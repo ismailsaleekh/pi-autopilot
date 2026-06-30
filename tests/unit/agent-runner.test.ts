@@ -381,7 +381,22 @@ void describe('autopilot-agent-run wrapper', () => {
     });
   });
 
-  void it('rejects multiple distinct autopilot_emit_status carriers', async () => {
+  void it('selects the receipt-matching carrier when a stale mismatched carrier is also present', async () => {
+    await withTempDir(async (root) => {
+      const unitSpec = spec(root);
+      const specPath = await writeSpec(root, unitSpec);
+      const fakePi = await writeFakePi(root);
+      const result = await runAutopilotAgentFromSpecPath(specPath, {
+        piExecutable: fakePi,
+        env: { ...process.env, AUTOPILOT_FAKE_PI_SCENARIO: 'stale-carrier-before-valid' },
+        timeoutMsOverride: FAKE_PI_COMPLETION_TIMEOUT_MS,
+      });
+      assert.equal(result.status, 'success');
+      assert.equal(result.statusEntry?.verdict, 'DONE');
+    });
+  });
+
+  void it('rejects status evidence when no carrier matches the accepted receipt', async () => {
     await withTempDir(async (root) => {
       const unitSpec = spec(root);
       const specPath = await writeSpec(root, unitSpec);
@@ -390,12 +405,13 @@ void describe('autopilot-agent-run wrapper', () => {
         () =>
           runAutopilotAgentFromSpecPath(specPath, {
             piExecutable: fakePi,
-            env: { ...process.env, AUTOPILOT_FAKE_PI_SCENARIO: 'distinct-duplicate-carrier' },
+            env: { ...process.env, AUTOPILOT_FAKE_PI_SCENARIO: 'mismatched-only-carrier' },
             timeoutMsOverride: FAKE_PI_COMPLETION_TIMEOUT_MS,
           }),
         (error: unknown) =>
           error instanceof AutopilotAgentRunError &&
           error.failureClass === 'invalid-structured-output' &&
+          /no autopilot_emit_status carrier matched accepted receipt\/status evidence/u.test(error.details.reason) &&
           /tool_call_id mismatch/u.test(error.details.reason),
       );
     });
@@ -661,14 +677,18 @@ function emitForcedStatus() {
     write({ type: 'tool_result', toolName: 'autopilot_emit_status', toolCallId: 'call-autopilot-fake-1', isError: true });
     return;
   }
+  const mismatchedDetails = { ...details, tool_call_id: 'call-autopilot-fake-2' };
+  if (scenario === 'mismatched-only-carrier') {
+    write({ type: 'tool_result', toolName: 'autopilot_emit_status', toolCallId: 'call-autopilot-fake-2', isError: false, details: mismatchedDetails });
+    return;
+  }
+  if (scenario === 'stale-carrier-before-valid') {
+    write({ type: 'tool_result', toolName: 'autopilot_emit_status', toolCallId: 'call-autopilot-fake-2', isError: false, details: mismatchedDetails });
+  }
   const carrierIsError = scenario === 'error-marked-carrier';
   write({ type: 'tool_result', toolName: 'autopilot_emit_status', toolCallId: 'call-autopilot-fake-1', isError: carrierIsError, details: carrierDetails });
   if (scenario === 'duplicate-carrier-frame') {
     write({ type: 'tool_execution_end', toolName: 'autopilot_emit_status', toolCallId: 'call-autopilot-fake-1', isError: false, result: { content, details } });
-  }
-  if (scenario === 'distinct-duplicate-carrier') {
-    const secondDetails = { ...details, tool_call_id: 'call-autopilot-fake-2' };
-    write({ type: 'tool_result', toolName: 'autopilot_emit_status', toolCallId: 'call-autopilot-fake-2', isError: false, details: secondDetails });
   }
 }
 async function emitTurn(message) {

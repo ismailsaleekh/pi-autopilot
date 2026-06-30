@@ -916,8 +916,26 @@ function validateAutopilotEmitStatusCarrier(
     throw new Error('missing autopilot_emit_status tool-result carrier in Pi RPC artifacts');
   }
 
-  for (const candidate of candidates) {
-    validateAutopilotEmitStatusCandidate(candidate, expectedToolCallId, expectedStatusSha256);
+  const mismatchReasons: string[] = [];
+  let matchingCarrierCount = 0;
+  for (const [index, candidate] of candidates.entries()) {
+    const mismatchReason = autopilotEmitStatusCandidateMismatch(
+      candidate,
+      expectedToolCallId,
+      expectedStatusSha256,
+    );
+    if (mismatchReason === null) {
+      matchingCarrierCount += 1;
+    } else {
+      mismatchReasons.push(`candidate ${String(index + 1)}: ${mismatchReason}`);
+    }
+  }
+
+  if (matchingCarrierCount === 0) {
+    throw new Error(
+      'no autopilot_emit_status carrier matched accepted receipt/status evidence; ' +
+        formatCarrierMismatchReasons(mismatchReasons),
+    );
   }
 }
 
@@ -927,32 +945,42 @@ function statusToolResultCandidates(piResult: PiResult): readonly ToolResultCand
   );
 }
 
-function validateAutopilotEmitStatusCandidate(
+function autopilotEmitStatusCandidateMismatch(
   candidate: ToolResultCandidate,
   expectedToolCallId: string,
   expectedStatusSha256: `sha256:${string}`,
-): void {
+): string | null {
   // Pi may mark a terminating tool-result frame as isError even after the
   // status tool has written valid status+receipt artifacts. The artifact/receipt
   // join below is the authority; do not reject solely on the transport flag.
-  if (candidate.detailsConflict === true) throw new Error('autopilot_emit_status carrier details conflict across events');
+  if (candidate.detailsConflict === true) return 'details conflict across events';
   if (!isJsonRecord(candidate.details)) {
-    throw new Error('autopilot_emit_status carrier details are missing or not a JSON object');
+    return 'details are missing or not a JSON object';
   }
   const details = candidate.details;
-  expectDetail(details, 'tool_name', AUTOPILOT_STATUS_TOOL);
-  expectDetail(details, 'tool_call_id', expectedToolCallId);
-  expectDetail(details, 'status_sha256', expectedStatusSha256);
-  expectDetail(details, 'terminating', true);
+  return (
+    detailMismatch(details, 'tool_name', AUTOPILOT_STATUS_TOOL) ??
+    detailMismatch(details, 'tool_call_id', expectedToolCallId) ??
+    detailMismatch(details, 'status_sha256', expectedStatusSha256) ??
+    detailMismatch(details, 'terminating', true)
+  );
 }
 
-function expectDetail(details: JsonRecord, field: string, expected: string | boolean): void {
+function formatCarrierMismatchReasons(reasons: readonly string[]): string {
+  if (reasons.length === 0) return 'no candidate diagnostics available';
+  const shown = reasons.slice(0, 4).join('; ');
+  const suffix = reasons.length > 4 ? `; ${String(reasons.length - 4)} more candidate(s) omitted` : '';
+  return boundedDiagnosticText(`${shown}${suffix}`, FAILURE_REASON_LIMIT);
+}
+
+function detailMismatch(
+  details: JsonRecord,
+  field: string,
+  expected: string | boolean,
+): string | null {
   const actual = details[field];
-  if (actual !== expected) {
-    throw new Error(
-      `autopilot_emit_status carrier ${field} mismatch: expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`,
-    );
-  }
+  if (actual === expected) return null;
+  return `${field} mismatch: expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`;
 }
 
 function isSuccessVerdict(status: AutopilotStatusEntry): boolean {
