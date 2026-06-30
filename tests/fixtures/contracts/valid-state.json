@@ -1,0 +1,29 @@
+{
+  "schema_version": "autopilot.state.v1",
+  "workstream": "autopilot-smoke",
+  "updated_at": "2026-06-28T00:00:00.000Z",
+  "status": "running",
+  "context_gate": {
+    "gate": "ok",
+    "percent": 12.5
+  },
+  "last_event_id": 1,
+  "ready_queue": [],
+  "running": [],
+  "blocked": [],
+  "completed": ["u01-implement"],
+  "units": {
+    "u01-implement": {
+      "unit_id": "u01-implement",
+      "role": "implement",
+      "state": "completed",
+      "attempt": 1,
+      "spec_ref": "unit-specs/u01-implement.implement.json",
+      "status_ref": "statuses/u01-implement.implement.attempt-1.json",
+      "receipt_ref": "receipts/u01-implement.implement.attempt-1.receipt.json",
+      "summary": "Implementation completed."
+    }
+  },
+  "operator_questions": [],
+  "next_actions": ["Launch independent validator."]
+}

@@ -1,0 +1,21 @@
+{
+  "schema_version": "autopilot.unit_spec.v1",
+  "workstream": "autopilot-smoke",
+  "unit_id": "u02-validate",
+  "role": "validate",
+  "template": "validate",
+  "attempt": 1,
+  "objective": "Independently validate the smoke fixture implementation and commands.",
+  "cwd": "/tmp/autopilot-smoke-worktree",
+  "model": "openai-codex/gpt-5.5",
+  "thinking": "xhigh",
+  "owned_paths": [],
+  "read_only_paths": ["src/smoke.ts", "README.md"],
+  "untouchable_paths": ["private/**", "vendor/**"],
+  "context_refs": [],
+  "validation_commands": ["npm test -- --runInBand"],
+  "status_output": "/tmp/autopilot-smoke-worktree/.pi/autopilot/autopilot-smoke/statuses/u02-validate.validate.attempt-1.json",
+  "receipt_output": "/tmp/autopilot-smoke-worktree/.pi/autopilot/autopilot-smoke/receipts/u02-validate.validate.attempt-1.receipt.json",
+  "evidence_dir": "/tmp/autopilot-smoke-worktree/.pi/autopilot/autopilot-smoke/evidence/u02-validate",
+  "stop_boundary": "Read-only validation; do not edit source files."
+}

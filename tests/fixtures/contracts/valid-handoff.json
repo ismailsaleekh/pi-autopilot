@@ -1,0 +1,12 @@
+{
+  "schema_version": "autopilot.handoff.v1",
+  "workstream": "autopilot-smoke",
+  "written_at": "2026-06-28T00:00:00.000Z",
+  "reason": "operator-pause",
+  "state_ref": "state.json",
+  "event_tail_ref": "events.jsonl",
+  "status_refs": ["statuses/u01-implement.implement.attempt-1.json"],
+  "summary": "Smoke run paused after implementation; validation remains next.",
+  "open_blockers": [],
+  "next_actions": ["Launch independent validator."]
+}

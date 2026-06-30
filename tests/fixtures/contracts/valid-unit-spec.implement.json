@@ -1,0 +1,28 @@
+{
+  "schema_version": "autopilot.unit_spec.v1",
+  "workstream": "autopilot-smoke",
+  "unit_id": "u01-implement",
+  "role": "implement",
+  "template": "implement",
+  "attempt": 1,
+  "objective": "Create the minimal smoke fixture implementation within the owned path.",
+  "cwd": "/tmp/autopilot-smoke-worktree",
+  "model": "openai-codex/gpt-5.5",
+  "thinking": "high",
+  "owned_paths": ["src/smoke.ts"],
+  "read_only_paths": ["README.md"],
+  "untouchable_paths": ["private/**", "vendor/**"],
+  "context_refs": [
+    {
+      "path": "docs/autopilot-context.md",
+      "purpose": "Autopilot task context"
+    }
+  ],
+  "validation_commands": [],
+  "status_output": "/tmp/autopilot-smoke-worktree/.pi/autopilot/autopilot-smoke/statuses/u01-implement.implement.attempt-1.json",
+  "receipt_output": "/tmp/autopilot-smoke-worktree/.pi/autopilot/autopilot-smoke/receipts/u01-implement.implement.attempt-1.receipt.json",
+  "evidence_dir": "/tmp/autopilot-smoke-worktree/.pi/autopilot/autopilot-smoke/evidence/u01-implement",
+  "stop_boundary": "Edit only src/smoke.ts; emit BLOCKED on ownership conflict.",
+  "timeout_seconds": 3600,
+  "render_prompt_snapshot": true
+}

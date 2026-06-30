@@ -1,0 +1,21 @@
+{
+  "schema_version": "autopilot.unit_spec.v1",
+  "workstream": "autopilot-smoke",
+  "unit_id": "u01-implement",
+  "role": "implement",
+  "template": "implement",
+  "attempt": 1,
+  "objective": "Invalid relative cwd.",
+  "cwd": "relative/worktree",
+  "model": "openai-codex/gpt-5.5",
+  "thinking": "high",
+  "owned_paths": ["src/smoke.ts"],
+  "read_only_paths": [],
+  "untouchable_paths": [],
+  "context_refs": [],
+  "validation_commands": [],
+  "status_output": "/tmp/autopilot-smoke-worktree/.pi/autopilot/autopilot-smoke/statuses/u01-implement.implement.attempt-1.json",
+  "receipt_output": "/tmp/autopilot-smoke-worktree/.pi/autopilot/autopilot-smoke/receipts/u01-implement.implement.attempt-1.receipt.json",
+  "evidence_dir": "/tmp/autopilot-smoke-worktree/.pi/autopilot/autopilot-smoke/evidence/u01-implement",
+  "stop_boundary": "Stop."
+}

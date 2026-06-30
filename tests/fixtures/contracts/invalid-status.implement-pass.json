@@ -1,0 +1,16 @@
+{
+  "schema_version": "autopilot.status.v1",
+  "workstream": "autopilot-smoke",
+  "unit_id": "u01-implement",
+  "role": "implement",
+  "attempt": 1,
+  "verdict": "PASS",
+  "severity": "clean",
+  "summary": "Implementers cannot emit PASS.",
+  "changed_paths": ["src/smoke.ts"],
+  "findings": [],
+  "commands": [],
+  "evidence_refs": [],
+  "report_ref": null,
+  "next_action": "Should fail."
+}

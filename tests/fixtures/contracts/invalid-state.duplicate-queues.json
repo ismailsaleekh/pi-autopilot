@@ -1,0 +1,26 @@
+{
+  "schema_version": "autopilot.state.v1",
+  "workstream": "autopilot-smoke",
+  "updated_at": "2026-06-28T00:00:00.000Z",
+  "status": "running",
+  "context_gate": {
+    "gate": "ok",
+    "percent": 12.5
+  },
+  "last_event_id": 1,
+  "ready_queue": ["u01-implement"],
+  "running": ["u01-implement"],
+  "blocked": [],
+  "completed": [],
+  "units": {
+    "u01-implement": {
+      "unit_id": "u01-implement",
+      "role": "implement",
+      "state": "running",
+      "attempt": 1,
+      "summary": "Duplicated across queues."
+    }
+  },
+  "operator_questions": [],
+  "next_actions": []
+}

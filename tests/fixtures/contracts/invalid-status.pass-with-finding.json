@@ -1,0 +1,22 @@
+{
+  "schema_version": "autopilot.status.v1",
+  "workstream": "autopilot-smoke",
+  "unit_id": "u02-validate",
+  "role": "validate",
+  "attempt": 1,
+  "verdict": "PASS",
+  "severity": "clean",
+  "summary": "Claims pass while carrying a finding.",
+  "changed_paths": [],
+  "findings": [
+    {
+      "id": "F-001",
+      "severity": "major-local",
+      "summary": "This finding makes PASS incoherent."
+    }
+  ],
+  "commands": [],
+  "evidence_refs": [],
+  "report_ref": null,
+  "next_action": "Should fail."
+}

@@ -1,0 +1,23 @@
+{
+  "schema_version": "autopilot.status.v1",
+  "workstream": "autopilot-smoke",
+  "unit_id": "u01-implement",
+  "role": "implement",
+  "attempt": 1,
+  "verdict": "DONE",
+  "severity": "clean",
+  "summary": "Implemented the smoke fixture within the owned path.",
+  "changed_paths": ["src/smoke.ts"],
+  "findings": [],
+  "commands": [
+    {
+      "command": "npm test -- --runInBand",
+      "status": "passed",
+      "exit_code": 0,
+      "summary": "Smoke test passed."
+    }
+  ],
+  "evidence_refs": [],
+  "report_ref": null,
+  "next_action": "Launch an independent validator over src/smoke.ts."
+}

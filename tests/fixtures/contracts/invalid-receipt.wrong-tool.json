@@ -1,0 +1,21 @@
+{
+  "schema_version": "autopilot.receipt.v1",
+  "tool_name": "dev_emit_verdict",
+  "workstream": "autopilot-smoke",
+  "unit_id": "u01-implement",
+  "role": "implement",
+  "attempt": 1,
+  "emitted_at": "2026-06-28T00:00:00.000Z",
+  "status_output": "/tmp/autopilot-smoke-worktree/.pi/autopilot/autopilot-smoke/statuses/u01-implement.implement.attempt-1.json",
+  "status_sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "schema_sha256": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "tool_call_id": "call-autopilot-status-1",
+  "provider_identity": {
+    "provider_id": "openai-codex",
+    "requested_model_id": "openai-codex/gpt-5.5",
+    "executed_model_id": "openai-codex/gpt-5.5",
+    "api": "pi-subscription",
+    "thinking_level": "high"
+  },
+  "expected_identity_hash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+}

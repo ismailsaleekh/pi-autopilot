@@ -1,0 +1,11 @@
+{
+  "schema_version": "autopilot.event.v1",
+  "id": 1,
+  "ts": "2026-06-28T00:00:00.000Z",
+  "event": "agent_completed",
+  "workstream": "autopilot-smoke",
+  "unit_id": "u01-implement",
+  "role": "implement",
+  "verdict": "DONE",
+  "summary": "Missing required status_ref."
+}

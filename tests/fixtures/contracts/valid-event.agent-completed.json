@@ -1,0 +1,14 @@
+{
+  "schema_version": "autopilot.event.v1",
+  "id": 1,
+  "ts": "2026-06-28T00:00:00.000Z",
+  "event": "agent_completed",
+  "workstream": "autopilot-smoke",
+  "unit_id": "u01-implement",
+  "role": "implement",
+  "verdict": "DONE",
+  "severity": "clean",
+  "status_ref": "statuses/u01-implement.implement.attempt-1.json",
+  "receipt_ref": "receipts/u01-implement.implement.attempt-1.receipt.json",
+  "summary": "Implementation completed through forced status."
+}

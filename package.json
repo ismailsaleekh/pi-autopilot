@@ -1,0 +1,55 @@
+{
+  "name": "pi-autopilot",
+  "version": "0.1.0",
+  "description": "Autopilot orchestration package for Pi: /autopilot, /autopilot-restart, context budget activation, and child runner wiring.",
+  "type": "module",
+  "license": "ISC",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "pi",
+    "autopilot",
+    "orchestration"
+  ],
+  "files": [
+    "bin/",
+    "extensions/",
+    "src/",
+    "templates/",
+    "README.md",
+    "TESTING.md",
+    "TEST_PLAN.md",
+    "PUBLISHING.md",
+    "LICENSE"
+  ],
+  "bin": {
+    "autopilot-agent-run": "./bin/autopilot-agent-run.mjs"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test:type-safety": "node --experimental-strip-types --test tests/package/type-safety.test.ts",
+    "test:unit": "node --experimental-strip-types --test tests/unit/*.test.ts",
+    "test:sdk": "node --experimental-strip-types --test tests/sdk/*.test.ts",
+    "test:rpc": "node --experimental-strip-types --test tests/rpc/*.test.ts",
+    "test:package": "node --experimental-strip-types --test tests/package/*.test.ts",
+    "test": "npm run typecheck && npm run test:type-safety && npm run test:unit && npm run test:sdk && npm run test:rpc && npm run test:package",
+    "pack:dry-run": "npm pack --dry-run"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions/autopilot.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.75.5",
+    "@types/node": "^24.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.9.0"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  }
+}
