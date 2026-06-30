@@ -1,18 +1,28 @@
 #!/usr/bin/env node
+import { existsSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const cli = resolve(root, 'src', 'cli', 'autopilot-agent-run.ts');
-const result = spawnSync(process.execPath, ['--experimental-strip-types', cli, ...process.argv.slice(2)], {
+const cli = resolve(root, 'dist', 'src', 'cli', 'autopilot-agent-run.js');
+
+if (!existsSync(cli)) {
+  process.stderr.write(
+    `autopilot-agent-run compiled entrypoint is missing: ${cli}\n` +
+      'Run `npm run build` in the pi-autopilot package before using the local checkout.\n',
+  );
+  process.exit(1);
+}
+
+const result = spawnSync(process.execPath, [cli, ...process.argv.slice(2)], {
   cwd: process.cwd(),
   env: process.env,
   stdio: 'inherit',
 });
 
 if (result.error !== undefined) {
-  process.stderr.write(`autopilot-agent-run failed to launch TypeScript entrypoint: ${result.error.message}\n`);
+  process.stderr.write(`autopilot-agent-run failed to launch compiled entrypoint: ${result.error.message}\n`);
   process.exit(1);
 }
 if (result.signal !== null) {

@@ -44,7 +44,7 @@ Role templates and deterministic render helpers cover strategy, implement, valid
 autopilot-agent-run [--dry-run] [--json] [--pi-executable <path>] <unit-spec.json>
 ```
 
-The runner reads and validates an Autopilot unit spec, builds the forced-output/status context, renders the child prompt, optionally snapshots it, preflights stale status/receipt paths, and either dry-runs or launches Pi in RPC mode with the internal status tool. On completion it accepts only a matching status artifact, receipt artifact, and structured tool carrier; assistant text alone is rejected. Stable failure classes distinguish invalid specs, Pi launch/runtime failures, missing structured output, invalid structured output, and non-success status verdicts.
+The published bin launches compiled JavaScript under `dist/src/cli/autopilot-agent-run.js`; it does not execute TypeScript source from `node_modules` or rely on Node type stripping. The runner reads and validates an Autopilot unit spec, builds the forced-output/status context, renders the child prompt, optionally snapshots it, preflights stale status/receipt paths, and either dry-runs or launches Pi in RPC mode with the internal compiled status tool. On completion it accepts matching status artifacts, receipt artifacts, and receipt-matching structured tool carriers; assistant text alone is rejected. Stable failure classes distinguish invalid specs, Pi launch/runtime failures, missing structured output, invalid structured output, and non-success status verdicts.
 
 Autopilot accepts subscription Pi model routes only for `openai-codex/*`, `anthropic/*`, `opencode-go/*`, `kimi-coding/*`, and `zai/*`. Other provider prefixes are rejected before child launch to avoid accidental metered frontier routes.
 
@@ -53,6 +53,7 @@ Default automated coverage is offline and no-spend: unit tests use fake Pi proce
 ## Development gate
 
 ```bash
+npm run build
 npm run typecheck
 npm run test:package
 npm run test

@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { writeFile } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -86,9 +86,16 @@ export class AutopilotUnitSpecError extends Error {
   }
 }
 
-export const DEFAULT_AUTOPILOT_TEMPLATE_DIR = fileURLToPath(
+const DEFAULT_TEMPLATE_DIR_FROM_SOURCE = fileURLToPath(
   new URL('../../../templates/', import.meta.url),
 );
+const DEFAULT_TEMPLATE_DIR_FROM_DIST = fileURLToPath(
+  new URL('../../../../templates/', import.meta.url),
+);
+
+export const DEFAULT_AUTOPILOT_TEMPLATE_DIR = existsSync(DEFAULT_TEMPLATE_DIR_FROM_SOURCE)
+  ? DEFAULT_TEMPLATE_DIR_FROM_SOURCE
+  : DEFAULT_TEMPLATE_DIR_FROM_DIST;
 
 const TEMPLATE_SLOT_PATTERN = /\{\{\s*([A-Za-z][A-Za-z0-9_]*)\s*\}\}/gu;
 const RAW_CHILD_PI_PROMPT_LAUNCH_PATTERN = /\bpi(?:\s+[^\n`]*?)?\s+-p(?:\s|$)/u;

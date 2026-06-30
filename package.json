@@ -22,6 +22,7 @@
   ],
   "files": [
     "bin/",
+    "dist/",
     "extensions/",
     "src/",
     "templates/",
@@ -35,13 +36,15 @@
     "autopilot-agent-run": "bin/autopilot-agent-run.mjs"
   },
   "scripts": {
+    "build": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "test:type-safety": "node --experimental-strip-types --test tests/package/type-safety.test.ts",
     "test:unit": "node --experimental-strip-types --test tests/unit/*.test.ts",
     "test:sdk": "node --experimental-strip-types --test tests/sdk/*.test.ts",
     "test:rpc": "node --experimental-strip-types --test tests/rpc/*.test.ts",
-    "test:package": "node --experimental-strip-types --test tests/package/*.test.ts",
+    "test:package": "npm run build && node --experimental-strip-types --test tests/package/*.test.ts",
     "test": "npm run typecheck && npm run test:type-safety && npm run test:unit && npm run test:sdk && npm run test:rpc && npm run test:package",
+    "prepack": "npm run build",
     "pack:dry-run": "npm pack --dry-run"
   },
   "pi": {

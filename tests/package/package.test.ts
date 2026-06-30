@@ -1,8 +1,10 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
-import { readFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 interface PackageScripts {
   readonly [key: string]: string | undefined;
@@ -161,11 +163,12 @@ void describe('package manifest and payload', () => {
     assert.ok(pkg.keywords.includes('autopilot'));
     assert.deepEqual(pkg.pi.extensions, ['./extensions/autopilot.ts']);
     assert.equal(pkg.bin['autopilot-agent-run'], 'bin/autopilot-agent-run.mjs');
+    assert.ok(pkg.files.includes('dist/'));
     assert.ok(pkg.peerDependencies['@earendil-works/pi-coding-agent']);
-    for (const script of ['typecheck', 'test:type-safety', 'test:unit', 'test:sdk', 'test:rpc', 'test:package']) {
+    for (const script of ['build', 'typecheck', 'test:type-safety', 'test:unit', 'test:sdk', 'test:rpc', 'test:package']) {
       assert.equal(typeof pkg.scripts[script], 'string', script);
     }
-    for (const dir of ['bin/', 'extensions/', 'src/', 'templates/']) assert.ok(pkg.files.includes(dir), dir);
+    for (const dir of ['bin/', 'dist/', 'extensions/', 'src/', 'templates/']) assert.ok(pkg.files.includes(dir), dir);
   });
 
   void it('has required docs and runtime files', async () => {
@@ -177,6 +180,9 @@ void describe('package manifest and payload', () => {
       'LICENSE',
       'extensions/autopilot.ts',
       'src/extension.ts',
+      'dist/src/cli/autopilot-agent-run.js',
+      'dist/src/core/agent-runner.js',
+      'dist/src/internal/status-extension.js',
       'src/core/context-budget.ts',
       'src/core/names.ts',
       'src/core/paths.ts',
@@ -289,6 +295,10 @@ void describe('package manifest and payload', () => {
       'LICENSE',
       'extensions/autopilot.ts',
       'src/extension.ts',
+      'dist/extensions/autopilot.js',
+      'dist/src/cli/autopilot-agent-run.js',
+      'dist/src/core/agent-runner.js',
+      'dist/src/internal/status-extension.js',
       'src/core/context-budget.ts',
       'src/core/names.ts',
       'src/core/paths.ts',
@@ -303,7 +313,12 @@ void describe('package manifest and payload', () => {
     assert.equal(files.some((file) => file.includes('node_modules')), false);
   });
 
-  void it('exposes the runner help path', () => {
+  void it('exposes the runner help path without Node type stripping', async () => {
+    const wrapper = await readFile(new URL('bin/autopilot-agent-run.mjs', root), 'utf8');
+    assert.equal(wrapper.includes('--experimental-strip-types'), false);
+    assert.equal(wrapper.includes('src/cli/autopilot-agent-run.ts'), false);
+    assert.match(wrapper, /'dist', 'src', 'cli', 'autopilot-agent-run\.js'/u);
+
     const result = spawnSync(process.execPath, ['bin/autopilot-agent-run.mjs', '--help'], {
       cwd: root,
       encoding: 'utf8',
@@ -313,4 +328,196 @@ void describe('package manifest and payload', () => {
     assert.match(result.stdout, /--dry-run/);
     assert.match(result.stdout, /--pi-executable/);
   });
+
+  void it('runs the packed bin from node_modules without TypeScript stripping', async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), 'pi-autopilot-installed-bin-'));
+    try {
+      const pack = spawnSync('npm', ['pack', '--json', '--pack-destination', tempRoot], {
+        cwd: root,
+        encoding: 'utf8',
+        env: { ...process.env, NPM_CONFIG_CACHE: '/tmp/pi-npm-cache' },
+      });
+      assert.equal(pack.status, 0, pack.stderr);
+      const packEntries = parsePackEntries(pack.stdout);
+      const packEntry = packEntries[0];
+      if (packEntry === undefined) throw new Error('pack must return an entry');
+      const tarballPath = join(tempRoot, packEntry.filename);
+      const installRoot = join(tempRoot, 'install-root');
+      await mkdir(installRoot, { recursive: true });
+      const install = spawnSync(
+        'npm',
+        ['install', '--ignore-scripts', '--omit=dev', '--legacy-peer-deps', '--no-audit', '--no-fund', tarballPath],
+        { cwd: installRoot, encoding: 'utf8', env: { ...process.env, NPM_CONFIG_CACHE: '/tmp/pi-npm-cache' } },
+      );
+      assert.equal(install.status, 0, install.stderr);
+
+      const installedPackage = join(installRoot, 'node_modules', 'pi-autopilot');
+      const installedBin = join(installedPackage, 'bin', 'autopilot-agent-run.mjs');
+      const worktree = join(tempRoot, 'worktree');
+      const runtimeRoot = join(worktree, '.pi', 'autopilot', 'node-modules-smoke');
+      await mkdir(worktree, { recursive: true });
+      await mkdir(join(runtimeRoot, 'unit-specs'), { recursive: true });
+      const specPath = join(runtimeRoot, 'unit-specs', 'node-modules-smoke.implement.attempt-1.json');
+      await writeFile(
+        specPath,
+        `${JSON.stringify({
+          schema_version: 'autopilot.unit_spec.v1',
+          workstream: 'node-modules-smoke',
+          unit_id: 'node-modules-smoke',
+          role: 'implement',
+          template: 'implement',
+          attempt: 1,
+          objective: 'Dry-run from an installed node_modules package.',
+          cwd: worktree,
+          model: 'openai-codex/gpt-5.5',
+          thinking: 'high',
+          owned_paths: ['src/smoke.ts'],
+          read_only_paths: [],
+          untouchable_paths: ['private/**'],
+          context_refs: [],
+          validation_commands: [],
+          status_output: join(runtimeRoot, 'statuses', 'node-modules-smoke.implement.attempt-1.json'),
+          receipt_output: join(runtimeRoot, 'receipts', 'node-modules-smoke.implement.attempt-1.receipt.json'),
+          evidence_dir: join(runtimeRoot, 'evidence', 'node-modules-smoke'),
+          stop_boundary: 'Dry-run only.',
+          timeout_seconds: 60,
+          render_prompt_snapshot: true,
+        }, null, 2)}\n`,
+        'utf8',
+      );
+
+      const dryRun = spawnSync(process.execPath, [installedBin, '--dry-run', '--json', specPath], {
+        cwd: worktree,
+        encoding: 'utf8',
+      });
+      assert.equal(dryRun.status, 0, dryRun.stderr);
+      assert.match(dryRun.stdout, /"status":"dry-run"/u);
+      assert.equal(dryRun.stderr, '');
+      assert.ok(existsSync(join(installedPackage, 'dist', 'src', 'cli', 'autopilot-agent-run.js')));
+
+      const fakePi = join(tempRoot, 'fake-pi.mjs');
+      await writeFile(fakePi, INSTALLED_PACKAGE_FAKE_PI_SOURCE, 'utf8');
+      const chmod = spawnSync('chmod', ['755', fakePi], { encoding: 'utf8' });
+      assert.equal(chmod.status, 0, chmod.stderr);
+      const liveRun = spawnSync(
+        process.execPath,
+        [installedBin, '--json', '--pi-executable', fakePi, specPath],
+        { cwd: worktree, encoding: 'utf8' },
+      );
+      assert.equal(liveRun.status, 0, liveRun.stderr);
+      assert.match(liveRun.stdout, /"status":"success"/u);
+      assert.equal(liveRun.stderr, '');
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
 });
+
+const INSTALLED_PACKAGE_FAKE_PI_SOURCE = `#!/usr/bin/env node
+import { createHash } from 'node:crypto';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, sep } from 'node:path';
+import { createInterface } from 'node:readline';
+
+const contextPath = process.env.AUTOPILOT_AGENT_STATUS_CONTEXT;
+const extensionIndex = process.argv.indexOf('--extension');
+const extensionPath = extensionIndex < 0 ? undefined : process.argv[extensionIndex + 1];
+const expectedExtensionSuffix = ['dist', 'src', 'internal', 'status-extension.js'].join(sep);
+const extensionPathOk =
+  typeof extensionPath === 'string' && extensionPath.endsWith(expectedExtensionSuffix) && existsSync(extensionPath);
+
+function write(record) { process.stdout.write(JSON.stringify(record) + '\\n'); }
+function response(command, success = true, extra = {}) {
+  write({ id: command.id, type: 'response', command: command.type, success, ...extra });
+}
+function loadContext() {
+  if (!contextPath) throw new Error('missing AUTOPILOT_AGENT_STATUS_CONTEXT');
+  return JSON.parse(readFileSync(contextPath, 'utf8'));
+}
+function emitStatus() {
+  const context = loadContext();
+  const unit = context.unit_spec;
+  const status = {
+    schema_version: 'autopilot.status.v1',
+    workstream: unit.workstream,
+    unit_id: unit.unit_id,
+    role: unit.role,
+    attempt: unit.attempt,
+    verdict: 'DONE',
+    severity: 'clean',
+    summary: 'Installed package fake Pi completed.',
+    changed_paths: [unit.owned_paths[0]],
+    findings: [],
+    commands: [],
+    evidence_refs: [],
+    report_ref: null,
+    next_action: 'installed package smoke complete'
+  };
+  mkdirSync(dirname(context.status_output), { recursive: true });
+  mkdirSync(dirname(context.receipt_output), { recursive: true });
+  const statusBytes = JSON.stringify(status, null, 2) + '\\n';
+  writeFileSync(context.status_output, statusBytes, 'utf8');
+  const statusSha256 = 'sha256:' + createHash('sha256').update(statusBytes, 'utf8').digest('hex');
+  const toolCallId = 'installed-package-call-1';
+  const receipt = {
+    schema_version: 'autopilot.receipt.v1',
+    tool_name: 'autopilot_emit_status',
+    workstream: unit.workstream,
+    unit_id: unit.unit_id,
+    role: unit.role,
+    attempt: unit.attempt,
+    emitted_at: '2026-06-30T00:00:00.000Z',
+    status_output: context.status_output,
+    status_sha256: statusSha256,
+    schema_sha256: context.schema_sha256,
+    tool_call_id: toolCallId,
+    provider_identity: context.provider_identity,
+    expected_identity_hash: context.expected_identity_hash
+  };
+  writeFileSync(context.receipt_output, JSON.stringify(receipt, null, 2) + '\\n', 'utf8');
+  write({
+    type: 'tool_execution_end',
+    toolName: 'autopilot_emit_status',
+    toolCallId,
+    isError: false,
+    result: {
+      content: [{ type: 'text', text: 'Autopilot status emitted' }],
+      details: {
+        tool_name: 'autopilot_emit_status',
+        tool_call_id: toolCallId,
+        terminating: true,
+        status_sha256: statusSha256
+      }
+    }
+  });
+}
+
+const rl = createInterface({ input: process.stdin, crlfDelay: Infinity });
+rl.on('line', (line) => {
+  const command = JSON.parse(line);
+  if (command.type === 'get_state') {
+    response(command, true, { data: { model: { id: 'gpt-5.5', provider: 'openai-codex', api: 'openai-codex-responses' }, thinkingLevel: 'high' } });
+    return;
+  }
+  if (command.type === 'get_session_stats') {
+    response(command, true, { data: { sessionId: 'installed-package-smoke' } });
+    return;
+  }
+  if (command.type === 'prompt') {
+    if (!extensionPathOk) {
+      response(command, false, { error: 'expected compiled status extension path, got ' + String(extensionPath) });
+      return;
+    }
+    response(command);
+    write({ type: 'agent_start' });
+    write({ type: 'turn_start' });
+    emitStatus();
+    const message = { role: 'assistant', content: [{ type: 'text', text: 'done' }], api: 'openai-codex-responses', provider: 'openai-codex', model: 'gpt-5.5', stopReason: 'stop' };
+    write({ type: 'message_end', message });
+    write({ type: 'turn_end', message, toolResults: [] });
+    write({ type: 'agent_end', messages: [message] });
+    return;
+  }
+  response(command, false, { error: 'unsupported command' });
+});
+`;

@@ -117,9 +117,13 @@ const DEFAULT_AGENT_WALL_MS = 3_600_000;
 const RPC_COMMAND_TIMEOUT_MS = 10_000;
 const DIAGNOSTIC_TEXT_LIMIT = 600;
 const FAILURE_REASON_LIMIT = 2_400;
-const AUTOPILOT_AGENT_STATUS_EXTENSION_PATH = fileURLToPath(
-  new URL('../internal/status-extension.ts', import.meta.url),
-);
+const AUTOPILOT_AGENT_STATUS_EXTENSION_PATH = resolveAutopilotStatusExtensionPath(import.meta.url);
+
+function resolveAutopilotStatusExtensionPath(moduleUrl: string): string {
+  const sourcePath = fileURLToPath(new URL('../internal/status-extension.ts', moduleUrl));
+  if (existsSync(sourcePath)) return sourcePath;
+  return fileURLToPath(new URL('../internal/status-extension.js', moduleUrl));
+}
 
 interface ToolPolicy {
   readonly builtinTools: readonly string[];
