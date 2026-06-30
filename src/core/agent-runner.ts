@@ -904,7 +904,9 @@ function validateAutopilotEmitStatusCandidate(
   expectedToolCallId: string,
   expectedStatusSha256: `sha256:${string}`,
 ): void {
-  if (candidate.isError === true) throw new Error('autopilot_emit_status tool-result carrier is marked isError');
+  // Pi may mark a terminating tool-result frame as isError even after the
+  // status tool has written valid status+receipt artifacts. The artifact/receipt
+  // join below is the authority; do not reject solely on the transport flag.
   if (candidate.detailsConflict === true) throw new Error('autopilot_emit_status carrier details conflict across events');
   if (!isJsonRecord(candidate.details)) {
     throw new Error('autopilot_emit_status carrier details are missing or not a JSON object');

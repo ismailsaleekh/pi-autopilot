@@ -296,6 +296,41 @@ void describe('autopilot-agent-run wrapper', () => {
     });
   });
 
+  void it('accepts an error-marked carrier when valid status and receipt evidence join', async () => {
+    await withTempDir(async (root) => {
+      const unitSpec = spec(root);
+      const specPath = await writeSpec(root, unitSpec);
+      const fakePi = await writeFakePi(root);
+      const result = await runAutopilotAgentFromSpecPath(specPath, {
+        piExecutable: fakePi,
+        env: { ...process.env, AUTOPILOT_FAKE_PI_SCENARIO: 'error-marked-carrier' },
+        timeoutMsOverride: FAKE_PI_COMPLETION_TIMEOUT_MS,
+      });
+      assert.equal(result.status, 'success');
+      assert.equal(result.statusEntry?.verdict, 'DONE');
+    });
+  });
+
+  void it('rejects an error-marked carrier without matching status details', async () => {
+    await withTempDir(async (root) => {
+      const unitSpec = spec(root);
+      const specPath = await writeSpec(root, unitSpec);
+      const fakePi = await writeFakePi(root);
+      await expectRejects(
+        () =>
+          runAutopilotAgentFromSpecPath(specPath, {
+            piExecutable: fakePi,
+            env: { ...process.env, AUTOPILOT_FAKE_PI_SCENARIO: 'error-marked-carrier-missing-details' },
+            timeoutMsOverride: FAKE_PI_COMPLETION_TIMEOUT_MS,
+          }),
+        (error: unknown) =>
+          error instanceof AutopilotAgentRunError &&
+          error.failureClass === 'invalid-structured-output' &&
+          /details are missing/u.test(error.details.reason),
+      );
+    });
+  });
+
   void it('rejects multiple distinct autopilot_emit_status carriers', async () => {
     await withTempDir(async (root) => {
       const unitSpec = spec(root);
@@ -565,7 +600,12 @@ function emitForcedStatus() {
     write({ type: 'tool_execution_end', toolName: 'autopilot_emit_status', toolCallId: 'call-autopilot-fake-1', isError: false, result: { content, details } });
     return;
   }
-  write({ type: 'tool_result', toolName: 'autopilot_emit_status', toolCallId: 'call-autopilot-fake-1', isError: false, details });
+  if (scenario === 'error-marked-carrier-missing-details') {
+    write({ type: 'tool_result', toolName: 'autopilot_emit_status', toolCallId: 'call-autopilot-fake-1', isError: true });
+    return;
+  }
+  const carrierIsError = scenario === 'error-marked-carrier';
+  write({ type: 'tool_result', toolName: 'autopilot_emit_status', toolCallId: 'call-autopilot-fake-1', isError: carrierIsError, details });
   if (scenario === 'duplicate-carrier-frame') {
     write({ type: 'tool_execution_end', toolName: 'autopilot_emit_status', toolCallId: 'call-autopilot-fake-1', isError: false, result: { content, details } });
   }
