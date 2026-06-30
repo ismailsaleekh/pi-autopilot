@@ -364,7 +364,14 @@ export async function runAutopilotAgentFromSpecPath(
     });
   }
 
-  if (piResult.isError && !isBenignTerminalStatusCompletion(piResult)) {
+  if (
+    piResult.isError &&
+    !isBenignTerminalStatusCompletion(
+      piResult,
+      evidence.receipt.tool_call_id,
+      evidence.receipt.status_sha256,
+    )
+  ) {
     throw new AutopilotAgentRunError('pi-spawn-failed', {
       reason: `Pi session returned an error result after Autopilot status emission: ${formatPiResultFailureDiagnostics(piResult)}`,
       specPath,
@@ -703,7 +710,8 @@ function supervisePiRpcChild(
         if (isJsonRecord(message)) lastMessage = message;
         if (type === 'turn_end') turnCount += 1;
       }
-      if (isStatusToolResult(record)) toolResultCandidates.push(toToolResultCandidate(record));
+      const statusToolCandidate = toStatusToolResultCandidate(record);
+      if (statusToolCandidate !== null) toolResultCandidates.push(statusToolCandidate);
       const waiters = eventWaiters.get(type);
       if (waiters !== undefined) {
         for (const waiter of waiters) {
@@ -806,24 +814,43 @@ function toRpcResponse(record: JsonRecord): RpcResponse {
   };
 }
 
-function isStatusToolResult(record: JsonRecord): boolean {
+function toStatusToolResultCandidate(record: JsonRecord): ToolResultCandidate | null {
+  const type = stringField(record, 'type');
   const toolName = stringField(record, 'toolName') ?? stringField(record, 'tool_name');
-  return toolName === AUTOPILOT_STATUS_TOOL;
+  if (toolName !== AUTOPILOT_STATUS_TOOL) return null;
+
+  if (type === 'tool_result') {
+    return toolResultCandidateFromRecord(record, record);
+  }
+
+  if (type === 'tool_execution_end') {
+    const result = jsonRecordField(record, 'result');
+    return toolResultCandidateFromRecord(record, result);
+  }
+
+  return null;
 }
 
-function toToolResultCandidate(record: JsonRecord): ToolResultCandidate {
-  const toolName = stringField(record, 'toolName');
-  const toolUnderscore = stringField(record, 'tool_name');
-  const toolCallId = stringField(record, 'toolCallId');
-  const toolCallUnderscore = stringField(record, 'tool_call_id');
+function toolResultCandidateFromRecord(
+  eventRecord: JsonRecord,
+  resultRecord: JsonRecord | undefined,
+): ToolResultCandidate {
+  const toolName = stringField(eventRecord, 'toolName');
+  const toolUnderscore = stringField(eventRecord, 'tool_name');
+  const toolCallId = stringField(eventRecord, 'toolCallId');
+  const toolCallUnderscore = stringField(eventRecord, 'tool_call_id');
+  const details = resultRecord?.['details'];
+  const detailsConflict =
+    booleanField(eventRecord, 'detailsConflict') ??
+    (resultRecord === undefined ? undefined : booleanField(resultRecord, 'detailsConflict'));
   return ({
     ...(toolUnderscore === undefined ? {} : { tool_name: toolUnderscore }),
     ...(toolName === undefined ? {} : { toolName }),
     ...(toolCallUnderscore === undefined ? {} : { tool_call_id: toolCallUnderscore }),
     ...(toolCallId === undefined ? {} : { toolCallId }),
-    ...(typeof record['isError'] === 'boolean' ? { isError: record['isError'] } : {}),
-    ...(record['details'] === undefined ? {} : { details: record['details'] }),
-    ...(typeof record['detailsConflict'] === 'boolean' ? { detailsConflict: record['detailsConflict'] } : {}),
+    ...(typeof eventRecord['isError'] === 'boolean' ? { isError: eventRecord['isError'] } : {}),
+    ...(details === undefined ? {} : { details }),
+    ...(detailsConflict === undefined ? {} : { detailsConflict }),
   });
 }
 
@@ -856,17 +883,27 @@ function validateAutopilotEmitStatusCarrier(
   expectedToolCallId: string,
   expectedStatusSha256: `sha256:${string}`,
 ): void {
-  const candidates = (piResult.artifacts.structuredOutput?.toolResultCandidates ?? []).filter(
-    (candidate) => (candidate.toolName ?? candidate.tool_name) === AUTOPILOT_STATUS_TOOL,
-  );
+  const candidates = statusToolResultCandidates(piResult);
   if (candidates.length === 0) {
     throw new Error('missing autopilot_emit_status tool-result carrier in Pi RPC artifacts');
   }
-  if (candidates.length > 1) {
-    throw new Error(`expected exactly one autopilot_emit_status carrier, found ${String(candidates.length)}`);
+
+  for (const candidate of candidates) {
+    validateAutopilotEmitStatusCandidate(candidate, expectedToolCallId, expectedStatusSha256);
   }
-  const candidate = candidates[0];
-  if (candidate === undefined) throw new Error('missing autopilot_emit_status tool-result carrier');
+}
+
+function statusToolResultCandidates(piResult: PiResult): readonly ToolResultCandidate[] {
+  return (piResult.artifacts.structuredOutput?.toolResultCandidates ?? []).filter(
+    (candidate) => (candidate.toolName ?? candidate.tool_name) === AUTOPILOT_STATUS_TOOL,
+  );
+}
+
+function validateAutopilotEmitStatusCandidate(
+  candidate: ToolResultCandidate,
+  expectedToolCallId: string,
+  expectedStatusSha256: `sha256:${string}`,
+): void {
   if (candidate.isError === true) throw new Error('autopilot_emit_status tool-result carrier is marked isError');
   if (candidate.detailsConflict === true) throw new Error('autopilot_emit_status carrier details conflict across events');
   if (!isJsonRecord(candidate.details)) {
@@ -892,7 +929,11 @@ function isSuccessVerdict(status: AutopilotStatusEntry): boolean {
   return status.verdict === 'DONE' || status.verdict === 'PASS';
 }
 
-function isBenignTerminalStatusCompletion(piResult: PiResult): boolean {
+function isBenignTerminalStatusCompletion(
+  piResult: PiResult,
+  expectedToolCallId: string,
+  expectedStatusSha256: `sha256:${string}`,
+): boolean {
   if (piResult.artifacts.diagnostics.errorMessages.length > 0) return false;
   if (
     piResult.stopReason !== null &&
@@ -901,15 +942,12 @@ function isBenignTerminalStatusCompletion(piResult: PiResult): boolean {
   ) {
     return false;
   }
-  const candidates = (piResult.artifacts.structuredOutput?.toolResultCandidates ?? []).filter(
-    (candidate) => (candidate.toolName ?? candidate.tool_name) === AUTOPILOT_STATUS_TOOL,
-  );
-  if (candidates.length !== 1) return false;
-  const candidate = candidates[0];
-  if (candidate === undefined) return false;
-  if (candidate.isError === true || candidate.detailsConflict === true) return false;
-  if (!isJsonRecord(candidate.details)) return false;
-  return candidate.details['terminating'] === true;
+  try {
+    validateAutopilotEmitStatusCarrier(piResult, expectedToolCallId, expectedStatusSha256);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function formatPiResultFailureDiagnostics(piResult: PiResult): string {
@@ -1018,6 +1056,16 @@ function stringField(record: JsonRecord | undefined, field: string): string | un
   if (record === undefined) return undefined;
   const value = record[field];
   return typeof value === 'string' ? value : undefined;
+}
+
+function booleanField(record: JsonRecord, field: string): boolean | undefined {
+  const value = record[field];
+  return typeof value === 'boolean' ? value : undefined;
+}
+
+function jsonRecordField(record: JsonRecord, field: string): JsonRecord | undefined {
+  const value = record[field];
+  return isJsonRecord(value) ? value : undefined;
 }
 
 function errorMessage(error: unknown): string {

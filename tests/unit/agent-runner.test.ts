@@ -266,6 +266,56 @@ void describe('autopilot-agent-run wrapper', () => {
     });
   });
 
+  void it('accepts Pi tool_execution_start/end framing without counting start as a status carrier', async () => {
+    await withTempDir(async (root) => {
+      const unitSpec = spec(root);
+      const specPath = await writeSpec(root, unitSpec);
+      const fakePi = await writeFakePi(root);
+      const result = await runAutopilotAgentFromSpecPath(specPath, {
+        piExecutable: fakePi,
+        env: { ...process.env, AUTOPILOT_FAKE_PI_SCENARIO: 'execution-events' },
+        timeoutMsOverride: FAKE_PI_COMPLETION_TIMEOUT_MS,
+      });
+      assert.equal(result.status, 'success');
+      assert.equal(result.statusEntry?.verdict, 'DONE');
+    });
+  });
+
+  void it('deduplicates repeated status carrier frames for the same tool call', async () => {
+    await withTempDir(async (root) => {
+      const unitSpec = spec(root);
+      const specPath = await writeSpec(root, unitSpec);
+      const fakePi = await writeFakePi(root);
+      const result = await runAutopilotAgentFromSpecPath(specPath, {
+        piExecutable: fakePi,
+        env: { ...process.env, AUTOPILOT_FAKE_PI_SCENARIO: 'duplicate-carrier-frame' },
+        timeoutMsOverride: FAKE_PI_COMPLETION_TIMEOUT_MS,
+      });
+      assert.equal(result.status, 'success');
+      assert.equal(result.statusEntry?.verdict, 'DONE');
+    });
+  });
+
+  void it('rejects multiple distinct autopilot_emit_status carriers', async () => {
+    await withTempDir(async (root) => {
+      const unitSpec = spec(root);
+      const specPath = await writeSpec(root, unitSpec);
+      const fakePi = await writeFakePi(root);
+      await expectRejects(
+        () =>
+          runAutopilotAgentFromSpecPath(specPath, {
+            piExecutable: fakePi,
+            env: { ...process.env, AUTOPILOT_FAKE_PI_SCENARIO: 'distinct-duplicate-carrier' },
+            timeoutMsOverride: FAKE_PI_COMPLETION_TIMEOUT_MS,
+          }),
+        (error: unknown) =>
+          error instanceof AutopilotAgentRunError &&
+          error.failureClass === 'invalid-structured-output' &&
+          /tool_call_id mismatch/u.test(error.details.reason),
+      );
+    });
+  });
+
   void it('rejects assistant-text JSON without forced tool output', async () => {
     await withTempDir(async (root) => {
       const unitSpec = spec(root);
@@ -502,12 +552,27 @@ function emitForcedStatus() {
     expected_identity_hash: context.expected_identity_hash
   };
   writeFileSync(context.receipt_output, JSON.stringify(receipt, null, 2) + '\\n', 'utf8');
-  write({ type: 'tool_result', toolName: 'autopilot_emit_status', toolCallId: 'call-autopilot-fake-1', isError: false, details: {
+  const details = {
     schema_version: 'autopilot.status_tool_result.v1', tool_name: 'autopilot_emit_status', tool_call_id: 'call-autopilot-fake-1', terminating: true,
     workstream: status.workstream, unit_id: status.unit_id, role: status.role, attempt: status.attempt,
     verdict: status.verdict, severity: status.severity, status_output: context.status_output, receipt_output: context.receipt_output,
     status_sha256: statusSha256, schema_sha256: context.schema_sha256, expected_identity_hash: context.expected_identity_hash
-  }});
+  };
+  const content = [{ type: 'text', text: 'Autopilot status emitted by fake Pi' }];
+  if (scenario === 'execution-events') {
+    write({ type: 'tool_execution_start', toolName: 'autopilot_emit_status', toolCallId: 'call-autopilot-fake-1', args: { workstream: status.workstream } });
+    write({ type: 'tool_execution_update', toolName: 'autopilot_emit_status', toolCallId: 'call-autopilot-fake-1', args: { workstream: status.workstream }, partialResult: { content, details } });
+    write({ type: 'tool_execution_end', toolName: 'autopilot_emit_status', toolCallId: 'call-autopilot-fake-1', isError: false, result: { content, details } });
+    return;
+  }
+  write({ type: 'tool_result', toolName: 'autopilot_emit_status', toolCallId: 'call-autopilot-fake-1', isError: false, details });
+  if (scenario === 'duplicate-carrier-frame') {
+    write({ type: 'tool_execution_end', toolName: 'autopilot_emit_status', toolCallId: 'call-autopilot-fake-1', isError: false, result: { content, details } });
+  }
+  if (scenario === 'distinct-duplicate-carrier') {
+    const secondDetails = { ...details, tool_call_id: 'call-autopilot-fake-2' };
+    write({ type: 'tool_result', toolName: 'autopilot_emit_status', toolCallId: 'call-autopilot-fake-2', isError: false, details: secondDetails });
+  }
 }
 async function emitTurn(message) {
   write({ type: 'agent_start' });
