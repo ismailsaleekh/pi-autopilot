@@ -15,12 +15,17 @@ interface PackageBin {
 interface PackageJson {
   readonly name: string;
   readonly type: string;
+  readonly author: string;
   readonly keywords: readonly string[];
   readonly files: readonly string[];
   readonly bin: PackageBin;
   readonly pi: { readonly extensions: readonly string[] };
   readonly scripts: PackageScripts;
   readonly peerDependencies: PackageScripts;
+  readonly repository: { readonly type: string; readonly url: string };
+  readonly bugs: { readonly url: string };
+  readonly homepage: string;
+  readonly publishConfig: { readonly access: string };
 }
 
 interface PackFile {
@@ -81,15 +86,29 @@ function parsePackageJson(value: unknown): PackageJson {
   const bin = field(value, 'bin');
   if (!isJsonMap(pi)) throw new TypeError('pi must be an object');
   if (!isJsonMap(bin)) throw new TypeError('bin must be an object');
+  const repository = field(value, 'repository');
+  const bugs = field(value, 'bugs');
+  const publishConfig = field(value, 'publishConfig');
+  if (!isJsonMap(repository)) throw new TypeError('repository must be an object');
+  if (!isJsonMap(bugs)) throw new TypeError('bugs must be an object');
+  if (!isJsonMap(publishConfig)) throw new TypeError('publishConfig must be an object');
   return {
     name: requireString(field(value, 'name'), 'name'),
     type: requireString(field(value, 'type'), 'type'),
+    author: requireString(field(value, 'author'), 'author'),
     keywords: requireStringArray(field(value, 'keywords'), 'keywords'),
     files: requireStringArray(field(value, 'files'), 'files'),
     bin: { 'autopilot-agent-run': requireString(field(bin, 'autopilot-agent-run'), 'bin') },
     pi: { extensions: requireStringArray(field(pi, 'extensions'), 'pi.extensions') },
     scripts: requireStringMap(field(value, 'scripts'), 'scripts'),
     peerDependencies: requireStringMap(field(value, 'peerDependencies'), 'peerDependencies'),
+    repository: {
+      type: requireString(field(repository, 'type'), 'repository.type'),
+      url: requireString(field(repository, 'url'), 'repository.url'),
+    },
+    bugs: { url: requireString(field(bugs, 'url'), 'bugs.url') },
+    homepage: requireString(field(value, 'homepage'), 'homepage'),
+    publishConfig: { access: requireString(field(publishConfig, 'access'), 'publishConfig.access') },
   };
 }
 
@@ -129,11 +148,19 @@ void describe('package manifest and payload', () => {
     const pkg = await packageJson();
     assert.equal(pkg.name, 'pi-autopilot');
     assert.equal(pkg.type, 'module');
+    assert.equal(pkg.author, 'Ismail Salikhodjaev <ismailsalikhodjaev@gmail.com>');
+    assert.deepEqual(pkg.repository, {
+      type: 'git',
+      url: 'git+https://github.com/ismailsaleekh/pi-autopilot.git',
+    });
+    assert.equal(pkg.bugs.url, 'https://github.com/ismailsaleekh/pi-autopilot/issues');
+    assert.equal(pkg.homepage, 'https://github.com/ismailsaleekh/pi-autopilot#readme');
+    assert.equal(pkg.publishConfig.access, 'public');
     assert.ok(pkg.keywords.includes('pi-package'));
     assert.ok(pkg.keywords.includes('pi-extension'));
     assert.ok(pkg.keywords.includes('autopilot'));
     assert.deepEqual(pkg.pi.extensions, ['./extensions/autopilot.ts']);
-    assert.equal(pkg.bin['autopilot-agent-run'], './bin/autopilot-agent-run.mjs');
+    assert.equal(pkg.bin['autopilot-agent-run'], 'bin/autopilot-agent-run.mjs');
     assert.ok(pkg.peerDependencies['@earendil-works/pi-coding-agent']);
     for (const script of ['typecheck', 'test:type-safety', 'test:unit', 'test:sdk', 'test:rpc', 'test:package']) {
       assert.equal(typeof pkg.scripts[script], 'string', script);
@@ -217,7 +244,7 @@ void describe('package manifest and payload', () => {
     const publishing = await docText('PUBLISHING.md');
     for (const script of ['typecheck', 'test:package', 'test', 'pack:dry-run']) {
       assert.equal(typeof pkg.scripts[script], 'string', script);
-      const command = `npm --prefix packages/pi-autopilot run ${script}`;
+      const command = `npm run ${script}`;
       assert.match(testing, literalPattern(command), `TESTING missing ${command}`);
       assert.match(publishing, literalPattern(command), `PUBLISHING missing ${command}`);
     }

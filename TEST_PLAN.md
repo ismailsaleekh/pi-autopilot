@@ -28,9 +28,9 @@ This plan covers the current Autopilot package capabilities: `/autopilot`, `/aut
 | CLI/bin supports `--json` and `--pi-executable` | Unit / Package | CLI unit tests cover parsing, json output, executable override, help output, and stable exit codes. |
 | Fake-Pi e2e smoke covers status, receipt, event rows, state, and resume | E2E | `tests/e2e/agent-runner-smoke.test.ts` runs a fake Pi child, validates status evidence, writes state/events, and resumes from `.pi/autopilot/<workstream>/`. |
 | Offline SDK/RPC/package gates are provider-free | SDK / RPC / Package | SDK harnesses use isolated temp dirs and in-memory managers; RPC uses offline Pi flags; package tests use no network and no provider calls. |
-| Published package payload | Package | `npm --prefix packages/pi-autopilot run pack:dry-run` and package tests assert runtime files are included and tests/node_modules/artifacts are excluded. |
+| Published package payload | Package | `npm run pack:dry-run` and package tests assert runtime files are included and tests/node_modules/artifacts are excluded. |
 | README promises map to TEST_PLAN rows | Package | `tests/package/package.test.ts` checks required README claim labels have matching TEST_PLAN rows. |
-| Docs and package tests avoid stale legacy-runtime terms | Package / Parent wrapper | Package docs tests and release wrapper scans fail on stale terms or forbidden legacy runtime identifiers. |
+| Docs and package tests avoid stale legacy-runtime terms | Package | Package docs tests and release wrapper scans fail on stale terms or forbidden legacy runtime identifiers. |
 | Remaining limitations are documented | Package | README, TESTING, TEST_PLAN, and PUBLISHING all state that default gates are offline and that live provider-backed child runs require explicit operator approval through subscription Pi channels. |
 
 ## Default offline gate
@@ -38,15 +38,15 @@ This plan covers the current Autopilot package capabilities: `/autopilot`, `/aut
 Run from the repository root:
 
 ```bash
-npm --prefix packages/pi-autopilot run typecheck
-npm --prefix packages/pi-autopilot run test:package
-npm --prefix packages/pi-autopilot run test
-npm --prefix packages/pi-autopilot run pack:dry-run
+npm run typecheck
+npm run test:package
+npm run test
+npm run pack:dry-run
 ```
 
-`npm --prefix packages/pi-autopilot run test` expands to typecheck, type-safety, unit, SDK, RPC, and package suites. E2E fake-runner witnesses live under `tests/e2e/` and are run by the dedicated validation lane when child-runner smoke coverage is required.
+`npm run test` expands to typecheck, type-safety, unit, SDK, RPC, and package suites. E2E fake-runner witnesses live under `tests/e2e/` and are run by the dedicated validation lane when child-runner smoke coverage is required.
 
-Release validation also runs docs audits and forbidden legacy-runtime scans supplied by the parent wrapper.
+Release validation also runs docs audits and forbidden legacy-runtime scans from this standalone repo.
 
 ## Manual and opt-in checks
 

@@ -7,7 +7,7 @@ Autopilot is a Pi extension package for dependency-cleared child-agent orchestra
 ```bash
 pi install npm:pi-autopilot
 # or during local development
-pi install ./packages/pi-autopilot
+pi install .
 ```
 
 ## Commands
@@ -53,13 +53,13 @@ Default automated coverage is offline and no-spend: unit tests use fake Pi proce
 ## Development gate
 
 ```bash
-npm --prefix packages/pi-autopilot run typecheck
-npm --prefix packages/pi-autopilot run test:package
-npm --prefix packages/pi-autopilot run test
-npm --prefix packages/pi-autopilot run pack:dry-run
+npm run typecheck
+npm run test:package
+npm run test
+npm run pack:dry-run
 ```
 
-Release QA also runs docs audits and forbidden legacy-runtime scans supplied by the parent wrapper.
+Release QA also runs docs audits and forbidden legacy-runtime scans from this standalone repo.
 
 ## Known limitations
 

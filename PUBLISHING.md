@@ -7,17 +7,17 @@ Autopilot now packages the extension commands, `context_budget`, contracts/templ
 Run from the repository root:
 
 ```bash
-npm --prefix packages/pi-autopilot run typecheck
-npm --prefix packages/pi-autopilot run test:package
-npm --prefix packages/pi-autopilot run test
-npm --prefix packages/pi-autopilot run pack:dry-run
+npm run typecheck
+npm run test:package
+npm run test
+npm run pack:dry-run
 ```
 
-Also run the parent-wrapper docs audits and forbidden legacy-runtime scans before cutting a package.
+Also run release docs audits and forbidden legacy-runtime scans before cutting a package.
 
 ## Package payload checklist
 
-1. Confirm `npm --prefix packages/pi-autopilot run pack:dry-run` includes `bin/`, `extensions/`, `src/`, `templates/`, README, TESTING, TEST_PLAN, PUBLISHING, and LICENSE.
+1. Confirm `npm run pack:dry-run` includes `bin/`, `extensions/`, `src/`, `templates/`, README, TESTING, TEST_PLAN, PUBLISHING, and LICENSE.
 2. Confirm tests, artifacts, dependency directories, and local runtime state are excluded from the tarball.
 3. Verify `pi.extensions` points at `./extensions/autopilot.ts` and the package bin exposes `autopilot-agent-run`.
 4. Verify `/autopilot` and `/autopilot-restart` load from the installed package and not from repo-local prompt files.

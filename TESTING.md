@@ -7,24 +7,24 @@ Autopilot tests are deterministic by default. They do not call live providers, n
 Run from the repository root:
 
 ```bash
-npm --prefix packages/pi-autopilot run typecheck
-npm --prefix packages/pi-autopilot run test:package
-npm --prefix packages/pi-autopilot run test
-npm --prefix packages/pi-autopilot run pack:dry-run
+npm run typecheck
+npm run test:package
+npm run test
+npm run pack:dry-run
 ```
 
-`npm --prefix packages/pi-autopilot run test` expands to:
+`npm run test` expands to:
 
 ```bash
-npm --prefix packages/pi-autopilot run typecheck
-npm --prefix packages/pi-autopilot run test:type-safety
-npm --prefix packages/pi-autopilot run test:unit
-npm --prefix packages/pi-autopilot run test:sdk
-npm --prefix packages/pi-autopilot run test:rpc
-npm --prefix packages/pi-autopilot run test:package
+npm run typecheck
+npm run test:type-safety
+npm run test:unit
+npm run test:sdk
+npm run test:rpc
+npm run test:package
 ```
 
-Release validation also runs docs audits and forbidden legacy-runtime scans supplied by the parent wrapper.
+Release validation also runs docs audits and forbidden legacy-runtime scans from this standalone repo.
 
 ## What the suites cover
 

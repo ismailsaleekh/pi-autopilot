@@ -4,6 +4,15 @@
   "description": "Autopilot orchestration package for Pi: /autopilot, /autopilot-restart, context budget activation, and child runner wiring.",
   "type": "module",
   "license": "ISC",
+  "author": "Ismail Salikhodjaev <ismailsalikhodjaev@gmail.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ismailsaleekh/pi-autopilot.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ismailsaleekh/pi-autopilot/issues"
+  },
+  "homepage": "https://github.com/ismailsaleekh/pi-autopilot#readme",
   "keywords": [
     "pi-package",
     "pi-extension",
@@ -23,7 +32,7 @@
     "LICENSE"
   ],
   "bin": {
-    "autopilot-agent-run": "./bin/autopilot-agent-run.mjs"
+    "autopilot-agent-run": "bin/autopilot-agent-run.mjs"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
@@ -51,5 +60,8 @@
   },
   "engines": {
     "node": ">=22.19.0"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

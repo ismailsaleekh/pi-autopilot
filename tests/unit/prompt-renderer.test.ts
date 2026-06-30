@@ -44,7 +44,7 @@ function spec(root: string, role: AutopilotRole): AutopilotUnitSpec {
     model: 'openai-codex/gpt-5.5',
     thinking: validationRole ? 'xhigh' : 'high',
     owned_paths: sourceRole ? [`src/${role}.ts`] : [],
-    read_only_paths: ['packages/pi-autopilot/src/core/names.ts'],
+    read_only_paths: ['src/core/names.ts'],
     untouchable_paths: ['private/**', 'node_modules/**'],
     context_refs: [
       {
@@ -52,7 +52,7 @@ function spec(root: string, role: AutopilotRole): AutopilotUnitSpec {
         purpose: 'Autopilot target architecture',
       },
     ],
-    validation_commands: validationRole ? ['npm --prefix packages/pi-autopilot run typecheck'] : [],
+    validation_commands: validationRole ? ['npm run typecheck'] : [],
     status_output: join(runtimeRoot, 'statuses', `u01-${role}.${role}.attempt-1.json`),
     receipt_output: join(runtimeRoot, 'receipts', `u01-${role}.${role}.attempt-1.receipt.json`),
     evidence_dir: join(runtimeRoot, 'evidence', `u01-${role}`),
