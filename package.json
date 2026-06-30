@@ -1,6 +1,6 @@
 {
   "name": "pi-autopilot",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Autopilot orchestration package for Pi: /autopilot, /autopilot-restart, context budget activation, and child runner wiring.",
   "type": "module",
   "license": "ISC",
