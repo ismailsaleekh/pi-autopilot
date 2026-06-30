@@ -839,7 +839,13 @@ function toolResultCandidateFromRecord(
   const toolUnderscore = stringField(eventRecord, 'tool_name');
   const toolCallId = stringField(eventRecord, 'toolCallId');
   const toolCallUnderscore = stringField(eventRecord, 'tool_call_id');
-  const details = resultRecord?.['details'];
+  const rawDetails = resultRecord?.['details'];
+  const details = normalizeStatusToolResultDetails(rawDetails, {
+    ...(toolName === undefined ? {} : { toolName }),
+    ...(toolUnderscore === undefined ? {} : { tool_name: toolUnderscore }),
+    ...(toolCallId === undefined ? {} : { toolCallId }),
+    ...(toolCallUnderscore === undefined ? {} : { tool_call_id: toolCallUnderscore }),
+  });
   const detailsConflict =
     booleanField(eventRecord, 'detailsConflict') ??
     (resultRecord === undefined ? undefined : booleanField(resultRecord, 'detailsConflict'));
@@ -875,6 +881,28 @@ function deriveResultFacts(state: JsonRecord | undefined, message: JsonRecord | 
     model: model ?? null,
     api: api ?? null,
     thinkingLevel: thinkingLevel ?? null,
+  });
+}
+
+function normalizeStatusToolResultDetails(
+  rawDetails: unknown,
+  eventIdentity: Pick<ToolResultCandidate, 'tool_name' | 'toolName' | 'tool_call_id' | 'toolCallId'>,
+): unknown {
+  if (!isJsonRecord(rawDetails)) return rawDetails;
+  const toolName =
+    stringField(rawDetails, 'tool_name') ??
+    stringField(rawDetails, 'toolName') ??
+    eventIdentity.tool_name ??
+    eventIdentity.toolName;
+  const toolCallId =
+    stringField(rawDetails, 'tool_call_id') ??
+    stringField(rawDetails, 'toolCallId') ??
+    eventIdentity.tool_call_id ??
+    eventIdentity.toolCallId;
+  return ({
+    ...(toolName === undefined ? {} : { tool_name: toolName }),
+    ...(toolCallId === undefined ? {} : { tool_call_id: toolCallId }),
+    ...rawDetails,
   });
 }
 

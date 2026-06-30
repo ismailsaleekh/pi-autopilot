@@ -296,6 +296,56 @@ void describe('autopilot-agent-run wrapper', () => {
     });
   });
 
+  void it('normalizes carrier tool identity from the Pi event when details omit tool_name', async () => {
+    await withTempDir(async (root) => {
+      const unitSpec = spec(root);
+      const specPath = await writeSpec(root, unitSpec);
+      const fakePi = await writeFakePi(root);
+      const result = await runAutopilotAgentFromSpecPath(specPath, {
+        piExecutable: fakePi,
+        env: { ...process.env, AUTOPILOT_FAKE_PI_SCENARIO: 'missing-details-tool-name' },
+        timeoutMsOverride: FAKE_PI_COMPLETION_TIMEOUT_MS,
+      });
+      assert.equal(result.status, 'success');
+      assert.equal(result.statusEntry?.verdict, 'DONE');
+    });
+  });
+
+  void it('normalizes carrier call identity from the Pi event when details omit tool_call_id', async () => {
+    await withTempDir(async (root) => {
+      const unitSpec = spec(root);
+      const specPath = await writeSpec(root, unitSpec);
+      const fakePi = await writeFakePi(root);
+      const result = await runAutopilotAgentFromSpecPath(specPath, {
+        piExecutable: fakePi,
+        env: { ...process.env, AUTOPILOT_FAKE_PI_SCENARIO: 'missing-details-tool-call-id' },
+        timeoutMsOverride: FAKE_PI_COMPLETION_TIMEOUT_MS,
+      });
+      assert.equal(result.status, 'success');
+      assert.equal(result.statusEntry?.verdict, 'DONE');
+    });
+  });
+
+  void it('rejects conflicting carrier tool identity inside details', async () => {
+    await withTempDir(async (root) => {
+      const unitSpec = spec(root);
+      const specPath = await writeSpec(root, unitSpec);
+      const fakePi = await writeFakePi(root);
+      await expectRejects(
+        () =>
+          runAutopilotAgentFromSpecPath(specPath, {
+            piExecutable: fakePi,
+            env: { ...process.env, AUTOPILOT_FAKE_PI_SCENARIO: 'conflicting-details-tool-name' },
+            timeoutMsOverride: FAKE_PI_COMPLETION_TIMEOUT_MS,
+          }),
+        (error: unknown) =>
+          error instanceof AutopilotAgentRunError &&
+          error.failureClass === 'invalid-structured-output' &&
+          /tool_name mismatch/u.test(error.details.reason),
+      );
+    });
+  });
+
   void it('accepts an error-marked carrier when valid status and receipt evidence join', async () => {
     await withTempDir(async (root) => {
       const unitSpec = spec(root);
@@ -594,6 +644,13 @@ function emitForcedStatus() {
     status_sha256: statusSha256, schema_sha256: context.schema_sha256, expected_identity_hash: context.expected_identity_hash
   };
   const content = [{ type: 'text', text: 'Autopilot status emitted by fake Pi' }];
+  const carrierDetails = scenario === 'missing-details-tool-name'
+    ? { ...details, tool_name: undefined }
+    : scenario === 'missing-details-tool-call-id'
+      ? { ...details, tool_call_id: undefined }
+      : scenario === 'conflicting-details-tool-name'
+        ? { ...details, tool_name: 'wrong_tool' }
+        : details;
   if (scenario === 'execution-events') {
     write({ type: 'tool_execution_start', toolName: 'autopilot_emit_status', toolCallId: 'call-autopilot-fake-1', args: { workstream: status.workstream } });
     write({ type: 'tool_execution_update', toolName: 'autopilot_emit_status', toolCallId: 'call-autopilot-fake-1', args: { workstream: status.workstream }, partialResult: { content, details } });
@@ -605,7 +662,7 @@ function emitForcedStatus() {
     return;
   }
   const carrierIsError = scenario === 'error-marked-carrier';
-  write({ type: 'tool_result', toolName: 'autopilot_emit_status', toolCallId: 'call-autopilot-fake-1', isError: carrierIsError, details });
+  write({ type: 'tool_result', toolName: 'autopilot_emit_status', toolCallId: 'call-autopilot-fake-1', isError: carrierIsError, details: carrierDetails });
   if (scenario === 'duplicate-carrier-frame') {
     write({ type: 'tool_execution_end', toolName: 'autopilot_emit_status', toolCallId: 'call-autopilot-fake-1', isError: false, result: { content, details } });
   }
