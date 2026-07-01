@@ -1,7 +1,8 @@
 export const AUTOPILOT_PACKAGE_NAME = 'pi-autopilot';
 export const AUTOPILOT_EXTENSION_NAME = 'Autopilot';
 export const AUTOPILOT_COMMAND = 'autopilot';
-export const AUTOPILOT_RESTART_COMMAND = 'autopilot-restart';
+export const AUTOPILOT_ONBOARD_COMMAND = 'autopilot-onboard';
+export const AUTOPILOT_HANDOFF_COMMAND = 'autopilot-handoff';
 export const AUTOPILOT_RUNNER_BIN = 'autopilot-agent-run';
 export const AUTOPILOT_STATUS_TOOL = 'autopilot_emit_status';
 export const AUTOPILOT_STATUS_CONTEXT_ENV = 'AUTOPILOT_AGENT_STATUS_CONTEXT';

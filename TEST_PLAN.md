@@ -1,22 +1,23 @@
 # Autopilot Test Plan
 
-This plan covers the current Autopilot package capabilities: `/autopilot`, `/autopilot-restart`, `context_budget`, contracts/templates, forced-output/status, state-store, compiled `autopilot-agent-run`, runner CLI/bin behavior, fake-Pi e2e witnesses, parent/restart prompts, offline SDK/RPC/package gates, and `pack:dry-run` payload verification. Default validation is deterministic, provider-free, network-free, and isolated from user/global Pi state.
+This plan covers the current Autopilot package capabilities: `/autopilot`, `/autopilot-onboard`, `/autopilot-handoff`, `context_budget`, contracts/templates, forced-output/status, state-store, compiled `autopilot-agent-run`, runner CLI/bin behavior, fake-Pi e2e witnesses, parent/onboard/handoff prompts, offline SDK/RPC/package gates, and `pack:dry-run` payload verification. Default validation is deterministic, provider-free, network-free, and isolated from user/global Pi state.
 
 ## Coverage matrix
 
 | Feature / README claim | Layer | Automated check |
 | --- | --- | --- |
 | Pi package manifest exposes the Autopilot extension | Package | `tests/package/package.test.ts` validates `pi.extensions`, keywords, peer deps, files, scripts, docs, bin, and pack payload. |
-| Public commands are `/autopilot` and `/autopilot-restart` | Package / SDK / RPC | Package docs checks, `tests/sdk/activation.test.ts`, `tests/sdk/autopilot-command.test.ts`, and `tests/rpc/command-payloads.test.ts` assert registered command names and command payloads. |
+| Public commands are `/autopilot`, `/autopilot-onboard`, and `/autopilot-handoff` | Package / SDK / RPC | Package docs checks, `tests/sdk/activation.test.ts`, `tests/sdk/autopilot-command.test.ts`, and `tests/rpc/command-payloads.test.ts` assert registered command names and command payloads. |
 | No public alias outside Autopilot names | SDK / RPC / Package | SDK and RPC tests assert the final command list; package/docs audits assert only Autopilot public names are documented. |
 | `context_budget` parent gate | Unit / SDK / RPC | Unit tests cover ok, halt, unknown, rounding, and invalid thresholds; SDK/RPC tests cover activation and invalid `AUTOPILOT_CONTEXT_HALT_PERCENT`. |
 | `/autopilot` activates package-owned `context_budget` | SDK / RPC | Real SDK and offline RPC tests invoke `/autopilot` in isolated sessions and verify prompt behavior. |
 | Parent prompt requires `context_budget` before file reads or child launch | Unit / SDK / RPC / Package | Prompt tests and command tests assert startup-gate text; package docs checks keep the README claim mapped to this row. |
-| Restart prompt is read-only and uses `/autopilot-restart` | Unit / SDK / RPC / Package | Restart tests assert no launch, mutation, test, provider, or runner execution; package docs include the same limitation. |
+| Onboard prompt is read-only and uses `/autopilot-onboard` | Unit / SDK / RPC / Package | Onboard tests assert no launch, mutation, test, provider, or runner execution; package docs include the same limitation. |
+| Handoff prompt uses the active workstream and emits a `/autopilot <workstream>` resume block | Unit / SDK / RPC / Package | Handoff tests assert no workstream argument is required, pre-activation calls warn, active-session calls use the recorded workstream, optional comments are preserved, and the generated prompt requires a full next-session `/autopilot` block. |
 | Runtime root uses `.pi/autopilot/<workstream>/` | Unit / Package / E2E | Parser/path tests, prompt tests, state-store tests, e2e smoke, README, and package tests assert the runtime root. |
 | Contracts/templates are schema-backed and package-owned | Unit / Package | `tests/unit/contracts.test.ts` covers unit specs, status, events, state, receipts, handoffs, semantic rules, evidence metadata, receipt hashes, provider identity, and owned-path enforcement; prompt-renderer tests validate every role template. |
 | Forced-output/status tool is child-only as `autopilot_emit_status` | Unit / SDK / RPC / E2E / Package | Status-extension, forced-output, runner, SDK/RPC, e2e, and package tests assert status+receipt writing and that parent sessions do not expose the child-only surface. |
-| State store | Unit / E2E | `tests/unit/state-store.test.ts` covers atomic state writes, append-only monotonic events, bounded resume snapshots, reference validation, and ignoring older runtime locations by default; e2e smoke resumes from written state. |
+| State store | Unit / E2E | `tests/unit/state-store.test.ts` covers atomic state writes, append-only monotonic events, bounded resume snapshots, reference validation, and ignoring older runtime locations by default; e2e smoke resumes from `.pi/autopilot/<workstream>/`. |
 | `autopilot-agent-run` bin is shipped | Package | Package tests assert manifest bin, compiled `dist/` file existence, help output, pack payload, and installed `node_modules` dry-run behavior without Node type stripping. |
 | Runner dry-run validates specs without launching Pi | Unit / Package | Runner unit tests and CLI assertions cover `autopilot-agent-run --dry-run`, prompt snapshots, status context output, and terse/json stdout. |
 | Runner accepts subscription provider gates only | Unit / Package | Runner and forced-output tests cover `openai-codex/*`, `anthropic/*`, `opencode-go/*`, `kimi-coding/*`, and `zai/*`, including mixed API identity mapping and rejection of unsupported provider prefixes. |
@@ -51,8 +52,8 @@ Release validation also runs docs audits and forbidden legacy-runtime scans from
 
 ## Manual and opt-in checks
 
-No live provider/model call is part of the default gate. Any provider-backed child execution must be an explicit release or operator witness using subscription Pi channels, a non-production workstream, and `autopilot-agent-run` with a reviewed unit spec.
+No live provider/model call is part of the default gate. Provider-backed child execution must be an explicit release or operator witness using subscription Pi channels, a non-production workstream, and `autopilot-agent-run` with a reviewed unit spec.
 
 ## Known limitations and future coverage
 
-Current automated coverage proves commands, `context_budget`, parent/restart prompts, contracts/templates, forced-output/status, state-store helpers, runner dry-run/fake-Pi paths, offline SDK/RPC/package gates, and `pack:dry-run`. Remaining gaps are compiled scheduling UI, PTY/TUI coverage, migration tooling for older runtime folders, and default live-provider child execution.
+Current automated coverage proves commands, `context_budget`, parent/onboard/handoff prompts, contracts/templates, forced-output/status, state-store helpers, runner dry-run/fake-Pi paths, offline SDK/RPC/package gates, and `pack:dry-run`. Remaining gaps are compiled scheduling UI, PTY/TUI coverage, migration tooling for older runtime folders, and default live-provider child execution.

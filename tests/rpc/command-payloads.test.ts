@@ -6,7 +6,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   AUTOPILOT_COMMAND,
-  AUTOPILOT_RESTART_COMMAND,
+  AUTOPILOT_HANDOFF_COMMAND,
+  AUTOPILOT_ONBOARD_COMMAND,
   AUTOPILOT_STATUS_TOOL,
 } from '../../src/core/names.ts';
 
@@ -189,13 +190,22 @@ void describe('Pi RPC Autopilot command wiring', () => {
   void it('reports only the Autopilot slash commands over pi --mode rpc', async () => {
     const { events } = await runRpc([{ id: 'commands', type: 'get_commands' }]);
     const commands = commandsFrom(requireResponse(events, 'commands'));
-    assert.deepEqual(commandNames(commands), [AUTOPILOT_COMMAND, AUTOPILOT_RESTART_COMMAND]);
+    assert.deepEqual(commandNames(commands), [
+      AUTOPILOT_COMMAND,
+      AUTOPILOT_HANDOFF_COMMAND,
+      AUTOPILOT_ONBOARD_COMMAND,
+    ]);
     assert.match(requireListedCommand(commands, AUTOPILOT_COMMAND).description ?? '', /Start or resume Autopilot/);
     assert.match(
-      requireListedCommand(commands, AUTOPILOT_RESTART_COMMAND).description ?? '',
-      /paste-ready Autopilot restart instructions/,
+      requireListedCommand(commands, AUTOPILOT_ONBOARD_COMMAND).description ?? '',
+      /paste-ready Autopilot onboarding instructions/,
+    );
+    assert.match(
+      requireListedCommand(commands, AUTOPILOT_HANDOFF_COMMAND).description ?? '',
+      /current active workstream/,
     );
     assert.equal(commands.some((command) => command.name === forbiddenLegacyCommand), false);
+    assert.equal(commands.some((command) => command.name === 'autopilot-restart'), false);
     assert.equal(commands.some((command) => command.name === AUTOPILOT_STATUS_TOOL), false);
   });
 
@@ -217,26 +227,42 @@ void describe('Pi RPC Autopilot command wiring', () => {
     assert.equal(notifyMessages.some((message) => /Autopilot activated for rpc-demo\./.test(message)), false);
   });
 
-  void it('executes /autopilot and /autopilot-restart through offline RPC without public legacy aliases', async () => {
+  void it('executes /autopilot, /autopilot-onboard, and /autopilot-handoff through offline RPC', async () => {
     const { events, stdout } = await runRpc([
       { id: 'commands', type: 'get_commands' },
+      { id: 'handoff-before', type: 'prompt', message: '/autopilot-handoff operator note before activation' },
       { id: 'autopilot', type: 'prompt', message: '/autopilot rpc-demo proceed after gates' },
-      { id: 'restart', type: 'prompt', message: '/autopilot-restart rpc-demo old refs' },
+      { id: 'onboard', type: 'prompt', message: '/autopilot-onboard rpc-demo old refs' },
+      { id: 'handoff-after', type: 'prompt', message: '/autopilot-handoff closing note' },
     ]);
 
     const commands = commandsFrom(requireResponse(events, 'commands'));
-    assert.deepEqual(commandNames(commands), [AUTOPILOT_COMMAND, AUTOPILOT_RESTART_COMMAND]);
+    assert.deepEqual(commandNames(commands), [
+      AUTOPILOT_COMMAND,
+      AUTOPILOT_HANDOFF_COMMAND,
+      AUTOPILOT_ONBOARD_COMMAND,
+    ]);
     const autopilot = requireResponse(events, 'autopilot');
-    const restart = requireResponse(events, 'restart');
+    const onboard = requireResponse(events, 'onboard');
+    const handoffBefore = requireResponse(events, 'handoff-before');
+    const handoffAfter = requireResponse(events, 'handoff-after');
     assert.equal(autopilot.success, true, autopilot.error);
-    assert.equal(restart.success, true, restart.error);
+    assert.equal(onboard.success, true, onboard.error);
+    assert.equal(handoffBefore.success, true, handoffBefore.error);
+    assert.equal(handoffAfter.success, true, handoffAfter.error);
     assert.equal(stdout.includes(`/${forbiddenLegacyCommand}`), false);
+    assert.equal(stdout.includes('/autopilot-restart'), false);
     assert.equal(stdout.includes(AUTOPILOT_STATUS_TOOL), false);
 
     const notifyMessages = notifications(events).map((event) => event.message);
+    assert.equal(notifyMessages.some((message) => /No active Autopilot workstream/.test(message)), true);
     assert.equal(notifyMessages.some((message) => /Autopilot activated for rpc-demo\./.test(message)), true);
     assert.equal(
-      notifyMessages.some((message) => /Autopilot restart brief requested for rpc-demo\./.test(message)),
+      notifyMessages.some((message) => /Autopilot onboard brief requested for rpc-demo\./.test(message)),
+      true,
+    );
+    assert.equal(
+      notifyMessages.some((message) => /Autopilot handoff requested for rpc-demo\./.test(message)),
       true,
     );
   });

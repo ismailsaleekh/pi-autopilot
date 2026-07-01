@@ -1,7 +1,7 @@
 {
   "name": "pi-autopilot",
-  "version": "0.1.2",
-  "description": "Autopilot orchestration package for Pi: /autopilot, /autopilot-restart, context budget activation, and child runner wiring.",
+  "version": "0.2.0",
+  "description": "Autopilot orchestration package for Pi: /autopilot, /autopilot-onboard, /autopilot-handoff, context budget activation, and child runner wiring.",
   "type": "module",
   "license": "ISC",
   "author": "Ismail Salikhodjaev <ismailsalikhodjaev@gmail.com>",

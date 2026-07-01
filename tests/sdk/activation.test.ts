@@ -6,7 +6,8 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
   AUTOPILOT_COMMAND,
-  AUTOPILOT_RESTART_COMMAND,
+  AUTOPILOT_HANDOFF_COMMAND,
+  AUTOPILOT_ONBOARD_COMMAND,
   AUTOPILOT_STATUS_TOOL,
   CONTEXT_BUDGET_TOOL_NAME,
 } from '../../src/core/names.ts';
@@ -337,7 +338,11 @@ void describe('Pi SDK Autopilot activation', () => {
   void it('loads through the real Pi SDK with only Autopilot public commands', async () => {
     const harness = await createSdkHarness();
     try {
-      assert.deepEqual(commandNames(harness.session), [AUTOPILOT_COMMAND, AUTOPILOT_RESTART_COMMAND]);
+      assert.deepEqual(commandNames(harness.session), [
+        AUTOPILOT_COMMAND,
+        AUTOPILOT_HANDOFF_COMMAND,
+        AUTOPILOT_ONBOARD_COMMAND,
+      ]);
       assert.equal(harness.session.extensionRunner.getCommand(forbiddenLegacyCommand), undefined);
       assert.equal(harness.session.extensionRunner.getCommand(AUTOPILOT_STATUS_TOOL), undefined);
       assert.equal(harness.session.extensionRunner.getToolDefinition(CONTEXT_BUDGET_TOOL_NAME), undefined);
@@ -407,10 +412,10 @@ void describe('Pi SDK Autopilot activation', () => {
     }
   });
 
-  void it('keeps restart as prompt-only SDK behavior without parent status-tool exposure', async () => {
+  void it('keeps onboard as prompt-only SDK behavior without parent status-tool exposure', async () => {
     const harness = await createSdkHarness();
     try {
-      await requireCommand(harness.session, AUTOPILOT_RESTART_COMMAND).handler(
+      await requireCommand(harness.session, AUTOPILOT_ONBOARD_COMMAND).handler(
         'demo refs',
         harness.session.extensionRunner.createCommandContext(),
       );
@@ -419,9 +424,9 @@ void describe('Pi SDK Autopilot activation', () => {
       assert.equal(harness.activeTools.includes(CONTEXT_BUDGET_TOOL_NAME), false);
       assert.equal(harness.sentMessages.length, 1);
       const message = harness.sentMessages[0];
-      if (message === undefined) throw new Error('missing restart prompt');
+      if (message === undefined) throw new Error('missing onboard prompt');
       assert.equal(message.deliverAs, 'followUp');
-      assert.match(message.content, /restart-brief generator/);
+      assert.match(message.content, /onboard-brief generator/);
       assert.match(message.content, /Do not start child agents/);
       assert.equal(new RegExp(AUTOPILOT_STATUS_TOOL).test(message.content), false);
     } finally {

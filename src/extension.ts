@@ -1,7 +1,18 @@
 import { createContextBudgetTool, resolveContextHaltPercent } from './core/context-budget.ts';
-import { AUTOPILOT_COMMAND, AUTOPILOT_RESTART_COMMAND, CONTEXT_BUDGET_TOOL_NAME } from './core/names.ts';
+import {
+  AUTOPILOT_COMMAND,
+  AUTOPILOT_HANDOFF_COMMAND,
+  AUTOPILOT_ONBOARD_COMMAND,
+  CONTEXT_BUDGET_TOOL_NAME,
+} from './core/names.ts';
 import { parseAutopilotArgs, runnerInvocationFromModuleUrl, runtimeRootForWorkstream } from './core/paths.ts';
-import { renderAutopilotPrompt, renderRestartPrompt, restartUsage } from './core/prompts.ts';
+import {
+  handoffUsage,
+  onboardUsage,
+  renderAutopilotPrompt,
+  renderHandoffPrompt,
+  renderOnboardPrompt,
+} from './core/prompts.ts';
 
 export type NotificationKind = 'info' | 'warning' | 'error';
 
@@ -32,6 +43,7 @@ function notify(ctx: ExtensionCommandContextLike, message: string, kind: Notific
 
 export default function autopilotExtension(pi: ExtensionHostLike): void {
   let contextBudgetRegistered = false;
+  let activeAutopilotWorkstream: string | null = null;
 
   function activateContextBudget(): void {
     if (!contextBudgetRegistered) {
@@ -69,6 +81,7 @@ export default function autopilotExtension(pi: ExtensionHostLike): void {
       }
 
       const runtimeRoot = runtimeRootForWorkstream(parsed.value.workstream);
+      activeAutopilotWorkstream = parsed.value.workstream;
       const prompt = renderAutopilotPrompt({
         workstream: parsed.value.workstream,
         runtimeRoot,
@@ -81,23 +94,59 @@ export default function autopilotExtension(pi: ExtensionHostLike): void {
     },
   });
 
-  pi.registerCommand(AUTOPILOT_RESTART_COMMAND, {
+  pi.registerCommand(AUTOPILOT_ONBOARD_COMMAND, {
     description:
-      'Generate paste-ready Autopilot restart instructions: /autopilot-restart <workstream> [notes]',
+      'Generate paste-ready Autopilot onboarding instructions: /autopilot-onboard <workstream> [handoff refs]',
     handler: (args, ctx) => {
       const parsed = parseAutopilotArgs(args);
       if (!parsed.ok) {
-        notify(ctx, restartUsage(), 'warning');
+        notify(ctx, onboardUsage(), 'warning');
         return Promise.resolve();
       }
       const runtimeRoot = runtimeRootForWorkstream(parsed.value.workstream);
-      const prompt = renderRestartPrompt({
+      const prompt = renderOnboardPrompt({
         workstream: parsed.value.workstream,
         runtimeRoot,
         notes: parsed.value.remainder,
       });
       pi.sendUserMessage(prompt, { deliverAs: 'followUp' });
-      notify(ctx, `Autopilot restart brief requested for ${parsed.value.workstream}.`, 'info');
+      notify(ctx, `Autopilot onboard brief requested for ${parsed.value.workstream}.`, 'info');
+      return Promise.resolve();
+    },
+  });
+
+  pi.registerCommand(AUTOPILOT_HANDOFF_COMMAND, {
+    description:
+      'Create an Autopilot context handoff for the current active workstream: /autopilot-handoff [comments]',
+    handler: (args, ctx) => {
+      if (activeAutopilotWorkstream === null) {
+        notify(
+          ctx,
+          `No active Autopilot workstream in this session. Start with /${AUTOPILOT_COMMAND} <workstream>. ${handoffUsage()}`,
+          'warning',
+        );
+        return Promise.resolve();
+      }
+
+      try {
+        activateContextBudget();
+      } catch (error) {
+        notify(
+          ctx,
+          `Autopilot could not activate context_budget for handoff: ${error instanceof Error ? error.message : String(error)}`,
+          'error',
+        );
+        return Promise.resolve();
+      }
+
+      const runtimeRoot = runtimeRootForWorkstream(activeAutopilotWorkstream);
+      const prompt = renderHandoffPrompt({
+        workstream: activeAutopilotWorkstream,
+        runtimeRoot,
+        comments: args.trim(),
+      });
+      pi.sendUserMessage(prompt, { deliverAs: 'followUp' });
+      notify(ctx, `Autopilot handoff requested for ${activeAutopilotWorkstream}.`, 'info');
       return Promise.resolve();
     },
   });

@@ -197,7 +197,7 @@ void describe('package manifest and payload', () => {
   void it('documents current Autopilot surfaces across package docs', async () => {
     for (const file of DOC_FILES) {
       const text = await docText(file);
-      for (const surface of ['autopilot-agent-run', 'context_budget', 'autopilot-restart']) {
+      for (const surface of ['autopilot-agent-run', 'context_budget', 'autopilot-onboard', 'autopilot-handoff']) {
         assert.match(text, literalPattern(surface), `${file} missing ${surface}`);
       }
     }
@@ -206,7 +206,8 @@ void describe('package manifest and payload', () => {
     const plan = await docText('TEST_PLAN.md');
     for (const surface of [
       '/autopilot',
-      '/autopilot-restart',
+      '/autopilot-onboard',
+      '/autopilot-handoff',
       'context_budget',
       'autopilot-agent-run',
       '.pi/autopilot/<workstream>/',
@@ -225,7 +226,7 @@ void describe('package manifest and payload', () => {
     const readme = await docText('README.md');
     const plan = await docText('TEST_PLAN.md');
     const mappings = [
-      { claim: 'Commands', row: 'Public commands are `/autopilot` and `/autopilot-restart`' },
+      { claim: 'Commands', row: 'Public commands are `/autopilot`, `/autopilot-onboard`, and `/autopilot-handoff`' },
       { claim: 'context_budget', row: '`context_budget` parent gate' },
       { claim: 'Contracts, templates, and state-store', row: 'Contracts/templates are schema-backed and package-owned' },
       { claim: 'forced-output/status', row: 'Forced-output/status tool is child-only' },
@@ -233,7 +234,8 @@ void describe('package manifest and payload', () => {
       { claim: 'autopilot-agent-run', row: '`autopilot-agent-run` bin is shipped' },
       { claim: 'fake-Pi', row: 'Runner accepts valid fake child' },
       { claim: 'parent prompt', row: 'Parent prompt requires `context_budget`' },
-      { claim: 'restart prompt', row: 'Restart prompt is read-only' },
+      { claim: 'onboard prompt', row: 'Onboard prompt is read-only' },
+      { claim: 'handoff prompt', row: 'Handoff prompt uses the active workstream' },
       { claim: 'offline SDK/RPC/package gates', row: 'Offline SDK/RPC/package gates are provider-free' },
       { claim: 'pack:dry-run', row: 'Published package payload' },
       { claim: 'Known limitations', row: 'Remaining limitations are documented' },
@@ -265,6 +267,8 @@ void describe('package manifest and payload', () => {
       'does not yet implement live child-agent execution',
       'runner remains offline',
       'placeholder for package wiring only',
+      '/autopilot-restart',
+      'autopilot-restart',
     ];
     for (const file of DOC_FILES) {
       const text = await docText(file);

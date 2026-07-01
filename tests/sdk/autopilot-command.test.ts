@@ -8,7 +8,8 @@ import autopilotExtension, {
 } from '../../src/extension.ts';
 import {
   AUTOPILOT_COMMAND,
-  AUTOPILOT_RESTART_COMMAND,
+  AUTOPILOT_HANDOFF_COMMAND,
+  AUTOPILOT_ONBOARD_COMMAND,
   AUTOPILOT_STATUS_TOOL,
   CONTEXT_BUDGET_TOOL_NAME,
 } from '../../src/core/names.ts';
@@ -70,11 +71,19 @@ function requireCommand(harness: Harness, name: string): ExtensionCommandDefinit
   return command;
 }
 
+function publicCommands(harness: Harness): string[] {
+  return [...harness.commands.keys()].sort();
+}
+
 void describe('Autopilot command SDK surface', () => {
   void it('queues the hardened parent prompt and activates context_budget only for /autopilot', async () => {
     const harness = createHarness();
     await requireCommand(harness, AUTOPILOT_COMMAND).handler('demo operator scope', harness.ctx);
-    assert.deepEqual([...harness.commands.keys()].sort(), [AUTOPILOT_COMMAND, AUTOPILOT_RESTART_COMMAND]);
+    assert.deepEqual(publicCommands(harness), [
+      AUTOPILOT_COMMAND,
+      AUTOPILOT_HANDOFF_COMMAND,
+      AUTOPILOT_ONBOARD_COMMAND,
+    ]);
     assert.deepEqual(harness.toolNames, [CONTEXT_BUDGET_TOOL_NAME]);
     assert.deepEqual(harness.activeTools, [CONTEXT_BUDGET_TOOL_NAME]);
     assert.equal(harness.messages.length, 1);
@@ -88,18 +97,43 @@ void describe('Autopilot command SDK surface', () => {
     assert.equal(message.content.includes(AUTOPILOT_STATUS_TOOL), false);
   });
 
-  void it('queues a restart brief without registering tools or launch authority', async () => {
+  void it('queues an onboard brief without registering tools or launch authority', async () => {
     const harness = createHarness();
-    await requireCommand(harness, AUTOPILOT_RESTART_COMMAND).handler('demo handoff refs', harness.ctx);
+    await requireCommand(harness, AUTOPILOT_ONBOARD_COMMAND).handler('demo handoff refs', harness.ctx);
     assert.deepEqual(harness.toolNames, []);
     assert.deepEqual(harness.activeTools, []);
     assert.equal(harness.messages.length, 1);
     const message = harness.messages[0];
-    if (message === undefined) throw new Error('missing restart prompt');
-    assert.match(message.content, /restart-brief generator/);
+    if (message === undefined) throw new Error('missing onboard prompt');
+    assert.match(message.content, /onboard-brief generator/);
     assert.match(message.content, /Do not start child agents/);
     assert.match(message.content, /Do not create, edit, move, delete/);
     assert.match(message.content, /validated status\+receipt evidence/);
+    assert.equal(message.content.includes(AUTOPILOT_STATUS_TOOL), false);
+  });
+
+  void it('rejects handoff before /autopilot establishes the active workstream', async () => {
+    const harness = createHarness();
+    await requireCommand(harness, AUTOPILOT_HANDOFF_COMMAND).handler('operator note', harness.ctx);
+    assert.deepEqual(harness.toolNames, []);
+    assert.deepEqual(harness.activeTools, []);
+    assert.equal(harness.messages.length, 0);
+    assert.equal(harness.notifications.some((entry) => /No active Autopilot workstream/.test(entry.message)), true);
+  });
+
+  void it('queues handoff for the active workstream and treats args as comments', async () => {
+    const harness = createHarness();
+    await requireCommand(harness, AUTOPILOT_COMMAND).handler('demo initial scope', harness.ctx);
+    await requireCommand(harness, AUTOPILOT_HANDOFF_COMMAND).handler('demo is a comment, not a slug', harness.ctx);
+    assert.deepEqual(harness.toolNames, [CONTEXT_BUDGET_TOOL_NAME]);
+    assert.deepEqual(harness.activeTools, [CONTEXT_BUDGET_TOOL_NAME]);
+    assert.equal(harness.messages.length, 2);
+    const message = harness.messages[1];
+    if (message === undefined) throw new Error('missing handoff prompt');
+    assert.match(message.content, /current Autopilot parent for workstream `demo`/);
+    assert.match(message.content, /demo is a comment, not a slug/);
+    assert.match(message.content, /first line is exactly/);
+    assert.match(message.content, new RegExp(`/${AUTOPILOT_COMMAND} demo`));
     assert.equal(message.content.includes(AUTOPILOT_STATUS_TOOL), false);
   });
 });

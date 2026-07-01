@@ -1,4 +1,4 @@
-import { AUTOPILOT_COMMAND, AUTOPILOT_RESTART_COMMAND, AUTOPILOT_RUNNER_BIN, AUTOPILOT_SCHEMA_NAMES, CONTEXT_BUDGET_TOOL_NAME, } from "./names.js";
+import { AUTOPILOT_COMMAND, AUTOPILOT_HANDOFF_COMMAND, AUTOPILOT_ONBOARD_COMMAND, AUTOPILOT_RUNNER_BIN, AUTOPILOT_SCHEMA_NAMES, CONTEXT_BUDGET_TOOL_NAME, } from "./names.js";
 function optionalBlock(label, value) {
     return value.length > 0 ? `\n## ${label}\n\n${value}\n` : '';
 }
@@ -61,10 +61,10 @@ Use these schema names:\n${schemas}
 After the context gate and resume reads, answer concisely with workstream, runtime root, gate/percent, current queues, whether a strategy exists, next dependency-cleared units, validation plan, held work, and operator questions.
 ${optionalBlock('Operator-provided task intro', input.taskIntro)}`;
 }
-export function renderRestartPrompt(input) {
-    return `# Role: Autopilot restart-brief generator
+export function renderOnboardPrompt(input) {
+    return `# Role: Autopilot onboard-brief generator
 
-Generate a paste-ready \`/${AUTOPILOT_COMMAND} ${input.workstream}\` instruction block from the operator notes and referenced state. You are not the Autopilot parent orchestrator, and this restart session is read-only.
+Generate a paste-ready \`/${AUTOPILOT_COMMAND} ${input.workstream}\` instruction block from the operator notes and referenced handoff state. You are not the Autopilot parent orchestrator, and this onboard session is read-only.
 
 ## Hard limits
 
@@ -72,15 +72,69 @@ Generate a paste-ready \`/${AUTOPILOT_COMMAND} ${input.workstream}\` instruction
 - Do not create, edit, move, delete, stage, commit, clean, or otherwise mutate files.
 - Do not run source gates, tests, builds, provider calls, network calls, child launch commands, or cleanup commands.
 - Do not call \`${AUTOPILOT_RUNNER_BIN}\` or raw Pi child-launch commands.
-- Reads and searches are allowed only to understand explicit references and produce the restart block.
+- Reads and searches are allowed only to understand explicit references and produce the onboard block.
 
 ## Generated block requirements
 
-The generated block must begin with \`/${AUTOPILOT_COMMAND} ${input.workstream}\` and must require \`${CONTEXT_BUDGET_TOOL_NAME}\` first. It must use runtime root \`${input.runtimeRoot}\`, resume from \`${input.runtimeRoot}/state.json\` and \`${input.runtimeRoot}/events.jsonl\`, require future child launches through the Autopilot runner \`${AUTOPILOT_RUNNER_BIN}\` as injected by /${AUTOPILOT_COMMAND}, accept only validated status+receipt evidence, and use Autopilot schema/status names only.
+The generated block must begin with \`/${AUTOPILOT_COMMAND} ${input.workstream}\` and must require \`${CONTEXT_BUDGET_TOOL_NAME}\` first. It must use runtime root \`${input.runtimeRoot}\`, resume from \`${input.runtimeRoot}/state.json\` and \`${input.runtimeRoot}/events.jsonl\`, prefer \`${input.runtimeRoot}/handoff.json\`, \`${input.runtimeRoot}/handoff.md\`, and \`${input.runtimeRoot}/handoff-event-tail.jsonl\` when present, require future child launches through the Autopilot runner \`${AUTOPILOT_RUNNER_BIN}\` as injected by /${AUTOPILOT_COMMAND}, accept only validated status+receipt evidence, and use Autopilot schema/status names only.
 
-Include concise sections for mode, operator scope, authoritative refs, state precedence, startup gates, current state, held work, launch authorization, machine-truth handling, hard prohibitions, and open questions. State that markdown notes are hints, not truth; that this restart turn must not mutate files; and that the future parent must not use metered frontier routes or mutate git state.
+Include concise sections for mode, operator scope, authoritative refs, state precedence, startup gates, current state, held work, launch authorization, machine-truth handling, hard prohibitions, and open questions. State that markdown notes are hints, not truth; that this onboard turn must not mutate files; and that the future parent must not use metered frontier routes or mutate git state.
 ${optionalBlock('Operator notes', input.notes)}`;
 }
-export function restartUsage() {
-    return `Usage: /${AUTOPILOT_RESTART_COMMAND} <workstream> [freeform notes or refs]`;
+export function renderHandoffPrompt(input) {
+    return `# Role: Autopilot context-handoff finalizer
+
+You are the current Autopilot parent for workstream \`${input.workstream}\`. The operator invoked \`/${AUTOPILOT_HANDOFF_COMMAND}\` in this active session because context is near or past the handoff threshold. Produce a durable handoff and a full next-session \`/${AUTOPILOT_COMMAND} ${input.workstream}\` resume block.
+
+## Hard handoff gate
+
+1. Before reading more files, launching work, or writing handoff artifacts, call \`${CONTEXT_BUDGET_TOOL_NAME}\` with no arguments.
+2. Start no new child work, even if the gate reports \`ok\`.
+3. Drain or record already-running child work only when \`${input.runtimeRoot}/state.json\` and \`${input.runtimeRoot}/events.jsonl\` prove it exists.
+4. Do not run broad source gates, builds, provider calls, cleanup commands, or child launch commands.
+5. Do not mutate git state. Do not change project source, docs, tests, config, or product files. Only Autopilot runtime handoff/state/event artifacts under \`${input.runtimeRoot}\` are in scope.
+
+## Runtime refs to read after the gate
+
+- \`${input.runtimeRoot}/state.json\`
+- \`${input.runtimeRoot}/events.jsonl\`
+- \`${input.runtimeRoot}/statuses/\`
+- \`${input.runtimeRoot}/receipts/\`
+- \`${input.runtimeRoot}/unit-specs/\`
+- \`${input.runtimeRoot}/handoff.json\` if present
+- \`${input.runtimeRoot}/handoff.md\` if present
+- \`${input.runtimeRoot}/handoff-event-tail.jsonl\` if present
+
+Treat schema-valid \`state.json\`, \`events.jsonl\`, statuses, receipts, and unit specs as machine truth. Treat markdown, chat text, and logs as hints unless confirmed by machine artifacts.
+
+## Required handoff writes
+
+Write or update these runtime artifacts only:
+
+- \`${input.runtimeRoot}/handoff.json\` with schema \`autopilot.handoff.v1\`, reason \`context-halt\`, exact state/event refs, status refs, blockers, next actions, and concise summary.
+- \`${input.runtimeRoot}/handoff.md\` as the human-readable transfer note.
+- \`${input.runtimeRoot}/handoff-event-tail.jsonl\` as a bounded latest-event tail.
+- \`${input.runtimeRoot}/events.jsonl\` with one monotonic \`handoff_written\` event.
+- \`${input.runtimeRoot}/state.json\` with current queues and \`status\` set to \`paused\` or \`blocked\` if that matches the real state.
+
+If a required artifact cannot be written safely, report the blocker clearly and still provide the best next-session \`/${AUTOPILOT_COMMAND} ${input.workstream}\` block with the refs that exist.
+
+## Handoff content requirements
+
+Capture current queues, running units, blocked units, completed units, failed units, last accepted statuses/receipts, validation gates, open blockers, held work, next dependency-cleared units, and operator questions. Include exact relative or runtime paths for the next parent to read. Keep the handoff compact; do not paste large logs or file bodies.
+
+## Final assistant response requirement
+
+After writing the handoff artifacts, your final response must include a section titled \`Next Autopilot command\` whose first line is exactly:
+
+\`/${AUTOPILOT_COMMAND} ${input.workstream}\`
+
+Under that line, include a full explanation for the next Autopilot parent: authoritative handoff refs, startup gate, state precedence, resume steps, current queues, open blockers, next actions, validation plan, launch authorization, and hard prohibitions. The next parent must call \`${CONTEXT_BUDGET_TOOL_NAME}\` first, must resume from \`${input.runtimeRoot}\`, must launch child work only through the injected \`${AUTOPILOT_RUNNER_BIN}\` path from its own /${AUTOPILOT_COMMAND} prompt, must accept only validated status+receipt evidence, must avoid metered frontier routes, and must preserve git state.
+${optionalBlock('Operator handoff comments', input.comments)}`;
+}
+export function onboardUsage() {
+    return `Usage: /${AUTOPILOT_ONBOARD_COMMAND} <workstream> [freeform handoff refs or notes]`;
+}
+export function handoffUsage() {
+    return `Usage: /${AUTOPILOT_HANDOFF_COMMAND} [optional comments]`;
 }

@@ -2,12 +2,14 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   AUTOPILOT_COMMAND,
+  AUTOPILOT_HANDOFF_COMMAND,
+  AUTOPILOT_ONBOARD_COMMAND,
   AUTOPILOT_RUNNER_BIN,
   AUTOPILOT_STATUS_TOOL,
   CONTEXT_BUDGET_TOOL_NAME,
 } from '../../src/core/names.ts';
 import { parseAutopilotArgs, runtimeRootForWorkstream } from '../../src/core/paths.ts';
-import { renderAutopilotPrompt, renderRestartPrompt } from '../../src/core/prompts.ts';
+import { renderAutopilotPrompt, renderHandoffPrompt, renderOnboardPrompt } from '../../src/core/prompts.ts';
 
 function parsedWorkstream(args: string): string {
   const parsed = parseAutopilotArgs(args);
@@ -63,21 +65,43 @@ void describe('Autopilot command parsing and prompts', () => {
     assert.match(prompt, /focus text/);
   });
 
-  void it('renders restart prompt as read-only instructions', () => {
-    const prompt = renderRestartPrompt({
+  void it('renders onboard prompt as read-only instructions', () => {
+    const prompt = renderOnboardPrompt({
       workstream: 'demo',
       runtimeRoot: '.pi/autopilot/demo',
       notes: 'handoff refs',
     });
     assert.match(prompt, new RegExp(`/${AUTOPILOT_COMMAND} demo`));
+    assert.match(prompt, /onboard-brief generator/);
     assert.match(prompt, /Do not start child agents/);
     assert.match(prompt, /Do not create, edit, move, delete/);
     assert.match(prompt, /read-only/);
+    assert.match(prompt, /handoff\.json/);
     assert.match(prompt, /state\.json/);
     assert.match(prompt, /events\.jsonl/);
     assert.match(prompt, /validated status\+receipt evidence/);
     assert.match(prompt, new RegExp(AUTOPILOT_RUNNER_BIN));
     assert.equal(legacySurfacePattern().test(prompt), false);
+    assert.equal(new RegExp(AUTOPILOT_STATUS_TOOL).test(prompt), false);
+  });
+
+  void it('renders handoff prompt from the active workstream with comments and next command', () => {
+    const prompt = renderHandoffPrompt({
+      workstream: 'demo',
+      runtimeRoot: '.pi/autopilot/demo',
+      comments: 'remember package docs validation',
+    });
+    assert.match(prompt, new RegExp(`/${AUTOPILOT_HANDOFF_COMMAND}`));
+    assert.match(prompt, new RegExp(`/${AUTOPILOT_COMMAND} demo`));
+    assert.match(prompt, /call `context_budget` with no arguments/);
+    assert.match(prompt, /Start no new child work/);
+    assert.match(prompt, /handoff\.json/);
+    assert.match(prompt, /handoff\.md/);
+    assert.match(prompt, /handoff-event-tail\.jsonl/);
+    assert.match(prompt, /Next Autopilot command/);
+    assert.match(prompt, /remember package docs validation/);
+    assert.match(prompt, new RegExp(AUTOPILOT_RUNNER_BIN));
+    assert.equal(prompt.includes(`/${AUTOPILOT_ONBOARD_COMMAND}`), false);
     assert.equal(new RegExp(AUTOPILOT_STATUS_TOOL).test(prompt), false);
   });
 });

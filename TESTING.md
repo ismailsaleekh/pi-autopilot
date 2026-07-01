@@ -1,6 +1,6 @@
 # Testing Autopilot
 
-Autopilot tests are deterministic by default. They do not call live providers, networks, real models, or user/global Pi state while validating `/autopilot`, `/autopilot-restart`, `context_budget`, contracts/templates, forced-output/status, state-store helpers, `autopilot-agent-run`, runner CLI/bin behavior, fake-Pi paths, offline SDK/RPC/package gates, and package payloads.
+Autopilot tests are deterministic by default. They do not call live providers, networks, real models, or user/global Pi state while validating `/autopilot`, `/autopilot-onboard`, `/autopilot-handoff`, `context_budget`, contracts/templates, forced-output/status, state-store helpers, `autopilot-agent-run`, runner CLI/bin behavior, fake-Pi paths, offline SDK/RPC/package gates, and package payloads.
 
 ## Default offline gate
 
@@ -31,9 +31,9 @@ Release validation also runs docs audits and forbidden legacy-runtime scans from
 
 - `build` emits runtime JavaScript into `dist/` so the published `autopilot-agent-run` bin never type-strips TypeScript from `node_modules`.
 - `typecheck` and `test:type-safety` enforce strict TypeScript and ban type escapes across source, extension, and tests.
-- `test:unit` covers `context_budget`, command parsing, parent prompt and restart prompt rendering, Autopilot contracts/templates, forced-output/status identity and receipts, state-store read/write/resume behavior, and `autopilot-agent-run` dry-run/fake-Pi/error handling.
-- `test:sdk` loads the extension through the real Pi SDK with isolated temp `cwd`/`agentDir`, in-memory managers, no built-in tools by default, and offline environment variables. It asserts `/autopilot`, `/autopilot-restart`, and parent-session tool exposure.
-- `test:rpc` starts an offline `pi --mode rpc` process with isolated HOME/session directories and validates command discovery plus `/autopilot` and `/autopilot-restart` command payloads.
+- `test:unit` covers `context_budget`, command parsing, parent prompt, onboard prompt, handoff prompt rendering, Autopilot contracts/templates, forced-output/status identity and receipts, state-store read/write/resume behavior, and `autopilot-agent-run` dry-run/fake-Pi/error handling.
+- `test:sdk` loads the extension through the real Pi SDK with isolated temp `cwd`/`agentDir`, in-memory managers, no built-in tools by default, and offline environment variables. It asserts `/autopilot`, `/autopilot-onboard`, `/autopilot-handoff`, active-workstream handoff behavior, and parent-session tool exposure.
+- `test:rpc` starts an offline `pi --mode rpc` process with isolated HOME/session directories and validates command discovery plus `/autopilot`, `/autopilot-onboard`, and `/autopilot-handoff` command payloads.
 - `test:package` validates manifest/docs/runtime files, public surfaces, README-to-TEST_PLAN mapping, stale-docs audits, runner help output, packed `node_modules` bin dry-run behavior, and dry-run pack contents.
 - `pack:dry-run` confirms the published payload contains runtime files (`bin/`, `dist/`, `extensions/`, `src/`, `templates/`, docs, license) and excludes tests, artifacts, and dependency directories.
 - `tests/e2e/` contains no-spend fake-Pi witnesses for runner/status/receipt/state/resume flows. These are invoked directly by the child-runner validation lane when e2e smoke coverage is required; they are not live-provider tests.
@@ -61,4 +61,4 @@ The default gate does not prove live provider behavior. Provider-backed child ru
 
 ## Known limitations
 
-Current tests validate shipped commands, `context_budget`, parent/restart prompts, contracts/templates, forced-output/status, state-store helpers, runner CLI/bin, fake-Pi and e2e witnesses, offline SDK/RPC/package gates, and `pack:dry-run`. Remaining coverage gaps are compiled scheduling UI, PTY/TUI behavior, migration tooling for older runtime folders, and default automated live-provider child execution.
+Current tests validate shipped commands, `context_budget`, parent/onboard/handoff prompts, contracts/templates, forced-output/status, state-store helpers, runner CLI/bin, fake-Pi and e2e witnesses, offline SDK/RPC/package gates, and `pack:dry-run`. Remaining coverage gaps are compiled scheduling UI, PTY/TUI behavior, migration tooling for older runtime folders, and default automated live-provider child execution.
