@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { isAbsolute, normalize, relative, resolve, sep } from 'node:path';
 import { AUTOPILOT_JSON_SCHEMAS, AUTOPILOT_STATUS_ENTRY_JSON_SCHEMA, } from "./schemas.js";
-import { AUTOPILOT_COMMAND_STATUS_VALUES, AUTOPILOT_CONTEXT_GATE_VALUES, AUTOPILOT_EVENT_TYPE_VALUES, AUTOPILOT_HANDOFF_REASON_VALUES, AUTOPILOT_ROLE_VALUES, AUTOPILOT_SEVERITY_VALUES, AUTOPILOT_TEMPLATE_VALUES, AUTOPILOT_THINKING_VALUES, AUTOPILOT_UNIT_STATE_VALUES, AUTOPILOT_VERDICT_VALUES, AUTOPILOT_WORKSTREAM_STATUS_VALUES, } from "./types.js";
+import { AUTOPILOT_AUDIT_CLASSIFICATION_VALUES, AUTOPILOT_COMMAND_STATUS_VALUES, AUTOPILOT_CONTEXT_GATE_VALUES, AUTOPILOT_DECISION_EVENT_VALUES, AUTOPILOT_EVENT_TYPE_VALUES, AUTOPILOT_HANDOFF_REASON_VALUES, AUTOPILOT_QUALITY_PROFILE_VALUES, AUTOPILOT_RISK_LEVEL_VALUES, AUTOPILOT_ROLE_VALUES, AUTOPILOT_SEVERITY_VALUES, AUTOPILOT_TEMPLATE_VALUES, AUTOPILOT_THINKING_VALUES, AUTOPILOT_UNIT_STATE_VALUES, AUTOPILOT_VERDICT_VALUES, AUTOPILOT_WORKSTREAM_STATUS_VALUES, } from "./types.js";
 const ISO_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;
 const SHA256 = /^sha256:[a-f0-9]{64}$/u;
 const WORKSTREAM = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
@@ -61,6 +61,24 @@ export function parseAutopilotHandoff(value) {
     throwIfIssues('AutopilotHandoff', semanticHandoffIssues(handoff));
     return handoff;
 }
+export function parseAutopilotMasterPlan(value) {
+    assertMasterPlanShape(value);
+    const masterPlan = value;
+    throwIfIssues('AutopilotMasterPlan', semanticMasterPlanIssues(masterPlan));
+    return masterPlan;
+}
+export function parseAutopilotDecisionRow(value) {
+    assertDecisionRowShape(value);
+    const decision = value;
+    throwIfIssues('AutopilotDecisionRow', semanticDecisionRowIssues(decision));
+    return decision;
+}
+export function parseAutopilotExecutionAudit(value) {
+    assertExecutionAuditShape(value);
+    const audit = value;
+    throwIfIssues('AutopilotExecutionAudit', semanticExecutionAuditIssues(audit));
+    return audit;
+}
 export function assertAutopilotStatusJsonSchemaCompiles() {
     stableJsonStringify(AUTOPILOT_STATUS_ENTRY_JSON_SCHEMA);
 }
@@ -89,6 +107,20 @@ function assertUnitSpecShape(value) {
         expectString(record['receipt_output'], '/receipt_output', issues, { max: 1024 });
         expectString(record['evidence_dir'], '/evidence_dir', issues, { max: 1024 });
         expectString(record['stop_boundary'], '/stop_boundary', issues, { max: 1200 });
+        optionalEnum(record, 'quality_profile', AUTOPILOT_QUALITY_PROFILE_VALUES, '/quality_profile', issues);
+        optionalEnum(record, 'risk_level', AUTOPILOT_RISK_LEVEL_VALUES, '/risk_level', issues);
+        if (hasKey(record, 'acceptance_criteria')) {
+            expectStringArray(record['acceptance_criteria'], '/acceptance_criteria', issues, 80, 0, 500);
+        }
+        if (hasKey(record, 'verification_plan')) {
+            checkVerificationPlan(record['verification_plan'], '/verification_plan', issues);
+        }
+        if (hasKey(record, 'closure_criteria')) {
+            expectStringArray(record['closure_criteria'], '/closure_criteria', issues, 80, 0, 500);
+        }
+        if (hasKey(record, 'upstream_refs')) {
+            expectArray(record['upstream_refs'], '/upstream_refs', issues, 80, 0, checkUpstreamRef);
+        }
         if (hasKey(record, 'timeout_seconds')) {
             expectInteger(record['timeout_seconds'], '/timeout_seconds', issues, 60, 86_400);
         }
@@ -118,6 +150,9 @@ function assertStatusShape(value) {
         expectArray(record['evidence_refs'], '/evidence_refs', issues, 80, 0, checkEvidenceRef);
         if (record['report_ref'] !== null)
             checkEvidenceRef(record['report_ref'], '/report_ref', issues);
+        if (hasKey(record, 'covered_witness_ids')) {
+            expectStringArray(record['covered_witness_ids'], '/covered_witness_ids', issues, 200, 0, 96, FINDING_ID);
+        }
         expectString(record['next_action'], '/next_action', issues, { max: 360 });
     }
     throwIfIssues('AutopilotStatusEntry', issues);
@@ -210,6 +245,85 @@ function assertHandoffShape(value) {
     }
     throwIfIssues('AutopilotHandoff', issues);
 }
+function assertMasterPlanShape(value) {
+    const issues = [];
+    const record = requireRecord(value, 'AutopilotMasterPlan', issues);
+    if (record !== undefined) {
+        checkKnownKeys(record, masterPlanKeys, 'AutopilotMasterPlan', issues);
+        checkRequired(record, masterPlanRequired, 'AutopilotMasterPlan', issues);
+        expectConst(record['schema_version'], 'autopilot.master_plan.v1', '/schema_version', issues);
+        expectString(record['workstream'], '/workstream', issues, { pattern: WORKSTREAM, max: 128 });
+        expectString(record['mission_ref'], '/mission_ref', issues, { max: 512 });
+        expectString(record['goal_summary'], '/goal_summary', issues, { max: 1000 });
+        expectStringArray(record['non_goals'], '/non_goals', issues, 80, 0, 500);
+        expectStringArray(record['definition_of_done'], '/definition_of_done', issues, 80, 0, 500);
+        expectEnum(record['risk_level'], AUTOPILOT_RISK_LEVEL_VALUES, '/risk_level', issues);
+        expectArray(record['lanes'], '/lanes', issues, 500, 0, checkMasterPlanLane);
+        checkMasterPlanUnits(record['units'], '/units', issues);
+        checkOwnershipMatrix(record['ownership_matrix'], '/ownership_matrix', issues);
+        checkVerificationPlan(record['verification_matrix'], '/verification_matrix', issues);
+        expectStringArray(record['closure_criteria'], '/closure_criteria', issues, 120, 0, 500);
+        expectString(record['current_focus'], '/current_focus', issues, { max: 500 });
+        expectInteger(record['last_decision_id'], '/last_decision_id', issues, 0, 9_000_000_000_000_000);
+        expectInteger(record['last_event_id'], '/last_event_id', issues, 0, 9_000_000_000_000_000);
+        expectString(record['updated_at'], '/updated_at', issues, { pattern: ISO_TIMESTAMP });
+    }
+    throwIfIssues('AutopilotMasterPlan', issues);
+}
+function assertDecisionRowShape(value) {
+    const issues = [];
+    const record = requireRecord(value, 'AutopilotDecisionRow', issues);
+    if (record !== undefined) {
+        checkKnownKeys(record, decisionRowKeys, 'AutopilotDecisionRow', issues);
+        checkRequired(record, decisionRowRequired, 'AutopilotDecisionRow', issues);
+        expectConst(record['schema_version'], 'autopilot.decision.v1', '/schema_version', issues);
+        expectInteger(record['id'], '/id', issues, 1, 9_000_000_000_000_000);
+        expectString(record['ts'], '/ts', issues, { pattern: ISO_TIMESTAMP });
+        expectEnum(record['event'], AUTOPILOT_DECISION_EVENT_VALUES, '/event', issues);
+        expectString(record['workstream'], '/workstream', issues, { pattern: WORKSTREAM, max: 128 });
+        expectString(record['summary'], '/summary', issues, { max: 500 });
+        expectString(record['decision'], '/decision', issues, { max: 1000 });
+        optionalString(record, 'unit_id', '/unit_id', issues, { pattern: UNIT_ID, max: 128 });
+        optionalString(record, 'master_plan_ref', '/master_plan_ref', issues, { max: 512 });
+        if (hasKey(record, 'evidence_refs')) {
+            expectArray(record['evidence_refs'], '/evidence_refs', issues, 80, 0, checkEvidenceRef);
+        }
+    }
+    throwIfIssues('AutopilotDecisionRow', issues);
+}
+function assertExecutionAuditShape(value) {
+    const issues = [];
+    const record = requireRecord(value, 'AutopilotExecutionAudit', issues);
+    if (record !== undefined) {
+        checkKnownKeys(record, executionAuditKeys, 'AutopilotExecutionAudit', issues);
+        checkRequired(record, executionAuditRequired, 'AutopilotExecutionAudit', issues);
+        expectConst(record['schema_version'], 'autopilot.execution_audit.v1', '/schema_version', issues);
+        expectString(record['workstream'], '/workstream', issues, { pattern: WORKSTREAM, max: 128 });
+        expectString(record['unit_id'], '/unit_id', issues, { pattern: UNIT_ID, max: 128 });
+        expectEnum(record['role'], AUTOPILOT_ROLE_VALUES, '/role', issues);
+        expectInteger(record['attempt'], '/attempt', issues, 1, 999);
+        expectString(record['audited_at'], '/audited_at', issues, { pattern: ISO_TIMESTAMP });
+        expectString(record['cwd'], '/cwd', issues, { max: 1024 });
+        if (record['git_head'] !== null)
+            expectString(record['git_head'], '/git_head', issues, { max: 80 });
+        if (record['dirty_baseline'] !== null)
+            expectBoolean(record['dirty_baseline'], '/dirty_baseline', issues);
+        expectStringArray(record['actual_changed_paths'], '/actual_changed_paths', issues, 500);
+        expectStringArray(record['status_reported_changed_paths'], '/status_reported_changed_paths', issues, 500);
+        expectStringArray(record['omitted_status_changes'], '/omitted_status_changes', issues, 500);
+        expectStringArray(record['reported_but_not_actual_changes'], '/reported_but_not_actual_changes', issues, 500);
+        expectStringArray(record['outside_owned_paths'], '/outside_owned_paths', issues, 500);
+        expectStringArray(record['read_only_touched_paths'], '/read_only_touched_paths', issues, 500);
+        expectStringArray(record['untouchable_touched_paths'], '/untouchable_touched_paths', issues, 500);
+        expectStringArray(record['declared_validation_commands'], '/declared_validation_commands', issues, 120, 0, 800);
+        expectStringArray(record['status_reported_commands'], '/status_reported_commands', issues, 120, 0, 800);
+        expectStringArray(record['command_coverage_gaps'], '/command_coverage_gaps', issues, 120, 0, 800);
+        expectEnum(record['classification'], AUTOPILOT_AUDIT_CLASSIFICATION_VALUES, '/classification', issues);
+        expectArray(record['evidence_refs'], '/evidence_refs', issues, 80, 0, checkEvidenceRef);
+        expectString(record['summary'], '/summary', issues, { max: 1000 });
+    }
+    throwIfIssues('AutopilotExecutionAudit', issues);
+}
 function checkContextRef(value, label, issues) {
     const record = requireRecord(value, label, issues);
     if (record === undefined)
@@ -244,6 +358,86 @@ function checkCommandSummary(value, label, issues) {
         expectInteger(record['exit_code'], `${label}/exit_code`, issues, -1, 255);
     expectString(record['summary'], `${label}/summary`, issues, { max: 360 });
     optionalString(record, 'evidence_ref', `${label}/evidence_ref`, issues, { max: 512 });
+}
+function checkWitnessSpec(value, label, issues) {
+    const record = requireRecord(value, label, issues);
+    if (record === undefined)
+        return;
+    checkKnownKeys(record, witnessSpecKeys, label, issues);
+    checkRequired(record, witnessSpecRequired, label, issues);
+    expectString(record['id'], `${label}/id`, issues, { pattern: FINDING_ID, max: 96 });
+    expectString(record['expected_signal'], `${label}/expected_signal`, issues, { max: 500 });
+    expectBoolean(record['required'], `${label}/required`, issues);
+    optionalString(record, 'command', `${label}/command`, issues, { max: 800 });
+    optionalString(record, 'inspection_target', `${label}/inspection_target`, issues, { max: 500 });
+    optionalString(record, 'blocker_reason', `${label}/blocker_reason`, issues, { max: 500 });
+}
+function checkVerificationPlan(value, label, issues) {
+    const record = requireRecord(value, label, issues);
+    if (record === undefined)
+        return;
+    checkKnownKeys(record, verificationPlanKeys, label, issues);
+    checkRequired(record, verificationPlanRequired, label, issues);
+    for (const key of verificationPlanRequired) {
+        expectArray(record[key], `${label}/${key}`, issues, 80, 0, checkWitnessSpec);
+    }
+}
+function checkUpstreamRef(value, label, issues) {
+    const record = requireRecord(value, label, issues);
+    if (record === undefined)
+        return;
+    checkKnownKeys(record, upstreamRefKeys, label, issues);
+    checkRequired(record, upstreamRefRequired, label, issues);
+    expectString(record['unit_id'], `${label}/unit_id`, issues, { pattern: UNIT_ID, max: 128 });
+    expectString(record['purpose'], `${label}/purpose`, issues, { max: 360 });
+    optionalString(record, 'status_ref', `${label}/status_ref`, issues, { max: 512 });
+    optionalString(record, 'audit_ref', `${label}/audit_ref`, issues, { max: 512 });
+}
+function checkMasterPlanLane(value, label, issues) {
+    const record = requireRecord(value, label, issues);
+    if (record === undefined)
+        return;
+    checkKnownKeys(record, masterPlanLaneKeys, label, issues);
+    checkRequired(record, masterPlanLaneRequired, label, issues);
+    expectString(record['lane_id'], `${label}/lane_id`, issues, { pattern: UNIT_ID, max: 128 });
+    expectString(record['summary'], `${label}/summary`, issues, { max: 360 });
+    expectStringArray(record['unit_ids'], `${label}/unit_ids`, issues, 500, 0, 128, UNIT_ID);
+}
+function checkMasterPlanUnits(value, label, issues) {
+    const record = requireRecord(value, label, issues);
+    if (record === undefined)
+        return;
+    const keys = Object.keys(record);
+    if (keys.length > 2_000)
+        issues.push(`${label} must contain at most 2000 entries`);
+    for (const key of keys) {
+        if (!UNIT_ID.test(key))
+            issues.push(`${label} key ${JSON.stringify(key)} is invalid`);
+        checkMasterPlanUnit(record[key], `${label}/${key}`, issues);
+    }
+}
+function checkMasterPlanUnit(value, label, issues) {
+    const record = requireRecord(value, label, issues);
+    if (record === undefined)
+        return;
+    checkKnownKeys(record, masterPlanUnitKeys, label, issues);
+    checkRequired(record, masterPlanUnitRequired, label, issues);
+    expectString(record['unit_id'], `${label}/unit_id`, issues, { pattern: UNIT_ID, max: 128 });
+    expectEnum(record['role'], AUTOPILOT_ROLE_VALUES, `${label}/role`, issues);
+    expectEnum(record['state'], AUTOPILOT_UNIT_STATE_VALUES, `${label}/state`, issues);
+    expectStringArray(record['dependencies'], `${label}/dependencies`, issues, 200, 0, 128, UNIT_ID);
+    expectString(record['summary'], `${label}/summary`, issues, { max: 360 });
+}
+function checkOwnershipMatrix(value, label, issues) {
+    const record = requireRecord(value, label, issues);
+    if (record === undefined)
+        return;
+    checkKnownKeys(record, ownershipMatrixKeys, label, issues);
+    checkRequired(record, ownershipMatrixRequired, label, issues);
+    expectStringArray(record['owned_paths'], `${label}/owned_paths`, issues, 500);
+    expectStringArray(record['read_only_paths'], `${label}/read_only_paths`, issues, 500);
+    expectStringArray(record['untouchable_paths'], `${label}/untouchable_paths`, issues, 500);
+    expectStringArray(record['held_paths'], `${label}/held_paths`, issues, 500);
 }
 function checkFinding(value, label, issues) {
     const record = requireRecord(value, label, issues);
@@ -340,6 +534,17 @@ function semanticUnitSpecIssues(spec) {
     for (const ref of spec.context_refs) {
         issues.push(...relativePathIssues(ref.path, `context_refs ${ref.path}`));
     }
+    for (const ref of spec.upstream_refs ?? []) {
+        if (ref.status_ref !== undefined) {
+            issues.push(...relativePathIssues(ref.status_ref, `upstream_refs ${ref.unit_id} status_ref`));
+        }
+        if (ref.audit_ref !== undefined) {
+            issues.push(...relativePathIssues(ref.audit_ref, `upstream_refs ${ref.unit_id} audit_ref`));
+        }
+    }
+    issues.push(...duplicateIssues('acceptance_criteria', spec.acceptance_criteria ?? []));
+    issues.push(...duplicateIssues('closure_criteria', spec.closure_criteria ?? []));
+    issues.push(...verificationPlanIssues(spec.verification_plan, 'verification_plan'));
     for (const [field, path] of [
         ['cwd', spec.cwd],
         ['status_output', spec.status_output],
@@ -367,13 +572,17 @@ function semanticStatusEntryIssues(status, options) {
     if (status.verdict === 'NEEDS_FIX' && status.findings.length === 0) {
         issues.push('NEEDS_FIX statuses require at least one finding');
     }
-    if (status.verdict === 'PASS' && status.commands.some((command) => command.status === 'failed')) {
-        issues.push('PASS statuses must not include failed commands');
+    if (isSuccessVerdict(status.verdict) && status.commands.some((command) => command.status === 'failed')) {
+        issues.push(`${status.verdict} statuses must not include failed commands`);
     }
-    if (status.verdict === 'PASS' &&
+    if (isSuccessVerdict(status.verdict) && status.commands.some((command) => command.status !== 'passed')) {
+        issues.push(`${status.verdict} statuses must report passed for every command summary`);
+    }
+    if (isSuccessVerdict(status.verdict) &&
         status.commands.some((command) => command.exit_code !== null && command.exit_code !== 0)) {
-        issues.push('PASS statuses must not include non-zero command exit codes');
+        issues.push(`${status.verdict} statuses must not include non-zero command exit codes`);
     }
+    issues.push(...duplicateIssues('covered_witness_ids', status.covered_witness_ids ?? []));
     for (const path of status.changed_paths) {
         issues.push(...relativePathIssues(path, 'changed_paths entry'));
     }
@@ -399,6 +608,9 @@ function semanticStatusEntryIssues(status, options) {
     if (options.unitSpec !== undefined) {
         issues.push(...statusMatchesUnitSpecIssues(status, options.unitSpec));
     }
+    if (options.executionAudit !== undefined) {
+        issues.push(...statusMatchesExecutionAuditIssues(status, options.executionAudit));
+    }
     return issues;
 }
 function roleVerdictIssues(role, verdict) {
@@ -417,6 +629,9 @@ function roleVerdictIssues(role, verdict) {
     return verdict === 'PASS' || verdict === 'NEEDS_FIX' || verdict === 'BLOCKED'
         ? []
         : [`role ${role} may only emit PASS, NEEDS_FIX, or BLOCKED, not ${verdict}`];
+}
+function isSuccessVerdict(verdict) {
+    return verdict === 'DONE' || verdict === 'PASS';
 }
 function statusMatchesUnitSpecIssues(status, spec) {
     const issues = [];
@@ -438,7 +653,88 @@ function statusMatchesUnitSpecIssues(status, spec) {
             }
         }
     }
+    if (isSuccessVerdict(status.verdict)) {
+        for (const command of spec.validation_commands) {
+            if (!status.commands.some((reported) => reported.command === command)) {
+                issues.push(`success status must report declared validation command ${JSON.stringify(command)}`);
+            }
+        }
+    }
+    const knownWitnessIds = allWitnessIds(spec);
+    for (const coveredWitnessId of status.covered_witness_ids ?? []) {
+        if (!knownWitnessIds.includes(coveredWitnessId)) {
+            issues.push(`covered_witness_ids contains unknown witness id ${JSON.stringify(coveredWitnessId)}`);
+        }
+    }
+    if (status.verdict === 'PASS') {
+        const missingWitnessIds = requiredWitnessIds(spec).filter((witnessId) => !(status.covered_witness_ids ?? []).includes(witnessId));
+        for (const witnessId of missingWitnessIds) {
+            issues.push(`PASS status must cover required witness id ${JSON.stringify(witnessId)}`);
+        }
+        if (!isMechanicalEvidenceFreePass(spec) && status.evidence_refs.length === 0 && status.report_ref === null) {
+            issues.push('PASS status for non-mechanical validation requires evidence_refs or report_ref');
+        }
+    }
+    if (status.verdict === 'DONE' &&
+        spec.quality_profile === 'strategy' &&
+        status.evidence_refs.length === 0 &&
+        status.report_ref === null) {
+        issues.push('strategy DONE status requires evidence_refs or report_ref for the produced plan');
+    }
     return issues;
+}
+function statusMatchesExecutionAuditIssues(status, audit) {
+    const issues = [];
+    if (status.workstream !== audit.workstream)
+        issues.push('status workstream does not match execution audit');
+    if (status.unit_id !== audit.unit_id)
+        issues.push('status unit_id does not match execution audit');
+    if (status.role !== audit.role)
+        issues.push('status role does not match execution audit');
+    if (status.attempt !== audit.attempt)
+        issues.push('status attempt does not match execution audit');
+    if ((status.role === 'implement' || status.role === 'fix') && isSuccessVerdict(status.verdict)) {
+        for (const changedPath of audit.actual_changed_paths) {
+            if (!status.changed_paths.includes(changedPath)) {
+                issues.push(`success status omitted actual changed path ${JSON.stringify(changedPath)}`);
+            }
+        }
+    }
+    return issues;
+}
+function requiredWitnessIds(spec) {
+    const plan = spec.verification_plan;
+    if (plan === undefined)
+        return [];
+    return Object.freeze(allWitnesses(plan).filter((witness) => witness.required).map((witness) => witness.id));
+}
+function allWitnessIds(spec) {
+    const plan = spec.verification_plan;
+    if (plan === undefined)
+        return [];
+    return Object.freeze(allWitnesses(plan).map((witness) => witness.id));
+}
+function isMechanicalEvidenceFreePass(spec) {
+    if (spec.quality_profile !== 'validation-only' || spec.risk_level !== 'low')
+        return false;
+    const plan = spec.verification_plan;
+    if (plan === undefined)
+        return false;
+    const required = allWitnesses(plan).filter((witness) => witness.required);
+    if (required.length === 0)
+        return false;
+    return required.every((witness) => witness.command !== undefined && witness.inspection_target === undefined);
+}
+function allWitnesses(plan) {
+    return Object.freeze([
+        ...plan.positive_witnesses,
+        ...plan.negative_witnesses,
+        ...plan.regression_witnesses,
+        ...plan.real_boundary_witnesses,
+        ...plan.blast_radius_checks,
+        ...plan.docs_schema_prompt_checks,
+        ...plan.dirty_tree_checks,
+    ]);
 }
 function semanticEventRowIssues(event) {
     const issues = [];
@@ -548,6 +844,131 @@ function semanticHandoffIssues(handoff) {
         handoff.open_blockers.length === 0 &&
         handoff.next_actions.length === 0) {
         issues.push('context-halt handoff must include an open blocker or next action');
+    }
+    return issues;
+}
+function semanticMasterPlanIssues(masterPlan) {
+    const issues = [];
+    issues.push(...relativePathIssues(masterPlan.mission_ref, 'mission_ref'));
+    issues.push(...duplicateIssues('non_goals', masterPlan.non_goals));
+    issues.push(...duplicateIssues('definition_of_done', masterPlan.definition_of_done));
+    issues.push(...duplicateIssues('closure_criteria', masterPlan.closure_criteria));
+    for (const lane of masterPlan.lanes) {
+        issues.push(...duplicateIssues(`lanes ${lane.lane_id} unit_ids`, lane.unit_ids));
+        for (const unitId of lane.unit_ids) {
+            if (masterPlan.units[unitId] === undefined) {
+                issues.push(`lane ${lane.lane_id} references missing unit ${JSON.stringify(unitId)}`);
+            }
+        }
+    }
+    for (const [unitId, unit] of Object.entries(masterPlan.units)) {
+        if (unit.unit_id !== unitId) {
+            issues.push(`units entry key ${JSON.stringify(unitId)} does not match unit_id ${JSON.stringify(unit.unit_id)}`);
+        }
+        issues.push(...duplicateIssues(`unit ${unitId} dependencies`, unit.dependencies));
+        for (const dependency of unit.dependencies) {
+            if (masterPlan.units[dependency] === undefined) {
+                issues.push(`unit ${unitId} dependency ${JSON.stringify(dependency)} is missing from units`);
+            }
+        }
+    }
+    issues.push(...ownershipMatrixPathIssues(masterPlan.ownership_matrix));
+    issues.push(...verificationPlanIssues(masterPlan.verification_matrix, 'verification_matrix'));
+    return issues;
+}
+function semanticDecisionRowIssues(decision) {
+    const issues = [];
+    if (decision.master_plan_ref !== undefined) {
+        issues.push(...relativePathIssues(decision.master_plan_ref, 'master_plan_ref'));
+    }
+    for (const ref of decision.evidence_refs ?? []) {
+        issues.push(...evidenceRefIssues(ref, undefined, 'evidence_refs'));
+    }
+    return issues;
+}
+function semanticExecutionAuditIssues(audit) {
+    const issues = [];
+    issues.push(...absolutePathIssues(audit.cwd, 'cwd'));
+    for (const [field, paths] of [
+        ['actual_changed_paths', audit.actual_changed_paths],
+        ['status_reported_changed_paths', audit.status_reported_changed_paths],
+        ['omitted_status_changes', audit.omitted_status_changes],
+        ['reported_but_not_actual_changes', audit.reported_but_not_actual_changes],
+        ['outside_owned_paths', audit.outside_owned_paths],
+        ['read_only_touched_paths', audit.read_only_touched_paths],
+        ['untouchable_touched_paths', audit.untouchable_touched_paths],
+    ]) {
+        issues.push(...duplicateIssues(field, paths));
+        for (const path of paths)
+            issues.push(...relativePathIssues(path, `${field} entry`));
+    }
+    issues.push(...duplicateIssues('declared_validation_commands', audit.declared_validation_commands));
+    issues.push(...duplicateIssues('status_reported_commands', audit.status_reported_commands));
+    issues.push(...duplicateIssues('command_coverage_gaps', audit.command_coverage_gaps));
+    if (audit.classification !== 'audit-unavailable') {
+        const expectedOmitted = sortedDifference(audit.actual_changed_paths, audit.status_reported_changed_paths);
+        if (!sameStringSet(audit.omitted_status_changes, expectedOmitted)) {
+            issues.push('omitted_status_changes must equal actual_changed_paths minus status_reported_changed_paths');
+        }
+        const expectedReportedButNotActual = sortedDifference(audit.status_reported_changed_paths, audit.actual_changed_paths);
+        if (!sameStringSet(audit.reported_but_not_actual_changes, expectedReportedButNotActual)) {
+            issues.push('reported_but_not_actual_changes must equal status_reported_changed_paths minus actual_changed_paths');
+        }
+    }
+    const expectedCommandGaps = sortedDifference(audit.declared_validation_commands, audit.status_reported_commands);
+    if (!sameStringSet(audit.command_coverage_gaps, expectedCommandGaps)) {
+        issues.push('command_coverage_gaps must equal declared_validation_commands minus status_reported_commands');
+    }
+    const expectedClassification = expectedExecutionAuditClassification(audit);
+    if (audit.classification !== expectedClassification) {
+        issues.push(`classification ${audit.classification} does not match audit facts; expected ${expectedClassification}`);
+    }
+    for (const ref of audit.evidence_refs) {
+        issues.push(...evidenceRefIssues(ref, undefined, 'evidence_refs'));
+    }
+    return issues;
+}
+function ownershipMatrixPathIssues(matrix) {
+    const issues = [];
+    for (const [field, paths] of [
+        ['owned_paths', matrix.owned_paths],
+        ['read_only_paths', matrix.read_only_paths],
+        ['untouchable_paths', matrix.untouchable_paths],
+        ['held_paths', matrix.held_paths],
+    ]) {
+        issues.push(...duplicateIssues(field, paths));
+        for (const path of paths)
+            issues.push(...relativePathIssues(path, `${field} entry`));
+    }
+    issues.push(...intersectionIssues('owned_paths', matrix.owned_paths, 'read_only_paths', matrix.read_only_paths));
+    issues.push(...intersectionIssues('owned_paths', matrix.owned_paths, 'untouchable_paths', matrix.untouchable_paths));
+    return issues;
+}
+function verificationPlanIssues(plan, label) {
+    if (plan === undefined)
+        return [];
+    const issues = [];
+    const seen = new Set();
+    for (const [field, witnesses] of [
+        ['positive_witnesses', plan.positive_witnesses],
+        ['negative_witnesses', plan.negative_witnesses],
+        ['regression_witnesses', plan.regression_witnesses],
+        ['real_boundary_witnesses', plan.real_boundary_witnesses],
+        ['blast_radius_checks', plan.blast_radius_checks],
+        ['docs_schema_prompt_checks', plan.docs_schema_prompt_checks],
+        ['dirty_tree_checks', plan.dirty_tree_checks],
+    ]) {
+        for (const witness of witnesses) {
+            if (seen.has(witness.id))
+                issues.push(`${label}.${field} duplicates witness id ${JSON.stringify(witness.id)}`);
+            seen.add(witness.id);
+            if (witness.command === undefined && witness.inspection_target === undefined) {
+                issues.push(`${label}.${field} witness ${witness.id} requires command or inspection_target`);
+            }
+            if (!witness.required && witness.blocker_reason === undefined) {
+                issues.push(`${label}.${field} optional witness ${witness.id} requires blocker_reason`);
+            }
+        }
     }
     return issues;
 }
@@ -664,6 +1085,41 @@ function duplicateIssues(label, values) {
         seen.add(value);
     }
     return issues;
+}
+function sortedDifference(left, right) {
+    const rightSet = new Set(right);
+    return Object.freeze(sortedUnique(left.filter((value) => !rightSet.has(value))));
+}
+function sortedUnique(values) {
+    return Object.freeze([...new Set(values)].sort((left, right) => left.localeCompare(right)));
+}
+function sameStringSet(left, right) {
+    const leftSorted = sortedUnique(left);
+    const rightSorted = sortedUnique(right);
+    if (leftSorted.length !== rightSorted.length)
+        return false;
+    for (let index = 0; index < leftSorted.length; index += 1) {
+        const leftValue = leftSorted[index];
+        const rightValue = rightSorted[index];
+        if (leftValue === undefined || rightValue === undefined || leftValue !== rightValue)
+            return false;
+    }
+    return true;
+}
+function expectedExecutionAuditClassification(audit) {
+    if (audit.untouchable_touched_paths.length > 0)
+        return 'critical-protected-path-violation';
+    if (audit.read_only_touched_paths.length > 0)
+        return 'protected-path-review-required';
+    if (audit.dirty_baseline !== false)
+        return 'audit-unavailable';
+    if (audit.outside_owned_paths.length > 0 ||
+        audit.omitted_status_changes.length > 0 ||
+        audit.reported_but_not_actual_changes.length > 0 ||
+        audit.command_coverage_gaps.length > 0) {
+        return 'scope-review-required';
+    }
+    return 'clean';
 }
 function intersectionIssues(leftLabel, leftValues, rightLabel, rightValues) {
     const right = new Set(rightValues);
@@ -817,13 +1273,42 @@ const unitSpecRequired = [
     'evidence_dir',
     'stop_boundary',
 ];
-const unitSpecKeys = new Set([...unitSpecRequired, 'timeout_seconds', 'render_prompt_snapshot']);
+const unitSpecKeys = new Set([
+    ...unitSpecRequired,
+    'quality_profile',
+    'risk_level',
+    'acceptance_criteria',
+    'verification_plan',
+    'closure_criteria',
+    'upstream_refs',
+    'timeout_seconds',
+    'render_prompt_snapshot',
+]);
 const contextRefRequired = ['path', 'purpose'];
 const contextRefKeys = new Set([...contextRefRequired, 'sha256', 'byte_count']);
 const evidenceRefRequired = ['path'];
 const evidenceRefKeys = new Set([...evidenceRefRequired, 'sha256', 'byte_count', 'description']);
 const commandRequired = ['command', 'status', 'exit_code', 'summary'];
 const commandKeys = new Set([...commandRequired, 'evidence_ref']);
+const witnessSpecRequired = ['id', 'expected_signal', 'required'];
+const witnessSpecKeys = new Set([
+    ...witnessSpecRequired,
+    'command',
+    'inspection_target',
+    'blocker_reason',
+]);
+const verificationPlanRequired = [
+    'positive_witnesses',
+    'negative_witnesses',
+    'regression_witnesses',
+    'real_boundary_witnesses',
+    'blast_radius_checks',
+    'docs_schema_prompt_checks',
+    'dirty_tree_checks',
+];
+const verificationPlanKeys = new Set(verificationPlanRequired);
+const upstreamRefRequired = ['unit_id', 'purpose'];
+const upstreamRefKeys = new Set([...upstreamRefRequired, 'status_ref', 'audit_ref']);
 const findingRequired = ['id', 'severity', 'summary'];
 const findingKeys = new Set([...findingRequired, 'path', 'evidence_refs']);
 const statusRequired = [
@@ -842,7 +1327,7 @@ const statusRequired = [
     'report_ref',
     'next_action',
 ];
-const statusKeys = new Set(statusRequired);
+const statusKeys = new Set([...statusRequired, 'covered_witness_ids']);
 const eventRequired = ['schema_version', 'id', 'ts', 'event', 'workstream', 'summary'];
 const eventKeys = new Set([
     ...eventRequired,
@@ -912,3 +1397,73 @@ const handoffRequired = [
     'next_actions',
 ];
 const handoffKeys = new Set(handoffRequired);
+const masterPlanLaneRequired = ['lane_id', 'summary', 'unit_ids'];
+const masterPlanLaneKeys = new Set(masterPlanLaneRequired);
+const masterPlanUnitRequired = ['unit_id', 'role', 'state', 'dependencies', 'summary'];
+const masterPlanUnitKeys = new Set(masterPlanUnitRequired);
+const ownershipMatrixRequired = [
+    'owned_paths',
+    'read_only_paths',
+    'untouchable_paths',
+    'held_paths',
+];
+const ownershipMatrixKeys = new Set(ownershipMatrixRequired);
+const masterPlanRequired = [
+    'schema_version',
+    'workstream',
+    'mission_ref',
+    'goal_summary',
+    'non_goals',
+    'definition_of_done',
+    'risk_level',
+    'lanes',
+    'units',
+    'ownership_matrix',
+    'verification_matrix',
+    'closure_criteria',
+    'current_focus',
+    'last_decision_id',
+    'last_event_id',
+    'updated_at',
+];
+const masterPlanKeys = new Set(masterPlanRequired);
+const decisionRowRequired = [
+    'schema_version',
+    'id',
+    'ts',
+    'event',
+    'workstream',
+    'summary',
+    'decision',
+];
+const decisionRowKeys = new Set([
+    ...decisionRowRequired,
+    'unit_id',
+    'master_plan_ref',
+    'evidence_refs',
+]);
+const executionAuditRequired = [
+    'schema_version',
+    'workstream',
+    'unit_id',
+    'role',
+    'attempt',
+    'audited_at',
+    'cwd',
+    'git_head',
+    'dirty_baseline',
+    'actual_changed_paths',
+    'status_reported_changed_paths',
+    'omitted_status_changes',
+    'reported_but_not_actual_changes',
+    'outside_owned_paths',
+    'read_only_touched_paths',
+    'untouchable_touched_paths',
+    'declared_validation_commands',
+    'status_reported_commands',
+    'command_coverage_gaps',
+    'classification',
+    'evidence_refs',
+    'summary',
+];
+const executionAuditKeys = new Set(executionAuditRequired);

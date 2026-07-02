@@ -50,4 +50,17 @@ void describe('Autopilot parent prompt', () => {
     assert.equal(prompt.includes(AUTOPILOT_STATUS_TOOL), false);
     assert.equal(legacyRuntimePattern().test(prompt), false);
   });
+
+  void it('contains package-owned perfect-quality rules', () => {
+    const prompt = parentPrompt();
+    assert.match(prompt, /Perfect-quality contract/);
+    assert.match(prompt, /band-aids/);
+    assert.match(prompt, /hacks/);
+    assert.match(prompt, /silent fallbacks/);
+    assert.match(prompt, /fake-green tests/);
+    assert.match(prompt, /fixture tampering/);
+    assert.match(prompt, /deferred consumers/);
+    assert.match(prompt, /self-certifying/);
+    assert.match(prompt, /route adjudication/);
+  });
 });

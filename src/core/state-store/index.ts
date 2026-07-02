@@ -16,6 +16,12 @@ import type {
   AutopilotStatusEntry,
   AutopilotUnitSpec,
 } from '../contracts/types.ts';
+import {
+  readAutopilotPurposeSnapshot,
+  type AutopilotPurposeSnapshot,
+} from './purpose.ts';
+
+export * from './purpose.ts';
 
 const parseJsonValue: (text: string) => unknown = globalThis.JSON.parse;
 
@@ -30,6 +36,7 @@ export class AutopilotStateStoreError extends Error {
 }
 
 export interface AutopilotResumeSnapshot {
+  readonly purpose: AutopilotPurposeSnapshot;
   readonly state: AutopilotState;
   readonly eventsTail: readonly AutopilotEventRow[];
   readonly statuses: Readonly<Record<string, AutopilotStatusEntry>>;
@@ -120,6 +127,10 @@ export async function readAutopilotResumeSnapshot(input: {
     );
   }
 
+  const purpose = await readAutopilotPurposeSnapshot({
+    root: input.root,
+    decisionTailLimit: eventTailLimit,
+  });
   const state = parseAutopilotState(await readJsonObject(statePath, 'state.json'));
   const events = await readAutopilotEventsIfPresent(eventsPath);
   const newestEvent = lastEvent(events);
@@ -148,6 +159,7 @@ export async function readAutopilotResumeSnapshot(input: {
   const tail = eventTailLimit === 0 ? [] : events.slice(-eventTailLimit);
   const frozenTail = Object.freeze(tail);
   return Object.freeze({
+    purpose,
     state,
     eventsTail: frozenTail,
     statuses: refs.statuses,

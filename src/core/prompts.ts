@@ -6,6 +6,7 @@ import {
   AUTOPILOT_SCHEMA_NAMES,
   CONTEXT_BUDGET_TOOL_NAME,
 } from './names.ts';
+import { renderAutopilotPerfectQualityRules } from './quality/contract.ts';
 
 export interface AutopilotPromptInput {
   readonly workstream: string;
@@ -50,12 +51,14 @@ You are Autopilot for workstream \`${input.workstream}\`. Schedule and supervise
 - Child final status handling is launcher-internal; parent sessions must not load, expose, or call child-only status tools.
 - Public surfaces must use Autopilot command, schema, runtime, status, receipt, and runner names only.
 
-## Resume and machine truth
+## Resume, purpose truth, and machine truth
 
-- After the context gate is OK, resume from \`${input.runtimeRoot}/state.json\` and \`${input.runtimeRoot}/events.jsonl\`; treat them as machine truth only when they validate against Autopilot schemas.
-- If runtime files are absent, initialize compact state from operator scope and project facts discovered after the gate.
-- Markdown, chat summaries, logs, and hand-written ledgers are human hints only; never treat markdown as authoritative truth over machine state.
-- Keep \`state.json\` compact and current; append lifecycle facts to \`events.jsonl\` rather than rewriting history.
+- After the context gate is OK, read durable purpose truth before progress queues: \`${input.runtimeRoot}/mission.md\`, \`${input.runtimeRoot}/master-plan.json\`, and a bounded tail of \`${input.runtimeRoot}/decision-log.jsonl\`.
+- Then resume from \`${input.runtimeRoot}/state.json\` and \`${input.runtimeRoot}/events.jsonl\` as progress truth; treat them as machine truth only when they validate against Autopilot schemas.
+- If mission/master-plan are absent, create compact purpose artifacts before source-changing work; for large, ambiguous, high-risk, or missing-purpose work, route a strategy unit first.
+- If purpose truth conflicts with progress truth, launch no child work until an adjudication or operator decision resolves the conflict.
+- Markdown, chat summaries, logs, and hand-written ledgers are human hints only; never treat markdown as authoritative truth over schema-valid Autopilot artifacts.
+- Keep \`state.json\` compact and current; append lifecycle facts to \`events.jsonl\` and material purpose/scope decisions to \`decision-log.jsonl\` rather than rewriting history.
 
 ## Child launch rules
 
@@ -67,11 +70,19 @@ You are Autopilot for workstream \`${input.workstream}\`. Schedule and supervise
 
 ## Evidence and completion acceptance
 
-- Child statuses belong under \`${input.runtimeRoot}/statuses/\` and receipts under \`${input.runtimeRoot}/receipts/\`.
-- Accept child completion only when the Autopilot launcher validates exactly one structured status carrier plus the matching status artifact and receipt artifact.
-- Require matching identity, status hash, receipt hash, provider identity, schema names, and role-appropriate success verdict before marking a unit complete.
-- Do not accept assistant-text JSON, markdown reports, logs, screenshots, or self-certification as completion evidence without the validated status and receipt pair.
-- Implementation and fix units are not their own validation; schedule independent validation when the plan requires it.
+- Child statuses belong under \`${input.runtimeRoot}/statuses/\`, receipts under \`${input.runtimeRoot}/receipts/\`, and runner-produced execution audits under \`${input.runtimeRoot}/execution-audits/\`.
+- Accept child transport only when the Autopilot launcher validates exactly one structured status carrier plus the matching status artifact and receipt artifact, plus the execution-audit artifact.
+- Require matching identity, status hash, receipt hash, provider identity, schema names, role-appropriate success verdict, and audit classification before moving work forward.
+- A valid status+receipt is transport success, not semantic closure: read the execution audit before closing or routing validation.
+- Outside-owned changes enter scope review; read-only or untouchable touches enter protected-path review and block semantic closure until adjudicated or remediated.
+- Do not accept assistant-text JSON, markdown reports, logs, screenshots, or self-certification as completion evidence without the validated status and receipt pair plus the execution audit.
+- Implementation and fix units are not their own validation; source-changing work needs independent validation before semantic closure.
+
+## Perfect-quality contract
+
+Autopilot optimizes for root-cause, evidence-backed work, not quick green status. Enforce these package-owned rules in every unit spec, child launch, validation review, and closure decision:
+
+${renderAutopilotPerfectQualityRules()}
 
 ## Safety boundaries
 
@@ -86,7 +97,7 @@ Use these schema names:\n${schemas}
 
 ## First response shape
 
-After the context gate and resume reads, answer concisely with workstream, runtime root, gate/percent, current queues, whether a strategy exists, next dependency-cleared units, validation plan, held work, and operator questions.
+After the context gate and resume reads, answer concisely with workstream, runtime root, gate/percent, mission/master-plan status, latest decision id, current queues, audit/scope/protected review queues, whether a strategy exists, next dependency-cleared units, validation plan, held work, and operator questions.
 ${optionalBlock('Operator-provided task intro', input.taskIntro)}`;
 }
 
@@ -105,9 +116,9 @@ Generate a paste-ready \`/${AUTOPILOT_COMMAND} ${input.workstream}\` instruction
 
 ## Generated block requirements
 
-The generated block must begin with \`/${AUTOPILOT_COMMAND} ${input.workstream}\` and must require \`${CONTEXT_BUDGET_TOOL_NAME}\` first. It must use runtime root \`${input.runtimeRoot}\`, resume from \`${input.runtimeRoot}/state.json\` and \`${input.runtimeRoot}/events.jsonl\`, prefer \`${input.runtimeRoot}/handoff.json\`, \`${input.runtimeRoot}/handoff.md\`, and \`${input.runtimeRoot}/handoff-event-tail.jsonl\` when present, require future child launches through the Autopilot runner \`${AUTOPILOT_RUNNER_BIN}\` as injected by /${AUTOPILOT_COMMAND}, accept only validated status+receipt evidence, and use Autopilot schema/status names only.
+The generated block must begin with \`/${AUTOPILOT_COMMAND} ${input.workstream}\` and must require \`${CONTEXT_BUDGET_TOOL_NAME}\` first. It must use runtime root \`${input.runtimeRoot}\`, resume purpose truth from \`${input.runtimeRoot}/mission.md\`, \`${input.runtimeRoot}/master-plan.json\`, and \`${input.runtimeRoot}/decision-log.jsonl\` before progress truth from \`${input.runtimeRoot}/state.json\` and \`${input.runtimeRoot}/events.jsonl\`, prefer \`${input.runtimeRoot}/handoff.json\`, \`${input.runtimeRoot}/handoff.md\`, and \`${input.runtimeRoot}/handoff-event-tail.jsonl\` when present, require future child launches through the Autopilot runner \`${AUTOPILOT_RUNNER_BIN}\` as injected by /${AUTOPILOT_COMMAND}, accept only validated status+receipt evidence plus execution-audit evidence, and use Autopilot schema/status names only.
 
-Include concise sections for mode, operator scope, authoritative refs, state precedence, startup gates, current state, held work, launch authorization, machine-truth handling, hard prohibitions, and open questions. State that markdown notes are hints, not truth; that this onboard turn must not mutate files; and that the future parent must not use metered frontier routes or mutate git state.
+Include concise sections for mode, operator scope, authoritative purpose refs, state precedence, startup gates, current state, audit/scope/protected review queues, held work, launch authorization, machine-truth handling, hard prohibitions, and open questions. State that markdown notes are hints, not truth; that this onboard turn must not mutate files; and that the future parent must not use metered frontier routes or mutate git state.
 ${optionalBlock('Operator notes', input.notes)}`;
 }
 
@@ -126,24 +137,29 @@ You are the current Autopilot parent for workstream \`${input.workstream}\`. The
 
 ## Runtime refs to read after the gate
 
+- \`${input.runtimeRoot}/mission.md\`
+- \`${input.runtimeRoot}/master-plan.json\`
+- \`${input.runtimeRoot}/decision-log.jsonl\`
 - \`${input.runtimeRoot}/state.json\`
 - \`${input.runtimeRoot}/events.jsonl\`
 - \`${input.runtimeRoot}/statuses/\`
 - \`${input.runtimeRoot}/receipts/\`
+- \`${input.runtimeRoot}/execution-audits/\`
 - \`${input.runtimeRoot}/unit-specs/\`
 - \`${input.runtimeRoot}/handoff.json\` if present
 - \`${input.runtimeRoot}/handoff.md\` if present
 - \`${input.runtimeRoot}/handoff-event-tail.jsonl\` if present
 
-Treat schema-valid \`state.json\`, \`events.jsonl\`, statuses, receipts, and unit specs as machine truth. Treat markdown, chat text, and logs as hints unless confirmed by machine artifacts.
+Treat schema-valid \`master-plan.json\`, \`decision-log.jsonl\`, \`state.json\`, \`events.jsonl\`, statuses, receipts, execution audits, and unit specs as machine truth. Treat \`mission.md\` as compact human purpose truth. Treat other markdown, chat text, and logs as hints unless confirmed by machine artifacts.
 
 ## Required handoff writes
 
 Write or update these runtime artifacts only:
 
-- \`${input.runtimeRoot}/handoff.json\` with schema \`autopilot.handoff.v1\`, reason \`context-halt\`, exact state/event refs, status refs, blockers, next actions, and concise summary.
+- \`${input.runtimeRoot}/handoff.json\` with schema \`autopilot.handoff.v1\`, reason \`context-halt\`, exact mission/master-plan/decision/state/event refs, status/audit refs, blockers, next actions, and concise summary.
 - \`${input.runtimeRoot}/handoff.md\` as the human-readable transfer note.
 - \`${input.runtimeRoot}/handoff-event-tail.jsonl\` as a bounded latest-event tail.
+- \`${input.runtimeRoot}/decision-log.jsonl\` with each material handoff, scope, protected-path, or blocker decision that is not already recorded.
 - \`${input.runtimeRoot}/events.jsonl\` with one monotonic \`handoff_written\` event.
 - \`${input.runtimeRoot}/state.json\` with current queues and \`status\` set to \`paused\` or \`blocked\` if that matches the real state.
 
@@ -151,7 +167,7 @@ If a required artifact cannot be written safely, report the blocker clearly and 
 
 ## Handoff content requirements
 
-Capture current queues, running units, blocked units, completed units, failed units, last accepted statuses/receipts, validation gates, open blockers, held work, next dependency-cleared units, and operator questions. Include exact relative or runtime paths for the next parent to read. Keep the handoff compact; do not paste large logs or file bodies.
+Capture mission/master-plan refs, latest decision id, current queues, running units, blocked units, completed units, failed units, last accepted statuses/receipts/audits, audit/scope/protected review queues, validation gates, open blockers, held work, next dependency-cleared units, and operator questions. Include exact relative or runtime paths for the next parent to read. Keep the handoff compact; do not paste large logs or file bodies.
 
 ## Final assistant response requirement
 
@@ -159,7 +175,7 @@ After writing the handoff artifacts, your final response must include a section 
 
 \`/${AUTOPILOT_COMMAND} ${input.workstream}\`
 
-Under that line, include a full explanation for the next Autopilot parent: authoritative handoff refs, startup gate, state precedence, resume steps, current queues, open blockers, next actions, validation plan, launch authorization, and hard prohibitions. The next parent must call \`${CONTEXT_BUDGET_TOOL_NAME}\` first, must resume from \`${input.runtimeRoot}\`, must launch child work only through the injected \`${AUTOPILOT_RUNNER_BIN}\` path from its own /${AUTOPILOT_COMMAND} prompt, must accept only validated status+receipt evidence, must avoid metered frontier routes, and must preserve git state.
+Under that line, include a full explanation for the next Autopilot parent: authoritative mission/master-plan/decision/handoff refs, startup gate, purpose-before-progress state precedence, resume steps, current queues, audit/scope/protected review queues, open blockers, next actions, validation plan, launch authorization, and hard prohibitions. The next parent must call \`${CONTEXT_BUDGET_TOOL_NAME}\` first, must resume from \`${input.runtimeRoot}\`, must launch child work only through the injected \`${AUTOPILOT_RUNNER_BIN}\` path from its own /${AUTOPILOT_COMMAND} prompt, must accept only validated status+receipt+execution-audit evidence, must avoid metered frontier routes, and must preserve git state.
 ${optionalBlock('Operator handoff comments', input.comments)}`;
 }
 

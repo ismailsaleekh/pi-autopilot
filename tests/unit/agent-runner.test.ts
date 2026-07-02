@@ -6,7 +6,7 @@ import { dirname, join, resolve } from 'node:path';
 import { describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import type { AutopilotUnitSpec } from '../../src/core/contracts/index.ts';
+import type { AutopilotUnitSpec, AutopilotVerificationPlan } from '../../src/core/contracts/index.ts';
 import { AutopilotAgentRunError, runAutopilotAgentFromSpecPath } from '../../src/core/agent-runner.ts';
 
 const TEST_DIR = dirname(fileURLToPath(import.meta.url));
@@ -21,6 +21,25 @@ async function withTempDir<T>(run: (dir: string) => Promise<T>): Promise<T> {
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+}
+
+function verificationPlan(command = 'npm test -- --runInBand'): AutopilotVerificationPlan {
+  return {
+    positive_witnesses: [
+      {
+        id: 'positive-validation-command',
+        command,
+        expected_signal: 'command exits zero',
+        required: true,
+      },
+    ],
+    negative_witnesses: [],
+    regression_witnesses: [],
+    real_boundary_witnesses: [],
+    blast_radius_checks: [],
+    docs_schema_prompt_checks: [],
+    dirty_tree_checks: [],
+  };
 }
 
 function spec(root: string, overrides: Partial<AutopilotUnitSpec> = {}): AutopilotUnitSpec {
@@ -40,16 +59,38 @@ function spec(root: string, overrides: Partial<AutopilotUnitSpec> = {}): Autopil
     owned_paths: ['src/smoke.ts'],
     read_only_paths: [],
     untouchable_paths: ['private/**'],
-    context_refs: [],
+    context_refs: [
+      { path: '.pi/autopilot/autopilot-smoke/mission.md', purpose: 'Durable mission truth' },
+      { path: '.pi/autopilot/autopilot-smoke/master-plan.json', purpose: 'Durable master plan truth' },
+    ],
     validation_commands: [],
     status_output: join(runtimeRoot, 'statuses', 'u01-implement.implement.attempt-1.json'),
     receipt_output: join(runtimeRoot, 'receipts', 'u01-implement.implement.attempt-1.receipt.json'),
     evidence_dir: join(runtimeRoot, 'evidence', 'u01-implement'),
     stop_boundary: 'Edit only src/smoke.ts.',
+    quality_profile: 'source-change',
+    risk_level: 'medium',
+    acceptance_criteria: ['smoke fixture is implemented at root cause'],
+    verification_plan: verificationPlan(),
+    closure_criteria: ['independent validation passes'],
+    upstream_refs: [],
     timeout_seconds: 3600,
     render_prompt_snapshot: true,
   };
-  return { ...base, ...overrides };
+  const merged: AutopilotUnitSpec = { ...base, ...overrides };
+  if (merged.role === 'validate' || merged.role === 'bughunt') {
+    const command = merged.validation_commands[0] ?? 'true';
+    return {
+      ...merged,
+      quality_profile: 'validation-only',
+      risk_level: overrides.risk_level ?? 'low',
+      acceptance_criteria: ['independent validation covers declared commands'],
+      verification_plan: verificationPlan(command),
+      closure_criteria: ['validation status is PASS'],
+      upstream_refs: merged.upstream_refs ?? [],
+    };
+  }
+  return merged;
 }
 
 async function writeSpec(root: string, unitSpec: AutopilotUnitSpec): Promise<string> {
@@ -629,12 +670,15 @@ function buildStatus(context) {
       changed_paths: [], findings: [{ id: 'fake.issue', severity: 'major-local', summary: 'fake issue' }], commands: [], evidence_refs: [], report_ref: null, next_action: 'fix fake issue'
     };
   }
+  const validationCommands = Array.isArray(unit.validation_commands) ? unit.validation_commands : [];
+  const commands = validationCommands.map((command) => ({ command, status: 'passed', exit_code: 0, summary: 'fake command passed' }));
+  const coveredWitnessIds = unit.role === 'validate' || unit.role === 'bughunt' ? ['positive-validation-command'] : undefined;
   return {
     schema_version: 'autopilot.status.v1', workstream: unit.workstream, unit_id: unit.unit_id,
     role: unit.role, attempt: unit.attempt, verdict: unit.role === 'validate' || unit.role === 'bughunt' ? 'PASS' : 'DONE',
     severity: 'clean', summary: 'Fake Autopilot status completed.',
     changed_paths: unit.role === 'implement' || unit.role === 'fix' ? [unit.owned_paths[0]] : [],
-    findings: [], commands: [], evidence_refs: [], report_ref: null, next_action: 'fake next action'
+    findings: [], commands, evidence_refs: [], report_ref: null, ...(coveredWitnessIds === undefined ? {} : { covered_witness_ids: coveredWitnessIds }), next_action: 'fake next action'
   };
 }
 function emitForcedStatus() {

@@ -1,14 +1,21 @@
 import {
+  AUTOPILOT_AUDIT_CLASSIFICATION_VALUES,
+  AUTOPILOT_CLOSURE_GATE_STATUS_VALUES,
   AUTOPILOT_COMMAND_STATUS_VALUES,
   AUTOPILOT_CONTEXT_GATE_VALUES,
+  AUTOPILOT_DECISION_EVENT_VALUES,
   AUTOPILOT_EVENT_TYPE_VALUES,
+  AUTOPILOT_EXCEPTION_STATE_VALUES,
   AUTOPILOT_HANDOFF_REASON_VALUES,
+  AUTOPILOT_QUALITY_PROFILE_VALUES,
+  AUTOPILOT_RISK_LEVEL_VALUES,
   AUTOPILOT_ROLE_VALUES,
   AUTOPILOT_SEVERITY_VALUES,
   AUTOPILOT_TEMPLATE_VALUES,
   AUTOPILOT_THINKING_VALUES,
   AUTOPILOT_UNIT_STATE_VALUES,
   AUTOPILOT_VERDICT_VALUES,
+  AUTOPILOT_WORK_ITEM_STATE_VALUES,
   AUTOPILOT_WORKSTREAM_STATUS_VALUES,
 } from './types.ts';
 
@@ -125,6 +132,54 @@ export const AUTOPILOT_COMMAND_SUMMARY_JSON_SCHEMA = noExtraMap(
   ['command', 'status', 'exit_code', 'summary'],
 );
 
+export const AUTOPILOT_WITNESS_SPEC_JSON_SCHEMA = noExtraMap(
+  {
+    id: {
+      type: 'string',
+      minLength: 1,
+      maxLength: 96,
+      pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,95}$',
+    },
+    expected_signal: boundedString(500),
+    required: { type: 'boolean' },
+    command: boundedString(800),
+    inspection_target: boundedString(500),
+    blocker_reason: boundedString(500),
+  },
+  ['id', 'expected_signal', 'required'],
+);
+
+export const AUTOPILOT_VERIFICATION_PLAN_JSON_SCHEMA = noExtraMap(
+  {
+    positive_witnesses: boundedArray(AUTOPILOT_WITNESS_SPEC_JSON_SCHEMA, 80),
+    negative_witnesses: boundedArray(AUTOPILOT_WITNESS_SPEC_JSON_SCHEMA, 80),
+    regression_witnesses: boundedArray(AUTOPILOT_WITNESS_SPEC_JSON_SCHEMA, 80),
+    real_boundary_witnesses: boundedArray(AUTOPILOT_WITNESS_SPEC_JSON_SCHEMA, 80),
+    blast_radius_checks: boundedArray(AUTOPILOT_WITNESS_SPEC_JSON_SCHEMA, 80),
+    docs_schema_prompt_checks: boundedArray(AUTOPILOT_WITNESS_SPEC_JSON_SCHEMA, 80),
+    dirty_tree_checks: boundedArray(AUTOPILOT_WITNESS_SPEC_JSON_SCHEMA, 80),
+  },
+  [
+    'positive_witnesses',
+    'negative_witnesses',
+    'regression_witnesses',
+    'real_boundary_witnesses',
+    'blast_radius_checks',
+    'docs_schema_prompt_checks',
+    'dirty_tree_checks',
+  ],
+);
+
+export const AUTOPILOT_UPSTREAM_REF_JSON_SCHEMA = noExtraMap(
+  {
+    unit_id: unitIdSchema(),
+    purpose: boundedString(360),
+    status_ref: relativePathSchema(),
+    audit_ref: relativePathSchema(),
+  },
+  ['unit_id', 'purpose'],
+);
+
 export const AUTOPILOT_FINDING_JSON_SCHEMA = noExtraMap(
   {
     id: {
@@ -165,6 +220,12 @@ export const AUTOPILOT_UNIT_SPEC_JSON_SCHEMA = {
     receipt_output: absolutePathSchema(),
     evidence_dir: absolutePathSchema(),
     stop_boundary: boundedString(1200),
+    quality_profile: enumSchema(AUTOPILOT_QUALITY_PROFILE_VALUES),
+    risk_level: enumSchema(AUTOPILOT_RISK_LEVEL_VALUES),
+    acceptance_criteria: boundedArray(boundedString(500), 80),
+    verification_plan: AUTOPILOT_VERIFICATION_PLAN_JSON_SCHEMA,
+    closure_criteria: boundedArray(boundedString(500), 80),
+    upstream_refs: boundedArray(AUTOPILOT_UPSTREAM_REF_JSON_SCHEMA, 80),
     timeout_seconds: { type: 'integer', minimum: 60, maximum: 86_400 },
     render_prompt_snapshot: { type: 'boolean' },
   },
@@ -219,6 +280,15 @@ export const AUTOPILOT_STATUS_ENTRY_JSON_SCHEMA = {
     commands: boundedArray(AUTOPILOT_COMMAND_SUMMARY_JSON_SCHEMA, 80),
     evidence_refs: boundedArray(AUTOPILOT_EVIDENCE_REF_JSON_SCHEMA, 80),
     report_ref: { anyOf: [AUTOPILOT_EVIDENCE_REF_JSON_SCHEMA, { type: 'null' }] },
+    covered_witness_ids: boundedArray(
+      {
+        type: 'string',
+        minLength: 1,
+        maxLength: 96,
+        pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,95}$',
+      },
+      200,
+    ),
     next_action: boundedString(360),
   },
   required: [
@@ -337,6 +407,61 @@ const stateUnitSchema = noExtraMap(
   ['unit_id', 'role', 'state', 'attempt', 'summary'],
 );
 
+const workItemSchema = noExtraMap(
+  {
+    work_item_id: unitIdSchema(),
+    state: enumSchema(AUTOPILOT_WORK_ITEM_STATE_VALUES),
+    source_changing: { type: 'boolean' },
+    unit_ids: boundedArray(unitIdSchema(), 500),
+    implementation_unit_id: unitIdSchema(),
+    validation_unit_id: unitIdSchema(),
+    audit_ref: relativePathSchema(),
+    status_ref: relativePathSchema(),
+    validation_status_ref: relativePathSchema(),
+    summary: boundedString(360),
+  },
+  ['work_item_id', 'state', 'source_changing', 'unit_ids', 'summary'],
+);
+
+const scopeExceptionSchema = noExtraMap(
+  {
+    exception_id: unitIdSchema(),
+    unit_id: unitIdSchema(),
+    audit_ref: relativePathSchema(),
+    paths: boundedArray(relativePathSchema(), 500, 1),
+    state: enumSchema(AUTOPILOT_EXCEPTION_STATE_VALUES),
+    decision_ref: relativePathSchema(),
+    summary: boundedString(500),
+  },
+  ['exception_id', 'unit_id', 'audit_ref', 'paths', 'state', 'summary'],
+);
+
+const protectedPathExceptionSchema = noExtraMap(
+  {
+    exception_id: unitIdSchema(),
+    unit_id: unitIdSchema(),
+    audit_ref: relativePathSchema(),
+    read_only_paths: boundedArray(relativePathSchema(), 500),
+    untouchable_paths: boundedArray(relativePathSchema(), 500),
+    state: enumSchema(AUTOPILOT_EXCEPTION_STATE_VALUES),
+    decision_ref: relativePathSchema(),
+    summary: boundedString(500),
+  },
+  ['exception_id', 'unit_id', 'audit_ref', 'read_only_paths', 'untouchable_paths', 'state', 'summary'],
+);
+
+const closureGateSchema = noExtraMap(
+  {
+    status: enumSchema(AUTOPILOT_CLOSURE_GATE_STATUS_VALUES),
+    checked_at: isoTimestampSchema(),
+    blocking_reasons: boundedArray(boundedString(500), 200),
+    bughunt_status_ref: relativePathSchema(),
+    decision_ref: relativePathSchema(),
+    summary: boundedString(500),
+  },
+  ['status', 'blocking_reasons', 'summary'],
+);
+
 export const AUTOPILOT_STATE_JSON_SCHEMA = {
   $id: `${AUTOPILOT_SCHEMA_ID_BASE}/state.v1.json`,
   type: 'object',
@@ -366,6 +491,17 @@ export const AUTOPILOT_STATE_JSON_SCHEMA = {
     },
     operator_questions: boundedArray(boundedString(500), 80),
     next_actions: boundedArray(boundedString(500), 80),
+    work_items: {
+      type: 'object',
+      additionalProperties: workItemSchema,
+      propertyNames: unitIdSchema(),
+      maxProperties: 2_000,
+    },
+    audit_review_queue: boundedArray(unitIdSchema(), 500),
+    validation_ready_queue: boundedArray(unitIdSchema(), 500),
+    scope_exceptions: boundedArray(scopeExceptionSchema, 500),
+    protected_path_exceptions: boundedArray(protectedPathExceptionSchema, 500),
+    closure_gate: closureGateSchema,
   },
   required: [
     'schema_version',
@@ -459,6 +595,156 @@ export const AUTOPILOT_HANDOFF_JSON_SCHEMA = {
   ],
 } as const satisfies JsonMap;
 
+const masterPlanLaneSchema = noExtraMap(
+  {
+    lane_id: unitIdSchema(),
+    summary: boundedString(360),
+    unit_ids: boundedArray(unitIdSchema(), 500),
+  },
+  ['lane_id', 'summary', 'unit_ids'],
+);
+
+const masterPlanUnitSchema = noExtraMap(
+  {
+    unit_id: unitIdSchema(),
+    role: enumSchema(AUTOPILOT_ROLE_VALUES),
+    state: enumSchema(AUTOPILOT_UNIT_STATE_VALUES),
+    dependencies: boundedArray(unitIdSchema(), 200),
+    summary: boundedString(360),
+  },
+  ['unit_id', 'role', 'state', 'dependencies', 'summary'],
+);
+
+const ownershipMatrixSchema = noExtraMap(
+  {
+    owned_paths: boundedArray(relativePathSchema(), 500),
+    read_only_paths: boundedArray(relativePathSchema(), 500),
+    untouchable_paths: boundedArray(relativePathSchema(), 500),
+    held_paths: boundedArray(relativePathSchema(), 500),
+  },
+  ['owned_paths', 'read_only_paths', 'untouchable_paths', 'held_paths'],
+);
+
+export const AUTOPILOT_MASTER_PLAN_JSON_SCHEMA = {
+  $id: `${AUTOPILOT_SCHEMA_ID_BASE}/master-plan.v1.json`,
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    schema_version: { const: 'autopilot.master_plan.v1' },
+    workstream: workstreamSchema(),
+    mission_ref: relativePathSchema(),
+    goal_summary: boundedString(1000),
+    non_goals: boundedArray(boundedString(500), 80),
+    definition_of_done: boundedArray(boundedString(500), 80),
+    risk_level: enumSchema(AUTOPILOT_RISK_LEVEL_VALUES),
+    lanes: boundedArray(masterPlanLaneSchema, 500),
+    units: {
+      type: 'object',
+      additionalProperties: masterPlanUnitSchema,
+      propertyNames: unitIdSchema(),
+      maxProperties: 2_000,
+    },
+    ownership_matrix: ownershipMatrixSchema,
+    verification_matrix: AUTOPILOT_VERIFICATION_PLAN_JSON_SCHEMA,
+    closure_criteria: boundedArray(boundedString(500), 120),
+    current_focus: boundedString(500),
+    last_decision_id: { type: 'integer', minimum: 0, maximum: 9_000_000_000_000_000 },
+    last_event_id: { type: 'integer', minimum: 0, maximum: 9_000_000_000_000_000 },
+    updated_at: isoTimestampSchema(),
+  },
+  required: [
+    'schema_version',
+    'workstream',
+    'mission_ref',
+    'goal_summary',
+    'non_goals',
+    'definition_of_done',
+    'risk_level',
+    'lanes',
+    'units',
+    'ownership_matrix',
+    'verification_matrix',
+    'closure_criteria',
+    'current_focus',
+    'last_decision_id',
+    'last_event_id',
+    'updated_at',
+  ],
+} as const satisfies JsonMap;
+
+export const AUTOPILOT_DECISION_ROW_JSON_SCHEMA = {
+  $id: `${AUTOPILOT_SCHEMA_ID_BASE}/decision-row.v1.json`,
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    schema_version: { const: 'autopilot.decision.v1' },
+    id: { type: 'integer', minimum: 1, maximum: 9_000_000_000_000_000 },
+    ts: isoTimestampSchema(),
+    event: enumSchema(AUTOPILOT_DECISION_EVENT_VALUES),
+    workstream: workstreamSchema(),
+    summary: boundedString(500),
+    decision: boundedString(1000),
+    unit_id: unitIdSchema(),
+    master_plan_ref: relativePathSchema(),
+    evidence_refs: boundedArray(AUTOPILOT_EVIDENCE_REF_JSON_SCHEMA, 80),
+  },
+  required: ['schema_version', 'id', 'ts', 'event', 'workstream', 'summary', 'decision'],
+} as const satisfies JsonMap;
+
+export const AUTOPILOT_EXECUTION_AUDIT_JSON_SCHEMA = {
+  $id: `${AUTOPILOT_SCHEMA_ID_BASE}/execution-audit.v1.json`,
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    schema_version: { const: 'autopilot.execution_audit.v1' },
+    workstream: workstreamSchema(),
+    unit_id: unitIdSchema(),
+    role: enumSchema(AUTOPILOT_ROLE_VALUES),
+    attempt: { type: 'integer', minimum: 1, maximum: 999 },
+    audited_at: isoTimestampSchema(),
+    cwd: absolutePathSchema(),
+    git_head: { anyOf: [boundedString(80), { type: 'null' }] },
+    dirty_baseline: { anyOf: [{ type: 'boolean' }, { type: 'null' }] },
+    actual_changed_paths: boundedArray(relativePathSchema(), 500),
+    status_reported_changed_paths: boundedArray(relativePathSchema(), 500),
+    omitted_status_changes: boundedArray(relativePathSchema(), 500),
+    reported_but_not_actual_changes: boundedArray(relativePathSchema(), 500),
+    outside_owned_paths: boundedArray(relativePathSchema(), 500),
+    read_only_touched_paths: boundedArray(relativePathSchema(), 500),
+    untouchable_touched_paths: boundedArray(relativePathSchema(), 500),
+    declared_validation_commands: boundedArray(boundedString(800), 120),
+    status_reported_commands: boundedArray(boundedString(800), 120),
+    command_coverage_gaps: boundedArray(boundedString(800), 120),
+    classification: enumSchema(AUTOPILOT_AUDIT_CLASSIFICATION_VALUES),
+    evidence_refs: boundedArray(AUTOPILOT_EVIDENCE_REF_JSON_SCHEMA, 80),
+    summary: boundedString(1000),
+  },
+  required: [
+    'schema_version',
+    'workstream',
+    'unit_id',
+    'role',
+    'attempt',
+    'audited_at',
+    'cwd',
+    'git_head',
+    'dirty_baseline',
+    'actual_changed_paths',
+    'status_reported_changed_paths',
+    'omitted_status_changes',
+    'reported_but_not_actual_changes',
+    'outside_owned_paths',
+    'read_only_touched_paths',
+    'untouchable_touched_paths',
+    'declared_validation_commands',
+    'status_reported_commands',
+    'command_coverage_gaps',
+    'classification',
+    'evidence_refs',
+    'summary',
+  ],
+} as const satisfies JsonMap;
+
 export const AUTOPILOT_JSON_SCHEMAS = Object.freeze({
   unitSpec: AUTOPILOT_UNIT_SPEC_JSON_SCHEMA,
   statusEntry: AUTOPILOT_STATUS_ENTRY_JSON_SCHEMA,
@@ -466,4 +752,7 @@ export const AUTOPILOT_JSON_SCHEMAS = Object.freeze({
   state: AUTOPILOT_STATE_JSON_SCHEMA,
   receipt: AUTOPILOT_RECEIPT_JSON_SCHEMA,
   handoff: AUTOPILOT_HANDOFF_JSON_SCHEMA,
+  masterPlan: AUTOPILOT_MASTER_PLAN_JSON_SCHEMA,
+  decisionRow: AUTOPILOT_DECISION_ROW_JSON_SCHEMA,
+  executionAudit: AUTOPILOT_EXECUTION_AUDIT_JSON_SCHEMA,
 });

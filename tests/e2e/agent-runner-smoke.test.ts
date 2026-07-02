@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { describe, it } from 'node:test';
 
 import { runAutopilotAgentFromSpecPath } from '../../src/core/agent-runner.ts';
-import type { AutopilotEventRow, AutopilotState, AutopilotUnitSpec } from '../../src/core/contracts/types.ts';
+import type { AutopilotEventRow, AutopilotState, AutopilotUnitSpec, AutopilotVerificationPlan } from '../../src/core/contracts/types.ts';
 import { appendAutopilotEventRow, readAutopilotResumeSnapshot, writeAutopilotStateAtomic } from '../../src/core/state-store/index.ts';
 
 async function withTempDir<T>(run: (dir: string) => Promise<T>): Promise<T> {
@@ -16,6 +16,25 @@ async function withTempDir<T>(run: (dir: string) => Promise<T>): Promise<T> {
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+}
+
+function verificationPlan(): AutopilotVerificationPlan {
+  return {
+    positive_witnesses: [
+      {
+        id: 'positive-e2e-command',
+        command: 'npm test -- --runInBand',
+        expected_signal: 'fake command exits zero',
+        required: true,
+      },
+    ],
+    negative_witnesses: [],
+    regression_witnesses: [],
+    real_boundary_witnesses: [],
+    blast_radius_checks: [],
+    docs_schema_prompt_checks: [],
+    dirty_tree_checks: [],
+  };
 }
 
 function makeSpec(worktree: string, runtimeRoot: string): AutopilotUnitSpec {
@@ -33,12 +52,21 @@ function makeSpec(worktree: string, runtimeRoot: string): AutopilotUnitSpec {
     owned_paths: ['src/e2e.ts'],
     read_only_paths: [],
     untouchable_paths: ['private/**'],
-    context_refs: [],
+    context_refs: [
+      { path: '.pi/autopilot/autopilot-e2e/mission.md', purpose: 'Durable mission truth' },
+      { path: '.pi/autopilot/autopilot-e2e/master-plan.json', purpose: 'Durable master plan truth' },
+    ],
     validation_commands: [],
     status_output: join(runtimeRoot, 'statuses', 'e01-implement.implement.attempt-1.json'),
     receipt_output: join(runtimeRoot, 'receipts', 'e01-implement.implement.attempt-1.receipt.json'),
     evidence_dir: join(runtimeRoot, 'evidence', 'e01-implement'),
     stop_boundary: 'Edit only src/e2e.ts.',
+    quality_profile: 'source-change',
+    risk_level: 'medium',
+    acceptance_criteria: ['fake e2e implementation completes'],
+    verification_plan: verificationPlan(),
+    closure_criteria: ['state resumes after fake run'],
+    upstream_refs: [],
     timeout_seconds: 60,
     render_prompt_snapshot: true,
   };
@@ -67,10 +95,11 @@ void describe('autopilot runner e2e smoke', () => {
       const result = await runAutopilotAgentFromSpecPath(specPath, {
         piExecutable: fakePi,
         env: process.env,
-        timeoutMsOverride: 2_000,
+        timeoutMsOverride: 5_000,
       });
       assert.equal(result.status, 'success');
       assert.equal(result.statusEntry?.verdict, 'DONE');
+      assert.equal(typeof result.auditOutput, 'string');
 
       const statusRef = 'statuses/e01-implement.implement.attempt-1.json';
       const receiptRef = 'receipts/e01-implement.implement.attempt-1.receipt.json';

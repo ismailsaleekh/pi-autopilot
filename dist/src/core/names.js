@@ -15,4 +15,7 @@ export const AUTOPILOT_SCHEMA_NAMES = [
     'autopilot.state.v1',
     'autopilot.receipt.v1',
     'autopilot.handoff.v1',
+    'autopilot.master_plan.v1',
+    'autopilot.decision.v1',
+    'autopilot.execution_audit.v1',
 ];

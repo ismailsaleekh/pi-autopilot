@@ -96,6 +96,13 @@ void describe('Autopilot fixed prompt templates', () => {
         assert.match(prompt, /Autopilot/u);
         assert.match(prompt, new RegExp(AUTOPILOT_STATUS_TOOL, 'u'));
         assert.match(prompt, /Assistant-text JSON/u);
+        assert.match(prompt, /band-aids/u);
+        assert.match(prompt, /hacks/u);
+        assert.match(prompt, /silent fallbacks/u);
+        assert.match(prompt, /fake-green tests/u);
+        assert.match(prompt, /fixture tampering/u);
+        assert.match(prompt, /deferred consumers/u);
+        assert.match(prompt, /self-certifying/u);
         assert.match(prompt, /### Owned paths/u);
         assert.match(prompt, /### Read-only paths/u);
         assert.match(prompt, /### Untouchable paths/u);

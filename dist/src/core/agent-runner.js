@@ -7,6 +7,8 @@ import { AUTOPILOT_STATUS_CONTEXT_ENV, AUTOPILOT_STATUS_TOOL, } from "./names.js
 import { buildAutopilotProviderIdentity, buildAutopilotStatusToolContext, parseAutopilotStatusToolContext, validateAutopilotStatusEvidence, } from "./forced-output/index.js";
 import { AutopilotForcedOutputEvidenceError } from "./forced-output/status-evidence.js";
 import { parseAutopilotUnitSpec } from "./contracts/index.js";
+import { captureAutopilotExecutionBaseline, deriveAutopilotExecutionAuditPath, writeAutopilotExecutionAudit, } from "./execution-audit/index.js";
+import { assertAutopilotSpecQualityGate } from "./quality/spec-gate.js";
 import { AutopilotPromptTemplateError, renderAndMaybeWriteAutopilotPromptSnapshot, } from "./prompt-renderer/index.js";
 export class AutopilotAgentRunError extends Error {
     failureClass;
@@ -59,6 +61,8 @@ export async function runAutopilotAgentFromSpecPath(specPath, options = {}) {
         });
     }
     await preflightSpec(spec, specPath, { skipStaleOutputCheck: options.dryRun === true });
+    const auditBaseline = await captureAutopilotExecutionBaseline(spec.cwd);
+    const auditOutput = deriveAutopilotExecutionAuditPath(spec);
     const contextPath = deriveAutopilotStatusContextPath(spec);
     await writeStatusContext(contextPath, context);
     let rendered;
@@ -88,6 +92,8 @@ export async function runAutopilotAgentFromSpecPath(specPath, options = {}) {
             receiptOutput: spec.receipt_output,
             promptSnapshotPath: rendered.snapshotPath,
             contextPath,
+            auditOutput: null,
+            auditClassification: null,
             summary: 'dry-run rendered prompt and status context without launching Pi',
         });
     }
@@ -109,12 +115,15 @@ export async function runAutopilotAgentFromSpecPath(specPath, options = {}) {
     }
     catch (error) {
         if (error instanceof AutopilotPiRunError) {
+            const audit = await writeAttemptAudit(spec, auditBaseline, null, auditOutput);
             throw new AutopilotAgentRunError('pi-spawn-failed', {
                 reason: `Pi spawn failed before valid Autopilot status acceptance: ${error.code}: ${error.message}${formatPiRunErrorDiagnostics(error)}`,
                 specPath,
                 statusOutput: spec.status_output,
                 receiptOutput: spec.receipt_output,
                 promptSnapshotPath: rendered.snapshotPath,
+                auditOutput,
+                auditClassification: audit.classification,
                 piErrorCode: error.code,
             });
         }
@@ -125,6 +134,7 @@ export async function runAutopilotAgentFromSpecPath(specPath, options = {}) {
         evidence = await validateAutopilotStatusEvidence({ unitSpec: spec, providerIdentity });
     }
     catch (error) {
+        const audit = await writeAttemptAudit(spec, auditBaseline, null, auditOutput);
         if (piResult.isError) {
             throw new AutopilotAgentRunError('pi-spawn-failed', {
                 reason: `Pi session returned an error result before valid Autopilot status acceptance: ${formatPiResultFailureDiagnostics(piResult)}`,
@@ -132,6 +142,8 @@ export async function runAutopilotAgentFromSpecPath(specPath, options = {}) {
                 statusOutput: spec.status_output,
                 receiptOutput: spec.receipt_output,
                 promptSnapshotPath: rendered.snapshotPath,
+                auditOutput,
+                auditClassification: audit.classification,
             });
         }
         if (error instanceof AutopilotForcedOutputEvidenceError) {
@@ -144,6 +156,8 @@ export async function runAutopilotAgentFromSpecPath(specPath, options = {}) {
                 statusOutput: spec.status_output,
                 receiptOutput: spec.receipt_output,
                 promptSnapshotPath: rendered.snapshotPath,
+                auditOutput,
+                auditClassification: audit.classification,
             });
         }
         throw new AutopilotAgentRunError('invalid-structured-output', {
@@ -152,8 +166,11 @@ export async function runAutopilotAgentFromSpecPath(specPath, options = {}) {
             statusOutput: spec.status_output,
             receiptOutput: spec.receipt_output,
             promptSnapshotPath: rendered.snapshotPath,
+            auditOutput,
+            auditClassification: audit.classification,
         });
     }
+    const audit = await writeAttemptAudit(spec, auditBaseline, evidence.status, auditOutput);
     try {
         validateAutopilotEmitStatusCarrier(piResult, evidence.receipt.tool_call_id, evidence.receipt.status_sha256);
     }
@@ -164,6 +181,8 @@ export async function runAutopilotAgentFromSpecPath(specPath, options = {}) {
             statusOutput: spec.status_output,
             receiptOutput: spec.receipt_output,
             promptSnapshotPath: rendered.snapshotPath,
+            auditOutput,
+            auditClassification: audit.classification,
         });
     }
     if (!isSuccessVerdict(evidence.status)) {
@@ -173,6 +192,8 @@ export async function runAutopilotAgentFromSpecPath(specPath, options = {}) {
             statusOutput: spec.status_output,
             receiptOutput: spec.receipt_output,
             promptSnapshotPath: rendered.snapshotPath,
+            auditOutput,
+            auditClassification: audit.classification,
             statusVerdict: evidence.status.verdict,
         });
     }
@@ -184,6 +205,8 @@ export async function runAutopilotAgentFromSpecPath(specPath, options = {}) {
             statusOutput: spec.status_output,
             receiptOutput: spec.receipt_output,
             promptSnapshotPath: rendered.snapshotPath,
+            auditOutput,
+            auditClassification: audit.classification,
         });
     }
     return ({
@@ -194,6 +217,8 @@ export async function runAutopilotAgentFromSpecPath(specPath, options = {}) {
         receiptOutput: spec.receipt_output,
         promptSnapshotPath: rendered.snapshotPath,
         contextPath,
+        auditOutput,
+        auditClassification: audit.classification,
         summary: evidence.status.summary,
     });
 }
@@ -209,7 +234,9 @@ async function readAndValidateSpec(specPath) {
         });
     }
     try {
-        return parseAutopilotUnitSpec(parsed);
+        const spec = parseAutopilotUnitSpec(parsed);
+        assertAutopilotSpecQualityGate(spec);
+        return spec;
     }
     catch (error) {
         throw new AutopilotAgentRunError('spec-invalid', {
@@ -257,6 +284,14 @@ async function writeStatusContext(path, context) {
     const parsed = parseAutopilotStatusToolContext(JSON.parse(JSON.stringify(context)));
     await mkdir(dirname(path), { recursive: true });
     await writeFile(path, `${JSON.stringify(parsed, null, 2)}\n`, 'utf8');
+}
+async function writeAttemptAudit(spec, baseline, statusEntry, auditPath) {
+    return await writeAutopilotExecutionAudit({
+        unitSpec: spec,
+        baseline,
+        statusEntry,
+        auditPath,
+    });
 }
 function resolvePiExecutable(env) {
     const override = env[AUTOPILOT_AGENT_PI_EXECUTABLE_ENV];

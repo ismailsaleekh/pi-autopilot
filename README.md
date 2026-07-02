@@ -1,6 +1,6 @@
 # Autopilot
 
-Autopilot is a Pi extension package for dependency-cleared child-agent orchestration. It provides the `/autopilot` parent prompt, `/autopilot-onboard` onboarding prompt, `/autopilot-handoff` context handoff prompt, the parent `context_budget` gate, Autopilot contracts/templates, forced-output/status handling, state-store helpers, and the `autopilot-agent-run` child runner.
+Autopilot is a Pi extension package for dependency-cleared child-agent orchestration. It provides the `/autopilot` parent prompt, `/autopilot-onboard` onboarding prompt, `/autopilot-handoff` context handoff prompt, the parent `context_budget` gate, Autopilot contracts/templates, Quality vNext spec/status gates, durable purpose state, execution audits, forced-output/status handling, state-store helpers, and the `autopilot-agent-run` child runner.
 
 ## Install
 
@@ -29,13 +29,13 @@ Runtime files live under:
 .pi/autopilot/<workstream>/
 ```
 
-Autopilot validates and writes package-owned artifact paths for `unit-specs/`, `statuses/`, `receipts/`, `rendered-prompts/`, `evidence/`, `state.json`, `events.jsonl`, and handoff files. Unit specs require status, receipt, and evidence outputs to stay inside the matching workstream runtime root. Handoff prompts target `handoff.json`, `handoff.md`, and `handoff-event-tail.jsonl` in the active workstream root.
+Autopilot validates and writes package-owned artifact paths for `mission.md`, `master-plan.json`, `decision-log.jsonl`, `unit-specs/`, `statuses/`, `receipts/`, `execution-audits/`, `rendered-prompts/`, `evidence/`, `state.json`, `events.jsonl`, and handoff files. Unit specs require status, receipt, and evidence outputs to stay inside the matching workstream runtime root, and non-strategy child specs must reference durable mission/master-plan context before launch. Handoff prompts target `handoff.json`, `handoff.md`, and `handoff-event-tail.jsonl` in the active workstream root.
 
 ## Contracts, templates, and state-store
 
-The package ships schema-backed Autopilot contracts for unit specs, status entries, events, state, receipts, and handoffs. Semantic validation covers role/verdict coherence, owned-path status changes, evidence metadata, receipt hashes, provider identity, output freshness, and runtime-root placement.
+The package ships schema-backed Autopilot contracts for unit specs, status entries, events, state, receipts, handoffs, `autopilot.master_plan.v1`, `autopilot.decision.v1`, and `autopilot.execution_audit.v1`. Unit specs also carry Quality vNext fields for quality profile, risk level, acceptance criteria, verification plan, closure criteria, and upstream refs. Semantic validation covers role/verdict coherence, owned-path status changes, fake-green command rejection, declared-command and witness coverage, evidence metadata, receipt hashes, provider identity, output freshness, runtime-root placement, durable planning refs, purpose-state coherence, and execution-audit fact/classification coherence.
 
-Role templates and deterministic render helpers cover strategy, implement, validate, fix, adjudicate, bughunt, and extract units. The state-store helpers write `state.json` atomically, append `events.jsonl` monotonically, validate runtime references, and resume from bounded event tails under `.pi/autopilot/<workstream>/`.
+Role templates and deterministic render helpers cover strategy, implement, validate, fix, adjudicate, bughunt, and extract units. Parent and child prompts include the package-owned perfect-quality contract: no band-aids, hacks, silent fallbacks, fake-green tests, fixture tampering, deferred consumers, or source-changing self-certification. The state-store helpers write `state.json` atomically, append `events.jsonl` monotonically, validate runtime references, and resume from bounded event tails under `.pi/autopilot/<workstream>/`.
 
 ## Runner and CLI
 
@@ -45,7 +45,7 @@ Role templates and deterministic render helpers cover strategy, implement, valid
 autopilot-agent-run [--dry-run] [--json] [--pi-executable <path>] <unit-spec.json>
 ```
 
-The published bin launches compiled JavaScript under `dist/src/cli/autopilot-agent-run.js`; it does not execute TypeScript source from `node_modules` or rely on Node type stripping. The runner reads and validates an Autopilot unit spec, builds the forced-output/status context, renders the child prompt, optionally snapshots it, preflights stale status/receipt paths, and either dry-runs or launches Pi in RPC mode with the internal compiled status tool. On completion it accepts matching status artifacts, receipt artifacts, and receipt-matching structured tool carriers; assistant text alone is rejected. Stable failure classes distinguish invalid specs, Pi launch/runtime failures, missing structured output, invalid structured output, and non-success status verdicts.
+The published bin launches compiled JavaScript under `dist/src/cli/autopilot-agent-run.js`; it does not execute TypeScript source from `node_modules` or rely on Node type stripping. The runner reads and validates an Autopilot unit spec, applies the deterministic Quality vNext spec gate before model spend, builds the forced-output/status context, renders the child prompt, optionally snapshots it, preflights stale status/receipt paths, and either dry-runs or launches Pi in RPC mode with the internal compiled status tool. On completion it accepts matching status artifacts, receipt artifacts, and receipt-matching structured tool carriers, then writes an `autopilot.execution_audit.v1` record under `execution-audits/`; assistant text alone is rejected. Stable failure classes distinguish invalid specs, Pi launch/runtime failures, missing structured output, invalid structured output, and non-success status verdicts, while runner output includes audit path/classification for parent semantic routing.
 
 Autopilot accepts subscription Pi model routes only for `openai-codex/*`, `anthropic/*`, `opencode-go/*`, `kimi-coding/*`, and `zai/*`. Other provider prefixes are rejected before child launch to avoid accidental metered frontier routes.
 
@@ -65,4 +65,4 @@ Release QA also runs docs audits and forbidden legacy-runtime scans from this st
 
 ## Known limitations
 
-Autopilot currently supplies the package extension, commands, `context_budget`, contracts/templates, forced-output/status tool, state-store helpers, runner CLI/bin, fake-Pi and e2e witnesses, parent prompt, onboard prompt, handoff prompt, and offline SDK/RPC/package gates. It does not include a compiled scheduler UI, PTY/TUI coverage, migration of older runtime folders, or default automated live-provider execution. Provider-backed child runs require explicit operator approval, subscription Pi channels, and the `autopilot-agent-run` path; the default package gate remains deterministic, offline, network-free, and isolated from user/global Pi state.
+Autopilot currently supplies the package extension, commands, `context_budget`, contracts/templates, Quality vNext spec/status gates, durable purpose state helpers, execution-audit generation/validation, forced-output/status tool, state-store helpers, runner CLI/bin, fake-Pi and e2e witnesses, parent prompt, onboard prompt, handoff prompt, and offline SDK/RPC/package gates. It does not include a compiled scheduler UI, PTY/TUI coverage, migration of older runtime folders, full lifecycle/adjudication/terminal-closure automation, or default automated live-provider execution. Provider-backed child runs require explicit operator approval, subscription Pi channels, and the `autopilot-agent-run` path; the default package gate remains deterministic, offline, network-free, and isolated from user/global Pi state.

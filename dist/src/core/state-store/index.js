@@ -2,6 +2,8 @@ import { constants as fsConstants, existsSync } from 'node:fs';
 import { access, appendFile, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { parseAutopilotEventRow, parseAutopilotReceipt, parseAutopilotState, parseAutopilotStatusEntry, parseAutopilotUnitSpec, } from "../contracts/index.js";
+import { readAutopilotPurposeSnapshot, } from "./purpose.js";
+export * from "./purpose.js";
 const parseJsonValue = globalThis.JSON.parse;
 export class AutopilotStateStoreError extends Error {
     code;
@@ -66,6 +68,10 @@ export async function readAutopilotResumeSnapshot(input) {
     if (!Number.isInteger(eventTailLimit) || eventTailLimit < 0 || eventTailLimit > 10_000) {
         throw new AutopilotStateStoreError('invalid-event-tail-limit', `eventTailLimit must be an integer in [0, 10000], got ${String(eventTailLimit)}`);
     }
+    const purpose = await readAutopilotPurposeSnapshot({
+        root: input.root,
+        decisionTailLimit: eventTailLimit,
+    });
     const state = parseAutopilotState(await readJsonObject(statePath, 'state.json'));
     const events = await readAutopilotEventsIfPresent(eventsPath);
     const newestEvent = lastEvent(events);
@@ -84,6 +90,7 @@ export async function readAutopilotResumeSnapshot(input) {
     const tail = eventTailLimit === 0 ? [] : events.slice(-eventTailLimit);
     const frozenTail = Object.freeze(tail);
     return Object.freeze({
+        purpose,
         state,
         eventsTail: frozenTail,
         statuses: refs.statuses,

@@ -4,6 +4,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { AUTOPILOT_RUNNER_BIN, AUTOPILOT_SCHEMA_NAMES, AUTOPILOT_STATUS_TOOL, } from "../names.js";
 import { buildAutopilotProviderIdentity as buildForcedOutputAutopilotProviderIdentity } from "../forced-output/identity.js";
+import { renderAutopilotPerfectQualityRules } from "../quality/contract.js";
 import { AUTOPILOT_ROLE_VALUES, } from "../contracts/types.js";
 export { AUTOPILOT_ROLE_VALUES };
 export class AutopilotPromptTemplateError extends Error {
@@ -303,11 +304,10 @@ function validationCommands(commands) {
 }
 function qualityRules() {
     return [
-        '- Deliver the complete root-cause solution for this unit; no band-aids, silent fallbacks, fake-green tests, or deferred consumers.',
+        renderAutopilotPerfectQualityRules(),
         '- Preserve dirty-tree discipline: do not stash, reset, clean, checkout, restore, switch, rebase, or discard unrelated work.',
         '- Stay inside owned_paths for edits. Treat read_only_paths and untouchable_paths as no-write zones.',
         `- Do not hand-assemble raw child Pi launches; Autopilot child work is launched only through ${AUTOPILOT_RUNNER_BIN} by the parent.`,
-        '- If a correct solution needs out-of-scope edits or a human decision, stop and emit BLOCKED with concise evidence.',
         '- Use real files, diffs, and commands for claims. Reports are optional evidence refs, not the verdict authority.',
         '- Do not paste large file or report bodies into the final answer; final truth is the forced AutopilotStatusEntry.',
         '- Use only subscription Pi channels for frontier models; do not introduce OpenRouter or metered Claude, GPT, or Codex API routes.',

@@ -43,13 +43,15 @@ async function main(argv: readonly string[]): Promise<number> {
           receipt_output: result.receiptOutput,
           prompt_snapshot: result.promptSnapshotPath,
           context_path: result.contextPath,
+          audit_output: result.auditOutput,
+          audit_classification: result.auditClassification,
           summary: result.summary,
         }),
       );
     } else {
       console.log(
         `autopilot-agent-run ${result.status} unit=${result.spec.unit_id} role=${result.spec.role} ` +
-          `status=${result.statusOutput} summary=${result.summary}`,
+          `status=${result.statusOutput} audit=${result.auditClassification ?? 'none'} summary=${result.summary}`, 
       );
     }
     return 0;
@@ -62,6 +64,8 @@ async function main(argv: readonly string[]): Promise<number> {
         status_output: error.details.statusOutput,
         receipt_output: error.details.receiptOutput,
         prompt_snapshot: error.details.promptSnapshotPath,
+        audit_output: error.details.auditOutput,
+        audit_classification: error.details.auditClassification,
       };
       if (args.json) {
         console.error(JSON.stringify(payload));

@@ -11,14 +11,18 @@ import {
   AutopilotContractValidationError,
   assertAutopilotStatusJsonSchemaCompiles,
   autopilotSchemaSha256,
+  parseAutopilotDecisionRow,
   parseAutopilotEventRow,
+  parseAutopilotExecutionAudit,
   parseAutopilotHandoff,
+  parseAutopilotMasterPlan,
   parseAutopilotReceipt,
   parseAutopilotState,
   parseAutopilotStatusEntry,
   parseAutopilotUnitSpec,
   type AutopilotReceipt,
   type AutopilotStatusEntry,
+  type AutopilotVerificationPlan,
 } from '../../src/core/contracts/index.ts';
 
 const TEST_DIR = dirname(fileURLToPath(import.meta.url));
@@ -40,6 +44,25 @@ async function withTempDir<T>(run: (dir: string) => Promise<T>): Promise<T> {
 
 function sha256Text(text: string): `sha256:${string}` {
   return `sha256:${createHash('sha256').update(text, 'utf8').digest('hex')}`;
+}
+
+function verificationPlan(): AutopilotVerificationPlan {
+  return {
+    positive_witnesses: [
+      {
+        id: 'positive-typecheck',
+        command: 'npm run typecheck',
+        expected_signal: 'typecheck exits zero',
+        required: true,
+      },
+    ],
+    negative_witnesses: [],
+    regression_witnesses: [],
+    real_boundary_witnesses: [],
+    blast_radius_checks: [],
+    docs_schema_prompt_checks: [],
+    dirty_tree_checks: [],
+  };
 }
 
 void describe('Autopilot contracts', () => {
@@ -105,6 +128,153 @@ void describe('Autopilot contracts', () => {
       'autopilot_emit_status',
     );
     assert.equal(parseAutopilotHandoff(await fixture('valid-handoff.json')).reason, 'operator-pause');
+  });
+
+  void it('parses quality unit-spec fields and new Quality vNext contracts', async () => {
+    await withTempDir(async (root) => {
+      const baseSpec = parseAutopilotUnitSpec(await fixture('valid-unit-spec.implement.json'));
+      const spec = parseAutopilotUnitSpec({
+        ...baseSpec,
+        quality_profile: 'source-change',
+        risk_level: 'medium',
+        acceptance_criteria: ['root-cause implementation is complete'],
+        verification_plan: verificationPlan(),
+        closure_criteria: ['independent validation passes'],
+        upstream_refs: [
+          {
+            unit_id: 'strategy-1',
+            status_ref: 'statuses/strategy-1.strategy.attempt-1.json',
+            audit_ref: 'execution-audits/strategy-1.strategy.attempt-1.json',
+            purpose: 'strategy baseline',
+          },
+        ],
+      });
+      assert.equal(spec.quality_profile, 'source-change');
+      assert.equal(spec.verification_plan?.positive_witnesses[0]?.id, 'positive-typecheck');
+
+      const masterPlan = parseAutopilotMasterPlan({
+        schema_version: 'autopilot.master_plan.v1',
+        workstream: 'demo',
+        mission_ref: 'mission.md',
+        goal_summary: 'Ship a root-cause package upgrade.',
+        non_goals: ['no live provider run in default gate'],
+        definition_of_done: ['package gate passes'],
+        risk_level: 'medium',
+        lanes: [{ lane_id: 'lane-1', summary: 'core quality lane', unit_ids: ['u01'] }],
+        units: {
+          u01: {
+            unit_id: 'u01',
+            role: 'implement',
+            state: 'ready',
+            dependencies: [],
+            summary: 'implement quality contracts',
+          },
+        },
+        ownership_matrix: {
+          owned_paths: ['packages/pi-autopilot/src'],
+          read_only_paths: ['packages/pi-autopilot/README.md'],
+          untouchable_paths: ['private'],
+          held_paths: ['products'],
+        },
+        verification_matrix: verificationPlan(),
+        closure_criteria: ['validation passes'],
+        current_focus: 'quality contracts',
+        last_decision_id: 1,
+        last_event_id: 2,
+        updated_at: '2026-07-02T00:00:00.000Z',
+      });
+      assert.equal(masterPlan.schema_version, 'autopilot.master_plan.v1');
+
+      const decision = parseAutopilotDecisionRow({
+        schema_version: 'autopilot.decision.v1',
+        id: 1,
+        ts: '2026-07-02T00:00:00.000Z',
+        event: 'master_plan_created',
+        workstream: 'demo',
+        summary: 'Created durable plan.',
+        decision: 'Use Quality vNext contracts for semantic closure.',
+        master_plan_ref: 'master-plan.json',
+      });
+      assert.equal(decision.event, 'master_plan_created');
+
+      const audit = parseAutopilotExecutionAudit({
+        schema_version: 'autopilot.execution_audit.v1',
+        workstream: 'demo',
+        unit_id: 'u01',
+        role: 'implement',
+        attempt: 1,
+        audited_at: '2026-07-02T00:00:00.000Z',
+        cwd: root,
+        git_head: null,
+        dirty_baseline: false,
+        actual_changed_paths: ['packages/pi-autopilot/src/core/contracts/types.ts'],
+        status_reported_changed_paths: ['packages/pi-autopilot/src/core/contracts/types.ts'],
+        omitted_status_changes: [],
+        reported_but_not_actual_changes: [],
+        outside_owned_paths: [],
+        read_only_touched_paths: [],
+        untouchable_touched_paths: [],
+        declared_validation_commands: ['npm run typecheck'],
+        status_reported_commands: ['npm run typecheck'],
+        command_coverage_gaps: [],
+        classification: 'clean',
+        evidence_refs: [],
+        summary: 'Audit clean.',
+      });
+      assert.equal(audit.classification, 'clean');
+    });
+  });
+
+  void it('rejects malformed Quality vNext contracts loudly', async () => {
+    assert.throws(
+      () =>
+        parseAutopilotMasterPlan({
+          schema_version: 'autopilot.master_plan.v1',
+          workstream: 'demo',
+          mission_ref: '../mission.md',
+        }),
+      AutopilotContractValidationError,
+    );
+    assert.throws(
+      () =>
+        parseAutopilotDecisionRow({
+          schema_version: 'autopilot.decision.v1',
+          id: 1,
+          ts: '2026-07-02T00:00:00.000Z',
+          event: 'scope_exception_ratified',
+          workstream: 'demo',
+          summary: 'missing decision',
+        }),
+      AutopilotContractValidationError,
+    );
+    assert.throws(
+      () =>
+        parseAutopilotExecutionAudit({
+          schema_version: 'autopilot.execution_audit.v1',
+          workstream: 'demo',
+          unit_id: 'u01',
+          role: 'implement',
+          attempt: 1,
+          audited_at: '2026-07-02T00:00:00.000Z',
+          cwd: 'relative',
+          git_head: null,
+          dirty_baseline: null,
+          actual_changed_paths: [],
+          status_reported_changed_paths: [],
+          omitted_status_changes: [],
+          reported_but_not_actual_changes: [],
+          outside_owned_paths: [],
+          read_only_touched_paths: [],
+          untouchable_touched_paths: [],
+          declared_validation_commands: [],
+          status_reported_commands: [],
+          command_coverage_gaps: [],
+          classification: 'clean',
+          evidence_refs: [],
+          summary: 'bad cwd',
+        }),
+      AutopilotContractValidationError,
+    );
   });
 
   void it('rejects invalid contract fixtures loudly', async () => {
