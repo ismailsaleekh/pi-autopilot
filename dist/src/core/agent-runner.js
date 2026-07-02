@@ -4,9 +4,9 @@ import { spawn } from 'node:child_process';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { AUTOPILOT_STATUS_CONTEXT_ENV, AUTOPILOT_STATUS_TOOL, } from "./names.js";
-import { buildAutopilotProviderIdentity, buildAutopilotStatusToolContext, parseAutopilotStatusToolContext, validateAutopilotStatusEvidence, } from "./forced-output/index.js";
+import { buildAutopilotProviderIdentity, buildAutopilotStatusToolContext, deriveAutopilotArtifactRoot, parseAutopilotStatusToolContext, validateAutopilotStatusEvidence, } from "./forced-output/index.js";
 import { AutopilotForcedOutputEvidenceError } from "./forced-output/status-evidence.js";
-import { parseAutopilotUnitSpec } from "./contracts/index.js";
+import { parseAutopilotStatusEntry, parseAutopilotUnitSpec } from "./contracts/index.js";
 import { captureAutopilotExecutionBaseline, deriveAutopilotExecutionAuditPath, writeAutopilotExecutionAudit, } from "./execution-audit/index.js";
 import { assertAutopilotSpecQualityGate } from "./quality/spec-gate.js";
 import { AutopilotPromptTemplateError, renderAndMaybeWriteAutopilotPromptSnapshot, } from "./prompt-renderer/index.js";
@@ -173,6 +173,11 @@ export async function runAutopilotAgentFromSpecPath(specPath, options = {}) {
     const audit = await writeAttemptAudit(spec, auditBaseline, evidence.status, auditOutput);
     try {
         validateAutopilotEmitStatusCarrier(piResult, evidence.receipt.tool_call_id, evidence.receipt.status_sha256);
+        parseAutopilotStatusEntry(evidence.status, {
+            unitSpec: spec,
+            artifactRoot: deriveAutopilotArtifactRoot(spec),
+            executionAudit: audit,
+        });
     }
     catch (error) {
         throw new AutopilotAgentRunError('invalid-structured-output', {

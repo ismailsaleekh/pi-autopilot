@@ -132,6 +132,22 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function git(root: string, args: readonly string[]): void {
+  const result = spawnSync('git', args, { cwd: root, encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+}
+
+async function initGitWorktree(worktree: string): Promise<void> {
+  await mkdir(join(worktree, 'src'), { recursive: true });
+  await writeFile(join(worktree, 'src', 'smoke.ts'), 'export const smoke = 1;\n', 'utf8');
+  await writeFile(join(worktree, '.gitignore'), '.pi/\n', 'utf8');
+  git(worktree, ['init']);
+  git(worktree, ['config', 'user.email', 'autopilot@example.invalid']);
+  git(worktree, ['config', 'user.name', 'Autopilot Test']);
+  git(worktree, ['add', '.']);
+  git(worktree, ['commit', '-m', 'baseline']);
+}
+
 const CURRENT_PI_SUBSCRIPTION_MODELS = [
   'openai-codex/gpt-5.3-codex-spark',
   'openai-codex/gpt-5.4',
@@ -289,6 +305,28 @@ void describe('autopilot-agent-run wrapper', () => {
       assert.equal(result.statusEntry?.verdict, 'DONE');
       const receipt = JSON.parse(await readFile(unitSpec.receipt_output, 'utf8')) as FakeReceipt;
       assert.equal(receipt.tool_call_id, 'call-autopilot-fake-1');
+    });
+  });
+
+  void it('rejects success status that omits audit-detected changed paths', async () => {
+    await withTempDir(async (root) => {
+      const worktree = join(root, 'worktree');
+      await initGitWorktree(worktree);
+      const unitSpec = spec(root, { cwd: worktree });
+      const specPath = await writeSpec(root, unitSpec);
+      const fakePi = await writeFakePi(root);
+      await expectRejects(
+        () =>
+          runAutopilotAgentFromSpecPath(specPath, {
+            piExecutable: fakePi,
+            env: { ...process.env, AUTOPILOT_FAKE_PI_SCENARIO: 'omitted-actual-change' },
+            timeoutMsOverride: FAKE_PI_COMPLETION_TIMEOUT_MS,
+          }),
+        (error: unknown) =>
+          error instanceof AutopilotAgentRunError &&
+          error.failureClass === 'invalid-structured-output' &&
+          /success status omitted actual changed path/u.test(error.details.reason),
+      );
     });
   });
 
@@ -614,7 +652,7 @@ interface FakeReceipt {
 const FAKE_PI_SOURCE = `#!/usr/bin/env node
 import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
 
 const scenario = process.env.AUTOPILOT_FAKE_PI_SCENARIO || 'success';
@@ -683,6 +721,11 @@ function buildStatus(context) {
 }
 function emitForcedStatus() {
   const context = loadContext();
+  if (scenario === 'omitted-actual-change') {
+    const omittedPath = join(context.unit_spec.cwd, 'src', 'omitted.ts');
+    mkdirSync(dirname(omittedPath), { recursive: true });
+    writeFileSync(omittedPath, 'export const omitted = true;\\n', 'utf8');
+  }
   const status = buildStatus(context);
   mkdirSync(dirname(context.status_output), { recursive: true });
   mkdirSync(dirname(context.receipt_output), { recursive: true });

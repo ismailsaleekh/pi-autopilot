@@ -324,11 +324,18 @@ function assertHandoffShape(value: unknown): void {
     expectString(record['workstream'], '/workstream', issues, { pattern: WORKSTREAM, max: 128 });
     expectString(record['written_at'], '/written_at', issues, { pattern: ISO_TIMESTAMP });
     expectEnum(record['reason'], AUTOPILOT_HANDOFF_REASON_VALUES, '/reason', issues);
+    expectString(record['mission_ref'], '/mission_ref', issues, { max: 512 });
+    expectString(record['master_plan_ref'], '/master_plan_ref', issues, { max: 512 });
+    if (record['decision_tail_ref'] !== null) {
+      expectString(record['decision_tail_ref'], '/decision_tail_ref', issues, { max: 512 });
+    }
+    expectInteger(record['latest_decision_id'], '/latest_decision_id', issues, 0, 9_000_000_000_000_000);
     expectString(record['state_ref'], '/state_ref', issues, { max: 512 });
     if (record['event_tail_ref'] !== null) {
       expectString(record['event_tail_ref'], '/event_tail_ref', issues, { max: 512 });
     }
     expectStringArray(record['status_refs'], '/status_refs', issues, 500);
+    expectStringArray(record['audit_refs'], '/audit_refs', issues, 500);
     expectString(record['summary'], '/summary', issues, { max: 1000 });
     expectStringArray(record['open_blockers'], '/open_blockers', issues, 80, 0, 500);
     expectStringArray(record['next_actions'], '/next_actions', issues, 80, 0, 500);
@@ -399,6 +406,8 @@ function assertExecutionAuditShape(value: unknown): void {
     expectString(record['cwd'], '/cwd', issues, { max: 1024 });
     if (record['git_head'] !== null) expectString(record['git_head'], '/git_head', issues, { max: 80 });
     if (record['dirty_baseline'] !== null) expectBoolean(record['dirty_baseline'], '/dirty_baseline', issues);
+    expectStringArray(record['dirty_baseline_paths'], '/dirty_baseline_paths', issues, 500);
+    expectStringArray(record['dirty_relevant_paths'], '/dirty_relevant_paths', issues, 500);
     expectStringArray(record['actual_changed_paths'], '/actual_changed_paths', issues, 500);
     expectStringArray(record['status_reported_changed_paths'], '/status_reported_changed_paths', issues, 500);
     expectStringArray(record['omitted_status_changes'], '/omitted_status_changes', issues, 500);
@@ -883,6 +892,9 @@ function statusMatchesExecutionAuditIssues(
         issues.push(`success status omitted actual changed path ${JSON.stringify(changedPath)}`);
       }
     }
+    for (const reportedPath of audit.reported_but_not_actual_changes) {
+      issues.push(`success status reported unchanged path ${JSON.stringify(reportedPath)}`);
+    }
   }
   return issues;
 }
@@ -1111,12 +1123,20 @@ function semanticReceiptIssues(
 
 function semanticHandoffIssues(handoff: AutopilotHandoff): string[] {
   const issues: string[] = [];
+  issues.push(...relativePathIssues(handoff.mission_ref, 'mission_ref'));
+  issues.push(...relativePathIssues(handoff.master_plan_ref, 'master_plan_ref'));
+  if (handoff.decision_tail_ref !== null) {
+    issues.push(...relativePathIssues(handoff.decision_tail_ref, 'decision_tail_ref'));
+  }
   issues.push(...relativePathIssues(handoff.state_ref, 'state_ref'));
   if (handoff.event_tail_ref !== null) {
     issues.push(...relativePathIssues(handoff.event_tail_ref, 'event_tail_ref'));
   }
   for (const statusRef of handoff.status_refs) {
     issues.push(...relativePathIssues(statusRef, 'status_refs entry'));
+  }
+  for (const auditRef of handoff.audit_refs) {
+    issues.push(...relativePathIssues(auditRef, 'audit_refs entry'));
   }
   if (
     handoff.reason === 'context-halt' &&
@@ -1173,6 +1193,8 @@ function semanticExecutionAuditIssues(audit: AutopilotExecutionAudit): string[] 
   const issues: string[] = [];
   issues.push(...absolutePathIssues(audit.cwd, 'cwd'));
   for (const [field, paths] of [
+    ['dirty_baseline_paths', audit.dirty_baseline_paths],
+    ['dirty_relevant_paths', audit.dirty_relevant_paths],
     ['actual_changed_paths', audit.actual_changed_paths],
     ['status_reported_changed_paths', audit.status_reported_changed_paths],
     ['omitted_status_changes', audit.omitted_status_changes],
@@ -1187,6 +1209,23 @@ function semanticExecutionAuditIssues(audit: AutopilotExecutionAudit): string[] 
   issues.push(...duplicateIssues('declared_validation_commands', audit.declared_validation_commands));
   issues.push(...duplicateIssues('status_reported_commands', audit.status_reported_commands));
   issues.push(...duplicateIssues('command_coverage_gaps', audit.command_coverage_gaps));
+  if (audit.dirty_baseline === null && audit.dirty_baseline_paths.length > 0) {
+    issues.push('dirty_baseline null requires empty dirty_baseline_paths');
+  }
+  if (audit.dirty_baseline === false && audit.dirty_baseline_paths.length > 0) {
+    issues.push('dirty_baseline false requires empty dirty_baseline_paths');
+  }
+  if (audit.dirty_baseline === true && audit.dirty_baseline_paths.length === 0) {
+    issues.push('dirty_baseline true requires dirty_baseline_paths');
+  }
+  if (audit.dirty_baseline === null && audit.dirty_relevant_paths.length > 0) {
+    issues.push('dirty_baseline null requires empty dirty_relevant_paths');
+  }
+  for (const dirtyRelevantPath of audit.dirty_relevant_paths) {
+    if (!audit.dirty_baseline_paths.includes(dirtyRelevantPath)) {
+      issues.push(`dirty_relevant_paths entry ${JSON.stringify(dirtyRelevantPath)} must be present in dirty_baseline_paths`);
+    }
+  }
   if (audit.classification !== 'audit-unavailable') {
     const expectedOmitted = sortedDifference(audit.actual_changed_paths, audit.status_reported_changed_paths);
     if (!sameStringSet(audit.omitted_status_changes, expectedOmitted)) {
@@ -1473,7 +1512,7 @@ function sameStringSet(left: readonly string[], right: readonly string[]): boole
 function expectedExecutionAuditClassification(audit: AutopilotExecutionAudit): AutopilotExecutionAudit['classification'] {
   if (audit.untouchable_touched_paths.length > 0) return 'critical-protected-path-violation';
   if (audit.read_only_touched_paths.length > 0) return 'protected-path-review-required';
-  if (audit.dirty_baseline !== false) return 'audit-unavailable';
+  if (audit.dirty_baseline === null || audit.dirty_relevant_paths.length > 0) return 'audit-unavailable';
   if (
     audit.outside_owned_paths.length > 0 ||
     audit.omitted_status_changes.length > 0 ||
@@ -1803,9 +1842,14 @@ const handoffRequired = [
   'workstream',
   'written_at',
   'reason',
+  'mission_ref',
+  'master_plan_ref',
+  'decision_tail_ref',
+  'latest_decision_id',
   'state_ref',
   'event_tail_ref',
   'status_refs',
+  'audit_refs',
   'summary',
   'open_blockers',
   'next_actions',
@@ -1866,6 +1910,8 @@ const executionAuditRequired = [
   'cwd',
   'git_head',
   'dirty_baseline',
+  'dirty_baseline_paths',
+  'dirty_relevant_paths',
   'actual_changed_paths',
   'status_reported_changed_paths',
   'omitted_status_changes',

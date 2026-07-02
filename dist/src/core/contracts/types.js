@@ -38,6 +38,32 @@ export const AUTOPILOT_AUDIT_CLASSIFICATION_VALUES = [
     'critical-protected-path-violation',
     'audit-unavailable',
 ];
+export const AUTOPILOT_WORK_ITEM_STATE_VALUES = [
+    'planned',
+    'running',
+    'transport-complete',
+    'audit-review',
+    'validation-ready',
+    'validated',
+    'needs-fix',
+    'fixed',
+    'revalidation-ready',
+    'closed',
+];
+export const AUTOPILOT_EXCEPTION_STATE_VALUES = [
+    'open',
+    'ratified',
+    'split',
+    'remediated',
+    'operator-decision',
+];
+export const AUTOPILOT_ADJUDICATION_OUTCOME_VALUES = [
+    'ratify',
+    'split',
+    'remediate',
+    'operator-decision',
+];
+export const AUTOPILOT_CLOSURE_GATE_STATUS_VALUES = ['not-run', 'passed', 'failed'];
 export const AUTOPILOT_DECISION_EVENT_VALUES = [
     'mission_created',
     'master_plan_created',

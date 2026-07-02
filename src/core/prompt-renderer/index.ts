@@ -479,6 +479,7 @@ function roleSpecificInstructions(role: AutopilotRole): string {
       return [
         '- Resolve a blocker, conflict, or readiness question through read-first analysis and a clear ruling.',
         '- Prefer a compact adjudication artifact under evidence_dir when details exceed the status bounds.',
+        '- Classify the outcome as ratify, split, remediate, or operator-decision, and state the parent decision-log/master-plan update required.',
         '- Do not make implementation fixes. If a real human product or architecture fork remains, emit BLOCKED with options and recommendation.',
         '- changed_paths must be empty for this role.',
       ].join('\n');

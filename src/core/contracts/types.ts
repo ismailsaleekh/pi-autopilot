@@ -380,9 +380,14 @@ export interface AutopilotHandoff {
   readonly workstream: string;
   readonly written_at: string;
   readonly reason: AutopilotHandoffReason;
+  readonly mission_ref: string;
+  readonly master_plan_ref: string;
+  readonly decision_tail_ref: string | null;
+  readonly latest_decision_id: number;
   readonly state_ref: string;
   readonly event_tail_ref: string | null;
   readonly status_refs: readonly string[];
+  readonly audit_refs: readonly string[];
   readonly summary: string;
   readonly open_blockers: readonly string[];
   readonly next_actions: readonly string[];
@@ -451,6 +456,8 @@ export interface AutopilotExecutionAudit {
   readonly cwd: string;
   readonly git_head: string | null;
   readonly dirty_baseline: boolean | null;
+  readonly dirty_baseline_paths: readonly string[];
+  readonly dirty_relevant_paths: readonly string[];
   readonly actual_changed_paths: readonly string[];
   readonly status_reported_changed_paths: readonly string[];
   readonly omitted_status_changes: readonly string[];

@@ -73,10 +73,16 @@ export function buildAutopilotExecutionAudit(input: {
   readonly statusEntry: AutopilotStatusEntry | null;
 }): AutopilotExecutionAudit {
   const auditAvailable = input.baseline.available && input.postRun.available;
-  const baselineDirty = input.baseline.dirtyPaths.length > 0;
   const runtimeRoot = runtimeRootRelativePrefix(input.unitSpec);
+  const baselineDirtyPaths = auditAvailable
+    ? input.baseline.dirtyPaths.filter((path) => !matchesPathPattern(path, runtimeRoot))
+    : [];
+  const baselineDirty = baselineDirtyPaths.length > 0;
+  const dirtyRelevantPaths = baselineDirtyPaths.filter((path) =>
+    matchesPathPatterns(path, relevantDirtyPathPatterns(input.unitSpec)),
+  );
   const actualChangedPaths = auditAvailable
-    ? sortedDifference(input.postRun.changedPaths, input.baseline.dirtyPaths).filter(
+    ? sortedDifference(input.postRun.changedPaths, baselineDirtyPaths).filter(
         (path) => !matchesPathPattern(path, runtimeRoot),
       )
     : [];
@@ -103,7 +109,7 @@ export function buildAutopilotExecutionAudit(input: {
   const commandCoverageGaps = sortedDifference(declaredValidationCommands, statusReportedCommands);
   const classification = classifyAudit({
     auditAvailable,
-    baselineDirty,
+    dirtyRelevantPaths,
     outsideOwnedPaths,
     readOnlyTouchedPaths,
     untouchableTouchedPaths,
@@ -120,7 +126,9 @@ export function buildAutopilotExecutionAudit(input: {
     audited_at: new Date().toISOString(),
     cwd: input.unitSpec.cwd,
     git_head: input.baseline.gitHead ?? input.postRun.gitHead,
-    dirty_baseline: input.baseline.available ? baselineDirty : null,
+    dirty_baseline: auditAvailable ? baselineDirty : null,
+    dirty_baseline_paths: baselineDirtyPaths,
+    dirty_relevant_paths: dirtyRelevantPaths,
     actual_changed_paths: actualChangedPaths,
     status_reported_changed_paths: statusReportedChangedPaths,
     omitted_status_changes: omittedStatusChanges,
@@ -133,13 +141,18 @@ export function buildAutopilotExecutionAudit(input: {
     command_coverage_gaps: commandCoverageGaps,
     classification,
     evidence_refs: [],
-    summary: auditSummary(classification, auditAvailable, baselineDirty),
+    summary: auditSummary({
+      classification,
+      auditAvailable,
+      baselineDirty,
+      dirtyRelevantPaths,
+    }),
   });
 }
 
 function classifyAudit(input: {
   readonly auditAvailable: boolean;
-  readonly baselineDirty: boolean;
+  readonly dirtyRelevantPaths: readonly string[];
   readonly outsideOwnedPaths: readonly string[];
   readonly readOnlyTouchedPaths: readonly string[];
   readonly untouchableTouchedPaths: readonly string[];
@@ -149,7 +162,7 @@ function classifyAudit(input: {
 }): AutopilotAuditClassification {
   if (input.untouchableTouchedPaths.length > 0) return 'critical-protected-path-violation';
   if (input.readOnlyTouchedPaths.length > 0) return 'protected-path-review-required';
-  if (!input.auditAvailable || input.baselineDirty) return 'audit-unavailable';
+  if (!input.auditAvailable || input.dirtyRelevantPaths.length > 0) return 'audit-unavailable';
   if (
     input.outsideOwnedPaths.length > 0 ||
     input.omittedStatusChanges.length > 0 ||
@@ -161,15 +174,21 @@ function classifyAudit(input: {
   return 'clean';
 }
 
-function auditSummary(
-  classification: AutopilotAuditClassification,
-  auditAvailable: boolean,
-  baselineDirty: boolean,
-): string {
-  if (!auditAvailable) return 'Execution audit could not read git status; semantic closure requires review.';
-  if (baselineDirty) return 'Execution audit found a dirty baseline; semantic closure requires review.';
-  if (classification === 'clean') return 'Execution audit is clean.';
-  return `Execution audit classified this attempt as ${classification}.`;
+function auditSummary(input: {
+  readonly classification: AutopilotAuditClassification;
+  readonly auditAvailable: boolean;
+  readonly baselineDirty: boolean;
+  readonly dirtyRelevantPaths: readonly string[];
+}): string {
+  if (!input.auditAvailable) return 'Execution audit could not read git status; semantic closure requires review.';
+  if (input.dirtyRelevantPaths.length > 0) {
+    return 'Execution audit found dirty baseline paths on unit-owned or protected surfaces; semantic closure requires attribution review.';
+  }
+  if (input.classification === 'clean' && input.baselineDirty) {
+    return 'Execution audit is clean; unrelated dirty baseline paths are recorded as caveats.';
+  }
+  if (input.classification === 'clean') return 'Execution audit is clean.';
+  return `Execution audit classified this attempt as ${input.classification}.`;
 }
 
 function readGitStatusSnapshot(cwd: string): GitStatusSnapshot {
@@ -229,6 +248,10 @@ function toPosixRelativePath(path: string): string {
 
 function matchesPathPatterns(path: string, patterns: readonly string[]): boolean {
   return patterns.some((pattern) => matchesPathPattern(path, pattern));
+}
+
+function relevantDirtyPathPatterns(spec: AutopilotUnitSpec): readonly string[] {
+  return Object.freeze([...spec.owned_paths, ...spec.read_only_paths, ...spec.untouchable_paths]);
 }
 
 function matchesPathPattern(path: string, pattern: string): boolean {

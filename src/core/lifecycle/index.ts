@@ -95,15 +95,21 @@ export function evaluateAutopilotClosureGate(
     blockingReasons.push(`audit unavailable for ${audit.unit_id}`);
   }
 
-  for (const [workItemId, workItem] of Object.entries(state.work_items ?? {})) {
-    if (workItem.source_changing && workItem.state !== 'closed') {
+  const sourceChangingWorkItems = Object.entries(state.work_items ?? {}).filter(
+    (entry) => entry[1].source_changing,
+  );
+  for (const [workItemId, workItem] of sourceChangingWorkItems) {
+    if (workItem.state !== 'closed') {
       blockingReasons.push(`source-changing work item ${workItemId} is ${workItem.state}, not closed`);
     }
+    blockingReasons.push(
+      ...sourceChangingWorkItemValidationBlockers({ state, workItemId, workItem, statuses }),
+    );
   }
 
-  const sourceChangingAuditExists = audits.some((audit) => audit.role === 'implement' || audit.role === 'fix');
-  if (sourceChangingAuditExists && !hasIndependentValidationPass(statuses)) {
-    blockingReasons.push('source-changing work requires independent validation PASS');
+  const sourceChangingAuditExists = audits.some(isSourceChangingAudit);
+  if (sourceChangingAuditExists && sourceChangingWorkItems.length === 0) {
+    blockingReasons.push('source-changing audits require work_items with independent validation refs');
   }
 
   const requiresFinalBughunt =
@@ -116,7 +122,7 @@ export function evaluateAutopilotClosureGate(
   return Object.freeze({
     status,
     checked_at: input.checkedAt ?? new Date().toISOString(),
-    blocking_reasons: Object.freeze(blockingReasons),
+    blocking_reasons: [...blockingReasons],
     summary:
       status === 'passed'
         ? 'Autopilot closure gate passed.'
@@ -124,10 +130,71 @@ export function evaluateAutopilotClosureGate(
   });
 }
 
-function hasIndependentValidationPass(statuses: readonly AutopilotStatusEntry[]): boolean {
-  return statuses.some(
-    (status) => (status.role === 'validate' || status.role === 'bughunt') && status.verdict === 'PASS',
+function sourceChangingWorkItemValidationBlockers(input: {
+  readonly state: AutopilotState;
+  readonly workItemId: string;
+  readonly workItem: AutopilotWorkItem;
+  readonly statuses: readonly AutopilotStatusEntry[];
+}): readonly string[] {
+  const blockers: string[] = [];
+  const validationUnitId = input.workItem.validation_unit_id;
+  const validationStatusRef = input.workItem.validation_status_ref;
+  if (validationUnitId === undefined) {
+    blockers.push(`source-changing work item ${input.workItemId} lacks validation_unit_id`);
+    return blockers;
+  }
+  if (validationStatusRef === undefined) {
+    blockers.push(`source-changing work item ${input.workItemId} lacks validation_status_ref`);
+    return blockers;
+  }
+  if (validationUnitId === input.workItem.implementation_unit_id) {
+    blockers.push(`source-changing work item ${input.workItemId} uses its implementation unit as validation`);
+  }
+  if (!input.workItem.unit_ids.includes(validationUnitId)) {
+    blockers.push(`source-changing work item ${input.workItemId} validation_unit_id is outside unit_ids`);
+  }
+  const stateUnit = input.state.units[validationUnitId];
+  if (stateUnit === undefined) {
+    blockers.push(`source-changing work item ${input.workItemId} validation_unit_id is missing from state units`);
+    return blockers;
+  }
+  if (stateUnit.status_ref !== undefined && stateUnit.status_ref !== validationStatusRef) {
+    blockers.push(`source-changing work item ${input.workItemId} validation_status_ref does not match state unit status_ref`);
+  }
+  const validationStatuses = input.statuses.filter(
+    (status) =>
+      status.workstream === input.state.workstream &&
+      status.unit_id === validationUnitId &&
+      isValidationRole(status.role),
   );
+  const matchingStatus = validationStatuses.find((status) =>
+    statusRefCandidates(status, stateUnit.status_ref).includes(validationStatusRef),
+  );
+  if (matchingStatus === undefined) {
+    const reason =
+      validationStatuses.length === 0
+        ? 'lacks referenced validation PASS status'
+        : 'validation_status_ref does not match validation status identity';
+    blockers.push(`source-changing work item ${input.workItemId} ${reason}`);
+    return blockers;
+  }
+  if (matchingStatus.verdict !== 'PASS') {
+    blockers.push(`source-changing work item ${input.workItemId} validation status is ${matchingStatus.verdict}, not PASS`);
+  }
+  return blockers;
+}
+
+function statusRefCandidates(status: AutopilotStatusEntry, stateStatusRef: string | undefined): readonly string[] {
+  const canonical = `statuses/${status.unit_id}.${status.role}.attempt-${String(status.attempt)}.json`;
+  return stateStatusRef === undefined ? [canonical] : [canonical, stateStatusRef];
+}
+
+function isValidationRole(role: AutopilotStatusEntry['role']): boolean {
+  return role === 'validate' || role === 'bughunt';
+}
+
+function isSourceChangingAudit(audit: AutopilotExecutionAudit): boolean {
+  return audit.role === 'implement' || audit.role === 'fix';
 }
 
 function hasBughuntPass(statuses: readonly AutopilotStatusEntry[]): boolean {

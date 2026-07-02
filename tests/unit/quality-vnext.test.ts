@@ -413,6 +413,34 @@ void describe('Autopilot execution audits', () => {
       );
 
       git(worktree, ['checkout', '--', 'src/owned.ts']);
+      await mkdir(join(worktree, 'docs'), { recursive: true });
+      await writeFile(join(worktree, 'docs', 'operator-note.md'), 'pre-existing note\n', 'utf8');
+      const unrelatedDirtyBaseline = await captureAutopilotExecutionBaseline(worktree);
+      await writeFile(join(worktree, 'src', 'owned.ts'), 'export const value = 3;\n', 'utf8');
+      const unrelatedDirtyAudit = await writeAutopilotExecutionAudit({
+        unitSpec: spec,
+        baseline: unrelatedDirtyBaseline,
+        statusEntry: passingStatus(spec),
+      });
+      assert.equal(unrelatedDirtyAudit.classification, 'clean');
+      assert.equal(unrelatedDirtyAudit.dirty_baseline, true);
+      assert.deepEqual(unrelatedDirtyAudit.dirty_baseline_paths, ['docs/operator-note.md']);
+      assert.deepEqual(unrelatedDirtyAudit.dirty_relevant_paths, []);
+
+      git(worktree, ['checkout', '--', 'src/owned.ts']);
+      await rm(join(worktree, 'docs'), { recursive: true, force: true });
+      await writeFile(join(worktree, 'README.md'), '# pre-existing dirty read-only change\n', 'utf8');
+      const relevantDirtyBaseline = await captureAutopilotExecutionBaseline(worktree);
+      await writeFile(join(worktree, 'src', 'owned.ts'), 'export const value = 4;\n', 'utf8');
+      const relevantDirtyAudit = await writeAutopilotExecutionAudit({
+        unitSpec: spec,
+        baseline: relevantDirtyBaseline,
+        statusEntry: passingStatus(spec),
+      });
+      assert.equal(relevantDirtyAudit.classification, 'audit-unavailable');
+      assert.deepEqual(relevantDirtyAudit.dirty_relevant_paths, ['README.md']);
+
+      git(worktree, ['checkout', '--', 'src/owned.ts', 'README.md']);
       const scopeBaseline = await captureAutopilotExecutionBaseline(worktree);
       await writeFile(join(worktree, 'src', 'outside.ts'), 'export const outside = true;\n', 'utf8');
       const scopeAudit = await writeAutopilotExecutionAudit({

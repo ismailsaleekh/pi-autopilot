@@ -11,13 +11,14 @@ import {
 import {
   buildAutopilotProviderIdentity,
   buildAutopilotStatusToolContext,
+  deriveAutopilotArtifactRoot,
   parseAutopilotStatusToolContext,
   validateAutopilotStatusEvidence,
   type AutopilotProviderIdentity,
   type AutopilotStatusToolContext,
 } from './forced-output/index.ts';
 import { AutopilotForcedOutputEvidenceError } from './forced-output/status-evidence.ts';
-import { parseAutopilotUnitSpec } from './contracts/index.ts';
+import { parseAutopilotStatusEntry, parseAutopilotUnitSpec } from './contracts/index.ts';
 import type { AutopilotExecutionAudit, AutopilotStatusEntry, AutopilotUnitSpec } from './contracts/types.ts';
 import {
   captureAutopilotExecutionBaseline,
@@ -374,6 +375,11 @@ export async function runAutopilotAgentFromSpecPath(
       evidence.receipt.tool_call_id,
       evidence.receipt.status_sha256,
     );
+    parseAutopilotStatusEntry(evidence.status, {
+      unitSpec: spec,
+      artifactRoot: deriveAutopilotArtifactRoot(spec),
+      executionAudit: audit,
+    });
   } catch (error) {
     throw new AutopilotAgentRunError('invalid-structured-output', {
       reason: errorMessage(error),

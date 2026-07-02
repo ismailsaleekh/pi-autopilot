@@ -127,7 +127,10 @@ void describe('Autopilot contracts', () => {
       parseAutopilotReceipt(await fixture('valid-receipt.json')).tool_name,
       'autopilot_emit_status',
     );
-    assert.equal(parseAutopilotHandoff(await fixture('valid-handoff.json')).reason, 'operator-pause');
+    const handoff = parseAutopilotHandoff(await fixture('valid-handoff.json'));
+    assert.equal(handoff.reason, 'operator-pause');
+    assert.equal(handoff.latest_decision_id, 1);
+    assert.deepEqual(handoff.audit_refs, ['execution-audits/u01-implement.implement.attempt-1.json']);
   });
 
   void it('parses quality unit-spec fields and new Quality vNext contracts', async () => {
@@ -207,6 +210,8 @@ void describe('Autopilot contracts', () => {
         cwd: root,
         git_head: null,
         dirty_baseline: false,
+        dirty_baseline_paths: [],
+        dirty_relevant_paths: [],
         actual_changed_paths: ['packages/pi-autopilot/src/core/contracts/types.ts'],
         status_reported_changed_paths: ['packages/pi-autopilot/src/core/contracts/types.ts'],
         omitted_status_changes: [],
@@ -259,6 +264,8 @@ void describe('Autopilot contracts', () => {
           cwd: 'relative',
           git_head: null,
           dirty_baseline: null,
+          dirty_baseline_paths: [],
+          dirty_relevant_paths: [],
           actual_changed_paths: [],
           status_reported_changed_paths: [],
           omitted_status_changes: [],

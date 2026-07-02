@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { isAbsolute, normalize, relative, resolve, sep } from 'node:path';
 import { AUTOPILOT_JSON_SCHEMAS, AUTOPILOT_STATUS_ENTRY_JSON_SCHEMA, } from "./schemas.js";
-import { AUTOPILOT_AUDIT_CLASSIFICATION_VALUES, AUTOPILOT_COMMAND_STATUS_VALUES, AUTOPILOT_CONTEXT_GATE_VALUES, AUTOPILOT_DECISION_EVENT_VALUES, AUTOPILOT_EVENT_TYPE_VALUES, AUTOPILOT_HANDOFF_REASON_VALUES, AUTOPILOT_QUALITY_PROFILE_VALUES, AUTOPILOT_RISK_LEVEL_VALUES, AUTOPILOT_ROLE_VALUES, AUTOPILOT_SEVERITY_VALUES, AUTOPILOT_TEMPLATE_VALUES, AUTOPILOT_THINKING_VALUES, AUTOPILOT_UNIT_STATE_VALUES, AUTOPILOT_VERDICT_VALUES, AUTOPILOT_WORKSTREAM_STATUS_VALUES, } from "./types.js";
+import { AUTOPILOT_AUDIT_CLASSIFICATION_VALUES, AUTOPILOT_CLOSURE_GATE_STATUS_VALUES, AUTOPILOT_COMMAND_STATUS_VALUES, AUTOPILOT_CONTEXT_GATE_VALUES, AUTOPILOT_DECISION_EVENT_VALUES, AUTOPILOT_EVENT_TYPE_VALUES, AUTOPILOT_EXCEPTION_STATE_VALUES, AUTOPILOT_HANDOFF_REASON_VALUES, AUTOPILOT_QUALITY_PROFILE_VALUES, AUTOPILOT_RISK_LEVEL_VALUES, AUTOPILOT_ROLE_VALUES, AUTOPILOT_SEVERITY_VALUES, AUTOPILOT_TEMPLATE_VALUES, AUTOPILOT_THINKING_VALUES, AUTOPILOT_UNIT_STATE_VALUES, AUTOPILOT_VERDICT_VALUES, AUTOPILOT_WORK_ITEM_STATE_VALUES, AUTOPILOT_WORKSTREAM_STATUS_VALUES, } from "./types.js";
 const ISO_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;
 const SHA256 = /^sha256:[a-f0-9]{64}$/u;
 const WORKSTREAM = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
@@ -199,6 +199,22 @@ function assertStateShape(value) {
         checkUnits(record['units'], '/units', issues);
         expectStringArray(record['operator_questions'], '/operator_questions', issues, 80, 0, 500);
         expectStringArray(record['next_actions'], '/next_actions', issues, 80, 0, 500);
+        if (hasKey(record, 'work_items'))
+            checkWorkItems(record['work_items'], '/work_items', issues);
+        if (hasKey(record, 'audit_review_queue')) {
+            expectStringArray(record['audit_review_queue'], '/audit_review_queue', issues, 500, 0, 128, UNIT_ID);
+        }
+        if (hasKey(record, 'validation_ready_queue')) {
+            expectStringArray(record['validation_ready_queue'], '/validation_ready_queue', issues, 500, 0, 128, UNIT_ID);
+        }
+        if (hasKey(record, 'scope_exceptions')) {
+            expectArray(record['scope_exceptions'], '/scope_exceptions', issues, 500, 0, checkScopeException);
+        }
+        if (hasKey(record, 'protected_path_exceptions')) {
+            expectArray(record['protected_path_exceptions'], '/protected_path_exceptions', issues, 500, 0, checkProtectedPathException);
+        }
+        if (hasKey(record, 'closure_gate'))
+            checkClosureGate(record['closure_gate'], '/closure_gate', issues);
     }
     throwIfIssues('AutopilotState', issues);
 }
@@ -234,11 +250,18 @@ function assertHandoffShape(value) {
         expectString(record['workstream'], '/workstream', issues, { pattern: WORKSTREAM, max: 128 });
         expectString(record['written_at'], '/written_at', issues, { pattern: ISO_TIMESTAMP });
         expectEnum(record['reason'], AUTOPILOT_HANDOFF_REASON_VALUES, '/reason', issues);
+        expectString(record['mission_ref'], '/mission_ref', issues, { max: 512 });
+        expectString(record['master_plan_ref'], '/master_plan_ref', issues, { max: 512 });
+        if (record['decision_tail_ref'] !== null) {
+            expectString(record['decision_tail_ref'], '/decision_tail_ref', issues, { max: 512 });
+        }
+        expectInteger(record['latest_decision_id'], '/latest_decision_id', issues, 0, 9_000_000_000_000_000);
         expectString(record['state_ref'], '/state_ref', issues, { max: 512 });
         if (record['event_tail_ref'] !== null) {
             expectString(record['event_tail_ref'], '/event_tail_ref', issues, { max: 512 });
         }
         expectStringArray(record['status_refs'], '/status_refs', issues, 500);
+        expectStringArray(record['audit_refs'], '/audit_refs', issues, 500);
         expectString(record['summary'], '/summary', issues, { max: 1000 });
         expectStringArray(record['open_blockers'], '/open_blockers', issues, 80, 0, 500);
         expectStringArray(record['next_actions'], '/next_actions', issues, 80, 0, 500);
@@ -308,6 +331,8 @@ function assertExecutionAuditShape(value) {
             expectString(record['git_head'], '/git_head', issues, { max: 80 });
         if (record['dirty_baseline'] !== null)
             expectBoolean(record['dirty_baseline'], '/dirty_baseline', issues);
+        expectStringArray(record['dirty_baseline_paths'], '/dirty_baseline_paths', issues, 500);
+        expectStringArray(record['dirty_relevant_paths'], '/dirty_relevant_paths', issues, 500);
         expectStringArray(record['actual_changed_paths'], '/actual_changed_paths', issues, 500);
         expectStringArray(record['status_reported_changed_paths'], '/status_reported_changed_paths', issues, 500);
         expectStringArray(record['omitted_status_changes'], '/omitted_status_changes', issues, 500);
@@ -490,6 +515,75 @@ function checkStateUnit(value, label, issues) {
     optionalString(record, 'status_ref', `${label}/status_ref`, issues, { max: 512 });
     optionalString(record, 'receipt_ref', `${label}/receipt_ref`, issues, { max: 512 });
     expectString(record['summary'], `${label}/summary`, issues, { max: 360 });
+}
+function checkWorkItems(value, label, issues) {
+    const record = requireRecord(value, label, issues);
+    if (record === undefined)
+        return;
+    for (const [key, item] of Object.entries(record)) {
+        if (!UNIT_ID.test(key))
+            issues.push(`${label} key ${JSON.stringify(key)} is invalid`);
+        checkWorkItem(item, `${label}/${key}`, issues);
+    }
+}
+function checkWorkItem(value, label, issues) {
+    const record = requireRecord(value, label, issues);
+    if (record === undefined)
+        return;
+    checkKnownKeys(record, workItemKeys, label, issues);
+    checkRequired(record, workItemRequired, label, issues);
+    expectString(record['work_item_id'], `${label}/work_item_id`, issues, { pattern: UNIT_ID, max: 128 });
+    expectEnum(record['state'], AUTOPILOT_WORK_ITEM_STATE_VALUES, `${label}/state`, issues);
+    expectBoolean(record['source_changing'], `${label}/source_changing`, issues);
+    expectStringArray(record['unit_ids'], `${label}/unit_ids`, issues, 500, 0, 128, UNIT_ID);
+    optionalString(record, 'implementation_unit_id', `${label}/implementation_unit_id`, issues, { pattern: UNIT_ID, max: 128 });
+    optionalString(record, 'validation_unit_id', `${label}/validation_unit_id`, issues, { pattern: UNIT_ID, max: 128 });
+    optionalString(record, 'audit_ref', `${label}/audit_ref`, issues, { max: 512 });
+    optionalString(record, 'status_ref', `${label}/status_ref`, issues, { max: 512 });
+    optionalString(record, 'validation_status_ref', `${label}/validation_status_ref`, issues, { max: 512 });
+    expectString(record['summary'], `${label}/summary`, issues, { max: 360 });
+}
+function checkScopeException(value, label, issues) {
+    const record = requireRecord(value, label, issues);
+    if (record === undefined)
+        return;
+    checkKnownKeys(record, scopeExceptionKeys, label, issues);
+    checkRequired(record, scopeExceptionRequired, label, issues);
+    expectString(record['exception_id'], `${label}/exception_id`, issues, { pattern: UNIT_ID, max: 128 });
+    expectString(record['unit_id'], `${label}/unit_id`, issues, { pattern: UNIT_ID, max: 128 });
+    expectString(record['audit_ref'], `${label}/audit_ref`, issues, { max: 512 });
+    expectStringArray(record['paths'], `${label}/paths`, issues, 500, 1);
+    expectEnum(record['state'], AUTOPILOT_EXCEPTION_STATE_VALUES, `${label}/state`, issues);
+    optionalString(record, 'decision_ref', `${label}/decision_ref`, issues, { max: 512 });
+    expectString(record['summary'], `${label}/summary`, issues, { max: 500 });
+}
+function checkProtectedPathException(value, label, issues) {
+    const record = requireRecord(value, label, issues);
+    if (record === undefined)
+        return;
+    checkKnownKeys(record, protectedPathExceptionKeys, label, issues);
+    checkRequired(record, protectedPathExceptionRequired, label, issues);
+    expectString(record['exception_id'], `${label}/exception_id`, issues, { pattern: UNIT_ID, max: 128 });
+    expectString(record['unit_id'], `${label}/unit_id`, issues, { pattern: UNIT_ID, max: 128 });
+    expectString(record['audit_ref'], `${label}/audit_ref`, issues, { max: 512 });
+    expectStringArray(record['read_only_paths'], `${label}/read_only_paths`, issues, 500);
+    expectStringArray(record['untouchable_paths'], `${label}/untouchable_paths`, issues, 500);
+    expectEnum(record['state'], AUTOPILOT_EXCEPTION_STATE_VALUES, `${label}/state`, issues);
+    optionalString(record, 'decision_ref', `${label}/decision_ref`, issues, { max: 512 });
+    expectString(record['summary'], `${label}/summary`, issues, { max: 500 });
+}
+function checkClosureGate(value, label, issues) {
+    const record = requireRecord(value, label, issues);
+    if (record === undefined)
+        return;
+    checkKnownKeys(record, closureGateKeys, label, issues);
+    checkRequired(record, closureGateRequired, label, issues);
+    expectEnum(record['status'], AUTOPILOT_CLOSURE_GATE_STATUS_VALUES, `${label}/status`, issues);
+    optionalString(record, 'checked_at', `${label}/checked_at`, issues, { pattern: ISO_TIMESTAMP });
+    expectStringArray(record['blocking_reasons'], `${label}/blocking_reasons`, issues, 200, 0, 500);
+    optionalString(record, 'bughunt_status_ref', `${label}/bughunt_status_ref`, issues, { max: 512 });
+    optionalString(record, 'decision_ref', `${label}/decision_ref`, issues, { max: 512 });
+    expectString(record['summary'], `${label}/summary`, issues, { max: 500 });
 }
 function checkProviderIdentity(value, label, issues) {
     const record = requireRecord(value, label, issues);
@@ -699,6 +793,9 @@ function statusMatchesExecutionAuditIssues(status, audit) {
                 issues.push(`success status omitted actual changed path ${JSON.stringify(changedPath)}`);
             }
         }
+        for (const reportedPath of audit.reported_but_not_actual_changes) {
+            issues.push(`success status reported unchanged path ${JSON.stringify(reportedPath)}`);
+        }
     }
     return issues;
 }
@@ -795,6 +892,93 @@ function semanticStateIssues(state) {
                 issues.push(...relativePathIssues(path, `units.${unitId}.${field}`));
         }
     }
+    if (state.work_items !== undefined) {
+        issues.push(...workItemStateIssues(state));
+    }
+    issues.push(...duplicateIssues('audit_review_queue', state.audit_review_queue ?? []));
+    issues.push(...duplicateIssues('validation_ready_queue', state.validation_ready_queue ?? []));
+    for (const ref of state.audit_review_queue ?? []) {
+        issues.push(...relativePathIssues(ref, 'audit_review_queue entry'));
+    }
+    for (const unitId of state.validation_ready_queue ?? []) {
+        if (state.work_items?.[unitId] === undefined && state.units[unitId] === undefined) {
+            issues.push(`validation_ready_queue references missing unit/work item ${JSON.stringify(unitId)}`);
+        }
+    }
+    for (const exception of state.scope_exceptions ?? []) {
+        issues.push(...relativePathIssues(exception.audit_ref, `scope_exceptions ${exception.exception_id} audit_ref`));
+        for (const path of exception.paths) {
+            issues.push(...relativePathIssues(path, `scope_exceptions ${exception.exception_id} paths entry`));
+        }
+        if (exception.decision_ref !== undefined) {
+            issues.push(...relativePathIssues(exception.decision_ref, `scope_exceptions ${exception.exception_id} decision_ref`));
+        }
+    }
+    for (const exception of state.protected_path_exceptions ?? []) {
+        issues.push(...relativePathIssues(exception.audit_ref, `protected_path_exceptions ${exception.exception_id} audit_ref`));
+        if (exception.read_only_paths.length === 0 && exception.untouchable_paths.length === 0) {
+            issues.push(`protected_path_exceptions ${exception.exception_id} must include read_only_paths or untouchable_paths`);
+        }
+        for (const path of exception.read_only_paths) {
+            issues.push(...relativePathIssues(path, `protected_path_exceptions ${exception.exception_id} read_only_paths entry`));
+        }
+        for (const path of exception.untouchable_paths) {
+            issues.push(...relativePathIssues(path, `protected_path_exceptions ${exception.exception_id} untouchable_paths entry`));
+        }
+        if (exception.decision_ref !== undefined) {
+            issues.push(...relativePathIssues(exception.decision_ref, `protected_path_exceptions ${exception.exception_id} decision_ref`));
+        }
+    }
+    const closureGate = state.closure_gate;
+    if (closureGate !== undefined) {
+        for (const [field, path] of [
+            ['bughunt_status_ref', closureGate.bughunt_status_ref],
+            ['decision_ref', closureGate.decision_ref],
+        ]) {
+            if (path !== undefined)
+                issues.push(...relativePathIssues(path, `closure_gate.${field}`));
+        }
+        if (closureGate.status === 'passed' && closureGate.blocking_reasons.length > 0) {
+            issues.push('closure_gate passed must not include blocking_reasons');
+        }
+        if (closureGate.status === 'failed' && closureGate.blocking_reasons.length === 0) {
+            issues.push('closure_gate failed must include blocking_reasons');
+        }
+    }
+    return issues;
+}
+function workItemStateIssues(state) {
+    const issues = [];
+    for (const [workItemId, workItem] of Object.entries(state.work_items ?? {})) {
+        if (workItem.work_item_id !== workItemId) {
+            issues.push(`work_items entry key ${JSON.stringify(workItemId)} does not match work_item_id ${JSON.stringify(workItem.work_item_id)}`);
+        }
+        issues.push(...duplicateIssues(`work_items ${workItemId} unit_ids`, workItem.unit_ids));
+        for (const unitId of workItem.unit_ids) {
+            if (state.units[unitId] === undefined) {
+                issues.push(`work_items ${workItemId} references missing unit ${JSON.stringify(unitId)}`);
+            }
+        }
+        for (const [field, unitId] of [
+            ['implementation_unit_id', workItem.implementation_unit_id],
+            ['validation_unit_id', workItem.validation_unit_id],
+        ]) {
+            if (unitId !== undefined && state.units[unitId] === undefined) {
+                issues.push(`work_items ${workItemId}.${field} references missing unit ${JSON.stringify(unitId)}`);
+            }
+        }
+        for (const [field, path] of [
+            ['audit_ref', workItem.audit_ref],
+            ['status_ref', workItem.status_ref],
+            ['validation_status_ref', workItem.validation_status_ref],
+        ]) {
+            if (path !== undefined)
+                issues.push(...relativePathIssues(path, `work_items.${workItemId}.${field}`));
+        }
+        if (workItem.state === 'closed' && workItem.source_changing && workItem.validation_status_ref === undefined) {
+            issues.push(`source-changing work item ${workItemId} cannot be closed without validation_status_ref`);
+        }
+    }
     return issues;
 }
 function semanticReceiptIssues(receipt, options) {
@@ -833,12 +1017,20 @@ function semanticReceiptIssues(receipt, options) {
 }
 function semanticHandoffIssues(handoff) {
     const issues = [];
+    issues.push(...relativePathIssues(handoff.mission_ref, 'mission_ref'));
+    issues.push(...relativePathIssues(handoff.master_plan_ref, 'master_plan_ref'));
+    if (handoff.decision_tail_ref !== null) {
+        issues.push(...relativePathIssues(handoff.decision_tail_ref, 'decision_tail_ref'));
+    }
     issues.push(...relativePathIssues(handoff.state_ref, 'state_ref'));
     if (handoff.event_tail_ref !== null) {
         issues.push(...relativePathIssues(handoff.event_tail_ref, 'event_tail_ref'));
     }
     for (const statusRef of handoff.status_refs) {
         issues.push(...relativePathIssues(statusRef, 'status_refs entry'));
+    }
+    for (const auditRef of handoff.audit_refs) {
+        issues.push(...relativePathIssues(auditRef, 'audit_refs entry'));
     }
     if (handoff.reason === 'context-halt' &&
         handoff.open_blockers.length === 0 &&
@@ -890,6 +1082,8 @@ function semanticExecutionAuditIssues(audit) {
     const issues = [];
     issues.push(...absolutePathIssues(audit.cwd, 'cwd'));
     for (const [field, paths] of [
+        ['dirty_baseline_paths', audit.dirty_baseline_paths],
+        ['dirty_relevant_paths', audit.dirty_relevant_paths],
         ['actual_changed_paths', audit.actual_changed_paths],
         ['status_reported_changed_paths', audit.status_reported_changed_paths],
         ['omitted_status_changes', audit.omitted_status_changes],
@@ -905,6 +1099,23 @@ function semanticExecutionAuditIssues(audit) {
     issues.push(...duplicateIssues('declared_validation_commands', audit.declared_validation_commands));
     issues.push(...duplicateIssues('status_reported_commands', audit.status_reported_commands));
     issues.push(...duplicateIssues('command_coverage_gaps', audit.command_coverage_gaps));
+    if (audit.dirty_baseline === null && audit.dirty_baseline_paths.length > 0) {
+        issues.push('dirty_baseline null requires empty dirty_baseline_paths');
+    }
+    if (audit.dirty_baseline === false && audit.dirty_baseline_paths.length > 0) {
+        issues.push('dirty_baseline false requires empty dirty_baseline_paths');
+    }
+    if (audit.dirty_baseline === true && audit.dirty_baseline_paths.length === 0) {
+        issues.push('dirty_baseline true requires dirty_baseline_paths');
+    }
+    if (audit.dirty_baseline === null && audit.dirty_relevant_paths.length > 0) {
+        issues.push('dirty_baseline null requires empty dirty_relevant_paths');
+    }
+    for (const dirtyRelevantPath of audit.dirty_relevant_paths) {
+        if (!audit.dirty_baseline_paths.includes(dirtyRelevantPath)) {
+            issues.push(`dirty_relevant_paths entry ${JSON.stringify(dirtyRelevantPath)} must be present in dirty_baseline_paths`);
+        }
+    }
     if (audit.classification !== 'audit-unavailable') {
         const expectedOmitted = sortedDifference(audit.actual_changed_paths, audit.status_reported_changed_paths);
         if (!sameStringSet(audit.omitted_status_changes, expectedOmitted)) {
@@ -1111,7 +1322,7 @@ function expectedExecutionAuditClassification(audit) {
         return 'critical-protected-path-violation';
     if (audit.read_only_touched_paths.length > 0)
         return 'protected-path-review-required';
-    if (audit.dirty_baseline !== false)
+    if (audit.dirty_baseline === null || audit.dirty_relevant_paths.length > 0)
         return 'audit-unavailable';
     if (audit.outside_owned_paths.length > 0 ||
         audit.omitted_status_changes.length > 0 ||
@@ -1344,6 +1555,34 @@ const contextGateRequired = ['gate', 'percent'];
 const contextGateKeys = new Set(contextGateRequired);
 const stateUnitRequired = ['unit_id', 'role', 'state', 'attempt', 'summary'];
 const stateUnitKeys = new Set([...stateUnitRequired, 'spec_ref', 'status_ref', 'receipt_ref']);
+const workItemRequired = ['work_item_id', 'state', 'source_changing', 'unit_ids', 'summary'];
+const workItemKeys = new Set([
+    ...workItemRequired,
+    'implementation_unit_id',
+    'validation_unit_id',
+    'audit_ref',
+    'status_ref',
+    'validation_status_ref',
+]);
+const scopeExceptionRequired = ['exception_id', 'unit_id', 'audit_ref', 'paths', 'state', 'summary'];
+const scopeExceptionKeys = new Set([...scopeExceptionRequired, 'decision_ref']);
+const protectedPathExceptionRequired = [
+    'exception_id',
+    'unit_id',
+    'audit_ref',
+    'read_only_paths',
+    'untouchable_paths',
+    'state',
+    'summary',
+];
+const protectedPathExceptionKeys = new Set([...protectedPathExceptionRequired, 'decision_ref']);
+const closureGateRequired = ['status', 'blocking_reasons', 'summary'];
+const closureGateKeys = new Set([
+    ...closureGateRequired,
+    'checked_at',
+    'bughunt_status_ref',
+    'decision_ref',
+]);
 const stateRequired = [
     'schema_version',
     'workstream',
@@ -1359,7 +1598,15 @@ const stateRequired = [
     'operator_questions',
     'next_actions',
 ];
-const stateKeys = new Set(stateRequired);
+const stateKeys = new Set([
+    ...stateRequired,
+    'work_items',
+    'audit_review_queue',
+    'validation_ready_queue',
+    'scope_exceptions',
+    'protected_path_exceptions',
+    'closure_gate',
+]);
 const providerRequired = [
     'provider_id',
     'requested_model_id',
@@ -1389,9 +1636,14 @@ const handoffRequired = [
     'workstream',
     'written_at',
     'reason',
+    'mission_ref',
+    'master_plan_ref',
+    'decision_tail_ref',
+    'latest_decision_id',
     'state_ref',
     'event_tail_ref',
     'status_refs',
+    'audit_refs',
     'summary',
     'open_blockers',
     'next_actions',
@@ -1452,6 +1704,8 @@ const executionAuditRequired = [
     'cwd',
     'git_head',
     'dirty_baseline',
+    'dirty_baseline_paths',
+    'dirty_relevant_paths',
     'actual_changed_paths',
     'status_reported_changed_paths',
     'omitted_status_changes',
