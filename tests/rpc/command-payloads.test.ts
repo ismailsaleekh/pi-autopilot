@@ -5,6 +5,8 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  AUTOPILOT_ABORT_COMMAND,
+  AUTOPILOT_CLOSE_COMMAND,
   AUTOPILOT_COMMAND,
   AUTOPILOT_HANDOFF_COMMAND,
   AUTOPILOT_ONBOARD_COMMAND,
@@ -211,6 +213,8 @@ void describe('Pi RPC Autopilot command wiring', () => {
     const commands = commandsFrom(requireResponse(events, 'commands'));
     assert.deepEqual(commandNames(commands), [
       AUTOPILOT_COMMAND,
+      AUTOPILOT_ABORT_COMMAND,
+      AUTOPILOT_CLOSE_COMMAND,
       AUTOPILOT_HANDOFF_COMMAND,
       AUTOPILOT_ONBOARD_COMMAND,
     ]);
@@ -223,6 +227,8 @@ void describe('Pi RPC Autopilot command wiring', () => {
       requireListedCommand(commands, AUTOPILOT_HANDOFF_COMMAND).description ?? '',
       /current active workstream/,
     );
+    assert.match(requireListedCommand(commands, AUTOPILOT_CLOSE_COMMAND).description ?? '', /Runtime-close/);
+    assert.match(requireListedCommand(commands, AUTOPILOT_ABORT_COMMAND).description ?? '', /Runtime-abort/);
     assert.equal(commands.some((command) => command.name === forbiddenLegacyCommand), false);
     assert.equal(commands.some((command) => command.name === 'autopilot-restart'), false);
     assert.equal(commands.some((command) => command.name === AUTOPILOT_STATUS_TOOL), false);
@@ -256,6 +262,8 @@ void describe('Pi RPC Autopilot command wiring', () => {
     const commands = commandsFrom(requireResponse(events, 'commands'));
     assert.deepEqual(commandNames(commands), [
       AUTOPILOT_COMMAND,
+      AUTOPILOT_ABORT_COMMAND,
+      AUTOPILOT_CLOSE_COMMAND,
       AUTOPILOT_HANDOFF_COMMAND,
       AUTOPILOT_ONBOARD_COMMAND,
     ]);

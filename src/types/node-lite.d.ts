@@ -47,6 +47,7 @@ declare module 'node:fs/promises' {
   export interface Stats {
     readonly mtimeMs: number;
     isFile(): boolean;
+    isDirectory(): boolean;
   }
   export interface FileHandle {
     writeFile(data: string, encoding?: 'utf8'): Promise<void>;
@@ -58,13 +59,14 @@ declare module 'node:fs/promises' {
   export function mkdtemp(prefix: string): Promise<string>;
   export function open(path: string | URL, flags: string): Promise<FileHandle>;
   export function readdir(path: string, options: { readonly withFileTypes: true }): Promise<Dirent[]>;
+  export function readFile(path: string | URL): Promise<Uint8Array>;
   export function readFile(path: string | URL, encoding: 'utf8'): Promise<string>;
   export function rename(oldPath: string | URL, newPath: string | URL): Promise<void>;
   export function rm(path: string | URL, options?: { readonly recursive?: boolean; readonly force?: boolean }): Promise<void>;
   export function stat(path: string | URL): Promise<Stats>;
   export function unlink(path: string | URL): Promise<void>;
-  export function writeFile(path: string | URL, data: string, encoding?: 'utf8'): Promise<void>;
-  export function writeFile(path: string | URL, data: string, options: { readonly encoding?: 'utf8'; readonly flag?: string }): Promise<void>;
+  export function writeFile(path: string | URL, data: string | Uint8Array, encoding?: 'utf8'): Promise<void>;
+  export function writeFile(path: string | URL, data: string | Uint8Array, options: { readonly encoding?: 'utf8'; readonly flag?: string }): Promise<void>;
 } 
 
 declare module 'node:os' {

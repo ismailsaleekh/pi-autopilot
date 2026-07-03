@@ -6,6 +6,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
+  AUTOPILOT_ABORT_COMMAND,
+  AUTOPILOT_CLOSE_COMMAND,
   AUTOPILOT_COMMAND,
   AUTOPILOT_HANDOFF_COMMAND,
   AUTOPILOT_ONBOARD_COMMAND,
@@ -366,6 +368,8 @@ void describe('Pi SDK Autopilot activation', () => {
     try {
       assert.deepEqual(commandNames(harness.session), [
         AUTOPILOT_COMMAND,
+        AUTOPILOT_ABORT_COMMAND,
+        AUTOPILOT_CLOSE_COMMAND,
         AUTOPILOT_HANDOFF_COMMAND,
         AUTOPILOT_ONBOARD_COMMAND,
       ]);

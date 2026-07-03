@@ -5,8 +5,18 @@ export interface ParsedAutopilotArgs {
   readonly remainder: string;
 }
 
+export interface ParsedAutopilotCloseArgs {
+  readonly workstream: string;
+  readonly workstreamRun: string | null;
+  readonly dryRun: boolean;
+}
+
 export type ParseAutopilotArgsResult =
   | { readonly ok: true; readonly value: ParsedAutopilotArgs }
+  | { readonly ok: false; readonly message: string };
+
+export type ParseAutopilotCloseArgsResult =
+  | { readonly ok: true; readonly value: ParsedAutopilotCloseArgs }
   | { readonly ok: false; readonly message: string };
 
 const WORKSTREAM_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
@@ -31,6 +41,51 @@ export function parseAutopilotArgs(args: string): ParseAutopilotArgsResult {
   }
   const remainder = firstSpace < 0 ? '' : trimmed.slice(firstSpace).trim();
   return { ok: true, value: { workstream, remainder } };
+}
+
+export function parseAutopilotCloseArgs(args: string): ParseAutopilotCloseArgsResult {
+  return parseAutopilotLifecycleArgs(args, 'Usage: /autopilot-close <workstream> [--run <workstream_run>] [--dry-run]');
+}
+
+export function parseAutopilotAbortArgs(args: string): ParseAutopilotCloseArgsResult {
+  return parseAutopilotLifecycleArgs(args, 'Usage: /autopilot-abort <workstream> [--run <workstream_run>] [--dry-run]');
+}
+
+function parseAutopilotLifecycleArgs(args: string, usage: string): ParseAutopilotCloseArgsResult {
+  const tokens = args.trim().split(/\s+/u).filter((token) => token.length > 0);
+  if (tokens.length === 0) {
+    return { ok: false, message: usage };
+  }
+  const workstream = tokens[0];
+  if (workstream === undefined || !isValidWorkstreamSlug(workstream)) {
+    return {
+      ok: false,
+      message:
+        'Workstream must start with a letter or digit and contain only letters, digits, dot, underscore, or dash.',
+    };
+  }
+  let workstreamRun: string | null = null;
+  let dryRun = false;
+  for (let index = 1; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token === undefined) continue;
+    if (token === '--dry-run') {
+      dryRun = true;
+      continue;
+    }
+    if (token === '--run') {
+      const value = tokens[index + 1];
+      if (value === undefined || value.startsWith('--')) {
+        return { ok: false, message: '--run requires a non-empty workstream_run value.' };
+      }
+      if (workstreamRun !== null) return { ok: false, message: '--run may be provided at most once.' };
+      workstreamRun = value;
+      index += 1;
+      continue;
+    }
+    return { ok: false, message: `Unknown /autopilot-close argument: ${token}` };
+  }
+  return { ok: true, value: { workstream, workstreamRun, dryRun } };
 }
 
 export function runtimeRootForWorkstream(workstream: string): string {

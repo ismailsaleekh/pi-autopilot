@@ -183,10 +183,12 @@ void describe('package manifest and payload', () => {
       'src/extension.ts',
       'dist/src/cli/autopilot-agent-run.js',
       'dist/src/core/agent-runner.js',
+      'dist/src/core/close-runtime.js',
       'dist/src/internal/status-extension.js',
       'src/core/context-budget.ts',
       'src/core/adjudication/index.ts',
       'src/core/lifecycle/index.ts',
+      'src/core/close-runtime.ts',
       'src/core/names.ts',
       'src/core/paths.ts',
       'src/core/prompts.ts',
@@ -200,7 +202,7 @@ void describe('package manifest and payload', () => {
   void it('documents current Autopilot surfaces across package docs', async () => {
     for (const file of DOC_FILES) {
       const text = await docText(file);
-      for (const surface of ['autopilot-agent-run', 'context_budget', 'autopilot-onboard', 'autopilot-handoff']) {
+      for (const surface of ['autopilot-agent-run', 'context_budget', 'autopilot-onboard', 'autopilot-handoff', 'autopilot-close', 'autopilot-abort']) {
         assert.match(text, literalPattern(surface), `${file} missing ${surface}`);
       }
     }
@@ -211,6 +213,8 @@ void describe('package manifest and payload', () => {
       '/autopilot',
       '/autopilot-onboard',
       '/autopilot-handoff',
+      '/autopilot-close',
+      '/autopilot-abort',
       'context_budget',
       'autopilot-agent-run',
       '.pi/autopilot/<workstream>/',
@@ -224,6 +228,7 @@ void describe('package manifest and payload', () => {
       'scope/protected-path adjudication',
       'work-item lifecycle',
       'terminal closure',
+      'runtime close/merge/abort',
       'fake-Pi',
       'offline SDK/RPC/package gates',
     ]) {
@@ -236,13 +241,14 @@ void describe('package manifest and payload', () => {
     const readme = await docText('README.md');
     const plan = await docText('TEST_PLAN.md');
     const mappings = [
-      { claim: 'Commands', row: 'Public commands are `/autopilot`, `/autopilot-onboard`, and `/autopilot-handoff`' },
+      { claim: 'Commands', row: 'Public commands are `/autopilot`, `/autopilot-onboard`, `/autopilot-handoff`, `/autopilot-close`, and `/autopilot-abort`' },
       { claim: 'context_budget', row: '`context_budget` parent gate' },
       { claim: 'Contracts, templates, and state-store', row: 'Contracts/templates are schema-backed and package-owned' },
       { claim: 'perfect-quality', row: 'Perfect-quality doctrine is package-owned' },
       { claim: 'scope/protected-path adjudication', row: 'Scope/protected-path adjudication blocks silent closure' },
       { claim: 'work-item lifecycle', row: 'Work-item lifecycle separates transport success from closure' },
       { claim: 'closure gates', row: 'Terminal closure gate rejects unresolved semantic risk' },
+      { claim: 'runtime close/merge/abort', row: 'Runtime close/merge/abort is deterministic and local-only' },
       { claim: 'forced-output/status', row: 'Forced-output/status tool is child-only' },
       { claim: 'state-store', row: 'State store' },
       { claim: 'autopilot-agent-run', row: '`autopilot-agent-run` bin is shipped' },
@@ -316,10 +322,12 @@ void describe('package manifest and payload', () => {
       'dist/extensions/autopilot.js',
       'dist/src/cli/autopilot-agent-run.js',
       'dist/src/core/agent-runner.js',
+      'dist/src/core/close-runtime.js',
       'dist/src/internal/status-extension.js',
       'src/core/context-budget.ts',
       'src/core/adjudication/index.ts',
       'src/core/lifecycle/index.ts',
+      'src/core/close-runtime.ts',
       'src/core/names.ts',
       'src/core/paths.ts',
       'src/core/prompts.ts',

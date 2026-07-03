@@ -9,15 +9,15 @@ import { isValidWorkstreamSlug } from "./paths.js";
 export const AUTOPILOT_STATE_ROOT_ENV = 'AUTOPILOT_STATE_ROOT';
 export const AUTOPILOT_RUNTIME_ENV = 'AUTOPILOT_RUNTIME';
 export const AUTOPILOT_RUNTIME_VALUE = '1';
-const ACTIVE_AUTOPILOTS_FILE = 'active-autopilots.json';
-const PATH_CLAIMS_FILE = 'path-claims.json';
-const CLAIM_EVENTS_FILE = 'claim-events.jsonl';
-const MERGE_LOG_FILE = 'merge-log.jsonl';
-const FOREIGN_MERGE_ACKS_FILE = 'foreign-merge-acks.jsonl';
-const WORKTREE_INDEX_FILE = '_index.json';
-const WORKTREE_LEDGER_FILE = '_ledger.jsonl';
-const TASK_INFO_FILE = '_task-info.json';
-const BRANCHES_FILE = '_branches.json';
+export const ACTIVE_AUTOPILOTS_FILE = 'active-autopilots.json';
+export const PATH_CLAIMS_FILE = 'path-claims.json';
+export const CLAIM_EVENTS_FILE = 'claim-events.jsonl';
+export const MERGE_LOG_FILE = 'merge-log.jsonl';
+export const FOREIGN_MERGE_ACKS_FILE = 'foreign-merge-acks.jsonl';
+export const WORKTREE_INDEX_FILE = '_index.json';
+export const WORKTREE_LEDGER_FILE = '_ledger.jsonl';
+export const TASK_INFO_FILE = '_task-info.json';
+export const BRANCHES_FILE = '_branches.json';
 const DEFAULT_LOCK_TIMEOUT_MS = 60_000;
 const LOCK_STALE_MULTIPLIER = 5;
 const LOCK_BACKOFF_START_MS = 100;
@@ -56,6 +56,12 @@ export function coordinationRootForRepo(repoKey, env = process.env) {
 export function worktreeRootForRepo(repoKey, env = process.env) {
     return join(resolveAutopilotStateRoot(env), 'worktrees', repoKey);
 }
+export function mainMergeLockPathForRepo(repoKey, env = process.env) {
+    return join(coordinationRootForRepo(repoKey, env), 'main-merge.lock');
+}
+export function taskRootForActiveAutopilot(row) {
+    return dirname(row.main_worktree_path);
+}
 export async function prepareAutopilotWorkstream(input) {
     if (!isValidWorkstreamSlug(input.workstream)) {
         fail('invalid-workstream', `Invalid Autopilot workstream slug: ${input.workstream}`);
@@ -66,7 +72,7 @@ export async function prepareAutopilotWorkstream(input) {
     const coordinationRoot = coordinationRootForRepo(repo.repoKey, env);
     const worktreeRoot = worktreeRootForRepo(repo.repoKey, env);
     await ensureRepoRuntimeFiles(coordinationRoot, worktreeRoot);
-    return await withFileLock(join(coordinationRoot, '.locks', 'activation.lock'), `activation:${repo.repoKey}`, async () => {
+    return await withAutopilotFileLock(join(coordinationRoot, '.locks', 'activation.lock'), `activation:${repo.repoKey}`, async () => {
         const activeRows = await readActiveAutopilots(coordinationRoot);
         const matching = activeRows.filter((row) => row.repo_key === repo.repoKey && row.workstream === input.workstream && isLiveParentStatus(row.status));
         if (matching.length > 1) {
@@ -109,7 +115,7 @@ export async function resolveActiveAutopilotForSpec(spec, env = process.env) {
     const activeRows = await readActiveAutopilots(coordinationRoot);
     const cwdReal = realpathExisting(spec.cwd, 'unit spec cwd');
     const matches = activeRows.filter((row) => {
-        if (row.repo_key !== repo.repoKey || row.workstream !== spec.workstream || !isLiveParentStatus(row.status))
+        if (row.repo_key !== repo.repoKey || row.workstream !== spec.workstream || !isChildLaunchParentStatus(row.status))
             return false;
         const worktreeReal = realpathExisting(row.main_worktree_path, 'registered Autopilot worktree');
         return isPathWithinRoot(worktreeReal, cwdReal);
@@ -165,11 +171,11 @@ export async function acquireClaimsForUnit(input) {
     if (requested.length === 0)
         return Object.freeze([]);
     const lockPath = join(input.context.coordinationRoot, '.locks', 'path-claims.lock');
-    return await withFileLock(lockPath, `claims:${input.context.active.autopilot_id}`, async () => {
+    return await withAutopilotFileLock(lockPath, `claims:${input.context.active.autopilot_id}`, async () => {
         const activeRows = await readActiveAutopilots(input.context.coordinationRoot);
         const authority = activeRows.find((row) => row.autopilot_id === input.context.active.autopilot_id);
-        if (authority === undefined || !isLiveParentStatus(authority.status)) {
-            fail('active-authority-missing', 'active Autopilot row is missing or not live before claim acquisition.', [input.context.active.autopilot_id]);
+        if (authority === undefined || !isChildLaunchParentStatus(authority.status)) {
+            fail('active-authority-missing', 'active Autopilot row is missing or not child-launch authorized before claim acquisition.', [input.context.active.autopilot_id]);
         }
         if (authority.active_run_epoch !== input.context.active.active_run_epoch) {
             fail('active-epoch-mismatch', 'active Autopilot epoch changed before claim acquisition.', [
@@ -530,7 +536,7 @@ async function ensureRepoRuntimeFiles(coordinationRoot, worktreeRoot) {
             throw error;
         });
 }
-async function readActiveAutopilots(coordinationRoot) {
+export async function readActiveAutopilots(coordinationRoot) {
     const path = join(coordinationRoot, ACTIVE_AUTOPILOTS_FILE);
     if (!existsSync(path))
         return Object.freeze([]);
@@ -539,10 +545,10 @@ async function readActiveAutopilots(coordinationRoot) {
         fail('invalid-active-autopilots', 'active-autopilots.json must contain an array.');
     return Object.freeze(value.map(parseActiveAutopilotRow));
 }
-async function writeActiveAutopilots(coordinationRoot, rows) {
+export async function writeActiveAutopilots(coordinationRoot, rows) {
     await writeJsonAtomic(join(coordinationRoot, ACTIVE_AUTOPILOTS_FILE), rows);
 }
-async function readPathClaims(coordinationRoot) {
+export async function readPathClaims(coordinationRoot) {
     const path = join(coordinationRoot, PATH_CLAIMS_FILE);
     if (!existsSync(path))
         return Object.freeze([]);
@@ -551,10 +557,10 @@ async function readPathClaims(coordinationRoot) {
         fail('invalid-path-claims', 'path-claims.json must contain an array.');
     return Object.freeze(value.map(parsePathClaim));
 }
-async function writePathClaims(coordinationRoot, claims) {
+export async function writePathClaims(coordinationRoot, claims) {
     await writeJsonAtomic(join(coordinationRoot, PATH_CLAIMS_FILE), claims);
 }
-async function appendClaimEvent(coordinationRoot, event) {
+export async function appendClaimEvent(coordinationRoot, event) {
     await appendJsonl(join(coordinationRoot, CLAIM_EVENTS_FILE), event);
 }
 async function addWorktreeIndexRow(worktreeRoot, row) {
@@ -563,7 +569,7 @@ async function addWorktreeIndexRow(worktreeRoot, row) {
     const active = current.active.filter((candidate) => candidate.workstream_run !== row.workstream_run);
     await writeJsonAtomic(path, { ...current, active: [...active, row] });
 }
-async function readWorktreeIndex(path) {
+export async function readWorktreeIndex(path) {
     if (!existsSync(path))
         return emptyWorktreeIndex();
     const value = await readJson(path);
@@ -576,7 +582,7 @@ async function readWorktreeIndex(path) {
 function emptyWorktreeIndex() {
     return { schema_version: 'autopilot.worktree_index.v1', active: [], archive: [] };
 }
-async function updateTaskInfoStatus(row, status) {
+export async function updateTaskInfoStatus(row, status) {
     const path = join(dirname(row.main_worktree_path), TASK_INFO_FILE);
     if (!existsSync(path))
         return;
@@ -677,7 +683,7 @@ function assertBranchAvailable(repoRoot, branch) {
     if (result.status !== 1)
         fail('branch-check-failed', 'git show-ref failed while checking Autopilot branch availability.', [branch, result.stderr]);
 }
-async function withFileLock(lockPath, holderId, run) {
+export async function withAutopilotFileLock(lockPath, holderId, run) {
     const handle = await acquireFileLock(lockPath, holderId);
     try {
         return await run();
@@ -805,13 +811,13 @@ async function readJson(path) {
         fail('json-read-failed', `failed to read JSON runtime file ${path}: ${errorMessage(error)}`);
     }
 }
-async function writeJsonAtomic(path, value) {
+export async function writeJsonAtomic(path, value) {
     await mkdir(dirname(path), { recursive: true });
     const tmp = `${path}.tmp-${process.pid}-${Date.now()}-${randomBytes(4).toString('hex')}`;
     await writeFile(tmp, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
     await rename(tmp, path);
 }
-async function appendJsonl(path, value) {
+export async function appendJsonl(path, value) {
     await mkdir(dirname(path), { recursive: true });
     await appendFile(path, `${JSON.stringify(value)}\n`, 'utf8');
 }
@@ -824,6 +830,9 @@ function buildReceiptId(kind) {
 }
 function isLiveParentStatus(status) {
     return status === 'active' || status === 'paused' || status === 'merging' || status === 'blocked';
+}
+function isChildLaunchParentStatus(status) {
+    return status === 'active';
 }
 function realpathExisting(path, label) {
     try {

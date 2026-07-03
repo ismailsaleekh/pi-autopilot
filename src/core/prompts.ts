@@ -1,4 +1,6 @@
 import {
+  AUTOPILOT_ABORT_COMMAND,
+  AUTOPILOT_CLOSE_COMMAND,
   AUTOPILOT_COMMAND,
   AUTOPILOT_HANDOFF_COMMAND,
   AUTOPILOT_ONBOARD_COMMAND,
@@ -51,6 +53,8 @@ export function renderAutopilotPrompt(input: AutopilotPromptInput): string {
   const worktreeCwdRule = input.worktreePath === undefined
     ? ''
     : `\n- For every unit, set \`cwd\` to \`${input.worktreePath}\`; never set child \`cwd\` to the operator source checkout.`;
+  const closeInvocation = `/${AUTOPILOT_CLOSE_COMMAND} ${input.workstream}${input.workstreamRun === undefined ? '' : ` --run ${input.workstreamRun}`}`;
+  const abortInvocation = `/${AUTOPILOT_ABORT_COMMAND} ${input.workstream}${input.workstreamRun === undefined ? '' : ` --run ${input.workstreamRun}`}`;
   return `# Role: Autopilot parent orchestrator
 
 You are Autopilot for workstream \`${input.workstream}\`. Schedule and supervise child agents through typed Autopilot unit specs, package-owned runtime state, and forced structured status artifacts.
@@ -66,7 +70,8 @@ You are Autopilot for workstream \`${input.workstream}\`. Schedule and supervise
 - Runtime root: \`${input.runtimeRoot}\`.
 ${runtimeMetadata.length === 0 ? '' : `${runtimeMetadata}\n`}- Injected child launcher: \`${input.runnerInvocation}\`.
 - Child final status handling is launcher-internal; parent sessions must not load, expose, or call child-only status tools.
-- Public surfaces must use Autopilot command, schema, runtime, status, receipt, and runner names only.
+- Final landing/abandonment is runtime-owned: after closure evidence is ready, request operator invocation of \`${closeInvocation}\`; if the run must be abandoned without landing, request \`${abortInvocation}\`. Never merge, rebase, push, abort, or archive branches manually.
+- Public surfaces must use Autopilot command, schema, runtime, status, receipt, close, and runner names only.
 
 ## Resume, purpose truth, and machine truth
 
@@ -106,7 +111,7 @@ ${renderAutopilotPerfectQualityRules()}
 ## Safety boundaries
 
 - Do not create public compatibility aliases or paths outside Autopilot names.
-- Preserve dirty work; do not stash, reset, clean, checkout, restore, switch, rebase, stage, commit, or otherwise mutate git state manually. The package runtime is the only authority allowed to create Autopilot source commits inside the registered worktree.
+- Preserve dirty work; do not stash, reset, clean, checkout, restore, switch, rebase, stage, commit, merge, branch-delete, archive, abort, or otherwise mutate git state manually. The package runtime is the only authority allowed to create Autopilot source commits inside the registered worktree, close/merge via \`/${AUTOPILOT_CLOSE_COMMAND}\`, or abandon/archive via \`/${AUTOPILOT_ABORT_COMMAND}\`.
 - Use subscription Pi channels only for frontier child models; do not introduce OpenRouter, paid API keys, or other metered frontier routes.
 - Respect each unit spec's owned, read-only, and untouchable paths.
 

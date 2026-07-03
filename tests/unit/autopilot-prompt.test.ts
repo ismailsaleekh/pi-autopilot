@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { AUTOPILOT_STATUS_TOOL, CONTEXT_BUDGET_TOOL_NAME } from '../../src/core/names.ts';
+import { AUTOPILOT_ABORT_COMMAND, AUTOPILOT_CLOSE_COMMAND, AUTOPILOT_STATUS_TOOL, CONTEXT_BUDGET_TOOL_NAME } from '../../src/core/names.ts';
 import { renderAutopilotPrompt } from '../../src/core/prompts.ts';
 
 function parentPrompt(): string {
@@ -37,6 +37,8 @@ void describe('Autopilot parent prompt', () => {
     assert.match(prompt, /machine truth/);
     assert.match(prompt, /exact injected invocation `\/opt\/pi-autopilot\/bin\/autopilot-agent-run\.mjs <unit-spec\.json>`/);
     assert.match(prompt, /Do not call `autopilot-agent-run` directly unless it is the injected invocation/);
+    assert.match(prompt, new RegExp(`/${AUTOPILOT_CLOSE_COMMAND}`));
+    assert.match(prompt, new RegExp(`/${AUTOPILOT_ABORT_COMMAND}`));
   });
 
   void it('rejects bypass evidence, raw child launches, git mutation, and metered routes', () => {

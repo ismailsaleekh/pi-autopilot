@@ -1,6 +1,8 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  AUTOPILOT_ABORT_COMMAND,
+  AUTOPILOT_CLOSE_COMMAND,
   AUTOPILOT_COMMAND,
   AUTOPILOT_HANDOFF_COMMAND,
   AUTOPILOT_ONBOARD_COMMAND,
@@ -8,7 +10,7 @@ import {
   AUTOPILOT_STATUS_TOOL,
   CONTEXT_BUDGET_TOOL_NAME,
 } from '../../src/core/names.ts';
-import { parseAutopilotArgs, runtimeRootForWorkstream } from '../../src/core/paths.ts';
+import { parseAutopilotArgs, parseAutopilotCloseArgs, runtimeRootForWorkstream } from '../../src/core/paths.ts';
 import { renderAutopilotPrompt, renderHandoffPrompt, renderOnboardPrompt } from '../../src/core/prompts.ts';
 
 function parsedWorkstream(args: string): string {
@@ -37,6 +39,16 @@ void describe('Autopilot command parsing and prompts', () => {
     assert.equal(parseAutopilotArgs('../bad').ok, false);
   });
 
+  void it('parses runtime close arguments without freeform ambiguity', () => {
+    const parsed = parseAutopilotCloseArgs('demo --run demo-20260703T000000Z-abcdef --dry-run');
+    assert.equal(parsed.ok, true);
+    if (!parsed.ok) throw new Error(parsed.message);
+    assert.equal(parsed.value.workstream, 'demo');
+    assert.equal(parsed.value.workstreamRun, 'demo-20260703T000000Z-abcdef');
+    assert.equal(parsed.value.dryRun, true);
+    assert.equal(parseAutopilotCloseArgs('demo --unknown').ok, false);
+  });
+
   void it('builds the project runtime root', () => {
     assert.equal(parsedWorkstream('demo'), 'demo');
     assert.equal(runtimeRootForWorkstream('demo'), '.pi/autopilot/demo');
@@ -55,6 +67,8 @@ void describe('Autopilot command parsing and prompts', () => {
     assert.match(prompt, /resume from `\.pi\/autopilot\/demo\/state\.json`/);
     assert.match(prompt, /markdown as authoritative truth/);
     assert.match(prompt, /only through the exact injected invocation/);
+    assert.match(prompt, new RegExp(`/${AUTOPILOT_CLOSE_COMMAND}`));
+    assert.match(prompt, new RegExp(`/${AUTOPILOT_ABORT_COMMAND}`));
     assert.match(prompt, /status artifact and receipt artifact/);
     assert.match(prompt, /raw Pi commands/);
     assert.match(prompt, /mutate git state/);

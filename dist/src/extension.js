@@ -1,6 +1,7 @@
 import { createContextBudgetTool, resolveContextHaltPercent } from "./core/context-budget.js";
-import { AUTOPILOT_COMMAND, AUTOPILOT_HANDOFF_COMMAND, AUTOPILOT_ONBOARD_COMMAND, CONTEXT_BUDGET_TOOL_NAME, } from "./core/names.js";
-import { parseAutopilotArgs, runnerInvocationFromModuleUrl, runtimeRootForWorkstream } from "./core/paths.js";
+import { AUTOPILOT_ABORT_COMMAND, AUTOPILOT_CLOSE_COMMAND, AUTOPILOT_COMMAND, AUTOPILOT_HANDOFF_COMMAND, AUTOPILOT_ONBOARD_COMMAND, CONTEXT_BUDGET_TOOL_NAME, } from "./core/names.js";
+import { parseAutopilotAbortArgs, parseAutopilotArgs, parseAutopilotCloseArgs, runnerInvocationFromModuleUrl, runtimeRootForWorkstream } from "./core/paths.js";
+import { AutopilotCloseError, abortAutopilotWorkstream, closeAutopilotWorkstream } from "./core/close-runtime.js";
 import { AutopilotParallelRuntimeError, prepareAutopilotWorkstream } from "./core/parallel-runtime.js";
 import { handoffUsage, onboardUsage, renderAutopilotPrompt, renderHandoffPrompt, renderOnboardPrompt, } from "./core/prompts.js";
 function notify(ctx, message, kind) {
@@ -75,6 +76,71 @@ export default function autopilotExtension(pi) {
                 return;
             }
             notify(ctx, `Autopilot activated for ${parsed.value.workstream} (${prepared.active.workstream_run}).`, 'info');
+        },
+    });
+    pi.registerCommand(AUTOPILOT_CLOSE_COMMAND, {
+        description: 'Runtime-close an Autopilot workstream: /autopilot-close <workstream> [--run <workstream_run>] [--dry-run]',
+        handler: async (args, ctx) => {
+            const parsed = parseAutopilotCloseArgs(args);
+            if (!parsed.ok) {
+                notify(ctx, parsed.message, 'warning');
+                return;
+            }
+            try {
+                const result = await closeAutopilotWorkstream({
+                    workstream: parsed.value.workstream,
+                    sourceCwd: ctx.cwd ?? process.cwd(),
+                    workstreamRun: parsed.value.workstreamRun,
+                    dryRun: parsed.value.dryRun,
+                });
+                const blockerText = result.blockers.length === 0 ? '' : `\nBlockers:\n${result.blockers.map((blocker) => `- ${blocker}`).join('\n')}`;
+                const summary = [
+                    `Autopilot close ${result.outcome} for ${result.workstream_run}.`,
+                    `Branch: ${result.branch}`,
+                    `Target: ${result.target_branch ?? 'detached-HEAD'}`,
+                    `Changed paths: ${String(result.changed_paths.length)}`,
+                    result.close_result_path === null ? null : `Close result: ${result.close_result_path}`,
+                    blockerText.length === 0 ? null : blockerText,
+                ].filter((line) => line !== null).join('\n');
+                pi.sendUserMessage(summary, { deliverAs: 'followUp' });
+                notify(ctx, `Autopilot close ${result.outcome} for ${result.workstream_run}.`, result.outcome === 'closed' ? 'info' : result.outcome === 'dry-run' ? 'info' : 'warning');
+            }
+            catch (error) {
+                const message = error instanceof AutopilotCloseError ? error.message : error instanceof Error ? error.message : String(error);
+                notify(ctx, `Autopilot close failed: ${message}`, 'error');
+            }
+        },
+    });
+    pi.registerCommand(AUTOPILOT_ABORT_COMMAND, {
+        description: 'Runtime-abort/archive an Autopilot workstream without merging: /autopilot-abort <workstream> [--run <workstream_run>] [--dry-run]',
+        handler: async (args, ctx) => {
+            const parsed = parseAutopilotAbortArgs(args);
+            if (!parsed.ok) {
+                notify(ctx, parsed.message, 'warning');
+                return;
+            }
+            try {
+                const result = await abortAutopilotWorkstream({
+                    workstream: parsed.value.workstream,
+                    sourceCwd: ctx.cwd ?? process.cwd(),
+                    workstreamRun: parsed.value.workstreamRun,
+                    dryRun: parsed.value.dryRun,
+                });
+                const blockerText = result.blockers.length === 0 ? '' : `\nBlockers:\n${result.blockers.map((blocker) => `- ${blocker}`).join('\n')}`;
+                const summary = [
+                    `Autopilot abort ${result.outcome} for ${result.workstream_run}.`,
+                    `Branch: ${result.branch}`,
+                    `Archive ref: ${result.archive_ref ?? 'not archived'}`,
+                    result.close_result_path === null ? null : `Abort result: ${result.close_result_path}`,
+                    blockerText.length === 0 ? null : blockerText,
+                ].filter((line) => line !== null).join('\n');
+                pi.sendUserMessage(summary, { deliverAs: 'followUp' });
+                notify(ctx, `Autopilot abort ${result.outcome} for ${result.workstream_run}.`, result.outcome === 'aborted' ? 'info' : result.outcome === 'dry-run' ? 'info' : 'warning');
+            }
+            catch (error) {
+                const message = error instanceof AutopilotCloseError ? error.message : error instanceof Error ? error.message : String(error);
+                notify(ctx, `Autopilot abort failed: ${message}`, 'error');
+            }
         },
     });
     pi.registerCommand(AUTOPILOT_ONBOARD_COMMAND, {

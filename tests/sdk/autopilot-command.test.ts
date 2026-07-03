@@ -11,6 +11,8 @@ import autopilotExtension, {
   type NotificationKind,
 } from '../../src/extension.ts';
 import {
+  AUTOPILOT_ABORT_COMMAND,
+  AUTOPILOT_CLOSE_COMMAND,
   AUTOPILOT_COMMAND,
   AUTOPILOT_HANDOFF_COMMAND,
   AUTOPILOT_ONBOARD_COMMAND,
@@ -117,6 +119,8 @@ void describe('Autopilot command SDK surface', () => {
       await requireCommand(harness, AUTOPILOT_COMMAND).handler('demo operator scope', harness.ctx);
       assert.deepEqual(publicCommands(harness), [
         AUTOPILOT_COMMAND,
+        AUTOPILOT_ABORT_COMMAND,
+        AUTOPILOT_CLOSE_COMMAND,
         AUTOPILOT_HANDOFF_COMMAND,
         AUTOPILOT_ONBOARD_COMMAND,
       ]);
