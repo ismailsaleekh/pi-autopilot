@@ -6,14 +6,19 @@ import { join } from 'node:path';
 import { describe, it } from 'node:test';
 
 import { runAutopilotAgentFromSpecPath } from '../../src/core/agent-runner.ts';
+import { AUTOPILOT_STATE_ROOT_ENV, prepareAutopilotWorkstream } from '../../src/core/parallel-runtime.ts';
 import type { AutopilotEventRow, AutopilotState, AutopilotUnitSpec, AutopilotVerificationPlan } from '../../src/core/contracts/types.ts';
 import { appendAutopilotEventRow, readAutopilotResumeSnapshot, writeAutopilotStateAtomic } from '../../src/core/state-store/index.ts';
 
 async function withTempDir<T>(run: (dir: string) => Promise<T>): Promise<T> {
   const dir = await mkdtemp(join(tmpdir(), 'autopilot-agent-e2e-'));
+  const originalStateRoot = process.env[AUTOPILOT_STATE_ROOT_ENV];
+  process.env[AUTOPILOT_STATE_ROOT_ENV] = join(dir, 'autopilot-state');
   try {
     return await run(dir);
   } finally {
+    if (originalStateRoot === undefined) delete process.env[AUTOPILOT_STATE_ROOT_ENV];
+    else process.env[AUTOPILOT_STATE_ROOT_ENV] = originalStateRoot;
     await rm(dir, { recursive: true, force: true });
   }
 }
@@ -83,9 +88,11 @@ async function writeFakePi(root: string): Promise<string> {
 void describe('autopilot runner e2e smoke', () => {
   void it('runs fake Pi, validates status evidence, writes state, and resumes under runtime root', async () => {
     await withTempDir(async (root) => {
-      const worktree = join(root, 'worktree');
-      const runtimeRoot = join(worktree, '.pi', 'autopilot', 'autopilot-e2e');
-      await mkdir(worktree, { recursive: true });
+      const source = join(root, 'source');
+      await initGitSource(source);
+      const prepared = await prepareAutopilotWorkstream({ workstream: 'autopilot-e2e', sourceCwd: source });
+      const worktree = prepared.mainWorktreePath;
+      const runtimeRoot = prepared.runtimeRoot;
       const unitSpec = makeSpec(worktree, runtimeRoot);
       const specPath = join(runtimeRoot, 'unit-specs', 'e01-implement.implement.attempt-1.json');
       await mkdir(join(runtimeRoot, 'unit-specs'), { recursive: true });
@@ -158,10 +165,26 @@ void describe('autopilot runner e2e smoke', () => {
   });
 });
 
+async function initGitSource(source: string): Promise<void> {
+  await mkdir(join(source, 'src'), { recursive: true });
+  await writeFile(join(source, '.gitignore'), '.pi/\n', 'utf8');
+  await writeFile(join(source, 'src', 'e2e.ts'), 'export const e2e = "baseline";\n', 'utf8');
+  git(source, ['init']);
+  git(source, ['config', 'user.email', 'autopilot@example.invalid']);
+  git(source, ['config', 'user.name', 'Autopilot Test']);
+  git(source, ['add', '.']);
+  git(source, ['commit', '-m', 'baseline']);
+}
+
+function git(cwd: string, args: readonly string[]): void {
+  const result = spawnSync('git', args, { cwd, encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+}
+
 const FAKE_PI_SOURCE = `#!/usr/bin/env node
 import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
 
 const contextPath = process.env.AUTOPILOT_AGENT_STATUS_CONTEXT;
@@ -174,6 +197,9 @@ function loadContext() {
 function emitForcedStatus() {
   const context = loadContext();
   const unit = context.unit_spec;
+  const changedPath = join(unit.cwd, ...String(unit.owned_paths[0]).split('/'));
+  mkdirSync(dirname(changedPath), { recursive: true });
+  writeFileSync(changedPath, 'export const e2e = "fake implementation";\\n', 'utf8');
   const status = {
     schema_version: 'autopilot.status.v1', workstream: unit.workstream, unit_id: unit.unit_id,
     role: unit.role, attempt: unit.attempt, verdict: 'DONE', severity: 'clean', summary: 'Fake e2e Autopilot status completed.',

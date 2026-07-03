@@ -1,6 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { spawnSync } from 'node:child_process';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -11,6 +12,7 @@ import {
   AUTOPILOT_STATUS_TOOL,
   CONTEXT_BUDGET_TOOL_NAME,
 } from '../../src/core/names.ts';
+import { AUTOPILOT_STATE_ROOT_ENV } from '../../src/core/parallel-runtime.ts';
 
 type ThinkingLevelLike = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
 
@@ -162,6 +164,8 @@ interface SdkHarness {
   readonly session: SessionLike;
   readonly sentMessages: MessageCapture[];
   readonly activeTools: readonly string[];
+  readonly previousCwd: string;
+  readonly previousStateRoot: string | undefined;
 }
 
 const packageRoot = new URL('../../', import.meta.url).pathname;
@@ -290,13 +294,32 @@ function contextActions(): ExtensionContextActionsLike {
   };
 }
 
+async function initGitProject(project: string): Promise<void> {
+  await mkdir(project, { recursive: true });
+  await writeFile(join(project, 'README.md'), '# test project\n', 'utf8');
+  git(project, ['init']);
+  git(project, ['config', 'user.email', 'autopilot@example.invalid']);
+  git(project, ['config', 'user.name', 'Autopilot Test']);
+  git(project, ['add', '.']);
+  git(project, ['commit', '-m', 'baseline']);
+}
+
+function git(cwd: string, args: readonly string[]): void {
+  const result = spawnSync('git', args, { cwd, encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+}
+
 async function createSdkHarness(): Promise<SdkHarness> {
   setOfflineEnvironment();
   const root = await mkdtemp(join(tmpdir(), 'pi-autopilot-sdk-'));
   const cwd = join(root, 'project');
   const agentDir = join(root, 'agent');
-  await mkdir(cwd, { recursive: true });
+  await initGitProject(cwd);
   await mkdir(agentDir, { recursive: true });
+  const previousCwd = process.cwd();
+  const previousStateRoot = process.env[AUTOPILOT_STATE_ROOT_ENV];
+  process.env[AUTOPILOT_STATE_ROOT_ENV] = join(root, 'autopilot-state');
+  process.chdir(cwd);
 
   const sdk = await loadPiSdk();
   const resourceLoader = new sdk.DefaultResourceLoader({
@@ -325,12 +348,15 @@ async function createSdkHarness(): Promise<SdkHarness> {
   const sentMessages: MessageCapture[] = [];
   const activeTools: string[] = [];
   session.extensionRunner.bindCore(captureCoreActions(session, sentMessages, activeTools), contextActions());
-  return { root, session, sentMessages, activeTools };
+  return { root, session, sentMessages, activeTools, previousCwd, previousStateRoot };
 }
 
 async function disposeHarness(harness: SdkHarness): Promise<void> {
   await harness.session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' });
   harness.session.dispose();
+  process.chdir(harness.previousCwd);
+  if (harness.previousStateRoot === undefined) delete process.env[AUTOPILOT_STATE_ROOT_ENV];
+  else process.env[AUTOPILOT_STATE_ROOT_ENV] = harness.previousStateRoot;
   await rm(harness.root, { recursive: true, force: true });
 }
 
@@ -368,7 +394,9 @@ void describe('Pi SDK Autopilot activation', () => {
       const message = harness.sentMessages[0];
       if (message === undefined) throw new Error('missing queued SDK prompt');
       assert.equal(message.deliverAs, 'followUp');
-      assert.match(message.content, /Runtime root: `\.pi\/autopilot\/demo`/);
+      assert.match(message.content, /Runtime root: `.*\.pi\/autopilot\/demo`/);
+      assert.match(message.content, /Registered Autopilot worktree/);
+      assert.match(message.content, /autopilot\.execution_commit\.v1/);
       assert.match(message.content, /context_budget/);
       assert.equal(new RegExp(AUTOPILOT_STATUS_TOOL).test(message.content), false);
 

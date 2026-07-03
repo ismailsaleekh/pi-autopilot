@@ -1,5 +1,9 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import autopilotExtension, {
   type ExtensionCommandDefinitionLike,
   type ExtensionCommandContextLike,
@@ -13,6 +17,7 @@ import {
   AUTOPILOT_STATUS_TOOL,
   CONTEXT_BUDGET_TOOL_NAME,
 } from '../../src/core/names.ts';
+import { AUTOPILOT_STATE_ROOT_ENV } from '../../src/core/parallel-runtime.ts';
 
 interface CapturedMessage {
   readonly content: string;
@@ -33,7 +38,7 @@ interface Harness {
   readonly ctx: ExtensionCommandContextLike;
 }
 
-function createHarness(): Harness {
+function createHarness(cwd?: string): Harness {
   const commands = new Map<string, ExtensionCommandDefinitionLike>();
   const toolNames: string[] = [];
   const activeTools: string[] = [];
@@ -60,6 +65,7 @@ function createHarness(): Harness {
         notifications.push({ message, kind });
       },
     },
+    ...(cwd === undefined ? {} : { cwd }),
   };
   autopilotExtension(host);
   return { commands, toolNames, activeTools, messages, notifications, ctx };
@@ -75,26 +81,59 @@ function publicCommands(harness: Harness): string[] {
   return [...harness.commands.keys()].sort();
 }
 
+async function withIsolatedHarness<T>(run: (harness: Harness) => Promise<T>): Promise<T> {
+  const root = await mkdtemp(join(tmpdir(), 'pi-autopilot-command-'));
+  const project = join(root, 'project');
+  const originalStateRoot = process.env[AUTOPILOT_STATE_ROOT_ENV];
+  process.env[AUTOPILOT_STATE_ROOT_ENV] = join(root, 'state');
+  try {
+    await initGitProject(project);
+    return await run(createHarness(project));
+  } finally {
+    if (originalStateRoot === undefined) delete process.env[AUTOPILOT_STATE_ROOT_ENV];
+    else process.env[AUTOPILOT_STATE_ROOT_ENV] = originalStateRoot;
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
+async function initGitProject(project: string): Promise<void> {
+  await mkdir(project, { recursive: true });
+  await writeFile(join(project, 'README.md'), '# test project\n', 'utf8');
+  git(project, ['init']);
+  git(project, ['config', 'user.email', 'autopilot@example.invalid']);
+  git(project, ['config', 'user.name', 'Autopilot Test']);
+  git(project, ['add', '.']);
+  git(project, ['commit', '-m', 'baseline']);
+}
+
+function git(cwd: string, args: readonly string[]): void {
+  const result = spawnSync('git', args, { cwd, encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+}
+
 void describe('Autopilot command SDK surface', () => {
   void it('queues the hardened parent prompt and activates context_budget only for /autopilot', async () => {
-    const harness = createHarness();
-    await requireCommand(harness, AUTOPILOT_COMMAND).handler('demo operator scope', harness.ctx);
-    assert.deepEqual(publicCommands(harness), [
-      AUTOPILOT_COMMAND,
-      AUTOPILOT_HANDOFF_COMMAND,
-      AUTOPILOT_ONBOARD_COMMAND,
-    ]);
-    assert.deepEqual(harness.toolNames, [CONTEXT_BUDGET_TOOL_NAME]);
-    assert.deepEqual(harness.activeTools, [CONTEXT_BUDGET_TOOL_NAME]);
-    assert.equal(harness.messages.length, 1);
-    const message = harness.messages[0];
-    if (message === undefined) throw new Error('missing parent prompt');
-    assert.equal(message.deliverAs, 'followUp');
-    assert.match(message.content, /call `context_budget` with no arguments/);
-    assert.match(message.content, /Runtime root: `\.pi\/autopilot\/demo`/);
-    assert.match(message.content, /only through the exact injected invocation/);
-    assert.match(message.content, /validated status and receipt pair/);
-    assert.equal(message.content.includes(AUTOPILOT_STATUS_TOOL), false);
+    await withIsolatedHarness(async (harness) => {
+      await requireCommand(harness, AUTOPILOT_COMMAND).handler('demo operator scope', harness.ctx);
+      assert.deepEqual(publicCommands(harness), [
+        AUTOPILOT_COMMAND,
+        AUTOPILOT_HANDOFF_COMMAND,
+        AUTOPILOT_ONBOARD_COMMAND,
+      ]);
+      assert.deepEqual(harness.toolNames, [CONTEXT_BUDGET_TOOL_NAME]);
+      assert.deepEqual(harness.activeTools, [CONTEXT_BUDGET_TOOL_NAME]);
+      assert.equal(harness.messages.length, 1);
+      const message = harness.messages[0];
+      if (message === undefined) throw new Error('missing parent prompt');
+      assert.equal(message.deliverAs, 'followUp');
+      assert.match(message.content, /call `context_budget` with no arguments/);
+      assert.match(message.content, /Runtime root: `.*\.pi\/autopilot\/demo`/);
+      assert.match(message.content, /Registered Autopilot worktree/);
+      assert.match(message.content, /autopilot\.execution_commit\.v1/);
+      assert.match(message.content, /only through the exact injected invocation/);
+      assert.match(message.content, /validated status and receipt pair/);
+      assert.equal(message.content.includes(AUTOPILOT_STATUS_TOOL), false);
+    });
   });
 
   void it('queues an onboard brief without registering tools or launch authority', async () => {
@@ -122,18 +161,20 @@ void describe('Autopilot command SDK surface', () => {
   });
 
   void it('queues handoff for the active workstream and treats args as comments', async () => {
-    const harness = createHarness();
-    await requireCommand(harness, AUTOPILOT_COMMAND).handler('demo initial scope', harness.ctx);
-    await requireCommand(harness, AUTOPILOT_HANDOFF_COMMAND).handler('demo is a comment, not a slug', harness.ctx);
-    assert.deepEqual(harness.toolNames, [CONTEXT_BUDGET_TOOL_NAME]);
-    assert.deepEqual(harness.activeTools, [CONTEXT_BUDGET_TOOL_NAME]);
-    assert.equal(harness.messages.length, 2);
-    const message = harness.messages[1];
-    if (message === undefined) throw new Error('missing handoff prompt');
-    assert.match(message.content, /current Autopilot parent for workstream `demo`/);
-    assert.match(message.content, /demo is a comment, not a slug/);
-    assert.match(message.content, /first line is exactly/);
-    assert.match(message.content, new RegExp(`/${AUTOPILOT_COMMAND} demo`));
-    assert.equal(message.content.includes(AUTOPILOT_STATUS_TOOL), false);
+    await withIsolatedHarness(async (harness) => {
+      await requireCommand(harness, AUTOPILOT_COMMAND).handler('demo initial scope', harness.ctx);
+      await requireCommand(harness, AUTOPILOT_HANDOFF_COMMAND).handler('demo is a comment, not a slug', harness.ctx);
+      assert.deepEqual(harness.toolNames, [CONTEXT_BUDGET_TOOL_NAME]);
+      assert.deepEqual(harness.activeTools, [CONTEXT_BUDGET_TOOL_NAME]);
+      assert.equal(harness.messages.length, 2);
+      const message = harness.messages[1];
+      if (message === undefined) throw new Error('missing handoff prompt');
+      assert.match(message.content, /current Autopilot parent for workstream `demo`/);
+      assert.match(message.content, /demo is a comment, not a slug/);
+      assert.match(message.content, /Active workstream run:/);
+      assert.match(message.content, /first line is exactly/);
+      assert.match(message.content, new RegExp(`/${AUTOPILOT_COMMAND} demo`));
+      assert.equal(message.content.includes(AUTOPILOT_STATUS_TOOL), false);
+    });
   });
 });

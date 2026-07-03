@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 
 import type { AutopilotUnitSpec, AutopilotVerificationPlan } from '../../src/core/contracts/index.ts';
 import { AutopilotAgentRunError, runAutopilotAgentFromSpecPath } from '../../src/core/agent-runner.ts';
+import { AUTOPILOT_STATE_ROOT_ENV, prepareAutopilotWorkstream } from '../../src/core/parallel-runtime.ts';
 
 const TEST_DIR = dirname(fileURLToPath(import.meta.url));
 const PACKAGE_ROOT = resolve(TEST_DIR, '..', '..');
@@ -16,9 +17,13 @@ const FAKE_PI_COMPLETION_TIMEOUT_MS = 10_000;
 
 async function withTempDir<T>(run: (dir: string) => Promise<T>): Promise<T> {
   const dir = await mkdtemp(join(tmpdir(), 'autopilot-agent-runner-test-'));
+  const originalStateRoot = process.env[AUTOPILOT_STATE_ROOT_ENV];
+  process.env[AUTOPILOT_STATE_ROOT_ENV] = join(dir, 'autopilot-state');
   try {
     return await run(dir);
   } finally {
+    if (originalStateRoot === undefined) delete process.env[AUTOPILOT_STATE_ROOT_ENV];
+    else process.env[AUTOPILOT_STATE_ROOT_ENV] = originalStateRoot;
     await rm(dir, { recursive: true, force: true });
   }
 }
@@ -94,10 +99,58 @@ function spec(root: string, overrides: Partial<AutopilotUnitSpec> = {}): Autopil
 }
 
 async function writeSpec(root: string, unitSpec: AutopilotUnitSpec): Promise<string> {
-  await mkdir(unitSpec.cwd, { recursive: true });
-  const specPath = join(root, 'unit-spec.json');
+  const prepared = await prepareRegisteredWorktree(root, unitSpec);
+  const mutable = unitSpec as {
+    cwd: string;
+    status_output: string;
+    receipt_output: string;
+    evidence_dir: string;
+  };
+  mutable.cwd = prepared.mainWorktreePath;
+  mutable.status_output = join(
+    prepared.runtimeRoot,
+    'statuses',
+    `${unitSpec.unit_id}.${unitSpec.role}.attempt-${String(unitSpec.attempt)}.json`,
+  );
+  mutable.receipt_output = join(
+    prepared.runtimeRoot,
+    'receipts',
+    `${unitSpec.unit_id}.${unitSpec.role}.attempt-${String(unitSpec.attempt)}.receipt.json`,
+  );
+  mutable.evidence_dir = join(prepared.runtimeRoot, 'evidence', unitSpec.unit_id);
+  const specPath = join(prepared.runtimeRoot, 'unit-specs', `${unitSpec.unit_id}.${unitSpec.role}.attempt-${String(unitSpec.attempt)}.json`);
+  await mkdir(dirname(specPath), { recursive: true });
   await writeFile(specPath, `${JSON.stringify(unitSpec, null, 2)}\n`, 'utf8');
   return specPath;
+}
+
+async function prepareRegisteredWorktree(root: string, unitSpec: AutopilotUnitSpec): Promise<{
+  readonly mainWorktreePath: string;
+  readonly runtimeRoot: string;
+}> {
+  const source = join(root, 'source');
+  if (!existsGitRepo(source)) await initGitSource(source, unitSpec.owned_paths);
+  return await prepareAutopilotWorkstream({ workstream: unitSpec.workstream, sourceCwd: source });
+}
+
+function existsGitRepo(path: string): boolean {
+  return spawnSync('git', ['-C', path, 'rev-parse', '--show-toplevel'], { encoding: 'utf8' }).status === 0;
+}
+
+async function initGitSource(source: string, ownedPaths: readonly string[]): Promise<void> {
+  await mkdir(source, { recursive: true });
+  await writeFile(join(source, '.gitignore'), '.pi/\n', 'utf8');
+  for (const ownedPath of ownedPaths.length === 0 ? ['src/smoke.ts'] : ownedPaths) {
+    if (ownedPath.includes('*')) continue;
+    const abs = join(source, ...ownedPath.split('/'));
+    await mkdir(dirname(abs), { recursive: true });
+    await writeFile(abs, `export const baseline = ${JSON.stringify(ownedPath)};\n`, 'utf8');
+  }
+  git(source, ['init']);
+  git(source, ['config', 'user.email', 'autopilot@example.invalid']);
+  git(source, ['config', 'user.name', 'Autopilot Test']);
+  git(source, ['add', '.']);
+  git(source, ['commit', '-m', 'baseline']);
 }
 
 async function writeFakePi(root: string): Promise<string> {
@@ -243,8 +296,7 @@ void describe('autopilot-agent-run wrapper', () => {
           receipt_output: join(root, 'worktree', '.pi', 'autopilot', 'autopilot-smoke', 'receipts', `${unitId}.validate.attempt-1.receipt.json`),
           evidence_dir: join(root, 'worktree', '.pi', 'autopilot', 'autopilot-smoke', 'evidence', unitId),
         });
-        const specPath = join(root, `${unitId}.unit-spec.json`);
-        await writeFile(specPath, `${JSON.stringify(unitSpec, null, 2)}\n`, 'utf8');
+        const specPath = await writeSpec(root, unitSpec);
         const result = await runAutopilotAgentFromSpecPath(specPath, { dryRun: true });
         assert.equal(result.status, 'dry-run', model);
       }
@@ -264,8 +316,7 @@ void describe('autopilot-agent-run wrapper', () => {
           receipt_output: join(root, 'worktree', '.pi', 'autopilot', 'autopilot-smoke', 'receipts', `${unitId}.implement.attempt-1.receipt.json`),
           evidence_dir: join(root, 'worktree', '.pi', 'autopilot', 'autopilot-smoke', 'evidence', unitId),
         });
-        const specPath = join(root, `${unitId}.unit-spec.json`);
-        await writeFile(specPath, `${JSON.stringify(unitSpec, null, 2)}\n`, 'utf8');
+        const specPath = await writeSpec(root, unitSpec);
         await expectRejects(
           () => runAutopilotAgentFromSpecPath(specPath, { dryRun: true }),
           (error: unknown) =>
@@ -303,6 +354,11 @@ void describe('autopilot-agent-run wrapper', () => {
       });
       assert.equal(result.status, 'success');
       assert.equal(result.statusEntry?.verdict, 'DONE');
+      assert.equal(typeof result.executionCommitSha, 'string');
+      if (result.executionCommitOutput === null) throw new Error('expected runtime commit evidence');
+      const executionCommit = JSON.parse(await readFile(result.executionCommitOutput, 'utf8')) as { schema_version?: string; edited_claimed_paths?: string[] };
+      assert.equal(executionCommit.schema_version, 'autopilot.execution_commit.v1');
+      assert.deepEqual(executionCommit.edited_claimed_paths, ['src/smoke.ts']);
       const receipt = JSON.parse(await readFile(unitSpec.receipt_output, 'utf8')) as FakeReceipt;
       assert.equal(receipt.tool_call_id, 'call-autopilot-fake-1');
     });
@@ -626,7 +682,7 @@ void describe('autopilot-agent-run wrapper', () => {
     await withTempDir(async (root) => {
       const unitSpec = spec(root);
       const specPath = await writeSpec(root, unitSpec);
-      await mkdir(join(root, 'worktree', '.pi', 'autopilot', 'autopilot-smoke', 'statuses'), { recursive: true });
+      await mkdir(dirname(unitSpec.status_output), { recursive: true });
       await writeFile(unitSpec.status_output, '{}\n', 'utf8');
       const dryRun = await runAutopilotAgentFromSpecPath(specPath, { dryRun: true });
       assert.equal(dryRun.status, 'dry-run');
@@ -721,6 +777,12 @@ function buildStatus(context) {
 }
 function emitForcedStatus() {
   const context = loadContext();
+  const unit = context.unit_spec;
+  if ((unit.role === 'implement' || unit.role === 'fix') && scenario !== 'blocked-status') {
+    const ownedPath = join(unit.cwd, ...String(unit.owned_paths[0]).split('/'));
+    mkdirSync(dirname(ownedPath), { recursive: true });
+    writeFileSync(ownedPath, 'export const smoke = "fake implementation";\\n', 'utf8');
+  }
   if (scenario === 'omitted-actual-change') {
     const omittedPath = join(context.unit_spec.cwd, 'src', 'omitted.ts');
     mkdirSync(dirname(omittedPath), { recursive: true });

@@ -7,7 +7,8 @@ export type AutopilotSchemaVersion =
   | 'autopilot.handoff.v1'
   | 'autopilot.master_plan.v1'
   | 'autopilot.decision.v1'
-  | 'autopilot.execution_audit.v1';
+  | 'autopilot.execution_audit.v1'
+  | 'autopilot.execution_commit.v1';
 
 export const AUTOPILOT_ROLE_VALUES = [
   'strategy',
@@ -487,4 +488,27 @@ export interface AutopilotExecutionAudit {
   readonly classification: AutopilotAuditClassification;
   readonly evidence_refs: readonly AutopilotEvidenceRef[];
   readonly summary: string;
+}
+
+export interface AutopilotExecutionCommit {
+  readonly schema_version: 'autopilot.execution_commit.v1';
+  readonly workstream: string;
+  readonly workstream_run: string;
+  readonly autopilot_id: string;
+  readonly active_run_epoch: number;
+  readonly unit_id: string;
+  readonly role: 'implement' | 'fix';
+  readonly attempt: number;
+  readonly cwd: string;
+  readonly branch: string;
+  readonly claimed_paths: readonly string[];
+  readonly edited_claimed_paths: readonly string[];
+  readonly before_head: string;
+  readonly after_head: string;
+  readonly commit_sha: string;
+  readonly commit_subject: string;
+  readonly status_ref: string;
+  readonly receipt_ref: string;
+  readonly audit_ref: string;
+  readonly created_at: string;
 }

@@ -6,6 +6,7 @@ import {
   CONTEXT_BUDGET_TOOL_NAME,
 } from './core/names.ts';
 import { parseAutopilotArgs, runnerInvocationFromModuleUrl, runtimeRootForWorkstream } from './core/paths.ts';
+import { AutopilotParallelRuntimeError, prepareAutopilotWorkstream } from './core/parallel-runtime.ts';
 import {
   handoffUsage,
   onboardUsage,
@@ -22,6 +23,7 @@ export interface ExtensionUiLike {
 
 export interface ExtensionCommandContextLike {
   readonly ui: ExtensionUiLike;
+  readonly cwd?: string;
 }
 
 export interface ExtensionCommandDefinitionLike {
@@ -44,6 +46,8 @@ function notify(ctx: ExtensionCommandContextLike, message: string, kind: Notific
 export default function autopilotExtension(pi: ExtensionHostLike): void {
   let contextBudgetRegistered = false;
   let activeAutopilotWorkstream: string | null = null;
+  let activeAutopilotRuntimeRoot: string | null = null;
+  let activeAutopilotWorkstreamRun: string | null = null;
 
   function activateContextBudget(): void {
     if (!contextBudgetRegistered) {
@@ -62,11 +66,11 @@ export default function autopilotExtension(pi: ExtensionHostLike): void {
 
   pi.registerCommand(AUTOPILOT_COMMAND, {
     description: 'Start or resume Autopilot orchestration: /autopilot <workstream> [task intro]',
-    handler: (args, ctx) => {
+    handler: async (args, ctx) => {
       const parsed = parseAutopilotArgs(args);
       if (!parsed.ok) {
         notify(ctx, parsed.message, 'warning');
-        return Promise.resolve();
+        return;
       }
 
       try {
@@ -77,20 +81,48 @@ export default function autopilotExtension(pi: ExtensionHostLike): void {
           `Autopilot could not activate context_budget: ${error instanceof Error ? error.message : String(error)}`,
           'error',
         );
-        return Promise.resolve();
+        return;
       }
 
-      const runtimeRoot = runtimeRootForWorkstream(parsed.value.workstream);
+      let prepared;
+      try {
+        prepared = await prepareAutopilotWorkstream({
+          workstream: parsed.value.workstream,
+          sourceCwd: ctx.cwd ?? process.cwd(),
+        });
+      } catch (error) {
+        const message = error instanceof AutopilotParallelRuntimeError ? error.message : error instanceof Error ? error.message : String(error);
+        notify(ctx, `Autopilot could not prepare isolated worktree: ${message}`, 'error');
+        return;
+      }
+
+      const runtimeRoot = prepared.runtimeRoot;
       activeAutopilotWorkstream = parsed.value.workstream;
+      activeAutopilotRuntimeRoot = runtimeRoot;
+      activeAutopilotWorkstreamRun = prepared.active.workstream_run;
       const prompt = renderAutopilotPrompt({
         workstream: parsed.value.workstream,
         runtimeRoot,
         runnerInvocation: runnerInvocationFromModuleUrl(import.meta.url),
         taskIntro: parsed.value.remainder,
+        workstreamRun: prepared.active.workstream_run,
+        sourceRepo: prepared.active.source_repo,
+        worktreePath: prepared.mainWorktreePath,
+        branch: prepared.active.branch,
+        repoKey: prepared.active.repo_key,
+        targetBranch: prepared.active.target_branch,
       });
-      pi.sendUserMessage(prompt, { deliverAs: 'followUp' });
-      notify(ctx, `Autopilot activated for ${parsed.value.workstream}.`, 'info');
-      return Promise.resolve();
+      try {
+        pi.sendUserMessage(prompt, { deliverAs: 'followUp' });
+      } catch (error) {
+        notify(
+          ctx,
+          `Autopilot prepared ${prepared.active.workstream_run} but could not deliver the parent prompt: ${error instanceof Error ? error.message : String(error)}`,
+          'error',
+        );
+        return;
+      }
+      notify(ctx, `Autopilot activated for ${parsed.value.workstream} (${prepared.active.workstream_run}).`, 'info');
     },
   });
 
@@ -139,11 +171,12 @@ export default function autopilotExtension(pi: ExtensionHostLike): void {
         return Promise.resolve();
       }
 
-      const runtimeRoot = runtimeRootForWorkstream(activeAutopilotWorkstream);
+      const runtimeRoot = activeAutopilotRuntimeRoot ?? runtimeRootForWorkstream(activeAutopilotWorkstream);
+      const runSuffix = activeAutopilotWorkstreamRun === null ? '' : `\nActive workstream run: ${activeAutopilotWorkstreamRun}`;
       const prompt = renderHandoffPrompt({
         workstream: activeAutopilotWorkstream,
         runtimeRoot,
-        comments: args.trim(),
+        comments: `${args.trim()}${runSuffix}`.trim(),
       });
       pi.sendUserMessage(prompt, { deliverAs: 'followUp' });
       notify(ctx, `Autopilot handoff requested for ${activeAutopilotWorkstream}.`, 'info');

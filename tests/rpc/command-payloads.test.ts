@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -10,6 +10,7 @@ import {
   AUTOPILOT_ONBOARD_COMMAND,
   AUTOPILOT_STATUS_TOOL,
 } from '../../src/core/names.ts';
+import { AUTOPILOT_STATE_ROOT_ENV } from '../../src/core/parallel-runtime.ts';
 
 interface JsonMap {
   readonly [key: string]: unknown;
@@ -143,11 +144,14 @@ async function runRpc(
     const cwd = join(root, 'project');
     const home = join(root, 'home');
     const sessionDir = join(root, 'sessions');
-    await mkdir(cwd, { recursive: true });
+    await initGitProject(cwd);
     await mkdir(home, { recursive: true });
     await mkdir(sessionDir, { recursive: true });
     const input = commands.map((command) => JSON.stringify(command)).join('\n') + '\n';
-    const result = spawnPiRpc(cwd, home, sessionDir, input, envOverrides);
+    const result = spawnPiRpc(cwd, home, sessionDir, input, {
+      ...envOverrides,
+      [AUTOPILOT_STATE_ROOT_ENV]: join(root, 'autopilot-state'),
+    });
     assert.equal(result.status, 0, result.stderr);
     assert.equal(result.signal, null, result.stderr);
     assert.equal(result.stderr, '');
@@ -155,6 +159,21 @@ async function runRpc(
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+}
+
+async function initGitProject(project: string): Promise<void> {
+  await mkdir(project, { recursive: true });
+  await writeFile(join(project, 'README.md'), '# rpc project\n', 'utf8');
+  git(project, ['init']);
+  git(project, ['config', 'user.email', 'autopilot@example.invalid']);
+  git(project, ['config', 'user.name', 'Autopilot Test']);
+  git(project, ['add', '.']);
+  git(project, ['commit', '-m', 'baseline']);
+}
+
+function git(cwd: string, args: readonly string[]): void {
+  const result = spawnSync('git', args, { cwd, encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
 }
 
 function spawnPiRpc(
@@ -227,13 +246,11 @@ void describe('Pi RPC Autopilot command wiring', () => {
     assert.equal(notifyMessages.some((message) => /Autopilot activated for rpc-demo\./.test(message)), false);
   });
 
-  void it('executes /autopilot, /autopilot-onboard, and /autopilot-handoff through offline RPC', async () => {
+  void it('executes prompt-only Autopilot commands through offline RPC', async () => {
     const { events, stdout } = await runRpc([
       { id: 'commands', type: 'get_commands' },
       { id: 'handoff-before', type: 'prompt', message: '/autopilot-handoff operator note before activation' },
-      { id: 'autopilot', type: 'prompt', message: '/autopilot rpc-demo proceed after gates' },
       { id: 'onboard', type: 'prompt', message: '/autopilot-onboard rpc-demo old refs' },
-      { id: 'handoff-after', type: 'prompt', message: '/autopilot-handoff closing note' },
     ]);
 
     const commands = commandsFrom(requireResponse(events, 'commands'));
@@ -242,27 +259,18 @@ void describe('Pi RPC Autopilot command wiring', () => {
       AUTOPILOT_HANDOFF_COMMAND,
       AUTOPILOT_ONBOARD_COMMAND,
     ]);
-    const autopilot = requireResponse(events, 'autopilot');
     const onboard = requireResponse(events, 'onboard');
     const handoffBefore = requireResponse(events, 'handoff-before');
-    const handoffAfter = requireResponse(events, 'handoff-after');
-    assert.equal(autopilot.success, true, autopilot.error);
     assert.equal(onboard.success, true, onboard.error);
     assert.equal(handoffBefore.success, true, handoffBefore.error);
-    assert.equal(handoffAfter.success, true, handoffAfter.error);
     assert.equal(stdout.includes(`/${forbiddenLegacyCommand}`), false);
     assert.equal(stdout.includes('/autopilot-restart'), false);
     assert.equal(stdout.includes(AUTOPILOT_STATUS_TOOL), false);
 
     const notifyMessages = notifications(events).map((event) => event.message);
     assert.equal(notifyMessages.some((message) => /No active Autopilot workstream/.test(message)), true);
-    assert.equal(notifyMessages.some((message) => /Autopilot activated for rpc-demo\./.test(message)), true);
     assert.equal(
-      notifyMessages.some((message) => /Autopilot onboard brief requested for rpc-demo\./.test(message)),
-      true,
-    );
-    assert.equal(
-      notifyMessages.some((message) => /Autopilot handoff requested for rpc-demo\./.test(message)),
+      notifyMessages.some((message) => /Autopilot onboard brief/.test(message) && /rpc-demo/.test(message)),
       true,
     );
   });

@@ -13,6 +13,12 @@ export interface AutopilotPromptInput {
   readonly runtimeRoot: string;
   readonly runnerInvocation: string;
   readonly taskIntro: string;
+  readonly workstreamRun?: string;
+  readonly sourceRepo?: string;
+  readonly worktreePath?: string;
+  readonly branch?: string;
+  readonly repoKey?: string;
+  readonly targetBranch?: string | null;
 }
 
 export interface OnboardPromptInput {
@@ -34,6 +40,17 @@ function optionalBlock(label: string, value: string): string {
 // Source-audit phrases: call `${CONTEXT_BUDGET_TOOL_NAME}` with no arguments; Do not call `${AUTOPILOT_RUNNER_BIN}`.
 export function renderAutopilotPrompt(input: AutopilotPromptInput): string {
   const schemas = AUTOPILOT_SCHEMA_NAMES.map((name) => `- ${name}`).join('\n');
+  const runtimeMetadata = [
+    input.workstreamRun === undefined ? null : `- Workstream run: \`${input.workstreamRun}\`.`,
+    input.sourceRepo === undefined ? null : `- Operator source checkout: \`${input.sourceRepo}\` — read-only for Autopilot source edits.`,
+    input.worktreePath === undefined ? null : `- Registered Autopilot worktree: \`${input.worktreePath}\`. Every source-changing unit spec must set \`cwd\` to this worktree path.`,
+    input.branch === undefined ? null : `- Runtime branch: \`${input.branch}\`.`,
+    input.targetBranch === undefined ? null : `- Final merge target branch captured at activation: \`${input.targetBranch ?? 'detached-HEAD'}\`.`,
+    input.repoKey === undefined ? null : `- Repo coordination key: \`${input.repoKey}\`.`,
+  ].filter((line): line is string => line !== null).join('\n');
+  const worktreeCwdRule = input.worktreePath === undefined
+    ? ''
+    : `\n- For every unit, set \`cwd\` to \`${input.worktreePath}\`; never set child \`cwd\` to the operator source checkout.`;
   return `# Role: Autopilot parent orchestrator
 
 You are Autopilot for workstream \`${input.workstream}\`. Schedule and supervise child agents through typed Autopilot unit specs, package-owned runtime state, and forced structured status artifacts.
@@ -44,10 +61,10 @@ You are Autopilot for workstream \`${input.workstream}\`. Schedule and supervise
 2. If the tool is unavailable, errors, returns \`gate: "halt"\`, or returns \`gate: "unknown"\`, start no new child work. Drain already-running child work only when the runtime state proves it exists, update lifecycle handoff if needed, and stop.
 3. Continue only when \`gate: "ok"\`. Record the returned percent in \`${input.runtimeRoot}/state.json\` on the next state update.
 
-## Runtime and package paths
+## Runtime, worktree, and package paths
 
 - Runtime root: \`${input.runtimeRoot}\`.
-- Injected child launcher: \`${input.runnerInvocation}\`.
+${runtimeMetadata.length === 0 ? '' : `${runtimeMetadata}\n`}- Injected child launcher: \`${input.runnerInvocation}\`.
 - Child final status handling is launcher-internal; parent sessions must not load, expose, or call child-only status tools.
 - Public surfaces must use Autopilot command, schema, runtime, status, receipt, and runner names only.
 
@@ -62,15 +79,17 @@ You are Autopilot for workstream \`${input.workstream}\`. Schedule and supervise
 
 ## Child launch rules
 
-- Write unit specs under \`${input.runtimeRoot}/unit-specs/\`.
+- Write unit specs under \`${input.runtimeRoot}/unit-specs/\`.${worktreeCwdRule}
 - Start child work only through the exact injected invocation \`${input.runnerInvocation} <unit-spec.json>\`; start child agents only through that same injected Autopilot launcher.
+- The launcher/runtime acquires path claims for owned/read-only paths before model spend and rejects conflicting same-path work instead of guessing attribution.
+- The launcher/runtime, not the child, owns source commits: successful source-changing units must produce a clean execution audit plus \`autopilot.execution_commit.v1\` evidence.
 - When using a background task manager, its command must still be exactly that Autopilot launcher invocation with a unit-spec path.
 - Do not hand-assemble raw child Pi launches; do not start child agents with raw Pi commands, prompt-template commands, ad-hoc shell pipelines, compatibility aliases, or hand-assembled child sessions.
 - Do not call \`${AUTOPILOT_RUNNER_BIN}\` directly unless it is the injected invocation shown above for this session.
 
 ## Evidence and completion acceptance
 
-- Child statuses belong under \`${input.runtimeRoot}/statuses/\`, receipts under \`${input.runtimeRoot}/receipts/\`, and runner-produced execution audits under \`${input.runtimeRoot}/execution-audits/\`.
+- Child statuses belong under \`${input.runtimeRoot}/statuses/\`, receipts under \`${input.runtimeRoot}/receipts/\`, runner-produced execution audits under \`${input.runtimeRoot}/execution-audits/\`, and runtime commit evidence under \`${input.runtimeRoot}/execution-commits/\`.
 - Accept child transport only when the Autopilot launcher validates exactly one structured status carrier plus the matching status artifact and receipt artifact, plus the execution-audit artifact.
 - Require matching identity, status hash, receipt hash, provider identity, schema names, role-appropriate success verdict, and audit classification before moving work forward.
 - A valid status+receipt is transport success, not semantic closure: read the execution audit before closing or routing validation.
@@ -87,7 +106,7 @@ ${renderAutopilotPerfectQualityRules()}
 ## Safety boundaries
 
 - Do not create public compatibility aliases or paths outside Autopilot names.
-- Preserve dirty work; do not stash, reset, clean, checkout, restore, switch, rebase, stage, commit, or otherwise mutate git state.
+- Preserve dirty work; do not stash, reset, clean, checkout, restore, switch, rebase, stage, commit, or otherwise mutate git state manually. The package runtime is the only authority allowed to create Autopilot source commits inside the registered worktree.
 - Use subscription Pi channels only for frontier child models; do not introduce OpenRouter, paid API keys, or other metered frontier routes.
 - Respect each unit spec's owned, read-only, and untouchable paths.
 

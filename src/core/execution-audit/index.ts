@@ -247,7 +247,7 @@ function boundedAuditPathSet(
     selected.add(path);
   }
   return Object.freeze({
-    paths: Object.freeze([...selected].sort((left, right) => left.localeCompare(right))),
+    paths: sortedUnique([...selected]),
     count: uniquePaths.length,
     truncated: true,
   });

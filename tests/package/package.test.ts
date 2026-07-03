@@ -5,6 +5,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { AUTOPILOT_STATE_ROOT_ENV, prepareAutopilotWorkstream } from '../../src/core/parallel-runtime.ts';
 
 interface PackageScripts {
   readonly [key: string]: string | undefined;
@@ -372,9 +373,15 @@ void describe('package manifest and payload', () => {
 
       const installedPackage = join(installRoot, 'node_modules', 'pi-autopilot');
       const installedBin = join(installedPackage, 'bin', 'autopilot-agent-run.mjs');
-      const worktree = join(tempRoot, 'worktree');
-      const runtimeRoot = join(worktree, '.pi', 'autopilot', 'node-modules-smoke');
-      await mkdir(worktree, { recursive: true });
+      const source = join(tempRoot, 'source');
+      await initInstalledBinSource(source);
+      const previousStateRoot = process.env[AUTOPILOT_STATE_ROOT_ENV];
+      process.env[AUTOPILOT_STATE_ROOT_ENV] = join(tempRoot, 'autopilot-state');
+      const prepared = await prepareAutopilotWorkstream({ workstream: 'node-modules-smoke', sourceCwd: source });
+      if (previousStateRoot === undefined) delete process.env[AUTOPILOT_STATE_ROOT_ENV];
+      else process.env[AUTOPILOT_STATE_ROOT_ENV] = previousStateRoot;
+      const worktree = prepared.mainWorktreePath;
+      const runtimeRoot = prepared.runtimeRoot;
       await mkdir(join(runtimeRoot, 'unit-specs'), { recursive: true });
       const specPath = join(runtimeRoot, 'unit-specs', 'node-modules-smoke.implement.attempt-1.json');
       await writeFile(
@@ -429,9 +436,11 @@ void describe('package manifest and payload', () => {
         'utf8',
       );
 
+      const runnerEnv = { ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: join(tempRoot, 'autopilot-state') };
       const dryRun = spawnSync(process.execPath, [installedBin, '--dry-run', '--json', specPath], {
         cwd: worktree,
         encoding: 'utf8',
+        env: runnerEnv,
       });
       assert.equal(dryRun.status, 0, dryRun.stderr);
       assert.match(dryRun.stdout, /"status":"dry-run"/u);
@@ -445,7 +454,7 @@ void describe('package manifest and payload', () => {
       const liveRun = spawnSync(
         process.execPath,
         [installedBin, '--json', '--pi-executable', fakePi, specPath],
-        { cwd: worktree, encoding: 'utf8' },
+        { cwd: worktree, encoding: 'utf8', env: { ...runnerEnv, AUTOPILOT_FAKE_PI_SCENARIO: 'success' } },
       );
       assert.equal(liveRun.status, 0, liveRun.stderr);
       assert.match(liveRun.stdout, /"status":"success"/u);
@@ -456,10 +465,26 @@ void describe('package manifest and payload', () => {
   });
 });
 
+async function initInstalledBinSource(source: string): Promise<void> {
+  await mkdir(join(source, 'src'), { recursive: true });
+  await writeFile(join(source, '.gitignore'), '.pi/\n', 'utf8');
+  await writeFile(join(source, 'src', 'smoke.ts'), 'export const smoke = "baseline";\n', 'utf8');
+  git(source, ['init']);
+  git(source, ['config', 'user.email', 'autopilot@example.invalid']);
+  git(source, ['config', 'user.name', 'Autopilot Test']);
+  git(source, ['add', '.']);
+  git(source, ['commit', '-m', 'baseline']);
+}
+
+function git(cwd: string, args: readonly string[]): void {
+  const result = spawnSync('git', args, { cwd, encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+}
+
 const INSTALLED_PACKAGE_FAKE_PI_SOURCE = `#!/usr/bin/env node
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, sep } from 'node:path';
+import { dirname, join, sep } from 'node:path';
 import { createInterface } from 'node:readline';
 
 const contextPath = process.env.AUTOPILOT_AGENT_STATUS_CONTEXT;
@@ -480,6 +505,9 @@ function loadContext() {
 function emitStatus() {
   const context = loadContext();
   const unit = context.unit_spec;
+  const changedPath = join(unit.cwd, ...String(unit.owned_paths[0]).split('/'));
+  mkdirSync(dirname(changedPath), { recursive: true });
+  writeFileSync(changedPath, 'export const smoke = "installed fake";\\n', 'utf8');
   const status = {
     schema_version: 'autopilot.status.v1',
     workstream: unit.workstream,

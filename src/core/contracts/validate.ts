@@ -32,6 +32,7 @@ import {
   type AutopilotEvidenceRef,
   type AutopilotExecutionAudit,
   type AutopilotExecutionAuditPathSet,
+  type AutopilotExecutionCommit,
   type AutopilotHandoff,
   type AutopilotMasterPlan,
   type AutopilotReceipt,
@@ -150,6 +151,13 @@ export function parseAutopilotExecutionAudit(value: unknown): AutopilotExecution
   const audit = value as AutopilotExecutionAudit;
   throwIfIssues('AutopilotExecutionAudit', semanticExecutionAuditIssues(audit));
   return audit;
+}
+
+export function parseAutopilotExecutionCommit(value: unknown): AutopilotExecutionCommit {
+  assertExecutionCommitShape(value);
+  const commit = value as AutopilotExecutionCommit;
+  throwIfIssues('AutopilotExecutionCommit', semanticExecutionCommitIssues(commit));
+  return commit;
 }
 
 export function assertAutopilotStatusJsonSchemaCompiles(): void {
@@ -429,6 +437,36 @@ function assertExecutionAuditShape(value: unknown): void {
     expectString(record['summary'], '/summary', issues, { max: 1000 });
   }
   throwIfIssues('AutopilotExecutionAudit', issues);
+}
+
+function assertExecutionCommitShape(value: unknown): void {
+  const issues: string[] = [];
+  const record = requireRecord(value, 'AutopilotExecutionCommit', issues);
+  if (record !== undefined) {
+    checkKnownKeys(record, executionCommitKeys, 'AutopilotExecutionCommit', issues);
+    checkRequired(record, executionCommitRequired, 'AutopilotExecutionCommit', issues);
+    expectConst(record['schema_version'], 'autopilot.execution_commit.v1', '/schema_version', issues);
+    expectString(record['workstream'], '/workstream', issues, { pattern: WORKSTREAM, max: 128 });
+    expectString(record['workstream_run'], '/workstream_run', issues, { max: 180 });
+    expectString(record['autopilot_id'], '/autopilot_id', issues, { max: 200 });
+    expectInteger(record['active_run_epoch'], '/active_run_epoch', issues, 1, 9_000_000_000_000_000);
+    expectString(record['unit_id'], '/unit_id', issues, { pattern: UNIT_ID, max: 128 });
+    expectEnum(record['role'], ['implement', 'fix'] as const, '/role', issues);
+    expectInteger(record['attempt'], '/attempt', issues, 1, 999);
+    expectString(record['cwd'], '/cwd', issues, { max: 1024 });
+    expectString(record['branch'], '/branch', issues, { max: 240 });
+    expectStringArray(record['claimed_paths'], '/claimed_paths', issues, 500);
+    expectStringArray(record['edited_claimed_paths'], '/edited_claimed_paths', issues, 500);
+    expectString(record['before_head'], '/before_head', issues, { max: 80 });
+    expectString(record['after_head'], '/after_head', issues, { max: 80 });
+    expectString(record['commit_sha'], '/commit_sha', issues, { max: 80 });
+    expectString(record['commit_subject'], '/commit_subject', issues, { max: 240 });
+    expectString(record['status_ref'], '/status_ref', issues, { max: 512 });
+    expectString(record['receipt_ref'], '/receipt_ref', issues, { max: 512 });
+    expectString(record['audit_ref'], '/audit_ref', issues, { max: 512 });
+    expectString(record['created_at'], '/created_at', issues, { pattern: ISO_TIMESTAMP });
+  }
+  throwIfIssues('AutopilotExecutionCommit', issues);
 }
 
 function expectExecutionAuditPathCounts(value: unknown, label: string, issues: string[]): void {
@@ -1201,6 +1239,33 @@ function semanticDecisionRowIssues(decision: AutopilotDecisionRow): string[] {
   }
   for (const ref of decision.evidence_refs ?? []) {
     issues.push(...evidenceRefIssues(ref, undefined, 'evidence_refs'));
+  }
+  return issues;
+}
+
+function semanticExecutionCommitIssues(commit: AutopilotExecutionCommit): string[] {
+  const issues: string[] = [];
+  for (const [field, path] of [
+    ['claimed_paths', commit.claimed_paths],
+    ['edited_claimed_paths', commit.edited_claimed_paths],
+  ] as const) {
+    issues.push(...duplicateIssues(field, path));
+    for (const value of path) issues.push(...relativePathIssues(value, `${field} entry`));
+  }
+  if (commit.edited_claimed_paths.length === 0) issues.push('edited_claimed_paths must not be empty');
+  for (const editedPath of commit.edited_claimed_paths) {
+    if (!isUnderOwnedPath(editedPath, commit.claimed_paths)) {
+      issues.push(`edited claimed path ${JSON.stringify(editedPath)} is outside claimed_paths`);
+    }
+  }
+  if (commit.after_head !== commit.commit_sha) issues.push('after_head must equal commit_sha');
+  if (commit.before_head === commit.after_head) issues.push('before_head and after_head must differ');
+  for (const [field, path] of [
+    ['status_ref', commit.status_ref],
+    ['receipt_ref', commit.receipt_ref],
+    ['audit_ref', commit.audit_ref],
+  ] as const) {
+    issues.push(...relativePathIssues(path, field));
   }
   return issues;
 }
@@ -1990,4 +2055,28 @@ const executionAuditRequired = [
   'summary',
 ] as const;
 const executionAuditKeys = new Set(executionAuditRequired);
+
+const executionCommitRequired = [
+  'schema_version',
+  'workstream',
+  'workstream_run',
+  'autopilot_id',
+  'active_run_epoch',
+  'unit_id',
+  'role',
+  'attempt',
+  'cwd',
+  'branch',
+  'claimed_paths',
+  'edited_claimed_paths',
+  'before_head',
+  'after_head',
+  'commit_sha',
+  'commit_subject',
+  'status_ref',
+  'receipt_ref',
+  'audit_ref',
+  'created_at',
+] as const;
+const executionCommitKeys = new Set(executionCommitRequired);
 

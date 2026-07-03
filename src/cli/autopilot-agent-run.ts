@@ -14,6 +14,7 @@ const EXIT_BY_FAILURE_CLASS = Object.freeze({
   'missing-structured-output': 20,
   'invalid-structured-output': 21,
   'status-non-success': 30,
+  'runtime-commit-failed': 31,
 } as const satisfies Readonly<Record<AutopilotAgentRunError['failureClass'], number>>);
 
 async function main(argv: readonly string[]): Promise<number> {
@@ -45,13 +46,16 @@ async function main(argv: readonly string[]): Promise<number> {
           context_path: result.contextPath,
           audit_output: result.auditOutput,
           audit_classification: result.auditClassification,
+          execution_commit_output: result.executionCommitOutput,
+          execution_commit_sha: result.executionCommitSha,
           summary: result.summary,
         }),
       );
     } else {
       console.log(
         `autopilot-agent-run ${result.status} unit=${result.spec.unit_id} role=${result.spec.role} ` +
-          `status=${result.statusOutput} audit=${result.auditClassification ?? 'none'} summary=${result.summary}`, 
+          `status=${result.statusOutput} audit=${result.auditClassification ?? 'none'} ` +
+          `commit=${result.executionCommitSha ?? 'none'} summary=${result.summary}`,
       );
     }
     return 0;
@@ -66,6 +70,8 @@ async function main(argv: readonly string[]): Promise<number> {
         prompt_snapshot: error.details.promptSnapshotPath,
         audit_output: error.details.auditOutput,
         audit_classification: error.details.auditClassification,
+        execution_commit_output: error.details.executionCommitOutput,
+        execution_commit_sha: error.details.executionCommitSha,
       };
       if (args.json) {
         console.error(JSON.stringify(payload));
