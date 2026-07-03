@@ -1,4 +1,4 @@
-import { AUTOPILOT_AUDIT_CLASSIFICATION_VALUES, AUTOPILOT_CLOSURE_GATE_STATUS_VALUES, AUTOPILOT_COMMAND_STATUS_VALUES, AUTOPILOT_CONTEXT_GATE_VALUES, AUTOPILOT_DECISION_EVENT_VALUES, AUTOPILOT_EVENT_TYPE_VALUES, AUTOPILOT_EXCEPTION_STATE_VALUES, AUTOPILOT_HANDOFF_REASON_VALUES, AUTOPILOT_QUALITY_PROFILE_VALUES, AUTOPILOT_RISK_LEVEL_VALUES, AUTOPILOT_ROLE_VALUES, AUTOPILOT_SEVERITY_VALUES, AUTOPILOT_TEMPLATE_VALUES, AUTOPILOT_THINKING_VALUES, AUTOPILOT_UNIT_STATE_VALUES, AUTOPILOT_VERDICT_VALUES, AUTOPILOT_WORK_ITEM_STATE_VALUES, AUTOPILOT_WORKSTREAM_STATUS_VALUES, } from "./types.js";
+import { AUTOPILOT_AUDIT_CLASSIFICATION_VALUES, AUTOPILOT_CLOSURE_GATE_STATUS_VALUES, AUTOPILOT_COMMAND_STATUS_VALUES, AUTOPILOT_CONTEXT_GATE_VALUES, AUTOPILOT_DECISION_EVENT_VALUES, AUTOPILOT_EVENT_TYPE_VALUES, AUTOPILOT_EXCEPTION_STATE_VALUES, AUTOPILOT_EXECUTION_AUDIT_PATH_SET_VALUES, AUTOPILOT_HANDOFF_REASON_VALUES, AUTOPILOT_QUALITY_PROFILE_VALUES, AUTOPILOT_RISK_LEVEL_VALUES, AUTOPILOT_ROLE_VALUES, AUTOPILOT_SEVERITY_VALUES, AUTOPILOT_TEMPLATE_VALUES, AUTOPILOT_THINKING_VALUES, AUTOPILOT_UNIT_STATE_VALUES, AUTOPILOT_VERDICT_VALUES, AUTOPILOT_WORK_ITEM_STATE_VALUES, AUTOPILOT_WORKSTREAM_STATUS_VALUES, } from "./types.js";
 export const AUTOPILOT_SCHEMA_ID_BASE = 'urn:pi-autopilot:schemas';
 const ISO_TIMESTAMP_PATTERN = '^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$';
 const SHA256_PATTERN = '^sha256:[a-f0-9]{64}$';
@@ -65,6 +65,13 @@ const noExtraMap = (properties, required) => ({
     properties,
     required: [...required],
 });
+const integerCountSchema = () => ({
+    type: 'integer',
+    minimum: 0,
+    maximum: 1_000_000_000,
+});
+const executionAuditPathCountProperties = Object.fromEntries(AUTOPILOT_EXECUTION_AUDIT_PATH_SET_VALUES.map((pathSet) => [pathSet, integerCountSchema()]));
+export const AUTOPILOT_EXECUTION_AUDIT_PATH_COUNTS_JSON_SCHEMA = noExtraMap(executionAuditPathCountProperties, AUTOPILOT_EXECUTION_AUDIT_PATH_SET_VALUES);
 export const AUTOPILOT_CONTEXT_REF_JSON_SCHEMA = noExtraMap({
     path: relativePathSchema(),
     purpose: boundedString(240),
@@ -611,6 +618,8 @@ export const AUTOPILOT_EXECUTION_AUDIT_JSON_SCHEMA = {
         outside_owned_paths: boundedArray(relativePathSchema(), 500),
         read_only_touched_paths: boundedArray(relativePathSchema(), 500),
         untouchable_touched_paths: boundedArray(relativePathSchema(), 500),
+        path_counts: AUTOPILOT_EXECUTION_AUDIT_PATH_COUNTS_JSON_SCHEMA,
+        truncated_path_sets: boundedArray(enumSchema(AUTOPILOT_EXECUTION_AUDIT_PATH_SET_VALUES), 9),
         declared_validation_commands: boundedArray(boundedString(800), 120),
         status_reported_commands: boundedArray(boundedString(800), 120),
         command_coverage_gaps: boundedArray(boundedString(800), 120),
@@ -637,6 +646,8 @@ export const AUTOPILOT_EXECUTION_AUDIT_JSON_SCHEMA = {
         'outside_owned_paths',
         'read_only_touched_paths',
         'untouchable_touched_paths',
+        'path_counts',
+        'truncated_path_sets',
         'declared_validation_commands',
         'status_reported_commands',
         'command_coverage_gaps',

@@ -6,6 +6,7 @@ import {
   AUTOPILOT_DECISION_EVENT_VALUES,
   AUTOPILOT_EVENT_TYPE_VALUES,
   AUTOPILOT_EXCEPTION_STATE_VALUES,
+  AUTOPILOT_EXECUTION_AUDIT_PATH_SET_VALUES,
   AUTOPILOT_HANDOFF_REASON_VALUES,
   AUTOPILOT_QUALITY_PROFILE_VALUES,
   AUTOPILOT_RISK_LEVEL_VALUES,
@@ -100,6 +101,21 @@ const noExtraMap = (properties: Record<string, JsonMap>, required: readonly stri
   properties,
   required: [...required],
 });
+
+const integerCountSchema = (): JsonMap => ({
+  type: 'integer',
+  minimum: 0,
+  maximum: 1_000_000_000,
+});
+
+const executionAuditPathCountProperties = Object.fromEntries(
+  AUTOPILOT_EXECUTION_AUDIT_PATH_SET_VALUES.map((pathSet) => [pathSet, integerCountSchema()]),
+) as Record<(typeof AUTOPILOT_EXECUTION_AUDIT_PATH_SET_VALUES)[number], JsonMap>;
+
+export const AUTOPILOT_EXECUTION_AUDIT_PATH_COUNTS_JSON_SCHEMA = noExtraMap(
+  executionAuditPathCountProperties,
+  AUTOPILOT_EXECUTION_AUDIT_PATH_SET_VALUES,
+);
 
 export const AUTOPILOT_CONTEXT_REF_JSON_SCHEMA = noExtraMap(
   {
@@ -724,6 +740,8 @@ export const AUTOPILOT_EXECUTION_AUDIT_JSON_SCHEMA = {
     outside_owned_paths: boundedArray(relativePathSchema(), 500),
     read_only_touched_paths: boundedArray(relativePathSchema(), 500),
     untouchable_touched_paths: boundedArray(relativePathSchema(), 500),
+    path_counts: AUTOPILOT_EXECUTION_AUDIT_PATH_COUNTS_JSON_SCHEMA,
+    truncated_path_sets: boundedArray(enumSchema(AUTOPILOT_EXECUTION_AUDIT_PATH_SET_VALUES), 9),
     declared_validation_commands: boundedArray(boundedString(800), 120),
     status_reported_commands: boundedArray(boundedString(800), 120),
     command_coverage_gaps: boundedArray(boundedString(800), 120),
@@ -750,6 +768,8 @@ export const AUTOPILOT_EXECUTION_AUDIT_JSON_SCHEMA = {
     'outside_owned_paths',
     'read_only_touched_paths',
     'untouchable_touched_paths',
+    'path_counts',
+    'truncated_path_sets',
     'declared_validation_commands',
     'status_reported_commands',
     'command_coverage_gaps',

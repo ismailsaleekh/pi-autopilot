@@ -2,9 +2,11 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import {
+  AUTOPILOT_EXECUTION_AUDIT_PATH_SET_VALUES,
   parseAutopilotState,
   type AutopilotDecisionRow,
   type AutopilotExecutionAudit,
+  type AutopilotExecutionAuditPathCounts,
   type AutopilotMasterPlan,
   type AutopilotState,
   type AutopilotStatusEntry,
@@ -114,7 +116,7 @@ function status(role: 'implement' | 'validate' | 'bughunt' = 'validate'): Autopi
 }
 
 function audit(overrides: Partial<AutopilotExecutionAudit> = {}): AutopilotExecutionAudit {
-  return {
+  const base: AutopilotExecutionAudit = {
     schema_version: 'autopilot.execution_audit.v1',
     workstream: 'quality-demo',
     unit_id: 'u01-implement',
@@ -137,10 +139,31 @@ function audit(overrides: Partial<AutopilotExecutionAudit> = {}): AutopilotExecu
     status_reported_commands: [],
     command_coverage_gaps: [],
     classification: 'clean',
+    path_counts: {
+      dirty_baseline_paths: 0,
+      dirty_relevant_paths: 0,
+      actual_changed_paths: 1,
+      status_reported_changed_paths: 1,
+      omitted_status_changes: 0,
+      reported_but_not_actual_changes: 0,
+      outside_owned_paths: 0,
+      read_only_touched_paths: 0,
+      untouchable_touched_paths: 0,
+    },
+    truncated_path_sets: [],
     evidence_refs: [],
     summary: 'audit clean',
-    ...overrides,
   };
+  const merged: AutopilotExecutionAudit = { ...base, ...overrides };
+  return { ...merged, path_counts: executionAuditPathCounts(merged) };
+}
+
+function executionAuditPathCounts(audit: AutopilotExecutionAudit): AutopilotExecutionAuditPathCounts {
+  return Object.freeze(
+    Object.fromEntries(
+      AUTOPILOT_EXECUTION_AUDIT_PATH_SET_VALUES.map((pathSet) => [pathSet, audit[pathSet].length]),
+    ) as Record<(typeof AUTOPILOT_EXECUTION_AUDIT_PATH_SET_VALUES)[number], number>,
+  );
 }
 
 function state(workItem: AutopilotWorkItem): AutopilotState {

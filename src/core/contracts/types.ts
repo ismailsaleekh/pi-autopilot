@@ -71,6 +71,20 @@ export const AUTOPILOT_AUDIT_CLASSIFICATION_VALUES = [
 ] as const;
 export type AutopilotAuditClassification = (typeof AUTOPILOT_AUDIT_CLASSIFICATION_VALUES)[number];
 
+export const AUTOPILOT_EXECUTION_AUDIT_PATH_SET_VALUES = [
+  'dirty_baseline_paths',
+  'dirty_relevant_paths',
+  'actual_changed_paths',
+  'status_reported_changed_paths',
+  'omitted_status_changes',
+  'reported_but_not_actual_changes',
+  'outside_owned_paths',
+  'read_only_touched_paths',
+  'untouchable_touched_paths',
+] as const;
+export type AutopilotExecutionAuditPathSet = (typeof AUTOPILOT_EXECUTION_AUDIT_PATH_SET_VALUES)[number];
+export type AutopilotExecutionAuditPathCounts = Readonly<Record<AutopilotExecutionAuditPathSet, number>>;
+
 export const AUTOPILOT_WORK_ITEM_STATE_VALUES = [
   'planned',
   'running',
@@ -465,6 +479,8 @@ export interface AutopilotExecutionAudit {
   readonly outside_owned_paths: readonly string[];
   readonly read_only_touched_paths: readonly string[];
   readonly untouchable_touched_paths: readonly string[];
+  readonly path_counts: AutopilotExecutionAuditPathCounts;
+  readonly truncated_path_sets: readonly AutopilotExecutionAuditPathSet[];
   readonly declared_validation_commands: readonly string[];
   readonly status_reported_commands: readonly string[];
   readonly command_coverage_gaps: readonly string[];

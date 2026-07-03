@@ -15,6 +15,7 @@ import {
   type AutopilotVerificationPlan,
 } from '../../src/core/contracts/index.ts';
 import {
+  buildAutopilotExecutionAudit,
   captureAutopilotExecutionBaseline,
   deriveAutopilotExecutionAuditPath,
   writeAutopilotExecutionAudit,
@@ -408,6 +409,7 @@ void describe('Autopilot execution audits', () => {
           parseAutopilotExecutionAudit({
             ...cleanAudit,
             outside_owned_paths: ['src/outside.ts'],
+            path_counts: { ...cleanAudit.path_counts, outside_owned_paths: 1 },
           }),
         /classification clean does not match audit facts/u,
       );
@@ -426,6 +428,8 @@ void describe('Autopilot execution audits', () => {
       assert.equal(unrelatedDirtyAudit.dirty_baseline, true);
       assert.deepEqual(unrelatedDirtyAudit.dirty_baseline_paths, ['docs/operator-note.md']);
       assert.deepEqual(unrelatedDirtyAudit.dirty_relevant_paths, []);
+      assert.equal(unrelatedDirtyAudit.path_counts.dirty_baseline_paths, 1);
+      assert.deepEqual(unrelatedDirtyAudit.truncated_path_sets, []);
 
       git(worktree, ['checkout', '--', 'src/owned.ts']);
       await rm(join(worktree, 'docs'), { recursive: true, force: true });
@@ -467,5 +471,38 @@ void describe('Autopilot execution audits', () => {
       const auditText = await readFile(deriveAutopilotExecutionAuditPath(spec), 'utf8');
       assert.match(auditText, /autopilot.execution_audit.v1/u);
     });
+  });
+
+  void it('truncates oversized dirty baselines with counts and fail-closed classification', () => {
+    const spec = sourceSpec('/tmp/autopilot-large-dirty-baseline');
+    const dirtyPaths = Array.from(
+      { length: 946 },
+      (_, index) => `docs/baseline-${String(index).padStart(4, '0')}.md`,
+    );
+    const audit = buildAutopilotExecutionAudit({
+      unitSpec: spec,
+      baseline: {
+        cwd: spec.cwd,
+        available: true,
+        gitHead: null,
+        dirtyPaths,
+        summary: 'large dirty baseline captured',
+      },
+      postRun: {
+        available: true,
+        gitHead: null,
+        changedPaths: [...dirtyPaths, 'src/owned.ts'],
+        summary: 'post-run captured',
+      },
+      statusEntry: passingStatus(spec),
+    });
+
+    assert.equal(audit.dirty_baseline, true);
+    assert.equal(audit.dirty_baseline_paths.length, 500);
+    assert.equal(audit.path_counts.dirty_baseline_paths, 946);
+    assert.deepEqual(audit.truncated_path_sets, ['dirty_baseline_paths']);
+    assert.equal(audit.classification, 'audit-unavailable');
+    assert.match(audit.summary, /truncated dirty_baseline_paths/u);
+    assert.equal(parseAutopilotExecutionAudit(audit).path_counts.dirty_baseline_paths, 946);
   });
 });

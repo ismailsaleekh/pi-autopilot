@@ -38,6 +38,17 @@ export const AUTOPILOT_AUDIT_CLASSIFICATION_VALUES = [
     'critical-protected-path-violation',
     'audit-unavailable',
 ];
+export const AUTOPILOT_EXECUTION_AUDIT_PATH_SET_VALUES = [
+    'dirty_baseline_paths',
+    'dirty_relevant_paths',
+    'actual_changed_paths',
+    'status_reported_changed_paths',
+    'omitted_status_changes',
+    'reported_but_not_actual_changes',
+    'outside_owned_paths',
+    'read_only_touched_paths',
+    'untouchable_touched_paths',
+];
 export const AUTOPILOT_WORK_ITEM_STATE_VALUES = [
     'planned',
     'running',

@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { isAbsolute, normalize, relative, resolve, sep } from 'node:path';
 import { AUTOPILOT_JSON_SCHEMAS, AUTOPILOT_STATUS_ENTRY_JSON_SCHEMA, } from "./schemas.js";
-import { AUTOPILOT_AUDIT_CLASSIFICATION_VALUES, AUTOPILOT_CLOSURE_GATE_STATUS_VALUES, AUTOPILOT_COMMAND_STATUS_VALUES, AUTOPILOT_CONTEXT_GATE_VALUES, AUTOPILOT_DECISION_EVENT_VALUES, AUTOPILOT_EVENT_TYPE_VALUES, AUTOPILOT_EXCEPTION_STATE_VALUES, AUTOPILOT_HANDOFF_REASON_VALUES, AUTOPILOT_QUALITY_PROFILE_VALUES, AUTOPILOT_RISK_LEVEL_VALUES, AUTOPILOT_ROLE_VALUES, AUTOPILOT_SEVERITY_VALUES, AUTOPILOT_TEMPLATE_VALUES, AUTOPILOT_THINKING_VALUES, AUTOPILOT_UNIT_STATE_VALUES, AUTOPILOT_VERDICT_VALUES, AUTOPILOT_WORK_ITEM_STATE_VALUES, AUTOPILOT_WORKSTREAM_STATUS_VALUES, } from "./types.js";
+import { AUTOPILOT_AUDIT_CLASSIFICATION_VALUES, AUTOPILOT_CLOSURE_GATE_STATUS_VALUES, AUTOPILOT_COMMAND_STATUS_VALUES, AUTOPILOT_CONTEXT_GATE_VALUES, AUTOPILOT_DECISION_EVENT_VALUES, AUTOPILOT_EVENT_TYPE_VALUES, AUTOPILOT_EXCEPTION_STATE_VALUES, AUTOPILOT_EXECUTION_AUDIT_PATH_SET_VALUES, AUTOPILOT_HANDOFF_REASON_VALUES, AUTOPILOT_QUALITY_PROFILE_VALUES, AUTOPILOT_RISK_LEVEL_VALUES, AUTOPILOT_ROLE_VALUES, AUTOPILOT_SEVERITY_VALUES, AUTOPILOT_TEMPLATE_VALUES, AUTOPILOT_THINKING_VALUES, AUTOPILOT_UNIT_STATE_VALUES, AUTOPILOT_VERDICT_VALUES, AUTOPILOT_WORK_ITEM_STATE_VALUES, AUTOPILOT_WORKSTREAM_STATUS_VALUES, } from "./types.js";
 const ISO_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;
 const SHA256 = /^sha256:[a-f0-9]{64}$/u;
 const WORKSTREAM = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
@@ -340,6 +340,10 @@ function assertExecutionAuditShape(value) {
         expectStringArray(record['outside_owned_paths'], '/outside_owned_paths', issues, 500);
         expectStringArray(record['read_only_touched_paths'], '/read_only_touched_paths', issues, 500);
         expectStringArray(record['untouchable_touched_paths'], '/untouchable_touched_paths', issues, 500);
+        expectExecutionAuditPathCounts(record['path_counts'], '/path_counts', issues);
+        expectArray(record['truncated_path_sets'], '/truncated_path_sets', issues, 9, 0, (item, label, itemIssues) => {
+            expectEnum(item, AUTOPILOT_EXECUTION_AUDIT_PATH_SET_VALUES, label, itemIssues);
+        });
         expectStringArray(record['declared_validation_commands'], '/declared_validation_commands', issues, 120, 0, 800);
         expectStringArray(record['status_reported_commands'], '/status_reported_commands', issues, 120, 0, 800);
         expectStringArray(record['command_coverage_gaps'], '/command_coverage_gaps', issues, 120, 0, 800);
@@ -348,6 +352,16 @@ function assertExecutionAuditShape(value) {
         expectString(record['summary'], '/summary', issues, { max: 1000 });
     }
     throwIfIssues('AutopilotExecutionAudit', issues);
+}
+function expectExecutionAuditPathCounts(value, label, issues) {
+    const record = requireRecord(value, label, issues);
+    if (record === undefined)
+        return;
+    checkKnownKeys(record, new Set(AUTOPILOT_EXECUTION_AUDIT_PATH_SET_VALUES), label, issues);
+    checkRequired(record, AUTOPILOT_EXECUTION_AUDIT_PATH_SET_VALUES, label, issues);
+    for (const pathSet of AUTOPILOT_EXECUTION_AUDIT_PATH_SET_VALUES) {
+        expectInteger(record[pathSet], `${label}/${pathSet}`, issues, 0, 1_000_000_000);
+    }
 }
 function checkContextRef(value, label, issues) {
     const record = requireRecord(value, label, issues);
@@ -1096,17 +1110,19 @@ function semanticExecutionAuditIssues(audit) {
         for (const path of paths)
             issues.push(...relativePathIssues(path, `${field} entry`));
     }
+    issues.push(...executionAuditPathCountIssues(audit));
+    issues.push(...duplicateIssues('truncated_path_sets', audit.truncated_path_sets));
     issues.push(...duplicateIssues('declared_validation_commands', audit.declared_validation_commands));
     issues.push(...duplicateIssues('status_reported_commands', audit.status_reported_commands));
     issues.push(...duplicateIssues('command_coverage_gaps', audit.command_coverage_gaps));
-    if (audit.dirty_baseline === null && audit.dirty_baseline_paths.length > 0) {
-        issues.push('dirty_baseline null requires empty dirty_baseline_paths');
+    if (audit.dirty_baseline === null && audit.path_counts.dirty_baseline_paths > 0) {
+        issues.push('dirty_baseline null requires zero dirty_baseline_paths count');
     }
-    if (audit.dirty_baseline === false && audit.dirty_baseline_paths.length > 0) {
-        issues.push('dirty_baseline false requires empty dirty_baseline_paths');
+    if (audit.dirty_baseline === false && audit.path_counts.dirty_baseline_paths > 0) {
+        issues.push('dirty_baseline false requires zero dirty_baseline_paths count');
     }
-    if (audit.dirty_baseline === true && audit.dirty_baseline_paths.length === 0) {
-        issues.push('dirty_baseline true requires dirty_baseline_paths');
+    if (audit.dirty_baseline === true && audit.path_counts.dirty_baseline_paths === 0) {
+        issues.push('dirty_baseline true requires dirty_baseline_paths count');
     }
     if (audit.dirty_baseline === null && audit.dirty_relevant_paths.length > 0) {
         issues.push('dirty_baseline null requires empty dirty_relevant_paths');
@@ -1116,7 +1132,7 @@ function semanticExecutionAuditIssues(audit) {
             issues.push(`dirty_relevant_paths entry ${JSON.stringify(dirtyRelevantPath)} must be present in dirty_baseline_paths`);
         }
     }
-    if (audit.classification !== 'audit-unavailable') {
+    if (executionAuditStatusDiffsFullyRepresented(audit)) {
         const expectedOmitted = sortedDifference(audit.actual_changed_paths, audit.status_reported_changed_paths);
         if (!sameStringSet(audit.omitted_status_changes, expectedOmitted)) {
             issues.push('omitted_status_changes must equal actual_changed_paths minus status_reported_changed_paths');
@@ -1138,6 +1154,35 @@ function semanticExecutionAuditIssues(audit) {
         issues.push(...evidenceRefIssues(ref, undefined, 'evidence_refs'));
     }
     return issues;
+}
+function executionAuditPathCountIssues(audit) {
+    const issues = [];
+    const truncatedPathSets = new Set(audit.truncated_path_sets);
+    for (const pathSet of AUTOPILOT_EXECUTION_AUDIT_PATH_SET_VALUES) {
+        const paths = audit[pathSet];
+        const count = audit.path_counts[pathSet];
+        if (count < paths.length) {
+            issues.push(`${pathSet} count must be greater than or equal to recorded ${pathSet} length`);
+        }
+        const isTruncated = truncatedPathSets.has(pathSet);
+        if (isTruncated && count === paths.length) {
+            issues.push(`${pathSet} is marked truncated but count equals recorded length`);
+        }
+        if (!isTruncated && count !== paths.length) {
+            issues.push(`${pathSet} count must equal recorded length unless ${pathSet} is truncated`);
+        }
+    }
+    return issues;
+}
+function executionAuditStatusDiffsFullyRepresented(audit) {
+    return (audit.dirty_baseline !== null &&
+        !executionAuditPathSetTruncated(audit, 'actual_changed_paths') &&
+        !executionAuditPathSetTruncated(audit, 'status_reported_changed_paths') &&
+        !executionAuditPathSetTruncated(audit, 'omitted_status_changes') &&
+        !executionAuditPathSetTruncated(audit, 'reported_but_not_actual_changes'));
+}
+function executionAuditPathSetTruncated(audit, pathSet) {
+    return audit.truncated_path_sets.includes(pathSet);
 }
 function ownershipMatrixPathIssues(matrix) {
     const issues = [];
@@ -1318,15 +1363,18 @@ function sameStringSet(left, right) {
     return true;
 }
 function expectedExecutionAuditClassification(audit) {
-    if (audit.untouchable_touched_paths.length > 0)
+    if (audit.path_counts.untouchable_touched_paths > 0)
         return 'critical-protected-path-violation';
-    if (audit.read_only_touched_paths.length > 0)
+    if (audit.path_counts.read_only_touched_paths > 0)
         return 'protected-path-review-required';
-    if (audit.dirty_baseline === null || audit.dirty_relevant_paths.length > 0)
+    if (audit.dirty_baseline === null ||
+        audit.path_counts.dirty_relevant_paths > 0 ||
+        audit.truncated_path_sets.length > 0) {
         return 'audit-unavailable';
-    if (audit.outside_owned_paths.length > 0 ||
-        audit.omitted_status_changes.length > 0 ||
-        audit.reported_but_not_actual_changes.length > 0 ||
+    }
+    if (audit.path_counts.outside_owned_paths > 0 ||
+        audit.path_counts.omitted_status_changes > 0 ||
+        audit.path_counts.reported_but_not_actual_changes > 0 ||
         audit.command_coverage_gaps.length > 0) {
         return 'scope-review-required';
     }
@@ -1713,6 +1761,8 @@ const executionAuditRequired = [
     'outside_owned_paths',
     'read_only_touched_paths',
     'untouchable_touched_paths',
+    'path_counts',
+    'truncated_path_sets',
     'declared_validation_commands',
     'status_reported_commands',
     'command_coverage_gaps',

@@ -15,6 +15,7 @@ import {
   AUTOPILOT_DECISION_EVENT_VALUES,
   AUTOPILOT_EVENT_TYPE_VALUES,
   AUTOPILOT_EXCEPTION_STATE_VALUES,
+  AUTOPILOT_EXECUTION_AUDIT_PATH_SET_VALUES,
   AUTOPILOT_HANDOFF_REASON_VALUES,
   AUTOPILOT_QUALITY_PROFILE_VALUES,
   AUTOPILOT_RISK_LEVEL_VALUES,
@@ -30,6 +31,7 @@ import {
   type AutopilotEventRow,
   type AutopilotEvidenceRef,
   type AutopilotExecutionAudit,
+  type AutopilotExecutionAuditPathSet,
   type AutopilotHandoff,
   type AutopilotMasterPlan,
   type AutopilotReceipt,
@@ -415,6 +417,10 @@ function assertExecutionAuditShape(value: unknown): void {
     expectStringArray(record['outside_owned_paths'], '/outside_owned_paths', issues, 500);
     expectStringArray(record['read_only_touched_paths'], '/read_only_touched_paths', issues, 500);
     expectStringArray(record['untouchable_touched_paths'], '/untouchable_touched_paths', issues, 500);
+    expectExecutionAuditPathCounts(record['path_counts'], '/path_counts', issues);
+    expectArray(record['truncated_path_sets'], '/truncated_path_sets', issues, 9, 0, (item, label, itemIssues) => {
+      expectEnum(item, AUTOPILOT_EXECUTION_AUDIT_PATH_SET_VALUES, label, itemIssues);
+    });
     expectStringArray(record['declared_validation_commands'], '/declared_validation_commands', issues, 120, 0, 800);
     expectStringArray(record['status_reported_commands'], '/status_reported_commands', issues, 120, 0, 800);
     expectStringArray(record['command_coverage_gaps'], '/command_coverage_gaps', issues, 120, 0, 800);
@@ -423,6 +429,16 @@ function assertExecutionAuditShape(value: unknown): void {
     expectString(record['summary'], '/summary', issues, { max: 1000 });
   }
   throwIfIssues('AutopilotExecutionAudit', issues);
+}
+
+function expectExecutionAuditPathCounts(value: unknown, label: string, issues: string[]): void {
+  const record = requireRecord(value, label, issues);
+  if (record === undefined) return;
+  checkKnownKeys(record, new Set(AUTOPILOT_EXECUTION_AUDIT_PATH_SET_VALUES), label, issues);
+  checkRequired(record, AUTOPILOT_EXECUTION_AUDIT_PATH_SET_VALUES, label, issues);
+  for (const pathSet of AUTOPILOT_EXECUTION_AUDIT_PATH_SET_VALUES) {
+    expectInteger(record[pathSet], `${label}/${pathSet}`, issues, 0, 1_000_000_000);
+  }
 }
 
 function checkContextRef(value: unknown, label: string, issues: string[]): void {
@@ -1206,17 +1222,19 @@ function semanticExecutionAuditIssues(audit: AutopilotExecutionAudit): string[] 
     issues.push(...duplicateIssues(field, paths));
     for (const path of paths) issues.push(...relativePathIssues(path, `${field} entry`));
   }
+  issues.push(...executionAuditPathCountIssues(audit));
+  issues.push(...duplicateIssues('truncated_path_sets', audit.truncated_path_sets));
   issues.push(...duplicateIssues('declared_validation_commands', audit.declared_validation_commands));
   issues.push(...duplicateIssues('status_reported_commands', audit.status_reported_commands));
   issues.push(...duplicateIssues('command_coverage_gaps', audit.command_coverage_gaps));
-  if (audit.dirty_baseline === null && audit.dirty_baseline_paths.length > 0) {
-    issues.push('dirty_baseline null requires empty dirty_baseline_paths');
+  if (audit.dirty_baseline === null && audit.path_counts.dirty_baseline_paths > 0) {
+    issues.push('dirty_baseline null requires zero dirty_baseline_paths count');
   }
-  if (audit.dirty_baseline === false && audit.dirty_baseline_paths.length > 0) {
-    issues.push('dirty_baseline false requires empty dirty_baseline_paths');
+  if (audit.dirty_baseline === false && audit.path_counts.dirty_baseline_paths > 0) {
+    issues.push('dirty_baseline false requires zero dirty_baseline_paths count');
   }
-  if (audit.dirty_baseline === true && audit.dirty_baseline_paths.length === 0) {
-    issues.push('dirty_baseline true requires dirty_baseline_paths');
+  if (audit.dirty_baseline === true && audit.path_counts.dirty_baseline_paths === 0) {
+    issues.push('dirty_baseline true requires dirty_baseline_paths count');
   }
   if (audit.dirty_baseline === null && audit.dirty_relevant_paths.length > 0) {
     issues.push('dirty_baseline null requires empty dirty_relevant_paths');
@@ -1226,7 +1244,7 @@ function semanticExecutionAuditIssues(audit: AutopilotExecutionAudit): string[] 
       issues.push(`dirty_relevant_paths entry ${JSON.stringify(dirtyRelevantPath)} must be present in dirty_baseline_paths`);
     }
   }
-  if (audit.classification !== 'audit-unavailable') {
+  if (executionAuditStatusDiffsFullyRepresented(audit)) {
     const expectedOmitted = sortedDifference(audit.actual_changed_paths, audit.status_reported_changed_paths);
     if (!sameStringSet(audit.omitted_status_changes, expectedOmitted)) {
       issues.push('omitted_status_changes must equal actual_changed_paths minus status_reported_changed_paths');
@@ -1256,6 +1274,43 @@ function semanticExecutionAuditIssues(audit: AutopilotExecutionAudit): string[] 
     issues.push(...evidenceRefIssues(ref, undefined, 'evidence_refs'));
   }
   return issues;
+}
+
+function executionAuditPathCountIssues(audit: AutopilotExecutionAudit): string[] {
+  const issues: string[] = [];
+  const truncatedPathSets = new Set(audit.truncated_path_sets);
+  for (const pathSet of AUTOPILOT_EXECUTION_AUDIT_PATH_SET_VALUES) {
+    const paths = audit[pathSet];
+    const count = audit.path_counts[pathSet];
+    if (count < paths.length) {
+      issues.push(`${pathSet} count must be greater than or equal to recorded ${pathSet} length`);
+    }
+    const isTruncated = truncatedPathSets.has(pathSet);
+    if (isTruncated && count === paths.length) {
+      issues.push(`${pathSet} is marked truncated but count equals recorded length`);
+    }
+    if (!isTruncated && count !== paths.length) {
+      issues.push(`${pathSet} count must equal recorded length unless ${pathSet} is truncated`);
+    }
+  }
+  return issues;
+}
+
+function executionAuditStatusDiffsFullyRepresented(audit: AutopilotExecutionAudit): boolean {
+  return (
+    audit.dirty_baseline !== null &&
+    !executionAuditPathSetTruncated(audit, 'actual_changed_paths') &&
+    !executionAuditPathSetTruncated(audit, 'status_reported_changed_paths') &&
+    !executionAuditPathSetTruncated(audit, 'omitted_status_changes') &&
+    !executionAuditPathSetTruncated(audit, 'reported_but_not_actual_changes')
+  );
+}
+
+function executionAuditPathSetTruncated(
+  audit: AutopilotExecutionAudit,
+  pathSet: AutopilotExecutionAuditPathSet,
+): boolean {
+  return audit.truncated_path_sets.includes(pathSet);
 }
 
 function ownershipMatrixPathIssues(matrix: AutopilotMasterPlan['ownership_matrix']): string[] {
@@ -1510,13 +1565,19 @@ function sameStringSet(left: readonly string[], right: readonly string[]): boole
 }
 
 function expectedExecutionAuditClassification(audit: AutopilotExecutionAudit): AutopilotExecutionAudit['classification'] {
-  if (audit.untouchable_touched_paths.length > 0) return 'critical-protected-path-violation';
-  if (audit.read_only_touched_paths.length > 0) return 'protected-path-review-required';
-  if (audit.dirty_baseline === null || audit.dirty_relevant_paths.length > 0) return 'audit-unavailable';
+  if (audit.path_counts.untouchable_touched_paths > 0) return 'critical-protected-path-violation';
+  if (audit.path_counts.read_only_touched_paths > 0) return 'protected-path-review-required';
   if (
-    audit.outside_owned_paths.length > 0 ||
-    audit.omitted_status_changes.length > 0 ||
-    audit.reported_but_not_actual_changes.length > 0 ||
+    audit.dirty_baseline === null ||
+    audit.path_counts.dirty_relevant_paths > 0 ||
+    audit.truncated_path_sets.length > 0
+  ) {
+    return 'audit-unavailable';
+  }
+  if (
+    audit.path_counts.outside_owned_paths > 0 ||
+    audit.path_counts.omitted_status_changes > 0 ||
+    audit.path_counts.reported_but_not_actual_changes > 0 ||
     audit.command_coverage_gaps.length > 0
   ) {
     return 'scope-review-required';
@@ -1919,6 +1980,8 @@ const executionAuditRequired = [
   'outside_owned_paths',
   'read_only_touched_paths',
   'untouchable_touched_paths',
+  'path_counts',
+  'truncated_path_sets',
   'declared_validation_commands',
   'status_reported_commands',
   'command_coverage_gaps',

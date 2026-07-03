@@ -3,11 +3,14 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, normalize, relative, resolve, sep } from 'node:path';
 
 import { parseAutopilotExecutionAudit } from '../contracts/index.ts';
-import type {
-  AutopilotAuditClassification,
-  AutopilotExecutionAudit,
-  AutopilotStatusEntry,
-  AutopilotUnitSpec,
+import {
+  AUTOPILOT_EXECUTION_AUDIT_PATH_SET_VALUES,
+  type AutopilotAuditClassification,
+  type AutopilotExecutionAudit,
+  type AutopilotExecutionAuditPathCounts,
+  type AutopilotExecutionAuditPathSet,
+  type AutopilotStatusEntry,
+  type AutopilotUnitSpec,
 } from '../contracts/types.ts';
 
 export interface AutopilotExecutionBaseline {
@@ -24,6 +27,14 @@ interface GitStatusSnapshot {
   readonly changedPaths: readonly string[];
   readonly summary: string;
 }
+
+interface BoundedAuditPathSet {
+  readonly paths: readonly string[];
+  readonly count: number;
+  readonly truncated: boolean;
+}
+
+const EXECUTION_AUDIT_PATH_SET_LIMIT = 500;
 
 export async function captureAutopilotExecutionBaseline(
   cwd: string,
@@ -74,34 +85,48 @@ export function buildAutopilotExecutionAudit(input: {
 }): AutopilotExecutionAudit {
   const auditAvailable = input.baseline.available && input.postRun.available;
   const runtimeRoot = runtimeRootRelativePrefix(input.unitSpec);
-  const baselineDirtyPaths = auditAvailable
+  const baselineDirtyPathsFull = auditAvailable
     ? input.baseline.dirtyPaths.filter((path) => !matchesPathPattern(path, runtimeRoot))
     : [];
-  const baselineDirty = baselineDirtyPaths.length > 0;
-  const dirtyRelevantPaths = baselineDirtyPaths.filter((path) =>
+  const baselineDirty = baselineDirtyPathsFull.length > 0;
+  const dirtyRelevantPathsFull = baselineDirtyPathsFull.filter((path) =>
     matchesPathPatterns(path, relevantDirtyPathPatterns(input.unitSpec)),
   );
-  const actualChangedPaths = auditAvailable
-    ? sortedDifference(input.postRun.changedPaths, baselineDirtyPaths).filter(
+  const actualChangedPathsFull = auditAvailable
+    ? sortedDifference(input.postRun.changedPaths, baselineDirtyPathsFull).filter(
         (path) => !matchesPathPattern(path, runtimeRoot),
       )
     : [];
-  const statusReportedChangedPaths = sortedUnique(input.statusEntry?.changed_paths ?? []);
-  const omittedStatusChanges = auditAvailable
-    ? sortedDifference(actualChangedPaths, statusReportedChangedPaths)
+  const statusReportedChangedPathsFull = sortedUnique(input.statusEntry?.changed_paths ?? []);
+  const omittedStatusChangesFull = auditAvailable
+    ? sortedDifference(actualChangedPathsFull, statusReportedChangedPathsFull)
     : [];
-  const reportedButNotActualChanges = auditAvailable
-    ? sortedDifference(statusReportedChangedPaths, actualChangedPaths)
+  const reportedButNotActualChangesFull = auditAvailable
+    ? sortedDifference(statusReportedChangedPathsFull, actualChangedPathsFull)
     : [];
-  const outsideOwnedPaths = actualChangedPaths.filter(
+  const outsideOwnedPathsFull = actualChangedPathsFull.filter(
     (path) => !matchesPathPatterns(path, input.unitSpec.owned_paths),
   );
-  const readOnlyTouchedPaths = actualChangedPaths.filter((path) =>
+  const readOnlyTouchedPathsFull = actualChangedPathsFull.filter((path) =>
     matchesPathPatterns(path, input.unitSpec.read_only_paths),
   );
-  const untouchableTouchedPaths = actualChangedPaths.filter((path) =>
+  const untouchableTouchedPathsFull = actualChangedPathsFull.filter((path) =>
     matchesPathPatterns(path, input.unitSpec.untouchable_paths),
   );
+  const dirtyRelevantPaths = boundedAuditPathSet(dirtyRelevantPathsFull);
+  const boundedPathSets = Object.freeze({
+    dirty_baseline_paths: boundedAuditPathSet(baselineDirtyPathsFull, dirtyRelevantPaths.paths),
+    dirty_relevant_paths: dirtyRelevantPaths,
+    actual_changed_paths: boundedAuditPathSet(actualChangedPathsFull),
+    status_reported_changed_paths: boundedAuditPathSet(statusReportedChangedPathsFull),
+    omitted_status_changes: boundedAuditPathSet(omittedStatusChangesFull),
+    reported_but_not_actual_changes: boundedAuditPathSet(reportedButNotActualChangesFull),
+    outside_owned_paths: boundedAuditPathSet(outsideOwnedPathsFull),
+    read_only_touched_paths: boundedAuditPathSet(readOnlyTouchedPathsFull),
+    untouchable_touched_paths: boundedAuditPathSet(untouchableTouchedPathsFull),
+  } satisfies Record<AutopilotExecutionAuditPathSet, BoundedAuditPathSet>);
+  const pathCounts = executionAuditPathCounts(boundedPathSets);
+  const truncatedPathSets = truncatedAuditPathSets(boundedPathSets);
   const statusReportedCommands = sortedUnique(
     (input.statusEntry?.commands ?? []).map((command) => command.command),
   );
@@ -109,13 +134,14 @@ export function buildAutopilotExecutionAudit(input: {
   const commandCoverageGaps = sortedDifference(declaredValidationCommands, statusReportedCommands);
   const classification = classifyAudit({
     auditAvailable,
-    dirtyRelevantPaths,
-    outsideOwnedPaths,
-    readOnlyTouchedPaths,
-    untouchableTouchedPaths,
-    omittedStatusChanges,
-    reportedButNotActualChanges,
+    dirtyRelevantPaths: dirtyRelevantPathsFull,
+    outsideOwnedPaths: outsideOwnedPathsFull,
+    readOnlyTouchedPaths: readOnlyTouchedPathsFull,
+    untouchableTouchedPaths: untouchableTouchedPathsFull,
+    omittedStatusChanges: omittedStatusChangesFull,
+    reportedButNotActualChanges: reportedButNotActualChangesFull,
     commandCoverageGaps,
+    truncatedPathSets,
   });
   return Object.freeze({
     schema_version: 'autopilot.execution_audit.v1',
@@ -127,15 +153,17 @@ export function buildAutopilotExecutionAudit(input: {
     cwd: input.unitSpec.cwd,
     git_head: input.baseline.gitHead ?? input.postRun.gitHead,
     dirty_baseline: auditAvailable ? baselineDirty : null,
-    dirty_baseline_paths: baselineDirtyPaths,
-    dirty_relevant_paths: dirtyRelevantPaths,
-    actual_changed_paths: actualChangedPaths,
-    status_reported_changed_paths: statusReportedChangedPaths,
-    omitted_status_changes: omittedStatusChanges,
-    reported_but_not_actual_changes: reportedButNotActualChanges,
-    outside_owned_paths: outsideOwnedPaths,
-    read_only_touched_paths: readOnlyTouchedPaths,
-    untouchable_touched_paths: untouchableTouchedPaths,
+    dirty_baseline_paths: boundedPathSets.dirty_baseline_paths.paths,
+    dirty_relevant_paths: boundedPathSets.dirty_relevant_paths.paths,
+    actual_changed_paths: boundedPathSets.actual_changed_paths.paths,
+    status_reported_changed_paths: boundedPathSets.status_reported_changed_paths.paths,
+    omitted_status_changes: boundedPathSets.omitted_status_changes.paths,
+    reported_but_not_actual_changes: boundedPathSets.reported_but_not_actual_changes.paths,
+    outside_owned_paths: boundedPathSets.outside_owned_paths.paths,
+    read_only_touched_paths: boundedPathSets.read_only_touched_paths.paths,
+    untouchable_touched_paths: boundedPathSets.untouchable_touched_paths.paths,
+    path_counts: pathCounts,
+    truncated_path_sets: truncatedPathSets,
     declared_validation_commands: declaredValidationCommands,
     status_reported_commands: statusReportedCommands,
     command_coverage_gaps: commandCoverageGaps,
@@ -145,7 +173,8 @@ export function buildAutopilotExecutionAudit(input: {
       classification,
       auditAvailable,
       baselineDirty,
-      dirtyRelevantPaths,
+      dirtyRelevantPathCount: dirtyRelevantPathsFull.length,
+      truncatedPathSets,
     }),
   });
 }
@@ -159,10 +188,13 @@ function classifyAudit(input: {
   readonly omittedStatusChanges: readonly string[];
   readonly reportedButNotActualChanges: readonly string[];
   readonly commandCoverageGaps: readonly string[];
+  readonly truncatedPathSets: readonly AutopilotExecutionAuditPathSet[];
 }): AutopilotAuditClassification {
   if (input.untouchableTouchedPaths.length > 0) return 'critical-protected-path-violation';
   if (input.readOnlyTouchedPaths.length > 0) return 'protected-path-review-required';
-  if (!input.auditAvailable || input.dirtyRelevantPaths.length > 0) return 'audit-unavailable';
+  if (!input.auditAvailable || input.dirtyRelevantPaths.length > 0 || input.truncatedPathSets.length > 0) {
+    return 'audit-unavailable';
+  }
   if (
     input.outsideOwnedPaths.length > 0 ||
     input.omittedStatusChanges.length > 0 ||
@@ -178,17 +210,63 @@ function auditSummary(input: {
   readonly classification: AutopilotAuditClassification;
   readonly auditAvailable: boolean;
   readonly baselineDirty: boolean;
-  readonly dirtyRelevantPaths: readonly string[];
+  readonly dirtyRelevantPathCount: number;
+  readonly truncatedPathSets: readonly AutopilotExecutionAuditPathSet[];
 }): string {
   if (!input.auditAvailable) return 'Execution audit could not read git status; semantic closure requires review.';
-  if (input.dirtyRelevantPaths.length > 0) {
+  if (input.dirtyRelevantPathCount > 0) {
     return 'Execution audit found dirty baseline paths on unit-owned or protected surfaces; semantic closure requires attribution review.';
+  }
+  if (input.truncatedPathSets.length > 0) {
+    return `Execution audit truncated ${input.truncatedPathSets.join(', ')} evidence to schema limits; semantic closure requires review.`;
   }
   if (input.classification === 'clean' && input.baselineDirty) {
     return 'Execution audit is clean; unrelated dirty baseline paths are recorded as caveats.';
   }
   if (input.classification === 'clean') return 'Execution audit is clean.';
   return `Execution audit classified this attempt as ${input.classification}.`;
+}
+
+function boundedAuditPathSet(
+  paths: readonly string[],
+  priorityPaths: readonly string[] = [],
+): BoundedAuditPathSet {
+  const uniquePaths = sortedUnique(paths);
+  if (uniquePaths.length <= EXECUTION_AUDIT_PATH_SET_LIMIT) {
+    return Object.freeze({ paths: uniquePaths, count: uniquePaths.length, truncated: false });
+  }
+  const uniquePathSet = new Set(uniquePaths);
+  const selected = new Set<string>();
+  for (const path of sortedUnique(priorityPaths)) {
+    if (!uniquePathSet.has(path)) continue;
+    selected.add(path);
+    if (selected.size >= EXECUTION_AUDIT_PATH_SET_LIMIT) break;
+  }
+  for (const path of uniquePaths) {
+    if (selected.size >= EXECUTION_AUDIT_PATH_SET_LIMIT) break;
+    selected.add(path);
+  }
+  return Object.freeze({
+    paths: Object.freeze([...selected].sort((left, right) => left.localeCompare(right))),
+    count: uniquePaths.length,
+    truncated: true,
+  });
+}
+
+function executionAuditPathCounts(
+  pathSets: Readonly<Record<AutopilotExecutionAuditPathSet, BoundedAuditPathSet>>,
+): AutopilotExecutionAuditPathCounts {
+  return Object.freeze(
+    Object.fromEntries(
+      AUTOPILOT_EXECUTION_AUDIT_PATH_SET_VALUES.map((pathSet) => [pathSet, pathSets[pathSet].count]),
+    ) as Record<AutopilotExecutionAuditPathSet, number>,
+  );
+}
+
+function truncatedAuditPathSets(
+  pathSets: Readonly<Record<AutopilotExecutionAuditPathSet, BoundedAuditPathSet>>,
+): readonly AutopilotExecutionAuditPathSet[] {
+  return Object.freeze(AUTOPILOT_EXECUTION_AUDIT_PATH_SET_VALUES.filter((pathSet) => pathSets[pathSet].truncated));
 }
 
 function readGitStatusSnapshot(cwd: string): GitStatusSnapshot {
