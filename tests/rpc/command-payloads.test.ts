@@ -9,6 +9,7 @@ import {
   AUTOPILOT_CLOSE_COMMAND,
   AUTOPILOT_COMMAND,
   AUTOPILOT_HANDOFF_COMMAND,
+  AUTOPILOT_INJECT_COMMAND,
   AUTOPILOT_ONBOARD_COMMAND,
   AUTOPILOT_STATUS_TOOL,
 } from '../../src/core/names.ts';
@@ -216,6 +217,7 @@ void describe('Pi RPC Autopilot command wiring', () => {
       AUTOPILOT_ABORT_COMMAND,
       AUTOPILOT_CLOSE_COMMAND,
       AUTOPILOT_HANDOFF_COMMAND,
+      AUTOPILOT_INJECT_COMMAND,
       AUTOPILOT_ONBOARD_COMMAND,
     ]);
     assert.match(requireListedCommand(commands, AUTOPILOT_COMMAND).description ?? '', /Start or resume Autopilot/);
@@ -226,6 +228,10 @@ void describe('Pi RPC Autopilot command wiring', () => {
     assert.match(
       requireListedCommand(commands, AUTOPILOT_HANDOFF_COMMAND).description ?? '',
       /current active workstream/,
+    );
+    assert.match(
+      requireListedCommand(commands, AUTOPILOT_INJECT_COMMAND).description ?? '',
+      /session binding/,
     );
     assert.match(requireListedCommand(commands, AUTOPILOT_CLOSE_COMMAND).description ?? '', /Runtime-close/);
     assert.match(requireListedCommand(commands, AUTOPILOT_ABORT_COMMAND).description ?? '', /Runtime-abort/);
@@ -265,6 +271,7 @@ void describe('Pi RPC Autopilot command wiring', () => {
       AUTOPILOT_ABORT_COMMAND,
       AUTOPILOT_CLOSE_COMMAND,
       AUTOPILOT_HANDOFF_COMMAND,
+      AUTOPILOT_INJECT_COMMAND,
       AUTOPILOT_ONBOARD_COMMAND,
     ]);
     const onboard = requireResponse(events, 'onboard');

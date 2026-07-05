@@ -11,12 +11,20 @@ export interface ParsedAutopilotCloseArgs {
   readonly dryRun: boolean;
 }
 
+export interface ParsedAutopilotInjectArgs {
+  readonly workstream: string;
+}
+
 export type ParseAutopilotArgsResult =
   | { readonly ok: true; readonly value: ParsedAutopilotArgs }
   | { readonly ok: false; readonly message: string };
 
 export type ParseAutopilotCloseArgsResult =
   | { readonly ok: true; readonly value: ParsedAutopilotCloseArgs }
+  | { readonly ok: false; readonly message: string };
+
+export type ParseAutopilotInjectArgsResult =
+  | { readonly ok: true; readonly value: ParsedAutopilotInjectArgs }
   | { readonly ok: false; readonly message: string };
 
 const WORKSTREAM_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
@@ -41,6 +49,22 @@ export function parseAutopilotArgs(args: string): ParseAutopilotArgsResult {
   }
   const remainder = firstSpace < 0 ? '' : trimmed.slice(firstSpace).trim();
   return { ok: true, value: { workstream, remainder } };
+}
+
+export function parseAutopilotInjectArgs(args: string): ParseAutopilotInjectArgsResult {
+  const tokens = args.trim().split(/\s+/u).filter((token) => token.length > 0);
+  if (tokens.length !== 1) {
+    return { ok: false, message: 'Usage: /autopilot-inject <workstream>' };
+  }
+  const workstream = tokens[0];
+  if (workstream === undefined || !isValidWorkstreamSlug(workstream)) {
+    return {
+      ok: false,
+      message:
+        'Workstream must start with a letter or digit and contain only letters, digits, dot, underscore, or dash.',
+    };
+  }
+  return { ok: true, value: { workstream } };
 }
 
 export function parseAutopilotCloseArgs(args: string): ParseAutopilotCloseArgsResult {

@@ -5,12 +5,13 @@ import {
   AUTOPILOT_CLOSE_COMMAND,
   AUTOPILOT_COMMAND,
   AUTOPILOT_HANDOFF_COMMAND,
+  AUTOPILOT_INJECT_COMMAND,
   AUTOPILOT_ONBOARD_COMMAND,
   AUTOPILOT_RUNNER_BIN,
   AUTOPILOT_STATUS_TOOL,
   CONTEXT_BUDGET_TOOL_NAME,
 } from '../../src/core/names.ts';
-import { parseAutopilotArgs, parseAutopilotCloseArgs, runtimeRootForWorkstream } from '../../src/core/paths.ts';
+import { parseAutopilotArgs, parseAutopilotCloseArgs, parseAutopilotInjectArgs, runtimeRootForWorkstream } from '../../src/core/paths.ts';
 import { renderAutopilotPrompt, renderHandoffPrompt, renderOnboardPrompt } from '../../src/core/prompts.ts';
 
 function parsedWorkstream(args: string): string {
@@ -37,6 +38,16 @@ void describe('Autopilot command parsing and prompts', () => {
     assert.equal(parseAutopilotArgs('').ok, false);
     assert.equal(parseAutopilotArgs('-bad').ok, false);
     assert.equal(parseAutopilotArgs('../bad').ok, false);
+  });
+
+  void it('parses inject arguments without freeform ambiguity', () => {
+    const parsed = parseAutopilotInjectArgs('demo');
+    assert.equal(parsed.ok, true);
+    if (!parsed.ok) throw new Error(parsed.message);
+    assert.equal(parsed.value.workstream, 'demo');
+    assert.equal(parseAutopilotInjectArgs('').ok, false);
+    assert.equal(parseAutopilotInjectArgs('-bad').ok, false);
+    assert.equal(parseAutopilotInjectArgs('demo extra').ok, false);
   });
 
   void it('parses runtime close arguments without freeform ambiguity', () => {
@@ -106,6 +117,7 @@ void describe('Autopilot command parsing and prompts', () => {
       comments: 'remember package docs validation',
     });
     assert.match(prompt, new RegExp(`/${AUTOPILOT_HANDOFF_COMMAND}`));
+    assert.equal(AUTOPILOT_INJECT_COMMAND, 'autopilot-inject');
     assert.match(prompt, new RegExp(`/${AUTOPILOT_COMMAND} demo`));
     assert.match(prompt, /call `context_budget` with no arguments/);
     assert.match(prompt, /Start no new child work/);

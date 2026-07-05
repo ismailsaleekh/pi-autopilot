@@ -21,8 +21,8 @@ Also run release docs audits and forbidden legacy-runtime scans before cutting a
 1. Confirm `npm run pack:dry-run` includes `bin/`, `dist/`, `extensions/`, `src/`, `templates/`, README, TESTING, TEST_PLAN, PUBLISHING, and LICENSE.
 2. Confirm tests, artifacts, dependency directories, and local runtime state are excluded from the tarball.
 3. Verify `pi.extensions` points at `./extensions/autopilot.ts` and the package bin exposes `autopilot-agent-run` through compiled `dist/src/cli/autopilot-agent-run.js`, not Node type stripping of `.ts` under `node_modules`.
-4. Verify `/autopilot`, `/autopilot-onboard`, `/autopilot-handoff`, `/autopilot-close`, and `/autopilot-abort` load from the installed package and not from repo-local prompt files.
-5. Verify `/autopilot` activates `context_budget` in a parent session, `/autopilot-onboard` remains read-only, `/autopilot-handoff` uses the active workstream without requiring a workstream argument, and `/autopilot-close`/`/autopilot-abort` are runtime-owned/local-only.
+4. Verify `/autopilot`, `/autopilot-inject`, `/autopilot-onboard`, `/autopilot-handoff`, `/autopilot-close`, and `/autopilot-abort` load from the installed package and not from repo-local prompt files.
+5. Verify `/autopilot` activates `context_budget` in a parent session, `/autopilot-inject` refreshes active workstream binding without queueing the parent prompt, `/autopilot-onboard` remains read-only, `/autopilot-handoff` uses the active workstream without requiring a workstream argument, and `/autopilot-close`/`/autopilot-abort` are runtime-owned/local-only.
 6. Verify `autopilot-agent-run --dry-run <unit-spec.json>` works from the documented install mode.
 7. Verify the fake-Pi runner/e2e witness still joins status artifact, receipt artifact, receipt hash, provider identity, and structured tool carrier.
 8. Verify unit/package tests cover the perfect-quality prompt doctrine and the `autopilot.master_plan.v1`, `autopilot.decision.v1`, and `autopilot.execution_audit.v1` schemas.

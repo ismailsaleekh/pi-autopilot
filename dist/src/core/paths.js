@@ -19,6 +19,20 @@ export function parseAutopilotArgs(args) {
     const remainder = firstSpace < 0 ? '' : trimmed.slice(firstSpace).trim();
     return { ok: true, value: { workstream, remainder } };
 }
+export function parseAutopilotInjectArgs(args) {
+    const tokens = args.trim().split(/\s+/u).filter((token) => token.length > 0);
+    if (tokens.length !== 1) {
+        return { ok: false, message: 'Usage: /autopilot-inject <workstream>' };
+    }
+    const workstream = tokens[0];
+    if (workstream === undefined || !isValidWorkstreamSlug(workstream)) {
+        return {
+            ok: false,
+            message: 'Workstream must start with a letter or digit and contain only letters, digits, dot, underscore, or dash.',
+        };
+    }
+    return { ok: true, value: { workstream } };
+}
 export function parseAutopilotCloseArgs(args) {
     return parseAutopilotLifecycleArgs(args, 'Usage: /autopilot-close <workstream> [--run <workstream_run>] [--dry-run]');
 }

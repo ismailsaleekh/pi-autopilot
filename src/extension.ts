@@ -4,12 +4,13 @@ import {
   AUTOPILOT_CLOSE_COMMAND,
   AUTOPILOT_COMMAND,
   AUTOPILOT_HANDOFF_COMMAND,
+  AUTOPILOT_INJECT_COMMAND,
   AUTOPILOT_ONBOARD_COMMAND,
   CONTEXT_BUDGET_TOOL_NAME,
 } from './core/names.ts';
-import { parseAutopilotAbortArgs, parseAutopilotArgs, parseAutopilotCloseArgs, runnerInvocationFromModuleUrl, runtimeRootForWorkstream } from './core/paths.ts';
+import { parseAutopilotAbortArgs, parseAutopilotArgs, parseAutopilotCloseArgs, parseAutopilotInjectArgs, runnerInvocationFromModuleUrl, runtimeRootForWorkstream } from './core/paths.ts';
 import { AutopilotCloseError, abortAutopilotWorkstream, closeAutopilotWorkstream } from './core/close-runtime.ts';
-import { AutopilotParallelRuntimeError, prepareAutopilotWorkstream } from './core/parallel-runtime.ts';
+import { AutopilotParallelRuntimeError, prepareAutopilotWorkstream, type PreparedAutopilotWorkstream } from './core/parallel-runtime.ts';
 import {
   handoffUsage,
   onboardUsage,
@@ -67,6 +68,41 @@ export default function autopilotExtension(pi: ExtensionHostLike): void {
     }
   }
 
+  async function prepareAndActivateWorkstream(input: {
+    readonly workstream: string;
+    readonly ctx: ExtensionCommandContextLike;
+    readonly contextBudgetErrorPrefix: string;
+    readonly prepareErrorPrefix: string;
+  }): Promise<PreparedAutopilotWorkstream | null> {
+    try {
+      activateContextBudget();
+    } catch (error) {
+      notify(
+        input.ctx,
+        `${input.contextBudgetErrorPrefix}: ${error instanceof Error ? error.message : String(error)}`,
+        'error',
+      );
+      return null;
+    }
+
+    let prepared: PreparedAutopilotWorkstream;
+    try {
+      prepared = await prepareAutopilotWorkstream({
+        workstream: input.workstream,
+        sourceCwd: input.ctx.cwd ?? process.cwd(),
+      });
+    } catch (error) {
+      const message = error instanceof AutopilotParallelRuntimeError ? error.message : error instanceof Error ? error.message : String(error);
+      notify(input.ctx, `${input.prepareErrorPrefix}: ${message}`, 'error');
+      return null;
+    }
+
+    activeAutopilotWorkstream = prepared.active.workstream;
+    activeAutopilotRuntimeRoot = prepared.runtimeRoot;
+    activeAutopilotWorkstreamRun = prepared.active.workstream_run;
+    return prepared;
+  }
+
   pi.registerCommand(AUTOPILOT_COMMAND, {
     description: 'Start or resume Autopilot orchestration: /autopilot <workstream> [task intro]',
     handler: async (args, ctx) => {
@@ -76,33 +112,15 @@ export default function autopilotExtension(pi: ExtensionHostLike): void {
         return;
       }
 
-      try {
-        activateContextBudget();
-      } catch (error) {
-        notify(
-          ctx,
-          `Autopilot could not activate context_budget: ${error instanceof Error ? error.message : String(error)}`,
-          'error',
-        );
-        return;
-      }
-
-      let prepared;
-      try {
-        prepared = await prepareAutopilotWorkstream({
-          workstream: parsed.value.workstream,
-          sourceCwd: ctx.cwd ?? process.cwd(),
-        });
-      } catch (error) {
-        const message = error instanceof AutopilotParallelRuntimeError ? error.message : error instanceof Error ? error.message : String(error);
-        notify(ctx, `Autopilot could not prepare isolated worktree: ${message}`, 'error');
-        return;
-      }
+      const prepared = await prepareAndActivateWorkstream({
+        workstream: parsed.value.workstream,
+        ctx,
+        contextBudgetErrorPrefix: 'Autopilot could not activate context_budget',
+        prepareErrorPrefix: 'Autopilot could not prepare isolated worktree',
+      });
+      if (prepared === null) return;
 
       const runtimeRoot = prepared.runtimeRoot;
-      activeAutopilotWorkstream = parsed.value.workstream;
-      activeAutopilotRuntimeRoot = runtimeRoot;
-      activeAutopilotWorkstreamRun = prepared.active.workstream_run;
       const prompt = renderAutopilotPrompt({
         workstream: parsed.value.workstream,
         runtimeRoot,
@@ -126,6 +144,27 @@ export default function autopilotExtension(pi: ExtensionHostLike): void {
         return;
       }
       notify(ctx, `Autopilot activated for ${parsed.value.workstream} (${prepared.active.workstream_run}).`, 'info');
+    },
+  });
+
+  pi.registerCommand(AUTOPILOT_INJECT_COMMAND, {
+    description: 'Refresh Autopilot session binding without queueing the parent prompt: /autopilot-inject <workstream>',
+    handler: async (args, ctx) => {
+      const parsed = parseAutopilotInjectArgs(args);
+      if (!parsed.ok) {
+        notify(ctx, parsed.message, 'warning');
+        return;
+      }
+
+      const prepared = await prepareAndActivateWorkstream({
+        workstream: parsed.value.workstream,
+        ctx,
+        contextBudgetErrorPrefix: 'Autopilot inject could not activate context_budget',
+        prepareErrorPrefix: 'Autopilot inject could not prepare isolated worktree',
+      });
+      if (prepared === null) return;
+
+      notify(ctx, `Autopilot injected for ${prepared.active.workstream} (${prepared.active.workstream_run}).`, 'info');
     },
   });
 
@@ -222,7 +261,7 @@ export default function autopilotExtension(pi: ExtensionHostLike): void {
       if (activeAutopilotWorkstream === null) {
         notify(
           ctx,
-          `No active Autopilot workstream in this session. Start with /${AUTOPILOT_COMMAND} <workstream>. ${handoffUsage()}`,
+          `No active Autopilot workstream in this session. Start with /${AUTOPILOT_COMMAND} <workstream>, or after resuming an existing session run /${AUTOPILOT_INJECT_COMMAND} <workstream>. ${handoffUsage()}`,
           'warning',
         );
         return Promise.resolve();

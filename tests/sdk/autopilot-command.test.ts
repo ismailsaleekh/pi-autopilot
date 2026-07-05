@@ -15,6 +15,7 @@ import {
   AUTOPILOT_CLOSE_COMMAND,
   AUTOPILOT_COMMAND,
   AUTOPILOT_HANDOFF_COMMAND,
+  AUTOPILOT_INJECT_COMMAND,
   AUTOPILOT_ONBOARD_COMMAND,
   AUTOPILOT_STATUS_TOOL,
   CONTEXT_BUDGET_TOOL_NAME,
@@ -122,6 +123,7 @@ void describe('Autopilot command SDK surface', () => {
         AUTOPILOT_ABORT_COMMAND,
         AUTOPILOT_CLOSE_COMMAND,
         AUTOPILOT_HANDOFF_COMMAND,
+        AUTOPILOT_INJECT_COMMAND,
         AUTOPILOT_ONBOARD_COMMAND,
       ]);
       assert.deepEqual(harness.toolNames, [CONTEXT_BUDGET_TOOL_NAME]);
@@ -137,6 +139,24 @@ void describe('Autopilot command SDK surface', () => {
       assert.match(message.content, /only through the exact injected invocation/);
       assert.match(message.content, /validated status and receipt pair/);
       assert.equal(message.content.includes(AUTOPILOT_STATUS_TOOL), false);
+    });
+  });
+
+  void it('injects an active workstream without queueing the parent prompt and enables handoff', async () => {
+    await withIsolatedHarness(async (harness) => {
+      await requireCommand(harness, AUTOPILOT_INJECT_COMMAND).handler('demo', harness.ctx);
+      assert.deepEqual(harness.toolNames, [CONTEXT_BUDGET_TOOL_NAME]);
+      assert.deepEqual(harness.activeTools, [CONTEXT_BUDGET_TOOL_NAME]);
+      assert.equal(harness.messages.length, 0);
+      assert.equal(harness.notifications.some((entry) => /Autopilot injected for demo/.test(entry.message)), true);
+
+      await requireCommand(harness, AUTOPILOT_HANDOFF_COMMAND).handler('handoff after injected session', harness.ctx);
+      assert.equal(harness.messages.length, 1);
+      const message = harness.messages[0];
+      if (message === undefined) throw new Error('missing handoff prompt after inject');
+      assert.match(message.content, /current Autopilot parent for workstream `demo`/);
+      assert.match(message.content, /handoff after injected session/);
+      assert.match(message.content, /Active workstream run:/);
     });
   });
 

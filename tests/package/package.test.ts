@@ -202,7 +202,7 @@ void describe('package manifest and payload', () => {
   void it('documents current Autopilot surfaces across package docs', async () => {
     for (const file of DOC_FILES) {
       const text = await docText(file);
-      for (const surface of ['autopilot-agent-run', 'context_budget', 'autopilot-onboard', 'autopilot-handoff', 'autopilot-close', 'autopilot-abort']) {
+      for (const surface of ['autopilot-agent-run', 'context_budget', 'autopilot-inject', 'autopilot-onboard', 'autopilot-handoff', 'autopilot-close', 'autopilot-abort']) {
         assert.match(text, literalPattern(surface), `${file} missing ${surface}`);
       }
     }
@@ -211,6 +211,7 @@ void describe('package manifest and payload', () => {
     const plan = await docText('TEST_PLAN.md');
     for (const surface of [
       '/autopilot',
+      '/autopilot-inject',
       '/autopilot-onboard',
       '/autopilot-handoff',
       '/autopilot-close',
@@ -241,7 +242,7 @@ void describe('package manifest and payload', () => {
     const readme = await docText('README.md');
     const plan = await docText('TEST_PLAN.md');
     const mappings = [
-      { claim: 'Commands', row: 'Public commands are `/autopilot`, `/autopilot-onboard`, `/autopilot-handoff`, `/autopilot-close`, and `/autopilot-abort`' },
+      { claim: 'Commands', row: 'Public commands are `/autopilot`, `/autopilot-inject`, `/autopilot-onboard`, `/autopilot-handoff`, `/autopilot-close`, and `/autopilot-abort`' },
       { claim: 'context_budget', row: '`context_budget` parent gate' },
       { claim: 'Contracts, templates, and state-store', row: 'Contracts/templates are schema-backed and package-owned' },
       { claim: 'perfect-quality', row: 'Perfect-quality doctrine is package-owned' },

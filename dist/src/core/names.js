@@ -1,6 +1,7 @@
 export const AUTOPILOT_PACKAGE_NAME = 'pi-autopilot';
 export const AUTOPILOT_EXTENSION_NAME = 'Autopilot';
 export const AUTOPILOT_COMMAND = 'autopilot';
+export const AUTOPILOT_INJECT_COMMAND = 'autopilot-inject';
 export const AUTOPILOT_ONBOARD_COMMAND = 'autopilot-onboard';
 export const AUTOPILOT_HANDOFF_COMMAND = 'autopilot-handoff';
 export const AUTOPILOT_CLOSE_COMMAND = 'autopilot-close';

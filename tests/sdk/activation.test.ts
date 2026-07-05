@@ -10,6 +10,7 @@ import {
   AUTOPILOT_CLOSE_COMMAND,
   AUTOPILOT_COMMAND,
   AUTOPILOT_HANDOFF_COMMAND,
+  AUTOPILOT_INJECT_COMMAND,
   AUTOPILOT_ONBOARD_COMMAND,
   AUTOPILOT_STATUS_TOOL,
   CONTEXT_BUDGET_TOOL_NAME,
@@ -371,6 +372,7 @@ void describe('Pi SDK Autopilot activation', () => {
         AUTOPILOT_ABORT_COMMAND,
         AUTOPILOT_CLOSE_COMMAND,
         AUTOPILOT_HANDOFF_COMMAND,
+        AUTOPILOT_INJECT_COMMAND,
         AUTOPILOT_ONBOARD_COMMAND,
       ]);
       assert.equal(harness.session.extensionRunner.getCommand(forbiddenLegacyCommand), undefined);
@@ -413,6 +415,33 @@ void describe('Pi SDK Autopilot activation', () => {
       );
       assert.equal(result.details.gate, 'ok');
       assert.match(result.content[0].text, /"gate":"ok"/);
+    } finally {
+      await disposeHarness(harness);
+    }
+  });
+
+  void it('injects context_budget and active workstream state without queueing the parent prompt', async () => {
+    const harness = await createSdkHarness();
+    try {
+      await requireCommand(harness.session, AUTOPILOT_INJECT_COMMAND).handler(
+        'demo',
+        harness.session.extensionRunner.createCommandContext(),
+      );
+      const contextBudget = harness.session.extensionRunner.getToolDefinition(CONTEXT_BUDGET_TOOL_NAME);
+      if (contextBudget === undefined) throw new Error('context_budget was not registered by inject');
+      assert.equal(harness.activeTools.includes(CONTEXT_BUDGET_TOOL_NAME), true);
+      assert.equal(harness.sentMessages.length, 0);
+
+      await requireCommand(harness.session, AUTOPILOT_HANDOFF_COMMAND).handler(
+        'handoff after inject',
+        harness.session.extensionRunner.createCommandContext(),
+      );
+      assert.equal(harness.sentMessages.length, 1);
+      const message = harness.sentMessages[0];
+      if (message === undefined) throw new Error('missing handoff prompt after inject');
+      assert.match(message.content, /current Autopilot parent for workstream `demo`/);
+      assert.match(message.content, /handoff after inject/);
+      assert.match(message.content, /Active workstream run:/);
     } finally {
       await disposeHarness(harness);
     }
