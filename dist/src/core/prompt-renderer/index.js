@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { AUTOPILOT_RUNNER_BIN, AUTOPILOT_SCHEMA_NAMES, AUTOPILOT_STATUS_TOOL, } from "../names.js";
 import { buildAutopilotProviderIdentity as buildForcedOutputAutopilotProviderIdentity } from "../forced-output/identity.js";
 import { renderAutopilotPerfectQualityRules } from "../quality/contract.js";
-import { AUTOPILOT_ROLE_VALUES, } from "../contracts/types.js";
+import { AUTOPILOT_ROLE_VALUES, AUTOPILOT_STATUS_CHANGED_PATHS_LIMIT, } from "../contracts/types.js";
 export { AUTOPILOT_ROLE_VALUES };
 export class AutopilotPromptTemplateError extends Error {
     issues;
@@ -369,7 +369,7 @@ function roleSpecificInstructions(role) {
 }
 function statusPayloadContract(role) {
     const changedPathRule = role === 'implement' || role === 'fix'
-        ? 'changed_paths must list edited repo-relative paths and every entry must be inside owned_paths.'
+        ? `changed_paths must list every edited repo-relative path, every entry must be inside owned_paths, and the list must contain at most ${String(AUTOPILOT_STATUS_CHANGED_PATHS_LIMIT)} paths. If this unit would edit more paths, emit BLOCKED and ask the parent to split the work.`
         : 'changed_paths must be an empty array for this read/coordinator role.';
     return [
         '- schema_version: "autopilot.status.v1"',

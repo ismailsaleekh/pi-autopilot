@@ -364,6 +364,35 @@ void describe('autopilot-agent-run wrapper', () => {
     });
   });
 
+  void it('accepts fake Pi source-changing runs with more than the old 120 changed-path cap', async () => {
+    await withTempDir(async (root) => {
+      const unitSpec = spec(root, {
+        owned_paths: ['src/generated'],
+        stop_boundary: 'Edit only generated source files.',
+      });
+      const specPath = await writeSpec(root, unitSpec);
+      git(unitSpec.cwd, ['rm', '-f', 'src/generated']);
+      await mkdir(join(unitSpec.cwd, 'src', 'generated'), { recursive: true });
+      await writeFile(join(unitSpec.cwd, 'src', 'generated', '.keep'), 'generated baseline\n', 'utf8');
+      git(unitSpec.cwd, ['add', '.']);
+      git(unitSpec.cwd, ['commit', '-m', 'generated directory baseline']);
+
+      const fakePi = await writeFakePi(root);
+      const result = await runAutopilotAgentFromSpecPath(specPath, {
+        piExecutable: fakePi,
+        env: { ...process.env, AUTOPILOT_FAKE_PI_SCENARIO: 'many-changed-paths' },
+        timeoutMsOverride: FAKE_PI_COMPLETION_TIMEOUT_MS,
+      });
+
+      assert.equal(result.status, 'success');
+      assert.equal(result.statusEntry?.changed_paths.length, 121);
+      assert.equal(result.auditClassification, 'clean');
+      if (result.executionCommitOutput === null) throw new Error('expected runtime commit evidence');
+      const executionCommit = JSON.parse(await readFile(result.executionCommitOutput, 'utf8')) as { edited_claimed_paths?: string[] };
+      assert.equal(executionCommit.edited_claimed_paths?.length, 121);
+    });
+  });
+
   void it('rejects success status that omits audit-detected changed paths', async () => {
     await withTempDir(async (root) => {
       const worktree = join(root, 'worktree');
@@ -741,6 +770,9 @@ function loadContext() {
   if (!contextPath) throw new Error('missing AUTOPILOT_AGENT_STATUS_CONTEXT');
   return JSON.parse(readFileSync(contextPath, 'utf8'));
 }
+function manyChangedPaths() {
+  return Array.from({ length: 121 }, (_, index) => 'src/generated/file-' + String(index).padStart(4, '0') + '.ts');
+}
 function buildStatus(context) {
   const unit = context.unit_spec;
   if (scenario === 'invalid-status') {
@@ -764,6 +796,15 @@ function buildStatus(context) {
       changed_paths: [], findings: [{ id: 'fake.issue', severity: 'major-local', summary: 'fake issue' }], commands: [], evidence_refs: [], report_ref: null, next_action: 'fix fake issue'
     };
   }
+  if (scenario === 'many-changed-paths') {
+    const validationCommands = Array.isArray(unit.validation_commands) ? unit.validation_commands : [];
+    const commands = validationCommands.map((command) => ({ command, status: 'passed', exit_code: 0, summary: 'fake command passed' }));
+    return {
+      schema_version: 'autopilot.status.v1', workstream: unit.workstream, unit_id: unit.unit_id,
+      role: unit.role, attempt: unit.attempt, verdict: 'DONE', severity: 'clean', summary: 'Fake Autopilot status completed with many changed paths.',
+      changed_paths: manyChangedPaths(), findings: [], commands, evidence_refs: [], report_ref: null, next_action: 'fake next action'
+    };
+  }
   const validationCommands = Array.isArray(unit.validation_commands) ? unit.validation_commands : [];
   const commands = validationCommands.map((command) => ({ command, status: 'passed', exit_code: 0, summary: 'fake command passed' }));
   const coveredWitnessIds = unit.role === 'validate' || unit.role === 'bughunt' ? ['positive-validation-command'] : undefined;
@@ -778,7 +819,13 @@ function buildStatus(context) {
 function emitForcedStatus() {
   const context = loadContext();
   const unit = context.unit_spec;
-  if ((unit.role === 'implement' || unit.role === 'fix') && scenario !== 'blocked-status') {
+  if ((unit.role === 'implement' || unit.role === 'fix') && scenario === 'many-changed-paths') {
+    for (const changedPath of manyChangedPaths()) {
+      const ownedPath = join(unit.cwd, ...changedPath.split('/'));
+      mkdirSync(dirname(ownedPath), { recursive: true });
+      writeFileSync(ownedPath, 'export const generated = ' + JSON.stringify(changedPath) + ';\\n', 'utf8');
+    }
+  } else if ((unit.role === 'implement' || unit.role === 'fix') && scenario !== 'blocked-status') {
     const ownedPath = join(unit.cwd, ...String(unit.owned_paths[0]).split('/'));
     mkdirSync(dirname(ownedPath), { recursive: true });
     writeFileSync(ownedPath, 'export const smoke = "fake implementation";\\n', 'utf8');

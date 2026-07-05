@@ -8,6 +8,7 @@ export const AUTOPILOT_ROLE_VALUES = [
     'extract',
 ];
 export const AUTOPILOT_TEMPLATE_VALUES = AUTOPILOT_ROLE_VALUES;
+export const AUTOPILOT_STATUS_CHANGED_PATHS_LIMIT = 500;
 export const AUTOPILOT_THINKING_VALUES = ['high', 'xhigh'];
 export const AUTOPILOT_VERDICT_VALUES = ['DONE', 'PASS', 'NEEDS_FIX', 'BLOCKED'];
 export const AUTOPILOT_SEVERITY_VALUES = [
