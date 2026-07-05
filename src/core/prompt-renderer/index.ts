@@ -12,6 +12,7 @@ import { buildAutopilotProviderIdentity as buildForcedOutputAutopilotProviderIde
 import { renderAutopilotPerfectQualityRules } from '../quality/contract.ts';
 import {
   AUTOPILOT_ROLE_VALUES,
+  AUTOPILOT_STATUS_CHANGED_PATHS_LIMIT,
   type AutopilotContextRef,
   type AutopilotRole,
   type AutopilotTemplate,
@@ -503,7 +504,7 @@ function roleSpecificInstructions(role: AutopilotRole): string {
 function statusPayloadContract(role: AutopilotRole): string {
   const changedPathRule =
     role === 'implement' || role === 'fix'
-      ? 'changed_paths must list edited repo-relative paths and every entry must be inside owned_paths.'
+      ? `changed_paths must list every edited repo-relative path, every entry must be inside owned_paths, and the list must contain at most ${String(AUTOPILOT_STATUS_CHANGED_PATHS_LIMIT)} paths. If this unit would edit more paths, emit BLOCKED and ask the parent to split the work.`
       : 'changed_paths must be an empty array for this read/coordinator role.';
   return [
     '- schema_version: "autopilot.status.v1"',

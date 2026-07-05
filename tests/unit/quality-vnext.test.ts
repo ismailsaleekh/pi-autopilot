@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { describe, it } from 'node:test';
 
 import {
+  AUTOPILOT_STATUS_CHANGED_PATHS_LIMIT,
   parseAutopilotExecutionAudit,
   parseAutopilotStatusEntry,
   type AutopilotMasterPlan,
@@ -36,6 +37,12 @@ async function withTempDir<T>(run: (dir: string) => Promise<T>): Promise<T> {
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+}
+
+function generatedChangedPaths(count: number): readonly string[] {
+  return Object.freeze(
+    Array.from({ length: count }, (_, index) => `src/generated/file-${String(index).padStart(4, '0')}.ts`),
+  );
 }
 
 function verificationPlan(command = 'npm test'): AutopilotVerificationPlan {
@@ -470,6 +477,45 @@ void describe('Autopilot execution audits', () => {
 
       const auditText = await readFile(deriveAutopilotExecutionAuditPath(spec), 'utf8');
       assert.match(auditText, /autopilot.execution_audit.v1/u);
+    });
+  });
+
+  void it('accepts clean status/audit coherence at the 500 changed-path boundary', async () => {
+    await withTempDir(async (root) => {
+      const changedPaths = generatedChangedPaths(AUTOPILOT_STATUS_CHANGED_PATHS_LIMIT);
+      const spec = sourceSpec(root, { owned_paths: ['src/generated'] });
+      const status: AutopilotStatusEntry = {
+        ...passingStatus(spec),
+        changed_paths: changedPaths,
+      };
+      const audit = buildAutopilotExecutionAudit({
+        unitSpec: spec,
+        baseline: {
+          cwd: spec.cwd,
+          available: true,
+          gitHead: 'before-head',
+          dirtyPaths: [],
+          summary: 'clean baseline captured',
+        },
+        postRun: {
+          available: true,
+          gitHead: 'before-head',
+          changedPaths,
+          summary: 'post-run captured',
+        },
+        statusEntry: status,
+      });
+
+      assert.equal(audit.classification, 'clean');
+      assert.equal(audit.actual_changed_paths.length, AUTOPILOT_STATUS_CHANGED_PATHS_LIMIT);
+      assert.equal(audit.status_reported_changed_paths.length, AUTOPILOT_STATUS_CHANGED_PATHS_LIMIT);
+      assert.equal(audit.path_counts.actual_changed_paths, AUTOPILOT_STATUS_CHANGED_PATHS_LIMIT);
+      assert.equal(audit.path_counts.status_reported_changed_paths, AUTOPILOT_STATUS_CHANGED_PATHS_LIMIT);
+      assert.deepEqual(audit.truncated_path_sets, []);
+      assert.equal(
+        parseAutopilotStatusEntry(status, { unitSpec: spec, executionAudit: audit }).changed_paths.length,
+        AUTOPILOT_STATUS_CHANGED_PATHS_LIMIT,
+      );
     });
   });
 

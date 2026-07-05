@@ -21,6 +21,7 @@ import {
   AUTOPILOT_RISK_LEVEL_VALUES,
   AUTOPILOT_ROLE_VALUES,
   AUTOPILOT_SEVERITY_VALUES,
+  AUTOPILOT_STATUS_CHANGED_PATHS_LIMIT,
   AUTOPILOT_TEMPLATE_VALUES,
   AUTOPILOT_THINKING_VALUES,
   AUTOPILOT_UNIT_STATE_VALUES,
@@ -227,7 +228,7 @@ function assertStatusShape(value: unknown): void {
     expectEnum(record['verdict'], AUTOPILOT_VERDICT_VALUES, '/verdict', issues);
     expectEnum(record['severity'], AUTOPILOT_SEVERITY_VALUES, '/severity', issues);
     expectString(record['summary'], '/summary', issues, { max: 360 });
-    expectStringArray(record['changed_paths'], '/changed_paths', issues, 120);
+    expectStringArray(record['changed_paths'], '/changed_paths', issues, AUTOPILOT_STATUS_CHANGED_PATHS_LIMIT);
     expectArray(record['findings'], '/findings', issues, 80, 0, checkFinding);
     expectArray(record['commands'], '/commands', issues, 80, 0, checkCommandSummary);
     expectArray(record['evidence_refs'], '/evidence_refs', issues, 80, 0, checkEvidenceRef);

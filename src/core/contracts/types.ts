@@ -24,6 +24,8 @@ export type AutopilotRole = (typeof AUTOPILOT_ROLE_VALUES)[number];
 export const AUTOPILOT_TEMPLATE_VALUES = AUTOPILOT_ROLE_VALUES;
 export type AutopilotTemplate = AutopilotRole;
 
+export const AUTOPILOT_STATUS_CHANGED_PATHS_LIMIT = 500 as const;
+
 export const AUTOPILOT_THINKING_VALUES = ['high', 'xhigh'] as const;
 export type AutopilotThinking = (typeof AUTOPILOT_THINKING_VALUES)[number];
 

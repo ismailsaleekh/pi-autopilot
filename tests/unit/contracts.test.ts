@@ -7,6 +7,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
+  AUTOPILOT_STATUS_CHANGED_PATHS_LIMIT,
   AUTOPILOT_STATUS_ENTRY_JSON_SCHEMA,
   AutopilotContractValidationError,
   assertAutopilotStatusJsonSchemaCompiles,
@@ -44,6 +45,12 @@ async function withTempDir<T>(run: (dir: string) => Promise<T>): Promise<T> {
 
 function sha256Text(text: string): `sha256:${string}` {
   return `sha256:${createHash('sha256').update(text, 'utf8').digest('hex')}`;
+}
+
+function generatedChangedPaths(count: number): readonly string[] {
+  return Object.freeze(
+    Array.from({ length: count }, (_, index) => `src/generated/file-${String(index).padStart(4, '0')}.ts`),
+  );
 }
 
 function verificationPlan(): AutopilotVerificationPlan {
@@ -350,6 +357,34 @@ void describe('Autopilot contracts', () => {
     assert.throws(
       () => parseAutopilotStatusEntry(wrongAttempt, { unitSpec: spec }),
       /attempt does not match/u,
+    );
+  });
+
+  void it('caps status changed_paths at the shared 500-path boundary', async () => {
+    const spec = parseAutopilotUnitSpec(await fixture('valid-unit-spec.implement.json'));
+    const status = parseAutopilotStatusEntry(await fixture('valid-status.implement.json'));
+    const wideSpec = { ...spec, owned_paths: ['src/generated'] };
+    const changedPathsSchema = AUTOPILOT_STATUS_ENTRY_JSON_SCHEMA.properties['changed_paths'] as {
+      readonly maxItems?: unknown;
+    };
+    assert.equal(changedPathsSchema.maxItems, AUTOPILOT_STATUS_CHANGED_PATHS_LIMIT);
+
+    const atLimit: AutopilotStatusEntry = {
+      ...status,
+      changed_paths: generatedChangedPaths(AUTOPILOT_STATUS_CHANGED_PATHS_LIMIT),
+    };
+    assert.equal(
+      parseAutopilotStatusEntry(atLimit, { unitSpec: wideSpec }).changed_paths.length,
+      AUTOPILOT_STATUS_CHANGED_PATHS_LIMIT,
+    );
+
+    const overLimit: AutopilotStatusEntry = {
+      ...status,
+      changed_paths: generatedChangedPaths(AUTOPILOT_STATUS_CHANGED_PATHS_LIMIT + 1),
+    };
+    assert.throws(
+      () => parseAutopilotStatusEntry(overLimit, { unitSpec: wideSpec }),
+      /changed_paths must contain at most 500 item/u,
     );
   });
 
