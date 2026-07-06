@@ -1,6 +1,12 @@
 import { readFileSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
 
+import {
+  evaluateAutopilotWorktreeToolCall,
+  type AutopilotGuardDecision,
+  type AutopilotToolCallContextLike,
+  type AutopilotToolCallEventLike,
+} from '../core/git-guard.ts';
 import { AUTOPILOT_STATUS_CONTEXT_ENV, AUTOPILOT_STATUS_TOOL } from '../core/names.ts';
 import { AUTOPILOT_STATUS_ENTRY_JSON_SCHEMA } from '../core/contracts/schemas.ts';
 import {
@@ -29,8 +35,14 @@ export interface PiToolDefinitionLike {
   ): Promise<PiToolTextResult>;
 }
 
+export type PiStatusToolCallHandler = (
+  event: AutopilotToolCallEventLike,
+  ctx: AutopilotToolCallContextLike,
+) => AutopilotGuardDecision | Promise<AutopilotGuardDecision>;
+
 export interface PiExtensionHostLike {
   registerTool(tool: PiToolDefinitionLike): void;
+  on?(eventName: 'tool_call', handler: PiStatusToolCallHandler): void;
 }
 
 export function loadAutopilotStatusToolContextFromEnv(
@@ -120,5 +132,15 @@ export default function autopilotStatusExtension(pi: PiExtensionHostLike): void 
       'autopilot-status-extension: refusing to load on a host without registerTool()',
     );
   }
-  pi.registerTool(createAutopilotEmitStatusTool(loadAutopilotStatusToolContextFromEnv()));
+  const context = loadAutopilotStatusToolContextFromEnv();
+  pi.registerTool(createAutopilotEmitStatusTool(context));
+  if (pi.on !== undefined) {
+    pi.on('tool_call', (event, toolCtx) =>
+      evaluateAutopilotWorktreeToolCall(event, toolCtx, {
+        worktreeRoot: context.unit_spec.cwd,
+        label: 'Autopilot child worktree guard',
+        allowedWriteRoots: [context.artifact_root],
+      }),
+    );
+  }
 }

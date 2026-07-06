@@ -2,6 +2,7 @@ import { createContextBudgetTool, resolveContextHaltPercent } from "./core/conte
 import { AUTOPILOT_ABORT_COMMAND, AUTOPILOT_CLOSE_COMMAND, AUTOPILOT_COMMAND, AUTOPILOT_HANDOFF_COMMAND, AUTOPILOT_INJECT_COMMAND, AUTOPILOT_ONBOARD_COMMAND, CONTEXT_BUDGET_TOOL_NAME, } from "./core/names.js";
 import { parseAutopilotAbortArgs, parseAutopilotArgs, parseAutopilotCloseArgs, parseAutopilotInjectArgs, runnerInvocationFromModuleUrl, runtimeRootForWorkstream } from "./core/paths.js";
 import { AutopilotCloseError, abortAutopilotWorkstream, closeAutopilotWorkstream } from "./core/close-runtime.js";
+import { evaluateAutopilotWorktreeToolCall, } from "./core/git-guard.js";
 import { AutopilotParallelRuntimeError, prepareAutopilotWorkstream } from "./core/parallel-runtime.js";
 import { handoffUsage, onboardUsage, renderAutopilotPrompt, renderHandoffPrompt, renderOnboardPrompt, } from "./core/prompts.js";
 function notify(ctx, message, kind) {
@@ -9,8 +10,10 @@ function notify(ctx, message, kind) {
 }
 export default function autopilotExtension(pi) {
     let contextBudgetRegistered = false;
+    let worktreeGuardRegistered = false;
     let activeAutopilotWorkstream = null;
     let activeAutopilotRuntimeRoot = null;
+    let activeAutopilotWorktreePath = null;
     let activeAutopilotWorkstreamRun = null;
     function activateContextBudget() {
         if (!contextBudgetRegistered) {
@@ -24,6 +27,20 @@ export default function autopilotExtension(pi) {
                 pi.setActiveTools([...activeTools, CONTEXT_BUDGET_TOOL_NAME]);
             }
         }
+    }
+    function registerWorktreeGuardIfSupported() {
+        if (worktreeGuardRegistered || pi.on === undefined)
+            return;
+        pi.on('tool_call', (event, toolCtx) => {
+            if (activeAutopilotWorktreePath === null)
+                return undefined;
+            return evaluateAutopilotWorktreeToolCall(event, toolCtx, {
+                worktreeRoot: activeAutopilotWorktreePath,
+                label: 'Autopilot worktree guard',
+                allowedWriteRoots: activeAutopilotRuntimeRoot === null ? [] : [activeAutopilotRuntimeRoot],
+            });
+        });
+        worktreeGuardRegistered = true;
     }
     async function prepareAndActivateWorkstream(input) {
         try {
@@ -47,7 +64,9 @@ export default function autopilotExtension(pi) {
         }
         activeAutopilotWorkstream = prepared.active.workstream;
         activeAutopilotRuntimeRoot = prepared.runtimeRoot;
+        activeAutopilotWorktreePath = prepared.mainWorktreePath;
         activeAutopilotWorkstreamRun = prepared.active.workstream_run;
+        registerWorktreeGuardIfSupported();
         return prepared;
     }
     pi.registerCommand(AUTOPILOT_COMMAND, {

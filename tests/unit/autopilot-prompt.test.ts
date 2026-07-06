@@ -41,13 +41,14 @@ void describe('Autopilot parent prompt', () => {
     assert.match(prompt, new RegExp(`/${AUTOPILOT_ABORT_COMMAND}`));
   });
 
-  void it('rejects bypass evidence, raw child launches, git mutation, and metered routes', () => {
+  void it('rejects bypass evidence, raw child launches, outside-worktree git, and metered routes', () => {
     const prompt = parentPrompt();
     assert.match(prompt, /validated status and receipt pair/);
     assert.match(prompt, /assistant-text JSON, markdown reports, logs, screenshots, or self-certification/);
     assert.match(prompt, /Do not hand-assemble raw child Pi launches/);
     assert.match(prompt, /raw Pi commands/);
-    assert.match(prompt, /mutate git state/);
+    assert.match(prompt, /Git discipline is worktree-scoped/);
+    assert.match(prompt, /git operations outside/);
     assert.match(prompt, /metered frontier routes/);
     assert.equal(prompt.includes(AUTOPILOT_STATUS_TOOL), false);
     assert.equal(legacyRuntimePattern().test(prompt), false);

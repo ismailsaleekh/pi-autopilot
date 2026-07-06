@@ -24,6 +24,7 @@ import {
 import {
   loadAutopilotStatusToolContextFromEnv,
   createAutopilotEmitStatusTool,
+  type PiStatusToolCallHandler,
 } from '../../src/internal/status-extension.ts';
 import autopilotStatusExtension from '../../src/internal/status-extension.ts';
 import type { AutopilotStatusEntry, AutopilotUnitSpec } from '../../src/core/contracts/types.ts';
@@ -385,13 +386,24 @@ void describe('status-extension tool', () => {
       process.env['AUTOPILOT_AGENT_STATUS_CONTEXT'] = contextPath;
       try {
         const hostTools: ReturnType<typeof createAutopilotEmitStatusTool>[] = [];
+        const handlers: PiStatusToolCallHandler[] = [];
         autopilotStatusExtension({
           registerTool(tool: ReturnType<typeof createAutopilotEmitStatusTool>) {
             hostTools.push(tool);
           },
+          on(eventName, handler) {
+            assert.equal(eventName, 'tool_call');
+            handlers.push(handler);
+          },
         });
         assert.equal(hostTools.length, 1);
         assert.equal(hostTools[0]?.name, 'autopilot_emit_status');
+        assert.equal(handlers.length, 1);
+        const handler = handlers[0];
+        if (handler === undefined) throw new Error('missing status guard handler');
+        assert.equal(await handler({ toolName: 'bash', input: { command: 'git status' } }, { cwd: root }), undefined);
+        const outsideDecision = await handler({ toolName: 'bash', input: { command: 'git -C /tmp status' } }, { cwd: root });
+        assert.equal(outsideDecision?.block, true);
       } finally {
         process.env['AUTOPILOT_AGENT_STATUS_CONTEXT'] = original;
       }

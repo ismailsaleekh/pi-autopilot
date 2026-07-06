@@ -437,8 +437,8 @@ function validationCommands(commands: readonly string[]): string {
 function qualityRules(): string {
   return [
     renderAutopilotPerfectQualityRules(),
-    '- Preserve dirty-tree discipline: do not stash, reset, clean, checkout, restore, switch, rebase, or discard unrelated work.',
-    '- Stay inside owned_paths for edits. Treat read_only_paths and untouchable_paths as no-write zones.',
+    '- Git discipline is worktree-scoped: local git inspection and mutation are allowed only inside this unit cwd/registered Autopilot worktree; never run git against the operator source checkout, another worktree, external paths, or remotes; do not create/delete/move shared branches or tags.',
+    '- Stay inside owned_paths for source edits. Treat read_only_paths and untouchable_paths as no-write zones.',
     `- Do not hand-assemble raw child Pi launches; Autopilot child work is launched only through ${AUTOPILOT_RUNNER_BIN} by the parent.`,
     '- Use real files, diffs, and commands for claims. Reports are optional evidence refs, not the verdict authority.',
     '- Do not paste large file or report bodies into the final answer; final truth is the forced AutopilotStatusEntry.',

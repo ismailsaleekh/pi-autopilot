@@ -8,6 +8,7 @@ import autopilotExtension, {
   type ExtensionCommandDefinitionLike,
   type ExtensionCommandContextLike,
   type ExtensionHostLike,
+  type ExtensionToolCallHandler,
   type NotificationKind,
 } from '../../src/extension.ts';
 import {
@@ -38,6 +39,7 @@ interface Harness {
   readonly activeTools: string[];
   readonly messages: CapturedMessage[];
   readonly notifications: CapturedNotification[];
+  readonly toolCallHandlers: ExtensionToolCallHandler[];
   readonly ctx: ExtensionCommandContextLike;
 }
 
@@ -47,6 +49,7 @@ function createHarness(cwd?: string): Harness {
   const activeTools: string[] = [];
   const messages: CapturedMessage[] = [];
   const notifications: CapturedNotification[] = [];
+  const toolCallHandlers: ExtensionToolCallHandler[] = [];
   const host: ExtensionHostLike = {
     registerCommand: (name, definition) => {
       commands.set(name, definition);
@@ -61,6 +64,10 @@ function createHarness(cwd?: string): Harness {
     sendUserMessage: (content, options) => {
       messages.push({ content, deliverAs: options.deliverAs });
     },
+    on: (eventName, handler) => {
+      assert.equal(eventName, 'tool_call');
+      toolCallHandlers.push(handler);
+    },
   };
   const ctx: ExtensionCommandContextLike = {
     ui: {
@@ -71,7 +78,7 @@ function createHarness(cwd?: string): Harness {
     ...(cwd === undefined ? {} : { cwd }),
   };
   autopilotExtension(host);
-  return { commands, toolNames, activeTools, messages, notifications, ctx };
+  return { commands, toolNames, activeTools, messages, notifications, toolCallHandlers, ctx };
 }
 
 function requireCommand(harness: Harness, name: string): ExtensionCommandDefinitionLike {
@@ -139,6 +146,26 @@ void describe('Autopilot command SDK surface', () => {
       assert.match(message.content, /only through the exact injected invocation/);
       assert.match(message.content, /validated status and receipt pair/);
       assert.equal(message.content.includes(AUTOPILOT_STATUS_TOOL), false);
+      assert.equal(harness.toolCallHandlers.length, 1);
+      const handler = harness.toolCallHandlers[0];
+      if (handler === undefined) throw new Error('missing worktree guard handler');
+      const sourceCwd = harness.ctx.cwd;
+      if (sourceCwd === undefined) throw new Error('missing source cwd');
+      const blocked = await handler({ toolName: 'bash', input: { command: 'git status' } }, { cwd: sourceCwd });
+      assert.equal(blocked?.block, true);
+      const match = /Registered Autopilot worktree: `([^`]+)`/u.exec(message.content);
+      const worktreePath = match?.[1];
+      if (worktreePath === undefined) throw new Error('missing worktree path in prompt');
+      const allowed = await handler({ toolName: 'bash', input: { command: 'git status' } }, { cwd: worktreePath });
+      assert.equal(allowed, undefined);
+      const runtimeMatch = /Runtime root: `([^`]+)`/u.exec(message.content);
+      const runtimeRoot = runtimeMatch?.[1];
+      if (runtimeRoot === undefined) throw new Error('missing runtime root in prompt');
+      const unitSpecWrite = await handler(
+        { toolName: 'write', input: { path: `${runtimeRoot}/unit-specs/demo.json` } },
+        { cwd: worktreePath },
+      );
+      assert.equal(unitSpecWrite, undefined);
     });
   });
 

@@ -82,8 +82,9 @@ void describe('Autopilot command parsing and prompts', () => {
     assert.match(prompt, new RegExp(`/${AUTOPILOT_ABORT_COMMAND}`));
     assert.match(prompt, /status artifact and receipt artifact/);
     assert.match(prompt, /raw Pi commands/);
-    assert.match(prompt, /mutate git state/);
+    assert.match(prompt, /Git discipline is worktree-scoped/);
     assert.match(prompt, /metered frontier routes/);
+    assert.match(prompt, /git operations outside/);
     assert.match(prompt, /autopilot\.status\.v1/);
     assert.equal(new RegExp(AUTOPILOT_STATUS_TOOL).test(prompt), false);
     assert.equal(legacySurfacePattern().test(prompt), false);

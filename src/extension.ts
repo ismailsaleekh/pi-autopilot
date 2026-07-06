@@ -10,6 +10,12 @@ import {
 } from './core/names.ts';
 import { parseAutopilotAbortArgs, parseAutopilotArgs, parseAutopilotCloseArgs, parseAutopilotInjectArgs, runnerInvocationFromModuleUrl, runtimeRootForWorkstream } from './core/paths.ts';
 import { AutopilotCloseError, abortAutopilotWorkstream, closeAutopilotWorkstream } from './core/close-runtime.ts';
+import {
+  evaluateAutopilotWorktreeToolCall,
+  type AutopilotGuardDecision,
+  type AutopilotToolCallContextLike,
+  type AutopilotToolCallEventLike,
+} from './core/git-guard.ts';
 import { AutopilotParallelRuntimeError, prepareAutopilotWorkstream, type PreparedAutopilotWorkstream } from './core/parallel-runtime.ts';
 import {
   handoffUsage,
@@ -35,12 +41,18 @@ export interface ExtensionCommandDefinitionLike {
   handler(args: string, ctx: ExtensionCommandContextLike): Promise<void>;
 }
 
+export type ExtensionToolCallHandler = (
+  event: AutopilotToolCallEventLike,
+  ctx: AutopilotToolCallContextLike,
+) => AutopilotGuardDecision | Promise<AutopilotGuardDecision>;
+
 export interface ExtensionHostLike {
   registerCommand(name: string, definition: ExtensionCommandDefinitionLike): void;
   registerTool(tool: ReturnType<typeof createContextBudgetTool>): void;
   getActiveTools?(): readonly string[];
   setActiveTools?(toolNames: readonly string[]): void;
   sendUserMessage(content: string, options: { readonly deliverAs: 'followUp' }): void;
+  on?(eventName: 'tool_call', handler: ExtensionToolCallHandler): void;
 }
 
 function notify(ctx: ExtensionCommandContextLike, message: string, kind: NotificationKind): void {
@@ -49,8 +61,10 @@ function notify(ctx: ExtensionCommandContextLike, message: string, kind: Notific
 
 export default function autopilotExtension(pi: ExtensionHostLike): void {
   let contextBudgetRegistered = false;
+  let worktreeGuardRegistered = false;
   let activeAutopilotWorkstream: string | null = null;
   let activeAutopilotRuntimeRoot: string | null = null;
+  let activeAutopilotWorktreePath: string | null = null;
   let activeAutopilotWorkstreamRun: string | null = null;
 
   function activateContextBudget(): void {
@@ -66,6 +80,19 @@ export default function autopilotExtension(pi: ExtensionHostLike): void {
         pi.setActiveTools([...activeTools, CONTEXT_BUDGET_TOOL_NAME]);
       }
     }
+  }
+
+  function registerWorktreeGuardIfSupported(): void {
+    if (worktreeGuardRegistered || pi.on === undefined) return;
+    pi.on('tool_call', (event, toolCtx) => {
+      if (activeAutopilotWorktreePath === null) return undefined;
+      return evaluateAutopilotWorktreeToolCall(event, toolCtx, {
+        worktreeRoot: activeAutopilotWorktreePath,
+        label: 'Autopilot worktree guard',
+        allowedWriteRoots: activeAutopilotRuntimeRoot === null ? [] : [activeAutopilotRuntimeRoot],
+      });
+    });
+    worktreeGuardRegistered = true;
   }
 
   async function prepareAndActivateWorkstream(input: {
@@ -99,7 +126,9 @@ export default function autopilotExtension(pi: ExtensionHostLike): void {
 
     activeAutopilotWorkstream = prepared.active.workstream;
     activeAutopilotRuntimeRoot = prepared.runtimeRoot;
+    activeAutopilotWorktreePath = prepared.mainWorktreePath;
     activeAutopilotWorkstreamRun = prepared.active.workstream_run;
+    registerWorktreeGuardIfSupported();
     return prepared;
   }
 

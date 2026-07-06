@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
+import { evaluateAutopilotWorktreeToolCall, } from "../core/git-guard.js";
 import { AUTOPILOT_STATUS_CONTEXT_ENV, AUTOPILOT_STATUS_TOOL } from "../core/names.js";
 import { AUTOPILOT_STATUS_ENTRY_JSON_SCHEMA } from "../core/contracts/schemas.js";
 import { parseAutopilotStatusToolContext, } from "../core/forced-output/identity.js";
@@ -71,5 +72,13 @@ export default function autopilotStatusExtension(pi) {
     if (typeof pi.registerTool !== 'function') {
         throw new Error('autopilot-status-extension: refusing to load on a host without registerTool()');
     }
-    pi.registerTool(createAutopilotEmitStatusTool(loadAutopilotStatusToolContextFromEnv()));
+    const context = loadAutopilotStatusToolContextFromEnv();
+    pi.registerTool(createAutopilotEmitStatusTool(context));
+    if (pi.on !== undefined) {
+        pi.on('tool_call', (event, toolCtx) => evaluateAutopilotWorktreeToolCall(event, toolCtx, {
+            worktreeRoot: context.unit_spec.cwd,
+            label: 'Autopilot child worktree guard',
+            allowedWriteRoots: [context.artifact_root],
+        }));
+    }
 }

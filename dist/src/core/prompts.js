@@ -34,7 +34,8 @@ You are Autopilot for workstream \`${input.workstream}\`. Schedule and supervise
 - Runtime root: \`${input.runtimeRoot}\`.
 ${runtimeMetadata.length === 0 ? '' : `${runtimeMetadata}\n`}- Injected child launcher: \`${input.runnerInvocation}\`.
 - Child final status handling is launcher-internal; parent sessions must not load, expose, or call child-only status tools.
-- Final landing/abandonment is runtime-owned: after closure evidence is ready, request operator invocation of \`${closeInvocation}\`; if the run must be abandoned without landing, request \`${abortInvocation}\`. Never merge, rebase, push, abort, or archive branches manually.
+- Final landing/abandonment is runtime-owned: after closure evidence is ready, request operator invocation of \`${closeInvocation}\`; if the run must be abandoned without landing, request \`${abortInvocation}\`. Do not manually mutate the operator source checkout or target branch.
+- Local git operations are allowed only when their effective cwd/work-tree is the registered Autopilot worktree above; never use git against the operator source checkout, another worktree, an arbitrary external path, or a remote/network target. Shared branch/tag lifecycle and final landing remain runtime/operator controlled.
 - Public surfaces must use Autopilot command, schema, runtime, status, receipt, close, and runner names only.
 
 ## Resume, purpose truth, and machine truth
@@ -51,14 +52,14 @@ ${runtimeMetadata.length === 0 ? '' : `${runtimeMetadata}\n`}- Injected child la
 - Write unit specs under \`${input.runtimeRoot}/unit-specs/\`.${worktreeCwdRule}
 - Start child work only through the exact injected invocation \`${input.runnerInvocation} <unit-spec.json>\`; start child agents only through that same injected Autopilot launcher.
 - The launcher/runtime acquires path claims for owned/read-only paths before model spend and rejects conflicting same-path work instead of guessing attribution.
-- The launcher/runtime, not the child, owns source commits: successful source-changing units must produce a clean execution audit plus \`autopilot.execution_commit.v1\` evidence.
+- The launcher/runtime audits and evidence-captures source commits: successful source-changing units must produce a clean execution audit plus \`autopilot.execution_commit.v1\` evidence whether changes were left dirty for runtime commit or committed locally inside the registered worktree.
 - When using a background task manager, its command must still be exactly that Autopilot launcher invocation with a unit-spec path.
 - Do not hand-assemble raw child Pi launches; do not start child agents with raw Pi commands, prompt-template commands, ad-hoc shell pipelines, compatibility aliases, or hand-assembled child sessions.
 - Do not call \`${AUTOPILOT_RUNNER_BIN}\` directly unless it is the injected invocation shown above for this session.
 
 ## Evidence and completion acceptance
 
-- Child statuses belong under \`${input.runtimeRoot}/statuses/\`, receipts under \`${input.runtimeRoot}/receipts/\`, runner-produced execution audits under \`${input.runtimeRoot}/execution-audits/\`, and runtime commit evidence under \`${input.runtimeRoot}/execution-commits/\`.
+- Child statuses belong under \`${input.runtimeRoot}/statuses/\`, receipts under \`${input.runtimeRoot}/receipts/\`, runner-produced execution audits under \`${input.runtimeRoot}/execution-audits/\`, and execution-commit evidence under \`${input.runtimeRoot}/execution-commits/\`.
 - Accept child transport only when the Autopilot launcher validates exactly one structured status carrier plus the matching status artifact and receipt artifact, plus the execution-audit artifact.
 - Require matching identity, status hash, receipt hash, provider identity, schema names, role-appropriate success verdict, and audit classification before moving work forward.
 - A valid status+receipt is transport success, not semantic closure: read the execution audit before closing or routing validation.
@@ -75,7 +76,8 @@ ${renderAutopilotPerfectQualityRules()}
 ## Safety boundaries
 
 - Do not create public compatibility aliases or paths outside Autopilot names.
-- Preserve dirty work; do not stash, reset, clean, checkout, restore, switch, rebase, stage, commit, merge, branch-delete, archive, abort, or otherwise mutate git state manually. The package runtime is the only authority allowed to create Autopilot source commits inside the registered worktree, close/merge via \`/${AUTOPILOT_CLOSE_COMMAND}\`, or abandon/archive via \`/${AUTOPILOT_ABORT_COMMAND}\`.
+- Git discipline is worktree-scoped: local git inspection and mutation are allowed inside the registered Autopilot worktree, but git operations outside that worktree are forbidden. Do not use \`git -C\`, \`--git-dir\`, \`--work-tree\`, shell \`cd\`, wrappers, or remote subcommands to affect the operator source checkout, another worktree, arbitrary external paths, or network/remotes; do not create/delete/move shared branches or tags.
+- Final target/source checkout mutation remains package-runtime-owned through \`/${AUTOPILOT_CLOSE_COMMAND}\` or \`/${AUTOPILOT_ABORT_COMMAND}\`; do not manually land, push, archive, delete, or abandon branches outside that runtime flow.
 - Use subscription Pi channels only for frontier child models; do not introduce OpenRouter, paid API keys, or other metered frontier routes.
 - Respect each unit spec's owned, read-only, and untouchable paths.
 
@@ -105,7 +107,7 @@ Generate a paste-ready \`/${AUTOPILOT_COMMAND} ${input.workstream}\` instruction
 
 The generated block must begin with \`/${AUTOPILOT_COMMAND} ${input.workstream}\` and must require \`${CONTEXT_BUDGET_TOOL_NAME}\` first. It must use runtime root \`${input.runtimeRoot}\`, resume purpose truth from \`${input.runtimeRoot}/mission.md\`, \`${input.runtimeRoot}/master-plan.json\`, and \`${input.runtimeRoot}/decision-log.jsonl\` before progress truth from \`${input.runtimeRoot}/state.json\` and \`${input.runtimeRoot}/events.jsonl\`, prefer \`${input.runtimeRoot}/handoff.json\`, \`${input.runtimeRoot}/handoff.md\`, and \`${input.runtimeRoot}/handoff-event-tail.jsonl\` when present, require future child launches through the Autopilot runner \`${AUTOPILOT_RUNNER_BIN}\` as injected by /${AUTOPILOT_COMMAND}, accept only validated status+receipt evidence plus execution-audit evidence, and use Autopilot schema/status names only.
 
-Include concise sections for mode, operator scope, authoritative purpose refs, state precedence, startup gates, current state, audit/scope/protected review queues, held work, launch authorization, machine-truth handling, hard prohibitions, and open questions. State that markdown notes are hints, not truth; that this onboard turn must not mutate files; and that the future parent must not use metered frontier routes or mutate git state.
+Include concise sections for mode, operator scope, authoritative purpose refs, state precedence, startup gates, current state, audit/scope/protected review queues, held work, launch authorization, machine-truth handling, hard prohibitions, and open questions. State that markdown notes are hints, not truth; that this onboard turn must not mutate files; and that the future parent must not use metered frontier routes or use git outside its registered Autopilot worktree.
 ${optionalBlock('Operator notes', input.notes)}`;
 }
 export function renderHandoffPrompt(input) {
@@ -161,7 +163,7 @@ After writing the handoff artifacts, your final response must include a section 
 
 \`/${AUTOPILOT_COMMAND} ${input.workstream}\`
 
-Under that line, include a full explanation for the next Autopilot parent: authoritative mission/master-plan/decision/handoff refs, startup gate, purpose-before-progress state precedence, resume steps, current queues, audit/scope/protected review queues, open blockers, next actions, validation plan, launch authorization, and hard prohibitions. The next parent must call \`${CONTEXT_BUDGET_TOOL_NAME}\` first, must resume from \`${input.runtimeRoot}\`, must launch child work only through the injected \`${AUTOPILOT_RUNNER_BIN}\` path from its own /${AUTOPILOT_COMMAND} prompt, must accept only validated status+receipt+execution-audit evidence, must avoid metered frontier routes, and must preserve git state.
+Under that line, include a full explanation for the next Autopilot parent: authoritative mission/master-plan/decision/handoff refs, startup gate, purpose-before-progress state precedence, resume steps, current queues, audit/scope/protected review queues, open blockers, next actions, validation plan, launch authorization, and hard prohibitions. The next parent must call \`${CONTEXT_BUDGET_TOOL_NAME}\` first, must resume from \`${input.runtimeRoot}\`, must launch child work only through the injected \`${AUTOPILOT_RUNNER_BIN}\` path from its own /${AUTOPILOT_COMMAND} prompt, must accept only validated status+receipt+execution-audit evidence, must avoid metered frontier routes, and must use git only inside the registered Autopilot worktree.
 ${optionalBlock('Operator handoff comments', input.comments)}`;
 }
 export function onboardUsage() {
