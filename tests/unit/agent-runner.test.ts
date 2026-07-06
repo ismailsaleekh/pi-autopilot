@@ -355,12 +355,36 @@ void describe('autopilot-agent-run wrapper', () => {
       assert.equal(result.status, 'success');
       assert.equal(result.statusEntry?.verdict, 'DONE');
       assert.equal(typeof result.executionCommitSha, 'string');
-      if (result.executionCommitOutput === null) throw new Error('expected runtime commit evidence');
+      if (result.executionCommitOutput === null) throw new Error('expected execution-commit evidence');
       const executionCommit = JSON.parse(await readFile(result.executionCommitOutput, 'utf8')) as { schema_version?: string; edited_claimed_paths?: string[] };
       assert.equal(executionCommit.schema_version, 'autopilot.execution_commit.v1');
       assert.deepEqual(executionCommit.edited_claimed_paths, ['src/smoke.ts']);
       const receipt = JSON.parse(await readFile(unitSpec.receipt_output, 'utf8')) as FakeReceipt;
       assert.equal(receipt.tool_call_id, 'call-autopilot-fake-1');
+    });
+  });
+
+  void it('accepts a child-created git commit inside the registered worktree as execution evidence', async () => {
+    await withTempDir(async (root) => {
+      const unitSpec = spec(root);
+      const specPath = await writeSpec(root, unitSpec);
+      const fakePi = await writeFakePi(root);
+      const result = await runAutopilotAgentFromSpecPath(specPath, {
+        piExecutable: fakePi,
+        env: { ...process.env, AUTOPILOT_FAKE_PI_SCENARIO: 'child-commit' },
+        timeoutMsOverride: FAKE_PI_COMPLETION_TIMEOUT_MS,
+      });
+      assert.equal(result.status, 'success');
+      assert.equal(result.auditClassification, 'clean');
+      if (result.executionCommitOutput === null) throw new Error('expected child commit evidence');
+      const executionCommit = JSON.parse(await readFile(result.executionCommitOutput, 'utf8')) as {
+        readonly commit_origin?: string;
+        readonly commit_shas?: readonly string[];
+        readonly edited_claimed_paths?: readonly string[];
+      };
+      assert.equal(executionCommit.commit_origin, 'child');
+      assert.deepEqual(executionCommit.edited_claimed_paths, ['src/smoke.ts']);
+      assert.equal((executionCommit.commit_shas ?? []).length, 1);
     });
   });
 
@@ -387,7 +411,7 @@ void describe('autopilot-agent-run wrapper', () => {
       assert.equal(result.status, 'success');
       assert.equal(result.statusEntry?.changed_paths.length, 121);
       assert.equal(result.auditClassification, 'clean');
-      if (result.executionCommitOutput === null) throw new Error('expected runtime commit evidence');
+      if (result.executionCommitOutput === null) throw new Error('expected execution-commit evidence');
       const executionCommit = JSON.parse(await readFile(result.executionCommitOutput, 'utf8')) as { edited_claimed_paths?: string[] };
       assert.equal(executionCommit.edited_claimed_paths?.length, 121);
     });
@@ -735,6 +759,7 @@ interface FakeReceipt {
 }
 
 const FAKE_PI_SOURCE = `#!/usr/bin/env node
+import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -753,6 +778,10 @@ function state() {
     sessionId: 'autopilot-fake-session',
     isStreaming: false,
   };
+}
+function git(args, cwd) {
+  const result = spawnSync('git', args, { cwd, encoding: 'utf8' });
+  if (result.status !== 0) throw new Error('fake git failed: ' + result.stderr);
 }
 function assistant(message, stopReason = 'stop') {
   return {
@@ -834,6 +863,10 @@ function emitForcedStatus() {
     const omittedPath = join(context.unit_spec.cwd, 'src', 'omitted.ts');
     mkdirSync(dirname(omittedPath), { recursive: true });
     writeFileSync(omittedPath, 'export const omitted = true;\\n', 'utf8');
+  }
+  if (scenario === 'child-commit') {
+    git(['add', '--', String(unit.owned_paths[0])], unit.cwd);
+    git(['commit', '-m', 'child commits owned change'], unit.cwd);
   }
   const status = buildStatus(context);
   mkdirSync(dirname(context.status_output), { recursive: true });

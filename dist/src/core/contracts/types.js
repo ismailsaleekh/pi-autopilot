@@ -39,6 +39,13 @@ export const AUTOPILOT_AUDIT_CLASSIFICATION_VALUES = [
     'critical-protected-path-violation',
     'audit-unavailable',
 ];
+export const AUTOPILOT_HEAD_CHANGE_KIND_VALUES = [
+    'none',
+    'fast-forward',
+    'rewrite',
+    'unavailable',
+];
+export const AUTOPILOT_EXECUTION_COMMIT_ORIGIN_VALUES = ['runtime', 'child', 'mixed'];
 export const AUTOPILOT_EXECUTION_AUDIT_PATH_SET_VALUES = [
     'dirty_baseline_paths',
     'dirty_relevant_paths',

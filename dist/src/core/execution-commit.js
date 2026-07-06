@@ -31,33 +31,52 @@ export async function commitAutopilotExecution(input) {
             ...input.audit.untouchable_touched_paths.map((path) => `untouchable_touched=${path}`),
         ]);
     }
-    const beforeHead = gitHead(input.spec.cwd);
+    const headBeforeRuntimeCommit = gitHead(input.spec.cwd);
     const status = readGitStatus(input.spec.cwd);
     const nonRuntimeChangedPaths = status.changedPaths.filter((path) => !isAutopilotRuntimeRepoPath(path, input.spec.workstream));
     const claimedWritePatterns = activeWriteClaimPaths(input);
-    const editedClaimedPaths = nonRuntimeChangedPaths.filter((path) => claimedWritePatterns.some((pattern) => matchesRepoPathPattern(path, pattern))).sort();
-    const unclaimedChangedPaths = nonRuntimeChangedPaths.filter((path) => !editedClaimedPaths.includes(path));
+    const dirtyClaimedPaths = nonRuntimeChangedPaths.filter((path) => claimedWritePatterns.some((pattern) => matchesRepoPathPattern(path, pattern))).sort();
+    const unclaimedChangedPaths = nonRuntimeChangedPaths.filter((path) => !dirtyClaimedPaths.includes(path));
     if (unclaimedChangedPaths.length > 0) {
-        fail('unclaimed-changes', 'runtime commit refused unclaimed source changes.', unclaimedChangedPaths);
+        fail('unclaimed-changes', 'execution-commit evidence refused unclaimed source changes.', unclaimedChangedPaths);
     }
+    const committedClaimedPaths = sortedUnique(input.audit.committed_changed_paths ?? []);
+    for (const path of committedClaimedPaths) {
+        if (!claimedWritePatterns.some((pattern) => matchesRepoPathPattern(path, pattern))) {
+            fail('committed-path-outside-claims', 'child-created commit changed a path outside active WRITE claims.', [path]);
+        }
+    }
+    const editedClaimedPaths = sortedUnique([...committedClaimedPaths, ...dirtyClaimedPaths]);
     if (editedClaimedPaths.length === 0) {
-        fail('no-claimed-edits', 'source-changing DONE status produced no claimed source edits to commit.');
+        fail('no-claimed-edits', 'source-changing DONE status produced no claimed source edits to commit or capture.');
     }
     assertSameSet('status.changed_paths', input.statusEntry.changed_paths, 'actual claimed changed paths', editedClaimedPaths);
     assertSameSet('audit.actual_changed_paths', input.audit.actual_changed_paths, 'actual claimed changed paths', editedClaimedPaths);
-    const stagedOutsideRuntime = status.stagedPaths.filter((path) => !isAutopilotRuntimeRepoPath(path, input.spec.workstream));
-    if (stagedOutsideRuntime.length > 0) {
-        fail('preexisting-staged-paths', 'runtime commit refused preexisting staged source paths before staging claimed edits.', stagedOutsideRuntime);
+    const stagedOutsideClaims = status.stagedPaths
+        .filter((path) => !isAutopilotRuntimeRepoPath(path, input.spec.workstream))
+        .filter((path) => !claimedWritePatterns.some((pattern) => matchesRepoPathPattern(path, pattern)));
+    if (stagedOutsideClaims.length > 0) {
+        fail('preexisting-staged-paths', 'execution-commit evidence refused staged source paths outside active WRITE claims.', stagedOutsideClaims);
     }
-    runGit(['add', '--', ...editedClaimedPaths], input.spec.cwd, runtimeGitEnv());
-    const staged = readGitStatus(input.spec.cwd);
-    const stagedSource = staged.stagedPaths.filter((path) => !isAutopilotRuntimeRepoPath(path, input.spec.workstream));
-    assertSameSet('staged source paths', stagedSource, 'actual claimed changed paths', editedClaimedPaths);
-    const commitSubject = `autopilot runtime commit ${input.spec.unit_id} attempt ${String(input.spec.attempt)}`;
-    runGit(['commit', '--no-verify', '-m', commitSubject], input.spec.cwd, runtimeGitEnv());
+    let runtimeCommitCreated = false;
+    let commitSubject = `autopilot captured child commit ${input.spec.unit_id} attempt ${String(input.spec.attempt)}`;
+    if (dirtyClaimedPaths.length > 0) {
+        runGit(['add', '--', ...dirtyClaimedPaths], input.spec.cwd, runtimeGitEnv());
+        const staged = readGitStatus(input.spec.cwd);
+        const stagedSource = staged.stagedPaths.filter((path) => !isAutopilotRuntimeRepoPath(path, input.spec.workstream));
+        for (const stagedPath of stagedSource) {
+            if (!dirtyClaimedPaths.includes(stagedPath)) {
+                fail('staged-path-set-mismatch', 'runtime staging included a source path outside dirty claimed edits.', [stagedPath]);
+            }
+        }
+        commitSubject = `autopilot runtime commit ${input.spec.unit_id} attempt ${String(input.spec.attempt)}`;
+        runGit(['commit', '--no-verify', '-m', commitSubject], input.spec.cwd, runtimeGitEnv());
+        runtimeCommitCreated = true;
+    }
     const afterHead = gitHead(input.spec.cwd);
+    const beforeHead = input.audit.baseline_head ?? headBeforeRuntimeCommit;
     if (afterHead === beforeHead)
-        fail('commit-not-created', 'runtime git commit did not advance HEAD.');
+        fail('commit-not-created', 'source-changing success did not advance or capture a changed HEAD.');
     const diffPaths = committedDiffPaths(input.spec.cwd, beforeHead, afterHead);
     assertSameSet('committed diff paths', diffPaths, 'actual claimed changed paths', editedClaimedPaths);
     const afterStatus = readGitStatus(input.spec.cwd);
@@ -65,6 +84,8 @@ export async function commitAutopilotExecution(input) {
     if (afterSourceDirty.length > 0) {
         fail('post-commit-source-dirty', 'runtime commit left source paths dirty after commit.', afterSourceDirty);
     }
+    const commitShas = commitRange(input.spec.cwd, beforeHead, afterHead);
+    const commitOrigin = executionCommitOrigin(runtimeCommitCreated, committedClaimedPaths.length > 0);
     const commitPath = input.commitPath ?? deriveAutopilotExecutionCommitPath(input.spec);
     const record = parseAutopilotExecutionCommit({
         schema_version: 'autopilot.execution_commit.v1',
@@ -83,6 +104,8 @@ export async function commitAutopilotExecution(input) {
         after_head: afterHead,
         commit_sha: afterHead,
         commit_subject: commitSubject,
+        commit_origin: commitOrigin,
+        commit_shas: commitShas,
         status_ref: relativeArtifactRef(input.spec.status_output, input.context.active.runtime_root),
         receipt_ref: relativeArtifactRef(input.spec.receipt_output, input.context.active.runtime_root),
         audit_ref: relativeArtifactRef(input.auditPath, input.context.active.runtime_root),
@@ -105,8 +128,20 @@ function activeWriteClaimPaths(input) {
     return Object.freeze(unique);
 }
 function committedDiffPaths(cwd, beforeHead, afterHead) {
-    const output = runGit(['diff-tree', '--no-commit-id', '--name-only', '-r', '-z', beforeHead, afterHead], cwd);
+    const output = runGit(['diff', '--name-only', '-z', beforeHead, afterHead], cwd);
     return Object.freeze(output.split('\0').filter((path) => path.length > 0).map((path) => path.replace(/\\/gu, '/')).sort());
+}
+function commitRange(cwd, beforeHead, afterHead) {
+    const output = runGit(['rev-list', '--reverse', `${beforeHead}..${afterHead}`], cwd);
+    const shas = output.split('\n').map((line) => line.trim()).filter((line) => line.length > 0);
+    return Object.freeze(shas.includes(afterHead) ? shas : [...shas, afterHead]);
+}
+function executionCommitOrigin(runtimeCommitCreated, childCommitCaptured) {
+    if (runtimeCommitCreated && childCommitCaptured)
+        return 'mixed';
+    if (runtimeCommitCreated)
+        return 'runtime';
+    return 'child';
 }
 function runtimeGitEnv() {
     return {

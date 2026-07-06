@@ -401,6 +401,23 @@ void describe('Autopilot execution audits', () => {
         deriveAutopilotExecutionAuditPath(spec).endsWith('execution-audits/u01-implement.implement.attempt-1.json'),
         true,
       );
+
+      git(worktree, ['add', 'src/owned.ts']);
+      git(worktree, ['commit', '-m', 'child committed owned change']);
+      const committedBaseline = await captureAutopilotExecutionBaseline(worktree);
+      await writeFile(join(worktree, 'src', 'owned.ts'), 'export const value = 20;\n', 'utf8');
+      git(worktree, ['add', 'src/owned.ts']);
+      git(worktree, ['commit', '-m', 'child committed second owned change']);
+      const committedAudit = await writeAutopilotExecutionAudit({
+        unitSpec: spec,
+        baseline: committedBaseline,
+        statusEntry: passingStatus(spec),
+      });
+      assert.equal(committedAudit.classification, 'clean');
+      assert.equal(committedAudit.head_change_kind, 'fast-forward');
+      assert.deepEqual(committedAudit.committed_changed_paths, ['src/owned.ts']);
+      assert.deepEqual(committedAudit.actual_changed_paths, ['src/owned.ts']);
+
       assert.throws(
         () =>
           parseAutopilotExecutionAudit({

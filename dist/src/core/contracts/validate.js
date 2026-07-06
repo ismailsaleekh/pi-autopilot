@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { isAbsolute, normalize, relative, resolve, sep } from 'node:path';
 import { AUTOPILOT_JSON_SCHEMAS, AUTOPILOT_STATUS_ENTRY_JSON_SCHEMA, } from "./schemas.js";
-import { AUTOPILOT_AUDIT_CLASSIFICATION_VALUES, AUTOPILOT_CLOSURE_GATE_STATUS_VALUES, AUTOPILOT_COMMAND_STATUS_VALUES, AUTOPILOT_CONTEXT_GATE_VALUES, AUTOPILOT_DECISION_EVENT_VALUES, AUTOPILOT_EVENT_TYPE_VALUES, AUTOPILOT_EXCEPTION_STATE_VALUES, AUTOPILOT_EXECUTION_AUDIT_PATH_SET_VALUES, AUTOPILOT_HANDOFF_REASON_VALUES, AUTOPILOT_QUALITY_PROFILE_VALUES, AUTOPILOT_RISK_LEVEL_VALUES, AUTOPILOT_ROLE_VALUES, AUTOPILOT_SEVERITY_VALUES, AUTOPILOT_STATUS_CHANGED_PATHS_LIMIT, AUTOPILOT_TEMPLATE_VALUES, AUTOPILOT_THINKING_VALUES, AUTOPILOT_UNIT_STATE_VALUES, AUTOPILOT_VERDICT_VALUES, AUTOPILOT_WORK_ITEM_STATE_VALUES, AUTOPILOT_WORKSTREAM_STATUS_VALUES, } from "./types.js";
+import { AUTOPILOT_AUDIT_CLASSIFICATION_VALUES, AUTOPILOT_CLOSURE_GATE_STATUS_VALUES, AUTOPILOT_COMMAND_STATUS_VALUES, AUTOPILOT_CONTEXT_GATE_VALUES, AUTOPILOT_DECISION_EVENT_VALUES, AUTOPILOT_EVENT_TYPE_VALUES, AUTOPILOT_EXCEPTION_STATE_VALUES, AUTOPILOT_EXECUTION_AUDIT_PATH_SET_VALUES, AUTOPILOT_EXECUTION_COMMIT_ORIGIN_VALUES, AUTOPILOT_HANDOFF_REASON_VALUES, AUTOPILOT_HEAD_CHANGE_KIND_VALUES, AUTOPILOT_QUALITY_PROFILE_VALUES, AUTOPILOT_RISK_LEVEL_VALUES, AUTOPILOT_ROLE_VALUES, AUTOPILOT_SEVERITY_VALUES, AUTOPILOT_STATUS_CHANGED_PATHS_LIMIT, AUTOPILOT_TEMPLATE_VALUES, AUTOPILOT_THINKING_VALUES, AUTOPILOT_UNIT_STATE_VALUES, AUTOPILOT_VERDICT_VALUES, AUTOPILOT_WORK_ITEM_STATE_VALUES, AUTOPILOT_WORKSTREAM_STATUS_VALUES, } from "./types.js";
 const ISO_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;
 const SHA256 = /^sha256:[a-f0-9]{64}$/u;
 const WORKSTREAM = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
@@ -335,6 +335,13 @@ function assertExecutionAuditShape(value) {
         expectString(record['cwd'], '/cwd', issues, { max: 1024 });
         if (record['git_head'] !== null)
             expectString(record['git_head'], '/git_head', issues, { max: 80 });
+        if (hasKey(record, 'baseline_head') && record['baseline_head'] !== null)
+            expectString(record['baseline_head'], '/baseline_head', issues, { max: 80 });
+        if (hasKey(record, 'post_run_head') && record['post_run_head'] !== null)
+            expectString(record['post_run_head'], '/post_run_head', issues, { max: 80 });
+        optionalEnum(record, 'head_change_kind', AUTOPILOT_HEAD_CHANGE_KIND_VALUES, '/head_change_kind', issues);
+        if (hasKey(record, 'committed_changed_paths'))
+            expectStringArray(record['committed_changed_paths'], '/committed_changed_paths', issues, 500);
         if (record['dirty_baseline'] !== null)
             expectBoolean(record['dirty_baseline'], '/dirty_baseline', issues);
         expectStringArray(record['dirty_baseline_paths'], '/dirty_baseline_paths', issues, 500);
@@ -381,6 +388,9 @@ function assertExecutionCommitShape(value) {
         expectString(record['after_head'], '/after_head', issues, { max: 80 });
         expectString(record['commit_sha'], '/commit_sha', issues, { max: 80 });
         expectString(record['commit_subject'], '/commit_subject', issues, { max: 240 });
+        optionalEnum(record, 'commit_origin', AUTOPILOT_EXECUTION_COMMIT_ORIGIN_VALUES, '/commit_origin', issues);
+        if (hasKey(record, 'commit_shas'))
+            expectStringArray(record['commit_shas'], '/commit_shas', issues, 500, 1, 80);
         expectString(record['status_ref'], '/status_ref', issues, { max: 512 });
         expectString(record['receipt_ref'], '/receipt_ref', issues, { max: 512 });
         expectString(record['audit_ref'], '/audit_ref', issues, { max: 512 });
@@ -1148,6 +1158,10 @@ function semanticExecutionCommitIssues(commit) {
         issues.push('after_head must equal commit_sha');
     if (commit.before_head === commit.after_head)
         issues.push('before_head and after_head must differ');
+    issues.push(...duplicateIssues('commit_shas', commit.commit_shas ?? []));
+    if (commit.commit_shas !== undefined && !commit.commit_shas.includes(commit.commit_sha)) {
+        issues.push('commit_shas must include commit_sha');
+    }
     for (const [field, path] of [
         ['status_ref', commit.status_ref],
         ['receipt_ref', commit.receipt_ref],
@@ -1170,6 +1184,7 @@ function semanticExecutionAuditIssues(audit) {
         ['outside_owned_paths', audit.outside_owned_paths],
         ['read_only_touched_paths', audit.read_only_touched_paths],
         ['untouchable_touched_paths', audit.untouchable_touched_paths],
+        ['committed_changed_paths', audit.committed_changed_paths ?? []],
     ]) {
         issues.push(...duplicateIssues(field, paths));
         for (const path of paths)
@@ -1180,6 +1195,14 @@ function semanticExecutionAuditIssues(audit) {
     issues.push(...duplicateIssues('declared_validation_commands', audit.declared_validation_commands));
     issues.push(...duplicateIssues('status_reported_commands', audit.status_reported_commands));
     issues.push(...duplicateIssues('command_coverage_gaps', audit.command_coverage_gaps));
+    if (audit.head_change_kind !== undefined) {
+        if (audit.head_change_kind === 'none' && (audit.committed_changed_paths ?? []).length > 0) {
+            issues.push('head_change_kind none requires empty committed_changed_paths');
+        }
+        if (audit.head_change_kind === 'fast-forward' && (audit.committed_changed_paths ?? []).length === 0 && audit.baseline_head !== audit.post_run_head) {
+            issues.push('head_change_kind fast-forward requires committed_changed_paths when heads differ');
+        }
+    }
     if (audit.dirty_baseline === null && audit.path_counts.dirty_baseline_paths > 0) {
         issues.push('dirty_baseline null requires zero dirty_baseline_paths count');
     }
@@ -1434,7 +1457,9 @@ function expectedExecutionAuditClassification(audit) {
         return 'protected-path-review-required';
     if (audit.dirty_baseline === null ||
         audit.path_counts.dirty_relevant_paths > 0 ||
-        audit.truncated_path_sets.length > 0) {
+        audit.truncated_path_sets.length > 0 ||
+        audit.head_change_kind === 'rewrite' ||
+        audit.head_change_kind === 'unavailable') {
         return 'audit-unavailable';
     }
     if (audit.path_counts.outside_owned_paths > 0 ||
@@ -1835,7 +1860,13 @@ const executionAuditRequired = [
     'evidence_refs',
     'summary',
 ];
-const executionAuditKeys = new Set(executionAuditRequired);
+const executionAuditKeys = new Set([
+    ...executionAuditRequired,
+    'baseline_head',
+    'post_run_head',
+    'head_change_kind',
+    'committed_changed_paths',
+]);
 const executionCommitRequired = [
     'schema_version',
     'workstream',
@@ -1858,4 +1889,8 @@ const executionCommitRequired = [
     'audit_ref',
     'created_at',
 ];
-const executionCommitKeys = new Set(executionCommitRequired);
+const executionCommitKeys = new Set([
+    ...executionCommitRequired,
+    'commit_origin',
+    'commit_shas',
+]);

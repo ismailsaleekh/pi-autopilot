@@ -74,6 +74,17 @@ export const AUTOPILOT_AUDIT_CLASSIFICATION_VALUES = [
 ] as const;
 export type AutopilotAuditClassification = (typeof AUTOPILOT_AUDIT_CLASSIFICATION_VALUES)[number];
 
+export const AUTOPILOT_HEAD_CHANGE_KIND_VALUES = [
+  'none',
+  'fast-forward',
+  'rewrite',
+  'unavailable',
+] as const;
+export type AutopilotHeadChangeKind = (typeof AUTOPILOT_HEAD_CHANGE_KIND_VALUES)[number];
+
+export const AUTOPILOT_EXECUTION_COMMIT_ORIGIN_VALUES = ['runtime', 'child', 'mixed'] as const;
+export type AutopilotExecutionCommitOrigin = (typeof AUTOPILOT_EXECUTION_COMMIT_ORIGIN_VALUES)[number];
+
 export const AUTOPILOT_EXECUTION_AUDIT_PATH_SET_VALUES = [
   'dirty_baseline_paths',
   'dirty_relevant_paths',
@@ -472,6 +483,10 @@ export interface AutopilotExecutionAudit {
   readonly audited_at: string;
   readonly cwd: string;
   readonly git_head: string | null;
+  readonly baseline_head?: string | null;
+  readonly post_run_head?: string | null;
+  readonly head_change_kind?: AutopilotHeadChangeKind;
+  readonly committed_changed_paths?: readonly string[];
   readonly dirty_baseline: boolean | null;
   readonly dirty_baseline_paths: readonly string[];
   readonly dirty_relevant_paths: readonly string[];
@@ -509,6 +524,8 @@ export interface AutopilotExecutionCommit {
   readonly after_head: string;
   readonly commit_sha: string;
   readonly commit_subject: string;
+  readonly commit_origin?: AutopilotExecutionCommitOrigin;
+  readonly commit_shas?: readonly string[];
   readonly status_ref: string;
   readonly receipt_ref: string;
   readonly audit_ref: string;

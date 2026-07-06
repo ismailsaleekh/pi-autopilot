@@ -422,8 +422,10 @@ function executionCommitBlockers(active, executionCommits, audits, retainedWrite
     for (const commit of executionCommits) {
         if (commit.branch !== active.branch)
             blockers.push(`execution commit ${commit.commit_sha} branch does not match active branch`);
-        if (!isAncestor(active.main_worktree_path, commit.commit_sha, gitHead(active.main_worktree_path))) {
-            blockers.push(`execution commit ${commit.commit_sha} is not reachable from workstream branch`);
+        for (const sha of commit.commit_shas ?? [commit.commit_sha]) {
+            if (!isAncestor(active.main_worktree_path, sha, gitHead(active.main_worktree_path))) {
+                blockers.push(`execution commit ${sha} is not reachable from workstream branch`);
+            }
         }
         const matchingAudit = audits.find((audit) => audit.workstream === commit.workstream &&
             audit.unit_id === commit.unit_id &&
@@ -452,7 +454,7 @@ function branchCommitBlockers(active, executionCommits) {
     if (!commitExists(active.main_worktree_path, active.target_base_sha))
         return [`target_base_sha ${active.target_base_sha} is not reachable in workstream repo`];
     const commits = revList(active.main_worktree_path, active.target_base_sha, gitHead(active.main_worktree_path));
-    const executionShas = new Set(executionCommits.map((commit) => commit.commit_sha));
+    const executionShas = new Set(executionCommits.flatMap((commit) => [...(commit.commit_shas ?? [commit.commit_sha])]));
     const unknownCommits = commits.filter((sha) => !executionShas.has(sha));
     if (unknownCommits.length === 0)
         return [];

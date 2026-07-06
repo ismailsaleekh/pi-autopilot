@@ -39,9 +39,14 @@ export function buildAutopilotExecutionAudit(input) {
         : [];
     const baselineDirty = baselineDirtyPathsFull.length > 0;
     const dirtyRelevantPathsFull = baselineDirtyPathsFull.filter((path) => matchesPathPatterns(path, relevantDirtyPathPatterns(input.unitSpec)));
-    const actualChangedPathsFull = auditAvailable
+    const headChangeKind = classifyHeadChange(input.unitSpec.cwd, input.baseline.gitHead, input.postRun.gitHead, auditAvailable);
+    const committedChangedPathsFull = auditAvailable
+        ? committedChangedPaths(input.unitSpec.cwd, input.baseline.gitHead, input.postRun.gitHead).filter((path) => !matchesPathPattern(path, runtimeRoot))
+        : [];
+    const dirtyChangedPathsFull = auditAvailable
         ? sortedDifference(input.postRun.changedPaths, baselineDirtyPathsFull).filter((path) => !matchesPathPattern(path, runtimeRoot))
         : [];
+    const actualChangedPathsFull = sortedUnique([...committedChangedPathsFull, ...dirtyChangedPathsFull]);
     const statusReportedChangedPathsFull = sortedUnique(input.statusEntry?.changed_paths ?? []);
     const omittedStatusChangesFull = auditAvailable
         ? sortedDifference(actualChangedPathsFull, statusReportedChangedPathsFull)
@@ -79,6 +84,7 @@ export function buildAutopilotExecutionAudit(input) {
         reportedButNotActualChanges: reportedButNotActualChangesFull,
         commandCoverageGaps,
         truncatedPathSets,
+        headChangeKind,
     });
     return Object.freeze({
         schema_version: 'autopilot.execution_audit.v1',
@@ -89,6 +95,10 @@ export function buildAutopilotExecutionAudit(input) {
         audited_at: new Date().toISOString(),
         cwd: input.unitSpec.cwd,
         git_head: input.baseline.gitHead ?? input.postRun.gitHead,
+        baseline_head: input.baseline.gitHead,
+        post_run_head: input.postRun.gitHead,
+        head_change_kind: headChangeKind,
+        committed_changed_paths: boundedAuditPathSet(committedChangedPathsFull).paths,
         dirty_baseline: auditAvailable ? baselineDirty : null,
         dirty_baseline_paths: boundedPathSets.dirty_baseline_paths.paths,
         dirty_relevant_paths: boundedPathSets.dirty_relevant_paths.paths,
@@ -120,7 +130,11 @@ function classifyAudit(input) {
         return 'critical-protected-path-violation';
     if (input.readOnlyTouchedPaths.length > 0)
         return 'protected-path-review-required';
-    if (!input.auditAvailable || input.dirtyRelevantPaths.length > 0 || input.truncatedPathSets.length > 0) {
+    if (!input.auditAvailable ||
+        input.dirtyRelevantPaths.length > 0 ||
+        input.truncatedPathSets.length > 0 ||
+        input.headChangeKind === 'rewrite' ||
+        input.headChangeKind === 'unavailable') {
         return 'audit-unavailable';
     }
     if (input.outsideOwnedPaths.length > 0 ||
@@ -146,6 +160,31 @@ function auditSummary(input) {
     if (input.classification === 'clean')
         return 'Execution audit is clean.';
     return `Execution audit classified this attempt as ${input.classification}.`;
+}
+function classifyHeadChange(cwd, baselineHead, postRunHead, auditAvailable) {
+    if (!auditAvailable)
+        return 'unavailable';
+    if (baselineHead === null || postRunHead === null)
+        return 'unavailable';
+    if (baselineHead === postRunHead)
+        return 'none';
+    return isAncestor(cwd, baselineHead, postRunHead) ? 'fast-forward' : 'rewrite';
+}
+function committedChangedPaths(cwd, baselineHead, postRunHead) {
+    if (baselineHead === null || postRunHead === null || baselineHead === postRunHead)
+        return [];
+    const result = spawnSync('git', ['-C', cwd, 'diff', '--name-only', '-z', baselineHead, postRunHead], {
+        encoding: 'utf8',
+    });
+    if (result.status !== 0)
+        return [];
+    return Object.freeze(result.stdout.split('\0').filter((path) => path.length > 0).map(toPosixRelativePath).sort());
+}
+function isAncestor(cwd, ancestor, descendant) {
+    const result = spawnSync('git', ['-C', cwd, 'merge-base', '--is-ancestor', ancestor, descendant], {
+        encoding: 'utf8',
+    });
+    return result.status === 0;
 }
 function boundedAuditPathSet(paths, priorityPaths = []) {
     const uniquePaths = sortedUnique(paths);
