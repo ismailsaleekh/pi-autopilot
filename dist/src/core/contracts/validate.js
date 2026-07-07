@@ -1517,7 +1517,11 @@ function unitSpecArtifactPathIssues(spec) {
     const issues = [];
     if (absolutePathIssues(spec.cwd, 'cwd').length > 0)
         return issues;
-    const runtimeRoot = resolve(spec.cwd, '.pi', 'autopilot', spec.workstream);
+    const runtimeRoot = deriveRuntimeRootFromArtifactOutputs(spec);
+    if (runtimeRoot === null) {
+        issues.push('status_output, receipt_output, and evidence_dir must point to one .pi/autopilot/<workstream> runtime root');
+        return issues;
+    }
     for (const [field, pathValue, artifactDir] of [
         ['status_output', spec.status_output, resolve(runtimeRoot, 'statuses')],
         ['receipt_output', spec.receipt_output, resolve(runtimeRoot, 'receipts')],
@@ -1530,6 +1534,31 @@ function unitSpecArtifactPathIssues(spec) {
         }
     }
     return issues;
+}
+function deriveRuntimeRootFromArtifactOutputs(spec) {
+    const expectedSuffix = `/.pi/autopilot/${spec.workstream}`;
+    const roots = [
+        rootBeforeArtifactSegment(spec.status_output, 'statuses'),
+        rootBeforeArtifactSegment(spec.receipt_output, 'receipts'),
+        rootBeforeArtifactSegment(spec.evidence_dir, 'evidence'),
+    ].filter((root) => root !== null && root.endsWith(expectedSuffix));
+    for (const root of roots) {
+        if (roots.filter((candidate) => candidate === root).length >= 2)
+            return root;
+    }
+    const [only] = roots;
+    return roots.length === 1 && only !== undefined ? only : null;
+}
+function rootBeforeArtifactSegment(pathValue, segment) {
+    const normalized = normalize(pathValue).replace(/\\/gu, '/');
+    const marker = `/${segment}`;
+    const index = normalized.indexOf(marker);
+    if (index < 0)
+        return null;
+    const after = normalized.slice(index + marker.length);
+    if (after.length > 0 && !after.startsWith('/'))
+        return null;
+    return normalized.slice(0, index);
 }
 function evidenceRefIssues(ref, artifactRoot, label) {
     const issues = relativePathIssues(ref.path, `${label} path`);

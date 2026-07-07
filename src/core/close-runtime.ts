@@ -18,6 +18,7 @@ import {
   type AutopilotStatusEntry,
 } from './contracts/index.ts';
 import { evaluateAutopilotClosureGate } from './lifecycle/index.ts';
+import { parseAutopilotUnitMerge, type AutopilotUnitMerge } from './unit-merge.ts';
 import {
   ACTIVE_AUTOPILOTS_FILE,
   BRANCHES_FILE,
@@ -128,6 +129,8 @@ interface RuntimeArtifacts {
   readonly audits: readonly AutopilotExecutionAudit[];
   readonly decisions: readonly AutopilotDecisionRow[];
   readonly executionCommits: readonly AutopilotExecutionCommit[];
+  readonly unitMerges: readonly AutopilotUnitMerge[];
+  readonly validationStalenessRefs: readonly string[];
 }
 
 interface PreparedCloseContext {
@@ -141,6 +144,7 @@ interface CloseValidationResult {
   readonly retainedClaims: readonly AutopilotPathClaim[];
   readonly retainedWriteClaims: readonly AutopilotPathClaim[];
   readonly executionCommits: readonly AutopilotExecutionCommit[];
+  readonly unitMerges: readonly AutopilotUnitMerge[];
   readonly preIntegrationChangedPaths: readonly string[];
   readonly targetDeltaPaths: readonly string[];
   readonly unackedForeignMerges: readonly AutopilotMergeEvent[];
@@ -230,7 +234,9 @@ export async function closeAutopilotWorkstream(options: AutopilotCloseOptions): 
         const integrationCommitSha = integrateTargetIntoWorkstream({ active, targetHead: targetBefore });
         const workstreamAfter = gitHead(active.main_worktree_path);
         const changedPaths = diffPaths(active.main_worktree_path, targetBefore, workstreamAfter);
-        const postIntegrationBlockers = finalDiffBlockers(changedPaths, validation.retainedWriteClaims, validation.executionCommits);
+        const postIntegrationBlockers = validation.unitMerges.length > 0
+          ? phaseTwoCloseBlockers(active, validation.unitMerges, [], changedPaths)
+          : finalDiffBlockers(changedPaths, validation.retainedWriteClaims, validation.executionCommits);
         if (postIntegrationBlockers.length > 0) {
           active = await setActiveStatus(context.coordinationRoot, active, 'blocked', now, null);
           const result = buildCloseResult({
@@ -490,11 +496,20 @@ async function validateCloseReadiness(context: PreparedCloseContext, now: Date):
   const executionCommits = artifacts.executionCommits.filter((commit) =>
     commit.autopilot_id === active.autopilot_id && commit.workstream_run === active.workstream_run,
   );
+  const unitMerges = relevantUnitMerges(active, artifacts.unitMerges);
+  const closeSurfacePaths = unitMerges.length > 0
+    ? sortedUnique(unitMerges.flatMap((merge) => [...merge.changed_paths]))
+    : retainedWriteClaims.map((claim) => claim.path);
   blockers.push(...semanticClosureBlockers(artifacts, preIntegrationChangedPaths));
-  blockers.push(...executionCommitBlockers(active, executionCommits, artifacts.audits, retainedWriteClaims, preIntegrationChangedPaths));
-  blockers.push(...branchCommitBlockers(active, executionCommits));
+  if (unitMerges.length > 0) {
+    blockers.push(...phaseTwoExecutionCommitBlockers(active, executionCommits, artifacts.audits, unitMerges));
+  } else {
+    blockers.push(...executionCommitBlockers(active, executionCommits, artifacts.audits, retainedWriteClaims, preIntegrationChangedPaths));
+  }
+  blockers.push(...phaseTwoCloseBlockers(active, unitMerges, artifacts.validationStalenessRefs, preIntegrationChangedPaths));
+  blockers.push(...branchCommitBlockers(active, executionCommits, unitMerges));
 
-  const targetIntersection = intersectingPaths(targetDeltaPaths, retainedWriteClaims.map((claim) => claim.path));
+  const targetIntersection = intersectingPaths(targetDeltaPaths, closeSurfacePaths);
   if (targetIntersection.length > 0) {
     blockers.push(`target branch changed retained claimed path(s) since activation: ${targetIntersection.join(', ')}; targeted revalidation required before close`);
   }
@@ -508,7 +523,7 @@ async function validateCloseReadiness(context: PreparedCloseContext, now: Date):
   );
   const nonIntersectingForeignMerges: AutopilotMergeEvent[] = [];
   for (const merge of unackedForeignMerges) {
-    const intersection = intersectingPaths(merge.changed_paths, retainedWriteClaims.map((claim) => claim.path));
+    const intersection = intersectingPaths(merge.changed_paths, closeSurfacePaths);
     if (intersection.length > 0) {
       blockers.push(`foreign merge ${merge.merge_id} touched retained claimed path(s): ${intersection.join(', ')}; targeted revalidation required before close`);
     } else {
@@ -516,7 +531,7 @@ async function validateCloseReadiness(context: PreparedCloseContext, now: Date):
     }
   }
 
-  blockers.push(...finalDiffBlockers(preIntegrationChangedPaths, retainedWriteClaims, executionCommits));
+  if (unitMerges.length === 0) blockers.push(...finalDiffBlockers(preIntegrationChangedPaths, retainedWriteClaims, executionCommits));
   if (blockers.length === 0 && targetBranch !== null && !isAncestor(context.repo.repoRoot, targetHead, workstreamHead)) {
     // This is allowed: the runtime will merge target into the clean workstream.
     // The explicit branch keeps this invariant visible and prevents accidental silent fallback.
@@ -527,6 +542,7 @@ async function validateCloseReadiness(context: PreparedCloseContext, now: Date):
     retainedClaims,
     retainedWriteClaims,
     executionCommits,
+    unitMerges,
     preIntegrationChangedPaths,
     targetDeltaPaths,
     unackedForeignMerges,
@@ -572,6 +588,10 @@ function semanticClosureBlockers(artifacts: RuntimeArtifacts, changedPaths: read
   return blockers;
 }
 
+function relevantUnitMerges(active: ActiveAutopilotRow, unitMerges: readonly AutopilotUnitMerge[]): readonly AutopilotUnitMerge[] {
+  return Object.freeze(unitMerges.filter((merge) => merge.autopilot_id === active.autopilot_id && merge.workstream_run === active.workstream_run));
+}
+
 function executionCommitBlockers(
   active: ActiveAutopilotRow,
   executionCommits: readonly AutopilotExecutionCommit[],
@@ -613,10 +633,84 @@ function executionCommitBlockers(
   return blockers;
 }
 
-function branchCommitBlockers(active: ActiveAutopilotRow, executionCommits: readonly AutopilotExecutionCommit[]): readonly string[] {
+function phaseTwoExecutionCommitBlockers(
+  active: ActiveAutopilotRow,
+  executionCommits: readonly AutopilotExecutionCommit[],
+  audits: readonly AutopilotExecutionAudit[],
+  unitMerges: readonly AutopilotUnitMerge[],
+): readonly string[] {
+  const blockers: string[] = [];
+  for (const merge of unitMerges) {
+    const matchingCommit = executionCommits.find((commit) =>
+      commit.unit_id === merge.unit_id && commit.attempt === merge.attempt && commit.role === merge.role,
+    );
+    if (matchingCommit === undefined) {
+      blockers.push(`Phase 2 close: unit merge ${merge.unit_id} attempt ${String(merge.attempt)} lacks execution commit evidence`);
+      continue;
+    }
+    if (matchingCommit.branch !== merge.unit_branch) {
+      blockers.push(`Phase 2 close: execution commit ${matchingCommit.commit_sha} branch does not match unit branch ${merge.unit_branch}`);
+    }
+    if (matchingCommit.after_head !== merge.unit_head) {
+      blockers.push(`Phase 2 close: execution commit ${matchingCommit.commit_sha} head does not match merged unit head ${merge.unit_head}`);
+    }
+    const matchingAudit = audits.find((audit) =>
+      audit.workstream === matchingCommit.workstream &&
+      audit.unit_id === matchingCommit.unit_id &&
+      audit.role === matchingCommit.role &&
+      audit.attempt === matchingCommit.attempt,
+    );
+    if (matchingAudit === undefined) blockers.push(`Phase 2 close: execution commit ${matchingCommit.commit_sha} lacks matching execution audit`);
+    else if (matchingAudit.classification !== 'clean') blockers.push(`Phase 2 close: execution commit ${matchingCommit.commit_sha} audit is ${matchingAudit.classification}, not clean`);
+    for (const path of merge.changed_paths) {
+      if (!pathMatchesAnyClaim(path, matchingCommit.edited_claimed_paths)) {
+        blockers.push(`Phase 2 close: unit merge ${merge.unit_id} path lacks execution commit evidence: ${path}`);
+      }
+    }
+    for (const path of matchingCommit.edited_claimed_paths) {
+      if (!pathMatchesAnyClaim(path, merge.changed_paths)) {
+        blockers.push(`Phase 2 close: execution commit ${matchingCommit.commit_sha} path missing from unit merge evidence: ${path}`);
+      }
+    }
+    if (!isAncestor(active.main_worktree_path, matchingCommit.commit_sha, gitHead(active.main_worktree_path))) {
+      blockers.push(`Phase 2 close: execution commit ${matchingCommit.commit_sha} is not reachable from integration branch`);
+    }
+  }
+  return sortedUnique(blockers);
+}
+
+function phaseTwoCloseBlockers(
+  active: ActiveAutopilotRow,
+  unitMerges: readonly AutopilotUnitMerge[],
+  validationStalenessRefs: readonly string[],
+  finalChangedPaths: readonly string[],
+): readonly string[] {
+  const blockers: string[] = [];
+  if (unitMerges.length === 0 && validationStalenessRefs.length === 0) return blockers;
+  const relevantMerges = relevantUnitMerges(active, unitMerges);
+  const unionPaths = sortedUnique(relevantMerges.flatMap((merge) => [...merge.changed_paths]));
+  for (const path of finalChangedPaths) {
+    if (!pathMatchesAnyClaim(path, unionPaths)) blockers.push(`Phase 2 close: final path lacks accepted unit-merge evidence: ${path}`);
+  }
+  for (const path of unionPaths) {
+    if (!pathMatchesAnyClaim(path, finalChangedPaths)) blockers.push(`Phase 2 close: accepted unit merge path missing from final integrated diff: ${path}`);
+  }
+  for (const merge of relevantMerges) {
+    if (!isAncestor(active.main_worktree_path, merge.merge_commit_sha, gitHead(active.main_worktree_path))) {
+      blockers.push(`Phase 2 close: unit merge ${merge.unit_id} attempt ${String(merge.attempt)} is not reachable from integration branch`);
+    }
+  }
+  if (validationStalenessRefs.length > 0) blockers.push(`Phase 2 close: stale validation artifacts remain: ${validationStalenessRefs.join(', ')}`);
+  return sortedUnique(blockers);
+}
+
+function branchCommitBlockers(active: ActiveAutopilotRow, executionCommits: readonly AutopilotExecutionCommit[], unitMerges: readonly AutopilotUnitMerge[]): readonly string[] {
   if (!commitExists(active.main_worktree_path, active.target_base_sha)) return [`target_base_sha ${active.target_base_sha} is not reachable in workstream repo`];
   const commits = revList(active.main_worktree_path, active.target_base_sha, gitHead(active.main_worktree_path));
-  const executionShas = new Set(executionCommits.flatMap((commit) => [...(commit.commit_shas ?? [commit.commit_sha])]));
+  const executionShas = new Set([
+    ...executionCommits.flatMap((commit) => [...(commit.commit_shas ?? [commit.commit_sha])]),
+    ...unitMerges.flatMap((merge) => [merge.unit_head, merge.merge_commit_sha]),
+  ]);
   const unknownCommits = commits.filter((sha) => !executionShas.has(sha));
   if (unknownCommits.length === 0) return [];
   return unknownCommits.map((sha) => `workstream branch contains non-runtime execution commit ${sha}`);
@@ -645,6 +739,8 @@ async function readRuntimeArtifacts(runtimeRoot: string): Promise<RuntimeArtifac
     audits: await readJsonObjectsFromDir(join(runtimeRoot, 'execution-audits'), parseAutopilotExecutionAudit),
     decisions: await readDecisionRows(join(runtimeRoot, 'decision-log.jsonl')),
     executionCommits: await readJsonObjectsFromDir(join(runtimeRoot, 'execution-commits'), parseAutopilotExecutionCommit),
+    unitMerges: await readJsonObjectsFromDir(join(runtimeRoot, 'unit-merges'), parseAutopilotUnitMerge),
+    validationStalenessRefs: await listRuntimeJsonRefs(join(runtimeRoot, 'validation-staleness'), runtimeRoot),
   };
 }
 
@@ -685,6 +781,13 @@ async function readDecisionRows(path: string): Promise<readonly AutopilotDecisio
     }
   }
   return Object.freeze(rows);
+}
+
+async function listRuntimeJsonRefs(root: string, runtimeRoot: string): Promise<readonly string[]> {
+  if (!existsSync(root)) return [];
+  const files = await listFilesRecursive(root);
+  const prefix = runtimeRoot.endsWith('/') ? runtimeRoot : `${runtimeRoot}/`;
+  return Object.freeze(files.filter((file) => file.endsWith('.json')).map((file) => file.startsWith(prefix) ? file.slice(prefix.length) : file).sort((left, right) => left.localeCompare(right)));
 }
 
 async function listFilesRecursive(root: string): Promise<readonly string[]> {

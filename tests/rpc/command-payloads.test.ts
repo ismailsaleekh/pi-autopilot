@@ -6,8 +6,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   AUTOPILOT_ABORT_COMMAND,
+  AUTOPILOT_CLAIM_GC_COMMAND,
   AUTOPILOT_CLOSE_COMMAND,
   AUTOPILOT_COMMAND,
+  AUTOPILOT_CONFIG_COMMAND,
   AUTOPILOT_HANDOFF_COMMAND,
   AUTOPILOT_INJECT_COMMAND,
   AUTOPILOT_ONBOARD_COMMAND,
@@ -215,7 +217,9 @@ void describe('Pi RPC Autopilot command wiring', () => {
     assert.deepEqual(commandNames(commands), [
       AUTOPILOT_COMMAND,
       AUTOPILOT_ABORT_COMMAND,
+      AUTOPILOT_CLAIM_GC_COMMAND,
       AUTOPILOT_CLOSE_COMMAND,
+      AUTOPILOT_CONFIG_COMMAND,
       AUTOPILOT_HANDOFF_COMMAND,
       AUTOPILOT_INJECT_COMMAND,
       AUTOPILOT_ONBOARD_COMMAND,
@@ -235,6 +239,8 @@ void describe('Pi RPC Autopilot command wiring', () => {
     );
     assert.match(requireListedCommand(commands, AUTOPILOT_CLOSE_COMMAND).description ?? '', /Runtime-close/);
     assert.match(requireListedCommand(commands, AUTOPILOT_ABORT_COMMAND).description ?? '', /Runtime-abort/);
+    assert.match(requireListedCommand(commands, AUTOPILOT_CONFIG_COMMAND).description ?? '', /scheduler config/);
+    assert.match(requireListedCommand(commands, AUTOPILOT_CLAIM_GC_COMMAND).description ?? '', /claim garbage collection/);
     assert.equal(commands.some((command) => command.name === forbiddenLegacyCommand), false);
     assert.equal(commands.some((command) => command.name === 'autopilot-restart'), false);
     assert.equal(commands.some((command) => command.name === AUTOPILOT_STATUS_TOOL), false);
@@ -269,7 +275,9 @@ void describe('Pi RPC Autopilot command wiring', () => {
     assert.deepEqual(commandNames(commands), [
       AUTOPILOT_COMMAND,
       AUTOPILOT_ABORT_COMMAND,
+      AUTOPILOT_CLAIM_GC_COMMAND,
       AUTOPILOT_CLOSE_COMMAND,
+      AUTOPILOT_CONFIG_COMMAND,
       AUTOPILOT_HANDOFF_COMMAND,
       AUTOPILOT_INJECT_COMMAND,
       AUTOPILOT_ONBOARD_COMMAND,

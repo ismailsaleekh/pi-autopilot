@@ -18,6 +18,8 @@ export const WORKTREE_INDEX_FILE = '_index.json';
 export const WORKTREE_LEDGER_FILE = '_ledger.jsonl';
 export const TASK_INFO_FILE = '_task-info.json';
 export const BRANCHES_FILE = '_branches.json';
+export const UNIT_INDEX_FILE = '_unit-index.json';
+export const UNIT_INFO_FILE = '_unit-info.json';
 const DEFAULT_LOCK_TIMEOUT_MS = 60_000;
 const LOCK_STALE_MULTIPLIER = 5;
 const LOCK_BACKOFF_START_MS = 100;
@@ -61,6 +63,9 @@ export function mainMergeLockPathForRepo(repoKey, env = process.env) {
 }
 export function taskRootForActiveAutopilot(row) {
     return dirname(row.main_worktree_path);
+}
+export function unitWorktreePathForActiveAutopilot(row, unitId, attempt) {
+    return join(taskRootForActiveAutopilot(row), 'units', unitId, `attempt-${String(attempt)}`, 'worktree');
 }
 export async function prepareAutopilotWorkstream(input) {
     if (!isValidWorkstreamSlug(input.workstream)) {
@@ -109,6 +114,123 @@ export async function prepareAutopilotWorkstream(input) {
         return created;
     });
 }
+export async function prepareAutopilotUnitWorktree(input) {
+    const env = input.env ?? process.env;
+    const now = input.now ?? new Date();
+    const taskRoot = taskRootForActiveAutopilot(input.active);
+    const unitWorktreePath = unitWorktreePathForActiveAutopilot(input.active, input.unitId, input.attempt);
+    const unitAttemptRoot = dirname(unitWorktreePath);
+    const branch = `autopilot/unit/${input.active.workstream_run}/${input.unitId}/attempt-${String(input.attempt)}`;
+    const lockPath = join(taskRoot, '.locks', 'unit-worktrees.lock');
+    return await withAutopilotFileLock(lockPath, `unit-worktree:${input.active.autopilot_id}:${input.unitId}:${String(input.attempt)}`, async () => {
+        const existing = await readUnitIndex(taskRoot);
+        const found = existing.units.find((unit) => unit.unit_id === input.unitId && unit.attempt === input.attempt);
+        if (found !== undefined) {
+            const infoPath = unitInfoPathForBranch(taskRoot, found);
+            const info = existsSync(infoPath) ? parseUnitInfo(JSON.parse(await readFile(infoPath, 'utf8'))) : unitInfoFromBranch(input.active, found, now);
+            return { unitInfo: info, created: false, resumed: true };
+        }
+        if (existsSync(unitAttemptRoot))
+            fail('unit-worktree-path-exists', 'unit attempt path already exists without metadata.', [unitAttemptRoot]);
+        assertBranchAvailable(input.active.source_repo, branch);
+        await mkdir(unitAttemptRoot, { recursive: true });
+        const baseSha = gitHead(input.active.main_worktree_path);
+        try {
+            runGit(['worktree', 'add', '-b', branch, unitWorktreePath, baseSha], input.active.main_worktree_path, {
+                ...env,
+                [AUTOPILOT_RUNTIME_ENV]: AUTOPILOT_RUNTIME_VALUE,
+            });
+        }
+        catch (error) {
+            await rm(unitAttemptRoot, { recursive: true, force: true });
+            throw error;
+        }
+        const unitInfo = {
+            schema_version: 'autopilot.unit_info.v1',
+            workstream: input.active.workstream,
+            workstream_run: input.active.workstream_run,
+            autopilot_id: input.active.autopilot_id,
+            unit_id: input.unitId,
+            attempt: input.attempt,
+            branch,
+            worktree_path: unitWorktreePath,
+            base_sha: baseSha,
+            current_sha: baseSha,
+            archive_ref: null,
+            status: 'active',
+            runtime_root: input.active.runtime_root,
+            created_at: now.toISOString(),
+        };
+        await writeJsonAtomic(join(unitAttemptRoot, UNIT_INFO_FILE), unitInfo);
+        const branchInfo = branchInfoFromUnitInfo(unitInfo);
+        await writeUnitIndex(taskRoot, { schema_version: 'autopilot.unit_index.v1', units: [...existing.units, branchInfo] });
+        await upsertUnitBranchInfo(taskRoot, branchInfo);
+        await appendJsonl(join(input.active.worktree_root, WORKTREE_LEDGER_FILE), {
+            schema_version: 'autopilot.worktree_ledger.v1',
+            event: 'unit-create',
+            ts: now.toISOString(),
+            workstream: input.active.workstream,
+            workstream_run: input.active.workstream_run,
+            autopilot_id: input.active.autopilot_id,
+            unit_id: input.unitId,
+            attempt: input.attempt,
+            branch,
+            unit_path: unitWorktreePath,
+            base_sha: baseSha,
+        });
+        return { unitInfo, created: true, resumed: false };
+    });
+}
+export async function updateUnitBranchStatus(input) {
+    const taskRoot = taskRootForActiveAutopilot(input.active);
+    const index = await readUnitIndex(taskRoot);
+    const nextUnits = index.units.map((unit) => unit.unit_id === input.unitId && unit.attempt === input.attempt
+        ? { ...unit, status: input.status, current_sha: input.currentSha, archive_ref: input.archiveRef }
+        : unit);
+    await writeUnitIndex(taskRoot, { schema_version: 'autopilot.unit_index.v1', units: nextUnits });
+    const target = nextUnits.find((unit) => unit.unit_id === input.unitId && unit.attempt === input.attempt);
+    if (target !== undefined)
+        await upsertUnitBranchInfo(taskRoot, target);
+}
+export async function releaseClaimsForUnit(input) {
+    const now = input.now ?? new Date();
+    return await withAutopilotFileLock(join(input.context.coordinationRoot, '.locks', 'path-claims.lock'), `unit-claim-release:${input.context.active.autopilot_id}:${input.unitId}:${String(input.attempt)}`, async () => {
+        const current = await readPathClaims(input.context.coordinationRoot);
+        const released = current.filter((claim) => claim.autopilot_id === input.context.active.autopilot_id && claim.workstream_run === input.context.active.workstream_run && claim.unit_id === input.unitId && claim.attempt === input.attempt);
+        if (released.length === 0)
+            return Object.freeze([]);
+        const remaining = current.filter((claim) => !(claim.autopilot_id === input.context.active.autopilot_id && claim.workstream_run === input.context.active.workstream_run && claim.unit_id === input.unitId && claim.attempt === input.attempt));
+        await writePathClaims(input.context.coordinationRoot, remaining);
+        for (const claim of released) {
+            await appendClaimEvent(input.context.coordinationRoot, {
+                schema_version: 'autopilot.claim_event.v1',
+                event: 'release',
+                ts: now.toISOString(),
+                repo_key: input.context.active.repo_key,
+                autopilot_id: claim.autopilot_id,
+                workstream: claim.workstream,
+                workstream_run: claim.workstream_run,
+                unit_id: claim.unit_id,
+                attempt: claim.attempt,
+                path: claim.path,
+                claim_type: claim.claim_type,
+                active_run_epoch: claim.active_run_epoch,
+                reason: input.reason,
+            });
+        }
+        return Object.freeze(released);
+    });
+}
+export async function readUnitIndex(taskRoot) {
+    const path = join(taskRoot, UNIT_INDEX_FILE);
+    if (!existsSync(path))
+        return { schema_version: 'autopilot.unit_index.v1', units: [] };
+    const value = await readJson(path);
+    return parseUnitIndex(value);
+}
+export async function writeUnitIndex(taskRoot, index) {
+    await writeJsonAtomic(join(taskRoot, UNIT_INDEX_FILE), index);
+}
 export async function resolveActiveAutopilotForSpec(spec, env = process.env) {
     const repo = resolveRepoIdentity(spec.cwd);
     const coordinationRoot = coordinationRootForRepo(repo.repoKey, env);
@@ -117,8 +239,10 @@ export async function resolveActiveAutopilotForSpec(spec, env = process.env) {
     const matches = activeRows.filter((row) => {
         if (row.repo_key !== repo.repoKey || row.workstream !== spec.workstream || !isChildLaunchParentStatus(row.status))
             return false;
-        const worktreeReal = realpathExisting(row.main_worktree_path, 'registered Autopilot worktree');
-        return isPathWithinRoot(worktreeReal, cwdReal);
+        const taskRoot = taskRootForActiveAutopilot(row);
+        if (isSamePath(row.main_worktree_path, cwdReal))
+            return true;
+        return readRegisteredUnitWorktreeSync(taskRoot, spec.unit_id, spec.attempt, cwdReal) !== null;
     });
     if (matches.length === 0) {
         fail('unregistered-worktree', 'unit spec cwd is not inside an active registered Autopilot worktree.', [
@@ -157,6 +281,16 @@ export async function resolveActiveAutopilotForSpec(spec, env = process.env) {
             `source_repo=${active.source_repo}`,
             `cwd=${spec.cwd}`,
         ]);
+    }
+    if (spec.role === 'implement' || spec.role === 'fix') {
+        const unitInfo = readRegisteredUnitWorktreeSync(taskRootForActiveAutopilot(active), spec.unit_id, spec.attempt, cwdReal);
+        if (unitInfo === null) {
+            fail('source-changing-main-launch', 'Phase 2 source-changing unit attempts must launch from their registered per-unit worktree, not workstream main or another path.', [
+                `unit=${spec.unit_id}`,
+                `attempt=${String(spec.attempt)}`,
+                `cwd=${spec.cwd}`,
+            ]);
+        }
     }
     return {
         repo,
@@ -382,6 +516,7 @@ async function createNewWorkstream(input) {
     };
     await writeJsonAtomic(join(taskRoot, TASK_INFO_FILE), taskInfo);
     await writeJsonAtomic(join(taskRoot, BRANCHES_FILE), branches);
+    await writeJsonAtomic(join(taskRoot, UNIT_INDEX_FILE), { schema_version: 'autopilot.unit_index.v1', units: [] });
     await writeActiveAutopilots(input.coordinationRoot, [...input.activeRows, row]);
     await addWorktreeIndexRow(input.worktreeRoot, {
         workstream: row.workstream,
@@ -469,7 +604,7 @@ function findClaimBlockers(existing, requested, authority) {
     const blockers = [];
     for (const req of requested) {
         for (const claim of existing) {
-            if (claim.autopilot_id === authority.autopilot_id)
+            if (isIdempotentSameUnitClaim(req, claim, authority))
                 continue;
             if (!pathOverlapsOrContains(req.path, claim.path))
                 continue;
@@ -493,6 +628,15 @@ function claimTypesConflict(requested, existing) {
         return false;
     return true;
 }
+function isIdempotentSameUnitClaim(req, claim, authority) {
+    return claim.autopilot_id === authority.autopilot_id &&
+        claim.workstream_run === authority.workstream_run &&
+        claim.unit_id === req.unit_id &&
+        claim.attempt === req.attempt &&
+        claim.active_run_epoch === authority.active_run_epoch &&
+        claim.path === req.path &&
+        claim.claim_type === req.claim_type;
+}
 function mergeClaims(existing, requested) {
     const out = [...existing];
     for (const claim of requested) {
@@ -506,6 +650,121 @@ function mergeClaims(existing, requested) {
             out.push(claim);
     }
     return Object.freeze(out.sort((left, right) => `${left.path}\0${left.autopilot_id}\0${left.unit_id}`.localeCompare(`${right.path}\0${right.autopilot_id}\0${right.unit_id}`)));
+}
+function branchInfoFromUnitInfo(info) {
+    return {
+        unit_id: info.unit_id,
+        attempt: info.attempt,
+        branch: info.branch,
+        worktree_path: info.worktree_path,
+        base_sha: info.base_sha,
+        current_sha: info.current_sha,
+        archive_ref: info.archive_ref,
+        status: info.status,
+    };
+}
+function unitInfoPathForBranch(taskRoot, branch) {
+    const expectedAttemptRoot = join(taskRoot, 'units', branch.unit_id, `attempt-${String(branch.attempt)}`);
+    return join(expectedAttemptRoot, UNIT_INFO_FILE);
+}
+function unitInfoFromBranch(active, branch, now) {
+    return {
+        schema_version: 'autopilot.unit_info.v1',
+        workstream: active.workstream,
+        workstream_run: active.workstream_run,
+        autopilot_id: active.autopilot_id,
+        unit_id: branch.unit_id,
+        attempt: branch.attempt,
+        branch: branch.branch,
+        worktree_path: branch.worktree_path,
+        base_sha: branch.base_sha,
+        current_sha: branch.current_sha,
+        archive_ref: branch.archive_ref,
+        status: branch.status,
+        runtime_root: active.runtime_root,
+        created_at: now.toISOString(),
+    };
+}
+async function upsertUnitBranchInfo(taskRoot, branchInfo) {
+    const path = join(taskRoot, BRANCHES_FILE);
+    const branches = existsSync(path) ? parseBranchesInfo(await readJson(path)) : {
+        schema_version: 'autopilot.branches.v1',
+        active_branch: '',
+        base_sha: branchInfo.base_sha,
+        current_sha: branchInfo.base_sha,
+        archive_ref: null,
+        unit_branches: [],
+    };
+    const unitBranches = branches.unit_branches.filter((unit) => !(unit.unit_id === branchInfo.unit_id && unit.attempt === branchInfo.attempt));
+    await writeJsonAtomic(path, { ...branches, unit_branches: [...unitBranches, branchInfo] });
+}
+function readRegisteredUnitWorktreeSync(taskRoot, unitId, attempt, cwdReal) {
+    const path = join(taskRoot, UNIT_INDEX_FILE);
+    if (!existsSync(path))
+        return null;
+    let parsed;
+    try {
+        parsed = JSON.parse(readFileSync(path, 'utf8'));
+    }
+    catch {
+        return null;
+    }
+    const index = parseUnitIndex(parsed);
+    const unit = index.units.find((candidate) => candidate.unit_id === unitId && candidate.attempt === attempt);
+    if (unit === undefined)
+        return null;
+    const unitReal = realpathExisting(unit.worktree_path, 'registered unit worktree');
+    return isSamePath(unitReal, cwdReal) || isPathWithinRoot(unitReal, cwdReal) ? unit : null;
+}
+function parseUnitIndex(value) {
+    if (!isRecord(value))
+        fail('invalid-unit-index', '_unit-index.json must contain an object.');
+    const schemaVersion = expectConst(value, 'schema_version', 'autopilot.unit_index.v1');
+    const unitsRaw = value['units'];
+    if (!Array.isArray(unitsRaw))
+        fail('invalid-unit-index', 'units must be an array.');
+    return { schema_version: schemaVersion, units: [...unitsRaw.map(parseUnitBranchInfo)] };
+}
+function parseBranchesInfo(value) {
+    if (!isRecord(value))
+        fail('invalid-branches-info', '_branches.json must contain an object.');
+    const unitBranches = value['unit_branches'];
+    return {
+        schema_version: expectConst(value, 'schema_version', 'autopilot.branches.v1'),
+        active_branch: expectString(value, 'active_branch'),
+        base_sha: expectString(value, 'base_sha'),
+        current_sha: expectString(value, 'current_sha'),
+        archive_ref: expectNullableString(value, 'archive_ref'),
+        unit_branches: Array.isArray(unitBranches) ? Object.freeze(unitBranches.map(parseUnitBranchInfo)) : [],
+    };
+}
+function parseUnitInfo(value) {
+    if (!isRecord(value))
+        fail('invalid-unit-info', '_unit-info.json must contain an object.');
+    const branch = parseUnitBranchInfo(value);
+    return {
+        schema_version: expectConst(value, 'schema_version', 'autopilot.unit_info.v1'),
+        workstream: expectString(value, 'workstream'),
+        workstream_run: expectString(value, 'workstream_run'),
+        autopilot_id: expectString(value, 'autopilot_id'),
+        ...branch,
+        runtime_root: expectString(value, 'runtime_root'),
+        created_at: expectString(value, 'created_at'),
+    };
+}
+function parseUnitBranchInfo(value) {
+    if (!isRecord(value))
+        fail('invalid-unit-branch', 'unit branch info must be an object.');
+    return {
+        unit_id: expectString(value, 'unit_id'),
+        attempt: expectInteger(value, 'attempt'),
+        branch: expectString(value, 'branch'),
+        worktree_path: expectString(value, 'worktree_path'),
+        base_sha: expectString(value, 'base_sha'),
+        current_sha: expectString(value, 'current_sha'),
+        archive_ref: expectNullableString(value, 'archive_ref'),
+        status: expectOneOf(value, 'status', ['active', 'merged', 'aborted', 'quarantined', 'superseded']),
+    };
 }
 async function ensureRepoRuntimeFiles(coordinationRoot, worktreeRoot) {
     await mkdir(join(coordinationRoot, '.locks'), { recursive: true });

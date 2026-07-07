@@ -1,7 +1,7 @@
 {
   "name": "pi-autopilot",
-  "version": "0.4.2",
-  "description": "Autopilot orchestration package for Pi: /autopilot, /autopilot-inject, /autopilot-onboard, /autopilot-handoff, /autopilot-close, /autopilot-abort, context budget activation, and child runner wiring.",
+  "version": "0.5.0",
+  "description": "Autopilot orchestration package for Pi: /autopilot, /autopilot-inject, /autopilot-onboard, /autopilot-handoff, /autopilot-config, /autopilot-claim-gc, /autopilot-close, /autopilot-abort, context budget activation, and child runner wiring.",
   "type": "module",
   "license": "ISC",
   "author": "Ismail Salikhodjaev <ismailsalikhodjaev@gmail.com>",

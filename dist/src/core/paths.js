@@ -39,6 +39,30 @@ export function parseAutopilotCloseArgs(args) {
 export function parseAutopilotAbortArgs(args) {
     return parseAutopilotLifecycleArgs(args, 'Usage: /autopilot-abort <workstream> [--run <workstream_run>] [--dry-run]');
 }
+export function parseAutopilotConfigArgs(args) {
+    const tokens = args.trim().split(/\s+/u).filter((token) => token.length > 0);
+    if (tokens.length === 1 && tokens[0] === 'show')
+        return { ok: true, value: { action: 'show' } };
+    if (tokens.length === 2 && tokens[0] === 'parallel-cap') {
+        const raw = tokens[1];
+        if (raw === undefined || !/^\d+$/u.test(raw))
+            return { ok: false, message: 'parallel-cap requires an integer in range 1..32.' };
+        const parsed = Number.parseInt(raw, 10);
+        if (!Number.isInteger(parsed) || parsed < 1 || parsed > 32) {
+            return { ok: false, message: 'parallel-cap requires an integer in range 1..32.' };
+        }
+        return { ok: true, value: { action: 'parallel-cap', parallelCap: parsed } };
+    }
+    return { ok: false, message: 'Usage: /autopilot-config show OR /autopilot-config parallel-cap <1..32>' };
+}
+export function parseAutopilotClaimGcArgs(args) {
+    const tokens = args.trim().split(/\s+/u).filter((token) => token.length > 0);
+    if (tokens.length === 0 || (tokens.length === 1 && tokens[0] === '--dry-run'))
+        return { ok: true, value: { apply: false } };
+    if (tokens.length === 1 && tokens[0] === '--apply')
+        return { ok: true, value: { apply: true } };
+    return { ok: false, message: 'Usage: /autopilot-claim-gc --dry-run OR /autopilot-claim-gc --apply' };
+}
 function parseAutopilotLifecycleArgs(args, usage) {
     const tokens = args.trim().split(/\s+/u).filter((token) => token.length > 0);
     if (tokens.length === 0) {

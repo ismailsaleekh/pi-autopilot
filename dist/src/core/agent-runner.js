@@ -9,7 +9,7 @@ import { AutopilotForcedOutputEvidenceError } from "./forced-output/status-evide
 import { parseAutopilotStatusEntry, parseAutopilotUnitSpec } from "./contracts/index.js";
 import { captureAutopilotExecutionBaseline, deriveAutopilotExecutionAuditPath, writeAutopilotExecutionAudit, } from "./execution-audit/index.js";
 import { AutopilotExecutionCommitError, commitAutopilotExecution, deriveAutopilotExecutionCommitPath, } from "./execution-commit.js";
-import { AutopilotParallelRuntimeError, acquireClaimsForUnit, ensureWorktreeCleanForLaunch, resolveActiveAutopilotForSpec, } from "./parallel-runtime.js";
+import { AutopilotParallelRuntimeError, acquireClaimsForUnit, coordinationRootForRepo, ensureWorktreeCleanForLaunch, prepareAutopilotUnitWorktree, readActiveAutopilots, unitWorktreePathForActiveAutopilot, resolveActiveAutopilotForSpec, } from "./parallel-runtime.js";
 import { assertAutopilotSpecQualityGate } from "./quality/spec-gate.js";
 import { AutopilotPromptTemplateError, renderAndMaybeWriteAutopilotPromptSnapshot, } from "./prompt-renderer/index.js";
 export class AutopilotAgentRunError extends Error {
@@ -289,6 +289,7 @@ async function readAndValidateSpec(specPath) {
     }
 }
 async function preflightSpec(spec, specPath, options = {}) {
+    await prepareMissingSourceChangingUnitWorktree(spec, options.env ?? process.env);
     try {
         await access(spec.cwd, fsConstants.R_OK);
     }
@@ -347,6 +348,45 @@ async function preflightSpec(spec, specPath, options = {}) {
     await mkdir(spec.evidence_dir, { recursive: true });
     return { context: runtimeContext, acquiredClaims };
 }
+async function prepareMissingSourceChangingUnitWorktree(spec, env) {
+    if (spec.role !== 'implement' && spec.role !== 'fix')
+        return;
+    if (existsSync(spec.cwd))
+        return;
+    const artifactRoot = deriveAutopilotArtifactRoot(spec);
+    const runtimeSuffix = `${AUTOPILOT_RUNTIME_ROOT_MARKER}/${spec.workstream}`;
+    if (!artifactRoot.endsWith(runtimeSuffix))
+        return;
+    const mainWorktreePath = artifactRoot.slice(0, artifactRoot.length - runtimeSuffix.length);
+    const taskRoot = dirname(mainWorktreePath);
+    let taskInfo;
+    try {
+        const parsed = JSON.parse(await readFile(resolve(taskRoot, '_task-info.json'), 'utf8'));
+        if (!isJsonRecord(parsed))
+            return;
+        taskInfo = parsed;
+    }
+    catch {
+        return;
+    }
+    const repoKey = taskInfo['repo_key'];
+    if (typeof repoKey !== 'string' || repoKey.length === 0)
+        return;
+    const activeRows = await readActiveAutopilots(coordinationRootForRepo(repoKey, env));
+    const active = activeRows.find((row) => row.workstream === spec.workstream && row.runtime_root === artifactRoot);
+    if (active === undefined)
+        return;
+    const expectedCwd = unitWorktreePathForActiveAutopilot(active, spec.unit_id, spec.attempt);
+    if (resolve(spec.cwd) !== resolve(expectedCwd)) {
+        throw new AutopilotAgentRunError('spec-invalid', {
+            reason: `source-changing Phase 2 unit cwd must be its deterministic unit worktree path ${expectedCwd}`,
+            statusOutput: spec.status_output,
+            receiptOutput: spec.receipt_output,
+        });
+    }
+    await prepareAutopilotUnitWorktree({ active, unitId: spec.unit_id, attempt: spec.attempt, env });
+}
+const AUTOPILOT_RUNTIME_ROOT_MARKER = '/.pi/autopilot';
 function timeoutMsForSpec(spec) {
     return spec.timeout_seconds === undefined ? DEFAULT_AGENT_WALL_MS : spec.timeout_seconds * 1000;
 }

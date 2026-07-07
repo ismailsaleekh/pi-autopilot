@@ -34,7 +34,11 @@ import {
 import {
   AutopilotParallelRuntimeError,
   acquireClaimsForUnit,
+  coordinationRootForRepo,
   ensureWorktreeCleanForLaunch,
+  prepareAutopilotUnitWorktree,
+  readActiveAutopilots,
+  unitWorktreePathForActiveAutopilot,
   resolveActiveAutopilotForSpec,
   type ActiveAutopilotContext,
   type AutopilotPathClaim,
@@ -525,6 +529,8 @@ async function preflightSpec(
   specPath: string,
   options: { readonly skipStaleOutputCheck?: boolean; readonly skipClaimAcquire?: boolean; readonly env?: ProcessEnv } = {},
 ): Promise<RuntimePreflightResult> {
+  await prepareMissingSourceChangingUnitWorktree(spec, options.env ?? process.env);
+
   try {
     await access(spec.cwd, fsConstants.R_OK);
   } catch (error) {
@@ -585,6 +591,40 @@ async function preflightSpec(
   await mkdir(spec.evidence_dir, { recursive: true });
   return { context: runtimeContext, acquiredClaims };
 }
+
+async function prepareMissingSourceChangingUnitWorktree(spec: AutopilotUnitSpec, env: ProcessEnv): Promise<void> {
+  if (spec.role !== 'implement' && spec.role !== 'fix') return;
+  if (existsSync(spec.cwd)) return;
+  const artifactRoot = deriveAutopilotArtifactRoot(spec);
+  const runtimeSuffix = `${AUTOPILOT_RUNTIME_ROOT_MARKER}/${spec.workstream}`;
+  if (!artifactRoot.endsWith(runtimeSuffix)) return;
+  const mainWorktreePath = artifactRoot.slice(0, artifactRoot.length - runtimeSuffix.length);
+  const taskRoot = dirname(mainWorktreePath);
+  let taskInfo: JsonRecord;
+  try {
+    const parsed = JSON.parse(await readFile(resolve(taskRoot, '_task-info.json'), 'utf8')) as unknown;
+    if (!isJsonRecord(parsed)) return;
+    taskInfo = parsed;
+  } catch {
+    return;
+  }
+  const repoKey = taskInfo['repo_key'];
+  if (typeof repoKey !== 'string' || repoKey.length === 0) return;
+  const activeRows = await readActiveAutopilots(coordinationRootForRepo(repoKey, env));
+  const active = activeRows.find((row) => row.workstream === spec.workstream && row.runtime_root === artifactRoot);
+  if (active === undefined) return;
+  const expectedCwd = unitWorktreePathForActiveAutopilot(active, spec.unit_id, spec.attempt);
+  if (resolve(spec.cwd) !== resolve(expectedCwd)) {
+    throw new AutopilotAgentRunError('spec-invalid', {
+      reason: `source-changing Phase 2 unit cwd must be its deterministic unit worktree path ${expectedCwd}`,
+      statusOutput: spec.status_output,
+      receiptOutput: spec.receipt_output,
+    });
+  }
+  await prepareAutopilotUnitWorktree({ active, unitId: spec.unit_id, attempt: spec.attempt, env });
+}
+
+const AUTOPILOT_RUNTIME_ROOT_MARKER = '/.pi/autopilot';
 
 function timeoutMsForSpec(spec: AutopilotUnitSpec): number {
   return spec.timeout_seconds === undefined ? DEFAULT_AGENT_WALL_MS : spec.timeout_seconds * 1000;

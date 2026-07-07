@@ -12,6 +12,7 @@ import {
   AUTOPILOT_STATE_ROOT_ENV,
   acquireClaimsForUnit,
   coordinationRootForRepo,
+  prepareAutopilotUnitWorktree,
   prepareAutopilotWorkstream,
   readActiveAutopilots,
   readPathClaims,
@@ -44,7 +45,8 @@ async function prepareCloseFixture(root: string): Promise<PreparedCloseFixture> 
   const source = join(root, 'source');
   await initGitSource(source);
   const prepared = await prepareAutopilotWorkstream({ workstream: 'close-smoke', sourceCwd: source });
-  const spec = unitSpec(prepared.mainWorktreePath, prepared.runtimeRoot);
+  const unitWorktree = await prepareAutopilotUnitWorktree({ active: prepared.active, unitId: 'u01-implement', attempt: 1 });
+  const spec = unitSpec(unitWorktree.unitInfo.worktree_path, prepared.runtimeRoot);
   const activeContext = await resolveActiveAutopilotForSpec(spec);
   await acquireClaimsForUnit({ context: activeContext, spec, reason: 'close-runtime test setup' });
 

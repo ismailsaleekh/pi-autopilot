@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 
 import type { AutopilotUnitSpec, AutopilotVerificationPlan } from '../../src/core/contracts/index.ts';
 import { AutopilotAgentRunError, runAutopilotAgentFromSpecPath } from '../../src/core/agent-runner.ts';
-import { AUTOPILOT_STATE_ROOT_ENV, prepareAutopilotWorkstream } from '../../src/core/parallel-runtime.ts';
+import { AUTOPILOT_STATE_ROOT_ENV, prepareAutopilotUnitWorktree, prepareAutopilotWorkstream } from '../../src/core/parallel-runtime.ts';
 
 const TEST_DIR = dirname(fileURLToPath(import.meta.url));
 const PACKAGE_ROOT = resolve(TEST_DIR, '..', '..');
@@ -106,7 +106,12 @@ async function writeSpec(root: string, unitSpec: AutopilotUnitSpec): Promise<str
     receipt_output: string;
     evidence_dir: string;
   };
-  mutable.cwd = prepared.mainWorktreePath;
+  if (unitSpec.role === 'implement' || unitSpec.role === 'fix') {
+    const unitWorktree = await prepareAutopilotUnitWorktree({ active: prepared.active, unitId: unitSpec.unit_id, attempt: unitSpec.attempt });
+    mutable.cwd = unitWorktree.unitInfo.worktree_path;
+  } else {
+    mutable.cwd = prepared.mainWorktreePath;
+  }
   mutable.status_output = join(
     prepared.runtimeRoot,
     'statuses',
@@ -125,6 +130,7 @@ async function writeSpec(root: string, unitSpec: AutopilotUnitSpec): Promise<str
 }
 
 async function prepareRegisteredWorktree(root: string, unitSpec: AutopilotUnitSpec): Promise<{
+  readonly active: Awaited<ReturnType<typeof prepareAutopilotWorkstream>>['active'];
   readonly mainWorktreePath: string;
   readonly runtimeRoot: string;
 }> {

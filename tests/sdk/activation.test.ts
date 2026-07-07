@@ -7,8 +7,10 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
   AUTOPILOT_ABORT_COMMAND,
+  AUTOPILOT_CLAIM_GC_COMMAND,
   AUTOPILOT_CLOSE_COMMAND,
   AUTOPILOT_COMMAND,
+  AUTOPILOT_CONFIG_COMMAND,
   AUTOPILOT_HANDOFF_COMMAND,
   AUTOPILOT_INJECT_COMMAND,
   AUTOPILOT_ONBOARD_COMMAND,
@@ -370,7 +372,9 @@ void describe('Pi SDK Autopilot activation', () => {
       assert.deepEqual(commandNames(harness.session), [
         AUTOPILOT_COMMAND,
         AUTOPILOT_ABORT_COMMAND,
+        AUTOPILOT_CLAIM_GC_COMMAND,
         AUTOPILOT_CLOSE_COMMAND,
+        AUTOPILOT_CONFIG_COMMAND,
         AUTOPILOT_HANDOFF_COMMAND,
         AUTOPILOT_INJECT_COMMAND,
         AUTOPILOT_ONBOARD_COMMAND,

@@ -1,7 +1,9 @@
 import { createContextBudgetTool, resolveContextHaltPercent } from "./core/context-budget.js";
-import { AUTOPILOT_ABORT_COMMAND, AUTOPILOT_CLOSE_COMMAND, AUTOPILOT_COMMAND, AUTOPILOT_HANDOFF_COMMAND, AUTOPILOT_INJECT_COMMAND, AUTOPILOT_ONBOARD_COMMAND, CONTEXT_BUDGET_TOOL_NAME, } from "./core/names.js";
-import { parseAutopilotAbortArgs, parseAutopilotArgs, parseAutopilotCloseArgs, parseAutopilotInjectArgs, runnerInvocationFromModuleUrl, runtimeRootForWorkstream } from "./core/paths.js";
+import { AUTOPILOT_ABORT_COMMAND, AUTOPILOT_CLAIM_GC_COMMAND, AUTOPILOT_CLOSE_COMMAND, AUTOPILOT_COMMAND, AUTOPILOT_CONFIG_COMMAND, AUTOPILOT_HANDOFF_COMMAND, AUTOPILOT_INJECT_COMMAND, AUTOPILOT_ONBOARD_COMMAND, CONTEXT_BUDGET_TOOL_NAME, } from "./core/names.js";
+import { parseAutopilotAbortArgs, parseAutopilotArgs, parseAutopilotClaimGcArgs, parseAutopilotCloseArgs, parseAutopilotConfigArgs, parseAutopilotInjectArgs, runnerInvocationFromModuleUrl, runtimeRootForWorkstream } from "./core/paths.js";
 import { AutopilotCloseError, abortAutopilotWorkstream, closeAutopilotWorkstream } from "./core/close-runtime.js";
+import { runAutopilotClaimGc } from "./core/claim-gc.js";
+import { readSchedulerConfig, writeSchedulerConfig } from "./core/scheduler-config.js";
 import { evaluateAutopilotWorktreeToolCall, } from "./core/git-guard.js";
 import { AutopilotParallelRuntimeError, prepareAutopilotWorkstream } from "./core/parallel-runtime.js";
 import { handoffUsage, onboardUsage, renderAutopilotPrompt, renderHandoffPrompt, renderOnboardPrompt, } from "./core/prompts.js";
@@ -189,6 +191,52 @@ export default function autopilotExtension(pi) {
             catch (error) {
                 const message = error instanceof AutopilotCloseError ? error.message : error instanceof Error ? error.message : String(error);
                 notify(ctx, `Autopilot abort failed: ${message}`, 'error');
+            }
+        },
+    });
+    pi.registerCommand(AUTOPILOT_CONFIG_COMMAND, {
+        description: 'Show or update Autopilot scheduler config: /autopilot-config show | parallel-cap <1..32>',
+        handler: async (args, ctx) => {
+            if (activeAutopilotWorkstream === null || activeAutopilotRuntimeRoot === null) {
+                notify(ctx, `No active Autopilot workstream in this session. Start with /${AUTOPILOT_COMMAND} <workstream> or /${AUTOPILOT_INJECT_COMMAND} <workstream>.`, 'warning');
+                return;
+            }
+            const parsed = parseAutopilotConfigArgs(args);
+            if (!parsed.ok) {
+                notify(ctx, parsed.message, 'warning');
+                return;
+            }
+            try {
+                const config = parsed.value.action === 'show'
+                    ? await readSchedulerConfig({ runtimeRoot: activeAutopilotRuntimeRoot, workstream: activeAutopilotWorkstream })
+                    : await writeSchedulerConfig({ runtimeRoot: activeAutopilotRuntimeRoot, workstream: activeAutopilotWorkstream, parallelCap: parsed.value.parallelCap ?? 8, updatedBy: 'autopilot-config' });
+                const summary = `Autopilot scheduler config for ${config.workstream}: parallel_cap=${String(config.parallel_cap)} updated_by=${config.updated_by} updated_at=${config.updated_at}`;
+                pi.sendUserMessage(summary, { deliverAs: 'followUp' });
+                notify(ctx, summary, 'info');
+            }
+            catch (error) {
+                notify(ctx, `Autopilot config failed: ${error instanceof Error ? error.message : String(error)}`, 'error');
+            }
+        },
+    });
+    pi.registerCommand(AUTOPILOT_CLAIM_GC_COMMAND, {
+        description: 'Evidence-backed Autopilot claim garbage collection: /autopilot-claim-gc --dry-run|--apply',
+        handler: async (args, ctx) => {
+            const parsed = parseAutopilotClaimGcArgs(args);
+            if (!parsed.ok) {
+                notify(ctx, parsed.message, 'warning');
+                return;
+            }
+            try {
+                const result = await runAutopilotClaimGc({ sourceCwd: ctx.cwd ?? process.cwd(), apply: parsed.value.apply });
+                const staleCount = result.candidates.filter((candidate) => candidate.stale).length;
+                const blockedCount = result.candidates.filter((candidate) => candidate.blockers.length > 0).length;
+                const summary = `Autopilot claim GC ${result.mode}: stale=${String(staleCount)} blocked=${String(blockedCount)} released=${String(result.released_claims.length)} evidence=${result.evidence_path ?? 'none'}`;
+                pi.sendUserMessage(summary, { deliverAs: 'followUp' });
+                notify(ctx, summary, blockedCount === 0 ? 'info' : 'warning');
+            }
+            catch (error) {
+                notify(ctx, `Autopilot claim GC failed: ${error instanceof Error ? error.message : String(error)}`, 'error');
             }
         },
     });

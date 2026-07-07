@@ -5,7 +5,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { AUTOPILOT_STATE_ROOT_ENV, prepareAutopilotWorkstream } from '../../src/core/parallel-runtime.ts';
+import { AUTOPILOT_STATE_ROOT_ENV, prepareAutopilotUnitWorktree, prepareAutopilotWorkstream } from '../../src/core/parallel-runtime.ts';
 
 interface PackageScripts {
   readonly [key: string]: string | undefined;
@@ -203,7 +203,7 @@ void describe('package manifest and payload', () => {
   void it('documents current Autopilot surfaces across package docs', async () => {
     for (const file of DOC_FILES) {
       const text = await docText(file);
-      for (const surface of ['autopilot-agent-run', 'context_budget', 'autopilot-inject', 'autopilot-onboard', 'autopilot-handoff', 'autopilot-close', 'autopilot-abort']) {
+      for (const surface of ['autopilot-agent-run', 'context_budget', 'autopilot-inject', 'autopilot-onboard', 'autopilot-handoff', 'autopilot-config', 'autopilot-claim-gc', 'autopilot-close', 'autopilot-abort']) {
         assert.match(text, literalPattern(surface), `${file} missing ${surface}`);
       }
     }
@@ -215,6 +215,8 @@ void describe('package manifest and payload', () => {
       '/autopilot-inject',
       '/autopilot-onboard',
       '/autopilot-handoff',
+      '/autopilot-config',
+      '/autopilot-claim-gc',
       '/autopilot-close',
       '/autopilot-abort',
       'context_budget',
@@ -231,6 +233,9 @@ void describe('package manifest and payload', () => {
       'work-item lifecycle',
       'terminal closure',
       'runtime close/merge/abort',
+      'per-unit worktrees',
+      'autopilot.unit_merge.v1',
+      'validation staleness',
       'fake-Pi',
       'offline SDK/RPC/package gates',
     ]) {
@@ -243,7 +248,7 @@ void describe('package manifest and payload', () => {
     const readme = await docText('README.md');
     const plan = await docText('TEST_PLAN.md');
     const mappings = [
-      { claim: 'Commands', row: 'Public commands are `/autopilot`, `/autopilot-inject`, `/autopilot-onboard`, `/autopilot-handoff`, `/autopilot-close`, and `/autopilot-abort`' },
+      { claim: 'Commands', row: 'Public commands are `/autopilot`, `/autopilot-inject`, `/autopilot-onboard`, `/autopilot-handoff`, `/autopilot-config`, `/autopilot-claim-gc`, `/autopilot-close`, and `/autopilot-abort`' },
       { claim: 'context_budget', row: '`context_budget` parent gate' },
       { claim: 'Contracts, templates, and state-store', row: 'Contracts/templates are schema-backed and package-owned' },
       { claim: 'perfect-quality', row: 'Perfect-quality doctrine is package-owned' },
@@ -251,6 +256,7 @@ void describe('package manifest and payload', () => {
       { claim: 'work-item lifecycle', row: 'Work-item lifecycle separates transport success from closure' },
       { claim: 'closure gates', row: 'Terminal closure gate rejects unresolved semantic risk' },
       { claim: 'runtime close/merge/abort', row: 'Runtime close/merge/abort is deterministic and local-only' },
+      { claim: 'per-unit worktrees', row: 'Phase 2 per-unit worktrees isolate source-changing units' },
       { claim: 'forced-output/status', row: 'Forced-output/status tool is child-only' },
       { claim: 'state-store', row: 'State store' },
       { claim: 'autopilot-agent-run', row: '`autopilot-agent-run` bin is shipped' },
@@ -392,6 +398,7 @@ void describe('package manifest and payload', () => {
       if (previousStateRoot === undefined) delete process.env[AUTOPILOT_STATE_ROOT_ENV];
       else process.env[AUTOPILOT_STATE_ROOT_ENV] = previousStateRoot;
       const worktree = prepared.mainWorktreePath;
+      const unitWorktree = await prepareAutopilotUnitWorktree({ active: prepared.active, unitId: 'node-modules-smoke', attempt: 1 });
       const runtimeRoot = prepared.runtimeRoot;
       await mkdir(join(runtimeRoot, 'unit-specs'), { recursive: true });
       const specPath = join(runtimeRoot, 'unit-specs', 'node-modules-smoke.implement.attempt-1.json');
@@ -405,7 +412,7 @@ void describe('package manifest and payload', () => {
           template: 'implement',
           attempt: 1,
           objective: 'Dry-run from an installed node_modules package.',
-          cwd: worktree,
+          cwd: unitWorktree.unitInfo.worktree_path,
           model: 'openai-codex/gpt-5.5',
           thinking: 'high',
           owned_paths: ['src/smoke.ts'],

@@ -86,6 +86,7 @@ export async function commitAutopilotExecution(input) {
     }
     const commitShas = commitRange(input.spec.cwd, beforeHead, afterHead);
     const commitOrigin = executionCommitOrigin(runtimeCommitCreated, committedClaimedPaths.length > 0);
+    const executionBranch = currentBranch(input.spec.cwd);
     const commitPath = input.commitPath ?? deriveAutopilotExecutionCommitPath(input.spec);
     const record = parseAutopilotExecutionCommit({
         schema_version: 'autopilot.execution_commit.v1',
@@ -97,7 +98,7 @@ export async function commitAutopilotExecution(input) {
         role: input.spec.role,
         attempt: input.spec.attempt,
         cwd: input.spec.cwd,
-        branch: input.context.active.branch,
+        branch: executionBranch,
         claimed_paths: claimedWritePatterns,
         edited_claimed_paths: editedClaimedPaths,
         before_head: beforeHead,
@@ -142,6 +143,12 @@ function executionCommitOrigin(runtimeCommitCreated, childCommitCaptured) {
     if (runtimeCommitCreated)
         return 'runtime';
     return 'child';
+}
+function currentBranch(cwd) {
+    const branch = runGit(['rev-parse', '--abbrev-ref', 'HEAD'], cwd).trim();
+    if (branch.length === 0 || branch === 'HEAD')
+        fail('detached-execution-head', 'source-changing runtime commit requires the unit worktree to be on a named branch.');
+    return branch;
 }
 function runtimeGitEnv() {
     return {
