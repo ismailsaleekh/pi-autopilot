@@ -1,11 +1,11 @@
 import { spawnSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { parseAutopilotExecutionAudit, parseAutopilotExecutionCommit, parseAutopilotMasterPlan, parseAutopilotState, parseAutopilotStatusEntry, parseAutopilotDecisionRow, } from "./contracts/index.js";
 import { evaluateAutopilotClosureGate } from "./lifecycle/index.js";
 import { parseAutopilotUnitMerge } from "./unit-merge.js";
-import { ACTIVE_AUTOPILOTS_FILE, BRANCHES_FILE, CLAIM_EVENTS_FILE, FOREIGN_MERGE_ACKS_FILE, MERGE_LOG_FILE, PATH_CLAIMS_FILE, TASK_INFO_FILE, WORKTREE_INDEX_FILE, appendClaimEvent, appendJsonl, coordinationRootForRepo, gitHead, isAutopilotRuntimeRepoPath, mainMergeLockPathForRepo, matchesRepoPathPattern, pathOverlapsOrContains, readActiveAutopilots, readGitStatus, readPathClaims, readWorktreeIndex, resolveRepoIdentity, runGit, taskRootForActiveAutopilot, updateTaskInfoStatus, withAutopilotFileLock, worktreeRootForRepo, writeActiveAutopilots, writeJsonAtomic, writePathClaims, } from "./parallel-runtime.js";
+import { ACTIVE_AUTOPILOTS_FILE, BRANCHES_FILE, CLAIM_EVENTS_FILE, FOREIGN_MERGE_ACKS_FILE, MERGE_LOG_FILE, PATH_CLAIMS_FILE, TASK_INFO_FILE, UNIT_INDEX_FILE, WORKTREE_INDEX_FILE, appendClaimEvent, appendJsonl, coordinationRootForRepo, gitHead, isAutopilotRuntimeRepoPath, mainMergeLockPathForRepo, matchesRepoPathPattern, pathOverlapsOrContains, readActiveAutopilots, readGitStatus, readPathClaims, readUnitIndex, readWorktreeIndex, resolveRepoIdentity, runGit, taskRootForActiveAutopilot, updateTaskInfoStatus, withAutopilotFileLock, worktreeRootForRepo, writeActiveAutopilots, writeJsonAtomic, writePathClaims, } from "./parallel-runtime.js";
 export class AutopilotCloseError extends Error {
     name = 'AutopilotCloseError';
     code;
@@ -348,6 +348,7 @@ async function validateCloseReadiness(context, now) {
         blockers.push(...executionCommitBlockers(active, executionCommits, artifacts.audits, retainedWriteClaims, preIntegrationChangedPaths));
     }
     blockers.push(...phaseTwoCloseBlockers(active, unitMerges, artifacts.validationStalenessRefs, preIntegrationChangedPaths));
+    blockers.push(...await unitWorktreeResidueBlockers(active));
     blockers.push(...branchCommitBlockers(active, executionCommits, unitMerges));
     const targetIntersection = intersectingPaths(targetDeltaPaths, closeSurfacePaths);
     if (targetIntersection.length > 0) {
@@ -402,7 +403,59 @@ function abortReadinessBlockers(active) {
         if (branch !== active.branch)
             blockers.push(`registered worktree must be on ${active.branch}, got ${String(branch)}`);
     }
+    blockers.push(...unitWorktreeResidueBlockersSync(active));
     return sortedUnique(blockers);
+}
+async function unitWorktreeResidueBlockers(active) {
+    const taskRoot = taskRootForActiveAutopilot(active);
+    const indexPath = join(taskRoot, UNIT_INDEX_FILE);
+    if (!existsSync(indexPath))
+        return [];
+    const index = await readUnitIndex(taskRoot);
+    const blockers = [];
+    for (const unit of index.units) {
+        if (unit.status === 'active')
+            blockers.push(`unit worktree still active: ${unit.unit_id} attempt ${String(unit.attempt)}`);
+        if (unit.status === 'quarantined')
+            blockers.push(`unit worktree is quarantined and requires operator decision: ${unit.unit_id} attempt ${String(unit.attempt)}`);
+        if (existsSync(unit.worktree_path) && readGitStatus(unit.worktree_path).changedPaths.length > 0)
+            blockers.push(`unit worktree has dirty residue: ${unit.unit_id} attempt ${String(unit.attempt)}`);
+    }
+    return sortedUnique(blockers);
+}
+function unitWorktreeResidueBlockersSync(active) {
+    const taskRoot = taskRootForActiveAutopilot(active);
+    const indexPath = join(taskRoot, UNIT_INDEX_FILE);
+    if (!existsSync(indexPath))
+        return [];
+    try {
+        const parsed = JSON.parse(readFileSync(indexPath, 'utf8'));
+        if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed))
+            return [`invalid unit index: ${indexPath}`];
+        const units = parsed['units'];
+        if (!Array.isArray(units))
+            return [`invalid unit index units: ${indexPath}`];
+        const blockers = [];
+        for (const unit of units) {
+            if (typeof unit !== 'object' || unit === null || Array.isArray(unit))
+                continue;
+            const row = unit;
+            const status = row['status'];
+            const unitId = typeof row['unit_id'] === 'string' ? row['unit_id'] : 'unknown';
+            const attempt = typeof row['attempt'] === 'number' ? String(row['attempt']) : 'unknown';
+            const worktreePath = typeof row['worktree_path'] === 'string' ? row['worktree_path'] : null;
+            if (status === 'active')
+                blockers.push(`unit worktree still active: ${unitId} attempt ${attempt}`);
+            if (status === 'quarantined')
+                blockers.push(`unit worktree is quarantined and requires operator decision: ${unitId} attempt ${attempt}`);
+            if (worktreePath !== null && existsSync(worktreePath) && readGitStatus(worktreePath).changedPaths.length > 0)
+                blockers.push(`unit worktree has dirty residue: ${unitId} attempt ${attempt}`);
+        }
+        return sortedUnique(blockers);
+    }
+    catch (error) {
+        return [`failed to inspect unit worktree residue: ${errorMessage(error)}`];
+    }
 }
 function semanticClosureBlockers(artifacts, changedPaths) {
     if (changedPaths.length === 0 && artifacts.executionCommits.length === 0)
@@ -750,7 +803,7 @@ async function archiveRuntimeArtifacts(context, archiveRef, now) {
     if (existsSync(context.active.runtime_root))
         await copyPath(context.active.runtime_root, archiveRuntime);
     const taskRoot = taskRootForActiveAutopilot(context.active);
-    for (const file of [TASK_INFO_FILE, BRANCHES_FILE]) {
+    for (const file of [TASK_INFO_FILE, BRANCHES_FILE, UNIT_INDEX_FILE, '_checkout-profile.json', '_materialization-ledger.jsonl']) {
         const source = join(taskRoot, file);
         if (existsSync(source))
             await copyPath(source, join(archiveRoot, file));
@@ -829,8 +882,34 @@ async function releaseRetainedClaims(context, retainedClaims, now) {
 function claimKey(claim) {
     return `${claim.autopilot_id}\0${claim.workstream_run}\0${claim.active_run_epoch}\0${claim.unit_id}\0${String(claim.attempt)}\0${claim.claim_type}\0${claim.path}`;
 }
+function removeSafeTerminalUnitWorktrees(sourceRepo, row) {
+    const indexPath = join(taskRootForActiveAutopilot(row), UNIT_INDEX_FILE);
+    if (!existsSync(indexPath))
+        return;
+    const parsed = JSON.parse(readFileSync(indexPath, 'utf8'));
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed))
+        fail('invalid-unit-index', '_unit-index.json must contain an object before worktree cleanup.', [indexPath]);
+    const units = parsed['units'];
+    if (!Array.isArray(units))
+        fail('invalid-unit-index', '_unit-index.json units must be an array before worktree cleanup.', [indexPath]);
+    for (const unit of units) {
+        if (typeof unit !== 'object' || unit === null || Array.isArray(unit))
+            continue;
+        const rowRecord = unit;
+        const status = rowRecord['status'];
+        const worktreePath = rowRecord['worktree_path'];
+        if (typeof worktreePath !== 'string' || !existsSync(worktreePath))
+            continue;
+        if (status !== 'merged' && status !== 'aborted' && status !== 'superseded')
+            continue;
+        if (readGitStatus(worktreePath).changedPaths.length > 0)
+            fail('dirty-terminal-unit-worktree', 'refusing to remove dirty terminal unit worktree during close cleanup.', [worktreePath]);
+        runGit(['worktree', 'remove', '--force', worktreePath], sourceRepo, runtimeGitEnv('unit-worktree-remove'));
+    }
+}
 function retireBranchAndRemoveWorktree(sourceRepo, row, archiveRef, targetAfter) {
     runGit(['update-ref', `refs/heads/${archiveRef}`, targetAfter], sourceRepo, runtimeGitEnv('archive-ref'));
+    removeSafeTerminalUnitWorktrees(sourceRepo, row);
     if (existsSync(row.main_worktree_path))
         runGit(['worktree', 'remove', '--force', row.main_worktree_path], sourceRepo, runtimeGitEnv('worktree-remove'));
     const deleteResult = spawnSync('git', ['branch', '-D', row.branch], { cwd: sourceRepo, encoding: 'utf8', env: runtimeGitEnv('branch-retire') });

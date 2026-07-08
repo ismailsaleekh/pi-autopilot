@@ -396,8 +396,8 @@ void describe('status-extension tool', () => {
             handlers.push(handler);
           },
         });
-        assert.equal(hostTools.length, 1);
-        assert.equal(hostTools[0]?.name, 'autopilot_emit_status');
+        assert.equal(hostTools.length, 2);
+        assert.deepEqual(hostTools.map((tool) => tool.name).sort(), ['autopilot_emit_status', 'autopilot_materialize_context']);
         assert.equal(handlers.length, 1);
         const handler = handlers[0];
         if (handler === undefined) throw new Error('missing status guard handler');

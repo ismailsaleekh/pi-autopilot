@@ -7,6 +7,7 @@ import { dirname, join } from 'node:path';
 import { describe, it } from 'node:test';
 
 import { abortAutopilotWorkstream, closeAutopilotWorkstream } from '../../src/core/close-runtime.ts';
+import { materializeAutopilotSpecPaths } from '../../src/core/materialization.ts';
 import type { AutopilotExecutionAudit, AutopilotExecutionCommit, AutopilotMasterPlan, AutopilotState, AutopilotStatusEntry, AutopilotUnitSpec } from '../../src/core/contracts/index.ts';
 import {
   AUTOPILOT_STATE_ROOT_ENV,
@@ -18,6 +19,7 @@ import {
   readPathClaims,
   resolveActiveAutopilotForSpec,
   resolveRepoIdentity,
+  updateUnitBranchStatus,
 } from '../../src/core/parallel-runtime.ts';
 
 async function withTempDir<T>(run: (root: string) => Promise<T>): Promise<T> {
@@ -49,6 +51,15 @@ async function prepareCloseFixture(root: string): Promise<PreparedCloseFixture> 
   const spec = unitSpec(unitWorktree.unitInfo.worktree_path, prepared.runtimeRoot);
   const activeContext = await resolveActiveAutopilotForSpec(spec);
   await acquireClaimsForUnit({ context: activeContext, spec, reason: 'close-runtime test setup' });
+  await materializeAutopilotSpecPaths({ context: activeContext, spec, reason: 'close-runtime test setup materialization' });
+  await updateUnitBranchStatus({
+    active: prepared.active,
+    unitId: 'u01-implement',
+    attempt: 1,
+    status: 'superseded',
+    currentSha: gitOutput(unitWorktree.unitInfo.worktree_path, ['rev-parse', 'HEAD']),
+    archiveRef: null,
+  });
 
   const beforeHead = gitOutput(prepared.mainWorktreePath, ['rev-parse', 'HEAD']);
   await writeFile(join(prepared.mainWorktreePath, 'src', 'smoke.ts'), 'export const smoke = "autopilot";\n', 'utf8');

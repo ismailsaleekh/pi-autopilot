@@ -49,6 +49,7 @@ const REMOTE_OR_EXTERNAL_GIT_SUBCOMMANDS = new Set([
   'request-pull',
   'remote',
   'send-email',
+  'sparse-checkout',
   'submodule',
   'svn',
   'worktree',

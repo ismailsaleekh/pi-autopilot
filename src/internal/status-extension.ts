@@ -8,6 +8,12 @@ import {
   type AutopilotToolCallEventLike,
 } from '../core/git-guard.ts';
 import { AUTOPILOT_STATUS_CONTEXT_ENV, AUTOPILOT_STATUS_TOOL } from '../core/names.ts';
+import {
+  AUTOPILOT_MATERIALIZE_CONTEXT_TOOL,
+  materializeAdditionalReadPathsForSpec,
+  materializeSparseReadForToolCall,
+  resolveActiveContextForStatusContext,
+} from '../core/materialization.ts';
 import { AUTOPILOT_STATUS_ENTRY_JSON_SCHEMA } from '../core/contracts/schemas.ts';
 import {
   parseAutopilotStatusToolContext,
@@ -94,6 +100,84 @@ export function createAutopilotEmitStatusTool(
   };
 }
 
+export function createAutopilotMaterializeContextTool(
+  context: AutopilotStatusToolContext,
+): PiToolDefinitionLike {
+  return {
+    name: AUTOPILOT_MATERIALIZE_CONTEXT_TOOL,
+    label: 'Autopilot Sparse Context Materialization',
+    description:
+      'Materialize additional tracked read-only repository paths inside this sparse Autopilot child worktree. This never grants write authority.',
+    promptSnippet: 'Request sparse READ context via autopilot_materialize_context',
+    promptGuidelines: [
+      'Use autopilot_materialize_context only when a needed tracked source path is absent because the worktree is sparse.',
+      'This tool grants READ context only; do not edit materialized paths unless they are already in owned_paths.',
+      'If you need new write scope, emit BLOCKED with the exact path instead of using this tool as a workaround.',
+      'Do not run manual git sparse-checkout commands.',
+    ],
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        paths: {
+          type: 'array',
+          minItems: 1,
+          maxItems: 32,
+          items: { type: 'string', minLength: 1, maxLength: 500 },
+        },
+        reason: { type: 'string', minLength: 1, maxLength: 500 },
+      },
+      required: ['paths'],
+    },
+    async execute(toolCallId: string, params: unknown): Promise<PiToolTextResult> {
+      const request = parseMaterializeRequest(params);
+      const activeContext = await resolveActiveContextForStatusContext(context);
+      const result = await materializeAdditionalReadPathsForSpec({
+        context: activeContext,
+        spec: context.unit_spec,
+        paths: request.paths,
+        reason: request.reason ?? `child tool ${AUTOPILOT_MATERIALIZE_CONTEXT_TOOL} ${toolCallId}`,
+      });
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Autopilot sparse context materialized ${String(result.materialized_paths.length)} path(s) as READ context.`,
+          },
+        ],
+        details: {
+          schema_version: 'autopilot.materialize_context_result.v1',
+          tool_name: AUTOPILOT_MATERIALIZE_CONTEXT_TOOL,
+          tool_call_id: toolCallId,
+          checkout_mode: result.checkout_mode,
+          paths: result.materialized_paths.map((row) => row.path),
+          targets: result.targets,
+          byte_count: result.byte_count,
+        },
+      };
+    },
+  };
+}
+
+function parseMaterializeRequest(params: unknown): { readonly paths: readonly string[]; readonly reason?: string } {
+  if (typeof params !== 'object' || params === null || Array.isArray(params)) {
+    throw new Error('autopilot_materialize_context params must be an object');
+  }
+  const record = params as Readonly<Record<string, unknown>>;
+  const paths = record['paths'];
+  if (!Array.isArray(paths) || paths.length === 0 || paths.length > 32 || !paths.every((item) => typeof item === 'string' && item.trim().length > 0)) {
+    throw new Error('autopilot_materialize_context paths must be 1..32 non-empty strings');
+  }
+  const reason = record['reason'];
+  if (reason !== undefined && (typeof reason !== 'string' || reason.trim().length === 0)) {
+    throw new Error('autopilot_materialize_context reason must be a non-empty string when provided');
+  }
+  const frozenPaths = Object.freeze(paths.map((path) => path));
+  return reason === undefined
+    ? { paths: frozenPaths }
+    : { paths: frozenPaths, reason };
+}
+
 function buildToolResult(
   result: AutopilotEmitResult,
   toolCallId: string,
@@ -134,13 +218,16 @@ export default function autopilotStatusExtension(pi: PiExtensionHostLike): void 
   }
   const context = loadAutopilotStatusToolContextFromEnv();
   pi.registerTool(createAutopilotEmitStatusTool(context));
+  pi.registerTool(createAutopilotMaterializeContextTool(context));
   if (pi.on !== undefined) {
-    pi.on('tool_call', (event, toolCtx) =>
-      evaluateAutopilotWorktreeToolCall(event, toolCtx, {
+    pi.on('tool_call', async (event, toolCtx) => {
+      const sparseDecision = await materializeSparseReadForToolCall({ event, toolContext: toolCtx, statusContext: context });
+      if (sparseDecision !== undefined) return sparseDecision;
+      return evaluateAutopilotWorktreeToolCall(event, toolCtx, {
         worktreeRoot: context.unit_spec.cwd,
         label: 'Autopilot child worktree guard',
         allowedWriteRoots: [context.artifact_root],
-      }),
-    );
+      });
+    });
   }
 }

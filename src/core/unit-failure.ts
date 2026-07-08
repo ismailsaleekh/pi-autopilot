@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs';
-import { mkdir, rm } from 'node:fs/promises';
+import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { gitHead, readGitStatus, releaseClaimsForUnit, runGit, updateUnitBranchStatus, writeJsonAtomic, type ActiveAutopilotContext } from './parallel-runtime.ts';
@@ -44,6 +44,9 @@ export async function resetFailedUnit(input: {
   if (existsSync(input.unitWorktreePath)) runGit(['reset', '--hard', 'HEAD'], input.unitWorktreePath, { AUTOPILOT_RUNTIME: '1', AUTOPILOT_RUNTIME_AUTHORITY: 'unit-reset' });
   const record = await writeFailureRecord({ ...input, action: 'reset' });
   await releaseClaimsForUnit(releaseInput(input, 'autopilot failed unit reset'));
+  const currentSha = existsSync(input.unitWorktreePath) ? gitHead(input.unitWorktreePath) : input.context.active.target_base_sha;
+  await updateUnitBranchStatus({ active: input.context.active, unitId: input.unitId, attempt: input.attempt, status: 'aborted', currentSha, archiveRef: null });
+  if (existsSync(input.unitWorktreePath)) runGit(['worktree', 'remove', '--force', input.unitWorktreePath], input.context.active.source_repo, { AUTOPILOT_RUNTIME: '1', AUTOPILOT_RUNTIME_AUTHORITY: 'unit-reset-remove' });
   return record;
 }
 
@@ -70,8 +73,11 @@ export async function abortFailedUnit(input: {
 }): Promise<AutopilotUnitFailureRecord> {
   const record = await writeFailureRecord({ ...input, action: 'abort' });
   await releaseClaimsForUnit(releaseInput(input, 'autopilot failed unit abort'));
-  await updateUnitBranchStatus({ active: input.context.active, unitId: input.unitId, attempt: input.attempt, status: 'aborted', currentSha: existsSync(input.unitWorktreePath) ? gitHead(input.unitWorktreePath) : input.context.active.target_base_sha, archiveRef: null });
-  if (existsSync(input.unitWorktreePath)) await rm(input.unitWorktreePath, { recursive: true, force: true });
+  const currentSha = existsSync(input.unitWorktreePath) ? gitHead(input.unitWorktreePath) : input.context.active.target_base_sha;
+  const archiveRef = `autopilot/archive/${input.context.active.workstream_run}/unit/${input.unitId}/attempt-${String(input.attempt)}/aborted`;
+  runGit(['update-ref', `refs/heads/${archiveRef}`, currentSha], input.context.active.source_repo, { AUTOPILOT_RUNTIME: '1', AUTOPILOT_RUNTIME_AUTHORITY: 'unit-abort-archive' });
+  await updateUnitBranchStatus({ active: input.context.active, unitId: input.unitId, attempt: input.attempt, status: 'aborted', currentSha, archiveRef });
+  if (existsSync(input.unitWorktreePath)) runGit(['worktree', 'remove', '--force', input.unitWorktreePath], input.context.active.source_repo, { AUTOPILOT_RUNTIME: '1', AUTOPILOT_RUNTIME_AUTHORITY: 'unit-abort-remove' });
   return record;
 }
 

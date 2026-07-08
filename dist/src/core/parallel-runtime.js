@@ -4,6 +4,9 @@ import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { appendFile, mkdir, open, readFile, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import { homedir, hostname, platform, uptime } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { AUTOPILOT_CHECKOUT_PROFILE_SNAPSHOT_FILE, checkoutProfileSnapshotFromResolved, readCheckoutProfileSnapshot, resolveAutopilotCheckoutProfile, sparseIncludePatternsForPaths, } from "./checkout-profile.js";
+import { assertAutopilotDiskGate } from "./disk-gate.js";
+import { createAutopilotGitWorktree, removeGitWorktreeIfPresent } from "./sparse-worktree.js";
 import { AUTOPILOT_RUNTIME_ROOT_PREFIX } from "./names.js";
 import { isValidWorkstreamSlug } from "./paths.js";
 export const AUTOPILOT_STATE_ROOT_ENV = 'AUTOPILOT_STATE_ROOT';
@@ -20,6 +23,7 @@ export const TASK_INFO_FILE = '_task-info.json';
 export const BRANCHES_FILE = '_branches.json';
 export const UNIT_INDEX_FILE = '_unit-index.json';
 export const UNIT_INFO_FILE = '_unit-info.json';
+export const MATERIALIZED_PATHS_FILE = '_materialized-paths.json';
 const DEFAULT_LOCK_TIMEOUT_MS = 60_000;
 const LOCK_STALE_MULTIPLIER = 5;
 const LOCK_BACKOFF_START_MS = 100;
@@ -133,18 +137,46 @@ export async function prepareAutopilotUnitWorktree(input) {
         if (existsSync(unitAttemptRoot))
             fail('unit-worktree-path-exists', 'unit attempt path already exists without metadata.', [unitAttemptRoot]);
         assertBranchAvailable(input.active.source_repo, branch);
+        const checkout = await checkoutMetadataForTaskRoot(taskRoot);
+        const unitClaimPaths = input.unitSpec === undefined ? [] : materializationPathsForCheckoutBootstrap(input.unitSpec);
+        const sparsePatterns = checkout.mode === 'full' || checkout.mode === 'legacy-full'
+            ? []
+            : [...checkout.basePatterns, ...sparseIncludePatternsForPaths(unitClaimPaths)];
+        assertAutopilotDiskGate({
+            path: input.active.worktree_root,
+            projection: {
+                profileMode: checkout.mode === 'legacy-full' ? 'full' : checkout.mode,
+                diskGate: checkout.diskGate,
+                perWorktreeEstimateBytes: checkout.perWorktreeEstimateBytes,
+                additionalMaterializationBytes: 0,
+                worktreeCount: 1,
+            },
+        });
         await mkdir(unitAttemptRoot, { recursive: true });
         const baseSha = gitHead(input.active.main_worktree_path);
         try {
-            runGit(['worktree', 'add', '-b', branch, unitWorktreePath, baseSha], input.active.main_worktree_path, {
-                ...env,
-                [AUTOPILOT_RUNTIME_ENV]: AUTOPILOT_RUNTIME_VALUE,
+            createAutopilotGitWorktree({
+                repoRoot: input.active.source_repo,
+                worktreePath: unitWorktreePath,
+                branch,
+                startPoint: baseSha,
+                mode: checkout.mode === 'legacy-full' ? 'full' : checkout.mode,
+                sparsePatterns,
+                env: { ...env, [AUTOPILOT_RUNTIME_ENV]: AUTOPILOT_RUNTIME_VALUE },
             });
         }
         catch (error) {
+            try {
+                removeGitWorktreeIfPresent(input.active.source_repo, unitWorktreePath, env);
+            }
+            catch {
+                // Best-effort cleanup is followed by loud failure from the original worktree creation error.
+            }
             await rm(unitAttemptRoot, { recursive: true, force: true });
             throw error;
         }
+        if (input.unitSpec !== undefined)
+            await ensureFutureOwnedParentDirs(unitWorktreePath, input.unitSpec.owned_paths);
         const unitInfo = {
             schema_version: 'autopilot.unit_info.v1',
             workstream: input.active.workstream,
@@ -160,6 +192,9 @@ export async function prepareAutopilotUnitWorktree(input) {
             status: 'active',
             runtime_root: input.active.runtime_root,
             created_at: now.toISOString(),
+            checkout_mode: checkout.mode === 'legacy-full' ? 'legacy-full' : checkout.mode === 'full' ? 'full' : 'sparse',
+            checkout_profile_ref: checkout.checkoutProfileRef,
+            materialized_paths_ref: MATERIALIZED_PATHS_FILE,
         };
         await writeJsonAtomic(join(unitAttemptRoot, UNIT_INFO_FILE), unitInfo);
         const branchInfo = branchInfoFromUnitInfo(unitInfo);
@@ -200,6 +235,44 @@ export async function releaseClaimsForUnit(input) {
         if (released.length === 0)
             return Object.freeze([]);
         const remaining = current.filter((claim) => !(claim.autopilot_id === input.context.active.autopilot_id && claim.workstream_run === input.context.active.workstream_run && claim.unit_id === input.unitId && claim.attempt === input.attempt));
+        await writePathClaims(input.context.coordinationRoot, remaining);
+        for (const claim of released) {
+            await appendClaimEvent(input.context.coordinationRoot, {
+                schema_version: 'autopilot.claim_event.v1',
+                event: 'release',
+                ts: now.toISOString(),
+                repo_key: input.context.active.repo_key,
+                autopilot_id: claim.autopilot_id,
+                workstream: claim.workstream,
+                workstream_run: claim.workstream_run,
+                unit_id: claim.unit_id,
+                attempt: claim.attempt,
+                path: claim.path,
+                claim_type: claim.claim_type,
+                active_run_epoch: claim.active_run_epoch,
+                reason: input.reason,
+            });
+        }
+        return Object.freeze(released);
+    });
+}
+export async function releaseReadClaimsForUnitPaths(input) {
+    const now = input.now ?? new Date();
+    const pathSet = new Set(input.paths.map(normalizeRepoRelativePath));
+    if (pathSet.size === 0)
+        return Object.freeze([]);
+    return await withAutopilotFileLock(join(input.context.coordinationRoot, '.locks', 'path-claims.lock'), `read-claim-release:${input.context.active.autopilot_id}:${input.unitId}:${String(input.attempt)}`, async () => {
+        const current = await readPathClaims(input.context.coordinationRoot);
+        const released = current.filter((claim) => claim.autopilot_id === input.context.active.autopilot_id &&
+            claim.workstream_run === input.context.active.workstream_run &&
+            claim.unit_id === input.unitId &&
+            claim.attempt === input.attempt &&
+            claim.claim_type === 'READ' &&
+            pathSet.has(claim.path));
+        if (released.length === 0)
+            return Object.freeze([]);
+        const releaseKeys = new Set(released.map((claim) => `${claim.autopilot_id}\0${claim.workstream_run}\0${claim.active_run_epoch}\0${claim.claim_type}\0${claim.path}\0${claim.unit_id}\0${String(claim.attempt)}`));
+        const remaining = current.filter((claim) => !releaseKeys.has(`${claim.autopilot_id}\0${claim.workstream_run}\0${claim.active_run_epoch}\0${claim.claim_type}\0${claim.path}\0${claim.unit_id}\0${String(claim.attempt)}`));
         await writePathClaims(input.context.coordinationRoot, remaining);
         for (const claim of released) {
             await appendClaimEvent(input.context.coordinationRoot, {
@@ -362,6 +435,81 @@ export async function acquireClaimsForUnit(input) {
         return requested;
     });
 }
+export async function acquireReadClaimsForUnitPaths(input) {
+    const acquiredAt = (input.now ?? new Date()).toISOString();
+    const requested = dedupeClaims(input.paths.map((path) => ({
+        schema_version: 'autopilot.path_claim.v1',
+        path: normalizeRepoRelativePath(path),
+        autopilot_id: input.context.active.autopilot_id,
+        workstream: input.context.active.workstream,
+        workstream_run: input.context.active.workstream_run,
+        unit_id: input.unitId,
+        attempt: input.attempt,
+        claim_type: 'READ',
+        acquired_at: acquiredAt,
+        active_run_epoch: input.context.active.active_run_epoch,
+        reason: input.reason,
+    })));
+    if (requested.length === 0)
+        return Object.freeze([]);
+    const lockPath = join(input.context.coordinationRoot, '.locks', 'path-claims.lock');
+    return await withAutopilotFileLock(lockPath, `read-claim-expand:${input.context.active.autopilot_id}:${input.unitId}:${String(input.attempt)}`, async () => {
+        const activeRows = await readActiveAutopilots(input.context.coordinationRoot);
+        const authority = activeRows.find((row) => row.autopilot_id === input.context.active.autopilot_id);
+        if (authority === undefined || !isChildLaunchParentStatus(authority.status)) {
+            fail('active-authority-missing', 'active Autopilot row is missing or not child-launch authorized before READ claim expansion.', [input.context.active.autopilot_id]);
+        }
+        if (authority.active_run_epoch !== input.context.active.active_run_epoch) {
+            fail('active-epoch-mismatch', 'active Autopilot epoch changed before READ claim expansion.', [
+                `expected=${String(input.context.active.active_run_epoch)}`,
+                `actual=${String(authority.active_run_epoch)}`,
+            ]);
+        }
+        const existing = await readPathClaims(input.context.coordinationRoot);
+        const blockers = findClaimBlockers(existing, requested, authority);
+        if (blockers.length > 0) {
+            for (const requestedClaim of requested) {
+                await appendClaimEvent(input.context.coordinationRoot, {
+                    schema_version: 'autopilot.claim_event.v1',
+                    event: 'rejected',
+                    ts: acquiredAt,
+                    repo_key: authority.repo_key,
+                    autopilot_id: authority.autopilot_id,
+                    workstream: authority.workstream,
+                    workstream_run: authority.workstream_run,
+                    unit_id: input.unitId,
+                    attempt: input.attempt,
+                    path: requestedClaim.path,
+                    claim_type: requestedClaim.claim_type,
+                    active_run_epoch: authority.active_run_epoch,
+                    reason: input.reason,
+                    blockers,
+                });
+            }
+            fail('claim-conflict', 'Autopilot READ expansion rejected because another active Autopilot owns an overlapping path.', blockers.map((blocker) => `${blocker.claim_type} ${blocker.path} by ${blocker.workstream_run}/${blocker.unit_id}`));
+        }
+        const next = mergeClaims(existing, requested);
+        await writePathClaims(input.context.coordinationRoot, next);
+        for (const claim of requested) {
+            await appendClaimEvent(input.context.coordinationRoot, {
+                schema_version: 'autopilot.claim_event.v1',
+                event: 'expand',
+                ts: claim.acquired_at,
+                repo_key: authority.repo_key,
+                autopilot_id: authority.autopilot_id,
+                workstream: authority.workstream,
+                workstream_run: authority.workstream_run,
+                unit_id: claim.unit_id,
+                attempt: claim.attempt,
+                path: claim.path,
+                claim_type: claim.claim_type,
+                active_run_epoch: authority.active_run_epoch,
+                reason: claim.reason,
+            });
+        }
+        return requested;
+    });
+}
 export async function ensureWorktreeCleanForLaunch(input) {
     const status = readGitStatus(input.spec.cwd);
     const sourceDirty = status.changedPaths.filter((path) => !isAutopilotRuntimeRepoPath(path, input.spec.workstream));
@@ -441,6 +589,46 @@ export function normalizeRepoRelativePath(value) {
     }
     return normalized;
 }
+async function checkoutMetadataForTaskRoot(taskRoot) {
+    const snapshot = await readCheckoutProfileSnapshot(join(taskRoot, AUTOPILOT_CHECKOUT_PROFILE_SNAPSHOT_FILE));
+    if (snapshot === null) {
+        return {
+            mode: 'legacy-full',
+            checkoutProfileRef: null,
+            basePatterns: [],
+            perWorktreeEstimateBytes: 1_048_576,
+            diskGate: {
+                expected_parallel_units: 1,
+                headroom_factor: 1,
+                floor_free_bytes: 0,
+            },
+        };
+    }
+    return {
+        mode: snapshot.profile.mode,
+        checkoutProfileRef: AUTOPILOT_CHECKOUT_PROFILE_SNAPSHOT_FILE,
+        basePatterns: snapshot.base_patterns,
+        perWorktreeEstimateBytes: snapshot.profile.mode === 'full' ? snapshot.full_checkout_bytes : snapshot.base_checkout_bytes,
+        diskGate: snapshot.profile.disk_gate,
+    };
+}
+function materializationPathsForCheckoutBootstrap(spec) {
+    return sortedUnique([
+        ...spec.owned_paths,
+        ...spec.read_only_paths,
+        ...sourceReadClaimPathsForSpec(spec),
+    ].filter((path) => !isAutopilotRuntimeRepoPath(path, spec.workstream)).map((path) => normalizeRepoRelativePath(path.replace(/\/\*\*$/u, ''))));
+}
+async function ensureFutureOwnedParentDirs(worktreePath, ownedPaths) {
+    for (const path of ownedPaths) {
+        const normalized = normalizeRepoRelativePath(path.replace(/\/\*\*$/u, ''));
+        const target = join(worktreePath, ...normalized.split('/'));
+        if (path.endsWith('/**'))
+            await mkdir(target, { recursive: true });
+        else
+            await mkdir(dirname(target), { recursive: true });
+    }
+}
 async function createNewWorkstream(input) {
     const startedAt = input.now.toISOString();
     const workstreamRun = buildWorkstreamRun(input.workstream, input.now);
@@ -453,18 +641,44 @@ async function createNewWorkstream(input) {
         fail('worktree-path-exists', 'refusing to create Autopilot worktree at an existing path.', [mainWorktreePath]);
     }
     assertBranchAvailable(input.repo.repoRoot, branch);
+    const checkoutProfile = await resolveAutopilotCheckoutProfile({ repoRoot: input.repo.repoRoot, env: input.env, now: input.now });
+    const profileSnapshot = checkoutProfileSnapshotFromResolved({ resolved: checkoutProfile, now: input.now });
+    const perWorktreeEstimateBytes = checkoutProfile.profile.mode === 'full'
+        ? checkoutProfile.full_checkout_bytes
+        : checkoutProfile.base_checkout_bytes;
+    assertAutopilotDiskGate({
+        path: input.worktreeRoot,
+        projection: {
+            profileMode: checkoutProfile.profile.mode,
+            diskGate: checkoutProfile.profile.disk_gate,
+            perWorktreeEstimateBytes,
+            expectedParallelUnits: checkoutProfile.profile.disk_gate.expected_parallel_units,
+        },
+    });
     await mkdir(taskRoot, { recursive: true });
     try {
-        runGit(['worktree', 'add', '-b', branch, mainWorktreePath, input.repo.headSha], input.repo.repoRoot, {
-            ...input.env,
-            [AUTOPILOT_RUNTIME_ENV]: AUTOPILOT_RUNTIME_VALUE,
+        createAutopilotGitWorktree({
+            repoRoot: input.repo.repoRoot,
+            worktreePath: mainWorktreePath,
+            branch,
+            startPoint: input.repo.headSha,
+            mode: checkoutProfile.profile.mode,
+            sparsePatterns: checkoutProfile.base_patterns,
+            env: { ...input.env, [AUTOPILOT_RUNTIME_ENV]: AUTOPILOT_RUNTIME_VALUE },
         });
+        await mkdir(runtimeRoot, { recursive: true });
+        await writeJsonAtomic(join(taskRoot, AUTOPILOT_CHECKOUT_PROFILE_SNAPSHOT_FILE), profileSnapshot);
     }
     catch (error) {
+        try {
+            removeGitWorktreeIfPresent(input.repo.repoRoot, mainWorktreePath, input.env);
+        }
+        catch {
+            // Best-effort cleanup is followed by loud failure from the original activation error.
+        }
         await rm(taskRoot, { recursive: true, force: true });
         throw error;
     }
-    await mkdir(runtimeRoot, { recursive: true });
     const row = {
         schema_version: 'autopilot.active_parent.v1',
         autopilot_id: autopilotId,
@@ -505,6 +719,10 @@ async function createNewWorkstream(input) {
         started_at: row.started_at,
         closed_at: null,
         status: row.status,
+        checkout_mode: checkoutProfile.profile.mode === 'full' ? 'full' : 'sparse',
+        checkout_profile_ref: AUTOPILOT_CHECKOUT_PROFILE_SNAPSHOT_FILE,
+        checkout_profile_sha256: checkoutProfile.profile_sha256,
+        checkout_profile_origin: checkoutProfile.origin,
     };
     const branches = {
         schema_version: 'autopilot.branches.v1',
@@ -564,6 +782,39 @@ function reactivateActiveRow(row, repo, now) {
         active_run_receipt_id: sameProcess ? row.active_run_receipt_id : buildReceiptId('resume-reactivate'),
     };
 }
+function sourceReadClaimPathsForSpec(spec) {
+    const owned = spec.owned_paths.map((path) => normalizeRepoRelativePath(path.replace(/\/\*\*$/u, '')));
+    const candidates = [];
+    for (const path of spec.read_only_paths)
+        candidates.push(path);
+    for (const ref of spec.context_refs)
+        candidates.push(ref.path);
+    for (const witness of witnessesFromVerificationPlan(spec.verification_plan)) {
+        if (witness.inspection_target !== undefined)
+            candidates.push(witness.inspection_target);
+    }
+    const normalized = candidates
+        .filter((path) => !isAutopilotRuntimeRepoPath(path, spec.workstream))
+        .map((path) => normalizeRepoRelativePath(path.replace(/\/\*\*$/u, '')))
+        .filter((path) => !owned.some((ownedPath) => pathOverlapsOrContains(ownedPath, path)));
+    return sortedUnique(normalized);
+}
+function witnessesFromVerificationPlan(plan) {
+    if (plan === undefined)
+        return [];
+    return Object.freeze([
+        ...plan.positive_witnesses,
+        ...plan.negative_witnesses,
+        ...plan.regression_witnesses,
+        ...plan.real_boundary_witnesses,
+        ...plan.blast_radius_checks,
+        ...plan.docs_schema_prompt_checks,
+        ...plan.dirty_tree_checks,
+    ]);
+}
+function sortedUnique(values) {
+    return Object.freeze([...new Set(values)].sort((left, right) => left.localeCompare(right)));
+}
 function requestedClaimsForSpec(active, spec, reason) {
     const now = new Date().toISOString();
     const claims = [];
@@ -585,6 +836,8 @@ function requestedClaimsForSpec(active, spec, reason) {
     for (const path of spec.owned_paths)
         add(path, 'WRITE');
     for (const path of spec.read_only_paths)
+        add(path, 'READ');
+    for (const path of sourceReadClaimPathsForSpec(spec))
         add(path, 'READ');
     return Object.freeze(dedupeClaims(claims));
 }
@@ -683,6 +936,9 @@ function unitInfoFromBranch(active, branch, now) {
         status: branch.status,
         runtime_root: active.runtime_root,
         created_at: now.toISOString(),
+        checkout_mode: 'legacy-full',
+        checkout_profile_ref: null,
+        materialized_paths_ref: null,
     };
 }
 async function upsertUnitBranchInfo(taskRoot, branchInfo) {
@@ -750,6 +1006,9 @@ function parseUnitInfo(value) {
         ...branch,
         runtime_root: expectString(value, 'runtime_root'),
         created_at: expectString(value, 'created_at'),
+        checkout_mode: optionalCheckoutMode(value, 'checkout_mode'),
+        checkout_profile_ref: optionalNullableString(value, 'checkout_profile_ref'),
+        materialized_paths_ref: optionalNullableString(value, 'materialized_paths_ref'),
     };
 }
 function parseUnitBranchInfo(value) {
@@ -1139,6 +1398,24 @@ function expectNullableString(record, field) {
     if (typeof value === 'string')
         return value;
     fail('invalid-runtime-record', `field ${field} must be a string or null.`);
+}
+function optionalNullableString(record, field) {
+    const value = record[field];
+    if (value === undefined || value === null)
+        return null;
+    if (typeof value === 'string')
+        return value;
+    fail('invalid-runtime-record', `field ${field} must be a string, null, or omitted.`);
+}
+function optionalCheckoutMode(record, field) {
+    const value = record[field];
+    if (value === undefined)
+        return 'legacy-full';
+    if (value === 'sparse' || value === 'full' || value === 'legacy-full')
+        return value;
+    if (value === 'claim-minimal' || value === 'exclude-heavy')
+        return 'sparse';
+    fail('invalid-runtime-record', `field ${field} must be a checkout mode.`);
 }
 function expectInteger(record, field) {
     const value = record[field];

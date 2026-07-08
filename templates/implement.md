@@ -35,6 +35,9 @@ You are a child agent launched by Autopilot. Complete exactly this implementatio
 ## Context refs
 {{context_refs}}
 
+## Sparse checkout and materialization
+This worktree is sparse by default. Declared owned/read-only/context paths are materialized before launch, but unrelated tracked files may be intentionally absent. If a needed tracked source file is missing, use child-only `autopilot_materialize_context` or report the exact path. Do not run manual `git sparse-checkout` commands. Extra READ context does not grant WRITE authority; if you need to edit a path outside owned paths, emit BLOCKED for parent/spec amendment.
+
 ## Validation commands
 {{validation_commands}}
 

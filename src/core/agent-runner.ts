@@ -38,11 +38,17 @@ import {
   ensureWorktreeCleanForLaunch,
   prepareAutopilotUnitWorktree,
   readActiveAutopilots,
+  releaseClaimsForUnit,
   unitWorktreePathForActiveAutopilot,
   resolveActiveAutopilotForSpec,
   type ActiveAutopilotContext,
   type AutopilotPathClaim,
 } from './parallel-runtime.ts';
+import {
+  assertAutopilotSpecMaterializationDiskGate,
+  expandedReadOnlyPathsForAudit,
+  materializeAutopilotSpecPaths,
+} from './materialization.ts';
 import { assertAutopilotSpecQualityGate } from './quality/spec-gate.ts';
 import {
   AutopilotPromptTemplateError,
@@ -338,7 +344,7 @@ export async function runAutopilotAgentFromSpecPath(
     piResult = await runPiPromptWithStatusCarrier(spawnSpec, rendered.text);
   } catch (error) {
     if (error instanceof AutopilotPiRunError) {
-      const audit = await writeAttemptAudit(spec, auditBaseline, null, auditOutput);
+      const audit = await writeAttemptAudit(spec, runtimePreflight.context, auditBaseline, null, auditOutput);
       throw new AutopilotAgentRunError('pi-spawn-failed', {
         reason: `Pi spawn failed before valid Autopilot status acceptance: ${error.code}: ${error.message}${formatPiRunErrorDiagnostics(error)}`,
         specPath,
@@ -357,7 +363,7 @@ export async function runAutopilotAgentFromSpecPath(
   try {
     evidence = await validateAutopilotStatusEvidence({ unitSpec: spec, providerIdentity });
   } catch (error) {
-    const audit = await writeAttemptAudit(spec, auditBaseline, null, auditOutput);
+    const audit = await writeAttemptAudit(spec, runtimePreflight.context, auditBaseline, null, auditOutput);
     if (piResult.isError) {
       throw new AutopilotAgentRunError('pi-spawn-failed', {
         reason: `Pi session returned an error result before valid Autopilot status acceptance: ${formatPiResultFailureDiagnostics(piResult)}`,
@@ -395,7 +401,7 @@ export async function runAutopilotAgentFromSpecPath(
     });
   }
 
-  const audit = await writeAttemptAudit(spec, auditBaseline, evidence.status, auditOutput);
+  const audit = await writeAttemptAudit(spec, runtimePreflight.context, auditBaseline, evidence.status, auditOutput);
 
   try {
     validateAutopilotEmitStatusCarrier(
@@ -572,6 +578,20 @@ async function preflightSpec(
     }
   }
 
+  if (options.skipClaimAcquire !== true) {
+    await assertAutopilotSpecMaterializationDiskGate({ context: runtimeContext, spec }).catch((error: unknown) => {
+      if (error instanceof Error) {
+        throw new AutopilotAgentRunError('spec-invalid', {
+          reason: error.message,
+          specPath,
+          statusOutput: spec.status_output,
+          receiptOutput: spec.receipt_output,
+        });
+      }
+      throw error;
+    });
+  }
+
   const acquiredClaims = options.skipClaimAcquire === true
     ? []
     : await acquireClaimsForUnit({ context: runtimeContext, spec, reason: 'autopilot-agent-run preflight' }).catch((error: unknown) => {
@@ -585,6 +605,28 @@ async function preflightSpec(
         }
         throw error;
       });
+
+  if (options.skipClaimAcquire !== true) {
+    await materializeAutopilotSpecPaths({
+      context: runtimeContext,
+      spec,
+      reason: 'autopilot-agent-run preflight materialization',
+      ...(options.env === undefined ? {} : { env: options.env }),
+    }).catch(async (error: unknown) => {
+      if (acquiredClaims.length > 0) {
+        await releaseClaimsForUnit({ context: runtimeContext, unitId: spec.unit_id, attempt: spec.attempt, reason: 'autopilot-agent-run materialization failure claim rollback' }).catch(() => undefined);
+      }
+      if (error instanceof Error) {
+        throw new AutopilotAgentRunError('spec-invalid', {
+          reason: error.message,
+          specPath,
+          statusOutput: spec.status_output,
+          receiptOutput: spec.receipt_output,
+        });
+      }
+      throw error;
+    });
+  }
 
   await mkdir(dirname(spec.status_output), { recursive: true });
   await mkdir(dirname(spec.receipt_output), { recursive: true });
@@ -621,7 +663,7 @@ async function prepareMissingSourceChangingUnitWorktree(spec: AutopilotUnitSpec,
       receiptOutput: spec.receipt_output,
     });
   }
-  await prepareAutopilotUnitWorktree({ active, unitId: spec.unit_id, attempt: spec.attempt, env });
+  await prepareAutopilotUnitWorktree({ active, unitId: spec.unit_id, attempt: spec.attempt, unitSpec: spec, env });
 }
 
 const AUTOPILOT_RUNTIME_ROOT_MARKER = '/.pi/autopilot';
@@ -645,12 +687,14 @@ async function writeStatusContext(path: string, context: AutopilotStatusToolCont
 
 async function writeAttemptAudit(
   spec: AutopilotUnitSpec,
+  context: ActiveAutopilotContext,
   baseline: AutopilotExecutionBaseline,
   statusEntry: AutopilotStatusEntry | null,
   auditPath: string,
 ): Promise<AutopilotExecutionAudit> {
+  const readOnlyPaths = await expandedReadOnlyPathsForAudit({ context, spec });
   return await writeAutopilotExecutionAudit({
-    unitSpec: spec,
+    unitSpec: { ...spec, read_only_paths: readOnlyPaths },
     baseline,
     statusEntry,
     auditPath,

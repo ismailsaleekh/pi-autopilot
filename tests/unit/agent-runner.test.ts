@@ -107,7 +107,7 @@ async function writeSpec(root: string, unitSpec: AutopilotUnitSpec): Promise<str
     evidence_dir: string;
   };
   if (unitSpec.role === 'implement' || unitSpec.role === 'fix') {
-    const unitWorktree = await prepareAutopilotUnitWorktree({ active: prepared.active, unitId: unitSpec.unit_id, attempt: unitSpec.attempt });
+    const unitWorktree = await prepareAutopilotUnitWorktree({ active: prepared.active, unitId: unitSpec.unit_id, attempt: unitSpec.attempt, unitSpec });
     mutable.cwd = unitWorktree.unitInfo.worktree_path;
   } else {
     mutable.cwd = prepared.mainWorktreePath;

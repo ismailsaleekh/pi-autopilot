@@ -91,7 +91,9 @@ ${runtimeMetadata.length === 0 ? '' : `${runtimeMetadata}\n`}- Injected child la
 
 - Write unit specs under \`${input.runtimeRoot}/unit-specs/\`.${worktreeCwdRule}
 - Start child work only through the exact injected invocation \`${input.runnerInvocation} <unit-spec.json>\`; start child agents only through that same injected Autopilot launcher.
-- The launcher/runtime creates or resumes the requested per-unit worktree before model spend, acquires path claims for owned/read-only paths, and rejects conflicting same-path work instead of guessing attribution.
+- The launcher/runtime creates or resumes sparse main/unit worktrees before model spend, applies the package checkout profile, snapshots \`_checkout-profile.json\`, runs the disk gate, acquires path claims for owned/read-only/source-context paths, materializes declared source surfaces, and rejects conflicting same-path work instead of guessing attribution.
+- Worktrees are claim-minimal by default. Declare every source path needed for write/read context in \`owned_paths\`, \`read_only_paths\`, source \`context_refs\`, or witness \`inspection_target\`; unrelated tracked files may intentionally be absent.
+- Children may use the child-only \`autopilot_materialize_context\` helper for additional tracked READ context when safe. WRITE scope cannot expand silently: if correct work needs a new edit path, require a parent/spec amendment or new attempt.
 - The launcher/runtime audits and evidence-captures source commits: successful source-changing units must produce a clean execution audit plus \`autopilot.execution_commit.v1\` evidence whether changes were left dirty for runtime commit or committed locally inside the per-unit worktree.
 - When using a background task manager, its command must still be exactly that Autopilot launcher invocation with a unit-spec path.
 - Do not hand-assemble raw child Pi launches; do not start child agents with raw Pi commands, prompt-template commands, ad-hoc shell pipelines, compatibility aliases, or hand-assembled child sessions.
@@ -120,6 +122,7 @@ ${renderAutopilotPerfectQualityRules()}
 - Final target/source checkout mutation remains package-runtime-owned through \`/${AUTOPILOT_CLOSE_COMMAND}\` or \`/${AUTOPILOT_ABORT_COMMAND}\`; do not manually land, push, archive, delete, or abandon branches outside that runtime flow.
 - Use subscription Pi channels only for frontier child models; do not introduce OpenRouter, paid API keys, or other metered frontier routes.
 - Respect each unit spec's owned, read-only, and untouchable paths.
+- Do not run manual \`git sparse-checkout\` commands; use Autopilot materialization or amend the unit spec.
 
 ## Schemas and status acceptance
 

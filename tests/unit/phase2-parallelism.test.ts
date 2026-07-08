@@ -9,6 +9,9 @@ import { describe, it } from 'node:test';
 
 import type { AutopilotExecutionAudit, AutopilotExecutionCommit, AutopilotReceipt, AutopilotState, AutopilotStatusEntry, AutopilotUnitSpec } from '../../src/core/contracts/index.ts';
 import { runAutopilotClaimGc } from '../../src/core/claim-gc.ts';
+import { materializeAdditionalReadPathsForSpec, materializeAutopilotSpecPaths } from '../../src/core/materialization.ts';
+import { parseAutopilotCheckoutProfile } from '../../src/core/checkout-profile.ts';
+import { projectAutopilotDiskUse } from '../../src/core/disk-gate.ts';
 import { planNextDispatch } from '../../src/core/scheduler.ts';
 import { readSchedulerConfig, writeSchedulerConfig } from '../../src/core/scheduler-config.ts';
 import { mergeAutopilotUnit } from '../../src/core/unit-merge.ts';
@@ -128,6 +131,23 @@ void describe('Phase 2 scheduler config and deterministic scheduler', () => {
     });
   });
 
+  void it('validates sparse checkout profiles and disk-gate projection arithmetic loudly', () => {
+    const profile = parseAutopilotCheckoutProfile({
+      schema_version: 'autopilot.checkout_profile.v1',
+      mode: 'claim-minimal',
+      always_include: ['README.md'],
+      exclude: [],
+      auto_profile: { enabled: true, heavy_dir_threshold_bytes: 64, max_scan_depth: 2 },
+      disk_gate: { expected_parallel_units: 2, headroom_factor: 2, floor_free_bytes: 100 },
+      materialization: { auto_read_claims: true, max_auto_read_bytes: 1000, max_single_materialization_bytes: 500, max_auto_read_paths: 4 },
+    });
+    assert.equal(profile.mode, 'claim-minimal');
+    const projection = projectAutopilotDiskUse({ profileMode: profile.mode, diskGate: profile.disk_gate, perWorktreeEstimateBytes: 10, additionalMaterializationBytes: 40 });
+    assert.equal(projection.expected_worktree_count, 3);
+    assert.equal(projection.projected_required_bytes, 6_291_636);
+    assert.throws(() => parseAutopilotCheckoutProfile({ schema_version: 'autopilot.checkout_profile.v1', mode: 'claim-minimal', always_include: ['../escape'] }), /invalid-repo-path/u);
+  });
+
   void it('selects dependency-clear conflict-free units in lane order and records cap/skip reasons', () => {
     const runtimeRoot = '/tmp/autopilot-phase2-main/.pi/autopilot/phase2-smoke';
     const baseSpec = unitSpec({ cwd: '/tmp/unit', runtimeRoot, unitId: 'u01' });
@@ -217,13 +237,57 @@ void describe('Phase 2 unit worktrees, claims, mergeback, staleness, and GC', ()
     });
   });
 
+  void it('creates sparse main and unit worktrees, materializes declared paths, and keeps unrelated tracked files absent', async () => {
+    await withTempDir(async (root) => {
+      const source = join(root, 'source');
+      await mkdir(join(source, 'src'), { recursive: true });
+      await mkdir(join(source, 'docs'), { recursive: true });
+      await mkdir(join(source, 'heavy'), { recursive: true });
+      await writeFile(join(source, '.gitignore'), '.pi/\n', 'utf8');
+      await writeFile(join(source, 'src', 'baseline.ts'), 'export const baseline = true;\n', 'utf8');
+      await writeFile(join(source, 'docs', 'context.md'), 'context\n', 'utf8');
+      await writeFile(join(source, 'heavy', 'blob.bin'), 'heavy but tiny fixture\n', 'utf8');
+      git(source, ['init']);
+      git(source, ['config', 'user.email', 'autopilot@example.invalid']);
+      git(source, ['config', 'user.name', 'Autopilot Test']);
+      git(source, ['add', '.']);
+      git(source, ['commit', '-m', 'baseline']);
+
+      const prepared = await prepareAutopilotWorkstream({ workstream: 'phase2-smoke', sourceCwd: source });
+      assert.equal(gitOut(prepared.mainWorktreePath, ['config', '--bool', 'core.sparseCheckout']), 'true');
+      assert.equal(existsSync(join(prepared.mainWorktreePath, 'heavy', 'blob.bin')), false);
+      const taskInfo = JSON.parse(await readFile(join(prepared.taskRoot, '_task-info.json'), 'utf8')) as { checkout_mode?: string; checkout_profile_ref?: string };
+      assert.equal(taskInfo.checkout_mode, 'sparse');
+      assert.equal(taskInfo.checkout_profile_ref, '_checkout-profile.json');
+      assert.equal(existsSync(join(prepared.taskRoot, '_checkout-profile.json')), true);
+
+      const unitCwd = join(prepared.taskRoot, 'units', 'u-sparse', 'attempt-1', 'worktree');
+      const sparseSpec = unitSpec({ cwd: unitCwd, runtimeRoot: prepared.runtimeRoot, unitId: 'u-sparse', ownedPaths: ['src/new-file.ts'], readOnlyPaths: ['src/baseline.ts'] });
+      const specWithContext = { ...sparseSpec, context_refs: [{ path: 'docs/context.md', purpose: 'source context' }] };
+      const unit = await prepareAutopilotUnitWorktree({ active: prepared.active, unitId: 'u-sparse', attempt: 1, unitSpec: specWithContext });
+      const context = await resolveActiveAutopilotForSpec(specWithContext);
+      await acquireClaimsForUnit({ context, spec: specWithContext, reason: 'sparse materialization test' });
+      await materializeAutopilotSpecPaths({ context, spec: specWithContext, reason: 'sparse materialization test' });
+      assert.equal(existsSync(join(unit.unitInfo.worktree_path, 'src', 'baseline.ts')), true);
+      assert.equal(existsSync(join(unit.unitInfo.worktree_path, 'docs', 'context.md')), true);
+      assert.equal(existsSync(join(unit.unitInfo.worktree_path, 'heavy', 'blob.bin')), false);
+      assert.equal(existsSync(join(unit.unitInfo.worktree_path, 'src')), true);
+      assert.equal(existsSync(join(prepared.taskRoot, '_materialization-ledger.jsonl')), true);
+
+      const expanded = await materializeAdditionalReadPathsForSpec({ context, spec: specWithContext, paths: ['heavy/blob.bin'], reason: 'safe auto read expansion test' });
+      assert.equal(expanded.checkout_mode, 'sparse');
+      assert.equal(existsSync(join(unit.unitInfo.worktree_path, 'heavy', 'blob.bin')), true);
+    });
+  });
+
   void it('runtime-owned unit merge writes evidence, releases claims, marks stale validations, and GC releases proven stale leaks', async () => {
     await withTempDir(async (root) => {
       const source = join(root, 'source');
       await initGitSource(source);
       const prepared = await prepareAutopilotWorkstream({ workstream: 'phase2-smoke', sourceCwd: source });
-      const unit = await prepareAutopilotUnitWorktree({ active: prepared.active, unitId: 'u01', attempt: 1 });
-      const spec = unitSpec({ cwd: unit.unitInfo.worktree_path, runtimeRoot: prepared.runtimeRoot, unitId: 'u01', ownedPaths: ['src/u01.ts'] });
+      const expectedUnitCwd = join(prepared.taskRoot, 'units', 'u01', 'attempt-1', 'worktree');
+      const spec = unitSpec({ cwd: expectedUnitCwd, runtimeRoot: prepared.runtimeRoot, unitId: 'u01', ownedPaths: ['src/u01.ts'] });
+      const unit = await prepareAutopilotUnitWorktree({ active: prepared.active, unitId: 'u01', attempt: 1, unitSpec: spec });
       const context = await resolveActiveAutopilotForSpec(spec);
       await acquireClaimsForUnit({ context, spec, reason: 'phase2 merge test' });
       const beforeHead = gitOut(unit.unitInfo.worktree_path, ['rev-parse', 'HEAD']);
