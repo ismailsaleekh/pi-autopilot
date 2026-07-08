@@ -1,10 +1,11 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { readFile, rm } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { parseAutopilotExecutionAudit, parseAutopilotExecutionCommit, parseAutopilotReceipt, parseAutopilotStatusEntry, type AutopilotExecutionAudit, type AutopilotExecutionCommit, type AutopilotReceipt, type AutopilotStatusEntry } from './contracts/index.ts';
 import { gitHead, readGitStatus, releaseClaimsForUnit, runGit, taskRootForActiveAutopilot, updateUnitBranchStatus, withAutopilotFileLock, writeJsonAtomic, type ActiveAutopilotContext, type ActiveAutopilotRow, type ProcessEnvLike } from './parallel-runtime.ts';
+import { cleanupTerminalUnitWorktree } from './worktree-cleanup.ts';
 
 export interface AutopilotUnitMerge {
   readonly schema_version: 'autopilot.unit_merge.v1';
@@ -127,7 +128,15 @@ export async function mergeAutopilotUnit(input: {
     const archiveRef = `autopilot/archive/${active.workstream_run}/unit/${input.unitId}/attempt-${String(input.attempt)}`;
     runGit(['update-ref', `refs/heads/${archiveRef}`, unitHead], active.source_repo, runtimeGitEnv('unit-archive', input.env));
     await updateUnitBranchStatus({ active, unitId: input.unitId, attempt: input.attempt, status: 'merged', currentSha: unitHead, archiveRef });
-    retireUnitWorktree(active, executionCommit.cwd, unitBranch);
+    await cleanupTerminalUnitWorktree({
+      active,
+      unitId: input.unitId,
+      attempt: input.attempt,
+      allowedStatuses: ['merged'],
+      reason: 'autopilot unit merge cleanup',
+      ...(input.env === undefined ? {} : { env: input.env }),
+      now,
+    });
     return { outcome: 'merged', merge, blockers: [], conflict_path: null };
   });
 }
@@ -178,18 +187,6 @@ async function readJsonFile(path: string): Promise<unknown> {
     fail('json-read-failed', `failed to read ${path}: ${errorMessage(error)}`);
   }
 }
-
-function retireUnitWorktree(active: ActiveAutopilotRow, unitWorktree: string, branch: string): void {
-  if (existsSync(unitWorktree)) runGit(['worktree', 'remove', '--force', unitWorktree], active.source_repo, runtimeGitEnv('unit-worktree-remove'));
-  const deleteResult = spawnSync('git', ['branch', '-D', branch], { cwd: active.source_repo, encoding: 'utf8', env: runtimeGitEnv('unit-branch-retire') });
-  if ((deleteResult.status ?? -1) !== 0 && !deleteResult.stderr.includes('not found')) fail('unit-branch-retire-failed', 'failed to retire unit branch.', [deleteResult.stderr.trim()]);
-}
-
-async function removePath(path: string): Promise<void> {
-  await rm(path, { recursive: true, force: true });
-}
-
-void removePath;
 
 function diffPaths(cwd: string, left: string, right: string): readonly string[] {
   const output = runGit(['diff', '--name-only', '-z', left, right], cwd);

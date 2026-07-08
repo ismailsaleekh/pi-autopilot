@@ -1,9 +1,10 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { readFile, rm } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { parseAutopilotExecutionAudit, parseAutopilotExecutionCommit, parseAutopilotReceipt, parseAutopilotStatusEntry } from "./contracts/index.js";
 import { gitHead, readGitStatus, releaseClaimsForUnit, runGit, updateUnitBranchStatus, withAutopilotFileLock, writeJsonAtomic } from "./parallel-runtime.js";
+import { cleanupTerminalUnitWorktree } from "./worktree-cleanup.js";
 export class AutopilotUnitMergeError extends Error {
     name = 'AutopilotUnitMergeError';
     code;
@@ -85,7 +86,15 @@ export async function mergeAutopilotUnit(input) {
         const archiveRef = `autopilot/archive/${active.workstream_run}/unit/${input.unitId}/attempt-${String(input.attempt)}`;
         runGit(['update-ref', `refs/heads/${archiveRef}`, unitHead], active.source_repo, runtimeGitEnv('unit-archive', input.env));
         await updateUnitBranchStatus({ active, unitId: input.unitId, attempt: input.attempt, status: 'merged', currentSha: unitHead, archiveRef });
-        retireUnitWorktree(active, executionCommit.cwd, unitBranch);
+        await cleanupTerminalUnitWorktree({
+            active,
+            unitId: input.unitId,
+            attempt: input.attempt,
+            allowedStatuses: ['merged'],
+            reason: 'autopilot unit merge cleanup',
+            ...(input.env === undefined ? {} : { env: input.env }),
+            now,
+        });
         return { outcome: 'merged', merge, blockers: [], conflict_path: null };
     });
 }
@@ -143,17 +152,6 @@ async function readJsonFile(path) {
         fail('json-read-failed', `failed to read ${path}: ${errorMessage(error)}`);
     }
 }
-function retireUnitWorktree(active, unitWorktree, branch) {
-    if (existsSync(unitWorktree))
-        runGit(['worktree', 'remove', '--force', unitWorktree], active.source_repo, runtimeGitEnv('unit-worktree-remove'));
-    const deleteResult = spawnSync('git', ['branch', '-D', branch], { cwd: active.source_repo, encoding: 'utf8', env: runtimeGitEnv('unit-branch-retire') });
-    if ((deleteResult.status ?? -1) !== 0 && !deleteResult.stderr.includes('not found'))
-        fail('unit-branch-retire-failed', 'failed to retire unit branch.', [deleteResult.stderr.trim()]);
-}
-async function removePath(path) {
-    await rm(path, { recursive: true, force: true });
-}
-void removePath;
 function diffPaths(cwd, left, right) {
     const output = runGit(['diff', '--name-only', '-z', left, right], cwd);
     return Object.freeze(output.split('\0').filter((path) => path.length > 0).map((path) => path.replace(/\\/gu, '/')).sort((leftPath, rightPath) => leftPath.localeCompare(rightPath)));

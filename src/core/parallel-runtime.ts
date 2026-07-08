@@ -18,6 +18,7 @@ import {
 } from './checkout-profile.ts';
 import { assertAutopilotDiskGate } from './disk-gate.ts';
 import { createAutopilotGitWorktree, removeGitWorktreeIfPresent } from './sparse-worktree.ts';
+import { cleanupTerminalUnitWorktreesForRun } from './worktree-cleanup.ts';
 import { AUTOPILOT_RUNTIME_ROOT_PREFIX } from './names.ts';
 import { isValidWorkstreamSlug } from './paths.ts';
 
@@ -361,6 +362,7 @@ export async function prepareAutopilotUnitWorktree(input: {
       const info = existsSync(infoPath) ? parseUnitInfo(JSON.parse(await readFile(infoPath, 'utf8')) as unknown) : unitInfoFromBranch(input.active, found, now);
       return { unitInfo: info, created: false, resumed: true };
     }
+    await cleanupTerminalUnitWorktreesForRun({ active: input.active, reason: 'prepare unit worktree pre-create cleanup', env, now });
     if (existsSync(unitAttemptRoot)) fail('unit-worktree-path-exists', 'unit attempt path already exists without metadata.', [unitAttemptRoot]);
     assertBranchAvailable(input.active.source_repo, branch);
     const checkout = await checkoutMetadataForTaskRoot(taskRoot);

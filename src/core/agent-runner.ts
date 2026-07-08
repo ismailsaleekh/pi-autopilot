@@ -42,8 +42,10 @@ import {
   unitWorktreePathForActiveAutopilot,
   resolveActiveAutopilotForSpec,
   type ActiveAutopilotContext,
+  type ActiveAutopilotRow,
   type AutopilotPathClaim,
 } from './parallel-runtime.ts';
+import { rollbackCreatedUnitWorktree } from './worktree-cleanup.ts';
 import {
   assertAutopilotSpecMaterializationDiskGate,
   expandedReadOnlyPathsForAudit,
@@ -535,8 +537,26 @@ async function preflightSpec(
   specPath: string,
   options: { readonly skipStaleOutputCheck?: boolean; readonly skipClaimAcquire?: boolean; readonly env?: ProcessEnv } = {},
 ): Promise<RuntimePreflightResult> {
-  await prepareMissingSourceChangingUnitWorktree(spec, options.env ?? process.env);
+  const preparedWorktree = await prepareMissingSourceChangingUnitWorktree(spec, options.env ?? process.env);
+  try {
+    return await preflightSpecAfterWorktreePreparation(spec, specPath, options);
+  } catch (error) {
+    if (preparedWorktree.created) {
+      try {
+        await rollbackCreatedUnitWorktree({ active: preparedWorktree.active, unitId: preparedWorktree.unitId, attempt: preparedWorktree.attempt, reason: `autopilot-agent-run preflight rollback after failure: ${errorMessage(error)}`, env: options.env ?? process.env });
+      } catch (rollbackError) {
+        throw preflightRollbackFailure(spec, specPath, error, rollbackError);
+      }
+    }
+    throw error;
+  }
+}
 
+async function preflightSpecAfterWorktreePreparation(
+  spec: AutopilotUnitSpec,
+  specPath: string,
+  options: { readonly skipStaleOutputCheck?: boolean; readonly skipClaimAcquire?: boolean; readonly env?: ProcessEnv } = {},
+): Promise<RuntimePreflightResult> {
   try {
     await access(spec.cwd, fsConstants.R_OK);
   } catch (error) {
@@ -634,27 +654,31 @@ async function preflightSpec(
   return { context: runtimeContext, acquiredClaims };
 }
 
-async function prepareMissingSourceChangingUnitWorktree(spec: AutopilotUnitSpec, env: ProcessEnv): Promise<void> {
-  if (spec.role !== 'implement' && spec.role !== 'fix') return;
-  if (existsSync(spec.cwd)) return;
+type MissingSourceChangingUnitWorktreePreparation =
+  | { readonly created: false }
+  | { readonly created: true; readonly active: ActiveAutopilotRow; readonly unitId: string; readonly attempt: number };
+
+async function prepareMissingSourceChangingUnitWorktree(spec: AutopilotUnitSpec, env: ProcessEnv): Promise<MissingSourceChangingUnitWorktreePreparation> {
+  if (spec.role !== 'implement' && spec.role !== 'fix') return { created: false };
+  if (existsSync(spec.cwd)) return { created: false };
   const artifactRoot = deriveAutopilotArtifactRoot(spec);
   const runtimeSuffix = `${AUTOPILOT_RUNTIME_ROOT_MARKER}/${spec.workstream}`;
-  if (!artifactRoot.endsWith(runtimeSuffix)) return;
+  if (!artifactRoot.endsWith(runtimeSuffix)) return { created: false };
   const mainWorktreePath = artifactRoot.slice(0, artifactRoot.length - runtimeSuffix.length);
   const taskRoot = dirname(mainWorktreePath);
   let taskInfo: JsonRecord;
   try {
     const parsed = JSON.parse(await readFile(resolve(taskRoot, '_task-info.json'), 'utf8')) as unknown;
-    if (!isJsonRecord(parsed)) return;
+    if (!isJsonRecord(parsed)) return { created: false };
     taskInfo = parsed;
   } catch {
-    return;
+    return { created: false };
   }
   const repoKey = taskInfo['repo_key'];
-  if (typeof repoKey !== 'string' || repoKey.length === 0) return;
+  if (typeof repoKey !== 'string' || repoKey.length === 0) return { created: false };
   const activeRows = await readActiveAutopilots(coordinationRootForRepo(repoKey, env));
   const active = activeRows.find((row) => row.workstream === spec.workstream && row.runtime_root === artifactRoot);
-  if (active === undefined) return;
+  if (active === undefined) return { created: false };
   const expectedCwd = unitWorktreePathForActiveAutopilot(active, spec.unit_id, spec.attempt);
   if (resolve(spec.cwd) !== resolve(expectedCwd)) {
     throw new AutopilotAgentRunError('spec-invalid', {
@@ -663,7 +687,17 @@ async function prepareMissingSourceChangingUnitWorktree(spec: AutopilotUnitSpec,
       receiptOutput: spec.receipt_output,
     });
   }
-  await prepareAutopilotUnitWorktree({ active, unitId: spec.unit_id, attempt: spec.attempt, unitSpec: spec, env });
+  const prepared = await prepareAutopilotUnitWorktree({ active, unitId: spec.unit_id, attempt: spec.attempt, unitSpec: spec, env });
+  return prepared.created ? { created: true, active, unitId: spec.unit_id, attempt: spec.attempt } : { created: false };
+}
+
+function preflightRollbackFailure(spec: AutopilotUnitSpec, specPath: string, originalError: unknown, rollbackError: unknown): AutopilotAgentRunError {
+  return new AutopilotAgentRunError('spec-invalid', {
+    reason: `preflight failed before child launch (${errorMessage(originalError)}), and rollback of the newly-created unit worktree was blocked: ${errorMessage(rollbackError)}`,
+    specPath,
+    statusOutput: spec.status_output,
+    receiptOutput: spec.receipt_output,
+  });
 }
 
 const AUTOPILOT_RUNTIME_ROOT_MARKER = '/.pi/autopilot';

@@ -1,13 +1,14 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { describe, it } from 'node:test';
 
 import type { AutopilotExecutionAudit, AutopilotExecutionCommit, AutopilotReceipt, AutopilotState, AutopilotStatusEntry, AutopilotUnitSpec } from '../../src/core/contracts/index.ts';
+import { runAutopilotAgentFromSpecPath } from '../../src/core/agent-runner.ts';
 import { runAutopilotClaimGc } from '../../src/core/claim-gc.ts';
 import { materializeAdditionalReadPathsForSpec, materializeAutopilotSpecPaths } from '../../src/core/materialization.ts';
 import { parseAutopilotCheckoutProfile } from '../../src/core/checkout-profile.ts';
@@ -15,14 +16,21 @@ import { projectAutopilotDiskUse } from '../../src/core/disk-gate.ts';
 import { planNextDispatch } from '../../src/core/scheduler.ts';
 import { readSchedulerConfig, writeSchedulerConfig } from '../../src/core/scheduler-config.ts';
 import { mergeAutopilotUnit } from '../../src/core/unit-merge.ts';
+import { abortFailedUnit, resetFailedUnit } from '../../src/core/unit-failure.ts';
+import { cleanupTerminalUnitWorktree, cleanupTerminalUnitWorktreesForRun } from '../../src/core/worktree-cleanup.ts';
 import { recordValidationStalenessForMerge, validationCanCloseSourceWork, type AutopilotValidationEvidence } from '../../src/core/validation-staleness.ts';
 import {
   AUTOPILOT_STATE_ROOT_ENV,
   acquireClaimsForUnit,
+  coordinationRootForRepo,
   prepareAutopilotUnitWorktree,
   prepareAutopilotWorkstream,
   readPathClaims,
+  readUnitIndex,
   resolveActiveAutopilotForSpec,
+  resolveRepoIdentity,
+  taskRootForActiveAutopilot,
+  updateUnitBranchStatus,
 } from '../../src/core/parallel-runtime.ts';
 
 async function withTempDir<T>(run: (root: string) => Promise<T>): Promise<T> {
@@ -115,6 +123,20 @@ function gitOut(root: string, args: readonly string[]): string {
   const result = spawnSync('git', args, { cwd: root, encoding: 'utf8' });
   assert.equal(result.status, 0, result.stderr);
   return result.stdout.trim();
+}
+
+function gitWorktreeListContains(root: string, worktreePath: string): boolean {
+  const expected = normalizeTestPath(worktreePath);
+  return gitOut(root, ['worktree', 'list', '--porcelain'])
+    .split('\n')
+    .filter((line) => line.startsWith('worktree '))
+    .map((line) => normalizeTestPath(line.slice('worktree '.length)))
+    .some((path) => path === expected);
+}
+
+function normalizeTestPath(path: string): string {
+  if (!existsSync(path)) return path;
+  return realpathSync(path);
 }
 
 void describe('Phase 2 scheduler config and deterministic scheduler', () => {
@@ -303,6 +325,8 @@ void describe('Phase 2 unit worktrees, claims, mergeback, staleness, and GC', ()
       assert.deepEqual(merge.changed_paths, ['src/u01.ts']);
       assert.equal((await readPathClaims(context.coordinationRoot)).length, 0);
       assert.equal(existsSync(join(prepared.runtimeRoot, 'unit-merges', 'u01.implement.attempt-1.json')), true);
+      assert.equal(existsSync(unit.unitInfo.worktree_path), false);
+      assert.equal(gitWorktreeListContains(source, unit.unitInfo.worktree_path), false);
       const validation: AutopilotValidationEvidence = {
         schema_version: 'autopilot.validation_evidence.v1',
         workstream: 'phase2-smoke',
@@ -332,6 +356,97 @@ void describe('Phase 2 unit worktrees, claims, mergeback, staleness, and GC', ()
       await acquireClaimsForUnit({ context: context2, spec: spec2, reason: 'phase2 gc setup' });
       const gcDry = await runAutopilotClaimGc({ sourceCwd: source, apply: false, now: new Date('2026-07-08T00:00:02.000Z') });
       assert.equal(gcDry.candidates.some((candidate) => candidate.blockers.some((blocker) => blocker.includes('live'))), true);
+    });
+  });
+
+  void it('cleans same-run terminal unit worktrees before creating a new unit and leaves foreign runs untouched', async () => {
+    await withTempDir(async (root) => {
+      const source = join(root, 'source');
+      await initGitSource(source);
+      const runA = await prepareAutopilotWorkstream({ workstream: 'phase2-smoke', sourceCwd: source });
+      const oldA = await prepareAutopilotUnitWorktree({ active: runA.active, unitId: 'u-old', attempt: 1 });
+      await updateUnitBranchStatus({ active: runA.active, unitId: 'u-old', attempt: 1, status: 'aborted', currentSha: gitOut(oldA.unitInfo.worktree_path, ['rev-parse', 'HEAD']), archiveRef: null });
+      const runB = await prepareAutopilotWorkstream({ workstream: 'phase2-other', sourceCwd: source });
+      const oldB = await prepareAutopilotUnitWorktree({ active: runB.active, unitId: 'u-old', attempt: 1 });
+      await updateUnitBranchStatus({ active: runB.active, unitId: 'u-old', attempt: 1, status: 'aborted', currentSha: gitOut(oldB.unitInfo.worktree_path, ['rev-parse', 'HEAD']), archiveRef: null });
+      const cleanup = await cleanupTerminalUnitWorktreesForRun({ active: runA.active, reason: 'phase2 cleanup isolation test' });
+      assert.equal(cleanup.removed_paths.includes(oldA.unitInfo.worktree_path), true);
+      assert.equal(existsSync(oldA.unitInfo.worktree_path), false);
+      assert.equal(gitWorktreeListContains(source, oldA.unitInfo.worktree_path), false);
+      assert.equal(existsSync(oldB.unitInfo.worktree_path), true);
+      assert.equal(gitWorktreeListContains(source, oldB.unitInfo.worktree_path), true);
+      const nextA = await prepareAutopilotUnitWorktree({ active: runA.active, unitId: 'u-new', attempt: 1 });
+      assert.equal(existsSync(nextA.unitInfo.worktree_path), true);
+      assert.equal(existsSync(oldB.unitInfo.worktree_path), true);
+    });
+  });
+
+  void it('unit reset and abort transitions remove their unit worktrees after recorded reset evidence', async () => {
+    await withTempDir(async (root) => {
+      const source = join(root, 'source');
+      await initGitSource(source);
+      const prepared = await prepareAutopilotWorkstream({ workstream: 'phase2-smoke', sourceCwd: source });
+      const resetUnit = await prepareAutopilotUnitWorktree({ active: prepared.active, unitId: 'u-reset', attempt: 1 });
+      await mkdir(join(resetUnit.unitInfo.worktree_path, 'src'), { recursive: true });
+      await writeFile(join(resetUnit.unitInfo.worktree_path, 'src', 'reset.ts'), 'reset residue\n', 'utf8');
+      await resetFailedUnit({ context: { repo: resolveRepoIdentity(resetUnit.unitInfo.worktree_path), active: prepared.active, coordinationRoot: coordinationRootForRepo(prepared.active.repo_key), claimsPath: '', claimEventsPath: '' }, unitId: 'u-reset', attempt: 1, unitWorktreePath: resetUnit.unitInfo.worktree_path, summary: 'reset failed unit', now: new Date('2026-07-08T00:00:03.000Z') });
+      assert.equal(existsSync(resetUnit.unitInfo.worktree_path), false);
+      assert.equal(gitWorktreeListContains(source, resetUnit.unitInfo.worktree_path), false);
+
+      const abortUnit = await prepareAutopilotUnitWorktree({ active: prepared.active, unitId: 'u-abort', attempt: 1 });
+      await mkdir(join(abortUnit.unitInfo.worktree_path, 'src'), { recursive: true });
+      await writeFile(join(abortUnit.unitInfo.worktree_path, 'src', 'abort.ts'), 'abort residue\n', 'utf8');
+      await abortFailedUnit({ context: { repo: resolveRepoIdentity(abortUnit.unitInfo.worktree_path), active: prepared.active, coordinationRoot: coordinationRootForRepo(prepared.active.repo_key), claimsPath: '', claimEventsPath: '' }, unitId: 'u-abort', attempt: 1, unitWorktreePath: abortUnit.unitInfo.worktree_path, summary: 'abort failed unit', now: new Date('2026-07-08T00:00:04.000Z') });
+      assert.equal(existsSync(abortUnit.unitInfo.worktree_path), false);
+      assert.equal(gitWorktreeListContains(source, abortUnit.unitInfo.worktree_path), false);
+    });
+  });
+
+  void it('runner preflight rollback removes a newly-created unlaunched unit worktree', async () => {
+    await withTempDir(async (root) => {
+      const source = join(root, 'source');
+      await initGitSource(source);
+      const prepared = await prepareAutopilotWorkstream({ workstream: 'phase2-smoke', sourceCwd: source });
+      const unitCwd = join(prepared.taskRoot, 'units', 'u-rollback', 'attempt-1', 'worktree');
+      const baseSpec = unitSpec({ cwd: unitCwd, runtimeRoot: prepared.runtimeRoot, unitId: 'u-rollback', ownedPaths: ['src/rollback.ts'] });
+      const spec: AutopilotUnitSpec = {
+        ...baseSpec,
+        verification_plan: {
+          ...emptyPlan(),
+          positive_witnesses: [{ id: 'rollback-stale-output', expected_signal: 'preflight fails before launch', required: true, inspection_target: 'src/rollback.ts' }],
+        },
+      };
+      await writeJson(spec.status_output, { stale: true });
+      const specPath = join(prepared.runtimeRoot, 'unit-specs', 'u-rollback.json');
+      await writeJson(specPath, spec);
+      await expectRejects(() => runAutopilotAgentFromSpecPath(specPath), /status_output already exists/u);
+      assert.equal(existsSync(unitCwd), false);
+      assert.equal(gitWorktreeListContains(source, unitCwd), false);
+      const index = await readUnitIndex(taskRootForActiveAutopilot(prepared.active));
+      assert.equal(index.units.some((unit) => unit.unit_id === 'u-rollback'), false);
+    });
+  });
+
+  void it('dirty, quarantined, and active unit worktrees block direct cleanup', async () => {
+    await withTempDir(async (root) => {
+      const source = join(root, 'source');
+      await initGitSource(source);
+      const prepared = await prepareAutopilotWorkstream({ workstream: 'phase2-smoke', sourceCwd: source });
+      const activeUnit = await prepareAutopilotUnitWorktree({ active: prepared.active, unitId: 'u-active', attempt: 1 });
+      await expectRejects(() => cleanupTerminalUnitWorktree({ active: prepared.active, unitId: 'u-active', attempt: 1, reason: 'active blocker test' }), /unit-status-not-terminal/u);
+      assert.equal(existsSync(activeUnit.unitInfo.worktree_path), true);
+
+      const dirtyUnit = await prepareAutopilotUnitWorktree({ active: prepared.active, unitId: 'u-dirty', attempt: 1 });
+      const quarantinedUnit = await prepareAutopilotUnitWorktree({ active: prepared.active, unitId: 'u-quarantine', attempt: 1 });
+      await updateUnitBranchStatus({ active: prepared.active, unitId: 'u-dirty', attempt: 1, status: 'aborted', currentSha: gitOut(dirtyUnit.unitInfo.worktree_path, ['rev-parse', 'HEAD']), archiveRef: null });
+      await mkdir(join(dirtyUnit.unitInfo.worktree_path, 'src'), { recursive: true });
+      await writeFile(join(dirtyUnit.unitInfo.worktree_path, 'src', 'dirty.ts'), 'dirty residue\n', 'utf8');
+      await expectRejects(() => cleanupTerminalUnitWorktree({ active: prepared.active, unitId: 'u-dirty', attempt: 1, reason: 'dirty blocker test' }), /dirty-terminal-unit-worktree/u);
+      assert.equal(existsSync(dirtyUnit.unitInfo.worktree_path), true);
+
+      await updateUnitBranchStatus({ active: prepared.active, unitId: 'u-quarantine', attempt: 1, status: 'quarantined', currentSha: gitOut(quarantinedUnit.unitInfo.worktree_path, ['rev-parse', 'HEAD']), archiveRef: null });
+      await expectRejects(() => cleanupTerminalUnitWorktree({ active: prepared.active, unitId: 'u-quarantine', attempt: 1, reason: 'quarantine blocker test' }), /unit-status-not-terminal/u);
+      assert.equal(existsSync(quarantinedUnit.unitInfo.worktree_path), true);
     });
   });
 });

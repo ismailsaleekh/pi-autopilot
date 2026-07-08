@@ -19,6 +19,7 @@ import {
 } from './contracts/index.ts';
 import { evaluateAutopilotClosureGate } from './lifecycle/index.ts';
 import { parseAutopilotUnitMerge, type AutopilotUnitMerge } from './unit-merge.ts';
+import { cleanupClosedAutopilotRun } from './worktree-cleanup.ts';
 import {
   ACTIVE_AUTOPILOTS_FILE,
   BRANCHES_FILE,
@@ -293,7 +294,7 @@ export async function closeAutopilotWorkstream(options: AutopilotCloseOptions): 
         const archivedRuntimePath = await archiveRuntimeArtifacts(closedContext, archiveRef, now);
         const releasedClaims = await releaseRetainedClaims(closedContext, validation.retainedClaims, now);
         await archiveWorktreeIndex(active, now);
-        retireBranchAndRemoveWorktree(context.repo.repoRoot, active, archiveRef, targetAfter);
+        await cleanupClosedAutopilotRun({ active, archiveRef, archiveSha: targetAfter, reason: 'autopilot close run-owned cleanup', removeActiveTaskDir: true, env, now });
 
         const archiveCloseResultPath = join(dirname(archivedRuntimePath), '_close-result.json');
         const result = buildCloseResult({
@@ -399,7 +400,7 @@ export async function abortAutopilotWorkstream(options: AutopilotCloseOptions): 
         );
         const releasedClaims = await releaseRetainedClaims(closedContext, latestRetainedClaims, now);
         await archiveWorktreeIndex(active, now);
-        retireBranchAndRemoveWorktree(context.repo.repoRoot, active, archiveRef, workstreamHead);
+        await cleanupClosedAutopilotRun({ active, archiveRef, archiveSha: workstreamHead, reason: 'autopilot abort run-owned cleanup', removeActiveTaskDir: true, env, now });
         const archiveCloseResultPath = join(dirname(archivedRuntimePath), '_abort-result.json');
         const result = buildCloseResult({
           outcome: 'aborted',
@@ -1075,35 +1076,6 @@ async function releaseRetainedClaims(
 
 function claimKey(claim: AutopilotPathClaim): string {
   return `${claim.autopilot_id}\0${claim.workstream_run}\0${claim.active_run_epoch}\0${claim.unit_id}\0${String(claim.attempt)}\0${claim.claim_type}\0${claim.path}`;
-}
-
-function removeSafeTerminalUnitWorktrees(sourceRepo: string, row: ActiveAutopilotRow): void {
-  const indexPath = join(taskRootForActiveAutopilot(row), UNIT_INDEX_FILE);
-  if (!existsSync(indexPath)) return;
-  const parsed = JSON.parse(readFileSync(indexPath, 'utf8')) as unknown;
-  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) fail('invalid-unit-index', '_unit-index.json must contain an object before worktree cleanup.', [indexPath]);
-  const units = (parsed as Readonly<Record<string, unknown>>)['units'];
-  if (!Array.isArray(units)) fail('invalid-unit-index', '_unit-index.json units must be an array before worktree cleanup.', [indexPath]);
-  for (const unit of units) {
-    if (typeof unit !== 'object' || unit === null || Array.isArray(unit)) continue;
-    const rowRecord = unit as Readonly<Record<string, unknown>>;
-    const status = rowRecord['status'];
-    const worktreePath = rowRecord['worktree_path'];
-    if (typeof worktreePath !== 'string' || !existsSync(worktreePath)) continue;
-    if (status !== 'merged' && status !== 'aborted' && status !== 'superseded') continue;
-    if (readGitStatus(worktreePath).changedPaths.length > 0) fail('dirty-terminal-unit-worktree', 'refusing to remove dirty terminal unit worktree during close cleanup.', [worktreePath]);
-    runGit(['worktree', 'remove', '--force', worktreePath], sourceRepo, runtimeGitEnv('unit-worktree-remove'));
-  }
-}
-
-function retireBranchAndRemoveWorktree(sourceRepo: string, row: ActiveAutopilotRow, archiveRef: string, targetAfter: string): void {
-  runGit(['update-ref', `refs/heads/${archiveRef}`, targetAfter], sourceRepo, runtimeGitEnv('archive-ref'));
-  removeSafeTerminalUnitWorktrees(sourceRepo, row);
-  if (existsSync(row.main_worktree_path)) runGit(['worktree', 'remove', '--force', row.main_worktree_path], sourceRepo, runtimeGitEnv('worktree-remove'));
-  const deleteResult = spawnSync('git', ['branch', '-D', row.branch], { cwd: sourceRepo, encoding: 'utf8', env: runtimeGitEnv('branch-retire') });
-  if (deleteResult.status !== 0 && !deleteResult.stderr.includes('not found')) {
-    fail('branch-retire-failed', 'failed to retire Autopilot branch after successful merge', [deleteResult.stderr.trim()]);
-  }
 }
 
 async function appendForeignMergeAcks(context: PreparedCloseContext, merges: readonly AutopilotMergeEvent[], now: Date): Promise<void> {

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -37,7 +37,9 @@ async function withTempDir<T>(run: (root: string) => Promise<T>): Promise<T> {
 
 interface PreparedCloseFixture {
   readonly source: string;
+  readonly taskRoot: string;
   readonly worktree: string;
+  readonly unitWorktree: string;
   readonly runtimeRoot: string;
   readonly workstreamRun: string;
   readonly repoKey: string;
@@ -77,7 +79,9 @@ async function prepareCloseFixture(root: string): Promise<PreparedCloseFixture> 
   });
   return {
     source,
+    taskRoot: prepared.taskRoot,
     worktree: prepared.mainWorktreePath,
+    unitWorktree: unitWorktree.unitInfo.worktree_path,
     runtimeRoot: prepared.runtimeRoot,
     workstreamRun: prepared.active.workstream_run,
     repoKey: prepared.active.repo_key,
@@ -346,6 +350,20 @@ function gitOutput(cwd: string, args: readonly string[]): string {
   return result.stdout.trim();
 }
 
+function gitWorktreeListContains(cwd: string, worktreePath: string): boolean {
+  const expected = normalizeTestPath(worktreePath);
+  return gitOutput(cwd, ['worktree', 'list', '--porcelain'])
+    .split('\n')
+    .filter((line) => line.startsWith('worktree '))
+    .map((line) => normalizeTestPath(line.slice('worktree '.length)))
+    .some((path) => path === expected);
+}
+
+function normalizeTestPath(path: string): string {
+  if (!existsSync(path)) return path;
+  return realpathSync(path);
+}
+
 void describe('Autopilot close runtime', () => {
   void it('lands a validated workstream branch, releases claims, archives runtime, and retires the branch', async () => {
     await withTempDir(async (root) => {
@@ -356,6 +374,10 @@ void describe('Autopilot close runtime', () => {
       assert.deepEqual(result.changed_paths, ['src/smoke.ts']);
       assert.equal(await readFile(join(fixture.source, 'src', 'smoke.ts'), 'utf8'), 'export const smoke = "autopilot";\n');
       assert.equal(existsSync(fixture.worktree), false);
+      assert.equal(existsSync(fixture.unitWorktree), false);
+      assert.equal(existsSync(fixture.taskRoot), false);
+      assert.equal(gitWorktreeListContains(fixture.source, fixture.worktree), false);
+      assert.equal(gitWorktreeListContains(fixture.source, fixture.unitWorktree), false);
       assert.equal(gitOutput(fixture.source, ['branch', '--list', `autopilot/${fixture.workstreamRun}`]), '');
       assert.match(gitOutput(fixture.source, ['branch', '--list', `autopilot/archive/${fixture.workstreamRun}/main`]), /autopilot\/archive\//u);
       const claims = await readPathClaims(coordinationRootForRepo(fixture.repoKey));
@@ -377,6 +399,10 @@ void describe('Autopilot close runtime', () => {
       assert.deepEqual(result.blockers, []);
       assert.equal(await readFile(join(fixture.source, 'src', 'smoke.ts'), 'utf8'), 'export const smoke = "baseline";\n');
       assert.equal(existsSync(fixture.worktree), false);
+      assert.equal(existsSync(fixture.unitWorktree), false);
+      assert.equal(existsSync(fixture.taskRoot), false);
+      assert.equal(gitWorktreeListContains(fixture.source, fixture.worktree), false);
+      assert.equal(gitWorktreeListContains(fixture.source, fixture.unitWorktree), false);
       assert.match(gitOutput(fixture.source, ['branch', '--list', `autopilot/archive/${fixture.workstreamRun}/aborted`]), /autopilot\/archive\//u);
       const claims = await readPathClaims(coordinationRootForRepo(fixture.repoKey));
       assert.deepEqual(claims, []);

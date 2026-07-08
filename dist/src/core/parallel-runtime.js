@@ -7,6 +7,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { AUTOPILOT_CHECKOUT_PROFILE_SNAPSHOT_FILE, checkoutProfileSnapshotFromResolved, readCheckoutProfileSnapshot, resolveAutopilotCheckoutProfile, sparseIncludePatternsForPaths, } from "./checkout-profile.js";
 import { assertAutopilotDiskGate } from "./disk-gate.js";
 import { createAutopilotGitWorktree, removeGitWorktreeIfPresent } from "./sparse-worktree.js";
+import { cleanupTerminalUnitWorktreesForRun } from "./worktree-cleanup.js";
 import { AUTOPILOT_RUNTIME_ROOT_PREFIX } from "./names.js";
 import { isValidWorkstreamSlug } from "./paths.js";
 export const AUTOPILOT_STATE_ROOT_ENV = 'AUTOPILOT_STATE_ROOT';
@@ -134,6 +135,7 @@ export async function prepareAutopilotUnitWorktree(input) {
             const info = existsSync(infoPath) ? parseUnitInfo(JSON.parse(await readFile(infoPath, 'utf8'))) : unitInfoFromBranch(input.active, found, now);
             return { unitInfo: info, created: false, resumed: true };
         }
+        await cleanupTerminalUnitWorktreesForRun({ active: input.active, reason: 'prepare unit worktree pre-create cleanup', env, now });
         if (existsSync(unitAttemptRoot))
             fail('unit-worktree-path-exists', 'unit attempt path already exists without metadata.', [unitAttemptRoot]);
         assertBranchAvailable(input.active.source_repo, branch);

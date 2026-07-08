@@ -2,6 +2,7 @@ import { existsSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { gitHead, readGitStatus, releaseClaimsForUnit, runGit, updateUnitBranchStatus, writeJsonAtomic } from "./parallel-runtime.js";
+import { cleanupTerminalUnitWorktree } from "./worktree-cleanup.js";
 export async function quarantineFailedUnit(input) {
     const record = await writeFailureRecord({ ...input, action: 'quarantine' });
     await updateUnitBranchStatus({ active: input.context.active, unitId: input.unitId, attempt: input.attempt, status: 'quarantined', currentSha: existsSync(input.unitWorktreePath) ? gitHead(input.unitWorktreePath) : input.context.active.target_base_sha, archiveRef: null });
@@ -9,14 +10,12 @@ export async function quarantineFailedUnit(input) {
     return record;
 }
 export async function resetFailedUnit(input) {
-    if (existsSync(input.unitWorktreePath))
-        runGit(['reset', '--hard', 'HEAD'], input.unitWorktreePath, { AUTOPILOT_RUNTIME: '1', AUTOPILOT_RUNTIME_AUTHORITY: 'unit-reset' });
     const record = await writeFailureRecord({ ...input, action: 'reset' });
+    resetWorktreeForRecordedTransition(input.unitWorktreePath, 'unit-reset');
     await releaseClaimsForUnit(releaseInput(input, 'autopilot failed unit reset'));
     const currentSha = existsSync(input.unitWorktreePath) ? gitHead(input.unitWorktreePath) : input.context.active.target_base_sha;
     await updateUnitBranchStatus({ active: input.context.active, unitId: input.unitId, attempt: input.attempt, status: 'aborted', currentSha, archiveRef: null });
-    if (existsSync(input.unitWorktreePath))
-        runGit(['worktree', 'remove', '--force', input.unitWorktreePath], input.context.active.source_repo, { AUTOPILOT_RUNTIME: '1', AUTOPILOT_RUNTIME_AUTHORITY: 'unit-reset-remove' });
+    await cleanupTerminalUnitWorktree({ active: input.context.active, unitId: input.unitId, attempt: input.attempt, allowedStatuses: ['aborted'], reason: 'autopilot failed unit reset cleanup', ...(input.now === undefined ? {} : { now: input.now }) });
     return record;
 }
 export async function preserveFailedUnit(input) {
@@ -26,14 +25,20 @@ export async function preserveFailedUnit(input) {
 }
 export async function abortFailedUnit(input) {
     const record = await writeFailureRecord({ ...input, action: 'abort' });
+    resetWorktreeForRecordedTransition(input.unitWorktreePath, 'unit-abort-reset');
     await releaseClaimsForUnit(releaseInput(input, 'autopilot failed unit abort'));
     const currentSha = existsSync(input.unitWorktreePath) ? gitHead(input.unitWorktreePath) : input.context.active.target_base_sha;
     const archiveRef = `autopilot/archive/${input.context.active.workstream_run}/unit/${input.unitId}/attempt-${String(input.attempt)}/aborted`;
     runGit(['update-ref', `refs/heads/${archiveRef}`, currentSha], input.context.active.source_repo, { AUTOPILOT_RUNTIME: '1', AUTOPILOT_RUNTIME_AUTHORITY: 'unit-abort-archive' });
     await updateUnitBranchStatus({ active: input.context.active, unitId: input.unitId, attempt: input.attempt, status: 'aborted', currentSha, archiveRef });
-    if (existsSync(input.unitWorktreePath))
-        runGit(['worktree', 'remove', '--force', input.unitWorktreePath], input.context.active.source_repo, { AUTOPILOT_RUNTIME: '1', AUTOPILOT_RUNTIME_AUTHORITY: 'unit-abort-remove' });
+    await cleanupTerminalUnitWorktree({ active: input.context.active, unitId: input.unitId, attempt: input.attempt, allowedStatuses: ['aborted'], reason: 'autopilot failed unit abort cleanup', ...(input.now === undefined ? {} : { now: input.now }) });
     return record;
+}
+function resetWorktreeForRecordedTransition(unitWorktreePath, authority) {
+    if (!existsSync(unitWorktreePath))
+        return;
+    runGit(['reset', '--hard', 'HEAD'], unitWorktreePath, { AUTOPILOT_RUNTIME: '1', AUTOPILOT_RUNTIME_AUTHORITY: authority });
+    runGit(['clean', '-fd'], unitWorktreePath, { AUTOPILOT_RUNTIME: '1', AUTOPILOT_RUNTIME_AUTHORITY: authority });
 }
 function releaseInput(input, reason) {
     return input.now === undefined
