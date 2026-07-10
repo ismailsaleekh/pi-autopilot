@@ -10,6 +10,7 @@ import {
 } from '../names.ts';
 import { buildAutopilotProviderIdentity as buildForcedOutputAutopilotProviderIdentity } from '../forced-output/identity.ts';
 import { renderAutopilotPerfectQualityRules } from '../quality/contract.ts';
+import { autopilotModelRosterIssues } from '../model-roster.ts';
 import {
   AUTOPILOT_ROLE_VALUES,
   AUTOPILOT_STATUS_CHANGED_PATHS_LIMIT,
@@ -385,6 +386,7 @@ function autopilotUnitSpecIssues(spec: AutopilotUnitSpec): readonly string[] {
   }
   if (!AUTOPILOT_ROLE_VALUES.includes(spec.role)) issues.push(`unknown role ${spec.role}`);
   if (spec.template !== spec.role) issues.push('template must match role');
+  issues.push(...autopilotModelRosterIssues(spec));
   if (!Number.isInteger(spec.attempt) || spec.attempt < 1) issues.push('attempt must be a positive integer');
   if ((spec.role === 'implement' || spec.role === 'fix') && spec.owned_paths.length === 0) {
     issues.push(`${spec.role} specs require at least one owned path`);

@@ -11,6 +11,7 @@ import {
   CONTEXT_BUDGET_TOOL_NAME,
 } from './names.ts';
 import { renderAutopilotPerfectQualityRules } from './quality/contract.ts';
+import { renderAutopilotModelRoster } from './model-roster.ts';
 
 export interface AutopilotPromptInput {
   readonly workstream: string;
@@ -86,6 +87,14 @@ ${runtimeMetadata.length === 0 ? '' : `${runtimeMetadata}\n`}- Injected child la
 - If purpose truth conflicts with progress truth, launch no child work until an adjudication or operator decision resolves the conflict.
 - Markdown, chat summaries, logs, and hand-written ledgers are human hints only; never treat markdown as authoritative truth over schema-valid Autopilot artifacts.
 - Keep \`state.json\` compact and current; append lifecycle facts to \`events.jsonl\` and material purpose/scope decisions to \`decision-log.jsonl\` rather than rewriting history.
+
+## Fixed model roster
+
+Every newly created or retried unit spec must use this exact package-owned assignment. Never substitute another model or thinking level, including for low-risk work:
+
+${renderAutopilotModelRoster()}
+
+Historical completed specs remain immutable. If an unlaunched or retried historical spec does not match the roster, create a new roster-compliant attempt rather than rewriting accepted status, receipt, or audit evidence.
 
 ## Child launch rules
 

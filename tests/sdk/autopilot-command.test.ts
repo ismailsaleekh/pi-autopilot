@@ -8,6 +8,7 @@ import autopilotExtension, {
   type ExtensionCommandDefinitionLike,
   type ExtensionCommandContextLike,
   type ExtensionHostLike,
+  type ExtensionModelLike,
   type ExtensionToolCallHandler,
   type NotificationKind,
 } from '../../src/extension.ts';
@@ -42,16 +43,24 @@ interface Harness {
   readonly messages: CapturedMessage[];
   readonly notifications: CapturedNotification[];
   readonly toolCallHandlers: ExtensionToolCallHandler[];
+  readonly selectedModels: ExtensionModelLike[];
+  readonly thinkingLevels: string[];
   readonly ctx: ExtensionCommandContextLike;
 }
 
-function createHarness(cwd?: string): Harness {
+function createHarness(
+  cwd?: string,
+  options: { readonly modelAvailable?: boolean; readonly authenticationAvailable?: boolean } = {},
+): Harness {
   const commands = new Map<string, ExtensionCommandDefinitionLike>();
   const toolNames: string[] = [];
   const activeTools: string[] = [];
   const messages: CapturedMessage[] = [];
   const notifications: CapturedNotification[] = [];
   const toolCallHandlers: ExtensionToolCallHandler[] = [];
+  const selectedModels: ExtensionModelLike[] = [];
+  const thinkingLevels: string[] = [];
+  let thinkingLevel = 'high';
   const host: ExtensionHostLike = {
     registerCommand: (name, definition) => {
       commands.set(name, definition);
@@ -62,6 +71,15 @@ function createHarness(cwd?: string): Harness {
     getActiveTools: () => [...activeTools],
     setActiveTools: (names) => {
       activeTools.splice(0, activeTools.length, ...names);
+    },
+    setModel: (model) => {
+      selectedModels.push(model);
+      return Promise.resolve(options.authenticationAvailable !== false);
+    },
+    getThinkingLevel: () => thinkingLevel,
+    setThinkingLevel: (level) => {
+      thinkingLevel = level;
+      thinkingLevels.push(level);
     },
     sendUserMessage: (content, options) => {
       messages.push({ content, deliverAs: options.deliverAs });
@@ -77,10 +95,14 @@ function createHarness(cwd?: string): Harness {
         notifications.push({ message, kind });
       },
     },
+    modelRegistry: {
+      find: (provider, modelId) =>
+        options.modelAvailable === false ? undefined : { provider, id: modelId },
+    },
     ...(cwd === undefined ? {} : { cwd }),
   };
   autopilotExtension(host);
-  return { commands, toolNames, activeTools, messages, notifications, toolCallHandlers, ctx };
+  return { commands, toolNames, activeTools, messages, notifications, toolCallHandlers, selectedModels, thinkingLevels, ctx };
 }
 
 function requireCommand(harness: Harness, name: string): ExtensionCommandDefinitionLike {
@@ -139,11 +161,17 @@ void describe('Autopilot command SDK surface', () => {
       ]);
       assert.deepEqual(harness.toolNames, [CONTEXT_BUDGET_TOOL_NAME]);
       assert.deepEqual(harness.activeTools, [CONTEXT_BUDGET_TOOL_NAME]);
+      assert.deepEqual(harness.selectedModels, [{ provider: 'openai-codex', id: 'gpt-5.6-sol' }]);
+      assert.deepEqual(harness.thinkingLevels, ['xhigh']);
       assert.equal(harness.messages.length, 1);
       const message = harness.messages[0];
       if (message === undefined) throw new Error('missing parent prompt');
       assert.equal(message.deliverAs, 'followUp');
       assert.match(message.content, /call `context_budget` with no arguments/);
+      assert.match(message.content, /parent\/orchestrator: openai-codex\/gpt-5\.6-sol at xhigh/);
+      assert.match(message.content, /implement: openai-codex\/gpt-5\.6-terra at high/);
+      assert.match(message.content, /validate: openai-codex\/gpt-5\.6-sol at xhigh/);
+      assert.match(message.content, /extract: openai-codex\/gpt-5\.6-luna at high/);
       assert.match(message.content, /Runtime root: `.*\.pi\/autopilot\/demo`/);
       assert.match(message.content, /Registered Autopilot worktree/);
       assert.match(message.content, /autopilot\.execution_commit\.v1/);
@@ -173,11 +201,32 @@ void describe('Autopilot command SDK surface', () => {
     });
   });
 
+  void it('fails loudly before worktree preparation when the fixed parent model is unavailable', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pi-autopilot-roster-command-'));
+    const project = join(root, 'project');
+    try {
+      await initGitProject(project);
+      const missingModel = createHarness(project, { modelAvailable: false });
+      await requireCommand(missingModel, AUTOPILOT_COMMAND).handler('demo', missingModel.ctx);
+      assert.equal(missingModel.messages.length, 0);
+      assert.equal(missingModel.notifications.some((entry) => /gpt-5\.6-sol is not registered/u.test(entry.message)), true);
+
+      const missingAuth = createHarness(project, { authenticationAvailable: false });
+      await requireCommand(missingAuth, AUTOPILOT_COMMAND).handler('demo', missingAuth.ctx);
+      assert.equal(missingAuth.messages.length, 0);
+      assert.equal(missingAuth.notifications.some((entry) => /no usable subscription authentication/u.test(entry.message)), true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   void it('injects an active workstream without queueing the parent prompt and enables handoff', async () => {
     await withIsolatedHarness(async (harness) => {
       await requireCommand(harness, AUTOPILOT_INJECT_COMMAND).handler('demo', harness.ctx);
       assert.deepEqual(harness.toolNames, [CONTEXT_BUDGET_TOOL_NAME]);
       assert.deepEqual(harness.activeTools, [CONTEXT_BUDGET_TOOL_NAME]);
+      assert.deepEqual(harness.selectedModels, [{ provider: 'openai-codex', id: 'gpt-5.6-sol' }]);
+      assert.deepEqual(harness.thinkingLevels, ['xhigh']);
       assert.equal(harness.messages.length, 0);
       assert.equal(harness.notifications.some((entry) => /Autopilot injected for demo/.test(entry.message)), true);
 

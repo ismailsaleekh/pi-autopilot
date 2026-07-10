@@ -38,7 +38,7 @@ function makeSpec(root: string): AutopilotUnitSpec {
     attempt: 1,
     objective: 'Witness status emission.',
     cwd: root,
-    model: 'opencode-go/kimi-k2.6',
+    model: 'openai-codex/gpt-5.6-terra',
     thinking: 'high',
     owned_paths: ['src/witness.ts'],
     read_only_paths: [],

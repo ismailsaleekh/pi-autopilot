@@ -23,6 +23,23 @@ pi install .
 
 All commands use package-owned prompt sources and Autopilot names only.
 
+## Fixed model roster
+
+Autopilot enforces one package-owned model/thinking assignment for every parent and child role:
+
+| Role | Model | Thinking |
+|---|---|---|
+| Parent/orchestrator | `openai-codex/gpt-5.6-sol` | `xhigh` |
+| Strategy | `openai-codex/gpt-5.6-sol` | `xhigh` |
+| Implement | `openai-codex/gpt-5.6-terra` | `high` |
+| Validate | `openai-codex/gpt-5.6-sol` | `xhigh` |
+| Fix | `openai-codex/gpt-5.6-terra` | `high` |
+| Adjudicate | `openai-codex/gpt-5.6-sol` | `xhigh` |
+| Bughunt | `openai-codex/gpt-5.6-sol` | `xhigh` |
+| Extract | `openai-codex/gpt-5.6-luna` | `high` |
+
+`/autopilot` and `/autopilot-inject` select the parent assignment before preparing a worktree and fail loudly if the model, subscription authentication, or exact thinking level is unavailable. The spec-quality gate and prompt renderer reject child unit specs that deviate from the role assignment before model spend. Completed historical specs and their bound receipts/audits remain immutable; retries must use a new roster-compliant attempt.
+
 ## Tools and runtime surfaces
 
 - `context_budget` is the parent-session tool activated by `/autopilot`; it reports `ok`, `halt`, or `unknown` using the default 85% halt threshold unless configured otherwise.
@@ -61,7 +78,7 @@ autopilot-agent-run [--dry-run] [--json] [--pi-executable <path>] <unit-spec.jso
 
 The published bin launches compiled JavaScript under `dist/src/cli/autopilot-agent-run.js`; it does not execute TypeScript source from `node_modules` or rely on Node type stripping. The runner reads and validates an Autopilot unit spec, applies the deterministic Quality vNext spec gate before model spend, creates/resumes the deterministic per-unit worktree for source-changing implement/fix specs, rolls that worktree/branch back if later preflight fails before child launch, verifies that `cwd` is inside the registered Autopilot unit worktree, verifies a clean source baseline, acquires path claims for owned/read-only paths, builds the forced-output/status context against the authoritative main runtime root, renders the child prompt, optionally snapshots it, preflights stale status/receipt paths, and either dry-runs or launches Pi in RPC mode with the internal compiled status tool and worktree guard. Parent and child sessions may use local git inside registered Autopilot worktrees, including staging, commits, resets, restores, checkouts, cleanups, and rebases, but the guard rejects git whose effective cwd/work-tree is outside the active worktree plus explicit git remapping, remote/external subcommands, and shared branch/tag mutation. On completion the runner accepts matching status artifacts, receipt artifacts, and receipt-matching structured tool carriers, then writes an `autopilot.execution_audit.v1` record under `execution-audits/` and revalidates success statuses against the audit before transport acceptance; assistant text alone is rejected. Execution audits include committed-path deltas when a child creates in-worktree commits, and `autopilot.execution_commit.v1` evidence captures either runtime-created commits, child-created commits, or mixed child+runtime ranges on the unit branch. Stable failure classes distinguish invalid specs, Pi launch/runtime failures, missing structured output, invalid structured output, and non-success status verdicts, while runner output includes audit path/classification for parent semantic routing. Dirty baselines are attribution blockers only when they overlap unit-owned or protected surfaces; unrelated dirty paths are recorded as audit caveats instead of forcing a globally clean tree.
 
-Autopilot accepts subscription Pi model routes only for `openai-codex/*`, `anthropic/*`, `opencode-go/*`, `kimi-coding/*`, and `zai/*`. Other provider prefixes are rejected before child launch to avoid accidental metered frontier routes.
+Autopilot's forced-output identity layer recognizes subscription Pi provider routes under `openai-codex/*`, `anthropic/*`, `opencode-go/*`, `kimi-coding/*`, and `zai/*`, but the fixed launch roster is stricter: parent and child execution uses only the three documented `openai-codex/gpt-5.6-*` assignments. Any role/model/thinking mismatch is rejected before child launch; OpenRouter and other metered frontier routes remain forbidden.
 
 ## Close / merge lifecycle
 

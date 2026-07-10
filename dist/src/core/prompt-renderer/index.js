@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { AUTOPILOT_RUNNER_BIN, AUTOPILOT_SCHEMA_NAMES, AUTOPILOT_STATUS_TOOL, } from "../names.js";
 import { buildAutopilotProviderIdentity as buildForcedOutputAutopilotProviderIdentity } from "../forced-output/identity.js";
 import { renderAutopilotPerfectQualityRules } from "../quality/contract.js";
+import { autopilotModelRosterIssues } from "../model-roster.js";
 import { AUTOPILOT_ROLE_VALUES, AUTOPILOT_STATUS_CHANGED_PATHS_LIMIT, } from "../contracts/types.js";
 export { AUTOPILOT_ROLE_VALUES };
 export class AutopilotPromptTemplateError extends Error {
@@ -255,6 +256,7 @@ function autopilotUnitSpecIssues(spec) {
         issues.push(`unknown role ${spec.role}`);
     if (spec.template !== spec.role)
         issues.push('template must match role');
+    issues.push(...autopilotModelRosterIssues(spec));
     if (!Number.isInteger(spec.attempt) || spec.attempt < 1)
         issues.push('attempt must be a positive integer');
     if ((spec.role === 'implement' || spec.role === 'fix') && spec.owned_paths.length === 0) {

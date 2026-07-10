@@ -14,6 +14,7 @@ import { parseAutopilotAbortArgs, parseAutopilotArgs, parseAutopilotClaimGcArgs,
 import { AutopilotCloseError, abortAutopilotWorkstream, closeAutopilotWorkstream } from './core/close-runtime.ts';
 import { runAutopilotClaimGc } from './core/claim-gc.ts';
 import { readSchedulerConfig, writeSchedulerConfig } from './core/scheduler-config.ts';
+import { AUTOPILOT_PARENT_MODEL_ASSIGNMENT } from './core/model-roster.ts';
 import {
   evaluateAutopilotWorktreeToolCall,
   type AutopilotGuardDecision,
@@ -35,9 +36,19 @@ export interface ExtensionUiLike {
   notify(message: string, kind?: NotificationKind): void;
 }
 
+export interface ExtensionModelLike {
+  readonly provider: string;
+  readonly id: string;
+}
+
+export interface ExtensionModelRegistryLike {
+  find(provider: string, modelId: string): ExtensionModelLike | undefined;
+}
+
 export interface ExtensionCommandContextLike {
   readonly ui: ExtensionUiLike;
   readonly cwd?: string;
+  readonly modelRegistry?: ExtensionModelRegistryLike;
 }
 
 export interface ExtensionCommandDefinitionLike {
@@ -55,6 +66,9 @@ export interface ExtensionHostLike {
   registerTool(tool: ReturnType<typeof createContextBudgetTool>): void;
   getActiveTools?(): readonly string[];
   setActiveTools?(toolNames: readonly string[]): void;
+  setModel?(model: ExtensionModelLike): Promise<boolean>;
+  getThinkingLevel?(): string;
+  setThinkingLevel?(level: 'high' | 'xhigh'): void;
   sendUserMessage(content: string, options: { readonly deliverAs: 'followUp' }): void;
   on?(eventName: 'tool_call', handler: ExtensionToolCallHandler): void;
 }
@@ -86,6 +100,46 @@ export default function autopilotExtension(pi: ExtensionHostLike): void {
     }
   }
 
+  async function activateParentModelRoster(ctx: ExtensionCommandContextLike): Promise<boolean> {
+    const assignment = AUTOPILOT_PARENT_MODEL_ASSIGNMENT;
+    const slash = assignment.model.indexOf('/');
+    const provider = assignment.model.slice(0, slash);
+    const modelId = assignment.model.slice(slash + 1);
+    if (
+      slash <= 0 ||
+      modelId.length === 0 ||
+      ctx.modelRegistry === undefined ||
+      pi.setModel === undefined ||
+      pi.setThinkingLevel === undefined ||
+      pi.getThinkingLevel === undefined
+    ) {
+      notify(ctx, `Autopilot cannot enforce parent model roster ${assignment.model} at ${assignment.thinking}: Pi model-selection APIs are unavailable.`, 'error');
+      return false;
+    }
+    const model = ctx.modelRegistry.find(provider, modelId);
+    if (model === undefined) {
+      notify(ctx, `Autopilot cannot enforce parent model roster: ${assignment.model} is not registered in this Pi installation.`, 'error');
+      return false;
+    }
+    let selected: boolean;
+    try {
+      selected = await pi.setModel(model);
+    } catch (error) {
+      notify(ctx, `Autopilot cannot select parent roster model ${assignment.model}: ${error instanceof Error ? error.message : String(error)}`, 'error');
+      return false;
+    }
+    if (!selected) {
+      notify(ctx, `Autopilot cannot select parent roster model ${assignment.model}: no usable subscription authentication is available.`, 'error');
+      return false;
+    }
+    pi.setThinkingLevel(assignment.thinking);
+    if (pi.getThinkingLevel() !== assignment.thinking) {
+      notify(ctx, `Autopilot cannot enforce parent thinking level ${assignment.thinking} for ${assignment.model}.`, 'error');
+      return false;
+    }
+    return true;
+  }
+
   function registerWorktreeGuardIfSupported(): void {
     if (worktreeGuardRegistered || pi.on === undefined) return;
     pi.on('tool_call', (event, toolCtx) => {
@@ -115,6 +169,8 @@ export default function autopilotExtension(pi: ExtensionHostLike): void {
       );
       return null;
     }
+
+    if (!(await activateParentModelRoster(input.ctx))) return null;
 
     let prepared: PreparedAutopilotWorkstream;
     try {

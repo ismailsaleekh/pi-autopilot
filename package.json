@@ -1,6 +1,6 @@
 {
   "name": "pi-autopilot",
-  "version": "0.6.1",
+  "version": "0.7.0",
   "description": "Autopilot orchestration package for Pi: /autopilot, /autopilot-inject, /autopilot-onboard, /autopilot-handoff, /autopilot-config, /autopilot-claim-gc, /autopilot-close, /autopilot-abort, context budget activation, and child runner wiring.",
   "type": "module",
   "license": "ISC",
@@ -56,7 +56,7 @@
     "@earendil-works/pi-coding-agent": "*"
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "^0.75.5",
+    "@earendil-works/pi-coding-agent": "^0.80.6",
     "@types/node": "^24.0.0",
     "tsx": "^4.19.0",
     "typescript": "^5.9.0"

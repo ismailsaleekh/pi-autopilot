@@ -98,7 +98,7 @@ function unitSpec(worktree: string, runtimeRoot: string): AutopilotUnitSpec {
     attempt: 1,
     objective: 'Implement close smoke change.',
     cwd: worktree,
-    model: 'openai-codex/gpt-5.5',
+    model: 'openai-codex/gpt-5.6-terra',
     thinking: 'high',
     owned_paths: ['src/smoke.ts'],
     read_only_paths: [],

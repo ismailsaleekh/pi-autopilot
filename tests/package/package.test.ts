@@ -245,6 +245,9 @@ void describe('package manifest and payload', () => {
       'sparse by default',
       '.autopilot/checkout-profile.json',
       'autopilot_materialize_context',
+      'openai-codex/gpt-5.6-sol',
+      'openai-codex/gpt-5.6-terra',
+      'openai-codex/gpt-5.6-luna',
     ]) {
       assert.match(readme, literalPattern(surface), `README missing ${surface}`);
       assert.match(plan, literalPattern(surface), `TEST_PLAN missing ${surface}`);
@@ -257,6 +260,7 @@ void describe('package manifest and payload', () => {
     const mappings = [
       { claim: 'Commands', row: 'Public commands are `/autopilot`, `/autopilot-inject`, `/autopilot-onboard`, `/autopilot-handoff`, `/autopilot-config`, `/autopilot-claim-gc`, `/autopilot-close`, and `/autopilot-abort`' },
       { claim: 'context_budget', row: '`context_budget` parent gate' },
+      { claim: 'Fixed model roster', row: 'Fixed parent and child model roster' },
       { claim: 'Contracts, templates, and state-store', row: 'Contracts/templates are schema-backed and package-owned' },
       { claim: 'perfect-quality', row: 'Perfect-quality doctrine is package-owned' },
       { claim: 'scope/protected-path adjudication', row: 'Scope/protected-path adjudication blocks silent closure' },
@@ -426,7 +430,7 @@ void describe('package manifest and payload', () => {
           attempt: 1,
           objective: 'Dry-run from an installed node_modules package.',
           cwd: unitWorktree.unitInfo.worktree_path,
-          model: 'openai-codex/gpt-5.5',
+          model: 'openai-codex/gpt-5.6-terra',
           thinking: 'high',
           owned_paths: ['src/smoke.ts'],
           read_only_paths: [],
@@ -598,7 +602,7 @@ const rl = createInterface({ input: process.stdin, crlfDelay: Infinity });
 rl.on('line', (line) => {
   const command = JSON.parse(line);
   if (command.type === 'get_state') {
-    response(command, true, { data: { model: { id: 'gpt-5.5', provider: 'openai-codex', api: 'openai-codex-responses' }, thinkingLevel: 'high' } });
+    response(command, true, { data: { model: { id: 'gpt-5.6-terra', provider: 'openai-codex', api: 'openai-codex-responses' }, thinkingLevel: 'high' } });
     return;
   }
   if (command.type === 'get_session_stats') {
@@ -614,7 +618,7 @@ rl.on('line', (line) => {
     write({ type: 'agent_start' });
     write({ type: 'turn_start' });
     emitStatus();
-    const message = { role: 'assistant', content: [{ type: 'text', text: 'done' }], api: 'openai-codex-responses', provider: 'openai-codex', model: 'gpt-5.5', stopReason: 'stop' };
+    const message = { role: 'assistant', content: [{ type: 'text', text: 'done' }], api: 'openai-codex-responses', provider: 'openai-codex', model: 'gpt-5.6-terra', stopReason: 'stop' };
     write({ type: 'message_end', message });
     write({ type: 'turn_end', message, toolResults: [] });
     write({ type: 'agent_end', messages: [message] });

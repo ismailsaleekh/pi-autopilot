@@ -4,6 +4,7 @@ import { parseAutopilotAbortArgs, parseAutopilotArgs, parseAutopilotClaimGcArgs,
 import { AutopilotCloseError, abortAutopilotWorkstream, closeAutopilotWorkstream } from "./core/close-runtime.js";
 import { runAutopilotClaimGc } from "./core/claim-gc.js";
 import { readSchedulerConfig, writeSchedulerConfig } from "./core/scheduler-config.js";
+import { AUTOPILOT_PARENT_MODEL_ASSIGNMENT } from "./core/model-roster.js";
 import { evaluateAutopilotWorktreeToolCall, } from "./core/git-guard.js";
 import { AutopilotParallelRuntimeError, prepareAutopilotWorkstream } from "./core/parallel-runtime.js";
 import { handoffUsage, onboardUsage, renderAutopilotPrompt, renderHandoffPrompt, renderOnboardPrompt, } from "./core/prompts.js";
@@ -30,6 +31,44 @@ export default function autopilotExtension(pi) {
             }
         }
     }
+    async function activateParentModelRoster(ctx) {
+        const assignment = AUTOPILOT_PARENT_MODEL_ASSIGNMENT;
+        const slash = assignment.model.indexOf('/');
+        const provider = assignment.model.slice(0, slash);
+        const modelId = assignment.model.slice(slash + 1);
+        if (slash <= 0 ||
+            modelId.length === 0 ||
+            ctx.modelRegistry === undefined ||
+            pi.setModel === undefined ||
+            pi.setThinkingLevel === undefined ||
+            pi.getThinkingLevel === undefined) {
+            notify(ctx, `Autopilot cannot enforce parent model roster ${assignment.model} at ${assignment.thinking}: Pi model-selection APIs are unavailable.`, 'error');
+            return false;
+        }
+        const model = ctx.modelRegistry.find(provider, modelId);
+        if (model === undefined) {
+            notify(ctx, `Autopilot cannot enforce parent model roster: ${assignment.model} is not registered in this Pi installation.`, 'error');
+            return false;
+        }
+        let selected;
+        try {
+            selected = await pi.setModel(model);
+        }
+        catch (error) {
+            notify(ctx, `Autopilot cannot select parent roster model ${assignment.model}: ${error instanceof Error ? error.message : String(error)}`, 'error');
+            return false;
+        }
+        if (!selected) {
+            notify(ctx, `Autopilot cannot select parent roster model ${assignment.model}: no usable subscription authentication is available.`, 'error');
+            return false;
+        }
+        pi.setThinkingLevel(assignment.thinking);
+        if (pi.getThinkingLevel() !== assignment.thinking) {
+            notify(ctx, `Autopilot cannot enforce parent thinking level ${assignment.thinking} for ${assignment.model}.`, 'error');
+            return false;
+        }
+        return true;
+    }
     function registerWorktreeGuardIfSupported() {
         if (worktreeGuardRegistered || pi.on === undefined)
             return;
@@ -52,6 +91,8 @@ export default function autopilotExtension(pi) {
             notify(input.ctx, `${input.contextBudgetErrorPrefix}: ${error instanceof Error ? error.message : String(error)}`, 'error');
             return null;
         }
+        if (!(await activateParentModelRoster(input.ctx)))
+            return null;
         let prepared;
         try {
             prepared = await prepareAutopilotWorkstream({

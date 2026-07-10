@@ -5,6 +5,7 @@ import type {
   AutopilotVerificationPlan,
   AutopilotWitnessSpec,
 } from '../contracts/types.ts';
+import { autopilotModelRosterIssues } from '../model-roster.ts';
 
 export class AutopilotSpecQualityGateError extends Error {
   public readonly issues: readonly string[];
@@ -38,6 +39,8 @@ export function autopilotSpecQualityGateIssues(spec: AutopilotUnitSpec): readonl
   const acceptanceCriteria = spec.acceptance_criteria;
   const verificationPlan = spec.verification_plan;
   const closureCriteria = spec.closure_criteria;
+
+  issues.push(...autopilotModelRosterIssues(spec));
 
   if (profile === undefined) issues.push('quality_profile is required before child launch');
   if (riskLevel === undefined) issues.push('risk_level is required before child launch');

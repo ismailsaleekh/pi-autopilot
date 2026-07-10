@@ -7,7 +7,7 @@
   "attempt": 1,
   "objective": "Invalid relative cwd.",
   "cwd": "relative/worktree",
-  "model": "openai-codex/gpt-5.5",
+  "model": "openai-codex/gpt-5.6-terra",
   "thinking": "high",
   "owned_paths": ["src/smoke.ts"],
   "read_only_paths": [],

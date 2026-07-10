@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { AUTOPILOT_RUNNER_BIN, AUTOPILOT_STATUS_TOOL } from '../../src/core/names.ts';
+import { autopilotModelAssignmentForRole } from '../../src/core/model-roster.ts';
 import {
   AUTOPILOT_ROLE_VALUES,
   AutopilotPromptTemplateError,
@@ -32,6 +33,7 @@ function spec(root: string, role: AutopilotRole): AutopilotUnitSpec {
   const validationRole = role === 'validate' || role === 'bughunt';
   const worktree = join(root, 'worktree');
   const runtimeRoot = join(worktree, '.pi', 'autopilot', 'demo');
+  const assignment = autopilotModelAssignmentForRole(role);
   return {
     schema_version: 'autopilot.unit_spec.v1',
     workstream: 'demo',
@@ -41,8 +43,8 @@ function spec(root: string, role: AutopilotRole): AutopilotUnitSpec {
     attempt: 1,
     objective: `Exercise the ${role} fixed template.`,
     cwd: worktree,
-    model: 'openai-codex/gpt-5.5',
-    thinking: validationRole ? 'xhigh' : 'high',
+    model: assignment.model,
+    thinking: assignment.thinking,
     owned_paths: sourceRole ? [`src/${role}.ts`] : [],
     read_only_paths: ['src/core/names.ts'],
     untouchable_paths: ['private/**', 'node_modules/**'],
@@ -134,25 +136,23 @@ void describe('Autopilot fixed prompt templates', () => {
     });
   });
 
-  void it('renders newly allowed subscription provider models before spend', async () => {
-    await withTempDir(async (root) => {
-      const prompt = renderAutopilotAgentPrompt({
-        ...spec(root, 'implement'),
-        model: 'openai-codex/gpt-5.3-codex-spark',
-      });
-      assert.match(prompt, /openai-codex\/gpt-5\.3-codex-spark/u);
-    });
-  });
-
-  void it('fails before model spend when the spec uses an unsupported provider route', async () => {
+  void it('fails before model spend when a role deviates from the fixed model roster', async () => {
     await withTempDir(async (root) => {
       assert.throws(
         () =>
           renderAutopilotAgentPrompt({
             ...spec(root, 'implement'),
-            model: 'openrouter/gpt-4',
+            model: 'openai-codex/gpt-5.6-sol',
           }),
-        /unsupported Autopilot subscription model/u,
+        /implement role requires fixed roster model openai-codex\/gpt-5\.6-terra/u,
+      );
+      assert.throws(
+        () =>
+          renderAutopilotAgentPrompt({
+            ...spec(root, 'validate'),
+            thinking: 'high',
+          }),
+        /validate role requires fixed roster thinking xhigh/u,
       );
     });
   });

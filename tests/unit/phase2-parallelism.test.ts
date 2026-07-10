@@ -76,7 +76,7 @@ function unitSpec(input: {
     attempt,
     objective: `Implement ${input.unitId}.`,
     cwd: input.cwd,
-    model: 'openai-codex/gpt-5.5',
+    model: 'openai-codex/gpt-5.6-terra',
     thinking: 'high',
     owned_paths: input.ownedPaths ?? [`src/${input.unitId}.ts`],
     read_only_paths: input.readOnlyPaths ?? [],
@@ -564,7 +564,7 @@ async function writeUnitEvidence(input: {
     status_sha256: sha256Text(statusText),
     schema_sha256: `sha256:${'b'.repeat(64)}`,
     tool_call_id: 'call-u01',
-    provider_identity: { provider_id: 'openai-codex', requested_model_id: 'gpt-5.5', executed_model_id: 'gpt-5.5', api: 'codex', thinking_level: 'high' },
+    provider_identity: { provider_id: 'openai-codex', requested_model_id: 'openai-codex/gpt-5.6-terra', executed_model_id: 'openai-codex/gpt-5.6-terra', api: 'openai-codex-responses', thinking_level: 'high' },
     expected_identity_hash: `sha256:${'c'.repeat(64)}`,
   };
   const statusPath = join(input.runtimeRoot, 'statuses', 'u01.implement.attempt-1.json');

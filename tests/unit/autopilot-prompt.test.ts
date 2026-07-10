@@ -54,6 +54,19 @@ void describe('Autopilot parent prompt', () => {
     assert.equal(legacyRuntimePattern().test(prompt), false);
   });
 
+  void it('injects the complete fixed parent and child model roster', () => {
+    const prompt = parentPrompt();
+    assert.match(prompt, /parent\/orchestrator: openai-codex\/gpt-5\.6-sol at xhigh/u);
+    assert.match(prompt, /strategy: openai-codex\/gpt-5\.6-sol at xhigh/u);
+    assert.match(prompt, /implement: openai-codex\/gpt-5\.6-terra at high/u);
+    assert.match(prompt, /validate: openai-codex\/gpt-5\.6-sol at xhigh/u);
+    assert.match(prompt, /fix: openai-codex\/gpt-5\.6-terra at high/u);
+    assert.match(prompt, /adjudicate: openai-codex\/gpt-5\.6-sol at xhigh/u);
+    assert.match(prompt, /bughunt: openai-codex\/gpt-5\.6-sol at xhigh/u);
+    assert.match(prompt, /extract: openai-codex\/gpt-5\.6-luna at high/u);
+    assert.match(prompt, /Never substitute another model or thinking level/u);
+  });
+
   void it('contains package-owned perfect-quality rules', () => {
     const prompt = parentPrompt();
     assert.match(prompt, /Perfect-quality contract/);

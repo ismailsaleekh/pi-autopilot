@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { describe, it } from 'node:test';
 
 import { runAutopilotAgentFromSpecPath } from '../../src/core/agent-runner.ts';
-import { AUTOPILOT_STATE_ROOT_ENV, prepareAutopilotWorkstream } from '../../src/core/parallel-runtime.ts';
+import { AUTOPILOT_STATE_ROOT_ENV, prepareAutopilotUnitWorktree, prepareAutopilotWorkstream } from '../../src/core/parallel-runtime.ts';
 import type { AutopilotEventRow, AutopilotState, AutopilotUnitSpec, AutopilotVerificationPlan } from '../../src/core/contracts/types.ts';
 import { appendAutopilotEventRow, readAutopilotResumeSnapshot, writeAutopilotStateAtomic } from '../../src/core/state-store/index.ts';
 
@@ -52,7 +52,7 @@ function makeSpec(worktree: string, runtimeRoot: string): AutopilotUnitSpec {
     attempt: 1,
     objective: 'Run fake child and persist state.',
     cwd: worktree,
-    model: 'openai-codex/gpt-5.5',
+    model: 'openai-codex/gpt-5.6-terra',
     thinking: 'high',
     owned_paths: ['src/e2e.ts'],
     read_only_paths: [],
@@ -91,9 +91,13 @@ void describe('autopilot runner e2e smoke', () => {
       const source = join(root, 'source');
       await initGitSource(source);
       const prepared = await prepareAutopilotWorkstream({ workstream: 'autopilot-e2e', sourceCwd: source });
-      const worktree = prepared.mainWorktreePath;
       const runtimeRoot = prepared.runtimeRoot;
-      const unitSpec = makeSpec(worktree, runtimeRoot);
+      const unitWorktree = await prepareAutopilotUnitWorktree({
+        active: prepared.active,
+        unitId: 'e01-implement',
+        attempt: 1,
+      });
+      const unitSpec = makeSpec(unitWorktree.unitInfo.worktree_path, runtimeRoot);
       const specPath = join(runtimeRoot, 'unit-specs', 'e01-implement.implement.attempt-1.json');
       await mkdir(join(runtimeRoot, 'unit-specs'), { recursive: true });
       await writeFile(specPath, `${JSON.stringify(unitSpec, null, 2)}\n`, 'utf8');
@@ -226,7 +230,7 @@ function emitForcedStatus() {
 const rl = createInterface({ input: process.stdin, crlfDelay: Infinity });
 rl.on('line', async (line) => {
   const cmd = JSON.parse(line);
-  if (cmd.type === 'get_state') { response(cmd, true, { data: { model: { id: 'gpt-5.5', provider: 'openai-codex', api: 'openai-codex-responses' }, thinkingLevel: 'high' } }); return; }
+  if (cmd.type === 'get_state') { response(cmd, true, { data: { model: { id: 'gpt-5.6-terra', provider: 'openai-codex', api: 'openai-codex-responses' }, thinkingLevel: 'high' } }); return; }
   if (cmd.type === 'get_session_stats') { response(cmd, true, { data: { sessionId: 'autopilot-e2e' } }); return; }
   if (cmd.type === 'prompt') {
     if (typeof cmd.message !== 'string' || Object.prototype.hasOwnProperty.call(cmd, 'prompt')) {
@@ -237,7 +241,7 @@ rl.on('line', async (line) => {
     write({ type: 'agent_start' });
     write({ type: 'turn_start' });
     emitForcedStatus();
-    const msg = { role: 'assistant', content: [{ type: 'text', text: 'done' }], api: 'openai-codex-responses', provider: 'openai-codex', model: 'gpt-5.5', stopReason: 'stop' };
+    const msg = { role: 'assistant', content: [{ type: 'text', text: 'done' }], api: 'openai-codex-responses', provider: 'openai-codex', model: 'gpt-5.6-terra', stopReason: 'stop' };
     write({ type: 'message_end', message: msg });
     write({ type: 'turn_end', message: msg, toolResults: [] });
     write({ type: 'agent_end', messages: [msg] });

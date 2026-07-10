@@ -253,6 +253,7 @@ function captureCoreActions(
   activeTools: string[],
 ): ExtensionActionsLike {
   let sessionName: string | undefined;
+  let thinkingLevel: ThinkingLevelLike = 'off';
   return {
     sendMessage: () => undefined,
     sendUserMessage: (content, options) => {
@@ -278,9 +279,11 @@ function captureCoreActions(
           ? { name: command.name }
           : { name: command.name, description: command.description },
       ),
-    setModel: () => Promise.resolve(false),
-    getThinkingLevel: () => 'off',
-    setThinkingLevel: () => undefined,
+    setModel: () => Promise.resolve(true),
+    getThinkingLevel: () => thinkingLevel,
+    setThinkingLevel: (level) => {
+      thinkingLevel = level;
+    },
   };
 }
 

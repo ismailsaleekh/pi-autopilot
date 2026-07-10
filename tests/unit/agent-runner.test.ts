@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import type { AutopilotUnitSpec, AutopilotVerificationPlan } from '../../src/core/contracts/index.ts';
 import { AutopilotAgentRunError, runAutopilotAgentFromSpecPath } from '../../src/core/agent-runner.ts';
 import { AUTOPILOT_STATE_ROOT_ENV, prepareAutopilotUnitWorktree, prepareAutopilotWorkstream } from '../../src/core/parallel-runtime.ts';
+import { autopilotModelAssignmentForRole } from '../../src/core/model-roster.ts';
 
 const TEST_DIR = dirname(fileURLToPath(import.meta.url));
 const PACKAGE_ROOT = resolve(TEST_DIR, '..', '..');
@@ -59,7 +60,7 @@ function spec(root: string, overrides: Partial<AutopilotUnitSpec> = {}): Autopil
     attempt: 1,
     objective: 'Implement a smoke fixture.',
     cwd: worktree,
-    model: 'openai-codex/gpt-5.5',
+    model: 'openai-codex/gpt-5.6-terra',
     thinking: 'high',
     owned_paths: ['src/smoke.ts'],
     read_only_paths: [],
@@ -83,19 +84,25 @@ function spec(root: string, overrides: Partial<AutopilotUnitSpec> = {}): Autopil
     render_prompt_snapshot: true,
   };
   const merged: AutopilotUnitSpec = { ...base, ...overrides };
-  if (merged.role === 'validate' || merged.role === 'bughunt') {
-    const command = merged.validation_commands[0] ?? 'true';
+  const assignment = autopilotModelAssignmentForRole(merged.role);
+  const rostered: AutopilotUnitSpec = {
+    ...merged,
+    model: overrides.model ?? assignment.model,
+    thinking: overrides.thinking ?? assignment.thinking,
+  };
+  if (rostered.role === 'validate' || rostered.role === 'bughunt') {
+    const command = rostered.validation_commands[0] ?? 'true';
     return {
-      ...merged,
+      ...rostered,
       quality_profile: 'validation-only',
       risk_level: overrides.risk_level ?? 'low',
       acceptance_criteria: ['independent validation covers declared commands'],
       verification_plan: verificationPlan(command),
       closure_criteria: ['validation status is PASS'],
-      upstream_refs: merged.upstream_refs ?? [],
+      upstream_refs: rostered.upstream_refs ?? [],
     };
   }
-  return merged;
+  return rostered;
 }
 
 async function writeSpec(root: string, unitSpec: AutopilotUnitSpec): Promise<string> {
@@ -207,60 +214,6 @@ async function initGitWorktree(worktree: string): Promise<void> {
   git(worktree, ['commit', '-m', 'baseline']);
 }
 
-const CURRENT_PI_SUBSCRIPTION_MODELS = [
-  'openai-codex/gpt-5.3-codex-spark',
-  'openai-codex/gpt-5.4',
-  'openai-codex/gpt-5.4-mini',
-  'openai-codex/gpt-5.5',
-  'anthropic/claude-3-5-haiku-20241022',
-  'anthropic/claude-3-5-haiku-latest',
-  'anthropic/claude-3-5-sonnet-20240620',
-  'anthropic/claude-3-5-sonnet-20241022',
-  'anthropic/claude-3-7-sonnet-20250219',
-  'anthropic/claude-3-haiku-20240307',
-  'anthropic/claude-3-opus-20240229',
-  'anthropic/claude-3-sonnet-20240229',
-  'anthropic/claude-fable-5',
-  'anthropic/claude-haiku-4-5',
-  'anthropic/claude-haiku-4-5-20251001',
-  'anthropic/claude-opus-4-0',
-  'anthropic/claude-opus-4-1',
-  'anthropic/claude-opus-4-1-20250805',
-  'anthropic/claude-opus-4-20250514',
-  'anthropic/claude-opus-4-5',
-  'anthropic/claude-opus-4-5-20251101',
-  'anthropic/claude-opus-4-6',
-  'anthropic/claude-opus-4-7',
-  'anthropic/claude-opus-4-8',
-  'anthropic/claude-sonnet-4-0',
-  'anthropic/claude-sonnet-4-20250514',
-  'anthropic/claude-sonnet-4-5',
-  'anthropic/claude-sonnet-4-5-20250929',
-  'anthropic/claude-sonnet-4-6',
-  'opencode-go/deepseek-v4-flash',
-  'opencode-go/deepseek-v4-pro',
-  'opencode-go/glm-5.1',
-  'opencode-go/glm-5.2',
-  'opencode-go/kimi-k2.6',
-  'opencode-go/kimi-k2.7-code',
-  'opencode-go/mimo-v2.5',
-  'opencode-go/mimo-v2.5-pro',
-  'opencode-go/minimax-m2.7',
-  'opencode-go/minimax-m3',
-  'opencode-go/qwen3.6-plus',
-  'opencode-go/qwen3.7-max',
-  'opencode-go/qwen3.7-plus',
-  'kimi-coding/k2p7',
-  'kimi-coding/kimi-for-coding',
-  'kimi-coding/kimi-k2-thinking',
-  'zai/glm-4.5-air',
-  'zai/glm-4.7',
-  'zai/glm-5-turbo',
-  'zai/glm-5.1',
-  'zai/glm-5.2',
-  'zai/glm-5v-turbo',
-] as const;
-
 function runCli(args: readonly string[]): CliResult {
   const result = spawnSync(process.execPath, ['--experimental-strip-types', AUTOPILOT_AGENT_RUN_CLI, ...args], {
     cwd: PACKAGE_ROOT,
@@ -286,38 +239,18 @@ void describe('autopilot-agent-run wrapper', () => {
     });
   });
 
-  void it('dry-runs every current Pi subscription model under Autopilot provider gates', async () => {
+  void it('rejects model or thinking deviations from the fixed role roster before launch', async () => {
     await withTempDir(async (root) => {
       await mkdir(join(root, 'worktree'), { recursive: true });
-      for (const [index, model] of CURRENT_PI_SUBSCRIPTION_MODELS.entries()) {
-        const unitId = `u${String(index).padStart(2, '0')}-validate`;
+      for (const [index, overrides] of [
+        { model: 'openai-codex/gpt-5.6-sol' },
+        { model: 'anthropic/claude-opus-4-8' },
+        { thinking: 'xhigh' as const },
+      ].entries()) {
+        const unitId = `roster-mismatch-${String(index)}`;
         const unitSpec = spec(root, {
           unit_id: unitId,
-          role: 'validate',
-          template: 'validate',
-          model,
-          owned_paths: [],
-          validation_commands: ['true'],
-          status_output: join(root, 'worktree', '.pi', 'autopilot', 'autopilot-smoke', 'statuses', `${unitId}.validate.attempt-1.json`),
-          receipt_output: join(root, 'worktree', '.pi', 'autopilot', 'autopilot-smoke', 'receipts', `${unitId}.validate.attempt-1.receipt.json`),
-          evidence_dir: join(root, 'worktree', '.pi', 'autopilot', 'autopilot-smoke', 'evidence', unitId),
-        });
-        const specPath = await writeSpec(root, unitSpec);
-        const result = await runAutopilotAgentFromSpecPath(specPath, { dryRun: true });
-        assert.equal(result.status, 'dry-run', model);
-      }
-    });
-  });
-
-  void it('rejects unsupported provider routes during dry-run preflight', async () => {
-    const models = ['openrouter/gpt-4', 'openai/gpt-5', 'github-copilot/claude-sonnet', 'missing-slash'];
-    await withTempDir(async (root) => {
-      await mkdir(join(root, 'worktree'), { recursive: true });
-      for (const [index, model] of models.entries()) {
-        const unitId = `unsupported-${String(index)}`;
-        const unitSpec = spec(root, {
-          unit_id: unitId,
-          model,
+          ...overrides,
           status_output: join(root, 'worktree', '.pi', 'autopilot', 'autopilot-smoke', 'statuses', `${unitId}.implement.attempt-1.json`),
           receipt_output: join(root, 'worktree', '.pi', 'autopilot', 'autopilot-smoke', 'receipts', `${unitId}.implement.attempt-1.receipt.json`),
           evidence_dir: join(root, 'worktree', '.pi', 'autopilot', 'autopilot-smoke', 'evidence', unitId),
@@ -328,8 +261,7 @@ void describe('autopilot-agent-run wrapper', () => {
           (error: unknown) =>
             error instanceof AutopilotAgentRunError &&
             error.failureClass === 'spec-invalid' &&
-            /unsupported Autopilot subscription model|\/model has invalid format/u.test(error.details.reason),
-          model,
+            /implement role requires fixed roster/u.test(error.details.reason),
         );
       }
     });
@@ -694,7 +626,7 @@ void describe('autopilot-agent-run wrapper', () => {
           error instanceof AutopilotAgentRunError &&
           error.failureClass === 'pi-spawn-failed' &&
           /provider="openai-codex"/u.test(error.details.reason) &&
-          /model="gpt-5\.5"/u.test(error.details.reason) &&
+          /model="gpt-5\.6-terra"/u.test(error.details.reason) &&
           /last_events/u.test(error.details.reason) &&
           /fake provider failure/u.test(error.details.reason),
       );
@@ -778,7 +710,7 @@ function write(obj) { process.stdout.write(JSON.stringify(obj) + '\\n'); }
 function response(cmd, success = true, extra = {}) { write({ id: cmd.id, type: 'response', command: cmd.type, success, ...extra }); }
 function state() {
   return {
-    model: { id: 'gpt-5.5', provider: 'openai-codex', api: 'openai-codex-responses' },
+    model: { id: 'gpt-5.6-terra', provider: 'openai-codex', api: 'openai-codex-responses' },
     thinkingLevel: 'high',
     sessionFile: null,
     sessionId: 'autopilot-fake-session',
@@ -795,7 +727,7 @@ function assistant(message, stopReason = 'stop') {
     content: [{ type: 'text', text: message }],
     api: 'openai-codex-responses',
     provider: 'openai-codex',
-    model: 'gpt-5.5',
+    model: 'gpt-5.6-terra',
     usage: { input: 1, output: 1, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
     stopReason,
     timestamp: Date.now(),

@@ -1,3 +1,4 @@
+import { autopilotModelRosterIssues } from "../model-roster.js";
 export class AutopilotSpecQualityGateError extends Error {
     issues;
     constructor(issues) {
@@ -26,6 +27,7 @@ export function autopilotSpecQualityGateIssues(spec) {
     const acceptanceCriteria = spec.acceptance_criteria;
     const verificationPlan = spec.verification_plan;
     const closureCriteria = spec.closure_criteria;
+    issues.push(...autopilotModelRosterIssues(spec));
     if (profile === undefined)
         issues.push('quality_profile is required before child launch');
     if (riskLevel === undefined)

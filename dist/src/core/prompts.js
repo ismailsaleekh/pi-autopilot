@@ -1,5 +1,6 @@
 import { AUTOPILOT_ABORT_COMMAND, AUTOPILOT_CLAIM_GC_COMMAND, AUTOPILOT_CLOSE_COMMAND, AUTOPILOT_COMMAND, AUTOPILOT_CONFIG_COMMAND, AUTOPILOT_HANDOFF_COMMAND, AUTOPILOT_ONBOARD_COMMAND, AUTOPILOT_RUNNER_BIN, AUTOPILOT_SCHEMA_NAMES, CONTEXT_BUDGET_TOOL_NAME, } from "./names.js";
 import { renderAutopilotPerfectQualityRules } from "./quality/contract.js";
+import { renderAutopilotModelRoster } from "./model-roster.js";
 function optionalBlock(label, value) {
     return value.length > 0 ? `\n## ${label}\n\n${value}\n` : '';
 }
@@ -48,6 +49,14 @@ ${runtimeMetadata.length === 0 ? '' : `${runtimeMetadata}\n`}- Injected child la
 - If purpose truth conflicts with progress truth, launch no child work until an adjudication or operator decision resolves the conflict.
 - Markdown, chat summaries, logs, and hand-written ledgers are human hints only; never treat markdown as authoritative truth over schema-valid Autopilot artifacts.
 - Keep \`state.json\` compact and current; append lifecycle facts to \`events.jsonl\` and material purpose/scope decisions to \`decision-log.jsonl\` rather than rewriting history.
+
+## Fixed model roster
+
+Every newly created or retried unit spec must use this exact package-owned assignment. Never substitute another model or thinking level, including for low-risk work:
+
+${renderAutopilotModelRoster()}
+
+Historical completed specs remain immutable. If an unlaunched or retried historical spec does not match the roster, create a new roster-compliant attempt rather than rewriting accepted status, receipt, or audit evidence.
 
 ## Child launch rules
 

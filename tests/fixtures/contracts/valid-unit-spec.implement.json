@@ -7,7 +7,7 @@
   "attempt": 1,
   "objective": "Create the minimal smoke fixture implementation within the owned path.",
   "cwd": "/tmp/autopilot-smoke-worktree",
-  "model": "openai-codex/gpt-5.5",
+  "model": "openai-codex/gpt-5.6-terra",
   "thinking": "high",
   "owned_paths": ["src/smoke.ts"],
   "read_only_paths": ["README.md"],
