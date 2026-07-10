@@ -62,7 +62,8 @@ type JsonRecord = Readonly<Record<string, unknown>>;
 type ProcessEnv = Readonly<Record<string, string | undefined>>;
 type TimerHandle = ReturnType<typeof setTimeout>;
 
-interface DataChunk {
+interface DataChunk extends Uint8Array {
+  toString(): string;
   toString(encoding: 'utf8'): string;
 }
 
@@ -73,6 +74,7 @@ interface WritablePipe {
 
 interface ReadablePipe {
   on(event: 'data', listener: (chunk: DataChunk) => void): void;
+  on(event: 'error', listener: (error: Error) => void): void;
 }
 
 interface AgentChildProcess {

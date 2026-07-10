@@ -1,4 +1,4 @@
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
@@ -104,7 +104,7 @@ export async function resolveAutopilotCheckoutProfile(input: {
 }): Promise<ResolvedAutopilotCheckoutProfile> {
   const env = input.env ?? process.env;
   const repoRoot = resolve(input.repoRoot);
-  const scan = scanTrackedTree(repoRoot, input.now ?? new Date());
+  const scan = await scanTrackedTree(repoRoot, input.now ?? new Date());
   const loaded = await loadCheckoutProfile(repoRoot, env);
   const profile = loaded.profile;
   const basePatterns = baseSparsePatternsForProfile(profile);
@@ -221,26 +221,19 @@ export function parseAutopilotCheckoutProfile(value: unknown, source = '<profile
   });
 }
 
-export function scanTrackedTree(repoRoot: string, now: Date = new Date()): AutopilotTrackedTreeScan {
-  const headSha = gitOut(['rev-parse', 'HEAD'], repoRoot).trim();
-  const output = gitOut(['ls-tree', '-r', '-l', '--full-tree', '-z', 'HEAD'], repoRoot);
+export async function scanTrackedTree(repoRoot: string, now: Date = new Date()): Promise<AutopilotTrackedTreeScan> {
+  const resolvedRepoRoot = resolve(repoRoot);
+  const headSha = gitOut(['rev-parse', 'HEAD'], resolvedRepoRoot).trim();
   const entries: AutopilotTrackedTreeEntry[] = [];
   let totalBytes = 0;
-  for (const raw of output.split('\0')) {
-    if (raw.length === 0) continue;
-    const tabIndex = raw.indexOf('\t');
-    if (tabIndex < 0) fail('invalid-ls-tree-output', 'git ls-tree output did not contain a path separator.', [raw.slice(0, 120)]);
-    const meta = raw.slice(0, tabIndex).trim().split(/\s+/u);
-    const path = normalizeRepoRelativePath(raw.slice(tabIndex + 1));
-    const objectType = parseGitObjectType(meta[1]);
-    const byteToken = meta[3] ?? '0';
-    const byteCount = /^\d+$/u.test(byteToken) ? Number(byteToken) : 0;
-    entries.push({ path, byte_count: byteCount, object_type: objectType });
-    totalBytes += byteCount;
-  }
+  await streamGitLsTree(['ls-tree', '-r', '-l', '--full-tree', '-z', headSha], resolvedRepoRoot, (record) => {
+    const entry = parseTrackedTreeRecord(record);
+    entries.push(entry);
+    totalBytes += entry.byte_count;
+  });
   const sortedEntries = Object.freeze(entries.sort((left, right) => left.path.localeCompare(right.path)));
   return Object.freeze({
-    repo_root: resolve(repoRoot),
+    repo_root: resolvedRepoRoot,
     head_sha: headSha,
     entries: sortedEntries,
     total_bytes: totalBytes,
@@ -414,6 +407,165 @@ function parseMaterializationConfig(value: unknown, defaults: AutopilotCheckoutM
     max_single_materialization_bytes: optionalNonNegativeInteger(record, 'max_single_materialization_bytes', defaults.max_single_materialization_bytes),
     max_auto_read_paths: optionalPositiveInteger(record, 'max_auto_read_paths', defaults.max_auto_read_paths),
   });
+}
+
+const GIT_STDERR_EVIDENCE_BYTES = 65_536;
+const STRICT_UTF8_DECODER = new TextDecoder('utf-8', { fatal: true });
+const LOSSY_UTF8_DECODER = new TextDecoder('utf-8');
+
+async function streamGitLsTree(
+  args: readonly string[],
+  cwd: string,
+  onRecord: (record: Uint8Array) => void,
+): Promise<void> {
+  await new Promise<void>((resolvePromise, rejectPromise) => {
+    const child = spawn('git', [...args], { cwd, stdio: ['pipe', 'pipe', 'pipe'] });
+    child.stdin.end();
+    let pendingChunks: Uint8Array[] = [];
+    let pendingBytes = 0;
+    const stderrChunks: Uint8Array[] = [];
+    let stderrCapturedBytes = 0;
+    let stderrDroppedBytes = 0;
+    let terminalError: Error | null = null;
+
+    const rememberError = (error: Error): void => {
+      if (terminalError !== null) return;
+      terminalError = error;
+      child.kill('SIGTERM');
+    };
+
+    child.stdout.on('data', (value: Uint8Array) => {
+      if (terminalError !== null) return;
+      try {
+        let cursor = 0;
+        while (cursor < value.length) {
+          const delimiter = value.indexOf(0, cursor);
+          if (delimiter < 0) {
+            const tail = value.subarray(cursor);
+            if (tail.length > 0) {
+              pendingChunks.push(tail);
+              pendingBytes += tail.length;
+            }
+            return;
+          }
+          const segment = value.subarray(cursor, delimiter);
+          let record: Uint8Array;
+          if (pendingBytes === 0) {
+            record = segment;
+          } else {
+            if (segment.length > 0) pendingChunks.push(segment);
+            record = concatByteChunks(pendingChunks, pendingBytes + segment.length);
+          }
+          pendingChunks = [];
+          pendingBytes = 0;
+          if (record.length > 0) onRecord(record);
+          cursor = delimiter + 1;
+        }
+      } catch (error) {
+        rememberError(error instanceof Error ? error : new Error(String(error)));
+      }
+    });
+    child.stdout.on('error', (error: Error) => {
+      rememberError(new AutopilotCheckoutProfileError('git-stdout-stream-failed', `git ${args.join(' ')} stdout stream failed: ${error.message}`));
+    });
+    child.stderr.on('data', (value: Uint8Array) => {
+      const remaining = Math.max(0, GIT_STDERR_EVIDENCE_BYTES - stderrCapturedBytes);
+      const captured = value.subarray(0, remaining);
+      if (captured.length > 0) {
+        stderrChunks.push(captured);
+        stderrCapturedBytes += captured.length;
+      }
+      stderrDroppedBytes += value.length - captured.length;
+    });
+    child.stderr.on('error', (error: Error) => {
+      rememberError(new AutopilotCheckoutProfileError('git-stderr-stream-failed', `git ${args.join(' ')} stderr stream failed: ${error.message}`));
+    });
+    child.on('error', (error: Error) => {
+      rememberError(new AutopilotCheckoutProfileError('git-spawn-failed', `git ${args.join(' ')} failed to spawn: ${error.message}`));
+    });
+    child.on('close', (code, signal) => {
+      if (terminalError !== null) {
+        rejectPromise(terminalError);
+        return;
+      }
+      const stderr = boundedStderrEvidence(stderrChunks, stderrDroppedBytes);
+      if (code !== 0) {
+        rejectPromise(new AutopilotCheckoutProfileError(
+          'git-command-failed',
+          `git ${args.join(' ')} exited with status ${code === null ? 'null' : String(code)}${signal === null ? '' : ` (signal ${signal})`}.`,
+          stderr.length === 0 ? [] : [stderr],
+        ));
+        return;
+      }
+      if (pendingBytes > 0) {
+        rejectPromise(new AutopilotCheckoutProfileError(
+          'invalid-ls-tree-output',
+          'git ls-tree output ended without a NUL record delimiter.',
+          [`trailing_bytes=${String(pendingBytes)}`],
+        ));
+        return;
+      }
+      resolvePromise();
+    });
+  });
+}
+
+function parseTrackedTreeRecord(raw: Uint8Array): AutopilotTrackedTreeEntry {
+  const tabIndex = raw.indexOf(9);
+  if (tabIndex < 0) {
+    fail('invalid-ls-tree-output', 'git ls-tree output did not contain a path separator.', [bytesToHex(raw.subarray(0, 120))]);
+  }
+  const meta = decodeUtf8(raw.subarray(0, tabIndex), 'git ls-tree metadata').trim().split(/\s+/u);
+  if (meta.length < 4) {
+    fail('invalid-ls-tree-output', 'git ls-tree output did not contain mode, type, object id, and size metadata.', [bytesToHex(raw.subarray(0, 120))]);
+  }
+  let decodedPath: string;
+  try {
+    decodedPath = STRICT_UTF8_DECODER.decode(raw.subarray(tabIndex + 1));
+  } catch (error) {
+    fail('invalid-ls-tree-output', `git ls-tree path was not valid UTF-8: ${errorMessage(error)}`, [bytesToHex(raw.subarray(tabIndex + 1, tabIndex + 61))]);
+  }
+  const path = normalizeRepoRelativePath(decodedPath);
+  const objectType = parseGitObjectType(meta[1]);
+  const byteToken = meta[3];
+  if (byteToken === undefined || (!/^\d+$/u.test(byteToken) && byteToken !== '-')) {
+    fail('invalid-ls-tree-output', 'git ls-tree output contained an invalid object-size token.', [byteToken ?? '<missing>', path]);
+  }
+  const byteCount = byteToken === '-' ? 0 : Number(byteToken);
+  if (!Number.isSafeInteger(byteCount)) {
+    fail('invalid-ls-tree-output', 'git ls-tree object size exceeded the JavaScript safe-integer range.', [byteToken, path]);
+  }
+  return Object.freeze({ path, byte_count: byteCount, object_type: objectType });
+}
+
+function boundedStderrEvidence(chunks: readonly Uint8Array[], droppedBytes: number): string {
+  const capturedBytes = concatByteChunks(chunks, chunks.reduce((sum, chunk) => sum + chunk.length, 0));
+  const captured = LOSSY_UTF8_DECODER.decode(capturedBytes).trim();
+  if (droppedBytes === 0) return captured;
+  const suffix = `[stderr truncated; dropped_bytes=${String(droppedBytes)}]`;
+  return captured.length === 0 ? suffix : `${captured}\n${suffix}`;
+}
+
+function concatByteChunks(chunks: readonly Uint8Array[], totalLength: number): Uint8Array {
+  const joined = new Uint8Array(totalLength);
+  let offset = 0;
+  for (const chunk of chunks) {
+    joined.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return joined;
+}
+
+function decodeUtf8(value: Uint8Array, label: string): string {
+  try {
+    return STRICT_UTF8_DECODER.decode(value);
+  } catch (error) {
+    fail('invalid-ls-tree-output', `${label} was not valid UTF-8: ${errorMessage(error)}`, [bytesToHex(value.subarray(0, 60))]);
+  }
+}
+
+function bytesToHex(value: Uint8Array): string {
+  return [...value].map((byte) => byte.toString(16).padStart(2, '0')).join('');
 }
 
 function gitOut(args: readonly string[], cwd: string): string {

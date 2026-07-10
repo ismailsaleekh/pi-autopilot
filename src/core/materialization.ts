@@ -112,7 +112,7 @@ export async function assertAutopilotSpecMaterializationDiskGate(input: {
   const snapshot = await readCheckoutProfileSnapshot(join(taskRoot, AUTOPILOT_CHECKOUT_PROFILE_SNAPSHOT_FILE));
   if (snapshot === null || snapshot.profile.mode === 'full') return;
   const paths = sourceMaterializationPathsForSpec(input.spec).map((path) => path.path);
-  const scan = scanTrackedTree(input.context.active.main_worktree_path, input.now ?? new Date());
+  const scan = await scanTrackedTree(input.context.active.main_worktree_path, input.now ?? new Date());
   const byteCount = estimateBytesForMaterializationPaths(scan, paths);
   assertAutopilotDiskGate({
     path: input.context.active.worktree_root,
@@ -167,7 +167,7 @@ export async function materializeAdditionalReadPathsForSpec(input: {
   const materialized = await readMaterializedPaths(input.context.active, input.spec);
   const existingAutoReadRows = materialized.paths.filter((row) => row.automatic && row.claim_type === 'READ');
   const existingAutoReadBytes = existingAutoReadRows.reduce((sum, row) => sum + row.byte_count, 0);
-  const scan = scanTrackedTree(input.context.active.main_worktree_path, now);
+  const scan = await scanTrackedTree(input.context.active.main_worktree_path, now);
   for (const path of normalized) {
     if (!trackedPathExists(scan, path)) {
       fail('auto-read-untracked', 'Autopilot sparse materialization refused: requested READ path is not tracked at this worktree HEAD.', [path]);
@@ -362,7 +362,7 @@ async function materializePathsForSpec(input: {
     await ensureFutureOwnedParents(input.spec.cwd, paths.filter((path) => path.claim_type === 'WRITE').map((path) => path.path));
     return { checkout_mode: 'full', materialized_paths: paths, targets: [], byte_count: 0 };
   }
-  const scan = scanTrackedTree(input.context.active.main_worktree_path, now);
+  const scan = await scanTrackedTree(input.context.active.main_worktree_path, now);
   assertNoUnsupportedSubmodules(scan, paths.map((path) => path.path));
   const byteCount = estimateBytesForMaterializationPaths(scan, paths.map((path) => path.path));
   assertAutopilotDiskGate({
