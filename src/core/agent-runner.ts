@@ -1,6 +1,6 @@
 import { constants as fsConstants, existsSync } from 'node:fs';
 import { access, mkdir, readFile, writeFile } from 'node:fs/promises';
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcessDataChunk, type ChildProcessLite } from 'node:child_process';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -61,41 +61,6 @@ import {
 type JsonRecord = Readonly<Record<string, unknown>>;
 type ProcessEnv = Readonly<Record<string, string | undefined>>;
 type TimerHandle = ReturnType<typeof setTimeout>;
-
-interface DataChunk extends Uint8Array {
-  toString(): string;
-  toString(encoding: 'utf8'): string;
-}
-
-interface WritablePipe {
-  write(data: string, callback?: (error: Error | null | undefined) => void): void;
-  end(): void;
-}
-
-interface ReadablePipe {
-  on(event: 'data', listener: (chunk: DataChunk) => void): void;
-  on(event: 'error', listener: (error: Error) => void): void;
-}
-
-interface AgentChildProcess {
-  readonly stdin: WritablePipe;
-  readonly stdout: ReadablePipe;
-  readonly stderr: ReadablePipe;
-  readonly killed: boolean;
-  kill(signal: 'SIGTERM'): void;
-  on(event: 'error', listener: (error: Error) => void): void;
-  on(event: 'close', listener: (code: number | null, signal: string | null) => void): void;
-}
-
-declare module 'node:child_process' {
-  interface SpawnOptionsLite {
-    readonly cwd?: string;
-    readonly env?: ProcessEnv;
-    readonly stdio?: readonly ['pipe', 'pipe', 'pipe'];
-    readonly shell?: boolean;
-  }
-  export function spawn(command: string, args: readonly string[], options?: SpawnOptionsLite): AgentChildProcess;
-}
 
 export type AutopilotAgentRunFailureClass =
   | 'spec-invalid'
@@ -804,7 +769,7 @@ async function runPiPromptWithStatusCarrier(spec: SpawnSpec, prompt: string): Pr
   ];
 
   const env = sanitizeAgentEnv(spec.env, spec.contextPath);
-  let child: AgentChildProcess;
+  let child: ChildProcessLite;
   try {
     child = spawn(spec.executable, argv, {
       cwd: spec.cwd,
@@ -830,7 +795,7 @@ function sanitizeAgentEnv(env: ProcessEnv, contextPath: string): ProcessEnv {
 }
 
 function supervisePiRpcChild(
-  child: AgentChildProcess,
+  child: ChildProcessLite,
   spec: SpawnSpec,
   prompt: string,
 ): Promise<PiResult> {
@@ -1010,7 +975,7 @@ function supervisePiRpcChild(
       else handleEvent(parsed);
     };
 
-    child.stdout.on('data', (chunk: DataChunk) => {
+    child.stdout.on('data', (chunk: ChildProcessDataChunk) => {
       stdoutBuffer += chunk.toString('utf8');
       while (true) {
         const newline = stdoutBuffer.indexOf('\n');
@@ -1025,7 +990,7 @@ function supervisePiRpcChild(
       }
     });
 
-    child.stderr.on('data', (chunk: DataChunk) => {
+    child.stderr.on('data', (chunk: ChildProcessDataChunk) => {
       stderrText = tailText(`${stderrText}${chunk.toString('utf8')}`);
     });
 

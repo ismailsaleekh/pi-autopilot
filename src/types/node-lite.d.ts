@@ -101,6 +101,34 @@ declare module 'node:child_process' {
     readonly stderr: string;
     readonly error?: Error;
   }
+  export interface ChildProcessDataChunk extends Uint8Array {
+    toString(): string;
+    toString(encoding: 'utf8'): string;
+  }
+  export interface ChildProcessWritablePipe {
+    write(data: string, callback?: (error: Error | null | undefined) => void): void;
+    end(): void;
+  }
+  export interface ChildProcessReadablePipe {
+    on(event: 'data', listener: (chunk: ChildProcessDataChunk) => void): void;
+    on(event: 'error', listener: (error: Error) => void): void;
+  }
+  export interface ChildProcessLite {
+    readonly stdin: ChildProcessWritablePipe;
+    readonly stdout: ChildProcessReadablePipe;
+    readonly stderr: ChildProcessReadablePipe;
+    readonly killed: boolean;
+    kill(signal: 'SIGTERM'): void;
+    on(event: 'error', listener: (error: Error) => void): void;
+    on(event: 'close', listener: (code: number | null, signal: string | null) => void): void;
+  }
+  export interface SpawnOptionsLite {
+    readonly cwd?: string;
+    readonly env?: { readonly [key: string]: string | undefined };
+    readonly stdio?: readonly ['pipe', 'pipe', 'pipe'];
+    readonly shell?: boolean;
+  }
+  export function spawn(command: string, args: readonly string[], options?: SpawnOptionsLite): ChildProcessLite;
   export function spawnSync(
     command: string,
     args: readonly string[],
