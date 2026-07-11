@@ -9,6 +9,7 @@ declare const process: {
   exit(code?: number): never;
   exitCode: number | undefined;
   once(event: 'SIGINT' | 'SIGTERM' | 'SIGHUP', listener: () => void): void;
+  off(event: 'SIGINT' | 'SIGTERM' | 'SIGHUP', listener: () => void): void;
 };
 
 declare module 'node:test' {

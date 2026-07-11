@@ -64,6 +64,10 @@ export function planNextDispatch(input) {
             reasons.push('governing-blocker');
             details.push(...(candidate.governing_blockers ?? []));
         }
+        if ((candidate.peer_claim_request_refs ?? []).length > 0) {
+            reasons.push('waiting-for-peer-release');
+            details.push(...(candidate.peer_claim_request_refs ?? []).map((ref) => `claim request ${ref}`));
+        }
         if (candidate.worktree_available === false) {
             reasons.push('worktree-unavailable');
             details.push('unit worktree cannot be created or resumed');

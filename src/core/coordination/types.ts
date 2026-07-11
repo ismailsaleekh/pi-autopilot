@@ -112,14 +112,18 @@ export interface CoordinationRequestedLease {
 }
 
 export interface CoordinationAcquisitionGroup {
-  readonly schema_version: 'autopilot.acquisition_group.v1';
+  readonly schema_version: 'autopilot.acquisition_group.v2';
   readonly acquisition_group_id: string;
   readonly owner: CoordinationOwnerIdentity;
   readonly requested_leases: readonly CoordinationRequestedLease[];
+  readonly reason: string;
+  readonly normal_release_condition: CoordinationReleaseCondition;
   readonly state: CoordinationAcquisitionState;
   readonly created_event_seq: number;
+  readonly fairness_event_seq: number;
   readonly grant_event_seq: number | null;
   readonly offer_expires_at: string | null;
+  readonly offer_count: number;
   readonly bypass_count: number;
   readonly version: number;
 }
@@ -254,7 +258,7 @@ export interface CoordinationSnapshot {
 }
 
 export type CoordinatorQueryAction = 'status' | 'doctor' | 'export';
-export type CoordinatorMutationAction = 'attach-run' | 'attach-session' | 'detach-session' | 'prepare-handoff' | 'heartbeat' | 'register-child' | 'heartbeat-child' | 'complete-child' | 'drain-mailbox' | 'acquire-group' | 'acknowledge-grant' | 'respond-claim-request' | 'cancel-claim-request' | 'acknowledge-message' | 'transition-operation';
+export type CoordinatorMutationAction = 'attach-run' | 'attach-session' | 'detach-session' | 'prepare-handoff' | 'heartbeat' | 'register-child' | 'heartbeat-child' | 'complete-child' | 'drain-mailbox' | 'acquire-group' | 'acknowledge-grant' | 'respond-claim-request' | 'cancel-claim-request' | 'cancel-acquisition-group' | 'supersede-attempt' | 'acknowledge-message' | 'transition-operation';
 
 export interface CoordinatorRequestEnvelope {
   readonly schema_version: typeof AUTOPILOT_COORDINATOR_REQUEST_SCHEMA;

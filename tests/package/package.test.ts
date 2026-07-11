@@ -278,7 +278,8 @@ void describe('package manifest and payload', () => {
       'openai-codex/gpt-5.6-sol',
       'openai-codex/gpt-5.6-terra',
       'openai-codex/gpt-5.6-luna',
-      'Coordination Fabric Phases 27–29',
+      'Coordination Fabric Phases 27–30',
+      'end-to-end peer claim negotiation',
       'read-only canonical preflight',
       'standalone production surfaces',
       'transactional coordinator',
@@ -295,7 +296,8 @@ void describe('package manifest and payload', () => {
     const plan = await docText('TEST_PLAN.md');
     const mappings = [
       { claim: 'Commands', row: 'Public commands are `/autopilot`, `/autopilot-inject`, `/autopilot-onboard`, `/autopilot-handoff`, `/autopilot-config`, `/autopilot-claim-gc`, `/autopilot-coordination`, `/autopilot-close`, and `/autopilot-abort`' },
-      { claim: 'Coordination Fabric Phases 27–29', row: 'Coordination Fabric contracts and protocol lock' },
+      { claim: 'Coordination Fabric Phases 27–30', row: 'Coordination Fabric contracts and protocol lock' },
+      { claim: 'end-to-end peer claim negotiation', row: 'End-to-end peer claim negotiation' },
       { claim: 'read-only canonical preflight', row: 'Legacy coordination preflight has real consumers' },
       { claim: 'standalone production surfaces', row: 'Standalone package boundary' },
       { claim: 'context_budget', row: '`context_budget` parent gate' },

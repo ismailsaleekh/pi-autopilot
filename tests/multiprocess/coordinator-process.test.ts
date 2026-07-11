@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { spawn, type ChildProcessLite } from 'node:child_process';
+import { spawn, spawnSync, type ChildProcessLite } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -12,6 +12,7 @@ import { AUTOPILOT_STATE_ROOT_ENV } from '../../src/core/parallel-runtime.ts';
 
 const packageRoot = resolve(new URL('../../', import.meta.url).pathname);
 const coordinatorCli = join(packageRoot, 'src', 'cli', 'autopilot-coordinator.ts');
+const negotiationClient = join(packageRoot, 'tests', 'helpers', 'negotiation-process-client.ts');
 
 interface LockRecord {
   readonly pid: number;
@@ -28,6 +29,17 @@ async function waitFor(predicate: () => boolean | Promise<boolean>, timeoutMs = 
     await sleep(25);
   }
   throw new Error('condition did not become true before timeout');
+}
+
+async function waitForCoordinator(client: CoordinatorClient): Promise<void> {
+  await waitFor(async () => {
+    try {
+      await client.query('status');
+      return true;
+    } catch {
+      return false;
+    }
+  });
 }
 
 async function readLock(path: string): Promise<LockRecord | null> {
@@ -48,6 +60,18 @@ function startServe(stateRoot: string): ChildProcessLite {
     stdio: ['pipe', 'pipe', 'pipe'],
     shell: false,
   });
+}
+
+function runNegotiationClient(stateRoot: string, action: 'attach-acquire' | 'release' | 'ack', suffix: string, targetGroup?: string): Readonly<Record<string, unknown>> {
+  const result = spawnSync(process.execPath, ['--experimental-strip-types', negotiationClient, action, stateRoot, suffix, ...(targetGroup === undefined ? [] : [targetGroup])], {
+    cwd: packageRoot,
+    env: { ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: stateRoot },
+    encoding: 'utf8',
+  });
+  assert.equal(result.status, 0, result.stderr);
+  const parsed: unknown = JSON.parse(result.stdout.trim()) as unknown;
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) throw new Error('negotiation process output is not an object');
+  return parsed as Readonly<Record<string, unknown>>;
 }
 
 function closeResult(child: ChildProcessLite): Promise<number | null> {
@@ -78,6 +102,7 @@ void describe('coordinator multiprocess lifecycle', () => {
     try {
       await waitFor(() => existsSync(paths.lockPath) && existsSync(paths.capabilityPath));
       const client = new CoordinatorClient({ env, autoStart: false });
+      await waitForCoordinator(client);
       const response = await client.query('status');
       assert.equal(response.payload['schema_version'], 'autopilot.coordinator_status.v1');
       const outcome = await Promise.race([
@@ -99,6 +124,33 @@ void describe('coordinator multiprocess lifecycle', () => {
     }
   });
 
+  void it('negotiates release and reacquisition through two independent client processes', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pi-autopilot-coordinator-negotiation-process-'));
+    const stateRoot = join(root, 'state');
+    const env = { ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: stateRoot };
+    const paths = coordinatorRuntimePaths(env);
+    const server = startServe(stateRoot);
+    try {
+      await waitFor(() => existsSync(paths.lockPath) && existsSync(paths.capabilityPath));
+      await waitForCoordinator(new CoordinatorClient({ env, autoStart: false }));
+      const owner = runNegotiationClient(stateRoot, 'attach-acquire', 'a');
+      const requester = runNegotiationClient(stateRoot, 'attach-acquire', 'b');
+      assert.equal(owner['outcome'], 'granted');
+      assert.equal(requester['outcome'], 'waiting-for-peer-release');
+      const release = runNegotiationClient(stateRoot, 'release', 'a', 'group-b');
+      assert.equal(release['status'], 'grant-ready');
+      const grant = runNegotiationClient(stateRoot, 'ack', 'b');
+      assert.equal(grant['state'], 'granted');
+      assert.equal(grant['lease_count'], 1);
+      const status = await new CoordinatorClient({ env, autoStart: false }).query('status', 'repo-process-negotiation', 'run-b');
+      assert.equal(Array.isArray(status.payload['edit_leases']) ? status.payload['edit_leases'].length : -1, 1);
+    } finally {
+      await stopCoordinator(paths.lockPath);
+      if (!server.killed) server.kill('SIGTERM');
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   void it('recovers committed state after a hard coordinator kill and client restart', async () => {
     const root = await mkdtemp(join(tmpdir(), 'pi-autopilot-coordinator-restart-'));
     const stateRoot = join(root, 'state');
@@ -108,6 +160,7 @@ void describe('coordinator multiprocess lifecycle', () => {
     try {
       await waitFor(() => existsSync(paths.lockPath) && existsSync(paths.capabilityPath));
       const client = new CoordinatorClient({ env });
+      await waitForCoordinator(client);
       await client.mutate('attach-run', {
         repoId: 'repo-process-test', workstreamRun: 'run-process-test', sessionId: null, fencingGeneration: null, expectedVersion: 0, idempotencyKey: 'attach-run-process-test',
       }, {

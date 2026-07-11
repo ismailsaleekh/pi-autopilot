@@ -224,7 +224,7 @@ void describe('Phase 2 scheduler config and deterministic scheduler', () => {
       masterPlan,
       config: { schema_version: 'autopilot.scheduler_config.v1', workstream: 'phase2-smoke', parallel_cap: 1, updated_at: '2026-07-08T00:00:00.000Z', updated_by: 'runtime-test' },
       candidates: [
-        { unit_id: 'u01', attempt: 1, spec: baseSpec },
+        { unit_id: 'u01', attempt: 1, spec: baseSpec, peer_claim_request_refs: ['claim-request-peer-u01'] },
         { unit_id: 'u02', attempt: 1, spec: { ...baseSpec, unit_id: 'u02', owned_paths: ['src/u02.ts'] } },
         { unit_id: 'u03', attempt: 1, spec: { ...baseSpec, unit_id: 'u03', owned_paths: ['src/u03.ts'] } },
       ],
@@ -235,6 +235,8 @@ void describe('Phase 2 scheduler config and deterministic scheduler', () => {
     assert.deepEqual(dispatch.selected.map((unit) => unit.unit_id), ['u02']);
     const skippedReasons = new Map(dispatch.skipped.map((unit) => [unit.unit_id, unit.reasons]));
     assert.ok(skippedReasons.get('u01')?.includes('running-cap-reached'));
+    assert.ok(skippedReasons.get('u01')?.includes('waiting-for-peer-release'));
+    assert.ok(dispatch.skipped.find((unit) => unit.unit_id === 'u01')?.details.includes('claim request claim-request-peer-u01'));
     assert.ok(skippedReasons.get('u03')?.includes('dependency-not-satisfied'));
   });
 });

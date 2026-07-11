@@ -69,8 +69,8 @@ export const COORDINATION_CHILD_LEASE_SCHEMA = exactObject('autopilot.child_leas
 export const COORDINATION_UNIT_ATTEMPT_SCHEMA = exactObject('autopilot.unit_attempt.v1', {
   owner: owner(), state: enumeration(COORDINATION_UNIT_STATES), spec: evidence(), preemptible: { type: 'boolean' }, checkpoint_ordinal: integer(), critical_section: nullable(boundedString(128)), version: integer(1),
 });
-export const COORDINATION_ACQUISITION_GROUP_SCHEMA = exactObject('autopilot.acquisition_group.v1', {
-  acquisition_group_id: identifier(), owner: owner(), requested_leases: { type: 'array', minItems: 1, maxItems: 1024, uniqueItems: true, items: requestedLease() }, state: enumeration(COORDINATION_ACQUISITION_STATES), created_event_seq: integer(), grant_event_seq: nullable(integer()), offer_expires_at: nullable(boundedString(32)), bypass_count: integer(), version: integer(1),
+export const COORDINATION_ACQUISITION_GROUP_SCHEMA = exactObject('autopilot.acquisition_group.v2', {
+  acquisition_group_id: identifier(), owner: owner(), requested_leases: { type: 'array', minItems: 1, maxItems: 1024, uniqueItems: true, items: requestedLease() }, reason: boundedString(1024), normal_release_condition: condition(), state: enumeration(COORDINATION_ACQUISITION_STATES), created_event_seq: integer(), fairness_event_seq: integer(), grant_event_seq: nullable(integer()), offer_expires_at: nullable(boundedString(32)), offer_count: integer(), bypass_count: integer(), version: integer(1),
 });
 export const COORDINATION_EDIT_LEASE_SCHEMA = exactObject('autopilot.edit_lease.v1', {
   edit_lease_id: identifier(), owner: owner(), acquisition_group_id: identifier(), path: boundedString(512), mode: enumeration(COORDINATION_CLAIM_MODES), purpose: boundedString(512), acquired_event_seq: integer(), normal_release_condition: condition(), version: integer(1),
@@ -105,7 +105,7 @@ export const COORDINATOR_REQUEST_SCHEMA: CoordinationJsonSchema = {
   $id: 'urn:pi-autopilot:coordination:coordinator-request-v1', type: 'object', additionalProperties: false,
   required: ['schema_version', 'protocol_version', 'request_id', 'action', 'idempotency_key', 'repo_id', 'workstream_run', 'session_id', 'fencing_generation', 'expected_version', 'payload'],
   properties: {
-    schema_version: { const: AUTOPILOT_COORDINATOR_REQUEST_SCHEMA }, protocol_version: { const: AUTOPILOT_COORDINATOR_PROTOCOL_VERSION }, request_id: identifier(), action: enumeration(['status', 'doctor', 'export', 'attach-run', 'attach-session', 'detach-session', 'prepare-handoff', 'heartbeat', 'register-child', 'heartbeat-child', 'complete-child', 'drain-mailbox', 'acquire-group', 'acknowledge-grant', 'respond-claim-request', 'cancel-claim-request', 'acknowledge-message', 'transition-operation']), idempotency_key: nullable(identifier()), repo_id: identifier(), workstream_run: nullable(identifier()), session_id: nullable(identifier()), fencing_generation: nullable(integer()), expected_version: nullable(integer()), payload: { type: 'object' },
+    schema_version: { const: AUTOPILOT_COORDINATOR_REQUEST_SCHEMA }, protocol_version: { const: AUTOPILOT_COORDINATOR_PROTOCOL_VERSION }, request_id: identifier(), action: enumeration(['status', 'doctor', 'export', 'attach-run', 'attach-session', 'detach-session', 'prepare-handoff', 'heartbeat', 'register-child', 'heartbeat-child', 'complete-child', 'drain-mailbox', 'acquire-group', 'acknowledge-grant', 'respond-claim-request', 'cancel-claim-request', 'cancel-acquisition-group', 'supersede-attempt', 'acknowledge-message', 'transition-operation']), idempotency_key: nullable(identifier()), repo_id: identifier(), workstream_run: nullable(identifier()), session_id: nullable(identifier()), fencing_generation: nullable(integer()), expected_version: nullable(integer()), payload: { type: 'object' },
   },
 };
 export const COORDINATOR_RESPONSE_SCHEMA: CoordinationJsonSchema = {

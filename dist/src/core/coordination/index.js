@@ -5,6 +5,7 @@ export * from "./failures.js";
 export * from "./ipc.js";
 export * from "./invariants.js";
 export * from "./legacy-preflight.js";
+export * from "./negotiation.js";
 export * from "./package-isolation.js";
 export * from "./process-identity.js";
 export * from "./runtime-paths.js";

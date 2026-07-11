@@ -4,11 +4,12 @@ import { mkdir } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { platform } from 'node:os';
 import { backup, DatabaseSync } from 'node:sqlite';
-import { parseCoordinationChildLease, parseCoordinationMessage, parseCoordinationRepository, parseCoordinationRun, parseCoordinationSessionLease } from "./contracts.js";
+import { claimModesConflict, coordinationPathsOverlap, parseCoordinationAcquisitionGroup, parseCoordinationChildLease, parseCoordinationClaimRequest, parseCoordinationEditLease, parseCoordinationMessage, parseCoordinationReleaseCondition, parseCoordinationRepository, parseCoordinationRequestedLease, parseCoordinationRun, parseCoordinationSessionLease, parseCoordinationUnitAttempt } from "./contracts.js";
 import { CoordinationRuntimeError } from "./failures.js";
-import { COORDINATOR_BUSY_TIMEOUT_MS, COORDINATOR_DATABASE_SCHEMA_VERSION, COORDINATOR_PACKAGE_BUILD } from "./runtime-paths.js";
+import { COORDINATOR_BUSY_TIMEOUT_MS, COORDINATOR_DATABASE_SCHEMA_VERSION, COORDINATOR_GRANT_OFFER_TTL_MS, COORDINATOR_PACKAGE_BUILD } from "./runtime-paths.js";
 const DATABASE_EXPORT_SCHEMA = 'autopilot.coordinator_export.v1';
 const SHA256_PATTERN = /^sha256:[a-f0-9]{64}$/u;
+const RUN_OWNED_IDEMPOTENCY_ACTIONS = new Set(['acquire-group', 'acknowledge-grant', 'respond-claim-request', 'cancel-claim-request', 'cancel-acquisition-group', 'supersede-attempt']);
 const systemClock = { now: () => new Date() };
 const MIGRATION_1 = `
 CREATE TABLE repositories (
@@ -131,6 +132,21 @@ CREATE INDEX idx_children_run_status ON child_leases(repo_id, workstream_run, st
 CREATE INDEX idx_messages_mailbox ON messages(repo_id, recipient_workstream_run, status, created_event_seq);
 CREATE INDEX idx_events_entity ON events(repo_id, entity_type, entity_id, event_seq);
 `;
+const MIGRATION_2 = `
+CREATE TABLE acquisition_groups (
+  entity_id TEXT NOT NULL,
+  repo_id TEXT NOT NULL,
+  workstream_run TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  version INTEGER NOT NULL CHECK(version >= 1),
+  PRIMARY KEY(repo_id, entity_id),
+  FOREIGN KEY(repo_id, workstream_run) REFERENCES runs(repo_id, workstream_run) ON DELETE RESTRICT
+) STRICT;
+CREATE INDEX idx_acquisition_groups_run ON acquisition_groups(repo_id, workstream_run, entity_id);
+CREATE INDEX idx_edit_leases_repo ON edit_leases(repo_id, entity_id);
+CREATE INDEX idx_claim_requests_owner_status ON claim_requests(repo_id, owner_workstream_run, entity_id);
+CREATE INDEX idx_claim_requests_requester_status ON claim_requests(repo_id, requester_workstream_run, entity_id);
+`;
 function asRow(value, label) {
     if (value === undefined)
         throw new CoordinationRuntimeError('invalid-state', `${label} row is missing`);
@@ -176,6 +192,33 @@ function payloadInteger(payload, field) {
         throw new CoordinationRuntimeError('invalid-request', `payload field ${field} must be an integer`);
     return value;
 }
+function payloadBoolean(payload, field) {
+    const value = payload[field];
+    if (typeof value !== 'boolean')
+        throw new CoordinationRuntimeError('invalid-request', `payload field ${field} must be boolean`);
+    return value;
+}
+function payloadRequestedLeases(payload) {
+    const value = payload['requested_leases'];
+    if (!Array.isArray(value))
+        throw new CoordinationRuntimeError('invalid-request', 'payload field requested_leases must be an array');
+    return Object.freeze(value.map((entry, index) => parseCoordinationRequestedLease(entry, `requested_leases[${String(index)}]`)));
+}
+function payloadReleaseCondition(payload, field) {
+    return parseCoordinationReleaseCondition(payload[field], `payload.${field}`);
+}
+function ownerIdentityKey(owner) {
+    return `${owner.repo_id}\0${owner.autopilot_id}\0${owner.workstream_run}\0${owner.unit_id}\0${String(owner.attempt)}`;
+}
+function sameOwner(left, right) {
+    return ownerIdentityKey(left) === ownerIdentityKey(right);
+}
+function unitAttemptEntityId(owner) {
+    return `attempt-${createHash('sha256').update(ownerIdentityKey(owner), 'utf8').digest('hex')}`;
+}
+function stableEntityId(prefix, parts) {
+    return `${prefix}-${createHash('sha256').update(parts.join('\0'), 'utf8').digest('hex')}`;
+}
 function canonicalJson(value) {
     if (value === null || typeof value === 'boolean' || typeof value === 'number' || typeof value === 'string')
         return JSON.stringify(value);
@@ -187,16 +230,20 @@ function canonicalJson(value) {
     return `{${entries.map(([key, entry]) => `${JSON.stringify(key)}:${canonicalJson(entry)}`).join(',')}}`;
 }
 function requestDigest(request) {
+    const runOwnedIdempotency = RUN_OWNED_IDEMPOTENCY_ACTIONS.has(request.action);
+    const payload = runOwnedIdempotency
+        ? Object.fromEntries(Object.entries(request.payload).filter(([field]) => field !== 'session_lease_id' && field !== 'session_token'))
+        : request.payload;
     const semantic = {
         schema_version: request.schema_version,
         protocol_version: request.protocol_version,
         action: request.action,
         repo_id: request.repo_id,
         workstream_run: request.workstream_run,
-        session_id: request.session_id,
-        fencing_generation: request.fencing_generation,
-        expected_version: request.expected_version,
-        payload: request.payload,
+        session_id: runOwnedIdempotency ? null : request.session_id,
+        fencing_generation: runOwnedIdempotency ? null : request.fencing_generation,
+        expected_version: runOwnedIdempotency && request.action === 'acquire-group' ? null : request.expected_version,
+        payload,
     };
     return `sha256:${createHash('sha256').update(canonicalJson(semantic), 'utf8').digest('hex')}`;
 }
@@ -273,6 +320,25 @@ function childFromRow(row) {
         version: sqlInteger(row, 'version'),
     });
 }
+function entityFromRow(row, parser, label) {
+    const parsed = parser(parseJsonObject(sqlString(row, 'payload_json'), label));
+    const version = sqlInteger(row, 'version');
+    if (typeof parsed !== 'object' || parsed === null || !('version' in parsed) || parsed.version !== version)
+        throw new CoordinationRuntimeError('store-corrupt', `${label} payload version disagrees with its indexed row`);
+    return parsed;
+}
+function acquisitionGroupFromRow(row) {
+    return entityFromRow(row, parseCoordinationAcquisitionGroup, 'acquisition group');
+}
+function editLeaseFromRow(row) {
+    return entityFromRow(row, parseCoordinationEditLease, 'edit lease');
+}
+function claimRequestFromRow(row) {
+    return entityFromRow(row, parseCoordinationClaimRequest, 'claim request');
+}
+function unitAttemptFromRow(row) {
+    return entityFromRow(row, parseCoordinationUnitAttempt, 'unit attempt');
+}
 function messageFromRow(row) {
     return parseCoordinationMessage({
         schema_version: 'autopilot.coordination_message.v1',
@@ -310,12 +376,10 @@ function sqliteFailure(error) {
 }
 export class CoordinatorStore {
     #db;
-    #paths;
     #clock;
     #lastBackupPath;
-    constructor(db, paths, clock, lastBackupPath) {
+    constructor(db, clock, lastBackupPath) {
         this.#db = db;
-        this.#paths = paths;
         this.#clock = clock;
         this.#lastBackupPath = lastBackupPath;
     }
@@ -350,50 +414,56 @@ export class CoordinatorStore {
             const currentVersion = sqlInteger(versionRow, 'user_version');
             if (currentVersion > COORDINATOR_DATABASE_SCHEMA_VERSION)
                 throw new CoordinationRuntimeError('schema-mismatch', `database schema ${String(currentVersion)} is newer than supported schema ${String(COORDINATOR_DATABASE_SCHEMA_VERSION)}`);
-            if (currentVersion < COORDINATOR_DATABASE_SCHEMA_VERSION) {
-                if (existed) {
-                    const stamp = clock.now().toISOString().replace(/[-:.]/gu, '');
-                    lastBackupPath = join(paths.backupsRoot, `coordinator.pre-v${String(currentVersion)}.${stamp}.db`);
-                    await backup(db, lastBackupPath);
-                    const backupDb = new DatabaseSync(lastBackupPath, { readOnly: true });
-                    try {
-                        if (integrityResult(backupDb) !== 'ok')
-                            throw new CoordinationRuntimeError('store-corrupt', 'pre-migration backup failed integrity verification');
-                    }
-                    finally {
-                        backupDb.close();
-                    }
+            if (currentVersion < COORDINATOR_DATABASE_SCHEMA_VERSION && existed) {
+                const stamp = clock.now().toISOString().replace(/[-:.]/gu, '');
+                lastBackupPath = join(paths.backupsRoot, `coordinator.pre-v${String(currentVersion)}.${stamp}.db`);
+                await backup(db, lastBackupPath);
+                const backupDb = new DatabaseSync(lastBackupPath, { readOnly: true });
+                try {
+                    if (integrityResult(backupDb) !== 'ok')
+                        throw new CoordinationRuntimeError('store-corrupt', 'pre-migration backup failed integrity verification');
                 }
-                if (currentVersion === 0) {
-                    const checksum = createHash('sha256').update(MIGRATION_1, 'utf8').digest('hex');
-                    db.exec('BEGIN IMMEDIATE');
-                    try {
-                        db.exec(MIGRATION_1);
-                        db.prepare('INSERT INTO schema_migrations(version, checksum, applied_at) VALUES(?, ?, ?)').run(1, checksum, clock.now().toISOString());
-                        db.exec('PRAGMA user_version=1');
-                        db.exec('COMMIT');
-                    }
-                    catch (error) {
-                        db.exec('ROLLBACK');
-                        throw error;
-                    }
+                finally {
+                    backupDb.close();
                 }
             }
-            const expectedMigrationChecksum = createHash('sha256').update(MIGRATION_1, 'utf8').digest('hex');
-            let migrationRow;
-            try {
-                migrationRow = db.prepare('SELECT version, checksum FROM schema_migrations WHERE version=1').get();
+            const migrations = [
+                { version: 1, sql: MIGRATION_1 },
+                { version: 2, sql: MIGRATION_2 },
+            ];
+            for (const migration of migrations) {
+                if (currentVersion >= migration.version)
+                    continue;
+                const checksum = createHash('sha256').update(migration.sql, 'utf8').digest('hex');
+                db.exec('BEGIN IMMEDIATE');
+                try {
+                    db.exec(migration.sql);
+                    db.prepare('INSERT INTO schema_migrations(version, checksum, applied_at) VALUES(?, ?, ?)').run(migration.version, checksum, clock.now().toISOString());
+                    db.exec(`PRAGMA user_version=${String(migration.version)}`);
+                    db.exec('COMMIT');
+                }
+                catch (error) {
+                    db.exec('ROLLBACK');
+                    throw error;
+                }
             }
-            catch (error) {
-                throw new CoordinationRuntimeError('schema-mismatch', 'coordinator migration journal is unavailable', [error instanceof Error ? error.message : String(error)]);
+            for (const migration of migrations) {
+                let migrationRow;
+                try {
+                    migrationRow = db.prepare('SELECT version, checksum FROM schema_migrations WHERE version=?').get(migration.version);
+                }
+                catch (error) {
+                    throw new CoordinationRuntimeError('schema-mismatch', 'coordinator migration journal is unavailable', [error instanceof Error ? error.message : String(error)]);
+                }
+                const expectedChecksum = createHash('sha256').update(migration.sql, 'utf8').digest('hex');
+                if (migrationRow === undefined || sqlInteger(migrationRow, 'version') !== migration.version || sqlString(migrationRow, 'checksum') !== expectedChecksum)
+                    throw new CoordinationRuntimeError('schema-mismatch', `coordinator migration ${String(migration.version)} checksum does not match the package schema`);
             }
-            if (migrationRow === undefined || sqlInteger(migrationRow, 'version') !== 1 || sqlString(migrationRow, 'checksum') !== expectedMigrationChecksum)
-                throw new CoordinationRuntimeError('schema-mismatch', 'coordinator migration journal checksum does not match the package schema');
             if (integrityResult(db) !== 'ok')
                 throw new CoordinationRuntimeError('store-corrupt', 'coordinator database failed post-migration integrity check');
             if (platform() !== 'win32')
                 chmodSync(paths.databasePath, 0o600);
-            return new CoordinatorStore(db, paths, clock, lastBackupPath);
+            return new CoordinatorStore(db, clock, lastBackupPath);
         }
         catch (error) {
             db.close();
@@ -404,6 +474,34 @@ export class CoordinatorStore {
     }
     close() {
         this.#db.close();
+    }
+    sweepExpiredGrantOffers() {
+        const now = this.#clock.now().toISOString();
+        const repoRows = this.#db.prepare("SELECT DISTINCT repo_id FROM acquisition_groups WHERE json_extract(payload_json, '$.state')='grant-ready' AND json_extract(payload_json, '$.offer_expires_at')<=? ORDER BY repo_id").all(now);
+        let expiredCount = 0;
+        for (const repoRow of repoRows) {
+            const repoId = sqlString(repoRow, 'repo_id');
+            this.#db.exec('BEGIN IMMEDIATE');
+            try {
+                const seq = this.#nextEventSequence(repoId);
+                const before = sqlInteger(asRow(this.#db.prepare("SELECT COUNT(*) AS count FROM acquisition_groups WHERE repo_id=? AND json_extract(payload_json, '$.state')='grant-ready' AND json_extract(payload_json, '$.offer_expires_at')<=?").get(repoId, now), 'expired offer count'), 'count');
+                if (!this.#expireGrantOffers(repoId, seq)) {
+                    this.#db.exec('ROLLBACK');
+                    continue;
+                }
+                this.#reevaluateWaitingGroups(repoId, seq);
+                const idempotencyKey = `grant-offer-expiry:${repoId}:${String(seq)}`;
+                const digest = `sha256:${createHash('sha256').update(idempotencyKey, 'utf8').digest('hex')}`;
+                this.#db.prepare('INSERT INTO events(repo_id, event_seq, event_type, entity_type, entity_id, idempotency_key, request_sha256, occurred_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?)').run(repoId, seq, 'grant-offers-expired', 'repository', repoId, idempotencyKey, digest, now);
+                this.#db.exec('COMMIT');
+                expiredCount += before;
+            }
+            catch (error) {
+                this.#db.exec('ROLLBACK');
+                throw error;
+            }
+        }
+        return expiredCount;
     }
     handle(request) {
         try {
@@ -448,12 +546,13 @@ export class CoordinatorStore {
             case 'complete-child': return this.completeChild(request);
             case 'drain-mailbox': return this.drainMailbox(request);
             case 'acknowledge-message': return this.acknowledgeMessage(request);
-            case 'acquire-group':
-            case 'acknowledge-grant':
-            case 'respond-claim-request':
-            case 'cancel-claim-request':
-            case 'transition-operation':
-                throw new CoordinationRuntimeError('recovery-required', `${request.action} is reserved for a later Coordination Fabric transition`);
+            case 'acquire-group': return this.acquireGroup(request);
+            case 'acknowledge-grant': return this.acknowledgeGrant(request);
+            case 'respond-claim-request': return this.respondClaimRequest(request);
+            case 'cancel-claim-request': return this.cancelClaimRequest(request);
+            case 'cancel-acquisition-group': return this.cancelAcquisitionGroup(request);
+            case 'supersede-attempt': return this.supersedeAttempt(request);
+            case 'transition-operation': throw new CoordinationRuntimeError('recovery-required', `${request.action} is reserved for a later Coordination Fabric transition`);
         }
     }
     status(repoId, workstreamRun) {
@@ -470,6 +569,9 @@ export class CoordinatorStore {
             ? (repoId === 'global' ? this.#db.prepare('SELECT * FROM child_leases ORDER BY repo_id, workstream_run, unit_id, attempt').all() : this.#db.prepare('SELECT * FROM child_leases WHERE repo_id=? ORDER BY workstream_run, unit_id, attempt').all(repoId)).map(childFromRow)
             : this.#db.prepare('SELECT * FROM child_leases WHERE repo_id=? AND workstream_run=? ORDER BY unit_id, attempt').all(repoId, workstreamRun).map(childFromRow);
         const pendingMessages = workstreamRun === null ? 0 : sqlInteger(asRow(this.#db.prepare("SELECT COUNT(*) AS count FROM messages WHERE repo_id=? AND recipient_workstream_run=? AND status!='acknowledged'").get(repoId, workstreamRun), 'message count'), 'count');
+        const acquisitionGroups = workstreamRun === null ? [] : this.#db.prepare('SELECT * FROM acquisition_groups WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(repoId, workstreamRun).map(acquisitionGroupFromRow);
+        const editLeases = workstreamRun === null ? [] : this.#db.prepare('SELECT * FROM edit_leases WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(repoId, workstreamRun).map(editLeaseFromRow);
+        const claimRequests = workstreamRun === null ? [] : this.#db.prepare('SELECT * FROM claim_requests WHERE repo_id=? AND (requester_workstream_run=? OR owner_workstream_run=?) ORDER BY entity_id').all(repoId, workstreamRun, workstreamRun).map(claimRequestFromRow);
         return {
             committedEventSeq: null,
             payload: {
@@ -481,6 +583,9 @@ export class CoordinatorStore {
                 runs,
                 session_leases: sessions,
                 child_leases: children,
+                acquisition_groups: acquisitionGroups,
+                edit_leases: editLeases,
+                claim_requests: claimRequests,
                 pending_messages: pendingMessages,
             },
         };
@@ -529,6 +634,7 @@ export class CoordinatorStore {
             ['session_leases', 'repo_id, workstream_run, session_generation, session_lease_id'],
             ['child_leases', 'repo_id, workstream_run, unit_id, attempt, child_lease_id'],
             ['unit_attempts', 'repo_id, workstream_run, entity_id'],
+            ['acquisition_groups', 'repo_id, workstream_run, entity_id'],
             ['edit_leases', 'repo_id, workstream_run, entity_id'],
             ['change_reservations', 'repo_id, workstream_run, entity_id'],
             ['claim_requests', 'repo_id, requester_workstream_run, owner_workstream_run, entity_id'],
@@ -606,7 +712,7 @@ export class CoordinatorStore {
         });
     }
     detachSession(request) {
-        return this.#sessionMutation(request, 'session-detached', (session, seq) => {
+        return this.#sessionMutation(request, 'session-detached', (session) => {
             this.#db.prepare("UPDATE session_leases SET status='detached', version=version+1 WHERE session_lease_id=?").run(session.session_lease_id);
             return { entityId: session.session_lease_id, payload: { session: sessionFromRow(asRow(this.#db.prepare('SELECT * FROM session_leases WHERE session_lease_id=?').get(session.session_lease_id), 'detached session')), reason: payloadString(request.payload, 'reason') } };
         });
@@ -673,11 +779,189 @@ export class CoordinatorStore {
             return { sequence: seq, eventType: status === 'terminal' ? 'child-terminal' : 'child-recovery-required', entityType: 'child-lease', entityId: childId, payload: { child: childFromRow(asRow(this.#db.prepare('SELECT * FROM child_leases WHERE child_lease_id=?').get(childId), 'completed child')) } };
         });
     }
+    acquireGroup(request) {
+        return this.#mutation(request, () => {
+            this.#requireCurrentSession(request);
+            const run = this.#requireRun(request.repo_id, this.#workstreamRun(request));
+            this.#assertVersion(run.version, request.expected_version, 'run');
+            const groupId = payloadString(request.payload, 'acquisition_group_id');
+            if (this.#db.prepare('SELECT entity_id FROM acquisition_groups WHERE repo_id=? AND entity_id=?').get(request.repo_id, groupId) !== undefined)
+                throw new CoordinationRuntimeError('stale-version', 'acquisition group already exists; retry with its original idempotency key or query status');
+            const owner = {
+                repo_id: request.repo_id,
+                autopilot_id: run.autopilot_id,
+                workstream_run: run.workstream_run,
+                unit_id: payloadString(request.payload, 'unit_id'),
+                attempt: payloadInteger(request.payload, 'attempt'),
+            };
+            const requestedLeases = payloadRequestedLeases(request.payload);
+            const releaseCondition = payloadReleaseCondition(request.payload, 'normal_release_condition');
+            const seq = this.#nextEventSequence(request.repo_id);
+            const attempt = {
+                schema_version: 'autopilot.unit_attempt.v1', owner, state: 'preflight',
+                spec: { ref: payloadString(request.payload, 'spec_ref'), sha256: payloadString(request.payload, 'spec_sha256') },
+                preemptible: payloadBoolean(request.payload, 'preemptible'), checkpoint_ordinal: payloadInteger(request.payload, 'checkpoint_ordinal'), critical_section: null, version: 1,
+            };
+            this.#insertOrVerifyUnitAttempt(attempt);
+            this.#assertReleaseConditionOwner(releaseCondition, owner);
+            const group = {
+                schema_version: 'autopilot.acquisition_group.v2', acquisition_group_id: groupId, owner, requested_leases: requestedLeases,
+                reason: payloadString(request.payload, 'reason'), normal_release_condition: releaseCondition, state: 'waiting', created_event_seq: seq, fairness_event_seq: seq,
+                grant_event_seq: null, offer_expires_at: null, offer_count: 0, bypass_count: 0, version: 1,
+            };
+            this.#insertEntity('acquisition_groups', groupId, owner.repo_id, owner.workstream_run, group);
+            const expiredOffers = this.#expireGrantOffers(request.repo_id, seq);
+            if (expiredOffers)
+                this.#reevaluateWaitingGroups(request.repo_id, seq);
+            const currentGroup = expiredOffers ? this.#requireGroup(request.repo_id, groupId) : group;
+            if (currentGroup.state === 'grant-ready') {
+                const requests = this.#claimRequestsForGroup(request.repo_id, groupId);
+                return { sequence: seq, eventType: 'acquisition-group-waiting', entityType: 'acquisition-group', entityId: groupId, payload: { outcome: 'waiting-for-peer-release', acquisition_group: currentGroup, claim_requests: requests, request_refs: requests.map((entry) => entry.request_id) } };
+            }
+            const blockers = this.#blockingLeases(owner.repo_id, requestedLeases);
+            if (blockers.some((lease) => sameOwner(lease.owner, owner)))
+                throw new CoordinationRuntimeError('invalid-state', 'new acquisition group redundantly overlaps authority already held by the same unit attempt');
+            const offeredBlockers = this.#blockingGrantOffers(owner.repo_id, groupId, requestedLeases);
+            if (blockers.length === 0 && offeredBlockers.length === 0) {
+                const granted = this.#grantGroup(currentGroup, seq);
+                this.#reevaluateWaitingGroups(request.repo_id, seq);
+                return { sequence: seq, eventType: 'acquisition-group-granted', entityType: 'acquisition-group', entityId: groupId, payload: { outcome: 'granted', acquisition_group: granted.group, edit_leases: granted.leases, request_refs: [] } };
+            }
+            const requests = this.#ensureClaimRequests(currentGroup, blockers, seq);
+            return { sequence: seq, eventType: 'acquisition-group-waiting', entityType: 'acquisition-group', entityId: groupId, payload: { outcome: 'waiting-for-peer-release', acquisition_group: currentGroup, claim_requests: requests, request_refs: requests.map((entry) => entry.request_id) } };
+        });
+    }
+    acknowledgeGrant(request) {
+        return this.#mutation(request, () => {
+            this.#requireCurrentSession(request);
+            const groupId = payloadString(request.payload, 'acquisition_group_id');
+            const group = this.#requireGroup(request.repo_id, groupId);
+            this.#assertGroupOwner(request, group);
+            this.#assertVersion(group.version, request.expected_version, 'acquisition group');
+            const seq = this.#nextEventSequence(request.repo_id);
+            const offerExpired = this.#expireGrantOffers(request.repo_id, seq);
+            if (offerExpired) {
+                this.#reevaluateWaitingGroups(request.repo_id, seq);
+                const requeued = this.#requireGroup(request.repo_id, groupId);
+                return { sequence: seq, eventType: 'grant-offer-expired', entityType: 'acquisition-group', entityId: groupId, payload: { outcome: 'offer-expired', acquisition_group: requeued, edit_leases: [] } };
+            }
+            const current = this.#requireGroup(request.repo_id, groupId);
+            if (current.state !== 'grant-ready')
+                throw new CoordinationRuntimeError('invalid-state', `acquisition group is ${current.state}, not grant-ready`);
+            if (current.offer_expires_at === null || Date.parse(current.offer_expires_at) <= this.#clock.now().getTime())
+                throw new CoordinationRuntimeError('stale-version', 'grant offer expired before requester preflight acknowledgement');
+            if (this.#blockingLeases(request.repo_id, current.requested_leases).length > 0)
+                throw new CoordinationRuntimeError('coordinator-contention', 'grant offer is no longer completely free');
+            const granted = this.#grantGroup(current, seq);
+            this.#db.prepare("UPDATE messages SET status='acknowledged', delivered_event_seq=COALESCE(delivered_event_seq, ?), acknowledged_event_seq=COALESCE(acknowledged_event_seq, ?), version=version+1 WHERE repo_id=? AND correlation_id=? AND message_type='grant-offer' AND status!='acknowledged'").run(seq, seq, request.repo_id, groupId);
+            const groupRequests = this.#claimRequestsForGroup(request.repo_id, groupId);
+            for (const claimRequest of groupRequests) {
+                const next = { ...claimRequest, status: 'resolved', grant_event_seq: seq, version: claimRequest.version + 1 };
+                this.#updateClaimRequest(next);
+            }
+            this.#reevaluateWaitingGroups(request.repo_id, seq);
+            return { sequence: seq, eventType: 'acquisition-group-granted', entityType: 'acquisition-group', entityId: groupId, payload: { outcome: 'granted', acquisition_group: granted.group, edit_leases: granted.leases, request_refs: groupRequests.map((entry) => entry.request_id), grant_evidence: { acquisition_group_id: groupId, grant_event_seq: seq, lease_ids: granted.leases.map((entry) => entry.edit_lease_id) } } };
+        });
+    }
+    respondClaimRequest(request) {
+        return this.#mutation(request, () => {
+            this.#requireCurrentSession(request);
+            const requestId = payloadString(request.payload, 'request_id');
+            const claimRequest = this.#requireClaimRequest(requestId);
+            this.#assertRequestOwner(request, claimRequest);
+            this.#assertVersion(claimRequest.version, request.expected_version, 'claim request');
+            if (!['pending', 'delivered', 'acknowledged', 'deferred'].includes(claimRequest.status))
+                throw new CoordinationRuntimeError('invalid-state', `claim request is ${claimRequest.status}`);
+            const seq = this.#nextEventSequence(request.repo_id);
+            const offersExpired = this.#expireGrantOffers(request.repo_id, seq);
+            if (payloadString(request.payload, 'response') === 'deferred') {
+                const condition = payloadReleaseCondition(request.payload, 'release_condition');
+                this.#assertReleaseConditionOwner(condition, claimRequest.owner);
+                const deferred = { ...claimRequest, status: 'deferred', owner_reason: payloadString(request.payload, 'owner_reason'), release_condition: condition, version: claimRequest.version + 1 };
+                this.#updateClaimRequest(deferred);
+                if (offersExpired)
+                    this.#reevaluateWaitingGroups(request.repo_id, seq);
+                return { sequence: seq, eventType: 'claim-request-deferred', entityType: 'claim-request', entityId: requestId, payload: { claim_request: deferred } };
+            }
+            const releasedLeaseIds = [];
+            for (const leaseId of claimRequest.blocking_lease_ids) {
+                const row = this.#db.prepare('SELECT * FROM edit_leases WHERE entity_id=?').get(leaseId);
+                if (row === undefined)
+                    continue;
+                const lease = editLeaseFromRow(row);
+                if (!sameOwner(lease.owner, claimRequest.owner))
+                    throw new CoordinationRuntimeError('invalid-state', 'claim request blocking lease changed durable owner');
+                this.#db.prepare('DELETE FROM edit_leases WHERE entity_id=?').run(leaseId);
+                releasedLeaseIds.push(leaseId);
+                this.#markGroupReleasedWhenEmpty(lease.owner.repo_id, lease.acquisition_group_id);
+            }
+            const released = { ...claimRequest, status: 'released', owner_reason: payloadNullableString(request.payload, 'owner_reason'), release_condition: claimRequest.release_condition, release_event_seq: seq, version: claimRequest.version + 1 };
+            this.#updateClaimRequest(released);
+            const notification = this.#releaseNotification(released, releasedLeaseIds, seq);
+            this.#insertMessage(notification);
+            this.#reevaluateWaitingGroups(request.repo_id, seq);
+            return { sequence: seq, eventType: 'claim-request-released', entityType: 'claim-request', entityId: requestId, payload: { claim_request: this.#requireClaimRequest(requestId), released_lease_ids: releasedLeaseIds, release_notification: notification } };
+        });
+    }
+    cancelClaimRequest(request) {
+        return this.#mutation(request, () => {
+            this.#requireCurrentSession(request);
+            const claimRequest = this.#requireClaimRequest(payloadString(request.payload, 'request_id'));
+            this.#assertRequestRequester(request, claimRequest);
+            this.#assertVersion(claimRequest.version, request.expected_version, 'claim request');
+            const group = this.#requireGroup(request.repo_id, claimRequest.acquisition_group_id);
+            if (group.state === 'granted')
+                throw new CoordinationRuntimeError('invalid-state', 'a granted acquisition group must release through its owner lifecycle');
+            const seq = this.#nextEventSequence(request.repo_id);
+            this.#cancelGroup(group, 'cancelled', seq);
+            this.#reevaluateWaitingGroups(request.repo_id, seq);
+            return { sequence: seq, eventType: 'claim-request-cancelled', entityType: 'claim-request', entityId: claimRequest.request_id, payload: { acquisition_group: this.#requireGroup(request.repo_id, group.acquisition_group_id), request_refs: this.#claimRequestsForGroup(request.repo_id, group.acquisition_group_id).map((entry) => entry.request_id), reason: payloadString(request.payload, 'reason') } };
+        });
+    }
+    cancelAcquisitionGroup(request) {
+        return this.#mutation(request, () => {
+            this.#requireCurrentSession(request);
+            const group = this.#requireGroup(request.repo_id, payloadString(request.payload, 'acquisition_group_id'));
+            this.#assertGroupOwner(request, group);
+            this.#assertVersion(group.version, request.expected_version, 'acquisition group');
+            const seq = this.#nextEventSequence(request.repo_id);
+            this.#cancelGroup(group, 'cancelled', seq);
+            this.#reevaluateWaitingGroups(request.repo_id, seq);
+            return { sequence: seq, eventType: 'acquisition-group-cancelled', entityType: 'acquisition-group', entityId: group.acquisition_group_id, payload: { acquisition_group: this.#requireGroup(request.repo_id, group.acquisition_group_id), request_refs: this.#claimRequestsForGroup(request.repo_id, group.acquisition_group_id).map((entry) => entry.request_id), reason: payloadString(request.payload, 'reason') } };
+        });
+    }
+    supersedeAttempt(request) {
+        return this.#mutation(request, () => {
+            this.#requireCurrentSession(request);
+            const run = this.#requireRun(request.repo_id, this.#workstreamRun(request));
+            const unitId = payloadString(request.payload, 'unit_id');
+            const attemptNumber = payloadInteger(request.payload, 'attempt');
+            const attempt = this.#requireUnitAttempt(request.repo_id, run.workstream_run, unitId, attemptNumber);
+            this.#assertVersion(attempt.version, request.expected_version, 'unit attempt');
+            const seq = this.#nextEventSequence(request.repo_id);
+            const groups = this.#groupsForAttempt(attempt.owner);
+            if (groups.some((group) => group.state === 'granted'))
+                throw new CoordinationRuntimeError('invalid-state', 'running/granted attempt must release or quarantine before supersession');
+            for (const group of groups)
+                this.#cancelGroup(group, 'superseded', seq);
+            const superseded = { ...attempt, state: 'superseded', version: attempt.version + 1 };
+            this.#updateEntity('unit_attempts', unitAttemptEntityId(attempt.owner), superseded);
+            this.#reevaluateWaitingGroups(request.repo_id, seq);
+            return { sequence: seq, eventType: 'unit-attempt-superseded', entityType: 'unit-attempt', entityId: unitAttemptEntityId(attempt.owner), payload: { unit_attempt: superseded, superseded_by_attempt: payloadInteger(request.payload, 'superseded_by_attempt'), reason: payloadString(request.payload, 'reason'), request_refs: groups.flatMap((group) => this.#claimRequestsForGroup(group.owner.repo_id, group.acquisition_group_id).map((entry) => entry.request_id)) } };
+        });
+    }
     drainMailbox(request) {
         return this.#sessionMutation(request, 'mailbox-drained', (session, seq) => {
             const workstreamRun = this.#workstreamRun(request);
             this.#db.prepare("UPDATE messages SET status='delivered', delivered_event_seq=COALESCE(delivered_event_seq, ?), version=version+1 WHERE repo_id=? AND recipient_workstream_run=? AND status='pending'").run(seq, request.repo_id, workstreamRun);
-            const messages = this.#db.prepare("SELECT * FROM messages WHERE repo_id=? AND recipient_workstream_run=? AND status IN ('pending','delivered') ORDER BY created_event_seq, message_id").all(request.repo_id, workstreamRun).map(messageFromRow);
+            const messages = this.#db.prepare("SELECT * FROM messages WHERE repo_id=? AND recipient_workstream_run=? AND status='delivered' ORDER BY created_event_seq, message_id").all(request.repo_id, workstreamRun).map(messageFromRow);
+            for (const message of messages) {
+                if (message.message_type !== 'claim-request')
+                    continue;
+                const claimRequest = this.#requireClaimRequest(message.correlation_id);
+                if (claimRequest.status === 'pending')
+                    this.#updateClaimRequest({ ...claimRequest, status: 'delivered', version: claimRequest.version + 1 });
+            }
             return { entityId: payloadString(request.payload, 'delivery_id'), payload: { delivery_id: payloadString(request.payload, 'delivery_id'), session_version: session.version, messages } };
         });
     }
@@ -693,12 +977,235 @@ export class CoordinatorStore {
                 throw new CoordinationRuntimeError('invalid-state', `message is ${message.status}`);
             const seq = this.#nextEventSequence(request.repo_id);
             this.#db.prepare("UPDATE messages SET status='acknowledged', acknowledged_event_seq=?, version=version+1 WHERE message_id=?").run(seq, messageId);
+            if (message.message_type === 'claim-request') {
+                const claimRequest = this.#requireClaimRequest(message.correlation_id);
+                if (claimRequest.status === 'delivered')
+                    this.#updateClaimRequest({ ...claimRequest, status: 'acknowledged', version: claimRequest.version + 1 });
+            }
+            else if (message.message_type === 'release-notification') {
+                const claimRequest = this.#requireClaimRequest(message.correlation_id);
+                if (claimRequest.status === 'released')
+                    this.#updateClaimRequest({ ...claimRequest, status: 'requester-notified', version: claimRequest.version + 1 });
+            }
             return { sequence: seq, eventType: 'message-acknowledged', entityType: 'message', entityId: messageId, payload: { message: messageFromRow(asRow(this.#db.prepare('SELECT * FROM messages WHERE message_id=?').get(messageId), 'acknowledged message')) } };
         });
     }
     enqueueMessageForTest(message) {
         const parsed = parseCoordinationMessage(message);
         this.#db.prepare('INSERT INTO messages(message_id, repo_id, recipient_workstream_run, message_type, correlation_id, payload_json, status, created_event_seq, delivered_event_seq, acknowledged_event_seq, version) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(parsed.message_id, parsed.repo_id, parsed.recipient_workstream_run, parsed.message_type, parsed.correlation_id, canonicalJson(parsed.payload), parsed.status, parsed.created_event_seq, parsed.delivered_event_seq, parsed.acknowledged_event_seq, parsed.version);
+    }
+    #insertEntity(table, entityId, repoId, workstreamRun, entity) {
+        this.#db.prepare(`INSERT INTO ${table}(entity_id, repo_id, workstream_run, payload_json, version) VALUES(?, ?, ?, ?, ?)`).run(entityId, repoId, workstreamRun, canonicalJson(entity), entity.version);
+    }
+    #updateEntity(table, entityId, entity) {
+        const result = table === 'acquisition_groups'
+            ? this.#db.prepare('UPDATE acquisition_groups SET payload_json=?, version=? WHERE repo_id=? AND entity_id=?').run(canonicalJson(entity), entity.version, entity.owner.repo_id, entityId)
+            : this.#db.prepare(`UPDATE ${table} SET payload_json=?, version=? WHERE entity_id=?`).run(canonicalJson(entity), entity.version, entityId);
+        if (result.changes !== 1)
+            throw new CoordinationRuntimeError('invalid-state', `${table} entity ${entityId} disappeared during mutation`);
+    }
+    #insertOrVerifyUnitAttempt(attempt) {
+        const entityId = unitAttemptEntityId(attempt.owner);
+        const row = this.#db.prepare('SELECT * FROM unit_attempts WHERE entity_id=?').get(entityId);
+        if (row === undefined) {
+            this.#insertEntity('unit_attempts', entityId, attempt.owner.repo_id, attempt.owner.workstream_run, attempt);
+            return;
+        }
+        const existing = unitAttemptFromRow(row);
+        if (!sameOwner(existing.owner, attempt.owner) || canonicalJson(existing.spec) !== canonicalJson(attempt.spec))
+            throw new CoordinationRuntimeError('invalid-state', 'unit attempt identity was reused with different immutable spec evidence');
+        if (existing.state === 'superseded' || existing.state === 'reset' || existing.state === 'failed' || existing.state === 'quarantined')
+            throw new CoordinationRuntimeError('invalid-state', `unit attempt is ${existing.state}`);
+    }
+    #requireUnitAttempt(repoId, workstreamRun, unitId, attempt) {
+        const run = this.#requireRun(repoId, workstreamRun);
+        const owner = { repo_id: repoId, autopilot_id: run.autopilot_id, workstream_run: workstreamRun, unit_id: unitId, attempt };
+        return unitAttemptFromRow(asRow(this.#db.prepare('SELECT * FROM unit_attempts WHERE entity_id=?').get(unitAttemptEntityId(owner)), 'unit attempt'));
+    }
+    #requireGroup(repoId, groupId) {
+        return acquisitionGroupFromRow(asRow(this.#db.prepare('SELECT * FROM acquisition_groups WHERE repo_id=? AND entity_id=?').get(repoId, groupId), 'acquisition group'));
+    }
+    #requireClaimRequest(requestId) {
+        return claimRequestFromRow(asRow(this.#db.prepare('SELECT * FROM claim_requests WHERE entity_id=?').get(requestId), 'claim request'));
+    }
+    #claimRequestsForGroup(repoId, groupId) {
+        return this.#db.prepare("SELECT * FROM claim_requests WHERE repo_id=? AND json_extract(payload_json, '$.acquisition_group_id')=? ORDER BY entity_id").all(repoId, groupId).map(claimRequestFromRow);
+    }
+    #groupsForAttempt(owner) {
+        return this.#db.prepare('SELECT * FROM acquisition_groups WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(owner.repo_id, owner.workstream_run).map(acquisitionGroupFromRow).filter((group) => sameOwner(group.owner, owner));
+    }
+    #assertReleaseConditionOwner(condition, owner) {
+        if (condition.condition_type === 'run-closed' && condition.target_id !== owner.workstream_run)
+            throw new CoordinationRuntimeError('invalid-request', 'run-closed condition must target the blocking owner run');
+        if ((condition.condition_type === 'unit-merged' || condition.condition_type === 'attempt-reset' || condition.condition_type === 'quarantine-captured') && condition.target_id !== `${owner.unit_id}:${String(owner.attempt)}`)
+            throw new CoordinationRuntimeError('invalid-request', `${condition.condition_type} condition must target the blocking owner unit attempt`);
+        if (condition.condition_type === 'child-terminal') {
+            const expectedChildId = `child-${owner.workstream_run}-${owner.unit_id}-${String(owner.attempt)}`;
+            if (condition.target_id !== expectedChildId)
+                throw new CoordinationRuntimeError('invalid-request', 'child-terminal condition must target the deterministic child lease for the blocking unit attempt');
+            const row = this.#db.prepare('SELECT * FROM child_leases WHERE child_lease_id=?').get(condition.target_id);
+            if (row !== undefined && !sameOwner(childFromRow(row).owner, owner))
+                throw new CoordinationRuntimeError('invalid-request', 'child-terminal condition targets a child lease with different durable ownership');
+        }
+    }
+    #assertGroupOwner(request, group) {
+        if (group.owner.repo_id !== request.repo_id || group.owner.workstream_run !== this.#workstreamRun(request))
+            throw new CoordinationRuntimeError('unauthorized-client', 'session does not own acquisition group');
+    }
+    #assertRequestOwner(request, claimRequest) {
+        if (claimRequest.owner.repo_id !== request.repo_id || claimRequest.owner.workstream_run !== this.#workstreamRun(request))
+            throw new CoordinationRuntimeError('unauthorized-client', 'session is not the blocking claim owner');
+    }
+    #assertRequestRequester(request, claimRequest) {
+        if (claimRequest.requester.repo_id !== request.repo_id || claimRequest.requester.workstream_run !== this.#workstreamRun(request))
+            throw new CoordinationRuntimeError('unauthorized-client', 'session is not the claim requester');
+    }
+    #blockingLeases(repoId, requested) {
+        const leases = this.#db.prepare('SELECT * FROM edit_leases WHERE repo_id=? ORDER BY entity_id').all(repoId).map(editLeaseFromRow);
+        return Object.freeze(leases.filter((lease) => requested.some((entry) => coordinationPathsOverlap(entry.path, lease.path) && claimModesConflict(entry.mode, lease.mode))));
+    }
+    #blockingGrantOffers(repoId, groupId, requested) {
+        const offered = this.#db.prepare('SELECT * FROM acquisition_groups WHERE repo_id=? ORDER BY entity_id').all(repoId).map(acquisitionGroupFromRow);
+        return Object.freeze(offered.filter((group) => group.acquisition_group_id !== groupId && group.state === 'grant-ready' && requested.some((entry) => group.requested_leases.some((offeredLease) => coordinationPathsOverlap(entry.path, offeredLease.path) && claimModesConflict(entry.mode, offeredLease.mode)))));
+    }
+    #grantGroup(group, seq) {
+        if (this.#blockingLeases(group.owner.repo_id, group.requested_leases).length > 0)
+            throw new CoordinationRuntimeError('coordinator-contention', 'complete acquisition group became blocked before grant');
+        const leases = group.requested_leases.map((requested, index) => ({
+            schema_version: 'autopilot.edit_lease.v1',
+            edit_lease_id: stableEntityId('lease', [group.owner.repo_id, group.acquisition_group_id, String(index), requested.mode, requested.path]),
+            owner: group.owner, acquisition_group_id: group.acquisition_group_id, path: requested.path, mode: requested.mode, purpose: requested.purpose,
+            acquired_event_seq: seq, normal_release_condition: group.normal_release_condition, version: 1,
+        }));
+        for (const lease of leases)
+            this.#insertEntity('edit_leases', lease.edit_lease_id, lease.owner.repo_id, lease.owner.workstream_run, lease);
+        const granted = { ...group, state: 'granted', grant_event_seq: seq, offer_expires_at: null, version: group.version + 1 };
+        this.#updateEntity('acquisition_groups', group.acquisition_group_id, granted);
+        return { group: granted, leases };
+    }
+    #ensureClaimRequests(group, blockers, seq) {
+        const byOwner = new Map();
+        for (const blocker of blockers) {
+            const key = ownerIdentityKey(blocker.owner);
+            const owned = byOwner.get(key) ?? [];
+            owned.push(blocker);
+            byOwner.set(key, owned);
+        }
+        const requests = [];
+        for (const owned of [...byOwner.values()].sort((left, right) => ownerIdentityKey(left[0]?.owner ?? group.owner).localeCompare(ownerIdentityKey(right[0]?.owner ?? group.owner)))) {
+            const owner = owned[0]?.owner;
+            if (owner === undefined)
+                continue;
+            const leaseIds = owned.map((lease) => lease.edit_lease_id).sort();
+            const requestId = stableEntityId('claim-request', [group.acquisition_group_id, ownerIdentityKey(owner), ...leaseIds]);
+            const existingRow = this.#db.prepare('SELECT * FROM claim_requests WHERE entity_id=?').get(requestId);
+            if (existingRow !== undefined) {
+                requests.push(claimRequestFromRow(existingRow));
+                continue;
+            }
+            const claimRequest = {
+                schema_version: 'autopilot.claim_request.v1', request_id: requestId, acquisition_group_id: group.acquisition_group_id,
+                requester: group.owner, owner, blocking_lease_ids: leaseIds, requested_leases: group.requested_leases, reason: group.reason,
+                created_event_seq: seq, status: 'pending', owner_reason: null, release_condition: null, release_event_seq: null, grant_event_seq: null, version: 1,
+            };
+            this.#db.prepare('INSERT INTO claim_requests(entity_id, repo_id, requester_workstream_run, owner_workstream_run, payload_json, version) VALUES(?, ?, ?, ?, ?, ?)').run(requestId, owner.repo_id, group.owner.workstream_run, owner.workstream_run, canonicalJson(claimRequest), claimRequest.version);
+            const message = {
+                schema_version: 'autopilot.coordination_message.v1', message_id: stableEntityId('message', ['claim-request', requestId]), repo_id: owner.repo_id,
+                recipient_workstream_run: owner.workstream_run, message_type: 'claim-request', correlation_id: requestId,
+                payload: { request_id: requestId, acquisition_group_id: group.acquisition_group_id, requester_run: group.owner.workstream_run, requester_unit: group.owner.unit_id, requester_attempt: group.owner.attempt, blocking_lease_ids: leaseIds, requested_leases: group.requested_leases, reason: group.reason },
+                status: 'pending', created_event_seq: seq, delivered_event_seq: null, acknowledged_event_seq: null, version: 1,
+            };
+            this.#insertMessage(message);
+            requests.push(claimRequest);
+        }
+        return Object.freeze(requests);
+    }
+    #updateClaimRequest(claimRequest) {
+        const result = this.#db.prepare('UPDATE claim_requests SET payload_json=?, version=? WHERE entity_id=?').run(canonicalJson(claimRequest), claimRequest.version, claimRequest.request_id);
+        if (result.changes !== 1)
+            throw new CoordinationRuntimeError('invalid-state', `claim request ${claimRequest.request_id} disappeared during mutation`);
+    }
+    #insertMessage(message) {
+        this.#db.prepare('INSERT INTO messages(message_id, repo_id, recipient_workstream_run, message_type, correlation_id, payload_json, status, created_event_seq, delivered_event_seq, acknowledged_event_seq, version) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(message.message_id, message.repo_id, message.recipient_workstream_run, message.message_type, message.correlation_id, canonicalJson(message.payload), message.status, message.created_event_seq, message.delivered_event_seq, message.acknowledged_event_seq, message.version);
+    }
+    #releaseNotification(claimRequest, releasedLeaseIds, seq) {
+        return {
+            schema_version: 'autopilot.coordination_message.v1', message_id: stableEntityId('message', ['release-notification', claimRequest.request_id, String(seq)]), repo_id: claimRequest.requester.repo_id,
+            recipient_workstream_run: claimRequest.requester.workstream_run, message_type: 'release-notification', correlation_id: claimRequest.request_id,
+            payload: { request_id: claimRequest.request_id, acquisition_group_id: claimRequest.acquisition_group_id, released_lease_ids: [...releasedLeaseIds], release_event_seq: seq },
+            status: 'pending', created_event_seq: seq, delivered_event_seq: null, acknowledged_event_seq: null, version: 1,
+        };
+    }
+    #markGroupReleasedWhenEmpty(repoId, groupId) {
+        const count = sqlInteger(asRow(this.#db.prepare('SELECT COUNT(*) AS count FROM edit_leases WHERE repo_id=? AND json_extract(payload_json, \'$.acquisition_group_id\')=?').get(repoId, groupId), 'group lease count'), 'count');
+        if (count !== 0)
+            return;
+        const group = this.#requireGroup(repoId, groupId);
+        if (group.state === 'granted')
+            this.#updateEntity('acquisition_groups', groupId, { ...group, state: 'released', version: group.version + 1 });
+    }
+    #markSatisfiedRequests(group, seq) {
+        for (const claimRequest of this.#claimRequestsForGroup(group.owner.repo_id, group.acquisition_group_id)) {
+            if (['resolved', 'cancelled', 'superseded', 'released', 'grant-ready', 'requester-notified'].includes(claimRequest.status))
+                continue;
+            const stillBlocked = claimRequest.blocking_lease_ids.some((leaseId) => this.#db.prepare('SELECT entity_id FROM edit_leases WHERE repo_id=? AND entity_id=?').get(group.owner.repo_id, leaseId) !== undefined);
+            if (stillBlocked)
+                continue;
+            const released = { ...claimRequest, status: 'released', release_event_seq: seq, version: claimRequest.version + 1 };
+            this.#updateClaimRequest(released);
+            this.#insertMessage(this.#releaseNotification(released, claimRequest.blocking_lease_ids, seq));
+        }
+    }
+    #reevaluateWaitingGroups(repoId, seq) {
+        const waiting = this.#db.prepare('SELECT * FROM acquisition_groups WHERE repo_id=? ORDER BY json_extract(payload_json, \'$.fairness_event_seq\'), entity_id').all(repoId).map(acquisitionGroupFromRow).filter((group) => group.state === 'waiting');
+        for (const group of waiting) {
+            this.#markSatisfiedRequests(group, seq);
+            const blockers = this.#blockingLeases(repoId, group.requested_leases);
+            this.#ensureClaimRequests(group, blockers, seq);
+            if (blockers.length > 0 || this.#blockingGrantOffers(repoId, group.acquisition_group_id, group.requested_leases).length > 0)
+                continue;
+            const offered = { ...group, state: 'grant-ready', offer_expires_at: new Date(this.#clock.now().getTime() + COORDINATOR_GRANT_OFFER_TTL_MS).toISOString(), version: group.version + 1 };
+            this.#updateEntity('acquisition_groups', group.acquisition_group_id, offered);
+            for (const claimRequest of this.#claimRequestsForGroup(repoId, group.acquisition_group_id)) {
+                if (claimRequest.release_event_seq === null || ['cancelled', 'superseded', 'resolved'].includes(claimRequest.status))
+                    continue;
+                this.#updateClaimRequest({ ...claimRequest, status: 'grant-ready', version: claimRequest.version + 1 });
+            }
+            this.#insertMessage({
+                schema_version: 'autopilot.coordination_message.v1', message_id: stableEntityId('message', ['grant-offer', group.owner.repo_id, group.acquisition_group_id, String(offered.version)]), repo_id: repoId,
+                recipient_workstream_run: group.owner.workstream_run, message_type: 'grant-offer', correlation_id: group.acquisition_group_id,
+                payload: { acquisition_group_id: group.acquisition_group_id, offer_expires_at: offered.offer_expires_at, request_refs: this.#claimRequestsForGroup(repoId, group.acquisition_group_id).map((entry) => entry.request_id) },
+                status: 'pending', created_event_seq: seq, delivered_event_seq: null, acknowledged_event_seq: null, version: 1,
+            });
+        }
+    }
+    #expireGrantOffers(repoId, seq) {
+        const now = this.#clock.now().toISOString();
+        const offered = this.#db.prepare("SELECT * FROM acquisition_groups WHERE repo_id=? AND json_extract(payload_json, '$.state')='grant-ready' ORDER BY entity_id").all(repoId).map(acquisitionGroupFromRow);
+        let expired = false;
+        for (const group of offered) {
+            if (group.offer_expires_at === null || group.offer_expires_at > now)
+                continue;
+            expired = true;
+            this.#updateEntity('acquisition_groups', group.acquisition_group_id, { ...group, state: 'waiting', offer_expires_at: null, offer_count: group.offer_count + 1, fairness_event_seq: seq, version: group.version + 1 });
+            this.#db.prepare("UPDATE messages SET status='acknowledged', delivered_event_seq=COALESCE(delivered_event_seq, ?), acknowledged_event_seq=COALESCE(acknowledged_event_seq, ?), version=version+1 WHERE repo_id=? AND correlation_id=? AND message_type='grant-offer' AND status!='acknowledged'").run(seq, seq, repoId, group.acquisition_group_id);
+            for (const claimRequest of this.#claimRequestsForGroup(repoId, group.acquisition_group_id)) {
+                if (claimRequest.status === 'grant-ready')
+                    this.#updateClaimRequest({ ...claimRequest, status: 'released', version: claimRequest.version + 1 });
+            }
+        }
+        return expired;
+    }
+    #cancelGroup(group, status, seq) {
+        if (group.state !== 'waiting' && group.state !== 'grant-ready')
+            throw new CoordinationRuntimeError('invalid-state', `cannot ${status} acquisition group in state ${group.state}`);
+        this.#updateEntity('acquisition_groups', group.acquisition_group_id, { ...group, state: status, offer_expires_at: null, version: group.version + 1 });
+        for (const claimRequest of this.#claimRequestsForGroup(group.owner.repo_id, group.acquisition_group_id)) {
+            if (claimRequest.status === 'resolved' || claimRequest.status === 'cancelled' || claimRequest.status === 'superseded')
+                continue;
+            this.#updateClaimRequest({ ...claimRequest, status, version: claimRequest.version + 1 });
+        }
+        this.#db.prepare("UPDATE messages SET status='acknowledged', delivered_event_seq=COALESCE(delivered_event_seq, ?), acknowledged_event_seq=COALESCE(acknowledged_event_seq, ?), version=version+1 WHERE repo_id=? AND (correlation_id=? OR correlation_id IN (SELECT entity_id FROM claim_requests WHERE repo_id=? AND json_extract(payload_json, '$.acquisition_group_id')=?)) AND status!='acknowledged'").run(seq, seq, group.owner.repo_id, group.acquisition_group_id, group.owner.repo_id, group.acquisition_group_id);
     }
     #sessionMutation(request, eventType, apply) {
         return this.#mutation(request, () => {
@@ -718,6 +1225,7 @@ export class CoordinatorStore {
         try {
             const prior = this.#db.prepare('SELECT request_sha256, committed_event_seq, payload_json FROM idempotency_results WHERE repo_id=? AND idempotency_key=?').get(request.repo_id, idempotencyKey);
             if (prior !== undefined) {
+                this.#assertReplayAuthority(request);
                 if (sqlString(prior, 'request_sha256') !== digest)
                     throw new CoordinationRuntimeError('idempotency-conflict', 'idempotency key was reused with a different request');
                 const replay = { committedEventSeq: sqlInteger(prior, 'committed_event_seq'), payload: parseJsonObject(sqlString(prior, 'payload_json'), 'idempotency payload'), replayed: true };
@@ -762,6 +1270,26 @@ export class CoordinatorStore {
             throw new CoordinationRuntimeError('unauthorized-client', 'session lease identity does not match current authority');
         this.#assertCapability(row, 'session_token_sha256', payloadString(request.payload, 'session_token'), 'session');
         return sessionFromRow(row);
+    }
+    #assertReplayAuthority(request) {
+        if (request.action === 'attach-run')
+            return;
+        if (request.action === 'heartbeat-child' || request.action === 'complete-child') {
+            const childId = payloadString(request.payload, 'child_lease_id');
+            const row = asRow(this.#db.prepare('SELECT * FROM child_leases WHERE child_lease_id=?').get(childId), 'child replay authority');
+            this.#assertChildAuthority(request, childFromRow(row), row);
+            return;
+        }
+        const sessionLeaseId = payloadString(request.payload, 'session_lease_id');
+        const row = asRow(this.#db.prepare('SELECT * FROM session_leases WHERE session_lease_id=?').get(sessionLeaseId), 'session replay authority');
+        const session = sessionFromRow(row);
+        const run = this.#requireRun(request.repo_id, this.#workstreamRun(request));
+        if (session.repo_id !== request.repo_id || session.workstream_run !== run.workstream_run || session.session_id !== request.session_id || session.session_generation !== request.fencing_generation || session.session_generation !== run.active_session_generation)
+            throw new CoordinationRuntimeError('fenced-session', 'idempotent replay session is no longer the current generation');
+        const allowedStatus = request.action === 'prepare-handoff' ? 'handoff-pending' : request.action === 'detach-session' ? 'detached' : 'attached';
+        if (session.status !== allowedStatus)
+            throw new CoordinationRuntimeError('fenced-session', `idempotent replay requires session status ${allowedStatus}`);
+        this.#assertCapability(row, 'session_token_sha256', payloadString(request.payload, 'session_token'), 'session');
     }
     #assertChildAuthority(request, child, row) {
         if (child.owner.repo_id !== request.repo_id || child.owner.workstream_run !== this.#workstreamRun(request))

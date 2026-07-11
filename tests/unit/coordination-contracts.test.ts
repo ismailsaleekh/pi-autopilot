@@ -104,6 +104,17 @@ void describe('Coordination Fabric contracts and invariants', () => {
       claim_requests: snapshot.claim_requests.map((request) => ({ ...request, status: 'released' as const, release_event_seq: 3 })),
     };
     assert.equal(checkCoordinationInvariants(released).some((entry) => entry.code === 'release-notification-not-atomic'), true);
+
+    const requesterNotifiedBeforeOtherOwnersRelease = {
+      ...snapshot,
+      claim_requests: snapshot.claim_requests.map((request) => ({ ...request, status: 'requester-notified' as const, release_event_seq: 3, grant_event_seq: null })),
+      messages: [{
+        schema_version: 'autopilot.coordination_message.v1' as const, message_id: 'release-message-before-grant', repo_id: 'repo-1', recipient_workstream_run: 'run-b',
+        message_type: 'release-notification' as const, correlation_id: 'request-b-a', payload: { request_id: 'request-b-a' }, status: 'acknowledged' as const,
+        created_event_seq: 3, delivered_event_seq: 3, acknowledged_event_seq: 3, version: 2,
+      }],
+    };
+    assert.equal(checkCoordinationInvariants(requesterNotifiedBeforeOtherOwnersRelease).some((entry) => entry.code === 'granted-request-event-missing'), false);
   });
 
   void it('strictly validates versioned query and mutation envelopes', () => {
@@ -129,6 +140,39 @@ void describe('Coordination Fabric contracts and invariants', () => {
       () => parseCoordinatorRequestEnvelope({ ...query, action: 'unknown-action' }),
       /action must be one of/u,
     );
+    const mutation = {
+      ...query,
+      idempotency_key: 'claim-mutation-1',
+      workstream_run: 'run-a',
+      session_id: 'session-a',
+      fencing_generation: 1,
+      expected_version: 1,
+    };
+    const sessionProof = { session_lease_id: 'lease-session-a', session_token: 'a'.repeat(64) };
+    const acquisition = parseCoordinatorRequestEnvelope({
+      ...mutation,
+      action: 'acquire-group',
+      payload: {
+        acquisition_group_id: 'group-new', unit_id: 'unit-new', attempt: 1,
+        requested_leases: [{ path: 'src/new.ts', mode: 'WRITE', purpose: 'implement new source' }],
+        reason: 'unit needs complete initial authority', normal_release_condition: { condition_type: 'unit-merged', target_id: 'unit-new:1', evidence: null },
+        spec_ref: '.pi/autopilot/demo/unit-specs/unit-new.json', spec_sha256: `sha256:${'a'.repeat(64)}`,
+        preemptible: true, checkpoint_ordinal: 0, ...sessionProof,
+      },
+    });
+    assert.equal(acquisition.action, 'acquire-group');
+    assert.throws(() => parseCoordinatorRequestEnvelope({
+      ...mutation, action: 'respond-claim-request',
+      payload: { request_id: 'claim-request-1', response: 'deferred', owner_reason: 'still needed', release_condition: null, ...sessionProof },
+    }), /deferred response requires/u);
+    assert.throws(() => parseCoordinatorRequestEnvelope({
+      ...mutation, action: 'respond-claim-request',
+      payload: { request_id: 'claim-request-1', response: 'release-now', owner_reason: 'free', release_condition: { condition_type: 'unit-merged', target_id: 'unit-new:1', evidence: null }, ...sessionProof },
+    }), /must not invent/u);
+    assert.throws(() => parseCoordinatorRequestEnvelope({
+      ...mutation, action: 'supersede-attempt',
+      payload: { unit_id: 'unit-new', attempt: 1, superseded_by_attempt: 1, reason: 'invalid self supersession', ...sessionProof },
+    }), /must differ/u);
     assert.equal(parseCoordinatorResponseEnvelope({
       schema_version: 'autopilot.coordinator_response.v1',
       protocol_version: '1.0',

@@ -7,8 +7,8 @@ import { platform } from 'node:os';
 import { parseCoordinatorTransportRequest, CoordinatorFrameDecoder, writeCoordinatorResponse } from './ipc.ts';
 import { CoordinationRuntimeError } from './failures.ts';
 import { currentBootId, isProcessAlive } from './process-identity.ts';
-import { ensureCoordinatorPrivateRoots, readOrCreateCoordinatorCapability, type CoordinatorRuntimePaths } from './runtime-paths.ts';
-import { CoordinatorStore } from './store.ts';
+import { COORDINATOR_GRANT_OFFER_SWEEP_MS, ensureCoordinatorPrivateRoots, readOrCreateCoordinatorCapability, type CoordinatorRuntimePaths } from './runtime-paths.ts';
+import { CoordinatorStore, type StoreClock } from './store.ts';
 import type { CoordinatorResponseEnvelope } from './types.ts';
 
 interface LockRecord {
@@ -131,7 +131,7 @@ function errorResponse(requestId: string, error: unknown): CoordinatorResponseEn
   };
 }
 
-function handleSocket(socket: Socket, store: CoordinatorStore, capability: string): void {
+function handleSocket(socket: Socket, store: CoordinatorStore, capability: string, backgroundFailure: () => Error | null): void {
   const decoder = new CoordinatorFrameDecoder();
   let chain = Promise.resolve();
   socket.on('data', (chunk: NodeBuffer) => {
@@ -143,6 +143,8 @@ function handleSocket(socket: Socket, store: CoordinatorStore, capability: strin
           const transport = parseCoordinatorTransportRequest(frame);
           requestId = transport.request.request_id;
           if (!authenticated(transport.capability, capability)) throw new CoordinationRuntimeError('unauthorized-client', 'coordinator capability proof was rejected');
+          const timerFailure = backgroundFailure();
+          if (timerFailure !== null) throw new CoordinationRuntimeError('system-fatal', `coordinator grant-offer timer failed: ${timerFailure.message}`);
           await writeCoordinatorResponse(socket, store.handle(transport.request));
         } catch (error) {
           await writeCoordinatorResponse(socket, errorResponse(requestId, error));
@@ -190,17 +192,26 @@ export interface RunningCoordinator {
   close(): Promise<void>;
 }
 
-export async function startCoordinatorServer(paths: CoordinatorRuntimePaths): Promise<RunningCoordinator> {
+export async function startCoordinatorServer(paths: CoordinatorRuntimePaths, clock?: StoreClock): Promise<RunningCoordinator> {
   const lifecycleLock = await acquireCoordinatorLock(paths);
   let store: CoordinatorStore | null = null;
   let server: Server | null = null;
+  let offerTimer: ReturnType<typeof setInterval> | null = null;
   let serverListening = false;
   try {
     const capability = await readOrCreateCoordinatorCapability(paths);
     if (platform() !== 'win32' && existsSync(paths.socketPath)) await unlink(paths.socketPath);
-    store = await CoordinatorStore.open(paths);
+    store = clock === undefined ? await CoordinatorStore.open(paths) : await CoordinatorStore.open(paths, clock);
     const openedStore = store;
-    server = createServer((socket) => handleSocket(socket, openedStore, capability));
+    let timerFailure: Error | null = null;
+    offerTimer = setInterval(() => {
+      try {
+        openedStore.sweepExpiredGrantOffers();
+      } catch (error) {
+        timerFailure = error instanceof Error ? error : new Error(String(error));
+      }
+    }, COORDINATOR_GRANT_OFFER_SWEEP_MS);
+    server = createServer((socket) => handleSocket(socket, openedStore, capability, () => timerFailure));
     await listen(server, paths.socketPath);
     serverListening = true;
     const openedServer = server;
@@ -213,6 +224,8 @@ export async function startCoordinatorServer(paths: CoordinatorRuntimePaths): Pr
       store: openedStore,
       close: async () => {
         if (closed) return;
+        if (offerTimer !== null) clearInterval(offerTimer);
+        offerTimer = null;
         if (!serverClosed) {
           await closeServer(openedServer);
           serverClosed = true;
@@ -232,6 +245,8 @@ export async function startCoordinatorServer(paths: CoordinatorRuntimePaths): Pr
     };
   } catch (error) {
     const cleanupFailures: string[] = [];
+    if (offerTimer !== null) clearInterval(offerTimer);
+    offerTimer = null;
     if (server !== null && serverListening) {
       try {
         await closeServer(server);
@@ -257,12 +272,21 @@ export async function startCoordinatorServer(paths: CoordinatorRuntimePaths): Pr
 }
 
 export async function runCoordinatorUntilSignal(paths: CoordinatorRuntimePaths): Promise<void> {
-  const running = await startCoordinatorServer(paths);
-  await new Promise<void>((resolveSignal) => {
-    const finish = (): void => resolveSignal();
-    process.once('SIGINT', finish);
-    process.once('SIGTERM', finish);
-    process.once('SIGHUP', finish);
+  let finishSignal: (() => void) | null = null;
+  const signal = new Promise<void>((resolveSignal) => {
+    finishSignal = resolveSignal;
   });
-  await running.close();
+  const finish = (): void => finishSignal?.();
+  process.once('SIGINT', finish);
+  process.once('SIGTERM', finish);
+  process.once('SIGHUP', finish);
+  try {
+    const running = await startCoordinatorServer(paths);
+    await signal;
+    await running.close();
+  } finally {
+    process.off('SIGINT', finish);
+    process.off('SIGTERM', finish);
+    process.off('SIGHUP', finish);
+  }
 }

@@ -6,12 +6,14 @@ import { platform, tmpdir } from 'node:os';
 import { AUTOPILOT_STATE_ROOT_ENV, resolveAutopilotStateRoot, type ProcessEnvLike } from '../parallel-runtime.ts';
 import { CoordinationRuntimeError } from './failures.ts';
 
-export const COORDINATOR_PACKAGE_BUILD = '0.8.0-cf29';
-export const COORDINATOR_DATABASE_SCHEMA_VERSION = 1;
+export const COORDINATOR_PACKAGE_BUILD = '0.9.0-cf30';
+export const COORDINATOR_DATABASE_SCHEMA_VERSION = 2;
 export const COORDINATOR_MAX_FRAME_BYTES = 1_048_576;
 export const COORDINATOR_BUSY_TIMEOUT_MS = 5_000;
 export const COORDINATOR_SESSION_LEASE_MS = 30_000;
 export const COORDINATOR_HEARTBEAT_MS = 10_000;
+export const COORDINATOR_GRANT_OFFER_TTL_MS = 30_000;
+export const COORDINATOR_GRANT_OFFER_SWEEP_MS = 1_000;
 
 export interface CoordinatorRuntimePaths {
   readonly stateRoot: string;

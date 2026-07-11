@@ -5,6 +5,7 @@ export * from './failures.ts';
 export * from './ipc.ts';
 export * from './invariants.ts';
 export * from './legacy-preflight.ts';
+export * from './negotiation.ts';
 export * from './package-isolation.ts';
 export * from './process-identity.ts';
 export * from './runtime-paths.ts';

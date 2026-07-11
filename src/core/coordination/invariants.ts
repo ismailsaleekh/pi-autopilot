@@ -99,11 +99,24 @@ export function checkCoordinationInvariants(snapshot: CoordinationSnapshot): rea
     if (group.state === 'waiting' || group.state === 'grant-ready' || group.state === 'released' || group.state === 'cancelled' || group.state === 'superseded') {
       if (leases.length > 0) findings.push(finding('ungranted-group-holds-leases', group.acquisition_group_id, `${group.state} group holds ${String(leases.length)} active leases`));
     }
+    if (group.state === 'grant-ready' && group.offer_expires_at === null) findings.push(finding('grant-offer-expiry-missing', group.acquisition_group_id, 'grant-ready group requires a bounded offer expiry'));
+    if (group.state !== 'grant-ready' && group.offer_expires_at !== null) findings.push(finding('unexpected-grant-offer-expiry', group.acquisition_group_id, `${group.state} group retains an offer expiry`));
     if (group.state === 'granted') {
       const requested = new Set(group.requested_leases.map((lease) => `${lease.mode}\0${lease.path}`));
       const unexpected = leases.filter((lease) => !requested.has(`${lease.mode}\0${lease.path}`));
       if (unexpected.length > 0) findings.push(finding('acquisition-group-unrequested-lease', group.acquisition_group_id, 'active lease set contains authority outside the requested set'));
       if (group.grant_event_seq === null) findings.push(finding('granted-group-event-missing', group.acquisition_group_id, 'granted group requires grant_event_seq'));
+    }
+  }
+  const offeredGroups = snapshot.acquisition_groups.filter((group) => group.state === 'grant-ready');
+  for (let leftIndex = 0; leftIndex < offeredGroups.length; leftIndex += 1) {
+    const left = offeredGroups[leftIndex];
+    if (left === undefined) continue;
+    for (let rightIndex = leftIndex + 1; rightIndex < offeredGroups.length; rightIndex += 1) {
+      const right = offeredGroups[rightIndex];
+      if (right === undefined || left.owner.repo_id !== right.owner.repo_id) continue;
+      const incompatible = left.requested_leases.some((leftLease) => right.requested_leases.some((rightLease) => coordinationPathsOverlap(leftLease.path, rightLease.path) && claimModesConflict(leftLease.mode, rightLease.mode)));
+      if (incompatible) findings.push(finding('incompatible-grant-offers', `${left.acquisition_group_id},${right.acquisition_group_id}`, 'only one incompatible acquisition group may hold a bounded offer'));
     }
   }
 
@@ -145,7 +158,7 @@ export function checkCoordinationInvariants(snapshot: CoordinationSnapshot): rea
     }
     if (request.status === 'deferred' && (request.owner_reason === null || request.release_condition === null)) findings.push(finding('deferred-request-promise-incomplete', request.request_id, 'deferred request requires owner_reason and typed release_condition'));
     if ((request.status === 'released' || request.status === 'grant-ready' || request.status === 'granted' || request.status === 'requester-notified' || request.status === 'resolved') && request.release_event_seq === null) findings.push(finding('released-request-event-missing', request.request_id, `${request.status} request requires release_event_seq`));
-    if ((request.status === 'granted' || request.status === 'requester-notified' || request.status === 'resolved') && request.grant_event_seq === null) findings.push(finding('granted-request-event-missing', request.request_id, `${request.status} request requires grant_event_seq`));
+    if ((request.status === 'granted' || request.status === 'resolved') && request.grant_event_seq === null) findings.push(finding('granted-request-event-missing', request.request_id, `${request.status} request requires grant_event_seq`));
     if (!TERMINAL_REQUEST_STATES.has(request.status) && request.status !== 'deferred' && request.status !== 'contradiction-review') {
       const run = runs.get(runKey(request.requester.repo_id, request.requester.workstream_run));
       if (run !== undefined && !LIVE_RUN_STATES.has(run.status)) findings.push(finding('nonterminal-request-on-terminal-run', request.request_id, `requester run is ${run.status}`));

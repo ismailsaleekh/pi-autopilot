@@ -17,6 +17,7 @@ export type AutopilotSchedulerSkipCode =
   | 'governing-blocker'
   | 'running-cap-reached'
   | 'path-conflict'
+  | 'waiting-for-peer-release'
   | 'worktree-unavailable';
 
 export interface AutopilotSchedulerCandidate {
@@ -24,6 +25,7 @@ export interface AutopilotSchedulerCandidate {
   readonly attempt: number;
   readonly spec: unknown | null;
   readonly governing_blockers?: readonly string[];
+  readonly peer_claim_request_refs?: readonly string[];
   readonly worktree_available?: boolean;
 }
 
@@ -151,6 +153,10 @@ export function planNextDispatch(input: AutopilotSchedulerInput): AutopilotDispa
     if ((candidate.governing_blockers ?? []).length > 0) {
       reasons.push('governing-blocker');
       details.push(...(candidate.governing_blockers ?? []));
+    }
+    if ((candidate.peer_claim_request_refs ?? []).length > 0) {
+      reasons.push('waiting-for-peer-release');
+      details.push(...(candidate.peer_claim_request_refs ?? []).map((ref) => `claim request ${ref}`));
     }
     if (candidate.worktree_available === false) {
       reasons.push('worktree-unavailable');

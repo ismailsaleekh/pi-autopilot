@@ -143,6 +143,33 @@ void describe('transactional coordinator runtime', () => {
     }
   });
 
+  void it('backs up and upgrades a valid schema-1 coordinator through the claim-negotiation migration', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pi-autopilot-coordinator-v1-upgrade-'));
+    const env = { ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: join(root, 'state') };
+    const paths = coordinatorRuntimePaths(env);
+    const initial = await startCoordinatorServer(paths);
+    await initial.close();
+    const oldDatabase = new DatabaseSync(paths.databasePath);
+    oldDatabase.exec('DROP TABLE acquisition_groups; DROP INDEX idx_edit_leases_repo; DROP INDEX idx_claim_requests_owner_status; DROP INDEX idx_claim_requests_requester_status; DELETE FROM schema_migrations WHERE version=2; PRAGMA user_version=1;');
+    oldDatabase.close();
+    const upgraded = await startCoordinatorServer(paths);
+    try {
+      const doctor = await new CoordinatorClient({ env, autoStart: false }).query('doctor');
+      assert.equal(doctor.payload['database_schema_version'], 2);
+      assert.equal(typeof doctor.payload['last_backup_path'], 'string');
+      const database = new DatabaseSync(paths.databasePath, { readOnly: true });
+      try {
+        const migration = record(database.prepare('SELECT version FROM schema_migrations WHERE version=2').get(), 'migration 2');
+        assert.equal(migration['version'], 2);
+      } finally {
+        database.close();
+      }
+    } finally {
+      await upgraded.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   void it('rejects a tampered migration journal as an incompatible schema', async () => {
     const root = await mkdtemp(join(tmpdir(), 'pi-autopilot-coordinator-schema-tamper-'));
     const env = { ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: join(root, 'state') };
@@ -199,7 +226,6 @@ void describe('transactional coordinator runtime', () => {
       assert.equal(handoffSession['status'], 'handoff-pending');
 
       const secondSessionResponse = await attachSession(client, integer(firstRun['version'], 'first run version'), 2, 'session-second', 'boot-second');
-      const secondSession = record(secondSessionResponse.payload['session'], 'second session');
       const secondRun = record(secondSessionResponse.payload['run'], 'second run');
 
       await assert.rejects(

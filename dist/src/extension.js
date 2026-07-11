@@ -117,7 +117,7 @@ export default function autopilotExtension(pi) {
                 active: prepared.active,
                 rawSessionId: rawSessionId(ctx),
                 sink: {
-                    send: (message, delivery) => sendMessage(message, { deliverAs: delivery, triggerTurn: false }),
+                    send: (message, delivery, triggerTurn) => sendMessage(message, { deliverAs: delivery, triggerTurn }),
                     isIdle: () => ctx.isIdle?.() ?? true,
                 },
             });

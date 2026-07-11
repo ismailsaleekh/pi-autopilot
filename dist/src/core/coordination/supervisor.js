@@ -105,9 +105,7 @@ export async function readCoordinatorSessionContext(path) {
 }
 export class DurableRunSupervisorClient {
     #client;
-    #env;
     constructor(env = process.env) {
-        this.#env = env;
         this.#client = new CoordinatorClient({ env });
     }
     get client() {
@@ -215,28 +213,32 @@ export class AutopilotSessionBridge {
         let delivered = [];
         await this.#enqueue(async () => {
             this.#assertOpen();
-            const session = this.#attachment.session;
-            const response = await this.#supervisor.client.mutate('drain-mailbox', {
+            delivered = await this.#drainMailboxNow();
+        });
+        return delivered;
+    }
+    async #drainMailboxNow() {
+        const session = this.#attachment.session;
+        const response = await this.#supervisor.client.mutate('drain-mailbox', {
+            repoId: session.repo_id,
+            workstreamRun: session.workstream_run,
+            sessionId: session.session_id,
+            fencingGeneration: session.session_generation,
+            expectedVersion: session.version,
+            idempotencyKey: `drain-mailbox:${session.session_lease_id}:${randomUUID()}`,
+        }, { delivery_id: `delivery-${randomUUID()}`, session_lease_id: session.session_lease_id, session_token: this.#attachment.context.session_token });
+        const delivered = Object.freeze(payloadArray(response, 'messages').map((value) => parseCoordinationMessage(value)));
+        for (const message of delivered) {
+            this.#sink.send({ customType: 'autopilot-coordination', content: messageContent(message), display: true, details: { message_id: message.message_id, message_type: message.message_type, correlation_id: message.correlation_id } }, this.#sink.isIdle() ? 'steer' : 'followUp', true);
+            await this.#supervisor.client.mutate('acknowledge-message', {
                 repoId: session.repo_id,
                 workstreamRun: session.workstream_run,
                 sessionId: session.session_id,
                 fencingGeneration: session.session_generation,
-                expectedVersion: session.version,
-                idempotencyKey: `drain-mailbox:${session.session_lease_id}:${randomUUID()}`,
-            }, { delivery_id: `delivery-${randomUUID()}`, session_lease_id: session.session_lease_id, session_token: this.#attachment.context.session_token });
-            delivered = Object.freeze(payloadArray(response, 'messages').map((value) => parseCoordinationMessage(value)));
-            for (const message of delivered) {
-                this.#sink.send({ customType: 'autopilot-coordination', content: messageContent(message), display: true, details: { message_id: message.message_id, message_type: message.message_type, correlation_id: message.correlation_id } }, this.#sink.isIdle() ? 'steer' : 'followUp');
-                await this.#supervisor.client.mutate('acknowledge-message', {
-                    repoId: session.repo_id,
-                    workstreamRun: session.workstream_run,
-                    sessionId: session.session_id,
-                    fencingGeneration: session.session_generation,
-                    expectedVersion: message.version,
-                    idempotencyKey: `ack-message:${message.message_id}`,
-                }, { message_id: message.message_id, session_lease_id: session.session_lease_id, session_token: this.#attachment.context.session_token });
-            }
-        });
+                expectedVersion: message.version,
+                idempotencyKey: `ack-message:${message.message_id}`,
+            }, { message_id: message.message_id, session_lease_id: session.session_lease_id, session_token: this.#attachment.context.session_token });
+        }
         return delivered;
     }
     async prepareHandoff() {
@@ -309,6 +311,7 @@ export class AutopilotSessionBridge {
                 const nextSession = parseCoordinationSessionLease(payloadRecord(response, 'session'));
                 this.#attachment = { ...this.#attachment, session: nextSession, context: { ...this.#attachment.context, session_version: nextSession.version } };
                 await writeCoordinatorSessionContext(this.#attachment.contextPath, this.#attachment.context);
+                await this.#drainMailboxNow();
             }).catch((error) => {
                 this.#fatalError = error instanceof Error ? error : new Error(String(error));
                 this.#stopHeartbeat();
@@ -318,7 +321,7 @@ export class AutopilotSessionBridge {
                         content: `Autopilot coordination heartbeat halted loudly: ${this.#fatalError.message}`,
                         display: true,
                         details: { error_code: 'coordinator-unavailable' },
-                    }, this.#sink.isIdle() ? 'steer' : 'followUp');
+                    }, this.#sink.isIdle() ? 'steer' : 'followUp', false);
                 }
                 catch (notificationError) {
                     this.#fatalError = new Error(`coordinator heartbeat failed (${this.#fatalError.message}) and Pi notification delivery failed (${notificationError instanceof Error ? notificationError.message : String(notificationError)})`);

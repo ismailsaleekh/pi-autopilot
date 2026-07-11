@@ -14,7 +14,7 @@ const SHA256 = /^sha256:[a-f0-9]{64}$/u;
 const CHILD_TOKEN = /^[a-f0-9]{64}$/u;
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,191}$/u;
 const QUERY_ACTIONS = ['status', 'doctor', 'export'];
-const MUTATION_ACTIONS = ['attach-run', 'attach-session', 'detach-session', 'prepare-handoff', 'heartbeat', 'register-child', 'heartbeat-child', 'complete-child', 'drain-mailbox', 'acquire-group', 'acknowledge-grant', 'respond-claim-request', 'cancel-claim-request', 'acknowledge-message', 'transition-operation'];
+const MUTATION_ACTIONS = ['attach-run', 'attach-session', 'detach-session', 'prepare-handoff', 'heartbeat', 'register-child', 'heartbeat-child', 'complete-child', 'drain-mailbox', 'acquire-group', 'acknowledge-grant', 'respond-claim-request', 'cancel-claim-request', 'cancel-acquisition-group', 'supersede-attempt', 'acknowledge-message', 'transition-operation'];
 const MESSAGE_TYPES = ['claim-request', 'release-notification', 'grant-offer', 'recovery-required'];
 const WORKTREE_STATES = ['planned', 'active', 'dirty', 'quarantined', 'terminal', 'removed'];
 const OPERATION_TYPES = ['create', 'materialize', 'commit', 'merge', 'reset', 'quarantine', 'archive', 'remove'];
@@ -32,10 +32,12 @@ const PAYLOAD_FIELDS = {
     'heartbeat-child': ['boot_id', 'child_lease_id', 'child_token', 'lease_expires_at', 'pid'],
     'complete-child': ['boot_id', 'child_lease_id', 'child_token', 'evidence_ref', 'evidence_sha256', 'pid', 'status'],
     'drain-mailbox': ['delivery_id', 'session_lease_id', 'session_token'],
-    'acquire-group': ['acquisition_group_id'],
-    'acknowledge-grant': ['acquisition_group_id'],
-    'respond-claim-request': ['request_id', 'response'],
-    'cancel-claim-request': ['request_id'],
+    'acquire-group': ['acquisition_group_id', 'attempt', 'checkpoint_ordinal', 'normal_release_condition', 'preemptible', 'reason', 'requested_leases', 'session_lease_id', 'session_token', 'spec_ref', 'spec_sha256', 'unit_id'],
+    'acknowledge-grant': ['acquisition_group_id', 'session_lease_id', 'session_token'],
+    'respond-claim-request': ['owner_reason', 'release_condition', 'request_id', 'response', 'session_lease_id', 'session_token'],
+    'cancel-claim-request': ['reason', 'request_id', 'session_lease_id', 'session_token'],
+    'cancel-acquisition-group': ['acquisition_group_id', 'reason', 'session_lease_id', 'session_token'],
+    'supersede-attempt': ['attempt', 'reason', 'session_lease_id', 'session_token', 'superseded_by_attempt', 'unit_id'],
     'acknowledge-message': ['message_id', 'session_lease_id', 'session_token'],
     'transition-operation': ['operation_id', 'stage'],
 };
@@ -144,8 +146,8 @@ function boundedJsonValue(value, label, depth) {
         return value;
     }
     if (Array.isArray(value)) {
-        if (value.length > 256)
-            fail(label, 'contains an array longer than 256 entries');
+        if (value.length > 1024)
+            fail(label, 'contains an array longer than 1024 entries');
         return Object.freeze(value.map((entry, index) => boundedJsonValue(entry, `${label}[${String(index)}]`, depth + 1)));
     }
     if (!isJsonObject(value))
@@ -207,7 +209,7 @@ export function parseCoordinationReleaseCondition(value, label = 'CoordinationRe
         evidence: parseNullableEvidence(record['evidence'], `${label}.evidence`),
     };
 }
-function parseRequestedLease(value, label) {
+export function parseCoordinationRequestedLease(value, label = 'CoordinationRequestedLease') {
     const record = object(value, label, ['mode', 'path', 'purpose']);
     return {
         path: repoPath(record, 'path', label),
@@ -307,20 +309,24 @@ export function parseCoordinationUnitAttempt(value) {
 }
 export function parseCoordinationAcquisitionGroup(value) {
     const label = 'CoordinationAcquisitionGroup';
-    const record = object(value, label, ['acquisition_group_id', 'bypass_count', 'created_event_seq', 'grant_event_seq', 'offer_expires_at', 'owner', 'requested_leases', 'schema_version', 'state', 'version']);
-    const requested = array(record['requested_leases'], `${label}.requested_leases`, 1024).map((entry, index) => parseRequestedLease(entry, `${label}.requested_leases[${String(index)}]`));
+    const record = object(value, label, ['acquisition_group_id', 'bypass_count', 'created_event_seq', 'fairness_event_seq', 'grant_event_seq', 'normal_release_condition', 'offer_count', 'offer_expires_at', 'owner', 'reason', 'requested_leases', 'schema_version', 'state', 'version']);
+    const requested = array(record['requested_leases'], `${label}.requested_leases`, 1024).map((entry, index) => parseCoordinationRequestedLease(entry, `${label}.requested_leases[${String(index)}]`));
     if (requested.length === 0)
         fail(label, 'requested_leases must not be empty');
     assertRequestedLeaseSet(requested, label);
     return {
-        schema_version: literal(record, 'schema_version', 'autopilot.acquisition_group.v1', label),
+        schema_version: literal(record, 'schema_version', 'autopilot.acquisition_group.v2', label),
         acquisition_group_id: identifier(record, 'acquisition_group_id', label),
         owner: parseCoordinationOwnerIdentity(record['owner'], `${label}.owner`),
         requested_leases: requested,
+        reason: string(record, 'reason', label, 1024),
+        normal_release_condition: parseCoordinationReleaseCondition(record['normal_release_condition'], `${label}.normal_release_condition`),
         state: oneOf(record, 'state', COORDINATION_ACQUISITION_STATES, label),
         created_event_seq: integer(record, 'created_event_seq', label),
+        fairness_event_seq: integer(record, 'fairness_event_seq', label),
         grant_event_seq: nullableInteger(record, 'grant_event_seq', label),
         offer_expires_at: record['offer_expires_at'] === null ? null : timestamp(record, 'offer_expires_at', label),
+        offer_count: integer(record, 'offer_count', label),
         bypass_count: integer(record, 'bypass_count', label),
         version: integer(record, 'version', label, 1),
     };
@@ -360,7 +366,7 @@ export function parseCoordinationChangeReservation(value) {
 export function parseCoordinationClaimRequest(value) {
     const label = 'CoordinationClaimRequest';
     const record = object(value, label, ['acquisition_group_id', 'blocking_lease_ids', 'created_event_seq', 'grant_event_seq', 'owner', 'owner_reason', 'reason', 'release_condition', 'release_event_seq', 'request_id', 'requested_leases', 'requester', 'schema_version', 'status', 'version']);
-    const requested = array(record['requested_leases'], `${label}.requested_leases`, 1024).map((entry, index) => parseRequestedLease(entry, `${label}.requested_leases[${String(index)}]`));
+    const requested = array(record['requested_leases'], `${label}.requested_leases`, 1024).map((entry, index) => parseCoordinationRequestedLease(entry, `${label}.requested_leases[${String(index)}]`));
     if (requested.length === 0)
         fail(label, 'requested_leases must not be empty');
     assertRequestedLeaseSet(requested, label);
@@ -516,9 +522,32 @@ function parsePayload(value, action) {
     const payload = object(value, label, PAYLOAD_FIELDS[action]);
     for (const field of PAYLOAD_FIELDS[action]) {
         const entry = payload[field];
-        if (field === 'pid' || field === 'attempt') {
+        if (field === 'pid' || field === 'attempt' || field === 'superseded_by_attempt') {
             if (typeof entry !== 'number' || !Number.isSafeInteger(entry) || entry < 1)
                 fail(label, `${field} must be a positive safe integer`);
+        }
+        else if (field === 'checkpoint_ordinal') {
+            integer(payload, field, label);
+        }
+        else if (field === 'preemptible') {
+            boolean(payload, field, label);
+        }
+        else if (field === 'requested_leases') {
+            const requested = array(entry, `${label}.requested_leases`, 1024).map((lease, index) => parseCoordinationRequestedLease(lease, `${label}.requested_leases[${String(index)}]`));
+            if (requested.length === 0)
+                fail(label, 'requested_leases must not be empty');
+            assertRequestedLeaseSet(requested, label);
+        }
+        else if (field === 'normal_release_condition') {
+            parseCoordinationReleaseCondition(entry, `${label}.normal_release_condition`);
+        }
+        else if (field === 'release_condition') {
+            if (entry !== null)
+                parseCoordinationReleaseCondition(entry, `${label}.release_condition`);
+        }
+        else if (field === 'owner_reason') {
+            if (entry !== null && (typeof entry !== 'string' || entry.length === 0 || entry.length > 1024))
+                fail(label, 'owner_reason must be null or bounded non-empty text');
         }
         else if (field === 'lease_expires_at') {
             timestamp(payload, field, label);
@@ -539,6 +568,13 @@ function parsePayload(value, action) {
             if (typeof entry !== 'string' || !CHILD_TOKEN.test(entry))
                 fail(label, `${field} must be 32 random bytes encoded as lowercase hex`);
         }
+        else if (field === 'spec_sha256') {
+            if (typeof entry !== 'string' || !SHA256.test(entry))
+                fail(label, 'spec_sha256 must use sha256:<64 lowercase hex>');
+        }
+        else if (field === 'spec_ref') {
+            repoPath(payload, field, label);
+        }
         else if (field === 'handoff_token' || field === 'evidence_ref' || field === 'evidence_sha256') {
             if (entry !== null && (typeof entry !== 'string' || entry.length === 0 || entry.length > 1024))
                 fail(label, `${field} must be null or a bounded non-empty string`);
@@ -549,6 +585,17 @@ function parsePayload(value, action) {
             fail(label, `${field} must be a bounded non-empty string`);
         }
     }
+    if (action === 'respond-claim-request') {
+        const response = payload['response'];
+        const ownerReason = payload['owner_reason'];
+        const condition = payload['release_condition'];
+        if (response === 'deferred' && (typeof ownerReason !== 'string' || condition === null))
+            fail(label, 'deferred response requires owner_reason and release_condition');
+        if (response === 'release-now' && condition !== null)
+            fail(label, 'release-now response must not invent a deferred release condition');
+    }
+    if (action === 'supersede-attempt' && payload['attempt'] === payload['superseded_by_attempt'])
+        fail(label, 'superseding attempt must differ from the old attempt');
     return payload;
 }
 export function parseCoordinatorRequestEnvelope(value) {
