@@ -8,6 +8,15 @@ function ownerKey(owner) {
 function runKey(repoId, workstreamRun) {
     return `${repoId}\0${workstreamRun}`;
 }
+function conditionSatisfied(snapshot, repoId, workstreamRun, condition) {
+    if (condition.condition_type === 'explicit-owner-release')
+        return false;
+    if (condition.condition_type === 'child-terminal')
+        return snapshot.child_leases.some((child) => child.owner.repo_id === repoId && child.owner.workstream_run === workstreamRun && child.child_lease_id === condition.target_id && child.status === 'terminal');
+    if (condition.condition_type === 'run-closed')
+        return snapshot.runs.some((run) => run.repo_id === repoId && run.workstream_run === workstreamRun && condition.target_id === workstreamRun && (run.status === 'closed' || run.status === 'aborted'));
+    return snapshot.reconciliation_evidence.some((evidence) => evidence.repo_id === repoId && evidence.workstream_run === workstreamRun && evidence.release_condition.condition_type === condition.condition_type && evidence.release_condition.target_id === condition.target_id);
+}
 function finding(code, entity, detail, severity = 'error') {
     return { code, severity, entity, detail };
 }
@@ -35,6 +44,8 @@ export function checkCoordinationInvariants(snapshot) {
     findings.push(...duplicateFindings(snapshot.edit_leases.map((value) => value.edit_lease_id), 'duplicate-edit-lease', 'edit_leases'));
     findings.push(...duplicateFindings(snapshot.change_reservations.map((value) => value.reservation_id), 'duplicate-reservation', 'change_reservations'));
     findings.push(...duplicateFindings(snapshot.claim_requests.map((value) => value.request_id), 'duplicate-claim-request', 'claim_requests'));
+    findings.push(...duplicateFindings(snapshot.mailbox_cursors.map((value) => runKey(value.repo_id, value.workstream_run)), 'duplicate-mailbox-cursor', 'mailbox_cursors'));
+    findings.push(...duplicateFindings(snapshot.reconciliation_evidence.map((value) => value.reconciliation_evidence_id), 'duplicate-reconciliation-evidence', 'reconciliation_evidence'));
     findings.push(...duplicateFindings(snapshot.messages.map((value) => value.message_id), 'duplicate-message', 'messages'));
     findings.push(...duplicateFindings(snapshot.worktrees.map((value) => value.worktree_id), 'duplicate-worktree', 'worktrees'));
     findings.push(...duplicateFindings(snapshot.worktree_operations.map((value) => value.operation_id), 'duplicate-operation', 'worktree_operations'));
@@ -59,6 +70,9 @@ export function checkCoordinationInvariants(snapshot) {
         const attached = snapshot.session_leases.filter((session) => session.repo_id === run.repo_id && session.workstream_run === run.workstream_run && session.status === 'attached');
         if (attached.length > 1)
             findings.push(finding('multiple-attached-sessions', run.workstream_run, `${String(attached.length)} sessions are attached`));
+        const cursors = snapshot.mailbox_cursors.filter((cursor) => cursor.repo_id === run.repo_id && cursor.workstream_run === run.workstream_run);
+        if (cursors.length !== 1)
+            findings.push(finding('run-mailbox-cursor-count', run.workstream_run, `run requires exactly one durable mailbox cursor, found ${String(cursors.length)}`));
     }
     const assertOwner = (owner, entity) => {
         const run = runs.get(runKey(owner.repo_id, owner.workstream_run));
@@ -116,6 +130,8 @@ export function checkCoordinationInvariants(snapshot) {
     }
     for (const lease of snapshot.edit_leases) {
         assertOwner(lease.owner, lease.edit_lease_id);
+        if (conditionSatisfied(snapshot, lease.owner.repo_id, lease.owner.workstream_run, lease.normal_release_condition))
+            findings.push(finding('satisfied-condition-retains-lease', lease.edit_lease_id, 'accepted terminal evidence must release active edit authority'));
         const group = groups.get(lease.acquisition_group_id);
         if (group === undefined)
             findings.push(finding('lease-group-missing', lease.edit_lease_id, 'acquisition group does not exist'));
@@ -159,6 +175,8 @@ export function checkCoordinationInvariants(snapshot) {
         }
         if (request.status === 'deferred' && (request.owner_reason === null || request.release_condition === null))
             findings.push(finding('deferred-request-promise-incomplete', request.request_id, 'deferred request requires owner_reason and typed release_condition'));
+        if (request.status === 'deferred' && request.release_condition !== null && conditionSatisfied(snapshot, request.owner.repo_id, request.owner.workstream_run, request.release_condition))
+            findings.push(finding('satisfied-deferred-request-not-released', request.request_id, 'satisfied typed release promise must release and notify automatically'));
         if ((request.status === 'released' || request.status === 'grant-ready' || request.status === 'granted' || request.status === 'requester-notified' || request.status === 'resolved') && request.release_event_seq === null)
             findings.push(finding('released-request-event-missing', request.request_id, `${request.status} request requires release_event_seq`));
         if ((request.status === 'granted' || request.status === 'resolved') && request.grant_event_seq === null)
@@ -174,6 +192,22 @@ export function checkCoordinationInvariants(snapshot) {
                 findings.push(finding('release-notification-not-atomic', request.request_id, 'release event lacks a same-sequence requester notification'));
         }
     }
+    for (const cursor of snapshot.mailbox_cursors) {
+        if (!runs.has(runKey(cursor.repo_id, cursor.workstream_run)))
+            findings.push(finding('mailbox-cursor-run-missing', cursor.workstream_run, 'mailbox cursor owning run does not exist'));
+        if (cursor.acknowledged_through_event_seq > cursor.delivered_through_event_seq)
+            findings.push(finding('mailbox-cursor-order-invalid', cursor.workstream_run, 'acknowledgement cursor exceeds delivery cursor'));
+    }
+    const expectedConditionBySource = { 'child-process': 'child-terminal', 'unit-merge': 'unit-merged', 'attempt-reset': 'attempt-reset', 'quarantine-capture': 'quarantine-captured', 'run-close': 'run-closed', 'run-abort': 'run-closed' };
+    for (const evidence of snapshot.reconciliation_evidence) {
+        const run = runs.get(runKey(evidence.repo_id, evidence.workstream_run));
+        if (run === undefined)
+            findings.push(finding('reconciliation-evidence-run-missing', evidence.reconciliation_evidence_id, 'owning run does not exist'));
+        else if (run.autopilot_id !== evidence.autopilot_id)
+            findings.push(finding('reconciliation-evidence-owner-mismatch', evidence.reconciliation_evidence_id, 'evidence owner differs from durable run owner'));
+        if (expectedConditionBySource[evidence.source] !== evidence.release_condition.condition_type)
+            findings.push(finding('reconciliation-source-condition-mismatch', evidence.reconciliation_evidence_id, 'evidence source does not match its typed release condition'));
+    }
     for (const message of snapshot.messages) {
         if (!runs.has(runKey(message.repo_id, message.recipient_workstream_run)))
             findings.push(finding('message-recipient-run-missing', message.message_id, 'recipient run does not exist'));
@@ -181,6 +215,9 @@ export function checkCoordinationInvariants(snapshot) {
             findings.push(finding('delivered-message-event-missing', message.message_id, 'delivered message requires delivered_event_seq'));
         if (message.status === 'acknowledged' && (message.delivered_event_seq === null || message.acknowledged_event_seq === null))
             findings.push(finding('acknowledged-message-events-missing', message.message_id, 'acknowledged message requires delivery and acknowledgement events'));
+        const cursor = snapshot.mailbox_cursors.find((entry) => entry.repo_id === message.repo_id && entry.workstream_run === message.recipient_workstream_run);
+        if (message.status !== 'pending' && cursor !== undefined && message.created_event_seq > cursor.delivered_through_event_seq)
+            findings.push(finding('delivered-message-ahead-of-cursor', message.message_id, 'durable delivery cursor does not include the delivered message'));
     }
     for (const worktree of snapshot.worktrees)
         assertOwner(worktree.owner, worktree.worktree_id);

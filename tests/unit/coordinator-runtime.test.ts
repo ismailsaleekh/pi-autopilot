@@ -3,7 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { describe, it } from 'node:test';
 
@@ -150,12 +150,12 @@ void describe('transactional coordinator runtime', () => {
     const initial = await startCoordinatorServer(paths);
     await initial.close();
     const oldDatabase = new DatabaseSync(paths.databasePath);
-    oldDatabase.exec('DROP TABLE acquisition_groups; DROP INDEX idx_edit_leases_repo; DROP INDEX idx_claim_requests_owner_status; DROP INDEX idx_claim_requests_requester_status; DELETE FROM schema_migrations WHERE version=2; PRAGMA user_version=1;');
+    oldDatabase.exec('DROP TABLE reconciliation_evidence; DROP TABLE mailbox_cursors; DROP INDEX idx_messages_cursor; DROP TABLE acquisition_groups; DROP INDEX idx_edit_leases_repo; DROP INDEX idx_claim_requests_owner_status; DROP INDEX idx_claim_requests_requester_status; DELETE FROM schema_migrations WHERE version IN (2,3); PRAGMA user_version=1;');
     oldDatabase.close();
     const upgraded = await startCoordinatorServer(paths);
     try {
       const doctor = await new CoordinatorClient({ env, autoStart: false }).query('doctor');
-      assert.equal(doctor.payload['database_schema_version'], 2);
+      assert.equal(doctor.payload['database_schema_version'], 3);
       assert.equal(typeof doctor.payload['last_backup_path'], 'string');
       const database = new DatabaseSync(paths.databasePath, { readOnly: true });
       try {
@@ -164,6 +164,54 @@ void describe('transactional coordinator runtime', () => {
       } finally {
         database.close();
       }
+    } finally {
+      await upgraded.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  void it('migrates existing delivered and acknowledged mailbox state into durable cursors', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pi-autopilot-coordinator-v2-mailbox-upgrade-'));
+    const env = { ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: join(root, 'state') };
+    const paths = coordinatorRuntimePaths(env);
+    const initial = await startCoordinatorServer(paths);
+    const client = new CoordinatorClient({ env, autoStart: false });
+    const runResponse = await attachRun(client);
+    const run = record(runResponse.payload['run'], 'mailbox migration run');
+    const sessionResponse = await attachSession(client, integer(run['version'], 'mailbox migration run version'), 1, 'session-mailbox-migration', 'boot-mailbox-migration');
+    const session = record(sessionResponse.payload['session'], 'mailbox migration session');
+    initial.store.enqueueMessageForTest({
+      schema_version: 'autopilot.coordination_message.v1', message_id: 'message-mailbox-migration', repo_id: 'repo-runtime-test', recipient_workstream_run: 'run-runtime-test',
+      message_type: 'recovery-required', correlation_id: 'migration-recovery', payload: { reason: 'migration witness' }, status: 'pending', created_event_seq: 5,
+      delivered_event_seq: null, acknowledged_event_seq: null, version: 1,
+    });
+    const drained = await client.mutate('drain-mailbox', {
+      repoId: 'repo-runtime-test', workstreamRun: 'run-runtime-test', sessionId: 'session-mailbox-migration', fencingGeneration: 1,
+      expectedVersion: integer(session['version'], 'mailbox migration session version'), idempotencyKey: 'drain-mailbox-migration',
+    }, { delivery_id: 'delivery-mailbox-migration', session_lease_id: 'lease-session-mailbox-migration-1', session_token: sessionToken(1) });
+    const delivered = record(queryPayload(drained, 'messages')[0], 'mailbox migration message');
+    await client.mutate('acknowledge-message', {
+      repoId: 'repo-runtime-test', workstreamRun: 'run-runtime-test', sessionId: 'session-mailbox-migration', fencingGeneration: 1,
+      expectedVersion: integer(delivered['version'], 'mailbox migration message version'), idempotencyKey: 'ack-mailbox-migration',
+    }, { message_id: 'message-mailbox-migration', session_lease_id: 'lease-session-mailbox-migration-1', session_token: sessionToken(1) });
+    initial.store.enqueueMessageForTest({
+      schema_version: 'autopilot.coordination_message.v1', message_id: 'message-mailbox-migration-pending', repo_id: 'repo-runtime-test', recipient_workstream_run: 'run-runtime-test',
+      message_type: 'recovery-required', correlation_id: 'migration-pending', payload: { reason: 'pending migration witness' }, status: 'pending', created_event_seq: 6,
+      delivered_event_seq: null, acknowledged_event_seq: null, version: 1,
+    });
+    await initial.close();
+    const oldDatabase = new DatabaseSync(paths.databasePath);
+    oldDatabase.exec('DROP TABLE reconciliation_evidence; DROP TABLE mailbox_cursors; DROP INDEX idx_messages_cursor; DELETE FROM schema_migrations WHERE version=3; PRAGMA user_version=2;');
+    oldDatabase.close();
+    const upgraded = await startCoordinatorServer(paths);
+    try {
+      const status = await new CoordinatorClient({ env, autoStart: false }).query('status', 'repo-runtime-test', 'run-runtime-test');
+      const cursors = queryPayload(status, 'mailbox_cursors');
+      assert.equal(cursors.length, 1);
+      const cursor = record(cursors[0], 'migrated mailbox cursor');
+      assert.equal(cursor['delivered_through_event_seq'], 5);
+      assert.equal(cursor['acknowledged_through_event_seq'], 5);
+      assert.equal(status.payload['pending_messages'], 1);
     } finally {
       await upgraded.close();
       await rm(root, { recursive: true, force: true });
@@ -211,7 +259,7 @@ void describe('transactional coordinator runtime', () => {
   });
 
   void it('fences old sessions, retains child ownership, and preserves mailbox state across handoff', async () => {
-    await withCoordinator(async ({ client, server }) => {
+    await withCoordinator(async ({ root, client, server }) => {
       const runResponse = await attachRun(client);
       const initialRun = record(runResponse.payload['run'], 'run');
       const firstSessionResponse = await attachSession(client, integer(initialRun['version'], 'run.version'), 1, 'session-first', 'boot-first');
@@ -279,12 +327,18 @@ void describe('transactional coordinator runtime', () => {
         }),
         (error: unknown) => error instanceof CoordinationRuntimeError && error.code === 'unauthorized-client',
       );
+      const childEvidenceRef = '.pi/autopilot/runtime-test/receipts/unit-runtime-test.json';
+      const childEvidenceBytes = `${JSON.stringify({ schema_version: 'autopilot.receipt.v1', tool_name: 'autopilot_emit_status', workstream: 'runtime-test', unit_id: 'unit-runtime-test', attempt: 1 })}\n`;
+      const childEvidencePath = join(root, 'state', 'worktrees', 'repo-runtime-test', 'active', 'run-runtime-test', 'main', ...childEvidenceRef.split('/'));
+      await mkdir(dirname(childEvidencePath), { recursive: true });
+      await writeFile(childEvidencePath, childEvidenceBytes, 'utf8');
+      const childEvidenceSha = `sha256:${createHash('sha256').update(childEvidenceBytes, 'utf8').digest('hex')}`;
       const completedChild = await client.mutate('complete-child', {
         repoId: 'repo-runtime-test', workstreamRun: 'run-runtime-test', sessionId: null, fencingGeneration: null,
         expectedVersion: integer(heartbeatChild['version'], 'heartbeat child version'), idempotencyKey: 'complete-child-after-handoff',
       }, {
         child_lease_id: 'child-runtime-test', child_token: childToken, pid: process.pid, boot_id: 'child-boot', status: 'terminal',
-        evidence_ref: '.pi/autopilot/runtime-test/receipts/unit-runtime-test.json', evidence_sha256: `sha256:${'c'.repeat(64)}`,
+        evidence_ref: childEvidenceRef, evidence_sha256: childEvidenceSha,
       });
       const terminalChild = record(completedChild.payload['child'], 'completed child');
       assert.equal(terminalChild['status'], 'terminal');

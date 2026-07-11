@@ -1,15 +1,17 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { platform } from 'node:os';
 import { backup, DatabaseSync } from 'node:sqlite';
-import { claimModesConflict, coordinationPathsOverlap, parseCoordinationAcquisitionGroup, parseCoordinationChildLease, parseCoordinationClaimRequest, parseCoordinationEditLease, parseCoordinationMessage, parseCoordinationReleaseCondition, parseCoordinationRepository, parseCoordinationRequestedLease, parseCoordinationRun, parseCoordinationSessionLease, parseCoordinationUnitAttempt } from "./contracts.js";
+import { claimModesConflict, coordinationPathsOverlap, parseCoordinationAcquisitionGroup, parseCoordinationChildLease, parseCoordinationClaimRequest, parseCoordinationEditLease, parseCoordinationMailboxCursor, parseCoordinationMessage, parseCoordinationReconciliationEvidence, parseCoordinationReleaseCondition, parseCoordinationRepository, parseCoordinationRequestedLease, parseCoordinationRun, parseCoordinationSessionLease, parseCoordinationUnitAttempt } from "./contracts.js";
 import { CoordinationRuntimeError } from "./failures.js";
 import { COORDINATOR_BUSY_TIMEOUT_MS, COORDINATOR_DATABASE_SCHEMA_VERSION, COORDINATOR_GRANT_OFFER_TTL_MS, COORDINATOR_PACKAGE_BUILD } from "./runtime-paths.js";
+import { parseUnitAttemptTarget, validateReconciliationEvidenceDocument } from "./terminal-evidence.js";
 const DATABASE_EXPORT_SCHEMA = 'autopilot.coordinator_export.v1';
 const SHA256_PATTERN = /^sha256:[a-f0-9]{64}$/u;
-const RUN_OWNED_IDEMPOTENCY_ACTIONS = new Set(['acquire-group', 'acknowledge-grant', 'respond-claim-request', 'cancel-claim-request', 'cancel-acquisition-group', 'supersede-attempt']);
+const RUN_OWNED_IDEMPOTENCY_ACTIONS = new Set(['acquire-group', 'acknowledge-grant', 'respond-claim-request', 'cancel-claim-request', 'cancel-acquisition-group', 'supersede-attempt', 'record-release-evidence', 'reconcile-run']);
+const TERMINAL_SESSION_ACTIONS = new Set(['detach-session', 'heartbeat', 'drain-mailbox', 'acknowledge-message', 'record-release-evidence', 'reconcile-run']);
 const systemClock = { now: () => new Date() };
 const MIGRATION_1 = `
 CREATE TABLE repositories (
@@ -147,6 +149,44 @@ CREATE INDEX idx_edit_leases_repo ON edit_leases(repo_id, entity_id);
 CREATE INDEX idx_claim_requests_owner_status ON claim_requests(repo_id, owner_workstream_run, entity_id);
 CREATE INDEX idx_claim_requests_requester_status ON claim_requests(repo_id, requester_workstream_run, entity_id);
 `;
+const MIGRATION_3 = `
+CREATE TABLE mailbox_cursors (
+  repo_id TEXT NOT NULL,
+  workstream_run TEXT NOT NULL,
+  delivered_through_event_seq INTEGER NOT NULL DEFAULT 0 CHECK(delivered_through_event_seq >= 0),
+  acknowledged_through_event_seq INTEGER NOT NULL DEFAULT 0 CHECK(acknowledged_through_event_seq >= 0),
+  version INTEGER NOT NULL CHECK(version >= 1),
+  PRIMARY KEY(repo_id, workstream_run),
+  FOREIGN KEY(repo_id, workstream_run) REFERENCES runs(repo_id, workstream_run) ON DELETE RESTRICT
+) STRICT;
+INSERT INTO mailbox_cursors(repo_id, workstream_run, delivered_through_event_seq, acknowledged_through_event_seq, version)
+SELECT
+  r.repo_id,
+  r.workstream_run,
+  COALESCE((SELECT MAX(m.created_event_seq) FROM messages m WHERE m.repo_id=r.repo_id AND m.recipient_workstream_run=r.workstream_run AND m.status IN ('delivered','acknowledged')), 0),
+  CASE
+    WHEN (SELECT MIN(m.created_event_seq) FROM messages m WHERE m.repo_id=r.repo_id AND m.recipient_workstream_run=r.workstream_run AND m.status!='acknowledged') IS NULL
+      THEN COALESCE((SELECT MAX(m.created_event_seq) FROM messages m WHERE m.repo_id=r.repo_id AND m.recipient_workstream_run=r.workstream_run AND m.status='acknowledged'), 0)
+    ELSE MAX(0, (SELECT MIN(m.created_event_seq) FROM messages m WHERE m.repo_id=r.repo_id AND m.recipient_workstream_run=r.workstream_run AND m.status!='acknowledged') - 1)
+  END,
+  1
+FROM runs r;
+UPDATE mailbox_cursors
+SET acknowledged_through_event_seq=MIN(acknowledged_through_event_seq, delivered_through_event_seq);
+CREATE TABLE reconciliation_evidence (
+  entity_id TEXT PRIMARY KEY,
+  repo_id TEXT NOT NULL,
+  workstream_run TEXT NOT NULL,
+  source TEXT NOT NULL,
+  target_id TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  version INTEGER NOT NULL CHECK(version >= 1),
+  UNIQUE(repo_id, workstream_run, source, target_id, entity_id),
+  FOREIGN KEY(repo_id, workstream_run) REFERENCES runs(repo_id, workstream_run) ON DELETE RESTRICT
+) STRICT;
+CREATE INDEX idx_reconciliation_evidence_condition ON reconciliation_evidence(repo_id, workstream_run, source, target_id);
+CREATE INDEX idx_messages_cursor ON messages(repo_id, recipient_workstream_run, created_event_seq, message_id, status);
+`;
 function asRow(value, label) {
     if (value === undefined)
         throw new CoordinationRuntimeError('invalid-state', `${label} row is missing`);
@@ -242,7 +282,7 @@ function requestDigest(request) {
         workstream_run: request.workstream_run,
         session_id: runOwnedIdempotency ? null : request.session_id,
         fencing_generation: runOwnedIdempotency ? null : request.fencing_generation,
-        expected_version: runOwnedIdempotency && request.action === 'acquire-group' ? null : request.expected_version,
+        expected_version: runOwnedIdempotency ? null : request.expected_version,
         payload,
     };
     return `sha256:${createHash('sha256').update(canonicalJson(semantic), 'utf8').digest('hex')}`;
@@ -339,6 +379,19 @@ function claimRequestFromRow(row) {
 function unitAttemptFromRow(row) {
     return entityFromRow(row, parseCoordinationUnitAttempt, 'unit attempt');
 }
+function mailboxCursorFromRow(row) {
+    return parseCoordinationMailboxCursor({
+        schema_version: 'autopilot.mailbox_cursor.v1',
+        repo_id: sqlString(row, 'repo_id'),
+        workstream_run: sqlString(row, 'workstream_run'),
+        delivered_through_event_seq: sqlInteger(row, 'delivered_through_event_seq'),
+        acknowledged_through_event_seq: sqlInteger(row, 'acknowledged_through_event_seq'),
+        version: sqlInteger(row, 'version'),
+    });
+}
+function reconciliationEvidenceFromRow(row) {
+    return entityFromRow(row, parseCoordinationReconciliationEvidence, 'reconciliation evidence');
+}
 function messageFromRow(row) {
     return parseCoordinationMessage({
         schema_version: 'autopilot.coordination_message.v1',
@@ -377,10 +430,13 @@ function sqliteFailure(error) {
 export class CoordinatorStore {
     #db;
     #clock;
+    #stateRoot;
     #lastBackupPath;
-    constructor(db, clock, lastBackupPath) {
+    #lastStartupReconciliation = null;
+    constructor(db, clock, stateRoot, lastBackupPath) {
         this.#db = db;
         this.#clock = clock;
+        this.#stateRoot = stateRoot;
         this.#lastBackupPath = lastBackupPath;
     }
     static async open(paths, clock = systemClock) {
@@ -430,6 +486,7 @@ export class CoordinatorStore {
             const migrations = [
                 { version: 1, sql: MIGRATION_1 },
                 { version: 2, sql: MIGRATION_2 },
+                { version: 3, sql: MIGRATION_3 },
             ];
             for (const migration of migrations) {
                 if (currentVersion >= migration.version)
@@ -463,7 +520,9 @@ export class CoordinatorStore {
                 throw new CoordinationRuntimeError('store-corrupt', 'coordinator database failed post-migration integrity check');
             if (platform() !== 'win32')
                 chmodSync(paths.databasePath, 0o600);
-            return new CoordinatorStore(db, clock, lastBackupPath);
+            const store = new CoordinatorStore(db, clock, paths.stateRoot, lastBackupPath);
+            store.#recoverDurableTransitionsAfterStartup();
+            return store;
         }
         catch (error) {
             db.close();
@@ -552,6 +611,8 @@ export class CoordinatorStore {
             case 'cancel-claim-request': return this.cancelClaimRequest(request);
             case 'cancel-acquisition-group': return this.cancelAcquisitionGroup(request);
             case 'supersede-attempt': return this.supersedeAttempt(request);
+            case 'record-release-evidence': return this.recordReleaseEvidence(request);
+            case 'reconcile-run': return this.reconcileRun(request);
             case 'transition-operation': throw new CoordinationRuntimeError('recovery-required', `${request.action} is reserved for a later Coordination Fabric transition`);
         }
     }
@@ -572,6 +633,10 @@ export class CoordinatorStore {
         const acquisitionGroups = workstreamRun === null ? [] : this.#db.prepare('SELECT * FROM acquisition_groups WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(repoId, workstreamRun).map(acquisitionGroupFromRow);
         const editLeases = workstreamRun === null ? [] : this.#db.prepare('SELECT * FROM edit_leases WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(repoId, workstreamRun).map(editLeaseFromRow);
         const claimRequests = workstreamRun === null ? [] : this.#db.prepare('SELECT * FROM claim_requests WHERE repo_id=? AND (requester_workstream_run=? OR owner_workstream_run=?) ORDER BY entity_id').all(repoId, workstreamRun, workstreamRun).map(claimRequestFromRow);
+        const mailboxCursors = workstreamRun === null
+            ? (repoId === 'global' ? this.#db.prepare('SELECT * FROM mailbox_cursors ORDER BY repo_id, workstream_run').all() : this.#db.prepare('SELECT * FROM mailbox_cursors WHERE repo_id=? ORDER BY workstream_run').all(repoId)).map(mailboxCursorFromRow)
+            : this.#db.prepare('SELECT * FROM mailbox_cursors WHERE repo_id=? AND workstream_run=?').all(repoId, workstreamRun).map(mailboxCursorFromRow);
+        const reconciliationEvidence = workstreamRun === null ? [] : this.#db.prepare('SELECT * FROM reconciliation_evidence WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(repoId, workstreamRun).map(reconciliationEvidenceFromRow);
         return {
             committedEventSeq: null,
             payload: {
@@ -586,6 +651,8 @@ export class CoordinatorStore {
                 acquisition_groups: acquisitionGroups,
                 edit_leases: editLeases,
                 claim_requests: claimRequests,
+                mailbox_cursors: mailboxCursors,
+                reconciliation_evidence: reconciliationEvidence,
                 pending_messages: pendingMessages,
             },
         };
@@ -622,6 +689,7 @@ export class CoordinatorStore {
                 expired_session_classifications: expired,
                 expired_child_classifications: expiredChildren,
                 last_backup_path: this.#lastBackupPath,
+                last_startup_reconciliation: this.#lastStartupReconciliation,
             },
         };
     }
@@ -638,6 +706,8 @@ export class CoordinatorStore {
             ['edit_leases', 'repo_id, workstream_run, entity_id'],
             ['change_reservations', 'repo_id, workstream_run, entity_id'],
             ['claim_requests', 'repo_id, requester_workstream_run, owner_workstream_run, entity_id'],
+            ['mailbox_cursors', 'repo_id, workstream_run'],
+            ['reconciliation_evidence', 'repo_id, workstream_run, entity_id'],
             ['messages', 'repo_id, recipient_workstream_run, created_event_seq, message_id'],
             ['worktrees', 'repo_id, workstream_run, entity_id'],
             ['worktree_operations', 'repo_id, workstream_run, entity_id'],
@@ -677,6 +747,7 @@ export class CoordinatorStore {
                 this.#db.prepare('UPDATE repositories SET event_seq=? WHERE repo_id=?').run(seq, request.repo_id);
             }
             this.#db.prepare("INSERT INTO runs(repo_id, autopilot_id, workstream, workstream_run, status, active_session_generation, created_event_seq, version) VALUES(?, ?, ?, ?, 'active', 0, ?, 1)").run(request.repo_id, payloadString(request.payload, 'autopilot_id'), payloadString(request.payload, 'workstream'), workstreamRun, seq);
+            this.#db.prepare('INSERT INTO mailbox_cursors(repo_id, workstream_run, delivered_through_event_seq, acknowledged_through_event_seq, version) VALUES(?, ?, 0, 0, 1)').run(request.repo_id, workstreamRun);
             const run = runFromRow(asRow(this.#db.prepare('SELECT * FROM runs WHERE repo_id=? AND workstream_run=?').get(request.repo_id, workstreamRun), 'created run'));
             return { sequence: seq, eventType: 'run-attached', entityType: 'run', entityId: workstreamRun, payload: { run } };
         });
@@ -687,6 +758,8 @@ export class CoordinatorStore {
             const sessionId = this.#sessionId(request);
             const run = this.#requireRun(request.repo_id, workstreamRun);
             this.#assertVersion(run.version, request.expected_version, 'run');
+            if (run.status === 'closed' || run.status === 'aborted')
+                throw new CoordinationRuntimeError('invalid-state', `terminal run ${workstreamRun} cannot accept a new parent session`);
             const nextGeneration = run.active_session_generation + 1;
             if (request.fencing_generation !== nextGeneration)
                 throw new CoordinationRuntimeError('stale-version', `next session generation must be ${String(nextGeneration)}`);
@@ -708,7 +781,8 @@ export class CoordinatorStore {
             this.#db.prepare("UPDATE runs SET active_session_generation=?, status='active', version=version+1 WHERE repo_id=? AND workstream_run=?").run(nextGeneration, request.repo_id, workstreamRun);
             const nextRun = this.#requireRun(request.repo_id, workstreamRun);
             const session = sessionFromRow(asRow(this.#db.prepare('SELECT * FROM session_leases WHERE session_lease_id=?').get(payloadString(request.payload, 'session_lease_id')), 'attached session'));
-            return { sequence: seq, eventType: 'session-attached', entityType: 'session-lease', entityId: session.session_lease_id, payload: { run: nextRun, session } };
+            const reconciliation = this.#reconcileOwnedRun(request.repo_id, workstreamRun, seq);
+            return { sequence: seq, eventType: 'session-attached', entityType: 'session-lease', entityId: session.session_lease_id, payload: { run: nextRun, session, reconciliation } };
         });
     }
     detachSession(request) {
@@ -726,9 +800,10 @@ export class CoordinatorStore {
         });
     }
     heartbeatSession(request) {
-        return this.#sessionMutation(request, 'session-heartbeat', (session) => {
+        return this.#sessionMutation(request, 'session-heartbeat', (session, seq) => {
             this.#db.prepare('UPDATE session_leases SET lease_expires_at=?, version=version+1 WHERE session_lease_id=?').run(payloadString(request.payload, 'lease_expires_at'), session.session_lease_id);
-            return { entityId: session.session_lease_id, payload: { session: sessionFromRow(asRow(this.#db.prepare('SELECT * FROM session_leases WHERE session_lease_id=?').get(session.session_lease_id), 'heartbeat session')) } };
+            const reconciliation = this.#reconcileOwnedRun(request.repo_id, session.workstream_run, seq);
+            return { entityId: session.session_lease_id, payload: { session: sessionFromRow(asRow(this.#db.prepare('SELECT * FROM session_leases WHERE session_lease_id=?').get(session.session_lease_id), 'heartbeat session')), reconciliation } };
         });
     }
     registerChild(request) {
@@ -776,7 +851,19 @@ export class CoordinatorStore {
                 throw new CoordinationRuntimeError('invalid-request', 'recovery-required child completion must not claim terminal evidence');
             const seq = this.#nextEventSequence(request.repo_id);
             this.#db.prepare('UPDATE child_leases SET status=?, terminal_evidence_ref=?, terminal_evidence_sha256=?, version=version+1 WHERE child_lease_id=?').run(status, evidenceRef, evidenceSha, childId);
-            return { sequence: seq, eventType: status === 'terminal' ? 'child-terminal' : 'child-recovery-required', entityType: 'child-lease', entityId: childId, payload: { child: childFromRow(asRow(this.#db.prepare('SELECT * FROM child_leases WHERE child_lease_id=?').get(childId), 'completed child')) } };
+            if (status === 'terminal' && evidenceRef !== null && evidenceSha !== null) {
+                this.#acceptReconciliationEvidence({
+                    repoId: child.owner.repo_id,
+                    workstreamRun: child.owner.workstream_run,
+                    source: 'child-process',
+                    targetId: child.child_lease_id,
+                    evidence: { ref: evidenceRef, sha256: evidenceSha },
+                    seq,
+                });
+                this.#updateAttemptForSatisfiedCondition(child.owner, 'child-terminal');
+            }
+            const reconciliation = this.#reconcileOwnedRun(request.repo_id, child.owner.workstream_run, seq);
+            return { sequence: seq, eventType: status === 'terminal' ? 'child-terminal' : 'child-recovery-required', entityType: 'child-lease', entityId: childId, payload: { child: childFromRow(asRow(this.#db.prepare('SELECT * FROM child_leases WHERE child_lease_id=?').get(childId), 'completed child')), reconciliation } };
         });
     }
     acquireGroup(request) {
@@ -854,6 +941,7 @@ export class CoordinatorStore {
                 throw new CoordinationRuntimeError('coordinator-contention', 'grant offer is no longer completely free');
             const granted = this.#grantGroup(current, seq);
             this.#db.prepare("UPDATE messages SET status='acknowledged', delivered_event_seq=COALESCE(delivered_event_seq, ?), acknowledged_event_seq=COALESCE(acknowledged_event_seq, ?), version=version+1 WHERE repo_id=? AND correlation_id=? AND message_type='grant-offer' AND status!='acknowledged'").run(seq, seq, request.repo_id, groupId);
+            this.#advanceMailboxCursor(request.repo_id, current.owner.workstream_run, 'acknowledged');
             const groupRequests = this.#claimRequestsForGroup(request.repo_id, groupId);
             for (const claimRequest of groupRequests) {
                 const next = { ...claimRequest, status: 'resolved', grant_event_seq: seq, version: claimRequest.version + 1 };
@@ -879,9 +967,10 @@ export class CoordinatorStore {
                 this.#assertReleaseConditionOwner(condition, claimRequest.owner);
                 const deferred = { ...claimRequest, status: 'deferred', owner_reason: payloadString(request.payload, 'owner_reason'), release_condition: condition, version: claimRequest.version + 1 };
                 this.#updateClaimRequest(deferred);
-                if (offersExpired)
+                const reconciliation = this.#reconcileOwnedRun(request.repo_id, claimRequest.owner.workstream_run, seq);
+                if (offersExpired && reconciliation.offered_group_ids.length === 0)
                     this.#reevaluateWaitingGroups(request.repo_id, seq);
-                return { sequence: seq, eventType: 'claim-request-deferred', entityType: 'claim-request', entityId: requestId, payload: { claim_request: deferred } };
+                return { sequence: seq, eventType: 'claim-request-deferred', entityType: 'claim-request', entityId: requestId, payload: { claim_request: this.#requireClaimRequest(requestId), reconciliation } };
             }
             const releasedLeaseIds = [];
             for (const leaseId of claimRequest.blocking_lease_ids) {
@@ -950,10 +1039,55 @@ export class CoordinatorStore {
             return { sequence: seq, eventType: 'unit-attempt-superseded', entityType: 'unit-attempt', entityId: unitAttemptEntityId(attempt.owner), payload: { unit_attempt: superseded, superseded_by_attempt: payloadInteger(request.payload, 'superseded_by_attempt'), reason: payloadString(request.payload, 'reason'), request_refs: groups.flatMap((group) => this.#claimRequestsForGroup(group.owner.repo_id, group.acquisition_group_id).map((entry) => entry.request_id)) } };
         });
     }
+    recordReleaseEvidence(request) {
+        return this.#mutation(request, () => {
+            this.#requireCurrentSession(request);
+            const workstreamRun = this.#workstreamRun(request);
+            const run = this.#requireRun(request.repo_id, workstreamRun);
+            this.#assertVersion(run.version, request.expected_version, 'run');
+            const source = this.#reconciliationSource(payloadString(request.payload, 'source'));
+            const conditionType = this.#conditionTypeForSource(source);
+            const targetId = payloadString(request.payload, 'target_id');
+            this.#assertReconciliationTarget(run, conditionType, targetId);
+            const seq = this.#nextEventSequence(request.repo_id);
+            const evidence = this.#acceptReconciliationEvidence({
+                repoId: request.repo_id,
+                workstreamRun,
+                source,
+                targetId,
+                evidence: {
+                    ref: payloadString(request.payload, 'evidence_ref'),
+                    sha256: payloadString(request.payload, 'evidence_sha256'),
+                },
+                seq,
+            });
+            this.#updateAttemptFromEvidence(run, conditionType, targetId);
+            let nextRun = run;
+            if (conditionType === 'run-closed' && run.status !== 'closed' && run.status !== 'aborted') {
+                const terminalStatus = source === 'run-abort' ? 'aborted' : 'closed';
+                this.#db.prepare('UPDATE runs SET status=?, version=version+1 WHERE repo_id=? AND workstream_run=?').run(terminalStatus, run.repo_id, run.workstream_run);
+                nextRun = this.#requireRun(run.repo_id, run.workstream_run);
+            }
+            const reconciliation = this.#reconcileOwnedRun(request.repo_id, workstreamRun, seq);
+            return { sequence: seq, eventType: 'release-evidence-accepted', entityType: 'reconciliation-evidence', entityId: evidence.reconciliation_evidence_id, payload: { reconciliation_evidence: evidence, run: nextRun, reconciliation } };
+        });
+    }
+    reconcileRun(request) {
+        return this.#mutation(request, () => {
+            this.#requireCurrentSession(request);
+            const workstreamRun = this.#workstreamRun(request);
+            const run = this.#requireRun(request.repo_id, workstreamRun);
+            this.#assertVersion(run.version, request.expected_version, 'run');
+            const seq = this.#nextEventSequence(request.repo_id);
+            const reconciliation = this.#reconcileOwnedRun(request.repo_id, workstreamRun, seq);
+            return { sequence: seq, eventType: 'run-reconciled', entityType: 'run', entityId: workstreamRun, payload: { run, reconciliation, reason: payloadString(request.payload, 'reason') } };
+        });
+    }
     drainMailbox(request) {
         return this.#sessionMutation(request, 'mailbox-drained', (session, seq) => {
             const workstreamRun = this.#workstreamRun(request);
             this.#db.prepare("UPDATE messages SET status='delivered', delivered_event_seq=COALESCE(delivered_event_seq, ?), version=version+1 WHERE repo_id=? AND recipient_workstream_run=? AND status='pending'").run(seq, request.repo_id, workstreamRun);
+            this.#advanceMailboxCursor(request.repo_id, workstreamRun, 'delivered');
             const messages = this.#db.prepare("SELECT * FROM messages WHERE repo_id=? AND recipient_workstream_run=? AND status='delivered' ORDER BY created_event_seq, message_id").all(request.repo_id, workstreamRun).map(messageFromRow);
             for (const message of messages) {
                 if (message.message_type !== 'claim-request')
@@ -962,7 +1096,7 @@ export class CoordinatorStore {
                 if (claimRequest.status === 'pending')
                     this.#updateClaimRequest({ ...claimRequest, status: 'delivered', version: claimRequest.version + 1 });
             }
-            return { entityId: payloadString(request.payload, 'delivery_id'), payload: { delivery_id: payloadString(request.payload, 'delivery_id'), session_version: session.version, messages } };
+            return { entityId: payloadString(request.payload, 'delivery_id'), payload: { delivery_id: payloadString(request.payload, 'delivery_id'), session_version: session.version, mailbox_cursor: this.#requireMailboxCursor(request.repo_id, workstreamRun), messages } };
         });
     }
     acknowledgeMessage(request) {
@@ -987,12 +1121,265 @@ export class CoordinatorStore {
                 if (claimRequest.status === 'released')
                     this.#updateClaimRequest({ ...claimRequest, status: 'requester-notified', version: claimRequest.version + 1 });
             }
-            return { sequence: seq, eventType: 'message-acknowledged', entityType: 'message', entityId: messageId, payload: { message: messageFromRow(asRow(this.#db.prepare('SELECT * FROM messages WHERE message_id=?').get(messageId), 'acknowledged message')) } };
+            this.#advanceMailboxCursor(request.repo_id, message.recipient_workstream_run, 'acknowledged');
+            return { sequence: seq, eventType: 'message-acknowledged', entityType: 'message', entityId: messageId, payload: { message: messageFromRow(asRow(this.#db.prepare('SELECT * FROM messages WHERE message_id=?').get(messageId), 'acknowledged message')), mailbox_cursor: this.#requireMailboxCursor(request.repo_id, message.recipient_workstream_run) } };
         });
     }
     enqueueMessageForTest(message) {
         const parsed = parseCoordinationMessage(message);
         this.#db.prepare('INSERT INTO messages(message_id, repo_id, recipient_workstream_run, message_type, correlation_id, payload_json, status, created_event_seq, delivered_event_seq, acknowledged_event_seq, version) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(parsed.message_id, parsed.repo_id, parsed.recipient_workstream_run, parsed.message_type, parsed.correlation_id, canonicalJson(parsed.payload), parsed.status, parsed.created_event_seq, parsed.delivered_event_seq, parsed.acknowledged_event_seq, parsed.version);
+    }
+    #recoverDurableTransitionsAfterStartup() {
+        const runs = this.#db.prepare('SELECT * FROM runs ORDER BY repo_id, workstream_run').all().map(runFromRow);
+        const aggregate = this.#emptyReconciliationSummary();
+        for (const run of runs) {
+            this.#db.exec('BEGIN IMMEDIATE');
+            try {
+                const seq = this.#nextEventSequence(run.repo_id);
+                const summary = this.#reconcileOwnedRun(run.repo_id, run.workstream_run, seq);
+                if (summary.released_lease_ids.length === 0 && summary.released_request_ids.length === 0 && summary.notification_ids.length === 0 && summary.offered_group_ids.length === 0) {
+                    this.#db.exec('ROLLBACK');
+                    continue;
+                }
+                const idempotencyKey = `startup-reconciliation:${run.workstream_run}:${String(seq)}`;
+                const digest = `sha256:${createHash('sha256').update(idempotencyKey, 'utf8').digest('hex')}`;
+                this.#db.prepare('INSERT INTO events(repo_id, event_seq, event_type, entity_type, entity_id, idempotency_key, request_sha256, occurred_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?)').run(run.repo_id, seq, 'startup-run-reconciled', 'run', run.workstream_run, idempotencyKey, digest, this.#clock.now().toISOString());
+                this.#db.exec('COMMIT');
+                aggregate.released_lease_ids.push(...summary.released_lease_ids);
+                aggregate.released_request_ids.push(...summary.released_request_ids);
+                aggregate.notification_ids.push(...summary.notification_ids);
+                aggregate.offered_group_ids.push(...summary.offered_group_ids);
+            }
+            catch (error) {
+                this.#db.exec('ROLLBACK');
+                throw error;
+            }
+        }
+        this.#lastStartupReconciliation = this.#freezeReconciliationSummary(aggregate);
+    }
+    #reconcileOwnedRun(repoId, workstreamRun, seq) {
+        const beforeRequests = new Map(this.#db.prepare('SELECT * FROM claim_requests WHERE repo_id=? ORDER BY entity_id').all(repoId).map(claimRequestFromRow).map((entry) => [entry.request_id, entry]));
+        const beforeMessages = new Set(this.#db.prepare('SELECT message_id FROM messages WHERE repo_id=? ORDER BY message_id').all(repoId).map((row) => sqlString(row, 'message_id')));
+        const beforeOffers = new Set(this.#db.prepare("SELECT entity_id FROM acquisition_groups WHERE repo_id=? AND json_extract(payload_json, '$.state')='grant-ready'").all(repoId).map((row) => sqlString(row, 'entity_id')));
+        const releasedLeaseIds = [];
+        const ownerRequests = this.#db.prepare('SELECT * FROM claim_requests WHERE repo_id=? AND owner_workstream_run=? ORDER BY entity_id').all(repoId, workstreamRun).map(claimRequestFromRow);
+        for (const claimRequest of ownerRequests) {
+            if (claimRequest.release_condition === null || !['deferred', 'acknowledged', 'delivered', 'pending'].includes(claimRequest.status) || !this.#conditionSatisfied(repoId, workstreamRun, claimRequest.release_condition))
+                continue;
+            for (const leaseId of claimRequest.blocking_lease_ids)
+                this.#releaseOwnedLease(repoId, workstreamRun, leaseId, releasedLeaseIds);
+        }
+        const ownedLeases = this.#db.prepare('SELECT * FROM edit_leases WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(repoId, workstreamRun).map(editLeaseFromRow);
+        for (const lease of ownedLeases) {
+            if (this.#conditionSatisfied(repoId, workstreamRun, lease.normal_release_condition))
+                this.#releaseOwnedLease(repoId, workstreamRun, lease.edit_lease_id, releasedLeaseIds);
+        }
+        this.#reevaluateWaitingGroups(repoId, seq);
+        const afterRequests = this.#db.prepare('SELECT * FROM claim_requests WHERE repo_id=? ORDER BY entity_id').all(repoId).map(claimRequestFromRow);
+        const releasedRequestIds = afterRequests.filter((entry) => {
+            const before = beforeRequests.get(entry.request_id);
+            return entry.release_event_seq === seq && before?.release_event_seq !== seq;
+        }).map((entry) => entry.request_id);
+        const notificationIds = this.#db.prepare('SELECT message_id FROM messages WHERE repo_id=? ORDER BY message_id').all(repoId).map((row) => sqlString(row, 'message_id')).filter((messageId) => !beforeMessages.has(messageId));
+        const offeredGroupIds = this.#db.prepare("SELECT entity_id FROM acquisition_groups WHERE repo_id=? AND json_extract(payload_json, '$.state')='grant-ready' ORDER BY entity_id").all(repoId).map((row) => sqlString(row, 'entity_id')).filter((groupId) => !beforeOffers.has(groupId));
+        return this.#freezeReconciliationSummary({ released_lease_ids: releasedLeaseIds, released_request_ids: releasedRequestIds, notification_ids: notificationIds, offered_group_ids: offeredGroupIds });
+    }
+    #releaseOwnedLease(repoId, workstreamRun, leaseId, releasedLeaseIds) {
+        const row = this.#db.prepare('SELECT * FROM edit_leases WHERE repo_id=? AND entity_id=?').get(repoId, leaseId);
+        if (row === undefined)
+            return;
+        const lease = editLeaseFromRow(row);
+        if (lease.owner.workstream_run !== workstreamRun)
+            throw new CoordinationRuntimeError('unauthorized-client', 'run reconciliation cannot release a foreign-run edit lease');
+        this.#db.prepare('DELETE FROM edit_leases WHERE repo_id=? AND entity_id=?').run(repoId, leaseId);
+        releasedLeaseIds.push(leaseId);
+        this.#markGroupReleasedWhenEmpty(repoId, lease.acquisition_group_id);
+    }
+    #conditionSatisfied(repoId, workstreamRun, condition) {
+        if (condition.condition_type === 'explicit-owner-release')
+            return false;
+        if (condition.condition_type === 'child-terminal') {
+            const row = this.#db.prepare("SELECT * FROM child_leases WHERE repo_id=? AND workstream_run=? AND child_lease_id=? AND status='terminal'").get(repoId, workstreamRun, condition.target_id);
+            if (row !== undefined) {
+                const child = childFromRow(row);
+                if (child.terminal_evidence === null)
+                    throw new CoordinationRuntimeError('store-corrupt', 'terminal child fact lacks immutable evidence');
+                this.#verifyAcceptedEvidenceFile(this.#requireRun(repoId, workstreamRun), 'child-process', condition.target_id, child.terminal_evidence);
+                return true;
+            }
+        }
+        if (condition.condition_type === 'run-closed') {
+            const run = this.#requireRun(repoId, workstreamRun);
+            if (condition.target_id === workstreamRun && (run.status === 'closed' || run.status === 'aborted'))
+                return true;
+        }
+        return this.#db.prepare("SELECT entity_id FROM reconciliation_evidence WHERE repo_id=? AND workstream_run=? AND json_extract(payload_json, '$.release_condition.condition_type')=? AND target_id=? LIMIT 1").get(repoId, workstreamRun, condition.condition_type, condition.target_id) !== undefined;
+    }
+    #acceptReconciliationEvidence(input) {
+        const run = this.#requireRun(input.repoId, input.workstreamRun);
+        this.#verifyAcceptedEvidenceFile(run, input.source, input.targetId, input.evidence);
+        const conditionType = this.#conditionTypeForSource(input.source);
+        this.#assertReconciliationTarget(run, conditionType, input.targetId);
+        const entityId = stableEntityId('reconciliation-evidence', [input.repoId, input.workstreamRun, input.source, input.targetId, input.evidence.ref, input.evidence.sha256]);
+        const existing = this.#db.prepare('SELECT * FROM reconciliation_evidence WHERE entity_id=?').get(entityId);
+        if (existing !== undefined)
+            return reconciliationEvidenceFromRow(existing);
+        const evidence = {
+            schema_version: 'autopilot.reconciliation_evidence.v1',
+            reconciliation_evidence_id: entityId,
+            repo_id: input.repoId,
+            autopilot_id: run.autopilot_id,
+            workstream_run: input.workstreamRun,
+            source: input.source,
+            release_condition: { condition_type: conditionType, target_id: input.targetId, evidence: input.evidence },
+            accepted_event_seq: input.seq,
+            version: 1,
+        };
+        const parsed = parseCoordinationReconciliationEvidence(evidence);
+        this.#db.prepare('INSERT INTO reconciliation_evidence(entity_id, repo_id, workstream_run, source, target_id, payload_json, version) VALUES(?, ?, ?, ?, ?, ?, ?)').run(entityId, input.repoId, input.workstreamRun, input.source, input.targetId, canonicalJson(parsed), parsed.version);
+        return parsed;
+    }
+    #verifyAcceptedEvidenceFile(run, source, targetId, evidence) {
+        const repository = repositoryFromRow(asRow(this.#db.prepare('SELECT * FROM repositories WHERE repo_id=?').get(run.repo_id), 'evidence repository'));
+        const worktreesRoot = resolve(this.#stateRoot, 'worktrees');
+        const runMainRoot = resolve(worktreesRoot, repository.repo_key, 'active', run.workstream_run, 'main');
+        const relativeRunRoot = relative(worktreesRoot, runMainRoot);
+        if (relativeRunRoot.length === 0 || relativeRunRoot === '..' || relativeRunRoot.startsWith(`..${sep}`) || isAbsolute(relativeRunRoot))
+            throw new CoordinationRuntimeError('unauthorized-client', 'durable run identity escapes the package-owned worktree root');
+        const evidencePath = resolve(runMainRoot, evidence.ref);
+        const relativeEvidence = relative(runMainRoot, evidencePath);
+        if (relativeEvidence.length === 0 || relativeEvidence === '..' || relativeEvidence.startsWith(`..${sep}`) || isAbsolute(relativeEvidence))
+            throw new CoordinationRuntimeError('unauthorized-client', 'accepted reconciliation evidence escapes the run-owned main worktree');
+        let bytes;
+        try {
+            const evidenceStat = lstatSync(evidencePath);
+            if (!evidenceStat.isFile() || evidenceStat.isSymbolicLink())
+                throw new CoordinationRuntimeError('unauthorized-client', 'accepted reconciliation evidence must be a regular non-symbolic file', [evidencePath]);
+            const realRunRoot = realpathSync(runMainRoot);
+            const realEvidencePath = realpathSync(evidencePath);
+            const relativeRealEvidence = relative(realRunRoot, realEvidencePath);
+            if (relativeRealEvidence.length === 0 || relativeRealEvidence === '..' || relativeRealEvidence.startsWith(`..${sep}`) || isAbsolute(relativeRealEvidence))
+                throw new CoordinationRuntimeError('unauthorized-client', 'accepted reconciliation evidence resolves outside the run-owned main worktree', [evidencePath, realEvidencePath]);
+            bytes = readFileSync(evidencePath);
+        }
+        catch (error) {
+            if (error instanceof CoordinationRuntimeError)
+                throw error;
+            throw new CoordinationRuntimeError('recovery-required', 'accepted reconciliation evidence file is unreadable', [evidencePath, error instanceof Error ? error.message : String(error)]);
+        }
+        const actual = `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
+        if (actual !== evidence.sha256)
+            throw new CoordinationRuntimeError('invalid-state', 'accepted reconciliation evidence hash does not match the run-owned artifact', [evidencePath, `expected=${evidence.sha256}`, `actual=${actual}`]);
+        let unitId = null;
+        let attempt = null;
+        if (source === 'child-process') {
+            const child = childFromRow(asRow(this.#db.prepare('SELECT * FROM child_leases WHERE child_lease_id=?').get(targetId), 'terminal evidence child'));
+            unitId = child.owner.unit_id;
+            attempt = child.owner.attempt;
+        }
+        else if (source === 'unit-merge' || source === 'attempt-reset' || source === 'quarantine-capture') {
+            const target = parseUnitAttemptTarget(targetId);
+            unitId = target.unitId;
+            attempt = target.attempt;
+        }
+        validateReconciliationEvidenceDocument(bytes, {
+            repoKey: repository.repo_key,
+            autopilotId: run.autopilot_id,
+            workstream: run.workstream,
+            workstreamRun: run.workstream_run,
+            source,
+            targetId,
+            unitId,
+            attempt,
+        });
+    }
+    #updateAttemptForSatisfiedCondition(owner, conditionType) {
+        const entityId = unitAttemptEntityId(owner);
+        const row = this.#db.prepare('SELECT * FROM unit_attempts WHERE entity_id=?').get(entityId);
+        if (row === undefined)
+            return;
+        const attempt = unitAttemptFromRow(row);
+        const state = conditionType === 'child-terminal' ? 'transport-complete' : conditionType === 'unit-merged' ? 'merged' : conditionType === 'attempt-reset' ? 'reset' : conditionType === 'quarantine-captured' ? 'quarantined' : null;
+        if (state === null || attempt.state === state)
+            return;
+        this.#updateEntity('unit_attempts', entityId, { ...attempt, state, version: attempt.version + 1 });
+    }
+    #updateAttemptFromEvidence(run, conditionType, targetId) {
+        if (conditionType === 'run-closed' || conditionType === 'explicit-owner-release' || conditionType === 'child-terminal')
+            return;
+        const split = targetId.lastIndexOf(':');
+        if (split <= 0)
+            throw new CoordinationRuntimeError('invalid-request', `${conditionType} target must be unit-id:attempt`);
+        const attempt = Number(targetId.slice(split + 1));
+        if (!Number.isSafeInteger(attempt) || attempt < 1)
+            throw new CoordinationRuntimeError('invalid-request', `${conditionType} target attempt is invalid`);
+        this.#updateAttemptForSatisfiedCondition({ repo_id: run.repo_id, autopilot_id: run.autopilot_id, workstream_run: run.workstream_run, unit_id: targetId.slice(0, split), attempt }, conditionType);
+    }
+    #assertReconciliationTarget(run, conditionType, targetId) {
+        if (conditionType === 'run-closed') {
+            if (targetId !== run.workstream_run)
+                throw new CoordinationRuntimeError('invalid-request', 'run-close evidence must target the current durable run');
+            return;
+        }
+        if (conditionType === 'child-terminal') {
+            const child = this.#db.prepare('SELECT * FROM child_leases WHERE child_lease_id=?').get(targetId);
+            if (child !== undefined && childFromRow(child).owner.workstream_run !== run.workstream_run)
+                throw new CoordinationRuntimeError('unauthorized-client', 'child-terminal evidence targets a foreign run');
+            return;
+        }
+        const split = targetId.lastIndexOf(':');
+        if (split <= 0 || !Number.isSafeInteger(Number(targetId.slice(split + 1))) || Number(targetId.slice(split + 1)) < 1)
+            throw new CoordinationRuntimeError('invalid-request', `${conditionType} evidence target must be unit-id:attempt`);
+    }
+    #reconciliationSource(value) {
+        switch (value) {
+            case 'child-process':
+            case 'unit-merge':
+            case 'attempt-reset':
+            case 'quarantine-capture':
+            case 'run-close':
+            case 'run-abort': return value;
+            default: throw new CoordinationRuntimeError('invalid-request', `unsupported reconciliation source ${value}`);
+        }
+    }
+    #conditionTypeForSource(source) {
+        switch (source) {
+            case 'child-process': return 'child-terminal';
+            case 'unit-merge': return 'unit-merged';
+            case 'attempt-reset': return 'attempt-reset';
+            case 'quarantine-capture': return 'quarantine-captured';
+            case 'run-close':
+            case 'run-abort': return 'run-closed';
+        }
+    }
+    #emptyReconciliationSummary() {
+        return { released_lease_ids: [], released_request_ids: [], notification_ids: [], offered_group_ids: [] };
+    }
+    #freezeReconciliationSummary(summary) {
+        return {
+            released_lease_ids: Object.freeze([...new Set(summary.released_lease_ids)].sort()),
+            released_request_ids: Object.freeze([...new Set(summary.released_request_ids)].sort()),
+            notification_ids: Object.freeze([...new Set(summary.notification_ids)].sort()),
+            offered_group_ids: Object.freeze([...new Set(summary.offered_group_ids)].sort()),
+        };
+    }
+    #requireMailboxCursor(repoId, workstreamRun) {
+        return mailboxCursorFromRow(asRow(this.#db.prepare('SELECT * FROM mailbox_cursors WHERE repo_id=? AND workstream_run=?').get(repoId, workstreamRun), 'mailbox cursor'));
+    }
+    #advanceMailboxCursor(repoId, workstreamRun, kind) {
+        const cursor = this.#requireMailboxCursor(repoId, workstreamRun);
+        const deliveredRow = asRow(this.#db.prepare("SELECT COALESCE(MAX(created_event_seq), 0) AS cursor FROM messages WHERE repo_id=? AND recipient_workstream_run=? AND status IN ('delivered','acknowledged')").get(repoId, workstreamRun), 'delivered mailbox cursor');
+        const firstUnacknowledged = this.#db.prepare("SELECT MIN(created_event_seq) AS cursor FROM messages WHERE repo_id=? AND recipient_workstream_run=? AND status!='acknowledged'").get(repoId, workstreamRun);
+        const maxAcknowledged = asRow(this.#db.prepare("SELECT COALESCE(MAX(created_event_seq), 0) AS cursor FROM messages WHERE repo_id=? AND recipient_workstream_run=? AND status='acknowledged'").get(repoId, workstreamRun), 'acknowledged mailbox cursor');
+        const delivered = Math.max(cursor.delivered_through_event_seq, sqlInteger(deliveredRow, 'cursor'));
+        const unacknowledgedEvent = firstUnacknowledged === undefined || firstUnacknowledged['cursor'] === null ? null : sqlInteger(firstUnacknowledged, 'cursor');
+        const acknowledgedMaximum = sqlInteger(maxAcknowledged, 'cursor');
+        const acknowledged = kind === 'acknowledged'
+            ? Math.max(cursor.acknowledged_through_event_seq, unacknowledgedEvent === null ? acknowledgedMaximum : Math.min(acknowledgedMaximum, Math.max(0, unacknowledgedEvent - 1)))
+            : cursor.acknowledged_through_event_seq;
+        if (delivered === cursor.delivered_through_event_seq && acknowledged === cursor.acknowledged_through_event_seq)
+            return;
+        this.#db.prepare('UPDATE mailbox_cursors SET delivered_through_event_seq=?, acknowledged_through_event_seq=?, version=version+1 WHERE repo_id=? AND workstream_run=?').run(delivered, acknowledged, repoId, workstreamRun);
     }
     #insertEntity(table, entityId, repoId, workstreamRun, entity) {
         this.#db.prepare(`INSERT INTO ${table}(entity_id, repo_id, workstream_run, payload_json, version) VALUES(?, ?, ?, ?, ?)`).run(entityId, repoId, workstreamRun, canonicalJson(entity), entity.version);
@@ -1189,6 +1576,7 @@ export class CoordinatorStore {
             expired = true;
             this.#updateEntity('acquisition_groups', group.acquisition_group_id, { ...group, state: 'waiting', offer_expires_at: null, offer_count: group.offer_count + 1, fairness_event_seq: seq, version: group.version + 1 });
             this.#db.prepare("UPDATE messages SET status='acknowledged', delivered_event_seq=COALESCE(delivered_event_seq, ?), acknowledged_event_seq=COALESCE(acknowledged_event_seq, ?), version=version+1 WHERE repo_id=? AND correlation_id=? AND message_type='grant-offer' AND status!='acknowledged'").run(seq, seq, repoId, group.acquisition_group_id);
+            this.#advanceMailboxCursor(repoId, group.owner.workstream_run, 'acknowledged');
             for (const claimRequest of this.#claimRequestsForGroup(repoId, group.acquisition_group_id)) {
                 if (claimRequest.status === 'grant-ready')
                     this.#updateClaimRequest({ ...claimRequest, status: 'released', version: claimRequest.version + 1 });
@@ -1205,7 +1593,10 @@ export class CoordinatorStore {
                 continue;
             this.#updateClaimRequest({ ...claimRequest, status, version: claimRequest.version + 1 });
         }
+        const affectedMailboxRuns = this.#db.prepare("SELECT DISTINCT recipient_workstream_run FROM messages WHERE repo_id=? AND (correlation_id=? OR correlation_id IN (SELECT entity_id FROM claim_requests WHERE repo_id=? AND json_extract(payload_json, '$.acquisition_group_id')=?)) AND status!='acknowledged' ORDER BY recipient_workstream_run").all(group.owner.repo_id, group.acquisition_group_id, group.owner.repo_id, group.acquisition_group_id).map((row) => sqlString(row, 'recipient_workstream_run'));
         this.#db.prepare("UPDATE messages SET status='acknowledged', delivered_event_seq=COALESCE(delivered_event_seq, ?), acknowledged_event_seq=COALESCE(acknowledged_event_seq, ?), version=version+1 WHERE repo_id=? AND (correlation_id=? OR correlation_id IN (SELECT entity_id FROM claim_requests WHERE repo_id=? AND json_extract(payload_json, '$.acquisition_group_id')=?)) AND status!='acknowledged'").run(seq, seq, group.owner.repo_id, group.acquisition_group_id, group.owner.repo_id, group.acquisition_group_id);
+        for (const workstreamRun of affectedMailboxRuns)
+            this.#advanceMailboxCursor(group.owner.repo_id, workstreamRun, 'acknowledged');
     }
     #sessionMutation(request, eventType, apply) {
         return this.#mutation(request, () => {
@@ -1259,6 +1650,8 @@ export class CoordinatorStore {
     }
     #requireCurrentSession(request) {
         const run = this.#requireRun(request.repo_id, this.#workstreamRun(request));
+        if ((run.status === 'closed' || run.status === 'aborted') && !TERMINAL_SESSION_ACTIONS.has(request.action))
+            throw new CoordinationRuntimeError('invalid-state', `terminal run ${run.workstream_run} rejects new coordination action ${request.action}`);
         const sessionId = this.#sessionId(request);
         const generation = request.fencing_generation;
         if (generation === null || generation !== run.active_session_generation)

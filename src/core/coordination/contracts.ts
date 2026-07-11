@@ -11,6 +11,7 @@ import {
   COORDINATION_MESSAGE_STATUSES,
   COORDINATION_OPERATION_STAGES,
   COORDINATION_RELEASE_CONDITION_TYPES,
+  COORDINATION_RECONCILIATION_SOURCES,
   COORDINATION_REQUEST_STATUSES,
   COORDINATION_RUN_STATUSES,
   COORDINATION_SESSION_STATUSES,
@@ -24,8 +25,10 @@ import {
   type CoordinationEscalation,
   type CoordinationEvent,
   type CoordinationEvidenceRef,
+  type CoordinationMailboxCursor,
   type CoordinationMessage,
   type CoordinationOwnerIdentity,
+  type CoordinationReconciliationEvidence,
   type CoordinationReleaseCondition,
   type CoordinationRepository,
   type CoordinationRequestedLease,
@@ -58,7 +61,7 @@ const SHA256 = /^sha256:[a-f0-9]{64}$/u;
 const CHILD_TOKEN = /^[a-f0-9]{64}$/u;
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,191}$/u;
 const QUERY_ACTIONS = ['status', 'doctor', 'export'] as const;
-const MUTATION_ACTIONS = ['attach-run', 'attach-session', 'detach-session', 'prepare-handoff', 'heartbeat', 'register-child', 'heartbeat-child', 'complete-child', 'drain-mailbox', 'acquire-group', 'acknowledge-grant', 'respond-claim-request', 'cancel-claim-request', 'cancel-acquisition-group', 'supersede-attempt', 'acknowledge-message', 'transition-operation'] as const;
+const MUTATION_ACTIONS = ['attach-run', 'attach-session', 'detach-session', 'prepare-handoff', 'heartbeat', 'register-child', 'heartbeat-child', 'complete-child', 'drain-mailbox', 'acquire-group', 'acknowledge-grant', 'respond-claim-request', 'cancel-claim-request', 'cancel-acquisition-group', 'supersede-attempt', 'acknowledge-message', 'record-release-evidence', 'reconcile-run', 'transition-operation'] as const;
 const MESSAGE_TYPES = ['claim-request', 'release-notification', 'grant-offer', 'recovery-required'] as const;
 const WORKTREE_STATES = ['planned', 'active', 'dirty', 'quarantined', 'terminal', 'removed'] as const;
 const OPERATION_TYPES = ['create', 'materialize', 'commit', 'merge', 'reset', 'quarantine', 'archive', 'remove'] as const;
@@ -83,6 +86,8 @@ const PAYLOAD_FIELDS: Readonly<Record<CoordinatorQueryAction | CoordinatorMutati
   'cancel-acquisition-group': ['acquisition_group_id', 'reason', 'session_lease_id', 'session_token'],
   'supersede-attempt': ['attempt', 'reason', 'session_lease_id', 'session_token', 'superseded_by_attempt', 'unit_id'],
   'acknowledge-message': ['message_id', 'session_lease_id', 'session_token'],
+  'record-release-evidence': ['evidence_ref', 'evidence_sha256', 'source', 'target_id', 'session_lease_id', 'session_token'],
+  'reconcile-run': ['reason', 'session_lease_id', 'session_token'],
   'transition-operation': ['operation_id', 'stage'],
 };
 
@@ -121,6 +126,17 @@ function identifier(record: JsonObject, field: string, label: string): string {
   const value = string(record, field, label, 192);
   if (!IDENTIFIER.test(value)) fail(label, `${field} is not a valid bounded identifier`);
   return value;
+}
+
+function pathSegmentIdentifier(record: JsonObject, field: string, label: string): string {
+  const value = identifier(record, field, label);
+  if (value === '.' || value === '..' || value.includes('/') || value.includes('\\')) fail(label, `${field} must be one filesystem-safe identifier segment`);
+  return value;
+}
+
+function nullablePathSegmentIdentifier(record: JsonObject, field: string, label: string): string | null {
+  if (record[field] === null) return null;
+  return pathSegmentIdentifier(record, field, label);
 }
 
 function integer(record: JsonObject, field: string, label: string, minimum = 0): number {
@@ -231,9 +247,9 @@ function parseNullableEvidence(value: unknown, label: string): CoordinationEvide
 export function parseCoordinationOwnerIdentity(value: unknown, label = 'CoordinationOwnerIdentity'): CoordinationOwnerIdentity {
   const record = object(value, label, ['attempt', 'autopilot_id', 'repo_id', 'unit_id', 'workstream_run']);
   return {
-    repo_id: identifier(record, 'repo_id', label),
-    autopilot_id: identifier(record, 'autopilot_id', label),
-    workstream_run: identifier(record, 'workstream_run', label),
+    repo_id: pathSegmentIdentifier(record, 'repo_id', label),
+    autopilot_id: pathSegmentIdentifier(record, 'autopilot_id', label),
+    workstream_run: pathSegmentIdentifier(record, 'workstream_run', label),
     unit_id: identifier(record, 'unit_id', label),
     attempt: integer(record, 'attempt', label, 1),
   };
@@ -275,8 +291,8 @@ export function parseCoordinationRepository(value: unknown): CoordinationReposit
   const record = object(value, label, ['canonical_root', 'created_event_seq', 'git_common_dir', 'repo_id', 'repo_key', 'schema_version', 'version']);
   return {
     schema_version: literal(record, 'schema_version', 'autopilot.coordination_repository.v1', label),
-    repo_id: identifier(record, 'repo_id', label),
-    repo_key: identifier(record, 'repo_key', label),
+    repo_id: pathSegmentIdentifier(record, 'repo_id', label),
+    repo_key: pathSegmentIdentifier(record, 'repo_key', label),
     canonical_root: absolutePath(record, 'canonical_root', label),
     git_common_dir: absolutePath(record, 'git_common_dir', label),
     created_event_seq: integer(record, 'created_event_seq', label),
@@ -289,10 +305,10 @@ export function parseCoordinationRun(value: unknown): CoordinationRun {
   const record = object(value, label, ['active_session_generation', 'autopilot_id', 'created_event_seq', 'repo_id', 'schema_version', 'status', 'version', 'workstream', 'workstream_run']);
   return {
     schema_version: literal(record, 'schema_version', 'autopilot.coordination_run.v1', label),
-    repo_id: identifier(record, 'repo_id', label),
-    autopilot_id: identifier(record, 'autopilot_id', label),
+    repo_id: pathSegmentIdentifier(record, 'repo_id', label),
+    autopilot_id: pathSegmentIdentifier(record, 'autopilot_id', label),
     workstream: identifier(record, 'workstream', label),
-    workstream_run: identifier(record, 'workstream_run', label),
+    workstream_run: pathSegmentIdentifier(record, 'workstream_run', label),
     status: oneOf(record, 'status', COORDINATION_RUN_STATUSES, label),
     active_session_generation: integer(record, 'active_session_generation', label),
     created_event_seq: integer(record, 'created_event_seq', label),
@@ -306,8 +322,8 @@ export function parseCoordinationSessionLease(value: unknown): CoordinationSessi
   return {
     schema_version: literal(record, 'schema_version', 'autopilot.session_lease.v1', label),
     session_lease_id: identifier(record, 'session_lease_id', label),
-    repo_id: identifier(record, 'repo_id', label),
-    workstream_run: identifier(record, 'workstream_run', label),
+    repo_id: pathSegmentIdentifier(record, 'repo_id', label),
+    workstream_run: pathSegmentIdentifier(record, 'workstream_run', label),
     session_id: identifier(record, 'session_id', label),
     session_generation: integer(record, 'session_generation', label, 1),
     pid: integer(record, 'pid', label, 1),
@@ -397,9 +413,9 @@ export function parseCoordinationChangeReservation(value: unknown): Coordination
   return {
     schema_version: literal(record, 'schema_version', 'autopilot.change_reservation.v1', label),
     reservation_id: identifier(record, 'reservation_id', label),
-    repo_id: identifier(record, 'repo_id', label),
-    autopilot_id: identifier(record, 'autopilot_id', label),
-    workstream_run: identifier(record, 'workstream_run', label),
+    repo_id: pathSegmentIdentifier(record, 'repo_id', label),
+    autopilot_id: pathSegmentIdentifier(record, 'autopilot_id', label),
+    workstream_run: pathSegmentIdentifier(record, 'workstream_run', label),
     path: repoPath(record, 'path', label),
     merge_evidence: parseEvidence(record['merge_evidence'], `${label}.merge_evidence`),
     created_event_seq: integer(record, 'created_event_seq', label),
@@ -433,14 +449,48 @@ export function parseCoordinationClaimRequest(value: unknown): CoordinationClaim
   };
 }
 
+export function parseCoordinationMailboxCursor(value: unknown): CoordinationMailboxCursor {
+  const label = 'CoordinationMailboxCursor';
+  const record = object(value, label, ['acknowledged_through_event_seq', 'delivered_through_event_seq', 'repo_id', 'schema_version', 'version', 'workstream_run']);
+  const delivered = integer(record, 'delivered_through_event_seq', label);
+  const acknowledged = integer(record, 'acknowledged_through_event_seq', label);
+  if (acknowledged > delivered) fail(label, 'acknowledged cursor cannot exceed delivered cursor');
+  return {
+    schema_version: literal(record, 'schema_version', 'autopilot.mailbox_cursor.v1', label),
+    repo_id: pathSegmentIdentifier(record, 'repo_id', label),
+    workstream_run: pathSegmentIdentifier(record, 'workstream_run', label),
+    delivered_through_event_seq: delivered,
+    acknowledged_through_event_seq: acknowledged,
+    version: integer(record, 'version', label, 1),
+  };
+}
+
+export function parseCoordinationReconciliationEvidence(value: unknown): CoordinationReconciliationEvidence {
+  const label = 'CoordinationReconciliationEvidence';
+  const record = object(value, label, ['accepted_event_seq', 'autopilot_id', 'reconciliation_evidence_id', 'release_condition', 'repo_id', 'schema_version', 'source', 'version', 'workstream_run']);
+  const condition = parseCoordinationReleaseCondition(record['release_condition'], `${label}.release_condition`);
+  if (condition.evidence === null) fail(label, 'release_condition must carry immutable accepted evidence');
+  return {
+    schema_version: literal(record, 'schema_version', 'autopilot.reconciliation_evidence.v1', label),
+    reconciliation_evidence_id: identifier(record, 'reconciliation_evidence_id', label),
+    repo_id: pathSegmentIdentifier(record, 'repo_id', label),
+    autopilot_id: pathSegmentIdentifier(record, 'autopilot_id', label),
+    workstream_run: pathSegmentIdentifier(record, 'workstream_run', label),
+    source: oneOf(record, 'source', COORDINATION_RECONCILIATION_SOURCES, label),
+    release_condition: condition,
+    accepted_event_seq: integer(record, 'accepted_event_seq', label, 1),
+    version: integer(record, 'version', label, 1),
+  };
+}
+
 export function parseCoordinationMessage(value: unknown): CoordinationMessage {
   const label = 'CoordinationMessage';
   const record = object(value, label, ['acknowledged_event_seq', 'correlation_id', 'created_event_seq', 'delivered_event_seq', 'message_id', 'message_type', 'payload', 'recipient_workstream_run', 'repo_id', 'schema_version', 'status', 'version']);
   return {
     schema_version: literal(record, 'schema_version', 'autopilot.coordination_message.v1', label),
     message_id: identifier(record, 'message_id', label),
-    repo_id: identifier(record, 'repo_id', label),
-    recipient_workstream_run: identifier(record, 'recipient_workstream_run', label),
+    repo_id: pathSegmentIdentifier(record, 'repo_id', label),
+    recipient_workstream_run: pathSegmentIdentifier(record, 'recipient_workstream_run', label),
     message_type: oneOf(record, 'message_type', MESSAGE_TYPES, label),
     correlation_id: identifier(record, 'correlation_id', label),
     payload: boundedJsonObject(record['payload'], `${label}.payload`),
@@ -509,7 +559,7 @@ export function parseCoordinationEscalation(value: unknown): CoordinationEscalat
   return {
     schema_version: literal(record, 'schema_version', 'autopilot.planning_contradiction.v1', label),
     escalation_id: identifier(record, 'escalation_id', label),
-    repo_id: identifier(record, 'repo_id', label),
+    repo_id: pathSegmentIdentifier(record, 'repo_id', label),
     participating_runs: uniqueStrings(record['participating_runs'], `${label}.participating_runs`, 2, 32),
     authoritative_refs: refs,
     conflicting_clauses: uniqueStrings(record['conflicting_clauses'], `${label}.conflicting_clauses`, 2, 32),
@@ -528,7 +578,7 @@ export function parseCoordinationEvent(value: unknown): CoordinationEvent {
   if (!SHA256.test(requestDigest)) fail(label, 'request_sha256 must use sha256:<64 lowercase hex>');
   return {
     schema_version: literal(record, 'schema_version', 'autopilot.coordination_event.v1', label),
-    repo_id: identifier(record, 'repo_id', label),
+    repo_id: pathSegmentIdentifier(record, 'repo_id', label),
     event_seq: integer(record, 'event_seq', label, 1),
     event_type: identifier(record, 'event_type', label),
     entity_type: identifier(record, 'entity_type', label),
@@ -545,7 +595,7 @@ function parseTable<T>(record: JsonObject, field: string, parser: (value: unknow
 
 export function parseCoordinationSnapshot(value: unknown): CoordinationSnapshot {
   const label = 'CoordinationSnapshot';
-  const fields = ['acquisition_groups', 'change_reservations', 'child_leases', 'claim_requests', 'edit_leases', 'escalations', 'events', 'messages', 'repositories', 'repository_event_seq', 'runs', 'schema_version', 'session_leases', 'unit_attempts', 'worktree_operations', 'worktrees'] as const;
+  const fields = ['acquisition_groups', 'change_reservations', 'child_leases', 'claim_requests', 'edit_leases', 'escalations', 'events', 'mailbox_cursors', 'messages', 'reconciliation_evidence', 'repositories', 'repository_event_seq', 'runs', 'schema_version', 'session_leases', 'unit_attempts', 'worktree_operations', 'worktrees'] as const;
   const record = object(value, label, fields);
   return {
     schema_version: literal(record, 'schema_version', AUTOPILOT_COORDINATION_SNAPSHOT_SCHEMA, label),
@@ -559,6 +609,8 @@ export function parseCoordinationSnapshot(value: unknown): CoordinationSnapshot 
     edit_leases: parseTable(record, 'edit_leases', parseCoordinationEditLease),
     change_reservations: parseTable(record, 'change_reservations', parseCoordinationChangeReservation),
     claim_requests: parseTable(record, 'claim_requests', parseCoordinationClaimRequest),
+    mailbox_cursors: parseTable(record, 'mailbox_cursors', parseCoordinationMailboxCursor),
+    reconciliation_evidence: parseTable(record, 'reconciliation_evidence', parseCoordinationReconciliationEvidence),
     messages: parseTable(record, 'messages', parseCoordinationMessage, 100_000),
     worktrees: parseTable(record, 'worktrees', parseCoordinationWorktree),
     worktree_operations: parseTable(record, 'worktree_operations', parseCoordinationWorktreeOperation),
@@ -596,6 +648,8 @@ function parsePayload(value: unknown, action: CoordinatorQueryAction | Coordinat
       oneOf(payload, field, COORDINATION_OPERATION_STAGES, label);
     } else if (field === 'status') {
       oneOf(payload, field, ['terminal', 'recovery-required'] as const, label);
+    } else if (field === 'source') {
+      oneOf(payload, field, COORDINATION_RECONCILIATION_SOURCES, label);
     } else if (field === 'output_path' || field === 'canonical_root' || field === 'git_common_dir') {
       absolutePath(payload, field, label);
     } else if (field === 'child_token' || field === 'session_token') {
@@ -618,6 +672,17 @@ function parsePayload(value: unknown, action: CoordinatorQueryAction | Coordinat
     if (response === 'deferred' && (typeof ownerReason !== 'string' || condition === null)) fail(label, 'deferred response requires owner_reason and release_condition');
     if (response === 'release-now' && condition !== null) fail(label, 'release-now response must not invent a deferred release condition');
   }
+  if (action === 'record-release-evidence') {
+    const source = payload['source'];
+    const expectedSourceTargets: Readonly<Record<string, string>> = {
+      'unit-merge': 'unit-merged',
+      'attempt-reset': 'attempt-reset',
+      'quarantine-capture': 'quarantine-captured',
+      'run-close': 'run-closed',
+      'run-abort': 'run-closed',
+    };
+    if (typeof source !== 'string' || expectedSourceTargets[source] === undefined) fail(label, 'record-release-evidence source must be a parent-owned terminal transition');
+  }
   if (action === 'supersede-attempt' && payload['attempt'] === payload['superseded_by_attempt']) fail(label, 'superseding attempt must differ from the old attempt');
   return payload;
 }
@@ -628,7 +693,7 @@ export function parseCoordinatorRequestEnvelope(value: unknown): CoordinatorRequ
   const action = oneOf(record, 'action', [...QUERY_ACTIONS, ...MUTATION_ACTIONS] as const, label);
   const mutation = (MUTATION_ACTIONS as readonly string[]).includes(action);
   const idempotencyKey = nullableString(record, 'idempotency_key', label, 192);
-  const workstreamRun = nullableString(record, 'workstream_run', label, 192);
+  const workstreamRun = nullablePathSegmentIdentifier(record, 'workstream_run', label);
   const sessionId = nullableString(record, 'session_id', label, 192);
   const fencingGeneration = nullableInteger(record, 'fencing_generation', label);
   const expectedVersion = nullableInteger(record, 'expected_version', label);
@@ -648,7 +713,7 @@ export function parseCoordinatorRequestEnvelope(value: unknown): CoordinatorRequ
     request_id: identifier(record, 'request_id', label),
     action,
     idempotency_key: idempotencyKey,
-    repo_id: identifier(record, 'repo_id', label),
+    repo_id: pathSegmentIdentifier(record, 'repo_id', label),
     workstream_run: workstreamRun,
     session_id: sessionId,
     fencing_generation: fencingGeneration,

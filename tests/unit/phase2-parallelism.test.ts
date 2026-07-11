@@ -16,7 +16,7 @@ import { projectAutopilotDiskUse } from '../../src/core/disk-gate.ts';
 import { planNextDispatch } from '../../src/core/scheduler.ts';
 import { readSchedulerConfig, writeSchedulerConfig } from '../../src/core/scheduler-config.ts';
 import { mergeAutopilotUnit } from '../../src/core/unit-merge.ts';
-import { abortFailedUnit, resetFailedUnit } from '../../src/core/unit-failure.ts';
+import { abortFailedUnit, quarantineFailedUnit, resetFailedUnit } from '../../src/core/unit-failure.ts';
 import { cleanupTerminalUnitWorktree, cleanupTerminalUnitWorktreesForRun } from '../../src/core/worktree-cleanup.ts';
 import { recordValidationStalenessForMerge, validationCanCloseSourceWork, type AutopilotValidationEvidence } from '../../src/core/validation-staleness.ts';
 import {
@@ -25,6 +25,7 @@ import {
   coordinationRootForRepo,
   prepareAutopilotUnitWorktree,
   prepareAutopilotWorkstream,
+  readGitStatus,
   readPathClaims,
   readUnitIndex,
   resolveActiveAutopilotForSpec,
@@ -388,6 +389,15 @@ void describe('Phase 2 unit worktrees, claims, mergeback, staleness, and GC', ()
       const source = join(root, 'source');
       await initGitSource(source);
       const prepared = await prepareAutopilotWorkstream({ workstream: 'phase2-smoke', sourceCwd: source });
+      const quarantineUnit = await prepareAutopilotUnitWorktree({ active: prepared.active, unitId: 'u-quarantine-capture', attempt: 1 });
+      await mkdir(join(quarantineUnit.unitInfo.worktree_path, 'src'), { recursive: true });
+      await writeFile(join(quarantineUnit.unitInfo.worktree_path, 'src', 'quarantine.ts'), 'captured dirty work\n', 'utf8');
+      const quarantineRecord = await quarantineFailedUnit({ context: { repo: resolveRepoIdentity(quarantineUnit.unitInfo.worktree_path), active: prepared.active, coordinationRoot: coordinationRootForRepo(prepared.active.repo_key), claimsPath: '', claimEventsPath: '' }, unitId: 'u-quarantine-capture', attempt: 1, unitWorktreePath: quarantineUnit.unitInfo.worktree_path, summary: 'capture failed unit before releasing authority', now: new Date('2026-07-08T00:00:02.000Z') });
+      assert.equal(typeof quarantineRecord.capture_commit_sha, 'string');
+      if (quarantineRecord.capture_commit_sha === null) throw new Error('missing quarantine capture commit');
+      assert.equal(gitOut(quarantineUnit.unitInfo.worktree_path, ['show', `${quarantineRecord.capture_commit_sha}:src/quarantine.ts`]).trim(), 'captured dirty work');
+      assert.deepEqual(readGitStatus(quarantineUnit.unitInfo.worktree_path).changedPaths, []);
+
       const resetUnit = await prepareAutopilotUnitWorktree({ active: prepared.active, unitId: 'u-reset', attempt: 1 });
       await mkdir(join(resetUnit.unitInfo.worktree_path, 'src'), { recursive: true });
       await writeFile(join(resetUnit.unitInfo.worktree_path, 'src', 'reset.ts'), 'reset residue\n', 'utf8');

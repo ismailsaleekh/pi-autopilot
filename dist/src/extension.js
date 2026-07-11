@@ -9,6 +9,7 @@ import { AUTOPILOT_PARENT_MODEL_ASSIGNMENT } from "./core/model-roster.js";
 import { evaluateAutopilotWorktreeToolCall, } from "./core/git-guard.js";
 import { AutopilotParallelRuntimeError, prepareAutopilotWorkstream, resolveRepoIdentity } from "./core/parallel-runtime.js";
 import { CoordinatorClient } from "./core/coordination/client.js";
+import { replayPendingCoordinatorReconciliation } from "./core/coordination/reconciliation.js";
 import { AutopilotSessionBridge } from "./core/coordination/supervisor.js";
 import { handoffUsage, onboardUsage, renderAutopilotPrompt, renderHandoffPrompt, renderOnboardPrompt, } from "./core/prompts.js";
 function notify(ctx, message, kind) {
@@ -95,6 +96,8 @@ export default function autopilotExtension(pi) {
     }
     async function attachSessionBridge(prepared, ctx) {
         if (sessionBridge !== null && sessionBridge.attachment.context.workstream_run === prepared.active.workstream_run) {
+            await replayPendingCoordinatorReconciliation({ active: prepared.active });
+            await sessionBridge.reconcileOwnedRun('same-session-resume-before-mailbox-and-dispatch');
             await sessionBridge.drainMailbox();
             process.env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV] = sessionBridge.attachment.contextPath;
             return true;
@@ -122,14 +125,50 @@ export default function autopilotExtension(pi) {
                 },
             });
             process.env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV] = sessionBridge.attachment.contextPath;
+            await replayPendingCoordinatorReconciliation({ active: prepared.active });
+            await sessionBridge.reconcileOwnedRun('pending-evidence-replay-before-mailbox-and-dispatch');
+            await sessionBridge.drainMailbox();
             handoffRequested = false;
             return true;
         }
         catch (error) {
+            const failedBridge = sessionBridge;
+            if (failedBridge !== null) {
+                const contextPath = failedBridge.attachment.contextPath;
+                if (process.env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV] === contextPath)
+                    delete process.env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV];
+                await failedBridge.close('attachment-reconciliation-failed').catch((closeError) => {
+                    notify(ctx, `Autopilot durable run supervisor cleanup also failed: ${closeError instanceof Error ? closeError.message : String(closeError)}`, 'error');
+                });
+            }
             notify(ctx, `Autopilot durable run supervisor attachment failed: ${error instanceof Error ? error.message : String(error)}`, 'error');
             sessionBridge = null;
             return false;
         }
+    }
+    async function attachLifecycleWorkstream(input) {
+        if (sessionBridge !== null && sessionBridge.attachment.context.workstream === input.workstream && (input.requestedRun === null || sessionBridge.attachment.context.workstream_run === input.requestedRun))
+            return true;
+        let prepared;
+        try {
+            prepared = await prepareAutopilotWorkstream({ workstream: input.workstream, sourceCwd: input.ctx.cwd ?? process.cwd() });
+        }
+        catch (error) {
+            notify(input.ctx, `Autopilot lifecycle attachment failed before terminal reconciliation: ${error instanceof Error ? error.message : String(error)}`, 'error');
+            return false;
+        }
+        if (input.requestedRun !== null && prepared.active.workstream_run !== input.requestedRun) {
+            notify(input.ctx, `Autopilot lifecycle attachment resolved ${prepared.active.workstream_run}, not requested run ${input.requestedRun}.`, 'error');
+            return false;
+        }
+        if (!(await attachSessionBridge(prepared, input.ctx)))
+            return false;
+        activeAutopilotWorkstream = prepared.active.workstream;
+        activeAutopilotRuntimeRoot = prepared.runtimeRoot;
+        activeAutopilotWorktreePath = prepared.mainWorktreePath;
+        activeAutopilotWorkstreamRun = prepared.active.workstream_run;
+        registerWorktreeGuardIfSupported();
+        return true;
     }
     async function prepareAndActivateWorkstream(input) {
         try {
@@ -254,6 +293,8 @@ export default function autopilotExtension(pi) {
                 return;
             }
             try {
+                if (!parsed.value.dryRun && !(await attachLifecycleWorkstream({ workstream: parsed.value.workstream, requestedRun: parsed.value.workstreamRun, ctx })))
+                    return;
                 const result = await closeAutopilotWorkstream({
                     workstream: parsed.value.workstream,
                     sourceCwd: ctx.cwd ?? process.cwd(),
@@ -287,6 +328,8 @@ export default function autopilotExtension(pi) {
                 return;
             }
             try {
+                if (!parsed.value.dryRun && !(await attachLifecycleWorkstream({ workstream: parsed.value.workstream, requestedRun: parsed.value.workstreamRun, ctx })))
+                    return;
                 const result = await abortAutopilotWorkstream({
                     workstream: parsed.value.workstream,
                     sourceCwd: ctx.cwd ?? process.cwd(),
@@ -336,7 +379,7 @@ export default function autopilotExtension(pi) {
         },
     });
     pi.registerCommand(AUTOPILOT_CLAIM_GC_COMMAND, {
-        description: 'Evidence-backed Autopilot claim garbage collection: /autopilot-claim-gc --dry-run|--apply',
+        description: 'Legacy migration/diagnostic claim repair only: /autopilot-claim-gc --dry-run|--apply',
         handler: async (args, ctx) => {
             const parsed = parseAutopilotClaimGcArgs(args);
             if (!parsed.ok) {
@@ -347,7 +390,7 @@ export default function autopilotExtension(pi) {
                 const result = await runAutopilotClaimGc({ sourceCwd: ctx.cwd ?? process.cwd(), apply: parsed.value.apply });
                 const staleCount = result.candidates.filter((candidate) => candidate.stale).length;
                 const blockedCount = result.candidates.filter((candidate) => candidate.blockers.length > 0).length;
-                const summary = `Autopilot claim GC ${result.mode}: stale=${String(staleCount)} blocked=${String(blockedCount)} released=${String(result.released_claims.length)} evidence=${result.evidence_path ?? 'none'}`;
+                const summary = `Autopilot legacy claim diagnostic ${result.mode}: stale=${String(staleCount)} blocked=${String(blockedCount)} released=${String(result.released_claims.length)} evidence=${result.evidence_path ?? 'none'}; normal Fabric leases reconcile automatically`;
                 pi.sendUserMessage(summary, { deliverAs: 'followUp' });
                 notify(ctx, summary, blockedCount === 0 ? 'info' : 'warning');
             }

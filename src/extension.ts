@@ -27,6 +27,7 @@ import {
 } from './core/git-guard.ts';
 import { AutopilotParallelRuntimeError, prepareAutopilotWorkstream, resolveRepoIdentity, type PreparedAutopilotWorkstream } from './core/parallel-runtime.ts';
 import { CoordinatorClient } from './core/coordination/client.ts';
+import { replayPendingCoordinatorReconciliation } from './core/coordination/reconciliation.ts';
 import { AutopilotSessionBridge, type CoordinationMessageInjection } from './core/coordination/supervisor.ts';
 import {
   handoffUsage,
@@ -186,6 +187,8 @@ export default function autopilotExtension(pi: ExtensionHostLike): void {
 
   async function attachSessionBridge(prepared: PreparedAutopilotWorkstream, ctx: ExtensionCommandContextLike): Promise<boolean> {
     if (sessionBridge !== null && sessionBridge.attachment.context.workstream_run === prepared.active.workstream_run) {
+      await replayPendingCoordinatorReconciliation({ active: prepared.active });
+      await sessionBridge.reconcileOwnedRun('same-session-resume-before-mailbox-and-dispatch');
       await sessionBridge.drainMailbox();
       process.env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV] = sessionBridge.attachment.contextPath;
       return true;
@@ -212,13 +215,46 @@ export default function autopilotExtension(pi: ExtensionHostLike): void {
         },
       });
       process.env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV] = sessionBridge.attachment.contextPath;
+      await replayPendingCoordinatorReconciliation({ active: prepared.active });
+      await sessionBridge.reconcileOwnedRun('pending-evidence-replay-before-mailbox-and-dispatch');
+      await sessionBridge.drainMailbox();
       handoffRequested = false;
       return true;
     } catch (error) {
+      const failedBridge = sessionBridge;
+      if (failedBridge !== null) {
+        const contextPath = failedBridge.attachment.contextPath;
+        if (process.env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV] === contextPath) delete process.env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV];
+        await failedBridge.close('attachment-reconciliation-failed').catch((closeError: unknown) => {
+          notify(ctx, `Autopilot durable run supervisor cleanup also failed: ${closeError instanceof Error ? closeError.message : String(closeError)}`, 'error');
+        });
+      }
       notify(ctx, `Autopilot durable run supervisor attachment failed: ${error instanceof Error ? error.message : String(error)}`, 'error');
       sessionBridge = null;
       return false;
     }
+  }
+
+  async function attachLifecycleWorkstream(input: { readonly workstream: string; readonly requestedRun: string | null; readonly ctx: ExtensionCommandContextLike }): Promise<boolean> {
+    if (sessionBridge !== null && sessionBridge.attachment.context.workstream === input.workstream && (input.requestedRun === null || sessionBridge.attachment.context.workstream_run === input.requestedRun)) return true;
+    let prepared: PreparedAutopilotWorkstream;
+    try {
+      prepared = await prepareAutopilotWorkstream({ workstream: input.workstream, sourceCwd: input.ctx.cwd ?? process.cwd() });
+    } catch (error) {
+      notify(input.ctx, `Autopilot lifecycle attachment failed before terminal reconciliation: ${error instanceof Error ? error.message : String(error)}`, 'error');
+      return false;
+    }
+    if (input.requestedRun !== null && prepared.active.workstream_run !== input.requestedRun) {
+      notify(input.ctx, `Autopilot lifecycle attachment resolved ${prepared.active.workstream_run}, not requested run ${input.requestedRun}.`, 'error');
+      return false;
+    }
+    if (!(await attachSessionBridge(prepared, input.ctx))) return false;
+    activeAutopilotWorkstream = prepared.active.workstream;
+    activeAutopilotRuntimeRoot = prepared.runtimeRoot;
+    activeAutopilotWorktreePath = prepared.mainWorktreePath;
+    activeAutopilotWorkstreamRun = prepared.active.workstream_run;
+    registerWorktreeGuardIfSupported();
+    return true;
   }
 
   async function prepareAndActivateWorkstream(input: {
@@ -356,6 +392,7 @@ export default function autopilotExtension(pi: ExtensionHostLike): void {
         return;
       }
       try {
+        if (!parsed.value.dryRun && !(await attachLifecycleWorkstream({ workstream: parsed.value.workstream, requestedRun: parsed.value.workstreamRun, ctx }))) return;
         const result = await closeAutopilotWorkstream({
           workstream: parsed.value.workstream,
           sourceCwd: ctx.cwd ?? process.cwd(),
@@ -389,6 +426,7 @@ export default function autopilotExtension(pi: ExtensionHostLike): void {
         return;
       }
       try {
+        if (!parsed.value.dryRun && !(await attachLifecycleWorkstream({ workstream: parsed.value.workstream, requestedRun: parsed.value.workstreamRun, ctx }))) return;
         const result = await abortAutopilotWorkstream({
           workstream: parsed.value.workstream,
           sourceCwd: ctx.cwd ?? process.cwd(),
@@ -438,7 +476,7 @@ export default function autopilotExtension(pi: ExtensionHostLike): void {
   });
 
   pi.registerCommand(AUTOPILOT_CLAIM_GC_COMMAND, {
-    description: 'Evidence-backed Autopilot claim garbage collection: /autopilot-claim-gc --dry-run|--apply',
+    description: 'Legacy migration/diagnostic claim repair only: /autopilot-claim-gc --dry-run|--apply',
     handler: async (args, ctx) => {
       const parsed = parseAutopilotClaimGcArgs(args);
       if (!parsed.ok) {
@@ -449,7 +487,7 @@ export default function autopilotExtension(pi: ExtensionHostLike): void {
         const result = await runAutopilotClaimGc({ sourceCwd: ctx.cwd ?? process.cwd(), apply: parsed.value.apply });
         const staleCount = result.candidates.filter((candidate) => candidate.stale).length;
         const blockedCount = result.candidates.filter((candidate) => candidate.blockers.length > 0).length;
-        const summary = `Autopilot claim GC ${result.mode}: stale=${String(staleCount)} blocked=${String(blockedCount)} released=${String(result.released_claims.length)} evidence=${result.evidence_path ?? 'none'}`;
+        const summary = `Autopilot legacy claim diagnostic ${result.mode}: stale=${String(staleCount)} blocked=${String(blockedCount)} released=${String(result.released_claims.length)} evidence=${result.evidence_path ?? 'none'}; normal Fabric leases reconcile automatically`;
         pi.sendUserMessage(summary, { deliverAs: 'followUp' });
         notify(ctx, summary, blockedCount === 0 ? 'info' : 'warning');
       } catch (error) {

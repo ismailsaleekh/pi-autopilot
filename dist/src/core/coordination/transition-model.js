@@ -15,6 +15,8 @@ export function emptyCoordinationSnapshot() {
         edit_leases: [],
         change_reservations: [],
         claim_requests: [],
+        mailbox_cursors: [],
+        reconciliation_evidence: [],
         messages: [],
         worktrees: [],
         worktree_operations: [],

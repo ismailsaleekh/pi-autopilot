@@ -20,6 +20,7 @@ import {
 import { evaluateAutopilotClosureGate } from './lifecycle/index.ts';
 import { parseAutopilotUnitMerge, type AutopilotUnitMerge } from './unit-merge.ts';
 import { cleanupClosedAutopilotRun } from './worktree-cleanup.ts';
+import { recordCoordinatorReleaseEvidenceFromFile } from './coordination/reconciliation.ts';
 import {
   ACTIVE_AUTOPILOTS_FILE,
   BRANCHES_FILE,
@@ -289,6 +290,7 @@ export async function closeAutopilotWorkstream(options: AutopilotCloseOptions): 
 
         const archiveRef = `autopilot/archive/${active.workstream_run}/main`;
         active = await setActiveStatus(context.coordinationRoot, active, 'closed', now, now.toISOString());
+        await writeAndRecordRunTerminalEvidence(active, 'closed', targetAfter, env, now);
         await updateBranchesInfo(active, archiveRef, targetAfter);
         const closedContext: PreparedCloseContext = { ...context, active };
         const archivedRuntimePath = await archiveRuntimeArtifacts(closedContext, archiveRef, now);
@@ -392,6 +394,7 @@ export async function abortAutopilotWorkstream(options: AutopilotCloseOptions): 
         const archiveRef = `autopilot/archive/${active.workstream_run}/aborted`;
         const workstreamHead = gitHead(active.main_worktree_path);
         active = await setActiveStatus(context.coordinationRoot, active, 'closed', now, now.toISOString());
+        await writeAndRecordRunTerminalEvidence(active, 'aborted', workstreamHead, env, now);
         await updateBranchesInfo(active, archiveRef, workstreamHead);
         const closedContext: PreparedCloseContext = { ...context, active };
         const archivedRuntimePath = await archiveRuntimeArtifacts(closedContext, archiveRef, now);
@@ -984,6 +987,21 @@ function buildCloseResult(input: {
     close_result_path: input.closeResultPath,
     created_at: input.now.toISOString(),
   });
+}
+
+async function writeAndRecordRunTerminalEvidence(active: ActiveAutopilotRow, outcome: 'closed' | 'aborted', terminalSha: string, env: ProcessEnvLike, now: Date): Promise<void> {
+  const evidencePath = join(active.runtime_root, 'close', `_run-terminal.${outcome}.json`);
+  await writeJsonAtomic(evidencePath, {
+    schema_version: 'autopilot.run_terminal.v1',
+    repo_key: active.repo_key,
+    autopilot_id: active.autopilot_id,
+    workstream: active.workstream,
+    workstream_run: active.workstream_run,
+    outcome,
+    terminal_sha: terminalSha,
+    accepted_at: now.toISOString(),
+  });
+  await recordCoordinatorReleaseEvidenceFromFile({ active, source: outcome === 'closed' ? 'run-close' : 'run-abort', targetId: active.workstream_run, evidencePath, env });
 }
 
 async function archiveRuntimeArtifacts(context: PreparedCloseContext, archiveRef: string, now: Date): Promise<string> {

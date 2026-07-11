@@ -13,3 +13,4 @@ export const COORDINATION_REQUEST_STATUSES = ['pending', 'delivered', 'acknowled
 export const COORDINATION_MESSAGE_STATUSES = ['pending', 'delivered', 'acknowledged'];
 export const COORDINATION_OPERATION_STAGES = ['prepared', 'in-progress', 'verified', 'committed', 'reconciling', 'compensated', 'failed'];
 export const COORDINATION_RELEASE_CONDITION_TYPES = ['child-terminal', 'unit-merged', 'attempt-reset', 'quarantine-captured', 'run-closed', 'explicit-owner-release'];
+export const COORDINATION_RECONCILIATION_SOURCES = ['child-process', 'unit-merge', 'attempt-reset', 'quarantine-capture', 'run-close', 'run-abort'];

@@ -251,6 +251,7 @@ export class AutopilotSessionBridge {
     const supervisor = new DurableRunSupervisorClient(input.env ?? process.env);
     const attachment = await supervisor.attach({ repo: input.repo, active: input.active, rawSessionId: input.rawSessionId });
     const bridge = new AutopilotSessionBridge(supervisor, attachment, input.sink);
+    await bridge.reconcileOwnedRun('session-attachment-before-mailbox-and-dispatch');
     await bridge.drainMailbox();
     bridge.#startHeartbeat();
     return bridge;
@@ -258,6 +259,21 @@ export class AutopilotSessionBridge {
 
   get attachment(): RunSupervisorAttachment {
     return this.#attachment;
+  }
+
+  async reconcileOwnedRun(reason = 'explicit-owned-run-reconciliation'): Promise<void> {
+    await this.#enqueue(async () => {
+      this.#assertOpen();
+      const session = this.#attachment.session;
+      await this.#supervisor.client.mutate('reconcile-run', {
+        repoId: session.repo_id,
+        workstreamRun: session.workstream_run,
+        sessionId: session.session_id,
+        fencingGeneration: session.session_generation,
+        expectedVersion: this.#attachment.context.run_version,
+        idempotencyKey: `reconcile-run:${session.session_lease_id}:${randomUUID()}`,
+      }, { reason, session_lease_id: session.session_lease_id, session_token: this.#attachment.context.session_token });
+    });
   }
 
   async drainMailbox(): Promise<readonly CoordinationMessage[]> {

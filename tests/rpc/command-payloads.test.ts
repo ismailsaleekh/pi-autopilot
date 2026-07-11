@@ -327,7 +327,7 @@ void describe('Pi RPC Autopilot command wiring', () => {
     assert.match(requireListedCommand(commands, AUTOPILOT_CLOSE_COMMAND).description ?? '', /Runtime-close/);
     assert.match(requireListedCommand(commands, AUTOPILOT_ABORT_COMMAND).description ?? '', /Runtime-abort/);
     assert.match(requireListedCommand(commands, AUTOPILOT_CONFIG_COMMAND).description ?? '', /scheduler config/);
-    assert.match(requireListedCommand(commands, AUTOPILOT_CLAIM_GC_COMMAND).description ?? '', /claim garbage collection/);
+    assert.match(requireListedCommand(commands, AUTOPILOT_CLAIM_GC_COMMAND).description ?? '', /Legacy migration\/diagnostic claim repair only/);
     assert.match(requireListedCommand(commands, AUTOPILOT_COORDINATION_COMMAND).description ?? '', /local Autopilot coordinator/);
     assert.equal(commands.some((command) => command.name === forbiddenLegacyCommand), false);
     assert.equal(commands.some((command) => command.name === 'autopilot-restart'), false);

@@ -124,7 +124,7 @@ void describe('coordinator multiprocess lifecycle', () => {
     }
   });
 
-  void it('negotiates release and reacquisition through two independent client processes', async () => {
+  void it('replays an offline requester release across a hard coordinator restart before reacquisition', async () => {
     const root = await mkdtemp(join(tmpdir(), 'pi-autopilot-coordinator-negotiation-process-'));
     const stateRoot = join(root, 'state');
     const env = { ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: stateRoot };
@@ -139,6 +139,24 @@ void describe('coordinator multiprocess lifecycle', () => {
       assert.equal(requester['outcome'], 'waiting-for-peer-release');
       const release = runNegotiationClient(stateRoot, 'release', 'a', 'group-b');
       assert.equal(release['status'], 'grant-ready');
+      const elected = await readLock(paths.lockPath);
+      if (elected === null) throw new Error('missing coordinator lock before offline replay kill');
+      process.kill(elected.pid, 'SIGKILL');
+      await waitFor(async () => {
+        const current = await readLock(paths.lockPath);
+        if (current === null) return true;
+        try {
+          process.kill(current.pid, 0);
+          return false;
+        } catch {
+          return true;
+        }
+      });
+      const restartedClient = new CoordinatorClient({ env });
+      const replayStatus = await restartedClient.query('status', 'repo-process-negotiation', 'run-b');
+      assert.equal(typeof replayStatus.payload['pending_messages'] === 'number' && replayStatus.payload['pending_messages'] >= 2, true);
+      const cursors = replayStatus.payload['mailbox_cursors'];
+      assert.equal(Array.isArray(cursors) && cursors.length === 1, true);
       const grant = runNegotiationClient(stateRoot, 'ack', 'b');
       assert.equal(grant['state'], 'granted');
       assert.equal(grant['lease_count'], 1);

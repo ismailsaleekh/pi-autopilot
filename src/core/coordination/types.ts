@@ -14,6 +14,7 @@ export const COORDINATION_REQUEST_STATUSES = ['pending', 'delivered', 'acknowled
 export const COORDINATION_MESSAGE_STATUSES = ['pending', 'delivered', 'acknowledged'] as const;
 export const COORDINATION_OPERATION_STAGES = ['prepared', 'in-progress', 'verified', 'committed', 'reconciling', 'compensated', 'failed'] as const;
 export const COORDINATION_RELEASE_CONDITION_TYPES = ['child-terminal', 'unit-merged', 'attempt-reset', 'quarantine-captured', 'run-closed', 'explicit-owner-release'] as const;
+export const COORDINATION_RECONCILIATION_SOURCES = ['child-process', 'unit-merge', 'attempt-reset', 'quarantine-capture', 'run-close', 'run-abort'] as const;
 
 export type CoordinationClaimMode = (typeof COORDINATION_CLAIM_MODES)[number];
 export type CoordinationRunStatus = (typeof COORDINATION_RUN_STATUSES)[number];
@@ -25,6 +26,7 @@ export type CoordinationRequestStatus = (typeof COORDINATION_REQUEST_STATUSES)[n
 export type CoordinationMessageStatus = (typeof COORDINATION_MESSAGE_STATUSES)[number];
 export type CoordinationOperationStage = (typeof COORDINATION_OPERATION_STAGES)[number];
 export type CoordinationReleaseConditionType = (typeof COORDINATION_RELEASE_CONDITION_TYPES)[number];
+export type CoordinationReconciliationSource = (typeof COORDINATION_RECONCILIATION_SOURCES)[number];
 
 export interface CoordinationEvidenceRef {
   readonly ref: string;
@@ -172,6 +174,34 @@ export interface CoordinationClaimRequest {
   readonly version: number;
 }
 
+export interface CoordinationMailboxCursor {
+  readonly schema_version: 'autopilot.mailbox_cursor.v1';
+  readonly repo_id: string;
+  readonly workstream_run: string;
+  readonly delivered_through_event_seq: number;
+  readonly acknowledged_through_event_seq: number;
+  readonly version: number;
+}
+
+export interface CoordinationReconciliationEvidence {
+  readonly schema_version: 'autopilot.reconciliation_evidence.v1';
+  readonly reconciliation_evidence_id: string;
+  readonly repo_id: string;
+  readonly autopilot_id: string;
+  readonly workstream_run: string;
+  readonly source: CoordinationReconciliationSource;
+  readonly release_condition: CoordinationReleaseCondition;
+  readonly accepted_event_seq: number;
+  readonly version: number;
+}
+
+export interface CoordinationReconciliationSummary {
+  readonly released_lease_ids: readonly string[];
+  readonly released_request_ids: readonly string[];
+  readonly notification_ids: readonly string[];
+  readonly offered_group_ids: readonly string[];
+}
+
 export interface CoordinationMessage {
   readonly schema_version: 'autopilot.coordination_message.v1';
   readonly message_id: string;
@@ -250,6 +280,8 @@ export interface CoordinationSnapshot {
   readonly edit_leases: readonly CoordinationEditLease[];
   readonly change_reservations: readonly CoordinationChangeReservation[];
   readonly claim_requests: readonly CoordinationClaimRequest[];
+  readonly mailbox_cursors: readonly CoordinationMailboxCursor[];
+  readonly reconciliation_evidence: readonly CoordinationReconciliationEvidence[];
   readonly messages: readonly CoordinationMessage[];
   readonly worktrees: readonly CoordinationWorktree[];
   readonly worktree_operations: readonly CoordinationWorktreeOperation[];
@@ -258,7 +290,7 @@ export interface CoordinationSnapshot {
 }
 
 export type CoordinatorQueryAction = 'status' | 'doctor' | 'export';
-export type CoordinatorMutationAction = 'attach-run' | 'attach-session' | 'detach-session' | 'prepare-handoff' | 'heartbeat' | 'register-child' | 'heartbeat-child' | 'complete-child' | 'drain-mailbox' | 'acquire-group' | 'acknowledge-grant' | 'respond-claim-request' | 'cancel-claim-request' | 'cancel-acquisition-group' | 'supersede-attempt' | 'acknowledge-message' | 'transition-operation';
+export type CoordinatorMutationAction = 'attach-run' | 'attach-session' | 'detach-session' | 'prepare-handoff' | 'heartbeat' | 'register-child' | 'heartbeat-child' | 'complete-child' | 'drain-mailbox' | 'acquire-group' | 'acknowledge-grant' | 'respond-claim-request' | 'cancel-claim-request' | 'cancel-acquisition-group' | 'supersede-attempt' | 'acknowledge-message' | 'record-release-evidence' | 'reconcile-run' | 'transition-operation';
 
 export interface CoordinatorRequestEnvelope {
   readonly schema_version: typeof AUTOPILOT_COORDINATOR_REQUEST_SCHEMA;

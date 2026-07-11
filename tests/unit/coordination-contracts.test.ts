@@ -32,7 +32,9 @@ void describe('Coordination Fabric contracts and invariants', () => {
       'edit_lease',
       'escalation',
       'event',
+      'mailbox_cursor',
       'message',
+      'reconciliation_evidence',
       'repository',
       'run',
       'session_lease',
@@ -140,6 +142,7 @@ void describe('Coordination Fabric contracts and invariants', () => {
       () => parseCoordinatorRequestEnvelope({ ...query, action: 'unknown-action' }),
       /action must be one of/u,
     );
+    assert.throws(() => parseCoordinatorRequestEnvelope({ ...query, repo_id: 'repo/../foreign' }), /filesystem-safe identifier segment/u);
     const mutation = {
       ...query,
       idempotency_key: 'claim-mutation-1',
@@ -148,6 +151,7 @@ void describe('Coordination Fabric contracts and invariants', () => {
       fencing_generation: 1,
       expected_version: 1,
     };
+    assert.throws(() => parseCoordinatorRequestEnvelope({ ...mutation, workstream_run: 'run-a/../run-b', action: 'heartbeat', payload: { lease_expires_at: '2026-07-11T16:00:00.000Z', session_lease_id: 'lease-session-a', session_token: 'a'.repeat(64) } }), /filesystem-safe identifier segment/u);
     const sessionProof = { session_lease_id: 'lease-session-a', session_token: 'a'.repeat(64) };
     const acquisition = parseCoordinatorRequestEnvelope({
       ...mutation,

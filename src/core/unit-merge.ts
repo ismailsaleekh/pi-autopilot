@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { parseAutopilotExecutionAudit, parseAutopilotExecutionCommit, parseAutopilotReceipt, parseAutopilotStatusEntry, type AutopilotExecutionAudit, type AutopilotExecutionCommit, type AutopilotReceipt, type AutopilotStatusEntry } from './contracts/index.ts';
 import { gitHead, readGitStatus, releaseClaimsForUnit, runGit, updateUnitBranchStatus, withAutopilotFileLock, writeJsonAtomic, type ActiveAutopilotContext, type ActiveAutopilotRow, type ProcessEnvLike } from './parallel-runtime.ts';
 import { cleanupTerminalUnitWorktree } from './worktree-cleanup.ts';
+import { recordCoordinatorReleaseEvidenceFromFile } from './coordination/reconciliation.ts';
 
 export interface AutopilotUnitMerge {
   readonly schema_version: 'autopilot.unit_merge.v1';
@@ -133,6 +134,13 @@ export async function mergeAutopilotUnit(input: {
     };
     const mergePath = join(active.runtime_root, 'unit-merges', `${input.unitId}.${executionCommit.role}.attempt-${String(input.attempt)}.json`);
     await writeJsonAtomic(mergePath, merge);
+    await recordCoordinatorReleaseEvidenceFromFile({
+      active,
+      source: 'unit-merge',
+      targetId: `${input.unitId}:${String(input.attempt)}`,
+      evidencePath: mergePath,
+      ...(input.env === undefined ? {} : { env: input.env }),
+    });
     await releaseClaimsForUnit({ context: input.context, unitId: input.unitId, attempt: input.attempt, reason: 'autopilot unit merge release', now });
     const archiveRef = `autopilot/archive/${active.workstream_run}/unit/${input.unitId}/attempt-${String(input.attempt)}`;
     runGit(['update-ref', `refs/heads/${archiveRef}`, validatedUnitHead], active.source_repo, runtimeGitEnv('unit-archive', input.env));

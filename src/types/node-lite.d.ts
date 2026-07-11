@@ -37,11 +37,13 @@ declare module 'node:fs' {
     readonly size: number;
     readonly mtimeMs: number;
     isFile(): boolean;
+    isSymbolicLink(): boolean;
   }
   export function existsSync(path: string | URL): boolean;
   export function readFileSync(path: string | URL): Uint8Array;
   export function readFileSync(path: string | URL, encoding: 'utf8'): string;
   export function realpathSync(path: string | URL): string;
+  export function lstatSync(path: string | URL): Stats;
   export function statSync(path: string | URL): Stats;
   export function chmodSync(path: string | URL, mode: number): void;
 }
@@ -50,6 +52,7 @@ declare module 'node:fs/promises' {
   export interface Dirent {
     readonly name: string;
     isDirectory(): boolean;
+    isFile(): boolean;
   }
   export interface Stats {
     readonly mtimeMs: number;
