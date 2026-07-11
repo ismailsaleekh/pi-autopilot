@@ -10,6 +10,7 @@ import { createAutopilotGitWorktree, removeGitWorktreeIfPresent } from "./sparse
 import { cleanupTerminalUnitWorktreesForRun } from "./worktree-cleanup.js";
 import { AUTOPILOT_RUNTIME_ROOT_PREFIX } from "./names.js";
 import { isValidWorkstreamSlug } from "./paths.js";
+import { parseLegacyActiveAutopilots, parseLegacyPathClaims, runLegacyCoordinationPreflight } from "./coordination/legacy-preflight.js";
 export const AUTOPILOT_STATE_ROOT_ENV = 'AUTOPILOT_STATE_ROOT';
 export const AUTOPILOT_RUNTIME_ENV = 'AUTOPILOT_RUNTIME';
 export const AUTOPILOT_RUNTIME_VALUE = '1';
@@ -81,8 +82,20 @@ export async function prepareAutopilotWorkstream(input) {
     const repo = resolveRepoIdentity(input.sourceCwd);
     const coordinationRoot = coordinationRootForRepo(repo.repoKey, env);
     const worktreeRoot = worktreeRootForRepo(repo.repoKey, env);
-    await ensureRepoRuntimeFiles(coordinationRoot, worktreeRoot);
+    await mkdir(join(coordinationRoot, '.locks'), { recursive: true });
     return await withAutopilotFileLock(join(coordinationRoot, '.locks', 'activation.lock'), `activation:${repo.repoKey}`, async () => {
+        await withAutopilotFileLock(join(coordinationRoot, '.locks', 'path-claims.lock'), `activation-preflight:${repo.repoKey}`, async () => {
+            await runLegacyCoordinationPreflight({
+                coordinationRoot,
+                repoKey: repo.repoKey,
+                mode: 'activation',
+                activationWorkstream: input.workstream,
+                currentPid: process.pid,
+                currentBootId: getBootId(),
+                now,
+            });
+        });
+        await ensureRepoRuntimeFiles(coordinationRoot, worktreeRoot);
         const activeRows = await readActiveAutopilots(coordinationRoot);
         const matching = activeRows.filter((row) => row.repo_key === repo.repoKey && row.workstream === input.workstream && isLiveParentStatus(row.status));
         if (matching.length > 1) {
@@ -1060,10 +1073,7 @@ export async function readActiveAutopilots(coordinationRoot) {
     const path = join(coordinationRoot, ACTIVE_AUTOPILOTS_FILE);
     if (!existsSync(path))
         return Object.freeze([]);
-    const value = await readJson(path);
-    if (!Array.isArray(value))
-        fail('invalid-active-autopilots', 'active-autopilots.json must contain an array.');
-    return Object.freeze(value.map(parseActiveAutopilotRow));
+    return parseLegacyActiveAutopilots(await readJson(path));
 }
 export async function writeActiveAutopilots(coordinationRoot, rows) {
     await writeJsonAtomic(join(coordinationRoot, ACTIVE_AUTOPILOTS_FILE), rows);
@@ -1072,10 +1082,7 @@ export async function readPathClaims(coordinationRoot) {
     const path = join(coordinationRoot, PATH_CLAIMS_FILE);
     if (!existsSync(path))
         return Object.freeze([]);
-    const value = await readJson(path);
-    if (!Array.isArray(value))
-        fail('invalid-path-claims', 'path-claims.json must contain an array.');
-    return Object.freeze(value.map(parsePathClaim));
+    return parseLegacyPathClaims(await readJson(path));
 }
 export async function writePathClaims(coordinationRoot, claims) {
     await writeJsonAtomic(join(coordinationRoot, PATH_CLAIMS_FILE), claims);
@@ -1110,53 +1117,6 @@ export async function updateTaskInfoStatus(row, status) {
     if (!isRecord(value))
         fail('invalid-task-info', '_task-info.json must contain an object.');
     await writeJsonAtomic(path, { ...value, status, runtime_root: row.runtime_root, worktree_path: row.main_worktree_path });
-}
-function parseActiveAutopilotRow(value) {
-    if (!isRecord(value))
-        fail('invalid-active-row', 'active Autopilot row must be an object.');
-    const row = value;
-    const parsed = {
-        schema_version: expectConst(row, 'schema_version', 'autopilot.active_parent.v1'),
-        autopilot_id: expectString(row, 'autopilot_id'),
-        workstream: expectString(row, 'workstream'),
-        workstream_run: expectString(row, 'workstream_run'),
-        repo_key: expectString(row, 'repo_key'),
-        source_repo: expectString(row, 'source_repo'),
-        git_common_dir: expectString(row, 'git_common_dir'),
-        worktree_root: expectString(row, 'worktree_root'),
-        main_worktree_path: expectString(row, 'main_worktree_path'),
-        branch: expectString(row, 'branch'),
-        runtime_root: expectString(row, 'runtime_root'),
-        target_branch: expectNullableString(row, 'target_branch'),
-        target_base_sha: expectString(row, 'target_base_sha'),
-        origin_url: expectNullableString(row, 'origin_url'),
-        pid: expectInteger(row, 'pid'),
-        boot_id: expectString(row, 'boot_id'),
-        status: expectOneOf(row, 'status', ['active', 'paused', 'merging', 'blocked', 'crashed', 'closed']),
-        started_at: expectString(row, 'started_at'),
-        active_run_epoch: expectInteger(row, 'active_run_epoch'),
-        active_epoch_started_at: expectString(row, 'active_epoch_started_at'),
-        active_run_receipt_id: expectString(row, 'active_run_receipt_id'),
-    };
-    return parsed;
-}
-function parsePathClaim(value) {
-    if (!isRecord(value))
-        fail('invalid-path-claim', 'path claim must be an object.');
-    const row = value;
-    return {
-        schema_version: expectConst(row, 'schema_version', 'autopilot.path_claim.v1'),
-        path: normalizeRepoRelativePath(expectString(row, 'path')),
-        autopilot_id: expectString(row, 'autopilot_id'),
-        workstream: expectString(row, 'workstream'),
-        workstream_run: expectString(row, 'workstream_run'),
-        unit_id: expectString(row, 'unit_id'),
-        attempt: expectInteger(row, 'attempt'),
-        claim_type: expectOneOf(row, 'claim_type', ['READ', 'WRITE', 'EXCLUSIVE']),
-        acquired_at: expectString(row, 'acquired_at'),
-        active_run_epoch: expectInteger(row, 'active_run_epoch'),
-        reason: expectString(row, 'reason'),
-    };
 }
 function parseWorktreeIndexRow(value) {
     if (!isRecord(value))

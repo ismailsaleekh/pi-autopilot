@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import autopilotExtension, {
@@ -24,7 +24,7 @@ import {
   AUTOPILOT_STATUS_TOOL,
   CONTEXT_BUDGET_TOOL_NAME,
 } from '../../src/core/names.ts';
-import { AUTOPILOT_STATE_ROOT_ENV } from '../../src/core/parallel-runtime.ts';
+import { AUTOPILOT_STATE_ROOT_ENV, coordinationRootForRepo, resolveRepoIdentity } from '../../src/core/parallel-runtime.ts';
 
 interface CapturedMessage {
   readonly content: string;
@@ -178,6 +178,11 @@ void describe('Autopilot command SDK surface', () => {
       assert.match(message.content, /only through the exact injected invocation/);
       assert.match(message.content, /validated status and receipt pair/);
       assert.equal(message.content.includes(AUTOPILOT_STATUS_TOOL), false);
+      const sourceCwdForPreflight = harness.ctx.cwd;
+      if (sourceCwdForPreflight === undefined) throw new Error('missing source cwd for coordination preflight');
+      const repo = resolveRepoIdentity(sourceCwdForPreflight);
+      const preflightFiles = await readdir(join(coordinationRootForRepo(repo.repoKey), 'preflight'), { withFileTypes: true });
+      assert.equal(preflightFiles.some((file) => file.name.includes('.activation.') && file.name.endsWith('.json')), true);
       assert.equal(harness.toolCallHandlers.length, 1);
       const handler = harness.toolCallHandlers[0];
       if (handler === undefined) throw new Error('missing worktree guard handler');

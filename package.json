@@ -1,7 +1,7 @@
 {
   "name": "pi-autopilot",
   "version": "0.7.3",
-  "description": "Autopilot orchestration package for Pi: /autopilot, /autopilot-inject, /autopilot-onboard, /autopilot-handoff, /autopilot-config, /autopilot-claim-gc, /autopilot-close, /autopilot-abort, context budget activation, and child runner wiring.",
+  "description": "Standalone perfect-quality Autopilot orchestration for Pi with isolated worktrees, coordination contracts, deterministic quality gates, and child runner wiring.",
   "type": "module",
   "license": "ISC",
   "author": "Ismail Salikhodjaev <ismailsalikhodjaev@gmail.com>",
@@ -40,10 +40,11 @@
     "typecheck": "tsc --noEmit",
     "test:type-safety": "node --experimental-strip-types --test tests/package/type-safety.test.ts",
     "test:unit": "node --experimental-strip-types --test tests/unit/*.test.ts",
+    "test:model": "node --experimental-strip-types --test tests/model/*.test.ts",
     "test:sdk": "node --experimental-strip-types --test tests/sdk/*.test.ts",
     "test:rpc": "node --experimental-strip-types --test tests/rpc/*.test.ts",
     "test:package": "npm run build && node --experimental-strip-types --test tests/package/*.test.ts",
-    "test": "npm run typecheck && npm run test:type-safety && npm run test:unit && npm run test:sdk && npm run test:rpc && npm run test:package",
+    "test": "npm run typecheck && npm run test:type-safety && npm run test:unit && npm run test:model && npm run test:sdk && npm run test:rpc && npm run test:package",
     "prepack": "npm run build",
     "pack:dry-run": "npm pack --dry-run"
   },

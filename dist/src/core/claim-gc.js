@@ -3,6 +3,7 @@ import { mkdir, readFile } from 'node:fs/promises';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { parseAutopilotExecutionAudit, parseAutopilotState, parseAutopilotStatusEntry } from "./contracts/index.js";
 import { appendClaimEvent, coordinationRootForRepo, readActiveAutopilots, readPathClaims, readUnitIndex, resolveRepoIdentity, taskRootForActiveAutopilot, withAutopilotFileLock, writeJsonAtomic, writePathClaims } from "./parallel-runtime.js";
+import { runLegacyCoordinationPreflight } from "./coordination/legacy-preflight.js";
 export class AutopilotClaimGcError extends Error {
     name = 'AutopilotClaimGcError';
     code;
@@ -19,6 +20,18 @@ export async function runAutopilotClaimGc(input) {
     const now = input.now ?? new Date();
     const repo = resolveRepoIdentity(input.sourceCwd);
     const coordinationRoot = coordinationRootForRepo(repo.repoKey, env);
+    if (!input.apply) {
+        await withAutopilotFileLock(join(coordinationRoot, '.locks', 'activation.lock'), `claim-gc-preflight-active:${repo.repoKey}`, async () => {
+            await withAutopilotFileLock(join(coordinationRoot, '.locks', 'path-claims.lock'), `claim-gc-preflight-claims:${repo.repoKey}`, async () => {
+                await runLegacyCoordinationPreflight({
+                    coordinationRoot,
+                    repoKey: repo.repoKey,
+                    mode: 'claim-gc-dry-run',
+                    now,
+                });
+            });
+        });
+    }
     const rows = await readActiveAutopilots(coordinationRoot);
     const evaluate = async () => {
         const claims = await readPathClaims(coordinationRoot);

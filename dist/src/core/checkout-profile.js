@@ -180,15 +180,15 @@ export function sparseExcludePatternsForPath(path) {
     return Object.freeze([`!/${normalized}`, `!/${normalized}/**`]);
 }
 export function normalizeMaterializationPath(path, label = 'repo-relative path') {
-    return normalizeRepoRelativePath(path);
+    return normalizeRepoRelativePath(path, label);
 }
-export function normalizeRepoRelativePath(value) {
+export function normalizeRepoRelativePath(value, label = 'repo-relative path') {
     if (value.includes('\0'))
-        fail('invalid-repo-path', 'repo-relative path contains NUL.');
+        fail('invalid-repo-path', `${label} contains NUL.`);
     if (isAbsolute(value) || /^[A-Za-z]:/u.test(value))
-        fail('invalid-repo-path', 'repo-relative path must not be absolute.', [value]);
+        fail('invalid-repo-path', `${label} must not be absolute.`, [value]);
     if (value.includes('\\'))
-        fail('invalid-repo-path', 'repo-relative path must use POSIX separators.', [value]);
+        fail('invalid-repo-path', `${label} must use POSIX separators.`, [value]);
     let suffix = '';
     let raw = value;
     if (raw.endsWith('/**')) {

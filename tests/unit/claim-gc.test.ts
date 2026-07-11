@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { describe, it } from 'node:test';
@@ -38,6 +38,8 @@ void describe('claim GC runtime terminal fallback', () => {
       assert.deepEqual(dryCandidate.blockers, []);
       assert.equal(dryCandidate.proof.some((proof) => proof.includes('validated runtime terminal proof')), true);
       assert.deepEqual(dryRun.released_claims, []);
+      const preflightFiles = await readdir(join(fixture.context.coordinationRoot, 'preflight'), { withFileTypes: true });
+      assert.equal(preflightFiles.some((entry) => entry.name.startsWith('20260711T100000000Z.claim-gc-dry-run.') && entry.name.endsWith('.json')), true);
       assert.equal((await readPathClaims(fixture.context.coordinationRoot)).length, 1);
 
       const contender = await prepareClaimFixture(root, 'claim-gc-contender', 'WRITE', fixture.source, false);

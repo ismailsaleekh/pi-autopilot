@@ -1,0 +1,15 @@
+export const AUTOPILOT_COORDINATION_SNAPSHOT_SCHEMA = 'autopilot.coordination_snapshot.v1';
+export const AUTOPILOT_COORDINATOR_PROTOCOL_VERSION = '1.0';
+export const AUTOPILOT_COORDINATOR_REQUEST_SCHEMA = 'autopilot.coordinator_request.v1';
+export const AUTOPILOT_COORDINATOR_RESPONSE_SCHEMA = 'autopilot.coordinator_response.v1';
+export const AUTOPILOT_COORDINATION_PREFLIGHT_SCHEMA = 'autopilot.coordination_preflight.v1';
+export const COORDINATION_CLAIM_MODES = ['READ', 'WRITE', 'EXCLUSIVE'];
+export const COORDINATION_RUN_STATUSES = ['active', 'paused', 'merging', 'blocked', 'recovering', 'closed', 'aborted'];
+export const COORDINATION_SESSION_STATUSES = ['attached', 'handoff-pending', 'detached', 'fenced', 'expired'];
+export const COORDINATION_CHILD_STATUSES = ['preflight', 'running', 'terminal', 'recovery-required'];
+export const COORDINATION_UNIT_STATES = ['queued', 'preflight', 'running', 'transport-complete', 'merged', 'failed', 'reset', 'quarantined', 'superseded'];
+export const COORDINATION_ACQUISITION_STATES = ['waiting', 'grant-ready', 'granted', 'released', 'cancelled', 'superseded'];
+export const COORDINATION_REQUEST_STATUSES = ['pending', 'delivered', 'acknowledged', 'release-now', 'deferred', 'released', 'grant-ready', 'granted', 'requester-notified', 'resolved', 'cancelled', 'superseded', 'contradiction-review'];
+export const COORDINATION_MESSAGE_STATUSES = ['pending', 'delivered', 'acknowledged'];
+export const COORDINATION_OPERATION_STAGES = ['prepared', 'in-progress', 'verified', 'committed', 'reconciling', 'compensated', 'failed'];
+export const COORDINATION_RELEASE_CONDITION_TYPES = ['child-terminal', 'unit-merged', 'attempt-reset', 'quarantine-captured', 'run-closed', 'explicit-owner-release'];

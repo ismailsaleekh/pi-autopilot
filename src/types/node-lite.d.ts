@@ -20,6 +20,7 @@ declare module 'node:assert/strict' {
     deepEqual(actual: unknown, expected: unknown, message?: string): void;
     ok(value: unknown, message?: string): void;
     throws(fn: () => unknown, error?: unknown, message?: string): void;
+    doesNotThrow(fn: () => unknown, message?: string): void;
     match(value: string, regexp: RegExp, message?: string): void;
   }
   const assert: AssertStrict;
@@ -48,6 +49,7 @@ declare module 'node:fs/promises' {
     readonly mtimeMs: number;
     isFile(): boolean;
     isDirectory(): boolean;
+    isSymbolicLink(): boolean;
   }
   export interface FileHandle {
     writeFile(data: string, encoding?: 'utf8'): Promise<void>;
@@ -55,15 +57,18 @@ declare module 'node:fs/promises' {
     close(): Promise<void>;
   }
   export function appendFile(path: string | URL, data: string, encoding?: 'utf8'): Promise<void>;
+  export function lstat(path: string | URL): Promise<Stats>;
   export function mkdir(path: string | URL, options?: { readonly recursive?: boolean }): Promise<string | undefined>;
   export function mkdtemp(prefix: string): Promise<string>;
   export function open(path: string | URL, flags: string): Promise<FileHandle>;
   export function readdir(path: string, options: { readonly withFileTypes: true }): Promise<Dirent[]>;
   export function readFile(path: string | URL): Promise<Uint8Array>;
   export function readFile(path: string | URL, encoding: 'utf8'): Promise<string>;
+  export function realpath(path: string | URL): Promise<string>;
   export function rename(oldPath: string | URL, newPath: string | URL): Promise<void>;
   export function rm(path: string | URL, options?: { readonly recursive?: boolean; readonly force?: boolean }): Promise<void>;
   export function stat(path: string | URL): Promise<Stats>;
+  export function symlink(target: string | URL, path: string | URL): Promise<void>;
   export function unlink(path: string | URL): Promise<void>;
   export function writeFile(path: string | URL, data: string | Uint8Array, encoding?: 'utf8'): Promise<void>;
   export function writeFile(path: string | URL, data: string | Uint8Array, options: { readonly encoding?: 'utf8'; readonly flag?: string }): Promise<void>;
@@ -78,6 +83,7 @@ declare module 'node:os' {
 }
 
 declare module 'node:path' {
+  export function extname(path: string): string;
   export function join(...parts: readonly string[]): string;
   export function resolve(...parts: readonly string[]): string;
 }

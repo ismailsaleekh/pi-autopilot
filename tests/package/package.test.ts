@@ -166,7 +166,7 @@ void describe('package manifest and payload', () => {
     assert.equal(pkg.bin['autopilot-agent-run'], 'bin/autopilot-agent-run.mjs');
     assert.ok(pkg.files.includes('dist/'));
     assert.ok(pkg.peerDependencies['@earendil-works/pi-coding-agent']);
-    for (const script of ['build', 'typecheck', 'test:type-safety', 'test:unit', 'test:sdk', 'test:rpc', 'test:package']) {
+    for (const script of ['build', 'typecheck', 'test:type-safety', 'test:unit', 'test:model', 'test:sdk', 'test:rpc', 'test:package']) {
       assert.equal(typeof pkg.scripts[script], 'string', script);
     }
     for (const dir of ['bin/', 'dist/', 'extensions/', 'src/', 'templates/']) assert.ok(pkg.files.includes(dir), dir);
@@ -184,8 +184,19 @@ void describe('package manifest and payload', () => {
       'dist/src/cli/autopilot-agent-run.js',
       'dist/src/core/agent-runner.js',
       'dist/src/core/close-runtime.js',
+      'dist/src/core/coordination/contracts.js',
+      'dist/src/core/coordination/invariants.js',
+      'dist/src/core/coordination/legacy-preflight.js',
+      'dist/src/core/coordination/package-isolation.js',
+      'dist/src/core/coordination/transition-model.js',
       'dist/src/internal/status-extension.js',
       'src/core/context-budget.ts',
+      'src/core/coordination/index.ts',
+      'src/core/coordination/contracts.ts',
+      'src/core/coordination/invariants.ts',
+      'src/core/coordination/legacy-preflight.ts',
+      'src/core/coordination/package-isolation.ts',
+      'src/core/coordination/transition-model.ts',
       'src/core/git-guard.ts',
       'src/core/checkout-profile.ts',
       'src/core/sparse-worktree.ts',
@@ -248,6 +259,9 @@ void describe('package manifest and payload', () => {
       'openai-codex/gpt-5.6-sol',
       'openai-codex/gpt-5.6-terra',
       'openai-codex/gpt-5.6-luna',
+      'Coordination Fabric contract lock',
+      'read-only canonical preflight',
+      'standalone production surfaces',
     ]) {
       assert.match(readme, literalPattern(surface), `README missing ${surface}`);
       assert.match(plan, literalPattern(surface), `TEST_PLAN missing ${surface}`);
@@ -259,6 +273,9 @@ void describe('package manifest and payload', () => {
     const plan = await docText('TEST_PLAN.md');
     const mappings = [
       { claim: 'Commands', row: 'Public commands are `/autopilot`, `/autopilot-inject`, `/autopilot-onboard`, `/autopilot-handoff`, `/autopilot-config`, `/autopilot-claim-gc`, `/autopilot-close`, and `/autopilot-abort`' },
+      { claim: 'Coordination Fabric contract lock', row: 'Coordination Fabric contracts and protocol lock' },
+      { claim: 'read-only canonical preflight', row: 'Legacy coordination preflight has real consumers' },
+      { claim: 'standalone production surfaces', row: 'Standalone package boundary' },
       { claim: 'context_budget', row: '`context_budget` parent gate' },
       { claim: 'Fixed model roster', row: 'Fixed parent and child model roster' },
       { claim: 'Contracts, templates, and state-store', row: 'Contracts/templates are schema-backed and package-owned' },
@@ -344,8 +361,18 @@ void describe('package manifest and payload', () => {
       'dist/src/cli/autopilot-agent-run.js',
       'dist/src/core/agent-runner.js',
       'dist/src/core/close-runtime.js',
+      'dist/src/core/coordination/contracts.js',
+      'dist/src/core/coordination/invariants.js',
+      'dist/src/core/coordination/legacy-preflight.js',
+      'dist/src/core/coordination/package-isolation.js',
+      'dist/src/core/coordination/transition-model.js',
       'dist/src/internal/status-extension.js',
       'src/core/context-budget.ts',
+      'src/core/coordination/contracts.ts',
+      'src/core/coordination/invariants.ts',
+      'src/core/coordination/legacy-preflight.ts',
+      'src/core/coordination/package-isolation.ts',
+      'src/core/coordination/transition-model.ts',
       'src/core/git-guard.ts',
       'src/core/checkout-profile.ts',
       'src/core/sparse-worktree.ts',

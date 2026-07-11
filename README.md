@@ -23,6 +23,28 @@ pi install .
 
 All commands use package-owned prompt sources and Autopilot names only.
 
+## Coordination Fabric contract lock
+
+Autopilot ships the first Coordination Fabric slice as package-owned public
+runtime code. It defines strict versioned schemas and unknown-input parsers for
+repositories, runs, session and child leases, unit attempts, atomic acquisition
+groups, edit leases, change reservations, claim requests, durable messages,
+worktrees, recoverable operations, contradiction packets, events, and local IPC
+envelopes. Executable invariants enforce ownership, fencing, incompatible-lease,
+idempotency, deferred-promise, atomic release-notification, operation-evidence,
+and contradiction-only escalation rules. A pure transition model proves session
+fencing, all-or-nothing grant, idempotent replay, and release-plus-notification
+semantics before the transactional coordinator is introduced.
+
+Current `/autopilot` activation and `/autopilot-claim-gc --dry-run` execute a
+read-only canonical preflight over legacy coordination authority before launch
+or diagnosis. The preflight hashes inputs, rejects malformed owners, old-epoch
+claims, incompatible claims, and session replacement that would create a
+self-conflict, and writes a bounded diagnostic under
+`coordination/<repo-key>/preflight/`. It does not mutate active rows or claims.
+Package source and release gates also scan standalone production surfaces and
+reject closed-repository imports, state roots, plans, and product fixtures.
+
 ## Fixed model roster
 
 Autopilot enforces one package-owned model/thinking assignment for every parent and child role:
@@ -100,4 +122,4 @@ Release QA also runs docs audits and forbidden legacy-runtime scans from this st
 
 ## Known limitations
 
-Autopilot currently supplies the package extension, commands, `context_budget`, scheduler config, deterministic dispatch planning helpers, contracts/templates, Quality vNext spec/status gates, durable purpose state helpers, per-unit worktrees, runtime-owned unit mergeback, validation-staleness tracking, claim GC, run-owned worktree cleanup/pruning, execution-audit generation/validation, scope/protected-path adjudication helpers, work-item lifecycle and terminal closure gates, runtime close/merge/abort, forced-output/status tool, state-store helpers, runner CLI/bin, fake-Pi and e2e witnesses, parent prompt, onboard prompt, handoff prompt, and offline SDK/RPC/package gates. It does not include a compiled scheduler UI, PTY/TUI coverage, migration tooling for older runtime folders, default automated live-provider execution, network push/PR creation, or hosted PR automation. Provider-backed child runs require explicit operator approval, subscription Pi channels, and the `autopilot-agent-run` path; the default package gate remains deterministic, offline, network-free, and isolated from user/global Pi state.
+Autopilot currently supplies the package extension, commands, `context_budget`, scheduler config, deterministic dispatch planning helpers, contracts/templates, Quality vNext spec/status gates, durable purpose state helpers, per-unit worktrees, runtime-owned unit mergeback, validation-staleness tracking, claim GC, run-owned worktree cleanup/pruning, execution-audit generation/validation, scope/protected-path adjudication helpers, work-item lifecycle and terminal closure gates, runtime close/merge/abort, forced-output/status tool, state-store helpers, runner CLI/bin, Coordination Fabric contracts/invariants/failure model/legacy preflight/package-isolation gate, fake-Pi and e2e witnesses, parent prompt, onboard prompt, handoff prompt, and offline SDK/RPC/package gates plus model/property gates. The transactional coordinator, durable supervisors, negotiation mailboxes, saga executor, reservation cutover, deadlock engine, and legacy migration remain subsequent Coordination Fabric slices. It does not include a compiled scheduler UI, PTY/TUI coverage, default automated live-provider execution, network push/PR creation, or hosted PR automation. Provider-backed child runs require explicit operator approval, subscription Pi channels, and the `autopilot-agent-run` path; the default package gate remains deterministic, offline, network-free, and isolated from user/global Pi state.

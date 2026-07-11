@@ -1,5 +1,5 @@
 import { existsSync, readFileSync, statSync } from 'node:fs';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 import type { AutopilotStatusToolContext } from './forced-output/identity.ts';
@@ -15,7 +15,6 @@ import {
   sparseIncludePatternsForPaths,
   submodulePathsForMaterialization,
   trackedPathExists,
-  type AutopilotCheckoutProfileSnapshot,
   type AutopilotTrackedTreeScan,
 } from './checkout-profile.ts';
 import { assertAutopilotDiskGate } from './disk-gate.ts';
