@@ -29,11 +29,20 @@ export async function mergeAutopilotUnit(input) {
         const blockers = mergePreflightBlockers(active, input.unitId, input.attempt, status, receipt, audit, executionCommit);
         if (blockers.length > 0)
             return { outcome: 'blocked', merge: null, blockers, conflict_path: null };
-        const before = gitHead(active.main_worktree_path);
         const unitBranch = executionCommit.branch;
         const unitHead = gitHead(executionCommit.cwd);
+        const validatedUnitHead = executionCommit.commit_sha;
+        if (unitHead !== validatedUnitHead) {
+            return {
+                outcome: 'blocked',
+                merge: null,
+                blockers: [`unit worktree HEAD ${unitHead} does not match execution commit ${validatedUnitHead}`],
+                conflict_path: null,
+            };
+        }
+        const before = gitHead(active.main_worktree_path);
         try {
-            runGit(['merge', '--no-ff', '--no-edit', '-m', `autopilot unit merge ${active.workstream_run} ${input.unitId} attempt ${String(input.attempt)}`, unitBranch], active.main_worktree_path, runtimeGitEnv('unit-merge', input.env));
+            runGit(['merge', '--no-ff', '--no-edit', '-m', `autopilot unit merge ${active.workstream_run} ${input.unitId} attempt ${String(input.attempt)}`, validatedUnitHead], active.main_worktree_path, runtimeGitEnv('unit-merge', input.env));
         }
         catch (error) {
             const dirty = readGitStatus(active.main_worktree_path).changedPaths;
@@ -69,7 +78,7 @@ export async function mergeAutopilotUnit(input) {
             attempt: input.attempt,
             unit_branch: unitBranch,
             main_branch: active.branch,
-            unit_head: unitHead,
+            unit_head: validatedUnitHead,
             integration_before: before,
             integration_after: after,
             merge_commit_sha: after,
@@ -84,8 +93,8 @@ export async function mergeAutopilotUnit(input) {
         await writeJsonAtomic(mergePath, merge);
         await releaseClaimsForUnit({ context: input.context, unitId: input.unitId, attempt: input.attempt, reason: 'autopilot unit merge release', now });
         const archiveRef = `autopilot/archive/${active.workstream_run}/unit/${input.unitId}/attempt-${String(input.attempt)}`;
-        runGit(['update-ref', `refs/heads/${archiveRef}`, unitHead], active.source_repo, runtimeGitEnv('unit-archive', input.env));
-        await updateUnitBranchStatus({ active, unitId: input.unitId, attempt: input.attempt, status: 'merged', currentSha: unitHead, archiveRef });
+        runGit(['update-ref', `refs/heads/${archiveRef}`, validatedUnitHead], active.source_repo, runtimeGitEnv('unit-archive', input.env));
+        await updateUnitBranchStatus({ active, unitId: input.unitId, attempt: input.attempt, status: 'merged', currentSha: validatedUnitHead, archiveRef });
         await cleanupTerminalUnitWorktree({
             active,
             unitId: input.unitId,
