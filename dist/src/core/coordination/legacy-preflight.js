@@ -140,9 +140,9 @@ function conflict(left, right) {
 export function checkLegacyCoordinationInvariants(input) {
     const findings = [];
     const internalFindingLimit = LEGACY_PREFLIGHT_MAX_FINDINGS + 1;
-    const add = (code, entity, detail) => {
+    const add = (code, entity, detail, severity = 'error') => {
         if (findings.length < internalFindingLimit)
-            findings.push({ code, severity: 'error', entity, detail });
+            findings.push({ code, severity, entity, detail });
     };
     const activeIds = new Set();
     const runIds = new Set();
@@ -158,7 +158,7 @@ export function checkLegacyCoordinationInvariants(input) {
     }
     const claimKeys = new Set();
     for (const claim of input.claims) {
-        const key = `${claim.autopilot_id}\0${claim.workstream_run}\0${claim.active_run_epoch}\0${claim.unit_id}\0${String(claim.attempt)}\0${claim.claim_type}\0${claim.path}`;
+        const key = `${claim.autopilot_id}\0${claim.workstream_run}\0${claim.unit_id}\0${String(claim.attempt)}\0${claim.claim_type}\0${claim.path}`;
         if (claimKeys.has(key))
             add('legacy-duplicate-claim', claim.path, 'claim identity occurs more than once');
         claimKeys.add(key);
@@ -170,7 +170,7 @@ export function checkLegacyCoordinationInvariants(input) {
         if (owner.workstream !== claim.workstream)
             add('legacy-claim-workstream-mismatch', claim.path, `claim workstream ${claim.workstream} differs from owner ${owner.workstream}`);
         if (owner.active_run_epoch !== claim.active_run_epoch)
-            add('legacy-old-epoch-claim', claim.path, `claim epoch ${String(claim.active_run_epoch)} differs from owner epoch ${String(owner.active_run_epoch)}`);
+            add('legacy-old-epoch-claim', claim.path, `claim epoch ${String(claim.active_run_epoch)} differs from owner epoch ${String(owner.active_run_epoch)}; durable run/unit ownership remains authoritative`, 'warning');
     }
     const indexedClaims = new Map();
     const orderedClaims = [...input.claims].sort((left, right) => {
@@ -191,7 +191,7 @@ export function checkLegacyCoordinationInvariants(input) {
             for (const existing of [indexed.read, indexed.write]) {
                 if (existing === null)
                     continue;
-                const exactAttempt = existing.autopilot_id === claim.autopilot_id && existing.workstream_run === claim.workstream_run && existing.active_run_epoch === claim.active_run_epoch && existing.unit_id === claim.unit_id && existing.attempt === claim.attempt && existing.path === claim.path && existing.claim_type === claim.claim_type;
+                const exactAttempt = existing.autopilot_id === claim.autopilot_id && existing.workstream_run === claim.workstream_run && existing.unit_id === claim.unit_id && existing.attempt === claim.attempt && existing.path === claim.path && existing.claim_type === claim.claim_type;
                 if (!exactAttempt && conflict(existing.claim_type, claim.claim_type)) {
                     add('legacy-incompatible-claims', `${existing.path},${claim.path}`, `${existing.claim_type} owned by ${existing.workstream_run}/${existing.unit_id} overlaps ${claim.claim_type} owned by ${claim.workstream_run}/${claim.unit_id}`);
                     break;
@@ -206,7 +206,7 @@ export function checkLegacyCoordinationInvariants(input) {
         if (resumed !== undefined && (resumed.pid !== input.currentPid || resumed.boot_id !== input.currentBootId)) {
             const ownedClaims = input.claims.filter((claim) => claim.autopilot_id === resumed.autopilot_id && claim.workstream_run === resumed.workstream_run);
             if (ownedClaims.length > 0)
-                add('legacy-resume-would-self-conflict', resumed.workstream_run, `session replacement would advance epoch while ${String(ownedClaims.length)} run-owned claims remain epoch-bound`);
+                add('legacy-resume-retains-durable-claims', resumed.workstream_run, `session replacement retains ${String(ownedClaims.length)} claims by durable run/unit ownership`, 'warning');
         }
     }
     return Object.freeze(findings);

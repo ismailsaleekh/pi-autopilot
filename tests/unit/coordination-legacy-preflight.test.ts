@@ -50,22 +50,22 @@ void describe('legacy coordination canonical preflight', () => {
     });
   });
 
-  void it('refuses old-epoch claims and records the exact finding before throwing', async () => {
+  void it('retains old-epoch claims by durable run ownership and records a warning', async () => {
     await withTempDir(async (root) => {
       const coordinationRoot = await writeLegacyAuthority(root, [{ ...legacyClaim(legacyRow(root)), active_run_epoch: 1 }], { ...legacyRow(root), active_run_epoch: 2 });
       const now = new Date('2026-07-11T15:11:00.000Z');
-      await expectRejects(() => runLegacyCoordinationPreflight({ coordinationRoot, repoKey: 'repo-key-1', mode: 'claim-gc-dry-run', now }), /legacy-old-epoch-claim/u);
+      const result = await runLegacyCoordinationPreflight({ coordinationRoot, repoKey: 'repo-key-1', mode: 'claim-gc-dry-run', now });
       const diagnostic = await readDiagnosticFor(coordinationRoot, '20260711T151100000Z.claim-gc-dry-run.');
-      assert.equal(diagnostic.safe, false);
-      assert.equal(diagnostic.findings.some((finding) => finding.code === 'legacy-old-epoch-claim'), true);
+      assert.equal(result.safe, true);
+      assert.equal(diagnostic.findings.some((finding) => finding.code === 'legacy-old-epoch-claim' && finding.severity === 'warning'), true);
     });
   });
 
-  void it('predicts session-epoch self-conflict before activation mutates the active row', async () => {
+  void it('classifies session replacement as durable claim retention without mutation', async () => {
     await withTempDir(async (root) => {
       const row = legacyRow(root);
       const coordinationRoot = await writeLegacyAuthority(root, [legacyClaim(row)], row);
-      await expectRejects(() => runLegacyCoordinationPreflight({
+      const result = await runLegacyCoordinationPreflight({
         coordinationRoot,
         repoKey: row.repo_key,
         mode: 'activation',
@@ -73,13 +73,15 @@ void describe('legacy coordination canonical preflight', () => {
         currentPid: row.pid + 1,
         currentBootId: 'replacement-boot',
         now: new Date('2026-07-11T15:12:00.000Z'),
-      }), /legacy-resume-would-self-conflict/u);
+      });
+      assert.equal(result.safe, true);
+      assert.equal(result.findings.some((finding) => finding.code === 'legacy-resume-retains-durable-claims'), true);
       const storedRows = parseLegacyActiveAutopilots(JSON.parse(await readFile(join(coordinationRoot, 'active-autopilots.json'), 'utf8')) as unknown);
       assert.equal(storedRows[0]?.active_run_epoch, row.active_run_epoch);
     });
   });
 
-  void it('wires self-conflict refusal into real workstream activation before row mutation', async () => {
+  void it('resumes a real workstream while preserving its old-session claim identity', async () => {
     await withTempDir(async (root) => {
       const source = join(root, 'source');
       await initGitSource(source);
@@ -89,12 +91,16 @@ void describe('legacy coordination canonical preflight', () => {
         const prepared = await prepareAutopilotWorkstream({ workstream: 'production-preflight', sourceCwd: source, now: new Date('2026-07-11T15:12:30.000Z') });
         const simulatedPriorProcess = { ...prepared.active, pid: prepared.active.pid + 10, boot_id: 'prior-process-boot' };
         const coordinationRoot = coordinationRootForRepo(prepared.active.repo_key);
+        const durableClaim = legacyClaim(simulatedPriorProcess);
         await writeActiveAutopilots(coordinationRoot, [simulatedPriorProcess]);
-        await writePathClaims(coordinationRoot, [legacyClaim(simulatedPriorProcess)]);
-        await expectRejects(() => prepareAutopilotWorkstream({ workstream: 'production-preflight', sourceCwd: source, now: new Date('2026-07-11T15:12:31.000Z') }), /legacy-resume-would-self-conflict/u);
+        await writePathClaims(coordinationRoot, [durableClaim]);
+        const resumed = await prepareAutopilotWorkstream({ workstream: 'production-preflight', sourceCwd: source, now: new Date('2026-07-11T15:12:31.000Z') });
         const rows = await readActiveAutopilots(coordinationRoot);
-        assert.equal(rows[0]?.pid, simulatedPriorProcess.pid);
-        assert.equal(rows[0]?.active_run_epoch, simulatedPriorProcess.active_run_epoch);
+        const claims = await readFile(join(coordinationRoot, 'path-claims.json'), 'utf8');
+        assert.equal(rows[0]?.pid, process.pid);
+        assert.equal(rows[0]?.active_run_epoch, simulatedPriorProcess.active_run_epoch + 1);
+        assert.equal(resumed.active.workstream_run, simulatedPriorProcess.workstream_run);
+        assert.match(claims, new RegExp(`"active_run_epoch": ${String(durableClaim.active_run_epoch)}`, 'u'));
       } finally {
         if (previousStateRoot === undefined) delete process.env[AUTOPILOT_STATE_ROOT_ENV];
         else process.env[AUTOPILOT_STATE_ROOT_ENV] = previousStateRoot;

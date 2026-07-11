@@ -8,6 +8,7 @@ import autopilotExtension, {
   type ExtensionCommandDefinitionLike,
   type ExtensionCommandContextLike,
   type ExtensionHostLike,
+  type ExtensionLifecycleHandler,
   type ExtensionModelLike,
   type ExtensionToolCallHandler,
   type NotificationKind,
@@ -18,6 +19,7 @@ import {
   AUTOPILOT_CLOSE_COMMAND,
   AUTOPILOT_COMMAND,
   AUTOPILOT_CONFIG_COMMAND,
+  AUTOPILOT_COORDINATION_COMMAND,
   AUTOPILOT_HANDOFF_COMMAND,
   AUTOPILOT_INJECT_COMMAND,
   AUTOPILOT_ONBOARD_COMMAND,
@@ -25,6 +27,8 @@ import {
   CONTEXT_BUDGET_TOOL_NAME,
 } from '../../src/core/names.ts';
 import { AUTOPILOT_STATE_ROOT_ENV, coordinationRootForRepo, resolveRepoIdentity } from '../../src/core/parallel-runtime.ts';
+import { coordinatorRuntimePaths } from '../../src/core/coordination/runtime-paths.ts';
+import { startCoordinatorServer } from '../../src/core/coordination/server.ts';
 
 interface CapturedMessage {
   readonly content: string;
@@ -43,6 +47,7 @@ interface Harness {
   readonly messages: CapturedMessage[];
   readonly notifications: CapturedNotification[];
   readonly toolCallHandlers: ExtensionToolCallHandler[];
+  readonly shutdownHandlers: ExtensionLifecycleHandler[];
   readonly selectedModels: ExtensionModelLike[];
   readonly thinkingLevels: string[];
   readonly ctx: ExtensionCommandContextLike;
@@ -58,6 +63,7 @@ function createHarness(
   const messages: CapturedMessage[] = [];
   const notifications: CapturedNotification[] = [];
   const toolCallHandlers: ExtensionToolCallHandler[] = [];
+  const shutdownHandlers: ExtensionLifecycleHandler[] = [];
   const selectedModels: ExtensionModelLike[] = [];
   const thinkingLevels: string[] = [];
   let thinkingLevel = 'high';
@@ -84,9 +90,10 @@ function createHarness(
     sendUserMessage: (content, options) => {
       messages.push({ content, deliverAs: options.deliverAs });
     },
+    sendMessage: () => undefined,
     on: (eventName, handler) => {
-      assert.equal(eventName, 'tool_call');
-      toolCallHandlers.push(handler);
+      if (eventName === 'tool_call') toolCallHandlers.push(handler as ExtensionToolCallHandler);
+      else if (eventName === 'session_shutdown') shutdownHandlers.push(handler as ExtensionLifecycleHandler);
     },
   };
   const ctx: ExtensionCommandContextLike = {
@@ -99,10 +106,12 @@ function createHarness(
       find: (provider, modelId) =>
         options.modelAvailable === false ? undefined : { provider, id: modelId },
     },
+    sessionManager: { getSessionId: () => 'sdk-command-session' },
+    isIdle: () => true,
     ...(cwd === undefined ? {} : { cwd }),
   };
   autopilotExtension(host);
-  return { commands, toolNames, activeTools, messages, notifications, toolCallHandlers, selectedModels, thinkingLevels, ctx };
+  return { commands, toolNames, activeTools, messages, notifications, toolCallHandlers, shutdownHandlers, selectedModels, thinkingLevels, ctx };
 }
 
 function requireCommand(harness: Harness, name: string): ExtensionCommandDefinitionLike {
@@ -120,10 +129,18 @@ async function withIsolatedHarness<T>(run: (harness: Harness) => Promise<T>): Pr
   const project = join(root, 'project');
   const originalStateRoot = process.env[AUTOPILOT_STATE_ROOT_ENV];
   process.env[AUTOPILOT_STATE_ROOT_ENV] = join(root, 'state');
+  let coordinator: Awaited<ReturnType<typeof startCoordinatorServer>> | null = null;
+  let harness: Harness | null = null;
   try {
     await initGitProject(project);
-    return await run(createHarness(project));
+    coordinator = await startCoordinatorServer(coordinatorRuntimePaths(process.env));
+    harness = createHarness(project);
+    return await run(harness);
   } finally {
+    if (harness !== null) {
+      for (const handler of harness.shutdownHandlers) await handler({ reason: 'test-complete' }, harness.ctx);
+    }
+    if (coordinator !== null) await coordinator.close();
     if (originalStateRoot === undefined) delete process.env[AUTOPILOT_STATE_ROOT_ENV];
     else process.env[AUTOPILOT_STATE_ROOT_ENV] = originalStateRoot;
     await rm(root, { recursive: true, force: true });
@@ -155,6 +172,7 @@ void describe('Autopilot command SDK surface', () => {
         AUTOPILOT_CLAIM_GC_COMMAND,
         AUTOPILOT_CLOSE_COMMAND,
         AUTOPILOT_CONFIG_COMMAND,
+        AUTOPILOT_COORDINATION_COMMAND,
         AUTOPILOT_HANDOFF_COMMAND,
         AUTOPILOT_INJECT_COMMAND,
         AUTOPILOT_ONBOARD_COMMAND,
@@ -203,6 +221,18 @@ void describe('Autopilot command SDK surface', () => {
         { cwd: worktreePath },
       );
       assert.equal(unitSpecWrite, undefined);
+    });
+  });
+
+  void it('queries coordinator status and doctor without queueing an LLM turn', async () => {
+    await withIsolatedHarness(async (harness) => {
+      await requireCommand(harness, AUTOPILOT_COMMAND).handler('coordination-observability', harness.ctx);
+      const messageCount = harness.messages.length;
+      await requireCommand(harness, AUTOPILOT_COORDINATION_COMMAND).handler('status', harness.ctx);
+      await requireCommand(harness, AUTOPILOT_COORDINATION_COMMAND).handler('doctor', harness.ctx);
+      assert.equal(harness.messages.length, messageCount);
+      assert.equal(harness.notifications.some((entry) => /coordinator status:.*runs=1 sessions=1/u.test(entry.message)), true);
+      assert.equal(harness.notifications.some((entry) => /coordinator doctor:.*healthy=true/u.test(entry.message)), true);
     });
   });
 

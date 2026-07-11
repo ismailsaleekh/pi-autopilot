@@ -429,6 +429,7 @@ export async function acquireClaimsForUnit(input) {
             fail('claim-conflict', 'Autopilot path claim rejected because another active Autopilot owns an overlapping path.', blockers.map((blocker) => `${blocker.claim_type} ${blocker.path} by ${blocker.workstream_run}/${blocker.unit_id}`));
         }
         const next = mergeClaims(existing, requested);
+        const granted = effectiveClaims(next, requested);
         await writePathClaims(input.context.coordinationRoot, next);
         for (const claim of requested) {
             await appendClaimEvent(input.context.coordinationRoot, {
@@ -447,7 +448,7 @@ export async function acquireClaimsForUnit(input) {
                 reason: claim.reason,
             });
         }
-        return requested;
+        return granted;
     });
 }
 export async function acquireReadClaimsForUnitPaths(input) {
@@ -504,6 +505,7 @@ export async function acquireReadClaimsForUnitPaths(input) {
             fail('claim-conflict', 'Autopilot READ expansion rejected because another active Autopilot owns an overlapping path.', blockers.map((blocker) => `${blocker.claim_type} ${blocker.path} by ${blocker.workstream_run}/${blocker.unit_id}`));
         }
         const next = mergeClaims(existing, requested);
+        const granted = effectiveClaims(next, requested);
         await writePathClaims(input.context.coordinationRoot, next);
         for (const claim of requested) {
             await appendClaimEvent(input.context.coordinationRoot, {
@@ -522,7 +524,7 @@ export async function acquireReadClaimsForUnitPaths(input) {
                 reason: claim.reason,
             });
         }
-        return requested;
+        return granted;
     });
 }
 export async function ensureWorktreeCleanForLaunch(input) {
@@ -901,7 +903,6 @@ function isIdempotentSameUnitClaim(req, claim, authority) {
         claim.workstream_run === authority.workstream_run &&
         claim.unit_id === req.unit_id &&
         claim.attempt === req.attempt &&
-        claim.active_run_epoch === authority.active_run_epoch &&
         claim.path === req.path &&
         claim.claim_type === req.claim_type;
 }
@@ -909,7 +910,7 @@ function mergeClaims(existing, requested) {
     const out = [...existing];
     for (const claim of requested) {
         const alreadyPresent = out.some((candidate) => candidate.autopilot_id === claim.autopilot_id &&
-            candidate.active_run_epoch === claim.active_run_epoch &&
+            candidate.workstream_run === claim.workstream_run &&
             candidate.unit_id === claim.unit_id &&
             candidate.attempt === claim.attempt &&
             candidate.path === claim.path &&
@@ -918,6 +919,19 @@ function mergeClaims(existing, requested) {
             out.push(claim);
     }
     return Object.freeze(out.sort((left, right) => `${left.path}\0${left.autopilot_id}\0${left.unit_id}`.localeCompare(`${right.path}\0${right.autopilot_id}\0${right.unit_id}`)));
+}
+function effectiveClaims(stored, requested) {
+    return Object.freeze(requested.map((claim) => {
+        const effective = stored.find((candidate) => candidate.autopilot_id === claim.autopilot_id &&
+            candidate.workstream_run === claim.workstream_run &&
+            candidate.unit_id === claim.unit_id &&
+            candidate.attempt === claim.attempt &&
+            candidate.path === claim.path &&
+            candidate.claim_type === claim.claim_type);
+        if (effective === undefined)
+            fail('claim-persistence-mismatch', 'granted durable claim is absent after atomic claim persistence.', [claim.path]);
+        return effective;
+    }));
 }
 function branchInfoFromUnitInfo(info) {
     return {

@@ -157,7 +157,7 @@ function activeWriteClaimPaths(input: {
 }): readonly string[] {
   const fromAcquired = input.acquiredClaims.filter((claim) =>
     claim.autopilot_id === input.context.active.autopilot_id &&
-    claim.active_run_epoch === input.context.active.active_run_epoch &&
+    claim.workstream_run === input.context.active.workstream_run &&
     claim.unit_id === input.spec.unit_id &&
     claim.attempt === input.spec.attempt &&
     (claim.claim_type === 'WRITE' || claim.claim_type === 'EXCLUSIVE'),

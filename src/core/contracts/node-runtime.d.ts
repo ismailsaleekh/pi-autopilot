@@ -23,8 +23,3 @@ declare module 'node:path' {
   export function normalize(path: string): string;
   export function relative(from: string, to: string): string;
 }
-
-declare const Buffer: {
-  from(value: string, encoding?: 'utf8'): Uint8Array;
-  byteLength(value: string, encoding?: 'utf8'): number;
-};

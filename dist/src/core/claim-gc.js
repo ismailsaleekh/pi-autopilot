@@ -215,7 +215,7 @@ function resolveRuntimeRef(runtimeRoot, ref, label) {
     return resolved;
 }
 function claimKey(claim) {
-    return `${claim.autopilot_id}\0${claim.workstream_run}\0${claim.active_run_epoch}\0${claim.unit_id}\0${String(claim.attempt)}\0${claim.claim_type}\0${claim.path}`;
+    return `${claim.autopilot_id}\0${claim.workstream_run}\0${claim.unit_id}\0${String(claim.attempt)}\0${claim.claim_type}\0${claim.path}`;
 }
 function timestamp(now) {
     return now.toISOString().replace(/[-:.]/gu, '').replace(/Z$/u, 'Z');

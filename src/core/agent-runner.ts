@@ -1,10 +1,12 @@
 import { constants as fsConstants, existsSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { access, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { spawn, type ChildProcessDataChunk, type ChildProcessLite } from 'node:child_process';
-import { dirname, resolve } from 'node:path';
+import { dirname, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
+  AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV,
   AUTOPILOT_STATUS_CONTEXT_ENV,
   AUTOPILOT_STATUS_TOOL,
 } from './names.ts';
@@ -46,6 +48,7 @@ import {
   type AutopilotPathClaim,
 } from './parallel-runtime.ts';
 import { rollbackCreatedUnitWorktree } from './worktree-cleanup.ts';
+import { AutopilotChildLeaseHandle, registerAutopilotChildAuthority } from './coordination/child-authority.ts';
 import {
   assertAutopilotSpecMaterializationDiskGate,
   expandedReadOnlyPathsForAudit,
@@ -231,9 +234,37 @@ interface PendingEvent {
   readonly timer: TimerHandle;
 }
 
+interface ChildAuthorityLifecycle {
+  handle: AutopilotChildLeaseHandle | null;
+  completed: boolean;
+}
+
 export async function runAutopilotAgentFromSpecPath(
   specPath: string,
   options: AutopilotAgentRunOptions = {},
+): Promise<AutopilotAgentRunResult> {
+  const lifecycle: ChildAuthorityLifecycle = { handle: null, completed: false };
+  try {
+    return await runAutopilotAgentFromSpecPathInternal(specPath, options, lifecycle);
+  } catch (error) {
+    if (lifecycle.handle !== null && !lifecycle.completed) {
+      try {
+        await lifecycle.handle.markRecoveryRequired();
+      } catch (recoveryError) {
+        throw new AutopilotAgentRunError('runtime-commit-failed', {
+          reason: `child attempt failed (${errorMessage(error)}) and durable child recovery classification also failed: ${errorMessage(recoveryError)}`,
+          specPath,
+        });
+      }
+    }
+    throw error;
+  }
+}
+
+async function runAutopilotAgentFromSpecPathInternal(
+  specPath: string,
+  options: AutopilotAgentRunOptions,
+  lifecycle: ChildAuthorityLifecycle,
 ): Promise<AutopilotAgentRunResult> {
   const spec = await readAndValidateSpec(specPath);
   let providerIdentity: AutopilotProviderIdentity;
@@ -296,13 +327,25 @@ export async function runAutopilotAgentFromSpecPath(
     });
   }
 
+  try {
+    lifecycle.handle = await registerAutopilotChildAuthority(spec, env);
+  } catch (error) {
+    throw new AutopilotAgentRunError('spec-invalid', {
+      reason: `coordinator child authority preflight failed before model spend: ${errorMessage(error)}`,
+      specPath,
+      statusOutput: spec.status_output,
+      receiptOutput: spec.receipt_output,
+    });
+  }
+
+  const childProcessEnv: ProcessEnv = { ...env, [AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV]: undefined };
   const spawnSpec: SpawnSpec = {
     executable: options.piExecutable ?? resolvePiExecutable(env),
     model: providerIdentity.requested_model_id,
     thinking: providerIdentity.thinking_level,
     cwd: spec.cwd,
     toolPolicy: toolPolicyForRole(spec.role),
-    env,
+    env: childProcessEnv,
     contextPath,
     wallMs: options.timeoutMsOverride ?? timeoutMsForSpec(spec),
     name: `autopilot-${spec.unit_id}-${spec.role}-attempt-${String(spec.attempt)}`,
@@ -454,6 +497,15 @@ export async function runAutopilotAgentFromSpecPath(
     }
     throw error;
   }
+
+  const childAuthority = lifecycle.handle;
+  if (childAuthority === null) throw new AutopilotAgentRunError('runtime-commit-failed', { reason: 'durable child authority disappeared before terminal commit', specPath });
+  childAuthority.assertHealthy();
+  const receiptBytes = await readFile(spec.receipt_output);
+  const evidenceRelative = relative(runtimePreflight.context.active.main_worktree_path, spec.receipt_output).replace(/\\/gu, '/');
+  if (evidenceRelative.length === 0 || evidenceRelative.startsWith('../') || evidenceRelative.startsWith('/')) throw new AutopilotAgentRunError('runtime-commit-failed', { reason: 'terminal receipt evidence is outside the durable run worktree', specPath });
+  await childAuthority.completeTerminal({ ref: evidenceRelative, sha256: `sha256:${createHash('sha256').update(receiptBytes).digest('hex')}` });
+  lifecycle.completed = true;
 
   return ({
     status: 'success',
@@ -789,6 +841,7 @@ async function runPiPromptWithStatusCarrier(spec: SpawnSpec, prompt: string): Pr
 
 function sanitizeAgentEnv(env: ProcessEnv, contextPath: string): ProcessEnv {
   const out: Record<string, string | undefined> = { ...env, [AUTOPILOT_STATUS_CONTEXT_ENV]: contextPath };
+  delete out[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV];
   delete out['PIPELINE_CODEX_CLI_EXECUTABLE'];
   delete out['PIPELINE_CODEX_CLI_MODEL'];
   return out;

@@ -27,7 +27,7 @@ async function walk(root, path) {
     if (stat.isFile())
         return [canonicalPath];
     if (!stat.isDirectory())
-        return [];
+        throw new CoordinationRuntimeError('invalid-state', 'package isolation scan refuses unsupported filesystem entries', [path]);
     const entries = await readdir(path, { withFileTypes: true });
     const files = [];
     for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {

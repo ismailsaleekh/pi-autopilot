@@ -5,10 +5,17 @@ import type {
   ExtensionHostLike,
   NotificationKind,
 } from '../extension.ts';
+import type { CoordinationMessageInjection } from '../core/coordination/supervisor.ts';
 
 export interface SentUserMessage {
   readonly content: string;
   readonly deliverAs: 'followUp';
+}
+
+export interface SentCoordinationMessage {
+  readonly message: CoordinationMessageInjection;
+  readonly deliverAs: 'steer' | 'followUp';
+  readonly triggerTurn: boolean;
 }
 
 export interface UiNotification {
@@ -29,6 +36,7 @@ export class FakeExtensionHost implements ExtensionHostLike {
   readonly commands = new Map<string, ExtensionCommandDefinitionLike>();
   readonly tools = new Map<string, ContextBudgetToolDefinition>();
   readonly messages: SentUserMessage[] = [];
+  readonly coordinationMessages: SentCoordinationMessage[] = [];
 
   registerCommand(name: string, definition: ExtensionCommandDefinitionLike): void {
     this.commands.set(name, definition);
@@ -40,6 +48,10 @@ export class FakeExtensionHost implements ExtensionHostLike {
 
   sendUserMessage(content: string, options: { readonly deliverAs: 'followUp' }): void {
     this.messages.push({ content, deliverAs: options.deliverAs });
+  }
+
+  sendMessage(message: CoordinationMessageInjection, options: { readonly deliverAs: 'steer' | 'followUp'; readonly triggerTurn: boolean }): void {
+    this.coordinationMessages.push({ message, deliverAs: options.deliverAs, triggerTurn: options.triggerTurn });
   }
 
   requireCommand(name: string): ExtensionCommandDefinitionLike {

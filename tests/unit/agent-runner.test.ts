@@ -9,6 +9,10 @@ import { fileURLToPath } from 'node:url';
 import type { AutopilotUnitSpec, AutopilotVerificationPlan } from '../../src/core/contracts/index.ts';
 import { AutopilotAgentRunError, runAutopilotAgentFromSpecPath } from '../../src/core/agent-runner.ts';
 import { AUTOPILOT_STATE_ROOT_ENV, prepareAutopilotUnitWorktree, prepareAutopilotWorkstream } from '../../src/core/parallel-runtime.ts';
+import { AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV } from '../../src/core/names.ts';
+import { coordinatorRuntimePaths } from '../../src/core/coordination/runtime-paths.ts';
+import { startCoordinatorServer } from '../../src/core/coordination/server.ts';
+import { DurableRunSupervisorClient } from '../../src/core/coordination/supervisor.ts';
 import { autopilotModelAssignmentForRole } from '../../src/core/model-roster.ts';
 
 const TEST_DIR = dirname(fileURLToPath(import.meta.url));
@@ -19,12 +23,17 @@ const FAKE_PI_COMPLETION_TIMEOUT_MS = 10_000;
 async function withTempDir<T>(run: (dir: string) => Promise<T>): Promise<T> {
   const dir = await mkdtemp(join(tmpdir(), 'autopilot-agent-runner-test-'));
   const originalStateRoot = process.env[AUTOPILOT_STATE_ROOT_ENV];
+  const originalSessionContext = process.env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV];
   process.env[AUTOPILOT_STATE_ROOT_ENV] = join(dir, 'autopilot-state');
+  const coordinator = await startCoordinatorServer(coordinatorRuntimePaths(process.env));
   try {
     return await run(dir);
   } finally {
+    delete process.env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV];
+    await coordinator.close();
     if (originalStateRoot === undefined) delete process.env[AUTOPILOT_STATE_ROOT_ENV];
     else process.env[AUTOPILOT_STATE_ROOT_ENV] = originalStateRoot;
+    if (originalSessionContext !== undefined) process.env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV] = originalSessionContext;
     await rm(dir, { recursive: true, force: true });
   }
 }
@@ -107,6 +116,9 @@ function spec(root: string, overrides: Partial<AutopilotUnitSpec> = {}): Autopil
 
 async function writeSpec(root: string, unitSpec: AutopilotUnitSpec): Promise<string> {
   const prepared = await prepareRegisteredWorktree(root, unitSpec);
+  const supervisor = new DurableRunSupervisorClient(process.env);
+  const attachment = await supervisor.attach({ repo: prepared.repo, active: prepared.active, rawSessionId: `runner-test-${unitSpec.unit_id}-${String(unitSpec.attempt)}-${String(Date.now())}` });
+  process.env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV] = attachment.contextPath;
   const mutable = unitSpec as {
     cwd: string;
     status_output: string;
@@ -137,6 +149,7 @@ async function writeSpec(root: string, unitSpec: AutopilotUnitSpec): Promise<str
 }
 
 async function prepareRegisteredWorktree(root: string, unitSpec: AutopilotUnitSpec): Promise<{
+  readonly repo: Awaited<ReturnType<typeof prepareAutopilotWorkstream>>['repo'];
   readonly active: Awaited<ReturnType<typeof prepareAutopilotWorkstream>>['active'];
   readonly mainWorktreePath: string;
   readonly runtimeRoot: string;
@@ -705,6 +718,7 @@ import { createInterface } from 'node:readline';
 
 const scenario = process.env.AUTOPILOT_FAKE_PI_SCENARIO || 'success';
 const contextPath = process.env.AUTOPILOT_AGENT_STATUS_CONTEXT;
+if (process.env.AUTOPILOT_COORDINATOR_SESSION_CONTEXT !== undefined) throw new Error('parent session authority leaked into child Pi');
 
 function write(obj) { process.stdout.write(JSON.stringify(obj) + '\\n'); }
 function response(cmd, success = true, extra = {}) { write({ id: cmd.id, type: 'response', command: cmd.type, success, ...extra }); }

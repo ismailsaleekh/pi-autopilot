@@ -157,6 +157,7 @@ export function releaseCoordinationLeaseAndNotify(snapshot, input) {
         recipient_workstream_run: request.requester.workstream_run,
         message_type: 'release-notification',
         correlation_id: request.request_id,
+        payload: { request_id: request.request_id, released_lease_id: lease.edit_lease_id },
         status: 'pending',
         created_event_seq: event.sequence,
         delivered_event_seq: null,

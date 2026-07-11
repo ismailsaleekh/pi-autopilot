@@ -10,6 +10,7 @@ export class FakeExtensionHost {
     commands = new Map();
     tools = new Map();
     messages = [];
+    coordinationMessages = [];
     registerCommand(name, definition) {
         this.commands.set(name, definition);
     }
@@ -18,6 +19,9 @@ export class FakeExtensionHost {
     }
     sendUserMessage(content, options) {
         this.messages.push({ content, deliverAs: options.deliverAs });
+    }
+    sendMessage(message, options) {
+        this.coordinationMessages.push({ message, deliverAs: options.deliverAs, triggerTurn: options.triggerTurn });
     }
     requireCommand(name) {
         const command = this.commands.get(name);

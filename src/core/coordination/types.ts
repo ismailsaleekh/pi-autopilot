@@ -175,6 +175,7 @@ export interface CoordinationMessage {
   readonly recipient_workstream_run: string;
   readonly message_type: 'claim-request' | 'release-notification' | 'grant-offer' | 'recovery-required';
   readonly correlation_id: string;
+  readonly payload: Readonly<Record<string, unknown>>;
   readonly status: CoordinationMessageStatus;
   readonly created_event_seq: number;
   readonly delivered_event_seq: number | null;
@@ -252,8 +253,8 @@ export interface CoordinationSnapshot {
   readonly events: readonly CoordinationEvent[];
 }
 
-export type CoordinatorQueryAction = 'status' | 'doctor';
-export type CoordinatorMutationAction = 'attach-run' | 'attach-session' | 'detach-session' | 'heartbeat' | 'acquire-group' | 'acknowledge-grant' | 'respond-claim-request' | 'cancel-claim-request' | 'acknowledge-message' | 'transition-operation';
+export type CoordinatorQueryAction = 'status' | 'doctor' | 'export';
+export type CoordinatorMutationAction = 'attach-run' | 'attach-session' | 'detach-session' | 'prepare-handoff' | 'heartbeat' | 'register-child' | 'heartbeat-child' | 'complete-child' | 'drain-mailbox' | 'acquire-group' | 'acknowledge-grant' | 'respond-claim-request' | 'cancel-claim-request' | 'acknowledge-message' | 'transition-operation';
 
 export interface CoordinatorRequestEnvelope {
   readonly schema_version: typeof AUTOPILOT_COORDINATOR_REQUEST_SCHEMA;

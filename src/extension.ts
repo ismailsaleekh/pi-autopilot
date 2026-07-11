@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+
 import { createContextBudgetTool, resolveContextHaltPercent } from './core/context-budget.ts';
 import {
   AUTOPILOT_ABORT_COMMAND,
@@ -5,12 +7,14 @@ import {
   AUTOPILOT_CLOSE_COMMAND,
   AUTOPILOT_COMMAND,
   AUTOPILOT_CONFIG_COMMAND,
+  AUTOPILOT_COORDINATION_COMMAND,
+  AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV,
   AUTOPILOT_HANDOFF_COMMAND,
   AUTOPILOT_INJECT_COMMAND,
   AUTOPILOT_ONBOARD_COMMAND,
   CONTEXT_BUDGET_TOOL_NAME,
 } from './core/names.ts';
-import { parseAutopilotAbortArgs, parseAutopilotArgs, parseAutopilotClaimGcArgs, parseAutopilotCloseArgs, parseAutopilotConfigArgs, parseAutopilotInjectArgs, runnerInvocationFromModuleUrl, runtimeRootForWorkstream } from './core/paths.ts';
+import { parseAutopilotAbortArgs, parseAutopilotArgs, parseAutopilotClaimGcArgs, parseAutopilotCloseArgs, parseAutopilotConfigArgs, parseAutopilotCoordinationArgs, parseAutopilotInjectArgs, runnerInvocationFromModuleUrl, runtimeRootForWorkstream } from './core/paths.ts';
 import { AutopilotCloseError, abortAutopilotWorkstream, closeAutopilotWorkstream } from './core/close-runtime.ts';
 import { runAutopilotClaimGc } from './core/claim-gc.ts';
 import { readSchedulerConfig, writeSchedulerConfig } from './core/scheduler-config.ts';
@@ -21,7 +25,9 @@ import {
   type AutopilotToolCallContextLike,
   type AutopilotToolCallEventLike,
 } from './core/git-guard.ts';
-import { AutopilotParallelRuntimeError, prepareAutopilotWorkstream, type PreparedAutopilotWorkstream } from './core/parallel-runtime.ts';
+import { AutopilotParallelRuntimeError, prepareAutopilotWorkstream, resolveRepoIdentity, type PreparedAutopilotWorkstream } from './core/parallel-runtime.ts';
+import { CoordinatorClient } from './core/coordination/client.ts';
+import { AutopilotSessionBridge, type CoordinationMessageInjection } from './core/coordination/supervisor.ts';
 import {
   handoffUsage,
   onboardUsage,
@@ -45,10 +51,16 @@ export interface ExtensionModelRegistryLike {
   find(provider: string, modelId: string): ExtensionModelLike | undefined;
 }
 
+export interface ExtensionSessionManagerLike {
+  getSessionId(): string;
+}
+
 export interface ExtensionCommandContextLike {
   readonly ui: ExtensionUiLike;
   readonly cwd?: string;
   readonly modelRegistry?: ExtensionModelRegistryLike;
+  readonly sessionManager?: ExtensionSessionManagerLike;
+  isIdle?(): boolean;
 }
 
 export interface ExtensionCommandDefinitionLike {
@@ -61,6 +73,16 @@ export type ExtensionToolCallHandler = (
   ctx: AutopilotToolCallContextLike,
 ) => AutopilotGuardDecision | Promise<AutopilotGuardDecision>;
 
+export type ExtensionLifecycleHandler = (
+  event: Readonly<Record<string, unknown>>,
+  ctx: ExtensionCommandContextLike,
+) => void | Promise<void>;
+
+export interface ExtensionEventRegistrar {
+  (eventName: 'tool_call', handler: ExtensionToolCallHandler): void;
+  (eventName: 'session_start' | 'session_shutdown', handler: ExtensionLifecycleHandler): void;
+}
+
 export interface ExtensionHostLike {
   registerCommand(name: string, definition: ExtensionCommandDefinitionLike): void;
   registerTool(tool: ReturnType<typeof createContextBudgetTool>): void;
@@ -70,7 +92,8 @@ export interface ExtensionHostLike {
   getThinkingLevel?(): string;
   setThinkingLevel?(level: 'high' | 'xhigh'): void;
   sendUserMessage(content: string, options: { readonly deliverAs: 'followUp' }): void;
-  on?(eventName: 'tool_call', handler: ExtensionToolCallHandler): void;
+  sendMessage?(message: CoordinationMessageInjection, options: { readonly deliverAs: 'steer' | 'followUp'; readonly triggerTurn: boolean }): void;
+  on?: ExtensionEventRegistrar;
 }
 
 function notify(ctx: ExtensionCommandContextLike, message: string, kind: NotificationKind): void {
@@ -84,6 +107,9 @@ export default function autopilotExtension(pi: ExtensionHostLike): void {
   let activeAutopilotRuntimeRoot: string | null = null;
   let activeAutopilotWorktreePath: string | null = null;
   let activeAutopilotWorkstreamRun: string | null = null;
+  let sessionBridge: AutopilotSessionBridge | null = null;
+  let lifecycleSessionId = `pi-session-${randomUUID()}`;
+  let handoffRequested = false;
 
   function activateContextBudget(): void {
     if (!contextBudgetRegistered) {
@@ -153,6 +179,48 @@ export default function autopilotExtension(pi: ExtensionHostLike): void {
     worktreeGuardRegistered = true;
   }
 
+  function rawSessionId(ctx: ExtensionCommandContextLike): string {
+    const sessionId = ctx.sessionManager?.getSessionId();
+    return sessionId === undefined || sessionId.length === 0 ? lifecycleSessionId : sessionId;
+  }
+
+  async function attachSessionBridge(prepared: PreparedAutopilotWorkstream, ctx: ExtensionCommandContextLike): Promise<boolean> {
+    if (sessionBridge !== null && sessionBridge.attachment.context.workstream_run === prepared.active.workstream_run) {
+      await sessionBridge.drainMailbox();
+      process.env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV] = sessionBridge.attachment.contextPath;
+      return true;
+    }
+    const sendMessage = pi.sendMessage;
+    if (sendMessage === undefined) {
+      notify(ctx, 'Autopilot cannot attach its durable run supervisor because Pi sendMessage is unavailable.', 'error');
+      return false;
+    }
+    if (sessionBridge !== null) {
+      const priorContextPath = sessionBridge.attachment.contextPath;
+      await sessionBridge.close('replaced-by-autopilot-activation');
+      if (process.env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV] === priorContextPath) delete process.env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV];
+      sessionBridge = null;
+    }
+    try {
+      sessionBridge = await AutopilotSessionBridge.start({
+        repo: prepared.repo,
+        active: prepared.active,
+        rawSessionId: rawSessionId(ctx),
+        sink: {
+          send: (message, delivery) => sendMessage(message, { deliverAs: delivery, triggerTurn: false }),
+          isIdle: () => ctx.isIdle?.() ?? true,
+        },
+      });
+      process.env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV] = sessionBridge.attachment.contextPath;
+      handoffRequested = false;
+      return true;
+    } catch (error) {
+      notify(ctx, `Autopilot durable run supervisor attachment failed: ${error instanceof Error ? error.message : String(error)}`, 'error');
+      sessionBridge = null;
+      return false;
+    }
+  }
+
   async function prepareAndActivateWorkstream(input: {
     readonly workstream: string;
     readonly ctx: ExtensionCommandContextLike;
@@ -184,12 +252,34 @@ export default function autopilotExtension(pi: ExtensionHostLike): void {
       return null;
     }
 
+    if (!(await attachSessionBridge(prepared, input.ctx))) return null;
+
     activeAutopilotWorkstream = prepared.active.workstream;
     activeAutopilotRuntimeRoot = prepared.runtimeRoot;
     activeAutopilotWorktreePath = prepared.mainWorktreePath;
     activeAutopilotWorkstreamRun = prepared.active.workstream_run;
     registerWorktreeGuardIfSupported();
     return prepared;
+  }
+
+  if (pi.on !== undefined) {
+    pi.on('session_start', (_event, ctx) => {
+      const restored = ctx.sessionManager?.getSessionId();
+      lifecycleSessionId = restored === undefined || restored.length === 0 ? `pi-session-${randomUUID()}` : restored;
+    });
+    pi.on('session_shutdown', async (event, ctx) => {
+      if (sessionBridge === null) return;
+      try {
+        if (handoffRequested) await sessionBridge.prepareHandoff();
+        else await sessionBridge.close(typeof event['reason'] === 'string' ? event['reason'] : 'session-shutdown');
+      } catch (error) {
+        notify(ctx, `Autopilot session bridge shutdown failed loudly: ${error instanceof Error ? error.message : String(error)}`, 'error');
+      } finally {
+        const contextPath = sessionBridge.attachment.contextPath;
+        if (process.env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV] === contextPath) delete process.env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV];
+        sessionBridge = null;
+      }
+    });
   }
 
   pi.registerCommand(AUTOPILOT_COMMAND, {
@@ -368,6 +458,34 @@ export default function autopilotExtension(pi: ExtensionHostLike): void {
     },
   });
 
+  pi.registerCommand(AUTOPILOT_COORDINATION_COMMAND, {
+    description: 'Inspect the local Autopilot coordinator: /autopilot-coordination status|doctor',
+    handler: async (args, ctx) => {
+      const parsed = parseAutopilotCoordinationArgs(args);
+      if (!parsed.ok) {
+        notify(ctx, parsed.message, 'warning');
+        return;
+      }
+      try {
+        const client = new CoordinatorClient();
+        const repoId = activeAutopilotWorkstreamRun === null ? resolveRepoIdentity(ctx.cwd ?? process.cwd()).repoKey : sessionBridge?.attachment.context.repo_id ?? 'global';
+        const response = parsed.value.action === 'doctor'
+          ? await client.query('doctor')
+          : await client.query('status', repoId, activeAutopilotWorkstreamRun);
+        const schema = typeof response.payload['schema_version'] === 'string' ? response.payload['schema_version'] : 'unknown';
+        const healthy = response.payload['healthy'];
+        const runCount = Array.isArray(response.payload['runs']) ? response.payload['runs'].length : 0;
+        const sessionCount = Array.isArray(response.payload['session_leases']) ? response.payload['session_leases'].length : 0;
+        const summary = parsed.value.action === 'doctor'
+          ? `Autopilot coordinator doctor: schema=${schema} healthy=${String(healthy === true)}.`
+          : `Autopilot coordinator status: schema=${schema} runs=${String(runCount)} sessions=${String(sessionCount)}.`;
+        notify(ctx, summary, healthy === false ? 'error' : 'info');
+      } catch (error) {
+        notify(ctx, `Autopilot coordination ${parsed.value.action} failed: ${error instanceof Error ? error.message : String(error)}`, 'error');
+      }
+    },
+  });
+
   pi.registerCommand(AUTOPILOT_ONBOARD_COMMAND, {
     description:
       'Generate paste-ready Autopilot onboarding instructions: /autopilot-onboard <workstream> [handoff refs]',
@@ -421,7 +539,8 @@ export default function autopilotExtension(pi: ExtensionHostLike): void {
         comments: `${args.trim()}${runSuffix}`.trim(),
       });
       pi.sendUserMessage(prompt, { deliverAs: 'followUp' });
-      notify(ctx, `Autopilot handoff requested for ${activeAutopilotWorkstream}.`, 'info');
+      handoffRequested = true;
+      notify(ctx, `Autopilot handoff requested for ${activeAutopilotWorkstream}; durable fencing will commit at session shutdown after handoff artifacts are written.`, 'info');
       return Promise.resolve();
     },
   });

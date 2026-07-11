@@ -63,6 +63,13 @@ export function parseAutopilotClaimGcArgs(args) {
         return { ok: true, value: { apply: true } };
     return { ok: false, message: 'Usage: /autopilot-claim-gc --dry-run OR /autopilot-claim-gc --apply' };
 }
+export function parseAutopilotCoordinationArgs(args) {
+    const tokens = args.trim().split(/\s+/u).filter((token) => token.length > 0);
+    if (tokens.length === 1 && (tokens[0] === 'status' || tokens[0] === 'doctor')) {
+        return { ok: true, value: { action: tokens[0] } };
+    }
+    return { ok: false, message: 'Usage: /autopilot-coordination status OR /autopilot-coordination doctor' };
+}
 function parseAutopilotLifecycleArgs(args, usage) {
     const tokens = args.trim().split(/\s+/u).filter((token) => token.length > 0);
     if (tokens.length === 0) {

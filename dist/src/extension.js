@@ -1,12 +1,15 @@
+import { randomUUID } from 'node:crypto';
 import { createContextBudgetTool, resolveContextHaltPercent } from "./core/context-budget.js";
-import { AUTOPILOT_ABORT_COMMAND, AUTOPILOT_CLAIM_GC_COMMAND, AUTOPILOT_CLOSE_COMMAND, AUTOPILOT_COMMAND, AUTOPILOT_CONFIG_COMMAND, AUTOPILOT_HANDOFF_COMMAND, AUTOPILOT_INJECT_COMMAND, AUTOPILOT_ONBOARD_COMMAND, CONTEXT_BUDGET_TOOL_NAME, } from "./core/names.js";
-import { parseAutopilotAbortArgs, parseAutopilotArgs, parseAutopilotClaimGcArgs, parseAutopilotCloseArgs, parseAutopilotConfigArgs, parseAutopilotInjectArgs, runnerInvocationFromModuleUrl, runtimeRootForWorkstream } from "./core/paths.js";
+import { AUTOPILOT_ABORT_COMMAND, AUTOPILOT_CLAIM_GC_COMMAND, AUTOPILOT_CLOSE_COMMAND, AUTOPILOT_COMMAND, AUTOPILOT_CONFIG_COMMAND, AUTOPILOT_COORDINATION_COMMAND, AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV, AUTOPILOT_HANDOFF_COMMAND, AUTOPILOT_INJECT_COMMAND, AUTOPILOT_ONBOARD_COMMAND, CONTEXT_BUDGET_TOOL_NAME, } from "./core/names.js";
+import { parseAutopilotAbortArgs, parseAutopilotArgs, parseAutopilotClaimGcArgs, parseAutopilotCloseArgs, parseAutopilotConfigArgs, parseAutopilotCoordinationArgs, parseAutopilotInjectArgs, runnerInvocationFromModuleUrl, runtimeRootForWorkstream } from "./core/paths.js";
 import { AutopilotCloseError, abortAutopilotWorkstream, closeAutopilotWorkstream } from "./core/close-runtime.js";
 import { runAutopilotClaimGc } from "./core/claim-gc.js";
 import { readSchedulerConfig, writeSchedulerConfig } from "./core/scheduler-config.js";
 import { AUTOPILOT_PARENT_MODEL_ASSIGNMENT } from "./core/model-roster.js";
 import { evaluateAutopilotWorktreeToolCall, } from "./core/git-guard.js";
-import { AutopilotParallelRuntimeError, prepareAutopilotWorkstream } from "./core/parallel-runtime.js";
+import { AutopilotParallelRuntimeError, prepareAutopilotWorkstream, resolveRepoIdentity } from "./core/parallel-runtime.js";
+import { CoordinatorClient } from "./core/coordination/client.js";
+import { AutopilotSessionBridge } from "./core/coordination/supervisor.js";
 import { handoffUsage, onboardUsage, renderAutopilotPrompt, renderHandoffPrompt, renderOnboardPrompt, } from "./core/prompts.js";
 function notify(ctx, message, kind) {
     ctx.ui.notify(message, kind);
@@ -18,6 +21,9 @@ export default function autopilotExtension(pi) {
     let activeAutopilotRuntimeRoot = null;
     let activeAutopilotWorktreePath = null;
     let activeAutopilotWorkstreamRun = null;
+    let sessionBridge = null;
+    let lifecycleSessionId = `pi-session-${randomUUID()}`;
+    let handoffRequested = false;
     function activateContextBudget() {
         if (!contextBudgetRegistered) {
             const threshold = resolveContextHaltPercent(process.env);
@@ -83,6 +89,48 @@ export default function autopilotExtension(pi) {
         });
         worktreeGuardRegistered = true;
     }
+    function rawSessionId(ctx) {
+        const sessionId = ctx.sessionManager?.getSessionId();
+        return sessionId === undefined || sessionId.length === 0 ? lifecycleSessionId : sessionId;
+    }
+    async function attachSessionBridge(prepared, ctx) {
+        if (sessionBridge !== null && sessionBridge.attachment.context.workstream_run === prepared.active.workstream_run) {
+            await sessionBridge.drainMailbox();
+            process.env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV] = sessionBridge.attachment.contextPath;
+            return true;
+        }
+        const sendMessage = pi.sendMessage;
+        if (sendMessage === undefined) {
+            notify(ctx, 'Autopilot cannot attach its durable run supervisor because Pi sendMessage is unavailable.', 'error');
+            return false;
+        }
+        if (sessionBridge !== null) {
+            const priorContextPath = sessionBridge.attachment.contextPath;
+            await sessionBridge.close('replaced-by-autopilot-activation');
+            if (process.env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV] === priorContextPath)
+                delete process.env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV];
+            sessionBridge = null;
+        }
+        try {
+            sessionBridge = await AutopilotSessionBridge.start({
+                repo: prepared.repo,
+                active: prepared.active,
+                rawSessionId: rawSessionId(ctx),
+                sink: {
+                    send: (message, delivery) => sendMessage(message, { deliverAs: delivery, triggerTurn: false }),
+                    isIdle: () => ctx.isIdle?.() ?? true,
+                },
+            });
+            process.env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV] = sessionBridge.attachment.contextPath;
+            handoffRequested = false;
+            return true;
+        }
+        catch (error) {
+            notify(ctx, `Autopilot durable run supervisor attachment failed: ${error instanceof Error ? error.message : String(error)}`, 'error');
+            sessionBridge = null;
+            return false;
+        }
+    }
     async function prepareAndActivateWorkstream(input) {
         try {
             activateContextBudget();
@@ -105,12 +153,39 @@ export default function autopilotExtension(pi) {
             notify(input.ctx, `${input.prepareErrorPrefix}: ${message}`, 'error');
             return null;
         }
+        if (!(await attachSessionBridge(prepared, input.ctx)))
+            return null;
         activeAutopilotWorkstream = prepared.active.workstream;
         activeAutopilotRuntimeRoot = prepared.runtimeRoot;
         activeAutopilotWorktreePath = prepared.mainWorktreePath;
         activeAutopilotWorkstreamRun = prepared.active.workstream_run;
         registerWorktreeGuardIfSupported();
         return prepared;
+    }
+    if (pi.on !== undefined) {
+        pi.on('session_start', (_event, ctx) => {
+            const restored = ctx.sessionManager?.getSessionId();
+            lifecycleSessionId = restored === undefined || restored.length === 0 ? `pi-session-${randomUUID()}` : restored;
+        });
+        pi.on('session_shutdown', async (event, ctx) => {
+            if (sessionBridge === null)
+                return;
+            try {
+                if (handoffRequested)
+                    await sessionBridge.prepareHandoff();
+                else
+                    await sessionBridge.close(typeof event['reason'] === 'string' ? event['reason'] : 'session-shutdown');
+            }
+            catch (error) {
+                notify(ctx, `Autopilot session bridge shutdown failed loudly: ${error instanceof Error ? error.message : String(error)}`, 'error');
+            }
+            finally {
+                const contextPath = sessionBridge.attachment.contextPath;
+                if (process.env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV] === contextPath)
+                    delete process.env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV];
+                sessionBridge = null;
+            }
+        });
     }
     pi.registerCommand(AUTOPILOT_COMMAND, {
         description: 'Start or resume Autopilot orchestration: /autopilot <workstream> [task intro]',
@@ -281,6 +356,34 @@ export default function autopilotExtension(pi) {
             }
         },
     });
+    pi.registerCommand(AUTOPILOT_COORDINATION_COMMAND, {
+        description: 'Inspect the local Autopilot coordinator: /autopilot-coordination status|doctor',
+        handler: async (args, ctx) => {
+            const parsed = parseAutopilotCoordinationArgs(args);
+            if (!parsed.ok) {
+                notify(ctx, parsed.message, 'warning');
+                return;
+            }
+            try {
+                const client = new CoordinatorClient();
+                const repoId = activeAutopilotWorkstreamRun === null ? resolveRepoIdentity(ctx.cwd ?? process.cwd()).repoKey : sessionBridge?.attachment.context.repo_id ?? 'global';
+                const response = parsed.value.action === 'doctor'
+                    ? await client.query('doctor')
+                    : await client.query('status', repoId, activeAutopilotWorkstreamRun);
+                const schema = typeof response.payload['schema_version'] === 'string' ? response.payload['schema_version'] : 'unknown';
+                const healthy = response.payload['healthy'];
+                const runCount = Array.isArray(response.payload['runs']) ? response.payload['runs'].length : 0;
+                const sessionCount = Array.isArray(response.payload['session_leases']) ? response.payload['session_leases'].length : 0;
+                const summary = parsed.value.action === 'doctor'
+                    ? `Autopilot coordinator doctor: schema=${schema} healthy=${String(healthy === true)}.`
+                    : `Autopilot coordinator status: schema=${schema} runs=${String(runCount)} sessions=${String(sessionCount)}.`;
+                notify(ctx, summary, healthy === false ? 'error' : 'info');
+            }
+            catch (error) {
+                notify(ctx, `Autopilot coordination ${parsed.value.action} failed: ${error instanceof Error ? error.message : String(error)}`, 'error');
+            }
+        },
+    });
     pi.registerCommand(AUTOPILOT_ONBOARD_COMMAND, {
         description: 'Generate paste-ready Autopilot onboarding instructions: /autopilot-onboard <workstream> [handoff refs]',
         handler: (args, ctx) => {
@@ -322,7 +425,8 @@ export default function autopilotExtension(pi) {
                 comments: `${args.trim()}${runSuffix}`.trim(),
             });
             pi.sendUserMessage(prompt, { deliverAs: 'followUp' });
-            notify(ctx, `Autopilot handoff requested for ${activeAutopilotWorkstream}.`, 'info');
+            handoffRequested = true;
+            notify(ctx, `Autopilot handoff requested for ${activeAutopilotWorkstream}; durable fencing will commit at session shutdown after handoff artifacts are written.`, 'info');
             return Promise.resolve();
         },
     });

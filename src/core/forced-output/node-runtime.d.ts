@@ -4,6 +4,6 @@ declare module 'node:fs' {
   export function writeFileSync(
     path: string | URL,
     data: string,
-    options?: { readonly encoding?: 'utf8'; readonly flag?: string },
+    options?: { readonly encoding?: 'utf8'; readonly flag?: string; readonly mode?: number },
   ): void;
 }

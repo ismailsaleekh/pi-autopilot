@@ -20,6 +20,10 @@ export interface ParsedAutopilotClaimGcArgs {
   readonly apply: boolean;
 }
 
+export interface ParsedAutopilotCoordinationArgs {
+  readonly action: 'status' | 'doctor';
+}
+
 export interface ParsedAutopilotInjectArgs {
   readonly workstream: string;
 }
@@ -42,6 +46,10 @@ export type ParseAutopilotConfigArgsResult =
 
 export type ParseAutopilotClaimGcArgsResult =
   | { readonly ok: true; readonly value: ParsedAutopilotClaimGcArgs }
+  | { readonly ok: false; readonly message: string };
+
+export type ParseAutopilotCoordinationArgsResult =
+  | { readonly ok: true; readonly value: ParsedAutopilotCoordinationArgs }
   | { readonly ok: false; readonly message: string };
 
 const WORKSTREAM_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
@@ -112,6 +120,14 @@ export function parseAutopilotClaimGcArgs(args: string): ParseAutopilotClaimGcAr
   if (tokens.length === 0 || (tokens.length === 1 && tokens[0] === '--dry-run')) return { ok: true, value: { apply: false } };
   if (tokens.length === 1 && tokens[0] === '--apply') return { ok: true, value: { apply: true } };
   return { ok: false, message: 'Usage: /autopilot-claim-gc --dry-run OR /autopilot-claim-gc --apply' };
+}
+
+export function parseAutopilotCoordinationArgs(args: string): ParseAutopilotCoordinationArgsResult {
+  const tokens = args.trim().split(/\s+/u).filter((token) => token.length > 0);
+  if (tokens.length === 1 && (tokens[0] === 'status' || tokens[0] === 'doctor')) {
+    return { ok: true, value: { action: tokens[0] } };
+  }
+  return { ok: false, message: 'Usage: /autopilot-coordination status OR /autopilot-coordination doctor' };
 }
 
 function parseAutopilotLifecycleArgs(args: string, usage: string): ParseAutopilotCloseArgsResult {

@@ -11,13 +11,17 @@ import {
   AUTOPILOT_CLOSE_COMMAND,
   AUTOPILOT_COMMAND,
   AUTOPILOT_CONFIG_COMMAND,
+  AUTOPILOT_COORDINATION_COMMAND,
   AUTOPILOT_HANDOFF_COMMAND,
   AUTOPILOT_INJECT_COMMAND,
   AUTOPILOT_ONBOARD_COMMAND,
   AUTOPILOT_STATUS_TOOL,
   CONTEXT_BUDGET_TOOL_NAME,
 } from '../../src/core/names.ts';
-import { AUTOPILOT_STATE_ROOT_ENV } from '../../src/core/parallel-runtime.ts';
+import { AUTOPILOT_STATE_ROOT_ENV, resolveRepoIdentity } from '../../src/core/parallel-runtime.ts';
+import { CoordinatorClient } from '../../src/core/coordination/client.ts';
+import { coordinatorRuntimePaths } from '../../src/core/coordination/runtime-paths.ts';
+import { startCoordinatorServer, type RunningCoordinator } from '../../src/core/coordination/server.ts';
 
 type ThinkingLevelLike = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
 
@@ -171,6 +175,7 @@ interface SdkHarness {
   readonly activeTools: readonly string[];
   readonly previousCwd: string;
   readonly previousStateRoot: string | undefined;
+  readonly coordinator: RunningCoordinator;
 }
 
 const packageRoot = new URL('../../', import.meta.url).pathname;
@@ -328,6 +333,7 @@ async function createSdkHarness(): Promise<SdkHarness> {
   const previousStateRoot = process.env[AUTOPILOT_STATE_ROOT_ENV];
   process.env[AUTOPILOT_STATE_ROOT_ENV] = join(root, 'autopilot-state');
   process.chdir(cwd);
+  const coordinator = await startCoordinatorServer(coordinatorRuntimePaths(process.env));
 
   const sdk = await loadPiSdk();
   const resourceLoader = new sdk.DefaultResourceLoader({
@@ -356,12 +362,13 @@ async function createSdkHarness(): Promise<SdkHarness> {
   const sentMessages: MessageCapture[] = [];
   const activeTools: string[] = [];
   session.extensionRunner.bindCore(captureCoreActions(session, sentMessages, activeTools), contextActions());
-  return { root, session, sentMessages, activeTools, previousCwd, previousStateRoot };
+  return { root, session, sentMessages, activeTools, previousCwd, previousStateRoot, coordinator };
 }
 
 async function disposeHarness(harness: SdkHarness): Promise<void> {
   await harness.session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' });
   harness.session.dispose();
+  await harness.coordinator.close();
   process.chdir(harness.previousCwd);
   if (harness.previousStateRoot === undefined) delete process.env[AUTOPILOT_STATE_ROOT_ENV];
   else process.env[AUTOPILOT_STATE_ROOT_ENV] = harness.previousStateRoot;
@@ -378,6 +385,7 @@ void describe('Pi SDK Autopilot activation', () => {
         AUTOPILOT_CLAIM_GC_COMMAND,
         AUTOPILOT_CLOSE_COMMAND,
         AUTOPILOT_CONFIG_COMMAND,
+        AUTOPILOT_COORDINATION_COMMAND,
         AUTOPILOT_HANDOFF_COMMAND,
         AUTOPILOT_INJECT_COMMAND,
         AUTOPILOT_ONBOARD_COMMAND,
@@ -449,6 +457,35 @@ void describe('Pi SDK Autopilot activation', () => {
       assert.match(message.content, /current Autopilot parent for workstream `demo`/);
       assert.match(message.content, /handoff after inject/);
       assert.match(message.content, /Active workstream run:/);
+    } finally {
+      await disposeHarness(harness);
+    }
+  });
+
+  void it('commits handoff-pending fencing through the real session shutdown lifecycle', async () => {
+    const harness = await createSdkHarness();
+    try {
+      await requireCommand(harness.session, AUTOPILOT_COMMAND).handler(
+        'handoff-lifecycle scope',
+        harness.session.extensionRunner.createCommandContext(),
+      );
+      await requireCommand(harness.session, AUTOPILOT_HANDOFF_COMMAND).handler(
+        'handoff lifecycle proof',
+        harness.session.extensionRunner.createCommandContext(),
+      );
+      await harness.session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' });
+      const repo = resolveRepoIdentity(join(harness.root, 'project'));
+      const status = await new CoordinatorClient({ env: process.env, autoStart: false }).query('status', repo.repoKey, null);
+      const sessions = status.payload['session_leases'];
+      if (!Array.isArray(sessions) || sessions.length !== 1) throw new Error('expected one durable session lease');
+      const session = sessions[0];
+      if (!isIndexable(session)) throw new Error('durable session lease must be an object');
+      assert.equal(session['status'], 'handoff-pending');
+      const runs = status.payload['runs'];
+      if (!Array.isArray(runs) || runs.length !== 1) throw new Error('expected one durable run supervisor');
+      const run = runs[0];
+      if (!isIndexable(run)) throw new Error('durable run supervisor must be an object');
+      assert.equal(run['active_session_generation'], 1);
     } finally {
       await disposeHarness(harness);
     }

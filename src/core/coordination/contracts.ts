@@ -55,9 +55,10 @@ export class CoordinationContractError extends Error {
 type JsonObject = Readonly<Record<string, unknown>>;
 const ISO_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;
 const SHA256 = /^sha256:[a-f0-9]{64}$/u;
+const CHILD_TOKEN = /^[a-f0-9]{64}$/u;
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,191}$/u;
-const QUERY_ACTIONS = ['status', 'doctor'] as const;
-const MUTATION_ACTIONS = ['attach-run', 'attach-session', 'detach-session', 'heartbeat', 'acquire-group', 'acknowledge-grant', 'respond-claim-request', 'cancel-claim-request', 'acknowledge-message', 'transition-operation'] as const;
+const QUERY_ACTIONS = ['status', 'doctor', 'export'] as const;
+const MUTATION_ACTIONS = ['attach-run', 'attach-session', 'detach-session', 'prepare-handoff', 'heartbeat', 'register-child', 'heartbeat-child', 'complete-child', 'drain-mailbox', 'acquire-group', 'acknowledge-grant', 'respond-claim-request', 'cancel-claim-request', 'acknowledge-message', 'transition-operation'] as const;
 const MESSAGE_TYPES = ['claim-request', 'release-notification', 'grant-offer', 'recovery-required'] as const;
 const WORKTREE_STATES = ['planned', 'active', 'dirty', 'quarantined', 'terminal', 'removed'] as const;
 const OPERATION_TYPES = ['create', 'materialize', 'commit', 'merge', 'reset', 'quarantine', 'archive', 'remove'] as const;
@@ -65,15 +66,21 @@ const EXHAUSTED_ALTERNATIVES = ['sequencing', 'partitioning', 'ownership-transfe
 const PAYLOAD_FIELDS: Readonly<Record<CoordinatorQueryAction | CoordinatorMutationAction, readonly string[]>> = {
   status: [],
   doctor: [],
-  'attach-run': ['autopilot_id', 'workstream'],
-  'attach-session': ['boot_id', 'lease_expires_at', 'pid'],
-  'detach-session': ['reason'],
-  heartbeat: ['lease_expires_at'],
+  export: ['output_path'],
+  'attach-run': ['autopilot_id', 'canonical_root', 'git_common_dir', 'repo_key', 'workstream'],
+  'attach-session': ['boot_id', 'handoff_token', 'lease_expires_at', 'pid', 'session_lease_id', 'session_token'],
+  'detach-session': ['reason', 'session_lease_id', 'session_token'],
+  'prepare-handoff': ['handoff_token', 'session_lease_id', 'session_token'],
+  heartbeat: ['lease_expires_at', 'session_lease_id', 'session_token'],
+  'register-child': ['attempt', 'autopilot_id', 'boot_id', 'child_lease_id', 'child_token', 'lease_expires_at', 'pid', 'session_lease_id', 'session_token', 'unit_id'],
+  'heartbeat-child': ['boot_id', 'child_lease_id', 'child_token', 'lease_expires_at', 'pid'],
+  'complete-child': ['boot_id', 'child_lease_id', 'child_token', 'evidence_ref', 'evidence_sha256', 'pid', 'status'],
+  'drain-mailbox': ['delivery_id', 'session_lease_id', 'session_token'],
   'acquire-group': ['acquisition_group_id'],
   'acknowledge-grant': ['acquisition_group_id'],
   'respond-claim-request': ['request_id', 'response'],
   'cancel-claim-request': ['request_id'],
-  'acknowledge-message': ['message_id'],
+  'acknowledge-message': ['message_id', 'session_lease_id', 'session_token'],
   'transition-operation': ['operation_id', 'stage'],
 };
 
@@ -164,6 +171,38 @@ function repoPath(record: JsonObject, field: string, label: string): string {
 function array(value: unknown, label: string, maxItems = 10_000): readonly unknown[] {
   if (!Array.isArray(value) || value.length > maxItems) fail(label, `must be an array with at most ${String(maxItems)} entries`);
   return value;
+}
+
+function boundedJsonValue(value: unknown, label: string, depth: number): unknown {
+  if (depth > 8) fail(label, 'exceeds maximum JSON nesting depth');
+  if (value === null || typeof value === 'boolean') return value;
+  if (typeof value === 'string') {
+    if (value.length > 4096) fail(label, 'contains a string longer than 4096 characters');
+    return value;
+  }
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) fail(label, 'contains a non-finite number');
+    return value;
+  }
+  if (Array.isArray(value)) {
+    if (value.length > 256) fail(label, 'contains an array longer than 256 entries');
+    return Object.freeze(value.map((entry, index) => boundedJsonValue(entry, `${label}[${String(index)}]`, depth + 1)));
+  }
+  if (!isJsonObject(value)) fail(label, 'contains a non-JSON value');
+  const entries = Object.entries(value);
+  if (entries.length > 256) fail(label, 'contains an object with more than 256 fields');
+  const out: Record<string, unknown> = {};
+  for (const [key, entry] of entries) {
+    if (key.length === 0 || key.length > 128) fail(label, 'contains an invalid field name');
+    out[key] = boundedJsonValue(entry, `${label}.${key}`, depth + 1);
+  }
+  return Object.freeze(out);
+}
+
+function boundedJsonObject(value: unknown, label: string): JsonObject {
+  const parsed = boundedJsonValue(value, label, 0);
+  if (!isJsonObject(parsed)) fail(label, 'must be a JSON object');
+  return parsed;
 }
 
 function uniqueStrings(value: unknown, label: string, minItems = 0, maxItems = 1024): readonly string[] {
@@ -390,7 +429,7 @@ export function parseCoordinationClaimRequest(value: unknown): CoordinationClaim
 
 export function parseCoordinationMessage(value: unknown): CoordinationMessage {
   const label = 'CoordinationMessage';
-  const record = object(value, label, ['acknowledged_event_seq', 'correlation_id', 'created_event_seq', 'delivered_event_seq', 'message_id', 'message_type', 'recipient_workstream_run', 'repo_id', 'schema_version', 'status', 'version']);
+  const record = object(value, label, ['acknowledged_event_seq', 'correlation_id', 'created_event_seq', 'delivered_event_seq', 'message_id', 'message_type', 'payload', 'recipient_workstream_run', 'repo_id', 'schema_version', 'status', 'version']);
   return {
     schema_version: literal(record, 'schema_version', 'autopilot.coordination_message.v1', label),
     message_id: identifier(record, 'message_id', label),
@@ -398,6 +437,7 @@ export function parseCoordinationMessage(value: unknown): CoordinationMessage {
     recipient_workstream_run: identifier(record, 'recipient_workstream_run', label),
     message_type: oneOf(record, 'message_type', MESSAGE_TYPES, label),
     correlation_id: identifier(record, 'correlation_id', label),
+    payload: boundedJsonObject(record['payload'], `${label}.payload`),
     status: oneOf(record, 'status', COORDINATION_MESSAGE_STATUSES, label),
     created_event_seq: integer(record, 'created_event_seq', label),
     delivered_event_seq: nullableInteger(record, 'delivered_event_seq', label),
@@ -522,19 +562,29 @@ export function parseCoordinationSnapshot(value: unknown): CoordinationSnapshot 
 }
 
 function parsePayload(value: unknown, action: CoordinatorQueryAction | CoordinatorMutationAction): JsonObject {
-  const payload = object(value, `CoordinatorRequestEnvelope.payload(${action})`, PAYLOAD_FIELDS[action]);
+  const label = `CoordinatorRequestEnvelope.payload(${action})`;
+  const payload = object(value, label, PAYLOAD_FIELDS[action]);
   for (const field of PAYLOAD_FIELDS[action]) {
     const entry = payload[field];
-    if (field === 'pid') {
-      if (typeof entry !== 'number' || !Number.isSafeInteger(entry) || entry < 1) fail('CoordinatorRequestEnvelope.payload', 'pid must be a positive safe integer');
+    if (field === 'pid' || field === 'attempt') {
+      if (typeof entry !== 'number' || !Number.isSafeInteger(entry) || entry < 1) fail(label, `${field} must be a positive safe integer`);
     } else if (field === 'lease_expires_at') {
-      timestamp(payload, field, 'CoordinatorRequestEnvelope.payload');
+      timestamp(payload, field, label);
     } else if (field === 'response') {
-      oneOf(payload, field, ['release-now', 'deferred'] as const, 'CoordinatorRequestEnvelope.payload');
+      oneOf(payload, field, ['release-now', 'deferred'] as const, label);
     } else if (field === 'stage') {
-      oneOf(payload, field, COORDINATION_OPERATION_STAGES, 'CoordinatorRequestEnvelope.payload');
-    } else if (typeof entry !== 'string' || entry.length === 0 || entry.length > 512) {
-      fail('CoordinatorRequestEnvelope.payload', `${field} must be a bounded non-empty string`);
+      oneOf(payload, field, COORDINATION_OPERATION_STAGES, label);
+    } else if (field === 'status') {
+      oneOf(payload, field, ['terminal', 'recovery-required'] as const, label);
+    } else if (field === 'output_path' || field === 'canonical_root' || field === 'git_common_dir') {
+      absolutePath(payload, field, label);
+    } else if (field === 'child_token' || field === 'session_token') {
+      if (typeof entry !== 'string' || !CHILD_TOKEN.test(entry)) fail(label, `${field} must be 32 random bytes encoded as lowercase hex`);
+    } else if (field === 'handoff_token' || field === 'evidence_ref' || field === 'evidence_sha256') {
+      if (entry !== null && (typeof entry !== 'string' || entry.length === 0 || entry.length > 1024)) fail(label, `${field} must be null or a bounded non-empty string`);
+      if (field === 'evidence_sha256' && typeof entry === 'string' && !SHA256.test(entry)) fail(label, 'evidence_sha256 must use sha256:<64 lowercase hex>');
+    } else if (typeof entry !== 'string' || entry.length === 0 || entry.length > 1024) {
+      fail(label, `${field} must be a bounded non-empty string`);
     }
   }
   return payload;
@@ -550,8 +600,15 @@ export function parseCoordinatorRequestEnvelope(value: unknown): CoordinatorRequ
   const sessionId = nullableString(record, 'session_id', label, 192);
   const fencingGeneration = nullableInteger(record, 'fencing_generation', label);
   const expectedVersion = nullableInteger(record, 'expected_version', label);
-  if (mutation && (idempotencyKey === null || workstreamRun === null || sessionId === null || fencingGeneration === null || expectedVersion === null)) {
-    fail(label, 'mutating requests require idempotency_key, workstream_run, session_id, fencing_generation, and expected_version');
+  if (mutation && (idempotencyKey === null || workstreamRun === null || expectedVersion === null)) {
+    fail(label, 'mutating requests require idempotency_key, workstream_run, and expected_version');
+  }
+  const childScoped = action === 'heartbeat-child' || action === 'complete-child';
+  if (mutation && action !== 'attach-run' && !childScoped && (sessionId === null || fencingGeneration === null)) {
+    fail(label, 'session-scoped mutations require session_id and fencing_generation');
+  }
+  if ((action === 'attach-run' || childScoped) && (sessionId !== null || fencingGeneration !== null)) {
+    fail(label, `${action} must not carry ephemeral session identity`);
   }
   return {
     schema_version: literal(record, 'schema_version', AUTOPILOT_COORDINATOR_REQUEST_SCHEMA, label),
@@ -584,7 +641,7 @@ export function parseCoordinatorResponseEnvelope(value: unknown): CoordinatorRes
     committed_event_seq: committedEventSeq,
     error_code: errorCode,
     retryable: boolean(record, 'retryable', label),
-    payload: object(record['payload'], `${label}.payload`, Object.keys((record['payload'] !== null && typeof record['payload'] === 'object' && !Array.isArray(record['payload'])) ? record['payload'] : {})),
+    payload: boundedJsonObject(record['payload'], `${label}.payload`),
   };
 }
 

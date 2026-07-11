@@ -7,18 +7,27 @@ import { describe, it } from 'node:test';
 
 import { runAutopilotAgentFromSpecPath } from '../../src/core/agent-runner.ts';
 import { AUTOPILOT_STATE_ROOT_ENV, prepareAutopilotUnitWorktree, prepareAutopilotWorkstream } from '../../src/core/parallel-runtime.ts';
+import { AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV } from '../../src/core/names.ts';
+import { coordinatorRuntimePaths } from '../../src/core/coordination/runtime-paths.ts';
+import { startCoordinatorServer } from '../../src/core/coordination/server.ts';
+import { DurableRunSupervisorClient } from '../../src/core/coordination/supervisor.ts';
 import type { AutopilotEventRow, AutopilotState, AutopilotUnitSpec, AutopilotVerificationPlan } from '../../src/core/contracts/types.ts';
 import { appendAutopilotEventRow, readAutopilotResumeSnapshot, writeAutopilotStateAtomic } from '../../src/core/state-store/index.ts';
 
 async function withTempDir<T>(run: (dir: string) => Promise<T>): Promise<T> {
   const dir = await mkdtemp(join(tmpdir(), 'autopilot-agent-e2e-'));
   const originalStateRoot = process.env[AUTOPILOT_STATE_ROOT_ENV];
+  const originalSessionContext = process.env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV];
   process.env[AUTOPILOT_STATE_ROOT_ENV] = join(dir, 'autopilot-state');
+  const coordinator = await startCoordinatorServer(coordinatorRuntimePaths(process.env));
   try {
     return await run(dir);
   } finally {
+    await coordinator.close();
     if (originalStateRoot === undefined) delete process.env[AUTOPILOT_STATE_ROOT_ENV];
     else process.env[AUTOPILOT_STATE_ROOT_ENV] = originalStateRoot;
+    if (originalSessionContext === undefined) delete process.env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV];
+    else process.env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV] = originalSessionContext;
     await rm(dir, { recursive: true, force: true });
   }
 }
@@ -92,6 +101,9 @@ void describe('autopilot runner e2e smoke', () => {
       await initGitSource(source);
       const prepared = await prepareAutopilotWorkstream({ workstream: 'autopilot-e2e', sourceCwd: source });
       const runtimeRoot = prepared.runtimeRoot;
+      const supervisor = new DurableRunSupervisorClient(process.env);
+      const attachment = await supervisor.attach({ repo: prepared.repo, active: prepared.active, rawSessionId: 'e2e-parent-session' });
+      process.env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV] = attachment.contextPath;
       const unitWorktree = await prepareAutopilotUnitWorktree({
         active: prepared.active,
         unitId: 'e01-implement',
@@ -192,6 +204,7 @@ import { dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
 
 const contextPath = process.env.AUTOPILOT_AGENT_STATUS_CONTEXT;
+if (process.env.AUTOPILOT_COORDINATOR_SESSION_CONTEXT !== undefined) throw new Error('parent session authority leaked into child Pi');
 function write(obj) { process.stdout.write(JSON.stringify(obj) + '\\n'); }
 function response(cmd, success = true, extra = {}) { write({ id: cmd.id, type: 'response', command: cmd.type, success, ...extra }); }
 function loadContext() {

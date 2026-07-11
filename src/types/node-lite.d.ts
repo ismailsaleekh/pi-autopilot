@@ -7,6 +7,8 @@ declare const process: {
   chdir(directory: string): void;
   kill(pid: number, signal?: 0 | string): boolean;
   exit(code?: number): never;
+  exitCode: number | undefined;
+  once(event: 'SIGINT' | 'SIGTERM' | 'SIGHUP', listener: () => void): void;
 };
 
 declare module 'node:test' {
@@ -17,9 +19,11 @@ declare module 'node:test' {
 declare module 'node:assert/strict' {
   interface AssertStrict {
     equal(actual: unknown, expected: unknown, message?: string): void;
+    notEqual(actual: unknown, expected: unknown, message?: string): void;
     deepEqual(actual: unknown, expected: unknown, message?: string): void;
     ok(value: unknown, message?: string): void;
     throws(fn: () => unknown, error?: unknown, message?: string): void;
+    rejects(fn: () => Promise<unknown>, error?: unknown, message?: string): Promise<void>;
     doesNotThrow(fn: () => unknown, message?: string): void;
     match(value: string, regexp: RegExp, message?: string): void;
   }
@@ -38,6 +42,7 @@ declare module 'node:fs' {
   export function readFileSync(path: string | URL, encoding: 'utf8'): string;
   export function realpathSync(path: string | URL): string;
   export function statSync(path: string | URL): Stats;
+  export function chmodSync(path: string | URL, mode: number): void;
 }
 
 declare module 'node:fs/promises' {
@@ -58,9 +63,10 @@ declare module 'node:fs/promises' {
   }
   export function appendFile(path: string | URL, data: string, encoding?: 'utf8'): Promise<void>;
   export function lstat(path: string | URL): Promise<Stats>;
-  export function mkdir(path: string | URL, options?: { readonly recursive?: boolean }): Promise<string | undefined>;
+  export function chmod(path: string | URL, mode: number): Promise<void>;
+  export function mkdir(path: string | URL, options?: { readonly recursive?: boolean; readonly mode?: number }): Promise<string | undefined>;
   export function mkdtemp(prefix: string): Promise<string>;
-  export function open(path: string | URL, flags: string): Promise<FileHandle>;
+  export function open(path: string | URL, flags: string, mode?: number): Promise<FileHandle>;
   export function readdir(path: string, options: { readonly withFileTypes: true }): Promise<Dirent[]>;
   export function readFile(path: string | URL): Promise<Uint8Array>;
   export function readFile(path: string | URL, encoding: 'utf8'): Promise<string>;
@@ -71,7 +77,7 @@ declare module 'node:fs/promises' {
   export function symlink(target: string | URL, path: string | URL): Promise<void>;
   export function unlink(path: string | URL): Promise<void>;
   export function writeFile(path: string | URL, data: string | Uint8Array, encoding?: 'utf8'): Promise<void>;
-  export function writeFile(path: string | URL, data: string | Uint8Array, options: { readonly encoding?: 'utf8'; readonly flag?: string }): Promise<void>;
+  export function writeFile(path: string | URL, data: string | Uint8Array, options: { readonly encoding?: 'utf8'; readonly flag?: string; readonly mode?: number }): Promise<void>;
 } 
 
 declare module 'node:os' {
@@ -124,15 +130,18 @@ declare module 'node:child_process' {
     readonly stdout: ChildProcessReadablePipe;
     readonly stderr: ChildProcessReadablePipe;
     readonly killed: boolean;
-    kill(signal: 'SIGTERM'): void;
+    readonly pid: number | undefined;
+    kill(signal: 'SIGTERM' | 'SIGKILL'): void;
+    unref(): void;
     on(event: 'error', listener: (error: Error) => void): void;
     on(event: 'close', listener: (code: number | null, signal: string | null) => void): void;
   }
   export interface SpawnOptionsLite {
     readonly cwd?: string;
     readonly env?: { readonly [key: string]: string | undefined };
-    readonly stdio?: readonly ['pipe', 'pipe', 'pipe'];
+    readonly stdio?: readonly ['pipe', 'pipe', 'pipe'] | 'ignore';
     readonly shell?: boolean;
+    readonly detached?: boolean;
   }
   export function spawn(command: string, args: readonly string[], options?: SpawnOptionsLite): ChildProcessLite;
   export function spawnSync(
@@ -144,4 +153,67 @@ declare module 'node:child_process' {
 
 declare module 'node:crypto' {
   export function randomBytes(size: number): { toString(encoding: 'hex'): string };
+  export function randomUUID(): string;
+  export function timingSafeEqual(left: Uint8Array, right: Uint8Array): boolean;
+}
+
+declare interface NodeBuffer extends Uint8Array {
+  readonly byteLength: number;
+  readUInt32BE(offset: number): number;
+  writeUInt32BE(value: number, offset: number): number;
+  subarray(start?: number, end?: number): NodeBuffer;
+  toString(encoding?: 'utf8'): string;
+}
+
+declare const Buffer: {
+  from(value: string | Uint8Array, encoding?: 'utf8'): NodeBuffer;
+  byteLength(value: string, encoding?: 'utf8'): number;
+  alloc(size: number): NodeBuffer;
+  allocUnsafe(size: number): NodeBuffer;
+  concat(values: readonly Uint8Array[]): NodeBuffer;
+};
+
+declare module 'node:net' {
+  export interface Socket {
+    readonly destroyed: boolean;
+    write(data: Uint8Array, callback?: (error?: Error | null) => void): boolean;
+    end(): void;
+    destroy(): void;
+    on(event: 'data', listener: (chunk: NodeBuffer) => void): this;
+    on(event: 'end' | 'close', listener: () => void): this;
+    once(event: 'connect' | 'close', listener: () => void): this;
+    once(event: 'error', listener: (error: Error) => void): this;
+    off(event: 'error', listener: (error: Error) => void): this;
+  }
+  export interface Server {
+    listen(path: string): this;
+    once(event: 'error', listener: (error: Error) => void): this;
+    once(event: 'listening', listener: () => void): this;
+    off(event: 'error', listener: (error: Error) => void): this;
+    off(event: 'listening', listener: () => void): this;
+    close(callback: (error?: Error) => void): void;
+  }
+  export function connect(path: string): Socket;
+  export function createServer(listener: (socket: Socket) => void): Server;
+}
+
+declare module 'node:sqlite' {
+  export type SQLInputValue = string | number | bigint | null | Uint8Array;
+  export type SQLOutputValue = string | number | bigint | null | Uint8Array;
+  export interface StatementResultingChanges {
+    readonly changes: number | bigint;
+    readonly lastInsertRowid: number | bigint;
+  }
+  export class StatementSync {
+    get(...parameters: readonly SQLInputValue[]): Record<string, SQLOutputValue> | undefined;
+    all(...parameters: readonly SQLInputValue[]): Record<string, SQLOutputValue>[];
+    run(...parameters: readonly SQLInputValue[]): StatementResultingChanges;
+  }
+  export class DatabaseSync {
+    constructor(path: string | URL, options?: { readonly timeout?: number; readonly enableForeignKeyConstraints?: boolean; readonly readOnly?: boolean });
+    exec(sql: string): void;
+    prepare(sql: string): StatementSync;
+    close(): void;
+  }
+  export function backup(source: DatabaseSync, path: string | URL): Promise<number>;
 }

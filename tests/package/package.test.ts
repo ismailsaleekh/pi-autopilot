@@ -6,6 +6,9 @@ import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AUTOPILOT_STATE_ROOT_ENV, prepareAutopilotUnitWorktree, prepareAutopilotWorkstream } from '../../src/core/parallel-runtime.ts';
+import { AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV } from '../../src/core/names.ts';
+import { coordinatorRuntimePaths } from '../../src/core/coordination/runtime-paths.ts';
+import { DurableRunSupervisorClient } from '../../src/core/coordination/supervisor.ts';
 
 interface PackageScripts {
   readonly [key: string]: string | undefined;
@@ -13,6 +16,7 @@ interface PackageScripts {
 
 interface PackageBin {
   readonly 'autopilot-agent-run'?: string;
+  readonly 'autopilot-coordinator'?: string;
 }
 
 interface PackageJson {
@@ -101,7 +105,10 @@ function parsePackageJson(value: unknown): PackageJson {
     author: requireString(field(value, 'author'), 'author'),
     keywords: requireStringArray(field(value, 'keywords'), 'keywords'),
     files: requireStringArray(field(value, 'files'), 'files'),
-    bin: { 'autopilot-agent-run': requireString(field(bin, 'autopilot-agent-run'), 'bin') },
+    bin: {
+      'autopilot-agent-run': requireString(field(bin, 'autopilot-agent-run'), 'bin.autopilot-agent-run'),
+      'autopilot-coordinator': requireString(field(bin, 'autopilot-coordinator'), 'bin.autopilot-coordinator'),
+    },
     pi: { extensions: requireStringArray(field(pi, 'extensions'), 'pi.extensions') },
     scripts: requireStringMap(field(value, 'scripts'), 'scripts'),
     peerDependencies: requireStringMap(field(value, 'peerDependencies'), 'peerDependencies'),
@@ -164,6 +171,7 @@ void describe('package manifest and payload', () => {
     assert.ok(pkg.keywords.includes('autopilot'));
     assert.deepEqual(pkg.pi.extensions, ['./extensions/autopilot.ts']);
     assert.equal(pkg.bin['autopilot-agent-run'], 'bin/autopilot-agent-run.mjs');
+    assert.equal(pkg.bin['autopilot-coordinator'], 'bin/autopilot-coordinator.mjs');
     assert.ok(pkg.files.includes('dist/'));
     assert.ok(pkg.peerDependencies['@earendil-works/pi-coding-agent']);
     for (const script of ['build', 'typecheck', 'test:type-safety', 'test:unit', 'test:model', 'test:sdk', 'test:rpc', 'test:package']) {
@@ -182,20 +190,29 @@ void describe('package manifest and payload', () => {
       'extensions/autopilot.ts',
       'src/extension.ts',
       'dist/src/cli/autopilot-agent-run.js',
+      'dist/src/cli/autopilot-coordinator.js',
       'dist/src/core/agent-runner.js',
       'dist/src/core/close-runtime.js',
+      'dist/src/core/coordination/client.js',
       'dist/src/core/coordination/contracts.js',
       'dist/src/core/coordination/invariants.js',
       'dist/src/core/coordination/legacy-preflight.js',
       'dist/src/core/coordination/package-isolation.js',
+      'dist/src/core/coordination/server.js',
+      'dist/src/core/coordination/store.js',
+      'dist/src/core/coordination/supervisor.js',
       'dist/src/core/coordination/transition-model.js',
       'dist/src/internal/status-extension.js',
       'src/core/context-budget.ts',
       'src/core/coordination/index.ts',
+      'src/core/coordination/client.ts',
       'src/core/coordination/contracts.ts',
       'src/core/coordination/invariants.ts',
       'src/core/coordination/legacy-preflight.ts',
       'src/core/coordination/package-isolation.ts',
+      'src/core/coordination/server.ts',
+      'src/core/coordination/store.ts',
+      'src/core/coordination/supervisor.ts',
       'src/core/coordination/transition-model.ts',
       'src/core/git-guard.ts',
       'src/core/checkout-profile.ts',
@@ -209,6 +226,7 @@ void describe('package manifest and payload', () => {
       'src/core/paths.ts',
       'src/core/prompts.ts',
       'bin/autopilot-agent-run.mjs',
+      'bin/autopilot-coordinator.mjs',
       'templates/README.md',
     ]) {
       assert.ok(existsSync(new URL(file, root)), file);
@@ -218,7 +236,7 @@ void describe('package manifest and payload', () => {
   void it('documents current Autopilot surfaces across package docs', async () => {
     for (const file of DOC_FILES) {
       const text = await docText(file);
-      for (const surface of ['autopilot-agent-run', 'context_budget', 'autopilot-inject', 'autopilot-onboard', 'autopilot-handoff', 'autopilot-config', 'autopilot-claim-gc', 'autopilot-close', 'autopilot-abort']) {
+      for (const surface of ['autopilot-agent-run', 'autopilot-coordinator', 'autopilot-coordination', 'context_budget', 'autopilot-inject', 'autopilot-onboard', 'autopilot-handoff', 'autopilot-config', 'autopilot-claim-gc', 'autopilot-close', 'autopilot-abort']) {
         assert.match(text, literalPattern(surface), `${file} missing ${surface}`);
       }
     }
@@ -232,6 +250,7 @@ void describe('package manifest and payload', () => {
       '/autopilot-handoff',
       '/autopilot-config',
       '/autopilot-claim-gc',
+      '/autopilot-coordination',
       '/autopilot-close',
       '/autopilot-abort',
       'context_budget',
@@ -259,9 +278,12 @@ void describe('package manifest and payload', () => {
       'openai-codex/gpt-5.6-sol',
       'openai-codex/gpt-5.6-terra',
       'openai-codex/gpt-5.6-luna',
-      'Coordination Fabric contract lock',
+      'Coordination Fabric Phases 27–29',
       'read-only canonical preflight',
       'standalone production surfaces',
+      'transactional coordinator',
+      'durable run supervisor',
+      'session fencing',
     ]) {
       assert.match(readme, literalPattern(surface), `README missing ${surface}`);
       assert.match(plan, literalPattern(surface), `TEST_PLAN missing ${surface}`);
@@ -272,8 +294,8 @@ void describe('package manifest and payload', () => {
     const readme = await docText('README.md');
     const plan = await docText('TEST_PLAN.md');
     const mappings = [
-      { claim: 'Commands', row: 'Public commands are `/autopilot`, `/autopilot-inject`, `/autopilot-onboard`, `/autopilot-handoff`, `/autopilot-config`, `/autopilot-claim-gc`, `/autopilot-close`, and `/autopilot-abort`' },
-      { claim: 'Coordination Fabric contract lock', row: 'Coordination Fabric contracts and protocol lock' },
+      { claim: 'Commands', row: 'Public commands are `/autopilot`, `/autopilot-inject`, `/autopilot-onboard`, `/autopilot-handoff`, `/autopilot-config`, `/autopilot-claim-gc`, `/autopilot-coordination`, `/autopilot-close`, and `/autopilot-abort`' },
+      { claim: 'Coordination Fabric Phases 27–29', row: 'Coordination Fabric contracts and protocol lock' },
       { claim: 'read-only canonical preflight', row: 'Legacy coordination preflight has real consumers' },
       { claim: 'standalone production surfaces', row: 'Standalone package boundary' },
       { claim: 'context_budget', row: '`context_budget` parent gate' },
@@ -359,19 +381,28 @@ void describe('package manifest and payload', () => {
       'src/extension.ts',
       'dist/extensions/autopilot.js',
       'dist/src/cli/autopilot-agent-run.js',
+      'dist/src/cli/autopilot-coordinator.js',
       'dist/src/core/agent-runner.js',
       'dist/src/core/close-runtime.js',
+      'dist/src/core/coordination/client.js',
       'dist/src/core/coordination/contracts.js',
       'dist/src/core/coordination/invariants.js',
       'dist/src/core/coordination/legacy-preflight.js',
       'dist/src/core/coordination/package-isolation.js',
+      'dist/src/core/coordination/server.js',
+      'dist/src/core/coordination/store.js',
+      'dist/src/core/coordination/supervisor.js',
       'dist/src/core/coordination/transition-model.js',
       'dist/src/internal/status-extension.js',
       'src/core/context-budget.ts',
+      'src/core/coordination/client.ts',
       'src/core/coordination/contracts.ts',
       'src/core/coordination/invariants.ts',
       'src/core/coordination/legacy-preflight.ts',
       'src/core/coordination/package-isolation.ts',
+      'src/core/coordination/server.ts',
+      'src/core/coordination/store.ts',
+      'src/core/coordination/supervisor.ts',
       'src/core/coordination/transition-model.ts',
       'src/core/git-guard.ts',
       'src/core/checkout-profile.ts',
@@ -386,6 +417,7 @@ void describe('package manifest and payload', () => {
       'src/core/prompts.ts',
       'src/testing/fake-extension-host.ts',
       'bin/autopilot-agent-run.mjs',
+      'bin/autopilot-coordinator.mjs',
       'templates/README.md',
     ]) {
       assert.ok(files.includes(file), file);
@@ -410,8 +442,18 @@ void describe('package manifest and payload', () => {
     assert.match(result.stdout, /--pi-executable/);
   });
 
-  void it('runs the packed bin from node_modules without TypeScript stripping', async () => {
+  void it('exposes the coordinator help path without TypeScript stripping', async () => {
+    const wrapper = await readFile(new URL('bin/autopilot-coordinator.mjs', root), 'utf8');
+    assert.equal(wrapper.includes('--experimental-strip-types'), false);
+    assert.match(wrapper, /'dist', 'src', 'cli', 'autopilot-coordinator\.js'/u);
+    const result = spawnSync(process.execPath, ['bin/autopilot-coordinator.mjs', '--help'], { cwd: root, encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /autopilot-coordinator status/u);
+  });
+
+  void it('runs the packed bins from node_modules without TypeScript stripping', async () => {
     const tempRoot = await mkdtemp(join(tmpdir(), 'pi-autopilot-installed-bin-'));
+    let coordinatorStateRoot: string | null = null;
     try {
       const pack = spawnSync('npm', ['pack', '--json', '--pack-destination', tempRoot], {
         cwd: root,
@@ -434,11 +476,15 @@ void describe('package manifest and payload', () => {
 
       const installedPackage = join(installRoot, 'node_modules', 'pi-autopilot');
       const installedBin = join(installedPackage, 'bin', 'autopilot-agent-run.mjs');
+      const installedCoordinator = join(installedPackage, 'bin', 'autopilot-coordinator.mjs');
       const source = join(tempRoot, 'source');
       await initInstalledBinSource(source);
       const previousStateRoot = process.env[AUTOPILOT_STATE_ROOT_ENV];
-      process.env[AUTOPILOT_STATE_ROOT_ENV] = join(tempRoot, 'autopilot-state');
+      const stateRoot = join(tempRoot, 'autopilot-state');
+      coordinatorStateRoot = stateRoot;
+      process.env[AUTOPILOT_STATE_ROOT_ENV] = stateRoot;
       const prepared = await prepareAutopilotWorkstream({ workstream: 'node-modules-smoke', sourceCwd: source });
+      const attachment = await new DurableRunSupervisorClient(process.env).attach({ repo: prepared.repo, active: prepared.active, rawSessionId: 'packed-install-session' });
       if (previousStateRoot === undefined) delete process.env[AUTOPILOT_STATE_ROOT_ENV];
       else process.env[AUTOPILOT_STATE_ROOT_ENV] = previousStateRoot;
       const worktree = prepared.mainWorktreePath;
@@ -498,7 +544,14 @@ void describe('package manifest and payload', () => {
         'utf8',
       );
 
-      const runnerEnv = { ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: join(tempRoot, 'autopilot-state') };
+      const runnerEnv = { ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: stateRoot, [AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV]: attachment.contextPath };
+      const coordinatorStatus = spawnSync(process.execPath, [installedCoordinator, 'status', '--state-root', stateRoot, '--repo-id', prepared.repo.repoKey, '--run', prepared.active.workstream_run], {
+        cwd: source,
+        encoding: 'utf8',
+        env: runnerEnv,
+      });
+      assert.equal(coordinatorStatus.status, 0, coordinatorStatus.stderr);
+      assert.match(coordinatorStatus.stdout, /autopilot\.coordinator_status\.v1/u);
       const dryRun = spawnSync(process.execPath, [installedBin, '--dry-run', '--json', specPath], {
         cwd: worktree,
         encoding: 'utf8',
@@ -522,10 +575,25 @@ void describe('package manifest and payload', () => {
       assert.match(liveRun.stdout, /"status":"success"/u);
       assert.equal(liveRun.stderr, '');
     } finally {
+      delete process.env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV];
+      if (coordinatorStateRoot !== null) await stopExternalCoordinator(coordinatorStateRoot);
       await rm(tempRoot, { recursive: true, force: true });
     }
   });
 });
+
+async function stopExternalCoordinator(stateRoot: string): Promise<void> {
+  const paths = coordinatorRuntimePaths({ ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: stateRoot });
+  if (!existsSync(paths.lockPath)) return;
+  const parsed: unknown = JSON.parse(await readFile(paths.lockPath, 'utf8')) as unknown;
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) throw new Error('coordinator lock is malformed');
+  const pid = (parsed as Readonly<Record<string, unknown>>)['pid'];
+  if (typeof pid !== 'number' || !Number.isSafeInteger(pid) || pid < 1) throw new Error('coordinator lock pid is malformed');
+  process.kill(pid, 'SIGTERM');
+  const deadline = Date.now() + 5_000;
+  while (existsSync(paths.lockPath) && Date.now() < deadline) await new Promise<void>((resolveWait) => setTimeout(resolveWait, 25));
+  if (existsSync(paths.lockPath)) throw new Error('coordinator did not stop before cleanup');
+}
 
 async function initInstalledBinSource(source: string): Promise<void> {
   await mkdir(join(source, 'src'), { recursive: true });

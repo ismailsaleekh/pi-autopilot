@@ -1,5 +1,5 @@
 declare module 'node:fs' {
-  export function mkdirSync(path: string | URL, options?: { readonly recursive?: boolean }): void;
+  export function mkdirSync(path: string | URL, options?: { readonly recursive?: boolean; readonly mode?: number }): void;
   export function readFileSync(path: string | URL, encoding: 'utf8'): string;
 }
 

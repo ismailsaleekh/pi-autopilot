@@ -183,7 +183,7 @@ function mergePreflightBlockers(active: ActiveAutopilotRow, unitId: string, atte
   if (status.attempt !== attempt || receipt.attempt !== attempt || audit.attempt !== attempt || executionCommit.attempt !== attempt) blockers.push('attempt mismatch across unit evidence');
   if (status.verdict !== 'DONE') blockers.push(`source-changing unit status verdict must be DONE, got ${status.verdict}`);
   if (audit.classification !== 'clean') blockers.push(`execution audit must be clean, got ${audit.classification}`);
-  if (executionCommit.autopilot_id !== active.autopilot_id || executionCommit.workstream_run !== active.workstream_run || executionCommit.active_run_epoch !== active.active_run_epoch) blockers.push('execution commit authority does not match active workstream');
+  if (executionCommit.autopilot_id !== active.autopilot_id || executionCommit.workstream_run !== active.workstream_run) blockers.push('execution commit durable run authority does not match active workstream');
   if (!existsSync(executionCommit.cwd)) blockers.push(`unit worktree is missing: ${executionCommit.cwd}`);
   if (existsSync(executionCommit.cwd) && readGitStatus(executionCommit.cwd).changedPaths.length > 0) blockers.push('unit worktree must be clean before mergeback');
   return Object.freeze(blockers);

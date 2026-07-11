@@ -1,0 +1,134 @@
+import { randomBytes } from 'node:crypto';
+import { CoordinatorClient } from "./client.js";
+import { parseCoordinationChildLease } from "./contracts.js";
+import { CoordinationRuntimeError } from "./failures.js";
+import { currentBootId } from "./process-identity.js";
+import { COORDINATOR_HEARTBEAT_MS, COORDINATOR_SESSION_LEASE_MS } from "./runtime-paths.js";
+import { readCoordinatorSessionContext } from "./supervisor.js";
+import { AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV } from "../names.js";
+function requireRecord(value, label) {
+    if (typeof value !== 'object' || value === null || Array.isArray(value))
+        throw new CoordinationRuntimeError('invalid-state', `${label} is not an object`);
+    return value;
+}
+function childFromResponse(response) {
+    return parseCoordinationChildLease(requireRecord(response.payload['child'], 'coordinator child response'));
+}
+function childExpiry() {
+    return new Date(Date.now() + COORDINATOR_SESSION_LEASE_MS).toISOString();
+}
+export class AutopilotChildLeaseHandle {
+    #client;
+    #session;
+    #childToken;
+    #pid;
+    #bootId;
+    #child;
+    #heartbeat = null;
+    #fatalError = null;
+    #terminal = false;
+    #operation = Promise.resolve();
+    constructor(client, session, child, childToken, pid, bootId) {
+        this.#client = client;
+        this.#session = session;
+        this.#child = child;
+        this.#childToken = childToken;
+        this.#pid = pid;
+        this.#bootId = bootId;
+        const heartbeat = setInterval(() => {
+            void this.#enqueue(async () => {
+                if (this.#terminal)
+                    return;
+                const response = await this.#client.mutate('heartbeat-child', {
+                    repoId: this.#session.repo_id,
+                    workstreamRun: this.#session.workstream_run,
+                    sessionId: null,
+                    fencingGeneration: null,
+                    expectedVersion: this.#child.version,
+                    idempotencyKey: `heartbeat-child:${this.#child.child_lease_id}:${String(this.#child.version)}`,
+                }, { child_lease_id: this.#child.child_lease_id, child_token: this.#childToken, pid: this.#pid, boot_id: this.#bootId, lease_expires_at: childExpiry() });
+                this.#child = childFromResponse(response);
+            }).catch((error) => {
+                this.#fatalError = error instanceof Error ? error : new Error(String(error));
+                this.#stopHeartbeat();
+            });
+        }, COORDINATOR_HEARTBEAT_MS);
+        this.#heartbeat = heartbeat;
+    }
+    get child() {
+        return this.#child;
+    }
+    assertHealthy() {
+        if (this.#fatalError !== null)
+            throw new CoordinationRuntimeError('coordinator-unavailable', `child authority heartbeat failed: ${this.#fatalError.message}`);
+    }
+    async completeTerminal(evidence) {
+        await this.#complete('terminal', evidence.ref, evidence.sha256);
+    }
+    async markRecoveryRequired() {
+        if (this.#terminal)
+            return;
+        await this.#complete('recovery-required', null, null);
+    }
+    async #complete(status, evidenceRef, evidenceSha256) {
+        await this.#enqueue(async () => {
+            if (this.#terminal)
+                return;
+            this.assertHealthy();
+            this.#stopHeartbeat();
+            const response = await this.#client.mutate('complete-child', {
+                repoId: this.#session.repo_id,
+                workstreamRun: this.#session.workstream_run,
+                sessionId: null,
+                fencingGeneration: null,
+                expectedVersion: this.#child.version,
+                idempotencyKey: `complete-child:${this.#child.child_lease_id}:${status}`,
+            }, { child_lease_id: this.#child.child_lease_id, child_token: this.#childToken, pid: this.#pid, boot_id: this.#bootId, status, evidence_ref: evidenceRef, evidence_sha256: evidenceSha256 });
+            this.#child = childFromResponse(response);
+            this.#terminal = true;
+        });
+    }
+    #stopHeartbeat() {
+        if (this.#heartbeat !== null)
+            clearInterval(this.#heartbeat);
+        this.#heartbeat = null;
+    }
+    #enqueue(run) {
+        const next = this.#operation.then(run, run);
+        this.#operation = next.catch(() => undefined);
+        return next;
+    }
+}
+export async function registerAutopilotChildAuthority(spec, env = process.env) {
+    const contextPath = env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV];
+    if (contextPath === undefined || contextPath.trim().length === 0)
+        throw new CoordinationRuntimeError('unauthorized-client', `${AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV} is required for live child authority preflight`);
+    const session = await readCoordinatorSessionContext(contextPath);
+    if (session.workstream !== spec.workstream)
+        throw new CoordinationRuntimeError('unauthorized-client', 'unit workstream differs from coordinator session authority');
+    const client = new CoordinatorClient({ env: { ...env, AUTOPILOT_STATE_ROOT: session.state_root } });
+    const childLeaseId = `child-${session.workstream_run}-${spec.unit_id}-${String(spec.attempt)}`;
+    const childToken = randomBytes(32).toString('hex');
+    const pid = process.pid;
+    const bootId = currentBootId();
+    const response = await client.mutate('register-child', {
+        repoId: session.repo_id,
+        workstreamRun: session.workstream_run,
+        sessionId: session.session_id,
+        fencingGeneration: session.session_generation,
+        expectedVersion: session.run_version,
+        idempotencyKey: `register-child:${childLeaseId}`,
+    }, {
+        child_lease_id: childLeaseId,
+        autopilot_id: session.autopilot_id,
+        unit_id: spec.unit_id,
+        attempt: spec.attempt,
+        pid,
+        boot_id: bootId,
+        child_token: childToken,
+        session_lease_id: session.session_lease_id,
+        session_token: session.session_token,
+        lease_expires_at: childExpiry(),
+    });
+    return new AutopilotChildLeaseHandle(client, session, childFromResponse(response), childToken, pid, bootId);
+}
