@@ -121,7 +121,7 @@ function errorResponse(requestId: string, error: unknown): CoordinatorResponseEn
   const runtime = error instanceof CoordinationRuntimeError ? error : new CoordinationRuntimeError('system-fatal', error instanceof Error ? error.message : String(error));
   return {
     schema_version: 'autopilot.coordinator_response.v1',
-    protocol_version: '1.0',
+    protocol_version: '1.1',
     request_id: requestId,
     ok: false,
     committed_event_seq: null,

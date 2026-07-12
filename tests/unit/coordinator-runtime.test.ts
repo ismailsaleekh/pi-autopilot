@@ -45,7 +45,7 @@ function queryPayload(response: CoordinatorResponseEnvelope, field: string): rea
 function request(overrides: Partial<CoordinatorRequestEnvelope>): CoordinatorRequestEnvelope {
   return {
     schema_version: 'autopilot.coordinator_request.v1',
-    protocol_version: '1.0',
+    protocol_version: '1.1',
     request_id: `request-${randomUUID()}`,
     action: 'status',
     idempotency_key: null,
@@ -76,7 +76,7 @@ async function attachRun(client: CoordinatorClient): Promise<CoordinatorResponse
   return await client.mutate('attach-run', {
     repoId: 'repo-runtime-test', workstreamRun: 'run-runtime-test', sessionId: null, fencingGeneration: null, expectedVersion: 0, idempotencyKey: 'attach-run-runtime-test',
   }, {
-    repo_key: 'repo-runtime-test', canonical_root: '/tmp/generic-runtime-repository', git_common_dir: '/tmp/generic-runtime-repository/.git', autopilot_id: 'autopilot-runtime-test', workstream: 'runtime-test',
+    repo_key: 'repo-runtime-test', canonical_root: '/tmp/generic-runtime-repository', git_common_dir: '/tmp/generic-runtime-repository/.git', autopilot_id: 'autopilot-runtime-test', workstream: 'runtime-test', coordination_authority: 'coordinator-edit-leases-v1',
   });
 }
 
@@ -97,7 +97,7 @@ void describe('transactional coordinator runtime', () => {
     await withCoordinator(async ({ root, client }) => {
       const attachRequest = request({
         action: 'attach-run', idempotency_key: 'attach-run-duplicate', workstream_run: 'run-runtime-test', expected_version: 0,
-        payload: { repo_key: 'repo-runtime-test', canonical_root: '/tmp/generic-runtime-repository', git_common_dir: '/tmp/generic-runtime-repository/.git', autopilot_id: 'autopilot-runtime-test', workstream: 'runtime-test' },
+        payload: { repo_key: 'repo-runtime-test', canonical_root: '/tmp/generic-runtime-repository', git_common_dir: '/tmp/generic-runtime-repository/.git', autopilot_id: 'autopilot-runtime-test', workstream: 'runtime-test', coordination_authority: 'coordinator-edit-leases-v1' },
       });
       const first = await client.request(attachRequest);
       const second = await client.request(attachRequest);
@@ -150,12 +150,12 @@ void describe('transactional coordinator runtime', () => {
     const initial = await startCoordinatorServer(paths);
     await initial.close();
     const oldDatabase = new DatabaseSync(paths.databasePath);
-    oldDatabase.exec('DROP INDEX idx_worktree_operations_recovery; DROP INDEX idx_worktrees_owner; DROP TABLE reconciliation_evidence; DROP TABLE mailbox_cursors; DROP INDEX idx_messages_cursor; DROP TABLE acquisition_groups; DROP INDEX idx_edit_leases_repo; DROP INDEX idx_claim_requests_owner_status; DROP INDEX idx_claim_requests_requester_status; DELETE FROM schema_migrations WHERE version IN (2,3,4); PRAGMA user_version=1;');
+    oldDatabase.exec('DROP TABLE reservation_obligations; DROP TABLE run_terminal_intents; ALTER TABLE runs DROP COLUMN coordination_authority; DROP INDEX idx_worktree_operations_recovery; DROP INDEX idx_worktrees_owner; DROP TABLE reconciliation_evidence; DROP TABLE mailbox_cursors; DROP INDEX idx_messages_cursor; DROP TABLE acquisition_groups; DROP INDEX idx_edit_leases_repo; DROP INDEX idx_claim_requests_owner_status; DROP INDEX idx_claim_requests_requester_status; DELETE FROM schema_migrations WHERE version IN (2,3,4,5); PRAGMA user_version=1;');
     oldDatabase.close();
     const upgraded = await startCoordinatorServer(paths);
     try {
       const doctor = await new CoordinatorClient({ env, autoStart: false }).query('doctor');
-      assert.equal(doctor.payload['database_schema_version'], 4);
+      assert.equal(doctor.payload['database_schema_version'], 5);
       assert.equal(typeof doctor.payload['last_backup_path'], 'string');
       const database = new DatabaseSync(paths.databasePath, { readOnly: true });
       try {
@@ -201,7 +201,7 @@ void describe('transactional coordinator runtime', () => {
     });
     await initial.close();
     const oldDatabase = new DatabaseSync(paths.databasePath);
-    oldDatabase.exec('DROP INDEX idx_worktree_operations_recovery; DROP INDEX idx_worktrees_owner; DROP TABLE reconciliation_evidence; DROP TABLE mailbox_cursors; DROP INDEX idx_messages_cursor; DELETE FROM schema_migrations WHERE version IN (3,4); PRAGMA user_version=2;');
+    oldDatabase.exec('DROP TABLE reservation_obligations; DROP TABLE run_terminal_intents; ALTER TABLE runs DROP COLUMN coordination_authority; DROP INDEX idx_worktree_operations_recovery; DROP INDEX idx_worktrees_owner; DROP TABLE reconciliation_evidence; DROP TABLE mailbox_cursors; DROP INDEX idx_messages_cursor; DELETE FROM schema_migrations WHERE version IN (3,4,5); PRAGMA user_version=2;');
     oldDatabase.close();
     const upgraded = await startCoordinatorServer(paths);
     try {

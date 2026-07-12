@@ -280,8 +280,9 @@ void describe('package manifest and payload', () => {
       'openai-codex/gpt-5.6-sol',
       'openai-codex/gpt-5.6-terra',
       'openai-codex/gpt-5.6-luna',
-      'Coordination Fabric Phases 27–32',
+      'Coordination Fabric Phases 27–33',
       'end-to-end peer claim negotiation',
+      'change reservations',
       'automatic terminal-evidence reconciliation',
       'read-only canonical preflight',
       'standalone production surfaces',
@@ -299,7 +300,8 @@ void describe('package manifest and payload', () => {
     const plan = await docText('TEST_PLAN.md');
     const mappings = [
       { claim: 'Commands', row: 'Public commands are `/autopilot`, `/autopilot-inject`, `/autopilot-onboard`, `/autopilot-handoff`, `/autopilot-config`, `/autopilot-claim-gc`, `/autopilot-coordination`, `/autopilot-close`, and `/autopilot-abort`' },
-      { claim: 'Coordination Fabric Phases 27–32', row: 'Coordination Fabric contracts and protocol lock' },
+      { claim: 'Coordination Fabric Phases 27–33', row: 'Coordination Fabric contracts and protocol lock' },
+      { claim: 'change reservations', row: 'Edit lease / change reservation separation' },
       { claim: 'end-to-end peer claim negotiation', row: 'End-to-end peer claim negotiation' },
       { claim: 'automatic terminal-evidence reconciliation', row: 'Offline mailbox replay and automatic reconciliation' },
       { claim: 'read-only canonical preflight', row: 'Legacy coordination preflight has real consumers' },

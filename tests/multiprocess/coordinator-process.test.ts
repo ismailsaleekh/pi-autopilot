@@ -182,7 +182,7 @@ void describe('coordinator multiprocess lifecycle', () => {
       await client.mutate('attach-run', {
         repoId: 'repo-process-test', workstreamRun: 'run-process-test', sessionId: null, fencingGeneration: null, expectedVersion: 0, idempotencyKey: 'attach-run-process-test',
       }, {
-        repo_key: 'repo-process-test', canonical_root: '/tmp/generic-process-repository', git_common_dir: '/tmp/generic-process-repository/.git', autopilot_id: 'autopilot-process-test', workstream: 'process-test',
+        repo_key: 'repo-process-test', canonical_root: '/tmp/generic-process-repository', git_common_dir: '/tmp/generic-process-repository/.git', autopilot_id: 'autopilot-process-test', workstream: 'process-test', coordination_authority: 'coordinator-edit-leases-v1',
       });
       const lock = await readLock(paths.lockPath);
       if (lock === null) throw new Error('missing coordinator lock before kill');

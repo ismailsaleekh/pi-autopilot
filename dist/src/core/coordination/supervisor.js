@@ -131,13 +131,14 @@ export class DurableRunSupervisorClient {
                 git_common_dir: input.repo.gitCommonDir,
                 autopilot_id: input.active.autopilot_id,
                 workstream: input.active.workstream,
+                coordination_authority: input.active.coordination_authority,
             });
             run = parseCoordinationRun(payloadRecord(attachedRun, 'run'));
         }
         else if (runValues.length === 1) {
             run = parseCoordinationRun(runValues[0]);
-            if (run.autopilot_id !== input.active.autopilot_id || run.workstream !== input.active.workstream)
-                throw new CoordinationRuntimeError('invalid-state', 'durable run supervisor identity disagrees with the active Autopilot row');
+            if (run.autopilot_id !== input.active.autopilot_id || run.workstream !== input.active.workstream || run.coordination_authority !== input.active.coordination_authority)
+                throw new CoordinationRuntimeError('invalid-state', 'durable run supervisor identity or coordination authority disagrees with the active Autopilot row');
         }
         else {
             throw new CoordinationRuntimeError('invalid-state', 'coordinator returned duplicate durable run supervisors');

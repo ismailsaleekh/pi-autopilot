@@ -15,6 +15,8 @@ export function emptyCoordinationSnapshot(): CoordinationSnapshot {
     acquisition_groups: [],
     edit_leases: [],
     change_reservations: [],
+    reservation_obligations: [],
+    run_terminal_intents: [],
     claim_requests: [],
     mailbox_cursors: [],
     reconciliation_evidence: [],

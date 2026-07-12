@@ -39,7 +39,7 @@ async function attach(stateRoot: string, suffix: string): Promise<CoordinatorSes
   const workstreamRun = `run-${suffix}`;
   const runResponse = await client.mutate('attach-run', {
     repoId, workstreamRun, sessionId: null, fencingGeneration: null, expectedVersion: 0, idempotencyKey: `attach-run-${suffix}`,
-  }, { repo_key: repoId, canonical_root: '/tmp/generic-process-negotiation', git_common_dir: '/tmp/generic-process-negotiation/.git', autopilot_id: `autopilot-${suffix}`, workstream: `workstream-${suffix}` });
+  }, { repo_key: repoId, canonical_root: '/tmp/generic-process-negotiation', git_common_dir: '/tmp/generic-process-negotiation/.git', autopilot_id: `autopilot-${suffix}`, workstream: `workstream-${suffix}`, coordination_authority: 'coordinator-edit-leases-v1' });
   const run = parseCoordinationRun(runResponse.payload['run']);
   const sessionResponse = await client.mutate('attach-session', {
     repoId, workstreamRun, sessionId: `session-${suffix}`, fencingGeneration: 1, expectedVersion: run.version, idempotencyKey: `attach-session-${suffix}`,

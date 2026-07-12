@@ -10,7 +10,7 @@ export async function quarantineFailedUnit(input) {
     const record = await writeFailureRecord({ ...input, action: 'quarantine' });
     await updateUnitBranchStatus({ active: input.context.active, unitId: input.unitId, attempt: input.attempt, status: 'quarantined', currentSha: existsSync(input.unitWorktreePath) ? gitHead(input.unitWorktreePath) : input.context.active.target_base_sha, archiveRef: null });
     await recordFailureEvidence(input, record, 'quarantine-capture');
-    await releaseClaimsForUnit(releaseInput(input, 'autopilot failed unit quarantine'));
+    await releaseLegacyClaimsIfApplicable(input, 'autopilot failed unit quarantine');
     return record;
 }
 export async function resetFailedUnit(input) {
@@ -22,7 +22,7 @@ export async function resetFailedUnit(input) {
     if (archiveRef !== null)
         await archiveFailureBranch(input, currentSha, archiveRef, 'unit reset preservation archive');
     await recordFailureEvidence(input, record, 'attempt-reset');
-    await releaseClaimsForUnit(releaseInput(input, 'autopilot failed unit reset'));
+    await releaseLegacyClaimsIfApplicable(input, 'autopilot failed unit reset');
     await updateUnitBranchStatus({ active: input.context.active, unitId: input.unitId, attempt: input.attempt, status: 'aborted', currentSha, archiveRef });
     await cleanupTerminalUnitWorktree({ active: input.context.active, unitId: input.unitId, attempt: input.attempt, allowedStatuses: ['aborted'], reason: 'autopilot failed unit reset cleanup', ...(input.env === undefined ? {} : { env: input.env }), ...(input.now === undefined ? {} : { now: input.now }) });
     return record;
@@ -31,7 +31,7 @@ export async function preserveFailedUnit(input) {
     const record = await writeFailureRecord({ ...input, action: 'preserve' });
     await updateUnitBranchStatus({ active: input.context.active, unitId: input.unitId, attempt: input.attempt, status: 'quarantined', currentSha: existsSync(input.unitWorktreePath) ? gitHead(input.unitWorktreePath) : input.context.active.target_base_sha, archiveRef: null });
     await recordFailureEvidence(input, record, 'quarantine-capture');
-    await releaseClaimsForUnit(releaseInput(input, 'autopilot failed unit preserve-after-quarantine-capture'));
+    await releaseLegacyClaimsIfApplicable(input, 'autopilot failed unit preserve-after-quarantine-capture');
     return record;
 }
 export async function abortFailedUnit(input) {
@@ -39,13 +39,18 @@ export async function abortFailedUnit(input) {
     const record = await writeFailureRecord({ ...input, action: 'abort' });
     await resetWorktreeForRecordedTransition(input, 'unit-abort-reset', 'abort');
     await recordFailureEvidence(input, record, 'attempt-reset');
-    await releaseClaimsForUnit(releaseInput(input, 'autopilot failed unit abort'));
+    await releaseLegacyClaimsIfApplicable(input, 'autopilot failed unit abort');
     const currentSha = existsSync(input.unitWorktreePath) ? gitHead(input.unitWorktreePath) : input.context.active.target_base_sha;
     const archiveRef = `autopilot/archive/${input.context.active.workstream_run}/unit/${input.unitId}/attempt-${String(input.attempt)}/aborted`;
     await archiveFailureBranch(input, currentSha, archiveRef, 'unit abort preservation archive');
     await updateUnitBranchStatus({ active: input.context.active, unitId: input.unitId, attempt: input.attempt, status: 'aborted', currentSha, archiveRef });
     await cleanupTerminalUnitWorktree({ active: input.context.active, unitId: input.unitId, attempt: input.attempt, allowedStatuses: ['aborted'], reason: 'autopilot failed unit abort cleanup', ...(input.env === undefined ? {} : { env: input.env }), ...(input.now === undefined ? {} : { now: input.now }) });
     return record;
+}
+async function releaseLegacyClaimsIfApplicable(input, reason) {
+    if (input.context.active.coordination_authority === 'coordinator-edit-leases-v1')
+        return;
+    await releaseClaimsForUnit(releaseInput(input, reason));
 }
 async function archiveFailureBranch(input, sha, archiveRef, reason) {
     const active = input.context.active;
@@ -81,6 +86,8 @@ async function captureDirtyBeforeDestructiveTransition(input) {
     return await writeFailureRecord({ ...input, action: 'quarantine', summary: `automatic preservation before destructive transition: ${input.summary}` });
 }
 async function recordFailureEvidence(input, record, source) {
+    if (input.context.active.coordination_authority !== 'coordinator-edit-leases-v1')
+        return;
     const evidencePath = join(input.context.active.runtime_root, 'quarantine', `${input.unitId}.attempt-${String(input.attempt)}.${record.action}.json`);
     await recordCoordinatorReleaseEvidenceFromFile({
         active: input.context.active,

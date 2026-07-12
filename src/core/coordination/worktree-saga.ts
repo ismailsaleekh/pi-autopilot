@@ -376,6 +376,7 @@ async function withSagaExecutionLock<T>(session: CoordinatorSessionContext, spec
 export async function executeOwnedWorktreeSaga(spec: OwnedWorktreeOperationSpec, callbacks: WorktreeSagaCallbacks, env: ProcessEnvLike = process.env): Promise<WorktreeSagaResult> {
   const contextPath = env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV];
   if (contextPath === undefined || contextPath.trim().length === 0) {
+    if (spec.active.coordination_authority === 'coordinator-edit-leases-v1') throw new CoordinationRuntimeError('unauthorized-client', 'coordinator-authoritative run is missing its durable session; refusing unmanaged worktree mutation');
     if (await durableRunExists(spec.active, env)) throw new CoordinationRuntimeError('unauthorized-client', 'durable run exists but no current session can authorize its worktree mutation');
     assertExternalWorktreeAuthority(spec, env, spec.active.worktree_root);
     const inspection = await callbacks.inspect();

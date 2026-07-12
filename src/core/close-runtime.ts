@@ -23,6 +23,8 @@ import { cleanupClosedAutopilotRun } from './worktree-cleanup.ts';
 import { executeOwnedWorktreeSaga, OwnedWorktreeSagaClient, WorktreeSagaCompensatedError, type WorktreeSagaInspection } from './coordination/worktree-saga.ts';
 import { AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV } from './names.ts';
 import { recordCoordinatorReleaseEvidenceFromFile } from './coordination/reconciliation.ts';
+import { ReservationCoordinationClient, preparedRunTerminalIntent, reconcilePendingReservationResolutions, reservationCloseBlockers, resolvedReservationIntegrations } from './coordination/reservations.ts';
+import type { CoordinationRunTerminalIntent } from './coordination/types.ts';
 import {
   ACTIVE_AUTOPILOTS_FILE,
   BRANCHES_FILE,
@@ -209,8 +211,15 @@ export async function closeAutopilotWorkstream(options: AutopilotCloseOptions): 
       let active = await setActiveStatus(prepared.coordinationRoot, prepared.active, 'merging', now, null);
       const context: PreparedCloseContext = { ...prepared, active };
       const attemptPath = await writeCloseAttempt(context, now);
+      const coordinatorAuthority = active.coordination_authority === 'coordinator-edit-leases-v1';
+      if (coordinatorAuthority && env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV] === undefined) fail('coordination-authority-unavailable', 'Coordinator-backed close requires its durable coordinator session; refusing legacy fallback.');
+      let terminalIntent: CoordinationRunTerminalIntent | null = coordinatorAuthority ? await preparedRunTerminalIntent(active, env) : null;
+      if (terminalIntent !== null && terminalIntent.outcome !== 'closed') fail('terminal-intent-outcome-mismatch', 'prepared coordinator terminal intent is for abort, not close.', [terminalIntent.terminal_intent_id]);
+      let coordinatorTerminalCommitted = false;
+      let targetLanded = false;
       try {
-        const validation = await validateCloseReadiness(context, now, env);
+        if (coordinatorAuthority) await reconcilePendingReservationResolutions(active, env);
+        const validation = await validateCloseReadiness(context, now, env, terminalIntent !== null);
         if (validation.blockers.length > 0) {
           active = await setActiveStatus(context.coordinationRoot, active, 'blocked', now, null);
           const result = buildCloseResult({
@@ -235,11 +244,14 @@ export async function closeAutopilotWorkstream(options: AutopilotCloseOptions): 
           return { ...result, close_result_path: resultPath };
         }
 
+        if (coordinatorAuthority && terminalIntent === null) terminalIntent = await (await ReservationCoordinationClient.fromEnvironment(env)).prepareRunTerminal('closed');
         const targetBefore = gitHead(context.repo.repoRoot);
         const workstreamBefore = gitHead(active.main_worktree_path);
         const integrationCommitSha = await integrateTargetIntoWorkstream({ active, targetHead: targetBefore, env });
         const workstreamAfter = gitHead(active.main_worktree_path);
-        const changedPaths = diffPaths(active.main_worktree_path, targetBefore, workstreamAfter);
+        const changedPaths = terminalIntent !== null && targetBefore === workstreamBefore
+          ? diffPaths(active.main_worktree_path, active.target_base_sha, workstreamAfter)
+          : diffPaths(active.main_worktree_path, targetBefore, workstreamAfter);
         const postIntegrationBlockers = validation.unitMerges.length > 0
           ? phaseTwoCloseBlockers(active, validation.unitMerges, [], changedPaths)
           : finalDiffBlockers(changedPaths, validation.retainedWriteClaims, validation.executionCommits);
@@ -263,11 +275,14 @@ export async function closeAutopilotWorkstream(options: AutopilotCloseOptions): 
             closeResultPath: null,
             now,
           });
+          if (terminalIntent !== null) await (await ReservationCoordinationClient.fromEnvironment(env)).cancelRunTerminal(terminalIntent, 'post-integration close proof blocked');
+          terminalIntent = null;
           const resultPath = await writeCloseResult(active.runtime_root, result, now);
           return { ...result, close_result_path: resultPath };
         }
 
         await fastForwardTargetToWorkstream({ active, sourceRepo: context.repo.repoRoot, branch: active.branch, targetBefore, env });
+        targetLanded = true;
         const targetAfter = gitHead(context.repo.repoRoot);
         const mergeId = buildId('merge', active.workstream_run, now);
         const mergeEvent: AutopilotMergeEvent = {
@@ -293,6 +308,7 @@ export async function closeAutopilotWorkstream(options: AutopilotCloseOptions): 
         const archiveRef = `autopilot/archive/${active.workstream_run}/main`;
         active = await setActiveStatus(context.coordinationRoot, active, 'closed', now, now.toISOString());
         await writeAndRecordRunTerminalEvidence(active, 'closed', targetAfter, env, now);
+        coordinatorTerminalCommitted = true;
         await updateBranchesInfo(active, archiveRef, targetAfter);
         const closedContext: PreparedCloseContext = { ...context, active };
         const archivedRuntimePath = await archiveRuntimeArtifacts(closedContext, archiveRef, now);
@@ -322,7 +338,14 @@ export async function closeAutopilotWorkstream(options: AutopilotCloseOptions): 
         await writeJsonAtomic(archiveCloseResultPath, result);
         return result;
       } catch (error) {
-        await setActiveStatus(prepared.coordinationRoot, active, 'blocked', now, null).catch(() => undefined);
+        const recoveryFailures: string[] = [];
+        if (terminalIntent !== null && !coordinatorTerminalCommitted && !targetLanded) {
+          try { await (await ReservationCoordinationClient.fromEnvironment(env)).cancelRunTerminal(terminalIntent, 'close failed before final target mutation'); }
+          catch (recoveryError) { recoveryFailures.push(`terminal-intent cancellation failed: ${errorMessage(recoveryError)}`); }
+        }
+        try { await setActiveStatus(prepared.coordinationRoot, active, 'blocked', now, null); }
+        catch (recoveryError) { recoveryFailures.push(`active-row recovery classification failed: ${errorMessage(recoveryError)}`); }
+        if (recoveryFailures.length > 0) fail('close-recovery-failed', `Autopilot close failed (${errorMessage(error)}) and durable recovery also failed.`, recoveryFailures);
         if (error instanceof AutopilotCloseError) throw error;
         fail('close-failed', `Autopilot close failed after attempt ${attemptPath}: ${errorMessage(error)}`);
       }
@@ -368,6 +391,11 @@ export async function abortAutopilotWorkstream(options: AutopilotCloseOptions): 
       let active = await setActiveStatus(prepared.coordinationRoot, prepared.active, 'merging', now, null);
       const context: PreparedCloseContext = { ...prepared, active };
       const attemptPath = await writeCloseAttempt(context, now);
+      const coordinatorAuthority = active.coordination_authority === 'coordinator-edit-leases-v1';
+      if (coordinatorAuthority && env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV] === undefined) fail('coordination-authority-unavailable', 'Coordinator-backed abort requires its durable coordinator session; refusing legacy fallback.');
+      let terminalIntent: CoordinationRunTerminalIntent | null = coordinatorAuthority ? await preparedRunTerminalIntent(active, env) : null;
+      if (terminalIntent !== null && terminalIntent.outcome !== 'aborted') fail('terminal-intent-outcome-mismatch', 'prepared coordinator terminal intent is for close, not abort.', [terminalIntent.terminal_intent_id]);
+      let coordinatorTerminalCommitted = false;
       try {
         const latestBlockers = await abortReadinessBlockers(active, env);
         if (latestBlockers.length > 0) {
@@ -393,16 +421,18 @@ export async function abortAutopilotWorkstream(options: AutopilotCloseOptions): 
           const resultPath = await writeCloseResult(active.runtime_root, result, now);
           return { ...result, close_result_path: resultPath };
         }
+        if (coordinatorAuthority && terminalIntent === null) terminalIntent = await (await ReservationCoordinationClient.fromEnvironment(env)).prepareRunTerminal('aborted');
         const archiveRef = `autopilot/archive/${active.workstream_run}/aborted`;
         const workstreamHead = gitHead(active.main_worktree_path);
         active = await setActiveStatus(context.coordinationRoot, active, 'closed', now, now.toISOString());
         await writeAndRecordRunTerminalEvidence(active, 'aborted', workstreamHead, env, now);
+        coordinatorTerminalCommitted = true;
         await updateBranchesInfo(active, archiveRef, workstreamHead);
         const closedContext: PreparedCloseContext = { ...context, active };
         const archivedRuntimePath = await archiveRuntimeArtifacts(closedContext, archiveRef, now);
-        const latestRetainedClaims = (await readPathClaims(closedContext.coordinationRoot)).filter((claim) =>
-          claim.autopilot_id === active.autopilot_id && claim.workstream_run === active.workstream_run,
-        );
+        const latestRetainedClaims = active.coordination_authority === 'legacy-path-claims-v1'
+          ? (await readPathClaims(closedContext.coordinationRoot)).filter((claim) => claim.autopilot_id === active.autopilot_id && claim.workstream_run === active.workstream_run)
+          : [];
         const releasedClaims = await releaseRetainedClaims(closedContext, latestRetainedClaims, now);
         await archiveWorktreeIndex(active, now);
         await cleanupClosedAutopilotRun({ active, archiveRef, archiveSha: workstreamHead, reason: 'autopilot abort run-owned cleanup', removeActiveTaskDir: true, env, now });
@@ -428,7 +458,14 @@ export async function abortAutopilotWorkstream(options: AutopilotCloseOptions): 
         await writeJsonAtomic(archiveCloseResultPath, result);
         return result;
       } catch (error) {
-        await setActiveStatus(prepared.coordinationRoot, active, 'blocked', now, null).catch(() => undefined);
+        const recoveryFailures: string[] = [];
+        if (terminalIntent !== null && !coordinatorTerminalCommitted) {
+          try { await (await ReservationCoordinationClient.fromEnvironment(env)).cancelRunTerminal(terminalIntent, 'abort failed before coordinator terminal commit'); }
+          catch (recoveryError) { recoveryFailures.push(`terminal-intent cancellation failed: ${errorMessage(recoveryError)}`); }
+        }
+        try { await setActiveStatus(prepared.coordinationRoot, active, 'blocked', now, null); }
+        catch (recoveryError) { recoveryFailures.push(`active-row recovery classification failed: ${errorMessage(recoveryError)}`); }
+        if (recoveryFailures.length > 0) fail('abort-recovery-failed', `Autopilot abort failed (${errorMessage(error)}) and durable recovery also failed.`, recoveryFailures);
         if (error instanceof AutopilotCloseError) throw error;
         fail('abort-failed', `Autopilot abort failed after attempt ${attemptPath}: ${errorMessage(error)}`);
       }
@@ -458,13 +495,13 @@ async function resolveCloseContext(options: AutopilotCloseOptions, env: ProcessE
   }
   const active = matches[0];
   if (active === undefined) fail('internal-missing-active-row', 'matched active row disappeared.');
-  if (active.status === 'merging') {
-    fail('close-already-in-progress', 'Autopilot workstream is already marked merging.', [active.workstream_run]);
+  if (active.status === 'merging' && await preparedRunTerminalIntent(active, env) === null) {
+    fail('close-already-in-progress', 'Autopilot workstream is already marked merging without a recoverable coordinator terminal intent.', [active.workstream_run]);
   }
   return { repo, coordinationRoot, worktreeRoot, active };
 }
 
-async function validateCloseReadiness(context: PreparedCloseContext, now: Date, env: ProcessEnvLike): Promise<CloseValidationResult> {
+async function validateCloseReadiness(context: PreparedCloseContext, now: Date, env: ProcessEnvLike, resumingPreparedTerminal = false): Promise<CloseValidationResult> {
   const blockers: string[] = [];
   const active = context.active;
   const targetBranch = active.target_branch;
@@ -491,6 +528,8 @@ async function validateCloseReadiness(context: PreparedCloseContext, now: Date, 
   const claims = await readPathClaims(context.coordinationRoot);
   const retainedClaims = claims.filter((claim) => claim.autopilot_id === active.autopilot_id && claim.workstream_run === active.workstream_run);
   const retainedWriteClaims = retainedClaims.filter((claim) => claim.claim_type === 'WRITE' || claim.claim_type === 'EXCLUSIVE');
+  const coordinatorAuthority = active.coordination_authority === 'coordinator-edit-leases-v1';
+  if (coordinatorAuthority && retainedClaims.length > 0) blockers.push(`coordinator-backed run has forbidden legacy path-claim authority: ${retainedClaims.map((claim) => `${claim.claim_type}:${claim.path}`).join(', ')}`);
   const targetHead = targetBranch === null ? gitHead(context.repo.repoRoot) : revParse(context.repo.repoRoot, `refs/heads/${targetBranch}`);
   const workstreamHead = existsSync(active.main_worktree_path) ? gitHead(active.main_worktree_path) : active.target_base_sha;
   const preIntegrationChangedPaths = commitExists(active.main_worktree_path, active.target_base_sha)
@@ -508,6 +547,7 @@ async function validateCloseReadiness(context: PreparedCloseContext, now: Date, 
   const closeSurfacePaths = unitMerges.length > 0
     ? sortedUnique(unitMerges.flatMap((merge) => [...merge.changed_paths]))
     : retainedWriteClaims.map((claim) => claim.path);
+  if (coordinatorAuthority && preIntegrationChangedPaths.length > 0 && unitMerges.length === 0) blockers.push('coordinator-backed close refuses direct-main source changes without accepted unit-merge reservations');
   blockers.push(...semanticClosureBlockers(artifacts, preIntegrationChangedPaths));
   if (unitMerges.length > 0) {
     blockers.push(...phaseTwoExecutionCommitBlockers(active, executionCommits, artifacts.audits, unitMerges));
@@ -518,8 +558,15 @@ async function validateCloseReadiness(context: PreparedCloseContext, now: Date, 
   blockers.push(...await unitWorktreeResidueBlockers(active));
   blockers.push(...branchCommitBlockers(active, executionCommits, unitMerges));
   blockers.push(...await incompleteSagaBlockers(active, env));
+  blockers.push(...await reservationCloseBlockers(active, env));
+  const reservationIntegrations = await resolvedReservationIntegrations(active, env);
+  const resolvedTargetPath = (path: string): boolean => {
+    const latest = latestCommitForPath(context.repo.repoRoot, active.target_base_sha, targetHead, path);
+    return latest !== null && reservationIntegrations.some((integration) => integration.predecessorTerminalSha === latest && pathMatchesAnyClaim(path, integration.paths));
+  };
 
-  const targetIntersection = intersectingPaths(targetDeltaPaths, closeSurfacePaths);
+  const targetAlreadyEqualsWorkstream = targetHead === workstreamHead;
+  const targetIntersection = (resumingPreparedTerminal && targetAlreadyEqualsWorkstream ? [] : intersectingPaths(targetDeltaPaths, closeSurfacePaths)).filter((path) => !resolvedTargetPath(path));
   if (targetIntersection.length > 0) {
     blockers.push(`target branch changed retained claimed path(s) since activation: ${targetIntersection.join(', ')}; targeted revalidation required before close`);
   }
@@ -533,7 +580,7 @@ async function validateCloseReadiness(context: PreparedCloseContext, now: Date, 
   );
   const nonIntersectingForeignMerges: AutopilotMergeEvent[] = [];
   for (const merge of unackedForeignMerges) {
-    const intersection = intersectingPaths(merge.changed_paths, closeSurfacePaths);
+    const intersection = intersectingPaths(merge.changed_paths, closeSurfacePaths).filter((path) => !reservationIntegrations.some((integration) => integration.predecessorTerminalSha === merge.target_after && pathMatchesAnyClaim(path, integration.paths)));
     if (intersection.length > 0) {
       blockers.push(`foreign merge ${merge.merge_id} touched retained claimed path(s): ${intersection.join(', ')}; targeted revalidation required before close`);
     } else {
@@ -567,6 +614,10 @@ function sourceDirtyPaths(cwd: string, workstream: string): readonly string[] {
 
 async function abortReadinessBlockers(active: ActiveAutopilotRow, env: ProcessEnvLike): Promise<readonly string[]> {
   const blockers: string[] = [];
+  if (active.coordination_authority === 'coordinator-edit-leases-v1') {
+    const forbiddenLegacyClaims = (await readPathClaims(coordinationRootForRepo(active.repo_key, env))).filter((claim) => claim.autopilot_id === active.autopilot_id && claim.workstream_run === active.workstream_run);
+    if (forbiddenLegacyClaims.length > 0) blockers.push(`coordinator-backed abort found forbidden legacy path claims: ${forbiddenLegacyClaims.map((claim) => `${claim.claim_type}:${claim.path}`).join(', ')}`);
+  }
   if (!existsSync(active.main_worktree_path)) blockers.push(`registered worktree is missing: ${active.main_worktree_path}`);
   if (existsSync(active.main_worktree_path)) {
     const dirty = sourceDirtyPaths(active.main_worktree_path, active.workstream);
@@ -962,7 +1013,7 @@ async function updateTaskInfoClosedAt(row: ActiveAutopilotRow, closedAt: string)
   const path = join(taskRootForActiveAutopilot(row), TASK_INFO_FILE);
   if (!existsSync(path)) return;
   const value = JSON.parse(await readFile(path, 'utf8')) as Record<string, unknown>;
-  await writeJsonAtomic(path, { ...value, status: row.status, closed_at: closedAt });
+  await writeJsonAtomic(path, { ...value, schema_version: 'autopilot.task_info.v2', coordination_authority: row.coordination_authority, status: row.status, closed_at: closedAt });
 }
 
 async function updateBranchesInfo(row: ActiveAutopilotRow, archiveRef: string, currentSha: string): Promise<void> {
@@ -1245,6 +1296,11 @@ function requireTargetBranch(row: ActiveAutopilotRow): string {
 
 function revParse(cwd: string, ref: string): string {
   return runGit(['rev-parse', ref], cwd).trim();
+}
+
+function latestCommitForPath(cwd: string, fromExclusive: string, toInclusive: string, path: string): string | null {
+  const output = runGit(['log', '-1', '--format=%H', `${fromExclusive}..${toInclusive}`, '--', path], cwd).trim();
+  return output.length === 0 ? null : output;
 }
 
 function revList(cwd: string, fromExclusive: string, toInclusive: string): readonly string[] {

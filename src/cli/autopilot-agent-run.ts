@@ -10,6 +10,7 @@ interface CliArgs {
 
 const EXIT_BY_FAILURE_CLASS = Object.freeze({
   'spec-invalid': 2,
+  'waiting-for-peer-release': 3,
   'pi-spawn-failed': 10,
   'missing-structured-output': 20,
   'invalid-structured-output': 21,

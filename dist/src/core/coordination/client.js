@@ -4,7 +4,7 @@ import { open, readFile, stat, unlink } from 'node:fs/promises';
 import { connect } from 'node:net';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { parseCoordinatorRequestEnvelope, parseCoordinatorResponseEnvelope } from "./contracts.js";
+import { CoordinationContractError, parseCoordinatorRequestEnvelope, parseCoordinatorResponseEnvelope } from "./contracts.js";
 import { coordinationFailureDefinition, CoordinationRuntimeError } from "./failures.js";
 import { AUTOPILOT_COORDINATOR_TRANSPORT_VERSION, CoordinatorFrameDecoder, encodeCoordinatorFrame } from "./ipc.js";
 import { currentBootId, isProcessAlive } from "./process-identity.js";
@@ -15,6 +15,23 @@ const DEFAULT_STARTUP_TIMEOUT_MS = 10_000;
 const EMPTY_COORDINATOR_PAYLOAD = Object.freeze({});
 function sleep(ms) {
     return new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
+}
+function parseCoordinatorLifecycleLock(value) {
+    if (typeof value !== 'object' || value === null || Array.isArray(value))
+        return null;
+    const record = value;
+    const pid = record['pid'];
+    const bootId = record['boot_id'];
+    const token = record['token'];
+    const startedAt = record['started_at'];
+    if (record['schema_version'] !== 'autopilot.coordinator_lock.v1' || typeof pid !== 'number' || !Number.isSafeInteger(pid) || pid < 1 || typeof bootId !== 'string' || typeof token !== 'string' || typeof startedAt !== 'string')
+        return null;
+    return { schema_version: 'autopilot.coordinator_lock.v1', pid, boot_id: bootId, token, started_at: startedAt };
+}
+function compatibilityFailure(error) {
+    if (error instanceof CoordinationRuntimeError)
+        return error.code === 'protocol-mismatch' || error.code === 'schema-mismatch';
+    return error instanceof CoordinationContractError && error.issues.some((issue) => issue.includes('protocol_version'));
 }
 function errorCode(error) {
     if (error instanceof Error && 'code' in error && typeof error.code === 'string')
@@ -253,9 +270,9 @@ export class CoordinatorClient {
             return this.#assertSuccess(await sendOnce(this.#paths, capability, request, this.#requestTimeoutMs));
         }
         catch (error) {
-            if (!this.#autoStart || !isConnectionFailure(error))
+            if (!this.#autoStart || (!isConnectionFailure(error) && !compatibilityFailure(error)))
                 throw error;
-            await this.#ensureStarted(capability);
+            await this.#ensureStarted(capability, compatibilityFailure(error));
             try {
                 return this.#assertSuccess(await sendOnce(this.#paths, capability, request, this.#requestTimeoutMs));
             }
@@ -269,7 +286,7 @@ export class CoordinatorClient {
     async query(action, repoId = 'global', workstreamRun = null, payload = {}) {
         return await this.request({
             schema_version: 'autopilot.coordinator_request.v1',
-            protocol_version: '1.0',
+            protocol_version: '1.1',
             request_id: `request-${randomUUID()}`,
             action,
             idempotency_key: null,
@@ -284,7 +301,7 @@ export class CoordinatorClient {
     async mutate(action, identity, payload) {
         return await this.request({
             schema_version: 'autopilot.coordinator_request.v1',
-            protocol_version: '1.0',
+            protocol_version: '1.1',
             request_id: `request-${randomUUID()}`,
             action,
             idempotency_key: identity.idempotencyKey,
@@ -296,7 +313,7 @@ export class CoordinatorClient {
             payload,
         });
     }
-    async #ensureStarted(capability) {
+    async #ensureStarted(capability, replaceIncompatible = false) {
         const deadline = Date.now() + this.#startupTimeoutMs;
         const lock = await acquireStartupLock(this.#paths, deadline);
         try {
@@ -308,8 +325,10 @@ export class CoordinatorClient {
                 return;
             }
             catch (error) {
-                if (!isConnectionFailure(error))
+                if (!isConnectionFailure(error) && !(replaceIncompatible && compatibilityFailure(error)))
                     throw error;
+                if (replaceIncompatible && compatibilityFailure(error))
+                    await this.#retireIncompatibleCoordinator(deadline);
             }
             spawnCoordinator(this.#paths);
             while (Date.now() < deadline) {
@@ -331,9 +350,31 @@ export class CoordinatorClient {
             await lock.release();
         }
     }
+    async #retireIncompatibleCoordinator(deadline) {
+        let parsed;
+        try {
+            parsed = JSON.parse(await readFile(this.#paths.lockPath, 'utf8'));
+        }
+        catch (error) {
+            throw new CoordinationRuntimeError('protocol-mismatch', 'incompatible coordinator cannot be retired because its lifecycle lock is unreadable', [error instanceof Error ? error.message : String(error)]);
+        }
+        const lock = parseCoordinatorLifecycleLock(parsed);
+        if (lock === null || lock.boot_id !== currentBootId() || !isProcessAlive(lock.pid) || lock.pid === process.pid)
+            throw new CoordinationRuntimeError('protocol-mismatch', 'incompatible coordinator lifecycle identity cannot be retired safely');
+        try {
+            process.kill(lock.pid, 'SIGTERM');
+        }
+        catch (error) {
+            throw new CoordinationRuntimeError('protocol-mismatch', 'failed to stop the incompatible coordinator', [error instanceof Error ? error.message : String(error)]);
+        }
+        while (Date.now() < deadline && isProcessAlive(lock.pid))
+            await sleep(25);
+        if (isProcessAlive(lock.pid))
+            throw new CoordinationRuntimeError('coordinator-unavailable', 'incompatible coordinator did not stop before the startup deadline', [`pid=${String(lock.pid)}`]);
+    }
     #probeRequest() {
         return {
-            schema_version: 'autopilot.coordinator_request.v1', protocol_version: '1.0', request_id: `probe-${randomUUID()}`, action: 'status', idempotency_key: null, repo_id: 'global', workstream_run: null, session_id: null, fencing_generation: null, expected_version: null, payload: EMPTY_COORDINATOR_PAYLOAD,
+            schema_version: 'autopilot.coordinator_request.v1', protocol_version: '1.1', request_id: `probe-${randomUUID()}`, action: 'status', idempotency_key: null, repo_id: 'global', workstream_run: null, session_id: null, fencing_generation: null, expected_version: null, payload: EMPTY_COORDINATOR_PAYLOAD,
         };
     }
     #assertCoordinatorCompatibility(response) {
@@ -341,7 +382,7 @@ export class CoordinatorClient {
             throw new CoordinationRuntimeError('schema-mismatch', 'coordinator readiness handshake omitted its status schema');
         if (response.payload['package_build'] !== COORDINATOR_PACKAGE_BUILD)
             throw new CoordinationRuntimeError('protocol-mismatch', `coordinator package build is incompatible with ${COORDINATOR_PACKAGE_BUILD}`);
-        if (response.payload['protocol_version'] !== '1.0')
+        if (response.payload['protocol_version'] !== '1.1')
             throw new CoordinationRuntimeError('protocol-mismatch', 'coordinator handshake protocol version is incompatible');
         if (response.payload['database_schema_version'] !== COORDINATOR_DATABASE_SCHEMA_VERSION)
             throw new CoordinationRuntimeError('schema-mismatch', `coordinator database schema is incompatible with ${String(COORDINATOR_DATABASE_SCHEMA_VERSION)}`);

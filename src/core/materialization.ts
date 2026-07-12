@@ -163,6 +163,9 @@ export async function materializeAdditionalReadPathsForSpec(input: {
   if (snapshot === null || snapshot.profile.mode === 'full') {
     return { checkout_mode: snapshot === null ? 'legacy-full' : 'full', materialized_paths: [], targets: [], byte_count: 0 };
   }
+  if (input.context.active.coordination_authority === 'coordinator-edit-leases-v1') {
+    fail('coordinator-read-expansion-required', 'Coordinator-backed sparse READ expansion must be negotiated by the run supervisor; amend the unit complete initial read set before launch.', normalized);
+  }
   if (!snapshot.profile.materialization.auto_read_claims) {
     fail('auto-read-disabled', 'Autopilot sparse materialization refused: automatic READ materialization is disabled by checkout profile.', normalized);
   }
@@ -217,14 +220,18 @@ export async function materializeAdditionalReadPathsForSpec(input: {
       now,
     });
   } catch (error) {
-    await releaseReadClaimsForUnitPaths({
-      context: input.context,
-      unitId: input.spec.unit_id,
-      attempt: input.spec.attempt,
-      paths: normalized,
-      reason: 'auto READ materialization failure claim rollback',
-      now,
-    }).catch(() => undefined);
+    try {
+      await releaseReadClaimsForUnitPaths({
+        context: input.context,
+        unitId: input.spec.unit_id,
+        attempt: input.spec.attempt,
+        paths: normalized,
+        reason: 'auto READ materialization failure claim rollback',
+        now,
+      });
+    } catch (rollbackError) {
+      fail('materialization-rollback-failed', `READ materialization failed (${errorMessage(error)}) and legacy authority rollback failed: ${errorMessage(rollbackError)}`);
+    }
     throw error;
   }
 }
@@ -232,7 +239,9 @@ export async function materializeAdditionalReadPathsForSpec(input: {
 export async function expandedReadOnlyPathsForAudit(input: {
   readonly context: ActiveAutopilotContext;
   readonly spec: AutopilotUnitSpec;
+  readonly env?: ProcessEnvLike;
 }): Promise<readonly string[]> {
+  if (input.context.active.coordination_authority === 'coordinator-edit-leases-v1') return sortedUnique([...input.spec.read_only_paths, ...sourceReadClaimPathsForSpec(input.spec)]);
   const claims = await readPathClaims(input.context.coordinationRoot);
   const expanded = claims.filter((claim) =>
     claim.autopilot_id === input.context.active.autopilot_id &&

@@ -36,7 +36,9 @@ void describe('Coordination Fabric contracts and invariants', () => {
       'message',
       'reconciliation_evidence',
       'repository',
+      'reservation_obligation',
       'run',
+      'run_terminal_intent',
       'session_lease',
       'snapshot',
       'unit_attempt',
@@ -122,7 +124,7 @@ void describe('Coordination Fabric contracts and invariants', () => {
   void it('strictly validates versioned query and mutation envelopes', () => {
     const query = parseCoordinatorRequestEnvelope({
       schema_version: 'autopilot.coordinator_request.v1',
-      protocol_version: '1.0',
+      protocol_version: '1.1',
       request_id: 'request-1',
       action: 'status',
       idempotency_key: null,
@@ -179,7 +181,7 @@ void describe('Coordination Fabric contracts and invariants', () => {
     }), /must differ/u);
     assert.equal(parseCoordinatorResponseEnvelope({
       schema_version: 'autopilot.coordinator_response.v1',
-      protocol_version: '1.0',
+      protocol_version: '1.1',
       request_id: 'request-1',
       ok: false,
       committed_event_seq: null,

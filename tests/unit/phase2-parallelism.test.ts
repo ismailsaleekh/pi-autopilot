@@ -231,6 +231,7 @@ void describe('Phase 2 scheduler config and deterministic scheduler', () => {
       ],
       runningAttempts: [],
       activeClaims: [],
+      reservationCoordination: null,
       now: new Date('2026-07-08T00:00:00.000Z'),
     });
     assert.deepEqual(dispatch.selected.map((unit) => unit.unit_id), ['u02']);
@@ -357,8 +358,11 @@ void describe('Phase 2 unit worktrees, claims, mergeback, staleness, and GC', ()
         covered_path_groups: [],
         witness_ids: ['witness'],
         status_ref: 'statuses/v00.validate.attempt-1.json',
+        status_sha256: `sha256:${'a'.repeat(64)}`,
         receipt_ref: 'receipts/v00.validate.attempt-1.receipt.json',
+        receipt_sha256: `sha256:${'b'.repeat(64)}`,
         audit_ref: 'execution-audits/v00.validate.attempt-1.json',
+        audit_sha256: `sha256:${'c'.repeat(64)}`,
         verdict: 'PASS',
         validated_at: '2026-07-08T00:00:00.000Z',
       };

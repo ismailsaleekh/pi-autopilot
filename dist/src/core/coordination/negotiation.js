@@ -64,10 +64,24 @@ export class ClaimNegotiationClient {
             };
         }
         if (payload['outcome'] === 'waiting-for-peer-release') {
+            const status = await this.#client.query('status', this.#session.repo_id, this.#session.workstream_run);
+            const groups = parseEntityArray(status.payload['acquisition_groups'], 'status acquisition_groups', parseCoordinationAcquisitionGroup);
+            const current = groups.find((group) => group.acquisition_group_id === acquisitionGroup.acquisition_group_id);
+            if (current === undefined)
+                throw new CoordinationRuntimeError('invalid-state', 'acquisition group disappeared after a durable acquire response');
+            if (current.state === 'grant-ready') {
+                const granted = await this.acknowledgeGrant(current);
+                return { outcome: 'granted', acquisitionGroup: granted.acquisitionGroup, editLeases: granted.editLeases, requestRefs, committedEventSeq: granted.committedEventSeq };
+            }
+            if (current.state === 'granted') {
+                const leases = parseEntityArray(status.payload['edit_leases'], 'status edit_leases', parseCoordinationEditLease).filter((lease) => lease.acquisition_group_id === current.acquisition_group_id);
+                return { outcome: 'granted', acquisitionGroup: current, editLeases: leases, requestRefs, committedEventSeq: committedSequence(response) };
+            }
+            const currentRequests = parseEntityArray(status.payload['claim_requests'], 'status claim_requests', parseCoordinationClaimRequest).filter((claimRequest) => claimRequest.acquisition_group_id === current.acquisition_group_id);
             return {
-                outcome: 'waiting-for-peer-release', acquisitionGroup,
-                claimRequests: parseEntityArray(payload['claim_requests'], 'acquire-group claim_requests', parseCoordinationClaimRequest),
-                requestRefs, committedEventSeq: committedSequence(response),
+                outcome: 'waiting-for-peer-release', acquisitionGroup: current,
+                claimRequests: currentRequests,
+                requestRefs: currentRequests.map((claimRequest) => claimRequest.request_id), committedEventSeq: committedSequence(response),
             };
         }
         throw new CoordinationRuntimeError('invalid-state', 'coordinator returned an unsupported acquisition outcome');

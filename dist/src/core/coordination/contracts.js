@@ -1,5 +1,5 @@
 import { isAbsolute, normalize } from 'node:path';
-import { AUTOPILOT_COORDINATION_SNAPSHOT_SCHEMA, AUTOPILOT_COORDINATOR_PROTOCOL_VERSION, AUTOPILOT_COORDINATOR_REQUEST_SCHEMA, AUTOPILOT_COORDINATOR_RESPONSE_SCHEMA, COORDINATION_ACQUISITION_STATES, COORDINATION_CHILD_STATUSES, COORDINATION_CLAIM_MODES, COORDINATION_MESSAGE_STATUSES, COORDINATION_OPERATION_STAGES, COORDINATION_OPERATION_TYPES, COORDINATION_RELEASE_CONDITION_TYPES, COORDINATION_RECONCILIATION_SOURCES, COORDINATION_REQUEST_STATUSES, COORDINATION_RUN_STATUSES, COORDINATION_SESSION_STATUSES, COORDINATION_UNIT_STATES, COORDINATION_WORKTREE_KINDS, COORDINATION_WORKTREE_STATES, } from "./types.js";
+import { AUTOPILOT_COORDINATION_SNAPSHOT_SCHEMA, AUTOPILOT_COORDINATOR_PROTOCOL_VERSION, AUTOPILOT_COORDINATOR_REQUEST_SCHEMA, AUTOPILOT_COORDINATOR_RESPONSE_SCHEMA, COORDINATION_ACQUISITION_STATES, COORDINATION_CHILD_STATUSES, COORDINATION_CLAIM_MODES, COORDINATION_MESSAGE_STATUSES, COORDINATION_OPERATION_STAGES, COORDINATION_OPERATION_TYPES, COORDINATION_RELEASE_CONDITION_TYPES, COORDINATION_RECONCILIATION_SOURCES, COORDINATION_REQUEST_STATUSES, COORDINATION_RESERVATION_OBLIGATION_STATES, COORDINATION_MESSAGE_TYPES, COORDINATION_RUN_STATUSES, COORDINATION_SESSION_STATUSES, COORDINATION_UNIT_STATES, COORDINATION_WORKTREE_KINDS, COORDINATION_WORKTREE_STATES, } from "./types.js";
 export class CoordinationContractError extends Error {
     name = 'CoordinationContractError';
     code = 'invalid-coordination-contract';
@@ -14,8 +14,8 @@ const SHA256 = /^sha256:[a-f0-9]{64}$/u;
 const CHILD_TOKEN = /^[a-f0-9]{64}$/u;
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,191}$/u;
 const QUERY_ACTIONS = ['status', 'doctor', 'export'];
-const MUTATION_ACTIONS = ['attach-run', 'attach-session', 'detach-session', 'prepare-handoff', 'heartbeat', 'register-child', 'heartbeat-child', 'complete-child', 'drain-mailbox', 'acquire-group', 'acknowledge-grant', 'respond-claim-request', 'cancel-claim-request', 'cancel-acquisition-group', 'supersede-attempt', 'acknowledge-message', 'record-release-evidence', 'reconcile-run', 'prepare-operation', 'transition-operation'];
-const MESSAGE_TYPES = ['claim-request', 'release-notification', 'grant-offer', 'recovery-required'];
+const MUTATION_ACTIONS = ['attach-run', 'attach-session', 'detach-session', 'prepare-handoff', 'heartbeat', 'register-child', 'heartbeat-child', 'complete-child', 'drain-mailbox', 'acquire-group', 'acknowledge-grant', 'respond-claim-request', 'cancel-claim-request', 'cancel-acquisition-group', 'supersede-attempt', 'acknowledge-message', 'record-release-evidence', 'resolve-reservation-obligation', 'prepare-run-terminal', 'cancel-run-terminal', 'reconcile-run', 'prepare-operation', 'transition-operation'];
+const MESSAGE_TYPES = COORDINATION_MESSAGE_TYPES;
 const WORKTREE_STATES = COORDINATION_WORKTREE_STATES;
 const OPERATION_TYPES = COORDINATION_OPERATION_TYPES;
 const EXHAUSTED_ALTERNATIVES = ['sequencing', 'partitioning', 'ownership-transfer', 'rebase-revalidation', 'replanning'];
@@ -23,7 +23,7 @@ const PAYLOAD_FIELDS = {
     status: [],
     doctor: [],
     export: ['output_path'],
-    'attach-run': ['autopilot_id', 'canonical_root', 'git_common_dir', 'repo_key', 'workstream'],
+    'attach-run': ['autopilot_id', 'canonical_root', 'coordination_authority', 'git_common_dir', 'repo_key', 'workstream'],
     'attach-session': ['boot_id', 'handoff_token', 'lease_expires_at', 'pid', 'session_lease_id', 'session_token'],
     'detach-session': ['reason', 'session_lease_id', 'session_token'],
     'prepare-handoff': ['handoff_token', 'session_lease_id', 'session_token'],
@@ -40,6 +40,9 @@ const PAYLOAD_FIELDS = {
     'supersede-attempt': ['attempt', 'reason', 'session_lease_id', 'session_token', 'superseded_by_attempt', 'unit_id'],
     'acknowledge-message': ['message_id', 'session_lease_id', 'session_token'],
     'record-release-evidence': ['evidence_ref', 'evidence_sha256', 'source', 'target_id', 'session_lease_id', 'session_token'],
+    'resolve-reservation-obligation': ['integration_evidence_ref', 'integration_evidence_sha256', 'obligation_id', 'session_lease_id', 'session_token', 'validation_evidence_ref', 'validation_evidence_sha256'],
+    'prepare-run-terminal': ['outcome', 'session_lease_id', 'session_token', 'terminal_intent_id'],
+    'cancel-run-terminal': ['reason', 'session_lease_id', 'session_token', 'terminal_intent_id'],
     'reconcile-run': ['reason', 'session_lease_id', 'session_token'],
     'prepare-operation': ['operation', 'session_lease_id', 'session_token', 'worktree'],
     'transition-operation': ['completed_steps', 'current_step', 'error_code', 'operation_id', 'recovery_attempts', 'session_lease_id', 'session_token', 'stage', 'verification_evidence', 'worktree_state'],
@@ -261,13 +264,14 @@ export function parseCoordinationRepository(value) {
 }
 export function parseCoordinationRun(value) {
     const label = 'CoordinationRun';
-    const record = object(value, label, ['active_session_generation', 'autopilot_id', 'created_event_seq', 'repo_id', 'schema_version', 'status', 'version', 'workstream', 'workstream_run']);
+    const record = object(value, label, ['active_session_generation', 'autopilot_id', 'coordination_authority', 'created_event_seq', 'repo_id', 'schema_version', 'status', 'version', 'workstream', 'workstream_run']);
     return {
         schema_version: literal(record, 'schema_version', 'autopilot.coordination_run.v1', label),
         repo_id: pathSegmentIdentifier(record, 'repo_id', label),
         autopilot_id: pathSegmentIdentifier(record, 'autopilot_id', label),
         workstream: identifier(record, 'workstream', label),
         workstream_run: pathSegmentIdentifier(record, 'workstream_run', label),
+        coordination_authority: oneOf(record, 'coordination_authority', ['legacy-path-claims-v1', 'coordinator-edit-leases-v1'], label),
         status: oneOf(record, 'status', COORDINATION_RUN_STATUSES, label),
         active_session_generation: integer(record, 'active_session_generation', label),
         created_event_seq: integer(record, 'created_event_seq', label),
@@ -363,7 +367,14 @@ export function parseCoordinationEditLease(value) {
 }
 export function parseCoordinationChangeReservation(value) {
     const label = 'CoordinationChangeReservation';
-    const record = object(value, label, ['autopilot_id', 'created_event_seq', 'merge_evidence', 'path', 'released_event_seq', 'repo_id', 'reservation_id', 'schema_version', 'version', 'workstream_run']);
+    const record = object(value, label, ['autopilot_id', 'created_event_seq', 'merge_evidence', 'path', 'released_event_seq', 'repo_id', 'reservation_id', 'schema_version', 'terminal_outcome', 'terminal_sha', 'version', 'workstream_run']);
+    const releasedEvent = nullableInteger(record, 'released_event_seq', label);
+    const terminalOutcome = record['terminal_outcome'] === null ? null : oneOf(record, 'terminal_outcome', ['closed', 'aborted'], label);
+    const terminalSha = nullableString(record, 'terminal_sha', label, 64);
+    if ((releasedEvent === null) !== (terminalOutcome === null || terminalSha === null))
+        fail(label, 'reservation release requires both terminal outcome and terminal commit');
+    if (terminalSha !== null && !/^[a-f0-9]{7,64}$/u.test(terminalSha))
+        fail(label, 'terminal_sha must be a lowercase Git object id');
     return {
         schema_version: literal(record, 'schema_version', 'autopilot.change_reservation.v1', label),
         reservation_id: identifier(record, 'reservation_id', label),
@@ -373,7 +384,68 @@ export function parseCoordinationChangeReservation(value) {
         path: repoPath(record, 'path', label),
         merge_evidence: parseEvidence(record['merge_evidence'], `${label}.merge_evidence`),
         created_event_seq: integer(record, 'created_event_seq', label),
-        released_event_seq: nullableInteger(record, 'released_event_seq', label),
+        released_event_seq: releasedEvent,
+        terminal_outcome: terminalOutcome,
+        terminal_sha: terminalSha,
+        version: integer(record, 'version', label, 1),
+    };
+}
+export function parseCoordinationReservationObligation(value) {
+    const label = 'CoordinationReservationObligation';
+    const record = object(value, label, ['created_event_seq', 'integration_evidence', 'obligation_id', 'overlapping_paths', 'predecessor_released_event_seq', 'predecessor_reservation_id', 'predecessor_terminal_sha', 'repo_id', 'reservation_id', 'resolved_event_seq', 'schema_version', 'state', 'validation_evidence', 'version', 'workstream_run']);
+    const state = oneOf(record, 'state', COORDINATION_RESERVATION_OBLIGATION_STATES, label);
+    const predecessorReleased = nullableInteger(record, 'predecessor_released_event_seq', label);
+    const predecessorTerminalSha = nullableString(record, 'predecessor_terminal_sha', label, 64);
+    if (predecessorTerminalSha !== null && !/^[a-f0-9]{7,64}$/u.test(predecessorTerminalSha))
+        fail(label, 'predecessor_terminal_sha must be a lowercase Git object id');
+    const integrationEvidence = parseNullableEvidence(record['integration_evidence'], `${label}.integration_evidence`);
+    const validationEvidence = parseNullableEvidence(record['validation_evidence'], `${label}.validation_evidence`);
+    const resolvedEvent = nullableInteger(record, 'resolved_event_seq', label);
+    if (state === 'waiting-for-predecessor' && (predecessorReleased !== null || predecessorTerminalSha !== null || integrationEvidence !== null || validationEvidence !== null || resolvedEvent !== null))
+        fail(label, 'waiting obligation cannot carry release or resolution evidence');
+    if (state === 'integration-required' && (predecessorReleased === null || predecessorTerminalSha === null || integrationEvidence !== null || validationEvidence !== null || resolvedEvent !== null))
+        fail(label, 'integration-required obligation requires predecessor release/terminal commit and no resolution evidence');
+    if (state === 'resolved' && (predecessorReleased === null || predecessorTerminalSha === null || integrationEvidence === null || validationEvidence === null || resolvedEvent === null))
+        fail(label, 'resolved obligation requires predecessor release/terminal commit, integration evidence, validation evidence, and resolution event');
+    if (state === 'cancelled' && resolvedEvent === null)
+        fail(label, 'cancelled obligation requires a terminal event sequence');
+    return {
+        schema_version: literal(record, 'schema_version', 'autopilot.reservation_obligation.v1', label),
+        obligation_id: identifier(record, 'obligation_id', label),
+        repo_id: pathSegmentIdentifier(record, 'repo_id', label),
+        workstream_run: pathSegmentIdentifier(record, 'workstream_run', label),
+        reservation_id: identifier(record, 'reservation_id', label),
+        predecessor_reservation_id: identifier(record, 'predecessor_reservation_id', label),
+        overlapping_paths: uniqueStrings(record['overlapping_paths'], `${label}.overlapping_paths`, 1),
+        state,
+        created_event_seq: integer(record, 'created_event_seq', label, 1),
+        predecessor_released_event_seq: predecessorReleased,
+        predecessor_terminal_sha: predecessorTerminalSha,
+        integration_evidence: integrationEvidence,
+        validation_evidence: validationEvidence,
+        resolved_event_seq: resolvedEvent,
+        version: integer(record, 'version', label, 1),
+    };
+}
+export function parseCoordinationRunTerminalIntent(value) {
+    const label = 'CoordinationRunTerminalIntent';
+    const record = object(value, label, ['outcome', 'prepared_event_seq', 'repo_id', 'reservation_ids', 'schema_version', 'state', 'terminal_event_seq', 'terminal_intent_id', 'version', 'workstream_run']);
+    const state = oneOf(record, 'state', ['prepared', 'committed', 'cancelled'], label);
+    const terminalEvent = nullableInteger(record, 'terminal_event_seq', label);
+    if (state === 'prepared' && terminalEvent !== null)
+        fail(label, 'prepared terminal intent cannot carry a terminal event');
+    if (state !== 'prepared' && terminalEvent === null)
+        fail(label, 'terminal terminal intent requires a terminal event');
+    return {
+        schema_version: literal(record, 'schema_version', 'autopilot.run_terminal_intent.v1', label),
+        terminal_intent_id: identifier(record, 'terminal_intent_id', label),
+        repo_id: pathSegmentIdentifier(record, 'repo_id', label),
+        workstream_run: pathSegmentIdentifier(record, 'workstream_run', label),
+        outcome: oneOf(record, 'outcome', ['closed', 'aborted'], label),
+        state,
+        reservation_ids: uniqueStrings(record['reservation_ids'], `${label}.reservation_ids`, 0, 10_000),
+        prepared_event_seq: integer(record, 'prepared_event_seq', label, 1),
+        terminal_event_seq: terminalEvent,
         version: integer(record, 'version', label, 1),
     };
 }
@@ -574,7 +646,7 @@ function parseTable(record, field, parser, maxItems = 10_000) {
 }
 export function parseCoordinationSnapshot(value) {
     const label = 'CoordinationSnapshot';
-    const fields = ['acquisition_groups', 'change_reservations', 'child_leases', 'claim_requests', 'edit_leases', 'escalations', 'events', 'mailbox_cursors', 'messages', 'reconciliation_evidence', 'repositories', 'repository_event_seq', 'runs', 'schema_version', 'session_leases', 'unit_attempts', 'worktree_operations', 'worktrees'];
+    const fields = ['acquisition_groups', 'change_reservations', 'child_leases', 'claim_requests', 'edit_leases', 'escalations', 'events', 'mailbox_cursors', 'messages', 'reconciliation_evidence', 'repositories', 'repository_event_seq', 'reservation_obligations', 'run_terminal_intents', 'runs', 'schema_version', 'session_leases', 'unit_attempts', 'worktree_operations', 'worktrees'];
     const record = object(value, label, fields);
     return {
         schema_version: literal(record, 'schema_version', AUTOPILOT_COORDINATION_SNAPSHOT_SCHEMA, label),
@@ -587,6 +659,8 @@ export function parseCoordinationSnapshot(value) {
         acquisition_groups: parseTable(record, 'acquisition_groups', parseCoordinationAcquisitionGroup),
         edit_leases: parseTable(record, 'edit_leases', parseCoordinationEditLease),
         change_reservations: parseTable(record, 'change_reservations', parseCoordinationChangeReservation),
+        reservation_obligations: parseTable(record, 'reservation_obligations', parseCoordinationReservationObligation),
+        run_terminal_intents: parseTable(record, 'run_terminal_intents', parseCoordinationRunTerminalIntent),
         claim_requests: parseTable(record, 'claim_requests', parseCoordinationClaimRequest),
         mailbox_cursors: parseTable(record, 'mailbox_cursors', parseCoordinationMailboxCursor),
         reconciliation_evidence: parseTable(record, 'reconciliation_evidence', parseCoordinationReconciliationEvidence),
@@ -672,6 +746,16 @@ function parsePayload(value, action) {
         else if (field === 'child_token' || field === 'session_token') {
             if (typeof entry !== 'string' || !CHILD_TOKEN.test(entry))
                 fail(label, `${field} must be 32 random bytes encoded as lowercase hex`);
+        }
+        else if (field === 'outcome') {
+            oneOf(payload, field, ['closed', 'aborted'], label);
+        }
+        else if (field === 'integration_evidence_sha256' || field === 'validation_evidence_sha256') {
+            if (typeof entry !== 'string' || !SHA256.test(entry))
+                fail(label, `${field} must use sha256:<64 lowercase hex>`);
+        }
+        else if (field === 'integration_evidence_ref' || field === 'validation_evidence_ref') {
+            repoPath(payload, field, label);
         }
         else if (field === 'spec_sha256') {
             if (typeof entry !== 'string' || !SHA256.test(entry))

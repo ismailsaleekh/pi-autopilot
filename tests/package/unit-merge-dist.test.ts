@@ -1,10 +1,14 @@
 import { describe, it } from 'node:test';
 
-import { assertUnitMergeDriftBlocksWithoutMutation, assertUnitMergeHappyPath, type AutopilotUnitMergeExecutor } from '../helpers/unit-merge-regression.ts';
+import { assertUnitMergeCrashResumePreservesOriginalDiff, assertUnitMergeDriftBlocksWithoutMutation, assertUnitMergeHappyPath, type AutopilotUnitMergeExecutor } from '../helpers/unit-merge-regression.ts';
 
 void describe('compiled unit merge execution-commit authority', () => {
   void it('merges the exact evidenced source commit through dist', async () => {
     await assertUnitMergeHappyPath(await loadDistUnitMerge());
+  });
+
+  void it('preserves crash-resumed merge diff authority through dist', async () => {
+    await assertUnitMergeCrashResumePreservesOriginalDiff(await loadDistUnitMerge());
   });
 
   void it('blocks clean branch drift before integration mutation through dist', async () => {

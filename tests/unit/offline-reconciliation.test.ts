@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { existsSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -10,6 +12,7 @@ import { CoordinatorClient } from '../../src/core/coordination/client.ts';
 import { parseCoordinationAcquisitionGroup, parseCoordinationClaimRequest, parseCoordinationMailboxCursor, parseCoordinationMessage, parseCoordinationRun, parseCoordinationSessionLease } from '../../src/core/coordination/contracts.ts';
 import { ClaimNegotiationClient } from '../../src/core/coordination/negotiation.ts';
 import { recordCoordinatorReleaseEvidenceFromFile, replayPendingCoordinatorReconciliation, RunReconciliationClient } from '../../src/core/coordination/reconciliation.ts';
+import { ReservationCoordinationClient } from '../../src/core/coordination/reservations.ts';
 import { coordinatorRuntimePaths } from '../../src/core/coordination/runtime-paths.ts';
 import { startCoordinatorServer } from '../../src/core/coordination/server.ts';
 import { writeCoordinatorSessionContext, type CoordinatorSessionContext } from '../../src/core/coordination/supervisor.ts';
@@ -21,6 +24,7 @@ interface Actor {
   readonly context: CoordinatorSessionContext;
   readonly negotiation: ClaimNegotiationClient;
   readonly reconciliation: RunReconciliationClient;
+  readonly reservations: ReservationCoordinationClient;
 }
 
 interface Harness {
@@ -36,12 +40,24 @@ function array(value: unknown, label: string): readonly unknown[] {
   return value;
 }
 
+function git(cwd: string, args: readonly string[]): string {
+  const result = spawnSync('git', [...args], { cwd, encoding: 'utf8', env: { ...process.env, GIT_AUTHOR_NAME: 'Autopilot Test', GIT_AUTHOR_EMAIL: 'autopilot@example.invalid', GIT_COMMITTER_NAME: 'Autopilot Test', GIT_COMMITTER_EMAIL: 'autopilot@example.invalid' } });
+  if ((result.status ?? -1) !== 0) throw new Error(`git ${args.join(' ')} failed: ${result.stderr}`);
+  return result.stdout.trim();
+}
+
 function token(seed: string): string {
   return seed.charCodeAt(0).toString(16).slice(-1).repeat(64);
 }
 
 async function harness(): Promise<Harness> {
   const root = await mkdtemp(join(tmpdir(), 'pi-autopilot-offline-reconciliation-'));
+  const repository = join(root, 'repository');
+  await mkdir(repository, { recursive: true });
+  git(repository, ['init', '-b', 'main']);
+  await writeFile(join(repository, 'README.md'), 'offline reconciliation fixture\n', 'utf8');
+  git(repository, ['add', 'README.md']);
+  git(repository, ['commit', '-m', 'initial']);
   const stateRoot = join(root, 'state');
   const env = { ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: stateRoot };
   const server = await startCoordinatorServer(coordinatorRuntimePaths(env));
@@ -72,7 +88,7 @@ async function attachActor(client: CoordinatorClient, stateRoot: string, suffix:
   } else {
     const response = await client.mutate('attach-run', {
       repoId, workstreamRun, sessionId: null, fencingGeneration: null, expectedVersion: 0, idempotencyKey: `attach-run-${suffix}`,
-    }, { repo_key: repoId, canonical_root: '/tmp/generic-offline-repository', git_common_dir: '/tmp/generic-offline-repository/.git', autopilot_id: `autopilot-${suffix.charAt(0)}`, workstream: `work-${suffix.charAt(0)}` });
+    }, { repo_key: repoId, canonical_root: join(dirname(stateRoot), 'repository'), git_common_dir: join(dirname(stateRoot), 'repository', '.git'), autopilot_id: `autopilot-${suffix.charAt(0)}`, workstream: `work-${suffix.charAt(0)}`, coordination_authority: 'coordinator-edit-leases-v1' });
     run = parseCoordinationRun(response.payload['run']);
   }
   const generation = run.active_session_generation + 1;
@@ -82,13 +98,18 @@ async function attachActor(client: CoordinatorClient, stateRoot: string, suffix:
   }, { session_lease_id: `session-lease-${suffix}`, session_token: sessionToken, pid: process.pid, boot_id: `boot-${suffix}`, lease_expires_at: '2000-01-01T00:00:00.000Z', handoff_token: null });
   const attachedRun = parseCoordinationRun(response.payload['run']);
   const session = parseCoordinationSessionLease(response.payload['session']);
+  const mainWorktree = join(stateRoot, 'worktrees', repoId, 'active', workstreamRun, 'main');
+  if (!existsSync(mainWorktree)) {
+    await mkdir(dirname(mainWorktree), { recursive: true });
+    git(join(dirname(stateRoot), 'repository'), ['worktree', 'add', '-b', `autopilot/${workstreamRun}`, mainWorktree, 'main']);
+  }
   const context: CoordinatorSessionContext = {
     schema_version: 'autopilot.coordinator_session_context.v1', state_root: stateRoot, repo_id: repoId, repo_key: repoId,
     autopilot_id: attachedRun.autopilot_id, workstream: attachedRun.workstream, workstream_run: attachedRun.workstream_run,
     session_id: session.session_id, session_generation: session.session_generation, run_version: attachedRun.version,
     session_lease_id: session.session_lease_id, session_token: sessionToken, session_version: session.version, pid: session.pid, boot_id: session.boot_id,
   };
-  return { context, negotiation: new ClaimNegotiationClient(client, context), reconciliation: new RunReconciliationClient(client, context) };
+  return { context, negotiation: new ClaimNegotiationClient(client, context), reconciliation: new RunReconciliationClient(client, context), reservations: new ReservationCoordinationClient(client, context) };
 }
 
 function acquisitionInput(suffix: string, condition: CoordinationReleaseCondition, path = 'src/shared.ts') {
@@ -239,8 +260,9 @@ void describe('Coordination Fabric offline replay and automatic reconciliation',
 
       for (const entry of cases) {
         const evidenceRef = `.pi/autopilot/work-a/evidence/${entry.suffix}.json`;
+        const integrationHead = git(join(value.stateRoot, 'worktrees', owner.context.repo_id, 'active', owner.context.workstream_run, 'main'), ['rev-parse', 'HEAD']);
         const document = entry.source === 'unit-merge'
-          ? { schema_version: 'autopilot.unit_merge.v1', workstream_run: owner.context.workstream_run, autopilot_id: owner.context.autopilot_id, unit_id: 'unit-m', attempt: 1, merge_commit_sha: 'abc1234' }
+          ? { schema_version: 'autopilot.unit_merge.v1', workstream_run: owner.context.workstream_run, autopilot_id: owner.context.autopilot_id, unit_id: 'unit-m', attempt: 1, merge_commit_sha: integrationHead, integration_before: integrationHead, integration_after: integrationHead, execution_commit_ref: 'execution-commits/unit-m.json', changed_paths: [] }
           : entry.source === 'attempt-reset'
             ? { schema_version: 'autopilot.unit_failure.v1', workstream_run: owner.context.workstream_run, unit_id: 'unit-r', attempt: 1, action: 'reset' }
             : { schema_version: 'autopilot.unit_failure.v1', workstream_run: owner.context.workstream_run, unit_id: 'unit-q', attempt: 1, action: 'quarantine', capture_commit_sha: 'abc1234' };
@@ -251,8 +273,10 @@ void describe('Coordination Fabric offline replay and automatic reconciliation',
 
       const closeGrant = await owner.negotiation.acquire(acquisitionInput('z', { condition_type: 'run-closed', target_id: owner.context.workstream_run, evidence: null }, 'src/close.ts'));
       assert.equal(closeGrant.outcome, 'granted');
+      await owner.reservations.prepareRunTerminal('closed');
       const closeEvidenceRef = '.pi/autopilot/work-a/close/run-terminal.json';
-      const closeEvidenceSha = await writeEvidence(value.stateRoot, owner, closeEvidenceRef, `${JSON.stringify({ schema_version: 'autopilot.run_terminal.v1', repo_key: owner.context.repo_id, autopilot_id: owner.context.autopilot_id, workstream_run: owner.context.workstream_run, outcome: 'closed', terminal_sha: 'abc1234' })}\n`);
+      const closeTerminalSha = git(join(value.root, 'repository'), ['rev-parse', 'HEAD']);
+      const closeEvidenceSha = await writeEvidence(value.stateRoot, owner, closeEvidenceRef, `${JSON.stringify({ schema_version: 'autopilot.run_terminal.v1', repo_key: owner.context.repo_id, autopilot_id: owner.context.autopilot_id, workstream_run: owner.context.workstream_run, outcome: 'closed', terminal_sha: closeTerminalSha })}\n`);
       const closed = await owner.reconciliation.recordReleaseEvidence({ source: 'run-close', targetId: owner.context.workstream_run, evidenceRef: closeEvidenceRef, evidenceSha256: closeEvidenceSha });
       assert.equal(closed.reconciliation.released_lease_ids.length, 1);
       const replayedClose = await owner.reconciliation.recordReleaseEvidence({ source: 'run-close', targetId: owner.context.workstream_run, evidenceRef: closeEvidenceRef, evidenceSha256: closeEvidenceSha });
@@ -263,8 +287,10 @@ void describe('Coordination Fabric offline replay and automatic reconciliation',
 
       const abortedOwner = await attachActor(value.client, value.stateRoot, 'c');
       await abortedOwner.negotiation.acquire(acquisitionInput('c', { condition_type: 'run-closed', target_id: abortedOwner.context.workstream_run, evidence: null }, 'src/abort.ts'));
+      await abortedOwner.reservations.prepareRunTerminal('aborted');
       const abortEvidenceRef = '.pi/autopilot/work-c/close/run-terminal.json';
-      const abortEvidenceSha = await writeEvidence(value.stateRoot, abortedOwner, abortEvidenceRef, `${JSON.stringify({ schema_version: 'autopilot.run_terminal.v1', repo_key: abortedOwner.context.repo_id, autopilot_id: abortedOwner.context.autopilot_id, workstream_run: abortedOwner.context.workstream_run, outcome: 'aborted', terminal_sha: 'abc1234' })}\n`);
+      const abortTerminalSha = git(join(value.stateRoot, 'worktrees', abortedOwner.context.repo_id, 'active', abortedOwner.context.workstream_run, 'main'), ['rev-parse', 'HEAD']);
+      const abortEvidenceSha = await writeEvidence(value.stateRoot, abortedOwner, abortEvidenceRef, `${JSON.stringify({ schema_version: 'autopilot.run_terminal.v1', repo_key: abortedOwner.context.repo_id, autopilot_id: abortedOwner.context.autopilot_id, workstream_run: abortedOwner.context.workstream_run, outcome: 'aborted', terminal_sha: abortTerminalSha })}\n`);
       await abortedOwner.reconciliation.recordReleaseEvidence({ source: 'run-abort', targetId: abortedOwner.context.workstream_run, evidenceRef: abortEvidenceRef, evidenceSha256: abortEvidenceSha });
       const abortedRunStatus = await status(value.client, abortedOwner);
       const abortedRuns = array(abortedRunStatus.payload['runs'], 'aborted runs').map((entry) => parseCoordinationRun(entry));
@@ -283,15 +309,16 @@ void describe('Coordination Fabric offline replay and automatic reconciliation',
       const mainWorktree = join(value.stateRoot, 'worktrees', owner.context.repo_id, 'active', owner.context.workstream_run, 'main');
       const runtimeRoot = join(mainWorktree, '.pi', 'autopilot', 'work-a');
       const active: ActiveAutopilotRow = {
-        schema_version: 'autopilot.active_parent.v1', autopilot_id: owner.context.autopilot_id, workstream: owner.context.workstream,
-        workstream_run: owner.context.workstream_run, repo_key: owner.context.repo_id, source_repo: '/tmp/generic-offline-repository',
-        git_common_dir: '/tmp/generic-offline-repository/.git', worktree_root: join(value.stateRoot, 'worktrees', owner.context.repo_id),
+        schema_version: 'autopilot.active_parent.v2', coordination_authority: 'coordinator-edit-leases-v1', autopilot_id: owner.context.autopilot_id, workstream: owner.context.workstream,
+        workstream_run: owner.context.workstream_run, repo_key: owner.context.repo_id, source_repo: join(value.root, 'repository'),
+        git_common_dir: join(value.root, 'repository', '.git'), worktree_root: join(value.stateRoot, 'worktrees', owner.context.repo_id),
         main_worktree_path: mainWorktree, branch: 'autopilot/run-a', runtime_root: runtimeRoot, target_branch: 'main', target_base_sha: 'a'.repeat(40),
         origin_url: null, pid: process.pid, boot_id: owner.context.boot_id, status: 'active', started_at: '2026-07-11T00:00:00.000Z',
         active_run_epoch: 1, active_epoch_started_at: '2026-07-11T00:00:00.000Z', active_run_receipt_id: 'receipt-run-a',
       };
       const evidenceRef = '.pi/autopilot/work-a/unit-merges/unit-a.json';
-      await writeEvidence(value.stateRoot, owner, evidenceRef, `${JSON.stringify({ schema_version: 'autopilot.unit_merge.v1', workstream_run: owner.context.workstream_run, autopilot_id: owner.context.autopilot_id, unit_id: 'unit-a', attempt: 1, merge_commit_sha: 'abc1234' })}\n`);
+      const integrationHead = git(mainWorktree, ['rev-parse', 'HEAD']);
+      await writeEvidence(value.stateRoot, owner, evidenceRef, `${JSON.stringify({ schema_version: 'autopilot.unit_merge.v1', workstream_run: owner.context.workstream_run, autopilot_id: owner.context.autopilot_id, unit_id: 'unit-a', attempt: 1, merge_commit_sha: integrationHead, integration_before: integrationHead, integration_after: integrationHead, execution_commit_ref: 'execution-commits/unit-a.json', changed_paths: [] })}\n`);
       const evidencePath = join(mainWorktree, ...evidenceRef.split('/'));
       const pendingRoot = join(runtimeRoot, 'coordination-reconciliation', 'pending');
       await assert.rejects(

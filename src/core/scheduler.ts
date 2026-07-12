@@ -5,6 +5,7 @@ import type { AutopilotMasterPlan, AutopilotState, AutopilotUnitSpec } from './c
 import { parseAutopilotUnitSpec } from './contracts/validate.ts';
 import { matchesRepoPathPattern, pathOverlapsOrContains, writeJsonAtomic, type AutopilotClaimType } from './parallel-runtime.ts';
 import type { AutopilotSchedulerConfig } from './scheduler-config.ts';
+import { reservationSchedulingBlockers, type ReservationCoordinationView } from './coordination/reservations.ts';
 
 export type AutopilotSchedulerSkipCode =
   | 'context-not-ok'
@@ -18,6 +19,8 @@ export type AutopilotSchedulerSkipCode =
   | 'running-cap-reached'
   | 'path-conflict'
   | 'waiting-for-peer-release'
+  | 'reservation-ordering'
+  | 'reservation-integration-required'
   | 'worktree-unavailable';
 
 export interface AutopilotSchedulerCandidate {
@@ -51,6 +54,7 @@ export interface AutopilotSchedulerInput {
   readonly candidates: readonly AutopilotSchedulerCandidate[];
   readonly runningAttempts: readonly AutopilotSchedulerRunningAttempt[];
   readonly activeClaims: readonly AutopilotSchedulerClaimView[];
+  readonly reservationCoordination: { readonly workstreamRun: string; readonly view: ReservationCoordinationView } | null;
   readonly now?: Date;
 }
 
@@ -184,6 +188,21 @@ export function planNextDispatch(input: AutopilotSchedulerInput): AutopilotDispa
       if (blockers.length > 0) {
         reasons.push('path-conflict');
         details.push(...blockers);
+      }
+      if (input.reservationCoordination !== null) {
+        const reservationBlockers = reservationSchedulingBlockers({
+          workstreamRun: input.reservationCoordination.workstreamRun,
+          requestedPaths: requestedClaims.map((claim) => claim.path),
+          view: input.reservationCoordination.view,
+        });
+        if (reservationBlockers.ordering.length > 0) {
+          reasons.push('reservation-ordering');
+          details.push(...reservationBlockers.ordering);
+        }
+        if (reservationBlockers.integration.length > 0) {
+          reasons.push('reservation-integration-required');
+          details.push(...reservationBlockers.integration);
+        }
       }
     }
     const uniqueReasons = unique(reasons);

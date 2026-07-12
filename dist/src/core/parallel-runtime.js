@@ -363,8 +363,11 @@ async function recoverUnitCreateSagaMetadata(active, operation, env) {
 }
 export async function recoverAutopilotWorktreeSagas(input) {
     const env = input.env ?? process.env;
-    if (env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV] === undefined)
+    if (env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV] === undefined) {
+        if (input.active.coordination_authority === 'coordinator-edit-leases-v1')
+            fail('coordination-authority-unavailable', 'coordinator-authoritative saga recovery requires its durable session.');
         return await recoverOwnedWorktreeSagas({ active: input.active, env });
+    }
     const client = await OwnedWorktreeSagaClient.fromEnvironment(env);
     const recoveredUnitCreates = [];
     for (const operation of await client.operations()) {
@@ -385,7 +388,12 @@ export async function updateUnitBranchStatus(input) {
     if (target !== undefined)
         await upsertUnitBranchInfo(taskRoot, target);
 }
+function assertLegacyClaimAuthority(active, operation) {
+    if (active.coordination_authority !== 'legacy-path-claims-v1')
+        fail('coordination-authority-mismatch', `${operation} refused because ${active.workstream_run} is coordinator-edit-lease authoritative; legacy path claims are immutable for this run.`);
+}
 export async function releaseClaimsForUnit(input) {
+    assertLegacyClaimAuthority(input.context.active, 'legacy unit claim release');
     const now = input.now ?? new Date();
     return await withAutopilotFileLock(join(input.context.coordinationRoot, '.locks', 'path-claims.lock'), `unit-claim-release:${input.context.active.autopilot_id}:${input.unitId}:${String(input.attempt)}`, async () => {
         const current = await readPathClaims(input.context.coordinationRoot);
@@ -415,6 +423,7 @@ export async function releaseClaimsForUnit(input) {
     });
 }
 export async function releaseReadClaimsForUnitPaths(input) {
+    assertLegacyClaimAuthority(input.context.active, 'legacy READ claim release');
     const now = input.now ?? new Date();
     const pathSet = new Set(input.paths.map(normalizeRepoRelativePath));
     if (pathSet.size === 0)
@@ -532,6 +541,7 @@ export async function resolveActiveAutopilotForSpec(spec, env = process.env) {
     };
 }
 export async function acquireClaimsForUnit(input) {
+    assertLegacyClaimAuthority(input.context.active, 'legacy claim acquisition');
     const requested = requestedClaimsForSpec(input.context.active, input.spec, input.reason);
     if (requested.length === 0)
         return Object.freeze([]);
@@ -595,6 +605,7 @@ export async function acquireClaimsForUnit(input) {
     });
 }
 export async function acquireReadClaimsForUnitPaths(input) {
+    assertLegacyClaimAuthority(input.context.active, 'legacy READ claim expansion');
     const acquiredAt = (input.now ?? new Date()).toISOString();
     const requested = dedupeClaims(input.paths.map((path) => ({
         schema_version: 'autopilot.path_claim.v1',
@@ -824,7 +835,7 @@ async function recoverCoordinatorBootstrapWorkstream(input) {
     const profileSnapshot = parseCheckoutProfileSnapshot(bootstrap['profile_snapshot'], bootstrapPath);
     const bootstrapTaskInfo = bootstrap['task_info'];
     const bootstrapBranches = bootstrap['branches'];
-    if (!isRecord(bootstrapTaskInfo) || bootstrapTaskInfo['schema_version'] !== 'autopilot.task_info.v1' || !isRecord(bootstrapBranches) || bootstrapBranches['schema_version'] !== 'autopilot.branches.v1')
+    if (!isRecord(bootstrapTaskInfo) || (bootstrapTaskInfo['schema_version'] !== 'autopilot.task_info.v1' && bootstrapTaskInfo['schema_version'] !== 'autopilot.task_info.v2') || !isRecord(bootstrapBranches) || bootstrapBranches['schema_version'] !== 'autopilot.branches.v1')
         fail('bootstrap-state-invalid', 'worktree bootstrap metadata is malformed.', [bootstrapPath]);
     const bootstrapMetadataPaths = [join(taskRoot, AUTOPILOT_CHECKOUT_PROFILE_SNAPSHOT_FILE), join(taskRoot, TASK_INFO_FILE), join(taskRoot, BRANCHES_FILE), join(taskRoot, UNIT_INDEX_FILE)];
     const attachment = await new DurableRunSupervisorClient(input.env).attach({ repo: input.repo, active, rawSessionId: input.coordinationSessionId });
@@ -870,7 +881,7 @@ async function recoverCoordinatorBootstrapWorkstream(input) {
     await mkdir(active.runtime_root, { recursive: true });
     await writeJsonAtomic(join(taskRoot, AUTOPILOT_CHECKOUT_PROFILE_SNAPSHOT_FILE), profileSnapshot);
     const taskInfo = {
-        schema_version: 'autopilot.task_info.v1', workstream: active.workstream, workstream_run: active.workstream_run, autopilot_id: active.autopilot_id,
+        schema_version: 'autopilot.task_info.v2', coordination_authority: active.coordination_authority, workstream: active.workstream, workstream_run: active.workstream_run, autopilot_id: active.autopilot_id,
         source_repo: active.source_repo, git_common_dir: active.git_common_dir, repo_key: active.repo_key, base_sha: active.target_base_sha, branch: active.branch,
         worktree_path: active.main_worktree_path, runtime_root: active.runtime_root, target_branch: active.target_branch, target_base_sha: active.target_base_sha,
         started_at: active.started_at, closed_at: null, status: active.status, checkout_mode: profileSnapshot.profile.mode === 'full' ? 'full' : 'sparse',
@@ -915,14 +926,14 @@ async function createNewWorkstream(input) {
         },
     });
     const row = {
-        schema_version: 'autopilot.active_parent.v1', autopilot_id: autopilotId, workstream: input.workstream, workstream_run: workstreamRun,
+        schema_version: 'autopilot.active_parent.v2', coordination_authority: input.coordinationSessionId === undefined ? 'legacy-path-claims-v1' : 'coordinator-edit-leases-v1', autopilot_id: autopilotId, workstream: input.workstream, workstream_run: workstreamRun,
         repo_key: input.repo.repoKey, source_repo: input.repo.repoRoot, git_common_dir: input.repo.gitCommonDir, worktree_root: input.worktreeRoot,
         main_worktree_path: mainWorktreePath, branch, runtime_root: runtimeRoot, target_branch: input.repo.targetBranch,
         target_base_sha: input.repo.headSha, origin_url: input.repo.originUrl, pid: process.pid, boot_id: getBootId(), status: 'active',
         started_at: startedAt, active_run_epoch: 1, active_epoch_started_at: startedAt, active_run_receipt_id: buildReceiptId('bootstrap-register'),
     };
     const taskInfo = {
-        schema_version: 'autopilot.task_info.v1', workstream: row.workstream, workstream_run: row.workstream_run, autopilot_id: row.autopilot_id,
+        schema_version: 'autopilot.task_info.v2', coordination_authority: row.coordination_authority, workstream: row.workstream, workstream_run: row.workstream_run, autopilot_id: row.autopilot_id,
         source_repo: row.source_repo, git_common_dir: row.git_common_dir, repo_key: row.repo_key, base_sha: row.target_base_sha, branch: row.branch,
         worktree_path: row.main_worktree_path, runtime_root: row.runtime_root, target_branch: row.target_branch, target_base_sha: row.target_base_sha,
         started_at: row.started_at, closed_at: null, status: row.status, checkout_mode: checkoutProfile.profile.mode === 'full' ? 'full' : 'sparse',
@@ -1380,7 +1391,7 @@ export async function updateTaskInfoStatus(row, status) {
     const value = await readJson(path);
     if (!isRecord(value))
         fail('invalid-task-info', '_task-info.json must contain an object.');
-    await writeJsonAtomic(path, { ...value, status, runtime_root: row.runtime_root, worktree_path: row.main_worktree_path });
+    await writeJsonAtomic(path, { ...value, schema_version: 'autopilot.task_info.v2', coordination_authority: row.coordination_authority, status, runtime_root: row.runtime_root, worktree_path: row.main_worktree_path });
 }
 function parseWorktreeIndexRow(value) {
     if (!isRecord(value))

@@ -40,7 +40,7 @@ async function attachActor(client: CoordinatorClient, stateRoot: string, suffix:
   const runResponse = await client.mutate('attach-run', {
     repoId, workstreamRun, sessionId: null, fencingGeneration: null, expectedVersion: 0, idempotencyKey: `attach-run-${suffix}`,
   }, {
-    repo_key: repoId, canonical_root: `/tmp/generic-negotiation-repository-${repoId}`, git_common_dir: `/tmp/generic-negotiation-repository-${repoId}/.git`, autopilot_id: `autopilot-${suffix}`, workstream: `workstream-${suffix}`,
+    repo_key: repoId, canonical_root: `/tmp/generic-negotiation-repository-${repoId}`, git_common_dir: `/tmp/generic-negotiation-repository-${repoId}/.git`, autopilot_id: `autopilot-${suffix}`, workstream: `workstream-${suffix}`, coordination_authority: 'coordinator-edit-leases-v1',
   });
   const run = parseCoordinationRun(runResponse.payload['run']);
   const token = suffix.charCodeAt(0).toString(16).slice(-1).repeat(64);

@@ -1,5 +1,5 @@
 export const AUTOPILOT_COORDINATION_SNAPSHOT_SCHEMA = 'autopilot.coordination_snapshot.v1';
-export const AUTOPILOT_COORDINATOR_PROTOCOL_VERSION = '1.0';
+export const AUTOPILOT_COORDINATOR_PROTOCOL_VERSION = '1.1';
 export const AUTOPILOT_COORDINATOR_REQUEST_SCHEMA = 'autopilot.coordinator_request.v1';
 export const AUTOPILOT_COORDINATOR_RESPONSE_SCHEMA = 'autopilot.coordinator_response.v1';
 export const AUTOPILOT_COORDINATION_PREFLIGHT_SCHEMA = 'autopilot.coordination_preflight.v1';
@@ -17,3 +17,5 @@ export const COORDINATION_WORKTREE_KINDS = ['main', 'unit'];
 export const COORDINATION_OPERATION_TYPES = ['create', 'materialize', 'commit', 'merge', 'reset', 'quarantine', 'archive', 'remove'];
 export const COORDINATION_RELEASE_CONDITION_TYPES = ['child-terminal', 'unit-merged', 'attempt-reset', 'quarantine-captured', 'run-closed', 'explicit-owner-release'];
 export const COORDINATION_RECONCILIATION_SOURCES = ['child-process', 'unit-merge', 'attempt-reset', 'quarantine-capture', 'run-close', 'run-abort'];
+export const COORDINATION_RESERVATION_OBLIGATION_STATES = ['waiting-for-predecessor', 'integration-required', 'resolved', 'cancelled'];
+export const COORDINATION_MESSAGE_TYPES = ['claim-request', 'release-notification', 'grant-offer', 'recovery-required', 'reservation-overlap', 'reservation-landed'];

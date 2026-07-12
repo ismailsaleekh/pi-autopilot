@@ -28,8 +28,8 @@ export function validCoordinationSnapshot(): CoordinationSnapshot {
       version: 1,
     }],
     runs: [
-      { schema_version: 'autopilot.coordination_run.v1', repo_id: 'repo-1', autopilot_id: 'autopilot-a', workstream: 'work-a', workstream_run: 'run-a', status: 'active', active_session_generation: 1, created_event_seq: 1, version: 1 },
-      { schema_version: 'autopilot.coordination_run.v1', repo_id: 'repo-1', autopilot_id: 'autopilot-b', workstream: 'work-b', workstream_run: 'run-b', status: 'active', active_session_generation: 1, created_event_seq: 1, version: 1 },
+      { schema_version: 'autopilot.coordination_run.v1', repo_id: 'repo-1', autopilot_id: 'autopilot-a', workstream: 'work-a', workstream_run: 'run-a', coordination_authority: 'coordinator-edit-leases-v1', status: 'active', active_session_generation: 1, created_event_seq: 1, version: 1 },
+      { schema_version: 'autopilot.coordination_run.v1', repo_id: 'repo-1', autopilot_id: 'autopilot-b', workstream: 'work-b', workstream_run: 'run-b', coordination_authority: 'coordinator-edit-leases-v1', status: 'active', active_session_generation: 1, created_event_seq: 1, version: 1 },
     ],
     session_leases: [
       { schema_version: 'autopilot.session_lease.v1', session_lease_id: 'session-lease-a', repo_id: 'repo-1', workstream_run: 'run-a', session_id: 'session-a', session_generation: 1, pid: 101, boot_id: 'boot-a', lease_expires_at: '2026-07-11T16:00:00.000Z', status: 'attached', attached_event_seq: 2, version: 1 },
@@ -46,6 +46,8 @@ export function validCoordinationSnapshot(): CoordinationSnapshot {
     ],
     edit_leases: [{ schema_version: 'autopilot.edit_lease.v1', edit_lease_id: 'lease-a', owner: ownerA, acquisition_group_id: 'group-a', path: 'src/shared.ts', mode: 'WRITE', purpose: 'implement shared source', acquired_event_seq: 3, normal_release_condition: { condition_type: 'unit-merged', target_id: 'unit-a:1', evidence: null }, version: 1 }],
     change_reservations: [],
+    reservation_obligations: [],
+    run_terminal_intents: [],
     claim_requests: [{ schema_version: 'autopilot.claim_request.v1', request_id: 'request-b-a', acquisition_group_id: 'group-b', requester: ownerB, owner: ownerA, blocking_lease_ids: ['lease-a'], requested_leases: [{ path: 'src/shared.ts', mode: 'WRITE', purpose: 'implement peer change' }], reason: 'peer needs shared source', created_event_seq: 3, status: 'deferred', owner_reason: 'unit-a still running', release_condition: { condition_type: 'unit-merged', target_id: 'unit-a:1', evidence: null }, release_event_seq: null, grant_event_seq: null, version: 2 }],
     mailbox_cursors: [
       { schema_version: 'autopilot.mailbox_cursor.v1', repo_id: 'repo-1', workstream_run: 'run-a', delivered_through_event_seq: 3, acknowledged_through_event_seq: 0, version: 2 },

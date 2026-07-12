@@ -18,8 +18,11 @@ export interface AutopilotValidationEvidence {
   readonly covered_path_groups: readonly string[];
   readonly witness_ids: readonly string[];
   readonly status_ref: string;
+  readonly status_sha256: `sha256:${string}`;
   readonly receipt_ref: string;
+  readonly receipt_sha256: `sha256:${string}`;
   readonly audit_ref: string;
+  readonly audit_sha256: `sha256:${string}`;
   readonly verdict: 'PASS' | 'NEEDS_FIX' | 'BLOCKED';
   readonly validated_at: string;
 }
@@ -54,7 +57,7 @@ function fail(code: string, message: string): never {
 
 export function parseValidationEvidence(value: unknown): AutopilotValidationEvidence {
   if (!isRecord(value)) fail('invalid-validation-evidence', 'validation evidence must be an object.');
-  return {
+  const parsed: AutopilotValidationEvidence = {
     schema_version: expectConst(value, 'schema_version', 'autopilot.validation_evidence.v1'),
     workstream: expectString(value, 'workstream'),
     source_unit_id: expectString(value, 'source_unit_id'),
@@ -67,11 +70,17 @@ export function parseValidationEvidence(value: unknown): AutopilotValidationEvid
     covered_path_groups: expectStringArray(value, 'covered_path_groups'),
     witness_ids: expectStringArray(value, 'witness_ids'),
     status_ref: expectString(value, 'status_ref'),
+    status_sha256: expectSha256(value, 'status_sha256'),
     receipt_ref: expectString(value, 'receipt_ref'),
+    receipt_sha256: expectSha256(value, 'receipt_sha256'),
     audit_ref: expectString(value, 'audit_ref'),
+    audit_sha256: expectSha256(value, 'audit_sha256'),
     verdict: expectVerdict(value),
     validated_at: expectString(value, 'validated_at'),
   };
+  if (parsed.source_unit_id === parsed.validation_unit_id) fail('self-certifying-validation', 'source-changing work must be validated by an independent unit.');
+  if (parsed.verdict === 'PASS' && parsed.witness_ids.length === 0) fail('witnessless-validation-pass', 'validation PASS requires at least one witness id.');
+  return parsed;
 }
 
 export async function recordValidationStalenessForMerge(input: {
@@ -143,6 +152,12 @@ function expectString(record: Readonly<Record<string, unknown>>, key: string): s
   const value = record[key];
   if (typeof value !== 'string' || value.length === 0) fail('invalid-validation-evidence', `${key} must be a non-empty string.`);
   return value;
+}
+
+function expectSha256(record: Readonly<Record<string, unknown>>, key: string): `sha256:${string}` {
+  const value = expectString(record, key);
+  if (!/^sha256:[a-f0-9]{64}$/u.test(value)) fail('invalid-validation-evidence', `${key} must be a SHA-256 digest.`);
+  return value as `sha256:${string}`;
 }
 
 function expectInteger(record: Readonly<Record<string, unknown>>, key: string): number {

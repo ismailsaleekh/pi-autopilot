@@ -9,6 +9,7 @@ export * from './negotiation.ts';
 export * from './package-isolation.ts';
 export * from './process-identity.ts';
 export * from './reconciliation.ts';
+export * from './reservations.ts';
 export * from './runtime-paths.ts';
 export * from './schemas.ts';
 export * from './server.ts';

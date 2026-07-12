@@ -47,6 +47,21 @@ export async function assertUnitMergeHappyPath(executeMerge: AutopilotUnitMergeE
   });
 }
 
+export async function assertUnitMergeCrashResumePreservesOriginalDiff(executeMerge: AutopilotUnitMergeExecutor): Promise<void> {
+  await withTempDir(async (root) => {
+    const fixture = await prepareUnitFixture(root);
+    const integrationBefore = gitOut(fixture.prepared.mainWorktreePath, ['rev-parse', 'HEAD']);
+    const intentPath = join(fixture.prepared.runtimeRoot, 'unit-merge-intents', 'u01.implement.attempt-1.json');
+    await mkdir(dirname(intentPath), { recursive: true });
+    await writeFile(intentPath, `${JSON.stringify({ schema_version: 'autopilot.unit_merge_intent.v1', workstream: fixture.prepared.active.workstream, workstream_run: fixture.prepared.active.workstream_run, autopilot_id: fixture.prepared.active.autopilot_id, unit_id: 'u01', role: 'implement', attempt: 1, unit_head: fixture.validatedHead, integration_before: integrationBefore, created_at: '2026-07-12T00:00:00.000Z' })}\n`, 'utf8');
+    git(fixture.prepared.mainWorktreePath, ['merge', '--no-ff', '--no-edit', '-m', 'simulated crash after Git merge', fixture.validatedHead]);
+    const result = await executeMerge({ context: fixture.context, unitId: 'u01', attempt: 1, statusPath: fixture.evidence.statusPath, receiptPath: fixture.evidence.receiptPath, auditPath: fixture.evidence.auditPath, executionCommitPath: fixture.evidence.executionCommitPath, now: new Date('2026-07-12T00:00:01.000Z') });
+    assert.equal(result.outcome, 'merged');
+    assert.equal(result.merge?.integration_before, integrationBefore);
+    assert.deepEqual(result.merge?.changed_paths, ['src/u01.ts']);
+  });
+}
+
 export async function assertUnitMergeDriftBlocksWithoutMutation(executeMerge: AutopilotUnitMergeExecutor): Promise<void> {
   await withTempDir(async (root) => {
     const fixture = await prepareUnitFixture(root);

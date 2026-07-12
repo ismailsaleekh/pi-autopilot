@@ -1,12 +1,13 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { readFile } from 'node:fs/promises';
+import { readFile, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { parseAutopilotExecutionAudit, parseAutopilotExecutionCommit, parseAutopilotReceipt, parseAutopilotStatusEntry } from "./contracts/index.js";
 import { gitHead, readGitStatus, releaseClaimsForUnit, runGit, updateUnitBranchStatus, withAutopilotFileLock, writeJsonAtomic } from "./parallel-runtime.js";
 import { cleanupTerminalUnitWorktree } from "./worktree-cleanup.js";
 import { recordCoordinatorReleaseEvidenceFromFile } from "./coordination/reconciliation.js";
 import { executeOwnedWorktreeSaga, WorktreeSagaCompensatedError } from "./coordination/worktree-saga.js";
+import { recordValidationStalenessForMerge } from "./validation-staleness.js";
 export class AutopilotUnitMergeError extends Error {
     name = 'AutopilotUnitMergeError';
     code;
@@ -42,7 +43,19 @@ export async function mergeAutopilotUnit(input) {
                 conflict_path: null,
             };
         }
-        const before = gitHead(active.main_worktree_path);
+        const mergePath = join(active.runtime_root, 'unit-merges', `${input.unitId}.${executionCommit.role}.attempt-${String(input.attempt)}.json`);
+        const mergeIntentPath = join(active.runtime_root, 'unit-merge-intents', `${input.unitId}.${executionCommit.role}.attempt-${String(input.attempt)}.json`);
+        let before;
+        if (existsSync(mergeIntentPath)) {
+            const intent = await readJsonFile(mergeIntentPath);
+            if (!isRecord(intent) || intent['schema_version'] !== 'autopilot.unit_merge_intent.v1' || intent['workstream_run'] !== active.workstream_run || intent['autopilot_id'] !== active.autopilot_id || intent['unit_id'] !== input.unitId || intent['attempt'] !== input.attempt || intent['unit_head'] !== validatedUnitHead || typeof intent['integration_before'] !== 'string')
+                fail('merge-intent-mismatch', 'durable unit-merge intent does not match the exact attempt authority.', [mergeIntentPath]);
+            before = intent['integration_before'];
+        }
+        else {
+            before = gitHead(active.main_worktree_path);
+            await writeJsonAtomic(mergeIntentPath, { schema_version: 'autopilot.unit_merge_intent.v1', workstream: active.workstream, workstream_run: active.workstream_run, autopilot_id: active.autopilot_id, unit_id: input.unitId, role: executionCommit.role, attempt: input.attempt, unit_head: validatedUnitHead, integration_before: before, created_at: now.toISOString() });
+        }
         const conflictPath = join(active.runtime_root, 'merge-conflicts', `${input.unitId}.attempt-${String(input.attempt)}.${timestamp(now)}.json`);
         const inspectMerge = () => {
             const dirty = readGitStatus(active.main_worktree_path).changedPaths;
@@ -55,9 +68,14 @@ export async function mergeAutopilotUnit(input) {
                 return { outcome: 'unsafe', proof: [`expected_head=${before}`, `actual_head=${current}`] };
             return { outcome: 'not-applied', proof: [`head=${before}`, `pending_source=${validatedUnitHead}`] };
         };
-        const mergePath = join(active.runtime_root, 'unit-merges', `${input.unitId}.${executionCommit.role}.attempt-${String(input.attempt)}.json`);
         let durableMerge = null;
         const persistMergeEvidence = async () => {
+            if (existsSync(mergePath)) {
+                const existing = parseAutopilotUnitMerge(await readJsonFile(mergePath));
+                if (existing.workstream_run !== active.workstream_run || existing.autopilot_id !== active.autopilot_id || existing.unit_id !== input.unitId || existing.attempt !== input.attempt || existing.unit_head !== validatedUnitHead || existing.integration_before !== before)
+                    fail('merge-evidence-mismatch', 'existing immutable unit-merge evidence disagrees with its durable merge intent.', [mergePath]);
+                return existing;
+            }
             const after = gitHead(active.main_worktree_path);
             const merge = {
                 schema_version: 'autopilot.unit_merge.v1', workstream: active.workstream, workstream_run: active.workstream_run, autopilot_id: active.autopilot_id,
@@ -118,7 +136,16 @@ export async function mergeAutopilotUnit(input) {
                     if (inspected.outcome !== 'satisfied')
                         fail('merge-saga-postcondition', 'unit merge saga did not satisfy its exact source-ancestor postcondition.', inspected.proof);
                     durableMerge = await persistMergeEvidence();
-                    return [...inspected.proof, `unit_merge_ref=${relativeRuntimeRef(active.runtime_root, mergePath)}`];
+                    const validationEvidenceRefs = await listValidationEvidenceRefs(active.runtime_root);
+                    if (validationEvidenceRefs.length > 0)
+                        await recordValidationStalenessForMerge({
+                            runtimeRoot: active.runtime_root,
+                            workstream: active.workstream,
+                            invalidatingMergeRef: relativeRuntimeRef(active.runtime_root, mergePath),
+                            validationEvidenceRefs,
+                            now,
+                        });
+                    return [...inspected.proof, `unit_merge_ref=${relativeRuntimeRef(active.runtime_root, mergePath)}`, 'validation_staleness_reconciled'];
                 },
             }, input.env ?? process.env);
         }
@@ -128,14 +155,17 @@ export async function mergeAutopilotUnit(input) {
             throw error;
         }
         const merge = durableMerge ?? parseAutopilotUnitMerge(JSON.parse(await readFile(mergePath, 'utf8')));
-        await recordCoordinatorReleaseEvidenceFromFile({
-            active,
-            source: 'unit-merge',
-            targetId: `${input.unitId}:${String(input.attempt)}`,
-            evidencePath: mergePath,
-            ...(input.env === undefined ? {} : { env: input.env }),
-        });
-        await releaseClaimsForUnit({ context: input.context, unitId: input.unitId, attempt: input.attempt, reason: 'autopilot unit merge release', now });
+        if (active.coordination_authority === 'coordinator-edit-leases-v1')
+            await recordCoordinatorReleaseEvidenceFromFile({
+                active,
+                source: 'unit-merge',
+                targetId: `${input.unitId}:${String(input.attempt)}`,
+                evidencePath: mergePath,
+                ...(input.env === undefined ? {} : { env: input.env }),
+            });
+        if (active.coordination_authority === 'legacy-path-claims-v1') {
+            await releaseClaimsForUnit({ context: input.context, unitId: input.unitId, attempt: input.attempt, reason: 'autopilot unit merge release', now });
+        }
         const archiveRef = `autopilot/archive/${active.workstream_run}/unit/${input.unitId}/attempt-${String(input.attempt)}`;
         const inspectArchive = () => {
             const result = spawnSync('git', ['rev-parse', '--verify', `refs/heads/${archiveRef}`], { cwd: active.source_repo, encoding: 'utf8', env: runtimeGitEnv('unit-archive-inspect', input.env) });
@@ -238,7 +268,7 @@ function isAncestor(cwd, ancestor, descendant) {
     fail('merge-ancestry-check-failed', 'failed to verify unit merge source ancestry.', [result.stderr.trim(), ancestor, descendant]);
 }
 function diffPaths(cwd, left, right) {
-    const output = runGit(['diff', '--name-only', '-z', left, right], cwd);
+    const output = runGit(['diff', '--name-only', '--no-renames', '-z', left, right], cwd);
     return Object.freeze(output.split('\0').filter((path) => path.length > 0).map((path) => path.replace(/\\/gu, '/')).sort((leftPath, rightPath) => leftPath.localeCompare(rightPath)));
 }
 function relativeRuntimeRef(runtimeRoot, absolutePath) {
@@ -246,6 +276,23 @@ function relativeRuntimeRef(runtimeRoot, absolutePath) {
     if (!absolutePath.startsWith(normalizedRoot))
         fail('artifact-outside-runtime-root', 'unit merge artifact ref is outside authoritative runtime root.', [absolutePath, runtimeRoot]);
     return absolutePath.slice(normalizedRoot.length);
+}
+async function listValidationEvidenceRefs(runtimeRoot) {
+    const root = join(runtimeRoot, 'validation');
+    if (!existsSync(root))
+        return Object.freeze([]);
+    const refs = [];
+    const walk = async (directory) => {
+        for (const entry of await readdir(directory, { withFileTypes: true })) {
+            const path = join(directory, entry.name);
+            if (entry.isDirectory())
+                await walk(path);
+            else if (entry.isFile() && entry.name.endsWith('.json'))
+                refs.push(relativeRuntimeRef(runtimeRoot, path));
+        }
+    };
+    await walk(root);
+    return Object.freeze(refs.sort((left, right) => left.localeCompare(right)));
 }
 function runtimeGitEnv(authority, env = process.env) {
     return {

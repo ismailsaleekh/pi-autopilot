@@ -156,7 +156,7 @@ async function prepareRegisteredWorktree(root: string, unitSpec: AutopilotUnitSp
 }> {
   const source = join(root, 'source');
   if (!existsGitRepo(source)) await initGitSource(source, unitSpec.owned_paths);
-  return await prepareAutopilotWorkstream({ workstream: unitSpec.workstream, sourceCwd: source });
+  return await prepareAutopilotWorkstream({ workstream: unitSpec.workstream, sourceCwd: source, coordinationSessionId: `runner-bootstrap-${unitSpec.unit_id}-${String(unitSpec.attempt)}` });
 }
 
 function existsGitRepo(path: string): boolean {

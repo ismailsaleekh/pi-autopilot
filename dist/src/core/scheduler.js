@@ -2,6 +2,7 @@ import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { parseAutopilotUnitSpec } from "./contracts/validate.js";
 import { matchesRepoPathPattern, pathOverlapsOrContains, writeJsonAtomic } from "./parallel-runtime.js";
+import { reservationSchedulingBlockers } from "./coordination/reservations.js";
 export async function writeDispatchArtifacts(input) {
     const dispatchPath = join(input.runtimeRoot, 'dispatches', `${input.dispatch.dispatch_id}.json`);
     const claimSnapshotPath = join(input.runtimeRoot, 'claim-snapshots', `${input.dispatch.dispatch_id}.json`);
@@ -96,6 +97,21 @@ export function planNextDispatch(input) {
             if (blockers.length > 0) {
                 reasons.push('path-conflict');
                 details.push(...blockers);
+            }
+            if (input.reservationCoordination !== null) {
+                const reservationBlockers = reservationSchedulingBlockers({
+                    workstreamRun: input.reservationCoordination.workstreamRun,
+                    requestedPaths: requestedClaims.map((claim) => claim.path),
+                    view: input.reservationCoordination.view,
+                });
+                if (reservationBlockers.ordering.length > 0) {
+                    reasons.push('reservation-ordering');
+                    details.push(...reservationBlockers.ordering);
+                }
+                if (reservationBlockers.integration.length > 0) {
+                    reasons.push('reservation-integration-required');
+                    details.push(...reservationBlockers.integration);
+                }
             }
         }
         const uniqueReasons = unique(reasons);

@@ -48,6 +48,7 @@ export function checkCoordinationInvariants(snapshot: CoordinationSnapshot): rea
   const attempts = new Map(snapshot.unit_attempts.map((attempt) => [ownerKey(attempt.owner), attempt]));
   const groups = new Map(snapshot.acquisition_groups.map((group) => [group.acquisition_group_id, group]));
   const worktrees = new Map(snapshot.worktrees.map((worktree) => [worktree.worktree_id, worktree]));
+  const reservations = new Map(snapshot.change_reservations.map((reservation) => [reservation.reservation_id, reservation]));
 
   findings.push(...duplicateFindings(snapshot.repositories.map((value) => value.repo_id), 'duplicate-repository', 'repositories'));
   findings.push(...duplicateFindings(snapshot.runs.map((value) => runKey(value.repo_id, value.workstream_run)), 'duplicate-run', 'runs'));
@@ -57,6 +58,8 @@ export function checkCoordinationInvariants(snapshot: CoordinationSnapshot): rea
   findings.push(...duplicateFindings(snapshot.acquisition_groups.map((value) => value.acquisition_group_id), 'duplicate-acquisition-group', 'acquisition_groups'));
   findings.push(...duplicateFindings(snapshot.edit_leases.map((value) => value.edit_lease_id), 'duplicate-edit-lease', 'edit_leases'));
   findings.push(...duplicateFindings(snapshot.change_reservations.map((value) => value.reservation_id), 'duplicate-reservation', 'change_reservations'));
+  findings.push(...duplicateFindings(snapshot.reservation_obligations.map((value) => value.obligation_id), 'duplicate-reservation-obligation', 'reservation_obligations'));
+  findings.push(...duplicateFindings(snapshot.run_terminal_intents.map((value) => value.terminal_intent_id), 'duplicate-run-terminal-intent', 'run_terminal_intents'));
   findings.push(...duplicateFindings(snapshot.claim_requests.map((value) => value.request_id), 'duplicate-claim-request', 'claim_requests'));
   findings.push(...duplicateFindings(snapshot.mailbox_cursors.map((value) => runKey(value.repo_id, value.workstream_run)), 'duplicate-mailbox-cursor', 'mailbox_cursors'));
   findings.push(...duplicateFindings(snapshot.reconciliation_evidence.map((value) => value.reconciliation_evidence_id), 'duplicate-reconciliation-evidence', 'reconciliation_evidence'));
@@ -133,6 +136,10 @@ export function checkCoordinationInvariants(snapshot: CoordinationSnapshot): rea
 
   for (const lease of snapshot.edit_leases) {
     assertOwner(lease.owner, lease.edit_lease_id);
+    const owningRun = runs.get(runKey(lease.owner.repo_id, lease.owner.workstream_run));
+    if (owningRun !== undefined && owningRun.coordination_authority !== 'coordinator-edit-leases-v1') findings.push(finding('legacy-run-retains-edit-lease', lease.edit_lease_id, 'legacy-path-claim authoritative run must not hold coordinator edit authority'));
+    const attempt = attempts.get(ownerKey(lease.owner));
+    if (attempt !== undefined && ['merged', 'failed', 'reset', 'quarantined', 'superseded'].includes(attempt.state)) findings.push(finding('terminal-attempt-retains-edit-lease', lease.edit_lease_id, `${attempt.state} unit attempt retains active edit authority`));
     if (conditionSatisfied(snapshot, lease.owner.repo_id, lease.owner.workstream_run, lease.normal_release_condition)) findings.push(finding('satisfied-condition-retains-lease', lease.edit_lease_id, 'accepted terminal evidence must release active edit authority'));
     const group = groups.get(lease.acquisition_group_id);
     if (group === undefined) findings.push(finding('lease-group-missing', lease.edit_lease_id, 'acquisition group does not exist'));
@@ -153,7 +160,57 @@ export function checkCoordinationInvariants(snapshot: CoordinationSnapshot): rea
   for (const reservation of snapshot.change_reservations) {
     const run = runs.get(runKey(reservation.repo_id, reservation.workstream_run));
     if (run === undefined) findings.push(finding('reservation-run-missing', reservation.reservation_id, 'owning run does not exist'));
-    else if (run.autopilot_id !== reservation.autopilot_id) findings.push(finding('reservation-owner-mismatch', reservation.reservation_id, 'reservation owner differs from run owner'));
+    else {
+      if (run.coordination_authority !== 'coordinator-edit-leases-v1') findings.push(finding('legacy-run-retains-reservation', reservation.reservation_id, 'legacy-path-claim authoritative run must not hold change reservations'));
+      if (run.autopilot_id !== reservation.autopilot_id) findings.push(finding('reservation-owner-mismatch', reservation.reservation_id, 'reservation owner differs from run owner'));
+      if ((run.status === 'closed' || run.status === 'aborted') && reservation.released_event_seq === null) findings.push(finding('terminal-run-retains-reservation', reservation.reservation_id, `${run.status} run retains an unlanded reservation`));
+      if (run.status !== 'closed' && run.status !== 'aborted' && reservation.released_event_seq !== null) findings.push(finding('live-run-released-reservation', reservation.reservation_id, 'reservation was released without a terminal run transition'));
+    }
+    const acceptedMerge = snapshot.reconciliation_evidence.some((evidence) => evidence.repo_id === reservation.repo_id && evidence.workstream_run === reservation.workstream_run && evidence.source === 'unit-merge' && evidence.release_condition.evidence !== null && evidence.release_condition.evidence.ref === reservation.merge_evidence.ref && evidence.release_condition.evidence.sha256 === reservation.merge_evidence.sha256);
+    if (!acceptedMerge) findings.push(finding('reservation-merge-evidence-missing', reservation.reservation_id, 'reservation does not reference accepted immutable unit-merge evidence'));
+  }
+
+  for (const obligation of snapshot.reservation_obligations) {
+    const reservation = reservations.get(obligation.reservation_id);
+    const predecessor = reservations.get(obligation.predecessor_reservation_id);
+    if (reservation === undefined) findings.push(finding('obligation-reservation-missing', obligation.obligation_id, 'dependent reservation does not exist'));
+    if (predecessor === undefined) findings.push(finding('obligation-predecessor-missing', obligation.obligation_id, 'predecessor reservation does not exist'));
+    if (reservation !== undefined && (obligation.repo_id !== reservation.repo_id || obligation.workstream_run !== reservation.workstream_run)) findings.push(finding('obligation-owner-mismatch', obligation.obligation_id, 'obligation owner differs from dependent reservation'));
+    if (reservation !== undefined && predecessor !== undefined) {
+      if (reservation.repo_id !== predecessor.repo_id || reservation.workstream_run === predecessor.workstream_run) findings.push(finding('obligation-predecessor-invalid', obligation.obligation_id, 'predecessor must be a foreign run reservation in the same repository'));
+      if (!coordinationPathsOverlap(reservation.path, predecessor.path)) findings.push(finding('obligation-paths-do-not-overlap', obligation.obligation_id, 'reservation pair does not overlap'));
+    }
+    if (obligation.state === 'waiting-for-predecessor' && predecessor !== undefined && predecessor.released_event_seq !== null) findings.push(finding('released-predecessor-obligation-not-advanced', obligation.obligation_id, 'released predecessor must advance or cancel its obligation'));
+    if ((obligation.state === 'integration-required' || obligation.state === 'resolved') && predecessor !== undefined && obligation.predecessor_released_event_seq !== predecessor.released_event_seq) findings.push(finding('obligation-release-sequence-mismatch', obligation.obligation_id, 'obligation does not bind the predecessor release event'));
+  }
+
+  const orderedActiveReservations = snapshot.change_reservations.filter((reservation) => reservation.released_event_seq === null).sort((left, right) => left.created_event_seq - right.created_event_seq || left.reservation_id.localeCompare(right.reservation_id));
+  for (let leftIndex = 0; leftIndex < orderedActiveReservations.length; leftIndex += 1) {
+    const predecessor = orderedActiveReservations[leftIndex];
+    if (predecessor === undefined) continue;
+    for (let rightIndex = leftIndex + 1; rightIndex < orderedActiveReservations.length; rightIndex += 1) {
+      const dependent = orderedActiveReservations[rightIndex];
+      if (dependent === undefined || dependent.repo_id !== predecessor.repo_id || dependent.workstream_run === predecessor.workstream_run || !coordinationPathsOverlap(predecessor.path, dependent.path)) continue;
+      const obligation = snapshot.reservation_obligations.find((entry) => entry.reservation_id === dependent.reservation_id && entry.predecessor_reservation_id === predecessor.reservation_id && entry.state !== 'cancelled');
+      if (obligation === undefined) findings.push(finding('overlapping-reservations-uncoordinated', `${predecessor.reservation_id},${dependent.reservation_id}`, 'foreign unlanded overlap requires deterministic integration ordering'));
+    }
+  }
+
+  for (const intent of snapshot.run_terminal_intents) {
+    const run = runs.get(runKey(intent.repo_id, intent.workstream_run));
+    if (run === undefined) findings.push(finding('terminal-intent-run-missing', intent.terminal_intent_id, 'owning run does not exist'));
+    const activeReservations = snapshot.change_reservations.filter((reservation) => reservation.repo_id === intent.repo_id && reservation.workstream_run === intent.workstream_run && reservation.released_event_seq === null).map((reservation) => reservation.reservation_id).sort();
+    if (intent.state === 'prepared' && JSON.stringify([...intent.reservation_ids].sort()) !== JSON.stringify(activeReservations)) findings.push(finding('terminal-intent-reservation-set-drift', intent.terminal_intent_id, 'prepared terminal intent no longer matches active reservation set'));
+    if (intent.state === 'committed' && run !== undefined && run.status !== intent.outcome) findings.push(finding('terminal-intent-run-status-mismatch', intent.terminal_intent_id, `committed ${intent.outcome} intent has run status ${run.status}`));
+  }
+  for (const run of snapshot.runs) {
+    const preparedIntents = snapshot.run_terminal_intents.filter((intent) => intent.repo_id === run.repo_id && intent.workstream_run === run.workstream_run && intent.state === 'prepared');
+    if (preparedIntents.length > 1) findings.push(finding('multiple-prepared-terminal-intents', run.workstream_run, `${String(preparedIntents.length)} terminal intents are prepared`));
+    if (run.status !== 'closed' && run.status !== 'aborted') continue;
+    const liveLeases = snapshot.edit_leases.filter((lease) => lease.owner.repo_id === run.repo_id && lease.owner.workstream_run === run.workstream_run);
+    if (liveLeases.length > 0) findings.push(finding('terminal-run-retains-edit-leases', run.workstream_run, `${run.status} run retains ${String(liveLeases.length)} active edit leases`));
+    const unresolved = snapshot.reservation_obligations.filter((obligation) => obligation.repo_id === run.repo_id && obligation.workstream_run === run.workstream_run && obligation.state !== 'resolved' && obligation.state !== 'cancelled');
+    if (unresolved.length > 0) findings.push(finding('terminal-run-retains-reservation-obligations', run.workstream_run, `${run.status} run retains ${String(unresolved.length)} integration obligations`));
   }
 
   for (const request of snapshot.claim_requests) {

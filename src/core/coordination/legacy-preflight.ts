@@ -104,9 +104,15 @@ function repoPath(record: JsonObject, field: string, label: string): string {
 
 export function parseLegacyActiveAutopilotRow(value: unknown): ActiveAutopilotRow {
   const label = 'legacy active Autopilot row';
-  const record = object(value, label, ['active_epoch_started_at', 'active_run_epoch', 'active_run_receipt_id', 'autopilot_id', 'boot_id', 'branch', 'git_common_dir', 'main_worktree_path', 'origin_url', 'pid', 'repo_key', 'runtime_root', 'schema_version', 'source_repo', 'started_at', 'status', 'target_base_sha', 'target_branch', 'workstream', 'workstream_run', 'worktree_root']);
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) contractFailure(label, 'must be an object');
+  const schema = (value as JsonObject)['schema_version'];
+  if (schema !== 'autopilot.active_parent.v1' && schema !== 'autopilot.active_parent.v2') contractFailure(label, 'schema_version must be autopilot.active_parent.v1 or autopilot.active_parent.v2');
+  const fields = ['active_epoch_started_at', 'active_run_epoch', 'active_run_receipt_id', 'autopilot_id', 'boot_id', 'branch', 'git_common_dir', 'main_worktree_path', 'origin_url', 'pid', 'repo_key', 'runtime_root', 'schema_version', 'source_repo', 'started_at', 'status', 'target_base_sha', 'target_branch', 'workstream', 'workstream_run', 'worktree_root'];
+  const record = object(value, label, schema === 'autopilot.active_parent.v2' ? [...fields, 'coordination_authority'] : fields);
+  const coordinationAuthority = schema === 'autopilot.active_parent.v1' ? 'legacy-path-claims-v1' : oneOf(record, 'coordination_authority', ['legacy-path-claims-v1', 'coordinator-edit-leases-v1'] as const, label);
   return {
-    schema_version: literal(record, 'schema_version', 'autopilot.active_parent.v1', label),
+    schema_version: 'autopilot.active_parent.v2',
+    coordination_authority: coordinationAuthority,
     autopilot_id: string(record, 'autopilot_id', label),
     workstream: string(record, 'workstream', label),
     workstream_run: string(record, 'workstream_run', label),
@@ -205,6 +211,7 @@ export function checkLegacyCoordinationInvariants(input: {
       add('legacy-claim-owner-missing', claim.path, `owner ${claim.autopilot_id}/${claim.workstream_run} does not exist`);
       continue;
     }
+    if (owner.coordination_authority !== 'legacy-path-claims-v1') add('coordinator-run-has-legacy-claim', claim.path, `coordinator-authoritative run ${owner.workstream_run} must not own legacy path claims`);
     if (owner.workstream !== claim.workstream) add('legacy-claim-workstream-mismatch', claim.path, `claim workstream ${claim.workstream} differs from owner ${owner.workstream}`);
     if (owner.active_run_epoch !== claim.active_run_epoch) add('legacy-old-epoch-claim', claim.path, `claim epoch ${String(claim.active_run_epoch)} differs from owner epoch ${String(owner.active_run_epoch)}; durable run/unit ownership remains authoritative`, 'warning');
   }

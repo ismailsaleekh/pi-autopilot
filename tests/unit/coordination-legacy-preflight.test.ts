@@ -130,7 +130,8 @@ void describe('legacy coordination canonical preflight', () => {
 
 function legacyRow(root: string): ActiveAutopilotRow {
   return {
-    schema_version: 'autopilot.active_parent.v1',
+    schema_version: 'autopilot.active_parent.v2',
+    coordination_authority: 'legacy-path-claims-v1',
     autopilot_id: 'autopilot-1',
     workstream: 'generic-work',
     workstream_run: 'generic-work-run-1',

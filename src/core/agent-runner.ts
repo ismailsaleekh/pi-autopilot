@@ -6,6 +6,7 @@ import { dirname, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
+  AUTOPILOT_COORDINATION_AUTHORITY_ENV,
   AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV,
   AUTOPILOT_STATUS_CONTEXT_ENV,
   AUTOPILOT_STATUS_TOOL,
@@ -40,6 +41,7 @@ import {
   ensureWorktreeCleanForLaunch,
   prepareAutopilotUnitWorktree,
   readActiveAutopilots,
+  readPathClaims,
   recoverAutopilotWorktreeSagas,
   releaseClaimsForUnit,
   unitWorktreePathForActiveAutopilot,
@@ -48,12 +50,16 @@ import {
   type ActiveAutopilotRow,
   type AutopilotPathClaim,
 } from './parallel-runtime.ts';
+import { ClaimNegotiationClient, type ClaimGroupAcquisitionResult } from './coordination/negotiation.ts';
+import { ReservationCoordinationClient, reservationSchedulingBlockers } from './coordination/reservations.ts';
+import type { CoordinationAcquisitionGroup } from './coordination/types.ts';
 import { rollbackCreatedUnitWorktree } from './worktree-cleanup.ts';
 import { AutopilotChildLeaseHandle, registerAutopilotChildAuthority } from './coordination/child-authority.ts';
 import {
   assertAutopilotSpecMaterializationDiskGate,
   expandedReadOnlyPathsForAudit,
   materializeAutopilotSpecPaths,
+  sourceReadClaimPathsForSpec,
 } from './materialization.ts';
 import { assertAutopilotSpecQualityGate } from './quality/spec-gate.ts';
 import {
@@ -68,6 +74,7 @@ type TimerHandle = ReturnType<typeof setTimeout>;
 
 export type AutopilotAgentRunFailureClass =
   | 'spec-invalid'
+  | 'waiting-for-peer-release'
   | 'pi-spawn-failed'
   | 'missing-structured-output'
   | 'invalid-structured-output'
@@ -238,16 +245,33 @@ interface PendingEvent {
 interface ChildAuthorityLifecycle {
   handle: AutopilotChildLeaseHandle | null;
   completed: boolean;
+  preflight: RuntimePreflightResult | null;
+  env: ProcessEnv | null;
+  spec: AutopilotUnitSpec | null;
 }
 
 export async function runAutopilotAgentFromSpecPath(
   specPath: string,
   options: AutopilotAgentRunOptions = {},
 ): Promise<AutopilotAgentRunResult> {
-  const lifecycle: ChildAuthorityLifecycle = { handle: null, completed: false };
+  const lifecycle: ChildAuthorityLifecycle = { handle: null, completed: false, preflight: null, env: null, spec: null };
   try {
     return await runAutopilotAgentFromSpecPathInternal(specPath, options, lifecycle);
   } catch (error) {
+    if (lifecycle.handle === null && lifecycle.preflight !== null && lifecycle.env !== null && lifecycle.spec !== null) {
+      try {
+        if (lifecycle.preflight.coordinatorGroup !== null) {
+          await (await ClaimNegotiationClient.fromEnvironment(lifecycle.env)).cancelGroup({ group: lifecycle.preflight.coordinatorGroup, reason: 'autopilot-agent-run pre-child failure rollback' });
+        } else if (lifecycle.preflight.acquiredClaims.length > 0) {
+          await releaseClaimsForUnit({ context: lifecycle.preflight.context, unitId: lifecycle.spec.unit_id, attempt: lifecycle.spec.attempt, reason: 'autopilot-agent-run pre-child failure rollback' });
+        }
+      } catch (rollbackError) {
+        throw new AutopilotAgentRunError('runtime-commit-failed', {
+          reason: `pre-child attempt failed (${errorMessage(error)}) and authority rollback failed: ${errorMessage(rollbackError)}`,
+          specPath,
+        });
+      }
+    }
     if (lifecycle.handle !== null && !lifecycle.completed) {
       try {
         await lifecycle.handle.markRecoveryRequired();
@@ -289,6 +313,9 @@ async function runAutopilotAgentFromSpecPathInternal(
     skipSagaRecovery: options.dryRun === true,
     env,
   });
+  lifecycle.preflight = runtimePreflight;
+  lifecycle.env = env;
+  lifecycle.spec = spec;
   const auditBaseline = await captureAutopilotExecutionBaseline(spec.cwd);
   const auditOutput = deriveAutopilotExecutionAuditPath(spec);
   const contextPath = deriveAutopilotStatusContextPath(spec);
@@ -340,7 +367,11 @@ async function runAutopilotAgentFromSpecPathInternal(
     });
   }
 
-  const childProcessEnv: ProcessEnv = { ...env, [AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV]: undefined };
+  const childProcessEnv: ProcessEnv = {
+    ...env,
+    [AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV]: undefined,
+    [AUTOPILOT_COORDINATION_AUTHORITY_ENV]: runtimePreflight.context.active.coordination_authority,
+  };
   const spawnSpec: SpawnSpec = {
     executable: options.piExecutable ?? resolvePiExecutable(env),
     model: providerIdentity.requested_model_id,
@@ -358,7 +389,7 @@ async function runAutopilotAgentFromSpecPathInternal(
     piResult = await runPiPromptWithStatusCarrier(spawnSpec, rendered.text);
   } catch (error) {
     if (error instanceof AutopilotPiRunError) {
-      const audit = await writeAttemptAudit(spec, runtimePreflight.context, auditBaseline, null, auditOutput);
+      const audit = await writeAttemptAudit(spec, runtimePreflight.context, auditBaseline, null, auditOutput, env);
       throw new AutopilotAgentRunError('pi-spawn-failed', {
         reason: `Pi spawn failed before valid Autopilot status acceptance: ${error.code}: ${error.message}${formatPiRunErrorDiagnostics(error)}`,
         specPath,
@@ -377,7 +408,7 @@ async function runAutopilotAgentFromSpecPathInternal(
   try {
     evidence = await validateAutopilotStatusEvidence({ unitSpec: spec, providerIdentity });
   } catch (error) {
-    const audit = await writeAttemptAudit(spec, runtimePreflight.context, auditBaseline, null, auditOutput);
+    const audit = await writeAttemptAudit(spec, runtimePreflight.context, auditBaseline, null, auditOutput, env);
     if (piResult.isError) {
       throw new AutopilotAgentRunError('pi-spawn-failed', {
         reason: `Pi session returned an error result before valid Autopilot status acceptance: ${formatPiResultFailureDiagnostics(piResult)}`,
@@ -415,7 +446,7 @@ async function runAutopilotAgentFromSpecPathInternal(
     });
   }
 
-  const audit = await writeAttemptAudit(spec, runtimePreflight.context, auditBaseline, evidence.status, auditOutput);
+  const audit = await writeAttemptAudit(spec, runtimePreflight.context, auditBaseline, evidence.status, auditOutput, env);
 
   try {
     validateAutopilotEmitStatusCarrier(
@@ -551,6 +582,7 @@ async function readAndValidateSpec(specPath: string): Promise<AutopilotUnitSpec>
 interface RuntimePreflightResult {
   readonly context: ActiveAutopilotContext;
   readonly acquiredClaims: readonly AutopilotPathClaim[];
+  readonly coordinatorGroup: CoordinationAcquisitionGroup | null;
 }
 
 interface RuntimePreflightOptions {
@@ -641,19 +673,41 @@ async function preflightSpecAfterWorktreePreparation(
     });
   }
 
+  const coordinatorMode = options.skipClaimAcquire !== true && runtimeContext.active.coordination_authority === 'coordinator-edit-leases-v1';
+  if (coordinatorMode) {
+    const forbiddenLegacyClaims = (await readPathClaims(runtimeContext.coordinationRoot)).filter((claim) => claim.autopilot_id === runtimeContext.active.autopilot_id && claim.workstream_run === runtimeContext.active.workstream_run);
+    if (forbiddenLegacyClaims.length > 0) throw new AutopilotAgentRunError('spec-invalid', {
+      reason: `coordinator-edit-lease authoritative run has forbidden legacy claims: ${forbiddenLegacyClaims.map((claim) => `${claim.claim_type}:${claim.path}`).join(', ')}`,
+      specPath,
+      statusOutput: spec.status_output,
+      receiptOutput: spec.receipt_output,
+    });
+  }
+  if (coordinatorMode && (options.env ?? process.env)[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV] === undefined) throw new AutopilotAgentRunError('spec-invalid', {
+    reason: 'coordinator-edit-lease authoritative run is missing its durable coordinator session; refusing legacy claim fallback',
+    specPath,
+    statusOutput: spec.status_output,
+    receiptOutput: spec.receipt_output,
+  });
+  let coordinatorGroup: CoordinationAcquisitionGroup | null = null;
   const acquiredClaims = options.skipClaimAcquire === true
     ? []
-    : await acquireClaimsForUnit({ context: runtimeContext, spec, reason: 'autopilot-agent-run preflight' }).catch((error: unknown) => {
-        if (error instanceof AutopilotParallelRuntimeError) {
-          throw new AutopilotAgentRunError('spec-invalid', {
-            reason: error.message,
-            specPath,
-            statusOutput: spec.status_output,
-            receiptOutput: spec.receipt_output,
-          });
-        }
-        throw error;
-      });
+    : coordinatorMode
+      ? await acquireCoordinatorClaimsForUnit({ context: runtimeContext, spec, specPath, env: options.env ?? process.env }).then((result) => {
+          coordinatorGroup = result.group;
+          return result.claims;
+        })
+      : await acquireClaimsForUnit({ context: runtimeContext, spec, reason: 'autopilot-agent-run preflight' }).catch((error: unknown) => {
+          if (error instanceof AutopilotParallelRuntimeError) {
+            throw new AutopilotAgentRunError('spec-invalid', {
+              reason: error.message,
+              specPath,
+              statusOutput: spec.status_output,
+              receiptOutput: spec.receipt_output,
+            });
+          }
+          throw error;
+        });
 
   if (options.skipClaimAcquire !== true) {
     await materializeAutopilotSpecPaths({
@@ -662,8 +716,20 @@ async function preflightSpecAfterWorktreePreparation(
       reason: 'autopilot-agent-run preflight materialization',
       ...(options.env === undefined ? {} : { env: options.env }),
     }).catch(async (error: unknown) => {
-      if (acquiredClaims.length > 0) {
-        await releaseClaimsForUnit({ context: runtimeContext, unitId: spec.unit_id, attempt: spec.attempt, reason: 'autopilot-agent-run materialization failure claim rollback' }).catch(() => undefined);
+      try {
+        if (coordinatorGroup !== null) {
+          const negotiation = await ClaimNegotiationClient.fromEnvironment(options.env ?? process.env);
+          await negotiation.cancelGroup({ group: coordinatorGroup, reason: 'autopilot-agent-run materialization failure prelaunch rollback' });
+        } else if (acquiredClaims.length > 0) {
+          await releaseClaimsForUnit({ context: runtimeContext, unitId: spec.unit_id, attempt: spec.attempt, reason: 'autopilot-agent-run materialization failure claim rollback' });
+        }
+      } catch (rollbackError) {
+        throw new AutopilotAgentRunError('runtime-commit-failed', {
+          reason: `materialization failed (${errorMessage(error)}) and authority rollback failed: ${errorMessage(rollbackError)}`,
+          specPath,
+          statusOutput: spec.status_output,
+          receiptOutput: spec.receipt_output,
+        });
       }
       if (error instanceof Error) {
         throw new AutopilotAgentRunError('spec-invalid', {
@@ -680,7 +746,73 @@ async function preflightSpecAfterWorktreePreparation(
   await mkdir(dirname(spec.status_output), { recursive: true });
   await mkdir(dirname(spec.receipt_output), { recursive: true });
   await mkdir(spec.evidence_dir, { recursive: true });
-  return { context: runtimeContext, acquiredClaims };
+  return { context: runtimeContext, acquiredClaims, coordinatorGroup };
+}
+
+async function acquireCoordinatorClaimsForUnit(input: {
+  readonly context: ActiveAutopilotContext;
+  readonly spec: AutopilotUnitSpec;
+  readonly specPath: string;
+  readonly env: ProcessEnv;
+}): Promise<{ readonly claims: readonly AutopilotPathClaim[]; readonly group: CoordinationAcquisitionGroup | null }> {
+  const relativeSpec = relative(input.context.active.main_worktree_path, input.specPath).replace(/\\/gu, '/');
+  if (relativeSpec.length === 0 || relativeSpec.startsWith('../') || relativeSpec.startsWith('/')) throw new AutopilotAgentRunError('spec-invalid', { reason: 'coordinator-backed unit spec must be inside the durable run main worktree', specPath: input.specPath });
+  const specBytes = await readFile(input.specPath);
+  const specSha256 = `sha256:${createHash('sha256').update(specBytes).digest('hex')}` as const;
+  const requested = new Map<string, { readonly path: string; readonly mode: 'READ' | 'WRITE'; readonly purpose: string }>();
+  const add = (path: string, mode: 'READ' | 'WRITE', purpose: string): void => {
+    const normalized = path.replace(/\\/gu, '/');
+    requested.set(`${mode}\0${normalized}`, { path: normalized, mode, purpose });
+  };
+  for (const path of input.spec.owned_paths) add(path, 'WRITE', `source authority for ${input.spec.unit_id}`);
+  for (const path of input.spec.read_only_paths) add(path, 'READ', `declared read authority for ${input.spec.unit_id}`);
+  for (const path of sourceReadClaimPathsForSpec(input.spec)) add(path, 'READ', `source context authority for ${input.spec.unit_id}`);
+  if (requested.size === 0) return { claims: [], group: null };
+  const reservationView = await (await ReservationCoordinationClient.fromEnvironment(input.env)).view();
+  const reservationBlockers = reservationSchedulingBlockers({ workstreamRun: input.context.active.workstream_run, requestedPaths: [...requested.values()].map((entry) => entry.path), view: reservationView });
+  if (reservationBlockers.ordering.length > 0 || reservationBlockers.integration.length > 0) throw new AutopilotAgentRunError('waiting-for-peer-release', {
+    reason: `reservation coordination blocks dispatch: ${[...reservationBlockers.ordering, ...reservationBlockers.integration].join('; ')}`,
+    specPath: input.specPath,
+    statusOutput: input.spec.status_output,
+    receiptOutput: input.spec.receipt_output,
+  });
+  const groupId = `group-${createHash('sha256').update(`${input.context.active.repo_key}\0${input.context.active.workstream_run}\0${input.spec.unit_id}\0${String(input.spec.attempt)}\0${specSha256}`, 'utf8').digest('hex')}`;
+  const sourceChanging = input.spec.role === 'implement' || input.spec.role === 'fix';
+  const result: ClaimGroupAcquisitionResult = await (await ClaimNegotiationClient.fromEnvironment(input.env)).acquire({
+    acquisitionGroupId: groupId,
+    unitId: input.spec.unit_id,
+    attempt: input.spec.attempt,
+    requestedLeases: [...requested.values()],
+    reason: 'autopilot-agent-run complete initial authority preflight',
+    normalReleaseCondition: sourceChanging
+      ? { condition_type: 'unit-merged', target_id: `${input.spec.unit_id}:${String(input.spec.attempt)}`, evidence: null }
+      : { condition_type: 'child-terminal', target_id: `child-${input.context.active.workstream_run}-${input.spec.unit_id}-${String(input.spec.attempt)}`, evidence: null },
+    specRef: relativeSpec,
+    specSha256,
+    preemptible: true,
+    checkpointOrdinal: 0,
+  });
+  if (result.outcome === 'waiting-for-peer-release') throw new AutopilotAgentRunError('waiting-for-peer-release', {
+    reason: `complete lease set is waiting for peer release: ${result.requestRefs.join(', ')}`,
+    specPath: input.specPath,
+    statusOutput: input.spec.status_output,
+    receiptOutput: input.spec.receipt_output,
+  });
+  const now = new Date().toISOString();
+  const claims = result.editLeases.map((lease): AutopilotPathClaim => ({
+    schema_version: 'autopilot.path_claim.v1',
+    path: lease.path,
+    autopilot_id: input.context.active.autopilot_id,
+    workstream: input.context.active.workstream,
+    workstream_run: input.context.active.workstream_run,
+    unit_id: input.spec.unit_id,
+    attempt: input.spec.attempt,
+    claim_type: lease.mode,
+    acquired_at: now,
+    active_run_epoch: input.context.active.active_run_epoch,
+    reason: lease.purpose,
+  }));
+  return { claims, group: result.acquisitionGroup };
 }
 
 type MissingSourceChangingUnitWorktreePreparation =
@@ -755,8 +887,9 @@ async function writeAttemptAudit(
   baseline: AutopilotExecutionBaseline,
   statusEntry: AutopilotStatusEntry | null,
   auditPath: string,
+  env: ProcessEnv,
 ): Promise<AutopilotExecutionAudit> {
-  const readOnlyPaths = await expandedReadOnlyPathsForAudit({ context, spec });
+  const readOnlyPaths = await expandedReadOnlyPathsForAudit({ context, spec, env });
   return await writeAutopilotExecutionAudit({
     unitSpec: { ...spec, read_only_paths: readOnlyPaths },
     baseline,
