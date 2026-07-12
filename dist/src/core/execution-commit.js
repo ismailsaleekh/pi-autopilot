@@ -1,6 +1,7 @@
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { parseAutopilotExecutionCommit } from "./contracts/index.js";
+import { executeOwnedWorktreeSaga } from "./coordination/worktree-saga.js";
 import { AUTOPILOT_RUNTIME_ENV, AUTOPILOT_RUNTIME_VALUE, gitHead, isAutopilotRuntimeRepoPath, matchesRepoPathPattern, readGitStatus, runGit, } from "./parallel-runtime.js";
 export class AutopilotExecutionCommitError extends Error {
     name = 'AutopilotExecutionCommitError';
@@ -60,61 +61,99 @@ export async function commitAutopilotExecution(input) {
     }
     let runtimeCommitCreated = false;
     let commitSubject = `autopilot captured child commit ${input.spec.unit_id} attempt ${String(input.spec.attempt)}`;
-    if (dirtyClaimedPaths.length > 0) {
-        runGit(['add', '--', ...dirtyClaimedPaths], input.spec.cwd, runtimeGitEnv());
-        const staged = readGitStatus(input.spec.cwd);
-        const stagedSource = staged.stagedPaths.filter((path) => !isAutopilotRuntimeRepoPath(path, input.spec.workstream));
-        for (const stagedPath of stagedSource) {
-            if (!dirtyClaimedPaths.includes(stagedPath)) {
-                fail('staged-path-set-mismatch', 'runtime staging included a source path outside dirty claimed edits.', [stagedPath]);
-            }
-        }
-        commitSubject = `autopilot runtime commit ${input.spec.unit_id} attempt ${String(input.spec.attempt)}`;
-        runGit(['commit', '--no-verify', '-m', commitSubject], input.spec.cwd, runtimeGitEnv());
-        runtimeCommitCreated = true;
-    }
-    const afterHead = gitHead(input.spec.cwd);
     const beforeHead = input.audit.baseline_head ?? headBeforeRuntimeCommit;
-    if (afterHead === beforeHead)
-        fail('commit-not-created', 'source-changing success did not advance or capture a changed HEAD.');
-    const diffPaths = committedDiffPaths(input.spec.cwd, beforeHead, afterHead);
-    assertSameSet('committed diff paths', diffPaths, 'actual claimed changed paths', editedClaimedPaths);
-    const afterStatus = readGitStatus(input.spec.cwd);
-    const afterSourceDirty = afterStatus.changedPaths.filter((path) => !isAutopilotRuntimeRepoPath(path, input.spec.workstream));
-    if (afterSourceDirty.length > 0) {
-        fail('post-commit-source-dirty', 'runtime commit left source paths dirty after commit.', afterSourceDirty);
-    }
-    const commitShas = commitRange(input.spec.cwd, beforeHead, afterHead);
-    const commitOrigin = executionCommitOrigin(runtimeCommitCreated, committedClaimedPaths.length > 0);
-    const executionBranch = currentBranch(input.spec.cwd);
+    if (dirtyClaimedPaths.length > 0)
+        commitSubject = `autopilot runtime commit ${input.spec.unit_id} attempt ${String(input.spec.attempt)}`;
+    const inspectCommit = () => {
+        const currentHead = gitHead(input.spec.cwd);
+        const currentDirty = readGitStatus(input.spec.cwd).changedPaths.filter((path) => !isAutopilotRuntimeRepoPath(path, input.spec.workstream));
+        if (currentDirty.some((path) => !dirtyClaimedPaths.includes(path)))
+            return { outcome: 'unsafe', proof: currentDirty.map((path) => `unexpected_dirty=${path}`) };
+        if (currentDirty.length > 0)
+            return { outcome: 'not-applied', proof: currentDirty.map((path) => `dirty=${path}`) };
+        if (currentHead !== beforeHead) {
+            const actualPaths = committedDiffPaths(input.spec.cwd, beforeHead, currentHead);
+            const expectedPaths = [...editedClaimedPaths].sort((left, right) => left.localeCompare(right));
+            if (actualPaths.length !== expectedPaths.length || actualPaths.some((path, index) => path !== expectedPaths[index]))
+                return { outcome: 'unsafe', proof: [...expectedPaths.map((path) => `expected_path=${path}`), ...actualPaths.map((path) => `actual_path=${path}`)] };
+            return { outcome: 'satisfied', proof: [`head=${currentHead}`, ...actualPaths.map((path) => `committed=${path}`), 'source_worktree_clean'] };
+        }
+        return { outcome: 'unsafe', proof: ['no_dirty_edits_and_head_not_advanced'] };
+    };
     const commitPath = input.commitPath ?? deriveAutopilotExecutionCommitPath(input.spec);
-    const record = parseAutopilotExecutionCommit({
-        schema_version: 'autopilot.execution_commit.v1',
-        workstream: input.spec.workstream,
-        workstream_run: input.context.active.workstream_run,
-        autopilot_id: input.context.active.autopilot_id,
-        active_run_epoch: input.context.active.active_run_epoch,
-        unit_id: input.spec.unit_id,
-        role: input.spec.role,
+    let durableRecord = null;
+    const persistExecutionCommit = async () => {
+        const afterHead = gitHead(input.spec.cwd);
+        if (afterHead === beforeHead)
+            fail('commit-not-created', 'source-changing success did not advance or capture a changed HEAD.');
+        const diffPaths = committedDiffPaths(input.spec.cwd, beforeHead, afterHead);
+        assertSameSet('committed diff paths', diffPaths, 'actual claimed changed paths', editedClaimedPaths);
+        const afterStatus = readGitStatus(input.spec.cwd);
+        const afterSourceDirty = afterStatus.changedPaths.filter((path) => !isAutopilotRuntimeRepoPath(path, input.spec.workstream));
+        if (afterSourceDirty.length > 0)
+            fail('post-commit-source-dirty', 'runtime commit left source paths dirty after commit.', afterSourceDirty);
+        const record = parseAutopilotExecutionCommit({
+            schema_version: 'autopilot.execution_commit.v1', workstream: input.spec.workstream, workstream_run: input.context.active.workstream_run,
+            autopilot_id: input.context.active.autopilot_id, active_run_epoch: input.context.active.active_run_epoch, unit_id: input.spec.unit_id,
+            role: input.spec.role, attempt: input.spec.attempt, cwd: input.spec.cwd, branch: currentBranch(input.spec.cwd), claimed_paths: claimedWritePatterns,
+            edited_claimed_paths: editedClaimedPaths, before_head: beforeHead, after_head: afterHead, commit_sha: afterHead, commit_subject: commitSubject,
+            commit_origin: executionCommitOrigin(runtimeCommitCreated, committedClaimedPaths.length > 0), commit_shas: commitRange(input.spec.cwd, beforeHead, afterHead),
+            status_ref: relativeArtifactRef(input.spec.status_output, input.context.active.runtime_root), receipt_ref: relativeArtifactRef(input.spec.receipt_output, input.context.active.runtime_root),
+            audit_ref: relativeArtifactRef(input.auditPath, input.context.active.runtime_root), created_at: new Date().toISOString(),
+        });
+        await mkdir(dirname(commitPath), { recursive: true });
+        await writeFile(commitPath, `${JSON.stringify(record, null, 2)}\n`, 'utf8');
+        return record;
+    };
+    await executeOwnedWorktreeSaga({
+        active: input.context.active,
+        unitId: input.spec.unit_id,
         attempt: input.spec.attempt,
-        cwd: input.spec.cwd,
-        branch: executionBranch,
-        claimed_paths: claimedWritePatterns,
-        edited_claimed_paths: editedClaimedPaths,
-        before_head: beforeHead,
-        after_head: afterHead,
-        commit_sha: afterHead,
-        commit_subject: commitSubject,
-        commit_origin: commitOrigin,
-        commit_shas: commitShas,
-        status_ref: relativeArtifactRef(input.spec.status_output, input.context.active.runtime_root),
-        receipt_ref: relativeArtifactRef(input.spec.receipt_output, input.context.active.runtime_root),
-        audit_ref: relativeArtifactRef(input.auditPath, input.context.active.runtime_root),
-        created_at: new Date().toISOString(),
+        kind: 'unit',
+        operationType: 'commit',
+        operationKey: `execution-commit:${input.spec.unit_id}:${String(input.spec.attempt)}:${beforeHead}`,
+        initialWorktreeState: 'active',
+        committedWorktreeState: 'active',
+        intent: {
+            repo_root: input.context.active.source_repo,
+            worktree_path: input.spec.cwd,
+            git_common_dir: input.context.active.git_common_dir,
+            branch: currentBranch(input.spec.cwd),
+            reason: 'capture accepted source-changing child execution',
+            base_sha: beforeHead,
+            target_sha: null,
+            archive_ref: null,
+            checkout_mode: null,
+            sparse_patterns: [],
+            paths: editedClaimedPaths,
+            metadata_refs: [relativeArtifactRef(input.commitPath ?? deriveAutopilotExecutionCommitPath(input.spec), input.context.active.runtime_root)],
+        },
+    }, {
+        inspect: inspectCommit,
+        action: () => {
+            if (dirtyClaimedPaths.length === 0)
+                return;
+            runGit(['add', '--', ...dirtyClaimedPaths], input.spec.cwd, runtimeGitEnv());
+            const staged = readGitStatus(input.spec.cwd);
+            const stagedSource = staged.stagedPaths.filter((path) => !isAutopilotRuntimeRepoPath(path, input.spec.workstream));
+            for (const stagedPath of stagedSource) {
+                if (!dirtyClaimedPaths.includes(stagedPath))
+                    fail('staged-path-set-mismatch', 'runtime staging included a source path outside dirty claimed edits.', [stagedPath]);
+            }
+            runGit(['commit', '--no-verify', '-m', commitSubject], input.spec.cwd, runtimeGitEnv());
+            runtimeCommitCreated = true;
+        },
+        verify: async () => {
+            const inspected = inspectCommit();
+            if (inspected.outcome !== 'satisfied')
+                fail('commit-saga-postcondition', 'execution commit saga did not produce a clean advanced HEAD.', inspected.proof);
+            durableRecord = await persistExecutionCommit();
+            return [...inspected.proof, `execution_commit_ref=${relativeArtifactRef(commitPath, input.context.active.runtime_root)}`];
+        },
     });
-    await mkdir(dirname(commitPath), { recursive: true });
-    await writeFile(commitPath, `${JSON.stringify(record, null, 2)}\n`, 'utf8');
-    return record;
+    if (durableRecord !== null)
+        return durableRecord;
+    return parseAutopilotExecutionCommit(JSON.parse(await readFile(commitPath, 'utf8')));
 }
 function activeWriteClaimPaths(input) {
     const fromAcquired = input.acquiredClaims.filter((claim) => claim.autopilot_id === input.context.active.autopilot_id &&

@@ -234,6 +234,7 @@ export class DurableRunSupervisorClient {
 export class AutopilotSessionBridge {
   readonly #supervisor: DurableRunSupervisorClient;
   readonly #sink: CoordinationMessageSink;
+  readonly #recoverOwnedOperations: ((contextPath: string) => Promise<void>) | null;
   #attachment: RunSupervisorAttachment;
   #heartbeat: ReturnType<typeof setInterval> | null = null;
   #closed = false;
@@ -241,17 +242,19 @@ export class AutopilotSessionBridge {
   #fatalError: Error | null = null;
   #operation: Promise<void> = Promise.resolve();
 
-  private constructor(supervisor: DurableRunSupervisorClient, attachment: RunSupervisorAttachment, sink: CoordinationMessageSink) {
+  private constructor(supervisor: DurableRunSupervisorClient, attachment: RunSupervisorAttachment, sink: CoordinationMessageSink, recoverOwnedOperations: ((contextPath: string) => Promise<void>) | null) {
     this.#supervisor = supervisor;
     this.#attachment = attachment;
     this.#sink = sink;
+    this.#recoverOwnedOperations = recoverOwnedOperations;
   }
 
-  static async start(input: { readonly repo: AutopilotRepoIdentity; readonly active: ActiveAutopilotRow; readonly rawSessionId: string; readonly sink: CoordinationMessageSink; readonly env?: ProcessEnvLike }): Promise<AutopilotSessionBridge> {
+  static async start(input: { readonly repo: AutopilotRepoIdentity; readonly active: ActiveAutopilotRow; readonly rawSessionId: string; readonly sink: CoordinationMessageSink; readonly env?: ProcessEnvLike; readonly recoverOwnedOperations?: (contextPath: string) => Promise<void> }): Promise<AutopilotSessionBridge> {
     const supervisor = new DurableRunSupervisorClient(input.env ?? process.env);
     const attachment = await supervisor.attach({ repo: input.repo, active: input.active, rawSessionId: input.rawSessionId });
-    const bridge = new AutopilotSessionBridge(supervisor, attachment, input.sink);
+    const bridge = new AutopilotSessionBridge(supervisor, attachment, input.sink, input.recoverOwnedOperations ?? null);
     await bridge.reconcileOwnedRun('session-attachment-before-mailbox-and-dispatch');
+    if (bridge.#recoverOwnedOperations !== null) await bridge.#recoverOwnedOperations(bridge.#attachment.contextPath);
     await bridge.drainMailbox();
     bridge.#startHeartbeat();
     return bridge;
@@ -379,6 +382,7 @@ export class AutopilotSessionBridge {
         this.#attachment = { ...this.#attachment, session: nextSession, context: { ...this.#attachment.context, session_version: nextSession.version } };
         await writeCoordinatorSessionContext(this.#attachment.contextPath, this.#attachment.context);
         await this.#drainMailboxNow();
+        if (this.#recoverOwnedOperations !== null) await this.#recoverOwnedOperations(this.#attachment.contextPath);
       }).catch((error: unknown) => {
         this.#fatalError = error instanceof Error ? error : new Error(String(error));
         this.#stopHeartbeat();

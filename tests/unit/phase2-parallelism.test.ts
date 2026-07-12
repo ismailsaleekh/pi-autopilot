@@ -299,6 +299,20 @@ void describe('Phase 2 unit worktrees, claims, mergeback, staleness, and GC', ()
       assert.equal(existsSync(join(unit.unitInfo.worktree_path, 'src')), true);
       assert.equal(existsSync(join(prepared.taskRoot, '_materialization-ledger.jsonl')), true);
 
+      const branchOnlyPath = join(prepared.taskRoot, 'units', 'u-branch-only', 'attempt-1', 'worktree');
+      const branchOnlyName = `autopilot/unit/${prepared.active.workstream_run}/u-branch-only/attempt-1`;
+      git(source, ['branch', branchOnlyName, prepared.active.target_base_sha]);
+      const branchOnly = await prepareAutopilotUnitWorktree({ active: prepared.active, unitId: 'u-branch-only', attempt: 1, unitSpec: unitSpec({ cwd: branchOnlyPath, runtimeRoot: prepared.runtimeRoot, unitId: 'u-branch-only', ownedPaths: ['src/branch-only.ts'] }) });
+      assert.equal(existsSync(branchOnly.unitInfo.worktree_path), true);
+      assert.equal(gitOut(branchOnly.unitInfo.worktree_path, ['config', '--bool', 'core.sparseCheckout']), 'true');
+
+      const partialPath = join(prepared.taskRoot, 'units', 'u-partial', 'attempt-1', 'worktree');
+      const partialBranch = `autopilot/unit/${prepared.active.workstream_run}/u-partial/attempt-1`;
+      git(source, ['worktree', 'add', '--no-checkout', '-b', partialBranch, partialPath, prepared.active.target_base_sha]);
+      const partial = await prepareAutopilotUnitWorktree({ active: prepared.active, unitId: 'u-partial', attempt: 1, unitSpec: unitSpec({ cwd: partialPath, runtimeRoot: prepared.runtimeRoot, unitId: 'u-partial', ownedPaths: ['src/partial.ts'] }) });
+      assert.equal(gitOut(partial.unitInfo.worktree_path, ['config', '--bool', 'core.sparseCheckout']), 'true');
+      assert.equal(gitOut(partial.unitInfo.worktree_path, ['rev-parse', '--abbrev-ref', 'HEAD']), partialBranch);
+
       const expanded = await materializeAdditionalReadPathsForSpec({ context, spec: specWithContext, paths: ['heavy/blob.bin'], reason: 'safe auto read expansion test' });
       assert.equal(expanded.checkout_mode, 'sparse');
       assert.equal(existsSync(join(unit.unitInfo.worktree_path, 'heavy', 'blob.bin')), true);

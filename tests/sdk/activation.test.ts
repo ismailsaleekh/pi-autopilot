@@ -477,15 +477,15 @@ void describe('Pi SDK Autopilot activation', () => {
       const repo = resolveRepoIdentity(join(harness.root, 'project'));
       const status = await new CoordinatorClient({ env: process.env, autoStart: false }).query('status', repo.repoKey, null);
       const sessions = status.payload['session_leases'];
-      if (!Array.isArray(sessions) || sessions.length !== 1) throw new Error('expected one durable session lease');
-      const session = sessions[0];
-      if (!isIndexable(session)) throw new Error('durable session lease must be an object');
+      if (!Array.isArray(sessions) || sessions.length !== 2) throw new Error('expected bootstrap and current durable session leases');
+      const session = sessions.find((entry) => isIndexable(entry) && entry['session_generation'] === 2);
+      if (!isIndexable(session)) throw new Error('current durable session lease must be an object');
       assert.equal(session['status'], 'handoff-pending');
       const runs = status.payload['runs'];
       if (!Array.isArray(runs) || runs.length !== 1) throw new Error('expected one durable run supervisor');
       const run = runs[0];
       if (!isIndexable(run)) throw new Error('durable run supervisor must be an object');
-      assert.equal(run['active_session_generation'], 1);
+      assert.equal(run['active_session_generation'], 2);
     } finally {
       await disposeHarness(harness);
     }

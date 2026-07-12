@@ -7,6 +7,11 @@ import { dirname, join } from 'node:path';
 import { describe, it } from 'node:test';
 
 import { abortAutopilotWorkstream, closeAutopilotWorkstream } from '../../src/core/close-runtime.ts';
+import { DurableRunSupervisorClient } from '../../src/core/coordination/supervisor.ts';
+import { coordinatorRuntimePaths } from '../../src/core/coordination/runtime-paths.ts';
+import { startCoordinatorServer } from '../../src/core/coordination/server.ts';
+import { ensureMainWorktreeSagaRegistered } from '../../src/core/coordination/worktree-saga.ts';
+import { AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV } from '../../src/core/names.ts';
 import { materializeAutopilotSpecPaths } from '../../src/core/materialization.ts';
 import type { AutopilotExecutionAudit, AutopilotExecutionCommit, AutopilotMasterPlan, AutopilotState, AutopilotStatusEntry, AutopilotUnitSpec } from '../../src/core/contracts/index.ts';
 import {
@@ -25,12 +30,15 @@ import {
 async function withTempDir<T>(run: (root: string) => Promise<T>): Promise<T> {
   const root = await mkdtemp(join(tmpdir(), 'autopilot-close-test-'));
   const originalStateRoot = process.env[AUTOPILOT_STATE_ROOT_ENV];
+  const originalSessionContext = process.env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV];
   process.env[AUTOPILOT_STATE_ROOT_ENV] = join(root, 'autopilot-state');
   try {
     return await run(root);
   } finally {
     if (originalStateRoot === undefined) delete process.env[AUTOPILOT_STATE_ROOT_ENV];
     else process.env[AUTOPILOT_STATE_ROOT_ENV] = originalStateRoot;
+    if (originalSessionContext === undefined) delete process.env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV];
+    else process.env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV] = originalSessionContext;
     await rm(root, { recursive: true, force: true });
   }
 }
@@ -368,7 +376,14 @@ void describe('Autopilot close runtime', () => {
   void it('lands a validated workstream branch, releases claims, archives runtime, and retires the branch', async () => {
     await withTempDir(async (root) => {
       const fixture = await prepareCloseFixture(root);
+      const coordinator = await startCoordinatorServer(coordinatorRuntimePaths(process.env));
+      const active = (await readActiveAutopilots(coordinationRootForRepo(fixture.repoKey))).find((row) => row.workstream_run === fixture.workstreamRun);
+      if (active === undefined) throw new Error('active run missing');
+      const attachment = await new DurableRunSupervisorClient(process.env).attach({ repo: resolveRepoIdentity(fixture.source), active, rawSessionId: 'close-runtime-coordinated-test' });
+      process.env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV] = attachment.contextPath;
+      await ensureMainWorktreeSagaRegistered({ active });
       const result = await closeAutopilotWorkstream({ workstream: 'close-smoke', sourceCwd: fixture.source, workstreamRun: fixture.workstreamRun });
+      await coordinator.close();
       assert.equal(result.outcome, 'closed');
       assert.deepEqual(result.blockers, []);
       assert.deepEqual(result.changed_paths, ['src/smoke.ts']);

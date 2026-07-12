@@ -25,10 +25,11 @@ import {
   type AutopilotToolCallContextLike,
   type AutopilotToolCallEventLike,
 } from './core/git-guard.ts';
-import { AutopilotParallelRuntimeError, prepareAutopilotWorkstream, resolveRepoIdentity, type PreparedAutopilotWorkstream } from './core/parallel-runtime.ts';
+import { AutopilotParallelRuntimeError, prepareAutopilotWorkstream, recoverAutopilotWorktreeSagas, resolveRepoIdentity, type PreparedAutopilotWorkstream } from './core/parallel-runtime.ts';
 import { CoordinatorClient } from './core/coordination/client.ts';
 import { replayPendingCoordinatorReconciliation } from './core/coordination/reconciliation.ts';
 import { AutopilotSessionBridge, type CoordinationMessageInjection } from './core/coordination/supervisor.ts';
+import { ensureMainWorktreeSagaRegistered } from './core/coordination/worktree-saga.ts';
 import {
   handoffUsage,
   onboardUsage,
@@ -187,6 +188,8 @@ export default function autopilotExtension(pi: ExtensionHostLike): void {
 
   async function attachSessionBridge(prepared: PreparedAutopilotWorkstream, ctx: ExtensionCommandContextLike): Promise<boolean> {
     if (sessionBridge !== null && sessionBridge.attachment.context.workstream_run === prepared.active.workstream_run) {
+      await recoverAutopilotWorktreeSagas({ active: prepared.active });
+      await ensureMainWorktreeSagaRegistered({ active: prepared.active });
       await replayPendingCoordinatorReconciliation({ active: prepared.active });
       await sessionBridge.reconcileOwnedRun('same-session-resume-before-mailbox-and-dispatch');
       await sessionBridge.drainMailbox();
@@ -209,12 +212,19 @@ export default function autopilotExtension(pi: ExtensionHostLike): void {
         repo: prepared.repo,
         active: prepared.active,
         rawSessionId: rawSessionId(ctx),
+        recoverOwnedOperations: async (contextPath) => {
+          const env = { ...process.env, [AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV]: contextPath };
+          await recoverAutopilotWorktreeSagas({ active: prepared.active, env });
+          await ensureMainWorktreeSagaRegistered({ active: prepared.active, env });
+        },
         sink: {
           send: (message, delivery, triggerTurn) => sendMessage(message, { deliverAs: delivery, triggerTurn }),
           isIdle: () => ctx.isIdle?.() ?? true,
         },
       });
       process.env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV] = sessionBridge.attachment.contextPath;
+      await recoverAutopilotWorktreeSagas({ active: prepared.active });
+      await ensureMainWorktreeSagaRegistered({ active: prepared.active });
       await replayPendingCoordinatorReconciliation({ active: prepared.active });
       await sessionBridge.reconcileOwnedRun('pending-evidence-replay-before-mailbox-and-dispatch');
       await sessionBridge.drainMailbox();
@@ -239,7 +249,7 @@ export default function autopilotExtension(pi: ExtensionHostLike): void {
     if (sessionBridge !== null && sessionBridge.attachment.context.workstream === input.workstream && (input.requestedRun === null || sessionBridge.attachment.context.workstream_run === input.requestedRun)) return true;
     let prepared: PreparedAutopilotWorkstream;
     try {
-      prepared = await prepareAutopilotWorkstream({ workstream: input.workstream, sourceCwd: input.ctx.cwd ?? process.cwd() });
+      prepared = await prepareAutopilotWorkstream({ workstream: input.workstream, sourceCwd: input.ctx.cwd ?? process.cwd(), coordinationSessionId: rawSessionId(input.ctx) });
     } catch (error) {
       notify(input.ctx, `Autopilot lifecycle attachment failed before terminal reconciliation: ${error instanceof Error ? error.message : String(error)}`, 'error');
       return false;
@@ -281,6 +291,7 @@ export default function autopilotExtension(pi: ExtensionHostLike): void {
       prepared = await prepareAutopilotWorkstream({
         workstream: input.workstream,
         sourceCwd: input.ctx.cwd ?? process.cwd(),
+        coordinationSessionId: rawSessionId(input.ctx),
       });
     } catch (error) {
       const message = error instanceof AutopilotParallelRuntimeError ? error.message : error instanceof Error ? error.message : String(error);

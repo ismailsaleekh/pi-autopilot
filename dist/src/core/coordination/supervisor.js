@@ -187,22 +187,26 @@ export class DurableRunSupervisorClient {
 export class AutopilotSessionBridge {
     #supervisor;
     #sink;
+    #recoverOwnedOperations;
     #attachment;
     #heartbeat = null;
     #closed = false;
     #handoffPrepared = false;
     #fatalError = null;
     #operation = Promise.resolve();
-    constructor(supervisor, attachment, sink) {
+    constructor(supervisor, attachment, sink, recoverOwnedOperations) {
         this.#supervisor = supervisor;
         this.#attachment = attachment;
         this.#sink = sink;
+        this.#recoverOwnedOperations = recoverOwnedOperations;
     }
     static async start(input) {
         const supervisor = new DurableRunSupervisorClient(input.env ?? process.env);
         const attachment = await supervisor.attach({ repo: input.repo, active: input.active, rawSessionId: input.rawSessionId });
-        const bridge = new AutopilotSessionBridge(supervisor, attachment, input.sink);
+        const bridge = new AutopilotSessionBridge(supervisor, attachment, input.sink, input.recoverOwnedOperations ?? null);
         await bridge.reconcileOwnedRun('session-attachment-before-mailbox-and-dispatch');
+        if (bridge.#recoverOwnedOperations !== null)
+            await bridge.#recoverOwnedOperations(bridge.#attachment.contextPath);
         await bridge.drainMailbox();
         bridge.#startHeartbeat();
         return bridge;
@@ -327,6 +331,8 @@ export class AutopilotSessionBridge {
                 this.#attachment = { ...this.#attachment, session: nextSession, context: { ...this.#attachment.context, session_version: nextSession.version } };
                 await writeCoordinatorSessionContext(this.#attachment.contextPath, this.#attachment.context);
                 await this.#drainMailboxNow();
+                if (this.#recoverOwnedOperations !== null)
+                    await this.#recoverOwnedOperations(this.#attachment.contextPath);
             }).catch((error) => {
                 this.#fatalError = error instanceof Error ? error : new Error(String(error));
                 this.#stopHeartbeat();

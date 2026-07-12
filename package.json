@@ -1,6 +1,6 @@
 {
   "name": "pi-autopilot",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "description": "Standalone perfect-quality Autopilot orchestration for Pi with a transactional local coordinator, durable run supervisors, isolated worktrees, and deterministic quality gates.",
   "type": "module",
   "license": "ISC",

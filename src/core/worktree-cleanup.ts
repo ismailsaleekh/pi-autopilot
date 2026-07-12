@@ -1,9 +1,10 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync, realpathSync } from 'node:fs';
 import { readdir, readFile, rm } from 'node:fs/promises';
-import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 import { AUTOPILOT_RUNTIME_ROOT_PREFIX } from './names.ts';
+import { executeOwnedWorktreeSaga, type WorktreeSagaInspection } from './coordination/worktree-saga.ts';
 import {
   BRANCHES_FILE,
   MATERIALIZED_PATHS_FILE,
@@ -214,9 +215,9 @@ export async function rollbackCreatedUnitWorktree(input: {
       env: input.env,
       unit,
       dirtyBlockCode: 'dirty-preflight-rollback',
-      dirtyBlockMessage: 'refusing to roll back a newly-created unit worktree with dirty residue; quarantine or operator review is required.',
+      dirtyBlockMessage: 'refusing to roll back a newly-created unit worktree with dirty residue; owned quarantine recovery is required.',
     });
-    await retireBranchIfPresent(input.active, unit.branch, acc, 'preflight-rollback', input.reason, now, input.env, unit);
+    await retireBranchIfPresent(input.active, unit.branch, unit.current_sha, acc, 'preflight-rollback', input.reason, now, input.env, unit);
     await removeUnitMetadataForRollback(input.active, unit, now, input.reason);
     await removeUnitAttemptRootAfterRollback(input.active, unit, now, input.reason);
     await pruneGitMetadataAfterProof(input.active, acc, 'preflight-rollback', input.reason, now, input.env);
@@ -238,7 +239,29 @@ export async function cleanupClosedAutopilotRun(input: {
     const now = input.now ?? new Date();
     const acc = emptyAccumulator();
     const units = await loadScopedUnitRows(input.active);
-    runGitForCleanup(['update-ref', `refs/heads/${input.archiveRef}`, input.archiveSha], input.active.source_repo, runtimeGitEnv('worktree-cleanup-archive-ref', input.env));
+    const inspectMainArchive = (): WorktreeSagaInspection => {
+      const result = spawnSync('git', ['rev-parse', '--verify', `refs/heads/${input.archiveRef}`], { cwd: input.active.source_repo, encoding: 'utf8', env: runtimeGitEnv('worktree-cleanup-archive-inspect', input.env) });
+      if ((result.status ?? -1) !== 0) return { outcome: 'not-applied', proof: ['archive_ref_absent'] };
+      return result.stdout.trim() === input.archiveSha ? { outcome: 'satisfied', proof: [`archive_ref=${input.archiveRef}`, `archive_sha=${input.archiveSha}`] } : { outcome: 'unsafe', proof: [`expected=${input.archiveSha}`, `actual=${result.stdout.trim()}`] };
+    };
+    await executeOwnedWorktreeSaga({
+      active: input.active, unitId: 'main', attempt: 1, kind: 'main', operationType: 'archive',
+      operationKey: `main-archive:${input.archiveRef}:${input.archiveSha}`,
+      initialWorktreeState: 'active', committedWorktreeState: 'terminal',
+      intent: {
+        repo_root: input.active.source_repo, worktree_path: input.active.main_worktree_path, git_common_dir: input.active.git_common_dir,
+        branch: input.active.branch, reason: input.reason, base_sha: input.active.target_base_sha, target_sha: input.archiveSha,
+        archive_ref: input.archiveRef, checkout_mode: null, sparse_patterns: [], paths: [], metadata_refs: [`_archive/${input.active.workstream_run}`],
+      },
+    }, {
+      inspect: inspectMainArchive,
+      action: () => { runGitForCleanup(['update-ref', `refs/heads/${input.archiveRef}`, input.archiveSha, '0'.repeat(40)], input.active.source_repo, runtimeGitEnv('worktree-cleanup-archive-ref', input.env)); },
+      verify: () => {
+        const inspected = inspectMainArchive();
+        if (inspected.outcome !== 'satisfied') fail('main-archive-postcondition', 'main archive ref saga postcondition failed.', inspected.proof);
+        return inspected.proof;
+      },
+    }, input.env ?? process.env);
     await appendLedger(input.active, {
       mode: 'closed-run-cleanup',
       event: 'main-branch-archive-ref',
@@ -272,8 +295,8 @@ export async function cleanupClosedAutopilotRun(input: {
         retireBranch: true,
       });
     }
-    await removeMainWorktree(input.active, acc, input.reason, now, input.env);
-    await retireBranchIfPresent(input.active, input.active.branch, acc, 'closed-run-cleanup', input.reason, now, input.env);
+    await removeMainWorktree(input.active, acc, input.archiveSha, input.reason, now, input.env);
+    await retireBranchIfPresent(input.active, input.active.branch, input.archiveSha, acc, 'closed-run-cleanup', input.reason, now, input.env);
     await pruneGitMetadataAfterProof(input.active, acc, 'closed-run-cleanup', input.reason, now, input.env);
     const runOwnedWorktreePaths = [input.active.main_worktree_path, ...units.map((unit) => unit.worktree_path)];
     verifyNoPathResidue(input.active.source_repo, runOwnedWorktreePaths, input.env);
@@ -326,9 +349,9 @@ async function cleanupTerminalUnit(
     env: input.env,
     unit,
     dirtyBlockCode: 'dirty-terminal-unit-worktree',
-    dirtyBlockMessage: 'refusing to remove dirty terminal unit worktree; reset, abort, quarantine, or operator review is required.',
+    dirtyBlockMessage: 'refusing to remove dirty terminal unit worktree; owned reset, abort, or quarantine recovery is required.',
   });
-  if (input.retireBranch) await retireBranchIfPresent(active, unit.branch, acc, input.mode, input.reason, input.now, input.env, unit);
+  if (input.retireBranch) await retireBranchIfPresent(active, unit.branch, unit.current_sha, acc, input.mode, input.reason, input.now, input.env, unit);
 }
 
 async function removeRegisteredWorktree(
@@ -345,63 +368,86 @@ async function removeRegisteredWorktree(
     readonly dirtyBlockMessage: string;
   },
 ): Promise<void> {
+  const unit = input.unit;
+  if (unit === undefined) fail('unit-cleanup-owner-missing', 'unit worktree removal requires exact unit ownership metadata.', [worktreePath]);
   const listedBefore = gitWorktreeListPorcelain(active.source_repo, input.env);
   const registeredBefore = listedBefore.some((entry) => samePath(entry.path, worktreePath));
   if (!existsSync(worktreePath)) {
     acc.reconciledMissingPaths.push(worktreePath);
     await appendLedger(active, {
-      mode: input.mode,
-      event: 'worktree-missing-reconcile',
-      reason: input.reason,
-      now: input.now,
-      path: worktreePath,
-      ...ledgerUnitFields(input.unit),
-      proof: [registeredBefore ? 'git_metadata_present_before_prune' : 'git_metadata_absent_before_prune'],
+      mode: input.mode, event: 'worktree-missing-reconcile', reason: input.reason, now: input.now, path: worktreePath,
+      ...ledgerUnitFields(unit), proof: [registeredBefore ? 'git_metadata_present_before_prune' : 'git_metadata_absent_before_prune'],
     });
-    return;
   }
-  if (!registeredBefore) {
+  if (existsSync(worktreePath) && !registeredBefore) {
     await appendLedger(active, {
-      mode: input.mode,
-      event: 'worktree-cleanup-blocked',
-      reason: input.reason,
-      now: input.now,
-      path: worktreePath,
-      ...ledgerUnitFields(input.unit),
-      blockers: ['path is not registered by git worktree list'],
+      mode: input.mode, event: 'worktree-cleanup-blocked', reason: input.reason, now: input.now, path: worktreePath,
+      ...ledgerUnitFields(unit), blockers: ['path is not registered by git worktree list'],
     });
     fail('worktree-not-registered', 'refusing to remove a physical path that is not registered as a Git worktree for this repository.', [worktreePath]);
   }
-  const dirtyPaths = readGitStatus(worktreePath).changedPaths;
+  const dirtyPaths = existsSync(worktreePath) ? readGitStatus(worktreePath).changedPaths : [];
   if (dirtyPaths.length > 0) {
     await appendLedger(active, {
-      mode: input.mode,
-      event: 'worktree-cleanup-blocked',
-      reason: input.reason,
-      now: input.now,
-      path: worktreePath,
-      ...ledgerUnitFields(input.unit),
-      blockers: dirtyPaths,
+      mode: input.mode, event: 'worktree-cleanup-blocked', reason: input.reason, now: input.now, path: worktreePath,
+      ...ledgerUnitFields(unit), blockers: dirtyPaths,
     });
     fail(input.dirtyBlockCode, input.dirtyBlockMessage, dirtyPaths);
   }
-  runGitForCleanup(['worktree', 'remove', worktreePath], active.source_repo, runtimeGitEnv('worktree-cleanup-remove', input.env));
-  if (existsSync(worktreePath)) fail('worktree-remove-incomplete', 'git worktree remove returned success but the path still exists.', [worktreePath]);
+  const inspectRemove = (): WorktreeSagaInspection => {
+    const listed = gitWorktreeListPorcelain(active.source_repo, input.env);
+    const present = existsSync(worktreePath);
+    const registered = listed.some((entry) => samePath(entry.path, worktreePath));
+    if (present !== registered) {
+      const metadata = listed.find((entry) => samePath(entry.path, worktreePath));
+      if (present || !registered || metadata?.branch !== unit.branch) return { outcome: 'unsafe', proof: [`path_present=${String(present)}`, `git_registered=${String(registered)}`, `expected_metadata_branch=${unit.branch}`, `actual_metadata_branch=${String(metadata?.branch ?? null)}`] };
+    }
+    if (!present) {
+      if (!branchExists(active.source_repo, unit.branch, input.env)) return { outcome: 'satisfied', proof: ['path_absent', 'git_registration_absent', 'branch_absent'] };
+      const actualBranchSha = runGitForCleanup(['rev-parse', `refs/heads/${unit.branch}`], active.source_repo, runtimeGitEnv('worktree-cleanup-branch-head', input.env)).trim();
+      return actualBranchSha === unit.current_sha ? { outcome: 'not-applied', proof: ['path_absent', 'branch_present'] } : { outcome: 'unsafe', proof: [`branch_expected=${unit.current_sha}`, `branch_actual=${actualBranchSha}`] };
+    }
+    const dirty = readGitStatus(worktreePath).changedPaths;
+    return dirty.length === 0 ? { outcome: 'not-applied', proof: ['worktree_clean'] } : { outcome: 'unsafe', proof: dirty.map((path) => `dirty=${path}`) };
+  };
+  await executeOwnedWorktreeSaga({
+    active, unitId: unit.unit_id, attempt: unit.attempt, kind: 'unit', operationType: 'remove',
+    operationKey: `remove:${unit.unit_id}:${String(unit.attempt)}:${unit.current_sha}`,
+    initialWorktreeState: 'terminal', committedWorktreeState: 'removed',
+    intent: {
+      repo_root: active.source_repo, worktree_path: worktreePath, git_common_dir: active.git_common_dir, branch: unit.branch,
+      reason: input.reason, base_sha: unit.base_sha, target_sha: unit.current_sha, archive_ref: unit.archive_ref,
+      checkout_mode: null, sparse_patterns: [], paths: [], metadata_refs: [WORKTREE_LEDGER_FILE],
+    },
+  }, {
+    inspect: inspectRemove,
+    action: () => {
+      if (existsSync(worktreePath) || gitWorktreeListPorcelain(active.source_repo, input.env).some((entry) => samePath(entry.path, worktreePath))) runGitForCleanup(['worktree', 'remove', worktreePath], active.source_repo, runtimeGitEnv('worktree-cleanup-remove', input.env));
+      if (branchExists(active.source_repo, unit.branch, input.env)) {
+        const actualBranchSha = runGitForCleanup(['rev-parse', `refs/heads/${unit.branch}`], active.source_repo, runtimeGitEnv('worktree-cleanup-branch-head', input.env)).trim();
+        if (actualBranchSha !== unit.current_sha) fail('branch-retire-sha-mismatch', 'owned branch moved after cleanup intent; refusing retirement.', [unit.branch, `expected=${unit.current_sha}`, `actual=${actualBranchSha}`]);
+        runGitForCleanup(['update-ref', '-d', `refs/heads/${unit.branch}`, unit.current_sha], active.source_repo, runtimeGitEnv('worktree-cleanup-branch-retire', input.env));
+      }
+    },
+    verify: () => {
+      const inspected = inspectRemove();
+      if (inspected.outcome !== 'satisfied') fail('worktree-remove-incomplete', 'owned worktree remove saga postcondition failed.', inspected.proof);
+      return inspected.proof;
+    },
+  }, input.env ?? process.env);
+  if (existsSync(worktreePath)) fail('worktree-remove-incomplete', 'worktree remove saga committed but the path still exists.', [worktreePath]);
   acc.removedPaths.push(worktreePath);
+  if (!acc.retiredBranches.includes(unit.branch)) acc.retiredBranches.push(unit.branch);
   await appendLedger(active, {
-    mode: input.mode,
-    event: 'worktree-remove',
-    reason: input.reason,
-    now: input.now,
-    path: worktreePath,
-    ...ledgerUnitFields(input.unit),
-    proof: ['git_worktree_remove_succeeded', 'path_absent_after_remove'],
+    mode: input.mode, event: 'worktree-remove', reason: input.reason, now: input.now, path: worktreePath,
+    ...ledgerUnitFields(unit), proof: ['saga_committed', 'git_worktree_remove_succeeded_or_already_absent', 'branch_absent', 'path_absent_after_remove'],
   });
 }
 
 async function removeMainWorktree(
   active: ActiveAutopilotRow,
   acc: CleanupAccumulator,
+  expectedSha: string,
   reason: string,
   now: Date,
   env?: ProcessEnvLike,
@@ -421,9 +467,8 @@ async function removeMainWorktree(
       branch: active.branch,
       proof: [registeredBefore ? 'git_metadata_present_before_prune' : 'git_metadata_absent_before_prune'],
     });
-    return;
   }
-  if (!registeredBefore) {
+  if (existsSync(mainPath) && !registeredBefore) {
     await appendLedger(active, {
       mode: 'closed-run-cleanup',
       event: 'main-worktree-cleanup-blocked',
@@ -435,7 +480,7 @@ async function removeMainWorktree(
     });
     fail('main-worktree-not-registered', 'refusing to remove a physical main path that is not registered as a Git worktree for this repository.', [mainPath]);
   }
-  const dirtySourcePaths = readGitStatus(mainPath).changedPaths.filter((path) => !isRuntimeRepoPath(active, path));
+  const dirtySourcePaths = existsSync(mainPath) ? readGitStatus(mainPath).changedPaths.filter((path) => !isRuntimeRepoPath(active, path)) : [];
   if (dirtySourcePaths.length > 0) {
     await appendLedger(active, {
       mode: 'closed-run-cleanup',
@@ -449,9 +494,50 @@ async function removeMainWorktree(
     fail('dirty-main-worktree', 'refusing to remove main worktree with dirty source residue.', dirtySourcePaths);
   }
   await removeArchivedRuntimeResidue(active, reason, now);
-  runGitForCleanup(['worktree', 'remove', mainPath], active.source_repo, runtimeGitEnv('worktree-cleanup-remove-main', env));
-  if (existsSync(mainPath)) fail('main-worktree-remove-incomplete', 'git worktree remove returned success but the main path still exists.', [mainPath]);
+  const inspectMainRemove = (): WorktreeSagaInspection => {
+    const listed = gitWorktreeListPorcelain(active.source_repo, env);
+    const present = existsSync(mainPath);
+    const registered = listed.some((entry) => samePath(entry.path, mainPath));
+    if (present !== registered) {
+      const metadata = listed.find((entry) => samePath(entry.path, mainPath));
+      if (present || !registered || metadata?.branch !== active.branch) return { outcome: 'unsafe', proof: [`path_present=${String(present)}`, `git_registered=${String(registered)}`, `expected_metadata_branch=${active.branch}`, `actual_metadata_branch=${String(metadata?.branch ?? null)}`] };
+    }
+    if (!present) {
+      if (!branchExists(active.source_repo, active.branch, env)) return { outcome: 'satisfied', proof: ['path_absent', 'git_registration_absent', 'branch_absent'] };
+      const actualBranchSha = runGitForCleanup(['rev-parse', `refs/heads/${active.branch}`], active.source_repo, runtimeGitEnv('worktree-cleanup-branch-head', env)).trim();
+      return actualBranchSha === expectedSha ? { outcome: 'not-applied', proof: ['path_absent', 'branch_present'] } : { outcome: 'unsafe', proof: [`branch_expected=${expectedSha}`, `branch_actual=${actualBranchSha}`] };
+    }
+    const dirty = readGitStatus(mainPath).changedPaths.filter((path) => !isRuntimeRepoPath(active, path));
+    return dirty.length === 0 ? { outcome: 'not-applied', proof: ['main_source_clean'] } : { outcome: 'unsafe', proof: dirty.map((path) => `dirty=${path}`) };
+  };
+  await executeOwnedWorktreeSaga({
+    active, unitId: 'main', attempt: 1, kind: 'main', operationType: 'remove',
+    operationKey: `remove-main:${active.workstream_run}:${expectedSha}`,
+    initialWorktreeState: 'terminal', committedWorktreeState: 'removed',
+    intent: {
+      repo_root: active.source_repo, worktree_path: mainPath, git_common_dir: active.git_common_dir, branch: active.branch,
+      reason, base_sha: active.target_base_sha, target_sha: expectedSha, archive_ref: null, checkout_mode: null,
+      sparse_patterns: [], paths: [], metadata_refs: [`_archive/${active.workstream_run}`],
+    },
+  }, {
+    inspect: inspectMainRemove,
+    action: () => {
+      if (existsSync(mainPath) || gitWorktreeListPorcelain(active.source_repo, env).some((entry) => samePath(entry.path, mainPath))) runGitForCleanup(['worktree', 'remove', mainPath], active.source_repo, runtimeGitEnv('worktree-cleanup-remove-main', env));
+      if (branchExists(active.source_repo, active.branch, env)) {
+        const actualBranchSha = runGitForCleanup(['rev-parse', `refs/heads/${active.branch}`], active.source_repo, runtimeGitEnv('worktree-cleanup-branch-head', env)).trim();
+        if (actualBranchSha !== expectedSha) fail('branch-retire-sha-mismatch', 'main branch moved after cleanup intent; refusing retirement.', [active.branch, `expected=${expectedSha}`, `actual=${actualBranchSha}`]);
+        runGitForCleanup(['update-ref', '-d', `refs/heads/${active.branch}`, expectedSha], active.source_repo, runtimeGitEnv('worktree-cleanup-branch-retire', env));
+      }
+    },
+    verify: () => {
+      const inspected = inspectMainRemove();
+      if (inspected.outcome !== 'satisfied') fail('main-worktree-remove-incomplete', 'main worktree remove saga postcondition failed.', inspected.proof);
+      return inspected.proof;
+    },
+  }, env ?? process.env);
+  if (existsSync(mainPath)) fail('main-worktree-remove-incomplete', 'main worktree remove saga committed but the main path still exists.', [mainPath]);
   acc.removedPaths.push(mainPath);
+  if (!acc.retiredBranches.includes(active.branch)) acc.retiredBranches.push(active.branch);
   await appendLedger(active, {
     mode: 'closed-run-cleanup',
     event: 'main-worktree-remove',
@@ -493,9 +579,17 @@ async function removeEmptyDirectoryIfPresent(path: string): Promise<void> {
   }
 }
 
+function branchExists(repoRoot: string, branch: string, env?: ProcessEnvLike): boolean {
+  const result = spawnSync('git', ['show-ref', '--verify', '--quiet', `refs/heads/${branch}`], { cwd: repoRoot, encoding: 'utf8', env: runtimeGitEnv('worktree-cleanup-branch-check', env) });
+  if ((result.status ?? -1) === 0) return true;
+  if ((result.status ?? -1) === 1) return false;
+  fail('branch-check-failed', 'failed to inspect owned branch before cleanup.', [branch, result.stderr.trim()]);
+}
+
 async function retireBranchIfPresent(
   active: ActiveAutopilotRow,
   branch: string,
+  expectedSha: string,
   acc: CleanupAccumulator,
   mode: AutopilotWorktreeCleanupMode,
   reason: string,
@@ -503,9 +597,11 @@ async function retireBranchIfPresent(
   env?: ProcessEnvLike,
   unit?: AutopilotUnitBranchInfo,
 ): Promise<void> {
-  const result = spawnSync('git', ['branch', '-D', branch], { cwd: active.source_repo, encoding: 'utf8', env: runtimeGitEnv('worktree-cleanup-branch-retire', env) });
-  if ((result.status ?? -1) !== 0 && !result.stderr.includes('not found')) {
-    fail('branch-retire-failed', 'failed to retire Autopilot branch after worktree removal.', [branch, result.stderr.trim()]);
+  const existed = branchExists(active.source_repo, branch, env);
+  if (existed) {
+    const actualSha = runGitForCleanup(['rev-parse', `refs/heads/${branch}`], active.source_repo, runtimeGitEnv('worktree-cleanup-branch-head', env)).trim();
+    if (actualSha !== expectedSha) fail('branch-retire-sha-mismatch', 'owned branch moved before retirement; refusing deletion.', [branch, `expected=${expectedSha}`, `actual=${actualSha}`]);
+    runGitForCleanup(['update-ref', '-d', `refs/heads/${branch}`, expectedSha], active.source_repo, runtimeGitEnv('worktree-cleanup-branch-retire', env));
   }
   acc.retiredBranches.push(branch);
   await appendLedger(active, {
@@ -516,7 +612,7 @@ async function retireBranchIfPresent(
     path: unit?.worktree_path ?? active.main_worktree_path,
     branch,
     ...ledgerUnitFields(unit),
-    proof: [(result.status ?? -1) === 0 ? 'branch_deleted' : 'branch_already_absent'],
+    proof: [existed ? 'branch_deleted' : 'branch_already_absent'],
   });
 }
 
@@ -530,14 +626,15 @@ async function pruneGitMetadataAfterProof(
 ): Promise<void> {
   const proofPaths = sortedUnique([...acc.removedPaths, ...acc.reconciledMissingPaths]);
   if (proofPaths.length === 0) return;
-  runGitForCleanup(['worktree', 'prune'], active.source_repo, runtimeGitEnv('worktree-cleanup-prune', env));
+  const remaining = gitWorktreeListPorcelain(active.source_repo, env).filter((entry) => proofPaths.some((path) => samePath(entry.path, path)));
+  if (remaining.length > 0) fail('git-worktree-metadata-remains', 'owned worktree metadata remains after exact path removal; refusing global prune that could mutate foreign runs.', remaining.map((entry) => entry.path));
   acc.prunedGitMetadata = true;
   await appendLedger(active, {
     mode,
-    event: 'git-worktree-prune',
+    event: 'git-worktree-metadata-verified',
     reason,
     now,
-    proof: proofPaths.map((path) => `run_owned_path=${path}`),
+    proof: proofPaths.map((path) => `run_owned_path_absent=${path}`),
   });
 }
 
@@ -1004,14 +1101,19 @@ function samePath(left: string, right: string): boolean {
 }
 
 function normalizePath(path: string): string {
-  if (existsSync(path)) {
-    try {
-      return realpathSync(path);
-    } catch {
-      return resolve(path);
-    }
+  let cursor = resolve(path);
+  const missingSegments: string[] = [];
+  while (!existsSync(cursor)) {
+    const parent = dirname(cursor);
+    if (parent === cursor) return resolve(path);
+    missingSegments.unshift(basename(cursor));
+    cursor = parent;
   }
-  return resolve(path);
+  try {
+    return resolve(realpathSync(cursor), ...missingSegments);
+  } catch {
+    return resolve(path);
+  }
 }
 
 function unitKey(unit: AutopilotUnitBranchInfo): string {

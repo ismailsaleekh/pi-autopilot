@@ -8,12 +8,15 @@ import {
   COORDINATION_CLAIM_MODES,
   COORDINATION_MESSAGE_STATUSES,
   COORDINATION_OPERATION_STAGES,
+  COORDINATION_OPERATION_TYPES,
   COORDINATION_RELEASE_CONDITION_TYPES,
   COORDINATION_RECONCILIATION_SOURCES,
   COORDINATION_REQUEST_STATUSES,
   COORDINATION_RUN_STATUSES,
   COORDINATION_SESSION_STATUSES,
   COORDINATION_UNIT_STATES,
+  COORDINATION_WORKTREE_KINDS,
+  COORDINATION_WORKTREE_STATES,
 } from './types.ts';
 
 export type CoordinationJsonSchema = Readonly<Record<string, unknown>>;
@@ -92,11 +95,23 @@ export const COORDINATION_RECONCILIATION_EVIDENCE_SCHEMA = exactObject('autopilo
 export const COORDINATION_MESSAGE_SCHEMA = exactObject('autopilot.coordination_message.v1', {
   message_id: identifier(), repo_id: pathSegmentIdentifier(), recipient_workstream_run: pathSegmentIdentifier(), message_type: enumeration(['claim-request', 'release-notification', 'grant-offer', 'recovery-required']), correlation_id: identifier(), payload: { type: 'object', maxProperties: 256 }, status: enumeration(COORDINATION_MESSAGE_STATUSES), created_event_seq: integer(), delivered_event_seq: nullable(integer()), acknowledged_event_seq: nullable(integer()), version: integer(1),
 });
-export const COORDINATION_WORKTREE_SCHEMA = exactObject('autopilot.coordination_worktree.v1', {
-  worktree_id: identifier(), owner: owner(), canonical_path: boundedString(1024), git_common_dir: boundedString(1024), branch: boundedString(512), state: enumeration(['planned', 'active', 'dirty', 'quarantined', 'terminal', 'removed']), version: integer(1),
+export const COORDINATION_WORKTREE_SCHEMA = exactObject('autopilot.coordination_worktree.v2', {
+  worktree_id: identifier(), owner: owner(), kind: enumeration(COORDINATION_WORKTREE_KINDS), canonical_path: boundedString(1024), git_common_dir: boundedString(1024), branch: boundedString(512), state: enumeration(COORDINATION_WORKTREE_STATES), version: integer(1),
 });
-export const COORDINATION_WORKTREE_OPERATION_SCHEMA = exactObject('autopilot.worktree_operation.v1', {
-  operation_id: identifier(), worktree_id: identifier(), owner: owner(), operation_type: enumeration(['create', 'materialize', 'commit', 'merge', 'reset', 'quarantine', 'archive', 'remove']), stage: enumeration(COORDINATION_OPERATION_STAGES), authority_version: integer(1), intent_event_seq: integer(), verification_evidence: nullable(evidence()), error_code: nullable(boundedString(128)), version: integer(1),
+const operationIntent = (): CoordinationJsonSchema => ({
+  type: 'object', additionalProperties: false,
+  required: ['repo_root', 'worktree_path', 'git_common_dir', 'branch', 'reason', 'base_sha', 'target_sha', 'archive_ref', 'checkout_mode', 'sparse_patterns', 'paths', 'metadata_refs'],
+  properties: {
+    repo_root: boundedString(1024), worktree_path: boundedString(1024), git_common_dir: boundedString(1024), branch: boundedString(512), reason: boundedString(1024),
+    base_sha: nullable(boundedString(128)), target_sha: nullable(boundedString(128)), archive_ref: nullable(boundedString(512)),
+    checkout_mode: nullable(enumeration(['full', 'claim-minimal', 'exclude-heavy'])),
+    sparse_patterns: { type: 'array', maxItems: 4096, uniqueItems: true, items: boundedString(1024) },
+    paths: { type: 'array', maxItems: 4096, uniqueItems: true, items: boundedString(1024) },
+    metadata_refs: { type: 'array', maxItems: 256, uniqueItems: true, items: boundedString(1024) },
+  },
+});
+export const COORDINATION_WORKTREE_OPERATION_SCHEMA = exactObject('autopilot.worktree_operation.v2', {
+  operation_id: identifier(), worktree_id: identifier(), owner: owner(), operation_type: enumeration(COORDINATION_OPERATION_TYPES), stage: enumeration(COORDINATION_OPERATION_STAGES), authority_version: integer(1), intent_event_seq: integer(), intent: operationIntent(), completed_steps: { type: 'array', maxItems: 128, uniqueItems: true, items: identifier() }, current_step: nullable(identifier()), recovery_attempts: integer(), verification_evidence: nullable(evidence()), error_code: nullable(boundedString(128)), version: integer(1),
 });
 export const COORDINATION_ESCALATION_SCHEMA = exactObject('autopilot.planning_contradiction.v1', {
   escalation_id: identifier(), repo_id: pathSegmentIdentifier(), participating_runs: { type: 'array', minItems: 2, maxItems: 32, uniqueItems: true, items: identifier() }, authoritative_refs: { type: 'array', minItems: 2, maxItems: 32, items: evidence() }, conflicting_clauses: { type: 'array', minItems: 2, maxItems: 32, uniqueItems: true, items: boundedString(1024) }, exhausted_alternatives: { type: 'array', minItems: 5, maxItems: 5, uniqueItems: true, items: enumeration(['sequencing', 'partitioning', 'ownership-transfer', 'rebase-revalidation', 'replanning']) }, adjudication: evidence(), decision_options: { type: 'array', minItems: 2, maxItems: 16, uniqueItems: true, items: boundedString(1024) }, created_event_seq: integer(), version: integer(1),
@@ -113,7 +128,7 @@ export const COORDINATOR_REQUEST_SCHEMA: CoordinationJsonSchema = {
   $id: 'urn:pi-autopilot:coordination:coordinator-request-v1', type: 'object', additionalProperties: false,
   required: ['schema_version', 'protocol_version', 'request_id', 'action', 'idempotency_key', 'repo_id', 'workstream_run', 'session_id', 'fencing_generation', 'expected_version', 'payload'],
   properties: {
-    schema_version: { const: AUTOPILOT_COORDINATOR_REQUEST_SCHEMA }, protocol_version: { const: AUTOPILOT_COORDINATOR_PROTOCOL_VERSION }, request_id: identifier(), action: enumeration(['status', 'doctor', 'export', 'attach-run', 'attach-session', 'detach-session', 'prepare-handoff', 'heartbeat', 'register-child', 'heartbeat-child', 'complete-child', 'drain-mailbox', 'acquire-group', 'acknowledge-grant', 'respond-claim-request', 'cancel-claim-request', 'cancel-acquisition-group', 'supersede-attempt', 'acknowledge-message', 'record-release-evidence', 'reconcile-run', 'transition-operation']), idempotency_key: nullable(identifier()), repo_id: pathSegmentIdentifier(), workstream_run: nullable(pathSegmentIdentifier()), session_id: nullable(identifier()), fencing_generation: nullable(integer()), expected_version: nullable(integer()), payload: { type: 'object' },
+    schema_version: { const: AUTOPILOT_COORDINATOR_REQUEST_SCHEMA }, protocol_version: { const: AUTOPILOT_COORDINATOR_PROTOCOL_VERSION }, request_id: identifier(), action: enumeration(['status', 'doctor', 'export', 'attach-run', 'attach-session', 'detach-session', 'prepare-handoff', 'heartbeat', 'register-child', 'heartbeat-child', 'complete-child', 'drain-mailbox', 'acquire-group', 'acknowledge-grant', 'respond-claim-request', 'cancel-claim-request', 'cancel-acquisition-group', 'supersede-attempt', 'acknowledge-message', 'record-release-evidence', 'reconcile-run', 'prepare-operation', 'transition-operation']), idempotency_key: nullable(identifier()), repo_id: pathSegmentIdentifier(), workstream_run: nullable(pathSegmentIdentifier()), session_id: nullable(identifier()), fencing_generation: nullable(integer()), expected_version: nullable(integer()), payload: { type: 'object' },
   },
 };
 export const COORDINATOR_RESPONSE_SCHEMA: CoordinationJsonSchema = {

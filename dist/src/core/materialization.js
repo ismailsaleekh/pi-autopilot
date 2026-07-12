@@ -1,11 +1,13 @@
+import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { mkdir, readFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { AUTOPILOT_CHECKOUT_PROFILE_SNAPSHOT_FILE, estimateBytesForMaterializationPaths, normalizeMaterializationPath, pathMatchesMaterializationPattern, readCheckoutProfileSnapshot, scanTrackedTree, sparseIncludePatternsForPaths, submodulePathsForMaterialization, trackedPathExists, } from "./checkout-profile.js";
 import { assertAutopilotDiskGate } from "./disk-gate.js";
 import { addSparseCheckoutPatterns, assertSparseCheckoutEnabled, isSparseCheckoutEnabled, isSparseMissingPath } from "./sparse-worktree.js";
-import { acquireReadClaimsForUnitPaths, appendJsonl, coordinationRootForRepo, readActiveAutopilots, readPathClaims, releaseReadClaimsForUnitPaths, taskRootForActiveAutopilot, writeJsonAtomic, } from "./parallel-runtime.js";
+import { acquireReadClaimsForUnitPaths, appendJsonl, coordinationRootForRepo, readActiveAutopilots, readPathClaims, releaseReadClaimsForUnitPaths, runGit, taskRootForActiveAutopilot, writeJsonAtomic, } from "./parallel-runtime.js";
 import { AUTOPILOT_RUNTIME_ROOT_PREFIX } from "./names.js";
+import { executeOwnedWorktreeSaga } from "./coordination/worktree-saga.js";
 export const AUTOPILOT_MATERIALIZATION_LEDGER_FILE = '_materialization-ledger.jsonl';
 export const AUTOPILOT_MATERIALIZED_PATHS_FILE = '_materialized-paths.json';
 export const AUTOPILOT_MATERIALIZE_CONTEXT_TOOL = 'autopilot_materialize_context';
@@ -275,13 +277,55 @@ async function materializePathsForSpec(input) {
     const patterns = sparseIncludePatternsForPaths(paths.map((path) => path.path));
     for (const target of targets) {
         const worktreePath = target === 'main' ? input.context.active.main_worktree_path : input.spec.cwd;
-        assertSparseCheckoutEnabled(worktreePath, input.env);
-        addSparseCheckoutPatterns(worktreePath, patterns, input.env);
-        if (target === 'unit') {
-            await ensureFutureOwnedParents(worktreePath, paths.filter((path) => path.claim_type === 'WRITE').map((path) => path.path));
-        }
-        assertTrackedPathsMaterialized(worktreePath, scan, paths.map((path) => path.path));
-        assertNoLfsPointerMaterialized(worktreePath, scan, paths.map((path) => path.path));
+        const unitId = target === 'main' ? 'main' : input.spec.unit_id;
+        const attempt = target === 'main' ? 1 : input.spec.attempt;
+        const branch = target === 'main'
+            ? input.context.active.branch
+            : runBranch(worktreePath, input.env);
+        const claimedPaths = paths.map((path) => path.path);
+        const inspect = () => {
+            if (!existsSync(worktreePath))
+                return { outcome: 'unsafe', proof: ['owned_worktree_missing'] };
+            const missing = trackedMaterializationMisses(worktreePath, scan, claimedPaths);
+            return missing.length === 0 ? { outcome: 'satisfied', proof: claimedPaths.map((path) => `materialized=${path}`) } : { outcome: 'not-applied', proof: missing.map((path) => `missing=${path}`) };
+        };
+        await executeOwnedWorktreeSaga({
+            active: input.context.active,
+            unitId,
+            attempt,
+            kind: target,
+            operationType: 'materialize',
+            operationKey: `materialize:${input.spec.unit_id}:${String(input.spec.attempt)}:${target}:${createHashForPaths(claimedPaths)}`,
+            initialWorktreeState: 'active',
+            committedWorktreeState: 'active',
+            intent: {
+                repo_root: input.context.active.source_repo,
+                worktree_path: worktreePath,
+                git_common_dir: input.context.active.git_common_dir,
+                branch,
+                reason: input.reason,
+                base_sha: null,
+                target_sha: null,
+                archive_ref: null,
+                checkout_mode: snapshot.profile.mode,
+                sparse_patterns: patterns,
+                paths: claimedPaths,
+                metadata_refs: [],
+            },
+        }, {
+            inspect,
+            action: async () => {
+                assertSparseCheckoutEnabled(worktreePath, input.env);
+                addSparseCheckoutPatterns(worktreePath, patterns, input.env);
+                if (target === 'unit')
+                    await ensureFutureOwnedParents(worktreePath, paths.filter((path) => path.claim_type === 'WRITE').map((path) => path.path));
+            },
+            verify: () => {
+                assertTrackedPathsMaterialized(worktreePath, scan, claimedPaths);
+                assertNoLfsPointerMaterialized(worktreePath, scan, claimedPaths);
+                return ['sparse_checkout_enabled', ...claimedPaths.map((path) => `materialized=${path}`)];
+            },
+        }, input.env ?? process.env);
     }
     await appendMaterializationLedger(input.context.active, input.spec, paths, targets, byteCount, input.reason, input.automatic, now);
     await upsertMaterializedPaths(input.context.active, input.spec, paths, scan, input.reason, input.automatic, now);
@@ -385,7 +429,7 @@ function assertNoUnsupportedSubmodules(scan, paths) {
         fail('submodule-materialization-unsupported', 'Autopilot sparse materialization refused: claimed path overlaps a git submodule and no package submodule policy is enabled.', submodules);
     }
 }
-function assertTrackedPathsMaterialized(worktreePath, scan, paths) {
+function trackedMaterializationMisses(worktreePath, scan, paths) {
     const missing = [];
     for (const path of paths) {
         for (const entry of scan.entries) {
@@ -398,8 +442,21 @@ function assertTrackedPathsMaterialized(worktreePath, scan, paths) {
             break;
         }
     }
+    return Object.freeze(missing);
+}
+function assertTrackedPathsMaterialized(worktreePath, scan, paths) {
+    const missing = trackedMaterializationMisses(worktreePath, scan, paths);
     if (missing.length > 0)
         fail('materialization-missing-tracked-path', 'sparse checkout did not materialize tracked path(s) after successful sparse add.', missing);
+}
+function runBranch(worktreePath, env) {
+    const value = runGit(['rev-parse', '--abbrev-ref', 'HEAD'], worktreePath, env).trim();
+    if (value.length === 0 || value === 'HEAD')
+        fail('materialization-detached-head', 'materialization saga requires a named owned worktree branch.', [worktreePath]);
+    return value;
+}
+function createHashForPaths(paths) {
+    return createHash('sha256').update([...paths].sort().join('\0'), 'utf8').digest('hex').slice(0, 24);
 }
 function assertNoLfsPointerMaterialized(worktreePath, scan, paths) {
     const lfsPointers = [];

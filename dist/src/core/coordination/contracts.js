@@ -1,5 +1,5 @@
 import { isAbsolute, normalize } from 'node:path';
-import { AUTOPILOT_COORDINATION_SNAPSHOT_SCHEMA, AUTOPILOT_COORDINATOR_PROTOCOL_VERSION, AUTOPILOT_COORDINATOR_REQUEST_SCHEMA, AUTOPILOT_COORDINATOR_RESPONSE_SCHEMA, COORDINATION_ACQUISITION_STATES, COORDINATION_CHILD_STATUSES, COORDINATION_CLAIM_MODES, COORDINATION_MESSAGE_STATUSES, COORDINATION_OPERATION_STAGES, COORDINATION_RELEASE_CONDITION_TYPES, COORDINATION_RECONCILIATION_SOURCES, COORDINATION_REQUEST_STATUSES, COORDINATION_RUN_STATUSES, COORDINATION_SESSION_STATUSES, COORDINATION_UNIT_STATES, } from "./types.js";
+import { AUTOPILOT_COORDINATION_SNAPSHOT_SCHEMA, AUTOPILOT_COORDINATOR_PROTOCOL_VERSION, AUTOPILOT_COORDINATOR_REQUEST_SCHEMA, AUTOPILOT_COORDINATOR_RESPONSE_SCHEMA, COORDINATION_ACQUISITION_STATES, COORDINATION_CHILD_STATUSES, COORDINATION_CLAIM_MODES, COORDINATION_MESSAGE_STATUSES, COORDINATION_OPERATION_STAGES, COORDINATION_OPERATION_TYPES, COORDINATION_RELEASE_CONDITION_TYPES, COORDINATION_RECONCILIATION_SOURCES, COORDINATION_REQUEST_STATUSES, COORDINATION_RUN_STATUSES, COORDINATION_SESSION_STATUSES, COORDINATION_UNIT_STATES, COORDINATION_WORKTREE_KINDS, COORDINATION_WORKTREE_STATES, } from "./types.js";
 export class CoordinationContractError extends Error {
     name = 'CoordinationContractError';
     code = 'invalid-coordination-contract';
@@ -14,10 +14,10 @@ const SHA256 = /^sha256:[a-f0-9]{64}$/u;
 const CHILD_TOKEN = /^[a-f0-9]{64}$/u;
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,191}$/u;
 const QUERY_ACTIONS = ['status', 'doctor', 'export'];
-const MUTATION_ACTIONS = ['attach-run', 'attach-session', 'detach-session', 'prepare-handoff', 'heartbeat', 'register-child', 'heartbeat-child', 'complete-child', 'drain-mailbox', 'acquire-group', 'acknowledge-grant', 'respond-claim-request', 'cancel-claim-request', 'cancel-acquisition-group', 'supersede-attempt', 'acknowledge-message', 'record-release-evidence', 'reconcile-run', 'transition-operation'];
+const MUTATION_ACTIONS = ['attach-run', 'attach-session', 'detach-session', 'prepare-handoff', 'heartbeat', 'register-child', 'heartbeat-child', 'complete-child', 'drain-mailbox', 'acquire-group', 'acknowledge-grant', 'respond-claim-request', 'cancel-claim-request', 'cancel-acquisition-group', 'supersede-attempt', 'acknowledge-message', 'record-release-evidence', 'reconcile-run', 'prepare-operation', 'transition-operation'];
 const MESSAGE_TYPES = ['claim-request', 'release-notification', 'grant-offer', 'recovery-required'];
-const WORKTREE_STATES = ['planned', 'active', 'dirty', 'quarantined', 'terminal', 'removed'];
-const OPERATION_TYPES = ['create', 'materialize', 'commit', 'merge', 'reset', 'quarantine', 'archive', 'remove'];
+const WORKTREE_STATES = COORDINATION_WORKTREE_STATES;
+const OPERATION_TYPES = COORDINATION_OPERATION_TYPES;
 const EXHAUSTED_ALTERNATIVES = ['sequencing', 'partitioning', 'ownership-transfer', 'rebase-revalidation', 'replanning'];
 const PAYLOAD_FIELDS = {
     status: [],
@@ -41,7 +41,8 @@ const PAYLOAD_FIELDS = {
     'acknowledge-message': ['message_id', 'session_lease_id', 'session_token'],
     'record-release-evidence': ['evidence_ref', 'evidence_sha256', 'source', 'target_id', 'session_lease_id', 'session_token'],
     'reconcile-run': ['reason', 'session_lease_id', 'session_token'],
-    'transition-operation': ['operation_id', 'stage'],
+    'prepare-operation': ['operation', 'session_lease_id', 'session_token', 'worktree'],
+    'transition-operation': ['completed_steps', 'current_step', 'error_code', 'operation_id', 'recovery_attempts', 'session_lease_id', 'session_token', 'stage', 'verification_evidence', 'worktree_state'],
 };
 function fail(label, issue) {
     throw new CoordinationContractError(label, [issue]);
@@ -455,11 +456,12 @@ export function parseCoordinationMessage(value) {
 }
 export function parseCoordinationWorktree(value) {
     const label = 'CoordinationWorktree';
-    const record = object(value, label, ['branch', 'canonical_path', 'git_common_dir', 'owner', 'schema_version', 'state', 'version', 'worktree_id']);
+    const record = object(value, label, ['branch', 'canonical_path', 'git_common_dir', 'kind', 'owner', 'schema_version', 'state', 'version', 'worktree_id']);
     return {
-        schema_version: literal(record, 'schema_version', 'autopilot.coordination_worktree.v1', label),
+        schema_version: literal(record, 'schema_version', 'autopilot.coordination_worktree.v2', label),
         worktree_id: identifier(record, 'worktree_id', label),
         owner: parseCoordinationOwnerIdentity(record['owner'], `${label}.owner`),
+        kind: oneOf(record, 'kind', COORDINATION_WORKTREE_KINDS, label),
         canonical_path: absolutePath(record, 'canonical_path', label),
         git_common_dir: absolutePath(record, 'git_common_dir', label),
         branch: string(record, 'branch', label, 512),
@@ -467,11 +469,36 @@ export function parseCoordinationWorktree(value) {
         version: integer(record, 'version', label, 1),
     };
 }
+export function parseCoordinationWorktreeOperationIntent(value) {
+    const label = 'CoordinationWorktreeOperationIntent';
+    const record = object(value, label, ['archive_ref', 'base_sha', 'branch', 'checkout_mode', 'git_common_dir', 'metadata_refs', 'paths', 'reason', 'repo_root', 'sparse_patterns', 'target_sha', 'worktree_path']);
+    const nullableGitObject = (field) => {
+        const parsed = nullableString(record, field, label, 128);
+        if (parsed !== null && !/^[a-f0-9]{7,64}$/u.test(parsed))
+            fail(label, `${field} must be a lowercase Git object id`);
+        return parsed;
+    };
+    const checkout = record['checkout_mode'] === null ? null : oneOf(record, 'checkout_mode', ['full', 'claim-minimal', 'exclude-heavy'], label);
+    return {
+        repo_root: absolutePath(record, 'repo_root', label),
+        worktree_path: absolutePath(record, 'worktree_path', label),
+        git_common_dir: absolutePath(record, 'git_common_dir', label),
+        branch: string(record, 'branch', label, 512),
+        reason: string(record, 'reason', label, 1024),
+        base_sha: nullableGitObject('base_sha'),
+        target_sha: nullableGitObject('target_sha'),
+        archive_ref: nullableString(record, 'archive_ref', label, 512),
+        checkout_mode: checkout,
+        sparse_patterns: uniqueStrings(record['sparse_patterns'], `${label}.sparse_patterns`, 0, 4096),
+        paths: uniqueStrings(record['paths'], `${label}.paths`, 0, 4096),
+        metadata_refs: uniqueStrings(record['metadata_refs'], `${label}.metadata_refs`, 0, 256),
+    };
+}
 export function parseCoordinationWorktreeOperation(value) {
     const label = 'CoordinationWorktreeOperation';
-    const record = object(value, label, ['authority_version', 'error_code', 'intent_event_seq', 'operation_id', 'operation_type', 'owner', 'schema_version', 'stage', 'verification_evidence', 'version', 'worktree_id']);
+    const record = object(value, label, ['authority_version', 'completed_steps', 'current_step', 'error_code', 'intent', 'intent_event_seq', 'operation_id', 'operation_type', 'owner', 'recovery_attempts', 'schema_version', 'stage', 'verification_evidence', 'version', 'worktree_id']);
     return {
-        schema_version: literal(record, 'schema_version', 'autopilot.worktree_operation.v1', label),
+        schema_version: literal(record, 'schema_version', 'autopilot.worktree_operation.v2', label),
         operation_id: identifier(record, 'operation_id', label),
         worktree_id: identifier(record, 'worktree_id', label),
         owner: parseCoordinationOwnerIdentity(record['owner'], `${label}.owner`),
@@ -479,6 +506,10 @@ export function parseCoordinationWorktreeOperation(value) {
         stage: oneOf(record, 'stage', COORDINATION_OPERATION_STAGES, label),
         authority_version: integer(record, 'authority_version', label, 1),
         intent_event_seq: integer(record, 'intent_event_seq', label),
+        intent: parseCoordinationWorktreeOperationIntent(record['intent']),
+        completed_steps: uniqueStrings(record['completed_steps'], `${label}.completed_steps`, 0, 128),
+        current_step: nullableString(record, 'current_step', label, 192),
+        recovery_attempts: integer(record, 'recovery_attempts', label),
         verification_evidence: parseNullableEvidence(record['verification_evidence'], `${label}.verification_evidence`),
         error_code: nullableString(record, 'error_code', label, 128),
         version: integer(record, 'version', label, 1),
@@ -603,6 +634,28 @@ function parsePayload(value, action) {
         }
         else if (field === 'response') {
             oneOf(payload, field, ['release-now', 'deferred'], label);
+        }
+        else if (field === 'operation') {
+            parseCoordinationWorktreeOperation(entry);
+        }
+        else if (field === 'worktree') {
+            parseCoordinationWorktree(entry);
+        }
+        else if (field === 'completed_steps') {
+            uniqueStrings(entry, `${label}.completed_steps`, 0, 128);
+        }
+        else if (field === 'current_step' || field === 'error_code') {
+            if (entry !== null && (typeof entry !== 'string' || entry.length === 0 || entry.length > 192))
+                fail(label, `${field} must be null or bounded non-empty text`);
+        }
+        else if (field === 'recovery_attempts') {
+            integer(payload, field, label);
+        }
+        else if (field === 'verification_evidence') {
+            parseNullableEvidence(entry, `${label}.verification_evidence`);
+        }
+        else if (field === 'worktree_state') {
+            oneOf(payload, field, COORDINATION_WORKTREE_STATES, label);
         }
         else if (field === 'stage') {
             oneOf(payload, field, COORDINATION_OPERATION_STAGES, label);

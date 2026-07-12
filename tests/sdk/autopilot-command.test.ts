@@ -1,9 +1,10 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { CoordinatorClient } from '../../src/core/coordination/client.ts';
 import autopilotExtension, {
   type ExtensionCommandDefinitionLike,
   type ExtensionCommandContextLike,
@@ -231,8 +232,28 @@ void describe('Autopilot command SDK surface', () => {
       await requireCommand(harness, AUTOPILOT_COORDINATION_COMMAND).handler('status', harness.ctx);
       await requireCommand(harness, AUTOPILOT_COORDINATION_COMMAND).handler('doctor', harness.ctx);
       assert.equal(harness.messages.length, messageCount);
-      assert.equal(harness.notifications.some((entry) => /coordinator status:.*runs=1 sessions=1/u.test(entry.message)), true);
+      assert.equal(harness.notifications.some((entry) => /coordinator status:.*runs=1 sessions=2/u.test(entry.message)), true);
       assert.equal(harness.notifications.some((entry) => /coordinator doctor:.*healthy=true/u.test(entry.message)), true);
+      const sourceCwd = harness.ctx.cwd;
+      if (sourceCwd === undefined) throw new Error('missing source cwd');
+      const repo = resolveRepoIdentity(sourceCwd);
+      const runsStatus = await new CoordinatorClient({ env: process.env, autoStart: false }).query('status', repo.repoKey, null);
+      const runs = runsStatus.payload['runs'];
+      if (!Array.isArray(runs) || runs.length !== 1 || typeof runs[0] !== 'object' || runs[0] === null || Array.isArray(runs[0])) throw new Error('missing durable run');
+      const workstreamRun = (runs[0] as Readonly<Record<string, unknown>>)['workstream_run'];
+      if (typeof workstreamRun !== 'string') throw new Error('missing workstream run');
+      const exactStatus = await new CoordinatorClient({ env: process.env, autoStart: false }).query('status', repo.repoKey, workstreamRun);
+      const operations = exactStatus.payload['worktree_operations'];
+      if (!Array.isArray(operations)) throw new Error('missing worktree operations');
+      const mainCreate = operations.find((entry) => typeof entry === 'object' && entry !== null && !Array.isArray(entry) && (entry as Readonly<Record<string, unknown>>)['operation_type'] === 'create' && (entry as Readonly<Record<string, unknown>>)['stage'] === 'committed');
+      if (typeof mainCreate !== 'object' || mainCreate === null || Array.isArray(mainCreate)) throw new Error('missing committed main create operation');
+      const evidence = (mainCreate as Readonly<Record<string, unknown>>)['verification_evidence'];
+      if (typeof evidence !== 'object' || evidence === null || Array.isArray(evidence)) throw new Error('missing main create evidence');
+      const evidenceRef = (evidence as Readonly<Record<string, unknown>>)['ref'];
+      if (typeof evidenceRef !== 'string') throw new Error('missing main create evidence ref');
+      const stateRoot = process.env[AUTOPILOT_STATE_ROOT_ENV];
+      if (stateRoot === undefined) throw new Error('missing state root');
+      assert.match(await readFile(join(stateRoot, 'worktrees', repo.repoKey, ...evidenceRef.split('/')), 'utf8'), /main_metadata_complete/u);
     });
   });
 

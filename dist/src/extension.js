@@ -7,10 +7,11 @@ import { runAutopilotClaimGc } from "./core/claim-gc.js";
 import { readSchedulerConfig, writeSchedulerConfig } from "./core/scheduler-config.js";
 import { AUTOPILOT_PARENT_MODEL_ASSIGNMENT } from "./core/model-roster.js";
 import { evaluateAutopilotWorktreeToolCall, } from "./core/git-guard.js";
-import { AutopilotParallelRuntimeError, prepareAutopilotWorkstream, resolveRepoIdentity } from "./core/parallel-runtime.js";
+import { AutopilotParallelRuntimeError, prepareAutopilotWorkstream, recoverAutopilotWorktreeSagas, resolveRepoIdentity } from "./core/parallel-runtime.js";
 import { CoordinatorClient } from "./core/coordination/client.js";
 import { replayPendingCoordinatorReconciliation } from "./core/coordination/reconciliation.js";
 import { AutopilotSessionBridge } from "./core/coordination/supervisor.js";
+import { ensureMainWorktreeSagaRegistered } from "./core/coordination/worktree-saga.js";
 import { handoffUsage, onboardUsage, renderAutopilotPrompt, renderHandoffPrompt, renderOnboardPrompt, } from "./core/prompts.js";
 function notify(ctx, message, kind) {
     ctx.ui.notify(message, kind);
@@ -96,6 +97,8 @@ export default function autopilotExtension(pi) {
     }
     async function attachSessionBridge(prepared, ctx) {
         if (sessionBridge !== null && sessionBridge.attachment.context.workstream_run === prepared.active.workstream_run) {
+            await recoverAutopilotWorktreeSagas({ active: prepared.active });
+            await ensureMainWorktreeSagaRegistered({ active: prepared.active });
             await replayPendingCoordinatorReconciliation({ active: prepared.active });
             await sessionBridge.reconcileOwnedRun('same-session-resume-before-mailbox-and-dispatch');
             await sessionBridge.drainMailbox();
@@ -119,12 +122,19 @@ export default function autopilotExtension(pi) {
                 repo: prepared.repo,
                 active: prepared.active,
                 rawSessionId: rawSessionId(ctx),
+                recoverOwnedOperations: async (contextPath) => {
+                    const env = { ...process.env, [AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV]: contextPath };
+                    await recoverAutopilotWorktreeSagas({ active: prepared.active, env });
+                    await ensureMainWorktreeSagaRegistered({ active: prepared.active, env });
+                },
                 sink: {
                     send: (message, delivery, triggerTurn) => sendMessage(message, { deliverAs: delivery, triggerTurn }),
                     isIdle: () => ctx.isIdle?.() ?? true,
                 },
             });
             process.env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV] = sessionBridge.attachment.contextPath;
+            await recoverAutopilotWorktreeSagas({ active: prepared.active });
+            await ensureMainWorktreeSagaRegistered({ active: prepared.active });
             await replayPendingCoordinatorReconciliation({ active: prepared.active });
             await sessionBridge.reconcileOwnedRun('pending-evidence-replay-before-mailbox-and-dispatch');
             await sessionBridge.drainMailbox();
@@ -151,7 +161,7 @@ export default function autopilotExtension(pi) {
             return true;
         let prepared;
         try {
-            prepared = await prepareAutopilotWorkstream({ workstream: input.workstream, sourceCwd: input.ctx.cwd ?? process.cwd() });
+            prepared = await prepareAutopilotWorkstream({ workstream: input.workstream, sourceCwd: input.ctx.cwd ?? process.cwd(), coordinationSessionId: rawSessionId(input.ctx) });
         }
         catch (error) {
             notify(input.ctx, `Autopilot lifecycle attachment failed before terminal reconciliation: ${error instanceof Error ? error.message : String(error)}`, 'error');
@@ -185,6 +195,7 @@ export default function autopilotExtension(pi) {
             prepared = await prepareAutopilotWorkstream({
                 workstream: input.workstream,
                 sourceCwd: input.ctx.cwd ?? process.cwd(),
+                coordinationSessionId: rawSessionId(input.ctx),
             });
         }
         catch (error) {

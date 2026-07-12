@@ -53,8 +53,12 @@ export function validCoordinationSnapshot(): CoordinationSnapshot {
     ],
     reconciliation_evidence: [],
     messages: [{ schema_version: 'autopilot.coordination_message.v1', message_id: 'message-request-a', repo_id: 'repo-1', recipient_workstream_run: 'run-a', message_type: 'claim-request', correlation_id: 'request-b-a', payload: { request_id: 'request-b-a' }, status: 'delivered', created_event_seq: 3, delivered_event_seq: 3, acknowledged_event_seq: null, version: 2 }],
-    worktrees: [{ schema_version: 'autopilot.coordination_worktree.v1', worktree_id: 'worktree-a', owner: ownerA, canonical_path: '/tmp/autopilot-state/run-a/unit-a', git_common_dir: '/tmp/generic-repository/.git', branch: 'autopilot/unit/run-a/unit-a/attempt-1', state: 'active', version: 1 }],
-    worktree_operations: [{ schema_version: 'autopilot.worktree_operation.v1', operation_id: 'operation-a', worktree_id: 'worktree-a', owner: ownerA, operation_type: 'materialize', stage: 'prepared', authority_version: 1, intent_event_seq: 3, verification_evidence: null, error_code: null, version: 1 }],
+    worktrees: [{ schema_version: 'autopilot.coordination_worktree.v2', worktree_id: 'worktree-a', owner: ownerA, kind: 'unit', canonical_path: '/tmp/autopilot-state/run-a/unit-a', git_common_dir: '/tmp/generic-repository/.git', branch: 'autopilot/unit/run-a/unit-a/attempt-1', state: 'active', version: 1 }],
+    worktree_operations: [{
+      schema_version: 'autopilot.worktree_operation.v2', operation_id: 'operation-a', worktree_id: 'worktree-a', owner: ownerA, operation_type: 'materialize', stage: 'prepared', authority_version: 1, intent_event_seq: 3,
+      intent: { repo_root: '/tmp/generic-repository', worktree_path: '/tmp/autopilot-state/run-a/unit-a', git_common_dir: '/tmp/generic-repository/.git', branch: 'autopilot/unit/run-a/unit-a/attempt-1', reason: 'materialize claimed paths', base_sha: 'a'.repeat(40), target_sha: null, archive_ref: null, checkout_mode: 'claim-minimal', sparse_patterns: ['/src/shared.ts'], paths: ['src/shared.ts'], metadata_refs: [] },
+      completed_steps: [], current_step: null, recovery_attempts: 0, verification_evidence: null, error_code: null, version: 1,
+    }],
     escalations: [],
     events: [
       { schema_version: 'autopilot.coordination_event.v1', repo_id: 'repo-1', event_seq: 1, event_type: 'repository-registered', entity_type: 'repository', entity_id: 'repo-1', idempotency_key: 'event-key-1', request_sha256: digest, occurred_at: '2026-07-11T15:00:00.000Z' },

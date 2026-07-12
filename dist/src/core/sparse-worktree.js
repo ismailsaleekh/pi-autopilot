@@ -1,5 +1,4 @@
 import { spawnSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
 export class AutopilotSparseWorktreeError extends Error {
     name = 'AutopilotSparseWorktreeError';
     code;
@@ -14,15 +13,23 @@ function fail(code, message, evidence = []) {
     throw new AutopilotSparseWorktreeError(code, message, evidence);
 }
 export function createAutopilotGitWorktree(input) {
+    const existingBranch = spawnSync('git', ['show-ref', '--verify', '--quiet', `refs/heads/${input.branch}`], { cwd: input.repoRoot, encoding: 'utf8', env: runtimeGitEnv(input.env) });
+    const branchExists = (existingBranch.status ?? -1) === 0;
+    if (branchExists) {
+        const existingSha = runGit(['rev-parse', `refs/heads/${input.branch}`], input.repoRoot, runtimeGitEnv(input.env)).trim();
+        const expectedSha = runGit(['rev-parse', input.startPoint], input.repoRoot, runtimeGitEnv(input.env)).trim();
+        if (existingSha !== expectedSha)
+            fail('existing-branch-moved', 'partial worktree recovery found the intended branch at an unexpected commit.', [`branch=${input.branch}`, `expected=${expectedSha}`, `actual=${existingSha}`]);
+    }
     if (input.mode === 'full') {
-        runGit(['worktree', 'add', '-b', input.branch, input.worktreePath, input.startPoint], input.repoRoot, runtimeGitEnv(input.env));
+        runGit(branchExists ? ['worktree', 'add', input.worktreePath, input.branch] : ['worktree', 'add', '-b', input.branch, input.worktreePath, input.startPoint], input.repoRoot, runtimeGitEnv(input.env));
         return;
     }
     if (input.sparsePatterns.length === 0) {
         fail('empty-sparse-patterns', 'sparse worktree creation requires at least one sparse checkout pattern.');
     }
     assertSparseCheckoutSupported(input.repoRoot, input.env);
-    runGit(['worktree', 'add', '--no-checkout', '-b', input.branch, input.worktreePath, input.startPoint], input.repoRoot, runtimeGitEnv(input.env));
+    runGit(branchExists ? ['worktree', 'add', '--no-checkout', input.worktreePath, input.branch] : ['worktree', 'add', '--no-checkout', '-b', input.branch, input.worktreePath, input.startPoint], input.repoRoot, runtimeGitEnv(input.env));
     applySparseCheckoutSet(input.worktreePath, input.sparsePatterns, input.env);
     runGit(['checkout', '--force', input.branch], input.worktreePath, runtimeGitEnv(input.env));
     assertSparseCheckoutEnabled(input.worktreePath, input.env);
@@ -50,11 +57,6 @@ export function assertSparseCheckoutEnabled(worktreePath, env) {
     if (!isSparseCheckoutEnabled(worktreePath, env)) {
         fail('sparse-checkout-not-enabled', 'expected registered Autopilot worktree to have core.sparseCheckout=true.', [worktreePath]);
     }
-}
-export function removeGitWorktreeIfPresent(repoRoot, worktreePath, env) {
-    if (!existsSync(worktreePath))
-        return;
-    runGit(['worktree', 'remove', '--force', worktreePath], repoRoot, runtimeGitEnv(env));
 }
 export function isSparseMissingPath(worktreePath, repoRelativePath, env) {
     const result = spawnSync('git', ['ls-files', '-t', '--', repoRelativePath], {

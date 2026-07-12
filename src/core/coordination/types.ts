@@ -13,6 +13,9 @@ export const COORDINATION_ACQUISITION_STATES = ['waiting', 'grant-ready', 'grant
 export const COORDINATION_REQUEST_STATUSES = ['pending', 'delivered', 'acknowledged', 'release-now', 'deferred', 'released', 'grant-ready', 'granted', 'requester-notified', 'resolved', 'cancelled', 'superseded', 'contradiction-review'] as const;
 export const COORDINATION_MESSAGE_STATUSES = ['pending', 'delivered', 'acknowledged'] as const;
 export const COORDINATION_OPERATION_STAGES = ['prepared', 'in-progress', 'verified', 'committed', 'reconciling', 'compensated', 'failed'] as const;
+export const COORDINATION_WORKTREE_STATES = ['planned', 'active', 'dirty', 'quarantined', 'terminal', 'removed'] as const;
+export const COORDINATION_WORKTREE_KINDS = ['main', 'unit'] as const;
+export const COORDINATION_OPERATION_TYPES = ['create', 'materialize', 'commit', 'merge', 'reset', 'quarantine', 'archive', 'remove'] as const;
 export const COORDINATION_RELEASE_CONDITION_TYPES = ['child-terminal', 'unit-merged', 'attempt-reset', 'quarantine-captured', 'run-closed', 'explicit-owner-release'] as const;
 export const COORDINATION_RECONCILIATION_SOURCES = ['child-process', 'unit-merge', 'attempt-reset', 'quarantine-capture', 'run-close', 'run-abort'] as const;
 
@@ -25,6 +28,9 @@ export type CoordinationAcquisitionState = (typeof COORDINATION_ACQUISITION_STAT
 export type CoordinationRequestStatus = (typeof COORDINATION_REQUEST_STATUSES)[number];
 export type CoordinationMessageStatus = (typeof COORDINATION_MESSAGE_STATUSES)[number];
 export type CoordinationOperationStage = (typeof COORDINATION_OPERATION_STAGES)[number];
+export type CoordinationWorktreeState = (typeof COORDINATION_WORKTREE_STATES)[number];
+export type CoordinationWorktreeKind = (typeof COORDINATION_WORKTREE_KINDS)[number];
+export type CoordinationWorktreeOperationType = (typeof COORDINATION_OPERATION_TYPES)[number];
 export type CoordinationReleaseConditionType = (typeof COORDINATION_RELEASE_CONDITION_TYPES)[number];
 export type CoordinationReconciliationSource = (typeof COORDINATION_RECONCILIATION_SOURCES)[number];
 
@@ -218,25 +224,51 @@ export interface CoordinationMessage {
 }
 
 export interface CoordinationWorktree {
-  readonly schema_version: 'autopilot.coordination_worktree.v1';
+  readonly schema_version: 'autopilot.coordination_worktree.v2';
   readonly worktree_id: string;
   readonly owner: CoordinationOwnerIdentity;
+  readonly kind: CoordinationWorktreeKind;
   readonly canonical_path: string;
   readonly git_common_dir: string;
   readonly branch: string;
-  readonly state: 'planned' | 'active' | 'dirty' | 'quarantined' | 'terminal' | 'removed';
+  readonly state: CoordinationWorktreeState;
   readonly version: number;
 }
 
+/**
+ * Closed, data-only operation intent. The coordinator never accepts shell text:
+ * the package runtime maps operation_type plus these bounded values to fixed Git/
+ * filesystem actions. Null fields are explicit so migrations and replay cannot
+ * silently infer missing authority.
+ */
+export interface CoordinationWorktreeOperationIntent {
+  readonly repo_root: string;
+  readonly worktree_path: string;
+  readonly git_common_dir: string;
+  readonly branch: string;
+  readonly reason: string;
+  readonly base_sha: string | null;
+  readonly target_sha: string | null;
+  readonly archive_ref: string | null;
+  readonly checkout_mode: 'full' | 'claim-minimal' | 'exclude-heavy' | null;
+  readonly sparse_patterns: readonly string[];
+  readonly paths: readonly string[];
+  readonly metadata_refs: readonly string[];
+}
+
 export interface CoordinationWorktreeOperation {
-  readonly schema_version: 'autopilot.worktree_operation.v1';
+  readonly schema_version: 'autopilot.worktree_operation.v2';
   readonly operation_id: string;
   readonly worktree_id: string;
   readonly owner: CoordinationOwnerIdentity;
-  readonly operation_type: 'create' | 'materialize' | 'commit' | 'merge' | 'reset' | 'quarantine' | 'archive' | 'remove';
+  readonly operation_type: CoordinationWorktreeOperationType;
   readonly stage: CoordinationOperationStage;
   readonly authority_version: number;
   readonly intent_event_seq: number;
+  readonly intent: CoordinationWorktreeOperationIntent;
+  readonly completed_steps: readonly string[];
+  readonly current_step: string | null;
+  readonly recovery_attempts: number;
   readonly verification_evidence: CoordinationEvidenceRef | null;
   readonly error_code: string | null;
   readonly version: number;
@@ -290,7 +322,7 @@ export interface CoordinationSnapshot {
 }
 
 export type CoordinatorQueryAction = 'status' | 'doctor' | 'export';
-export type CoordinatorMutationAction = 'attach-run' | 'attach-session' | 'detach-session' | 'prepare-handoff' | 'heartbeat' | 'register-child' | 'heartbeat-child' | 'complete-child' | 'drain-mailbox' | 'acquire-group' | 'acknowledge-grant' | 'respond-claim-request' | 'cancel-claim-request' | 'cancel-acquisition-group' | 'supersede-attempt' | 'acknowledge-message' | 'record-release-evidence' | 'reconcile-run' | 'transition-operation';
+export type CoordinatorMutationAction = 'attach-run' | 'attach-session' | 'detach-session' | 'prepare-handoff' | 'heartbeat' | 'register-child' | 'heartbeat-child' | 'complete-child' | 'drain-mailbox' | 'acquire-group' | 'acknowledge-grant' | 'respond-claim-request' | 'cancel-claim-request' | 'cancel-acquisition-group' | 'supersede-attempt' | 'acknowledge-message' | 'record-release-evidence' | 'reconcile-run' | 'prepare-operation' | 'transition-operation';
 
 export interface CoordinatorRequestEnvelope {
   readonly schema_version: typeof AUTOPILOT_COORDINATOR_REQUEST_SCHEMA;

@@ -8,6 +8,8 @@ import {
   releaseCoordinationLeaseAndNotify,
   type CoordinationClaimMode,
   type CoordinationSnapshot,
+  type CoordinationOperationStage,
+  type CoordinationWorktreeOperation,
 } from '../../src/core/coordination/index.ts';
 import { validCoordinationSnapshot } from '../helpers/coordination-fixture.ts';
 
@@ -68,6 +70,45 @@ void describe('Coordination Fabric pure transition model', () => {
     });
     assert.equal(granted.edit_leases.filter((lease) => lease.acquisition_group_id === 'group-b').length, 1);
     assertCoordinationInvariants(granted);
+  });
+
+  void it('preserves worktree operation lifecycle invariants across generated stage and corruption cases', () => {
+    let seed = 0x32facade;
+    const next = (): number => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed; };
+    const stages: readonly CoordinationOperationStage[] = ['prepared', 'in-progress', 'verified', 'committed', 'reconciling', 'compensated', 'failed'];
+    for (let iteration = 0; iteration < 500; iteration += 1) {
+      const stage = stages[next() % stages.length];
+      if (stage === undefined) throw new Error('generated operation stage missing');
+      const base = validCoordinationSnapshot();
+      const original = base.worktree_operations[0];
+      const originalWorktree = base.worktrees[0];
+      if (original === undefined || originalWorktree === undefined) throw new Error('operation model fixture missing');
+      const verified = stage === 'verified' || stage === 'committed';
+      const terminalWithEvidence = verified || stage === 'compensated' || stage === 'failed';
+      const operation: CoordinationWorktreeOperation = {
+        ...original,
+        stage,
+        completed_steps: verified ? ['preflight-probe', 'external-action', 'postcondition-verification'] : stage === 'prepared' ? [] : ['preflight-probe'],
+        current_step: stage === 'in-progress' || stage === 'reconciling' ? 'external-action' : null,
+        verification_evidence: terminalWithEvidence ? { ref: '_saga-evidence/run-a/operation-a.json', sha256: `sha256:${'e'.repeat(64)}` } : null,
+        error_code: stage === 'reconciling' ? 'git-partial-effect' : null,
+      };
+      const valid: CoordinationSnapshot = {
+        ...base,
+        worktrees: [{ ...originalWorktree, version: stage === 'committed' ? 2 : 1 }],
+        worktree_operations: [operation],
+      };
+      assertCoordinationInvariants(valid);
+
+      const corruption = next() % 5;
+      let invalid: CoordinationSnapshot;
+      if (corruption === 0) invalid = { ...valid, worktrees: [] };
+      else if (corruption === 1) invalid = { ...valid, worktree_operations: [{ ...operation, intent: { ...operation.intent, worktree_path: `${operation.intent.worktree_path}-foreign` } }] };
+      else if (corruption === 2) invalid = { ...valid, worktree_operations: [{ ...operation, stage: 'verified', completed_steps: ['preflight-probe'], verification_evidence: null }] };
+      else if (corruption === 3) invalid = { ...valid, worktree_operations: [{ ...operation, stage: 'prepared', verification_evidence: null }, { ...operation, operation_id: `operation-duplicate-${String(iteration)}`, stage: 'reconciling', verification_evidence: null }] };
+      else invalid = { ...valid, worktrees: [{ ...originalWorktree, version: 99 }] };
+      assert.throws(() => assertCoordinationInvariants(invalid), /snapshot violates required invariants/u);
+    }
   });
 
   void it('preserves grant and fencing invariants across generated contention cases', () => {

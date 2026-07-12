@@ -7,6 +7,7 @@ import { parseAutopilotExecutionAudit, parseAutopilotExecutionCommit, parseAutop
 import { gitHead, readGitStatus, releaseClaimsForUnit, runGit, updateUnitBranchStatus, withAutopilotFileLock, writeJsonAtomic, type ActiveAutopilotContext, type ActiveAutopilotRow, type ProcessEnvLike } from './parallel-runtime.ts';
 import { cleanupTerminalUnitWorktree } from './worktree-cleanup.ts';
 import { recordCoordinatorReleaseEvidenceFromFile } from './coordination/reconciliation.ts';
+import { executeOwnedWorktreeSaga, WorktreeSagaCompensatedError, type WorktreeSagaInspection } from './coordination/worktree-saga.ts';
 
 export interface AutopilotUnitMerge {
   readonly schema_version: 'autopilot.unit_merge.v1';
@@ -86,54 +87,83 @@ export async function mergeAutopilotUnit(input: {
       };
     }
     const before = gitHead(active.main_worktree_path);
-    try {
-      runGit(['merge', '--no-ff', '--no-edit', '-m', `autopilot unit merge ${active.workstream_run} ${input.unitId} attempt ${String(input.attempt)}`, validatedUnitHead], active.main_worktree_path, runtimeGitEnv('unit-merge', input.env));
-    } catch (error) {
+    const conflictPath = join(active.runtime_root, 'merge-conflicts', `${input.unitId}.attempt-${String(input.attempt)}.${timestamp(now)}.json`);
+    const inspectMerge = (): WorktreeSagaInspection => {
       const dirty = readGitStatus(active.main_worktree_path).changedPaths;
-      const abort = spawnSync('git', ['merge', '--abort'], { cwd: active.main_worktree_path, encoding: 'utf8', env: runtimeGitEnv('unit-merge-abort', input.env) });
-      const conflictPath = join(active.runtime_root, 'merge-conflicts', `${input.unitId}.attempt-${String(input.attempt)}.${timestamp(now)}.json`);
-      await writeJsonAtomic(conflictPath, {
-        schema_version: 'autopilot.merge_conflict.v1',
-        workstream: active.workstream,
-        workstream_run: active.workstream_run,
-        unit_id: input.unitId,
-        attempt: input.attempt,
-        unit_branch: unitBranch,
-        integration_head: before,
-        dirty_paths: dirty,
-        abort_status: abort.status ?? -1,
-        error: errorMessage(error),
-        created_at: now.toISOString(),
-      });
-      if ((abort.status ?? -1) !== 0) fail('merge-abort-failed', 'unit merge conflicted and git merge --abort failed.', [abort.stderr.trim(), conflictPath]);
-      return { outcome: 'conflict', merge: null, blockers: [], conflict_path: conflictPath };
-    }
-    const after = gitHead(active.main_worktree_path);
-    const changedPaths = diffPaths(active.main_worktree_path, before, after);
-    const merge: AutopilotUnitMerge = {
-      schema_version: 'autopilot.unit_merge.v1',
-      workstream: active.workstream,
-      workstream_run: active.workstream_run,
-      autopilot_id: active.autopilot_id,
-      active_run_epoch: active.active_run_epoch,
-      unit_id: input.unitId,
-      role: executionCommit.role,
-      attempt: input.attempt,
-      unit_branch: unitBranch,
-      main_branch: active.branch,
-      unit_head: validatedUnitHead,
-      integration_before: before,
-      integration_after: after,
-      merge_commit_sha: after,
-      changed_paths: changedPaths,
-      status_ref: relativeRuntimeRef(active.runtime_root, input.statusPath),
-      receipt_ref: relativeRuntimeRef(active.runtime_root, input.receiptPath),
-      audit_ref: relativeRuntimeRef(active.runtime_root, input.auditPath),
-      execution_commit_ref: relativeRuntimeRef(active.runtime_root, input.executionCommitPath),
-      merged_at: now.toISOString(),
+      if (dirty.length > 0) return { outcome: 'unsafe', proof: dirty.map((path) => `dirty=${path}`) };
+      const current = gitHead(active.main_worktree_path);
+      if (isAncestor(active.main_worktree_path, validatedUnitHead, current)) return { outcome: 'satisfied', proof: [`merged_source=${validatedUnitHead}`, `head=${current}`] };
+      if (current !== before) return { outcome: 'unsafe', proof: [`expected_head=${before}`, `actual_head=${current}`] };
+      return { outcome: 'not-applied', proof: [`head=${before}`, `pending_source=${validatedUnitHead}`] };
     };
     const mergePath = join(active.runtime_root, 'unit-merges', `${input.unitId}.${executionCommit.role}.attempt-${String(input.attempt)}.json`);
-    await writeJsonAtomic(mergePath, merge);
+    let durableMerge: AutopilotUnitMerge | null = null;
+    const persistMergeEvidence = async (): Promise<AutopilotUnitMerge> => {
+      const after = gitHead(active.main_worktree_path);
+      const merge: AutopilotUnitMerge = {
+        schema_version: 'autopilot.unit_merge.v1', workstream: active.workstream, workstream_run: active.workstream_run, autopilot_id: active.autopilot_id,
+        active_run_epoch: active.active_run_epoch, unit_id: input.unitId, role: executionCommit.role, attempt: input.attempt, unit_branch: unitBranch,
+        main_branch: active.branch, unit_head: validatedUnitHead, integration_before: before, integration_after: after, merge_commit_sha: after,
+        changed_paths: diffPaths(active.main_worktree_path, before, after), status_ref: relativeRuntimeRef(active.runtime_root, input.statusPath),
+        receipt_ref: relativeRuntimeRef(active.runtime_root, input.receiptPath), audit_ref: relativeRuntimeRef(active.runtime_root, input.auditPath),
+        execution_commit_ref: relativeRuntimeRef(active.runtime_root, input.executionCommitPath), merged_at: now.toISOString(),
+      };
+      await writeJsonAtomic(mergePath, merge);
+      return merge;
+    };
+    try {
+      await executeOwnedWorktreeSaga({
+        active,
+        unitId: 'main',
+        attempt: 1,
+        kind: 'main',
+        operationType: 'merge',
+        operationKey: `unit-merge:${input.unitId}:${String(input.attempt)}:${validatedUnitHead}:${before}`,
+        initialWorktreeState: 'active',
+        committedWorktreeState: 'active',
+        intent: {
+          repo_root: active.source_repo,
+          worktree_path: active.main_worktree_path,
+          git_common_dir: active.git_common_dir,
+          branch: active.branch,
+          reason: `merge accepted unit ${input.unitId} attempt ${String(input.attempt)}`,
+          base_sha: before,
+          target_sha: validatedUnitHead,
+          archive_ref: null,
+          checkout_mode: null,
+          sparse_patterns: [],
+          paths: executionCommit.edited_claimed_paths,
+          metadata_refs: [relativeRuntimeRef(active.runtime_root, join(active.runtime_root, 'unit-merges', `${input.unitId}.${executionCommit.role}.attempt-${String(input.attempt)}.json`))],
+        },
+      }, {
+        inspect: inspectMerge,
+        action: async () => {
+          try {
+            runGit(['merge', '--no-ff', '--no-edit', '-m', `autopilot unit merge ${active.workstream_run} ${input.unitId} attempt ${String(input.attempt)}`, validatedUnitHead], active.main_worktree_path, runtimeGitEnv('unit-merge', input.env));
+          } catch (error) {
+            const dirty = readGitStatus(active.main_worktree_path).changedPaths;
+            const abort = spawnSync('git', ['merge', '--abort'], { cwd: active.main_worktree_path, encoding: 'utf8', env: runtimeGitEnv('unit-merge-abort', input.env) });
+            await writeJsonAtomic(conflictPath, {
+              schema_version: 'autopilot.merge_conflict.v1', workstream: active.workstream, workstream_run: active.workstream_run,
+              unit_id: input.unitId, attempt: input.attempt, unit_branch: unitBranch, integration_head: before,
+              dirty_paths: dirty, abort_status: abort.status ?? -1, error: errorMessage(error), created_at: now.toISOString(),
+            });
+            if ((abort.status ?? -1) !== 0) fail('merge-abort-failed', 'unit merge conflicted and git merge --abort failed.', [abort.stderr.trim(), conflictPath]);
+            throw new WorktreeSagaCompensatedError('unit merge conflicted and was cleanly aborted', [`conflict_path=${conflictPath}`, `integration_head=${before}`, `unit_head=${validatedUnitHead}`]);
+          }
+        },
+        verify: async () => {
+          const inspected = inspectMerge();
+          if (inspected.outcome !== 'satisfied') fail('merge-saga-postcondition', 'unit merge saga did not satisfy its exact source-ancestor postcondition.', inspected.proof);
+          durableMerge = await persistMergeEvidence();
+          return [...inspected.proof, `unit_merge_ref=${relativeRuntimeRef(active.runtime_root, mergePath)}`];
+        },
+      }, input.env ?? process.env);
+    } catch (error) {
+      if (error instanceof WorktreeSagaCompensatedError) return { outcome: 'conflict', merge: null, blockers: [], conflict_path: conflictPath };
+      throw error;
+    }
+    const merge = durableMerge ?? parseAutopilotUnitMerge(JSON.parse(await readFile(mergePath, 'utf8')) as unknown);
     await recordCoordinatorReleaseEvidenceFromFile({
       active,
       source: 'unit-merge',
@@ -143,7 +173,29 @@ export async function mergeAutopilotUnit(input: {
     });
     await releaseClaimsForUnit({ context: input.context, unitId: input.unitId, attempt: input.attempt, reason: 'autopilot unit merge release', now });
     const archiveRef = `autopilot/archive/${active.workstream_run}/unit/${input.unitId}/attempt-${String(input.attempt)}`;
-    runGit(['update-ref', `refs/heads/${archiveRef}`, validatedUnitHead], active.source_repo, runtimeGitEnv('unit-archive', input.env));
+    const inspectArchive = (): WorktreeSagaInspection => {
+      const result = spawnSync('git', ['rev-parse', '--verify', `refs/heads/${archiveRef}`], { cwd: active.source_repo, encoding: 'utf8', env: runtimeGitEnv('unit-archive-inspect', input.env) });
+      if ((result.status ?? -1) !== 0) return { outcome: 'not-applied', proof: ['archive_ref_absent'] };
+      return result.stdout.trim() === validatedUnitHead ? { outcome: 'satisfied', proof: [`archive_ref=${archiveRef}`, `archive_sha=${validatedUnitHead}`] } : { outcome: 'unsafe', proof: [`archive_ref=${archiveRef}`, `expected=${validatedUnitHead}`, `actual=${result.stdout.trim()}`] };
+    };
+    await executeOwnedWorktreeSaga({
+      active, unitId: input.unitId, attempt: input.attempt, kind: 'unit', operationType: 'archive',
+      operationKey: `unit-archive:${input.unitId}:${String(input.attempt)}:${validatedUnitHead}`,
+      initialWorktreeState: 'active', committedWorktreeState: 'terminal',
+      intent: {
+        repo_root: active.source_repo, worktree_path: executionCommit.cwd, git_common_dir: active.git_common_dir, branch: unitBranch,
+        reason: 'archive accepted unit branch before retirement', base_sha: executionCommit.before_head, target_sha: validatedUnitHead,
+        archive_ref: archiveRef, checkout_mode: null, sparse_patterns: [], paths: executionCommit.edited_claimed_paths, metadata_refs: [],
+      },
+    }, {
+      inspect: inspectArchive,
+      action: () => { runGit(['update-ref', `refs/heads/${archiveRef}`, validatedUnitHead, '0'.repeat(40)], active.source_repo, runtimeGitEnv('unit-archive', input.env)); },
+      verify: () => {
+        const inspected = inspectArchive();
+        if (inspected.outcome !== 'satisfied') fail('unit-archive-postcondition', 'unit branch archive saga did not establish the immutable archive ref.', inspected.proof);
+        return inspected.proof;
+      },
+    }, input.env ?? process.env);
     await updateUnitBranchStatus({ active, unitId: input.unitId, attempt: input.attempt, status: 'merged', currentSha: validatedUnitHead, archiveRef });
     await cleanupTerminalUnitWorktree({
       active,
@@ -203,6 +255,13 @@ async function readJsonFile(path: string): Promise<unknown> {
   } catch (error) {
     fail('json-read-failed', `failed to read ${path}: ${errorMessage(error)}`);
   }
+}
+
+function isAncestor(cwd: string, ancestor: string, descendant: string): boolean {
+  const result = spawnSync('git', ['merge-base', '--is-ancestor', ancestor, descendant], { cwd, encoding: 'utf8' });
+  if ((result.status ?? -1) === 0) return true;
+  if ((result.status ?? -1) === 1) return false;
+  fail('merge-ancestry-check-failed', 'failed to verify unit merge source ancestry.', [result.stderr.trim(), ancestor, descendant]);
 }
 
 function diffPaths(cwd: string, left: string, right: string): readonly string[] {

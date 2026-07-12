@@ -4,14 +4,15 @@ import { mkdir } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { platform } from 'node:os';
 import { backup, DatabaseSync } from 'node:sqlite';
-import { claimModesConflict, coordinationPathsOverlap, parseCoordinationAcquisitionGroup, parseCoordinationChildLease, parseCoordinationClaimRequest, parseCoordinationEditLease, parseCoordinationMailboxCursor, parseCoordinationMessage, parseCoordinationReconciliationEvidence, parseCoordinationReleaseCondition, parseCoordinationRepository, parseCoordinationRequestedLease, parseCoordinationRun, parseCoordinationSessionLease, parseCoordinationUnitAttempt } from "./contracts.js";
+import { claimModesConflict, coordinationPathsOverlap, parseCoordinationAcquisitionGroup, parseCoordinationChildLease, parseCoordinationClaimRequest, parseCoordinationEditLease, parseCoordinationMailboxCursor, parseCoordinationMessage, parseCoordinationReconciliationEvidence, parseCoordinationReleaseCondition, parseCoordinationRepository, parseCoordinationRequestedLease, parseCoordinationRun, parseCoordinationSessionLease, parseCoordinationUnitAttempt, parseCoordinationWorktree, parseCoordinationWorktreeOperation } from "./contracts.js";
 import { CoordinationRuntimeError } from "./failures.js";
 import { COORDINATOR_BUSY_TIMEOUT_MS, COORDINATOR_DATABASE_SCHEMA_VERSION, COORDINATOR_GRANT_OFFER_TTL_MS, COORDINATOR_PACKAGE_BUILD } from "./runtime-paths.js";
 import { parseUnitAttemptTarget, validateReconciliationEvidenceDocument } from "./terminal-evidence.js";
+import { COORDINATION_WORKTREE_STATES } from "./types.js";
 const DATABASE_EXPORT_SCHEMA = 'autopilot.coordinator_export.v1';
 const SHA256_PATTERN = /^sha256:[a-f0-9]{64}$/u;
-const RUN_OWNED_IDEMPOTENCY_ACTIONS = new Set(['acquire-group', 'acknowledge-grant', 'respond-claim-request', 'cancel-claim-request', 'cancel-acquisition-group', 'supersede-attempt', 'record-release-evidence', 'reconcile-run']);
-const TERMINAL_SESSION_ACTIONS = new Set(['detach-session', 'heartbeat', 'drain-mailbox', 'acknowledge-message', 'record-release-evidence', 'reconcile-run']);
+const RUN_OWNED_IDEMPOTENCY_ACTIONS = new Set(['acquire-group', 'acknowledge-grant', 'respond-claim-request', 'cancel-claim-request', 'cancel-acquisition-group', 'supersede-attempt', 'record-release-evidence', 'reconcile-run', 'prepare-operation', 'transition-operation']);
+const TERMINAL_SESSION_ACTIONS = new Set(['detach-session', 'heartbeat', 'drain-mailbox', 'acknowledge-message', 'record-release-evidence', 'reconcile-run', 'prepare-operation', 'transition-operation']);
 const systemClock = { now: () => new Date() };
 const MIGRATION_1 = `
 CREATE TABLE repositories (
@@ -186,6 +187,10 @@ CREATE TABLE reconciliation_evidence (
 ) STRICT;
 CREATE INDEX idx_reconciliation_evidence_condition ON reconciliation_evidence(repo_id, workstream_run, source, target_id);
 CREATE INDEX idx_messages_cursor ON messages(repo_id, recipient_workstream_run, created_event_seq, message_id, status);
+`;
+const MIGRATION_4 = `
+CREATE INDEX IF NOT EXISTS idx_worktree_operations_recovery ON worktree_operations(repo_id, workstream_run, entity_id);
+CREATE INDEX IF NOT EXISTS idx_worktrees_owner ON worktrees(repo_id, workstream_run, entity_id);
 `;
 function asRow(value, label) {
     if (value === undefined)
@@ -379,6 +384,12 @@ function claimRequestFromRow(row) {
 function unitAttemptFromRow(row) {
     return entityFromRow(row, parseCoordinationUnitAttempt, 'unit attempt');
 }
+function worktreeFromRow(row) {
+    return entityFromRow(row, parseCoordinationWorktree, 'worktree');
+}
+function worktreeOperationFromRow(row) {
+    return entityFromRow(row, parseCoordinationWorktreeOperation, 'worktree operation');
+}
 function mailboxCursorFromRow(row) {
     return parseCoordinationMailboxCursor({
         schema_version: 'autopilot.mailbox_cursor.v1',
@@ -487,6 +498,7 @@ export class CoordinatorStore {
                 { version: 1, sql: MIGRATION_1 },
                 { version: 2, sql: MIGRATION_2 },
                 { version: 3, sql: MIGRATION_3 },
+                { version: 4, sql: MIGRATION_4 },
             ];
             for (const migration of migrations) {
                 if (currentVersion >= migration.version)
@@ -613,7 +625,8 @@ export class CoordinatorStore {
             case 'supersede-attempt': return this.supersedeAttempt(request);
             case 'record-release-evidence': return this.recordReleaseEvidence(request);
             case 'reconcile-run': return this.reconcileRun(request);
-            case 'transition-operation': throw new CoordinationRuntimeError('recovery-required', `${request.action} is reserved for a later Coordination Fabric transition`);
+            case 'prepare-operation': return this.prepareOperation(request);
+            case 'transition-operation': return this.transitionOperation(request);
         }
     }
     status(repoId, workstreamRun) {
@@ -637,6 +650,8 @@ export class CoordinatorStore {
             ? (repoId === 'global' ? this.#db.prepare('SELECT * FROM mailbox_cursors ORDER BY repo_id, workstream_run').all() : this.#db.prepare('SELECT * FROM mailbox_cursors WHERE repo_id=? ORDER BY workstream_run').all(repoId)).map(mailboxCursorFromRow)
             : this.#db.prepare('SELECT * FROM mailbox_cursors WHERE repo_id=? AND workstream_run=?').all(repoId, workstreamRun).map(mailboxCursorFromRow);
         const reconciliationEvidence = workstreamRun === null ? [] : this.#db.prepare('SELECT * FROM reconciliation_evidence WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(repoId, workstreamRun).map(reconciliationEvidenceFromRow);
+        const worktrees = workstreamRun === null ? [] : this.#db.prepare('SELECT * FROM worktrees WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(repoId, workstreamRun).map(worktreeFromRow);
+        const worktreeOperations = workstreamRun === null ? [] : this.#db.prepare('SELECT * FROM worktree_operations WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(repoId, workstreamRun).map(worktreeOperationFromRow);
         return {
             committedEventSeq: null,
             payload: {
@@ -653,6 +668,8 @@ export class CoordinatorStore {
                 claim_requests: claimRequests,
                 mailbox_cursors: mailboxCursors,
                 reconciliation_evidence: reconciliationEvidence,
+                worktrees,
+                worktree_operations: worktreeOperations,
                 pending_messages: pendingMessages,
             },
         };
@@ -678,6 +695,7 @@ export class CoordinatorStore {
             write_authority_released: false,
         }));
         const migrations = this.#db.prepare('SELECT version, checksum, applied_at FROM schema_migrations ORDER BY version').all().map((row) => ({ version: sqlInteger(row, 'version'), checksum: sqlString(row, 'checksum'), applied_at: sqlString(row, 'applied_at') }));
+        const incompleteOperations = this.#db.prepare("SELECT * FROM worktree_operations WHERE json_extract(payload_json, '$.stage') NOT IN ('committed','compensated','failed') ORDER BY repo_id, workstream_run, entity_id").all().map(worktreeOperationFromRow);
         return {
             committedEventSeq: null,
             payload: {
@@ -690,6 +708,7 @@ export class CoordinatorStore {
                 expired_child_classifications: expiredChildren,
                 last_backup_path: this.#lastBackupPath,
                 last_startup_reconciliation: this.#lastStartupReconciliation,
+                incomplete_worktree_operations: incompleteOperations,
             },
         };
     }
@@ -1125,6 +1144,87 @@ export class CoordinatorStore {
             return { sequence: seq, eventType: 'message-acknowledged', entityType: 'message', entityId: messageId, payload: { message: messageFromRow(asRow(this.#db.prepare('SELECT * FROM messages WHERE message_id=?').get(messageId), 'acknowledged message')), mailbox_cursor: this.#requireMailboxCursor(request.repo_id, message.recipient_workstream_run) } };
         });
     }
+    prepareOperation(request) {
+        return this.#mutation(request, () => {
+            this.#requireCurrentSession(request);
+            const run = this.#requireRun(request.repo_id, this.#workstreamRun(request));
+            const worktree = parseCoordinationWorktree(request.payload['worktree']);
+            const suppliedOperation = parseCoordinationWorktreeOperation(request.payload['operation']);
+            if (worktree.owner.repo_id !== request.repo_id || worktree.owner.workstream_run !== run.workstream_run || worktree.owner.autopilot_id !== run.autopilot_id)
+                throw new CoordinationRuntimeError('unauthorized-client', 'worktree registration owner does not match the attached durable run');
+            if (!sameOwner(worktree.owner, suppliedOperation.owner) || suppliedOperation.worktree_id !== worktree.worktree_id)
+                throw new CoordinationRuntimeError('unauthorized-client', 'operation owner does not exactly match its worktree owner');
+            if (suppliedOperation.stage !== 'prepared' || suppliedOperation.intent_event_seq !== 0 || suppliedOperation.version !== 1 || suppliedOperation.authority_version !== worktree.version || suppliedOperation.completed_steps.length !== 0 || suppliedOperation.current_step !== null || suppliedOperation.recovery_attempts !== 0 || suppliedOperation.verification_evidence !== null || suppliedOperation.error_code !== null)
+                throw new CoordinationRuntimeError('invalid-request', 'new worktree operation must use the canonical prepared state');
+            this.#assertWorktreeAuthority(worktree, suppliedOperation);
+            const existingWorktreeRow = this.#db.prepare('SELECT * FROM worktrees WHERE entity_id=?').get(worktree.worktree_id);
+            if (existingWorktreeRow === undefined) {
+                if (request.expected_version !== 0)
+                    throw new CoordinationRuntimeError('stale-version', 'new worktree registration requires expected_version 0');
+                this.#db.prepare('INSERT INTO worktrees(entity_id, repo_id, workstream_run, payload_json, version) VALUES(?, ?, ?, ?, ?)').run(worktree.worktree_id, request.repo_id, run.workstream_run, canonicalJson(worktree), worktree.version);
+            }
+            else {
+                const existingWorktree = worktreeFromRow(existingWorktreeRow);
+                this.#assertVersion(existingWorktree.version, request.expected_version, 'worktree');
+                if (canonicalJson(existingWorktree) !== canonicalJson(worktree))
+                    throw new CoordinationRuntimeError('idempotency-conflict', 'worktree identity was reused with different immutable authority');
+            }
+            if (this.#db.prepare('SELECT entity_id FROM worktree_operations WHERE entity_id=?').get(suppliedOperation.operation_id) !== undefined)
+                throw new CoordinationRuntimeError('stale-version', 'worktree operation already exists; retry its original idempotency key or query status');
+            const nonterminal = this.#db.prepare("SELECT entity_id FROM worktree_operations WHERE repo_id=? AND workstream_run=? AND json_extract(payload_json, '$.worktree_id')=? AND json_extract(payload_json, '$.stage') NOT IN ('committed','compensated','failed') LIMIT 1").get(request.repo_id, run.workstream_run, worktree.worktree_id);
+            if (nonterminal !== undefined)
+                throw new CoordinationRuntimeError('coordinator-contention', 'worktree already has an incomplete owner operation');
+            const seq = this.#nextEventSequence(request.repo_id);
+            const operation = { ...suppliedOperation, intent_event_seq: seq };
+            this.#db.prepare('INSERT INTO worktree_operations(entity_id, repo_id, workstream_run, payload_json, version) VALUES(?, ?, ?, ?, ?)').run(operation.operation_id, request.repo_id, run.workstream_run, canonicalJson(operation), operation.version);
+            return { sequence: seq, eventType: 'worktree-operation-prepared', entityType: 'worktree-operation', entityId: operation.operation_id, payload: { worktree, operation } };
+        });
+    }
+    transitionOperation(request) {
+        return this.#mutation(request, () => {
+            this.#requireCurrentSession(request);
+            const operationId = payloadString(request.payload, 'operation_id');
+            const operationRow = asRow(this.#db.prepare('SELECT * FROM worktree_operations WHERE entity_id=?').get(operationId), 'worktree operation');
+            const operation = worktreeOperationFromRow(operationRow);
+            if (operation.owner.repo_id !== request.repo_id || operation.owner.workstream_run !== this.#workstreamRun(request))
+                throw new CoordinationRuntimeError('unauthorized-client', 'session cannot transition a foreign-run worktree operation');
+            this.#assertVersion(operation.version, request.expected_version, 'worktree operation');
+            const worktreeRow = asRow(this.#db.prepare('SELECT * FROM worktrees WHERE entity_id=?').get(operation.worktree_id), 'worktree');
+            const worktree = worktreeFromRow(worktreeRow);
+            if (!sameOwner(worktree.owner, operation.owner))
+                throw new CoordinationRuntimeError('store-corrupt', 'worktree operation ownership changed');
+            if (worktree.version !== operation.authority_version)
+                throw new CoordinationRuntimeError('stale-version', 'worktree authority changed while its operation was incomplete');
+            const next = parseCoordinationWorktreeOperation({
+                ...operation,
+                stage: payloadString(request.payload, 'stage'),
+                completed_steps: request.payload['completed_steps'],
+                current_step: request.payload['current_step'],
+                recovery_attempts: payloadInteger(request.payload, 'recovery_attempts'),
+                verification_evidence: request.payload['verification_evidence'],
+                error_code: request.payload['error_code'],
+                version: operation.version + 1,
+            });
+            this.#assertOperationTransition(operation, next);
+            if (next.verification_evidence !== null && operation.verification_evidence === null)
+                this.#verifyOperationEvidenceFile(next);
+            const requestedWorktreeState = payloadString(request.payload, 'worktree_state');
+            if (!COORDINATION_WORKTREE_STATES.includes(requestedWorktreeState))
+                throw new CoordinationRuntimeError('invalid-request', 'worktree_state is invalid');
+            if (next.stage !== 'committed' && requestedWorktreeState !== worktree.state)
+                throw new CoordinationRuntimeError('invalid-request', 'worktree state may change only when an operation commits');
+            if (next.stage === 'committed')
+                this.#assertCommittedWorktreeState(next, requestedWorktreeState);
+            const seq = this.#nextEventSequence(request.repo_id);
+            this.#db.prepare('UPDATE worktree_operations SET payload_json=?, version=? WHERE entity_id=?').run(canonicalJson(next), next.version, next.operation_id);
+            let nextWorktree = worktree;
+            if (next.stage === 'committed' && requestedWorktreeState !== worktree.state) {
+                nextWorktree = parseCoordinationWorktree({ ...worktree, state: requestedWorktreeState, version: worktree.version + 1 });
+                this.#db.prepare('UPDATE worktrees SET payload_json=?, version=? WHERE entity_id=?').run(canonicalJson(nextWorktree), nextWorktree.version, nextWorktree.worktree_id);
+            }
+            return { sequence: seq, eventType: `worktree-operation-${next.stage}`, entityType: 'worktree-operation', entityId: next.operation_id, payload: { operation: next, worktree: nextWorktree } };
+        });
+    }
     enqueueMessageForTest(message) {
         const parsed = parseCoordinationMessage(message);
         this.#db.prepare('INSERT INTO messages(message_id, repo_id, recipient_workstream_run, message_type, correlation_id, payload_json, status, created_event_seq, delivered_event_seq, acknowledged_event_seq, version) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(parsed.message_id, parsed.repo_id, parsed.recipient_workstream_run, parsed.message_type, parsed.correlation_id, canonicalJson(parsed.payload), parsed.status, parsed.created_event_seq, parsed.delivered_event_seq, parsed.acknowledged_event_seq, parsed.version);
@@ -1136,8 +1236,9 @@ export class CoordinatorStore {
             this.#db.exec('BEGIN IMMEDIATE');
             try {
                 const seq = this.#nextEventSequence(run.repo_id);
+                const recoveryMessageIds = this.#enqueueOperationRecoveryMessages(run, seq);
                 const summary = this.#reconcileOwnedRun(run.repo_id, run.workstream_run, seq);
-                if (summary.released_lease_ids.length === 0 && summary.released_request_ids.length === 0 && summary.notification_ids.length === 0 && summary.offered_group_ids.length === 0) {
+                if (recoveryMessageIds.length === 0 && summary.released_lease_ids.length === 0 && summary.released_request_ids.length === 0 && summary.notification_ids.length === 0 && summary.offered_group_ids.length === 0) {
                     this.#db.exec('ROLLBACK');
                     continue;
                 }
@@ -1147,7 +1248,7 @@ export class CoordinatorStore {
                 this.#db.exec('COMMIT');
                 aggregate.released_lease_ids.push(...summary.released_lease_ids);
                 aggregate.released_request_ids.push(...summary.released_request_ids);
-                aggregate.notification_ids.push(...summary.notification_ids);
+                aggregate.notification_ids.push(...recoveryMessageIds, ...summary.notification_ids);
                 aggregate.offered_group_ids.push(...summary.offered_group_ids);
             }
             catch (error) {
@@ -1156,6 +1257,24 @@ export class CoordinatorStore {
             }
         }
         this.#lastStartupReconciliation = this.#freezeReconciliationSummary(aggregate);
+    }
+    #enqueueOperationRecoveryMessages(run, seq) {
+        const operations = this.#db.prepare("SELECT * FROM worktree_operations WHERE repo_id=? AND workstream_run=? AND json_extract(payload_json, '$.stage') NOT IN ('committed','compensated','failed') ORDER BY entity_id").all(run.repo_id, run.workstream_run).map(worktreeOperationFromRow);
+        const messageIds = [];
+        for (const operation of operations) {
+            const messageId = stableEntityId('message', ['worktree-operation-recovery', operation.operation_id]);
+            if (this.#db.prepare('SELECT message_id FROM messages WHERE message_id=?').get(messageId) !== undefined)
+                continue;
+            const message = {
+                schema_version: 'autopilot.coordination_message.v1', message_id: messageId, repo_id: run.repo_id,
+                recipient_workstream_run: run.workstream_run, message_type: 'recovery-required', correlation_id: operation.operation_id,
+                payload: { operation_id: operation.operation_id, worktree_id: operation.worktree_id, operation_type: operation.operation_type, stage: operation.stage, owner_unit: operation.owner.unit_id, owner_attempt: operation.owner.attempt },
+                status: 'pending', created_event_seq: seq, delivered_event_seq: null, acknowledged_event_seq: null, version: 1,
+            };
+            this.#insertMessage(message);
+            messageIds.push(messageId);
+        }
+        return Object.freeze(messageIds);
     }
     #reconcileOwnedRun(repoId, workstreamRun, seq) {
         const beforeRequests = new Map(this.#db.prepare('SELECT * FROM claim_requests WHERE repo_id=? ORDER BY entity_id').all(repoId).map(claimRequestFromRow).map((entry) => [entry.request_id, entry]));
@@ -1434,6 +1553,123 @@ export class CoordinatorStore {
             if (row !== undefined && !sameOwner(childFromRow(row).owner, owner))
                 throw new CoordinationRuntimeError('invalid-request', 'child-terminal condition targets a child lease with different durable ownership');
         }
+    }
+    #assertWorktreeAuthority(worktree, operation) {
+        const repository = repositoryFromRow(asRow(this.#db.prepare('SELECT * FROM repositories WHERE repo_id=?').get(worktree.owner.repo_id), 'worktree repository'));
+        if (operation.intent.repo_root !== repository.canonical_root || worktree.git_common_dir !== repository.git_common_dir || operation.intent.git_common_dir !== repository.git_common_dir)
+            throw new CoordinationRuntimeError('unauthorized-client', 'worktree operation repository identity disagrees with the registered repository');
+        if (operation.intent.worktree_path !== worktree.canonical_path || operation.intent.branch !== worktree.branch)
+            throw new CoordinationRuntimeError('invalid-request', 'operation intent disagrees with immutable worktree identity');
+        const repoWorktreeRoot = resolve(this.#stateRoot, 'worktrees', repository.repo_key);
+        const taskRoot = resolve(repoWorktreeRoot, 'active', worktree.owner.workstream_run);
+        const expectedPath = worktree.kind === 'main'
+            ? resolve(taskRoot, 'main')
+            : resolve(taskRoot, 'units', worktree.owner.unit_id, `attempt-${String(worktree.owner.attempt)}`, 'worktree');
+        if (resolve(worktree.canonical_path) !== expectedPath)
+            throw new CoordinationRuntimeError('unauthorized-client', 'worktree path is not derived from its durable run/unit ownership', [worktree.canonical_path, expectedPath]);
+        const expectedBranch = worktree.kind === 'main'
+            ? `autopilot/${worktree.owner.workstream_run}`
+            : `autopilot/unit/${worktree.owner.workstream_run}/${worktree.owner.unit_id}/attempt-${String(worktree.owner.attempt)}`;
+        if (worktree.branch !== expectedBranch)
+            throw new CoordinationRuntimeError('unauthorized-client', 'worktree branch is not derived from its durable owner', [worktree.branch, expectedBranch]);
+        if (operation.operation_type === 'create' && operation.intent.base_sha === null)
+            throw new CoordinationRuntimeError('invalid-request', 'create operation requires immutable base_sha');
+        if (operation.operation_type === 'create' && operation.intent.checkout_mode !== null && operation.intent.checkout_mode !== 'full' && operation.intent.sparse_patterns.length === 0)
+            throw new CoordinationRuntimeError('invalid-request', 'sparse create operation requires non-empty patterns');
+        if ((operation.operation_type === 'merge' || operation.operation_type === 'reset' || operation.operation_type === 'archive' || operation.operation_type === 'remove') && operation.intent.target_sha === null)
+            throw new CoordinationRuntimeError('invalid-request', `${operation.operation_type} operation requires immutable target_sha`);
+        if (operation.operation_type === 'archive' && operation.intent.archive_ref === null)
+            throw new CoordinationRuntimeError('invalid-request', 'archive operation requires an archive_ref');
+        if (operation.operation_type === 'archive' && operation.intent.archive_ref !== null && !operation.intent.archive_ref.startsWith(`autopilot/archive/${worktree.owner.workstream_run}/`))
+            throw new CoordinationRuntimeError('unauthorized-client', 'archive operation ref is outside its run-owned namespace', [operation.intent.archive_ref]);
+        if (operation.operation_type === 'materialize' && (operation.intent.sparse_patterns.length === 0 || operation.intent.paths.length === 0))
+            throw new CoordinationRuntimeError('invalid-request', 'materialize operation requires non-empty sparse patterns and paths');
+        if (operation.operation_type === 'commit' && (operation.intent.base_sha === null || operation.intent.paths.length === 0))
+            throw new CoordinationRuntimeError('invalid-request', 'commit operation requires base_sha and exact changed paths');
+        for (const path of operation.intent.paths) {
+            const normalized = path.replace(/\\/gu, '/').replace(/\/\*\*$/u, '');
+            if (normalized.startsWith('/') || normalized.startsWith('../') || normalized.includes('/../') || normalized === '..' || normalized.startsWith(':') || normalized.includes('\u0000') || normalized.length === 0)
+                throw new CoordinationRuntimeError('invalid-request', 'operation path must be normalized repository-relative authority without Git pathspec magic', [path]);
+        }
+        for (const ref of operation.intent.metadata_refs) {
+            const normalized = ref.replace(/\\/gu, '/');
+            if (normalized.startsWith('/') || normalized.startsWith('../') || normalized.includes('/../') || normalized === '..' || normalized.includes('\u0000'))
+                throw new CoordinationRuntimeError('invalid-request', 'operation metadata ref must remain relative to its owned task root', [ref]);
+        }
+    }
+    #verifyOperationEvidenceFile(operation) {
+        const evidence = operation.verification_evidence;
+        if (evidence === null)
+            throw new CoordinationRuntimeError('invalid-request', 'operation evidence is missing');
+        const repository = repositoryFromRow(asRow(this.#db.prepare('SELECT * FROM repositories WHERE repo_id=?').get(operation.owner.repo_id), 'operation evidence repository'));
+        const expectedPrefix = `_saga-evidence/${operation.owner.workstream_run}/`;
+        if (!evidence.ref.startsWith(expectedPrefix) || evidence.ref !== `${expectedPrefix}${operation.operation_id}.json`)
+            throw new CoordinationRuntimeError('unauthorized-client', 'operation evidence ref is not derived from its durable owner and operation', [evidence.ref]);
+        const evidenceRoot = resolve(this.#stateRoot, 'worktrees', repository.repo_key, '_saga-evidence', operation.owner.workstream_run);
+        const evidencePath = resolve(this.#stateRoot, 'worktrees', repository.repo_key, evidence.ref);
+        const relativeEvidence = relative(evidenceRoot, evidencePath);
+        if (relativeEvidence.length === 0 || relativeEvidence === '..' || relativeEvidence.startsWith(`..${sep}`) || isAbsolute(relativeEvidence))
+            throw new CoordinationRuntimeError('unauthorized-client', 'operation evidence escapes its run-owned evidence root');
+        let bytes;
+        try {
+            const evidenceStat = lstatSync(evidencePath);
+            if (!evidenceStat.isFile() || evidenceStat.isSymbolicLink())
+                throw new CoordinationRuntimeError('unauthorized-client', 'operation evidence must be a regular non-symbolic file', [evidencePath]);
+            bytes = readFileSync(evidencePath);
+        }
+        catch (error) {
+            if (error instanceof CoordinationRuntimeError)
+                throw error;
+            throw new CoordinationRuntimeError('recovery-required', 'operation evidence file is unreadable', [evidencePath, error instanceof Error ? error.message : String(error)]);
+        }
+        const actual = `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
+        if (actual !== evidence.sha256)
+            throw new CoordinationRuntimeError('invalid-state', 'operation evidence hash does not match immutable artifact', [evidencePath, `expected=${evidence.sha256}`, `actual=${actual}`]);
+        let parsed;
+        try {
+            parsed = parseJsonObject(Buffer.from(bytes).toString('utf8'), 'operation evidence');
+        }
+        catch (error) {
+            throw new CoordinationRuntimeError('invalid-state', 'operation evidence is not valid JSON', [error instanceof Error ? error.message : String(error)]);
+        }
+        const expectedIntentSha = `sha256:${createHash('sha256').update(canonicalJson(operation.intent), 'utf8').digest('hex')}`;
+        if (parsed['schema_version'] !== 'autopilot.worktree_operation_evidence.v1' || parsed['operation_id'] !== operation.operation_id || parsed['worktree_id'] !== operation.worktree_id || parsed['operation_type'] !== operation.operation_type || parsed['terminal_stage'] !== operation.stage || parsed['intent_sha256'] !== expectedIntentSha || canonicalJson(parsed['owner']) !== canonicalJson(operation.owner))
+            throw new CoordinationRuntimeError('unauthorized-client', 'operation evidence identity or immutable intent does not match its durable operation');
+    }
+    #assertCommittedWorktreeState(operation, state) {
+        const allowed = {
+            create: ['active'], materialize: ['active'], commit: ['active'], merge: ['active', 'terminal'], reset: ['terminal'], quarantine: ['quarantined'], archive: ['active', 'terminal'], remove: ['removed'],
+        };
+        if (!allowed[operation.operation_type].includes(state))
+            throw new CoordinationRuntimeError('invalid-request', `${operation.operation_type} operation cannot commit worktree state ${state}`);
+    }
+    #assertOperationTransition(previous, next) {
+        const allowed = {
+            prepared: ['in-progress', 'reconciling', 'compensated', 'failed'],
+            'in-progress': ['in-progress', 'verified', 'reconciling', 'compensated', 'failed'],
+            reconciling: ['in-progress', 'verified', 'reconciling', 'compensated', 'failed'],
+            verified: ['committed', 'reconciling', 'failed'],
+            committed: [], compensated: [], failed: [],
+        };
+        if (!(allowed[previous.stage] ?? []).includes(next.stage))
+            throw new CoordinationRuntimeError('invalid-state', `worktree operation cannot transition ${previous.stage} -> ${next.stage}`);
+        if (next.completed_steps.length < previous.completed_steps.length || previous.completed_steps.some((step, index) => next.completed_steps[index] !== step))
+            throw new CoordinationRuntimeError('invalid-state', 'worktree operation completed steps cannot be removed or reordered');
+        if (next.recovery_attempts < previous.recovery_attempts || next.recovery_attempts > previous.recovery_attempts + 1)
+            throw new CoordinationRuntimeError('invalid-state', 'worktree operation recovery attempts must advance monotonically one at a time');
+        if (previous.verification_evidence !== null && canonicalJson(previous.verification_evidence) !== canonicalJson(next.verification_evidence))
+            throw new CoordinationRuntimeError('invalid-state', 'worktree operation verification evidence is immutable');
+        if ((next.stage === 'verified' || next.stage === 'committed' || next.stage === 'compensated' || next.stage === 'failed') && next.verification_evidence === null)
+            throw new CoordinationRuntimeError('invalid-request', `${next.stage} operation requires immutable verification evidence`);
+        const requiredSteps = ['preflight-probe', 'external-action', 'postcondition-verification'];
+        if ((next.stage === 'verified' || next.stage === 'committed') && (next.completed_steps.length !== requiredSteps.length || requiredSteps.some((step, index) => next.completed_steps[index] !== step)))
+            throw new CoordinationRuntimeError('invalid-state', 'verified operation must complete the closed probe/action/verification step plan in order');
+        if ((next.stage === 'verified' || next.stage === 'committed' || next.stage === 'compensated') && next.current_step !== null)
+            throw new CoordinationRuntimeError('invalid-request', `${next.stage} operation cannot retain a current step`);
+        if ((next.stage === 'reconciling' || next.stage === 'failed') && next.error_code === null)
+            throw new CoordinationRuntimeError('invalid-request', `${next.stage} operation requires an error code`);
+        if ((next.stage === 'in-progress' || next.stage === 'verified' || next.stage === 'committed' || next.stage === 'compensated') && next.error_code !== null)
+            throw new CoordinationRuntimeError('invalid-request', `${next.stage} operation cannot retain an error code`);
     }
     #assertGroupOwner(request, group) {
         if (group.owner.repo_id !== request.repo_id || group.owner.workstream_run !== this.#workstreamRun(request))

@@ -20,6 +20,8 @@ import {
 import { evaluateAutopilotClosureGate } from './lifecycle/index.ts';
 import { parseAutopilotUnitMerge, type AutopilotUnitMerge } from './unit-merge.ts';
 import { cleanupClosedAutopilotRun } from './worktree-cleanup.ts';
+import { executeOwnedWorktreeSaga, OwnedWorktreeSagaClient, WorktreeSagaCompensatedError, type WorktreeSagaInspection } from './coordination/worktree-saga.ts';
+import { AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV } from './names.ts';
 import { recordCoordinatorReleaseEvidenceFromFile } from './coordination/reconciliation.ts';
 import {
   ACTIVE_AUTOPILOTS_FILE,
@@ -179,7 +181,7 @@ export async function closeAutopilotWorkstream(options: AutopilotCloseOptions): 
   const prepared = await resolveCloseContext(options, env);
 
   if (dryRun) {
-    const validation = await validateCloseReadiness(prepared, now);
+    const validation = await validateCloseReadiness(prepared, now, env);
     return buildCloseResult({
       outcome: 'dry-run',
       active: prepared.active,
@@ -208,7 +210,7 @@ export async function closeAutopilotWorkstream(options: AutopilotCloseOptions): 
       const context: PreparedCloseContext = { ...prepared, active };
       const attemptPath = await writeCloseAttempt(context, now);
       try {
-        const validation = await validateCloseReadiness(context, now);
+        const validation = await validateCloseReadiness(context, now, env);
         if (validation.blockers.length > 0) {
           active = await setActiveStatus(context.coordinationRoot, active, 'blocked', now, null);
           const result = buildCloseResult({
@@ -235,7 +237,7 @@ export async function closeAutopilotWorkstream(options: AutopilotCloseOptions): 
 
         const targetBefore = gitHead(context.repo.repoRoot);
         const workstreamBefore = gitHead(active.main_worktree_path);
-        const integrationCommitSha = integrateTargetIntoWorkstream({ active, targetHead: targetBefore });
+        const integrationCommitSha = await integrateTargetIntoWorkstream({ active, targetHead: targetBefore, env });
         const workstreamAfter = gitHead(active.main_worktree_path);
         const changedPaths = diffPaths(active.main_worktree_path, targetBefore, workstreamAfter);
         const postIntegrationBlockers = validation.unitMerges.length > 0
@@ -265,7 +267,7 @@ export async function closeAutopilotWorkstream(options: AutopilotCloseOptions): 
           return { ...result, close_result_path: resultPath };
         }
 
-        fastForwardTargetToWorkstream(context.repo.repoRoot, active.branch);
+        await fastForwardTargetToWorkstream({ active, sourceRepo: context.repo.repoRoot, branch: active.branch, targetBefore, env });
         const targetAfter = gitHead(context.repo.repoRoot);
         const mergeId = buildId('merge', active.workstream_run, now);
         const mergeEvent: AutopilotMergeEvent = {
@@ -337,7 +339,7 @@ export async function abortAutopilotWorkstream(options: AutopilotCloseOptions): 
   const changedPaths = existsSync(prepared.active.main_worktree_path) && commitExists(prepared.active.main_worktree_path, prepared.active.target_base_sha)
     ? diffPaths(prepared.active.main_worktree_path, prepared.active.target_base_sha, currentHead)
     : [];
-  const blockers = abortReadinessBlockers(prepared.active);
+  const blockers = await abortReadinessBlockers(prepared.active, env);
   if (dryRun) {
     return buildCloseResult({
       outcome: 'dry-run',
@@ -367,7 +369,7 @@ export async function abortAutopilotWorkstream(options: AutopilotCloseOptions): 
       const context: PreparedCloseContext = { ...prepared, active };
       const attemptPath = await writeCloseAttempt(context, now);
       try {
-        const latestBlockers = abortReadinessBlockers(active);
+        const latestBlockers = await abortReadinessBlockers(active, env);
         if (latestBlockers.length > 0) {
           active = await setActiveStatus(context.coordinationRoot, active, 'blocked', now, null);
           const result = buildCloseResult({
@@ -462,7 +464,7 @@ async function resolveCloseContext(options: AutopilotCloseOptions, env: ProcessE
   return { repo, coordinationRoot, worktreeRoot, active };
 }
 
-async function validateCloseReadiness(context: PreparedCloseContext, now: Date): Promise<CloseValidationResult> {
+async function validateCloseReadiness(context: PreparedCloseContext, now: Date, env: ProcessEnvLike): Promise<CloseValidationResult> {
   const blockers: string[] = [];
   const active = context.active;
   const targetBranch = active.target_branch;
@@ -515,6 +517,7 @@ async function validateCloseReadiness(context: PreparedCloseContext, now: Date):
   blockers.push(...phaseTwoCloseBlockers(active, unitMerges, artifacts.validationStalenessRefs, preIntegrationChangedPaths));
   blockers.push(...await unitWorktreeResidueBlockers(active));
   blockers.push(...branchCommitBlockers(active, executionCommits, unitMerges));
+  blockers.push(...await incompleteSagaBlockers(active, env));
 
   const targetIntersection = intersectingPaths(targetDeltaPaths, closeSurfacePaths);
   if (targetIntersection.length > 0) {
@@ -562,7 +565,7 @@ function sourceDirtyPaths(cwd: string, workstream: string): readonly string[] {
   return readGitStatus(cwd).changedPaths.filter((path) => !isAutopilotRuntimeRepoPath(path, workstream));
 }
 
-function abortReadinessBlockers(active: ActiveAutopilotRow): readonly string[] {
+async function abortReadinessBlockers(active: ActiveAutopilotRow, env: ProcessEnvLike): Promise<readonly string[]> {
   const blockers: string[] = [];
   if (!existsSync(active.main_worktree_path)) blockers.push(`registered worktree is missing: ${active.main_worktree_path}`);
   if (existsSync(active.main_worktree_path)) {
@@ -572,7 +575,17 @@ function abortReadinessBlockers(active: ActiveAutopilotRow): readonly string[] {
     if (branch !== active.branch) blockers.push(`registered worktree must be on ${active.branch}, got ${String(branch)}`);
   }
   blockers.push(...unitWorktreeResidueBlockersSync(active));
+  blockers.push(...await incompleteSagaBlockers(active, env));
   return sortedUnique(blockers);
+}
+
+async function incompleteSagaBlockers(active: ActiveAutopilotRow, env: ProcessEnvLike): Promise<readonly string[]> {
+  if (env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV] === undefined) return [];
+  const client = await OwnedWorktreeSagaClient.fromEnvironment(env);
+  if (client.session.repo_id !== active.repo_key || client.session.autopilot_id !== active.autopilot_id || client.session.workstream_run !== active.workstream_run) return [`attached saga supervisor does not own closing run ${active.workstream_run}`];
+  return (await client.operations())
+    .filter((operation) => operation.stage !== 'committed' && operation.stage !== 'compensated' && operation.stage !== 'failed')
+    .map((operation) => `owner-scoped ${operation.operation_type} saga is incomplete: ${operation.operation_id} (${operation.stage})`);
 }
 
 async function unitWorktreeResidueBlockers(active: ActiveAutopilotRow): Promise<readonly string[]> {
@@ -583,7 +596,7 @@ async function unitWorktreeResidueBlockers(active: ActiveAutopilotRow): Promise<
   const blockers: string[] = [];
   for (const unit of index.units) {
     if (unit.status === 'active') blockers.push(`unit worktree still active: ${unit.unit_id} attempt ${String(unit.attempt)}`);
-    if (unit.status === 'quarantined') blockers.push(`unit worktree is quarantined and requires operator decision: ${unit.unit_id} attempt ${String(unit.attempt)}`);
+    if (unit.status === 'quarantined') blockers.push(`unit worktree is quarantined and requires owned autonomous recovery: ${unit.unit_id} attempt ${String(unit.attempt)}`);
     if (existsSync(unit.worktree_path) && readGitStatus(unit.worktree_path).changedPaths.length > 0) blockers.push(`unit worktree has dirty residue: ${unit.unit_id} attempt ${String(unit.attempt)}`);
   }
   return sortedUnique(blockers);
@@ -607,7 +620,7 @@ function unitWorktreeResidueBlockersSync(active: ActiveAutopilotRow): readonly s
       const attempt = typeof row['attempt'] === 'number' ? String(row['attempt']) : 'unknown';
       const worktreePath = typeof row['worktree_path'] === 'string' ? row['worktree_path'] : null;
       if (status === 'active') blockers.push(`unit worktree still active: ${unitId} attempt ${attempt}`);
-      if (status === 'quarantined') blockers.push(`unit worktree is quarantined and requires operator decision: ${unitId} attempt ${attempt}`);
+      if (status === 'quarantined') blockers.push(`unit worktree is quarantined and requires owned autonomous recovery: ${unitId} attempt ${attempt}`);
       if (worktreePath !== null && existsSync(worktreePath) && readGitStatus(worktreePath).changedPaths.length > 0) blockers.push(`unit worktree has dirty residue: ${unitId} attempt ${attempt}`);
     }
     return sortedUnique(blockers);
@@ -865,25 +878,61 @@ async function copyPath(source: string, destination: string): Promise<void> {
   }
 }
 
-function integrateTargetIntoWorkstream(input: { readonly active: ActiveAutopilotRow; readonly targetHead: string }): string | null {
+async function integrateTargetIntoWorkstream(input: { readonly active: ActiveAutopilotRow; readonly targetHead: string; readonly env: ProcessEnvLike }): Promise<string | null> {
   const workstreamHead = gitHead(input.active.main_worktree_path);
   if (isAncestor(input.active.main_worktree_path, input.targetHead, workstreamHead)) return null;
   const targetBranch = requireTargetBranch(input.active);
+  const inspect = (): WorktreeSagaInspection => {
+    const dirty = readGitStatus(input.active.main_worktree_path).changedPaths.filter((path) => !isAutopilotRuntimeRepoPath(path, input.active.workstream));
+    if (dirty.length > 0) return { outcome: 'unsafe', proof: dirty.map((path) => `dirty=${path}`) };
+    const current = gitHead(input.active.main_worktree_path);
+    if (isAncestor(input.active.main_worktree_path, input.targetHead, current)) return { outcome: 'satisfied', proof: [`merged_target=${input.targetHead}`, `head=${current}`] };
+    return current === workstreamHead ? { outcome: 'not-applied', proof: [`head=${current}`] } : { outcome: 'unsafe', proof: [`expected_head=${workstreamHead}`, `actual_head=${current}`] };
+  };
   try {
-    runGit(['merge', '--no-ff', '--no-edit', '-m', `autopilot close integration ${input.active.workstream_run}`, targetBranch], input.active.main_worktree_path, runtimeGitEnv('close-integration'));
+    await executeOwnedWorktreeSaga({
+      active: input.active, unitId: 'main', attempt: 1, kind: 'main', operationType: 'merge',
+      operationKey: `close-integration:${workstreamHead}:${input.targetHead}`, initialWorktreeState: 'active', committedWorktreeState: 'active',
+      intent: { repo_root: input.active.source_repo, worktree_path: input.active.main_worktree_path, git_common_dir: input.active.git_common_dir, branch: input.active.branch, reason: 'integrate current target before close', base_sha: workstreamHead, target_sha: input.targetHead, archive_ref: null, checkout_mode: null, sparse_patterns: [], paths: [], metadata_refs: [] },
+    }, {
+      inspect,
+      action: () => {
+        try { runGit(['merge', '--no-ff', '--no-edit', '-m', `autopilot close integration ${input.active.workstream_run}`, targetBranch], input.active.main_worktree_path, runtimeGitEnv('close-integration')); }
+        catch (error) {
+          const abort = spawnSync('git', ['merge', '--abort'], { cwd: input.active.main_worktree_path, encoding: 'utf8', env: runtimeGitEnv('close-integration') });
+          if (abort.status !== 0 && readGitStatus(input.active.main_worktree_path).changedPaths.length > 0) fail('integration-merge-conflict', `target merge into workstream conflicted and merge --abort failed: ${errorMessage(error)}`, [abort.stderr.trim()]);
+          throw new WorktreeSagaCompensatedError(`target merge into workstream conflicted: ${errorMessage(error)}`, [`workstream_head=${workstreamHead}`, `target_head=${input.targetHead}`]);
+        }
+      },
+      verify: () => { const inspected = inspect(); if (inspected.outcome !== 'satisfied') fail('integration-merge-postcondition', 'close integration merge saga postcondition failed.', inspected.proof); return inspected.proof; },
+    }, input.env);
   } catch (error) {
-    const abort = spawnSync('git', ['merge', '--abort'], { cwd: input.active.main_worktree_path, encoding: 'utf8', env: runtimeGitEnv('close-integration') });
-    if (abort.status !== 0 && readGitStatus(input.active.main_worktree_path).changedPaths.length > 0) {
-      fail('integration-merge-conflict', `target merge into workstream conflicted and merge --abort failed: ${errorMessage(error)}`, [abort.stderr.trim()]);
-    }
-    fail('integration-merge-conflict', `target merge into workstream conflicted; targeted revalidation required before close: ${errorMessage(error)}`);
+    if (error instanceof WorktreeSagaCompensatedError) fail('integration-merge-conflict', `${error.message}; targeted revalidation required before close`, error.proof);
+    throw error;
   }
   const after = gitHead(input.active.main_worktree_path);
   return after === workstreamHead ? null : after;
 }
 
-function fastForwardTargetToWorkstream(sourceRepo: string, branch: string): void {
-  runGit(['merge', '--ff-only', branch], sourceRepo, runtimeGitEnv('final-merge'));
+async function fastForwardTargetToWorkstream(input: { readonly active: ActiveAutopilotRow; readonly sourceRepo: string; readonly branch: string; readonly targetBefore: string; readonly env: ProcessEnvLike }): Promise<void> {
+  const desired = gitHead(input.active.main_worktree_path);
+  const targetBranch = requireTargetBranch(input.active);
+  const inspect = (): WorktreeSagaInspection => {
+    const currentBranch = runGit(['rev-parse', '--abbrev-ref', 'HEAD'], input.sourceRepo).trim();
+    const current = gitHead(input.sourceRepo);
+    if (currentBranch !== targetBranch) return { outcome: 'unsafe', proof: [`expected_branch=${targetBranch}`, `actual_branch=${currentBranch}`] };
+    if (current === desired) return { outcome: 'satisfied', proof: [`target_head=${current}`] };
+    return current === input.targetBefore ? { outcome: 'not-applied', proof: [`target_head=${current}`] } : { outcome: 'unsafe', proof: [`expected_before=${input.targetBefore}`, `actual_head=${current}`] };
+  };
+  await executeOwnedWorktreeSaga({
+    active: input.active, unitId: 'main', attempt: 1, kind: 'main', operationType: 'merge',
+    operationKey: `close-final-fast-forward:${targetBranch}:${input.targetBefore}:${desired}`, initialWorktreeState: 'active', committedWorktreeState: 'active',
+    intent: { repo_root: input.sourceRepo, worktree_path: input.active.main_worktree_path, git_common_dir: input.active.git_common_dir, branch: input.active.branch, reason: 'atomically fast-forward captured target to validated workstream', base_sha: input.targetBefore, target_sha: desired, archive_ref: targetBranch, checkout_mode: null, sparse_patterns: [], paths: [], metadata_refs: [] },
+  }, {
+    inspect,
+    action: () => { runGit(['merge', '--ff-only', input.branch], input.sourceRepo, runtimeGitEnv('final-merge')); },
+    verify: () => { const inspected = inspect(); if (inspected.outcome !== 'satisfied') fail('final-merge-postcondition', 'final target fast-forward saga postcondition failed.', inspected.proof); return inspected.proof; },
+  }, input.env);
 }
 
 async function setActiveStatus(

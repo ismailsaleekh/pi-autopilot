@@ -204,13 +204,29 @@ export function checkCoordinationInvariants(snapshot: CoordinationSnapshot): rea
   }
 
   for (const worktree of snapshot.worktrees) assertOwner(worktree.owner, worktree.worktree_id);
+  const incompleteByWorktree = new Map<string, string>();
   for (const operation of snapshot.worktree_operations) {
     assertOwner(operation.owner, operation.operation_id);
     const worktree = worktrees.get(operation.worktree_id);
     if (worktree === undefined) findings.push(finding('operation-worktree-missing', operation.operation_id, 'worktree does not exist'));
-    else if (ownerKey(worktree.owner) !== ownerKey(operation.owner)) findings.push(finding('foreign-worktree-operation', operation.operation_id, 'operation owner differs from worktree owner'));
-    if ((operation.stage === 'verified' || operation.stage === 'committed') && operation.verification_evidence === null) findings.push(finding('operation-verification-missing', operation.operation_id, `${operation.stage} operation requires verification evidence`));
-    if (operation.operation_type === 'remove' && operation.stage === 'committed' && worktree?.state === 'dirty') findings.push(finding('dirty-worktree-removed', operation.operation_id, 'dirty worktree cannot be removed without quarantine capture'));
+    else {
+      if (ownerKey(worktree.owner) !== ownerKey(operation.owner)) findings.push(finding('foreign-worktree-operation', operation.operation_id, 'operation owner differs from worktree owner'));
+      if (worktree.canonical_path !== operation.intent.worktree_path || worktree.git_common_dir !== operation.intent.git_common_dir || worktree.branch !== operation.intent.branch) findings.push(finding('operation-intent-authority-mismatch', operation.operation_id, 'operation intent disagrees with immutable worktree authority'));
+      const expectedAuthorityVersion = operation.stage === 'committed' && worktree.version === operation.authority_version + 1 ? operation.authority_version + 1 : operation.authority_version;
+      if (worktree.version !== expectedAuthorityVersion) findings.push(finding('operation-authority-version-mismatch', operation.operation_id, 'operation authority version is not fenced to its worktree version'));
+    }
+    if ((operation.stage === 'verified' || operation.stage === 'committed' || operation.stage === 'compensated' || operation.stage === 'failed') && operation.verification_evidence === null) findings.push(finding('operation-verification-missing', operation.operation_id, `${operation.stage} operation requires verification evidence`));
+    const requiredOperationSteps = ['preflight-probe', 'external-action', 'postcondition-verification'];
+    if ((operation.stage === 'verified' || operation.stage === 'committed') && (operation.completed_steps.length !== requiredOperationSteps.length || requiredOperationSteps.some((step, index) => operation.completed_steps[index] !== step))) findings.push(finding('operation-step-plan-incomplete', operation.operation_id, 'verified operation lacks the closed probe/action/verification step plan'));
+    if (!['committed', 'compensated', 'failed'].includes(operation.stage)) {
+      const prior = incompleteByWorktree.get(operation.worktree_id);
+      if (prior !== undefined) findings.push(finding('concurrent-worktree-operations', operation.operation_id, `worktree already has incomplete operation ${prior}`));
+      else incompleteByWorktree.set(operation.worktree_id, operation.operation_id);
+    }
+    if (operation.operation_type === 'remove' && operation.stage === 'committed' && worktree?.state !== 'removed') findings.push(finding('worktree-remove-state-mismatch', operation.operation_id, 'committed remove operation requires removed worktree state'));
+  }
+  for (const worktree of snapshot.worktrees) {
+    if (worktree.state === 'removed' && !snapshot.worktree_operations.some((operation) => operation.worktree_id === worktree.worktree_id && operation.operation_type === 'remove' && operation.stage === 'committed')) findings.push(finding('removed-worktree-without-commit', worktree.worktree_id, 'removed worktree state requires a committed remove operation'));
   }
 
   for (const escalation of snapshot.escalations) {

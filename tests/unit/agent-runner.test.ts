@@ -285,7 +285,7 @@ void describe('autopilot-agent-run wrapper', () => {
       const unitSpec = spec(root);
       const specPath = await writeSpec(root, unitSpec);
       const result = runCli(['--dry-run', specPath]);
-      assert.equal(result.code, 0);
+      assert.equal(result.code, 0, result.stderr);
       assert.equal(result.stderr, '');
       assert.match(result.stdout, /^autopilot-agent-run dry-run unit=u01-implement role=implement /u);
       assert.equal(result.stdout.trim().split('\n').length, 1);

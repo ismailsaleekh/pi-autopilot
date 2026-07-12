@@ -10,7 +10,7 @@ import { AutopilotForcedOutputEvidenceError } from "./forced-output/status-evide
 import { parseAutopilotStatusEntry, parseAutopilotUnitSpec } from "./contracts/index.js";
 import { captureAutopilotExecutionBaseline, deriveAutopilotExecutionAuditPath, writeAutopilotExecutionAudit, } from "./execution-audit/index.js";
 import { AutopilotExecutionCommitError, commitAutopilotExecution, deriveAutopilotExecutionCommitPath, } from "./execution-commit.js";
-import { AutopilotParallelRuntimeError, acquireClaimsForUnit, coordinationRootForRepo, ensureWorktreeCleanForLaunch, prepareAutopilotUnitWorktree, readActiveAutopilots, releaseClaimsForUnit, unitWorktreePathForActiveAutopilot, resolveActiveAutopilotForSpec, } from "./parallel-runtime.js";
+import { AutopilotParallelRuntimeError, acquireClaimsForUnit, coordinationRootForRepo, ensureWorktreeCleanForLaunch, prepareAutopilotUnitWorktree, readActiveAutopilots, recoverAutopilotWorktreeSagas, releaseClaimsForUnit, unitWorktreePathForActiveAutopilot, resolveActiveAutopilotForSpec, } from "./parallel-runtime.js";
 import { rollbackCreatedUnitWorktree } from "./worktree-cleanup.js";
 import { registerAutopilotChildAuthority } from "./coordination/child-authority.js";
 import { assertAutopilotSpecMaterializationDiskGate, expandedReadOnlyPathsForAudit, materializeAutopilotSpecPaths, } from "./materialization.js";
@@ -90,6 +90,7 @@ async function runAutopilotAgentFromSpecPathInternal(specPath, options, lifecycl
     const runtimePreflight = await preflightSpec(spec, specPath, {
         skipStaleOutputCheck: options.dryRun === true,
         skipClaimAcquire: options.dryRun === true,
+        skipSagaRecovery: options.dryRun === true,
         env,
     });
     const auditBaseline = await captureAutopilotExecutionBaseline(spec.cwd);
@@ -335,7 +336,7 @@ async function readAndValidateSpec(specPath) {
     }
 }
 async function preflightSpec(spec, specPath, options = {}) {
-    const preparedWorktree = await prepareMissingSourceChangingUnitWorktree(spec, options.env ?? process.env);
+    const preparedWorktree = await prepareMissingSourceChangingUnitWorktree(spec, options.env ?? process.env, options.skipSagaRecovery === true);
     try {
         return await preflightSpecAfterWorktreePreparation(spec, specPath, options);
     }
@@ -364,6 +365,8 @@ async function preflightSpecAfterWorktreePreparation(spec, specPath, options = {
     let runtimeContext;
     try {
         runtimeContext = await resolveActiveAutopilotForSpec(spec, options.env ?? process.env);
+        if (options.skipSagaRecovery !== true && (options.env ?? process.env)[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV] !== undefined)
+            await recoverAutopilotWorktreeSagas({ active: runtimeContext.active, env: options.env ?? process.env });
         await ensureWorktreeCleanForLaunch({ spec, context: runtimeContext });
     }
     catch (error) {
@@ -444,7 +447,7 @@ async function preflightSpecAfterWorktreePreparation(spec, specPath, options = {
     await mkdir(spec.evidence_dir, { recursive: true });
     return { context: runtimeContext, acquiredClaims };
 }
-async function prepareMissingSourceChangingUnitWorktree(spec, env) {
+async function prepareMissingSourceChangingUnitWorktree(spec, env, skipSagaRecovery = false) {
     if (spec.role !== 'implement' && spec.role !== 'fix')
         return { created: false };
     if (existsSync(spec.cwd))
@@ -472,6 +475,8 @@ async function prepareMissingSourceChangingUnitWorktree(spec, env) {
     const active = activeRows.find((row) => row.workstream === spec.workstream && row.runtime_root === artifactRoot);
     if (active === undefined)
         return { created: false };
+    if (!skipSagaRecovery && env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV] !== undefined)
+        await recoverAutopilotWorktreeSagas({ active, env });
     const expectedCwd = unitWorktreePathForActiveAutopilot(active, spec.unit_id, spec.attempt);
     if (resolve(spec.cwd) !== resolve(expectedCwd)) {
         throw new AutopilotAgentRunError('spec-invalid', {
