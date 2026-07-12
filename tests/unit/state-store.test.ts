@@ -84,6 +84,12 @@ void describe('Autopilot state-store', () => {
     });
   });
 
+  void it('rejects synthesized operator questions outside coordinator-accepted contradiction packets', async () => {
+    await withTempDir(async (dir) => {
+      await assertRejects(() => writeAutopilotStateAtomic({ statePath: join(dir, 'state.json'), state: makeState({ operator_questions: ['deadlock needs operator'] }) }), /operator decisions are coordinator-owned planning-contradiction packets/u);
+    });
+  });
+
   void it('appends events append-only and enforces monotonic ids', async () => {
     await withTempDir(async (dir) => {
       const eventsPath = join(dir, 'events.jsonl');

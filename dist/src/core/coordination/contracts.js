@@ -1,5 +1,5 @@
 import { isAbsolute, normalize } from 'node:path';
-import { AUTOPILOT_COORDINATION_SNAPSHOT_SCHEMA, AUTOPILOT_COORDINATOR_PROTOCOL_VERSION, AUTOPILOT_COORDINATOR_REQUEST_SCHEMA, AUTOPILOT_COORDINATOR_RESPONSE_SCHEMA, COORDINATION_ACQUISITION_STATES, COORDINATION_CHILD_STATUSES, COORDINATION_CLAIM_MODES, COORDINATION_MESSAGE_STATUSES, COORDINATION_OPERATION_STAGES, COORDINATION_OPERATION_TYPES, COORDINATION_RELEASE_CONDITION_TYPES, COORDINATION_RECONCILIATION_SOURCES, COORDINATION_REQUEST_STATUSES, COORDINATION_RESERVATION_OBLIGATION_STATES, COORDINATION_MESSAGE_TYPES, COORDINATION_RUN_STATUSES, COORDINATION_SESSION_STATUSES, COORDINATION_UNIT_STATES, COORDINATION_WORKTREE_KINDS, COORDINATION_WORKTREE_STATES, } from "./types.js";
+import { AUTOPILOT_COORDINATION_SNAPSHOT_SCHEMA, AUTOPILOT_COORDINATOR_PROTOCOL_VERSION, AUTOPILOT_COORDINATOR_REQUEST_SCHEMA, AUTOPILOT_COORDINATOR_RESPONSE_SCHEMA, COORDINATION_ACQUISITION_STATES, COORDINATION_CHILD_STATUSES, COORDINATION_CLAIM_MODES, COORDINATION_MESSAGE_STATUSES, COORDINATION_OPERATIONAL_ESCALATION_REASONS, COORDINATION_OPERATION_STAGES, COORDINATION_OPERATION_TYPES, COORDINATION_RELEASE_CONDITION_TYPES, COORDINATION_RECONCILIATION_SOURCES, COORDINATION_REQUEST_STATUSES, COORDINATION_RESERVATION_OBLIGATION_STATES, COORDINATION_MESSAGE_TYPES, COORDINATION_RUN_STATUSES, COORDINATION_SESSION_STATUSES, COORDINATION_UNIT_ROLES, COORDINATION_UNIT_STATES, COORDINATION_WORKTREE_KINDS, COORDINATION_WORKTREE_STATES, COORDINATION_WAIT_EDGE_STATES, COORDINATION_DEADLOCK_ACTIONS, COORDINATION_DEADLOCK_STATES, } from "./types.js";
 export class CoordinationContractError extends Error {
     name = 'CoordinationContractError';
     code = 'invalid-coordination-contract';
@@ -14,7 +14,7 @@ const SHA256 = /^sha256:[a-f0-9]{64}$/u;
 const CHILD_TOKEN = /^[a-f0-9]{64}$/u;
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,191}$/u;
 const QUERY_ACTIONS = ['status', 'doctor', 'export'];
-const MUTATION_ACTIONS = ['attach-run', 'attach-session', 'detach-session', 'prepare-handoff', 'heartbeat', 'register-child', 'heartbeat-child', 'complete-child', 'drain-mailbox', 'acquire-group', 'acknowledge-grant', 'respond-claim-request', 'cancel-claim-request', 'cancel-acquisition-group', 'supersede-attempt', 'acknowledge-message', 'record-release-evidence', 'resolve-reservation-obligation', 'prepare-run-terminal', 'cancel-run-terminal', 'reconcile-run', 'prepare-operation', 'transition-operation'];
+const MUTATION_ACTIONS = ['attach-run', 'attach-session', 'detach-session', 'prepare-handoff', 'heartbeat', 'register-attempt', 'register-child', 'heartbeat-child', 'checkpoint-child', 'complete-child', 'drain-mailbox', 'acquire-group', 'acknowledge-grant', 'respond-claim-request', 'cancel-claim-request', 'cancel-acquisition-group', 'supersede-attempt', 'acknowledge-message', 'record-release-evidence', 'resolve-reservation-obligation', 'prepare-run-terminal', 'cancel-run-terminal', 'reconcile-run', 'prepare-operation', 'transition-operation', 'register-authoritative-artifact', 'assign-adjudication', 'claim-adjudication-assignment', 'complete-adjudication', 'submit-planning-contradiction'];
 const MESSAGE_TYPES = COORDINATION_MESSAGE_TYPES;
 const WORKTREE_STATES = COORDINATION_WORKTREE_STATES;
 const OPERATION_TYPES = COORDINATION_OPERATION_TYPES;
@@ -28,11 +28,13 @@ const PAYLOAD_FIELDS = {
     'detach-session': ['reason', 'session_lease_id', 'session_token'],
     'prepare-handoff': ['handoff_token', 'session_lease_id', 'session_token'],
     heartbeat: ['lease_expires_at', 'session_lease_id', 'session_token'],
+    'register-attempt': ['attempt', 'checkpoint_ordinal', 'preemptible', 'role', 'session_lease_id', 'session_token', 'spec_ref', 'spec_sha256', 'unit_id'],
     'register-child': ['attempt', 'autopilot_id', 'boot_id', 'child_lease_id', 'child_token', 'lease_expires_at', 'pid', 'session_lease_id', 'session_token', 'unit_id'],
     'heartbeat-child': ['boot_id', 'child_lease_id', 'child_token', 'lease_expires_at', 'pid'],
+    'checkpoint-child': ['boot_id', 'child_lease_id', 'child_token', 'checkpoint_ordinal', 'critical_section', 'pid', 'preemptible'],
     'complete-child': ['boot_id', 'child_lease_id', 'child_token', 'evidence_ref', 'evidence_sha256', 'pid', 'status'],
     'drain-mailbox': ['delivery_id', 'session_lease_id', 'session_token'],
-    'acquire-group': ['acquisition_group_id', 'attempt', 'checkpoint_ordinal', 'normal_release_condition', 'preemptible', 'reason', 'requested_leases', 'session_lease_id', 'session_token', 'spec_ref', 'spec_sha256', 'unit_id'],
+    'acquire-group': ['acquisition_group_id', 'acquisition_kind', 'attempt', 'checkpoint_ordinal', 'normal_release_condition', 'preemptible', 'reason', 'role', 'requested_leases', 'session_lease_id', 'session_token', 'spec_ref', 'spec_sha256', 'unit_id'],
     'acknowledge-grant': ['acquisition_group_id', 'session_lease_id', 'session_token'],
     'respond-claim-request': ['owner_reason', 'release_condition', 'request_id', 'response', 'session_lease_id', 'session_token'],
     'cancel-claim-request': ['reason', 'request_id', 'session_lease_id', 'session_token'],
@@ -46,6 +48,11 @@ const PAYLOAD_FIELDS = {
     'reconcile-run': ['reason', 'session_lease_id', 'session_token'],
     'prepare-operation': ['operation', 'session_lease_id', 'session_token', 'worktree'],
     'transition-operation': ['completed_steps', 'current_step', 'error_code', 'operation_id', 'recovery_attempts', 'session_lease_id', 'session_token', 'stage', 'verification_evidence', 'worktree_state'],
+    'register-authoritative-artifact': ['artifact_id', 'document_schema_version', 'git_commit', 'ref', 'sha256', 'source_scope', 'source_type', 'session_lease_id', 'session_token'],
+    'assign-adjudication': ['assignment', 'session_lease_id', 'session_token'],
+    'claim-adjudication-assignment': ['attempt', 'session_lease_id', 'session_token', 'unit_id'],
+    'complete-adjudication': ['adjudication_path', 'assignment_id', 'boot_id', 'child_lease_id', 'child_token', 'pid'],
+    'submit-planning-contradiction': ['assignment_id', 'packet', 'session_lease_id', 'session_token'],
 };
 function fail(label, issue) {
     throw new CoordinationContractError(label, [issue]);
@@ -88,6 +95,16 @@ function pathSegmentIdentifier(record, field, label) {
     const value = identifier(record, field, label);
     if (value === '.' || value === '..' || value.includes('/') || value.includes('\\'))
         fail(label, `${field} must be one filesystem-safe identifier segment`);
+    return value;
+}
+function pathSegmentValue(value, label) {
+    if (!IDENTIFIER.test(value) || value === '.' || value === '..' || value.includes('/') || value.includes('\\'))
+        fail(label, 'value must be one filesystem-safe identifier segment');
+    return value;
+}
+function identifierValue(value, label) {
+    if (!IDENTIFIER.test(value))
+        fail(label, 'value is not a valid bounded identifier');
     return value;
 }
 function nullablePathSegmentIdentifier(record, field, label) {
@@ -138,7 +155,7 @@ function absolutePath(record, field, label) {
 function repoPath(record, field, label) {
     const value = string(record, field, label, 512);
     const segments = value.split('/');
-    if (value.startsWith('/') || value.startsWith('./') || value.endsWith('/') || value.includes('//') || /^[A-Za-z]:/u.test(value) || value.includes('\\') || value.includes('\u0000') || /^\s/u.test(value) || segments.includes('.') || segments.includes('..'))
+    if (value.startsWith('/') || value.startsWith('./') || value.endsWith('/') || value.includes('//') || /^[A-Za-z]:/u.test(value) || value.includes('\\') || /[\u0000-\u001f\u007f]/u.test(value) || /^\s/u.test(value) || segments.includes('.') || segments.includes('..'))
         fail(label, `${field} must be a normalized repository-relative path`);
     return value;
 }
@@ -313,11 +330,12 @@ export function parseCoordinationChildLease(value) {
 }
 export function parseCoordinationUnitAttempt(value) {
     const label = 'CoordinationUnitAttempt';
-    const record = object(value, label, ['checkpoint_ordinal', 'critical_section', 'owner', 'preemptible', 'schema_version', 'spec', 'state', 'version']);
+    const record = object(value, label, ['checkpoint_ordinal', 'critical_section', 'owner', 'preemptible', 'role', 'schema_version', 'spec', 'state', 'version']);
     return {
         schema_version: literal(record, 'schema_version', 'autopilot.unit_attempt.v1', label),
         owner: parseCoordinationOwnerIdentity(record['owner'], `${label}.owner`),
         state: oneOf(record, 'state', COORDINATION_UNIT_STATES, label),
+        role: oneOf(record, 'role', COORDINATION_UNIT_ROLES, label),
         spec: parseEvidence(record['spec'], `${label}.spec`),
         preemptible: boolean(record, 'preemptible', label),
         checkpoint_ordinal: integer(record, 'checkpoint_ordinal', label),
@@ -327,7 +345,7 @@ export function parseCoordinationUnitAttempt(value) {
 }
 export function parseCoordinationAcquisitionGroup(value) {
     const label = 'CoordinationAcquisitionGroup';
-    const record = object(value, label, ['acquisition_group_id', 'bypass_count', 'created_event_seq', 'fairness_event_seq', 'grant_event_seq', 'normal_release_condition', 'offer_count', 'offer_expires_at', 'owner', 'reason', 'requested_leases', 'schema_version', 'state', 'version']);
+    const record = object(value, label, ['acquisition_group_id', 'acquisition_kind', 'bypass_count', 'created_event_seq', 'fairness_event_seq', 'grant_event_seq', 'normal_release_condition', 'offer_count', 'offer_expires_at', 'owner', 'reason', 'requested_leases', 'schema_version', 'state', 'version']);
     const requested = array(record['requested_leases'], `${label}.requested_leases`, 1024).map((entry, index) => parseCoordinationRequestedLease(entry, `${label}.requested_leases[${String(index)}]`));
     if (requested.length === 0)
         fail(label, 'requested_leases must not be empty');
@@ -336,6 +354,7 @@ export function parseCoordinationAcquisitionGroup(value) {
         schema_version: literal(record, 'schema_version', 'autopilot.acquisition_group.v2', label),
         acquisition_group_id: identifier(record, 'acquisition_group_id', label),
         owner: parseCoordinationOwnerIdentity(record['owner'], `${label}.owner`),
+        acquisition_kind: oneOf(record, 'acquisition_kind', ['initial', 'materialization-read-expansion', 'legacy-unknown'], label),
         requested_leases: requested,
         reason: string(record, 'reason', label, 1024),
         normal_release_condition: parseCoordinationReleaseCondition(record['normal_release_condition'], `${label}.normal_release_condition`),
@@ -599,12 +618,142 @@ function parseExhaustedAlternative(value, label) {
             return fail(label, `unsupported exhausted alternative ${value}`);
     }
 }
+export function parseCoordinationWaitForEdge(value) {
+    const label = 'CoordinationWaitForEdge';
+    const record = object(value, label, ['blocker', 'created_event_seq', 'edge_id', 'repo_id', 'request_id', 'requester', 'resolved_event_seq', 'schema_version', 'state', 'version']);
+    const state = oneOf(record, 'state', COORDINATION_WAIT_EDGE_STATES, label);
+    const resolvedEvent = nullableInteger(record, 'resolved_event_seq', label);
+    if ((state === 'active') !== (resolvedEvent === null))
+        fail(label, 'active edges must be unresolved and resolved edges require resolved_event_seq');
+    const repoId = pathSegmentIdentifier(record, 'repo_id', label);
+    const requester = parseCoordinationOwnerIdentity(record['requester'], `${label}.requester`);
+    const blocker = parseCoordinationOwnerIdentity(record['blocker'], `${label}.blocker`);
+    if (requester.repo_id !== repoId || blocker.repo_id !== repoId)
+        fail(label, 'edge owners must belong to repo_id');
+    return {
+        schema_version: literal(record, 'schema_version', 'autopilot.wait_for_edge.v1', label),
+        edge_id: identifier(record, 'edge_id', label),
+        repo_id: repoId,
+        request_id: identifier(record, 'request_id', label),
+        requester,
+        blocker,
+        state,
+        created_event_seq: integer(record, 'created_event_seq', label, 1),
+        resolved_event_seq: resolvedEvent,
+        version: integer(record, 'version', label, 1),
+    };
+}
+export function parseCoordinationDeadlockResolution(value) {
+    const label = 'CoordinationDeadlockResolution';
+    const record = object(value, label, ['action', 'created_event_seq', 'cycle_edge_ids', 'participant_owners', 'reason', 'repo_id', 'resolution_id', 'resolved_event_seq', 'schema_version', 'state', 'version', 'victim', 'victim_class']);
+    const state = oneOf(record, 'state', COORDINATION_DEADLOCK_STATES, label);
+    const victim = record['victim'] === null ? null : parseCoordinationOwnerIdentity(record['victim'], `${label}.victim`);
+    const victimClassValue = record['victim_class'];
+    const victimClass = victimClassValue === null ? null : integer(record, 'victim_class', label, 1);
+    if (victimClass !== null && victimClass !== 1 && victimClass !== 2 && victimClass !== 3)
+        fail(label, 'victim_class must be 1, 2, 3, or null');
+    const action = oneOf(record, 'action', COORDINATION_DEADLOCK_ACTIONS, label);
+    const resolvedEvent = nullableInteger(record, 'resolved_event_seq', label);
+    const participants = array(record['participant_owners'], `${label}.participant_owners`, 32).map((entry, index) => parseCoordinationOwnerIdentity(entry, `${label}.participant_owners[${String(index)}]`));
+    if (participants.length < 2 || new Set(participants.map((owner) => `${owner.repo_id}\0${owner.autopilot_id}\0${owner.workstream_run}\0${owner.unit_id}\0${String(owner.attempt)}`)).size !== participants.length)
+        fail(label, 'participant_owners must contain at least two unique owners');
+    if (victim !== null && !participants.some((owner) => owner.repo_id === victim.repo_id && owner.autopilot_id === victim.autopilot_id && owner.workstream_run === victim.workstream_run && owner.unit_id === victim.unit_id && owner.attempt === victim.attempt))
+        fail(label, 'deadlock victim must be a cycle participant');
+    if ((victim === null) !== (victimClass === null) || (victim === null) !== (action === 'none'))
+        fail(label, 'victim, victim_class, and action must be present or absent together');
+    if (state === 'resolved' ? resolvedEvent === null : resolvedEvent !== null)
+        fail(label, 'only resolved deadlocks may carry resolved_event_seq');
+    return {
+        schema_version: literal(record, 'schema_version', 'autopilot.deadlock_resolution.v1', label),
+        resolution_id: identifier(record, 'resolution_id', label),
+        repo_id: pathSegmentIdentifier(record, 'repo_id', label),
+        cycle_edge_ids: uniqueStrings(record['cycle_edge_ids'], `${label}.cycle_edge_ids`, 2, 256),
+        participant_owners: participants,
+        state,
+        victim,
+        victim_class: victimClass,
+        action,
+        reason: string(record, 'reason', label, 1024),
+        created_event_seq: integer(record, 'created_event_seq', label, 1),
+        resolved_event_seq: resolvedEvent,
+        version: integer(record, 'version', label, 1),
+    };
+}
+export function parseCoordinationContradictionClause(value, label = 'CoordinationContradictionClause') {
+    const record = object(value, label, ['artifact_or_invariant', 'authoritative_ref', 'clause_id', 'demanded_outcome', 'exact_requirement', 'schema_version', 'source_run', 'source_scope', 'source_type']);
+    return {
+        authoritative_ref: parseEvidence(record['authoritative_ref'], `${label}.authoritative_ref`),
+        source_type: oneOf(record, 'source_type', ['mission', 'master-plan', 'task'], label),
+        source_scope: oneOf(record, 'source_scope', ['repository', 'run-main'], label),
+        source_run: pathSegmentIdentifier(record, 'source_run', label),
+        schema_version: string(record, 'schema_version', label, 128),
+        clause_id: identifier(record, 'clause_id', label),
+        exact_requirement: string(record, 'exact_requirement', label, 2048),
+        artifact_or_invariant: string(record, 'artifact_or_invariant', label, 512),
+        demanded_outcome: string(record, 'demanded_outcome', label, 1024),
+    };
+}
+export function parseCoordinationContradictionAdjudication(value) {
+    const label = 'CoordinationContradictionAdjudication';
+    const record = object(value, label, ['adjudication_id', 'adjudicator', 'adjudicator_role', 'conflicting_clauses', 'decision_options', 'independent_from_runs', 'operational_reasons', 'ownership_transfer_can_satisfy_both', 'partitioning_can_satisfy_both', 'rebase_revalidation_can_satisfy_both', 'replanning_can_preserve_both', 'schema_version', 'sequencing_can_satisfy_both', 'verdict']);
+    for (const field of ['sequencing_can_satisfy_both', 'partitioning_can_satisfy_both', 'ownership_transfer_can_satisfy_both', 'rebase_revalidation_can_satisfy_both', 'replanning_can_preserve_both'])
+        if (record[field] !== false)
+            fail(label, `${field} must be false for a proven contradiction`);
+    const operationalReasons = uniqueStrings(record['operational_reasons'], `${label}.operational_reasons`, 0, COORDINATION_OPERATIONAL_ESCALATION_REASONS.length);
+    for (const reason of operationalReasons)
+        if (!COORDINATION_OPERATIONAL_ESCALATION_REASONS.includes(reason))
+            fail(label, `unsupported operational reason ${reason}`);
+    return {
+        schema_version: literal(record, 'schema_version', 'autopilot.planning_contradiction_adjudication.v1', label),
+        adjudication_id: identifier(record, 'adjudication_id', label),
+        adjudicator: parseCoordinationOwnerIdentity(record['adjudicator'], `${label}.adjudicator`),
+        adjudicator_role: literal(record, 'adjudicator_role', 'adjudicate', label),
+        independent_from_runs: uniqueStrings(record['independent_from_runs'], `${label}.independent_from_runs`, 2, 32),
+        verdict: literal(record, 'verdict', 'major-contradiction', label),
+        conflicting_clauses: array(record['conflicting_clauses'], `${label}.conflicting_clauses`, 32).map((entry, index) => parseCoordinationContradictionClause(entry, `${label}.conflicting_clauses[${String(index)}]`)),
+        sequencing_can_satisfy_both: false,
+        partitioning_can_satisfy_both: false,
+        ownership_transfer_can_satisfy_both: false,
+        rebase_revalidation_can_satisfy_both: false,
+        replanning_can_preserve_both: false,
+        operational_reasons: operationalReasons,
+        decision_options: uniqueStrings(record['decision_options'], `${label}.decision_options`, 2, 16),
+    };
+}
+export function parseCoordinationAuthoritativeArtifact(value) {
+    const label = 'CoordinationAuthoritativeArtifact';
+    const record = object(value, label, ['artifact_id', 'document_schema_version', 'evidence', 'git_commit', 'registered_event_seq', 'repo_id', 'schema_version', 'source_run', 'source_scope', 'source_type', 'version']);
+    const gitCommit = string(record, 'git_commit', label, 64);
+    if (!/^[a-f0-9]{40,64}$/u.test(gitCommit))
+        fail(label, 'git_commit must be a full lowercase Git object id');
+    return {
+        schema_version: literal(record, 'schema_version', 'autopilot.authoritative_artifact.v1', label), artifact_id: identifier(record, 'artifact_id', label), repo_id: pathSegmentIdentifier(record, 'repo_id', label), source_run: pathSegmentIdentifier(record, 'source_run', label),
+        source_type: oneOf(record, 'source_type', ['mission', 'master-plan', 'task'], label), source_scope: oneOf(record, 'source_scope', ['repository', 'run-main'], label), document_schema_version: string(record, 'document_schema_version', label, 128), git_commit: gitCommit,
+        evidence: parseEvidence(record['evidence'], `${label}.evidence`), registered_event_seq: integer(record, 'registered_event_seq', label), version: integer(record, 'version', label, 1),
+    };
+}
+export function parseCoordinationAdjudicationAssignment(value) {
+    const label = 'CoordinationAdjudicationAssignment';
+    const record = object(value, label, ['accepted_event_seq', 'adjudication', 'adjudicator', 'assigned_event_seq', 'assignment_id', 'authoritative_artifact_ids', 'child_lease_id', 'conflicting_clauses', 'decision_options', 'participating_runs', 'repo_id', 'requesting_run', 'schema_version', 'state', 'version']);
+    const participants = uniqueStrings(record['participating_runs'], `${label}.participating_runs`, 2, 32).map((run) => pathSegmentValue(run, `${label}.participating_runs`));
+    const artifactIds = uniqueStrings(record['authoritative_artifact_ids'], `${label}.authoritative_artifact_ids`, 2, 32).map((id) => identifierValue(id, `${label}.authoritative_artifact_ids`));
+    const clauses = array(record['conflicting_clauses'], `${label}.conflicting_clauses`, 32).map((entry, index) => parseCoordinationContradictionClause(entry, `${label}.conflicting_clauses[${String(index)}]`));
+    if (clauses.length < 2)
+        fail(label, 'conflicting_clauses requires at least two clauses');
+    return {
+        schema_version: literal(record, 'schema_version', 'autopilot.adjudication_assignment.v1', label), assignment_id: identifier(record, 'assignment_id', label), repo_id: pathSegmentIdentifier(record, 'repo_id', label), requesting_run: pathSegmentIdentifier(record, 'requesting_run', label), participating_runs: participants, authoritative_artifact_ids: artifactIds, conflicting_clauses: clauses,
+        adjudicator: parseCoordinationOwnerIdentity(record['adjudicator'], `${label}.adjudicator`), decision_options: uniqueStrings(record['decision_options'], `${label}.decision_options`, 2, 16), state: oneOf(record, 'state', ['assigned', 'accepted'], label), adjudication: parseNullableEvidence(record['adjudication'], `${label}.adjudication`), child_lease_id: nullableString(record, 'child_lease_id', label, 192), assigned_event_seq: integer(record, 'assigned_event_seq', label), accepted_event_seq: nullableInteger(record, 'accepted_event_seq', label), version: integer(record, 'version', label, 1),
+    };
+}
 export function parseCoordinationEscalation(value) {
     const label = 'CoordinationEscalation';
     const record = object(value, label, ['adjudication', 'authoritative_refs', 'conflicting_clauses', 'created_event_seq', 'decision_options', 'escalation_id', 'exhausted_alternatives', 'participating_runs', 'repo_id', 'schema_version', 'version']);
     const refs = array(record['authoritative_refs'], `${label}.authoritative_refs`, 32).map((entry, index) => parseEvidence(entry, `${label}.authoritative_refs[${String(index)}]`));
     if (refs.length < 2)
         fail(label, 'authoritative_refs must contain at least two entries');
+    const clauses = array(record['conflicting_clauses'], `${label}.conflicting_clauses`, 32).map((entry, index) => parseCoordinationContradictionClause(entry, `${label}.conflicting_clauses[${String(index)}]`));
+    if (clauses.length < 2)
+        fail(label, 'conflicting_clauses must contain at least two entries');
     const alternativeValues = uniqueStrings(record['exhausted_alternatives'], `${label}.exhausted_alternatives`, EXHAUSTED_ALTERNATIVES.length, EXHAUSTED_ALTERNATIVES.length);
     if (!EXHAUSTED_ALTERNATIVES.every((entry) => alternativeValues.includes(entry)))
         fail(label, 'exhausted_alternatives must contain every required alternative');
@@ -615,7 +764,7 @@ export function parseCoordinationEscalation(value) {
         repo_id: pathSegmentIdentifier(record, 'repo_id', label),
         participating_runs: uniqueStrings(record['participating_runs'], `${label}.participating_runs`, 2, 32),
         authoritative_refs: refs,
-        conflicting_clauses: uniqueStrings(record['conflicting_clauses'], `${label}.conflicting_clauses`, 2, 32),
+        conflicting_clauses: clauses,
         exhausted_alternatives: alternatives,
         adjudication: parseEvidence(record['adjudication'], `${label}.adjudication`),
         decision_options: uniqueStrings(record['decision_options'], `${label}.decision_options`, 2, 16),
@@ -646,7 +795,7 @@ function parseTable(record, field, parser, maxItems = 10_000) {
 }
 export function parseCoordinationSnapshot(value) {
     const label = 'CoordinationSnapshot';
-    const fields = ['acquisition_groups', 'change_reservations', 'child_leases', 'claim_requests', 'edit_leases', 'escalations', 'events', 'mailbox_cursors', 'messages', 'reconciliation_evidence', 'repositories', 'repository_event_seq', 'reservation_obligations', 'run_terminal_intents', 'runs', 'schema_version', 'session_leases', 'unit_attempts', 'worktree_operations', 'worktrees'];
+    const fields = ['acquisition_groups', 'adjudication_assignments', 'authoritative_artifacts', 'change_reservations', 'child_leases', 'claim_requests', 'deadlock_resolutions', 'edit_leases', 'escalations', 'events', 'mailbox_cursors', 'messages', 'reconciliation_evidence', 'repositories', 'repository_event_seq', 'reservation_obligations', 'run_terminal_intents', 'runs', 'schema_version', 'session_leases', 'unit_attempts', 'wait_for_edges', 'worktree_operations', 'worktrees'];
     const record = object(value, label, fields);
     return {
         schema_version: literal(record, 'schema_version', AUTOPILOT_COORDINATION_SNAPSHOT_SCHEMA, label),
@@ -667,6 +816,10 @@ export function parseCoordinationSnapshot(value) {
         messages: parseTable(record, 'messages', parseCoordinationMessage, 100_000),
         worktrees: parseTable(record, 'worktrees', parseCoordinationWorktree),
         worktree_operations: parseTable(record, 'worktree_operations', parseCoordinationWorktreeOperation),
+        wait_for_edges: parseTable(record, 'wait_for_edges', parseCoordinationWaitForEdge),
+        deadlock_resolutions: parseTable(record, 'deadlock_resolutions', parseCoordinationDeadlockResolution),
+        authoritative_artifacts: parseTable(record, 'authoritative_artifacts', parseCoordinationAuthoritativeArtifact),
+        adjudication_assignments: parseTable(record, 'adjudication_assignments', parseCoordinationAdjudicationAssignment),
         escalations: parseTable(record, 'escalations', parseCoordinationEscalation),
         events: parseTable(record, 'events', parseCoordinationEvent, 100_000),
     };
@@ -685,6 +838,16 @@ function parsePayload(value, action) {
         }
         else if (field === 'preemptible') {
             boolean(payload, field, label);
+        }
+        else if (field === 'acquisition_kind') {
+            oneOf(payload, field, ['initial', 'materialization-read-expansion'], label);
+        }
+        else if (field === 'critical_section') {
+            if (entry !== null && (typeof entry !== 'string' || entry.length === 0 || entry.length > 128))
+                fail(label, 'critical_section must be null or bounded non-empty text');
+        }
+        else if (field === 'role') {
+            oneOf(payload, field, COORDINATION_UNIT_ROLES.filter((role) => role !== 'unknown'), label);
         }
         else if (field === 'requested_leases') {
             const requested = array(entry, `${label}.requested_leases`, 1024).map((lease, index) => parseCoordinationRequestedLease(lease, `${label}.requested_leases[${String(index)}]`));
@@ -711,6 +874,12 @@ function parsePayload(value, action) {
         }
         else if (field === 'operation') {
             parseCoordinationWorktreeOperation(entry);
+        }
+        else if (field === 'packet') {
+            parseCoordinationEscalation(entry);
+        }
+        else if (field === 'assignment') {
+            parseCoordinationAdjudicationAssignment(entry);
         }
         else if (field === 'worktree') {
             parseCoordinationWorktree(entry);
@@ -740,7 +909,24 @@ function parsePayload(value, action) {
         else if (field === 'source') {
             oneOf(payload, field, COORDINATION_RECONCILIATION_SOURCES, label);
         }
-        else if (field === 'output_path' || field === 'canonical_root' || field === 'git_common_dir') {
+        else if (field === 'source_type') {
+            oneOf(payload, field, ['mission', 'master-plan', 'task'], label);
+        }
+        else if (field === 'source_scope') {
+            oneOf(payload, field, ['repository', 'run-main'], label);
+        }
+        else if (field === 'git_commit') {
+            if (typeof entry !== 'string' || !/^[a-f0-9]{40,64}$/u.test(entry))
+                fail(label, 'git_commit must be a full lowercase Git object id');
+        }
+        else if (field === 'ref') {
+            repoPath(payload, field, label);
+        }
+        else if (field === 'sha256') {
+            if (typeof entry !== 'string' || !SHA256.test(entry))
+                fail(label, 'sha256 must use sha256:<64 lowercase hex>');
+        }
+        else if (field === 'output_path' || field === 'canonical_root' || field === 'git_common_dir' || field === 'adjudication_path') {
             absolutePath(payload, field, label);
         }
         else if (field === 'child_token' || field === 'session_token') {
@@ -812,7 +998,7 @@ export function parseCoordinatorRequestEnvelope(value) {
     if (mutation && (idempotencyKey === null || workstreamRun === null || expectedVersion === null)) {
         fail(label, 'mutating requests require idempotency_key, workstream_run, and expected_version');
     }
-    const childScoped = action === 'heartbeat-child' || action === 'complete-child';
+    const childScoped = action === 'heartbeat-child' || action === 'checkpoint-child' || action === 'complete-child' || action === 'complete-adjudication';
     if (mutation && action !== 'attach-run' && !childScoped && (sessionId === null || fencingGeneration === null)) {
         fail(label, 'session-scoped mutations require session_id and fencing_generation');
     }

@@ -15,10 +15,12 @@ export interface AcquireClaimGroupInput {
   readonly unitId: string;
   readonly attempt: number;
   readonly requestedLeases: readonly CoordinationRequestedLease[];
+  readonly acquisitionKind?: 'initial' | 'materialization-read-expansion';
   readonly reason: string;
   readonly normalReleaseCondition: CoordinationReleaseCondition;
   readonly specRef: string;
   readonly specSha256: `sha256:${string}`;
+  readonly role: 'strategy' | 'implement' | 'validate' | 'fix' | 'adjudicate' | 'bughunt' | 'extract';
   readonly preemptible: boolean;
   readonly checkpointOrdinal: number;
 }
@@ -83,10 +85,12 @@ export class ClaimNegotiationClient {
       unit_id: input.unitId,
       attempt: input.attempt,
       requested_leases: requestedLeases,
+      acquisition_kind: input.acquisitionKind ?? 'initial',
       reason: input.reason,
       normal_release_condition: normalReleaseCondition,
       spec_ref: input.specRef,
       spec_sha256: input.specSha256,
+      role: input.role,
       preemptible: input.preemptible,
       checkpoint_ordinal: input.checkpointOrdinal,
       ...this.#sessionProof(),

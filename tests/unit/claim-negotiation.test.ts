@@ -86,7 +86,7 @@ function acquisitionInput(suffix: string) {
     requestedLeases: [{ path: 'src/shared.ts', mode: 'WRITE' as const, purpose: `implement ${suffix}` }],
     reason: `workstream ${suffix} requires shared source`, normalReleaseCondition: { ...RELEASE_CONDITION, target_id: `unit-${suffix}:1` },
     specRef: `.pi/autopilot/workstream-${suffix}/unit-specs/unit-${suffix}.json`, specSha256: `sha256:${suffix.charCodeAt(0).toString(16).slice(-1).repeat(64)}` as `sha256:${string}`,
-    preemptible: true, checkpointOrdinal: 0,
+    role: 'implement' as const, preemptible: true, checkpointOrdinal: 0,
   };
 }
 
@@ -289,7 +289,7 @@ void describe('Coordination Fabric claim negotiation', () => {
       await owner.negotiation.acquire(acquisitionInput('a'));
       const otherOwnerInput = acquisitionInput('a');
       await owner.negotiation.acquire({
-        ...otherOwnerInput, acquisitionGroupId: 'group-a-other', requestedLeases: [{ path: 'src/other-shared.ts', mode: 'WRITE', purpose: 'hold second independent path' }],
+        ...otherOwnerInput, acquisitionGroupId: 'group-a-other', unitId: 'unit-a-other', normalReleaseCondition: { condition_type: 'unit-merged', target_id: 'unit-a-other:1', evidence: null }, requestedLeases: [{ path: 'src/other-shared.ts', mode: 'WRITE', purpose: 'hold second independent path' }],
       });
       await first.negotiation.acquire(acquisitionInput('b'));
       await second.negotiation.acquire(acquisitionInput('c'));
@@ -304,7 +304,7 @@ void describe('Coordination Fabric claim negotiation', () => {
       await owner.negotiation.respond({ request: firstRelease, response: 'release-now', ownerReason: 'release shared path', releaseCondition: null });
       assert.equal((await groups(client, first))[0]?.state, 'grant-ready');
       now = new Date(now.getTime() + COORDINATOR_GRANT_OFFER_TTL_MS + 1);
-      await owner.negotiation.respond({ request: otherDeferred, response: 'deferred', ownerReason: 'other owner group remains active', releaseCondition: { condition_type: 'unit-merged', target_id: 'unit-a:1', evidence: null } });
+      await owner.negotiation.respond({ request: otherDeferred, response: 'deferred', ownerReason: 'other owner group remains active', releaseCondition: { condition_type: 'unit-merged', target_id: 'unit-a-other:1', evidence: null } });
       assert.equal((await groups(client, first))[0]?.state, 'waiting');
       assert.equal((await groups(client, second))[0]?.state, 'grant-ready');
       assert.equal((await claimRequests(client, otherRequester)).some((entry) => entry.status === 'deferred'), true);
@@ -342,7 +342,7 @@ void describe('Coordination Fabric claim negotiation', () => {
       const nextOffered = (await groups(client, next))[0];
       assert.equal(expired?.state, 'waiting');
       assert.equal(expired?.offer_count, 1);
-      assert.equal(expired?.bypass_count, 0);
+      assert.equal(expired?.bypass_count, 1);
       assert.equal(nextOffered?.state, 'grant-ready');
       const newcomerGroup = (await groups(client, newcomer))[0];
       assert.equal(newcomerGroup?.state, 'waiting');

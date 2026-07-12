@@ -52,7 +52,9 @@ import {
 } from './parallel-runtime.ts';
 import { ClaimNegotiationClient, type ClaimGroupAcquisitionResult } from './coordination/negotiation.ts';
 import { ReservationCoordinationClient, reservationSchedulingBlockers } from './coordination/reservations.ts';
+import { PlanningContradictionClient } from './coordination/escalation.ts';
 import type { CoordinationAcquisitionGroup } from './coordination/types.ts';
+import { quarantineFailedUnit } from './unit-failure.ts';
 import { rollbackCreatedUnitWorktree } from './worktree-cleanup.ts';
 import { AutopilotChildLeaseHandle, registerAutopilotChildAuthority } from './coordination/child-authority.ts';
 import {
@@ -161,6 +163,7 @@ interface SpawnSpec {
   readonly contextPath: string;
   readonly wallMs: number;
   readonly name: string;
+  readonly preemptionSignal: AbortSignal;
 }
 
 interface RpcCommand {
@@ -273,11 +276,15 @@ export async function runAutopilotAgentFromSpecPath(
       }
     }
     if (lifecycle.handle !== null && !lifecycle.completed) {
+      const deadlockPreempted = lifecycle.handle.preemptionSignal.aborted;
       try {
         await lifecycle.handle.markRecoveryRequired();
+        if (deadlockPreempted && lifecycle.preflight !== null && lifecycle.spec !== null && lifecycle.env !== null) {
+          await quarantineFailedUnit({ context: lifecycle.preflight.context, unitId: lifecycle.spec.unit_id, attempt: lifecycle.spec.attempt, unitWorktreePath: lifecycle.spec.cwd, summary: 'autonomous deadlock preemption capture before edit-authority release', env: lifecycle.env });
+        }
       } catch (recoveryError) {
         throw new AutopilotAgentRunError('runtime-commit-failed', {
-          reason: `child attempt failed (${errorMessage(error)}) and durable child recovery classification also failed: ${errorMessage(recoveryError)}`,
+          reason: `child attempt failed (${errorMessage(error)}) and durable child recovery/quarantine also failed: ${errorMessage(recoveryError)}`,
           specPath,
         });
       }
@@ -321,10 +328,27 @@ async function runAutopilotAgentFromSpecPathInternal(
   const contextPath = deriveAutopilotStatusContextPath(spec);
   await writeStatusContext(contextPath, context);
 
+  const adjudicationBundle = options.dryRun !== true && spec.role === 'adjudicate' ? await (await PlanningContradictionClient.fromEnvironment(env)).assignmentBundleFor(spec.unit_id, spec.attempt) : null;
+  const adjudicationAssignment = adjudicationBundle?.assignment ?? null;
+  const adjudicationOutput = adjudicationAssignment === null ? null : resolve(spec.cwd, 'adjudications', `${adjudicationAssignment.assignment_id}.json`);
+  const coordinationAppendix = adjudicationAssignment === null || adjudicationBundle === null ? undefined : [
+    '## Coordinator planning-contradiction assignment',
+    '',
+    'This is the only assignment you may adjudicate. Independently inspect the registered immutable clauses. If and only if they are a major contradiction, write the exact `autopilot.planning_contradiction_adjudication.v1` JSON result to:',
+    '',
+    `- ${adjudicationOutput}`,
+    '',
+    'Do not claim another identity or assignment. The runner will accept this file only through your authenticated terminal child authority.',
+    '',
+    '<coordinator_assignment_bundle_json>',
+    JSON.stringify(adjudicationBundle, null, 2),
+    '</coordinator_assignment_bundle_json>',
+  ].join('\n');
   let rendered: AutopilotRenderedPrompt;
   try {
     rendered = await renderAndMaybeWriteAutopilotPromptSnapshot({
       spec,
+      ...(coordinationAppendix === undefined ? {} : { coordinationAppendix }),
       ...(options.forcePromptSnapshot === undefined ? {} : { forceSnapshot: options.forcePromptSnapshot }),
     });
   } catch (error) {
@@ -357,7 +381,7 @@ async function runAutopilotAgentFromSpecPathInternal(
   }
 
   try {
-    lifecycle.handle = await registerAutopilotChildAuthority(spec, env);
+    lifecycle.handle = await registerAutopilotChildAuthority(spec, runtimePreflight.attemptSpec, env);
   } catch (error) {
     throw new AutopilotAgentRunError('spec-invalid', {
       reason: `coordinator child authority preflight failed before model spend: ${errorMessage(error)}`,
@@ -382,6 +406,7 @@ async function runAutopilotAgentFromSpecPathInternal(
     contextPath,
     wallMs: options.timeoutMsOverride ?? timeoutMsForSpec(spec),
     name: `autopilot-${spec.unit_id}-${spec.role}-attempt-${String(spec.attempt)}`,
+    preemptionSignal: lifecycle.handle.preemptionSignal,
   };
 
   let piResult: PiResult;
@@ -534,10 +559,14 @@ async function runAutopilotAgentFromSpecPathInternal(
   const childAuthority = lifecycle.handle;
   if (childAuthority === null) throw new AutopilotAgentRunError('runtime-commit-failed', { reason: 'durable child authority disappeared before terminal commit', specPath });
   childAuthority.assertHealthy();
-  const receiptBytes = await readFile(spec.receipt_output);
-  const evidenceRelative = relative(runtimePreflight.context.active.main_worktree_path, spec.receipt_output).replace(/\\/gu, '/');
-  if (evidenceRelative.length === 0 || evidenceRelative.startsWith('../') || evidenceRelative.startsWith('/')) throw new AutopilotAgentRunError('runtime-commit-failed', { reason: 'terminal receipt evidence is outside the durable run worktree', specPath });
-  await childAuthority.completeTerminal({ ref: evidenceRelative, sha256: `sha256:${createHash('sha256').update(receiptBytes).digest('hex')}` });
+  if (adjudicationAssignment !== null && adjudicationOutput !== null) {
+    await childAuthority.completeAdjudication(adjudicationAssignment.assignment_id, adjudicationOutput);
+  } else {
+    const receiptBytes = await readFile(spec.receipt_output);
+    const evidenceRelative = relative(runtimePreflight.context.active.main_worktree_path, spec.receipt_output).replace(/\\/gu, '/');
+    if (evidenceRelative.length === 0 || evidenceRelative.startsWith('../') || evidenceRelative.startsWith('/')) throw new AutopilotAgentRunError('runtime-commit-failed', { reason: 'terminal receipt evidence is outside the durable run worktree', specPath });
+    await childAuthority.completeTerminal({ ref: evidenceRelative, sha256: `sha256:${createHash('sha256').update(receiptBytes).digest('hex')}` });
+  }
   lifecycle.completed = true;
 
   return ({
@@ -583,6 +612,7 @@ interface RuntimePreflightResult {
   readonly context: ActiveAutopilotContext;
   readonly acquiredClaims: readonly AutopilotPathClaim[];
   readonly coordinatorGroup: CoordinationAcquisitionGroup | null;
+  readonly attemptSpec: { readonly ref: string; readonly sha256: `sha256:${string}` };
 }
 
 interface RuntimePreflightOptions {
@@ -743,10 +773,14 @@ async function preflightSpecAfterWorktreePreparation(
     });
   }
 
+  const attemptSpecRef = relative(runtimeContext.active.main_worktree_path, specPath).replace(/\\/gu, '/');
+  if (attemptSpecRef.length === 0 || attemptSpecRef.startsWith('../') || attemptSpecRef.startsWith('/')) throw new AutopilotAgentRunError('spec-invalid', { reason: 'unit spec must remain inside the durable run main worktree', specPath });
+  const attemptSpecBytes = await readFile(specPath);
+  const attemptSpec = { ref: attemptSpecRef, sha256: `sha256:${createHash('sha256').update(attemptSpecBytes).digest('hex')}` as const };
   await mkdir(dirname(spec.status_output), { recursive: true });
   await mkdir(dirname(spec.receipt_output), { recursive: true });
   await mkdir(spec.evidence_dir, { recursive: true });
-  return { context: runtimeContext, acquiredClaims, coordinatorGroup };
+  return { context: runtimeContext, acquiredClaims, coordinatorGroup, attemptSpec };
 }
 
 async function acquireCoordinatorClaimsForUnit(input: {
@@ -789,6 +823,7 @@ async function acquireCoordinatorClaimsForUnit(input: {
       : { condition_type: 'child-terminal', target_id: `child-${input.context.active.workstream_run}-${input.spec.unit_id}-${String(input.spec.attempt)}`, evidence: null },
     specRef: relativeSpec,
     specSha256,
+    role: input.spec.role,
     preemptible: true,
     checkpointOrdinal: 0,
   });
@@ -1039,6 +1074,7 @@ function supervisePiRpcChild(
       if (settled) return;
       settled = true;
       clearTimeout(wallTimer);
+      spec.preemptionSignal.removeEventListener('abort', onPreemption);
       clearPending(error);
       if (!child.killed) child.kill('SIGTERM');
       rejectPromise(error);
@@ -1048,11 +1084,18 @@ function supervisePiRpcChild(
       if (settled) return;
       settled = true;
       clearTimeout(wallTimer);
+      spec.preemptionSignal.removeEventListener('abort', onPreemption);
       clearPending(new AutopilotPiRunError('settled', 'Pi RPC supervisor settled'));
       child.stdin.end();
       if (!child.killed) child.kill('SIGTERM');
       resolvePromise(result);
     };
+
+    const onPreemption = (): void => {
+      settleReject(new AutopilotPiRunError('deadlock-preempted', 'Coordinator deadlock policy requested child stop and owner reset/quarantine', undefined, diagnostics()));
+    };
+    spec.preemptionSignal.addEventListener('abort', onPreemption, { once: true });
+    if (spec.preemptionSignal.aborted) queueMicrotask(onPreemption);
 
     const wallTimer = setTimeout(() => {
       settleReject(new AutopilotPiRunError('wall-timeout', `Pi RPC wall timeout after ${String(spec.wallMs)} ms`, {

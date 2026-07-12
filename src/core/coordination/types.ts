@@ -1,5 +1,5 @@
 export const AUTOPILOT_COORDINATION_SNAPSHOT_SCHEMA = 'autopilot.coordination_snapshot.v1' as const;
-export const AUTOPILOT_COORDINATOR_PROTOCOL_VERSION = '1.1' as const;
+export const AUTOPILOT_COORDINATOR_PROTOCOL_VERSION = '1.2' as const;
 export const AUTOPILOT_COORDINATOR_REQUEST_SCHEMA = 'autopilot.coordinator_request.v1' as const;
 export const AUTOPILOT_COORDINATOR_RESPONSE_SCHEMA = 'autopilot.coordinator_response.v1' as const;
 export const AUTOPILOT_COORDINATION_PREFLIGHT_SCHEMA = 'autopilot.coordination_preflight.v1' as const;
@@ -9,7 +9,9 @@ export const COORDINATION_RUN_STATUSES = ['active', 'paused', 'merging', 'blocke
 export const COORDINATION_SESSION_STATUSES = ['attached', 'handoff-pending', 'detached', 'fenced', 'expired'] as const;
 export const COORDINATION_CHILD_STATUSES = ['preflight', 'running', 'terminal', 'recovery-required'] as const;
 export const COORDINATION_UNIT_STATES = ['queued', 'preflight', 'running', 'transport-complete', 'merged', 'failed', 'reset', 'quarantined', 'superseded'] as const;
+export const COORDINATION_UNIT_ROLES = ['strategy', 'implement', 'validate', 'fix', 'adjudicate', 'bughunt', 'extract', 'unknown'] as const;
 export const COORDINATION_ACQUISITION_STATES = ['waiting', 'grant-ready', 'granted', 'released', 'cancelled', 'superseded'] as const;
+export const COORDINATION_ACQUISITION_KINDS = ['initial', 'materialization-read-expansion', 'legacy-unknown'] as const;
 export const COORDINATION_REQUEST_STATUSES = ['pending', 'delivered', 'acknowledged', 'release-now', 'deferred', 'released', 'grant-ready', 'granted', 'requester-notified', 'resolved', 'cancelled', 'superseded', 'contradiction-review'] as const;
 export const COORDINATION_MESSAGE_STATUSES = ['pending', 'delivered', 'acknowledged'] as const;
 export const COORDINATION_OPERATION_STAGES = ['prepared', 'in-progress', 'verified', 'committed', 'reconciling', 'compensated', 'failed'] as const;
@@ -19,14 +21,20 @@ export const COORDINATION_OPERATION_TYPES = ['create', 'materialize', 'commit', 
 export const COORDINATION_RELEASE_CONDITION_TYPES = ['child-terminal', 'unit-merged', 'attempt-reset', 'quarantine-captured', 'run-closed', 'explicit-owner-release'] as const;
 export const COORDINATION_RECONCILIATION_SOURCES = ['child-process', 'unit-merge', 'attempt-reset', 'quarantine-capture', 'run-close', 'run-abort'] as const;
 export const COORDINATION_RESERVATION_OBLIGATION_STATES = ['waiting-for-predecessor', 'integration-required', 'resolved', 'cancelled'] as const;
-export const COORDINATION_MESSAGE_TYPES = ['claim-request', 'release-notification', 'grant-offer', 'recovery-required', 'reservation-overlap', 'reservation-landed'] as const;
+export const COORDINATION_MESSAGE_TYPES = ['claim-request', 'release-notification', 'grant-offer', 'recovery-required', 'reservation-overlap', 'reservation-landed', 'deadlock-resolution', 'adjudication-assignment'] as const;
+export const COORDINATION_WAIT_EDGE_STATES = ['active', 'resolved'] as const;
+export const COORDINATION_DEADLOCK_STATES = ['detected', 'victim-selected', 'awaiting-recovery', 'resolved', 'deferred-no-safe-victim'] as const;
+export const COORDINATION_DEADLOCK_ACTIONS = ['cancel-and-supersede', 'request-reset-or-quarantine', 'none'] as const;
+export const COORDINATION_OPERATIONAL_ESCALATION_REASONS = ['claim-conflict', 'offline-peer', 'handoff', 'stale-session', 'dirty-worktree', 'merge-conflict', 'failed-test', 'stale-validation', 'deadlock', 'starvation', 'disk-pressure', 'cleanup-failure', 'reconciliation-failure'] as const;
 
 export type CoordinationClaimMode = (typeof COORDINATION_CLAIM_MODES)[number];
 export type CoordinationRunStatus = (typeof COORDINATION_RUN_STATUSES)[number];
 export type CoordinationSessionStatus = (typeof COORDINATION_SESSION_STATUSES)[number];
 export type CoordinationChildStatus = (typeof COORDINATION_CHILD_STATUSES)[number];
 export type CoordinationUnitState = (typeof COORDINATION_UNIT_STATES)[number];
+export type CoordinationUnitRole = (typeof COORDINATION_UNIT_ROLES)[number];
 export type CoordinationAcquisitionState = (typeof COORDINATION_ACQUISITION_STATES)[number];
+export type CoordinationAcquisitionKind = (typeof COORDINATION_ACQUISITION_KINDS)[number];
 export type CoordinationRequestStatus = (typeof COORDINATION_REQUEST_STATUSES)[number];
 export type CoordinationMessageStatus = (typeof COORDINATION_MESSAGE_STATUSES)[number];
 export type CoordinationOperationStage = (typeof COORDINATION_OPERATION_STAGES)[number];
@@ -37,6 +45,11 @@ export type CoordinationReleaseConditionType = (typeof COORDINATION_RELEASE_COND
 export type CoordinationReconciliationSource = (typeof COORDINATION_RECONCILIATION_SOURCES)[number];
 export type CoordinationReservationObligationState = (typeof COORDINATION_RESERVATION_OBLIGATION_STATES)[number];
 export type CoordinationMessageType = (typeof COORDINATION_MESSAGE_TYPES)[number];
+export type CoordinationWaitForEdgeState = (typeof COORDINATION_WAIT_EDGE_STATES)[number];
+export type CoordinationDeadlockState = (typeof COORDINATION_DEADLOCK_STATES)[number];
+export type CoordinationDeadlockAction = (typeof COORDINATION_DEADLOCK_ACTIONS)[number];
+export type CoordinationDeadlockVictimClass = 1 | 2 | 3;
+export type CoordinationOperationalEscalationReason = (typeof COORDINATION_OPERATIONAL_ESCALATION_REASONS)[number];
 
 export interface CoordinationEvidenceRef {
   readonly ref: string;
@@ -111,6 +124,7 @@ export interface CoordinationUnitAttempt {
   readonly schema_version: 'autopilot.unit_attempt.v1';
   readonly owner: CoordinationOwnerIdentity;
   readonly state: CoordinationUnitState;
+  readonly role: CoordinationUnitRole;
   readonly spec: CoordinationEvidenceRef;
   readonly preemptible: boolean;
   readonly checkpoint_ordinal: number;
@@ -128,6 +142,7 @@ export interface CoordinationAcquisitionGroup {
   readonly schema_version: 'autopilot.acquisition_group.v2';
   readonly acquisition_group_id: string;
   readonly owner: CoordinationOwnerIdentity;
+  readonly acquisition_kind: CoordinationAcquisitionKind;
   readonly requested_leases: readonly CoordinationRequestedLease[];
   readonly reason: string;
   readonly normal_release_condition: CoordinationReleaseCondition;
@@ -312,13 +327,103 @@ export interface CoordinationWorktreeOperation {
   readonly version: number;
 }
 
+export interface CoordinationWaitForEdge {
+  readonly schema_version: 'autopilot.wait_for_edge.v1';
+  readonly edge_id: string;
+  readonly repo_id: string;
+  readonly request_id: string;
+  readonly requester: CoordinationOwnerIdentity;
+  readonly blocker: CoordinationOwnerIdentity;
+  readonly state: CoordinationWaitForEdgeState;
+  readonly created_event_seq: number;
+  readonly resolved_event_seq: number | null;
+  readonly version: number;
+}
+
+export interface CoordinationDeadlockResolution {
+  readonly schema_version: 'autopilot.deadlock_resolution.v1';
+  readonly resolution_id: string;
+  readonly repo_id: string;
+  readonly cycle_edge_ids: readonly string[];
+  readonly participant_owners: readonly CoordinationOwnerIdentity[];
+  readonly state: CoordinationDeadlockState;
+  readonly victim: CoordinationOwnerIdentity | null;
+  readonly victim_class: CoordinationDeadlockVictimClass | null;
+  readonly action: CoordinationDeadlockAction;
+  readonly reason: string;
+  readonly created_event_seq: number;
+  readonly resolved_event_seq: number | null;
+  readonly version: number;
+}
+
+export interface CoordinationContradictionClause {
+  readonly authoritative_ref: CoordinationEvidenceRef;
+  readonly source_type: 'mission' | 'master-plan' | 'task';
+  readonly source_scope: 'repository' | 'run-main';
+  readonly source_run: string;
+  readonly schema_version: string;
+  readonly clause_id: string;
+  readonly exact_requirement: string;
+  readonly artifact_or_invariant: string;
+  readonly demanded_outcome: string;
+}
+
+export interface CoordinationContradictionAdjudication {
+  readonly schema_version: 'autopilot.planning_contradiction_adjudication.v1';
+  readonly adjudication_id: string;
+  readonly adjudicator: CoordinationOwnerIdentity;
+  readonly adjudicator_role: 'adjudicate';
+  readonly independent_from_runs: readonly string[];
+  readonly verdict: 'major-contradiction';
+  readonly conflicting_clauses: readonly CoordinationContradictionClause[];
+  readonly sequencing_can_satisfy_both: false;
+  readonly partitioning_can_satisfy_both: false;
+  readonly ownership_transfer_can_satisfy_both: false;
+  readonly rebase_revalidation_can_satisfy_both: false;
+  readonly replanning_can_preserve_both: false;
+  readonly operational_reasons: readonly CoordinationOperationalEscalationReason[];
+  readonly decision_options: readonly string[];
+}
+
+export interface CoordinationAuthoritativeArtifact {
+  readonly schema_version: 'autopilot.authoritative_artifact.v1';
+  readonly artifact_id: string;
+  readonly repo_id: string;
+  readonly source_run: string;
+  readonly source_type: 'mission' | 'master-plan' | 'task';
+  readonly source_scope: 'repository' | 'run-main';
+  readonly document_schema_version: string;
+  readonly git_commit: string;
+  readonly evidence: CoordinationEvidenceRef;
+  readonly registered_event_seq: number;
+  readonly version: number;
+}
+
+export interface CoordinationAdjudicationAssignment {
+  readonly schema_version: 'autopilot.adjudication_assignment.v1';
+  readonly assignment_id: string;
+  readonly repo_id: string;
+  readonly requesting_run: string;
+  readonly participating_runs: readonly string[];
+  readonly authoritative_artifact_ids: readonly string[];
+  readonly conflicting_clauses: readonly CoordinationContradictionClause[];
+  readonly adjudicator: CoordinationOwnerIdentity;
+  readonly decision_options: readonly string[];
+  readonly state: 'assigned' | 'accepted';
+  readonly adjudication: CoordinationEvidenceRef | null;
+  readonly child_lease_id: string | null;
+  readonly assigned_event_seq: number;
+  readonly accepted_event_seq: number | null;
+  readonly version: number;
+}
+
 export interface CoordinationEscalation {
   readonly schema_version: 'autopilot.planning_contradiction.v1';
   readonly escalation_id: string;
   readonly repo_id: string;
   readonly participating_runs: readonly string[];
   readonly authoritative_refs: readonly CoordinationEvidenceRef[];
-  readonly conflicting_clauses: readonly string[];
+  readonly conflicting_clauses: readonly CoordinationContradictionClause[];
   readonly exhausted_alternatives: readonly ('sequencing' | 'partitioning' | 'ownership-transfer' | 'rebase-revalidation' | 'replanning')[];
   readonly adjudication: CoordinationEvidenceRef;
   readonly decision_options: readonly string[];
@@ -357,12 +462,16 @@ export interface CoordinationSnapshot {
   readonly messages: readonly CoordinationMessage[];
   readonly worktrees: readonly CoordinationWorktree[];
   readonly worktree_operations: readonly CoordinationWorktreeOperation[];
+  readonly wait_for_edges: readonly CoordinationWaitForEdge[];
+  readonly deadlock_resolutions: readonly CoordinationDeadlockResolution[];
+  readonly authoritative_artifacts: readonly CoordinationAuthoritativeArtifact[];
+  readonly adjudication_assignments: readonly CoordinationAdjudicationAssignment[];
   readonly escalations: readonly CoordinationEscalation[];
   readonly events: readonly CoordinationEvent[];
 }
 
 export type CoordinatorQueryAction = 'status' | 'doctor' | 'export';
-export type CoordinatorMutationAction = 'attach-run' | 'attach-session' | 'detach-session' | 'prepare-handoff' | 'heartbeat' | 'register-child' | 'heartbeat-child' | 'complete-child' | 'drain-mailbox' | 'acquire-group' | 'acknowledge-grant' | 'respond-claim-request' | 'cancel-claim-request' | 'cancel-acquisition-group' | 'supersede-attempt' | 'acknowledge-message' | 'record-release-evidence' | 'resolve-reservation-obligation' | 'prepare-run-terminal' | 'cancel-run-terminal' | 'reconcile-run' | 'prepare-operation' | 'transition-operation';
+export type CoordinatorMutationAction = 'attach-run' | 'attach-session' | 'detach-session' | 'prepare-handoff' | 'heartbeat' | 'register-attempt' | 'register-child' | 'heartbeat-child' | 'checkpoint-child' | 'complete-child' | 'drain-mailbox' | 'acquire-group' | 'acknowledge-grant' | 'respond-claim-request' | 'cancel-claim-request' | 'cancel-acquisition-group' | 'supersede-attempt' | 'acknowledge-message' | 'record-release-evidence' | 'resolve-reservation-obligation' | 'prepare-run-terminal' | 'cancel-run-terminal' | 'reconcile-run' | 'prepare-operation' | 'transition-operation' | 'register-authoritative-artifact' | 'assign-adjudication' | 'claim-adjudication-assignment' | 'complete-adjudication' | 'submit-planning-contradiction';
 
 export interface CoordinatorRequestEnvelope {
   readonly schema_version: typeof AUTOPILOT_COORDINATOR_REQUEST_SCHEMA;

@@ -1,5 +1,6 @@
 import { assertCoordinationInvariants } from "./invariants.js";
 import { claimModesConflict, coordinationPathsOverlap } from "./contracts.js";
+import { buildCoordinationWaitForEdges } from "./deadlock.js";
 import { CoordinationRuntimeError } from "./failures.js";
 import { AUTOPILOT_COORDINATION_SNAPSHOT_SCHEMA } from "./types.js";
 export function emptyCoordinationSnapshot() {
@@ -22,6 +23,10 @@ export function emptyCoordinationSnapshot() {
         messages: [],
         worktrees: [],
         worktree_operations: [],
+        wait_for_edges: [],
+        deadlock_resolutions: [],
+        authoritative_artifacts: [],
+        adjudication_assignments: [],
         escalations: [],
         events: [],
     };
@@ -56,6 +61,13 @@ function currentRun(snapshot, input) {
     if (run === undefined)
         throw new CoordinationRuntimeError('invalid-request', `run ${input.workstreamRun} does not exist`);
     return run;
+}
+function refreshWaitForEdges(snapshot) {
+    const requestIds = new Set(snapshot.claim_requests.map((request) => request.request_id));
+    return {
+        ...snapshot,
+        wait_for_edges: buildCoordinationWaitForEdges({ requests: snapshot.claim_requests, editLeases: snapshot.edit_leases, priorEdges: snapshot.wait_for_edges.filter((edge) => requestIds.has(edge.request_id)), eventSeq: snapshot.repository_event_seq }),
+    };
 }
 function assertCurrentSession(snapshot, input) {
     const run = currentRun(snapshot, input);
@@ -169,7 +181,7 @@ export function releaseCoordinationLeaseAndNotify(snapshot, input) {
         version: 1,
     };
     const remainingGroupLeases = snapshot.edit_leases.filter((candidate) => candidate.acquisition_group_id === lease.acquisition_group_id && candidate.edit_lease_id !== lease.edit_lease_id);
-    const next = {
+    const next = refreshWaitForEdges({
         ...snapshot,
         repository_event_seq: event.sequence,
         edit_leases: snapshot.edit_leases.filter((candidate) => candidate.edit_lease_id !== lease.edit_lease_id),
@@ -177,7 +189,7 @@ export function releaseCoordinationLeaseAndNotify(snapshot, input) {
         claim_requests: snapshot.claim_requests.map((candidate) => candidate.request_id === request.request_id ? { ...candidate, status: 'released', release_event_seq: event.sequence, version: candidate.version + 1 } : candidate),
         messages: [...snapshot.messages, notification],
         events: [...snapshot.events, event.event],
-    };
+    });
     assertCoordinationInvariants(next);
     return next;
 }

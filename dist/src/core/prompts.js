@@ -37,7 +37,7 @@ ${runtimeMetadata.length === 0 ? '' : `${runtimeMetadata}\n`}- Injected child la
 - Child final status handling is launcher-internal; parent sessions must not load, expose, or call child-only status tools.
 - Scheduler config is runtime-owned at \`${input.runtimeRoot}/scheduler-config.json\`; inspect or update it only through \`/${AUTOPILOT_CONFIG_COMMAND} show\` and \`/${AUTOPILOT_CONFIG_COMMAND} parallel-cap <1..32>\`.
 - Final landing/abandonment is runtime-owned: after closure evidence is ready, request operator invocation of \`${closeInvocation}\`; if the run must be abandoned without landing, request \`${abortInvocation}\`. Do not manually mutate the operator source checkout or target branch.
-- Stale claim cleanup is evidence-backed and operator-visible through \`/${AUTOPILOT_CLAIM_GC_COMMAND} --dry-run\` followed by \`/${AUTOPILOT_CLAIM_GC_COMMAND} --apply\` only when the dry-run proof is acceptable.
+- Active Fabric leases reconcile automatically from terminal evidence; \`/${AUTOPILOT_CLAIM_GC_COMMAND}\` is legacy migration/diagnostic evidence only and is never the normal contention path.
 - Local git operations are allowed only when their effective cwd/work-tree is the registered Autopilot main worktree or a runtime-created per-unit worktree for the same workstream; never use git against the operator source checkout, an arbitrary external path, or a remote/network target. Shared branch/tag lifecycle and final landing remain runtime/operator controlled.
 - Public surfaces must use Autopilot command, schema, runtime, status, receipt, close, and runner names only.
 
@@ -46,7 +46,7 @@ ${runtimeMetadata.length === 0 ? '' : `${runtimeMetadata}\n`}- Injected child la
 - After the context gate is OK, read durable purpose truth before progress queues: \`${input.runtimeRoot}/mission.md\`, \`${input.runtimeRoot}/master-plan.json\`, and a bounded tail of \`${input.runtimeRoot}/decision-log.jsonl\`.
 - Then resume from \`${input.runtimeRoot}/state.json\` and \`${input.runtimeRoot}/events.jsonl\` as progress truth; treat them as machine truth only when they validate against Autopilot schemas.
 - If mission/master-plan are absent, create compact purpose artifacts before source-changing work; for large, ambiguous, high-risk, or missing-purpose work, route a strategy unit first.
-- If purpose truth conflicts with progress truth, launch no child work until an adjudication or operator decision resolves the conflict.
+- If purpose truth conflicts with progress truth, launch no child work until adjudication resolves it. Request an operator decision only after source runs register exact Git-HEAD artifacts, the coordinator assigns an independent adjudication child, and the package contradiction arbiter accepts its terminal-evidence-bound \`planning-contradiction\` packet; operational blockers never qualify.
 - Markdown, chat summaries, logs, and hand-written ledgers are human hints only; never treat markdown as authoritative truth over schema-valid Autopilot artifacts.
 - Keep \`state.json\` compact and current; append lifecycle facts to \`events.jsonl\` and material purpose/scope decisions to \`decision-log.jsonl\` rather than rewriting history.
 
@@ -94,6 +94,7 @@ ${renderAutopilotPerfectQualityRules()}
 - Use subscription Pi channels only for frontier child models; do not introduce OpenRouter, paid API keys, or other metered frontier routes.
 - Respect each unit spec's owned, read-only, and untouchable paths.
 - Do not run manual \`git sparse-checkout\` commands; use Autopilot materialization or amend the unit spec.
+- Claims, offline peers, handoffs, stale sessions, worktree/merge/test/validation failures, deadlocks, disk pressure, and cleanup are autonomous runtime states. Never put them in operator_questions. Progress state keeps operator_questions empty; only the coordinator status surface may expose an accepted planning-contradiction packet.
 
 ## Schemas and status acceptance
 
@@ -101,7 +102,7 @@ Use these schema names:\n${schemas}
 
 ## First response shape
 
-After the context gate and resume reads, answer concisely with workstream, runtime root, gate/percent, mission/master-plan status, latest decision id, current queues, audit/scope/protected review queues, whether a strategy exists, next dependency-cleared units, validation plan, held work, and operator questions.
+After the context gate and resume reads, answer concisely with workstream, runtime root, gate/percent, mission/master-plan status, latest decision id, current queues, audit/scope/protected review queues, whether a strategy exists, next dependency-cleared units, validation plan, held work, and accepted coordinator planning-contradiction packets (normally none).
 ${optionalBlock('Operator-provided task intro', input.taskIntro)}`;
 }
 export function renderOnboardPrompt(input) {

@@ -3,7 +3,7 @@ import { existsSync } from 'node:fs';
 import { chmod, open, readFile, stat, unlink } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { platform } from 'node:os';
-import { parseCoordinatorTransportRequest, CoordinatorFrameDecoder, writeCoordinatorResponse } from "./ipc.js";
+import { encodeCoordinatorFrame, parseCoordinatorLegacyReplayTransportRequest, parseCoordinatorTransportRequest, CoordinatorFrameDecoder, writeCoordinatorResponse } from "./ipc.js";
 import { CoordinationRuntimeError } from "./failures.js";
 import { currentBootId, isProcessAlive } from "./process-identity.js";
 import { COORDINATOR_GRANT_OFFER_SWEEP_MS, ensureCoordinatorPrivateRoots, readOrCreateCoordinatorCapability } from "./runtime-paths.js";
@@ -106,11 +106,22 @@ function authenticated(provided, expected) {
     const right = Buffer.from(expected, 'utf8');
     return left.byteLength === right.byteLength && timingSafeEqual(left, right);
 }
+function writeLegacyReplayResponse(socket, response) {
+    const legacy = { ...response, protocol_version: '1.1' };
+    return new Promise((resolveWrite, rejectWrite) => {
+        socket.write(encodeCoordinatorFrame(legacy), (error) => {
+            if (error === undefined || error === null)
+                resolveWrite();
+            else
+                rejectWrite(error);
+        });
+    });
+}
 function errorResponse(requestId, error) {
     const runtime = error instanceof CoordinationRuntimeError ? error : new CoordinationRuntimeError('system-fatal', error instanceof Error ? error.message : String(error));
     return {
         schema_version: 'autopilot.coordinator_response.v1',
-        protocol_version: '1.1',
+        protocol_version: '1.2',
         request_id: requestId,
         ok: false,
         committed_event_seq: null,
@@ -128,14 +139,43 @@ function handleSocket(socket, store, capability, backgroundFailure) {
             for (const frame of frames) {
                 let requestId = `transport-error-${randomBytes(8).toString('hex')}`;
                 try {
-                    const transport = parseCoordinatorTransportRequest(frame);
-                    requestId = transport.request.request_id;
-                    if (!authenticated(transport.capability, capability))
-                        throw new CoordinationRuntimeError('unauthorized-client', 'coordinator capability proof was rejected');
+                    let response = null;
+                    let legacyReplay = false;
+                    let currentTransport = null;
+                    try {
+                        currentTransport = parseCoordinatorTransportRequest(frame);
+                    }
+                    catch (currentProtocolError) {
+                        let legacy;
+                        try {
+                            legacy = parseCoordinatorLegacyReplayTransportRequest(frame);
+                        }
+                        catch {
+                            throw currentProtocolError;
+                        }
+                        const legacyRequestId = legacy.request['request_id'];
+                        if (typeof legacyRequestId === 'string')
+                            requestId = legacyRequestId;
+                        if (!authenticated(legacy.capability, capability))
+                            throw new CoordinationRuntimeError('unauthorized-client', 'coordinator capability proof was rejected');
+                        response = store.replayLegacyRequest(legacy.request);
+                        legacyReplay = true;
+                    }
+                    if (currentTransport !== null) {
+                        requestId = currentTransport.request.request_id;
+                        if (!authenticated(currentTransport.capability, capability))
+                            throw new CoordinationRuntimeError('unauthorized-client', 'coordinator capability proof was rejected');
+                        response = store.handle(currentTransport.request);
+                    }
+                    if (response === null)
+                        throw new CoordinationRuntimeError('system-fatal', 'coordinator request parsing produced no response path');
                     const timerFailure = backgroundFailure();
                     if (timerFailure !== null)
                         throw new CoordinationRuntimeError('system-fatal', `coordinator grant-offer timer failed: ${timerFailure.message}`);
-                    await writeCoordinatorResponse(socket, store.handle(transport.request));
+                    if (legacyReplay)
+                        await writeLegacyReplayResponse(socket, response);
+                    else
+                        await writeCoordinatorResponse(socket, response);
                 }
                 catch (error) {
                     await writeCoordinatorResponse(socket, errorResponse(requestId, error));

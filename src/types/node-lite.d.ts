@@ -36,16 +36,25 @@ declare module 'node:fs' {
   export interface Stats {
     readonly size: number;
     readonly mtimeMs: number;
+    readonly dev: number;
+    readonly ino: number;
     isFile(): boolean;
     isSymbolicLink(): boolean;
   }
   export function existsSync(path: string | URL): boolean;
-  export function readFileSync(path: string | URL): Uint8Array;
+  export function readFileSync(path: string | URL | number): Uint8Array;
   export function readFileSync(path: string | URL, encoding: 'utf8'): string;
   export function realpathSync(path: string | URL): string;
   export function lstatSync(path: string | URL): Stats;
   export function statSync(path: string | URL): Stats;
   export function chmodSync(path: string | URL, mode: number): void;
+  export function openSync(path: string | URL, flags: number): number;
+  export function fstatSync(fd: number): Stats;
+  export function closeSync(fd: number): void;
+  export namespace constants {
+    const O_RDONLY: number;
+    const O_NOFOLLOW: number;
+  }
 }
 
 declare module 'node:fs/promises' {
@@ -109,6 +118,7 @@ declare module 'node:child_process' {
     readonly env?: { readonly [key: string]: string | undefined };
     readonly input?: string;
     readonly timeout?: number;
+    readonly maxBuffer?: number;
   }
   export interface SpawnSyncReturns {
     readonly status: number | null;

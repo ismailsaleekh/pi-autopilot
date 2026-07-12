@@ -38,6 +38,7 @@ export class AutopilotChildLeaseHandle {
   #heartbeat: ReturnType<typeof setInterval> | null = null;
   #fatalError: Error | null = null;
   #terminal = false;
+  readonly #preemption = new AbortController();
   #operation: Promise<void> = Promise.resolve();
 
   constructor(client: CoordinatorClient, session: CoordinatorSessionContext, child: CoordinationChildLease, childToken: string, pid: number, bootId: string) {
@@ -59,6 +60,11 @@ export class AutopilotChildLeaseHandle {
           idempotencyKey: `heartbeat-child:${this.#child.child_lease_id}:${String(this.#child.version)}`,
         }, { child_lease_id: this.#child.child_lease_id, child_token: this.#childToken, pid: this.#pid, boot_id: this.#bootId, lease_expires_at: childExpiry() });
         this.#child = childFromResponse(response);
+        const payload = requireRecord(response.payload, 'child heartbeat response');
+        if (payload['preemption_requested'] === true) {
+          this.#preemption.abort(new CoordinationRuntimeError('recovery-required', 'deadlock policy requested child preemption and owner recovery'));
+          this.#stopHeartbeat();
+        }
       }).catch((error: unknown) => {
         this.#fatalError = error instanceof Error ? error : new Error(String(error));
         this.#stopHeartbeat();
@@ -71,8 +77,36 @@ export class AutopilotChildLeaseHandle {
     return this.#child;
   }
 
+  get preemptionSignal(): AbortSignal {
+    return this.#preemption.signal;
+  }
+
+  async checkpoint(checkpointOrdinal: number, criticalSection: string | null, preemptible: boolean): Promise<void> {
+    await this.#enqueue(async () => {
+      if (this.#terminal) throw new CoordinationRuntimeError('invalid-state', 'terminal child cannot record a checkpoint');
+      const response = await this.#client.mutate('checkpoint-child', {
+        repoId: this.#session.repo_id, workstreamRun: this.#session.workstream_run, sessionId: null, fencingGeneration: null,
+        expectedVersion: this.#child.version, idempotencyKey: `checkpoint-child:${this.#child.child_lease_id}:${String(checkpointOrdinal)}`,
+      }, { child_lease_id: this.#child.child_lease_id, child_token: this.#childToken, pid: this.#pid, boot_id: this.#bootId, checkpoint_ordinal: checkpointOrdinal, critical_section: criticalSection, preemptible });
+    });
+  }
+
   assertHealthy(): void {
     if (this.#fatalError !== null) throw new CoordinationRuntimeError('coordinator-unavailable', `child authority heartbeat failed: ${this.#fatalError.message}`);
+  }
+
+  async completeAdjudication(assignmentId: string, adjudicationPath: string): Promise<void> {
+    await this.#enqueue(async () => {
+      if (this.#terminal) throw new CoordinationRuntimeError('invalid-state', 'terminal child cannot complete adjudication');
+      this.assertHealthy();
+      this.#stopHeartbeat();
+      const response = await this.#client.mutate('complete-adjudication', {
+        repoId: this.#session.repo_id, workstreamRun: this.#session.workstream_run, sessionId: null, fencingGeneration: null, expectedVersion: this.#child.version,
+        idempotencyKey: `complete-adjudication:${assignmentId}:${this.#child.child_lease_id}`,
+      }, { assignment_id: assignmentId, adjudication_path: adjudicationPath, child_lease_id: this.#child.child_lease_id, child_token: this.#childToken, pid: this.#pid, boot_id: this.#bootId });
+      this.#child = childFromResponse(response);
+      this.#terminal = true;
+    });
   }
 
   async completeTerminal(evidence: { readonly ref: string; readonly sha256: `sha256:${string}` }): Promise<void> {
@@ -114,7 +148,7 @@ export class AutopilotChildLeaseHandle {
   }
 }
 
-export async function registerAutopilotChildAuthority(spec: AutopilotUnitSpec, env: ProcessEnvLike = process.env): Promise<AutopilotChildLeaseHandle> {
+export async function registerAutopilotChildAuthority(spec: AutopilotUnitSpec, specEvidence: { readonly ref: string; readonly sha256: `sha256:${string}` }, env: ProcessEnvLike = process.env): Promise<AutopilotChildLeaseHandle> {
   const contextPath = env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV];
   if (contextPath === undefined || contextPath.trim().length === 0) throw new CoordinationRuntimeError('unauthorized-client', `${AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV} is required for live child authority preflight`);
   const session = await readCoordinatorSessionContext(contextPath);
@@ -124,6 +158,10 @@ export async function registerAutopilotChildAuthority(spec: AutopilotUnitSpec, e
   const childToken = randomBytes(32).toString('hex');
   const pid = process.pid;
   const bootId = currentBootId();
+  await client.mutate('register-attempt', {
+    repoId: session.repo_id, workstreamRun: session.workstream_run, sessionId: session.session_id, fencingGeneration: session.session_generation, expectedVersion: session.run_version,
+    idempotencyKey: `register-attempt:${session.workstream_run}:${spec.unit_id}:${String(spec.attempt)}`,
+  }, { unit_id: spec.unit_id, attempt: spec.attempt, spec_ref: specEvidence.ref, spec_sha256: specEvidence.sha256, role: spec.role, preemptible: true, checkpoint_ordinal: 0, session_lease_id: session.session_lease_id, session_token: session.session_token });
   const response = await client.mutate('register-child', {
     repoId: session.repo_id,
     workstreamRun: session.workstream_run,
@@ -143,5 +181,7 @@ export async function registerAutopilotChildAuthority(spec: AutopilotUnitSpec, e
     session_token: session.session_token,
     lease_expires_at: childExpiry(),
   });
-  return new AutopilotChildLeaseHandle(client, session, childFromResponse(response), childToken, pid, bootId);
+  const handle = new AutopilotChildLeaseHandle(client, session, childFromResponse(response), childToken, pid, bootId);
+  await handle.checkpoint(1, null, true);
+  return handle;
 }

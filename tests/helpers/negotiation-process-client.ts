@@ -20,15 +20,16 @@ function token(suffix: string): string {
   return suffix.charCodeAt(0).toString(16).slice(-1).repeat(64);
 }
 
-function acquisitionInput(suffix: string) {
+function acquisitionInput(suffix: string, groupId = `group-${suffix}`, path = 'src/shared.ts') {
+  const expansion = groupId.endsWith('-wait');
   return {
-    acquisitionGroupId: `group-${suffix}`, unitId: `unit-${suffix}`, attempt: 1,
-    requestedLeases: [{ path: 'src/shared.ts', mode: 'WRITE' as const, purpose: `process ${suffix}` }],
+    acquisitionGroupId: groupId, unitId: `unit-${suffix}`, attempt: 1, acquisitionKind: expansion ? 'materialization-read-expansion' as const : 'initial' as const,
+    requestedLeases: [{ path, mode: expansion ? 'READ' as const : 'WRITE' as const, purpose: `process ${suffix}` }],
     reason: `process ${suffix} requires shared source`,
     normalReleaseCondition: { condition_type: 'unit-merged' as const, target_id: `unit-${suffix}:1`, evidence: null },
     specRef: `.pi/autopilot/workstream-${suffix}/unit-specs/unit-${suffix}.json`,
     specSha256: `sha256:${suffix.charCodeAt(0).toString(16).slice(-1).repeat(64)}` as `sha256:${string}`,
-    preemptible: true, checkpointOrdinal: 0,
+    role: 'implement' as const, preemptible: true, checkpointOrdinal: 0,
   };
 }
 
@@ -74,11 +75,13 @@ async function main(): Promise<void> {
   const action = requireArg(2, 'action');
   const stateRoot = requireArg(3, 'state root');
   const suffix = requireArg(4, 'actor suffix');
-  const context = action === 'attach-acquire' ? await attach(stateRoot, suffix) : await readCoordinatorSessionContext(contextPath(stateRoot, suffix));
+  const context = action === 'attach-acquire' || action === 'attach-acquire-path' ? await attach(stateRoot, suffix) : await readCoordinatorSessionContext(contextPath(stateRoot, suffix));
   const client = new CoordinatorClient({ env: { ...process.env, AUTOPILOT_STATE_ROOT: stateRoot }, autoStart: false });
   const negotiation = new ClaimNegotiationClient(client, context);
-  if (action === 'attach-acquire') {
-    const result = await negotiation.acquire(acquisitionInput(suffix));
+  if (action === 'attach-acquire' || action === 'attach-acquire-path' || action === 'acquire-path') {
+    const groupId = action === 'attach-acquire' ? `group-${suffix}` : requireArg(5, 'acquisition group');
+    const path = action === 'attach-acquire' ? 'src/shared.ts' : requireArg(6, 'claim path');
+    const result = await negotiation.acquire(acquisitionInput(suffix, groupId, path));
     console.log(JSON.stringify({ action, outcome: result.outcome, request_refs: result.requestRefs }));
     return;
   }

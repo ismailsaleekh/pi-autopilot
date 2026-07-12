@@ -312,7 +312,7 @@ export class CoordinatorClient {
   async query(action: CoordinatorQueryAction, repoId = 'global', workstreamRun: string | null = null, payload: Readonly<Record<string, unknown>> = {}): Promise<CoordinatorResponseEnvelope> {
     return await this.request({
       schema_version: 'autopilot.coordinator_request.v1',
-      protocol_version: '1.1',
+      protocol_version: '1.2',
       request_id: `request-${randomUUID()}`,
       action,
       idempotency_key: null,
@@ -328,7 +328,7 @@ export class CoordinatorClient {
   async mutate(action: CoordinatorMutationAction, identity: CoordinatorMutationIdentity, payload: Readonly<Record<string, unknown>>): Promise<CoordinatorResponseEnvelope> {
     return await this.request({
       schema_version: 'autopilot.coordinator_request.v1',
-      protocol_version: '1.1',
+      protocol_version: '1.2',
       request_id: `request-${randomUUID()}`,
       action,
       idempotency_key: identity.idempotencyKey,
@@ -387,14 +387,14 @@ export class CoordinatorClient {
 
   #probeRequest(): CoordinatorRequestEnvelope {
     return {
-      schema_version: 'autopilot.coordinator_request.v1', protocol_version: '1.1', request_id: `probe-${randomUUID()}`, action: 'status', idempotency_key: null, repo_id: 'global', workstream_run: null, session_id: null, fencing_generation: null, expected_version: null, payload: EMPTY_COORDINATOR_PAYLOAD,
+      schema_version: 'autopilot.coordinator_request.v1', protocol_version: '1.2', request_id: `probe-${randomUUID()}`, action: 'status', idempotency_key: null, repo_id: 'global', workstream_run: null, session_id: null, fencing_generation: null, expected_version: null, payload: EMPTY_COORDINATOR_PAYLOAD,
     };
   }
 
   #assertCoordinatorCompatibility(response: CoordinatorResponseEnvelope): void {
     if (response.payload['schema_version'] !== 'autopilot.coordinator_status.v1') throw new CoordinationRuntimeError('schema-mismatch', 'coordinator readiness handshake omitted its status schema');
     if (response.payload['package_build'] !== COORDINATOR_PACKAGE_BUILD) throw new CoordinationRuntimeError('protocol-mismatch', `coordinator package build is incompatible with ${COORDINATOR_PACKAGE_BUILD}`);
-    if (response.payload['protocol_version'] !== '1.1') throw new CoordinationRuntimeError('protocol-mismatch', 'coordinator handshake protocol version is incompatible');
+    if (response.payload['protocol_version'] !== '1.2') throw new CoordinationRuntimeError('protocol-mismatch', 'coordinator handshake protocol version is incompatible');
     if (response.payload['database_schema_version'] !== COORDINATOR_DATABASE_SCHEMA_VERSION) throw new CoordinationRuntimeError('schema-mismatch', `coordinator database schema is incompatible with ${String(COORDINATOR_DATABASE_SCHEMA_VERSION)}`);
   }
 

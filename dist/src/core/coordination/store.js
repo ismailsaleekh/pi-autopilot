@@ -1,18 +1,22 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, constants as fsConstants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { platform } from 'node:os';
 import { backup, DatabaseSync } from 'node:sqlite';
-import { claimModesConflict, coordinationPathsOverlap, parseCoordinationAcquisitionGroup, parseCoordinationChangeReservation, parseCoordinationChildLease, parseCoordinationClaimRequest, parseCoordinationEditLease, parseCoordinationMailboxCursor, parseCoordinationMessage, parseCoordinationReconciliationEvidence, parseCoordinationReleaseCondition, parseCoordinationRepository, parseCoordinationRequestedLease, parseCoordinationReservationObligation, parseCoordinationRun, parseCoordinationRunTerminalIntent, parseCoordinationSessionLease, parseCoordinationUnitAttempt, parseCoordinationWorktree, parseCoordinationWorktreeOperation } from "./contracts.js";
+import { claimModesConflict, coordinationPathsOverlap, parseCoordinationAcquisitionGroup, parseCoordinationAdjudicationAssignment, parseCoordinationAuthoritativeArtifact, parseCoordinationChangeReservation, parseCoordinationChildLease, parseCoordinationClaimRequest, parseCoordinationDeadlockResolution, parseCoordinationEditLease, parseCoordinationEscalation, parseCoordinationMailboxCursor, parseCoordinationMessage, parseCoordinationReconciliationEvidence, parseCoordinationReleaseCondition, parseCoordinationRepository, parseCoordinationRequestedLease, parseCoordinationReservationObligation, parseCoordinationRun, parseCoordinationRunTerminalIntent, parseCoordinationSessionLease, parseCoordinationUnitAttempt, parseCoordinationWaitForEdge, parseCoordinationWorktree, parseCoordinationWorktreeOperation } from "./contracts.js";
+import { buildCoordinationWaitForEdges, compareCoordinationGrantPriority, coordinationOwnerKey, detectCoordinationWaitCycles, MAX_GRANT_BYPASSES, selectCoordinationDeadlockVictim } from "./deadlock.js";
+import { validateAuthoritativeCoordinationDocument, validatePlanningContradictionSubmission } from "./escalation.js";
 import { CoordinationRuntimeError } from "./failures.js";
 import { COORDINATOR_BUSY_TIMEOUT_MS, COORDINATOR_DATABASE_SCHEMA_VERSION, COORDINATOR_GRANT_OFFER_TTL_MS, COORDINATOR_PACKAGE_BUILD } from "./runtime-paths.js";
 import { parseRunTerminalSha, parseUnitAttemptTarget, parseUnitMergeReservationFacts, validateReconciliationEvidenceDocument, validateReservationIntegrationEvidenceDocument, validateReservationValidationArtifactChain, validateReservationValidationEvidenceDocument } from "./terminal-evidence.js";
 import { COORDINATION_WORKTREE_STATES } from "./types.js";
 const DATABASE_EXPORT_SCHEMA = 'autopilot.coordinator_export.v1';
 const SHA256_PATTERN = /^sha256:[a-f0-9]{64}$/u;
-const RUN_OWNED_IDEMPOTENCY_ACTIONS = new Set(['acquire-group', 'acknowledge-grant', 'respond-claim-request', 'cancel-claim-request', 'cancel-acquisition-group', 'supersede-attempt', 'record-release-evidence', 'resolve-reservation-obligation', 'prepare-run-terminal', 'cancel-run-terminal', 'reconcile-run', 'prepare-operation', 'transition-operation']);
+const MAX_COORDINATION_EVIDENCE_BYTES = 1024 * 1024;
+const MAX_ADJUDICATION_BUNDLE_BYTES = 256 * 1024;
+const RUN_OWNED_IDEMPOTENCY_ACTIONS = new Set(['register-attempt', 'acquire-group', 'acknowledge-grant', 'respond-claim-request', 'cancel-claim-request', 'cancel-acquisition-group', 'supersede-attempt', 'record-release-evidence', 'resolve-reservation-obligation', 'prepare-run-terminal', 'cancel-run-terminal', 'reconcile-run', 'prepare-operation', 'transition-operation', 'register-authoritative-artifact', 'assign-adjudication', 'claim-adjudication-assignment', 'submit-planning-contradiction']);
 const TERMINAL_SESSION_ACTIONS = new Set(['detach-session', 'heartbeat', 'drain-mailbox', 'acknowledge-message', 'record-release-evidence', 'reconcile-run', 'prepare-operation', 'transition-operation']);
 const systemClock = { now: () => new Date() };
 const MIGRATION_1 = `
@@ -222,6 +226,63 @@ CREATE INDEX IF NOT EXISTS idx_change_reservations_active_path ON change_reserva
 CREATE INDEX IF NOT EXISTS idx_reservation_obligations_run_state ON reservation_obligations(repo_id, workstream_run, json_extract(payload_json, '$.state'), entity_id);
 CREATE INDEX IF NOT EXISTS idx_reservation_obligations_predecessor ON reservation_obligations(repo_id, predecessor_reservation_id, entity_id);
 `;
+const MIGRATION_6 = `
+UPDATE unit_attempts SET payload_json=json_set(payload_json, '$.role', 'unknown', '$.version', version + 1), version=version+1;
+UPDATE acquisition_groups SET payload_json=json_set(payload_json, '$.acquisition_kind', 'legacy-unknown', '$.version', version + 1), version=version+1;
+UPDATE idempotency_results SET payload_json=json_set(payload_json, '$.acquisition_group.acquisition_kind', 'legacy-unknown', '$.acquisition_group.version', json_extract(payload_json, '$.acquisition_group.version') + 1) WHERE json_type(payload_json, '$.acquisition_group')='object' AND json_type(payload_json, '$.acquisition_group.acquisition_kind') IS NULL;
+UPDATE idempotency_results SET payload_json=json_set(payload_json, '$.unit_attempt.role', 'unknown', '$.unit_attempt.version', json_extract(payload_json, '$.unit_attempt.version') + 1) WHERE json_type(payload_json, '$.unit_attempt')='object' AND json_type(payload_json, '$.unit_attempt.role') IS NULL;
+CREATE TABLE wait_for_edges (
+  entity_id TEXT PRIMARY KEY,
+  repo_id TEXT NOT NULL,
+  request_id TEXT NOT NULL UNIQUE,
+  payload_json TEXT NOT NULL,
+  version INTEGER NOT NULL CHECK(version >= 1),
+  FOREIGN KEY(repo_id) REFERENCES repositories(repo_id) ON DELETE RESTRICT,
+  FOREIGN KEY(request_id) REFERENCES claim_requests(entity_id) ON DELETE RESTRICT
+) STRICT;
+CREATE INDEX idx_wait_for_edges_repo_state ON wait_for_edges(repo_id, json_extract(payload_json, '$.state'), entity_id);
+CREATE TABLE deadlock_resolutions (
+  entity_id TEXT PRIMARY KEY,
+  repo_id TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  version INTEGER NOT NULL CHECK(version >= 1),
+  FOREIGN KEY(repo_id) REFERENCES repositories(repo_id) ON DELETE RESTRICT
+) STRICT;
+CREATE INDEX idx_deadlock_resolutions_repo_state ON deadlock_resolutions(repo_id, json_extract(payload_json, '$.state'), entity_id);
+CREATE TABLE authoritative_artifacts (
+  entity_id TEXT NOT NULL,
+  repo_id TEXT NOT NULL,
+  source_run TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  version INTEGER NOT NULL CHECK(version >= 1),
+  PRIMARY KEY(repo_id, entity_id),
+  FOREIGN KEY(repo_id, source_run) REFERENCES runs(repo_id, workstream_run) ON DELETE RESTRICT
+) STRICT;
+CREATE INDEX idx_authoritative_artifacts_source ON authoritative_artifacts(repo_id, source_run, entity_id);
+CREATE TABLE adjudication_assignments (
+  entity_id TEXT NOT NULL,
+  repo_id TEXT NOT NULL,
+  requesting_run TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  version INTEGER NOT NULL CHECK(version >= 1),
+  PRIMARY KEY(repo_id, entity_id),
+  FOREIGN KEY(repo_id, requesting_run) REFERENCES runs(repo_id, workstream_run) ON DELETE RESTRICT
+) STRICT;
+CREATE INDEX idx_adjudication_assignments_state ON adjudication_assignments(repo_id, json_extract(payload_json, '$.state'), entity_id);
+CREATE TABLE evidence_artifacts (
+  entity_id TEXT PRIMARY KEY,
+  repo_id TEXT NOT NULL,
+  sha256 TEXT NOT NULL,
+  ref TEXT NOT NULL,
+  label TEXT NOT NULL,
+  content BLOB NOT NULL,
+  size_bytes INTEGER NOT NULL CHECK(size_bytes >= 0 AND size_bytes <= 1048576),
+  created_event_seq INTEGER NOT NULL CHECK(created_event_seq >= 1),
+  UNIQUE(repo_id, sha256),
+  FOREIGN KEY(repo_id) REFERENCES repositories(repo_id) ON DELETE RESTRICT
+) STRICT;
+CREATE INDEX idx_evidence_artifacts_repo_event ON evidence_artifacts(repo_id, created_event_seq, entity_id);
+`;
 function asRow(value, label) {
     if (value === undefined)
         throw new CoordinationRuntimeError('invalid-state', `${label} row is missing`);
@@ -266,6 +327,25 @@ function payloadInteger(payload, field) {
     if (typeof value !== 'number' || !Number.isSafeInteger(value))
         throw new CoordinationRuntimeError('invalid-request', `payload field ${field} must be an integer`);
     return value;
+}
+function payloadAcquisitionKind(payload, field) {
+    const value = payloadString(payload, field);
+    if (value === 'initial' || value === 'materialization-read-expansion')
+        return value;
+    throw new CoordinationRuntimeError('invalid-request', `payload field ${field} must be a supported acquisition kind`);
+}
+function payloadUnitRole(payload, field) {
+    const value = payloadString(payload, field);
+    switch (value) {
+        case 'strategy':
+        case 'implement':
+        case 'validate':
+        case 'fix':
+        case 'adjudicate':
+        case 'bughunt':
+        case 'extract': return value;
+        default: throw new CoordinationRuntimeError('invalid-request', `payload field ${field} must be a supported unit role`);
+    }
 }
 function payloadBoolean(payload, field) {
     const value = payload[field];
@@ -434,6 +514,21 @@ function worktreeFromRow(row) {
 function worktreeOperationFromRow(row) {
     return entityFromRow(row, parseCoordinationWorktreeOperation, 'worktree operation');
 }
+function waitForEdgeFromRow(row) {
+    return entityFromRow(row, parseCoordinationWaitForEdge, 'wait-for edge');
+}
+function deadlockResolutionFromRow(row) {
+    return entityFromRow(row, parseCoordinationDeadlockResolution, 'deadlock resolution');
+}
+function authoritativeArtifactFromRow(row) {
+    return entityFromRow(row, parseCoordinationAuthoritativeArtifact, 'authoritative artifact');
+}
+function adjudicationAssignmentFromRow(row) {
+    return entityFromRow(row, parseCoordinationAdjudicationAssignment, 'adjudication assignment');
+}
+function escalationFromRow(row) {
+    return entityFromRow(row, parseCoordinationEscalation, 'planning contradiction');
+}
 function mailboxCursorFromRow(row) {
     return parseCoordinationMailboxCursor({
         schema_version: 'autopilot.mailbox_cursor.v1',
@@ -544,6 +639,7 @@ export class CoordinatorStore {
                 { version: 3, sql: MIGRATION_3 },
                 { version: 4, sql: MIGRATION_4 },
                 { version: 5, sql: MIGRATION_5 },
+                { version: 6, sql: MIGRATION_6 },
             ];
             for (const migration of migrations) {
                 if (currentVersion >= migration.version)
@@ -619,12 +715,29 @@ export class CoordinatorStore {
         }
         return expiredCount;
     }
+    replayLegacyRequest(request) {
+        const requestId = request['request_id'];
+        const repoId = request['repo_id'];
+        const idempotencyKey = request['idempotency_key'];
+        const action = request['action'];
+        const payload = request['payload'];
+        if (typeof requestId !== 'string' || typeof repoId !== 'string' || typeof idempotencyKey !== 'string' || typeof action !== 'string' || typeof payload !== 'object' || payload === null || Array.isArray(payload))
+            throw new CoordinationRuntimeError('invalid-request', 'legacy replay request identity is malformed');
+        const runOwned = RUN_OWNED_IDEMPOTENCY_ACTIONS.has(action);
+        const semanticPayload = runOwned ? Object.fromEntries(Object.entries(payload).filter(([field]) => field !== 'session_lease_id' && field !== 'session_token')) : payload;
+        const semantic = { schema_version: request['schema_version'], protocol_version: request['protocol_version'], action, repo_id: repoId, workstream_run: request['workstream_run'], session_id: runOwned ? null : request['session_id'], fencing_generation: runOwned ? null : request['fencing_generation'], expected_version: runOwned ? null : request['expected_version'], payload: semanticPayload };
+        const digest = `sha256:${createHash('sha256').update(canonicalJson(semantic), 'utf8').digest('hex')}`;
+        const prior = this.#db.prepare('SELECT request_sha256, committed_event_seq, payload_json FROM idempotency_results WHERE repo_id=? AND idempotency_key=?').get(repoId, idempotencyKey);
+        if (prior === undefined || sqlString(prior, 'request_sha256') !== digest)
+            throw new CoordinationRuntimeError('idempotency-conflict', 'legacy request has no exact pre-migration idempotency result');
+        return { schema_version: 'autopilot.coordinator_response.v1', protocol_version: '1.2', request_id: requestId, ok: true, committed_event_seq: sqlInteger(prior, 'committed_event_seq'), error_code: null, retryable: false, payload: parseJsonObject(sqlString(prior, 'payload_json'), 'legacy idempotency result') };
+    }
     handle(request) {
         try {
             const effect = this.#dispatch(request);
             return {
                 schema_version: 'autopilot.coordinator_response.v1',
-                protocol_version: '1.1',
+                protocol_version: '1.2',
                 request_id: request.request_id,
                 ok: true,
                 committed_event_seq: effect.committedEventSeq,
@@ -637,7 +750,7 @@ export class CoordinatorStore {
             const runtime = error instanceof CoordinationRuntimeError ? error : sqliteFailure(error);
             return {
                 schema_version: 'autopilot.coordinator_response.v1',
-                protocol_version: '1.1',
+                protocol_version: '1.2',
                 request_id: request.request_id,
                 ok: false,
                 committed_event_seq: null,
@@ -657,8 +770,10 @@ export class CoordinatorStore {
             case 'detach-session': return this.detachSession(request);
             case 'prepare-handoff': return this.prepareHandoff(request);
             case 'heartbeat': return this.heartbeatSession(request);
+            case 'register-attempt': return this.registerAttempt(request);
             case 'register-child': return this.registerChild(request);
             case 'heartbeat-child': return this.heartbeatChild(request);
+            case 'checkpoint-child': return this.checkpointChild(request);
             case 'complete-child': return this.completeChild(request);
             case 'drain-mailbox': return this.drainMailbox(request);
             case 'acknowledge-message': return this.acknowledgeMessage(request);
@@ -675,6 +790,11 @@ export class CoordinatorStore {
             case 'reconcile-run': return this.reconcileRun(request);
             case 'prepare-operation': return this.prepareOperation(request);
             case 'transition-operation': return this.transitionOperation(request);
+            case 'register-authoritative-artifact': return this.registerAuthoritativeArtifact(request);
+            case 'assign-adjudication': return this.assignAdjudication(request);
+            case 'claim-adjudication-assignment': return this.claimAdjudicationAssignment(request);
+            case 'complete-adjudication': return this.completeAdjudication(request);
+            case 'submit-planning-contradiction': return this.submitPlanningContradiction(request);
         }
     }
     status(repoId, workstreamRun) {
@@ -691,6 +811,7 @@ export class CoordinatorStore {
             ? (repoId === 'global' ? this.#db.prepare('SELECT * FROM child_leases ORDER BY repo_id, workstream_run, unit_id, attempt').all() : this.#db.prepare('SELECT * FROM child_leases WHERE repo_id=? ORDER BY workstream_run, unit_id, attempt').all(repoId)).map(childFromRow)
             : this.#db.prepare('SELECT * FROM child_leases WHERE repo_id=? AND workstream_run=? ORDER BY unit_id, attempt').all(repoId, workstreamRun).map(childFromRow);
         const pendingMessages = workstreamRun === null ? 0 : sqlInteger(asRow(this.#db.prepare("SELECT COUNT(*) AS count FROM messages WHERE repo_id=? AND recipient_workstream_run=? AND status!='acknowledged'").get(repoId, workstreamRun), 'message count'), 'count');
+        const unitAttempts = workstreamRun === null ? [] : this.#db.prepare('SELECT * FROM unit_attempts WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(repoId, workstreamRun).map(unitAttemptFromRow);
         const acquisitionGroups = workstreamRun === null ? [] : this.#db.prepare('SELECT * FROM acquisition_groups WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(repoId, workstreamRun).map(acquisitionGroupFromRow);
         const editLeases = workstreamRun === null ? [] : this.#db.prepare('SELECT * FROM edit_leases WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(repoId, workstreamRun).map(editLeaseFromRow);
         const reservationObligations = workstreamRun === null ? [] : this.#db.prepare('SELECT * FROM reservation_obligations WHERE repo_id=? AND (workstream_run=? OR predecessor_reservation_id IN (SELECT entity_id FROM change_reservations WHERE repo_id=? AND workstream_run=?)) ORDER BY entity_id').all(repoId, workstreamRun, repoId, workstreamRun).map(reservationObligationFromRow);
@@ -704,17 +825,24 @@ export class CoordinatorStore {
         const reconciliationEvidence = workstreamRun === null ? [] : this.#db.prepare('SELECT * FROM reconciliation_evidence WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(repoId, workstreamRun).map(reconciliationEvidenceFromRow);
         const worktrees = workstreamRun === null ? [] : this.#db.prepare('SELECT * FROM worktrees WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(repoId, workstreamRun).map(worktreeFromRow);
         const worktreeOperations = workstreamRun === null ? [] : this.#db.prepare('SELECT * FROM worktree_operations WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(repoId, workstreamRun).map(worktreeOperationFromRow);
+        const waitForEdges = workstreamRun === null ? [] : this.#db.prepare("SELECT * FROM wait_for_edges WHERE repo_id=? AND (json_extract(payload_json, '$.requester.workstream_run')=? OR json_extract(payload_json, '$.blocker.workstream_run')=?) ORDER BY entity_id").all(repoId, workstreamRun, workstreamRun).map(waitForEdgeFromRow);
+        const relevantEdgeIds = new Set(waitForEdges.map((edge) => edge.edge_id));
+        const deadlockResolutions = workstreamRun === null ? [] : this.#db.prepare('SELECT * FROM deadlock_resolutions WHERE repo_id=? ORDER BY entity_id').all(repoId).map(deadlockResolutionFromRow).filter((resolution) => resolution.cycle_edge_ids.some((edgeId) => relevantEdgeIds.has(edgeId)));
+        const authoritativeArtifacts = workstreamRun === null ? [] : this.#db.prepare('SELECT * FROM authoritative_artifacts WHERE repo_id=? AND source_run=? ORDER BY entity_id').all(repoId, workstreamRun).map(authoritativeArtifactFromRow);
+        const adjudicationAssignments = workstreamRun === null ? [] : this.#db.prepare('SELECT * FROM adjudication_assignments WHERE repo_id=? ORDER BY entity_id').all(repoId).map(adjudicationAssignmentFromRow).filter((assignment) => assignment.requesting_run === workstreamRun || assignment.participating_runs.includes(workstreamRun) || assignment.adjudicator.workstream_run === workstreamRun);
+        const escalations = workstreamRun === null ? [] : this.#db.prepare('SELECT * FROM escalations WHERE repo_id=? ORDER BY entity_id').all(repoId).map(escalationFromRow).filter((escalation) => escalation.participating_runs.includes(workstreamRun));
         return {
             committedEventSeq: null,
             payload: {
                 schema_version: 'autopilot.coordinator_status.v1',
                 package_build: COORDINATOR_PACKAGE_BUILD,
-                protocol_version: '1.1',
+                protocol_version: '1.2',
                 database_schema_version: COORDINATOR_DATABASE_SCHEMA_VERSION,
                 repositories,
                 runs,
                 session_leases: sessions,
                 child_leases: children,
+                unit_attempts: unitAttempts,
                 acquisition_groups: acquisitionGroups,
                 edit_leases: editLeases,
                 change_reservations: changeReservations,
@@ -725,6 +853,11 @@ export class CoordinatorStore {
                 reconciliation_evidence: reconciliationEvidence,
                 worktrees,
                 worktree_operations: worktreeOperations,
+                wait_for_edges: waitForEdges,
+                deadlock_resolutions: deadlockResolutions,
+                authoritative_artifacts: authoritativeArtifacts,
+                adjudication_assignments: adjudicationAssignments,
+                escalations,
                 pending_messages: pendingMessages,
             },
         };
@@ -753,6 +886,10 @@ export class CoordinatorStore {
         const incompleteOperations = this.#db.prepare("SELECT * FROM worktree_operations WHERE json_extract(payload_json, '$.stage') NOT IN ('committed','compensated','failed') ORDER BY repo_id, workstream_run, entity_id").all().map(worktreeOperationFromRow);
         const pendingReservationObligations = this.#db.prepare("SELECT * FROM reservation_obligations WHERE json_extract(payload_json, '$.state') IN ('waiting-for-predecessor','integration-required') ORDER BY repo_id, workstream_run, entity_id").all().map(reservationObligationFromRow);
         const preparedRunTerminalIntents = this.#db.prepare("SELECT * FROM run_terminal_intents WHERE json_extract(payload_json, '$.state')='prepared' ORDER BY repo_id, workstream_run, entity_id").all().map(runTerminalIntentFromRow);
+        const activeWaitForEdges = this.#db.prepare("SELECT * FROM wait_for_edges WHERE json_extract(payload_json, '$.state')='active' ORDER BY repo_id, entity_id").all().map(waitForEdgeFromRow);
+        const openDeadlockResolutions = this.#db.prepare("SELECT * FROM deadlock_resolutions WHERE json_extract(payload_json, '$.state')!='resolved' ORDER BY repo_id, entity_id").all().map(deadlockResolutionFromRow);
+        const pendingAdjudicationAssignments = this.#db.prepare("SELECT * FROM adjudication_assignments WHERE json_extract(payload_json, '$.state')='assigned' ORDER BY repo_id, entity_id").all().map(adjudicationAssignmentFromRow);
+        const immutableEvidenceArtifactCount = sqlInteger(asRow(this.#db.prepare('SELECT COUNT(*) AS count FROM evidence_artifacts').get(), 'evidence artifact count'), 'count');
         return {
             committedEventSeq: null,
             payload: {
@@ -768,6 +905,11 @@ export class CoordinatorStore {
                 incomplete_worktree_operations: incompleteOperations,
                 pending_reservation_obligations: pendingReservationObligations,
                 prepared_run_terminal_intents: preparedRunTerminalIntents,
+                active_wait_for_edges: activeWaitForEdges,
+                open_deadlock_resolutions: openDeadlockResolutions,
+                pending_adjudication_assignments: pendingAdjudicationAssignments,
+                immutable_evidence_artifact_count: immutableEvidenceArtifactCount,
+                max_grant_bypasses: MAX_GRANT_BYPASSES,
             },
         };
     }
@@ -792,6 +934,10 @@ export class CoordinatorStore {
             ['worktrees', 'repo_id, workstream_run, entity_id'],
             ['worktree_operations', 'repo_id, workstream_run, entity_id'],
             ['merge_operations', 'repo_id, workstream_run, entity_id'],
+            ['wait_for_edges', 'repo_id, entity_id'],
+            ['deadlock_resolutions', 'repo_id, entity_id'],
+            ['authoritative_artifacts', 'repo_id, source_run, entity_id'],
+            ['adjudication_assignments', 'repo_id, requesting_run, entity_id'],
             ['escalations', 'repo_id, entity_id'],
             ['handoffs', 'repo_id, workstream_run, created_event_seq, handoff_token'],
             ['events', 'repo_id, event_seq'],
@@ -803,6 +949,7 @@ export class CoordinatorStore {
             const rows = this.#db.prepare(`SELECT * FROM ${table} ORDER BY ${order}`).all().map((row) => Object.fromEntries(Object.entries(row)));
             exported[table] = rows;
         }
+        exported['evidence_artifacts'] = this.#db.prepare('SELECT entity_id, repo_id, sha256, ref, label, size_bytes, created_event_seq, lower(hex(content)) AS content_hex FROM evidence_artifacts ORDER BY repo_id, created_event_seq, entity_id').all().map((row) => Object.fromEntries(Object.entries(row)));
         writeFileSync(target, `${canonicalJson(exported)}\n`, { encoding: 'utf8', mode: 0o600 });
         return { committedEventSeq: null, payload: { schema_version: 'autopilot.coordinator_export_result.v1', output_path: target, sha256: `sha256:${createHash('sha256').update(canonicalJson(exported), 'utf8').digest('hex')}` } };
     }
@@ -886,6 +1033,25 @@ export class CoordinatorStore {
             return { entityId: session.session_lease_id, payload: { session: sessionFromRow(asRow(this.#db.prepare('SELECT * FROM session_leases WHERE session_lease_id=?').get(session.session_lease_id), 'heartbeat session')), reconciliation } };
         });
     }
+    registerAttempt(request) {
+        return this.#mutation(request, () => {
+            this.#requireCurrentSession(request);
+            const run = this.#requireRun(request.repo_id, this.#workstreamRun(request));
+            this.#assertVersion(run.version, request.expected_version, 'run');
+            const owner = { repo_id: run.repo_id, autopilot_id: run.autopilot_id, workstream_run: run.workstream_run, unit_id: payloadString(request.payload, 'unit_id'), attempt: payloadInteger(request.payload, 'attempt') };
+            if (payloadInteger(request.payload, 'checkpoint_ordinal') !== 0)
+                throw new CoordinationRuntimeError('invalid-request', 'attempt registration must begin at checkpoint ordinal 0');
+            const attempt = { schema_version: 'autopilot.unit_attempt.v1', owner, state: 'preflight', role: payloadUnitRole(request.payload, 'role'), spec: { ref: payloadString(request.payload, 'spec_ref'), sha256: payloadString(request.payload, 'spec_sha256') }, preemptible: payloadBoolean(request.payload, 'preemptible'), checkpoint_ordinal: 0, critical_section: null, version: 1 };
+            const existing = this.#db.prepare('SELECT * FROM unit_attempts WHERE entity_id=?').get(unitAttemptEntityId(owner));
+            if (existing !== undefined) {
+                this.#insertOrVerifyUnitAttempt(attempt);
+                return { sequence: this.#nextEventSequence(run.repo_id), eventType: 'unit-attempt-verified', entityType: 'unit-attempt', entityId: unitAttemptEntityId(owner), payload: { unit_attempt: unitAttemptFromRow(existing) } };
+            }
+            const seq = this.#nextEventSequence(run.repo_id);
+            this.#insertEntity('unit_attempts', unitAttemptEntityId(owner), owner.repo_id, owner.workstream_run, attempt);
+            return { sequence: seq, eventType: 'unit-attempt-registered', entityType: 'unit-attempt', entityId: unitAttemptEntityId(owner), payload: { unit_attempt: attempt } };
+        });
+    }
     registerChild(request) {
         return this.#mutation(request, () => {
             const session = this.#requireCurrentSession(request);
@@ -893,10 +1059,18 @@ export class CoordinatorStore {
             this.#assertVersion(run.version, request.expected_version, 'run');
             if (this.#preparedTerminalIntent(run.repo_id, run.workstream_run) !== null)
                 throw new CoordinationRuntimeError('invalid-state', 'run terminal preparation fences new child registration');
+            const childOwner = { repo_id: run.repo_id, autopilot_id: run.autopilot_id, workstream_run: run.workstream_run, unit_id: payloadString(request.payload, 'unit_id'), attempt: payloadInteger(request.payload, 'attempt') };
+            if (payloadString(request.payload, 'autopilot_id') !== run.autopilot_id)
+                throw new CoordinationRuntimeError('unauthorized-client', 'child autopilot identity does not match its durable run');
+            const attempt = this.#requireUnitAttempt(childOwner.repo_id, childOwner.workstream_run, childOwner.unit_id, childOwner.attempt);
+            if (attempt.state !== 'preflight')
+                throw new CoordinationRuntimeError('invalid-state', `child registration requires a preflight attempt, not ${attempt.state}`);
             const seq = this.#nextEventSequence(request.repo_id);
             const childId = payloadString(request.payload, 'child_lease_id');
             const childTokenSha256 = createHash('sha256').update(payloadString(request.payload, 'child_token'), 'utf8').digest('hex');
             this.#db.prepare("INSERT INTO child_leases(child_lease_id, repo_id, autopilot_id, workstream_run, unit_id, attempt, pid, boot_id, child_token_sha256, lease_expires_at, status, terminal_evidence_ref, terminal_evidence_sha256, version) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', NULL, NULL, 1)").run(childId, request.repo_id, payloadString(request.payload, 'autopilot_id'), this.#workstreamRun(request), payloadString(request.payload, 'unit_id'), payloadInteger(request.payload, 'attempt'), payloadInteger(request.payload, 'pid'), payloadString(request.payload, 'boot_id'), childTokenSha256, payloadString(request.payload, 'lease_expires_at'));
+            const runningAttempt = { ...attempt, state: 'running', version: attempt.version + 1 };
+            this.#updateEntity('unit_attempts', unitAttemptEntityId(attempt.owner), runningAttempt);
             const child = childFromRow(asRow(this.#db.prepare('SELECT * FROM child_leases WHERE child_lease_id=?').get(childId), 'registered child'));
             return { sequence: seq, eventType: 'child-registered', entityType: 'child-lease', entityId: childId, payload: { child, authorizing_session_lease_id: session.session_lease_id } };
         });
@@ -912,7 +1086,30 @@ export class CoordinatorStore {
                 throw new CoordinationRuntimeError('invalid-state', `child lease is ${child.status}`);
             const seq = this.#nextEventSequence(request.repo_id);
             this.#db.prepare('UPDATE child_leases SET lease_expires_at=?, version=version+1 WHERE child_lease_id=?').run(payloadString(request.payload, 'lease_expires_at'), childId);
-            return { sequence: seq, eventType: 'child-heartbeat', entityType: 'child-lease', entityId: childId, payload: { child: childFromRow(asRow(this.#db.prepare('SELECT * FROM child_leases WHERE child_lease_id=?').get(childId), 'heartbeat child')) } };
+            const victimKey = coordinationOwnerKey(child.owner);
+            const preemptionRequested = this.#db.prepare("SELECT entity_id FROM deadlock_resolutions WHERE repo_id=? AND json_extract(payload_json, '$.state')='awaiting-recovery' AND json_extract(payload_json, '$.action')='request-reset-or-quarantine' AND json_extract(payload_json, '$.victim.repo_id')=? AND json_extract(payload_json, '$.victim.autopilot_id')=? AND json_extract(payload_json, '$.victim.workstream_run')=? AND json_extract(payload_json, '$.victim.unit_id')=? AND json_extract(payload_json, '$.victim.attempt')=? LIMIT 1").get(child.owner.repo_id, child.owner.repo_id, child.owner.autopilot_id, child.owner.workstream_run, child.owner.unit_id, child.owner.attempt) !== undefined;
+            return { sequence: seq, eventType: 'child-heartbeat', entityType: 'child-lease', entityId: childId, payload: { child: childFromRow(asRow(this.#db.prepare('SELECT * FROM child_leases WHERE child_lease_id=?').get(childId), 'heartbeat child')), preemption_requested: preemptionRequested, victim_key: preemptionRequested ? victimKey : null } };
+        });
+    }
+    checkpointChild(request) {
+        return this.#mutation(request, () => {
+            const childId = payloadString(request.payload, 'child_lease_id');
+            const childRow = asRow(this.#db.prepare('SELECT * FROM child_leases WHERE child_lease_id=?').get(childId), 'child');
+            const child = childFromRow(childRow);
+            this.#assertChildAuthority(request, child, childRow);
+            this.#assertVersion(child.version, request.expected_version, 'child lease');
+            if (child.status !== 'running')
+                throw new CoordinationRuntimeError('invalid-state', `child lease is ${child.status}`);
+            const attempt = this.#requireUnitAttempt(child.owner.repo_id, child.owner.workstream_run, child.owner.unit_id, child.owner.attempt);
+            if (attempt.state !== 'running')
+                throw new CoordinationRuntimeError('invalid-state', `child checkpoint requires a running attempt, not ${attempt.state}`);
+            const checkpointOrdinal = payloadInteger(request.payload, 'checkpoint_ordinal');
+            if (checkpointOrdinal !== attempt.checkpoint_ordinal + 1)
+                throw new CoordinationRuntimeError('stale-version', 'child checkpoint ordinal must advance exactly one durable boundary at a time');
+            const seq = this.#nextEventSequence(request.repo_id);
+            const checkpointed = { ...attempt, checkpoint_ordinal: checkpointOrdinal, critical_section: payloadNullableString(request.payload, 'critical_section'), preemptible: payloadBoolean(request.payload, 'preemptible'), version: attempt.version + 1 };
+            this.#updateEntity('unit_attempts', unitAttemptEntityId(attempt.owner), checkpointed);
+            return { sequence: seq, eventType: 'unit-attempt-checkpointed', entityType: 'unit-attempt', entityId: unitAttemptEntityId(attempt.owner), payload: { child, unit_attempt: checkpointed } };
         });
     }
     completeChild(request) {
@@ -933,6 +1130,11 @@ export class CoordinatorStore {
                 throw new CoordinationRuntimeError('invalid-request', 'recovery-required child completion must not claim terminal evidence');
             const seq = this.#nextEventSequence(request.repo_id);
             this.#db.prepare('UPDATE child_leases SET status=?, terminal_evidence_ref=?, terminal_evidence_sha256=?, version=version+1 WHERE child_lease_id=?').run(status, evidenceRef, evidenceSha, childId);
+            if (status === 'recovery-required') {
+                const attempt = this.#requireUnitAttempt(child.owner.repo_id, child.owner.workstream_run, child.owner.unit_id, child.owner.attempt);
+                if (attempt.state === 'running')
+                    this.#updateEntity('unit_attempts', unitAttemptEntityId(attempt.owner), { ...attempt, state: 'failed', critical_section: null, version: attempt.version + 1 });
+            }
             if (status === 'terminal' && evidenceRef !== null && evidenceSha !== null) {
                 this.#acceptReconciliationEvidence({
                     repoId: child.owner.repo_id,
@@ -967,17 +1169,35 @@ export class CoordinatorStore {
                 attempt: payloadInteger(request.payload, 'attempt'),
             };
             const requestedLeases = payloadRequestedLeases(request.payload);
+            const requestedRole = payloadUnitRole(request.payload, 'role');
+            if (requestedRole !== 'implement' && requestedRole !== 'fix' && requestedLeases.some((lease) => lease.mode !== 'READ'))
+                throw new CoordinationRuntimeError('invalid-request', `${requestedRole} units may acquire READ authority only`);
+            const acquisitionKind = payloadAcquisitionKind(request.payload, 'acquisition_kind');
             const releaseCondition = payloadReleaseCondition(request.payload, 'normal_release_condition');
             const seq = this.#nextEventSequence(request.repo_id);
+            const requestedCheckpointOrdinal = payloadInteger(request.payload, 'checkpoint_ordinal');
+            const existingAttemptRow = this.#db.prepare('SELECT entity_id FROM unit_attempts WHERE entity_id=?').get(unitAttemptEntityId(owner));
+            if (existingAttemptRow === undefined && requestedCheckpointOrdinal !== 0)
+                throw new CoordinationRuntimeError('invalid-request', 'initial acquisition must begin at checkpoint ordinal 0');
             const attempt = {
-                schema_version: 'autopilot.unit_attempt.v1', owner, state: 'preflight',
+                schema_version: 'autopilot.unit_attempt.v1', owner, state: 'preflight', role: requestedRole,
                 spec: { ref: payloadString(request.payload, 'spec_ref'), sha256: payloadString(request.payload, 'spec_sha256') },
-                preemptible: payloadBoolean(request.payload, 'preemptible'), checkpoint_ordinal: payloadInteger(request.payload, 'checkpoint_ordinal'), critical_section: null, version: 1,
+                preemptible: payloadBoolean(request.payload, 'preemptible'), checkpoint_ordinal: requestedCheckpointOrdinal, critical_section: null, version: 1,
             };
             this.#insertOrVerifyUnitAttempt(attempt);
+            const priorGroups = this.#db.prepare('SELECT * FROM acquisition_groups WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(owner.repo_id, owner.workstream_run).map(acquisitionGroupFromRow).filter((candidate) => sameOwner(candidate.owner, owner));
+            if (acquisitionKind === 'initial' && priorGroups.length > 0)
+                throw new CoordinationRuntimeError('invalid-state', 'a unit attempt may declare exactly one immutable initial acquisition group');
+            if (acquisitionKind === 'materialization-read-expansion') {
+                if (!requestedLeases.every((lease) => lease.mode === 'READ'))
+                    throw new CoordinationRuntimeError('invalid-request', 'materialization expansion may request READ authority only');
+                const initial = priorGroups.find((candidate) => candidate.acquisition_kind === 'initial' || candidate.acquisition_kind === 'legacy-unknown');
+                if (initial === undefined || (initial.state !== 'granted' && initial.state !== 'released'))
+                    throw new CoordinationRuntimeError('invalid-state', 'materialization READ expansion requires a previously granted initial acquisition group');
+            }
             this.#assertReleaseConditionOwner(releaseCondition, owner);
             const group = {
-                schema_version: 'autopilot.acquisition_group.v2', acquisition_group_id: groupId, owner, requested_leases: requestedLeases,
+                schema_version: 'autopilot.acquisition_group.v2', acquisition_group_id: groupId, owner, acquisition_kind: acquisitionKind, requested_leases: requestedLeases,
                 reason: payloadString(request.payload, 'reason'), normal_release_condition: releaseCondition, state: 'waiting', created_event_seq: seq, fairness_event_seq: seq,
                 grant_event_seq: null, offer_expires_at: null, offer_count: 0, bypass_count: 0, version: 1,
             };
@@ -1125,6 +1345,231 @@ export class CoordinatorStore {
             this.#updateEntity('unit_attempts', unitAttemptEntityId(attempt.owner), superseded);
             this.#reevaluateWaitingGroups(request.repo_id, seq);
             return { sequence: seq, eventType: 'unit-attempt-superseded', entityType: 'unit-attempt', entityId: unitAttemptEntityId(attempt.owner), payload: { unit_attempt: superseded, superseded_by_attempt: payloadInteger(request.payload, 'superseded_by_attempt'), reason: payloadString(request.payload, 'reason'), request_refs: groups.flatMap((group) => this.#claimRequestsForGroup(group.owner.repo_id, group.acquisition_group_id).map((entry) => entry.request_id)) } };
+        });
+    }
+    registerAuthoritativeArtifact(request) {
+        return this.#mutation(request, () => {
+            this.#requireCurrentSession(request);
+            const run = this.#requireRun(request.repo_id, this.#workstreamRun(request));
+            this.#assertVersion(run.version, request.expected_version, 'run');
+            const sourceType = payloadString(request.payload, 'source_type');
+            if (sourceType !== 'mission' && sourceType !== 'master-plan' && sourceType !== 'task')
+                throw new CoordinationRuntimeError('invalid-request', 'authoritative artifact source_type is unsupported');
+            const sourceScope = payloadString(request.payload, 'source_scope');
+            if (sourceScope !== 'repository' && sourceScope !== 'run-main')
+                throw new CoordinationRuntimeError('invalid-request', 'authoritative artifact source_scope is unsupported');
+            const repository = repositoryFromRow(asRow(this.#db.prepare('SELECT * FROM repositories WHERE repo_id=?').get(run.repo_id), 'authoritative artifact repository'));
+            const sourceRoot = sourceScope === 'repository' ? repository.canonical_root : this.#requireRunMainRoot(run.repo_id, run.workstream_run);
+            const ref = payloadString(request.payload, 'ref');
+            this.#evidencePathUnderRoot(sourceRoot, ref);
+            const gitCommit = payloadString(request.payload, 'git_commit');
+            const verifiedCommit = spawnSync('git', ['rev-parse', '--verify', `${gitCommit}^{commit}`], { cwd: sourceRoot, encoding: 'utf8', timeout: 30_000 });
+            if (verifiedCommit.status !== 0 || verifiedCommit.stdout.trim() !== gitCommit)
+                throw new CoordinationRuntimeError('invalid-request', 'authoritative artifact git_commit is not the exact verified commit in its registered source repository', [gitCommit, verifiedCommit.stderr.trim()]);
+            const sourceHead = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: sourceRoot, encoding: 'utf8', timeout: 30_000 });
+            if (sourceHead.status !== 0 || sourceHead.stdout.trim() !== gitCommit)
+                throw new CoordinationRuntimeError('invalid-request', 'authoritative artifact must be registered from the exact current source authority HEAD', [gitCommit, sourceHead.stdout.trim()]);
+            const shown = spawnSync('git', ['show', `${gitCommit}:${ref}`], { cwd: sourceRoot, encoding: 'utf8', timeout: 30_000, maxBuffer: MAX_COORDINATION_EVIDENCE_BYTES + 65_536 });
+            if (shown.status !== 0)
+                throw new CoordinationRuntimeError('invalid-request', 'authoritative artifact ref is not a blob at the immutable Git commit', [ref, shown.stderr.trim()]);
+            const bytes = Buffer.from(shown.stdout, 'utf8');
+            const evidence = { ref, sha256: payloadString(request.payload, 'sha256') };
+            const actual = `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
+            if (actual !== evidence.sha256)
+                throw new CoordinationRuntimeError('invalid-request', 'authoritative artifact hash does not match immutable Git blob bytes', [evidence.sha256, actual]);
+            const documentSchemaVersion = payloadString(request.payload, 'document_schema_version');
+            validateAuthoritativeCoordinationDocument(sourceType, documentSchemaVersion, bytes);
+            const artifactId = payloadString(request.payload, 'artifact_id');
+            if (this.#db.prepare('SELECT entity_id FROM authoritative_artifacts WHERE repo_id=? AND entity_id=?').get(run.repo_id, artifactId) !== undefined)
+                throw new CoordinationRuntimeError('stale-version', 'authoritative artifact id already exists');
+            const seq = this.#nextEventSequence(run.repo_id);
+            const artifact = { schema_version: 'autopilot.authoritative_artifact.v1', artifact_id: artifactId, repo_id: run.repo_id, source_run: run.workstream_run, source_type: sourceType, source_scope: sourceScope, document_schema_version: documentSchemaVersion, git_commit: gitCommit, evidence, registered_event_seq: seq, version: 1 };
+            this.#db.prepare('INSERT INTO authoritative_artifacts(entity_id, repo_id, source_run, payload_json, version) VALUES(?, ?, ?, ?, ?)').run(artifact.artifact_id, artifact.repo_id, artifact.source_run, canonicalJson(artifact), artifact.version);
+            this.#persistEvidenceArtifact(run.repo_id, artifact.evidence, bytes, `authoritative ${sourceType}`, seq);
+            return { sequence: seq, eventType: 'authoritative-artifact-registered', entityType: 'authoritative-artifact', entityId: artifact.artifact_id, payload: { authoritative_artifact: artifact } };
+        });
+    }
+    assignAdjudication(request) {
+        return this.#mutation(request, () => {
+            this.#requireCurrentSession(request);
+            const run = this.#requireRun(request.repo_id, this.#workstreamRun(request));
+            this.#assertVersion(run.version, request.expected_version, 'run');
+            const proposed = parseCoordinationAdjudicationAssignment(request.payload['assignment']);
+            if (proposed.repo_id !== run.repo_id || proposed.requesting_run !== run.workstream_run || !proposed.participating_runs.includes(run.workstream_run))
+                throw new CoordinationRuntimeError('unauthorized-client', 'adjudication assignment must be requested by a participating durable run');
+            if (proposed.state !== 'assigned' || proposed.adjudication !== null || proposed.child_lease_id !== null || proposed.assigned_event_seq !== 0 || proposed.accepted_event_seq !== null || proposed.version !== 1)
+                throw new CoordinationRuntimeError('invalid-request', 'new adjudication assignment must use the canonical uncommitted assigned state');
+            for (const participatingRun of proposed.participating_runs)
+                this.#requireRun(run.repo_id, participatingRun);
+            if (proposed.adjudicator.repo_id !== run.repo_id)
+                throw new CoordinationRuntimeError('invalid-request', 'adjudicator repository identity must match the contradiction repository');
+            if (proposed.participating_runs.includes(proposed.adjudicator.workstream_run))
+                throw new CoordinationRuntimeError('invalid-request', 'adjudicator run must be independent from every participating run');
+            const adjudicatorRun = this.#requireRun(run.repo_id, proposed.adjudicator.workstream_run);
+            if (adjudicatorRun.autopilot_id !== proposed.adjudicator.autopilot_id)
+                throw new CoordinationRuntimeError('invalid-request', 'adjudicator identity does not match its durable run');
+            const attempt = this.#requireUnitAttempt(proposed.adjudicator.repo_id, proposed.adjudicator.workstream_run, proposed.adjudicator.unit_id, proposed.adjudicator.attempt);
+            if (attempt.role !== 'adjudicate' || (attempt.state !== 'preflight' && attempt.state !== 'running'))
+                throw new CoordinationRuntimeError('invalid-request', 'assignment requires a live durable adjudication-role attempt');
+            const artifacts = proposed.authoritative_artifact_ids.map((artifactId) => authoritativeArtifactFromRow(asRow(this.#db.prepare('SELECT * FROM authoritative_artifacts WHERE repo_id=? AND entity_id=?').get(run.repo_id, artifactId), `authoritative artifact ${artifactId}`)));
+            const artifactKeys = new Map(artifacts.map((artifact) => [`${artifact.evidence.ref}\0${artifact.evidence.sha256}`, artifact]));
+            const artifactContents = new Map(artifacts.map((artifact) => [artifact.artifact_id, this.#loadEvidenceArtifact(run.repo_id, artifact.evidence)]));
+            const totalArtifactBytes = [...artifactContents.values()].reduce((total, bytes) => total + bytes.byteLength, 0);
+            if (totalArtifactBytes > MAX_ADJUDICATION_BUNDLE_BYTES)
+                throw new CoordinationRuntimeError('invalid-request', 'adjudication assignment authoritative bundle exceeds its bounded transport and review ceiling', [`size=${String(totalArtifactBytes)}`, `maximum=${String(MAX_ADJUDICATION_BUNDLE_BYTES)}`]);
+            const clauseArtifactKeys = new Set(proposed.conflicting_clauses.map((clause) => `${clause.authoritative_ref.ref}\0${clause.authoritative_ref.sha256}`));
+            if (artifactKeys.size !== clauseArtifactKeys.size || [...artifactKeys.keys()].some((key) => !clauseArtifactKeys.has(key)))
+                throw new CoordinationRuntimeError('invalid-request', 'adjudication assignment authoritative artifacts must exactly equal its conflicting clause refs');
+            if (artifacts.some((artifact) => !proposed.participating_runs.includes(artifact.source_run)))
+                throw new CoordinationRuntimeError('invalid-request', 'every authoritative artifact must be registered by a participating run');
+            for (const clause of proposed.conflicting_clauses) {
+                const artifact = artifactKeys.get(`${clause.authoritative_ref.ref}\0${clause.authoritative_ref.sha256}`);
+                if (artifact === undefined || artifact.source_run !== clause.source_run || artifact.source_type !== clause.source_type || artifact.source_scope !== clause.source_scope || artifact.document_schema_version !== clause.schema_version)
+                    throw new CoordinationRuntimeError('invalid-request', 'contradiction clause does not exactly match its coordinator-registered authoritative artifact', [clause.clause_id]);
+                const bytes = artifactContents.get(artifact.artifact_id);
+                if (bytes === undefined)
+                    throw new CoordinationRuntimeError('store-corrupt', 'registered authoritative artifact bytes disappeared');
+                if (!Buffer.from(bytes).toString('utf8').includes(clause.exact_requirement))
+                    throw new CoordinationRuntimeError('invalid-request', 'contradiction clause exact requirement is absent from its registered immutable artifact', [clause.clause_id]);
+            }
+            const outcomes = new Map();
+            for (const clause of proposed.conflicting_clauses) {
+                const values = outcomes.get(clause.artifact_or_invariant) ?? new Set();
+                values.add(clause.demanded_outcome);
+                outcomes.set(clause.artifact_or_invariant, values);
+            }
+            if (![...outcomes.values()].some((values) => values.size >= 2))
+                throw new CoordinationRuntimeError('invalid-request', 'assignment clauses do not demand incompatible final outcomes for one artifact or invariant');
+            if (this.#db.prepare('SELECT entity_id FROM adjudication_assignments WHERE repo_id=? AND entity_id=?').get(run.repo_id, proposed.assignment_id) !== undefined)
+                throw new CoordinationRuntimeError('stale-version', 'adjudication assignment id already exists');
+            const existingAttemptAssignment = this.#db.prepare("SELECT entity_id FROM adjudication_assignments WHERE repo_id=? AND json_extract(payload_json, '$.state')='assigned' AND json_extract(payload_json, '$.adjudicator.repo_id')=? AND json_extract(payload_json, '$.adjudicator.autopilot_id')=? AND json_extract(payload_json, '$.adjudicator.workstream_run')=? AND json_extract(payload_json, '$.adjudicator.unit_id')=? AND json_extract(payload_json, '$.adjudicator.attempt')=? LIMIT 1").get(run.repo_id, proposed.adjudicator.repo_id, proposed.adjudicator.autopilot_id, proposed.adjudicator.workstream_run, proposed.adjudicator.unit_id, proposed.adjudicator.attempt);
+            if (existingAttemptAssignment !== undefined)
+                throw new CoordinationRuntimeError('invalid-state', 'adjudication attempt already has a live coordinator assignment');
+            const seq = this.#nextEventSequence(run.repo_id);
+            const assignment = { ...proposed, assigned_event_seq: seq };
+            this.#db.prepare('INSERT INTO adjudication_assignments(entity_id, repo_id, requesting_run, payload_json, version) VALUES(?, ?, ?, ?, ?)').run(assignment.assignment_id, assignment.repo_id, assignment.requesting_run, canonicalJson(assignment), assignment.version);
+            this.#insertMessage({ schema_version: 'autopilot.coordination_message.v1', message_id: stableEntityId('message', ['adjudication-assignment', assignment.repo_id, assignment.assignment_id]), repo_id: assignment.repo_id, recipient_workstream_run: assignment.adjudicator.workstream_run, message_type: 'adjudication-assignment', correlation_id: assignment.assignment_id, payload: { assignment_id: assignment.assignment_id, authoritative_artifact_ids: assignment.authoritative_artifact_ids, participating_runs: assignment.participating_runs }, status: 'pending', created_event_seq: seq, delivered_event_seq: null, acknowledged_event_seq: null, version: 1 });
+            return { sequence: seq, eventType: 'adjudication-assigned', entityType: 'adjudication-assignment', entityId: assignment.assignment_id, payload: { adjudication_assignment: assignment } };
+        });
+    }
+    claimAdjudicationAssignment(request) {
+        return this.#mutation(request, () => {
+            this.#requireCurrentSession(request);
+            const run = this.#requireRun(request.repo_id, this.#workstreamRun(request));
+            this.#assertVersion(run.version, request.expected_version, 'run');
+            const unitId = payloadString(request.payload, 'unit_id');
+            const attempt = payloadInteger(request.payload, 'attempt');
+            const assignments = this.#db.prepare("SELECT * FROM adjudication_assignments WHERE repo_id=? AND json_extract(payload_json, '$.state')='assigned' AND json_extract(payload_json, '$.adjudicator.workstream_run')=? AND json_extract(payload_json, '$.adjudicator.unit_id')=? AND json_extract(payload_json, '$.adjudicator.attempt')=? ORDER BY entity_id").all(run.repo_id, run.workstream_run, unitId, attempt).map(adjudicationAssignmentFromRow);
+            if (assignments.length === 0)
+                throw new CoordinationRuntimeError('invalid-state', 'adjudication attempt has no assigned planning contradiction');
+            if (assignments.length !== 1)
+                throw new CoordinationRuntimeError('store-corrupt', 'adjudication attempt has multiple simultaneous assignments', assignments.map((assignment) => assignment.assignment_id));
+            const assignment = assignments[0];
+            if (assignment === undefined)
+                throw new CoordinationRuntimeError('invalid-state', 'adjudication assignment disappeared');
+            const documents = assignment.authoritative_artifact_ids.map((artifactId) => {
+                const artifact = authoritativeArtifactFromRow(asRow(this.#db.prepare('SELECT * FROM authoritative_artifacts WHERE repo_id=? AND entity_id=?').get(run.repo_id, artifactId), `authoritative artifact ${artifactId}`));
+                const bytes = this.#loadEvidenceArtifact(run.repo_id, artifact.evidence);
+                return { artifact, content_utf8: Buffer.from(bytes).toString('utf8') };
+            });
+            if (Buffer.byteLength(canonicalJson(documents), 'utf8') > MAX_ADJUDICATION_BUNDLE_BYTES * 3)
+                throw new CoordinationRuntimeError('invalid-state', 'serialized adjudication bundle exceeds the coordinator frame safety ceiling');
+            const seq = this.#nextEventSequence(run.repo_id);
+            return { sequence: seq, eventType: 'adjudication-assignment-claimed', entityType: 'adjudication-assignment', entityId: assignment.assignment_id, payload: { adjudication_assignment: assignment, authoritative_documents: documents } };
+        });
+    }
+    completeAdjudication(request) {
+        return this.#mutation(request, () => {
+            const childId = payloadString(request.payload, 'child_lease_id');
+            const childRow = asRow(this.#db.prepare('SELECT * FROM child_leases WHERE child_lease_id=?').get(childId), 'adjudicator child');
+            const child = childFromRow(childRow);
+            this.#assertChildAuthority(request, child, childRow);
+            this.#assertVersion(child.version, request.expected_version, 'child lease');
+            if (child.status !== 'running')
+                throw new CoordinationRuntimeError('invalid-state', `adjudicator child lease is ${child.status}`);
+            const assignmentId = payloadString(request.payload, 'assignment_id');
+            const assignmentRow = asRow(this.#db.prepare('SELECT * FROM adjudication_assignments WHERE repo_id=? AND entity_id=?').get(request.repo_id, assignmentId), 'adjudication assignment');
+            const assignment = adjudicationAssignmentFromRow(assignmentRow);
+            if (assignment.state !== 'assigned' || !sameOwner(assignment.adjudicator, child.owner))
+                throw new CoordinationRuntimeError('unauthorized-client', 'child is not the assigned independent adjudicator');
+            const attempt = this.#requireUnitAttempt(child.owner.repo_id, child.owner.workstream_run, child.owner.unit_id, child.owner.attempt);
+            if (attempt.role !== 'adjudicate' || attempt.state !== 'running')
+                throw new CoordinationRuntimeError('invalid-state', 'adjudication completion requires the assigned running adjudication attempt');
+            const unitWorktrees = this.#db.prepare("SELECT * FROM worktrees WHERE repo_id=? AND workstream_run=? AND json_extract(payload_json, '$.kind')='unit' AND json_extract(payload_json, '$.owner.unit_id')=? AND json_extract(payload_json, '$.owner.attempt')=? AND json_extract(payload_json, '$.state')!='removed' ORDER BY entity_id").all(child.owner.repo_id, child.owner.workstream_run, child.owner.unit_id, child.owner.attempt).map(worktreeFromRow);
+            if (unitWorktrees.length !== 1)
+                throw new CoordinationRuntimeError('invalid-state', 'adjudication evidence requires exactly one active durable adjudicator unit worktree');
+            const unitWorktree = unitWorktrees[0];
+            if (unitWorktree === undefined)
+                throw new CoordinationRuntimeError('invalid-state', 'adjudicator unit worktree disappeared');
+            const adjudicationPath = payloadString(request.payload, 'adjudication_path');
+            const expectedPath = this.#evidencePathUnderRoot(unitWorktree.canonical_path, `adjudications/${assignment.assignment_id}.json`);
+            let canonicalAdjudicationPath;
+            try {
+                canonicalAdjudicationPath = realpathSync(adjudicationPath);
+            }
+            catch (error) {
+                throw new CoordinationRuntimeError('invalid-request', 'assigned adjudication output is unreadable', [adjudicationPath, error instanceof Error ? error.message : String(error)]);
+            }
+            if (canonicalAdjudicationPath !== realpathSync(expectedPath))
+                throw new CoordinationRuntimeError('unauthorized-client', 'adjudication output path is not the assignment-derived path in the assigned unit worktree');
+            const bytes = this.#readRegularEvidenceFile(expectedPath, 'assigned adjudication output');
+            const adjudication = { ref: `adjudications/${assignment.assignment_id}.json`, sha256: `sha256:${createHash('sha256').update(bytes).digest('hex')}` };
+            const documents = assignment.authoritative_artifact_ids.map((artifactId) => {
+                const artifact = authoritativeArtifactFromRow(asRow(this.#db.prepare('SELECT * FROM authoritative_artifacts WHERE repo_id=? AND entity_id=?').get(assignment.repo_id, artifactId), `authoritative artifact ${artifactId}`));
+                return { ref: artifact.evidence, bytes: this.#loadEvidenceArtifact(assignment.repo_id, artifact.evidence) };
+            });
+            const packet = { schema_version: 'autopilot.planning_contradiction.v1', escalation_id: assignment.assignment_id, repo_id: assignment.repo_id, participating_runs: assignment.participating_runs, authoritative_refs: documents.map((document) => document.ref), conflicting_clauses: assignment.conflicting_clauses, exhausted_alternatives: ['sequencing', 'partitioning', 'ownership-transfer', 'rebase-revalidation', 'replanning'], adjudication, decision_options: assignment.decision_options, created_event_seq: 0, version: 1 };
+            const validated = validatePlanningContradictionSubmission({ packet, adjudicationBytes: bytes, authoritativeDocuments: documents });
+            if (!sameOwner(validated.adjudication.adjudicator, assignment.adjudicator))
+                throw new CoordinationRuntimeError('invalid-request', 'adjudication evidence identity does not exactly match the coordinator-assigned adjudicator');
+            const seq = this.#nextEventSequence(assignment.repo_id);
+            this.#persistEvidenceArtifact(assignment.repo_id, adjudication, bytes, 'assigned independent adjudication', seq);
+            const accepted = { ...assignment, state: 'accepted', adjudication, child_lease_id: child.child_lease_id, accepted_event_seq: seq, version: assignment.version + 1 };
+            this.#db.prepare('UPDATE adjudication_assignments SET payload_json=?, version=? WHERE repo_id=? AND entity_id=?').run(canonicalJson(accepted), accepted.version, accepted.repo_id, accepted.assignment_id);
+            this.#db.prepare("UPDATE child_leases SET status='terminal', terminal_evidence_ref=?, terminal_evidence_sha256=?, version=version+1 WHERE child_lease_id=?").run(adjudication.ref, adjudication.sha256, child.child_lease_id);
+            const adjudicatorRun = this.#requireRun(child.owner.repo_id, child.owner.workstream_run);
+            const releasedLeaseIds = this.#releaseAttemptLeases(adjudicatorRun, `${child.owner.unit_id}:${String(child.owner.attempt)}`);
+            this.#updateAttemptForSatisfiedCondition(child.owner, 'child-terminal');
+            this.#reevaluateWaitingGroups(child.owner.repo_id, seq);
+            return { sequence: seq, eventType: 'adjudication-accepted', entityType: 'adjudication-assignment', entityId: accepted.assignment_id, payload: { adjudication_assignment: accepted, child: childFromRow(asRow(this.#db.prepare('SELECT * FROM child_leases WHERE child_lease_id=?').get(child.child_lease_id), 'completed adjudicator child')), released_lease_ids: releasedLeaseIds } };
+        });
+    }
+    submitPlanningContradiction(request) {
+        return this.#mutation(request, () => {
+            this.#requireCurrentSession(request);
+            const run = this.#requireRun(request.repo_id, this.#workstreamRun(request));
+            this.#assertVersion(run.version, request.expected_version, 'run');
+            const submitted = parseCoordinationEscalation(request.payload['packet']);
+            if (submitted.repo_id !== run.repo_id || !submitted.participating_runs.includes(run.workstream_run))
+                throw new CoordinationRuntimeError('unauthorized-client', 'planning contradiction must include the submitting durable run');
+            if (submitted.created_event_seq !== 0 || submitted.version !== 1)
+                throw new CoordinationRuntimeError('invalid-request', 'new planning contradiction packet must use created_event_seq 0 and version 1 before coordinator commit');
+            for (const participatingRun of submitted.participating_runs)
+                this.#requireRun(run.repo_id, participatingRun);
+            const assignmentId = payloadString(request.payload, 'assignment_id');
+            const assignment = adjudicationAssignmentFromRow(asRow(this.#db.prepare('SELECT * FROM adjudication_assignments WHERE repo_id=? AND entity_id=?').get(run.repo_id, assignmentId), 'accepted adjudication assignment'));
+            if (assignment.state !== 'accepted' || assignment.adjudication === null || assignment.child_lease_id === null)
+                throw new CoordinationRuntimeError('invalid-state', 'planning contradiction requires an accepted coordinator-assigned adjudication result');
+            if (assignment.assignment_id !== submitted.escalation_id || canonicalJson(assignment.participating_runs) !== canonicalJson(submitted.participating_runs) || canonicalJson(assignment.conflicting_clauses) !== canonicalJson(submitted.conflicting_clauses) || canonicalJson(assignment.decision_options) !== canonicalJson(submitted.decision_options) || canonicalJson(assignment.adjudication) !== canonicalJson(submitted.adjudication))
+                throw new CoordinationRuntimeError('invalid-request', 'planning contradiction packet does not exactly match its accepted adjudication assignment');
+            const child = childFromRow(asRow(this.#db.prepare('SELECT * FROM child_leases WHERE child_lease_id=?').get(assignment.child_lease_id), 'accepted adjudicator child'));
+            if (!sameOwner(child.owner, assignment.adjudicator) || child.status !== 'terminal' || child.terminal_evidence === null || canonicalJson(child.terminal_evidence) !== canonicalJson(assignment.adjudication))
+                throw new CoordinationRuntimeError('store-corrupt', 'accepted adjudication is not bound to exact terminal child evidence');
+            const authoritativeDocuments = assignment.authoritative_artifact_ids.map((artifactId) => {
+                const artifact = authoritativeArtifactFromRow(asRow(this.#db.prepare('SELECT * FROM authoritative_artifacts WHERE repo_id=? AND entity_id=?').get(run.repo_id, artifactId), `authoritative artifact ${artifactId}`));
+                return { ref: artifact.evidence, bytes: this.#loadEvidenceArtifact(run.repo_id, artifact.evidence) };
+            });
+            if (canonicalJson(authoritativeDocuments.map((document) => document.ref)) !== canonicalJson(submitted.authoritative_refs))
+                throw new CoordinationRuntimeError('invalid-request', 'planning contradiction authoritative refs do not exactly match the assigned registered artifacts');
+            const adjudicationBytes = this.#loadEvidenceArtifact(run.repo_id, assignment.adjudication);
+            const validated = validatePlanningContradictionSubmission({ packet: submitted, adjudicationBytes, authoritativeDocuments });
+            const duplicate = this.#db.prepare("SELECT entity_id FROM escalations WHERE repo_id=? AND json_extract(payload_json, '$.adjudication.sha256')=? LIMIT 1").get(run.repo_id, submitted.adjudication.sha256);
+            if (duplicate !== undefined)
+                throw new CoordinationRuntimeError('invalid-state', 'independent adjudication evidence already created a planning contradiction packet');
+            const seq = this.#nextEventSequence(run.repo_id);
+            const packet = { ...validated.packet, created_event_seq: seq };
+            this.#db.prepare('INSERT INTO escalations(entity_id, repo_id, payload_json, version) VALUES(?, ?, ?, ?)').run(stableEntityId('escalation', [packet.repo_id, packet.escalation_id]), packet.repo_id, canonicalJson(packet), packet.version);
+            return { sequence: seq, eventType: 'planning-contradiction-accepted', entityType: 'escalation', entityId: packet.escalation_id, payload: { escalation: packet, failure_code: 'planning-contradiction-review' } };
         });
     }
     recordReleaseEvidence(request) {
@@ -1426,7 +1871,11 @@ export class CoordinatorStore {
                 const seq = this.#nextEventSequence(run.repo_id);
                 const recoveryMessageIds = this.#enqueueOperationRecoveryMessages(run, seq);
                 const summary = this.#reconcileOwnedRun(run.repo_id, run.workstream_run, seq);
-                if (recoveryMessageIds.length === 0 && summary.released_lease_ids.length === 0 && summary.released_request_ids.length === 0 && summary.notification_ids.length === 0 && summary.offered_group_ids.length === 0) {
+                const graphBefore = canonicalJson({ edges: this.#db.prepare('SELECT payload_json FROM wait_for_edges WHERE repo_id=? ORDER BY entity_id').all(run.repo_id).map((row) => sqlString(row, 'payload_json')), resolutions: this.#db.prepare('SELECT payload_json FROM deadlock_resolutions WHERE repo_id=? ORDER BY entity_id').all(run.repo_id).map((row) => sqlString(row, 'payload_json')) });
+                this.#maintainWaitForGraph(run.repo_id, seq);
+                const graphAfter = canonicalJson({ edges: this.#db.prepare('SELECT payload_json FROM wait_for_edges WHERE repo_id=? ORDER BY entity_id').all(run.repo_id).map((row) => sqlString(row, 'payload_json')), resolutions: this.#db.prepare('SELECT payload_json FROM deadlock_resolutions WHERE repo_id=? ORDER BY entity_id').all(run.repo_id).map((row) => sqlString(row, 'payload_json')) });
+                const graphChanged = graphBefore !== graphAfter;
+                if (recoveryMessageIds.length === 0 && summary.released_lease_ids.length === 0 && summary.released_request_ids.length === 0 && summary.notification_ids.length === 0 && summary.offered_group_ids.length === 0 && !graphChanged) {
                     this.#db.exec('ROLLBACK');
                     continue;
                 }
@@ -2024,8 +2473,8 @@ export class CoordinatorStore {
             return;
         }
         const existing = unitAttemptFromRow(row);
-        if (!sameOwner(existing.owner, attempt.owner) || canonicalJson(existing.spec) !== canonicalJson(attempt.spec))
-            throw new CoordinationRuntimeError('invalid-state', 'unit attempt identity was reused with different immutable spec evidence');
+        if (!sameOwner(existing.owner, attempt.owner) || canonicalJson(existing.spec) !== canonicalJson(attempt.spec) || existing.role !== attempt.role)
+            throw new CoordinationRuntimeError('invalid-state', 'unit attempt identity was reused with different immutable spec evidence or role');
         if (existing.state === 'superseded' || existing.state === 'reset' || existing.state === 'failed' || existing.state === 'quarantined')
             throw new CoordinationRuntimeError('invalid-state', `unit attempt is ${existing.state}`);
     }
@@ -2059,6 +2508,84 @@ export class CoordinatorStore {
             if (row !== undefined && !sameOwner(childFromRow(row).owner, owner))
                 throw new CoordinationRuntimeError('invalid-request', 'child-terminal condition targets a child lease with different durable ownership');
         }
+    }
+    #evidencePathUnderRoot(authorityRoot, ref) {
+        const normalizedRef = ref.replace(/\\/gu, '/');
+        if (normalizedRef.startsWith('/') || normalizedRef.startsWith('../') || normalizedRef.includes('/../') || normalizedRef === '..' || normalizedRef.includes('\u0000'))
+            throw new CoordinationRuntimeError('unauthorized-client', 'contradiction evidence ref must be normalized and authority-relative', [ref]);
+        const root = realpathSync(authorityRoot);
+        const target = resolve(root, normalizedRef);
+        const rel = relative(root, target);
+        if (rel.length === 0 || rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel))
+            throw new CoordinationRuntimeError('unauthorized-client', 'contradiction evidence ref escapes its registered authority root', [ref]);
+        return target;
+    }
+    #requireRunMainRoot(repoId, workstreamRun) {
+        const rows = this.#db.prepare("SELECT * FROM worktrees WHERE repo_id=? AND workstream_run=? AND json_extract(payload_json, '$.kind')='main' AND json_extract(payload_json, '$.state')!='removed' ORDER BY entity_id").all(repoId, workstreamRun).map(worktreeFromRow);
+        if (rows.length !== 1)
+            throw new CoordinationRuntimeError('invalid-state', 'run-main authoritative evidence requires exactly one active durable main worktree', [workstreamRun, `count=${String(rows.length)}`]);
+        const worktree = rows[0];
+        if (worktree === undefined)
+            throw new CoordinationRuntimeError('invalid-state', 'run-main worktree disappeared');
+        return worktree.canonical_path;
+    }
+    #readRegularEvidenceFile(path, label) {
+        let descriptor = null;
+        try {
+            const before = lstatSync(path);
+            if (!before.isFile() || before.isSymbolicLink())
+                throw new CoordinationRuntimeError('unauthorized-client', `${label} must be a regular non-symbolic file`, [path]);
+            const canonicalBefore = realpathSync(path);
+            const openedDescriptor = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+            descriptor = openedDescriptor;
+            const opened = fstatSync(openedDescriptor);
+            if (!opened.isFile() || opened.size > MAX_COORDINATION_EVIDENCE_BYTES)
+                throw new CoordinationRuntimeError('invalid-request', `${label} must be a regular file no larger than ${String(MAX_COORDINATION_EVIDENCE_BYTES)} bytes`, [path, `size=${String(opened.size)}`]);
+            if (opened.dev !== before.dev || opened.ino !== before.ino)
+                throw new CoordinationRuntimeError('unauthorized-client', `${label} changed while coordinator authority was being established`, [path]);
+            const bytes = readFileSync(openedDescriptor);
+            const afterDescriptor = fstatSync(openedDescriptor);
+            const afterPath = lstatSync(path);
+            const canonicalAfter = realpathSync(path);
+            if (bytes.byteLength !== opened.size || afterDescriptor.size !== opened.size || afterDescriptor.dev !== opened.dev || afterDescriptor.ino !== opened.ino || afterPath.dev !== opened.dev || afterPath.ino !== opened.ino || canonicalAfter !== canonicalBefore)
+                throw new CoordinationRuntimeError('unauthorized-client', `${label} changed during its atomic evidence read`, [path]);
+            return bytes;
+        }
+        catch (error) {
+            if (error instanceof CoordinationRuntimeError)
+                throw error;
+            throw new CoordinationRuntimeError('invalid-request', `${label} is unreadable`, [path, error instanceof Error ? error.message : String(error)]);
+        }
+        finally {
+            if (descriptor !== null)
+                closeSync(descriptor);
+        }
+    }
+    #persistEvidenceArtifact(repoId, evidence, bytes, label, seq) {
+        if (bytes.byteLength > MAX_COORDINATION_EVIDENCE_BYTES)
+            throw new CoordinationRuntimeError('invalid-request', `${label} exceeds the immutable evidence size ceiling`);
+        const actual = `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
+        if (actual !== evidence.sha256)
+            throw new CoordinationRuntimeError('invalid-request', `${label} hash changed before immutable persistence`, [evidence.sha256, actual]);
+        const entityId = stableEntityId('evidence', [repoId, evidence.sha256]);
+        const existing = this.#db.prepare('SELECT sha256, size_bytes, content FROM evidence_artifacts WHERE entity_id=?').get(entityId);
+        if (existing === undefined) {
+            this.#db.prepare('INSERT INTO evidence_artifacts(entity_id, repo_id, sha256, ref, label, content, size_bytes, created_event_seq) VALUES(?, ?, ?, ?, ?, ?, ?, ?)').run(entityId, repoId, evidence.sha256, evidence.ref, label, bytes, bytes.byteLength, seq);
+            return;
+        }
+        const content = existing['content'];
+        if (!(content instanceof Uint8Array) || sqlString(existing, 'sha256') !== evidence.sha256 || sqlInteger(existing, 'size_bytes') !== bytes.byteLength || !timingSafeEqual(content, bytes))
+            throw new CoordinationRuntimeError('store-corrupt', 'immutable evidence artifact hash identity was reused with different bytes', [entityId]);
+    }
+    #loadEvidenceArtifact(repoId, evidence) {
+        const row = asRow(this.#db.prepare('SELECT sha256, content, size_bytes FROM evidence_artifacts WHERE repo_id=? AND sha256=?').get(repoId, evidence.sha256), 'immutable evidence artifact');
+        const content = row['content'];
+        if (!(content instanceof Uint8Array) || sqlString(row, 'sha256') !== evidence.sha256 || sqlInteger(row, 'size_bytes') !== content.byteLength)
+            throw new CoordinationRuntimeError('store-corrupt', 'immutable evidence artifact metadata or bytes are invalid', [evidence.ref, evidence.sha256]);
+        const actual = `sha256:${createHash('sha256').update(content).digest('hex')}`;
+        if (actual !== evidence.sha256)
+            throw new CoordinationRuntimeError('store-corrupt', 'immutable evidence artifact bytes fail their durable hash', [evidence.ref, evidence.sha256, actual]);
+        return content;
     }
     #assertWorktreeAuthority(worktree, operation) {
         const repository = repositoryFromRow(asRow(this.#db.prepare('SELECT * FROM repositories WHERE repo_id=?').get(worktree.owner.repo_id), 'worktree repository'));
@@ -2286,13 +2813,17 @@ export class CoordinatorStore {
         }
     }
     #reevaluateWaitingGroups(repoId, seq) {
-        const waiting = this.#db.prepare('SELECT * FROM acquisition_groups WHERE repo_id=? ORDER BY json_extract(payload_json, \'$.fairness_event_seq\'), entity_id').all(repoId).map(acquisitionGroupFromRow).filter((group) => group.state === 'waiting');
-        for (const group of waiting) {
+        for (const group of this.#db.prepare("SELECT * FROM acquisition_groups WHERE repo_id=? AND json_extract(payload_json, '$.state')='waiting' ORDER BY entity_id").all(repoId).map(acquisitionGroupFromRow)) {
             this.#markSatisfiedRequests(group, seq);
-            const blockers = this.#blockingLeases(repoId, group.requested_leases);
-            this.#ensureClaimRequests(group, blockers, seq);
-            if (blockers.length > 0 || this.#blockingGrantOffers(repoId, group.acquisition_group_id, group.requested_leases).length > 0)
-                continue;
+            this.#ensureClaimRequests(group, this.#blockingLeases(repoId, group.requested_leases), seq);
+        }
+        while (true) {
+            const dependencyPriority = this.#grantDependencyPriority(repoId);
+            const waiting = this.#db.prepare("SELECT * FROM acquisition_groups WHERE repo_id=? AND json_extract(payload_json, '$.state')='waiting' ORDER BY entity_id").all(repoId).map(acquisitionGroupFromRow).sort((left, right) => (left.bypass_count >= MAX_GRANT_BYPASSES ? 0 : 1) - (right.bypass_count >= MAX_GRANT_BYPASSES ? 0 : 1) || (dependencyPriority.get(coordinationOwnerKey(right.owner)) ?? 0) - (dependencyPriority.get(coordinationOwnerKey(left.owner)) ?? 0) || compareCoordinationGrantPriority(left, right));
+            const eligible = waiting.filter((group) => this.#blockingLeases(repoId, group.requested_leases).length === 0 && this.#blockingGrantOffers(repoId, group.acquisition_group_id, group.requested_leases).length === 0);
+            const group = eligible[0];
+            if (group === undefined)
+                break;
             const offered = { ...group, state: 'grant-ready', offer_expires_at: new Date(this.#clock.now().getTime() + COORDINATOR_GRANT_OFFER_TTL_MS).toISOString(), version: group.version + 1 };
             this.#updateEntity('acquisition_groups', group.acquisition_group_id, offered);
             for (const claimRequest of this.#claimRequestsForGroup(repoId, group.acquisition_group_id)) {
@@ -2306,7 +2837,147 @@ export class CoordinatorStore {
                 payload: { acquisition_group_id: group.acquisition_group_id, offer_expires_at: offered.offer_expires_at, request_refs: this.#claimRequestsForGroup(repoId, group.acquisition_group_id).map((entry) => entry.request_id) },
                 status: 'pending', created_event_seq: seq, delivered_event_seq: null, acknowledged_event_seq: null, version: 1,
             });
+            this.#ageBypassedGroups(offered, eligible.slice(1));
         }
+    }
+    #grantDependencyPriority(repoId) {
+        const priorities = new Map();
+        const leases = new Set(this.#db.prepare('SELECT entity_id FROM edit_leases WHERE repo_id=?').all(repoId).map((row) => sqlString(row, 'entity_id')));
+        const requests = this.#db.prepare('SELECT * FROM claim_requests WHERE repo_id=? ORDER BY entity_id').all(repoId).map(claimRequestFromRow);
+        for (const request of requests) {
+            if (['resolved', 'cancelled', 'superseded', 'released', 'grant-ready', 'granted', 'requester-notified'].includes(request.status))
+                continue;
+            if (!request.blocking_lease_ids.some((leaseId) => leases.has(leaseId)))
+                continue;
+            const key = coordinationOwnerKey(request.owner);
+            priorities.set(key, (priorities.get(key) ?? 0) + 1);
+        }
+        return priorities;
+    }
+    #ageBypassedGroups(offered, otherwiseEligible) {
+        for (const group of otherwiseEligible) {
+            const incompatibleWithOffer = group.requested_leases.some((requested) => offered.requested_leases.some((candidate) => coordinationPathsOverlap(requested.path, candidate.path) && claimModesConflict(requested.mode, candidate.mode)));
+            if (!incompatibleWithOffer)
+                continue;
+            this.#updateEntity('acquisition_groups', group.acquisition_group_id, { ...group, bypass_count: group.bypass_count + 1, version: group.version + 1 });
+        }
+    }
+    #maintainWaitForGraph(repoId, seq, fixedPointDepth = 0) {
+        if (fixedPointDepth > 1024)
+            throw new CoordinationRuntimeError('store-corrupt', 'deadlock resolution did not reach a transactional fixed point');
+        const requests = this.#db.prepare('SELECT * FROM claim_requests WHERE repo_id=? ORDER BY entity_id').all(repoId).map(claimRequestFromRow);
+        const leases = this.#db.prepare('SELECT * FROM edit_leases WHERE repo_id=? ORDER BY entity_id').all(repoId).map(editLeaseFromRow);
+        const priorEdges = this.#db.prepare('SELECT * FROM wait_for_edges WHERE repo_id=? ORDER BY entity_id').all(repoId).map(waitForEdgeFromRow);
+        const nextEdges = buildCoordinationWaitForEdges({ requests, editLeases: leases, priorEdges, eventSeq: seq });
+        const priorById = new Map(priorEdges.map((edge) => [edge.edge_id, edge]));
+        for (const edge of nextEdges) {
+            const prior = priorById.get(edge.edge_id);
+            if (prior === undefined)
+                this.#db.prepare('INSERT INTO wait_for_edges(entity_id, repo_id, request_id, payload_json, version) VALUES(?, ?, ?, ?, ?)').run(edge.edge_id, edge.repo_id, edge.request_id, canonicalJson(edge), edge.version);
+            else if (canonicalJson(prior) !== canonicalJson(edge))
+                this.#db.prepare('UPDATE wait_for_edges SET payload_json=?, version=? WHERE entity_id=?').run(canonicalJson(edge), edge.version, edge.edge_id);
+        }
+        const activeEdges = nextEdges.filter((edge) => edge.state === 'active');
+        const cycles = detectCoordinationWaitCycles(activeEdges);
+        const liveResolutionIds = new Set();
+        for (const cycle of cycles) {
+            const resolutionId = stableEntityId('deadlock', [repoId, ...cycle.edge_ids]);
+            liveResolutionIds.add(resolutionId);
+            const existingRow = this.#db.prepare('SELECT * FROM deadlock_resolutions WHERE entity_id=?').get(resolutionId);
+            const existingResolution = existingRow === undefined ? null : deadlockResolutionFromRow(existingRow);
+            if (existingResolution !== null && existingResolution.state !== 'deferred-no-safe-victim')
+                continue;
+            const attempts = this.#db.prepare('SELECT * FROM unit_attempts WHERE repo_id=? ORDER BY entity_id').all(repoId).map(unitAttemptFromRow);
+            const groups = this.#db.prepare('SELECT * FROM acquisition_groups WHERE repo_id=? ORDER BY entity_id').all(repoId).map(acquisitionGroupFromRow);
+            const children = this.#db.prepare('SELECT * FROM child_leases WHERE repo_id=? ORDER BY child_lease_id').all(repoId).map(childFromRow);
+            const worktrees = this.#db.prepare('SELECT * FROM worktrees WHERE repo_id=? ORDER BY entity_id').all(repoId).map(worktreeFromRow);
+            const operations = this.#db.prepare('SELECT * FROM worktree_operations WHERE repo_id=? ORDER BY entity_id').all(repoId).map(worktreeOperationFromRow);
+            const victim = selectCoordinationDeadlockVictim(cycle, { attempts, acquisitionGroups: groups, claimRequests: requests, childLeases: children, worktrees, worktreeOperations: operations });
+            if (existingResolution !== null && victim === null)
+                continue;
+            const participantOwners = activeEdges.filter((edge) => cycle.edge_ids.includes(edge.edge_id)).flatMap((edge) => [edge.requester, edge.blocker]).filter((owner, index, all) => all.findIndex((candidate) => coordinationOwnerKey(candidate) === coordinationOwnerKey(owner)) === index).sort((left, right) => coordinationOwnerKey(left).localeCompare(coordinationOwnerKey(right)));
+            const resolutionVersion = existingResolution === null ? 1 : existingResolution.version + 1;
+            const createdEventSeq = existingResolution?.created_event_seq ?? seq;
+            const resolution = victim === null ? {
+                schema_version: 'autopilot.deadlock_resolution.v1', resolution_id: resolutionId, repo_id: repoId, cycle_edge_ids: cycle.edge_ids, participant_owners: participantOwners,
+                state: 'deferred-no-safe-victim', victim: null, victim_class: null, action: 'none', reason: 'cycle has no participant outside a critical section with a mechanically safe preemption path', created_event_seq: createdEventSeq, resolved_event_seq: null, version: resolutionVersion,
+            } : {
+                schema_version: 'autopilot.deadlock_resolution.v1', resolution_id: resolutionId, repo_id: repoId, cycle_edge_ids: cycle.edge_ids, participant_owners: participantOwners,
+                state: victim.action === 'cancel-and-supersede' ? 'victim-selected' : 'awaiting-recovery', victim: victim.owner, victim_class: victim.victim_class, action: victim.action,
+                reason: victim.action === 'cancel-and-supersede' ? 'queued or preflight victim can be cancelled without source mutation' : 'owner must complete reset or dirty-work quarantine before lease release', created_event_seq: createdEventSeq, resolved_event_seq: null, version: resolutionVersion,
+            };
+            if (existingResolution === null)
+                this.#db.prepare('INSERT INTO deadlock_resolutions(entity_id, repo_id, payload_json, version) VALUES(?, ?, ?, ?)').run(resolutionId, repoId, canonicalJson(resolution), resolution.version);
+            else if (canonicalJson(existingResolution) !== canonicalJson(resolution))
+                this.#db.prepare('UPDATE deadlock_resolutions SET payload_json=?, version=? WHERE entity_id=?').run(canonicalJson(resolution), resolution.version, resolutionId);
+            if (victim === null) {
+                this.#deferCycleRequests(cycle.request_ids);
+                continue;
+            }
+            this.#insertDeadlockResolutionMessage(resolution, seq);
+            if (victim.action !== 'cancel-and-supersede') {
+                this.#deferCycleRequests(cycle.request_ids);
+                continue;
+            }
+            const attempt = attempts.find((candidate) => coordinationOwnerKey(candidate.owner) === coordinationOwnerKey(victim.owner));
+            if (attempt === undefined)
+                throw new CoordinationRuntimeError('invalid-state', 'selected deadlock victim attempt disappeared');
+            for (const group of groups.filter((candidate) => coordinationOwnerKey(candidate.owner) === coordinationOwnerKey(victim.owner) && (candidate.state === 'waiting' || candidate.state === 'grant-ready' || candidate.state === 'granted')))
+                this.#cancelGroup(group, 'cancelled', seq);
+            this.#updateEntity('unit_attempts', unitAttemptEntityId(attempt.owner), { ...attempt, state: 'superseded', version: attempt.version + 1 });
+            const resolved = { ...resolution, state: 'resolved', resolved_event_seq: seq, version: resolution.version + 1 };
+            this.#db.prepare('UPDATE deadlock_resolutions SET payload_json=?, version=? WHERE entity_id=?').run(canonicalJson(resolved), resolved.version, resolutionId);
+            this.#reevaluateWaitingGroups(repoId, seq);
+        }
+        const openRows = this.#db.prepare("SELECT * FROM deadlock_resolutions WHERE repo_id=? AND json_extract(payload_json, '$.state')!='resolved' ORDER BY entity_id").all(repoId).map(deadlockResolutionFromRow);
+        for (const resolution of openRows) {
+            if (liveResolutionIds.has(resolution.resolution_id))
+                continue;
+            const resolved = { ...resolution, state: 'resolved', resolved_event_seq: seq, version: resolution.version + 1 };
+            this.#db.prepare('UPDATE deadlock_resolutions SET payload_json=?, version=? WHERE entity_id=?').run(canonicalJson(resolved), resolved.version, resolution.resolution_id);
+        }
+        const refreshedRequests = this.#db.prepare('SELECT * FROM claim_requests WHERE repo_id=? ORDER BY entity_id').all(repoId).map(claimRequestFromRow);
+        const refreshedLeases = this.#db.prepare('SELECT * FROM edit_leases WHERE repo_id=? ORDER BY entity_id').all(repoId).map(editLeaseFromRow);
+        const refreshedPrior = this.#db.prepare('SELECT * FROM wait_for_edges WHERE repo_id=? ORDER BY entity_id').all(repoId).map(waitForEdgeFromRow);
+        const refreshedEdges = buildCoordinationWaitForEdges({ requests: refreshedRequests, editLeases: refreshedLeases, priorEdges: refreshedPrior, eventSeq: seq });
+        for (const edge of refreshedEdges) {
+            const prior = refreshedPrior.find((candidate) => candidate.edge_id === edge.edge_id);
+            if (prior !== undefined && canonicalJson(prior) !== canonicalJson(edge))
+                this.#db.prepare('UPDATE wait_for_edges SET payload_json=?, version=? WHERE entity_id=?').run(canonicalJson(edge), edge.version, edge.edge_id);
+        }
+        const remainingCycles = detectCoordinationWaitCycles(refreshedEdges.filter((edge) => edge.state === 'active'));
+        const missingTypedResolution = remainingCycles.some((cycle) => {
+            const resolutionId = stableEntityId('deadlock', [repoId, ...cycle.edge_ids]);
+            const row = this.#db.prepare("SELECT entity_id FROM deadlock_resolutions WHERE entity_id=? AND json_extract(payload_json, '$.state')!='resolved'").get(resolutionId);
+            return row === undefined;
+        });
+        if (missingTypedResolution)
+            this.#maintainWaitForGraph(repoId, seq, fixedPointDepth + 1);
+    }
+    #deferCycleRequests(requestIds) {
+        for (const requestId of requestIds) {
+            const request = this.#requireClaimRequest(requestId);
+            if (request.status === 'deferred' || request.status === 'resolved' || request.status === 'cancelled' || request.status === 'superseded')
+                continue;
+            const blockers = request.blocking_lease_ids.map((leaseId) => this.#db.prepare('SELECT * FROM edit_leases WHERE repo_id=? AND entity_id=?').get(request.requester.repo_id, leaseId)).filter((row) => row !== undefined).map(editLeaseFromRow).map((lease) => ({ lease, conditionEventSeq: this.#requireGroup(lease.owner.repo_id, lease.acquisition_group_id).created_event_seq })).sort((left, right) => left.conditionEventSeq - right.conditionEventSeq || left.lease.edit_lease_id.localeCompare(right.lease.edit_lease_id));
+            const blocker = blockers[0];
+            if (blocker === undefined)
+                continue;
+            this.#updateClaimRequest({ ...request, status: 'deferred', owner_reason: 'deadlock policy deferred this request to the earliest declared owner release condition', release_condition: blocker.lease.normal_release_condition, version: request.version + 1 });
+        }
+    }
+    #insertDeadlockResolutionMessage(resolution, seq) {
+        if (resolution.victim === null)
+            return;
+        const messageId = stableEntityId('message', ['deadlock-resolution', resolution.resolution_id]);
+        if (this.#db.prepare('SELECT message_id FROM messages WHERE message_id=?').get(messageId) !== undefined)
+            return;
+        this.#insertMessage({
+            schema_version: 'autopilot.coordination_message.v1', message_id: messageId, repo_id: resolution.repo_id, recipient_workstream_run: resolution.victim.workstream_run,
+            message_type: 'deadlock-resolution', correlation_id: resolution.resolution_id,
+            payload: { resolution_id: resolution.resolution_id, victim: resolution.victim, victim_class: resolution.victim_class, action: resolution.action, reason: resolution.reason, cycle_edge_ids: resolution.cycle_edge_ids },
+            status: 'pending', created_event_seq: seq, delivered_event_seq: null, acknowledged_event_seq: null, version: 1,
+        });
     }
     #expireGrantOffers(repoId, seq) {
         const now = this.#clock.now().toISOString();
@@ -2316,7 +2987,7 @@ export class CoordinatorStore {
             if (group.offer_expires_at === null || group.offer_expires_at > now)
                 continue;
             expired = true;
-            this.#updateEntity('acquisition_groups', group.acquisition_group_id, { ...group, state: 'waiting', offer_expires_at: null, offer_count: group.offer_count + 1, fairness_event_seq: seq, version: group.version + 1 });
+            this.#updateEntity('acquisition_groups', group.acquisition_group_id, { ...group, state: 'waiting', offer_expires_at: null, offer_count: group.offer_count + 1, version: group.version + 1 });
             this.#db.prepare("UPDATE messages SET status='acknowledged', delivered_event_seq=COALESCE(delivered_event_seq, ?), acknowledged_event_seq=COALESCE(acknowledged_event_seq, ?), version=version+1 WHERE repo_id=? AND correlation_id=? AND message_type='grant-offer' AND status!='acknowledged'").run(seq, seq, repoId, group.acquisition_group_id);
             this.#advanceMailboxCursor(repoId, group.owner.workstream_run, 'acknowledged');
             for (const claimRequest of this.#claimRequestsForGroup(repoId, group.acquisition_group_id)) {
@@ -2380,6 +3051,7 @@ export class CoordinatorStore {
                 return replay;
             }
             const result = apply();
+            this.#maintainWaitForGraph(request.repo_id, result.sequence);
             const committed = this.#commitDescription(result.sequence, result.eventType, result.entityType, result.entityId, result.payload);
             this.#db.prepare('INSERT INTO events(repo_id, event_seq, event_type, entity_type, entity_id, idempotency_key, request_sha256, occurred_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?)').run(request.repo_id, result.sequence, result.eventType, result.entityType, result.entityId, idempotencyKey, digest, this.#clock.now().toISOString());
             this.#db.prepare('INSERT INTO idempotency_results(repo_id, idempotency_key, request_sha256, committed_event_seq, payload_json) VALUES(?, ?, ?, ?, ?)').run(request.repo_id, idempotencyKey, digest, result.sequence, canonicalJson(committed.payload));

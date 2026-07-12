@@ -9,7 +9,7 @@ import { describe, it } from 'node:test';
 
 import { CoordinatorClient } from '../../src/core/coordination/client.ts';
 import { CoordinationRuntimeError } from '../../src/core/coordination/failures.ts';
-import { encodeCoordinatorFrame, parseCoordinatorTransportRequest } from '../../src/core/coordination/ipc.ts';
+import { encodeCoordinatorFrame, parseCoordinatorLegacyReplayTransportRequest, parseCoordinatorTransportRequest } from '../../src/core/coordination/ipc.ts';
 import { coordinatorRuntimePaths } from '../../src/core/coordination/runtime-paths.ts';
 import { startCoordinatorServer } from '../../src/core/coordination/server.ts';
 import type { CoordinationMessage, CoordinatorRequestEnvelope, CoordinatorResponseEnvelope } from '../../src/core/coordination/types.ts';
@@ -19,6 +19,23 @@ const EMPTY_COORDINATOR_PAYLOAD: Readonly<Record<string, unknown>> = Object.free
 
 interface JsonMap {
   readonly [key: string]: unknown;
+}
+
+interface MutableJsonMap {
+  [key: string]: unknown;
+}
+
+function omitFields(value: JsonMap, omitted: readonly string[]): JsonMap {
+  const result: MutableJsonMap = {};
+  for (const [key, entry] of Object.entries(value)) if (!omitted.includes(key)) result[key] = entry;
+  return result;
+}
+
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value === 'boolean' || typeof value === 'number' || typeof value === 'string') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  if (typeof value !== 'object') throw new Error('canonical test value is not JSON');
+  return `{${Object.entries(value).sort((left, right) => left[0].localeCompare(right[0])).map(([key, entry]) => `${JSON.stringify(key)}:${canonicalJson(entry)}`).join(',')}}`;
 }
 
 function record(value: unknown, label: string): JsonMap {
@@ -45,7 +62,7 @@ function queryPayload(response: CoordinatorResponseEnvelope, field: string): rea
 function request(overrides: Partial<CoordinatorRequestEnvelope>): CoordinatorRequestEnvelope {
   return {
     schema_version: 'autopilot.coordinator_request.v1',
-    protocol_version: '1.1',
+    protocol_version: '1.2',
     request_id: `request-${randomUUID()}`,
     action: 'status',
     idempotency_key: null,
@@ -150,12 +167,12 @@ void describe('transactional coordinator runtime', () => {
     const initial = await startCoordinatorServer(paths);
     await initial.close();
     const oldDatabase = new DatabaseSync(paths.databasePath);
-    oldDatabase.exec('DROP TABLE reservation_obligations; DROP TABLE run_terminal_intents; ALTER TABLE runs DROP COLUMN coordination_authority; DROP INDEX idx_worktree_operations_recovery; DROP INDEX idx_worktrees_owner; DROP TABLE reconciliation_evidence; DROP TABLE mailbox_cursors; DROP INDEX idx_messages_cursor; DROP TABLE acquisition_groups; DROP INDEX idx_edit_leases_repo; DROP INDEX idx_claim_requests_owner_status; DROP INDEX idx_claim_requests_requester_status; DELETE FROM schema_migrations WHERE version IN (2,3,4,5); PRAGMA user_version=1;');
+    oldDatabase.exec('DROP TABLE evidence_artifacts; DROP TABLE adjudication_assignments; DROP TABLE authoritative_artifacts; DROP TABLE deadlock_resolutions; DROP TABLE wait_for_edges; DROP TABLE reservation_obligations; DROP TABLE run_terminal_intents; ALTER TABLE runs DROP COLUMN coordination_authority; DROP INDEX idx_worktree_operations_recovery; DROP INDEX idx_worktrees_owner; DROP TABLE reconciliation_evidence; DROP TABLE mailbox_cursors; DROP INDEX idx_messages_cursor; DROP TABLE acquisition_groups; DROP INDEX idx_edit_leases_repo; DROP INDEX idx_claim_requests_owner_status; DROP INDEX idx_claim_requests_requester_status; DELETE FROM schema_migrations WHERE version IN (2,3,4,5,6); PRAGMA user_version=1;');
     oldDatabase.close();
     const upgraded = await startCoordinatorServer(paths);
     try {
       const doctor = await new CoordinatorClient({ env, autoStart: false }).query('doctor');
-      assert.equal(doctor.payload['database_schema_version'], 5);
+      assert.equal(doctor.payload['database_schema_version'], 6);
       assert.equal(typeof doctor.payload['last_backup_path'], 'string');
       const database = new DatabaseSync(paths.databasePath, { readOnly: true });
       try {
@@ -201,7 +218,7 @@ void describe('transactional coordinator runtime', () => {
     });
     await initial.close();
     const oldDatabase = new DatabaseSync(paths.databasePath);
-    oldDatabase.exec('DROP TABLE reservation_obligations; DROP TABLE run_terminal_intents; ALTER TABLE runs DROP COLUMN coordination_authority; DROP INDEX idx_worktree_operations_recovery; DROP INDEX idx_worktrees_owner; DROP TABLE reconciliation_evidence; DROP TABLE mailbox_cursors; DROP INDEX idx_messages_cursor; DELETE FROM schema_migrations WHERE version IN (3,4,5); PRAGMA user_version=2;');
+    oldDatabase.exec('DROP TABLE evidence_artifacts; DROP TABLE adjudication_assignments; DROP TABLE authoritative_artifacts; DROP TABLE deadlock_resolutions; DROP TABLE wait_for_edges; DROP TABLE reservation_obligations; DROP TABLE run_terminal_intents; ALTER TABLE runs DROP COLUMN coordination_authority; DROP INDEX idx_worktree_operations_recovery; DROP INDEX idx_worktrees_owner; DROP TABLE reconciliation_evidence; DROP TABLE mailbox_cursors; DROP INDEX idx_messages_cursor; DELETE FROM schema_migrations WHERE version IN (3,4,5,6); PRAGMA user_version=2;');
     oldDatabase.close();
     const upgraded = await startCoordinatorServer(paths);
     try {
@@ -214,6 +231,43 @@ void describe('transactional coordinator runtime', () => {
       assert.equal(status.payload['pending_messages'], 1);
     } finally {
       await upgraded.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  void it('migrates existing schema-5 attempt roles and acquisition kinds without inventing modern authority', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pi-autopilot-migrate-v5-'));
+    const stateRoot = join(root, 'state');
+    const env = { ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: stateRoot };
+    let server = await startCoordinatorServer(coordinatorRuntimePaths(env));
+    try {
+      const client = new CoordinatorClient({ env, autoStart: false });
+      const runResponse = await attachRun(client);
+      const run = record(runResponse.payload['run'], 'migration run');
+      const sessionResponse = await attachSession(client, integer(run['version'], 'migration run version'), 1, 'session-migration-v5', 'boot-migration-v5');
+      const attachedRun = record(sessionResponse.payload['run'], 'attached migration run');
+      const acquireIdentity = { repoId: 'repo-runtime-test', workstreamRun: 'run-runtime-test', sessionId: 'session-migration-v5', fencingGeneration: 1, expectedVersion: integer(attachedRun['version'], 'attached migration run version'), idempotencyKey: 'migration-v5-group' };
+      const acquirePayload = { acquisition_group_id: 'group-migration-v5', acquisition_kind: 'initial', unit_id: 'unit-migration-v5', attempt: 1, requested_leases: [{ path: 'src/migration-v5.ts', mode: 'READ', purpose: 'migration fixture' }], reason: 'migration fixture', normal_release_condition: { condition_type: 'unit-merged', target_id: 'unit-migration-v5:1', evidence: null }, spec_ref: 'unit-migration-v5.json', spec_sha256: `sha256:${'d'.repeat(64)}`, role: 'implement', preemptible: true, checkpoint_ordinal: 0, session_lease_id: 'lease-session-migration-v5-1', session_token: sessionToken(1) };
+      await client.mutate('acquire-group', acquireIdentity, acquirePayload);
+      const legacyPayload = omitFields(acquirePayload, ['acquisition_kind', 'role']);
+      const legacyRequest = { schema_version: 'autopilot.coordinator_request.v1', protocol_version: '1.1', request_id: 'legacy-retry-request', action: 'acquire-group', idempotency_key: 'migration-v5-group', repo_id: 'repo-runtime-test', workstream_run: 'run-runtime-test', session_id: 'session-migration-v5', fencing_generation: 1, expected_version: integer(attachedRun['version'], 'attached migration run version'), payload: legacyPayload };
+      const legacySemantic = { schema_version: legacyRequest.schema_version, protocol_version: legacyRequest.protocol_version, action: legacyRequest.action, repo_id: legacyRequest.repo_id, workstream_run: legacyRequest.workstream_run, session_id: null, fencing_generation: null, expected_version: null, payload: omitFields(legacyPayload, ['session_lease_id', 'session_token']) };
+      const legacyDigest = `sha256:${createHash('sha256').update(canonicalJson(legacySemantic), 'utf8').digest('hex')}`;
+      await server.close();
+      const database = new DatabaseSync(coordinatorRuntimePaths(env).databasePath);
+      database.exec("UPDATE unit_attempts SET payload_json=json_remove(payload_json, '$.role'); UPDATE acquisition_groups SET payload_json=json_remove(payload_json, '$.acquisition_kind'); UPDATE idempotency_results SET payload_json=json_remove(payload_json, '$.acquisition_group.acquisition_kind') WHERE idempotency_key='migration-v5-group'; DROP TABLE evidence_artifacts; DROP TABLE adjudication_assignments; DROP TABLE authoritative_artifacts; DROP TABLE deadlock_resolutions; DROP TABLE wait_for_edges; DELETE FROM schema_migrations WHERE version=6; PRAGMA user_version=5;");
+      database.prepare("UPDATE idempotency_results SET request_sha256=? WHERE idempotency_key='migration-v5-group'").run(legacyDigest);
+      database.close();
+      server = await startCoordinatorServer(coordinatorRuntimePaths(env));
+      const status = await client.query('status', 'repo-runtime-test', 'run-runtime-test');
+      const attempt = record(queryPayload(status, 'unit_attempts')[0], 'migrated attempt');
+      const group = record(queryPayload(status, 'acquisition_groups')[0], 'migrated group');
+      assert.equal(attempt['role'], 'unknown');
+      assert.equal(group['acquisition_kind'], 'legacy-unknown');
+      const replay = server.store.replayLegacyRequest(legacyRequest);
+      assert.equal(record(replay.payload['acquisition_group'], 'migrated legacy replay group')['acquisition_kind'], 'legacy-unknown');
+    } finally {
+      await server.close();
       await rm(root, { recursive: true, force: true });
     }
   });
@@ -284,12 +338,13 @@ void describe('transactional coordinator runtime', () => {
         (error: unknown) => error instanceof CoordinationRuntimeError && error.code === 'fenced-session',
       );
 
+      await client.mutate('acquire-group', { repoId: 'repo-runtime-test', workstreamRun: 'run-runtime-test', sessionId: 'session-second', fencingGeneration: 2, expectedVersion: integer(secondRun['version'], 'second run version'), idempotencyKey: 'acquire-child-runtime-test' }, { acquisition_group_id: 'group-runtime-test', acquisition_kind: 'initial', unit_id: 'unit-runtime-test', attempt: 1, requested_leases: [{ path: 'src/runtime.ts', mode: 'READ', purpose: 'register child fixture' }], reason: 'establish durable attempt before child', normal_release_condition: { condition_type: 'child-terminal', target_id: 'child-run-runtime-test-unit-runtime-test-1', evidence: null }, spec_ref: 'unit-runtime-test.json', spec_sha256: `sha256:${'a'.repeat(64)}`, role: 'implement', preemptible: true, checkpoint_ordinal: 0, session_lease_id: 'lease-session-second-2', session_token: sessionToken(2) });
       const childToken = 'a'.repeat(64);
       const childResponse = await client.mutate('register-child', {
         repoId: 'repo-runtime-test', workstreamRun: 'run-runtime-test', sessionId: 'session-second', fencingGeneration: 2,
         expectedVersion: integer(secondRun['version'], 'second run version'), idempotencyKey: 'register-child-runtime-test',
       }, {
-        child_lease_id: 'child-runtime-test', autopilot_id: 'autopilot-runtime-test', unit_id: 'unit-runtime-test', attempt: 1,
+        child_lease_id: 'child-run-runtime-test-unit-runtime-test-1', autopilot_id: 'autopilot-runtime-test', unit_id: 'unit-runtime-test', attempt: 1,
         pid: process.pid, boot_id: 'child-boot', child_token: childToken, session_lease_id: 'lease-session-second-2', session_token: sessionToken(2), lease_expires_at: '2026-07-11T15:00:00.000Z',
       });
       const registeredChild = record(childResponse.payload['child'], 'child');
@@ -297,7 +352,7 @@ void describe('transactional coordinator runtime', () => {
 
       const message: CoordinationMessage = {
         schema_version: 'autopilot.coordination_message.v1', message_id: 'message-runtime-test', repo_id: 'repo-runtime-test', recipient_workstream_run: 'run-runtime-test',
-        message_type: 'recovery-required', correlation_id: 'child-runtime-test', payload: { child_lease_id: 'child-runtime-test' }, status: 'pending',
+        message_type: 'recovery-required', correlation_id: 'child-run-runtime-test-unit-runtime-test-1', payload: { child_lease_id: 'child-run-runtime-test-unit-runtime-test-1' }, status: 'pending',
         created_event_seq: 4, delivered_event_seq: null, acknowledged_event_seq: null, version: 1,
       };
       server.store.enqueueMessageForTest(message);
@@ -309,7 +364,7 @@ void describe('transactional coordinator runtime', () => {
         repoId: 'repo-runtime-test', workstreamRun: 'run-runtime-test', sessionId: null, fencingGeneration: null,
         expectedVersion: integer(registeredChild['version'], 'registered child version'), idempotencyKey: 'heartbeat-child-after-handoff',
       }, {
-        child_lease_id: 'child-runtime-test', child_token: childToken, pid: process.pid, boot_id: 'child-boot', lease_expires_at: '2000-01-01T00:00:00.000Z',
+        child_lease_id: 'child-run-runtime-test-unit-runtime-test-1', child_token: childToken, pid: process.pid, boot_id: 'child-boot', lease_expires_at: '2000-01-01T00:00:00.000Z',
       });
       const heartbeatChild = record(childHeartbeat.payload['child'], 'heartbeat child');
       assert.equal(heartbeatChild['status'], 'running');
@@ -323,7 +378,7 @@ void describe('transactional coordinator runtime', () => {
           repoId: 'repo-runtime-test', workstreamRun: 'run-runtime-test', sessionId: null, fencingGeneration: null,
           expectedVersion: integer(heartbeatChild['version'], 'heartbeat child version'), idempotencyKey: 'heartbeat-child-wrong-token',
         }, {
-          child_lease_id: 'child-runtime-test', child_token: 'b'.repeat(64), pid: process.pid, boot_id: 'child-boot', lease_expires_at: '2026-07-11T21:00:00.000Z',
+          child_lease_id: 'child-run-runtime-test-unit-runtime-test-1', child_token: 'b'.repeat(64), pid: process.pid, boot_id: 'child-boot', lease_expires_at: '2026-07-11T21:00:00.000Z',
         }),
         (error: unknown) => error instanceof CoordinationRuntimeError && error.code === 'unauthorized-client',
       );
@@ -337,7 +392,7 @@ void describe('transactional coordinator runtime', () => {
         repoId: 'repo-runtime-test', workstreamRun: 'run-runtime-test', sessionId: null, fencingGeneration: null,
         expectedVersion: integer(heartbeatChild['version'], 'heartbeat child version'), idempotencyKey: 'complete-child-after-handoff',
       }, {
-        child_lease_id: 'child-runtime-test', child_token: childToken, pid: process.pid, boot_id: 'child-boot', status: 'terminal',
+        child_lease_id: 'child-run-runtime-test-unit-runtime-test-1', child_token: childToken, pid: process.pid, boot_id: 'child-boot', status: 'terminal',
         evidence_ref: childEvidenceRef, evidence_sha256: childEvidenceSha,
       });
       const terminalChild = record(completedChild.payload['child'], 'completed child');
@@ -347,7 +402,7 @@ void describe('transactional coordinator runtime', () => {
           repoId: 'repo-runtime-test', workstreamRun: 'run-runtime-test', sessionId: null, fencingGeneration: null,
           expectedVersion: integer(terminalChild['version'], 'terminal child version'), idempotencyKey: 'rewrite-terminal-child',
         }, {
-          child_lease_id: 'child-runtime-test', child_token: childToken, pid: process.pid, boot_id: 'child-boot', status: 'recovery-required', evidence_ref: null, evidence_sha256: null,
+          child_lease_id: 'child-run-runtime-test-unit-runtime-test-1', child_token: childToken, pid: process.pid, boot_id: 'child-boot', status: 'recovery-required', evidence_ref: null, evidence_sha256: null,
         }),
         (error: unknown) => error instanceof CoordinationRuntimeError && error.code === 'invalid-state',
       );
@@ -392,6 +447,8 @@ void describe('transactional coordinator runtime', () => {
   void it('rejects malformed transport, bad capability shape, and oversized frames', () => {
     assert.throws(() => parseCoordinatorTransportRequest({ transport_version: 'wrong', capability: 'a'.repeat(64), request: request({}) }), /protocol version|transport version/u);
     assert.throws(() => parseCoordinatorTransportRequest({ transport_version: 'autopilot.coordinator_transport.v1', capability: 'short', request: request({}) }), /capability proof/u);
+    const legacy = parseCoordinatorLegacyReplayTransportRequest({ transport_version: 'autopilot.coordinator_transport.v1', capability: 'a'.repeat(64), request: { schema_version: 'autopilot.coordinator_request.v1', protocol_version: '1.1', request_id: 'legacy-request', action: 'acquire-group', idempotency_key: 'legacy-key', repo_id: 'repo-runtime-test', workstream_run: 'run-runtime-test', session_id: 'old-session', fencing_generation: 1, expected_version: 1, payload: { acquisition_group_id: 'legacy-group' } } });
+    assert.equal(legacy.request['protocol_version'], '1.1');
     assert.throws(() => encodeCoordinatorFrame({ payload: 'x'.repeat(1_048_577) }), /frame exceeds/u);
     const digest = createHash('sha256').update('runtime-test', 'utf8').digest('hex');
     assert.equal(digest.length, 64);

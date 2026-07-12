@@ -99,7 +99,7 @@ function acquisitionInput(suffix: string, path = 'src/shared.ts') {
     reason: `run ${suffix} changes ${path}`,
     normalReleaseCondition: { condition_type: 'unit-merged' as const, target_id: `unit-${suffix}:1`, evidence: null },
     specRef: `.pi/autopilot/work-${suffix}/unit-specs/unit-${suffix}.json`, specSha256: `sha256:${suffix.charCodeAt(0).toString(16).slice(-1).repeat(64)}` as `sha256:${string}`,
-    preemptible: true, checkpointOrdinal: 0,
+    role: 'implement' as const, preemptible: true, checkpointOrdinal: 0,
   };
 }
 
@@ -128,6 +128,7 @@ async function writeValidatorArtifacts(harness: Harness, actor: Actor, unitId: s
     schema_version: 'autopilot.execution_audit.v1', workstream: actor.context.workstream, unit_id: unitId, role: 'validate', attempt, audited_at: '2026-07-12T10:11:00.000Z', cwd: join(harness.stateRoot, 'worktrees', actor.context.repo_id, 'active', actor.context.workstream_run, 'main'), git_head: null, dirty_baseline: false, dirty_baseline_paths: [], dirty_relevant_paths: [], actual_changed_paths: [], status_reported_changed_paths: [], omitted_status_changes: [], reported_but_not_actual_changes: [], outside_owned_paths: [], read_only_touched_paths: [], untouchable_touched_paths: [], path_counts: { dirty_baseline_paths: 0, dirty_relevant_paths: 0, actual_changed_paths: 0, status_reported_changed_paths: 0, omitted_status_changes: 0, reported_but_not_actual_changes: 0, outside_owned_paths: 0, read_only_touched_paths: 0, untouchable_touched_paths: 0 }, truncated_path_sets: [], declared_validation_commands: ['generic-validation'], status_reported_commands: ['generic-validation'], command_coverage_gaps: [], classification: 'clean', evidence_refs: [], summary: 'Independent reservation validation audit is clean.',
   });
   const childId = `child-${actor.context.workstream_run}-${unitId}-${String(attempt)}`;
+  await harness.client.mutate('register-attempt', { repoId: actor.context.repo_id, workstreamRun: actor.context.workstream_run, sessionId: actor.context.session_id, fencingGeneration: actor.context.session_generation, expectedVersion: actor.context.run_version, idempotencyKey: `register-attempt-${childId}` }, { unit_id: unitId, attempt, spec_ref: `unit-specs/${unitId}.json`, spec_sha256: `sha256:${'c'.repeat(64)}`, role: 'validate', preemptible: true, checkpoint_ordinal: 0, session_lease_id: actor.context.session_lease_id, session_token: actor.context.session_token });
   const childToken = createHash('sha256').update(childId, 'utf8').digest('hex');
   const registered = await harness.client.mutate('register-child', {
     repoId: actor.context.repo_id, workstreamRun: actor.context.workstream_run, sessionId: actor.context.session_id, fencingGeneration: actor.context.session_generation, expectedVersion: actor.context.run_version, idempotencyKey: `register-${childId}`,

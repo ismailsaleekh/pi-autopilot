@@ -162,6 +162,7 @@ function generatedGrantSnapshot(leftMode: CoordinationClaimMode, rightMode: Coor
     })),
     edit_leases: [],
     claim_requests: [],
+    wait_for_edges: [],
     messages: [],
   };
 }

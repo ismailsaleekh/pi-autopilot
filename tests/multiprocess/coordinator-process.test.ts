@@ -62,8 +62,8 @@ function startServe(stateRoot: string): ChildProcessLite {
   });
 }
 
-function runNegotiationClient(stateRoot: string, action: 'attach-acquire' | 'release' | 'ack', suffix: string, targetGroup?: string): Readonly<Record<string, unknown>> {
-  const result = spawnSync(process.execPath, ['--experimental-strip-types', negotiationClient, action, stateRoot, suffix, ...(targetGroup === undefined ? [] : [targetGroup])], {
+function runNegotiationClient(stateRoot: string, action: 'attach-acquire' | 'attach-acquire-path' | 'acquire-path' | 'release' | 'ack', suffix: string, ...args: readonly string[]): Readonly<Record<string, unknown>> {
+  const result = spawnSync(process.execPath, ['--experimental-strip-types', negotiationClient, action, stateRoot, suffix, ...args], {
     cwd: packageRoot,
     env: { ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: stateRoot },
     encoding: 'utf8',
@@ -162,6 +162,34 @@ void describe('coordinator multiprocess lifecycle', () => {
       assert.equal(grant['lease_count'], 1);
       const status = await new CoordinatorClient({ env, autoStart: false }).query('status', 'repo-process-negotiation', 'run-b');
       assert.equal(Array.isArray(status.payload['edit_leases']) ? status.payload['edit_leases'].length : -1, 1);
+    } finally {
+      await stopCoordinator(paths.lockPath);
+      if (!server.killed) server.kill('SIGTERM');
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  void it('detects and resolves a cycle created by two independent client processes', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pi-autopilot-coordinator-deadlock-process-'));
+    const stateRoot = join(root, 'state');
+    const env = { ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: stateRoot };
+    const paths = coordinatorRuntimePaths(env);
+    const server = startServe(stateRoot);
+    try {
+      await waitFor(() => existsSync(paths.lockPath) && existsSync(paths.capabilityPath));
+      const client = new CoordinatorClient({ env, autoStart: false });
+      await waitForCoordinator(client);
+      assert.equal(runNegotiationClient(stateRoot, 'attach-acquire-path', 'a', 'group-a-held', 'src/a.ts')['outcome'], 'granted');
+      assert.equal(runNegotiationClient(stateRoot, 'attach-acquire-path', 'b', 'group-b-held', 'src/b.ts')['outcome'], 'granted');
+      assert.equal(runNegotiationClient(stateRoot, 'acquire-path', 'a', 'group-a-wait', 'src/b.ts')['outcome'], 'waiting-for-peer-release');
+      runNegotiationClient(stateRoot, 'acquire-path', 'b', 'group-b-wait', 'src/a.ts');
+      const status = await client.query('status', 'repo-process-negotiation', 'run-a');
+      const resolutions = status.payload['deadlock_resolutions'];
+      assert.equal(Array.isArray(resolutions) && resolutions.length === 1, true);
+      const resolution = Array.isArray(resolutions) ? resolutions[0] : null;
+      assert.equal(typeof resolution === 'object' && resolution !== null && !Array.isArray(resolution) && (resolution as Readonly<Record<string, unknown>>)['state'] === 'resolved', true);
+      const escalations = status.payload['escalations'];
+      assert.equal(Array.isArray(escalations) ? escalations.length : -1, 0);
     } finally {
       await stopCoordinator(paths.lockPath);
       if (!server.killed) server.kill('SIGTERM');

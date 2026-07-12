@@ -508,7 +508,7 @@ export const AUTOPILOT_STATE_JSON_SCHEMA = {
       propertyNames: unitIdSchema(),
       maxProperties: 2_000,
     },
-    operator_questions: boundedArray(boundedString(500), 80),
+    operator_questions: boundedArray(boundedString(500), 0),
     next_actions: boundedArray(boundedString(500), 80),
     work_items: {
       type: 'object',

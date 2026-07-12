@@ -12,7 +12,9 @@ import { AUTOPILOT_STATE_ROOT_ENV, prepareAutopilotUnitWorktree, prepareAutopilo
 import { AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV } from '../../src/core/names.ts';
 import { coordinatorRuntimePaths } from '../../src/core/coordination/runtime-paths.ts';
 import { startCoordinatorServer } from '../../src/core/coordination/server.ts';
-import { DurableRunSupervisorClient } from '../../src/core/coordination/supervisor.ts';
+import { DurableRunSupervisorClient, readCoordinatorSessionContext } from '../../src/core/coordination/supervisor.ts';
+import { CoordinatorClient } from '../../src/core/coordination/client.ts';
+import { parseCoordinationUnitAttempt } from '../../src/core/coordination/contracts.ts';
 import { autopilotModelAssignmentForRole } from '../../src/core/model-roster.ts';
 
 const TEST_DIR = dirname(fileURLToPath(import.meta.url));
@@ -312,6 +314,15 @@ void describe('autopilot-agent-run wrapper', () => {
       assert.deepEqual(executionCommit.edited_claimed_paths, ['src/smoke.ts']);
       const receipt = JSON.parse(await readFile(unitSpec.receipt_output, 'utf8')) as FakeReceipt;
       assert.equal(receipt.tool_call_id, 'call-autopilot-fake-1');
+      const contextPath = process.env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV];
+      if (contextPath === undefined) throw new Error('runner coordinator context path missing');
+      const context = await readCoordinatorSessionContext(contextPath);
+      const coordinationStatus = await new CoordinatorClient({ env: process.env, autoStart: false }).query('status', context.repo_id, context.workstream_run);
+      const attempts = coordinationStatus.payload['unit_attempts'];
+      if (!Array.isArray(attempts)) throw new Error('runner status unit_attempts is not an array');
+      const durableAttempt = attempts.map(parseCoordinationUnitAttempt).find((attempt) => attempt.owner.unit_id === unitSpec.unit_id);
+      assert.equal(durableAttempt?.state, 'transport-complete');
+      assert.equal(durableAttempt?.checkpoint_ordinal, 1);
     });
   });
 

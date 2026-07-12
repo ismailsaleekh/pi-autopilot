@@ -1,4 +1,5 @@
 import { claimModesConflict, coordinationPathsOverlap } from './contracts.ts';
+import { coordinationOwnerKey, detectCoordinationWaitCycles } from './deadlock.ts';
 import { CoordinationRuntimeError } from './failures.ts';
 import type { CoordinationOwnerIdentity, CoordinationReleaseCondition, CoordinationSnapshot } from './types.ts';
 
@@ -66,6 +67,12 @@ export function checkCoordinationInvariants(snapshot: CoordinationSnapshot): rea
   findings.push(...duplicateFindings(snapshot.messages.map((value) => value.message_id), 'duplicate-message', 'messages'));
   findings.push(...duplicateFindings(snapshot.worktrees.map((value) => value.worktree_id), 'duplicate-worktree', 'worktrees'));
   findings.push(...duplicateFindings(snapshot.worktree_operations.map((value) => value.operation_id), 'duplicate-operation', 'worktree_operations'));
+  findings.push(...duplicateFindings(snapshot.wait_for_edges.map((value) => value.edge_id), 'duplicate-wait-for-edge', 'wait_for_edges'));
+  findings.push(...duplicateFindings(snapshot.wait_for_edges.map((value) => value.request_id), 'duplicate-wait-for-request', 'wait_for_edges'));
+  findings.push(...duplicateFindings(snapshot.deadlock_resolutions.map((value) => value.resolution_id), 'duplicate-deadlock-resolution', 'deadlock_resolutions'));
+  findings.push(...duplicateFindings(snapshot.authoritative_artifacts.map((value) => value.artifact_id), 'duplicate-authoritative-artifact', 'authoritative_artifacts'));
+  findings.push(...duplicateFindings(snapshot.adjudication_assignments.map((value) => value.assignment_id), 'duplicate-adjudication-assignment', 'adjudication_assignments'));
+  findings.push(...duplicateFindings(snapshot.adjudication_assignments.filter((value) => value.state === 'assigned').map((value) => ownerKey(value.adjudicator)), 'duplicate-live-adjudicator-assignment', 'adjudication_assignments'));
   findings.push(...duplicateFindings(snapshot.escalations.map((value) => value.escalation_id), 'duplicate-escalation', 'escalations'));
   findings.push(...duplicateFindings(snapshot.events.map((value) => `${value.repo_id}\0${String(value.event_seq)}`), 'duplicate-event-sequence', 'events'));
   findings.push(...duplicateFindings(snapshot.events.map((value) => `${value.repo_id}\0${value.idempotency_key}`), 'duplicate-idempotency-key', 'events'));
@@ -106,8 +113,19 @@ export function checkCoordinationInvariants(snapshot: CoordinationSnapshot): rea
     if (!attempts.has(ownerKey(child.owner))) findings.push(finding('child-attempt-missing', child.child_lease_id, 'owning unit attempt does not exist'));
     if (child.status === 'terminal' && child.terminal_evidence === null) findings.push(finding('terminal-child-evidence-missing', child.child_lease_id, 'terminal child requires immutable evidence'));
   }
+  for (const attempt of snapshot.unit_attempts) {
+    const attemptGroups = snapshot.acquisition_groups.filter((group) => ownerKey(group.owner) === ownerKey(attempt.owner));
+    const initialGroups = attemptGroups.filter((group) => group.acquisition_kind === 'initial' || group.acquisition_kind === 'legacy-unknown');
+    if (initialGroups.length > 1) findings.push(finding('multiple-initial-acquisition-groups', ownerKey(attempt.owner), 'unit attempt may declare only one immutable initial acquisition group'));
+    for (const expansion of attemptGroups.filter((group) => group.acquisition_kind === 'materialization-read-expansion')) {
+      if (initialGroups.length !== 1 || expansion.requested_leases.some((lease) => lease.mode !== 'READ')) findings.push(finding('invalid-materialization-expansion', expansion.acquisition_group_id, 'materialization expansion requires one initial group and READ-only authority'));
+    }
+  }
+
   for (const group of snapshot.acquisition_groups) {
     assertOwner(group.owner, group.acquisition_group_id);
+    const groupAttempt = attempts.get(ownerKey(group.owner));
+    if (groupAttempt !== undefined && groupAttempt.role !== 'implement' && groupAttempt.role !== 'fix' && groupAttempt.role !== 'unknown' && group.requested_leases.some((lease) => lease.mode !== 'READ')) findings.push(finding('non-source-role-write-authority', group.acquisition_group_id, `${groupAttempt.role} unit requested source-changing authority`));
     if (!attempts.has(ownerKey(group.owner))) findings.push(finding('group-attempt-missing', group.acquisition_group_id, 'owning unit attempt does not exist'));
     const leases = snapshot.edit_leases.filter((lease) => lease.acquisition_group_id === group.acquisition_group_id);
     if (group.state === 'waiting' || group.state === 'grant-ready' || group.state === 'released' || group.state === 'cancelled' || group.state === 'superseded') {
@@ -286,11 +304,49 @@ export function checkCoordinationInvariants(snapshot: CoordinationSnapshot): rea
     if (worktree.state === 'removed' && !snapshot.worktree_operations.some((operation) => operation.worktree_id === worktree.worktree_id && operation.operation_type === 'remove' && operation.stage === 'committed')) findings.push(finding('removed-worktree-without-commit', worktree.worktree_id, 'removed worktree state requires a committed remove operation'));
   }
 
+  for (const edge of snapshot.wait_for_edges) {
+    const request = snapshot.claim_requests.find((candidate) => candidate.request_id === edge.request_id);
+    if (request === undefined) findings.push(finding('wait-edge-request-missing', edge.edge_id, 'wait-for edge request does not exist'));
+    else {
+      if (coordinationOwnerKey(edge.requester) !== coordinationOwnerKey(request.requester) || coordinationOwnerKey(edge.blocker) !== coordinationOwnerKey(request.owner)) findings.push(finding('wait-edge-owner-mismatch', edge.edge_id, 'wait-for edge owners differ from the durable claim request'));
+      const liveBlocker = request.blocking_lease_ids.some((leaseId) => snapshot.edit_leases.some((lease) => lease.edit_lease_id === leaseId));
+      if (edge.state === 'active' && !liveBlocker) findings.push(finding('active-wait-edge-without-blocker', edge.edge_id, 'active wait edge has no active blocking lease'));
+      if (edge.state === 'resolved' && edge.resolved_event_seq === null) findings.push(finding('resolved-wait-edge-event-missing', edge.edge_id, 'resolved wait edge requires a terminal event sequence'));
+    }
+  }
+  const activeCycles = detectCoordinationWaitCycles(snapshot.wait_for_edges);
+  for (const cycle of activeCycles) {
+    const resolution = snapshot.deadlock_resolutions.find((candidate) => candidate.cycle_edge_ids.length === cycle.edge_ids.length && candidate.cycle_edge_ids.every((edgeId) => cycle.edge_ids.includes(edgeId)) && candidate.state !== 'resolved');
+    if (resolution === undefined) findings.push(finding('wait-cycle-unresolved', cycle.cycle_id, 'every active wait-for cycle requires a typed deadlock resolution'));
+  }
+  for (const resolution of snapshot.deadlock_resolutions) {
+    if (resolution.state === 'deferred-no-safe-victim' && (resolution.victim !== null || resolution.action !== 'none')) findings.push(finding('unsafe-deadlock-victim', resolution.resolution_id, 'no-safe-victim deadlock cannot name a preemption action'));
+    if (resolution.state === 'awaiting-recovery' && resolution.action !== 'request-reset-or-quarantine') findings.push(finding('deadlock-recovery-action-mismatch', resolution.resolution_id, 'awaiting recovery requires reset-or-quarantine action'));
+    if (resolution.state === 'resolved' && resolution.resolved_event_seq === null) findings.push(finding('deadlock-resolution-event-missing', resolution.resolution_id, 'resolved deadlock requires resolved_event_seq'));
+  }
+
+  const artifacts = new Map(snapshot.authoritative_artifacts.map((artifact) => [artifact.artifact_id, artifact]));
+  for (const artifact of snapshot.authoritative_artifacts) {
+    if (!runs.has(runKey(artifact.repo_id, artifact.source_run))) findings.push(finding('authoritative-artifact-run-missing', artifact.artifact_id, 'registering source run does not exist'));
+  }
+  for (const assignment of snapshot.adjudication_assignments) {
+    assertOwner(assignment.adjudicator, assignment.assignment_id);
+    if (assignment.participating_runs.includes(assignment.adjudicator.workstream_run)) findings.push(finding('adjudicator-not-independent', assignment.assignment_id, 'adjudicator run is a participating run'));
+    for (const artifactId of assignment.authoritative_artifact_ids) if (!artifacts.has(artifactId)) findings.push(finding('assignment-artifact-missing', assignment.assignment_id, `authoritative artifact ${artifactId} does not exist`));
+    if (assignment.state === 'assigned' && (assignment.adjudication !== null || assignment.child_lease_id !== null || assignment.accepted_event_seq !== null)) findings.push(finding('unaccepted-assignment-has-result', assignment.assignment_id, 'assigned adjudication cannot contain accepted result evidence'));
+    if (assignment.state === 'accepted') {
+      const child = snapshot.child_leases.find((candidate) => candidate.child_lease_id === assignment.child_lease_id);
+      if (assignment.adjudication === null || assignment.accepted_event_seq === null || child === undefined || child.status !== 'terminal' || child.terminal_evidence?.sha256 !== assignment.adjudication.sha256 || ownerKey(child.owner) !== ownerKey(assignment.adjudicator)) findings.push(finding('accepted-assignment-child-proof-invalid', assignment.assignment_id, 'accepted adjudication requires exact assigned terminal-child evidence'));
+    }
+  }
+
   for (const escalation of snapshot.escalations) {
     if (!repositoryIds.has(escalation.repo_id)) findings.push(finding('escalation-repository-missing', escalation.escalation_id, 'repository does not exist'));
     for (const participatingRun of escalation.participating_runs) {
       if (!runs.has(runKey(escalation.repo_id, participatingRun))) findings.push(finding('escalation-run-missing', escalation.escalation_id, `participating run ${participatingRun} does not exist`));
     }
+    const assignment = snapshot.adjudication_assignments.find((candidate) => candidate.assignment_id === escalation.escalation_id && candidate.state === 'accepted');
+    if (assignment === undefined || assignment.adjudication?.sha256 !== escalation.adjudication.sha256) findings.push(finding('escalation-assignment-proof-missing', escalation.escalation_id, 'operator-decision packet requires exact accepted adjudication assignment evidence'));
   }
 
   const eventsByRepo = new Map<string, number[]>();

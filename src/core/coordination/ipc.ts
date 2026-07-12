@@ -7,6 +7,12 @@ import type { CoordinatorRequestEnvelope, CoordinatorResponseEnvelope } from './
 
 export const AUTOPILOT_COORDINATOR_TRANSPORT_VERSION = 'autopilot.coordinator_transport.v1' as const;
 
+export interface CoordinatorLegacyReplayTransportRequest {
+  readonly transport_version: typeof AUTOPILOT_COORDINATOR_TRANSPORT_VERSION;
+  readonly capability: string;
+  readonly request: JsonMap;
+}
+
 export interface CoordinatorTransportRequest {
   readonly transport_version: typeof AUTOPILOT_COORDINATOR_TRANSPORT_VERSION;
   readonly capability: string;
@@ -21,25 +27,32 @@ function isJsonMap(value: unknown): value is JsonMap {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-export function parseCoordinatorTransportRequest(value: unknown): CoordinatorTransportRequest {
+function parseTransportShell(value: unknown): { readonly capability: string; readonly request: unknown } {
   if (!isJsonMap(value)) throw new CoordinationRuntimeError('invalid-request', 'coordinator transport frame must be an object');
   const fields = Object.keys(value).sort();
   const expected = ['capability', 'request', 'transport_version'];
-  if (fields.length !== expected.length || fields.some((field, index) => field !== expected[index])) {
-    throw new CoordinationRuntimeError('invalid-request', 'coordinator transport frame fields are invalid', fields);
-  }
-  if (value['transport_version'] !== AUTOPILOT_COORDINATOR_TRANSPORT_VERSION) {
-    throw new CoordinationRuntimeError('protocol-mismatch', 'coordinator transport version is incompatible');
-  }
+  if (fields.length !== expected.length || fields.some((field, index) => field !== expected[index])) throw new CoordinationRuntimeError('invalid-request', 'coordinator transport frame fields are invalid', fields);
+  if (value['transport_version'] !== AUTOPILOT_COORDINATOR_TRANSPORT_VERSION) throw new CoordinationRuntimeError('protocol-mismatch', 'coordinator transport version is incompatible');
   const capability = value['capability'];
-  if (typeof capability !== 'string' || !/^[a-f0-9]{64}$/u.test(capability)) {
-    throw new CoordinationRuntimeError('unauthorized-client', 'coordinator capability proof is malformed');
-  }
-  return {
-    transport_version: AUTOPILOT_COORDINATOR_TRANSPORT_VERSION,
-    capability,
-    request: parseCoordinatorRequestEnvelope(value['request']),
-  };
+  if (typeof capability !== 'string' || !/^[a-f0-9]{64}$/u.test(capability)) throw new CoordinationRuntimeError('unauthorized-client', 'coordinator capability proof is malformed');
+  return { capability, request: value['request'] };
+}
+
+export function parseCoordinatorLegacyReplayTransportRequest(value: unknown): CoordinatorLegacyReplayTransportRequest {
+  const shell = parseTransportShell(value);
+  if (!isJsonMap(shell.request)) throw new CoordinationRuntimeError('invalid-request', 'legacy replay request must be an object');
+  const request = shell.request;
+  const fields = Object.keys(request).sort();
+  const expected = ['action', 'expected_version', 'fencing_generation', 'idempotency_key', 'payload', 'protocol_version', 'repo_id', 'request_id', 'schema_version', 'session_id', 'workstream_run'];
+  if (fields.length !== expected.length || fields.some((field, index) => field !== expected[index])) throw new CoordinationRuntimeError('invalid-request', 'legacy replay request fields are invalid', fields);
+  if (request['schema_version'] !== 'autopilot.coordinator_request.v1' || request['protocol_version'] !== '1.1') throw new CoordinationRuntimeError('protocol-mismatch', 'only exact protocol 1.1 requests may use migration replay');
+  if (typeof request['request_id'] !== 'string' || typeof request['repo_id'] !== 'string' || typeof request['idempotency_key'] !== 'string' || typeof request['action'] !== 'string' || !isJsonMap(request['payload'])) throw new CoordinationRuntimeError('invalid-request', 'legacy replay identity or payload is malformed');
+  return { transport_version: AUTOPILOT_COORDINATOR_TRANSPORT_VERSION, capability: shell.capability, request };
+}
+
+export function parseCoordinatorTransportRequest(value: unknown): CoordinatorTransportRequest {
+  const shell = parseTransportShell(value);
+  return { transport_version: AUTOPILOT_COORDINATOR_TRANSPORT_VERSION, capability: shell.capability, request: parseCoordinatorRequestEnvelope(shell.request) };
 }
 
 export function encodeCoordinatorFrame(value: unknown): NodeBuffer {

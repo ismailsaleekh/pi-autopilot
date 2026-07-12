@@ -1,5 +1,6 @@
 import { assertCoordinationInvariants } from './invariants.ts';
 import { claimModesConflict, coordinationPathsOverlap } from './contracts.ts';
+import { buildCoordinationWaitForEdges } from './deadlock.ts';
 import { CoordinationRuntimeError } from './failures.ts';
 import { AUTOPILOT_COORDINATION_SNAPSHOT_SCHEMA, type CoordinationAcquisitionGroup, type CoordinationEditLease, type CoordinationEvent, type CoordinationMessage, type CoordinationReleaseCondition, type CoordinationSessionLease, type CoordinationSnapshot } from './types.ts';
 
@@ -23,6 +24,10 @@ export function emptyCoordinationSnapshot(): CoordinationSnapshot {
     messages: [],
     worktrees: [],
     worktree_operations: [],
+    wait_for_edges: [],
+    deadlock_resolutions: [],
+    authoritative_artifacts: [],
+    adjudication_assignments: [],
     escalations: [],
     events: [],
   };
@@ -85,6 +90,14 @@ function currentRun(snapshot: CoordinationSnapshot, input: MutationIdentity) {
   const run = snapshot.runs.find((candidate) => candidate.repo_id === input.repoId && candidate.workstream_run === input.workstreamRun);
   if (run === undefined) throw new CoordinationRuntimeError('invalid-request', `run ${input.workstreamRun} does not exist`);
   return run;
+}
+
+function refreshWaitForEdges(snapshot: CoordinationSnapshot): CoordinationSnapshot {
+  const requestIds = new Set(snapshot.claim_requests.map((request) => request.request_id));
+  return {
+    ...snapshot,
+    wait_for_edges: buildCoordinationWaitForEdges({ requests: snapshot.claim_requests, editLeases: snapshot.edit_leases, priorEdges: snapshot.wait_for_edges.filter((edge) => requestIds.has(edge.request_id)), eventSeq: snapshot.repository_event_seq }),
+  };
 }
 
 function assertCurrentSession(snapshot: CoordinationSnapshot, input: MutationIdentity): void {
@@ -189,7 +202,7 @@ export function releaseCoordinationLeaseAndNotify(snapshot: CoordinationSnapshot
     version: 1,
   };
   const remainingGroupLeases = snapshot.edit_leases.filter((candidate) => candidate.acquisition_group_id === lease.acquisition_group_id && candidate.edit_lease_id !== lease.edit_lease_id);
-  const next: CoordinationSnapshot = {
+  const next = refreshWaitForEdges({
     ...snapshot,
     repository_event_seq: event.sequence,
     edit_leases: snapshot.edit_leases.filter((candidate) => candidate.edit_lease_id !== lease.edit_lease_id),
@@ -197,7 +210,7 @@ export function releaseCoordinationLeaseAndNotify(snapshot: CoordinationSnapshot
     claim_requests: snapshot.claim_requests.map((candidate) => candidate.request_id === request.request_id ? { ...candidate, status: 'released', release_event_seq: event.sequence, version: candidate.version + 1 } : candidate),
     messages: [...snapshot.messages, notification],
     events: [...snapshot.events, event.event],
-  };
+  });
   assertCoordinationInvariants(next);
   return next;
 }

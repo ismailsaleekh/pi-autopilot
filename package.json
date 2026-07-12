@@ -1,7 +1,7 @@
 {
   "name": "pi-autopilot",
-  "version": "0.12.0",
-  "description": "Standalone perfect-quality Autopilot orchestration for Pi with transactional edit leases, change reservations, durable run supervisors, isolated worktrees, and deterministic quality gates.",
+  "version": "0.13.0",
+  "description": "Standalone perfect-quality Autopilot orchestration for Pi with transactional coordination, deterministic deadlock resolution, contradiction-only escalation, isolated worktrees, and quality gates.",
   "type": "module",
   "license": "ISC",
   "author": "Ismail Salikhodjaev <ismailsalikhodjaev@gmail.com>",

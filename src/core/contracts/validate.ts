@@ -285,6 +285,7 @@ function assertStateShape(value: unknown): void {
     expectStringArray(record['completed'], '/completed', issues, 500, 0, 128, UNIT_ID);
     checkUnits(record['units'], '/units', issues);
     expectStringArray(record['operator_questions'], '/operator_questions', issues, 80, 0, 500);
+    if (Array.isArray(record['operator_questions']) && record['operator_questions'].length > 0) issues.push('/operator_questions: operator decisions are coordinator-owned planning-contradiction packets and must not be synthesized in progress state');
     expectStringArray(record['next_actions'], '/next_actions', issues, 80, 0, 500);
     if (hasKey(record, 'work_items')) checkWorkItems(record['work_items'], '/work_items', issues);
     if (hasKey(record, 'audit_review_queue')) {

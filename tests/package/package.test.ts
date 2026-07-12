@@ -280,7 +280,7 @@ void describe('package manifest and payload', () => {
       'openai-codex/gpt-5.6-sol',
       'openai-codex/gpt-5.6-terra',
       'openai-codex/gpt-5.6-luna',
-      'Coordination Fabric Phases 27–33',
+      'Coordination Fabric Phases 27–34',
       'end-to-end peer claim negotiation',
       'change reservations',
       'automatic terminal-evidence reconciliation',
@@ -300,7 +300,7 @@ void describe('package manifest and payload', () => {
     const plan = await docText('TEST_PLAN.md');
     const mappings = [
       { claim: 'Commands', row: 'Public commands are `/autopilot`, `/autopilot-inject`, `/autopilot-onboard`, `/autopilot-handoff`, `/autopilot-config`, `/autopilot-claim-gc`, `/autopilot-coordination`, `/autopilot-close`, and `/autopilot-abort`' },
-      { claim: 'Coordination Fabric Phases 27–33', row: 'Coordination Fabric contracts and protocol lock' },
+      { claim: 'Coordination Fabric Phases 27–34', row: 'Coordination Fabric contracts and protocol lock' },
       { claim: 'change reservations', row: 'Edit lease / change reservation separation' },
       { claim: 'end-to-end peer claim negotiation', row: 'End-to-end peer claim negotiation' },
       { claim: 'automatic terminal-evidence reconciliation', row: 'Offline mailbox replay and automatic reconciliation' },
@@ -434,6 +434,21 @@ void describe('package manifest and payload', () => {
     }
     assert.equal(files.some((file) => file.startsWith('tests/')), false);
     assert.equal(files.some((file) => file.includes('node_modules')), false);
+  });
+
+  void it('ships compiled Phase 34 authority and recovery behavior in exact source parity', async () => {
+    const sourceStore = await readFile(new URL('src/core/coordination/store.ts', root), 'utf8');
+    const compiledStore = await readFile(new URL('dist/src/core/coordination/store.js', root), 'utf8');
+    const sourceRunner = await readFile(new URL('src/core/agent-runner.ts', root), 'utf8');
+    const compiledRunner = await readFile(new URL('dist/src/core/agent-runner.js', root), 'utf8');
+    for (const marker of ['register-authoritative-artifact', 'assign-adjudication', 'claim-adjudication-assignment', 'complete-adjudication', 'materialization-read-expansion', 'checkpoint-child', 'fixedPointDepth', 'evidence_artifacts']) {
+      assert.equal(sourceStore.includes(marker), true, `source is missing ${marker}`);
+      assert.equal(compiledStore.includes(marker), true, `compiled coordinator is stale for ${marker}`);
+    }
+    for (const marker of ['preemptionSignal', 'quarantineFailedUnit', 'autonomous deadlock preemption capture']) {
+      assert.equal(sourceRunner.includes(marker), true, `source runner is missing ${marker}`);
+      assert.equal(compiledRunner.includes(marker), true, `compiled runner is stale for ${marker}`);
+    }
   });
 
   void it('exposes the runner help path without Node type stripping', async () => {

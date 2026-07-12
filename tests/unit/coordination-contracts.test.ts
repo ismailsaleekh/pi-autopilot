@@ -24,11 +24,15 @@ void describe('Coordination Fabric contracts and invariants', () => {
   void it('publishes a closed schema for every Phase 27 coordination entity', () => {
     assert.deepEqual(Object.keys(AUTOPILOT_COORDINATION_JSON_SCHEMAS).sort(), [
       'acquisition_group',
+      'adjudication_assignment',
+      'authoritative_artifact',
       'change_reservation',
       'child_lease',
       'claim_request',
+      'contradiction_adjudication',
       'coordinator_request',
       'coordinator_response',
+      'deadlock_resolution',
       'edit_lease',
       'escalation',
       'event',
@@ -42,6 +46,7 @@ void describe('Coordination Fabric contracts and invariants', () => {
       'session_lease',
       'snapshot',
       'unit_attempt',
+      'wait_for_edge',
       'worktree',
       'worktree_operation',
     ]);
@@ -124,7 +129,7 @@ void describe('Coordination Fabric contracts and invariants', () => {
   void it('strictly validates versioned query and mutation envelopes', () => {
     const query = parseCoordinatorRequestEnvelope({
       schema_version: 'autopilot.coordinator_request.v1',
-      protocol_version: '1.1',
+      protocol_version: '1.2',
       request_id: 'request-1',
       action: 'status',
       idempotency_key: null,
@@ -159,11 +164,11 @@ void describe('Coordination Fabric contracts and invariants', () => {
       ...mutation,
       action: 'acquire-group',
       payload: {
-        acquisition_group_id: 'group-new', unit_id: 'unit-new', attempt: 1,
+        acquisition_group_id: 'group-new', acquisition_kind: 'initial', unit_id: 'unit-new', attempt: 1,
         requested_leases: [{ path: 'src/new.ts', mode: 'WRITE', purpose: 'implement new source' }],
         reason: 'unit needs complete initial authority', normal_release_condition: { condition_type: 'unit-merged', target_id: 'unit-new:1', evidence: null },
         spec_ref: '.pi/autopilot/demo/unit-specs/unit-new.json', spec_sha256: `sha256:${'a'.repeat(64)}`,
-        preemptible: true, checkpoint_ordinal: 0, ...sessionProof,
+        role: 'implement', preemptible: true, checkpoint_ordinal: 0, ...sessionProof,
       },
     });
     assert.equal(acquisition.action, 'acquire-group');
@@ -181,7 +186,7 @@ void describe('Coordination Fabric contracts and invariants', () => {
     }), /must differ/u);
     assert.equal(parseCoordinatorResponseEnvelope({
       schema_version: 'autopilot.coordinator_response.v1',
-      protocol_version: '1.1',
+      protocol_version: '1.2',
       request_id: 'request-1',
       ok: false,
       committed_event_seq: null,
@@ -199,7 +204,10 @@ void describe('Coordination Fabric contracts and invariants', () => {
       repo_id: 'repo-1',
       participating_runs: ['run-a', 'run-b'],
       authoritative_refs: [{ ref: 'mission-a.md', sha256: digest }, { ref: 'mission-b.md', sha256: digest }],
-      conflicting_clauses: ['artifact must remain text', 'artifact must become binary'],
+      conflicting_clauses: [
+        { authoritative_ref: { ref: 'mission-a.md', sha256: digest }, source_type: 'mission', source_scope: 'repository', source_run: 'run-a', schema_version: 'autopilot.mission.v1', clause_id: 'mission-a-output', exact_requirement: 'artifact must remain text', artifact_or_invariant: 'artifact format', demanded_outcome: 'text' },
+        { authoritative_ref: { ref: 'mission-b.md', sha256: digest }, source_type: 'mission', source_scope: 'repository', source_run: 'run-b', schema_version: 'autopilot.mission.v1', clause_id: 'mission-b-output', exact_requirement: 'artifact must become binary', artifact_or_invariant: 'artifact format', demanded_outcome: 'binary' },
+      ],
       exhausted_alternatives: ['sequencing', 'partitioning', 'ownership-transfer', 'rebase-revalidation', 'replanning'],
       adjudication: { ref: 'adjudication.json', sha256: digest },
       decision_options: ['retain text requirement', 'adopt binary requirement'],

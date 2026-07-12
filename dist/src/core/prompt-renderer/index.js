@@ -106,7 +106,8 @@ export async function renderAndMaybeWriteAutopilotPromptSnapshot(input) {
             ? {}
             : { forcedOutputContract: input.forcedOutputContract }),
     };
-    const text = renderAutopilotAgentPrompt(input.spec, options);
+    const baseText = renderAutopilotAgentPrompt(input.spec, options);
+    const text = input.coordinationAppendix === undefined ? baseText : `${baseText}\n\n${input.coordinationAppendix}`;
     const shouldWrite = input.forceSnapshot === true || input.spec.render_prompt_snapshot === true;
     if (!shouldWrite)
         return { text, snapshotPath: null };
@@ -349,8 +350,8 @@ function roleSpecificInstructions(role) {
             return [
                 '- Resolve a blocker, conflict, or readiness question through read-first analysis and a clear ruling.',
                 '- Prefer a compact adjudication artifact under evidence_dir when details exceed the status bounds.',
-                '- Classify the outcome as ratify, split, remediate, or operator-decision, and state the parent decision-log/master-plan update required.',
-                '- Do not make implementation fixes. If a real human product or architecture fork remains, emit BLOCKED with options and recommendation.',
+                '- Classify the outcome as ratify, split, remediate, or planning-contradiction. Operator-decision is valid only for your exact coordinator assignment, after source-run Git-HEAD artifact registration, when exact schema-valid clauses demand incompatible outcomes and sequencing, partitioning, ownership transfer, rebase/revalidation, and replanning all fail. Complete through assignment-bound terminal child evidence; never self-claim another adjudicator identity.',
+                '- Do not make implementation fixes. Operational claim, offline, handoff, worktree, merge, test, validation, deadlock, disk, or cleanup blockers must remain autonomous and must never produce an operator packet.',
                 '- changed_paths must be empty for this role.',
             ].join('\n');
         case 'bughunt':
@@ -362,7 +363,7 @@ function roleSpecificInstructions(role) {
             ].join('\n');
         case 'extract':
             return [
-                '- Produce a concise operator packet for a genuine human decision or transfer.',
+                '- Produce an operator-decision packet only from a coordinator-accepted planning-contradiction; otherwise produce a non-escalating transfer summary.',
                 '- Extract facts from referenced artifacts without pasting large bodies; write a compact packet under evidence_dir if needed.',
                 '- Include context, options, trade-offs, recommendation, and exact next action.',
                 '- changed_paths must be empty for this role.',

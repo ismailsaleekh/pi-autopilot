@@ -118,7 +118,7 @@ function acquisitionInput(suffix: string, condition: CoordinationReleaseConditio
     requestedLeases: [{ path, mode: 'WRITE' as const, purpose: `implement ${suffix}` }],
     reason: `run ${suffix} needs ${path}`, normalReleaseCondition: condition,
     specRef: `.pi/autopilot/work-${suffix}/unit-specs/unit-${suffix}.json`, specSha256: `sha256:${suffix.charCodeAt(0).toString(16).slice(-1).repeat(64)}` as `sha256:${string}`,
-    preemptible: true, checkpointOrdinal: 0,
+    role: 'implement' as const, preemptible: true, checkpointOrdinal: 0,
   };
 }
 
