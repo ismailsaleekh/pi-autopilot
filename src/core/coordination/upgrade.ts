@@ -243,17 +243,17 @@ async function createVerifiedLockedBoundaryBackup(paths: CoordinatorRuntimePaths
   databaseReadiness(database);
   const target = finalUpgradeBackupPath(paths, upgradeId);
   await unlink(target).catch((error: unknown) => { if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw error; });
-  // node:sqlite backup() cannot run from an active transaction. serialize()
-  // captures the exact transaction snapshot while BEGIN EXCLUSIVE remains held,
-  // so no predecessor/stale writer can interleave with this rollback image.
-  const bytes = database.serialize();
-  const handle = await open(target, 'wx', 0o600);
+  // node:sqlite backup() cannot use the connection that owns an active
+  // transaction, and DatabaseSync.serialize() is unavailable on supported
+  // Node 22. Open a distinct read snapshot after BEGIN EXCLUSIVE: the outer
+  // writer transaction has made no changes yet, prevents every competing
+  // writer, and WAL readers see the exact committed schema-6 boundary.
+  const snapshot = new DatabaseSync(paths.databasePath, { readOnly: true, timeout: 10_000 });
   try {
-    await enforcePrivateAuthorityPath(target, false);
-    let offset = 0;
-    while (offset < bytes.byteLength) offset += (await handle.write(bytes.subarray(offset))).bytesWritten;
-    await handle.sync();
-  } finally { await handle.close(); }
+    const mode = (snapshot.prepare('PRAGMA journal_mode').get() as JsonRecord | undefined)?.['journal_mode'];
+    if (mode !== 'wal') throw new CoordinationRuntimeError('schema-mismatch', 'locked upgrade backup requires WAL snapshot isolation', [`journal_mode=${String(mode)}`]);
+    await backup(snapshot, target);
+  } finally { snapshot.close(); }
   return await verifyAndRecordBackup(target);
 }
 
