@@ -21,7 +21,7 @@ import { assertAutopilotDiskGate } from './disk-gate.ts';
 import { applySparseCheckoutSet, createAutopilotGitWorktree, isSparseCheckoutEnabled } from './sparse-worktree.ts';
 import { cleanupTerminalUnitWorktreesForRun } from './worktree-cleanup.ts';
 import { executeOwnedWorktreeSaga, OwnedWorktreeSagaClient, recoverOwnedWorktreeSagas, type WorktreeSagaInspection } from './coordination/worktree-saga.ts';
-import type { CoordinationWorktreeOperation } from './coordination/types.ts';
+import type { CoordinationRun, CoordinationRunResource, CoordinationWorktreeOperation } from './coordination/types.ts';
 import { AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV, AUTOPILOT_RUNTIME_ROOT_PREFIX } from './names.ts';
 import { isValidWorkstreamSlug } from './paths.ts';
 import { parseLegacyActiveAutopilots, parseLegacyPathClaims, runLegacyCoordinationPreflight } from './coordination/legacy-preflight.ts';
@@ -1661,12 +1661,32 @@ export async function readActiveAutopilots(coordinationRoot: string): Promise<re
   return parseLegacyActiveAutopilots(await readJson(path));
 }
 
+export async function readCoordinatorRunCatalog(client: CoordinatorClient, repoKey: string): Promise<{ readonly runs: readonly CoordinationRun[]; readonly resources: readonly CoordinationRunResource[] }> {
+  const runs: CoordinationRun[] = [];
+  const resources: CoordinationRunResource[] = [];
+  let cursor: string | null = null;
+  do {
+    const response = await client.query('run-catalog', repoKey, null, { cursor_run: cursor, limit: 128 });
+    const rawRuns = response.payload['runs'];
+    const rawResources = response.payload['run_resources'];
+    if (!Array.isArray(rawRuns) || !Array.isArray(rawResources) || rawRuns.length !== rawResources.length || rawRuns.length > 128) fail('invalid-coordinator-status', 'coordinator activation catalog omitted its bounded run/resource page.');
+    const pageRuns = rawRuns.map((value) => parseCoordinationRun(value));
+    const pageResources = rawResources.map((value) => parseCoordinationRunResource(value));
+    if (pageRuns.some((run, index) => pageResources[index]?.workstream_run !== run.workstream_run)) fail('invalid-coordinator-status', 'coordinator activation catalog run/resource page is not in lockstep.');
+    runs.push(...pageRuns); resources.push(...pageResources);
+    const next = response.payload['next_cursor'];
+    if (next !== null && typeof next !== 'string') fail('invalid-coordinator-status', 'coordinator activation catalog returned an invalid pagination cursor.');
+    if (next !== null && (next === cursor || pageRuns.at(-1)?.workstream_run !== next)) fail('invalid-coordinator-status', 'coordinator activation catalog returned a non-advancing pagination cursor.');
+    cursor = next as string | null;
+    if (runs.length > 100_000) fail('invalid-coordinator-status', 'coordinator activation catalog exceeds its aggregate run bound.');
+  } while (cursor !== null);
+  return { runs: Object.freeze(runs), resources: Object.freeze(resources) };
+}
+
 export async function assertCoordinatorMigrationRecoveryCleared(repo: AutopilotRepoIdentity, workstream: string, env: ProcessEnvLike = process.env): Promise<void> {
   const client = new CoordinatorClient({ env });
-  const response = await client.query('run-catalog', repo.repoKey, null);
-  const rawRuns = response.payload['runs'];
-  if (!Array.isArray(rawRuns) || rawRuns.length > 100_000) fail('invalid-coordinator-status', 'coordinator activation catalog omitted its bounded run collection.');
-  const matchingRunIds = rawRuns.map((value) => parseCoordinationRun(value)).filter((run) => run.repo_id === repo.repoKey && run.workstream === workstream).map((run) => run.workstream_run);
+  const catalog = await readCoordinatorRunCatalog(client, repo.repoKey);
+  const matchingRunIds = catalog.runs.filter((run) => run.repo_id === repo.repoKey && run.workstream === workstream).map((run) => run.workstream_run);
   for (const run of matchingRunIds) {
     const exact = await client.query('run-catalog', repo.repoKey, run);
     const pendingCount = exact.payload['pending_migration_recovery_count'];
@@ -1678,12 +1698,9 @@ export async function assertCoordinatorMigrationRecoveryCleared(repo: AutopilotR
 
 export async function readCoordinatorActiveAutopilots(repo: AutopilotRepoIdentity, worktreeRoot: string, env: ProcessEnvLike = process.env, includeTerminal = false): Promise<readonly ActiveAutopilotRow[]> {
   const client = new CoordinatorClient({ env });
-  const response = await client.query('run-catalog', repo.repoKey, null);
-  const rawRuns = response.payload['runs'];
-  const rawResources = response.payload['run_resources'];
-  if (!Array.isArray(rawRuns) || rawRuns.length > 100_000 || !Array.isArray(rawResources) || rawResources.length > 100_000) fail('invalid-coordinator-status', 'coordinator run catalog runs/resources must be bounded arrays.');
-  const resources = rawResources.map((value) => parseCoordinationRunResource(value));
-  const parsedRuns = rawRuns.map((value) => parseCoordinationRun(value));
+  const catalog = await readCoordinatorRunCatalog(client, repo.repoKey);
+  const resources = catalog.resources;
+  const parsedRuns = catalog.runs;
   const pendingRecoveryRuns = new Set<string>();
   for (const run of parsedRuns) {
     const exact = await client.query('run-catalog', repo.repoKey, run.workstream_run);

@@ -12,7 +12,7 @@ import { validateAuthoritativeCoordinationDocument, validatePlanningContradictio
 import { CoordinationRuntimeError, type CoordinationFailureCode } from './failures.ts';
 import { checkCoordinationInvariants, type CoordinationInvariantFinding } from './invariants.ts';
 import { COORDINATOR_BUSY_TIMEOUT_MS, COORDINATOR_DATABASE_SCHEMA_VERSION, COORDINATOR_GRANT_OFFER_TTL_MS, COORDINATOR_PACKAGE_BUILD, enforcePrivateAuthorityPath, enforceWindowsPrivateAcl, ensureCoordinatorPrivateRoots, type CoordinatorRuntimePaths } from './runtime-paths.ts';
-import { activeCoordinationMigrationFreeze, assertCoordinationDispatchAllowed, coordinationCutoverCommitted } from './migration-paths.ts';
+import { activeCoordinationMigrationFreeze, assertCoordinationDispatchAllowed, assertCoordinationFrozenMutationAllowed, coordinationCutoverCommitted } from './migration-paths.ts';
 import { parseRunTerminalSha, parseUnitAttemptTarget, parseUnitMergeReservationFacts, validateReconciliationEvidenceDocument, validateReservationIntegrationEvidenceDocument, validateReservationValidationArtifactChain, validateReservationValidationEvidenceDocument } from './terminal-evidence.ts';
 import { AUTOPILOT_COORDINATOR_PROTOCOL_VERSION, COORDINATION_WORKTREE_STATES } from './types.ts';
 import { assertPrivatePathNoAliases } from '../private-path.ts';
@@ -1709,15 +1709,18 @@ export class CoordinatorStore {
   }
 
   #dispatch(request: CoordinatorRequestEnvelope): StoreEffect {
-    const freezeDrainActions = new Set<CoordinatorMutationAction>(['attach-migration-recovery', 'resolve-migration-recovery', 'detach-session', 'heartbeat', 'heartbeat-child', 'checkpoint-child', 'complete-child', 'record-release-evidence', 'cancel-run-terminal', 'reconcile-run', 'transition-operation']);
-    if (request.action !== 'handshake' && request.action !== 'status' && request.action !== 'doctor' && request.action !== 'export' && request.action !== 'migration-recovery' && request.action !== 'run-catalog' && !freezeDrainActions.has(request.action)) assertCoordinationDispatchAllowed(this.#stateRoot, request.repo_id, `coordinator mutation ${request.action}`);
+    const queryActions = new Set(['handshake', 'status', 'doctor', 'export', 'migration-recovery', 'run-catalog']);
+    if (!queryActions.has(request.action)) {
+      if (activeCoordinationMigrationFreeze(this.#stateRoot) !== null) assertCoordinationFrozenMutationAllowed(this.#stateRoot, request.repo_id, request.action);
+      else assertCoordinationDispatchAllowed(this.#stateRoot, request.repo_id, `coordinator mutation ${request.action}`);
+    }
     switch (request.action) {
       case 'handshake': return this.handshake();
       case 'status': return this.status(request.repo_id, request.workstream_run);
       case 'doctor': return this.doctor();
       case 'export': return this.exportTo(payloadString(request.payload, 'output_path'));
       case 'migration-recovery': return this.migrationRecovery(request);
-      case 'run-catalog': return this.runCatalog(request.repo_id, request.workstream_run);
+      case 'run-catalog': return this.runCatalog(request.repo_id, request.workstream_run, request.payload);
       case 'attach-run': return this.attachRun(request);
       case 'attach-session': return this.attachSession(request);
       case 'attach-terminal-recovery': return this.attachTerminalRecovery(request);
@@ -1851,21 +1854,30 @@ export class CoordinatorStore {
     };
   }
 
-  runCatalog(repoId: string, workstreamRun: string | null): StoreEffect {
-    const runs = workstreamRun === null
-      ? this.#db.prepare('SELECT * FROM runs WHERE repo_id=? ORDER BY workstream_run LIMIT 257').all(repoId).map(runFromRow)
+  runCatalog(repoId: string, workstreamRun: string | null, payload: Readonly<Record<string, unknown>> = {}): StoreEffect {
+    const cursorValue = payload['cursor_run'];
+    const cursorRun = cursorValue === undefined || cursorValue === null ? null : typeof cursorValue === 'string' ? cursorValue : (() => { throw new CoordinationRuntimeError('invalid-request', 'run catalog cursor_run must be nullable text'); })();
+    const limitValue = payload['limit'];
+    const limit = limitValue === undefined ? 128 : typeof limitValue === 'number' && Number.isSafeInteger(limitValue) && limitValue >= 1 && limitValue <= 256 ? limitValue : (() => { throw new CoordinationRuntimeError('invalid-request', 'run catalog limit must be an integer from 1 through 256'); })();
+    if (workstreamRun !== null && cursorRun !== null) throw new CoordinationRuntimeError('invalid-request', 'exact run catalog query cannot carry a pagination cursor');
+    const fetchedRuns = workstreamRun === null
+      ? this.#db.prepare('SELECT * FROM runs WHERE repo_id=? AND workstream_run>? ORDER BY workstream_run LIMIT ?').all(repoId, cursorRun ?? '', limit + 1).map(runFromRow)
       : this.#db.prepare('SELECT * FROM runs WHERE repo_id=? AND workstream_run=? ORDER BY workstream_run').all(repoId, workstreamRun).map(runFromRow);
-    const resources = workstreamRun === null
-      ? this.#db.prepare('SELECT * FROM run_resources WHERE repo_id=? ORDER BY workstream_run LIMIT 257').all(repoId).map(runResourceFromRow)
+    const fetchedResources = workstreamRun === null
+      ? this.#db.prepare('SELECT * FROM run_resources WHERE repo_id=? AND workstream_run>? ORDER BY workstream_run LIMIT ?').all(repoId, cursorRun ?? '', limit + 1).map(runResourceFromRow)
       : this.#db.prepare('SELECT * FROM run_resources WHERE repo_id=? AND workstream_run=? ORDER BY workstream_run').all(repoId, workstreamRun).map(runResourceFromRow);
-    if (runs.length > 256 || resources.length > 256) throw new CoordinationRuntimeError('invalid-state', 'repository run catalog exceeds the bounded 256-run response; query one exact workstream run');
+    if (fetchedRuns.length !== fetchedResources.length || fetchedRuns.some((run, index) => fetchedResources[index]?.workstream_run !== run.workstream_run)) throw new CoordinationRuntimeError('store-corrupt', 'run catalog and immutable run resources are not in exact lockstep');
+    const hasMore = workstreamRun === null && fetchedRuns.length > limit;
+    const runs = fetchedRuns.slice(0, limit);
+    const resources = fetchedResources.slice(0, limit);
+    const nextCursor = hasMore ? runs.at(-1)?.workstream_run ?? null : null;
     const pendingRows = workstreamRun === null
       ? this.#db.prepare("SELECT workstream_run, entity_id FROM migration_recovery_work WHERE repo_id=? AND status='pending' ORDER BY workstream_run, entity_id LIMIT 128").all(repoId)
       : this.#db.prepare("SELECT workstream_run, entity_id FROM migration_recovery_work WHERE repo_id=? AND workstream_run=? AND status='pending' ORDER BY entity_id LIMIT 128").all(repoId, workstreamRun);
     const pendingCount = workstreamRun === null
       ? sqlInteger(asRow(this.#db.prepare("SELECT COUNT(*) AS count FROM migration_recovery_work WHERE repo_id=? AND status='pending'").get(repoId), 'run catalog pending recovery count'), 'count')
       : sqlInteger(asRow(this.#db.prepare("SELECT COUNT(*) AS count FROM migration_recovery_work WHERE repo_id=? AND workstream_run=? AND status='pending'").get(repoId, workstreamRun), 'run catalog pending recovery count'), 'count');
-    return { committedEventSeq: null, payload: { schema_version: 'autopilot.coordinator_run_catalog.v1', package_build: COORDINATOR_PACKAGE_BUILD, protocol_version: AUTOPILOT_COORDINATOR_PROTOCOL_VERSION, database_schema_version: COORDINATOR_DATABASE_SCHEMA_VERSION, runs, run_resources: resources, pending_migration_recovery_count: pendingCount, pending_migration_recovery: pendingRows.map((row) => ({ workstream_run: sqlString(row, 'workstream_run'), recovery_id: sqlString(row, 'entity_id') })) } };
+    return { committedEventSeq: null, payload: { schema_version: 'autopilot.coordinator_run_catalog.v1', package_build: COORDINATOR_PACKAGE_BUILD, protocol_version: AUTOPILOT_COORDINATOR_PROTOCOL_VERSION, database_schema_version: COORDINATOR_DATABASE_SCHEMA_VERSION, runs, run_resources: resources, next_cursor: nextCursor, pending_migration_recovery_count: pendingCount, pending_migration_recovery: pendingRows.map((row) => ({ workstream_run: sqlString(row, 'workstream_run'), recovery_id: sqlString(row, 'entity_id') })) } };
   }
 
   migrationRecovery(request: CoordinatorRequestEnvelope): StoreEffect {
@@ -1875,6 +1887,13 @@ export class CoordinatorStore {
     const cursorRecoveryId = payloadNullableString(request.payload, 'cursor_recovery_id');
     const limit = payloadInteger(request.payload, 'limit');
     if ((cursorRun === null) !== (cursorRecoveryId === null)) throw new CoordinationRuntimeError('invalid-request', 'migration recovery cursor requires both cursor_run and cursor_recovery_id');
+    const pendingCount = request.repo_id === 'global'
+      ? request.workstream_run === null
+        ? sqlInteger(asRow(this.#db.prepare("SELECT COUNT(*) AS count FROM migration_recovery_work WHERE status='pending'").get(), 'migration recovery pending count'), 'count')
+        : sqlInteger(asRow(this.#db.prepare("SELECT COUNT(*) AS count FROM migration_recovery_work WHERE workstream_run=? AND status='pending'").get(request.workstream_run), 'migration recovery pending count'), 'count')
+      : request.workstream_run === null
+        ? sqlInteger(asRow(this.#db.prepare("SELECT COUNT(*) AS count FROM migration_recovery_work WHERE repo_id=? AND status='pending'").get(request.repo_id), 'migration recovery pending count'), 'count')
+        : sqlInteger(asRow(this.#db.prepare("SELECT COUNT(*) AS count FROM migration_recovery_work WHERE repo_id=? AND workstream_run=? AND status='pending'").get(request.repo_id, request.workstream_run), 'migration recovery pending count'), 'count');
     let rows = request.repo_id === 'global'
       ? this.#db.prepare('SELECT * FROM migration_recovery_work ORDER BY repo_id, workstream_run, entity_id').all().map(migrationRecoveryFromRow)
       : this.#db.prepare('SELECT * FROM migration_recovery_work WHERE repo_id=? ORDER BY workstream_run, entity_id').all(request.repo_id).map(migrationRecoveryFromRow);
@@ -1893,6 +1912,7 @@ export class CoordinatorStore {
         database_schema_version: COORDINATOR_DATABASE_SCHEMA_VERSION,
         recovery: page,
         runs: request.workstream_run === null ? [] : this.#db.prepare('SELECT * FROM runs WHERE repo_id=? AND workstream_run=?').all(request.repo_id, request.workstream_run).map(runFromRow),
+        pending_migration_recovery_count: pendingCount,
         next_cursor: next === null ? null : { cursor_run: next.workstream_run, cursor_recovery_id: next.recovery_id },
       },
     };

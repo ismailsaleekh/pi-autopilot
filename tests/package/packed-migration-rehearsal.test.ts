@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { describe, it } from 'node:test';
 
 import { scanStandalonePackageBoundary } from '../../src/core/coordination/package-isolation.ts';
+import { coordinationRootForRepo, readActiveAutopilots } from '../../src/core/parallel-runtime.ts';
 import { withMigrationTestFixture, type MigrationTestFixture } from '../helpers/migration-fixture.ts';
 
 interface PackResult {
@@ -53,6 +54,26 @@ function parseMigrationReport(stdout: string, label: string): MigrationReport {
     imported_run_count: importedRunCount,
     rebound_old_epoch_claim_count: reboundCount,
   };
+}
+
+function runInstalledJson(installedCoordinator: string, fixture: MigrationTestFixture, args: readonly string[]): Readonly<Record<string, unknown>> {
+  const result = spawnSync(process.execPath, [installedCoordinator, ...args, '--state-root', fixture.stateRoot], {
+    cwd: fixture.source,
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      AUTOPILOT_STATE_ROOT: fixture.stateRoot,
+      PI_OFFLINE: '1',
+      PI_SKIP_VERSION_CHECK: '1',
+      PI_TELEMETRY: '0',
+      NODE_OPTIONS: `${process.env['NODE_OPTIONS'] ?? ''} --disable-warning=ExperimentalWarning`.trim(),
+    },
+  });
+  assert.equal(result.status, 0, `${args.join(' ')}\n${result.stderr}`);
+  assert.equal(result.stderr, '');
+  const value: unknown = JSON.parse(result.stdout) as unknown;
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error(`${args.join(' ')} output is malformed`);
+  return value as Readonly<Record<string, unknown>>;
 }
 
 function runInstalledMigration(installedCoordinator: string, fixture: MigrationTestFixture, args: readonly string[]): MigrationReport {
@@ -110,6 +131,19 @@ void describe('packed generic-repository migration certification scaffolding', (
         assert.equal(applied.state, 'imported');
         assert.equal(applied.imported_run_count, 1);
         assert.equal(applied.rebound_old_epoch_claim_count, 1);
+        const active = (await readActiveAutopilots(coordinationRootForRepo(fixture.repoKey, fixture.env)))[0];
+        if (active === undefined) throw new Error('packed migration fixture omitted its active run');
+        const listed = runInstalledJson(installedCoordinator, fixture, ['recovery', 'list', '--repo-root', fixture.source, '--run', active.workstream_run]);
+        assert.equal(listed['pending_count'], 1);
+        const recoveryRows = listed['recovery'];
+        if (!Array.isArray(recoveryRows) || typeof recoveryRows[0] !== 'object' || recoveryRows[0] === null || typeof (recoveryRows[0] as Readonly<Record<string, unknown>>)['recovery_id'] !== 'string') throw new Error('packed recovery list omitted its exact row');
+        const recoveryId = String((recoveryRows[0] as Readonly<Record<string, unknown>>)['recovery_id']);
+        assert.equal(runInstalledJson(installedCoordinator, fixture, ['recovery', 'show', '--repo-root', fixture.source, '--run', active.workstream_run, '--recovery-id', recoveryId])['action'], 'show');
+        assert.equal(runInstalledJson(installedCoordinator, fixture, ['recovery', 'doctor', '--repo-root', fixture.source, '--run', active.workstream_run])['healthy'], true);
+        const retained = runInstalledJson(installedCoordinator, fixture, ['recovery', 'retain-authority', '--repo-root', fixture.source, '--run', active.workstream_run, '--all']);
+        assert.equal(retained['resolved_count'], 1);
+        assert.equal(retained['remaining_recovery_count'], 0);
+        assert.equal(runInstalledJson(installedCoordinator, fixture, ['recovery', 'drain-stale-sessions', '--repo-root', fixture.source, '--run', active.workstream_run])['drained_count'], 0);
         const verified = runInstalledMigration(installedCoordinator, fixture, ['verify']);
         assert.equal(verified.state, 'cutover-ready');
         const rolledBack = runInstalledMigration(installedCoordinator, fixture, ['rollback']);

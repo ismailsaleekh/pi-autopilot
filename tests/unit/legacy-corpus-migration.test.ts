@@ -8,7 +8,7 @@ import { runCoordinationMigration, COORDINATION_MIGRATION_MAX_JSONL_LINE_BYTES }
 import { CoordinatorClient } from '../../src/core/coordination/client.ts';
 import { CoordinatorStore } from '../../src/core/coordination/store.ts';
 import { coordinatorRuntimePaths } from '../../src/core/coordination/runtime-paths.ts';
-import { coordinationRootForRepo, readActiveAutopilots, readPathClaims, writePathClaims, type ProcessEnvLike } from '../../src/core/parallel-runtime.ts';
+import { coordinationRootForRepo, readActiveAutopilots, readCoordinatorRunCatalog, readPathClaims, writePathClaims, type ProcessEnvLike } from '../../src/core/parallel-runtime.ts';
 import { runMigrationRecoveryCli } from '../../src/cli/migration-recovery.ts';
 import { writeCoordinatorSessionContext } from '../../src/core/coordination/supervisor.ts';
 import { migrationTestClock, withMigrationTestFixture } from '../helpers/migration-fixture.ts';
@@ -114,6 +114,29 @@ void describe('real legacy corpus migration compatibility', () => {
     });
   });
 
+  void it('reports the run-wide pending count when one exact resolved recovery row is replayed', async () => {
+    await withMigrationTestFixture(async (fixture) => {
+      const active = await fixtureActive(fixture);
+      const root = coordinationRootForRepo(fixture.repoKey, fixture.env);
+      const claim = (await readPathClaims(root))[0];
+      if (claim === undefined) throw new Error('missing fixture claim');
+      await writePathClaims(root, [claim, { ...claim, path: 'second/pending-path.ts' }]);
+      await runCoordinationMigration({ command: 'apply', repoKey: fixture.repoKey, env: fixture.env, clock: migrationTestClock() });
+      const listed = await runMigrationRecoveryCli(['list', '--state-root', fixture.stateRoot, '--repo-root', fixture.source, '--run', active.workstream_run], fixture.env);
+      const rows = listed['recovery'];
+      if (!Array.isArray(rows) || typeof rows[0] !== 'object' || rows[0] === null) throw new Error('missing exact recovery rows');
+      const recoveryId = (rows[0] as Readonly<Record<string, unknown>>)['recovery_id'];
+      if (typeof recoveryId !== 'string') throw new Error('missing exact recovery id');
+      const args = ['retain-authority', '--state-root', fixture.stateRoot, '--repo-root', fixture.source, '--run', active.workstream_run, '--recovery-id', recoveryId];
+      assert.equal((await runMigrationRecoveryCli(args, fixture.env))['remaining_recovery_count'], 1);
+      const replay = await runMigrationRecoveryCli(args, fixture.env);
+      assert.equal(replay['replayed'], true);
+      assert.equal(replay['remaining_recovery_count'], 1);
+      await runMigrationRecoveryCli(['retain-authority', '--state-root', fixture.stateRoot, '--repo-root', fixture.source, '--run', active.workstream_run, '--all'], fixture.env);
+      await runCoordinationMigration({ command: 'rollback', repoKey: fixture.repoKey, env: fixture.env, clock: migrationTestClock() });
+    });
+  });
+
   void it('drains an exact dead handoff-pending session through package-owned authority instead of editing coordinator storage', async () => {
     await withMigrationTestFixture(async (fixture) => {
       const active = await fixtureActive(fixture);
@@ -135,6 +158,24 @@ void describe('real legacy corpus migration compatibility', () => {
       assert.equal(Array.isArray(sessions) && typeof sessions[0] === 'object' && sessions[0] !== null ? (sessions[0] as Record<string, unknown>)['status'] : null, 'detached');
       assert.equal((await runCoordinationMigration({ command: 'apply', repoKey: fixture.repoKey, env: fixture.env, clock: migrationTestClock() })).state, 'imported');
       await runCoordinationMigration({ command: 'rollback', repoKey: fixture.repoKey, env: fixture.env, clock: migrationTestClock() });
+    });
+  });
+
+  void it('paginates activation and recovery discovery beyond 256 durable runs', async () => {
+    await withMigrationTestFixture(async (fixture) => {
+      const active = await fixtureActive(fixture);
+      const store = await CoordinatorStore.open(coordinatorRuntimePaths(fixture.env), migrationTestClock());
+      try {
+        for (let index = 0; index < 300; index += 1) {
+          const run = `catalog-run-${String(index).padStart(3, '0')}`;
+          const attached = store.handle({ schema_version: 'autopilot.coordinator_request.v1', protocol_version: '1.3', request_id: run, action: 'attach-run', idempotency_key: run, repo_id: fixture.repoKey, workstream_run: run, session_id: null, fencing_generation: null, expected_version: 0, payload: { repo_key: fixture.repoKey, canonical_root: active.source_repo, git_common_dir: active.git_common_dir, autopilot_id: `catalog-${String(index)}`, workstream: 'catalog', coordination_authority: 'coordinator-edit-leases-v1', run_resource: { schema_version: 'autopilot.coordination_run_resource.v1', repo_id: fixture.repoKey, workstream_run: run, source_repo: active.source_repo, git_common_dir: active.git_common_dir, worktree_root: active.worktree_root, main_worktree_path: active.main_worktree_path, runtime_root: active.runtime_root, branch: active.branch, target_branch: active.target_branch, target_base_sha: active.target_base_sha, origin_url: active.origin_url, started_at: active.started_at, version: 1 } } });
+          assert.equal(attached.ok, true);
+        }
+      } finally { store.close(); }
+      const catalog = await readCoordinatorRunCatalog(new CoordinatorClient({ env: fixture.env }), fixture.repoKey);
+      assert.equal(catalog.runs.length, 300);
+      assert.equal(catalog.resources.length, 300);
+      assert.equal(catalog.runs[299]?.workstream_run, 'catalog-run-299');
     });
   });
 

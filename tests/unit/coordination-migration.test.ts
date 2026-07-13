@@ -9,7 +9,8 @@ import { DatabaseSync } from 'node:sqlite';
 import { describe, it } from 'node:test';
 
 import { closeAutopilotWorkstream } from '../../src/core/close-runtime.ts';
-import { runCoordinationMigration } from '../../src/core/coordination/migration.ts';
+import { runMigrationRecoveryCli } from '../../src/cli/migration-recovery.ts';
+import { acquireCoordinationGlobalMigrationLock, runCoordinationMigration } from '../../src/core/coordination/migration.ts';
 import { ClaimNegotiationClient } from '../../src/core/coordination/negotiation.ts';
 import { CoordinatorClient } from '../../src/core/coordination/client.ts';
 import { currentBootId, processStartIdentity } from '../../src/core/coordination/process-identity.ts';
@@ -547,6 +548,49 @@ void describe('Coordination Fabric legacy migration and cutover', () => {
       const resumed = await runCoordinationMigration({ command: 'apply', repoKey: fixture.repoKey, env: fixture.env, clock: fixedClock() });
       assert.equal(resumed.state, 'imported');
       assert.equal(resumed.blockers.length, 0);
+      await runCoordinationMigration({ command: 'rollback', repoKey: fixture.repoKey, env: fixture.env, clock: fixedClock() });
+    });
+  });
+
+  void it('serializes recovery commands against migration retirement with one global operation lock', async () => {
+    await withFixture(async (fixture) => {
+      const lock = await acquireCoordinationGlobalMigrationLock(fixture.stateRoot);
+      try {
+        await assert.rejects(
+          () => runMigrationRecoveryCli(['list', '--state-root', fixture.stateRoot, '--repo-root', join(dirname(fixture.stateRoot), 'source')], fixture.env),
+          /another migration process owns the repository migration lock/u,
+        );
+      } finally { await lock.release(); }
+    });
+  });
+
+  void it('requires a global coordinator drain and rejects cross-repository drain mutations after writer authority', async () => {
+    await withFixture(async (fixture) => {
+      const active = (await readActiveAutopilots(coordinationRootForRepo(fixture.repoKey, fixture.env)))[0];
+      if (active === undefined) throw new Error('missing active row');
+      const foreignRepo = `sha256-${'f'.repeat(64)}`;
+      const store = await CoordinatorStore.open(coordinatorRuntimePaths(fixture.env), fixedClock());
+      try {
+        const attachedRun = store.handle({ schema_version: 'autopilot.coordinator_request.v1', protocol_version: '1.3', request_id: 'foreign-run', action: 'attach-run', idempotency_key: 'foreign-run', repo_id: foreignRepo, workstream_run: 'foreign-run', session_id: null, fencing_generation: null, expected_version: 0, payload: { repo_key: foreignRepo, canonical_root: active.source_repo, git_common_dir: active.git_common_dir, autopilot_id: 'foreign', workstream: 'foreign', coordination_authority: 'coordinator-edit-leases-v1', run_resource: { schema_version: 'autopilot.coordination_run_resource.v1', repo_id: foreignRepo, workstream_run: 'foreign-run', source_repo: active.source_repo, git_common_dir: active.git_common_dir, worktree_root: active.worktree_root, main_worktree_path: active.main_worktree_path, runtime_root: active.runtime_root, branch: active.branch, target_branch: active.target_branch, target_base_sha: active.target_base_sha, origin_url: active.origin_url, started_at: active.started_at, version: 1 } } });
+        assert.equal(attachedRun.ok, true);
+        const attachedSession = store.handle({ schema_version: 'autopilot.coordinator_request.v1', protocol_version: '1.3', request_id: 'foreign-session', action: 'attach-session', idempotency_key: 'foreign-session', repo_id: foreignRepo, workstream_run: 'foreign-run', session_id: 'foreign-session', fencing_generation: 1, expected_version: 1, payload: { boot_id: currentBootId(), handoff_token: null, lease_expires_at: '2026-07-12T12:30:00.000Z', pid: process.pid, session_lease_id: 'foreign-session-lease', session_token: 'f'.repeat(64) } });
+        assert.equal(attachedSession.ok, true);
+      } finally { store.close(); }
+      const blocked = await runCoordinationMigration({ command: 'apply', repoKey: fixture.repoKey, env: fixture.env, clock: fixedClock() });
+      assert.equal(blocked.state, 'frozen');
+      assert.equal(blocked.blockers.some((value) => value.includes(`${foreignRepo}:foreign-run:foreign-session-lease`)), true);
+      await runCoordinationMigration({ command: 'rollback', repoKey: fixture.repoKey, env: fixture.env, clock: fixedClock() });
+    });
+
+    await withEmptyMigrationTestFixture(async (fixture) => {
+      assert.equal((await runCoordinationMigration({ command: 'apply', repoKey: fixture.repoKey, repoRoot: fixture.source, env: fixture.env, clock: fixedClock() })).state, 'imported');
+      const store = await CoordinatorStore.open(coordinatorRuntimePaths(fixture.env), fixedClock());
+      try {
+        const denied = store.handle({ schema_version: 'autopilot.coordinator_request.v1', protocol_version: '1.3', request_id: 'foreign-heartbeat-after-backup', action: 'heartbeat', idempotency_key: 'foreign-heartbeat-after-backup', repo_id: `sha256-${'e'.repeat(64)}`, workstream_run: 'foreign-run', session_id: 'foreign-session', fencing_generation: 1, expected_version: 1, payload: { lease_expires_at: '2026-07-12T12:30:00.000Z', session_lease_id: 'foreign-session-lease', session_token: 'e'.repeat(64) } });
+        assert.equal(denied.ok, false);
+        assert.equal(denied.error_code, 'coordinator-contention');
+        assert.match(String(denied.payload['message']), /after global migration writer authority was acquired/u);
+      } finally { store.close(); }
       await runCoordinationMigration({ command: 'rollback', repoKey: fixture.repoKey, env: fixture.env, clock: fixedClock() });
     });
   });

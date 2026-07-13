@@ -4,11 +4,12 @@ import { isAbsolute, resolve } from 'node:path';
 import { durableIdentifier } from "../core/coordination/client.js";
 import { parseCoordinationMigrationRecoveryWork, parseCoordinationRun, parseCoordinationSessionLease } from "../core/coordination/contracts.js";
 import { CoordinationRuntimeError } from "../core/coordination/failures.js";
+import { acquireCoordinationGlobalMigrationLock, authorizeCoordinationMigrationRecovery } from "../core/coordination/migration.js";
 import { coordinatorRuntimePaths } from "../core/coordination/runtime-paths.js";
 import { acquireSerializedProcessGuard } from "../core/coordination/serialized-lock.js";
 import { DurableRunSupervisorClient, readCoordinatorSessionContext, readMigrationRecoveryEvidenceFile } from "../core/coordination/supervisor.js";
 import { currentBootId, isProcessAlive } from "../core/coordination/process-identity.js";
-import { AUTOPILOT_STATE_ROOT_ENV, resolveRepoIdentity } from "../core/parallel-runtime.js";
+import { AUTOPILOT_STATE_ROOT_ENV, readCoordinatorRunCatalog, resolveRepoIdentity } from "../core/parallel-runtime.js";
 export function migrationRecoveryUsage() {
     return [
         '       autopilot-coordinator recovery list --repo-root <absolute-path> [--run <run>] [--state-root <absolute-path>]',
@@ -80,13 +81,18 @@ function parse(argv) {
 }
 async function recoveryRows(supervisor, repoKey, run, includeResolved, recoveryId) {
     const rows = [];
+    let pendingCount = null;
     let cursorRun = null;
     let cursorRecoveryId = null;
     do {
         const response = await supervisor.client.query('migration-recovery', repoKey, run, { cursor_recovery_id: cursorRecoveryId, cursor_run: cursorRun, include_resolved: includeResolved, limit: 128, recovery_id: recoveryId });
         const page = response.payload['recovery'];
+        const observedPendingCount = response.payload['pending_migration_recovery_count'];
         if (!Array.isArray(page))
             throw new CoordinationRuntimeError('store-corrupt', 'coordinator recovery query omitted its bounded page');
+        if (typeof observedPendingCount !== 'number' || !Number.isSafeInteger(observedPendingCount) || observedPendingCount < 0 || pendingCount !== null && pendingCount !== observedPendingCount)
+            throw new CoordinationRuntimeError('store-corrupt', 'coordinator recovery query omitted a stable pending count');
+        pendingCount = observedPendingCount;
         rows.push(...page.map(parseCoordinationMigrationRecoveryWork));
         const next = response.payload['next_cursor'];
         if (next === null) {
@@ -102,7 +108,9 @@ async function recoveryRows(supervisor, repoKey, run, includeResolved, recoveryI
         cursorRun = record['cursor_run'];
         cursorRecoveryId = record['cursor_recovery_id'];
     } while (cursorRun !== null && cursorRecoveryId !== null);
-    return Object.freeze(rows);
+    if (pendingCount === null)
+        throw new CoordinationRuntimeError('store-corrupt', 'coordinator recovery query returned no pending count');
+    return { rows: Object.freeze(rows), pendingCount };
 }
 async function detach(supervisor, attachment) {
     await supervisor.client.mutate('detach-session', {
@@ -124,10 +132,16 @@ function replayed(work, command, evidenceBytes, releaseSource, targetId) {
     return resolution.resolution_type === 'authority-released' && resolution.release_source === releaseSource && resolution.release_target_id === targetId && resolution.evidence.sha256 === sha;
 }
 async function drainStaleSessions(supervisor, repoKey, runFilter) {
-    const catalog = await supervisor.client.query('run-catalog', repoKey, runFilter);
-    const rawRuns = catalog.payload['runs'];
-    if (!Array.isArray(rawRuns))
-        throw new CoordinationRuntimeError('store-corrupt', 'run catalog omitted runs during stale-session drain');
+    let rawRuns;
+    if (runFilter === null)
+        rawRuns = (await readCoordinatorRunCatalog(supervisor.client, repoKey)).runs;
+    else {
+        const exact = await supervisor.client.query('run-catalog', repoKey, runFilter);
+        const values = exact.payload['runs'];
+        if (!Array.isArray(values))
+            throw new CoordinationRuntimeError('store-corrupt', 'run catalog omitted exact run during stale-session drain');
+        rawRuns = Object.freeze(values.map(parseCoordinationRun));
+    }
     const contexts = new Map();
     const entries = await readdir(supervisor.client.paths.sessionsRoot, { withFileTypes: true });
     if (entries.length > 10_000)
@@ -169,13 +183,14 @@ async function executeMigrationRecoveryCli(argv, baseEnv) {
     const env = args.stateRoot === null ? baseEnv : { ...baseEnv, [AUTOPILOT_STATE_ROOT_ENV]: args.stateRoot };
     const repo = resolveRepoIdentity(args.repoRoot);
     const supervisor = new DurableRunSupervisorClient(env, { allowMigrationRecoveryAutoStart: true });
-    const allRows = await recoveryRows(supervisor, repo.repoKey, args.run, args.command === 'show' || args.recoveryId !== null, args.all ? null : args.recoveryId);
+    const queried = await recoveryRows(supervisor, repo.repoKey, args.run, args.command === 'show' || args.recoveryId !== null, args.all ? null : args.recoveryId);
+    const allRows = queried.rows;
     const pending = allRows.filter((work) => work.status === 'pending');
     if (args.command === 'list')
-        return { schema_version: 'autopilot.migration_recovery_cli.v1', action: 'list', repo_key: repo.repoKey, run: args.run, pending_count: pending.length, recovery: pending };
+        return { schema_version: 'autopilot.migration_recovery_cli.v1', action: 'list', repo_key: repo.repoKey, run: args.run, pending_count: queried.pendingCount, recovery: pending };
     if (args.command === 'doctor') {
         const doctor = await supervisor.client.query('doctor');
-        return { schema_version: 'autopilot.migration_recovery_cli.v1', action: 'doctor', repo_key: repo.repoKey, run: args.run, pending_count: pending.length, healthy: doctor.payload['healthy'], doctor: doctor.payload };
+        return { schema_version: 'autopilot.migration_recovery_cli.v1', action: 'doctor', repo_key: repo.repoKey, run: args.run, pending_count: queried.pendingCount, healthy: doctor.payload['healthy'], doctor: doctor.payload };
     }
     if (args.command === 'drain-stale-sessions')
         return await drainStaleSessions(supervisor, repo.repoKey, args.run);
@@ -198,7 +213,7 @@ async function executeMigrationRecoveryCli(argv, baseEnv) {
     if (already.length + unresolved.length !== targets.length)
         throw new CoordinationRuntimeError('invalid-state', 'existing recovery resolution conflicts with requested outcome');
     if (unresolved.length === 0)
-        return { schema_version: 'autopilot.migration_recovery_cli.v1', action: args.command, replayed: true, resolved_count: already.length, remaining_recovery_count: pending.length };
+        return { schema_version: 'autopilot.migration_recovery_cli.v1', action: args.command, replayed: true, resolved_count: already.length, remaining_recovery_count: queried.pendingCount };
     const first = unresolved[0];
     if (first === undefined || args.run === null)
         throw new CoordinationRuntimeError('invalid-state', 'recovery target disappeared');
@@ -228,13 +243,29 @@ export async function runMigrationRecoveryCli(argv, baseEnv = process.env) {
     const env = args.stateRoot === null ? baseEnv : { ...baseEnv, [AUTOPILOT_STATE_ROOT_ENV]: args.stateRoot };
     const paths = coordinatorRuntimePaths(env);
     const guard = acquireSerializedProcessGuard(resolve(paths.coordinatorRoot, 'migration-recovery-cli.election.db'), 10_000, 'migration recovery CLI');
+    let globalLock = null;
+    let recoveryAuthorization = null;
     try {
+        globalLock = await acquireCoordinationGlobalMigrationLock(paths.stateRoot);
+        recoveryAuthorization = await authorizeCoordinationMigrationRecovery(paths.stateRoot, globalLock);
         // Recovery commands never signal a coordinator: another client may have
         // attached after startup. Migration commands own process retirement while
-        // holding the repository migration lock and after proving a durable drain.
+        // holding the global migration lock and after proving a durable drain.
         return await executeMigrationRecoveryCli(argv, baseEnv);
     }
     finally {
-        guard.release();
+        try {
+            try {
+                if (recoveryAuthorization !== null)
+                    await recoveryAuthorization.release();
+            }
+            finally {
+                if (globalLock !== null)
+                    await globalLock.release();
+            }
+        }
+        finally {
+            guard.release();
+        }
     }
 }

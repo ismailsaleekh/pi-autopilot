@@ -25,7 +25,7 @@ const PAYLOAD_FIELDS = {
     doctor: [],
     export: ['output_path'],
     'migration-recovery': ['cursor_recovery_id', 'cursor_run', 'include_resolved', 'limit', 'recovery_id'],
-    'run-catalog': [],
+    'run-catalog': ['cursor_run', 'limit'],
     'attach-run': ['autopilot_id', 'canonical_root', 'coordination_authority', 'git_common_dir', 'repo_key', 'run_resource', 'workstream'],
     'attach-session': ['boot_id', 'handoff_token', 'lease_expires_at', 'pid', 'session_lease_id', 'session_token'],
     'attach-terminal-recovery': ['boot_id', 'lease_expires_at', 'pid', 'session_lease_id', 'session_token', 'terminal_intent_id'],
@@ -895,9 +895,21 @@ export function parseCoordinationSnapshot(value) {
 }
 function parsePayload(value, action) {
     const label = `CoordinatorRequestEnvelope.payload(${action})`;
-    const payload = object(value, label, PAYLOAD_FIELDS[action]);
+    let payload;
+    if (action === 'run-catalog') {
+        if (!isJsonObject(value))
+            fail(label, 'must be an object');
+        const unknownFields = Object.keys(value).filter((key) => !PAYLOAD_FIELDS[action].includes(key));
+        if (unknownFields.length > 0)
+            fail(label, `contains unknown fields: ${unknownFields.sort().join(', ')}`);
+        payload = value;
+    }
+    else
+        payload = object(value, label, PAYLOAD_FIELDS[action]);
     for (const field of PAYLOAD_FIELDS[action]) {
         const entry = payload[field];
+        if (action === 'run-catalog' && entry === undefined)
+            continue;
         if (field === 'limit') {
             if (typeof entry !== 'number' || !Number.isSafeInteger(entry) || entry < 1 || entry > 256)
                 fail(label, 'limit must be a safe integer from 1 through 256');

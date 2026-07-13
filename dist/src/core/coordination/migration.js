@@ -1011,6 +1011,19 @@ function inspectCoordinatorReadOnly(paths, repoKey, writerAuthorityAcquired = fa
         const attempts = boundedDatabaseRows(database, 'unit_attempts', 'SELECT payload_json FROM unit_attempts WHERE repo_id=? ORDER BY workstream_run, entity_id', [repoKey]).map((row, index) => parseCoordinationUnitAttempt(parseDatabasePayload(row, 'payload_json', `unit attempt ${String(index)}`)));
         const editLeases = boundedDatabaseRows(database, 'edit_leases', 'SELECT payload_json FROM edit_leases WHERE repo_id=? ORDER BY workstream_run, entity_id', [repoKey]).map((row, index) => parseCoordinationEditLease(parseDatabasePayload(row, 'payload_json', `edit lease ${String(index)}`)));
         const worktreeOperations = boundedDatabaseRows(database, 'worktree_operations', 'SELECT payload_json FROM worktree_operations WHERE repo_id=? ORDER BY workstream_run, entity_id', [repoKey]).map((row, index) => parseCoordinationWorktreeOperation(parseDatabasePayload(row, 'payload_json', `worktree operation ${String(index)}`)));
+        const globalDrainBlockers = [];
+        for (const row of boundedDatabaseRows(database, 'session_leases', "SELECT repo_id, workstream_run, session_lease_id, status FROM session_leases WHERE status IN ('attached','handoff-pending') ORDER BY repo_id, workstream_run, session_generation"))
+            globalDrainBlockers.push(`coordinator session has not durably drained: ${sqlText(row, 'repo_id', 'session lease', 192)}:${sqlText(row, 'workstream_run', 'session lease', 192)}:${sqlText(row, 'session_lease_id', 'session lease', 192)}`);
+        for (const row of boundedDatabaseRows(database, 'child_leases', "SELECT repo_id, workstream_run, child_lease_id, status FROM child_leases WHERE status IN ('preflight','starting','running','recovery-required') ORDER BY repo_id, workstream_run, unit_id, attempt"))
+            globalDrainBlockers.push(`coordinator child has not durably drained: ${sqlText(row, 'repo_id', 'child lease', 192)}:${sqlText(row, 'workstream_run', 'child lease', 192)}:${sqlText(row, 'child_lease_id', 'child lease', 192)}`);
+        const globalAttempts = boundedDatabaseRows(database, 'unit_attempts', 'SELECT payload_json FROM unit_attempts ORDER BY repo_id, workstream_run, entity_id').map((row, index) => parseCoordinationUnitAttempt(parseDatabasePayload(row, 'payload_json', `global unit attempt ${String(index)}`)));
+        for (const attempt of globalAttempts)
+            if (attempt.critical_section !== null)
+                globalDrainBlockers.push(`coordinator attempt remains in an incompatible critical section: ${attempt.owner.repo_id}:${attempt.owner.workstream_run}:${stableJson(attempt.critical_section)}`);
+        const globalOperations = boundedDatabaseRows(database, 'worktree_operations', 'SELECT payload_json FROM worktree_operations ORDER BY repo_id, workstream_run, entity_id').map((row, index) => parseCoordinationWorktreeOperation(parseDatabasePayload(row, 'payload_json', `global worktree operation ${String(index)}`)));
+        for (const operation of globalOperations)
+            if (!['committed', 'compensated', 'failed'].includes(operation.stage))
+                globalDrainBlockers.push(`coordinator worktree operation critical section is incomplete: ${operation.owner.repo_id}:${operation.owner.workstream_run}:${operation.operation_id}:${operation.stage}`);
         let migration = null;
         if (schemaVersion >= 7) {
             const migrationRows = boundedDatabaseRows(database, 'coordination_migrations', 'SELECT migration_id, snapshot_sha256, state, report_json FROM coordination_migrations WHERE repo_id=?', [repoKey]);
@@ -1028,7 +1041,7 @@ function inspectCoordinatorReadOnly(paths, repoKey, writerAuthorityAcquired = fa
             }
         }
         database.exec('ROLLBACK');
-        return { schemaVersion, repositories: Object.freeze(repositories), runs: Object.freeze(runs), sessions: Object.freeze(sessions), children: Object.freeze(children), attempts: Object.freeze(attempts), editLeases: Object.freeze(editLeases), worktreeOperations: Object.freeze(worktreeOperations), migration };
+        return { schemaVersion, repositories: Object.freeze(repositories), runs: Object.freeze(runs), sessions: Object.freeze(sessions), children: Object.freeze(children), attempts: Object.freeze(attempts), editLeases: Object.freeze(editLeases), worktreeOperations: Object.freeze(worktreeOperations), globalDrainBlockers: Object.freeze(globalDrainBlockers.sort()), migration };
     }
     catch (error) {
         try {
@@ -1234,22 +1247,7 @@ function legacyDrainBlockers(paths, migrationPaths, journal, rows) {
     return Object.freeze(blockers.sort());
 }
 function coordinatorDrainBlockers(coordinator) {
-    if (coordinator === null)
-        return [];
-    const blockers = [];
-    for (const session of coordinator.sessions)
-        if (session.status === 'attached' || session.status === 'handoff-pending')
-            blockers.push(`coordinator session has not durably drained: ${session.workstream_run}:${session.session_lease_id}`);
-    for (const child of coordinator.children)
-        if (['preflight', 'starting', 'running', 'recovery-required'].includes(child.status))
-            blockers.push(`coordinator child has not durably drained: ${child.workstream_run}:${child.child_lease_id}`);
-    for (const attempt of coordinator.attempts)
-        if (attempt.critical_section !== null)
-            blockers.push(`coordinator attempt remains in an incompatible critical section: ${attempt.owner.workstream_run}:${stableJson(attempt.critical_section)}`);
-    for (const operation of coordinator.worktreeOperations)
-        if (!['committed', 'compensated', 'failed'].includes(operation.stage))
-            blockers.push(`coordinator worktree operation critical section is incomplete: ${operation.owner.workstream_run}:${operation.operation_id}:${operation.stage}`);
-    return Object.freeze(blockers.sort());
+    return coordinator?.globalDrainBlockers ?? [];
 }
 function runStatus(row, recoveryRuns, terminalizedRuns, runtimeStatuses) {
     if (row.status === 'closed' || terminalizedRuns.has(row.workstream_run))
@@ -1632,7 +1630,7 @@ async function acquireMigrationLock(stateRoot, path, afterBoundary) {
             await afterBoundary?.('after-lock-published');
             unlinkSync(candidatePath);
             fsyncParentDirectory(path);
-            return { release: async () => {
+            return { path, pid: process.pid, bootId: currentBootId(), token, release: async () => {
                     assertMigrationPathSafe(stateRoot, path, 'repository migration lock release');
                     const releasePath = `${path}.release-${token}`;
                     assertMigrationPathSafe(stateRoot, releasePath, 'repository migration release fence');
@@ -1727,6 +1725,32 @@ async function acquireMigrationLock(stateRoot, path, afterBoundary) {
         }
     }
     failure('blocked', 'could not acquire repository migration lock', [path]);
+}
+export async function acquireCoordinationGlobalMigrationLock(stateRoot) {
+    const path = join(stateRoot, 'migrations', '.global-operation.lock');
+    const lock = await acquireMigrationLock(stateRoot, path);
+    const staleAuthorization = join(stateRoot, 'migrations', '.recovery-operation.json');
+    await rm(staleAuthorization, { force: true });
+    fsyncParentDirectory(staleAuthorization);
+    return lock;
+}
+export async function authorizeCoordinationMigrationRecovery(stateRoot, lock) {
+    const expectedPath = join(stateRoot, 'migrations', '.global-operation.lock');
+    if (lock.path !== expectedPath || lock.pid !== process.pid || lock.bootId !== currentBootId())
+        failure('blocked', 'recovery authorization does not own the exact global migration operation lock');
+    const marker = join(stateRoot, 'migrations', '.recovery-operation.json');
+    await atomicJson(stateRoot, marker, { schema_version: 'autopilot.coordination_recovery_operation.v1', pid: lock.pid, boot_id: lock.bootId, token: lock.token, created_at: new Date().toISOString() });
+    let released = false;
+    return { release: async () => {
+            if (released)
+                return;
+            const value = object(parseJsonFile(marker, null), marker, ['boot_id', 'created_at', 'pid', 'schema_version', 'token']);
+            if (value['schema_version'] !== 'autopilot.coordination_recovery_operation.v1' || value['pid'] !== lock.pid || value['boot_id'] !== lock.bootId || value['token'] !== lock.token)
+                failure('blocked', 'recovery authorization identity changed before release', [marker]);
+            await rm(marker, { force: true });
+            fsyncParentDirectory(marker);
+            released = true;
+        } };
 }
 async function createFreeze(stateRoot, path, repoKey, migrationId, token, now) {
     assertMigrationPathSafe(stateRoot, path, 'migration freeze');
@@ -2181,8 +2205,10 @@ export async function runCoordinationMigration(input) {
             else
                 await enforcePrivateAuthorityPath(existingAuthorityRoot, true, input.env ?? process.env);
         }
-    const lock = await acquireMigrationLock(paths.stateRoot, migrationPaths.lockPath, input.afterBoundary);
+    const globalLock = await acquireCoordinationGlobalMigrationLock(paths.stateRoot);
+    let lock = null;
     try {
+        lock = await acquireMigrationLock(paths.stateRoot, migrationPaths.lockPath, input.afterBoundary);
         const marker = readCoordinationCutoverMarker(migrationPaths.cutoverMarkerPath, input.repoKey, paths.stateRoot);
         let journal = await readJournal(paths.stateRoot, migrationPaths.journalPath);
         if (journal?.state === 'rolled-back' && input.command === 'apply') {
@@ -2520,7 +2546,13 @@ export async function runCoordinationMigration(input) {
         return finalReport;
     }
     finally {
-        await lock.release();
+        try {
+            if (lock !== null)
+                await lock.release();
+        }
+        finally {
+            await globalLock.release();
+        }
     }
 }
 export function coordinationMigrationUsage() {

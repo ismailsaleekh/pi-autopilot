@@ -513,7 +513,7 @@ void describe('package manifest and payload', () => {
     const runner = await readFile(new URL('src/core/agent-runner.ts', root), 'utf8');
     const saga = await readFile(new URL('src/core/coordination/worktree-saga.ts', root), 'utf8');
     const coordinatorProjection = parallel.slice(parallel.indexOf('export async function readCoordinatorActiveAutopilots'), parallel.indexOf('function legacyRootIdentity'));
-    assert.match(coordinatorProjection, /run_resources/u);
+    assert.match(coordinatorProjection, /readCoordinatorRunCatalog/u);
     assert.equal(/TASK_INFO_FILE|readJson/u.test(coordinatorProjection), false);
     assert.match(parallel, /post-cutover activation requires a durable coordinator session/u);
     assert.match(runner, /readCoordinatorActiveAutopilots/u);
@@ -678,6 +678,8 @@ void describe('package manifest and payload', () => {
         'utf8',
       );
 
+      await stopExternalCoordinator(stateRoot);
+      assert.equal(existsSync(coordinatorRuntimePaths({ ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: stateRoot }).lockPath), false, 'source coordinator must be stopped before the installed binary proves autostart');
       const runnerEnv = { ...process.env, NODE_OPTIONS: `${process.env['NODE_OPTIONS'] ?? ''} --disable-warning=ExperimentalWarning`.trim(), [AUTOPILOT_STATE_ROOT_ENV]: stateRoot, [AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV]: attachment.contextPath };
       const packedMigration = spawnSync(process.execPath, [installedCoordinator, 'migrate', '--dry-run', '--state-root', join(tempRoot, 'migration-state'), '--repo-root', source], { cwd: source, encoding: 'utf8', env: runnerEnv });
       assert.equal(packedMigration.status, 0, packedMigration.stderr);
@@ -690,6 +692,14 @@ void describe('package manifest and payload', () => {
       });
       assert.equal(coordinatorStatus.status, 0, coordinatorStatus.stderr);
       assert.match(coordinatorStatus.stdout, /autopilot\.coordinator_status\.v1/u);
+      for (const [command, expected] of [
+        [['recovery', 'list', '--state-root', stateRoot, '--repo-root', source], /autopilot\.migration_recovery_cli\.v1/u],
+        [['recovery', 'doctor', '--state-root', stateRoot, '--repo-root', source], /"healthy": true/u],
+      ] as const) {
+        const recovery = spawnSync(installedCoordinatorLink, command, { cwd: source, encoding: 'utf8', env: runnerEnv });
+        assert.equal(recovery.status, 0, recovery.stderr);
+        assert.match(recovery.stdout, expected);
+      }
       const dryRun = spawnSync(process.execPath, [installedBin, '--dry-run', '--json', specPath], {
         cwd: worktree,
         encoding: 'utf8',

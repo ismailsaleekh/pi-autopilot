@@ -42,7 +42,7 @@ Also run release docs audits and forbidden legacy-runtime scans before cutting a
 
 ## Release limitations
 
-A live `1.0.0-cf37` / protocol-1.3 / schema-9 coordinator is not an authenticated upgrade predecessor for this patch. Stop that process gracefully and verify its exact lifecycle lock is no longer live before starting `1.0.1-cf38`; unknown or still-live current-generation identities fail closed. Recovery commands do not retire a shared coordinator themselves—migration apply, verify, rollback, and cutover own drained retirement under the repository migration lock.
+A live `1.0.0-cf37` / protocol-1.3 / schema-9 coordinator is not an authenticated upgrade predecessor for this patch. Stop that process gracefully and verify its exact lifecycle lock is no longer live before starting `1.0.1-cf38`; unknown or still-live current-generation identities fail closed. Recovery commands do not retire a shared coordinator themselves—migration apply, verify, rollback, and cutover own drained retirement under the global migration operation lock. Certification must prove a second repository cannot mutate after writer authority/backup, all repositories participate in the pre-retirement drain, recovery attachments serialize on the same lock, and run-catalog activation remains paginated beyond 256 durable runs.
 
 Automatic predecessor signaling is not an OS-handle-bound mathematical kill: Node leaves a documented identity-read-to-signal PID race. macOS certification requires `/usr/bin/python3` as the fail-closed libproc bridge; absence or incomplete ABI results forbid automatic retirement.
 

@@ -4,7 +4,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { platform } from 'node:os';
 
 import { CoordinationRuntimeError } from './failures.ts';
-import { currentBootId } from './process-identity.ts';
+import { currentBootId, isProcessAlive } from './process-identity.ts';
 import { COORDINATOR_DATABASE_SCHEMA_VERSION, COORDINATOR_PACKAGE_BUILD } from './runtime-constants.ts';
 import { enforceWindowsPrivateAcl, hardenRuntimeAuthorityBeforeMarkerRead } from '../private-path.ts';
 import type { CoordinatorRuntimePaths } from './runtime-paths.ts';
@@ -229,15 +229,17 @@ export function activeCoordinationMigrationFreeze(stateRoot: string): string | n
   const migrationsRoot = join(stateRoot, 'migrations');
   assertMigrationPathSafe(stateRoot, migrationsRoot, 'coordination migrations root');
   if (!existsSync(migrationsRoot)) return null;
+  const freezes: string[] = [];
   for (const entry of readdirSync(migrationsRoot, { withFileTypes: true })) {
     if (entry.isSymbolicLink()) throw new CoordinationRuntimeError('invalid-state', 'migration root contains a symbolic-link repository entry', [join(migrationsRoot, entry.name)]);
     if (entry.isDirectory()) {
       const freeze = join(migrationsRoot, entry.name, 'freeze.json');
       assertMigrationPathSafe(stateRoot, freeze, 'coordination migration freeze');
-      if (existsSync(freeze)) return freeze;
+      if (existsSync(freeze)) freezes.push(freeze);
     }
   }
-  return null;
+  if (freezes.length > 1) throw new CoordinationRuntimeError('invalid-state', 'multiple global coordination migration freezes are active', freezes.sort());
+  return freezes[0] ?? null;
 }
 
 export function acknowledgeCoordinationMigrationFreeze(stateRoot: string, repoKey: string): boolean {
@@ -245,6 +247,38 @@ export function acknowledgeCoordinationMigrationFreeze(stateRoot: string, repoKe
   if (!existsSync(paths.freezePath)) return false;
   durableLegacyFreezeAck(stateRoot, repoKey, paths.freezePath);
   return true;
+}
+
+export function assertCoordinationFrozenMutationAllowed(stateRoot: string, repoKey: string, action: string): void {
+  const freezePath = activeCoordinationMigrationFreeze(stateRoot);
+  if (freezePath === null) return;
+  const freeze = readFreeze(freezePath);
+  const journalPath = join(dirname(freezePath), 'journal.json');
+  assertMigrationPathSafe(stateRoot, journalPath, 'coordination migration journal for mutation fence');
+  if (!existsSync(journalPath)) throw new CoordinationRuntimeError('invalid-state', 'global coordination freeze has no durable migration journal', [freezePath, journalPath]);
+  const journal = record(readRegularJsonNoFollow(journalPath, 'coordination migration journal for mutation fence'), 'coordination migration journal for mutation fence');
+  if (journal['schema_version'] !== COORDINATION_MIGRATION_JOURNAL_SCHEMA || journal['repo_key'] !== freeze['repo_key'] || journal['migration_id'] !== freeze['migration_id'] || !Array.isArray(journal['completed_effects']) || typeof journal['state'] !== 'string') throw new CoordinationRuntimeError('invalid-state', 'global coordination freeze and migration journal identities disagree', [freezePath, journalPath]);
+  const effects = journal['completed_effects'];
+  if (!effects.every((value) => typeof value === 'string')) throw new CoordinationRuntimeError('invalid-state', 'coordination migration journal completed effects are malformed', [journalPath]);
+  const preAuthorityDrainActions = new Set(['detach-session', 'heartbeat', 'heartbeat-child', 'checkpoint-child', 'complete-child', 'record-release-evidence', 'cancel-run-terminal', 'reconcile-run', 'transition-operation']);
+  if (!effects.includes('freeze-drain-complete')) {
+    if (preAuthorityDrainActions.has(action)) return;
+    throw new CoordinationRuntimeError('coordinator-contention', `coordinator mutation ${action} refused: migration freeze is active and the global drain is incomplete`, [freezePath]);
+  }
+  const recoveryActions = new Set(['attach-migration-recovery', 'resolve-migration-recovery', 'detach-session']);
+  if (repoKey === freeze['repo_key'] && ['imported', 'verified', 'cutover-ready'].includes(journal['state']) && recoveryActions.has(action)) {
+    const globalLockPath = join(stateRoot, 'migrations', '.global-operation.lock');
+    const authorizationPath = join(stateRoot, 'migrations', '.recovery-operation.json');
+    assertMigrationPathSafe(stateRoot, globalLockPath, 'global migration operation lock');
+    assertMigrationPathSafe(stateRoot, authorizationPath, 'migration recovery operation authorization');
+    if (!existsSync(globalLockPath) && !existsSync(authorizationPath)) return;
+    if (!existsSync(globalLockPath) || !existsSync(authorizationPath)) throw new CoordinationRuntimeError('coordinator-contention', 'migration recovery mutation lacks the serialized global recovery operation authority', [globalLockPath, authorizationPath]);
+    const operationLock = record(readRegularJsonNoFollow(globalLockPath, 'global migration operation lock'), 'global migration operation lock');
+    const authorization = record(readRegularJsonNoFollow(authorizationPath, 'migration recovery operation authorization'), 'migration recovery operation authorization');
+    if (operationLock['schema_version'] !== 'autopilot.coordination_migration_lock.v1' || authorization['schema_version'] !== 'autopilot.coordination_recovery_operation.v1' || operationLock['pid'] !== authorization['pid'] || operationLock['boot_id'] !== authorization['boot_id'] || operationLock['token'] !== authorization['token'] || authorization['boot_id'] !== currentBootId() || typeof authorization['pid'] !== 'number' || !Number.isSafeInteger(authorization['pid']) || !isProcessAlive(authorization['pid'])) throw new CoordinationRuntimeError('coordinator-contention', 'migration recovery operation authority is stale or mismatched', [globalLockPath, authorizationPath]);
+    return;
+  }
+  throw new CoordinationRuntimeError('coordinator-contention', `coordinator mutation ${action} refused after global migration writer authority was acquired`, [freezePath, String(freeze['repo_key'])]);
 }
 
 export function assertCoordinationDispatchAllowed(stateRoot: string, repoKey: string, operation: string): void {
