@@ -8,7 +8,7 @@ import { platform, tmpdir } from 'node:os';
 
 import { CoordinatorClient } from './client.ts';
 import { parseLegacyActiveAutopilots, parseLegacyPathClaims, checkLegacyCoordinationInvariants, LEGACY_PREFLIGHT_MAX_INPUT_BYTES } from './legacy-preflight.ts';
-import { activeCoordinationMigrationFreeze, assertMigrationPathSafe, coordinationMigrationPaths, COORDINATION_CUTOVER_MARKER_SCHEMA, COORDINATION_FREEZE_ACK_SCHEMA, COORDINATION_FREEZE_SCHEMA, COORDINATION_MIGRATION_JOURNAL_SCHEMA, readCoordinationCutoverMarker, type CoordinationCutoverMarker, type CoordinationFreezeAcknowledgement, type CoordinationMigrationPaths } from './migration-paths.ts';
+import { activeCoordinationMigrationFreeze, assertMigrationPathSafe, coordinationGlobalMigrationLockPath, coordinationMigrationPaths, COORDINATION_CUTOVER_MARKER_SCHEMA, COORDINATION_FREEZE_ACK_SCHEMA, COORDINATION_FREEZE_SCHEMA, COORDINATION_MIGRATION_JOURNAL_SCHEMA, readCoordinationCutoverMarker, type CoordinationCutoverMarker, type CoordinationFreezeAcknowledgement, type CoordinationMigrationPaths } from './migration-paths.ts';
 import { currentBootId, isExactProcessAlive, isProcessAlive, predecessorCompatibleBootId, preflightProcessRetirementSupport, retireExactProcess } from './process-identity.ts';
 import { COORDINATOR_DATABASE_SCHEMA_VERSION, COORDINATOR_PACKAGE_BUILD, coordinatorRuntimePaths, enforcePrivateAuthorityPath, enforceWindowsPrivateTree, ensureCoordinatorPrivateRoots, ensurePrivateAuthorityDirectory, type CoordinatorRuntimePaths } from './runtime-paths.ts';
 import { acquireSerializedProcessGuard, discardLockTombstone, quarantineExactLock, readExactLockText, restoreLockTombstone } from './serialized-lock.ts';
@@ -1642,10 +1642,11 @@ async function acquireMigrationLock(stateRoot: string, path: string, afterBounda
 }
 
 export async function acquireCoordinationGlobalMigrationLock(stateRoot: string): Promise<CoordinationMigrationOperationLock> {
-  // The state root already exists, so read-only dry-runs can elect without
-  // creating a persistent migrations directory merely to host the lock.
-  const path = join(stateRoot, '.coordination-migration-operation.lock');
-  const lock = await acquireMigrationLock(stateRoot, path, undefined, false);
+  // Elect in the existing parent so a dry-run of an empty state root does not
+  // create authority state merely to host its transient operation lock.
+  const lockRoot = dirname(resolve(stateRoot));
+  const path = coordinationGlobalMigrationLockPath(stateRoot);
+  const lock = await acquireMigrationLock(lockRoot, path, undefined, false);
   try {
     const staleAuthorization = join(stateRoot, 'migrations', '.recovery-operation.json');
     assertMigrationPathSafe(stateRoot, staleAuthorization, 'stale migration recovery operation authorization');
@@ -1661,7 +1662,7 @@ export async function acquireCoordinationGlobalMigrationLock(stateRoot: string):
 }
 
 export async function authorizeCoordinationMigrationRecovery(stateRoot: string, lock: CoordinationMigrationOperationLock): Promise<{ readonly token: string; readonly release: () => Promise<void> }> {
-  const expectedPath = join(stateRoot, '.coordination-migration-operation.lock');
+  const expectedPath = coordinationGlobalMigrationLockPath(stateRoot);
   if (lock.path !== expectedPath || lock.pid !== process.pid || lock.bootId !== currentBootId()) failure('blocked', 'recovery authorization does not own the exact global migration operation lock');
   const marker = join(stateRoot, 'migrations', '.recovery-operation.json');
   await atomicJson(stateRoot, marker, { schema_version: 'autopilot.coordination_recovery_operation.v1', pid: lock.pid, boot_id: lock.bootId, token: lock.token, created_at: new Date().toISOString() });

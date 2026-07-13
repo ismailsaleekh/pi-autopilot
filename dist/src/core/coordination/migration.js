@@ -7,7 +7,7 @@ import { pathToFileURL } from 'node:url';
 import { platform, tmpdir } from 'node:os';
 import { CoordinatorClient } from "./client.js";
 import { parseLegacyActiveAutopilots, parseLegacyPathClaims, checkLegacyCoordinationInvariants, LEGACY_PREFLIGHT_MAX_INPUT_BYTES } from "./legacy-preflight.js";
-import { activeCoordinationMigrationFreeze, assertMigrationPathSafe, coordinationMigrationPaths, COORDINATION_CUTOVER_MARKER_SCHEMA, COORDINATION_FREEZE_ACK_SCHEMA, COORDINATION_FREEZE_SCHEMA, COORDINATION_MIGRATION_JOURNAL_SCHEMA, readCoordinationCutoverMarker } from "./migration-paths.js";
+import { activeCoordinationMigrationFreeze, assertMigrationPathSafe, coordinationGlobalMigrationLockPath, coordinationMigrationPaths, COORDINATION_CUTOVER_MARKER_SCHEMA, COORDINATION_FREEZE_ACK_SCHEMA, COORDINATION_FREEZE_SCHEMA, COORDINATION_MIGRATION_JOURNAL_SCHEMA, readCoordinationCutoverMarker } from "./migration-paths.js";
 import { currentBootId, isExactProcessAlive, isProcessAlive, predecessorCompatibleBootId, preflightProcessRetirementSupport, retireExactProcess } from "./process-identity.js";
 import { COORDINATOR_DATABASE_SCHEMA_VERSION, COORDINATOR_PACKAGE_BUILD, coordinatorRuntimePaths, enforcePrivateAuthorityPath, enforceWindowsPrivateTree, ensureCoordinatorPrivateRoots, ensurePrivateAuthorityDirectory } from "./runtime-paths.js";
 import { acquireSerializedProcessGuard, discardLockTombstone, quarantineExactLock, readExactLockText, restoreLockTombstone } from "./serialized-lock.js";
@@ -1730,10 +1730,11 @@ async function acquireMigrationLock(stateRoot, path, afterBoundary, ensureParent
     failure('blocked', 'could not acquire repository migration lock', [path]);
 }
 export async function acquireCoordinationGlobalMigrationLock(stateRoot) {
-    // The state root already exists, so read-only dry-runs can elect without
-    // creating a persistent migrations directory merely to host the lock.
-    const path = join(stateRoot, '.coordination-migration-operation.lock');
-    const lock = await acquireMigrationLock(stateRoot, path, undefined, false);
+    // Elect in the existing parent so a dry-run of an empty state root does not
+    // create authority state merely to host its transient operation lock.
+    const lockRoot = dirname(resolve(stateRoot));
+    const path = coordinationGlobalMigrationLockPath(stateRoot);
+    const lock = await acquireMigrationLock(lockRoot, path, undefined, false);
     try {
         const staleAuthorization = join(stateRoot, 'migrations', '.recovery-operation.json');
         assertMigrationPathSafe(stateRoot, staleAuthorization, 'stale migration recovery operation authorization');
@@ -1749,7 +1750,7 @@ export async function acquireCoordinationGlobalMigrationLock(stateRoot) {
     }
 }
 export async function authorizeCoordinationMigrationRecovery(stateRoot, lock) {
-    const expectedPath = join(stateRoot, '.coordination-migration-operation.lock');
+    const expectedPath = coordinationGlobalMigrationLockPath(stateRoot);
     if (lock.path !== expectedPath || lock.pid !== process.pid || lock.bootId !== currentBootId())
         failure('blocked', 'recovery authorization does not own the exact global migration operation lock');
     const marker = join(stateRoot, 'migrations', '.recovery-operation.json');

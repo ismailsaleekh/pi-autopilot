@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { chmodSync, closeSync, constants as fsConstants, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, unlinkSync, writeSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { platform } from 'node:os';
@@ -91,6 +91,12 @@ export function assertMigrationPathSafe(stateRoot: string, candidate: string, la
     const physical = realpathSync(current);
     if (!pathInside(physicalRoot, physical)) throw new CoordinationRuntimeError('invalid-state', `${label} escapes the migration state root physically`, [current, physical, physicalRoot]);
   }
+}
+
+export function coordinationGlobalMigrationLockPath(stateRoot: string): string {
+  const canonicalStateRoot = resolve(stateRoot);
+  const identity = createHash('sha256').update(canonicalStateRoot, 'utf8').digest('hex').slice(0, 32);
+  return join(dirname(canonicalStateRoot), `.autopilot-coordination-migration-${identity}.lock`);
 }
 
 function migrationPathsForStateRoot(stateRoot: string, repoKey: string): CoordinationMigrationPaths {
@@ -250,9 +256,9 @@ export function acknowledgeCoordinationMigrationFreeze(stateRoot: string, repoKe
 }
 
 export function assertCoordinationMigrationRecoveryOperationAuthorized(stateRoot: string, operationToken: unknown): void {
-  const globalLockPath = join(stateRoot, '.coordination-migration-operation.lock');
+  const globalLockPath = coordinationGlobalMigrationLockPath(stateRoot);
   const authorizationPath = join(stateRoot, 'migrations', '.recovery-operation.json');
-  assertMigrationPathSafe(stateRoot, globalLockPath, 'global migration operation lock');
+  assertMigrationPathSafe(dirname(resolve(stateRoot)), globalLockPath, 'global migration operation lock');
   assertMigrationPathSafe(stateRoot, authorizationPath, 'migration recovery operation authorization');
   if (!existsSync(globalLockPath) || !existsSync(authorizationPath)) throw new CoordinationRuntimeError('coordinator-contention', 'migration recovery mutation lacks the serialized global recovery operation authority', [globalLockPath, authorizationPath]);
   const operationLock = record(readRegularJsonNoFollow(globalLockPath, 'global migration operation lock'), 'global migration operation lock');

@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { chmodSync, closeSync, constants as fsConstants, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, unlinkSync, writeSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { platform } from 'node:os';
@@ -57,6 +57,11 @@ export function assertMigrationPathSafe(stateRoot, candidate, label) {
         if (!pathInside(physicalRoot, physical))
             throw new CoordinationRuntimeError('invalid-state', `${label} escapes the migration state root physically`, [current, physical, physicalRoot]);
     }
+}
+export function coordinationGlobalMigrationLockPath(stateRoot) {
+    const canonicalStateRoot = resolve(stateRoot);
+    const identity = createHash('sha256').update(canonicalStateRoot, 'utf8').digest('hex').slice(0, 32);
+    return join(dirname(canonicalStateRoot), `.autopilot-coordination-migration-${identity}.lock`);
 }
 function migrationPathsForStateRoot(stateRoot, repoKey) {
     if (!/^[A-Za-z0-9][A-Za-z0-9._:@-]{0,191}$/u.test(repoKey))
@@ -250,9 +255,9 @@ export function acknowledgeCoordinationMigrationFreeze(stateRoot, repoKey) {
     return true;
 }
 export function assertCoordinationMigrationRecoveryOperationAuthorized(stateRoot, operationToken) {
-    const globalLockPath = join(stateRoot, '.coordination-migration-operation.lock');
+    const globalLockPath = coordinationGlobalMigrationLockPath(stateRoot);
     const authorizationPath = join(stateRoot, 'migrations', '.recovery-operation.json');
-    assertMigrationPathSafe(stateRoot, globalLockPath, 'global migration operation lock');
+    assertMigrationPathSafe(dirname(resolve(stateRoot)), globalLockPath, 'global migration operation lock');
     assertMigrationPathSafe(stateRoot, authorizationPath, 'migration recovery operation authorization');
     if (!existsSync(globalLockPath) || !existsSync(authorizationPath))
         throw new CoordinationRuntimeError('coordinator-contention', 'migration recovery mutation lacks the serialized global recovery operation authority', [globalLockPath, authorizationPath]);
