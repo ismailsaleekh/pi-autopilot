@@ -1606,9 +1606,12 @@ function recoverMigrationLockResidues(stateRoot, path) {
     if (changed)
         fsyncParentDirectory(path);
 }
-async function acquireMigrationLock(stateRoot, path, afterBoundary) {
+async function acquireMigrationLock(stateRoot, path, afterBoundary, ensureParent = true) {
     assertMigrationPathSafe(stateRoot, path, 'repository migration lock');
-    await ensurePrivateAuthorityDirectory(dirname(path));
+    if (ensureParent)
+        await ensurePrivateAuthorityDirectory(dirname(path));
+    else if (!existsSync(dirname(path)))
+        failure('blocked', 'global migration lock state root does not exist', [dirname(path)]);
     assertMigrationPathSafe(stateRoot, path, 'repository migration lock');
     const reclaimPath = `${path}.reclaim`;
     assertMigrationPathSafe(stateRoot, reclaimPath, 'repository migration lock reclamation fence');
@@ -1730,13 +1733,20 @@ export async function acquireCoordinationGlobalMigrationLock(stateRoot) {
     // The state root already exists, so read-only dry-runs can elect without
     // creating a persistent migrations directory merely to host the lock.
     const path = join(stateRoot, '.coordination-migration-operation.lock');
-    const lock = await acquireMigrationLock(stateRoot, path);
-    const staleAuthorization = join(stateRoot, 'migrations', '.recovery-operation.json');
-    if (existsSync(dirname(staleAuthorization))) {
-        await rm(staleAuthorization, { force: true });
-        fsyncParentDirectory(staleAuthorization);
+    const lock = await acquireMigrationLock(stateRoot, path, undefined, false);
+    try {
+        const staleAuthorization = join(stateRoot, 'migrations', '.recovery-operation.json');
+        assertMigrationPathSafe(stateRoot, staleAuthorization, 'stale migration recovery operation authorization');
+        if (existsSync(dirname(staleAuthorization))) {
+            await rm(staleAuthorization, { force: true });
+            fsyncParentDirectory(staleAuthorization);
+        }
+        return lock;
     }
-    return lock;
+    catch (error) {
+        await lock.release();
+        throw error;
+    }
 }
 export async function authorizeCoordinationMigrationRecovery(stateRoot, lock) {
     const expectedPath = join(stateRoot, '.coordination-migration-operation.lock');
@@ -2184,7 +2194,8 @@ export async function runCoordinationMigration(input) {
     const clock = input.clock ?? systemClock;
     const now = clock.now();
     const paths = coordinatorRuntimePaths(input.env ?? process.env);
-    const migrationPaths = coordinationMigrationPaths(paths, input.repoKey);
+    const expectedFreezePath = join(paths.stateRoot, 'migrations', input.repoKey, 'freeze.json');
+    assertMigrationPathSafe(paths.stateRoot, expectedFreezePath, 'expected repository migration freeze');
     if (input.command === 'dry-run') {
         // Inspection shares coordinator DB/WAL and authority paths with apply. Use
         // the same global operation election, while leaving no durable lock behind.
@@ -2197,6 +2208,7 @@ export async function runCoordinationMigration(input) {
             const existingFreeze = activeCoordinationMigrationFreeze(paths.stateRoot);
             if (existingFreeze !== null)
                 failure('blocked', 'migration dry-run is forbidden while a global coordination migration freeze is active', [existingFreeze]);
+            const migrationPaths = coordinationMigrationPaths(paths, input.repoKey);
             if (readCoordinationCutoverMarker(migrationPaths.cutoverMarkerPath, input.repoKey, paths.stateRoot) !== null)
                 failure('blocked', 'repository coordination cutover is already committed; legacy dry-run is no longer valid', [migrationPaths.cutoverMarkerPath]);
             const coordinator = inspectCoordinatorReadOnly(paths, input.repoKey);
@@ -2216,14 +2228,15 @@ export async function runCoordinationMigration(input) {
         }
     }
     const observedFreeze = activeCoordinationMigrationFreeze(paths.stateRoot);
-    if (observedFreeze !== null && observedFreeze !== migrationPaths.freezePath)
-        failure('blocked', 'another repository already owns the global coordination migration freeze', [observedFreeze, migrationPaths.freezePath]);
+    if (observedFreeze !== null && observedFreeze !== expectedFreezePath)
+        failure('blocked', 'another repository already owns the global coordination migration freeze', [observedFreeze, expectedFreezePath]);
     const globalLock = await acquireCoordinationGlobalMigrationLock(paths.stateRoot);
     let lock = null;
     try {
         const existingFreeze = activeCoordinationMigrationFreeze(paths.stateRoot);
-        if (existingFreeze !== null && existingFreeze !== migrationPaths.freezePath)
-            failure('blocked', 'another repository already owns the global coordination migration freeze', [existingFreeze, migrationPaths.freezePath]);
+        if (existingFreeze !== null && existingFreeze !== expectedFreezePath)
+            failure('blocked', 'another repository already owns the global coordination migration freeze', [existingFreeze, expectedFreezePath]);
+        const migrationPaths = coordinationMigrationPaths(paths, input.repoKey);
         await ensureCoordinatorPrivateRoots(paths, input.env ?? process.env);
         for (const authorityRoot of [join(paths.stateRoot, 'migrations'), join(paths.stateRoot, 'cutovers'), join(paths.stateRoot, 'migration-recovery-evidence')])
             await ensurePrivateAuthorityDirectory(authorityRoot, input.env ?? process.env);
