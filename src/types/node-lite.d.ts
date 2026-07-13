@@ -204,6 +204,13 @@ declare module 'node:child_process' {
   ): SpawnSyncReturns;
 }
 
+declare module 'node:async_hooks' {
+  export class AsyncLocalStorage<T> {
+    getStore(): T | undefined;
+    run<R>(store: T, callback: () => R): R;
+  }
+}
+
 declare module 'node:crypto' {
   export function randomBytes(size: number): { toString(encoding: 'hex'): string };
   export function randomUUID(): string;

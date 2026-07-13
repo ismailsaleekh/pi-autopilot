@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { closeSync, constants as fsConstants, existsSync, fstatSync, fsyncSync, lstatSync, openSync, readFileSync, readdirSync, unlinkSync } from 'node:fs';
 import { link, open, readFile, rename, unlink, writeFile, type FileHandle } from 'node:fs/promises';
@@ -260,7 +261,7 @@ export async function readCoordinatorSessionContext(path: string): Promise<Coord
 
 export class DurableRunSupervisorClient {
   readonly #client: CoordinatorClient;
-  #migrationRecoveryAuthorityDepth = 0;
+  readonly #migrationRecoveryAuthority = new AsyncLocalStorage<boolean>();
 
   constructor(env: ProcessEnvLike = process.env, options: { readonly allowMigrationRecoveryAutoStart?: boolean } = {}) {
     this.#client = new CoordinatorClient({ env, ...(options.allowMigrationRecoveryAutoStart === undefined ? {} : { allowMigrationRecoveryAutoStart: options.allowMigrationRecoveryAutoStart }) });
@@ -271,7 +272,7 @@ export class DurableRunSupervisorClient {
   }
 
   async withMigrationRecoveryAuthority<T>(operation: () => Promise<T>): Promise<T> {
-    if (this.#migrationRecoveryAuthorityDepth > 0) return await operation();
+    if (this.#migrationRecoveryAuthority.getStore() === true) return await operation();
     // Dynamic import avoids the parallel-runtime → supervisor → migration cycle;
     // recovery authority is acquired only after package module initialization.
     const migration = await import('./migration.ts');
@@ -279,10 +280,8 @@ export class DurableRunSupervisorClient {
     let authorization: { readonly release: () => Promise<void> } | null = null;
     try {
       authorization = await migration.authorizeCoordinationMigrationRecovery(this.#client.paths.stateRoot, lock);
-      this.#migrationRecoveryAuthorityDepth += 1;
-      return await operation();
+      return await this.#migrationRecoveryAuthority.run(true, operation);
     } finally {
-      this.#migrationRecoveryAuthorityDepth = Math.max(0, this.#migrationRecoveryAuthorityDepth - 1);
       try { if (authorization !== null) await authorization.release(); }
       finally { await lock.release(); }
     }

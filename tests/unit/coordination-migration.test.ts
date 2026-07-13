@@ -553,14 +553,28 @@ void describe('Coordination Fabric legacy migration and cutover', () => {
 
   void it('serializes recovery commands against migration retirement with one global operation lock', async () => {
     await withFixture(async (fixture) => {
+      const supervisor = new DurableRunSupervisorClient(fixture.env, { allowMigrationRecoveryAutoStart: true });
       const lock = await acquireCoordinationGlobalMigrationLock(fixture.stateRoot);
       try {
-        const supervisor = new DurableRunSupervisorClient(fixture.env, { allowMigrationRecoveryAutoStart: true });
         await assert.rejects(
           () => supervisor.withMigrationRecoveryAuthority(async () => undefined),
           /another migration process owns the repository migration lock/u,
         );
       } finally { await lock.release(); }
+
+      let markEntered!: () => void;
+      let releaseHeld!: () => void;
+      const entered = new Promise<void>((resolve) => { markEntered = resolve; });
+      const held = new Promise<void>((resolve) => { releaseHeld = resolve; });
+      const first = supervisor.withMigrationRecoveryAuthority(async () => { markEntered(); await held; });
+      await entered;
+      try {
+        await assert.rejects(
+          () => supervisor.withMigrationRecoveryAuthority(async () => undefined),
+          /another migration process owns the repository migration lock/u,
+        );
+      } finally { releaseHeld(); }
+      await first;
     });
   });
 
