@@ -463,6 +463,23 @@ export class DurableRunSupervisorClient {
             return { recoveryWork, remainingRecoveryCount, run };
         });
     }
+    async heartbeatMigrationRecovery(attachment) {
+        if (attachment.session.attachment_kind !== 'migration-recovery')
+            throw new CoordinationRuntimeError('unauthorized-client', 'migration recovery heartbeat requires a recovery-only supervisor attachment');
+        return await this.withMigrationRecoveryAuthority(async (operationToken) => {
+            const response = await this.#client.mutate('heartbeat', {
+                repoId: attachment.context.repo_id, workstreamRun: attachment.context.workstream_run, sessionId: attachment.session.session_id,
+                fencingGeneration: attachment.session.session_generation, expectedVersion: attachment.session.version,
+                idempotencyKey: durableIdentifier('heartbeat-migration-recovery', `${attachment.session.session_lease_id}\0${String(attachment.session.version)}`),
+            }, { lease_expires_at: leaseExpiry(), session_lease_id: attachment.session.session_lease_id, session_token: attachment.context.session_token, migration_operation_token: operationToken });
+            const session = parseCoordinationSessionLease(payloadRecord(response, 'session'));
+            if (session.attachment_kind !== 'migration-recovery')
+                throw new CoordinationRuntimeError('store-corrupt', 'migration recovery heartbeat changed the session attachment kind');
+            const context = { ...attachment.context, session_version: session.version };
+            await writeCoordinatorSessionContext(attachment.contextPath, context);
+            return { ...attachment, session, context };
+        });
+    }
     async detachMigrationRecovery(attachment, reason = 'migration recovery completed') {
         if (attachment.session.attachment_kind !== 'migration-recovery')
             throw new CoordinationRuntimeError('unauthorized-client', 'migration recovery detach requires a recovery-only supervisor attachment');

@@ -5,7 +5,7 @@ import { isAbsolute, resolve } from 'node:path';
 import { durableIdentifier } from '../core/coordination/client.ts';
 import { parseCoordinationMigrationRecoveryWork, parseCoordinationRun, parseCoordinationSessionLease } from '../core/coordination/contracts.ts';
 import { CoordinationRuntimeError } from '../core/coordination/failures.ts';
-import { coordinatorRuntimePaths } from '../core/coordination/runtime-paths.ts';
+import { COORDINATOR_HEARTBEAT_MS, coordinatorRuntimePaths } from '../core/coordination/runtime-paths.ts';
 import { acquireSerializedProcessGuard } from '../core/coordination/serialized-lock.ts';
 import { DurableRunSupervisorClient, readCoordinatorSessionContext, readMigrationRecoveryEvidenceFile, type RunSupervisorAttachment } from '../core/coordination/supervisor.ts';
 import { currentBootId, isProcessAlive } from '../core/coordination/process-identity.ts';
@@ -174,11 +174,18 @@ async function executeMigrationRecoveryCli(argv: readonly string[], baseEnv: Pro
   const workstreamRun = args.run;
   if (first === undefined || workstreamRun === null) throw new CoordinationRuntimeError('invalid-state', 'recovery target disappeared');
   return await supervisor.withMigrationRecoveryAuthority(async () => {
-  const attachment = await supervisor.attachMigrationRecovery({ repo, workstreamRun, recoveryId: first.recovery_id, rawSessionId: `recovery-cli-${process.pid}-${randomUUID()}` });
+  let attachment = await supervisor.attachMigrationRecovery({ repo, workstreamRun, recoveryId: first.recovery_id, rawSessionId: `recovery-cli-${process.pid}-${randomUUID()}` });
   let primary: unknown = null;
   const results = [];
+  let nextHeartbeatAt = Date.now() + COORDINATOR_HEARTBEAT_MS;
   try {
-    for (const work of unresolved) results.push(await supervisor.resolveMigrationRecovery({ attachment, recoveryWork: work, resolution: args.command === 'retain-authority' ? { resolutionType: 'authority-retained' } : { resolutionType: 'authority-released', releaseSource: args.source!, releaseTargetId: args.targetId!, evidenceBytes: evidenceBytes! } }));
+    for (const work of unresolved) {
+      if (Date.now() >= nextHeartbeatAt) {
+        attachment = await supervisor.heartbeatMigrationRecovery(attachment);
+        nextHeartbeatAt = Date.now() + COORDINATOR_HEARTBEAT_MS;
+      }
+      results.push(await supervisor.resolveMigrationRecovery({ attachment, recoveryWork: work, resolution: args.command === 'retain-authority' ? { resolutionType: 'authority-retained' } : { resolutionType: 'authority-released', releaseSource: args.source!, releaseTargetId: args.targetId!, evidenceBytes: evidenceBytes! } }));
+    }
   } catch (error) { primary = error; }
   try { await detach(supervisor, attachment); } catch (error) { primary = primary === null ? error : new AggregateError([primary, error], 'recovery mutation and fenced detach both failed'); }
   if (primary !== null) throw primary;

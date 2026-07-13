@@ -380,14 +380,34 @@ void describe('Coordination Fabric legacy migration and cutover', () => {
       const recoveryValues = status.payload['migration_recovery_work'];
       if (!Array.isArray(recoveryValues) || recoveryValues.length !== 1 || recoveryValues[0] === undefined) throw new Error('expected one pending migration recovery row');
       const recovery = parseCoordinationMigrationRecoveryWork(recoveryValues[0]);
-      const attachment = await supervisor.attachMigrationRecovery({ repo: resolveRepoIdentity(active.source_repo), workstreamRun: active.workstream_run, recoveryId: recovery.recovery_id, rawSessionId: 'migration-recovery-supervisor' });
+      const staleAttachToken = await supervisor.withMigrationRecoveryAuthority(async (operationToken) => operationToken);
+      await assert.rejects(() => supervisor.client.mutate('attach-migration-recovery', {
+        repoId: fixture.repoKey, workstreamRun: active.workstream_run, sessionId: 'missing-token-recovery-attach', fencingGeneration: recoveringRun.active_session_generation + 1,
+        expectedVersion: recoveringRun.version, idempotencyKey: 'missing-token-recovery-attach',
+      }, { recovery_id: recovery.recovery_id, session_lease_id: 'missing-token-recovery-lease', session_token: 'b'.repeat(64), pid: process.pid, boot_id: currentBootId(), lease_expires_at: '2026-07-12T12:05:00.000Z' }), /missing required field migration_operation_token/u);
+      await assert.rejects(() => supervisor.withMigrationRecoveryAuthority(async () => await supervisor.client.mutate('attach-migration-recovery', {
+        repoId: fixture.repoKey, workstreamRun: active.workstream_run, sessionId: 'stale-token-recovery-attach', fencingGeneration: recoveringRun.active_session_generation + 1,
+        expectedVersion: recoveringRun.version, idempotencyKey: 'stale-token-recovery-attach',
+      }, { recovery_id: recovery.recovery_id, session_lease_id: 'stale-token-recovery-lease', session_token: 'c'.repeat(64), pid: process.pid, boot_id: currentBootId(), lease_expires_at: '2026-07-12T12:05:00.000Z', migration_operation_token: staleAttachToken })), /not bound to this request/u);
+      let attachment = await supervisor.attachMigrationRecovery({ repo: resolveRepoIdentity(active.source_repo), workstreamRun: active.workstream_run, recoveryId: recovery.recovery_id, rawSessionId: 'migration-recovery-supervisor' });
       assert.equal(attachment.session.attachment_kind, 'migration-recovery');
       assert.equal(attachment.run.status, 'recovering');
       await assert.rejects(() => supervisor.client.mutate('reconcile-run', {
         repoId: fixture.repoKey, workstreamRun: active.workstream_run, sessionId: attachment.session.session_id, fencingGeneration: attachment.session.session_generation,
         expectedVersion: attachment.run.version, idempotencyKey: 'recovery-session-cannot-dispatch',
       }, { reason: 'must remain recovery-only', session_lease_id: attachment.session.session_lease_id, session_token: attachment.context.session_token }), /recovery-only session rejects ordinary dispatch/u);
+      const initialSessionVersion = attachment.session.version;
+      attachment = await supervisor.heartbeatMigrationRecovery(attachment);
+      assert.equal(attachment.session.version, initialSessionVersion + 1);
       const staleOperationToken = await supervisor.withMigrationRecoveryAuthority(async (operationToken) => operationToken);
+      await assert.rejects(() => supervisor.client.mutate('detach-session', {
+        repoId: fixture.repoKey, workstreamRun: active.workstream_run, sessionId: attachment.session.session_id, fencingGeneration: attachment.session.session_generation,
+        expectedVersion: attachment.session.version, idempotencyKey: 'missing-token-recovery-detach',
+      }, { reason: 'must reject missing operation token', session_lease_id: attachment.session.session_lease_id, session_token: attachment.context.session_token }), /lacks the serialized global recovery operation authority/u);
+      await assert.rejects(() => supervisor.withMigrationRecoveryAuthority(async () => await supervisor.client.mutate('detach-session', {
+        repoId: fixture.repoKey, workstreamRun: active.workstream_run, sessionId: attachment.session.session_id, fencingGeneration: attachment.session.session_generation,
+        expectedVersion: attachment.session.version, idempotencyKey: 'stale-token-recovery-detach',
+      }, { reason: 'must reject stale operation token', session_lease_id: attachment.session.session_lease_id, session_token: attachment.context.session_token, migration_operation_token: staleOperationToken })), /not bound to this request/u);
       await assert.rejects(() => supervisor.withMigrationRecoveryAuthority(async () => await supervisor.client.mutate('resolve-migration-recovery', {
         repoId: fixture.repoKey, workstreamRun: active.workstream_run, sessionId: attachment.session.session_id, fencingGeneration: attachment.session.session_generation,
         expectedVersion: recovery.version, idempotencyKey: 'stale-ambient-recovery-authorization',
@@ -403,6 +423,7 @@ void describe('Coordination Fabric legacy migration and cutover', () => {
       assert.equal(resolved.run.status, 'recovering');
       const replayed = await supervisor.resolveMigrationRecovery({ attachment, recoveryWork: recovery, resolution: { resolutionType: 'authority-retained' } });
       assert.equal(replayed.recoveryWork.version, resolved.recoveryWork.version);
+      await supervisor.detachMigrationRecovery(attachment);
       await supervisor.detachMigrationRecovery(attachment);
 
       const prepared = await prepareAutopilotWorkstream({ workstream: active.workstream, sourceCwd: active.source_repo, coordinationSessionId: 'ordinary-activation-after-recovery', env: fixture.env, now: new Date('2026-07-12T12:03:00.000Z') });

@@ -117,7 +117,6 @@ declare module 'node:fs/promises' {
   export function realpath(path: string | URL): Promise<string>;
   export function rename(oldPath: string | URL, newPath: string | URL): Promise<void>;
   export function rm(path: string | URL, options?: { readonly recursive?: boolean; readonly force?: boolean }): Promise<void>;
-  export function rmdir(path: string | URL): Promise<void>;
   export function stat(path: string | URL): Promise<Stats>;
   export function symlink(target: string | URL, path: string | URL, type?: 'dir' | 'file' | 'junction'): Promise<void>;
   export function unlink(path: string | URL): Promise<void>;

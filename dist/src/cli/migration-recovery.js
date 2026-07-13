@@ -4,7 +4,7 @@ import { isAbsolute, resolve } from 'node:path';
 import { durableIdentifier } from "../core/coordination/client.js";
 import { parseCoordinationMigrationRecoveryWork, parseCoordinationRun, parseCoordinationSessionLease } from "../core/coordination/contracts.js";
 import { CoordinationRuntimeError } from "../core/coordination/failures.js";
-import { coordinatorRuntimePaths } from "../core/coordination/runtime-paths.js";
+import { COORDINATOR_HEARTBEAT_MS, coordinatorRuntimePaths } from "../core/coordination/runtime-paths.js";
 import { acquireSerializedProcessGuard } from "../core/coordination/serialized-lock.js";
 import { DurableRunSupervisorClient, readCoordinatorSessionContext, readMigrationRecoveryEvidenceFile } from "../core/coordination/supervisor.js";
 import { currentBootId, isProcessAlive } from "../core/coordination/process-identity.js";
@@ -213,12 +213,18 @@ async function executeMigrationRecoveryCli(argv, baseEnv) {
     if (first === undefined || workstreamRun === null)
         throw new CoordinationRuntimeError('invalid-state', 'recovery target disappeared');
     return await supervisor.withMigrationRecoveryAuthority(async () => {
-        const attachment = await supervisor.attachMigrationRecovery({ repo, workstreamRun, recoveryId: first.recovery_id, rawSessionId: `recovery-cli-${process.pid}-${randomUUID()}` });
+        let attachment = await supervisor.attachMigrationRecovery({ repo, workstreamRun, recoveryId: first.recovery_id, rawSessionId: `recovery-cli-${process.pid}-${randomUUID()}` });
         let primary = null;
         const results = [];
+        let nextHeartbeatAt = Date.now() + COORDINATOR_HEARTBEAT_MS;
         try {
-            for (const work of unresolved)
+            for (const work of unresolved) {
+                if (Date.now() >= nextHeartbeatAt) {
+                    attachment = await supervisor.heartbeatMigrationRecovery(attachment);
+                    nextHeartbeatAt = Date.now() + COORDINATOR_HEARTBEAT_MS;
+                }
                 results.push(await supervisor.resolveMigrationRecovery({ attachment, recoveryWork: work, resolution: args.command === 'retain-authority' ? { resolutionType: 'authority-retained' } : { resolutionType: 'authority-released', releaseSource: args.source, releaseTargetId: args.targetId, evidenceBytes: evidenceBytes } }));
+            }
         }
         catch (error) {
             primary = error;

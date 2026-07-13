@@ -905,7 +905,7 @@ function parsePayload(value, action) {
         payload = value;
     }
     else
-        payload = object(value, label, PAYLOAD_FIELDS[action], action === 'detach-session' ? ['migration_operation_token'] : []);
+        payload = object(value, label, PAYLOAD_FIELDS[action], action === 'detach-session' || action === 'heartbeat' ? ['migration_operation_token'] : []);
     for (const field of PAYLOAD_FIELDS[action]) {
         const entry = payload[field];
         if (action === 'run-catalog' && entry === undefined)
@@ -1070,7 +1070,7 @@ function parsePayload(value, action) {
             fail(label, `${field} must be a bounded non-empty string`);
         }
     }
-    if (action === 'detach-session' && payload['migration_operation_token'] !== undefined && (typeof payload['migration_operation_token'] !== 'string' || !/^[a-f0-9]{48}$/u.test(payload['migration_operation_token'])))
+    if ((action === 'detach-session' || action === 'heartbeat') && payload['migration_operation_token'] !== undefined && (typeof payload['migration_operation_token'] !== 'string' || !/^[a-f0-9]{48}$/u.test(payload['migration_operation_token'])))
         fail(label, 'migration_operation_token must be 24 random bytes encoded as lowercase hex');
     if (action === 'respond-claim-request') {
         const response = payload['response'];

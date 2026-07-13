@@ -962,7 +962,7 @@ function parsePayload(value: unknown, action: CoordinatorQueryAction | Coordinat
     const unknownFields = Object.keys(value).filter((key) => !PAYLOAD_FIELDS[action].includes(key));
     if (unknownFields.length > 0) fail(label, `contains unknown fields: ${unknownFields.sort().join(', ')}`);
     payload = value;
-  } else payload = object(value, label, PAYLOAD_FIELDS[action], action === 'detach-session' ? ['migration_operation_token'] : []);
+  } else payload = object(value, label, PAYLOAD_FIELDS[action], action === 'detach-session' || action === 'heartbeat' ? ['migration_operation_token'] : []);
   for (const field of PAYLOAD_FIELDS[action]) {
     const entry = payload[field];
     if (action === 'run-catalog' && entry === undefined) continue;
@@ -1063,7 +1063,7 @@ function parsePayload(value: unknown, action: CoordinatorQueryAction | Coordinat
       fail(label, `${field} must be a bounded non-empty string`);
     }
   }
-  if (action === 'detach-session' && payload['migration_operation_token'] !== undefined && (typeof payload['migration_operation_token'] !== 'string' || !/^[a-f0-9]{48}$/u.test(payload['migration_operation_token']))) fail(label, 'migration_operation_token must be 24 random bytes encoded as lowercase hex');
+  if ((action === 'detach-session' || action === 'heartbeat') && payload['migration_operation_token'] !== undefined && (typeof payload['migration_operation_token'] !== 'string' || !/^[a-f0-9]{48}$/u.test(payload['migration_operation_token']))) fail(label, 'migration_operation_token must be 24 random bytes encoded as lowercase hex');
   if (action === 'respond-claim-request') {
     const response = payload['response'];
     const ownerReason = payload['owner_reason'];

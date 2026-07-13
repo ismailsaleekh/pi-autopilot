@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { closeSync, constants as fsConstants, copyFileSync, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdtempSync, openSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, unlinkSync } from 'node:fs';
-import { chmod, copyFile, mkdir, open, readFile, readdir, rename, rm, rmdir } from 'node:fs/promises';
+import { chmod, copyFile, mkdir, open, readFile, readdir, rename, rm } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { platform, tmpdir } from 'node:os';
@@ -1727,15 +1727,19 @@ async function acquireMigrationLock(stateRoot, path, afterBoundary) {
     failure('blocked', 'could not acquire repository migration lock', [path]);
 }
 export async function acquireCoordinationGlobalMigrationLock(stateRoot) {
-    const path = join(stateRoot, 'migrations', '.global-operation.lock');
+    // The state root already exists, so read-only dry-runs can elect without
+    // creating a persistent migrations directory merely to host the lock.
+    const path = join(stateRoot, '.coordination-migration-operation.lock');
     const lock = await acquireMigrationLock(stateRoot, path);
     const staleAuthorization = join(stateRoot, 'migrations', '.recovery-operation.json');
-    await rm(staleAuthorization, { force: true });
-    fsyncParentDirectory(staleAuthorization);
+    if (existsSync(dirname(staleAuthorization))) {
+        await rm(staleAuthorization, { force: true });
+        fsyncParentDirectory(staleAuthorization);
+    }
     return lock;
 }
 export async function authorizeCoordinationMigrationRecovery(stateRoot, lock) {
-    const expectedPath = join(stateRoot, 'migrations', '.global-operation.lock');
+    const expectedPath = join(stateRoot, '.coordination-migration-operation.lock');
     if (lock.path !== expectedPath || lock.pid !== process.pid || lock.bootId !== currentBootId())
         failure('blocked', 'recovery authorization does not own the exact global migration operation lock');
     const marker = join(stateRoot, 'migrations', '.recovery-operation.json');
@@ -2187,9 +2191,6 @@ export async function runCoordinationMigration(input) {
         const observedFreeze = activeCoordinationMigrationFreeze(paths.stateRoot);
         if (observedFreeze !== null)
             failure('blocked', 'migration dry-run is forbidden while a global coordination migration freeze is active', [observedFreeze]);
-        const migrationRoot = join(paths.stateRoot, 'migrations');
-        const migrationRootExisted = existsSync(migrationRoot);
-        await ensurePrivateAuthorityDirectory(migrationRoot, input.env ?? process.env);
         let dryRunLock = null;
         try {
             dryRunLock = await acquireCoordinationGlobalMigrationLock(paths.stateRoot);
@@ -2212,14 +2213,11 @@ export async function runCoordinationMigration(input) {
         finally {
             if (dryRunLock !== null)
                 await dryRunLock.release();
-            if (!migrationRootExisted)
-                await rmdir(migrationRoot);
         }
     }
     const observedFreeze = activeCoordinationMigrationFreeze(paths.stateRoot);
     if (observedFreeze !== null && observedFreeze !== migrationPaths.freezePath)
         failure('blocked', 'another repository already owns the global coordination migration freeze', [observedFreeze, migrationPaths.freezePath]);
-    await ensurePrivateAuthorityDirectory(join(paths.stateRoot, 'migrations'), input.env ?? process.env);
     const globalLock = await acquireCoordinationGlobalMigrationLock(paths.stateRoot);
     let lock = null;
     try {

@@ -250,7 +250,7 @@ export function acknowledgeCoordinationMigrationFreeze(stateRoot, repoKey) {
     return true;
 }
 export function assertCoordinationMigrationRecoveryOperationAuthorized(stateRoot, operationToken) {
-    const globalLockPath = join(stateRoot, 'migrations', '.global-operation.lock');
+    const globalLockPath = join(stateRoot, '.coordination-migration-operation.lock');
     const authorizationPath = join(stateRoot, 'migrations', '.recovery-operation.json');
     assertMigrationPathSafe(stateRoot, globalLockPath, 'global migration operation lock');
     assertMigrationPathSafe(stateRoot, authorizationPath, 'migration recovery operation authorization');
@@ -282,7 +282,7 @@ export function assertCoordinationFrozenMutationAllowed(stateRoot, repoKey, acti
             return;
         throw new CoordinationRuntimeError('coordinator-contention', `coordinator mutation ${action} refused: migration freeze is active and the global drain is incomplete`, [freezePath]);
     }
-    const recoveryActions = new Set(['attach-migration-recovery', 'resolve-migration-recovery', 'detach-session']);
+    const recoveryActions = new Set(['attach-migration-recovery', 'resolve-migration-recovery', 'detach-session', 'heartbeat']);
     if (repoKey === freeze['repo_key'] && ['imported', 'verified', 'cutover-ready'].includes(journal['state']) && recoveryActions.has(action)) {
         assertCoordinationMigrationRecoveryOperationAuthorized(stateRoot, operationToken);
         return;
