@@ -1709,7 +1709,7 @@ export class CoordinatorStore {
   }
 
   #dispatch(request: CoordinatorRequestEnvelope): StoreEffect {
-    const freezeDrainActions = new Set<CoordinatorMutationAction>(['detach-session', 'heartbeat', 'heartbeat-child', 'checkpoint-child', 'complete-child', 'record-release-evidence', 'cancel-run-terminal', 'reconcile-run', 'transition-operation']);
+    const freezeDrainActions = new Set<CoordinatorMutationAction>(['attach-migration-recovery', 'resolve-migration-recovery', 'detach-session', 'heartbeat', 'heartbeat-child', 'checkpoint-child', 'complete-child', 'record-release-evidence', 'cancel-run-terminal', 'reconcile-run', 'transition-operation']);
     if (request.action !== 'status' && request.action !== 'doctor' && request.action !== 'export' && !freezeDrainActions.has(request.action)) assertCoordinationDispatchAllowed(this.#stateRoot, request.repo_id, `coordinator mutation ${request.action}`);
     switch (request.action) {
       case 'status': return this.status(request.repo_id, request.workstream_run);
@@ -2177,6 +2177,7 @@ export class CoordinatorStore {
       const updated = this.#db.prepare("UPDATE migration_recovery_work SET status='resolved', resolution_json=?, resolved_event_seq=?, version=? WHERE entity_id=? AND status='pending' AND version=?").run(canonicalJson(parsed.resolution), seq, parsed.version, parsed.recovery_id, work.version);
       if (updated.changes !== 1) throw new CoordinationRuntimeError('coordinator-contention', 'migration recovery work changed during fenced resolution', [recoveryId]);
       this.#db.prepare("UPDATE messages SET status='acknowledged', delivered_event_seq=COALESCE(delivered_event_seq, ?), acknowledged_event_seq=COALESCE(acknowledged_event_seq, ?), version=version+1 WHERE repo_id=? AND recipient_workstream_run=? AND correlation_id=? AND status!='acknowledged'").run(seq, seq, run.repo_id, run.workstream_run, recoveryId);
+      this.#advanceMailboxCursor(run.repo_id, run.workstream_run, 'acknowledged');
       const remaining = this.#pendingMigrationRecovery(run.repo_id, run.workstream_run);
       return { sequence: seq, eventType: 'migration-recovery-resolved', entityType: 'migration-recovery-work', entityId: recoveryId, payload: { recovery_work: parsed, remaining_recovery_work: remaining, run: this.#requireRun(run.repo_id, run.workstream_run) } };
     });

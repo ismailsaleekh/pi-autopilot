@@ -37,6 +37,7 @@ interface StartupLock {
 export interface CoordinatorClientOptions {
   readonly env?: ProcessEnvLike;
   readonly autoStart?: boolean;
+  readonly allowMigrationRecoveryAutoStart?: boolean;
   readonly requestTimeoutMs?: number;
   readonly startupTimeoutMs?: number;
 }
@@ -299,6 +300,7 @@ async function sendOnce(paths: CoordinatorRuntimePaths, capability: string, requ
 export class CoordinatorClient {
   readonly #paths: CoordinatorRuntimePaths;
   readonly #autoStart: boolean;
+  readonly #allowMigrationRecoveryAutoStart: boolean;
   readonly #requestTimeoutMs: number;
   readonly #startupTimeoutMs: number;
   #compatibilityVerified = false;
@@ -306,6 +308,7 @@ export class CoordinatorClient {
   constructor(options: CoordinatorClientOptions = {}) {
     this.#paths = coordinatorRuntimePaths(options.env ?? process.env);
     this.#autoStart = options.autoStart !== false;
+    this.#allowMigrationRecoveryAutoStart = options.allowMigrationRecoveryAutoStart === true;
     this.#requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
     this.#startupTimeoutMs = options.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS;
   }
@@ -336,7 +339,8 @@ export class CoordinatorClient {
     } catch (error) {
       if (!this.#autoStart || (!isConnectionFailure(error) && !compatibilityFailure(error))) throw error;
       const freeze = activeCoordinationMigrationFreeze(this.#paths.stateRoot);
-      if (freeze !== null) throw new CoordinationRuntimeError('coordinator-contention', 'coordinator auto-start is forbidden while coordination migration is frozen; status remains read-only/offline', [freeze]);
+      const recoveryAction = request.action === 'status' || request.action === 'doctor' || request.action === 'export' || request.action === 'attach-migration-recovery' || request.action === 'resolve-migration-recovery' || request.action === 'detach-session' || request.action === 'heartbeat';
+      if (freeze !== null && !(this.#allowMigrationRecoveryAutoStart && recoveryAction)) throw new CoordinationRuntimeError('coordinator-contention', 'coordinator auto-start is forbidden while coordination migration is frozen; only an explicit recovery client may start the imported candidate store', [freeze]);
       await this.#ensureStarted(capability, compatibilityFailure(error));
       const retryDeadline = Date.now() + this.#requestTimeoutMs;
       let lastRetryError: unknown = error;

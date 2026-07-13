@@ -207,6 +207,11 @@ async function publishMigrationRecoveryEvidence(input: {
   }
 }
 
+export function readMigrationRecoveryEvidenceFile(path: string): Uint8Array {
+  if (!isAbsolute(path)) throw new CoordinationRuntimeError('invalid-request', 'migration recovery evidence path must be absolute');
+  return readExactRegularFile(path, 1024 * 1024, 'migration recovery evidence input').bytes;
+}
+
 export async function writeCoordinatorSessionContext(path: string, context: CoordinatorSessionContext): Promise<void> {
   await ensurePrivateAuthorityDirectory(dirname(path));
   const temporary = `${path}.tmp-${String(process.pid)}-${randomBytes(6).toString('hex')}`;
@@ -256,8 +261,8 @@ export async function readCoordinatorSessionContext(path: string): Promise<Coord
 export class DurableRunSupervisorClient {
   readonly #client: CoordinatorClient;
 
-  constructor(env: ProcessEnvLike = process.env) {
-    this.#client = new CoordinatorClient({ env });
+  constructor(env: ProcessEnvLike = process.env, options: { readonly allowMigrationRecoveryAutoStart?: boolean } = {}) {
+    this.#client = new CoordinatorClient({ env, ...(options.allowMigrationRecoveryAutoStart === undefined ? {} : { allowMigrationRecoveryAutoStart: options.allowMigrationRecoveryAutoStart }) });
   }
 
   get client(): CoordinatorClient {

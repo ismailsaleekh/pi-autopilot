@@ -26,7 +26,7 @@ import { AUTOPILOT_COORDINATOR_PROTOCOL_VERSION, type CoordinationAcquisitionGro
 export const COORDINATION_MIGRATION_MAX_FILE_BYTES = 64 * 1024 * 1024;
 export const COORDINATION_MIGRATION_MAX_TOTAL_BYTES = 256 * 1024 * 1024;
 export const COORDINATION_MIGRATION_MAX_FILES = 100_000;
-export const COORDINATION_MIGRATION_MAX_JSONL_LINE_BYTES = 64 * 1024;
+export const COORDINATION_MIGRATION_MAX_JSONL_LINE_BYTES = 1024 * 1024;
 export const COORDINATION_MIGRATION_MAX_JSONL_ROWS = 100_000;
 
 export type CoordinationMigrationState = 'planned' | 'frozen' | 'snapshotted' | 'imported' | 'verified' | 'cutover-ready' | 'cutover-committed' | 'legacy-archived' | 'rollback-restoring' | 'rollback-restored' | 'rollback-unfreezing' | 'rolled-back';
@@ -116,6 +116,8 @@ export interface CoordinationMigrationReport {
 interface ParsedUnitMetadata {
   readonly by_attempt: ReadonlyMap<string, AutopilotUnitBranchInfo>;
   readonly worktrees: readonly AutopilotUnitBranchInfo[];
+  readonly missingTaskInfoRuns: ReadonlySet<string>;
+  readonly orphanAttempts: ReadonlySet<string>;
 }
 
 interface LegacyMergeEvidence {
@@ -147,11 +149,14 @@ interface LegacyInspection {
   readonly equivalentClaimKeys: ReadonlySet<string>;
   readonly reboundCount: number;
   readonly totalBytes: number;
+  readonly ledgerTerminalizedRuns: ReadonlySet<string>;
+  readonly runtimeRunStatuses: ReadonlyMap<string, CoordinationRunStatus>;
 }
 
 interface MigrationClock extends StoreClock {}
 const systemClock: MigrationClock = { now: () => new Date() };
 const DIGEST = /^sha256:[a-f0-9]{64}$/u;
+const GIT_OBJECT_ID = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u;
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:@-]{0,191}$/u;
 const TOP_LEVEL_COORDINATION_FILES = ['active-autopilots.json', 'path-claims.json', 'claim-events.jsonl', 'merge-log.jsonl', 'foreign-merge-acks.jsonl'] as const;
 const TOP_LEVEL_WORKTREE_FILES = ['_index.json', '_ledger.jsonl'] as const;
@@ -182,11 +187,16 @@ function integer(value: unknown, label: string, minimum = 0): number {
 }
 
 function object(value: unknown, label: string, fields: readonly string[]): Readonly<Record<string, unknown>> {
+  return closedObject(value, label, fields, []);
+}
+
+function closedObject(value: unknown, label: string, requiredFields: readonly string[], optionalFields: readonly string[]): Readonly<Record<string, unknown>> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) failure('invalid', `${label} must be an object`);
   const row = value as Readonly<Record<string, unknown>>;
-  const unknown = Object.keys(row).filter((field) => !fields.includes(field));
+  const allowedFields = new Set([...requiredFields, ...optionalFields]);
+  const unknown = Object.keys(row).filter((field) => !allowedFields.has(field));
   if (unknown.length > 0) failure('invalid', `${label} has unknown fields`, unknown.sort());
-  for (const field of fields) if (!(field in row)) failure('invalid', `${label} is missing ${field}`);
+  for (const field of requiredFields) if (!(field in row)) failure('invalid', `${label} is missing ${field}`);
   return row;
 }
 
@@ -293,7 +303,7 @@ const LEGACY_JSONL_FIELDS: Readonly<Record<string, readonly string[]>> = {
   'autopilot.claim_event.v1': ['active_run_epoch', 'attempt', 'autopilot_id', 'blockers', 'claim_type', 'event', 'path', 'reason', 'repo_key', 'schema_version', 'ts', 'unit_id', 'workstream', 'workstream_run'],
   'autopilot.merge_event.v1': ['autopilot_id', 'branch', 'changed_paths', 'integration_commit_sha', 'merge_id', 'merged_at', 'repo_key', 'schema_version', 'target_after', 'target_before', 'target_branch', 'workstream', 'workstream_after', 'workstream_before', 'workstream_run'],
   'autopilot.foreign_merge_ack.v1': ['ack_id', 'acked_at', 'acknowledging_autopilot_id', 'acknowledging_workstream_run', 'action', 'foreign_autopilot_id', 'foreign_workstream_run', 'intersection_paths', 'merge_id', 'repo_key', 'schema_version'],
-  'autopilot.worktree_ledger.v1': ['archive_ref', 'archive_sha', 'attempt', 'autopilot_id', 'base_sha', 'blockers', 'branch', 'checkout_mode', 'event', 'main_path', 'mode', 'path', 'proof', 'reason', 'repo_key', 'schema_version', 'status', 'ts', 'unit_id', 'unit_path', 'workstream', 'workstream_run'],
+  'autopilot.worktree_ledger.v1': ['archive_ref', 'archive_sha', 'attempt', 'autopilot_id', 'base_sha', 'blockers', 'branch', 'branch_deleted', 'checkout_mode', 'event', 'main_path', 'mode', 'moved_task_root', 'path', 'proof', 'reason', 'repo_key', 'schema_version', 'status', 'ts', 'unit_id', 'unit_path', 'workstream', 'workstream_run'],
 };
 
 function requiredPayloadFields(payload: Readonly<Record<string, unknown>>, fields: readonly string[], label: string): void {
@@ -332,6 +342,8 @@ function validateLegacyJsonlPayload(payload: Readonly<Record<string, unknown>>, 
   }
   requiredPayloadFields(payload, ['autopilot_id', 'event', 'schema_version', 'ts', 'workstream', 'workstream_run'], label);
   for (const field of ['autopilot_id', 'event', 'ts', 'workstream', 'workstream_run']) boundedString(payload[field], `${label}.${field}`);
+  if (payload['branch_deleted'] !== undefined && typeof payload['branch_deleted'] !== 'boolean') failure('invalid', `${label}.branch_deleted must be boolean`);
+  if (payload['moved_task_root'] !== undefined && !isAbsolute(boundedString(payload['moved_task_root'], `${label}.moved_task_root`))) failure('invalid', `${label}.moved_task_root must be absolute`);
 }
 
 function parseJsonl(path: string, sourceKind: CoordinationMigrationAuditInput['source_kind'], expectedSchema: string): readonly CoordinationMigrationAuditInput[] {
@@ -359,6 +371,36 @@ function parseJsonl(path: string, sourceKind: CoordinationMigrationAuditInput['s
     rows.push({ audit_id: entityId('audit', `${sourceKind}\0${path}\0${String(index + 1)}\0${stableJson(payload)}`), source_kind: sourceKind, payload });
   }
   return Object.freeze(rows);
+}
+
+function ledgerTerminalizedRuns(rows: readonly ActiveAutopilotRow[], audit: readonly CoordinationMigrationAuditInput[]): ReadonlySet<string> {
+  const terminalized = new Set<string>();
+  const ledger = audit.filter((entry) => entry.source_kind === 'worktree-ledger').map((entry) => entry.payload);
+  for (const row of rows) {
+    if (existsSync(row.main_worktree_path)) continue;
+    const mainRemoved = ledger.some((entry) => entry['workstream_run'] === row.workstream_run && entry['autopilot_id'] === row.autopilot_id && entry['event'] === 'main-worktree-remove' && entry['path'] === row.main_worktree_path && Array.isArray(entry['proof']) && entry['proof'].includes('path_absent_after_remove'));
+    const branchRetired = ledger.some((entry) => entry['workstream_run'] === row.workstream_run && entry['autopilot_id'] === row.autopilot_id && entry['event'] === 'branch-retire' && entry['branch'] === row.branch && Array.isArray(entry['proof']) && entry['proof'].includes('branch_deleted'));
+    const branchAbsent = gitText(row.source_repo, ['show-ref', '--verify', '--quiet', `refs/heads/${row.branch}`]) === null;
+    if (mainRemoved && branchRetired && branchAbsent) terminalized.add(row.workstream_run);
+  }
+  return terminalized;
+}
+
+function readRuntimeRunStatuses(rows: readonly ActiveAutopilotRow[]): ReadonlyMap<string, CoordinationRunStatus> {
+  const statuses = new Map<string, CoordinationRunStatus>();
+  for (const row of rows) {
+    const path = join(row.runtime_root, 'state.json');
+    if (!existsSync(path)) continue;
+    const stateValue = parseJsonFile(path, null);
+    validateBoundedJson(stateValue, path);
+    const state = closedObject(stateValue, path, ['blocked', 'completed', 'context_gate', 'last_event_id', 'next_actions', 'operator_questions', 'ready_queue', 'running', 'schema_version', 'status', 'units', 'updated_at', 'workstream'], ['audit_review_queue', 'closure_gate', 'last_decision_id', 'notes', 'protected_path_exceptions', 'scope_exceptions', 'validation_ready_queue', 'work_items']);
+    if (state['schema_version'] !== 'autopilot.state.v1' || state['workstream'] !== row.workstream) failure('invalid', 'runtime state identity disagrees with active run ownership', [path]);
+    const legacyStatus = state['status'];
+    if (legacyStatus !== 'running' && legacyStatus !== 'paused' && legacyStatus !== 'blocked' && legacyStatus !== 'completed') failure('invalid', 'runtime state status is invalid', [path]);
+    const status: CoordinationRunStatus = legacyStatus === 'running' ? 'active' : legacyStatus === 'completed' ? 'closed' : legacyStatus;
+    statuses.set(row.workstream_run, status);
+  }
+  return statuses;
 }
 
 function entityId(prefix: string, value: string): string {
@@ -393,13 +435,33 @@ function parseUnitBranch(value: unknown, label: string): AutopilotUnitBranchInfo
 function readUnitMetadata(rows: readonly ActiveAutopilotRow[]): ParsedUnitMetadata {
   const map = new Map<string, AutopilotUnitBranchInfo>();
   const worktrees: AutopilotUnitBranchInfo[] = [];
+  const missingTaskInfoRuns = new Set<string>();
+  const orphanAttempts = new Set<string>();
   for (const active of rows) {
     const taskRoot = dirname(active.main_worktree_path);
     const taskInfoPath = join(taskRoot, '_task-info.json');
-    if (!existsSync(taskInfoPath) && active.status === 'closed') continue;
-    const taskFields = ['autopilot_id', 'base_sha', 'branch', 'checkout_mode', 'checkout_profile_origin', 'checkout_profile_ref', 'checkout_profile_sha256', 'closed_at', 'coordination_authority', 'git_common_dir', 'repo_key', 'runtime_root', 'schema_version', 'source_repo', 'started_at', 'status', 'target_base_sha', 'target_branch', 'workstream', 'workstream_run', 'worktree_path'];
-    const taskInfo = object(parseJsonFile(taskInfoPath, null), taskInfoPath, taskFields);
-    if (taskInfo['schema_version'] !== 'autopilot.task_info.v2' || taskInfo['repo_key'] !== active.repo_key || taskInfo['autopilot_id'] !== active.autopilot_id || taskInfo['workstream'] !== active.workstream || taskInfo['workstream_run'] !== active.workstream_run || taskInfo['source_repo'] !== active.source_repo || taskInfo['git_common_dir'] !== active.git_common_dir || taskInfo['worktree_path'] !== active.main_worktree_path || taskInfo['runtime_root'] !== active.runtime_root || taskInfo['branch'] !== active.branch || taskInfo['target_base_sha'] !== active.target_base_sha) failure('invalid', '_task-info.json disagrees with active run ownership', [taskInfoPath]);
+    if (!existsSync(taskInfoPath)) {
+      missingTaskInfoRuns.add(active.workstream_run);
+      continue;
+    }
+    const taskBaseFields = ['autopilot_id', 'base_sha', 'branch', 'closed_at', 'git_common_dir', 'repo_key', 'runtime_root', 'schema_version', 'source_repo', 'started_at', 'status', 'target_base_sha', 'target_branch', 'workstream', 'workstream_run', 'worktree_path'];
+    const taskCheckoutFields = ['checkout_mode', 'checkout_profile_origin', 'checkout_profile_ref', 'checkout_profile_sha256'];
+    const taskValue = parseJsonFile(taskInfoPath, null);
+    const taskRecord = typeof taskValue === 'object' && taskValue !== null && !Array.isArray(taskValue) ? taskValue as Readonly<Record<string, unknown>> : null;
+    const taskSchema = taskRecord?.['schema_version'];
+    const presentTaskCheckoutFields = taskCheckoutFields.filter((field) => taskRecord !== null && field in taskRecord);
+    if (presentTaskCheckoutFields.length !== 0 && presentTaskCheckoutFields.length !== taskCheckoutFields.length) failure('invalid', '_task-info.json has a partial checkout metadata generation', [taskInfoPath, ...presentTaskCheckoutFields]);
+    const hasTaskCheckout = presentTaskCheckoutFields.length === taskCheckoutFields.length;
+    const hasCoordinationAuthority = taskRecord !== null && 'coordination_authority' in taskRecord;
+    if (taskSchema === 'autopilot.task_info.v1' && hasCoordinationAuthority) failure('invalid', 'v1 _task-info.json cannot declare post-v1 coordination authority', [taskInfoPath]);
+    if (taskSchema === 'autopilot.task_info.v2' && !hasCoordinationAuthority) failure('invalid', 'v2 _task-info.json is missing coordination authority', [taskInfoPath]);
+    if (taskSchema !== 'autopilot.task_info.v1' && taskSchema !== 'autopilot.task_info.v2') failure('invalid', '_task-info.json uses an unsupported historical schema', [taskInfoPath, String(taskSchema)]);
+    const taskInfo = object(taskValue, taskInfoPath, [...taskBaseFields, ...(hasTaskCheckout ? taskCheckoutFields : []), ...(hasCoordinationAuthority ? ['coordination_authority'] : [])]);
+    const fixedIdentityMatches = taskInfo['repo_key'] === active.repo_key && taskInfo['autopilot_id'] === active.autopilot_id && taskInfo['workstream'] === active.workstream && taskInfo['workstream_run'] === active.workstream_run && taskInfo['source_repo'] === active.source_repo && taskInfo['git_common_dir'] === active.git_common_dir && taskInfo['worktree_path'] === active.main_worktree_path && taskInfo['runtime_root'] === active.runtime_root && taskInfo['branch'] === active.branch && taskInfo['target_branch'] === active.target_branch;
+    const exactBaseMatches = taskInfo['base_sha'] === active.target_base_sha && taskInfo['target_base_sha'] === active.target_base_sha;
+    const closedAdvancedBase = active.status === 'closed' && typeof taskInfo['base_sha'] === 'string' && taskInfo['base_sha'] === taskInfo['target_base_sha'] && GIT_OBJECT_ID.test(taskInfo['base_sha']) && gitAncestor(active.source_repo, taskInfo['base_sha'], active.target_base_sha);
+    if (!fixedIdentityMatches || (!exactBaseMatches && !closedAdvancedBase)) failure('invalid', '_task-info.json disagrees with active run ownership', [taskInfoPath]);
+    if (taskSchema === 'autopilot.task_info.v2' && taskInfo['coordination_authority'] !== active.coordination_authority) failure('invalid', '_task-info.json coordination authority disagrees with active run ownership', [taskInfoPath]);
     const unitPath = join(taskRoot, '_unit-index.json');
     const branchesPath = join(taskRoot, '_branches.json');
     const unitRaw = parseJsonFile(unitPath, { schema_version: 'autopilot.unit_index.v1', units: [] });
@@ -414,15 +476,24 @@ function readUnitMetadata(rows: readonly ActiveAutopilotRow[]): ParsedUnitMetada
       const key = attemptKey(active.workstream_run, candidate.unit_id, candidate.attempt);
       if (map.has(key)) failure('invalid', 'duplicate unit attempt metadata', [key]);
       const matching = branchRows.find((entry) => entry.unit_id === candidate.unit_id && entry.attempt === candidate.attempt);
-      if (matching === undefined || stableJson(matching) !== stableJson(candidate)) failure('invalid', '_unit-index.json and _branches.json disagree', [key]);
+      const recoverableMissingBranchRow = matching === undefined && candidate.status === 'active' && !existsSync(candidate.worktree_path);
+      if (recoverableMissingBranchRow) orphanAttempts.add(key);
+      else if (matching === undefined || stableJson(matching) !== stableJson(candidate)) failure('invalid', '_unit-index.json and _branches.json disagree', [key]);
       if (!isInside(active.worktree_root, candidate.worktree_path)) failure('invalid', 'unit worktree path escapes its repository worktree root', [candidate.worktree_path]);
       const unitInfoPath = join(dirname(candidate.worktree_path), '_unit-info.json');
       if (existsSync(unitInfoPath)) {
-        const unitInfoFields = ['archive_ref', 'attempt', 'autopilot_id', 'base_sha', 'branch', 'checkout_mode', 'checkout_profile_ref', 'created_at', 'current_sha', 'materialized_paths_ref', 'runtime_root', 'schema_version', 'status', 'unit_id', 'workstream', 'workstream_run', 'worktree_path'];
-        const unitInfo = object(parseJsonFile(unitInfoPath, null), unitInfoPath, unitInfoFields);
+        const unitInfoBaseFields = ['archive_ref', 'attempt', 'autopilot_id', 'base_sha', 'branch', 'created_at', 'current_sha', 'runtime_root', 'schema_version', 'status', 'unit_id', 'workstream', 'workstream_run', 'worktree_path'];
+        const unitInfoCheckoutFields = ['checkout_mode', 'checkout_profile_ref', 'materialized_paths_ref'];
+        const unitInfoValue = parseJsonFile(unitInfoPath, null);
+        const unitInfoRecord = typeof unitInfoValue === 'object' && unitInfoValue !== null && !Array.isArray(unitInfoValue) ? unitInfoValue as Readonly<Record<string, unknown>> : null;
+        const presentCheckoutFields = unitInfoCheckoutFields.filter((field) => unitInfoRecord !== null && field in unitInfoRecord);
+        if (presentCheckoutFields.length !== 0 && presentCheckoutFields.length !== unitInfoCheckoutFields.length) failure('invalid', '_unit-info.json has a partial checkout metadata generation', [unitInfoPath, ...presentCheckoutFields]);
+        const unitInfo = object(unitInfoValue, unitInfoPath, presentCheckoutFields.length === 0 ? unitInfoBaseFields : [...unitInfoBaseFields, ...unitInfoCheckoutFields]);
         const unitIdentity = { archive_ref: unitInfo['archive_ref'], attempt: unitInfo['attempt'], base_sha: unitInfo['base_sha'], branch: unitInfo['branch'], current_sha: unitInfo['current_sha'], status: unitInfo['status'], unit_id: unitInfo['unit_id'], worktree_path: unitInfo['worktree_path'] };
         const parsedUnitInfo = parseUnitBranch(unitIdentity, unitInfoPath);
-        if (stableJson(parsedUnitInfo) !== stableJson(candidate) || unitInfo['schema_version'] !== 'autopilot.unit_info.v1' || unitInfo['workstream_run'] !== active.workstream_run || unitInfo['autopilot_id'] !== active.autopilot_id || unitInfo['runtime_root'] !== active.runtime_root) failure('invalid', '_unit-info.json disagrees with run/unit index ownership', [unitInfoPath]);
+        const immutableUnitIdentityMatches = parsedUnitInfo.unit_id === candidate.unit_id && parsedUnitInfo.attempt === candidate.attempt && parsedUnitInfo.base_sha === candidate.base_sha && parsedUnitInfo.branch === candidate.branch && parsedUnitInfo.worktree_path === candidate.worktree_path;
+        const terminalIndexSupersedesCreationSnapshot = immutableUnitIdentityMatches && parsedUnitInfo.status === 'active' && candidate.status !== 'active' && (parsedUnitInfo.archive_ref === null || parsedUnitInfo.archive_ref === candidate.archive_ref) && (parsedUnitInfo.current_sha === candidate.current_sha || gitAncestor(active.source_repo, parsedUnitInfo.current_sha, candidate.current_sha));
+        if ((stableJson(parsedUnitInfo) !== stableJson(candidate) && !terminalIndexSupersedesCreationSnapshot) || unitInfo['schema_version'] !== 'autopilot.unit_info.v1' || unitInfo['workstream_run'] !== active.workstream_run || unitInfo['autopilot_id'] !== active.autopilot_id || unitInfo['runtime_root'] !== active.runtime_root) failure('invalid', '_unit-info.json disagrees with run/unit index ownership', [unitInfoPath]);
       }
       map.set(key, candidate);
       worktrees.push(candidate);
@@ -431,7 +502,7 @@ function readUnitMetadata(rows: readonly ActiveAutopilotRow[]): ParsedUnitMetada
     if (extras.length > 0) failure('invalid', '_branches.json contains units absent from _unit-index.json', extras.map((entry) => `${entry.unit_id}:${String(entry.attempt)}`));
   }
   const frozenWorktrees = Object.freeze(worktrees);
-  return { by_attempt: map, worktrees: frozenWorktrees };
+  return { by_attempt: map, worktrees: frozenWorktrees, missingTaskInfoRuns, orphanAttempts };
 }
 
 function gitText(cwd: string, args: readonly string[]): string | null {
@@ -558,7 +629,23 @@ function readLegacyTerminalEvidence(rows: readonly ActiveAutopilotRow[], unitMet
         if (files.length > 10_000) failure('invalid', 'terminal evidence file count exceeds bound', [quarantineRoot]);
         for (const path of files) {
           paths.push(path);
-          const record = object(parseJsonFile(path, null), path, ['action', 'attempt', 'capture_commit_sha', 'created_at', 'dirty_paths', 'schema_version', 'summary', 'unit_id', 'unit_worktree_path', 'workstream', 'workstream_run']);
+          const evidenceValue = parseJsonFile(path, null);
+          const evidenceSchema = typeof evidenceValue === 'object' && evidenceValue !== null && !Array.isArray(evidenceValue) ? (evidenceValue as Readonly<Record<string, unknown>>)['schema_version'] : null;
+          if (evidenceSchema === 'autopilot.unit_index_adjudication.v1') {
+            const adjudication = closedObject(evidenceValue, path, ['action', 'attempt', 'created_at', 'reason', 'schema_version', 'transport_failure_ref', 'unit_id', 'unit_index_ref', 'unit_info_ref', 'workstream', 'workstream_run'], ['branches_ref', 'manual_path_remove_ref', 'prior_reset_ref']);
+            if (adjudication['workstream'] !== row.workstream || adjudication['workstream_run'] !== row.workstream_run) failure('invalid', 'unit-index adjudication evidence identity is invalid', [path]);
+            boundedString(adjudication['unit_id'], `${path}.unit_id`, 192);
+            integer(adjudication['attempt'], `${path}.attempt`, 1);
+            continue;
+          }
+          if (evidenceSchema === 'autopilot.manual_worktree_reconcile.v1') {
+            const reconciliation = object(evidenceValue, path, ['action', 'attempt', 'changed_path_hash_proof', 'created_at', 'exists_after_remove', 'exists_before_remove', 'path_within_run_root', 'reason', 'schema_version', 'top_level_entries_before_remove', 'transport_failure_ref', 'unit_id', 'workstream', 'workstream_run', 'worktree_path']);
+            if (reconciliation['workstream'] !== row.workstream || reconciliation['workstream_run'] !== row.workstream_run) failure('invalid', 'manual worktree reconciliation evidence identity is invalid', [path]);
+            boundedString(reconciliation['unit_id'], `${path}.unit_id`, 192);
+            integer(reconciliation['attempt'], `${path}.attempt`, 1);
+            continue;
+          }
+          const record = closedObject(evidenceValue, path, ['action', 'attempt', 'created_at', 'dirty_paths', 'schema_version', 'summary', 'unit_id', 'unit_worktree_path', 'workstream', 'workstream_run'], ['capture_commit_sha']);
           if (record['schema_version'] !== 'autopilot.unit_failure.v1' || record['workstream'] !== row.workstream || record['workstream_run'] !== row.workstream_run) failure('invalid', 'unit terminal evidence identity is invalid', [path]);
           const unitId = boundedString(record['unit_id'], `${path}.unit_id`, 192);
           const attempt = integer(record['attempt'], `${path}.attempt`, 1);
@@ -678,7 +765,7 @@ function recheckGitSnapshot(expected: readonly GitSnapshotEntry[], rows: readonl
   return drift;
 }
 
-function inspectGit(rows: readonly ActiveAutopilotRow[]): readonly string[] {
+function inspectGit(rows: readonly ActiveAutopilotRow[], ledgerTerminalized: ReadonlySet<string>): readonly string[] {
   const blockers: string[] = [];
   for (const row of rows) {
     if (!existsSync(row.source_repo)) { blockers.push(`source repository is missing: ${row.source_repo}`); continue; }
@@ -696,7 +783,7 @@ function inspectGit(rows: readonly ActiveAutopilotRow[]): readonly string[] {
     if (existsSync(row.main_worktree_path)) {
       const branch = spawnSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: row.main_worktree_path, encoding: 'utf8' });
       if (branch.status !== 0 || branch.stdout.trim() !== row.branch) blockers.push(`main worktree branch mismatch: ${row.workstream_run}`);
-    } else if (row.status !== 'closed') blockers.push(`live main worktree is missing and requires recovery: ${row.workstream_run}`);
+    } else if (row.status !== 'closed' && !ledgerTerminalized.has(row.workstream_run)) blockers.push(`live main worktree is missing and requires recovery: ${row.workstream_run}`);
   }
   return Object.freeze(blockers.sort());
 }
@@ -892,7 +979,7 @@ function copiedCoordinatorDatabase(paths: CoordinatorRuntimePaths, writerAuthori
   if (database === undefined || !database.exists) failure('blocked', 'coordinator database disappeared before copied inspection');
   const wal = source[1];
   const shm = source[2];
-  if (wal?.exists === true && wal.size > 0 && ((!coordinatorRunning(paths) && !writerAuthorityAcquired) || shm?.exists !== true)) failure('blocked', 'uncheckpointed coordinator WAL has no live fenced owner or durable migration writer authority; copied inspection is unsafe', [wal.path]);
+  if (wal?.exists === true && wal.size > 0 && ((!coordinationMigrationCoordinatorRunning(paths) && !writerAuthorityAcquired) || shm?.exists !== true)) failure('blocked', 'uncheckpointed coordinator WAL has no live fenced owner or durable migration writer authority; copied inspection is unsafe', [wal.path]);
   const root = mkdtempSync(join(tmpdir(), 'autopilot-coordinator-inspection-'));
   if (isInside(paths.stateRoot, root)) {
     rmSync(root, { recursive: true, force: true });
@@ -1004,22 +1091,28 @@ function inspectLegacy(paths: CoordinatorRuntimePaths, repoKey: string, reposito
   const rows = parseLegacyActiveAutopilots(parseJsonFile(join(coordinationRoot, 'active-autopilots.json'), []));
   const claims = parseLegacyPathClaims(parseJsonFile(join(coordinationRoot, 'path-claims.json'), []));
   const findings = checkLegacyCoordinationInvariants({ repoKey, rows, claims });
-  const unitMetadata = readUnitMetadata(rows);
-  const mergeEvidence = readLegacyMergeEvidence(rows);
-  const index = parseWorktreeIndex(join(worktreeRoot, '_index.json'));
-  const terminalEvidence = readLegacyTerminalEvidence(rows, unitMetadata, index);
-  const blockers = findings.filter((finding) => finding.severity === 'error').map((finding) => `${finding.code}: ${finding.detail}`);
-  blockers.push(...inspectGit(rows), ...mergeEvidence.blockers);
-  const rowRuns = new Set(rows.map((row) => row.workstream_run));
-  for (const indexed of index.filter((entry) => entry.status === 'active')) if (!rowRuns.has(indexed.workstream_run)) blockers.push(`active worktree index row has no durable run owner: ${indexed.workstream_run}`);
-  const sourceEntries = snapshotEntries(paths.stateRoot, sourcePaths(paths.stateRoot, repoKey, rows, unitMetadata, mergeEvidence.merges, terminalEvidence.paths));
-  const gitSnapshot = captureGitSnapshot(rows, repository);
   const auditRows: CoordinationMigrationAuditInput[] = [
     ...parseJsonl(join(coordinationRoot, 'claim-events.jsonl'), 'claim-event', 'autopilot.claim_event.v1'),
     ...parseJsonl(join(coordinationRoot, 'merge-log.jsonl'), 'merge-event', 'autopilot.merge_event.v1'),
     ...parseJsonl(join(coordinationRoot, 'foreign-merge-acks.jsonl'), 'foreign-merge-ack', 'autopilot.foreign_merge_ack.v1'),
     ...parseJsonl(join(worktreeRoot, '_ledger.jsonl'), 'worktree-ledger', 'autopilot.worktree_ledger.v1'),
   ];
+  const terminalizedRuns = ledgerTerminalizedRuns(rows, auditRows);
+  const runtimeRunStatuses = readRuntimeRunStatuses(rows);
+  const unitMetadata = readUnitMetadata(rows);
+  const mergeEvidence = readLegacyMergeEvidence(rows);
+  const index = parseWorktreeIndex(join(worktreeRoot, '_index.json'));
+  const terminalEvidence = readLegacyTerminalEvidence(rows, unitMetadata, index);
+  const blockers = findings.filter((finding) => finding.severity === 'error').map((finding) => `${finding.code}: ${finding.detail}`);
+  blockers.push(...inspectGit(rows, terminalizedRuns), ...mergeEvidence.blockers);
+  for (const run of unitMetadata.missingTaskInfoRuns) {
+    const row = rows.find((candidate) => candidate.workstream_run === run);
+    if (row !== undefined && row.status !== 'closed' && !terminalizedRuns.has(run)) blockers.push(`live run task metadata is missing and requires recovery: ${run}`);
+  }
+  const rowRuns = new Set(rows.map((row) => row.workstream_run));
+  for (const indexed of index.filter((entry) => entry.status === 'active')) if (!rowRuns.has(indexed.workstream_run)) blockers.push(`active worktree index row has no durable run owner: ${indexed.workstream_run}`);
+  const sourceEntries = snapshotEntries(paths.stateRoot, sourcePaths(paths.stateRoot, repoKey, rows, unitMetadata, mergeEvidence.merges, terminalEvidence.paths));
+  const gitSnapshot = captureGitSnapshot(rows, repository);
   const terminalLeakKeys = new Set<string>();
   const recovery: CoordinationMigrationRecoveryInput[] = [];
   let reboundCount = 0;
@@ -1046,14 +1139,14 @@ function inspectLegacy(paths: CoordinatorRuntimePaths, repoKey: string, reposito
     if (terminalProof !== null) {
       terminalLeakKeys.add(claimKey(claim));
       auditRows.push({ audit_id: entityId('terminal-release', claimKey(claim)), source_kind: 'claim-event', payload: { schema_version: 'autopilot.migration_terminal_release.v1', repo_key: repoKey, workstream_run: claim.workstream_run, autopilot_id: claim.autopilot_id, unit_id: claim.unit_id, attempt: claim.attempt, path: claim.path, claim_type: claim.claim_type, mechanical_proof: terminalProof.mechanical_proof, evidence_source: terminalProof.source, evidence_ref: terminalProof.evidence_ref, evidence_sha256: terminalProof.evidence_sha256, exact_git_objects: terminalProof.exact_git_objects, filesystem_postconditions: terminalProof.filesystem_postconditions, released_from_active_import: true } });
-    } else if (owner.status === 'closed' || metadata === undefined || metadata.status !== 'active') {
+    } else if (owner.status === 'closed' || metadata === undefined || metadata.status !== 'active' || unitMetadata.orphanAttempts.has(attemptKey(claim.workstream_run, claim.unit_id, claim.attempt))) {
       recovery.push({ recovery_id: entityId('recovery', `ambiguous\0${claimKey(claim)}`), workstream_run: claim.workstream_run, recovery_type: 'ambiguous-live-claim', detail: { claim_path: claim.path, claim_mode: claim.claim_type, unit_id: claim.unit_id, attempt: claim.attempt, edit_lease_id: entityId('migration-lease', claimKey(claim)), owner_status: owner.status, reason: 'legacy terminal status lacks independently verified immutable release evidence; authority is preserved pending supervisor recovery' } });
     }
   }
   const frozenBlockers = Object.freeze([...new Set(blockers)].sort());
   const frozenRecovery = Object.freeze(recovery);
   const audit = Object.freeze(auditRows);
-  return { rows, claims, unitMetadata, worktreeIndex: index, sourceEntries, gitSnapshot, audit, merges: mergeEvidence.merges, terminalEvidence, blockers: frozenBlockers, recovery: frozenRecovery, terminalLeakKeys, equivalentClaimKeys: new Set<string>(), reboundCount, totalBytes: sourceEntries.reduce((sum, entry) => sum + entry.size_bytes, 0) };
+  return { rows, claims, unitMetadata, worktreeIndex: index, sourceEntries, gitSnapshot, audit, merges: mergeEvidence.merges, terminalEvidence, blockers: frozenBlockers, recovery: frozenRecovery, terminalLeakKeys, equivalentClaimKeys: new Set<string>(), reboundCount, totalBytes: sourceEntries.reduce((sum, entry) => sum + entry.size_bytes, 0), ledgerTerminalizedRuns: terminalizedRuns, runtimeRunStatuses };
 }
 
 function reconcileMixedCoordinatorAuthority(coordinator: ReadonlyCoordinatorInspection | null, inspection: LegacyInspection): LegacyInspection {
@@ -1133,17 +1226,19 @@ function coordinatorDrainBlockers(coordinator: ReadonlyCoordinatorInspection | n
   return Object.freeze(blockers.sort());
 }
 
-function runStatus(row: ActiveAutopilotRow, recoveryRuns: ReadonlySet<string>): CoordinationRunStatus {
-  if (row.status === 'closed') return 'closed';
+function runStatus(row: ActiveAutopilotRow, recoveryRuns: ReadonlySet<string>, terminalizedRuns: ReadonlySet<string>, runtimeStatuses: ReadonlyMap<string, CoordinationRunStatus>): CoordinationRunStatus {
+  if (row.status === 'closed' || terminalizedRuns.has(row.workstream_run)) return 'closed';
   if (row.status === 'crashed' || recoveryRuns.has(row.workstream_run)) return 'recovering';
-  return row.status;
+  const runtimeStatus = runtimeStatuses.get(row.workstream_run);
+  if (runtimeStatus !== undefined) return runtimeStatus;
+  return row.status === 'active' ? 'paused' : row.status;
 }
 
 function buildImportPlan(inspection: LegacyInspection, repositoryIdentity: MigrationRepositoryIdentity, repoKey: string, migrationId: string, snapshotSha: `sha256:${string}`, journalPath: string, report: CoordinationMigrationReport): CoordinationLegacyImportPlan {
   const repository: CoordinationRepository = { schema_version: 'autopilot.coordination_repository.v1', repo_id: repoKey, repo_key: repoKey, canonical_root: repositoryIdentity.canonical_root, git_common_dir: repositoryIdentity.git_common_dir, created_event_seq: 1, version: 1 };
   for (const row of inspection.rows) if (realpathSync(row.source_repo) !== repositoryIdentity.canonical_root || realpathSync(row.git_common_dir) !== repositoryIdentity.git_common_dir) failure('blocked', 'legacy rows disagree on repository identity');
   const recoveryRuns = new Set(inspection.recovery.map((entry) => entry.workstream_run));
-  const runs: CoordinationRun[] = inspection.rows.map((row) => ({ schema_version: 'autopilot.coordination_run.v1', repo_id: repoKey, autopilot_id: row.autopilot_id, workstream: row.workstream, workstream_run: row.workstream_run, coordination_authority: 'coordinator-edit-leases-v1', status: runStatus(row, recoveryRuns), active_session_generation: 0, created_event_seq: 1, version: 1 }));
+  const runs: CoordinationRun[] = inspection.rows.map((row) => ({ schema_version: 'autopilot.coordination_run.v1', repo_id: repoKey, autopilot_id: row.autopilot_id, workstream: row.workstream, workstream_run: row.workstream_run, coordination_authority: 'coordinator-edit-leases-v1', status: runStatus(row, recoveryRuns, inspection.ledgerTerminalizedRuns, inspection.runtimeRunStatuses), active_session_generation: 0, created_event_seq: 1, version: 1 }));
   const runResources: CoordinationRunResource[] = inspection.rows.map((row) => ({
     schema_version: 'autopilot.coordination_run_resource.v1', repo_id: repoKey, workstream_run: row.workstream_run,
     source_repo: row.source_repo, git_common_dir: row.git_common_dir, worktree_root: row.worktree_root,
@@ -1174,11 +1269,11 @@ function buildImportPlan(inspection: LegacyInspection, repositoryIdentity: Migra
     const metadata = inspection.unitMetadata.by_attempt.get(key);
     const owner = { repo_id: repoKey, autopilot_id: row.autopilot_id, workstream_run: row.workstream_run, unit_id: claim.unit_id, attempt: claim.attempt };
     const specSha = digest(new TextEncoder().encode(`${snapshotSha}\0${key}`));
-    const importedAttemptState: CoordinationUnitAttempt['state'] = metadata === undefined ? 'queued' : metadata.status === 'active' ? 'running' : metadata.status === 'merged' ? 'merged' : metadata.status === 'aborted' ? 'reset' : metadata.status === 'quarantined' ? 'quarantined' : 'superseded';
+    const pendingRecovery = inspection.recovery.some((entry) => entry.workstream_run === claim.workstream_run && entry.detail['unit_id'] === claim.unit_id && entry.detail['attempt'] === claim.attempt);
+    const importedAttemptState: CoordinationUnitAttempt['state'] = pendingRecovery ? 'queued' : metadata === undefined ? 'queued' : metadata.status === 'active' ? 'running' : metadata.status === 'merged' ? 'merged' : metadata.status === 'aborted' ? 'reset' : metadata.status === 'quarantined' ? 'quarantined' : 'superseded';
     attempts.push({ schema_version: 'autopilot.unit_attempt.v1', owner, state: importedAttemptState, role: 'unknown', spec: { ref: `migration/${migrationId}/legacy-attempt/${entityId('attempt', key)}.json`, sha256: specSha }, preemptible: claims.every((entry) => entry.claim_type === 'READ'), checkpoint_ordinal: 0, critical_section: null, version: 1 });
     const groupId = entityId('migration-group', key);
     const requested = claims.map((entry) => ({ path: entry.path, mode: entry.claim_type, purpose: entry.reason })).sort((left, right) => `${left.mode}\0${left.path}`.localeCompare(`${right.mode}\0${right.path}`));
-    const pendingRecovery = inspection.recovery.some((entry) => entry.workstream_run === claim.workstream_run && entry.detail['unit_id'] === claim.unit_id && entry.detail['attempt'] === claim.attempt);
     const condition = !pendingRecovery && claims.some((entry) => entry.claim_type === 'WRITE' || entry.claim_type === 'EXCLUSIVE')
       ? { condition_type: 'unit-merged' as const, target_id: `${claim.unit_id}:${String(claim.attempt)}`, evidence: null }
       : { condition_type: 'explicit-owner-release' as const, target_id: `${claim.unit_id}:${String(claim.attempt)}`, evidence: null };
@@ -1187,7 +1282,7 @@ function buildImportPlan(inspection: LegacyInspection, repositoryIdentity: Migra
   }
   const reconciliationEvidence: CoordinationReconciliationEvidence[] = [];
   const reservations: CoordinationChangeReservation[] = [];
-  const orderedMerges = inspection.merges.filter((entry) => inspection.rows.some((row) => row.workstream_run === entry.merge.workstream_run && row.status !== 'closed')).sort((left, right) => left.merge.merged_at.localeCompare(right.merge.merged_at) || left.path.localeCompare(right.path));
+  const orderedMerges = inspection.merges.filter((entry) => inspection.rows.some((row) => row.workstream_run === entry.merge.workstream_run && row.status !== 'closed' && !inspection.ledgerTerminalizedRuns.has(row.workstream_run))).sort((left, right) => left.merge.merged_at.localeCompare(right.merge.merged_at) || left.path.localeCompare(right.path));
   for (const evidence of orderedMerges) {
     const acceptedRef = { ref: evidence.ref, sha256: evidence.sha256 };
     const targetId = `${evidence.merge.unit_id}:${String(evidence.merge.attempt)}`;
@@ -1206,7 +1301,7 @@ function buildImportPlan(inspection: LegacyInspection, repositoryIdentity: Migra
   }
   const worktrees: CoordinationWorktree[] = [];
   for (const row of inspection.rows) {
-    const mainState: CoordinationWorktreeState = row.status === 'closed' ? 'terminal' : existsSync(row.main_worktree_path) ? 'active' : 'dirty';
+    const mainState: CoordinationWorktreeState = row.status === 'closed' || inspection.ledgerTerminalizedRuns.has(row.workstream_run) ? 'terminal' : existsSync(row.main_worktree_path) ? 'active' : 'dirty';
     worktrees.push({ schema_version: 'autopilot.coordination_worktree.v2', worktree_id: entityId('migration-worktree', `${row.workstream_run}\0main`), owner: { repo_id: repoKey, autopilot_id: row.autopilot_id, workstream_run: row.workstream_run, unit_id: 'main', attempt: 1 }, kind: 'main', canonical_path: row.main_worktree_path, git_common_dir: row.git_common_dir, branch: row.branch, state: mainState, version: 1 });
     for (const unit of inspection.unitMetadata.worktrees.filter((entry) => isInside(dirname(row.main_worktree_path), entry.worktree_path))) {
       const state: CoordinationWorktreeState = unit.status === 'active' ? existsSync(unit.worktree_path) ? 'active' : 'dirty' : unit.status === 'quarantined' ? 'quarantined' : 'terminal';
@@ -1576,7 +1671,7 @@ function recheckEntries(entries: readonly SnapshotEntry[]): readonly string[] {
   return Object.freeze(drift);
 }
 
-function coordinatorRunning(paths: CoordinatorRuntimePaths): boolean {
+export function coordinationMigrationCoordinatorRunning(paths: CoordinatorRuntimePaths): boolean {
   for (const path of [paths.lockPath, paths.predecessorLockPath]) {
     if (!existsSync(path)) continue;
     try {
@@ -1588,7 +1683,7 @@ function coordinatorRunning(paths: CoordinatorRuntimePaths): boolean {
   return false;
 }
 
-async function retireDrainedCoordinator(paths: CoordinatorRuntimePaths): Promise<readonly string[]> {
+export async function retireCoordinationMigrationCoordinator(paths: CoordinatorRuntimePaths): Promise<readonly string[]> {
   if (!existsSync(paths.lockPath)) return [];
   try { preflightProcessRetirementSupport(); }
   catch (error) { return Object.freeze([`coordinator process-retirement dependency preflight failed: ${error instanceof Error ? error.message : String(error)}`]); }
@@ -1907,9 +2002,9 @@ export async function runCoordinationMigration(input: { readonly command: Coordi
       inspection = reconcileMixedCoordinatorAuthority(coordinator, inspection);
       let drainBlockers = coordinatorDrainBlockers(coordinator);
       const legacyBlockers = legacyDrainBlockers(paths, migrationPaths, journal, inspection.rows);
-      let writerBlockers: readonly string[] = coordinatorRunning(paths)
+      let writerBlockers: readonly string[] = coordinationMigrationCoordinatorRunning(paths)
         ? drainBlockers.length === 0 && legacyBlockers.length === 0 && inspection.blockers.length === 0
-          ? await retireDrainedCoordinator(paths)
+          ? await retireCoordinationMigrationCoordinator(paths)
           : [`coordinator process remains online until every session, child, and legacy client has durably drained: ${paths.lockPath}`]
         : [];
       let blockers = Object.freeze([...inspection.blockers, ...drainBlockers, ...legacyBlockers, ...writerBlockers].sort());
@@ -1921,11 +2016,11 @@ export async function runCoordinationMigration(input: { readonly command: Coordi
       // Retirement is followed by a fresh read-only snapshot. Only this exact
       // post-drain/post-retirement observation grants this process store writer
       // authority; no CoordinatorStore.open call is reachable before it.
-      if (coordinatorRunning(paths)) failure('blocked', 'coordinator lifecycle lock remains live after retirement');
+      if (coordinationMigrationCoordinatorRunning(paths)) failure('blocked', 'coordinator lifecycle lock remains live after retirement');
       coordinator = inspectCoordinatorReadOnly(paths, input.repoKey, true);
       inspection = reconcileMixedCoordinatorAuthority(coordinator, inspectLegacy(paths, input.repoKey, repository));
       drainBlockers = coordinatorDrainBlockers(coordinator);
-      writerBlockers = coordinatorRunning(paths) ? ['coordinator writer authority changed during migration retirement'] : [];
+      writerBlockers = coordinationMigrationCoordinatorRunning(paths) ? ['coordinator writer authority changed during migration retirement'] : [];
       blockers = Object.freeze([...inspection.blockers, ...drainBlockers, ...legacyDrainBlockers(paths, migrationPaths, journal, inspection.rows), ...writerBlockers].sort());
       inspection = { ...inspection, blockers };
       report = baseReport('apply', input.repoKey, inspection, now, 'frozen', journal.migration_id, journal.snapshot_sha256, journal.backup_path, null);

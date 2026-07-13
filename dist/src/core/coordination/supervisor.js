@@ -162,6 +162,11 @@ async function publishMigrationRecoveryEvidence(input) {
         }
     }
 }
+export function readMigrationRecoveryEvidenceFile(path) {
+    if (!isAbsolute(path))
+        throw new CoordinationRuntimeError('invalid-request', 'migration recovery evidence path must be absolute');
+    return readExactRegularFile(path, 1024 * 1024, 'migration recovery evidence input').bytes;
+}
 export async function writeCoordinatorSessionContext(path, context) {
     await ensurePrivateAuthorityDirectory(dirname(path));
     const temporary = `${path}.tmp-${String(process.pid)}-${randomBytes(6).toString('hex')}`;
@@ -214,8 +219,8 @@ export async function readCoordinatorSessionContext(path) {
 }
 export class DurableRunSupervisorClient {
     #client;
-    constructor(env = process.env) {
-        this.#client = new CoordinatorClient({ env });
+    constructor(env = process.env, options = {}) {
+        this.#client = new CoordinatorClient({ env, ...(options.allowMigrationRecoveryAutoStart === undefined ? {} : { allowMigrationRecoveryAutoStart: options.allowMigrationRecoveryAutoStart }) });
     }
     get client() {
         return this.#client;

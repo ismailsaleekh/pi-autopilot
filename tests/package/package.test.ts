@@ -209,6 +209,7 @@ void describe('package manifest and payload', () => {
       'src/extension.ts',
       'dist/src/cli/autopilot-agent-run.js',
       'dist/src/cli/autopilot-coordinator.js',
+      'dist/src/cli/migration-recovery.js',
       'dist/src/core/agent-runner.js',
       'dist/src/core/close-runtime.js',
       'dist/src/core/coordination/client.js',
@@ -452,6 +453,7 @@ void describe('package manifest and payload', () => {
       'dist/extensions/autopilot.js',
       'dist/src/cli/autopilot-agent-run.js',
       'dist/src/cli/autopilot-coordinator.js',
+      'dist/src/cli/migration-recovery.js',
       'dist/src/core/agent-runner.js',
       'dist/src/core/close-runtime.js',
       'dist/src/core/coordination/client.js',
@@ -594,6 +596,14 @@ void describe('package manifest and payload', () => {
       const installedPackage = join(installRoot, 'node_modules', 'pi-autopilot');
       const installedBin = join(installedPackage, 'bin', 'autopilot-agent-run.mjs');
       const installedCoordinator = join(installedPackage, 'bin', 'autopilot-coordinator.mjs');
+      const installedBinLink = join(installRoot, 'node_modules', '.bin', 'autopilot-agent-run');
+      const installedCoordinatorLink = join(installRoot, 'node_modules', '.bin', 'autopilot-coordinator');
+      for (const [command, path] of [['autopilot-agent-run', installedBinLink], ['autopilot-coordinator', installedCoordinatorLink]] as const) {
+        assert.equal(existsSync(path), true, `${command} must be linked through the packed npm installation`);
+        const help = spawnSync(path, ['--help'], { cwd: installRoot, encoding: 'utf8' });
+        assert.equal(help.status, 0, `${command}: ${help.stderr}`);
+        assert.match(help.stdout, new RegExp(command, 'u'));
+      }
       const source = join(tempRoot, 'source');
       await initInstalledBinSource(source);
       const previousStateRoot = process.env[AUTOPILOT_STATE_ROOT_ENV];

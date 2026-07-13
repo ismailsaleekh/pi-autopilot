@@ -155,6 +155,69 @@ void describe('Coordination Fabric legacy migration and cutover', () => {
     });
   });
 
+  void it('BUG-172 accepts exact pre-checkout v1 task/unit metadata and pre-capture failure evidence without inventing release proof', async () => {
+    await withFixture(async (fixture) => {
+      const coordinationRoot = coordinationRootForRepo(fixture.repoKey, fixture.env);
+      const active = (await readActiveAutopilots(coordinationRoot))[0];
+      if (active === undefined) throw new Error('missing legacy-v1 active row');
+      const taskRoot = dirname(active.main_worktree_path);
+      const taskInfoPath = join(taskRoot, '_task-info.json');
+      const taskInfo = JSON.parse(await readFile(taskInfoPath, 'utf8')) as Readonly<Record<string, unknown>>;
+      const legacyTaskInfo = Object.fromEntries(Object.entries(taskInfo).filter(([field]) => !['checkout_mode', 'checkout_profile_origin', 'checkout_profile_ref', 'checkout_profile_sha256', 'coordination_authority'].includes(field)));
+      await writeFile(taskInfoPath, `${JSON.stringify({ ...legacyTaskInfo, schema_version: 'autopilot.task_info.v1' }, null, 2)}\n`, 'utf8');
+
+      const unitPath = join(taskRoot, 'units', 'legacy-v1-unit', 'attempt-1', 'worktree');
+      const unit = { unit_id: 'legacy-v1-unit', attempt: 1, branch: `autopilot/unit/${active.workstream_run}/legacy-v1-unit/attempt-1`, worktree_path: unitPath, base_sha: active.target_base_sha, current_sha: active.target_base_sha, archive_ref: null, status: 'aborted' };
+      await writeFile(join(taskRoot, '_unit-index.json'), `${JSON.stringify({ schema_version: 'autopilot.unit_index.v1', units: [unit] }, null, 2)}\n`, 'utf8');
+      const branches = JSON.parse(await readFile(join(taskRoot, '_branches.json'), 'utf8')) as Readonly<Record<string, unknown>>;
+      await writeFile(join(taskRoot, '_branches.json'), `${JSON.stringify({ ...branches, unit_branches: [unit] }, null, 2)}\n`, 'utf8');
+      await mkdir(dirname(unitPath), { recursive: true });
+      await writeFile(join(dirname(unitPath), '_unit-info.json'), `${JSON.stringify({ schema_version: 'autopilot.unit_info.v1', workstream: active.workstream, workstream_run: active.workstream_run, autopilot_id: active.autopilot_id, ...unit, runtime_root: active.runtime_root, created_at: '2026-07-12T11:00:30.000Z' }, null, 2)}\n`, 'utf8');
+
+      await mkdir(join(active.runtime_root, 'quarantine'), { recursive: true });
+      await writeFile(join(active.runtime_root, 'quarantine', 'legacy-v1-unit.attempt-1.abort.json'), `${JSON.stringify({ schema_version: 'autopilot.unit_failure.v1', action: 'abort', workstream: active.workstream, workstream_run: active.workstream_run, unit_id: 'legacy-v1-unit', attempt: 1, unit_worktree_path: unitPath, dirty_paths: [], summary: 'pre-capture historical abort evidence', created_at: '2026-07-12T11:04:00.000Z' }, null, 2)}\n`, 'utf8');
+
+      const before = await bytes(fixture.stateRoot);
+      const dry = await runCoordinationMigration({ command: 'dry-run', repoKey: fixture.repoKey, env: fixture.env, clock: fixedClock() });
+      assert.equal(dry.active_run_count, 1);
+      assert.equal(dry.imported_worktree_count, 2);
+      assert.equal(dry.terminal_leak_count, 1, 'pre-capture evidence must not invent a second terminal release');
+      assert.equal(dry.recovery_work_count, 1, 'ambiguous live WRITE authority remains fenced recovery work');
+      assert.deepEqual(await bytes(fixture.stateRoot), before, 'legacy compatibility dry-run must remain byte-read-only');
+    });
+  });
+
+  void it('BUG-172 exposes a recovery CLI that resolves imported authority while migration remains frozen', async () => {
+    await withFixture(async (fixture) => {
+      const applied = await runCoordinationMigration({ command: 'apply', repoKey: fixture.repoKey, env: fixture.env, clock: fixedClock() });
+      assert.equal(applied.state, 'imported');
+      assert.equal(applied.recovery_work_count, 1);
+      const cli = join(process.cwd(), 'src', 'cli', 'autopilot-coordinator.ts');
+      const common = ['--experimental-strip-types', cli, 'recovery'];
+      const listed = spawnSync(process.execPath, [...common, 'list', '--state-root', fixture.stateRoot, '--repo-root', join(dirname(fixture.stateRoot), 'source')], { cwd: process.cwd(), encoding: 'utf8', timeout: 30_000 });
+      assert.equal(listed.status, 0, listed.stderr);
+      const listPayload = JSON.parse(listed.stdout) as Readonly<Record<string, unknown>>;
+      const recoveryRows = listPayload['recovery'];
+      assert.equal(Array.isArray(recoveryRows), true);
+      if (!Array.isArray(recoveryRows) || recoveryRows.length !== 1 || typeof recoveryRows[0] !== 'object' || recoveryRows[0] === null) throw new Error('recovery CLI did not list one exact row');
+      const recoveryId = (recoveryRows[0] as Readonly<Record<string, unknown>>)['recovery_id'];
+      if (typeof recoveryId !== 'string') throw new Error('recovery CLI omitted recovery_id');
+
+      const retained = spawnSync(process.execPath, [...common, 'retain', '--state-root', fixture.stateRoot, '--repo-root', join(dirname(fixture.stateRoot), 'source'), '--run', fixture.workstreamRun, '--recovery-id', recoveryId], { cwd: process.cwd(), encoding: 'utf8', timeout: 30_000 });
+      assert.equal(retained.status, 0, retained.stderr);
+      const retainPayload = JSON.parse(retained.stdout) as Readonly<Record<string, unknown>>;
+      assert.equal(retainPayload['outcome'], 'authority-retained');
+      assert.equal(retainPayload['remaining_recovery_count'], 0);
+
+      const relisted = spawnSync(process.execPath, [...common, 'list', '--state-root', fixture.stateRoot, '--repo-root', join(dirname(fixture.stateRoot), 'source'), '--run', fixture.workstreamRun], { cwd: process.cwd(), encoding: 'utf8', timeout: 30_000 });
+      assert.equal(relisted.status, 0, relisted.stderr);
+      const relistedPayload = JSON.parse(relisted.stdout) as Readonly<Record<string, unknown>>;
+      assert.equal(Array.isArray(relistedPayload['recovery']) ? relistedPayload['recovery'].length : -1, 0);
+      assert.equal((await runCoordinationMigration({ command: 'verify', repoKey: fixture.repoKey, env: fixture.env, clock: fixedClock() })).state, 'cutover-ready');
+      await runCoordinationMigration({ command: 'rollback', repoKey: fixture.repoKey, env: fixture.env, clock: fixedClock() });
+    });
+  });
+
   void it('merges matching Phase 34 coordinator state instead of rejecting the real mixed migration source', async () => {
     await withFixture(async (fixture) => {
       const coordinationRoot = coordinationRootForRepo(fixture.repoKey, fixture.env);

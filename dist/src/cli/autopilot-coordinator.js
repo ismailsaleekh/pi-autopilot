@@ -2,6 +2,7 @@
 import { isAbsolute, join, resolve } from 'node:path';
 import { CoordinatorClient } from "../core/coordination/client.js";
 import { CoordinationRuntimeError } from "../core/coordination/failures.js";
+import { migrationRecoveryUsage, runMigrationRecoveryCli } from "./migration-recovery.js";
 import { coordinationMigrationUsage, runCoordinationMigration } from "../core/coordination/migration.js";
 import { CoordinatorAlreadyRunningError, runCoordinatorUntilSignal } from "../core/coordination/server.js";
 import { coordinatorRuntimePaths } from "../core/coordination/runtime-paths.js";
@@ -15,6 +16,7 @@ function usage() {
         '       autopilot-coordinator export [--state-root <absolute-path>] [--output <absolute-path>]',
         '       autopilot-coordinator replay --replay-id <stable-id> --input <absolute-request-jsonl> [--state-root <absolute-path>]',
         coordinationMigrationUsage(),
+        migrationRecoveryUsage(),
     ].join('\n');
 }
 function parseArgs(argv) {
@@ -97,6 +99,20 @@ async function main(argv) {
     if (argv[0] === '--help' || argv[0] === '-h') {
         console.log(usage());
         return 0;
+    }
+    if (argv[0] === 'recovery') {
+        try {
+            console.log(JSON.stringify(await runMigrationRecoveryCli(argv.slice(1)), null, 2));
+            return 0;
+        }
+        catch (error) {
+            if (error instanceof CoordinationRuntimeError) {
+                console.error(error.message);
+                return error.failure_class === 'system-fatal' ? 70 : 1;
+            }
+            console.error(error instanceof Error ? error.message : String(error));
+            return 2;
+        }
     }
     let args;
     try {
