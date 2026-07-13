@@ -1985,6 +1985,8 @@ export async function runCoordinationMigration(input: { readonly command: Coordi
   if (input.command === 'dry-run') {
     // Inspection shares coordinator DB/WAL and authority paths with apply. Use
     // the same global operation election, while leaving no durable lock behind.
+    const observedFreeze = activeCoordinationMigrationFreeze(paths.stateRoot);
+    if (observedFreeze !== null) failure('blocked', 'migration dry-run is forbidden while a global coordination migration freeze is active', [observedFreeze]);
     const migrationRoot = join(paths.stateRoot, 'migrations');
     const migrationRootExisted = existsSync(migrationRoot);
     await ensurePrivateAuthorityDirectory(migrationRoot, input.env ?? process.env);
@@ -2008,18 +2010,21 @@ export async function runCoordinationMigration(input: { readonly command: Coordi
       if (!migrationRootExisted) await rmdir(migrationRoot);
     }
   }
-  await ensureCoordinatorPrivateRoots(paths, input.env ?? process.env);
-  for (const authorityRoot of [join(paths.stateRoot, 'migrations'), join(paths.stateRoot, 'cutovers'), join(paths.stateRoot, 'migration-recovery-evidence')]) await ensurePrivateAuthorityDirectory(authorityRoot, input.env ?? process.env);
-  for (const existingAuthorityRoot of [join(paths.stateRoot, 'coordination'), join(paths.stateRoot, 'worktrees')]) if (existsSync(existingAuthorityRoot)) {
-    if (platform() === 'win32') enforceWindowsPrivateTree(existingAuthorityRoot, input.env ?? process.env);
-    else await enforcePrivateAuthorityPath(existingAuthorityRoot, true, input.env ?? process.env);
-  }
+  const observedFreeze = activeCoordinationMigrationFreeze(paths.stateRoot);
+  if (observedFreeze !== null && observedFreeze !== migrationPaths.freezePath) failure('blocked', 'another repository already owns the global coordination migration freeze', [observedFreeze, migrationPaths.freezePath]);
+  await ensurePrivateAuthorityDirectory(join(paths.stateRoot, 'migrations'), input.env ?? process.env);
   const globalLock = await acquireCoordinationGlobalMigrationLock(paths.stateRoot);
   let lock: Awaited<ReturnType<typeof acquireMigrationLock>> | null = null;
   try {
-    lock = await acquireMigrationLock(paths.stateRoot, migrationPaths.lockPath, input.afterBoundary);
     const existingFreeze = activeCoordinationMigrationFreeze(paths.stateRoot);
     if (existingFreeze !== null && existingFreeze !== migrationPaths.freezePath) failure('blocked', 'another repository already owns the global coordination migration freeze', [existingFreeze, migrationPaths.freezePath]);
+    await ensureCoordinatorPrivateRoots(paths, input.env ?? process.env);
+    for (const authorityRoot of [join(paths.stateRoot, 'migrations'), join(paths.stateRoot, 'cutovers'), join(paths.stateRoot, 'migration-recovery-evidence')]) await ensurePrivateAuthorityDirectory(authorityRoot, input.env ?? process.env);
+    for (const existingAuthorityRoot of [join(paths.stateRoot, 'coordination'), join(paths.stateRoot, 'worktrees')]) if (existsSync(existingAuthorityRoot)) {
+      if (platform() === 'win32') enforceWindowsPrivateTree(existingAuthorityRoot, input.env ?? process.env);
+      else await enforcePrivateAuthorityPath(existingAuthorityRoot, true, input.env ?? process.env);
+    }
+    lock = await acquireMigrationLock(paths.stateRoot, migrationPaths.lockPath, input.afterBoundary);
     const marker = readCoordinationCutoverMarker(migrationPaths.cutoverMarkerPath, input.repoKey, paths.stateRoot);
     let journal = await readJournal(paths.stateRoot, migrationPaths.journalPath);
     if (journal?.state === 'rolled-back' && input.command === 'apply') {

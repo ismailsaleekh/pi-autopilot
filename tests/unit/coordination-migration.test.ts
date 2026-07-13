@@ -609,8 +609,10 @@ void describe('Coordination Fabric legacy migration and cutover', () => {
       await writeFile(join(secondSource, 'README.md'), 'second repository\n', 'utf8');
       git(secondSource, ['init']); git(secondSource, ['config', 'user.email', 'test@example.invalid']); git(secondSource, ['config', 'user.name', 'Test']); git(secondSource, ['add', '.']); git(secondSource, ['commit', '-m', 'initial']);
       const secondRepo = resolveRepoIdentity(secondSource);
+      const frozenBytes = await bytes(fixture.stateRoot);
       await assert.rejects(() => runCoordinationMigration({ command: 'dry-run', repoKey: secondRepo.repoKey, repoRoot: secondSource, env: fixture.env, clock: fixedClock() }), /dry-run is forbidden while a global coordination migration freeze is active/u);
       await assert.rejects(() => runCoordinationMigration({ command: 'apply', repoKey: secondRepo.repoKey, repoRoot: secondSource, env: fixture.env, clock: fixedClock() }), /another repository already owns the global coordination migration freeze/u);
+      assert.deepEqual(await bytes(fixture.stateRoot), frozenBytes, 'foreign migration admission must not touch shared authority bytes');
       const store = await CoordinatorStore.open(coordinatorRuntimePaths(fixture.env), fixedClock());
       try {
         const denied = store.handle({ schema_version: 'autopilot.coordinator_request.v1', protocol_version: '1.3', request_id: 'foreign-heartbeat-after-backup', action: 'heartbeat', idempotency_key: 'foreign-heartbeat-after-backup', repo_id: `sha256-${'e'.repeat(64)}`, workstream_run: 'foreign-run', session_id: 'foreign-session', fencing_generation: 1, expected_version: 1, payload: { lease_expires_at: '2026-07-12T12:30:00.000Z', session_lease_id: 'foreign-session-lease', session_token: 'e'.repeat(64) } });
