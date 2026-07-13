@@ -559,6 +559,10 @@ void describe('Coordination Fabric legacy migration and cutover', () => {
       const lock = await acquireCoordinationGlobalMigrationLock(fixture.stateRoot);
       try {
         await assert.rejects(
+          () => runCoordinationMigration({ command: 'dry-run', repoKey: fixture.repoKey, env: fixture.env, clock: fixedClock() }),
+          /another migration process owns the repository migration lock/u,
+        );
+        await assert.rejects(
           () => supervisor.withMigrationRecoveryAuthority(async () => undefined),
           /another migration process owns the repository migration lock/u,
         );
