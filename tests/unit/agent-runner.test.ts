@@ -232,7 +232,7 @@ async function initGitWorktree(worktree: string): Promise<void> {
 function runCli(args: readonly string[]): CliResult {
   const result = spawnSync(process.execPath, ['--experimental-strip-types', AUTOPILOT_AGENT_RUN_CLI, ...args], {
     cwd: PACKAGE_ROOT,
-    env: process.env,
+    env: { ...process.env, NODE_OPTIONS: `${process.env['NODE_OPTIONS'] ?? ''} --disable-warning=ExperimentalWarning`.trim() },
     encoding: 'utf8',
   });
   return { code: result.status, stdout: result.stdout, stderr: result.stderr };

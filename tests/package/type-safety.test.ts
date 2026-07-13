@@ -2,7 +2,8 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { tmpdir } from 'node:os';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const packageRoot = fileURLToPath(new URL('../../', import.meta.url));
 const allTypeScriptRoots = ['extensions', 'src', 'tests'];
@@ -137,7 +138,7 @@ void describe('type-safety standard', () => {
       { rule: 'URL pathname filesystem conversion', pattern: /import\.meta\.url[^\n]*\.pathname/u },
     ]);
     assert.equal(violations.length, 0, formatViolations(violations));
-    const encoded = fileURLToPath(new URL('file:///tmp/pi-autopilot%20path'));
+    const encoded = fileURLToPath(pathToFileURL(join(tmpdir(), 'pi-autopilot path')));
     assert.equal(encoded.includes('%20'), false);
     assert.equal(encoded.includes('pi-autopilot path'), true);
   });

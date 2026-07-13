@@ -610,6 +610,13 @@ function parseSemanticReplayLine(line: string, label: string): CoordinatorSemant
   return parseSemanticReplayRecord(value, label);
 }
 
+function parseValidatedSemanticReplayLine(line: string, label: string): CoordinatorSemanticReplayRecord {
+  try { return parseSemanticReplayRecord(JSON.parse(line) as unknown, label); }
+  catch (error) {
+    throw new CoordinationRuntimeError('store-corrupt', `${label} changed after canonical contract staging`, [error instanceof Error ? error.message : String(error)]);
+  }
+}
+
 function parseSemanticReplayHeader(line: string): CoordinatorSemanticReplayHeader {
   let value: unknown;
   try { value = JSON.parse(line) as unknown; } catch (error) {
@@ -1343,13 +1350,17 @@ export class CoordinatorStore {
       this.#semanticReplayTransactionActive = true;
       let count = 0;
       const hash = createHash('sha256');
+      const insertStagedRecord = this.#db.prepare('INSERT INTO semantic_replay_stage_work(replay_id, ordinal, record_json) VALUES(?, ?, ?)');
       for await (const line of semanticReplayLines(paths.semanticReplayPath, descriptor)) {
         if (header === null) { header = parseSemanticReplayHeader(line); continue; }
-        const record = parseSemanticReplayLine(line, `semantic replay record ${String(count + 1)}`);
+        parseSemanticReplayLine(line, `semantic replay record ${String(count + 1)}`);
         count += 1;
         if (count > COORDINATOR_MAX_SEMANTIC_REPLAY_RECORDS) throw new CoordinationRuntimeError('invalid-request', 'semantic replay corpus exceeds its record bound');
         hash.update(`${line}\n`, 'utf8');
-        this.#db.prepare('INSERT INTO semantic_replay_stage_work(replay_id, ordinal, record_json) VALUES(?, ?, ?)').run(header.replay_id, count, canonicalJson(record));
+        // parseSemanticReplayLine proved this exact line canonical and contract-valid.
+        // Preserve those immutable bytes in the transaction-local stage rather
+        // than serializing the same request a second time.
+        insertStagedRecord.run(header.replay_id, count, line);
       }
       if (header === null || count !== header.record_count || `sha256:${hash.digest('hex')}` !== header.records_sha256) throw new CoordinationRuntimeError('invalid-request', 'semantic replay corpus count or digest does not match its header');
       if (!sameReplayFileIdentity(initialIdentity, replayFileIdentity(descriptor))) throw new CoordinationRuntimeError('invalid-request', 'semantic replay corpus changed during validation', [paths.semanticReplayPath]);
@@ -1359,7 +1370,10 @@ export class CoordinatorStore {
       if (receipt === null) {
         for (let first = 1; first <= header.record_count; first += COORDINATOR_SEMANTIC_REPLAY_BATCH_SIZE) {
           const rows = this.#db.prepare('SELECT record_json FROM semantic_replay_stage_work WHERE replay_id=? AND ordinal>=? ORDER BY ordinal LIMIT ?').all(header.replay_id, first, COORDINATOR_SEMANTIC_REPLAY_BATCH_SIZE);
-          const records = rows.map((row, index) => parseSemanticReplayLine(sqlString(row, 'record_json'), `staged semantic replay record ${String(first + index)}`));
+          // Only this transaction can populate the TEMP stage, and every row was
+          // canonicalized and contract-validated above. Revalidate the contract
+          // after decoding without repeating the expensive canonical byte proof.
+          const records = rows.map((row, index) => parseValidatedSemanticReplayLine(sqlString(row, 'record_json'), `staged semantic replay record ${String(first + index)}`));
           this.#reduceSemanticReplayRecords(records, false);
           await this.#semanticReplayBoundary('batch-applied');
         }

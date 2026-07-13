@@ -63,6 +63,23 @@ function startCoordinator(bin: string, cwd: string, stateRoot: string): RunningP
   return running;
 }
 
+async function socketAcceptingConnections(path: string): Promise<boolean> {
+  return await new Promise<boolean>((resolveConnection) => {
+    const socket = connect(path);
+    let settled = false;
+    const finish = (ready: boolean): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      socket.destroy();
+      resolveConnection(ready);
+    };
+    const timer = setTimeout(() => finish(false), 250);
+    socket.once('connect', () => finish(true));
+    socket.once('error', () => finish(false));
+  });
+}
+
 async function waitForExactPredecessor(running: RunningProcess, stateRoot: string): Promise<void> {
   const paths = coordinatorRuntimePaths({ ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: stateRoot });
   await waitFor(async () => {
@@ -70,7 +87,7 @@ async function waitForExactPredecessor(running: RunningProcess, stateRoot: strin
     if (!existsSync(paths.predecessorLockPath)) return false;
     try {
       if (parsePredecessorCoordinatorLock(await readJson(paths.predecessorLockPath)) === null || !existsSync(paths.databasePath)) return false;
-      return schemaVersion(paths.databasePath) === 6;
+      return schemaVersion(paths.databasePath) === 6 && await socketAcceptingConnections(paths.predecessorSocketPath);
     } catch { return false; }
   });
 }
