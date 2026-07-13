@@ -20,6 +20,7 @@ export function emptyCoordinationSnapshot() {
         claim_requests: [],
         mailbox_cursors: [],
         reconciliation_evidence: [],
+        migration_recovery_work: [],
         messages: [],
         worktrees: [],
         worktree_operations: [],
@@ -90,7 +91,7 @@ export function attachCoordinationSession(snapshot, input) {
         ? { ...session, status: 'fenced', version: session.version + 1 }
         : session);
     const lease = {
-        schema_version: 'autopilot.session_lease.v1',
+        schema_version: 'autopilot.session_lease.v2',
         session_lease_id: input.sessionLeaseId,
         repo_id: input.repoId,
         workstream_run: input.workstreamRun,
@@ -99,6 +100,7 @@ export function attachCoordinationSession(snapshot, input) {
         pid: input.pid,
         boot_id: input.bootId,
         lease_expires_at: input.leaseExpiresAt,
+        attachment_kind: 'dispatch',
         status: 'attached',
         attached_event_seq: event.sequence,
         version: 1,

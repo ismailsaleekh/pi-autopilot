@@ -245,26 +245,21 @@ export default function autopilotExtension(pi: ExtensionHostLike): void {
     }
   }
 
-  async function attachLifecycleWorkstream(input: { readonly workstream: string; readonly requestedRun: string | null; readonly ctx: ExtensionCommandContextLike }): Promise<boolean> {
-    if (sessionBridge !== null && sessionBridge.attachment.context.workstream === input.workstream && (input.requestedRun === null || sessionBridge.attachment.context.workstream_run === input.requestedRun)) return true;
-    let prepared: PreparedAutopilotWorkstream;
-    try {
-      prepared = await prepareAutopilotWorkstream({ workstream: input.workstream, sourceCwd: input.ctx.cwd ?? process.cwd(), coordinationSessionId: rawSessionId(input.ctx) });
-    } catch (error) {
-      notify(input.ctx, `Autopilot lifecycle attachment failed before terminal reconciliation: ${error instanceof Error ? error.message : String(error)}`, 'error');
-      return false;
+  async function retireTerminalSessionBridge(workstreamRun: string, ctx: ExtensionCommandContextLike): Promise<void> {
+    if (sessionBridge !== null && sessionBridge.attachment.context.workstream_run === workstreamRun) {
+      const bridge = sessionBridge;
+      const contextPath = bridge.attachment.contextPath;
+      try { await bridge.acceptTerminalDetach(); }
+      catch (error) { notify(ctx, `Autopilot terminal run closed, but local session-bridge fencing failed loudly: ${error instanceof Error ? error.message : String(error)}`, 'error'); }
+      if (process.env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV] === contextPath) delete process.env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV];
+      sessionBridge = null;
     }
-    if (input.requestedRun !== null && prepared.active.workstream_run !== input.requestedRun) {
-      notify(input.ctx, `Autopilot lifecycle attachment resolved ${prepared.active.workstream_run}, not requested run ${input.requestedRun}.`, 'error');
-      return false;
+    if (activeAutopilotWorkstreamRun === workstreamRun) {
+      activeAutopilotWorkstream = null;
+      activeAutopilotRuntimeRoot = null;
+      activeAutopilotWorktreePath = null;
+      activeAutopilotWorkstreamRun = null;
     }
-    if (!(await attachSessionBridge(prepared, input.ctx))) return false;
-    activeAutopilotWorkstream = prepared.active.workstream;
-    activeAutopilotRuntimeRoot = prepared.runtimeRoot;
-    activeAutopilotWorktreePath = prepared.mainWorktreePath;
-    activeAutopilotWorkstreamRun = prepared.active.workstream_run;
-    registerWorktreeGuardIfSupported();
-    return true;
   }
 
   async function prepareAndActivateWorkstream(input: {
@@ -295,7 +290,10 @@ export default function autopilotExtension(pi: ExtensionHostLike): void {
       });
     } catch (error) {
       const message = error instanceof AutopilotParallelRuntimeError ? error.message : error instanceof Error ? error.message : String(error);
-      notify(input.ctx, `${input.prepareErrorPrefix}: ${message}`, 'error');
+      const recoveryFence = error instanceof AutopilotParallelRuntimeError && error.code === 'migration-recovery-required'
+        ? ' Ordinary Autopilot activation remains disabled; use an explicit recovery-only supervisor session with exact evidence.'
+        : '';
+      notify(input.ctx, `${input.prepareErrorPrefix}: ${message}${recoveryFence}`, 'error');
       return null;
     }
 
@@ -403,13 +401,14 @@ export default function autopilotExtension(pi: ExtensionHostLike): void {
         return;
       }
       try {
-        if (!parsed.value.dryRun && !(await attachLifecycleWorkstream({ workstream: parsed.value.workstream, requestedRun: parsed.value.workstreamRun, ctx }))) return;
         const result = await closeAutopilotWorkstream({
           workstream: parsed.value.workstream,
           sourceCwd: ctx.cwd ?? process.cwd(),
           workstreamRun: parsed.value.workstreamRun,
           dryRun: parsed.value.dryRun,
+          coordinationSessionId: rawSessionId(ctx),
         });
+        if (result.outcome === 'closed') await retireTerminalSessionBridge(result.workstream_run, ctx);
         const blockerText = result.blockers.length === 0 ? '' : `\nBlockers:\n${result.blockers.map((blocker) => `- ${blocker}`).join('\n')}`;
         const summary = [
           `Autopilot close ${result.outcome} for ${result.workstream_run}.`,
@@ -437,13 +436,14 @@ export default function autopilotExtension(pi: ExtensionHostLike): void {
         return;
       }
       try {
-        if (!parsed.value.dryRun && !(await attachLifecycleWorkstream({ workstream: parsed.value.workstream, requestedRun: parsed.value.workstreamRun, ctx }))) return;
         const result = await abortAutopilotWorkstream({
           workstream: parsed.value.workstream,
           sourceCwd: ctx.cwd ?? process.cwd(),
           workstreamRun: parsed.value.workstreamRun,
           dryRun: parsed.value.dryRun,
+          coordinationSessionId: rawSessionId(ctx),
         });
+        if (result.outcome === 'aborted') await retireTerminalSessionBridge(result.workstream_run, ctx);
         const blockerText = result.blockers.length === 0 ? '' : `\nBlockers:\n${result.blockers.map((blocker) => `- ${blocker}`).join('\n')}`;
         const summary = [
           `Autopilot abort ${result.outcome} for ${result.workstream_run}.`,

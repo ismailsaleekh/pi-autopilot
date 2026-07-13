@@ -88,7 +88,16 @@ async function attachActor(client: CoordinatorClient, stateRoot: string, suffix:
   } else {
     const response = await client.mutate('attach-run', {
       repoId, workstreamRun, sessionId: null, fencingGeneration: null, expectedVersion: 0, idempotencyKey: `attach-run-${suffix}`,
-    }, { repo_key: repoId, canonical_root: join(dirname(stateRoot), 'repository'), git_common_dir: join(dirname(stateRoot), 'repository', '.git'), autopilot_id: `autopilot-${suffix.charAt(0)}`, workstream: `work-${suffix.charAt(0)}`, coordination_authority: 'coordinator-edit-leases-v1' });
+    }, {
+      repo_key: repoId, canonical_root: join(dirname(stateRoot), 'repository'), git_common_dir: join(dirname(stateRoot), 'repository', '.git'), autopilot_id: `autopilot-${suffix.charAt(0)}`, workstream: `work-${suffix.charAt(0)}`, coordination_authority: 'coordinator-edit-leases-v1',
+      run_resource: {
+        schema_version: 'autopilot.coordination_run_resource.v1', repo_id: repoId, workstream_run: workstreamRun,
+        source_repo: join(dirname(stateRoot), 'repository'), git_common_dir: join(dirname(stateRoot), 'repository', '.git'), worktree_root: join(stateRoot, 'worktrees', repoId),
+        main_worktree_path: join(stateRoot, 'worktrees', repoId, 'active', workstreamRun, 'main'), runtime_root: join(stateRoot, 'worktrees', repoId, 'active', workstreamRun, 'main', '.pi', 'autopilot', `work-${suffix.charAt(0)}`),
+        branch: `autopilot/${workstreamRun}`, target_branch: 'main', target_base_sha: git(join(dirname(stateRoot), 'repository'), ['rev-parse', 'HEAD']), origin_url: null,
+        started_at: '2026-07-12T00:00:00.000Z', version: 1,
+      },
+    });
     run = parseCoordinationRun(response.payload['run']);
   }
   const generation = run.active_session_generation + 1;

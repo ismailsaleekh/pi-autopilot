@@ -6,12 +6,12 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'nod
 import { CoordinatorClient, durableIdentifier } from "./client.js";
 import { parseCoordinationWorktree, parseCoordinationWorktreeOperation } from "./contracts.js";
 import { CoordinationRuntimeError } from "./failures.js";
+import { coordinationCutoverCommitted } from "./migration-paths.js";
 import { coordinatorRuntimePaths } from "./runtime-paths.js";
 import { currentBootId, isProcessAlive } from "./process-identity.js";
 import { readCoordinatorSessionContext } from "./supervisor.js";
 import { AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV } from "../names.js";
 const TERMINAL_STAGES = new Set(['committed', 'compensated', 'failed']);
-const SHA_PATTERN = /^[a-f0-9]{7,64}$/u;
 export const WORKTREE_SAGA_BOUNDARIES = ['after-prepare', 'before-probe', 'after-probe', 'after-start', 'before-action', 'after-action', 'after-action-report', 'before-verification', 'after-verification', 'after-evidence', 'after-verified-commit', 'after-terminal-commit'];
 async function observeBoundary(callbacks, boundary) {
     await callbacks.observeBoundary?.(boundary);
@@ -230,7 +230,10 @@ async function sagaExecutionLockIsStale(lockPath) {
         const parsed = record(JSON.parse(await readFile(lockPath, 'utf8')), 'saga execution lock');
         const pid = parsed['pid'];
         const bootId = parsed['boot_id'];
-        return typeof pid !== 'number' || !Number.isSafeInteger(pid) || pid < 1 || typeof bootId !== 'string' || bootId !== currentBootId() || !isProcessAlive(pid);
+        if (typeof pid !== 'number' || !Number.isSafeInteger(pid) || pid < 1 || typeof bootId !== 'string')
+            return true;
+        // Never reclaim a lock while its PID is alive merely because boot evidence differs.
+        return !isProcessAlive(pid);
     }
     catch {
         const lockStat = await stat(lockPath).catch(() => null);
@@ -309,6 +312,8 @@ async function withSagaExecutionLock(session, spec, run) {
 export async function executeOwnedWorktreeSaga(spec, callbacks, env = process.env) {
     const contextPath = env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV];
     if (contextPath === undefined || contextPath.trim().length === 0) {
+        if (coordinationCutoverCommitted(coordinatorRuntimePaths(env).stateRoot, spec.active.repo_key))
+            throw new CoordinationRuntimeError('unauthorized-client', 'post-cutover worktree mutation requires a current durable coordinator session');
         if (spec.active.coordination_authority === 'coordinator-edit-leases-v1')
             throw new CoordinationRuntimeError('unauthorized-client', 'coordinator-authoritative run is missing its durable session; refusing unmanaged worktree mutation');
         if (await durableRunExists(spec.active, env))

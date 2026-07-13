@@ -9,6 +9,7 @@ import {
   AUTOPILOT_RUNTIME_VALUE,
   type ActiveAutopilotContext,
   type AutopilotPathClaim,
+  type ProcessEnvLike,
   gitHead,
   isAutopilotRuntimeRepoPath,
   matchesRepoPathPattern,
@@ -48,6 +49,7 @@ export async function commitAutopilotExecution(input: {
   readonly acquiredClaims: readonly AutopilotPathClaim[];
   readonly auditPath: string;
   readonly commitPath?: string;
+  readonly env?: ProcessEnvLike;
 }): Promise<AutopilotExecutionCommit | null> {
   if (input.spec.role !== 'implement' && input.spec.role !== 'fix') return null;
   if (input.statusEntry.verdict !== 'DONE') return null;
@@ -157,13 +159,13 @@ export async function commitAutopilotExecution(input: {
     inspect: inspectCommit,
     action: () => {
       if (dirtyClaimedPaths.length === 0) return;
-      runGit(['add', '--', ...dirtyClaimedPaths], input.spec.cwd, runtimeGitEnv());
+      runGit(['add', '--', ...dirtyClaimedPaths], input.spec.cwd, runtimeGitEnv(input.env));
       const staged = readGitStatus(input.spec.cwd);
       const stagedSource = staged.stagedPaths.filter((path) => !isAutopilotRuntimeRepoPath(path, input.spec.workstream));
       for (const stagedPath of stagedSource) {
         if (!dirtyClaimedPaths.includes(stagedPath)) fail('staged-path-set-mismatch', 'runtime staging included a source path outside dirty claimed edits.', [stagedPath]);
       }
-      runGit(['commit', '--no-verify', '-m', commitSubject], input.spec.cwd, runtimeGitEnv());
+      runGit(['commit', '--no-verify', '-m', commitSubject], input.spec.cwd, runtimeGitEnv(input.env));
       runtimeCommitCreated = true;
     },
     verify: async () => {
@@ -172,7 +174,7 @@ export async function commitAutopilotExecution(input: {
       durableRecord = await persistExecutionCommit();
       return [...inspected.proof, `execution_commit_ref=${relativeArtifactRef(commitPath, input.context.active.runtime_root)}`];
     },
-  });
+  }, input.env ?? process.env);
 
   if (durableRecord !== null) return durableRecord;
   return parseAutopilotExecutionCommit(JSON.parse(await readFile(commitPath, 'utf8')) as unknown);
@@ -220,8 +222,9 @@ function currentBranch(cwd: string): string {
   return branch;
 }
 
-function runtimeGitEnv(): Record<string, string> {
+function runtimeGitEnv(env: ProcessEnvLike = process.env): Record<string, string | undefined> {
   return {
+    ...env,
     [AUTOPILOT_RUNTIME_ENV]: AUTOPILOT_RUNTIME_VALUE,
     AUTOPILOT_RUNTIME_AUTHORITY: 'execution-commit',
     GIT_AUTHOR_NAME: 'autopilot-runtime',

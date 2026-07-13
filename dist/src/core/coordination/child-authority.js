@@ -71,7 +71,7 @@ export class AutopilotChildLeaseHandle {
         await this.#enqueue(async () => {
             if (this.#terminal)
                 throw new CoordinationRuntimeError('invalid-state', 'terminal child cannot record a checkpoint');
-            const response = await this.#client.mutate('checkpoint-child', {
+            await this.#client.mutate('checkpoint-child', {
                 repoId: this.#session.repo_id, workstreamRun: this.#session.workstream_run, sessionId: null, fencingGeneration: null,
                 expectedVersion: this.#child.version, idempotencyKey: `checkpoint-child:${this.#child.child_lease_id}:${String(checkpointOrdinal)}`,
             }, { child_lease_id: this.#child.child_lease_id, child_token: this.#childToken, pid: this.#pid, boot_id: this.#bootId, checkpoint_ordinal: checkpointOrdinal, critical_section: criticalSection, preemptible });

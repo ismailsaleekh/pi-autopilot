@@ -25,10 +25,13 @@ import {
   appendJsonl,
   coordinationRootForRepo,
   readActiveAutopilots,
+  readCoordinatorActiveAutopilots,
   readPathClaims,
   releaseReadClaimsForUnitPaths,
+  resolveAutopilotStateRoot,
   runGit,
   taskRootForActiveAutopilot,
+  worktreeRootForRepo,
   writeJsonAtomic,
   type ActiveAutopilotContext,
   type ActiveAutopilotRow,
@@ -37,6 +40,7 @@ import {
 } from './parallel-runtime.ts';
 import { AUTOPILOT_RUNTIME_ROOT_PREFIX } from './names.ts';
 import { executeOwnedWorktreeSaga, type WorktreeSagaInspection } from './coordination/worktree-saga.ts';
+import { assertCoordinationDispatchAllowed, coordinationCutoverCommitted } from './coordination/migration-paths.ts';
 
 export const AUTOPILOT_MATERIALIZATION_LEDGER_FILE = '_materialization-ledger.jsonl';
 export const AUTOPILOT_MATERIALIZED_PATHS_FILE = '_materialized-paths.json';
@@ -309,7 +313,15 @@ export async function resolveActiveContextForStatusContext(
   const repoKey = taskInfo['repo_key'];
   if (typeof repoKey !== 'string' || repoKey.length === 0) fail('invalid-task-info', '_task-info.json repo_key must be a non-empty string.', [taskInfoPath]);
   const coordinationRoot = coordinationRootForRepo(repoKey, env);
-  const rows = await readActiveAutopilots(coordinationRoot);
+  assertCoordinationDispatchAllowed(resolveAutopilotStateRoot(env), repoKey, 'Autopilot materialization');
+  const sourceRepo = taskInfo['source_repo'];
+  const gitCommonDir = taskInfo['git_common_dir'];
+  const targetBaseSha = taskInfo['target_base_sha'];
+  const targetBranch = taskInfo['target_branch'];
+  if (typeof sourceRepo !== 'string' || typeof gitCommonDir !== 'string' || typeof targetBaseSha !== 'string' || (targetBranch !== null && typeof targetBranch !== 'string')) fail('invalid-task-info', '_task-info.json lacks post-cutover repository identity.', [taskInfoPath]);
+  const rows = coordinationCutoverCommitted(resolveAutopilotStateRoot(env), repoKey)
+    ? await readCoordinatorActiveAutopilots({ repoRoot: sourceRepo, gitCommonDir, repoKey, headSha: targetBaseSha, targetBranch, originUrl: null }, worktreeRootForRepo(repoKey, env), env)
+    : await readActiveAutopilots(coordinationRoot);
   const active = rows.find((row) => row.workstream === spec.workstream && row.runtime_root === statusContext.artifact_root && row.workstream_run === taskInfo['workstream_run']);
   if (active === undefined) fail('active-row-not-found', 'no active Autopilot row matches child status context.', [spec.workstream, statusContext.artifact_root]);
   return Object.freeze({

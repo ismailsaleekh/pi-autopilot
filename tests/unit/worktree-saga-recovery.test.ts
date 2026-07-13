@@ -63,7 +63,15 @@ async function setup(suffix = 'a'): Promise<Harness> {
   const client = new CoordinatorClient({ env, autoStart: false });
   const runResponse = await client.mutate('attach-run', {
     repoId, workstreamRun: runId, sessionId: null, fencingGeneration: null, expectedVersion: 0, idempotencyKey: `attach-${runId}`,
-  }, { repo_key: repoId, canonical_root: repo, git_common_dir: join(repo, '.git'), autopilot_id: autopilotId, workstream, coordination_authority: 'coordinator-edit-leases-v1' });
+  }, {
+    repo_key: repoId, canonical_root: repo, git_common_dir: join(repo, '.git'), autopilot_id: autopilotId, workstream, coordination_authority: 'coordinator-edit-leases-v1',
+    run_resource: {
+      schema_version: 'autopilot.coordination_run_resource.v1', repo_id: repoId, workstream_run: runId,
+      source_repo: repo, git_common_dir: join(repo, '.git'), worktree_root: join(stateRoot, 'worktrees', repoId), main_worktree_path: mainPath,
+      runtime_root: join(mainPath, '.pi', 'autopilot', workstream), branch: `autopilot/${runId}`, target_branch: 'master', target_base_sha: git(repo, ['rev-parse', 'HEAD']), origin_url: null,
+      started_at: '2026-07-11T00:00:00.000Z', version: 1,
+    },
+  });
   const run = parseCoordinationRun(runResponse.payload['run']);
   const token = suffix.charCodeAt(0).toString(16).slice(-1).repeat(64);
   const sessionResponse = await client.mutate('attach-session', {
@@ -627,7 +635,16 @@ void describe('owner-scoped worktree and Git saga recovery', () => {
       const sharedClient = new CoordinatorClient({ env: value.env, autoStart: false });
       const peerRunResponse = await sharedClient.mutate('attach-run', {
         repoId: value.active.repo_key, workstreamRun: 'run-peer', sessionId: null, fencingGeneration: null, expectedVersion: 0, idempotencyKey: 'attach-run-peer',
-      }, { repo_key: value.active.repo_key, canonical_root: value.repo, git_common_dir: join(value.repo, '.git'), autopilot_id: 'autopilot-peer', workstream: 'work-peer', coordination_authority: 'coordinator-edit-leases-v1' });
+      }, {
+        repo_key: value.active.repo_key, canonical_root: value.repo, git_common_dir: join(value.repo, '.git'), autopilot_id: 'autopilot-peer', workstream: 'work-peer', coordination_authority: 'coordinator-edit-leases-v1',
+        run_resource: {
+          schema_version: 'autopilot.coordination_run_resource.v1', repo_id: value.active.repo_key, workstream_run: 'run-peer',
+          source_repo: value.repo, git_common_dir: join(value.repo, '.git'), worktree_root: join(value.stateRoot, 'worktrees', value.active.repo_key),
+          main_worktree_path: join(value.stateRoot, 'worktrees', value.active.repo_key, 'active', 'run-peer', 'main'), runtime_root: join(value.stateRoot, 'worktrees', value.active.repo_key, 'active', 'run-peer', 'main', '.pi', 'autopilot', 'work-peer'),
+          branch: 'autopilot/run-peer', target_branch: 'master', target_base_sha: value.active.target_base_sha, origin_url: null,
+          started_at: '2026-07-11T00:00:00.000Z', version: 1,
+        },
+      });
       const peerRun = parseCoordinationRun(peerRunResponse.payload['run']);
       const peerToken = 'f'.repeat(64);
       await sharedClient.mutate('attach-session', {

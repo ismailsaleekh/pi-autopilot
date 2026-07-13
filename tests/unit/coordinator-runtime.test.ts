@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { platform, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { describe, it } from 'node:test';
@@ -10,12 +10,44 @@ import { describe, it } from 'node:test';
 import { CoordinatorClient } from '../../src/core/coordination/client.ts';
 import { CoordinationRuntimeError } from '../../src/core/coordination/failures.ts';
 import { encodeCoordinatorFrame, parseCoordinatorLegacyReplayTransportRequest, parseCoordinatorTransportRequest } from '../../src/core/coordination/ipc.ts';
-import { coordinatorRuntimePaths } from '../../src/core/coordination/runtime-paths.ts';
+import { isProcessAlive, predecessorCompatibleBootEstimate, processStartIdentity, retireExactProcess } from '../../src/core/coordination/process-identity.ts';
+import { coordinatorRuntimePaths, windowsPrivateAclCommand, windowsPrivateTreeAclCommand } from '../../src/core/coordination/runtime-paths.ts';
 import { startCoordinatorServer } from '../../src/core/coordination/server.ts';
 import type { CoordinationMessage, CoordinatorRequestEnvelope, CoordinatorResponseEnvelope } from '../../src/core/coordination/types.ts';
 import { AUTOPILOT_STATE_ROOT_ENV } from '../../src/core/parallel-runtime.ts';
 
 const EMPTY_COORDINATOR_PAYLOAD: Readonly<Record<string, unknown>> = Object.freeze({});
+
+void it('builds an exact protected user-only Windows DACL contract for files and authority roots', () => {
+  const env = { USERDOMAIN: 'CORP', USERNAME: "operator'o" };
+  const directory = windowsPrivateAclCommand("C:\\state with 'quote'", true, env);
+  const file = windowsPrivateAclCommand('C:\\state\\freeze.json', false, env);
+  assert.equal(directory.executable, 'powershell.exe');
+  assert.deepEqual(directory.args.slice(0, 4), ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass']);
+  assert.match(directory.args[5] ?? '', /SetSecurityDescriptorSddlForm/u);
+  assert.match(directory.args[5] ?? '', /D:P\(A;OICI;FA;;;\$sid\)/u);
+  assert.match(directory.args[5] ?? '', /AreAccessRulesProtected/u);
+  assert.match(directory.args[5] ?? '', /operator''o/u);
+  assert.match(file.args[5] ?? '', /D:P\(A;;FA;;;\$sid\)/u);
+  const tree = windowsPrivateTreeAclCommand('C:\\operator-state\\worktrees', env);
+  assert.equal(/Get-ChildItem.*-Recurse/u.test(tree.args[5] ?? ''), false);
+  assert.match(tree.args[5] ?? '', /Stack\[System\.IO\.FileSystemInfo\]/u);
+  assert.match(tree.args[5] ?? '', /ReparsePoint/u);
+  assert.match(tree.args[5] ?? '', /Set-Acl/u);
+});
+
+void it('uses a refreshable predecessor boot estimate and never exposes second-resolution macOS identity', () => {
+  const before = predecessorCompatibleBootEstimate(1_000_000, 100, 'host');
+  const corrected = predecessorCompatibleBootEstimate(1_060_000, 100, 'host');
+  assert.notEqual(before, corrected, 'a corrected clock produces a fence identity that maintenance must rewrite');
+  if (platform() === 'darwin') {
+    const identity = processStartIdentity(process.pid);
+    assert.match(identity ?? '', /^darwin-proc-birth:\d+:[0-9]{6}$/u);
+    assert.equal((identity ?? '').includes('lstart'), false);
+  }
+  assert.throws(() => retireExactProcess(process.pid, 'ambiguous-or-reused-pid'), /refusing to retire/u);
+  assert.equal(isProcessAlive(process.pid), true, 'identity mismatch must never signal the observed PID');
+});
 
 interface JsonMap {
   readonly [key: string]: unknown;
@@ -62,7 +94,7 @@ function queryPayload(response: CoordinatorResponseEnvelope, field: string): rea
 function request(overrides: Partial<CoordinatorRequestEnvelope>): CoordinatorRequestEnvelope {
   return {
     schema_version: 'autopilot.coordinator_request.v1',
-    protocol_version: '1.2',
+    protocol_version: '1.3',
     request_id: `request-${randomUUID()}`,
     action: 'status',
     idempotency_key: null,
@@ -94,6 +126,13 @@ async function attachRun(client: CoordinatorClient): Promise<CoordinatorResponse
     repoId: 'repo-runtime-test', workstreamRun: 'run-runtime-test', sessionId: null, fencingGeneration: null, expectedVersion: 0, idempotencyKey: 'attach-run-runtime-test',
   }, {
     repo_key: 'repo-runtime-test', canonical_root: '/tmp/generic-runtime-repository', git_common_dir: '/tmp/generic-runtime-repository/.git', autopilot_id: 'autopilot-runtime-test', workstream: 'runtime-test', coordination_authority: 'coordinator-edit-leases-v1',
+    run_resource: {
+      schema_version: 'autopilot.coordination_run_resource.v1', repo_id: 'repo-runtime-test', workstream_run: 'run-runtime-test',
+      source_repo: '/tmp/generic-runtime-repository', git_common_dir: '/tmp/generic-runtime-repository/.git', worktree_root: '/tmp/pi-autopilot-runtime-state/worktrees/repo-runtime-test',
+      main_worktree_path: '/tmp/pi-autopilot-runtime-state/worktrees/repo-runtime-test/active/run-runtime-test/main', runtime_root: '/tmp/pi-autopilot-runtime-state/worktrees/repo-runtime-test/active/run-runtime-test/main/.pi/autopilot/runtime-test',
+      branch: 'autopilot/run-runtime-test', target_branch: null, target_base_sha: '0000000000000000000000000000000000000000', origin_url: null,
+      started_at: '2026-07-12T00:00:00.000Z', version: 1,
+    },
   });
 }
 
@@ -114,7 +153,16 @@ void describe('transactional coordinator runtime', () => {
     await withCoordinator(async ({ root, client }) => {
       const attachRequest = request({
         action: 'attach-run', idempotency_key: 'attach-run-duplicate', workstream_run: 'run-runtime-test', expected_version: 0,
-        payload: { repo_key: 'repo-runtime-test', canonical_root: '/tmp/generic-runtime-repository', git_common_dir: '/tmp/generic-runtime-repository/.git', autopilot_id: 'autopilot-runtime-test', workstream: 'runtime-test', coordination_authority: 'coordinator-edit-leases-v1' },
+        payload: {
+          repo_key: 'repo-runtime-test', canonical_root: '/tmp/generic-runtime-repository', git_common_dir: '/tmp/generic-runtime-repository/.git', autopilot_id: 'autopilot-runtime-test', workstream: 'runtime-test', coordination_authority: 'coordinator-edit-leases-v1',
+          run_resource: {
+            schema_version: 'autopilot.coordination_run_resource.v1', repo_id: 'repo-runtime-test', workstream_run: 'run-runtime-test',
+            source_repo: '/tmp/generic-runtime-repository', git_common_dir: '/tmp/generic-runtime-repository/.git', worktree_root: '/tmp/pi-autopilot-runtime-state/worktrees/repo-runtime-test',
+            main_worktree_path: '/tmp/pi-autopilot-runtime-state/worktrees/repo-runtime-test/active/run-runtime-test/main', runtime_root: '/tmp/pi-autopilot-runtime-state/worktrees/repo-runtime-test/active/run-runtime-test/main/.pi/autopilot/runtime-test',
+            branch: 'autopilot/run-runtime-test', target_branch: null, target_base_sha: '0000000000000000000000000000000000000000', origin_url: null,
+            started_at: '2026-07-12T00:00:00.000Z', version: 1,
+          },
+        },
       });
       const first = await client.request(attachRequest);
       const second = await client.request(attachRequest);
@@ -135,6 +183,50 @@ void describe('transactional coordinator runtime', () => {
       assert.equal(doctor.payload['healthy'], true);
       assert.equal(doctor.payload['integrity'], 'ok');
     });
+  });
+
+  void it('fails closed without replacing an unknown stale lifecycle identity', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pi-autopilot-coordinator-unknown-lock-'));
+    const paths = coordinatorRuntimePaths({ ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: join(root, 'state') });
+    await mkdir(paths.coordinatorRoot, { recursive: true });
+    const unknown = `${JSON.stringify({ schema_version: 'autopilot.coordinator_lock.v2', pid: 2_147_483_647, boot_id: 'unknown-boot', token: 'unknown-token', instance_id: 'unknown-instance', package_build: 'unknown-build', protocol_version: '1.3', database_schema_version: 999, started_at: '2026-07-13T00:00:00.000Z' })}\n`;
+    await writeFile(paths.lockPath, unknown, 'utf8');
+    try {
+      await assert.rejects(() => startCoordinatorServer(paths), (error: unknown) => error instanceof CoordinationRuntimeError && error.code === 'protocol-mismatch');
+      assert.equal(await readFile(paths.lockPath, 'utf8'), unknown);
+      assert.equal(existsSync(paths.databasePath), false);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  void it('never reclaims a live lifecycle PID because boot identity differs', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pi-autopilot-coordinator-live-boot-mismatch-'));
+    const paths = coordinatorRuntimePaths({ ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: join(root, 'state') });
+    await mkdir(paths.coordinatorRoot, { recursive: true });
+    const identity = processStartIdentity(process.pid);
+    if (identity === null) throw new Error('process identity unavailable');
+    const live = { schema_version: 'autopilot.coordinator_lock.v2', pid: process.pid, boot_id: 'deliberately-wrong-boot', process_start_identity: identity, token: 'live-token', instance_id: 'live-instance', package_build: '1.0.0-cf37', protocol_version: '1.3', database_schema_version: 9, started_at: '2026-07-13T00:00:00.000Z' };
+    await writeFile(paths.lockPath, `${JSON.stringify(live)}\n`, 'utf8');
+    try {
+      await assert.rejects(() => startCoordinatorServer(paths), (error: unknown) => error instanceof Error && error.name === 'CoordinatorAlreadyRunningError');
+      assert.deepEqual(JSON.parse(await readFile(paths.lockPath, 'utf8')), live);
+      assert.equal(existsSync(paths.databasePath), false);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  void it('forbids ordinary server startup from migrating an existing schema-6 authority database in place', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pi-autopilot-schema6-direct-start-'));
+    const paths = coordinatorRuntimePaths({ ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: join(root, 'state') });
+    try {
+      const initialized = await startCoordinatorServer(paths);
+      await initialized.close();
+      const database = new DatabaseSync(paths.databasePath);
+      try { database.exec('PRAGMA user_version=6'); }
+      finally { database.close(); }
+      await assert.rejects(() => startCoordinatorServer(paths), (error: unknown) => error instanceof CoordinationRuntimeError && error.code === 'schema-mismatch' && /private verified migration path/u.test(error.message));
+      const unchanged = new DatabaseSync(paths.databasePath, { readOnly: true });
+      try { assert.equal((unchanged.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 6); }
+      finally { unchanged.close(); }
+    } finally { await rm(root, { recursive: true, force: true }); }
   });
 
   void it('backs up and verifies an existing pre-schema database before migration', async () => {
@@ -167,12 +259,12 @@ void describe('transactional coordinator runtime', () => {
     const initial = await startCoordinatorServer(paths);
     await initial.close();
     const oldDatabase = new DatabaseSync(paths.databasePath);
-    oldDatabase.exec('DROP TABLE evidence_artifacts; DROP TABLE adjudication_assignments; DROP TABLE authoritative_artifacts; DROP TABLE deadlock_resolutions; DROP TABLE wait_for_edges; DROP TABLE reservation_obligations; DROP TABLE run_terminal_intents; ALTER TABLE runs DROP COLUMN coordination_authority; DROP INDEX idx_worktree_operations_recovery; DROP INDEX idx_worktrees_owner; DROP TABLE reconciliation_evidence; DROP TABLE mailbox_cursors; DROP INDEX idx_messages_cursor; DROP TABLE acquisition_groups; DROP INDEX idx_edit_leases_repo; DROP INDEX idx_claim_requests_owner_status; DROP INDEX idx_claim_requests_requester_status; DELETE FROM schema_migrations WHERE version IN (2,3,4,5,6); PRAGMA user_version=1;');
+    oldDatabase.exec('DROP TABLE semantic_replays; ALTER TABLE session_leases DROP COLUMN attachment_kind; DROP TABLE migration_legacy_audit; DROP TABLE migration_recovery_work; DROP TABLE coordination_migrations; DROP TABLE run_resources; DROP TABLE evidence_artifacts; DROP TABLE adjudication_assignments; DROP TABLE authoritative_artifacts; DROP TABLE deadlock_resolutions; DROP TABLE wait_for_edges; DROP TABLE reservation_obligations; DROP TABLE run_terminal_intents; ALTER TABLE runs DROP COLUMN coordination_authority; DROP INDEX idx_worktree_operations_recovery; DROP INDEX idx_worktrees_owner; DROP TABLE reconciliation_evidence; DROP TABLE mailbox_cursors; DROP INDEX idx_messages_cursor; DROP TABLE acquisition_groups; DROP INDEX idx_edit_leases_repo; DROP INDEX idx_claim_requests_owner_status; DROP INDEX idx_claim_requests_requester_status; DELETE FROM schema_migrations WHERE version IN (2,3,4,5,6,7,8,9); PRAGMA user_version=1;');
     oldDatabase.close();
     const upgraded = await startCoordinatorServer(paths);
     try {
       const doctor = await new CoordinatorClient({ env, autoStart: false }).query('doctor');
-      assert.equal(doctor.payload['database_schema_version'], 6);
+      assert.equal(doctor.payload['database_schema_version'], 9);
       assert.equal(typeof doctor.payload['last_backup_path'], 'string');
       const database = new DatabaseSync(paths.databasePath, { readOnly: true });
       try {
@@ -218,7 +310,7 @@ void describe('transactional coordinator runtime', () => {
     });
     await initial.close();
     const oldDatabase = new DatabaseSync(paths.databasePath);
-    oldDatabase.exec('DROP TABLE evidence_artifacts; DROP TABLE adjudication_assignments; DROP TABLE authoritative_artifacts; DROP TABLE deadlock_resolutions; DROP TABLE wait_for_edges; DROP TABLE reservation_obligations; DROP TABLE run_terminal_intents; ALTER TABLE runs DROP COLUMN coordination_authority; DROP INDEX idx_worktree_operations_recovery; DROP INDEX idx_worktrees_owner; DROP TABLE reconciliation_evidence; DROP TABLE mailbox_cursors; DROP INDEX idx_messages_cursor; DELETE FROM schema_migrations WHERE version IN (3,4,5,6); PRAGMA user_version=2;');
+    oldDatabase.exec('DROP TABLE semantic_replays; ALTER TABLE session_leases DROP COLUMN attachment_kind; DROP TABLE migration_legacy_audit; DROP TABLE migration_recovery_work; DROP TABLE coordination_migrations; DROP TABLE run_resources; DROP TABLE evidence_artifacts; DROP TABLE adjudication_assignments; DROP TABLE authoritative_artifacts; DROP TABLE deadlock_resolutions; DROP TABLE wait_for_edges; DROP TABLE reservation_obligations; DROP TABLE run_terminal_intents; ALTER TABLE runs DROP COLUMN coordination_authority; DROP INDEX idx_worktree_operations_recovery; DROP INDEX idx_worktrees_owner; DROP TABLE reconciliation_evidence; DROP TABLE mailbox_cursors; DROP INDEX idx_messages_cursor; DELETE FROM schema_migrations WHERE version IN (3,4,5,6,7,8,9); PRAGMA user_version=2;');
     oldDatabase.close();
     const upgraded = await startCoordinatorServer(paths);
     try {
@@ -255,7 +347,7 @@ void describe('transactional coordinator runtime', () => {
       const legacyDigest = `sha256:${createHash('sha256').update(canonicalJson(legacySemantic), 'utf8').digest('hex')}`;
       await server.close();
       const database = new DatabaseSync(coordinatorRuntimePaths(env).databasePath);
-      database.exec("UPDATE unit_attempts SET payload_json=json_remove(payload_json, '$.role'); UPDATE acquisition_groups SET payload_json=json_remove(payload_json, '$.acquisition_kind'); UPDATE idempotency_results SET payload_json=json_remove(payload_json, '$.acquisition_group.acquisition_kind') WHERE idempotency_key='migration-v5-group'; DROP TABLE evidence_artifacts; DROP TABLE adjudication_assignments; DROP TABLE authoritative_artifacts; DROP TABLE deadlock_resolutions; DROP TABLE wait_for_edges; DELETE FROM schema_migrations WHERE version=6; PRAGMA user_version=5;");
+      database.exec("UPDATE unit_attempts SET payload_json=json_remove(payload_json, '$.role'); UPDATE acquisition_groups SET payload_json=json_remove(payload_json, '$.acquisition_kind'); UPDATE idempotency_results SET payload_json=json_remove(payload_json, '$.acquisition_group.acquisition_kind') WHERE idempotency_key='migration-v5-group'; DROP TABLE semantic_replays; ALTER TABLE session_leases DROP COLUMN attachment_kind; DROP TABLE migration_legacy_audit; DROP TABLE migration_recovery_work; DROP TABLE coordination_migrations; DROP TABLE run_resources; DROP TABLE evidence_artifacts; DROP TABLE adjudication_assignments; DROP TABLE authoritative_artifacts; DROP TABLE deadlock_resolutions; DROP TABLE wait_for_edges; DELETE FROM schema_migrations WHERE version IN (6,7,8,9); PRAGMA user_version=5;");
       database.prepare("UPDATE idempotency_results SET request_sha256=? WHERE idempotency_key='migration-v5-group'").run(legacyDigest);
       database.close();
       server = await startCoordinatorServer(coordinatorRuntimePaths(env));

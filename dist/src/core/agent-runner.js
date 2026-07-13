@@ -10,7 +10,8 @@ import { AutopilotForcedOutputEvidenceError } from "./forced-output/status-evide
 import { parseAutopilotStatusEntry, parseAutopilotUnitSpec } from "./contracts/index.js";
 import { captureAutopilotExecutionBaseline, deriveAutopilotExecutionAuditPath, writeAutopilotExecutionAudit, } from "./execution-audit/index.js";
 import { AutopilotExecutionCommitError, commitAutopilotExecution, deriveAutopilotExecutionCommitPath, } from "./execution-commit.js";
-import { AutopilotParallelRuntimeError, acquireClaimsForUnit, coordinationRootForRepo, ensureWorktreeCleanForLaunch, prepareAutopilotUnitWorktree, readActiveAutopilots, readPathClaims, recoverAutopilotWorktreeSagas, releaseClaimsForUnit, unitWorktreePathForActiveAutopilot, resolveActiveAutopilotForSpec, } from "./parallel-runtime.js";
+import { AutopilotParallelRuntimeError, acquireClaimsForUnit, coordinationRootForRepo, ensureWorktreeCleanForLaunch, prepareAutopilotUnitWorktree, readActiveAutopilots, readCoordinatorActiveAutopilots, readPathClaims, recoverAutopilotWorktreeSagas, releaseClaimsForUnit, resolveAutopilotStateRoot, resolveRepoIdentity, unitWorktreePathForActiveAutopilot, worktreeRootForRepo, resolveActiveAutopilotForSpec, } from "./parallel-runtime.js";
+import { coordinationCutoverCommitted } from "./coordination/migration-paths.js";
 import { ClaimNegotiationClient } from "./coordination/negotiation.js";
 import { ReservationCoordinationClient, reservationSchedulingBlockers } from "./coordination/reservations.js";
 import { PlanningContradictionClient } from "./coordination/escalation.js";
@@ -319,6 +320,7 @@ async function runAutopilotAgentFromSpecPathInternal(specPath, options, lifecycl
             acquiredClaims: runtimePreflight.acquiredClaims,
             auditPath: auditOutput,
             commitPath: executionCommitOutput,
+            env,
         });
     }
     catch (error) {
@@ -463,7 +465,8 @@ async function preflightSpecAfterWorktreePreparation(spec, specPath, options = {
         });
     }
     const coordinatorMode = options.skipClaimAcquire !== true && runtimeContext.active.coordination_authority === 'coordinator-edit-leases-v1';
-    if (coordinatorMode) {
+    const cutoverCommitted = coordinationCutoverCommitted(resolveAutopilotStateRoot(options.env ?? process.env), runtimeContext.active.repo_key);
+    if (coordinatorMode && !cutoverCommitted) {
         const forbiddenLegacyClaims = (await readPathClaims(runtimeContext.coordinationRoot)).filter((claim) => claim.autopilot_id === runtimeContext.active.autopilot_id && claim.workstream_run === runtimeContext.active.workstream_run);
         if (forbiddenLegacyClaims.length > 0)
             throw new AutopilotAgentRunError('spec-invalid', {
@@ -636,8 +639,18 @@ async function prepareMissingSourceChangingUnitWorktree(spec, env, skipSagaRecov
     const repoKey = taskInfo['repo_key'];
     if (typeof repoKey !== 'string' || repoKey.length === 0)
         return { created: false };
-    const activeRows = await readActiveAutopilots(coordinationRootForRepo(repoKey, env));
-    const active = activeRows.find((row) => row.workstream === spec.workstream && row.runtime_root === artifactRoot);
+    const activeRows = coordinationCutoverCommitted(resolveAutopilotStateRoot(env), repoKey)
+        ? (() => {
+            const sourceRepo = taskInfo['source_repo'];
+            if (typeof sourceRepo !== 'string')
+                throw new AutopilotAgentRunError('spec-invalid', { reason: 'post-cutover task info lacks source_repo', statusOutput: spec.status_output, receiptOutput: spec.receipt_output });
+            const repo = resolveRepoIdentity(sourceRepo);
+            if (repo.repoKey !== repoKey)
+                throw new AutopilotAgentRunError('spec-invalid', { reason: 'post-cutover task info repository identity mismatch', statusOutput: spec.status_output, receiptOutput: spec.receipt_output });
+            return readCoordinatorActiveAutopilots(repo, worktreeRootForRepo(repoKey, env), env);
+        })()
+        : readActiveAutopilots(coordinationRootForRepo(repoKey, env));
+    const active = (await activeRows).find((row) => row.workstream === spec.workstream && row.runtime_root === artifactRoot);
     if (active === undefined)
         return { created: false };
     if (!skipSagaRecovery && env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV] !== undefined)

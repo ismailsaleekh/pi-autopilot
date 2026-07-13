@@ -109,50 +109,74 @@ export function detectCoordinationWaitCycles(edges: readonly CoordinationWaitFor
     if (!adjacency.has(to)) adjacency.set(to, new Set<string>());
   }
 
-  let index = 0;
-  const indexes = new Map<string, number>();
-  const lowLinks = new Map<string, number>();
-  const stack: string[] = [];
-  const onStack = new Set<string>();
-  const components: string[][] = [];
-
-  const visit = (node: string): void => {
-    indexes.set(node, index);
-    lowLinks.set(node, index);
-    index += 1;
-    stack.push(node);
-    onStack.add(node);
-    for (const target of [...(adjacency.get(node) ?? [])].sort()) {
-      if (!indexes.has(target)) {
-        visit(target);
-        const nodeLow = lowLinks.get(node);
-        const targetLow = lowLinks.get(target);
-        if (nodeLow !== undefined && targetLow !== undefined) lowLinks.set(node, Math.min(nodeLow, targetLow));
-      } else if (onStack.has(target)) {
-        const nodeLow = lowLinks.get(node);
-        const targetIndex = indexes.get(target);
-        if (nodeLow !== undefined && targetIndex !== undefined) lowLinks.set(node, Math.min(nodeLow, targetIndex));
+  // Iterative Kosaraju avoids JavaScript call-stack exhaustion at the accepted
+  // 100k-record production bound. Both passes and edge bucketing stay O(V+E).
+  const orderedNodes = [...adjacency.keys()].sort();
+  const reverse = new Map<string, Set<string>>(orderedNodes.map((node) => [node, new Set<string>()]));
+  for (const [from, targets] of adjacency) for (const target of targets) reverse.get(target)?.add(from);
+  const visited = new Set<string>();
+  const finishOrder: string[] = [];
+  for (const root of orderedNodes) {
+    if (visited.has(root)) continue;
+    visited.add(root);
+    const frames: { readonly node: string; readonly targets: readonly string[]; index: number }[] = [{ node: root, targets: [...(adjacency.get(root) ?? [])].sort(), index: 0 }];
+    while (frames.length > 0) {
+      const frame = frames[frames.length - 1];
+      if (frame === undefined) break;
+      const target = frame.targets[frame.index];
+      if (target !== undefined) {
+        frame.index += 1;
+        if (!visited.has(target)) {
+          visited.add(target);
+          frames.push({ node: target, targets: [...(adjacency.get(target) ?? [])].sort(), index: 0 });
+        }
+        continue;
       }
+      finishOrder.push(frame.node);
+      frames.pop();
     }
-    if (lowLinks.get(node) !== indexes.get(node)) return;
+  }
+  const assigned = new Set<string>();
+  const components: string[][] = [];
+  for (let index = finishOrder.length - 1; index >= 0; index -= 1) {
+    const root = finishOrder[index];
+    if (root === undefined || assigned.has(root)) continue;
     const component: string[] = [];
-    while (stack.length > 0) {
-      const member = stack.pop();
-      if (member === undefined) break;
-      onStack.delete(member);
-      component.push(member);
-      if (member === node) break;
+    const pending = [root];
+    assigned.add(root);
+    while (pending.length > 0) {
+      const node = pending.pop();
+      if (node === undefined) break;
+      component.push(node);
+      for (const source of [...(reverse.get(node) ?? [])].sort().reverse()) if (!assigned.has(source)) { assigned.add(source); pending.push(source); }
     }
     components.push(component.sort());
-  };
-
-  for (const node of [...adjacency.keys()].sort()) if (!indexes.has(node)) visit(node);
+  }
+  const selfEdges = new Map<string, CoordinationWaitForEdge[]>();
+  for (const edge of active) {
+    const requester = coordinationOwnerKey(edge.requester);
+    if (requester !== coordinationOwnerKey(edge.blocker)) continue;
+    const entries = selfEdges.get(requester) ?? [];
+    entries.push(edge);
+    selfEdges.set(requester, entries);
+  }
+  const componentByParticipant = new Map<string, number>();
+  components.forEach((component, componentIndex) => component.forEach((participant) => componentByParticipant.set(participant, componentIndex)));
+  const edgesByComponent = new Map<number, CoordinationWaitForEdge[]>();
+  for (const edge of active) {
+    const requesterComponent = componentByParticipant.get(coordinationOwnerKey(edge.requester));
+    if (requesterComponent === undefined || requesterComponent !== componentByParticipant.get(coordinationOwnerKey(edge.blocker))) continue;
+    const entries = edgesByComponent.get(requesterComponent) ?? [];
+    entries.push(edge);
+    edgesByComponent.set(requesterComponent, entries);
+  }
   const cycles: CoordinationWaitCycle[] = [];
-  for (const component of components) {
-    const participants = new Set(component);
-    const componentEdges = active.filter((edge) => participants.has(coordinationOwnerKey(edge.requester)) && participants.has(coordinationOwnerKey(edge.blocker)));
-    const selfCycle = component.length === 1 && componentEdges.some((edge) => coordinationOwnerKey(edge.requester) === coordinationOwnerKey(edge.blocker));
-    if (component.length < 2 && !selfCycle) continue;
+  for (const [componentIndex, component] of components.entries()) {
+    // A singleton SCC can only be cyclic through a self-edge.
+    const componentEdges = component.length === 1
+      ? (selfEdges.get(component[0] ?? '') ?? [])
+      : (edgesByComponent.get(componentIndex) ?? []);
+    if (component.length === 1 && componentEdges.length === 0) continue;
     const edgeIds = componentEdges.map((edge) => edge.edge_id).sort();
     const requestIds = [...new Set(componentEdges.map((edge) => edge.request_id))].sort();
     cycles.push({

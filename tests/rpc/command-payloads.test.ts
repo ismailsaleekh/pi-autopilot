@@ -5,6 +5,7 @@ import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   AUTOPILOT_ABORT_COMMAND,
   AUTOPILOT_CLAIM_GC_COMMAND,
@@ -18,6 +19,7 @@ import {
   AUTOPILOT_STATUS_TOOL,
 } from '../../src/core/names.ts';
 import { AUTOPILOT_STATE_ROOT_ENV } from '../../src/core/parallel-runtime.ts';
+import { isProcessAlive } from '../../src/core/coordination/process-identity.ts';
 import { coordinatorRuntimePaths } from '../../src/core/coordination/runtime-paths.ts';
 
 interface JsonMap {
@@ -50,7 +52,7 @@ interface RpcRunResult {
   readonly stdout: string;
 }
 
-const packageRoot = new URL('../../', import.meta.url).pathname;
+const packageRoot = fileURLToPath(new URL('../../', import.meta.url));
 const extensionPath = join(packageRoot, 'extensions/autopilot.ts');
 const forbiddenLegacyCommand = ['hlo', 'v2'].join('-');
 
@@ -242,10 +244,14 @@ async function stopExternalCoordinator(stateRoot: string): Promise<void> {
   if (!isJsonMap(parsed)) throw new Error('coordinator lock is malformed');
   const pid = parsed['pid'];
   if (typeof pid !== 'number' || !Number.isSafeInteger(pid) || pid < 1) throw new Error('coordinator lock pid is malformed');
-  process.kill(pid, 'SIGTERM');
+  if (isProcessAlive(pid)) process.kill(pid, 'SIGTERM');
   const deadline = Date.now() + 5_000;
-  while (existsSync(paths.lockPath) && Date.now() < deadline) await new Promise<void>((resolveWait) => setTimeout(resolveWait, 25));
-  if (existsSync(paths.lockPath)) throw new Error('coordinator did not stop before RPC cleanup');
+  while (isProcessAlive(pid) && Date.now() < deadline) await new Promise<void>((resolveWait) => setTimeout(resolveWait, 25));
+  if (isProcessAlive(pid)) throw new Error('coordinator did not stop before RPC cleanup');
+  if (existsSync(paths.lockPath)) {
+    const stale: unknown = JSON.parse(await readFile(paths.lockPath, 'utf8')) as unknown;
+    if (!isJsonMap(stale) || stale['pid'] !== pid) throw new Error('coordinator lock identity changed during RPC cleanup');
+  }
 }
 
 async function initGitProject(project: string): Promise<void> {

@@ -1,12 +1,13 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
-import { tmpdir } from 'node:os';
+import { platform, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AUTOPILOT_STATE_ROOT_ENV, prepareAutopilotUnitWorktree, prepareAutopilotWorkstream } from '../../src/core/parallel-runtime.ts';
 import { AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV } from '../../src/core/names.ts';
+import { isProcessAlive } from '../../src/core/coordination/process-identity.ts';
 import { coordinatorRuntimePaths } from '../../src/core/coordination/runtime-paths.ts';
 import { DurableRunSupervisorClient } from '../../src/core/coordination/supervisor.ts';
 
@@ -130,6 +131,10 @@ async function docText(file: (typeof DOC_FILES)[number]): Promise<string> {
   return await readFile(new URL(file, root), 'utf8');
 }
 
+async function sourceText(file: string): Promise<string> {
+  return await readFile(new URL(file, root), 'utf8');
+}
+
 function literalPattern(value: string): RegExp {
   return new RegExp(value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
 }
@@ -174,14 +179,27 @@ void describe('package manifest and payload', () => {
     assert.equal(pkg.bin['autopilot-coordinator'], 'bin/autopilot-coordinator.mjs');
     assert.ok(pkg.files.includes('dist/'));
     assert.ok(pkg.peerDependencies['@earendil-works/pi-coding-agent']);
-    for (const script of ['build', 'typecheck', 'test:type-safety', 'test:unit', 'test:model', 'test:sdk', 'test:rpc', 'test:package']) {
+    for (const script of ['build', 'typecheck', 'test:type-safety', 'test:unit', 'test:e2e', 'test:model', 'test:multiprocess', 'test:upgrade', 'test:crash', 'test:chaos', 'test:scale', 'test:sdk', 'test:rpc', 'test:package', 'test:packed-migration', 'security:scan', 'security:audit', 'sbom', 'payload:check', 'test', 'test:release', 'pack:dry-run']) {
       assert.equal(typeof pkg.scripts[script], 'string', script);
     }
-    for (const dir of ['bin/', 'dist/', 'extensions/', 'src/', 'templates/']) assert.ok(pkg.files.includes(dir), dir);
+    assert.match(pkg.scripts['prepack'] ?? '', /security:scan -- --quiet && npm run sbom/u, 'prepack must regenerate security evidence before SBOM');
+    for (const dir of ['bin/', 'dist/', 'extensions/', 'src/', 'templates/', 'artifacts/security/']) assert.ok(pkg.files.includes(dir), dir);
   });
 
   void it('has required docs and runtime files', async () => {
     for (const file of [
+      'src/core/coordination/migration.ts',
+      'src/core/coordination/migration-paths.ts',
+      'src/core/coordination/upgrade.ts',
+      'src/core/coordination/upgrade-contracts.ts',
+      'src/core/coordination/serialized-lock.ts',
+      'dist/src/core/coordination/migration.js',
+      'dist/src/core/coordination/migration-paths.js',
+      'dist/src/core/coordination/upgrade.js',
+      'dist/src/core/coordination/upgrade-contracts.js',
+      'dist/src/core/coordination/serialized-lock.js',
+      'artifacts/security/cyclonedx-sbom.json',
+      'artifacts/security/offline-security-scan.json',
       'README.md',
       'TESTING.md',
       'TEST_PLAN.md',
@@ -280,7 +298,7 @@ void describe('package manifest and payload', () => {
       'openai-codex/gpt-5.6-sol',
       'openai-codex/gpt-5.6-terra',
       'openai-codex/gpt-5.6-luna',
-      'Coordination Fabric Phases 27–34',
+      'Coordination Fabric Phases 27–35',
       'end-to-end peer claim negotiation',
       'change reservations',
       'automatic terminal-evidence reconciliation',
@@ -300,7 +318,8 @@ void describe('package manifest and payload', () => {
     const plan = await docText('TEST_PLAN.md');
     const mappings = [
       { claim: 'Commands', row: 'Public commands are `/autopilot`, `/autopilot-inject`, `/autopilot-onboard`, `/autopilot-handoff`, `/autopilot-config`, `/autopilot-claim-gc`, `/autopilot-coordination`, `/autopilot-close`, and `/autopilot-abort`' },
-      { claim: 'Coordination Fabric Phases 27–34', row: 'Coordination Fabric contracts and protocol lock' },
+      { claim: 'Coordination Fabric Phases 27–35', row: 'Coordination Fabric contracts and protocol lock' },
+      { claim: 'durable, resumable, one-way migration and cutover', row: 'Verified legacy migration and one-way cutover' },
       { claim: 'change reservations', row: 'Edit lease / change reservation separation' },
       { claim: 'end-to-end peer claim negotiation', row: 'End-to-end peer claim negotiation' },
       { claim: 'automatic terminal-evidence reconciliation', row: 'Offline mailbox replay and automatic reconciliation' },
@@ -338,12 +357,49 @@ void describe('package manifest and payload', () => {
     const pkg = await packageJson();
     const testing = await docText('TESTING.md');
     const publishing = await docText('PUBLISHING.md');
-    for (const script of ['typecheck', 'test:package', 'test', 'pack:dry-run']) {
+    const exactTestChain = 'npm run typecheck && npm run test:type-safety && npm run security:scan && npm run test:unit && npm run test:e2e && npm run test:model && npm run test:multiprocess && npm run test:crash && npm run test:chaos && npm run test:scale && npm run test:sdk && npm run test:rpc && npm run test:package && npm run payload:check';
+    assert.equal(pkg.scripts['test'], exactTestChain);
+    const expansionStart = testing.indexOf('`npm run test` expands to:');
+    const expansionEnd = testing.indexOf('```', testing.indexOf('```bash', expansionStart) + '```bash'.length);
+    const expansion = testing.slice(expansionStart, expansionEnd);
+    let prior = -1;
+    for (const command of exactTestChain.split(' && ')) {
+      const index = expansion.indexOf(command);
+      assert.ok(index > prior, `TESTING npm test expansion is missing or reorders ${command}`);
+      prior = index;
+    }
+    assert.match(testing, /`sbom` and registry-backed `security:audit` are not nested in `npm run test`/u);
+    for (const exactScaleClaim of ['exactly **100,000**', 'exactly **10,000**', 'exactly **32**', '**<60s**', '**<512 MiB**', '**<256 MiB**', '**<1s**', '**=100,000**', '**=10,000**']) {
+      assert.match(await docText('TEST_PLAN.md'), literalPattern(exactScaleClaim), `TEST_PLAN missing exact scale assertion ${exactScaleClaim}`);
+    }
+    for (const script of ['typecheck', 'test:package', 'test:packed-migration', 'test', 'pack:dry-run', 'payload:check', 'security:scan', 'sbom']) {
       assert.equal(typeof pkg.scripts[script], 'string', script);
       const command = `npm run ${script}`;
       assert.match(testing, literalPattern(command), `TESTING missing ${command}`);
       assert.match(publishing, literalPattern(command), `PUBLISHING missing ${command}`);
     }
+  });
+
+  void it('locks CF-9 multiprocess and scale certification implementation claims', async () => {
+    const scale = await sourceText('tests/scale/coordination-scale.test.ts');
+    const multiprocess = await sourceText('tests/multiprocess/coordinator-process.test.ts');
+    const processClient = await sourceText('tests/helpers/release-trace-process-client.ts');
+    assert.match(scale, /stageCoordinatorSemanticReplay/u);
+    assert.match(await sourceText('src/core/coordination/store.ts'), /parseSemanticReplayLine\(line/u);
+    assert.equal((await sourceText('src/core/coordination/store.ts')).includes('SEMANTIC_REPLAY_OBSERVATION_LINE'), false, 'semantic replay must not regex-accept records');
+    assert.match(scale, /EVENT_COUNT = 100_000/u);
+    assert.match(scale, /REQUEST_COUNT = 10_000/u);
+    assert.match(scale, /CLIENT_COUNT = 32/u);
+    assert.equal(/INSERT\s+INTO/iu.test(scale), false, 'scale test must not insert coordinator rows directly');
+    for (const limit of ['MAX_DURATION_MS = 60_000', 'MAX_RSS = 512 * 1024 * 1024', 'MAX_DATABASE_BYTES = 256 * 1024 * 1024', 'MAX_INDEXED_QUERY_MS = 1_000']) assert.match(scale, literalPattern(limit));
+    assert.match((await packageJson()).scripts['test:scale'] ?? '', /--max-old-space-size=256/u);
+    assert.match(multiprocess, /new PersistentTraceClient/u);
+    assert.match(multiprocess, /randomizedTopologicalOrder/u);
+    assert.match(multiprocess, /changing the seed must change operation categories/u);
+    assert.match(multiprocess, /Promise\.all\(concurrentActors/u);
+    assert.match(multiprocess, /coordinator races their sockets/u);
+    for (const action of ['acquire', 'retry', 'defer', 'handoff', 'cancel', 'supersede', 'reacquire', 'crash']) assert.match(multiprocess, literalPattern(`'${action}'`));
+    assert.match(processClient, /createInterface\(\{ input: process\.stdin/u);
   });
 
   void it('does not publish stale docs claims', async () => {
@@ -379,6 +435,12 @@ void describe('package manifest and payload', () => {
     assert.match(entry.filename, /^pi-autopilot-/);
     const files = entry.files.map((file) => file.path).sort();
     for (const file of [
+      'artifacts/security/cyclonedx-sbom.json',
+      'artifacts/security/offline-security-scan.json',
+      'dist/src/core/coordination/migration.js',
+      'dist/src/core/coordination/migration-paths.js',
+      'src/core/coordination/migration.ts',
+      'src/core/coordination/migration-paths.ts',
       'package.json',
       'README.md',
       'TESTING.md',
@@ -436,14 +498,37 @@ void describe('package manifest and payload', () => {
     assert.equal(files.some((file) => file.includes('node_modules')), false);
   });
 
-  void it('ships compiled Phase 34 authority and recovery behavior in exact source parity', async () => {
+  void it('keeps post-cutover runtime authority coordinator-only with no task-info or unmanaged-worktree fallback', async () => {
+    const parallel = await readFile(new URL('src/core/parallel-runtime.ts', root), 'utf8');
+    const runner = await readFile(new URL('src/core/agent-runner.ts', root), 'utf8');
+    const saga = await readFile(new URL('src/core/coordination/worktree-saga.ts', root), 'utf8');
+    const coordinatorProjection = parallel.slice(parallel.indexOf('export async function readCoordinatorActiveAutopilots'), parallel.indexOf('function legacyRootIdentity'));
+    assert.match(coordinatorProjection, /run_resources/u);
+    assert.equal(/TASK_INFO_FILE|readJson/u.test(coordinatorProjection), false);
+    assert.match(parallel, /post-cutover activation requires a durable coordinator session/u);
+    assert.match(runner, /readCoordinatorActiveAutopilots/u);
+    assert.match(saga, /post-cutover worktree mutation requires a current durable coordinator session/u);
+    for (const functionName of ['writeActiveAutopilots', 'writePathClaims', 'appendClaimEvent']) {
+      const start = parallel.indexOf(`export async function ${functionName}`);
+      assert.notEqual(start, -1);
+      assert.match(parallel.slice(start, start + 600), /assertLegacyCoordinationWritable/u, functionName);
+    }
+  });
+
+  void it('ships compiled Phase 34–35 authority, migration, and recovery behavior in exact source parity', async () => {
     const sourceStore = await readFile(new URL('src/core/coordination/store.ts', root), 'utf8');
     const compiledStore = await readFile(new URL('dist/src/core/coordination/store.js', root), 'utf8');
+    const sourceMigration = await readFile(new URL('src/core/coordination/migration.ts', root), 'utf8');
+    const compiledMigration = await readFile(new URL('dist/src/core/coordination/migration.js', root), 'utf8');
     const sourceRunner = await readFile(new URL('src/core/agent-runner.ts', root), 'utf8');
     const compiledRunner = await readFile(new URL('dist/src/core/agent-runner.js', root), 'utf8');
-    for (const marker of ['register-authoritative-artifact', 'assign-adjudication', 'claim-adjudication-assignment', 'complete-adjudication', 'materialization-read-expansion', 'checkpoint-child', 'fixedPointDepth', 'evidence_artifacts']) {
+    for (const marker of ['register-authoritative-artifact', 'assign-adjudication', 'claim-adjudication-assignment', 'complete-adjudication', 'materialization-read-expansion', 'checkpoint-child', 'deadlockFixedPointMeasure', 'evidence_artifacts']) {
       assert.equal(sourceStore.includes(marker), true, `source is missing ${marker}`);
       assert.equal(compiledStore.includes(marker), true, `compiled coordinator is stale for ${marker}`);
+    }
+    for (const marker of ['after-cutover-marker', 'source-hashes-rechecked-before-cutover', 'legacy-files-archived-read-only', 'runtime-projections-rebound']) {
+      assert.equal(sourceMigration.includes(marker), true, `source migration is missing ${marker}`);
+      assert.equal(compiledMigration.includes(marker), true, `compiled migration is stale for ${marker}`);
     }
     for (const marker of ['preemptionSignal', 'quarantineFailedUnit', 'autonomous deadlock preemption capture']) {
       assert.equal(sourceRunner.includes(marker), true, `source runner is missing ${marker}`);
@@ -474,6 +559,13 @@ void describe('package manifest and payload', () => {
     const result = spawnSync(process.execPath, ['bin/autopilot-coordinator.mjs', '--help'], { cwd: root, encoding: 'utf8' });
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /autopilot-coordinator status/u);
+    assert.match(result.stdout, /replay --replay-id/u);
+    assert.match(result.stdout, /--input <absolute-request-jsonl>/u);
+    assert.match(result.stdout, /migrate --dry-run/u);
+    assert.match(result.stdout, /verify \[--repo-key/u);
+    const invalid = spawnSync(process.execPath, ['bin/autopilot-coordinator.mjs', 'migrate', '--repo-key', 'missing-mode'], { cwd: root, encoding: 'utf8' });
+    assert.equal(invalid.status, 2);
+    assert.match(invalid.stderr, /requires a mode/u);
   });
 
   void it('runs the packed bins from node_modules without TypeScript stripping', async () => {
@@ -570,6 +662,10 @@ void describe('package manifest and payload', () => {
       );
 
       const runnerEnv = { ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: stateRoot, [AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV]: attachment.contextPath };
+      const packedMigration = spawnSync(process.execPath, [installedCoordinator, 'migrate', '--dry-run', '--state-root', join(tempRoot, 'migration-state'), '--repo-root', source], { cwd: source, encoding: 'utf8', env: runnerEnv });
+      assert.equal(packedMigration.status, 0, packedMigration.stderr);
+      assert.match(packedMigration.stdout, /autopilot\.coordination_migration_report\.v1/u);
+      assert.match(packedMigration.stdout, /"dry_run": true/u);
       const coordinatorStatus = spawnSync(process.execPath, [installedCoordinator, 'status', '--state-root', stateRoot, '--repo-id', prepared.repo.repoKey, '--run', prepared.active.workstream_run], {
         cwd: source,
         encoding: 'utf8',
@@ -589,8 +685,7 @@ void describe('package manifest and payload', () => {
 
       const fakePi = join(tempRoot, 'fake-pi.mjs');
       await writeFile(fakePi, INSTALLED_PACKAGE_FAKE_PI_SOURCE, 'utf8');
-      const chmod = spawnSync('chmod', ['755', fakePi], { encoding: 'utf8' });
-      assert.equal(chmod.status, 0, chmod.stderr);
+      if (platform() !== 'win32') await chmod(fakePi, 0o755);
       const liveRun = spawnSync(
         process.execPath,
         [installedBin, '--json', '--pi-executable', fakePi, specPath],
@@ -614,10 +709,14 @@ async function stopExternalCoordinator(stateRoot: string): Promise<void> {
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) throw new Error('coordinator lock is malformed');
   const pid = (parsed as Readonly<Record<string, unknown>>)['pid'];
   if (typeof pid !== 'number' || !Number.isSafeInteger(pid) || pid < 1) throw new Error('coordinator lock pid is malformed');
-  process.kill(pid, 'SIGTERM');
+  if (isProcessAlive(pid)) process.kill(pid, 'SIGTERM');
   const deadline = Date.now() + 5_000;
-  while (existsSync(paths.lockPath) && Date.now() < deadline) await new Promise<void>((resolveWait) => setTimeout(resolveWait, 25));
-  if (existsSync(paths.lockPath)) throw new Error('coordinator did not stop before cleanup');
+  while (isProcessAlive(pid) && Date.now() < deadline) await new Promise<void>((resolveWait) => setTimeout(resolveWait, 25));
+  if (isProcessAlive(pid)) throw new Error('coordinator did not stop before cleanup');
+  if (existsSync(paths.lockPath)) {
+    const stale: unknown = JSON.parse(await readFile(paths.lockPath, 'utf8')) as unknown;
+    if (typeof stale !== 'object' || stale === null || Array.isArray(stale) || (stale as Readonly<Record<string, unknown>>)['pid'] !== pid) throw new Error('coordinator lock identity changed during cleanup');
+  }
 }
 
 async function initInstalledBinSource(source: string): Promise<void> {

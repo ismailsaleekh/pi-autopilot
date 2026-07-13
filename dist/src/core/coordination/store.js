@@ -1,23 +1,32 @@
-import { createHash, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, closeSync, constants as fsConstants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
-import { mkdir } from 'node:fs/promises';
+import { createReadStream, chmodSync, closeSync, constants as fsConstants, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, renameSync, statSync, unlinkSync, writeSync } from 'node:fs';
+import { link, mkdir, open as openFile, rename, unlink } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { platform } from 'node:os';
 import { backup, DatabaseSync } from 'node:sqlite';
-import { claimModesConflict, coordinationPathsOverlap, parseCoordinationAcquisitionGroup, parseCoordinationAdjudicationAssignment, parseCoordinationAuthoritativeArtifact, parseCoordinationChangeReservation, parseCoordinationChildLease, parseCoordinationClaimRequest, parseCoordinationDeadlockResolution, parseCoordinationEditLease, parseCoordinationEscalation, parseCoordinationMailboxCursor, parseCoordinationMessage, parseCoordinationReconciliationEvidence, parseCoordinationReleaseCondition, parseCoordinationRepository, parseCoordinationRequestedLease, parseCoordinationReservationObligation, parseCoordinationRun, parseCoordinationRunTerminalIntent, parseCoordinationSessionLease, parseCoordinationUnitAttempt, parseCoordinationWaitForEdge, parseCoordinationWorktree, parseCoordinationWorktreeOperation } from "./contracts.js";
+import { claimModesConflict, coordinationPathsOverlap, parseCoordinationAcquisitionGroup, parseCoordinationAdjudicationAssignment, parseCoordinationAuthoritativeArtifact, parseCoordinationChangeReservation, parseCoordinationChildLease, parseCoordinationClaimRequest, parseCoordinationDeadlockResolution, parseCoordinationEditLease, parseCoordinationEscalation, parseCoordinationEvent, parseCoordinationMailboxCursor, parseCoordinationMessage, parseCoordinationMigrationRecoveryWork, parseCoordinationReconciliationEvidence, parseCoordinationReleaseCondition, parseCoordinationRepository, parseCoordinationRequestedLease, parseCoordinationReservationObligation, parseCoordinationRun, parseCoordinationRunResource, parseCoordinationRunTerminalIntent, parseCoordinationSessionLease, parseCoordinationUnitAttempt, parseCoordinationWaitForEdge, parseCoordinationWorktree, parseCoordinationWorktreeOperation, parseCoordinatorRequestEnvelope } from "./contracts.js";
 import { buildCoordinationWaitForEdges, compareCoordinationGrantPriority, coordinationOwnerKey, detectCoordinationWaitCycles, MAX_GRANT_BYPASSES, selectCoordinationDeadlockVictim } from "./deadlock.js";
 import { validateAuthoritativeCoordinationDocument, validatePlanningContradictionSubmission } from "./escalation.js";
 import { CoordinationRuntimeError } from "./failures.js";
-import { COORDINATOR_BUSY_TIMEOUT_MS, COORDINATOR_DATABASE_SCHEMA_VERSION, COORDINATOR_GRANT_OFFER_TTL_MS, COORDINATOR_PACKAGE_BUILD } from "./runtime-paths.js";
+import { checkCoordinationInvariants } from "./invariants.js";
+import { COORDINATOR_BUSY_TIMEOUT_MS, COORDINATOR_DATABASE_SCHEMA_VERSION, COORDINATOR_GRANT_OFFER_TTL_MS, COORDINATOR_PACKAGE_BUILD, enforcePrivateAuthorityPath, enforceWindowsPrivateAcl, ensureCoordinatorPrivateRoots } from "./runtime-paths.js";
+import { activeCoordinationMigrationFreeze, assertCoordinationDispatchAllowed, coordinationCutoverCommitted } from "./migration-paths.js";
 import { parseRunTerminalSha, parseUnitAttemptTarget, parseUnitMergeReservationFacts, validateReconciliationEvidenceDocument, validateReservationIntegrationEvidenceDocument, validateReservationValidationArtifactChain, validateReservationValidationEvidenceDocument } from "./terminal-evidence.js";
-import { COORDINATION_WORKTREE_STATES } from "./types.js";
+import { AUTOPILOT_COORDINATOR_PROTOCOL_VERSION, COORDINATION_WORKTREE_STATES } from "./types.js";
+import { assertPrivatePathNoAliases } from "../private-path.js";
 const DATABASE_EXPORT_SCHEMA = 'autopilot.coordinator_export.v1';
 const SHA256_PATTERN = /^sha256:[a-f0-9]{64}$/u;
 const MAX_COORDINATION_EVIDENCE_BYTES = 1024 * 1024;
 const MAX_ADJUDICATION_BUNDLE_BYTES = 256 * 1024;
-const RUN_OWNED_IDEMPOTENCY_ACTIONS = new Set(['register-attempt', 'acquire-group', 'acknowledge-grant', 'respond-claim-request', 'cancel-claim-request', 'cancel-acquisition-group', 'supersede-attempt', 'record-release-evidence', 'resolve-reservation-obligation', 'prepare-run-terminal', 'cancel-run-terminal', 'reconcile-run', 'prepare-operation', 'transition-operation', 'register-authoritative-artifact', 'assign-adjudication', 'claim-adjudication-assignment', 'submit-planning-contradiction']);
-const TERMINAL_SESSION_ACTIONS = new Set(['detach-session', 'heartbeat', 'drain-mailbox', 'acknowledge-message', 'record-release-evidence', 'reconcile-run', 'prepare-operation', 'transition-operation']);
+export const COORDINATOR_SEMANTIC_REPLAY_SCHEMA = 'autopilot.coordinator_semantic_replay.v1';
+export const COORDINATOR_MAX_SEMANTIC_REPLAY_RECORDS = 100_000;
+const COORDINATOR_MAX_SEMANTIC_REPLAY_BYTES = 128 * 1024 * 1024;
+const COORDINATOR_MAX_SEMANTIC_REPLAY_LINE_BYTES = 1024 * 1024;
+const COORDINATOR_SEMANTIC_REPLAY_BATCH_SIZE = 1_000;
+const RUN_OWNED_IDEMPOTENCY_ACTIONS = new Set(['resolve-migration-recovery', 'register-attempt', 'acquire-group', 'acknowledge-grant', 'respond-claim-request', 'cancel-claim-request', 'cancel-acquisition-group', 'supersede-attempt', 'record-release-evidence', 'resolve-reservation-obligation', 'prepare-run-terminal', 'cancel-run-terminal', 'reconcile-run', 'prepare-operation', 'transition-operation', 'register-authoritative-artifact', 'assign-adjudication', 'claim-adjudication-assignment', 'submit-planning-contradiction']);
+const TERMINAL_SESSION_ACTIONS = new Set(['resolve-migration-recovery', 'detach-session', 'heartbeat', 'drain-mailbox', 'acknowledge-message', 'record-release-evidence', 'reconcile-run', 'prepare-operation', 'transition-operation']);
+const MIGRATION_RECOVERY_SESSION_ACTIONS = new Set(['resolve-migration-recovery', 'detach-session', 'heartbeat']);
 const systemClock = { now: () => new Date() };
 const MIGRATION_1 = `
 CREATE TABLE repositories (
@@ -283,6 +292,72 @@ CREATE TABLE evidence_artifacts (
 ) STRICT;
 CREATE INDEX idx_evidence_artifacts_repo_event ON evidence_artifacts(repo_id, created_event_seq, entity_id);
 `;
+const MIGRATION_7 = `
+CREATE TABLE run_resources (
+  entity_id TEXT PRIMARY KEY,
+  repo_id TEXT NOT NULL,
+  workstream_run TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  version INTEGER NOT NULL CHECK(version >= 1),
+  UNIQUE(repo_id, workstream_run),
+  FOREIGN KEY(repo_id, workstream_run) REFERENCES runs(repo_id, workstream_run) ON DELETE RESTRICT
+) STRICT;
+CREATE INDEX idx_run_resources_repo_run ON run_resources(repo_id, workstream_run);
+CREATE TABLE coordination_migrations (
+  repo_id TEXT PRIMARY KEY,
+  migration_id TEXT NOT NULL UNIQUE,
+  snapshot_sha256 TEXT NOT NULL CHECK(length(snapshot_sha256) = 71),
+  journal_path TEXT NOT NULL,
+  state TEXT NOT NULL,
+  report_json TEXT NOT NULL,
+  imported_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  version INTEGER NOT NULL CHECK(version >= 1),
+  FOREIGN KEY(repo_id) REFERENCES repositories(repo_id) ON DELETE RESTRICT
+) STRICT;
+CREATE TABLE migration_recovery_work (
+  entity_id TEXT PRIMARY KEY,
+  repo_id TEXT NOT NULL,
+  workstream_run TEXT NOT NULL,
+  recovery_type TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  status TEXT NOT NULL CHECK(status IN ('pending','resolved')),
+  created_event_seq INTEGER NOT NULL CHECK(created_event_seq >= 1),
+  version INTEGER NOT NULL CHECK(version >= 1),
+  FOREIGN KEY(repo_id, workstream_run) REFERENCES runs(repo_id, workstream_run) ON DELETE RESTRICT
+) STRICT;
+CREATE INDEX idx_migration_recovery_run_status ON migration_recovery_work(repo_id, workstream_run, status, entity_id);
+CREATE TABLE migration_legacy_audit (
+  entity_id TEXT PRIMARY KEY,
+  repo_id TEXT NOT NULL,
+  source_kind TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  created_event_seq INTEGER NOT NULL CHECK(created_event_seq >= 1),
+  FOREIGN KEY(repo_id) REFERENCES repositories(repo_id) ON DELETE RESTRICT
+) STRICT;
+CREATE INDEX idx_migration_legacy_audit_repo_source ON migration_legacy_audit(repo_id, source_kind, entity_id);
+`;
+const MIGRATION_8 = `
+ALTER TABLE session_leases ADD COLUMN attachment_kind TEXT NOT NULL DEFAULT 'dispatch' CHECK(attachment_kind IN ('dispatch','terminal-recovery','migration-recovery'));
+ALTER TABLE migration_recovery_work ADD COLUMN resolution_json TEXT;
+ALTER TABLE migration_recovery_work ADD COLUMN resolved_event_seq INTEGER CHECK(resolved_event_seq IS NULL OR resolved_event_seq >= 1);
+UPDATE idempotency_results
+SET payload_json=json_set(
+  payload_json,
+  '$.session.schema_version', 'autopilot.session_lease.v2',
+  '$.session.attachment_kind', CASE WHEN json_extract(payload_json, '$.event_type')='terminal-cleanup-recovery-attached' THEN 'terminal-recovery' ELSE 'dispatch' END
+)
+WHERE json_type(payload_json, '$.session')='object';
+`;
+const MIGRATION_9 = `
+CREATE TABLE semantic_replays (
+  replay_id TEXT PRIMARY KEY,
+  record_count INTEGER NOT NULL CHECK(record_count >= 1 AND record_count <= 100000),
+  records_sha256 TEXT NOT NULL CHECK(length(records_sha256) = 71),
+  applied_at TEXT NOT NULL
+) STRICT;
+`;
+export const COORDINATOR_SCHEMA_MIGRATION_CHECKSUMS = Object.freeze([MIGRATION_1, MIGRATION_2, MIGRATION_3, MIGRATION_4, MIGRATION_5, MIGRATION_6, MIGRATION_7, MIGRATION_8, MIGRATION_9].map((sql) => createHash('sha256').update(sql, 'utf8').digest('hex')));
 function asRow(value, label) {
     if (value === undefined)
         throw new CoordinationRuntimeError('invalid-state', `${label} row is missing`);
@@ -307,6 +382,9 @@ function sqlInteger(row, field) {
     if (typeof value !== 'number' || !Number.isSafeInteger(value))
         throw new CoordinationRuntimeError('store-corrupt', `database field ${field} is not a safe integer`);
     return value;
+}
+function sqlNullableInteger(row, field) {
+    return row[field] === null ? null : sqlInteger(row, field);
 }
 function payloadString(payload, field) {
     const value = payload[field];
@@ -388,6 +466,308 @@ function canonicalJson(value) {
     const entries = Object.entries(value).sort((left, right) => left[0].localeCompare(right[0]));
     return `{${entries.map(([key, entry]) => `${JSON.stringify(key)}:${canonicalJson(entry)}`).join(',')}}`;
 }
+function isCanonicalIsoTimestamp(value) {
+    if (typeof value !== 'string' || value.length !== 24)
+        return false;
+    try {
+        return new Date(value).toISOString() === value;
+    }
+    catch {
+        return false;
+    }
+}
+function parseSemanticReplayRequest(value, label) {
+    let request;
+    try {
+        request = parseCoordinatorRequestEnvelope(value);
+    }
+    catch (error) {
+        throw new CoordinationRuntimeError('invalid-request', `${label} is not a valid coordinator request`, [error instanceof Error ? error.message : String(error)]);
+    }
+    if (request.protocol_version !== AUTOPILOT_COORDINATOR_PROTOCOL_VERSION)
+        throw new CoordinationRuntimeError('protocol-mismatch', `${label} must use the current coordinator protocol`);
+    if (request.action === 'status' || request.action === 'doctor' || request.action === 'export' || request.idempotency_key === null)
+        throw new CoordinationRuntimeError('invalid-request', `${label} must be an idempotent semantic mutation`);
+    return request;
+}
+function parseSemanticReplayRecord(value, label) {
+    return parseSemanticReplayRequest(value, label);
+}
+function parseSemanticReplayLine(line, label) {
+    let value;
+    try {
+        value = JSON.parse(line);
+    }
+    catch (error) {
+        throw new CoordinationRuntimeError('invalid-request', `${label} is not valid JSON`, [error instanceof Error ? error.message : String(error)]);
+    }
+    if (canonicalJson(value) !== line)
+        throw new CoordinationRuntimeError('invalid-request', `${label} must be canonical JSON without duplicate or reordered fields`);
+    return parseSemanticReplayRecord(value, label);
+}
+function parseSemanticReplayHeader(line) {
+    let value;
+    try {
+        value = JSON.parse(line);
+    }
+    catch (error) {
+        throw new CoordinationRuntimeError('invalid-request', 'semantic replay header is not valid JSON', [error instanceof Error ? error.message : String(error)]);
+    }
+    if (canonicalJson(value) !== line || typeof value !== 'object' || value === null || Array.isArray(value))
+        throw new CoordinationRuntimeError('invalid-request', 'semantic replay header must be a canonical object');
+    const record = value;
+    const fields = Object.keys(record).sort();
+    if (fields.join(',') !== 'record_count,records_sha256,replay_id,schema_version')
+        throw new CoordinationRuntimeError('invalid-request', 'semantic replay header fields are closed');
+    const replayId = record['replay_id'];
+    const count = record['record_count'];
+    const sha256 = record['records_sha256'];
+    if (record['schema_version'] !== COORDINATOR_SEMANTIC_REPLAY_SCHEMA || typeof replayId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(replayId) || typeof count !== 'number' || !Number.isSafeInteger(count) || count < 1 || count > COORDINATOR_MAX_SEMANTIC_REPLAY_RECORDS || typeof sha256 !== 'string' || !SHA256_PATTERN.test(sha256))
+        throw new CoordinationRuntimeError('invalid-request', 'semantic replay header identity, count, or digest is invalid');
+    return { schema_version: COORDINATOR_SEMANTIC_REPLAY_SCHEMA, replay_id: replayId, record_count: count, records_sha256: sha256 };
+}
+function semanticReplayReceiptPath(paths, replayId) {
+    return join(paths.semanticReplayReceiptsRoot, `${replayId}.json`);
+}
+function parseSemanticReplayReceipt(text, path) {
+    const line = text.endsWith('\n') ? text.slice(0, -1) : text;
+    if (line.length === 0 || line.includes('\n'))
+        throw new CoordinationRuntimeError('invalid-state', 'semantic replay receipt must contain exactly one JSON record', [path]);
+    let value;
+    try {
+        value = JSON.parse(line);
+    }
+    catch (error) {
+        throw new CoordinationRuntimeError('invalid-state', 'semantic replay receipt is not valid JSON', [path, error instanceof Error ? error.message : String(error)]);
+    }
+    if (canonicalJson(value) !== line || typeof value !== 'object' || value === null || Array.isArray(value))
+        throw new CoordinationRuntimeError('invalid-state', 'semantic replay receipt must be a canonical object', [path]);
+    const record = value;
+    if (Object.keys(record).sort().join(',') !== 'applied_at,record_count,records_sha256,replay_id,schema_version')
+        throw new CoordinationRuntimeError('invalid-state', 'semantic replay receipt fields are closed', [path]);
+    const replayId = record['replay_id'];
+    const count = record['record_count'];
+    const sha256 = record['records_sha256'];
+    const appliedAt = record['applied_at'];
+    if (record['schema_version'] !== 'autopilot.coordinator_semantic_replay_receipt.v1' || typeof replayId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(replayId) || typeof count !== 'number' || !Number.isSafeInteger(count) || count < 1 || count > COORDINATOR_MAX_SEMANTIC_REPLAY_RECORDS || typeof sha256 !== 'string' || !SHA256_PATTERN.test(sha256) || !isCanonicalIsoTimestamp(appliedAt))
+        throw new CoordinationRuntimeError('invalid-state', 'semantic replay receipt identity, count, digest, or timestamp is invalid', [path]);
+    return { schema_version: 'autopilot.coordinator_semantic_replay_receipt.v1', replay_id: replayId, record_count: count, records_sha256: sha256, applied_at: appliedAt };
+}
+function sameSemanticReplayIdentity(receipt, header) {
+    return receipt.replay_id === header.replay_id && receipt.record_count === header.record_count && receipt.records_sha256 === header.records_sha256;
+}
+function syncParentDirectory(path) {
+    if (platform() === 'win32')
+        return;
+    const descriptor = openSync(dirname(path), fsConstants.O_RDONLY);
+    try {
+        fsyncSync(descriptor);
+    }
+    finally {
+        closeSync(descriptor);
+    }
+}
+function assertPrivateDirectory(path, label) {
+    const metadata = lstatSync(path);
+    if (!metadata.isDirectory() || metadata.isSymbolicLink())
+        throw new CoordinationRuntimeError('permission-denied', `${label} must be a real directory, not a symlink or junction`, [path]);
+}
+async function ensureSemanticReplayRoots(paths) {
+    // This producer is also called directly by the CLI, before server startup.
+    // Use the shared authority primitive first: on Windows it installs the
+    // protected user-only root DACL before a descendant mkdir/open can inherit
+    // an operator override's permissive ACL.
+    await ensureCoordinatorPrivateRoots(paths);
+    assertPrivateDirectory(paths.stateRoot, 'Autopilot state root');
+    for (const path of [paths.coordinatorRoot, paths.semanticReplayReceiptsRoot]) {
+        const relativePath = relative(paths.stateRoot, path);
+        if (relativePath.length === 0 || relativePath === '..' || relativePath.startsWith(`..${sep}`) || isAbsolute(relativePath))
+            throw new CoordinationRuntimeError('permission-denied', 'semantic replay path escapes the Autopilot state root', [path]);
+        let current = paths.stateRoot;
+        for (const component of relativePath.split(sep)) {
+            current = join(current, component);
+            assertPrivateDirectory(current, 'semantic replay path ancestor');
+        }
+    }
+    const realStateRoot = realpathSync(paths.stateRoot);
+    for (const path of [paths.coordinatorRoot, paths.semanticReplayReceiptsRoot]) {
+        const physical = realpathSync(path);
+        const physicalRelative = relative(realStateRoot, physical);
+        if (physicalRelative === '..' || physicalRelative.startsWith(`..${sep}`) || isAbsolute(physicalRelative))
+            throw new CoordinationRuntimeError('permission-denied', 'semantic replay path physically escapes the Autopilot state root', [path]);
+    }
+}
+function replayFileIdentity(descriptor) {
+    const metadata = fstatSync(descriptor);
+    if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size < 2 || metadata.size > COORDINATOR_MAX_SEMANTIC_REPLAY_BYTES)
+        throw new CoordinationRuntimeError('invalid-request', 'semantic replay corpus must be a bounded regular file');
+    return { dev: metadata.dev, ino: metadata.ino, size: metadata.size, mtimeMs: metadata.mtimeMs, ctimeMs: metadata.ctimeMs };
+}
+function sameReplayFileIdentity(left, right) {
+    return left.dev === right.dev && left.ino === right.ino && left.size === right.size && left.mtimeMs === right.mtimeMs && left.ctimeMs === right.ctimeMs;
+}
+async function* semanticReplayLines(path, descriptor) {
+    const stream = descriptor === undefined ? createReadStream(path, { encoding: 'utf8' }) : null;
+    async function* chunks() {
+        if (stream !== null) {
+            for await (const chunk of stream)
+                yield chunk;
+            return;
+        }
+        if (descriptor === undefined)
+            return;
+        const bytes = Buffer.allocUnsafe(1024 * 1024);
+        const decoder = new TextDecoder('utf-8', { fatal: true });
+        for (;;) {
+            const count = readSync(descriptor, bytes, 0, bytes.length, null);
+            if (count === 0)
+                break;
+            yield decoder.decode(bytes.subarray(0, count), { stream: true });
+        }
+        const tail = decoder.decode();
+        if (tail.length > 0)
+            yield tail;
+    }
+    let buffered = '';
+    try {
+        for await (const chunk of chunks()) {
+            buffered += chunk;
+            for (;;) {
+                const newline = buffered.indexOf('\n');
+                if (newline < 0)
+                    break;
+                const line = buffered.slice(0, newline);
+                buffered = buffered.slice(newline + 1);
+                if (Buffer.byteLength(line, 'utf8') > COORDINATOR_MAX_SEMANTIC_REPLAY_LINE_BYTES)
+                    throw new CoordinationRuntimeError('invalid-request', 'semantic replay record exceeds its per-record byte bound');
+                yield line;
+            }
+            if (Buffer.byteLength(buffered, 'utf8') > COORDINATOR_MAX_SEMANTIC_REPLAY_LINE_BYTES)
+                throw new CoordinationRuntimeError('invalid-request', 'semantic replay record exceeds its per-record byte bound');
+        }
+        if (buffered.length > 0)
+            throw new CoordinationRuntimeError('invalid-request', 'semantic replay corpus must end with a newline');
+    }
+    finally {
+        stream?.destroy();
+    }
+}
+export async function stageCoordinatorSemanticReplay(paths, replayId, records) {
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(replayId))
+        throw new CoordinationRuntimeError('invalid-request', 'semantic replay id is invalid');
+    await ensureSemanticReplayRoots(paths);
+    if (existsSync(paths.semanticReplayPath))
+        throw new CoordinationRuntimeError('invalid-state', 'a semantic replay corpus is already pending', [paths.semanticReplayPath]);
+    const suffix = `${String(process.pid)}.${Date.now().toString(16)}`;
+    const bodyPath = `${paths.semanticReplayPath}.${suffix}.body`;
+    const candidatePath = `${paths.semanticReplayPath}.${suffix}.candidate`;
+    let body = null;
+    let candidate = null;
+    try {
+        body = await openFile(bodyPath, 'wx', 0o600);
+        await enforcePrivateAuthorityPath(bodyPath, false);
+        const hash = createHash('sha256');
+        let count = 0;
+        let bytes = 0;
+        let buffered = '';
+        let bufferedBytes = 0;
+        for await (const input of records) {
+            const record = parseSemanticReplayRecord(input, `semantic replay record ${String(count + 1)}`);
+            const line = `${canonicalJson(record)}\n`;
+            count += 1;
+            const lineBytes = Buffer.byteLength(line, 'utf8');
+            bytes += lineBytes;
+            if (lineBytes > COORDINATOR_MAX_SEMANTIC_REPLAY_LINE_BYTES || count > COORDINATOR_MAX_SEMANTIC_REPLAY_RECORDS || bytes > COORDINATOR_MAX_SEMANTIC_REPLAY_BYTES)
+                throw new CoordinationRuntimeError('invalid-request', 'semantic replay corpus exceeds its record or byte bound');
+            hash.update(line, 'utf8');
+            buffered += line;
+            bufferedBytes += lineBytes;
+            if (bufferedBytes >= 1024 * 1024) {
+                await body.writeFile(buffered, 'utf8');
+                buffered = '';
+                bufferedBytes = 0;
+            }
+        }
+        if (buffered.length > 0)
+            await body.writeFile(buffered, 'utf8');
+        if (count === 0)
+            throw new CoordinationRuntimeError('invalid-request', 'semantic replay corpus must not be empty');
+        await body.sync();
+        const recordsSha256 = `sha256:${hash.digest('hex')}`;
+        const header = { schema_version: COORDINATOR_SEMANTIC_REPLAY_SCHEMA, replay_id: replayId, record_count: count, records_sha256: recordsSha256 };
+        const headerLine = `${canonicalJson(header)}\n`;
+        if (bytes + Buffer.byteLength(headerLine, 'utf8') > COORDINATOR_MAX_SEMANTIC_REPLAY_BYTES)
+            throw new CoordinationRuntimeError('invalid-request', 'semantic replay corpus exceeds its total byte bound');
+        candidate = await openFile(candidatePath, 'wx', 0o600);
+        await enforcePrivateAuthorityPath(candidatePath, false);
+        await candidate.writeFile(headerLine, 'utf8');
+        const source = await openFile(bodyPath, 'r');
+        try {
+            const buffer = Buffer.allocUnsafe(1024 * 1024);
+            for (;;) {
+                const read = await source.read(buffer, 0, buffer.length, null);
+                if (read.bytesRead === 0)
+                    break;
+                await candidate.write(buffer.subarray(0, read.bytesRead));
+            }
+        }
+        finally {
+            await source.close();
+        }
+        await candidate.sync();
+        await candidate.close();
+        candidate = null;
+        await body.close();
+        body = null;
+        try {
+            await link(candidatePath, paths.semanticReplayPath);
+            // The hard link inherits the already-private file object, but enforce and
+            // verify the final authority name explicitly before publishing durability.
+            await enforcePrivateAuthorityPath(paths.semanticReplayPath, false);
+            syncParentDirectory(paths.semanticReplayPath);
+        }
+        catch (error) {
+            if (error instanceof Error && 'code' in error && error.code === 'EEXIST')
+                throw new CoordinationRuntimeError('invalid-state', 'a semantic replay corpus became pending during staging', [paths.semanticReplayPath]);
+            throw error;
+        }
+        await unlink(candidatePath);
+        await unlink(bodyPath);
+        return { record_count: count, records_sha256: recordsSha256 };
+    }
+    catch (error) {
+        if (candidate !== null)
+            await candidate.close().catch(() => undefined);
+        if (body !== null)
+            await body.close().catch(() => undefined);
+        await unlink(candidatePath).catch(() => undefined);
+        await unlink(bodyPath).catch(() => undefined);
+        throw error;
+    }
+}
+/** Stages operator-supplied canonical request JSONL through the same bounded
+ * production producer used by startup recovery. The source is opened once and
+ * must remain the same regular file for the complete staging pass. */
+export async function stageCoordinatorSemanticReplayFile(paths, replayId, inputPath) {
+    const sourcePath = resolve(inputPath);
+    const metadata = lstatSync(sourcePath);
+    if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size < 2 || metadata.size > COORDINATOR_MAX_SEMANTIC_REPLAY_BYTES)
+        throw new CoordinationRuntimeError('invalid-request', 'semantic replay source must be a bounded regular non-symbolic file', [sourcePath]);
+    const descriptor = openSync(sourcePath, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
+    const before = replayFileIdentity(descriptor);
+    async function* records() {
+        for await (const line of semanticReplayLines(sourcePath, descriptor))
+            yield parseSemanticReplayLine(line, 'operator semantic replay record');
+        if (!sameReplayFileIdentity(before, replayFileIdentity(descriptor)))
+            throw new CoordinationRuntimeError('invalid-request', 'semantic replay source changed while it was staged', [sourcePath]);
+    }
+    try {
+        return await stageCoordinatorSemanticReplay(paths, replayId, records());
+    }
+    finally {
+        closeSync(descriptor);
+    }
+}
 function requestDigest(request) {
     const runOwnedIdempotency = RUN_OWNED_IDEMPOTENCY_ACTIONS.has(request.action);
     const payload = runOwnedIdempotency
@@ -443,9 +823,12 @@ function runFromRow(row) {
         version: sqlInteger(row, 'version'),
     });
 }
+function runResourceFromRow(row) {
+    return parseCoordinationRunResource(parseJsonObject(sqlString(row, 'payload_json'), 'run resource'));
+}
 function sessionFromRow(row) {
     return parseCoordinationSessionLease({
-        schema_version: 'autopilot.session_lease.v1',
+        schema_version: 'autopilot.session_lease.v2',
         session_lease_id: sqlString(row, 'session_lease_id'),
         repo_id: sqlString(row, 'repo_id'),
         workstream_run: sqlString(row, 'workstream_run'),
@@ -454,6 +837,7 @@ function sessionFromRow(row) {
         pid: sqlInteger(row, 'pid'),
         boot_id: sqlString(row, 'boot_id'),
         lease_expires_at: sqlString(row, 'lease_expires_at'),
+        attachment_kind: sqlString(row, 'attachment_kind'),
         status: sqlString(row, 'status'),
         attached_event_seq: sqlInteger(row, 'attached_event_seq'),
         version: sqlInteger(row, 'version'),
@@ -558,12 +942,74 @@ function messageFromRow(row) {
         version: sqlInteger(row, 'version'),
     });
 }
+function eventFromRow(row) {
+    return parseCoordinationEvent({
+        schema_version: 'autopilot.coordination_event.v1',
+        repo_id: sqlString(row, 'repo_id'),
+        event_seq: sqlInteger(row, 'event_seq'),
+        event_type: sqlString(row, 'event_type'),
+        entity_type: sqlString(row, 'entity_type'),
+        entity_id: sqlString(row, 'entity_id'),
+        idempotency_key: sqlString(row, 'idempotency_key'),
+        request_sha256: sqlString(row, 'request_sha256'),
+        occurred_at: sqlString(row, 'occurred_at'),
+    });
+}
+function migrationRecordFromRow(row) {
+    return Object.freeze({
+        schema_version: 'autopilot.coordination_migration_record.v1',
+        repo_id: sqlString(row, 'repo_id'),
+        migration_id: sqlString(row, 'migration_id'),
+        snapshot_sha256: sqlString(row, 'snapshot_sha256'),
+        journal_path: sqlString(row, 'journal_path'),
+        state: sqlString(row, 'state'),
+        report: parseJsonObject(sqlString(row, 'report_json'), 'migration report'),
+        imported_at: sqlString(row, 'imported_at'),
+        updated_at: sqlString(row, 'updated_at'),
+        version: sqlInteger(row, 'version'),
+    });
+}
+function migrationRecoveryFromRow(row) {
+    const resolutionJson = sqlNullableString(row, 'resolution_json');
+    return parseCoordinationMigrationRecoveryWork({
+        schema_version: 'autopilot.migration_recovery_work.v2',
+        recovery_id: sqlString(row, 'entity_id'),
+        repo_id: sqlString(row, 'repo_id'),
+        workstream_run: sqlString(row, 'workstream_run'),
+        recovery_type: sqlString(row, 'recovery_type'),
+        detail: parseJsonObject(sqlString(row, 'payload_json'), 'migration recovery detail'),
+        status: sqlString(row, 'status'),
+        resolution: resolutionJson === null ? null : parseJsonObject(resolutionJson, 'migration recovery resolution'),
+        created_event_seq: sqlInteger(row, 'created_event_seq'),
+        resolved_event_seq: sqlNullableInteger(row, 'resolved_event_seq'),
+        version: sqlInteger(row, 'version'),
+    });
+}
 function integrityResult(db) {
     const row = asRow(db.prepare('PRAGMA integrity_check').get(), 'integrity_check');
     const value = row['integrity_check'];
     if (typeof value !== 'string')
         throw new CoordinationRuntimeError('store-corrupt', 'integrity check returned an invalid result');
     return value;
+}
+function migrationRecoveryCoversRetainedAuthority(db, repoId, finding) {
+    const pendingLeaseIds = (workstreamRun) => new Set(db.prepare("SELECT payload_json FROM migration_recovery_work WHERE repo_id=? AND workstream_run=? AND recovery_type='ambiguous-live-claim' AND status='pending' ORDER BY entity_id").all(repoId, workstreamRun).map((row) => {
+        const detail = parseJsonObject(sqlString(row, 'payload_json'), 'pending migration recovery detail');
+        const leaseId = detail['edit_lease_id'];
+        if (typeof leaseId !== 'string')
+            throw new CoordinationRuntimeError('store-corrupt', 'pending migration recovery lacks an exact edit lease identity');
+        return leaseId;
+    }));
+    if (finding.code === 'terminal-attempt-retains-edit-lease') {
+        const row = db.prepare('SELECT workstream_run FROM edit_leases WHERE repo_id=? AND entity_id=?').get(repoId, finding.entity);
+        return row !== undefined && pendingLeaseIds(sqlString(row, 'workstream_run')).has(finding.entity);
+    }
+    if (finding.code === 'terminal-run-retains-edit-leases') {
+        const actual = db.prepare('SELECT entity_id FROM edit_leases WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(repoId, finding.entity).map((row) => sqlString(row, 'entity_id'));
+        const covered = pendingLeaseIds(finding.entity);
+        return actual.length > 0 && actual.every((leaseId) => covered.has(leaseId));
+    }
+    return false;
 }
 function sqliteFailure(error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -583,22 +1029,47 @@ export class CoordinatorStore {
     #stateRoot;
     #lastBackupPath;
     #lastStartupReconciliation = null;
-    constructor(db, clock, stateRoot, lastBackupPath) {
+    #semanticReplayTransactionActive = false;
+    #semanticReplayGraphlessRepositories = new Set();
+    #onSemanticReplayBoundary;
+    #idempotencyLookup;
+    #insertEvent;
+    #insertIdempotencyResult;
+    #incrementRepositorySequence;
+    #runByIdentity;
+    #attachedSessionByIdentity;
+    #sessionByLeaseId;
+    #pendingMigrationRecoveryByRun;
+    #updateSessionHeartbeat;
+    constructor(db, clock, stateRoot, lastBackupPath, options) {
         this.#db = db;
         this.#clock = clock;
         this.#stateRoot = stateRoot;
         this.#lastBackupPath = lastBackupPath;
+        this.#onSemanticReplayBoundary = options.onSemanticReplayBoundary;
+        this.#idempotencyLookup = db.prepare('SELECT request_sha256, committed_event_seq, payload_json FROM idempotency_results WHERE repo_id=? AND idempotency_key=?');
+        this.#insertEvent = db.prepare('INSERT INTO events(repo_id, event_seq, event_type, entity_type, entity_id, idempotency_key, request_sha256, occurred_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?)');
+        this.#insertIdempotencyResult = db.prepare('INSERT INTO idempotency_results(repo_id, idempotency_key, request_sha256, committed_event_seq, payload_json) VALUES(?, ?, ?, ?, ?)');
+        this.#incrementRepositorySequence = db.prepare('UPDATE repositories SET event_seq=event_seq+1 WHERE repo_id=? RETURNING event_seq');
+        this.#runByIdentity = db.prepare('SELECT * FROM runs WHERE repo_id=? AND workstream_run=?');
+        this.#attachedSessionByIdentity = db.prepare("SELECT * FROM session_leases WHERE repo_id=? AND workstream_run=? AND session_id=? AND session_generation=? AND status='attached'");
+        this.#sessionByLeaseId = db.prepare('SELECT * FROM session_leases WHERE session_lease_id=?');
+        this.#pendingMigrationRecoveryByRun = db.prepare("SELECT * FROM migration_recovery_work WHERE repo_id=? AND workstream_run=? AND status='pending' ORDER BY entity_id");
+        this.#updateSessionHeartbeat = db.prepare('UPDATE session_leases SET lease_expires_at=?, version=version+1 WHERE session_lease_id=?');
     }
-    static async open(paths, clock = systemClock) {
+    static async open(paths, clock = systemClock, options = {}) {
         try {
-            await mkdir(paths.coordinatorRoot, { recursive: true, mode: 0o700 });
+            await ensureCoordinatorPrivateRoots(paths);
+            await ensureSemanticReplayRoots(paths);
             await mkdir(paths.backupsRoot, { recursive: true, mode: 0o700 });
+            assertPrivateDirectory(paths.backupsRoot, 'coordinator backups root');
         }
         catch (error) {
             throw sqliteFailure(error);
         }
         let existed;
         try {
+            assertPrivatePathNoAliases(paths.databasePath);
             existed = existsSync(paths.databasePath) && statSync(paths.databasePath).size > 0;
         }
         catch (error) {
@@ -613,17 +1084,20 @@ export class CoordinatorStore {
         }
         let lastBackupPath = null;
         try {
-            db.exec(`PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=${String(COORDINATOR_BUSY_TIMEOUT_MS)}; PRAGMA trusted_schema=OFF;`);
+            db.exec(`PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA temp_store=FILE; PRAGMA busy_timeout=${String(COORDINATOR_BUSY_TIMEOUT_MS)}; PRAGMA trusted_schema=OFF;`);
             if (integrityResult(db) !== 'ok')
                 throw new CoordinationRuntimeError('store-corrupt', 'coordinator database failed startup integrity check');
             const versionRow = asRow(db.prepare('PRAGMA user_version').get(), 'user_version');
             const currentVersion = sqlInteger(versionRow, 'user_version');
             if (currentVersion > COORDINATOR_DATABASE_SCHEMA_VERSION)
                 throw new CoordinationRuntimeError('schema-mismatch', `database schema ${String(currentVersion)} is newer than supported schema ${String(COORDINATOR_DATABASE_SCHEMA_VERSION)}`);
+            if (currentVersion === 6 && existed && options.allowExistingSchemaMigration !== true)
+                throw new CoordinationRuntimeError('schema-mismatch', 'existing predecessor schema 6 requires the private verified migration path; in-place server migration is forbidden');
             if (currentVersion < COORDINATOR_DATABASE_SCHEMA_VERSION && existed) {
                 const stamp = clock.now().toISOString().replace(/[-:.]/gu, '');
                 lastBackupPath = join(paths.backupsRoot, `coordinator.pre-v${String(currentVersion)}.${stamp}.db`);
                 await backup(db, lastBackupPath);
+                await enforcePrivateAuthorityPath(lastBackupPath, false);
                 const backupDb = new DatabaseSync(lastBackupPath, { readOnly: true });
                 try {
                     if (integrityResult(backupDb) !== 'ok')
@@ -640,6 +1114,9 @@ export class CoordinatorStore {
                 { version: 4, sql: MIGRATION_4 },
                 { version: 5, sql: MIGRATION_5 },
                 { version: 6, sql: MIGRATION_6 },
+                { version: 7, sql: MIGRATION_7 },
+                { version: 8, sql: MIGRATION_8 },
+                { version: 9, sql: MIGRATION_9 },
             ];
             for (const migration of migrations) {
                 if (currentVersion >= migration.version)
@@ -671,9 +1148,9 @@ export class CoordinatorStore {
             }
             if (integrityResult(db) !== 'ok')
                 throw new CoordinationRuntimeError('store-corrupt', 'coordinator database failed post-migration integrity check');
-            if (platform() !== 'win32')
-                chmodSync(paths.databasePath, 0o600);
-            const store = new CoordinatorStore(db, clock, paths.stateRoot, lastBackupPath);
+            await enforcePrivateAuthorityPath(paths.databasePath, false);
+            const store = new CoordinatorStore(db, clock, paths.stateRoot, lastBackupPath, options);
+            await store.#replayPendingSemanticEvents(paths);
             store.#recoverDurableTransitionsAfterStartup();
             return store;
         }
@@ -687,7 +1164,444 @@ export class CoordinatorStore {
     close() {
         this.#db.close();
     }
+    integrity() {
+        return integrityResult(this.#db);
+    }
+    replaySemanticEventBatch(records) {
+        if (records.length < 1 || records.length > COORDINATOR_SEMANTIC_REPLAY_BATCH_SIZE)
+            throw new CoordinationRuntimeError('invalid-request', 'semantic replay batch size is outside the production bound');
+        if (this.#semanticReplayTransactionActive)
+            throw new CoordinationRuntimeError('invalid-state', 'nested semantic replay transactions are forbidden');
+        const parsed = records.map((record, index) => parseSemanticReplayRecord(record, `semantic replay batch record ${String(index + 1)}`));
+        this.#db.exec('BEGIN IMMEDIATE');
+        this.#semanticReplayTransactionActive = true;
+        try {
+            const results = this.#reduceSemanticReplayRecords(parsed, true);
+            this.#db.exec('COMMIT');
+            return results;
+        }
+        catch (error) {
+            this.#db.exec('ROLLBACK');
+            throw error;
+        }
+        finally {
+            this.#semanticReplayTransactionActive = false;
+            this.#semanticReplayGraphlessRepositories.clear();
+        }
+    }
+    #reduceSemanticReplayRecords(records, trackReplayState) {
+        const results = [];
+        for (const record of records) {
+            if (record.action !== 'heartbeat')
+                this.#semanticReplayGraphlessRepositories.delete(record.repo_id);
+            const prior = trackReplayState ? this.#db.prepare('SELECT event_seq FROM events WHERE repo_id=? AND idempotency_key=?').get(record.repo_id, record.idempotency_key) : undefined;
+            const response = this.handle(record);
+            if (!response.ok || response.committed_event_seq === null)
+                throw new CoordinationRuntimeError('invalid-state', 'semantic replay reducer rejected a request', [record.request_id, String(response.error_code), String(response.payload['message'] ?? '')]);
+            if (trackReplayState)
+                results.push({ committed_event_seq: response.committed_event_seq, replayed: prior !== undefined });
+        }
+        return Object.freeze(results);
+    }
+    async #semanticReplayBoundary(boundary) {
+        await this.#onSemanticReplayBoundary?.(boundary);
+    }
+    #allInvariantFindings() {
+        const findings = [];
+        for (const row of this.#db.prepare('SELECT repo_id FROM repositories ORDER BY repo_id').all())
+            findings.push(...checkCoordinationInvariants(this.#snapshotForRepository(sqlString(row, 'repo_id'))));
+        return Object.freeze(findings);
+    }
+    #semanticReplayCompletion(header) {
+        const row = this.#db.prepare('SELECT replay_id, record_count, records_sha256, applied_at FROM semantic_replays WHERE replay_id=?').get(header.replay_id);
+        if (row === undefined)
+            return null;
+        const receipt = {
+            schema_version: 'autopilot.coordinator_semantic_replay_receipt.v1', replay_id: sqlString(row, 'replay_id'),
+            record_count: sqlInteger(row, 'record_count'), records_sha256: sqlString(row, 'records_sha256'), applied_at: sqlString(row, 'applied_at'),
+        };
+        if (!sameSemanticReplayIdentity(receipt, header))
+            throw new CoordinationRuntimeError('idempotency-conflict', 'semantic replay id was reused with a different corpus identity', [header.replay_id]);
+        return parseSemanticReplayReceipt(canonicalJson(receipt), 'semantic_replays database row');
+    }
+    async #projectSemanticReplayReceipt(paths, receipt) {
+        await ensureSemanticReplayRoots(paths);
+        const receiptPath = semanticReplayReceiptPath(paths, receipt.replay_id);
+        const temporaryReceipt = join(paths.semanticReplayReceiptsRoot, `.${receipt.replay_id}.${String(process.pid)}.${Date.now().toString(16)}.tmp`);
+        const descriptor = openSync(temporaryReceipt, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | (fsConstants.O_NOFOLLOW ?? 0), 0o600);
+        try {
+            writeSync(descriptor, `${canonicalJson(receipt)}\n`);
+            fsyncSync(descriptor);
+        }
+        finally {
+            closeSync(descriptor);
+        }
+        try {
+            if (existsSync(receiptPath)) {
+                const existing = lstatSync(receiptPath);
+                if (existing.isDirectory())
+                    throw new CoordinationRuntimeError('permission-denied', 'semantic replay receipt projection refuses to replace a directory', [receiptPath]);
+                if (platform() === 'win32')
+                    await unlink(receiptPath);
+            }
+            await rename(temporaryReceipt, receiptPath);
+            syncParentDirectory(receiptPath);
+            const projected = lstatSync(receiptPath);
+            if (!projected.isFile() || projected.isSymbolicLink() || projected.size < 2 || projected.size > 4_096)
+                throw new CoordinationRuntimeError('invalid-state', 'semantic replay receipt projection is not a bounded regular file', [receiptPath]);
+            const parsed = parseSemanticReplayReceipt(readFileSync(receiptPath, 'utf8'), receiptPath);
+            if (canonicalJson(parsed) !== canonicalJson(receipt))
+                throw new CoordinationRuntimeError('invalid-state', 'semantic replay receipt projection disagrees with database completion', [receiptPath]);
+        }
+        finally {
+            await unlink(temporaryReceipt).catch(() => undefined);
+        }
+    }
+    async #removeSemanticReplayInbox(paths, expected) {
+        if (!existsSync(paths.semanticReplayPath))
+            return;
+        const descriptor = openSync(paths.semanticReplayPath, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
+        try {
+            if (!sameReplayFileIdentity(expected, replayFileIdentity(descriptor)))
+                throw new CoordinationRuntimeError('invalid-state', 'semantic replay inbox changed after validation; replacement input was preserved', [paths.semanticReplayPath]);
+        }
+        finally {
+            closeSync(descriptor);
+        }
+        await unlink(paths.semanticReplayPath);
+        syncParentDirectory(paths.semanticReplayPath);
+    }
+    async #replayPendingSemanticEvents(paths) {
+        if (!existsSync(paths.semanticReplayPath))
+            return;
+        await ensureSemanticReplayRoots(paths);
+        const descriptor = openSync(paths.semanticReplayPath, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
+        const initialIdentity = replayFileIdentity(descriptor);
+        let transactionOpen = false;
+        let header = null;
+        let receipt = null;
+        try {
+            this.#db.exec('CREATE TEMP TABLE IF NOT EXISTS semantic_replay_stage_work (replay_id TEXT NOT NULL, ordinal INTEGER NOT NULL CHECK(ordinal >= 1 AND ordinal <= 100000), record_json TEXT NOT NULL, PRIMARY KEY(replay_id, ordinal)) STRICT, WITHOUT ROWID; DELETE FROM semantic_replay_stage_work;');
+            this.#db.exec('BEGIN IMMEDIATE');
+            transactionOpen = true;
+            this.#semanticReplayTransactionActive = true;
+            let count = 0;
+            const hash = createHash('sha256');
+            for await (const line of semanticReplayLines(paths.semanticReplayPath, descriptor)) {
+                if (header === null) {
+                    header = parseSemanticReplayHeader(line);
+                    continue;
+                }
+                const record = parseSemanticReplayLine(line, `semantic replay record ${String(count + 1)}`);
+                count += 1;
+                if (count > COORDINATOR_MAX_SEMANTIC_REPLAY_RECORDS)
+                    throw new CoordinationRuntimeError('invalid-request', 'semantic replay corpus exceeds its record bound');
+                hash.update(`${line}\n`, 'utf8');
+                this.#db.prepare('INSERT INTO semantic_replay_stage_work(replay_id, ordinal, record_json) VALUES(?, ?, ?)').run(header.replay_id, count, canonicalJson(record));
+            }
+            if (header === null || count !== header.record_count || `sha256:${hash.digest('hex')}` !== header.records_sha256)
+                throw new CoordinationRuntimeError('invalid-request', 'semantic replay corpus count or digest does not match its header');
+            if (!sameReplayFileIdentity(initialIdentity, replayFileIdentity(descriptor)))
+                throw new CoordinationRuntimeError('invalid-request', 'semantic replay corpus changed during validation', [paths.semanticReplayPath]);
+            await this.#semanticReplayBoundary('stage-validated');
+            receipt = this.#semanticReplayCompletion(header);
+            if (receipt === null) {
+                for (let first = 1; first <= header.record_count; first += COORDINATOR_SEMANTIC_REPLAY_BATCH_SIZE) {
+                    const rows = this.#db.prepare('SELECT record_json FROM semantic_replay_stage_work WHERE replay_id=? AND ordinal>=? ORDER BY ordinal LIMIT ?').all(header.replay_id, first, COORDINATOR_SEMANTIC_REPLAY_BATCH_SIZE);
+                    const records = rows.map((row, index) => parseSemanticReplayLine(sqlString(row, 'record_json'), `staged semantic replay record ${String(first + index)}`));
+                    this.#reduceSemanticReplayRecords(records, false);
+                    await this.#semanticReplayBoundary('batch-applied');
+                }
+                await this.#semanticReplayBoundary('records-applied');
+                if (integrityResult(this.#db) !== 'ok')
+                    throw new CoordinationRuntimeError('store-corrupt', 'coordinator database failed integrity after semantic replay');
+                const invariantErrors = this.#allInvariantFindings().filter((finding) => finding.severity === 'error');
+                if (invariantErrors.length > 0)
+                    throw new CoordinationRuntimeError('invalid-state', 'semantic replay violates coordinator invariants', invariantErrors.slice(0, 100).map((finding) => `${finding.code}:${finding.entity}:${finding.detail}`));
+                receipt = { schema_version: 'autopilot.coordinator_semantic_replay_receipt.v1', replay_id: header.replay_id, record_count: header.record_count, records_sha256: header.records_sha256, applied_at: this.#clock.now().toISOString() };
+                this.#db.prepare('INSERT INTO semantic_replays(replay_id, record_count, records_sha256, applied_at) VALUES(?, ?, ?, ?)').run(receipt.replay_id, receipt.record_count, receipt.records_sha256, receipt.applied_at);
+            }
+            this.#db.prepare('DELETE FROM semantic_replay_stage_work WHERE replay_id=?').run(header.replay_id);
+            this.#db.exec('COMMIT');
+            transactionOpen = false;
+            this.#semanticReplayTransactionActive = false;
+            this.#semanticReplayGraphlessRepositories.clear();
+            await this.#semanticReplayBoundary('database-completed');
+        }
+        catch (error) {
+            if (transactionOpen)
+                this.#db.exec('ROLLBACK');
+            this.#semanticReplayTransactionActive = false;
+            this.#semanticReplayGraphlessRepositories.clear();
+            throw error;
+        }
+        finally {
+            closeSync(descriptor);
+        }
+        if (receipt === null)
+            throw new CoordinationRuntimeError('store-corrupt', 'semantic replay completion disappeared after commit');
+        await this.#projectSemanticReplayReceipt(paths, receipt);
+        await this.#semanticReplayBoundary('receipt-projected');
+        await this.#removeSemanticReplayInbox(paths, initialIdentity);
+        await this.#semanticReplayBoundary('inbox-cleaned');
+    }
+    async createVerifiedBackup(outputPath) {
+        const target = resolve(outputPath);
+        mkdirSync(dirname(target), { recursive: true, mode: 0o700 });
+        await backup(this.#db, target);
+        const backupDb = new DatabaseSync(target, { readOnly: true });
+        try {
+            if (integrityResult(backupDb) !== 'ok')
+                throw new CoordinationRuntimeError('store-corrupt', 'migration backup failed integrity verification', [target]);
+        }
+        finally {
+            backupDb.close();
+        }
+        if (platform() !== 'win32')
+            chmodSync(target, 0o600);
+        const sha256 = `sha256:${createHash('sha256').update(readFileSync(target)).digest('hex')}`;
+        this.#lastBackupPath = target;
+        return { path: target, sha256 };
+    }
+    importLegacyCoordination(plan) {
+        parseCoordinationRepository(plan.repository);
+        for (const run of plan.runs)
+            parseCoordinationRun(run);
+        for (const resource of plan.run_resources)
+            parseCoordinationRunResource(resource);
+        for (const attempt of plan.unit_attempts)
+            parseCoordinationUnitAttempt(attempt);
+        for (const group of plan.acquisition_groups)
+            parseCoordinationAcquisitionGroup(group);
+        for (const lease of plan.edit_leases)
+            parseCoordinationEditLease(lease);
+        for (const release of plan.terminal_releases) {
+            parseCoordinationRequestedLease({ path: release.path, mode: release.mode, purpose: 'migration terminal release proof' }, 'migration terminal release');
+            if (!SHA256_PATTERN.test(release.evidence_sha256) || release.evidence_ref.length === 0 || release.evidence_ref.length > 2048)
+                throw new CoordinationRuntimeError('invalid-request', 'migration terminal release evidence identity is invalid');
+        }
+        for (const reservation of plan.change_reservations)
+            parseCoordinationChangeReservation(reservation);
+        for (const obligation of plan.reservation_obligations)
+            parseCoordinationReservationObligation(obligation);
+        for (const evidence of plan.reconciliation_evidence)
+            parseCoordinationReconciliationEvidence(evidence);
+        for (const worktree of plan.worktrees)
+            parseCoordinationWorktree(worktree);
+        if (!SHA256_PATTERN.test(plan.snapshot_sha256))
+            throw new CoordinationRuntimeError('invalid-request', 'migration snapshot digest is invalid');
+        const existingMigration = this.#db.prepare('SELECT migration_id, snapshot_sha256, report_json FROM coordination_migrations WHERE repo_id=?').get(plan.repository.repo_id);
+        if (existingMigration !== undefined) {
+            if (sqlString(existingMigration, 'migration_id') !== plan.migration_id || sqlString(existingMigration, 'snapshot_sha256') !== plan.snapshot_sha256)
+                throw new CoordinationRuntimeError('idempotency-conflict', 'repository already has a different migration import');
+            return { committedEventSeq: null, payload: { schema_version: 'autopilot.coordination_migration_import_result.v1', replayed: true, report: parseJsonObject(sqlString(existingMigration, 'report_json'), 'migration report') } };
+        }
+        const now = this.#clock.now().toISOString();
+        let seq = 1;
+        let importedRunCount = 0;
+        let importedAttemptCount = 0;
+        let importedLeaseCount = 0;
+        let equivalentLeaseCount = 0;
+        let importedReservationCount = 0;
+        let importedWorktreeCount = 0;
+        let importedAuditCount = 0;
+        let recoveryWorkCount = 0;
+        this.#db.exec('BEGIN IMMEDIATE');
+        try {
+            const existingRepositoryRow = this.#db.prepare('SELECT * FROM repositories WHERE repo_id=?').get(plan.repository.repo_id);
+            if (existingRepositoryRow === undefined) {
+                this.#db.prepare('INSERT INTO repositories(repo_id, repo_key, canonical_root, git_common_dir, event_seq, created_event_seq, version) VALUES(?, ?, ?, ?, 1, 1, 1)').run(plan.repository.repo_id, plan.repository.repo_key, plan.repository.canonical_root, plan.repository.git_common_dir);
+            }
+            else {
+                const existingRepository = repositoryFromRow(existingRepositoryRow);
+                let samePhysicalRepository = false;
+                try {
+                    samePhysicalRepository = realpathSync(existingRepository.canonical_root) === realpathSync(plan.repository.canonical_root) && realpathSync(existingRepository.git_common_dir) === realpathSync(plan.repository.git_common_dir);
+                }
+                catch {
+                    samePhysicalRepository = false;
+                }
+                if (existingRepository.repo_key !== plan.repository.repo_key || !samePhysicalRepository)
+                    throw new CoordinationRuntimeError('invalid-state', 'legacy and coordinator repository identities disagree', [plan.repository.repo_id]);
+                seq = sqlInteger(existingRepositoryRow, 'event_seq') + 1;
+                this.#db.prepare('UPDATE repositories SET event_seq=? WHERE repo_id=?').run(seq, plan.repository.repo_id);
+            }
+            for (const run of plan.runs) {
+                const existingRunRow = this.#db.prepare('SELECT * FROM runs WHERE repo_id=? AND workstream_run=?').get(run.repo_id, run.workstream_run);
+                if (existingRunRow === undefined) {
+                    this.#db.prepare('INSERT INTO runs(repo_id, autopilot_id, workstream, workstream_run, coordination_authority, status, active_session_generation, created_event_seq, version) VALUES(?, ?, ?, ?, ?, ?, 0, ?, 1)').run(run.repo_id, run.autopilot_id, run.workstream, run.workstream_run, 'coordinator-edit-leases-v1', run.status, seq);
+                    importedRunCount += 1;
+                }
+                else {
+                    const existingRun = runFromRow(existingRunRow);
+                    if (existingRun.autopilot_id !== run.autopilot_id || existingRun.workstream !== run.workstream)
+                        throw new CoordinationRuntimeError('invalid-state', 'legacy run disagrees with existing coordinator identity', [run.workstream_run]);
+                    if (existingRun.coordination_authority === 'legacy-path-claims-v1')
+                        this.#db.prepare("UPDATE runs SET coordination_authority='coordinator-edit-leases-v1', version=version+1 WHERE repo_id=? AND workstream_run=?").run(run.repo_id, run.workstream_run);
+                    else if (existingRun.coordination_authority !== 'coordinator-edit-leases-v1')
+                        throw new CoordinationRuntimeError('invalid-state', 'existing coordinator run has an unsupported authority', [run.workstream_run]);
+                    if (run.status === 'recovering' && existingRun.status !== 'closed' && existingRun.status !== 'aborted')
+                        this.#db.prepare("UPDATE runs SET status='recovering', version=version+1 WHERE repo_id=? AND workstream_run=?").run(run.repo_id, run.workstream_run);
+                }
+                if (this.#db.prepare('SELECT repo_id FROM mailbox_cursors WHERE repo_id=? AND workstream_run=?').get(run.repo_id, run.workstream_run) === undefined)
+                    this.#db.prepare('INSERT INTO mailbox_cursors(repo_id, workstream_run, delivered_through_event_seq, acknowledged_through_event_seq, version) VALUES(?, ?, 0, 0, 1)').run(run.repo_id, run.workstream_run);
+            }
+            for (const resource of plan.run_resources) {
+                const row = this.#db.prepare('SELECT * FROM run_resources WHERE repo_id=? AND workstream_run=?').get(resource.repo_id, resource.workstream_run);
+                if (row === undefined)
+                    this.#db.prepare('INSERT INTO run_resources(entity_id, repo_id, workstream_run, payload_json, version) VALUES(?, ?, ?, ?, ?)').run(`run-resource:${resource.repo_id}:${resource.workstream_run}`, resource.repo_id, resource.workstream_run, canonicalJson(resource), resource.version);
+                else if (canonicalJson(runResourceFromRow(row)) !== canonicalJson(resource))
+                    throw new CoordinationRuntimeError('invalid-state', 'legacy run resource disagrees with existing coordinator resource', [resource.workstream_run]);
+            }
+            for (const attempt of plan.unit_attempts) {
+                const entityId = unitAttemptEntityId(attempt.owner);
+                const row = this.#db.prepare('SELECT * FROM unit_attempts WHERE entity_id=?').get(entityId);
+                if (row === undefined) {
+                    this.#db.prepare('INSERT INTO unit_attempts(entity_id, repo_id, workstream_run, payload_json, version) VALUES(?, ?, ?, ?, ?)').run(entityId, attempt.owner.repo_id, attempt.owner.workstream_run, canonicalJson(attempt), attempt.version);
+                    importedAttemptCount += 1;
+                }
+                else {
+                    const existingAttempt = unitAttemptFromRow(row);
+                    if (coordinationOwnerKey(existingAttempt.owner) !== coordinationOwnerKey(attempt.owner))
+                        throw new CoordinationRuntimeError('invalid-state', 'legacy attempt disagrees with existing coordinator owner', [entityId]);
+                }
+            }
+            const terminallyReleasedLeaseIds = [];
+            for (const release of plan.terminal_releases) {
+                const matches = this.#db.prepare('SELECT * FROM edit_leases WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(release.owner.repo_id, release.owner.workstream_run).map(editLeaseFromRow).filter((lease) => coordinationOwnerKey(lease.owner) === coordinationOwnerKey(release.owner) && lease.path === release.path && lease.mode === release.mode);
+                for (const lease of matches)
+                    this.#releaseOwnedLease(release.owner.repo_id, release.owner.workstream_run, lease.edit_lease_id, terminallyReleasedLeaseIds);
+            }
+            const existingLeases = this.#db.prepare('SELECT * FROM edit_leases WHERE repo_id=? ORDER BY entity_id').all(plan.repository.repo_id).map(editLeaseFromRow);
+            for (const group of plan.acquisition_groups) {
+                const existingRunRow = this.#db.prepare('SELECT * FROM runs WHERE repo_id=? AND workstream_run=?').get(group.owner.repo_id, group.owner.workstream_run);
+                const existingAttemptRow = this.#db.prepare('SELECT * FROM unit_attempts WHERE entity_id=?').get(unitAttemptEntityId(group.owner));
+                if (existingRunRow === undefined || existingAttemptRow === undefined)
+                    throw new CoordinationRuntimeError('invalid-state', 'migration authority owner disappeared during transactional reconciliation', [group.owner.workstream_run, group.owner.unit_id]);
+                const groupLeases = plan.edit_leases.filter((lease) => lease.acquisition_group_id === group.acquisition_group_id);
+                const uncovered = groupLeases.filter((lease) => !existingLeases.some((candidate) => coordinationOwnerKey(candidate.owner) === coordinationOwnerKey(lease.owner) && candidate.path === lease.path && candidate.mode === lease.mode));
+                equivalentLeaseCount += groupLeases.length - uncovered.length;
+                if (uncovered.length === 0)
+                    continue;
+                const adjusted = parseCoordinationAcquisitionGroup({ ...group, requested_leases: uncovered.map((lease) => ({ path: lease.path, mode: lease.mode, purpose: lease.purpose })), created_event_seq: seq, fairness_event_seq: seq, grant_event_seq: seq });
+                if (this.#db.prepare('SELECT entity_id FROM acquisition_groups WHERE entity_id=?').get(adjusted.acquisition_group_id) !== undefined)
+                    throw new CoordinationRuntimeError('invalid-state', 'migration acquisition group id collides with existing coordinator state', [adjusted.acquisition_group_id]);
+                this.#db.prepare('INSERT INTO acquisition_groups(entity_id, repo_id, workstream_run, payload_json, version) VALUES(?, ?, ?, ?, ?)').run(adjusted.acquisition_group_id, adjusted.owner.repo_id, adjusted.owner.workstream_run, canonicalJson(adjusted), adjusted.version);
+                for (const lease of uncovered) {
+                    if (this.#db.prepare('SELECT entity_id FROM edit_leases WHERE entity_id=?').get(lease.edit_lease_id) !== undefined)
+                        throw new CoordinationRuntimeError('invalid-state', 'migration lease id collides with existing coordinator state', [lease.edit_lease_id]);
+                    this.#db.prepare('INSERT INTO edit_leases(entity_id, repo_id, workstream_run, payload_json, version) VALUES(?, ?, ?, ?, ?)').run(lease.edit_lease_id, lease.owner.repo_id, lease.owner.workstream_run, canonicalJson({ ...lease, acquired_event_seq: seq }), lease.version);
+                    importedLeaseCount += 1;
+                }
+            }
+            for (const evidence of plan.reconciliation_evidence)
+                if (this.#db.prepare('SELECT entity_id FROM reconciliation_evidence WHERE entity_id=?').get(evidence.reconciliation_evidence_id) === undefined)
+                    this.#db.prepare('INSERT INTO reconciliation_evidence(entity_id, repo_id, workstream_run, source, target_id, payload_json, version) VALUES(?, ?, ?, ?, ?, ?, ?)').run(evidence.reconciliation_evidence_id, evidence.repo_id, evidence.workstream_run, evidence.source, evidence.release_condition.target_id, canonicalJson({ ...evidence, accepted_event_seq: seq }), evidence.version);
+            for (const reservation of plan.change_reservations) {
+                const reservationRun = this.#requireRun(reservation.repo_id, reservation.workstream_run);
+                if (reservationRun.status === 'closed' || reservationRun.status === 'aborted')
+                    continue;
+                const equivalent = this.#db.prepare("SELECT entity_id FROM change_reservations WHERE repo_id=? AND workstream_run=? AND json_extract(payload_json, '$.path')=?").get(reservation.repo_id, reservation.workstream_run, reservation.path);
+                if (equivalent === undefined) {
+                    this.#db.prepare('INSERT INTO change_reservations(entity_id, repo_id, workstream_run, payload_json, version) VALUES(?, ?, ?, ?, ?)').run(reservation.reservation_id, reservation.repo_id, reservation.workstream_run, canonicalJson({ ...reservation, created_event_seq: seq }), reservation.version);
+                    importedReservationCount += 1;
+                }
+            }
+            for (const obligation of plan.reservation_obligations)
+                if (this.#db.prepare('SELECT entity_id FROM reservation_obligations WHERE entity_id=?').get(obligation.obligation_id) === undefined && this.#db.prepare('SELECT entity_id FROM change_reservations WHERE entity_id=?').get(obligation.reservation_id) !== undefined && this.#db.prepare('SELECT entity_id FROM change_reservations WHERE entity_id=?').get(obligation.predecessor_reservation_id) !== undefined)
+                    this.#db.prepare('INSERT INTO reservation_obligations(entity_id, repo_id, workstream_run, reservation_id, predecessor_reservation_id, payload_json, version) VALUES(?, ?, ?, ?, ?, ?, ?)').run(obligation.obligation_id, obligation.repo_id, obligation.workstream_run, obligation.reservation_id, obligation.predecessor_reservation_id, canonicalJson({ ...obligation, created_event_seq: seq }), obligation.version);
+            for (const worktree of plan.worktrees) {
+                const existing = this.#db.prepare("SELECT * FROM worktrees WHERE repo_id=? AND workstream_run=? AND json_extract(payload_json, '$.owner.unit_id')=? AND json_extract(payload_json, '$.owner.attempt')=?").get(worktree.owner.repo_id, worktree.owner.workstream_run, worktree.owner.unit_id, worktree.owner.attempt);
+                if (existing === undefined) {
+                    this.#db.prepare('INSERT INTO worktrees(entity_id, repo_id, workstream_run, payload_json, version) VALUES(?, ?, ?, ?, ?)').run(worktree.worktree_id, worktree.owner.repo_id, worktree.owner.workstream_run, canonicalJson(worktree), worktree.version);
+                    importedWorktreeCount += 1;
+                }
+                else {
+                    const current = worktreeFromRow(existing);
+                    if (current.canonical_path !== worktree.canonical_path || current.git_common_dir !== worktree.git_common_dir || current.branch !== worktree.branch || current.kind !== worktree.kind)
+                        throw new CoordinationRuntimeError('invalid-state', 'legacy worktree disagrees with existing coordinator ownership', [worktree.worktree_id]);
+                }
+            }
+            for (const recovery of plan.recovery_work) {
+                if (this.#db.prepare('SELECT repo_id FROM runs WHERE repo_id=? AND workstream_run=?').get(plan.repository.repo_id, recovery.workstream_run) === undefined)
+                    throw new CoordinationRuntimeError('invalid-state', 'migration recovery work owner is missing', [recovery.recovery_id]);
+                if (this.#db.prepare('SELECT entity_id FROM migration_recovery_work WHERE entity_id=?').get(recovery.recovery_id) === undefined) {
+                    this.#db.prepare("INSERT INTO migration_recovery_work(entity_id, repo_id, workstream_run, recovery_type, payload_json, status, created_event_seq, version) VALUES(?, ?, ?, ?, ?, 'pending', ?, 1)").run(recovery.recovery_id, plan.repository.repo_id, recovery.workstream_run, recovery.recovery_type, canonicalJson(recovery.detail), seq);
+                    recoveryWorkCount += 1;
+                }
+                const messageId = `migration-message-${createHash('sha256').update(recovery.recovery_id, 'utf8').digest('hex').slice(0, 24)}`;
+                if (this.#db.prepare('SELECT message_id FROM messages WHERE message_id=?').get(messageId) === undefined)
+                    this.#db.prepare("INSERT INTO messages(message_id, repo_id, recipient_workstream_run, message_type, correlation_id, payload_json, status, created_event_seq, delivered_event_seq, acknowledged_event_seq, version) VALUES(?, ?, ?, 'recovery-required', ?, ?, 'pending', ?, NULL, NULL, 1)").run(messageId, plan.repository.repo_id, recovery.workstream_run, recovery.recovery_id, canonicalJson({ recovery_id: recovery.recovery_id, recovery_type: recovery.recovery_type, detail: recovery.detail }), seq);
+            }
+            for (const audit of plan.legacy_audit)
+                if (this.#db.prepare('SELECT entity_id FROM migration_legacy_audit WHERE entity_id=?').get(audit.audit_id) === undefined) {
+                    this.#db.prepare('INSERT INTO migration_legacy_audit(entity_id, repo_id, source_kind, payload_json, created_event_seq) VALUES(?, ?, ?, ?, ?)').run(audit.audit_id, plan.repository.repo_id, audit.source_kind, canonicalJson(audit.payload), seq);
+                    importedAuditCount += 1;
+                }
+            const exactReport = { ...plan.report, equivalent_lease_count: equivalentLeaseCount, imported_run_count: importedRunCount, imported_attempt_count: importedAttemptCount, imported_lease_count: importedLeaseCount, imported_reservation_count: importedReservationCount, imported_worktree_count: importedWorktreeCount, imported_audit_count: importedAuditCount, recovery_work_count: recoveryWorkCount };
+            if (exactReport.classified_claim_count !== exactReport.legacy_claim_count || exactReport.equivalent_lease_count + exactReport.imported_lease_count + exactReport.terminal_leak_count !== exactReport.legacy_claim_count)
+                throw new CoordinationRuntimeError('invalid-state', 'migration claim reconciliation did not classify every legacy authority claim', [canonicalJson(exactReport)]);
+            const idempotencyKey = `legacy-migration:${plan.migration_id}`;
+            this.#db.prepare('INSERT INTO events(repo_id, event_seq, event_type, entity_type, entity_id, idempotency_key, request_sha256, occurred_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?)').run(plan.repository.repo_id, seq, 'legacy-coordination-imported', 'migration', plan.migration_id, idempotencyKey, plan.snapshot_sha256, now);
+            this.#db.prepare("INSERT INTO coordination_migrations(repo_id, migration_id, snapshot_sha256, journal_path, state, report_json, imported_at, updated_at, version) VALUES(?, ?, ?, ?, 'imported', ?, ?, ?, 1)").run(plan.repository.repo_id, plan.migration_id, plan.snapshot_sha256, plan.journal_path, canonicalJson(exactReport), now, now);
+            const invariantFindings = checkCoordinationInvariants(this.#snapshotForRepository(plan.repository.repo_id)).filter((finding) => finding.severity === 'error' && !migrationRecoveryCoversRetainedAuthority(this.#db, plan.repository.repo_id, finding));
+            if (invariantFindings.length > 0)
+                throw new CoordinationRuntimeError('invalid-state', 'transactional legacy import violates coordinator invariants', invariantFindings.slice(0, 100).map((finding) => `${finding.code}:${finding.entity}:${finding.detail}`));
+            this.#db.exec('COMMIT');
+        }
+        catch (error) {
+            this.#db.exec('ROLLBACK');
+            throw error;
+        }
+        if (integrityResult(this.#db) !== 'ok')
+            throw new CoordinationRuntimeError('store-corrupt', 'coordinator database failed integrity after transactional legacy import');
+        const committedMigration = this.readMigrationImport(plan.repository.repo_id);
+        if (committedMigration === null)
+            throw new CoordinationRuntimeError('store-corrupt', 'committed migration report disappeared');
+        return { committedEventSeq: seq, payload: { schema_version: 'autopilot.coordination_migration_import_result.v1', replayed: false, report: committedMigration.report } };
+    }
+    readMigrationImport(repoId) {
+        const row = this.#db.prepare('SELECT migration_id, snapshot_sha256, state, report_json FROM coordination_migrations WHERE repo_id=?').get(repoId);
+        if (row === undefined)
+            return null;
+        const snapshot = sqlString(row, 'snapshot_sha256');
+        if (!SHA256_PATTERN.test(snapshot))
+            throw new CoordinationRuntimeError('store-corrupt', 'migration record snapshot digest is invalid');
+        const state = sqlString(row, 'state');
+        if (!['imported', 'verified', 'cutover-ready', 'cutover-committed', 'legacy-archived'].includes(state))
+            throw new CoordinationRuntimeError('store-corrupt', 'migration record state is invalid');
+        return { migration_id: sqlString(row, 'migration_id'), snapshot_sha256: snapshot, state: state, report: parseJsonObject(sqlString(row, 'report_json'), 'migration report') };
+    }
+    verifyMigrationImport(repoId, migrationId) {
+        const migration = this.#db.prepare('SELECT migration_id FROM coordination_migrations WHERE repo_id=?').get(repoId);
+        if (migration === undefined || sqlString(migration, 'migration_id') !== migrationId)
+            throw new CoordinationRuntimeError('invalid-state', 'migration import record is missing or mismatched');
+        const integrity = integrityResult(this.#db);
+        const findings = checkCoordinationInvariants(this.#snapshotForRepository(repoId));
+        const runCount = sqlInteger(asRow(this.#db.prepare("SELECT COUNT(*) AS count FROM runs WHERE repo_id=? AND status NOT IN ('closed','aborted')").get(repoId), 'migration run count'), 'count');
+        const resourceCount = sqlInteger(asRow(this.#db.prepare("SELECT COUNT(*) AS count FROM run_resources WHERE repo_id=? AND workstream_run IN (SELECT workstream_run FROM runs WHERE repo_id=? AND status NOT IN ('closed','aborted'))").get(repoId, repoId), 'migration resource count'), 'count');
+        if (runCount !== resourceCount)
+            throw new CoordinationRuntimeError('invalid-state', 'migration verification requires exactly one immutable run resource per run', [`runs=${String(runCount)}`, `resources=${String(resourceCount)}`]);
+        const errors = findings.filter((finding) => finding.severity === 'error' && !migrationRecoveryCoversRetainedAuthority(this.#db, repoId, finding));
+        if (integrity !== 'ok' || errors.length > 0)
+            throw new CoordinationRuntimeError('invalid-state', 'migration verification failed coordinator integrity or invariants', errors.slice(0, 100).map((finding) => `${finding.code}:${finding.entity}:${finding.detail}`));
+        return { integrity, invariant_findings: findings };
+    }
+    databaseDigest() {
+        this.#db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+        if (integrityResult(this.#db) !== 'ok')
+            throw new CoordinationRuntimeError('store-corrupt', 'database failed integrity before cutover digest');
+        return `sha256:${createHash('sha256').update(readFileSync(resolve(this.#stateRoot, 'coordinator', 'coordinator.db'))).digest('hex')}`;
+    }
+    updateMigrationState(repoId, migrationId, state, report) {
+        const row = this.#db.prepare('SELECT migration_id, version FROM coordination_migrations WHERE repo_id=?').get(repoId);
+        if (row === undefined || sqlString(row, 'migration_id') !== migrationId)
+            throw new CoordinationRuntimeError('invalid-state', 'migration import record is missing or mismatched');
+        this.#db.prepare('UPDATE coordination_migrations SET state=?, report_json=?, updated_at=?, version=version+1 WHERE repo_id=? AND migration_id=?').run(state, canonicalJson(report), this.#clock.now().toISOString(), repoId, migrationId);
+    }
     sweepExpiredGrantOffers() {
+        if (activeCoordinationMigrationFreeze(this.#stateRoot) !== null)
+            return 0;
         const now = this.#clock.now().toISOString();
         const repoRows = this.#db.prepare("SELECT DISTINCT repo_id FROM acquisition_groups WHERE json_extract(payload_json, '$.state')='grant-ready' AND json_extract(payload_json, '$.offer_expires_at')<=? ORDER BY repo_id").all(now);
         let expiredCount = 0;
@@ -730,14 +1644,14 @@ export class CoordinatorStore {
         const prior = this.#db.prepare('SELECT request_sha256, committed_event_seq, payload_json FROM idempotency_results WHERE repo_id=? AND idempotency_key=?').get(repoId, idempotencyKey);
         if (prior === undefined || sqlString(prior, 'request_sha256') !== digest)
             throw new CoordinationRuntimeError('idempotency-conflict', 'legacy request has no exact pre-migration idempotency result');
-        return { schema_version: 'autopilot.coordinator_response.v1', protocol_version: '1.2', request_id: requestId, ok: true, committed_event_seq: sqlInteger(prior, 'committed_event_seq'), error_code: null, retryable: false, payload: parseJsonObject(sqlString(prior, 'payload_json'), 'legacy idempotency result') };
+        return { schema_version: 'autopilot.coordinator_response.v1', protocol_version: AUTOPILOT_COORDINATOR_PROTOCOL_VERSION, request_id: requestId, ok: true, committed_event_seq: sqlInteger(prior, 'committed_event_seq'), error_code: null, retryable: false, payload: parseJsonObject(sqlString(prior, 'payload_json'), 'legacy idempotency result') };
     }
     handle(request) {
         try {
             const effect = this.#dispatch(request);
             return {
                 schema_version: 'autopilot.coordinator_response.v1',
-                protocol_version: '1.2',
+                protocol_version: AUTOPILOT_COORDINATOR_PROTOCOL_VERSION,
                 request_id: request.request_id,
                 ok: true,
                 committed_event_seq: effect.committedEventSeq,
@@ -750,7 +1664,7 @@ export class CoordinatorStore {
             const runtime = error instanceof CoordinationRuntimeError ? error : sqliteFailure(error);
             return {
                 schema_version: 'autopilot.coordinator_response.v1',
-                protocol_version: '1.2',
+                protocol_version: AUTOPILOT_COORDINATOR_PROTOCOL_VERSION,
                 request_id: request.request_id,
                 ok: false,
                 committed_event_seq: null,
@@ -760,13 +1674,50 @@ export class CoordinatorStore {
             };
         }
     }
+    #snapshotForRepository(repoId) {
+        const repositoryRows = this.#db.prepare('SELECT * FROM repositories WHERE repo_id=?').all(repoId);
+        const eventSeq = repositoryRows.length === 0 ? 0 : sqlInteger(asRow(repositoryRows[0], 'repository snapshot'), 'event_seq');
+        return {
+            schema_version: 'autopilot.coordination_snapshot.v1',
+            repository_event_seq: eventSeq,
+            repositories: repositoryRows.map(repositoryFromRow),
+            runs: this.#db.prepare('SELECT * FROM runs WHERE repo_id=? ORDER BY workstream_run').all(repoId).map(runFromRow),
+            session_leases: this.#db.prepare('SELECT * FROM session_leases WHERE repo_id=? ORDER BY workstream_run, session_generation').all(repoId).map(sessionFromRow),
+            child_leases: this.#db.prepare('SELECT * FROM child_leases WHERE repo_id=? ORDER BY workstream_run, unit_id, attempt').all(repoId).map(childFromRow),
+            unit_attempts: this.#db.prepare('SELECT * FROM unit_attempts WHERE repo_id=? ORDER BY entity_id').all(repoId).map(unitAttemptFromRow),
+            acquisition_groups: this.#db.prepare('SELECT * FROM acquisition_groups WHERE repo_id=? ORDER BY entity_id').all(repoId).map(acquisitionGroupFromRow),
+            edit_leases: this.#db.prepare('SELECT * FROM edit_leases WHERE repo_id=? ORDER BY entity_id').all(repoId).map(editLeaseFromRow),
+            change_reservations: this.#db.prepare('SELECT * FROM change_reservations WHERE repo_id=? ORDER BY entity_id').all(repoId).map(changeReservationFromRow),
+            reservation_obligations: this.#db.prepare('SELECT * FROM reservation_obligations WHERE repo_id=? ORDER BY entity_id').all(repoId).map(reservationObligationFromRow),
+            run_terminal_intents: this.#db.prepare('SELECT * FROM run_terminal_intents WHERE repo_id=? ORDER BY entity_id').all(repoId).map(runTerminalIntentFromRow),
+            claim_requests: this.#db.prepare('SELECT * FROM claim_requests WHERE repo_id=? ORDER BY entity_id').all(repoId).map(claimRequestFromRow),
+            mailbox_cursors: this.#db.prepare('SELECT * FROM mailbox_cursors WHERE repo_id=? ORDER BY workstream_run').all(repoId).map(mailboxCursorFromRow),
+            reconciliation_evidence: this.#db.prepare('SELECT * FROM reconciliation_evidence WHERE repo_id=? ORDER BY entity_id').all(repoId).map(reconciliationEvidenceFromRow),
+            migration_recovery_work: this.#db.prepare('SELECT * FROM migration_recovery_work WHERE repo_id=? ORDER BY entity_id').all(repoId).map(migrationRecoveryFromRow),
+            messages: this.#db.prepare('SELECT * FROM messages WHERE repo_id=? ORDER BY created_event_seq, message_id').all(repoId).map(messageFromRow),
+            worktrees: this.#db.prepare('SELECT * FROM worktrees WHERE repo_id=? ORDER BY entity_id').all(repoId).map(worktreeFromRow),
+            worktree_operations: this.#db.prepare('SELECT * FROM worktree_operations WHERE repo_id=? ORDER BY entity_id').all(repoId).map(worktreeOperationFromRow),
+            wait_for_edges: this.#db.prepare('SELECT * FROM wait_for_edges WHERE repo_id=? ORDER BY entity_id').all(repoId).map(waitForEdgeFromRow),
+            deadlock_resolutions: this.#db.prepare('SELECT * FROM deadlock_resolutions WHERE repo_id=? ORDER BY entity_id').all(repoId).map(deadlockResolutionFromRow),
+            authoritative_artifacts: this.#db.prepare('SELECT * FROM authoritative_artifacts WHERE repo_id=? ORDER BY entity_id').all(repoId).map(authoritativeArtifactFromRow),
+            adjudication_assignments: this.#db.prepare('SELECT * FROM adjudication_assignments WHERE repo_id=? ORDER BY entity_id').all(repoId).map(adjudicationAssignmentFromRow),
+            escalations: this.#db.prepare('SELECT * FROM escalations WHERE repo_id=? ORDER BY entity_id').all(repoId).map(escalationFromRow),
+            events: this.#db.prepare('SELECT * FROM events WHERE repo_id=? ORDER BY event_seq').all(repoId).map(eventFromRow),
+        };
+    }
     #dispatch(request) {
+        const freezeDrainActions = new Set(['detach-session', 'heartbeat', 'heartbeat-child', 'checkpoint-child', 'complete-child', 'record-release-evidence', 'cancel-run-terminal', 'reconcile-run', 'transition-operation']);
+        if (request.action !== 'status' && request.action !== 'doctor' && request.action !== 'export' && !freezeDrainActions.has(request.action))
+            assertCoordinationDispatchAllowed(this.#stateRoot, request.repo_id, `coordinator mutation ${request.action}`);
         switch (request.action) {
             case 'status': return this.status(request.repo_id, request.workstream_run);
             case 'doctor': return this.doctor();
             case 'export': return this.exportTo(payloadString(request.payload, 'output_path'));
             case 'attach-run': return this.attachRun(request);
             case 'attach-session': return this.attachSession(request);
+            case 'attach-terminal-recovery': return this.attachTerminalRecovery(request);
+            case 'attach-migration-recovery': return this.attachMigrationRecovery(request);
+            case 'resolve-migration-recovery': return this.resolveMigrationRecovery(request);
             case 'detach-session': return this.detachSession(request);
             case 'prepare-handoff': return this.prepareHandoff(request);
             case 'heartbeat': return this.heartbeatSession(request);
@@ -804,6 +1755,9 @@ export class CoordinatorStore {
         const runs = workstreamRun === null
             ? (repoId === 'global' ? this.#db.prepare('SELECT * FROM runs ORDER BY repo_id, workstream_run').all() : this.#db.prepare('SELECT * FROM runs WHERE repo_id=? ORDER BY workstream_run').all(repoId)).map(runFromRow)
             : this.#db.prepare('SELECT * FROM runs WHERE repo_id=? AND workstream_run=?').all(repoId, workstreamRun).map(runFromRow);
+        const runResources = workstreamRun === null
+            ? (repoId === 'global' ? this.#db.prepare('SELECT * FROM run_resources ORDER BY repo_id, workstream_run').all() : this.#db.prepare('SELECT * FROM run_resources WHERE repo_id=? ORDER BY workstream_run').all(repoId)).map(runResourceFromRow)
+            : this.#db.prepare('SELECT * FROM run_resources WHERE repo_id=? AND workstream_run=?').all(repoId, workstreamRun).map(runResourceFromRow);
         const sessions = workstreamRun === null
             ? (repoId === 'global' ? this.#db.prepare('SELECT * FROM session_leases ORDER BY repo_id, workstream_run, session_generation').all() : this.#db.prepare('SELECT * FROM session_leases WHERE repo_id=? ORDER BY workstream_run, session_generation').all(repoId)).map(sessionFromRow)
             : this.#db.prepare('SELECT * FROM session_leases WHERE repo_id=? AND workstream_run=? ORDER BY session_generation').all(repoId, workstreamRun).map(sessionFromRow);
@@ -831,15 +1785,22 @@ export class CoordinatorStore {
         const authoritativeArtifacts = workstreamRun === null ? [] : this.#db.prepare('SELECT * FROM authoritative_artifacts WHERE repo_id=? AND source_run=? ORDER BY entity_id').all(repoId, workstreamRun).map(authoritativeArtifactFromRow);
         const adjudicationAssignments = workstreamRun === null ? [] : this.#db.prepare('SELECT * FROM adjudication_assignments WHERE repo_id=? ORDER BY entity_id').all(repoId).map(adjudicationAssignmentFromRow).filter((assignment) => assignment.requesting_run === workstreamRun || assignment.participating_runs.includes(workstreamRun) || assignment.adjudicator.workstream_run === workstreamRun);
         const escalations = workstreamRun === null ? [] : this.#db.prepare('SELECT * FROM escalations WHERE repo_id=? ORDER BY entity_id').all(repoId).map(escalationFromRow).filter((escalation) => escalation.participating_runs.includes(workstreamRun));
+        const migrations = repoId === 'global'
+            ? this.#db.prepare('SELECT repo_id, migration_id, snapshot_sha256, journal_path, state, report_json, imported_at, updated_at, version FROM coordination_migrations ORDER BY repo_id').all().map(migrationRecordFromRow)
+            : this.#db.prepare('SELECT repo_id, migration_id, snapshot_sha256, journal_path, state, report_json, imported_at, updated_at, version FROM coordination_migrations WHERE repo_id=?').all(repoId).map(migrationRecordFromRow);
+        const migrationRecoveryWork = workstreamRun === null
+            ? (repoId === 'global' ? this.#db.prepare('SELECT * FROM migration_recovery_work ORDER BY repo_id, workstream_run, entity_id').all() : this.#db.prepare('SELECT * FROM migration_recovery_work WHERE repo_id=? ORDER BY workstream_run, entity_id').all(repoId)).map(migrationRecoveryFromRow)
+            : this.#db.prepare('SELECT * FROM migration_recovery_work WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(repoId, workstreamRun).map(migrationRecoveryFromRow);
         return {
             committedEventSeq: null,
             payload: {
                 schema_version: 'autopilot.coordinator_status.v1',
                 package_build: COORDINATOR_PACKAGE_BUILD,
-                protocol_version: '1.2',
+                protocol_version: AUTOPILOT_COORDINATOR_PROTOCOL_VERSION,
                 database_schema_version: COORDINATOR_DATABASE_SCHEMA_VERSION,
                 repositories,
                 runs,
+                run_resources: runResources,
                 session_leases: sessions,
                 child_leases: children,
                 unit_attempts: unitAttempts,
@@ -858,12 +1819,16 @@ export class CoordinatorStore {
                 authoritative_artifacts: authoritativeArtifacts,
                 adjudication_assignments: adjudicationAssignments,
                 escalations,
+                coordination_migrations: migrations,
+                migration_recovery_work: migrationRecoveryWork,
                 pending_messages: pendingMessages,
             },
         };
     }
     doctor() {
         const integrity = integrityResult(this.#db);
+        const invariantFindings = this.#allInvariantFindings();
+        const invariantErrors = invariantFindings.filter((finding) => finding.severity === 'error');
         const now = this.#clock.now().toISOString();
         const expired = this.#db.prepare("SELECT session_lease_id, repo_id, workstream_run, status, lease_expires_at FROM session_leases WHERE status IN ('attached','handoff-pending') AND lease_expires_at < ? ORDER BY repo_id, workstream_run").all(now).map((row) => ({
             session_lease_id: sqlString(row, 'session_lease_id'),
@@ -890,12 +1855,16 @@ export class CoordinatorStore {
         const openDeadlockResolutions = this.#db.prepare("SELECT * FROM deadlock_resolutions WHERE json_extract(payload_json, '$.state')!='resolved' ORDER BY repo_id, entity_id").all().map(deadlockResolutionFromRow);
         const pendingAdjudicationAssignments = this.#db.prepare("SELECT * FROM adjudication_assignments WHERE json_extract(payload_json, '$.state')='assigned' ORDER BY repo_id, entity_id").all().map(adjudicationAssignmentFromRow);
         const immutableEvidenceArtifactCount = sqlInteger(asRow(this.#db.prepare('SELECT COUNT(*) AS count FROM evidence_artifacts').get(), 'evidence artifact count'), 'count');
+        const coordinationMigrations = this.#db.prepare('SELECT repo_id, migration_id, snapshot_sha256, journal_path, state, report_json, imported_at, updated_at, version FROM coordination_migrations ORDER BY repo_id').all().map(migrationRecordFromRow);
+        const pendingMigrationRecovery = this.#db.prepare("SELECT * FROM migration_recovery_work WHERE status='pending' ORDER BY repo_id, workstream_run, entity_id").all().map(migrationRecoveryFromRow);
         return {
             committedEventSeq: null,
             payload: {
                 schema_version: 'autopilot.coordinator_doctor.v1',
-                healthy: integrity === 'ok',
+                healthy: integrity === 'ok' && invariantErrors.length === 0,
                 integrity,
+                invariant_findings: invariantFindings,
+                invariant_error_count: invariantErrors.length,
                 database_schema_version: COORDINATOR_DATABASE_SCHEMA_VERSION,
                 migrations,
                 expired_session_classifications: expired,
@@ -909,6 +1878,8 @@ export class CoordinatorStore {
                 open_deadlock_resolutions: openDeadlockResolutions,
                 pending_adjudication_assignments: pendingAdjudicationAssignments,
                 immutable_evidence_artifact_count: immutableEvidenceArtifactCount,
+                coordination_migrations: coordinationMigrations,
+                pending_migration_recovery_work: pendingMigrationRecovery,
                 max_grant_bypasses: MAX_GRANT_BYPASSES,
             },
         };
@@ -919,6 +1890,7 @@ export class CoordinatorStore {
         const tables = [
             ['repositories', 'repo_id'],
             ['runs', 'repo_id, workstream_run'],
+            ['run_resources', 'repo_id, workstream_run'],
             ['session_leases', 'repo_id, workstream_run, session_generation, session_lease_id'],
             ['child_leases', 'repo_id, workstream_run, unit_id, attempt, child_lease_id'],
             ['unit_attempts', 'repo_id, workstream_run, entity_id'],
@@ -942,20 +1914,108 @@ export class CoordinatorStore {
             ['handoffs', 'repo_id, workstream_run, created_event_seq, handoff_token'],
             ['events', 'repo_id, event_seq'],
             ['idempotency_results', 'repo_id, idempotency_key'],
+            ['coordination_migrations', 'repo_id'],
+            ['migration_recovery_work', 'repo_id, workstream_run, entity_id'],
+            ['migration_legacy_audit', 'repo_id, source_kind, entity_id'],
+            ['semantic_replays', 'replay_id'],
             ['schema_migrations', 'version'],
         ];
-        const exported = { schema_version: DATABASE_EXPORT_SCHEMA, database_schema_version: COORDINATOR_DATABASE_SCHEMA_VERSION };
-        for (const [table, order] of tables) {
-            const rows = this.#db.prepare(`SELECT * FROM ${table} ORDER BY ${order}`).all().map((row) => Object.fromEntries(Object.entries(row)));
-            exported[table] = rows;
+        const tableQueries = new Map(tables.map(([table, order]) => [table, `SELECT * FROM ${table} ORDER BY ${order}`]));
+        tableQueries.set('evidence_artifacts', 'SELECT entity_id, repo_id, sha256, ref, label, size_bytes, created_event_seq, lower(hex(content)) AS content_hex FROM evidence_artifacts ORDER BY repo_id, created_event_seq, entity_id');
+        const keys = ['schema_version', 'database_schema_version', ...tableQueries.keys()].sort((left, right) => left.localeCompare(right));
+        const hash = createHash('sha256');
+        const temporary = `${target}.tmp-${String(process.pid)}-${randomBytes(8).toString('hex')}`;
+        const descriptor = openSync(temporary, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL, 0o600);
+        let buffered = '';
+        let bufferedBytes = 0;
+        const flush = () => {
+            if (buffered.length === 0)
+                return;
+            const bytes = Buffer.from(buffered, 'utf8');
+            let offset = 0;
+            while (offset < bytes.byteLength) {
+                const written = writeSync(descriptor, bytes, offset, bytes.byteLength - offset);
+                if (written < 1)
+                    throw new CoordinationRuntimeError('system-fatal', 'coordinator export made no progress during a short write');
+                offset += written;
+            }
+            buffered = '';
+            bufferedBytes = 0;
+        };
+        const write = (chunk) => {
+            hash.update(chunk, 'utf8');
+            buffered += chunk;
+            bufferedBytes += Buffer.byteLength(chunk, 'utf8');
+            if (bufferedBytes >= 1024 * 1024)
+                flush();
+        };
+        try {
+            write('{');
+            for (let keyIndex = 0; keyIndex < keys.length; keyIndex += 1) {
+                const key = keys[keyIndex];
+                if (key === undefined)
+                    continue;
+                if (keyIndex > 0)
+                    write(',');
+                write(`${JSON.stringify(key)}:`);
+                if (key === 'schema_version') {
+                    write(JSON.stringify(DATABASE_EXPORT_SCHEMA));
+                    continue;
+                }
+                if (key === 'database_schema_version') {
+                    write(String(COORDINATOR_DATABASE_SCHEMA_VERSION));
+                    continue;
+                }
+                const query = tableQueries.get(key);
+                if (query === undefined)
+                    throw new CoordinationRuntimeError('system-fatal', 'deterministic export table query is missing', [key]);
+                write('[');
+                let rowIndex = 0;
+                for (const row of this.#db.prepare(query).iterate()) {
+                    if (rowIndex > 0)
+                        write(',');
+                    write(canonicalJson(Object.fromEntries(Object.entries(row))));
+                    rowIndex += 1;
+                }
+                write(']');
+            }
+            write('}');
+            write('\n');
+            flush();
+            fsyncSync(descriptor);
         }
-        exported['evidence_artifacts'] = this.#db.prepare('SELECT entity_id, repo_id, sha256, ref, label, size_bytes, created_event_seq, lower(hex(content)) AS content_hex FROM evidence_artifacts ORDER BY repo_id, created_event_seq, entity_id').all().map((row) => Object.fromEntries(Object.entries(row)));
-        writeFileSync(target, `${canonicalJson(exported)}\n`, { encoding: 'utf8', mode: 0o600 });
-        return { committedEventSeq: null, payload: { schema_version: 'autopilot.coordinator_export_result.v1', output_path: target, sha256: `sha256:${createHash('sha256').update(canonicalJson(exported), 'utf8').digest('hex')}` } };
+        catch (error) {
+            closeSync(descriptor);
+            unlinkSync(temporary);
+            throw error;
+        }
+        closeSync(descriptor);
+        if (platform() === 'win32')
+            enforceWindowsPrivateAcl(temporary, false);
+        else
+            chmodSync(temporary, 0o600);
+        renameSync(temporary, target);
+        if (platform() !== 'win32') {
+            const parent = openSync(dirname(target), fsConstants.O_RDONLY);
+            try {
+                fsyncSync(parent);
+            }
+            finally {
+                closeSync(parent);
+            }
+        }
+        return { committedEventSeq: null, payload: { schema_version: 'autopilot.coordinator_export_result.v1', output_path: target, sha256: `sha256:${hash.digest('hex')}` } };
     }
     attachRun(request) {
         return this.#mutation(request, () => {
             const workstreamRun = this.#workstreamRun(request);
+            const resource = parseCoordinationRunResource(request.payload['run_resource']);
+            if (coordinationCutoverCommitted(this.#stateRoot, request.repo_id) && payloadString(request.payload, 'coordination_authority') !== 'coordinator-edit-leases-v1')
+                throw new CoordinationRuntimeError('unauthorized-client', 'post-cutover run attachment cannot create legacy coordination authority');
+            if (resource.repo_id !== request.repo_id || resource.workstream_run !== workstreamRun)
+                throw new CoordinationRuntimeError('invalid-request', 'run resource identity must match the attached repository/run');
+            if (resource.source_repo !== payloadString(request.payload, 'canonical_root') || resource.git_common_dir !== payloadString(request.payload, 'git_common_dir'))
+                throw new CoordinationRuntimeError('invalid-request', 'run resource repository identity disagrees with attach-run');
             const existingRepoRow = this.#db.prepare('SELECT * FROM repositories WHERE repo_id=?').get(request.repo_id);
             const existingRunRow = this.#db.prepare('SELECT * FROM runs WHERE repo_id=? AND workstream_run=?').get(request.repo_id, workstreamRun);
             if (existingRunRow !== undefined)
@@ -974,6 +2034,7 @@ export class CoordinatorStore {
                 this.#db.prepare('UPDATE repositories SET event_seq=? WHERE repo_id=?').run(seq, request.repo_id);
             }
             this.#db.prepare("INSERT INTO runs(repo_id, autopilot_id, workstream, workstream_run, coordination_authority, status, active_session_generation, created_event_seq, version) VALUES(?, ?, ?, ?, ?, 'active', 0, ?, 1)").run(request.repo_id, payloadString(request.payload, 'autopilot_id'), payloadString(request.payload, 'workstream'), workstreamRun, payloadString(request.payload, 'coordination_authority'), seq);
+            this.#db.prepare('INSERT INTO run_resources(entity_id, repo_id, workstream_run, payload_json, version) VALUES(?, ?, ?, ?, ?)').run(`run-resource:${request.repo_id}:${workstreamRun}`, request.repo_id, workstreamRun, canonicalJson(resource), resource.version);
             this.#db.prepare('INSERT INTO mailbox_cursors(repo_id, workstream_run, delivered_through_event_seq, acknowledged_through_event_seq, version) VALUES(?, ?, 0, 0, 1)').run(request.repo_id, workstreamRun);
             const run = runFromRow(asRow(this.#db.prepare('SELECT * FROM runs WHERE repo_id=? AND workstream_run=?').get(request.repo_id, workstreamRun), 'created run'));
             return { sequence: seq, eventType: 'run-attached', entityType: 'run', entityId: workstreamRun, payload: { run } };
@@ -987,6 +2048,10 @@ export class CoordinatorStore {
             this.#assertVersion(run.version, request.expected_version, 'run');
             if (run.status === 'closed' || run.status === 'aborted')
                 throw new CoordinationRuntimeError('invalid-state', `terminal run ${workstreamRun} cannot accept a new parent session`);
+            const terminalPreparation = this.#preparedTerminalIntent(run.repo_id, run.workstream_run);
+            const pendingRecovery = this.#pendingMigrationRecovery(request.repo_id, workstreamRun);
+            if (pendingRecovery.length > 0)
+                throw new CoordinationRuntimeError('recovery-required', `run ${workstreamRun} cannot attach ordinary dispatch while migration recovery is pending`, pendingRecovery.map((work) => work.recovery_id));
             const nextGeneration = run.active_session_generation + 1;
             if (request.fencing_generation !== nextGeneration)
                 throw new CoordinationRuntimeError('stale-version', `next session generation must be ${String(nextGeneration)}`);
@@ -1004,12 +2069,134 @@ export class CoordinatorStore {
                 this.#db.prepare("UPDATE handoffs SET status='consumed', consumed_event_seq=? WHERE handoff_token=?").run(seq, effectiveHandoffToken);
             }
             const sessionTokenSha256 = createHash('sha256').update(payloadString(request.payload, 'session_token'), 'utf8').digest('hex');
-            this.#db.prepare("INSERT INTO session_leases(session_lease_id, repo_id, workstream_run, session_id, session_generation, pid, boot_id, session_token_sha256, lease_expires_at, status, attached_event_seq, version) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, 'attached', ?, 1)").run(payloadString(request.payload, 'session_lease_id'), request.repo_id, workstreamRun, sessionId, nextGeneration, payloadInteger(request.payload, 'pid'), payloadString(request.payload, 'boot_id'), sessionTokenSha256, payloadString(request.payload, 'lease_expires_at'), seq);
-            this.#db.prepare("UPDATE runs SET active_session_generation=?, status='active', version=version+1 WHERE repo_id=? AND workstream_run=?").run(nextGeneration, request.repo_id, workstreamRun);
+            this.#db.prepare("INSERT INTO session_leases(session_lease_id, repo_id, workstream_run, session_id, session_generation, pid, boot_id, session_token_sha256, lease_expires_at, status, attached_event_seq, version, attachment_kind) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, 'attached', ?, 1, 'dispatch')").run(payloadString(request.payload, 'session_lease_id'), request.repo_id, workstreamRun, sessionId, nextGeneration, payloadInteger(request.payload, 'pid'), payloadString(request.payload, 'boot_id'), sessionTokenSha256, payloadString(request.payload, 'lease_expires_at'), seq);
+            this.#db.prepare('UPDATE runs SET active_session_generation=?, status=?, version=version+1 WHERE repo_id=? AND workstream_run=?').run(nextGeneration, terminalPreparation === null ? 'active' : 'merging', request.repo_id, workstreamRun);
             const nextRun = this.#requireRun(request.repo_id, workstreamRun);
             const session = sessionFromRow(asRow(this.#db.prepare('SELECT * FROM session_leases WHERE session_lease_id=?').get(payloadString(request.payload, 'session_lease_id')), 'attached session'));
             const reconciliation = this.#reconcileOwnedRun(request.repo_id, workstreamRun, seq);
             return { sequence: seq, eventType: 'session-attached', entityType: 'session-lease', entityId: session.session_lease_id, payload: { run: nextRun, session, reconciliation } };
+        });
+    }
+    attachTerminalRecovery(request) {
+        return this.#mutation(request, () => {
+            const workstreamRun = this.#workstreamRun(request);
+            const sessionId = this.#sessionId(request);
+            const run = this.#requireRun(request.repo_id, workstreamRun);
+            this.#assertVersion(run.version, request.expected_version, 'terminal recovery run');
+            if (run.status !== 'closed' && run.status !== 'aborted')
+                throw new CoordinationRuntimeError('invalid-state', `nonterminal run ${workstreamRun} cannot accept a terminal-cleanup recovery attachment`);
+            const intent = runTerminalIntentFromRow(asRow(this.#db.prepare("SELECT * FROM run_terminal_intents WHERE repo_id=? AND workstream_run=? AND json_extract(payload_json, '$.state')='committed' ORDER BY entity_id LIMIT 1").get(request.repo_id, workstreamRun), 'committed terminal recovery intent'));
+            if (intent.terminal_intent_id !== payloadString(request.payload, 'terminal_intent_id'))
+                throw new CoordinationRuntimeError('unauthorized-client', 'terminal-cleanup recovery attachment does not match the committed terminal intent');
+            if ((run.status === 'closed' ? 'closed' : 'aborted') !== intent.outcome)
+                throw new CoordinationRuntimeError('store-corrupt', 'terminal run status disagrees with its committed terminal intent');
+            const mainRows = this.#db.prepare("SELECT * FROM worktrees WHERE repo_id=? AND workstream_run=? AND json_extract(payload_json, '$.kind')='main' AND json_extract(payload_json, '$.owner.unit_id')='main'").all(request.repo_id, workstreamRun).map(worktreeFromRow);
+            if (mainRows.length !== 1 || mainRows[0] === undefined)
+                throw new CoordinationRuntimeError('store-corrupt', 'terminal-cleanup recovery requires exactly one durable main worktree');
+            if (mainRows[0].state === 'removed')
+                throw new CoordinationRuntimeError('invalid-state', 'terminal-cleanup recovery is already complete');
+            const nextGeneration = run.active_session_generation + 1;
+            if (request.fencing_generation !== nextGeneration)
+                throw new CoordinationRuntimeError('stale-version', `next terminal recovery generation must be ${String(nextGeneration)}`);
+            const seq = this.#nextEventSequence(request.repo_id);
+            this.#db.prepare("UPDATE session_leases SET status='fenced', version=version+1 WHERE repo_id=? AND workstream_run=? AND status IN ('attached','handoff-pending')").run(request.repo_id, workstreamRun);
+            const sessionTokenSha256 = createHash('sha256').update(payloadString(request.payload, 'session_token'), 'utf8').digest('hex');
+            this.#db.prepare("INSERT INTO session_leases(session_lease_id, repo_id, workstream_run, session_id, session_generation, pid, boot_id, session_token_sha256, lease_expires_at, status, attached_event_seq, version, attachment_kind) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, 'attached', ?, 1, 'terminal-recovery')").run(payloadString(request.payload, 'session_lease_id'), request.repo_id, workstreamRun, sessionId, nextGeneration, payloadInteger(request.payload, 'pid'), payloadString(request.payload, 'boot_id'), sessionTokenSha256, payloadString(request.payload, 'lease_expires_at'), seq);
+            this.#db.prepare('UPDATE runs SET active_session_generation=?, version=version+1 WHERE repo_id=? AND workstream_run=?').run(nextGeneration, request.repo_id, workstreamRun);
+            const nextRun = this.#requireRun(request.repo_id, workstreamRun);
+            const session = sessionFromRow(asRow(this.#db.prepare('SELECT * FROM session_leases WHERE session_lease_id=?').get(payloadString(request.payload, 'session_lease_id')), 'attached terminal recovery session'));
+            const reconciliation = this.#reconcileOwnedRun(request.repo_id, workstreamRun, seq);
+            return { sequence: seq, eventType: 'terminal-cleanup-recovery-attached', entityType: 'session-lease', entityId: session.session_lease_id, payload: { run: nextRun, session, reconciliation, terminal_intent: intent } };
+        });
+    }
+    attachMigrationRecovery(request) {
+        return this.#mutation(request, () => {
+            const workstreamRun = this.#workstreamRun(request);
+            const sessionId = this.#sessionId(request);
+            const run = this.#requireRun(request.repo_id, workstreamRun);
+            this.#assertVersion(run.version, request.expected_version, 'migration recovery run');
+            this.#requireCoordinatorEditAuthority(run, 'migration recovery attachment');
+            const recoveryId = payloadString(request.payload, 'recovery_id');
+            const pending = this.#pendingMigrationRecovery(request.repo_id, workstreamRun);
+            if (!pending.some((work) => work.recovery_id === recoveryId))
+                throw new CoordinationRuntimeError('invalid-state', 'migration recovery attachment requires the exact pending recovery row', [recoveryId]);
+            const nextGeneration = run.active_session_generation + 1;
+            if (request.fencing_generation !== nextGeneration)
+                throw new CoordinationRuntimeError('stale-version', `next migration recovery generation must be ${String(nextGeneration)}`);
+            const seq = this.#nextEventSequence(request.repo_id);
+            this.#db.prepare("UPDATE session_leases SET status='fenced', version=version+1 WHERE repo_id=? AND workstream_run=? AND status IN ('attached','handoff-pending')").run(request.repo_id, workstreamRun);
+            const sessionTokenSha256 = createHash('sha256').update(payloadString(request.payload, 'session_token'), 'utf8').digest('hex');
+            this.#db.prepare("INSERT INTO session_leases(session_lease_id, repo_id, workstream_run, session_id, session_generation, pid, boot_id, session_token_sha256, lease_expires_at, status, attached_event_seq, version, attachment_kind) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, 'attached', ?, 1, 'migration-recovery')").run(payloadString(request.payload, 'session_lease_id'), request.repo_id, workstreamRun, sessionId, nextGeneration, payloadInteger(request.payload, 'pid'), payloadString(request.payload, 'boot_id'), sessionTokenSha256, payloadString(request.payload, 'lease_expires_at'), seq);
+            this.#db.prepare('UPDATE runs SET active_session_generation=?, version=version+1 WHERE repo_id=? AND workstream_run=?').run(nextGeneration, request.repo_id, workstreamRun);
+            const nextRun = this.#requireRun(request.repo_id, workstreamRun);
+            const session = sessionFromRow(asRow(this.#db.prepare('SELECT * FROM session_leases WHERE session_lease_id=?').get(payloadString(request.payload, 'session_lease_id')), 'attached migration recovery session'));
+            return { sequence: seq, eventType: 'migration-recovery-attached', entityType: 'session-lease', entityId: session.session_lease_id, payload: { run: nextRun, session, pending_recovery_work: pending } };
+        });
+    }
+    resolveMigrationRecovery(request) {
+        return this.#mutation(request, () => {
+            const session = this.#requireCurrentSession(request);
+            if (session.attachment_kind !== 'migration-recovery')
+                throw new CoordinationRuntimeError('unauthorized-client', 'migration recovery resolution requires a recovery-only supervisor session');
+            const recoveryId = payloadString(request.payload, 'recovery_id');
+            const row = asRow(this.#db.prepare('SELECT * FROM migration_recovery_work WHERE entity_id=? AND repo_id=? AND workstream_run=?').get(recoveryId, request.repo_id, this.#workstreamRun(request)), 'migration recovery work');
+            const work = migrationRecoveryFromRow(row);
+            this.#assertVersion(work.version, request.expected_version, 'migration recovery work');
+            if (work.status !== 'pending')
+                throw new CoordinationRuntimeError('invalid-state', 'migration recovery work is already terminal; use the original idempotency key to replay its result', [recoveryId]);
+            if (work.recovery_type !== 'ambiguous-live-claim')
+                throw new CoordinationRuntimeError('recovery-required', `recovery type ${work.recovery_type} has no safe authority mutation`, [recoveryId]);
+            const run = this.#requireRun(request.repo_id, work.workstream_run);
+            const claim = this.#migrationRecoveryClaim(work);
+            const leases = this.#db.prepare('SELECT * FROM edit_leases WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(request.repo_id, work.workstream_run).map(editLeaseFromRow).filter((lease) => lease.edit_lease_id === claim.editLeaseId && lease.owner.unit_id === claim.unitId && lease.owner.attempt === claim.attempt && lease.path === claim.path && lease.mode === claim.mode);
+            if (leases.length !== 1 || leases[0] === undefined)
+                throw new CoordinationRuntimeError('store-corrupt', 'pending migration recovery no longer has exactly one matching imported authority lease', [recoveryId, claim.editLeaseId]);
+            const evidence = { ref: payloadString(request.payload, 'evidence_ref'), sha256: payloadString(request.payload, 'evidence_sha256') };
+            const resolutionType = payloadString(request.payload, 'resolution_type');
+            const releaseSourceValue = payloadNullableString(request.payload, 'release_source');
+            const releaseTargetId = payloadNullableString(request.payload, 'release_target_id');
+            const seq = this.#nextEventSequence(request.repo_id);
+            let exactPostconditions;
+            if (resolutionType === 'authority-retained') {
+                if (releaseSourceValue !== null || releaseTargetId !== null)
+                    throw new CoordinationRuntimeError('invalid-request', 'authority-retained recovery cannot carry release identity');
+                if (run.status === 'closed' || run.status === 'aborted')
+                    throw new CoordinationRuntimeError('invalid-state', 'terminal run authority cannot be retained or resurrected during migration recovery', [run.workstream_run]);
+                const attempt = this.#requireUnitAttempt(run.repo_id, run.workstream_run, claim.unitId, claim.attempt);
+                if (['transport-complete', 'merged', 'failed', 'reset', 'quarantined', 'superseded'].includes(attempt.state))
+                    throw new CoordinationRuntimeError('invalid-state', 'terminal attempt authority cannot be retained or resurrected during migration recovery', [claim.unitId, String(claim.attempt), attempt.state]);
+                this.#verifyMigrationRetentionEvidence(run, work, claim, evidence);
+                exactPostconditions = Object.freeze([`run-status:${run.status}`, `attempt-state:${attempt.state}`, `edit-lease-retained:${claim.editLeaseId}`, `claim:${claim.mode}:${claim.path}`]);
+            }
+            else if (resolutionType === 'authority-released') {
+                if (releaseSourceValue === null || releaseTargetId === null || releaseSourceValue === 'child-process')
+                    throw new CoordinationRuntimeError('invalid-request', 'authority-released recovery requires an exact parent-owned release source and target');
+                const releaseSource = releaseSourceValue;
+                exactPostconditions = this.#verifyMigrationReleasePostconditions(run, work, claim, releaseSource, releaseTargetId, evidence);
+                const released = [];
+                this.#releaseOwnedLease(run.repo_id, run.workstream_run, claim.editLeaseId, released);
+                if (released.length !== 1 || released[0] !== claim.editLeaseId)
+                    throw new CoordinationRuntimeError('store-corrupt', 'exact migration authority lease was not released atomically', [claim.editLeaseId]);
+            }
+            else {
+                throw new CoordinationRuntimeError('invalid-request', 'migration recovery resolution type is unsupported');
+            }
+            const immutableEvidenceBytes = this.#readMigrationRecoveryEvidenceFile(run, evidence);
+            this.#persistEvidenceArtifact(run.repo_id, evidence, immutableEvidenceBytes, `migration recovery ${resolutionType}`, seq);
+            const resolution = {
+                resolution_type: resolutionType,
+                evidence,
+                release_source: releaseSourceValue,
+                release_target_id: releaseTargetId,
+                exact_postconditions: exactPostconditions,
+            };
+            const parsed = parseCoordinationMigrationRecoveryWork({ ...work, status: 'resolved', resolution, resolved_event_seq: seq, version: work.version + 1 });
+            const updated = this.#db.prepare("UPDATE migration_recovery_work SET status='resolved', resolution_json=?, resolved_event_seq=?, version=? WHERE entity_id=? AND status='pending' AND version=?").run(canonicalJson(parsed.resolution), seq, parsed.version, parsed.recovery_id, work.version);
+            if (updated.changes !== 1)
+                throw new CoordinationRuntimeError('coordinator-contention', 'migration recovery work changed during fenced resolution', [recoveryId]);
+            this.#db.prepare("UPDATE messages SET status='acknowledged', delivered_event_seq=COALESCE(delivered_event_seq, ?), acknowledged_event_seq=COALESCE(acknowledged_event_seq, ?), version=version+1 WHERE repo_id=? AND recipient_workstream_run=? AND correlation_id=? AND status!='acknowledged'").run(seq, seq, run.repo_id, run.workstream_run, recoveryId);
+            const remaining = this.#pendingMigrationRecovery(run.repo_id, run.workstream_run);
+            return { sequence: seq, eventType: 'migration-recovery-resolved', entityType: 'migration-recovery-work', entityId: recoveryId, payload: { recovery_work: parsed, remaining_recovery_work: remaining, run: this.#requireRun(run.repo_id, run.workstream_run) } };
         });
     }
     detachSession(request) {
@@ -1028,9 +2215,11 @@ export class CoordinatorStore {
     }
     heartbeatSession(request) {
         return this.#sessionMutation(request, 'session-heartbeat', (session, seq) => {
-            this.#db.prepare('UPDATE session_leases SET lease_expires_at=?, version=version+1 WHERE session_lease_id=?').run(payloadString(request.payload, 'lease_expires_at'), session.session_lease_id);
-            const reconciliation = this.#reconcileOwnedRun(request.repo_id, session.workstream_run, seq);
-            return { entityId: session.session_lease_id, payload: { session: sessionFromRow(asRow(this.#db.prepare('SELECT * FROM session_leases WHERE session_lease_id=?').get(session.session_lease_id), 'heartbeat session')), reconciliation } };
+            this.#updateSessionHeartbeat.run(payloadString(request.payload, 'lease_expires_at'), session.session_lease_id);
+            const reconciliation = this.#repositoryHasCoordinationGraph(request.repo_id)
+                ? this.#reconcileOwnedRun(request.repo_id, session.workstream_run, seq)
+                : this.#freezeReconciliationSummary(this.#emptyReconciliationSummary());
+            return { entityId: session.session_lease_id, payload: { session: sessionFromRow(asRow(this.#sessionByLeaseId.get(session.session_lease_id), 'heartbeat session')), reconciliation } };
         });
     }
     registerAttempt(request) {
@@ -1038,6 +2227,8 @@ export class CoordinatorStore {
             this.#requireCurrentSession(request);
             const run = this.#requireRun(request.repo_id, this.#workstreamRun(request));
             this.#assertVersion(run.version, request.expected_version, 'run');
+            if (this.#preparedTerminalIntent(run.repo_id, run.workstream_run) !== null)
+                throw new CoordinationRuntimeError('invalid-state', 'run terminal preparation fences new attempt dispatch');
             const owner = { repo_id: run.repo_id, autopilot_id: run.autopilot_id, workstream_run: run.workstream_run, unit_id: payloadString(request.payload, 'unit_id'), attempt: payloadInteger(request.payload, 'attempt') };
             if (payloadInteger(request.payload, 'checkpoint_ordinal') !== 0)
                 throw new CoordinationRuntimeError('invalid-request', 'attempt registration must begin at checkpoint ordinal 0');
@@ -1292,12 +2483,25 @@ export class CoordinatorStore {
                 releasedLeaseIds.push(leaseId);
                 this.#markGroupReleasedWhenEmpty(lease.owner.repo_id, lease.acquisition_group_id);
             }
-            const released = { ...claimRequest, status: 'released', owner_reason: payloadNullableString(request.payload, 'owner_reason'), release_condition: claimRequest.release_condition, release_event_seq: seq, version: claimRequest.version + 1 };
-            this.#updateClaimRequest(released);
-            const notification = this.#releaseNotification(released, releasedLeaseIds, seq);
-            this.#insertMessage(notification);
+            const releasedLeaseSet = new Set(releasedLeaseIds);
+            const affectedRequests = this.#db.prepare('SELECT * FROM claim_requests WHERE repo_id=? AND owner_workstream_run=? ORDER BY entity_id').all(request.repo_id, claimRequest.owner.workstream_run).map(claimRequestFromRow).filter((entry) => ['pending', 'delivered', 'acknowledged', 'deferred'].includes(entry.status) && (entry.request_id === requestId || entry.blocking_lease_ids.some((leaseId) => releasedLeaseSet.has(leaseId))));
+            const notifications = [];
+            for (const affected of affectedRequests) {
+                const released = {
+                    ...affected, status: 'released',
+                    owner_reason: affected.request_id === requestId ? payloadNullableString(request.payload, 'owner_reason') : `owner authority released atomically with ${requestId}`,
+                    release_condition: affected.release_condition, release_event_seq: seq, version: affected.version + 1,
+                };
+                this.#updateClaimRequest(released);
+                const notification = this.#releaseNotification(released, releasedLeaseIds, seq);
+                this.#insertMessage(notification);
+                notifications.push(notification);
+            }
+            const primaryNotification = notifications.find((entry) => entry.correlation_id === requestId);
+            if (primaryNotification === undefined)
+                throw new CoordinationRuntimeError('store-corrupt', 'owner release did not transition its initiating claim request');
             this.#reevaluateWaitingGroups(request.repo_id, seq);
-            return { sequence: seq, eventType: 'claim-request-released', entityType: 'claim-request', entityId: requestId, payload: { claim_request: this.#requireClaimRequest(requestId), released_lease_ids: releasedLeaseIds, release_notification: notification } };
+            return { sequence: seq, eventType: 'claim-request-released', entityType: 'claim-request', entityId: requestId, payload: { claim_request: this.#requireClaimRequest(requestId), released_lease_ids: releasedLeaseIds, release_notification: primaryNotification, affected_request_ids: affectedRequests.map((entry) => entry.request_id) } };
         });
     }
     cancelClaimRequest(request) {
@@ -1339,7 +2543,7 @@ export class CoordinatorStore {
             const groups = this.#groupsForAttempt(attempt.owner);
             if (groups.some((group) => group.state === 'granted'))
                 throw new CoordinationRuntimeError('invalid-state', 'running/granted attempt must release or quarantine before supersession');
-            for (const group of groups)
+            for (const group of groups.filter((group) => group.state === 'waiting' || group.state === 'grant-ready'))
                 this.#cancelGroup(group, 'superseded', seq);
             const superseded = { ...attempt, state: 'superseded', version: attempt.version + 1 };
             this.#updateEntity('unit_attempts', unitAttemptEntityId(attempt.owner), superseded);
@@ -1685,22 +2889,16 @@ export class CoordinatorStore {
             const outcomeValue = payloadString(request.payload, 'outcome');
             if (outcomeValue !== 'closed' && outcomeValue !== 'aborted')
                 throw new CoordinationRuntimeError('invalid-request', 'terminal outcome must be closed or aborted');
-            const runningChildren = this.#db.prepare("SELECT child_lease_id FROM child_leases WHERE repo_id=? AND workstream_run=? AND status IN ('preflight','running') ORDER BY child_lease_id").all(run.repo_id, run.workstream_run).map((row) => sqlString(row, 'child_lease_id'));
-            if (runningChildren.length > 0)
-                throw new CoordinationRuntimeError('recovery-required', 'run terminal preparation requires all child processes terminal', runningChildren);
-            const incompleteOperations = this.#db.prepare("SELECT entity_id FROM worktree_operations WHERE repo_id=? AND workstream_run=? AND json_extract(payload_json, '$.stage') NOT IN ('committed','compensated','failed') ORDER BY entity_id").all(run.repo_id, run.workstream_run).map((row) => sqlString(row, 'entity_id'));
-            if (incompleteOperations.length > 0)
-                throw new CoordinationRuntimeError('recovery-required', 'run terminal preparation requires all owned worktree sagas terminal', incompleteOperations);
-            if (outcomeValue === 'closed')
-                this.#assertRunCloseReservationReady(run);
-            const pendingGroups = this.#db.prepare("SELECT * FROM acquisition_groups WHERE repo_id=? AND workstream_run=? AND json_extract(payload_json, '$.state') IN ('waiting','grant-ready') ORDER BY entity_id").all(run.repo_id, run.workstream_run).map(acquisitionGroupFromRow);
-            if (pendingGroups.length > 0)
-                throw new CoordinationRuntimeError('recovery-required', 'run terminal preparation requires queued acquisition groups to be cancelled or superseded', pendingGroups.map((group) => `${group.acquisition_group_id}:${group.state}`));
+            // Readiness is deliberately checked at terminal commit, not here. This
+            // transaction must always establish the durable launch fence first; close
+            // validation can then classify/cancel safely without a concurrent dispatch.
             const seq = this.#nextEventSequence(run.repo_id);
             const reservationIds = this.#db.prepare("SELECT entity_id FROM change_reservations WHERE repo_id=? AND workstream_run=? AND json_extract(payload_json, '$.released_event_seq') IS NULL ORDER BY entity_id").all(run.repo_id, run.workstream_run).map((row) => sqlString(row, 'entity_id'));
             const intent = parseCoordinationRunTerminalIntent({ schema_version: 'autopilot.run_terminal_intent.v1', terminal_intent_id: payloadString(request.payload, 'terminal_intent_id'), repo_id: run.repo_id, workstream_run: run.workstream_run, outcome: outcomeValue, state: 'prepared', reservation_ids: reservationIds, prepared_event_seq: seq, terminal_event_seq: null, version: 1 });
+            const nextRun = parseCoordinationRun({ ...run, status: 'merging', version: run.version + 1 });
             this.#db.prepare('INSERT INTO run_terminal_intents(entity_id, repo_id, workstream_run, payload_json, version) VALUES(?, ?, ?, ?, ?)').run(intent.terminal_intent_id, intent.repo_id, intent.workstream_run, canonicalJson(intent), intent.version);
-            return { sequence: seq, eventType: 'run-terminal-prepared', entityType: 'run-terminal-intent', entityId: intent.terminal_intent_id, payload: { run_terminal_intent: intent } };
+            this.#db.prepare("UPDATE runs SET status='merging', version=? WHERE repo_id=? AND workstream_run=?").run(nextRun.version, run.repo_id, run.workstream_run);
+            return { sequence: seq, eventType: 'run-terminal-prepared', entityType: 'run-terminal-intent', entityId: intent.terminal_intent_id, payload: { run_terminal_intent: intent, run: nextRun } };
         });
     }
     cancelRunTerminal(request) {
@@ -1709,13 +2907,16 @@ export class CoordinatorStore {
             const intent = runTerminalIntentFromRow(asRow(this.#db.prepare('SELECT * FROM run_terminal_intents WHERE repo_id=? AND entity_id=?').get(request.repo_id, payloadString(request.payload, 'terminal_intent_id')), 'run terminal intent'));
             if (intent.workstream_run !== this.#workstreamRun(request))
                 throw new CoordinationRuntimeError('unauthorized-client', 'session cannot cancel a foreign run terminal intent');
+            const run = this.#requireRun(request.repo_id, intent.workstream_run);
             this.#assertVersion(intent.version, request.expected_version, 'run terminal intent');
             if (intent.state !== 'prepared')
                 throw new CoordinationRuntimeError('invalid-state', `run terminal intent is ${intent.state}`);
             const seq = this.#nextEventSequence(request.repo_id);
             const cancelled = parseCoordinationRunTerminalIntent({ ...intent, state: 'cancelled', terminal_event_seq: seq, version: intent.version + 1 });
+            const nextRun = parseCoordinationRun({ ...run, status: 'blocked', version: run.version + 1 });
             this.#db.prepare('UPDATE run_terminal_intents SET payload_json=?, version=? WHERE entity_id=?').run(canonicalJson(cancelled), cancelled.version, cancelled.terminal_intent_id);
-            return { sequence: seq, eventType: 'run-terminal-cancelled', entityType: 'run-terminal-intent', entityId: cancelled.terminal_intent_id, payload: { run_terminal_intent: cancelled, reason: payloadString(request.payload, 'reason') } };
+            this.#db.prepare("UPDATE runs SET status='blocked', version=? WHERE repo_id=? AND workstream_run=?").run(nextRun.version, run.repo_id, run.workstream_run);
+            return { sequence: seq, eventType: 'run-terminal-cancelled', entityType: 'run-terminal-intent', entityId: cancelled.terminal_intent_id, payload: { run_terminal_intent: cancelled, run: nextRun, reason: payloadString(request.payload, 'reason') } };
         });
     }
     reconcileRun(request) {
@@ -2147,6 +3348,9 @@ export class CoordinatorStore {
         const incompleteOperations = this.#db.prepare("SELECT entity_id FROM worktree_operations WHERE repo_id=? AND workstream_run=? AND json_extract(payload_json, '$.stage') NOT IN ('committed','compensated','failed') ORDER BY entity_id").all(run.repo_id, run.workstream_run).map((row) => sqlString(row, 'entity_id'));
         if (incompleteOperations.length > 0)
             throw new CoordinationRuntimeError('recovery-required', 'run terminal commit requires all owned worktree sagas terminal', incompleteOperations);
+        const pendingGroups = this.#db.prepare("SELECT * FROM acquisition_groups WHERE repo_id=? AND workstream_run=? AND json_extract(payload_json, '$.state') IN ('waiting','grant-ready') ORDER BY entity_id").all(run.repo_id, run.workstream_run).map(acquisitionGroupFromRow);
+        if (pendingGroups.length > 0)
+            throw new CoordinationRuntimeError('recovery-required', 'run terminal commit requires queued acquisition groups to be cancelled or superseded', pendingGroups.map((group) => `${group.acquisition_group_id}:${group.state}`));
     }
     #assertRunCloseReservationReady(run) {
         const activeLeases = this.#db.prepare('SELECT * FROM edit_leases WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(run.repo_id, run.workstream_run).map(editLeaseFromRow);
@@ -2862,97 +4066,119 @@ export class CoordinatorStore {
             this.#updateEntity('acquisition_groups', group.acquisition_group_id, { ...group, bypass_count: group.bypass_count + 1, version: group.version + 1 });
         }
     }
-    #maintainWaitForGraph(repoId, seq, fixedPointDepth = 0) {
-        if (fixedPointDepth > 1024)
-            throw new CoordinationRuntimeError('store-corrupt', 'deadlock resolution did not reach a transactional fixed point');
-        const requests = this.#db.prepare('SELECT * FROM claim_requests WHERE repo_id=? ORDER BY entity_id').all(repoId).map(claimRequestFromRow);
-        const leases = this.#db.prepare('SELECT * FROM edit_leases WHERE repo_id=? ORDER BY entity_id').all(repoId).map(editLeaseFromRow);
-        const priorEdges = this.#db.prepare('SELECT * FROM wait_for_edges WHERE repo_id=? ORDER BY entity_id').all(repoId).map(waitForEdgeFromRow);
-        const nextEdges = buildCoordinationWaitForEdges({ requests, editLeases: leases, priorEdges, eventSeq: seq });
-        const priorById = new Map(priorEdges.map((edge) => [edge.edge_id, edge]));
-        for (const edge of nextEdges) {
-            const prior = priorById.get(edge.edge_id);
-            if (prior === undefined)
-                this.#db.prepare('INSERT INTO wait_for_edges(entity_id, repo_id, request_id, payload_json, version) VALUES(?, ?, ?, ?, ?)').run(edge.edge_id, edge.repo_id, edge.request_id, canonicalJson(edge), edge.version);
-            else if (canonicalJson(prior) !== canonicalJson(edge))
-                this.#db.prepare('UPDATE wait_for_edges SET payload_json=?, version=? WHERE entity_id=?').run(canonicalJson(edge), edge.version, edge.edge_id);
-        }
-        const activeEdges = nextEdges.filter((edge) => edge.state === 'active');
-        const cycles = detectCoordinationWaitCycles(activeEdges);
-        const liveResolutionIds = new Set();
-        for (const cycle of cycles) {
-            const resolutionId = stableEntityId('deadlock', [repoId, ...cycle.edge_ids]);
-            liveResolutionIds.add(resolutionId);
-            const existingRow = this.#db.prepare('SELECT * FROM deadlock_resolutions WHERE entity_id=?').get(resolutionId);
-            const existingResolution = existingRow === undefined ? null : deadlockResolutionFromRow(existingRow);
-            if (existingResolution !== null && existingResolution.state !== 'deferred-no-safe-victim')
-                continue;
-            const attempts = this.#db.prepare('SELECT * FROM unit_attempts WHERE repo_id=? ORDER BY entity_id').all(repoId).map(unitAttemptFromRow);
-            const groups = this.#db.prepare('SELECT * FROM acquisition_groups WHERE repo_id=? ORDER BY entity_id').all(repoId).map(acquisitionGroupFromRow);
-            const children = this.#db.prepare('SELECT * FROM child_leases WHERE repo_id=? ORDER BY child_lease_id').all(repoId).map(childFromRow);
-            const worktrees = this.#db.prepare('SELECT * FROM worktrees WHERE repo_id=? ORDER BY entity_id').all(repoId).map(worktreeFromRow);
-            const operations = this.#db.prepare('SELECT * FROM worktree_operations WHERE repo_id=? ORDER BY entity_id').all(repoId).map(worktreeOperationFromRow);
-            const victim = selectCoordinationDeadlockVictim(cycle, { attempts, acquisitionGroups: groups, claimRequests: requests, childLeases: children, worktrees, worktreeOperations: operations });
-            if (existingResolution !== null && victim === null)
-                continue;
-            const participantOwners = activeEdges.filter((edge) => cycle.edge_ids.includes(edge.edge_id)).flatMap((edge) => [edge.requester, edge.blocker]).filter((owner, index, all) => all.findIndex((candidate) => coordinationOwnerKey(candidate) === coordinationOwnerKey(owner)) === index).sort((left, right) => coordinationOwnerKey(left).localeCompare(coordinationOwnerKey(right)));
-            const resolutionVersion = existingResolution === null ? 1 : existingResolution.version + 1;
-            const createdEventSeq = existingResolution?.created_event_seq ?? seq;
-            const resolution = victim === null ? {
-                schema_version: 'autopilot.deadlock_resolution.v1', resolution_id: resolutionId, repo_id: repoId, cycle_edge_ids: cycle.edge_ids, participant_owners: participantOwners,
-                state: 'deferred-no-safe-victim', victim: null, victim_class: null, action: 'none', reason: 'cycle has no participant outside a critical section with a mechanically safe preemption path', created_event_seq: createdEventSeq, resolved_event_seq: null, version: resolutionVersion,
-            } : {
-                schema_version: 'autopilot.deadlock_resolution.v1', resolution_id: resolutionId, repo_id: repoId, cycle_edge_ids: cycle.edge_ids, participant_owners: participantOwners,
-                state: victim.action === 'cancel-and-supersede' ? 'victim-selected' : 'awaiting-recovery', victim: victim.owner, victim_class: victim.victim_class, action: victim.action,
-                reason: victim.action === 'cancel-and-supersede' ? 'queued or preflight victim can be cancelled without source mutation' : 'owner must complete reset or dirty-work quarantine before lease release', created_event_seq: createdEventSeq, resolved_event_seq: null, version: resolutionVersion,
-            };
-            if (existingResolution === null)
-                this.#db.prepare('INSERT INTO deadlock_resolutions(entity_id, repo_id, payload_json, version) VALUES(?, ?, ?, ?)').run(resolutionId, repoId, canonicalJson(resolution), resolution.version);
-            else if (canonicalJson(existingResolution) !== canonicalJson(resolution))
-                this.#db.prepare('UPDATE deadlock_resolutions SET payload_json=?, version=? WHERE entity_id=?').run(canonicalJson(resolution), resolution.version, resolutionId);
-            if (victim === null) {
-                this.#deferCycleRequests(cycle.request_ids);
-                continue;
+    #maintainWaitForGraph(repoId, seq) {
+        for (;;) {
+            const requests = this.#db.prepare('SELECT * FROM claim_requests WHERE repo_id=? ORDER BY entity_id').all(repoId).map(claimRequestFromRow);
+            const leases = this.#db.prepare('SELECT * FROM edit_leases WHERE repo_id=? ORDER BY entity_id').all(repoId).map(editLeaseFromRow);
+            const priorEdges = this.#db.prepare('SELECT * FROM wait_for_edges WHERE repo_id=? ORDER BY entity_id').all(repoId).map(waitForEdgeFromRow);
+            const nextEdges = buildCoordinationWaitForEdges({ requests, editLeases: leases, priorEdges, eventSeq: seq });
+            const priorById = new Map(priorEdges.map((edge) => [edge.edge_id, edge]));
+            for (const edge of nextEdges) {
+                const prior = priorById.get(edge.edge_id);
+                if (prior === undefined)
+                    this.#db.prepare('INSERT INTO wait_for_edges(entity_id, repo_id, request_id, payload_json, version) VALUES(?, ?, ?, ?, ?)').run(edge.edge_id, edge.repo_id, edge.request_id, canonicalJson(edge), edge.version);
+                else if (canonicalJson(prior) !== canonicalJson(edge))
+                    this.#db.prepare('UPDATE wait_for_edges SET payload_json=?, version=? WHERE entity_id=?').run(canonicalJson(edge), edge.version, edge.edge_id);
             }
-            this.#insertDeadlockResolutionMessage(resolution, seq);
-            if (victim.action !== 'cancel-and-supersede') {
-                this.#deferCycleRequests(cycle.request_ids);
-                continue;
+            const activeEdges = nextEdges.filter((edge) => edge.state === 'active');
+            const cycles = detectCoordinationWaitCycles(activeEdges);
+            // A repeated pass is required only after cancel-and-supersede removed an
+            // eligible victim and its live groups. Compute this finite durable measure
+            // only for a cyclic graph so the common acyclic/scale path pays no query.
+            const progressMeasure = cycles.length === 0 ? null : this.#deadlockFixedPointMeasure(repoId);
+            const liveResolutionIds = new Set();
+            for (const cycle of cycles) {
+                const resolutionId = stableEntityId('deadlock', [repoId, ...cycle.edge_ids]);
+                liveResolutionIds.add(resolutionId);
+                const existingRow = this.#db.prepare('SELECT * FROM deadlock_resolutions WHERE entity_id=?').get(resolutionId);
+                const existingResolution = existingRow === undefined ? null : deadlockResolutionFromRow(existingRow);
+                if (existingResolution !== null && existingResolution.state !== 'deferred-no-safe-victim')
+                    continue;
+                const attempts = this.#db.prepare('SELECT * FROM unit_attempts WHERE repo_id=? ORDER BY entity_id').all(repoId).map(unitAttemptFromRow);
+                const groups = this.#db.prepare('SELECT * FROM acquisition_groups WHERE repo_id=? ORDER BY entity_id').all(repoId).map(acquisitionGroupFromRow);
+                const children = this.#db.prepare('SELECT * FROM child_leases WHERE repo_id=? ORDER BY child_lease_id').all(repoId).map(childFromRow);
+                const worktrees = this.#db.prepare('SELECT * FROM worktrees WHERE repo_id=? ORDER BY entity_id').all(repoId).map(worktreeFromRow);
+                const operations = this.#db.prepare('SELECT * FROM worktree_operations WHERE repo_id=? ORDER BY entity_id').all(repoId).map(worktreeOperationFromRow);
+                const victim = selectCoordinationDeadlockVictim(cycle, { attempts, acquisitionGroups: groups, claimRequests: requests, childLeases: children, worktrees, worktreeOperations: operations });
+                if (existingResolution !== null && victim === null)
+                    continue;
+                const participantOwners = activeEdges.filter((edge) => cycle.edge_ids.includes(edge.edge_id)).flatMap((edge) => [edge.requester, edge.blocker]).filter((owner, index, all) => all.findIndex((candidate) => coordinationOwnerKey(candidate) === coordinationOwnerKey(owner)) === index).sort((left, right) => coordinationOwnerKey(left).localeCompare(coordinationOwnerKey(right)));
+                const resolutionVersion = existingResolution === null ? 1 : existingResolution.version + 1;
+                const createdEventSeq = existingResolution?.created_event_seq ?? seq;
+                const resolution = victim === null ? {
+                    schema_version: 'autopilot.deadlock_resolution.v1', resolution_id: resolutionId, repo_id: repoId, cycle_edge_ids: cycle.edge_ids, participant_owners: participantOwners,
+                    state: 'deferred-no-safe-victim', victim: null, victim_class: null, action: 'none', reason: 'cycle has no participant outside a critical section with a mechanically safe preemption path', created_event_seq: createdEventSeq, resolved_event_seq: null, version: resolutionVersion,
+                } : {
+                    schema_version: 'autopilot.deadlock_resolution.v1', resolution_id: resolutionId, repo_id: repoId, cycle_edge_ids: cycle.edge_ids, participant_owners: participantOwners,
+                    state: victim.action === 'cancel-and-supersede' ? 'victim-selected' : 'awaiting-recovery', victim: victim.owner, victim_class: victim.victim_class, action: victim.action,
+                    reason: victim.action === 'cancel-and-supersede' ? 'queued or preflight victim can be cancelled without source mutation' : 'owner must complete reset or dirty-work quarantine before lease release', created_event_seq: createdEventSeq, resolved_event_seq: null, version: resolutionVersion,
+                };
+                parseCoordinationDeadlockResolution(resolution);
+                if (existingResolution === null)
+                    this.#db.prepare('INSERT INTO deadlock_resolutions(entity_id, repo_id, payload_json, version) VALUES(?, ?, ?, ?)').run(resolutionId, repoId, canonicalJson(resolution), resolution.version);
+                else if (canonicalJson(existingResolution) !== canonicalJson(resolution))
+                    this.#db.prepare('UPDATE deadlock_resolutions SET payload_json=?, version=? WHERE entity_id=?').run(canonicalJson(resolution), resolution.version, resolutionId);
+                if (victim === null) {
+                    this.#deferCycleRequests(cycle.request_ids);
+                    continue;
+                }
+                this.#insertDeadlockResolutionMessage(resolution, seq);
+                if (victim.action !== 'cancel-and-supersede') {
+                    this.#deferCycleRequests(cycle.request_ids);
+                    continue;
+                }
+                const attempt = attempts.find((candidate) => coordinationOwnerKey(candidate.owner) === coordinationOwnerKey(victim.owner));
+                if (attempt === undefined)
+                    throw new CoordinationRuntimeError('invalid-state', 'selected deadlock victim attempt disappeared');
+                for (const group of groups.filter((candidate) => coordinationOwnerKey(candidate.owner) === coordinationOwnerKey(victim.owner) && (candidate.state === 'waiting' || candidate.state === 'grant-ready' || candidate.state === 'granted')))
+                    this.#cancelGroup(group, 'cancelled', seq);
+                this.#updateEntity('unit_attempts', unitAttemptEntityId(attempt.owner), { ...attempt, state: 'superseded', version: attempt.version + 1 });
+                const resolved = { ...resolution, state: 'resolved', resolved_event_seq: seq, version: resolution.version + 1 };
+                parseCoordinationDeadlockResolution(resolved);
+                this.#db.prepare('UPDATE deadlock_resolutions SET payload_json=?, version=? WHERE entity_id=?').run(canonicalJson(resolved), resolved.version, resolutionId);
+                this.#reevaluateWaitingGroups(repoId, seq);
             }
-            const attempt = attempts.find((candidate) => coordinationOwnerKey(candidate.owner) === coordinationOwnerKey(victim.owner));
-            if (attempt === undefined)
-                throw new CoordinationRuntimeError('invalid-state', 'selected deadlock victim attempt disappeared');
-            for (const group of groups.filter((candidate) => coordinationOwnerKey(candidate.owner) === coordinationOwnerKey(victim.owner) && (candidate.state === 'waiting' || candidate.state === 'grant-ready' || candidate.state === 'granted')))
-                this.#cancelGroup(group, 'cancelled', seq);
-            this.#updateEntity('unit_attempts', unitAttemptEntityId(attempt.owner), { ...attempt, state: 'superseded', version: attempt.version + 1 });
-            const resolved = { ...resolution, state: 'resolved', resolved_event_seq: seq, version: resolution.version + 1 };
-            this.#db.prepare('UPDATE deadlock_resolutions SET payload_json=?, version=? WHERE entity_id=?').run(canonicalJson(resolved), resolved.version, resolutionId);
-            this.#reevaluateWaitingGroups(repoId, seq);
+            const openRows = this.#db.prepare("SELECT * FROM deadlock_resolutions WHERE repo_id=? AND json_extract(payload_json, '$.state')!='resolved' ORDER BY entity_id").all(repoId).map(deadlockResolutionFromRow);
+            for (const resolution of openRows) {
+                if (liveResolutionIds.has(resolution.resolution_id))
+                    continue;
+                const resolved = { ...resolution, state: 'resolved', resolved_event_seq: seq, version: resolution.version + 1 };
+                parseCoordinationDeadlockResolution(resolved);
+                this.#db.prepare('UPDATE deadlock_resolutions SET payload_json=?, version=? WHERE entity_id=?').run(canonicalJson(resolved), resolved.version, resolution.resolution_id);
+            }
+            // With no cycle, no resolution branch above can have changed requests,
+            // leases, or edges. The already persisted nextEdges are the fixed point;
+            // rebuilding and reparsing the entire graph a second time is redundant.
+            if (cycles.length === 0)
+                return;
+            const refreshedRequests = this.#db.prepare('SELECT * FROM claim_requests WHERE repo_id=? ORDER BY entity_id').all(repoId).map(claimRequestFromRow);
+            const refreshedLeases = this.#db.prepare('SELECT * FROM edit_leases WHERE repo_id=? ORDER BY entity_id').all(repoId).map(editLeaseFromRow);
+            const refreshedPrior = this.#db.prepare('SELECT * FROM wait_for_edges WHERE repo_id=? ORDER BY entity_id').all(repoId).map(waitForEdgeFromRow);
+            const refreshedEdges = buildCoordinationWaitForEdges({ requests: refreshedRequests, editLeases: refreshedLeases, priorEdges: refreshedPrior, eventSeq: seq });
+            for (const edge of refreshedEdges) {
+                const prior = refreshedPrior.find((candidate) => candidate.edge_id === edge.edge_id);
+                if (prior !== undefined && canonicalJson(prior) !== canonicalJson(edge))
+                    this.#db.prepare('UPDATE wait_for_edges SET payload_json=?, version=? WHERE entity_id=?').run(canonicalJson(edge), edge.version, edge.edge_id);
+            }
+            const remainingCycles = detectCoordinationWaitCycles(refreshedEdges.filter((edge) => edge.state === 'active'));
+            const missingTypedResolution = remainingCycles.some((cycle) => {
+                const resolutionId = stableEntityId('deadlock', [repoId, ...cycle.edge_ids]);
+                const row = this.#db.prepare("SELECT entity_id FROM deadlock_resolutions WHERE entity_id=? AND json_extract(payload_json, '$.state')!='resolved'").get(resolutionId);
+                return row === undefined;
+            });
+            if (!missingTypedResolution)
+                return;
+            const nextProgressMeasure = this.#deadlockFixedPointMeasure(repoId);
+            if (progressMeasure === null || nextProgressMeasure >= progressMeasure)
+                throw new CoordinationRuntimeError('store-corrupt', 'deadlock fixed-point progression did not consume an eligible attempt/group', [`before=${String(progressMeasure)}`, `after=${String(nextProgressMeasure)}`]);
         }
-        const openRows = this.#db.prepare("SELECT * FROM deadlock_resolutions WHERE repo_id=? AND json_extract(payload_json, '$.state')!='resolved' ORDER BY entity_id").all(repoId).map(deadlockResolutionFromRow);
-        for (const resolution of openRows) {
-            if (liveResolutionIds.has(resolution.resolution_id))
-                continue;
-            const resolved = { ...resolution, state: 'resolved', resolved_event_seq: seq, version: resolution.version + 1 };
-            this.#db.prepare('UPDATE deadlock_resolutions SET payload_json=?, version=? WHERE entity_id=?').run(canonicalJson(resolved), resolved.version, resolution.resolution_id);
-        }
-        const refreshedRequests = this.#db.prepare('SELECT * FROM claim_requests WHERE repo_id=? ORDER BY entity_id').all(repoId).map(claimRequestFromRow);
-        const refreshedLeases = this.#db.prepare('SELECT * FROM edit_leases WHERE repo_id=? ORDER BY entity_id').all(repoId).map(editLeaseFromRow);
-        const refreshedPrior = this.#db.prepare('SELECT * FROM wait_for_edges WHERE repo_id=? ORDER BY entity_id').all(repoId).map(waitForEdgeFromRow);
-        const refreshedEdges = buildCoordinationWaitForEdges({ requests: refreshedRequests, editLeases: refreshedLeases, priorEdges: refreshedPrior, eventSeq: seq });
-        for (const edge of refreshedEdges) {
-            const prior = refreshedPrior.find((candidate) => candidate.edge_id === edge.edge_id);
-            if (prior !== undefined && canonicalJson(prior) !== canonicalJson(edge))
-                this.#db.prepare('UPDATE wait_for_edges SET payload_json=?, version=? WHERE entity_id=?').run(canonicalJson(edge), edge.version, edge.edge_id);
-        }
-        const remainingCycles = detectCoordinationWaitCycles(refreshedEdges.filter((edge) => edge.state === 'active'));
-        const missingTypedResolution = remainingCycles.some((cycle) => {
-            const resolutionId = stableEntityId('deadlock', [repoId, ...cycle.edge_ids]);
-            const row = this.#db.prepare("SELECT entity_id FROM deadlock_resolutions WHERE entity_id=? AND json_extract(payload_json, '$.state')!='resolved'").get(resolutionId);
-            return row === undefined;
-        });
-        if (missingTypedResolution)
-            this.#maintainWaitForGraph(repoId, seq, fixedPointDepth + 1);
+    }
+    #deadlockFixedPointMeasure(repoId) {
+        const eligibleOwners = new Set(this.#db.prepare("SELECT * FROM unit_attempts WHERE repo_id=? AND json_extract(payload_json, '$.state') IN ('queued','preflight') ORDER BY entity_id").all(repoId).map(unitAttemptFromRow).map((attempt) => coordinationOwnerKey(attempt.owner)));
+        if (eligibleOwners.size === 0)
+            return 0;
+        const eligibleGroups = this.#db.prepare("SELECT * FROM acquisition_groups WHERE repo_id=? AND json_extract(payload_json, '$.state') IN ('waiting','grant-ready','granted') ORDER BY entity_id").all(repoId).map(acquisitionGroupFromRow).filter((group) => eligibleOwners.has(coordinationOwnerKey(group.owner))).length;
+        return eligibleOwners.size + eligibleGroups;
     }
     #deferCycleRequests(requestIds) {
         for (const requestId of requestIds) {
@@ -3025,6 +4251,14 @@ export class CoordinatorStore {
         for (const workstreamRun of affectedMailboxRuns)
             this.#advanceMailboxCursor(group.owner.repo_id, workstreamRun, 'acknowledged');
     }
+    #repositoryHasCoordinationGraph(repoId) {
+        if (this.#semanticReplayTransactionActive && this.#semanticReplayGraphlessRepositories.has(repoId))
+            return false;
+        const present = this.#db.prepare("SELECT 1 AS present WHERE EXISTS(SELECT 1 FROM acquisition_groups WHERE repo_id=? LIMIT 1) OR EXISTS(SELECT 1 FROM edit_leases WHERE repo_id=? LIMIT 1) OR EXISTS(SELECT 1 FROM claim_requests WHERE repo_id=? LIMIT 1) OR EXISTS(SELECT 1 FROM wait_for_edges WHERE repo_id=? LIMIT 1)").get(repoId, repoId, repoId, repoId) !== undefined;
+        if (!present && this.#semanticReplayTransactionActive)
+            this.#semanticReplayGraphlessRepositories.add(repoId);
+        return present;
+    }
     #sessionMutation(request, eventType, apply) {
         return this.#mutation(request, () => {
             const session = this.#requireCurrentSession(request);
@@ -3039,27 +4273,33 @@ export class CoordinatorStore {
         if (idempotencyKey === null)
             throw new CoordinationRuntimeError('invalid-request', 'mutation lacks idempotency key');
         const digest = requestDigest(request);
-        this.#db.exec('BEGIN IMMEDIATE');
+        const ownsTransaction = !this.#semanticReplayTransactionActive;
+        if (ownsTransaction)
+            this.#db.exec('BEGIN IMMEDIATE');
         try {
-            const prior = this.#db.prepare('SELECT request_sha256, committed_event_seq, payload_json FROM idempotency_results WHERE repo_id=? AND idempotency_key=?').get(request.repo_id, idempotencyKey);
+            const prior = this.#idempotencyLookup.get(request.repo_id, idempotencyKey);
             if (prior !== undefined) {
                 this.#assertReplayAuthority(request);
                 if (sqlString(prior, 'request_sha256') !== digest)
                     throw new CoordinationRuntimeError('idempotency-conflict', 'idempotency key was reused with a different request');
                 const replay = { committedEventSeq: sqlInteger(prior, 'committed_event_seq'), payload: parseJsonObject(sqlString(prior, 'payload_json'), 'idempotency payload'), replayed: true };
-                this.#db.exec('COMMIT');
+                if (ownsTransaction)
+                    this.#db.exec('COMMIT');
                 return replay;
             }
             const result = apply();
-            this.#maintainWaitForGraph(request.repo_id, result.sequence);
+            if (request.action !== 'heartbeat' || this.#repositoryHasCoordinationGraph(request.repo_id))
+                this.#maintainWaitForGraph(request.repo_id, result.sequence);
             const committed = this.#commitDescription(result.sequence, result.eventType, result.entityType, result.entityId, result.payload);
-            this.#db.prepare('INSERT INTO events(repo_id, event_seq, event_type, entity_type, entity_id, idempotency_key, request_sha256, occurred_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?)').run(request.repo_id, result.sequence, result.eventType, result.entityType, result.entityId, idempotencyKey, digest, this.#clock.now().toISOString());
-            this.#db.prepare('INSERT INTO idempotency_results(repo_id, idempotency_key, request_sha256, committed_event_seq, payload_json) VALUES(?, ?, ?, ?, ?)').run(request.repo_id, idempotencyKey, digest, result.sequence, canonicalJson(committed.payload));
-            this.#db.exec('COMMIT');
+            this.#insertEvent.run(request.repo_id, result.sequence, result.eventType, result.entityType, result.entityId, idempotencyKey, digest, this.#clock.now().toISOString());
+            this.#insertIdempotencyResult.run(request.repo_id, idempotencyKey, digest, result.sequence, canonicalJson(committed.payload));
+            if (ownsTransaction)
+                this.#db.exec('COMMIT');
             return { ...committed, replayed: false };
         }
         catch (error) {
-            this.#db.exec('ROLLBACK');
+            if (ownsTransaction)
+                this.#db.exec('ROLLBACK');
             throw error;
         }
     }
@@ -3067,14 +4307,154 @@ export class CoordinatorStore {
         return { committedEventSeq: sequence, payload: { ...payload, event_type: eventType, entity_type: entityType, entity_id: entityId } };
     }
     #nextEventSequence(repoId) {
-        const repository = repositoryFromRow(asRow(this.#db.prepare('SELECT * FROM repositories WHERE repo_id=?').get(repoId), 'repository'));
-        const next = this.#db.prepare('SELECT event_seq FROM repositories WHERE repo_id=?').get(repoId);
-        const sequence = sqlInteger(asRow(next, 'repository event sequence'), 'event_seq') + 1;
-        this.#db.prepare('UPDATE repositories SET event_seq=? WHERE repo_id=?').run(sequence, repository.repo_id);
-        return sequence;
+        return sqlInteger(asRow(this.#incrementRepositorySequence.get(repoId), 'repository event sequence'), 'event_seq');
+    }
+    #pendingMigrationRecovery(repoId, workstreamRun) {
+        return Object.freeze(this.#pendingMigrationRecoveryByRun.all(repoId, workstreamRun).map(migrationRecoveryFromRow));
+    }
+    #migrationRecoveryClaim(work) {
+        const detail = work.detail;
+        const path = detail['claim_path'];
+        const mode = detail['claim_mode'];
+        const unitId = detail['unit_id'];
+        const attempt = detail['attempt'];
+        const editLeaseId = detail['edit_lease_id'];
+        if (typeof path !== 'string' || typeof unitId !== 'string' || typeof editLeaseId !== 'string' || (mode !== 'READ' && mode !== 'WRITE' && mode !== 'EXCLUSIVE') || typeof attempt !== 'number' || !Number.isSafeInteger(attempt) || attempt < 1)
+            throw new CoordinationRuntimeError('store-corrupt', 'ambiguous migration recovery detail lacks exact imported claim identity', [work.recovery_id]);
+        return { path, mode, unitId, attempt, editLeaseId };
+    }
+    #readMigrationRecoveryEvidenceFile(run, evidence) {
+        const repository = repositoryFromRow(asRow(this.#db.prepare('SELECT * FROM repositories WHERE repo_id=?').get(run.repo_id), 'migration recovery repository'));
+        const root = resolve(this.#stateRoot, 'migration-recovery-evidence', repository.repo_key, run.workstream_run);
+        const path = resolve(root, evidence.ref);
+        const relativePath = relative(root, path);
+        if (relativePath.length === 0 || relativePath === '..' || relativePath.startsWith(`..${sep}`) || isAbsolute(relativePath))
+            throw new CoordinationRuntimeError('unauthorized-client', 'migration recovery evidence escapes its coordinator-owned recovery root', [path]);
+        let bytes;
+        try {
+            const realRoot = realpathSync(root);
+            const realPath = realpathSync(path);
+            const realRelative = relative(realRoot, realPath);
+            if (realRelative.length === 0 || realRelative === '..' || realRelative.startsWith(`..${sep}`) || isAbsolute(realRelative))
+                throw new CoordinationRuntimeError('unauthorized-client', 'migration recovery evidence physically escapes its coordinator-owned recovery root', [path]);
+            bytes = this.#readRegularEvidenceFile(path, 'migration recovery evidence');
+        }
+        catch (error) {
+            if (error instanceof CoordinationRuntimeError)
+                throw error;
+            throw new CoordinationRuntimeError('recovery-required', 'migration recovery evidence is unreadable', [path, error instanceof Error ? error.message : String(error)]);
+        }
+        const actual = `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
+        if (actual !== evidence.sha256)
+            throw new CoordinationRuntimeError('invalid-state', 'migration recovery evidence hash does not match the fenced artifact', [path, `expected=${evidence.sha256}`, `actual=${actual}`]);
+        return bytes;
+    }
+    #parseMigrationRecoveryEvidence(bytes) {
+        let parsed;
+        try {
+            parsed = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+        }
+        catch (error) {
+            throw new CoordinationRuntimeError('invalid-state', 'migration recovery evidence is not valid UTF-8 JSON', [error instanceof Error ? error.message : String(error)]);
+        }
+        if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed))
+            throw new CoordinationRuntimeError('invalid-state', 'migration recovery evidence must be a JSON object');
+        return parsed;
+    }
+    #verifyMigrationRetentionEvidence(run, work, claim, evidence) {
+        const document = this.#parseMigrationRecoveryEvidence(this.#readMigrationRecoveryEvidenceFile(run, evidence));
+        const fields = ['attempt', 'autopilot_id', 'claim_mode', 'claim_path', 'edit_lease_id', 'recorded_event_seq', 'recovery_id', 'repo_id', 'resolution_type', 'schema_version', 'unit_id', 'workstream', 'workstream_run'];
+        const actual = Object.keys(document).sort();
+        if (actual.length !== fields.length || actual.some((field, index) => field !== [...fields].sort()[index]))
+            throw new CoordinationRuntimeError('schema-mismatch', 'authority retention evidence fields are not the exact closed contract', actual);
+        if (document['schema_version'] !== 'autopilot.migration_authority_recovery.v1' || document['resolution_type'] !== 'authority-retained' || document['repo_id'] !== run.repo_id || document['autopilot_id'] !== run.autopilot_id || document['workstream'] !== run.workstream || document['workstream_run'] !== run.workstream_run || document['recovery_id'] !== work.recovery_id || document['claim_path'] !== claim.path || document['claim_mode'] !== claim.mode || document['unit_id'] !== claim.unitId || document['attempt'] !== claim.attempt || document['edit_lease_id'] !== claim.editLeaseId || typeof document['recorded_event_seq'] !== 'number' || !Number.isSafeInteger(document['recorded_event_seq']) || document['recorded_event_seq'] < 1)
+            throw new CoordinationRuntimeError('invalid-state', 'authority retention evidence does not bind the exact imported claim and durable owner', [work.recovery_id]);
+    }
+    #verifyMigrationReleasePostconditions(run, work, claim, source, targetId, evidence) {
+        const bytes = this.#readMigrationRecoveryEvidenceFile(run, evidence);
+        const unitTarget = source === 'unit-merge' || source === 'attempt-reset' || source === 'quarantine-capture' ? parseUnitAttemptTarget(targetId) : null;
+        if (unitTarget !== null && (unitTarget.unitId !== claim.unitId || unitTarget.attempt !== claim.attempt))
+            throw new CoordinationRuntimeError('invalid-state', 'migration recovery release target does not match the exact imported claim owner', [work.recovery_id, targetId]);
+        if ((source === 'run-close' || source === 'run-abort') && targetId !== run.workstream_run)
+            throw new CoordinationRuntimeError('invalid-state', 'run-terminal migration recovery target must be the exact durable run', [targetId, run.workstream_run]);
+        validateReconciliationEvidenceDocument(bytes, { repoKey: run.repo_id, autopilotId: run.autopilot_id, workstream: run.workstream, workstreamRun: run.workstream_run, source, targetId, unitId: unitTarget?.unitId ?? null, attempt: unitTarget?.attempt ?? null });
+        const resource = runResourceFromRow(asRow(this.#db.prepare('SELECT * FROM run_resources WHERE repo_id=? AND workstream_run=?').get(run.repo_id, run.workstream_run), 'migration recovery run resource'));
+        const postconditions = [`claim:${claim.mode}:${claim.path}`, `edit-lease-release:${claim.editLeaseId}`, `evidence:${evidence.sha256}`];
+        if (source === 'unit-merge') {
+            const facts = parseUnitMergeReservationFacts(bytes);
+            const document = this.#parseMigrationRecoveryEvidence(bytes);
+            const unitHeadValue = document['unit_head'];
+            const unitHead = typeof unitHeadValue === 'string' ? this.#gitText(resource.source_repo, ['rev-parse', '--verify', `${unitHeadValue}^{commit}`]) : null;
+            const before = this.#gitText(resource.source_repo, ['rev-parse', '--verify', `${facts.integrationBefore}^{commit}`]);
+            const after = this.#gitText(resource.source_repo, ['rev-parse', '--verify', `${facts.integrationAfter}^{commit}`]);
+            const mergeCommit = this.#gitText(resource.source_repo, ['rev-parse', '--verify', `${facts.mergeCommitSha}^{commit}`]);
+            const head = this.#gitText(resource.main_worktree_path, ['rev-parse', 'HEAD']);
+            const branch = this.#gitText(resource.main_worktree_path, ['symbolic-ref', '--short', 'HEAD']);
+            const beforeAncestor = before !== null && after !== null && spawnSync('git', ['merge-base', '--is-ancestor', before, after], { cwd: resource.source_repo, encoding: 'utf8', timeout: 30_000 }).status === 0;
+            const unitAncestor = unitHead !== null && after !== null && spawnSync('git', ['merge-base', '--is-ancestor', unitHead, after], { cwd: resource.source_repo, encoding: 'utf8', timeout: 30_000 }).status === 0;
+            const diff = before === null || after === null ? null : spawnSync('git', ['diff', '--name-only', '--no-renames', '-z', before, after], { cwd: resource.source_repo, encoding: 'utf8', timeout: 30_000 });
+            const actualPaths = diff?.status === 0 ? diff.stdout.split('\0').filter((entry) => entry.length > 0).map((entry) => entry.replace(/\\/gu, '/')).sort() : [];
+            const declaredPaths = [...facts.changedPaths].sort();
+            const claimCovered = declaredPaths.some((changedPath) => coordinationPathsOverlap(claim.path, changedPath));
+            if (document['main_branch'] !== resource.branch || head !== after || after === null || mergeCommit !== after || branch !== resource.branch || !beforeAncestor || !unitAncestor || diff?.status !== 0 || canonicalJson(actualPaths) !== canonicalJson(declaredPaths) || !claimCovered)
+                throw new CoordinationRuntimeError('invalid-state', 'unit-merge migration recovery lacks exact claim/Git object/ref/ancestry/diff postconditions', [`claim=${claim.path}`, `head=${String(head)}`, `integration_after=${String(after)}`, `branch=${String(branch)}`, `actual_paths=${actualPaths.join(',')}`, `declared_paths=${declaredPaths.join(',')}`]);
+            postconditions.push(`main-head:${head}`, `main-branch:${branch}`, `claim-covered-by-diff:${claim.path}`);
+        }
+        else if (source === 'attempt-reset') {
+            const worktree = this.#migrationRecoveryUnitWorktree(run, claim.unitId, claim.attempt);
+            const document = this.#parseMigrationRecoveryEvidence(bytes);
+            if (document['unit_worktree_path'] !== worktree.canonical_path || document['capture_commit_sha'] !== null || (worktree.state !== 'terminal' && worktree.state !== 'removed') || existsSync(worktree.canonical_path) || this.#gitWorktreeRegistered(resource.source_repo, worktree.canonical_path) || this.#gitText(resource.source_repo, ['rev-parse', '--verify', `refs/heads/${worktree.branch}`]) !== null)
+                throw new CoordinationRuntimeError('invalid-state', 'attempt-reset migration recovery postconditions are not exact', [worktree.canonical_path, worktree.branch, worktree.state]);
+            postconditions.push(`worktree-absent:${worktree.canonical_path}`, `branch-ref-absent:${worktree.branch}`, `worktree-state:${worktree.state}`);
+        }
+        else if (source === 'quarantine-capture') {
+            const worktree = this.#migrationRecoveryUnitWorktree(run, claim.unitId, claim.attempt);
+            const document = this.#parseMigrationRecoveryEvidence(bytes);
+            const capture = document['capture_commit_sha'];
+            const head = existsSync(worktree.canonical_path) ? this.#gitText(worktree.canonical_path, ['rev-parse', 'HEAD']) : null;
+            const branch = existsSync(worktree.canonical_path) ? this.#gitText(worktree.canonical_path, ['symbolic-ref', '--short', 'HEAD']) : null;
+            const branchRef = this.#gitText(resource.source_repo, ['rev-parse', '--verify', `refs/heads/${worktree.branch}`]);
+            const clean = existsSync(worktree.canonical_path) ? this.#gitText(worktree.canonical_path, ['status', '--porcelain=v1', '-z']) : null;
+            if (document['unit_worktree_path'] !== worktree.canonical_path || worktree.state !== 'quarantined' || typeof capture !== 'string' || head !== capture || branch !== worktree.branch || branchRef !== capture || clean !== '')
+                throw new CoordinationRuntimeError('invalid-state', 'quarantine migration recovery requires the exact clean captured worktree/ref postcondition', [worktree.canonical_path, String(capture), String(head), String(branch), String(branchRef), String(clean)]);
+            postconditions.push(`quarantined-head:${capture}`, `quarantined-branch:${worktree.branch}`, `clean-worktree:${worktree.canonical_path}`);
+        }
+        else {
+            const expectedStatus = source === 'run-close' ? 'closed' : 'aborted';
+            const main = this.#migrationRecoveryMainWorktree(run);
+            const terminalSha = parseRunTerminalSha(bytes);
+            const archiveRef = `autopilot/archive/${run.workstream_run}/${source === 'run-close' ? 'main' : 'aborted'}`;
+            if (run.status !== expectedStatus || (main.state !== 'terminal' && main.state !== 'removed') || existsSync(main.canonical_path) || this.#gitWorktreeRegistered(resource.source_repo, main.canonical_path) || this.#gitText(resource.source_repo, ['rev-parse', '--verify', `refs/heads/${main.branch}`]) !== null || this.#gitText(resource.source_repo, ['rev-parse', '--verify', `refs/heads/${archiveRef}`]) !== terminalSha || source === 'run-close' && (resource.target_branch === null || this.#gitText(resource.source_repo, ['rev-parse', '--verify', `refs/heads/${resource.target_branch}`]) !== terminalSha))
+                throw new CoordinationRuntimeError('invalid-state', 'run-terminal migration recovery postconditions are not exact and terminal state was not changed', [run.status, main.state, main.canonical_path, main.branch, archiveRef, terminalSha]);
+            postconditions.push(`run-status:${run.status}`, `main-worktree-absent:${main.canonical_path}`, `archive-ref:${archiveRef}:${terminalSha}`);
+        }
+        return Object.freeze(postconditions);
+    }
+    #migrationRecoveryUnitWorktree(run, unitId, attempt) {
+        const rows = this.#db.prepare("SELECT * FROM worktrees WHERE repo_id=? AND workstream_run=? AND json_extract(payload_json, '$.owner.unit_id')=? AND json_extract(payload_json, '$.owner.attempt')=? ORDER BY entity_id").all(run.repo_id, run.workstream_run, unitId, attempt).map(worktreeFromRow);
+        if (rows.length !== 1 || rows[0] === undefined)
+            throw new CoordinationRuntimeError('invalid-state', 'migration recovery requires exactly one matching durable unit worktree', [unitId, String(attempt)]);
+        return rows[0];
+    }
+    #migrationRecoveryMainWorktree(run) {
+        const rows = this.#db.prepare("SELECT * FROM worktrees WHERE repo_id=? AND workstream_run=? AND json_extract(payload_json, '$.kind')='main' ORDER BY entity_id").all(run.repo_id, run.workstream_run).map(worktreeFromRow);
+        if (rows.length !== 1 || rows[0] === undefined)
+            throw new CoordinationRuntimeError('invalid-state', 'migration recovery requires exactly one durable main worktree', [run.workstream_run]);
+        return rows[0];
+    }
+    #gitText(cwd, args) {
+        const result = spawnSync('git', [...args], { cwd, encoding: 'utf8', timeout: 30_000 });
+        return result.status === 0 ? result.stdout.trim() : null;
+    }
+    #gitWorktreeRegistered(repoRoot, candidate) {
+        const result = spawnSync('git', ['worktree', 'list', '--porcelain', '-z'], { cwd: repoRoot, encoding: 'utf8', timeout: 30_000 });
+        if (result.status !== 0)
+            throw new CoordinationRuntimeError('recovery-required', 'Git worktree registration inspection failed', [repoRoot, result.stderr]);
+        const expected = resolve(candidate);
+        return result.stdout.split('\0').some((entry) => entry.startsWith('worktree ') && resolve(entry.slice('worktree '.length)) === expected);
     }
     #requireRun(repoId, workstreamRun) {
-        return runFromRow(asRow(this.#db.prepare('SELECT * FROM runs WHERE repo_id=? AND workstream_run=?').get(repoId, workstreamRun), 'run'));
+        return runFromRow(asRow(this.#runByIdentity.get(repoId, workstreamRun), 'run'));
     }
     #requireCoordinatorEditAuthority(run, operation) {
         if (run.coordination_authority !== 'coordinator-edit-leases-v1')
@@ -3088,13 +4468,19 @@ export class CoordinatorStore {
         const generation = request.fencing_generation;
         if (generation === null || generation !== run.active_session_generation)
             throw new CoordinationRuntimeError('fenced-session', 'session generation is no longer current');
-        const row = this.#db.prepare("SELECT * FROM session_leases WHERE repo_id=? AND workstream_run=? AND session_id=? AND session_generation=? AND status='attached'").get(request.repo_id, run.workstream_run, sessionId, generation);
+        const row = this.#attachedSessionByIdentity.get(request.repo_id, run.workstream_run, sessionId, generation);
         if (row === undefined)
             throw new CoordinationRuntimeError('fenced-session', 'session is not attached to the durable run supervisor');
         if (sqlString(row, 'session_lease_id') !== payloadString(request.payload, 'session_lease_id'))
             throw new CoordinationRuntimeError('unauthorized-client', 'session lease identity does not match current authority');
         this.#assertCapability(row, 'session_token_sha256', payloadString(request.payload, 'session_token'), 'session');
-        return sessionFromRow(row);
+        const session = sessionFromRow(row);
+        const pendingRecovery = this.#pendingMigrationRecovery(run.repo_id, run.workstream_run);
+        if (session.attachment_kind === 'migration-recovery' && !MIGRATION_RECOVERY_SESSION_ACTIONS.has(request.action))
+            throw new CoordinationRuntimeError('unauthorized-client', `recovery-only session rejects ordinary dispatch action ${request.action}`);
+        if (session.attachment_kind !== 'migration-recovery' && pendingRecovery.length > 0 && !['detach-session', 'heartbeat'].includes(request.action))
+            throw new CoordinationRuntimeError('recovery-required', 'ordinary session is fenced from dispatch while migration recovery remains pending', pendingRecovery.map((work) => work.recovery_id));
+        return session;
     }
     #assertReplayAuthority(request) {
         if (request.action === 'attach-run')

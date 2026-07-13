@@ -3,10 +3,11 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
+import { fileURLToPath } from 'node:url';
 
 import { assertStandalonePackageBoundary, scanStandalonePackageBoundary } from '../../src/core/coordination/package-isolation.ts';
 
-const packageRoot = new URL('../../', import.meta.url).pathname;
+const packageRoot = fileURLToPath(new URL('../../', import.meta.url));
 
 void describe('Autopilot standalone package boundary', () => {
   void it('contains no production dependency on closed repository surfaces', async () => {

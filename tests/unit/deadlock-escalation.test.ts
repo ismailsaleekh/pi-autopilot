@@ -56,8 +56,16 @@ function digest(bytes: Uint8Array): `sha256:${string}` {
 
 async function attachActor(client: CoordinatorClient, stateRoot: string, repoRoot: string, suffix: string): Promise<Actor> {
   const repoId = 'repo-deadlock';
-  const runResponse = await client.mutate('attach-run', { repoId, workstreamRun: `run-${suffix}`, sessionId: null, fencingGeneration: null, expectedVersion: 0, idempotencyKey: `attach-run-${suffix}` }, {
+  const workstreamRun = `run-${suffix}`;
+  const runResponse = await client.mutate('attach-run', { repoId, workstreamRun, sessionId: null, fencingGeneration: null, expectedVersion: 0, idempotencyKey: `attach-run-${suffix}` }, {
     repo_key: repoId, canonical_root: repoRoot, git_common_dir: join(repoRoot, '.git'), autopilot_id: `autopilot-${suffix}`, workstream: `work-${suffix}`, coordination_authority: 'coordinator-edit-leases-v1',
+    run_resource: {
+      schema_version: 'autopilot.coordination_run_resource.v1', repo_id: repoId, workstream_run: workstreamRun,
+      source_repo: repoRoot, git_common_dir: join(repoRoot, '.git'), worktree_root: join(stateRoot, 'worktrees', repoId),
+      main_worktree_path: join(stateRoot, 'worktrees', repoId, 'active', workstreamRun, 'main'), runtime_root: join(stateRoot, 'worktrees', repoId, 'active', workstreamRun, 'main', '.pi', 'autopilot', `work-${suffix}`),
+      branch: `autopilot/${workstreamRun}`, target_branch: null, target_base_sha: '0'.repeat(40), origin_url: null,
+      started_at: '2026-07-12T00:00:00.000Z', version: 1,
+    },
   });
   const run = parseCoordinationRun(runResponse.payload['run']);
   const token = suffix.charCodeAt(0).toString(16).repeat(64).slice(0, 64);
@@ -126,6 +134,24 @@ void describe('Coordination Fabric deadlock, starvation, and escalation arbitrat
     }
   });
 
+  void it('keeps large acyclic fan-in graphs cycle-free while retaining singleton self-cycles', () => {
+    const blocker: CoordinationOwnerIdentity = { repo_id: 'repo', autopilot_id: 'blocker', workstream_run: 'run-blocker', unit_id: 'unit-blocker', attempt: 1 };
+    const fanIn: CoordinationWaitForEdge[] = Array.from({ length: 4_096 }, (_entry, index) => ({
+      schema_version: 'autopilot.wait_for_edge.v1', edge_id: `fan-in-${String(index)}`, repo_id: 'repo', request_id: `request-${String(index)}`,
+      requester: { repo_id: 'repo', autopilot_id: `requester-${String(index)}`, workstream_run: `run-${String(index)}`, unit_id: `unit-${String(index)}`, attempt: 1 },
+      blocker, state: 'active', created_event_seq: index + 1, resolved_event_seq: null, version: 1,
+    }));
+    assert.deepEqual(detectCoordinationWaitCycles(fanIn), []);
+    const selfEdge: CoordinationWaitForEdge = {
+      schema_version: 'autopilot.wait_for_edge.v1', edge_id: 'self-edge', repo_id: 'repo', request_id: 'self-request', requester: blocker, blocker,
+      state: 'active', created_event_seq: fanIn.length + 1, resolved_event_seq: null, version: 1,
+    };
+    const cycles = detectCoordinationWaitCycles([...fanIn, selfEdge]);
+    assert.equal(cycles.length, 1);
+    assert.deepEqual(cycles[0]?.edge_ids, ['self-edge']);
+    assert.deepEqual(cycles[0]?.request_ids, ['self-request']);
+  });
+
   void it('uses the locked victim ordering and refuses critical/non-preemptible victims', () => {
     const ownerA: CoordinationOwnerIdentity = { repo_id: 'repo', autopilot_id: 'a', workstream_run: 'run-a', unit_id: 'unit-a', attempt: 1 };
     const ownerB: CoordinationOwnerIdentity = { repo_id: 'repo', autopilot_id: 'b', workstream_run: 'run-b', unit_id: 'unit-b', attempt: 1 };
@@ -157,6 +183,36 @@ void describe('Coordination Fabric deadlock, starvation, and escalation arbitrat
     const starved = { ...baseGroup, acquisition_group_id: 'starved', offer_count: 12, bypass_count: MAX_GRANT_BYPASSES };
     const newcomer = { ...baseGroup, acquisition_group_id: 'newcomer', created_event_seq: 99, fairness_event_seq: 99, offer_count: 0, bypass_count: 0 };
     assert.equal(compareCoordinationGrantPriority(starved, newcomer) < 0, true);
+  });
+
+  void it('handles a 20,000-owner accepted wait chain without recursive stack growth', () => {
+    const owner = (index: number): CoordinationOwnerIdentity => ({ repo_id: 'repo', autopilot_id: `auto-${String(index)}`, workstream_run: `run-${String(index)}`, unit_id: `unit-${String(index)}`, attempt: 1 });
+    const edges: CoordinationWaitForEdge[] = Array.from({ length: 19_999 }, (_, index) => ({
+      schema_version: 'autopilot.wait_for_edge.v1', edge_id: `edge-${String(index).padStart(5, '0')}`, repo_id: 'repo', request_id: `request-${String(index)}`,
+      requester: owner(index), blocker: owner(index + 1), state: 'active', created_event_seq: index + 1, resolved_event_seq: null, version: 1,
+    }));
+    assert.deepEqual(detectCoordinationWaitCycles(edges), []);
+  });
+
+  void it('iteratively defers a 1,026-owner cyclic chain without a stack or arbitrary fixed-point bound', async () => {
+    const count = 1_026;
+    const owners = Array.from({ length: count }, (_entry, index): CoordinationOwnerIdentity => ({ repo_id: 'repo', autopilot_id: `cyclic-auto-${String(index)}`, workstream_run: `cyclic-run-${String(index)}`, unit_id: `cyclic-unit-${String(index)}`, attempt: 1 }));
+    const edges: CoordinationWaitForEdge[] = owners.map((requester, index) => ({
+      schema_version: 'autopilot.wait_for_edge.v1', edge_id: `cyclic-edge-${String(index).padStart(5, '0')}`, repo_id: 'repo', request_id: `cyclic-request-${String(index)}`,
+      requester, blocker: owners[(index + 1) % count] as CoordinationOwnerIdentity, state: 'active', created_event_seq: index + 1, resolved_event_seq: null, version: 1,
+    }));
+    const cycle = detectCoordinationWaitCycles(edges)[0];
+    assert.equal(cycle?.participant_keys.length, count);
+    if (cycle === undefined) throw new Error('large cyclic chain was not detected');
+    const attempts = owners.map((owner) => ({ schema_version: 'autopilot.unit_attempt.v1' as const, owner, state: 'running' as const, role: 'implement' as const, spec: { ref: `${owner.unit_id}.json`, sha256: `sha256:${'a'.repeat(64)}` as `sha256:${string}` }, preemptible: false, checkpoint_ordinal: 0, critical_section: null, version: 1 }));
+    assert.equal(selectCoordinationDeadlockVictim(cycle, { attempts, acquisitionGroups: [], claimRequests: [], childLeases: [], worktrees: [], worktreeOperations: [] }), null, 'large no-safe-victim cycle is explicitly deferred');
+    const storeSource = await readFile(fileURLToPath(new URL('../../src/core/coordination/store.ts', import.meta.url)), 'utf8');
+    const methodStart = storeSource.indexOf('#maintainWaitForGraph(repoId: string, seq: number): void');
+    const method = storeSource.slice(methodStart, storeSource.indexOf('#deferCycleRequests(requestIds:', methodStart));
+    assert.equal(method.includes('fixedPointDepth'), false);
+    assert.equal(method.includes('1024'), false);
+    assert.match(method, /for \(;;\)/u);
+    assert.match(method, /nextProgressMeasure >= progressMeasure/u);
   });
 
   void it('forbids every post-initial WRITE expansion while permitting typed READ materialization expansion', async () => {

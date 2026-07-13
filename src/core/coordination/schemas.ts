@@ -18,6 +18,10 @@ import {
   COORDINATION_MESSAGE_TYPES,
   COORDINATION_RUN_STATUSES,
   COORDINATION_SESSION_STATUSES,
+  COORDINATION_SESSION_ATTACHMENT_KINDS,
+  COORDINATION_MIGRATION_RECOVERY_RESOLUTIONS,
+  COORDINATION_MIGRATION_RECOVERY_STATUSES,
+  COORDINATION_MIGRATION_RECOVERY_TYPES,
   COORDINATION_UNIT_ROLES,
   COORDINATION_UNIT_STATES,
   COORDINATION_WORKTREE_KINDS,
@@ -73,8 +77,11 @@ export const COORDINATION_REPOSITORY_SCHEMA = exactObject('autopilot.coordinatio
 export const COORDINATION_RUN_SCHEMA = exactObject('autopilot.coordination_run.v1', {
   repo_id: pathSegmentIdentifier(), autopilot_id: pathSegmentIdentifier(), workstream: identifier(), workstream_run: pathSegmentIdentifier(), coordination_authority: enumeration(['legacy-path-claims-v1', 'coordinator-edit-leases-v1']), status: enumeration(COORDINATION_RUN_STATUSES), active_session_generation: integer(), created_event_seq: integer(), version: integer(1),
 });
-export const COORDINATION_SESSION_LEASE_SCHEMA = exactObject('autopilot.session_lease.v1', {
-  session_lease_id: identifier(), repo_id: pathSegmentIdentifier(), workstream_run: pathSegmentIdentifier(), session_id: identifier(), session_generation: integer(1), pid: integer(1), boot_id: identifier(), lease_expires_at: boundedString(32), status: enumeration(COORDINATION_SESSION_STATUSES), attached_event_seq: integer(), version: integer(1),
+export const COORDINATION_RUN_RESOURCE_SCHEMA = exactObject('autopilot.coordination_run_resource.v1', {
+  repo_id: pathSegmentIdentifier(), workstream_run: pathSegmentIdentifier(), source_repo: boundedString(1024), git_common_dir: boundedString(1024), worktree_root: boundedString(1024), main_worktree_path: boundedString(1024), runtime_root: boundedString(1024), branch: boundedString(512), target_branch: nullable(boundedString(512)), target_base_sha: boundedString(128), origin_url: nullable(boundedString(2048)), started_at: boundedString(32), version: integer(1),
+});
+export const COORDINATION_SESSION_LEASE_SCHEMA = exactObject('autopilot.session_lease.v2', {
+  session_lease_id: identifier(), repo_id: pathSegmentIdentifier(), workstream_run: pathSegmentIdentifier(), session_id: identifier(), session_generation: integer(1), pid: integer(1), boot_id: identifier(), lease_expires_at: boundedString(32), attachment_kind: enumeration(COORDINATION_SESSION_ATTACHMENT_KINDS), status: enumeration(COORDINATION_SESSION_STATUSES), attached_event_seq: integer(), version: integer(1),
 });
 export const COORDINATION_CHILD_LEASE_SCHEMA = exactObject('autopilot.child_lease.v1', {
   child_lease_id: identifier(), owner: owner(), pid: integer(1), boot_id: identifier(), lease_expires_at: boundedString(32), status: enumeration(COORDINATION_CHILD_STATUSES), terminal_evidence: nullable(evidence()), version: integer(1),
@@ -152,19 +159,35 @@ export const COORDINATION_ADJUDICATION_ASSIGNMENT_SCHEMA = exactObject('autopilo
 export const COORDINATION_ESCALATION_SCHEMA = exactObject('autopilot.planning_contradiction.v1', {
   escalation_id: identifier(), repo_id: pathSegmentIdentifier(), participating_runs: { type: 'array', minItems: 2, maxItems: 32, uniqueItems: true, items: identifier() }, authoritative_refs: { type: 'array', minItems: 2, maxItems: 32, items: evidence() }, conflicting_clauses: { type: 'array', minItems: 2, maxItems: 32, items: contradictionClause() }, exhausted_alternatives: { type: 'array', minItems: 5, maxItems: 5, uniqueItems: true, items: enumeration(['sequencing', 'partitioning', 'ownership-transfer', 'rebase-revalidation', 'replanning']) }, adjudication: evidence(), decision_options: { type: 'array', minItems: 2, maxItems: 16, uniqueItems: true, items: boundedString(1024) }, created_event_seq: integer(), version: integer(1),
 });
+const migrationRecoveryResolution = (): CoordinationJsonSchema => ({
+  type: 'object', additionalProperties: false, required: ['resolution_type', 'evidence', 'release_source', 'release_target_id', 'exact_postconditions'], properties: {
+    resolution_type: enumeration(COORDINATION_MIGRATION_RECOVERY_RESOLUTIONS), evidence: evidence(),
+    release_source: nullable(enumeration(COORDINATION_RECONCILIATION_SOURCES.filter((source) => source !== 'child-process'))), release_target_id: nullable(identifier()),
+    exact_postconditions: { type: 'array', minItems: 1, maxItems: 64, uniqueItems: true, items: boundedString(1024) },
+  },
+});
+export const COORDINATION_MIGRATION_RECOVERY_WORK_SCHEMA = exactObject('autopilot.migration_recovery_work.v2', {
+  recovery_id: identifier(), repo_id: pathSegmentIdentifier(), workstream_run: pathSegmentIdentifier(), recovery_type: enumeration(COORDINATION_MIGRATION_RECOVERY_TYPES), detail: { type: 'object', maxProperties: 128 }, status: enumeration(COORDINATION_MIGRATION_RECOVERY_STATUSES), resolution: nullable(migrationRecoveryResolution()), created_event_seq: integer(1), resolved_event_seq: nullable(integer(1)), version: integer(1),
+});
+export const COORDINATION_MIGRATION_RECORD_SCHEMA = exactObject('autopilot.coordination_migration_record.v1', {
+  repo_id: pathSegmentIdentifier(), migration_id: identifier(), snapshot_sha256: { type: 'string', pattern: '^sha256:[a-f0-9]{64}$' }, journal_path: boundedString(1024), state: enumeration(['imported', 'verified', 'cutover-ready', 'cutover-committed', 'legacy-archived']), report: { type: 'object', maxProperties: 64 }, imported_at: boundedString(32), updated_at: boundedString(32), version: integer(1),
+});
+export const COORDINATION_CUTOVER_MARKER_JSON_SCHEMA = exactObject('autopilot.coordination_cutover.v1', {
+  repo_key: pathSegmentIdentifier(), snapshot_sha256: { type: 'string', pattern: '^sha256:[a-f0-9]{64}$' }, database_sha256: { type: 'string', pattern: '^sha256:[a-f0-9]{64}$' }, committed_at: boundedString(32), migration_id: identifier(),
+});
 export const COORDINATION_EVENT_SCHEMA = exactObject('autopilot.coordination_event.v1', {
   repo_id: pathSegmentIdentifier(), event_seq: integer(1), event_type: identifier(), entity_type: identifier(), entity_id: identifier(), idempotency_key: identifier(), request_sha256: { type: 'string', pattern: '^sha256:[a-f0-9]{64}$' }, occurred_at: boundedString(32),
 });
 
 export const COORDINATION_SNAPSHOT_SCHEMA = exactObject(AUTOPILOT_COORDINATION_SNAPSHOT_SCHEMA, {
-  repository_event_seq: integer(), repositories: table(COORDINATION_REPOSITORY_SCHEMA), runs: table(COORDINATION_RUN_SCHEMA), session_leases: table(COORDINATION_SESSION_LEASE_SCHEMA), child_leases: table(COORDINATION_CHILD_LEASE_SCHEMA), unit_attempts: table(COORDINATION_UNIT_ATTEMPT_SCHEMA), acquisition_groups: table(COORDINATION_ACQUISITION_GROUP_SCHEMA), edit_leases: table(COORDINATION_EDIT_LEASE_SCHEMA), change_reservations: table(COORDINATION_CHANGE_RESERVATION_SCHEMA), reservation_obligations: table(COORDINATION_RESERVATION_OBLIGATION_SCHEMA), run_terminal_intents: table(COORDINATION_RUN_TERMINAL_INTENT_SCHEMA), claim_requests: table(COORDINATION_CLAIM_REQUEST_SCHEMA), mailbox_cursors: table(COORDINATION_MAILBOX_CURSOR_SCHEMA), reconciliation_evidence: table(COORDINATION_RECONCILIATION_EVIDENCE_SCHEMA), messages: table(COORDINATION_MESSAGE_SCHEMA, 100_000), worktrees: table(COORDINATION_WORKTREE_SCHEMA), worktree_operations: table(COORDINATION_WORKTREE_OPERATION_SCHEMA), wait_for_edges: table(COORDINATION_WAIT_FOR_EDGE_SCHEMA), deadlock_resolutions: table(COORDINATION_DEADLOCK_RESOLUTION_SCHEMA), authoritative_artifacts: table(COORDINATION_AUTHORITATIVE_ARTIFACT_SCHEMA), adjudication_assignments: table(COORDINATION_ADJUDICATION_ASSIGNMENT_SCHEMA), escalations: table(COORDINATION_ESCALATION_SCHEMA), events: table(COORDINATION_EVENT_SCHEMA, 100_000),
+  repository_event_seq: integer(), repositories: table(COORDINATION_REPOSITORY_SCHEMA), runs: table(COORDINATION_RUN_SCHEMA), session_leases: table(COORDINATION_SESSION_LEASE_SCHEMA), child_leases: table(COORDINATION_CHILD_LEASE_SCHEMA), unit_attempts: table(COORDINATION_UNIT_ATTEMPT_SCHEMA), acquisition_groups: table(COORDINATION_ACQUISITION_GROUP_SCHEMA), edit_leases: table(COORDINATION_EDIT_LEASE_SCHEMA), change_reservations: table(COORDINATION_CHANGE_RESERVATION_SCHEMA), reservation_obligations: table(COORDINATION_RESERVATION_OBLIGATION_SCHEMA), run_terminal_intents: table(COORDINATION_RUN_TERMINAL_INTENT_SCHEMA), claim_requests: table(COORDINATION_CLAIM_REQUEST_SCHEMA), mailbox_cursors: table(COORDINATION_MAILBOX_CURSOR_SCHEMA), reconciliation_evidence: table(COORDINATION_RECONCILIATION_EVIDENCE_SCHEMA), migration_recovery_work: table(COORDINATION_MIGRATION_RECOVERY_WORK_SCHEMA), messages: table(COORDINATION_MESSAGE_SCHEMA, 100_000), worktrees: table(COORDINATION_WORKTREE_SCHEMA), worktree_operations: table(COORDINATION_WORKTREE_OPERATION_SCHEMA), wait_for_edges: table(COORDINATION_WAIT_FOR_EDGE_SCHEMA), deadlock_resolutions: table(COORDINATION_DEADLOCK_RESOLUTION_SCHEMA), authoritative_artifacts: table(COORDINATION_AUTHORITATIVE_ARTIFACT_SCHEMA), adjudication_assignments: table(COORDINATION_ADJUDICATION_ASSIGNMENT_SCHEMA), escalations: table(COORDINATION_ESCALATION_SCHEMA), events: table(COORDINATION_EVENT_SCHEMA, 100_000),
 });
 
 export const COORDINATOR_REQUEST_SCHEMA: CoordinationJsonSchema = {
   $id: 'urn:pi-autopilot:coordination:coordinator-request-v1', type: 'object', additionalProperties: false,
   required: ['schema_version', 'protocol_version', 'request_id', 'action', 'idempotency_key', 'repo_id', 'workstream_run', 'session_id', 'fencing_generation', 'expected_version', 'payload'],
   properties: {
-    schema_version: { const: AUTOPILOT_COORDINATOR_REQUEST_SCHEMA }, protocol_version: { const: AUTOPILOT_COORDINATOR_PROTOCOL_VERSION }, request_id: identifier(), action: enumeration(['status', 'doctor', 'export', 'attach-run', 'attach-session', 'detach-session', 'prepare-handoff', 'heartbeat', 'register-attempt', 'register-child', 'heartbeat-child', 'checkpoint-child', 'complete-child', 'drain-mailbox', 'acquire-group', 'acknowledge-grant', 'respond-claim-request', 'cancel-claim-request', 'cancel-acquisition-group', 'supersede-attempt', 'acknowledge-message', 'record-release-evidence', 'resolve-reservation-obligation', 'prepare-run-terminal', 'cancel-run-terminal', 'reconcile-run', 'prepare-operation', 'transition-operation', 'register-authoritative-artifact', 'assign-adjudication', 'claim-adjudication-assignment', 'complete-adjudication', 'submit-planning-contradiction']), idempotency_key: nullable(identifier()), repo_id: pathSegmentIdentifier(), workstream_run: nullable(pathSegmentIdentifier()), session_id: nullable(identifier()), fencing_generation: nullable(integer()), expected_version: nullable(integer()), payload: { type: 'object' },
+    schema_version: { const: AUTOPILOT_COORDINATOR_REQUEST_SCHEMA }, protocol_version: { const: AUTOPILOT_COORDINATOR_PROTOCOL_VERSION }, request_id: identifier(), action: enumeration(['status', 'doctor', 'export', 'attach-run', 'attach-session', 'attach-terminal-recovery', 'attach-migration-recovery', 'resolve-migration-recovery', 'detach-session', 'prepare-handoff', 'heartbeat', 'register-attempt', 'register-child', 'heartbeat-child', 'checkpoint-child', 'complete-child', 'drain-mailbox', 'acquire-group', 'acknowledge-grant', 'respond-claim-request', 'cancel-claim-request', 'cancel-acquisition-group', 'supersede-attempt', 'acknowledge-message', 'record-release-evidence', 'resolve-reservation-obligation', 'prepare-run-terminal', 'cancel-run-terminal', 'reconcile-run', 'prepare-operation', 'transition-operation', 'register-authoritative-artifact', 'assign-adjudication', 'claim-adjudication-assignment', 'complete-adjudication', 'submit-planning-contradiction']), idempotency_key: nullable(identifier()), repo_id: pathSegmentIdentifier(), workstream_run: nullable(pathSegmentIdentifier()), session_id: nullable(identifier()), fencing_generation: nullable(integer()), expected_version: nullable(integer()), payload: { type: 'object' },
   },
 };
 export const COORDINATOR_RESPONSE_SCHEMA: CoordinationJsonSchema = {
@@ -178,6 +201,7 @@ export const COORDINATOR_RESPONSE_SCHEMA: CoordinationJsonSchema = {
 export const AUTOPILOT_COORDINATION_JSON_SCHEMAS = Object.freeze({
   repository: COORDINATION_REPOSITORY_SCHEMA,
   run: COORDINATION_RUN_SCHEMA,
+  run_resource: COORDINATION_RUN_RESOURCE_SCHEMA,
   session_lease: COORDINATION_SESSION_LEASE_SCHEMA,
   child_lease: COORDINATION_CHILD_LEASE_SCHEMA,
   unit_attempt: COORDINATION_UNIT_ATTEMPT_SCHEMA,
@@ -198,6 +222,9 @@ export const AUTOPILOT_COORDINATION_JSON_SCHEMAS = Object.freeze({
   authoritative_artifact: COORDINATION_AUTHORITATIVE_ARTIFACT_SCHEMA,
   adjudication_assignment: COORDINATION_ADJUDICATION_ASSIGNMENT_SCHEMA,
   escalation: COORDINATION_ESCALATION_SCHEMA,
+  migration_recovery_work: COORDINATION_MIGRATION_RECOVERY_WORK_SCHEMA,
+  migration_record: COORDINATION_MIGRATION_RECORD_SCHEMA,
+  cutover_marker: COORDINATION_CUTOVER_MARKER_JSON_SCHEMA,
   event: COORDINATION_EVENT_SCHEMA,
   snapshot: COORDINATION_SNAPSHOT_SCHEMA,
   coordinator_request: COORDINATOR_REQUEST_SCHEMA,

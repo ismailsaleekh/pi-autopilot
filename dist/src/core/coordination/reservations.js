@@ -4,10 +4,10 @@ import { spawnSync } from 'node:child_process';
 import { readFile, readdir } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { CoordinatorClient } from "./client.js";
-import { coordinationPathsOverlap, parseCoordinationChangeReservation, parseCoordinationEditLease, parseCoordinationReservationObligation, parseCoordinationRunTerminalIntent } from "./contracts.js";
+import { coordinationPathsOverlap, parseCoordinationChangeReservation, parseCoordinationEditLease, parseCoordinationReservationObligation, parseCoordinationRun, parseCoordinationRunTerminalIntent } from "./contracts.js";
 import { CoordinationRuntimeError } from "./failures.js";
 import { coordinatorRuntimePaths } from "./runtime-paths.js";
-import { readCoordinatorSessionContext } from "./supervisor.js";
+import { readCoordinatorSessionContext, writeCoordinatorSessionContext } from "./supervisor.js";
 import { parseAutopilotUnitMerge } from "../unit-merge.js";
 import { AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV } from "../names.js";
 import { gitHead } from "../parallel-runtime.js";
@@ -25,16 +25,19 @@ function stateRootForActive(active) {
 export class ReservationCoordinationClient {
     #client;
     #session;
-    constructor(client, session) {
+    #contextPath;
+    constructor(client, session, contextPath = null) {
         this.#client = client;
         this.#session = session;
+        this.#contextPath = contextPath;
     }
+    get session() { return this.#session; }
     static async fromEnvironment(env = process.env) {
         const contextPath = env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV];
         if (contextPath === undefined || contextPath.trim().length === 0)
             throw new CoordinationRuntimeError('unauthorized-client', `${AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV} is required for reservation coordination`);
         const session = await readCoordinatorSessionContext(contextPath);
-        return new ReservationCoordinationClient(new CoordinatorClient({ env: { ...env, AUTOPILOT_STATE_ROOT: session.state_root } }), session);
+        return new ReservationCoordinationClient(new CoordinatorClient({ env: { ...env, AUTOPILOT_STATE_ROOT: session.state_root } }), session, contextPath);
     }
     async view() {
         const response = await this.#client.query('status', this.#session.repo_id, this.#session.workstream_run);
@@ -50,6 +53,10 @@ export class ReservationCoordinationClient {
             expectedVersion: this.#session.run_version,
             idempotencyKey: `prepare-run-terminal:${terminalIntentId}`,
         }, { outcome, terminal_intent_id: terminalIntentId, session_lease_id: this.#session.session_lease_id, session_token: this.#session.session_token });
+        const run = parseCoordinationRun(response.payload['run']);
+        this.#session = { ...this.#session, run_version: run.version };
+        if (this.#contextPath !== null)
+            await writeCoordinatorSessionContext(this.#contextPath, this.#session);
         return parseCoordinationRunTerminalIntent(response.payload['run_terminal_intent']);
     }
     async cancelRunTerminal(intent, reason) {
@@ -61,6 +68,10 @@ export class ReservationCoordinationClient {
             expectedVersion: intent.version,
             idempotencyKey: `cancel-run-terminal:${intent.terminal_intent_id}`,
         }, { reason, terminal_intent_id: intent.terminal_intent_id, session_lease_id: this.#session.session_lease_id, session_token: this.#session.session_token });
+        const run = parseCoordinationRun(response.payload['run']);
+        this.#session = { ...this.#session, run_version: run.version };
+        if (this.#contextPath !== null)
+            await writeCoordinatorSessionContext(this.#contextPath, this.#session);
         return parseCoordinationRunTerminalIntent(response.payload['run_terminal_intent']);
     }
     async resolve(input) {

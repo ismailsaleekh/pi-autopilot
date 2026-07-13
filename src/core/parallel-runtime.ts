@@ -1,7 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
-import { appendFile, mkdir, open, readFile, readdir, rename, rm, stat, unlink, writeFile, type FileHandle } from 'node:fs/promises';
+import { mkdir, open, readFile, readdir, rename, rm, stat, unlink, writeFile, type FileHandle } from 'node:fs/promises';
 import { homedir, hostname, platform, uptime } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
@@ -27,7 +27,9 @@ import { isValidWorkstreamSlug } from './paths.ts';
 import { parseLegacyActiveAutopilots, parseLegacyPathClaims, runLegacyCoordinationPreflight } from './coordination/legacy-preflight.ts';
 import { DurableRunSupervisorClient } from './coordination/supervisor.ts';
 import { CoordinatorClient } from './coordination/client.ts';
-import { parseCoordinationRun, parseCoordinationWorktreeOperation } from './coordination/contracts.ts';
+import { parseCoordinationMigrationRecoveryWork, parseCoordinationRun, parseCoordinationRunResource, parseCoordinationWorktreeOperation } from './coordination/contracts.ts';
+import { assertCoordinationDispatchAllowed, assertLegacyCoordinationWritable, coordinationCutoverCommitted } from './coordination/migration-paths.ts';
+import { enforcePrivateAuthorityPath, ensurePrivateAuthorityDirectory } from './private-path.ts';
 
 export const AUTOPILOT_STATE_ROOT_ENV = 'AUTOPILOT_STATE_ROOT';
 export const AUTOPILOT_RUNTIME_ENV = 'AUTOPILOT_RUNTIME';
@@ -47,7 +49,6 @@ export const UNIT_INFO_FILE = '_unit-info.json';
 export const MATERIALIZED_PATHS_FILE = '_materialized-paths.json';
 
 const DEFAULT_LOCK_TIMEOUT_MS = 60_000;
-const LOCK_STALE_MULTIPLIER = 5;
 const LOCK_BACKOFF_START_MS = 100;
 const LOCK_BACKOFF_STEP_MS = 100;
 const LOCK_BACKOFF_CAP_MS = 2_000;
@@ -304,22 +305,37 @@ export async function prepareAutopilotWorkstream(input: {
   const repo = resolveRepoIdentity(input.sourceCwd);
   const coordinationRoot = coordinationRootForRepo(repo.repoKey, env);
   const worktreeRoot = worktreeRootForRepo(repo.repoKey, env);
-  await mkdir(join(coordinationRoot, '.locks'), { recursive: true });
+  const cutover = coordinationCutoverCommitted(resolveAutopilotStateRoot(env), repo.repoKey);
+  const activationLock = cutover ? join(worktreeRoot, '.locks', 'activation.lock') : join(coordinationRoot, '.locks', 'activation.lock');
+  await ensurePrivateAuthorityDirectory(dirname(activationLock), env);
 
-  return await withAutopilotFileLock(join(coordinationRoot, '.locks', 'activation.lock'), `activation:${repo.repoKey}`, async () => {
-    await withAutopilotFileLock(join(coordinationRoot, '.locks', 'path-claims.lock'), `activation-preflight:${repo.repoKey}`, async () => {
-      await runLegacyCoordinationPreflight({
-        coordinationRoot,
-        repoKey: repo.repoKey,
-        mode: 'activation',
-        activationWorkstream: input.workstream,
-        currentPid: process.pid,
-        currentBootId: getBootId(),
-        now,
+  return await withAutopilotFileLock(activationLock, `activation:${repo.repoKey}`, async () => {
+    if (cutover && input.coordinationSessionId === undefined) fail('coordinator-session-required', 'post-cutover activation requires a durable coordinator session before worktree mutation.', [repo.repoKey]);
+    if (cutover && input.coordinationSessionId !== undefined) {
+      await assertCoordinatorMigrationRecoveryCleared(repo, input.workstream, env);
+      const { recoverAutopilotTerminalCleanup } = await import('./close-runtime.ts');
+      await recoverAutopilotTerminalCleanup({ workstream: input.workstream, sourceCwd: input.sourceCwd, coordinationSessionId: input.coordinationSessionId, env, now });
+    }
+    assertCoordinationDispatchAllowed(resolveAutopilotStateRoot(env), repo.repoKey, 'Autopilot activation/new dispatch');
+    if (!cutover) {
+      assertLegacyCoordinationWritable(resolveAutopilotStateRoot(env), repo.repoKey, 'Autopilot activation/new dispatch');
+      await withAutopilotFileLock(join(coordinationRoot, '.locks', 'path-claims.lock'), `activation-preflight:${repo.repoKey}`, async () => {
+        await runLegacyCoordinationPreflight({
+          coordinationRoot,
+          repoKey: repo.repoKey,
+          mode: 'activation',
+          activationWorkstream: input.workstream,
+          currentPid: process.pid,
+          currentBootId: getBootId(),
+          now,
+        });
       });
-    });
-    await ensureRepoRuntimeFiles(coordinationRoot, worktreeRoot);
-    const activeRows = await readActiveAutopilots(coordinationRoot);
+      await ensureRepoRuntimeFiles(coordinationRoot, worktreeRoot);
+    } else {
+      await ensurePrivateAuthorityDirectory(join(worktreeRoot, 'active'), env);
+      await ensurePrivateAuthorityDirectory(join(worktreeRoot, '_archive'), env);
+    }
+    const activeRows = cutover ? await readCoordinatorActiveAutopilots(repo, worktreeRoot, env) : await readActiveAutopilots(coordinationRoot);
     const matching = activeRows.filter(
       (row) => row.repo_key === repo.repoKey && row.workstream === input.workstream && isLiveParentStatus(row.status),
     );
@@ -335,13 +351,19 @@ export async function prepareAutopilotWorkstream(input: {
       if (row === undefined) fail('internal-missing-active-row', 'matched active row disappeared.');
       const resumed = reactivateActiveRow(row, repo, now);
       const nextRows = activeRows.map((candidate) => candidate.autopilot_id === row.autopilot_id ? resumed : candidate);
-      await writeActiveAutopilots(coordinationRoot, nextRows);
+      if (!cutover) await writeActiveAutopilots(coordinationRoot, nextRows);
       await updateTaskInfoStatus(resumed, 'active');
       const bootstrapResidue = join(dirname(resumed.main_worktree_path), '_bootstrap-create.json');
       if (existsSync(bootstrapResidue)) {
         const required = [resumed.main_worktree_path, join(dirname(resumed.main_worktree_path), TASK_INFO_FILE), join(dirname(resumed.main_worktree_path), BRANCHES_FILE), join(dirname(resumed.main_worktree_path), UNIT_INDEX_FILE), join(dirname(resumed.main_worktree_path), AUTOPILOT_CHECKOUT_PROFILE_SNAPSHOT_FILE)];
         const missing = required.filter((path) => !existsSync(path));
-        if (missing.length > 0) fail('bootstrap-finalization-incomplete', 'bootstrap residue cannot be cleared until every main worktree metadata postcondition exists.', missing);
+        if (missing.length > 0) {
+          if (cutover && input.coordinationSessionId !== undefined) {
+            const recovered = await recoverCoordinatorBootstrapWorkstream({ workstream: input.workstream, repo, coordinationRoot, worktreeRoot, activeRows: activeRows.filter((candidate) => candidate.workstream_run !== row.workstream_run), now, env, coordinationSessionId: input.coordinationSessionId });
+            if (recovered !== null) return recovered;
+          }
+          fail('bootstrap-finalization-incomplete', 'bootstrap residue cannot be cleared until every main worktree metadata postcondition exists.', missing);
+        }
         await rm(bootstrapResidue, { force: false });
       }
       return {
@@ -397,6 +419,7 @@ export async function prepareAutopilotUnitWorktree(input: {
     const existing = await readUnitIndex(taskRoot);
     const found = existing.units.find((unit) => unit.unit_id === input.unitId && unit.attempt === input.attempt);
     if (found !== undefined) {
+      if (!isSamePath(found.worktree_path, unitWorktreePath)) fail('unit-worktree-projection-mismatch', 'unit index path disagrees with its deterministic run-owned worktree path.', [found.worktree_path, unitWorktreePath]);
       const infoPath = unitInfoPathForBranch(taskRoot, found);
       const info = existsSync(infoPath) ? parseUnitInfo(JSON.parse(await readFile(infoPath, 'utf8')) as unknown) : unitInfoFromBranch(input.active, found, now);
       return { unitInfo: info, created: false, resumed: true };
@@ -406,7 +429,7 @@ export async function prepareAutopilotUnitWorktree(input: {
     const unitClaimPaths = input.unitSpec === undefined ? [] : materializationPathsForCheckoutBootstrap(input.unitSpec);
     const sparsePatterns = checkout.mode === 'full' || checkout.mode === 'legacy-full'
       ? []
-      : [...checkout.basePatterns, ...sparseIncludePatternsForPaths(unitClaimPaths)];
+      : sortedUnique([...checkout.basePatterns, ...sparseIncludePatternsForPaths(unitClaimPaths)]);
     assertAutopilotDiskGate({
       path: input.active.worktree_root,
       projection: {
@@ -498,15 +521,17 @@ export async function prepareAutopilotUnitWorktree(input: {
         const currentIndex = await readUnitIndex(taskRoot);
         await writeUnitIndex(taskRoot, { schema_version: 'autopilot.unit_index.v1', units: [...currentIndex.units.filter((candidate) => !(candidate.unit_id === input.unitId && candidate.attempt === input.attempt)), branchInfo] });
         await upsertUnitBranchInfo(taskRoot, branchInfo);
-        const ledgerPath = join(input.active.worktree_root, WORKTREE_LEDGER_FILE);
-        const ledgerMarker = `\"event\":\"unit-create\"`;
-        const existingLedger = existsSync(ledgerPath) ? await readFile(ledgerPath, 'utf8') : '';
-        if (!existingLedger.split('\n').some((line) => line.includes(ledgerMarker) && line.includes(`\"workstream_run\":\"${input.active.workstream_run}\"`) && line.includes(`\"unit_id\":\"${input.unitId}\"`) && line.includes(`\"attempt\":${String(input.attempt)}`))) {
-          await appendJsonl(ledgerPath, {
-            schema_version: 'autopilot.worktree_ledger.v1', event: 'unit-create', ts: now.toISOString(), workstream: input.active.workstream,
-            workstream_run: input.active.workstream_run, autopilot_id: input.active.autopilot_id, unit_id: input.unitId, attempt: input.attempt,
-            branch, unit_path: unitWorktreePath, base_sha: baseSha,
-          });
+        if (!coordinationCutoverCommitted(resolveAutopilotStateRoot(env), input.active.repo_key)) {
+          const ledgerPath = join(input.active.worktree_root, WORKTREE_LEDGER_FILE);
+          const ledgerMarker = `\"event\":\"unit-create\"`;
+          const existingLedger = existsSync(ledgerPath) ? await readFile(ledgerPath, 'utf8') : '';
+          if (!existingLedger.split('\n').some((line) => line.includes(ledgerMarker) && line.includes(`\"workstream_run\":\"${input.active.workstream_run}\"`) && line.includes(`\"unit_id\":\"${input.unitId}\"`) && line.includes(`\"attempt\":${String(input.attempt)}`))) {
+            await appendJsonl(ledgerPath, {
+              schema_version: 'autopilot.worktree_ledger.v1', event: 'unit-create', ts: now.toISOString(), workstream: input.active.workstream,
+              workstream_run: input.active.workstream_run, autopilot_id: input.active.autopilot_id, unit_id: input.unitId, attempt: input.attempt,
+              branch, unit_path: unitWorktreePath, base_sha: baseSha,
+            });
+          }
         }
       },
       verify: async () => {
@@ -567,9 +592,11 @@ async function recoverUnitCreateSagaMetadata(active: ActiveAutopilotRow, operati
       const currentIndex = await readUnitIndex(taskRoot);
       await writeUnitIndex(taskRoot, { schema_version: 'autopilot.unit_index.v1', units: [...currentIndex.units.filter((candidate) => !(candidate.unit_id === unitId && candidate.attempt === attempt)), branchInfo] });
       await upsertUnitBranchInfo(taskRoot, branchInfo);
-      const ledgerPath = join(active.worktree_root, WORKTREE_LEDGER_FILE);
-      const existingLedger = existsSync(ledgerPath) ? await readFile(ledgerPath, 'utf8') : '';
-      if (!existingLedger.split('\n').some((line) => line.includes('"event":"unit-create"') && line.includes(`"workstream_run":"${active.workstream_run}"`) && line.includes(`"unit_id":"${unitId}"`) && line.includes(`"attempt":${String(attempt)}`))) await appendJsonl(ledgerPath, { schema_version: 'autopilot.worktree_ledger.v1', event: 'unit-create', ts: active.started_at, workstream: active.workstream, workstream_run: active.workstream_run, autopilot_id: active.autopilot_id, unit_id: unitId, attempt, branch: operation.intent.branch, unit_path: unitWorktreePath, base_sha: baseSha });
+      if (!coordinationCutoverCommitted(resolveAutopilotStateRoot(env), active.repo_key)) {
+        const ledgerPath = join(active.worktree_root, WORKTREE_LEDGER_FILE);
+        const existingLedger = existsSync(ledgerPath) ? await readFile(ledgerPath, 'utf8') : '';
+        if (!existingLedger.split('\n').some((line) => line.includes('"event":"unit-create"') && line.includes(`"workstream_run":"${active.workstream_run}"`) && line.includes(`"unit_id":"${unitId}"`) && line.includes(`"attempt":${String(attempt)}`))) await appendJsonl(ledgerPath, { schema_version: 'autopilot.worktree_ledger.v1', event: 'unit-create', ts: active.started_at, workstream: active.workstream, workstream_run: active.workstream_run, autopilot_id: active.autopilot_id, unit_id: unitId, attempt, branch: operation.intent.branch, unit_path: unitWorktreePath, base_sha: baseSha });
+      }
     },
     verify: () => { const inspected = inspect(); if (inspected.outcome !== 'satisfied') fail('unit-create-recovery-postcondition', 'recovered unit create metadata remains incomplete.', inspected.proof); return inspected.proof; },
   }, env);
@@ -714,7 +741,10 @@ export async function resolveActiveAutopilotForSpec(
 ): Promise<ActiveAutopilotContext> {
   const repo = resolveRepoIdentity(spec.cwd);
   const coordinationRoot = coordinationRootForRepo(repo.repoKey, env);
-  const activeRows = await readActiveAutopilots(coordinationRoot);
+  assertCoordinationDispatchAllowed(resolveAutopilotStateRoot(env), repo.repoKey, 'Autopilot runner preflight');
+  const activeRows = coordinationCutoverCommitted(resolveAutopilotStateRoot(env), repo.repoKey)
+    ? await readCoordinatorActiveAutopilots(repo, worktreeRootForRepo(repo.repoKey, env), env)
+    : await readActiveAutopilots(coordinationRoot);
   const cwdReal = realpathExisting(spec.cwd, 'unit spec cwd');
   const matches = activeRows.filter((row) => {
     if (row.repo_key !== repo.repoKey || row.workstream !== spec.workstream || !isChildLaunchParentStatus(row.status)) return false;
@@ -1157,9 +1187,11 @@ async function recoverCoordinatorBootstrapWorkstream(input: {
   await writeJsonAtomic(join(taskRoot, TASK_INFO_FILE), taskInfo);
   await writeJsonAtomic(join(taskRoot, BRANCHES_FILE), branches);
   await writeJsonAtomic(join(taskRoot, UNIT_INDEX_FILE), { schema_version: 'autopilot.unit_index.v1', units: [] });
-  await writeActiveAutopilots(input.coordinationRoot, [...input.activeRows, active]);
-  await addWorktreeIndexRow(input.worktreeRoot, { workstream: active.workstream, workstream_run: active.workstream_run, autopilot_id: active.autopilot_id, started_at: active.started_at, main_path: active.main_worktree_path, branch: active.branch, status: 'active' });
-  await appendJsonl(join(input.worktreeRoot, WORKTREE_LEDGER_FILE), { schema_version: 'autopilot.worktree_ledger.v1', event: 'bootstrap-recover', ts: input.now.toISOString(), workstream: active.workstream, workstream_run: active.workstream_run, autopilot_id: active.autopilot_id, branch: active.branch, main_path: active.main_worktree_path, base_sha: active.target_base_sha });
+  if (!coordinationCutoverCommitted(resolveAutopilotStateRoot(input.env), active.repo_key)) {
+    await writeActiveAutopilots(input.coordinationRoot, [...input.activeRows, active]);
+    await addWorktreeIndexRow(input.worktreeRoot, { workstream: active.workstream, workstream_run: active.workstream_run, autopilot_id: active.autopilot_id, started_at: active.started_at, main_path: active.main_worktree_path, branch: active.branch, status: 'active' });
+    await appendJsonl(join(input.worktreeRoot, WORKTREE_LEDGER_FILE), { schema_version: 'autopilot.worktree_ledger.v1', event: 'bootstrap-recover', ts: input.now.toISOString(), workstream: active.workstream, workstream_run: active.workstream_run, autopilot_id: active.autopilot_id, branch: active.branch, main_path: active.main_worktree_path, base_sha: active.target_base_sha });
+  }
   await rm(bootstrapPath, { force: false });
   return { repo: input.repo, active, worktreeRoot: input.worktreeRoot, taskRoot, mainWorktreePath: active.main_worktree_path, runtimeRoot: active.runtime_root, created: true, resumed: true };
 }
@@ -1282,27 +1314,29 @@ async function createNewWorkstream(input: {
   await writeJsonAtomic(join(taskRoot, TASK_INFO_FILE), taskInfo);
   await writeJsonAtomic(join(taskRoot, BRANCHES_FILE), branches);
   await writeJsonAtomic(join(taskRoot, UNIT_INDEX_FILE), { schema_version: 'autopilot.unit_index.v1', units: [] });
-  await writeActiveAutopilots(input.coordinationRoot, [...input.activeRows, row]);
-  await addWorktreeIndexRow(input.worktreeRoot, {
-    workstream: row.workstream,
-    workstream_run: row.workstream_run,
-    autopilot_id: row.autopilot_id,
-    started_at: row.started_at,
-    main_path: row.main_worktree_path,
-    branch: row.branch,
-    status: 'active',
-  });
-  await appendJsonl(join(input.worktreeRoot, WORKTREE_LEDGER_FILE), {
-    schema_version: 'autopilot.worktree_ledger.v1',
-    event: 'create',
-    ts: startedAt,
-    workstream: row.workstream,
-    workstream_run: row.workstream_run,
-    autopilot_id: row.autopilot_id,
-    branch: row.branch,
-    main_path: row.main_worktree_path,
-    base_sha: row.target_base_sha,
-  });
+  if (!coordinationCutoverCommitted(resolveAutopilotStateRoot(input.env), row.repo_key)) {
+    await writeActiveAutopilots(input.coordinationRoot, [...input.activeRows, row]);
+    await addWorktreeIndexRow(input.worktreeRoot, {
+      workstream: row.workstream,
+      workstream_run: row.workstream_run,
+      autopilot_id: row.autopilot_id,
+      started_at: row.started_at,
+      main_path: row.main_worktree_path,
+      branch: row.branch,
+      status: 'active',
+    });
+    await appendJsonl(join(input.worktreeRoot, WORKTREE_LEDGER_FILE), {
+      schema_version: 'autopilot.worktree_ledger.v1',
+      event: 'create',
+      ts: startedAt,
+      workstream: row.workstream,
+      workstream_run: row.workstream_run,
+      autopilot_id: row.autopilot_id,
+      branch: row.branch,
+      main_path: row.main_worktree_path,
+      base_sha: row.target_base_sha,
+    });
+  }
   await rm(bootstrapPath, { force: false });
   return {
     repo: input.repo,
@@ -1538,6 +1572,8 @@ function readRegisteredUnitWorktreeSync(taskRoot: string, unitId: string, attemp
   const index = parseUnitIndex(parsed);
   const unit = index.units.find((candidate) => candidate.unit_id === unitId && candidate.attempt === attempt);
   if (unit === undefined) return null;
+  const expectedPath = join(taskRoot, 'units', unitId, `attempt-${String(attempt)}`, 'worktree');
+  if (!isSamePath(unit.worktree_path, expectedPath)) fail('unit-worktree-projection-mismatch', 'registered unit path disagrees with its deterministic run-owned worktree path.', [unit.worktree_path, expectedPath]);
   const unitReal = realpathExisting(unit.worktree_path, 'registered unit worktree');
   return isSamePath(unitReal, cwdReal) || isPathWithinRoot(unitReal, cwdReal) ? unit : null;
 }
@@ -1595,27 +1631,28 @@ function parseUnitBranchInfo(value: unknown): AutopilotUnitBranchInfo {
 }
 
 async function ensureRepoRuntimeFiles(coordinationRoot: string, worktreeRoot: string): Promise<void> {
-  await mkdir(join(coordinationRoot, '.locks'), { recursive: true });
-  await mkdir(join(worktreeRoot, 'active'), { recursive: true });
-  await mkdir(join(worktreeRoot, '_archive'), { recursive: true });
+  const stateRoot = dirname(dirname(coordinationRoot));
+  for (const root of [stateRoot, dirname(coordinationRoot), coordinationRoot, dirname(worktreeRoot), worktreeRoot, join(coordinationRoot, '.locks'), join(worktreeRoot, '.locks'), join(worktreeRoot, 'active'), join(worktreeRoot, '_archive')]) await ensurePrivateAuthorityDirectory(root);
   for (const file of [ACTIVE_AUTOPILOTS_FILE, PATH_CLAIMS_FILE]) {
     const path = join(coordinationRoot, file);
     if (!existsSync(path)) await writeJsonAtomic(path, []);
   }
   for (const file of [CLAIM_EVENTS_FILE, MERGE_LOG_FILE, FOREIGN_MERGE_ACKS_FILE]) {
     const path = join(coordinationRoot, file);
-    if (!existsSync(path)) await writeFile(path, '', { encoding: 'utf8', flag: 'wx' }).catch((error: unknown) => {
+    if (!existsSync(path)) await writeFile(path, '', { encoding: 'utf8', flag: 'wx', mode: 0o600 }).catch((error: unknown) => {
       if (isNodeError(error) && error.code === 'EEXIST') return;
       throw error;
     });
+    await enforcePrivateAuthorityPath(path, false);
   }
   const indexPath = join(worktreeRoot, WORKTREE_INDEX_FILE);
   if (!existsSync(indexPath)) await writeJsonAtomic(indexPath, emptyWorktreeIndex());
   const ledgerPath = join(worktreeRoot, WORKTREE_LEDGER_FILE);
-  if (!existsSync(ledgerPath)) await writeFile(ledgerPath, '', { encoding: 'utf8', flag: 'wx' }).catch((error: unknown) => {
+  if (!existsSync(ledgerPath)) await writeFile(ledgerPath, '', { encoding: 'utf8', flag: 'wx', mode: 0o600 }).catch((error: unknown) => {
     if (isNodeError(error) && error.code === 'EEXIST') return;
     throw error;
   });
+  await enforcePrivateAuthorityPath(ledgerPath, false);
 }
 
 export async function readActiveAutopilots(coordinationRoot: string): Promise<readonly ActiveAutopilotRow[]> {
@@ -1624,7 +1661,56 @@ export async function readActiveAutopilots(coordinationRoot: string): Promise<re
   return parseLegacyActiveAutopilots(await readJson(path));
 }
 
+export async function assertCoordinatorMigrationRecoveryCleared(repo: AutopilotRepoIdentity, workstream: string, env: ProcessEnvLike = process.env): Promise<void> {
+  const response = await new CoordinatorClient({ env }).query('status', repo.repoKey, null);
+  const rawRuns = response.payload['runs'];
+  const rawRecovery = response.payload['migration_recovery_work'];
+  if (!Array.isArray(rawRuns) || !Array.isArray(rawRecovery) || rawRuns.length > 100_000 || rawRecovery.length > 100_000) fail('invalid-coordinator-status', 'coordinator activation status omitted bounded run/recovery collections.');
+  const matchingRunIds = new Set(rawRuns.map((value) => parseCoordinationRun(value)).filter((run) => run.repo_id === repo.repoKey && run.workstream === workstream).map((run) => run.workstream_run));
+  const pending = rawRecovery.map((value) => parseCoordinationMigrationRecoveryWork(value)).filter((work) => work.repo_id === repo.repoKey && work.status === 'pending' && matchingRunIds.has(work.workstream_run));
+  if (pending.length > 0) fail('migration-recovery-required', `Autopilot activation for ${workstream} is fenced until its imported authority recovery is resolved by a recovery-only supervisor session.`, pending.map((work) => `${work.workstream_run}:${work.recovery_id}:${work.recovery_type}`));
+}
+
+export async function readCoordinatorActiveAutopilots(repo: AutopilotRepoIdentity, worktreeRoot: string, env: ProcessEnvLike = process.env, includeTerminal = false): Promise<readonly ActiveAutopilotRow[]> {
+  const response = await new CoordinatorClient({ env }).query('status', repo.repoKey, null);
+  const rawRuns = response.payload['runs'];
+  const rawResources = response.payload['run_resources'];
+  const rawRecovery = response.payload['migration_recovery_work'];
+  if (!Array.isArray(rawRuns) || rawRuns.length > 100_000 || !Array.isArray(rawResources) || rawResources.length > 100_000 || !Array.isArray(rawRecovery) || rawRecovery.length > 100_000) fail('invalid-coordinator-status', 'coordinator status runs/resources/migration recovery must be bounded arrays.');
+  const resources = rawResources.map((value) => parseCoordinationRunResource(value));
+  const pendingRecoveryRuns = new Set(rawRecovery.map((value) => parseCoordinationMigrationRecoveryWork(value)).filter((work) => work.status === 'pending').map((work) => work.workstream_run));
+  const rows: ActiveAutopilotRow[] = [];
+  for (const rawRun of rawRuns) {
+    const run = parseCoordinationRun(rawRun);
+    if (run.repo_id !== repo.repoKey || run.coordination_authority !== 'coordinator-edit-leases-v1' || pendingRecoveryRuns.has(run.workstream_run) || (!includeTerminal && (run.status === 'closed' || run.status === 'aborted'))) continue;
+    const matching = resources.filter((resource) => resource.repo_id === repo.repoKey && resource.workstream_run === run.workstream_run);
+    if (matching.length !== 1) fail('invalid-coordinator-status', 'coordinator run must own exactly one immutable run resource.', [run.workstream_run]);
+    const resource = matching[0];
+    if (resource === undefined) fail('invalid-coordinator-status', 'coordinator run resource disappeared.', [run.workstream_run]);
+    const sourceIdentity = resolveRepoIdentity(resource.source_repo);
+    if (normalizePath(sourceIdentity.repoRoot) !== normalizePath(resource.source_repo) || sourceIdentity.repoKey !== repo.repoKey || normalizePath(sourceIdentity.gitCommonDir) !== normalizePath(repo.gitCommonDir) || normalizePath(resource.git_common_dir) !== normalizePath(repo.gitCommonDir) || normalizePath(resource.worktree_root) !== normalizePath(worktreeRoot)) fail('invalid-coordinator-status', 'coordinator run resource disagrees with canonical repository identity.', [run.workstream_run]);
+    if (!isPathWithinRoot(resource.worktree_root, resource.main_worktree_path) || !isPathWithinRoot(resource.main_worktree_path, resource.runtime_root)) fail('invalid-coordinator-status', 'coordinator run resource contains an escaped worktree/runtime path.', [run.workstream_run]);
+    const parentStatus: AutopilotParentStatus = run.status === 'recovering' ? 'blocked' : run.status === 'aborted' ? 'closed' : run.status;
+    rows.push({
+      schema_version: 'autopilot.active_parent.v2', coordination_authority: 'coordinator-edit-leases-v1', autopilot_id: run.autopilot_id, workstream: run.workstream, workstream_run: run.workstream_run,
+      repo_key: repo.repoKey, source_repo: resource.source_repo, git_common_dir: resource.git_common_dir, worktree_root: resource.worktree_root, main_worktree_path: resource.main_worktree_path,
+      branch: resource.branch, runtime_root: resource.runtime_root, target_branch: resource.target_branch, target_base_sha: resource.target_base_sha,
+      origin_url: resource.origin_url, pid: process.pid, boot_id: getBootId(), status: parentStatus, started_at: resource.started_at,
+      active_run_epoch: Math.max(1, run.active_session_generation), active_epoch_started_at: new Date().toISOString(), active_run_receipt_id: `coordinator-projection-${run.version}`,
+    });
+  }
+  return Object.freeze(rows);
+}
+
+function legacyRootIdentity(root: string): { readonly stateRoot: string; readonly repoKey: string } {
+  const repoKey = root.split(sep).filter((segment) => segment.length > 0).at(-1);
+  if (repoKey === undefined) fail('invalid-coordination-root', 'legacy coordination root has no repository key.', [root]);
+  return { stateRoot: dirname(dirname(root)), repoKey };
+}
+
 export async function writeActiveAutopilots(coordinationRoot: string, rows: readonly ActiveAutopilotRow[]): Promise<void> {
+  const identity = legacyRootIdentity(coordinationRoot);
+  assertLegacyCoordinationWritable(identity.stateRoot, identity.repoKey, 'legacy active-autopilots write');
   await writeJsonAtomic(join(coordinationRoot, ACTIVE_AUTOPILOTS_FILE), rows);
 }
 
@@ -1635,10 +1721,14 @@ export async function readPathClaims(coordinationRoot: string): Promise<readonly
 }
 
 export async function writePathClaims(coordinationRoot: string, claims: readonly AutopilotPathClaim[]): Promise<void> {
+  const identity = legacyRootIdentity(coordinationRoot);
+  assertLegacyCoordinationWritable(identity.stateRoot, identity.repoKey, 'legacy path-claims write');
   await writeJsonAtomic(join(coordinationRoot, PATH_CLAIMS_FILE), claims);
 }
 
 export async function appendClaimEvent(coordinationRoot: string, event: AutopilotClaimEvent): Promise<void> {
+  const identity = legacyRootIdentity(coordinationRoot);
+  assertLegacyCoordinationWritable(identity.stateRoot, identity.repoKey, 'legacy claim-event append');
   await appendJsonl(join(coordinationRoot, CLAIM_EVENTS_FILE), event);
 }
 
@@ -1727,13 +1817,13 @@ interface FileLockHandle {
 }
 
 async function acquireFileLock(lockPath: string, holderId: string, timeoutMs = DEFAULT_LOCK_TIMEOUT_MS): Promise<FileLockHandle> {
-  await mkdir(dirname(lockPath), { recursive: true });
+  await ensurePrivateAuthorityDirectory(dirname(lockPath));
   const started = Date.now();
   let backoff = LOCK_BACKOFF_START_MS;
   while (true) {
     let fileHandle: FileHandle | null = null;
     try {
-      fileHandle = await open(lockPath, 'wx');
+      fileHandle = await open(lockPath, 'wx', 0o600);
       const content = {
         schema_version: 'autopilot.lock.v1',
         holder_id: holderId,
@@ -1745,6 +1835,7 @@ async function acquireFileLock(lockPath: string, holderId: string, timeoutMs = D
       await fileHandle.sync();
       await fileHandle.close();
       fileHandle = null;
+      await enforcePrivateAuthorityPath(lockPath, false);
       return {
         release: async () => {
           const value = await readJson(lockPath);
@@ -1788,11 +1879,13 @@ async function reclaimStaleLockIfEligible(lockPath: string, timeoutMs: number): 
   const pidRaw = parsed['pid'];
   const bootIdRaw = parsed['boot_id'];
   if (typeof acquiredAtRaw !== 'string' || typeof pidRaw !== 'number' || typeof bootIdRaw !== 'string') return;
-  const ageMs = Date.now() - Date.parse(acquiredAtRaw);
-  if (!Number.isFinite(ageMs) || ageMs < timeoutMs * LOCK_STALE_MULTIPLIER) return;
-  const currentBoot = getBootId();
-  const stale = bootIdRaw !== currentBoot || !isPidAlive(pidRaw);
-  if (stale) await unlink(lockPath).catch(() => undefined);
+  // Boot identity may be unstable on Windows or after a clock correction. A
+  // runtime lock with a live PID is never reclaimed on boot mismatch alone.
+  const stale = !isPidAlive(pidRaw);
+  if (stale) {
+    await unlink(lockPath).catch(() => undefined);
+    return;
+  }
 }
 
 function isPidAlive(pid: number): boolean {
@@ -1833,16 +1926,31 @@ async function readJson(path: string): Promise<unknown> {
   }
 }
 
+async function fsyncRuntimeDirectory(path: string): Promise<void> {
+  if (platform() === 'win32') return;
+  const directory = await open(path, 'r');
+  try { await directory.sync(); } finally { await directory.close(); }
+}
+
 export async function writeJsonAtomic(path: string, value: unknown): Promise<void> {
-  await mkdir(dirname(path), { recursive: true });
+  await ensurePrivateAuthorityDirectory(dirname(path));
   const tmp = `${path}.tmp-${process.pid}-${Date.now()}-${randomBytes(4).toString('hex')}`;
-  await writeFile(tmp, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
+  const handle = await open(tmp, 'wx', 0o600);
+  try { await handle.writeFile(`${JSON.stringify(value, null, 2)}\n`, 'utf8'); await handle.sync(); }
+  finally { await handle.close(); }
+  await enforcePrivateAuthorityPath(tmp, false);
   await rename(tmp, path);
+  await enforcePrivateAuthorityPath(path, false);
+  await fsyncRuntimeDirectory(dirname(path));
 }
 
 export async function appendJsonl(path: string, value: unknown): Promise<void> {
-  await mkdir(dirname(path), { recursive: true });
-  await appendFile(path, `${JSON.stringify(value)}\n`, 'utf8');
+  await ensurePrivateAuthorityDirectory(dirname(path));
+  const handle = await open(path, 'a', 0o600);
+  try { await handle.writeFile(`${JSON.stringify(value)}\n`, 'utf8'); await handle.sync(); }
+  finally { await handle.close(); }
+  await enforcePrivateAuthorityPath(path, false);
+  await fsyncRuntimeDirectory(dirname(path));
 }
 
 function buildWorkstreamRun(workstream: string, now: Date): string {

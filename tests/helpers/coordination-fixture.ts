@@ -32,8 +32,8 @@ export function validCoordinationSnapshot(): CoordinationSnapshot {
       { schema_version: 'autopilot.coordination_run.v1', repo_id: 'repo-1', autopilot_id: 'autopilot-b', workstream: 'work-b', workstream_run: 'run-b', coordination_authority: 'coordinator-edit-leases-v1', status: 'active', active_session_generation: 1, created_event_seq: 1, version: 1 },
     ],
     session_leases: [
-      { schema_version: 'autopilot.session_lease.v1', session_lease_id: 'session-lease-a', repo_id: 'repo-1', workstream_run: 'run-a', session_id: 'session-a', session_generation: 1, pid: 101, boot_id: 'boot-a', lease_expires_at: '2026-07-11T16:00:00.000Z', status: 'attached', attached_event_seq: 2, version: 1 },
-      { schema_version: 'autopilot.session_lease.v1', session_lease_id: 'session-lease-b', repo_id: 'repo-1', workstream_run: 'run-b', session_id: 'session-b', session_generation: 1, pid: 102, boot_id: 'boot-b', lease_expires_at: '2026-07-11T16:00:00.000Z', status: 'attached', attached_event_seq: 2, version: 1 },
+      { schema_version: 'autopilot.session_lease.v2', session_lease_id: 'session-lease-a', repo_id: 'repo-1', workstream_run: 'run-a', session_id: 'session-a', session_generation: 1, pid: 101, boot_id: 'boot-a', lease_expires_at: '2026-07-11T16:00:00.000Z', attachment_kind: 'dispatch', status: 'attached', attached_event_seq: 2, version: 1 },
+      { schema_version: 'autopilot.session_lease.v2', session_lease_id: 'session-lease-b', repo_id: 'repo-1', workstream_run: 'run-b', session_id: 'session-b', session_generation: 1, pid: 102, boot_id: 'boot-b', lease_expires_at: '2026-07-11T16:00:00.000Z', attachment_kind: 'dispatch', status: 'attached', attached_event_seq: 2, version: 1 },
     ],
     child_leases: [{ schema_version: 'autopilot.child_lease.v1', child_lease_id: 'child-a', owner: ownerA, pid: 201, boot_id: 'boot-a', lease_expires_at: '2026-07-11T16:00:00.000Z', status: 'running', terminal_evidence: null, version: 1 }],
     unit_attempts: [
@@ -54,6 +54,7 @@ export function validCoordinationSnapshot(): CoordinationSnapshot {
       { schema_version: 'autopilot.mailbox_cursor.v1', repo_id: 'repo-1', workstream_run: 'run-b', delivered_through_event_seq: 0, acknowledged_through_event_seq: 0, version: 1 },
     ],
     reconciliation_evidence: [],
+    migration_recovery_work: [],
     messages: [{ schema_version: 'autopilot.coordination_message.v1', message_id: 'message-request-a', repo_id: 'repo-1', recipient_workstream_run: 'run-a', message_type: 'claim-request', correlation_id: 'request-b-a', payload: { request_id: 'request-b-a' }, status: 'delivered', created_event_seq: 3, delivered_event_seq: 3, acknowledged_event_seq: null, version: 2 }],
     worktrees: [{ schema_version: 'autopilot.coordination_worktree.v2', worktree_id: 'worktree-a', owner: ownerA, kind: 'unit', canonical_path: '/tmp/autopilot-state/run-a/unit-a', git_common_dir: '/tmp/generic-repository/.git', branch: 'autopilot/unit/run-a/unit-a/attempt-1', state: 'active', version: 1 }],
     wait_for_edges: [{ schema_version: 'autopilot.wait_for_edge.v1', edge_id: 'wait-request-b-a', repo_id: 'repo-1', request_id: 'request-b-a', requester: ownerB, blocker: ownerA, state: 'active', created_event_seq: 3, resolved_event_seq: null, version: 1 }],

@@ -1,10 +1,10 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   AUTOPILOT_ABORT_COMMAND,
   AUTOPILOT_CLAIM_GC_COMMAND,
@@ -18,7 +18,8 @@ import {
   AUTOPILOT_STATUS_TOOL,
   CONTEXT_BUDGET_TOOL_NAME,
 } from '../../src/core/names.ts';
-import { AUTOPILOT_STATE_ROOT_ENV, resolveRepoIdentity } from '../../src/core/parallel-runtime.ts';
+import { AUTOPILOT_STATE_ROOT_ENV, coordinationRootForRepo, prepareAutopilotWorkstream, readActiveAutopilots, resolveRepoIdentity, writeActiveAutopilots, writePathClaims, type ProcessEnvLike } from '../../src/core/parallel-runtime.ts';
+import { runCoordinationMigration } from '../../src/core/coordination/migration.ts';
 import { CoordinatorClient } from '../../src/core/coordination/client.ts';
 import { coordinatorRuntimePaths } from '../../src/core/coordination/runtime-paths.ts';
 import { startCoordinatorServer, type RunningCoordinator } from '../../src/core/coordination/server.ts';
@@ -178,7 +179,7 @@ interface SdkHarness {
   readonly coordinator: RunningCoordinator;
 }
 
-const packageRoot = new URL('../../', import.meta.url).pathname;
+const packageRoot = fileURLToPath(new URL('../../', import.meta.url));
 const extensionPath = join(packageRoot, 'extensions/autopilot.ts');
 const globalSdkPath = '/usr/local/lib/node_modules/@earendil-works/pi-coding-agent/dist/index.js';
 const packageSdkSpecifier = '@earendil-works/pi-coding-agent';
@@ -322,7 +323,7 @@ function git(cwd: string, args: readonly string[]): void {
   assert.equal(result.status, 0, result.stderr);
 }
 
-async function createSdkHarness(): Promise<SdkHarness> {
+async function createSdkHarness(setup?: (input: { readonly cwd: string; readonly stateRoot: string; readonly env: ProcessEnvLike }) => Promise<void>): Promise<SdkHarness> {
   setOfflineEnvironment();
   const root = await mkdtemp(join(tmpdir(), 'pi-autopilot-sdk-'));
   const cwd = join(root, 'project');
@@ -331,8 +332,10 @@ async function createSdkHarness(): Promise<SdkHarness> {
   await mkdir(agentDir, { recursive: true });
   const previousCwd = process.cwd();
   const previousStateRoot = process.env[AUTOPILOT_STATE_ROOT_ENV];
-  process.env[AUTOPILOT_STATE_ROOT_ENV] = join(root, 'autopilot-state');
+  const stateRoot = join(root, 'autopilot-state');
+  process.env[AUTOPILOT_STATE_ROOT_ENV] = stateRoot;
   process.chdir(cwd);
+  if (setup !== undefined) await setup({ cwd, stateRoot, env: { ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: stateRoot } });
   const coordinator = await startCoordinatorServer(coordinatorRuntimePaths(process.env));
 
   const sdk = await loadPiSdk();
@@ -365,6 +368,15 @@ async function createSdkHarness(): Promise<SdkHarness> {
   return { root, session, sentMessages, activeTools, previousCwd, previousStateRoot, coordinator };
 }
 
+async function makeRemovable(root: string): Promise<void> {
+  await chmod(root, 0o700).catch(() => undefined);
+  for (const entry of await readdir(root, { withFileTypes: true }).catch(() => [])) {
+    const path = join(root, entry.name);
+    if (entry.isDirectory()) await makeRemovable(path);
+    else await chmod(path, 0o600).catch(() => undefined);
+  }
+}
+
 async function disposeHarness(harness: SdkHarness): Promise<void> {
   await harness.session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' });
   harness.session.dispose();
@@ -372,6 +384,7 @@ async function disposeHarness(harness: SdkHarness): Promise<void> {
   process.chdir(harness.previousCwd);
   if (harness.previousStateRoot === undefined) delete process.env[AUTOPILOT_STATE_ROOT_ENV];
   else process.env[AUTOPILOT_STATE_ROOT_ENV] = harness.previousStateRoot;
+  await makeRemovable(harness.root);
   await rm(harness.root, { recursive: true, force: true });
 }
 
@@ -486,6 +499,36 @@ void describe('Pi SDK Autopilot activation', () => {
       const run = runs[0];
       if (!isIndexable(run)) throw new Error('durable run supervisor must be an object');
       assert.equal(run['active_session_generation'], 2);
+    } finally {
+      await disposeHarness(harness);
+    }
+  });
+
+  void it('fails closed before prompt/session activation for cut-over nonactive legacy WRITE recovery', async () => {
+    const harness = await createSdkHarness(async ({ cwd, env }) => {
+      const prepared = await prepareAutopilotWorkstream({ workstream: 'migration-recovery-sdk', sourceCwd: cwd, env, now: new Date('2026-07-12T11:00:00.000Z') });
+      const coordinationRoot = coordinationRootForRepo(prepared.active.repo_key, env);
+      const active = (await readActiveAutopilots(coordinationRoot))[0];
+      if (active === undefined) throw new Error('missing SDK legacy active row');
+      const nonactive = { ...active, status: 'paused' as const, pid: 999_999_999, boot_id: 'legacy-boot' };
+      await writeActiveAutopilots(coordinationRoot, [nonactive]);
+      await writePathClaims(coordinationRoot, [{ schema_version: 'autopilot.path_claim.v1', path: 'src/recovery.ts', autopilot_id: nonactive.autopilot_id, workstream: nonactive.workstream, workstream_run: nonactive.workstream_run, unit_id: 'legacy-unit', attempt: 1, claim_type: 'WRITE', acquired_at: '2026-07-12T11:01:00.000Z', active_run_epoch: nonactive.active_run_epoch, reason: 'ambiguous nonactive legacy owner' }]);
+      await runCoordinationMigration({ command: 'apply', repoKey: nonactive.repo_key, env, clock: { now: () => new Date('2026-07-12T12:00:00.000Z') } });
+      await runCoordinationMigration({ command: 'verify', repoKey: nonactive.repo_key, env, clock: { now: () => new Date('2026-07-12T12:00:00.000Z') } });
+      await runCoordinationMigration({ command: 'cutover', repoKey: nonactive.repo_key, env, clock: { now: () => new Date('2026-07-12T12:00:00.000Z') } });
+    });
+    try {
+      await requireCommand(harness.session, AUTOPILOT_COMMAND).handler('migration-recovery-sdk ordinary dispatch', harness.session.extensionRunner.createCommandContext());
+      assert.equal(harness.sentMessages.length, 0);
+      const repo = resolveRepoIdentity(join(harness.root, 'project'));
+      const status = await new CoordinatorClient({ env: process.env, autoStart: false }).query('status', repo.repoKey, null);
+      const runs = status.payload['runs'];
+      if (!Array.isArray(runs) || runs.length !== 1 || !isIndexable(runs[0])) throw new Error('expected one recovering SDK run');
+      assert.equal(runs[0]['status'], 'recovering');
+      const sessions = status.payload['session_leases'];
+      assert.equal(Array.isArray(sessions) ? sessions.length : -1, 0);
+      const recovery = status.payload['migration_recovery_work'];
+      assert.equal(Array.isArray(recovery) ? recovery.length : -1, 1);
     } finally {
       await disposeHarness(harness);
     }

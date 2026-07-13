@@ -5,10 +5,10 @@ import { readFile, readdir } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 import { CoordinatorClient } from './client.ts';
-import { coordinationPathsOverlap, parseCoordinationChangeReservation, parseCoordinationEditLease, parseCoordinationReservationObligation, parseCoordinationRunTerminalIntent } from './contracts.ts';
+import { coordinationPathsOverlap, parseCoordinationChangeReservation, parseCoordinationEditLease, parseCoordinationReservationObligation, parseCoordinationRun, parseCoordinationRunTerminalIntent } from './contracts.ts';
 import { CoordinationRuntimeError } from './failures.ts';
 import { coordinatorRuntimePaths } from './runtime-paths.ts';
-import { readCoordinatorSessionContext, type CoordinatorSessionContext } from './supervisor.ts';
+import { readCoordinatorSessionContext, writeCoordinatorSessionContext, type CoordinatorSessionContext } from './supervisor.ts';
 import type { CoordinationChangeReservation, CoordinationEditLease, CoordinationReservationObligation, CoordinationRunTerminalIntent } from './types.ts';
 import { parseAutopilotUnitMerge, type AutopilotUnitMerge } from '../unit-merge.ts';
 import { AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV } from '../names.ts';
@@ -47,18 +47,22 @@ function stateRootForActive(active: ActiveAutopilotRow): string {
 
 export class ReservationCoordinationClient {
   readonly #client: CoordinatorClient;
-  readonly #session: CoordinatorSessionContext;
+  #session: CoordinatorSessionContext;
+  readonly #contextPath: string | null;
 
-  constructor(client: CoordinatorClient, session: CoordinatorSessionContext) {
+  constructor(client: CoordinatorClient, session: CoordinatorSessionContext, contextPath: string | null = null) {
     this.#client = client;
     this.#session = session;
+    this.#contextPath = contextPath;
   }
+
+  get session(): CoordinatorSessionContext { return this.#session; }
 
   static async fromEnvironment(env: ProcessEnvLike = process.env): Promise<ReservationCoordinationClient> {
     const contextPath = env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV];
     if (contextPath === undefined || contextPath.trim().length === 0) throw new CoordinationRuntimeError('unauthorized-client', `${AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV} is required for reservation coordination`);
     const session = await readCoordinatorSessionContext(contextPath);
-    return new ReservationCoordinationClient(new CoordinatorClient({ env: { ...env, AUTOPILOT_STATE_ROOT: session.state_root } }), session);
+    return new ReservationCoordinationClient(new CoordinatorClient({ env: { ...env, AUTOPILOT_STATE_ROOT: session.state_root } }), session, contextPath);
   }
 
   async view(): Promise<ReservationCoordinationView> {
@@ -76,6 +80,9 @@ export class ReservationCoordinationClient {
       expectedVersion: this.#session.run_version,
       idempotencyKey: `prepare-run-terminal:${terminalIntentId}`,
     }, { outcome, terminal_intent_id: terminalIntentId, session_lease_id: this.#session.session_lease_id, session_token: this.#session.session_token });
+    const run = parseCoordinationRun(response.payload['run']);
+    this.#session = { ...this.#session, run_version: run.version };
+    if (this.#contextPath !== null) await writeCoordinatorSessionContext(this.#contextPath, this.#session);
     return parseCoordinationRunTerminalIntent(response.payload['run_terminal_intent']);
   }
 
@@ -88,6 +95,9 @@ export class ReservationCoordinationClient {
       expectedVersion: intent.version,
       idempotencyKey: `cancel-run-terminal:${intent.terminal_intent_id}`,
     }, { reason, terminal_intent_id: intent.terminal_intent_id, session_lease_id: this.#session.session_lease_id, session_token: this.#session.session_token });
+    const run = parseCoordinationRun(response.payload['run']);
+    this.#session = { ...this.#session, run_version: run.version };
+    if (this.#contextPath !== null) await writeCoordinatorSessionContext(this.#contextPath, this.#session);
     return parseCoordinationRunTerminalIntent(response.payload['run_terminal_intent']);
   }
 

@@ -1,11 +1,15 @@
 export const AUTOPILOT_COORDINATION_SNAPSHOT_SCHEMA = 'autopilot.coordination_snapshot.v1';
-export const AUTOPILOT_COORDINATOR_PROTOCOL_VERSION = '1.2';
+export const AUTOPILOT_COORDINATOR_PROTOCOL_VERSION = '1.3';
 export const AUTOPILOT_COORDINATOR_REQUEST_SCHEMA = 'autopilot.coordinator_request.v1';
 export const AUTOPILOT_COORDINATOR_RESPONSE_SCHEMA = 'autopilot.coordinator_response.v1';
 export const AUTOPILOT_COORDINATION_PREFLIGHT_SCHEMA = 'autopilot.coordination_preflight.v1';
 export const COORDINATION_CLAIM_MODES = ['READ', 'WRITE', 'EXCLUSIVE'];
 export const COORDINATION_RUN_STATUSES = ['active', 'paused', 'merging', 'blocked', 'recovering', 'closed', 'aborted'];
 export const COORDINATION_SESSION_STATUSES = ['attached', 'handoff-pending', 'detached', 'fenced', 'expired'];
+export const COORDINATION_SESSION_ATTACHMENT_KINDS = ['dispatch', 'terminal-recovery', 'migration-recovery'];
+export const COORDINATION_MIGRATION_RECOVERY_TYPES = ['ambiguous-live-claim', 'orphan-worktree', 'git-metadata-mismatch', 'unreachable-live-process'];
+export const COORDINATION_MIGRATION_RECOVERY_STATUSES = ['pending', 'resolved'];
+export const COORDINATION_MIGRATION_RECOVERY_RESOLUTIONS = ['authority-retained', 'authority-released'];
 export const COORDINATION_CHILD_STATUSES = ['preflight', 'running', 'terminal', 'recovery-required'];
 export const COORDINATION_UNIT_STATES = ['queued', 'preflight', 'running', 'transport-complete', 'merged', 'failed', 'reset', 'quarantined', 'superseded'];
 export const COORDINATION_UNIT_ROLES = ['strategy', 'implement', 'validate', 'fix', 'adjudicate', 'bughunt', 'extract', 'unknown'];

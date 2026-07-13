@@ -1,14 +1,16 @@
-import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
+import { closeSync, constants as fsConstants, existsSync, fstatSync, fsyncSync, lstatSync, openSync, readFileSync, readdirSync, unlinkSync } from 'node:fs';
+import { link, open, readFile, rename, unlink, writeFile, type FileHandle } from 'node:fs/promises';
 import { dirname, isAbsolute, join, normalize } from 'node:path';
 import { platform } from 'node:os';
 
 import { CoordinatorClient, durableIdentifier } from './client.ts';
-import { parseCoordinationMessage, parseCoordinationRun, parseCoordinationSessionLease } from './contracts.ts';
+import { parseCoordinationMessage, parseCoordinationMigrationRecoveryWork, parseCoordinationRun, parseCoordinationRunTerminalIntent, parseCoordinationSessionLease } from './contracts.ts';
 import { CoordinationRuntimeError } from './failures.ts';
+import { acknowledgeCoordinationMigrationFreeze, activeCoordinationMigrationFreeze, assertMigrationPathSafe } from './migration-paths.ts';
 import { currentBootId } from './process-identity.ts';
-import { COORDINATOR_HEARTBEAT_MS, COORDINATOR_SESSION_LEASE_MS } from './runtime-paths.ts';
-import type { CoordinationMessage, CoordinationRun, CoordinationSessionLease, CoordinatorResponseEnvelope } from './types.ts';
+import { COORDINATOR_HEARTBEAT_MS, COORDINATOR_SESSION_LEASE_MS, enforcePrivateAuthorityPath, ensurePrivateAuthorityDirectory } from './runtime-paths.ts';
+import type { CoordinationMessage, CoordinationMigrationRecoveryWork, CoordinationReconciliationSource, CoordinationRun, CoordinationSessionLease, CoordinatorResponseEnvelope } from './types.ts';
 import type { ActiveAutopilotRow, AutopilotRepoIdentity, ProcessEnvLike } from '../parallel-runtime.ts';
 
 export const AUTOPILOT_COORDINATOR_SESSION_CONTEXT_SCHEMA = 'autopilot.coordinator_session_context.v1' as const;
@@ -37,6 +39,18 @@ export interface RunSupervisorAttachment {
   readonly contextPath: string;
   readonly context: CoordinatorSessionContext;
 }
+
+export type MigrationRecoveryResolutionInput =
+  | { readonly resolutionType: 'authority-retained' }
+  | { readonly resolutionType: 'authority-released'; readonly releaseSource: Exclude<CoordinationReconciliationSource, 'child-process'>; readonly releaseTargetId: string; readonly evidenceBytes: Uint8Array };
+
+export interface MigrationRecoveryResolutionResult {
+  readonly recoveryWork: CoordinationMigrationRecoveryWork;
+  readonly remainingRecoveryWork: readonly CoordinationMigrationRecoveryWork[];
+  readonly run: CoordinationRun;
+}
+
+export type MigrationRecoveryEvidenceBoundary = 'after-evidence-temp-synced' | 'after-evidence-published';
 
 export interface CoordinationMessageInjection {
   readonly customType: 'autopilot-coordination';
@@ -104,12 +118,102 @@ function messageContent(message: CoordinationMessage): string {
   return `Autopilot coordination ${message.message_type} (${message.correlation_id}): ${bounded}`;
 }
 
+function fsyncParentDirectory(path: string): void {
+  if (platform() === 'win32') return;
+  const descriptor = openSync(dirname(path), fsConstants.O_RDONLY);
+  try { fsyncSync(descriptor); } finally { closeSync(descriptor); }
+}
+
+function readExactRegularFile(path: string, maximumBytes: number, label: string): { readonly bytes: Uint8Array; readonly dev: number; readonly ino: number } {
+  const before = lstatSync(path);
+  if (!before.isFile() || before.isSymbolicLink() || before.size > maximumBytes) throw new CoordinationRuntimeError('invalid-state', `${label} must be a bounded regular non-symbolic file`, [path]);
+  const descriptor = openSync(path, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
+  try {
+    const opened = fstatSync(descriptor);
+    if (!opened.isFile() || opened.dev !== before.dev || opened.ino !== before.ino || opened.size !== before.size) throw new CoordinationRuntimeError('invalid-state', `${label} identity changed while opening`, [path]);
+    const bytes = readFileSync(descriptor);
+    const afterDescriptor = fstatSync(descriptor);
+    const afterPath = lstatSync(path);
+    if (bytes.byteLength !== opened.size || afterDescriptor.dev !== opened.dev || afterDescriptor.ino !== opened.ino || afterDescriptor.size !== opened.size || afterPath.dev !== opened.dev || afterPath.ino !== opened.ino || afterPath.size !== opened.size) throw new CoordinationRuntimeError('invalid-state', `${label} identity changed during read`, [path]);
+    return { bytes, dev: opened.dev, ino: opened.ino };
+  } finally { closeSync(descriptor); }
+}
+
+async function publishMigrationRecoveryEvidence(input: {
+  readonly stateRoot: string;
+  readonly evidenceRoot: string;
+  readonly evidencePath: string;
+  readonly evidenceBytes: Uint8Array;
+  readonly afterBoundary?: (boundary: MigrationRecoveryEvidenceBoundary) => void | Promise<void>;
+}): Promise<void> {
+  const maximumBytes = 1024 * 1024;
+  if (input.evidenceBytes.byteLength > maximumBytes) throw new CoordinationRuntimeError('invalid-request', 'migration recovery evidence exceeds its immutable byte ceiling');
+  assertMigrationPathSafe(input.stateRoot, input.evidenceRoot, 'migration recovery evidence root');
+  await ensurePrivateAuthorityDirectory(input.evidenceRoot);
+  assertMigrationPathSafe(input.stateRoot, input.evidenceRoot, 'migration recovery evidence root');
+  assertMigrationPathSafe(input.stateRoot, input.evidencePath, 'migration recovery evidence destination');
+  const evidenceName = input.evidencePath.slice(dirname(input.evidencePath).length + 1);
+  let residueRemoved = false;
+  for (const entry of readdirSync(input.evidenceRoot, { withFileTypes: true })) {
+    if (!entry.name.startsWith(`${evidenceName}.tmp-`) && !entry.name.startsWith(`${evidenceName}.invalid-`)) continue;
+    const residue = join(input.evidenceRoot, entry.name);
+    assertMigrationPathSafe(input.stateRoot, residue, 'migration recovery evidence crash residue');
+    if (entry.isSymbolicLink() || !entry.isFile()) throw new CoordinationRuntimeError('invalid-state', 'migration recovery evidence crash residue has an unsafe type', [residue]);
+    const opened = readExactRegularFile(residue, maximumBytes, 'migration recovery evidence crash residue');
+    const current = lstatSync(residue);
+    if (current.dev !== opened.dev || current.ino !== opened.ino) throw new CoordinationRuntimeError('invalid-state', 'migration recovery evidence crash residue changed before cleanup', [residue]);
+    unlinkSync(residue);
+    residueRemoved = true;
+  }
+  if (residueRemoved) fsyncParentDirectory(input.evidencePath);
+  if (existsSync(input.evidencePath)) {
+    const existing = readExactRegularFile(input.evidencePath, maximumBytes, 'migration recovery evidence');
+    if (existing.bytes.byteLength === input.evidenceBytes.byteLength && timingSafeEqual(existing.bytes, input.evidenceBytes)) return;
+    const invalid = `${input.evidencePath}.invalid-${String(process.pid)}-${randomBytes(8).toString('hex')}`;
+    assertMigrationPathSafe(input.stateRoot, invalid, 'invalid migration recovery evidence quarantine');
+    await rename(input.evidencePath, invalid);
+    const quarantined = readExactRegularFile(invalid, maximumBytes, 'invalid migration recovery evidence quarantine');
+    if (quarantined.dev !== existing.dev || quarantined.ino !== existing.ino) throw new CoordinationRuntimeError('idempotency-conflict', 'migration recovery evidence identity changed during invalid-file quarantine', [input.evidencePath, invalid]);
+    fsyncParentDirectory(input.evidencePath);
+    await unlink(invalid);
+    fsyncParentDirectory(input.evidencePath);
+  }
+  const temporary = `${input.evidencePath}.tmp-${String(process.pid)}-${randomBytes(8).toString('hex')}`;
+  assertMigrationPathSafe(input.stateRoot, temporary, 'migration recovery evidence temporary');
+  let handle: FileHandle | null = null;
+  try {
+    handle = await open(temporary, 'wx', 0o600);
+    const written = await handle.write(input.evidenceBytes);
+    if (written.bytesWritten !== input.evidenceBytes.byteLength) throw new CoordinationRuntimeError('coordinator-unavailable', 'migration recovery evidence temporary write was incomplete', [temporary, String(written.bytesWritten), String(input.evidenceBytes.byteLength)]);
+    await handle.sync();
+    await handle.close(); handle = null;
+    await enforcePrivateAuthorityPath(temporary, false);
+    await input.afterBoundary?.('after-evidence-temp-synced');
+    try { await link(temporary, input.evidencePath); }
+    catch (error) {
+      if (!(error instanceof Error && 'code' in error && error.code === 'EEXIST')) throw error;
+      const existing = readExactRegularFile(input.evidencePath, maximumBytes, 'concurrent migration recovery evidence');
+      if (existing.bytes.byteLength !== input.evidenceBytes.byteLength || !timingSafeEqual(existing.bytes, input.evidenceBytes)) throw new CoordinationRuntimeError('idempotency-conflict', 'migration recovery evidence identity was concurrently reused with different bytes', [input.evidencePath]);
+    }
+    await enforcePrivateAuthorityPath(input.evidencePath, false);
+    fsyncParentDirectory(input.evidencePath);
+    await input.afterBoundary?.('after-evidence-published');
+  } finally {
+    if (handle !== null) await handle.close();
+    if (existsSync(temporary)) {
+      await unlink(temporary);
+      fsyncParentDirectory(input.evidencePath);
+    }
+  }
+}
+
 export async function writeCoordinatorSessionContext(path: string, context: CoordinatorSessionContext): Promise<void> {
-  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  await ensurePrivateAuthorityDirectory(dirname(path));
   const temporary = `${path}.tmp-${String(process.pid)}-${randomBytes(6).toString('hex')}`;
   await writeFile(temporary, `${JSON.stringify(context, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
+  await enforcePrivateAuthorityPath(temporary, false);
   await rename(temporary, path);
-  if (platform() !== 'win32') await chmod(path, 0o600);
+  await enforcePrivateAuthorityPath(path, false);
 }
 
 export async function readCoordinatorSessionContext(path: string): Promise<CoordinatorSessionContext> {
@@ -165,6 +269,8 @@ export class DurableRunSupervisorClient {
     const sessionId = durableIdentifier('session', input.rawSessionId);
     const status = await this.#client.query('status', repoId, input.active.workstream_run);
     const runValues = payloadArray(status, 'runs');
+    const pendingRecovery = payloadArray(status, 'migration_recovery_work').map((value) => parseCoordinationMigrationRecoveryWork(value)).filter((work) => work.status === 'pending');
+    if (pendingRecovery.length > 0) throw new CoordinationRuntimeError('recovery-required', 'ordinary run supervisor attachment is fenced while migration recovery work is pending', pendingRecovery.map((work) => work.recovery_id));
     let run: CoordinationRun;
     if (runValues.length === 0) {
       const attachedRun = await this.#client.mutate('attach-run', {
@@ -181,6 +287,22 @@ export class DurableRunSupervisorClient {
         autopilot_id: input.active.autopilot_id,
         workstream: input.active.workstream,
         coordination_authority: input.active.coordination_authority,
+        run_resource: {
+          schema_version: 'autopilot.coordination_run_resource.v1',
+          repo_id: repoId,
+          workstream_run: input.active.workstream_run,
+          source_repo: input.active.source_repo,
+          git_common_dir: input.active.git_common_dir,
+          worktree_root: input.active.worktree_root,
+          main_worktree_path: input.active.main_worktree_path,
+          runtime_root: input.active.runtime_root,
+          branch: input.active.branch,
+          target_branch: input.active.target_branch,
+          target_base_sha: input.active.target_base_sha,
+          origin_url: input.active.origin_url,
+          started_at: input.active.started_at,
+          version: 1,
+        },
       });
       run = parseCoordinationRun(payloadRecord(attachedRun, 'run'));
     } else if (runValues.length === 1) {
@@ -229,6 +351,112 @@ export class DurableRunSupervisorClient {
     const contextPath = join(this.#client.paths.sessionsRoot, `${createHash('sha256').update(`${repoId}\0${run.workstream_run}\0${session.session_lease_id}`, 'utf8').digest('hex')}.json`);
     await writeCoordinatorSessionContext(contextPath, context);
     return { run: attachedRun, session, contextPath, context };
+  }
+
+  async attachTerminalRecovery(input: { readonly repo: AutopilotRepoIdentity; readonly active: ActiveAutopilotRow; readonly rawSessionId: string }): Promise<RunSupervisorAttachment> {
+    const repoId = input.repo.repoKey;
+    const status = await this.#client.query('status', repoId, input.active.workstream_run);
+    const runValues = payloadArray(status, 'runs');
+    if (runValues.length !== 1) throw new CoordinationRuntimeError('invalid-state', 'terminal-cleanup recovery requires exactly one durable run supervisor');
+    const run = parseCoordinationRun(runValues[0]);
+    if ((run.status !== 'closed' && run.status !== 'aborted') || run.autopilot_id !== input.active.autopilot_id || run.workstream !== input.active.workstream || run.coordination_authority !== 'coordinator-edit-leases-v1') throw new CoordinationRuntimeError('unauthorized-client', 'terminal-cleanup recovery identity does not match the durable terminal run');
+    const intentValues = payloadArray(status, 'run_terminal_intents').map((value) => parseCoordinationRunTerminalIntent(value));
+    const intents = intentValues.filter((intent) => intent.state === 'committed');
+    if (intents.length !== 1 || intents[0] === undefined || intents[0].outcome !== run.status) throw new CoordinationRuntimeError('invalid-state', 'terminal-cleanup recovery requires one matching committed terminal intent');
+    const generation = run.active_session_generation + 1;
+    const sessionLeaseId = `terminal-recovery-lease-${randomUUID()}`;
+    const sessionToken = randomBytes(32).toString('hex');
+    const response = await this.#client.mutate('attach-terminal-recovery', {
+      repoId, workstreamRun: run.workstream_run, sessionId: durableIdentifier('terminal-recovery-session', input.rawSessionId),
+      fencingGeneration: generation, expectedVersion: run.version, idempotencyKey: durableIdentifier('attach-terminal-recovery', `${repoId}\0${run.workstream_run}\0${sessionLeaseId}`),
+    }, {
+      session_lease_id: sessionLeaseId, session_token: sessionToken, pid: process.pid, boot_id: currentBootId(),
+      lease_expires_at: leaseExpiry(), terminal_intent_id: intents[0].terminal_intent_id,
+    });
+    const attachedRun = parseCoordinationRun(payloadRecord(response, 'run'));
+    const session = parseCoordinationSessionLease(payloadRecord(response, 'session'));
+    if (attachedRun.status !== run.status) throw new CoordinationRuntimeError('store-corrupt', 'terminal recovery attachment reactivated a terminal run');
+    const context: CoordinatorSessionContext = {
+      schema_version: AUTOPILOT_COORDINATOR_SESSION_CONTEXT_SCHEMA, state_root: this.#client.paths.stateRoot, repo_id: repoId, repo_key: input.repo.repoKey,
+      autopilot_id: input.active.autopilot_id, workstream: input.active.workstream, workstream_run: input.active.workstream_run,
+      session_id: session.session_id, session_generation: session.session_generation, run_version: attachedRun.version,
+      session_lease_id: session.session_lease_id, session_token: sessionToken, session_version: session.version, pid: session.pid, boot_id: session.boot_id,
+    };
+    const contextPath = join(this.#client.paths.sessionsRoot, `${createHash('sha256').update(`${repoId}\0${run.workstream_run}\0${session.session_lease_id}`, 'utf8').digest('hex')}.json`);
+    await writeCoordinatorSessionContext(contextPath, context);
+    return { run: attachedRun, session, contextPath, context };
+  }
+
+  async attachMigrationRecovery(input: { readonly repo: AutopilotRepoIdentity; readonly workstreamRun: string; readonly recoveryId: string; readonly rawSessionId: string }): Promise<RunSupervisorAttachment> {
+    const repoId = input.repo.repoKey;
+    const status = await this.#client.query('status', repoId, input.workstreamRun);
+    const runs = payloadArray(status, 'runs').map((value) => parseCoordinationRun(value));
+    if (runs.length !== 1 || runs[0] === undefined) throw new CoordinationRuntimeError('invalid-state', 'migration recovery requires exactly one durable run supervisor');
+    const run = runs[0];
+    if (run.coordination_authority !== 'coordinator-edit-leases-v1') throw new CoordinationRuntimeError('unauthorized-client', 'migration recovery requires coordinator sole authority');
+    const pending = payloadArray(status, 'migration_recovery_work').map((value) => parseCoordinationMigrationRecoveryWork(value)).filter((work) => work.status === 'pending');
+    if (!pending.some((work) => work.recovery_id === input.recoveryId)) throw new CoordinationRuntimeError('invalid-state', 'requested migration recovery row is not pending for the durable run', [input.recoveryId]);
+    const generation = run.active_session_generation + 1;
+    const sessionLeaseId = `migration-recovery-lease-${randomUUID()}`;
+    const sessionToken = randomBytes(32).toString('hex');
+    const response = await this.#client.mutate('attach-migration-recovery', {
+      repoId, workstreamRun: run.workstream_run, sessionId: durableIdentifier('migration-recovery-session', input.rawSessionId),
+      fencingGeneration: generation, expectedVersion: run.version, idempotencyKey: durableIdentifier('attach-migration-recovery', `${repoId}\0${run.workstream_run}\0${sessionLeaseId}`),
+    }, {
+      recovery_id: input.recoveryId, session_lease_id: sessionLeaseId, session_token: sessionToken, pid: process.pid, boot_id: currentBootId(), lease_expires_at: leaseExpiry(),
+    });
+    const attachedRun = parseCoordinationRun(payloadRecord(response, 'run'));
+    const session = parseCoordinationSessionLease(payloadRecord(response, 'session'));
+    if (session.attachment_kind !== 'migration-recovery' || attachedRun.status !== run.status) throw new CoordinationRuntimeError('store-corrupt', 'migration recovery attachment acquired ordinary dispatch or changed durable run status');
+    const context: CoordinatorSessionContext = {
+      schema_version: AUTOPILOT_COORDINATOR_SESSION_CONTEXT_SCHEMA, state_root: this.#client.paths.stateRoot, repo_id: repoId, repo_key: input.repo.repoKey,
+      autopilot_id: run.autopilot_id, workstream: run.workstream, workstream_run: run.workstream_run,
+      session_id: session.session_id, session_generation: session.session_generation, run_version: attachedRun.version,
+      session_lease_id: session.session_lease_id, session_token: sessionToken, session_version: session.version, pid: session.pid, boot_id: session.boot_id,
+    };
+    const contextPath = join(this.#client.paths.sessionsRoot, `${createHash('sha256').update(`${repoId}\0${run.workstream_run}\0${session.session_lease_id}`, 'utf8').digest('hex')}.json`);
+    await writeCoordinatorSessionContext(contextPath, context);
+    return { run: attachedRun, session, contextPath, context };
+  }
+
+  async resolveMigrationRecovery(input: { readonly attachment: RunSupervisorAttachment; readonly recoveryWork: CoordinationMigrationRecoveryWork; readonly resolution: MigrationRecoveryResolutionInput; readonly afterEvidenceBoundary?: (boundary: MigrationRecoveryEvidenceBoundary) => void | Promise<void> }): Promise<MigrationRecoveryResolutionResult> {
+    if (input.attachment.session.attachment_kind !== 'migration-recovery') throw new CoordinationRuntimeError('unauthorized-client', 'migration recovery mutation requires a recovery-only supervisor attachment');
+    const session = input.attachment.session;
+    const work = input.recoveryWork;
+    if (work.status !== 'pending' || work.repo_id !== session.repo_id || work.workstream_run !== session.workstream_run) throw new CoordinationRuntimeError('invalid-request', 'migration recovery mutation work identity does not match its recovery-only session');
+    const detail = work.detail;
+    let evidenceBytes: Uint8Array;
+    let releaseSource: string | null = null;
+    let releaseTargetId: string | null = null;
+    if (input.resolution.resolutionType === 'authority-retained') {
+      evidenceBytes = new TextEncoder().encode(`${JSON.stringify({
+        schema_version: 'autopilot.migration_authority_recovery.v1', repo_id: work.repo_id, autopilot_id: input.attachment.run.autopilot_id,
+        workstream: input.attachment.run.workstream, workstream_run: work.workstream_run, recovery_id: work.recovery_id,
+        resolution_type: 'authority-retained', claim_path: detail['claim_path'], claim_mode: detail['claim_mode'], unit_id: detail['unit_id'], attempt: detail['attempt'], edit_lease_id: detail['edit_lease_id'], recorded_event_seq: work.created_event_seq,
+      }, null, 2)}\n`);
+    } else {
+      evidenceBytes = input.resolution.evidenceBytes;
+      releaseSource = input.resolution.releaseSource;
+      releaseTargetId = input.resolution.releaseTargetId;
+    }
+    const evidenceSha256 = `sha256:${createHash('sha256').update(evidenceBytes).digest('hex')}` as `sha256:${string}`;
+    const evidenceRef = `${createHash('sha256').update(`${work.recovery_id}\0${input.resolution.resolutionType}\0${evidenceSha256}`, 'utf8').digest('hex')}.json`;
+    const evidenceRoot = join(this.#client.paths.stateRoot, 'migration-recovery-evidence', work.repo_id, work.workstream_run);
+    const evidencePath = join(evidenceRoot, evidenceRef);
+    await publishMigrationRecoveryEvidence({ stateRoot: this.#client.paths.stateRoot, evidenceRoot, evidencePath, evidenceBytes, ...(input.afterEvidenceBoundary === undefined ? {} : { afterBoundary: input.afterEvidenceBoundary }) });
+    const idempotencyKey = durableIdentifier('resolve-migration-recovery', `${work.recovery_id}\0${input.resolution.resolutionType}\0${evidenceSha256}`);
+    const response = await this.#client.mutate('resolve-migration-recovery', {
+      repoId: work.repo_id, workstreamRun: work.workstream_run, sessionId: session.session_id, fencingGeneration: session.session_generation,
+      expectedVersion: work.version, idempotencyKey,
+    }, {
+      recovery_id: work.recovery_id, resolution_type: input.resolution.resolutionType, evidence_ref: evidenceRef, evidence_sha256: evidenceSha256,
+      release_source: releaseSource, release_target_id: releaseTargetId, session_lease_id: session.session_lease_id, session_token: input.attachment.context.session_token,
+    });
+    const recoveryWork = parseCoordinationMigrationRecoveryWork(response.payload['recovery_work']);
+    const remaining = payloadArray(response, 'remaining_recovery_work').map((value) => parseCoordinationMigrationRecoveryWork(value));
+    const run = parseCoordinationRun(response.payload['run']);
+    if (run.status !== input.attachment.run.status) throw new CoordinationRuntimeError('store-corrupt', 'migration recovery resolution changed durable run terminal/recovery state');
+    return { recoveryWork, remainingRecoveryWork: Object.freeze(remaining), run };
   }
 }
 
@@ -342,6 +570,14 @@ export class AutopilotSessionBridge {
     return token;
   }
 
+  async acceptTerminalDetach(): Promise<void> {
+    await this.#enqueue(async () => {
+      if (this.#closed) return;
+      this.#stopHeartbeat();
+      this.#closed = true;
+    });
+  }
+
   async close(reason = 'session-shutdown'): Promise<void> {
     await this.#enqueue(async () => {
       if (this.#closed) return;
@@ -371,6 +607,26 @@ export class AutopilotSessionBridge {
       void this.#enqueue(async () => {
         if (this.#closed || this.#handoffPrepared) return;
         const session = this.#attachment.session;
+        const stateRoot = this.#supervisor.client.paths.stateRoot;
+        const migrationFreeze = activeCoordinationMigrationFreeze(stateRoot);
+        if (migrationFreeze !== null) {
+          acknowledgeCoordinationMigrationFreeze(stateRoot, session.repo_id);
+          const detached = await this.#supervisor.client.mutate('detach-session', {
+            repoId: session.repo_id,
+            workstreamRun: session.workstream_run,
+            sessionId: session.session_id,
+            fencingGeneration: session.session_generation,
+            expectedVersion: session.version,
+            idempotencyKey: `migration-freeze-detach:${session.session_lease_id}`,
+          }, { reason: 'coordination-migration-freeze', session_lease_id: session.session_lease_id, session_token: this.#attachment.context.session_token });
+          const detachedSession = parseCoordinationSessionLease(payloadRecord(detached, 'session'));
+          this.#attachment = { ...this.#attachment, session: detachedSession, context: { ...this.#attachment.context, session_version: detachedSession.version } };
+          await writeCoordinatorSessionContext(this.#attachment.contextPath, this.#attachment.context);
+          this.#closed = true;
+          this.#stopHeartbeat();
+          this.#sink.send({ customType: 'autopilot-coordination', content: 'Autopilot session drained and fenced for the active coordination migration freeze.', display: true, details: { freeze: migrationFreeze } }, this.#sink.isIdle() ? 'steer' : 'followUp', true);
+          return;
+        }
         const response = await this.#supervisor.client.mutate('heartbeat', {
           repoId: session.repo_id,
           workstreamRun: session.workstream_run,

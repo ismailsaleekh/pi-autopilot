@@ -10,6 +10,7 @@ import {
   checkCoordinationInvariants,
   coordinationFailureDefinition,
   parseCoordinationEscalation,
+  parseCoordinationMigrationRecoveryWork,
   parseCoordinationSnapshot,
   parseCoordinatorRequestEnvelope,
   parseCoordinatorResponseEnvelope,
@@ -32,16 +33,20 @@ void describe('Coordination Fabric contracts and invariants', () => {
       'contradiction_adjudication',
       'coordinator_request',
       'coordinator_response',
+      'cutover_marker',
       'deadlock_resolution',
       'edit_lease',
       'escalation',
       'event',
       'mailbox_cursor',
       'message',
+      'migration_record',
+      'migration_recovery_work',
       'reconciliation_evidence',
       'repository',
       'reservation_obligation',
       'run',
+      'run_resource',
       'run_terminal_intent',
       'session_lease',
       'snapshot',
@@ -126,10 +131,23 @@ void describe('Coordination Fabric contracts and invariants', () => {
     assert.equal(checkCoordinationInvariants(requesterNotifiedBeforeOtherOwnersRelease).some((entry) => entry.code === 'granted-request-event-missing'), false);
   });
 
+  void it('enforces the typed migration recovery lifecycle and closed resolution contract', () => {
+    const pending = parseCoordinationMigrationRecoveryWork({
+      schema_version: 'autopilot.migration_recovery_work.v2', recovery_id: 'recovery-1', repo_id: 'repo-1', workstream_run: 'run-a', recovery_type: 'ambiguous-live-claim',
+      detail: { claim_path: 'src/owned.ts', claim_mode: 'WRITE', unit_id: 'unit-a', attempt: 1, edit_lease_id: 'lease-a' }, status: 'pending', resolution: null,
+      created_event_seq: 3, resolved_event_seq: null, version: 1,
+    });
+    assert.equal(pending.status, 'pending');
+    assert.throws(() => parseCoordinationMigrationRecoveryWork({ ...pending, status: 'resolved' }), /requires resolution evidence/u);
+    assert.throws(() => parseCoordinationMigrationRecoveryWork({ ...pending, resolution: { resolution_type: 'authority-retained', evidence: { ref: 'recovery.json', sha256: `sha256:${'a'.repeat(64)}` }, release_source: 'unit-merge', release_target_id: 'unit-a:1', exact_postconditions: ['lease retained'] } }), /cannot carry a release source/u);
+    const resolved = parseCoordinationMigrationRecoveryWork({ ...pending, status: 'resolved', resolution: { resolution_type: 'authority-released', evidence: { ref: 'recovery.json', sha256: `sha256:${'a'.repeat(64)}` }, release_source: 'attempt-reset', release_target_id: 'unit-a:1', exact_postconditions: ['worktree absent'] }, resolved_event_seq: 4, version: 2 });
+    assert.equal(resolved.resolution?.resolution_type, 'authority-released');
+  });
+
   void it('strictly validates versioned query and mutation envelopes', () => {
     const query = parseCoordinatorRequestEnvelope({
       schema_version: 'autopilot.coordinator_request.v1',
-      protocol_version: '1.2',
+      protocol_version: '1.3',
       request_id: 'request-1',
       action: 'status',
       idempotency_key: null,
@@ -141,6 +159,7 @@ void describe('Coordination Fabric contracts and invariants', () => {
       payload: JSON.parse('{}') as unknown,
     });
     assert.equal(query.action, 'status');
+    assert.throws(() => parseCoordinatorRequestEnvelope({ ...query, protocol_version: '1.2' }), /protocol_version must equal 1.3/u);
     assert.throws(
       () => parseCoordinatorRequestEnvelope({ ...query, action: 'heartbeat', payload: { lease_expires_at: '2026-07-11T16:00:00.000Z' } }),
       /mutating requests require/u,
@@ -160,6 +179,13 @@ void describe('Coordination Fabric contracts and invariants', () => {
     };
     assert.throws(() => parseCoordinatorRequestEnvelope({ ...mutation, workstream_run: 'run-a/../run-b', action: 'heartbeat', payload: { lease_expires_at: '2026-07-11T16:00:00.000Z', session_lease_id: 'lease-session-a', session_token: 'a'.repeat(64) } }), /filesystem-safe identifier segment/u);
     const sessionProof = { session_lease_id: 'lease-session-a', session_token: 'a'.repeat(64) };
+    const recoveryResolution = parseCoordinatorRequestEnvelope({
+      ...mutation,
+      action: 'resolve-migration-recovery',
+      payload: { recovery_id: 'recovery-1', resolution_type: 'authority-retained', evidence_ref: 'retention.json', evidence_sha256: `sha256:${'b'.repeat(64)}`, release_source: null, release_target_id: null, ...sessionProof },
+    });
+    assert.equal(recoveryResolution.action, 'resolve-migration-recovery');
+    assert.throws(() => parseCoordinatorRequestEnvelope({ ...recoveryResolution, payload: { ...recoveryResolution.payload, release_source: 'unit-merge', release_target_id: 'unit-a:1' } }), /cannot carry release_source/u);
     const acquisition = parseCoordinatorRequestEnvelope({
       ...mutation,
       action: 'acquire-group',
@@ -186,7 +212,7 @@ void describe('Coordination Fabric contracts and invariants', () => {
     }), /must differ/u);
     assert.equal(parseCoordinatorResponseEnvelope({
       schema_version: 'autopilot.coordinator_response.v1',
-      protocol_version: '1.2',
+      protocol_version: '1.3',
       request_id: 'request-1',
       ok: false,
       committed_event_seq: null,

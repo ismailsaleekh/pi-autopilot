@@ -40,7 +40,17 @@ async function attach(stateRoot: string, suffix: string): Promise<CoordinatorSes
   const workstreamRun = `run-${suffix}`;
   const runResponse = await client.mutate('attach-run', {
     repoId, workstreamRun, sessionId: null, fencingGeneration: null, expectedVersion: 0, idempotencyKey: `attach-run-${suffix}`,
-  }, { repo_key: repoId, canonical_root: '/tmp/generic-process-negotiation', git_common_dir: '/tmp/generic-process-negotiation/.git', autopilot_id: `autopilot-${suffix}`, workstream: `workstream-${suffix}`, coordination_authority: 'coordinator-edit-leases-v1' });
+  }, {
+    repo_key: repoId, canonical_root: '/tmp/generic-process-negotiation', git_common_dir: '/tmp/generic-process-negotiation/.git', autopilot_id: `autopilot-${suffix}`, workstream: `workstream-${suffix}`, coordination_authority: 'coordinator-edit-leases-v1',
+    run_resource: {
+      schema_version: 'autopilot.coordination_run_resource.v1', repo_id: repoId, workstream_run: workstreamRun,
+      source_repo: '/tmp/generic-process-negotiation', git_common_dir: '/tmp/generic-process-negotiation/.git',
+      worktree_root: join(stateRoot, 'worktrees', repoId), main_worktree_path: join(stateRoot, 'worktrees', repoId, 'active', workstreamRun, 'main'),
+      runtime_root: join(stateRoot, 'worktrees', repoId, 'active', workstreamRun, 'main', '.pi', 'autopilot', `workstream-${suffix}`),
+      branch: `autopilot/${workstreamRun}`, target_branch: null, target_base_sha: '0'.repeat(40), origin_url: null,
+      started_at: '2026-07-12T00:00:00.000Z', version: 1,
+    },
+  });
   const run = parseCoordinationRun(runResponse.payload['run']);
   const sessionResponse = await client.mutate('attach-session', {
     repoId, workstreamRun, sessionId: `session-${suffix}`, fencingGeneration: 1, expectedVersion: run.version, idempotencyKey: `attach-session-${suffix}`,

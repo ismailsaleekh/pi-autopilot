@@ -1,5 +1,5 @@
 export const AUTOPILOT_COORDINATION_SNAPSHOT_SCHEMA = 'autopilot.coordination_snapshot.v1' as const;
-export const AUTOPILOT_COORDINATOR_PROTOCOL_VERSION = '1.2' as const;
+export const AUTOPILOT_COORDINATOR_PROTOCOL_VERSION = '1.3' as const;
 export const AUTOPILOT_COORDINATOR_REQUEST_SCHEMA = 'autopilot.coordinator_request.v1' as const;
 export const AUTOPILOT_COORDINATOR_RESPONSE_SCHEMA = 'autopilot.coordinator_response.v1' as const;
 export const AUTOPILOT_COORDINATION_PREFLIGHT_SCHEMA = 'autopilot.coordination_preflight.v1' as const;
@@ -7,6 +7,10 @@ export const AUTOPILOT_COORDINATION_PREFLIGHT_SCHEMA = 'autopilot.coordination_p
 export const COORDINATION_CLAIM_MODES = ['READ', 'WRITE', 'EXCLUSIVE'] as const;
 export const COORDINATION_RUN_STATUSES = ['active', 'paused', 'merging', 'blocked', 'recovering', 'closed', 'aborted'] as const;
 export const COORDINATION_SESSION_STATUSES = ['attached', 'handoff-pending', 'detached', 'fenced', 'expired'] as const;
+export const COORDINATION_SESSION_ATTACHMENT_KINDS = ['dispatch', 'terminal-recovery', 'migration-recovery'] as const;
+export const COORDINATION_MIGRATION_RECOVERY_TYPES = ['ambiguous-live-claim', 'orphan-worktree', 'git-metadata-mismatch', 'unreachable-live-process'] as const;
+export const COORDINATION_MIGRATION_RECOVERY_STATUSES = ['pending', 'resolved'] as const;
+export const COORDINATION_MIGRATION_RECOVERY_RESOLUTIONS = ['authority-retained', 'authority-released'] as const;
 export const COORDINATION_CHILD_STATUSES = ['preflight', 'running', 'terminal', 'recovery-required'] as const;
 export const COORDINATION_UNIT_STATES = ['queued', 'preflight', 'running', 'transport-complete', 'merged', 'failed', 'reset', 'quarantined', 'superseded'] as const;
 export const COORDINATION_UNIT_ROLES = ['strategy', 'implement', 'validate', 'fix', 'adjudicate', 'bughunt', 'extract', 'unknown'] as const;
@@ -30,6 +34,10 @@ export const COORDINATION_OPERATIONAL_ESCALATION_REASONS = ['claim-conflict', 'o
 export type CoordinationClaimMode = (typeof COORDINATION_CLAIM_MODES)[number];
 export type CoordinationRunStatus = (typeof COORDINATION_RUN_STATUSES)[number];
 export type CoordinationSessionStatus = (typeof COORDINATION_SESSION_STATUSES)[number];
+export type CoordinationSessionAttachmentKind = (typeof COORDINATION_SESSION_ATTACHMENT_KINDS)[number];
+export type CoordinationMigrationRecoveryType = (typeof COORDINATION_MIGRATION_RECOVERY_TYPES)[number];
+export type CoordinationMigrationRecoveryStatus = (typeof COORDINATION_MIGRATION_RECOVERY_STATUSES)[number];
+export type CoordinationMigrationRecoveryResolutionType = (typeof COORDINATION_MIGRATION_RECOVERY_RESOLUTIONS)[number];
 export type CoordinationChildStatus = (typeof COORDINATION_CHILD_STATUSES)[number];
 export type CoordinationUnitState = (typeof COORDINATION_UNIT_STATES)[number];
 export type CoordinationUnitRole = (typeof COORDINATION_UNIT_ROLES)[number];
@@ -93,8 +101,26 @@ export interface CoordinationRun {
   readonly version: number;
 }
 
+/** Immutable physical/runtime identity required to reconstruct a run without legacy files. */
+export interface CoordinationRunResource {
+  readonly schema_version: 'autopilot.coordination_run_resource.v1';
+  readonly repo_id: string;
+  readonly workstream_run: string;
+  readonly source_repo: string;
+  readonly git_common_dir: string;
+  readonly worktree_root: string;
+  readonly main_worktree_path: string;
+  readonly runtime_root: string;
+  readonly branch: string;
+  readonly target_branch: string | null;
+  readonly target_base_sha: string;
+  readonly origin_url: string | null;
+  readonly started_at: string;
+  readonly version: number;
+}
+
 export interface CoordinationSessionLease {
-  readonly schema_version: 'autopilot.session_lease.v1';
+  readonly schema_version: 'autopilot.session_lease.v2';
   readonly session_lease_id: string;
   readonly repo_id: string;
   readonly workstream_run: string;
@@ -103,8 +129,31 @@ export interface CoordinationSessionLease {
   readonly pid: number;
   readonly boot_id: string;
   readonly lease_expires_at: string;
+  readonly attachment_kind: CoordinationSessionAttachmentKind;
   readonly status: CoordinationSessionStatus;
   readonly attached_event_seq: number;
+  readonly version: number;
+}
+
+export interface CoordinationMigrationRecoveryResolution {
+  readonly resolution_type: CoordinationMigrationRecoveryResolutionType;
+  readonly evidence: CoordinationEvidenceRef;
+  readonly release_source: Exclude<CoordinationReconciliationSource, 'child-process'> | null;
+  readonly release_target_id: string | null;
+  readonly exact_postconditions: readonly string[];
+}
+
+export interface CoordinationMigrationRecoveryWork {
+  readonly schema_version: 'autopilot.migration_recovery_work.v2';
+  readonly recovery_id: string;
+  readonly repo_id: string;
+  readonly workstream_run: string;
+  readonly recovery_type: CoordinationMigrationRecoveryType;
+  readonly detail: Readonly<Record<string, unknown>>;
+  readonly status: CoordinationMigrationRecoveryStatus;
+  readonly resolution: CoordinationMigrationRecoveryResolution | null;
+  readonly created_event_seq: number;
+  readonly resolved_event_seq: number | null;
   readonly version: number;
 }
 
@@ -459,6 +508,7 @@ export interface CoordinationSnapshot {
   readonly claim_requests: readonly CoordinationClaimRequest[];
   readonly mailbox_cursors: readonly CoordinationMailboxCursor[];
   readonly reconciliation_evidence: readonly CoordinationReconciliationEvidence[];
+  readonly migration_recovery_work: readonly CoordinationMigrationRecoveryWork[];
   readonly messages: readonly CoordinationMessage[];
   readonly worktrees: readonly CoordinationWorktree[];
   readonly worktree_operations: readonly CoordinationWorktreeOperation[];
@@ -471,7 +521,7 @@ export interface CoordinationSnapshot {
 }
 
 export type CoordinatorQueryAction = 'status' | 'doctor' | 'export';
-export type CoordinatorMutationAction = 'attach-run' | 'attach-session' | 'detach-session' | 'prepare-handoff' | 'heartbeat' | 'register-attempt' | 'register-child' | 'heartbeat-child' | 'checkpoint-child' | 'complete-child' | 'drain-mailbox' | 'acquire-group' | 'acknowledge-grant' | 'respond-claim-request' | 'cancel-claim-request' | 'cancel-acquisition-group' | 'supersede-attempt' | 'acknowledge-message' | 'record-release-evidence' | 'resolve-reservation-obligation' | 'prepare-run-terminal' | 'cancel-run-terminal' | 'reconcile-run' | 'prepare-operation' | 'transition-operation' | 'register-authoritative-artifact' | 'assign-adjudication' | 'claim-adjudication-assignment' | 'complete-adjudication' | 'submit-planning-contradiction';
+export type CoordinatorMutationAction = 'attach-run' | 'attach-session' | 'attach-terminal-recovery' | 'attach-migration-recovery' | 'resolve-migration-recovery' | 'detach-session' | 'prepare-handoff' | 'heartbeat' | 'register-attempt' | 'register-child' | 'heartbeat-child' | 'checkpoint-child' | 'complete-child' | 'drain-mailbox' | 'acquire-group' | 'acknowledge-grant' | 'respond-claim-request' | 'cancel-claim-request' | 'cancel-acquisition-group' | 'supersede-attempt' | 'acknowledge-message' | 'record-release-evidence' | 'resolve-reservation-obligation' | 'prepare-run-terminal' | 'cancel-run-terminal' | 'reconcile-run' | 'prepare-operation' | 'transition-operation' | 'register-authoritative-artifact' | 'assign-adjudication' | 'claim-adjudication-assignment' | 'complete-adjudication' | 'submit-planning-contradiction';
 
 export interface CoordinatorRequestEnvelope {
   readonly schema_version: typeof AUTOPILOT_COORDINATOR_REQUEST_SCHEMA;

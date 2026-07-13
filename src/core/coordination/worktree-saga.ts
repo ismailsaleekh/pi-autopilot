@@ -7,6 +7,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'nod
 import { CoordinatorClient, durableIdentifier } from './client.ts';
 import { parseCoordinationWorktree, parseCoordinationWorktreeOperation } from './contracts.ts';
 import { CoordinationRuntimeError } from './failures.ts';
+import { coordinationCutoverCommitted } from './migration-paths.ts';
 import { coordinatorRuntimePaths } from './runtime-paths.ts';
 import { currentBootId, isProcessAlive } from './process-identity.ts';
 import { readCoordinatorSessionContext, type CoordinatorSessionContext } from './supervisor.ts';
@@ -25,7 +26,6 @@ import { AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV } from '../names.ts';
 import type { ActiveAutopilotRow, ProcessEnvLike } from '../parallel-runtime.ts';
 
 const TERMINAL_STAGES = new Set(['committed', 'compensated', 'failed']);
-const SHA_PATTERN = /^[a-f0-9]{7,64}$/u;
 
 interface JsonMap {
   readonly [key: string]: unknown;
@@ -308,7 +308,9 @@ async function sagaExecutionLockIsStale(lockPath: string): Promise<boolean> {
     const parsed = record(JSON.parse(await readFile(lockPath, 'utf8')) as unknown, 'saga execution lock');
     const pid = parsed['pid'];
     const bootId = parsed['boot_id'];
-    return typeof pid !== 'number' || !Number.isSafeInteger(pid) || pid < 1 || typeof bootId !== 'string' || bootId !== currentBootId() || !isProcessAlive(pid);
+    if (typeof pid !== 'number' || !Number.isSafeInteger(pid) || pid < 1 || typeof bootId !== 'string') return true;
+    // Never reclaim a lock while its PID is alive merely because boot evidence differs.
+    return !isProcessAlive(pid);
   } catch {
     const lockStat = await stat(lockPath).catch(() => null);
     return lockStat !== null && Date.now() - lockStat.mtimeMs > 30_000;
@@ -376,6 +378,7 @@ async function withSagaExecutionLock<T>(session: CoordinatorSessionContext, spec
 export async function executeOwnedWorktreeSaga(spec: OwnedWorktreeOperationSpec, callbacks: WorktreeSagaCallbacks, env: ProcessEnvLike = process.env): Promise<WorktreeSagaResult> {
   const contextPath = env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV];
   if (contextPath === undefined || contextPath.trim().length === 0) {
+    if (coordinationCutoverCommitted(coordinatorRuntimePaths(env).stateRoot, spec.active.repo_key)) throw new CoordinationRuntimeError('unauthorized-client', 'post-cutover worktree mutation requires a current durable coordinator session');
     if (spec.active.coordination_authority === 'coordinator-edit-leases-v1') throw new CoordinationRuntimeError('unauthorized-client', 'coordinator-authoritative run is missing its durable session; refusing unmanaged worktree mutation');
     if (await durableRunExists(spec.active, env)) throw new CoordinationRuntimeError('unauthorized-client', 'durable run exists but no current session can authorize its worktree mutation');
     assertExternalWorktreeAuthority(spec, env, spec.active.worktree_root);

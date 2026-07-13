@@ -41,15 +41,20 @@ import {
   ensureWorktreeCleanForLaunch,
   prepareAutopilotUnitWorktree,
   readActiveAutopilots,
+  readCoordinatorActiveAutopilots,
   readPathClaims,
   recoverAutopilotWorktreeSagas,
   releaseClaimsForUnit,
+  resolveAutopilotStateRoot,
+  resolveRepoIdentity,
   unitWorktreePathForActiveAutopilot,
+  worktreeRootForRepo,
   resolveActiveAutopilotForSpec,
   type ActiveAutopilotContext,
   type ActiveAutopilotRow,
   type AutopilotPathClaim,
 } from './parallel-runtime.ts';
+import { coordinationCutoverCommitted } from './coordination/migration-paths.ts';
 import { ClaimNegotiationClient, type ClaimGroupAcquisitionResult } from './coordination/negotiation.ts';
 import { ReservationCoordinationClient, reservationSchedulingBlockers } from './coordination/reservations.ts';
 import { PlanningContradictionClient } from './coordination/escalation.ts';
@@ -539,6 +544,7 @@ async function runAutopilotAgentFromSpecPathInternal(
       acquiredClaims: runtimePreflight.acquiredClaims,
       auditPath: auditOutput,
       commitPath: executionCommitOutput,
+      env,
     });
   } catch (error) {
     if (error instanceof AutopilotExecutionCommitError || error instanceof AutopilotParallelRuntimeError) {
@@ -704,7 +710,8 @@ async function preflightSpecAfterWorktreePreparation(
   }
 
   const coordinatorMode = options.skipClaimAcquire !== true && runtimeContext.active.coordination_authority === 'coordinator-edit-leases-v1';
-  if (coordinatorMode) {
+  const cutoverCommitted = coordinationCutoverCommitted(resolveAutopilotStateRoot(options.env ?? process.env), runtimeContext.active.repo_key);
+  if (coordinatorMode && !cutoverCommitted) {
     const forbiddenLegacyClaims = (await readPathClaims(runtimeContext.coordinationRoot)).filter((claim) => claim.autopilot_id === runtimeContext.active.autopilot_id && claim.workstream_run === runtimeContext.active.workstream_run);
     if (forbiddenLegacyClaims.length > 0) throw new AutopilotAgentRunError('spec-invalid', {
       reason: `coordinator-edit-lease authoritative run has forbidden legacy claims: ${forbiddenLegacyClaims.map((claim) => `${claim.claim_type}:${claim.path}`).join(', ')}`,
@@ -872,8 +879,16 @@ async function prepareMissingSourceChangingUnitWorktree(spec: AutopilotUnitSpec,
   }
   const repoKey = taskInfo['repo_key'];
   if (typeof repoKey !== 'string' || repoKey.length === 0) return { created: false };
-  const activeRows = await readActiveAutopilots(coordinationRootForRepo(repoKey, env));
-  const active = activeRows.find((row) => row.workstream === spec.workstream && row.runtime_root === artifactRoot);
+  const activeRows = coordinationCutoverCommitted(resolveAutopilotStateRoot(env), repoKey)
+    ? (() => {
+        const sourceRepo = taskInfo['source_repo'];
+        if (typeof sourceRepo !== 'string') throw new AutopilotAgentRunError('spec-invalid', { reason: 'post-cutover task info lacks source_repo', statusOutput: spec.status_output, receiptOutput: spec.receipt_output });
+        const repo = resolveRepoIdentity(sourceRepo);
+        if (repo.repoKey !== repoKey) throw new AutopilotAgentRunError('spec-invalid', { reason: 'post-cutover task info repository identity mismatch', statusOutput: spec.status_output, receiptOutput: spec.receipt_output });
+        return readCoordinatorActiveAutopilots(repo, worktreeRootForRepo(repoKey, env), env);
+      })()
+    : readActiveAutopilots(coordinationRootForRepo(repoKey, env));
+  const active = (await activeRows).find((row) => row.workstream === spec.workstream && row.runtime_root === artifactRoot);
   if (active === undefined) return { created: false };
   if (!skipSagaRecovery && env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV] !== undefined) await recoverAutopilotWorktreeSagas({ active, env });
   const expectedCwd = unitWorktreePathForActiveAutopilot(active, spec.unit_id, spec.attempt);

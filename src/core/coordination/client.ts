@@ -1,6 +1,6 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { open, readFile, stat, unlink, type FileHandle } from 'node:fs/promises';
+import { open, unlink, type FileHandle } from 'node:fs/promises';
 import { connect, type Socket } from 'node:net';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -8,11 +8,15 @@ import { fileURLToPath } from 'node:url';
 import { CoordinationContractError, parseCoordinatorRequestEnvelope, parseCoordinatorResponseEnvelope } from './contracts.ts';
 import { coordinationFailureDefinition, CoordinationRuntimeError } from './failures.ts';
 import { AUTOPILOT_COORDINATOR_TRANSPORT_VERSION, CoordinatorFrameDecoder, encodeCoordinatorFrame } from './ipc.ts';
+import { activeCoordinationMigrationFreeze } from './migration-paths.ts';
 import { currentBootId, isProcessAlive } from './process-identity.ts';
-import { COORDINATOR_DATABASE_SCHEMA_VERSION, COORDINATOR_PACKAGE_BUILD, coordinatorRuntimePaths, ensureCoordinatorPrivateRoots, readOrCreateCoordinatorCapability, type CoordinatorRuntimePaths } from './runtime-paths.ts';
+import { COORDINATOR_DATABASE_SCHEMA_VERSION, COORDINATOR_PACKAGE_BUILD, coordinatorRuntimePaths, enforcePrivateAuthorityPath, ensureCoordinatorPrivateRoots, readOrCreateCoordinatorCapability, type CoordinatorRuntimePaths } from './runtime-paths.ts';
+import { acquireSerializedProcessGuard, discardLockTombstone, quarantineExactLock, readExactLockText, restoreLockTombstone } from './serialized-lock.ts';
 import { coordinationErrorCode } from './store.ts';
+import { preparePredecessorCoordinatorUpgrade, resumeCoordinatorUpgrade, type CoordinatorUpgradeTransaction } from './upgrade.ts';
+import { parsePredecessorCoordinatorLock } from './upgrade-contracts.ts';
 import type { ProcessEnvLike } from '../parallel-runtime.ts';
-import type { CoordinatorMutationAction, CoordinatorQueryAction, CoordinatorRequestEnvelope, CoordinatorResponseEnvelope } from './types.ts';
+import { AUTOPILOT_COORDINATOR_PROTOCOL_VERSION, type CoordinatorMutationAction, type CoordinatorQueryAction, type CoordinatorRequestEnvelope, type CoordinatorResponseEnvelope } from './types.ts';
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 5_000;
 const DEFAULT_STARTUP_TIMEOUT_MS = 10_000;
@@ -28,14 +32,6 @@ interface StartupLockRecord {
 
 interface StartupLock {
   release(): Promise<void>;
-}
-
-interface CoordinatorLifecycleLockRecord {
-  readonly schema_version: 'autopilot.coordinator_lock.v1';
-  readonly pid: number;
-  readonly boot_id: string;
-  readonly token: string;
-  readonly started_at: string;
 }
 
 export interface CoordinatorClientOptions {
@@ -58,18 +54,12 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
 }
 
-function parseCoordinatorLifecycleLock(value: unknown): CoordinatorLifecycleLockRecord | null {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
-  const record = value as Readonly<Record<string, unknown>>;
-  const pid = record['pid'];
-  const bootId = record['boot_id'];
-  const token = record['token'];
-  const startedAt = record['started_at'];
-  if (record['schema_version'] !== 'autopilot.coordinator_lock.v1' || typeof pid !== 'number' || !Number.isSafeInteger(pid) || pid < 1 || typeof bootId !== 'string' || typeof token !== 'string' || typeof startedAt !== 'string') return null;
-  return { schema_version: 'autopilot.coordinator_lock.v1', pid, boot_id: bootId, token, started_at: startedAt };
-}
-
 function compatibilityFailure(error: unknown): boolean {
+  if (typeof error === 'object' && error !== null) {
+    const record = error as Readonly<Record<string, unknown>>;
+    if (record['code'] === 'protocol-mismatch' || record['code'] === 'schema-mismatch') return true;
+    if (record['code'] === 'invalid-coordination-contract' && Array.isArray(record['issues']) && record['issues'].some((issue) => typeof issue === 'string' && issue.includes('protocol_version'))) return true;
+  }
   if (error instanceof CoordinationRuntimeError) return error.code === 'protocol-mismatch' || error.code === 'schema-mismatch';
   return error instanceof CoordinationContractError && error.issues.some((issue) => issue.includes('protocol_version'));
 }
@@ -95,30 +85,37 @@ function parseStartupLock(value: unknown): StartupLockRecord | null {
   return { schema_version: 'autopilot.coordinator_startup_lock.v1', pid, boot_id: bootId, acquired_at: acquiredAt, token };
 }
 
-async function readStartupLock(path: string): Promise<StartupLockRecord | null> {
-  try {
-    const value: unknown = JSON.parse(await readFile(path, 'utf8')) as unknown;
-    return parseStartupLock(value);
-  } catch {
-    return null;
-  }
-}
-
-async function readStartupLockAfterConcurrentCreation(path: string): Promise<StartupLockRecord | null> {
-  for (let attempt = 0; attempt < 50; attempt += 1) {
-    const record = await readStartupLock(path);
-    if (record !== null) return record;
-    await sleep(10);
-  }
-  return null;
+function sameStartupLock(left: StartupLockRecord, right: StartupLockRecord): boolean {
+  return left.pid === right.pid && left.boot_id === right.boot_id && left.acquired_at === right.acquired_at && left.token === right.token;
 }
 
 async function acquireStartupLock(paths: CoordinatorRuntimePaths, deadline: number): Promise<StartupLock> {
   await ensureCoordinatorPrivateRoots(paths);
   while (Date.now() < deadline) {
+    let guard: ReturnType<typeof acquireSerializedProcessGuard>;
+    try { guard = acquireSerializedProcessGuard(paths.startupElectionPath, Math.min(500, Math.max(1, deadline - Date.now())), 'coordinator startup election'); }
+    catch (error) {
+      if (Date.now() >= deadline) throw error;
+      await sleep(25);
+      continue;
+    }
     let handle: FileHandle | null = null;
+    let reclaimedTombstone: string | null = null;
+    let createdPath = false;
     try {
-      handle = await open(paths.startupLockPath, 'wx', 0o600);
+      const existingText = await readExactLockText(paths.startupLockPath);
+      if (existingText !== null) {
+        let existing: StartupLockRecord | null = null;
+        try { existing = parseStartupLock(JSON.parse(existingText) as unknown); } catch { /* fail below */ }
+        if (existing === null) throw new CoordinationRuntimeError('protocol-mismatch', 'coordinator startup lock is unreadable; refusing destructive replacement');
+        // A live PID is never reclaimed because boot identity differs.
+        if (isProcessAlive(existing.pid)) {
+          guard.release();
+          await sleep(50);
+          continue;
+        }
+        reclaimedTombstone = await quarantineExactLock(paths.startupLockPath, existingText, 'stale coordinator startup lock');
+      }
       const record: StartupLockRecord = {
         schema_version: 'autopilot.coordinator_startup_lock.v1',
         pid: process.pid,
@@ -126,50 +123,85 @@ async function acquireStartupLock(paths: CoordinatorRuntimePaths, deadline: numb
         acquired_at: new Date().toISOString(),
         token: randomBytes(24).toString('hex'),
       };
+      handle = await open(paths.startupLockPath, 'wx', 0o600);
+      createdPath = true;
       await handle.writeFile(`${JSON.stringify(record)}\n`, 'utf8');
       await handle.sync();
       await handle.close();
       handle = null;
+      await enforcePrivateAuthorityPath(paths.startupLockPath, false);
+      if (reclaimedTombstone !== null) await discardLockTombstone(reclaimedTombstone);
       return {
         release: async () => {
-          const current = await readStartupLock(paths.startupLockPath);
-          if (current !== null && current.token !== record.token) throw new CoordinationRuntimeError('system-fatal', 'coordinator startup lock ownership changed');
-          await unlink(paths.startupLockPath).catch((error: unknown) => {
-            if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw error;
-          });
+          try {
+            const currentText = await readExactLockText(paths.startupLockPath);
+            if (currentText === null) throw new CoordinationRuntimeError('system-fatal', 'coordinator startup lock disappeared before release');
+            let current: StartupLockRecord | null = null;
+            try { current = parseStartupLock(JSON.parse(currentText) as unknown); } catch { /* fail below */ }
+            if (current === null || !sameStartupLock(current, record)) throw new CoordinationRuntimeError('system-fatal', 'coordinator startup lock ownership changed');
+            const tombstone = await quarantineExactLock(paths.startupLockPath, currentText, 'coordinator startup lock');
+            await discardLockTombstone(tombstone);
+          } finally { guard.release(); }
         },
       };
     } catch (error) {
       if (handle !== null) {
-        try {
-          await handle.close();
-        } catch (closeError) {
-          throw new CoordinationRuntimeError('system-fatal', 'coordinator startup lock creation and file close both failed', [error instanceof Error ? error.message : String(error), closeError instanceof Error ? closeError.message : String(closeError)]);
-        }
+        try { await handle.close(); }
+        catch (closeError) { throw new CoordinationRuntimeError('system-fatal', 'coordinator startup lock creation and file close both failed', [error instanceof Error ? error.message : String(error), closeError instanceof Error ? closeError.message : String(closeError)]); }
       }
-      if (!(error instanceof Error && 'code' in error && error.code === 'EEXIST')) throw error;
-      const existing = await readStartupLockAfterConcurrentCreation(paths.startupLockPath);
-      if (existing === null) {
-        const lockStat = await stat(paths.startupLockPath).catch((statError: unknown) => {
-          if (statError instanceof Error && 'code' in statError && statError.code === 'ENOENT') return null;
-          throw statError;
-        });
-        if (lockStat === null || Date.now() - lockStat.mtimeMs > DEFAULT_STARTUP_TIMEOUT_MS * 2) {
-          await unlink(paths.startupLockPath).catch((unlinkError: unknown) => {
-            if (!(unlinkError instanceof Error && 'code' in unlinkError && unlinkError.code === 'ENOENT')) throw unlinkError;
-          });
-        } else await sleep(50);
-      } else {
-        const stale = existing.boot_id !== currentBootId() || !isProcessAlive(existing.pid) || Date.now() - Date.parse(existing.acquired_at) > DEFAULT_STARTUP_TIMEOUT_MS * 2;
-        if (stale) {
-          await unlink(paths.startupLockPath).catch((unlinkError: unknown) => {
-            if (!(unlinkError instanceof Error && 'code' in unlinkError && unlinkError.code === 'ENOENT')) throw unlinkError;
-          });
-        } else await sleep(50);
-      }
+      if (createdPath) await unlink(paths.startupLockPath).catch(() => undefined);
+      if (reclaimedTombstone !== null) await restoreLockTombstone(paths.startupLockPath, reclaimedTombstone, 'stale coordinator startup lock');
+      guard.release();
+      throw error;
     }
   }
   throw new CoordinationRuntimeError('coordinator-contention', 'timed out acquiring coordinator startup lock');
+}
+
+async function acquirePredecessorStartupFence(paths: CoordinatorRuntimePaths, deadline: number): Promise<StartupLock> {
+  while (Date.now() < deadline) {
+    let handle: FileHandle | null = null;
+    try {
+      handle = await open(paths.predecessorStartupLockPath, 'wx', 0o600);
+      const record: StartupLockRecord = { schema_version: 'autopilot.coordinator_startup_lock.v1', pid: process.pid, boot_id: currentBootId(), acquired_at: new Date().toISOString(), token: randomBytes(24).toString('hex') };
+      await handle.writeFile(`${JSON.stringify(record)}\n`, 'utf8');
+      await handle.sync();
+      await handle.close();
+      handle = null;
+      await enforcePrivateAuthorityPath(paths.predecessorStartupLockPath, false);
+      return {
+        release: async () => {
+          const text = await readExactLockText(paths.predecessorStartupLockPath);
+          if (text === null) throw new CoordinationRuntimeError('system-fatal', 'predecessor startup fence disappeared before release');
+          const current = parseStartupLock(JSON.parse(text) as unknown);
+          if (current === null || !sameStartupLock(current, record)) throw new CoordinationRuntimeError('system-fatal', 'predecessor startup fence ownership changed');
+          const tombstone = await quarantineExactLock(paths.predecessorStartupLockPath, text, 'predecessor startup fence');
+          await discardLockTombstone(tombstone);
+        },
+      };
+    } catch (error) {
+      if (handle !== null) await handle.close().catch(() => undefined);
+      if (!(error instanceof Error && 'code' in error && error.code === 'EEXIST')) throw error;
+      const text = await readExactLockText(paths.predecessorStartupLockPath);
+      if (text === null) continue;
+      let existing: StartupLockRecord | null = null;
+      try { existing = parseStartupLock(JSON.parse(text) as unknown); } catch { /* fail below */ }
+      if (existing === null) throw new CoordinationRuntimeError('protocol-mismatch', 'predecessor startup fence is unreadable');
+      if (isProcessAlive(existing.pid)) { await sleep(50); continue; }
+      const tombstone = await quarantineExactLock(paths.predecessorStartupLockPath, text, 'dead predecessor startup lock');
+      await discardLockTombstone(tombstone);
+    }
+  }
+  throw new CoordinationRuntimeError('coordinator-contention', 'timed out acquiring predecessor-compatible startup fence');
+}
+
+async function hasLiveExactPredecessor(paths: CoordinatorRuntimePaths): Promise<boolean> {
+  const text = await readExactLockText(paths.predecessorLockPath);
+  if (text === null) return false;
+  let value: unknown;
+  try { value = JSON.parse(text) as unknown; } catch { return false; }
+  const lock = parsePredecessorCoordinatorLock(value);
+  return lock !== null && isProcessAlive(lock.pid);
 }
 
 function coordinatorCliPath(): { readonly path: string; readonly stripTypes: boolean } {
@@ -240,6 +272,10 @@ async function sendOnce(paths: CoordinatorRuntimePaths, capability: string, requ
     socket.on('data', (chunk: NodeBuffer) => {
       try {
         for (const frame of decoder.push(chunk)) {
+          if (typeof frame === 'object' && frame !== null && !Array.isArray(frame)) {
+            const observedProtocol = (frame as Readonly<Record<string, unknown>>)['protocol_version'];
+            if (typeof observedProtocol === 'string' && observedProtocol !== AUTOPILOT_COORDINATOR_PROTOCOL_VERSION) throw new CoordinationRuntimeError('protocol-mismatch', `coordinator response protocol ${observedProtocol} is incompatible with ${AUTOPILOT_COORDINATOR_PROTOCOL_VERSION}`);
+          }
           const response = parseCoordinatorResponseEnvelope(frame);
           if (response.request_id !== request.request_id) throw new CoordinationRuntimeError('invalid-state', 'coordinator response request id mismatch');
           finishResponse(response);
@@ -299,20 +335,28 @@ export class CoordinatorClient {
       return this.#assertSuccess(await sendOnce(this.#paths, capability, request, this.#requestTimeoutMs));
     } catch (error) {
       if (!this.#autoStart || (!isConnectionFailure(error) && !compatibilityFailure(error))) throw error;
+      const freeze = activeCoordinationMigrationFreeze(this.#paths.stateRoot);
+      if (freeze !== null) throw new CoordinationRuntimeError('coordinator-contention', 'coordinator auto-start is forbidden while coordination migration is frozen; status remains read-only/offline', [freeze]);
       await this.#ensureStarted(capability, compatibilityFailure(error));
-      try {
-        return this.#assertSuccess(await sendOnce(this.#paths, capability, request, this.#requestTimeoutMs));
-      } catch (retryError) {
-        if (isConnectionFailure(retryError)) throw new CoordinationRuntimeError('coordinator-unavailable', retryError instanceof Error ? retryError.message : String(retryError));
-        throw retryError;
+      const retryDeadline = Date.now() + this.#requestTimeoutMs;
+      let lastRetryError: unknown = error;
+      while (Date.now() < retryDeadline) {
+        try { return this.#assertSuccess(await sendOnce(this.#paths, capability, request, Math.min(500, this.#requestTimeoutMs))); }
+        catch (retryError) {
+          lastRetryError = retryError;
+          if (!isConnectionFailure(retryError) && !compatibilityFailure(retryError)) throw retryError;
+          await sleep(25);
+        }
       }
+      if (isConnectionFailure(lastRetryError)) throw new CoordinationRuntimeError('coordinator-unavailable', lastRetryError instanceof Error ? lastRetryError.message : String(lastRetryError));
+      throw lastRetryError;
     }
   }
 
   async query(action: CoordinatorQueryAction, repoId = 'global', workstreamRun: string | null = null, payload: Readonly<Record<string, unknown>> = {}): Promise<CoordinatorResponseEnvelope> {
     return await this.request({
       schema_version: 'autopilot.coordinator_request.v1',
-      protocol_version: '1.2',
+      protocol_version: AUTOPILOT_COORDINATOR_PROTOCOL_VERSION,
       request_id: `request-${randomUUID()}`,
       action,
       idempotency_key: null,
@@ -328,7 +372,7 @@ export class CoordinatorClient {
   async mutate(action: CoordinatorMutationAction, identity: CoordinatorMutationIdentity, payload: Readonly<Record<string, unknown>>): Promise<CoordinatorResponseEnvelope> {
     return await this.request({
       schema_version: 'autopilot.coordinator_request.v1',
-      protocol_version: '1.2',
+      protocol_version: AUTOPILOT_COORDINATOR_PROTOCOL_VERSION,
       request_id: `request-${randomUUID()}`,
       action,
       idempotency_key: identity.idempotencyKey,
@@ -344,57 +388,75 @@ export class CoordinatorClient {
   async #ensureStarted(capability: string, replaceIncompatible = false): Promise<void> {
     const deadline = Date.now() + this.#startupTimeoutMs;
     const lock = await acquireStartupLock(this.#paths, deadline);
+    const predecessorStartupFence = await acquirePredecessorStartupFence(this.#paths, deadline).catch(async (error: unknown) => { await lock.release(); throw error; });
+    let upgrade: CoordinatorUpgradeTransaction | null = null;
     try {
       const probe = this.#probeRequest();
       try {
         const response = this.#assertSuccess(await sendOnce(this.#paths, capability, probe, Math.min(500, this.#requestTimeoutMs)));
         this.#assertCoordinatorCompatibility(response);
+        const pendingUpgrade = await resumeCoordinatorUpgrade(this.#paths);
+        if (pendingUpgrade !== null) {
+          await pendingUpgrade.markReconnectVerified();
+          await pendingUpgrade.commit();
+        }
         this.#compatibilityVerified = true;
         return;
       } catch (error) {
         if (!isConnectionFailure(error) && !(replaceIncompatible && compatibilityFailure(error))) throw error;
-        if (replaceIncompatible && compatibilityFailure(error)) await this.#retireIncompatibleCoordinator(deadline);
+        upgrade = await resumeCoordinatorUpgrade(this.#paths);
+        if (upgrade === null && await hasLiveExactPredecessor(this.#paths)) upgrade = await preparePredecessorCoordinatorUpgrade(this.#paths, capability, deadline);
+        else if (upgrade === null && replaceIncompatible && compatibilityFailure(error)) throw new CoordinationRuntimeError('protocol-mismatch', 'an incompatible current-generation coordinator cannot be replaced through the locked 1.2 predecessor path');
       }
-      spawnCoordinator(this.#paths);
-      while (Date.now() < deadline) {
-        try {
-          const response = this.#assertSuccess(await sendOnce(this.#paths, capability, probe, Math.min(500, this.#requestTimeoutMs)));
-          this.#assertCoordinatorCompatibility(response);
-          this.#compatibilityVerified = true;
-          return;
-        } catch (error) {
-          if (!isConnectionFailure(error)) throw error;
-          await sleep(50);
+      if (upgrade !== null) await upgrade.markStarting();
+      try {
+        spawnCoordinator(this.#paths);
+        await this.#waitForCompatibleCoordinator(probe, capability, deadline);
+        if (upgrade !== null) {
+          await upgrade.markReconnectVerified();
+          await upgrade.commit();
         }
+        this.#compatibilityVerified = true;
+      } catch (error) {
+        if (upgrade === null) throw error;
+        try {
+          await upgrade.rollback(error);
+        } catch (rollbackError) {
+          await upgrade.markRecoveryRequired(rollbackError).catch(() => undefined);
+          throw new CoordinationRuntimeError('recovery-required', 'coordinator upgrade failed and exact verified-backup restoration also failed', [error instanceof Error ? error.message : String(error), rollbackError instanceof Error ? rollbackError.message : String(rollbackError)]);
+        }
+        throw new CoordinationRuntimeError('recovery-required', 'coordinator upgrade failed; the exact schema-6 backup was restored, but this package cannot automatically restart the unavailable aa3e377 binary', [error instanceof Error ? error.message : String(error), `upgrade_id=${upgrade.intent.upgrade_id}`]);
       }
-      throw new CoordinationRuntimeError('coordinator-unavailable', 'coordinator did not become ready before the startup deadline');
     } finally {
+      await predecessorStartupFence.release();
       await lock.release();
     }
   }
 
-  async #retireIncompatibleCoordinator(deadline: number): Promise<void> {
-    let parsed: unknown;
-    try { parsed = JSON.parse(await readFile(this.#paths.lockPath, 'utf8')) as unknown; }
-    catch (error) { throw new CoordinationRuntimeError('protocol-mismatch', 'incompatible coordinator cannot be retired because its lifecycle lock is unreadable', [error instanceof Error ? error.message : String(error)]); }
-    const lock = parseCoordinatorLifecycleLock(parsed);
-    if (lock === null || lock.boot_id !== currentBootId() || !isProcessAlive(lock.pid) || lock.pid === process.pid) throw new CoordinationRuntimeError('protocol-mismatch', 'incompatible coordinator lifecycle identity cannot be retired safely');
-    try { process.kill(lock.pid, 'SIGTERM'); }
-    catch (error) { throw new CoordinationRuntimeError('protocol-mismatch', 'failed to stop the incompatible coordinator', [error instanceof Error ? error.message : String(error)]); }
-    while (Date.now() < deadline && isProcessAlive(lock.pid)) await sleep(25);
-    if (isProcessAlive(lock.pid)) throw new CoordinationRuntimeError('coordinator-unavailable', 'incompatible coordinator did not stop before the startup deadline', [`pid=${String(lock.pid)}`]);
+  async #waitForCompatibleCoordinator(probe: CoordinatorRequestEnvelope, capability: string, deadline: number): Promise<void> {
+    while (Date.now() < deadline) {
+      try {
+        const response = this.#assertSuccess(await sendOnce(this.#paths, capability, probe, Math.min(500, this.#requestTimeoutMs)));
+        this.#assertCoordinatorCompatibility(response);
+        return;
+      } catch (error) {
+        if (!isConnectionFailure(error) && !compatibilityFailure(error)) throw error;
+        await sleep(50);
+      }
+    }
+    throw new CoordinationRuntimeError('coordinator-unavailable', 'coordinator did not complete schema migration, start, and reconnect verification before the deadline');
   }
 
   #probeRequest(): CoordinatorRequestEnvelope {
     return {
-      schema_version: 'autopilot.coordinator_request.v1', protocol_version: '1.2', request_id: `probe-${randomUUID()}`, action: 'status', idempotency_key: null, repo_id: 'global', workstream_run: null, session_id: null, fencing_generation: null, expected_version: null, payload: EMPTY_COORDINATOR_PAYLOAD,
+      schema_version: 'autopilot.coordinator_request.v1', protocol_version: AUTOPILOT_COORDINATOR_PROTOCOL_VERSION, request_id: `probe-${randomUUID()}`, action: 'status', idempotency_key: null, repo_id: 'global', workstream_run: null, session_id: null, fencing_generation: null, expected_version: null, payload: EMPTY_COORDINATOR_PAYLOAD,
     };
   }
 
   #assertCoordinatorCompatibility(response: CoordinatorResponseEnvelope): void {
     if (response.payload['schema_version'] !== 'autopilot.coordinator_status.v1') throw new CoordinationRuntimeError('schema-mismatch', 'coordinator readiness handshake omitted its status schema');
     if (response.payload['package_build'] !== COORDINATOR_PACKAGE_BUILD) throw new CoordinationRuntimeError('protocol-mismatch', `coordinator package build is incompatible with ${COORDINATOR_PACKAGE_BUILD}`);
-    if (response.payload['protocol_version'] !== '1.2') throw new CoordinationRuntimeError('protocol-mismatch', 'coordinator handshake protocol version is incompatible');
+    if (response.payload['protocol_version'] !== AUTOPILOT_COORDINATOR_PROTOCOL_VERSION) throw new CoordinationRuntimeError('protocol-mismatch', 'coordinator handshake protocol version is incompatible');
     if (response.payload['database_schema_version'] !== COORDINATOR_DATABASE_SCHEMA_VERSION) throw new CoordinationRuntimeError('schema-mismatch', `coordinator database schema is incompatible with ${String(COORDINATOR_DATABASE_SCHEMA_VERSION)}`);
   }
 

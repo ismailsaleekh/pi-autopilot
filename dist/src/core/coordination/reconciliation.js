@@ -63,13 +63,33 @@ export class RunReconciliationClient {
     }
     async recordReleaseEvidence(input) {
         const evidenceIdentity = createHash('sha256').update(`${this.#session.repo_id}\0${this.#session.workstream_run}\0${input.source}\0${input.targetId}\0${input.evidenceRef}\0${input.evidenceSha256}`, 'utf8').digest('hex');
-        const response = await this.#client.mutate('record-release-evidence', this.#identity(`record-release-evidence:${evidenceIdentity}`), {
+        const idempotencyKey = `record-release-evidence:${evidenceIdentity}`;
+        const payload = {
             source: input.source,
             target_id: input.targetId,
             evidence_ref: input.evidenceRef,
             evidence_sha256: input.evidenceSha256,
             ...this.#sessionProof(),
-        });
+        };
+        let response;
+        try {
+            response = await this.#client.mutate('record-release-evidence', this.#identity(idempotencyKey), payload);
+        }
+        catch (error) {
+            if (!(error instanceof CoordinationRuntimeError && error.code === 'stale-version'))
+                throw error;
+            const status = await this.#client.query('status', this.#session.repo_id, this.#session.workstream_run);
+            const values = status.payload['runs'];
+            if (!Array.isArray(values) || values.length !== 1 || values[0] === undefined)
+                throw new CoordinationRuntimeError('invalid-state', 'stale reconciliation retry could not recover one exact durable run');
+            const currentRun = parseCoordinationRun(values[0]);
+            if (currentRun.active_session_generation !== this.#session.session_generation)
+                throw new CoordinationRuntimeError('fenced-session', 'stale reconciliation retry observed a replacement session generation');
+            this.#session = { ...this.#session, run_version: currentRun.version };
+            // One bounded retry uses the identical semantic idempotency key and exact
+            // authenticated session after refreshing only durable run version.
+            response = await this.#client.mutate('record-release-evidence', this.#identity(idempotencyKey), payload);
+        }
         const run = parseCoordinationRun(response.payload['run']);
         this.#session = { ...this.#session, run_version: run.version };
         return {

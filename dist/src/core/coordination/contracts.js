@@ -1,5 +1,5 @@
 import { isAbsolute, normalize } from 'node:path';
-import { AUTOPILOT_COORDINATION_SNAPSHOT_SCHEMA, AUTOPILOT_COORDINATOR_PROTOCOL_VERSION, AUTOPILOT_COORDINATOR_REQUEST_SCHEMA, AUTOPILOT_COORDINATOR_RESPONSE_SCHEMA, COORDINATION_ACQUISITION_STATES, COORDINATION_CHILD_STATUSES, COORDINATION_CLAIM_MODES, COORDINATION_MESSAGE_STATUSES, COORDINATION_OPERATIONAL_ESCALATION_REASONS, COORDINATION_OPERATION_STAGES, COORDINATION_OPERATION_TYPES, COORDINATION_RELEASE_CONDITION_TYPES, COORDINATION_RECONCILIATION_SOURCES, COORDINATION_REQUEST_STATUSES, COORDINATION_RESERVATION_OBLIGATION_STATES, COORDINATION_MESSAGE_TYPES, COORDINATION_RUN_STATUSES, COORDINATION_SESSION_STATUSES, COORDINATION_UNIT_ROLES, COORDINATION_UNIT_STATES, COORDINATION_WORKTREE_KINDS, COORDINATION_WORKTREE_STATES, COORDINATION_WAIT_EDGE_STATES, COORDINATION_DEADLOCK_ACTIONS, COORDINATION_DEADLOCK_STATES, } from "./types.js";
+import { AUTOPILOT_COORDINATION_SNAPSHOT_SCHEMA, AUTOPILOT_COORDINATOR_PROTOCOL_VERSION, AUTOPILOT_COORDINATOR_REQUEST_SCHEMA, AUTOPILOT_COORDINATOR_RESPONSE_SCHEMA, COORDINATION_ACQUISITION_STATES, COORDINATION_CHILD_STATUSES, COORDINATION_CLAIM_MODES, COORDINATION_MESSAGE_STATUSES, COORDINATION_OPERATIONAL_ESCALATION_REASONS, COORDINATION_OPERATION_STAGES, COORDINATION_OPERATION_TYPES, COORDINATION_RELEASE_CONDITION_TYPES, COORDINATION_RECONCILIATION_SOURCES, COORDINATION_REQUEST_STATUSES, COORDINATION_RESERVATION_OBLIGATION_STATES, COORDINATION_MESSAGE_TYPES, COORDINATION_RUN_STATUSES, COORDINATION_SESSION_STATUSES, COORDINATION_SESSION_ATTACHMENT_KINDS, COORDINATION_MIGRATION_RECOVERY_RESOLUTIONS, COORDINATION_MIGRATION_RECOVERY_STATUSES, COORDINATION_MIGRATION_RECOVERY_TYPES, COORDINATION_UNIT_ROLES, COORDINATION_UNIT_STATES, COORDINATION_WORKTREE_KINDS, COORDINATION_WORKTREE_STATES, COORDINATION_WAIT_EDGE_STATES, COORDINATION_DEADLOCK_ACTIONS, COORDINATION_DEADLOCK_STATES, } from "./types.js";
 export class CoordinationContractError extends Error {
     name = 'CoordinationContractError';
     code = 'invalid-coordination-contract';
@@ -14,7 +14,7 @@ const SHA256 = /^sha256:[a-f0-9]{64}$/u;
 const CHILD_TOKEN = /^[a-f0-9]{64}$/u;
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,191}$/u;
 const QUERY_ACTIONS = ['status', 'doctor', 'export'];
-const MUTATION_ACTIONS = ['attach-run', 'attach-session', 'detach-session', 'prepare-handoff', 'heartbeat', 'register-attempt', 'register-child', 'heartbeat-child', 'checkpoint-child', 'complete-child', 'drain-mailbox', 'acquire-group', 'acknowledge-grant', 'respond-claim-request', 'cancel-claim-request', 'cancel-acquisition-group', 'supersede-attempt', 'acknowledge-message', 'record-release-evidence', 'resolve-reservation-obligation', 'prepare-run-terminal', 'cancel-run-terminal', 'reconcile-run', 'prepare-operation', 'transition-operation', 'register-authoritative-artifact', 'assign-adjudication', 'claim-adjudication-assignment', 'complete-adjudication', 'submit-planning-contradiction'];
+const MUTATION_ACTIONS = ['attach-run', 'attach-session', 'attach-terminal-recovery', 'attach-migration-recovery', 'resolve-migration-recovery', 'detach-session', 'prepare-handoff', 'heartbeat', 'register-attempt', 'register-child', 'heartbeat-child', 'checkpoint-child', 'complete-child', 'drain-mailbox', 'acquire-group', 'acknowledge-grant', 'respond-claim-request', 'cancel-claim-request', 'cancel-acquisition-group', 'supersede-attempt', 'acknowledge-message', 'record-release-evidence', 'resolve-reservation-obligation', 'prepare-run-terminal', 'cancel-run-terminal', 'reconcile-run', 'prepare-operation', 'transition-operation', 'register-authoritative-artifact', 'assign-adjudication', 'claim-adjudication-assignment', 'complete-adjudication', 'submit-planning-contradiction'];
 const MESSAGE_TYPES = COORDINATION_MESSAGE_TYPES;
 const WORKTREE_STATES = COORDINATION_WORKTREE_STATES;
 const OPERATION_TYPES = COORDINATION_OPERATION_TYPES;
@@ -23,8 +23,11 @@ const PAYLOAD_FIELDS = {
     status: [],
     doctor: [],
     export: ['output_path'],
-    'attach-run': ['autopilot_id', 'canonical_root', 'coordination_authority', 'git_common_dir', 'repo_key', 'workstream'],
+    'attach-run': ['autopilot_id', 'canonical_root', 'coordination_authority', 'git_common_dir', 'repo_key', 'run_resource', 'workstream'],
     'attach-session': ['boot_id', 'handoff_token', 'lease_expires_at', 'pid', 'session_lease_id', 'session_token'],
+    'attach-terminal-recovery': ['boot_id', 'lease_expires_at', 'pid', 'session_lease_id', 'session_token', 'terminal_intent_id'],
+    'attach-migration-recovery': ['boot_id', 'lease_expires_at', 'pid', 'recovery_id', 'session_lease_id', 'session_token'],
+    'resolve-migration-recovery': ['evidence_ref', 'evidence_sha256', 'recovery_id', 'release_source', 'release_target_id', 'resolution_type', 'session_lease_id', 'session_token'],
     'detach-session': ['reason', 'session_lease_id', 'session_token'],
     'prepare-handoff': ['handoff_token', 'session_lease_id', 'session_token'],
     heartbeat: ['lease_expires_at', 'session_lease_id', 'session_token'],
@@ -295,11 +298,31 @@ export function parseCoordinationRun(value) {
         version: integer(record, 'version', label, 1),
     };
 }
+export function parseCoordinationRunResource(value) {
+    const label = 'CoordinationRunResource';
+    const record = object(value, label, ['branch', 'git_common_dir', 'main_worktree_path', 'origin_url', 'repo_id', 'runtime_root', 'schema_version', 'source_repo', 'started_at', 'target_base_sha', 'target_branch', 'version', 'workstream_run', 'worktree_root']);
+    return {
+        schema_version: literal(record, 'schema_version', 'autopilot.coordination_run_resource.v1', label),
+        repo_id: pathSegmentIdentifier(record, 'repo_id', label),
+        workstream_run: pathSegmentIdentifier(record, 'workstream_run', label),
+        source_repo: absolutePath(record, 'source_repo', label),
+        git_common_dir: absolutePath(record, 'git_common_dir', label),
+        worktree_root: absolutePath(record, 'worktree_root', label),
+        main_worktree_path: absolutePath(record, 'main_worktree_path', label),
+        runtime_root: absolutePath(record, 'runtime_root', label),
+        branch: string(record, 'branch', label, 512),
+        target_branch: nullableString(record, 'target_branch', label, 512),
+        target_base_sha: string(record, 'target_base_sha', label, 128),
+        origin_url: nullableString(record, 'origin_url', label, 2048),
+        started_at: timestamp(record, 'started_at', label),
+        version: integer(record, 'version', label, 1),
+    };
+}
 export function parseCoordinationSessionLease(value) {
     const label = 'CoordinationSessionLease';
-    const record = object(value, label, ['attached_event_seq', 'boot_id', 'lease_expires_at', 'pid', 'repo_id', 'schema_version', 'session_generation', 'session_id', 'session_lease_id', 'status', 'version', 'workstream_run']);
+    const record = object(value, label, ['attached_event_seq', 'attachment_kind', 'boot_id', 'lease_expires_at', 'pid', 'repo_id', 'schema_version', 'session_generation', 'session_id', 'session_lease_id', 'status', 'version', 'workstream_run']);
     return {
-        schema_version: literal(record, 'schema_version', 'autopilot.session_lease.v1', label),
+        schema_version: literal(record, 'schema_version', 'autopilot.session_lease.v2', label),
         session_lease_id: identifier(record, 'session_lease_id', label),
         repo_id: pathSegmentIdentifier(record, 'repo_id', label),
         workstream_run: pathSegmentIdentifier(record, 'workstream_run', label),
@@ -308,8 +331,50 @@ export function parseCoordinationSessionLease(value) {
         pid: integer(record, 'pid', label, 1),
         boot_id: identifier(record, 'boot_id', label),
         lease_expires_at: timestamp(record, 'lease_expires_at', label),
+        attachment_kind: oneOf(record, 'attachment_kind', COORDINATION_SESSION_ATTACHMENT_KINDS, label),
         status: oneOf(record, 'status', COORDINATION_SESSION_STATUSES, label),
         attached_event_seq: integer(record, 'attached_event_seq', label),
+        version: integer(record, 'version', label, 1),
+    };
+}
+export function parseCoordinationMigrationRecoveryWork(value) {
+    const label = 'CoordinationMigrationRecoveryWork';
+    const record = object(value, label, ['created_event_seq', 'detail', 'recovery_id', 'recovery_type', 'repo_id', 'resolution', 'resolved_event_seq', 'schema_version', 'status', 'version', 'workstream_run']);
+    const status = oneOf(record, 'status', COORDINATION_MIGRATION_RECOVERY_STATUSES, label);
+    const resolvedEvent = nullableInteger(record, 'resolved_event_seq', label);
+    let resolution = null;
+    if (record['resolution'] !== null) {
+        const valueRecord = object(record['resolution'], `${label}.resolution`, ['evidence', 'exact_postconditions', 'release_source', 'release_target_id', 'resolution_type']);
+        const resolutionType = oneOf(valueRecord, 'resolution_type', COORDINATION_MIGRATION_RECOVERY_RESOLUTIONS, `${label}.resolution`);
+        const releaseSource = valueRecord['release_source'] === null ? null : oneOf(valueRecord, 'release_source', COORDINATION_RECONCILIATION_SOURCES.filter((source) => source !== 'child-process'), `${label}.resolution`);
+        const releaseTargetId = nullableString(valueRecord, 'release_target_id', `${label}.resolution`, 192);
+        if (resolutionType === 'authority-retained' && (releaseSource !== null || releaseTargetId !== null))
+            fail(label, 'authority-retained resolution cannot carry a release source or target');
+        if (resolutionType === 'authority-released' && (releaseSource === null || releaseTargetId === null))
+            fail(label, 'authority-released resolution requires an exact release source and target');
+        resolution = {
+            resolution_type: resolutionType,
+            evidence: parseEvidence(valueRecord['evidence'], `${label}.resolution.evidence`),
+            release_source: releaseSource,
+            release_target_id: releaseTargetId,
+            exact_postconditions: uniqueStrings(valueRecord['exact_postconditions'], `${label}.resolution.exact_postconditions`, 1, 64),
+        };
+    }
+    if (status === 'pending' && (resolution !== null || resolvedEvent !== null))
+        fail(label, 'pending migration recovery cannot carry resolution evidence');
+    if (status === 'resolved' && (resolution === null || resolvedEvent === null))
+        fail(label, 'resolved migration recovery requires resolution evidence and event sequence');
+    return {
+        schema_version: literal(record, 'schema_version', 'autopilot.migration_recovery_work.v2', label),
+        recovery_id: identifier(record, 'recovery_id', label),
+        repo_id: pathSegmentIdentifier(record, 'repo_id', label),
+        workstream_run: pathSegmentIdentifier(record, 'workstream_run', label),
+        recovery_type: oneOf(record, 'recovery_type', COORDINATION_MIGRATION_RECOVERY_TYPES, label),
+        detail: boundedJsonObject(record['detail'], `${label}.detail`),
+        status,
+        resolution,
+        created_event_seq: integer(record, 'created_event_seq', label, 1),
+        resolved_event_seq: resolvedEvent,
         version: integer(record, 'version', label, 1),
     };
 }
@@ -795,7 +860,7 @@ function parseTable(record, field, parser, maxItems = 10_000) {
 }
 export function parseCoordinationSnapshot(value) {
     const label = 'CoordinationSnapshot';
-    const fields = ['acquisition_groups', 'adjudication_assignments', 'authoritative_artifacts', 'change_reservations', 'child_leases', 'claim_requests', 'deadlock_resolutions', 'edit_leases', 'escalations', 'events', 'mailbox_cursors', 'messages', 'reconciliation_evidence', 'repositories', 'repository_event_seq', 'reservation_obligations', 'run_terminal_intents', 'runs', 'schema_version', 'session_leases', 'unit_attempts', 'wait_for_edges', 'worktree_operations', 'worktrees'];
+    const fields = ['acquisition_groups', 'adjudication_assignments', 'authoritative_artifacts', 'change_reservations', 'child_leases', 'claim_requests', 'deadlock_resolutions', 'edit_leases', 'escalations', 'events', 'mailbox_cursors', 'messages', 'migration_recovery_work', 'reconciliation_evidence', 'repositories', 'repository_event_seq', 'reservation_obligations', 'run_terminal_intents', 'runs', 'schema_version', 'session_leases', 'unit_attempts', 'wait_for_edges', 'worktree_operations', 'worktrees'];
     const record = object(value, label, fields);
     return {
         schema_version: literal(record, 'schema_version', AUTOPILOT_COORDINATION_SNAPSHOT_SCHEMA, label),
@@ -813,6 +878,7 @@ export function parseCoordinationSnapshot(value) {
         claim_requests: parseTable(record, 'claim_requests', parseCoordinationClaimRequest),
         mailbox_cursors: parseTable(record, 'mailbox_cursors', parseCoordinationMailboxCursor),
         reconciliation_evidence: parseTable(record, 'reconciliation_evidence', parseCoordinationReconciliationEvidence),
+        migration_recovery_work: parseTable(record, 'migration_recovery_work', parseCoordinationMigrationRecoveryWork),
         messages: parseTable(record, 'messages', parseCoordinationMessage, 100_000),
         worktrees: parseTable(record, 'worktrees', parseCoordinationWorktree),
         worktree_operations: parseTable(record, 'worktree_operations', parseCoordinationWorktreeOperation),
@@ -848,6 +914,9 @@ function parsePayload(value, action) {
         }
         else if (field === 'role') {
             oneOf(payload, field, COORDINATION_UNIT_ROLES.filter((role) => role !== 'unknown'), label);
+        }
+        else if (field === 'run_resource') {
+            parseCoordinationRunResource(entry);
         }
         else if (field === 'requested_leases') {
             const requested = array(entry, `${label}.requested_leases`, 1024).map((lease, index) => parseCoordinationRequestedLease(lease, `${label}.requested_leases[${String(index)}]`));
@@ -905,6 +974,17 @@ function parsePayload(value, action) {
         }
         else if (field === 'status') {
             oneOf(payload, field, ['terminal', 'recovery-required'], label);
+        }
+        else if (field === 'resolution_type') {
+            oneOf(payload, field, COORDINATION_MIGRATION_RECOVERY_RESOLUTIONS, label);
+        }
+        else if (field === 'release_source') {
+            if (entry !== null)
+                oneOf(payload, field, COORDINATION_RECONCILIATION_SOURCES.filter((source) => source !== 'child-process'), label);
+        }
+        else if (field === 'release_target_id') {
+            if (entry !== null)
+                identifier(payload, field, label);
         }
         else if (field === 'source') {
             oneOf(payload, field, COORDINATION_RECONCILIATION_SOURCES, label);
@@ -968,6 +1048,17 @@ function parsePayload(value, action) {
             fail(label, 'deferred response requires owner_reason and release_condition');
         if (response === 'release-now' && condition !== null)
             fail(label, 'release-now response must not invent a deferred release condition');
+    }
+    if (action === 'resolve-migration-recovery') {
+        if (typeof payload['evidence_ref'] !== 'string' || typeof payload['evidence_sha256'] !== 'string')
+            fail(label, 'migration recovery resolution requires immutable evidence ref and digest');
+        const resolution = payload['resolution_type'];
+        const source = payload['release_source'];
+        const target = payload['release_target_id'];
+        if (resolution === 'authority-retained' && (source !== null || target !== null))
+            fail(label, 'authority-retained recovery cannot carry release_source or release_target_id');
+        if (resolution === 'authority-released' && (source === null || target === null))
+            fail(label, 'authority-released recovery requires release_source and release_target_id');
     }
     if (action === 'record-release-evidence') {
         const source = payload['source'];

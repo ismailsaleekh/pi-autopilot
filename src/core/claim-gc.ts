@@ -3,7 +3,8 @@ import { mkdir, readFile } from 'node:fs/promises';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 import { parseAutopilotExecutionAudit, parseAutopilotState, parseAutopilotStatusEntry } from './contracts/index.ts';
-import { appendClaimEvent, coordinationRootForRepo, readActiveAutopilots, readPathClaims, readUnitIndex, resolveRepoIdentity, taskRootForActiveAutopilot, withAutopilotFileLock, writeJsonAtomic, writePathClaims, type ActiveAutopilotRow, type AutopilotPathClaim, type ProcessEnvLike } from './parallel-runtime.ts';
+import { appendClaimEvent, coordinationRootForRepo, readActiveAutopilots, readPathClaims, readUnitIndex, resolveAutopilotStateRoot, resolveRepoIdentity, taskRootForActiveAutopilot, withAutopilotFileLock, writeJsonAtomic, writePathClaims, type ActiveAutopilotRow, type AutopilotPathClaim, type ProcessEnvLike } from './parallel-runtime.ts';
+import { coordinationCutoverCommitted } from './coordination/migration-paths.ts';
 import { runLegacyCoordinationPreflight } from './coordination/legacy-preflight.ts';
 
 export interface AutopilotClaimGcCandidate {
@@ -58,6 +59,7 @@ export async function runAutopilotClaimGc(input: {
   const now = input.now ?? new Date();
   const repo = resolveRepoIdentity(input.sourceCwd);
   const coordinationRoot = coordinationRootForRepo(repo.repoKey, env);
+  if (coordinationCutoverCommitted(resolveAutopilotStateRoot(env), repo.repoKey)) fail('legacy-authority-archived', 'claim GC is disabled after coordination cutover; coordinator reconciliation is authoritative.');
   if (!input.apply) {
     await withAutopilotFileLock(join(coordinationRoot, '.locks', 'activation.lock'), `claim-gc-preflight-active:${repo.repoKey}`, async () => {
       await withAutopilotFileLock(join(coordinationRoot, '.locks', 'path-claims.lock'), `claim-gc-preflight-claims:${repo.repoKey}`, async () => {

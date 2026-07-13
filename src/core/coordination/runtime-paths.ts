@@ -1,61 +1,95 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { chmod, mkdir, open, readFile } from 'node:fs/promises';
+import { open, readFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { platform, tmpdir } from 'node:os';
 
 import { AUTOPILOT_STATE_ROOT_ENV, resolveAutopilotStateRoot, type ProcessEnvLike } from '../parallel-runtime.ts';
 import { CoordinationRuntimeError } from './failures.ts';
+import { enforcePrivateAuthorityPath, enforceWindowsPrivateTree, ensurePrivateAuthorityDirectory, markWindowsPrivateTreeHardened } from '../private-path.ts';
 
-export const COORDINATOR_PACKAGE_BUILD = '0.13.0-cf34';
-export const COORDINATOR_DATABASE_SCHEMA_VERSION = 6;
-export const COORDINATOR_MAX_FRAME_BYTES = 1_048_576;
-export const COORDINATOR_BUSY_TIMEOUT_MS = 5_000;
-export const COORDINATOR_SESSION_LEASE_MS = 30_000;
-export const COORDINATOR_HEARTBEAT_MS = 10_000;
-export const COORDINATOR_GRANT_OFFER_TTL_MS = 30_000;
-export const COORDINATOR_GRANT_OFFER_SWEEP_MS = 1_000;
+export { enforcePrivateAuthorityPath, enforceWindowsPrivateAcl, enforceWindowsPrivateTree, ensurePrivateAuthorityDirectory, windowsPrivateAclCommand, windowsPrivateTreeAclCommand } from '../private-path.ts';
+export type { WindowsPrivateAclCommand } from '../private-path.ts';
+
+export { COORDINATOR_BUSY_TIMEOUT_MS, COORDINATOR_DATABASE_SCHEMA_VERSION, COORDINATOR_GRANT_OFFER_SWEEP_MS, COORDINATOR_GRANT_OFFER_TTL_MS, COORDINATOR_HEARTBEAT_MS, COORDINATOR_MAX_FRAME_BYTES, COORDINATOR_PACKAGE_BUILD, COORDINATOR_SESSION_LEASE_MS } from './runtime-constants.ts';
 
 export interface CoordinatorRuntimePaths {
   readonly stateRoot: string;
   readonly coordinatorRoot: string;
   readonly databasePath: string;
+  /** Current-generation paths are deliberately invisible to protocol 1.2. */
   readonly lockPath: string;
+  readonly lifecycleElectionPath: string;
   readonly startupLockPath: string;
+  readonly startupElectionPath: string;
   readonly socketPath: string;
+  /** Exact paths used by the aa3e377 protocol-1.2 predecessor. */
+  readonly predecessorLockPath: string;
+  readonly predecessorStartupLockPath: string;
+  readonly predecessorSocketPath: string;
   readonly capabilityPath: string;
   readonly backupsRoot: string;
   readonly exportsRoot: string;
   readonly sessionsRoot: string;
+  readonly semanticReplayPath: string;
+  readonly semanticReplayReceiptsRoot: string;
 }
 
 export function coordinatorRuntimePaths(env: ProcessEnvLike = process.env): CoordinatorRuntimePaths {
   const stateRoot = resolveAutopilotStateRoot(env);
   const coordinatorRoot = join(stateRoot, 'coordinator');
   const pipeHash = createHash('sha256').update(coordinatorRoot, 'utf8').digest('hex').slice(0, 24);
-  const preferredSocketPath = join(coordinatorRoot, 'coordinator.sock');
-  const socketPath = platform() === 'win32'
+  const generation = 'protocol-1.3-schema-9';
+  const currentPipeHash = createHash('sha256').update(`${coordinatorRoot}\0${generation}\0${process.env['USERDOMAIN'] ?? ''}\\${process.env['USERNAME'] ?? ''}`, 'utf8').digest('hex').slice(0, 32);
+  const preferredPredecessorSocketPath = join(coordinatorRoot, 'coordinator.sock');
+  const predecessorSocketPath = platform() === 'win32'
     ? `\\\\.\\pipe\\pi-autopilot-${pipeHash}`
-    : Buffer.byteLength(preferredSocketPath, 'utf8') <= 100
-      ? preferredSocketPath
+    : Buffer.byteLength(preferredPredecessorSocketPath, 'utf8') <= 100
+      ? preferredPredecessorSocketPath
       : join(tmpdir(), `pi-autopilot-${pipeHash}.sock`);
+  const preferredCurrentSocketPath = join(coordinatorRoot, `coordinator.${generation}.sock`);
+  const socketPath = platform() === 'win32'
+    ? `\\\\.\\pipe\\pi-autopilot-${currentPipeHash}`
+    : Buffer.byteLength(preferredCurrentSocketPath, 'utf8') <= 100
+      ? preferredCurrentSocketPath
+      : join(tmpdir(), `pi-autopilot-${currentPipeHash}.sock`);
   return {
     stateRoot,
     coordinatorRoot,
     databasePath: join(coordinatorRoot, 'coordinator.db'),
-    lockPath: join(coordinatorRoot, 'coordinator.lock'),
-    startupLockPath: join(coordinatorRoot, 'coordinator.startup.lock'),
+    lockPath: join(coordinatorRoot, `coordinator.${generation}.lock`),
+    lifecycleElectionPath: join(coordinatorRoot, `coordinator.${generation}.lifecycle-election.db`),
+    startupLockPath: join(coordinatorRoot, `coordinator.${generation}.startup.lock`),
+    startupElectionPath: join(coordinatorRoot, `coordinator.${generation}.startup-election.db`),
     socketPath,
+    predecessorLockPath: join(coordinatorRoot, 'coordinator.lock'),
+    predecessorStartupLockPath: join(coordinatorRoot, 'coordinator.startup.lock'),
+    predecessorSocketPath,
     capabilityPath: join(coordinatorRoot, 'capability'),
     backupsRoot: join(coordinatorRoot, 'backups'),
     exportsRoot: join(coordinatorRoot, 'exports'),
     sessionsRoot: join(coordinatorRoot, 'sessions'),
+    semanticReplayPath: join(coordinatorRoot, 'semantic-replay.jsonl'),
+    semanticReplayReceiptsRoot: join(coordinatorRoot, 'semantic-replay-receipts'),
   };
 }
 
-export async function ensureCoordinatorPrivateRoots(paths: CoordinatorRuntimePaths): Promise<void> {
-  for (const path of [paths.stateRoot, paths.coordinatorRoot, paths.backupsRoot, paths.exportsRoot, paths.sessionsRoot]) {
-    await mkdir(path, { recursive: true, mode: 0o700 });
-    if (platform() !== 'win32') await chmod(path, 0o700);
+export async function ensureCoordinatorPrivateRoots(paths: CoordinatorRuntimePaths, env: ProcessEnvLike = process.env): Promise<void> {
+  // The state root itself is authority, including an operator override. Harden it
+  // before creating descendants so inherited Windows ACLs never expose new files.
+  const roots = [
+    paths.stateRoot,
+    paths.coordinatorRoot,
+    paths.backupsRoot,
+    paths.exportsRoot,
+    paths.sessionsRoot,
+    paths.semanticReplayReceiptsRoot,
+  ];
+  for (const path of roots) await ensurePrivateAuthorityDirectory(path, env);
+  if (platform() === 'win32') {
+    // An operator override may predate this process. Reapplying the closed tree
+    // DACL is intentionally fail-closed; the leaf primitive tracks completed roots.
+    enforceWindowsPrivateTree(paths.stateRoot, env);
+    markWindowsPrivateTreeHardened(paths.stateRoot);
   }
 }
 
@@ -74,7 +108,7 @@ export async function readOrCreateCoordinatorCapability(paths: CoordinatorRuntim
   } catch (error) {
     if (!(error instanceof Error && 'code' in error && error.code === 'EEXIST')) throw error;
   }
-  if (platform() !== 'win32') await chmod(paths.capabilityPath, 0o600);
+  await enforcePrivateAuthorityPath(paths.capabilityPath, false);
   for (let attempt = 0; attempt < 50; attempt += 1) {
     const capability = (await readFile(paths.capabilityPath, 'utf8')).trim();
     if (/^[a-f0-9]{64}$/u.test(capability)) return capability;

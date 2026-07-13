@@ -40,6 +40,24 @@ export class ClaimNegotiationClient {
     async acquire(input) {
         const requestedLeases = Object.freeze(input.requestedLeases.map((entry) => parseCoordinationRequestedLease(entry)));
         const normalReleaseCondition = parseCoordinationReleaseCondition(input.normalReleaseCondition);
+        if ((input.acquisitionKind ?? 'initial') === 'initial') {
+            const status = await this.#client.query('status', this.#session.repo_id, this.#session.workstream_run);
+            const groups = parseEntityArray(status.payload['acquisition_groups'], 'status acquisition_groups', parseCoordinationAcquisitionGroup);
+            const rebound = groups.find((group) => group.acquisition_kind === 'legacy-unknown' && group.state === 'granted' && group.owner.autopilot_id === this.#session.autopilot_id && group.owner.workstream_run === this.#session.workstream_run && group.owner.unit_id === input.unitId && group.owner.attempt === input.attempt && sameRequestedAuthority(group.requested_leases, requestedLeases));
+            if (rebound !== undefined) {
+                await this.#client.mutate('reconcile-run', this.#identity(this.#session.run_version, `reconcile-migrated-authority:${this.#session.session_lease_id}:${rebound.acquisition_group_id}`), { reason: 'validate current generation before migrated authority reuse', ...this.#sessionProof() });
+                const verifiedStatus = await this.#client.query('status', this.#session.repo_id, this.#session.workstream_run);
+                const verifiedGroups = parseEntityArray(verifiedStatus.payload['acquisition_groups'], 'verified status acquisition_groups', parseCoordinationAcquisitionGroup);
+                const verified = verifiedGroups.find((group) => group.acquisition_group_id === rebound.acquisition_group_id && group.state === 'granted');
+                if (verified !== undefined) {
+                    const editLeases = parseEntityArray(verifiedStatus.payload['edit_leases'], 'verified status edit_leases', parseCoordinationEditLease).filter((lease) => lease.acquisition_group_id === verified.acquisition_group_id);
+                    if (editLeases.length !== verified.requested_leases.length || verified.grant_event_seq === null)
+                        throw new CoordinationRuntimeError('invalid-state', 'migrated acquisition authority is incomplete and requires supervisor recovery');
+                    return { outcome: 'granted', acquisitionGroup: verified, editLeases, requestRefs: [], committedEventSeq: verified.grant_event_seq };
+                }
+                throw new CoordinationRuntimeError('recovery-required', 'migrated authority became terminal during current-generation reconciliation; dispatch is refused');
+            }
+        }
         const response = await this.#client.mutate('acquire-group', this.#identity(this.#session.run_version, `acquire-group:${input.acquisitionGroupId}`), {
             acquisition_group_id: input.acquisitionGroupId,
             unit_id: input.unitId,
@@ -152,4 +170,10 @@ export class ClaimNegotiationClient {
     #sessionProof() {
         return { session_lease_id: this.#session.session_lease_id, session_token: this.#session.session_token };
     }
+}
+function sameRequestedAuthority(left, right) {
+    const identity = (lease) => `${lease.mode}\0${lease.path}`;
+    const leftSet = [...new Set(left.map(identity))].sort();
+    const rightSet = [...new Set(right.map(identity))].sort();
+    return leftSet.length === rightSet.length && leftSet.every((value, index) => value === rightSet[index]);
 }

@@ -5,6 +5,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { describe, it } from 'node:test';
+import { fileURLToPath } from 'node:url';
 
 import { CoordinatorClient } from '../../src/core/coordination/client.ts';
 import { parseCoordinationRun, parseCoordinationSessionLease } from '../../src/core/coordination/contracts.ts';
@@ -21,7 +22,7 @@ function git(cwd: string, args: readonly string[]): string {
   return result.stdout.trim();
 }
 
-const packageRoot = resolve(new URL('../../', import.meta.url).pathname);
+const packageRoot = resolve(fileURLToPath(new URL('../../', import.meta.url)));
 
 function closeResult(child: ChildProcessLite): Promise<number | null> {
   return new Promise((resolveClose) => child.on('close', (code) => resolveClose(code)));
@@ -48,7 +49,17 @@ void describe('owner-scoped worktree saga multiprocess execution', () => {
     try {
       const client = new CoordinatorClient({ env, autoStart: false });
       const repoId = 'repo-process'; const runId = 'run-process'; const autopilotId = 'autopilot-process';
-      const runResponse = await client.mutate('attach-run', { repoId, workstreamRun: runId, sessionId: null, fencingGeneration: null, expectedVersion: 0, idempotencyKey: 'attach-run-process' }, { repo_key: repoId, canonical_root: repo, git_common_dir: join(repo, '.git'), autopilot_id: autopilotId, workstream: 'work-process', coordination_authority: 'coordinator-edit-leases-v1' });
+      const runResponse = await client.mutate('attach-run', { repoId, workstreamRun: runId, sessionId: null, fencingGeneration: null, expectedVersion: 0, idempotencyKey: 'attach-run-process' }, {
+        repo_key: repoId, canonical_root: repo, git_common_dir: join(repo, '.git'), autopilot_id: autopilotId, workstream: 'work-process', coordination_authority: 'coordinator-edit-leases-v1',
+        run_resource: {
+          schema_version: 'autopilot.coordination_run_resource.v1', repo_id: repoId, workstream_run: runId,
+          source_repo: repo, git_common_dir: join(repo, '.git'), worktree_root: join(stateRoot, 'worktrees', repoId),
+          main_worktree_path: join(stateRoot, 'worktrees', repoId, 'active', runId, 'main'),
+          runtime_root: join(stateRoot, 'worktrees', repoId, 'active', runId, 'main', '.pi', 'autopilot', 'work-process'),
+          branch: `autopilot/${runId}`, target_branch: 'master', target_base_sha: git(repo, ['rev-parse', 'HEAD']), origin_url: null,
+          started_at: '2026-07-11T00:00:00.000Z', version: 1,
+        },
+      });
       const run = parseCoordinationRun(runResponse.payload['run']);
       const token = 'e'.repeat(64);
       const sessionResponse = await client.mutate('attach-session', { repoId, workstreamRun: runId, sessionId: 'session-process', fencingGeneration: 1, expectedVersion: run.version, idempotencyKey: 'attach-session-process' }, { session_lease_id: 'lease-process', session_token: token, pid: process.pid, boot_id: 'boot-process', lease_expires_at: '2099-01-01T00:00:00.000Z', handoff_token: null });

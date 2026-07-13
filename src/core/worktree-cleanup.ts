@@ -5,6 +5,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'nod
 
 import { AUTOPILOT_RUNTIME_ROOT_PREFIX } from './names.ts';
 import { executeOwnedWorktreeSaga, type WorktreeSagaInspection } from './coordination/worktree-saga.ts';
+import { coordinationCutoverCommitted } from './coordination/migration-paths.ts';
 import {
   BRANCHES_FILE,
   MATERIALIZED_PATHS_FILE,
@@ -234,6 +235,7 @@ export async function cleanupClosedAutopilotRun(input: {
   readonly removeActiveTaskDir: boolean;
   readonly env?: ProcessEnvLike;
   readonly now?: Date;
+  readonly observeTerminalBoundary?: (boundary: 'after-archive-ref' | 'after-unit-cleanup' | 'after-main-cleanup') => Promise<void> | void;
 }): Promise<AutopilotWorktreeCleanupResult> {
   return await withCleanupLock(input.active, async () => {
     const now = input.now ?? new Date();
@@ -262,6 +264,7 @@ export async function cleanupClosedAutopilotRun(input: {
         return inspected.proof;
       },
     }, input.env ?? process.env);
+    await input.observeTerminalBoundary?.('after-archive-ref');
     await appendLedger(input.active, {
       mode: 'closed-run-cleanup',
       event: 'main-branch-archive-ref',
@@ -294,19 +297,16 @@ export async function cleanupClosedAutopilotRun(input: {
         env: input.env,
         retireBranch: true,
       });
+      await input.observeTerminalBoundary?.('after-unit-cleanup');
     }
-    await removeMainWorktree(input.active, acc, input.archiveSha, input.reason, now, input.env);
+    await removeMainWorktree(input.active, units, acc, input.archiveSha, input.reason, now, input.env, input.removeActiveTaskDir);
     await retireBranchIfPresent(input.active, input.active.branch, input.archiveSha, acc, 'closed-run-cleanup', input.reason, now, input.env);
     await pruneGitMetadataAfterProof(input.active, acc, 'closed-run-cleanup', input.reason, now, input.env);
     const runOwnedWorktreePaths = [input.active.main_worktree_path, ...units.map((unit) => unit.worktree_path)];
     verifyNoPathResidue(input.active.source_repo, runOwnedWorktreePaths, input.env);
-    if (input.removeActiveTaskDir) {
-      await removeActiveTaskDirectory(input.active, units, acc, input.reason, now, input.env);
-    }
     verifyNoPathResidue(input.active.source_repo, runOwnedWorktreePaths, input.env);
-    if (input.removeActiveTaskDir && existsSync(taskRootForActiveAutopilot(input.active))) {
-      fail('active-task-dir-remains', 'active task directory still exists after closed-run cleanup.', [taskRootForActiveAutopilot(input.active)]);
-    }
+    if (input.removeActiveTaskDir && existsSync(taskRootForActiveAutopilot(input.active))) fail('active-task-dir-remains', 'active task directory still exists after closed-run cleanup.', [taskRootForActiveAutopilot(input.active)]);
+    await input.observeTerminalBoundary?.('after-main-cleanup');
     return cleanupResult(input.active, 'closed-run-cleanup', acc, now);
   });
 }
@@ -446,11 +446,13 @@ async function removeRegisteredWorktree(
 
 async function removeMainWorktree(
   active: ActiveAutopilotRow,
+  units: readonly AutopilotUnitBranchInfo[],
   acc: CleanupAccumulator,
   expectedSha: string,
   reason: string,
   now: Date,
   env?: ProcessEnvLike,
+  removeActiveTaskDir = false,
 ): Promise<void> {
   assertActiveRowScope(active);
   const mainPath = active.main_worktree_path;
@@ -493,7 +495,6 @@ async function removeMainWorktree(
     });
     fail('dirty-main-worktree', 'refusing to remove main worktree with dirty source residue.', dirtySourcePaths);
   }
-  await removeArchivedRuntimeResidue(active, reason, now);
   const inspectMainRemove = (): WorktreeSagaInspection => {
     const listed = gitWorktreeListPorcelain(active.source_repo, env);
     const present = existsSync(mainPath);
@@ -503,7 +504,9 @@ async function removeMainWorktree(
       if (present || !registered || metadata?.branch !== active.branch) return { outcome: 'unsafe', proof: [`path_present=${String(present)}`, `git_registered=${String(registered)}`, `expected_metadata_branch=${active.branch}`, `actual_metadata_branch=${String(metadata?.branch ?? null)}`] };
     }
     if (!present) {
-      if (!branchExists(active.source_repo, active.branch, env)) return { outcome: 'satisfied', proof: ['path_absent', 'git_registration_absent', 'branch_absent'] };
+      if (!branchExists(active.source_repo, active.branch, env)) return removeActiveTaskDir && existsSync(taskRootForActiveAutopilot(active))
+        ? { outcome: 'not-applied', proof: ['path_absent', 'git_registration_absent', 'branch_absent', 'active_task_dir_present'] }
+        : { outcome: 'satisfied', proof: ['path_absent', 'git_registration_absent', 'branch_absent', ...(removeActiveTaskDir ? ['active_task_dir_absent'] : [])] };
       const actualBranchSha = runGitForCleanup(['rev-parse', `refs/heads/${active.branch}`], active.source_repo, runtimeGitEnv('worktree-cleanup-branch-head', env)).trim();
       return actualBranchSha === expectedSha ? { outcome: 'not-applied', proof: ['path_absent', 'branch_present'] } : { outcome: 'unsafe', proof: [`branch_expected=${expectedSha}`, `branch_actual=${actualBranchSha}`] };
     }
@@ -521,17 +524,20 @@ async function removeMainWorktree(
     },
   }, {
     inspect: inspectMainRemove,
-    action: () => {
+    action: async () => {
+      await removeArchivedRuntimeResidue(active, reason, now);
       if (existsSync(mainPath) || gitWorktreeListPorcelain(active.source_repo, env).some((entry) => samePath(entry.path, mainPath))) runGitForCleanup(['worktree', 'remove', mainPath], active.source_repo, runtimeGitEnv('worktree-cleanup-remove-main', env));
       if (branchExists(active.source_repo, active.branch, env)) {
         const actualBranchSha = runGitForCleanup(['rev-parse', `refs/heads/${active.branch}`], active.source_repo, runtimeGitEnv('worktree-cleanup-branch-head', env)).trim();
         if (actualBranchSha !== expectedSha) fail('branch-retire-sha-mismatch', 'main branch moved after cleanup intent; refusing retirement.', [active.branch, `expected=${expectedSha}`, `actual=${actualBranchSha}`]);
         runGitForCleanup(['update-ref', '-d', `refs/heads/${active.branch}`, expectedSha], active.source_repo, runtimeGitEnv('worktree-cleanup-branch-retire', env));
       }
+      if (removeActiveTaskDir) await removeActiveTaskDirectory(active, units, acc, reason, now, env);
     },
     verify: () => {
       const inspected = inspectMainRemove();
       if (inspected.outcome !== 'satisfied') fail('main-worktree-remove-incomplete', 'main worktree remove saga postcondition failed.', inspected.proof);
+      if (removeActiveTaskDir && existsSync(taskRootForActiveAutopilot(active))) fail('active-task-dir-remains', 'main remove saga cannot commit while active task metadata remains.', [taskRootForActiveAutopilot(active)]);
       return inspected.proof;
     },
   }, env ?? process.env);
@@ -778,7 +784,7 @@ async function activeTaskDirectoryResidueBlockers(taskRoot: string, units: reado
 }
 
 function isAllowedTaskResidual(entry: ResidualEntry, units: readonly AutopilotUnitBranchInfo[]): boolean {
-  const rootFiles = new Set<string>(['_task-info.json', BRANCHES_FILE, UNIT_INDEX_FILE, '_checkout-profile.json', '_materialization-ledger.jsonl']);
+  const rootFiles = new Set<string>(['_task-info.json', BRANCHES_FILE, UNIT_INDEX_FILE, '_checkout-profile.json', '_materialization-ledger.jsonl', MATERIALIZED_PATHS_FILE]);
   if (!entry.directory && rootFiles.has(entry.relativePath)) return true;
   if (entry.relativePath === 'units' && entry.directory) return true;
   if (entry.relativePath === '.locks' && entry.directory) return true;
@@ -1034,7 +1040,7 @@ async function appendLedger(active: ActiveAutopilotRow, input: {
     ...(input.proof === undefined ? {} : { proof: input.proof }),
     ...(input.blockers === undefined ? {} : { blockers: input.blockers }),
   };
-  await appendJsonl(join(active.worktree_root, WORKTREE_LEDGER_FILE), row);
+  if (!coordinationCutoverCommitted(dirname(dirname(active.worktree_root)), active.repo_key)) await appendJsonl(join(active.worktree_root, WORKTREE_LEDGER_FILE), row);
 }
 
 function runGitForCleanup(args: readonly string[], cwd: string, env: ProcessEnvLike): string {

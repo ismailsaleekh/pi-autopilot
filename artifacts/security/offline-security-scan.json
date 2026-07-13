@@ -1,0 +1,22 @@
+{
+  "schema_version": "autopilot.security_scan.v1",
+  "package": "pi-autopilot",
+  "version": "1.0.0",
+  "lockfile_sha256": "sha256:01cfb00c1131e7f644a5e570de3739db149b129011691a4dcf28ab67e32ecea7",
+  "production_dependency_count": 0,
+  "peer_dependency_count": 1,
+  "audited_lock_entry_count": 173,
+  "reviewed_install_scripts": [
+    "node_modules/@earendil-works/pi-coding-agent/node_modules/@google/genai@1.52.0 (sha512-gwSvbpiN/17O9TbsqSsE/OzZcpv5Fo4RQjdngGgogtuB9RsyJ8ZHhX5KjHj1bp5N9snN2eK8LDGXSaWW2hof8Q==)",
+    "node_modules/@earendil-works/pi-coding-agent/node_modules/protobufjs@7.6.4 (sha512-RJJPTTpvFfHcWLkIa2JFWK4XvtSzS0yEWDmunqHXli1h3JlkbcQZXDZdcWxv+JK3Xsl5/UFDPZ0iGm7DAengYw==)",
+    "node_modules/esbuild@0.28.1 (sha512-HrJrvZv5ayxBzPfwphOoNzkzOIIlifzk0KJrGK2c8R4+LKpMtpYLQeUdjnwjWv/LZlkH2laZk+4w78pi99D4Vw==)",
+    "node_modules/fsevents@2.3.3 (sha512-5xoDfX+fL7faATnagmWPpbFtwh/R77WmMMqqHGS65C3vvB0YHrgF+B1YmZ3441tMj5n63k0212XNoJwzlhffQw==)"
+  ],
+  "reviewed_integrity_exceptions": [
+    "node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-agent-core@0.80.6",
+    "node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai@0.80.6",
+    "node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-tui@0.80.6"
+  ],
+  "findings": [],
+  "passed": true
+}

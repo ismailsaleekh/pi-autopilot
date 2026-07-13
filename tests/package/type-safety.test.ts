@@ -2,8 +2,9 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const packageRoot = new URL('../../', import.meta.url).pathname;
+const packageRoot = fileURLToPath(new URL('../../', import.meta.url));
 const allTypeScriptRoots = ['extensions', 'src', 'tests'];
 
 interface Violation {
@@ -39,19 +40,19 @@ function parseJson(text: string): unknown {
   return JSON.parse(text) as unknown;
 }
 
-async function walk(dir: string): Promise<string[]> {
+async function walk(dir: string, filePattern = /\.tsx?$/): Promise<string[]> {
   const entries = await readdir(dir, { withFileTypes: true });
   const files: string[] = [];
   for (const entry of entries) {
     const path = join(dir, entry.name);
-    if (entry.isDirectory()) files.push(...(await walk(path)));
-    else if (/\.tsx?$/.test(entry.name)) files.push(path);
+    if (entry.isDirectory()) files.push(...(await walk(path, filePattern)));
+    else if (filePattern.test(entry.name)) files.push(path);
   }
   return files;
 }
 
-async function filesFor(roots: readonly string[]): Promise<string[]> {
-  const nested = await Promise.all(roots.map((root) => walk(join(packageRoot, root))));
+async function filesFor(roots: readonly string[], filePattern?: RegExp): Promise<string[]> {
+  const nested = await Promise.all(roots.map((root) => walk(join(packageRoot, root), filePattern)));
   return nested.flat().sort();
 }
 
@@ -91,7 +92,7 @@ void describe('type-safety standard', () => {
         '|' +
         'Obj' +
         'ect' +
-        ')\\b',
+        ')\\b(?!\\s*\\.)',
     );
     const emptyStructuralPattern = /(?:[\w)]\s*:\s*\{\s*\}\s*(?:[=;,)]|$)|(?:as|<|extends\s+|implements\s+|\btype\s+\w+\s*=)\s*\{\s*\})/;
     const violations = await scan(await filesFor(allTypeScriptRoots), [
@@ -128,6 +129,17 @@ void describe('type-safety standard', () => {
       { rule: 'non-null assertion', pattern: nonNullAssertionPattern },
     ]);
     assert.equal(violations.length, 0, formatViolations(violations));
+  });
+
+  void it('uses fileURLToPath rather than URL.pathname for module-relative filesystem paths', async () => {
+    const filesystemSources = await filesFor(['src', 'tests', 'scripts'], /\.(?:[cm]?js|tsx?)$/u);
+    const violations = await scan(filesystemSources, [
+      { rule: 'URL pathname filesystem conversion', pattern: /import\.meta\.url[^\n]*\.pathname/u },
+    ]);
+    assert.equal(violations.length, 0, formatViolations(violations));
+    const encoded = fileURLToPath(new URL('file:///tmp/pi-autopilot%20path'));
+    assert.equal(encoded.includes('%20'), false);
+    assert.equal(encoded.includes('pi-autopilot path'), true);
   });
 
   void it('overrides inherited lib checking in the package compiler config', async () => {

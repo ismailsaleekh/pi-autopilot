@@ -17,7 +17,7 @@ import { coordinatorRuntimePaths } from '../../src/core/coordination/runtime-pat
 import { startCoordinatorServer } from '../../src/core/coordination/server.ts';
 import { ensureMainWorktreeSagaRegistered, executeOwnedWorktreeSaga, type WorktreeSagaInspection } from '../../src/core/coordination/worktree-saga.ts';
 import { writeCoordinatorSessionContext, type CoordinatorSessionContext } from '../../src/core/coordination/supervisor.ts';
-import type { CoordinationAcquisitionGroup, CoordinationReservationObligation, CoordinatorResponseEnvelope } from '../../src/core/coordination/types.ts';
+import type { CoordinationReservationObligation, CoordinatorResponseEnvelope } from '../../src/core/coordination/types.ts';
 import { AUTOPILOT_STATE_ROOT_ENV, type ActiveAutopilotRow, type ProcessEnvLike } from '../../src/core/parallel-runtime.ts';
 import { AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV } from '../../src/core/names.ts';
 import { validCoordinationSnapshot } from '../helpers/coordination-fixture.ts';
@@ -67,7 +67,16 @@ async function attachActor(harness: Harness, suffix: string): Promise<Actor> {
   const workstreamRun = `run-${suffix}`;
   const runResponse = await harness.client.mutate('attach-run', {
     repoId, workstreamRun, sessionId: null, fencingGeneration: null, expectedVersion: 0, idempotencyKey: `attach-run-${suffix}`,
-  }, { repo_key: repoId, canonical_root: join(harness.root, 'repository'), git_common_dir: join(harness.root, 'repository', '.git'), autopilot_id: `autopilot-${suffix}`, workstream: `work-${suffix}`, coordination_authority: 'coordinator-edit-leases-v1' });
+  }, {
+    repo_key: repoId, canonical_root: join(harness.root, 'repository'), git_common_dir: join(harness.root, 'repository', '.git'), autopilot_id: `autopilot-${suffix}`, workstream: `work-${suffix}`, coordination_authority: 'coordinator-edit-leases-v1',
+    run_resource: {
+      schema_version: 'autopilot.coordination_run_resource.v1', repo_id: repoId, workstream_run: workstreamRun,
+      source_repo: join(harness.root, 'repository'), git_common_dir: join(harness.root, 'repository', '.git'), worktree_root: join(harness.stateRoot, 'worktrees', repoId),
+      main_worktree_path: join(harness.stateRoot, 'worktrees', repoId, 'active', workstreamRun, 'main'), runtime_root: join(harness.stateRoot, 'worktrees', repoId, 'active', workstreamRun, 'main', '.pi', 'autopilot', `work-${suffix}`),
+      branch: `autopilot/${workstreamRun}`, target_branch: 'main', target_base_sha: git(join(harness.root, 'repository'), ['rev-parse', 'HEAD']), origin_url: null,
+      started_at: '2026-07-12T00:00:00.000Z', version: 1,
+    },
+  });
   const run = parseCoordinationRun(runResponse.payload['run']);
   const sessionToken = suffix.charCodeAt(0).toString(16).slice(-1).repeat(64);
   const sessionResponse = await harness.client.mutate('attach-session', {
@@ -258,7 +267,7 @@ void describe('Coordination Fabric edit leases and change reservations', () => {
       const dependentMergeRef = requiredView.reservations.find((entry) => entry.reservation_id === obligation.reservation_id)?.merge_evidence.ref;
       if (dependentMergeRef === undefined) throw new Error('dependent merge evidence is missing');
       assert.equal(required?.state, 'integration-required');
-      await assert.rejects(() => second.reservations.prepareRunTerminal('closed'), /requires every reservation integration obligation to be resolved/u);
+      assert.equal((await reservationCloseBlockers(activeRow(harness, second), harness.env)).some((blocker) => blocker.includes('requires rebase/integration')), true);
 
       const secondMain = join(harness.stateRoot, 'worktrees', second.context.repo_id, 'active', second.context.workstream_run, 'main');
       if (required?.predecessor_terminal_sha === null || required?.predecessor_terminal_sha === undefined) throw new Error('predecessor terminal commit is missing');
@@ -297,7 +306,6 @@ void describe('Coordination Fabric edit leases and change reservations', () => {
       assert.equal((await second.negotiation.acquire(acquisitionInput('l'))).outcome, 'granted');
       await recordUnitMerge(harness, second, 'l', ['src/shared.ts']);
       assert.ok((await reservationCloseBlockers(activeRow(harness, second), harness.env)).some((blocker) => blocker.includes('is stale at integration head')));
-      await assert.rejects(() => second.reservations.prepareRunTerminal('closed'), /resolved reservation validation became stale on overlapping paths/u);
       const driftHead = git(secondMain, ['rev-parse', 'HEAD']);
       const refreshedObligation = (await second.reservations.view()).obligations.find((entry) => entry.obligation_id === obligation.obligation_id);
       if (refreshedObligation === undefined) throw new Error('refreshable obligation is missing');

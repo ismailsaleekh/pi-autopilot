@@ -1,13 +1,14 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { existsSync, realpathSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { describe, it } from 'node:test';
 
-import { abortAutopilotWorkstream, closeAutopilotWorkstream } from '../../src/core/close-runtime.ts';
-import { DurableRunSupervisorClient } from '../../src/core/coordination/supervisor.ts';
+import { AUTOPILOT_TERMINAL_CLEANUP_BOUNDARIES, AutopilotCloseError, abortAutopilotWorkstream, closeAutopilotWorkstream } from '../../src/core/close-runtime.ts';
+import { CoordinatorClient } from '../../src/core/coordination/client.ts';
+import { DurableRunSupervisorClient, readCoordinatorSessionContext } from '../../src/core/coordination/supervisor.ts';
 import { coordinatorRuntimePaths } from '../../src/core/coordination/runtime-paths.ts';
 import { startCoordinatorServer } from '../../src/core/coordination/server.ts';
 import { ensureMainWorktreeSagaRegistered } from '../../src/core/coordination/worktree-saga.ts';
@@ -94,6 +95,31 @@ async function prepareCloseFixture(root: string): Promise<PreparedCloseFixture> 
     workstreamRun: prepared.active.workstream_run,
     repoKey: prepared.active.repo_key,
   };
+}
+
+async function prepareEmptyCoordinatedFixture(root: string, workstream: string): Promise<{ readonly source: string; readonly taskRoot: string; readonly worktree: string; readonly workstreamRun: string; readonly repoKey: string }> {
+  const source = join(root, `source-${workstream}`);
+  await initGitSource(source);
+  const prepared = await prepareAutopilotWorkstream({ workstream, sourceCwd: source, coordinationSessionId: `bootstrap-${workstream}` });
+  const attachment = await new DurableRunSupervisorClient(process.env).attach({ repo: prepared.repo, active: prepared.active, rawSessionId: `active-${workstream}` });
+  process.env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV] = attachment.contextPath;
+  await ensureMainWorktreeSagaRegistered({ active: prepared.active });
+  return { source, taskRoot: prepared.taskRoot, worktree: prepared.mainWorktreePath, workstreamRun: prepared.active.workstream_run, repoKey: prepared.active.repo_key };
+}
+
+async function commitTestCutover(root: string, repoKey: string): Promise<void> {
+  const stateRoot = join(root, 'autopilot-state');
+  const legacySource = join(stateRoot, 'coordination', repoKey);
+  const legacyArchive = join(stateRoot, 'legacy', repoKey);
+  if (existsSync(legacySource)) {
+    await mkdir(dirname(legacyArchive), { recursive: true });
+    await rename(legacySource, legacyArchive);
+  }
+  await writeJson(join(stateRoot, 'cutovers', `${repoKey}.json`), {
+    schema_version: 'autopilot.coordination_cutover.v1', repo_key: repoKey,
+    snapshot_sha256: `sha256:${'a'.repeat(64)}`, database_sha256: `sha256:${'b'.repeat(64)}`,
+    committed_at: '2026-07-12T00:00:00.000Z', migration_id: `test-cutover-${repoKey.slice(-12)}`,
+  });
 }
 
 function unitSpec(worktree: string, runtimeRoot: string): AutopilotUnitSpec {
@@ -406,6 +432,71 @@ void describe('Autopilot close runtime', () => {
     });
   });
 
+  void it('rejects an external runtime symlink before terminal commit and never archives external bytes', async () => {
+    await withTempDir(async (root) => {
+      const fixture = await prepareCloseFixture(root);
+      const secret = join(root, 'external-secret.txt');
+      await writeFile(secret, 'must-never-enter-terminal-archive\n', 'utf8');
+      await symlink(secret, join(fixture.runtimeRoot, 'external-link'));
+      await assert.rejects(
+        () => closeAutopilotWorkstream({ workstream: 'close-smoke', sourceCwd: fixture.source, workstreamRun: fixture.workstreamRun }),
+        (error: unknown) => error instanceof AutopilotCloseError && /symbolic link/u.test(error.message),
+      );
+      const archive = join(root, 'autopilot-state', 'worktrees', fixture.repoKey, '_archive', fixture.workstreamRun, 'runtime', 'external-link');
+      assert.equal(existsSync(archive), false);
+      assert.equal(await readFile(join(fixture.source, 'src', 'smoke.ts'), 'utf8'), 'export const smoke = "baseline";\n');
+    });
+  });
+
+  void it('rejects a pre-existing _archive symlink before terminal commit without touching its target', async () => {
+    await withTempDir(async (root) => {
+      const fixture = await prepareCloseFixture(root);
+      const archiveParent = join(root, 'autopilot-state', 'worktrees', fixture.repoKey, '_archive');
+      const external = join(root, 'external-archive-target');
+      await rm(archiveParent, { recursive: true, force: true });
+      await mkdir(external, { recursive: true });
+      await writeFile(join(external, 'sentinel'), 'unchanged\n', 'utf8');
+      await symlink(external, archiveParent, 'dir');
+      await assert.rejects(
+        () => closeAutopilotWorkstream({ workstream: 'close-smoke', sourceCwd: fixture.source, workstreamRun: fixture.workstreamRun }),
+        (error: unknown) => error instanceof AutopilotCloseError && /archive|symbolic/u.test(error.message),
+      );
+      assert.equal(await readFile(join(external, 'sentinel'), 'utf8'), 'unchanged\n');
+      assert.equal((await readActiveAutopilots(coordinationRootForRepo(fixture.repoKey))).find((row) => row.workstream_run === fixture.workstreamRun)?.status, 'blocked');
+    });
+  });
+
+  void it('rejects a raced final archive symlink before terminal commit and never overwrites it', async () => {
+    await withTempDir(async (root) => {
+      const fixture = await prepareCloseFixture(root);
+      const external = join(root, 'raced-archive-target');
+      await mkdir(external, { recursive: true });
+      await writeFile(join(external, 'sentinel'), 'unchanged\n', 'utf8');
+      const finalArchive = join(root, 'autopilot-state', 'worktrees', fixture.repoKey, '_archive', fixture.workstreamRun);
+      await assert.rejects(
+        () => closeAutopilotWorkstream({
+          workstream: 'close-smoke', sourceCwd: fixture.source, workstreamRun: fixture.workstreamRun,
+          observeCloseRaceBoundary: async (boundary) => { if (boundary === 'after-private-archive-staging-before-terminal-commit') await symlink(external, finalArchive, 'dir'); },
+        }),
+        (error: unknown) => error instanceof AutopilotCloseError && /archive|symbolic/u.test(error.message),
+      );
+      assert.equal(await readFile(join(external, 'sentinel'), 'utf8'), 'unchanged\n');
+      assert.equal((await readActiveAutopilots(coordinationRootForRepo(fixture.repoKey))).find((row) => row.workstream_run === fixture.workstreamRun)?.status, 'blocked');
+    });
+  });
+
+  void it('rejects a runtime symlink loop before abort terminal commit', async () => {
+    await withTempDir(async (root) => {
+      const fixture = await prepareCloseFixture(root);
+      await symlink('..', join(fixture.runtimeRoot, 'loop'));
+      await assert.rejects(
+        () => abortAutopilotWorkstream({ workstream: 'close-smoke', sourceCwd: fixture.source, workstreamRun: fixture.workstreamRun }),
+        (error: unknown) => error instanceof AutopilotCloseError && /symbolic link|loop/u.test(error.message),
+      );
+      assert.equal(existsSync(join(root, 'autopilot-state', 'worktrees', fixture.repoKey, '_archive', fixture.workstreamRun)), false);
+    });
+  });
+
   void it('aborts an abandoned workstream without merging and releases retained claims', async () => {
     await withTempDir(async (root) => {
       const fixture = await prepareCloseFixture(root);
@@ -421,6 +512,96 @@ void describe('Autopilot close runtime', () => {
       assert.match(gitOutput(fixture.source, ['branch', '--list', `autopilot/archive/${fixture.workstreamRun}/aborted`]), /autopilot\/archive\//u);
       const claims = await readPathClaims(coordinationRootForRepo(fixture.repoKey));
       assert.deepEqual(claims, []);
+    });
+  });
+
+  for (const action of ['close', 'abort'] as const) void it(`${action} durably fences a concurrent launch while validation is paused`, async () => {
+    await withTempDir(async (root) => {
+      const coordinator = await startCoordinatorServer(coordinatorRuntimePaths(process.env));
+      try {
+        const fixture = await prepareEmptyCoordinatedFixture(root, `fenced-${action}`);
+        await commitTestCutover(root, fixture.repoKey);
+        const contextPath = process.env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV];
+        if (contextPath === undefined) throw new Error('missing durable close session');
+        const context = await readCoordinatorSessionContext(contextPath);
+        let releaseValidation!: () => void;
+        let reportFenced!: () => void;
+        const fenced = new Promise<void>((resolveFenced) => { reportFenced = resolveFenced; });
+        const resume = new Promise<void>((resolveResume) => { releaseValidation = resolveResume; });
+        const operation = (action === 'close' ? closeAutopilotWorkstream : abortAutopilotWorkstream)({
+          workstream: `fenced-${action}`,
+          sourceCwd: fixture.source,
+          workstreamRun: fixture.workstreamRun,
+          observeCloseRaceBoundary: async () => { reportFenced(); await resume; },
+        });
+        await fenced;
+        const client = new CoordinatorClient({ env: process.env, autoStart: false });
+        const status = await client.query('status', fixture.repoKey, fixture.workstreamRun);
+        const run = (status.payload['runs'] as readonly Readonly<Record<string, unknown>>[])[0];
+        assert.equal(run?.['status'], 'merging', 'durable coordinator state must expose the validation fence');
+        await assert.rejects(() => client.mutate('register-attempt', {
+          repoId: fixture.repoKey,
+          workstreamRun: fixture.workstreamRun,
+          sessionId: context.session_id,
+          fencingGeneration: context.session_generation,
+          expectedVersion: Number(run?.['version']),
+          idempotencyKey: `paused-validation-launch-${action}`,
+        }, {
+          unit_id: `late-${action}`, attempt: 1, checkpoint_ordinal: 0, role: 'implement',
+          spec_ref: `unit-specs/late-${action}.json`, spec_sha256: `sha256:${'c'.repeat(64)}`,
+          preemptible: true, session_lease_id: context.session_lease_id, session_token: context.session_token,
+        }), /terminal preparation fences new attempt dispatch/u);
+        releaseValidation();
+        await operation;
+      } finally { await coordinator.close(); }
+    });
+  });
+
+  void it('resumes fenced post-cutover terminal cleanup without resurrecting dispatch or touching a foreign run', async () => {
+    await withTempDir(async (root) => {
+      const coordinator = await startCoordinatorServer(coordinatorRuntimePaths(process.env));
+      try {
+        const closing = await prepareEmptyCoordinatedFixture(root, 'terminal-close');
+        const foreign = await prepareAutopilotWorkstream({ workstream: 'foreign-run', sourceCwd: closing.source, coordinationSessionId: 'foreign-bootstrap' });
+        const foreignAttachment = await new DurableRunSupervisorClient(process.env).attach({ repo: foreign.repo, active: foreign.active, rawSessionId: 'foreign-active' });
+        await ensureMainWorktreeSagaRegistered({ active: foreign.active, env: { ...process.env, [AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV]: foreignAttachment.contextPath } });
+        const closingActive = (await readActiveAutopilots(coordinationRootForRepo(closing.repoKey))).find((row) => row.workstream_run === closing.workstreamRun);
+        if (closingActive === undefined) throw new Error('closing active row missing');
+        const closingAttachment = await new DurableRunSupervisorClient(process.env).attach({ repo: resolveRepoIdentity(closing.source), active: closingActive, rawSessionId: 'closing-current' });
+        process.env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV] = closingAttachment.contextPath;
+        await commitTestCutover(root, closing.repoKey);
+        await assert.rejects(
+          () => closeAutopilotWorkstream({
+            workstream: 'terminal-close', sourceCwd: closing.source, workstreamRun: closing.workstreamRun,
+            observeTerminalCleanupBoundary: (boundary) => { if (boundary === 'after-terminal-commit') throw new Error('simulated post-terminal process death'); },
+          }),
+          (error: unknown) => error instanceof AutopilotCloseError && error.code === 'terminal-cleanup-recovery-required',
+        );
+        delete process.env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV];
+        const replacement = await prepareAutopilotWorkstream({ workstream: 'terminal-close', sourceCwd: closing.source, coordinationSessionId: 'replacement-activation' });
+        assert.notEqual(replacement.active.workstream_run, closing.workstreamRun);
+        assert.equal(replacement.active.status, 'active');
+        assert.equal(existsSync(closing.taskRoot), false);
+        assert.equal(existsSync(join(root, 'autopilot-state', 'worktrees', closing.repoKey, '_archive', closing.workstreamRun, '_close-result.json')), true);
+        assert.equal(existsSync(foreign.mainWorktreePath), true);
+        const status = await new CoordinatorClient({ env: process.env, autoStart: false }).query('status', closing.repoKey, null);
+        const runs = status.payload['runs'];
+        if (!Array.isArray(runs)) throw new Error('coordinator runs missing');
+        const terminal = runs.find((entry) => typeof entry === 'object' && entry !== null && (entry as Record<string, unknown>)['workstream_run'] === closing.workstreamRun) as Record<string, unknown> | undefined;
+        const foreignRun = runs.find((entry) => typeof entry === 'object' && entry !== null && (entry as Record<string, unknown>)['workstream_run'] === foreign.active.workstream_run) as Record<string, unknown> | undefined;
+        assert.equal(terminal?.['status'], 'closed');
+        assert.equal(foreignRun?.['status'], 'active');
+        const sessions = status.payload['session_leases'];
+        if (!Array.isArray(sessions)) throw new Error('coordinator sessions missing');
+        const terminalSessions = sessions.filter((entry) => typeof entry === 'object' && entry !== null && (entry as Record<string, unknown>)['workstream_run'] === closing.workstreamRun) as Record<string, unknown>[];
+        assert.equal(terminalSessions.filter((entry) => entry['status'] === 'attached').length, 0);
+        assert.equal(terminalSessions.some((entry) => entry['status'] === 'fenced'), true);
+        const recoveryGeneration = Math.max(...terminalSessions.map((entry) => Number(entry['session_generation'])));
+        assert.equal(terminalSessions.find((entry) => entry['session_generation'] === recoveryGeneration)?.['status'], 'detached');
+        assert.equal(AUTOPILOT_TERMINAL_CLEANUP_BOUNDARIES.includes('after-terminal-commit'), true);
+      } finally {
+        await coordinator.close();
+      }
     });
   });
 

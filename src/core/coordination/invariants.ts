@@ -50,6 +50,7 @@ export function checkCoordinationInvariants(snapshot: CoordinationSnapshot): rea
   const groups = new Map(snapshot.acquisition_groups.map((group) => [group.acquisition_group_id, group]));
   const worktrees = new Map(snapshot.worktrees.map((worktree) => [worktree.worktree_id, worktree]));
   const reservations = new Map(snapshot.change_reservations.map((reservation) => [reservation.reservation_id, reservation]));
+  const pendingMigrationRecoveryLeaseIds = new Set(snapshot.migration_recovery_work.filter((work) => work.status === 'pending' && typeof work.detail['edit_lease_id'] === 'string').map((work) => work.detail['edit_lease_id'] as string));
 
   findings.push(...duplicateFindings(snapshot.repositories.map((value) => value.repo_id), 'duplicate-repository', 'repositories'));
   findings.push(...duplicateFindings(snapshot.runs.map((value) => runKey(value.repo_id, value.workstream_run)), 'duplicate-run', 'runs'));
@@ -64,6 +65,7 @@ export function checkCoordinationInvariants(snapshot: CoordinationSnapshot): rea
   findings.push(...duplicateFindings(snapshot.claim_requests.map((value) => value.request_id), 'duplicate-claim-request', 'claim_requests'));
   findings.push(...duplicateFindings(snapshot.mailbox_cursors.map((value) => runKey(value.repo_id, value.workstream_run)), 'duplicate-mailbox-cursor', 'mailbox_cursors'));
   findings.push(...duplicateFindings(snapshot.reconciliation_evidence.map((value) => value.reconciliation_evidence_id), 'duplicate-reconciliation-evidence', 'reconciliation_evidence'));
+  findings.push(...duplicateFindings(snapshot.migration_recovery_work.map((value) => value.recovery_id), 'duplicate-migration-recovery-work', 'migration_recovery_work'));
   findings.push(...duplicateFindings(snapshot.messages.map((value) => value.message_id), 'duplicate-message', 'messages'));
   findings.push(...duplicateFindings(snapshot.worktrees.map((value) => value.worktree_id), 'duplicate-worktree', 'worktrees'));
   findings.push(...duplicateFindings(snapshot.worktree_operations.map((value) => value.operation_id), 'duplicate-operation', 'worktree_operations'));
@@ -79,6 +81,21 @@ export function checkCoordinationInvariants(snapshot: CoordinationSnapshot): rea
 
   for (const run of snapshot.runs) {
     if (!repositoryIds.has(run.repo_id)) findings.push(finding('run-repository-missing', run.workstream_run, `repository ${run.repo_id} does not exist`));
+  }
+
+  for (const work of snapshot.migration_recovery_work) {
+    const run = runs.get(runKey(work.repo_id, work.workstream_run));
+    if (run === undefined) {
+      findings.push(finding('migration-recovery-run-missing', work.recovery_id, 'migration recovery owner run does not exist'));
+      continue;
+    }
+    if (work.status === 'pending') {
+      if (run.status !== 'recovering' && run.status !== 'closed' && run.status !== 'aborted') findings.push(finding('pending-migration-recovery-run-dispatchable', work.recovery_id, `${run.status} run must be fenced as recovering or remain terminal`));
+      const dispatchSessions = snapshot.session_leases.filter((session) => session.repo_id === work.repo_id && session.workstream_run === work.workstream_run && session.status === 'attached' && session.attachment_kind === 'dispatch');
+      if (dispatchSessions.length > 0) findings.push(finding('pending-migration-recovery-dispatch-session', work.recovery_id, 'pending migration recovery must not coexist with ordinary attached dispatch'));
+      const leaseId = work.detail['edit_lease_id'];
+      if (work.recovery_type === 'ambiguous-live-claim' && (typeof leaseId !== 'string' || !snapshot.edit_leases.some((lease) => lease.edit_lease_id === leaseId))) findings.push(finding('pending-migration-recovery-lease-missing', work.recovery_id, 'ambiguous authority recovery must bind one exact retained edit lease'));
+    }
   }
 
   for (const session of snapshot.session_leases) {
@@ -157,7 +174,7 @@ export function checkCoordinationInvariants(snapshot: CoordinationSnapshot): rea
     const owningRun = runs.get(runKey(lease.owner.repo_id, lease.owner.workstream_run));
     if (owningRun !== undefined && owningRun.coordination_authority !== 'coordinator-edit-leases-v1') findings.push(finding('legacy-run-retains-edit-lease', lease.edit_lease_id, 'legacy-path-claim authoritative run must not hold coordinator edit authority'));
     const attempt = attempts.get(ownerKey(lease.owner));
-    if (attempt !== undefined && ['merged', 'failed', 'reset', 'quarantined', 'superseded'].includes(attempt.state)) findings.push(finding('terminal-attempt-retains-edit-lease', lease.edit_lease_id, `${attempt.state} unit attempt retains active edit authority`));
+    if (attempt !== undefined && ['merged', 'failed', 'reset', 'quarantined', 'superseded'].includes(attempt.state) && !pendingMigrationRecoveryLeaseIds.has(lease.edit_lease_id)) findings.push(finding('terminal-attempt-retains-edit-lease', lease.edit_lease_id, `${attempt.state} unit attempt retains active edit authority`));
     if (conditionSatisfied(snapshot, lease.owner.repo_id, lease.owner.workstream_run, lease.normal_release_condition)) findings.push(finding('satisfied-condition-retains-lease', lease.edit_lease_id, 'accepted terminal evidence must release active edit authority'));
     const group = groups.get(lease.acquisition_group_id);
     if (group === undefined) findings.push(finding('lease-group-missing', lease.edit_lease_id, 'acquisition group does not exist'));
@@ -225,7 +242,7 @@ export function checkCoordinationInvariants(snapshot: CoordinationSnapshot): rea
     const preparedIntents = snapshot.run_terminal_intents.filter((intent) => intent.repo_id === run.repo_id && intent.workstream_run === run.workstream_run && intent.state === 'prepared');
     if (preparedIntents.length > 1) findings.push(finding('multiple-prepared-terminal-intents', run.workstream_run, `${String(preparedIntents.length)} terminal intents are prepared`));
     if (run.status !== 'closed' && run.status !== 'aborted') continue;
-    const liveLeases = snapshot.edit_leases.filter((lease) => lease.owner.repo_id === run.repo_id && lease.owner.workstream_run === run.workstream_run);
+    const liveLeases = snapshot.edit_leases.filter((lease) => lease.owner.repo_id === run.repo_id && lease.owner.workstream_run === run.workstream_run && !pendingMigrationRecoveryLeaseIds.has(lease.edit_lease_id));
     if (liveLeases.length > 0) findings.push(finding('terminal-run-retains-edit-leases', run.workstream_run, `${run.status} run retains ${String(liveLeases.length)} active edit leases`));
     const unresolved = snapshot.reservation_obligations.filter((obligation) => obligation.repo_id === run.repo_id && obligation.workstream_run === run.workstream_run && obligation.state !== 'resolved' && obligation.state !== 'cancelled');
     if (unresolved.length > 0) findings.push(finding('terminal-run-retains-reservation-obligations', run.workstream_run, `${run.status} run retains ${String(unresolved.length)} integration obligations`));
@@ -238,7 +255,7 @@ export function checkCoordinationInvariants(snapshot: CoordinationSnapshot): rea
     for (const leaseId of request.blocking_lease_ids) {
       const lease = snapshot.edit_leases.find((candidate) => candidate.edit_lease_id === leaseId);
       if (lease === undefined) {
-        if (!TERMINAL_REQUEST_STATES.has(request.status) && request.status !== 'released' && request.status !== 'requester-notified') findings.push(finding('request-blocking-lease-missing', request.request_id, `blocking lease ${leaseId} is absent before release evidence`));
+        if (!TERMINAL_REQUEST_STATES.has(request.status) && request.status !== 'released' && request.status !== 'requester-notified' && request.status !== 'grant-ready' && request.status !== 'granted') findings.push(finding('request-blocking-lease-missing', request.request_id, `${request.status} request blocking lease ${leaseId} is absent before release evidence`));
       } else if (ownerKey(lease.owner) !== ownerKey(request.owner)) {
         findings.push(finding('request-addressed-to-wrong-owner', request.request_id, `blocking lease ${leaseId} has a different owner`));
       }

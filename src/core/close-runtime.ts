@@ -1,7 +1,9 @@
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
-import { mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { createHash } from 'node:crypto';
+import { closeSync, constants as fsConstants, existsSync, fstatSync, lstatSync, openSync, readFileSync } from 'node:fs';
+import { lstat, mkdir, open, readFile, readdir, realpath, rename, writeFile } from 'node:fs/promises';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { platform } from 'node:os';
 
 import {
   parseAutopilotExecutionAudit,
@@ -21,7 +23,10 @@ import { evaluateAutopilotClosureGate } from './lifecycle/index.ts';
 import { parseAutopilotUnitMerge, type AutopilotUnitMerge } from './unit-merge.ts';
 import { cleanupClosedAutopilotRun } from './worktree-cleanup.ts';
 import { executeOwnedWorktreeSaga, OwnedWorktreeSagaClient, WorktreeSagaCompensatedError, type WorktreeSagaInspection } from './coordination/worktree-saga.ts';
-import { AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV } from './names.ts';
+import { AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV, AUTOPILOT_RUNTIME_ROOT_PREFIX } from './names.ts';
+import { CoordinatorClient } from './coordination/client.ts';
+import { parseCoordinationReconciliationEvidence, parseCoordinationRun, parseCoordinationRunTerminalIntent, parseCoordinationSessionLease, parseCoordinationWorktree } from './coordination/contracts.ts';
+import { DurableRunSupervisorClient, readCoordinatorSessionContext } from './coordination/supervisor.ts';
 import { recordCoordinatorReleaseEvidenceFromFile } from './coordination/reconciliation.ts';
 import { ReservationCoordinationClient, preparedRunTerminalIntent, reconcilePendingReservationResolutions, reservationCloseBlockers, resolvedReservationIntegrations } from './coordination/reservations.ts';
 import type { CoordinationRunTerminalIntent } from './coordination/types.ts';
@@ -44,10 +49,12 @@ import {
   matchesRepoPathPattern,
   pathOverlapsOrContains,
   readActiveAutopilots,
+  readCoordinatorActiveAutopilots,
   readGitStatus,
   readPathClaims,
   readUnitIndex,
   readWorktreeIndex,
+  resolveAutopilotStateRoot,
   resolveRepoIdentity,
   runGit,
   taskRootForActiveAutopilot,
@@ -62,6 +69,10 @@ import {
   type AutopilotParentStatus,
   type ProcessEnvLike,
 } from './parallel-runtime.ts';
+import { assertCoordinationDispatchAllowed, coordinationCutoverCommitted } from './coordination/migration-paths.ts';
+import { coordinatorRuntimePaths } from './coordination/runtime-paths.ts';
+import { currentBootId } from './coordination/process-identity.ts';
+import { enforcePrivateAuthorityPath, ensurePrivateAuthorityDirectory } from './private-path.ts';
 
 export interface AutopilotCloseOptions {
   readonly workstream: string;
@@ -70,9 +81,19 @@ export interface AutopilotCloseOptions {
   readonly dryRun?: boolean;
   readonly env?: ProcessEnvLike;
   readonly now?: Date;
+  readonly coordinationSessionId?: string;
+  readonly observeTerminalCleanupBoundary?: (boundary: AutopilotTerminalCleanupBoundary) => Promise<void> | void;
+  /** Deterministic race witness used to prove the durable pre-validation fence. */
+  readonly observeCloseRaceBoundary?: (boundary: AutopilotCloseRaceBoundary) => Promise<void> | void;
 }
 
+export const AUTOPILOT_CLOSE_RACE_BOUNDARIES = ['after-durable-launch-fence-before-validation', 'after-private-archive-staging-before-terminal-commit'] as const;
+export type AutopilotCloseRaceBoundary = (typeof AUTOPILOT_CLOSE_RACE_BOUNDARIES)[number];
+
 export type AutopilotCloseOutcome = 'dry-run' | 'closed' | 'blocked' | 'aborted';
+
+export const AUTOPILOT_TERMINAL_CLEANUP_BOUNDARIES = ['after-terminal-manifest', 'after-terminal-commit', 'after-terminal-projections', 'after-runtime-archive', 'after-result-projection', 'after-archive-ref', 'after-unit-cleanup', 'after-main-cleanup'] as const;
+export type AutopilotTerminalCleanupBoundary = (typeof AUTOPILOT_TERMINAL_CLEANUP_BOUNDARIES)[number];
 
 export interface AutopilotCloseResult {
   readonly schema_version: 'autopilot.close_result.v1';
@@ -148,6 +169,33 @@ interface PreparedCloseContext {
   readonly active: ActiveAutopilotRow;
 }
 
+interface TerminalCleanupManifest {
+  readonly schema_version: 'autopilot.terminal_cleanup.v1';
+  readonly repo_key: string;
+  readonly autopilot_id: string;
+  readonly workstream: string;
+  readonly workstream_run: string;
+  readonly outcome: 'closed' | 'aborted';
+  readonly terminal_sha: string;
+  readonly archive_ref: string;
+  readonly archive_runtime_path: string;
+  readonly result_path: string;
+  readonly result: AutopilotCloseResult;
+  readonly prepared_at: string;
+}
+
+interface CloseSessionBinding {
+  readonly env: ProcessEnvLike;
+  readonly supervisor: DurableRunSupervisorClient | null;
+  readonly attachment: Awaited<ReturnType<DurableRunSupervisorClient['attach']>> | null;
+}
+
+interface TerminalCleanupRecovery {
+  readonly context: PreparedCloseContext;
+  readonly manifest: TerminalCleanupManifest;
+  readonly env: ProcessEnvLike;
+}
+
 interface CloseValidationResult {
   readonly retainedClaims: readonly AutopilotPathClaim[];
   readonly retainedWriteClaims: readonly AutopilotPathClaim[];
@@ -177,10 +225,16 @@ function fail(code: string, message: string, evidence: readonly string[] = []): 
 }
 
 export async function closeAutopilotWorkstream(options: AutopilotCloseOptions): Promise<AutopilotCloseResult> {
-  const env = options.env ?? process.env;
+  let env = options.env ?? process.env;
   const now = options.now ?? new Date();
   const dryRun = options.dryRun === true;
+  if (!dryRun) {
+    const recovered = await recoverAutopilotTerminalCleanup({ ...options, expectedOutcome: 'closed' });
+    if (recovered !== null) return recovered;
+  }
   const prepared = await resolveCloseContext(options, env);
+  const sessionBinding = dryRun ? { env, supervisor: null, attachment: null } : await ensureCloseSession(prepared, env, options.coordinationSessionId);
+  env = sessionBinding.env;
 
   if (dryRun) {
     const validation = await validateCloseReadiness(prepared, now, env);
@@ -204,8 +258,9 @@ export async function closeAutopilotWorkstream(options: AutopilotCloseOptions): 
     });
   }
 
-  return await withAutopilotFileLock(
-    mainMergeLockPathForRepo(prepared.repo.repoKey, env),
+  try {
+    return await withAutopilotFileLock(
+    closeMergeLockPath(prepared, env),
     `autopilot-close:${prepared.active.autopilot_id}:${prepared.active.workstream_run}`,
     async () => {
       let active = await setActiveStatus(prepared.coordinationRoot, prepared.active, 'merging', now, null);
@@ -218,9 +273,18 @@ export async function closeAutopilotWorkstream(options: AutopilotCloseOptions): 
       let coordinatorTerminalCommitted = false;
       let targetLanded = false;
       try {
+        // The coordinator transaction changes the durable run to merging and
+        // installs the launch fence before validation can observe mutable state.
+        if (coordinatorAuthority && terminalIntent === null) terminalIntent = await (await ReservationCoordinationClient.fromEnvironment(env)).prepareRunTerminal('closed');
+        if (coordinatorAuthority) await options.observeCloseRaceBoundary?.('after-durable-launch-fence-before-validation');
+        await validateTerminalArchiveSources(context);
         if (coordinatorAuthority) await reconcilePendingReservationResolutions(active, env);
         const validation = await validateCloseReadiness(context, now, env, terminalIntent !== null);
         if (validation.blockers.length > 0) {
+          if (terminalIntent !== null) {
+            await (await ReservationCoordinationClient.fromEnvironment(env)).cancelRunTerminal(terminalIntent, 'close validation blocked');
+            terminalIntent = null;
+          }
           active = await setActiveStatus(context.coordinationRoot, active, 'blocked', now, null);
           const result = buildCloseResult({
             outcome: 'blocked',
@@ -244,7 +308,6 @@ export async function closeAutopilotWorkstream(options: AutopilotCloseOptions): 
           return { ...result, close_result_path: resultPath };
         }
 
-        if (coordinatorAuthority && terminalIntent === null) terminalIntent = await (await ReservationCoordinationClient.fromEnvironment(env)).prepareRunTerminal('closed');
         const targetBefore = gitHead(context.repo.repoRoot);
         const workstreamBefore = gitHead(active.main_worktree_path);
         const integrationCommitSha = await integrateTargetIntoWorkstream({ active, targetHead: targetBefore, env });
@@ -302,44 +365,38 @@ export async function closeAutopilotWorkstream(options: AutopilotCloseOptions): 
           changed_paths: changedPaths,
           merged_at: now.toISOString(),
         };
-        await appendJsonl(join(context.coordinationRoot, MERGE_LOG_FILE), parseMergeEvent(mergeEvent));
-        await appendForeignMergeAcks(context, validation.nonIntersectingForeignMerges, now);
+        if (!coordinationCutoverCommitted(resolveAutopilotStateRoot(env), active.repo_key)) {
+          await appendJsonl(join(context.coordinationRoot, MERGE_LOG_FILE), parseMergeEvent(mergeEvent));
+          await appendForeignMergeAcks(context, validation.nonIntersectingForeignMerges, now);
+        }
 
         const archiveRef = `autopilot/archive/${active.workstream_run}/main`;
+        await assertPrivateTerminalArchiveAncestry(context, true);
+        await options.observeCloseRaceBoundary?.('after-private-archive-staging-before-terminal-commit');
+        await assertPrivateTerminalArchiveAncestry(context, true);
         active = await setActiveStatus(context.coordinationRoot, active, 'closed', now, now.toISOString());
+        const closedContext: PreparedCloseContext = { ...context, active };
+        const manifest = await prepareTerminalCleanupManifest({
+          context: closedContext, outcome: 'closed', terminalSha: targetAfter, archiveRef, now,
+          result: buildCloseResult({
+            outcome: 'closed', active, repoKey: context.repo.repoKey, targetBefore, targetAfter, workstreamBefore, workstreamAfter,
+            integrationCommitSha, changedPaths, releasedClaims: validation.retainedClaims.map((claim) => `${claim.claim_type} ${claim.path}`),
+            archivedRuntimePath: join(context.worktreeRoot, '_archive', active.workstream_run, 'runtime'), archiveRef, mergeId, blockers: [],
+            closeResultPath: join(context.worktreeRoot, '_archive', active.workstream_run, '_close-result.json'), now,
+          }),
+        });
+        await observeTerminalBoundary(options, 'after-terminal-manifest');
         await writeAndRecordRunTerminalEvidence(active, 'closed', targetAfter, env, now);
         coordinatorTerminalCommitted = true;
-        await updateBranchesInfo(active, archiveRef, targetAfter);
-        const closedContext: PreparedCloseContext = { ...context, active };
-        const archivedRuntimePath = await archiveRuntimeArtifacts(closedContext, archiveRef, now);
-        const releasedClaims = await releaseRetainedClaims(closedContext, validation.retainedClaims, now);
-        await archiveWorktreeIndex(active, now);
-        await cleanupClosedAutopilotRun({ active, archiveRef, archiveSha: targetAfter, reason: 'autopilot close run-owned cleanup', removeActiveTaskDir: true, env, now });
+        await observeTerminalBoundary(options, 'after-terminal-commit');
+        const terminalResult = await completeTerminalCleanup({ context: closedContext, manifest, env }, options.observeTerminalCleanupBoundary);
+        await detachExistingTerminalSession(sessionBinding, active, 'close-terminal-cleanup-finished');
+        return terminalResult;
 
-        const archiveCloseResultPath = join(dirname(archivedRuntimePath), '_close-result.json');
-        const result = buildCloseResult({
-          outcome: 'closed',
-          active,
-          repoKey: context.repo.repoKey,
-          targetBefore,
-          targetAfter,
-          workstreamBefore,
-          workstreamAfter,
-          integrationCommitSha,
-          changedPaths,
-          releasedClaims,
-          archivedRuntimePath,
-          archiveRef,
-          mergeId,
-          blockers: [],
-          closeResultPath: archiveCloseResultPath,
-          now,
-        });
-        await writeJsonAtomic(archiveCloseResultPath, result);
-        return result;
       } catch (error) {
+        if (coordinatorTerminalCommitted) fail('terminal-cleanup-recovery-required', `Coordinator close is terminal; remaining archive/worktree cleanup must resume forward-only after attempt ${attemptPath}: ${errorMessage(error)}`, [active.workstream_run]);
         const recoveryFailures: string[] = [];
-        if (terminalIntent !== null && !coordinatorTerminalCommitted && !targetLanded) {
+        if (terminalIntent !== null && !targetLanded) {
           try { await (await ReservationCoordinationClient.fromEnvironment(env)).cancelRunTerminal(terminalIntent, 'close failed before final target mutation'); }
           catch (recoveryError) { recoveryFailures.push(`terminal-intent cancellation failed: ${errorMessage(recoveryError)}`); }
         }
@@ -350,20 +407,29 @@ export async function closeAutopilotWorkstream(options: AutopilotCloseOptions): 
         fail('close-failed', `Autopilot close failed after attempt ${attemptPath}: ${errorMessage(error)}`);
       }
     },
-  );
+    );
+  } finally {
+    await detachTransientCloseSession(sessionBinding, 'close-invocation-finished');
+  }
 }
 
 export async function abortAutopilotWorkstream(options: AutopilotCloseOptions): Promise<AutopilotCloseResult> {
-  const env = options.env ?? process.env;
+  let env = options.env ?? process.env;
   const now = options.now ?? new Date();
   const dryRun = options.dryRun === true;
+  if (!dryRun) {
+    const recovered = await recoverAutopilotTerminalCleanup({ ...options, expectedOutcome: 'aborted' });
+    if (recovered !== null) return recovered;
+  }
   const prepared = await resolveCloseContext(options, env);
+  const sessionBinding = dryRun ? { env, supervisor: null, attachment: null } : await ensureCloseSession(prepared, env, options.coordinationSessionId);
+  env = sessionBinding.env;
   const currentHead = existsSync(prepared.active.main_worktree_path) ? gitHead(prepared.active.main_worktree_path) : prepared.active.target_base_sha;
   const changedPaths = existsSync(prepared.active.main_worktree_path) && commitExists(prepared.active.main_worktree_path, prepared.active.target_base_sha)
     ? diffPaths(prepared.active.main_worktree_path, prepared.active.target_base_sha, currentHead)
     : [];
-  const blockers = await abortReadinessBlockers(prepared.active, env);
   if (dryRun) {
+    const blockers = await abortReadinessBlockers(prepared.active, env);
     return buildCloseResult({
       outcome: 'dry-run',
       active: prepared.active,
@@ -384,8 +450,9 @@ export async function abortAutopilotWorkstream(options: AutopilotCloseOptions): 
     });
   }
 
-  return await withAutopilotFileLock(
-    mainMergeLockPathForRepo(prepared.repo.repoKey, env),
+  try {
+    return await withAutopilotFileLock(
+    closeMergeLockPath(prepared, env),
     `autopilot-abort:${prepared.active.autopilot_id}:${prepared.active.workstream_run}`,
     async () => {
       let active = await setActiveStatus(prepared.coordinationRoot, prepared.active, 'merging', now, null);
@@ -397,8 +464,16 @@ export async function abortAutopilotWorkstream(options: AutopilotCloseOptions): 
       if (terminalIntent !== null && terminalIntent.outcome !== 'aborted') fail('terminal-intent-outcome-mismatch', 'prepared coordinator terminal intent is for close, not abort.', [terminalIntent.terminal_intent_id]);
       let coordinatorTerminalCommitted = false;
       try {
+        // Abort uses the same durable pre-validation launch fence as close.
+        if (coordinatorAuthority && terminalIntent === null) terminalIntent = await (await ReservationCoordinationClient.fromEnvironment(env)).prepareRunTerminal('aborted');
+        if (coordinatorAuthority) await options.observeCloseRaceBoundary?.('after-durable-launch-fence-before-validation');
+        await validateTerminalArchiveSources(context);
         const latestBlockers = await abortReadinessBlockers(active, env);
         if (latestBlockers.length > 0) {
+          if (terminalIntent !== null) {
+            await (await ReservationCoordinationClient.fromEnvironment(env)).cancelRunTerminal(terminalIntent, 'abort validation blocked');
+            terminalIntent = null;
+          }
           active = await setActiveStatus(context.coordinationRoot, active, 'blocked', now, null);
           const result = buildCloseResult({
             outcome: 'blocked',
@@ -421,45 +496,38 @@ export async function abortAutopilotWorkstream(options: AutopilotCloseOptions): 
           const resultPath = await writeCloseResult(active.runtime_root, result, now);
           return { ...result, close_result_path: resultPath };
         }
-        if (coordinatorAuthority && terminalIntent === null) terminalIntent = await (await ReservationCoordinationClient.fromEnvironment(env)).prepareRunTerminal('aborted');
         const archiveRef = `autopilot/archive/${active.workstream_run}/aborted`;
         const workstreamHead = gitHead(active.main_worktree_path);
+        await assertPrivateTerminalArchiveAncestry(context, true);
+        await options.observeCloseRaceBoundary?.('after-private-archive-staging-before-terminal-commit');
+        await assertPrivateTerminalArchiveAncestry(context, true);
         active = await setActiveStatus(context.coordinationRoot, active, 'closed', now, now.toISOString());
-        await writeAndRecordRunTerminalEvidence(active, 'aborted', workstreamHead, env, now);
-        coordinatorTerminalCommitted = true;
-        await updateBranchesInfo(active, archiveRef, workstreamHead);
         const closedContext: PreparedCloseContext = { ...context, active };
-        const archivedRuntimePath = await archiveRuntimeArtifacts(closedContext, archiveRef, now);
         const latestRetainedClaims = active.coordination_authority === 'legacy-path-claims-v1'
           ? (await readPathClaims(closedContext.coordinationRoot)).filter((claim) => claim.autopilot_id === active.autopilot_id && claim.workstream_run === active.workstream_run)
           : [];
-        const releasedClaims = await releaseRetainedClaims(closedContext, latestRetainedClaims, now);
-        await archiveWorktreeIndex(active, now);
-        await cleanupClosedAutopilotRun({ active, archiveRef, archiveSha: workstreamHead, reason: 'autopilot abort run-owned cleanup', removeActiveTaskDir: true, env, now });
-        const archiveCloseResultPath = join(dirname(archivedRuntimePath), '_abort-result.json');
-        const result = buildCloseResult({
-          outcome: 'aborted',
-          active,
-          repoKey: context.repo.repoKey,
-          targetBefore: gitHead(context.repo.repoRoot),
-          targetAfter: null,
-          workstreamBefore: workstreamHead,
-          workstreamAfter: workstreamHead,
-          integrationCommitSha: null,
-          changedPaths,
-          releasedClaims,
-          archivedRuntimePath,
-          archiveRef,
-          mergeId: null,
-          blockers: [],
-          closeResultPath: archiveCloseResultPath,
-          now,
+        const manifest = await prepareTerminalCleanupManifest({
+          context: closedContext, outcome: 'aborted', terminalSha: workstreamHead, archiveRef, now,
+          result: buildCloseResult({
+            outcome: 'aborted', active, repoKey: context.repo.repoKey, targetBefore: gitHead(context.repo.repoRoot), targetAfter: null,
+            workstreamBefore: workstreamHead, workstreamAfter: workstreamHead, integrationCommitSha: null, changedPaths,
+            releasedClaims: latestRetainedClaims.map((claim) => `${claim.claim_type} ${claim.path}`),
+            archivedRuntimePath: join(context.worktreeRoot, '_archive', active.workstream_run, 'runtime'), archiveRef, mergeId: null, blockers: [],
+            closeResultPath: join(context.worktreeRoot, '_archive', active.workstream_run, '_abort-result.json'), now,
+          }),
         });
-        await writeJsonAtomic(archiveCloseResultPath, result);
-        return result;
+        await observeTerminalBoundary(options, 'after-terminal-manifest');
+        await writeAndRecordRunTerminalEvidence(active, 'aborted', workstreamHead, env, now);
+        coordinatorTerminalCommitted = true;
+        await observeTerminalBoundary(options, 'after-terminal-commit');
+        const terminalResult = await completeTerminalCleanup({ context: closedContext, manifest, env }, options.observeTerminalCleanupBoundary);
+        await detachExistingTerminalSession(sessionBinding, active, 'abort-terminal-cleanup-finished');
+        return terminalResult;
+
       } catch (error) {
+        if (coordinatorTerminalCommitted) fail('terminal-cleanup-recovery-required', `Coordinator abort is terminal; remaining archive/worktree cleanup must resume forward-only after attempt ${attemptPath}: ${errorMessage(error)}`, [active.workstream_run]);
         const recoveryFailures: string[] = [];
-        if (terminalIntent !== null && !coordinatorTerminalCommitted) {
+        if (terminalIntent !== null) {
           try { await (await ReservationCoordinationClient.fromEnvironment(env)).cancelRunTerminal(terminalIntent, 'abort failed before coordinator terminal commit'); }
           catch (recoveryError) { recoveryFailures.push(`terminal-intent cancellation failed: ${errorMessage(recoveryError)}`); }
         }
@@ -470,14 +538,268 @@ export async function abortAutopilotWorkstream(options: AutopilotCloseOptions): 
         fail('abort-failed', `Autopilot abort failed after attempt ${attemptPath}: ${errorMessage(error)}`);
       }
     },
-  );
+    );
+  } finally {
+    await detachTransientCloseSession(sessionBinding, 'abort-invocation-finished');
+  }
+}
+
+export async function recoverAutopilotTerminalCleanup(options: AutopilotCloseOptions & { readonly expectedOutcome?: 'closed' | 'aborted' }): Promise<AutopilotCloseResult | null> {
+  const baseEnv = options.env ?? process.env;
+  const repo = resolveRepoIdentity(options.sourceCwd);
+  const paths = coordinatorRuntimePaths(baseEnv);
+  if (!coordinationCutoverCommitted(resolveAutopilotStateRoot(baseEnv), repo.repoKey) && !existsSync(paths.databasePath)) return null;
+  const worktreeRoot = worktreeRootForRepo(repo.repoKey, baseEnv);
+  let terminalRows = (await readCoordinatorActiveAutopilots(repo, worktreeRoot, baseEnv, true)).filter((row) => row.workstream === options.workstream && row.status === 'closed' && (options.workstreamRun === undefined || options.workstreamRun === null || row.workstream_run === options.workstreamRun));
+  if (terminalRows.length === 0) return null;
+  if ((options.workstreamRun === undefined || options.workstreamRun === null) && terminalRows.length > 0) {
+    const pending: ActiveAutopilotRow[] = [];
+    for (const row of terminalRows) {
+      const candidateStatus = await new CoordinatorClient({ env: baseEnv }).query('status', repo.repoKey, row.workstream_run);
+      const candidateMain = arrayField(candidateStatus.payload['worktrees'], 'terminal cleanup candidate worktrees').map((value) => parseCoordinationWorktree(value)).find((worktree) => worktree.owner.workstream_run === row.workstream_run && worktree.owner.unit_id === 'main' && worktree.kind === 'main');
+      if (candidateMain?.state !== 'removed') pending.push(row);
+      else {
+        const completedManifest = await readTerminalCleanupManifest(row);
+        await verifyCoordinatorBoundTerminalCleanup(candidateStatus.payload, row, completedManifest);
+        await verifyTerminalResultProjection(completedManifest);
+      }
+    }
+    terminalRows = pending;
+  }
+  if (terminalRows.length === 0) return null;
+  if (terminalRows.length > 1) fail('ambiguous-terminal-cleanup', 'Multiple incomplete terminal runs match cleanup recovery; pass --run.', terminalRows.map((row) => row.workstream_run));
+  const active = terminalRows[0];
+  if (active === undefined) return null;
+  const status = await new CoordinatorClient({ env: baseEnv }).query('status', repo.repoKey, active.workstream_run);
+  const runs = arrayField(status.payload['runs'], 'terminal cleanup runs').map((value) => parseCoordinationRun(value));
+  const run = runs[0];
+  if (runs.length !== 1 || run === undefined || (run.status !== 'closed' && run.status !== 'aborted')) fail('invalid-terminal-cleanup-state', 'Terminal cleanup recovery lacks exactly one terminal durable run.', [active.workstream_run]);
+  const intents = arrayField(status.payload['run_terminal_intents'], 'terminal cleanup intents').map((value) => parseCoordinationRunTerminalIntent(value)).filter((intent) => intent.state === 'committed');
+  const intent = intents[0];
+  if (intents.length !== 1 || intent === undefined || intent.outcome !== run.status) fail('invalid-terminal-cleanup-state', 'Terminal cleanup recovery lacks one matching committed terminal intent.', [active.workstream_run]);
+  if (options.expectedOutcome !== undefined && intent.outcome !== options.expectedOutcome) fail('terminal-outcome-mismatch', `Terminal run outcome is ${intent.outcome}, not ${options.expectedOutcome}.`, [active.workstream_run]);
+  const manifest = await readTerminalCleanupManifest(active);
+  await verifyCoordinatorBoundTerminalCleanup(status.payload, active, manifest);
+  if (manifest.outcome !== intent.outcome) fail('invalid-terminal-cleanup-state', 'Terminal cleanup manifest outcome disagrees with coordinator evidence.', [active.workstream_run]);
+  const worktrees = arrayField(status.payload['worktrees'], 'terminal cleanup worktrees').map((value) => parseCoordinationWorktree(value));
+  const main = worktrees.find((worktree) => worktree.owner.workstream_run === active.workstream_run && worktree.owner.unit_id === 'main' && worktree.kind === 'main');
+  if (main?.state === 'removed') {
+    await verifyTerminalResultProjection(manifest);
+    await detachExistingTerminalSession({ env: baseEnv, supervisor: null, attachment: null }, active, 'terminal-cleanup-already-complete');
+    return manifest.result;
+  }
+  let recoveryEnv = baseEnv;
+  let transientRecovery: Awaited<ReturnType<DurableRunSupervisorClient['attachTerminalRecovery']>> | null = null;
+  let transientSupervisor: DurableRunSupervisorClient | null = null;
+  const contextPath = baseEnv[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV];
+  let currentContext = false;
+  if (contextPath !== undefined && contextPath.trim().length > 0) {
+    const context = await readCoordinatorSessionContext(contextPath);
+    const lease = arrayField(status.payload['session_leases'], 'terminal cleanup sessions').map((value) => parseCoordinationSessionLease(value)).find((candidate) => candidate.session_lease_id === context.session_lease_id);
+    currentContext = context.repo_id === active.repo_key && context.autopilot_id === active.autopilot_id && context.workstream_run === active.workstream_run &&
+      context.pid === process.pid && context.boot_id === currentBootId() && lease?.status === 'attached' && lease.session_generation === run.active_session_generation;
+  }
+  if (!currentContext) {
+    if (options.coordinationSessionId === undefined || options.coordinationSessionId.trim().length === 0) fail('terminal-recovery-session-required', 'Terminal cleanup requires a fenced recovery attachment after process death.', [active.workstream_run]);
+    transientSupervisor = new DurableRunSupervisorClient(baseEnv);
+    transientRecovery = await transientSupervisor.attachTerminalRecovery({ repo, active, rawSessionId: options.coordinationSessionId });
+    recoveryEnv = { ...baseEnv, [AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV]: transientRecovery.contextPath };
+  }
+  try {
+    return await completeTerminalCleanup({ context: { repo, coordinationRoot: coordinationRootForRepo(repo.repoKey, baseEnv), worktreeRoot, active }, manifest, env: recoveryEnv }, options.observeTerminalCleanupBoundary);
+  } finally {
+    if (transientRecovery !== null && transientSupervisor !== null) {
+      await transientSupervisor.client.mutate('detach-session', {
+        repoId: transientRecovery.session.repo_id, workstreamRun: transientRecovery.session.workstream_run, sessionId: transientRecovery.session.session_id,
+        fencingGeneration: transientRecovery.session.session_generation, expectedVersion: transientRecovery.session.version,
+        idempotencyKey: `detach-terminal-recovery:${transientRecovery.session.session_lease_id}`,
+      }, { reason: 'terminal-cleanup-recovery-finished', session_lease_id: transientRecovery.session.session_lease_id, session_token: transientRecovery.context.session_token });
+    }
+  }
+}
+
+async function ensureCloseSession(context: PreparedCloseContext, env: ProcessEnvLike, rawSessionId: string | undefined): Promise<CloseSessionBinding> {
+  if (context.active.coordination_authority !== 'coordinator-edit-leases-v1') return { env, supervisor: null, attachment: null };
+  const existingPath = env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV];
+  if (existingPath !== undefined && existingPath.trim().length > 0) {
+    const existing = await readCoordinatorSessionContext(existingPath);
+    if (existing.repo_id === context.active.repo_key && existing.autopilot_id === context.active.autopilot_id && existing.workstream_run === context.active.workstream_run && existing.pid === process.pid && existing.boot_id === currentBootId()) return { env, supervisor: null, attachment: null };
+  }
+  if (rawSessionId === undefined || rawSessionId.trim().length === 0) fail('coordination-authority-unavailable', 'Coordinator-backed close/abort requires a durable session attachment; refusing legacy fallback.');
+  const supervisor = new DurableRunSupervisorClient(env);
+  const attachment = await supervisor.attach({ repo: context.repo, active: context.active, rawSessionId });
+  return { env: { ...env, [AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV]: attachment.contextPath }, supervisor, attachment };
+}
+
+async function detachExistingTerminalSession(binding: CloseSessionBinding, active: ActiveAutopilotRow, reason: string): Promise<void> {
+  if (active.coordination_authority !== 'coordinator-edit-leases-v1' || binding.attachment !== null) return;
+  const contextPath = binding.env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV];
+  if (contextPath === undefined || contextPath.trim().length === 0) return;
+  const context = await readCoordinatorSessionContext(contextPath);
+  if (context.repo_id !== active.repo_key || context.autopilot_id !== active.autopilot_id || context.workstream_run !== active.workstream_run) return;
+  await new CoordinatorClient({ env: binding.env }).mutate('detach-session', {
+    repoId: context.repo_id, workstreamRun: context.workstream_run, sessionId: context.session_id,
+    fencingGeneration: context.session_generation, expectedVersion: context.session_version,
+    idempotencyKey: `detach-terminal-session:${context.session_lease_id}`,
+  }, { reason, session_lease_id: context.session_lease_id, session_token: context.session_token });
+}
+
+async function detachTransientCloseSession(binding: CloseSessionBinding, reason: string): Promise<void> {
+  if (binding.supervisor === null || binding.attachment === null) return;
+  await binding.supervisor.client.mutate('detach-session', {
+    repoId: binding.attachment.session.repo_id, workstreamRun: binding.attachment.session.workstream_run, sessionId: binding.attachment.session.session_id,
+    fencingGeneration: binding.attachment.session.session_generation, expectedVersion: binding.attachment.session.version,
+    idempotencyKey: `detach-close-session:${binding.attachment.session.session_lease_id}`,
+  }, { reason, session_lease_id: binding.attachment.session.session_lease_id, session_token: binding.attachment.context.session_token });
+}
+
+async function prepareTerminalCleanupManifest(input: { readonly context: PreparedCloseContext; readonly outcome: 'closed' | 'aborted'; readonly terminalSha: string; readonly archiveRef: string; readonly result: AutopilotCloseResult; readonly now: Date }): Promise<TerminalCleanupManifest> {
+  const manifest: TerminalCleanupManifest = {
+    schema_version: 'autopilot.terminal_cleanup.v1', repo_key: input.context.active.repo_key, autopilot_id: input.context.active.autopilot_id,
+    workstream: input.context.active.workstream, workstream_run: input.context.active.workstream_run, outcome: input.outcome,
+    terminal_sha: input.terminalSha, archive_ref: input.archiveRef, archive_runtime_path: input.result.archived_runtime_path ?? '',
+    result_path: input.result.close_result_path ?? '', result: input.result, prepared_at: input.now.toISOString(),
+  };
+  if (manifest.archive_runtime_path.length === 0 || manifest.result_path.length === 0) fail('invalid-terminal-cleanup-state', 'Terminal cleanup manifest requires deterministic archive/result paths.');
+  const path = terminalCleanupManifestPath(input.context.active);
+  if (existsSync(path)) {
+    const existing = parseTerminalCleanupManifest(JSON.parse(await readFile(path, 'utf8')) as unknown, input.context.active);
+    if (existing.outcome !== manifest.outcome || existing.terminal_sha !== manifest.terminal_sha || existing.archive_ref !== manifest.archive_ref || existing.archive_runtime_path !== manifest.archive_runtime_path || existing.result_path !== manifest.result_path) fail('terminal-cleanup-intent-conflict', 'Existing terminal cleanup intent differs from the requested immutable recovery work.', [path]);
+    if (!commitExists(input.context.active.source_repo, existing.terminal_sha)) fail('terminal-cleanup-git-drift', 'Existing terminal cleanup intent references a Git object that is no longer available.', [existing.terminal_sha]);
+    return existing;
+  }
+  await writeJsonAtomic(path, manifest);
+  return manifest;
+}
+
+async function completeTerminalCleanup(recovery: TerminalCleanupRecovery, observer?: (boundary: AutopilotTerminalCleanupBoundary) => Promise<void> | void): Promise<AutopilotCloseResult> {
+  const { context, manifest, env } = recovery;
+  await updateTaskInfoStatus(context.active, 'closed');
+  await updateTaskInfoClosedAt(context.active, manifest.prepared_at);
+  await updateBranchesInfo(context.active, manifest.archive_ref, manifest.terminal_sha);
+  await observer?.('after-terminal-projections');
+  const archivedRuntimePath = await archiveRuntimeArtifacts(context, manifest.archive_ref, new Date(manifest.prepared_at));
+  if (archivedRuntimePath !== manifest.archive_runtime_path) fail('terminal-cleanup-path-mismatch', 'Runtime archive path disagrees with immutable terminal cleanup intent.', [archivedRuntimePath, manifest.archive_runtime_path]);
+  await observer?.('after-runtime-archive');
+  const retainedClaims = context.active.coordination_authority === 'legacy-path-claims-v1'
+    ? (await readPathClaims(context.coordinationRoot)).filter((claim) => claim.autopilot_id === context.active.autopilot_id && claim.workstream_run === context.active.workstream_run)
+    : [];
+  await releaseRetainedClaims(context, retainedClaims, new Date(manifest.prepared_at));
+  if (!coordinationCutoverCommitted(resolveAutopilotStateRoot(env), context.active.repo_key)) await archiveWorktreeIndex(context.active, new Date(manifest.prepared_at));
+  await writeJsonAtomic(manifest.result_path, manifest.result);
+  await observer?.('after-result-projection');
+  await cleanupClosedAutopilotRun({
+    active: context.active, archiveRef: manifest.archive_ref, archiveSha: manifest.terminal_sha,
+    reason: manifest.outcome === 'closed' ? 'autopilot close terminal-cleanup recovery' : 'autopilot abort terminal-cleanup recovery',
+    removeActiveTaskDir: true, env, now: new Date(manifest.prepared_at),
+    ...(observer === undefined ? {} : { observeTerminalBoundary: observer }),
+  });
+  return manifest.result;
+}
+
+async function verifyTerminalResultProjection(manifest: TerminalCleanupManifest): Promise<void> {
+  if (!existsSync(manifest.result_path)) fail('terminal-cleanup-projection-missing', 'Completed terminal cleanup is missing its final result projection.', [manifest.result_path]);
+  const projected = parseTerminalCloseResult(JSON.parse(await readFile(manifest.result_path, 'utf8')) as unknown);
+  if (canonicalDigest(projected) !== canonicalDigest(manifest.result)) fail('terminal-cleanup-projection-mismatch', 'Final terminal cleanup projection differs from its hash-bound cleanup intent.', [manifest.result_path]);
+}
+
+async function verifyCoordinatorBoundTerminalCleanup(payload: Readonly<Record<string, unknown>>, active: ActiveAutopilotRow, manifest: TerminalCleanupManifest): Promise<void> {
+  const expectedSource = manifest.outcome === 'closed' ? 'run-close' : 'run-abort';
+  const accepted = arrayField(payload['reconciliation_evidence'], 'terminal reconciliation evidence').map((value) => parseCoordinationReconciliationEvidence(value)).filter((entry) => entry.source === expectedSource && entry.workstream_run === active.workstream_run);
+  const evidence = accepted[0]?.release_condition.evidence;
+  if (accepted.length !== 1 || evidence === null || evidence === undefined) fail('terminal-cleanup-evidence-missing', 'Terminal cleanup manifest is not bound to exactly one accepted coordinator evidence record.', [active.workstream_run]);
+  const activeEvidence = join(active.main_worktree_path, ...evidence.ref.split('/'));
+  const runtimePrefix = `${AUTOPILOT_RUNTIME_ROOT_PREFIX}/${active.workstream}/`;
+  if (!evidence.ref.startsWith(runtimePrefix)) fail('terminal-cleanup-evidence-mismatch', 'Accepted terminal evidence ref is outside the deterministic runtime root.', [evidence.ref, runtimePrefix]);
+  const archiveEvidence = join(active.worktree_root, '_archive', active.workstream_run, 'runtime', ...evidence.ref.slice(runtimePrefix.length).split('/'));
+  const evidencePath = existsSync(activeEvidence) ? activeEvidence : archiveEvidence;
+  if (!existsSync(evidencePath)) fail('terminal-cleanup-evidence-missing', 'Accepted terminal evidence artifact is unavailable from active or archived run storage.', [activeEvidence, archiveEvidence]);
+  const evidenceBytes = await readFile(evidencePath);
+  const evidenceSha = `sha256:${createHash('sha256').update(evidenceBytes).digest('hex')}`;
+  if (evidenceSha !== evidence.sha256) fail('terminal-cleanup-evidence-mismatch', 'Accepted terminal evidence bytes no longer match coordinator authority.', [evidencePath, evidence.sha256, evidenceSha]);
+  const document = requireRecord(JSON.parse(await readFile(evidencePath, 'utf8')) as unknown, 'run terminal evidence');
+  const expectedManifestRef = 'close/_terminal-cleanup.json';
+  const manifestPath = existsSync(terminalCleanupManifestPath(active)) ? terminalCleanupManifestPath(active) : join(active.worktree_root, '_archive', active.workstream_run, 'runtime', ...expectedManifestRef.split('/'));
+  const manifestBytes = await readFile(manifestPath);
+  const manifestSha = `sha256:${createHash('sha256').update(manifestBytes).digest('hex')}`;
+  if (document['schema_version'] !== 'autopilot.run_terminal.v1' || document['repo_key'] !== active.repo_key || document['autopilot_id'] !== active.autopilot_id || document['workstream_run'] !== active.workstream_run || document['outcome'] !== manifest.outcome || document['terminal_sha'] !== manifest.terminal_sha || document['cleanup_manifest_ref'] !== expectedManifestRef || document['cleanup_manifest_sha256'] !== manifestSha) fail('terminal-cleanup-evidence-mismatch', 'Terminal cleanup manifest is not hash-bound to accepted terminal evidence.', [active.workstream_run]);
+}
+
+async function readTerminalCleanupManifest(active: ActiveAutopilotRow): Promise<TerminalCleanupManifest> {
+  const activePath = terminalCleanupManifestPath(active);
+  const archivePath = join(active.worktree_root, '_archive', active.workstream_run, 'runtime', 'close', '_terminal-cleanup.json');
+  const path = existsSync(activePath) ? activePath : archivePath;
+  if (!existsSync(path)) fail('terminal-cleanup-intent-missing', 'Terminal coordinator evidence exists without its required cleanup intent.', [activePath, archivePath]);
+  return parseTerminalCleanupManifest(JSON.parse(await readFile(path, 'utf8')) as unknown, active);
+}
+
+function terminalCleanupManifestPath(active: ActiveAutopilotRow): string {
+  return join(active.runtime_root, 'close', '_terminal-cleanup.json');
+}
+
+function parseTerminalCleanupManifest(value: unknown, active: ActiveAutopilotRow): TerminalCleanupManifest {
+  const row = requireRecord(value, 'terminal cleanup manifest');
+  const fields = ['archive_ref', 'archive_runtime_path', 'autopilot_id', 'outcome', 'prepared_at', 'repo_key', 'result', 'result_path', 'schema_version', 'terminal_sha', 'workstream', 'workstream_run'];
+  const unknown = Object.keys(row).filter((field) => !fields.includes(field));
+  if (unknown.length > 0 || fields.some((field) => !(field in row))) fail('invalid-terminal-cleanup-state', 'Terminal cleanup manifest has an incompatible closed shape.', unknown);
+  if (row['schema_version'] !== 'autopilot.terminal_cleanup.v1' || row['repo_key'] !== active.repo_key || row['autopilot_id'] !== active.autopilot_id || row['workstream'] !== active.workstream || row['workstream_run'] !== active.workstream_run) fail('terminal-cleanup-owner-mismatch', 'Terminal cleanup manifest does not belong to the exact durable run.', [active.workstream_run]);
+  const outcome = row['outcome'];
+  if (outcome !== 'closed' && outcome !== 'aborted') fail('invalid-terminal-cleanup-state', 'Terminal cleanup outcome is invalid.');
+  const terminalSha = expectString(row, 'terminal_sha');
+  const archiveRef = expectString(row, 'archive_ref');
+  const archiveRuntimePath = expectString(row, 'archive_runtime_path');
+  const resultPath = expectString(row, 'result_path');
+  const preparedAt = expectString(row, 'prepared_at');
+  if (Number.isNaN(Date.parse(preparedAt)) || normalizeSha(terminalSha) === null) fail('invalid-terminal-cleanup-state', 'Terminal cleanup timestamp or Git object id is invalid.');
+  const expectedArchiveRuntime = join(active.worktree_root, '_archive', active.workstream_run, 'runtime');
+  const expectedResult = join(active.worktree_root, '_archive', active.workstream_run, outcome === 'closed' ? '_close-result.json' : '_abort-result.json');
+  if (archiveRuntimePath !== expectedArchiveRuntime || resultPath !== expectedResult || !archiveRef.startsWith(`autopilot/archive/${active.workstream_run}/`)) fail('terminal-cleanup-path-mismatch', 'Terminal cleanup paths/ref are not derived from exact run ownership.', [archiveRuntimePath, resultPath, archiveRef]);
+  const closeResult = parseTerminalCloseResult(row['result']);
+  if (closeResult.outcome !== outcome || closeResult.repo_key !== active.repo_key || closeResult.autopilot_id !== active.autopilot_id || closeResult.workstream !== active.workstream || closeResult.workstream_run !== active.workstream_run || closeResult.archive_ref !== archiveRef || closeResult.archived_runtime_path !== archiveRuntimePath || closeResult.close_result_path !== resultPath) fail('terminal-cleanup-owner-mismatch', 'Terminal cleanup result projection identity is invalid.', [active.workstream_run]);
+  return { schema_version: 'autopilot.terminal_cleanup.v1', repo_key: active.repo_key, autopilot_id: active.autopilot_id, workstream: active.workstream, workstream_run: active.workstream_run, outcome, terminal_sha: terminalSha, archive_ref: archiveRef, archive_runtime_path: archiveRuntimePath, result_path: resultPath, result: closeResult, prepared_at: preparedAt };
+}
+
+function parseTerminalCloseResult(value: unknown): AutopilotCloseResult {
+  const row = requireRecord(value, 'terminal cleanup close result');
+  const fields = ['archive_ref', 'archived_runtime_path', 'autopilot_id', 'blockers', 'branch', 'changed_paths', 'close_result_path', 'created_at', 'integration_commit_sha', 'merge_id', 'outcome', 'released_claims', 'repo_key', 'schema_version', 'target_after', 'target_before', 'target_branch', 'workstream', 'workstream_after', 'workstream_before', 'workstream_run'];
+  const unknown = Object.keys(row).filter((field) => !fields.includes(field));
+  if (unknown.length > 0 || fields.some((field) => !(field in row))) fail('invalid-terminal-cleanup-state', 'Terminal cleanup close result has an incompatible closed shape.', unknown);
+  if (row['schema_version'] !== 'autopilot.close_result.v1') fail('invalid-terminal-cleanup-state', 'Terminal cleanup close result schema is invalid.');
+  const outcome = row['outcome'];
+  if (outcome !== 'closed' && outcome !== 'aborted') fail('invalid-terminal-cleanup-state', 'Terminal cleanup close result must be terminal.');
+  const createdAt = expectString(row, 'created_at');
+  if (Number.isNaN(Date.parse(createdAt))) fail('invalid-terminal-cleanup-state', 'Terminal cleanup close result timestamp is invalid.');
+  return Object.freeze({
+    schema_version: 'autopilot.close_result.v1', outcome, workstream: expectString(row, 'workstream'), workstream_run: expectString(row, 'workstream_run'),
+    autopilot_id: expectString(row, 'autopilot_id'), repo_key: expectString(row, 'repo_key'), branch: expectString(row, 'branch'), target_branch: expectNullableString(row, 'target_branch'),
+    target_before: expectString(row, 'target_before'), target_after: expectNullableString(row, 'target_after'), workstream_before: expectString(row, 'workstream_before'),
+    workstream_after: expectNullableString(row, 'workstream_after'), integration_commit_sha: expectNullableString(row, 'integration_commit_sha'), changed_paths: expectStringArray(row, 'changed_paths'),
+    released_claims: expectStringArray(row, 'released_claims'), archived_runtime_path: expectNullableString(row, 'archived_runtime_path'), archive_ref: expectNullableString(row, 'archive_ref'),
+    merge_id: expectNullableString(row, 'merge_id'), blockers: expectStringArray(row, 'blockers'), close_result_path: expectNullableString(row, 'close_result_path'), created_at: createdAt,
+  });
+}
+
+async function observeTerminalBoundary(options: AutopilotCloseOptions, boundary: AutopilotTerminalCleanupBoundary): Promise<void> {
+  await options.observeTerminalCleanupBoundary?.(boundary);
+}
+
+function canonicalDigest(value: unknown): string {
+  return createHash('sha256').update(JSON.stringify(value), 'utf8').digest('hex');
+}
+
+function arrayField(value: unknown, label: string): readonly unknown[] {
+  if (!Array.isArray(value)) fail('invalid-coordinator-status', `${label} must be an array.`);
+  return value;
 }
 
 async function resolveCloseContext(options: AutopilotCloseOptions, env: ProcessEnvLike): Promise<PreparedCloseContext> {
   const repo = resolveRepoIdentity(options.sourceCwd);
   const coordinationRoot = coordinationRootForRepo(repo.repoKey, env);
   const worktreeRoot = worktreeRootForRepo(repo.repoKey, env);
-  const activeRows = await readActiveAutopilots(coordinationRoot);
+  assertCoordinationDispatchAllowed(resolveAutopilotStateRoot(env), repo.repoKey, 'Autopilot close/abort');
+  const activeRows = coordinationCutoverCommitted(resolveAutopilotStateRoot(env), repo.repoKey)
+    ? await readCoordinatorActiveAutopilots(repo, worktreeRoot, env)
+    : await readActiveAutopilots(coordinationRoot);
   const matches = activeRows.filter((row) => {
     if (row.repo_key !== repo.repoKey || row.workstream !== options.workstream) return false;
     if (options.workstreamRun !== undefined && options.workstreamRun !== null && row.workstream_run !== options.workstreamRun) return false;
@@ -525,10 +847,11 @@ async function validateCloseReadiness(context: PreparedCloseContext, now: Date, 
     if (branch !== active.branch) blockers.push(`registered worktree must be on ${active.branch}, got ${String(branch)}`);
   }
 
-  const claims = await readPathClaims(context.coordinationRoot);
+  const coordinatorAuthority = active.coordination_authority === 'coordinator-edit-leases-v1';
+  const cutoverCommitted = coordinationCutoverCommitted(resolveAutopilotStateRoot(env), active.repo_key);
+  const claims = cutoverCommitted ? [] : await readPathClaims(context.coordinationRoot);
   const retainedClaims = claims.filter((claim) => claim.autopilot_id === active.autopilot_id && claim.workstream_run === active.workstream_run);
   const retainedWriteClaims = retainedClaims.filter((claim) => claim.claim_type === 'WRITE' || claim.claim_type === 'EXCLUSIVE');
-  const coordinatorAuthority = active.coordination_authority === 'coordinator-edit-leases-v1';
   if (coordinatorAuthority && retainedClaims.length > 0) blockers.push(`coordinator-backed run has forbidden legacy path-claim authority: ${retainedClaims.map((claim) => `${claim.claim_type}:${claim.path}`).join(', ')}`);
   const targetHead = targetBranch === null ? gitHead(context.repo.repoRoot) : revParse(context.repo.repoRoot, `refs/heads/${targetBranch}`);
   const workstreamHead = existsSync(active.main_worktree_path) ? gitHead(active.main_worktree_path) : active.target_base_sha;
@@ -571,8 +894,8 @@ async function validateCloseReadiness(context: PreparedCloseContext, now: Date, 
     blockers.push(`target branch changed retained claimed path(s) since activation: ${targetIntersection.join(', ')}; targeted revalidation required before close`);
   }
 
-  const mergeLog = await readMergeLog(context.coordinationRoot);
-  const ackedIds = await readAckedMergeIds(context.coordinationRoot, active);
+  const mergeLog = cutoverCommitted ? [] : await readMergeLog(context.coordinationRoot);
+  const ackedIds = cutoverCommitted ? new Set<string>() : await readAckedMergeIds(context.coordinationRoot, active);
   const unackedForeignMerges = mergeLog.filter((row) =>
     row.repo_key === active.repo_key &&
     row.autopilot_id !== active.autopilot_id &&
@@ -614,7 +937,7 @@ function sourceDirtyPaths(cwd: string, workstream: string): readonly string[] {
 
 async function abortReadinessBlockers(active: ActiveAutopilotRow, env: ProcessEnvLike): Promise<readonly string[]> {
   const blockers: string[] = [];
-  if (active.coordination_authority === 'coordinator-edit-leases-v1') {
+  if (active.coordination_authority === 'coordinator-edit-leases-v1' && !coordinationCutoverCommitted(resolveAutopilotStateRoot(env), active.repo_key)) {
     const forbiddenLegacyClaims = (await readPathClaims(coordinationRootForRepo(active.repo_key, env))).filter((claim) => claim.autopilot_id === active.autopilot_id && claim.workstream_run === active.workstream_run);
     if (forbiddenLegacyClaims.length > 0) blockers.push(`coordinator-backed abort found forbidden legacy path claims: ${forbiddenLegacyClaims.map((claim) => `${claim.claim_type}:${claim.path}`).join(', ')}`);
   }
@@ -914,19 +1237,113 @@ async function listFilesRecursive(root: string): Promise<readonly string[]> {
   return Object.freeze(out.sort((left, right) => left.localeCompare(right)));
 }
 
-async function copyPath(source: string, destination: string): Promise<void> {
-  const info = await stat(source);
+function pathContained(root: string, candidate: string): boolean {
+  const rel = relative(resolve(root), resolve(candidate));
+  return rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+}
+
+async function assertNoSymbolicTree(source: string, physicalRoot: string, label: string): Promise<void> {
+  const info = await lstat(source);
+  if (info.isSymbolicLink()) fail('unsafe-terminal-archive-source', `${label} contains a symbolic link or junction.`, [source]);
+  const physical = await realpath(source);
+  if (!pathContained(physicalRoot, physical)) fail('unsafe-terminal-archive-source', `${label} physically escapes its authority root.`, [source, physical, physicalRoot]);
   if (info.isDirectory()) {
-    await mkdir(destination, { recursive: true });
     for (const entry of await readdir(source, { withFileTypes: true })) {
-      await copyPath(join(source, entry.name), join(destination, entry.name));
+      if (entry.isSymbolicLink()) fail('unsafe-terminal-archive-source', `${label} contains a symbolic link or loop.`, [join(source, entry.name)]);
+      await assertNoSymbolicTree(join(source, entry.name), physicalRoot, label);
+    }
+  } else if (!info.isFile()) fail('unsafe-terminal-archive-source', `${label} contains a non-regular archive object.`, [source]);
+}
+
+function terminalArchiveStagingPath(context: PreparedCloseContext): string {
+  return join(context.worktreeRoot, '_archive', `.staging-${context.active.workstream_run}`);
+}
+
+async function assertPrivateTerminalArchiveAncestry(context: PreparedCloseContext, createStage: boolean): Promise<void> {
+  const archiveParent = join(context.worktreeRoot, '_archive');
+  const archiveRoot = join(archiveParent, context.active.workstream_run);
+  const stage = terminalArchiveStagingPath(context);
+  const worktreeInfo = await lstat(context.worktreeRoot);
+  if (!worktreeInfo.isDirectory() || worktreeInfo.isSymbolicLink()) fail('unsafe-terminal-archive-destination', 'terminal archive authority root must be a real directory.', [context.worktreeRoot]);
+  const worktreePhysical = await realpath(context.worktreeRoot);
+  if (existsSync(archiveParent)) {
+    const parentInfo = await lstat(archiveParent);
+    if (!parentInfo.isDirectory() || parentInfo.isSymbolicLink()) fail('unsafe-terminal-archive-destination', 'terminal archive parent must be a non-symbolic directory.', [archiveParent]);
+  } else await ensurePrivateAuthorityDirectory(archiveParent);
+  const parentPhysical = await realpath(archiveParent);
+  if (!pathContained(worktreePhysical, parentPhysical)) fail('unsafe-terminal-archive-destination', 'terminal archive parent escapes its worktree authority root.', [archiveParent, parentPhysical]);
+  await enforcePrivateAuthorityPath(archiveParent, true);
+  if (existsSync(archiveRoot)) {
+    const finalInfo = await lstat(archiveRoot);
+    if (finalInfo.isSymbolicLink() || !finalInfo.isDirectory()) fail('unsafe-terminal-archive-destination', 'terminal archive final path is preoccupied by an unsafe object.', [archiveRoot]);
+    if (createStage) fail('unsafe-terminal-archive-destination', 'terminal archive final path already exists before terminal commit.', [archiveRoot]);
+  }
+  if (!existsSync(stage) && createStage) await mkdir(stage, { recursive: false, mode: 0o700 });
+  if (existsSync(stage)) {
+    const stageInfo = await lstat(stage);
+    if (!stageInfo.isDirectory() || stageInfo.isSymbolicLink() || !pathContained(parentPhysical, await realpath(stage))) fail('unsafe-terminal-archive-destination', 'terminal archive staging path is unsafe.', [stage]);
+    await enforcePrivateAuthorityPath(stage, true);
+  }
+  // Re-read every destination component after creation; no later copy is
+  // permitted to discover or follow a different ancestry.
+  const parentAfter = await lstat(archiveParent);
+  if (!parentAfter.isDirectory() || parentAfter.isSymbolicLink() || await realpath(archiveParent) !== parentPhysical) fail('unsafe-terminal-archive-destination', 'terminal archive ancestry changed during preparation.', [archiveParent]);
+}
+
+async function validateTerminalArchiveSources(context: PreparedCloseContext): Promise<void> {
+  await assertPrivateTerminalArchiveAncestry(context, true);
+  const mainInfo = await lstat(context.active.main_worktree_path);
+  if (!mainInfo.isDirectory() || mainInfo.isSymbolicLink()) fail('unsafe-terminal-archive-source', 'main worktree archive authority must be a real directory.', [context.active.main_worktree_path]);
+  const mainPhysical = await realpath(context.active.main_worktree_path);
+  await assertNoSymbolicTree(context.active.runtime_root, mainPhysical, 'terminal runtime archive');
+  const taskRoot = taskRootForActiveAutopilot(context.active);
+  const taskInfo = await lstat(taskRoot);
+  if (!taskInfo.isDirectory() || taskInfo.isSymbolicLink()) fail('unsafe-terminal-archive-source', 'task archive authority must be a real directory.', [taskRoot]);
+  const taskPhysical = await realpath(taskRoot);
+  for (const file of [TASK_INFO_FILE, BRANCHES_FILE, UNIT_INDEX_FILE, '_checkout-profile.json', '_materialization-ledger.jsonl']) {
+    const source = join(taskRoot, file);
+    if (existsSync(source)) await assertNoSymbolicTree(source, taskPhysical, 'terminal task metadata archive');
+  }
+}
+
+async function copyPathNoFollow(source: string, destination: string, physicalRoot: string): Promise<void> {
+  const before = await lstat(source);
+  if (before.isSymbolicLink()) fail('unsafe-terminal-archive-source', 'terminal archive copy refuses a symbolic link or loop.', [source]);
+  const physical = await realpath(source);
+  if (!pathContained(physicalRoot, physical)) fail('unsafe-terminal-archive-source', 'terminal archive copy source escaped its physical authority root.', [source, physical]);
+  if (before.isDirectory()) {
+    await mkdir(destination, { recursive: true, mode: 0o700 });
+    for (const entry of await readdir(source, { withFileTypes: true })) {
+      if (entry.isSymbolicLink()) fail('unsafe-terminal-archive-source', 'terminal archive copy refuses a symbolic link or loop.', [join(source, entry.name)]);
+      await copyPathNoFollow(join(source, entry.name), join(destination, entry.name), physicalRoot);
     }
     return;
   }
-  if (info.isFile()) {
-    await mkdir(dirname(destination), { recursive: true });
-    await writeFile(destination, await readFile(source));
-  }
+  if (!before.isFile()) fail('unsafe-terminal-archive-source', 'terminal archive copy accepts regular files only.', [source]);
+  const descriptor = openSync(source, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
+  try {
+    const opened = fstatSync(descriptor);
+    const beforeSync = lstatSync(source);
+    const openedPhysical = await realpath(source);
+    if (!pathContained(physicalRoot, openedPhysical)) fail('unsafe-terminal-archive-source', 'terminal archive source ancestor changed to a physical escape while opening.', [source, openedPhysical, physicalRoot]);
+    if (!opened.isFile() || opened.dev !== beforeSync.dev || opened.ino !== beforeSync.ino || opened.size !== beforeSync.size) fail('unsafe-terminal-archive-source', 'terminal archive source identity changed while opening.', [source]);
+    const bytes = readFileSync(descriptor);
+    const afterHandle = fstatSync(descriptor);
+    const afterPath = lstatSync(source);
+    if (bytes.byteLength !== opened.size || afterHandle.dev !== opened.dev || afterHandle.ino !== opened.ino || afterHandle.size !== opened.size || afterPath.isSymbolicLink() || afterPath.dev !== opened.dev || afterPath.ino !== opened.ino || afterPath.size !== opened.size) fail('unsafe-terminal-archive-source', 'terminal archive source identity changed during no-follow read.', [source]);
+    await ensurePrivateAuthorityDirectory(dirname(destination));
+    if (existsSync(destination)) {
+      const destinationInfo = await lstat(destination);
+      if (!destinationInfo.isFile() || destinationInfo.isSymbolicLink()) fail('unsafe-terminal-archive-destination', 'terminal archive staging destination is not a regular file.', [destination]);
+      const existing = await readFile(destination);
+      if (createHash('sha256').update(existing).digest('hex') !== createHash('sha256').update(bytes).digest('hex') || existing.byteLength !== bytes.byteLength) fail('terminal-archive-conflict', 'existing staged archive bytes differ from the no-follow source.', [destination]);
+    } else {
+      await writeFile(destination, bytes, { flag: 'wx', mode: 0o600 });
+      const target = await open(destination, 'r');
+      try { await target.sync(); } finally { await target.close(); }
+      await enforcePrivateAuthorityPath(destination, false);
+    }
+  } finally { closeSync(descriptor); }
 }
 
 async function integrateTargetIntoWorkstream(input: { readonly active: ActiveAutopilotRow; readonly targetHead: string; readonly env: ProcessEnvLike }): Promise<string | null> {
@@ -993,16 +1410,21 @@ async function setActiveStatus(
   now: Date,
   closedAt: string | null,
 ): Promise<ActiveAutopilotRow> {
-  return await withAutopilotFileLock(join(coordinationRoot, '.locks', 'activation.lock'), `close-status:${row.autopilot_id}`, async () => {
-    const rows = await readActiveAutopilots(coordinationRoot);
+  const lockPath = coordinationCutoverCommitted(dirname(dirname(coordinationRoot)), row.repo_key)
+    ? join(row.worktree_root, '.locks', 'activation.lock')
+    : join(coordinationRoot, '.locks', 'activation.lock');
+  return await withAutopilotFileLock(lockPath, `close-status:${row.autopilot_id}`, async () => {
     const updated: ActiveAutopilotRow = {
       ...row,
       status,
       active_epoch_started_at: now.toISOString(),
     };
-    const replaced = rows.map((candidate) => candidate.autopilot_id === row.autopilot_id ? updated : candidate);
-    if (!replaced.some((candidate) => candidate.autopilot_id === row.autopilot_id)) fail('active-row-missing', 'active Autopilot row disappeared during close.', [row.autopilot_id]);
-    await writeActiveAutopilots(coordinationRoot, replaced);
+    if (!coordinationCutoverCommitted(dirname(dirname(coordinationRoot)), row.repo_key)) {
+      const rows = await readActiveAutopilots(coordinationRoot);
+      const replaced = rows.map((candidate) => candidate.autopilot_id === row.autopilot_id ? updated : candidate);
+      if (!replaced.some((candidate) => candidate.autopilot_id === row.autopilot_id)) fail('active-row-missing', 'active Autopilot row disappeared during close.', [row.autopilot_id]);
+      await writeActiveAutopilots(coordinationRoot, replaced);
+    }
     await updateTaskInfoStatus(updated, status);
     if (closedAt !== null) await updateTaskInfoClosedAt(updated, closedAt);
     return updated;
@@ -1091,6 +1513,9 @@ function buildCloseResult(input: {
 
 async function writeAndRecordRunTerminalEvidence(active: ActiveAutopilotRow, outcome: 'closed' | 'aborted', terminalSha: string, env: ProcessEnvLike, now: Date): Promise<void> {
   const evidencePath = join(active.runtime_root, 'close', `_run-terminal.${outcome}.json`);
+  const cleanupPath = terminalCleanupManifestPath(active);
+  if (!existsSync(cleanupPath)) fail('terminal-cleanup-intent-missing', 'Terminal evidence cannot commit before its cleanup intent is durable.', [cleanupPath]);
+  const cleanupBytes = await readFile(cleanupPath);
   await writeJsonAtomic(evidencePath, {
     schema_version: 'autopilot.run_terminal.v1',
     repo_key: active.repo_key,
@@ -1099,31 +1524,70 @@ async function writeAndRecordRunTerminalEvidence(active: ActiveAutopilotRow, out
     workstream_run: active.workstream_run,
     outcome,
     terminal_sha: terminalSha,
+    cleanup_manifest_ref: 'close/_terminal-cleanup.json',
+    cleanup_manifest_sha256: `sha256:${createHash('sha256').update(cleanupBytes).digest('hex')}`,
     accepted_at: now.toISOString(),
   });
   await recordCoordinatorReleaseEvidenceFromFile({ active, source: outcome === 'closed' ? 'run-close' : 'run-abort', targetId: active.workstream_run, evidencePath, env });
 }
 
-async function archiveRuntimeArtifacts(context: PreparedCloseContext, archiveRef: string, now: Date): Promise<string> {
-  const archiveRoot = join(context.worktreeRoot, '_archive', context.active.workstream_run);
-  const archiveRuntime = join(archiveRoot, 'runtime');
-  await rm(archiveRoot, { recursive: true, force: true });
-  await mkdir(archiveRoot, { recursive: true });
-  if (existsSync(context.active.runtime_root)) await copyPath(context.active.runtime_root, archiveRuntime);
-  const taskRoot = taskRootForActiveAutopilot(context.active);
-  for (const file of [TASK_INFO_FILE, BRANCHES_FILE, UNIT_INDEX_FILE, '_checkout-profile.json', '_materialization-ledger.jsonl']) {
-    const source = join(taskRoot, file);
-    if (existsSync(source)) await copyPath(source, join(archiveRoot, file));
+async function fsyncArchiveTree(root: string): Promise<void> {
+  if (platform() === 'win32') return;
+  for (const entry of await readdir(root, { withFileTypes: true })) {
+    const path = join(root, entry.name);
+    if (entry.isDirectory()) await fsyncArchiveTree(path);
+    else {
+      const file = await open(path, 'r');
+      try { await file.sync(); } finally { await file.close(); }
+    }
   }
-  await writeJsonAtomic(join(archiveRoot, '_archive-info.json'), {
-    schema_version: 'autopilot.archive_info.v1',
-    workstream: context.active.workstream,
-    workstream_run: context.active.workstream_run,
-    autopilot_id: context.active.autopilot_id,
-    branch: context.active.branch,
-    archive_ref: archiveRef,
-    archived_at: now.toISOString(),
+  const directory = await open(root, 'r');
+  try { await directory.sync(); } finally { await directory.close(); }
+}
+
+async function archiveRuntimeArtifacts(context: PreparedCloseContext, archiveRef: string, now: Date): Promise<string> {
+  const archiveParent = join(context.worktreeRoot, '_archive');
+  const archiveRoot = join(archiveParent, context.active.workstream_run);
+  const archiveRuntime = join(archiveRoot, 'runtime');
+  const stage = terminalArchiveStagingPath(context);
+  await assertPrivateTerminalArchiveAncestry(context, false);
+  if (existsSync(archiveRoot)) {
+    const infoPath = join(archiveRoot, '_archive-info.json');
+    if (!existsSync(infoPath)) fail('terminal-archive-conflict', 'published terminal archive lacks its completion identity.', [archiveRoot]);
+    const info = JSON.parse(await readFile(infoPath, 'utf8')) as Readonly<Record<string, unknown>>;
+    if (info['schema_version'] !== 'autopilot.archive_info.v1' || info['workstream_run'] !== context.active.workstream_run || info['autopilot_id'] !== context.active.autopilot_id || info['archive_ref'] !== archiveRef) fail('terminal-archive-conflict', 'published terminal archive belongs to different terminal authority.', [archiveRoot]);
+    if (!existsSync(archiveRuntime)) fail('terminal-runtime-archive-missing', 'published terminal archive has no runtime tree.', [archiveRuntime]);
+    return archiveRuntime;
+  }
+  if (!existsSync(stage)) fail('unsafe-terminal-archive-destination', 'private terminal archive staging reservation disappeared after terminal commit.', [stage]);
+  if (existsSync(context.active.runtime_root)) {
+    const runtimePhysicalRoot = await realpath(context.active.runtime_root);
+    await assertNoSymbolicTree(context.active.runtime_root, runtimePhysicalRoot, 'terminal runtime archive');
+    await copyPathNoFollow(context.active.runtime_root, join(stage, 'runtime'), runtimePhysicalRoot);
+  } else if (!existsSync(join(stage, 'runtime'))) fail('terminal-runtime-archive-missing', 'active runtime vanished before its private staged archive became complete.', [context.active.runtime_root]);
+  const taskRoot = taskRootForActiveAutopilot(context.active);
+  if (existsSync(taskRoot)) {
+    const taskPhysicalRoot = await realpath(taskRoot);
+    for (const file of [TASK_INFO_FILE, BRANCHES_FILE, UNIT_INDEX_FILE, '_checkout-profile.json', '_materialization-ledger.jsonl']) {
+      const source = join(taskRoot, file);
+      if (existsSync(source)) await copyPathNoFollow(source, join(stage, file), taskPhysicalRoot);
+    }
+  }
+  await writeJsonAtomic(join(stage, '_archive-info.json'), {
+    schema_version: 'autopilot.archive_info.v1', workstream: context.active.workstream, workstream_run: context.active.workstream_run,
+    autopilot_id: context.active.autopilot_id, branch: context.active.branch, archive_ref: archiveRef, archived_at: now.toISOString(),
   });
+  await assertNoSymbolicTree(stage, await realpath(stage), 'private terminal archive staging');
+  await fsyncArchiveTree(stage);
+  // The final name is never deleted or overwritten. Its parent was privately
+  // reserved before terminal commit; a raced symlink/object is rejected.
+  if (existsSync(archiveRoot)) fail('unsafe-terminal-archive-destination', 'terminal archive final path was raced before atomic publication.', [archiveRoot]);
+  await rename(stage, archiveRoot);
+  if (platform() !== 'win32') {
+    const parent = await open(archiveParent, 'r');
+    try { await parent.sync(); } finally { await parent.close(); }
+  }
+  if (existsSync(stage) || !existsSync(archiveRuntime)) fail('terminal-runtime-archive-missing', 'atomic terminal archive publication did not establish the exact final tree.', [archiveRoot]);
   return archiveRuntime;
 }
 
@@ -1287,6 +1751,12 @@ function parseForeignMergeAck(value: unknown): AutopilotForeignMergeAck {
     intersection_paths: expectStringArray(row, 'intersection_paths'),
     acked_at: expectString(row, 'acked_at'),
   };
+}
+
+function closeMergeLockPath(context: PreparedCloseContext, env: ProcessEnvLike): string {
+  return coordinationCutoverCommitted(resolveAutopilotStateRoot(env), context.active.repo_key)
+    ? join(context.worktreeRoot, '.locks', 'main-merge.lock')
+    : mainMergeLockPathForRepo(context.repo.repoKey, env);
 }
 
 function requireTargetBranch(row: ActiveAutopilotRow): string {

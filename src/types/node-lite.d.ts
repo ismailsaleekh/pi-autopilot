@@ -3,8 +3,11 @@ declare const process: {
   readonly env: { [key: string]: string | undefined };
   readonly execPath: string;
   readonly pid: number;
+  readonly stdin: import('node:readline').ReadableInput;
   cwd(): string;
   chdir(directory: string): void;
+  memoryUsage(): { readonly rss: number; readonly heapTotal: number; readonly heapUsed: number; readonly external: number; readonly arrayBuffers: number };
+  resourceUsage(): { readonly maxRSS: number };
   kill(pid: number, signal?: 0 | string): boolean;
   exit(code?: number): never;
   exitCode: number | undefined;
@@ -36,24 +39,45 @@ declare module 'node:fs' {
   export interface Stats {
     readonly size: number;
     readonly mtimeMs: number;
+    readonly ctimeMs: number;
     readonly dev: number;
     readonly ino: number;
     isFile(): boolean;
+    isDirectory(): boolean;
     isSymbolicLink(): boolean;
   }
   export function existsSync(path: string | URL): boolean;
+  export function copyFileSync(source: string | URL, destination: string | URL, mode?: number): void;
+  export function mkdtempSync(prefix: string): string;
   export function readFileSync(path: string | URL | number): Uint8Array;
   export function readFileSync(path: string | URL, encoding: 'utf8'): string;
+  export function readSync(fd: number, buffer: Uint8Array, offset: number, length: number, position: number | null): number;
+  export function readdirSync(path: string | URL, options: { readonly withFileTypes: true }): import('node:fs/promises').Dirent[];
   export function realpathSync(path: string | URL): string;
   export function lstatSync(path: string | URL): Stats;
   export function statSync(path: string | URL): Stats;
   export function chmodSync(path: string | URL, mode: number): void;
-  export function openSync(path: string | URL, flags: number): number;
+  export function openSync(path: string | URL, flags: number | string, mode?: number): number;
+  export function writeSync(fd: number, data: string): number;
+  export function writeSync(fd: number, buffer: Uint8Array, offset: number, length: number): number;
+  export function writeFileSync(fd: number, data: string, encoding?: 'utf8'): void;
+  export function writeFileSync(path: string | URL, data: string | Uint8Array, options?: { readonly encoding?: 'utf8'; readonly flag?: string; readonly mode?: number }): void;
+  export function linkSync(existingPath: string | URL, newPath: string | URL): void;
+  export interface ReadStream extends AsyncIterable<string> { destroy(): void; }
+  export function createReadStream(path: string | URL, options: { readonly encoding: 'utf8'; readonly fd?: number; readonly autoClose?: boolean }): ReadStream;
+  export function unlinkSync(path: string | URL): void;
+  export function rmSync(path: string | URL, options?: { readonly recursive?: boolean; readonly force?: boolean }): void;
+  export function linkSync(existingPath: string | URL, newPath: string | URL): void;
   export function fstatSync(fd: number): Stats;
   export function closeSync(fd: number): void;
+  export function fsyncSync(fd: number): void;
   export namespace constants {
     const O_RDONLY: number;
+    const O_WRONLY: number;
+    const O_CREAT: number;
+    const O_EXCL: number;
     const O_NOFOLLOW: number;
+    const COPYFILE_EXCL: number;
   }
 }
 
@@ -62,24 +86,31 @@ declare module 'node:fs/promises' {
     readonly name: string;
     isDirectory(): boolean;
     isFile(): boolean;
+    isSymbolicLink(): boolean;
   }
   export interface Stats {
     readonly mtimeMs: number;
+    readonly size: number;
     isFile(): boolean;
     isDirectory(): boolean;
     isSymbolicLink(): boolean;
   }
   export interface FileHandle {
     writeFile(data: string, encoding?: 'utf8'): Promise<void>;
+    write(data: Uint8Array): Promise<{ readonly bytesWritten: number; readonly buffer: Uint8Array }>;
+    read(buffer: Uint8Array, offset: number, length: number, position: number | null): Promise<{ readonly bytesRead: number; readonly buffer: Uint8Array }>;
     sync(): Promise<void>;
     close(): Promise<void>;
   }
   export function appendFile(path: string | URL, data: string, encoding?: 'utf8'): Promise<void>;
   export function lstat(path: string | URL): Promise<Stats>;
+  export function link(existingPath: string | URL, newPath: string | URL): Promise<void>;
   export function chmod(path: string | URL, mode: number): Promise<void>;
+  export function copyFile(source: string | URL, destination: string | URL, mode?: number): Promise<void>;
   export function mkdir(path: string | URL, options?: { readonly recursive?: boolean; readonly mode?: number }): Promise<string | undefined>;
   export function mkdtemp(prefix: string): Promise<string>;
   export function open(path: string | URL, flags: string, mode?: number): Promise<FileHandle>;
+  export function readdir(path: string | URL): Promise<string[]>;
   export function readdir(path: string, options: { readonly withFileTypes: true }): Promise<Dirent[]>;
   export function readFile(path: string | URL): Promise<Uint8Array>;
   export function readFile(path: string | URL, encoding: 'utf8'): Promise<string>;
@@ -87,11 +118,17 @@ declare module 'node:fs/promises' {
   export function rename(oldPath: string | URL, newPath: string | URL): Promise<void>;
   export function rm(path: string | URL, options?: { readonly recursive?: boolean; readonly force?: boolean }): Promise<void>;
   export function stat(path: string | URL): Promise<Stats>;
-  export function symlink(target: string | URL, path: string | URL): Promise<void>;
+  export function symlink(target: string | URL, path: string | URL, type?: 'dir' | 'file' | 'junction'): Promise<void>;
   export function unlink(path: string | URL): Promise<void>;
   export function writeFile(path: string | URL, data: string | Uint8Array, encoding?: 'utf8'): Promise<void>;
   export function writeFile(path: string | URL, data: string | Uint8Array, options: { readonly encoding?: 'utf8'; readonly flag?: string; readonly mode?: number }): Promise<void>;
 } 
+
+declare module 'node:readline' {
+  export interface ReadableInput extends AsyncIterable<string | Uint8Array> {}
+  export interface Interface extends AsyncIterable<string> { close(): void; }
+  export function createInterface(options: { readonly input: ReadableInput | import('node:fs').ReadStream; readonly crlfDelay: number }): Interface;
+}
 
 declare module 'node:os' {
   export function homedir(): string;
@@ -145,15 +182,17 @@ declare module 'node:child_process' {
     readonly stderr: ChildProcessReadablePipe;
     readonly killed: boolean;
     readonly pid: number | undefined;
+    readonly exitCode: number | null;
     kill(signal: 'SIGTERM' | 'SIGKILL'): void;
     unref(): void;
     on(event: 'error', listener: (error: Error) => void): void;
     on(event: 'close', listener: (code: number | null, signal: string | null) => void): void;
+    once(event: 'close', listener: (code: number | null, signal: string | null) => void): void;
   }
   export interface SpawnOptionsLite {
     readonly cwd?: string;
     readonly env?: { readonly [key: string]: string | undefined };
-    readonly stdio?: readonly ['pipe', 'pipe', 'pipe'] | 'ignore';
+    readonly stdio?: readonly ['pipe' | 'ignore', 'pipe' | 'ignore', 'pipe' | 'ignore'] | 'ignore';
     readonly shell?: boolean;
     readonly detached?: boolean;
   }
@@ -221,12 +260,15 @@ declare module 'node:sqlite' {
   export class StatementSync {
     get(...parameters: readonly SQLInputValue[]): Record<string, SQLOutputValue> | undefined;
     all(...parameters: readonly SQLInputValue[]): Record<string, SQLOutputValue>[];
+    iterate(...parameters: readonly SQLInputValue[]): IterableIterator<Record<string, SQLOutputValue>>;
     run(...parameters: readonly SQLInputValue[]): StatementResultingChanges;
   }
   export class DatabaseSync {
     constructor(path: string | URL, options?: { readonly timeout?: number; readonly enableForeignKeyConstraints?: boolean; readonly readOnly?: boolean });
+    readonly isTransaction: boolean;
     exec(sql: string): void;
     prepare(sql: string): StatementSync;
+    serialize(schema?: string): Uint8Array;
     close(): void;
   }
   export function backup(source: DatabaseSync, path: string | URL): Promise<number>;

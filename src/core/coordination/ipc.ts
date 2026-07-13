@@ -10,6 +10,7 @@ export const AUTOPILOT_COORDINATOR_TRANSPORT_VERSION = 'autopilot.coordinator_tr
 export interface CoordinatorLegacyReplayTransportRequest {
   readonly transport_version: typeof AUTOPILOT_COORDINATOR_TRANSPORT_VERSION;
   readonly capability: string;
+  readonly replay_protocol: '1.1' | '1.2';
   readonly request: JsonMap;
 }
 
@@ -45,9 +46,10 @@ export function parseCoordinatorLegacyReplayTransportRequest(value: unknown): Co
   const fields = Object.keys(request).sort();
   const expected = ['action', 'expected_version', 'fencing_generation', 'idempotency_key', 'payload', 'protocol_version', 'repo_id', 'request_id', 'schema_version', 'session_id', 'workstream_run'];
   if (fields.length !== expected.length || fields.some((field, index) => field !== expected[index])) throw new CoordinationRuntimeError('invalid-request', 'legacy replay request fields are invalid', fields);
-  if (request['schema_version'] !== 'autopilot.coordinator_request.v1' || request['protocol_version'] !== '1.1') throw new CoordinationRuntimeError('protocol-mismatch', 'only exact protocol 1.1 requests may use migration replay');
+  const replayProtocol = request['protocol_version'];
+  if (request['schema_version'] !== 'autopilot.coordinator_request.v1' || (replayProtocol !== '1.1' && replayProtocol !== '1.2')) throw new CoordinationRuntimeError('protocol-mismatch', 'only exact proven-compatible protocol 1.1 or 1.2 requests may use idempotency replay');
   if (typeof request['request_id'] !== 'string' || typeof request['repo_id'] !== 'string' || typeof request['idempotency_key'] !== 'string' || typeof request['action'] !== 'string' || !isJsonMap(request['payload'])) throw new CoordinationRuntimeError('invalid-request', 'legacy replay identity or payload is malformed');
-  return { transport_version: AUTOPILOT_COORDINATOR_TRANSPORT_VERSION, capability: shell.capability, request };
+  return { transport_version: AUTOPILOT_COORDINATOR_TRANSPORT_VERSION, capability: shell.capability, replay_protocol: replayProtocol, request };
 }
 
 export function parseCoordinatorTransportRequest(value: unknown): CoordinatorTransportRequest {

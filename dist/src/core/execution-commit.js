@@ -133,14 +133,14 @@ export async function commitAutopilotExecution(input) {
         action: () => {
             if (dirtyClaimedPaths.length === 0)
                 return;
-            runGit(['add', '--', ...dirtyClaimedPaths], input.spec.cwd, runtimeGitEnv());
+            runGit(['add', '--', ...dirtyClaimedPaths], input.spec.cwd, runtimeGitEnv(input.env));
             const staged = readGitStatus(input.spec.cwd);
             const stagedSource = staged.stagedPaths.filter((path) => !isAutopilotRuntimeRepoPath(path, input.spec.workstream));
             for (const stagedPath of stagedSource) {
                 if (!dirtyClaimedPaths.includes(stagedPath))
                     fail('staged-path-set-mismatch', 'runtime staging included a source path outside dirty claimed edits.', [stagedPath]);
             }
-            runGit(['commit', '--no-verify', '-m', commitSubject], input.spec.cwd, runtimeGitEnv());
+            runGit(['commit', '--no-verify', '-m', commitSubject], input.spec.cwd, runtimeGitEnv(input.env));
             runtimeCommitCreated = true;
         },
         verify: async () => {
@@ -150,7 +150,7 @@ export async function commitAutopilotExecution(input) {
             durableRecord = await persistExecutionCommit();
             return [...inspected.proof, `execution_commit_ref=${relativeArtifactRef(commitPath, input.context.active.runtime_root)}`];
         },
-    });
+    }, input.env ?? process.env);
     if (durableRecord !== null)
         return durableRecord;
     return parseAutopilotExecutionCommit(JSON.parse(await readFile(commitPath, 'utf8')));
@@ -189,8 +189,9 @@ function currentBranch(cwd) {
         fail('detached-execution-head', 'source-changing runtime commit requires the unit worktree to be on a named branch.');
     return branch;
 }
-function runtimeGitEnv() {
+function runtimeGitEnv(env = process.env) {
     return {
+        ...env,
         [AUTOPILOT_RUNTIME_ENV]: AUTOPILOT_RUNTIME_VALUE,
         AUTOPILOT_RUNTIME_AUTHORITY: 'execution-commit',
         GIT_AUTHOR_NAME: 'autopilot-runtime',

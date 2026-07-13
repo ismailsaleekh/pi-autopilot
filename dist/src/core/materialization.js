@@ -5,9 +5,10 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { AUTOPILOT_CHECKOUT_PROFILE_SNAPSHOT_FILE, estimateBytesForMaterializationPaths, normalizeMaterializationPath, pathMatchesMaterializationPattern, readCheckoutProfileSnapshot, scanTrackedTree, sparseIncludePatternsForPaths, submodulePathsForMaterialization, trackedPathExists, } from "./checkout-profile.js";
 import { assertAutopilotDiskGate } from "./disk-gate.js";
 import { addSparseCheckoutPatterns, assertSparseCheckoutEnabled, isSparseCheckoutEnabled, isSparseMissingPath } from "./sparse-worktree.js";
-import { acquireReadClaimsForUnitPaths, appendJsonl, coordinationRootForRepo, readActiveAutopilots, readPathClaims, releaseReadClaimsForUnitPaths, runGit, taskRootForActiveAutopilot, writeJsonAtomic, } from "./parallel-runtime.js";
+import { acquireReadClaimsForUnitPaths, appendJsonl, coordinationRootForRepo, readActiveAutopilots, readCoordinatorActiveAutopilots, readPathClaims, releaseReadClaimsForUnitPaths, resolveAutopilotStateRoot, runGit, taskRootForActiveAutopilot, worktreeRootForRepo, writeJsonAtomic, } from "./parallel-runtime.js";
 import { AUTOPILOT_RUNTIME_ROOT_PREFIX } from "./names.js";
 import { executeOwnedWorktreeSaga } from "./coordination/worktree-saga.js";
+import { assertCoordinationDispatchAllowed, coordinationCutoverCommitted } from "./coordination/migration-paths.js";
 export const AUTOPILOT_MATERIALIZATION_LEDGER_FILE = '_materialization-ledger.jsonl';
 export const AUTOPILOT_MATERIALIZED_PATHS_FILE = '_materialized-paths.json';
 export const AUTOPILOT_MATERIALIZE_CONTEXT_TOOL = 'autopilot_materialize_context';
@@ -210,7 +211,16 @@ export async function resolveActiveContextForStatusContext(statusContext, env = 
     if (typeof repoKey !== 'string' || repoKey.length === 0)
         fail('invalid-task-info', '_task-info.json repo_key must be a non-empty string.', [taskInfoPath]);
     const coordinationRoot = coordinationRootForRepo(repoKey, env);
-    const rows = await readActiveAutopilots(coordinationRoot);
+    assertCoordinationDispatchAllowed(resolveAutopilotStateRoot(env), repoKey, 'Autopilot materialization');
+    const sourceRepo = taskInfo['source_repo'];
+    const gitCommonDir = taskInfo['git_common_dir'];
+    const targetBaseSha = taskInfo['target_base_sha'];
+    const targetBranch = taskInfo['target_branch'];
+    if (typeof sourceRepo !== 'string' || typeof gitCommonDir !== 'string' || typeof targetBaseSha !== 'string' || (targetBranch !== null && typeof targetBranch !== 'string'))
+        fail('invalid-task-info', '_task-info.json lacks post-cutover repository identity.', [taskInfoPath]);
+    const rows = coordinationCutoverCommitted(resolveAutopilotStateRoot(env), repoKey)
+        ? await readCoordinatorActiveAutopilots({ repoRoot: sourceRepo, gitCommonDir, repoKey, headSha: targetBaseSha, targetBranch, originUrl: null }, worktreeRootForRepo(repoKey, env), env)
+        : await readActiveAutopilots(coordinationRoot);
     const active = rows.find((row) => row.workstream === spec.workstream && row.runtime_root === statusContext.artifact_root && row.workstream_run === taskInfo['workstream_run']);
     if (active === undefined)
         fail('active-row-not-found', 'no active Autopilot row matches child status context.', [spec.workstream, statusContext.artifact_root]);

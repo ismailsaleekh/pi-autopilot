@@ -1,26 +1,33 @@
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { chmod, open, readFile, stat, unlink, type FileHandle } from 'node:fs/promises';
+import { chmod, open, rename, unlink } from 'node:fs/promises';
 import { createServer, type Server, type Socket } from 'node:net';
 import { platform } from 'node:os';
 
 import { encodeCoordinatorFrame, parseCoordinatorLegacyReplayTransportRequest, parseCoordinatorTransportRequest, CoordinatorFrameDecoder, writeCoordinatorResponse } from './ipc.ts';
 import { CoordinationRuntimeError } from './failures.ts';
-import { currentBootId, isProcessAlive } from './process-identity.ts';
-import { COORDINATOR_GRANT_OFFER_SWEEP_MS, ensureCoordinatorPrivateRoots, readOrCreateCoordinatorCapability, type CoordinatorRuntimePaths } from './runtime-paths.ts';
+import { currentBootId, isProcessAlive, predecessorCompatibleBootId, processStartIdentity } from './process-identity.ts';
+import { COORDINATOR_GRANT_OFFER_SWEEP_MS, enforcePrivateAuthorityPath, ensureCoordinatorPrivateRoots, readOrCreateCoordinatorCapability, type CoordinatorRuntimePaths } from './runtime-paths.ts';
+import { acquireSerializedProcessGuard, discardLockTombstone, quarantineExactLock, readExactLockText, restoreLockTombstone } from './serialized-lock.ts';
 import { CoordinatorStore, type StoreClock } from './store.ts';
-import type { CoordinatorResponseEnvelope } from './types.ts';
+import { AUTOPILOT_COORDINATOR_PROTOCOL_VERSION, type CoordinatorResponseEnvelope } from './types.ts';
+import { recordCoordinatorFenceHandoff, readCoordinatorUpgradeIntent } from './upgrade.ts';
+import { COORDINATOR_UPGRADE_PATH, parseCurrentCoordinatorLock, parsePredecessorCoordinatorLock, type CurrentCoordinatorLock, type PredecessorCoordinatorLock } from './upgrade-contracts.ts';
 
-interface LockRecord {
-  readonly schema_version: 'autopilot.coordinator_lock.v1';
-  readonly pid: number;
-  readonly boot_id: string;
-  readonly token: string;
-  readonly started_at: string;
+type LockRecord = CurrentCoordinatorLock;
+
+export interface CoordinatorStartupAdoption {
+  readonly predecessorFence: PredecessorCoordinatorLock;
+  releaseElection(): void;
+  adopted(replacement: PredecessorCoordinatorLock): void;
+  restored(): void;
 }
 
 interface CoordinatorLock {
   readonly record: LockRecord;
+  activate(): void;
+  verifyOrRepairFence(): Promise<void>;
+  abortStartup(): Promise<void>;
   release(): Promise<void>;
 }
 
@@ -28,87 +35,195 @@ export class CoordinatorAlreadyRunningError extends Error {
   override readonly name = 'CoordinatorAlreadyRunningError';
 }
 
-function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
+function failureText(error: unknown): string { return error instanceof Error ? error.message : String(error); }
+
+function sameCurrentLock(left: LockRecord, right: LockRecord): boolean {
+  return left.pid === right.pid && left.boot_id === right.boot_id && left.process_start_identity === right.process_start_identity && left.token === right.token && left.instance_id === right.instance_id && left.started_at === right.started_at;
 }
 
-function parseLockRecord(value: unknown): LockRecord | null {
-  if (!isRecord(value)) return null;
-  const pid = value['pid'];
-  const bootId = value['boot_id'];
-  const token = value['token'];
-  const startedAt = value['started_at'];
-  if (value['schema_version'] !== 'autopilot.coordinator_lock.v1' || typeof pid !== 'number' || !Number.isSafeInteger(pid) || pid < 1 || typeof bootId !== 'string' || typeof token !== 'string' || typeof startedAt !== 'string') return null;
-  return { schema_version: 'autopilot.coordinator_lock.v1', pid, boot_id: bootId, token, started_at: startedAt };
+function samePredecessorLock(left: PredecessorCoordinatorLock, right: PredecessorCoordinatorLock): boolean {
+  return left.pid === right.pid && left.boot_id === right.boot_id && left.token === right.token && left.started_at === right.started_at;
 }
 
-async function readLock(path: string): Promise<LockRecord | null> {
-  try {
-    const parsed: unknown = JSON.parse(await readFile(path, 'utf8')) as unknown;
-    return parseLockRecord(parsed);
-  } catch {
-    return null;
-  }
+function samePredecessorFenceOwner(left: PredecessorCoordinatorLock, right: PredecessorCoordinatorLock): boolean {
+  return left.pid === right.pid && left.token === right.token && left.started_at === right.started_at;
 }
 
-async function readLockAfterConcurrentCreation(path: string): Promise<LockRecord | null> {
-  for (let attempt = 0; attempt < 50; attempt += 1) {
-    const record = await readLock(path);
-    if (record !== null) return record;
-    await new Promise<void>((resolveWait) => setTimeout(resolveWait, 10));
-  }
-  return null;
+async function writePredecessorFence(path: string, fence: PredecessorCoordinatorLock): Promise<void> {
+  const handle = await open(path, 'wx', 0o600);
+  try { await handle.writeFile(`${JSON.stringify(fence)}\n`, 'utf8'); await handle.sync(); } finally { await handle.close(); }
+  await enforcePrivateAuthorityPath(path, false);
 }
 
-async function acquireCoordinatorLock(paths: CoordinatorRuntimePaths): Promise<CoordinatorLock> {
+async function replacePredecessorFence(path: string, fence: PredecessorCoordinatorLock): Promise<void> {
+  const temporary = `${path}.refresh.${String(process.pid)}.${randomBytes(8).toString('hex')}`;
+  const handle = await open(temporary, 'wx', 0o600);
+  try { await handle.writeFile(`${JSON.stringify(fence)}\n`, 'utf8'); await handle.sync(); } finally { await handle.close(); }
+  await enforcePrivateAuthorityPath(temporary, false);
+  await rename(temporary, path);
+  await enforcePrivateAuthorityPath(path, false);
+}
+
+async function acquireCoordinatorLock(paths: CoordinatorRuntimePaths, adoption?: CoordinatorStartupAdoption): Promise<CoordinatorLock> {
   await ensureCoordinatorPrivateRoots(paths);
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    let handle: FileHandle | null = null;
-    try {
-      handle = await open(paths.lockPath, 'wx', 0o600);
-      const record: LockRecord = {
-        schema_version: 'autopilot.coordinator_lock.v1',
-        pid: process.pid,
-        boot_id: currentBootId(),
-        token: randomBytes(24).toString('hex'),
-        started_at: new Date().toISOString(),
-      };
-      await handle.writeFile(`${JSON.stringify(record)}\n`, 'utf8');
-      await handle.sync();
-      await handle.close();
-      handle = null;
-      return {
-        record,
-        release: async () => {
-          const current = await readLock(paths.lockPath);
-          if (current === null || current.token !== record.token) throw new CoordinationRuntimeError('system-fatal', 'coordinator lifecycle lock ownership changed before release');
-          await unlink(paths.lockPath);
-        },
-      };
-    } catch (error) {
-      if (handle !== null) {
-        try {
-          await handle.close();
-        } catch (closeError) {
-          throw new CoordinationRuntimeError('system-fatal', 'coordinator lifecycle lock creation and file close both failed', [error instanceof Error ? error.message : String(error), closeError instanceof Error ? closeError.message : String(closeError)]);
-        }
-      }
-      if (!(error instanceof Error && 'code' in error && error.code === 'EEXIST')) throw error;
-      const existing = await readLockAfterConcurrentCreation(paths.lockPath);
-      if (existing !== null && existing.boot_id === currentBootId() && isProcessAlive(existing.pid)) throw new CoordinatorAlreadyRunningError(`coordinator is already running as pid ${String(existing.pid)}`);
-      if (existing === null) {
-        const lockStat = await stat(paths.lockPath).catch((statError: unknown) => {
-          if (statError instanceof Error && 'code' in statError && statError.code === 'ENOENT') return null;
-          throw statError;
-        });
-        if (lockStat !== null && Date.now() - lockStat.mtimeMs < 30_000) throw new CoordinationRuntimeError('coordinator-contention', 'coordinator lifecycle lock is fresh but incomplete');
-      }
-      await unlink(paths.lockPath).catch((unlinkError: unknown) => {
-        if (!(unlinkError instanceof Error && 'code' in unlinkError && unlinkError.code === 'ENOENT')) throw unlinkError;
-      });
+  const election = adoption === undefined
+    ? acquireSerializedProcessGuard(paths.lifecycleElectionPath, 10_000, 'coordinator lifecycle election')
+    : { release: () => adoption.releaseElection() };
+  let currentTombstone: string | null = null;
+  let predecessorTombstone: string | null = null;
+  let predecessorRestore: PredecessorCoordinatorLock | null = null;
+  let createdCurrent = false;
+  let createdFence = false;
+  let activated = false;
+  const startIdentity = processStartIdentity(process.pid);
+  if (startIdentity === null) { election.release(); throw new CoordinationRuntimeError('system-fatal', 'cannot obtain current coordinator process-creation identity'); }
+  const record: LockRecord = {
+    schema_version: COORDINATOR_UPGRADE_PATH.target.lifecycle_lock_schema,
+    pid: process.pid,
+    boot_id: currentBootId(),
+    process_start_identity: startIdentity,
+    token: randomBytes(24).toString('hex'),
+    instance_id: randomBytes(24).toString('hex'),
+    package_build: COORDINATOR_UPGRADE_PATH.target.package_build,
+    protocol_version: COORDINATOR_UPGRADE_PATH.target.protocol_version,
+    database_schema_version: COORDINATOR_UPGRADE_PATH.target.database_schema_version,
+    started_at: new Date().toISOString(),
+  };
+  let predecessorFence: PredecessorCoordinatorLock = { schema_version: 'autopilot.coordinator_lock.v1', pid: process.pid, boot_id: predecessorCompatibleBootId(), token: randomBytes(24).toString('hex'), started_at: record.started_at };
+  try {
+    const currentText = await readExactLockText(paths.lockPath);
+    if (currentText !== null) {
+      let current: LockRecord | null = null;
+      try { current = parseCurrentCoordinatorLock(JSON.parse(currentText) as unknown); } catch { /* fail below */ }
+      if (current === null) throw new CoordinationRuntimeError('protocol-mismatch', 'current-generation lifecycle lock belongs to an unknown build');
+      // PID liveness always wins. Boot-id disagreement is never stale proof.
+      if (isProcessAlive(current.pid)) throw new CoordinatorAlreadyRunningError(`coordinator is already running as pid ${String(current.pid)}`);
+      currentTombstone = await quarantineExactLock(paths.lockPath, currentText, 'dead current-generation coordinator lock');
     }
+    const currentHandle = await open(paths.lockPath, 'wx', 0o600);
+    try { await currentHandle.writeFile(`${JSON.stringify(record)}\n`, 'utf8'); await currentHandle.sync(); } finally { await currentHandle.close(); }
+    await enforcePrivateAuthorityPath(paths.lockPath, false);
+    createdCurrent = true;
+
+    const predecessorText = await readExactLockText(paths.predecessorLockPath);
+    if (predecessorText !== null) {
+      let predecessor: PredecessorCoordinatorLock | null = null;
+      try { predecessor = parsePredecessorCoordinatorLock(JSON.parse(predecessorText) as unknown); } catch { /* fail below */ }
+      if (predecessor === null) throw new CoordinationRuntimeError('protocol-mismatch', 'predecessor lifecycle path contains an unknown lock');
+      const intent = await readCoordinatorUpgradeIntent(paths);
+      const upgradeHandoff = intent !== null && intent.predecessor_fence !== null && ['starting', 'reconnect-verified'].includes(intent.state) && samePredecessorLock(predecessor, intent.predecessor_fence);
+      const adoptedHandoff = adoption !== undefined && samePredecessorLock(predecessor, adoption.predecessorFence);
+      const authorizedHandoff = upgradeHandoff || adoptedHandoff;
+      if (isProcessAlive(predecessor.pid) && !authorizedHandoff) throw new CoordinatorAlreadyRunningError(`predecessor lifecycle path is fenced by live pid ${String(predecessor.pid)}`);
+      if (authorizedHandoff) {
+        predecessorRestore = predecessor;
+        await replacePredecessorFence(paths.predecessorLockPath, predecessorFence);
+        createdFence = true;
+        if (upgradeHandoff) await recordCoordinatorFenceHandoff(paths, predecessor, predecessorFence);
+        adoption?.adopted(predecessorFence);
+      } else {
+        predecessorTombstone = await quarantineExactLock(paths.predecessorLockPath, predecessorText, 'dead predecessor fence replacement');
+        await writePredecessorFence(paths.predecessorLockPath, predecessorFence);
+        createdFence = true;
+      }
+    } else {
+      await writePredecessorFence(paths.predecessorLockPath, predecessorFence);
+      createdFence = true;
+    }
+    if (currentTombstone !== null) { await discardLockTombstone(currentTombstone); currentTombstone = null; }
+    if (predecessorTombstone !== null) { await discardLockTombstone(predecessorTombstone); predecessorTombstone = null; }
+
+    const verifyOrRepairFence = async (): Promise<void> => {
+      const guard = acquireSerializedProcessGuard(paths.lifecycleElectionPath, 2_000, 'predecessor fence maintenance');
+      try {
+        const text = await readExactLockText(paths.predecessorLockPath);
+        if (text === null) { await writePredecessorFence(paths.predecessorLockPath, predecessorFence); return; }
+        const observed = parsePredecessorCoordinatorLock(JSON.parse(text) as unknown);
+        if (observed !== null && samePredecessorFenceOwner(observed, predecessorFence)) {
+          const refreshed = { ...predecessorFence, boot_id: predecessorCompatibleBootId() };
+          if (!samePredecessorLock(observed, refreshed)) await replacePredecessorFence(paths.predecessorLockPath, refreshed);
+          predecessorFence = refreshed;
+          return;
+        }
+        if (observed === null) throw new CoordinationRuntimeError('system-fatal', 'old-format predecessor fence became unreadable');
+        if (isProcessAlive(observed.pid)) throw new CoordinationRuntimeError('system-fatal', 'a live stale coordinator displaced the predecessor fence', [`pid=${String(observed.pid)}`]);
+        const tombstone = await quarantineExactLock(paths.predecessorLockPath, text, 'dead stale predecessor lock');
+        predecessorFence = { ...predecessorFence, boot_id: predecessorCompatibleBootId() };
+        await writePredecessorFence(paths.predecessorLockPath, predecessorFence);
+        await discardLockTombstone(tombstone);
+      } finally { guard.release(); }
+    };
+
+    return {
+      record,
+      activate: () => { if (!activated) { activated = true; election.release(); } },
+      verifyOrRepairFence,
+      abortStartup: async () => {
+        if (adoption === undefined || predecessorRestore === null) {
+          const currentTextValue = await readExactLockText(paths.lockPath);
+          const current = currentTextValue === null ? null : parseCurrentCoordinatorLock(JSON.parse(currentTextValue) as unknown);
+          if (currentTextValue === null || current === null || !sameCurrentLock(current, record)) throw new CoordinationRuntimeError('system-fatal', 'failed-startup current lock changed before cleanup');
+          await discardLockTombstone(await quarantineExactLock(paths.lockPath, currentTextValue, 'failed-startup current-generation lifecycle lock'));
+          const fenceText = await readExactLockText(paths.predecessorLockPath);
+          const fence = fenceText === null ? null : parsePredecessorCoordinatorLock(JSON.parse(fenceText) as unknown);
+          if (fenceText === null || fence === null || !samePredecessorFenceOwner(fence, predecessorFence)) throw new CoordinationRuntimeError('system-fatal', 'failed-startup predecessor fence changed before cleanup');
+          await discardLockTombstone(await quarantineExactLock(paths.predecessorLockPath, fenceText, 'failed-startup predecessor lifecycle fence'));
+          election.release();
+          return;
+        }
+        const currentTextValue = await readExactLockText(paths.lockPath);
+        if (currentTextValue === null) throw new CoordinationRuntimeError('system-fatal', 'adopted startup current lock disappeared before crash cleanup');
+        const current = parseCurrentCoordinatorLock(JSON.parse(currentTextValue) as unknown);
+        if (current === null || !sameCurrentLock(current, record)) throw new CoordinationRuntimeError('system-fatal', 'adopted startup current lock changed before crash cleanup');
+        await discardLockTombstone(await quarantineExactLock(paths.lockPath, currentTextValue, 'adopted failed-startup current lock'));
+        const fenceText = await readExactLockText(paths.predecessorLockPath);
+        const fence = fenceText === null ? null : parsePredecessorCoordinatorLock(JSON.parse(fenceText) as unknown);
+        if (fence === null || !samePredecessorFenceOwner(fence, predecessorFence)) throw new CoordinationRuntimeError('system-fatal', 'adopted startup predecessor fence changed before crash cleanup');
+        await replacePredecessorFence(paths.predecessorLockPath, predecessorRestore);
+        adoption.restored();
+        election.release();
+      },
+      release: async () => {
+        const currentTextValue = await readExactLockText(paths.lockPath);
+        if (currentTextValue === null) throw new CoordinationRuntimeError('system-fatal', 'current-generation lifecycle lock disappeared before release');
+        const current = parseCurrentCoordinatorLock(JSON.parse(currentTextValue) as unknown);
+        if (current === null || !sameCurrentLock(current, record)) throw new CoordinationRuntimeError('system-fatal', 'current-generation lifecycle lock ownership changed before release');
+        const currentRemoval = await quarantineExactLock(paths.lockPath, currentTextValue, 'current-generation lifecycle lock');
+        await discardLockTombstone(currentRemoval);
+        const fenceText = await readExactLockText(paths.predecessorLockPath);
+        if (fenceText === null) throw new CoordinationRuntimeError('system-fatal', 'predecessor fence disappeared before release');
+        const fence = parsePredecessorCoordinatorLock(JSON.parse(fenceText) as unknown);
+        if (fence === null || !samePredecessorFenceOwner(fence, predecessorFence)) throw new CoordinationRuntimeError('system-fatal', 'predecessor fence ownership changed before release');
+        const fenceRemoval = await quarantineExactLock(paths.predecessorLockPath, fenceText, 'predecessor lifecycle fence');
+        await discardLockTombstone(fenceRemoval);
+      },
+    };
+  } catch (error) {
+    try {
+      if (createdFence) {
+        const text = await readExactLockText(paths.predecessorLockPath);
+        if (text === null) throw new CoordinationRuntimeError('system-fatal', 'new predecessor fence disappeared during failed startup cleanup');
+        const observed = parsePredecessorCoordinatorLock(JSON.parse(text) as unknown);
+        if (observed === null || !samePredecessorFenceOwner(observed, predecessorFence)) throw new CoordinationRuntimeError('system-fatal', 'new predecessor fence changed identity during failed startup cleanup');
+        if (predecessorRestore === null) await discardLockTombstone(await quarantineExactLock(paths.predecessorLockPath, text, 'failed-startup predecessor fence'));
+        else { await replacePredecessorFence(paths.predecessorLockPath, predecessorRestore); adoption?.restored(); }
+      }
+      if (createdCurrent) {
+        const text = await readExactLockText(paths.lockPath);
+        if (text === null) throw new CoordinationRuntimeError('system-fatal', 'new current lock disappeared during failed startup cleanup');
+        const observed = parseCurrentCoordinatorLock(JSON.parse(text) as unknown);
+        if (observed === null || !sameCurrentLock(observed, record)) throw new CoordinationRuntimeError('system-fatal', 'new current lock changed identity during failed startup cleanup');
+        await discardLockTombstone(await quarantineExactLock(paths.lockPath, text, 'failed-startup current lock'));
+      }
+      if (predecessorTombstone !== null) await restoreLockTombstone(paths.predecessorLockPath, predecessorTombstone, 'predecessor fence');
+      if (currentTombstone !== null) await restoreLockTombstone(paths.lockPath, currentTombstone, 'current-generation lifecycle lock');
+    } catch (cleanupError) {
+      election.release();
+      throw new CoordinationRuntimeError('system-fatal', 'coordinator election failed and exact lock cleanup was incomplete', [failureText(error), failureText(cleanupError)]);
+    }
+    election.release();
+    throw error;
   }
-  throw new CoordinationRuntimeError('coordinator-contention', 'could not acquire coordinator lifecycle lock');
 }
 
 function authenticated(provided: string, expected: string): boolean {
@@ -117,8 +232,8 @@ function authenticated(provided: string, expected: string): boolean {
   return left.byteLength === right.byteLength && timingSafeEqual(left, right);
 }
 
-function writeLegacyReplayResponse(socket: Socket, response: CoordinatorResponseEnvelope): Promise<void> {
-  const legacy = { ...response, protocol_version: '1.1' };
+function writeLegacyReplayResponse(socket: Socket, response: CoordinatorResponseEnvelope, protocol: '1.1' | '1.2'): Promise<void> {
+  const legacy = { ...response, protocol_version: protocol };
   return new Promise<void>((resolveWrite, rejectWrite) => {
     socket.write(encodeCoordinatorFrame(legacy), (error) => {
       if (error === undefined || error === null) resolveWrite();
@@ -131,7 +246,7 @@ function errorResponse(requestId: string, error: unknown): CoordinatorResponseEn
   const runtime = error instanceof CoordinationRuntimeError ? error : new CoordinationRuntimeError('system-fatal', error instanceof Error ? error.message : String(error));
   return {
     schema_version: 'autopilot.coordinator_response.v1',
-    protocol_version: '1.2',
+    protocol_version: AUTOPILOT_COORDINATOR_PROTOCOL_VERSION,
     request_id: requestId,
     ok: false,
     committed_event_seq: null,
@@ -141,7 +256,7 @@ function errorResponse(requestId: string, error: unknown): CoordinatorResponseEn
   };
 }
 
-function handleSocket(socket: Socket, store: CoordinatorStore, capability: string, backgroundFailure: () => Error | null): void {
+function handleSocket(socket: Socket, store: CoordinatorStore, capability: string, paths: CoordinatorRuntimePaths, backgroundFailure: () => Error | null): void {
   const decoder = new CoordinatorFrameDecoder();
   let chain = Promise.resolve();
   socket.on('data', (chunk: NodeBuffer) => {
@@ -151,7 +266,8 @@ function handleSocket(socket: Socket, store: CoordinatorStore, capability: strin
         let requestId = `transport-error-${randomBytes(8).toString('hex')}`;
         try {
           let response: CoordinatorResponseEnvelope | null = null;
-          let legacyReplay = false;
+          let legacyReplayProtocol: '1.1' | '1.2' | null = null;
+          let action: string | null = null;
           let currentTransport: ReturnType<typeof parseCoordinatorTransportRequest> | null = null;
           try { currentTransport = parseCoordinatorTransportRequest(frame); }
           catch (currentProtocolError) {
@@ -161,18 +277,26 @@ function handleSocket(socket: Socket, store: CoordinatorStore, capability: strin
             const legacyRequestId = legacy.request['request_id'];
             if (typeof legacyRequestId === 'string') requestId = legacyRequestId;
             if (!authenticated(legacy.capability, capability)) throw new CoordinationRuntimeError('unauthorized-client', 'coordinator capability proof was rejected');
+            action = typeof legacy.request['action'] === 'string' ? legacy.request['action'] : null;
+            const timerFailure = backgroundFailure();
+            if (timerFailure !== null) throw new CoordinationRuntimeError('system-fatal', `coordinator predecessor fence maintenance failed: ${timerFailure.message}`);
+            const upgradeIntent = await readCoordinatorUpgradeIntent(paths);
+            if (upgradeIntent !== null && upgradeIntent.state !== 'committed' && action !== 'status' && action !== 'doctor') throw new CoordinationRuntimeError('coordinator-contention', 'coordinator upgrade is not durably committed; mutation/replay authority remains closed');
             response = store.replayLegacyRequest(legacy.request);
-            legacyReplay = true;
+            legacyReplayProtocol = legacy.replay_protocol;
           }
           if (currentTransport !== null) {
             requestId = currentTransport.request.request_id;
+            action = currentTransport.request.action;
             if (!authenticated(currentTransport.capability, capability)) throw new CoordinationRuntimeError('unauthorized-client', 'coordinator capability proof was rejected');
+            const timerFailure = backgroundFailure();
+            if (timerFailure !== null) throw new CoordinationRuntimeError('system-fatal', `coordinator predecessor fence maintenance failed: ${timerFailure.message}`);
+            const upgradeIntent = await readCoordinatorUpgradeIntent(paths);
+            if (upgradeIntent !== null && upgradeIntent.state !== 'committed' && action !== 'status' && action !== 'doctor') throw new CoordinationRuntimeError('coordinator-contention', 'coordinator upgrade is not durably committed; mutation authority remains closed');
             response = store.handle(currentTransport.request);
           }
           if (response === null) throw new CoordinationRuntimeError('system-fatal', 'coordinator request parsing produced no response path');
-          const timerFailure = backgroundFailure();
-          if (timerFailure !== null) throw new CoordinationRuntimeError('system-fatal', `coordinator grant-offer timer failed: ${timerFailure.message}`);
-          if (legacyReplay) await writeLegacyReplayResponse(socket, response);
+          if (legacyReplayProtocol !== null) await writeLegacyReplayResponse(socket, response, legacyReplayProtocol);
           else await writeCoordinatorResponse(socket, response);
         } catch (error) {
           await writeCoordinatorResponse(socket, errorResponse(requestId, error));
@@ -220,8 +344,8 @@ export interface RunningCoordinator {
   close(): Promise<void>;
 }
 
-export async function startCoordinatorServer(paths: CoordinatorRuntimePaths, clock?: StoreClock): Promise<RunningCoordinator> {
-  const lifecycleLock = await acquireCoordinatorLock(paths);
+export async function startCoordinatorServer(paths: CoordinatorRuntimePaths, clock?: StoreClock, adoption?: CoordinatorStartupAdoption): Promise<RunningCoordinator> {
+  const lifecycleLock = await acquireCoordinatorLock(paths, adoption);
   let store: CoordinatorStore | null = null;
   let server: Server | null = null;
   let offerTimer: ReturnType<typeof setInterval> | null = null;
@@ -232,18 +356,23 @@ export async function startCoordinatorServer(paths: CoordinatorRuntimePaths, clo
     store = clock === undefined ? await CoordinatorStore.open(paths) : await CoordinatorStore.open(paths, clock);
     const openedStore = store;
     let timerFailure: Error | null = null;
-    offerTimer = setInterval(() => {
-      try {
-        openedStore.sweepExpiredGrantOffers();
-      } catch (error) {
-        timerFailure = error instanceof Error ? error : new Error(String(error));
-      }
-    }, COORDINATOR_GRANT_OFFER_SWEEP_MS);
-    server = createServer((socket) => handleSocket(socket, openedStore, capability, () => timerFailure));
+    server = createServer((socket) => handleSocket(socket, openedStore, capability, paths, () => timerFailure));
     await listen(server, paths.socketPath);
     serverListening = true;
     const openedServer = server;
     if (platform() !== 'win32') await chmod(paths.socketPath, 0o600);
+    // Schema migration, current socket publication, and old-format fence handoff
+    // all complete under one lifecycle election. Only then may another startup or
+    // restore operation enter the election.
+    lifecycleLock.activate();
+    offerTimer = setInterval(() => {
+      void lifecycleLock.verifyOrRepairFence().then(() => {
+        openedStore.sweepExpiredGrantOffers();
+        timerFailure = null;
+      }).catch((error: unknown) => {
+        timerFailure = error instanceof Error ? error : new Error(String(error));
+      });
+    }, COORDINATOR_GRANT_OFFER_SWEEP_MS);
     let closed = false;
     let serverClosed = false;
     let storeClosed = false;
@@ -290,7 +419,7 @@ export async function startCoordinatorServer(paths: CoordinatorRuntimePaths, clo
       }
     }
     try {
-      await lifecycleLock.release();
+      await lifecycleLock.abortStartup();
     } catch (releaseError) {
       cleanupFailures.push(`lock-release: ${releaseError instanceof Error ? releaseError.message : String(releaseError)}`);
     }

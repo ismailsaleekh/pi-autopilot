@@ -4,6 +4,7 @@ import { readdir, readFile, rm } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { AUTOPILOT_RUNTIME_ROOT_PREFIX } from "./names.js";
 import { executeOwnedWorktreeSaga } from "./coordination/worktree-saga.js";
+import { coordinationCutoverCommitted } from "./coordination/migration-paths.js";
 import { BRANCHES_FILE, MATERIALIZED_PATHS_FILE, UNIT_INDEX_FILE, UNIT_INFO_FILE, WORKTREE_LEDGER_FILE, appendJsonl, readGitStatus, readUnitIndex, taskRootForActiveAutopilot, unitWorktreePathForActiveAutopilot, withAutopilotFileLock, writeJsonAtomic, writeUnitIndex, } from "./parallel-runtime.js";
 export class AutopilotWorktreeCleanupError extends Error {
     name = 'AutopilotWorktreeCleanupError';
@@ -139,6 +140,7 @@ export async function cleanupClosedAutopilotRun(input) {
                 return inspected.proof;
             },
         }, input.env ?? process.env);
+        await input.observeTerminalBoundary?.('after-archive-ref');
         await appendLedger(input.active, {
             mode: 'closed-run-cleanup',
             event: 'main-branch-archive-ref',
@@ -171,19 +173,17 @@ export async function cleanupClosedAutopilotRun(input) {
                 env: input.env,
                 retireBranch: true,
             });
+            await input.observeTerminalBoundary?.('after-unit-cleanup');
         }
-        await removeMainWorktree(input.active, acc, input.archiveSha, input.reason, now, input.env);
+        await removeMainWorktree(input.active, units, acc, input.archiveSha, input.reason, now, input.env, input.removeActiveTaskDir);
         await retireBranchIfPresent(input.active, input.active.branch, input.archiveSha, acc, 'closed-run-cleanup', input.reason, now, input.env);
         await pruneGitMetadataAfterProof(input.active, acc, 'closed-run-cleanup', input.reason, now, input.env);
         const runOwnedWorktreePaths = [input.active.main_worktree_path, ...units.map((unit) => unit.worktree_path)];
         verifyNoPathResidue(input.active.source_repo, runOwnedWorktreePaths, input.env);
-        if (input.removeActiveTaskDir) {
-            await removeActiveTaskDirectory(input.active, units, acc, input.reason, now, input.env);
-        }
         verifyNoPathResidue(input.active.source_repo, runOwnedWorktreePaths, input.env);
-        if (input.removeActiveTaskDir && existsSync(taskRootForActiveAutopilot(input.active))) {
+        if (input.removeActiveTaskDir && existsSync(taskRootForActiveAutopilot(input.active)))
             fail('active-task-dir-remains', 'active task directory still exists after closed-run cleanup.', [taskRootForActiveAutopilot(input.active)]);
-        }
+        await input.observeTerminalBoundary?.('after-main-cleanup');
         return cleanupResult(input.active, 'closed-run-cleanup', acc, now);
     });
 }
@@ -300,7 +300,7 @@ async function removeRegisteredWorktree(active, worktreePath, acc, input) {
         ...ledgerUnitFields(unit), proof: ['saga_committed', 'git_worktree_remove_succeeded_or_already_absent', 'branch_absent', 'path_absent_after_remove'],
     });
 }
-async function removeMainWorktree(active, acc, expectedSha, reason, now, env) {
+async function removeMainWorktree(active, units, acc, expectedSha, reason, now, env, removeActiveTaskDir = false) {
     assertActiveRowScope(active);
     const mainPath = active.main_worktree_path;
     const listedBefore = gitWorktreeListPorcelain(active.source_repo, env);
@@ -342,7 +342,6 @@ async function removeMainWorktree(active, acc, expectedSha, reason, now, env) {
         });
         fail('dirty-main-worktree', 'refusing to remove main worktree with dirty source residue.', dirtySourcePaths);
     }
-    await removeArchivedRuntimeResidue(active, reason, now);
     const inspectMainRemove = () => {
         const listed = gitWorktreeListPorcelain(active.source_repo, env);
         const present = existsSync(mainPath);
@@ -354,7 +353,9 @@ async function removeMainWorktree(active, acc, expectedSha, reason, now, env) {
         }
         if (!present) {
             if (!branchExists(active.source_repo, active.branch, env))
-                return { outcome: 'satisfied', proof: ['path_absent', 'git_registration_absent', 'branch_absent'] };
+                return removeActiveTaskDir && existsSync(taskRootForActiveAutopilot(active))
+                    ? { outcome: 'not-applied', proof: ['path_absent', 'git_registration_absent', 'branch_absent', 'active_task_dir_present'] }
+                    : { outcome: 'satisfied', proof: ['path_absent', 'git_registration_absent', 'branch_absent', ...(removeActiveTaskDir ? ['active_task_dir_absent'] : [])] };
             const actualBranchSha = runGitForCleanup(['rev-parse', `refs/heads/${active.branch}`], active.source_repo, runtimeGitEnv('worktree-cleanup-branch-head', env)).trim();
             return actualBranchSha === expectedSha ? { outcome: 'not-applied', proof: ['path_absent', 'branch_present'] } : { outcome: 'unsafe', proof: [`branch_expected=${expectedSha}`, `branch_actual=${actualBranchSha}`] };
         }
@@ -372,7 +373,8 @@ async function removeMainWorktree(active, acc, expectedSha, reason, now, env) {
         },
     }, {
         inspect: inspectMainRemove,
-        action: () => {
+        action: async () => {
+            await removeArchivedRuntimeResidue(active, reason, now);
             if (existsSync(mainPath) || gitWorktreeListPorcelain(active.source_repo, env).some((entry) => samePath(entry.path, mainPath)))
                 runGitForCleanup(['worktree', 'remove', mainPath], active.source_repo, runtimeGitEnv('worktree-cleanup-remove-main', env));
             if (branchExists(active.source_repo, active.branch, env)) {
@@ -381,11 +383,15 @@ async function removeMainWorktree(active, acc, expectedSha, reason, now, env) {
                     fail('branch-retire-sha-mismatch', 'main branch moved after cleanup intent; refusing retirement.', [active.branch, `expected=${expectedSha}`, `actual=${actualBranchSha}`]);
                 runGitForCleanup(['update-ref', '-d', `refs/heads/${active.branch}`, expectedSha], active.source_repo, runtimeGitEnv('worktree-cleanup-branch-retire', env));
             }
+            if (removeActiveTaskDir)
+                await removeActiveTaskDirectory(active, units, acc, reason, now, env);
         },
         verify: () => {
             const inspected = inspectMainRemove();
             if (inspected.outcome !== 'satisfied')
                 fail('main-worktree-remove-incomplete', 'main worktree remove saga postcondition failed.', inspected.proof);
+            if (removeActiveTaskDir && existsSync(taskRootForActiveAutopilot(active)))
+                fail('active-task-dir-remains', 'main remove saga cannot commit while active task metadata remains.', [taskRootForActiveAutopilot(active)]);
             return inspected.proof;
         },
     }, env ?? process.env);
@@ -612,7 +618,7 @@ async function activeTaskDirectoryResidueBlockers(taskRoot, units) {
     return sortedUnique(blockers);
 }
 function isAllowedTaskResidual(entry, units) {
-    const rootFiles = new Set(['_task-info.json', BRANCHES_FILE, UNIT_INDEX_FILE, '_checkout-profile.json', '_materialization-ledger.jsonl']);
+    const rootFiles = new Set(['_task-info.json', BRANCHES_FILE, UNIT_INDEX_FILE, '_checkout-profile.json', '_materialization-ledger.jsonl', MATERIALIZED_PATHS_FILE]);
     if (!entry.directory && rootFiles.has(entry.relativePath))
         return true;
     if (entry.relativePath === 'units' && entry.directory)
@@ -860,7 +866,8 @@ async function appendLedger(active, input) {
         ...(input.proof === undefined ? {} : { proof: input.proof }),
         ...(input.blockers === undefined ? {} : { blockers: input.blockers }),
     };
-    await appendJsonl(join(active.worktree_root, WORKTREE_LEDGER_FILE), row);
+    if (!coordinationCutoverCommitted(dirname(dirname(active.worktree_root)), active.repo_key))
+        await appendJsonl(join(active.worktree_root, WORKTREE_LEDGER_FILE), row);
 }
 function runGitForCleanup(args, cwd, env) {
     const result = spawnSync('git', [...args], { cwd, encoding: 'utf8', env });
