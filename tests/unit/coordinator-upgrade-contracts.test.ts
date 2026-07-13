@@ -9,9 +9,9 @@ const capability = 'a'.repeat(64);
 void describe('standalone coordinator upgrade contracts', () => {
   void it('locks one exact 1.2/schema-6/build predecessor to one exact 1.3/schema-9 target', () => {
     assert.deepEqual(COORDINATOR_UPGRADE_PATH.source, { package_build: '0.13.0-cf34', protocol_version: '1.2', database_schema_version: 6, lifecycle_lock_schema: 'autopilot.coordinator_lock.v1' });
-    assert.deepEqual(COORDINATOR_UPGRADE_PATH.target, { package_build: '1.0.0-cf37', protocol_version: '1.3', database_schema_version: 9, lifecycle_lock_schema: 'autopilot.coordinator_lock.v2' });
+    assert.deepEqual(COORDINATOR_UPGRADE_PATH.target, { package_build: '1.0.1-cf38', protocol_version: '1.3', database_schema_version: 9, lifecycle_lock_schema: 'autopilot.coordinator_lock.v2' });
     const predecessor = { schema_version: 'autopilot.coordinator_lock.v1', pid: 123, boot_id: 'boot', token: 'token', started_at: '2026-07-12T00:00:00.000Z' };
-    const current = { schema_version: 'autopilot.coordinator_lock.v2', pid: 456, boot_id: 'boot', process_start_identity: 'process-start', token: 'token', instance_id: 'instance', package_build: '1.0.0-cf37', protocol_version: '1.3', database_schema_version: 9, started_at: '2026-07-12T00:00:00.000Z' };
+    const current = { schema_version: 'autopilot.coordinator_lock.v2', pid: 456, boot_id: 'boot', process_start_identity: 'process-start', token: 'token', instance_id: 'instance', package_build: '1.0.1-cf38', protocol_version: '1.3', database_schema_version: 9, started_at: '2026-07-12T00:00:00.000Z' };
     assert.notEqual(parsePredecessorCoordinatorLock(predecessor), null);
     assert.equal(parsePredecessorCoordinatorLock(current), null);
     assert.notEqual(parseCurrentCoordinatorLock(current), null);

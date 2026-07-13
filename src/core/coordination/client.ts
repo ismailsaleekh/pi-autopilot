@@ -320,13 +320,13 @@ export class CoordinatorClient {
   async request(requestValue: CoordinatorRequestEnvelope): Promise<CoordinatorResponseEnvelope> {
     const request = parseCoordinatorRequestEnvelope(requestValue);
     const capability = await readOrCreateCoordinatorCapability(this.#paths);
-    if (!this.#compatibilityVerified && request.action !== 'status') {
+    if (!this.#compatibilityVerified && request.action !== 'handshake' && request.action !== 'status' && request.action !== 'migration-recovery' && request.action !== 'run-catalog') {
       const probeResponse = await this.#sendWithRecovery(this.#probeRequest(), capability);
       this.#assertCoordinatorCompatibility(probeResponse);
       this.#compatibilityVerified = true;
     }
     const response = await this.#sendWithRecovery(request, capability);
-    if (request.action === 'status') {
+    if (request.action === 'handshake' || request.action === 'status' || request.action === 'migration-recovery' || request.action === 'run-catalog') {
       this.#assertCoordinatorCompatibility(response);
       this.#compatibilityVerified = true;
     }
@@ -339,7 +339,7 @@ export class CoordinatorClient {
     } catch (error) {
       if (!this.#autoStart || (!isConnectionFailure(error) && !compatibilityFailure(error))) throw error;
       const freeze = activeCoordinationMigrationFreeze(this.#paths.stateRoot);
-      const recoveryAction = request.action === 'status' || request.action === 'doctor' || request.action === 'export' || request.action === 'attach-migration-recovery' || request.action === 'resolve-migration-recovery' || request.action === 'detach-session' || request.action === 'heartbeat';
+      const recoveryAction = request.action === 'handshake' || request.action === 'status' || request.action === 'doctor' || request.action === 'export' || request.action === 'migration-recovery' || request.action === 'run-catalog' || request.action === 'attach-migration-recovery' || request.action === 'resolve-migration-recovery' || request.action === 'detach-session' || request.action === 'heartbeat';
       if (freeze !== null && !(this.#allowMigrationRecoveryAutoStart && recoveryAction)) throw new CoordinationRuntimeError('coordinator-contention', 'coordinator auto-start is forbidden while coordination migration is frozen; only an explicit recovery client may start the imported candidate store', [freeze]);
       await this.#ensureStarted(capability, compatibilityFailure(error));
       const retryDeadline = Date.now() + this.#requestTimeoutMs;
@@ -453,12 +453,12 @@ export class CoordinatorClient {
 
   #probeRequest(): CoordinatorRequestEnvelope {
     return {
-      schema_version: 'autopilot.coordinator_request.v1', protocol_version: AUTOPILOT_COORDINATOR_PROTOCOL_VERSION, request_id: `probe-${randomUUID()}`, action: 'status', idempotency_key: null, repo_id: 'global', workstream_run: null, session_id: null, fencing_generation: null, expected_version: null, payload: EMPTY_COORDINATOR_PAYLOAD,
+      schema_version: 'autopilot.coordinator_request.v1', protocol_version: AUTOPILOT_COORDINATOR_PROTOCOL_VERSION, request_id: `probe-${randomUUID()}`, action: 'handshake', idempotency_key: null, repo_id: 'global', workstream_run: null, session_id: null, fencing_generation: null, expected_version: null, payload: EMPTY_COORDINATOR_PAYLOAD,
     };
   }
 
   #assertCoordinatorCompatibility(response: CoordinatorResponseEnvelope): void {
-    if (response.payload['schema_version'] !== 'autopilot.coordinator_status.v1') throw new CoordinationRuntimeError('schema-mismatch', 'coordinator readiness handshake omitted its status schema');
+    if (response.payload['schema_version'] !== 'autopilot.coordinator_handshake.v1' && response.payload['schema_version'] !== 'autopilot.coordinator_status.v1' && response.payload['schema_version'] !== 'autopilot.migration_recovery_query.v1' && response.payload['schema_version'] !== 'autopilot.coordinator_run_catalog.v1') throw new CoordinationRuntimeError('schema-mismatch', 'coordinator readiness response omitted a compatible handshake schema');
     if (response.payload['package_build'] !== COORDINATOR_PACKAGE_BUILD) throw new CoordinationRuntimeError('protocol-mismatch', `coordinator package build is incompatible with ${COORDINATOR_PACKAGE_BUILD}`);
     if (response.payload['protocol_version'] !== AUTOPILOT_COORDINATOR_PROTOCOL_VERSION) throw new CoordinationRuntimeError('protocol-mismatch', 'coordinator handshake protocol version is incompatible');
     if (response.payload['database_schema_version'] !== COORDINATOR_DATABASE_SCHEMA_VERSION) throw new CoordinationRuntimeError('schema-mismatch', `coordinator database schema is incompatible with ${String(COORDINATOR_DATABASE_SCHEMA_VERSION)}`);

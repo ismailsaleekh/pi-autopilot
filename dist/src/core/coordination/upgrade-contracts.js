@@ -7,7 +7,7 @@ const COORDINATOR_UPGRADE_SOURCE = Object.freeze({
     lifecycle_lock_schema: 'autopilot.coordinator_lock.v1',
 });
 const COORDINATOR_UPGRADE_TARGET = Object.freeze({
-    package_build: '1.0.0-cf37',
+    package_build: '1.0.1-cf38',
     protocol_version: '1.3',
     database_schema_version: 9,
     lifecycle_lock_schema: 'autopilot.coordinator_lock.v2',

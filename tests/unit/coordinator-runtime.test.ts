@@ -207,7 +207,7 @@ void describe('transactional coordinator runtime', () => {
     await mkdir(paths.coordinatorRoot, { recursive: true });
     const identity = processStartIdentity(process.pid);
     if (identity === null) throw new Error('process identity unavailable');
-    const live = { schema_version: 'autopilot.coordinator_lock.v2', pid: process.pid, boot_id: 'deliberately-wrong-boot', process_start_identity: identity, token: 'live-token', instance_id: 'live-instance', package_build: '1.0.0-cf37', protocol_version: '1.3', database_schema_version: 9, started_at: '2026-07-13T00:00:00.000Z' };
+    const live = { schema_version: 'autopilot.coordinator_lock.v2', pid: process.pid, boot_id: 'deliberately-wrong-boot', process_start_identity: identity, token: 'live-token', instance_id: 'live-instance', package_build: '1.0.1-cf38', protocol_version: '1.3', database_schema_version: 9, started_at: '2026-07-13T00:00:00.000Z' };
     await writeFile(paths.lockPath, `${JSON.stringify(live)}\n`, 'utf8');
     try {
       await assert.rejects(() => startCoordinatorServer(paths), (error: unknown) => error instanceof Error && error.name === 'CoordinatorAlreadyRunningError');

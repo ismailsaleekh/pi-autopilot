@@ -35,7 +35,7 @@ const required = [
   'artifacts/security/offline-security-scan.json',
 ];
 const missing = required.filter((path) => !files.has(path));
-const forbidden = [...files].filter((path) => path.includes('parent-repository') || path.startsWith('tests/') || path.includes('.pi/'));
+const forbidden = [...files].filter((path) => path.startsWith('tests/') || path === '.pi' || path.startsWith('.pi/') || path.includes('/.pi/'));
 let securityScanError = null;
 let lockfileSha256 = null;
 let securityScanLockfileSha256 = null;

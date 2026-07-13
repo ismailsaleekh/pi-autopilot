@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, statSync } from 'node:fs';
 import { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { platform, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -70,13 +70,13 @@ void describe('Coordination Fabric legacy migration and cutover', () => {
       if (startIdentity === null) throw new Error('test process lacks exact birth identity');
       await writeFile(paths.lockPath, `${JSON.stringify({
         schema_version: 'autopilot.coordinator_lock.v2', pid: process.pid, boot_id: currentBootId(), process_start_identity: startIdentity,
-        token: 'd'.repeat(48), instance_id: 'e'.repeat(48), package_build: '1.0.0-cf37', protocol_version: '1.3', database_schema_version: 9,
+        token: 'd'.repeat(48), instance_id: 'e'.repeat(48), package_build: '1.0.1-cf38', protocol_version: '1.3', database_schema_version: 9,
         started_at: '2026-07-12T12:00:00.000Z',
       })}\n`, 'utf8');
       const marker = join(fixture.stateRoot, 'cutovers', `${fixture.repoKey}.json`);
       await assert.rejects(
         () => runCoordinationMigration({ command: 'cutover', repoKey: fixture.repoKey, repoRoot: fixture.source, env: fixture.env, clock: fixedClock() }),
-        /refuses direct store access while current coordinator/u,
+        /could not retire the drained coordinator/u,
       );
       assert.equal(existsSync(marker), false, 'failed election must precede one-way marker publication');
       await rm(paths.lockPath, { force: true });
@@ -155,6 +155,40 @@ void describe('Coordination Fabric legacy migration and cutover', () => {
     });
   });
 
+  void it('BUG-172 inspects a bounded coordinator database larger than the legacy single-file ceiling', async () => {
+    await withFixture(async (fixture) => {
+      const paths = coordinatorRuntimePaths(fixture.env);
+      const store = await CoordinatorStore.open(paths, fixedClock());
+      store.close();
+      const database = new DatabaseSync(paths.databasePath);
+      try {
+        database.exec('PRAGMA journal_mode=DELETE; CREATE TABLE migration_bound_filler(payload BLOB); INSERT INTO migration_bound_filler VALUES(zeroblob(73400320)); DROP TABLE migration_bound_filler;');
+      } finally { database.close(); }
+      assert.equal(statSync(paths.databasePath).size > 64 * 1024 * 1024, true);
+      const dry = await runCoordinationMigration({ command: 'dry-run', repoKey: fixture.repoKey, env: fixture.env, clock: fixedClock() });
+      assert.equal(dry.blockers.length, 0);
+    });
+  });
+
+  void it('BUG-172 promotes an authentic pre-checkout v1 task projection during one-way cutover', async () => {
+    await withFixture(async (fixture) => {
+      const root = coordinationRootForRepo(fixture.repoKey, fixture.env);
+      const active = (await readActiveAutopilots(root))[0];
+      if (active === undefined) throw new Error('missing legacy-v1 active row');
+      const taskInfoPath = join(dirname(active.main_worktree_path), '_task-info.json');
+      const taskInfo = JSON.parse(await readFile(taskInfoPath, 'utf8')) as Readonly<Record<string, unknown>>;
+      const legacy = Object.fromEntries(Object.entries(taskInfo).filter(([field]) => !['checkout_mode', 'checkout_profile_origin', 'checkout_profile_ref', 'checkout_profile_sha256', 'coordination_authority'].includes(field)));
+      await writeFile(taskInfoPath, `${JSON.stringify({ ...legacy, schema_version: 'autopilot.task_info.v1' }, null, 2)}\n`, 'utf8');
+      await writePathClaims(root, []);
+      assert.equal((await runCoordinationMigration({ command: 'apply', repoKey: fixture.repoKey, env: fixture.env, clock: fixedClock() })).state, 'imported');
+      assert.equal((await runCoordinationMigration({ command: 'verify', repoKey: fixture.repoKey, env: fixture.env, clock: fixedClock() })).state, 'cutover-ready');
+      assert.equal((await runCoordinationMigration({ command: 'cutover', repoKey: fixture.repoKey, env: fixture.env, clock: fixedClock() })).state, 'legacy-archived');
+      const promoted = JSON.parse(await readFile(taskInfoPath, 'utf8')) as Readonly<Record<string, unknown>>;
+      assert.equal(promoted['schema_version'], 'autopilot.task_info.v2');
+      assert.equal(promoted['coordination_authority'], 'coordinator-edit-leases-v1');
+    });
+  });
+
   void it('BUG-172 accepts exact pre-checkout v1 task/unit metadata and pre-capture failure evidence without inventing release proof', async () => {
     await withFixture(async (fixture) => {
       const coordinationRoot = coordinationRootForRepo(fixture.repoKey, fixture.env);
@@ -213,7 +247,10 @@ void describe('Coordination Fabric legacy migration and cutover', () => {
       assert.equal(relisted.status, 0, relisted.stderr);
       const relistedPayload = JSON.parse(relisted.stdout) as Readonly<Record<string, unknown>>;
       assert.equal(Array.isArray(relistedPayload['recovery']) ? relistedPayload['recovery'].length : -1, 0);
+      const paths = coordinatorRuntimePaths(fixture.env);
+      assert.equal(existsSync(paths.lockPath), true, 'recovery CLI must not race another client by retiring the shared coordinator');
       assert.equal((await runCoordinationMigration({ command: 'verify', repoKey: fixture.repoKey, env: fixture.env, clock: fixedClock() })).state, 'cutover-ready');
+      assert.equal(existsSync(paths.lockPath), false, 'verify owns drained coordinator retirement under the migration lock');
       await runCoordinationMigration({ command: 'rollback', repoKey: fixture.repoKey, env: fixture.env, clock: fixedClock() });
     });
   });
@@ -357,7 +394,7 @@ void describe('Coordination Fabric legacy migration and cutover', () => {
       const resolved = await supervisor.resolveMigrationRecovery({ attachment, recoveryWork: recovery, resolution: { resolutionType: 'authority-retained' } });
       assert.equal(resolved.recoveryWork.status, 'resolved');
       assert.equal(resolved.recoveryWork.resolution?.resolution_type, 'authority-retained');
-      assert.equal(resolved.remainingRecoveryWork.length, 0);
+      assert.equal(resolved.remainingRecoveryCount, 0);
       assert.equal(resolved.run.status, 'recovering');
       const replayed = await supervisor.resolveMigrationRecovery({ attachment, recoveryWork: recovery, resolution: { resolutionType: 'authority-retained' } });
       assert.equal(replayed.recoveryWork.version, resolved.recoveryWork.version);

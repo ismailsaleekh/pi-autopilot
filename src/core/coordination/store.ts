@@ -1710,12 +1710,14 @@ export class CoordinatorStore {
 
   #dispatch(request: CoordinatorRequestEnvelope): StoreEffect {
     const freezeDrainActions = new Set<CoordinatorMutationAction>(['attach-migration-recovery', 'resolve-migration-recovery', 'detach-session', 'heartbeat', 'heartbeat-child', 'checkpoint-child', 'complete-child', 'record-release-evidence', 'cancel-run-terminal', 'reconcile-run', 'transition-operation']);
-    if (request.action !== 'status' && request.action !== 'doctor' && request.action !== 'export' && request.action !== 'migration-recovery' && !freezeDrainActions.has(request.action)) assertCoordinationDispatchAllowed(this.#stateRoot, request.repo_id, `coordinator mutation ${request.action}`);
+    if (request.action !== 'handshake' && request.action !== 'status' && request.action !== 'doctor' && request.action !== 'export' && request.action !== 'migration-recovery' && request.action !== 'run-catalog' && !freezeDrainActions.has(request.action)) assertCoordinationDispatchAllowed(this.#stateRoot, request.repo_id, `coordinator mutation ${request.action}`);
     switch (request.action) {
+      case 'handshake': return this.handshake();
       case 'status': return this.status(request.repo_id, request.workstream_run);
       case 'doctor': return this.doctor();
       case 'export': return this.exportTo(payloadString(request.payload, 'output_path'));
       case 'migration-recovery': return this.migrationRecovery(request);
+      case 'run-catalog': return this.runCatalog(request.repo_id, request.workstream_run);
       case 'attach-run': return this.attachRun(request);
       case 'attach-session': return this.attachSession(request);
       case 'attach-terminal-recovery': return this.attachTerminalRecovery(request);
@@ -1750,6 +1752,10 @@ export class CoordinatorStore {
       case 'complete-adjudication': return this.completeAdjudication(request);
       case 'submit-planning-contradiction': return this.submitPlanningContradiction(request);
     }
+  }
+
+  handshake(): StoreEffect {
+    return { committedEventSeq: null, payload: { schema_version: 'autopilot.coordinator_handshake.v1', package_build: COORDINATOR_PACKAGE_BUILD, protocol_version: AUTOPILOT_COORDINATOR_PROTOCOL_VERSION, database_schema_version: COORDINATOR_DATABASE_SCHEMA_VERSION } };
   }
 
   status(repoId: string, workstreamRun: string | null): StoreEffect {
@@ -1789,12 +1795,23 @@ export class CoordinatorStore {
     const authoritativeArtifacts = workstreamRun === null ? [] : this.#db.prepare('SELECT * FROM authoritative_artifacts WHERE repo_id=? AND source_run=? ORDER BY entity_id').all(repoId, workstreamRun).map(authoritativeArtifactFromRow);
     const adjudicationAssignments = workstreamRun === null ? [] : this.#db.prepare('SELECT * FROM adjudication_assignments WHERE repo_id=? ORDER BY entity_id').all(repoId).map(adjudicationAssignmentFromRow).filter((assignment) => assignment.requesting_run === workstreamRun || assignment.participating_runs.includes(workstreamRun) || assignment.adjudicator.workstream_run === workstreamRun);
     const escalations = workstreamRun === null ? [] : this.#db.prepare('SELECT * FROM escalations WHERE repo_id=? ORDER BY entity_id').all(repoId).map(escalationFromRow).filter((escalation) => escalation.participating_runs.includes(workstreamRun));
-    const migrations = repoId === 'global'
+    const migrations = (repoId === 'global'
       ? this.#db.prepare('SELECT repo_id, migration_id, snapshot_sha256, journal_path, state, report_json, imported_at, updated_at, version FROM coordination_migrations ORDER BY repo_id').all().map(migrationRecordFromRow)
-      : this.#db.prepare('SELECT repo_id, migration_id, snapshot_sha256, journal_path, state, report_json, imported_at, updated_at, version FROM coordination_migrations WHERE repo_id=?').all(repoId).map(migrationRecordFromRow);
+      : this.#db.prepare('SELECT repo_id, migration_id, snapshot_sha256, journal_path, state, report_json, imported_at, updated_at, version FROM coordination_migrations WHERE repo_id=?').all(repoId).map(migrationRecordFromRow))
+      .map((migration) => {
+        const report = migration['report'];
+        if (typeof report !== 'object' || report === null || Array.isArray(report)) throw new CoordinationRuntimeError('store-corrupt', 'coordination migration status report is not an object');
+        return { ...migration, report: { ...report, recovery: [] } };
+      });
     const migrationRecoveryWork = workstreamRun === null
-      ? (repoId === 'global' ? this.#db.prepare('SELECT * FROM migration_recovery_work ORDER BY repo_id, workstream_run, entity_id').all() : this.#db.prepare('SELECT * FROM migration_recovery_work WHERE repo_id=? ORDER BY workstream_run, entity_id').all(repoId)).map(migrationRecoveryFromRow)
-      : this.#db.prepare('SELECT * FROM migration_recovery_work WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(repoId, workstreamRun).map(migrationRecoveryFromRow);
+      ? (repoId === 'global' ? this.#db.prepare("SELECT * FROM migration_recovery_work WHERE status='pending' ORDER BY repo_id, workstream_run, entity_id LIMIT 128").all() : this.#db.prepare("SELECT * FROM migration_recovery_work WHERE repo_id=? AND status='pending' ORDER BY workstream_run, entity_id LIMIT 128").all(repoId)).map(migrationRecoveryFromRow)
+      : this.#db.prepare("SELECT * FROM migration_recovery_work WHERE repo_id=? AND workstream_run=? AND status='pending' ORDER BY entity_id LIMIT 128").all(repoId, workstreamRun).map(migrationRecoveryFromRow);
+    const pendingMigrationRecoveryCount = workstreamRun === null
+      ? (repoId === 'global' ? sqlInteger(asRow(this.#db.prepare("SELECT COUNT(*) AS count FROM migration_recovery_work WHERE status='pending'").get(), 'status pending recovery count'), 'count') : sqlInteger(asRow(this.#db.prepare("SELECT COUNT(*) AS count FROM migration_recovery_work WHERE repo_id=? AND status='pending'").get(repoId), 'status pending recovery count'), 'count'))
+      : sqlInteger(asRow(this.#db.prepare("SELECT COUNT(*) AS count FROM migration_recovery_work WHERE repo_id=? AND workstream_run=? AND status='pending'").get(repoId, workstreamRun), 'status pending recovery count'), 'count');
+    const migrationRecoveryTotalCount = workstreamRun === null
+      ? (repoId === 'global' ? sqlInteger(asRow(this.#db.prepare('SELECT COUNT(*) AS count FROM migration_recovery_work').get(), 'status recovery total count'), 'count') : sqlInteger(asRow(this.#db.prepare('SELECT COUNT(*) AS count FROM migration_recovery_work WHERE repo_id=?').get(repoId), 'status recovery total count'), 'count'))
+      : sqlInteger(asRow(this.#db.prepare('SELECT COUNT(*) AS count FROM migration_recovery_work WHERE repo_id=? AND workstream_run=?').get(repoId, workstreamRun), 'status recovery total count'), 'count');
     return {
       committedEventSeq: null,
       payload: {
@@ -1824,10 +1841,31 @@ export class CoordinatorStore {
         adjudication_assignments: adjudicationAssignments,
         escalations,
         coordination_migrations: migrations,
+        coordination_migration_report_recovery_omitted: true,
         migration_recovery_work: migrationRecoveryWork,
+        migration_recovery_work_complete: migrationRecoveryTotalCount === migrationRecoveryWork.length,
+        migration_recovery_total_count: migrationRecoveryTotalCount,
+        pending_migration_recovery_count: pendingMigrationRecoveryCount,
         pending_messages: pendingMessages,
       },
     };
+  }
+
+  runCatalog(repoId: string, workstreamRun: string | null): StoreEffect {
+    const runs = workstreamRun === null
+      ? this.#db.prepare('SELECT * FROM runs WHERE repo_id=? ORDER BY workstream_run LIMIT 257').all(repoId).map(runFromRow)
+      : this.#db.prepare('SELECT * FROM runs WHERE repo_id=? AND workstream_run=? ORDER BY workstream_run').all(repoId, workstreamRun).map(runFromRow);
+    const resources = workstreamRun === null
+      ? this.#db.prepare('SELECT * FROM run_resources WHERE repo_id=? ORDER BY workstream_run LIMIT 257').all(repoId).map(runResourceFromRow)
+      : this.#db.prepare('SELECT * FROM run_resources WHERE repo_id=? AND workstream_run=? ORDER BY workstream_run').all(repoId, workstreamRun).map(runResourceFromRow);
+    if (runs.length > 256 || resources.length > 256) throw new CoordinationRuntimeError('invalid-state', 'repository run catalog exceeds the bounded 256-run response; query one exact workstream run');
+    const pendingRows = workstreamRun === null
+      ? this.#db.prepare("SELECT workstream_run, entity_id FROM migration_recovery_work WHERE repo_id=? AND status='pending' ORDER BY workstream_run, entity_id LIMIT 128").all(repoId)
+      : this.#db.prepare("SELECT workstream_run, entity_id FROM migration_recovery_work WHERE repo_id=? AND workstream_run=? AND status='pending' ORDER BY entity_id LIMIT 128").all(repoId, workstreamRun);
+    const pendingCount = workstreamRun === null
+      ? sqlInteger(asRow(this.#db.prepare("SELECT COUNT(*) AS count FROM migration_recovery_work WHERE repo_id=? AND status='pending'").get(repoId), 'run catalog pending recovery count'), 'count')
+      : sqlInteger(asRow(this.#db.prepare("SELECT COUNT(*) AS count FROM migration_recovery_work WHERE repo_id=? AND workstream_run=? AND status='pending'").get(repoId, workstreamRun), 'run catalog pending recovery count'), 'count');
+    return { committedEventSeq: null, payload: { schema_version: 'autopilot.coordinator_run_catalog.v1', package_build: COORDINATOR_PACKAGE_BUILD, protocol_version: AUTOPILOT_COORDINATOR_PROTOCOL_VERSION, database_schema_version: COORDINATOR_DATABASE_SCHEMA_VERSION, runs, run_resources: resources, pending_migration_recovery_count: pendingCount, pending_migration_recovery: pendingRows.map((row) => ({ workstream_run: sqlString(row, 'workstream_run'), recovery_id: sqlString(row, 'entity_id') })) } };
   }
 
   migrationRecovery(request: CoordinatorRequestEnvelope): StoreEffect {
@@ -1850,7 +1888,11 @@ export class CoordinatorStore {
       committedEventSeq: null,
       payload: {
         schema_version: 'autopilot.migration_recovery_query.v1',
+        package_build: COORDINATOR_PACKAGE_BUILD,
+        protocol_version: AUTOPILOT_COORDINATOR_PROTOCOL_VERSION,
+        database_schema_version: COORDINATOR_DATABASE_SCHEMA_VERSION,
         recovery: page,
+        runs: request.workstream_run === null ? [] : this.#db.prepare('SELECT * FROM runs WHERE repo_id=? AND workstream_run=?').all(request.repo_id, request.workstream_run).map(runFromRow),
         next_cursor: next === null ? null : { cursor_run: next.workstream_run, cursor_recovery_id: next.recovery_id },
       },
     };
@@ -1886,8 +1928,13 @@ export class CoordinatorStore {
     const openDeadlockResolutions = this.#db.prepare("SELECT * FROM deadlock_resolutions WHERE json_extract(payload_json, '$.state')!='resolved' ORDER BY repo_id, entity_id").all().map(deadlockResolutionFromRow);
     const pendingAdjudicationAssignments = this.#db.prepare("SELECT * FROM adjudication_assignments WHERE json_extract(payload_json, '$.state')='assigned' ORDER BY repo_id, entity_id").all().map(adjudicationAssignmentFromRow);
     const immutableEvidenceArtifactCount = sqlInteger(asRow(this.#db.prepare('SELECT COUNT(*) AS count FROM evidence_artifacts').get(), 'evidence artifact count'), 'count');
-    const coordinationMigrations = this.#db.prepare('SELECT repo_id, migration_id, snapshot_sha256, journal_path, state, report_json, imported_at, updated_at, version FROM coordination_migrations ORDER BY repo_id').all().map(migrationRecordFromRow);
-    const pendingMigrationRecovery = this.#db.prepare("SELECT * FROM migration_recovery_work WHERE status='pending' ORDER BY repo_id, workstream_run, entity_id").all().map(migrationRecoveryFromRow);
+    const coordinationMigrations = this.#db.prepare('SELECT repo_id, migration_id, snapshot_sha256, journal_path, state, report_json, imported_at, updated_at, version FROM coordination_migrations ORDER BY repo_id').all().map(migrationRecordFromRow).map((migration) => {
+      const report = migration['report'];
+      if (typeof report !== 'object' || report === null || Array.isArray(report)) throw new CoordinationRuntimeError('store-corrupt', 'coordination migration doctor report is not an object');
+      return { ...migration, report: { ...report, recovery: [] } };
+    });
+    const pendingMigrationRecoveryCount = sqlInteger(asRow(this.#db.prepare("SELECT COUNT(*) AS count FROM migration_recovery_work WHERE status='pending'").get(), 'pending migration recovery count'), 'count');
+    const pendingMigrationRecovery = this.#db.prepare("SELECT * FROM migration_recovery_work WHERE status='pending' ORDER BY repo_id, workstream_run, entity_id LIMIT 128").all().map(migrationRecoveryFromRow);
     return {
       committedEventSeq: null,
       payload: {
@@ -1910,6 +1957,7 @@ export class CoordinatorStore {
         pending_adjudication_assignments: pendingAdjudicationAssignments,
         immutable_evidence_artifact_count: immutableEvidenceArtifactCount,
         coordination_migrations: coordinationMigrations,
+        pending_migration_recovery_count: pendingMigrationRecoveryCount,
         pending_migration_recovery_work: pendingMigrationRecovery,
         max_grant_bypasses: MAX_GRANT_BYPASSES,
       },
@@ -2136,8 +2184,8 @@ export class CoordinatorStore {
       this.#assertVersion(run.version, request.expected_version, 'migration recovery run');
       this.#requireCoordinatorEditAuthority(run, 'migration recovery attachment');
       const recoveryId = payloadString(request.payload, 'recovery_id');
-      const pending = this.#pendingMigrationRecovery(request.repo_id, workstreamRun);
-      if (!pending.some((work) => work.recovery_id === recoveryId)) throw new CoordinationRuntimeError('invalid-state', 'migration recovery attachment requires the exact pending recovery row', [recoveryId]);
+      const exactPending = this.#db.prepare("SELECT entity_id FROM migration_recovery_work WHERE entity_id=? AND repo_id=? AND workstream_run=? AND status='pending'").get(recoveryId, request.repo_id, workstreamRun);
+      if (exactPending === undefined) throw new CoordinationRuntimeError('invalid-state', 'migration recovery attachment requires the exact pending recovery row', [recoveryId]);
       const nextGeneration = run.active_session_generation + 1;
       if (request.fencing_generation !== nextGeneration) throw new CoordinationRuntimeError('stale-version', `next migration recovery generation must be ${String(nextGeneration)}`);
       const seq = this.#nextEventSequence(request.repo_id);
@@ -2150,7 +2198,8 @@ export class CoordinatorStore {
       this.#db.prepare('UPDATE runs SET active_session_generation=?, version=version+1 WHERE repo_id=? AND workstream_run=?').run(nextGeneration, request.repo_id, workstreamRun);
       const nextRun = this.#requireRun(request.repo_id, workstreamRun);
       const session = sessionFromRow(asRow(this.#db.prepare('SELECT * FROM session_leases WHERE session_lease_id=?').get(payloadString(request.payload, 'session_lease_id')), 'attached migration recovery session'));
-      return { sequence: seq, eventType: 'migration-recovery-attached', entityType: 'session-lease', entityId: session.session_lease_id, payload: { run: nextRun, session, pending_recovery_work: pending } };
+      const pendingRecoveryCount = sqlInteger(asRow(this.#db.prepare("SELECT COUNT(*) AS count FROM migration_recovery_work WHERE repo_id=? AND workstream_run=? AND status='pending'").get(request.repo_id, workstreamRun), 'migration recovery attachment pending count'), 'count');
+      return { sequence: seq, eventType: 'migration-recovery-attached', entityType: 'session-lease', entityId: session.session_lease_id, payload: { run: nextRun, session, pending_recovery_count: pendingRecoveryCount } };
     });
   }
 
@@ -2205,8 +2254,8 @@ export class CoordinatorStore {
       if (updated.changes !== 1) throw new CoordinationRuntimeError('coordinator-contention', 'migration recovery work changed during fenced resolution', [recoveryId]);
       this.#db.prepare("UPDATE messages SET status='acknowledged', delivered_event_seq=COALESCE(delivered_event_seq, ?), acknowledged_event_seq=COALESCE(acknowledged_event_seq, ?), version=version+1 WHERE repo_id=? AND recipient_workstream_run=? AND correlation_id=? AND status!='acknowledged'").run(seq, seq, run.repo_id, run.workstream_run, recoveryId);
       this.#advanceMailboxCursor(run.repo_id, run.workstream_run, 'acknowledged');
-      const remaining = this.#pendingMigrationRecovery(run.repo_id, run.workstream_run);
-      return { sequence: seq, eventType: 'migration-recovery-resolved', entityType: 'migration-recovery-work', entityId: recoveryId, payload: { recovery_work: parsed, remaining_recovery_work: remaining, run: this.#requireRun(run.repo_id, run.workstream_run) } };
+      const remainingRecoveryCount = sqlInteger(asRow(this.#db.prepare("SELECT COUNT(*) AS count FROM migration_recovery_work WHERE repo_id=? AND workstream_run=? AND status='pending'").get(run.repo_id, run.workstream_run), 'remaining migration recovery count'), 'count');
+      return { sequence: seq, eventType: 'migration-recovery-resolved', entityType: 'migration-recovery-work', entityId: recoveryId, payload: { recovery_work: parsed, remaining_recovery_count: remainingRecoveryCount, run: this.#requireRun(run.repo_id, run.workstream_run) } };
     });
   }
 
@@ -4277,7 +4326,8 @@ export class CoordinatorStore {
     const sessionId = this.#sessionId(request);
     const generation = request.fencing_generation;
     if (generation === null || generation !== run.active_session_generation) throw new CoordinationRuntimeError('fenced-session', 'session generation is no longer current');
-    const row = this.#attachedSessionByIdentity.get(request.repo_id, run.workstream_run, sessionId, generation);
+    let row = this.#attachedSessionByIdentity.get(request.repo_id, run.workstream_run, sessionId, generation);
+    if (row === undefined && request.action === 'detach-session') row = this.#db.prepare("SELECT * FROM session_leases WHERE repo_id=? AND workstream_run=? AND session_id=? AND session_generation=? AND status='handoff-pending'").get(request.repo_id, run.workstream_run, sessionId, generation);
     if (row === undefined) throw new CoordinationRuntimeError('fenced-session', 'session is not attached to the durable run supervisor');
     if (sqlString(row, 'session_lease_id') !== payloadString(request.payload, 'session_lease_id')) throw new CoordinationRuntimeError('unauthorized-client', 'session lease identity does not match current authority');
     this.#assertCapability(row, 'session_token_sha256', payloadString(request.payload, 'session_token'), 'session');

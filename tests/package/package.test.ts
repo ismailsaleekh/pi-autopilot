@@ -159,6 +159,14 @@ function parsePackEntries(stdout: string): PackEntry[] {
 }
 
 void describe('package manifest and payload', () => {
+  void it('BUG-173 rejects tracked local runtime state in the public package repository', () => {
+    const tracked = spawnSync('git', ['ls-files', '-z', '--', '.pi'], { cwd: root, encoding: 'utf8' });
+    assert.equal(tracked.status, 0, tracked.stderr);
+    assert.equal(tracked.stdout, '', 'public package source must not track any local runtime-state path');
+    const ignored = spawnSync('git', ['check-ignore', '--quiet', '.pi/runtime-state-probe'], { cwd: root, encoding: 'utf8' });
+    assert.equal(ignored.status, 0, 'the package must ignore its complete local runtime-state root');
+  });
+
   void it('declares the Autopilot package surfaces', async () => {
     const pkg = await packageJson();
     assert.equal(pkg.name, 'pi-autopilot');
@@ -570,8 +578,9 @@ void describe('package manifest and payload', () => {
     assert.match(invalid.stderr, /requires a mode/u);
   });
 
-  void it('runs the packed bins from node_modules without TypeScript stripping', async () => {
+  void it('BUG-172 runs both packed npm bins from node_modules without TypeScript stripping', async () => {
     const tempRoot = await mkdtemp(join(tmpdir(), 'pi-autopilot-installed-bin-'));
+    const previousStateRoot = process.env[AUTOPILOT_STATE_ROOT_ENV];
     let coordinatorStateRoot: string | null = null;
     try {
       const pack = spawnSync('npm', ['pack', '--json', '--pack-destination', tempRoot], {
@@ -606,14 +615,12 @@ void describe('package manifest and payload', () => {
       }
       const source = join(tempRoot, 'source');
       await initInstalledBinSource(source);
-      const previousStateRoot = process.env[AUTOPILOT_STATE_ROOT_ENV];
       const stateRoot = join(tempRoot, 'autopilot-state');
       coordinatorStateRoot = stateRoot;
       process.env[AUTOPILOT_STATE_ROOT_ENV] = stateRoot;
       const prepared = await prepareAutopilotWorkstream({ workstream: 'node-modules-smoke', sourceCwd: source });
       const attachment = await new DurableRunSupervisorClient(process.env).attach({ repo: prepared.repo, active: prepared.active, rawSessionId: 'packed-install-session' });
-      if (previousStateRoot === undefined) delete process.env[AUTOPILOT_STATE_ROOT_ENV];
-      else process.env[AUTOPILOT_STATE_ROOT_ENV] = previousStateRoot;
+      process.env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV] = attachment.contextPath;
       const worktree = prepared.mainWorktreePath;
       const unitWorktree = await prepareAutopilotUnitWorktree({ active: prepared.active, unitId: 'node-modules-smoke', attempt: 1 });
       const runtimeRoot = prepared.runtimeRoot;
@@ -707,6 +714,8 @@ void describe('package manifest and payload', () => {
     } finally {
       delete process.env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV];
       if (coordinatorStateRoot !== null) await stopExternalCoordinator(coordinatorStateRoot);
+      if (previousStateRoot === undefined) delete process.env[AUTOPILOT_STATE_ROOT_ENV];
+      else process.env[AUTOPILOT_STATE_ROOT_ENV] = previousStateRoot;
       await rm(tempRoot, { recursive: true, force: true });
     }
   });

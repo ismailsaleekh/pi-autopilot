@@ -14,7 +14,7 @@ import { isValidWorkstreamSlug } from "./paths.js";
 import { parseLegacyActiveAutopilots, parseLegacyPathClaims, runLegacyCoordinationPreflight } from "./coordination/legacy-preflight.js";
 import { DurableRunSupervisorClient } from "./coordination/supervisor.js";
 import { CoordinatorClient } from "./coordination/client.js";
-import { parseCoordinationMigrationRecoveryWork, parseCoordinationRun, parseCoordinationRunResource, parseCoordinationWorktreeOperation } from "./coordination/contracts.js";
+import { parseCoordinationRun, parseCoordinationRunResource, parseCoordinationWorktreeOperation } from "./coordination/contracts.js";
 import { assertCoordinationDispatchAllowed, assertLegacyCoordinationWritable, coordinationCutoverCommitted } from "./coordination/migration-paths.js";
 import { enforcePrivateAuthorityPath, ensurePrivateAuthorityDirectory } from "./private-path.js";
 export const AUTOPILOT_STATE_ROOT_ENV = 'AUTOPILOT_STATE_ROOT';
@@ -1394,27 +1394,43 @@ export async function readActiveAutopilots(coordinationRoot) {
     return parseLegacyActiveAutopilots(await readJson(path));
 }
 export async function assertCoordinatorMigrationRecoveryCleared(repo, workstream, env = process.env) {
-    const response = await new CoordinatorClient({ env }).query('status', repo.repoKey, null);
+    const client = new CoordinatorClient({ env });
+    const response = await client.query('run-catalog', repo.repoKey, null);
     const rawRuns = response.payload['runs'];
-    const rawRecovery = response.payload['migration_recovery_work'];
-    if (!Array.isArray(rawRuns) || !Array.isArray(rawRecovery) || rawRuns.length > 100_000 || rawRecovery.length > 100_000)
-        fail('invalid-coordinator-status', 'coordinator activation status omitted bounded run/recovery collections.');
-    const matchingRunIds = new Set(rawRuns.map((value) => parseCoordinationRun(value)).filter((run) => run.repo_id === repo.repoKey && run.workstream === workstream).map((run) => run.workstream_run));
-    const pending = rawRecovery.map((value) => parseCoordinationMigrationRecoveryWork(value)).filter((work) => work.repo_id === repo.repoKey && work.status === 'pending' && matchingRunIds.has(work.workstream_run));
-    if (pending.length > 0)
-        fail('migration-recovery-required', `Autopilot activation for ${workstream} is fenced until its imported authority recovery is resolved by a recovery-only supervisor session.`, pending.map((work) => `${work.workstream_run}:${work.recovery_id}:${work.recovery_type}`));
+    if (!Array.isArray(rawRuns) || rawRuns.length > 100_000)
+        fail('invalid-coordinator-status', 'coordinator activation catalog omitted its bounded run collection.');
+    const matchingRunIds = rawRuns.map((value) => parseCoordinationRun(value)).filter((run) => run.repo_id === repo.repoKey && run.workstream === workstream).map((run) => run.workstream_run);
+    for (const run of matchingRunIds) {
+        const exact = await client.query('run-catalog', repo.repoKey, run);
+        const pendingCount = exact.payload['pending_migration_recovery_count'];
+        const pending = exact.payload['pending_migration_recovery'];
+        if (typeof pendingCount !== 'number' || !Number.isSafeInteger(pendingCount) || !Array.isArray(pending))
+            fail('invalid-coordinator-status', 'coordinator run catalog omitted bounded recovery identity.');
+        if (pendingCount > 0)
+            fail('migration-recovery-required', `Autopilot activation for ${workstream} is fenced until its imported authority recovery is resolved by a recovery-only supervisor session.`, pending.map((value) => typeof value === 'object' && value !== null ? `${run}:${String(value['recovery_id'])}` : run));
+    }
 }
 export async function readCoordinatorActiveAutopilots(repo, worktreeRoot, env = process.env, includeTerminal = false) {
-    const response = await new CoordinatorClient({ env }).query('status', repo.repoKey, null);
+    const client = new CoordinatorClient({ env });
+    const response = await client.query('run-catalog', repo.repoKey, null);
     const rawRuns = response.payload['runs'];
     const rawResources = response.payload['run_resources'];
-    const rawRecovery = response.payload['migration_recovery_work'];
-    if (!Array.isArray(rawRuns) || rawRuns.length > 100_000 || !Array.isArray(rawResources) || rawResources.length > 100_000 || !Array.isArray(rawRecovery) || rawRecovery.length > 100_000)
-        fail('invalid-coordinator-status', 'coordinator status runs/resources/migration recovery must be bounded arrays.');
+    if (!Array.isArray(rawRuns) || rawRuns.length > 100_000 || !Array.isArray(rawResources) || rawResources.length > 100_000)
+        fail('invalid-coordinator-status', 'coordinator run catalog runs/resources must be bounded arrays.');
     const resources = rawResources.map((value) => parseCoordinationRunResource(value));
-    const pendingRecoveryRuns = new Set(rawRecovery.map((value) => parseCoordinationMigrationRecoveryWork(value)).filter((work) => work.status === 'pending').map((work) => work.workstream_run));
+    const parsedRuns = rawRuns.map((value) => parseCoordinationRun(value));
+    const pendingRecoveryRuns = new Set();
+    for (const run of parsedRuns) {
+        const exact = await client.query('run-catalog', repo.repoKey, run.workstream_run);
+        const pendingCount = exact.payload['pending_migration_recovery_count'];
+        if (typeof pendingCount !== 'number' || !Number.isSafeInteger(pendingCount) || pendingCount < 0)
+            fail('invalid-coordinator-status', 'coordinator run catalog pending recovery count is invalid.');
+        if (pendingCount > 0)
+            pendingRecoveryRuns.add(run.workstream_run);
+    }
+    const rawRunValues = parsedRuns;
     const rows = [];
-    for (const rawRun of rawRuns) {
+    for (const rawRun of rawRunValues) {
         const run = parseCoordinationRun(rawRun);
         if (run.repo_id !== repo.repoKey || run.coordination_authority !== 'coordinator-edit-leases-v1' || pendingRecoveryRuns.has(run.workstream_run) || (!includeTerminal && (run.status === 'closed' || run.status === 'aborted')))
             continue;

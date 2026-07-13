@@ -228,11 +228,12 @@ export class DurableRunSupervisorClient {
     async attach(input) {
         const repoId = input.repo.repoKey;
         const sessionId = durableIdentifier('session', input.rawSessionId);
-        const status = await this.#client.query('status', repoId, input.active.workstream_run);
+        const status = await this.#client.query('run-catalog', repoId, input.active.workstream_run);
         const runValues = payloadArray(status, 'runs');
-        const pendingRecovery = payloadArray(status, 'migration_recovery_work').map((value) => parseCoordinationMigrationRecoveryWork(value)).filter((work) => work.status === 'pending');
-        if (pendingRecovery.length > 0)
-            throw new CoordinationRuntimeError('recovery-required', 'ordinary run supervisor attachment is fenced while migration recovery work is pending', pendingRecovery.map((work) => work.recovery_id));
+        const pendingRecoveryCount = requireInteger(status.payload, 'pending_migration_recovery_count');
+        const pendingRecovery = payloadArray(status, 'pending_migration_recovery').map((value) => requireRecord(value, 'pending migration recovery identity'));
+        if (pendingRecoveryCount > 0)
+            throw new CoordinationRuntimeError('recovery-required', 'ordinary run supervisor attachment is fenced while migration recovery work is pending', pendingRecovery.map((work) => String(work['recovery_id'])));
         let run;
         if (runValues.length === 0) {
             const attachedRun = await this.#client.mutate('attach-run', {
@@ -356,14 +357,14 @@ export class DurableRunSupervisorClient {
     }
     async attachMigrationRecovery(input) {
         const repoId = input.repo.repoKey;
-        const status = await this.#client.query('status', repoId, input.workstreamRun);
+        const status = await this.#client.query('migration-recovery', repoId, input.workstreamRun, { cursor_recovery_id: null, cursor_run: null, include_resolved: false, limit: 1, recovery_id: input.recoveryId });
         const runs = payloadArray(status, 'runs').map((value) => parseCoordinationRun(value));
         if (runs.length !== 1 || runs[0] === undefined)
             throw new CoordinationRuntimeError('invalid-state', 'migration recovery requires exactly one durable run supervisor');
         const run = runs[0];
         if (run.coordination_authority !== 'coordinator-edit-leases-v1')
             throw new CoordinationRuntimeError('unauthorized-client', 'migration recovery requires coordinator sole authority');
-        const pending = payloadArray(status, 'migration_recovery_work').map((value) => parseCoordinationMigrationRecoveryWork(value)).filter((work) => work.status === 'pending');
+        const pending = payloadArray(status, 'recovery').map((value) => parseCoordinationMigrationRecoveryWork(value)).filter((work) => work.status === 'pending');
         if (!pending.some((work) => work.recovery_id === input.recoveryId))
             throw new CoordinationRuntimeError('invalid-state', 'requested migration recovery row is not pending for the durable run', [input.recoveryId]);
         const generation = run.active_session_generation + 1;
@@ -426,11 +427,11 @@ export class DurableRunSupervisorClient {
             release_source: releaseSource, release_target_id: releaseTargetId, session_lease_id: session.session_lease_id, session_token: input.attachment.context.session_token,
         });
         const recoveryWork = parseCoordinationMigrationRecoveryWork(response.payload['recovery_work']);
-        const remaining = payloadArray(response, 'remaining_recovery_work').map((value) => parseCoordinationMigrationRecoveryWork(value));
+        const remainingRecoveryCount = requireInteger(response.payload, 'remaining_recovery_count');
         const run = parseCoordinationRun(response.payload['run']);
         if (run.status !== input.attachment.run.status)
             throw new CoordinationRuntimeError('store-corrupt', 'migration recovery resolution changed durable run terminal/recovery state');
-        return { recoveryWork, remainingRecoveryWork: Object.freeze(remaining), run };
+        return { recoveryWork, remainingRecoveryCount, run };
     }
 }
 export class AutopilotSessionBridge {

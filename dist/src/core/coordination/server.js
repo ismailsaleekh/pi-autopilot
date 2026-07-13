@@ -332,7 +332,7 @@ function handleSocket(socket, store, capability, paths, backgroundFailure) {
                         if (timerFailure !== null)
                             throw new CoordinationRuntimeError('system-fatal', `coordinator predecessor fence maintenance failed: ${timerFailure.message}`);
                         const upgradeIntent = await readCoordinatorUpgradeIntent(paths);
-                        if (upgradeIntent !== null && upgradeIntent.state !== 'committed' && action !== 'status' && action !== 'doctor')
+                        if (upgradeIntent !== null && upgradeIntent.state !== 'committed' && action !== 'handshake' && action !== 'status' && action !== 'doctor')
                             throw new CoordinationRuntimeError('coordinator-contention', 'coordinator upgrade is not durably committed; mutation/replay authority remains closed');
                         response = store.replayLegacyRequest(legacy.request);
                         legacyReplayProtocol = legacy.replay_protocol;
@@ -346,7 +346,7 @@ function handleSocket(socket, store, capability, paths, backgroundFailure) {
                         if (timerFailure !== null)
                             throw new CoordinationRuntimeError('system-fatal', `coordinator predecessor fence maintenance failed: ${timerFailure.message}`);
                         const upgradeIntent = await readCoordinatorUpgradeIntent(paths);
-                        if (upgradeIntent !== null && upgradeIntent.state !== 'committed' && action !== 'status' && action !== 'doctor')
+                        if (upgradeIntent !== null && upgradeIntent.state !== 'committed' && action !== 'handshake' && action !== 'status' && action !== 'doctor')
                             throw new CoordinationRuntimeError('coordinator-contention', 'coordinator upgrade is not durably committed; mutation authority remains closed');
                         response = store.handle(currentTransport.request);
                     }

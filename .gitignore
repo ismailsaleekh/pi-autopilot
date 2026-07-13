@@ -3,3 +3,5 @@ artifacts/*
 !artifacts/security/
 !artifacts/security/*.json
 *.tgz
+
+.pi/

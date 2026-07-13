@@ -13,7 +13,7 @@ import { currentBootId, isExactProcessAlive, isProcessAlive, predecessorCompatib
 import { COORDINATOR_DATABASE_SCHEMA_VERSION, COORDINATOR_PACKAGE_BUILD, coordinatorRuntimePaths, enforcePrivateAuthorityPath, enforceWindowsPrivateTree, ensureCoordinatorPrivateRoots, ensurePrivateAuthorityDirectory, type CoordinatorRuntimePaths } from './runtime-paths.ts';
 import { acquireSerializedProcessGuard, discardLockTombstone, quarantineExactLock, readExactLockText, restoreLockTombstone } from './serialized-lock.ts';
 import { startCoordinatorServer, type CoordinatorStartupAdoption } from './server.ts';
-import { parseCurrentCoordinatorLock, parsePredecessorCoordinatorLock } from './upgrade-contracts.ts';
+import { parseCurrentCoordinatorLock, parsePredecessorCoordinatorLock, type CurrentCoordinatorLock } from './upgrade-contracts.ts';
 import { COORDINATOR_SCHEMA_MIGRATION_CHECKSUMS, CoordinatorStore, type CoordinationLegacyImportPlan, type CoordinationMigrationAuditInput, type CoordinationMigrationRecordState, type CoordinationMigrationRecoveryInput, type StoreClock } from './store.ts';
 import { backup, DatabaseSync, type SQLOutputValue } from 'node:sqlite';
 import { CoordinationRuntimeError } from './failures.ts';
@@ -24,6 +24,7 @@ import { parseCoordinationEditLease, parseCoordinationUnitAttempt, parseCoordina
 import { AUTOPILOT_COORDINATOR_PROTOCOL_VERSION, type CoordinationAcquisitionGroup, type CoordinationChangeReservation, type CoordinationEditLease, type CoordinationReconciliationEvidence, type CoordinationRepository, type CoordinationReservationObligation, type CoordinationRun, type CoordinationRunResource, type CoordinationRunStatus, type CoordinationUnitAttempt, type CoordinationWorktree, type CoordinationWorktreeOperation, type CoordinationWorktreeState } from './types.ts';
 
 export const COORDINATION_MIGRATION_MAX_FILE_BYTES = 64 * 1024 * 1024;
+export const COORDINATION_MIGRATION_MAX_DATABASE_COMPONENT_BYTES = 256 * 1024 * 1024;
 export const COORDINATION_MIGRATION_MAX_TOTAL_BYTES = 256 * 1024 * 1024;
 export const COORDINATION_MIGRATION_MAX_FILES = 100_000;
 export const COORDINATION_MIGRATION_MAX_JSONL_LINE_BYTES = 1024 * 1024;
@@ -699,7 +700,7 @@ function sourcePaths(stateRoot: string, repoKey: string, rows: readonly ActiveAu
   paths.push(...merges.map((entry) => entry.path), ...terminalPaths);
   for (const row of rows) {
     const taskRoot = dirname(row.main_worktree_path);
-    paths.push(join(taskRoot, '_task-info.json'), join(taskRoot, '_branches.json'), join(taskRoot, '_unit-index.json'));
+    paths.push(join(taskRoot, '_task-info.json'), join(taskRoot, '_branches.json'), join(taskRoot, '_unit-index.json'), join(row.runtime_root, 'state.json'));
     for (const unit of unitMetadata.worktrees.filter((entry) => isInside(taskRoot, entry.worktree_path))) paths.push(join(dirname(unit.worktree_path), '_unit-info.json'));
   }
   return Object.freeze([...new Set(paths.map((path) => resolve(path)))].sort());
@@ -941,7 +942,7 @@ function coordinatorDatabaseSourceIdentity(path: string): CoordinatorDatabaseSou
   if (!existsSync(path)) return { path, exists: false, dev: 0, ino: 0, size: 0, mtime_ms: 0, ctime_ms: 0, sha256: digest(new TextEncoder().encode('<missing>')) };
   const info = lstatSync(path);
   if (!info.isFile() || info.isSymbolicLink()) failure('blocked', 'coordinator database snapshot source must be a regular non-symbolic file', [path]);
-  if (info.size > COORDINATION_MIGRATION_MAX_FILE_BYTES) failure('blocked', 'coordinator database snapshot source exceeds its bounded file ceiling', [path, String(info.size)]);
+  if (info.size > COORDINATION_MIGRATION_MAX_DATABASE_COMPONENT_BYTES) failure('blocked', 'coordinator database snapshot source exceeds its bounded file ceiling', [path, String(info.size)]);
   const descriptor = openSync(path, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
   try {
     const opened = fstatSync(descriptor);
@@ -1683,7 +1684,7 @@ export function coordinationMigrationCoordinatorRunning(paths: CoordinatorRuntim
   return false;
 }
 
-export async function retireCoordinationMigrationCoordinator(paths: CoordinatorRuntimePaths): Promise<readonly string[]> {
+export async function retireCoordinationMigrationCoordinator(paths: CoordinatorRuntimePaths, expectedIdentity?: CurrentCoordinatorLock): Promise<readonly string[]> {
   if (!existsSync(paths.lockPath)) return [];
   try { preflightProcessRetirementSupport(); }
   catch (error) { return Object.freeze([`coordinator process-retirement dependency preflight failed: ${error instanceof Error ? error.message : String(error)}`]); }
@@ -1691,6 +1692,7 @@ export async function retireCoordinationMigrationCoordinator(paths: CoordinatorR
   try { lock = parseCurrentCoordinatorLock(JSON.parse(await readFile(paths.lockPath, 'utf8')) as unknown); }
   catch (error) { return Object.freeze([`coordinator lifecycle lock is unreadable during migration drain: ${error instanceof Error ? error.message : String(error)}`]); }
   if (lock === null || !isExactProcessAlive(lock.pid, lock.process_start_identity) || lock.pid === process.pid) return Object.freeze(['coordinator lifecycle identity is incompatible with exact automatic migration retirement']);
+  if (expectedIdentity !== undefined && (lock.pid !== expectedIdentity.pid || lock.boot_id !== expectedIdentity.boot_id || lock.process_start_identity !== expectedIdentity.process_start_identity || lock.token !== expectedIdentity.token || lock.instance_id !== expectedIdentity.instance_id || lock.started_at !== expectedIdentity.started_at)) return Object.freeze(['coordinator lifecycle identity changed after the recovery client started its temporary process']);
   try { retireExactProcess(lock.pid, lock.process_start_identity); }
   catch (error) { return Object.freeze([`drained coordinator could not be retired: ${error instanceof Error ? error.message : String(error)}`]); }
   const deadline = Date.now() + 5_000;
@@ -1715,6 +1717,16 @@ export async function retireCoordinationMigrationCoordinator(paths: CoordinatorR
     await new Promise<void>((resolveWait) => setTimeout(resolveWait, 25));
   }
   return Object.freeze([`drained coordinator did not release its lifecycle lock before the migration deadline: pid=${String(lock.pid)}`]);
+}
+
+async function retireDrainedCoordinatorForMigration(paths: CoordinatorRuntimePaths, repoKey: string, label: string): Promise<void> {
+  if (!coordinationMigrationCoordinatorRunning(paths)) return;
+  const coordinator = inspectCoordinatorReadOnly(paths, repoKey);
+  const blockers = coordinatorDrainBlockers(coordinator);
+  if (blockers.length > 0) failure('blocked', `${label} refuses coordinator retirement until every durable session and child has drained`, blockers);
+  const retirementBlockers = await retireCoordinationMigrationCoordinator(paths);
+  if (retirementBlockers.length > 0) failure('blocked', `${label} could not retire the drained coordinator`, retirementBlockers);
+  if (coordinationMigrationCoordinatorRunning(paths)) failure('blocked', `${label} coordinator lifecycle lock remains live after retirement`, [paths.lockPath]);
 }
 
 interface MigrationStoreAuthority {
@@ -1863,8 +1875,8 @@ async function promoteRuntimeProjections(stateRoot: string, entries: readonly Sn
     const parsed = parseJsonFile(entry.source_path, null);
     if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) failure('blocked', 'runtime task-info projection is malformed during cutover', [entry.source_path]);
     const row = parsed as Readonly<Record<string, unknown>>;
-    if (row['schema_version'] !== 'autopilot.task_info.v2' || row['repo_key'] !== repoKey || typeof row['workstream_run'] !== 'string' || typeof row['autopilot_id'] !== 'string') failure('blocked', 'runtime task-info identity is invalid during cutover', [entry.source_path]);
-    await atomicJson(stateRoot, entry.source_path, { ...row, coordination_authority: 'coordinator-edit-leases-v1' });
+    if ((row['schema_version'] !== 'autopilot.task_info.v1' && row['schema_version'] !== 'autopilot.task_info.v2') || row['repo_key'] !== repoKey || typeof row['workstream_run'] !== 'string' || typeof row['autopilot_id'] !== 'string') failure('blocked', 'runtime task-info identity is invalid during cutover', [entry.source_path]);
+    await atomicJson(stateRoot, entry.source_path, { ...row, schema_version: 'autopilot.task_info.v2', coordination_authority: 'coordinator-edit-leases-v1' });
   }
 }
 
@@ -1991,6 +2003,7 @@ export async function runCoordinationMigration(input: { readonly command: Coordi
     const currentCoordinator = inspectCoordinatorReadOnly(paths, input.repoKey, writerAuthorityAcquired);
     const currentRepository = resolveMigrationRepositoryIdentity(paths, input.repoKey, input.repoRoot ?? journal.repository_root, currentCoordinator);
     if (stableJson(currentRepository) !== stableJson(repository)) failure('blocked', 'migration journal repository identity no longer matches canonical Git identity');
+    if (input.command !== 'apply') await retireDrainedCoordinatorForMigration(paths, input.repoKey, `migration ${input.command}`);
     if (input.command === 'apply') {
       if (journal.state === 'imported' || journal.state === 'verified' || journal.state === 'cutover-ready') return journal.report;
       if (journal.state === 'rollback-restoring' || journal.state === 'rollback-restored' || journal.state === 'rollback-unfreezing') failure('blocked', 'apply is forbidden while durable rollback is incomplete; resume rollback first');
