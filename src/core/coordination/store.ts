@@ -1710,11 +1710,12 @@ export class CoordinatorStore {
 
   #dispatch(request: CoordinatorRequestEnvelope): StoreEffect {
     const freezeDrainActions = new Set<CoordinatorMutationAction>(['attach-migration-recovery', 'resolve-migration-recovery', 'detach-session', 'heartbeat', 'heartbeat-child', 'checkpoint-child', 'complete-child', 'record-release-evidence', 'cancel-run-terminal', 'reconcile-run', 'transition-operation']);
-    if (request.action !== 'status' && request.action !== 'doctor' && request.action !== 'export' && !freezeDrainActions.has(request.action)) assertCoordinationDispatchAllowed(this.#stateRoot, request.repo_id, `coordinator mutation ${request.action}`);
+    if (request.action !== 'status' && request.action !== 'doctor' && request.action !== 'export' && request.action !== 'migration-recovery' && !freezeDrainActions.has(request.action)) assertCoordinationDispatchAllowed(this.#stateRoot, request.repo_id, `coordinator mutation ${request.action}`);
     switch (request.action) {
       case 'status': return this.status(request.repo_id, request.workstream_run);
       case 'doctor': return this.doctor();
       case 'export': return this.exportTo(payloadString(request.payload, 'output_path'));
+      case 'migration-recovery': return this.migrationRecovery(request);
       case 'attach-run': return this.attachRun(request);
       case 'attach-session': return this.attachSession(request);
       case 'attach-terminal-recovery': return this.attachTerminalRecovery(request);
@@ -1825,6 +1826,32 @@ export class CoordinatorStore {
         coordination_migrations: migrations,
         migration_recovery_work: migrationRecoveryWork,
         pending_messages: pendingMessages,
+      },
+    };
+  }
+
+  migrationRecovery(request: CoordinatorRequestEnvelope): StoreEffect {
+    const includeResolved = payloadBoolean(request.payload, 'include_resolved');
+    const recoveryId = payloadNullableString(request.payload, 'recovery_id');
+    const cursorRun = payloadNullableString(request.payload, 'cursor_run');
+    const cursorRecoveryId = payloadNullableString(request.payload, 'cursor_recovery_id');
+    const limit = payloadInteger(request.payload, 'limit');
+    if ((cursorRun === null) !== (cursorRecoveryId === null)) throw new CoordinationRuntimeError('invalid-request', 'migration recovery cursor requires both cursor_run and cursor_recovery_id');
+    let rows = request.repo_id === 'global'
+      ? this.#db.prepare('SELECT * FROM migration_recovery_work ORDER BY repo_id, workstream_run, entity_id').all().map(migrationRecoveryFromRow)
+      : this.#db.prepare('SELECT * FROM migration_recovery_work WHERE repo_id=? ORDER BY workstream_run, entity_id').all(request.repo_id).map(migrationRecoveryFromRow);
+    if (request.workstream_run !== null) rows = rows.filter((work) => work.workstream_run === request.workstream_run);
+    if (!includeResolved) rows = rows.filter((work) => work.status === 'pending');
+    if (recoveryId !== null) rows = rows.filter((work) => work.recovery_id === recoveryId);
+    if (cursorRun !== null && cursorRecoveryId !== null) rows = rows.filter((work) => work.workstream_run > cursorRun || (work.workstream_run === cursorRun && work.recovery_id > cursorRecoveryId));
+    const page = rows.slice(0, limit);
+    const next = rows.length > limit ? page.at(-1) ?? null : null;
+    return {
+      committedEventSeq: null,
+      payload: {
+        schema_version: 'autopilot.migration_recovery_query.v1',
+        recovery: page,
+        next_cursor: next === null ? null : { cursor_run: next.workstream_run, cursor_recovery_id: next.recovery_id },
       },
     };
   }

@@ -520,7 +520,7 @@ export interface CoordinationSnapshot {
   readonly events: readonly CoordinationEvent[];
 }
 
-export type CoordinatorQueryAction = 'status' | 'doctor' | 'export';
+export type CoordinatorQueryAction = 'status' | 'doctor' | 'export' | 'migration-recovery';
 export type CoordinatorMutationAction = 'attach-run' | 'attach-session' | 'attach-terminal-recovery' | 'attach-migration-recovery' | 'resolve-migration-recovery' | 'detach-session' | 'prepare-handoff' | 'heartbeat' | 'register-attempt' | 'register-child' | 'heartbeat-child' | 'checkpoint-child' | 'complete-child' | 'drain-mailbox' | 'acquire-group' | 'acknowledge-grant' | 'respond-claim-request' | 'cancel-claim-request' | 'cancel-acquisition-group' | 'supersede-attempt' | 'acknowledge-message' | 'record-release-evidence' | 'resolve-reservation-obligation' | 'prepare-run-terminal' | 'cancel-run-terminal' | 'reconcile-run' | 'prepare-operation' | 'transition-operation' | 'register-authoritative-artifact' | 'assign-adjudication' | 'claim-adjudication-assignment' | 'complete-adjudication' | 'submit-planning-contradiction';
 
 export interface CoordinatorRequestEnvelope {
