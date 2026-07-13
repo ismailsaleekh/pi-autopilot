@@ -5,7 +5,6 @@ import { isAbsolute, resolve } from 'node:path';
 import { durableIdentifier } from '../core/coordination/client.ts';
 import { parseCoordinationMigrationRecoveryWork, parseCoordinationRun, parseCoordinationSessionLease } from '../core/coordination/contracts.ts';
 import { CoordinationRuntimeError } from '../core/coordination/failures.ts';
-import { acquireCoordinationGlobalMigrationLock, authorizeCoordinationMigrationRecovery } from '../core/coordination/migration.ts';
 import { coordinatorRuntimePaths } from '../core/coordination/runtime-paths.ts';
 import { acquireSerializedProcessGuard } from '../core/coordination/serialized-lock.ts';
 import { DurableRunSupervisorClient, readCoordinatorSessionContext, readMigrationRecoveryEvidenceFile, type RunSupervisorAttachment } from '../core/coordination/supervisor.ts';
@@ -92,12 +91,7 @@ async function recoveryRows(supervisor: DurableRunSupervisorClient, repoKey: str
 }
 
 async function detach(supervisor: DurableRunSupervisorClient, attachment: RunSupervisorAttachment): Promise<void> {
-  await supervisor.client.mutate('detach-session', {
-    repoId: attachment.context.repo_id, workstreamRun: attachment.context.workstream_run, sessionId: attachment.session.session_id,
-    fencingGeneration: attachment.session.session_generation, expectedVersion: attachment.session.version,
-    idempotencyKey: durableIdentifier('detach-migration-recovery', attachment.session.session_lease_id),
-  }, { reason: 'migration recovery CLI completed', session_lease_id: attachment.session.session_lease_id, session_token: attachment.context.session_token });
-  await rm(attachment.contextPath, { force: true });
+  await supervisor.detachMigrationRecovery(attachment, 'migration recovery CLI completed');
 }
 
 function replayed(work: CoordinationMigrationRecoveryWork, command: Command, evidenceBytes: Uint8Array | null, releaseSource: ReleaseSource | null, targetId: string | null): boolean {
@@ -161,7 +155,7 @@ async function executeMigrationRecoveryCli(argv: readonly string[], baseEnv: Pro
     const doctor = await supervisor.client.query('doctor');
     return { schema_version: 'autopilot.migration_recovery_cli.v1', action: 'doctor', repo_key: repo.repoKey, run: args.run, pending_count: queried.pendingCount, healthy: doctor.payload['healthy'], doctor: doctor.payload };
   }
-  if (args.command === 'drain-stale-sessions') return await drainStaleSessions(supervisor, repo.repoKey, args.run);
+  if (args.command === 'drain-stale-sessions') return await supervisor.withMigrationRecoveryAuthority(async () => await drainStaleSessions(supervisor, repo.repoKey, args.run));
   if (args.command === 'show') {
     const exact = allRows.filter((work) => work.recovery_id === args.recoveryId);
     if (exact.length !== 1) throw new CoordinationRuntimeError('invalid-state', 'recovery show requires exactly one matching row', [String(args.recoveryId)]);
@@ -177,8 +171,10 @@ async function executeMigrationRecoveryCli(argv: readonly string[], baseEnv: Pro
   if (already.length + unresolved.length !== targets.length) throw new CoordinationRuntimeError('invalid-state', 'existing recovery resolution conflicts with requested outcome');
   if (unresolved.length === 0) return { schema_version: 'autopilot.migration_recovery_cli.v1', action: args.command, replayed: true, resolved_count: already.length, remaining_recovery_count: queried.pendingCount };
   const first = unresolved[0];
-  if (first === undefined || args.run === null) throw new CoordinationRuntimeError('invalid-state', 'recovery target disappeared');
-  const attachment = await supervisor.attachMigrationRecovery({ repo, workstreamRun: args.run, recoveryId: first.recovery_id, rawSessionId: `recovery-cli-${process.pid}-${randomUUID()}` });
+  const workstreamRun = args.run;
+  if (first === undefined || workstreamRun === null) throw new CoordinationRuntimeError('invalid-state', 'recovery target disappeared');
+  return await supervisor.withMigrationRecoveryAuthority(async () => {
+  const attachment = await supervisor.attachMigrationRecovery({ repo, workstreamRun, recoveryId: first.recovery_id, rawSessionId: `recovery-cli-${process.pid}-${randomUUID()}` });
   let primary: unknown = null;
   const results = [];
   try {
@@ -188,6 +184,7 @@ async function executeMigrationRecoveryCli(argv: readonly string[], baseEnv: Pro
   if (primary !== null) throw primary;
   const last = results.at(-1);
   return { schema_version: 'autopilot.migration_recovery_cli.v1', action: args.command, replayed: false, resolved_count: results.length, outcome: args.command === 'retain-authority' ? 'authority-retained' : 'authority-released', remaining_recovery_count: last?.remainingRecoveryCount ?? pending.length };
+  });
 }
 
 export async function runMigrationRecoveryCli(argv: readonly string[], baseEnv: ProcessEnvLike = process.env): Promise<Readonly<Record<string, unknown>>> {
@@ -195,19 +192,9 @@ export async function runMigrationRecoveryCli(argv: readonly string[], baseEnv: 
   const env: ProcessEnvLike = args.stateRoot === null ? baseEnv : { ...baseEnv, [AUTOPILOT_STATE_ROOT_ENV]: args.stateRoot };
   const paths = coordinatorRuntimePaths(env);
   const guard = acquireSerializedProcessGuard(resolve(paths.coordinatorRoot, 'migration-recovery-cli.election.db'), 10_000, 'migration recovery CLI');
-  let globalLock: Awaited<ReturnType<typeof acquireCoordinationGlobalMigrationLock>> | null = null;
-  let recoveryAuthorization: Awaited<ReturnType<typeof authorizeCoordinationMigrationRecovery>> | null = null;
   try {
-    globalLock = await acquireCoordinationGlobalMigrationLock(paths.stateRoot);
-    recoveryAuthorization = await authorizeCoordinationMigrationRecovery(paths.stateRoot, globalLock);
-    // Recovery commands never signal a coordinator: another client may have
-    // attached after startup. Migration commands own process retirement while
-    // holding the global migration lock and after proving a durable drain.
+    // Every recovery mutation acquires the same global operation lock used by
+    // migration retirement. Read-only commands remain serialized by this CLI.
     return await executeMigrationRecoveryCli(argv, baseEnv);
-  } finally {
-    try {
-      try { if (recoveryAuthorization !== null) await recoveryAuthorization.release(); }
-      finally { if (globalLock !== null) await globalLock.release(); }
-    } finally { guard.release(); }
-  }
+  } finally { guard.release(); }
 }

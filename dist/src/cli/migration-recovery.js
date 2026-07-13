@@ -4,7 +4,6 @@ import { isAbsolute, resolve } from 'node:path';
 import { durableIdentifier } from "../core/coordination/client.js";
 import { parseCoordinationMigrationRecoveryWork, parseCoordinationRun, parseCoordinationSessionLease } from "../core/coordination/contracts.js";
 import { CoordinationRuntimeError } from "../core/coordination/failures.js";
-import { acquireCoordinationGlobalMigrationLock, authorizeCoordinationMigrationRecovery } from "../core/coordination/migration.js";
 import { coordinatorRuntimePaths } from "../core/coordination/runtime-paths.js";
 import { acquireSerializedProcessGuard } from "../core/coordination/serialized-lock.js";
 import { DurableRunSupervisorClient, readCoordinatorSessionContext, readMigrationRecoveryEvidenceFile } from "../core/coordination/supervisor.js";
@@ -113,12 +112,7 @@ async function recoveryRows(supervisor, repoKey, run, includeResolved, recoveryI
     return { rows: Object.freeze(rows), pendingCount };
 }
 async function detach(supervisor, attachment) {
-    await supervisor.client.mutate('detach-session', {
-        repoId: attachment.context.repo_id, workstreamRun: attachment.context.workstream_run, sessionId: attachment.session.session_id,
-        fencingGeneration: attachment.session.session_generation, expectedVersion: attachment.session.version,
-        idempotencyKey: durableIdentifier('detach-migration-recovery', attachment.session.session_lease_id),
-    }, { reason: 'migration recovery CLI completed', session_lease_id: attachment.session.session_lease_id, session_token: attachment.context.session_token });
-    await rm(attachment.contextPath, { force: true });
+    await supervisor.detachMigrationRecovery(attachment, 'migration recovery CLI completed');
 }
 function replayed(work, command, evidenceBytes, releaseSource, targetId) {
     const resolution = work.resolution;
@@ -193,7 +187,7 @@ async function executeMigrationRecoveryCli(argv, baseEnv) {
         return { schema_version: 'autopilot.migration_recovery_cli.v1', action: 'doctor', repo_key: repo.repoKey, run: args.run, pending_count: queried.pendingCount, healthy: doctor.payload['healthy'], doctor: doctor.payload };
     }
     if (args.command === 'drain-stale-sessions')
-        return await drainStaleSessions(supervisor, repo.repoKey, args.run);
+        return await supervisor.withMigrationRecoveryAuthority(async () => await drainStaleSessions(supervisor, repo.repoKey, args.run));
     if (args.command === 'show') {
         const exact = allRows.filter((work) => work.recovery_id === args.recoveryId);
         if (exact.length !== 1)
@@ -215,57 +209,43 @@ async function executeMigrationRecoveryCli(argv, baseEnv) {
     if (unresolved.length === 0)
         return { schema_version: 'autopilot.migration_recovery_cli.v1', action: args.command, replayed: true, resolved_count: already.length, remaining_recovery_count: queried.pendingCount };
     const first = unresolved[0];
-    if (first === undefined || args.run === null)
+    const workstreamRun = args.run;
+    if (first === undefined || workstreamRun === null)
         throw new CoordinationRuntimeError('invalid-state', 'recovery target disappeared');
-    const attachment = await supervisor.attachMigrationRecovery({ repo, workstreamRun: args.run, recoveryId: first.recovery_id, rawSessionId: `recovery-cli-${process.pid}-${randomUUID()}` });
-    let primary = null;
-    const results = [];
-    try {
-        for (const work of unresolved)
-            results.push(await supervisor.resolveMigrationRecovery({ attachment, recoveryWork: work, resolution: args.command === 'retain-authority' ? { resolutionType: 'authority-retained' } : { resolutionType: 'authority-released', releaseSource: args.source, releaseTargetId: args.targetId, evidenceBytes: evidenceBytes } }));
-    }
-    catch (error) {
-        primary = error;
-    }
-    try {
-        await detach(supervisor, attachment);
-    }
-    catch (error) {
-        primary = primary === null ? error : new AggregateError([primary, error], 'recovery mutation and fenced detach both failed');
-    }
-    if (primary !== null)
-        throw primary;
-    const last = results.at(-1);
-    return { schema_version: 'autopilot.migration_recovery_cli.v1', action: args.command, replayed: false, resolved_count: results.length, outcome: args.command === 'retain-authority' ? 'authority-retained' : 'authority-released', remaining_recovery_count: last?.remainingRecoveryCount ?? pending.length };
+    return await supervisor.withMigrationRecoveryAuthority(async () => {
+        const attachment = await supervisor.attachMigrationRecovery({ repo, workstreamRun, recoveryId: first.recovery_id, rawSessionId: `recovery-cli-${process.pid}-${randomUUID()}` });
+        let primary = null;
+        const results = [];
+        try {
+            for (const work of unresolved)
+                results.push(await supervisor.resolveMigrationRecovery({ attachment, recoveryWork: work, resolution: args.command === 'retain-authority' ? { resolutionType: 'authority-retained' } : { resolutionType: 'authority-released', releaseSource: args.source, releaseTargetId: args.targetId, evidenceBytes: evidenceBytes } }));
+        }
+        catch (error) {
+            primary = error;
+        }
+        try {
+            await detach(supervisor, attachment);
+        }
+        catch (error) {
+            primary = primary === null ? error : new AggregateError([primary, error], 'recovery mutation and fenced detach both failed');
+        }
+        if (primary !== null)
+            throw primary;
+        const last = results.at(-1);
+        return { schema_version: 'autopilot.migration_recovery_cli.v1', action: args.command, replayed: false, resolved_count: results.length, outcome: args.command === 'retain-authority' ? 'authority-retained' : 'authority-released', remaining_recovery_count: last?.remainingRecoveryCount ?? pending.length };
+    });
 }
 export async function runMigrationRecoveryCli(argv, baseEnv = process.env) {
     const args = parse(argv);
     const env = args.stateRoot === null ? baseEnv : { ...baseEnv, [AUTOPILOT_STATE_ROOT_ENV]: args.stateRoot };
     const paths = coordinatorRuntimePaths(env);
     const guard = acquireSerializedProcessGuard(resolve(paths.coordinatorRoot, 'migration-recovery-cli.election.db'), 10_000, 'migration recovery CLI');
-    let globalLock = null;
-    let recoveryAuthorization = null;
     try {
-        globalLock = await acquireCoordinationGlobalMigrationLock(paths.stateRoot);
-        recoveryAuthorization = await authorizeCoordinationMigrationRecovery(paths.stateRoot, globalLock);
-        // Recovery commands never signal a coordinator: another client may have
-        // attached after startup. Migration commands own process retirement while
-        // holding the global migration lock and after proving a durable drain.
+        // Every recovery mutation acquires the same global operation lock used by
+        // migration retirement. Read-only commands remain serialized by this CLI.
         return await executeMigrationRecoveryCli(argv, baseEnv);
     }
     finally {
-        try {
-            try {
-                if (recoveryAuthorization !== null)
-                    await recoveryAuthorization.release();
-            }
-            finally {
-                if (globalLock !== null)
-                    await globalLock.release();
-            }
-        }
-        finally {
-            guard.release();
-        }
+        guard.release();
     }
 }

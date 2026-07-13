@@ -162,7 +162,7 @@ void describe('package manifest and payload', () => {
   void it('BUG-173 rejects tracked local runtime state in the public package repository', () => {
     const tracked = spawnSync('git', ['ls-files', '-z', '--', '.pi'], { cwd: root, encoding: 'utf8' });
     assert.equal(tracked.status, 0, tracked.stderr);
-    assert.equal(tracked.stdout, '', 'public package source must not track any local runtime-state path');
+    assert.equal(tracked.stdout, '', 'public package source must track zero local runtime-state paths');
     const ignored = spawnSync('git', ['check-ignore', '--quiet', '.pi/runtime-state-probe'], { cwd: root, encoding: 'utf8' });
     assert.equal(ignored.status, 0, 'the package must ignore its complete local runtime-state root');
   });

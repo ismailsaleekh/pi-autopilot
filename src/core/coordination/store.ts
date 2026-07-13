@@ -1231,8 +1231,13 @@ export class CoordinatorStore {
       if (integrityResult(db) !== 'ok') throw new CoordinationRuntimeError('store-corrupt', 'coordinator database failed post-migration integrity check');
       await enforcePrivateAuthorityPath(paths.databasePath, false);
       const store = new CoordinatorStore(db, clock, paths.stateRoot, lastBackupPath, options);
-      await store.#replayPendingSemanticEvents(paths);
-      store.#recoverDurableTransitionsAfterStartup();
+      // A migration freeze protects a whole-database rollback boundary. Startup
+      // replay/recovery is therefore deferred until the freeze is removed;
+      // explicit target-repository recovery mutations remain separately fenced.
+      if (activeCoordinationMigrationFreeze(paths.stateRoot) === null) {
+        await store.#replayPendingSemanticEvents(paths);
+        store.#recoverDurableTransitionsAfterStartup();
+      }
       return store;
     } catch (error) {
       db.close();

@@ -271,7 +271,6 @@ export function assertCoordinationFrozenMutationAllowed(stateRoot: string, repoK
     const authorizationPath = join(stateRoot, 'migrations', '.recovery-operation.json');
     assertMigrationPathSafe(stateRoot, globalLockPath, 'global migration operation lock');
     assertMigrationPathSafe(stateRoot, authorizationPath, 'migration recovery operation authorization');
-    if (!existsSync(globalLockPath) && !existsSync(authorizationPath)) return;
     if (!existsSync(globalLockPath) || !existsSync(authorizationPath)) throw new CoordinationRuntimeError('coordinator-contention', 'migration recovery mutation lacks the serialized global recovery operation authority', [globalLockPath, authorizationPath]);
     const operationLock = record(readRegularJsonNoFollow(globalLockPath, 'global migration operation lock'), 'global migration operation lock');
     const authorization = record(readRegularJsonNoFollow(authorizationPath, 'migration recovery operation authorization'), 'migration recovery operation authorization');

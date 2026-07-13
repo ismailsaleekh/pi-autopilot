@@ -9,7 +9,6 @@ import { DatabaseSync } from 'node:sqlite';
 import { describe, it } from 'node:test';
 
 import { closeAutopilotWorkstream } from '../../src/core/close-runtime.ts';
-import { runMigrationRecoveryCli } from '../../src/cli/migration-recovery.ts';
 import { acquireCoordinationGlobalMigrationLock, runCoordinationMigration } from '../../src/core/coordination/migration.ts';
 import { ClaimNegotiationClient } from '../../src/core/coordination/negotiation.ts';
 import { CoordinatorClient } from '../../src/core/coordination/client.ts';
@@ -17,7 +16,7 @@ import { currentBootId, processStartIdentity } from '../../src/core/coordination
 import { parseCoordinationMigrationRecoveryWork, parseCoordinationRun } from '../../src/core/coordination/contracts.ts';
 import { coordinatorRuntimePaths } from '../../src/core/coordination/runtime-paths.ts';
 import { startCoordinatorServer } from '../../src/core/coordination/server.ts';
-import { CoordinatorStore } from '../../src/core/coordination/store.ts';
+import { CoordinatorStore, stageCoordinatorSemanticReplay } from '../../src/core/coordination/store.ts';
 import { DurableRunSupervisorClient } from '../../src/core/coordination/supervisor.ts';
 import { AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV } from '../../src/core/names.ts';
 import { coordinationRootForRepo, prepareAutopilotUnitWorktree, prepareAutopilotWorkstream, readActiveAutopilots, readPathClaims, resolveRepoIdentity, writeActiveAutopilots, writePathClaims, type AutopilotPathClaim, type ProcessEnvLike } from '../../src/core/parallel-runtime.ts';
@@ -388,10 +387,10 @@ void describe('Coordination Fabric legacy migration and cutover', () => {
         repoId: fixture.repoKey, workstreamRun: active.workstream_run, sessionId: attachment.session.session_id, fencingGeneration: attachment.session.session_generation,
         expectedVersion: attachment.run.version, idempotencyKey: 'recovery-session-cannot-dispatch',
       }, { reason: 'must remain recovery-only', session_lease_id: attachment.session.session_lease_id, session_token: attachment.context.session_token }), /recovery-only session rejects ordinary dispatch/u);
-      await assert.rejects(() => supervisor.client.mutate('resolve-migration-recovery', {
+      await assert.rejects(() => supervisor.withMigrationRecoveryAuthority(async () => await supervisor.client.mutate('resolve-migration-recovery', {
         repoId: fixture.repoKey, workstreamRun: active.workstream_run, sessionId: attachment.session.session_id, fencingGeneration: attachment.session.session_generation,
         expectedVersion: recovery.version, idempotencyKey: 'missing-recovery-evidence',
-      }, { recovery_id: recovery.recovery_id, resolution_type: 'authority-retained', evidence_ref: 'missing.json', evidence_sha256: `sha256:${'f'.repeat(64)}`, release_source: null, release_target_id: null, session_lease_id: attachment.session.session_lease_id, session_token: attachment.context.session_token }), /evidence is unreadable/u);
+      }, { recovery_id: recovery.recovery_id, resolution_type: 'authority-retained', evidence_ref: 'missing.json', evidence_sha256: `sha256:${'f'.repeat(64)}`, release_source: null, release_target_id: null, session_lease_id: attachment.session.session_lease_id, session_token: attachment.context.session_token })), /evidence is unreadable/u);
       const resolved = await supervisor.resolveMigrationRecovery({ attachment, recoveryWork: recovery, resolution: { resolutionType: 'authority-retained' } });
       assert.equal(resolved.recoveryWork.status, 'resolved');
       assert.equal(resolved.recoveryWork.resolution?.resolution_type, 'authority-retained');
@@ -556,8 +555,9 @@ void describe('Coordination Fabric legacy migration and cutover', () => {
     await withFixture(async (fixture) => {
       const lock = await acquireCoordinationGlobalMigrationLock(fixture.stateRoot);
       try {
+        const supervisor = new DurableRunSupervisorClient(fixture.env, { allowMigrationRecoveryAutoStart: true });
         await assert.rejects(
-          () => runMigrationRecoveryCli(['list', '--state-root', fixture.stateRoot, '--repo-root', join(dirname(fixture.stateRoot), 'source')], fixture.env),
+          () => supervisor.withMigrationRecoveryAuthority(async () => undefined),
           /another migration process owns the repository migration lock/u,
         );
       } finally { await lock.release(); }
@@ -584,6 +584,12 @@ void describe('Coordination Fabric legacy migration and cutover', () => {
 
     await withEmptyMigrationTestFixture(async (fixture) => {
       assert.equal((await runCoordinationMigration({ command: 'apply', repoKey: fixture.repoKey, repoRoot: fixture.source, env: fixture.env, clock: fixedClock() })).state, 'imported');
+      const secondSource = join(fixture.root, 'second-source');
+      await mkdir(secondSource, { recursive: true });
+      await writeFile(join(secondSource, 'README.md'), 'second repository\n', 'utf8');
+      git(secondSource, ['init']); git(secondSource, ['config', 'user.email', 'test@example.invalid']); git(secondSource, ['config', 'user.name', 'Test']); git(secondSource, ['add', '.']); git(secondSource, ['commit', '-m', 'initial']);
+      const secondRepo = resolveRepoIdentity(secondSource);
+      await assert.rejects(() => runCoordinationMigration({ command: 'apply', repoKey: secondRepo.repoKey, repoRoot: secondSource, env: fixture.env, clock: fixedClock() }), /another repository already owns the global coordination migration freeze/u);
       const store = await CoordinatorStore.open(coordinatorRuntimePaths(fixture.env), fixedClock());
       try {
         const denied = store.handle({ schema_version: 'autopilot.coordinator_request.v1', protocol_version: '1.3', request_id: 'foreign-heartbeat-after-backup', action: 'heartbeat', idempotency_key: 'foreign-heartbeat-after-backup', repo_id: `sha256-${'e'.repeat(64)}`, workstream_run: 'foreign-run', session_id: 'foreign-session', fencing_generation: 1, expected_version: 1, payload: { lease_expires_at: '2026-07-12T12:30:00.000Z', session_lease_id: 'foreign-session-lease', session_token: 'e'.repeat(64) } });
@@ -592,6 +598,30 @@ void describe('Coordination Fabric legacy migration and cutover', () => {
         assert.match(String(denied.payload['message']), /after global migration writer authority was acquired/u);
       } finally { store.close(); }
       await runCoordinationMigration({ command: 'rollback', repoKey: fixture.repoKey, env: fixture.env, clock: fixedClock() });
+    });
+  });
+
+  void it('defers semantic replay and startup recovery across the global rollback boundary', async () => {
+    await withEmptyMigrationTestFixture(async (fixture) => {
+      assert.equal((await runCoordinationMigration({ command: 'apply', repoKey: fixture.repoKey, repoRoot: fixture.source, env: fixture.env, clock: fixedClock() })).state, 'imported');
+      const paths = coordinatorRuntimePaths(fixture.env);
+      const foreignRepo = `sha256-${'d'.repeat(64)}`;
+      const head = git(fixture.source, ['rev-parse', 'HEAD']);
+      await stageCoordinatorSemanticReplay(paths, 'freeze-deferred-replay', [{
+        schema_version: 'autopilot.coordinator_request.v1', protocol_version: '1.3', request_id: 'freeze-deferred-run', action: 'attach-run', idempotency_key: 'freeze-deferred-run', repo_id: foreignRepo, workstream_run: 'freeze-deferred-run', session_id: null, fencing_generation: null, expected_version: 0,
+        payload: { repo_key: foreignRepo, canonical_root: fixture.source, git_common_dir: join(fixture.source, '.git'), autopilot_id: 'freeze-deferred', workstream: 'freeze-deferred', coordination_authority: 'coordinator-edit-leases-v1', run_resource: { schema_version: 'autopilot.coordination_run_resource.v1', repo_id: foreignRepo, workstream_run: 'freeze-deferred-run', source_repo: fixture.source, git_common_dir: join(fixture.source, '.git'), worktree_root: join(fixture.stateRoot, 'worktrees', foreignRepo), main_worktree_path: fixture.source, runtime_root: join(fixture.source, '.pi', 'autopilot', 'freeze-deferred'), branch: git(fixture.source, ['symbolic-ref', '--short', 'HEAD']), target_branch: null, target_base_sha: head, origin_url: null, started_at: '2026-07-12T12:00:00.000Z', version: 1 } },
+      }]);
+      const frozenStore = await CoordinatorStore.open(paths, fixedClock());
+      try { assert.deepEqual(frozenStore.status(foreignRepo, null).payload['runs'], []); }
+      finally { frozenStore.close(); }
+      assert.equal(existsSync(paths.semanticReplayPath), true, 'frozen startup must preserve pending replay bytes');
+      await runCoordinationMigration({ command: 'rollback', repoKey: fixture.repoKey, env: fixture.env, clock: fixedClock() });
+      const resumedStore = await CoordinatorStore.open(paths, fixedClock());
+      try {
+        const runs = resumedStore.status(foreignRepo, null).payload['runs'];
+        assert.equal(Array.isArray(runs) ? runs.length : -1, 1);
+      } finally { resumedStore.close(); }
+      assert.equal(existsSync(paths.semanticReplayPath), false, 'unfrozen startup consumes the preserved replay');
     });
   });
 
@@ -659,7 +689,7 @@ void describe('Coordination Fabric legacy migration and cutover', () => {
         const recovery = parseCoordinationMigrationRecoveryWork(recoveryValues[0]);
         const recoveryAttachment = await supervisor.attachMigrationRecovery({ repo: resolveRepoIdentity(join(dirname(fixture.stateRoot), 'source')), workstreamRun: fixture.workstreamRun, recoveryId: recovery.recovery_id, rawSessionId: 'cutover-recovery-only' });
         await supervisor.resolveMigrationRecovery({ attachment: recoveryAttachment, recoveryWork: recovery, resolution: { resolutionType: 'authority-retained' } });
-        await supervisor.client.mutate('detach-session', { repoId: fixture.repoKey, workstreamRun: fixture.workstreamRun, sessionId: recoveryAttachment.session.session_id, fencingGeneration: recoveryAttachment.session.session_generation, expectedVersion: recoveryAttachment.session.version, idempotencyKey: `detach-recovery:${recoveryAttachment.session.session_lease_id}` }, { reason: 'cutover recovery completed', session_lease_id: recoveryAttachment.session.session_lease_id, session_token: recoveryAttachment.context.session_token });
+        await supervisor.detachMigrationRecovery(recoveryAttachment, 'cutover recovery completed');
         const resumed = await prepareAutopilotWorkstream({ workstream: 'migration-proof', sourceCwd: join(dirname(fixture.stateRoot), 'source'), coordinationSessionId: 'post-cutover-session', env: fixture.env, now: new Date('2026-07-12T12:01:00.000Z') });
         assert.equal(resumed.resumed, true);
         assert.equal(resumed.active.coordination_authority, 'coordinator-edit-leases-v1');

@@ -8,7 +8,7 @@ import { platform, tmpdir } from 'node:os';
 
 import { CoordinatorClient } from './client.ts';
 import { parseLegacyActiveAutopilots, parseLegacyPathClaims, checkLegacyCoordinationInvariants, LEGACY_PREFLIGHT_MAX_INPUT_BYTES } from './legacy-preflight.ts';
-import { assertMigrationPathSafe, coordinationMigrationPaths, COORDINATION_CUTOVER_MARKER_SCHEMA, COORDINATION_FREEZE_ACK_SCHEMA, COORDINATION_FREEZE_SCHEMA, COORDINATION_MIGRATION_JOURNAL_SCHEMA, readCoordinationCutoverMarker, type CoordinationCutoverMarker, type CoordinationFreezeAcknowledgement, type CoordinationMigrationPaths } from './migration-paths.ts';
+import { activeCoordinationMigrationFreeze, assertMigrationPathSafe, coordinationMigrationPaths, COORDINATION_CUTOVER_MARKER_SCHEMA, COORDINATION_FREEZE_ACK_SCHEMA, COORDINATION_FREEZE_SCHEMA, COORDINATION_MIGRATION_JOURNAL_SCHEMA, readCoordinationCutoverMarker, type CoordinationCutoverMarker, type CoordinationFreezeAcknowledgement, type CoordinationMigrationPaths } from './migration-paths.ts';
 import { currentBootId, isExactProcessAlive, isProcessAlive, predecessorCompatibleBootId, preflightProcessRetirementSupport, retireExactProcess } from './process-identity.ts';
 import { COORDINATOR_DATABASE_SCHEMA_VERSION, COORDINATOR_PACKAGE_BUILD, coordinatorRuntimePaths, enforcePrivateAuthorityPath, enforceWindowsPrivateTree, ensureCoordinatorPrivateRoots, ensurePrivateAuthorityDirectory, type CoordinatorRuntimePaths } from './runtime-paths.ts';
 import { acquireSerializedProcessGuard, discardLockTombstone, quarantineExactLock, readExactLockText, restoreLockTombstone } from './serialized-lock.ts';
@@ -2004,6 +2004,8 @@ export async function runCoordinationMigration(input: { readonly command: Coordi
   let lock: Awaited<ReturnType<typeof acquireMigrationLock>> | null = null;
   try {
     lock = await acquireMigrationLock(paths.stateRoot, migrationPaths.lockPath, input.afterBoundary);
+    const existingFreeze = activeCoordinationMigrationFreeze(paths.stateRoot);
+    if (existingFreeze !== null && existingFreeze !== migrationPaths.freezePath) failure('blocked', 'another repository already owns the global coordination migration freeze', [existingFreeze, migrationPaths.freezePath]);
     const marker = readCoordinationCutoverMarker(migrationPaths.cutoverMarkerPath, input.repoKey, paths.stateRoot);
     let journal = await readJournal(paths.stateRoot, migrationPaths.journalPath);
     if (journal?.state === 'rolled-back' && input.command === 'apply') {

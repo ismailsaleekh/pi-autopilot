@@ -7,7 +7,7 @@ import { pathToFileURL } from 'node:url';
 import { platform, tmpdir } from 'node:os';
 import { CoordinatorClient } from "./client.js";
 import { parseLegacyActiveAutopilots, parseLegacyPathClaims, checkLegacyCoordinationInvariants, LEGACY_PREFLIGHT_MAX_INPUT_BYTES } from "./legacy-preflight.js";
-import { assertMigrationPathSafe, coordinationMigrationPaths, COORDINATION_CUTOVER_MARKER_SCHEMA, COORDINATION_FREEZE_ACK_SCHEMA, COORDINATION_FREEZE_SCHEMA, COORDINATION_MIGRATION_JOURNAL_SCHEMA, readCoordinationCutoverMarker } from "./migration-paths.js";
+import { activeCoordinationMigrationFreeze, assertMigrationPathSafe, coordinationMigrationPaths, COORDINATION_CUTOVER_MARKER_SCHEMA, COORDINATION_FREEZE_ACK_SCHEMA, COORDINATION_FREEZE_SCHEMA, COORDINATION_MIGRATION_JOURNAL_SCHEMA, readCoordinationCutoverMarker } from "./migration-paths.js";
 import { currentBootId, isExactProcessAlive, isProcessAlive, predecessorCompatibleBootId, preflightProcessRetirementSupport, retireExactProcess } from "./process-identity.js";
 import { COORDINATOR_DATABASE_SCHEMA_VERSION, COORDINATOR_PACKAGE_BUILD, coordinatorRuntimePaths, enforcePrivateAuthorityPath, enforceWindowsPrivateTree, ensureCoordinatorPrivateRoots, ensurePrivateAuthorityDirectory } from "./runtime-paths.js";
 import { acquireSerializedProcessGuard, discardLockTombstone, quarantineExactLock, readExactLockText, restoreLockTombstone } from "./serialized-lock.js";
@@ -2209,6 +2209,9 @@ export async function runCoordinationMigration(input) {
     let lock = null;
     try {
         lock = await acquireMigrationLock(paths.stateRoot, migrationPaths.lockPath, input.afterBoundary);
+        const existingFreeze = activeCoordinationMigrationFreeze(paths.stateRoot);
+        if (existingFreeze !== null && existingFreeze !== migrationPaths.freezePath)
+            failure('blocked', 'another repository already owns the global coordination migration freeze', [existingFreeze, migrationPaths.freezePath]);
         const marker = readCoordinationCutoverMarker(migrationPaths.cutoverMarkerPath, input.repoKey, paths.stateRoot);
         let journal = await readJournal(paths.stateRoot, migrationPaths.journalPath);
         if (journal?.state === 'rolled-back' && input.command === 'apply') {

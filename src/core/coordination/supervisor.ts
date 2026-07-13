@@ -260,6 +260,7 @@ export async function readCoordinatorSessionContext(path: string): Promise<Coord
 
 export class DurableRunSupervisorClient {
   readonly #client: CoordinatorClient;
+  #migrationRecoveryAuthorityDepth = 0;
 
   constructor(env: ProcessEnvLike = process.env, options: { readonly allowMigrationRecoveryAutoStart?: boolean } = {}) {
     this.#client = new CoordinatorClient({ env, ...(options.allowMigrationRecoveryAutoStart === undefined ? {} : { allowMigrationRecoveryAutoStart: options.allowMigrationRecoveryAutoStart }) });
@@ -267,6 +268,24 @@ export class DurableRunSupervisorClient {
 
   get client(): CoordinatorClient {
     return this.#client;
+  }
+
+  async withMigrationRecoveryAuthority<T>(operation: () => Promise<T>): Promise<T> {
+    if (this.#migrationRecoveryAuthorityDepth > 0) return await operation();
+    // Dynamic import avoids the parallel-runtime → supervisor → migration cycle;
+    // recovery authority is acquired only after package module initialization.
+    const migration = await import('./migration.ts');
+    const lock = await migration.acquireCoordinationGlobalMigrationLock(this.#client.paths.stateRoot);
+    let authorization: { readonly release: () => Promise<void> } | null = null;
+    try {
+      authorization = await migration.authorizeCoordinationMigrationRecovery(this.#client.paths.stateRoot, lock);
+      this.#migrationRecoveryAuthorityDepth += 1;
+      return await operation();
+    } finally {
+      this.#migrationRecoveryAuthorityDepth = Math.max(0, this.#migrationRecoveryAuthorityDepth - 1);
+      try { if (authorization !== null) await authorization.release(); }
+      finally { await lock.release(); }
+    }
   }
 
   async attach(input: { readonly repo: AutopilotRepoIdentity; readonly active: ActiveAutopilotRow; readonly rawSessionId: string; readonly handoffToken?: string | null }): Promise<RunSupervisorAttachment> {
@@ -394,6 +413,7 @@ export class DurableRunSupervisorClient {
   }
 
   async attachMigrationRecovery(input: { readonly repo: AutopilotRepoIdentity; readonly workstreamRun: string; readonly recoveryId: string; readonly rawSessionId: string }): Promise<RunSupervisorAttachment> {
+    return await this.withMigrationRecoveryAuthority(async () => {
     const repoId = input.repo.repoKey;
     const status = await this.#client.query('migration-recovery', repoId, input.workstreamRun, { cursor_recovery_id: null, cursor_run: null, include_resolved: false, limit: 1, recovery_id: input.recoveryId });
     const runs = payloadArray(status, 'runs').map((value) => parseCoordinationRun(value));
@@ -423,9 +443,11 @@ export class DurableRunSupervisorClient {
     const contextPath = join(this.#client.paths.sessionsRoot, `${createHash('sha256').update(`${repoId}\0${run.workstream_run}\0${session.session_lease_id}`, 'utf8').digest('hex')}.json`);
     await writeCoordinatorSessionContext(contextPath, context);
     return { run: attachedRun, session, contextPath, context };
+    });
   }
 
   async resolveMigrationRecovery(input: { readonly attachment: RunSupervisorAttachment; readonly recoveryWork: CoordinationMigrationRecoveryWork; readonly resolution: MigrationRecoveryResolutionInput; readonly afterEvidenceBoundary?: (boundary: MigrationRecoveryEvidenceBoundary) => void | Promise<void> }): Promise<MigrationRecoveryResolutionResult> {
+    return await this.withMigrationRecoveryAuthority(async () => {
     if (input.attachment.session.attachment_kind !== 'migration-recovery') throw new CoordinationRuntimeError('unauthorized-client', 'migration recovery mutation requires a recovery-only supervisor attachment');
     const session = input.attachment.session;
     const work = input.recoveryWork;
@@ -463,6 +485,22 @@ export class DurableRunSupervisorClient {
     const run = parseCoordinationRun(response.payload['run']);
     if (run.status !== input.attachment.run.status) throw new CoordinationRuntimeError('store-corrupt', 'migration recovery resolution changed durable run terminal/recovery state');
     return { recoveryWork, remainingRecoveryCount, run };
+    });
+  }
+
+  async detachMigrationRecovery(attachment: RunSupervisorAttachment, reason = 'migration recovery completed'): Promise<void> {
+    if (attachment.session.attachment_kind !== 'migration-recovery') throw new CoordinationRuntimeError('unauthorized-client', 'migration recovery detach requires a recovery-only supervisor attachment');
+    await this.withMigrationRecoveryAuthority(async () => {
+      await this.#client.mutate('detach-session', {
+        repoId: attachment.context.repo_id, workstreamRun: attachment.context.workstream_run, sessionId: attachment.session.session_id,
+        fencingGeneration: attachment.session.session_generation, expectedVersion: attachment.session.version,
+        idempotencyKey: durableIdentifier('detach-migration-recovery', attachment.session.session_lease_id),
+      }, { reason, session_lease_id: attachment.session.session_lease_id, session_token: attachment.context.session_token });
+      await unlink(attachment.contextPath).catch((error: unknown) => {
+        if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return;
+        throw error;
+      });
+    });
   }
 }
 
