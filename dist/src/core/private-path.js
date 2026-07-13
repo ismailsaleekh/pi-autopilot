@@ -109,23 +109,37 @@ export async function ensurePrivateAuthorityDirectory(path, env = process.env) {
 export function hardenRuntimeAuthorityBeforeMarkerRead(stateRoot, repoKey, env = process.env) {
     if (platform() !== 'win32')
         return;
+    const canonicalRoot = resolve(stateRoot);
     const roots = [
-        stateRoot,
-        join(stateRoot, 'coordination'),
-        join(stateRoot, 'coordination', repoKey),
-        join(stateRoot, 'worktrees'),
-        join(stateRoot, 'worktrees', repoKey),
-        join(stateRoot, 'cutovers'),
-        join(stateRoot, 'migrations'),
+        canonicalRoot,
+        join(canonicalRoot, 'coordination'),
+        join(canonicalRoot, 'coordination', repoKey),
+        join(canonicalRoot, 'worktrees'),
+        join(canonicalRoot, 'worktrees', repoKey),
+        join(canonicalRoot, 'cutovers'),
+        join(canonicalRoot, 'migrations'),
     ];
-    for (const root of roots)
-        enforceWindowsPrivateAcl(root, true, env);
-    if (!windowsRecursivelyHardenedRoots.has(stateRoot)) {
-        enforceWindowsPrivateTree(stateRoot, env);
-        windowsRecursivelyHardenedRoots.add(stateRoot);
+    if (windowsRecursivelyHardenedRoots.has(canonicalRoot)) {
+        assertPrivatePathNoAliases(canonicalRoot);
+        for (const root of roots.slice(1)) {
+            mkdirSync(root, { recursive: true });
+            assertPrivatePathNoAliases(root);
+        }
+        return;
     }
+    enforceWindowsPrivateAcl(canonicalRoot, true, env);
+    enforceWindowsPrivateTree(canonicalRoot, env);
+    for (const root of roots.slice(1)) {
+        mkdirSync(root, { recursive: true });
+        assertPrivatePathNoAliases(root);
+    }
+    enforceWindowsPrivateTree(canonicalRoot, env);
+    windowsRecursivelyHardenedRoots.add(canonicalRoot);
+}
+export function isWindowsPrivateTreeHardened(path) {
+    return platform() === 'win32' && windowsRecursivelyHardenedRoots.has(resolve(path));
 }
 export function markWindowsPrivateTreeHardened(path) {
     if (platform() === 'win32')
-        windowsRecursivelyHardenedRoots.add(path);
+        windowsRecursivelyHardenedRoots.add(resolve(path));
 }

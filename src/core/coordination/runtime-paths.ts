@@ -1,11 +1,11 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { open, readFile } from 'node:fs/promises';
+import { mkdir, open, readFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { platform, tmpdir } from 'node:os';
 
 import { AUTOPILOT_STATE_ROOT_ENV, resolveAutopilotStateRoot, type ProcessEnvLike } from '../parallel-runtime.ts';
 import { CoordinationRuntimeError } from './failures.ts';
-import { enforcePrivateAuthorityPath, enforceWindowsPrivateTree, ensurePrivateAuthorityDirectory, markWindowsPrivateTreeHardened } from '../private-path.ts';
+import { assertPrivatePathNoAliases, enforcePrivateAuthorityPath, enforceWindowsPrivateTree, ensurePrivateAuthorityDirectory, isWindowsPrivateTreeHardened, markWindowsPrivateTreeHardened } from '../private-path.ts';
 
 export { enforcePrivateAuthorityPath, enforceWindowsPrivateAcl, enforceWindowsPrivateTree, ensurePrivateAuthorityDirectory, windowsPrivateAclCommand, windowsPrivateTreeAclCommand } from '../private-path.ts';
 export type { WindowsPrivateAclCommand } from '../private-path.ts';
@@ -84,13 +84,34 @@ export async function ensureCoordinatorPrivateRoots(paths: CoordinatorRuntimePat
     paths.sessionsRoot,
     paths.semanticReplayReceiptsRoot,
   ];
-  for (const path of roots) await ensurePrivateAuthorityDirectory(path, env);
   if (platform() === 'win32') {
-    // An operator override may predate this process. Reapplying the closed tree
-    // DACL is intentionally fail-closed; the leaf primitive tracks completed roots.
+    if (isWindowsPrivateTreeHardened(paths.stateRoot)) {
+      assertPrivatePathNoAliases(paths.stateRoot);
+      for (const path of roots.slice(1)) {
+        await mkdir(path, { recursive: true });
+        assertPrivatePathNoAliases(path);
+      }
+      if (!isWindowsPrivateTreeHardened(paths.coordinatorRoot)) {
+        enforceWindowsPrivateTree(paths.coordinatorRoot, env);
+        markWindowsPrivateTreeHardened(paths.coordinatorRoot);
+      }
+      return;
+    }
+    // First close the operator-supplied root, then reject/harden every existing
+    // descendant before creating package roots. New descendants inherit only the
+    // closed current-user ACE; one final tree pass makes every root explicit.
+    await ensurePrivateAuthorityDirectory(paths.stateRoot, env);
+    enforceWindowsPrivateTree(paths.stateRoot, env);
+    for (const path of roots.slice(1)) {
+      await mkdir(path, { recursive: true });
+      assertPrivatePathNoAliases(path);
+    }
     enforceWindowsPrivateTree(paths.stateRoot, env);
     markWindowsPrivateTreeHardened(paths.stateRoot);
+    markWindowsPrivateTreeHardened(paths.coordinatorRoot);
+    return;
   }
+  for (const path of roots) await ensurePrivateAuthorityDirectory(path, env);
 }
 
 export async function readOrCreateCoordinatorCapability(paths: CoordinatorRuntimePaths): Promise<string> {

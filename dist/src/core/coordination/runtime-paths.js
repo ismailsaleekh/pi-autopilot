@@ -1,10 +1,10 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { open, readFile } from 'node:fs/promises';
+import { mkdir, open, readFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { platform, tmpdir } from 'node:os';
 import { AUTOPILOT_STATE_ROOT_ENV, resolveAutopilotStateRoot } from "../parallel-runtime.js";
 import { CoordinationRuntimeError } from "./failures.js";
-import { enforcePrivateAuthorityPath, enforceWindowsPrivateTree, ensurePrivateAuthorityDirectory, markWindowsPrivateTreeHardened } from "../private-path.js";
+import { assertPrivatePathNoAliases, enforcePrivateAuthorityPath, enforceWindowsPrivateTree, ensurePrivateAuthorityDirectory, isWindowsPrivateTreeHardened, markWindowsPrivateTreeHardened } from "../private-path.js";
 export { enforcePrivateAuthorityPath, enforceWindowsPrivateAcl, enforceWindowsPrivateTree, ensurePrivateAuthorityDirectory, windowsPrivateAclCommand, windowsPrivateTreeAclCommand } from "../private-path.js";
 export { COORDINATOR_BUSY_TIMEOUT_MS, COORDINATOR_DATABASE_SCHEMA_VERSION, COORDINATOR_GRANT_OFFER_SWEEP_MS, COORDINATOR_GRANT_OFFER_TTL_MS, COORDINATOR_HEARTBEAT_MS, COORDINATOR_MAX_FRAME_BYTES, COORDINATOR_PACKAGE_BUILD, COORDINATOR_SESSION_LEASE_MS } from "./runtime-constants.js";
 export function coordinatorRuntimePaths(env = process.env) {
@@ -56,14 +56,35 @@ export async function ensureCoordinatorPrivateRoots(paths, env = process.env) {
         paths.sessionsRoot,
         paths.semanticReplayReceiptsRoot,
     ];
-    for (const path of roots)
-        await ensurePrivateAuthorityDirectory(path, env);
     if (platform() === 'win32') {
-        // An operator override may predate this process. Reapplying the closed tree
-        // DACL is intentionally fail-closed; the leaf primitive tracks completed roots.
+        if (isWindowsPrivateTreeHardened(paths.stateRoot)) {
+            assertPrivatePathNoAliases(paths.stateRoot);
+            for (const path of roots.slice(1)) {
+                await mkdir(path, { recursive: true });
+                assertPrivatePathNoAliases(path);
+            }
+            if (!isWindowsPrivateTreeHardened(paths.coordinatorRoot)) {
+                enforceWindowsPrivateTree(paths.coordinatorRoot, env);
+                markWindowsPrivateTreeHardened(paths.coordinatorRoot);
+            }
+            return;
+        }
+        // First close the operator-supplied root, then reject/harden every existing
+        // descendant before creating package roots. New descendants inherit only the
+        // closed current-user ACE; one final tree pass makes every root explicit.
+        await ensurePrivateAuthorityDirectory(paths.stateRoot, env);
+        enforceWindowsPrivateTree(paths.stateRoot, env);
+        for (const path of roots.slice(1)) {
+            await mkdir(path, { recursive: true });
+            assertPrivatePathNoAliases(path);
+        }
         enforceWindowsPrivateTree(paths.stateRoot, env);
         markWindowsPrivateTreeHardened(paths.stateRoot);
+        markWindowsPrivateTreeHardened(paths.coordinatorRoot);
+        return;
     }
+    for (const path of roots)
+        await ensurePrivateAuthorityDirectory(path, env);
 }
 export async function readOrCreateCoordinatorCapability(paths) {
     await ensureCoordinatorPrivateRoots(paths);
