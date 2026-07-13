@@ -182,7 +182,7 @@ void describe('Coordination Fabric contracts and invariants', () => {
     const recoveryResolution = parseCoordinatorRequestEnvelope({
       ...mutation,
       action: 'resolve-migration-recovery',
-      payload: { recovery_id: 'recovery-1', resolution_type: 'authority-retained', evidence_ref: 'retention.json', evidence_sha256: `sha256:${'b'.repeat(64)}`, release_source: null, release_target_id: null, ...sessionProof },
+      payload: { recovery_id: 'recovery-1', resolution_type: 'authority-retained', evidence_ref: 'retention.json', evidence_sha256: `sha256:${'b'.repeat(64)}`, release_source: null, release_target_id: null, migration_operation_token: 'c'.repeat(48), ...sessionProof },
     });
     assert.equal(recoveryResolution.action, 'resolve-migration-recovery');
     assert.throws(() => parseCoordinatorRequestEnvelope({ ...recoveryResolution, payload: { ...recoveryResolution.payload, release_source: 'unit-merge', release_target_id: 'unit-a:1' } }), /cannot carry release_source/u);

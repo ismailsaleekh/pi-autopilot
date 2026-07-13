@@ -103,7 +103,7 @@ function replayed(work: CoordinationMigrationRecoveryWork, command: Command, evi
   return resolution.resolution_type === 'authority-released' && resolution.release_source === releaseSource && resolution.release_target_id === targetId && resolution.evidence.sha256 === sha;
 }
 
-async function drainStaleSessions(supervisor: DurableRunSupervisorClient, repoKey: string, runFilter: string | null): Promise<Readonly<Record<string, unknown>>> {
+async function drainStaleSessions(supervisor: DurableRunSupervisorClient, repoKey: string, runFilter: string | null, operationToken: string): Promise<Readonly<Record<string, unknown>>> {
   let rawRuns: readonly CoordinationRun[];
   if (runFilter === null) rawRuns = (await readCoordinatorRunCatalog(supervisor.client, repoKey)).runs;
   else {
@@ -134,7 +134,7 @@ async function drainStaleSessions(supervisor: DurableRunSupervisorClient, repoKe
       if (session.boot_id === currentBootId() && isProcessAlive(session.pid)) throw new CoordinationRuntimeError('coordinator-contention', 'recovery drain refuses a live session process', [run.workstream_run, session.session_lease_id, String(session.pid)]);
       const owned = contexts.get(session.session_lease_id);
       if (owned === undefined || owned.context.repo_id !== repoKey || owned.context.workstream_run !== run.workstream_run || owned.context.session_id !== session.session_id || owned.context.session_generation !== session.session_generation) throw new CoordinationRuntimeError('recovery-required', 'stale session cannot be detached without its exact private authority context', [run.workstream_run, session.session_lease_id]);
-      await supervisor.client.mutate('detach-session', { repoId: repoKey, workstreamRun: run.workstream_run, sessionId: session.session_id, fencingGeneration: session.session_generation, expectedVersion: session.version, idempotencyKey: durableIdentifier('drain-stale-session', session.session_lease_id) }, { reason: 'exact dead legacy session drained before migration', session_lease_id: session.session_lease_id, session_token: owned.context.session_token });
+      await supervisor.client.mutate('detach-session', { repoId: repoKey, workstreamRun: run.workstream_run, sessionId: session.session_id, fencingGeneration: session.session_generation, expectedVersion: session.version, idempotencyKey: durableIdentifier('drain-stale-session', session.session_lease_id) }, { reason: 'exact dead legacy session drained before migration', session_lease_id: session.session_lease_id, session_token: owned.context.session_token, migration_operation_token: operationToken });
       await rm(owned.path, { force: true });
       drained.push(`${run.workstream_run}:${session.session_lease_id}`);
     }
@@ -155,7 +155,7 @@ async function executeMigrationRecoveryCli(argv: readonly string[], baseEnv: Pro
     const doctor = await supervisor.client.query('doctor');
     return { schema_version: 'autopilot.migration_recovery_cli.v1', action: 'doctor', repo_key: repo.repoKey, run: args.run, pending_count: queried.pendingCount, healthy: doctor.payload['healthy'], doctor: doctor.payload };
   }
-  if (args.command === 'drain-stale-sessions') return await supervisor.withMigrationRecoveryAuthority(async () => await drainStaleSessions(supervisor, repo.repoKey, args.run));
+  if (args.command === 'drain-stale-sessions') return await supervisor.withMigrationRecoveryAuthority(async (operationToken) => await drainStaleSessions(supervisor, repo.repoKey, args.run, operationToken));
   if (args.command === 'show') {
     const exact = allRows.filter((work) => work.recovery_id === args.recoveryId);
     if (exact.length !== 1) throw new CoordinationRuntimeError('invalid-state', 'recovery show requires exactly one matching row', [String(args.recoveryId)]);

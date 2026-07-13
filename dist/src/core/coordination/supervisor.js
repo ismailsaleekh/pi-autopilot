@@ -228,16 +228,18 @@ export class DurableRunSupervisorClient {
         return this.#client;
     }
     async withMigrationRecoveryAuthority(operation) {
-        if (this.#migrationRecoveryAuthority.getStore() === true)
-            return await operation();
+        const inheritedToken = this.#migrationRecoveryAuthority.getStore();
+        if (inheritedToken !== undefined)
+            return await operation(inheritedToken);
         // Dynamic import avoids the parallel-runtime → supervisor → migration cycle;
         // recovery authority is acquired only after package module initialization.
         const migration = await import("./migration.js");
         const lock = await migration.acquireCoordinationGlobalMigrationLock(this.#client.paths.stateRoot);
         let authorization = null;
         try {
-            authorization = await migration.authorizeCoordinationMigrationRecovery(this.#client.paths.stateRoot, lock);
-            return await this.#migrationRecoveryAuthority.run(true, operation);
+            const granted = await migration.authorizeCoordinationMigrationRecovery(this.#client.paths.stateRoot, lock);
+            authorization = granted;
+            return await this.#migrationRecoveryAuthority.run(granted.token, async () => await operation(granted.token));
         }
         finally {
             try {
@@ -380,7 +382,7 @@ export class DurableRunSupervisorClient {
         return { run: attachedRun, session, contextPath, context };
     }
     async attachMigrationRecovery(input) {
-        return await this.withMigrationRecoveryAuthority(async () => {
+        return await this.withMigrationRecoveryAuthority(async (operationToken) => {
             const repoId = input.repo.repoKey;
             const status = await this.#client.query('migration-recovery', repoId, input.workstreamRun, { cursor_recovery_id: null, cursor_run: null, include_resolved: false, limit: 1, recovery_id: input.recoveryId });
             const runs = payloadArray(status, 'runs').map((value) => parseCoordinationRun(value));
@@ -399,7 +401,7 @@ export class DurableRunSupervisorClient {
                 repoId, workstreamRun: run.workstream_run, sessionId: durableIdentifier('migration-recovery-session', input.rawSessionId),
                 fencingGeneration: generation, expectedVersion: run.version, idempotencyKey: durableIdentifier('attach-migration-recovery', `${repoId}\0${run.workstream_run}\0${sessionLeaseId}`),
             }, {
-                recovery_id: input.recoveryId, session_lease_id: sessionLeaseId, session_token: sessionToken, pid: process.pid, boot_id: currentBootId(), lease_expires_at: leaseExpiry(),
+                recovery_id: input.recoveryId, session_lease_id: sessionLeaseId, session_token: sessionToken, pid: process.pid, boot_id: currentBootId(), lease_expires_at: leaseExpiry(), migration_operation_token: operationToken,
             });
             const attachedRun = parseCoordinationRun(payloadRecord(response, 'run'));
             const session = parseCoordinationSessionLease(payloadRecord(response, 'session'));
@@ -417,7 +419,7 @@ export class DurableRunSupervisorClient {
         });
     }
     async resolveMigrationRecovery(input) {
-        return await this.withMigrationRecoveryAuthority(async () => {
+        return await this.withMigrationRecoveryAuthority(async (operationToken) => {
             if (input.attachment.session.attachment_kind !== 'migration-recovery')
                 throw new CoordinationRuntimeError('unauthorized-client', 'migration recovery mutation requires a recovery-only supervisor attachment');
             const session = input.attachment.session;
@@ -451,7 +453,7 @@ export class DurableRunSupervisorClient {
                 expectedVersion: work.version, idempotencyKey,
             }, {
                 recovery_id: work.recovery_id, resolution_type: input.resolution.resolutionType, evidence_ref: evidenceRef, evidence_sha256: evidenceSha256,
-                release_source: releaseSource, release_target_id: releaseTargetId, session_lease_id: session.session_lease_id, session_token: input.attachment.context.session_token,
+                release_source: releaseSource, release_target_id: releaseTargetId, session_lease_id: session.session_lease_id, session_token: input.attachment.context.session_token, migration_operation_token: operationToken,
             });
             const recoveryWork = parseCoordinationMigrationRecoveryWork(response.payload['recovery_work']);
             const remainingRecoveryCount = requireInteger(response.payload, 'remaining_recovery_count');
@@ -464,12 +466,12 @@ export class DurableRunSupervisorClient {
     async detachMigrationRecovery(attachment, reason = 'migration recovery completed') {
         if (attachment.session.attachment_kind !== 'migration-recovery')
             throw new CoordinationRuntimeError('unauthorized-client', 'migration recovery detach requires a recovery-only supervisor attachment');
-        await this.withMigrationRecoveryAuthority(async () => {
+        await this.withMigrationRecoveryAuthority(async (operationToken) => {
             await this.#client.mutate('detach-session', {
                 repoId: attachment.context.repo_id, workstreamRun: attachment.context.workstream_run, sessionId: attachment.session.session_id,
                 fencingGeneration: attachment.session.session_generation, expectedVersion: attachment.session.version,
                 idempotencyKey: durableIdentifier('detach-migration-recovery', attachment.session.session_lease_id),
-            }, { reason, session_lease_id: attachment.session.session_lease_id, session_token: attachment.context.session_token });
+            }, { reason, session_lease_id: attachment.session.session_lease_id, session_token: attachment.context.session_token, migration_operation_token: operationToken });
             await unlink(attachment.contextPath).catch((error) => {
                 if (error instanceof Error && 'code' in error && error.code === 'ENOENT')
                     return;

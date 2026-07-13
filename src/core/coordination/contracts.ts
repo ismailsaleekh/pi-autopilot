@@ -101,8 +101,8 @@ const PAYLOAD_FIELDS: Readonly<Record<CoordinatorQueryAction | CoordinatorMutati
   'attach-run': ['autopilot_id', 'canonical_root', 'coordination_authority', 'git_common_dir', 'repo_key', 'run_resource', 'workstream'],
   'attach-session': ['boot_id', 'handoff_token', 'lease_expires_at', 'pid', 'session_lease_id', 'session_token'],
   'attach-terminal-recovery': ['boot_id', 'lease_expires_at', 'pid', 'session_lease_id', 'session_token', 'terminal_intent_id'],
-  'attach-migration-recovery': ['boot_id', 'lease_expires_at', 'pid', 'recovery_id', 'session_lease_id', 'session_token'],
-  'resolve-migration-recovery': ['evidence_ref', 'evidence_sha256', 'recovery_id', 'release_source', 'release_target_id', 'resolution_type', 'session_lease_id', 'session_token'],
+  'attach-migration-recovery': ['boot_id', 'lease_expires_at', 'migration_operation_token', 'pid', 'recovery_id', 'session_lease_id', 'session_token'],
+  'resolve-migration-recovery': ['evidence_ref', 'evidence_sha256', 'migration_operation_token', 'recovery_id', 'release_source', 'release_target_id', 'resolution_type', 'session_lease_id', 'session_token'],
   'detach-session': ['reason', 'session_lease_id', 'session_token'],
   'prepare-handoff': ['handoff_token', 'session_lease_id', 'session_token'],
   heartbeat: ['lease_expires_at', 'session_lease_id', 'session_token'],
@@ -141,10 +141,10 @@ function isJsonObject(value: unknown): value is JsonObject {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function object(value: unknown, label: string, fields: readonly string[]): JsonObject {
+function object(value: unknown, label: string, fields: readonly string[], optionalFields: readonly string[] = []): JsonObject {
   if (!isJsonObject(value)) fail(label, 'must be an object');
   const record = value;
-  const unknownFields = Object.keys(record).filter((key) => !fields.includes(key));
+  const unknownFields = Object.keys(record).filter((key) => !fields.includes(key) && !optionalFields.includes(key));
   if (unknownFields.length > 0) fail(label, `contains unknown fields: ${unknownFields.sort().join(', ')}`);
   for (const field of fields) {
     if (!(field in record)) fail(label, `missing required field ${field}`);
@@ -962,7 +962,7 @@ function parsePayload(value: unknown, action: CoordinatorQueryAction | Coordinat
     const unknownFields = Object.keys(value).filter((key) => !PAYLOAD_FIELDS[action].includes(key));
     if (unknownFields.length > 0) fail(label, `contains unknown fields: ${unknownFields.sort().join(', ')}`);
     payload = value;
-  } else payload = object(value, label, PAYLOAD_FIELDS[action]);
+  } else payload = object(value, label, PAYLOAD_FIELDS[action], action === 'detach-session' ? ['migration_operation_token'] : []);
   for (const field of PAYLOAD_FIELDS[action]) {
     const entry = payload[field];
     if (action === 'run-catalog' && entry === undefined) continue;
@@ -1044,6 +1044,8 @@ function parsePayload(value: unknown, action: CoordinatorQueryAction | Coordinat
       absolutePath(payload, field, label);
     } else if (field === 'child_token' || field === 'session_token') {
       if (typeof entry !== 'string' || !CHILD_TOKEN.test(entry)) fail(label, `${field} must be 32 random bytes encoded as lowercase hex`);
+    } else if (field === 'migration_operation_token') {
+      if (typeof entry !== 'string' || !/^[a-f0-9]{48}$/u.test(entry)) fail(label, 'migration_operation_token must be 24 random bytes encoded as lowercase hex');
     } else if (field === 'outcome') {
       oneOf(payload, field, ['closed', 'aborted'] as const, label);
     } else if (field === 'integration_evidence_sha256' || field === 'validation_evidence_sha256') {
@@ -1061,6 +1063,7 @@ function parsePayload(value: unknown, action: CoordinatorQueryAction | Coordinat
       fail(label, `${field} must be a bounded non-empty string`);
     }
   }
+  if (action === 'detach-session' && payload['migration_operation_token'] !== undefined && (typeof payload['migration_operation_token'] !== 'string' || !/^[a-f0-9]{48}$/u.test(payload['migration_operation_token']))) fail(label, 'migration_operation_token must be 24 random bytes encoded as lowercase hex');
   if (action === 'respond-claim-request') {
     const response = payload['response'];
     const ownerReason = payload['owner_reason'];

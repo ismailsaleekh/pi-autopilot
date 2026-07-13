@@ -12,7 +12,7 @@ import { validateAuthoritativeCoordinationDocument, validatePlanningContradictio
 import { CoordinationRuntimeError, type CoordinationFailureCode } from './failures.ts';
 import { checkCoordinationInvariants, type CoordinationInvariantFinding } from './invariants.ts';
 import { COORDINATOR_BUSY_TIMEOUT_MS, COORDINATOR_DATABASE_SCHEMA_VERSION, COORDINATOR_GRANT_OFFER_TTL_MS, COORDINATOR_PACKAGE_BUILD, enforcePrivateAuthorityPath, enforceWindowsPrivateAcl, ensureCoordinatorPrivateRoots, type CoordinatorRuntimePaths } from './runtime-paths.ts';
-import { activeCoordinationMigrationFreeze, assertCoordinationDispatchAllowed, assertCoordinationFrozenMutationAllowed, coordinationCutoverCommitted } from './migration-paths.ts';
+import { activeCoordinationMigrationFreeze, assertCoordinationDispatchAllowed, assertCoordinationFrozenMutationAllowed, assertCoordinationMigrationRecoveryOperationAuthorized, coordinationCutoverCommitted } from './migration-paths.ts';
 import { parseRunTerminalSha, parseUnitAttemptTarget, parseUnitMergeReservationFacts, validateReconciliationEvidenceDocument, validateReservationIntegrationEvidenceDocument, validateReservationValidationArtifactChain, validateReservationValidationEvidenceDocument } from './terminal-evidence.ts';
 import { AUTOPILOT_COORDINATOR_PROTOCOL_VERSION, COORDINATION_WORKTREE_STATES } from './types.ts';
 import { assertPrivatePathNoAliases } from '../private-path.ts';
@@ -840,9 +840,7 @@ export async function stageCoordinatorSemanticReplayFile(paths: CoordinatorRunti
 
 function requestDigest(request: CoordinatorRequestEnvelope): `sha256:${string}` {
   const runOwnedIdempotency = RUN_OWNED_IDEMPOTENCY_ACTIONS.has(request.action);
-  const payload = runOwnedIdempotency
-    ? Object.fromEntries(Object.entries(request.payload).filter(([field]) => field !== 'session_lease_id' && field !== 'session_token'))
-    : request.payload;
+  const payload = Object.fromEntries(Object.entries(request.payload).filter(([field]) => field !== 'migration_operation_token' && (!runOwnedIdempotency || field !== 'session_lease_id' && field !== 'session_token')));
   const semantic = {
     schema_version: request.schema_version,
     protocol_version: request.protocol_version,
@@ -1645,7 +1643,7 @@ export class CoordinatorStore {
     const payload = request['payload'];
     if (typeof requestId !== 'string' || typeof repoId !== 'string' || typeof idempotencyKey !== 'string' || typeof action !== 'string' || typeof payload !== 'object' || payload === null || Array.isArray(payload)) throw new CoordinationRuntimeError('invalid-request', 'legacy replay request identity is malformed');
     const runOwned = RUN_OWNED_IDEMPOTENCY_ACTIONS.has(action);
-    const semanticPayload = runOwned ? Object.fromEntries(Object.entries(payload).filter(([field]) => field !== 'session_lease_id' && field !== 'session_token')) : payload;
+    const semanticPayload = Object.fromEntries(Object.entries(payload).filter(([field]) => field !== 'migration_operation_token' && (!runOwned || field !== 'session_lease_id' && field !== 'session_token')));
     const semantic = { schema_version: request['schema_version'], protocol_version: request['protocol_version'], action, repo_id: repoId, workstream_run: request['workstream_run'], session_id: runOwned ? null : request['session_id'], fencing_generation: runOwned ? null : request['fencing_generation'], expected_version: runOwned ? null : request['expected_version'], payload: semanticPayload };
     const digest = `sha256:${createHash('sha256').update(canonicalJson(semantic), 'utf8').digest('hex')}`;
     const prior = this.#db.prepare('SELECT request_sha256, committed_event_seq, payload_json FROM idempotency_results WHERE repo_id=? AND idempotency_key=?').get(repoId, idempotencyKey);
@@ -1716,7 +1714,8 @@ export class CoordinatorStore {
   #dispatch(request: CoordinatorRequestEnvelope): StoreEffect {
     const queryActions = new Set(['handshake', 'status', 'doctor', 'export', 'migration-recovery', 'run-catalog']);
     if (!queryActions.has(request.action)) {
-      if (activeCoordinationMigrationFreeze(this.#stateRoot) !== null) assertCoordinationFrozenMutationAllowed(this.#stateRoot, request.repo_id, request.action);
+      if (request.action === 'attach-migration-recovery') assertCoordinationMigrationRecoveryOperationAuthorized(this.#stateRoot, request.payload['migration_operation_token']);
+      if (activeCoordinationMigrationFreeze(this.#stateRoot) !== null) assertCoordinationFrozenMutationAllowed(this.#stateRoot, request.repo_id, request.action, request.payload['migration_operation_token']);
       else assertCoordinationDispatchAllowed(this.#stateRoot, request.repo_id, `coordinator mutation ${request.action}`);
     }
     switch (request.action) {
@@ -4357,8 +4356,9 @@ export class CoordinatorStore {
     if (sqlString(row, 'session_lease_id') !== payloadString(request.payload, 'session_lease_id')) throw new CoordinationRuntimeError('unauthorized-client', 'session lease identity does not match current authority');
     this.#assertCapability(row, 'session_token_sha256', payloadString(request.payload, 'session_token'), 'session');
     const session = sessionFromRow(row);
-    const pendingRecovery = this.#pendingMigrationRecovery(run.repo_id, run.workstream_run);
     if (session.attachment_kind === 'migration-recovery' && !MIGRATION_RECOVERY_SESSION_ACTIONS.has(request.action)) throw new CoordinationRuntimeError('unauthorized-client', `recovery-only session rejects ordinary dispatch action ${request.action}`);
+    if (session.attachment_kind === 'migration-recovery') assertCoordinationMigrationRecoveryOperationAuthorized(this.#stateRoot, request.payload['migration_operation_token']);
+    const pendingRecovery = this.#pendingMigrationRecovery(run.repo_id, run.workstream_run);
     if (session.attachment_kind !== 'migration-recovery' && pendingRecovery.length > 0 && !['detach-session', 'heartbeat'].includes(request.action)) throw new CoordinationRuntimeError('recovery-required', 'ordinary session is fenced from dispatch while migration recovery remains pending', pendingRecovery.map((work) => work.recovery_id));
     return session;
   }
@@ -4374,6 +4374,7 @@ export class CoordinatorStore {
     const sessionLeaseId = payloadString(request.payload, 'session_lease_id');
     const row = asRow(this.#db.prepare('SELECT * FROM session_leases WHERE session_lease_id=?').get(sessionLeaseId), 'session replay authority');
     const session = sessionFromRow(row);
+    if (session.attachment_kind === 'migration-recovery') assertCoordinationMigrationRecoveryOperationAuthorized(this.#stateRoot, request.payload['migration_operation_token']);
     const run = this.#requireRun(request.repo_id, this.#workstreamRun(request));
     if (session.repo_id !== request.repo_id || session.workstream_run !== run.workstream_run || session.session_id !== request.session_id || session.session_generation !== request.fencing_generation || session.session_generation !== run.active_session_generation) throw new CoordinationRuntimeError('fenced-session', 'idempotent replay session is no longer the current generation');
     const allowedStatus = request.action === 'prepare-handoff' ? 'handoff-pending' : request.action === 'detach-session' ? 'detached' : 'attached';

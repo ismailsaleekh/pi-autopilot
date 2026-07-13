@@ -387,10 +387,15 @@ void describe('Coordination Fabric legacy migration and cutover', () => {
         repoId: fixture.repoKey, workstreamRun: active.workstream_run, sessionId: attachment.session.session_id, fencingGeneration: attachment.session.session_generation,
         expectedVersion: attachment.run.version, idempotencyKey: 'recovery-session-cannot-dispatch',
       }, { reason: 'must remain recovery-only', session_lease_id: attachment.session.session_lease_id, session_token: attachment.context.session_token }), /recovery-only session rejects ordinary dispatch/u);
+      const staleOperationToken = await supervisor.withMigrationRecoveryAuthority(async (operationToken) => operationToken);
       await assert.rejects(() => supervisor.withMigrationRecoveryAuthority(async () => await supervisor.client.mutate('resolve-migration-recovery', {
         repoId: fixture.repoKey, workstreamRun: active.workstream_run, sessionId: attachment.session.session_id, fencingGeneration: attachment.session.session_generation,
+        expectedVersion: recovery.version, idempotencyKey: 'stale-ambient-recovery-authorization',
+      }, { recovery_id: recovery.recovery_id, resolution_type: 'authority-retained', evidence_ref: 'missing.json', evidence_sha256: `sha256:${'f'.repeat(64)}`, release_source: null, release_target_id: null, session_lease_id: attachment.session.session_lease_id, session_token: attachment.context.session_token, migration_operation_token: staleOperationToken })), /not bound to this request/u);
+      await assert.rejects(() => supervisor.withMigrationRecoveryAuthority(async (operationToken) => await supervisor.client.mutate('resolve-migration-recovery', {
+        repoId: fixture.repoKey, workstreamRun: active.workstream_run, sessionId: attachment.session.session_id, fencingGeneration: attachment.session.session_generation,
         expectedVersion: recovery.version, idempotencyKey: 'missing-recovery-evidence',
-      }, { recovery_id: recovery.recovery_id, resolution_type: 'authority-retained', evidence_ref: 'missing.json', evidence_sha256: `sha256:${'f'.repeat(64)}`, release_source: null, release_target_id: null, session_lease_id: attachment.session.session_lease_id, session_token: attachment.context.session_token })), /evidence is unreadable/u);
+      }, { recovery_id: recovery.recovery_id, resolution_type: 'authority-retained', evidence_ref: 'missing.json', evidence_sha256: `sha256:${'f'.repeat(64)}`, release_source: null, release_target_id: null, session_lease_id: attachment.session.session_lease_id, session_token: attachment.context.session_token, migration_operation_token: operationToken })), /evidence is unreadable/u);
       const resolved = await supervisor.resolveMigrationRecovery({ attachment, recoveryWork: recovery, resolution: { resolutionType: 'authority-retained' } });
       assert.equal(resolved.recoveryWork.status, 'resolved');
       assert.equal(resolved.recoveryWork.resolution?.resolution_type, 'authority-retained');
@@ -398,10 +403,7 @@ void describe('Coordination Fabric legacy migration and cutover', () => {
       assert.equal(resolved.run.status, 'recovering');
       const replayed = await supervisor.resolveMigrationRecovery({ attachment, recoveryWork: recovery, resolution: { resolutionType: 'authority-retained' } });
       assert.equal(replayed.recoveryWork.version, resolved.recoveryWork.version);
-      await supervisor.client.mutate('detach-session', {
-        repoId: fixture.repoKey, workstreamRun: active.workstream_run, sessionId: attachment.session.session_id, fencingGeneration: attachment.session.session_generation,
-        expectedVersion: attachment.session.version, idempotencyKey: `detach-recovery:${attachment.session.session_lease_id}`,
-      }, { reason: 'migration recovery completed', session_lease_id: attachment.session.session_lease_id, session_token: attachment.context.session_token });
+      await supervisor.detachMigrationRecovery(attachment);
 
       const prepared = await prepareAutopilotWorkstream({ workstream: active.workstream, sourceCwd: active.source_repo, coordinationSessionId: 'ordinary-activation-after-recovery', env: fixture.env, now: new Date('2026-07-12T12:03:00.000Z') });
       assert.equal(prepared.resumed, true);
@@ -603,6 +605,7 @@ void describe('Coordination Fabric legacy migration and cutover', () => {
       await writeFile(join(secondSource, 'README.md'), 'second repository\n', 'utf8');
       git(secondSource, ['init']); git(secondSource, ['config', 'user.email', 'test@example.invalid']); git(secondSource, ['config', 'user.name', 'Test']); git(secondSource, ['add', '.']); git(secondSource, ['commit', '-m', 'initial']);
       const secondRepo = resolveRepoIdentity(secondSource);
+      await assert.rejects(() => runCoordinationMigration({ command: 'dry-run', repoKey: secondRepo.repoKey, repoRoot: secondSource, env: fixture.env, clock: fixedClock() }), /dry-run is forbidden while a global coordination migration freeze is active/u);
       await assert.rejects(() => runCoordinationMigration({ command: 'apply', repoKey: secondRepo.repoKey, repoRoot: secondSource, env: fixture.env, clock: fixedClock() }), /another repository already owns the global coordination migration freeze/u);
       const store = await CoordinatorStore.open(coordinatorRuntimePaths(fixture.env), fixedClock());
       try {

@@ -249,7 +249,18 @@ export function acknowledgeCoordinationMigrationFreeze(stateRoot: string, repoKe
   return true;
 }
 
-export function assertCoordinationFrozenMutationAllowed(stateRoot: string, repoKey: string, action: string): void {
+export function assertCoordinationMigrationRecoveryOperationAuthorized(stateRoot: string, operationToken: unknown): void {
+  const globalLockPath = join(stateRoot, 'migrations', '.global-operation.lock');
+  const authorizationPath = join(stateRoot, 'migrations', '.recovery-operation.json');
+  assertMigrationPathSafe(stateRoot, globalLockPath, 'global migration operation lock');
+  assertMigrationPathSafe(stateRoot, authorizationPath, 'migration recovery operation authorization');
+  if (!existsSync(globalLockPath) || !existsSync(authorizationPath)) throw new CoordinationRuntimeError('coordinator-contention', 'migration recovery mutation lacks the serialized global recovery operation authority', [globalLockPath, authorizationPath]);
+  const operationLock = record(readRegularJsonNoFollow(globalLockPath, 'global migration operation lock'), 'global migration operation lock');
+  const authorization = record(readRegularJsonNoFollow(authorizationPath, 'migration recovery operation authorization'), 'migration recovery operation authorization');
+  if (operationLock['schema_version'] !== 'autopilot.coordination_migration_lock.v1' || authorization['schema_version'] !== 'autopilot.coordination_recovery_operation.v1' || operationLock['pid'] !== authorization['pid'] || operationLock['boot_id'] !== authorization['boot_id'] || operationLock['token'] !== authorization['token'] || operationToken !== authorization['token'] || authorization['boot_id'] !== currentBootId() || typeof authorization['pid'] !== 'number' || !Number.isSafeInteger(authorization['pid']) || !isProcessAlive(authorization['pid'])) throw new CoordinationRuntimeError('coordinator-contention', 'migration recovery operation authority is stale, mismatched, or not bound to this request', [globalLockPath, authorizationPath]);
+}
+
+export function assertCoordinationFrozenMutationAllowed(stateRoot: string, repoKey: string, action: string, operationToken: unknown): void {
   const freezePath = activeCoordinationMigrationFreeze(stateRoot);
   if (freezePath === null) return;
   const freeze = readFreeze(freezePath);
@@ -267,14 +278,7 @@ export function assertCoordinationFrozenMutationAllowed(stateRoot: string, repoK
   }
   const recoveryActions = new Set(['attach-migration-recovery', 'resolve-migration-recovery', 'detach-session']);
   if (repoKey === freeze['repo_key'] && ['imported', 'verified', 'cutover-ready'].includes(journal['state']) && recoveryActions.has(action)) {
-    const globalLockPath = join(stateRoot, 'migrations', '.global-operation.lock');
-    const authorizationPath = join(stateRoot, 'migrations', '.recovery-operation.json');
-    assertMigrationPathSafe(stateRoot, globalLockPath, 'global migration operation lock');
-    assertMigrationPathSafe(stateRoot, authorizationPath, 'migration recovery operation authorization');
-    if (!existsSync(globalLockPath) || !existsSync(authorizationPath)) throw new CoordinationRuntimeError('coordinator-contention', 'migration recovery mutation lacks the serialized global recovery operation authority', [globalLockPath, authorizationPath]);
-    const operationLock = record(readRegularJsonNoFollow(globalLockPath, 'global migration operation lock'), 'global migration operation lock');
-    const authorization = record(readRegularJsonNoFollow(authorizationPath, 'migration recovery operation authorization'), 'migration recovery operation authorization');
-    if (operationLock['schema_version'] !== 'autopilot.coordination_migration_lock.v1' || authorization['schema_version'] !== 'autopilot.coordination_recovery_operation.v1' || operationLock['pid'] !== authorization['pid'] || operationLock['boot_id'] !== authorization['boot_id'] || operationLock['token'] !== authorization['token'] || authorization['boot_id'] !== currentBootId() || typeof authorization['pid'] !== 'number' || !Number.isSafeInteger(authorization['pid']) || !isProcessAlive(authorization['pid'])) throw new CoordinationRuntimeError('coordinator-contention', 'migration recovery operation authority is stale or mismatched', [globalLockPath, authorizationPath]);
+    assertCoordinationMigrationRecoveryOperationAuthorized(stateRoot, operationToken);
     return;
   }
   throw new CoordinationRuntimeError('coordinator-contention', `coordinator mutation ${action} refused after global migration writer authority was acquired`, [freezePath, String(freeze['repo_key'])]);

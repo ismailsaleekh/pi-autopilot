@@ -125,7 +125,7 @@ function replayed(work, command, evidenceBytes, releaseSource, targetId) {
     const sha = `sha256:${createHash('sha256').update(evidenceBytes).digest('hex')}`;
     return resolution.resolution_type === 'authority-released' && resolution.release_source === releaseSource && resolution.release_target_id === targetId && resolution.evidence.sha256 === sha;
 }
-async function drainStaleSessions(supervisor, repoKey, runFilter) {
+async function drainStaleSessions(supervisor, repoKey, runFilter, operationToken) {
     let rawRuns;
     if (runFilter === null)
         rawRuns = (await readCoordinatorRunCatalog(supervisor.client, repoKey)).runs;
@@ -165,7 +165,7 @@ async function drainStaleSessions(supervisor, repoKey, runFilter) {
             const owned = contexts.get(session.session_lease_id);
             if (owned === undefined || owned.context.repo_id !== repoKey || owned.context.workstream_run !== run.workstream_run || owned.context.session_id !== session.session_id || owned.context.session_generation !== session.session_generation)
                 throw new CoordinationRuntimeError('recovery-required', 'stale session cannot be detached without its exact private authority context', [run.workstream_run, session.session_lease_id]);
-            await supervisor.client.mutate('detach-session', { repoId: repoKey, workstreamRun: run.workstream_run, sessionId: session.session_id, fencingGeneration: session.session_generation, expectedVersion: session.version, idempotencyKey: durableIdentifier('drain-stale-session', session.session_lease_id) }, { reason: 'exact dead legacy session drained before migration', session_lease_id: session.session_lease_id, session_token: owned.context.session_token });
+            await supervisor.client.mutate('detach-session', { repoId: repoKey, workstreamRun: run.workstream_run, sessionId: session.session_id, fencingGeneration: session.session_generation, expectedVersion: session.version, idempotencyKey: durableIdentifier('drain-stale-session', session.session_lease_id) }, { reason: 'exact dead legacy session drained before migration', session_lease_id: session.session_lease_id, session_token: owned.context.session_token, migration_operation_token: operationToken });
             await rm(owned.path, { force: true });
             drained.push(`${run.workstream_run}:${session.session_lease_id}`);
         }
@@ -187,7 +187,7 @@ async function executeMigrationRecoveryCli(argv, baseEnv) {
         return { schema_version: 'autopilot.migration_recovery_cli.v1', action: 'doctor', repo_key: repo.repoKey, run: args.run, pending_count: queried.pendingCount, healthy: doctor.payload['healthy'], doctor: doctor.payload };
     }
     if (args.command === 'drain-stale-sessions')
-        return await supervisor.withMigrationRecoveryAuthority(async () => await drainStaleSessions(supervisor, repo.repoKey, args.run));
+        return await supervisor.withMigrationRecoveryAuthority(async (operationToken) => await drainStaleSessions(supervisor, repo.repoKey, args.run, operationToken));
     if (args.command === 'show') {
         const exact = allRows.filter((work) => work.recovery_id === args.recoveryId);
         if (exact.length !== 1)

@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { closeSync, constants as fsConstants, copyFileSync, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdtempSync, openSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, unlinkSync } from 'node:fs';
-import { chmod, copyFile, mkdir, open, readFile, readdir, rename, rm, type FileHandle } from 'node:fs/promises';
+import { chmod, copyFile, mkdir, open, readFile, readdir, rename, rm, rmdir, type FileHandle } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { platform, tmpdir } from 'node:os';
@@ -1649,13 +1649,13 @@ export async function acquireCoordinationGlobalMigrationLock(stateRoot: string):
   return lock;
 }
 
-export async function authorizeCoordinationMigrationRecovery(stateRoot: string, lock: CoordinationMigrationOperationLock): Promise<{ readonly release: () => Promise<void> }> {
+export async function authorizeCoordinationMigrationRecovery(stateRoot: string, lock: CoordinationMigrationOperationLock): Promise<{ readonly token: string; readonly release: () => Promise<void> }> {
   const expectedPath = join(stateRoot, 'migrations', '.global-operation.lock');
   if (lock.path !== expectedPath || lock.pid !== process.pid || lock.bootId !== currentBootId()) failure('blocked', 'recovery authorization does not own the exact global migration operation lock');
   const marker = join(stateRoot, 'migrations', '.recovery-operation.json');
   await atomicJson(stateRoot, marker, { schema_version: 'autopilot.coordination_recovery_operation.v1', pid: lock.pid, boot_id: lock.bootId, token: lock.token, created_at: new Date().toISOString() });
   let released = false;
-  return { release: async () => {
+  return { token: lock.token, release: async () => {
     if (released) return;
     const value = object(parseJsonFile(marker, null), marker, ['boot_id', 'created_at', 'pid', 'schema_version', 'token']);
     if (value['schema_version'] !== 'autopilot.coordination_recovery_operation.v1' || value['pid'] !== lock.pid || value['boot_id'] !== lock.bootId || value['token'] !== lock.token) failure('blocked', 'recovery authorization identity changed before release', [marker]);
@@ -1983,16 +1983,30 @@ export async function runCoordinationMigration(input: { readonly command: Coordi
   const paths = coordinatorRuntimePaths(input.env ?? process.env);
   const migrationPaths = coordinationMigrationPaths(paths, input.repoKey);
   if (input.command === 'dry-run') {
-    if (readCoordinationCutoverMarker(migrationPaths.cutoverMarkerPath, input.repoKey, paths.stateRoot) !== null) failure('blocked', 'repository coordination cutover is already committed; legacy dry-run is no longer valid', [migrationPaths.cutoverMarkerPath]);
-    const coordinator = inspectCoordinatorReadOnly(paths, input.repoKey);
-    const repository = resolveMigrationRepositoryIdentity(paths, input.repoKey, input.repoRoot, coordinator);
-    let inspection = inspectLegacy(paths, input.repoKey, repository);
-    inspection = reconcileMixedCoordinatorAuthority(coordinator, inspection);
-    const dryRunBlockers = Object.freeze([...inspection.blockers, ...legacyDrainBlockers(paths, migrationPaths, null, inspection.rows), ...coordinatorDrainBlockers(coordinator)].sort());
-    inspection = { ...inspection, blockers: dryRunBlockers };
-    const drift = Object.freeze([...recheckEntries(inspection.sourceEntries), ...recheckGitSnapshot(inspection.gitSnapshot, inspection.rows, repository)]);
-    if (drift.length > 0) failure('blocked', 'legacy source changed during dry-run inspection; rerun against a stable source', drift);
-    return baseReport('dry-run', input.repoKey, inspection, now, 'planned', null, aggregateDigest(inspection.sourceEntries, inspection.gitSnapshot), null, null);
+    // Inspection shares coordinator DB/WAL and authority paths with apply. Use
+    // the same global operation election, while leaving no durable lock behind.
+    const migrationRoot = join(paths.stateRoot, 'migrations');
+    const migrationRootExisted = existsSync(migrationRoot);
+    await ensurePrivateAuthorityDirectory(migrationRoot, input.env ?? process.env);
+    let dryRunLock: CoordinationMigrationOperationLock | null = null;
+    try {
+      dryRunLock = await acquireCoordinationGlobalMigrationLock(paths.stateRoot);
+      const existingFreeze = activeCoordinationMigrationFreeze(paths.stateRoot);
+      if (existingFreeze !== null) failure('blocked', 'migration dry-run is forbidden while a global coordination migration freeze is active', [existingFreeze]);
+      if (readCoordinationCutoverMarker(migrationPaths.cutoverMarkerPath, input.repoKey, paths.stateRoot) !== null) failure('blocked', 'repository coordination cutover is already committed; legacy dry-run is no longer valid', [migrationPaths.cutoverMarkerPath]);
+      const coordinator = inspectCoordinatorReadOnly(paths, input.repoKey);
+      const repository = resolveMigrationRepositoryIdentity(paths, input.repoKey, input.repoRoot, coordinator);
+      let inspection = inspectLegacy(paths, input.repoKey, repository);
+      inspection = reconcileMixedCoordinatorAuthority(coordinator, inspection);
+      const dryRunBlockers = Object.freeze([...inspection.blockers, ...legacyDrainBlockers(paths, migrationPaths, null, inspection.rows), ...coordinatorDrainBlockers(coordinator)].sort());
+      inspection = { ...inspection, blockers: dryRunBlockers };
+      const drift = Object.freeze([...recheckEntries(inspection.sourceEntries), ...recheckGitSnapshot(inspection.gitSnapshot, inspection.rows, repository)]);
+      if (drift.length > 0) failure('blocked', 'legacy source changed during dry-run inspection; rerun against a stable source', drift);
+      return baseReport('dry-run', input.repoKey, inspection, now, 'planned', null, aggregateDigest(inspection.sourceEntries, inspection.gitSnapshot), null, null);
+    } finally {
+      if (dryRunLock !== null) await dryRunLock.release();
+      if (!migrationRootExisted) await rmdir(migrationRoot);
+    }
   }
   await ensureCoordinatorPrivateRoots(paths, input.env ?? process.env);
   for (const authorityRoot of [join(paths.stateRoot, 'migrations'), join(paths.stateRoot, 'cutovers'), join(paths.stateRoot, 'migration-recovery-evidence')]) await ensurePrivateAuthorityDirectory(authorityRoot, input.env ?? process.env);
