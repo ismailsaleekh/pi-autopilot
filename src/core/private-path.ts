@@ -44,13 +44,15 @@ export function windowsPrivateAclCommand(path: string, directory: boolean, env: 
     `$sid=(New-Object Security.Principal.NTAccount($account)).Translate([Security.Principal.SecurityIdentifier]).Value`,
     `$sddl=\"O:$($sid)G:$($sid)D:P${inheritance}\"`,
     ...(directory ? [`if(-not [IO.Directory]::Exists($path)){$create=New-Object Security.AccessControl.DirectorySecurity;$create.SetSecurityDescriptorSddlForm($sddl);[void][IO.Directory]::CreateDirectory($path,$create)}`] : []),
-    `$item=Get-Item -LiteralPath $path -Force`,
-    `if(($item.Attributes -band [IO.FileAttributes]::ReparsePoint)-ne 0){throw 'Autopilot private authority refuses a reparse point'}`,
-    `$acl=Get-Acl -LiteralPath $path`,
+    `$attributes=[IO.File]::GetAttributes($path)`,
+    `if(($attributes -band [IO.FileAttributes]::ReparsePoint)-ne 0){throw 'Autopilot private authority refuses a reparse point'}`,
+    `$isDirectory=($attributes -band [IO.FileAttributes]::Directory)-ne 0`,
+    `$acl=if($isDirectory){[IO.Directory]::GetAccessControl($path)}else{[IO.File]::GetAccessControl($path)}`,
     `$acl.SetSecurityDescriptorSddlForm($sddl)`,
-    `Set-Acl -LiteralPath $path -AclObject $acl`,
-    `$check=Get-Acl -LiteralPath $path`,
-    `if(-not $check.AreAccessRulesProtected -or @($check.Access | Where-Object { $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value -ne $sid }).Count -ne 0){throw 'Autopilot private DACL verification failed'}`,
+    `if($isDirectory){[IO.Directory]::SetAccessControl($path,$acl)}else{[IO.File]::SetAccessControl($path,$acl)}`,
+    `$check=if($isDirectory){[IO.Directory]::GetAccessControl($path)}else{[IO.File]::GetAccessControl($path)}`,
+    `$actual=$check.GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]::All)`,
+    `if(-not $check.AreAccessRulesProtected -or $actual -ne $sddl){throw 'Autopilot private DACL verification failed'}`,
   ].join(';');
   return { executable: 'powershell.exe', args: ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script] };
 }
@@ -67,9 +69,9 @@ export function windowsPrivateTreeAclCommand(path: string, env: PrivatePathEnv =
   const script = [
     `$root='${literalPath}'`, `$account='${literalAccount}'`,
     `$sid=(New-Object Security.Principal.NTAccount($account)).Translate([Security.Principal.SecurityIdentifier]).Value`,
-    `$stack=New-Object 'System.Collections.Generic.Stack[System.IO.FileSystemInfo]'`,
-    `$stack.Push((Get-Item -LiteralPath $root -Force))`,
-    `while($stack.Count -gt 0){$item=$stack.Pop();if(($item.Attributes -band [IO.FileAttributes]::ReparsePoint)-ne 0){throw \"reparse point in Autopilot authority: $($item.FullName)\"};$dir=$item.PSIsContainer;$sddl=if($dir){\"O:$($sid)G:$($sid)D:P(A;OICI;FA;;;$sid)\"}else{\"O:$($sid)G:$($sid)D:P(A;;FA;;;$sid)\"};$acl=Get-Acl -LiteralPath $item.FullName;$acl.SetSecurityDescriptorSddlForm($sddl);Set-Acl -LiteralPath $item.FullName -AclObject $acl;if($dir){foreach($child in @(Get-ChildItem -LiteralPath $item.FullName -Force)){$stack.Push($child)}}}`,
+    `$stack=New-Object 'System.Collections.Generic.Stack[string]'`,
+    `$stack.Push($root)`,
+    `while($stack.Count -gt 0){$current=$stack.Pop();$attributes=[IO.File]::GetAttributes($current);if(($attributes -band [IO.FileAttributes]::ReparsePoint)-ne 0){throw \"reparse point in Autopilot authority: $current\"};$dir=($attributes -band [IO.FileAttributes]::Directory)-ne 0;$sddl=if($dir){\"O:$($sid)G:$($sid)D:P(A;OICI;FA;;;$sid)\"}else{\"O:$($sid)G:$($sid)D:P(A;;FA;;;$sid)\"};$acl=if($dir){[IO.Directory]::GetAccessControl($current)}else{[IO.File]::GetAccessControl($current)};$acl.SetSecurityDescriptorSddlForm($sddl);if($dir){[IO.Directory]::SetAccessControl($current,$acl)}else{[IO.File]::SetAccessControl($current,$acl)};$check=if($dir){[IO.Directory]::GetAccessControl($current)}else{[IO.File]::GetAccessControl($current)};$actual=$check.GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]::All);if(-not $check.AreAccessRulesProtected -or $actual -ne $sddl){throw \"Autopilot private DACL verification failed: $current\"};if($dir){foreach($child in [IO.Directory]::EnumerateFileSystemEntries($current)){$stack.Push($child)}}}`,
   ].join(';');
   return { executable: 'powershell.exe', args: ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script] };
 }

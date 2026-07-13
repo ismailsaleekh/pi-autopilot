@@ -661,7 +661,7 @@ void describe('package manifest and payload', () => {
         'utf8',
       );
 
-      const runnerEnv = { ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: stateRoot, [AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV]: attachment.contextPath };
+      const runnerEnv = { ...process.env, NODE_OPTIONS: `${process.env['NODE_OPTIONS'] ?? ''} --disable-warning=ExperimentalWarning`.trim(), [AUTOPILOT_STATE_ROOT_ENV]: stateRoot, [AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV]: attachment.contextPath };
       const packedMigration = spawnSync(process.execPath, [installedCoordinator, 'migrate', '--dry-run', '--state-root', join(tempRoot, 'migration-state'), '--repo-root', source], { cwd: source, encoding: 'utf8', env: runnerEnv });
       assert.equal(packedMigration.status, 0, packedMigration.stderr);
       assert.match(packedMigration.stdout, /autopilot\.coordination_migration_report\.v1/u);

@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { isAbsolute, normalize, relative, resolve, sep } from 'node:path';
+import { platform } from 'node:os';
 
 import {
   AUTOPILOT_JSON_SCHEMAS,
@@ -89,7 +90,15 @@ export function autopilotSchemaSha256(name: keyof typeof AUTOPILOT_JSON_SCHEMAS)
 
 export function parseAutopilotUnitSpec(value: unknown): AutopilotUnitSpec {
   assertUnitSpecShape(value);
-  const spec = value as AutopilotUnitSpec;
+  const input = value as AutopilotUnitSpec;
+  const canonicalAbsolutePath = (path: string): string => platform() === 'win32' ? path.replace(/\\/gu, '/') : path;
+  const spec: AutopilotUnitSpec = {
+    ...input,
+    cwd: canonicalAbsolutePath(input.cwd),
+    status_output: canonicalAbsolutePath(input.status_output),
+    receipt_output: canonicalAbsolutePath(input.receipt_output),
+    evidence_dir: canonicalAbsolutePath(input.evidence_dir),
+  };
   throwIfIssues('AutopilotUnitSpec', semanticUnitSpecIssues(spec));
   return spec;
 }

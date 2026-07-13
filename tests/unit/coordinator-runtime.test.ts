@@ -29,11 +29,14 @@ void it('builds an exact protected user-only Windows DACL contract for files and
   assert.match(directory.args[5] ?? '', /AreAccessRulesProtected/u);
   assert.match(directory.args[5] ?? '', /operator''o/u);
   assert.match(file.args[5] ?? '', /D:P\(A;;FA;;;\$sid\)/u);
+  assert.match(file.args[5] ?? '', /SetAccessControl/u);
+  assert.equal(/Get-Acl|Set-Acl/u.test(file.args[5] ?? ''), false);
   const tree = windowsPrivateTreeAclCommand('C:\\operator-state\\worktrees', env);
   assert.equal(/Get-ChildItem.*-Recurse/u.test(tree.args[5] ?? ''), false);
-  assert.match(tree.args[5] ?? '', /Stack\[System\.IO\.FileSystemInfo\]/u);
+  assert.match(tree.args[5] ?? '', /Stack\[string\]/u);
   assert.match(tree.args[5] ?? '', /ReparsePoint/u);
-  assert.match(tree.args[5] ?? '', /Set-Acl/u);
+  assert.match(tree.args[5] ?? '', /SetAccessControl/u);
+  assert.equal(/Get-Acl|Set-Acl/u.test(tree.args[5] ?? ''), false);
 });
 
 void it('uses a refreshable predecessor boot estimate and never exposes second-resolution macOS identity', () => {

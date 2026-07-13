@@ -147,6 +147,7 @@ function offlineEnv(
     PI_SKIP_VERSION_CHECK: '1',
     PI_TELEMETRY: '0',
     CI: '1',
+    NODE_OPTIONS: `${process.env['NODE_OPTIONS'] ?? ''} --disable-warning=ExperimentalWarning`.trim(),
   };
 }
 

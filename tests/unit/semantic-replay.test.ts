@@ -90,7 +90,7 @@ void describe('production semantic replay startup recovery', () => {
     mockWindowsAcl('C:\\permissive-override\\coordinator\\semantic-replay.candidate', false);
     mockWindowsAcl('C:\\permissive-override\\coordinator\\semantic-replay.jsonl', false);
     assert.match(invoked[0] ?? '', /DirectorySecurity.*CreateDirectory/u);
-    assert.equal(invoked.slice(1).every((command) => /D:P\(A;;FA;;;\$sid\)/u.test(command) && /Set-Acl/u.test(command)), true);
+    assert.equal(invoked.slice(1).every((command) => /D:P\(A;;FA;;;\$sid\)/u.test(command) && /SetAccessControl/u.test(command)), true);
   });
 
   void it('fails closed on malformed, duplicate-key, and closed-schema violations even with a matching digest', async () => {

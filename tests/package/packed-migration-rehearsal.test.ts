@@ -65,6 +65,7 @@ function runInstalledMigration(installedCoordinator: string, fixture: MigrationT
       PI_OFFLINE: '1',
       PI_SKIP_VERSION_CHECK: '1',
       PI_TELEMETRY: '0',
+      NODE_OPTIONS: `${process.env['NODE_OPTIONS'] ?? ''} --disable-warning=ExperimentalWarning`.trim(),
     },
   });
   assert.equal(result.status, 0, `${args.join(' ')}\n${result.stderr}`);
