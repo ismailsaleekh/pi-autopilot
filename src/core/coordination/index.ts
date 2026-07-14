@@ -3,6 +3,7 @@ export * from './client.ts';
 export * from './contracts.ts';
 export * from './deadlock.ts';
 export * from './escalation.ts';
+export * from './exclusive-policy.ts';
 export * from './failures.ts';
 export * from './ipc.ts';
 export * from './invariants.ts';

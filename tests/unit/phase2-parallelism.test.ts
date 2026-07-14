@@ -32,6 +32,7 @@ import {
   resolveRepoIdentity,
   taskRootForActiveAutopilot,
   updateUnitBranchStatus,
+  withAutopilotFileLock,
 } from '../../src/core/parallel-runtime.ts';
 
 async function withTempDir<T>(run: (root: string) => Promise<T>): Promise<T> {
@@ -240,6 +241,27 @@ void describe('Phase 2 scheduler config and deterministic scheduler', () => {
     assert.ok(skippedReasons.get('u01')?.includes('waiting-for-peer-release'));
     assert.ok(dispatch.skipped.find((unit) => unit.unit_id === 'u01')?.details.includes('claim request claim-request-peer-u01'));
     assert.ok(skippedReasons.get('u03')?.includes('dependency-not-satisfied'));
+  });
+});
+
+void describe('Phase 2 fail-closed runtime file locking', () => {
+  void it('never reclaims ambiguous ownership from age and still reclaims an exact dead owner', async () => {
+    await withTempDir(async (root) => {
+      const lockPath = join(root, 'locks', 'critical.lock');
+      await mkdir(dirname(lockPath), { recursive: true });
+      await writeFile(lockPath, '{"schema_version":"autopilot.lock.v1","pid":', { encoding: 'utf8', mode: 0o600 });
+      await assert.rejects(
+        () => withAutopilotFileLock(lockPath, 'new-holder', async () => undefined, { timeoutMs: 25 }),
+        /lock-timeout/u,
+      );
+      assert.equal(await readFile(lockPath, 'utf8'), '{"schema_version":"autopilot.lock.v1","pid":');
+
+      await writeFile(lockPath, `${JSON.stringify({ schema_version: 'autopilot.lock.v1', holder_id: 'dead-holder', acquired_at: '2000-01-01T00:00:00.000Z', pid: 2_147_483_647, boot_id: 'dead-boot' })}\n`, { encoding: 'utf8', mode: 0o600 });
+      let entered = false;
+      await withAutopilotFileLock(lockPath, 'replacement-holder', async () => { entered = true; }, { timeoutMs: 500 });
+      assert.equal(entered, true);
+      assert.equal(existsSync(lockPath), false);
+    });
   });
 });
 

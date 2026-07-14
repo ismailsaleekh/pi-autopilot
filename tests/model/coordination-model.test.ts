@@ -11,7 +11,7 @@ import {
   type CoordinationOperationStage,
   type CoordinationWorktreeOperation,
 } from '../../src/core/coordination/index.ts';
-import { validCoordinationSnapshot } from '../helpers/coordination-fixture.ts';
+import { exclusiveOperation, validCoordinationSnapshot } from '../helpers/coordination-fixture.ts';
 
 const releaseCondition = { condition_type: 'unit-merged' as const, target_id: 'unit-b:1', evidence: null };
 const requestHash = `sha256:${'c'.repeat(64)}` as const;
@@ -62,7 +62,7 @@ void describe('Coordination Fabric pure transition model', () => {
     const message = released.messages.find((candidate) => candidate.message_id === 'release-message-b');
     assert.equal(request?.status, 'released');
     assert.equal(message?.created_event_seq, request?.release_event_seq);
-    assert.equal(released.edit_leases.length, 0);
+    assert.deepEqual(released.edit_leases.map((lease) => `${lease.mode}:${lease.path}`), ['WRITE:src/shared.ts']);
     assertCoordinationInvariants(released);
 
     const granted = grantCoordinationAcquisitionGroup(released, {
@@ -149,18 +149,20 @@ function generatedGrantSnapshot(leftMode: CoordinationClaimMode, rightMode: Coor
   return {
     ...base,
     repository_event_seq: 3,
-    acquisition_groups: base.acquisition_groups.map((group) => ({
+    acquisition_groups: base.acquisition_groups.map((group) => {
+      const mode = group.acquisition_group_id === 'group-a' ? leftMode : rightMode;
+      const path = group.acquisition_group_id === 'group-a' || overlap ? 'src/shared.ts' : 'src/independent.ts';
+      const requested = mode === 'EXCLUSIVE'
+        ? [{ path, mode: 'WRITE' as const, purpose: 'generated model edit layer' }, { path, mode, purpose: 'generated model check', exclusive_operation: exclusiveOperation(`model-${group.acquisition_group_id}`) }]
+        : [{ path, mode, purpose: 'generated model check', ...(mode === 'READ' ? { source_identity: { base_commit: 'a'.repeat(40), object_id: 'b'.repeat(40), object_kind: 'blob' as const } } : {}) }];
+      return {
       ...group,
-      requested_leases: [{
-        path: group.acquisition_group_id === 'group-a' || overlap ? 'src/shared.ts' : 'src/independent.ts',
-        mode: group.acquisition_group_id === 'group-a' ? leftMode : rightMode,
-        purpose: 'generated model check',
-        ...((group.acquisition_group_id === 'group-a' ? leftMode : rightMode) === 'READ' ? { source_identity: { base_commit: 'a'.repeat(40), object_id: 'b'.repeat(40), object_kind: 'blob' as const } } : {}),
-      }],
+      requested_leases: requested,
       state: 'waiting',
       grant_event_seq: null,
       version: 1,
-    })),
+    };
+    }),
     edit_leases: [],
     claim_requests: [],
     wait_for_edges: [],

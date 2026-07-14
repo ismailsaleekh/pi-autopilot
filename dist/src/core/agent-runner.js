@@ -186,7 +186,7 @@ async function runAutopilotAgentFromSpecPathInternal(specPath, options, lifecycl
         });
     }
     try {
-        lifecycle.handle = await registerAutopilotChildAuthority(spec, runtimePreflight.attemptSpec, env);
+        lifecycle.handle = await registerAutopilotChildAuthority(spec, runtimePreflight.attemptSpec, env, runtimePreflight.authority.exclusives[0]?.critical_section ?? null);
     }
     catch (error) {
         throw new AutopilotAgentRunError('spec-invalid', {
@@ -632,7 +632,7 @@ async function acquireCoordinatorClaimsForUnit(input) {
     for (const edit of input.authority.edit_intentions)
         requested.set(`WRITE\0${edit.path}`, { path: edit.path, mode: 'WRITE', purpose: edit.purpose });
     for (const exclusive of input.authority.exclusives)
-        requested.set(`EXCLUSIVE\0${exclusive.path}`, { path: exclusive.path, mode: 'EXCLUSIVE', purpose: `${exclusive.purpose}; critical-section=${exclusive.critical_section}` });
+        requested.set(`EXCLUSIVE\0${exclusive.path}`, { path: exclusive.path, mode: 'EXCLUSIVE', purpose: exclusive.purpose, exclusive_operation: exclusive.operation });
     if (requested.size === 0)
         return { claims: [], group: null };
     const reservationView = await (await ReservationCoordinationClient.fromEnvironment(input.env)).view();
@@ -658,7 +658,7 @@ async function acquireCoordinatorClaimsForUnit(input) {
         specRef: relativeSpec,
         specSha256,
         role: input.spec.role,
-        preemptible: true,
+        preemptible: input.authority.exclusives.length === 0,
         checkpointOrdinal: 0,
     });
     if (result.outcome === 'waiting-for-peer-release')

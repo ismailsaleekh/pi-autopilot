@@ -1,9 +1,12 @@
 export const AUTOPILOT_COORDINATION_SNAPSHOT_SCHEMA = 'autopilot.coordination_snapshot.v1';
-export const AUTOPILOT_COORDINATOR_PROTOCOL_VERSION = '1.4';
+export const AUTOPILOT_COORDINATOR_PROTOCOL_VERSION = '1.5';
 export const AUTOPILOT_COORDINATOR_REQUEST_SCHEMA = 'autopilot.coordinator_request.v1';
 export const AUTOPILOT_COORDINATOR_RESPONSE_SCHEMA = 'autopilot.coordinator_response.v1';
 export const AUTOPILOT_COORDINATION_PREFLIGHT_SCHEMA = 'autopilot.coordination_preflight.v1';
 export const COORDINATION_CLAIM_MODES = ['READ', 'WRITE', 'EXCLUSIVE'];
+export const COORDINATION_EXCLUSIVE_OPERATION_KINDS = ['canonical-authority-replacement', 'generated-authority-replacement', 'repository-schema-migration', 'target-branch-landing', 'worktree-metadata-transition', 'critical-git-operation', 'legacy-migration-exclusive'];
+export const COORDINATION_EXCLUSIVE_RESOURCE_SCOPES = ['exact-repository-path'];
+export const COORDINATION_EXCLUSIVE_RELEASE_TRIGGERS = ['critical-section-exit'];
 export const COORDINATION_RUN_STATUSES = ['active', 'paused', 'merging', 'blocked', 'recovering', 'closed', 'aborted'];
 export const COORDINATION_SESSION_STATUSES = ['attached', 'handoff-pending', 'detached', 'fenced', 'expired'];
 export const COORDINATION_SESSION_ATTACHMENT_KINDS = ['dispatch', 'terminal-recovery', 'migration-recovery'];

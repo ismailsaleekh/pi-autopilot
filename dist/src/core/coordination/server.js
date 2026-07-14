@@ -11,7 +11,7 @@ import { acquireSerializedProcessGuard, discardLockTombstone, quarantineExactLoc
 import { CoordinatorStore } from "./store.js";
 import { AUTOPILOT_COORDINATOR_PROTOCOL_VERSION } from "./types.js";
 import { readKnownCoordinatorUpgradeIntent, recordCoordinatorFenceHandoff } from "./upgrade.js";
-import { COORDINATOR_UPGRADE_PATH, parseCurrentCoordinatorLock, parseKnownCompatibleCurrentCoordinatorLock, parsePredecessorCoordinatorLock, parsePriorSchema9CurrentCoordinatorLock } from "./upgrade-contracts.js";
+import { COORDINATOR_UPGRADE_PATH, parseCurrentCoordinatorLock, parseKnownCompatibleCurrentCoordinatorLock, parsePredecessorCoordinatorLock, parsePriorSchema10CurrentCoordinatorLock, parsePriorSchema9CurrentCoordinatorLock } from "./upgrade-contracts.js";
 export class CoordinatorAlreadyRunningError extends Error {
     name = 'CoordinatorAlreadyRunningError';
 }
@@ -88,7 +88,7 @@ async function acquireCoordinatorLock(paths, adoption) {
             let current = null;
             try {
                 const parsed = JSON.parse(currentText);
-                current = parseKnownCompatibleCurrentCoordinatorLock(parsed) ?? parsePriorSchema9CurrentCoordinatorLock(parsed);
+                current = parseKnownCompatibleCurrentCoordinatorLock(parsed) ?? parsePriorSchema10CurrentCoordinatorLock(parsed) ?? parsePriorSchema9CurrentCoordinatorLock(parsed);
             }
             catch { /* fail below */ }
             if (current === null)

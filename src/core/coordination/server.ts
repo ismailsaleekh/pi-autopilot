@@ -12,7 +12,7 @@ import { acquireSerializedProcessGuard, discardLockTombstone, quarantineExactLoc
 import { CoordinatorStore, type StoreClock } from './store.ts';
 import { AUTOPILOT_COORDINATOR_PROTOCOL_VERSION, type CoordinatorResponseEnvelope } from './types.ts';
 import { readKnownCoordinatorUpgradeIntent, recordCoordinatorFenceHandoff } from './upgrade.ts';
-import { COORDINATOR_UPGRADE_PATH, parseCurrentCoordinatorLock, parseKnownCompatibleCurrentCoordinatorLock, parsePredecessorCoordinatorLock, parsePriorSchema9CurrentCoordinatorLock, type CurrentCoordinatorLock, type KnownCompatibleCurrentCoordinatorLock, type PredecessorCoordinatorLock } from './upgrade-contracts.ts';
+import { COORDINATOR_UPGRADE_PATH, parseCurrentCoordinatorLock, parseKnownCompatibleCurrentCoordinatorLock, parsePredecessorCoordinatorLock, parsePriorSchema10CurrentCoordinatorLock, parsePriorSchema9CurrentCoordinatorLock, type CurrentCoordinatorLock, type KnownCompatibleCurrentCoordinatorLock, type PredecessorCoordinatorLock } from './upgrade-contracts.ts';
 
 type LockRecord = CurrentCoordinatorLock;
 
@@ -95,10 +95,10 @@ async function acquireCoordinatorLock(paths: CoordinatorRuntimePaths, adoption?:
     if (startupIntent !== null && startupIntent.target.package_build !== COORDINATOR_UPGRADE_PATH.target.package_build && startupIntent.state !== 'committed') throw new CoordinationRuntimeError('recovery-required', `historical coordinator upgrade target ${startupIntent.target.package_build} is ${startupIntent.state}; startup cannot rewrite another build's intent`);
     const currentText = await readExactLockText(paths.lockPath);
     if (currentText !== null) {
-      let current: KnownCompatibleCurrentCoordinatorLock | ReturnType<typeof parsePriorSchema9CurrentCoordinatorLock> = null;
+      let current: KnownCompatibleCurrentCoordinatorLock | ReturnType<typeof parsePriorSchema10CurrentCoordinatorLock> | ReturnType<typeof parsePriorSchema9CurrentCoordinatorLock> = null;
       try {
         const parsed: unknown = JSON.parse(currentText) as unknown;
-        current = parseKnownCompatibleCurrentCoordinatorLock(parsed) ?? parsePriorSchema9CurrentCoordinatorLock(parsed);
+        current = parseKnownCompatibleCurrentCoordinatorLock(parsed) ?? parsePriorSchema10CurrentCoordinatorLock(parsed) ?? parsePriorSchema9CurrentCoordinatorLock(parsed);
       } catch { /* fail below */ }
       if (current === null) throw new CoordinationRuntimeError('protocol-mismatch', 'current-generation lifecycle lock belongs to an unknown build');
       // PID liveness always wins. Boot-id disagreement is never stale proof.

@@ -32,7 +32,7 @@ function assertCompleteGrantedAuthority(group, observations, editLeases) {
                 evidence.push(`READ ${requested.path}:observations=${String(matching.length)}:source=${requested.source_identity === undefined ? 'unbound' : 'bound'}`);
         }
         else {
-            const matching = editLeases.filter((lease) => lease.path === requested.path && lease.mode === requested.mode && lease.purpose === requested.purpose);
+            const matching = editLeases.filter((lease) => lease.path === requested.path && lease.mode === requested.mode && lease.purpose === requested.purpose && JSON.stringify(lease.exclusive_operation) === JSON.stringify(requested.exclusive_operation));
             if (matching.length !== 1)
                 evidence.push(`${requested.mode} ${requested.path}:leases=${String(matching.length)}`);
         }
@@ -205,7 +205,7 @@ export class ClaimNegotiationClient {
     }
 }
 function sameRequestedAuthority(left, right) {
-    const identity = (lease) => `${lease.mode}\0${lease.path}`;
+    const identity = (lease) => `${lease.mode}\0${lease.path}\0${lease.purpose}\0${JSON.stringify(lease.source_identity)}\0${JSON.stringify(lease.exclusive_operation)}`;
     const leftSet = [...new Set(left.map(identity))].sort();
     const rightSet = [...new Set(right.map(identity))].sort();
     return leftSet.length === rightSet.length && leftSet.every((value, index) => value === rightSet[index]);

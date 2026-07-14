@@ -14,7 +14,7 @@ import { classifyCoordinatorRuntimeIdentity } from "./runtime-compatibility.js";
 import { acquireSerializedProcessGuard, discardLockTombstone, quarantineExactLock, readExactLockText, restoreLockTombstone } from "./serialized-lock.js";
 import { coordinationErrorCode } from "./store.js";
 import { preparePredecessorCoordinatorUpgrade, resumeCoordinatorUpgrade } from "./upgrade.js";
-import { parseKnownCompatibleCurrentCoordinatorLock, parsePredecessorCoordinatorLock, parsePriorSchema9CurrentCoordinatorLock } from "./upgrade-contracts.js";
+import { parseKnownCompatibleCurrentCoordinatorLock, parsePredecessorCoordinatorLock, parsePriorSchema10CurrentCoordinatorLock, parsePriorSchema9CurrentCoordinatorLock } from "./upgrade-contracts.js";
 import { AUTOPILOT_COORDINATOR_PROTOCOL_VERSION } from "./types.js";
 const DEFAULT_REQUEST_TIMEOUT_MS = 5_000;
 const DEFAULT_STARTUP_TIMEOUT_MS = 10_000;
@@ -489,7 +489,7 @@ export class CoordinatorClient {
                         let current = null;
                         try {
                             const parsed = JSON.parse(currentText);
-                            current = parseKnownCompatibleCurrentCoordinatorLock(parsed) ?? parsePriorSchema9CurrentCoordinatorLock(parsed);
+                            current = parseKnownCompatibleCurrentCoordinatorLock(parsed) ?? parsePriorSchema10CurrentCoordinatorLock(parsed) ?? parsePriorSchema9CurrentCoordinatorLock(parsed);
                         }
                         catch { /* fail below */ }
                         if (current === null)
@@ -567,7 +567,7 @@ export class CoordinatorClient {
         if (compatibility.reason === 'protocol-mismatch')
             throw new CoordinationRuntimeError('protocol-mismatch', `coordinator handshake protocol is incompatible with ${AUTOPILOT_COORDINATOR_PROTOCOL_VERSION}`);
         if (compatibility.reason === 'unknown-build')
-            throw new CoordinationRuntimeError('protocol-mismatch', `coordinator package build ${compatibility.package_build ?? '<missing>'} is outside the closed protocol-1.4/schema-10 compatibility lineage`);
+            throw new CoordinationRuntimeError('protocol-mismatch', `coordinator package build ${compatibility.package_build ?? '<missing>'} is outside the closed protocol-1.5/schema-11 compatibility lineage`);
         throw new CoordinationRuntimeError('schema-mismatch', 'coordinator readiness response omitted a valid runtime identity');
     }
     #assertSuccess(response) {

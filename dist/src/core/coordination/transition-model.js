@@ -141,13 +141,21 @@ export function grantCoordinationAcquisitionGroup(snapshot, input) {
             observations.push({ schema_version: 'autopilot.observation.v1', observation_id: `${group.acquisition_group_id}:observation:${String(index + 1)}`, owner: group.owner, acquisition_group_id: group.acquisition_group_id, path: requested.path, purpose: requested.purpose, source_identity: requested.source_identity, execution_state: 'active', freshness: 'current', recorded_event_seq: event.sequence, released_event_seq: null, stale_event_seq: null, stale_by_reservation_id: null, stale_by_commit: null, version: 1 });
         }
         else
-            leases.push({ schema_version: 'autopilot.edit_lease.v1', edit_lease_id: `${group.acquisition_group_id}:lease:${String(index + 1)}`, owner: group.owner, acquisition_group_id: group.acquisition_group_id, path: requested.path, mode: requested.mode, purpose: requested.purpose, acquired_event_seq: event.sequence, normal_release_condition: input.normalReleaseCondition, version: 1 });
+            leases.push({ schema_version: 'autopilot.edit_lease.v1', edit_lease_id: `${group.acquisition_group_id}:lease:${String(index + 1)}`, owner: group.owner, acquisition_group_id: group.acquisition_group_id, path: requested.path, mode: requested.mode, purpose: requested.purpose, ...(requested.exclusive_operation === undefined ? {} : { exclusive_operation: requested.exclusive_operation }), acquired_event_seq: event.sequence, normal_release_condition: input.normalReleaseCondition, version: 1 });
     }
+    const exclusiveOperation = group.requested_leases.find((requested) => requested.mode === 'EXCLUSIVE')?.exclusive_operation;
     const grantedGroup = { ...group, state: 'granted', grant_event_seq: event.sequence, offer_expires_at: null, version: group.version + 1 };
     const next = {
         ...snapshot,
         repository_event_seq: event.sequence,
         acquisition_groups: snapshot.acquisition_groups.map((candidate) => candidate.acquisition_group_id === group.acquisition_group_id ? grantedGroup : candidate),
+        unit_attempts: snapshot.unit_attempts.map((attempt) => exclusiveOperation !== undefined
+            && attempt.owner.repo_id === group.owner.repo_id
+            && attempt.owner.workstream_run === group.owner.workstream_run
+            && attempt.owner.unit_id === group.owner.unit_id
+            && attempt.owner.attempt === group.owner.attempt
+            ? { ...attempt, critical_section: exclusiveOperation.critical_section, preemptible: false, version: attempt.version + 1 }
+            : attempt),
         observations: [...snapshot.observations, ...observations],
         edit_leases: [...snapshot.edit_leases, ...leases],
         events: [...snapshot.events, event.event],
@@ -168,6 +176,9 @@ export function releaseCoordinationLeaseAndNotify(snapshot, input) {
     const request = snapshot.claim_requests.find((candidate) => candidate.request_id === input.requestId && candidate.blocking_lease_ids.includes(input.editLeaseId));
     if (request === undefined)
         throw new CoordinationRuntimeError('invalid-request', `claim request ${input.requestId} does not reference the lease`);
+    const pairedExclusive = snapshot.edit_leases.find((candidate) => candidate.acquisition_group_id === lease.acquisition_group_id && candidate.path === lease.path && candidate.mode === 'EXCLUSIVE');
+    if (lease.mode === 'WRITE' && pairedExclusive !== undefined)
+        throw new CoordinationRuntimeError('invalid-state', 'modeled critical-section exit cannot drop WRITE while paired EXCLUSIVE authority remains', [lease.edit_lease_id, pairedExclusive.edit_lease_id]);
     const event = nextEvent(snapshot, input, 'lease-released-and-requester-notified', 'claim-request', request.request_id);
     const notification = {
         schema_version: 'autopilot.coordination_message.v1',
@@ -189,6 +200,13 @@ export function releaseCoordinationLeaseAndNotify(snapshot, input) {
         repository_event_seq: event.sequence,
         edit_leases: snapshot.edit_leases.filter((candidate) => candidate.edit_lease_id !== lease.edit_lease_id),
         acquisition_groups: snapshot.acquisition_groups.map((group) => group.acquisition_group_id === lease.acquisition_group_id && remainingGroupLeases.length === 0 ? { ...group, state: 'released', version: group.version + 1 } : group),
+        unit_attempts: snapshot.unit_attempts.map((attempt) => lease.mode === 'EXCLUSIVE'
+            && attempt.owner.repo_id === lease.owner.repo_id
+            && attempt.owner.workstream_run === lease.owner.workstream_run
+            && attempt.owner.unit_id === lease.owner.unit_id
+            && attempt.owner.attempt === lease.owner.attempt
+            ? { ...attempt, critical_section: null, preemptible: true, version: attempt.version + 1 }
+            : attempt),
         claim_requests: snapshot.claim_requests.map((candidate) => candidate.request_id === request.request_id ? { ...candidate, status: 'released', release_event_seq: event.sequence, version: candidate.version + 1 } : candidate),
         messages: [...snapshot.messages, notification],
         events: [...snapshot.events, event.event],

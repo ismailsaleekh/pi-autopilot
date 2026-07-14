@@ -1,5 +1,5 @@
 import { AUTOPILOT_CHILD_TERMINAL_ACCEPTANCE_SCHEMA } from "./terminal-acceptance.js";
-import { AUTOPILOT_COORDINATION_SNAPSHOT_SCHEMA, AUTOPILOT_COORDINATOR_PROTOCOL_VERSION, AUTOPILOT_COORDINATOR_REQUEST_SCHEMA, AUTOPILOT_COORDINATOR_RESPONSE_SCHEMA, COORDINATION_ACQUISITION_KINDS, COORDINATION_ACQUISITION_STATES, COORDINATION_CHILD_STATUSES, COORDINATION_CLAIM_MODES, COORDINATION_MESSAGE_STATUSES, COORDINATION_INTEGRATION_CONFLICT_KINDS, COORDINATION_INTEGRATION_DISPOSITIONS, COORDINATION_MERGE_TREE_STATUSES, COORDINATION_OPERATIONAL_ESCALATION_REASONS, COORDINATION_OPERATION_STAGES, COORDINATION_OPERATION_TYPES, COORDINATION_OBSERVATION_EXECUTION_STATES, COORDINATION_OBSERVATION_FRESHNESS_STATES, COORDINATION_OBSERVATION_OBJECT_KINDS, COORDINATION_RELEASE_CONDITION_TYPES, COORDINATION_RECONCILIATION_SOURCES, COORDINATION_REQUEST_STATUSES, COORDINATION_RESERVATION_OBLIGATION_STATES, COORDINATION_MESSAGE_TYPES, COORDINATION_RUN_STATUSES, COORDINATION_SESSION_STATUSES, COORDINATION_SESSION_ATTACHMENT_KINDS, COORDINATION_MIGRATION_RECOVERY_RESOLUTIONS, COORDINATION_MIGRATION_RECOVERY_STATUSES, COORDINATION_MIGRATION_RECOVERY_TYPES, COORDINATION_UNIT_ROLES, COORDINATION_UNIT_STATES, COORDINATION_WORKTREE_KINDS, COORDINATION_WORKTREE_STATES, COORDINATION_WAIT_EDGE_STATES, COORDINATION_DEADLOCK_ACTIONS, COORDINATION_DEADLOCK_STATES, } from "./types.js";
+import { AUTOPILOT_COORDINATION_SNAPSHOT_SCHEMA, AUTOPILOT_COORDINATOR_PROTOCOL_VERSION, AUTOPILOT_COORDINATOR_REQUEST_SCHEMA, AUTOPILOT_COORDINATOR_RESPONSE_SCHEMA, COORDINATION_ACQUISITION_KINDS, COORDINATION_ACQUISITION_STATES, COORDINATION_CHILD_STATUSES, COORDINATION_CLAIM_MODES, COORDINATION_EXCLUSIVE_OPERATION_KINDS, COORDINATION_EXCLUSIVE_RELEASE_TRIGGERS, COORDINATION_EXCLUSIVE_RESOURCE_SCOPES, COORDINATION_MESSAGE_STATUSES, COORDINATION_INTEGRATION_CONFLICT_KINDS, COORDINATION_INTEGRATION_DISPOSITIONS, COORDINATION_MERGE_TREE_STATUSES, COORDINATION_OPERATIONAL_ESCALATION_REASONS, COORDINATION_OPERATION_STAGES, COORDINATION_OPERATION_TYPES, COORDINATION_OBSERVATION_EXECUTION_STATES, COORDINATION_OBSERVATION_FRESHNESS_STATES, COORDINATION_OBSERVATION_OBJECT_KINDS, COORDINATION_RELEASE_CONDITION_TYPES, COORDINATION_RECONCILIATION_SOURCES, COORDINATION_REQUEST_STATUSES, COORDINATION_RESERVATION_OBLIGATION_STATES, COORDINATION_MESSAGE_TYPES, COORDINATION_RUN_STATUSES, COORDINATION_SESSION_STATUSES, COORDINATION_SESSION_ATTACHMENT_KINDS, COORDINATION_MIGRATION_RECOVERY_RESOLUTIONS, COORDINATION_MIGRATION_RECOVERY_STATUSES, COORDINATION_MIGRATION_RECOVERY_TYPES, COORDINATION_UNIT_ROLES, COORDINATION_UNIT_STATES, COORDINATION_WORKTREE_KINDS, COORDINATION_WORKTREE_STATES, COORDINATION_WAIT_EDGE_STATES, COORDINATION_DEADLOCK_ACTIONS, COORDINATION_DEADLOCK_STATES, } from "./types.js";
 const boundedString = (maxLength = 512) => ({ type: 'string', minLength: 1, maxLength });
 const identifier = () => ({ type: 'string', minLength: 1, maxLength: 192, pattern: '^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,191}$' });
 const pathSegmentIdentifier = () => ({ type: 'string', minLength: 1, maxLength: 192, pattern: '^[A-Za-z0-9][A-Za-z0-9._:@-]{0,191}$' });
@@ -38,10 +38,24 @@ const observationSourceIdentity = () => ({
         object_kind: enumeration(COORDINATION_OBSERVATION_OBJECT_KINDS),
     },
 });
+const exclusiveOperation = () => ({
+    type: 'object', additionalProperties: false,
+    required: ['schema_version', 'operation_id', 'operation_kind', 'critical_section', 'resource_scope', 'expected_duration_ms', 'release_trigger'],
+    properties: {
+        schema_version: { const: 'autopilot.exclusive_operation.v1' }, operation_id: identifier(),
+        operation_kind: enumeration(COORDINATION_EXCLUSIVE_OPERATION_KINDS), critical_section: enumeration(COORDINATION_EXCLUSIVE_OPERATION_KINDS),
+        resource_scope: enumeration(COORDINATION_EXCLUSIVE_RESOURCE_SCOPES), expected_duration_ms: { type: 'integer', minimum: 1, maximum: 300000 },
+        release_trigger: enumeration(COORDINATION_EXCLUSIVE_RELEASE_TRIGGERS),
+    },
+});
 const requestedLease = () => ({
     type: 'object', additionalProperties: false, required: ['path', 'mode', 'purpose'], properties: {
-        path: boundedString(512), mode: enumeration(COORDINATION_CLAIM_MODES), purpose: boundedString(512), source_identity: observationSourceIdentity(),
+        path: boundedString(512), mode: enumeration(COORDINATION_CLAIM_MODES), purpose: boundedString(512), source_identity: observationSourceIdentity(), exclusive_operation: exclusiveOperation(),
     },
+    allOf: [
+        { if: { properties: { mode: { const: 'EXCLUSIVE' } }, required: ['mode'] }, then: { required: ['exclusive_operation'] }, else: { not: { required: ['exclusive_operation'] } } },
+        { if: { not: { properties: { mode: { const: 'READ' } }, required: ['mode'] } }, then: { not: { required: ['source_identity'] } } },
+    ],
 });
 const table = (items, maxItems = 10_000) => ({ type: 'array', maxItems, items });
 export const COORDINATION_REPOSITORY_SCHEMA = exactObject('autopilot.coordination_repository.v1', {
@@ -73,9 +87,12 @@ export const COORDINATION_OBSERVATION_SCHEMA = exactObject('autopilot.observatio
     execution_state: enumeration(COORDINATION_OBSERVATION_EXECUTION_STATES), freshness: enumeration(COORDINATION_OBSERVATION_FRESHNESS_STATES), recorded_event_seq: integer(1),
     released_event_seq: nullable(integer(1)), stale_event_seq: nullable(integer(1)), stale_by_reservation_id: nullable(identifier()), stale_by_commit: nullable(boundedString(64)), version: integer(1),
 });
-export const COORDINATION_EDIT_LEASE_SCHEMA = exactObject('autopilot.edit_lease.v1', {
-    edit_lease_id: identifier(), owner: owner(), acquisition_group_id: identifier(), path: boundedString(512), mode: enumeration(['WRITE', 'EXCLUSIVE']), purpose: boundedString(512), acquired_event_seq: integer(), normal_release_condition: condition(), version: integer(1),
-});
+export const COORDINATION_EDIT_LEASE_SCHEMA = {
+    ...exactObject('autopilot.edit_lease.v1', {
+        edit_lease_id: identifier(), owner: owner(), acquisition_group_id: identifier(), path: boundedString(512), mode: enumeration(['WRITE', 'EXCLUSIVE']), purpose: boundedString(512), exclusive_operation: exclusiveOperation(), acquired_event_seq: integer(), normal_release_condition: condition(), version: integer(1),
+    }, ['edit_lease_id', 'owner', 'acquisition_group_id', 'path', 'mode', 'purpose', 'acquired_event_seq', 'normal_release_condition', 'version']),
+    allOf: [{ if: { properties: { mode: { const: 'EXCLUSIVE' } }, required: ['mode'] }, then: { required: ['exclusive_operation'] }, else: { not: { required: ['exclusive_operation'] } } }],
+};
 export const COORDINATION_CHANGE_RESERVATION_SCHEMA = exactObject('autopilot.change_reservation.v1', {
     reservation_id: identifier(), repo_id: pathSegmentIdentifier(), autopilot_id: pathSegmentIdentifier(), workstream_run: pathSegmentIdentifier(), path: boundedString(512), merge_evidence: evidence(), created_event_seq: integer(), released_event_seq: nullable(integer()), terminal_outcome: nullable(enumeration(['closed', 'aborted'])), terminal_sha: nullable(boundedString(64)), version: integer(1),
 });

@@ -3,6 +3,7 @@ export * from "./client.js";
 export * from "./contracts.js";
 export * from "./deadlock.js";
 export * from "./escalation.js";
+export * from "./exclusive-policy.js";
 export * from "./failures.js";
 export * from "./ipc.js";
 export * from "./invariants.js";

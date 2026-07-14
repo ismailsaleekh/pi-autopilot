@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { isAbsolute, normalize } from 'node:path';
 
+import { COORDINATION_EXCLUSIVE_MAX_EXPECTED_DURATION_MS } from './exclusive-policy.ts';
 import {
   AUTOPILOT_COORDINATION_SNAPSHOT_SCHEMA,
   AUTOPILOT_COORDINATOR_PROTOCOL_VERSION,
@@ -9,6 +10,9 @@ import {
   COORDINATION_ACQUISITION_STATES,
   COORDINATION_CHILD_STATUSES,
   COORDINATION_CLAIM_MODES,
+  COORDINATION_EXCLUSIVE_OPERATION_KINDS,
+  COORDINATION_EXCLUSIVE_RELEASE_TRIGGERS,
+  COORDINATION_EXCLUSIVE_RESOURCE_SCOPES,
   COORDINATION_MESSAGE_STATUSES,
   COORDINATION_INTEGRATION_CONFLICT_KINDS,
   COORDINATION_INTEGRATION_DISPOSITIONS,
@@ -49,6 +53,7 @@ import {
   type CoordinationClaimRequest,
   type CoordinationEditLease,
   type CoordinationEscalation,
+  type CoordinationExclusiveOperation,
   type CoordinationEvent,
   type CoordinationEvidenceRef,
   type CoordinationMailboxCursor,
@@ -334,16 +339,40 @@ export function parseCoordinationObservationSourceIdentity(value: unknown, label
   return { base_commit: baseCommit, object_id: objectId, object_kind: oneOf(record, 'object_kind', COORDINATION_OBSERVATION_OBJECT_KINDS, label) };
 }
 
+export function parseCoordinationExclusiveOperation(value: unknown, label = 'CoordinationExclusiveOperation'): CoordinationExclusiveOperation {
+  const record = object(value, label, ['critical_section', 'expected_duration_ms', 'operation_id', 'operation_kind', 'release_trigger', 'resource_scope', 'schema_version']);
+  const operationKind = oneOf(record, 'operation_kind', COORDINATION_EXCLUSIVE_OPERATION_KINDS, label);
+  const criticalSection = oneOf(record, 'critical_section', COORDINATION_EXCLUSIVE_OPERATION_KINDS, label);
+  if (criticalSection !== operationKind) fail(label, 'critical_section must equal the closed operation_kind');
+  const expectedDuration = integer(record, 'expected_duration_ms', label, 1);
+  if (expectedDuration > COORDINATION_EXCLUSIVE_MAX_EXPECTED_DURATION_MS) fail(label, `expected_duration_ms must be <= ${String(COORDINATION_EXCLUSIVE_MAX_EXPECTED_DURATION_MS)}`);
+  return {
+    schema_version: literal(record, 'schema_version', 'autopilot.exclusive_operation.v1', label),
+    operation_id: identifier(record, 'operation_id', label),
+    operation_kind: operationKind,
+    critical_section: criticalSection,
+    resource_scope: oneOf(record, 'resource_scope', COORDINATION_EXCLUSIVE_RESOURCE_SCOPES, label),
+    expected_duration_ms: expectedDuration,
+    release_trigger: oneOf(record, 'release_trigger', COORDINATION_EXCLUSIVE_RELEASE_TRIGGERS, label),
+  };
+}
+
 export function parseCoordinationRequestedLease(value: unknown, label = 'CoordinationRequestedLease'): CoordinationRequestedLease {
-  const record = object(value, label, ['mode', 'path', 'purpose'], ['source_identity']);
+  const record = object(value, label, ['mode', 'path', 'purpose'], ['exclusive_operation', 'source_identity']);
   const mode = oneOf(record, 'mode', COORDINATION_CLAIM_MODES, label);
   const sourceIdentity = record['source_identity'] === undefined ? undefined : parseCoordinationObservationSourceIdentity(record['source_identity'], `${label}.source_identity`);
+  const exclusiveOperation = record['exclusive_operation'] === undefined ? undefined : parseCoordinationExclusiveOperation(record['exclusive_operation'], `${label}.exclusive_operation`);
   if (mode !== 'READ' && sourceIdentity !== undefined) fail(label, 'WRITE/EXCLUSIVE edit intent must not carry observation source identity');
+  if (mode === 'EXCLUSIVE' && exclusiveOperation === undefined) fail(label, 'EXCLUSIVE authority requires a closed critical-operation contract');
+  if (mode !== 'EXCLUSIVE' && exclusiveOperation !== undefined) fail(label, 'only EXCLUSIVE authority may carry a critical-operation contract');
+  const path = repoPath(record, 'path', label);
+  if (mode === 'EXCLUSIVE' && exclusiveOperation?.operation_kind !== 'legacy-migration-exclusive' && (path.endsWith('/**') || path.endsWith('/'))) fail(label, 'new EXCLUSIVE authority requires one exact repository path');
   return {
-    path: repoPath(record, 'path', label),
+    path,
     mode,
     purpose: string(record, 'purpose', label, 512),
     ...(sourceIdentity === undefined ? {} : { source_identity: sourceIdentity }),
+    ...(exclusiveOperation === undefined ? {} : { exclusive_operation: exclusiveOperation }),
   };
 }
 
@@ -355,8 +384,29 @@ function assertRequestedLeaseSet(leases: readonly CoordinationRequestedLease[], 
     if (left === undefined) continue;
     for (let rightIndex = leftIndex + 1; rightIndex < leases.length; rightIndex += 1) {
       const right = leases[rightIndex];
-      if (right !== undefined && coordinationPathsOverlap(left.path, right.path) && claimModesConflict(left.mode, right.mode)) fail(label, `requested_leases contain internally incompatible authority: ${left.mode} ${left.path} and ${right.mode} ${right.path}`);
+      if (right !== undefined && coordinationPathsOverlap(left.path, right.path) && claimModesConflict(left.mode, right.mode) && !isLayeredWriteExclusivePair(left, right)) fail(label, `requested_leases contain internally incompatible authority: ${left.mode} ${left.path} and ${right.mode} ${right.path}`);
     }
+  }
+}
+
+function isLayeredWriteExclusivePair(left: CoordinationRequestedLease, right: CoordinationRequestedLease): boolean {
+  return left.path === right.path && ((left.mode === 'WRITE' && right.mode === 'EXCLUSIVE') || (left.mode === 'EXCLUSIVE' && right.mode === 'WRITE'));
+}
+
+function assertExclusiveGroupPolicy(group: Pick<CoordinationAcquisitionGroup, 'acquisition_kind' | 'normal_release_condition' | 'requested_leases'>, label: string): void {
+  const exclusives = group.requested_leases.filter((lease) => lease.mode === 'EXCLUSIVE');
+  if (group.acquisition_kind !== 'legacy-unknown' && exclusives.length > 1) fail(label, 'one new acquisition group may contain at most one EXCLUSIVE critical operation');
+  if (group.acquisition_kind === 'materialization-read-expansion' && exclusives.length > 0) fail(label, 'materialization expansion cannot acquire EXCLUSIVE authority');
+  for (const exclusive of exclusives) {
+    const operation = exclusive.exclusive_operation;
+    if (operation === undefined) fail(label, 'EXCLUSIVE authority lacks its critical-operation contract');
+    if (group.acquisition_kind === 'legacy-unknown') {
+      if (operation.operation_kind !== 'legacy-migration-exclusive') fail(label, 'legacy acquisition may retain only explicitly classified migration EXCLUSIVE authority');
+      continue;
+    }
+    if (operation.operation_kind === 'legacy-migration-exclusive') fail(label, 'new acquisition cannot create legacy EXCLUSIVE authority');
+    if (!group.requested_leases.some((lease) => lease.mode === 'WRITE' && lease.path === exclusive.path)) fail(label, 'EXCLUSIVE authority must layer over an exact WRITE intention');
+    if (group.normal_release_condition.condition_type !== 'unit-merged') fail(label, 'source EXCLUSIVE authority requires exact unit-merge/reset/quarantine lifecycle ownership');
   }
 }
 
@@ -508,14 +558,17 @@ export function parseCoordinationAcquisitionGroup(value: unknown): CoordinationA
   const requested = array(record['requested_leases'], `${label}.requested_leases`, 1024).map((entry, index) => parseCoordinationRequestedLease(entry, `${label}.requested_leases[${String(index)}]`));
   if (requested.length === 0) fail(label, 'requested_leases must not be empty');
   assertRequestedLeaseSet(requested, label);
+  const acquisitionKind = oneOf(record, 'acquisition_kind', ['initial', 'materialization-read-expansion', 'legacy-unknown'] as const, label);
+  const normalReleaseCondition = parseCoordinationReleaseCondition(record['normal_release_condition'], `${label}.normal_release_condition`);
+  assertExclusiveGroupPolicy({ acquisition_kind: acquisitionKind, normal_release_condition: normalReleaseCondition, requested_leases: requested }, label);
   return {
     schema_version: literal(record, 'schema_version', 'autopilot.acquisition_group.v2', label),
     acquisition_group_id: identifier(record, 'acquisition_group_id', label),
     owner: parseCoordinationOwnerIdentity(record['owner'], `${label}.owner`),
-    acquisition_kind: oneOf(record, 'acquisition_kind', ['initial', 'materialization-read-expansion', 'legacy-unknown'] as const, label),
+    acquisition_kind: acquisitionKind,
     requested_leases: requested,
     reason: string(record, 'reason', label, 1024),
-    normal_release_condition: parseCoordinationReleaseCondition(record['normal_release_condition'], `${label}.normal_release_condition`),
+    normal_release_condition: normalReleaseCondition,
     state: oneOf(record, 'state', COORDINATION_ACQUISITION_STATES, label),
     created_event_seq: integer(record, 'created_event_seq', label),
     fairness_event_seq: integer(record, 'fairness_event_seq', label),
@@ -560,15 +613,22 @@ export function parseCoordinationObservation(value: unknown): CoordinationObserv
 
 export function parseCoordinationEditLease(value: unknown): CoordinationEditLease {
   const label = 'CoordinationEditLease';
-  const record = object(value, label, ['acquired_event_seq', 'acquisition_group_id', 'edit_lease_id', 'mode', 'normal_release_condition', 'owner', 'path', 'purpose', 'schema_version', 'version']);
+  const record = object(value, label, ['acquired_event_seq', 'acquisition_group_id', 'edit_lease_id', 'mode', 'normal_release_condition', 'owner', 'path', 'purpose', 'schema_version', 'version'], ['exclusive_operation']);
+  const mode = oneOf(record, 'mode', ['WRITE', 'EXCLUSIVE'] as const, label);
+  const exclusiveOperation = record['exclusive_operation'] === undefined ? undefined : parseCoordinationExclusiveOperation(record['exclusive_operation'], `${label}.exclusive_operation`);
+  if (mode === 'EXCLUSIVE' && exclusiveOperation === undefined) fail(label, 'EXCLUSIVE lease requires its closed critical-operation contract');
+  if (mode !== 'EXCLUSIVE' && exclusiveOperation !== undefined) fail(label, 'WRITE lease cannot carry an EXCLUSIVE critical-operation contract');
+  const path = repoPath(record, 'path', label);
+  if (mode === 'EXCLUSIVE' && exclusiveOperation?.operation_kind !== 'legacy-migration-exclusive' && (path.endsWith('/**') || path.endsWith('/'))) fail(label, 'new EXCLUSIVE lease requires one exact repository path');
   return {
     schema_version: literal(record, 'schema_version', 'autopilot.edit_lease.v1', label),
     edit_lease_id: identifier(record, 'edit_lease_id', label),
     owner: parseCoordinationOwnerIdentity(record['owner'], `${label}.owner`),
     acquisition_group_id: identifier(record, 'acquisition_group_id', label),
-    path: repoPath(record, 'path', label),
-    mode: oneOf(record, 'mode', ['WRITE', 'EXCLUSIVE'] as const, label),
+    path,
+    mode,
     purpose: string(record, 'purpose', label, 512),
+    ...(exclusiveOperation === undefined ? {} : { exclusive_operation: exclusiveOperation }),
     acquired_event_seq: integer(record, 'acquired_event_seq', label),
     normal_release_condition: parseCoordinationReleaseCondition(record['normal_release_condition'], `${label}.normal_release_condition`),
     version: integer(record, 'version', label, 1),

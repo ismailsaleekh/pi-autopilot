@@ -399,7 +399,7 @@ async function runAutopilotAgentFromSpecPathInternal(
   }
 
   try {
-    lifecycle.handle = await registerAutopilotChildAuthority(spec, runtimePreflight.attemptSpec, env);
+    lifecycle.handle = await registerAutopilotChildAuthority(spec, runtimePreflight.attemptSpec, env, runtimePreflight.authority.exclusives[0]?.critical_section ?? null);
   } catch (error) {
     throw new AutopilotAgentRunError('spec-invalid', {
       reason: `coordinator child authority preflight failed before model spend: ${errorMessage(error)}`,
@@ -890,10 +890,10 @@ async function acquireCoordinatorClaimsForUnit(input: {
   if (relativeSpec.length === 0 || relativeSpec.startsWith('../') || relativeSpec.startsWith('/')) throw new AutopilotAgentRunError('spec-invalid', { reason: 'coordinator-backed unit spec must be inside the durable run main worktree', specPath: input.specPath });
   const specBytes = await readFile(input.specPath);
   const specSha256 = `sha256:${createHash('sha256').update(specBytes).digest('hex')}` as const;
-  const requested = new Map<string, { readonly path: string; readonly mode: 'READ' | 'WRITE' | 'EXCLUSIVE'; readonly purpose: string; readonly source_identity?: AutopilotAuthorityArtifact['observations'][number]['source_identity'] }>();
+  const requested = new Map<string, { readonly path: string; readonly mode: 'READ' | 'WRITE' | 'EXCLUSIVE'; readonly purpose: string; readonly source_identity?: AutopilotAuthorityArtifact['observations'][number]['source_identity']; readonly exclusive_operation?: AutopilotAuthorityArtifact['exclusives'][number]['operation'] }>();
   for (const observation of input.authority.observations) requested.set(`READ\0${observation.path}`, { path: observation.path, mode: 'READ', purpose: observation.purpose, source_identity: observation.source_identity });
   for (const edit of input.authority.edit_intentions) requested.set(`WRITE\0${edit.path}`, { path: edit.path, mode: 'WRITE', purpose: edit.purpose });
-  for (const exclusive of input.authority.exclusives) requested.set(`EXCLUSIVE\0${exclusive.path}`, { path: exclusive.path, mode: 'EXCLUSIVE', purpose: `${exclusive.purpose}; critical-section=${exclusive.critical_section}` });
+  for (const exclusive of input.authority.exclusives) requested.set(`EXCLUSIVE\0${exclusive.path}`, { path: exclusive.path, mode: 'EXCLUSIVE', purpose: exclusive.purpose, exclusive_operation: exclusive.operation });
   if (requested.size === 0) return { claims: [], group: null };
   const reservationView = await (await ReservationCoordinationClient.fromEnvironment(input.env)).view();
   const reservationBlockers = reservationSchedulingBlockers({ workstreamRun: input.context.active.workstream_run, requestedPaths: [...requested.values()].filter((entry) => entry.mode !== 'READ').map((entry) => entry.path), view: reservationView });
@@ -917,7 +917,7 @@ async function acquireCoordinatorClaimsForUnit(input: {
     specRef: relativeSpec,
     specSha256,
     role: input.spec.role,
-    preemptible: true,
+    preemptible: input.authority.exclusives.length === 0,
     checkpointOrdinal: 0,
   });
   if (result.outcome === 'waiting-for-peer-release') throw new AutopilotAgentRunError('waiting-for-peer-release', {

@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 
 import { CoordinatorClient } from '../../src/core/coordination/client.ts';
+import { coordinationExclusiveOperation } from '../../src/core/coordination/exclusive-policy.ts';
 import {
   parseCoordinationAcquisitionGroup,
   parseCoordinationClaimRequest,
@@ -44,13 +45,16 @@ function acquisitionInput(suffix: string, groupId: string, path: string, attempt
     unitId: `unit-${suffix}`,
     attempt,
     acquisitionKind: 'initial' as const,
-    requestedLeases: [{ path, mode: 'EXCLUSIVE' as const, purpose: `seeded critical-section trace ${suffix}` }],
+    requestedLeases: [
+      { path, mode: 'WRITE' as const, purpose: `seeded edit attribution ${suffix}` },
+      { path, mode: 'EXCLUSIVE' as const, purpose: `seeded critical-section trace ${suffix}`, exclusive_operation: coordinationExclusiveOperation({ operationId: `release-trace-${suffix}-${groupId}`, operationKind: 'critical-git-operation', expectedDurationMs: 30_000 }) },
+    ],
     reason: `seeded release trace ${suffix} contests ${path}`,
     normalReleaseCondition: { condition_type: 'unit-merged' as const, target_id: `unit-${suffix}:${String(attempt)}`, evidence: null },
     specRef: `.pi/autopilot/workstream-${suffix}/unit-specs/unit-${suffix}.json`,
     specSha256: `sha256:${token('spec', suffix)}` as `sha256:${string}`,
     role: 'implement' as const,
-    preemptible: true,
+    preemptible: false,
     checkpointOrdinal: 0,
   };
 }

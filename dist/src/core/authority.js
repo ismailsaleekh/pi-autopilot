@@ -5,6 +5,8 @@ import { link, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { normalizeMaterializationPath, pathMatchesMaterializationPattern, scanTrackedTree, trackedEntriesForMaterializationPath, } from "./checkout-profile.js";
 import { AUTOPILOT_RUNTIME_ROOT_PREFIX } from "./names.js";
+import { coordinationExclusiveOperation } from "./coordination/exclusive-policy.js";
+import { parseCoordinationExclusiveOperation } from "./coordination/contracts.js";
 import { deriveCoordinationObservationSourceIdentity } from "./coordination/observations.js";
 export const AUTOPILOT_AUTHORITY_SCHEMA = 'autopilot.authority.v1';
 export const AUTOPILOT_AUTHORITY_PATH_LIMIT = 512;
@@ -30,11 +32,11 @@ function fail(code, message, evidence = []) {
  */
 export function authorityCandidatesForSpec(spec, runtimeExclusives = []) {
     const candidates = [];
-    const add = (path, source, purpose, criticalSection = null) => {
+    const add = (path, source, purpose, exclusiveOperation = null) => {
         const normalized = normalizeMaterializationPath(path, `${source} authority`);
         if (isRuntimeRepoPath(normalized, spec.workstream))
             return;
-        candidates.push({ path: normalized, source, purpose, criticalSection });
+        candidates.push({ path: normalized, source, purpose, exclusiveOperation });
     };
     for (const path of spec.owned_paths)
         add(path, 'owned-path', `edit intention for ${spec.unit_id}`);
@@ -47,7 +49,7 @@ export function authorityCandidatesForSpec(spec, runtimeExclusives = []) {
             add(witness.inspection_target, 'verification-inspection-target', `verification observation for ${spec.unit_id}: ${witness.id}`);
     }
     for (const exclusive of runtimeExclusives)
-        add(exclusive.path, 'runtime-exclusive', exclusive.purpose, exclusive.criticalSection);
+        add(exclusive.path, 'runtime-exclusive', exclusive.purpose, coordinationExclusiveOperation({ operationId: exclusive.operationId, operationKind: exclusive.operationKind, expectedDurationMs: exclusive.expectedDurationMs }));
     return Object.freeze(candidates);
 }
 /**
@@ -61,6 +63,11 @@ export async function deriveAutopilotAuthority(input) {
     if (scan.head_sha.length < 40 || scan.head_sha.length > 64 || !/^[a-f0-9]+$/u.test(scan.head_sha))
         fail('invalid-base-commit', 'authority derivation requires a full lowercase Git commit id', [scan.head_sha]);
     const candidates = authorityCandidatesForSpec(input.spec, input.runtimeExclusives ?? []);
+    const runtimeExclusiveCount = candidates.filter((candidate) => candidate.source === 'runtime-exclusive').length;
+    if (runtimeExclusiveCount > 1)
+        fail('exclusive-operation-cap', 'one unit attempt may enter at most one bounded EXCLUSIVE critical operation', [`count=${String(runtimeExclusiveCount)}`]);
+    if (runtimeExclusiveCount > 0 && input.spec.role !== 'implement' && input.spec.role !== 'fix')
+        fail('exclusive-role-forbidden', 'only source-changing package runtime attempts may receive EXCLUSIVE authority', [input.spec.role]);
     const maxPaths = input.limits?.maxPaths ?? AUTOPILOT_AUTHORITY_PATH_LIMIT;
     const candidatePathCount = new Set(candidates.map((candidate) => candidate.path)).size;
     if (candidatePathCount > maxPaths)
@@ -78,11 +85,12 @@ export async function deriveAutopilotAuthority(input) {
         else if (!ownedPaths.some((authorityPath) => authorityCoversPath(authorityPath, candidate.path)) && !exclusivePaths.some((authorityPath) => pathsOverlap(authorityPath, candidate.path)))
             append(observationsByPath, candidate.path, candidate);
     }
-    // EXCLUSIVE is runtime-declared critical authority and replaces an ordinary
-    // edit intention on the same/contained surface rather than duplicating it.
-    for (const [path] of editsByPath) {
-        if (exclusivePaths.some((exclusivePath) => pathsOverlap(exclusivePath, path)))
-            editsByPath.delete(path);
+    // EXCLUSIVE is a transient critical-operation layer over the same exact
+    // WRITE intention. Keeping WRITE preserves non-blocking edit attribution
+    // after the critical section exits and before merge/reset/quarantine.
+    for (const exclusivePath of exclusivePaths) {
+        if (!ownedPaths.includes(exclusivePath))
+            fail('exclusive-owned-path-required', 'EXCLUSIVE authority must layer over one exact declared owned path', [exclusivePath]);
     }
     const observations = [];
     for (const [path, grouped] of observationsByPath) {
@@ -115,18 +123,27 @@ export async function deriveAutopilotAuthority(input) {
     }
     const exclusives = [];
     for (const [path, grouped] of exclusivesByPath) {
+        if (path.endsWith('/**') || path.endsWith('/'))
+            fail('exclusive-scope-forbidden', 'EXCLUSIVE authority requires one exact tracked file, never a directory or subtree', [path]);
         const grounded = groundPath(scan, path, false, input.limits);
-        const criticalSections = sortedUnique(grouped.map((candidate) => candidate.criticalSection ?? ''));
-        if (criticalSections.length !== 1 || criticalSections[0] === undefined || !/^[A-Za-z0-9][A-Za-z0-9._:-]{2,95}$/u.test(criticalSections[0]))
-            fail('invalid-exclusive-critical-section', 'runtime EXCLUSIVE authority requires one bounded named critical section', [path, ...criticalSections]);
+        if (grounded.scope !== 'tracked-file' || grounded.trackedFileCount !== 1)
+            fail('exclusive-scope-forbidden', 'EXCLUSIVE authority requires one exact tracked file', [path, grounded.scope, `files=${String(grounded.trackedFileCount)}`]);
+        const operations = grouped.map((candidate) => candidate.exclusiveOperation).filter((operation) => operation !== null);
+        const operationBytes = sortedUnique(operations.map((operation) => JSON.stringify(operation)));
+        if (operations.length !== grouped.length || operationBytes.length !== 1 || operations[0] === undefined)
+            fail('invalid-exclusive-operation', 'runtime EXCLUSIVE authority requires one identical closed package operation contract', [path]);
+        const operation = operations[0];
+        if (operation.operation_kind === 'legacy-migration-exclusive')
+            fail('invalid-exclusive-operation', 'runtime authority cannot create a legacy migration EXCLUSIVE operation', [path]);
         exclusives.push({
             path,
             purpose: authorityPurpose(grouped, path),
             sources: Object.freeze(['runtime-exclusive']),
-            scope: requireTrackedScope(grounded.scope),
+            scope: 'tracked-file',
             tracked_file_count: grounded.trackedFileCount,
             tracked_byte_count: grounded.trackedByteCount,
-            critical_section: criticalSections[0],
+            operation,
+            critical_section: operation.operation_kind,
         });
     }
     if (observations.length + editIntentions.length + exclusives.length > maxPaths)
@@ -227,8 +244,14 @@ export function parseAutopilotAuthority(value) {
         fail('invalid-authority-artifact', 'authority artifact duplicates an observation beneath edit authority');
     if (artifact.observations.some((observation) => artifact.exclusives.some((exclusive) => pathsOverlap(observation.path, exclusive.path))))
         fail('invalid-authority-artifact', 'authority artifact overlaps observation and EXCLUSIVE authority');
-    if (artifact.edit_intentions.some((edit) => artifact.exclusives.some((exclusive) => pathsOverlap(edit.path, exclusive.path))))
-        fail('invalid-authority-artifact', 'authority artifact overlaps speculative edit and EXCLUSIVE authority');
+    if (artifact.exclusives.length > 1)
+        fail('invalid-authority-artifact', 'authority artifact may contain at most one EXCLUSIVE critical operation');
+    for (const exclusive of artifact.exclusives) {
+        if (!artifact.edit_intentions.some((edit) => edit.path === exclusive.path))
+            fail('invalid-authority-artifact', 'EXCLUSIVE authority must layer over an exact WRITE intention');
+        if (artifact.edit_intentions.some((edit) => edit.path !== exclusive.path && pathsOverlap(edit.path, exclusive.path)))
+            fail('invalid-authority-artifact', 'EXCLUSIVE authority cannot partially overlap a broader or narrower WRITE intention');
+    }
     return Object.freeze(artifact);
 }
 export function materializationRowsForAuthority(artifact) {
@@ -321,14 +344,26 @@ function parseEditIntent(value) {
 }
 function parseExclusive(value) {
     const row = record(value, 'exclusive authority');
-    exactKeys(row, ['critical_section', 'path', 'purpose', 'scope', 'sources', 'tracked_byte_count', 'tracked_file_count'], 'exclusive authority');
+    exactKeys(row, ['critical_section', 'operation', 'path', 'purpose', 'scope', 'sources', 'tracked_byte_count', 'tracked_file_count'], 'exclusive authority');
     const sources = stringArray(row, 'sources');
     if (sources.length !== 1 || sources[0] !== 'runtime-exclusive')
         fail('invalid-authority-artifact', 'exclusive source must be runtime-exclusive');
+    if (row['scope'] !== 'tracked-file' || integer(row, 'tracked_file_count', 0) !== 1)
+        fail('invalid-authority-artifact', 'exclusive authority must bind one exact tracked file');
+    let operation;
+    try {
+        operation = parseCoordinationExclusiveOperation(row['operation'], 'exclusive authority operation');
+    }
+    catch (error) {
+        fail('invalid-authority-artifact', error instanceof Error ? error.message : 'exclusive operation is invalid');
+    }
     const criticalSection = text(row, 'critical_section');
-    if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{2,95}$/u.test(criticalSection))
-        fail('invalid-authority-artifact', 'exclusive critical_section is invalid');
-    return { path: normalizeMaterializationPath(text(row, 'path')), purpose: boundedText(row, 'purpose', 512), sources: Object.freeze(['runtime-exclusive']), scope: trackedScope(row['scope'], 'exclusive authority'), tracked_file_count: integer(row, 'tracked_file_count', 0), tracked_byte_count: integer(row, 'tracked_byte_count', 0), critical_section: criticalSection };
+    if (operation.operation_kind === 'legacy-migration-exclusive' || criticalSection !== operation.critical_section)
+        fail('invalid-authority-artifact', 'exclusive critical_section differs from its closed runtime operation');
+    const path = normalizeMaterializationPath(text(row, 'path'));
+    if (path.endsWith('/**') || path.endsWith('/'))
+        fail('invalid-authority-artifact', 'exclusive path must be exact');
+    return { path, purpose: boundedText(row, 'purpose', 512), sources: Object.freeze(['runtime-exclusive']), scope: 'tracked-file', tracked_file_count: 1, tracked_byte_count: integer(row, 'tracked_byte_count', 0), operation, critical_section: operation.operation_kind };
 }
 function authorityScope(value, label) {
     if (value === 'tracked-file' || value === 'tracked-directory' || value === 'tracked-subtree' || value === 'future-owned-file' || value === 'future-owned-directory')

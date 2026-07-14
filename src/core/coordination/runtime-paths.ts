@@ -39,7 +39,7 @@ export function coordinatorRuntimePaths(env: ProcessEnvLike = process.env): Coor
   const coordinatorRoot = join(stateRoot, 'coordinator');
   const pipeHash = createHash('sha256').update(coordinatorRoot, 'utf8').digest('hex').slice(0, 24);
   // Retain the established lifecycle authority namespace across the explicit
-  // protocol-1.3/schema-9 to protocol-1.4/schema-10 migration. Sharing the path
+  // protocol-1.3/schema-9 through protocol-1.5/schema-11 migrations. Sharing the path
   // is intentional: an older live broker is detected and fenced rather than
   // allowing two protocol generations to open the shared database.
   const generation = 'protocol-1.3-schema-9';

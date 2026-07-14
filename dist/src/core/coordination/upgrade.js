@@ -253,7 +253,7 @@ async function verifyAndRecordBackup(target, expectedDigest) {
 }
 async function createVerifiedBackup(paths, upgradeId) {
     await ensurePrivateAuthorityDirectory(paths.backupsRoot);
-    const target = join(paths.backupsRoot, `coordinator.preflight.pre-upgrade-1.2-to-1.4.${upgradeId}.db`);
+    const target = join(paths.backupsRoot, `coordinator.preflight.pre-upgrade-1.2-to-1.5.${upgradeId}.db`);
     await unlink(target).catch((error) => { if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT'))
         throw error; });
     const source = new DatabaseSync(paths.databasePath, { timeout: 5_000 });
@@ -270,7 +270,7 @@ async function createVerifiedBackup(paths, upgradeId) {
     return await verifyAndRecordBackup(target);
 }
 function finalUpgradeBackupPath(paths, upgradeId) {
-    return join(paths.backupsRoot, `coordinator.final.pre-upgrade-1.2-to-1.4.${upgradeId}.db`);
+    return join(paths.backupsRoot, `coordinator.final.pre-upgrade-1.2-to-1.5.${upgradeId}.db`);
 }
 async function createVerifiedLockedBoundaryBackup(paths, upgradeId, database) {
     await ensurePrivateAuthorityDirectory(paths.backupsRoot);
@@ -325,8 +325,8 @@ async function verifyMigrationOnCopy(paths, record, upgradeId, retain = false) {
         if (store.integrity() !== 'ok')
             throw new CoordinationRuntimeError('store-corrupt', 'schema migration probe failed integrity');
         const status = store.status('global', null).payload;
-        if (status['package_build'] !== COORDINATOR_UPGRADE_PATH.target.package_build || status['protocol_version'] !== '1.4' || status['database_schema_version'] !== 10)
-            throw new CoordinationRuntimeError('schema-mismatch', 'schema migration probe did not reach the locked schema-10 target');
+        if (status['package_build'] !== COORDINATOR_UPGRADE_PATH.target.package_build || status['protocol_version'] !== '1.5' || status['database_schema_version'] !== 11)
+            throw new CoordinationRuntimeError('schema-mismatch', 'schema migration probe did not reach the locked schema-11 target');
     }
     finally {
         store?.close();
@@ -334,8 +334,8 @@ async function verifyMigrationOnCopy(paths, record, upgradeId, retain = false) {
     const checkpoint = new DatabaseSync(probePaths.databasePath, { timeout: 5_000 });
     try {
         checkpoint.exec('PRAGMA wal_checkpoint(TRUNCATE)');
-        if (checkpoint.prepare('PRAGMA integrity_check').get()?.['integrity_check'] !== 'ok' || checkpoint.prepare('PRAGMA user_version').get()?.['user_version'] !== 10)
-            throw new CoordinationRuntimeError('store-corrupt', 'private migrated target failed final schema-10 verification');
+        if (checkpoint.prepare('PRAGMA integrity_check').get()?.['integrity_check'] !== 'ok' || checkpoint.prepare('PRAGMA user_version').get()?.['user_version'] !== 11)
+            throw new CoordinationRuntimeError('store-corrupt', 'private migrated target failed final schema-11 verification');
     }
     finally {
         checkpoint.close();
@@ -491,7 +491,7 @@ function installedBarrierBackupDigest(database, upgradeId) {
     }
     const row = rows[0];
     const digest = row?.['backup_sha256'];
-    if (rows.length !== 1 || row?.['upgrade_id'] !== upgradeId || row['source_schema'] !== 6 || row['target_schema'] !== 10 || typeof digest !== 'string' || !/^sha256:[a-f0-9]{64}$/u.test(digest))
+    if (rows.length !== 1 || row?.['upgrade_id'] !== upgradeId || row['source_schema'] !== 6 || row['target_schema'] !== 11 || typeof digest !== 'string' || !/^sha256:[a-f0-9]{64}$/u.test(digest))
         throw new CoordinationRuntimeError('schema-mismatch', 'committed incompatible migration barrier identity does not match the durable upgrade', [upgradeId]);
     return digest;
 }
@@ -506,7 +506,7 @@ function commitIncompatibleMigrationBarrier(database, upgradeId, backupRecord) {
     if (version !== 6)
         throw new CoordinationRuntimeError('schema-mismatch', 'shared database is neither schema 6 nor the incompatible migration barrier');
     database.exec('CREATE TABLE coordinator_upgrade_barrier(upgrade_id TEXT PRIMARY KEY NOT NULL, source_schema INTEGER NOT NULL, target_schema INTEGER NOT NULL, backup_sha256 TEXT NOT NULL) STRICT');
-    database.prepare('INSERT INTO coordinator_upgrade_barrier(upgrade_id, source_schema, target_schema, backup_sha256) VALUES(?, 6, 10, ?)').run(upgradeId, backupRecord.sha256);
+    database.prepare('INSERT INTO coordinator_upgrade_barrier(upgrade_id, source_schema, target_schema, backup_sha256) VALUES(?, 6, 11, ?)').run(upgradeId, backupRecord.sha256);
     // Main-schema triggers are deliberately installed on every user table,
     // including the barrier record itself. SQLite invalidates statements prepared
     // by already-open aa3e377 connections when this schema change commits; their
@@ -522,14 +522,14 @@ function commitIncompatibleMigrationBarrier(database, upgradeId, backupRecord) {
 }
 async function publishMigratedPrivateDatabase(paths, backupRecord, upgradeId) {
     const current = databaseVersionAndIntegrity(paths.databasePath);
-    if (current.version === 10 && current.integrity === 'ok')
+    if (current.version === 11 && current.integrity === 'ok')
         return;
     if (current.version !== COORDINATOR_UPGRADE_BARRIER_SCHEMA_VERSION || current.integrity !== 'ok')
-        throw new CoordinationRuntimeError('schema-mismatch', 'schema-10 publication requires the exact incompatible migration barrier');
+        throw new CoordinationRuntimeError('schema-mismatch', 'schema-11 publication requires the exact incompatible migration barrier');
     const barrier = new DatabaseSync(paths.databasePath, { readOnly: true, timeout: 5_000 });
     try {
         if (installedBarrierBackupDigest(barrier, upgradeId) !== backupRecord.sha256)
-            throw new CoordinationRuntimeError('store-corrupt', 'schema-10 publication backup does not match the committed barrier digest');
+            throw new CoordinationRuntimeError('store-corrupt', 'schema-11 publication backup does not match the committed barrier digest');
     }
     finally {
         barrier.close();
@@ -541,8 +541,8 @@ async function publishMigratedPrivateDatabase(paths, backupRecord, upgradeId) {
     await enforcePrivateAuthorityPath(paths.databasePath, false);
     await fsyncDirectory(dirname(paths.databasePath));
     const published = databaseVersionAndIntegrity(paths.databasePath);
-    if (published.version !== 10 || published.integrity !== 'ok')
-        throw new CoordinationRuntimeError('store-corrupt', 'atomically published schema-10 database failed verification');
+    if (published.version !== 11 || published.integrity !== 'ok')
+        throw new CoordinationRuntimeError('store-corrupt', 'atomically published schema-11 database failed verification');
 }
 async function commitLockedSchema6Boundary(paths, intentValue, database, options, onBarrierCommitted) {
     let intent = intentValue;
@@ -860,7 +860,7 @@ export async function resumeCoordinatorUpgrade(paths) {
             }
         }
         else if (observed.version !== 10) {
-            throw new CoordinationRuntimeError('schema-mismatch', 'upgrade recovery found neither schema 6, the durable incompatibility barrier, nor schema 10');
+            throw new CoordinationRuntimeError('schema-mismatch', 'upgrade recovery found neither schema 6, the durable incompatibility barrier, nor schema 11');
         }
         if (intent.state === 'barrier-installed' || observed.version === COORDINATOR_UPGRADE_BARRIER_SCHEMA_VERSION) {
             const finalBackup = intent.backup;

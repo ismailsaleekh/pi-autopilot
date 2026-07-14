@@ -155,9 +155,9 @@ export function checkCoordinationInvariants(snapshot) {
         if (group.state !== 'grant-ready' && group.offer_expires_at !== null)
             findings.push(finding('unexpected-grant-offer-expiry', group.acquisition_group_id, `${group.state} group retains an offer expiry`));
         if (group.state === 'granted') {
-            const requested = new Set(group.requested_leases.map((lease) => `${lease.mode}\0${lease.path}`));
-            const unexpected = leases.filter((lease) => !requested.has(`${lease.mode}\0${lease.path}`));
-            const unexpectedObservations = observations.filter((observation) => !requested.has(`READ\0${observation.path}`));
+            const requested = new Set(group.requested_leases.map((lease) => `${lease.mode}\0${lease.path}\0${lease.exclusive_operation === undefined ? '' : JSON.stringify(lease.exclusive_operation)}`));
+            const unexpected = leases.filter((lease) => !requested.has(`${lease.mode}\0${lease.path}\0${lease.exclusive_operation === undefined ? '' : JSON.stringify(lease.exclusive_operation)}`));
+            const unexpectedObservations = observations.filter((observation) => !group.requested_leases.some((lease) => lease.mode === 'READ' && lease.path === observation.path));
             if (unexpected.length > 0)
                 findings.push(finding('acquisition-group-unrequested-lease', group.acquisition_group_id, 'active edit lease set contains authority outside the requested set'));
             if (unexpectedObservations.length > 0)
@@ -166,9 +166,17 @@ export function checkCoordinationInvariants(snapshot) {
             if (leases.length + observations.length !== expectedActiveCount) {
                 const represented = new Set([...leases.map((lease) => `${lease.mode}\0${lease.path}`), ...observations.map((observation) => `READ\0${observation.path}`)]);
                 const missing = group.requested_leases.filter((requestedLease) => !represented.has(`${requestedLease.mode}\0${requestedLease.path}`));
+                const boundedCriticalSectionExited = missing.length > 0
+                    && missing.every((requestedLease) => requestedLease.mode === 'EXCLUSIVE'
+                        && requestedLease.exclusive_operation !== undefined
+                        && requestedLease.exclusive_operation.operation_kind !== 'legacy-migration-exclusive'
+                        && requestedLease.exclusive_operation.release_trigger === 'critical-section-exit'
+                        && leases.some((lease) => lease.mode === 'WRITE' && lease.path === requestedLease.path))
+                    && groupAttempt?.critical_section === null
+                    && groupAttempt.preemptible;
                 if (group.acquisition_kind === 'legacy-unknown' && missing.length > 0 && missing.every((requestedLease) => requestedLease.mode === 'READ'))
                     findings.push(finding('legacy-granted-group-read-revalidation-required', group.acquisition_group_id, 'historical unbound READ entries were audit-retired; the retained edit authority cannot dispatch until a new attempt revalidates observations', 'warning'));
-                else
+                else if (!boundedCriticalSectionExited)
                     findings.push(finding('granted-group-authority-incomplete', group.acquisition_group_id, `granted group has ${String(leases.length)} edit leases and ${String(observations.length)} durable observations for ${String(expectedActiveCount)} requested entries`));
             }
             if (group.grant_event_seq === null)
@@ -222,6 +230,15 @@ export function checkCoordinationInvariants(snapshot) {
         else {
             if (ownerKey(group.owner) !== ownerKey(lease.owner))
                 findings.push(finding('lease-group-owner-mismatch', lease.edit_lease_id, 'lease and acquisition group have different owners'));
+            const requested = group.requested_leases.find((entry) => entry.mode === lease.mode && entry.path === lease.path);
+            if (requested === undefined || JSON.stringify(requested.exclusive_operation) !== JSON.stringify(lease.exclusive_operation))
+                findings.push(finding('lease-operation-contract-mismatch', lease.edit_lease_id, 'lease does not preserve its immutable requested critical-operation contract'));
+            if (lease.mode === 'EXCLUSIVE' && group.acquisition_kind !== 'legacy-unknown') {
+                if (!snapshot.edit_leases.some((candidate) => candidate.acquisition_group_id === lease.acquisition_group_id && candidate.mode === 'WRITE' && candidate.path === lease.path && ownerKey(candidate.owner) === ownerKey(lease.owner)))
+                    findings.push(finding('exclusive-write-layer-missing', lease.edit_lease_id, 'new EXCLUSIVE authority requires a paired WRITE intention on the exact path'));
+                if (attempt === undefined || attempt.critical_section !== lease.exclusive_operation?.critical_section || attempt.preemptible)
+                    findings.push(finding('exclusive-critical-section-mismatch', lease.edit_lease_id, 'active EXCLUSIVE authority requires the exact non-preemptible attempt critical section'));
+            }
             if (group.acquisition_kind === 'legacy-unknown' && lease.normal_release_condition.condition_type === 'explicit-owner-release' && retainedMigrationRecoveryLeaseIds.has(lease.edit_lease_id) && !nonterminalChildOwners.has(ownerKey(lease.owner)))
                 findings.push(finding('retained-legacy-explicit-owner-lease', lease.edit_lease_id, 'resolved authority-retained import has no resumable child and awaits evidence-backed terminal reconciliation or authenticated owner response through autopilot_respond_claim_request', 'warning'));
         }
@@ -234,7 +251,8 @@ export function checkCoordinationInvariants(snapshot) {
             const right = snapshot.edit_leases[rightIndex];
             if (right === undefined || left.owner.repo_id !== right.owner.repo_id)
                 continue;
-            if (coordinationPathsOverlap(left.path, right.path) && claimModesConflict(left.mode, right.mode)) {
+            const layeredSameOwner = ownerKey(left.owner) === ownerKey(right.owner) && left.acquisition_group_id === right.acquisition_group_id && left.path === right.path && ((left.mode === 'WRITE' && right.mode === 'EXCLUSIVE') || (left.mode === 'EXCLUSIVE' && right.mode === 'WRITE'));
+            if (coordinationPathsOverlap(left.path, right.path) && claimModesConflict(left.mode, right.mode) && !layeredSameOwner) {
                 findings.push(finding('incompatible-active-edit-leases', `${left.edit_lease_id},${right.edit_lease_id}`, `${left.mode} ${left.path} overlaps ${right.mode} ${right.path}`));
             }
         }

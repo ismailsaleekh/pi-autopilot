@@ -69,7 +69,7 @@ function assertCompleteGrantedAuthority(group: CoordinationAcquisitionGroup, obs
       const matching = observations.filter((observation) => observation.path === requested.path && observation.purpose === requested.purpose && observation.execution_state === 'active' && observation.freshness === 'current' && requested.source_identity !== undefined && observation.source_identity.base_commit === requested.source_identity.base_commit && observation.source_identity.object_id === requested.source_identity.object_id && observation.source_identity.object_kind === requested.source_identity.object_kind);
       if (matching.length !== 1) evidence.push(`READ ${requested.path}:observations=${String(matching.length)}:source=${requested.source_identity === undefined ? 'unbound' : 'bound'}`);
     } else {
-      const matching = editLeases.filter((lease) => lease.path === requested.path && lease.mode === requested.mode && lease.purpose === requested.purpose);
+      const matching = editLeases.filter((lease) => lease.path === requested.path && lease.mode === requested.mode && lease.purpose === requested.purpose && JSON.stringify(lease.exclusive_operation) === JSON.stringify(requested.exclusive_operation));
       if (matching.length !== 1) evidence.push(`${requested.mode} ${requested.path}:leases=${String(matching.length)}`);
     }
   }
@@ -245,7 +245,7 @@ export class ClaimNegotiationClient {
 }
 
 function sameRequestedAuthority(left: readonly CoordinationRequestedLease[], right: readonly CoordinationRequestedLease[]): boolean {
-  const identity = (lease: CoordinationRequestedLease): string => `${lease.mode}\0${lease.path}`;
+  const identity = (lease: CoordinationRequestedLease): string => `${lease.mode}\0${lease.path}\0${lease.purpose}\0${JSON.stringify(lease.source_identity)}\0${JSON.stringify(lease.exclusive_operation)}`;
   const leftSet = [...new Set(left.map(identity))].sort();
   const rightSet = [...new Set(right.map(identity))].sort();
   return leftSet.length === rightSet.length && leftSet.every((value, index) => value === rightSet[index]);

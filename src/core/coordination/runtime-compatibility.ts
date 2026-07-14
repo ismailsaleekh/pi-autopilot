@@ -4,8 +4,8 @@ import { AUTOPILOT_COORDINATOR_PROTOCOL_VERSION } from './types.ts';
 export const CURRENT_COORDINATOR_LIFECYCLE_LOCK_SCHEMA = 'autopilot.coordinator_lock.v2' as const;
 
 /**
- * Closed, audited build lineage for the protocol-1.4/schema-10 observation/edit
- * contract. Entries are admitted only after the request/response contracts,
+ * Closed, audited build lineage for the protocol-1.5/schema-11 bounded
+ * EXCLUSIVE-operation contract. Entries are admitted only after the request/response contracts,
  * transport, mutation vocabulary, and persisted entity projections have been
  * compared byte-for-byte or behaviorally certified against the target.
  *
@@ -13,7 +13,7 @@ export const CURRENT_COORDINATOR_LIFECYCLE_LOCK_SCHEMA = 'autopilot.coordinator_
  * incompatible even when it claims the same protocol and database schema.
  */
 export const COORDINATOR_WIRE_COMPATIBILITY_MATRIX = Object.freeze([
-  Object.freeze({ package_build: '1.1.0-cf41', protocol_version: '1.4', database_schema_version: 10, lifecycle_lock_schema: CURRENT_COORDINATOR_LIFECYCLE_LOCK_SCHEMA }),
+  Object.freeze({ package_build: '1.1.0-cf42', protocol_version: '1.5', database_schema_version: 11, lifecycle_lock_schema: CURRENT_COORDINATOR_LIFECYCLE_LOCK_SCHEMA }),
 ] as const);
 
 export type KnownCoordinatorPackageBuild = (typeof COORDINATOR_WIRE_COMPATIBILITY_MATRIX)[number]['package_build'];

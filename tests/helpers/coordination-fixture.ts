@@ -1,6 +1,11 @@
-import type { CoordinationOwnerIdentity, CoordinationSnapshot } from '../../src/core/coordination/types.ts';
+import { coordinationExclusiveOperation } from '../../src/core/coordination/exclusive-policy.ts';
+import type { CoordinationExclusiveOperation, CoordinationOwnerIdentity, CoordinationSnapshot } from '../../src/core/coordination/types.ts';
 
 const digest = `sha256:${'a'.repeat(64)}` as const;
+
+export function exclusiveOperation(id: string): CoordinationExclusiveOperation {
+  return coordinationExclusiveOperation({ operationId: id, operationKind: 'canonical-authority-replacement', expectedDurationMs: 30_000 });
+}
 
 export function coordinationOwner(run: 'run-a' | 'run-b', unit: 'unit-a' | 'unit-b'): CoordinationOwnerIdentity {
   return {
@@ -37,15 +42,18 @@ export function validCoordinationSnapshot(): CoordinationSnapshot {
     ],
     child_leases: [{ schema_version: 'autopilot.child_lease.v1', child_lease_id: 'child-a', owner: ownerA, pid: 201, boot_id: 'boot-a', lease_expires_at: '2026-07-11T16:00:00.000Z', status: 'running', terminal_evidence: null, version: 1 }],
     unit_attempts: [
-      { schema_version: 'autopilot.unit_attempt.v1', owner: ownerA, state: 'running', role: 'implement', spec: { ref: 'unit-specs/unit-a.json', sha256: digest }, preemptible: false, checkpoint_ordinal: 0, critical_section: null, version: 1 },
+      { schema_version: 'autopilot.unit_attempt.v1', owner: ownerA, state: 'running', role: 'implement', spec: { ref: 'unit-specs/unit-a.json', sha256: digest }, preemptible: false, checkpoint_ordinal: 0, critical_section: 'canonical-authority-replacement', version: 1 },
       { schema_version: 'autopilot.unit_attempt.v1', owner: ownerB, state: 'queued', role: 'implement', spec: { ref: 'unit-specs/unit-b.json', sha256: digest }, preemptible: true, checkpoint_ordinal: 0, critical_section: null, version: 1 },
     ],
     acquisition_groups: [
-      { schema_version: 'autopilot.acquisition_group.v2', acquisition_group_id: 'group-a', owner: ownerA, acquisition_kind: 'initial', requested_leases: [{ path: 'src/shared.ts', mode: 'EXCLUSIVE', purpose: 'bounded shared-source critical section' }], reason: 'owner A initial acquisition', normal_release_condition: { condition_type: 'unit-merged', target_id: 'unit-a:1', evidence: null }, state: 'granted', created_event_seq: 2, fairness_event_seq: 2, grant_event_seq: 3, offer_expires_at: null, offer_count: 0, bypass_count: 0, version: 2 },
+      { schema_version: 'autopilot.acquisition_group.v2', acquisition_group_id: 'group-a', owner: ownerA, acquisition_kind: 'initial', requested_leases: [{ path: 'src/shared.ts', mode: 'WRITE', purpose: 'edit attribution after critical section' }, { path: 'src/shared.ts', mode: 'EXCLUSIVE', purpose: 'bounded shared-source critical section', exclusive_operation: exclusiveOperation('fixture-operation-a') }], reason: 'owner A initial acquisition', normal_release_condition: { condition_type: 'unit-merged', target_id: 'unit-a:1', evidence: null }, state: 'granted', created_event_seq: 2, fairness_event_seq: 2, grant_event_seq: 3, offer_expires_at: null, offer_count: 0, bypass_count: 0, version: 2 },
       { schema_version: 'autopilot.acquisition_group.v2', acquisition_group_id: 'group-b', owner: ownerB, acquisition_kind: 'initial', requested_leases: [{ path: 'src/shared.ts', mode: 'WRITE', purpose: 'implement peer change' }], reason: 'owner B initial acquisition', normal_release_condition: { condition_type: 'unit-merged', target_id: 'unit-b:1', evidence: null }, state: 'waiting', created_event_seq: 3, fairness_event_seq: 3, grant_event_seq: null, offer_expires_at: null, offer_count: 0, bypass_count: 0, version: 1 },
     ],
     observations: [],
-    edit_leases: [{ schema_version: 'autopilot.edit_lease.v1', edit_lease_id: 'lease-a', owner: ownerA, acquisition_group_id: 'group-a', path: 'src/shared.ts', mode: 'EXCLUSIVE', purpose: 'bounded shared-source critical section', acquired_event_seq: 3, normal_release_condition: { condition_type: 'unit-merged', target_id: 'unit-a:1', evidence: null }, version: 1 }],
+    edit_leases: [
+      { schema_version: 'autopilot.edit_lease.v1', edit_lease_id: 'lease-a-write', owner: ownerA, acquisition_group_id: 'group-a', path: 'src/shared.ts', mode: 'WRITE', purpose: 'edit attribution after critical section', acquired_event_seq: 3, normal_release_condition: { condition_type: 'unit-merged', target_id: 'unit-a:1', evidence: null }, version: 1 },
+      { schema_version: 'autopilot.edit_lease.v1', edit_lease_id: 'lease-a', owner: ownerA, acquisition_group_id: 'group-a', path: 'src/shared.ts', mode: 'EXCLUSIVE', purpose: 'bounded shared-source critical section', exclusive_operation: exclusiveOperation('fixture-operation-a'), acquired_event_seq: 3, normal_release_condition: { condition_type: 'unit-merged', target_id: 'unit-a:1', evidence: null }, version: 1 },
+    ],
     change_reservations: [],
     reservation_obligations: [],
     run_terminal_intents: [],

@@ -32,7 +32,7 @@ void describe('child authority terminal acknowledgement recovery', () => {
       throw new Error('simulated dropped completion response');
     } });
     Object.defineProperty(fakeClient, 'query', { value: async (): Promise<CoordinatorResponseEnvelope> => ({
-      schema_version: 'autopilot.coordinator_response.v1', protocol_version: '1.4', request_id: 'status-after-drop', ok: true, committed_event_seq: null, error_code: null, retryable: false,
+      schema_version: 'autopilot.coordinator_response.v1', protocol_version: '1.5', request_id: 'status-after-drop', ok: true, committed_event_seq: null, error_code: null, retryable: false,
       payload: { child_leases: [child('terminal')] },
     }) });
     const handle = new AutopilotChildLeaseHandle(fakeClient, session, child('running'), 'c'.repeat(64), process.pid, 'boot');

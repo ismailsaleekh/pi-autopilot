@@ -1,7 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
-import { mkdir, open, readFile, readdir, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
+import { mkdir, open, readFile, readdir, rename, rm, unlink, writeFile } from 'node:fs/promises';
 import { homedir, hostname, platform, uptime } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { authorityCandidatesForSpec, deriveAutopilotAuthority } from "./authority.js";
@@ -1549,8 +1549,8 @@ function assertBranchAvailable(repoRoot, branch) {
     if (result.status !== 1)
         fail('branch-check-failed', 'git show-ref failed while checking Autopilot branch availability.', [branch, result.stderr]);
 }
-export async function withAutopilotFileLock(lockPath, holderId, run) {
-    const handle = await acquireFileLock(lockPath, holderId);
+export async function withAutopilotFileLock(lockPath, holderId, run, options = {}) {
+    const handle = await acquireFileLock(lockPath, holderId, options.timeoutMs ?? DEFAULT_LOCK_TIMEOUT_MS);
     try {
         return await run();
     }
@@ -1559,6 +1559,8 @@ export async function withAutopilotFileLock(lockPath, holderId, run) {
     }
 }
 async function acquireFileLock(lockPath, holderId, timeoutMs = DEFAULT_LOCK_TIMEOUT_MS) {
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > DEFAULT_LOCK_TIMEOUT_MS)
+        fail('invalid-lock-timeout', 'Autopilot runtime lock timeout must be a positive bounded integer.', [String(timeoutMs)]);
     await ensurePrivateAuthorityDirectory(dirname(lockPath));
     const started = Date.now();
     let backoff = LOCK_BACKOFF_START_MS;
@@ -1566,12 +1568,14 @@ async function acquireFileLock(lockPath, holderId, timeoutMs = DEFAULT_LOCK_TIME
         let fileHandle = null;
         try {
             fileHandle = await open(lockPath, 'wx', 0o600);
+            const token = randomBytes(24).toString('hex');
             const content = {
                 schema_version: 'autopilot.lock.v1',
                 holder_id: holderId,
                 acquired_at: new Date().toISOString(),
                 pid: process.pid,
                 boot_id: getBootId(),
+                token,
             };
             await fileHandle.writeFile(`${JSON.stringify(content)}\n`, 'utf8');
             await fileHandle.sync();
@@ -1581,8 +1585,8 @@ async function acquireFileLock(lockPath, holderId, timeoutMs = DEFAULT_LOCK_TIME
             return {
                 release: async () => {
                     const value = await readJson(lockPath);
-                    if (!isRecord(value) || value['holder_id'] !== holderId) {
-                        fail('foreign-lock-release', 'refusing to release a lock owned by another holder.', [lockPath]);
+                    if (!isRecord(value) || value['holder_id'] !== holderId || value['token'] !== token) {
+                        fail('foreign-lock-release', 'refusing to release a lock whose exact holder capability changed.', [lockPath]);
                     }
                     await unlink(lockPath);
                 },
@@ -1593,7 +1597,7 @@ async function acquireFileLock(lockPath, holderId, timeoutMs = DEFAULT_LOCK_TIME
                 await fileHandle.close().catch(() => undefined);
             if (!isNodeError(error) || error.code !== 'EEXIST')
                 throw error;
-            await reclaimStaleLockIfEligible(lockPath, timeoutMs);
+            await reclaimStaleLockIfEligible(lockPath);
             if (Date.now() - started > timeoutMs) {
                 fail('lock-timeout', 'timed out acquiring Autopilot runtime lock.', [lockPath, holderId]);
             }
@@ -1602,11 +1606,10 @@ async function acquireFileLock(lockPath, holderId, timeoutMs = DEFAULT_LOCK_TIME
         }
     }
 }
-async function reclaimStaleLockIfEligible(lockPath, timeoutMs) {
+async function reclaimStaleLockIfEligible(lockPath) {
     let text;
-    let stats;
     try {
-        [text, stats] = await Promise.all([readFile(lockPath, 'utf8'), stat(lockPath)]);
+        text = await readFile(lockPath, 'utf8');
     }
     catch (error) {
         if (isNodeError(error) && error.code === 'ENOENT')
@@ -1618,8 +1621,8 @@ async function reclaimStaleLockIfEligible(lockPath, timeoutMs) {
         parsed = JSON.parse(text);
     }
     catch {
-        if (Date.now() - stats.mtimeMs > timeoutMs)
-            await unlink(lockPath).catch(() => undefined);
+        // Malformed ownership is ambiguous, never stale. Age is diagnostic only;
+        // silently unlinking here can enter a live critical section twice.
         return;
     }
     if (!isRecord(parsed))
@@ -1627,13 +1630,25 @@ async function reclaimStaleLockIfEligible(lockPath, timeoutMs) {
     const acquiredAtRaw = parsed['acquired_at'];
     const pidRaw = parsed['pid'];
     const bootIdRaw = parsed['boot_id'];
-    if (typeof acquiredAtRaw !== 'string' || typeof pidRaw !== 'number' || typeof bootIdRaw !== 'string')
+    if (parsed['schema_version'] !== 'autopilot.lock.v1' || typeof parsed['holder_id'] !== 'string' || typeof acquiredAtRaw !== 'string' || typeof pidRaw !== 'number' || !Number.isSafeInteger(pidRaw) || typeof bootIdRaw !== 'string')
         return;
     // Boot identity may be unstable on Windows or after a clock correction. A
     // runtime lock with a live PID is never reclaimed on boot mismatch alone.
     const stale = !isPidAlive(pidRaw);
     if (stale) {
-        await unlink(lockPath).catch(() => undefined);
+        // Re-read the exact identity immediately before removal. This prevents a
+        // contender that already replaced the dead lock from being unlinked by a
+        // stale observer; acquisition still uses O_EXCL as the authority boundary.
+        const current = await readFile(lockPath, 'utf8').catch((error) => {
+            if (isNodeError(error) && error.code === 'ENOENT')
+                return null;
+            throw error;
+        });
+        if (current === text)
+            await unlink(lockPath).catch((error) => {
+                if (!isNodeError(error) || error.code !== 'ENOENT')
+                    throw error;
+            });
         return;
     }
 }

@@ -1,6 +1,7 @@
 import { join } from 'node:path';
 
 import { CoordinatorClient } from '../../src/core/coordination/client.ts';
+import { coordinationExclusiveOperation } from '../../src/core/coordination/exclusive-policy.ts';
 import { parseCoordinationAcquisitionGroup, parseCoordinationClaimRequest, parseCoordinationRun, parseCoordinationSessionLease } from '../../src/core/coordination/contracts.ts';
 import { ClaimNegotiationClient } from '../../src/core/coordination/negotiation.ts';
 import { readCoordinatorSessionContext, writeCoordinatorSessionContext, type CoordinatorSessionContext } from '../../src/core/coordination/supervisor.ts';
@@ -22,14 +23,22 @@ function token(suffix: string): string {
 
 function acquisitionInput(suffix: string, groupId = `group-${suffix}`, path = 'src/shared.ts', speculativeWrite = false) {
   const expansion = groupId.endsWith('-wait');
+  const requestedLeases = expansion
+    ? [{ path, mode: 'READ' as const, purpose: `process ${suffix}` }]
+    : speculativeWrite
+      ? [{ path, mode: 'WRITE' as const, purpose: `process ${suffix}` }]
+      : [
+          { path, mode: 'WRITE' as const, purpose: `process ${suffix} edit attribution` },
+          { path, mode: 'EXCLUSIVE' as const, purpose: `process ${suffix} bounded critical section`, exclusive_operation: coordinationExclusiveOperation({ operationId: `process-${suffix}-${groupId}`, operationKind: 'canonical-authority-replacement', expectedDurationMs: 30_000 }) },
+        ];
   return {
     acquisitionGroupId: groupId, unitId: `unit-${suffix}`, attempt: 1, acquisitionKind: expansion ? 'materialization-read-expansion' as const : 'initial' as const,
-    requestedLeases: [{ path, mode: expansion ? 'READ' as const : speculativeWrite ? 'WRITE' as const : 'EXCLUSIVE' as const, purpose: `process ${suffix}` }],
+    requestedLeases,
     reason: `process ${suffix} requires shared source`,
     normalReleaseCondition: { condition_type: 'unit-merged' as const, target_id: `unit-${suffix}:1`, evidence: null },
     specRef: `.pi/autopilot/workstream-${suffix}/unit-specs/unit-${suffix}.json`,
     specSha256: `sha256:${suffix.charCodeAt(0).toString(16).slice(-1).repeat(64)}` as `sha256:${string}`,
-    role: 'implement' as const, preemptible: true, checkpointOrdinal: 0,
+    role: 'implement' as const, preemptible: expansion || speculativeWrite, checkpointOrdinal: 0,
   };
 }
 

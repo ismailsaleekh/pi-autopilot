@@ -85,13 +85,13 @@ void describe('canonical Autopilot authority derivation', () => {
   void it('rejects forged observation identity and malformed persisted EXCLUSIVE authority', async () => {
     const fixture = await repository();
     try {
-      const canonical = await deriveAutopilotAuthority({ spec: spec(fixture.root, fixture.runtimeRoot), runtimeExclusives: [{ path: 'src/core.ts', purpose: 'critical replacement', criticalSection: 'critical-replacement' }] });
+      const canonical = await deriveAutopilotAuthority({ spec: spec(fixture.root, fixture.runtimeRoot, { owned_paths: ['src/core.ts', 'src/generated/new.ts'] }), runtimeExclusives: [{ path: 'src/core.ts', purpose: 'critical replacement', operationId: 'critical-replacement-1', operationKind: 'canonical-authority-replacement', expectedDurationMs: 30_000 }] });
       const wrongBase = { ...canonical, observations: canonical.observations.map((entry, index) => index === 0 ? { ...entry, source_identity: { ...entry.source_identity, base_commit: 'f'.repeat(40) } } : entry) };
       assert.throws(() => parseAutopilotAuthority(wrongBase), /every observation must bind/u);
       const missingObject = { ...canonical, observations: canonical.observations.map((entry, index) => index === 0 ? { ...entry, source_identity: { ...entry.source_identity, object_kind: 'missing' } } : entry) };
       assert.throws(() => parseAutopilotAuthority(missingObject), /exact tracked blob or tree/u);
-      const malformedExclusive = { ...canonical, exclusives: canonical.exclusives.map((entry) => ({ ...entry, critical_section: 'x' })) };
-      assert.throws(() => parseAutopilotAuthority(malformedExclusive), /critical_section is invalid/u);
+      const malformedExclusive = { ...canonical, exclusives: canonical.exclusives.map((entry) => ({ ...entry, critical_section: 'generated-authority-replacement' })) };
+      assert.throws(() => parseAutopilotAuthority(malformedExclusive), /critical_section differs from its closed runtime operation/u);
     } finally { await rm(fixture.root, { recursive: true, force: true }); }
   });
 
@@ -117,13 +117,19 @@ void describe('canonical Autopilot authority derivation', () => {
     } finally { await rm(fixture.root, { recursive: true, force: true }); }
   });
 
-  void it('accepts only explicit runtime exclusives with a tracked bounded surface and named critical section', async () => {
+  void it('accepts only one package-declared exact-file EXCLUSIVE layered over WRITE', async () => {
     const fixture = await repository();
     try {
-      const artifact = await deriveAutopilotAuthority({ spec: spec(fixture.root, fixture.runtimeRoot), runtimeExclusives: [{ path: 'src/core.ts', purpose: 'replace canonical authority atomically', criticalSection: 'canonical-authority-replacement' }] });
-      assert.deepEqual(artifact.exclusives.map((entry) => [entry.path, entry.critical_section]), [['src/core.ts', 'canonical-authority-replacement']]);
+      const owned = spec(fixture.root, fixture.runtimeRoot, { owned_paths: ['src/core.ts', 'src/generated/new.ts'] });
+      const exclusive = { path: 'src/core.ts', purpose: 'replace canonical authority atomically', operationId: 'canonical-replacement-1', operationKind: 'canonical-authority-replacement' as const, expectedDurationMs: 30_000 };
+      const artifact = await deriveAutopilotAuthority({ spec: owned, runtimeExclusives: [exclusive] });
+      assert.deepEqual(artifact.exclusives.map((entry) => [entry.path, entry.critical_section, entry.operation.release_trigger]), [['src/core.ts', 'canonical-authority-replacement', 'critical-section-exit']]);
+      assert.equal(artifact.edit_intentions.some((entry) => entry.path === 'src/core.ts'), true);
       assert.equal(artifact.observations.some((entry) => entry.path === 'src/core.ts'), false);
-      await assert.rejects(() => deriveAutopilotAuthority({ spec: spec(fixture.root, fixture.runtimeRoot), runtimeExclusives: [{ path: 'src/core.ts', purpose: 'invalid', criticalSection: 'x' }] }), /invalid-exclusive-critical-section/u);
+      await assert.rejects(() => deriveAutopilotAuthority({ spec: owned, runtimeExclusives: [{ ...exclusive, expectedDurationMs: 0 }] }), /expected duration/u);
+      await assert.rejects(() => deriveAutopilotAuthority({ spec: spec(fixture.root, fixture.runtimeRoot), runtimeExclusives: [exclusive] }), /exact declared owned path/u);
+      await assert.rejects(() => deriveAutopilotAuthority({ spec: spec(fixture.root, fixture.runtimeRoot, { owned_paths: ['src/nested'] }), runtimeExclusives: [{ ...exclusive, path: 'src/nested' }] }), /exact tracked file/u);
+      await assert.rejects(() => deriveAutopilotAuthority({ spec: owned, runtimeExclusives: [exclusive, { ...exclusive, path: 'docs/guide.md', operationId: 'canonical-replacement-2' }] }), /at most one/u);
     } finally { await rm(fixture.root, { recursive: true, force: true }); }
   });
 });

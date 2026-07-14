@@ -251,14 +251,14 @@ async function assertReleaseTraceInvariants(client: CoordinatorClient, suffixes:
   const authorityGroups = [...groups.values()].filter((group) => group['state'] === 'granted' || group['state'] === 'grant-ready');
   assert.equal(authorityGroups.length, expectedAuthority === 'none' ? 0 : 1, `${phase}: one-or-zero total authority groups`);
   if (expectedAuthority !== 'none') assert.equal(authorityGroups[0]?.['state'], expectedAuthority, `${phase}: authority phase`);
-  assert.equal(leases.size, expectedAuthority === 'granted' ? 1 : 0, `${phase}: active contested lease count`);
-  assert.equal(new Set([...leases.values()].map((lease) => lease['path'])).size, leases.size, `${phase}: duplicate path authority`);
+  assert.equal(leases.size, expectedAuthority === 'granted' ? 2 : 0, `${phase}: active layered critical authority count`);
+  assert.equal(new Set([...leases.values()].map((lease) => `${String(lease['mode'])}\0${String(lease['path'])}`)).size, leases.size, `${phase}: duplicate mode/path authority`);
   for (const group of groups.values()) {
     const state = group['state'];
     const groupId = group['acquisition_group_id'];
     const held = [...leases.values()].filter((lease) => lease['acquisition_group_id'] === groupId);
     if (state === 'waiting' || state === 'grant-ready' || state === 'released' || state === 'cancelled' || state === 'superseded') assert.equal(held.length, 0, `${phase}: ${String(state)} group holds a lease`);
-    if (state === 'granted') assert.equal(held.length, 1, `${phase}: granted group lacks exact lease`);
+    if (state === 'granted') assert.equal(held.length, 2, `${phase}: granted group lacks layered WRITE/EXCLUSIVE authority`);
   }
   for (const request of requests.values()) {
     assert.equal(groups.has(String(request['acquisition_group_id'])), true, `${phase}: request has no acquisition group`);
@@ -504,7 +504,7 @@ async function certifyPersistentReleaseTrace(clientCount: number): Promise<void>
       if (nextActor === undefined) throw new Error('grant-ready actor process is missing');
       const grant = await nextActor.send('ack');
       assert.equal(grant['state'], 'granted');
-      assert.equal(grant['lease_count'], 1);
+      assert.equal(grant['lease_count'], 2);
       states.set(expected['acquisition_group_id'], 'granted');
       holder = nextHolder;
       observedHolders.add(holder);
@@ -657,9 +657,9 @@ void describe('coordinator multiprocess lifecycle', () => {
       assert.equal(Array.isArray(cursors) && cursors.length === 1, true);
       const grant = runNegotiationClient(stateRoot, 'ack', 'b');
       assert.equal(grant['state'], 'granted');
-      assert.equal(grant['lease_count'], 1);
+      assert.equal(grant['lease_count'], 2);
       const status = await new CoordinatorClient({ env, autoStart: false }).query('status', 'repo-process-negotiation', 'run-b');
-      assert.equal(Array.isArray(status.payload['edit_leases']) ? status.payload['edit_leases'].length : -1, 1);
+      assert.equal(Array.isArray(status.payload['edit_leases']) ? status.payload['edit_leases'].length : -1, 2);
     } finally {
       await stopCoordinator(paths.lockPath);
       if (!server.killed) server.kill('SIGTERM');

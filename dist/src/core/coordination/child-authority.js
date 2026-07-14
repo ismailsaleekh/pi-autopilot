@@ -175,7 +175,7 @@ export class AutopilotChildLeaseHandle {
         return next;
     }
 }
-export async function registerAutopilotChildAuthority(spec, specEvidence, env = process.env) {
+export async function registerAutopilotChildAuthority(spec, specEvidence, env = process.env, initialCriticalSection = null) {
     const contextPath = env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV];
     if (contextPath === undefined || contextPath.trim().length === 0)
         throw new CoordinationRuntimeError('unauthorized-client', `${AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV} is required for live child authority preflight`);
@@ -190,7 +190,7 @@ export async function registerAutopilotChildAuthority(spec, specEvidence, env = 
     await client.mutate('register-attempt', {
         repoId: session.repo_id, workstreamRun: session.workstream_run, sessionId: session.session_id, fencingGeneration: session.session_generation, expectedVersion: session.run_version,
         idempotencyKey: `register-attempt:${session.workstream_run}:${spec.unit_id}:${String(spec.attempt)}`,
-    }, { unit_id: spec.unit_id, attempt: spec.attempt, spec_ref: specEvidence.ref, spec_sha256: specEvidence.sha256, role: spec.role, preemptible: true, checkpoint_ordinal: 0, session_lease_id: session.session_lease_id, session_token: session.session_token });
+    }, { unit_id: spec.unit_id, attempt: spec.attempt, spec_ref: specEvidence.ref, spec_sha256: specEvidence.sha256, role: spec.role, preemptible: initialCriticalSection === null, checkpoint_ordinal: 0, session_lease_id: session.session_lease_id, session_token: session.session_token });
     const response = await client.mutate('register-child', {
         repoId: session.repo_id,
         workstreamRun: session.workstream_run,
@@ -211,6 +211,6 @@ export async function registerAutopilotChildAuthority(spec, specEvidence, env = 
         lease_expires_at: childExpiry(),
     });
     const handle = new AutopilotChildLeaseHandle(client, session, childFromResponse(response), childToken, pid, bootId);
-    await handle.checkpoint(1, null, true);
+    await handle.checkpoint(1, initialCriticalSection, initialCriticalSection === null);
     return handle;
 }

@@ -2,9 +2,11 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { describe, it } from 'node:test';
 
 import { CoordinatorClient } from '../../src/core/coordination/client.ts';
+import { coordinationExclusiveOperation } from '../../src/core/coordination/exclusive-policy.ts';
 import { ClaimNegotiationClient } from '../../src/core/coordination/negotiation.ts';
 import { parseCoordinationAcquisitionGroup, parseCoordinationClaimRequest, parseCoordinationMessage, parseCoordinationRun, parseCoordinationSessionLease } from '../../src/core/coordination/contracts.ts';
 import { CoordinationRuntimeError } from '../../src/core/coordination/failures.ts';
@@ -90,10 +92,13 @@ async function replaceActor(client: CoordinatorClient, actor: Actor, suffix: str
 function acquisitionInput(suffix: string) {
   return {
     acquisitionGroupId: `group-${suffix}`, unitId: `unit-${suffix}`, attempt: 1,
-    requestedLeases: [{ path: 'src/shared.ts', mode: 'EXCLUSIVE' as const, purpose: `bounded critical section ${suffix}` }],
+    requestedLeases: [
+      { path: 'src/shared.ts', mode: 'WRITE' as const, purpose: `edit attribution ${suffix}` },
+      { path: 'src/shared.ts', mode: 'EXCLUSIVE' as const, purpose: `bounded critical section ${suffix}`, exclusive_operation: coordinationExclusiveOperation({ operationId: `claim-${suffix}`, operationKind: 'canonical-authority-replacement', expectedDurationMs: 30_000 }) },
+    ],
     reason: `workstream ${suffix} requires shared source`, normalReleaseCondition: { ...RELEASE_CONDITION, target_id: `unit-${suffix}:1` },
     specRef: `.pi/autopilot/workstream-${suffix}/unit-specs/unit-${suffix}.json`, specSha256: `sha256:${suffix.charCodeAt(0).toString(16).slice(-1).repeat(64)}` as `sha256:${string}`,
-    role: 'implement' as const, preemptible: true, checkpointOrdinal: 0,
+    role: 'implement' as const, preemptible: false, checkpointOrdinal: 0,
   };
 }
 
@@ -198,13 +203,113 @@ void describe('Coordination Fabric claim negotiation', () => {
       assert.equal(offered.state, 'grant-ready');
       const requesterGrant = await requester.negotiation.acknowledgeGrant(offered);
       assert.equal(requesterGrant.acquisitionGroup.state, 'granted');
-      assert.deepEqual(requesterGrant.editLeases.map((entry) => `${entry.mode} ${entry.path}`), ['EXCLUSIVE src/shared.ts', 'WRITE src/requester-only.ts']);
+      assert.deepEqual(requesterGrant.editLeases.map((entry) => `${entry.mode} ${entry.path}`), ['WRITE src/shared.ts', 'EXCLUSIVE src/shared.ts', 'WRITE src/requester-only.ts']);
       const ownerStatus = await client.query('status', owner.context.repo_id, owner.context.workstream_run);
       const requesterStatus = await client.query('status', requester.context.repo_id, requester.context.workstream_run);
       const retainedOwnerLeases = array(ownerStatus.payload['edit_leases'], 'owner leases');
       assert.equal(retainedOwnerLeases.length, 1);
       assert.equal(record(retainedOwnerLeases[0], 'retained owner lease')['path'], 'src/owner-private.ts');
-      assert.equal(array(requesterStatus.payload['edit_leases'], 'requester leases').length, 2);
+      assert.equal(array(requesterStatus.payload['edit_leases'], 'requester leases').length, 3);
+    } finally {
+      await server.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  void it('retains WRITE attribution when a child exits EXCLUSIVE after coordinator restart', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pi-autopilot-exclusive-exit-'));
+    const stateRoot = join(root, 'state');
+    const env = { ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: stateRoot };
+    let server = await startCoordinatorServer(coordinatorRuntimePaths(env));
+    try {
+      const client = new CoordinatorClient({ env, autoStart: false });
+      const owner = await attachActor(client, stateRoot, 'critical-owner');
+      const requester = await attachActor(client, stateRoot, 'write-requester');
+      const ownerGrant = await owner.negotiation.acquire(acquisitionInput('critical-owner'));
+      assert.equal(ownerGrant.outcome, 'granted');
+
+      const childId = 'child-run-critical-owner-unit-critical-owner-1';
+      const childToken = '9'.repeat(64);
+      const childResponse = await client.mutate('register-child', {
+        repoId: owner.context.repo_id, workstreamRun: owner.context.workstream_run, sessionId: owner.context.session_id,
+        fencingGeneration: owner.context.session_generation, expectedVersion: owner.context.run_version, idempotencyKey: 'register-exclusive-exit-child',
+      }, { child_lease_id: childId, autopilot_id: owner.context.autopilot_id, unit_id: 'unit-critical-owner', attempt: 1, pid: process.pid, boot_id: 'exclusive-exit-boot', child_token: childToken, lease_expires_at: '2099-01-01T00:00:00.000Z', session_lease_id: owner.context.session_lease_id, session_token: owner.context.session_token });
+      const child = record(childResponse.payload['child'], 'exclusive child');
+      assert.equal(child['version'], 1);
+
+      const requesterInput = acquisitionInput('write-requester');
+      const write = requesterInput.requestedLeases.find((lease) => lease.mode === 'WRITE');
+      if (write === undefined) throw new Error('WRITE layer missing from requester fixture');
+      const waiting = await requester.negotiation.acquire({ ...requesterInput, requestedLeases: [write], preemptible: true });
+      assert.equal(waiting.outcome, 'waiting-for-peer-release');
+      const activeDoctor = await client.query('doctor');
+      const retainedOperations = array(activeDoctor.payload['retained_exclusive_operations'], 'active EXCLUSIVE diagnostics');
+      assert.equal(retainedOperations.length, 1);
+      assert.equal(record(retainedOperations[0], 'active EXCLUSIVE diagnostic')['release_from_age_authorized'], false);
+      assert.equal(record(retainedOperations[0], 'active EXCLUSIVE diagnostic')['critical_section_active'], true);
+
+      await server.close();
+      server = await startCoordinatorServer(coordinatorRuntimePaths(env));
+      const restartedOwner = await client.query('status', owner.context.repo_id, owner.context.workstream_run);
+      assert.equal(array(restartedOwner.payload['edit_leases'], 'restarted owner leases').length, 2, 'restart and age never release active EXCLUSIVE authority');
+
+      const checkpoint = await client.mutate('checkpoint-child', {
+        repoId: owner.context.repo_id, workstreamRun: owner.context.workstream_run, sessionId: null, fencingGeneration: null,
+        expectedVersion: 1, idempotencyKey: 'exit-exclusive-after-restart',
+      }, { child_lease_id: childId, child_token: childToken, pid: process.pid, boot_id: 'exclusive-exit-boot', checkpoint_ordinal: 1, critical_section: null, preemptible: true });
+      assert.equal(array(checkpoint.payload['released_exclusive_lease_ids'], 'released EXCLUSIVE ids').length, 1);
+
+      const ownerStatus = await client.query('status', owner.context.repo_id, owner.context.workstream_run);
+      const retained = array(ownerStatus.payload['edit_leases'], 'retained owner WRITE');
+      assert.equal(retained.length, 1);
+      assert.equal(record(retained[0], 'retained owner WRITE')['mode'], 'WRITE');
+      const attempt = record(array(ownerStatus.payload['unit_attempts'], 'owner attempts')[0], 'owner attempt');
+      assert.equal(attempt['critical_section'], null);
+      assert.equal(attempt['preemptible'], true);
+      assert.equal((await groups(client, requester))[0]?.state, 'grant-ready');
+
+      const doctor = await client.query('doctor');
+      assert.deepEqual(array(doctor.payload['retained_exclusive_operations'], 'retained EXCLUSIVE diagnostics'), []);
+      assert.equal(doctor.payload['healthy'], true);
+    } finally {
+      await server.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  void it('migrates schema-10 EXCLUSIVE entities and idempotent replay into explicit legacy authority', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pi-autopilot-exclusive-schema10-'));
+    const stateRoot = join(root, 'state');
+    const env = { ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: stateRoot };
+    const paths = coordinatorRuntimePaths(env);
+    let server = await startCoordinatorServer(paths);
+    try {
+      const client = new CoordinatorClient({ env, autoStart: false });
+      const owner = await attachActor(client, stateRoot, 'schema10');
+      const input = acquisitionInput('schema10');
+      assert.equal((await owner.negotiation.acquire(input)).outcome, 'granted');
+      await server.close();
+
+      const database = new DatabaseSync(paths.databasePath);
+      database.exec(`
+        UPDATE acquisition_groups SET payload_json=json_remove(payload_json,'$.requested_leases[1].exclusive_operation');
+        UPDATE edit_leases SET payload_json=json_remove(payload_json,'$.exclusive_operation') WHERE json_extract(payload_json,'$.mode')='EXCLUSIVE';
+        UPDATE idempotency_results SET payload_json=json_remove(payload_json,'$.acquisition_group.requested_leases[1].exclusive_operation','$.edit_leases[1].exclusive_operation');
+        DELETE FROM schema_migrations WHERE version=11;
+        PRAGMA user_version=10;
+      `);
+      database.close();
+
+      server = await startCoordinatorServer(paths);
+      const status = await client.query('status', owner.context.repo_id, owner.context.workstream_run);
+      const migratedGroup = parseCoordinationAcquisitionGroup(array(status.payload['acquisition_groups'], 'migrated groups')[0]);
+      assert.equal(migratedGroup.acquisition_kind, 'legacy-unknown');
+      assert.equal(migratedGroup.requested_leases.find((lease) => lease.mode === 'EXCLUSIVE')?.exclusive_operation?.operation_kind, 'legacy-migration-exclusive');
+      const replay = await owner.negotiation.acquire(input);
+      assert.equal(replay.outcome, 'granted');
+      if (replay.outcome !== 'granted') throw new Error('schema-10 idempotency replay was not granted');
+      assert.equal(replay.editLeases.find((lease) => lease.mode === 'EXCLUSIVE')?.exclusive_operation?.operation_kind, 'legacy-migration-exclusive');
+      assert.equal((await client.query('doctor')).payload['healthy'], true);
     } finally {
       await server.close();
       await rm(root, { recursive: true, force: true });
@@ -273,8 +378,8 @@ void describe('Coordination Fabric claim negotiation', () => {
       assert.equal(second.outcome, 'granted');
       const firstStatus = await client.query('status', firstRepo.context.repo_id, firstRepo.context.workstream_run);
       const secondStatus = await client.query('status', secondRepo.context.repo_id, secondRepo.context.workstream_run);
-      assert.equal(array(firstStatus.payload['edit_leases'], 'first repo leases').length, 1);
-      assert.equal(array(secondStatus.payload['edit_leases'], 'second repo leases').length, 1);
+      assert.equal(array(firstStatus.payload['edit_leases'], 'first repo leases').length, 2);
+      assert.equal(array(secondStatus.payload['edit_leases'], 'second repo leases').length, 2);
     } finally {
       await server.close();
       await rm(root, { recursive: true, force: true });
@@ -296,7 +401,7 @@ void describe('Coordination Fabric claim negotiation', () => {
       await owner.negotiation.acquire(acquisitionInput('a'));
       const otherOwnerInput = acquisitionInput('a');
       await owner.negotiation.acquire({
-        ...otherOwnerInput, acquisitionGroupId: 'group-a-other', unitId: 'unit-a-other', normalReleaseCondition: { condition_type: 'unit-merged', target_id: 'unit-a-other:1', evidence: null }, requestedLeases: [{ path: 'src/other-shared.ts', mode: 'EXCLUSIVE', purpose: 'hold second independent critical path' }],
+        ...otherOwnerInput, acquisitionGroupId: 'group-a-other', unitId: 'unit-a-other', normalReleaseCondition: { condition_type: 'unit-merged', target_id: 'unit-a-other:1', evidence: null }, requestedLeases: [{ path: 'src/other-shared.ts', mode: 'WRITE', purpose: 'edit attribution for second critical path' }, { path: 'src/other-shared.ts', mode: 'EXCLUSIVE', purpose: 'hold second independent critical path', exclusive_operation: coordinationExclusiveOperation({ operationId: 'claim-a-other', operationKind: 'canonical-authority-replacement', expectedDurationMs: 30_000 }) }],
       });
       await first.negotiation.acquire(acquisitionInput('b'));
       await second.negotiation.acquire(acquisitionInput('c'));

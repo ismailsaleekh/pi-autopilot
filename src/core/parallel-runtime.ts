@@ -1809,8 +1809,13 @@ function assertBranchAvailable(repoRoot: string, branch: string): void {
   if (result.status !== 1) fail('branch-check-failed', 'git show-ref failed while checking Autopilot branch availability.', [branch, result.stderr]);
 }
 
-export async function withAutopilotFileLock<T>(lockPath: string, holderId: string, run: () => Promise<T>): Promise<T> {
-  const handle = await acquireFileLock(lockPath, holderId);
+export interface AutopilotFileLockOptions {
+  /** Bounded acquisition wait; exposed for deterministic fail-closed QA. */
+  readonly timeoutMs?: number;
+}
+
+export async function withAutopilotFileLock<T>(lockPath: string, holderId: string, run: () => Promise<T>, options: AutopilotFileLockOptions = {}): Promise<T> {
+  const handle = await acquireFileLock(lockPath, holderId, options.timeoutMs ?? DEFAULT_LOCK_TIMEOUT_MS);
   try {
     return await run();
   } finally {
@@ -1823,6 +1828,7 @@ interface FileLockHandle {
 }
 
 async function acquireFileLock(lockPath: string, holderId: string, timeoutMs = DEFAULT_LOCK_TIMEOUT_MS): Promise<FileLockHandle> {
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > DEFAULT_LOCK_TIMEOUT_MS) fail('invalid-lock-timeout', 'Autopilot runtime lock timeout must be a positive bounded integer.', [String(timeoutMs)]);
   await ensurePrivateAuthorityDirectory(dirname(lockPath));
   const started = Date.now();
   let backoff = LOCK_BACKOFF_START_MS;
@@ -1830,12 +1836,14 @@ async function acquireFileLock(lockPath: string, holderId: string, timeoutMs = D
     let fileHandle: FileHandle | null = null;
     try {
       fileHandle = await open(lockPath, 'wx', 0o600);
+      const token = randomBytes(24).toString('hex');
       const content = {
         schema_version: 'autopilot.lock.v1',
         holder_id: holderId,
         acquired_at: new Date().toISOString(),
         pid: process.pid,
         boot_id: getBootId(),
+        token,
       };
       await fileHandle.writeFile(`${JSON.stringify(content)}\n`, 'utf8');
       await fileHandle.sync();
@@ -1845,8 +1853,8 @@ async function acquireFileLock(lockPath: string, holderId: string, timeoutMs = D
       return {
         release: async () => {
           const value = await readJson(lockPath);
-          if (!isRecord(value) || value['holder_id'] !== holderId) {
-            fail('foreign-lock-release', 'refusing to release a lock owned by another holder.', [lockPath]);
+          if (!isRecord(value) || value['holder_id'] !== holderId || value['token'] !== token) {
+            fail('foreign-lock-release', 'refusing to release a lock whose exact holder capability changed.', [lockPath]);
           }
           await unlink(lockPath);
         },
@@ -1854,7 +1862,7 @@ async function acquireFileLock(lockPath: string, holderId: string, timeoutMs = D
     } catch (error) {
       if (fileHandle !== null) await fileHandle.close().catch(() => undefined);
       if (!isNodeError(error) || error.code !== 'EEXIST') throw error;
-      await reclaimStaleLockIfEligible(lockPath, timeoutMs);
+      await reclaimStaleLockIfEligible(lockPath);
       if (Date.now() - started > timeoutMs) {
         fail('lock-timeout', 'timed out acquiring Autopilot runtime lock.', [lockPath, holderId]);
       }
@@ -1864,11 +1872,10 @@ async function acquireFileLock(lockPath: string, holderId: string, timeoutMs = D
   }
 }
 
-async function reclaimStaleLockIfEligible(lockPath: string, timeoutMs: number): Promise<void> {
+async function reclaimStaleLockIfEligible(lockPath: string): Promise<void> {
   let text: string;
-  let stats;
   try {
-    [text, stats] = await Promise.all([readFile(lockPath, 'utf8'), stat(lockPath)]);
+    text = await readFile(lockPath, 'utf8');
   } catch (error) {
     if (isNodeError(error) && error.code === 'ENOENT') return;
     throw error;
@@ -1877,19 +1884,29 @@ async function reclaimStaleLockIfEligible(lockPath: string, timeoutMs: number): 
   try {
     parsed = JSON.parse(text) as unknown;
   } catch {
-    if (Date.now() - stats.mtimeMs > timeoutMs) await unlink(lockPath).catch(() => undefined);
+    // Malformed ownership is ambiguous, never stale. Age is diagnostic only;
+    // silently unlinking here can enter a live critical section twice.
     return;
   }
   if (!isRecord(parsed)) return;
   const acquiredAtRaw = parsed['acquired_at'];
   const pidRaw = parsed['pid'];
   const bootIdRaw = parsed['boot_id'];
-  if (typeof acquiredAtRaw !== 'string' || typeof pidRaw !== 'number' || typeof bootIdRaw !== 'string') return;
+  if (parsed['schema_version'] !== 'autopilot.lock.v1' || typeof parsed['holder_id'] !== 'string' || typeof acquiredAtRaw !== 'string' || typeof pidRaw !== 'number' || !Number.isSafeInteger(pidRaw) || typeof bootIdRaw !== 'string') return;
   // Boot identity may be unstable on Windows or after a clock correction. A
   // runtime lock with a live PID is never reclaimed on boot mismatch alone.
   const stale = !isPidAlive(pidRaw);
   if (stale) {
-    await unlink(lockPath).catch(() => undefined);
+    // Re-read the exact identity immediately before removal. This prevents a
+    // contender that already replaced the dead lock from being unlinked by a
+    // stale observer; acquisition still uses O_EXCL as the authority boundary.
+    const current = await readFile(lockPath, 'utf8').catch((error: unknown) => {
+      if (isNodeError(error) && error.code === 'ENOENT') return null;
+      throw error;
+    });
+    if (current === text) await unlink(lockPath).catch((error: unknown) => {
+      if (!isNodeError(error) || error.code !== 'ENOENT') throw error;
+    });
     return;
   }
 }

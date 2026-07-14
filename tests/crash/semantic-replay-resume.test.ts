@@ -24,7 +24,7 @@ function attachRun(stateRoot: string, suffix: string): CoordinatorRequestEnvelop
   const source = join(stateRoot, 'repository');
   const digest = createHash('sha256').update(suffix).digest('hex');
   return {
-    schema_version: 'autopilot.coordinator_request.v1', protocol_version: '1.4', request_id: `semantic-crash-request-${suffix}`,
+    schema_version: 'autopilot.coordinator_request.v1', protocol_version: '1.5', request_id: `semantic-crash-request-${suffix}`,
     action: 'attach-run', idempotency_key: `semantic-crash-attach-${suffix}`, repo_id: repository, workstream_run: run,
     session_id: null, fencing_generation: null, expected_version: 0,
     payload: {

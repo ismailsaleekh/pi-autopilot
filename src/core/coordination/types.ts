@@ -1,10 +1,13 @@
 export const AUTOPILOT_COORDINATION_SNAPSHOT_SCHEMA = 'autopilot.coordination_snapshot.v1' as const;
-export const AUTOPILOT_COORDINATOR_PROTOCOL_VERSION = '1.4' as const;
+export const AUTOPILOT_COORDINATOR_PROTOCOL_VERSION = '1.5' as const;
 export const AUTOPILOT_COORDINATOR_REQUEST_SCHEMA = 'autopilot.coordinator_request.v1' as const;
 export const AUTOPILOT_COORDINATOR_RESPONSE_SCHEMA = 'autopilot.coordinator_response.v1' as const;
 export const AUTOPILOT_COORDINATION_PREFLIGHT_SCHEMA = 'autopilot.coordination_preflight.v1' as const;
 
 export const COORDINATION_CLAIM_MODES = ['READ', 'WRITE', 'EXCLUSIVE'] as const;
+export const COORDINATION_EXCLUSIVE_OPERATION_KINDS = ['canonical-authority-replacement', 'generated-authority-replacement', 'repository-schema-migration', 'target-branch-landing', 'worktree-metadata-transition', 'critical-git-operation', 'legacy-migration-exclusive'] as const;
+export const COORDINATION_EXCLUSIVE_RESOURCE_SCOPES = ['exact-repository-path'] as const;
+export const COORDINATION_EXCLUSIVE_RELEASE_TRIGGERS = ['critical-section-exit'] as const;
 export const COORDINATION_RUN_STATUSES = ['active', 'paused', 'merging', 'blocked', 'recovering', 'closed', 'aborted'] as const;
 export const COORDINATION_SESSION_STATUSES = ['attached', 'handoff-pending', 'detached', 'fenced', 'expired'] as const;
 export const COORDINATION_SESSION_ATTACHMENT_KINDS = ['dispatch', 'terminal-recovery', 'migration-recovery'] as const;
@@ -38,6 +41,9 @@ export const COORDINATION_DEADLOCK_ACTIONS = ['cancel-and-supersede', 'request-r
 export const COORDINATION_OPERATIONAL_ESCALATION_REASONS = ['claim-conflict', 'offline-peer', 'handoff', 'stale-session', 'dirty-worktree', 'merge-conflict', 'failed-test', 'stale-validation', 'deadlock', 'starvation', 'disk-pressure', 'cleanup-failure', 'reconciliation-failure'] as const;
 
 export type CoordinationClaimMode = (typeof COORDINATION_CLAIM_MODES)[number];
+export type CoordinationExclusiveOperationKind = (typeof COORDINATION_EXCLUSIVE_OPERATION_KINDS)[number];
+export type CoordinationExclusiveResourceScope = (typeof COORDINATION_EXCLUSIVE_RESOURCE_SCOPES)[number];
+export type CoordinationExclusiveReleaseTrigger = (typeof COORDINATION_EXCLUSIVE_RELEASE_TRIGGERS)[number];
 export type CoordinationRunStatus = (typeof COORDINATION_RUN_STATUSES)[number];
 export type CoordinationSessionStatus = (typeof COORDINATION_SESSION_STATUSES)[number];
 export type CoordinationSessionAttachmentKind = (typeof COORDINATION_SESSION_ATTACHMENT_KINDS)[number];
@@ -199,12 +205,24 @@ export interface CoordinationObservationSourceIdentity {
   readonly object_kind: CoordinationObservationObjectKind;
 }
 
+export interface CoordinationExclusiveOperation {
+  readonly schema_version: 'autopilot.exclusive_operation.v1';
+  readonly operation_id: string;
+  readonly operation_kind: CoordinationExclusiveOperationKind;
+  readonly critical_section: CoordinationExclusiveOperationKind;
+  readonly resource_scope: CoordinationExclusiveResourceScope;
+  readonly expected_duration_ms: number;
+  readonly release_trigger: CoordinationExclusiveReleaseTrigger;
+}
+
 export interface CoordinationRequestedLease {
   readonly path: string;
   readonly mode: CoordinationClaimMode;
   readonly purpose: string;
   /** Required for new READ observations; absent only on pre-redesign persisted groups. */
   readonly source_identity?: CoordinationObservationSourceIdentity;
+  /** Required only for EXCLUSIVE authority. Legacy imports use the explicit legacy kind. */
+  readonly exclusive_operation?: CoordinationExclusiveOperation;
 }
 
 export interface CoordinationAcquisitionGroup {
@@ -251,6 +269,7 @@ export interface CoordinationEditLease {
   readonly path: string;
   readonly mode: CoordinationClaimMode;
   readonly purpose: string;
+  readonly exclusive_operation?: CoordinationExclusiveOperation;
   readonly acquired_event_seq: number;
   readonly normal_release_condition: CoordinationReleaseCondition;
   readonly version: number;

@@ -6,13 +6,14 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'nod
 import { pathToFileURL } from 'node:url';
 import { platform, tmpdir } from 'node:os';
 import { CoordinatorClient } from "./client.js";
+import { legacyMigrationExclusiveOperation } from "./exclusive-policy.js";
 import { parseLegacyActiveAutopilots, parseLegacyPathClaims, checkLegacyCoordinationInvariants, LEGACY_PREFLIGHT_MAX_INPUT_BYTES } from "./legacy-preflight.js";
 import { activeCoordinationMigrationFreeze, assertMigrationPathSafe, coordinationGlobalMigrationLockPath, coordinationMigrationPaths, COORDINATION_CUTOVER_MARKER_SCHEMA, COORDINATION_FREEZE_ACK_SCHEMA, COORDINATION_FREEZE_SCHEMA, COORDINATION_MIGRATION_JOURNAL_SCHEMA, readCoordinationCutoverMarker } from "./migration-paths.js";
 import { currentBootId, isExactProcessAlive, isProcessAlive, predecessorCompatibleBootId, preflightProcessRetirementSupport, retireExactProcess } from "./process-identity.js";
 import { COORDINATOR_DATABASE_SCHEMA_VERSION, COORDINATOR_PACKAGE_BUILD, coordinatorRuntimePaths, enforcePrivateAuthorityPath, enforceWindowsPrivateTree, ensureCoordinatorPrivateRoots, ensurePrivateAuthorityDirectory } from "./runtime-paths.js";
 import { acquireSerializedProcessGuard, discardLockTombstone, quarantineExactLock, readExactLockText, restoreLockTombstone } from "./serialized-lock.js";
 import { startCoordinatorServer } from "./server.js";
-import { parseCurrentCoordinatorLock, parsePredecessorCoordinatorLock, parsePriorSchema9CurrentCoordinatorLock } from "./upgrade-contracts.js";
+import { parseCurrentCoordinatorLock, parsePredecessorCoordinatorLock, parsePriorSchema10CurrentCoordinatorLock, parsePriorSchema9CurrentCoordinatorLock } from "./upgrade-contracts.js";
 import { COORDINATOR_SCHEMA_MIGRATION_CHECKSUMS, CoordinatorStore } from "./store.js";
 import { backup, DatabaseSync } from 'node:sqlite';
 import { CoordinationRuntimeError } from "./failures.js";
@@ -891,8 +892,8 @@ function assertReadOnlySchema(database) {
     if (versionRow === undefined)
         failure('blocked', 'coordinator database has no schema version');
     const version = sqlSafeInteger(versionRow, 'user_version', 'coordinator database');
-    if (version !== 6 && version !== 7 && version !== 8 && version !== 9 && version !== 10)
-        failure('blocked', 'migration inspection supports only exact coordinator schema 6 through the current schema 10', [`schema=${String(version)}`]);
+    if (version !== 6 && version !== 7 && version !== 8 && version !== 9 && version !== 10 && version !== 11)
+        failure('blocked', 'migration inspection supports only exact coordinator schema 6 through the current schema 11', [`schema=${String(version)}`]);
     const integrityRow = database.prepare('PRAGMA integrity_check(1)').get();
     if (integrityRow === undefined || integrityRow['integrity_check'] !== 'ok')
         failure('blocked', 'coordinator database failed read-only integrity inspection');
@@ -900,7 +901,7 @@ function assertReadOnlySchema(database) {
     if (schemaRows.length > 64)
         failure('blocked', 'coordinator database schema contains too many tables');
     const actual = schemaRows.map((row) => sqlText(row, 'name', 'coordinator schema table', 128));
-    const expected = version === 6 ? [...SCHEMA_6_TABLES].sort() : version === 10 ? SCHEMA_10_TABLES : version === 9 ? SCHEMA_9_TABLES : SCHEMA_7_TABLES;
+    const expected = version === 6 ? [...SCHEMA_6_TABLES].sort() : version >= 10 ? SCHEMA_10_TABLES : version === 9 ? SCHEMA_9_TABLES : SCHEMA_7_TABLES;
     if (stableJson(actual) !== stableJson(expected))
         failure('blocked', `coordinator schema ${String(version)} table profile is not exact`, [`expected=${stableJson(expected)}`, `actual=${stableJson(actual)}`]);
     assertExactTableColumns(database, 'repositories', ['repo_id', 'repo_key', 'canonical_root', 'git_common_dir', 'event_seq', 'created_event_seq', 'version']);
@@ -1333,13 +1334,13 @@ function buildImportPlan(inspection, repositoryIdentity, repoKey, migrationId, s
         const importedAttemptState = pendingRecovery ? 'queued' : metadata === undefined ? 'queued' : metadata.status === 'active' ? 'running' : metadata.status === 'merged' ? 'merged' : metadata.status === 'aborted' ? 'reset' : metadata.status === 'quarantined' ? 'quarantined' : 'superseded';
         attempts.push({ schema_version: 'autopilot.unit_attempt.v1', owner, state: importedAttemptState, role: 'unknown', spec: { ref: `migration/${migrationId}/legacy-attempt/${entityId('attempt', key)}.json`, sha256: specSha }, preemptible: claims.every((entry) => entry.claim_type === 'READ'), checkpoint_ordinal: 0, critical_section: null, version: 1 });
         const groupId = entityId('migration-group', key);
-        const requested = claims.map((entry) => ({ path: entry.path, mode: entry.claim_type, purpose: entry.reason })).sort((left, right) => `${left.mode}\0${left.path}`.localeCompare(`${right.mode}\0${right.path}`));
+        const requested = claims.map((entry) => ({ path: entry.path, mode: entry.claim_type, purpose: entry.reason, ...(entry.claim_type === 'EXCLUSIVE' ? { exclusive_operation: legacyMigrationExclusiveOperation(entityId('legacy-exclusive', claimKey(entry))) } : {}) })).sort((left, right) => `${left.mode}\0${left.path}`.localeCompare(`${right.mode}\0${right.path}`));
         const condition = !pendingRecovery && claims.some((entry) => entry.claim_type === 'WRITE' || entry.claim_type === 'EXCLUSIVE')
             ? { condition_type: 'unit-merged', target_id: `${claim.unit_id}:${String(claim.attempt)}`, evidence: null }
             : { condition_type: 'explicit-owner-release', target_id: `${claim.unit_id}:${String(claim.attempt)}`, evidence: null };
         groups.push({ schema_version: 'autopilot.acquisition_group.v2', acquisition_group_id: groupId, owner, acquisition_kind: 'legacy-unknown', requested_leases: requested, reason: 'verified legacy path authority import', normal_release_condition: condition, state: 'granted', created_event_seq: 1, fairness_event_seq: 1, grant_event_seq: 1, offer_expires_at: null, offer_count: 0, bypass_count: 0, version: 1 });
         for (const entry of claims)
-            leases.push({ schema_version: 'autopilot.edit_lease.v1', edit_lease_id: entityId('migration-lease', claimKey(entry)), owner, acquisition_group_id: groupId, path: entry.path, mode: entry.claim_type, purpose: entry.reason, acquired_event_seq: 1, normal_release_condition: condition, version: 1 });
+            leases.push({ schema_version: 'autopilot.edit_lease.v1', edit_lease_id: entityId('migration-lease', claimKey(entry)), owner, acquisition_group_id: groupId, path: entry.path, mode: entry.claim_type, purpose: entry.reason, ...(entry.claim_type === 'EXCLUSIVE' ? { exclusive_operation: legacyMigrationExclusiveOperation(entityId('legacy-exclusive', claimKey(entry))) } : {}), acquired_event_seq: 1, normal_release_condition: condition, version: 1 });
     }
     const reconciliationEvidence = [];
     const reservations = [];
@@ -1857,7 +1858,7 @@ export function coordinationMigrationCoordinatorRunning(paths) {
             continue;
         try {
             const raw = JSON.parse(readFileSync(path, 'utf8'));
-            const lock = parseCurrentCoordinatorLock(raw) ?? parsePriorSchema9CurrentCoordinatorLock(raw) ?? parsePredecessorCoordinatorLock(raw);
+            const lock = parseCurrentCoordinatorLock(raw) ?? parsePriorSchema10CurrentCoordinatorLock(raw) ?? parsePriorSchema9CurrentCoordinatorLock(raw) ?? parsePredecessorCoordinatorLock(raw);
             if (lock === null || isProcessAlive(lock.pid))
                 return true;
         }
@@ -1879,7 +1880,7 @@ export async function retireCoordinationMigrationCoordinator(paths, expectedIden
     let lock;
     try {
         const value = JSON.parse(await readFile(paths.lockPath, 'utf8'));
-        lock = parseCurrentCoordinatorLock(value) ?? parsePriorSchema9CurrentCoordinatorLock(value);
+        lock = parseCurrentCoordinatorLock(value) ?? parsePriorSchema10CurrentCoordinatorLock(value) ?? parsePriorSchema9CurrentCoordinatorLock(value);
     }
     catch (error) {
         return Object.freeze([`coordinator lifecycle lock is unreadable during migration drain: ${error instanceof Error ? error.message : String(error)}`]);
@@ -1913,7 +1914,7 @@ export async function retireCoordinationMigrationCoordinator(paths, expectedIden
                 let current;
                 try {
                     const value = JSON.parse(currentText);
-                    current = parseCurrentCoordinatorLock(value) ?? parsePriorSchema9CurrentCoordinatorLock(value);
+                    current = parseCurrentCoordinatorLock(value) ?? parsePriorSchema10CurrentCoordinatorLock(value) ?? parsePriorSchema9CurrentCoordinatorLock(value);
                 }
                 catch (error) {
                     return Object.freeze([`coordinator lifecycle lock became unreadable while retiring for migration: ${error instanceof Error ? error.message : String(error)}`]);

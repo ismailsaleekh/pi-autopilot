@@ -129,7 +129,7 @@ async function attachActor(client: CoordinatorClient, stateRoot: string, suffix:
 function acquisitionInput(suffix: string, condition: CoordinationReleaseCondition, path = 'src/shared.ts') {
   return {
     acquisitionGroupId: `group-${suffix}`, unitId: `unit-${suffix}`, attempt: 1,
-    requestedLeases: [{ path, mode: 'EXCLUSIVE' as const, purpose: `critical operation ${suffix}` }],
+    requestedLeases: [{ path, mode: 'WRITE' as const, purpose: `retained edit operation ${suffix}` }],
     reason: `run ${suffix} needs ${path}`, normalReleaseCondition: condition,
     specRef: `.pi/autopilot/work-${suffix}/unit-specs/unit-${suffix}.json`, specSha256: `sha256:${suffix.charCodeAt(0).toString(16).slice(-1).repeat(64)}` as `sha256:${string}`,
     role: 'implement' as const, preemptible: true, checkpointOrdinal: 0,
@@ -203,7 +203,7 @@ async function detach(client: CoordinatorClient, actor: Actor): Promise<void> {
 }
 
 void describe('Coordination Fabric offline replay and automatic reconciliation', () => {
-  void it('keeps source edit authority after offline child terminal, then replays exact merge release after owner resume', async () => {
+  void it('allows overlapping WRITE work while retaining offline source authority until exact merge replay', async () => {
     const value = await harness();
     try {
       const owner = await attachActor(value.client, value.stateRoot, 'a');
@@ -222,12 +222,11 @@ void describe('Coordination Fabric offline replay and automatic reconciliation',
       const childVersion = (child as Readonly<Record<string, unknown>>)['version'];
       if (typeof childVersion !== 'number') throw new Error('missing child version');
 
-      const waiting = await requester.negotiation.acquire(acquisitionInput('b', { condition_type: 'unit-merged', target_id: 'unit-b:1', evidence: null }));
-      assert.equal(waiting.outcome, 'waiting-for-peer-release');
-      const ownerRequest = (await requests(value.client, owner)).find((entry) => entry.requester.workstream_run === requester.context.workstream_run);
-      if (ownerRequest === undefined) throw new Error('owner request missing');
-      const deferred = await owner.negotiation.respond({ request: ownerRequest, response: 'deferred', ownerReason: 'source edit authority remains through integration', releaseCondition: { condition_type: 'unit-merged', target_id: 'unit-a:1', evidence: null } });
-      assert.equal(deferred.status, 'deferred');
+      const concurrent = await requester.negotiation.acquire(acquisitionInput('b', { condition_type: 'unit-merged', target_id: 'unit-b:1', evidence: null }));
+      assert.equal(concurrent.outcome, 'granted');
+      assert.equal((await requests(value.client, owner)).length, 0, 'ordinary WRITE overlap must not create claim negotiation');
+      assert.equal(array((await status(value.client, owner)).payload['edit_leases'], 'owner edit leases').length, 1);
+      assert.equal(array((await status(value.client, requester)).payload['edit_leases'], 'requester edit leases').length, 1);
       await detach(value.client, owner);
       await detach(value.client, requester);
 
@@ -236,9 +235,11 @@ void describe('Coordination Fabric offline replay and automatic reconciliation',
         repoId: owner.context.repo_id, workstreamRun: owner.context.workstream_run, sessionId: null, fencingGeneration: null,
         expectedVersion: childVersion, idempotencyKey: 'complete-offline-child',
       }, { child_lease_id: childId, child_token: childToken, pid: process.pid, boot_id: 'boot-child', status: 'terminal', evidence_ref: terminalEvidence.ref, evidence_sha256: terminalEvidence.sha256 });
+      const ownerOfflineStatus = await status(value.client, owner);
       const requesterOfflineStatus = await status(value.client, requester);
-      assert.equal(array(requesterOfflineStatus.payload['edit_leases'], 'requester edit leases').length, 0);
-      assert.equal((await groups(value.client, requester))[0]?.state, 'waiting');
+      assert.equal(array(ownerOfflineStatus.payload['edit_leases'], 'owner edit leases').length, 1, 'child terminal alone must retain owner WRITE authority');
+      assert.equal(array(requesterOfflineStatus.payload['edit_leases'], 'requester edit leases').length, 1, 'peer WRITE authority remains independent');
+      assert.equal((await groups(value.client, requester))[0]?.state, 'granted');
 
       await value.server.close();
       value.server = await startCoordinatorServer(coordinatorRuntimePaths(value.env));
@@ -248,11 +249,12 @@ void describe('Coordination Fabric offline replay and automatic reconciliation',
       const mergeRef = '.pi/autopilot/work-a/unit-merges/unit-a.json';
       const mergeSha = await writeEvidence(value.stateRoot, resumedOwner, mergeRef, `${JSON.stringify({ schema_version: 'autopilot.unit_merge.v1', workstream_run: resumedOwner.context.workstream_run, autopilot_id: resumedOwner.context.autopilot_id, unit_id: 'unit-a', attempt: 1, merge_commit_sha: integrationHead, integration_before: integrationHead, integration_after: integrationHead, execution_commit_ref: 'execution-commits/unit-a.json', changed_paths: [] })}\n`);
       await resumedOwner.reconciliation.recordReleaseEvidence({ source: 'unit-merge', targetId: 'unit-a:1', evidenceRef: mergeRef, evidenceSha256: mergeSha });
+      assert.equal(array((await status(value.client, resumedOwner)).payload['edit_leases'], 'released owner edit leases').length, 0, 'exact merge evidence releases only the owner WRITE authority');
       await detach(value.client, resumedOwner);
       const resumedRequester = await attachActor(value.client, value.stateRoot, 'b-resumed', true);
       await resumedRequester.reconciliation.reconcile('resume-before-dispatch');
       const firstReplay = await drain(value.client, resumedRequester, 'requester-first-replay');
-      assert.deepEqual(firstReplay.messages.map((entry) => entry.message_type).sort(), ['grant-offer', 'release-notification']);
+      assert.deepEqual(firstReplay.messages, [], 'non-blocking WRITE overlap creates no release or grant mailbox traffic');
       assert.equal(firstReplay.cursor.acknowledged_through_event_seq, 0);
       await detach(value.client, resumedRequester);
 
@@ -263,10 +265,8 @@ void describe('Coordination Fabric offline replay and automatic reconciliation',
       const acknowledgedStatus = await status(value.client, secondRequester);
       const cursors = array(acknowledgedStatus.payload['mailbox_cursors'], 'mailbox cursors').map((entry) => parseCoordinationMailboxCursor(entry));
       assert.equal(cursors[0]?.acknowledged_through_event_seq, cursors[0]?.delivered_through_event_seq);
-      const offered = (await groups(value.client, secondRequester))[0];
-      if (offered === undefined) throw new Error('grant offer missing after replay');
-      const grant = await secondRequester.negotiation.acknowledgeGrant(offered);
-      assert.equal(grant.acquisitionGroup.state, 'granted');
+      assert.equal((await groups(value.client, secondRequester))[0]?.state, 'granted');
+      assert.equal(array((await status(value.client, secondRequester)).payload['edit_leases'], 'resumed requester edit leases').length, 1);
     } finally {
       await closeHarness(value);
     }

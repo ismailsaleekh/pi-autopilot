@@ -411,7 +411,94 @@ CREATE INDEX idx_observations_group ON observations(repo_id, acquisition_group_i
 CREATE INDEX idx_observations_freshness ON observations(repo_id, freshness, entity_id);
 `;
 
-export const COORDINATOR_SCHEMA_MIGRATION_CHECKSUMS = Object.freeze([MIGRATION_1, MIGRATION_2, MIGRATION_3, MIGRATION_4, MIGRATION_5, MIGRATION_6, MIGRATION_7, MIGRATION_8, MIGRATION_9, MIGRATION_10].map((sql) => createHash('sha256').update(sql, 'utf8').digest('hex')));
+// Protocol 1.4 admitted free-form EXCLUSIVE rows. Preserve them explicitly as
+// legacy migration authority; never reinterpret historical bytes as a newly
+// package-declared critical operation. Durable entities and replay payloads are
+// transformed together so exact old idempotency keys remain replayable.
+const MIGRATION_11 = `
+UPDATE acquisition_groups
+SET payload_json=json_set(
+  payload_json,
+  '$.acquisition_kind','legacy-unknown',
+  '$.requested_leases',json((
+    SELECT json_group_array(json(CASE WHEN json_extract(value,'$.mode')='EXCLUSIVE' THEN
+      json_set(value,'$.exclusive_operation',json_object(
+        'schema_version','autopilot.exclusive_operation.v1','operation_id','legacy-schema11-'||substr(hex(acquisition_groups.entity_id),1,160),
+        'operation_kind','legacy-migration-exclusive','critical_section','legacy-migration-exclusive','resource_scope','exact-repository-path',
+        'expected_duration_ms',300000,'release_trigger','critical-section-exit'))
+      ELSE value END)) FROM json_each(acquisition_groups.payload_json,'$.requested_leases')
+  ))
+)
+WHERE EXISTS (SELECT 1 FROM json_each(acquisition_groups.payload_json,'$.requested_leases') WHERE json_extract(value,'$.mode')='EXCLUSIVE');
+
+UPDATE edit_leases
+SET payload_json=json_set(payload_json,'$.exclusive_operation',json_object(
+  'schema_version','autopilot.exclusive_operation.v1','operation_id','legacy-schema11-'||substr(hex(json_extract(payload_json,'$.acquisition_group_id')),1,160),
+  'operation_kind','legacy-migration-exclusive','critical_section','legacy-migration-exclusive','resource_scope','exact-repository-path',
+  'expected_duration_ms',300000,'release_trigger','critical-section-exit'))
+WHERE json_extract(payload_json,'$.mode')='EXCLUSIVE' AND json_type(payload_json,'$.exclusive_operation') IS NULL;
+
+UPDATE claim_requests
+SET payload_json=json_set(payload_json,'$.requested_leases',json((
+  SELECT json_group_array(json(CASE WHEN json_extract(value,'$.mode')='EXCLUSIVE' THEN
+    json_set(value,'$.exclusive_operation',json_object(
+      'schema_version','autopilot.exclusive_operation.v1','operation_id','legacy-schema11-'||substr(hex(json_extract(claim_requests.payload_json,'$.acquisition_group_id')),1,160),
+      'operation_kind','legacy-migration-exclusive','critical_section','legacy-migration-exclusive','resource_scope','exact-repository-path',
+      'expected_duration_ms',300000,'release_trigger','critical-section-exit'))
+    ELSE value END)) FROM json_each(claim_requests.payload_json,'$.requested_leases')
+)))
+WHERE EXISTS (SELECT 1 FROM json_each(claim_requests.payload_json,'$.requested_leases') WHERE json_extract(value,'$.mode')='EXCLUSIVE');
+
+UPDATE idempotency_results
+SET payload_json=json_set(payload_json,'$.acquisition_group',json_set(
+  json_extract(payload_json,'$.acquisition_group'),
+  '$.acquisition_kind','legacy-unknown',
+  '$.requested_leases',json((SELECT json_group_array(json(CASE WHEN json_extract(value,'$.mode')='EXCLUSIVE' THEN
+    json_set(value,'$.exclusive_operation',json_object(
+      'schema_version','autopilot.exclusive_operation.v1','operation_id','legacy-schema11-'||substr(hex(json_extract(idempotency_results.payload_json,'$.acquisition_group.acquisition_group_id')),1,160),
+      'operation_kind','legacy-migration-exclusive','critical_section','legacy-migration-exclusive','resource_scope','exact-repository-path',
+      'expected_duration_ms',300000,'release_trigger','critical-section-exit'))
+    ELSE value END)) FROM json_each(idempotency_results.payload_json,'$.acquisition_group.requested_leases')))
+))
+WHERE json_type(payload_json,'$.acquisition_group')='object'
+  AND EXISTS (SELECT 1 FROM json_each(idempotency_results.payload_json,'$.acquisition_group.requested_leases') WHERE json_extract(value,'$.mode')='EXCLUSIVE');
+
+UPDATE idempotency_results
+SET payload_json=json_set(payload_json,'$.edit_leases',json((SELECT json_group_array(json(CASE WHEN json_extract(value,'$.mode')='EXCLUSIVE' THEN
+  json_set(value,'$.exclusive_operation',json_object(
+    'schema_version','autopilot.exclusive_operation.v1','operation_id','legacy-schema11-'||substr(hex(json_extract(value,'$.acquisition_group_id')),1,160),
+    'operation_kind','legacy-migration-exclusive','critical_section','legacy-migration-exclusive','resource_scope','exact-repository-path',
+    'expected_duration_ms',300000,'release_trigger','critical-section-exit'))
+  ELSE value END)) FROM json_each(idempotency_results.payload_json,'$.edit_leases'))))
+WHERE json_type(payload_json,'$.edit_leases')='array'
+  AND EXISTS (SELECT 1 FROM json_each(idempotency_results.payload_json,'$.edit_leases') WHERE json_extract(value,'$.mode')='EXCLUSIVE');
+
+UPDATE idempotency_results
+SET payload_json=json_set(payload_json,'$.claim_request.requested_leases',json((SELECT json_group_array(json(CASE WHEN json_extract(value,'$.mode')='EXCLUSIVE' THEN
+  json_set(value,'$.exclusive_operation',json_object(
+    'schema_version','autopilot.exclusive_operation.v1','operation_id','legacy-schema11-'||substr(hex(json_extract(idempotency_results.payload_json,'$.claim_request.acquisition_group_id')),1,160),
+    'operation_kind','legacy-migration-exclusive','critical_section','legacy-migration-exclusive','resource_scope','exact-repository-path',
+    'expected_duration_ms',300000,'release_trigger','critical-section-exit'))
+  ELSE value END)) FROM json_each(idempotency_results.payload_json,'$.claim_request.requested_leases'))))
+WHERE json_type(payload_json,'$.claim_request')='object'
+  AND EXISTS (SELECT 1 FROM json_each(idempotency_results.payload_json,'$.claim_request.requested_leases') WHERE json_extract(value,'$.mode')='EXCLUSIVE');
+
+UPDATE idempotency_results
+SET payload_json=json_set(payload_json,'$.claim_requests',json((SELECT json_group_array(json(
+  CASE WHEN EXISTS (SELECT 1 FROM json_each(request.value,'$.requested_leases') AS requested WHERE json_extract(requested.value,'$.mode')='EXCLUSIVE') THEN
+    json_set(request.value,'$.requested_leases',json((SELECT json_group_array(json(CASE WHEN json_extract(lease.value,'$.mode')='EXCLUSIVE' THEN
+      json_set(lease.value,'$.exclusive_operation',json_object(
+        'schema_version','autopilot.exclusive_operation.v1','operation_id','legacy-schema11-'||substr(hex(json_extract(request.value,'$.acquisition_group_id')),1,160),
+        'operation_kind','legacy-migration-exclusive','critical_section','legacy-migration-exclusive','resource_scope','exact-repository-path',
+        'expected_duration_ms',300000,'release_trigger','critical-section-exit'))
+      ELSE lease.value END)) FROM json_each(request.value,'$.requested_leases') AS lease)))
+    ELSE request.value END
+)) FROM json_each(idempotency_results.payload_json,'$.claim_requests') AS request)))
+WHERE json_type(payload_json,'$.claim_requests')='array'
+  AND EXISTS (SELECT 1 FROM json_each(idempotency_results.payload_json,'$.claim_requests') AS request, json_each(request.value,'$.requested_leases') AS lease WHERE json_extract(lease.value,'$.mode')='EXCLUSIVE');
+`;
+
+export const COORDINATOR_SCHEMA_MIGRATION_CHECKSUMS = Object.freeze([MIGRATION_1, MIGRATION_2, MIGRATION_3, MIGRATION_4, MIGRATION_5, MIGRATION_6, MIGRATION_7, MIGRATION_8, MIGRATION_9, MIGRATION_10, MIGRATION_11].map((sql) => createHash('sha256').update(sql, 'utf8').digest('hex')));
 
 export type CoordinationMigrationRecordState = 'imported' | 'verified' | 'cutover-ready' | 'cutover-committed' | 'legacy-archived';
 
@@ -1231,6 +1318,7 @@ export class CoordinatorStore {
         { version: 8, sql: MIGRATION_8 },
         { version: 9, sql: MIGRATION_9 },
         { version: 10, sql: MIGRATION_10 },
+        { version: 11, sql: MIGRATION_11 },
       ] as const;
       for (const migration of migrations) {
         if (currentVersion >= migration.version) continue;
@@ -1964,7 +2052,32 @@ export class CoordinatorStore {
     const integrity = integrityResult(this.#db);
     const invariantFindings = this.#allInvariantFindings();
     const invariantErrors = invariantFindings.filter((finding) => finding.severity === 'error');
-    const now = this.#clock.now().toISOString();
+    const nowDate = this.#clock.now();
+    const now = nowDate.toISOString();
+    const retainedExclusiveOperations = this.#db.prepare('SELECT * FROM edit_leases ORDER BY repo_id, workstream_run, entity_id').all().map(editLeaseFromRow).filter((lease) => lease.mode === 'EXCLUSIVE').map((lease) => {
+      const operation = lease.exclusive_operation;
+      if (operation === undefined) throw new CoordinationRuntimeError('store-corrupt', 'EXCLUSIVE lease lacks its parsed operation contract', [lease.edit_lease_id]);
+      const event = asRow(this.#db.prepare('SELECT occurred_at FROM events WHERE repo_id=? AND event_seq=?').get(lease.owner.repo_id, lease.acquired_event_seq), 'EXCLUSIVE acquisition event');
+      const acquiredAt = sqlString(event, 'occurred_at');
+      const acquiredAtMs = Date.parse(acquiredAt);
+      if (!Number.isFinite(acquiredAtMs)) throw new CoordinationRuntimeError('store-corrupt', 'EXCLUSIVE acquisition event has an invalid timestamp', [lease.edit_lease_id, acquiredAt]);
+      const elapsedMs = Math.max(0, nowDate.getTime() - acquiredAtMs);
+      const attempt = this.#requireUnitAttempt(lease.owner.repo_id, lease.owner.workstream_run, lease.owner.unit_id, lease.owner.attempt);
+      return {
+        edit_lease_id: lease.edit_lease_id,
+        repo_id: lease.owner.repo_id,
+        workstream_run: lease.owner.workstream_run,
+        unit_id: lease.owner.unit_id,
+        attempt: lease.owner.attempt,
+        path: lease.path,
+        operation,
+        acquired_at: acquiredAt,
+        elapsed_ms: elapsedMs,
+        overdue: elapsedMs > operation.expected_duration_ms,
+        critical_section_active: attempt.critical_section === operation.critical_section && !attempt.preemptible,
+        release_from_age_authorized: false,
+      };
+    });
     const expired = this.#db.prepare("SELECT session_lease_id, repo_id, workstream_run, status, lease_expires_at FROM session_leases WHERE status IN ('attached','handoff-pending') AND lease_expires_at < ? ORDER BY repo_id, workstream_run").all(now).map((row) => ({
       session_lease_id: sqlString(row, 'session_lease_id'),
       repo_id: sqlString(row, 'repo_id'),
@@ -2017,6 +2130,7 @@ export class CoordinatorStore {
         active_wait_for_edges: activeWaitForEdges,
         open_deadlock_resolutions: openDeadlockResolutions,
         pending_adjudication_assignments: pendingAdjudicationAssignments,
+        retained_exclusive_operations: retainedExclusiveOperations,
         immutable_evidence_artifact_count: immutableEvidenceArtifactCount,
         coordination_migrations: coordinationMigrations,
         pending_migration_recovery_count: pendingMigrationRecoveryCount,
@@ -2430,9 +2544,20 @@ export class CoordinatorStore {
       const checkpointOrdinal = payloadInteger(request.payload, 'checkpoint_ordinal');
       if (checkpointOrdinal !== attempt.checkpoint_ordinal + 1) throw new CoordinationRuntimeError('stale-version', 'child checkpoint ordinal must advance exactly one durable boundary at a time');
       const seq = this.#nextEventSequence(request.repo_id);
-      const checkpointed: CoordinationUnitAttempt = { ...attempt, checkpoint_ordinal: checkpointOrdinal, critical_section: payloadNullableString(request.payload, 'critical_section'), preemptible: payloadBoolean(request.payload, 'preemptible'), version: attempt.version + 1 };
+      const criticalSection = payloadNullableString(request.payload, 'critical_section');
+      const preemptible = payloadBoolean(request.payload, 'preemptible');
+      const activeExclusive = this.#activeExclusiveLeases(attempt.owner);
+      if (criticalSection !== null && !activeExclusive.some((lease) => lease.exclusive_operation?.critical_section === criticalSection)) throw new CoordinationRuntimeError('invalid-request', 'child cannot enter a critical section without its exact active EXCLUSIVE operation', [criticalSection]);
+      if (criticalSection !== null && (preemptible || criticalSection !== attempt.critical_section)) throw new CoordinationRuntimeError('invalid-request', 'active EXCLUSIVE checkpoint must preserve its exact non-preemptible critical section', [criticalSection, String(preemptible)]);
+      if (attempt.critical_section !== null && criticalSection === null && !preemptible) throw new CoordinationRuntimeError('invalid-request', 'critical-section exit must restore attempt preemptibility before releasing EXCLUSIVE authority');
+      const checkpointed: CoordinationUnitAttempt = { ...attempt, checkpoint_ordinal: checkpointOrdinal, critical_section: criticalSection, preemptible, version: attempt.version + 1 };
       this.#updateEntity('unit_attempts', unitAttemptEntityId(attempt.owner), checkpointed);
-      return { sequence: seq, eventType: 'unit-attempt-checkpointed', entityType: 'unit-attempt', entityId: unitAttemptEntityId(attempt.owner), payload: { child, unit_attempt: checkpointed } };
+      const releasedExclusiveLeaseIds: string[] = [];
+      if (attempt.critical_section !== null && criticalSection === null) {
+        this.#releaseExitedExclusiveLeases(attempt.owner, releasedExclusiveLeaseIds);
+        this.#reevaluateWaitingGroups(attempt.owner.repo_id, seq);
+      }
+      return { sequence: seq, eventType: 'unit-attempt-checkpointed', entityType: 'unit-attempt', entityId: unitAttemptEntityId(attempt.owner), payload: { child, unit_attempt: checkpointed, released_exclusive_lease_ids: releasedExclusiveLeaseIds } };
     });
   }
 
@@ -2457,7 +2582,7 @@ export class CoordinatorStore {
       this.#db.prepare('UPDATE child_leases SET status=?, terminal_evidence_ref=?, terminal_evidence_sha256=?, version=version+1 WHERE child_lease_id=?').run(status, evidenceRef, evidenceSha, childId);
       if (status === 'recovery-required') {
         const attempt = this.#requireUnitAttempt(child.owner.repo_id, child.owner.workstream_run, child.owner.unit_id, child.owner.attempt);
-        if (attempt.state === 'running') this.#updateEntity('unit_attempts', unitAttemptEntityId(attempt.owner), { ...attempt, state: 'failed', critical_section: null, version: attempt.version + 1 });
+        if (attempt.state === 'running') this.#updateEntity('unit_attempts', unitAttemptEntityId(attempt.owner), { ...attempt, state: 'failed', critical_section: null, preemptible: true, version: attempt.version + 1 });
       }
       if (status === 'terminal' && evidenceRef !== null && evidenceSha !== null) {
         this.#acceptReconciliationEvidence({
@@ -2470,8 +2595,10 @@ export class CoordinatorStore {
         });
         this.#updateAttemptForSatisfiedCondition(child.owner, 'child-terminal');
       }
+      const releasedExclusiveLeaseIds: string[] = [];
+      this.#releaseExitedExclusiveLeases(child.owner, releasedExclusiveLeaseIds);
       const reconciliation = this.#reconcileOwnedRun(request.repo_id, child.owner.workstream_run, seq);
-      return { sequence: seq, eventType: status === 'terminal' ? 'child-terminal' : 'child-recovery-required', entityType: 'child-lease', entityId: childId, payload: { child: childFromRow(asRow(this.#db.prepare('SELECT * FROM child_leases WHERE child_lease_id=?').get(childId), 'completed child')), reconciliation } };
+      return { sequence: seq, eventType: status === 'terminal' ? 'child-terminal' : 'child-recovery-required', entityType: 'child-lease', entityId: childId, payload: { child: childFromRow(asRow(this.#db.prepare('SELECT * FROM child_leases WHERE child_lease_id=?').get(childId), 'completed child')), reconciliation, released_exclusive_lease_ids: releasedExclusiveLeaseIds } };
     });
   }
 
@@ -2483,7 +2610,6 @@ export class CoordinatorStore {
       this.#assertVersion(run.version, request.expected_version, 'run');
       if (this.#preparedTerminalIntent(run.repo_id, run.workstream_run) !== null) throw new CoordinationRuntimeError('invalid-state', 'run terminal preparation fences new acquisition groups');
       const groupId = payloadString(request.payload, 'acquisition_group_id');
-      if (this.#db.prepare('SELECT entity_id FROM acquisition_groups WHERE repo_id=? AND entity_id=?').get(request.repo_id, groupId) !== undefined) throw new CoordinationRuntimeError('stale-version', 'acquisition group already exists; retry with its original idempotency key or query status');
       const owner: CoordinationOwnerIdentity = {
         repo_id: request.repo_id,
         autopilot_id: run.autopilot_id,
@@ -2494,9 +2620,33 @@ export class CoordinatorStore {
       const requestedLeases = payloadRequestedLeases(request.payload);
       const requestedRole = payloadUnitRole(request.payload, 'role');
       if (requestedRole !== 'implement' && requestedRole !== 'fix' && requestedLeases.some((lease) => lease.mode !== 'READ')) throw new CoordinationRuntimeError('invalid-request', `${requestedRole} units may acquire READ authority only`);
+      const exclusiveOperation = requestedLeases.find((lease) => lease.mode === 'EXCLUSIVE')?.exclusive_operation;
+      if (exclusiveOperation !== undefined && payloadBoolean(request.payload, 'preemptible')) throw new CoordinationRuntimeError('invalid-request', 'an attempt holding bounded EXCLUSIVE authority must be non-preemptible until its critical section exits');
       const acquisitionKind = payloadAcquisitionKind(request.payload, 'acquisition_kind');
       const releaseCondition = payloadReleaseCondition(request.payload, 'normal_release_condition');
       if ((requestedRole === 'implement' || requestedRole === 'fix') && requestedLeases.some((lease) => lease.mode !== 'READ') && releaseCondition.condition_type === 'child-terminal') throw new CoordinationRuntimeError('invalid-request', 'source-changing edit authority cannot release from child terminal alone; merge, reset, quarantine, abort, or close proof is required');
+
+      // One-time post-cutover binding consumes exact retained legacy WRITE
+      // authority instead of creating a second initial group. The migration
+      // audit preserves the synthetic prior spec; only an unclaimed unknown-role
+      // attempt with an exact active mode/path set can be rebound.
+      const priorGroups = this.#db.prepare('SELECT * FROM acquisition_groups WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(owner.repo_id, owner.workstream_run).map(acquisitionGroupFromRow).filter((candidate) => sameOwner(candidate.owner, owner));
+      if (acquisitionKind === 'initial' && priorGroups.length === 1 && priorGroups[0]?.acquisition_kind === 'legacy-unknown' && priorGroups[0].state === 'granted') {
+        const legacyGroup = priorGroups[0];
+        const existingAttempt = this.#requireUnitAttempt(owner.repo_id, owner.workstream_run, owner.unit_id, owner.attempt);
+        const activeLegacyLeases = this.#db.prepare('SELECT * FROM edit_leases WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(owner.repo_id, owner.workstream_run).map(editLeaseFromRow).filter((lease) => sameOwner(lease.owner, owner));
+        const requestedKeys = [...new Set(requestedLeases.map((lease) => `${lease.mode}\0${lease.path}`))].sort();
+        const activeKeys = [...new Set(activeLegacyLeases.map((lease) => `${lease.mode}\0${lease.path}`))].sort();
+        const exactAuthority = canonicalJson(requestedKeys) === canonicalJson(activeKeys);
+        const requestedCheckpointOrdinal = payloadInteger(request.payload, 'checkpoint_ordinal');
+        const safeBinding = existingAttempt.role === 'unknown' && existingAttempt.spec.ref.startsWith('migration/') && this.#childForOwner(owner) === null && requestedCheckpointOrdinal === 0 && requestedLeases.every((lease) => lease.mode === 'WRITE');
+        if (!exactAuthority || !safeBinding) throw new CoordinationRuntimeError('invalid-state', 'retained legacy authority cannot bind to a different or already-dispatched attempt', [owner.unit_id, String(owner.attempt)]);
+        const seq = this.#nextEventSequence(request.repo_id);
+        const reboundAttempt: CoordinationUnitAttempt = { ...existingAttempt, state: 'preflight', role: requestedRole, spec: { ref: payloadString(request.payload, 'spec_ref'), sha256: payloadString(request.payload, 'spec_sha256') as `sha256:${string}` }, preemptible: true, checkpoint_ordinal: requestedCheckpointOrdinal, critical_section: null, version: existingAttempt.version + 1 };
+        this.#updateEntity('unit_attempts', unitAttemptEntityId(owner), reboundAttempt);
+        return { sequence: seq, eventType: 'legacy-authority-rebound', entityType: 'acquisition-group', entityId: legacyGroup.acquisition_group_id, payload: { outcome: 'granted', acquisition_group: legacyGroup, observations: [], edit_leases: activeLegacyLeases, request_refs: [], rebound_from_group_id: groupId, unit_attempt: reboundAttempt } };
+      }
+      if (this.#db.prepare('SELECT entity_id FROM acquisition_groups WHERE repo_id=? AND entity_id=?').get(request.repo_id, groupId) !== undefined) throw new CoordinationRuntimeError('stale-version', 'acquisition group already exists; retry with its original idempotency key or query status');
       const seq = this.#nextEventSequence(request.repo_id);
       const requestedCheckpointOrdinal = payloadInteger(request.payload, 'checkpoint_ordinal');
       const existingAttemptRow = this.#db.prepare('SELECT entity_id FROM unit_attempts WHERE entity_id=?').get(unitAttemptEntityId(owner));
@@ -2504,10 +2654,12 @@ export class CoordinatorStore {
       const attempt: CoordinationUnitAttempt = {
         schema_version: 'autopilot.unit_attempt.v1', owner, state: 'preflight', role: requestedRole,
         spec: { ref: payloadString(request.payload, 'spec_ref'), sha256: payloadString(request.payload, 'spec_sha256') as `sha256:${string}` },
-        preemptible: payloadBoolean(request.payload, 'preemptible'), checkpoint_ordinal: requestedCheckpointOrdinal, critical_section: null, version: 1,
+        // A waiting group has not entered its critical section and holds no
+        // authority. #grantGroup atomically makes an EXCLUSIVE attempt
+        // non-preemptible and records the closed critical-section identity.
+        preemptible: true, checkpoint_ordinal: requestedCheckpointOrdinal, critical_section: null, version: 1,
       };
       this.#insertOrVerifyUnitAttempt(attempt);
-      const priorGroups = this.#db.prepare('SELECT * FROM acquisition_groups WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(owner.repo_id, owner.workstream_run).map(acquisitionGroupFromRow).filter((candidate) => sameOwner(candidate.owner, owner));
       if (acquisitionKind === 'initial' && priorGroups.length > 0) throw new CoordinationRuntimeError('invalid-state', 'a unit attempt may declare exactly one immutable initial acquisition group');
       if (acquisitionKind === 'materialization-read-expansion') {
         if (!requestedLeases.every((lease) => lease.mode === 'READ')) throw new CoordinationRuntimeError('invalid-request', 'materialization expansion may request READ authority only');
@@ -2515,11 +2667,11 @@ export class CoordinatorStore {
         if (initial === undefined || (initial.state !== 'granted' && initial.state !== 'released')) throw new CoordinationRuntimeError('invalid-state', 'materialization READ expansion requires a previously granted initial acquisition group');
       }
       this.#assertReleaseConditionOwner(releaseCondition, owner);
-      const group: CoordinationAcquisitionGroup = {
+      const group = parseCoordinationAcquisitionGroup({
         schema_version: 'autopilot.acquisition_group.v2', acquisition_group_id: groupId, owner, acquisition_kind: acquisitionKind, requested_leases: requestedLeases,
         reason: payloadString(request.payload, 'reason'), normal_release_condition: releaseCondition, state: 'waiting', created_event_seq: seq, fairness_event_seq: seq,
         grant_event_seq: null, offer_expires_at: null, offer_count: 0, bypass_count: 0, version: 1,
-      };
+      });
       this.#insertEntity('acquisition_groups', groupId, owner.repo_id, owner.workstream_run, group);
       const expiredOffers = this.#expireGrantOffers(request.repo_id, seq);
       if (expiredOffers) this.#reevaluateWaitingGroups(request.repo_id, seq);
@@ -2599,6 +2751,11 @@ export class CoordinatorStore {
         if (row === undefined) continue;
         const lease = editLeaseFromRow(row);
         if (!sameOwner(lease.owner, claimRequest.owner)) throw new CoordinationRuntimeError('invalid-state', 'claim request blocking lease changed durable owner');
+        if (lease.mode === 'EXCLUSIVE' && lease.exclusive_operation?.operation_kind !== 'legacy-migration-exclusive') {
+          const attempt = this.#requireUnitAttempt(lease.owner.repo_id, lease.owner.workstream_run, lease.owner.unit_id, lease.owner.attempt);
+          if (attempt.critical_section !== lease.exclusive_operation?.critical_section) throw new CoordinationRuntimeError('invalid-state', 'authenticated release-now cannot exit an EXCLUSIVE operation whose exact critical section is not active', [lease.edit_lease_id]);
+          this.#updateEntity('unit_attempts', unitAttemptEntityId(attempt.owner), { ...attempt, critical_section: null, preemptible: true, version: attempt.version + 1 });
+        }
         this.#db.prepare('DELETE FROM edit_leases WHERE entity_id=?').run(leaseId);
         releasedLeaseIds.push(leaseId);
         this.#markGroupReleasedWhenEmpty(lease.owner.repo_id, lease.acquisition_group_id);
@@ -3320,8 +3477,10 @@ export class CoordinatorStore {
       const updated = this.#db.prepare("UPDATE child_leases SET status='terminal', terminal_evidence_ref=?, terminal_evidence_sha256=?, version=version+1 WHERE child_lease_id=? AND status IN ('running','recovery-required')").run(proof.terminalEvidence.ref, proof.terminalEvidence.sha256, child.child_lease_id);
       if (updated.changes !== 1) throw new CoordinationRuntimeError('invalid-state', 'trusted terminal repair lost its exact child transition', [child.child_lease_id]);
       this.#updateAttemptForSatisfiedCondition(child.owner, 'child-terminal');
-      // Terminal process fact releases observations. Source-changing edit authority
-      // remains until the owning supervisor commits reset or quarantine evidence.
+      const releasedExclusiveLeaseIds: string[] = [];
+      this.#releaseExitedExclusiveLeases(child.owner, releasedExclusiveLeaseIds);
+      // Terminal process fact releases observations. Ordinary WRITE authority
+      // remains until merge/reset/quarantine; bounded EXCLUSIVE authority ends.
       const cleanEditRelease = false;
       this.#persistPostCutoverTerminalRepairAudit(run, child, proof, cleanEditRelease, seq);
     }
@@ -3423,6 +3582,22 @@ export class CoordinatorStore {
       released_from_active_import: false, released_post_cutover: coordinationCutoverCommitted(this.#stateRoot, run.repo_id),
     };
     this.#db.prepare('INSERT INTO migration_legacy_audit(entity_id, repo_id, source_kind, payload_json, created_event_seq) VALUES(?, ?, ?, ?, ?)').run(auditId, run.repo_id, 'claim-event', canonicalJson(payload), seq);
+  }
+
+  #activeExclusiveLeases(owner: CoordinationOwnerIdentity): readonly CoordinationEditLease[] {
+    return Object.freeze(this.#db.prepare('SELECT * FROM edit_leases WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(owner.repo_id, owner.workstream_run).map(editLeaseFromRow).filter((lease) => sameOwner(lease.owner, owner) && lease.mode === 'EXCLUSIVE'));
+  }
+
+  #releaseExitedExclusiveLeases(owner: CoordinationOwnerIdentity, releasedLeaseIds: string[]): void {
+    for (const lease of this.#activeExclusiveLeases(owner)) {
+      const operation = lease.exclusive_operation;
+      if (operation === undefined || operation.operation_kind === 'legacy-migration-exclusive' || operation.release_trigger !== 'critical-section-exit') continue;
+      const group = this.#requireGroup(owner.repo_id, lease.acquisition_group_id);
+      const pairedWrite = group.requested_leases.some((requested) => requested.mode === 'WRITE' && requested.path === lease.path)
+        && this.#db.prepare("SELECT entity_id FROM edit_leases WHERE repo_id=? AND workstream_run=? AND json_extract(payload_json, '$.acquisition_group_id')=? AND json_extract(payload_json, '$.mode')='WRITE' AND json_extract(payload_json, '$.path')=? LIMIT 1").get(owner.repo_id, owner.workstream_run, lease.acquisition_group_id, lease.path) !== undefined;
+      if (!pairedWrite) throw new CoordinationRuntimeError('store-corrupt', 'new EXCLUSIVE authority lost its paired WRITE intention before critical-section exit', [lease.edit_lease_id, lease.path]);
+      this.#releaseOwnedLease(owner.repo_id, owner.workstream_run, lease.edit_lease_id, releasedLeaseIds);
+    }
   }
 
   #releaseOwnedLease(repoId: string, workstreamRun: string, leaseId: string, releasedLeaseIds: string[]): void {
@@ -3915,7 +4090,7 @@ export class CoordinatorStore {
     const attempt = unitAttemptFromRow(row);
     const state = conditionType === 'child-terminal' ? 'transport-complete' : conditionType === 'unit-merged' ? 'merged' : conditionType === 'attempt-reset' ? 'reset' : conditionType === 'quarantine-captured' ? 'quarantined' : null;
     if (state === null || attempt.state === state) return;
-    this.#updateEntity('unit_attempts', entityId, { ...attempt, state, version: attempt.version + 1 });
+    this.#updateEntity('unit_attempts', entityId, { ...attempt, state, critical_section: null, preemptible: true, version: attempt.version + 1 });
   }
 
   #updateAttemptFromEvidence(run: CoordinationRun, conditionType: CoordinationReleaseConditionType, targetId: string): void {
@@ -4274,9 +4449,16 @@ export class CoordinatorStore {
         schema_version: 'autopilot.edit_lease.v1',
         edit_lease_id: stableEntityId('lease', [group.owner.repo_id, group.acquisition_group_id, String(index), requested.mode, requested.path]),
         owner: group.owner, acquisition_group_id: group.acquisition_group_id, path: requested.path, mode: requested.mode, purpose: requested.purpose,
+        ...(requested.exclusive_operation === undefined ? {} : { exclusive_operation: requested.exclusive_operation }),
         acquired_event_seq: seq, normal_release_condition: group.normal_release_condition, version: 1,
       };
       leases.push(lease);
+    }
+    const exclusiveOperation = group.requested_leases.find((requested) => requested.mode === 'EXCLUSIVE')?.exclusive_operation;
+    if (exclusiveOperation !== undefined && exclusiveOperation.operation_kind !== 'legacy-migration-exclusive') {
+      const attempt = this.#requireUnitAttempt(group.owner.repo_id, group.owner.workstream_run, group.owner.unit_id, group.owner.attempt);
+      if (attempt.critical_section !== null) throw new CoordinationRuntimeError('invalid-state', 'EXCLUSIVE grant requires an attempt outside every critical section', [group.acquisition_group_id, attempt.critical_section]);
+      this.#updateEntity('unit_attempts', unitAttemptEntityId(attempt.owner), { ...attempt, critical_section: exclusiveOperation.critical_section, preemptible: false, version: attempt.version + 1 });
     }
     for (const observation of observations) this.#insertObservation(observation);
     for (const lease of leases) this.#insertEntity('edit_leases', lease.edit_lease_id, lease.owner.repo_id, lease.owner.workstream_run, lease);

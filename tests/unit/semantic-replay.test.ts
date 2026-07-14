@@ -26,7 +26,7 @@ function attachRun(stateRoot: string, suffix = 'primary'): CoordinatorRequestEnv
   const run = `semantic-replay-run-${suffix}`;
   const source = join(stateRoot, 'repository');
   return {
-    schema_version: 'autopilot.coordinator_request.v1', protocol_version: '1.4', request_id: `semantic-replay-attach-request-${suffix}`,
+    schema_version: 'autopilot.coordinator_request.v1', protocol_version: '1.5', request_id: `semantic-replay-attach-request-${suffix}`,
     action: 'attach-run', idempotency_key: `semantic-replay-attach-${suffix}`, repo_id: repoId, workstream_run: run,
     session_id: null, fencing_generation: null, expected_version: 0,
     payload: {
