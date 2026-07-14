@@ -1,5 +1,6 @@
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
+import { deriveAutopilotAuthority, persistAutopilotAuthority } from "./authority.js";
 import { parseAutopilotUnitSpec } from "./contracts/validate.js";
 import { matchesRepoPathPattern, pathOverlapsOrContains, writeJsonAtomic } from "./parallel-runtime.js";
 import { reservationSchedulingBlockers } from "./coordination/reservations.js";
@@ -8,6 +9,8 @@ export async function writeDispatchArtifacts(input) {
     const claimSnapshotPath = join(input.runtimeRoot, 'claim-snapshots', `${input.dispatch.dispatch_id}.json`);
     await mkdir(join(input.runtimeRoot, 'dispatches'), { recursive: true });
     await mkdir(join(input.runtimeRoot, 'claim-snapshots'), { recursive: true });
+    for (const selected of input.dispatch.selected)
+        await persistAutopilotAuthority(input.runtimeRoot, selected.authority);
     await writeJsonAtomic(dispatchPath, input.dispatch);
     const snapshot = {
         schema_version: 'autopilot.claim_snapshot.v1',
@@ -19,7 +22,7 @@ export async function writeDispatchArtifacts(input) {
     await writeJsonAtomic(claimSnapshotPath, snapshot);
     return { dispatchPath, claimSnapshotPath };
 }
-export function planNextDispatch(input) {
+export async function planNextDispatch(input) {
     const createdAt = (input.now ?? new Date()).toISOString();
     const runningCount = input.runningAttempts.length;
     const capacity = Math.max(0, input.config.parallel_cap - runningCount);
@@ -74,6 +77,7 @@ export function planNextDispatch(input) {
             details.push('unit worktree cannot be created or resumed');
         }
         let spec = null;
+        let authority = null;
         if (candidate.spec === null) {
             reasons.push('missing-spec');
             details.push('candidate attempt has no schema-valid spec artifact');
@@ -81,6 +85,7 @@ export function planNextDispatch(input) {
         else {
             try {
                 spec = parseAutopilotUnitSpec(candidate.spec);
+                authority = await deriveAutopilotAuthority({ spec });
             }
             catch (error) {
                 reasons.push('invalid-spec');
@@ -91,8 +96,8 @@ export function planNextDispatch(input) {
             reasons.push('running-cap-reached');
             details.push(`parallel cap ${String(input.config.parallel_cap)} with ${String(runningCount)} already running`);
         }
-        if (spec !== null) {
-            const requestedClaims = schedulerClaimsForSpec(spec);
+        if (spec !== null && authority !== null) {
+            const requestedClaims = schedulerClaimsForAuthority(spec, authority);
             const blockers = findSchedulerClaimBlockers(acceptedClaims, requestedClaims, spec.unit_id, spec.attempt);
             if (blockers.length > 0) {
                 reasons.push('path-conflict');
@@ -115,12 +120,12 @@ export function planNextDispatch(input) {
             }
         }
         const uniqueReasons = unique(reasons);
-        if (uniqueReasons.length > 0 || spec === null) {
+        if (uniqueReasons.length > 0 || spec === null || authority === null) {
             skipped.push({ unit_id: candidate.unit_id, attempt: candidate.attempt, reasons: uniqueReasons, details: unique(details) });
             continue;
         }
-        selected.push({ unit_id: candidate.unit_id, attempt: candidate.attempt, spec, order_key: orderKey(input.masterPlan, candidate.unit_id) });
-        acceptedClaims.push(...schedulerClaimsForSpec(spec));
+        selected.push({ unit_id: candidate.unit_id, attempt: candidate.attempt, spec, authority, order_key: orderKey(input.masterPlan, candidate.unit_id) });
+        acceptedClaims.push(...schedulerClaimsForAuthority(spec, authority));
     }
     return {
         schema_version: 'autopilot.dispatch.v1',
@@ -141,13 +146,12 @@ function orderKey(masterPlan, unitId) {
     }
     return `999999:999999:${unitId}`;
 }
-function schedulerClaimsForSpec(spec) {
-    const claims = [];
-    for (const path of spec.owned_paths)
-        claims.push({ path, claim_type: 'WRITE', unit_id: spec.unit_id, attempt: spec.attempt });
-    for (const path of spec.read_only_paths)
-        claims.push({ path, claim_type: 'READ', unit_id: spec.unit_id, attempt: spec.attempt });
-    return claims;
+function schedulerClaimsForAuthority(spec, authority) {
+    return Object.freeze([
+        ...authority.observations.map((entry) => ({ path: entry.path, claim_type: 'READ', unit_id: spec.unit_id, attempt: spec.attempt })),
+        ...authority.edit_intentions.map((entry) => ({ path: entry.path, claim_type: 'WRITE', unit_id: spec.unit_id, attempt: spec.attempt })),
+        ...authority.exclusives.map((entry) => ({ path: entry.path, claim_type: 'EXCLUSIVE', unit_id: spec.unit_id, attempt: spec.attempt })),
+    ]);
 }
 function findSchedulerClaimBlockers(existing, requested, unitId, attempt) {
     const blockers = [];
@@ -157,7 +161,12 @@ function findSchedulerClaimBlockers(existing, requested, unitId, attempt) {
                 continue;
             if (!pathOverlapsOrContains(req.path, claim.path) && !matchesRepoPathPattern(req.path, claim.path) && !matchesRepoPathPattern(claim.path, req.path))
                 continue;
-            if (req.claim_type === 'READ' || claim.claim_type === 'READ')
+            // A previously selected/active READ already owns immutable worktree bytes
+            // and may finish while a new EXCLUSIVE starts. An active EXCLUSIVE blocks
+            // a new READ, and WRITE/EXCLUSIVE pairs remain incompatible.
+            if (claim.claim_type === 'READ')
+                continue;
+            if (req.claim_type !== 'EXCLUSIVE' && claim.claim_type !== 'EXCLUSIVE')
                 continue;
             blockers.push(`${req.claim_type} ${req.path} conflicts with ${claim.claim_type} ${claim.path} from ${claim.unit_id} attempt ${String(claim.attempt)}`);
         }

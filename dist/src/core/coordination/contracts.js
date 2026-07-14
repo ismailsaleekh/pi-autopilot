@@ -1,5 +1,6 @@
+import { createHash } from 'node:crypto';
 import { isAbsolute, normalize } from 'node:path';
-import { AUTOPILOT_COORDINATION_SNAPSHOT_SCHEMA, AUTOPILOT_COORDINATOR_PROTOCOL_VERSION, AUTOPILOT_COORDINATOR_REQUEST_SCHEMA, AUTOPILOT_COORDINATOR_RESPONSE_SCHEMA, COORDINATION_ACQUISITION_STATES, COORDINATION_CHILD_STATUSES, COORDINATION_CLAIM_MODES, COORDINATION_MESSAGE_STATUSES, COORDINATION_OPERATIONAL_ESCALATION_REASONS, COORDINATION_OPERATION_STAGES, COORDINATION_OBSERVATION_EXECUTION_STATES, COORDINATION_OBSERVATION_FRESHNESS_STATES, COORDINATION_OBSERVATION_OBJECT_KINDS, COORDINATION_OPERATION_TYPES, COORDINATION_RELEASE_CONDITION_TYPES, COORDINATION_RECONCILIATION_SOURCES, COORDINATION_REQUEST_STATUSES, COORDINATION_RESERVATION_OBLIGATION_STATES, COORDINATION_MESSAGE_TYPES, COORDINATION_RUN_STATUSES, COORDINATION_SESSION_STATUSES, COORDINATION_SESSION_ATTACHMENT_KINDS, COORDINATION_MIGRATION_RECOVERY_RESOLUTIONS, COORDINATION_MIGRATION_RECOVERY_STATUSES, COORDINATION_MIGRATION_RECOVERY_TYPES, COORDINATION_UNIT_ROLES, COORDINATION_UNIT_STATES, COORDINATION_WORKTREE_KINDS, COORDINATION_WORKTREE_STATES, COORDINATION_WAIT_EDGE_STATES, COORDINATION_DEADLOCK_ACTIONS, COORDINATION_DEADLOCK_STATES, } from "./types.js";
+import { AUTOPILOT_COORDINATION_SNAPSHOT_SCHEMA, AUTOPILOT_COORDINATOR_PROTOCOL_VERSION, AUTOPILOT_COORDINATOR_REQUEST_SCHEMA, AUTOPILOT_COORDINATOR_RESPONSE_SCHEMA, COORDINATION_ACQUISITION_STATES, COORDINATION_CHILD_STATUSES, COORDINATION_CLAIM_MODES, COORDINATION_MESSAGE_STATUSES, COORDINATION_INTEGRATION_CONFLICT_KINDS, COORDINATION_INTEGRATION_DISPOSITIONS, COORDINATION_MERGE_TREE_STATUSES, COORDINATION_OPERATIONAL_ESCALATION_REASONS, COORDINATION_OPERATION_STAGES, COORDINATION_OBSERVATION_EXECUTION_STATES, COORDINATION_OBSERVATION_FRESHNESS_STATES, COORDINATION_OBSERVATION_OBJECT_KINDS, COORDINATION_OPERATION_TYPES, COORDINATION_RELEASE_CONDITION_TYPES, COORDINATION_RECONCILIATION_SOURCES, COORDINATION_REQUEST_STATUSES, COORDINATION_RESERVATION_OBLIGATION_STATES, COORDINATION_MESSAGE_TYPES, COORDINATION_RUN_STATUSES, COORDINATION_SESSION_STATUSES, COORDINATION_SESSION_ATTACHMENT_KINDS, COORDINATION_MIGRATION_RECOVERY_RESOLUTIONS, COORDINATION_MIGRATION_RECOVERY_STATUSES, COORDINATION_MIGRATION_RECOVERY_TYPES, COORDINATION_UNIT_ROLES, COORDINATION_UNIT_STATES, COORDINATION_WORKTREE_KINDS, COORDINATION_WORKTREE_STATES, COORDINATION_WAIT_EDGE_STATES, COORDINATION_DEADLOCK_ACTIONS, COORDINATION_DEADLOCK_STATES, } from "./types.js";
 export class CoordinationContractError extends Error {
     name = 'CoordinationContractError';
     code = 'invalid-coordination-contract';
@@ -523,10 +524,47 @@ export function parseCoordinationChangeReservation(value) {
         version: integer(record, 'version', label, 1),
     };
 }
+export function parseCoordinationIntegrationConflict(value, label = 'CoordinationIntegrationConflict') {
+    const record = object(value, label, ['classification_id', 'dependent_commit', 'disposition', 'evidence', 'kind', 'merge_base', 'merge_tree_status', 'overlapping_hunks', 'overlapping_paths', 'predecessor_commit', 'protected_surfaces', 'schema_version', 'semantic_keys']);
+    const commit = (field) => {
+        const result = nullableString(record, field, label, 64);
+        if (result !== null && !/^[a-f0-9]{40,64}$/u.test(result))
+            fail(label, `${field} must be a full lowercase Git object id or null`);
+        return result;
+    };
+    const mergeBase = commit('merge_base');
+    const predecessorCommit = commit('predecessor_commit');
+    const dependentCommit = commit('dependent_commit');
+    const mergeTreeStatus = oneOf(record, 'merge_tree_status', COORDINATION_MERGE_TREE_STATUSES, label);
+    if (mergeTreeStatus === 'legacy-unverified' ? mergeBase !== null || predecessorCommit !== null || dependentCommit !== null : mergeBase === null || predecessorCommit === null || dependentCommit === null)
+        fail(label, 'verified classification requires all commit identities; legacy classification requires none');
+    return {
+        schema_version: literal(record, 'schema_version', 'autopilot.integration_conflict.v1', label),
+        classification_id: identifier(record, 'classification_id', label),
+        kind: oneOf(record, 'kind', COORDINATION_INTEGRATION_CONFLICT_KINDS, label),
+        disposition: oneOf(record, 'disposition', COORDINATION_INTEGRATION_DISPOSITIONS, label),
+        merge_base: mergeBase,
+        predecessor_commit: predecessorCommit,
+        dependent_commit: dependentCommit,
+        merge_tree_status: mergeTreeStatus,
+        overlapping_paths: uniqueStrings(record['overlapping_paths'], `${label}.overlapping_paths`, 1, 1024),
+        overlapping_hunks: uniqueStrings(record['overlapping_hunks'], `${label}.overlapping_hunks`, 0, 1024),
+        semantic_keys: uniqueStrings(record['semantic_keys'], `${label}.semantic_keys`, 0, 1024),
+        protected_surfaces: uniqueStrings(record['protected_surfaces'], `${label}.protected_surfaces`, 0, 1024),
+        evidence: uniqueStrings(record['evidence'], `${label}.evidence`, 1, 1024),
+    };
+}
 export function parseCoordinationReservationObligation(value) {
     const label = 'CoordinationReservationObligation';
-    const record = object(value, label, ['created_event_seq', 'integration_evidence', 'obligation_id', 'overlapping_paths', 'predecessor_released_event_seq', 'predecessor_reservation_id', 'predecessor_terminal_sha', 'repo_id', 'reservation_id', 'resolved_event_seq', 'schema_version', 'state', 'validation_evidence', 'version', 'workstream_run']);
+    const record = object(value, label, ['created_event_seq', 'integration_evidence', 'obligation_id', 'overlapping_paths', 'predecessor_released_event_seq', 'predecessor_reservation_id', 'predecessor_terminal_sha', 'repo_id', 'reservation_id', 'resolved_event_seq', 'schema_version', 'state', 'validation_evidence', 'version', 'workstream_run'], ['integration_conflict']);
     const state = oneOf(record, 'state', COORDINATION_RESERVATION_OBLIGATION_STATES, label);
+    const obligationId = identifier(record, 'obligation_id', label);
+    const overlappingPaths = uniqueStrings(record['overlapping_paths'], `${label}.overlapping_paths`, 1);
+    const integrationConflict = record['integration_conflict'] === undefined
+        ? parseCoordinationIntegrationConflict({ schema_version: 'autopilot.integration_conflict.v1', classification_id: `legacy-${createHash('sha256').update(`${obligationId}\0${[...overlappingPaths].sort().join('\0')}`, 'utf8').digest('hex')}`, kind: 'legacy-conservative', disposition: 'repair-required', merge_base: null, predecessor_commit: null, dependent_commit: null, merge_tree_status: 'legacy-unverified', overlapping_paths: overlappingPaths, overlapping_hunks: [], semantic_keys: [], protected_surfaces: [], evidence: ['historical reservation obligation predates integration-time Git classification'] }, `${label}.integration_conflict`)
+        : parseCoordinationIntegrationConflict(record['integration_conflict'], `${label}.integration_conflict`);
+    if (integrationConflict.overlapping_paths.some((path) => !overlappingPaths.some((candidate) => coordinationPathsOverlap(path, candidate))))
+        fail(label, 'integration conflict paths must be contained by the reservation overlap');
     const predecessorReleased = nullableInteger(record, 'predecessor_released_event_seq', label);
     const predecessorTerminalSha = nullableString(record, 'predecessor_terminal_sha', label, 64);
     if (predecessorTerminalSha !== null && !/^[a-f0-9]{7,64}$/u.test(predecessorTerminalSha))
@@ -544,12 +582,13 @@ export function parseCoordinationReservationObligation(value) {
         fail(label, 'cancelled obligation requires a terminal event sequence');
     return {
         schema_version: literal(record, 'schema_version', 'autopilot.reservation_obligation.v1', label),
-        obligation_id: identifier(record, 'obligation_id', label),
+        obligation_id: obligationId,
         repo_id: pathSegmentIdentifier(record, 'repo_id', label),
         workstream_run: pathSegmentIdentifier(record, 'workstream_run', label),
         reservation_id: identifier(record, 'reservation_id', label),
         predecessor_reservation_id: identifier(record, 'predecessor_reservation_id', label),
-        overlapping_paths: uniqueStrings(record['overlapping_paths'], `${label}.overlapping_paths`, 1),
+        overlapping_paths: overlappingPaths,
+        integration_conflict: integrationConflict,
         state,
         created_event_seq: integer(record, 'created_event_seq', label, 1),
         predecessor_released_event_seq: predecessorReleased,
@@ -1211,10 +1250,11 @@ export function parseCoordinatorResponseEnvelope(value) {
     };
 }
 export function claimModesConflict(left, right) {
-    // READ is a commit/hash-bound observation in an isolated worktree. It never
-    // represents shared mutable filesystem authority and therefore cannot block
-    // an edit intention or bounded critical section.
-    return left !== 'READ' && right !== 'READ';
+    // READ is a commit/hash-bound observation and WRITE is speculative edit
+    // intent in an isolated worktree, so those modes never exclude one another.
+    // A bounded EXCLUSIVE critical section protects an indivisible surface from
+    // both reads and edits; actual WRITE/WRITE conflicts are classified later.
+    return left === 'EXCLUSIVE' || right === 'EXCLUSIVE';
 }
 export function coordinationPathsOverlap(left, right) {
     const normalize = (value) => value.replace(/\/\*\*$/u, '').replace(/\/$/u, '');

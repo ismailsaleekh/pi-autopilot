@@ -15,6 +15,7 @@ import { proveLegacyReadAttemptTerminal } from "./legacy-read-terminal.js";
 import { COORDINATOR_BUSY_TIMEOUT_MS, COORDINATOR_DATABASE_SCHEMA_VERSION, COORDINATOR_GRANT_OFFER_TTL_MS, COORDINATOR_PACKAGE_BUILD, enforcePrivateAuthorityPath, enforceWindowsPrivateAcl, ensureCoordinatorPrivateRoots } from "./runtime-paths.js";
 import { activeCoordinationMigrationFreeze, assertCoordinationDispatchAllowed, assertCoordinationFrozenMutationAllowed, assertCoordinationMigrationRecoveryOperationAuthorized, coordinationCutoverCommitted } from "./migration-paths.js";
 import { proveStructuredAttemptTerminal } from "./terminal-attempt-proof.js";
+import { classifyCoordinationIntegrationConflict } from "./integration-conflicts.js";
 import { assertAutopilotChildTerminalAcceptanceChain, AUTOPILOT_CHILD_TERMINAL_ACCEPTANCE_SCHEMA, parseAutopilotChildTerminalAcceptance } from "./terminal-acceptance.js";
 import { parseRunTerminalSha, parseUnitAttemptTarget, parseUnitFailureEvidenceFacts, parseUnitMergeReservationFacts, validateReconciliationEvidenceDocument, validateReservationIntegrationEvidenceDocument, validateReservationValidationArtifactChain, validateReservationValidationEvidenceDocument } from "./terminal-evidence.js";
 import { AUTOPILOT_COORDINATOR_PROTOCOL_VERSION, COORDINATION_WORKTREE_STATES } from "./types.js";
@@ -3642,6 +3643,8 @@ export class CoordinatorStore {
                 if (predecessor.terminal_outcome === 'closed' && predecessor.terminal_sha !== null && this.#gitCommitIsAncestor(run, predecessor.terminal_sha, facts.integrationBefore))
                     continue;
                 const predecessorLanded = predecessor.released_event_seq !== null && predecessor.terminal_outcome === 'closed' && predecessor.terminal_sha !== null;
+                const overlapPaths = [reservation.path, predecessor.path].filter((entry, index, values) => values.indexOf(entry) === index).sort();
+                const integrationConflict = this.#classifyReservationOverlap(run, facts.integrationAfter, predecessor, overlapPaths);
                 const obligation = parseCoordinationReservationObligation({
                     schema_version: 'autopilot.reservation_obligation.v1',
                     obligation_id: stableEntityId('reservation-obligation', [reservation.reservation_id, predecessor.reservation_id]),
@@ -3649,7 +3652,8 @@ export class CoordinatorStore {
                     workstream_run: run.workstream_run,
                     reservation_id: reservation.reservation_id,
                     predecessor_reservation_id: predecessor.reservation_id,
-                    overlapping_paths: [reservation.path, predecessor.path].filter((entry, index, values) => values.indexOf(entry) === index).sort(),
+                    overlapping_paths: overlapPaths,
+                    integration_conflict: integrationConflict,
                     state: predecessorLanded ? 'integration-required' : 'waiting-for-predecessor',
                     created_event_seq: seq,
                     predecessor_released_event_seq: predecessorLanded ? predecessor.released_event_seq : null,
@@ -3664,19 +3668,26 @@ export class CoordinatorStore {
                 this.#insertMessage({
                     schema_version: 'autopilot.coordination_message.v1', message_id: stableEntityId('message', [predecessorLanded ? 'reservation-landed' : 'reservation-overlap', obligation.obligation_id, 'dependent']), repo_id: run.repo_id,
                     recipient_workstream_run: run.workstream_run, message_type: predecessorLanded ? 'reservation-landed' : 'reservation-overlap', correlation_id: obligation.obligation_id,
-                    payload: { obligation_id: obligation.obligation_id, role: 'dependent', reservation_id: reservation.reservation_id, predecessor_reservation_id: predecessor.reservation_id, predecessor_released_event_seq: predecessor.released_event_seq, predecessor_terminal_sha: predecessor.terminal_sha, overlapping_paths: obligation.overlapping_paths, required_action: predecessorLanded ? 'integrate-and-revalidate' : 'wait-for-predecessor' },
+                    payload: { obligation_id: obligation.obligation_id, role: 'dependent', reservation_id: reservation.reservation_id, predecessor_reservation_id: predecessor.reservation_id, predecessor_released_event_seq: predecessor.released_event_seq, predecessor_terminal_sha: predecessor.terminal_sha, overlapping_paths: obligation.overlapping_paths, integration_conflict: obligation.integration_conflict, required_action: integrationConflict.disposition === 'repair-required' ? 'create-integration-repair-and-revalidate' : predecessorLanded ? 'integrate-and-revalidate' : 'continue-speculatively-until-predecessor-lands' },
                     status: 'pending', created_event_seq: seq, delivered_event_seq: null, acknowledged_event_seq: null, version: 1,
                 });
                 if (!predecessorLanded)
                     this.#insertMessage({
                         schema_version: 'autopilot.coordination_message.v1', message_id: stableEntityId('message', ['reservation-overlap', obligation.obligation_id, 'predecessor']), repo_id: run.repo_id,
                         recipient_workstream_run: predecessor.workstream_run, message_type: 'reservation-overlap', correlation_id: obligation.obligation_id,
-                        payload: { obligation_id: obligation.obligation_id, role: 'predecessor', reservation_id: predecessor.reservation_id, dependent_reservation_id: reservation.reservation_id, overlapping_paths: obligation.overlapping_paths, required_action: 'land-or-abort-before-dependent' },
+                        payload: { obligation_id: obligation.obligation_id, role: 'predecessor', reservation_id: predecessor.reservation_id, dependent_reservation_id: reservation.reservation_id, overlapping_paths: obligation.overlapping_paths, integration_conflict: obligation.integration_conflict, required_action: 'land-or-abort-before-dependent-integration' },
                         status: 'pending', created_event_seq: seq, delivered_event_seq: null, acknowledged_event_seq: null, version: 1,
                     });
             }
         }
         return { reservations, obligations };
+    }
+    #classifyReservationOverlap(run, dependentCommit, predecessor, overlappingPaths) {
+        const predecessorRun = this.#requireRun(run.repo_id, predecessor.workstream_run);
+        const predecessorTarget = this.#targetIdForMergeEvidence(predecessorRun, predecessor.merge_evidence);
+        const predecessorFacts = parseUnitMergeReservationFacts(this.#verifyAcceptedEvidenceFile(predecessorRun, 'unit-merge', predecessorTarget, predecessor.merge_evidence));
+        const repository = repositoryFromRow(asRow(this.#db.prepare('SELECT * FROM repositories WHERE repo_id=?').get(run.repo_id), 'integration classification repository'));
+        return classifyCoordinationIntegrationConflict({ repoRoot: repository.canonical_root, predecessorCommit: predecessorFacts.integrationAfter, dependentCommit, overlappingPaths });
     }
     #assertReservationValidationArtifactChain(run, validationEvidenceRef, facts) {
         const marker = '/validation/';
@@ -3867,7 +3878,7 @@ export class CoordinatorStore {
                     this.#insertMessage({
                         schema_version: 'autopilot.coordination_message.v1', message_id: stableEntityId('message', ['reservation-landed', obligation.obligation_id, String(seq)]), repo_id: run.repo_id,
                         recipient_workstream_run: obligation.workstream_run, message_type: 'reservation-landed', correlation_id: obligation.obligation_id,
-                        payload: { obligation_id: obligation.obligation_id, predecessor_reservation_id: reservation.reservation_id, predecessor_released_event_seq: seq, predecessor_terminal_sha: terminalSha, overlapping_paths: obligation.overlapping_paths, required_action: 'integrate-and-revalidate' },
+                        payload: { obligation_id: obligation.obligation_id, predecessor_reservation_id: reservation.reservation_id, predecessor_released_event_seq: seq, predecessor_terminal_sha: terminalSha, overlapping_paths: obligation.overlapping_paths, integration_conflict: obligation.integration_conflict, required_action: obligation.integration_conflict.disposition === 'repair-required' ? 'create-integration-repair-and-revalidate' : 'integrate-and-revalidate' },
                         status: 'pending', created_event_seq: seq, delivered_event_seq: null, acknowledged_event_seq: null, version: 1,
                     });
             }
@@ -4545,7 +4556,7 @@ export class CoordinatorStore {
                 requests.push(claimRequestFromRow(existingRow));
                 continue;
             }
-            const contested = group.requested_leases.filter((requested) => requested.mode !== 'READ' && owned.some((blocker) => coordinationPathsOverlap(requested.path, blocker.path) && claimModesConflict(requested.mode, blocker.mode)));
+            const contested = group.requested_leases.filter((requested) => owned.some((blocker) => coordinationPathsOverlap(requested.path, blocker.path) && claimModesConflict(requested.mode, blocker.mode)));
             if (contested.length === 0)
                 throw new CoordinationRuntimeError('store-corrupt', 'claim request blocker set has no contested edit intention');
             const claimRequest = {

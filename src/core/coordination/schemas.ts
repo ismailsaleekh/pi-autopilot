@@ -9,6 +9,9 @@ import {
   COORDINATION_CHILD_STATUSES,
   COORDINATION_CLAIM_MODES,
   COORDINATION_MESSAGE_STATUSES,
+  COORDINATION_INTEGRATION_CONFLICT_KINDS,
+  COORDINATION_INTEGRATION_DISPOSITIONS,
+  COORDINATION_MERGE_TREE_STATUSES,
   COORDINATION_OPERATIONAL_ESCALATION_REASONS,
   COORDINATION_OPERATION_STAGES,
   COORDINATION_OPERATION_TYPES,
@@ -117,9 +120,14 @@ export const COORDINATION_EDIT_LEASE_SCHEMA = exactObject('autopilot.edit_lease.
 export const COORDINATION_CHANGE_RESERVATION_SCHEMA = exactObject('autopilot.change_reservation.v1', {
   reservation_id: identifier(), repo_id: pathSegmentIdentifier(), autopilot_id: pathSegmentIdentifier(), workstream_run: pathSegmentIdentifier(), path: boundedString(512), merge_evidence: evidence(), created_event_seq: integer(), released_event_seq: nullable(integer()), terminal_outcome: nullable(enumeration(['closed', 'aborted'])), terminal_sha: nullable(boundedString(64)), version: integer(1),
 });
+export const COORDINATION_INTEGRATION_CONFLICT_SCHEMA = exactObject('autopilot.integration_conflict.v1', {
+  classification_id: identifier(), kind: enumeration(COORDINATION_INTEGRATION_CONFLICT_KINDS), disposition: enumeration(COORDINATION_INTEGRATION_DISPOSITIONS),
+  merge_base: nullable({ type: 'string', pattern: '^[a-f0-9]{40,64}$' }), predecessor_commit: nullable({ type: 'string', pattern: '^[a-f0-9]{40,64}$' }), dependent_commit: nullable({ type: 'string', pattern: '^[a-f0-9]{40,64}$' }), merge_tree_status: enumeration(COORDINATION_MERGE_TREE_STATUSES),
+  overlapping_paths: { type: 'array', minItems: 1, maxItems: 1024, uniqueItems: true, items: boundedString(512) }, overlapping_hunks: { type: 'array', maxItems: 1024, uniqueItems: true, items: boundedString(512) }, semantic_keys: { type: 'array', maxItems: 1024, uniqueItems: true, items: boundedString(512) }, protected_surfaces: { type: 'array', maxItems: 1024, uniqueItems: true, items: boundedString(512) }, evidence: { type: 'array', minItems: 1, maxItems: 1024, uniqueItems: true, items: boundedString(1024) },
+});
 export const COORDINATION_RESERVATION_OBLIGATION_SCHEMA = exactObject('autopilot.reservation_obligation.v1', {
   obligation_id: identifier(), repo_id: pathSegmentIdentifier(), workstream_run: pathSegmentIdentifier(), reservation_id: identifier(), predecessor_reservation_id: identifier(),
-  overlapping_paths: { type: 'array', minItems: 1, maxItems: 1024, uniqueItems: true, items: boundedString(512) }, state: enumeration(COORDINATION_RESERVATION_OBLIGATION_STATES),
+  overlapping_paths: { type: 'array', minItems: 1, maxItems: 1024, uniqueItems: true, items: boundedString(512) }, integration_conflict: COORDINATION_INTEGRATION_CONFLICT_SCHEMA, state: enumeration(COORDINATION_RESERVATION_OBLIGATION_STATES),
   created_event_seq: integer(1), predecessor_released_event_seq: nullable(integer(1)), predecessor_terminal_sha: nullable(boundedString(64)), integration_evidence: nullable(evidence()), validation_evidence: nullable(evidence()), resolved_event_seq: nullable(integer(1)), version: integer(1),
 });
 export const COORDINATION_RUN_TERMINAL_INTENT_SCHEMA = exactObject('autopilot.run_terminal_intent.v1', {
@@ -229,6 +237,7 @@ export const AUTOPILOT_COORDINATION_JSON_SCHEMAS = Object.freeze({
   observation: COORDINATION_OBSERVATION_SCHEMA,
   edit_lease: COORDINATION_EDIT_LEASE_SCHEMA,
   change_reservation: COORDINATION_CHANGE_RESERVATION_SCHEMA,
+  integration_conflict: COORDINATION_INTEGRATION_CONFLICT_SCHEMA,
   reservation_obligation: COORDINATION_RESERVATION_OBLIGATION_SCHEMA,
   run_terminal_intent: COORDINATION_RUN_TERMINAL_INTENT_SCHEMA,
   claim_request: COORDINATION_CLAIM_REQUEST_SCHEMA,

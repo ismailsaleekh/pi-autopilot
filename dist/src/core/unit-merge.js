@@ -7,11 +7,12 @@ import { gitHead, readGitStatus, releaseClaimsForUnit, runGit, updateUnitBranchS
 import { cleanupTerminalUnitWorktree } from "./worktree-cleanup.js";
 import { recordCoordinatorReleaseEvidenceFromFile } from "./coordination/reconciliation.js";
 import { CoordinatorClient } from "./coordination/client.js";
-import { coordinationPathsOverlap, parseCoordinationObservation } from "./coordination/contracts.js";
+import { coordinationPathsOverlap, parseCoordinationObservation, parseCoordinationUnitAttempt } from "./coordination/contracts.js";
 import { readCoordinatorSessionContext } from "./coordination/supervisor.js";
 import { AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV } from "./names.js";
 import { executeOwnedWorktreeSaga, WorktreeSagaCompensatedError } from "./coordination/worktree-saga.js";
 import { recordValidationStalenessForMerge } from "./validation-staleness.js";
+import { classifyCoordinationIntegrationConflict } from "./coordination/integration-conflicts.js";
 export class AutopilotUnitMergeError extends Error {
     name = 'AutopilotUnitMergeError';
     code;
@@ -35,11 +36,11 @@ export async function mergeAutopilotUnit(input) {
         const executionCommit = parseAutopilotExecutionCommit(await readJsonFile(input.executionCommitPath));
         const blockers = mergePreflightBlockers(active, input.unitId, input.attempt, status, receipt, audit, executionCommit);
         if (blockers.length > 0)
-            return { outcome: 'blocked', merge: null, blockers, conflict_path: null };
+            return { outcome: 'blocked', merge: null, blockers, conflict_path: null, integration_analysis_path: null };
         if (active.coordination_authority === 'coordinator-edit-leases-v1') {
             const observationBlockers = await activeMainObservationBlockers(active, executionCommit.edited_claimed_paths, input.env ?? process.env);
             if (observationBlockers.length > 0)
-                return { outcome: 'blocked', merge: null, blockers: observationBlockers, conflict_path: null };
+                return { outcome: 'blocked', merge: null, blockers: observationBlockers, conflict_path: null, integration_analysis_path: null };
         }
         const unitBranch = executionCommit.branch;
         const unitHead = gitHead(executionCommit.cwd);
@@ -50,6 +51,7 @@ export async function mergeAutopilotUnit(input) {
                 merge: null,
                 blockers: [`unit worktree HEAD ${unitHead} does not match execution commit ${validatedUnitHead}`],
                 conflict_path: null,
+                integration_analysis_path: null,
             };
         }
         const mergePath = join(active.runtime_root, 'unit-merges', `${input.unitId}.${executionCommit.role}.attempt-${String(input.attempt)}.json`);
@@ -66,6 +68,22 @@ export async function mergeAutopilotUnit(input) {
             await writeJsonAtomic(mergeIntentPath, { schema_version: 'autopilot.unit_merge_intent.v1', workstream: active.workstream, workstream_run: active.workstream_run, autopilot_id: active.autopilot_id, unit_id: input.unitId, role: executionCommit.role, attempt: input.attempt, unit_head: validatedUnitHead, integration_before: before, created_at: now.toISOString() });
         }
         const conflictPath = join(active.runtime_root, 'merge-conflicts', `${input.unitId}.attempt-${String(input.attempt)}.${timestamp(now)}.json`);
+        const integrationAnalysisPath = executionCommit.edited_claimed_paths.length === 0 ? null : join(active.runtime_root, 'integration-analyses', `${input.unitId}.attempt-${String(input.attempt)}.json`);
+        if (integrationAnalysisPath !== null) {
+            const integrationConflict = classifyCoordinationIntegrationConflict({ repoRoot: active.source_repo, predecessorCommit: before, dependentCommit: validatedUnitHead, overlappingPaths: executionCommit.edited_claimed_paths });
+            if (existsSync(integrationAnalysisPath)) {
+                const existing = await readJsonFile(integrationAnalysisPath);
+                if (!isRecord(existing) || existing['schema_version'] !== 'autopilot.integration_analysis.v1' || existing['workstream_run'] !== active.workstream_run || existing['unit_id'] !== input.unitId || existing['attempt'] !== input.attempt || existing['integration_before'] !== before || existing['unit_head'] !== validatedUnitHead || !isRecord(existing['classification']) || existing['classification']['classification_id'] !== integrationConflict.classification_id)
+                    fail('integration-analysis-drift', 'immutable integration analysis differs on replay; create a repair attempt instead of overwriting evidence.', [integrationAnalysisPath]);
+            }
+            else {
+                await writeJsonAtomic(integrationAnalysisPath, { schema_version: 'autopilot.integration_analysis.v1', workstream: active.workstream, workstream_run: active.workstream_run, unit_id: input.unitId, attempt: input.attempt, integration_before: before, unit_head: validatedUnitHead, classification: integrationConflict, created_at: now.toISOString() });
+            }
+            if (integrationConflict.disposition === 'repair-required') {
+                await writeJsonAtomic(conflictPath, { schema_version: 'autopilot.merge_conflict.v1', workstream: active.workstream, workstream_run: active.workstream_run, unit_id: input.unitId, attempt: input.attempt, unit_branch: unitBranch, integration_head: before, dirty_paths: [], abort_status: 0, error: `integration classification requires repair: ${integrationConflict.kind}`, integration_analysis_ref: relativeRuntimeRef(active.runtime_root, integrationAnalysisPath), classification: integrationConflict, created_at: now.toISOString() });
+                return { outcome: 'conflict', merge: null, blockers: [`${integrationConflict.kind}: integration repair required before merge`], conflict_path: conflictPath, integration_analysis_path: integrationAnalysisPath };
+            }
+        }
         const inspectMerge = () => {
             const dirty = readGitStatus(active.main_worktree_path).changedPaths;
             if (dirty.length > 0)
@@ -160,7 +178,7 @@ export async function mergeAutopilotUnit(input) {
         }
         catch (error) {
             if (error instanceof WorktreeSagaCompensatedError)
-                return { outcome: 'conflict', merge: null, blockers: [], conflict_path: conflictPath };
+                return { outcome: 'conflict', merge: null, blockers: [], conflict_path: conflictPath, integration_analysis_path: integrationAnalysisPath };
             throw error;
         }
         const merge = durableMerge ?? parseAutopilotUnitMerge(JSON.parse(await readFile(mergePath, 'utf8')));
@@ -211,7 +229,7 @@ export async function mergeAutopilotUnit(input) {
             ...(input.env === undefined ? {} : { env: input.env }),
             now,
         });
-        return { outcome: 'merged', merge, blockers: [], conflict_path: null };
+        return { outcome: 'merged', merge, blockers: [], conflict_path: null, integration_analysis_path: integrationAnalysisPath };
     });
 }
 async function activeMainObservationBlockers(active, changedPaths, env) {
@@ -223,10 +241,23 @@ async function activeMainObservationBlockers(active, changedPaths, env) {
         fail('coordinator-session-mismatch', 'unit merge session does not own the run main worktree.', [session.workstream_run, active.workstream_run]);
     const response = await new CoordinatorClient({ env: { ...env, AUTOPILOT_STATE_ROOT: session.state_root } }).query('status', session.repo_id, session.workstream_run);
     const raw = response.payload['observations'];
-    if (!Array.isArray(raw))
-        fail('coordinator-status-invalid', 'coordinator status observations are not an array.');
-    const activeObservations = raw.map(parseCoordinationObservation).filter((observation) => observation.owner.workstream_run === active.workstream_run && observation.execution_state === 'active' && changedPaths.some((path) => coordinationPathsOverlap(path, observation.path)));
-    return Object.freeze(activeObservations.map((observation) => `run-main integration waits for active observation ${observation.observation_id} on ${observation.path}`));
+    const rawAttempts = response.payload['unit_attempts'];
+    if (!Array.isArray(raw) || !Array.isArray(rawAttempts))
+        fail('coordinator-status-invalid', 'coordinator status observations/unit_attempts are not arrays.');
+    return mainWorktreeObservationBlockers(raw.map(parseCoordinationObservation), rawAttempts.map(parseCoordinationUnitAttempt), active.workstream_run, changedPaths);
+}
+export function mainWorktreeObservationBlockers(observations, attempts, workstreamRun, changedPaths) {
+    const attemptRoles = new Map(attempts.map((attempt) => [`${attempt.owner.unit_id}\0${String(attempt.owner.attempt)}`, attempt.role]));
+    const activeObservations = observations.filter((observation) => {
+        if (observation.owner.workstream_run !== workstreamRun || observation.execution_state !== 'active' || !changedPaths.some((path) => coordinationPathsOverlap(path, observation.path)))
+            return false;
+        const role = attemptRoles.get(`${observation.owner.unit_id}\0${String(observation.owner.attempt)}`);
+        // Implement/fix readers own immutable bytes in separate unit worktrees and
+        // cannot block run-main integration. Main-worktree validators/bughunts still
+        // fence the physical checkout mutation until their observation terminates.
+        return role !== 'implement' && role !== 'fix';
+    });
+    return Object.freeze(activeObservations.map((observation) => `run-main integration waits for active main-worktree observation ${observation.observation_id} on ${observation.path}`));
 }
 export function parseAutopilotUnitMerge(value) {
     if (!isRecord(value))

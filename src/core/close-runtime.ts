@@ -28,7 +28,7 @@ import { CoordinatorClient } from './coordination/client.ts';
 import { parseCoordinationReconciliationEvidence, parseCoordinationRun, parseCoordinationRunTerminalIntent, parseCoordinationSessionLease, parseCoordinationWorktree } from './coordination/contracts.ts';
 import { DurableRunSupervisorClient, readCoordinatorSessionContext } from './coordination/supervisor.ts';
 import { recordCoordinatorReleaseEvidenceFromFile } from './coordination/reconciliation.ts';
-import { ReservationCoordinationClient, preparedRunTerminalIntent, reconcilePendingReservationResolutions, reservationCloseBlockers, resolvedReservationIntegrations } from './coordination/reservations.ts';
+import { ReservationCoordinationClient, preparePendingReservationIntegrations, preparedRunTerminalIntent, reconcilePendingReservationResolutions, reservationCloseBlockers, resolvedReservationIntegrations } from './coordination/reservations.ts';
 import type { CoordinationRunTerminalIntent } from './coordination/types.ts';
 import {
   ACTIVE_AUTOPILOTS_FILE,
@@ -278,7 +278,10 @@ export async function closeAutopilotWorkstream(options: AutopilotCloseOptions): 
         if (coordinatorAuthority && terminalIntent === null) terminalIntent = await (await ReservationCoordinationClient.fromEnvironment(env)).prepareRunTerminal('closed');
         if (coordinatorAuthority) await options.observeCloseRaceBoundary?.('after-durable-launch-fence-before-validation');
         await validateTerminalArchiveSources(context);
-        if (coordinatorAuthority) await reconcilePendingReservationResolutions(active, env);
+        if (coordinatorAuthority) {
+          await preparePendingReservationIntegrations(active, env, now);
+          await reconcilePendingReservationResolutions(active, env);
+        }
         const validation = await validateCloseReadiness(context, now, env, terminalIntent !== null);
         if (validation.blockers.length > 0) {
           if (terminalIntent !== null) {

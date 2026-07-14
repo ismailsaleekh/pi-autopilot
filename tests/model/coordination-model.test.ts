@@ -127,7 +127,7 @@ void describe('Coordination Fabric pure transition model', () => {
       const left = grantCoordinationAcquisitionGroup(initial, {
         repoId: 'repo-1', workstreamRun: 'run-a', sessionId: 'session-a', fencingGeneration: 1, idempotencyKey: `left-${String(iteration)}`, requestHash, occurredAt: '2026-07-11T15:04:00.000Z', acquisitionGroupId: 'group-a', normalReleaseCondition: releaseCondition,
       });
-      const shouldBlock = overlap && leftMode !== 'READ' && rightMode !== 'READ';
+      const shouldBlock = overlap && leftMode !== 'READ' && (leftMode === 'EXCLUSIVE' || rightMode === 'EXCLUSIVE');
       if (shouldBlock) {
         assert.throws(() => grantCoordinationAcquisitionGroup(left, {
           repoId: 'repo-1', workstreamRun: 'run-b', sessionId: 'session-b', fencingGeneration: 1, idempotencyKey: `right-${String(iteration)}`, requestHash, occurredAt: '2026-07-11T15:04:01.000Z', acquisitionGroupId: 'group-b', normalReleaseCondition: releaseCondition,

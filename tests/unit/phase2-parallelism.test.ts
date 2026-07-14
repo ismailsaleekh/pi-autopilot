@@ -171,9 +171,9 @@ void describe('Phase 2 scheduler config and deterministic scheduler', () => {
     assert.throws(() => parseAutopilotCheckoutProfile({ schema_version: 'autopilot.checkout_profile.v1', mode: 'claim-minimal', always_include: ['../escape'] }), /invalid-repo-path/u);
   });
 
-  void it('selects dependency-clear conflict-free units in lane order and records cap/skip reasons', () => {
+  void it('selects dependency-clear conflict-free units in lane order and records cap/skip reasons', async () => {
     const runtimeRoot = '/tmp/autopilot-phase2-main/.pi/autopilot/phase2-smoke';
-    const baseSpec = unitSpec({ cwd: '/tmp/unit', runtimeRoot, unitId: 'u01' });
+    const baseSpec = unitSpec({ cwd: process.cwd(), runtimeRoot, unitId: 'u01', ownedPaths: ['src/scheduler.ts'] });
     const state: AutopilotState = {
       schema_version: 'autopilot.state.v1',
       workstream: 'phase2-smoke',
@@ -217,7 +217,7 @@ void describe('Phase 2 scheduler config and deterministic scheduler', () => {
       last_event_id: 0,
       updated_at: '2026-07-08T00:00:00.000Z',
     };
-    const dispatch = planNextDispatch({
+    const dispatch = await planNextDispatch({
       workstream: 'phase2-smoke',
       runtimeRoot,
       contextGate: 'ok',
@@ -253,12 +253,13 @@ void describe('Phase 2 unit worktrees, claims, mergeback, staleness, and GC', ()
       const unitB = await prepareAutopilotUnitWorktree({ active: prepared.active, unitId: 'u02', attempt: 1 });
       assert.ok(unitA.unitInfo.worktree_path !== unitB.unitInfo.worktree_path);
       assert.equal(unitA.unitInfo.runtime_root, prepared.runtimeRoot);
-      const contextA = await resolveActiveAutopilotForSpec(unitSpec({ cwd: unitA.unitInfo.worktree_path, runtimeRoot: prepared.runtimeRoot, unitId: 'u01', ownedPaths: ['src/shared.ts'] }));
-      await acquireClaimsForUnit({ context: contextA, spec: unitSpec({ cwd: unitA.unitInfo.worktree_path, runtimeRoot: prepared.runtimeRoot, unitId: 'u01', ownedPaths: ['src/shared.ts'] }), reason: 'phase2 claim test' });
-      await acquireClaimsForUnit({ context: contextA, spec: unitSpec({ cwd: unitA.unitInfo.worktree_path, runtimeRoot: prepared.runtimeRoot, unitId: 'u01', ownedPaths: ['src/shared.ts'] }), reason: 'phase2 idempotent reuse' });
-      const contextB = await resolveActiveAutopilotForSpec(unitSpec({ cwd: unitB.unitInfo.worktree_path, runtimeRoot: prepared.runtimeRoot, unitId: 'u02', ownedPaths: ['src/shared.ts'] }));
-      await expectRejects(() => acquireClaimsForUnit({ context: contextB, spec: unitSpec({ cwd: unitB.unitInfo.worktree_path, runtimeRoot: prepared.runtimeRoot, unitId: 'u02', ownedPaths: ['src/shared.ts'] }), reason: 'phase2 conflict test' }), /claim-conflict/u);
-      const readSpec = unitSpec({ cwd: unitB.unitInfo.worktree_path, runtimeRoot: prepared.runtimeRoot, unitId: 'u02-read', ownedPaths: ['src/other.ts'], readOnlyPaths: ['src/shared.ts'] });
+      const contextA = await resolveActiveAutopilotForSpec(unitSpec({ cwd: unitA.unitInfo.worktree_path, runtimeRoot: prepared.runtimeRoot, unitId: 'u01', ownedPaths: ['src/baseline.ts'] }));
+      await acquireClaimsForUnit({ context: contextA, spec: unitSpec({ cwd: unitA.unitInfo.worktree_path, runtimeRoot: prepared.runtimeRoot, unitId: 'u01', ownedPaths: ['src/baseline.ts'] }), reason: 'phase2 claim test' });
+      await acquireClaimsForUnit({ context: contextA, spec: unitSpec({ cwd: unitA.unitInfo.worktree_path, runtimeRoot: prepared.runtimeRoot, unitId: 'u01', ownedPaths: ['src/baseline.ts'] }), reason: 'phase2 idempotent reuse' });
+      const contextB = await resolveActiveAutopilotForSpec(unitSpec({ cwd: unitB.unitInfo.worktree_path, runtimeRoot: prepared.runtimeRoot, unitId: 'u02', ownedPaths: ['src/baseline.ts'] }));
+      const speculative = await acquireClaimsForUnit({ context: contextB, spec: unitSpec({ cwd: unitB.unitInfo.worktree_path, runtimeRoot: prepared.runtimeRoot, unitId: 'u02', ownedPaths: ['src/baseline.ts'] }), reason: 'separate-worktree speculative WRITE test' });
+      assert.equal(speculative.some((claim) => claim.claim_type === 'WRITE' && claim.path === 'src/baseline.ts'), true);
+      const readSpec = unitSpec({ cwd: unitB.unitInfo.worktree_path, runtimeRoot: prepared.runtimeRoot, unitId: 'u02-read', ownedPaths: ['src/other.ts'], readOnlyPaths: ['src/baseline.ts'] });
       await acquireClaimsForUnit({ context: contextB, spec: readSpec, reason: 'isolated READ observation must not block a disjoint edit intent' });
     });
   });

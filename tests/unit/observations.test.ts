@@ -57,13 +57,13 @@ void describe('commit-bound coordination observations', () => {
     });
   });
 
-  void it('never treats observation overlap as edit or exclusive contention', () => {
+  void it('keeps observations non-blocking for ordinary edits while bounded EXCLUSIVE remains incompatible', () => {
     assert.equal(claimModesConflict('READ', 'READ'), false);
     assert.equal(claimModesConflict('READ', 'WRITE'), false);
     assert.equal(claimModesConflict('WRITE', 'READ'), false);
-    assert.equal(claimModesConflict('READ', 'EXCLUSIVE'), false);
-    assert.equal(claimModesConflict('EXCLUSIVE', 'READ'), false);
-    assert.equal(claimModesConflict('WRITE', 'WRITE'), true);
+    assert.equal(claimModesConflict('READ', 'EXCLUSIVE'), true);
+    assert.equal(claimModesConflict('EXCLUSIVE', 'READ'), true);
+    assert.equal(claimModesConflict('WRITE', 'WRITE'), false);
     assert.equal(claimModesConflict('WRITE', 'EXCLUSIVE'), true);
     assert.equal(claimModesConflict('EXCLUSIVE', 'EXCLUSIVE'), true);
   });

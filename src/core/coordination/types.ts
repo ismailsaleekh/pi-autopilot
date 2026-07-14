@@ -25,6 +25,9 @@ export const COORDINATION_OPERATION_TYPES = ['create', 'materialize', 'commit', 
 export const COORDINATION_RELEASE_CONDITION_TYPES = ['child-terminal', 'unit-merged', 'attempt-reset', 'quarantine-captured', 'run-closed', 'explicit-owner-release'] as const;
 export const COORDINATION_RECONCILIATION_SOURCES = ['child-process', 'unit-merge', 'attempt-reset', 'quarantine-capture', 'run-close', 'run-abort'] as const;
 export const COORDINATION_RESERVATION_OBLIGATION_STATES = ['waiting-for-predecessor', 'integration-required', 'resolved', 'cancelled'] as const;
+export const COORDINATION_INTEGRATION_CONFLICT_KINDS = ['legacy-conservative', 'disjoint-hunks', 'clean-overlap', 'textual-merge-conflict', 'delete-modify-conflict', 'protected-surface-conflict', 'semantic-key-conflict'] as const;
+export const COORDINATION_INTEGRATION_DISPOSITIONS = ['ordered-integration', 'repair-required'] as const;
+export const COORDINATION_MERGE_TREE_STATUSES = ['clean', 'conflict', 'legacy-unverified'] as const;
 export const COORDINATION_MESSAGE_TYPES = ['claim-request', 'release-notification', 'grant-offer', 'recovery-required', 'reservation-overlap', 'reservation-landed', 'observation-stale', 'deadlock-resolution', 'adjudication-assignment'] as const;
 export const COORDINATION_OBSERVATION_EXECUTION_STATES = ['active', 'released', 'abandoned', 'cancelled'] as const;
 export const COORDINATION_OBSERVATION_FRESHNESS_STATES = ['current', 'stale'] as const;
@@ -61,6 +64,9 @@ export type CoordinationDeadlockState = (typeof COORDINATION_DEADLOCK_STATES)[nu
 export type CoordinationDeadlockAction = (typeof COORDINATION_DEADLOCK_ACTIONS)[number];
 export type CoordinationDeadlockVictimClass = 1 | 2 | 3;
 export type CoordinationOperationalEscalationReason = (typeof COORDINATION_OPERATIONAL_ESCALATION_REASONS)[number];
+export type CoordinationIntegrationConflictKind = (typeof COORDINATION_INTEGRATION_CONFLICT_KINDS)[number];
+export type CoordinationIntegrationDisposition = (typeof COORDINATION_INTEGRATION_DISPOSITIONS)[number];
+export type CoordinationMergeTreeStatus = (typeof COORDINATION_MERGE_TREE_STATUSES)[number];
 export type CoordinationObservationExecutionState = (typeof COORDINATION_OBSERVATION_EXECUTION_STATES)[number];
 export type CoordinationObservationFreshnessState = (typeof COORDINATION_OBSERVATION_FRESHNESS_STATES)[number];
 export type CoordinationObservationObjectKind = (typeof COORDINATION_OBSERVATION_OBJECT_KINDS)[number];
@@ -265,6 +271,22 @@ export interface CoordinationChangeReservation {
   readonly version: number;
 }
 
+export interface CoordinationIntegrationConflict {
+  readonly schema_version: 'autopilot.integration_conflict.v1';
+  readonly classification_id: string;
+  readonly kind: CoordinationIntegrationConflictKind;
+  readonly disposition: CoordinationIntegrationDisposition;
+  readonly merge_base: string | null;
+  readonly predecessor_commit: string | null;
+  readonly dependent_commit: string | null;
+  readonly merge_tree_status: CoordinationMergeTreeStatus;
+  readonly overlapping_paths: readonly string[];
+  readonly overlapping_hunks: readonly string[];
+  readonly semantic_keys: readonly string[];
+  readonly protected_surfaces: readonly string[];
+  readonly evidence: readonly string[];
+}
+
 export interface CoordinationReservationObligation {
   readonly schema_version: 'autopilot.reservation_obligation.v1';
   readonly obligation_id: string;
@@ -273,6 +295,7 @@ export interface CoordinationReservationObligation {
   readonly reservation_id: string;
   readonly predecessor_reservation_id: string;
   readonly overlapping_paths: readonly string[];
+  readonly integration_conflict: CoordinationIntegrationConflict;
   readonly state: CoordinationReservationObligationState;
   readonly created_event_seq: number;
   readonly predecessor_released_event_seq: number | null;

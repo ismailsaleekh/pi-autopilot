@@ -21,6 +21,7 @@ import { proveLegacyReadAttemptTerminal } from "./legacy-read-terminal.js";
 import { parseAutopilotUnitMerge } from "../unit-merge.js";
 import { parseCoordinationEditLease, parseCoordinationUnitAttempt, parseCoordinationWorktreeOperation } from "./contracts.js";
 import { AUTOPILOT_COORDINATOR_PROTOCOL_VERSION } from "./types.js";
+import { legacyConservativeIntegrationConflict } from "./integration-conflicts.js";
 export const COORDINATION_MIGRATION_MAX_FILE_BYTES = 64 * 1024 * 1024;
 export const COORDINATION_MIGRATION_MAX_DATABASE_COMPONENT_BYTES = 256 * 1024 * 1024;
 export const COORDINATION_MIGRATION_MAX_TOTAL_BYTES = 256 * 1024 * 1024;
@@ -1359,7 +1360,7 @@ function buildImportPlan(inspection, repositoryIdentity, repoKey, migrationId, s
             const predecessor = reservations[predecessorIndex];
             if (predecessor === undefined || predecessor.workstream_run === dependent.workstream_run || !pathOverlapsOrContains(predecessor.path, dependent.path))
                 continue;
-            obligations.push({ schema_version: 'autopilot.reservation_obligation.v1', obligation_id: entityId('migration-obligation', `${dependent.reservation_id}\0${predecessor.reservation_id}`), repo_id: repoKey, workstream_run: dependent.workstream_run, reservation_id: dependent.reservation_id, predecessor_reservation_id: predecessor.reservation_id, overlapping_paths: [dependent.path], state: 'waiting-for-predecessor', created_event_seq: 1, predecessor_released_event_seq: null, predecessor_terminal_sha: null, integration_evidence: null, validation_evidence: null, resolved_event_seq: null, version: 1 });
+            obligations.push({ schema_version: 'autopilot.reservation_obligation.v1', obligation_id: entityId('migration-obligation', `${dependent.reservation_id}\0${predecessor.reservation_id}`), repo_id: repoKey, workstream_run: dependent.workstream_run, reservation_id: dependent.reservation_id, predecessor_reservation_id: predecessor.reservation_id, overlapping_paths: [dependent.path], integration_conflict: legacyConservativeIntegrationConflict(entityId('migration-obligation', `${dependent.reservation_id}\0${predecessor.reservation_id}`), [dependent.path]), state: 'waiting-for-predecessor', created_event_seq: 1, predecessor_released_event_seq: null, predecessor_terminal_sha: null, integration_evidence: null, validation_evidence: null, resolved_event_seq: null, version: 1 });
         }
     }
     const worktrees = [];

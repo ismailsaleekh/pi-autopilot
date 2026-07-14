@@ -6,6 +6,7 @@ export * from './escalation.ts';
 export * from './failures.ts';
 export * from './ipc.ts';
 export * from './invariants.ts';
+export * from './integration-conflicts.ts';
 export * from './legacy-preflight.ts';
 export * from './migration-paths.ts';
 export * from './migration.ts';

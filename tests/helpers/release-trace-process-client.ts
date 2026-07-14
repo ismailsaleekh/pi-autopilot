@@ -44,7 +44,7 @@ function acquisitionInput(suffix: string, groupId: string, path: string, attempt
     unitId: `unit-${suffix}`,
     attempt,
     acquisitionKind: 'initial' as const,
-    requestedLeases: [{ path, mode: 'WRITE' as const, purpose: `seeded release trace ${suffix}` }],
+    requestedLeases: [{ path, mode: 'EXCLUSIVE' as const, purpose: `seeded critical-section trace ${suffix}` }],
     reason: `seeded release trace ${suffix} contests ${path}`,
     normalReleaseCondition: { condition_type: 'unit-merged' as const, target_id: `unit-${suffix}:${String(attempt)}`, evidence: null },
     specRef: `.pi/autopilot/workstream-${suffix}/unit-specs/unit-${suffix}.json`,

@@ -8,6 +8,7 @@ import { AUTOPILOT_COORDINATION_AUTHORITY_ENV, AUTOPILOT_COORDINATOR_SESSION_CON
 import { buildAutopilotProviderIdentity, buildAutopilotStatusToolContext, deriveAutopilotArtifactRoot, parseAutopilotStatusToolContext, validateAutopilotStatusEvidence, } from "./forced-output/index.js";
 import { AutopilotForcedOutputEvidenceError } from "./forced-output/status-evidence.js";
 import { parseAutopilotStatusEntry, parseAutopilotUnitSpec } from "./contracts/index.js";
+import { deriveAutopilotAuthority, persistAutopilotAuthority } from "./authority.js";
 import { captureAutopilotExecutionBaseline, deriveAutopilotExecutionAuditPath, writeAutopilotExecutionAudit, } from "./execution-audit/index.js";
 import { AutopilotExecutionCommitError, commitAutopilotExecution, deriveAutopilotExecutionCommitPath, } from "./execution-commit.js";
 import { AutopilotParallelRuntimeError, acquireClaimsForUnit, coordinationRootForRepo, ensureWorktreeCleanForLaunch, prepareAutopilotUnitWorktree, readActiveAutopilots, readCoordinatorActiveAutopilots, readPathClaims, recoverAutopilotWorktreeSagas, releaseClaimsForUnit, readGitStatus, gitHead, resolveAutopilotStateRoot, resolveRepoIdentity, unitWorktreePathForActiveAutopilot, worktreeRootForRepo, resolveActiveAutopilotForSpec, } from "./parallel-runtime.js";
@@ -15,12 +16,11 @@ import { coordinationCutoverCommitted } from "./coordination/migration-paths.js"
 import { ClaimNegotiationClient } from "./coordination/negotiation.js";
 import { ReservationCoordinationClient, reservationSchedulingBlockers } from "./coordination/reservations.js";
 import { PlanningContradictionClient } from "./coordination/escalation.js";
-import { deriveCoordinationObservationSourceIdentity } from "./coordination/observations.js";
 import { quarantineFailedUnit, resetFailedUnit } from "./unit-failure.js";
 import { rollbackCreatedUnitWorktree } from "./worktree-cleanup.js";
 import { registerAutopilotChildAuthority } from "./coordination/child-authority.js";
 import { autopilotAuditProvesZeroSourceChange, writeAutopilotChildTerminalAcceptance } from "./coordination/terminal-acceptance.js";
-import { assertAutopilotSpecMaterializationDiskGate, expandedReadOnlyPathsForAudit, materializeAutopilotSpecPaths, sourceReadClaimPathsForSpec, } from "./materialization.js";
+import { assertAutopilotSpecMaterializationDiskGate, expandedReadOnlyPathsForAudit, materializeAutopilotSpecPaths, } from "./materialization.js";
 import { assertAutopilotSpecQualityGate } from "./quality/spec-gate.js";
 import { AutopilotPromptTemplateError, renderAndMaybeWriteAutopilotPromptSnapshot, } from "./prompt-renderer/index.js";
 export class AutopilotAgentRunError extends Error {
@@ -219,7 +219,7 @@ async function runAutopilotAgentFromSpecPathInternal(specPath, options, lifecycl
     }
     catch (error) {
         if (error instanceof AutopilotPiRunError) {
-            const audit = await writeAttemptAudit(spec, runtimePreflight.context, auditBaseline, null, auditOutput, env);
+            const audit = await writeAttemptAudit(spec, runtimePreflight.context, runtimePreflight.authority, auditBaseline, null, auditOutput, env);
             throw new AutopilotAgentRunError('pi-spawn-failed', {
                 reason: `Pi spawn failed before valid Autopilot status acceptance: ${error.code}: ${error.message}${formatPiRunErrorDiagnostics(error)}`,
                 specPath,
@@ -238,7 +238,7 @@ async function runAutopilotAgentFromSpecPathInternal(specPath, options, lifecycl
         evidence = await validateAutopilotStatusEvidence({ unitSpec: spec, providerIdentity });
     }
     catch (error) {
-        const audit = await writeAttemptAudit(spec, runtimePreflight.context, auditBaseline, null, auditOutput, env);
+        const audit = await writeAttemptAudit(spec, runtimePreflight.context, runtimePreflight.authority, auditBaseline, null, auditOutput, env);
         if (piResult.isError) {
             throw new AutopilotAgentRunError('pi-spawn-failed', {
                 reason: `Pi session returned an error result before valid Autopilot status acceptance: ${formatPiResultFailureDiagnostics(piResult)}`,
@@ -274,7 +274,7 @@ async function runAutopilotAgentFromSpecPathInternal(specPath, options, lifecycl
             auditClassification: audit.classification,
         });
     }
-    const audit = await writeAttemptAudit(spec, runtimePreflight.context, auditBaseline, evidence.status, auditOutput, env);
+    const audit = await writeAttemptAudit(spec, runtimePreflight.context, runtimePreflight.authority, auditBaseline, evidence.status, auditOutput, env);
     try {
         validateAutopilotEmitStatusCarrier(piResult, evidence.receipt.tool_call_id, evidence.receipt.status_sha256);
         parseAutopilotStatusEntry(evidence.status, {
@@ -504,6 +504,15 @@ async function preflightSpecAfterWorktreePreparation(spec, specPath, options = {
         }
         throw error;
     }
+    let authority;
+    try {
+        authority = await deriveAutopilotAuthority({ spec });
+        if (options.skipClaimAcquire !== true)
+            await persistAutopilotAuthority(runtimeContext.active.runtime_root, authority);
+    }
+    catch (error) {
+        throw new AutopilotAgentRunError('spec-invalid', { reason: errorMessage(error), specPath, statusOutput: spec.status_output, receiptOutput: spec.receipt_output });
+    }
     if (options.skipStaleOutputCheck !== true) {
         for (const [label, path] of [
             ['status_output', spec.status_output],
@@ -520,7 +529,7 @@ async function preflightSpecAfterWorktreePreparation(spec, specPath, options = {
         }
     }
     if (options.skipClaimAcquire !== true) {
-        await assertAutopilotSpecMaterializationDiskGate({ context: runtimeContext, spec }).catch((error) => {
+        await assertAutopilotSpecMaterializationDiskGate({ context: runtimeContext, spec, authority }).catch((error) => {
             if (error instanceof Error) {
                 throw new AutopilotAgentRunError('spec-invalid', {
                     reason: error.message,
@@ -563,11 +572,11 @@ async function preflightSpecAfterWorktreePreparation(spec, specPath, options = {
     const acquiredClaims = options.skipClaimAcquire === true
         ? []
         : coordinatorMode
-            ? await acquireCoordinatorClaimsForUnit({ context: runtimeContext, spec, specPath, env: options.env ?? process.env }).then((result) => {
+            ? await acquireCoordinatorClaimsForUnit({ context: runtimeContext, spec, authority, specPath, env: options.env ?? process.env }).then((result) => {
                 coordinatorGroup = result.group;
                 return result.claims;
             })
-            : await acquireClaimsForUnit({ context: runtimeContext, spec, reason: 'autopilot-agent-run preflight' }).catch((error) => {
+            : await acquireClaimsForUnit({ context: runtimeContext, spec, authority, reason: 'autopilot-agent-run preflight' }).catch((error) => {
                 if (error instanceof AutopilotParallelRuntimeError) {
                     throw new AutopilotAgentRunError('spec-invalid', {
                         reason: error.message,
@@ -583,6 +592,7 @@ async function preflightSpecAfterWorktreePreparation(spec, specPath, options = {
             await materializeAutopilotSpecPaths({
                 context: runtimeContext,
                 spec,
+                authority,
                 reason: 'autopilot-agent-run preflight materialization',
                 ...(options.env === undefined ? {} : { env: options.env }),
             });
@@ -590,7 +600,7 @@ async function preflightSpecAfterWorktreePreparation(spec, specPath, options = {
         const verifiedSpecSha = `sha256:${createHash('sha256').update(verifiedSpecBytes).digest('hex')}`;
         if (verifiedSpecSha !== attemptSpec.sha256)
             throw new AutopilotAgentRunError('spec-invalid', { reason: 'unit spec changed after authority derivation; prelaunch authority was rolled back', specPath, statusOutput: spec.status_output, receiptOutput: spec.receipt_output });
-        return { context: runtimeContext, acquiredClaims, coordinatorGroup, attemptSpec };
+        return { context: runtimeContext, authority, acquiredClaims, coordinatorGroup, attemptSpec };
     }
     catch (error) {
         try {
@@ -617,18 +627,12 @@ async function acquireCoordinatorClaimsForUnit(input) {
     const specBytes = await readFile(input.specPath);
     const specSha256 = `sha256:${createHash('sha256').update(specBytes).digest('hex')}`;
     const requested = new Map();
-    const add = (path, mode, purpose) => {
-        const normalized = path.replace(/\\/gu, '/');
-        requested.set(`${mode}\0${normalized}`, mode === 'READ'
-            ? { path: normalized, mode, purpose, source_identity: deriveCoordinationObservationSourceIdentity({ cwd: input.spec.cwd, path: normalized }) }
-            : { path: normalized, mode, purpose });
-    };
-    for (const path of input.spec.owned_paths)
-        add(path, 'WRITE', `source authority for ${input.spec.unit_id}`);
-    for (const path of input.spec.read_only_paths)
-        add(path, 'READ', `declared read authority for ${input.spec.unit_id}`);
-    for (const path of sourceReadClaimPathsForSpec(input.spec))
-        add(path, 'READ', `source context authority for ${input.spec.unit_id}`);
+    for (const observation of input.authority.observations)
+        requested.set(`READ\0${observation.path}`, { path: observation.path, mode: 'READ', purpose: observation.purpose, source_identity: observation.source_identity });
+    for (const edit of input.authority.edit_intentions)
+        requested.set(`WRITE\0${edit.path}`, { path: edit.path, mode: 'WRITE', purpose: edit.purpose });
+    for (const exclusive of input.authority.exclusives)
+        requested.set(`EXCLUSIVE\0${exclusive.path}`, { path: exclusive.path, mode: 'EXCLUSIVE', purpose: `${exclusive.purpose}; critical-section=${exclusive.critical_section}` });
     if (requested.size === 0)
         return { claims: [], group: null };
     const reservationView = await (await ReservationCoordinationClient.fromEnvironment(input.env)).view();
@@ -763,8 +767,8 @@ async function writeStatusContext(path, context) {
     await mkdir(dirname(path), { recursive: true });
     await writeFile(path, `${JSON.stringify(parsed, null, 2)}\n`, 'utf8');
 }
-async function writeAttemptAudit(spec, context, baseline, statusEntry, auditPath, env) {
-    const readOnlyPaths = await expandedReadOnlyPathsForAudit({ context, spec, env });
+async function writeAttemptAudit(spec, context, authority, baseline, statusEntry, auditPath, env) {
+    const readOnlyPaths = await expandedReadOnlyPathsForAudit({ context, spec, authority, env });
     return await writeAutopilotExecutionAudit({
         unitSpec: { ...spec, read_only_paths: readOnlyPaths },
         baseline,

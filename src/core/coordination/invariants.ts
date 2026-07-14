@@ -245,7 +245,10 @@ export function checkCoordinationInvariants(snapshot: CoordinationSnapshot): rea
     if (reservation !== undefined && predecessor !== undefined) {
       if (reservation.repo_id !== predecessor.repo_id || reservation.workstream_run === predecessor.workstream_run) findings.push(finding('obligation-predecessor-invalid', obligation.obligation_id, 'predecessor must be a foreign run reservation in the same repository'));
       if (!coordinationPathsOverlap(reservation.path, predecessor.path)) findings.push(finding('obligation-paths-do-not-overlap', obligation.obligation_id, 'reservation pair does not overlap'));
+      if (!obligation.integration_conflict.overlapping_paths.some((path) => coordinationPathsOverlap(path, reservation.path) && coordinationPathsOverlap(path, predecessor.path))) findings.push(finding('obligation-conflict-path-mismatch', obligation.obligation_id, 'integration classification does not bind the actual reservation overlap'));
     }
+    const repairKinds = new Set(['legacy-conservative', 'textual-merge-conflict', 'delete-modify-conflict', 'protected-surface-conflict', 'semantic-key-conflict']);
+    if (repairKinds.has(obligation.integration_conflict.kind) !== (obligation.integration_conflict.disposition === 'repair-required')) findings.push(finding('obligation-conflict-disposition-mismatch', obligation.obligation_id, `${obligation.integration_conflict.kind} has ${obligation.integration_conflict.disposition}`));
     if (obligation.state === 'waiting-for-predecessor' && predecessor !== undefined && predecessor.released_event_seq !== null) findings.push(finding('released-predecessor-obligation-not-advanced', obligation.obligation_id, 'released predecessor must advance or cancel its obligation'));
     if ((obligation.state === 'integration-required' || obligation.state === 'resolved') && predecessor !== undefined && obligation.predecessor_released_event_seq !== predecessor.released_event_seq) findings.push(finding('obligation-release-sequence-mismatch', obligation.obligation_id, 'obligation does not bind the predecessor release event'));
   }

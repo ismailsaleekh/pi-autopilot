@@ -6,6 +6,7 @@ export * from "./escalation.js";
 export * from "./failures.js";
 export * from "./ipc.js";
 export * from "./invariants.js";
+export * from "./integration-conflicts.js";
 export * from "./legacy-preflight.js";
 export * from "./migration-paths.js";
 export * from "./migration.js";

@@ -8,11 +8,12 @@ import { dirname, join } from 'node:path';
 import { describe, it } from 'node:test';
 
 import { CoordinatorClient } from '../../src/core/coordination/client.ts';
-import { parseCoordinationAcquisitionGroup, parseCoordinationChangeReservation, parseCoordinationChildLease, parseCoordinationEditLease, parseCoordinationReservationObligation, parseCoordinationRun, parseCoordinationSessionLease } from '../../src/core/coordination/contracts.ts';
+import { parseCoordinationChangeReservation, parseCoordinationChildLease, parseCoordinationEditLease, parseCoordinationReservationObligation, parseCoordinationRun, parseCoordinationSessionLease } from '../../src/core/coordination/contracts.ts';
 import { checkCoordinationInvariants } from '../../src/core/coordination/invariants.ts';
+import { legacyConservativeIntegrationConflict } from '../../src/core/coordination/integration-conflicts.ts';
 import { ClaimNegotiationClient } from '../../src/core/coordination/negotiation.ts';
 import { RunReconciliationClient } from '../../src/core/coordination/reconciliation.ts';
-import { ReservationCoordinationClient, reconcilePendingReservationResolutions, reservationCloseBlockers, reservationSchedulingBlockers } from '../../src/core/coordination/reservations.ts';
+import { ReservationCoordinationClient, preparePendingReservationIntegrations, reconcilePendingReservationResolutions, reservationCloseBlockers, reservationSchedulingBlockers } from '../../src/core/coordination/reservations.ts';
 import { coordinatorRuntimePaths } from '../../src/core/coordination/runtime-paths.ts';
 import { startCoordinatorServer } from '../../src/core/coordination/server.ts';
 import { ensureMainWorktreeSagaRegistered, executeOwnedWorktreeSaga, type WorktreeSagaInspection } from '../../src/core/coordination/worktree-saga.ts';
@@ -20,6 +21,7 @@ import { writeCoordinatorSessionContext, type CoordinatorSessionContext } from '
 import type { CoordinationReservationObligation, CoordinatorResponseEnvelope } from '../../src/core/coordination/types.ts';
 import { AUTOPILOT_STATE_ROOT_ENV, type ActiveAutopilotRow, type ProcessEnvLike } from '../../src/core/parallel-runtime.ts';
 import { AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV } from '../../src/core/names.ts';
+import { reservationValidationStalenessPath } from '../../src/core/validation-staleness.ts';
 import { validCoordinationSnapshot } from '../helpers/coordination-fixture.ts';
 
 interface Actor {
@@ -53,7 +55,7 @@ async function createHarness(): Promise<Harness> {
   const repository = join(root, 'repository');
   await mkdir(repository, { recursive: true });
   git(repository, ['init', '-b', 'main']);
-  await writeFile(join(repository, 'README.md'), 'generic reservation fixture\n', 'utf8');
+  await writeFile(join(repository, 'README.md'), ['line-1', 'line-2', 'line-3', 'line-4', 'line-5', 'line-6', ''].join('\n'), 'utf8');
   git(repository, ['add', 'README.md']);
   git(repository, ['commit', '-m', 'initial']);
   const stateRoot = join(root, 'state');
@@ -208,6 +210,21 @@ async function recordUnitMerge(harness: Harness, actor: Actor, suffix: string, c
   await actor.reconciliation.recordReleaseEvidence({ source: 'unit-merge', targetId: `unit-${suffix}:1`, evidenceRef: ref, evidenceSha256: sha });
 }
 
+async function recordDisjointReadmeMerge(harness: Harness, actor: Actor, suffix: string, lineIndex: number): Promise<void> {
+  const main = join(harness.stateRoot, 'worktrees', actor.context.repo_id, 'active', actor.context.workstream_run, 'main');
+  const before = git(main, ['rev-parse', 'HEAD']);
+  const readme = join(main, 'README.md');
+  const lines = (await readFile(readme, 'utf8')).split('\n');
+  lines[lineIndex] = `${lines[lineIndex] ?? 'line'}-${suffix}`;
+  await writeFile(readme, lines.join('\n'), 'utf8');
+  git(main, ['add', 'README.md']);
+  git(main, ['commit', '-m', `unit ${suffix} disjoint README hunk`]);
+  const after = git(main, ['rev-parse', 'HEAD']);
+  const ref = `.pi/autopilot/${actor.context.workstream}/unit-merges/unit-${suffix}.implement.attempt-1.json`;
+  const sha = await writeEvidence(harness, actor, ref, unitMergeDocument(actor, suffix, ['README.md'], before, after));
+  await actor.reconciliation.recordReleaseEvidence({ source: 'unit-merge', targetId: `unit-${suffix}:1`, evidenceRef: ref, evidenceSha256: sha });
+}
+
 async function status(harness: Harness, actor: Actor): Promise<CoordinatorResponseEnvelope> {
   return await harness.client.query('status', actor.context.repo_id, actor.context.workstream_run);
 }
@@ -243,8 +260,8 @@ void describe('Coordination Fabric edit leases and change reservations', () => {
       const second = await attachActor(harness, 'b');
       const firstGrant = await first.negotiation.acquire(acquisitionInput('a'));
       assert.equal(firstGrant.outcome, 'granted');
-      const secondWait = await second.negotiation.acquire(acquisitionInput('b'));
-      assert.equal(secondWait.outcome, 'waiting-for-peer-release');
+      const secondGrant = await second.negotiation.acquire(acquisitionInput('b'));
+      assert.equal(secondGrant.outcome, 'granted', 'separate-worktree WRITE intentions must launch speculatively');
 
       await recordUnitMerge(harness, first, 'a', ['src/shared.ts']);
       await recordUnitMerge(harness, first, 'a', ['src/shared.ts']);
@@ -255,10 +272,6 @@ void describe('Coordination Fabric edit leases and change reservations', () => {
       assert.equal(firstReservations[0]?.released_event_seq, null);
       assert.deepEqual(await reservationCloseBlockers(activeRow(harness, first), harness.env), []);
 
-      const offered = values((await status(harness, second)).payload['acquisition_groups'], 'second groups').map((entry) => parseCoordinationAcquisitionGroup(entry)).find((group) => group.acquisition_group_id === 'group-b');
-      if (offered === undefined) throw new Error('second acquisition group is missing');
-      assert.equal(offered.state, 'grant-ready');
-      await second.negotiation.acknowledgeGrant(offered);
       await recordUnitMerge(harness, second, 'b', ['src/shared.ts']);
 
       const overlapStatus = await status(harness, second);
@@ -268,7 +281,8 @@ void describe('Coordination Fabric edit leases and change reservations', () => {
       if (obligation === undefined) throw new Error('reservation obligation is missing');
       assert.equal(obligation.state, 'waiting-for-predecessor');
       assert.deepEqual(obligation.overlapping_paths, ['src/shared.ts']);
-      assert.ok((await reservationCloseBlockers(activeRow(harness, second), harness.env)).some((blocker) => blocker.includes('reservation ordering waits for predecessor')));
+      assert.equal(obligation.integration_conflict.disposition, 'repair-required');
+      assert.ok((await reservationCloseBlockers(activeRow(harness, second), harness.env)).some((blocker) => blocker.includes('speculative reservation awaits predecessor landing')));
       assert.equal(values(overlapStatus.payload['edit_leases'], 'second edit leases').length, 0);
 
       const firstActive = activeRow(harness, first);
@@ -293,7 +307,7 @@ void describe('Coordination Fabric edit leases and change reservations', () => {
       const dependentMergeRef = requiredView.reservations.find((entry) => entry.reservation_id === obligation.reservation_id)?.merge_evidence.ref;
       if (dependentMergeRef === undefined) throw new Error('dependent merge evidence is missing');
       assert.equal(required?.state, 'integration-required');
-      assert.equal((await reservationCloseBlockers(activeRow(harness, second), harness.env)).some((blocker) => blocker.includes('requires rebase/integration')), true);
+      assert.equal((await reservationCloseBlockers(activeRow(harness, second), harness.env)).some((blocker) => blocker.includes('requires integration repair')), true);
 
       const secondMain = join(harness.stateRoot, 'worktrees', second.context.repo_id, 'active', second.context.workstream_run, 'main');
       if (required?.predecessor_terminal_sha === null || required?.predecessor_terminal_sha === undefined) throw new Error('predecessor terminal commit is missing');
@@ -361,21 +375,129 @@ void describe('Coordination Fabric edit leases and change reservations', () => {
     }
   });
 
+  void it('auto-integrates same-file disjoint hunks in deterministic reservation order without a repair route', async () => {
+    const harness = await createHarness();
+    try {
+      const first = await attachActor(harness, 'm');
+      const second = await attachActor(harness, 'n');
+      assert.equal((await first.negotiation.acquire(acquisitionInput('m', 'README.md'))).outcome, 'granted');
+      assert.equal((await second.negotiation.acquire(acquisitionInput('n', 'README.md'))).outcome, 'granted');
+      await recordDisjointReadmeMerge(harness, first, 'm', 0);
+      await recordDisjointReadmeMerge(harness, second, 'n', 4);
+      const waiting = (await second.reservations.view()).obligations[0];
+      if (waiting === undefined) throw new Error('disjoint reservation obligation is missing');
+      assert.equal(waiting.integration_conflict.kind, 'disjoint-hunks');
+      assert.equal(waiting.integration_conflict.disposition, 'ordered-integration');
+      assert.deepEqual(reservationSchedulingBlockers({ workstreamRun: second.context.workstream_run, requestedPaths: ['README.md'], view: await second.reservations.view() }), { ordering: [], integration: [] });
+      const secondBeforeIntegration = git(join(harness.stateRoot, 'worktrees', second.context.repo_id, 'active', second.context.workstream_run, 'main'), ['rev-parse', 'HEAD']);
+      await writeEvidence(harness, second, `.pi/autopilot/${second.context.workstream}/validation/prior.json`, {
+        schema_version: 'autopilot.validation_evidence.v1', workstream: second.context.workstream, source_unit_id: 'unit-n', source_attempt: 1, validation_unit_id: 'prior-validator', validation_attempt: 1,
+        unit_merge_ref: 'unit-merges/unit-n.implement.attempt-1.json', integration_head: secondBeforeIntegration, covered_paths: ['README.md'], covered_path_groups: [], witness_ids: ['prior-readme-witness'],
+        status_ref: 'statuses/prior.json', status_sha256: `sha256:${'1'.repeat(64)}`, receipt_ref: 'receipts/prior.json', receipt_sha256: `sha256:${'2'.repeat(64)}`, audit_ref: 'execution-audits/prior.json', audit_sha256: `sha256:${'3'.repeat(64)}`, verdict: 'PASS', validated_at: '2026-07-12T10:19:00.000Z',
+      });
+      await writeEvidence(harness, second, `.pi/autopilot/${second.context.workstream}/validation/prior-second.json`, {
+        schema_version: 'autopilot.validation_evidence.v1', workstream: second.context.workstream, source_unit_id: 'unit-n', source_attempt: 1, validation_unit_id: 'prior-validator-two', validation_attempt: 1,
+        unit_merge_ref: 'unit-merges/unit-n.implement.attempt-1.json', integration_head: secondBeforeIntegration, covered_paths: ['README.md'], covered_path_groups: [], witness_ids: ['prior-readme-witness-two'],
+        status_ref: 'statuses/prior-two.json', status_sha256: `sha256:${'7'.repeat(64)}`, receipt_ref: 'receipts/prior-two.json', receipt_sha256: `sha256:${'8'.repeat(64)}`, audit_ref: 'execution-audits/prior-two.json', audit_sha256: `sha256:${'9'.repeat(64)}`, verdict: 'PASS', validated_at: '2026-07-12T10:19:30.000Z',
+      });
+
+      const firstActive = activeRow(harness, first);
+      const firstContextPath = join(harness.root, 'session-m.json');
+      await writeCoordinatorSessionContext(firstContextPath, first.context);
+      await ensureMainWorktreeSagaRegistered({ active: firstActive, env: { ...harness.env, [AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV]: firstContextPath } });
+      await first.reservations.prepareRunTerminal('closed');
+      const terminal = await terminalEvidence(harness, first, 'closed');
+      await first.reconciliation.recordReleaseEvidence({ source: 'run-close', targetId: first.context.workstream_run, evidenceRef: terminal.ref, evidenceSha256: terminal.sha });
+
+      const secondActive = activeRow(harness, second);
+      const secondContextPath = join(harness.root, 'session-n.json');
+      await writeCoordinatorSessionContext(secondContextPath, second.context);
+      const secondEnv = { ...harness.env, [AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV]: secondContextPath };
+      await ensureMainWorktreeSagaRegistered({ active: secondActive, env: secondEnv });
+      const prepared = await preparePendingReservationIntegrations(secondActive, secondEnv, new Date('2026-07-12T10:20:00.000Z'));
+      assert.equal(prepared.integration_evidence_paths.length, 1);
+      assert.deepEqual(prepared.repair_route_paths, []);
+      assert.equal(prepared.stale_validation_paths.length, 2, 'distinct validation artifacts for one source attempt require distinct immutable staleness records');
+      const priorStalenessPaths = prepared.stale_validation_paths;
+      assert.equal(priorStalenessPaths.every((path) => existsSync(path)), true);
+      const integratedHead = git(secondActive.main_worktree_path, ['rev-parse', 'HEAD']);
+      await writeEvidence(harness, second, `.pi/autopilot/${second.context.workstream}/validation/fresh-after-integration.json`, {
+        schema_version: 'autopilot.validation_evidence.v1', workstream: second.context.workstream, source_unit_id: 'unit-fresh', source_attempt: 1, validation_unit_id: 'fresh-validator', validation_attempt: 1,
+        unit_merge_ref: 'unit-merges/unit-fresh.implement.attempt-1.json', integration_head: integratedHead, covered_paths: ['README.md'], covered_path_groups: [], witness_ids: ['fresh-readme-witness'],
+        status_ref: 'statuses/fresh.json', status_sha256: `sha256:${'4'.repeat(64)}`, receipt_ref: 'receipts/fresh.json', receipt_sha256: `sha256:${'5'.repeat(64)}`, audit_ref: 'execution-audits/fresh.json', audit_sha256: `sha256:${'6'.repeat(64)}`, verdict: 'PASS', validated_at: '2026-07-12T10:21:00.000Z',
+      });
+      for (const path of priorStalenessPaths) await rm(path, { force: true });
+      const resumedAfterCrashWindow = await preparePendingReservationIntegrations(secondActive, secondEnv, new Date('2026-07-12T10:22:00.000Z'));
+      assert.equal(resumedAfterCrashWindow.stale_validation_paths.length, 2, 'existing integration evidence must resume every missing staleness record without invalidating a PASS bound to the integrated head');
+      assert.equal(priorStalenessPaths.every((path) => existsSync(path)), true);
+      assert.equal(existsSync(reservationValidationStalenessPath(secondActive.runtime_root, 'unit-fresh', 1, waiting.obligation_id, `validation/fresh-after-integration.json`)), false);
+      const advanced = (await second.reservations.view()).obligations[0];
+      if (advanced?.predecessor_terminal_sha === null || advanced?.predecessor_terminal_sha === undefined) throw new Error('landed predecessor commit is missing');
+      assert.equal(git(secondActive.main_worktree_path, ['merge-base', '--is-ancestor', advanced.predecessor_terminal_sha, 'HEAD']), '');
+      assert.equal(existsSync(join(secondActive.runtime_root, 'reservation-repairs', `${advanced.obligation_id}.json`)), false);
+    } finally {
+      await harness.server.close();
+      await rm(harness.root, { recursive: true, force: true });
+    }
+  });
+
+  void it('keeps reservation repair routes immutable and creates a fresh generation when integration facts drift', async () => {
+    const harness = await createHarness();
+    try {
+      const first = await attachActor(harness, 'o');
+      const second = await attachActor(harness, 'p');
+      assert.equal((await first.negotiation.acquire(acquisitionInput('o'))).outcome, 'granted');
+      assert.equal((await second.negotiation.acquire(acquisitionInput('p'))).outcome, 'granted');
+      await recordUnitMerge(harness, first, 'o', ['src/shared.ts']);
+      await recordUnitMerge(harness, second, 'p', ['src/shared.ts']);
+      const obligation = (await second.reservations.view()).obligations[0];
+      if (obligation === undefined) throw new Error('major integration obligation is missing');
+      assert.equal(obligation.integration_conflict.disposition, 'repair-required');
+
+      const firstActive = activeRow(harness, first);
+      const firstContextPath = join(harness.root, 'session-o.json');
+      await writeCoordinatorSessionContext(firstContextPath, first.context);
+      await ensureMainWorktreeSagaRegistered({ active: firstActive, env: { ...harness.env, [AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV]: firstContextPath } });
+      await first.reservations.prepareRunTerminal('closed');
+      const terminal = await terminalEvidence(harness, first, 'closed');
+      await first.reconciliation.recordReleaseEvidence({ source: 'run-close', targetId: first.context.workstream_run, evidenceRef: terminal.ref, evidenceSha256: terminal.sha });
+
+      const secondActive = activeRow(harness, second);
+      const secondContextPath = join(harness.root, 'session-p.json');
+      await writeCoordinatorSessionContext(secondContextPath, second.context);
+      const secondEnv = { ...harness.env, [AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV]: secondContextPath };
+      const firstRoute = await preparePendingReservationIntegrations(secondActive, secondEnv, new Date('2026-07-12T10:30:00.000Z'));
+      assert.equal(firstRoute.repair_route_paths.length, 1);
+      const replay = await preparePendingReservationIntegrations(secondActive, secondEnv, new Date('2026-07-12T10:31:00.000Z'));
+      assert.deepEqual(replay.repair_route_paths, firstRoute.repair_route_paths);
+
+      await mkdir(join(secondActive.main_worktree_path, 'docs'), { recursive: true });
+      await writeFile(join(secondActive.main_worktree_path, 'docs', 'repair-context.md'), 'new integration context\n', 'utf8');
+      git(secondActive.main_worktree_path, ['add', 'docs/repair-context.md']);
+      git(secondActive.main_worktree_path, ['commit', '-m', 'advance repair context']);
+      const refreshed = await preparePendingReservationIntegrations(secondActive, secondEnv, new Date('2026-07-12T10:32:00.000Z'));
+      assert.equal(refreshed.repair_route_paths.length, 1);
+      assert.notEqual(refreshed.repair_route_paths[0], firstRoute.repair_route_paths[0]);
+      assert.equal(existsSync(firstRoute.repair_route_paths[0] ?? ''), true);
+      assert.equal(existsSync(refreshed.repair_route_paths[0] ?? ''), true);
+    } finally {
+      await harness.server.close();
+      await rm(harness.root, { recursive: true, force: true });
+    }
+  });
+
   void it('creates an immediate integration obligation when a predecessor landed before the dependent reservation', async () => {
     const harness = await createHarness();
     try {
       const first = await attachActor(harness, 'h');
       const dependent = await attachActor(harness, 'i');
       assert.equal((await first.negotiation.acquire(acquisitionInput('h'))).outcome, 'granted');
-      const waiting = await dependent.negotiation.acquire(acquisitionInput('i'));
-      assert.equal(waiting.outcome, 'waiting-for-peer-release');
+      const speculative = await dependent.negotiation.acquire(acquisitionInput('i'));
+      assert.equal(speculative.outcome, 'granted');
       await recordUnitMerge(harness, first, 'h', ['src/shared.ts']);
       await first.reservations.prepareRunTerminal('closed');
       const firstTerminal = await terminalEvidence(harness, first, 'closed');
       await first.reconciliation.recordReleaseEvidence({ source: 'run-close', targetId: first.context.workstream_run, evidenceRef: firstTerminal.ref, evidenceSha256: firstTerminal.sha });
-      const offered = values((await status(harness, dependent)).payload['acquisition_groups'], 'dependent groups').map((entry) => parseCoordinationAcquisitionGroup(entry)).find((group) => group.acquisition_group_id === 'group-i');
-      if (offered === undefined) throw new Error('dependent offer is missing');
-      await dependent.negotiation.acknowledgeGrant(offered);
       await recordUnitMerge(harness, dependent, 'i', ['src/shared.ts']);
       const obligations = (await dependent.reservations.view()).obligations;
       assert.equal(obligations.length, 1);
@@ -442,10 +564,10 @@ void describe('Coordination Fabric edit leases and change reservations', () => {
     const snapshot = validCoordinationSnapshot();
     const predecessor = { schema_version: 'autopilot.change_reservation.v1' as const, reservation_id: 'reservation-a', repo_id: 'repo-1', autopilot_id: 'autopilot-a', workstream_run: 'run-a', path: 'src/shared.ts', merge_evidence: { ref: 'merge-a.json', sha256: `sha256:${'a'.repeat(64)}` as const }, created_event_seq: 4, released_event_seq: null, terminal_outcome: null, terminal_sha: null, version: 1 };
     const dependent = { ...predecessor, reservation_id: 'reservation-b', autopilot_id: 'autopilot-b', workstream_run: 'run-b', merge_evidence: { ref: 'merge-b.json', sha256: `sha256:${'b'.repeat(64)}` as const }, created_event_seq: 5 };
-    const waiting: CoordinationReservationObligation = { schema_version: 'autopilot.reservation_obligation.v1', obligation_id: 'obligation-b-a', repo_id: 'repo-1', workstream_run: 'run-b', reservation_id: 'reservation-b', predecessor_reservation_id: 'reservation-a', overlapping_paths: ['src/shared.ts'], state: 'waiting-for-predecessor', created_event_seq: 5, predecessor_released_event_seq: null, predecessor_terminal_sha: null, integration_evidence: null, validation_evidence: null, resolved_event_seq: null, version: 1 };
+    const waiting: CoordinationReservationObligation = { schema_version: 'autopilot.reservation_obligation.v1', obligation_id: 'obligation-b-a', repo_id: 'repo-1', workstream_run: 'run-b', reservation_id: 'reservation-b', predecessor_reservation_id: 'reservation-a', overlapping_paths: ['src/shared.ts'], integration_conflict: legacyConservativeIntegrationConflict('obligation-b-a', ['src/shared.ts']), state: 'waiting-for-predecessor', created_event_seq: 5, predecessor_released_event_seq: null, predecessor_terminal_sha: null, integration_evidence: null, validation_evidence: null, resolved_event_seq: null, version: 1 };
     const blockers = reservationSchedulingBlockers({ workstreamRun: 'run-b', requestedPaths: ['src/shared.ts'], view: { reservations: [predecessor, dependent], obligations: [waiting], editLeases: [] } });
-    assert.equal(blockers.ordering.length, 1);
-    assert.equal(blockers.integration.length, 0);
+    assert.equal(blockers.ordering.length, 0);
+    assert.equal(blockers.integration.length, 1, 'legacy-unverified overlap is conservatively routed to repair, not ordinary ordering');
     assert.deepEqual(reservationSchedulingBlockers({ workstreamRun: 'run-b', requestedPaths: ['src/disjoint.ts'], view: { reservations: [predecessor, dependent], obligations: [waiting], editLeases: [] } }), { ordering: [], integration: [] });
     const invalid = checkCoordinationInvariants({ ...snapshot, change_reservations: [predecessor, dependent], reservation_obligations: [] });
     assert.ok(invalid.some((finding) => finding.code === 'overlapping-reservations-uncoordinated'));

@@ -21,7 +21,7 @@ export function buildCoordinationWaitForEdges(input) {
             const lease = leases.get(leaseId);
             return lease !== undefined
                 && coordinationOwnerKey(lease.owner) === coordinationOwnerKey(request.owner)
-                && request.requested_leases.some((requested) => requested.mode !== 'READ' && coordinationPathsOverlap(requested.path, lease.path) && claimModesConflict(requested.mode, lease.mode));
+                && request.requested_leases.some((requested) => coordinationPathsOverlap(requested.path, lease.path) && claimModesConflict(requested.mode, lease.mode));
         });
         if (TERMINAL_REQUEST_STATES.has(request.status) || !hasBlocker)
             continue;

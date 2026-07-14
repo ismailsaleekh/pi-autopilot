@@ -22,6 +22,7 @@ import {
 } from './forced-output/index.ts';
 import { AutopilotForcedOutputEvidenceError } from './forced-output/status-evidence.ts';
 import { parseAutopilotStatusEntry, parseAutopilotUnitSpec } from './contracts/index.ts';
+import { deriveAutopilotAuthority, persistAutopilotAuthority, type AutopilotAuthorityArtifact } from './authority.ts';
 import type { AutopilotExecutionAudit, AutopilotExecutionCommit, AutopilotStatusEntry, AutopilotUnitSpec } from './contracts/types.ts';
 import {
   captureAutopilotExecutionBaseline,
@@ -60,8 +61,7 @@ import { coordinationCutoverCommitted } from './coordination/migration-paths.ts'
 import { ClaimNegotiationClient, type ClaimGroupAcquisitionResult } from './coordination/negotiation.ts';
 import { ReservationCoordinationClient, reservationSchedulingBlockers } from './coordination/reservations.ts';
 import { PlanningContradictionClient } from './coordination/escalation.ts';
-import { deriveCoordinationObservationSourceIdentity } from './coordination/observations.ts';
-import type { CoordinationAcquisitionGroup, CoordinationObservationSourceIdentity } from './coordination/types.ts';
+import type { CoordinationAcquisitionGroup } from './coordination/types.ts';
 import { quarantineFailedUnit, resetFailedUnit } from './unit-failure.ts';
 import { rollbackCreatedUnitWorktree } from './worktree-cleanup.ts';
 import { registerAutopilotChildAuthority, type AutopilotChildLeaseHandle } from './coordination/child-authority.ts';
@@ -70,7 +70,6 @@ import {
   assertAutopilotSpecMaterializationDiskGate,
   expandedReadOnlyPathsForAudit,
   materializeAutopilotSpecPaths,
-  sourceReadClaimPathsForSpec,
 } from './materialization.ts';
 import { assertAutopilotSpecQualityGate } from './quality/spec-gate.ts';
 import {
@@ -433,7 +432,7 @@ async function runAutopilotAgentFromSpecPathInternal(
     piResult = await runPiPromptWithStatusCarrier(spawnSpec, rendered.text);
   } catch (error) {
     if (error instanceof AutopilotPiRunError) {
-      const audit = await writeAttemptAudit(spec, runtimePreflight.context, auditBaseline, null, auditOutput, env);
+      const audit = await writeAttemptAudit(spec, runtimePreflight.context, runtimePreflight.authority, auditBaseline, null, auditOutput, env);
       throw new AutopilotAgentRunError('pi-spawn-failed', {
         reason: `Pi spawn failed before valid Autopilot status acceptance: ${error.code}: ${error.message}${formatPiRunErrorDiagnostics(error)}`,
         specPath,
@@ -452,7 +451,7 @@ async function runAutopilotAgentFromSpecPathInternal(
   try {
     evidence = await validateAutopilotStatusEvidence({ unitSpec: spec, providerIdentity });
   } catch (error) {
-    const audit = await writeAttemptAudit(spec, runtimePreflight.context, auditBaseline, null, auditOutput, env);
+    const audit = await writeAttemptAudit(spec, runtimePreflight.context, runtimePreflight.authority, auditBaseline, null, auditOutput, env);
     if (piResult.isError) {
       throw new AutopilotAgentRunError('pi-spawn-failed', {
         reason: `Pi session returned an error result before valid Autopilot status acceptance: ${formatPiResultFailureDiagnostics(piResult)}`,
@@ -490,7 +489,7 @@ async function runAutopilotAgentFromSpecPathInternal(
     });
   }
 
-  const audit = await writeAttemptAudit(spec, runtimePreflight.context, auditBaseline, evidence.status, auditOutput, env);
+  const audit = await writeAttemptAudit(spec, runtimePreflight.context, runtimePreflight.authority, auditBaseline, evidence.status, auditOutput, env);
 
   try {
     validateAutopilotEmitStatusCarrier(
@@ -705,6 +704,7 @@ async function readAndValidateSpec(specPath: string): Promise<AutopilotUnitSpec>
 
 interface RuntimePreflightResult {
   readonly context: ActiveAutopilotContext;
+  readonly authority: AutopilotAuthorityArtifact;
   readonly acquiredClaims: readonly AutopilotPathClaim[];
   readonly coordinatorGroup: CoordinationAcquisitionGroup | null;
   readonly attemptSpec: { readonly ref: string; readonly sha256: `sha256:${string}` };
@@ -768,6 +768,14 @@ async function preflightSpecAfterWorktreePreparation(
     throw error;
   }
 
+  let authority: AutopilotAuthorityArtifact;
+  try {
+    authority = await deriveAutopilotAuthority({ spec });
+    if (options.skipClaimAcquire !== true) await persistAutopilotAuthority(runtimeContext.active.runtime_root, authority);
+  } catch (error) {
+    throw new AutopilotAgentRunError('spec-invalid', { reason: errorMessage(error), specPath, statusOutput: spec.status_output, receiptOutput: spec.receipt_output });
+  }
+
   if (options.skipStaleOutputCheck !== true) {
     for (const [label, path] of [
       ['status_output', spec.status_output],
@@ -785,7 +793,7 @@ async function preflightSpecAfterWorktreePreparation(
   }
 
   if (options.skipClaimAcquire !== true) {
-    await assertAutopilotSpecMaterializationDiskGate({ context: runtimeContext, spec }).catch((error: unknown) => {
+    await assertAutopilotSpecMaterializationDiskGate({ context: runtimeContext, spec, authority }).catch((error: unknown) => {
       if (error instanceof Error) {
         throw new AutopilotAgentRunError('spec-invalid', {
           reason: error.message,
@@ -827,11 +835,11 @@ async function preflightSpecAfterWorktreePreparation(
   const acquiredClaims = options.skipClaimAcquire === true
     ? []
     : coordinatorMode
-      ? await acquireCoordinatorClaimsForUnit({ context: runtimeContext, spec, specPath, env: options.env ?? process.env }).then((result) => {
+      ? await acquireCoordinatorClaimsForUnit({ context: runtimeContext, spec, authority, specPath, env: options.env ?? process.env }).then((result) => {
           coordinatorGroup = result.group;
           return result.claims;
         })
-      : await acquireClaimsForUnit({ context: runtimeContext, spec, reason: 'autopilot-agent-run preflight' }).catch((error: unknown) => {
+      : await acquireClaimsForUnit({ context: runtimeContext, spec, authority, reason: 'autopilot-agent-run preflight' }).catch((error: unknown) => {
           if (error instanceof AutopilotParallelRuntimeError) {
             throw new AutopilotAgentRunError('spec-invalid', {
               reason: error.message,
@@ -847,13 +855,14 @@ async function preflightSpecAfterWorktreePreparation(
     if (options.skipClaimAcquire !== true) await materializeAutopilotSpecPaths({
       context: runtimeContext,
       spec,
+      authority,
       reason: 'autopilot-agent-run preflight materialization',
       ...(options.env === undefined ? {} : { env: options.env }),
     });
     const verifiedSpecBytes = await readFile(specPath);
     const verifiedSpecSha = `sha256:${createHash('sha256').update(verifiedSpecBytes).digest('hex')}`;
     if (verifiedSpecSha !== attemptSpec.sha256) throw new AutopilotAgentRunError('spec-invalid', { reason: 'unit spec changed after authority derivation; prelaunch authority was rolled back', specPath, statusOutput: spec.status_output, receiptOutput: spec.receipt_output });
-    return { context: runtimeContext, acquiredClaims, coordinatorGroup, attemptSpec };
+    return { context: runtimeContext, authority, acquiredClaims, coordinatorGroup, attemptSpec };
   } catch (error) {
     try {
       if (coordinatorGroup !== null) {
@@ -873,6 +882,7 @@ async function preflightSpecAfterWorktreePreparation(
 async function acquireCoordinatorClaimsForUnit(input: {
   readonly context: ActiveAutopilotContext;
   readonly spec: AutopilotUnitSpec;
+  readonly authority: AutopilotAuthorityArtifact;
   readonly specPath: string;
   readonly env: ProcessEnv;
 }): Promise<{ readonly claims: readonly AutopilotPathClaim[]; readonly group: CoordinationAcquisitionGroup | null }> {
@@ -880,16 +890,10 @@ async function acquireCoordinatorClaimsForUnit(input: {
   if (relativeSpec.length === 0 || relativeSpec.startsWith('../') || relativeSpec.startsWith('/')) throw new AutopilotAgentRunError('spec-invalid', { reason: 'coordinator-backed unit spec must be inside the durable run main worktree', specPath: input.specPath });
   const specBytes = await readFile(input.specPath);
   const specSha256 = `sha256:${createHash('sha256').update(specBytes).digest('hex')}` as const;
-  const requested = new Map<string, { readonly path: string; readonly mode: 'READ' | 'WRITE'; readonly purpose: string; readonly source_identity?: CoordinationObservationSourceIdentity }>();
-  const add = (path: string, mode: 'READ' | 'WRITE', purpose: string): void => {
-    const normalized = path.replace(/\\/gu, '/');
-    requested.set(`${mode}\0${normalized}`, mode === 'READ'
-      ? { path: normalized, mode, purpose, source_identity: deriveCoordinationObservationSourceIdentity({ cwd: input.spec.cwd, path: normalized }) }
-      : { path: normalized, mode, purpose });
-  };
-  for (const path of input.spec.owned_paths) add(path, 'WRITE', `source authority for ${input.spec.unit_id}`);
-  for (const path of input.spec.read_only_paths) add(path, 'READ', `declared read authority for ${input.spec.unit_id}`);
-  for (const path of sourceReadClaimPathsForSpec(input.spec)) add(path, 'READ', `source context authority for ${input.spec.unit_id}`);
+  const requested = new Map<string, { readonly path: string; readonly mode: 'READ' | 'WRITE' | 'EXCLUSIVE'; readonly purpose: string; readonly source_identity?: AutopilotAuthorityArtifact['observations'][number]['source_identity'] }>();
+  for (const observation of input.authority.observations) requested.set(`READ\0${observation.path}`, { path: observation.path, mode: 'READ', purpose: observation.purpose, source_identity: observation.source_identity });
+  for (const edit of input.authority.edit_intentions) requested.set(`WRITE\0${edit.path}`, { path: edit.path, mode: 'WRITE', purpose: edit.purpose });
+  for (const exclusive of input.authority.exclusives) requested.set(`EXCLUSIVE\0${exclusive.path}`, { path: exclusive.path, mode: 'EXCLUSIVE', purpose: `${exclusive.purpose}; critical-section=${exclusive.critical_section}` });
   if (requested.size === 0) return { claims: [], group: null };
   const reservationView = await (await ReservationCoordinationClient.fromEnvironment(input.env)).view();
   const reservationBlockers = reservationSchedulingBlockers({ workstreamRun: input.context.active.workstream_run, requestedPaths: [...requested.values()].filter((entry) => entry.mode !== 'READ').map((entry) => entry.path), view: reservationView });
@@ -1028,12 +1032,13 @@ async function writeStatusContext(path: string, context: AutopilotStatusToolCont
 async function writeAttemptAudit(
   spec: AutopilotUnitSpec,
   context: ActiveAutopilotContext,
+  authority: AutopilotAuthorityArtifact,
   baseline: AutopilotExecutionBaseline,
   statusEntry: AutopilotStatusEntry | null,
   auditPath: string,
   env: ProcessEnv,
 ): Promise<AutopilotExecutionAudit> {
-  const readOnlyPaths = await expandedReadOnlyPathsForAudit({ context, spec, env });
+  const readOnlyPaths = await expandedReadOnlyPathsForAudit({ context, spec, authority, env });
   return await writeAutopilotExecutionAudit({
     unitSpec: { ...spec, read_only_paths: readOnlyPaths },
     baseline,

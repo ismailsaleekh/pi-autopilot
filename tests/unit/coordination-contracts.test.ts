@@ -12,6 +12,7 @@ import {
   parseAutopilotChildTerminalAcceptance,
   parseCoordinationEscalation,
   parseCoordinationMigrationRecoveryWork,
+  parseCoordinationReservationObligation,
   parseCoordinationSnapshot,
   parseCoordinatorRequestEnvelope,
   parseCoordinatorResponseEnvelope,
@@ -40,6 +41,7 @@ void describe('Coordination Fabric contracts and invariants', () => {
       'edit_lease',
       'escalation',
       'event',
+      'integration_conflict',
       'mailbox_cursor',
       'message',
       'migration_record',
@@ -62,6 +64,16 @@ void describe('Coordination Fabric contracts and invariants', () => {
       assert.equal(schema['type'], 'object');
       assert.equal(schema['additionalProperties'], false);
     }
+  });
+
+  void it('normalizes pre-classifier reservation obligations before exposing the required current schema', () => {
+    const legacy = parseCoordinationReservationObligation({
+      schema_version: 'autopilot.reservation_obligation.v1', obligation_id: 'legacy-obligation', repo_id: 'repo-1', workstream_run: 'run-b', reservation_id: 'reservation-b', predecessor_reservation_id: 'reservation-a', overlapping_paths: ['src/shared.ts'], state: 'waiting-for-predecessor', created_event_seq: 4, predecessor_released_event_seq: null, predecessor_terminal_sha: null, integration_evidence: null, validation_evidence: null, resolved_event_seq: null, version: 1,
+    });
+    assert.equal(legacy.integration_conflict.kind, 'legacy-conservative');
+    assert.equal(legacy.integration_conflict.disposition, 'repair-required');
+    const required = AUTOPILOT_COORDINATION_JSON_SCHEMAS.reservation_obligation['required'];
+    assert.equal(Array.isArray(required) && required.includes('integration_conflict'), true, 'wire/status output requires the normalized classification even though the parser accepts old stored payloads');
   });
 
   void it('strictly parses parent-owned child-terminal acceptance evidence', () => {
@@ -111,9 +123,10 @@ void describe('Coordination Fabric contracts and invariants', () => {
           edit_lease_id: 'lease-b',
           owner: snapshot.unit_attempts[1]?.owner,
           acquisition_group_id: 'group-b',
+          mode: 'EXCLUSIVE' as const,
         },
       ],
-      acquisition_groups: snapshot.acquisition_groups.map((group) => group.acquisition_group_id === 'group-b' ? { ...group, state: 'granted', grant_event_seq: 3 } : group),
+      acquisition_groups: snapshot.acquisition_groups.map((group) => group.acquisition_group_id === 'group-b' ? { ...group, state: 'granted', grant_event_seq: 3, requested_leases: group.requested_leases.map((lease) => ({ ...lease, mode: 'EXCLUSIVE' as const })) } : group),
     };
     const findings = checkCoordinationInvariants(parseCoordinationSnapshot(jsonRoundTrip(conflicting)));
     assert.equal(findings.some((entry) => entry.code === 'incompatible-active-edit-leases'), true);

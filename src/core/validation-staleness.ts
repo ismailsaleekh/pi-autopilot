@@ -1,6 +1,7 @@
+import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 
 import { writeJsonAtomic } from './parallel-runtime.ts';
 import { parseAutopilotUnitMerge, type AutopilotUnitMerge } from './unit-merge.ts';
@@ -36,6 +37,20 @@ export interface AutopilotValidationStaleness {
   readonly invalidating_unit_merge_ref: string;
   readonly invalidating_unit_id: string;
   readonly invalidating_attempt: number;
+  readonly overlapping_paths: readonly string[];
+  readonly next_state: 'validation-ready' | 'revalidation-ready';
+  readonly created_at: string;
+}
+
+export interface AutopilotReservationValidationStaleness {
+  readonly schema_version: 'autopilot.validation_staleness.v2';
+  readonly workstream: string;
+  readonly stale_validation_ref: string;
+  readonly source_unit_id: string;
+  readonly source_attempt: number;
+  readonly invalidating_kind: 'reservation-integration';
+  readonly invalidating_ref: string;
+  readonly invalidating_obligation_id: string;
   readonly overlapping_paths: readonly string[];
   readonly next_state: 'validation-ready' | 'revalidation-ready';
   readonly created_at: string;
@@ -117,6 +132,77 @@ export async function recordValidationStalenessForMerge(input: {
     records.push(record);
   }
   return Object.freeze(records);
+}
+
+export async function recordValidationStalenessForReservationIntegration(input: {
+  readonly runtimeRoot: string;
+  readonly workstream: string;
+  readonly obligationId: string;
+  readonly invalidatingRef: string;
+  readonly currentIntegrationHead: string;
+  readonly changedPaths: readonly string[];
+  readonly validationEvidenceRefs: readonly string[];
+  readonly now?: Date;
+}): Promise<readonly AutopilotReservationValidationStaleness[]> {
+  const now = input.now ?? new Date();
+  const records: AutopilotReservationValidationStaleness[] = [];
+  for (const ref of input.validationEvidenceRefs) {
+    const validation = parseValidationEvidence(await readRuntimeJson(input.runtimeRoot, ref));
+    if (validation.verdict !== 'PASS' || validation.integration_head === input.currentIntegrationHead) continue;
+    const overlap = overlapping(validation.covered_paths, input.changedPaths);
+    if (overlap.length === 0) continue;
+    const record: AutopilotReservationValidationStaleness = {
+      schema_version: 'autopilot.validation_staleness.v2',
+      workstream: input.workstream,
+      stale_validation_ref: ref,
+      source_unit_id: validation.source_unit_id,
+      source_attempt: validation.source_attempt,
+      invalidating_kind: 'reservation-integration',
+      invalidating_ref: input.invalidatingRef,
+      invalidating_obligation_id: input.obligationId,
+      overlapping_paths: overlap,
+      next_state: validation.source_attempt > 1 ? 'revalidation-ready' : 'validation-ready',
+      created_at: now.toISOString(),
+    };
+    const path = reservationValidationStalenessPath(input.runtimeRoot, validation.source_unit_id, validation.source_attempt, input.obligationId, ref);
+    if (existsSync(path)) {
+      const existing = parseReservationValidationStaleness(await readRuntimeJson(input.runtimeRoot, relative(input.runtimeRoot, path).replace(/\\/gu, '/')));
+      if (!sameReservationStaleness(existing, record)) fail('reservation-staleness-drift', `immutable reservation staleness evidence differs on replay: ${path}`);
+      records.push(existing);
+      continue;
+    }
+    await writeJsonAtomic(path, record);
+    records.push(record);
+  }
+  return Object.freeze(records);
+}
+
+export function reservationValidationStalenessPath(runtimeRoot: string, sourceUnitId: string, sourceAttempt: number, obligationId: string, staleValidationRef: string): string {
+  const refDigest = createHash('sha256').update(staleValidationRef, 'utf8').digest('hex').slice(0, 20);
+  return join(runtimeRoot, 'validation-staleness', `${sourceUnitId}.attempt-${String(sourceAttempt)}.by-reservation-${obligationId}.${refDigest}.json`);
+}
+
+export function parseReservationValidationStaleness(value: unknown): AutopilotReservationValidationStaleness {
+  if (!isRecord(value)) fail('invalid-reservation-staleness', 'reservation validation staleness must be an object.');
+  const nextState = expectString(value, 'next_state');
+  if (nextState !== 'validation-ready' && nextState !== 'revalidation-ready') fail('invalid-reservation-staleness', 'reservation validation staleness next_state is invalid.');
+  return {
+    schema_version: expectConst(value, 'schema_version', 'autopilot.validation_staleness.v2'),
+    workstream: expectString(value, 'workstream'),
+    stale_validation_ref: expectString(value, 'stale_validation_ref'),
+    source_unit_id: expectString(value, 'source_unit_id'),
+    source_attempt: expectInteger(value, 'source_attempt'),
+    invalidating_kind: expectConst(value, 'invalidating_kind', 'reservation-integration'),
+    invalidating_ref: expectString(value, 'invalidating_ref'),
+    invalidating_obligation_id: expectString(value, 'invalidating_obligation_id'),
+    overlapping_paths: expectStringArray(value, 'overlapping_paths'),
+    next_state: nextState,
+    created_at: expectString(value, 'created_at'),
+  };
+}
+
+function sameReservationStaleness(left: AutopilotReservationValidationStaleness, right: AutopilotReservationValidationStaleness): boolean {
+  return left.schema_version === right.schema_version && left.workstream === right.workstream && left.stale_validation_ref === right.stale_validation_ref && left.source_unit_id === right.source_unit_id && left.source_attempt === right.source_attempt && left.invalidating_kind === right.invalidating_kind && left.invalidating_ref === right.invalidating_ref && left.invalidating_obligation_id === right.invalidating_obligation_id && left.next_state === right.next_state && JSON.stringify(left.overlapping_paths) === JSON.stringify(right.overlapping_paths);
 }
 
 export function validationCanCloseSourceWork(input: {

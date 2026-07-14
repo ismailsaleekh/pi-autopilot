@@ -135,7 +135,7 @@ function acquireRequest(actor: ScaleSession, requestIndex: number | 'owner'): Co
     session_id: actor.sessionId, fencing_generation: actor.generation, expected_version: actor.runVersion,
     payload: {
       acquisition_group_id: groupId, unit_id: unitId, attempt: 1,
-      requested_leases: [{ path: 'src/contested/shared.ts', mode: 'WRITE', purpose: owner ? 'scale contention anchor' : 'scale requester replay' }],
+      requested_leases: [{ path: 'src/contested/shared.ts', mode: 'EXCLUSIVE', purpose: owner ? 'scale critical-section contention anchor' : 'scale critical-section requester replay' }],
       acquisition_kind: 'initial', reason: owner ? 'hold deterministic repository contention anchor' : 'request deterministic repository contention anchor',
       normal_release_condition: { condition_type: 'unit-merged', target_id: `${unitId}:1`, evidence: null },
       spec_ref: `.pi/autopilot/scale/unit-specs/${unitId}.json`, spec_sha256: `sha256:${digest(`scale-spec-${identity}`)}`,

@@ -14,7 +14,7 @@ import { CoordinatorClient } from "./coordination/client.js";
 import { parseCoordinationReconciliationEvidence, parseCoordinationRun, parseCoordinationRunTerminalIntent, parseCoordinationSessionLease, parseCoordinationWorktree } from "./coordination/contracts.js";
 import { DurableRunSupervisorClient, readCoordinatorSessionContext } from "./coordination/supervisor.js";
 import { recordCoordinatorReleaseEvidenceFromFile } from "./coordination/reconciliation.js";
-import { ReservationCoordinationClient, preparedRunTerminalIntent, reconcilePendingReservationResolutions, reservationCloseBlockers, resolvedReservationIntegrations } from "./coordination/reservations.js";
+import { ReservationCoordinationClient, preparePendingReservationIntegrations, preparedRunTerminalIntent, reconcilePendingReservationResolutions, reservationCloseBlockers, resolvedReservationIntegrations } from "./coordination/reservations.js";
 import { ACTIVE_AUTOPILOTS_FILE, BRANCHES_FILE, CLAIM_EVENTS_FILE, FOREIGN_MERGE_ACKS_FILE, MERGE_LOG_FILE, PATH_CLAIMS_FILE, TASK_INFO_FILE, UNIT_INDEX_FILE, WORKTREE_INDEX_FILE, appendClaimEvent, appendJsonl, coordinationRootForRepo, gitHead, isAutopilotRuntimeRepoPath, mainMergeLockPathForRepo, matchesRepoPathPattern, pathOverlapsOrContains, readActiveAutopilots, readCoordinatorActiveAutopilots, readGitStatus, readPathClaims, readUnitIndex, readWorktreeIndex, resolveAutopilotStateRoot, resolveRepoIdentity, runGit, taskRootForActiveAutopilot, updateTaskInfoStatus, withAutopilotFileLock, worktreeRootForRepo, writeActiveAutopilots, writeJsonAtomic, writePathClaims, } from "./parallel-runtime.js";
 import { assertCoordinationDispatchAllowed, coordinationCutoverCommitted } from "./coordination/migration-paths.js";
 import { coordinatorRuntimePaths } from "./coordination/runtime-paths.js";
@@ -89,8 +89,10 @@ export async function closeAutopilotWorkstream(options) {
                 if (coordinatorAuthority)
                     await options.observeCloseRaceBoundary?.('after-durable-launch-fence-before-validation');
                 await validateTerminalArchiveSources(context);
-                if (coordinatorAuthority)
+                if (coordinatorAuthority) {
+                    await preparePendingReservationIntegrations(active, env, now);
                     await reconcilePendingReservationResolutions(active, env);
+                }
                 const validation = await validateCloseReadiness(context, now, env, terminalIntent !== null);
                 if (validation.blockers.length > 0) {
                     if (terminalIntent !== null) {

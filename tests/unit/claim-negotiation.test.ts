@@ -90,7 +90,7 @@ async function replaceActor(client: CoordinatorClient, actor: Actor, suffix: str
 function acquisitionInput(suffix: string) {
   return {
     acquisitionGroupId: `group-${suffix}`, unitId: `unit-${suffix}`, attempt: 1,
-    requestedLeases: [{ path: 'src/shared.ts', mode: 'WRITE' as const, purpose: `implement ${suffix}` }],
+    requestedLeases: [{ path: 'src/shared.ts', mode: 'EXCLUSIVE' as const, purpose: `bounded critical section ${suffix}` }],
     reason: `workstream ${suffix} requires shared source`, normalReleaseCondition: { ...RELEASE_CONDITION, target_id: `unit-${suffix}:1` },
     specRef: `.pi/autopilot/workstream-${suffix}/unit-specs/unit-${suffix}.json`, specSha256: `sha256:${suffix.charCodeAt(0).toString(16).slice(-1).repeat(64)}` as `sha256:${string}`,
     role: 'implement' as const, preemptible: true, checkpointOrdinal: 0,
@@ -198,7 +198,7 @@ void describe('Coordination Fabric claim negotiation', () => {
       assert.equal(offered.state, 'grant-ready');
       const requesterGrant = await requester.negotiation.acknowledgeGrant(offered);
       assert.equal(requesterGrant.acquisitionGroup.state, 'granted');
-      assert.deepEqual(requesterGrant.editLeases.map((entry) => `${entry.mode} ${entry.path}`), ['WRITE src/shared.ts', 'WRITE src/requester-only.ts']);
+      assert.deepEqual(requesterGrant.editLeases.map((entry) => `${entry.mode} ${entry.path}`), ['EXCLUSIVE src/shared.ts', 'WRITE src/requester-only.ts']);
       const ownerStatus = await client.query('status', owner.context.repo_id, owner.context.workstream_run);
       const requesterStatus = await client.query('status', requester.context.repo_id, requester.context.workstream_run);
       const retainedOwnerLeases = array(ownerStatus.payload['edit_leases'], 'owner leases');
@@ -296,7 +296,7 @@ void describe('Coordination Fabric claim negotiation', () => {
       await owner.negotiation.acquire(acquisitionInput('a'));
       const otherOwnerInput = acquisitionInput('a');
       await owner.negotiation.acquire({
-        ...otherOwnerInput, acquisitionGroupId: 'group-a-other', unitId: 'unit-a-other', normalReleaseCondition: { condition_type: 'unit-merged', target_id: 'unit-a-other:1', evidence: null }, requestedLeases: [{ path: 'src/other-shared.ts', mode: 'WRITE', purpose: 'hold second independent path' }],
+        ...otherOwnerInput, acquisitionGroupId: 'group-a-other', unitId: 'unit-a-other', normalReleaseCondition: { condition_type: 'unit-merged', target_id: 'unit-a-other:1', evidence: null }, requestedLeases: [{ path: 'src/other-shared.ts', mode: 'EXCLUSIVE', purpose: 'hold second independent critical path' }],
       });
       await first.negotiation.acquire(acquisitionInput('b'));
       await second.negotiation.acquire(acquisitionInput('c'));

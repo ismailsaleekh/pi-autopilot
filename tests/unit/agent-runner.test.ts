@@ -19,6 +19,7 @@ import { parseAutopilotChildTerminalAcceptance } from '../../src/core/coordinati
 import { RunReconciliationClient } from '../../src/core/coordination/reconciliation.ts';
 import { proveStructuredAttemptTerminal } from '../../src/core/coordination/terminal-attempt-proof.ts';
 import { autopilotModelAssignmentForRole } from '../../src/core/model-roster.ts';
+import { authorityArtifactPath, parseAutopilotAuthority } from '../../src/core/authority.ts';
 
 const TEST_DIR = dirname(fileURLToPath(import.meta.url));
 const PACKAGE_ROOT = resolve(TEST_DIR, '..', '..');
@@ -315,6 +316,10 @@ void describe('autopilot-agent-run wrapper', () => {
       const executionCommit = JSON.parse(await readFile(result.executionCommitOutput, 'utf8')) as { schema_version?: string; edited_claimed_paths?: string[] };
       assert.equal(executionCommit.schema_version, 'autopilot.execution_commit.v1');
       assert.deepEqual(executionCommit.edited_claimed_paths, ['src/smoke.ts']);
+      const authorityPath = authorityArtifactPath(dirname(dirname(unitSpec.status_output)), { unit_id: unitSpec.unit_id, role: unitSpec.role, attempt: unitSpec.attempt });
+      const authority = parseAutopilotAuthority(JSON.parse(await readFile(authorityPath, 'utf8')) as unknown);
+      assert.deepEqual(authority.edit_intentions.map((entry) => entry.path), ['src/smoke.ts']);
+      assert.deepEqual(authority.observations, []);
       const receipt = JSON.parse(await readFile(unitSpec.receipt_output, 'utf8')) as FakeReceipt;
       assert.equal(receipt.tool_call_id, 'call-autopilot-fake-1');
       const contextPath = process.env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV];

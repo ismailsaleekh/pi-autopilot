@@ -5,7 +5,8 @@ import { mkdir, open, readFile, readdir, rename, rm, stat, unlink, writeFile, ty
 import { homedir, hostname, platform, uptime } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
-import type { AutopilotUnitSpec, AutopilotVerificationPlan, AutopilotWitnessSpec } from './contracts/types.ts';
+import type { AutopilotUnitSpec } from './contracts/types.ts';
+import { authorityCandidatesForSpec, deriveAutopilotAuthority, type AutopilotAuthorityArtifact } from './authority.ts';
 import {
   AUTOPILOT_CHECKOUT_PROFILE_SNAPSHOT_FILE,
   checkoutProfileSnapshotFromResolved,
@@ -811,10 +812,12 @@ export async function resolveActiveAutopilotForSpec(
 export async function acquireClaimsForUnit(input: {
   readonly context: ActiveAutopilotContext;
   readonly spec: AutopilotUnitSpec;
+  readonly authority?: AutopilotAuthorityArtifact;
   readonly reason: string;
 }): Promise<readonly AutopilotPathClaim[]> {
   assertLegacyClaimAuthority(input.context.active, 'legacy claim acquisition');
-  const requested = requestedClaimsForSpec(input.context.active, input.spec, input.reason);
+  const authorityArtifact = input.authority ?? await deriveAutopilotAuthority({ spec: input.spec });
+  const requested = requestedClaimsForAuthority(input.context.active, input.spec, authorityArtifact, input.reason);
   if (requested.length === 0) return Object.freeze([]);
   const lockPath = join(input.context.coordinationRoot, '.locks', 'path-claims.lock');
   return await withAutopilotFileLock(lockPath, `claims:${input.context.active.autopilot_id}`, async () => {
@@ -1084,11 +1087,7 @@ async function checkoutMetadataForTaskRoot(taskRoot: string): Promise<TaskChecko
 }
 
 function materializationPathsForCheckoutBootstrap(spec: AutopilotUnitSpec): readonly string[] {
-  return sortedUnique([
-    ...spec.owned_paths,
-    ...spec.read_only_paths,
-    ...sourceReadClaimPathsForSpec(spec),
-  ].filter((path) => !isAutopilotRuntimeRepoPath(path, spec.workstream)).map((path) => normalizeRepoRelativePath(path.replace(/\/\*\*$/u, ''))));
+  return sortedUnique(authorityCandidatesForSpec(spec).map((candidate) => normalizeRepoRelativePath(candidate.path.replace(/\/\*\*$/u, ''))));
 }
 
 async function ensureFutureOwnedParentDirs(worktreePath: string, ownedPaths: readonly string[]): Promise<void> {
@@ -1366,39 +1365,11 @@ function reactivateActiveRow(row: ActiveAutopilotRow, repo: AutopilotRepoIdentit
   };
 }
 
-function sourceReadClaimPathsForSpec(spec: AutopilotUnitSpec): readonly string[] {
-  const owned = spec.owned_paths.map((path) => normalizeRepoRelativePath(path.replace(/\/\*\*$/u, '')));
-  const candidates: string[] = [];
-  for (const path of spec.read_only_paths) candidates.push(path);
-  for (const ref of spec.context_refs) candidates.push(ref.path);
-  for (const witness of witnessesFromVerificationPlan(spec.verification_plan)) {
-    if (witness.inspection_target !== undefined) candidates.push(witness.inspection_target);
-  }
-  const normalized = candidates
-    .filter((path) => !isAutopilotRuntimeRepoPath(path, spec.workstream))
-    .map((path) => normalizeRepoRelativePath(path.replace(/\/\*\*$/u, '')))
-    .filter((path) => !owned.some((ownedPath) => pathOverlapsOrContains(ownedPath, path)));
-  return sortedUnique(normalized);
-}
-
-function witnessesFromVerificationPlan(plan: AutopilotVerificationPlan | undefined): readonly AutopilotWitnessSpec[] {
-  if (plan === undefined) return [];
-  return Object.freeze([
-    ...plan.positive_witnesses,
-    ...plan.negative_witnesses,
-    ...plan.regression_witnesses,
-    ...plan.real_boundary_witnesses,
-    ...plan.blast_radius_checks,
-    ...plan.docs_schema_prompt_checks,
-    ...plan.dirty_tree_checks,
-  ]);
-}
-
 function sortedUnique(values: readonly string[]): readonly string[] {
   return Object.freeze([...new Set(values)].sort((left, right) => left.localeCompare(right)));
 }
 
-function requestedClaimsForSpec(active: ActiveAutopilotRow, spec: AutopilotUnitSpec, reason: string): readonly AutopilotPathClaim[] {
+function requestedClaimsForAuthority(active: ActiveAutopilotRow, spec: AutopilotUnitSpec, authorityArtifact: AutopilotAuthorityArtifact, reason: string): readonly AutopilotPathClaim[] {
   const now = new Date().toISOString();
   const claims: AutopilotPathClaim[] = [];
   const add = (path: string, claimType: AutopilotClaimType): void => {
@@ -1416,9 +1387,9 @@ function requestedClaimsForSpec(active: ActiveAutopilotRow, spec: AutopilotUnitS
       reason,
     });
   };
-  for (const path of spec.owned_paths) add(path, 'WRITE');
-  for (const path of spec.read_only_paths) add(path, 'READ');
-  for (const path of sourceReadClaimPathsForSpec(spec)) add(path, 'READ');
+  for (const observation of authorityArtifact.observations) add(observation.path, 'READ');
+  for (const edit of authorityArtifact.edit_intentions) add(edit.path, 'WRITE');
+  for (const exclusive of authorityArtifact.exclusives) add(exclusive.path, 'EXCLUSIVE');
   return Object.freeze(dedupeClaims(claims));
 }
 
@@ -1460,9 +1431,13 @@ function findClaimBlockers(
 }
 
 function claimTypesConflict(requested: AutopilotClaimType, existing: AutopilotClaimType): boolean {
-  // READ records stable bytes in an isolated worktree; it is an observation,
-  // not shared-checkout exclusion authority.
-  return requested !== 'READ' && existing !== 'READ';
+  // READ is a stable observation and WRITE is speculative edit intent in an
+  // isolated worktree. A pre-existing READ may finish against immutable bytes;
+  // an active bounded EXCLUSIVE excludes every new overlapping mode, and a new
+  // EXCLUSIVE excludes active WRITE. Real WRITE/WRITE conflicts are classified
+  // from actual diffs at integration time.
+  if (existing === 'READ') return false;
+  return requested === 'EXCLUSIVE' || existing === 'EXCLUSIVE';
 }
 
 function isIdempotentSameUnitClaim(req: AutopilotPathClaim, claim: AutopilotPathClaim, authority: ActiveAutopilotRow): boolean {

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { existsSync, lstatSync, readdirSync, realpathSync } from 'node:fs';
 import { mkdir, readFile } from 'node:fs/promises';
@@ -7,6 +8,7 @@ import { CoordinatorClient } from "./coordination/client.js";
 import { parseCoordinationChildLease, parseCoordinationEditLease, parseCoordinationUnitAttempt, parseCoordinationWorktree, parseCoordinationWorktreeOperation } from "./coordination/contracts.js";
 import { CoordinationRuntimeError } from "./coordination/failures.js";
 import { readCoordinatorSessionContext } from "./coordination/supervisor.js";
+import { parseAutopilotChildTerminalAcceptance } from "./coordination/terminal-acceptance.js";
 import { AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV } from "./names.js";
 import { gitHead, readGitStatus, releaseClaimsForUnit, runGit, updateUnitBranchStatus, writeJsonAtomic } from "./parallel-runtime.js";
 import { cleanupTerminalUnitWorktree } from "./worktree-cleanup.js";
@@ -51,6 +53,13 @@ export async function reconcileRetainedFailedUnitAuthority(input) {
         }
         if (child.status !== 'terminal' && child.status !== 'recovery-required')
             continue;
+        if (child.status === 'terminal') {
+            const verdict = await acceptedTerminalVerdict(input.context, child, attempt.role);
+            if (verdict === 'DONE')
+                continue;
+            if (verdict !== 'NEEDS_FIX' && verdict !== 'BLOCKED')
+                throw new CoordinationRuntimeError('invalid-state', 'source-changing terminal acceptance has an invalid recovery verdict', [child.child_lease_id, verdict]);
+        }
         const worktree = worktrees.find((candidate) => candidate.kind === 'unit' && candidate.owner.unit_id === lease.owner.unit_id && candidate.owner.attempt === lease.owner.attempt && candidate.state !== 'removed');
         if (worktree === undefined)
             throw new CoordinationRuntimeError('recovery-required', 'terminal source-changing attempt retains edit authority without one recoverable registered unit worktree', [lease.edit_lease_id, child.child_lease_id]);
@@ -81,6 +90,29 @@ export async function reconcileRetainedFailedUnitAuthority(input) {
         processed.add(ownerKey);
     }
     return Object.freeze(records);
+}
+export async function acceptedTerminalVerdict(context, child, expectedRole) {
+    if (child.terminal_evidence === null)
+        throw new CoordinationRuntimeError('recovery-required', 'terminal source-changing child lacks accepted terminal evidence', [child.child_lease_id]);
+    const path = resolve(context.active.main_worktree_path, child.terminal_evidence.ref);
+    const inside = relative(context.active.main_worktree_path, path);
+    if (inside.length === 0 || inside.startsWith('..') || isAbsolute(inside))
+        throw new CoordinationRuntimeError('invalid-state', 'terminal acceptance evidence escapes the owned main worktree', [child.terminal_evidence.ref]);
+    const bytes = await readFile(path);
+    const digest = `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
+    if (digest !== child.terminal_evidence.sha256)
+        throw new CoordinationRuntimeError('invalid-state', 'terminal acceptance evidence hash differs from coordinator authority', [child.child_lease_id, child.terminal_evidence.ref]);
+    let value;
+    try {
+        value = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+    }
+    catch (error) {
+        throw new CoordinationRuntimeError('invalid-state', 'terminal acceptance evidence is not valid JSON', [child.terminal_evidence.ref, error instanceof Error ? error.message : String(error)]);
+    }
+    const acceptance = parseAutopilotChildTerminalAcceptance(value);
+    if (acceptance.repo_id !== child.owner.repo_id || acceptance.autopilot_id !== child.owner.autopilot_id || acceptance.workstream_run !== child.owner.workstream_run || acceptance.unit_id !== child.owner.unit_id || acceptance.attempt !== child.owner.attempt || acceptance.child_lease_id !== child.child_lease_id || acceptance.role !== expectedRole)
+        throw new CoordinationRuntimeError('invalid-state', 'terminal acceptance identity differs from retained child authority', [child.child_lease_id]);
+    return acceptance.verdict;
 }
 export async function quarantineFailedUnit(input) {
     const record = await writeFailureRecord({ ...input, action: 'quarantine' });

@@ -83,7 +83,7 @@ async function attachActor(client: CoordinatorClient, stateRoot: string, repoRoo
 
 function acquisition(actor: Actor, id: string, path: string, unitId: string, preemptible = true, role: 'implement' | 'adjudicate' = 'implement', acquisitionKind: 'initial' | 'materialization-read-expansion' = 'initial') {
   return {
-    acquisitionGroupId: id, unitId, attempt: 1, acquisitionKind, requestedLeases: [{ path, mode: acquisitionKind === 'initial' && role === 'implement' ? 'WRITE' as const : 'READ' as const, purpose: `own ${path}` }], reason: `requires ${path}`,
+    acquisitionGroupId: id, unitId, attempt: 1, acquisitionKind, requestedLeases: [{ path, mode: acquisitionKind === 'initial' && role === 'implement' ? 'EXCLUSIVE' as const : 'READ' as const, purpose: `own ${path}` }], reason: `requires ${path}`,
     normalReleaseCondition: role === 'adjudicate' ? { condition_type: 'child-terminal' as const, target_id: `child-${actor.context.workstream_run}-${unitId}-1`, evidence: null } : { condition_type: 'unit-merged' as const, target_id: `${unitId}:1`, evidence: null }, specRef: `.pi/autopilot/${actor.context.workstream}/unit-specs/${unitId}.json`,
     specSha256: `sha256:${actor.context.autopilot_id.charCodeAt(0).toString(16).repeat(64).slice(0, 64)}` as `sha256:${string}`, role, preemptible, checkpointOrdinal: 0,
   };
@@ -139,8 +139,8 @@ void describe('Coordination Fabric deadlock, starvation, and escalation arbitrat
         const blocker = owners[(index + 1) % size];
         if (requester === undefined || blocker === undefined) throw new Error('generated owner missing');
         const leaseId = `lease-${String(index)}`;
-        leases.push({ schema_version: 'autopilot.edit_lease.v1', edit_lease_id: leaseId, owner: blocker, acquisition_group_id: `held-${String(index)}`, path: `src/${String(index)}.ts`, mode: 'WRITE', purpose: 'ring', acquired_event_seq: index + 1, normal_release_condition: { condition_type: 'unit-merged', target_id: `${blocker.unit_id}:1`, evidence: null }, version: 1 });
-        requests.push({ schema_version: 'autopilot.claim_request.v1', request_id: `request-${String(index)}`, acquisition_group_id: `wait-${String(index)}`, requester, owner: blocker, blocking_lease_ids: [leaseId], requested_leases: [{ path: `src/${String(index)}.ts`, mode: 'WRITE', purpose: 'ring' }], reason: 'ring', created_event_seq: index + 1, status: 'deferred', owner_reason: 'held', release_condition: { condition_type: 'unit-merged', target_id: `${blocker.unit_id}:1`, evidence: null }, release_event_seq: null, grant_event_seq: null, version: 2 });
+        leases.push({ schema_version: 'autopilot.edit_lease.v1', edit_lease_id: leaseId, owner: blocker, acquisition_group_id: `held-${String(index)}`, path: `src/${String(index)}.ts`, mode: 'EXCLUSIVE', purpose: 'ring critical section', acquired_event_seq: index + 1, normal_release_condition: { condition_type: 'unit-merged', target_id: `${blocker.unit_id}:1`, evidence: null }, version: 1 });
+        requests.push({ schema_version: 'autopilot.claim_request.v1', request_id: `request-${String(index)}`, acquisition_group_id: `wait-${String(index)}`, requester, owner: blocker, blocking_lease_ids: [leaseId], requested_leases: [{ path: `src/${String(index)}.ts`, mode: 'EXCLUSIVE', purpose: 'ring critical section' }], reason: 'ring', created_event_seq: index + 1, status: 'deferred', owner_reason: 'held', release_condition: { condition_type: 'unit-merged', target_id: `${blocker.unit_id}:1`, evidence: null }, release_event_seq: null, grant_event_seq: null, version: 2 });
       }
       const edges = buildCoordinationWaitForEdges({ requests, editLeases: leases, eventSeq: size + 1 });
       assert.equal(detectCoordinationWaitCycles(edges).length, 1);
@@ -290,16 +290,19 @@ void describe('Coordination Fabric deadlock, starvation, and escalation arbitrat
     }
   });
 
-  void it('keeps observation-only dependencies out of wait edges and deadlock decisions', () => {
+  void it('keeps ordinary observation/edit overlap out of wait graphs while retaining genuine EXCLUSIVE edges', () => {
     const requester: CoordinationOwnerIdentity = { repo_id: 'repo', autopilot_id: 'reader', workstream_run: 'run-reader', unit_id: 'unit-reader', attempt: 1 };
     const owner: CoordinationOwnerIdentity = { repo_id: 'repo', autopilot_id: 'writer', workstream_run: 'run-writer', unit_id: 'unit-writer', attempt: 1 };
-    const lease: CoordinationEditLease = { schema_version: 'autopilot.edit_lease.v1', edit_lease_id: 'lease-writer', owner, acquisition_group_id: 'group-writer', path: 'src/shared.ts', mode: 'WRITE', purpose: 'writer authority', acquired_event_seq: 1, normal_release_condition: { condition_type: 'unit-merged', target_id: 'unit-writer:1', evidence: null }, version: 1 };
-    const staleReadRequest: CoordinationClaimRequest = { schema_version: 'autopilot.claim_request.v1', request_id: 'request-reader', acquisition_group_id: 'group-reader', requester, owner, blocking_lease_ids: [lease.edit_lease_id], requested_leases: [{ path: 'src/shared.ts', mode: 'READ', purpose: 'historical read dependency' }], reason: 'legacy read blocker', created_event_seq: 2, status: 'pending', owner_reason: null, release_condition: null, release_event_seq: null, grant_event_seq: null, version: 1 };
-    assert.deepEqual(buildCoordinationWaitForEdges({ requests: [staleReadRequest], editLeases: [lease], eventSeq: 3 }), []);
-    const editRequest: CoordinationClaimRequest = { ...staleReadRequest, request_id: 'request-writer', requested_leases: [{ path: 'src/shared.ts', mode: 'WRITE', purpose: 'real edit contention' }] };
-    const edges = buildCoordinationWaitForEdges({ requests: [editRequest], editLeases: [lease], eventSeq: 3 });
-    assert.equal(edges.length, 1);
-    assert.deepEqual(detectCoordinationWaitCycles(edges), []);
+    const lease: CoordinationEditLease = { schema_version: 'autopilot.edit_lease.v1', edit_lease_id: 'lease-writer', owner, acquisition_group_id: 'group-writer', path: 'src/shared.ts', mode: 'EXCLUSIVE', purpose: 'bounded writer critical section', acquired_event_seq: 1, normal_release_condition: { condition_type: 'unit-merged', target_id: 'unit-writer:1', evidence: null }, version: 1 };
+    const readRequest: CoordinationClaimRequest = { schema_version: 'autopilot.claim_request.v1', request_id: 'request-reader', acquisition_group_id: 'group-reader', requester, owner, blocking_lease_ids: [lease.edit_lease_id], requested_leases: [{ path: 'src/shared.ts', mode: 'READ', purpose: 'commit-bound observation' }], reason: 'active exclusive blocks new observation', created_event_seq: 2, status: 'pending', owner_reason: null, release_condition: null, release_event_seq: null, grant_event_seq: null, version: 1 };
+    const ordinaryWrite = { ...lease, mode: 'WRITE' as const, purpose: 'speculative edit intent' };
+    assert.deepEqual(buildCoordinationWaitForEdges({ requests: [readRequest], editLeases: [ordinaryWrite], eventSeq: 3 }), []);
+    const readExclusiveEdges = buildCoordinationWaitForEdges({ requests: [readRequest], editLeases: [lease], eventSeq: 3 });
+    assert.equal(readExclusiveEdges.length, 1);
+    const editRequest: CoordinationClaimRequest = { ...readRequest, request_id: 'request-writer', requested_leases: [{ path: 'src/shared.ts', mode: 'WRITE', purpose: 'real exclusive contention' }] };
+    const editExclusiveEdges = buildCoordinationWaitForEdges({ requests: [editRequest], editLeases: [lease], eventSeq: 3 });
+    assert.equal(editExclusiveEdges.length, 1);
+    assert.deepEqual(detectCoordinationWaitCycles([...readExclusiveEdges, ...editExclusiveEdges]), []);
   });
 
   void it('mechanically rejects every operational escalation class', () => {

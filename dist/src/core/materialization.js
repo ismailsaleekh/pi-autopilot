@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { mkdir, readFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { deriveAutopilotAuthority, materializationRowsForAuthority } from "./authority.js";
 import { AUTOPILOT_CHECKOUT_PROFILE_SNAPSHOT_FILE, estimateBytesForMaterializationPaths, normalizeMaterializationPath, pathMatchesMaterializationPattern, readCheckoutProfileSnapshot, scanTrackedTree, sparseIncludePatternsForPaths, submodulePathsForMaterialization, trackedPathExists, } from "./checkout-profile.js";
 import { assertAutopilotDiskGate } from "./disk-gate.js";
 import { addSparseCheckoutPatterns, assertSparseCheckoutEnabled, isSparseCheckoutEnabled, isSparseMissingPath } from "./sparse-worktree.js";
@@ -30,7 +31,8 @@ export async function assertAutopilotSpecMaterializationDiskGate(input) {
     const snapshot = await readCheckoutProfileSnapshot(join(taskRoot, AUTOPILOT_CHECKOUT_PROFILE_SNAPSHOT_FILE));
     if (snapshot === null || snapshot.profile.mode === 'full')
         return;
-    const paths = sourceMaterializationPathsForSpec(input.spec).map((path) => path.path);
+    const authority = input.authority ?? await deriveAutopilotAuthority({ spec: input.spec });
+    const paths = materializationRowsForAuthority(authority).map((path) => path.path);
     const scan = await scanTrackedTree(input.context.active.main_worktree_path, input.now ?? new Date());
     const byteCount = estimateBytesForMaterializationPaths(scan, paths);
     assertAutopilotDiskGate({
@@ -45,7 +47,8 @@ export async function assertAutopilotSpecMaterializationDiskGate(input) {
     });
 }
 export async function materializeAutopilotSpecPaths(input) {
-    const materializationPaths = sourceMaterializationPathsForSpec(input.spec);
+    const authority = input.authority ?? await deriveAutopilotAuthority({ spec: input.spec });
+    const materializationPaths = materializationRowsForAuthority(authority);
     return await materializePathsForSpec({
         context: input.context,
         spec: input.spec,
@@ -142,14 +145,14 @@ export async function materializeAdditionalReadPathsForSpec(input) {
 }
 export async function expandedReadOnlyPathsForAudit(input) {
     if (input.context.active.coordination_authority === 'coordinator-edit-leases-v1')
-        return sortedUnique([...input.spec.read_only_paths, ...sourceReadClaimPathsForSpec(input.spec)]);
+        return sortedUnique(input.authority.observations.map((observation) => observation.path));
     const claims = await readPathClaims(input.context.coordinationRoot);
     const expanded = claims.filter((claim) => claim.autopilot_id === input.context.active.autopilot_id &&
         claim.workstream_run === input.context.active.workstream_run &&
         claim.unit_id === input.spec.unit_id &&
         claim.attempt === input.spec.attempt &&
         claim.claim_type === 'READ').map((claim) => claim.path);
-    return sortedUnique([...input.spec.read_only_paths, ...expanded]);
+    return sortedUnique([...input.authority.observations.map((observation) => observation.path), ...expanded]);
 }
 export async function materializeSparseReadForToolCall(input) {
     if (input.event.toolName !== 'read' && input.event.toolName !== 'Read')
@@ -238,31 +241,6 @@ export async function resolveActiveContextForStatusContext(statusContext, env = 
         claimsPath: join(coordinationRoot, 'path-claims.json'),
         claimEventsPath: join(coordinationRoot, 'claim-events.jsonl'),
     });
-}
-export function sourceMaterializationPathsForSpec(spec) {
-    const rows = [];
-    const add = (path, claimType, reason) => {
-        const normalized = normalizeMaterializationPath(path, reason);
-        if (isRuntimeRepoPath(normalized, spec.workstream))
-            return;
-        rows.push({ path: normalized, claim_type: claimType, reason });
-    };
-    for (const path of spec.owned_paths)
-        add(path, 'WRITE', 'unit owned_paths');
-    for (const path of spec.read_only_paths)
-        add(path, 'READ', 'unit read_only_paths');
-    for (const ref of spec.context_refs)
-        add(ref.path, 'READ', 'unit context_refs');
-    for (const witness of witnessesFromVerificationPlan(spec.verification_plan)) {
-        if (witness.inspection_target !== undefined)
-            add(witness.inspection_target, 'READ', 'unit verification inspection_target');
-    }
-    return Object.freeze(dedupeMaterializationRows(rows));
-}
-export function sourceReadClaimPathsForSpec(spec) {
-    const owned = spec.owned_paths.map((path) => normalizeMaterializationPath(path, 'owned path'));
-    const rows = sourceMaterializationPathsForSpec(spec).filter((row) => row.claim_type === 'READ' && !owned.some((ownedPath) => pathMatchesMaterializationPattern(row.path, ownedPath) || pathMatchesMaterializationPattern(ownedPath, row.path)));
-    return sortedUnique(rows.map((row) => row.path));
 }
 async function materializePathsForSpec(input) {
     const now = input.now ?? new Date();
@@ -357,7 +335,7 @@ function materializationTargets(active, spec) {
     return Object.freeze(['main']);
 }
 async function appendMaterializationLedger(active, spec, paths, targets, byteCount, reason, automatic, now) {
-    for (const claimType of ['WRITE', 'READ']) {
+    for (const claimType of ['WRITE', 'READ', 'EXCLUSIVE']) {
         const typedPaths = paths.filter((path) => path.claim_type === claimType).map((path) => path.path);
         if (typedPaths.length === 0)
             continue;
@@ -459,7 +437,6 @@ function trackedMaterializationMisses(worktreePath, scan, paths) {
                 continue;
             if (!existsSync(join(worktreePath, ...entry.path.split('/'))))
                 missing.push(entry.path);
-            break;
         }
     }
     return Object.freeze(missing);
@@ -527,19 +504,6 @@ function relativePathInsideRoot(root, absolute) {
 }
 function isPathInsideRoot(root, absolute) {
     return relativePathInsideRoot(root, absolute) !== null;
-}
-function witnessesFromVerificationPlan(plan) {
-    if (plan === undefined)
-        return [];
-    return Object.freeze([
-        ...plan.positive_witnesses,
-        ...plan.negative_witnesses,
-        ...plan.regression_witnesses,
-        ...plan.real_boundary_witnesses,
-        ...plan.blast_radius_checks,
-        ...plan.docs_schema_prompt_checks,
-        ...plan.dirty_tree_checks,
-    ]);
 }
 function dedupeMaterializationRows(rows) {
     const byKey = new Map();
