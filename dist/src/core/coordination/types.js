@@ -1,5 +1,5 @@
 export const AUTOPILOT_COORDINATION_SNAPSHOT_SCHEMA = 'autopilot.coordination_snapshot.v1';
-export const AUTOPILOT_COORDINATOR_PROTOCOL_VERSION = '1.5';
+export const AUTOPILOT_COORDINATOR_PROTOCOL_VERSION = '1.6';
 export const AUTOPILOT_COORDINATOR_REQUEST_SCHEMA = 'autopilot.coordinator_request.v1';
 export const AUTOPILOT_COORDINATOR_RESPONSE_SCHEMA = 'autopilot.coordinator_response.v1';
 export const AUTOPILOT_COORDINATION_PREFLIGHT_SCHEMA = 'autopilot.coordination_preflight.v1';
@@ -38,3 +38,4 @@ export const COORDINATION_WAIT_EDGE_STATES = ['active', 'resolved'];
 export const COORDINATION_DEADLOCK_STATES = ['detected', 'victim-selected', 'awaiting-recovery', 'resolved', 'deferred-no-safe-victim'];
 export const COORDINATION_DEADLOCK_ACTIONS = ['cancel-and-supersede', 'request-reset-or-quarantine', 'none'];
 export const COORDINATION_OPERATIONAL_ESCALATION_REASONS = ['claim-conflict', 'offline-peer', 'handoff', 'stale-session', 'dirty-worktree', 'merge-conflict', 'failed-test', 'stale-validation', 'deadlock', 'starvation', 'disk-pressure', 'cleanup-failure', 'reconciliation-failure'];
+export const COORDINATION_RECONCILIATION_DETAIL_KINDS = ['released-lease', 'released-observation', 'stale-observation', 'released-request', 'notification', 'offered-group'];

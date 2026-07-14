@@ -295,7 +295,13 @@ void describe('Coordination Fabric claim negotiation', () => {
         UPDATE acquisition_groups SET payload_json=json_remove(payload_json,'$.requested_leases[1].exclusive_operation');
         UPDATE edit_leases SET payload_json=json_remove(payload_json,'$.exclusive_operation') WHERE json_extract(payload_json,'$.mode')='EXCLUSIVE';
         UPDATE idempotency_results SET payload_json=json_remove(payload_json,'$.acquisition_group.requested_leases[1].exclusive_operation','$.edit_leases[1].exclusive_operation');
-        DELETE FROM schema_migrations WHERE version=11;
+        DROP TABLE result_details;
+        DROP TABLE result_receipts;
+        DROP TABLE mailbox_delivery_items;
+        DROP TABLE mailbox_deliveries;
+        DROP TABLE reconciliation_details;
+        DROP TABLE reconciliation_receipts;
+        DELETE FROM schema_migrations WHERE version>=11;
         PRAGMA user_version=10;
       `);
       database.close();

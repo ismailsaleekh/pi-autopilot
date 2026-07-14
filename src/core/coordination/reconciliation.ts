@@ -4,12 +4,12 @@ import { mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promise
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 import { CoordinatorClient } from './client.ts';
-import { parseCoordinationReconciliationEvidence, parseCoordinationRun } from './contracts.ts';
+import { parseCoordinationReconciliationEvidence, parseOptionalCoordinationReconciliationReceipt, parseCoordinationRun } from './contracts.ts';
 import { CoordinationRuntimeError } from './failures.ts';
 import { readCoordinatorSessionContext, type CoordinatorSessionContext } from './supervisor.ts';
 import { coordinatorRuntimePaths } from './runtime-paths.ts';
 import { parseUnitAttemptTarget, validateReconciliationEvidenceDocument } from './terminal-evidence.ts';
-import type { CoordinationReconciliationEvidence, CoordinationReconciliationSource, CoordinationReconciliationSummary, CoordinatorResponseEnvelope } from './types.ts';
+import type { CoordinationReconciliationDetail, CoordinationReconciliationEvidence, CoordinationReconciliationSource, CoordinationReconciliationSummary, CoordinatorResponseEnvelope } from './types.ts';
 import { AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV } from '../names.ts';
 import type { ActiveAutopilotRow, ProcessEnvLike } from '../parallel-runtime.ts';
 
@@ -66,6 +66,18 @@ export function parseCoordinationReconciliationSummary(value: unknown): Coordina
   };
 }
 
+export function reconciliationSummaryFromDetails(details: readonly CoordinationReconciliationDetail[]): CoordinationReconciliationSummary {
+  const ids = (kind: CoordinationReconciliationDetail['kind']): readonly string[] => Object.freeze(details.filter((detail) => detail.kind === kind).map((detail) => detail.entity_id));
+  return {
+    released_lease_ids: ids('released-lease'),
+    released_observation_ids: ids('released-observation'),
+    stale_observation_ids: ids('stale-observation'),
+    released_request_ids: ids('released-request'),
+    notification_ids: ids('notification'),
+    offered_group_ids: ids('offered-group'),
+  };
+}
+
 function committedSequence(response: CoordinatorResponseEnvelope): number {
   if (response.committed_event_seq === null) throw new CoordinationRuntimeError('invalid-state', 'coordinator reconciliation mutation omitted committed event sequence');
   return response.committed_event_seq;
@@ -96,7 +108,9 @@ export class RunReconciliationClient {
       reason,
       ...this.#sessionProof(),
     });
-    return { reconciliation: parseCoordinationReconciliationSummary(response.payload['reconciliation']), committedEventSeq: committedSequence(response) };
+    const receipt = parseOptionalCoordinationReconciliationReceipt(response.payload['reconciliation_receipt']);
+    const details = receipt === null ? [] : await this.#client.reconciliationDetails({ repoId: this.#session.repo_id, workstreamRun: this.#session.workstream_run, sessionId: this.#session.session_id, fencingGeneration: this.#session.session_generation, sessionLeaseId: this.#session.session_lease_id, sessionToken: this.#session.session_token, receipt });
+    return { reconciliation: reconciliationSummaryFromDetails(details), committedEventSeq: committedSequence(response) };
   }
 
   async recordReleaseEvidence(input: RecordReleaseEvidenceInput): Promise<RecordReleaseEvidenceResult> {
@@ -126,9 +140,11 @@ export class RunReconciliationClient {
     }
     const run = parseCoordinationRun(response.payload['run']);
     this.#session = { ...this.#session, run_version: run.version };
+    const receipt = parseOptionalCoordinationReconciliationReceipt(response.payload['reconciliation_receipt']);
+    const details = receipt === null ? [] : await this.#client.reconciliationDetails({ repoId: this.#session.repo_id, workstreamRun: this.#session.workstream_run, sessionId: this.#session.session_id, fencingGeneration: this.#session.session_generation, sessionLeaseId: this.#session.session_lease_id, sessionToken: this.#session.session_token, receipt });
     return {
       evidence: parseCoordinationReconciliationEvidence(response.payload['reconciliation_evidence']),
-      reconciliation: parseCoordinationReconciliationSummary(response.payload['reconciliation']),
+      reconciliation: reconciliationSummaryFromDetails(details),
     };
   }
 

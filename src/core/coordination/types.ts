@@ -1,5 +1,5 @@
 export const AUTOPILOT_COORDINATION_SNAPSHOT_SCHEMA = 'autopilot.coordination_snapshot.v1' as const;
-export const AUTOPILOT_COORDINATOR_PROTOCOL_VERSION = '1.5' as const;
+export const AUTOPILOT_COORDINATOR_PROTOCOL_VERSION = '1.6' as const;
 export const AUTOPILOT_COORDINATOR_REQUEST_SCHEMA = 'autopilot.coordinator_request.v1' as const;
 export const AUTOPILOT_COORDINATOR_RESPONSE_SCHEMA = 'autopilot.coordinator_response.v1' as const;
 export const AUTOPILOT_COORDINATION_PREFLIGHT_SCHEMA = 'autopilot.coordination_preflight.v1' as const;
@@ -377,6 +377,9 @@ export interface CoordinationReconciliationEvidence {
   readonly version: number;
 }
 
+export const COORDINATION_RECONCILIATION_DETAIL_KINDS = ['released-lease', 'released-observation', 'stale-observation', 'released-request', 'notification', 'offered-group'] as const;
+export type CoordinationReconciliationDetailKind = (typeof COORDINATION_RECONCILIATION_DETAIL_KINDS)[number];
+
 export interface CoordinationReconciliationSummary {
   readonly released_lease_ids: readonly string[];
   readonly released_observation_ids: readonly string[];
@@ -384,6 +387,67 @@ export interface CoordinationReconciliationSummary {
   readonly released_request_ids: readonly string[];
   readonly notification_ids: readonly string[];
   readonly offered_group_ids: readonly string[];
+}
+
+export interface CoordinationReconciliationReceipt {
+  readonly schema_version: 'autopilot.reconciliation_receipt.v1';
+  readonly reconciliation_receipt_id: string;
+  readonly repo_id: string;
+  readonly workstream_run: string;
+  readonly source_action: string;
+  readonly committed_event_seq: number;
+  readonly detail_count: number;
+  readonly details_sha256: `sha256:${string}`;
+  readonly counts: Readonly<Record<CoordinationReconciliationDetailKind, number>>;
+  readonly version: number;
+}
+
+export interface CoordinationReconciliationDetail {
+  readonly schema_version: 'autopilot.reconciliation_detail.v1';
+  readonly reconciliation_receipt_id: string;
+  readonly ordinal: number;
+  readonly kind: CoordinationReconciliationDetailKind;
+  readonly entity_id: string;
+}
+
+export interface CoordinationMailboxDeliveryReceipt {
+  readonly schema_version: 'autopilot.mailbox_delivery_receipt.v1';
+  readonly delivery_id: string;
+  readonly repo_id: string;
+  readonly workstream_run: string;
+  readonly session_lease_id: string;
+  readonly snapshot_through_event_seq: number;
+  readonly message_count: number;
+  readonly message_ids_sha256: `sha256:${string}`;
+  readonly completed: boolean;
+  readonly version: number;
+}
+
+export interface CoordinationResultCollectionReceipt {
+  readonly item_count: number;
+  readonly items_sha256: `sha256:${string}`;
+}
+
+export interface CoordinationResultReceipt {
+  readonly schema_version: 'autopilot.result_receipt.v1';
+  readonly result_receipt_id: string;
+  readonly repo_id: string;
+  readonly workstream_run: string;
+  readonly source_action: string;
+  readonly committed_event_seq: number;
+  readonly detail_count: number;
+  readonly details_sha256: `sha256:${string}`;
+  readonly collections: Readonly<Record<string, CoordinationResultCollectionReceipt>>;
+  readonly version: number;
+}
+
+export interface CoordinationResultDetail {
+  readonly schema_version: 'autopilot.result_detail.v1';
+  readonly result_receipt_id: string;
+  readonly ordinal: number;
+  readonly collection: string;
+  readonly collection_ordinal: number;
+  readonly value: unknown;
 }
 
 export interface CoordinationMessage {
@@ -597,7 +661,7 @@ export interface CoordinationSnapshot {
   readonly events: readonly CoordinationEvent[];
 }
 
-export type CoordinatorQueryAction = 'handshake' | 'status' | 'doctor' | 'export' | 'migration-recovery' | 'run-catalog';
+export type CoordinatorQueryAction = 'handshake' | 'status' | 'doctor' | 'export' | 'migration-recovery' | 'run-catalog' | 'reconciliation-details' | 'result-details';
 export type CoordinatorMutationAction = 'attach-run' | 'attach-session' | 'attach-terminal-recovery' | 'attach-migration-recovery' | 'resolve-migration-recovery' | 'detach-session' | 'prepare-handoff' | 'heartbeat' | 'register-attempt' | 'register-child' | 'heartbeat-child' | 'checkpoint-child' | 'complete-child' | 'drain-mailbox' | 'acquire-group' | 'acknowledge-grant' | 'respond-claim-request' | 'cancel-claim-request' | 'cancel-acquisition-group' | 'supersede-attempt' | 'acknowledge-message' | 'record-release-evidence' | 'resolve-reservation-obligation' | 'prepare-run-terminal' | 'cancel-run-terminal' | 'reconcile-run' | 'prepare-operation' | 'transition-operation' | 'register-authoritative-artifact' | 'assign-adjudication' | 'claim-adjudication-assignment' | 'complete-adjudication' | 'submit-planning-contradiction';
 
 export interface CoordinatorRequestEnvelope {

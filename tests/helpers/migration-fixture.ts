@@ -31,6 +31,12 @@ export async function seedPhase34Schema6Database(env: ProcessEnvLike): Promise<s
   try {
     database.exec(`
       BEGIN IMMEDIATE;
+      DROP TABLE result_details;
+      DROP TABLE result_receipts;
+      DROP TABLE mailbox_delivery_items;
+      DROP TABLE mailbox_deliveries;
+      DROP TABLE reconciliation_details;
+      DROP TABLE reconciliation_receipts;
       DROP TABLE observations;
       DROP TABLE semantic_replays;
       ALTER TABLE session_leases DROP COLUMN attachment_kind;

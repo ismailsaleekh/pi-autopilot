@@ -14,7 +14,7 @@ import { currentBootId, isExactProcessAlive, isProcessAlive, predecessorCompatib
 import { COORDINATOR_DATABASE_SCHEMA_VERSION, COORDINATOR_PACKAGE_BUILD, coordinatorRuntimePaths, enforcePrivateAuthorityPath, enforceWindowsPrivateTree, ensureCoordinatorPrivateRoots, ensurePrivateAuthorityDirectory, type CoordinatorRuntimePaths } from './runtime-paths.ts';
 import { acquireSerializedProcessGuard, discardLockTombstone, quarantineExactLock, readExactLockText, restoreLockTombstone } from './serialized-lock.ts';
 import { startCoordinatorServer, type CoordinatorStartupAdoption } from './server.ts';
-import { parseCurrentCoordinatorLock, parsePredecessorCoordinatorLock, parsePriorSchema10CurrentCoordinatorLock, parsePriorSchema9CurrentCoordinatorLock, type CurrentCoordinatorLock } from './upgrade-contracts.ts';
+import { parseCurrentCoordinatorLock, parsePredecessorCoordinatorLock, parsePriorSchema11CurrentCoordinatorLock, parsePriorSchema10CurrentCoordinatorLock, parsePriorSchema9CurrentCoordinatorLock, type CurrentCoordinatorLock } from './upgrade-contracts.ts';
 import { COORDINATOR_SCHEMA_MIGRATION_CHECKSUMS, CoordinatorStore, type CoordinationLegacyImportPlan, type CoordinationMigrationAuditInput, type CoordinationMigrationRecordState, type CoordinationMigrationRecoveryInput, type StoreClock } from './store.ts';
 import { backup, DatabaseSync, type SQLOutputValue } from 'node:sqlite';
 import { CoordinationRuntimeError } from './failures.ts';
@@ -848,7 +848,7 @@ interface ReadonlyCoordinatorMigration {
 }
 
 interface ReadonlyCoordinatorInspection {
-  readonly schemaVersion: 6 | 7 | 8 | 9 | 10 | 11;
+  readonly schemaVersion: 6 | 7 | 8 | 9 | 10 | 11 | 12;
   readonly repositories: readonly ReadonlyCoordinatorRepository[];
   readonly runs: readonly ReadonlyCoordinatorRun[];
   readonly sessions: readonly ReadonlyCoordinatorSession[];
@@ -874,6 +874,7 @@ const SCHEMA_6_TABLES = Object.freeze([
 const SCHEMA_7_TABLES = Object.freeze([...SCHEMA_6_TABLES, 'coordination_migrations', 'migration_legacy_audit', 'migration_recovery_work', 'run_resources'].sort());
 const SCHEMA_9_TABLES = Object.freeze([...SCHEMA_7_TABLES, 'semantic_replays'].sort());
 const SCHEMA_10_TABLES = Object.freeze([...SCHEMA_9_TABLES, 'observations'].sort());
+const SCHEMA_12_TABLES = Object.freeze([...SCHEMA_10_TABLES, 'mailbox_deliveries', 'mailbox_delivery_items', 'reconciliation_details', 'reconciliation_receipts', 'result_details', 'result_receipts'].sort());
 const COORDINATION_MIGRATION_MAX_DATABASE_ROWS = 100_000;
 const COORDINATION_MIGRATION_MAX_DATABASE_JSON_BYTES = 1024 * 1024;
 
@@ -918,17 +919,17 @@ function assertExactTableColumns(database: DatabaseSync, table: string, expected
   if (stableJson(actual) !== stableJson(expected)) failure('blocked', `coordinator table ${table} does not match its exact schema profile`, [`expected=${stableJson(expected)}`, `actual=${stableJson(actual)}`]);
 }
 
-function assertReadOnlySchema(database: DatabaseSync): 6 | 7 | 8 | 9 | 10 | 11 {
+function assertReadOnlySchema(database: DatabaseSync): 6 | 7 | 8 | 9 | 10 | 11 | 12 {
   const versionRow = database.prepare('PRAGMA user_version').get() as SqliteRow | undefined;
   if (versionRow === undefined) failure('blocked', 'coordinator database has no schema version');
   const version = sqlSafeInteger(versionRow, 'user_version', 'coordinator database');
-  if (version !== 6 && version !== 7 && version !== 8 && version !== 9 && version !== 10 && version !== 11) failure('blocked', 'migration inspection supports only exact coordinator schema 6 through the current schema 11', [`schema=${String(version)}`]);
+  if (version !== 6 && version !== 7 && version !== 8 && version !== 9 && version !== 10 && version !== 11 && version !== 12) failure('blocked', `migration inspection supports only exact coordinator schema 6 through the current schema ${String(COORDINATOR_DATABASE_SCHEMA_VERSION)}`, [`schema=${String(version)}`]);
   const integrityRow = database.prepare('PRAGMA integrity_check(1)').get() as SqliteRow | undefined;
   if (integrityRow === undefined || integrityRow['integrity_check'] !== 'ok') failure('blocked', 'coordinator database failed read-only integrity inspection');
   const schemaRows = database.prepare("SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all() as SqliteRow[];
   if (schemaRows.length > 64) failure('blocked', 'coordinator database schema contains too many tables');
   const actual = schemaRows.map((row) => sqlText(row, 'name', 'coordinator schema table', 128));
-  const expected = version === 6 ? [...SCHEMA_6_TABLES].sort() : version >= 10 ? SCHEMA_10_TABLES : version === 9 ? SCHEMA_9_TABLES : SCHEMA_7_TABLES;
+  const expected = version === 6 ? [...SCHEMA_6_TABLES].sort() : version === 12 ? SCHEMA_12_TABLES : version >= 10 ? SCHEMA_10_TABLES : version === 9 ? SCHEMA_9_TABLES : SCHEMA_7_TABLES;
   if (stableJson(actual) !== stableJson(expected)) failure('blocked', `coordinator schema ${String(version)} table profile is not exact`, [`expected=${stableJson(expected)}`, `actual=${stableJson(actual)}`]);
   assertExactTableColumns(database, 'repositories', ['repo_id', 'repo_key', 'canonical_root', 'git_common_dir', 'event_seq', 'created_event_seq', 'version']);
   assertExactTableColumns(database, 'runs', ['repo_id', 'autopilot_id', 'workstream', 'workstream_run', 'status', 'active_session_generation', 'created_event_seq', 'version', 'coordination_authority']);
@@ -946,13 +947,21 @@ function assertReadOnlySchema(database: DatabaseSync): 6 | 7 | 8 | 9 | 10 | 11 {
     assertExactTableColumns(database, 'semantic_replays', ['replay_id', 'record_count', 'records_sha256', 'applied_at']);
   }
   if (version >= 10) assertExactTableColumns(database, 'observations', ['entity_id', 'repo_id', 'workstream_run', 'acquisition_group_id', 'payload_json', 'execution_state', 'freshness', 'version']);
+  if (version >= 12) {
+    assertExactTableColumns(database, 'reconciliation_receipts', ['entity_id', 'repo_id', 'workstream_run', 'committed_event_seq', 'source_action', 'payload_json', 'version']);
+    assertExactTableColumns(database, 'reconciliation_details', ['reconciliation_receipt_id', 'ordinal', 'kind', 'entity_id']);
+    assertExactTableColumns(database, 'mailbox_deliveries', ['delivery_id', 'repo_id', 'workstream_run', 'session_lease_id', 'snapshot_through_event_seq', 'next_ordinal', 'payload_json', 'version']);
+    assertExactTableColumns(database, 'result_receipts', ['entity_id', 'repo_id', 'workstream_run', 'committed_event_seq', 'source_action', 'payload_json', 'version']);
+    assertExactTableColumns(database, 'result_details', ['result_receipt_id', 'ordinal', 'collection_name', 'collection_ordinal', 'payload_json']);
+    assertExactTableColumns(database, 'mailbox_delivery_items', ['delivery_id', 'ordinal', 'message_id', 'snapshot_delivered_event_seq', 'snapshot_message_version']);
+  }
   const migrationRows = boundedDatabaseRows(database, 'schema_migrations', 'SELECT version, checksum FROM schema_migrations ORDER BY version');
   if (migrationRows.length !== version) failure('blocked', 'coordinator schema migration journal length is not exact');
   for (let index = 0; index < migrationRows.length; index += 1) {
     const row = migrationRows[index];
     const checksum = row === undefined ? null : sqlText(row, 'checksum', 'schema migration', 64);
     const checksumMatches = checksum === COORDINATOR_SCHEMA_MIGRATION_CHECKSUMS[index];
-    if (row === undefined || sqlSafeInteger(row, 'version', 'schema migration') !== index + 1 || !checksumMatches) failure('blocked', 'coordinator schema migration journal is malformed, discontinuous, or not the exact locked schema-6/7/8/9/10 package lineage');
+    if (row === undefined || sqlSafeInteger(row, 'version', 'schema migration') !== index + 1 || !checksumMatches) failure('blocked', 'coordinator schema migration journal is malformed, discontinuous, or not the exact locked schema-6/7/8/9/10/11/12 package lineage');
   }
   return version;
 }
@@ -1754,7 +1763,7 @@ export function coordinationMigrationCoordinatorRunning(paths: CoordinatorRuntim
     if (!existsSync(path)) continue;
     try {
       const raw: unknown = JSON.parse(readFileSync(path, 'utf8')) as unknown;
-      const lock = parseCurrentCoordinatorLock(raw) ?? parsePriorSchema10CurrentCoordinatorLock(raw) ?? parsePriorSchema9CurrentCoordinatorLock(raw) ?? parsePredecessorCoordinatorLock(raw);
+      const lock = parseCurrentCoordinatorLock(raw) ?? parsePriorSchema11CurrentCoordinatorLock(raw) ?? parsePriorSchema10CurrentCoordinatorLock(raw) ?? parsePriorSchema9CurrentCoordinatorLock(raw) ?? parsePredecessorCoordinatorLock(raw);
       if (lock === null || isProcessAlive(lock.pid)) return true;
     } catch { return true; }
   }
@@ -1768,7 +1777,7 @@ export async function retireCoordinationMigrationCoordinator(paths: CoordinatorR
   let lock;
   try {
     const value = JSON.parse(await readFile(paths.lockPath, 'utf8')) as unknown;
-    lock = parseCurrentCoordinatorLock(value) ?? parsePriorSchema10CurrentCoordinatorLock(value) ?? parsePriorSchema9CurrentCoordinatorLock(value);
+    lock = parseCurrentCoordinatorLock(value) ?? parsePriorSchema11CurrentCoordinatorLock(value) ?? parsePriorSchema10CurrentCoordinatorLock(value) ?? parsePriorSchema9CurrentCoordinatorLock(value);
   }
   catch (error) { return Object.freeze([`coordinator lifecycle lock is unreadable during migration drain: ${error instanceof Error ? error.message : String(error)}`]); }
   if (lock === null || !isExactProcessAlive(lock.pid, lock.process_start_identity) || lock.pid === process.pid) return Object.freeze(['coordinator lifecycle identity is incompatible with exact automatic migration retirement']);
@@ -1788,7 +1797,7 @@ export async function retireCoordinationMigrationCoordinator(paths: CoordinatorR
         let current;
         try {
           const value = JSON.parse(currentText) as unknown;
-          current = parseCurrentCoordinatorLock(value) ?? parsePriorSchema10CurrentCoordinatorLock(value) ?? parsePriorSchema9CurrentCoordinatorLock(value);
+          current = parseCurrentCoordinatorLock(value) ?? parsePriorSchema11CurrentCoordinatorLock(value) ?? parsePriorSchema10CurrentCoordinatorLock(value) ?? parsePriorSchema9CurrentCoordinatorLock(value);
         }
         catch (error) { return Object.freeze([`coordinator lifecycle lock became unreadable while retiring for migration: ${error instanceof Error ? error.message : String(error)}`]); }
         if (current === null || current.pid !== lock.pid || current.boot_id !== lock.boot_id || current.process_start_identity !== lock.process_start_identity || current.token !== lock.token || current.instance_id !== lock.instance_id || current.started_at !== lock.started_at) return Object.freeze(['coordinator lifecycle identity changed while retiring for migration']);
@@ -1897,7 +1906,7 @@ async function withMigrationStoreAuthority<T>(paths: CoordinatorRuntimePaths, la
   finally { await authority.release(); }
 }
 
-function verifyCoordinatorDatabaseFileReadOnly(path: string): 6 | 7 | 8 | 9 | 10 | 11 {
+function verifyCoordinatorDatabaseFileReadOnly(path: string): 6 | 7 | 8 | 9 | 10 | 11 | 12 {
   const database = openImmutableCoordinatorDatabase(path);
   try { return assertReadOnlySchema(database); }
   finally { database.close(); }

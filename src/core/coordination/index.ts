@@ -19,6 +19,7 @@ export * from './reconciliation.ts';
 export * from './reservations.ts';
 export * from './runtime-paths.ts';
 export * from './schemas.ts';
+export * from './schema11-retirement.ts';
 export * from './server.ts';
 export * from './store.ts';
 export * from './supervisor.ts';

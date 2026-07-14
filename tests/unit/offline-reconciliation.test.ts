@@ -8,7 +8,7 @@ import { dirname, join } from 'node:path';
 import { describe, it } from 'node:test';
 
 import { CoordinatorClient } from '../../src/core/coordination/client.ts';
-import { parseCoordinationAcquisitionGroup, parseCoordinationClaimRequest, parseCoordinationMailboxCursor, parseCoordinationMessage, parseCoordinationRun, parseCoordinationSessionLease, parseCoordinationUnitAttempt } from '../../src/core/coordination/contracts.ts';
+import { parseCoordinationAcquisitionGroup, parseCoordinationClaimRequest, parseCoordinationMailboxCursor, parseCoordinationMessage, parseCoordinationReconciliationReceipt, parseCoordinationRun, parseCoordinationSessionLease, parseCoordinationUnitAttempt } from '../../src/core/coordination/contracts.ts';
 import { ClaimNegotiationClient } from '../../src/core/coordination/negotiation.ts';
 import { recordCoordinatorReleaseEvidenceFromFile, replayPendingCoordinatorReconciliation, RunReconciliationClient } from '../../src/core/coordination/reconciliation.ts';
 import { ReservationCoordinationClient } from '../../src/core/coordination/reservations.ts';
@@ -421,9 +421,8 @@ void describe('Coordination Fabric offline replay and automatic reconciliation',
       assert.equal(record(repairedChild?.['terminal_evidence'], 'repaired terminal evidence')['sha256'], acceptance.sha256);
       assert.equal(array(repaired.payload['edit_leases'], 'source edit leases after terminal repair').length, 1, 'terminal transport fact alone must retain source-changing edit authority');
       const doctor = await value.client.query('doctor');
-      const startup = doctor.payload['last_startup_reconciliation'];
-      if (typeof startup !== 'object' || startup === null || Array.isArray(startup)) throw new Error('startup reconciliation summary missing');
-      assert.equal(array((startup as Readonly<Record<string, unknown>>)['released_lease_ids'], 'startup released edit leases').length, 0);
+      const startup = parseCoordinationReconciliationReceipt(doctor.payload['last_startup_reconciliation']);
+      assert.equal(startup.counts['released-lease'], 0);
     } finally {
       await closeHarness(value);
     }

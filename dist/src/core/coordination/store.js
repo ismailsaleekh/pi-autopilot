@@ -5,7 +5,7 @@ import { link, mkdir, open as openFile, rename, unlink } from 'node:fs/promises'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { platform } from 'node:os';
 import { backup, DatabaseSync } from 'node:sqlite';
-import { claimModesConflict, coordinationPathsOverlap, parseCoordinationAcquisitionGroup, parseCoordinationAdjudicationAssignment, parseCoordinationAuthoritativeArtifact, parseCoordinationChangeReservation, parseCoordinationChildLease, parseCoordinationClaimRequest, parseCoordinationDeadlockResolution, parseCoordinationEditLease, parseCoordinationEscalation, parseCoordinationEvent, parseCoordinationMailboxCursor, parseCoordinationMessage, parseCoordinationMigrationRecoveryWork, parseCoordinationObservation, parseCoordinationReconciliationEvidence, parseCoordinationReleaseCondition, parseCoordinationRepository, parseCoordinationRequestedLease, parseCoordinationReservationObligation, parseCoordinationRun, parseCoordinationRunResource, parseCoordinationRunTerminalIntent, parseCoordinationSessionLease, parseCoordinationUnitAttempt, parseCoordinationWaitForEdge, parseCoordinationWorktree, parseCoordinationWorktreeOperation, parseCoordinatorRequestEnvelope } from "./contracts.js";
+import { claimModesConflict, coordinationPathsOverlap, parseCoordinationAcquisitionGroup, parseCoordinationAdjudicationAssignment, parseCoordinationAuthoritativeArtifact, parseCoordinationChangeReservation, parseCoordinationChildLease, parseCoordinationClaimRequest, parseCoordinationDeadlockResolution, parseCoordinationEditLease, parseCoordinationEscalation, parseCoordinationEvent, parseCoordinationMailboxCursor, parseCoordinationMailboxDeliveryReceipt, parseCoordinationMessage, parseCoordinationMigrationRecoveryWork, parseCoordinationObservation, parseCoordinationReconciliationDetail, parseCoordinationReconciliationEvidence, parseCoordinationReconciliationReceipt, parseCoordinationResultDetail, parseCoordinationResultReceipt, parseCoordinationReleaseCondition, parseCoordinationRepository, parseCoordinationRequestedLease, parseCoordinationReservationObligation, parseCoordinationRun, parseCoordinationRunResource, parseCoordinationRunTerminalIntent, parseCoordinationSessionLease, parseCoordinationUnitAttempt, parseCoordinationWaitForEdge, parseCoordinationWorktree, parseCoordinationWorktreeOperation, parseCoordinatorMailboxPage, parseCoordinatorMigrationRecoveryPage, parseCoordinatorProjectionPage, parseCoordinatorReconciliationDetailPage, parseCoordinatorRequestEnvelope, parseCoordinatorResponseEnvelope, parseCoordinatorResultDetailPage, parseCoordinatorRunCatalogPage } from "./contracts.js";
 import { buildCoordinationWaitForEdges, compareCoordinationGrantPriority, coordinationOwnerKey, detectCoordinationWaitCycles, MAX_GRANT_BYPASSES, selectCoordinationDeadlockVictim } from "./deadlock.js";
 import { validateAuthoritativeCoordinationDocument, validatePlanningContradictionSubmission } from "./escalation.js";
 import { CoordinationRuntimeError } from "./failures.js";
@@ -13,12 +13,14 @@ import { assertCoordinationObservationSourceIdentity } from "./observations.js";
 import { checkCoordinationInvariants } from "./invariants.js";
 import { proveLegacyReadAttemptTerminal } from "./legacy-read-terminal.js";
 import { COORDINATOR_BUSY_TIMEOUT_MS, COORDINATOR_DATABASE_SCHEMA_VERSION, COORDINATOR_GRANT_OFFER_TTL_MS, COORDINATOR_PACKAGE_BUILD, enforcePrivateAuthorityPath, enforceWindowsPrivateAcl, ensureCoordinatorPrivateRoots } from "./runtime-paths.js";
+import { byteBudgetPage, COORDINATOR_MAX_PAGE_ENTITY_BYTES, COORDINATOR_PAGE_TARGET_BYTES, encodePaginationCursor, encodedJsonBytes, paginationCursorState, paginationRevision, paginationScope, parsePaginationCursor } from "./pagination.js";
 import { activeCoordinationMigrationFreeze, assertCoordinationDispatchAllowed, assertCoordinationFrozenMutationAllowed, assertCoordinationMigrationRecoveryOperationAuthorized, coordinationCutoverCommitted } from "./migration-paths.js";
 import { proveStructuredAttemptTerminal } from "./terminal-attempt-proof.js";
 import { classifyCoordinationIntegrationConflict } from "./integration-conflicts.js";
 import { assertAutopilotChildTerminalAcceptanceChain, AUTOPILOT_CHILD_TERMINAL_ACCEPTANCE_SCHEMA, parseAutopilotChildTerminalAcceptance } from "./terminal-acceptance.js";
 import { parseRunTerminalSha, parseUnitAttemptTarget, parseUnitFailureEvidenceFacts, parseUnitMergeReservationFacts, validateReconciliationEvidenceDocument, validateReservationIntegrationEvidenceDocument, validateReservationValidationArtifactChain, validateReservationValidationEvidenceDocument } from "./terminal-evidence.js";
 import { AUTOPILOT_COORDINATOR_PROTOCOL_VERSION, COORDINATION_WORKTREE_STATES } from "./types.js";
+import { COORDINATOR_MAX_FRAME_BYTES } from "./runtime-constants.js";
 import { assertPrivatePathNoAliases } from "../private-path.js";
 const DATABASE_EXPORT_SCHEMA = 'autopilot.coordinator_export.v1';
 const SHA256_PATTERN = /^sha256:[a-f0-9]{64}$/u;
@@ -29,9 +31,18 @@ export const COORDINATOR_MAX_SEMANTIC_REPLAY_RECORDS = 100_000;
 const COORDINATOR_MAX_SEMANTIC_REPLAY_BYTES = 128 * 1024 * 1024;
 const COORDINATOR_MAX_SEMANTIC_REPLAY_LINE_BYTES = 1024 * 1024;
 const COORDINATOR_SEMANTIC_REPLAY_BATCH_SIZE = 1_000;
-const RUN_OWNED_IDEMPOTENCY_ACTIONS = new Set(['resolve-migration-recovery', 'register-attempt', 'acquire-group', 'acknowledge-grant', 'respond-claim-request', 'cancel-claim-request', 'cancel-acquisition-group', 'supersede-attempt', 'record-release-evidence', 'resolve-reservation-obligation', 'prepare-run-terminal', 'cancel-run-terminal', 'reconcile-run', 'prepare-operation', 'transition-operation', 'register-authoritative-artifact', 'assign-adjudication', 'claim-adjudication-assignment', 'submit-planning-contradiction']);
-const TERMINAL_SESSION_ACTIONS = new Set(['resolve-migration-recovery', 'detach-session', 'heartbeat', 'drain-mailbox', 'acknowledge-message', 'record-release-evidence', 'reconcile-run', 'prepare-operation', 'transition-operation']);
+const RUN_OWNED_IDEMPOTENCY_ACTIONS = new Set(['resolve-migration-recovery', 'register-attempt', 'acquire-group', 'acknowledge-grant', 'respond-claim-request', 'cancel-claim-request', 'cancel-acquisition-group', 'supersede-attempt', 'acknowledge-message', 'record-release-evidence', 'resolve-reservation-obligation', 'prepare-run-terminal', 'cancel-run-terminal', 'reconcile-run', 'prepare-operation', 'transition-operation', 'register-authoritative-artifact', 'assign-adjudication', 'claim-adjudication-assignment', 'submit-planning-contradiction']);
+const TERMINAL_SESSION_ACTIONS = new Set(['resolve-migration-recovery', 'detach-session', 'heartbeat', 'drain-mailbox', 'acknowledge-message', 'record-release-evidence', 'reconcile-run', 'reconciliation-details', 'result-details', 'prepare-operation', 'transition-operation']);
 const MIGRATION_RECOVERY_SESSION_ACTIONS = new Set(['resolve-migration-recovery', 'detach-session', 'heartbeat']);
+const STATUS_SECTIONS = ['repositories', 'runs', 'run_resources', 'session_leases', 'child_leases', 'unit_attempts', 'acquisition_groups', 'observations', 'edit_leases', 'change_reservations', 'reservation_obligations', 'run_terminal_intents', 'claim_requests', 'mailbox_cursors', 'reconciliation_evidence', 'reconciliation_receipts', 'mailbox_deliveries', 'result_receipts', 'worktrees', 'worktree_operations', 'wait_for_edges', 'deadlock_resolutions', 'authoritative_artifacts', 'adjudication_assignments', 'escalations', 'coordination_migrations', 'migration_recovery_work'];
+const COORDINATOR_PROJECTION_SCAN_TTL_MS = 60_000;
+const COORDINATOR_MAX_ACTIVE_PROJECTION_SCANS = 8;
+const COORDINATOR_RUN_CATALOG_SCAN_TTL_MS = 60_000;
+const COORDINATOR_MAX_ACTIVE_RUN_CATALOG_SCANS = 64;
+const DOCTOR_SECTIONS = ['invariant_findings', 'migrations', 'expired_session_classifications', 'expired_child_classifications', 'incomplete_worktree_operations', 'pending_reservation_obligations', 'prepared_run_terminal_intents', 'active_wait_for_edges', 'open_deadlock_resolutions', 'pending_adjudication_assignments', 'retained_exclusive_operations', 'coordination_migrations', 'pending_migration_recovery_work'];
+function isJsonMap(value) {
+    return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
 const systemClock = { now: () => new Date() };
 const MIGRATION_1 = `
 CREATE TABLE repositories (
@@ -465,7 +476,75 @@ SET payload_json=json_set(payload_json,'$.claim_requests',json((SELECT json_grou
 WHERE json_type(payload_json,'$.claim_requests')='array'
   AND EXISTS (SELECT 1 FROM json_each(idempotency_results.payload_json,'$.claim_requests') AS request, json_each(request.value,'$.requested_leases') AS lease WHERE json_extract(lease.value,'$.mode')='EXCLUSIVE');
 `;
-export const COORDINATOR_SCHEMA_MIGRATION_CHECKSUMS = Object.freeze([MIGRATION_1, MIGRATION_2, MIGRATION_3, MIGRATION_4, MIGRATION_5, MIGRATION_6, MIGRATION_7, MIGRATION_8, MIGRATION_9, MIGRATION_10, MIGRATION_11].map((sql) => createHash('sha256').update(sql, 'utf8').digest('hex')));
+const MIGRATION_12 = `
+CREATE TABLE reconciliation_receipts (
+  entity_id TEXT PRIMARY KEY,
+  repo_id TEXT NOT NULL,
+  workstream_run TEXT NOT NULL,
+  committed_event_seq INTEGER NOT NULL CHECK(committed_event_seq >= 1),
+  source_action TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  version INTEGER NOT NULL CHECK(version >= 1),
+  FOREIGN KEY(repo_id, workstream_run) REFERENCES runs(repo_id, workstream_run) ON DELETE RESTRICT
+) STRICT;
+CREATE INDEX idx_reconciliation_receipts_run_event ON reconciliation_receipts(repo_id, workstream_run, committed_event_seq, entity_id);
+CREATE TABLE reconciliation_details (
+  reconciliation_receipt_id TEXT NOT NULL,
+  ordinal INTEGER NOT NULL CHECK(ordinal >= 1),
+  kind TEXT NOT NULL,
+  entity_id TEXT NOT NULL,
+  PRIMARY KEY(reconciliation_receipt_id, ordinal),
+  FOREIGN KEY(reconciliation_receipt_id) REFERENCES reconciliation_receipts(entity_id) ON DELETE RESTRICT
+) STRICT, WITHOUT ROWID;
+CREATE INDEX idx_reconciliation_details_kind ON reconciliation_details(reconciliation_receipt_id, kind, ordinal);
+CREATE TABLE mailbox_deliveries (
+  delivery_id TEXT PRIMARY KEY,
+  repo_id TEXT NOT NULL,
+  workstream_run TEXT NOT NULL,
+  session_lease_id TEXT NOT NULL,
+  snapshot_through_event_seq INTEGER NOT NULL CHECK(snapshot_through_event_seq >= 0),
+  next_ordinal INTEGER NOT NULL CHECK(next_ordinal >= 0),
+  payload_json TEXT NOT NULL,
+  version INTEGER NOT NULL CHECK(version >= 1),
+  FOREIGN KEY(repo_id, workstream_run) REFERENCES runs(repo_id, workstream_run) ON DELETE RESTRICT,
+  FOREIGN KEY(session_lease_id) REFERENCES session_leases(session_lease_id) ON DELETE RESTRICT
+) STRICT;
+CREATE INDEX idx_mailbox_deliveries_run ON mailbox_deliveries(repo_id, workstream_run, delivery_id);
+CREATE TABLE mailbox_delivery_items (
+  delivery_id TEXT NOT NULL,
+  ordinal INTEGER NOT NULL CHECK(ordinal >= 1),
+  message_id TEXT NOT NULL,
+  snapshot_delivered_event_seq INTEGER NOT NULL CHECK(snapshot_delivered_event_seq >= 0),
+  snapshot_message_version INTEGER NOT NULL CHECK(snapshot_message_version >= 1),
+  PRIMARY KEY(delivery_id, ordinal),
+  UNIQUE(delivery_id, message_id),
+  FOREIGN KEY(delivery_id) REFERENCES mailbox_deliveries(delivery_id) ON DELETE RESTRICT,
+  FOREIGN KEY(message_id) REFERENCES messages(message_id) ON DELETE RESTRICT
+) STRICT, WITHOUT ROWID;
+CREATE TABLE result_receipts (
+  entity_id TEXT PRIMARY KEY,
+  repo_id TEXT NOT NULL,
+  workstream_run TEXT NOT NULL,
+  committed_event_seq INTEGER NOT NULL CHECK(committed_event_seq >= 1),
+  source_action TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  version INTEGER NOT NULL CHECK(version >= 1),
+  FOREIGN KEY(repo_id, workstream_run) REFERENCES runs(repo_id, workstream_run) ON DELETE RESTRICT
+) STRICT;
+CREATE INDEX idx_result_receipts_run_event ON result_receipts(repo_id, workstream_run, committed_event_seq, entity_id);
+CREATE TABLE result_details (
+  result_receipt_id TEXT NOT NULL,
+  ordinal INTEGER NOT NULL CHECK(ordinal >= 1),
+  collection_name TEXT NOT NULL,
+  collection_ordinal INTEGER NOT NULL CHECK(collection_ordinal >= 1),
+  payload_json TEXT NOT NULL,
+  PRIMARY KEY(result_receipt_id, ordinal),
+  UNIQUE(result_receipt_id, collection_name, collection_ordinal),
+  FOREIGN KEY(result_receipt_id) REFERENCES result_receipts(entity_id) ON DELETE RESTRICT
+) STRICT, WITHOUT ROWID;
+CREATE INDEX idx_result_details_collection ON result_details(result_receipt_id, collection_name, collection_ordinal);
+`;
+export const COORDINATOR_SCHEMA_MIGRATION_CHECKSUMS = Object.freeze([MIGRATION_1, MIGRATION_2, MIGRATION_3, MIGRATION_4, MIGRATION_5, MIGRATION_6, MIGRATION_7, MIGRATION_8, MIGRATION_9, MIGRATION_10, MIGRATION_11, MIGRATION_12].map((sql) => createHash('sha256').update(sql, 'utf8').digest('hex')));
 function asRow(value, label) {
     if (value === undefined)
         throw new CoordinationRuntimeError('invalid-state', `${label} row is missing`);
@@ -543,7 +622,10 @@ function payloadRequestedLeases(payload) {
     const value = payload['requested_leases'];
     if (!Array.isArray(value))
         throw new CoordinationRuntimeError('invalid-request', 'payload field requested_leases must be an array');
-    return Object.freeze(value.map((entry, index) => parseCoordinationRequestedLease(entry, `requested_leases[${String(index)}]`)));
+    const parsed = Object.freeze(value.map((entry, index) => parseCoordinationRequestedLease(entry, `requested_leases[${String(index)}]`)));
+    if (encodedJsonBytes(parsed) > COORDINATOR_MAX_PAGE_ENTITY_BYTES)
+        throw new CoordinationRuntimeError('frame-too-large', 'requested leases make one durable acquisition group exceed the single-entity byte ceiling');
+    return parsed;
 }
 function payloadReleaseCondition(payload, field) {
     return parseCoordinationReleaseCondition(payload[field], `payload.${field}`);
@@ -1046,6 +1128,30 @@ function mailboxCursorFromRow(row) {
 function reconciliationEvidenceFromRow(row) {
     return entityFromRow(row, parseCoordinationReconciliationEvidence, 'reconciliation evidence');
 }
+function reconciliationReceiptFromRow(row) {
+    return entityFromRow(row, parseCoordinationReconciliationReceipt, 'reconciliation receipt');
+}
+function reconciliationDetailFromRow(row) {
+    return parseCoordinationReconciliationDetail({
+        schema_version: 'autopilot.reconciliation_detail.v1',
+        reconciliation_receipt_id: sqlString(row, 'reconciliation_receipt_id'),
+        ordinal: sqlInteger(row, 'ordinal'),
+        kind: sqlString(row, 'kind'),
+        entity_id: sqlString(row, 'entity_id'),
+    });
+}
+function mailboxDeliveryFromRow(row) {
+    return parseCoordinationMailboxDeliveryReceipt(parseJsonObject(sqlString(row, 'payload_json'), 'mailbox delivery receipt'));
+}
+function resultReceiptFromRow(row) {
+    return parseCoordinationResultReceipt(parseJsonObject(sqlString(row, 'payload_json'), 'result receipt'));
+}
+function resultDetailFromRow(row) {
+    return parseCoordinationResultDetail({
+        schema_version: 'autopilot.result_detail.v1', result_receipt_id: sqlString(row, 'result_receipt_id'), ordinal: sqlInteger(row, 'ordinal'),
+        collection: sqlString(row, 'collection_name'), collection_ordinal: sqlInteger(row, 'collection_ordinal'), value: JSON.parse(sqlString(row, 'payload_json')),
+    });
+}
 function messageFromRow(row) {
     return parseCoordinationMessage({
         schema_version: 'autopilot.coordination_message.v1',
@@ -1151,6 +1257,7 @@ export class CoordinatorStore {
     #lastStartupReconciliation = null;
     #semanticReplayTransactionActive = false;
     #semanticReplayGraphlessRepositories = new Set();
+    #projectionScans = new Map();
     #onSemanticReplayBoundary;
     #idempotencyLookup;
     #insertEvent;
@@ -1176,6 +1283,26 @@ export class CoordinatorStore {
         this.#sessionByLeaseId = db.prepare('SELECT * FROM session_leases WHERE session_lease_id=?');
         this.#pendingMigrationRecoveryByRun = db.prepare("SELECT * FROM migration_recovery_work WHERE repo_id=? AND workstream_run=? AND status='pending' ORDER BY entity_id");
         this.#updateSessionHeartbeat = db.prepare('UPDATE session_leases SET lease_expires_at=?, version=version+1 WHERE session_lease_id=?');
+        db.exec(`
+      CREATE TEMP TABLE IF NOT EXISTS run_catalog_scans (
+        scan_token TEXT PRIMARY KEY,
+        repo_id TEXT NOT NULL,
+        scope_sha256 TEXT NOT NULL,
+        revision_sha256 TEXT NOT NULL,
+        pending_recovery_count INTEGER NOT NULL CHECK(pending_recovery_count >= 0),
+        item_count INTEGER NOT NULL CHECK(item_count >= 0),
+        created_at_ms INTEGER NOT NULL,
+        completed_at_ms INTEGER
+      ) STRICT;
+      CREATE TEMP TABLE IF NOT EXISTS run_catalog_scan_items (
+        scan_token TEXT NOT NULL,
+        ordinal INTEGER NOT NULL CHECK(ordinal >= 1),
+        run_json TEXT NOT NULL,
+        run_resource_json TEXT NOT NULL,
+        PRIMARY KEY(scan_token, ordinal),
+        FOREIGN KEY(scan_token) REFERENCES run_catalog_scans(scan_token) ON DELETE CASCADE
+      ) STRICT;
+    `);
     }
     static async open(paths, clock = systemClock, options = {}) {
         try {
@@ -1239,6 +1366,7 @@ export class CoordinatorStore {
                 { version: 9, sql: MIGRATION_9 },
                 { version: 10, sql: MIGRATION_10 },
                 { version: 11, sql: MIGRATION_11 },
+                { version: 12, sql: MIGRATION_12 },
             ];
             for (const migration of migrations) {
                 if (currentVersion >= migration.version)
@@ -1272,6 +1400,7 @@ export class CoordinatorStore {
                 throw new CoordinationRuntimeError('store-corrupt', 'coordinator database failed post-migration integrity check');
             await enforcePrivateAuthorityPath(paths.databasePath, false);
             const store = new CoordinatorStore(db, clock, paths.stateRoot, lastBackupPath, options);
+            store.#migrateLegacyReconciliationResults();
             store.#migrateSchema9ReadLeasesToObservations();
             // A migration freeze protects a whole-database rollback boundary. Startup
             // replay/recovery is therefore deferred until the freeze is removed;
@@ -1452,7 +1581,7 @@ export class CoordinatorStore {
                     throw new CoordinationRuntimeError('store-corrupt', 'coordinator database failed integrity after semantic replay');
                 const invariantErrors = this.#allInvariantFindings().filter((finding) => finding.severity === 'error');
                 if (invariantErrors.length > 0)
-                    throw new CoordinationRuntimeError('invalid-state', 'semantic replay violates coordinator invariants', invariantErrors.slice(0, 100).map((finding) => `${finding.code}:${finding.entity}:${finding.detail}`));
+                    throw new CoordinationRuntimeError('invalid-state', 'semantic replay violates coordinator invariants; query byte-paged doctor for the exact finding set', [`finding_count=${String(invariantErrors.length)}`]);
                 receipt = { schema_version: 'autopilot.coordinator_semantic_replay_receipt.v1', replay_id: header.replay_id, record_count: header.record_count, records_sha256: header.records_sha256, applied_at: this.#clock.now().toISOString() };
                 this.#db.prepare('INSERT INTO semantic_replays(replay_id, record_count, records_sha256, applied_at) VALUES(?, ?, ?, ?)').run(receipt.replay_id, receipt.record_count, receipt.records_sha256, receipt.applied_at);
             }
@@ -1686,7 +1815,7 @@ export class CoordinatorStore {
             this.#db.prepare("INSERT INTO coordination_migrations(repo_id, migration_id, snapshot_sha256, journal_path, state, report_json, imported_at, updated_at, version) VALUES(?, ?, ?, ?, 'imported', ?, ?, ?, 1)").run(plan.repository.repo_id, plan.migration_id, plan.snapshot_sha256, plan.journal_path, canonicalJson(exactReport), now, now);
             const invariantFindings = checkCoordinationInvariants(this.#snapshotForRepository(plan.repository.repo_id)).filter((finding) => finding.severity === 'error' && !migrationRecoveryCoversRetainedAuthority(this.#db, plan.repository.repo_id, finding));
             if (invariantFindings.length > 0)
-                throw new CoordinationRuntimeError('invalid-state', 'transactional legacy import violates coordinator invariants', invariantFindings.slice(0, 100).map((finding) => `${finding.code}:${finding.entity}:${finding.detail}`));
+                throw new CoordinationRuntimeError('invalid-state', 'transactional legacy import violates coordinator invariants; query byte-paged doctor for the exact finding set', [`finding_count=${String(invariantFindings.length)}`]);
             this.#db.exec('COMMIT');
         }
         catch (error) {
@@ -1724,7 +1853,7 @@ export class CoordinatorStore {
             throw new CoordinationRuntimeError('invalid-state', 'migration verification requires exactly one immutable run resource per run', [`runs=${String(runCount)}`, `resources=${String(resourceCount)}`]);
         const errors = findings.filter((finding) => finding.severity === 'error' && !migrationRecoveryCoversRetainedAuthority(this.#db, repoId, finding));
         if (integrity !== 'ok' || errors.length > 0)
-            throw new CoordinationRuntimeError('invalid-state', 'migration verification failed coordinator integrity or invariants', errors.slice(0, 100).map((finding) => `${finding.code}:${finding.entity}:${finding.detail}`));
+            throw new CoordinationRuntimeError('invalid-state', 'migration verification failed coordinator integrity or invariants; query byte-paged doctor for the exact finding set', [`integrity=${integrity}`, `finding_count=${String(errors.length)}`]);
         return { integrity, invariant_findings: findings };
     }
     databaseDigest() {
@@ -1789,7 +1918,7 @@ export class CoordinatorStore {
     handle(request) {
         try {
             const effect = this.#dispatch(request);
-            return {
+            const response = {
                 schema_version: 'autopilot.coordinator_response.v1',
                 protocol_version: AUTOPILOT_COORDINATOR_PROTOCOL_VERSION,
                 request_id: request.request_id,
@@ -1799,6 +1928,8 @@ export class CoordinatorStore {
                 retryable: false,
                 payload: effect.payload,
             };
+            this.#assertResponseFitsFrame(response, request.action);
+            return response;
         }
         catch (error) {
             const runtime = error instanceof CoordinationRuntimeError ? error : sqliteFailure(error);
@@ -1847,7 +1978,7 @@ export class CoordinatorStore {
         };
     }
     #dispatch(request) {
-        const queryActions = new Set(['handshake', 'status', 'doctor', 'export', 'migration-recovery', 'run-catalog']);
+        const queryActions = new Set(['handshake', 'status', 'doctor', 'export', 'migration-recovery', 'run-catalog', 'reconciliation-details', 'result-details']);
         if (!queryActions.has(request.action)) {
             if (request.action === 'attach-migration-recovery')
                 assertCoordinationMigrationRecoveryOperationAuthorized(this.#stateRoot, request.payload['migration_operation_token']);
@@ -1858,11 +1989,13 @@ export class CoordinatorStore {
         }
         switch (request.action) {
             case 'handshake': return this.handshake();
-            case 'status': return this.status(request.repo_id, request.workstream_run);
-            case 'doctor': return this.doctor();
+            case 'status': return this.statusPage(request);
+            case 'doctor': return this.doctorPage(request);
             case 'export': return this.exportTo(payloadString(request.payload, 'output_path'));
             case 'migration-recovery': return this.migrationRecovery(request);
             case 'run-catalog': return this.runCatalog(request.repo_id, request.workstream_run, request.payload);
+            case 'reconciliation-details': return this.reconciliationDetails(request);
+            case 'result-details': return this.resultDetails(request);
             case 'attach-run': return this.attachRun(request);
             case 'attach-session': return this.attachSession(request);
             case 'attach-terminal-recovery': return this.attachTerminalRecovery(request);
@@ -1901,6 +2034,102 @@ export class CoordinatorStore {
     handshake() {
         return { committedEventSeq: null, payload: { schema_version: 'autopilot.coordinator_handshake.v1', package_build: COORDINATOR_PACKAGE_BUILD, protocol_version: AUTOPILOT_COORDINATOR_PROTOCOL_VERSION, database_schema_version: COORDINATOR_DATABASE_SCHEMA_VERSION } };
     }
+    statusPage(request) {
+        const complete = request.payload['scan_token'] === undefined ? this.status(request.repo_id, request.workstream_run).payload : null;
+        return this.#projectionPage('status', request, complete, STATUS_SECTIONS, null);
+    }
+    doctorPage(request) {
+        const observedAt = request.payload['scan_token'] === undefined ? this.#clock.now().toISOString() : null;
+        const complete = observedAt === null ? null : this.doctor(new Date(observedAt)).payload;
+        return this.#projectionPage('doctor', request, complete, DOCTOR_SECTIONS, observedAt);
+    }
+    #projectionPage(kind, request, initialComplete, sections, initialSnapshot) {
+        const sectionValue = request.payload['section'];
+        const section = sectionValue === undefined ? 'summary' : typeof sectionValue === 'string' ? sectionValue : (() => { throw new CoordinationRuntimeError('invalid-request', `${kind} section must be bounded text`); })();
+        if (section !== 'summary' && !sections.includes(section))
+            throw new CoordinationRuntimeError('invalid-request', `${kind} section is unsupported`, [section]);
+        const scopeSha256 = paginationScope([kind, request.repo_id, request.workstream_run]);
+        const suppliedScan = request.payload['scan_token'];
+        const now = Date.now();
+        for (const [token, scan] of this.#projectionScans)
+            if (now - scan.created_at_ms > COORDINATOR_PROJECTION_SCAN_TTL_MS)
+                this.#projectionScans.delete(token);
+        let scanToken;
+        let scan;
+        if (suppliedScan === undefined) {
+            if (section !== 'summary' || initialComplete === null)
+                throw new CoordinationRuntimeError('invalid-request', `${kind} scan must begin with its summary page`);
+            if (this.#projectionScans.size >= COORDINATOR_MAX_ACTIVE_PROJECTION_SCANS) {
+                for (const [token, candidate] of this.#projectionScans) {
+                    if (candidate.completed_at_ms !== null)
+                        this.#projectionScans.delete(token);
+                    if (this.#projectionScans.size < COORDINATOR_MAX_ACTIVE_PROJECTION_SCANS)
+                        break;
+                }
+            }
+            if (this.#projectionScans.size >= COORDINATOR_MAX_ACTIVE_PROJECTION_SCANS)
+                throw new CoordinationRuntimeError('coordinator-contention', `${kind} snapshot capacity is temporarily exhausted; retry after an active scan completes or expires`);
+            scanToken = `scan-${randomBytes(32).toString('hex')}`;
+            scan = { kind, scope_sha256: scopeSha256, revision_sha256: paginationRevision(initialComplete), snapshot: initialSnapshot, complete: initialComplete, created_at_ms: now, completed_sections: new Set(), completed_at_ms: null };
+            this.#projectionScans.set(scanToken, scan);
+        }
+        else {
+            if (section === 'summary' || typeof suppliedScan !== 'string')
+                throw new CoordinationRuntimeError('invalid-request', `${kind} detail page requires its opaque scan token`);
+            const found = this.#projectionScans.get(suppliedScan);
+            if (found === undefined)
+                throw new CoordinationRuntimeError('stale-version', `${kind} snapshot expired or belongs to a retired coordinator process`);
+            if (found.kind !== kind || found.scope_sha256 !== scopeSha256)
+                throw new CoordinationRuntimeError('unauthorized-client', `${kind} snapshot belongs to a different query scope`);
+            scanToken = suppliedScan;
+            scan = found;
+        }
+        const complete = scan.complete;
+        const counts = {};
+        for (const name of sections) {
+            const values = complete[name];
+            if (!Array.isArray(values))
+                throw new CoordinationRuntimeError('store-corrupt', `${kind} projection section ${name} is not an array`);
+            counts[name] = values.length;
+        }
+        const projection = {};
+        for (const [field, value] of Object.entries(complete))
+            if (!sections.includes(field))
+                projection[field] = value;
+        const baseFor = (value) => ({ schema_version: `autopilot.coordinator_${kind}_page.v1`, projection_schema_version: complete['schema_version'], section, scan_token: scanToken, observed_at: scan.snapshot, section_counts: counts, projection: value });
+        if (section === 'summary') {
+            for (const name of sections) {
+                const values = complete[name];
+                if (!Array.isArray(values) || values.length > 1_024 || values.some((value) => encodedJsonBytes(value) > COORDINATOR_MAX_PAGE_ENTITY_BYTES))
+                    continue;
+                const candidate = { ...projection, [name]: values };
+                if (encodedJsonBytes({ ...baseFor(candidate), items: [], next_cursor: null }) > COORDINATOR_PAGE_TARGET_BYTES)
+                    continue;
+                projection[name] = values;
+                scan.completed_sections.add(name);
+            }
+            if (scan.completed_sections.size === sections.length)
+                scan.completed_at_ms = now;
+            return { committedEventSeq: null, payload: { ...baseFor(projection), items: [], next_cursor: null } };
+        }
+        const base = baseFor(projection);
+        const values = complete[section];
+        if (!Array.isArray(values))
+            throw new CoordinationRuntimeError('store-corrupt', `${kind} projection section ${section} disappeared`);
+        const cursorValue = request.payload['cursor'];
+        const offset = cursorValue === undefined ? 0 : typeof cursorValue === 'string'
+            ? parsePaginationCursor(cursorValue, { kind: `${kind}-page`, scopeSha256, revisionSha256: scan.revision_sha256, section, snapshot: scanToken })
+            : (() => { throw new CoordinationRuntimeError('invalid-request', `${kind} cursor must be bounded opaque text`); })();
+        const cursorForOffset = (nextOffset) => encodePaginationCursor({ kind: `${kind}-page`, scopeSha256, revisionSha256: scan.revision_sha256, section, snapshot: scanToken, offset: nextOffset });
+        const payloadForPage = (items, nextCursor) => ({ ...base, items, next_cursor: nextCursor });
+        const page = byteBudgetPage({ items: values, offset, cursorForOffset, payloadForPage });
+        if (page.nextCursor === null) {
+            scan.completed_sections.add(section);
+            if (scan.completed_sections.size === sections.length)
+                scan.completed_at_ms = now;
+        }
+        return { committedEventSeq: null, payload: payloadForPage(page.items, page.nextCursor) };
+    }
     status(repoId, workstreamRun) {
         const repositories = repoId === 'global'
             ? this.#db.prepare('SELECT * FROM repositories ORDER BY repo_id').all().map(repositoryFromRow)
@@ -1931,6 +2160,9 @@ export class CoordinatorStore {
             ? (repoId === 'global' ? this.#db.prepare('SELECT * FROM mailbox_cursors ORDER BY repo_id, workstream_run').all() : this.#db.prepare('SELECT * FROM mailbox_cursors WHERE repo_id=? ORDER BY workstream_run').all(repoId)).map(mailboxCursorFromRow)
             : this.#db.prepare('SELECT * FROM mailbox_cursors WHERE repo_id=? AND workstream_run=?').all(repoId, workstreamRun).map(mailboxCursorFromRow);
         const reconciliationEvidence = workstreamRun === null ? [] : this.#db.prepare('SELECT * FROM reconciliation_evidence WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(repoId, workstreamRun).map(reconciliationEvidenceFromRow);
+        const reconciliationReceipts = workstreamRun === null ? [] : this.#db.prepare('SELECT * FROM reconciliation_receipts WHERE repo_id=? AND workstream_run=? ORDER BY committed_event_seq, entity_id').all(repoId, workstreamRun).map(reconciliationReceiptFromRow);
+        const mailboxDeliveries = workstreamRun === null ? [] : this.#db.prepare('SELECT * FROM mailbox_deliveries WHERE repo_id=? AND workstream_run=? ORDER BY delivery_id').all(repoId, workstreamRun).map(mailboxDeliveryFromRow);
+        const resultReceipts = workstreamRun === null ? [] : this.#db.prepare('SELECT * FROM result_receipts WHERE repo_id=? AND workstream_run=? ORDER BY committed_event_seq, entity_id').all(repoId, workstreamRun).map(resultReceiptFromRow);
         const worktrees = workstreamRun === null ? [] : this.#db.prepare('SELECT * FROM worktrees WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(repoId, workstreamRun).map(worktreeFromRow);
         const worktreeOperations = workstreamRun === null ? [] : this.#db.prepare('SELECT * FROM worktree_operations WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(repoId, workstreamRun).map(worktreeOperationFromRow);
         const waitForEdges = workstreamRun === null ? [] : this.#db.prepare("SELECT * FROM wait_for_edges WHERE repo_id=? AND (json_extract(payload_json, '$.requester.workstream_run')=? OR json_extract(payload_json, '$.blocker.workstream_run')=?) ORDER BY entity_id").all(repoId, workstreamRun, workstreamRun).map(waitForEdgeFromRow);
@@ -1946,11 +2178,11 @@ export class CoordinatorStore {
             const report = migration['report'];
             if (typeof report !== 'object' || report === null || Array.isArray(report))
                 throw new CoordinationRuntimeError('store-corrupt', 'coordination migration status report is not an object');
-            return { ...migration, report: { ...report, recovery: [] } };
+            return { ...migration, report: { ...report, recovery: [], recovery_omitted: true, recovery_query: 'migration-recovery' } };
         });
         const migrationRecoveryWork = workstreamRun === null
-            ? (repoId === 'global' ? this.#db.prepare("SELECT * FROM migration_recovery_work WHERE status='pending' ORDER BY repo_id, workstream_run, entity_id LIMIT 128").all() : this.#db.prepare("SELECT * FROM migration_recovery_work WHERE repo_id=? AND status='pending' ORDER BY workstream_run, entity_id LIMIT 128").all(repoId)).map(migrationRecoveryFromRow)
-            : this.#db.prepare("SELECT * FROM migration_recovery_work WHERE repo_id=? AND workstream_run=? AND status='pending' ORDER BY entity_id LIMIT 128").all(repoId, workstreamRun).map(migrationRecoveryFromRow);
+            ? (repoId === 'global' ? this.#db.prepare("SELECT * FROM migration_recovery_work WHERE status='pending' ORDER BY repo_id, workstream_run, entity_id").all() : this.#db.prepare("SELECT * FROM migration_recovery_work WHERE repo_id=? AND status='pending' ORDER BY workstream_run, entity_id").all(repoId)).map(migrationRecoveryFromRow)
+            : this.#db.prepare("SELECT * FROM migration_recovery_work WHERE repo_id=? AND workstream_run=? AND status='pending' ORDER BY entity_id").all(repoId, workstreamRun).map(migrationRecoveryFromRow);
         const pendingMigrationRecoveryCount = workstreamRun === null
             ? (repoId === 'global' ? sqlInteger(asRow(this.#db.prepare("SELECT COUNT(*) AS count FROM migration_recovery_work WHERE status='pending'").get(), 'status pending recovery count'), 'count') : sqlInteger(asRow(this.#db.prepare("SELECT COUNT(*) AS count FROM migration_recovery_work WHERE repo_id=? AND status='pending'").get(repoId), 'status pending recovery count'), 'count'))
             : sqlInteger(asRow(this.#db.prepare("SELECT COUNT(*) AS count FROM migration_recovery_work WHERE repo_id=? AND workstream_run=? AND status='pending'").get(repoId, workstreamRun), 'status pending recovery count'), 'count');
@@ -1979,6 +2211,9 @@ export class CoordinatorStore {
                 claim_requests: claimRequests,
                 mailbox_cursors: mailboxCursors,
                 reconciliation_evidence: reconciliationEvidence,
+                reconciliation_receipts: reconciliationReceipts,
+                mailbox_deliveries: mailboxDeliveries,
+                result_receipts: resultReceipts,
                 worktrees,
                 worktree_operations: worktreeOperations,
                 wait_for_edges: waitForEdges,
@@ -1998,30 +2233,245 @@ export class CoordinatorStore {
     }
     runCatalog(repoId, workstreamRun, payload = {}) {
         const cursorValue = payload['cursor_run'];
-        const cursorRun = cursorValue === undefined || cursorValue === null ? null : typeof cursorValue === 'string' ? cursorValue : (() => { throw new CoordinationRuntimeError('invalid-request', 'run catalog cursor_run must be nullable text'); })();
+        const cursor = cursorValue === undefined || cursorValue === null ? null : typeof cursorValue === 'string' ? cursorValue : (() => { throw new CoordinationRuntimeError('invalid-request', 'run catalog cursor_run must be nullable opaque text'); })();
         const limitValue = payload['limit'];
         const limit = limitValue === undefined ? 128 : typeof limitValue === 'number' && Number.isSafeInteger(limitValue) && limitValue >= 1 && limitValue <= 256 ? limitValue : (() => { throw new CoordinationRuntimeError('invalid-request', 'run catalog limit must be an integer from 1 through 256'); })();
-        if (workstreamRun !== null && cursorRun !== null)
+        if (workstreamRun !== null && cursor !== null)
             throw new CoordinationRuntimeError('invalid-request', 'exact run catalog query cannot carry a pagination cursor');
-        const fetchedRuns = workstreamRun === null
-            ? this.#db.prepare('SELECT * FROM runs WHERE repo_id=? AND workstream_run>? ORDER BY workstream_run LIMIT ?').all(repoId, cursorRun ?? '', limit + 1).map(runFromRow)
-            : this.#db.prepare('SELECT * FROM runs WHERE repo_id=? AND workstream_run=? ORDER BY workstream_run').all(repoId, workstreamRun).map(runFromRow);
-        const fetchedResources = workstreamRun === null
-            ? this.#db.prepare('SELECT * FROM run_resources WHERE repo_id=? AND workstream_run>? ORDER BY workstream_run LIMIT ?').all(repoId, cursorRun ?? '', limit + 1).map(runResourceFromRow)
-            : this.#db.prepare('SELECT * FROM run_resources WHERE repo_id=? AND workstream_run=? ORDER BY workstream_run').all(repoId, workstreamRun).map(runResourceFromRow);
-        if (fetchedRuns.length !== fetchedResources.length || fetchedRuns.some((run, index) => fetchedResources[index]?.workstream_run !== run.workstream_run))
-            throw new CoordinationRuntimeError('store-corrupt', 'run catalog and immutable run resources are not in exact lockstep');
-        const hasMore = workstreamRun === null && fetchedRuns.length > limit;
-        const runs = fetchedRuns.slice(0, limit);
-        const resources = fetchedResources.slice(0, limit);
-        const nextCursor = hasMore ? runs.at(-1)?.workstream_run ?? null : null;
-        const pendingRows = workstreamRun === null
-            ? this.#db.prepare("SELECT workstream_run, entity_id FROM migration_recovery_work WHERE repo_id=? AND status='pending' ORDER BY workstream_run, entity_id LIMIT 128").all(repoId)
-            : this.#db.prepare("SELECT workstream_run, entity_id FROM migration_recovery_work WHERE repo_id=? AND workstream_run=? AND status='pending' ORDER BY entity_id LIMIT 128").all(repoId, workstreamRun);
-        const pendingCount = workstreamRun === null
-            ? sqlInteger(asRow(this.#db.prepare("SELECT COUNT(*) AS count FROM migration_recovery_work WHERE repo_id=? AND status='pending'").get(repoId), 'run catalog pending recovery count'), 'count')
-            : sqlInteger(asRow(this.#db.prepare("SELECT COUNT(*) AS count FROM migration_recovery_work WHERE repo_id=? AND workstream_run=? AND status='pending'").get(repoId, workstreamRun), 'run catalog pending recovery count'), 'count');
-        return { committedEventSeq: null, payload: { schema_version: 'autopilot.coordinator_run_catalog.v1', package_build: COORDINATOR_PACKAGE_BUILD, protocol_version: AUTOPILOT_COORDINATOR_PROTOCOL_VERSION, database_schema_version: COORDINATOR_DATABASE_SCHEMA_VERSION, runs, run_resources: resources, next_cursor: nextCursor, pending_migration_recovery_count: pendingCount, pending_migration_recovery: pendingRows.map((row) => ({ workstream_run: sqlString(row, 'workstream_run'), recovery_id: sqlString(row, 'entity_id') })) } };
+        const scopeSha256 = paginationScope(['run-catalog', repoId, workstreamRun]);
+        if (workstreamRun !== null) {
+            const joined = this.#db.prepare('SELECT runs.*, run_resources.payload_json AS run_resource_payload_json FROM runs LEFT JOIN run_resources ON run_resources.repo_id=runs.repo_id AND run_resources.workstream_run=runs.workstream_run WHERE runs.repo_id=? AND runs.workstream_run=?').all(repoId, workstreamRun);
+            const entries = joined.map((row) => ({ run: runFromRow(row), run_resource: parseCoordinationRunResource(parseJsonObject(sqlString(row, 'run_resource_payload_json'), 'exact run catalog resource')) }));
+            const pendingCount = sqlInteger(asRow(this.#db.prepare("SELECT COUNT(*) AS count FROM migration_recovery_work WHERE repo_id=? AND workstream_run=? AND status='pending'").get(repoId, workstreamRun), 'run catalog pending recovery count'), 'count');
+            const payloadForPage = (items) => ({
+                schema_version: 'autopilot.coordinator_run_catalog.v1', package_build: COORDINATOR_PACKAGE_BUILD, protocol_version: AUTOPILOT_COORDINATOR_PROTOCOL_VERSION,
+                database_schema_version: COORDINATOR_DATABASE_SCHEMA_VERSION, runs: items.map((entry) => entry.run), run_resources: items.map((entry) => entry.run_resource), next_cursor: null,
+                pending_migration_recovery_count: pendingCount,
+            });
+            for (const entry of entries)
+                if (encodedJsonBytes(entry) > COORDINATOR_MAX_PAGE_ENTITY_BYTES)
+                    throw new CoordinationRuntimeError('frame-too-large', 'single run catalog entry exceeds the durable entity byte ceiling', [entry.run.workstream_run]);
+            return { committedEventSeq: null, payload: payloadForPage(entries) };
+        }
+        const now = Date.now();
+        this.#db.prepare('DELETE FROM run_catalog_scans WHERE created_at_ms<?').run(now - COORDINATOR_RUN_CATALOG_SCAN_TTL_MS);
+        let scanToken;
+        let revisionSha256;
+        let pendingCount;
+        let itemCount;
+        let offset;
+        if (cursor === null) {
+            const activeCount = sqlInteger(asRow(this.#db.prepare('SELECT COUNT(*) AS count FROM run_catalog_scans').get(), 'active run catalog scan count'), 'count');
+            if (activeCount >= COORDINATOR_MAX_ACTIVE_RUN_CATALOG_SCANS) {
+                this.#db.prepare('DELETE FROM run_catalog_scans WHERE scan_token IN (SELECT scan_token FROM run_catalog_scans WHERE completed_at_ms IS NOT NULL ORDER BY completed_at_ms LIMIT ?)').run(activeCount - COORDINATOR_MAX_ACTIVE_RUN_CATALOG_SCANS + 1);
+            }
+            const retainedCount = sqlInteger(asRow(this.#db.prepare('SELECT COUNT(*) AS count FROM run_catalog_scans').get(), 'retained run catalog scan count'), 'count');
+            if (retainedCount >= COORDINATOR_MAX_ACTIVE_RUN_CATALOG_SCANS)
+                throw new CoordinationRuntimeError('coordinator-contention', 'run catalog snapshot capacity is temporarily exhausted; retry after an active scan completes or expires');
+            scanToken = `run-catalog-scan-${randomBytes(32).toString('hex')}`;
+            pendingCount = sqlInteger(asRow(this.#db.prepare("SELECT COUNT(*) AS count FROM migration_recovery_work WHERE repo_id=? AND status='pending'").get(repoId), 'run catalog pending recovery count'), 'count');
+            const revisionHash = createHash('sha256');
+            revisionHash.update('[', 'utf8');
+            itemCount = 0;
+            this.#db.exec('SAVEPOINT create_run_catalog_scan');
+            try {
+                this.#db.prepare('INSERT INTO run_catalog_scans(scan_token, repo_id, scope_sha256, revision_sha256, pending_recovery_count, item_count, created_at_ms, completed_at_ms) VALUES(?, ?, ?, ?, ?, 0, ?, NULL)').run(scanToken, repoId, scopeSha256, 'pending', pendingCount, now);
+                const insert = this.#db.prepare('INSERT INTO run_catalog_scan_items(scan_token, ordinal, run_json, run_resource_json) VALUES(?, ?, ?, ?)');
+                for (const row of this.#db.prepare('SELECT runs.*, run_resources.payload_json AS run_resource_payload_json FROM runs LEFT JOIN run_resources ON run_resources.repo_id=runs.repo_id AND run_resources.workstream_run=runs.workstream_run WHERE runs.repo_id=? ORDER BY runs.workstream_run').iterate(repoId)) {
+                    const run = runFromRow(row);
+                    const runResource = parseCoordinationRunResource(parseJsonObject(sqlString(row, 'run_resource_payload_json'), 'snapshotted run catalog resource'));
+                    if (runResource.repo_id !== run.repo_id || runResource.workstream_run !== run.workstream_run)
+                        throw new CoordinationRuntimeError('store-corrupt', 'run catalog and immutable run resource are not in exact lockstep', [run.workstream_run]);
+                    const entry = { run, run_resource: runResource };
+                    if (encodedJsonBytes(entry) > COORDINATOR_MAX_PAGE_ENTITY_BYTES)
+                        throw new CoordinationRuntimeError('frame-too-large', 'single run catalog entry exceeds the durable entity byte ceiling', [run.workstream_run]);
+                    itemCount += 1;
+                    if (itemCount > 1)
+                        revisionHash.update(',', 'utf8');
+                    revisionHash.update(JSON.stringify(entry), 'utf8');
+                    insert.run(scanToken, itemCount, canonicalJson(run), canonicalJson(runResource));
+                }
+                revisionHash.update(']', 'utf8');
+                revisionSha256 = `sha256:${revisionHash.digest('hex')}`;
+                this.#db.prepare('UPDATE run_catalog_scans SET revision_sha256=?, item_count=? WHERE scan_token=?').run(revisionSha256, itemCount, scanToken);
+                this.#db.exec('RELEASE SAVEPOINT create_run_catalog_scan');
+            }
+            catch (error) {
+                this.#db.exec('ROLLBACK TO SAVEPOINT create_run_catalog_scan; RELEASE SAVEPOINT create_run_catalog_scan;');
+                throw error;
+            }
+            offset = 0;
+        }
+        else {
+            const cursorState = paginationCursorState(cursor, { kind: 'run-catalog', scopeSha256, section: 'runs' });
+            if (cursorState.snapshot === null)
+                throw new CoordinationRuntimeError('invalid-request', 'run catalog continuation omitted its snapshot identity');
+            scanToken = cursorState.snapshot;
+            const scan = this.#db.prepare('SELECT * FROM run_catalog_scans WHERE scan_token=?').get(scanToken);
+            if (scan === undefined)
+                throw new CoordinationRuntimeError('stale-version', 'run catalog snapshot expired or belongs to a retired coordinator process');
+            if (sqlString(scan, 'repo_id') !== repoId || sqlString(scan, 'scope_sha256') !== scopeSha256)
+                throw new CoordinationRuntimeError('unauthorized-client', 'run catalog snapshot belongs to a different query scope');
+            revisionSha256 = sqlString(scan, 'revision_sha256');
+            pendingCount = sqlInteger(scan, 'pending_recovery_count');
+            itemCount = sqlInteger(scan, 'item_count');
+            offset = parsePaginationCursor(cursor, { kind: 'run-catalog', scopeSha256, revisionSha256, section: 'runs', snapshot: scanToken });
+        }
+        if (offset > itemCount)
+            throw new CoordinationRuntimeError('stale-version', 'run catalog cursor is beyond its immutable snapshot');
+        const entries = this.#db.prepare('SELECT run_json, run_resource_json FROM run_catalog_scan_items WHERE scan_token=? AND ordinal>? ORDER BY ordinal LIMIT ?').all(scanToken, offset, limit + 1).map((row) => ({
+            run: parseCoordinationRun(parseJsonObject(sqlString(row, 'run_json'), 'snapshotted run catalog entry')),
+            run_resource: parseCoordinationRunResource(parseJsonObject(sqlString(row, 'run_resource_json'), 'snapshotted run catalog resource')),
+        }));
+        const cursorForOffset = (localOffset) => encodePaginationCursor({ kind: 'run-catalog', scopeSha256, revisionSha256, section: 'runs', snapshot: scanToken, offset: offset + localOffset });
+        const payloadForPage = (items, nextCursor) => ({
+            schema_version: 'autopilot.coordinator_run_catalog.v1', package_build: COORDINATOR_PACKAGE_BUILD, protocol_version: AUTOPILOT_COORDINATOR_PROTOCOL_VERSION,
+            database_schema_version: COORDINATOR_DATABASE_SCHEMA_VERSION, runs: items.map((entry) => entry.run), run_resources: items.map((entry) => entry.run_resource),
+            next_cursor: nextCursor, pending_migration_recovery_count: pendingCount,
+        });
+        const page = byteBudgetPage({ items: entries, offset: 0, cursorForOffset, payloadForPage, maximumItems: limit });
+        const finalPage = offset + page.items.length === itemCount;
+        if ((page.nextCursor === null) !== finalPage)
+            throw new CoordinationRuntimeError('store-corrupt', 'run catalog pagination disagrees with its frozen snapshot count', [scanToken]);
+        if (finalPage)
+            this.#db.prepare('UPDATE run_catalog_scans SET completed_at_ms=COALESCE(completed_at_ms, ?) WHERE scan_token=?').run(now, scanToken);
+        return { committedEventSeq: null, payload: payloadForPage(page.items, page.nextCursor) };
+    }
+    reconciliationDetails(request) {
+        const receiptId = payloadString(request.payload, 'reconciliation_receipt_id');
+        const receiptRow = asRow(this.#db.prepare('SELECT * FROM reconciliation_receipts WHERE entity_id=? AND repo_id=? AND workstream_run=?').get(receiptId, request.repo_id, this.#workstreamRun(request)), 'reconciliation receipt');
+        const receipt = reconciliationReceiptFromRow(receiptRow);
+        let authorityId;
+        if (request.payload['session_lease_id'] !== undefined) {
+            const session = this.#requireCurrentSession(request);
+            authorityId = `session:${session.session_lease_id}`;
+        }
+        else {
+            if (receipt.source_action !== 'complete-child' && receipt.source_action !== 'complete-adjudication')
+                throw new CoordinationRuntimeError('unauthorized-client', 'child authority can read only its own completion reconciliation receipt');
+            const childId = payloadString(request.payload, 'child_lease_id');
+            const childRow = asRow(this.#db.prepare('SELECT * FROM child_leases WHERE child_lease_id=?').get(childId), 'reconciliation detail child');
+            const child = childFromRow(childRow);
+            this.#assertChildAuthority(request, child, childRow);
+            if (child.owner.workstream_run !== receipt.workstream_run || child.status === 'running')
+                throw new CoordinationRuntimeError('unauthorized-client', 'child completion receipt does not match terminal child authority');
+            const completionEvent = receipt.source_action === 'complete-child'
+                ? this.#db.prepare("SELECT entity_id FROM events WHERE repo_id=? AND event_seq=? AND entity_type='child-lease' AND entity_id=? AND event_type IN ('child-terminal','child-recovery-required')").get(receipt.repo_id, receipt.committed_event_seq, child.child_lease_id)
+                : this.#db.prepare("SELECT entity_id FROM events WHERE repo_id=? AND event_seq=? AND event_type='adjudication-accepted' AND entity_id IN (SELECT entity_id FROM adjudication_assignments WHERE json_extract(payload_json, '$.child_lease_id')=?)").get(receipt.repo_id, receipt.committed_event_seq, child.child_lease_id);
+            if (completionEvent === undefined)
+                throw new CoordinationRuntimeError('unauthorized-client', 'reconciliation receipt is not bound to the authenticated child completion event');
+            authorityId = `child:${child.child_lease_id}`;
+        }
+        const countRows = this.#db.prepare('SELECT kind, COUNT(*) AS count FROM reconciliation_details WHERE reconciliation_receipt_id=? GROUP BY kind ORDER BY kind').all(receiptId);
+        const actualCounts = { 'released-lease': 0, 'released-observation': 0, 'stale-observation': 0, 'released-request': 0, notification: 0, 'offered-group': 0 };
+        let actualCount = 0;
+        for (const row of countRows) {
+            const kind = sqlString(row, 'kind');
+            if (!(kind in actualCounts))
+                throw new CoordinationRuntimeError('store-corrupt', 'reconciliation details contain an unknown kind', [receiptId, kind]);
+            const count = sqlInteger(row, 'count');
+            actualCounts[kind] = count;
+            actualCount += count;
+        }
+        if (actualCount !== receipt.detail_count || canonicalJson(actualCounts) !== canonicalJson(receipt.counts))
+            throw new CoordinationRuntimeError('store-corrupt', 'reconciliation receipt counts disagree with durable detail rows', [receiptId]);
+        const scopeSha256 = paginationScope(['reconciliation-details', request.repo_id, receipt.workstream_run, receiptId, authorityId]);
+        const cursorValue = request.payload['cursor'];
+        const offset = cursorValue === null
+            ? 0
+            : typeof cursorValue === 'string'
+                ? parsePaginationCursor(cursorValue, { kind: 'reconciliation-details', scopeSha256, revisionSha256: receipt.details_sha256, section: receiptId })
+                : (() => { throw new CoordinationRuntimeError('invalid-request', 'reconciliation detail cursor must be null or bounded opaque text'); })();
+        const details = this.#db.prepare('SELECT * FROM reconciliation_details WHERE reconciliation_receipt_id=? AND ordinal>? ORDER BY ordinal LIMIT 1025').all(receiptId, offset).map(reconciliationDetailFromRow);
+        const cursorForOffset = (localOffset) => encodePaginationCursor({ kind: 'reconciliation-details', scopeSha256, revisionSha256: receipt.details_sha256, section: receiptId, offset: offset + localOffset });
+        const payloadForPage = (items, nextCursor) => ({ schema_version: 'autopilot.reconciliation_detail_page.v1', reconciliation_receipt: receipt, details: items, next_cursor: nextCursor });
+        const page = byteBudgetPage({ items: details, offset: 0, cursorForOffset, payloadForPage });
+        const finalPage = offset + page.items.length === receipt.detail_count;
+        if ((page.nextCursor === null) !== finalPage)
+            throw new CoordinationRuntimeError('store-corrupt', 'reconciliation pagination disagrees with its receipt count', [receiptId]);
+        if (finalPage) {
+            const hash = createHash('sha256');
+            hash.update('[', 'utf8');
+            let ordinal = 0;
+            for (const row of this.#db.prepare('SELECT * FROM reconciliation_details WHERE reconciliation_receipt_id=? ORDER BY ordinal').iterate(receiptId)) {
+                const detail = reconciliationDetailFromRow(row);
+                ordinal += 1;
+                if (detail.ordinal !== ordinal)
+                    throw new CoordinationRuntimeError('store-corrupt', 'reconciliation detail ordinals are not exact and contiguous', [receiptId]);
+                if (ordinal > 1)
+                    hash.update(',', 'utf8');
+                hash.update(JSON.stringify(detail), 'utf8');
+            }
+            hash.update(']', 'utf8');
+            if (ordinal !== receipt.detail_count || `sha256:${hash.digest('hex')}` !== receipt.details_sha256)
+                throw new CoordinationRuntimeError('store-corrupt', 'reconciliation receipt digest disagrees with durable detail rows', [receiptId]);
+        }
+        return { committedEventSeq: null, payload: payloadForPage(page.items, page.nextCursor) };
+    }
+    resultDetails(request) {
+        const session = this.#requireCurrentSession(request);
+        const receiptId = payloadString(request.payload, 'result_receipt_id');
+        const receipt = resultReceiptFromRow(asRow(this.#db.prepare('SELECT * FROM result_receipts WHERE entity_id=? AND repo_id=? AND workstream_run=?').get(receiptId, request.repo_id, session.workstream_run), 'result receipt'));
+        const countRows = this.#db.prepare('SELECT collection_name, COUNT(*) AS count, MAX(collection_ordinal) AS maximum FROM result_details WHERE result_receipt_id=? GROUP BY collection_name ORDER BY collection_name').all(receiptId);
+        let actualCount = 0;
+        for (const row of countRows) {
+            const collection = sqlString(row, 'collection_name');
+            const expected = receipt.collections[collection];
+            const count = sqlInteger(row, 'count');
+            if (expected === undefined || count !== expected.item_count || sqlInteger(row, 'maximum') !== count)
+                throw new CoordinationRuntimeError('store-corrupt', 'result collection count or ordinals disagree with its receipt', [receiptId, collection]);
+            actualCount += count;
+        }
+        const nonemptyExpected = Object.values(receipt.collections).filter((collection) => collection.item_count > 0).length;
+        if (actualCount !== receipt.detail_count || countRows.length !== nonemptyExpected)
+            throw new CoordinationRuntimeError('store-corrupt', 'result receipt count disagrees with durable details', [receiptId]);
+        const scopeSha256 = paginationScope(['result-details', request.repo_id, session.workstream_run, receiptId, session.session_lease_id]);
+        const cursorValue = request.payload['cursor'];
+        const offset = cursorValue === null ? 0 : typeof cursorValue === 'string'
+            ? parsePaginationCursor(cursorValue, { kind: 'result-details', scopeSha256, revisionSha256: receipt.details_sha256, section: receiptId })
+            : (() => { throw new CoordinationRuntimeError('invalid-request', 'result detail cursor must be null or bounded opaque text'); })();
+        const details = this.#db.prepare('SELECT * FROM result_details WHERE result_receipt_id=? AND ordinal>? ORDER BY ordinal LIMIT 1025').all(receiptId, offset).map(resultDetailFromRow);
+        const cursorForOffset = (localOffset) => encodePaginationCursor({ kind: 'result-details', scopeSha256, revisionSha256: receipt.details_sha256, section: receiptId, offset: offset + localOffset });
+        const payloadForPage = (items, nextCursor) => ({ schema_version: 'autopilot.result_detail_page.v1', result_receipt: receipt, details: items, next_cursor: nextCursor });
+        const page = byteBudgetPage({ items: details, offset: 0, cursorForOffset, payloadForPage });
+        const finalPage = offset + page.items.length === receipt.detail_count;
+        if ((page.nextCursor === null) !== finalPage)
+            throw new CoordinationRuntimeError('store-corrupt', 'result pagination disagrees with its receipt count', [receiptId]);
+        if (finalPage) {
+            const detailsHash = createHash('sha256');
+            detailsHash.update('[', 'utf8');
+            const collectionHashes = new Map();
+            let ordinal = 0;
+            for (const row of this.#db.prepare('SELECT * FROM result_details WHERE result_receipt_id=? ORDER BY ordinal').iterate(receiptId)) {
+                const detail = resultDetailFromRow(row);
+                ordinal += 1;
+                if (detail.ordinal !== ordinal)
+                    throw new CoordinationRuntimeError('store-corrupt', 'result detail ordinals are not exact and contiguous', [receiptId]);
+                if (ordinal > 1)
+                    detailsHash.update(',', 'utf8');
+                detailsHash.update(JSON.stringify(detail), 'utf8');
+                let collectionHash = collectionHashes.get(detail.collection);
+                if (collectionHash === undefined) {
+                    collectionHash = { hash: createHash('sha256'), count: 0 };
+                    collectionHash.hash.update('[', 'utf8');
+                    collectionHashes.set(detail.collection, collectionHash);
+                }
+                collectionHash.count += 1;
+                if (collectionHash.count > 1)
+                    collectionHash.hash.update(',', 'utf8');
+                collectionHash.hash.update(JSON.stringify(detail.value), 'utf8');
+            }
+            detailsHash.update(']', 'utf8');
+            if (ordinal !== receipt.detail_count || `sha256:${detailsHash.digest('hex')}` !== receipt.details_sha256)
+                throw new CoordinationRuntimeError('store-corrupt', 'result receipt digest disagrees with durable details', [receiptId]);
+            for (const [collection, expected] of Object.entries(receipt.collections)) {
+                const state = collectionHashes.get(collection);
+                const digest = state === undefined ? `sha256:${createHash('sha256').update('[]', 'utf8').digest('hex')}` : (state.hash.update(']', 'utf8'), `sha256:${state.hash.digest('hex')}`);
+                if ((state?.count ?? 0) !== expected.item_count || digest !== expected.items_sha256)
+                    throw new CoordinationRuntimeError('store-corrupt', 'result collection digest disagrees with durable details', [receiptId, collection]);
+            }
+        }
+        return { committedEventSeq: null, payload: payloadForPage(page.items, page.nextCursor) };
     }
     migrationRecovery(request) {
         const includeResolved = payloadBoolean(request.payload, 'include_resolved');
@@ -2029,8 +2479,8 @@ export class CoordinatorStore {
         const cursorRun = payloadNullableString(request.payload, 'cursor_run');
         const cursorRecoveryId = payloadNullableString(request.payload, 'cursor_recovery_id');
         const limit = payloadInteger(request.payload, 'limit');
-        if ((cursorRun === null) !== (cursorRecoveryId === null))
-            throw new CoordinationRuntimeError('invalid-request', 'migration recovery cursor requires both cursor_run and cursor_recovery_id');
+        if ((cursorRun === null) !== (cursorRecoveryId === null) || (cursorRun !== null && cursorRun !== cursorRecoveryId))
+            throw new CoordinationRuntimeError('invalid-request', 'migration recovery cursor requires one matching opaque continuation identity');
         const pendingCount = request.repo_id === 'global'
             ? request.workstream_run === null
                 ? sqlInteger(asRow(this.#db.prepare("SELECT COUNT(*) AS count FROM migration_recovery_work WHERE status='pending'").get(), 'migration recovery pending count'), 'count')
@@ -2047,29 +2497,24 @@ export class CoordinatorStore {
             rows = rows.filter((work) => work.status === 'pending');
         if (recoveryId !== null)
             rows = rows.filter((work) => work.recovery_id === recoveryId);
-        if (cursorRun !== null && cursorRecoveryId !== null)
-            rows = rows.filter((work) => work.workstream_run > cursorRun || (work.workstream_run === cursorRun && work.recovery_id > cursorRecoveryId));
-        const page = rows.slice(0, limit);
-        const next = rows.length > limit ? page.at(-1) ?? null : null;
-        return {
-            committedEventSeq: null,
-            payload: {
-                schema_version: 'autopilot.migration_recovery_query.v1',
-                package_build: COORDINATOR_PACKAGE_BUILD,
-                protocol_version: AUTOPILOT_COORDINATOR_PROTOCOL_VERSION,
-                database_schema_version: COORDINATOR_DATABASE_SCHEMA_VERSION,
-                recovery: page,
-                runs: request.workstream_run === null ? [] : this.#db.prepare('SELECT * FROM runs WHERE repo_id=? AND workstream_run=?').all(request.repo_id, request.workstream_run).map(runFromRow),
-                pending_migration_recovery_count: pendingCount,
-                next_cursor: next === null ? null : { cursor_run: next.workstream_run, cursor_recovery_id: next.recovery_id },
-            },
-        };
+        const runs = request.workstream_run === null ? [] : this.#db.prepare('SELECT * FROM runs WHERE repo_id=? AND workstream_run=?').all(request.repo_id, request.workstream_run).map(runFromRow);
+        const revisionSha256 = paginationRevision({ rows, runs, pendingCount });
+        const scopeSha256 = paginationScope(['migration-recovery', request.repo_id, request.workstream_run, includeResolved ? 'resolved' : 'pending', recoveryId]);
+        const offset = cursorRun === null ? 0 : parsePaginationCursor(cursorRun, { kind: 'migration-recovery', scopeSha256, revisionSha256, section: 'recovery' });
+        const cursorForOffset = (nextOffset) => encodePaginationCursor({ kind: 'migration-recovery', scopeSha256, revisionSha256, section: 'recovery', offset: nextOffset });
+        const payloadForPage = (items, nextCursor) => ({
+            schema_version: 'autopilot.migration_recovery_query.v1', package_build: COORDINATOR_PACKAGE_BUILD, protocol_version: AUTOPILOT_COORDINATOR_PROTOCOL_VERSION,
+            database_schema_version: COORDINATOR_DATABASE_SCHEMA_VERSION, recovery: items, runs, pending_migration_recovery_count: pendingCount,
+            next_cursor: nextCursor === null ? null : { cursor_run: nextCursor, cursor_recovery_id: nextCursor },
+        });
+        const page = byteBudgetPage({ items: rows, offset, cursorForOffset, payloadForPage, maximumItems: limit });
+        return { committedEventSeq: null, payload: payloadForPage(page.items, page.nextCursor) };
     }
-    doctor() {
+    doctor(observedAt) {
         const integrity = integrityResult(this.#db);
         const invariantFindings = this.#allInvariantFindings();
         const invariantErrors = invariantFindings.filter((finding) => finding.severity === 'error');
-        const nowDate = this.#clock.now();
+        const nowDate = observedAt ?? this.#clock.now();
         const now = nowDate.toISOString();
         const retainedExclusiveOperations = this.#db.prepare('SELECT * FROM edit_leases ORDER BY repo_id, workstream_run, entity_id').all().map(editLeaseFromRow).filter((lease) => lease.mode === 'EXCLUSIVE').map((lease) => {
             const operation = lease.exclusive_operation;
@@ -2126,14 +2571,15 @@ export class CoordinatorStore {
             const report = migration['report'];
             if (typeof report !== 'object' || report === null || Array.isArray(report))
                 throw new CoordinationRuntimeError('store-corrupt', 'coordination migration doctor report is not an object');
-            return { ...migration, report: { ...report, recovery: [] } };
+            return { ...migration, report: { ...report, recovery: [], recovery_omitted: true, recovery_query: 'migration-recovery' } };
         });
         const pendingMigrationRecoveryCount = sqlInteger(asRow(this.#db.prepare("SELECT COUNT(*) AS count FROM migration_recovery_work WHERE status='pending'").get(), 'pending migration recovery count'), 'count');
-        const pendingMigrationRecovery = this.#db.prepare("SELECT * FROM migration_recovery_work WHERE status='pending' ORDER BY repo_id, workstream_run, entity_id LIMIT 128").all().map(migrationRecoveryFromRow);
+        const pendingMigrationRecovery = this.#db.prepare("SELECT * FROM migration_recovery_work WHERE status='pending' ORDER BY repo_id, workstream_run, entity_id").all().map(migrationRecoveryFromRow);
         return {
             committedEventSeq: null,
             payload: {
                 schema_version: 'autopilot.coordinator_doctor.v1',
+                observed_at: now,
                 healthy: integrity === 'ok' && invariantErrors.length === 0,
                 integrity,
                 invariant_findings: invariantFindings,
@@ -2178,7 +2624,13 @@ export class CoordinatorStore {
             ['claim_requests', 'repo_id, requester_workstream_run, owner_workstream_run, entity_id'],
             ['mailbox_cursors', 'repo_id, workstream_run'],
             ['reconciliation_evidence', 'repo_id, workstream_run, entity_id'],
+            ['reconciliation_receipts', 'repo_id, workstream_run, committed_event_seq, entity_id'],
+            ['reconciliation_details', 'reconciliation_receipt_id, ordinal'],
             ['messages', 'repo_id, recipient_workstream_run, created_event_seq, message_id'],
+            ['mailbox_deliveries', 'repo_id, workstream_run, delivery_id'],
+            ['mailbox_delivery_items', 'delivery_id, ordinal'],
+            ['result_receipts', 'repo_id, workstream_run, committed_event_seq, entity_id'],
+            ['result_details', 'result_receipt_id, ordinal'],
             ['worktrees', 'repo_id, workstream_run, entity_id'],
             ['worktree_operations', 'repo_id, workstream_run, entity_id'],
             ['merge_operations', 'repo_id, workstream_run, entity_id'],
@@ -2327,7 +2779,7 @@ export class CoordinatorStore {
             const terminalPreparation = this.#preparedTerminalIntent(run.repo_id, run.workstream_run);
             const pendingRecovery = this.#pendingMigrationRecovery(request.repo_id, workstreamRun);
             if (pendingRecovery.length > 0)
-                throw new CoordinationRuntimeError('recovery-required', `run ${workstreamRun} cannot attach ordinary dispatch while migration recovery is pending`, pendingRecovery.map((work) => work.recovery_id));
+                throw new CoordinationRuntimeError('recovery-required', `run ${workstreamRun} cannot attach ordinary dispatch while migration recovery is pending; query migration-recovery for exact identities`, [`pending_count=${String(pendingRecovery.length)}`]);
             const nextGeneration = run.active_session_generation + 1;
             if (request.fencing_generation !== nextGeneration)
                 throw new CoordinationRuntimeError('stale-version', `next session generation must be ${String(nextGeneration)}`);
@@ -2350,7 +2802,8 @@ export class CoordinatorStore {
             const nextRun = this.#requireRun(request.repo_id, workstreamRun);
             const session = sessionFromRow(asRow(this.#db.prepare('SELECT * FROM session_leases WHERE session_lease_id=?').get(payloadString(request.payload, 'session_lease_id')), 'attached session'));
             const reconciliation = this.#reconcileOwnedRun(request.repo_id, workstreamRun, seq);
-            return { sequence: seq, eventType: 'session-attached', entityType: 'session-lease', entityId: session.session_lease_id, payload: { run: nextRun, session, reconciliation } };
+            const reconciliationReceipt = this.#persistReconciliationReceipt(request.repo_id, workstreamRun, request.action, seq, reconciliation);
+            return { sequence: seq, eventType: 'session-attached', entityType: 'session-lease', entityId: session.session_lease_id, payload: { run: nextRun, session, ...this.#reconciliationReceiptPayload(reconciliationReceipt) } };
         });
     }
     attachTerminalRecovery(request) {
@@ -2382,7 +2835,8 @@ export class CoordinatorStore {
             const nextRun = this.#requireRun(request.repo_id, workstreamRun);
             const session = sessionFromRow(asRow(this.#db.prepare('SELECT * FROM session_leases WHERE session_lease_id=?').get(payloadString(request.payload, 'session_lease_id')), 'attached terminal recovery session'));
             const reconciliation = this.#reconcileOwnedRun(request.repo_id, workstreamRun, seq);
-            return { sequence: seq, eventType: 'terminal-cleanup-recovery-attached', entityType: 'session-lease', entityId: session.session_lease_id, payload: { run: nextRun, session, reconciliation, terminal_intent: intent } };
+            const reconciliationReceipt = this.#persistReconciliationReceipt(request.repo_id, workstreamRun, request.action, seq, reconciliation);
+            return { sequence: seq, eventType: 'terminal-cleanup-recovery-attached', entityType: 'session-lease', entityId: session.session_lease_id, payload: { run: nextRun, session, ...this.#reconciliationReceiptPayload(reconciliationReceipt), terminal_intent: intent } };
         });
     }
     attachMigrationRecovery(request) {
@@ -2497,7 +2951,9 @@ export class CoordinatorStore {
             const reconciliation = this.#repositoryHasCoordinationGraph(request.repo_id)
                 ? this.#reconcileOwnedRun(request.repo_id, session.workstream_run, seq)
                 : this.#freezeReconciliationSummary(this.#emptyReconciliationSummary());
-            return { entityId: session.session_lease_id, payload: { session: sessionFromRow(asRow(this.#sessionByLeaseId.get(session.session_lease_id), 'heartbeat session')), reconciliation } };
+            const reconciliationReceipt = this.#persistReconciliationReceipt(request.repo_id, session.workstream_run, request.action, seq, reconciliation);
+            const pendingMessages = sqlInteger(asRow(this.#db.prepare("SELECT COUNT(*) AS count FROM messages WHERE repo_id=? AND recipient_workstream_run=? AND status!='acknowledged'").get(request.repo_id, session.workstream_run), 'heartbeat pending message count'), 'count');
+            return { entityId: session.session_lease_id, payload: { session: sessionFromRow(asRow(this.#sessionByLeaseId.get(session.session_lease_id), 'heartbeat session')), ...this.#reconciliationReceiptPayload(reconciliationReceipt), pending_messages: pendingMessages } };
         });
     }
     registerAttempt(request) {
@@ -2648,8 +3104,10 @@ export class CoordinatorStore {
             }
             const releasedExclusiveLeaseIds = [];
             this.#releaseExitedExclusiveLeases(child.owner, releasedExclusiveLeaseIds);
-            const reconciliation = this.#reconcileOwnedRun(request.repo_id, child.owner.workstream_run, seq);
-            return { sequence: seq, eventType: status === 'terminal' ? 'child-terminal' : 'child-recovery-required', entityType: 'child-lease', entityId: childId, payload: { child: childFromRow(asRow(this.#db.prepare('SELECT * FROM child_leases WHERE child_lease_id=?').get(childId), 'completed child')), reconciliation, released_exclusive_lease_ids: releasedExclusiveLeaseIds } };
+            const reconciled = this.#reconcileOwnedRun(request.repo_id, child.owner.workstream_run, seq);
+            const reconciliation = this.#freezeReconciliationSummary({ ...reconciled, released_lease_ids: [...releasedExclusiveLeaseIds, ...reconciled.released_lease_ids] });
+            const reconciliationReceipt = this.#persistReconciliationReceipt(request.repo_id, child.owner.workstream_run, request.action, seq, reconciliation);
+            return { sequence: seq, eventType: status === 'terminal' ? 'child-terminal' : 'child-recovery-required', entityType: 'child-lease', entityId: childId, payload: { child: childFromRow(asRow(this.#db.prepare('SELECT * FROM child_leases WHERE child_lease_id=?').get(childId), 'completed child')), ...this.#reconciliationReceiptPayload(reconciliationReceipt) } };
         });
     }
     acquireGroup(request) {
@@ -2731,6 +3189,8 @@ export class CoordinatorStore {
                 reason: payloadString(request.payload, 'reason'), normal_release_condition: releaseCondition, state: 'waiting', created_event_seq: seq, fairness_event_seq: seq,
                 grant_event_seq: null, offer_expires_at: null, offer_count: 0, bypass_count: 0, version: 1,
             });
+            if (encodedJsonBytes(group) > COORDINATOR_MAX_PAGE_ENTITY_BYTES)
+                throw new CoordinationRuntimeError('frame-too-large', 'acquisition group exceeds the single durable entity byte ceiling', [groupId]);
             this.#insertEntity('acquisition_groups', groupId, owner.repo_id, owner.workstream_run, group);
             const expiredOffers = this.#expireGrantOffers(request.repo_id, seq);
             if (expiredOffers)
@@ -2808,7 +3268,8 @@ export class CoordinatorStore {
                 const reconciliation = this.#reconcileOwnedRun(request.repo_id, claimRequest.owner.workstream_run, seq);
                 if (offersExpired && reconciliation.offered_group_ids.length === 0)
                     this.#reevaluateWaitingGroups(request.repo_id, seq);
-                return { sequence: seq, eventType: 'claim-request-deferred', entityType: 'claim-request', entityId: requestId, payload: { claim_request: this.#requireClaimRequest(requestId), reconciliation } };
+                const reconciliationReceipt = this.#persistReconciliationReceipt(request.repo_id, claimRequest.owner.workstream_run, request.action, seq, reconciliation);
+                return { sequence: seq, eventType: 'claim-request-deferred', entityType: 'claim-request', entityId: requestId, payload: { claim_request: this.#requireClaimRequest(requestId), ...this.#reconciliationReceiptPayload(reconciliationReceipt) } };
             }
             const releasedLeaseIds = [];
             for (const leaseId of claimRequest.blocking_lease_ids) {
@@ -3012,7 +3473,7 @@ export class CoordinatorStore {
             if (assignments.length === 0)
                 throw new CoordinationRuntimeError('invalid-state', 'adjudication attempt has no assigned planning contradiction');
             if (assignments.length !== 1)
-                throw new CoordinationRuntimeError('store-corrupt', 'adjudication attempt has multiple simultaneous assignments', assignments.map((assignment) => assignment.assignment_id));
+                throw new CoordinationRuntimeError('store-corrupt', 'adjudication attempt has multiple simultaneous assignments; query status for exact identities', [`assignment_count=${String(assignments.length)}`]);
             const assignment = assignments[0];
             if (assignment === undefined)
                 throw new CoordinationRuntimeError('invalid-state', 'adjudication assignment disappeared');
@@ -3085,7 +3546,9 @@ export class CoordinatorStore {
             const releasedLeaseIds = this.#releaseAttemptLeases(adjudicatorRun, `${child.owner.unit_id}:${String(child.owner.attempt)}`);
             this.#updateAttemptForSatisfiedCondition(child.owner, 'child-terminal');
             this.#reevaluateWaitingGroups(child.owner.repo_id, seq);
-            return { sequence: seq, eventType: 'adjudication-accepted', entityType: 'adjudication-assignment', entityId: accepted.assignment_id, payload: { adjudication_assignment: accepted, child: childFromRow(asRow(this.#db.prepare('SELECT * FROM child_leases WHERE child_lease_id=?').get(child.child_lease_id), 'completed adjudicator child')), released_lease_ids: releasedLeaseIds } };
+            const reconciliation = this.#freezeReconciliationSummary({ ...this.#emptyReconciliationSummary(), released_lease_ids: releasedLeaseIds });
+            const reconciliationReceipt = this.#persistReconciliationReceipt(request.repo_id, child.owner.workstream_run, request.action, seq, reconciliation);
+            return { sequence: seq, eventType: 'adjudication-accepted', entityType: 'adjudication-assignment', entityId: accepted.assignment_id, payload: { adjudication_assignment: accepted, child: childFromRow(asRow(this.#db.prepare('SELECT * FROM child_leases WHERE child_lease_id=?').get(child.child_lease_id), 'completed adjudicator child')), ...this.#reconciliationReceiptPayload(reconciliationReceipt) } };
         });
     }
     submitPlanningContradiction(request) {
@@ -3189,7 +3652,8 @@ export class CoordinatorStore {
             }
             const reconciled = this.#reconcileOwnedRun(request.repo_id, workstreamRun, seq);
             const reconciliation = this.#freezeReconciliationSummary({ ...reconciled, released_lease_ids: [...directlyReleasedLeaseIds, ...reconciled.released_lease_ids], stale_observation_ids: [...staleObservationIds, ...reconciled.stale_observation_ids] });
-            return { sequence: seq, eventType: 'release-evidence-accepted', entityType: 'reconciliation-evidence', entityId: evidence.reconciliation_evidence_id, payload: { reconciliation_evidence: evidence, run: nextRun, reconciliation, change_reservations: convertedReservations, reservation_obligations: createdObligations } };
+            const reconciliationReceipt = this.#persistReconciliationReceipt(request.repo_id, run.workstream_run, request.action, seq, reconciliation);
+            return { sequence: seq, eventType: 'release-evidence-accepted', entityType: 'reconciliation-evidence', entityId: evidence.reconciliation_evidence_id, payload: { reconciliation_evidence: evidence, run: nextRun, ...this.#reconciliationReceiptPayload(reconciliationReceipt), change_reservations: convertedReservations, reservation_obligations: createdObligations } };
         });
     }
     resolveReservationObligation(request) {
@@ -3285,23 +3749,107 @@ export class CoordinatorStore {
             this.#assertVersion(run.version, request.expected_version, 'run');
             const seq = this.#nextEventSequence(request.repo_id);
             const reconciliation = this.#reconcileOwnedRun(request.repo_id, workstreamRun, seq);
-            return { sequence: seq, eventType: 'run-reconciled', entityType: 'run', entityId: workstreamRun, payload: { run, reconciliation, reason: payloadString(request.payload, 'reason') } };
+            const reconciliationReceipt = this.#persistReconciliationReceipt(request.repo_id, workstreamRun, request.action, seq, reconciliation);
+            return { sequence: seq, eventType: 'run-reconciled', entityType: 'run', entityId: workstreamRun, payload: { run, ...this.#reconciliationReceiptPayload(reconciliationReceipt), reason: payloadString(request.payload, 'reason') } };
         });
     }
     drainMailbox(request) {
         return this.#sessionMutation(request, 'mailbox-drained', (session, seq) => {
             const workstreamRun = this.#workstreamRun(request);
-            this.#db.prepare("UPDATE messages SET status='delivered', delivered_event_seq=COALESCE(delivered_event_seq, ?), version=version+1 WHERE repo_id=? AND recipient_workstream_run=? AND status='pending'").run(seq, request.repo_id, workstreamRun);
-            this.#advanceMailboxCursor(request.repo_id, workstreamRun, 'delivered');
-            const messages = this.#db.prepare("SELECT * FROM messages WHERE repo_id=? AND recipient_workstream_run=? AND status='delivered' ORDER BY created_event_seq, message_id").all(request.repo_id, workstreamRun).map(messageFromRow);
-            for (const message of messages) {
+            const deliveryId = payloadString(request.payload, 'delivery_id');
+            const cursorValue = request.payload['cursor'];
+            const existingRow = this.#db.prepare('SELECT * FROM mailbox_deliveries WHERE delivery_id=?').get(deliveryId);
+            let delivery;
+            if (existingRow === undefined) {
+                if (cursorValue !== undefined && cursorValue !== null)
+                    throw new CoordinationRuntimeError('invalid-request', 'new mailbox delivery cannot begin from a continuation cursor');
+                const emptyDigest = `sha256:${createHash('sha256').update('[]', 'utf8').digest('hex')}`;
+                delivery = parseCoordinationMailboxDeliveryReceipt({
+                    schema_version: 'autopilot.mailbox_delivery_receipt.v1', delivery_id: deliveryId, repo_id: request.repo_id, workstream_run: workstreamRun,
+                    session_lease_id: session.session_lease_id, snapshot_through_event_seq: 0, message_count: 0, message_ids_sha256: emptyDigest, completed: false, version: 1,
+                });
+                this.#db.prepare('INSERT INTO mailbox_deliveries(delivery_id, repo_id, workstream_run, session_lease_id, snapshot_through_event_seq, next_ordinal, payload_json, version) VALUES(?, ?, ?, ?, 0, 0, ?, ?)').run(delivery.delivery_id, delivery.repo_id, delivery.workstream_run, delivery.session_lease_id, canonicalJson(delivery), delivery.version);
+                const insertItem = this.#db.prepare('INSERT INTO mailbox_delivery_items(delivery_id, ordinal, message_id, snapshot_delivered_event_seq, snapshot_message_version) VALUES(?, ?, ?, ?, ?)');
+                const membershipHash = createHash('sha256');
+                membershipHash.update('[', 'utf8');
+                let messageCount = 0;
+                let snapshotThrough = 0;
+                for (const row of this.#db.prepare("SELECT * FROM messages WHERE repo_id=? AND recipient_workstream_run=? AND status!='acknowledged' ORDER BY created_event_seq, message_id").iterate(request.repo_id, workstreamRun)) {
+                    const message = messageFromRow(row);
+                    messageCount += 1;
+                    snapshotThrough = Math.max(snapshotThrough, message.created_event_seq);
+                    if (messageCount > 1)
+                        membershipHash.update(',', 'utf8');
+                    membershipHash.update(JSON.stringify(message.message_id), 'utf8');
+                    const projected = message.status === 'pending' ? parseCoordinationMessage({ ...message, status: 'delivered', delivered_event_seq: seq, version: message.version + 1 }) : message;
+                    if (projected.delivered_event_seq === null)
+                        throw new CoordinationRuntimeError('store-corrupt', 'mailbox delivery projection lacks its exact delivery event sequence', [projected.message_id]);
+                    insertItem.run(delivery.delivery_id, messageCount, message.message_id, projected.delivered_event_seq, projected.version);
+                }
+                membershipHash.update(']', 'utf8');
+                delivery = parseCoordinationMailboxDeliveryReceipt({ ...delivery, snapshot_through_event_seq: snapshotThrough, message_count: messageCount, message_ids_sha256: `sha256:${membershipHash.digest('hex')}`, completed: messageCount === 0 });
+                this.#db.prepare('UPDATE mailbox_deliveries SET snapshot_through_event_seq=?, payload_json=? WHERE delivery_id=?').run(snapshotThrough, canonicalJson(delivery), delivery.delivery_id);
+            }
+            else {
+                delivery = mailboxDeliveryFromRow(existingRow);
+                if (delivery.repo_id !== request.repo_id || delivery.workstream_run !== workstreamRun || delivery.session_lease_id !== session.session_lease_id)
+                    throw new CoordinationRuntimeError('unauthorized-client', 'mailbox delivery continuation belongs to a different attached session');
+                if (cursorValue === undefined || cursorValue === null)
+                    throw new CoordinationRuntimeError('idempotency-conflict', 'mailbox delivery id was reused without its original idempotency key or continuation cursor', [deliveryId]);
+                if (delivery.completed)
+                    throw new CoordinationRuntimeError('invalid-state', 'completed mailbox delivery cannot accept another continuation page', [deliveryId]);
+            }
+            const scopeSha256 = paginationScope(['mailbox-delivery', request.repo_id, workstreamRun, session.session_lease_id, deliveryId]);
+            const offset = cursorValue === undefined || cursorValue === null
+                ? 0
+                : typeof cursorValue === 'string'
+                    ? parsePaginationCursor(cursorValue, { kind: 'mailbox-delivery', scopeSha256, revisionSha256: delivery.message_ids_sha256, section: deliveryId })
+                    : (() => { throw new CoordinationRuntimeError('invalid-request', 'mailbox delivery cursor must be bounded opaque text'); })();
+            const durableNextOrdinal = sqlInteger(asRow(this.#db.prepare('SELECT next_ordinal FROM mailbox_deliveries WHERE delivery_id=?').get(deliveryId), 'mailbox delivery progress'), 'next_ordinal');
+            if (offset !== durableNextOrdinal)
+                throw new CoordinationRuntimeError('stale-version', 'mailbox delivery continuation does not match its exact durable next ordinal', [deliveryId, `expected=${String(durableNextOrdinal)}`, `actual=${String(offset)}`]);
+            const projected = this.#db.prepare('SELECT messages.*, mailbox_delivery_items.snapshot_delivered_event_seq, mailbox_delivery_items.snapshot_message_version FROM mailbox_delivery_items JOIN messages ON messages.message_id=mailbox_delivery_items.message_id WHERE mailbox_delivery_items.delivery_id=? AND mailbox_delivery_items.ordinal>? ORDER BY mailbox_delivery_items.ordinal LIMIT 1025').all(deliveryId, offset).map((row) => {
+                const current = messageFromRow(row);
+                return parseCoordinationMessage({ ...current, status: 'delivered', delivered_event_seq: sqlInteger(row, 'snapshot_delivered_event_seq'), acknowledged_event_seq: null, version: sqlInteger(row, 'snapshot_message_version') });
+            });
+            const cursorForOffset = (localOffset) => encodePaginationCursor({ kind: 'mailbox-delivery', scopeSha256, revisionSha256: delivery.message_ids_sha256, section: deliveryId, offset: offset + localOffset });
+            const payloadForPage = (items, nextCursor) => ({ delivery_receipt: delivery, session_version: session.version, mailbox_cursor: this.#requireMailboxCursor(request.repo_id, workstreamRun), messages: items, next_cursor: nextCursor });
+            const page = byteBudgetPage({ items: projected, offset: 0, cursorForOffset, payloadForPage });
+            for (const message of page.items) {
+                if (message.status === 'delivered')
+                    this.#db.prepare("UPDATE messages SET status='delivered', delivered_event_seq=COALESCE(delivered_event_seq, ?), version=? WHERE message_id=? AND status='pending'").run(seq, message.version, message.message_id);
                 if (message.message_type !== 'claim-request')
                     continue;
                 const claimRequest = this.#requireClaimRequest(message.correlation_id);
                 if (claimRequest.status === 'pending')
                     this.#updateClaimRequest({ ...claimRequest, status: 'delivered', version: claimRequest.version + 1 });
             }
-            return { entityId: payloadString(request.payload, 'delivery_id'), payload: { delivery_id: payloadString(request.payload, 'delivery_id'), session_version: session.version, mailbox_cursor: this.#requireMailboxCursor(request.repo_id, workstreamRun), messages } };
+            this.#advanceMailboxCursor(request.repo_id, workstreamRun, 'delivered');
+            const nextOrdinal = offset + page.items.length;
+            const finalPage = nextOrdinal === delivery.message_count;
+            if (page.nextCursor === null !== finalPage)
+                throw new CoordinationRuntimeError('store-corrupt', 'mailbox delivery pagination disagrees with its exact receipt count', [deliveryId]);
+            if (finalPage) {
+                const membershipHash = createHash('sha256');
+                membershipHash.update('[', 'utf8');
+                let count = 0;
+                for (const row of this.#db.prepare('SELECT message_id FROM mailbox_delivery_items WHERE delivery_id=? ORDER BY ordinal').iterate(deliveryId)) {
+                    count += 1;
+                    if (count > 1)
+                        membershipHash.update(',', 'utf8');
+                    membershipHash.update(JSON.stringify(sqlString(row, 'message_id')), 'utf8');
+                }
+                membershipHash.update(']', 'utf8');
+                if (count !== delivery.message_count || `sha256:${membershipHash.digest('hex')}` !== delivery.message_ids_sha256)
+                    throw new CoordinationRuntimeError('store-corrupt', 'mailbox delivery membership disagrees with its durable receipt', [deliveryId]);
+            }
+            if (finalPage && !delivery.completed) {
+                delivery = parseCoordinationMailboxDeliveryReceipt({ ...delivery, completed: true, version: delivery.version + 1 });
+                this.#db.prepare('UPDATE mailbox_deliveries SET next_ordinal=?, payload_json=?, version=? WHERE delivery_id=?').run(nextOrdinal, canonicalJson(delivery), delivery.version, delivery.delivery_id);
+            }
+            else
+                this.#db.prepare('UPDATE mailbox_deliveries SET next_ordinal=? WHERE delivery_id=?').run(nextOrdinal, delivery.delivery_id);
+            return { entityId: deliveryId, payload: { delivery_receipt: delivery, session_version: session.version, mailbox_cursor: this.#requireMailboxCursor(request.repo_id, workstreamRun), messages: page.items, next_cursor: page.nextCursor } };
         });
     }
     acknowledgeMessage(request) {
@@ -3421,6 +3969,97 @@ export class CoordinatorStore {
         const parsed = parseCoordinationMessage(message);
         this.#db.prepare('INSERT INTO messages(message_id, repo_id, recipient_workstream_run, message_type, correlation_id, payload_json, status, created_event_seq, delivered_event_seq, acknowledged_event_seq, version) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(parsed.message_id, parsed.repo_id, parsed.recipient_workstream_run, parsed.message_type, parsed.correlation_id, canonicalJson(parsed.payload), parsed.status, parsed.created_event_seq, parsed.delivered_event_seq, parsed.acknowledged_event_seq, parsed.version);
     }
+    #migrateLegacyReconciliationResults() {
+        while (true) {
+            const rows = this.#db.prepare("SELECT repo_id, idempotency_key, committed_event_seq, payload_json FROM idempotency_results WHERE json_type(payload_json, '$.reconciliation')='object' ORDER BY repo_id, committed_event_seq, idempotency_key LIMIT 128").all();
+            if (rows.length === 0)
+                return;
+            this.#db.exec('BEGIN IMMEDIATE');
+            try {
+                for (const row of rows) {
+                    const repoId = sqlString(row, 'repo_id');
+                    const idempotencyKey = sqlString(row, 'idempotency_key');
+                    const eventSeq = sqlInteger(row, 'committed_event_seq');
+                    const payload = parseJsonObject(sqlString(row, 'payload_json'), 'legacy reconciliation idempotency payload');
+                    const summary = this.#parseStoredReconciliationSummary(payload['reconciliation']);
+                    const event = asRow(this.#db.prepare('SELECT event_type, entity_type, entity_id FROM events WHERE repo_id=? AND idempotency_key=?').get(repoId, idempotencyKey), 'legacy reconciliation event');
+                    const workstreamRun = this.#legacyReconciliationRun(repoId, payload, event);
+                    const receipt = this.#persistReconciliationReceipt(repoId, workstreamRun, this.#legacyReconciliationSourceAction(sqlString(event, 'event_type')), eventSeq, summary);
+                    const compact = {};
+                    for (const [field, value] of Object.entries(payload))
+                        if (field !== 'reconciliation')
+                            compact[field] = value;
+                    Object.assign(compact, this.#reconciliationReceiptPayload(receipt));
+                    this.#db.prepare('UPDATE idempotency_results SET payload_json=? WHERE repo_id=? AND idempotency_key=?').run(canonicalJson(compact), repoId, idempotencyKey);
+                }
+                this.#db.exec('COMMIT');
+            }
+            catch (error) {
+                this.#db.exec('ROLLBACK');
+                throw error;
+            }
+        }
+    }
+    #parseStoredReconciliationSummary(value) {
+        if (!isJsonMap(value))
+            throw new CoordinationRuntimeError('schema-mismatch', 'stored reconciliation summary is not an object');
+        const fields = Object.keys(value).sort();
+        const predecessorFields = ['notification_ids', 'offered_group_ids', 'released_lease_ids', 'released_request_ids'];
+        const observationFields = ['notification_ids', 'offered_group_ids', 'released_lease_ids', 'released_observation_ids', 'released_request_ids', 'stale_observation_ids'];
+        const predecessorShape = canonicalJson(fields) === canonicalJson(predecessorFields);
+        if (!predecessorShape && canonicalJson(fields) !== canonicalJson(observationFields))
+            throw new CoordinationRuntimeError('schema-mismatch', 'stored reconciliation summary fields are not an exact historical contract', fields);
+        const values = (field, absentBeforeObservations = false) => {
+            const entries = value[field];
+            if (entries === undefined && predecessorShape && absentBeforeObservations)
+                return Object.freeze([]);
+            if (!Array.isArray(entries) || !entries.every((entry) => typeof entry === 'string'))
+                throw new CoordinationRuntimeError('schema-mismatch', `stored reconciliation ${field} is not a string array`);
+            if (new Set(entries).size !== entries.length)
+                throw new CoordinationRuntimeError('schema-mismatch', `stored reconciliation ${field} contains duplicate durable identities`);
+            return Object.freeze([...entries]);
+        };
+        return Object.freeze({ released_lease_ids: values('released_lease_ids'), released_observation_ids: values('released_observation_ids', true), stale_observation_ids: values('stale_observation_ids', true), released_request_ids: values('released_request_ids'), notification_ids: values('notification_ids'), offered_group_ids: values('offered_group_ids') });
+    }
+    #legacyReconciliationSourceAction(eventType) {
+        const actions = {
+            'session-attached': 'attach-session', 'terminal-cleanup-recovery-attached': 'attach-terminal-recovery', 'session-heartbeat': 'heartbeat',
+            'child-terminal': 'complete-child', 'child-recovery-required': 'complete-child', 'claim-request-deferred': 'respond-claim-request',
+            'release-evidence-accepted': 'record-release-evidence', 'run-reconciled': 'reconcile-run',
+        };
+        const action = actions[eventType];
+        if (action === undefined)
+            throw new CoordinationRuntimeError('schema-mismatch', 'legacy reconciliation event type has no exact protocol-1.6 source-action mapping', [eventType]);
+        return action;
+    }
+    #legacyReconciliationRun(repoId, payload, event) {
+        const candidateRecords = ['run', 'session', 'child', 'claim_request', 'reconciliation_evidence'].map((field) => payload[field]);
+        for (const candidate of candidateRecords) {
+            if (!isJsonMap(candidate))
+                continue;
+            const record = candidate;
+            const direct = record['workstream_run'];
+            if (typeof direct === 'string')
+                return direct;
+            const owner = record['owner'];
+            if (isJsonMap(owner)) {
+                const ownedRun = owner['workstream_run'];
+                if (typeof ownedRun === 'string')
+                    return ownedRun;
+            }
+        }
+        const entityType = sqlString(event, 'entity_type');
+        const entityId = sqlString(event, 'entity_id');
+        if (entityType === 'run')
+            return entityId;
+        if (entityType === 'session-lease')
+            return sqlString(asRow(this.#db.prepare('SELECT workstream_run FROM session_leases WHERE repo_id=? AND session_lease_id=?').get(repoId, entityId), 'legacy reconciliation session'), 'workstream_run');
+        if (entityType === 'child-lease')
+            return sqlString(asRow(this.#db.prepare('SELECT workstream_run FROM child_leases WHERE repo_id=? AND child_lease_id=?').get(repoId, entityId), 'legacy reconciliation child'), 'workstream_run');
+        if (entityType === 'claim-request')
+            return sqlString(asRow(this.#db.prepare('SELECT owner_workstream_run FROM claim_requests WHERE repo_id=? AND entity_id=?').get(repoId, entityId), 'legacy reconciliation claim request'), 'owner_workstream_run');
+        throw new CoordinationRuntimeError('schema-mismatch', 'legacy reconciliation result lacks durable run identity', [repoId, entityType, entityId]);
+    }
     #migrateSchema9ReadLeasesToObservations(ownsTransactions = true) {
         const rowsByRun = new Map();
         for (const row of this.#db.prepare("SELECT * FROM edit_leases WHERE json_extract(payload_json, '$.mode')='READ' ORDER BY repo_id, workstream_run, entity_id").all()) {
@@ -3523,7 +4162,6 @@ export class CoordinatorStore {
     }
     #recoverDurableTransitionsAfterStartup() {
         const runs = this.#db.prepare('SELECT * FROM runs ORDER BY repo_id, workstream_run').all().map(runFromRow);
-        const aggregate = this.#emptyReconciliationSummary();
         for (const run of runs) {
             this.#db.exec('BEGIN IMMEDIATE');
             try {
@@ -3543,20 +4181,15 @@ export class CoordinatorStore {
                 const idempotencyKey = `startup-reconciliation:${run.workstream_run}:${String(seq)}`;
                 const digest = `sha256:${createHash('sha256').update(idempotencyKey, 'utf8').digest('hex')}`;
                 this.#db.prepare('INSERT INTO events(repo_id, event_seq, event_type, entity_type, entity_id, idempotency_key, request_sha256, occurred_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?)').run(run.repo_id, seq, 'startup-run-reconciled', 'run', run.workstream_run, idempotencyKey, digest, this.#clock.now().toISOString());
+                const persistedSummary = this.#freezeReconciliationSummary({ ...summary, notification_ids: [...recoveryMessageIds, ...summary.notification_ids] });
+                this.#lastStartupReconciliation = this.#persistReconciliationReceipt(run.repo_id, run.workstream_run, 'startup-reconciliation', seq, persistedSummary, true);
                 this.#db.exec('COMMIT');
-                aggregate.released_lease_ids.push(...summary.released_lease_ids);
-                aggregate.released_observation_ids.push(...summary.released_observation_ids);
-                aggregate.stale_observation_ids.push(...summary.stale_observation_ids);
-                aggregate.released_request_ids.push(...summary.released_request_ids);
-                aggregate.notification_ids.push(...recoveryMessageIds, ...summary.notification_ids);
-                aggregate.offered_group_ids.push(...summary.offered_group_ids);
             }
             catch (error) {
                 this.#db.exec('ROLLBACK');
                 throw error;
             }
         }
-        this.#lastStartupReconciliation = this.#freezeReconciliationSummary(aggregate);
     }
     #enqueueOperationRecoveryMessages(run, seq) {
         const operations = this.#db.prepare("SELECT * FROM worktree_operations WHERE repo_id=? AND workstream_run=? AND json_extract(payload_json, '$.stage') NOT IN ('committed','compensated','failed') ORDER BY entity_id").all(run.repo_id, run.workstream_run).map(worktreeOperationFromRow);
@@ -3797,7 +4430,7 @@ export class CoordinatorStore {
                 throw new CoordinationRuntimeError('unauthorized-client', 'unit merge changed a path outside active WRITE/EXCLUSIVE authority', [path, targetId]);
         }
         if (existing.length > 0)
-            throw new CoordinationRuntimeError('invalid-state', 'partial or mismatched reservation conversion already exists', existing.map((reservation) => reservation.reservation_id));
+            throw new CoordinationRuntimeError('invalid-state', 'partial or mismatched reservation conversion already exists; query status for exact identities', [`reservation_count=${String(existing.length)}`]);
         const reservations = [];
         const obligations = [];
         for (const path of facts.changedPaths) {
@@ -3988,7 +4621,7 @@ export class CoordinatorStore {
             throw new CoordinationRuntimeError('recovery-required', 'run terminal commit requires all owned worktree sagas terminal', incompleteOperations);
         const pendingGroups = this.#db.prepare("SELECT * FROM acquisition_groups WHERE repo_id=? AND workstream_run=? AND json_extract(payload_json, '$.state') IN ('waiting','grant-ready') ORDER BY entity_id").all(run.repo_id, run.workstream_run).map(acquisitionGroupFromRow);
         if (pendingGroups.length > 0)
-            throw new CoordinationRuntimeError('recovery-required', 'run terminal commit requires queued acquisition groups to be cancelled or superseded', pendingGroups.map((group) => `${group.acquisition_group_id}:${group.state}`));
+            throw new CoordinationRuntimeError('recovery-required', 'run terminal commit requires queued acquisition groups to be cancelled or superseded; query status for exact identities', [`group_count=${String(pendingGroups.length)}`]);
     }
     #assertRunCloseReservationReady(run) {
         const allObservations = this.#db.prepare('SELECT * FROM observations WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(run.repo_id, run.workstream_run).map(observationFromRow);
@@ -4000,15 +4633,15 @@ export class CoordinatorStore {
             return staleAttempt.role === candidateAttempt.role && this.#gitCommitIsAncestor(run, stale.stale_by_commit, candidate.source_identity.base_commit);
         }));
         if (unresolvedStaleObservations.length > 0)
-            throw new CoordinationRuntimeError('recovery-required', 'run close requires every stale observation to be refreshed or revalidated by a same-role terminal attempt', unresolvedStaleObservations.map((observation) => observation.observation_id));
+            throw new CoordinationRuntimeError('recovery-required', 'run close requires every stale observation to be refreshed or revalidated by a same-role terminal attempt; query status for exact identities', [`observation_count=${String(unresolvedStaleObservations.length)}`]);
         const activeLeases = this.#db.prepare('SELECT * FROM edit_leases WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(run.repo_id, run.workstream_run).map(editLeaseFromRow);
         const nonCloseLeases = activeLeases.filter((lease) => lease.normal_release_condition.condition_type !== 'run-closed' || lease.normal_release_condition.target_id !== run.workstream_run);
         if (nonCloseLeases.length > 0)
-            throw new CoordinationRuntimeError('recovery-required', 'run close requires every unit edit lease to be terminally released', nonCloseLeases.map((lease) => lease.edit_lease_id));
+            throw new CoordinationRuntimeError('recovery-required', 'run close requires every unit edit lease to be terminally released; query status for exact identities', [`lease_count=${String(nonCloseLeases.length)}`]);
         const obligations = this.#db.prepare('SELECT * FROM reservation_obligations WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(run.repo_id, run.workstream_run).map(reservationObligationFromRow);
         const unresolved = obligations.filter((entry) => entry.state !== 'resolved' && entry.state !== 'cancelled');
         if (unresolved.length > 0)
-            throw new CoordinationRuntimeError('recovery-required', 'run close requires every reservation integration obligation to be resolved', unresolved.map((entry) => `${entry.obligation_id}:${entry.state}`));
+            throw new CoordinationRuntimeError('recovery-required', 'run close requires every reservation integration obligation to be resolved; query status for exact identities', [`obligation_count=${String(unresolved.length)}`]);
         for (const obligation of obligations.filter((entry) => entry.state === 'resolved'))
             this.#assertResolvedReservationObligationCurrent(run, obligation);
         const reservations = this.#db.prepare('SELECT * FROM change_reservations WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(run.repo_id, run.workstream_run).map(changeReservationFromRow);
@@ -4371,6 +5004,83 @@ export class CoordinatorStore {
             notification_ids: Object.freeze([...new Set(summary.notification_ids)].sort()),
             offered_group_ids: Object.freeze([...new Set(summary.offered_group_ids)].sort()),
         };
+    }
+    #reconciliationDetails(receiptId, summary) {
+        const groups = [
+            { kind: 'released-lease', ids: summary.released_lease_ids },
+            { kind: 'released-observation', ids: summary.released_observation_ids },
+            { kind: 'stale-observation', ids: summary.stale_observation_ids },
+            { kind: 'released-request', ids: summary.released_request_ids },
+            { kind: 'notification', ids: summary.notification_ids },
+            { kind: 'offered-group', ids: summary.offered_group_ids },
+        ];
+        const details = [];
+        for (const group of groups) {
+            for (const entityId of group.ids)
+                details.push(parseCoordinationReconciliationDetail({ schema_version: 'autopilot.reconciliation_detail.v1', reconciliation_receipt_id: receiptId, ordinal: details.length + 1, kind: group.kind, entity_id: entityId }));
+        }
+        return Object.freeze(details);
+    }
+    #persistResultReceipt(repoId, workstreamRun, sourceAction, eventSeq, collectionsInput) {
+        const receiptId = stableEntityId('result-receipt', [repoId, workstreamRun, sourceAction, String(eventSeq)]);
+        const details = [];
+        const collections = {};
+        for (const name of Object.keys(collectionsInput).sort((left, right) => left.localeCompare(right))) {
+            const values = collectionsInput[name];
+            if (values === undefined)
+                throw new CoordinationRuntimeError('store-corrupt', 'result collection disappeared during receipt construction', [name]);
+            collections[name] = { item_count: values.length, items_sha256: `sha256:${createHash('sha256').update(JSON.stringify(values), 'utf8').digest('hex')}` };
+            for (const [index, value] of values.entries()) {
+                if (encodedJsonBytes(value) > COORDINATOR_MAX_PAGE_ENTITY_BYTES)
+                    throw new CoordinationRuntimeError('frame-too-large', 'single mutation result entity exceeds the byte-paged detail ceiling', [sourceAction, name, `ordinal=${String(index + 1)}`]);
+                details.push(parseCoordinationResultDetail({ schema_version: 'autopilot.result_detail.v1', result_receipt_id: receiptId, ordinal: details.length + 1, collection: name, collection_ordinal: index + 1, value }));
+            }
+        }
+        const receipt = parseCoordinationResultReceipt({
+            schema_version: 'autopilot.result_receipt.v1', result_receipt_id: receiptId, repo_id: repoId, workstream_run: workstreamRun, source_action: sourceAction,
+            committed_event_seq: eventSeq, detail_count: details.length, details_sha256: `sha256:${createHash('sha256').update(JSON.stringify(details), 'utf8').digest('hex')}`,
+            collections, version: 1,
+        });
+        this.#db.prepare('INSERT INTO result_receipts(entity_id, repo_id, workstream_run, committed_event_seq, source_action, payload_json, version) VALUES(?, ?, ?, ?, ?, ?, ?)').run(receipt.result_receipt_id, receipt.repo_id, receipt.workstream_run, receipt.committed_event_seq, receipt.source_action, canonicalJson(receipt), receipt.version);
+        const insertDetail = this.#db.prepare('INSERT INTO result_details(result_receipt_id, ordinal, collection_name, collection_ordinal, payload_json) VALUES(?, ?, ?, ?, ?)');
+        for (const detail of details)
+            insertDetail.run(detail.result_receipt_id, detail.ordinal, detail.collection, detail.collection_ordinal, JSON.stringify(detail.value));
+        return receipt;
+    }
+    #reconciliationReceiptPayload(receipt) {
+        return receipt.detail_count === 0 ? Object.freeze({}) : Object.freeze({ reconciliation_receipt: receipt });
+    }
+    #persistReconciliationReceipt(repoId, workstreamRun, sourceAction, eventSeq, summary, persistEmpty = false) {
+        const receiptId = stableEntityId('reconciliation-receipt', [repoId, workstreamRun, sourceAction, String(eventSeq)]);
+        const finalDetails = this.#reconciliationDetails(receiptId, summary);
+        const receipt = parseCoordinationReconciliationReceipt({
+            schema_version: 'autopilot.reconciliation_receipt.v1', reconciliation_receipt_id: receiptId, repo_id: repoId, workstream_run: workstreamRun,
+            source_action: sourceAction, committed_event_seq: eventSeq, detail_count: finalDetails.length,
+            details_sha256: `sha256:${createHash('sha256').update(JSON.stringify(finalDetails), 'utf8').digest('hex')}`,
+            counts: {
+                'released-lease': summary.released_lease_ids.length,
+                'released-observation': summary.released_observation_ids.length,
+                'stale-observation': summary.stale_observation_ids.length,
+                'released-request': summary.released_request_ids.length,
+                notification: summary.notification_ids.length,
+                'offered-group': summary.offered_group_ids.length,
+            },
+            version: 1,
+        });
+        if (finalDetails.length === 0 && !persistEmpty)
+            return receipt;
+        const existing = this.#db.prepare('SELECT * FROM reconciliation_receipts WHERE entity_id=?').get(receiptId);
+        if (existing !== undefined) {
+            const parsed = reconciliationReceiptFromRow(existing);
+            if (canonicalJson(parsed) !== canonicalJson(receipt))
+                throw new CoordinationRuntimeError('idempotency-conflict', 'reconciliation receipt identity was reused with different exact details', [receiptId]);
+            return parsed;
+        }
+        this.#db.prepare('INSERT INTO reconciliation_receipts(entity_id, repo_id, workstream_run, committed_event_seq, source_action, payload_json, version) VALUES(?, ?, ?, ?, ?, ?, ?)').run(receipt.reconciliation_receipt_id, receipt.repo_id, receipt.workstream_run, receipt.committed_event_seq, receipt.source_action, canonicalJson(receipt), receipt.version);
+        const insertDetail = this.#db.prepare('INSERT INTO reconciliation_details(reconciliation_receipt_id, ordinal, kind, entity_id) VALUES(?, ?, ?, ?)');
+        for (const detail of finalDetails)
+            insertDetail.run(detail.reconciliation_receipt_id, detail.ordinal, detail.kind, detail.entity_id);
+        return receipt;
     }
     #requireMailboxCursor(repoId, workstreamRun) {
         return mailboxCursorFromRow(asRow(this.#db.prepare('SELECT * FROM mailbox_cursors WHERE repo_id=? AND workstream_run=?').get(repoId, workstreamRun), 'mailbox cursor'));
@@ -5077,9 +5787,29 @@ export class CoordinatorStore {
                 return replay;
             }
             const result = apply();
+            for (const [field, value] of Object.entries(result.payload)) {
+                if (value !== null && typeof value === 'object' && !Array.isArray(value) && encodedJsonBytes(value) > COORDINATOR_MAX_PAGE_ENTITY_BYTES)
+                    throw new CoordinationRuntimeError('frame-too-large', `coordinator action ${request.action} produced an oversized single result entity`, [field]);
+                if (Array.isArray(value)) {
+                    const oversizedIndex = value.findIndex((entry) => encodedJsonBytes(entry) > COORDINATOR_MAX_PAGE_ENTITY_BYTES);
+                    if (oversizedIndex >= 0)
+                        throw new CoordinationRuntimeError('frame-too-large', `coordinator action ${request.action} produced an oversized single collection entity`, [field, `ordinal=${String(oversizedIndex + 1)}`]);
+                }
+            }
             if (request.action !== 'heartbeat' || this.#repositoryHasCoordinationGraph(request.repo_id))
                 this.#maintainWaitForGraph(request.repo_id, result.sequence);
-            const committed = this.#commitDescription(result.sequence, result.eventType, result.entityType, result.entityId, result.payload);
+            let committed = this.#commitDescription(result.sequence, result.eventType, result.entityType, result.entityId, result.payload);
+            const responseFor = (effect) => ({ schema_version: 'autopilot.coordinator_response.v1', protocol_version: AUTOPILOT_COORDINATOR_PROTOCOL_VERSION, request_id: request.request_id, ok: true, committed_event_seq: effect.committedEventSeq, error_code: null, retryable: false, payload: effect.payload });
+            try {
+                this.#assertResponseFitsFrame(responseFor(committed), request.action);
+            }
+            catch (error) {
+                const externalized = this.#externalizeResultCollections(request, result.sequence, committed.payload);
+                if (externalized === null)
+                    throw error;
+                committed = { committedEventSeq: result.sequence, payload: externalized };
+                this.#assertResponseFitsFrame(responseFor(committed), request.action);
+            }
             this.#insertEvent.run(request.repo_id, result.sequence, result.eventType, result.entityType, result.entityId, idempotencyKey, digest, this.#clock.now().toISOString());
             this.#insertIdempotencyResult.run(request.repo_id, idempotencyKey, digest, result.sequence, canonicalJson(committed.payload));
             if (ownsTransaction)
@@ -5091,6 +5821,51 @@ export class CoordinatorStore {
                 this.#db.exec('ROLLBACK');
             throw error;
         }
+    }
+    #externalizeResultCollections(request, eventSeq, payload) {
+        if (request.action === 'drain-mailbox' || request.action === 'complete-child' || request.action === 'complete-adjudication')
+            return null;
+        const collections = Object.fromEntries(Object.entries(payload).filter((entry) => Array.isArray(entry[1])));
+        if (Object.keys(collections).length === 0)
+            return null;
+        const receipt = this.#persistResultReceipt(request.repo_id, this.#workstreamRun(request), request.action, eventSeq, collections);
+        const compact = {};
+        for (const [field, value] of Object.entries(payload))
+            if (!Array.isArray(value))
+                compact[field] = value;
+        compact['result_receipt'] = receipt;
+        return Object.freeze(compact);
+    }
+    #assertResponseFitsFrame(response, action) {
+        try {
+            const parsed = parseCoordinatorResponseEnvelope(response);
+            if (parsed.ok) {
+                if (action === 'status')
+                    parseCoordinatorProjectionPage(parsed.payload, 'status');
+                else if (action === 'doctor')
+                    parseCoordinatorProjectionPage(parsed.payload, 'doctor');
+                else if (action === 'run-catalog')
+                    parseCoordinatorRunCatalogPage(parsed.payload);
+                else if (action === 'migration-recovery')
+                    parseCoordinatorMigrationRecoveryPage(parsed.payload);
+                else if (action === 'reconciliation-details')
+                    parseCoordinatorReconciliationDetailPage(parsed.payload);
+                else if (action === 'result-details')
+                    parseCoordinatorResultDetailPage(parsed.payload);
+                else if (action === 'drain-mailbox')
+                    parseCoordinatorMailboxPage(parsed.payload);
+                if (parsed.payload['reconciliation_receipt'] !== undefined)
+                    parseCoordinationReconciliationReceipt(parsed.payload['reconciliation_receipt']);
+                if (parsed.payload['result_receipt'] !== undefined)
+                    parseCoordinationResultReceipt(parsed.payload['result_receipt']);
+            }
+        }
+        catch (error) {
+            throw new CoordinationRuntimeError('frame-too-large', `coordinator action ${action} produced a response outside the bounded outbound contract before commit`, [error instanceof Error ? error.message : String(error)]);
+        }
+        const bytes = encodedJsonBytes(response);
+        if (bytes >= COORDINATOR_MAX_FRAME_BYTES)
+            throw new CoordinationRuntimeError('frame-too-large', `coordinator action ${action} produced an oversized response before commit`, [`encoded_bytes=${String(bytes)}`, `ceiling=${String(COORDINATOR_MAX_FRAME_BYTES)}`]);
     }
     #commitDescription(sequence, eventType, entityType, entityId, payload) {
         return { committedEventSeq: sequence, payload: { ...payload, event_type: eventType, entity_type: entityType, entity_id: entityId } };
@@ -5272,7 +6047,7 @@ export class CoordinatorStore {
             assertCoordinationMigrationRecoveryOperationAuthorized(this.#stateRoot, request.payload['migration_operation_token']);
         const pendingRecovery = this.#pendingMigrationRecovery(run.repo_id, run.workstream_run);
         if (session.attachment_kind !== 'migration-recovery' && pendingRecovery.length > 0 && !['detach-session', 'heartbeat'].includes(request.action))
-            throw new CoordinationRuntimeError('recovery-required', 'ordinary session is fenced from dispatch while migration recovery remains pending', pendingRecovery.map((work) => work.recovery_id));
+            throw new CoordinationRuntimeError('recovery-required', 'ordinary session is fenced from dispatch while migration recovery remains pending; query migration-recovery for exact identities', [`pending_count=${String(pendingRecovery.length)}`]);
         return session;
     }
     #assertReplayAuthority(request) {

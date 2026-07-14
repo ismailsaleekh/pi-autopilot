@@ -4,7 +4,7 @@ import { chmod, open, rename, unlink } from 'node:fs/promises';
 import { createServer, type Server, type Socket } from 'node:net';
 import { platform } from 'node:os';
 
-import { encodeCoordinatorFrame, parseCoordinatorLegacyReplayTransportRequest, parseCoordinatorTransportRequest, CoordinatorFrameDecoder, writeCoordinatorResponse } from './ipc.ts';
+import { encodeCoordinatorFrame, parseCoordinatorLegacyReplayTransportRequest, parseCoordinatorTransportRequest, CoordinatorFrameDecoder, writeCoordinatorResponse, type CoordinatorLegacyReplayProtocol } from './ipc.ts';
 import { CoordinationRuntimeError } from './failures.ts';
 import { currentBootId, isProcessAlive, predecessorCompatibleBootId, processStartIdentity } from './process-identity.ts';
 import { COORDINATOR_GRANT_OFFER_SWEEP_MS, enforcePrivateAuthorityPath, ensureCoordinatorPrivateRoots, readOrCreateCoordinatorCapability, type CoordinatorRuntimePaths } from './runtime-paths.ts';
@@ -12,7 +12,7 @@ import { acquireSerializedProcessGuard, discardLockTombstone, quarantineExactLoc
 import { CoordinatorStore, type StoreClock } from './store.ts';
 import { AUTOPILOT_COORDINATOR_PROTOCOL_VERSION, type CoordinatorResponseEnvelope } from './types.ts';
 import { readKnownCoordinatorUpgradeIntent, recordCoordinatorFenceHandoff } from './upgrade.ts';
-import { COORDINATOR_UPGRADE_PATH, parseCurrentCoordinatorLock, parseKnownCompatibleCurrentCoordinatorLock, parsePredecessorCoordinatorLock, parsePriorSchema10CurrentCoordinatorLock, parsePriorSchema9CurrentCoordinatorLock, type CurrentCoordinatorLock, type KnownCompatibleCurrentCoordinatorLock, type PredecessorCoordinatorLock } from './upgrade-contracts.ts';
+import { COORDINATOR_UPGRADE_PATH, parseCurrentCoordinatorLock, parseKnownCompatibleCurrentCoordinatorLock, parsePredecessorCoordinatorLock, parsePriorSchema11CurrentCoordinatorLock, parsePriorSchema10CurrentCoordinatorLock, parsePriorSchema9CurrentCoordinatorLock, type CurrentCoordinatorLock, type KnownCompatibleCurrentCoordinatorLock, type PredecessorCoordinatorLock } from './upgrade-contracts.ts';
 
 type LockRecord = CurrentCoordinatorLock;
 
@@ -95,10 +95,10 @@ async function acquireCoordinatorLock(paths: CoordinatorRuntimePaths, adoption?:
     if (startupIntent !== null && startupIntent.target.package_build !== COORDINATOR_UPGRADE_PATH.target.package_build && startupIntent.state !== 'committed') throw new CoordinationRuntimeError('recovery-required', `historical coordinator upgrade target ${startupIntent.target.package_build} is ${startupIntent.state}; startup cannot rewrite another build's intent`);
     const currentText = await readExactLockText(paths.lockPath);
     if (currentText !== null) {
-      let current: KnownCompatibleCurrentCoordinatorLock | ReturnType<typeof parsePriorSchema10CurrentCoordinatorLock> | ReturnType<typeof parsePriorSchema9CurrentCoordinatorLock> = null;
+      let current: KnownCompatibleCurrentCoordinatorLock | ReturnType<typeof parsePriorSchema11CurrentCoordinatorLock> | ReturnType<typeof parsePriorSchema10CurrentCoordinatorLock> | ReturnType<typeof parsePriorSchema9CurrentCoordinatorLock> = null;
       try {
         const parsed: unknown = JSON.parse(currentText) as unknown;
-        current = parseKnownCompatibleCurrentCoordinatorLock(parsed) ?? parsePriorSchema10CurrentCoordinatorLock(parsed) ?? parsePriorSchema9CurrentCoordinatorLock(parsed);
+        current = parseKnownCompatibleCurrentCoordinatorLock(parsed) ?? parsePriorSchema11CurrentCoordinatorLock(parsed) ?? parsePriorSchema10CurrentCoordinatorLock(parsed) ?? parsePriorSchema9CurrentCoordinatorLock(parsed);
       } catch { /* fail below */ }
       if (current === null) throw new CoordinationRuntimeError('protocol-mismatch', 'current-generation lifecycle lock belongs to an unknown build');
       // PID liveness always wins. Boot-id disagreement is never stale proof.
@@ -237,7 +237,7 @@ function authenticated(provided: string, expected: string): boolean {
   return left.byteLength === right.byteLength && timingSafeEqual(left, right);
 }
 
-function writeLegacyReplayResponse(socket: Socket, response: CoordinatorResponseEnvelope, protocol: '1.1' | '1.2'): Promise<void> {
+function writeLegacyReplayResponse(socket: Socket, response: CoordinatorResponseEnvelope, protocol: CoordinatorLegacyReplayProtocol): Promise<void> {
   const legacy = { ...response, protocol_version: protocol };
   return new Promise<void>((resolveWrite, rejectWrite) => {
     socket.write(encodeCoordinatorFrame(legacy), (error) => {
@@ -261,7 +261,12 @@ function errorResponse(requestId: string, error: unknown): CoordinatorResponseEn
   };
 }
 
-function handleSocket(socket: Socket, store: CoordinatorStore, capability: string, paths: CoordinatorRuntimePaths, backgroundFailure: () => Error | null): void {
+export interface CoordinatorServerTestHooks {
+  /** Explicit subprocess-only crash witness after a committed response is durable and before socket encoding. */
+  readonly afterStoreCommitBeforeResponse?: (action: string, response: CoordinatorResponseEnvelope) => void | Promise<void>;
+}
+
+function handleSocket(socket: Socket, store: CoordinatorStore, capability: string, paths: CoordinatorRuntimePaths, backgroundFailure: () => Error | null, testHooks?: CoordinatorServerTestHooks): void {
   const decoder = new CoordinatorFrameDecoder();
   let chain = Promise.resolve();
   socket.on('data', (chunk: NodeBuffer) => {
@@ -271,7 +276,7 @@ function handleSocket(socket: Socket, store: CoordinatorStore, capability: strin
         let requestId = `transport-error-${randomBytes(8).toString('hex')}`;
         try {
           let response: CoordinatorResponseEnvelope | null = null;
-          let legacyReplayProtocol: '1.1' | '1.2' | null = null;
+          let legacyReplayProtocol: CoordinatorLegacyReplayProtocol | null = null;
           let action: string | null = null;
           let currentTransport: ReturnType<typeof parseCoordinatorTransportRequest> | null = null;
           try { currentTransport = parseCoordinatorTransportRequest(frame); }
@@ -299,6 +304,7 @@ function handleSocket(socket: Socket, store: CoordinatorStore, capability: strin
             const upgradeIntent = await readKnownCoordinatorUpgradeIntent(paths);
             if (upgradeIntent !== null && upgradeIntent.state !== 'committed' && action !== 'handshake' && action !== 'status' && action !== 'doctor') throw new CoordinationRuntimeError('coordinator-contention', 'coordinator upgrade is not durably committed; mutation authority remains closed');
             response = store.handle(currentTransport.request);
+            if (response.ok && response.committed_event_seq !== null) await testHooks?.afterStoreCommitBeforeResponse?.(currentTransport.request.action, response);
           }
           if (response === null) throw new CoordinationRuntimeError('system-fatal', 'coordinator request parsing produced no response path');
           if (legacyReplayProtocol !== null) await writeLegacyReplayResponse(socket, response, legacyReplayProtocol);
@@ -349,7 +355,7 @@ export interface RunningCoordinator {
   close(): Promise<void>;
 }
 
-export async function startCoordinatorServer(paths: CoordinatorRuntimePaths, clock?: StoreClock, adoption?: CoordinatorStartupAdoption): Promise<RunningCoordinator> {
+export async function startCoordinatorServer(paths: CoordinatorRuntimePaths, clock?: StoreClock, adoption?: CoordinatorStartupAdoption, testHooks?: CoordinatorServerTestHooks): Promise<RunningCoordinator> {
   const lifecycleLock = await acquireCoordinatorLock(paths, adoption);
   let store: CoordinatorStore | null = null;
   let server: Server | null = null;
@@ -361,7 +367,7 @@ export async function startCoordinatorServer(paths: CoordinatorRuntimePaths, clo
     store = clock === undefined ? await CoordinatorStore.open(paths) : await CoordinatorStore.open(paths, clock);
     const openedStore = store;
     let timerFailure: Error | null = null;
-    server = createServer((socket) => handleSocket(socket, openedStore, capability, paths, () => timerFailure));
+    server = createServer((socket) => handleSocket(socket, openedStore, capability, paths, () => timerFailure, testHooks));
     await listen(server, paths.socketPath);
     serverListening = true;
     const openedServer = server;

@@ -1652,8 +1652,8 @@ export async function readCoordinatorRunCatalog(client: CoordinatorClient, repoK
     runs.push(...pageRuns); resources.push(...pageResources);
     const next = response.payload['next_cursor'];
     if (next !== null && typeof next !== 'string') fail('invalid-coordinator-status', 'coordinator activation catalog returned an invalid pagination cursor.');
-    if (next !== null && (next === cursor || pageRuns.at(-1)?.workstream_run !== next)) fail('invalid-coordinator-status', 'coordinator activation catalog returned a non-advancing pagination cursor.');
-    cursor = next as string | null;
+    if (next !== null && next === cursor) fail('invalid-coordinator-status', 'coordinator activation catalog returned a non-advancing pagination cursor.');
+    cursor = typeof next === 'string' ? next : null;
     if (runs.length > 100_000) fail('invalid-coordinator-status', 'coordinator activation catalog exceeds its aggregate run bound.');
   } while (cursor !== null);
   return { runs: Object.freeze(runs), resources: Object.freeze(resources) };
@@ -1666,9 +1666,8 @@ export async function assertCoordinatorMigrationRecoveryCleared(repo: AutopilotR
   for (const run of matchingRunIds) {
     const exact = await client.query('run-catalog', repo.repoKey, run);
     const pendingCount = exact.payload['pending_migration_recovery_count'];
-    const pending = exact.payload['pending_migration_recovery'];
-    if (typeof pendingCount !== 'number' || !Number.isSafeInteger(pendingCount) || !Array.isArray(pending)) fail('invalid-coordinator-status', 'coordinator run catalog omitted bounded recovery identity.');
-    if (pendingCount > 0) fail('migration-recovery-required', `Autopilot activation for ${workstream} is fenced until its imported authority recovery is resolved by a recovery-only supervisor session.`, pending.map((value) => typeof value === 'object' && value !== null ? `${run}:${String((value as Readonly<Record<string, unknown>>)['recovery_id'])}` : run));
+    if (typeof pendingCount !== 'number' || !Number.isSafeInteger(pendingCount) || pendingCount < 0) fail('invalid-coordinator-status', 'coordinator run catalog omitted its exact recovery count.');
+    if (pendingCount > 0) fail('migration-recovery-required', `Autopilot activation for ${workstream} is fenced until its imported authority recovery is resolved by a recovery-only supervisor session.`, [`${run}:pending_count=${String(pendingCount)}`, 'use autopilot-coordinator recovery list for exact paginated identities']);
   }
 }
 

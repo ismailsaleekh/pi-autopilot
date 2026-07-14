@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { isAbsolute, normalize } from 'node:path';
 import { COORDINATION_EXCLUSIVE_MAX_EXPECTED_DURATION_MS } from "./exclusive-policy.js";
-import { AUTOPILOT_COORDINATION_SNAPSHOT_SCHEMA, AUTOPILOT_COORDINATOR_PROTOCOL_VERSION, AUTOPILOT_COORDINATOR_REQUEST_SCHEMA, AUTOPILOT_COORDINATOR_RESPONSE_SCHEMA, COORDINATION_ACQUISITION_STATES, COORDINATION_CHILD_STATUSES, COORDINATION_CLAIM_MODES, COORDINATION_EXCLUSIVE_OPERATION_KINDS, COORDINATION_EXCLUSIVE_RELEASE_TRIGGERS, COORDINATION_EXCLUSIVE_RESOURCE_SCOPES, COORDINATION_MESSAGE_STATUSES, COORDINATION_INTEGRATION_CONFLICT_KINDS, COORDINATION_INTEGRATION_DISPOSITIONS, COORDINATION_MERGE_TREE_STATUSES, COORDINATION_OPERATIONAL_ESCALATION_REASONS, COORDINATION_OPERATION_STAGES, COORDINATION_OBSERVATION_EXECUTION_STATES, COORDINATION_OBSERVATION_FRESHNESS_STATES, COORDINATION_OBSERVATION_OBJECT_KINDS, COORDINATION_OPERATION_TYPES, COORDINATION_RELEASE_CONDITION_TYPES, COORDINATION_RECONCILIATION_SOURCES, COORDINATION_REQUEST_STATUSES, COORDINATION_RESERVATION_OBLIGATION_STATES, COORDINATION_MESSAGE_TYPES, COORDINATION_RUN_STATUSES, COORDINATION_SESSION_STATUSES, COORDINATION_SESSION_ATTACHMENT_KINDS, COORDINATION_MIGRATION_RECOVERY_RESOLUTIONS, COORDINATION_MIGRATION_RECOVERY_STATUSES, COORDINATION_MIGRATION_RECOVERY_TYPES, COORDINATION_UNIT_ROLES, COORDINATION_UNIT_STATES, COORDINATION_WORKTREE_KINDS, COORDINATION_WORKTREE_STATES, COORDINATION_WAIT_EDGE_STATES, COORDINATION_DEADLOCK_ACTIONS, COORDINATION_DEADLOCK_STATES, } from "./types.js";
+import { AUTOPILOT_COORDINATION_SNAPSHOT_SCHEMA, AUTOPILOT_COORDINATOR_PROTOCOL_VERSION, AUTOPILOT_COORDINATOR_REQUEST_SCHEMA, AUTOPILOT_COORDINATOR_RESPONSE_SCHEMA, COORDINATION_ACQUISITION_STATES, COORDINATION_CHILD_STATUSES, COORDINATION_CLAIM_MODES, COORDINATION_EXCLUSIVE_OPERATION_KINDS, COORDINATION_EXCLUSIVE_RELEASE_TRIGGERS, COORDINATION_EXCLUSIVE_RESOURCE_SCOPES, COORDINATION_MESSAGE_STATUSES, COORDINATION_INTEGRATION_CONFLICT_KINDS, COORDINATION_INTEGRATION_DISPOSITIONS, COORDINATION_MERGE_TREE_STATUSES, COORDINATION_OPERATIONAL_ESCALATION_REASONS, COORDINATION_OPERATION_STAGES, COORDINATION_OBSERVATION_EXECUTION_STATES, COORDINATION_OBSERVATION_FRESHNESS_STATES, COORDINATION_OBSERVATION_OBJECT_KINDS, COORDINATION_OPERATION_TYPES, COORDINATION_RELEASE_CONDITION_TYPES, COORDINATION_RECONCILIATION_DETAIL_KINDS, COORDINATION_RECONCILIATION_SOURCES, COORDINATION_REQUEST_STATUSES, COORDINATION_RESERVATION_OBLIGATION_STATES, COORDINATION_MESSAGE_TYPES, COORDINATION_RUN_STATUSES, COORDINATION_SESSION_STATUSES, COORDINATION_SESSION_ATTACHMENT_KINDS, COORDINATION_MIGRATION_RECOVERY_RESOLUTIONS, COORDINATION_MIGRATION_RECOVERY_STATUSES, COORDINATION_MIGRATION_RECOVERY_TYPES, COORDINATION_UNIT_ROLES, COORDINATION_UNIT_STATES, COORDINATION_WORKTREE_KINDS, COORDINATION_WORKTREE_STATES, COORDINATION_WAIT_EDGE_STATES, COORDINATION_DEADLOCK_ACTIONS, COORDINATION_DEADLOCK_STATES, } from "./types.js";
 export class CoordinationContractError extends Error {
     name = 'CoordinationContractError';
     code = 'invalid-coordination-contract';
@@ -15,7 +15,7 @@ const ISO_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;
 const SHA256 = /^sha256:[a-f0-9]{64}$/u;
 const CHILD_TOKEN = /^[a-f0-9]{64}$/u;
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,191}$/u;
-const QUERY_ACTIONS = ['handshake', 'status', 'doctor', 'export', 'migration-recovery', 'run-catalog'];
+const QUERY_ACTIONS = ['handshake', 'status', 'doctor', 'export', 'migration-recovery', 'run-catalog', 'reconciliation-details', 'result-details'];
 const MUTATION_ACTIONS = ['attach-run', 'attach-session', 'attach-terminal-recovery', 'attach-migration-recovery', 'resolve-migration-recovery', 'detach-session', 'prepare-handoff', 'heartbeat', 'register-attempt', 'register-child', 'heartbeat-child', 'checkpoint-child', 'complete-child', 'drain-mailbox', 'acquire-group', 'acknowledge-grant', 'respond-claim-request', 'cancel-claim-request', 'cancel-acquisition-group', 'supersede-attempt', 'acknowledge-message', 'record-release-evidence', 'resolve-reservation-obligation', 'prepare-run-terminal', 'cancel-run-terminal', 'reconcile-run', 'prepare-operation', 'transition-operation', 'register-authoritative-artifact', 'assign-adjudication', 'claim-adjudication-assignment', 'complete-adjudication', 'submit-planning-contradiction'];
 const MESSAGE_TYPES = COORDINATION_MESSAGE_TYPES;
 const WORKTREE_STATES = COORDINATION_WORKTREE_STATES;
@@ -23,11 +23,13 @@ const OPERATION_TYPES = COORDINATION_OPERATION_TYPES;
 const EXHAUSTED_ALTERNATIVES = ['sequencing', 'partitioning', 'ownership-transfer', 'rebase-revalidation', 'replanning'];
 const PAYLOAD_FIELDS = {
     handshake: [],
-    status: [],
-    doctor: [],
+    status: ['cursor', 'scan_token', 'section'],
+    doctor: ['cursor', 'scan_token', 'section'],
     export: ['output_path'],
     'migration-recovery': ['cursor_recovery_id', 'cursor_run', 'include_resolved', 'limit', 'recovery_id'],
     'run-catalog': ['cursor_run', 'limit'],
+    'reconciliation-details': ['cursor', 'reconciliation_receipt_id'],
+    'result-details': ['cursor', 'result_receipt_id', 'session_lease_id', 'session_token'],
     'attach-run': ['autopilot_id', 'canonical_root', 'coordination_authority', 'git_common_dir', 'repo_key', 'run_resource', 'workstream'],
     'attach-session': ['boot_id', 'handoff_token', 'lease_expires_at', 'pid', 'session_lease_id', 'session_token'],
     'attach-terminal-recovery': ['boot_id', 'lease_expires_at', 'pid', 'session_lease_id', 'session_token', 'terminal_intent_id'],
@@ -207,6 +209,45 @@ function boundedJsonValue(value, label, depth) {
 }
 function boundedJsonObject(value, label) {
     const parsed = boundedJsonValue(value, label, 0);
+    if (!isJsonObject(parsed))
+        fail(label, 'must be a JSON object');
+    return parsed;
+}
+function boundedResponseJsonValue(value, label, depth) {
+    if (depth > 8)
+        fail(label, 'exceeds maximum JSON nesting depth');
+    if (value === null || typeof value === 'boolean')
+        return value;
+    if (typeof value === 'string') {
+        if (Buffer.byteLength(value, 'utf8') > 524_288)
+            fail(label, 'contains a string larger than one page entity');
+        return value;
+    }
+    if (typeof value === 'number') {
+        if (!Number.isFinite(value))
+            fail(label, 'contains a non-finite number');
+        return value;
+    }
+    if (Array.isArray(value)) {
+        if (value.length > 1024)
+            fail(label, 'contains an array longer than 1024 entries');
+        return Object.freeze(value.map((entry, index) => boundedResponseJsonValue(entry, `${label}[${String(index)}]`, depth + 1)));
+    }
+    if (!isJsonObject(value))
+        fail(label, 'contains a non-JSON value');
+    const entries = Object.entries(value);
+    if (entries.length > 256)
+        fail(label, 'contains an object with more than 256 fields');
+    const out = {};
+    for (const [key, entry] of entries) {
+        if (key.length === 0 || key.length > 128)
+            fail(label, 'contains an invalid field name');
+        out[key] = boundedResponseJsonValue(entry, `${label}.${key}`, depth + 1);
+    }
+    return Object.freeze(out);
+}
+function boundedResponseJsonObject(value, label) {
+    const parsed = boundedResponseJsonValue(value, label, 0);
     if (!isJsonObject(parsed))
         fail(label, 'must be a JSON object');
     return parsed;
@@ -748,6 +789,111 @@ export function parseCoordinationReconciliationEvidence(value) {
         version: integer(record, 'version', label, 1),
     };
 }
+export function parseCoordinationReconciliationReceipt(value) {
+    const label = 'CoordinationReconciliationReceipt';
+    const record = object(value, label, ['committed_event_seq', 'counts', 'detail_count', 'details_sha256', 'reconciliation_receipt_id', 'repo_id', 'schema_version', 'source_action', 'version', 'workstream_run']);
+    const countsRecord = object(record['counts'], `${label}.counts`, COORDINATION_RECONCILIATION_DETAIL_KINDS);
+    const counts = {
+        'released-lease': integer(countsRecord, 'released-lease', `${label}.counts`),
+        'released-observation': integer(countsRecord, 'released-observation', `${label}.counts`),
+        'stale-observation': integer(countsRecord, 'stale-observation', `${label}.counts`),
+        'released-request': integer(countsRecord, 'released-request', `${label}.counts`),
+        notification: integer(countsRecord, 'notification', `${label}.counts`),
+        'offered-group': integer(countsRecord, 'offered-group', `${label}.counts`),
+    };
+    const detailCount = integer(record, 'detail_count', label);
+    if (Object.values(counts).reduce((total, count) => total + count, 0) !== detailCount)
+        fail(label, 'detail_count does not equal the exact per-kind counts');
+    const detailsSha256 = string(record, 'details_sha256', label, 71);
+    if (!SHA256.test(detailsSha256))
+        fail(label, 'details_sha256 must use sha256:<64 lowercase hex>');
+    return {
+        schema_version: literal(record, 'schema_version', 'autopilot.reconciliation_receipt.v1', label),
+        reconciliation_receipt_id: identifier(record, 'reconciliation_receipt_id', label),
+        repo_id: pathSegmentIdentifier(record, 'repo_id', label),
+        workstream_run: pathSegmentIdentifier(record, 'workstream_run', label),
+        source_action: identifier(record, 'source_action', label),
+        committed_event_seq: integer(record, 'committed_event_seq', label, 1),
+        detail_count: detailCount,
+        details_sha256: detailsSha256,
+        counts,
+        version: integer(record, 'version', label, 1),
+    };
+}
+export function parseOptionalCoordinationReconciliationReceipt(value) {
+    return value === undefined ? null : parseCoordinationReconciliationReceipt(value);
+}
+export function parseCoordinationReconciliationDetail(value) {
+    const label = 'CoordinationReconciliationDetail';
+    const record = object(value, label, ['entity_id', 'kind', 'ordinal', 'reconciliation_receipt_id', 'schema_version']);
+    return {
+        schema_version: literal(record, 'schema_version', 'autopilot.reconciliation_detail.v1', label),
+        reconciliation_receipt_id: identifier(record, 'reconciliation_receipt_id', label),
+        ordinal: integer(record, 'ordinal', label, 1),
+        kind: oneOf(record, 'kind', COORDINATION_RECONCILIATION_DETAIL_KINDS, label),
+        entity_id: identifier(record, 'entity_id', label),
+    };
+}
+export function parseCoordinationMailboxDeliveryReceipt(value) {
+    const label = 'CoordinationMailboxDeliveryReceipt';
+    const record = object(value, label, ['completed', 'delivery_id', 'message_count', 'message_ids_sha256', 'repo_id', 'schema_version', 'session_lease_id', 'snapshot_through_event_seq', 'version', 'workstream_run']);
+    const digest = string(record, 'message_ids_sha256', label, 71);
+    if (!SHA256.test(digest))
+        fail(label, 'message_ids_sha256 must use sha256:<64 lowercase hex>');
+    return {
+        schema_version: literal(record, 'schema_version', 'autopilot.mailbox_delivery_receipt.v1', label),
+        delivery_id: identifier(record, 'delivery_id', label),
+        repo_id: pathSegmentIdentifier(record, 'repo_id', label),
+        workstream_run: pathSegmentIdentifier(record, 'workstream_run', label),
+        session_lease_id: identifier(record, 'session_lease_id', label),
+        snapshot_through_event_seq: integer(record, 'snapshot_through_event_seq', label),
+        message_count: integer(record, 'message_count', label),
+        message_ids_sha256: digest,
+        completed: boolean(record, 'completed', label),
+        version: integer(record, 'version', label, 1),
+    };
+}
+export function parseCoordinationResultReceipt(value) {
+    const label = 'CoordinationResultReceipt';
+    const record = object(value, label, ['collections', 'committed_event_seq', 'detail_count', 'details_sha256', 'repo_id', 'result_receipt_id', 'schema_version', 'source_action', 'version', 'workstream_run']);
+    if (!isJsonObject(record['collections']))
+        fail(label, 'collections must be an object');
+    const collectionEntries = Object.entries(record['collections']);
+    if (collectionEntries.length < 1 || collectionEntries.length > 64)
+        fail(label, 'collections must contain 1 through 64 named results');
+    const collections = {};
+    let total = 0;
+    for (const [name, raw] of collectionEntries) {
+        identifierValue(name, `${label}.collections key`);
+        const collection = object(raw, `${label}.collections.${name}`, ['item_count', 'items_sha256']);
+        const digest = string(collection, 'items_sha256', `${label}.collections.${name}`, 71);
+        if (!SHA256.test(digest))
+            fail(label, `${name}.items_sha256 must use sha256:<64 lowercase hex>`);
+        const count = integer(collection, 'item_count', `${label}.collections.${name}`);
+        total += count;
+        collections[name] = { item_count: count, items_sha256: digest };
+    }
+    const detailCount = integer(record, 'detail_count', label);
+    if (total !== detailCount)
+        fail(label, 'detail_count does not equal the exact collection counts');
+    const detailsDigest = string(record, 'details_sha256', label, 71);
+    if (!SHA256.test(detailsDigest))
+        fail(label, 'details_sha256 must use sha256:<64 lowercase hex>');
+    return {
+        schema_version: literal(record, 'schema_version', 'autopilot.result_receipt.v1', label), result_receipt_id: identifier(record, 'result_receipt_id', label),
+        repo_id: pathSegmentIdentifier(record, 'repo_id', label), workstream_run: pathSegmentIdentifier(record, 'workstream_run', label), source_action: identifier(record, 'source_action', label),
+        committed_event_seq: integer(record, 'committed_event_seq', label, 1), detail_count: detailCount, details_sha256: detailsDigest,
+        collections: Object.freeze(collections), version: integer(record, 'version', label, 1),
+    };
+}
+export function parseCoordinationResultDetail(value) {
+    const label = 'CoordinationResultDetail';
+    const record = object(value, label, ['collection', 'collection_ordinal', 'ordinal', 'result_receipt_id', 'schema_version', 'value']);
+    return {
+        schema_version: literal(record, 'schema_version', 'autopilot.result_detail.v1', label), result_receipt_id: identifier(record, 'result_receipt_id', label), ordinal: integer(record, 'ordinal', label, 1),
+        collection: identifier(record, 'collection', label), collection_ordinal: integer(record, 'collection_ordinal', label, 1), value: boundedResponseJsonValue(record['value'], `${label}.value`, 0),
+    };
+}
 export function parseCoordinationMessage(value) {
     const label = 'CoordinationMessage';
     const record = object(value, label, ['acknowledged_event_seq', 'correlation_id', 'created_event_seq', 'delivered_event_seq', 'message_id', 'message_type', 'payload', 'recipient_workstream_run', 'repo_id', 'schema_version', 'status', 'version']);
@@ -1050,7 +1196,8 @@ export function parseCoordinationSnapshot(value) {
 function parsePayload(value, action) {
     const label = `CoordinatorRequestEnvelope.payload(${action})`;
     let payload;
-    if (action === 'run-catalog') {
+    const optionalPagePayload = action === 'run-catalog' || action === 'status' || action === 'doctor';
+    if (optionalPagePayload) {
         if (!isJsonObject(value))
             fail(label, 'must be an object');
         const unknownFields = Object.keys(value).filter((key) => !PAYLOAD_FIELDS[action].includes(key));
@@ -1059,10 +1206,10 @@ function parsePayload(value, action) {
         payload = value;
     }
     else
-        payload = object(value, label, PAYLOAD_FIELDS[action], action === 'detach-session' || action === 'heartbeat' ? ['migration_operation_token'] : []);
+        payload = object(value, label, PAYLOAD_FIELDS[action], action === 'detach-session' || action === 'heartbeat' ? ['migration_operation_token'] : action === 'drain-mailbox' ? ['cursor'] : action === 'reconciliation-details' ? ['boot_id', 'child_lease_id', 'child_token', 'pid', 'session_lease_id', 'session_token'] : []);
     for (const field of PAYLOAD_FIELDS[action]) {
         const entry = payload[field];
-        if (action === 'run-catalog' && entry === undefined)
+        if (optionalPagePayload && entry === undefined)
             continue;
         if (field === 'limit') {
             if (typeof entry !== 'number' || !Number.isSafeInteger(entry) || entry < 1 || entry > 256)
@@ -1072,8 +1219,12 @@ function parsePayload(value, action) {
             boolean(payload, field, label);
         }
         else if (field === 'cursor_recovery_id' || field === 'cursor_run' || field === 'recovery_id') {
-            if (entry !== null && (typeof entry !== 'string' || !IDENTIFIER.test(entry)))
-                fail(label, `${field} must be null or a bounded identifier`);
+            if (entry !== null && (typeof entry !== 'string' || entry.length === 0 || entry.length > 1024))
+                fail(label, `${field} must be null or bounded cursor text`);
+        }
+        else if (field === 'cursor' || field === 'scan_token') {
+            if (entry !== null && (typeof entry !== 'string' || entry.length === 0 || entry.length > 2048))
+                fail(label, `${field} must be null or bounded opaque cursor text`);
         }
         else if (field === 'pid' || field === 'attempt' || field === 'superseded_by_attempt') {
             if (typeof entry !== 'number' || !Number.isSafeInteger(entry) || entry < 1)
@@ -1102,6 +1253,8 @@ function parsePayload(value, action) {
             const requested = array(entry, `${label}.requested_leases`, 1024).map((lease, index) => parseCoordinationRequestedLease(lease, `${label}.requested_leases[${String(index)}]`));
             if (requested.length === 0)
                 fail(label, 'requested_leases must not be empty');
+            if (Buffer.byteLength(JSON.stringify(requested), 'utf8') > 524_288)
+                fail(label, 'requested_leases make one durable acquisition group exceed the single-entity byte ceiling');
             assertRequestedLeaseSet(requested, label);
         }
         else if (field === 'normal_release_condition') {
@@ -1189,6 +1342,9 @@ function parsePayload(value, action) {
         else if (field === 'output_path' || field === 'canonical_root' || field === 'git_common_dir' || field === 'adjudication_path') {
             absolutePath(payload, field, label);
         }
+        else if (field === 'reconciliation_receipt_id' || field === 'result_receipt_id') {
+            identifier(payload, field, label);
+        }
         else if (field === 'child_token' || field === 'session_token') {
             if (typeof entry !== 'string' || !CHILD_TOKEN.test(entry))
                 fail(label, `${field} must be 32 random bytes encoded as lowercase hex`);
@@ -1226,6 +1382,25 @@ function parsePayload(value, action) {
     }
     if ((action === 'detach-session' || action === 'heartbeat') && payload['migration_operation_token'] !== undefined && (typeof payload['migration_operation_token'] !== 'string' || !/^[a-f0-9]{48}$/u.test(payload['migration_operation_token'])))
         fail(label, 'migration_operation_token must be 24 random bytes encoded as lowercase hex');
+    if (action === 'drain-mailbox') {
+        const cursor = payload['cursor'];
+        if (cursor !== undefined && cursor !== null && (typeof cursor !== 'string' || cursor.length === 0 || cursor.length > 2048))
+            fail(label, 'mailbox cursor must be null or bounded opaque text');
+    }
+    if (action === 'reconciliation-details') {
+        const sessionFields = ['session_lease_id', 'session_token'];
+        const childFields = ['boot_id', 'child_lease_id', 'child_token', 'pid'];
+        const hasSession = sessionFields.every((field) => payload[field] !== undefined) && childFields.every((field) => payload[field] === undefined);
+        const hasChild = childFields.every((field) => payload[field] !== undefined) && sessionFields.every((field) => payload[field] === undefined);
+        if (!hasSession && !hasChild)
+            fail(label, 'reconciliation details require exactly one complete session or child authority proof');
+        if (hasSession) {
+            if (typeof payload['session_lease_id'] !== 'string' || !IDENTIFIER.test(payload['session_lease_id']) || typeof payload['session_token'] !== 'string' || !CHILD_TOKEN.test(payload['session_token']))
+                fail(label, 'reconciliation detail session authority is malformed');
+        }
+        else if (typeof payload['child_lease_id'] !== 'string' || !IDENTIFIER.test(payload['child_lease_id']) || typeof payload['child_token'] !== 'string' || !CHILD_TOKEN.test(payload['child_token']) || typeof payload['pid'] !== 'number' || !Number.isSafeInteger(payload['pid']) || payload['pid'] < 1 || typeof payload['boot_id'] !== 'string' || payload['boot_id'].length === 0 || payload['boot_id'].length > 1024)
+            fail(label, 'reconciliation detail child authority is malformed');
+    }
     if (action === 'respond-claim-request') {
         const response = payload['response'];
         const ownerReason = payload['owner_reason'];
@@ -1314,8 +1489,85 @@ export function parseCoordinatorResponseEnvelope(value) {
         committed_event_seq: committedEventSeq,
         error_code: errorCode,
         retryable: boolean(record, 'retryable', label),
-        payload: boundedJsonObject(record['payload'], `${label}.payload`),
+        payload: boundedResponseJsonObject(record['payload'], `${label}.payload`),
     };
+}
+export function parseCoordinatorProjectionPage(value, kind) {
+    const label = `Coordinator${kind === 'status' ? 'Status' : 'Doctor'}Page`;
+    const record = object(value, label, ['items', 'next_cursor', 'observed_at', 'projection', 'projection_schema_version', 'scan_token', 'schema_version', 'section', 'section_counts']);
+    const schema = `autopilot.coordinator_${kind}_page.v1`;
+    if (record['schema_version'] !== schema)
+        fail(label, `schema_version must equal ${schema}`);
+    const projectionSchema = string(record, 'projection_schema_version', label, 192);
+    const section = string(record, 'section', label, 192);
+    const scanToken = string(record, 'scan_token', label, 192);
+    if (!isJsonObject(record['section_counts']))
+        fail(label, 'section_counts must be an object');
+    const counts = {};
+    for (const [name, count] of Object.entries(record['section_counts'])) {
+        identifierValue(name, `${label}.section_counts key`);
+        if (typeof count !== 'number' || !Number.isSafeInteger(count) || count < 0)
+            fail(label, `${name} count must be a nonnegative integer`);
+        counts[name] = count;
+    }
+    const observedAt = record['observed_at'];
+    if (observedAt !== null && (typeof observedAt !== 'string' || !ISO_TIMESTAMP.test(observedAt)))
+        fail(label, 'observed_at must be null or an ISO timestamp');
+    const next = record['next_cursor'];
+    if (next !== null && (typeof next !== 'string' || next.length === 0 || next.length > 2048))
+        fail(label, 'next_cursor must be null or bounded opaque text');
+    return Object.freeze({ schema_version: schema, projection_schema_version: projectionSchema, section, scan_token: scanToken, observed_at: observedAt, section_counts: Object.freeze(counts), projection: boundedResponseJsonObject(record['projection'], `${label}.projection`), items: array(record['items'], `${label}.items`, 1024).map((item, index) => boundedResponseJsonValue(item, `${label}.items[${String(index)}]`, 0)), next_cursor: next });
+}
+export function parseCoordinatorRunCatalogPage(value) {
+    const label = 'CoordinatorRunCatalogPage';
+    const record = object(value, label, ['database_schema_version', 'next_cursor', 'package_build', 'pending_migration_recovery_count', 'protocol_version', 'run_resources', 'runs', 'schema_version']);
+    const next = record['next_cursor'];
+    if (next !== null && (typeof next !== 'string' || next.length === 0 || next.length > 2048))
+        fail(label, 'next_cursor must be null or bounded opaque text');
+    const runs = Object.freeze(array(record['runs'], `${label}.runs`, 1024).map(parseCoordinationRun));
+    const resources = Object.freeze(array(record['run_resources'], `${label}.run_resources`, 1024).map(parseCoordinationRunResource));
+    if (runs.length !== resources.length || runs.some((run, index) => resources[index]?.workstream_run !== run.workstream_run))
+        fail(label, 'runs and run_resources must be in exact lockstep');
+    return Object.freeze({ schema_version: literal(record, 'schema_version', 'autopilot.coordinator_run_catalog.v1', label), package_build: string(record, 'package_build', label, 192), protocol_version: literal(record, 'protocol_version', AUTOPILOT_COORDINATOR_PROTOCOL_VERSION, label), database_schema_version: integer(record, 'database_schema_version', label, 1), runs, run_resources: resources, next_cursor: next, pending_migration_recovery_count: integer(record, 'pending_migration_recovery_count', label) });
+}
+export function parseCoordinatorMigrationRecoveryPage(value) {
+    const label = 'CoordinatorMigrationRecoveryPage';
+    const record = object(value, label, ['database_schema_version', 'next_cursor', 'package_build', 'pending_migration_recovery_count', 'protocol_version', 'recovery', 'runs', 'schema_version']);
+    const nextValue = record['next_cursor'];
+    let next = null;
+    if (nextValue !== null) {
+        const cursor = object(nextValue, `${label}.next_cursor`, ['cursor_recovery_id', 'cursor_run']);
+        const cursorRun = string(cursor, 'cursor_run', `${label}.next_cursor`, 1024);
+        const cursorRecovery = string(cursor, 'cursor_recovery_id', `${label}.next_cursor`, 1024);
+        if (cursorRun !== cursorRecovery)
+            fail(label, 'next cursor identities must match exactly');
+        next = Object.freeze({ cursor_run: cursorRun, cursor_recovery_id: cursorRecovery });
+    }
+    return Object.freeze({ schema_version: literal(record, 'schema_version', 'autopilot.migration_recovery_query.v1', label), package_build: string(record, 'package_build', label, 192), protocol_version: literal(record, 'protocol_version', AUTOPILOT_COORDINATOR_PROTOCOL_VERSION, label), database_schema_version: integer(record, 'database_schema_version', label, 1), recovery: Object.freeze(array(record['recovery'], `${label}.recovery`, 1024).map(parseCoordinationMigrationRecoveryWork)), runs: Object.freeze(array(record['runs'], `${label}.runs`, 1024).map(parseCoordinationRun)), pending_migration_recovery_count: integer(record, 'pending_migration_recovery_count', label), next_cursor: next });
+}
+export function parseCoordinatorReconciliationDetailPage(value) {
+    const label = 'CoordinatorReconciliationDetailPage';
+    const record = object(value, label, ['details', 'next_cursor', 'reconciliation_receipt', 'schema_version']);
+    const next = record['next_cursor'];
+    if (next !== null && (typeof next !== 'string' || next.length === 0 || next.length > 2048))
+        fail(label, 'next_cursor must be null or bounded opaque text');
+    return Object.freeze({ schema_version: literal(record, 'schema_version', 'autopilot.reconciliation_detail_page.v1', label), reconciliation_receipt: parseCoordinationReconciliationReceipt(record['reconciliation_receipt']), details: Object.freeze(array(record['details'], `${label}.details`, 1024).map(parseCoordinationReconciliationDetail)), next_cursor: next });
+}
+export function parseCoordinatorResultDetailPage(value) {
+    const label = 'CoordinatorResultDetailPage';
+    const record = object(value, label, ['details', 'next_cursor', 'result_receipt', 'schema_version']);
+    const next = record['next_cursor'];
+    if (next !== null && (typeof next !== 'string' || next.length === 0 || next.length > 2048))
+        fail(label, 'next_cursor must be null or bounded opaque text');
+    return Object.freeze({ schema_version: literal(record, 'schema_version', 'autopilot.result_detail_page.v1', label), result_receipt: parseCoordinationResultReceipt(record['result_receipt']), details: Object.freeze(array(record['details'], `${label}.details`, 1024).map(parseCoordinationResultDetail)), next_cursor: next });
+}
+export function parseCoordinatorMailboxPage(value) {
+    const label = 'CoordinatorMailboxPage';
+    const record = object(value, label, ['delivery_receipt', 'entity_id', 'entity_type', 'event_type', 'mailbox_cursor', 'messages', 'next_cursor', 'session_version']);
+    const next = record['next_cursor'];
+    if (next !== null && (typeof next !== 'string' || next.length === 0 || next.length > 2048))
+        fail(label, 'next_cursor must be null or bounded opaque text');
+    return Object.freeze({ delivery_receipt: parseCoordinationMailboxDeliveryReceipt(record['delivery_receipt']), session_version: integer(record, 'session_version', label, 1), mailbox_cursor: parseCoordinationMailboxCursor(record['mailbox_cursor']), messages: Object.freeze(array(record['messages'], `${label}.messages`, 1024).map(parseCoordinationMessage)), next_cursor: next, event_type: identifier(record, 'event_type', label), entity_type: identifier(record, 'entity_type', label), entity_id: identifier(record, 'entity_id', label) });
 }
 export function claimModesConflict(left, right) {
     // READ is a commit/hash-bound observation and WRITE is speculative edit

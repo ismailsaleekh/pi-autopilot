@@ -145,9 +145,9 @@ void describe('real legacy corpus migration compatibility', () => {
       const leaseId = 'dead-handoff-lease';
       const token = 'a'.repeat(64);
       try {
-        store.handle({ schema_version: 'autopilot.coordinator_request.v1', protocol_version: '1.5', request_id: 'dead-handoff-run', action: 'attach-run', idempotency_key: 'dead-handoff-run', repo_id: fixture.repoKey, workstream_run: active.workstream_run, session_id: null, fencing_generation: null, expected_version: 0, payload: { repo_key: fixture.repoKey, canonical_root: active.source_repo, git_common_dir: active.git_common_dir, autopilot_id: active.autopilot_id, workstream: active.workstream, coordination_authority: 'coordinator-edit-leases-v1', run_resource: { schema_version: 'autopilot.coordination_run_resource.v1', repo_id: fixture.repoKey, workstream_run: active.workstream_run, source_repo: active.source_repo, git_common_dir: active.git_common_dir, worktree_root: active.worktree_root, main_worktree_path: active.main_worktree_path, runtime_root: active.runtime_root, branch: active.branch, target_branch: active.target_branch, target_base_sha: active.target_base_sha, origin_url: active.origin_url, started_at: active.started_at, version: 1 } } });
-        store.handle({ schema_version: 'autopilot.coordinator_request.v1', protocol_version: '1.5', request_id: 'dead-handoff-attach', action: 'attach-session', idempotency_key: 'dead-handoff-attach', repo_id: fixture.repoKey, workstream_run: active.workstream_run, session_id: sessionId, fencing_generation: 1, expected_version: 1, payload: { boot_id: 'prior-boot', handoff_token: null, lease_expires_at: '2026-07-12T11:30:00.000Z', pid: 999_999_999, session_lease_id: leaseId, session_token: token } });
-        store.handle({ schema_version: 'autopilot.coordinator_request.v1', protocol_version: '1.5', request_id: 'dead-handoff-prepare', action: 'prepare-handoff', idempotency_key: 'dead-handoff-prepare', repo_id: fixture.repoKey, workstream_run: active.workstream_run, session_id: sessionId, fencing_generation: 1, expected_version: 1, payload: { handoff_token: 'dead-handoff-token', session_lease_id: leaseId, session_token: token } });
+        store.handle({ schema_version: 'autopilot.coordinator_request.v1', protocol_version: '1.6', request_id: 'dead-handoff-run', action: 'attach-run', idempotency_key: 'dead-handoff-run', repo_id: fixture.repoKey, workstream_run: active.workstream_run, session_id: null, fencing_generation: null, expected_version: 0, payload: { repo_key: fixture.repoKey, canonical_root: active.source_repo, git_common_dir: active.git_common_dir, autopilot_id: active.autopilot_id, workstream: active.workstream, coordination_authority: 'coordinator-edit-leases-v1', run_resource: { schema_version: 'autopilot.coordination_run_resource.v1', repo_id: fixture.repoKey, workstream_run: active.workstream_run, source_repo: active.source_repo, git_common_dir: active.git_common_dir, worktree_root: active.worktree_root, main_worktree_path: active.main_worktree_path, runtime_root: active.runtime_root, branch: active.branch, target_branch: active.target_branch, target_base_sha: active.target_base_sha, origin_url: active.origin_url, started_at: active.started_at, version: 1 } } });
+        store.handle({ schema_version: 'autopilot.coordinator_request.v1', protocol_version: '1.6', request_id: 'dead-handoff-attach', action: 'attach-session', idempotency_key: 'dead-handoff-attach', repo_id: fixture.repoKey, workstream_run: active.workstream_run, session_id: sessionId, fencing_generation: 1, expected_version: 1, payload: { boot_id: 'prior-boot', handoff_token: null, lease_expires_at: '2026-07-12T11:30:00.000Z', pid: 999_999_999, session_lease_id: leaseId, session_token: token } });
+        store.handle({ schema_version: 'autopilot.coordinator_request.v1', protocol_version: '1.6', request_id: 'dead-handoff-prepare', action: 'prepare-handoff', idempotency_key: 'dead-handoff-prepare', repo_id: fixture.repoKey, workstream_run: active.workstream_run, session_id: sessionId, fencing_generation: 1, expected_version: 1, payload: { handoff_token: 'dead-handoff-token', session_lease_id: leaseId, session_token: token } });
       } finally { store.close(); }
       const contextPath = join(coordinatorRuntimePaths(fixture.env).sessionsRoot, 'dead-handoff.json');
       await writeCoordinatorSessionContext(contextPath, { schema_version: 'autopilot.coordinator_session_context.v1', state_root: fixture.stateRoot, repo_id: fixture.repoKey, repo_key: fixture.repoKey, autopilot_id: active.autopilot_id, workstream: active.workstream, workstream_run: active.workstream_run, session_id: sessionId, session_generation: 1, run_version: 2, session_lease_id: leaseId, session_token: token, session_version: 2, pid: 999_999_999, boot_id: 'prior-boot' });
@@ -161,21 +161,42 @@ void describe('real legacy corpus migration compatibility', () => {
     });
   });
 
-  void it('paginates activation and recovery discovery beyond 256 durable runs', async () => {
+  void it('BUG-176 paginates activation and recovery discovery beyond 256 durable runs', async () => {
     await withMigrationTestFixture(async (fixture) => {
       const active = await fixtureActive(fixture);
       const store = await CoordinatorStore.open(coordinatorRuntimePaths(fixture.env), migrationTestClock());
+      const attachCatalogRun = (run: string, index: number): void => {
+        const attached = store.handle({ schema_version: 'autopilot.coordinator_request.v1', protocol_version: '1.6', request_id: run, action: 'attach-run', idempotency_key: run, repo_id: fixture.repoKey, workstream_run: run, session_id: null, fencing_generation: null, expected_version: 0, payload: { repo_key: fixture.repoKey, canonical_root: active.source_repo, git_common_dir: active.git_common_dir, autopilot_id: `catalog-${String(index)}`, workstream: 'catalog', coordination_authority: 'coordinator-edit-leases-v1', run_resource: { schema_version: 'autopilot.coordination_run_resource.v1', repo_id: fixture.repoKey, workstream_run: run, source_repo: active.source_repo, git_common_dir: active.git_common_dir, worktree_root: active.worktree_root, main_worktree_path: active.main_worktree_path, runtime_root: active.runtime_root, branch: active.branch, target_branch: active.target_branch, target_base_sha: active.target_base_sha, origin_url: active.origin_url, started_at: active.started_at, version: 1 } } });
+        assert.equal(attached.ok, true);
+      };
       try {
-        for (let index = 0; index < 300; index += 1) {
-          const run = `catalog-run-${String(index).padStart(3, '0')}`;
-          const attached = store.handle({ schema_version: 'autopilot.coordinator_request.v1', protocol_version: '1.5', request_id: run, action: 'attach-run', idempotency_key: run, repo_id: fixture.repoKey, workstream_run: run, session_id: null, fencing_generation: null, expected_version: 0, payload: { repo_key: fixture.repoKey, canonical_root: active.source_repo, git_common_dir: active.git_common_dir, autopilot_id: `catalog-${String(index)}`, workstream: 'catalog', coordination_authority: 'coordinator-edit-leases-v1', run_resource: { schema_version: 'autopilot.coordination_run_resource.v1', repo_id: fixture.repoKey, workstream_run: run, source_repo: active.source_repo, git_common_dir: active.git_common_dir, worktree_root: active.worktree_root, main_worktree_path: active.main_worktree_path, runtime_root: active.runtime_root, branch: active.branch, target_branch: active.target_branch, target_base_sha: active.target_base_sha, origin_url: active.origin_url, started_at: active.started_at, version: 1 } } });
-          assert.equal(attached.ok, true);
-        }
+        for (let index = 0; index < 300; index += 1) attachCatalogRun(`catalog-run-${String(index).padStart(3, '0')}`, index);
+        const frozenRunIds: string[] = [];
+        let cursor: string | null = null;
+        let pageOrdinal = 0;
+        do {
+          const page = store.runCatalog(fixture.repoKey, null, { limit: 64, cursor_run: cursor });
+          const runs = page.payload['runs'];
+          if (!Array.isArray(runs)) throw new Error('run catalog page omitted runs');
+          for (const run of runs) {
+            if (typeof run !== 'object' || run === null || Array.isArray(run) || typeof (run as Record<string, unknown>)['workstream_run'] !== 'string') throw new Error('run catalog page contains a malformed run');
+            frozenRunIds.push((run as Record<string, unknown>)['workstream_run'] as string);
+          }
+          const next = page.payload['next_cursor'];
+          if (next !== null && typeof next !== 'string') throw new Error('run catalog continuation is malformed');
+          cursor = typeof next === 'string' ? next : null;
+          if (pageOrdinal === 0) attachCatalogRun('catalog-run-late-arrival', 301);
+          pageOrdinal += 1;
+        } while (cursor !== null);
+        assert.ok(pageOrdinal > 1);
+        assert.equal(frozenRunIds.length, 300);
+        assert.equal(frozenRunIds.includes('catalog-run-late-arrival'), false, 'new run must not drift into a frozen catalog scan');
+        assert.equal(new Set(frozenRunIds).size, frozenRunIds.length, 'frozen catalog scan must contain no duplicate run identities');
       } finally { store.close(); }
       const catalog = await readCoordinatorRunCatalog(new CoordinatorClient({ env: fixture.env }), fixture.repoKey);
-      assert.equal(catalog.runs.length, 300);
-      assert.equal(catalog.resources.length, 300);
-      assert.equal(catalog.runs[299]?.workstream_run, 'catalog-run-299');
+      assert.equal(catalog.runs.length, 301);
+      assert.equal(catalog.resources.length, 301);
+      assert.equal(catalog.runs.some((run) => run.workstream_run === 'catalog-run-late-arrival'), true);
     });
   });
 

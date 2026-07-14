@@ -3,7 +3,7 @@ import { existsSync } from 'node:fs';
 import { mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { CoordinatorClient } from "./client.js";
-import { parseCoordinationReconciliationEvidence, parseCoordinationRun } from "./contracts.js";
+import { parseCoordinationReconciliationEvidence, parseOptionalCoordinationReconciliationReceipt, parseCoordinationRun } from "./contracts.js";
 import { CoordinationRuntimeError } from "./failures.js";
 import { readCoordinatorSessionContext } from "./supervisor.js";
 import { coordinatorRuntimePaths } from "./runtime-paths.js";
@@ -34,6 +34,17 @@ export function parseCoordinationReconciliationSummary(value) {
         offered_group_ids: stringArray(parsed['offered_group_ids'], 'offered_group_ids'),
     };
 }
+export function reconciliationSummaryFromDetails(details) {
+    const ids = (kind) => Object.freeze(details.filter((detail) => detail.kind === kind).map((detail) => detail.entity_id));
+    return {
+        released_lease_ids: ids('released-lease'),
+        released_observation_ids: ids('released-observation'),
+        stale_observation_ids: ids('stale-observation'),
+        released_request_ids: ids('released-request'),
+        notification_ids: ids('notification'),
+        offered_group_ids: ids('offered-group'),
+    };
+}
 function committedSequence(response) {
     if (response.committed_event_seq === null)
         throw new CoordinationRuntimeError('invalid-state', 'coordinator reconciliation mutation omitted committed event sequence');
@@ -61,7 +72,9 @@ export class RunReconciliationClient {
             reason,
             ...this.#sessionProof(),
         });
-        return { reconciliation: parseCoordinationReconciliationSummary(response.payload['reconciliation']), committedEventSeq: committedSequence(response) };
+        const receipt = parseOptionalCoordinationReconciliationReceipt(response.payload['reconciliation_receipt']);
+        const details = receipt === null ? [] : await this.#client.reconciliationDetails({ repoId: this.#session.repo_id, workstreamRun: this.#session.workstream_run, sessionId: this.#session.session_id, fencingGeneration: this.#session.session_generation, sessionLeaseId: this.#session.session_lease_id, sessionToken: this.#session.session_token, receipt });
+        return { reconciliation: reconciliationSummaryFromDetails(details), committedEventSeq: committedSequence(response) };
     }
     async recordReleaseEvidence(input) {
         const evidenceIdentity = createHash('sha256').update(`${this.#session.repo_id}\0${this.#session.workstream_run}\0${input.source}\0${input.targetId}\0${input.evidenceRef}\0${input.evidenceSha256}`, 'utf8').digest('hex');
@@ -94,9 +107,11 @@ export class RunReconciliationClient {
         }
         const run = parseCoordinationRun(response.payload['run']);
         this.#session = { ...this.#session, run_version: run.version };
+        const receipt = parseOptionalCoordinationReconciliationReceipt(response.payload['reconciliation_receipt']);
+        const details = receipt === null ? [] : await this.#client.reconciliationDetails({ repoId: this.#session.repo_id, workstreamRun: this.#session.workstream_run, sessionId: this.#session.session_id, fencingGeneration: this.#session.session_generation, sessionLeaseId: this.#session.session_lease_id, sessionToken: this.#session.session_token, receipt });
         return {
             evidence: parseCoordinationReconciliationEvidence(response.payload['reconciliation_evidence']),
-            reconciliation: parseCoordinationReconciliationSummary(response.payload['reconciliation']),
+            reconciliation: reconciliationSummaryFromDetails(details),
         };
     }
     #identity(idempotencyKey) {

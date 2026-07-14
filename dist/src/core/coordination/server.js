@@ -11,7 +11,7 @@ import { acquireSerializedProcessGuard, discardLockTombstone, quarantineExactLoc
 import { CoordinatorStore } from "./store.js";
 import { AUTOPILOT_COORDINATOR_PROTOCOL_VERSION } from "./types.js";
 import { readKnownCoordinatorUpgradeIntent, recordCoordinatorFenceHandoff } from "./upgrade.js";
-import { COORDINATOR_UPGRADE_PATH, parseCurrentCoordinatorLock, parseKnownCompatibleCurrentCoordinatorLock, parsePredecessorCoordinatorLock, parsePriorSchema10CurrentCoordinatorLock, parsePriorSchema9CurrentCoordinatorLock } from "./upgrade-contracts.js";
+import { COORDINATOR_UPGRADE_PATH, parseCurrentCoordinatorLock, parseKnownCompatibleCurrentCoordinatorLock, parsePredecessorCoordinatorLock, parsePriorSchema11CurrentCoordinatorLock, parsePriorSchema10CurrentCoordinatorLock, parsePriorSchema9CurrentCoordinatorLock } from "./upgrade-contracts.js";
 export class CoordinatorAlreadyRunningError extends Error {
     name = 'CoordinatorAlreadyRunningError';
 }
@@ -88,7 +88,7 @@ async function acquireCoordinatorLock(paths, adoption) {
             let current = null;
             try {
                 const parsed = JSON.parse(currentText);
-                current = parseKnownCompatibleCurrentCoordinatorLock(parsed) ?? parsePriorSchema10CurrentCoordinatorLock(parsed) ?? parsePriorSchema9CurrentCoordinatorLock(parsed);
+                current = parseKnownCompatibleCurrentCoordinatorLock(parsed) ?? parsePriorSchema11CurrentCoordinatorLock(parsed) ?? parsePriorSchema10CurrentCoordinatorLock(parsed) ?? parsePriorSchema9CurrentCoordinatorLock(parsed);
             }
             catch { /* fail below */ }
             if (current === null)
@@ -302,7 +302,7 @@ function errorResponse(requestId, error) {
         payload: { message: runtime.message, evidence: runtime.evidence },
     };
 }
-function handleSocket(socket, store, capability, paths, backgroundFailure) {
+function handleSocket(socket, store, capability, paths, backgroundFailure, testHooks) {
     const decoder = new CoordinatorFrameDecoder();
     let chain = Promise.resolve();
     socket.on('data', (chunk) => {
@@ -353,6 +353,8 @@ function handleSocket(socket, store, capability, paths, backgroundFailure) {
                         if (upgradeIntent !== null && upgradeIntent.state !== 'committed' && action !== 'handshake' && action !== 'status' && action !== 'doctor')
                             throw new CoordinationRuntimeError('coordinator-contention', 'coordinator upgrade is not durably committed; mutation authority remains closed');
                         response = store.handle(currentTransport.request);
+                        if (response.ok && response.committed_event_seq !== null)
+                            await testHooks?.afterStoreCommitBeforeResponse?.(currentTransport.request.action, response);
                     }
                     if (response === null)
                         throw new CoordinationRuntimeError('system-fatal', 'coordinator request parsing produced no response path');
@@ -401,7 +403,7 @@ function closeServer(server) {
         });
     });
 }
-export async function startCoordinatorServer(paths, clock, adoption) {
+export async function startCoordinatorServer(paths, clock, adoption, testHooks) {
     const lifecycleLock = await acquireCoordinatorLock(paths, adoption);
     let store = null;
     let server = null;
@@ -414,7 +416,7 @@ export async function startCoordinatorServer(paths, clock, adoption) {
         store = clock === undefined ? await CoordinatorStore.open(paths) : await CoordinatorStore.open(paths, clock);
         const openedStore = store;
         let timerFailure = null;
-        server = createServer((socket) => handleSocket(socket, openedStore, capability, paths, () => timerFailure));
+        server = createServer((socket) => handleSocket(socket, openedStore, capability, paths, () => timerFailure, testHooks));
         await listen(server, paths.socketPath);
         serverListening = true;
         const openedServer = server;

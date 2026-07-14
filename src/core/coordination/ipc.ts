@@ -7,10 +7,12 @@ import type { CoordinatorRequestEnvelope, CoordinatorResponseEnvelope } from './
 
 export const AUTOPILOT_COORDINATOR_TRANSPORT_VERSION = 'autopilot.coordinator_transport.v1' as const;
 
+export type CoordinatorLegacyReplayProtocol = '1.1' | '1.2' | '1.3' | '1.4' | '1.5';
+
 export interface CoordinatorLegacyReplayTransportRequest {
   readonly transport_version: typeof AUTOPILOT_COORDINATOR_TRANSPORT_VERSION;
   readonly capability: string;
-  readonly replay_protocol: '1.1' | '1.2';
+  readonly replay_protocol: CoordinatorLegacyReplayProtocol;
   readonly request: JsonMap;
 }
 
@@ -47,7 +49,7 @@ export function parseCoordinatorLegacyReplayTransportRequest(value: unknown): Co
   const expected = ['action', 'expected_version', 'fencing_generation', 'idempotency_key', 'payload', 'protocol_version', 'repo_id', 'request_id', 'schema_version', 'session_id', 'workstream_run'];
   if (fields.length !== expected.length || fields.some((field, index) => field !== expected[index])) throw new CoordinationRuntimeError('invalid-request', 'legacy replay request fields are invalid', fields);
   const replayProtocol = request['protocol_version'];
-  if (request['schema_version'] !== 'autopilot.coordinator_request.v1' || (replayProtocol !== '1.1' && replayProtocol !== '1.2')) throw new CoordinationRuntimeError('protocol-mismatch', 'only exact proven-compatible protocol 1.1 or 1.2 requests may use idempotency replay');
+  if (request['schema_version'] !== 'autopilot.coordinator_request.v1' || (replayProtocol !== '1.1' && replayProtocol !== '1.2' && replayProtocol !== '1.3' && replayProtocol !== '1.4' && replayProtocol !== '1.5')) throw new CoordinationRuntimeError('protocol-mismatch', 'only exact proven-compatible protocol 1.1 through 1.5 requests may use idempotency replay');
   if (typeof request['request_id'] !== 'string' || typeof request['repo_id'] !== 'string' || typeof request['idempotency_key'] !== 'string' || typeof request['action'] !== 'string' || !isJsonMap(request['payload'])) throw new CoordinationRuntimeError('invalid-request', 'legacy replay identity or payload is malformed');
   return { transport_version: AUTOPILOT_COORDINATOR_TRANSPORT_VERSION, capability: shell.capability, replay_protocol: replayProtocol, request };
 }

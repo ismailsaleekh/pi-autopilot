@@ -1,5 +1,5 @@
 import { CoordinatorClient } from './client.ts';
-import { parseCoordinationAcquisitionGroup, parseCoordinationClaimRequest, parseCoordinationEditLease, parseCoordinationObservation, parseCoordinationReleaseCondition, parseCoordinationRequestedLease } from './contracts.ts';
+import { parseCoordinationAcquisitionGroup, parseCoordinationClaimRequest, parseCoordinationEditLease, parseCoordinationObservation, parseOptionalCoordinationReconciliationReceipt, parseCoordinationReleaseCondition, parseCoordinationRequestedLease } from './contracts.ts';
 import { CoordinationRuntimeError } from './failures.ts';
 import { readCoordinatorSessionContext, type CoordinatorSessionContext } from './supervisor.ts';
 import type { CoordinationAcquisitionGroup, CoordinationClaimRequest, CoordinationEditLease, CoordinationObservation, CoordinationReleaseCondition, CoordinationRequestedLease, CoordinatorResponseEnvelope } from './types.ts';
@@ -101,7 +101,9 @@ export class ClaimNegotiationClient {
       const groups = parseEntityArray(status.payload['acquisition_groups'], 'status acquisition_groups', parseCoordinationAcquisitionGroup);
       const rebound = groups.find((group) => group.acquisition_kind === 'legacy-unknown' && group.state === 'granted' && group.owner.autopilot_id === this.#session.autopilot_id && group.owner.workstream_run === this.#session.workstream_run && group.owner.unit_id === input.unitId && group.owner.attempt === input.attempt && sameRequestedAuthority(group.requested_leases, requestedLeases));
       if (rebound !== undefined) {
-        await this.#client.mutate('reconcile-run', this.#identity(this.#session.run_version, `reconcile-migrated-authority:${this.#session.session_lease_id}:${rebound.acquisition_group_id}`), { reason: 'validate current generation before migrated authority reuse', ...this.#sessionProof() });
+        const reconciliation = await this.#client.mutate('reconcile-run', this.#identity(this.#session.run_version, `reconcile-migrated-authority:${this.#session.session_lease_id}:${rebound.acquisition_group_id}`), { reason: 'validate current generation before migrated authority reuse', ...this.#sessionProof() });
+        const receipt = parseOptionalCoordinationReconciliationReceipt(reconciliation.payload['reconciliation_receipt']);
+        if (receipt !== null) await this.#client.reconciliationDetails({ repoId: this.#session.repo_id, workstreamRun: this.#session.workstream_run, sessionId: this.#session.session_id, fencingGeneration: this.#session.session_generation, sessionLeaseId: this.#session.session_lease_id, sessionToken: this.#session.session_token, receipt });
         const verifiedStatus = await this.#client.query('status', this.#session.repo_id, this.#session.workstream_run);
         const verifiedGroups = parseEntityArray(verifiedStatus.payload['acquisition_groups'], 'verified status acquisition_groups', parseCoordinationAcquisitionGroup);
         const verified = verifiedGroups.find((group) => group.acquisition_group_id === rebound.acquisition_group_id && group.state === 'granted');
@@ -197,6 +199,8 @@ export class ClaimNegotiationClient {
       release_condition: condition,
       ...this.#sessionProof(),
     });
+    const receipt = parseOptionalCoordinationReconciliationReceipt(response.payload['reconciliation_receipt']);
+    if (receipt !== null) await this.#client.reconciliationDetails({ repoId: this.#session.repo_id, workstreamRun: this.#session.workstream_run, sessionId: this.#session.session_id, fencingGeneration: this.#session.session_generation, sessionLeaseId: this.#session.session_lease_id, sessionToken: this.#session.session_token, receipt });
     return parseCoordinationClaimRequest(response.payload['claim_request']);
   }
 

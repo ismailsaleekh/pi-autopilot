@@ -13,7 +13,7 @@ import { currentBootId, isExactProcessAlive, isProcessAlive, predecessorCompatib
 import { COORDINATOR_DATABASE_SCHEMA_VERSION, COORDINATOR_PACKAGE_BUILD, coordinatorRuntimePaths, enforcePrivateAuthorityPath, enforceWindowsPrivateTree, ensureCoordinatorPrivateRoots, ensurePrivateAuthorityDirectory } from "./runtime-paths.js";
 import { acquireSerializedProcessGuard, discardLockTombstone, quarantineExactLock, readExactLockText, restoreLockTombstone } from "./serialized-lock.js";
 import { startCoordinatorServer } from "./server.js";
-import { parseCurrentCoordinatorLock, parsePredecessorCoordinatorLock, parsePriorSchema10CurrentCoordinatorLock, parsePriorSchema9CurrentCoordinatorLock } from "./upgrade-contracts.js";
+import { parseCurrentCoordinatorLock, parsePredecessorCoordinatorLock, parsePriorSchema11CurrentCoordinatorLock, parsePriorSchema10CurrentCoordinatorLock, parsePriorSchema9CurrentCoordinatorLock } from "./upgrade-contracts.js";
 import { COORDINATOR_SCHEMA_MIGRATION_CHECKSUMS, CoordinatorStore } from "./store.js";
 import { backup, DatabaseSync } from 'node:sqlite';
 import { CoordinationRuntimeError } from "./failures.js";
@@ -837,6 +837,7 @@ const SCHEMA_6_TABLES = Object.freeze([
 const SCHEMA_7_TABLES = Object.freeze([...SCHEMA_6_TABLES, 'coordination_migrations', 'migration_legacy_audit', 'migration_recovery_work', 'run_resources'].sort());
 const SCHEMA_9_TABLES = Object.freeze([...SCHEMA_7_TABLES, 'semantic_replays'].sort());
 const SCHEMA_10_TABLES = Object.freeze([...SCHEMA_9_TABLES, 'observations'].sort());
+const SCHEMA_12_TABLES = Object.freeze([...SCHEMA_10_TABLES, 'mailbox_deliveries', 'mailbox_delivery_items', 'reconciliation_details', 'reconciliation_receipts', 'result_details', 'result_receipts'].sort());
 const COORDINATION_MIGRATION_MAX_DATABASE_ROWS = 100_000;
 const COORDINATION_MIGRATION_MAX_DATABASE_JSON_BYTES = 1024 * 1024;
 function sqlText(row, field, label, maximum = 2048) {
@@ -892,8 +893,8 @@ function assertReadOnlySchema(database) {
     if (versionRow === undefined)
         failure('blocked', 'coordinator database has no schema version');
     const version = sqlSafeInteger(versionRow, 'user_version', 'coordinator database');
-    if (version !== 6 && version !== 7 && version !== 8 && version !== 9 && version !== 10 && version !== 11)
-        failure('blocked', 'migration inspection supports only exact coordinator schema 6 through the current schema 11', [`schema=${String(version)}`]);
+    if (version !== 6 && version !== 7 && version !== 8 && version !== 9 && version !== 10 && version !== 11 && version !== 12)
+        failure('blocked', `migration inspection supports only exact coordinator schema 6 through the current schema ${String(COORDINATOR_DATABASE_SCHEMA_VERSION)}`, [`schema=${String(version)}`]);
     const integrityRow = database.prepare('PRAGMA integrity_check(1)').get();
     if (integrityRow === undefined || integrityRow['integrity_check'] !== 'ok')
         failure('blocked', 'coordinator database failed read-only integrity inspection');
@@ -901,7 +902,7 @@ function assertReadOnlySchema(database) {
     if (schemaRows.length > 64)
         failure('blocked', 'coordinator database schema contains too many tables');
     const actual = schemaRows.map((row) => sqlText(row, 'name', 'coordinator schema table', 128));
-    const expected = version === 6 ? [...SCHEMA_6_TABLES].sort() : version >= 10 ? SCHEMA_10_TABLES : version === 9 ? SCHEMA_9_TABLES : SCHEMA_7_TABLES;
+    const expected = version === 6 ? [...SCHEMA_6_TABLES].sort() : version === 12 ? SCHEMA_12_TABLES : version >= 10 ? SCHEMA_10_TABLES : version === 9 ? SCHEMA_9_TABLES : SCHEMA_7_TABLES;
     if (stableJson(actual) !== stableJson(expected))
         failure('blocked', `coordinator schema ${String(version)} table profile is not exact`, [`expected=${stableJson(expected)}`, `actual=${stableJson(actual)}`]);
     assertExactTableColumns(database, 'repositories', ['repo_id', 'repo_key', 'canonical_root', 'git_common_dir', 'event_seq', 'created_event_seq', 'version']);
@@ -921,6 +922,14 @@ function assertReadOnlySchema(database) {
     }
     if (version >= 10)
         assertExactTableColumns(database, 'observations', ['entity_id', 'repo_id', 'workstream_run', 'acquisition_group_id', 'payload_json', 'execution_state', 'freshness', 'version']);
+    if (version >= 12) {
+        assertExactTableColumns(database, 'reconciliation_receipts', ['entity_id', 'repo_id', 'workstream_run', 'committed_event_seq', 'source_action', 'payload_json', 'version']);
+        assertExactTableColumns(database, 'reconciliation_details', ['reconciliation_receipt_id', 'ordinal', 'kind', 'entity_id']);
+        assertExactTableColumns(database, 'mailbox_deliveries', ['delivery_id', 'repo_id', 'workstream_run', 'session_lease_id', 'snapshot_through_event_seq', 'next_ordinal', 'payload_json', 'version']);
+        assertExactTableColumns(database, 'result_receipts', ['entity_id', 'repo_id', 'workstream_run', 'committed_event_seq', 'source_action', 'payload_json', 'version']);
+        assertExactTableColumns(database, 'result_details', ['result_receipt_id', 'ordinal', 'collection_name', 'collection_ordinal', 'payload_json']);
+        assertExactTableColumns(database, 'mailbox_delivery_items', ['delivery_id', 'ordinal', 'message_id', 'snapshot_delivered_event_seq', 'snapshot_message_version']);
+    }
     const migrationRows = boundedDatabaseRows(database, 'schema_migrations', 'SELECT version, checksum FROM schema_migrations ORDER BY version');
     if (migrationRows.length !== version)
         failure('blocked', 'coordinator schema migration journal length is not exact');
@@ -929,7 +938,7 @@ function assertReadOnlySchema(database) {
         const checksum = row === undefined ? null : sqlText(row, 'checksum', 'schema migration', 64);
         const checksumMatches = checksum === COORDINATOR_SCHEMA_MIGRATION_CHECKSUMS[index];
         if (row === undefined || sqlSafeInteger(row, 'version', 'schema migration') !== index + 1 || !checksumMatches)
-            failure('blocked', 'coordinator schema migration journal is malformed, discontinuous, or not the exact locked schema-6/7/8/9/10 package lineage');
+            failure('blocked', 'coordinator schema migration journal is malformed, discontinuous, or not the exact locked schema-6/7/8/9/10/11/12 package lineage');
     }
     return version;
 }
@@ -1858,7 +1867,7 @@ export function coordinationMigrationCoordinatorRunning(paths) {
             continue;
         try {
             const raw = JSON.parse(readFileSync(path, 'utf8'));
-            const lock = parseCurrentCoordinatorLock(raw) ?? parsePriorSchema10CurrentCoordinatorLock(raw) ?? parsePriorSchema9CurrentCoordinatorLock(raw) ?? parsePredecessorCoordinatorLock(raw);
+            const lock = parseCurrentCoordinatorLock(raw) ?? parsePriorSchema11CurrentCoordinatorLock(raw) ?? parsePriorSchema10CurrentCoordinatorLock(raw) ?? parsePriorSchema9CurrentCoordinatorLock(raw) ?? parsePredecessorCoordinatorLock(raw);
             if (lock === null || isProcessAlive(lock.pid))
                 return true;
         }
@@ -1880,7 +1889,7 @@ export async function retireCoordinationMigrationCoordinator(paths, expectedIden
     let lock;
     try {
         const value = JSON.parse(await readFile(paths.lockPath, 'utf8'));
-        lock = parseCurrentCoordinatorLock(value) ?? parsePriorSchema10CurrentCoordinatorLock(value) ?? parsePriorSchema9CurrentCoordinatorLock(value);
+        lock = parseCurrentCoordinatorLock(value) ?? parsePriorSchema11CurrentCoordinatorLock(value) ?? parsePriorSchema10CurrentCoordinatorLock(value) ?? parsePriorSchema9CurrentCoordinatorLock(value);
     }
     catch (error) {
         return Object.freeze([`coordinator lifecycle lock is unreadable during migration drain: ${error instanceof Error ? error.message : String(error)}`]);
@@ -1914,7 +1923,7 @@ export async function retireCoordinationMigrationCoordinator(paths, expectedIden
                 let current;
                 try {
                     const value = JSON.parse(currentText);
-                    current = parseCurrentCoordinatorLock(value) ?? parsePriorSchema10CurrentCoordinatorLock(value) ?? parsePriorSchema9CurrentCoordinatorLock(value);
+                    current = parseCurrentCoordinatorLock(value) ?? parsePriorSchema11CurrentCoordinatorLock(value) ?? parsePriorSchema10CurrentCoordinatorLock(value) ?? parsePriorSchema9CurrentCoordinatorLock(value);
                 }
                 catch (error) {
                     return Object.freeze([`coordinator lifecycle lock became unreadable while retiring for migration: ${error instanceof Error ? error.message : String(error)}`]);

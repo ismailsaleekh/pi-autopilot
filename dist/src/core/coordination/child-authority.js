@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { CoordinatorClient } from "./client.js";
-import { parseCoordinationChildLease } from "./contracts.js";
+import { parseCoordinationChildLease, parseOptionalCoordinationReconciliationReceipt } from "./contracts.js";
 import { CoordinationRuntimeError } from "./failures.js";
 import { currentBootId } from "./process-identity.js";
 import { COORDINATOR_HEARTBEAT_MS, COORDINATOR_SESSION_LEASE_MS } from "./runtime-paths.js";
@@ -92,6 +92,9 @@ export class AutopilotChildLeaseHandle {
                 repoId: this.#session.repo_id, workstreamRun: this.#session.workstream_run, sessionId: null, fencingGeneration: null, expectedVersion: this.#child.version,
                 idempotencyKey: `complete-adjudication:${assignmentId}:${this.#child.child_lease_id}`,
             }, { assignment_id: assignmentId, adjudication_path: adjudicationPath, terminal_evidence_ref: terminalEvidence.ref, terminal_evidence_sha256: terminalEvidence.sha256, child_lease_id: this.#child.child_lease_id, child_token: this.#childToken, pid: this.#pid, boot_id: this.#bootId });
+            const receipt = parseOptionalCoordinationReconciliationReceipt(response.payload['reconciliation_receipt']);
+            if (receipt !== null)
+                await this.#client.reconciliationDetails({ repoId: this.#session.repo_id, workstreamRun: this.#session.workstream_run, childLeaseId: this.#child.child_lease_id, childToken: this.#childToken, pid: this.#pid, bootId: this.#bootId, receipt });
             this.#child = childFromResponse(response);
             this.#terminal = true;
         });
@@ -125,6 +128,9 @@ export class AutopilotChildLeaseHandle {
                         expectedVersion: this.#child.version,
                         idempotencyKey,
                     }, payload);
+                    const receipt = parseOptionalCoordinationReconciliationReceipt(response.payload['reconciliation_receipt']);
+                    if (receipt !== null)
+                        await this.#client.reconciliationDetails({ repoId: this.#session.repo_id, workstreamRun: this.#session.workstream_run, childLeaseId: this.#child.child_lease_id, childToken: this.#childToken, pid: this.#pid, bootId: this.#bootId, receipt });
                     this.#child = childFromResponse(response);
                     this.#terminal = true;
                     return;

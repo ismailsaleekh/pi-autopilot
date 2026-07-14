@@ -6,12 +6,12 @@ import { dirname, isAbsolute, join, normalize } from 'node:path';
 import { platform } from 'node:os';
 
 import { CoordinatorClient, durableIdentifier } from './client.ts';
-import { parseCoordinationMessage, parseCoordinationMigrationRecoveryWork, parseCoordinationRun, parseCoordinationRunTerminalIntent, parseCoordinationSessionLease } from './contracts.ts';
+import { parseCoordinationMailboxDeliveryReceipt, parseCoordinationMessage, parseCoordinationMigrationRecoveryWork, parseOptionalCoordinationReconciliationReceipt, parseCoordinationRun, parseCoordinationRunTerminalIntent, parseCoordinationSessionLease } from './contracts.ts';
 import { CoordinationRuntimeError } from './failures.ts';
 import { acknowledgeCoordinationMigrationFreeze, activeCoordinationMigrationFreeze, assertMigrationPathSafe } from './migration-paths.ts';
 import { currentBootId } from './process-identity.ts';
 import { COORDINATOR_HEARTBEAT_MS, COORDINATOR_SESSION_LEASE_MS, enforcePrivateAuthorityPath, ensurePrivateAuthorityDirectory } from './runtime-paths.ts';
-import type { CoordinationMessage, CoordinationMigrationRecoveryWork, CoordinationReconciliationSource, CoordinationRun, CoordinationSessionLease, CoordinatorResponseEnvelope } from './types.ts';
+import type { CoordinationMailboxDeliveryReceipt, CoordinationMessage, CoordinationMigrationRecoveryWork, CoordinationReconciliationSource, CoordinationRun, CoordinationSessionLease, CoordinatorResponseEnvelope } from './types.ts';
 import type { ActiveAutopilotRow, AutopilotRepoIdentity, ProcessEnvLike } from '../parallel-runtime.ts';
 
 export const AUTOPILOT_COORDINATOR_SESSION_CONTEXT_SCHEMA = 'autopilot.coordinator_session_context.v1' as const;
@@ -295,8 +295,7 @@ export class DurableRunSupervisorClient {
     const status = await this.#client.query('run-catalog', repoId, input.active.workstream_run);
     const runValues = payloadArray(status, 'runs');
     const pendingRecoveryCount = requireInteger(status.payload, 'pending_migration_recovery_count');
-    const pendingRecovery = payloadArray(status, 'pending_migration_recovery').map((value) => requireRecord(value, 'pending migration recovery identity'));
-    if (pendingRecoveryCount > 0) throw new CoordinationRuntimeError('recovery-required', 'ordinary run supervisor attachment is fenced while migration recovery work is pending', pendingRecovery.map((work) => String(work['recovery_id'])));
+    if (pendingRecoveryCount > 0) throw new CoordinationRuntimeError('recovery-required', 'ordinary run supervisor attachment is fenced while migration recovery work is pending; use the paginated recovery command for exact identities', [`pending_count=${String(pendingRecoveryCount)}`]);
     let run: CoordinationRun;
     if (runValues.length === 0) {
       const attachedRun = await this.#client.mutate('attach-run', {
@@ -357,6 +356,8 @@ export class DurableRunSupervisorClient {
     });
     const attachedRun = parseCoordinationRun(payloadRecord(attachSession, 'run'));
     const session = parseCoordinationSessionLease(payloadRecord(attachSession, 'session'));
+    const receipt = parseOptionalCoordinationReconciliationReceipt(attachSession.payload['reconciliation_receipt']);
+    if (receipt !== null) await this.#client.reconciliationDetails({ repoId, workstreamRun: run.workstream_run, sessionId: session.session_id, fencingGeneration: session.session_generation, sessionLeaseId: session.session_lease_id, sessionToken, receipt });
     const context: CoordinatorSessionContext = {
       schema_version: AUTOPILOT_COORDINATOR_SESSION_CONTEXT_SCHEMA,
       state_root: this.#client.paths.stateRoot,
@@ -377,6 +378,11 @@ export class DurableRunSupervisorClient {
     const contextPath = join(this.#client.paths.sessionsRoot, `${createHash('sha256').update(`${repoId}\0${run.workstream_run}\0${session.session_lease_id}`, 'utf8').digest('hex')}.json`);
     await writeCoordinatorSessionContext(contextPath, context);
     return { run: attachedRun, session, contextPath, context };
+  }
+
+  async consumeReconciliationReceipt(response: CoordinatorResponseEnvelope, context: CoordinatorSessionContext): Promise<void> {
+    const receipt = parseOptionalCoordinationReconciliationReceipt(response.payload['reconciliation_receipt']);
+    if (receipt !== null) await this.#client.reconciliationDetails({ repoId: context.repo_id, workstreamRun: context.workstream_run, sessionId: context.session_id, fencingGeneration: context.session_generation, sessionLeaseId: context.session_lease_id, sessionToken: context.session_token, receipt });
   }
 
   async attachTerminalRecovery(input: { readonly repo: AutopilotRepoIdentity; readonly active: ActiveAutopilotRow; readonly rawSessionId: string }): Promise<RunSupervisorAttachment> {
@@ -401,6 +407,8 @@ export class DurableRunSupervisorClient {
     });
     const attachedRun = parseCoordinationRun(payloadRecord(response, 'run'));
     const session = parseCoordinationSessionLease(payloadRecord(response, 'session'));
+    const receipt = parseOptionalCoordinationReconciliationReceipt(response.payload['reconciliation_receipt']);
+    if (receipt !== null) await this.#client.reconciliationDetails({ repoId, workstreamRun: run.workstream_run, sessionId: session.session_id, fencingGeneration: session.session_generation, sessionLeaseId: session.session_lease_id, sessionToken, receipt });
     if (attachedRun.status !== run.status) throw new CoordinationRuntimeError('store-corrupt', 'terminal recovery attachment reactivated a terminal run');
     const context: CoordinatorSessionContext = {
       schema_version: AUTOPILOT_COORDINATOR_SESSION_CONTEXT_SCHEMA, state_root: this.#client.paths.stateRoot, repo_id: repoId, repo_key: input.repo.repoKey,
@@ -559,7 +567,7 @@ export class AutopilotSessionBridge {
     await this.#enqueue(async () => {
       this.#assertOpen();
       const session = this.#attachment.session;
-      await this.#supervisor.client.mutate('reconcile-run', {
+      const response = await this.#supervisor.client.mutate('reconcile-run', {
         repoId: session.repo_id,
         workstreamRun: session.workstream_run,
         sessionId: session.session_id,
@@ -567,6 +575,7 @@ export class AutopilotSessionBridge {
         expectedVersion: this.#attachment.context.run_version,
         idempotencyKey: `reconcile-run:${session.session_lease_id}:${randomUUID()}`,
       }, { reason, session_lease_id: session.session_lease_id, session_token: this.#attachment.context.session_token });
+      await this.#supervisor.consumeReconciliationReceipt(response, this.#attachment.context);
     });
   }
 
@@ -581,27 +590,52 @@ export class AutopilotSessionBridge {
 
   async #drainMailboxNow(): Promise<readonly CoordinationMessage[]> {
     const session = this.#attachment.session;
-    const response = await this.#supervisor.client.mutate('drain-mailbox', {
-      repoId: session.repo_id,
-      workstreamRun: session.workstream_run,
-      sessionId: session.session_id,
-      fencingGeneration: session.session_generation,
-      expectedVersion: session.version,
-      idempotencyKey: `drain-mailbox:${session.session_lease_id}:${randomUUID()}`,
-    }, { delivery_id: `delivery-${randomUUID()}`, session_lease_id: session.session_lease_id, session_token: this.#attachment.context.session_token });
-    const delivered = Object.freeze(payloadArray(response, 'messages').map((value) => parseCoordinationMessage(value)));
-    for (const message of delivered) {
-      this.#sink.send({ customType: 'autopilot-coordination', content: messageContent(message), display: true, details: { message_id: message.message_id, message_type: message.message_type, correlation_id: message.correlation_id } }, this.#sink.isIdle() ? 'steer' : 'followUp', true);
-      await this.#supervisor.client.mutate('acknowledge-message', {
+    const deliveryId = `delivery-${randomUUID()}`;
+    const delivered: CoordinationMessage[] = [];
+    const seen = new Set<string>();
+    let cursor: string | null = null;
+    let pageOrdinal = 0;
+    let deliveryReceipt: CoordinationMailboxDeliveryReceipt | null = null;
+    do {
+      const payload: Record<string, unknown> = { delivery_id: deliveryId, session_lease_id: session.session_lease_id, session_token: this.#attachment.context.session_token };
+      if (cursor !== null) payload['cursor'] = cursor;
+      const response = await this.#supervisor.client.mutate('drain-mailbox', {
         repoId: session.repo_id,
         workstreamRun: session.workstream_run,
         sessionId: session.session_id,
         fencingGeneration: session.session_generation,
-        expectedVersion: message.version,
-        idempotencyKey: `ack-message:${message.message_id}`,
-      }, { message_id: message.message_id, session_lease_id: session.session_lease_id, session_token: this.#attachment.context.session_token });
-    }
-    return delivered;
+        expectedVersion: session.version,
+        idempotencyKey: `drain-mailbox:${session.session_lease_id}:${deliveryId}:${String(pageOrdinal)}`,
+      }, payload);
+      const pageReceipt = parseCoordinationMailboxDeliveryReceipt(payloadRecord(response, 'delivery_receipt'));
+      if (deliveryReceipt === null) deliveryReceipt = pageReceipt;
+      else if (pageReceipt.delivery_id !== deliveryReceipt.delivery_id || pageReceipt.repo_id !== deliveryReceipt.repo_id || pageReceipt.workstream_run !== deliveryReceipt.workstream_run || pageReceipt.session_lease_id !== deliveryReceipt.session_lease_id || pageReceipt.snapshot_through_event_seq !== deliveryReceipt.snapshot_through_event_seq || pageReceipt.message_count !== deliveryReceipt.message_count || pageReceipt.message_ids_sha256 !== deliveryReceipt.message_ids_sha256) throw new CoordinationRuntimeError('invalid-state', 'mailbox delivery receipt identity changed between pages', [deliveryId]);
+      deliveryReceipt = pageReceipt;
+      const messages = payloadArray(response, 'messages').map((value) => parseCoordinationMessage(value));
+      for (const message of messages) {
+        if (seen.has(message.message_id)) throw new CoordinationRuntimeError('store-corrupt', 'mailbox delivery pages repeated a stable message identity', [deliveryId, message.message_id]);
+        seen.add(message.message_id);
+        delivered.push(message);
+        this.#sink.send({ customType: 'autopilot-coordination', content: messageContent(message), display: true, details: { message_id: message.message_id, message_type: message.message_type, correlation_id: message.correlation_id } }, this.#sink.isIdle() ? 'steer' : 'followUp', true);
+        await this.#supervisor.client.mutate('acknowledge-message', {
+          repoId: session.repo_id,
+          workstreamRun: session.workstream_run,
+          sessionId: session.session_id,
+          fencingGeneration: session.session_generation,
+          expectedVersion: message.version,
+          idempotencyKey: `ack-message:${message.message_id}`,
+        }, { message_id: message.message_id, session_lease_id: session.session_lease_id, session_token: this.#attachment.context.session_token });
+      }
+      const next = response.payload['next_cursor'];
+      if (next !== null && typeof next !== 'string') throw new CoordinationRuntimeError('invalid-state', 'mailbox delivery page omitted its continuation identity');
+      cursor = typeof next === 'string' ? next : null;
+      pageOrdinal += 1;
+    } while (cursor !== null);
+    if (deliveryReceipt === null || !deliveryReceipt.completed) throw new CoordinationRuntimeError('invalid-state', 'mailbox delivery ended without its completed durable receipt', [deliveryId]);
+    if (delivered.length !== deliveryReceipt.message_count) throw new CoordinationRuntimeError('invalid-state', 'mailbox delivery pages do not match their exact receipt count', [deliveryId, `expected=${String(deliveryReceipt.message_count)}`, `actual=${String(delivered.length)}`]);
+    const digest = `sha256:${createHash('sha256').update(JSON.stringify(delivered.map((message) => message.message_id)), 'utf8').digest('hex')}`;
+    if (digest !== deliveryReceipt.message_ids_sha256) throw new CoordinationRuntimeError('invalid-state', 'mailbox delivery pages do not match their exact receipt digest', [deliveryId]);
+    return Object.freeze(delivered);
   }
 
   async prepareHandoff(): Promise<string> {
@@ -698,9 +732,12 @@ export class AutopilotSessionBridge {
           idempotencyKey: `heartbeat:${session.session_lease_id}:${String(session.version)}`,
         }, { lease_expires_at: leaseExpiry(), session_lease_id: session.session_lease_id, session_token: this.#attachment.context.session_token });
         const nextSession = parseCoordinationSessionLease(payloadRecord(response, 'session'));
+        await this.#supervisor.consumeReconciliationReceipt(response, this.#attachment.context);
         this.#attachment = { ...this.#attachment, session: nextSession, context: { ...this.#attachment.context, session_version: nextSession.version } };
         await writeCoordinatorSessionContext(this.#attachment.contextPath, this.#attachment.context);
-        await this.#drainMailboxNow();
+        const pendingMessages = response.payload['pending_messages'];
+        if (typeof pendingMessages !== 'number' || !Number.isSafeInteger(pendingMessages) || pendingMessages < 0) throw new CoordinationRuntimeError('invalid-state', 'heartbeat response omitted its exact pending mailbox count');
+        if (pendingMessages > 0) await this.#drainMailboxNow();
         if (this.#recoverOwnedOperations !== null) await this.#recoverOwnedOperations(this.#attachment.contextPath);
       }).catch((error: unknown) => {
         this.#fatalError = error instanceof Error ? error : new Error(String(error));

@@ -90,7 +90,7 @@ void describe('Coordination Fabric legacy migration and cutover', () => {
       const database = new DatabaseSync(databasePath);
       try { database.prepare('UPDATE schema_migrations SET checksum=? WHERE version=6').run('f'.repeat(64)); }
       finally { database.close(); }
-      await assert.rejects(() => runCoordinationMigration({ command: 'dry-run', repoKey: fixture.repoKey, env: fixture.env, clock: migrationTestClock() }), /exact locked schema-6\/7\/8\/9\/10 package lineage/u);
+      await assert.rejects(() => runCoordinationMigration({ command: 'dry-run', repoKey: fixture.repoKey, env: fixture.env, clock: migrationTestClock() }), /exact locked schema-6\/7\/8\/9\/10\/11\/12 package lineage/u);
     });
     await withMigrationTestFixture(async (fixture) => {
       const paths = coordinatorRuntimePaths(fixture.env);
@@ -99,7 +99,7 @@ void describe('Coordination Fabric legacy migration and cutover', () => {
       const database = new DatabaseSync(paths.databasePath);
       try { database.prepare('UPDATE schema_migrations SET checksum=? WHERE version=9').run('e'.repeat(64)); }
       finally { database.close(); }
-      await assert.rejects(() => runCoordinationMigration({ command: 'dry-run', repoKey: fixture.repoKey, env: fixture.env, clock: migrationTestClock() }), /exact locked schema-6\/7\/8\/9\/10 package lineage/u);
+      await assert.rejects(() => runCoordinationMigration({ command: 'dry-run', repoKey: fixture.repoKey, env: fixture.env, clock: migrationTestClock() }), /exact locked schema-6\/7\/8\/9\/10\/11\/12 package lineage/u);
     });
   });
 
@@ -263,7 +263,7 @@ void describe('Coordination Fabric legacy migration and cutover', () => {
       const store = await CoordinatorStore.open(coordinatorRuntimePaths(fixture.env), fixedClock());
       try {
         const attached = store.handle({
-          schema_version: 'autopilot.coordinator_request.v1', protocol_version: '1.5', request_id: 'mixed-attach', action: 'attach-run', idempotency_key: 'mixed-attach',
+          schema_version: 'autopilot.coordinator_request.v1', protocol_version: '1.6', request_id: 'mixed-attach', action: 'attach-run', idempotency_key: 'mixed-attach',
           repo_id: fixture.repoKey, workstream_run: active.workstream_run, session_id: null, fencing_generation: null, expected_version: 0,
           payload: {
             repo_key: fixture.repoKey, canonical_root: active.source_repo, git_common_dir: active.git_common_dir, autopilot_id: active.autopilot_id, workstream: active.workstream, coordination_authority: 'coordinator-edit-leases-v1',
@@ -321,7 +321,7 @@ void describe('Coordination Fabric legacy migration and cutover', () => {
       const store = await CoordinatorStore.open(coordinatorRuntimePaths(fixture.env), fixedClock());
       try {
         const attached = store.handle({
-          schema_version: 'autopilot.coordinator_request.v1', protocol_version: '1.5', request_id: 'terminal-mixed-attach', action: 'attach-run', idempotency_key: 'terminal-mixed-attach', repo_id: fixture.repoKey, workstream_run: active.workstream_run, session_id: null, fencing_generation: null, expected_version: 0,
+          schema_version: 'autopilot.coordinator_request.v1', protocol_version: '1.6', request_id: 'terminal-mixed-attach', action: 'attach-run', idempotency_key: 'terminal-mixed-attach', repo_id: fixture.repoKey, workstream_run: active.workstream_run, session_id: null, fencing_generation: null, expected_version: 0,
           payload: { repo_key: fixture.repoKey, canonical_root: active.source_repo, git_common_dir: active.git_common_dir, autopilot_id: active.autopilot_id, workstream: active.workstream, coordination_authority: 'coordinator-edit-leases-v1', run_resource: { schema_version: 'autopilot.coordination_run_resource.v1', repo_id: fixture.repoKey, workstream_run: active.workstream_run, source_repo: active.source_repo, git_common_dir: active.git_common_dir, worktree_root: active.worktree_root, main_worktree_path: active.main_worktree_path, runtime_root: active.runtime_root, branch: active.branch, target_branch: active.target_branch, target_base_sha: active.target_base_sha, origin_url: active.origin_url, started_at: active.started_at, version: 1 } },
         });
         assert.equal(attached.ok, true);
@@ -543,7 +543,7 @@ void describe('Coordination Fabric legacy migration and cutover', () => {
       const head = git(fixture.source, ['rev-parse', 'HEAD']);
       try {
         const attached = store.handle({
-          schema_version: 'autopilot.coordinator_request.v1', protocol_version: '1.5', request_id: 'empty-existing-repository', action: 'attach-run', idempotency_key: 'empty-existing-repository', repo_id: fixture.repoKey, workstream_run: 'coordinator-only-run', session_id: null, fencing_generation: null, expected_version: 0,
+          schema_version: 'autopilot.coordinator_request.v1', protocol_version: '1.6', request_id: 'empty-existing-repository', action: 'attach-run', idempotency_key: 'empty-existing-repository', repo_id: fixture.repoKey, workstream_run: 'coordinator-only-run', session_id: null, fencing_generation: null, expected_version: 0,
           payload: { repo_key: fixture.repoKey, canonical_root: fixture.source, git_common_dir: join(fixture.source, '.git'), autopilot_id: 'coordinator-only', workstream: 'coordinator-only', coordination_authority: 'coordinator-edit-leases-v1', run_resource: { schema_version: 'autopilot.coordination_run_resource.v1', repo_id: fixture.repoKey, workstream_run: 'coordinator-only-run', source_repo: fixture.source, git_common_dir: join(fixture.source, '.git'), worktree_root: join(fixture.stateRoot, 'worktrees', fixture.repoKey), main_worktree_path: fixture.source, runtime_root: join(fixture.source, '.pi', 'autopilot', 'coordinator-only'), branch: git(fixture.source, ['symbolic-ref', '--short', 'HEAD']), target_branch: null, target_base_sha: head, origin_url: null, started_at: '2026-07-12T11:00:00.000Z', version: 1 } },
         });
         assert.equal(attached.ok, true);
@@ -612,9 +612,9 @@ void describe('Coordination Fabric legacy migration and cutover', () => {
       const foreignRepo = `sha256-${'f'.repeat(64)}`;
       const store = await CoordinatorStore.open(coordinatorRuntimePaths(fixture.env), fixedClock());
       try {
-        const attachedRun = store.handle({ schema_version: 'autopilot.coordinator_request.v1', protocol_version: '1.5', request_id: 'foreign-run', action: 'attach-run', idempotency_key: 'foreign-run', repo_id: foreignRepo, workstream_run: 'foreign-run', session_id: null, fencing_generation: null, expected_version: 0, payload: { repo_key: foreignRepo, canonical_root: active.source_repo, git_common_dir: active.git_common_dir, autopilot_id: 'foreign', workstream: 'foreign', coordination_authority: 'coordinator-edit-leases-v1', run_resource: { schema_version: 'autopilot.coordination_run_resource.v1', repo_id: foreignRepo, workstream_run: 'foreign-run', source_repo: active.source_repo, git_common_dir: active.git_common_dir, worktree_root: active.worktree_root, main_worktree_path: active.main_worktree_path, runtime_root: active.runtime_root, branch: active.branch, target_branch: active.target_branch, target_base_sha: active.target_base_sha, origin_url: active.origin_url, started_at: active.started_at, version: 1 } } });
+        const attachedRun = store.handle({ schema_version: 'autopilot.coordinator_request.v1', protocol_version: '1.6', request_id: 'foreign-run', action: 'attach-run', idempotency_key: 'foreign-run', repo_id: foreignRepo, workstream_run: 'foreign-run', session_id: null, fencing_generation: null, expected_version: 0, payload: { repo_key: foreignRepo, canonical_root: active.source_repo, git_common_dir: active.git_common_dir, autopilot_id: 'foreign', workstream: 'foreign', coordination_authority: 'coordinator-edit-leases-v1', run_resource: { schema_version: 'autopilot.coordination_run_resource.v1', repo_id: foreignRepo, workstream_run: 'foreign-run', source_repo: active.source_repo, git_common_dir: active.git_common_dir, worktree_root: active.worktree_root, main_worktree_path: active.main_worktree_path, runtime_root: active.runtime_root, branch: active.branch, target_branch: active.target_branch, target_base_sha: active.target_base_sha, origin_url: active.origin_url, started_at: active.started_at, version: 1 } } });
         assert.equal(attachedRun.ok, true);
-        const attachedSession = store.handle({ schema_version: 'autopilot.coordinator_request.v1', protocol_version: '1.5', request_id: 'foreign-session', action: 'attach-session', idempotency_key: 'foreign-session', repo_id: foreignRepo, workstream_run: 'foreign-run', session_id: 'foreign-session', fencing_generation: 1, expected_version: 1, payload: { boot_id: currentBootId(), handoff_token: null, lease_expires_at: '2026-07-12T12:30:00.000Z', pid: process.pid, session_lease_id: 'foreign-session-lease', session_token: 'f'.repeat(64) } });
+        const attachedSession = store.handle({ schema_version: 'autopilot.coordinator_request.v1', protocol_version: '1.6', request_id: 'foreign-session', action: 'attach-session', idempotency_key: 'foreign-session', repo_id: foreignRepo, workstream_run: 'foreign-run', session_id: 'foreign-session', fencing_generation: 1, expected_version: 1, payload: { boot_id: currentBootId(), handoff_token: null, lease_expires_at: '2026-07-12T12:30:00.000Z', pid: process.pid, session_lease_id: 'foreign-session-lease', session_token: 'f'.repeat(64) } });
         assert.equal(attachedSession.ok, true);
       } finally { store.close(); }
       const blocked = await runCoordinationMigration({ command: 'apply', repoKey: fixture.repoKey, env: fixture.env, clock: fixedClock() });
@@ -636,7 +636,7 @@ void describe('Coordination Fabric legacy migration and cutover', () => {
       assert.deepEqual(await bytes(fixture.stateRoot), frozenBytes, 'foreign migration admission must not touch shared authority bytes');
       const store = await CoordinatorStore.open(coordinatorRuntimePaths(fixture.env), fixedClock());
       try {
-        const denied = store.handle({ schema_version: 'autopilot.coordinator_request.v1', protocol_version: '1.5', request_id: 'foreign-heartbeat-after-backup', action: 'heartbeat', idempotency_key: 'foreign-heartbeat-after-backup', repo_id: `sha256-${'e'.repeat(64)}`, workstream_run: 'foreign-run', session_id: 'foreign-session', fencing_generation: 1, expected_version: 1, payload: { lease_expires_at: '2026-07-12T12:30:00.000Z', session_lease_id: 'foreign-session-lease', session_token: 'e'.repeat(64) } });
+        const denied = store.handle({ schema_version: 'autopilot.coordinator_request.v1', protocol_version: '1.6', request_id: 'foreign-heartbeat-after-backup', action: 'heartbeat', idempotency_key: 'foreign-heartbeat-after-backup', repo_id: `sha256-${'e'.repeat(64)}`, workstream_run: 'foreign-run', session_id: 'foreign-session', fencing_generation: 1, expected_version: 1, payload: { lease_expires_at: '2026-07-12T12:30:00.000Z', session_lease_id: 'foreign-session-lease', session_token: 'e'.repeat(64) } });
         assert.equal(denied.ok, false);
         assert.equal(denied.error_code, 'coordinator-contention');
         assert.match(String(denied.payload['message']), /after global migration writer authority was acquired/u);
@@ -652,7 +652,7 @@ void describe('Coordination Fabric legacy migration and cutover', () => {
       const foreignRepo = `sha256-${'d'.repeat(64)}`;
       const head = git(fixture.source, ['rev-parse', 'HEAD']);
       await stageCoordinatorSemanticReplay(paths, 'freeze-deferred-replay', [{
-        schema_version: 'autopilot.coordinator_request.v1', protocol_version: '1.5', request_id: 'freeze-deferred-run', action: 'attach-run', idempotency_key: 'freeze-deferred-run', repo_id: foreignRepo, workstream_run: 'freeze-deferred-run', session_id: null, fencing_generation: null, expected_version: 0,
+        schema_version: 'autopilot.coordinator_request.v1', protocol_version: '1.6', request_id: 'freeze-deferred-run', action: 'attach-run', idempotency_key: 'freeze-deferred-run', repo_id: foreignRepo, workstream_run: 'freeze-deferred-run', session_id: null, fencing_generation: null, expected_version: 0,
         payload: { repo_key: foreignRepo, canonical_root: fixture.source, git_common_dir: join(fixture.source, '.git'), autopilot_id: 'freeze-deferred', workstream: 'freeze-deferred', coordination_authority: 'coordinator-edit-leases-v1', run_resource: { schema_version: 'autopilot.coordination_run_resource.v1', repo_id: foreignRepo, workstream_run: 'freeze-deferred-run', source_repo: fixture.source, git_common_dir: join(fixture.source, '.git'), worktree_root: join(fixture.stateRoot, 'worktrees', foreignRepo), main_worktree_path: fixture.source, runtime_root: join(fixture.source, '.pi', 'autopilot', 'freeze-deferred'), branch: git(fixture.source, ['symbolic-ref', '--short', 'HEAD']), target_branch: null, target_base_sha: head, origin_url: null, started_at: '2026-07-12T12:00:00.000Z', version: 1 } },
       }]);
       const frozenStore = await CoordinatorStore.open(paths, fixedClock());

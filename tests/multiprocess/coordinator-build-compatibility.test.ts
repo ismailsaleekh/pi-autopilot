@@ -9,6 +9,7 @@ import { CoordinatorClient } from '../../src/core/coordination/client.ts';
 import { CoordinatorFrameDecoder, encodeCoordinatorFrame } from '../../src/core/coordination/ipc.ts';
 import { isProcessAlive, processStartIdentity } from '../../src/core/coordination/process-identity.ts';
 import { coordinatorRuntimePaths } from '../../src/core/coordination/runtime-paths.ts';
+import { retireSchema11CoordinatorForUpgrade } from '../../src/core/coordination/schema11-retirement.ts';
 import { startCoordinatorServer } from '../../src/core/coordination/server.ts';
 import { coordinatorUpgradeIntentPath, preparePredecessorCoordinatorUpgrade } from '../../src/core/coordination/upgrade.ts';
 import { AUTOPILOT_STATE_ROOT_ENV } from '../../src/core/parallel-runtime.ts';
@@ -51,7 +52,37 @@ function historicalUpgradeIntent(state: 'committed' | 'starting', packageBuild =
 
 
 void describe('coordinator protocol and schema version boundary', () => {
-  void it('rejects new protocol-1.5 operations against the actual live protocol-1.3 coordinator without replacing it', async () => {
+  void it('BUG-176 drains and retires the exact live cf42 process before elected schema-12 startup', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pi-autopilot-cf42-retirement-'));
+    const stateRoot = join(root, 'state');
+    const env = { ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: stateRoot };
+    const tagged = await startTaggedCoordinator({ stateRoot, extractionRoot: root, commit: 'a6772a2997d349b6efd357d8c10e9d6d61a60c6a' });
+    let current: Awaited<ReturnType<typeof startCoordinatorServer>> | null = null;
+    try {
+      const before = await lockRecord(tagged.paths.lockPath);
+      assert.equal(before['package_build'], '1.1.0-cf42');
+      assert.equal(before['pid'], tagged.child.pid);
+      const report = await retireSchema11CoordinatorForUpgrade(tagged.paths);
+      assert.equal(report.outcome, 'ready-for-schema12-start');
+      assert.equal(report.retired_package_build, '1.1.0-cf42');
+      assert.equal(report.retired_pid, tagged.child.pid);
+      assert.equal(report.database_schema_version, 11);
+      assert.equal(typeof report.backup_path, 'string');
+      assert.equal(typeof report.backup_sha256, 'string');
+      assert.equal(isProcessAlive(tagged.child.pid ?? -1), false);
+      current = await startCoordinatorServer(tagged.paths);
+      const handshake = await new CoordinatorClient({ env, autoStart: false }).query('handshake');
+      assert.equal(handshake.payload['package_build'], '1.1.1-cf43');
+      assert.equal(handshake.payload['protocol_version'], '1.6');
+      assert.equal(handshake.payload['database_schema_version'], 12);
+    } finally {
+      if (current !== null) await current.close();
+      await tagged.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  void it('rejects new protocol-1.6 operations against the actual live protocol-1.3 coordinator without replacing it', async () => {
     const root = await mkdtemp(join(tmpdir(), 'pi-autopilot-version-boundary-live-'));
     const stateRoot = join(root, 'state');
     const env = { ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: stateRoot };
@@ -95,10 +126,10 @@ void describe('coordinator protocol and schema version boundary', () => {
             if (typeof requestId !== 'string' || typeof action !== 'string') throw new Error('compatible replacement received malformed request identity');
             events.push([connectionId, action]);
             socket.write(encodeCoordinatorFrame({
-              schema_version: 'autopilot.coordinator_response.v1', protocol_version: '1.5', request_id: requestId, ok: true,
+              schema_version: 'autopilot.coordinator_response.v1', protocol_version: '1.6', request_id: requestId, ok: true,
               committed_event_seq: action === 'handshake' ? null : 1, error_code: null, retryable: false,
               payload: action === 'handshake'
-                ? { schema_version: 'autopilot.coordinator_handshake.v1', package_build: '1.1.0-cf42', protocol_version: '1.5', database_schema_version: 11 }
+                ? { schema_version: 'autopilot.coordinator_handshake.v1', package_build: '1.1.1-cf43', protocol_version: '1.6', database_schema_version: 12 }
                 : { accepted: true },
             }));
           }
@@ -135,9 +166,9 @@ void describe('coordinator protocol and schema version boundary', () => {
           if (typeof requestId !== 'string' || typeof action !== 'string') throw new Error('unknown server received malformed request identity');
           actions.push(action);
           socket.write(encodeCoordinatorFrame({
-            schema_version: 'autopilot.coordinator_response.v1', protocol_version: '1.5', request_id: requestId, ok: true,
+            schema_version: 'autopilot.coordinator_response.v1', protocol_version: '1.6', request_id: requestId, ok: true,
             committed_event_seq: null, error_code: null, retryable: false,
-            payload: { schema_version: 'autopilot.coordinator_handshake.v1', package_build: 'unknown-cf99', protocol_version: '1.5', database_schema_version: 11 },
+            payload: { schema_version: 'autopilot.coordinator_handshake.v1', package_build: 'unknown-cf99', protocol_version: '1.6', database_schema_version: 12 },
           }));
         }
       });
@@ -146,7 +177,7 @@ void describe('coordinator protocol and schema version boundary', () => {
       await listen(fake, paths.socketPath);
       await assert.rejects(() => new CoordinatorClient({ env }).mutate('heartbeat', {
         repoId: 'repo-never-sent', workstreamRun: 'run-never-sent', sessionId: 'session-never-sent', fencingGeneration: 1, expectedVersion: 0, idempotencyKey: 'BUG-175-never-send-mutation',
-      }, { session_lease_id: 'lease-never-sent', session_token: 'f'.repeat(64), lease_expires_at: '2099-01-01T00:00:00.000Z' }), /outside the closed protocol-1\.5\/schema-11 compatibility lineage/u);
+      }, { session_lease_id: 'lease-never-sent', session_token: 'f'.repeat(64), lease_expires_at: '2099-01-01T00:00:00.000Z' }), /outside the closed protocol-1\.6\/schema-12 compatibility lineage/u);
       assert.deepEqual(actions, ['handshake']);
     } finally {
       await closeServer(fake);
@@ -193,10 +224,10 @@ void describe('coordinator protocol and schema version boundary', () => {
 
       current = await startCoordinatorServer(paths);
       const response = await new CoordinatorClient({ env, autoStart: false }).query('handshake');
-      assert.equal(response.payload['package_build'], '1.1.0-cf42');
+      assert.equal(response.payload['package_build'], '1.1.1-cf43');
       const newLock = await lockRecord(paths.lockPath);
       assert.notEqual(newLock['instance_id'], oldLock['instance_id']);
-      assert.equal(newLock['package_build'], '1.1.0-cf42');
+      assert.equal(newLock['package_build'], '1.1.1-cf43');
       assert.equal(await readFile(coordinatorUpgradeIntentPath(paths), 'utf8'), committedIntent, 'historical committed intent remains immutable forensic evidence');
     } finally {
       if (current !== null) await current.close();

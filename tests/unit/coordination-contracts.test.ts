@@ -34,8 +34,15 @@ void describe('Coordination Fabric contracts and invariants', () => {
       'child_terminal_acceptance',
       'claim_request',
       'contradiction_adjudication',
+      'coordinator_doctor_page',
+      'coordinator_mailbox_page',
+      'coordinator_migration_recovery_page',
+      'coordinator_reconciliation_detail_page',
       'coordinator_request',
       'coordinator_response',
+      'coordinator_result_detail_page',
+      'coordinator_run_catalog_page',
+      'coordinator_status_page',
       'cutover_marker',
       'deadlock_resolution',
       'edit_lease',
@@ -43,13 +50,18 @@ void describe('Coordination Fabric contracts and invariants', () => {
       'event',
       'integration_conflict',
       'mailbox_cursor',
+      'mailbox_delivery_receipt',
       'message',
       'migration_record',
       'migration_recovery_work',
       'observation',
+      'reconciliation_detail',
       'reconciliation_evidence',
+      'reconciliation_receipt',
       'repository',
       'reservation_obligation',
+      'result_detail',
+      'result_receipt',
       'run',
       'run_resource',
       'run_terminal_intent',
@@ -174,7 +186,7 @@ void describe('Coordination Fabric contracts and invariants', () => {
   void it('strictly validates versioned query and mutation envelopes', () => {
     const query = parseCoordinatorRequestEnvelope({
       schema_version: 'autopilot.coordinator_request.v1',
-      protocol_version: '1.5',
+      protocol_version: '1.6',
       request_id: 'request-1',
       action: 'status',
       idempotency_key: null,
@@ -186,7 +198,7 @@ void describe('Coordination Fabric contracts and invariants', () => {
       payload: JSON.parse('{}') as unknown,
     });
     assert.equal(query.action, 'status');
-    assert.throws(() => parseCoordinatorRequestEnvelope({ ...query, protocol_version: '1.2' }), /protocol_version must equal 1.5/u);
+    assert.throws(() => parseCoordinatorRequestEnvelope({ ...query, protocol_version: '1.2' }), /protocol_version must equal 1.6/u);
     assert.throws(
       () => parseCoordinatorRequestEnvelope({ ...query, action: 'heartbeat', payload: { lease_expires_at: '2026-07-11T16:00:00.000Z' } }),
       /mutating requests require/u,
@@ -239,7 +251,7 @@ void describe('Coordination Fabric contracts and invariants', () => {
     }), /must differ/u);
     assert.equal(parseCoordinatorResponseEnvelope({
       schema_version: 'autopilot.coordinator_response.v1',
-      protocol_version: '1.5',
+      protocol_version: '1.6',
       request_id: 'request-1',
       ok: false,
       committed_event_seq: null,

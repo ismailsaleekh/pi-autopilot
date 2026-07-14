@@ -187,7 +187,7 @@ async function assertOldMutationsDenied(paths: CoordinatorRuntimePaths, capabili
 }
 
 void describe('exact aa3e377 coordinator upgrade choreography', () => {
-  void it('git-archives, builds, runs, and upgrades the actual executable predecessor to schema 11', async () => {
+  void it('git-archives, builds, runs, and upgrades the actual executable predecessor to schema 12', async () => {
     const root = await mkdtemp(join(tmpdir(), 'pi-autopilot-real-predecessor-'));
     const stateRoot = join(root, 'state');
     const env = { ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: stateRoot };
@@ -198,8 +198,8 @@ void describe('exact aa3e377 coordinator upgrade choreography', () => {
       await waitForExactPredecessor(predecessor, stateRoot);
       assert.equal(schemaVersion(paths.databasePath), 6);
       const response = await new CoordinatorClient({ env, startupTimeoutMs: 30_000 }).query('status');
-      assert.equal(response.payload['protocol_version'], '1.5');
-      assert.equal(response.payload['database_schema_version'], 11);
+      assert.equal(response.payload['protocol_version'], '1.6');
+      assert.equal(response.payload['database_schema_version'], 12);
       await waitFor(() => predecessor.exited);
       assert.notEqual(parseCurrentCoordinatorLock(await readJson(paths.lockPath)), null);
       assert.notEqual(parsePredecessorCoordinatorLock(await readJson(paths.predecessorLockPath)), null, 'target must maintain an old-format live-PID fence');
@@ -209,7 +209,7 @@ void describe('exact aa3e377 coordinator upgrade choreography', () => {
       if (intent?.backup === null || intent?.backup === undefined) throw new Error('final upgrade backup missing');
       assert.equal(`sha256:${createHash('sha256').update(await readFile(intent.backup.path)).digest('hex')}`, intent.backup.sha256);
       assert.equal(schemaVersion(intent.backup.path), 6);
-      assert.equal(schemaVersion(paths.databasePath), 11);
+      assert.equal(schemaVersion(paths.databasePath), 12);
     } finally { await stopCurrent(stateRoot); await stop(predecessor); await rm(root, { recursive: true, force: true }); }
   });
 
@@ -245,7 +245,7 @@ void describe('exact aa3e377 coordinator upgrade choreography', () => {
       if (completedAttack === null) throw new Error('pre-barrier attack process was not started');
       assert.equal(writerAcquiredWhilePredecessorLive, true, 'exclusive SQLite writer barrier is acquired while the predecessor is alive');
       assert.equal(completedAttack.exited, true);
-      assert.equal(schemaVersion(paths.databasePath), 11);
+      assert.equal(schemaVersion(paths.databasePath), 12);
       assert.equal(upgrade.intent.state, 'migration-verified');
     } finally { if (attack !== null) await stop(attack); await stop(predecessor); await rm(root, { recursive: true, force: true }); }
   });
@@ -266,16 +266,16 @@ void describe('exact aa3e377 coordinator upgrade choreography', () => {
       await sleep(31_000);
       attack = startCoordinator(built.bin, built.root, stateRoot);
       await waitFor(() => attack?.exited === true, 15_000);
-      assert.equal(schemaVersion(paths.databasePath), 11);
+      assert.equal(schemaVersion(paths.databasePath), 12);
       const current = parseCurrentCoordinatorLock(await readJson(paths.lockPath));
       assert.notEqual(current, null);
       await waitFor(async () => parsePredecessorCoordinatorLock(await readJson(paths.predecessorLockPath))?.boot_id === predecessorCompatibleBootId());
       const repairedFence = parsePredecessorCoordinatorLock(await readJson(paths.predecessorLockPath));
       assert.equal(repairedFence?.pid, current?.pid, 'stale predecessor must not displace target authority');
       assert.match(repairedFence?.boot_id ?? '', /^(linux:|darwin:|boot-estimate:)/u, 'target must continuously repair a predecessor-compatible boot identity');
-      assert.equal((await new CoordinatorClient({ env, autoStart: false }).query('status')).payload['protocol_version'], '1.5');
+      assert.equal((await new CoordinatorClient({ env, autoStart: false }).query('status')).payload['protocol_version'], '1.6');
       // Simulate a wall-clock correction that invalidates every old-format boot
-      // estimate, then remove lock defense entirely. Schema 10 itself must keep
+      // estimate, then remove lock defense entirely. Schema 12 itself must keep
       // the stale executable powerless.
       assert.notEqual(predecessorCompatibleBootEstimate(1_000_000, 100, 'host'), predecessorCompatibleBootEstimate(1_060_000, 100, 'host'));
       await stop(attack);
@@ -283,7 +283,7 @@ void describe('exact aa3e377 coordinator upgrade choreography', () => {
       await stopCurrent(stateRoot);
       attack = startCoordinator(built.bin, built.root, stateRoot);
       await waitFor(() => attack?.exited === true, 15_000);
-      assert.equal(schemaVersion(paths.databasePath), 11);
+      assert.equal(schemaVersion(paths.databasePath), 12);
     } finally { await stopCurrent(stateRoot); if (attack !== null) await stop(attack); await stop(predecessor); await rm(root, { recursive: true, force: true }); }
   });
 
@@ -385,7 +385,7 @@ void describe('exact aa3e377 coordinator upgrade choreography', () => {
       await assertOldMutationsDenied(paths, capability, oldSession, 'owner-killed');
       assert.equal(existsSync(paths.lockPath), false, 'no target authority is alive during the post-commit recovery gap');
       if (interrupted === null) throw new Error('interrupted upgrade intent missing');
-      const deterministicBackup = join(paths.backupsRoot, `coordinator.final.pre-upgrade-1.2-to-1.5.${interrupted.upgrade_id}.db`);
+      const deterministicBackup = join(paths.backupsRoot, `coordinator.final.pre-upgrade-1.2-to-1.6.${interrupted.upgrade_id}.db`);
       assert.equal(schemaVersion(deterministicBackup), 6);
 
       // A direct second launch cannot displace the still-live exact predecessor,
@@ -398,7 +398,7 @@ void describe('exact aa3e377 coordinator upgrade choreography', () => {
 
       const clients = [new CoordinatorClient({ env, startupTimeoutMs: 30_000 }), new CoordinatorClient({ env, startupTimeoutMs: 30_000 })];
       const responses = await Promise.all(clients.map(async (client) => await client.query('status')));
-      assert.equal(responses.every((response) => response.payload['database_schema_version'] === 11), true);
+      assert.equal(responses.every((response) => response.payload['database_schema_version'] === 12), true);
       const committed = await readCoordinatorUpgradeIntent(paths);
       assert.equal(committed?.state, 'committed');
       assert.equal(committed?.backup?.path, deterministicBackup);

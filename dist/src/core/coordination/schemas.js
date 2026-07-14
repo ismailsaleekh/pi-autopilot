@@ -1,5 +1,5 @@
 import { AUTOPILOT_CHILD_TERMINAL_ACCEPTANCE_SCHEMA } from "./terminal-acceptance.js";
-import { AUTOPILOT_COORDINATION_SNAPSHOT_SCHEMA, AUTOPILOT_COORDINATOR_PROTOCOL_VERSION, AUTOPILOT_COORDINATOR_REQUEST_SCHEMA, AUTOPILOT_COORDINATOR_RESPONSE_SCHEMA, COORDINATION_ACQUISITION_KINDS, COORDINATION_ACQUISITION_STATES, COORDINATION_CHILD_STATUSES, COORDINATION_CLAIM_MODES, COORDINATION_EXCLUSIVE_OPERATION_KINDS, COORDINATION_EXCLUSIVE_RELEASE_TRIGGERS, COORDINATION_EXCLUSIVE_RESOURCE_SCOPES, COORDINATION_MESSAGE_STATUSES, COORDINATION_INTEGRATION_CONFLICT_KINDS, COORDINATION_INTEGRATION_DISPOSITIONS, COORDINATION_MERGE_TREE_STATUSES, COORDINATION_OPERATIONAL_ESCALATION_REASONS, COORDINATION_OPERATION_STAGES, COORDINATION_OPERATION_TYPES, COORDINATION_OBSERVATION_EXECUTION_STATES, COORDINATION_OBSERVATION_FRESHNESS_STATES, COORDINATION_OBSERVATION_OBJECT_KINDS, COORDINATION_RELEASE_CONDITION_TYPES, COORDINATION_RECONCILIATION_SOURCES, COORDINATION_REQUEST_STATUSES, COORDINATION_RESERVATION_OBLIGATION_STATES, COORDINATION_MESSAGE_TYPES, COORDINATION_RUN_STATUSES, COORDINATION_SESSION_STATUSES, COORDINATION_SESSION_ATTACHMENT_KINDS, COORDINATION_MIGRATION_RECOVERY_RESOLUTIONS, COORDINATION_MIGRATION_RECOVERY_STATUSES, COORDINATION_MIGRATION_RECOVERY_TYPES, COORDINATION_UNIT_ROLES, COORDINATION_UNIT_STATES, COORDINATION_WORKTREE_KINDS, COORDINATION_WORKTREE_STATES, COORDINATION_WAIT_EDGE_STATES, COORDINATION_DEADLOCK_ACTIONS, COORDINATION_DEADLOCK_STATES, } from "./types.js";
+import { AUTOPILOT_COORDINATION_SNAPSHOT_SCHEMA, AUTOPILOT_COORDINATOR_PROTOCOL_VERSION, AUTOPILOT_COORDINATOR_REQUEST_SCHEMA, AUTOPILOT_COORDINATOR_RESPONSE_SCHEMA, COORDINATION_ACQUISITION_KINDS, COORDINATION_ACQUISITION_STATES, COORDINATION_CHILD_STATUSES, COORDINATION_CLAIM_MODES, COORDINATION_EXCLUSIVE_OPERATION_KINDS, COORDINATION_EXCLUSIVE_RELEASE_TRIGGERS, COORDINATION_EXCLUSIVE_RESOURCE_SCOPES, COORDINATION_MESSAGE_STATUSES, COORDINATION_INTEGRATION_CONFLICT_KINDS, COORDINATION_INTEGRATION_DISPOSITIONS, COORDINATION_MERGE_TREE_STATUSES, COORDINATION_OPERATIONAL_ESCALATION_REASONS, COORDINATION_OPERATION_STAGES, COORDINATION_OPERATION_TYPES, COORDINATION_OBSERVATION_EXECUTION_STATES, COORDINATION_OBSERVATION_FRESHNESS_STATES, COORDINATION_OBSERVATION_OBJECT_KINDS, COORDINATION_RELEASE_CONDITION_TYPES, COORDINATION_RECONCILIATION_DETAIL_KINDS, COORDINATION_RECONCILIATION_SOURCES, COORDINATION_REQUEST_STATUSES, COORDINATION_RESERVATION_OBLIGATION_STATES, COORDINATION_MESSAGE_TYPES, COORDINATION_RUN_STATUSES, COORDINATION_SESSION_STATUSES, COORDINATION_SESSION_ATTACHMENT_KINDS, COORDINATION_MIGRATION_RECOVERY_RESOLUTIONS, COORDINATION_MIGRATION_RECOVERY_STATUSES, COORDINATION_MIGRATION_RECOVERY_TYPES, COORDINATION_UNIT_ROLES, COORDINATION_UNIT_STATES, COORDINATION_WORKTREE_KINDS, COORDINATION_WORKTREE_STATES, COORDINATION_WAIT_EDGE_STATES, COORDINATION_DEADLOCK_ACTIONS, COORDINATION_DEADLOCK_STATES, } from "./types.js";
 const boundedString = (maxLength = 512) => ({ type: 'string', minLength: 1, maxLength });
 const identifier = () => ({ type: 'string', minLength: 1, maxLength: 192, pattern: '^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,191}$' });
 const pathSegmentIdentifier = () => ({ type: 'string', minLength: 1, maxLength: 192, pattern: '^[A-Za-z0-9][A-Za-z0-9._:@-]{0,191}$' });
@@ -58,6 +58,7 @@ const requestedLease = () => ({
     ],
 });
 const table = (items, maxItems = 10_000) => ({ type: 'array', maxItems, items });
+const boundedPageValue = { oneOf: [{ type: 'null' }, { type: 'boolean' }, { type: 'number' }, boundedString(524_288), { type: 'array', maxItems: 1024 }, { type: 'object', maxProperties: 256 }] };
 export const COORDINATION_REPOSITORY_SCHEMA = exactObject('autopilot.coordination_repository.v1', {
     repo_id: pathSegmentIdentifier(), repo_key: pathSegmentIdentifier(), canonical_root: boundedString(1024), git_common_dir: boundedString(1024), created_event_seq: integer(), version: integer(1),
 });
@@ -117,6 +118,23 @@ export const COORDINATION_MAILBOX_CURSOR_SCHEMA = exactObject('autopilot.mailbox
 });
 export const COORDINATION_RECONCILIATION_EVIDENCE_SCHEMA = exactObject('autopilot.reconciliation_evidence.v1', {
     reconciliation_evidence_id: identifier(), repo_id: pathSegmentIdentifier(), autopilot_id: pathSegmentIdentifier(), workstream_run: pathSegmentIdentifier(), source: enumeration(COORDINATION_RECONCILIATION_SOURCES), release_condition: condition(), accepted_event_seq: integer(1), version: integer(1),
+});
+export const COORDINATION_RECONCILIATION_RECEIPT_SCHEMA = exactObject('autopilot.reconciliation_receipt.v1', {
+    reconciliation_receipt_id: identifier(), repo_id: pathSegmentIdentifier(), workstream_run: pathSegmentIdentifier(), source_action: identifier(), committed_event_seq: integer(1), detail_count: integer(), details_sha256: { type: 'string', pattern: '^sha256:[a-f0-9]{64}$' },
+    counts: { type: 'object', additionalProperties: false, required: [...COORDINATION_RECONCILIATION_DETAIL_KINDS], properties: Object.fromEntries(COORDINATION_RECONCILIATION_DETAIL_KINDS.map((kind) => [kind, integer()])) }, version: integer(1),
+});
+export const COORDINATION_RECONCILIATION_DETAIL_SCHEMA = exactObject('autopilot.reconciliation_detail.v1', {
+    reconciliation_receipt_id: identifier(), ordinal: integer(1), kind: enumeration(COORDINATION_RECONCILIATION_DETAIL_KINDS), entity_id: identifier(),
+});
+export const COORDINATION_MAILBOX_DELIVERY_RECEIPT_SCHEMA = exactObject('autopilot.mailbox_delivery_receipt.v1', {
+    delivery_id: identifier(), repo_id: pathSegmentIdentifier(), workstream_run: pathSegmentIdentifier(), session_lease_id: identifier(), snapshot_through_event_seq: integer(), message_count: integer(), message_ids_sha256: { type: 'string', pattern: '^sha256:[a-f0-9]{64}$' }, completed: { type: 'boolean' }, version: integer(1),
+});
+export const COORDINATION_RESULT_RECEIPT_SCHEMA = exactObject('autopilot.result_receipt.v1', {
+    result_receipt_id: identifier(), repo_id: pathSegmentIdentifier(), workstream_run: pathSegmentIdentifier(), source_action: identifier(), committed_event_seq: integer(1), detail_count: integer(), details_sha256: { type: 'string', pattern: '^sha256:[a-f0-9]{64}$' },
+    collections: { type: 'object', minProperties: 1, maxProperties: 64, additionalProperties: { type: 'object', additionalProperties: false, required: ['item_count', 'items_sha256'], properties: { item_count: integer(), items_sha256: { type: 'string', pattern: '^sha256:[a-f0-9]{64}$' } } } }, version: integer(1),
+});
+export const COORDINATION_RESULT_DETAIL_SCHEMA = exactObject('autopilot.result_detail.v1', {
+    result_receipt_id: identifier(), ordinal: integer(1), collection: identifier(), collection_ordinal: integer(1), value: boundedPageValue,
 });
 export const COORDINATION_MESSAGE_SCHEMA = exactObject('autopilot.coordination_message.v1', {
     message_id: identifier(), repo_id: pathSegmentIdentifier(), recipient_workstream_run: pathSegmentIdentifier(), message_type: enumeration(COORDINATION_MESSAGE_TYPES), correlation_id: identifier(), payload: { type: 'object', maxProperties: 256 }, status: enumeration(COORDINATION_MESSAGE_STATUSES), created_event_seq: integer(), delivered_event_seq: nullable(integer()), acknowledged_event_seq: nullable(integer()), version: integer(1),
@@ -188,7 +206,7 @@ export const COORDINATOR_REQUEST_SCHEMA = {
     $id: 'urn:pi-autopilot:coordination:coordinator-request-v1', type: 'object', additionalProperties: false,
     required: ['schema_version', 'protocol_version', 'request_id', 'action', 'idempotency_key', 'repo_id', 'workstream_run', 'session_id', 'fencing_generation', 'expected_version', 'payload'],
     properties: {
-        schema_version: { const: AUTOPILOT_COORDINATOR_REQUEST_SCHEMA }, protocol_version: { const: AUTOPILOT_COORDINATOR_PROTOCOL_VERSION }, request_id: identifier(), action: enumeration(['handshake', 'status', 'doctor', 'export', 'migration-recovery', 'run-catalog', 'attach-run', 'attach-session', 'attach-terminal-recovery', 'attach-migration-recovery', 'resolve-migration-recovery', 'detach-session', 'prepare-handoff', 'heartbeat', 'register-attempt', 'register-child', 'heartbeat-child', 'checkpoint-child', 'complete-child', 'drain-mailbox', 'acquire-group', 'acknowledge-grant', 'respond-claim-request', 'cancel-claim-request', 'cancel-acquisition-group', 'supersede-attempt', 'acknowledge-message', 'record-release-evidence', 'resolve-reservation-obligation', 'prepare-run-terminal', 'cancel-run-terminal', 'reconcile-run', 'prepare-operation', 'transition-operation', 'register-authoritative-artifact', 'assign-adjudication', 'claim-adjudication-assignment', 'complete-adjudication', 'submit-planning-contradiction']), idempotency_key: nullable(identifier()), repo_id: pathSegmentIdentifier(), workstream_run: nullable(pathSegmentIdentifier()), session_id: nullable(identifier()), fencing_generation: nullable(integer()), expected_version: nullable(integer()), payload: { type: 'object' },
+        schema_version: { const: AUTOPILOT_COORDINATOR_REQUEST_SCHEMA }, protocol_version: { const: AUTOPILOT_COORDINATOR_PROTOCOL_VERSION }, request_id: identifier(), action: enumeration(['handshake', 'status', 'doctor', 'export', 'migration-recovery', 'run-catalog', 'reconciliation-details', 'result-details', 'attach-run', 'attach-session', 'attach-terminal-recovery', 'attach-migration-recovery', 'resolve-migration-recovery', 'detach-session', 'prepare-handoff', 'heartbeat', 'register-attempt', 'register-child', 'heartbeat-child', 'checkpoint-child', 'complete-child', 'drain-mailbox', 'acquire-group', 'acknowledge-grant', 'respond-claim-request', 'cancel-claim-request', 'cancel-acquisition-group', 'supersede-attempt', 'acknowledge-message', 'record-release-evidence', 'resolve-reservation-obligation', 'prepare-run-terminal', 'cancel-run-terminal', 'reconcile-run', 'prepare-operation', 'transition-operation', 'register-authoritative-artifact', 'assign-adjudication', 'claim-adjudication-assignment', 'complete-adjudication', 'submit-planning-contradiction']), idempotency_key: nullable(identifier()), repo_id: pathSegmentIdentifier(), workstream_run: nullable(pathSegmentIdentifier()), session_id: nullable(identifier()), fencing_generation: nullable(integer()), expected_version: nullable(integer()), payload: { type: 'object' },
     },
 };
 export const COORDINATOR_RESPONSE_SCHEMA = {
@@ -198,6 +216,22 @@ export const COORDINATOR_RESPONSE_SCHEMA = {
         schema_version: { const: AUTOPILOT_COORDINATOR_RESPONSE_SCHEMA }, protocol_version: { const: AUTOPILOT_COORDINATOR_PROTOCOL_VERSION }, request_id: identifier(), ok: { type: 'boolean' }, committed_event_seq: nullable(integer()), error_code: nullable(boundedString(128)), retryable: { type: 'boolean' }, payload: { type: 'object' },
     },
 };
+const projectionPageSchema = (kind) => exactObject(`autopilot.coordinator_${kind}_page.v1`, {
+    projection_schema_version: boundedString(192), section: identifier(), scan_token: boundedString(192), observed_at: nullable(boundedString(32)),
+    section_counts: { type: 'object', maxProperties: 64, additionalProperties: integer() }, projection: { type: 'object', maxProperties: 256 }, items: table(boundedPageValue, 1024), next_cursor: nullable(boundedString(2048)),
+});
+export const COORDINATOR_STATUS_PAGE_SCHEMA = projectionPageSchema('status');
+export const COORDINATOR_DOCTOR_PAGE_SCHEMA = projectionPageSchema('doctor');
+export const COORDINATOR_RUN_CATALOG_PAGE_SCHEMA = exactObject('autopilot.coordinator_run_catalog.v1', {
+    package_build: boundedString(192), protocol_version: { const: AUTOPILOT_COORDINATOR_PROTOCOL_VERSION }, database_schema_version: integer(1), runs: table(COORDINATION_RUN_SCHEMA, 1024), run_resources: table(COORDINATION_RUN_RESOURCE_SCHEMA, 1024), next_cursor: nullable(boundedString(2048)), pending_migration_recovery_count: integer(),
+});
+export const COORDINATOR_MIGRATION_RECOVERY_PAGE_SCHEMA = exactObject('autopilot.migration_recovery_query.v1', {
+    package_build: boundedString(192), protocol_version: { const: AUTOPILOT_COORDINATOR_PROTOCOL_VERSION }, database_schema_version: integer(1), recovery: table(COORDINATION_MIGRATION_RECOVERY_WORK_SCHEMA, 1024), runs: table(COORDINATION_RUN_SCHEMA, 1024), pending_migration_recovery_count: integer(),
+    next_cursor: nullable({ type: 'object', additionalProperties: false, required: ['cursor_run', 'cursor_recovery_id'], properties: { cursor_run: boundedString(1024), cursor_recovery_id: boundedString(1024) } }),
+});
+export const COORDINATOR_RECONCILIATION_DETAIL_PAGE_SCHEMA = exactObject('autopilot.reconciliation_detail_page.v1', { reconciliation_receipt: COORDINATION_RECONCILIATION_RECEIPT_SCHEMA, details: table(COORDINATION_RECONCILIATION_DETAIL_SCHEMA, 1024), next_cursor: nullable(boundedString(2048)) });
+export const COORDINATOR_RESULT_DETAIL_PAGE_SCHEMA = exactObject('autopilot.result_detail_page.v1', { result_receipt: COORDINATION_RESULT_RECEIPT_SCHEMA, details: table(COORDINATION_RESULT_DETAIL_SCHEMA, 1024), next_cursor: nullable(boundedString(2048)) });
+export const COORDINATOR_MAILBOX_PAGE_SCHEMA = { $id: 'urn:pi-autopilot:coordination:coordinator-mailbox-page-v1', type: 'object', additionalProperties: false, required: ['delivery_receipt', 'session_version', 'mailbox_cursor', 'messages', 'next_cursor', 'event_type', 'entity_type', 'entity_id'], properties: { delivery_receipt: COORDINATION_MAILBOX_DELIVERY_RECEIPT_SCHEMA, session_version: integer(1), mailbox_cursor: COORDINATION_MAILBOX_CURSOR_SCHEMA, messages: table(COORDINATION_MESSAGE_SCHEMA, 1024), next_cursor: nullable(boundedString(2048)), event_type: identifier(), entity_type: identifier(), entity_id: identifier() } };
 export const AUTOPILOT_COORDINATION_JSON_SCHEMAS = Object.freeze({
     repository: COORDINATION_REPOSITORY_SCHEMA,
     run: COORDINATION_RUN_SCHEMA,
@@ -216,6 +250,11 @@ export const AUTOPILOT_COORDINATION_JSON_SCHEMAS = Object.freeze({
     claim_request: COORDINATION_CLAIM_REQUEST_SCHEMA,
     mailbox_cursor: COORDINATION_MAILBOX_CURSOR_SCHEMA,
     reconciliation_evidence: COORDINATION_RECONCILIATION_EVIDENCE_SCHEMA,
+    reconciliation_receipt: COORDINATION_RECONCILIATION_RECEIPT_SCHEMA,
+    reconciliation_detail: COORDINATION_RECONCILIATION_DETAIL_SCHEMA,
+    mailbox_delivery_receipt: COORDINATION_MAILBOX_DELIVERY_RECEIPT_SCHEMA,
+    result_receipt: COORDINATION_RESULT_RECEIPT_SCHEMA,
+    result_detail: COORDINATION_RESULT_DETAIL_SCHEMA,
     message: COORDINATION_MESSAGE_SCHEMA,
     worktree: COORDINATION_WORKTREE_SCHEMA,
     worktree_operation: COORDINATION_WORKTREE_OPERATION_SCHEMA,
@@ -232,4 +271,11 @@ export const AUTOPILOT_COORDINATION_JSON_SCHEMAS = Object.freeze({
     snapshot: COORDINATION_SNAPSHOT_SCHEMA,
     coordinator_request: COORDINATOR_REQUEST_SCHEMA,
     coordinator_response: COORDINATOR_RESPONSE_SCHEMA,
+    coordinator_status_page: COORDINATOR_STATUS_PAGE_SCHEMA,
+    coordinator_doctor_page: COORDINATOR_DOCTOR_PAGE_SCHEMA,
+    coordinator_run_catalog_page: COORDINATOR_RUN_CATALOG_PAGE_SCHEMA,
+    coordinator_migration_recovery_page: COORDINATOR_MIGRATION_RECOVERY_PAGE_SCHEMA,
+    coordinator_reconciliation_detail_page: COORDINATOR_RECONCILIATION_DETAIL_PAGE_SCHEMA,
+    coordinator_result_detail_page: COORDINATOR_RESULT_DETAIL_PAGE_SCHEMA,
+    coordinator_mailbox_page: COORDINATOR_MAILBOX_PAGE_SCHEMA,
 });

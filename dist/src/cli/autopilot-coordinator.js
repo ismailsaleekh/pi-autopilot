@@ -6,6 +6,7 @@ import { migrationRecoveryUsage, runMigrationRecoveryCli } from "./migration-rec
 import { coordinationMigrationUsage, runCoordinationMigration } from "../core/coordination/migration.js";
 import { CoordinatorAlreadyRunningError, runCoordinatorUntilSignal } from "../core/coordination/server.js";
 import { coordinatorRuntimePaths } from "../core/coordination/runtime-paths.js";
+import { retireSchema11CoordinatorForUpgrade } from "../core/coordination/schema11-retirement.js";
 import { stageCoordinatorSemanticReplayFile } from "../core/coordination/store.js";
 import { AUTOPILOT_STATE_ROOT_ENV, resolveRepoIdentity } from "../core/parallel-runtime.js";
 function usage() {
@@ -15,13 +16,14 @@ function usage() {
         '       autopilot-coordinator doctor [--state-root <absolute-path>]',
         '       autopilot-coordinator export [--state-root <absolute-path>] [--output <absolute-path>]',
         '       autopilot-coordinator replay --replay-id <stable-id> --input <absolute-request-jsonl> [--state-root <absolute-path>]',
+        '       autopilot-coordinator upgrade-schema11 [--state-root <absolute-path>]',
         coordinationMigrationUsage(),
         migrationRecoveryUsage(),
     ].join('\n');
 }
 function parseArgs(argv) {
     const command = argv[0];
-    if (command !== 'serve' && command !== 'status' && command !== 'doctor' && command !== 'export' && command !== 'replay' && command !== 'migrate' && command !== 'verify' && command !== 'rollback' && command !== 'cutover')
+    if (command !== 'serve' && command !== 'status' && command !== 'doctor' && command !== 'export' && command !== 'replay' && command !== 'upgrade-schema11' && command !== 'migrate' && command !== 'verify' && command !== 'rollback' && command !== 'cutover')
         throw new Error(usage());
     let stateRoot = null;
     let repoId = 'global';
@@ -139,6 +141,10 @@ async function main(argv) {
                 throw new CoordinationRuntimeError('invalid-request', 'replay input identity is missing');
             const staged = await stageCoordinatorSemanticReplayFile(coordinatorRuntimePaths(env), args.replayId, args.inputPath);
             console.log(JSON.stringify({ schema_version: 'autopilot.coordinator_replay_stage_result.v1', replay_id: args.replayId, ...staged, recovery: 'restart the coordinator to consume the validated inbox atomically' }, null, 2));
+            return 0;
+        }
+        if (args.command === 'upgrade-schema11') {
+            console.log(JSON.stringify(await retireSchema11CoordinatorForUpgrade(coordinatorRuntimePaths(env)), null, 2));
             return 0;
         }
         const client = new CoordinatorClient({ env });

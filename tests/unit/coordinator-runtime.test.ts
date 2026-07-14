@@ -97,7 +97,7 @@ function queryPayload(response: CoordinatorResponseEnvelope, field: string): rea
 function request(overrides: Partial<CoordinatorRequestEnvelope>): CoordinatorRequestEnvelope {
   return {
     schema_version: 'autopilot.coordinator_request.v1',
-    protocol_version: '1.5',
+    protocol_version: '1.6',
     request_id: `request-${randomUUID()}`,
     action: 'status',
     idempotency_key: null,
@@ -262,12 +262,12 @@ void describe('transactional coordinator runtime', () => {
     const initial = await startCoordinatorServer(paths);
     await initial.close();
     const oldDatabase = new DatabaseSync(paths.databasePath);
-    oldDatabase.exec('DROP TABLE observations; DROP TABLE semantic_replays; ALTER TABLE session_leases DROP COLUMN attachment_kind; DROP TABLE migration_legacy_audit; DROP TABLE migration_recovery_work; DROP TABLE coordination_migrations; DROP TABLE run_resources; DROP TABLE evidence_artifacts; DROP TABLE adjudication_assignments; DROP TABLE authoritative_artifacts; DROP TABLE deadlock_resolutions; DROP TABLE wait_for_edges; DROP TABLE reservation_obligations; DROP TABLE run_terminal_intents; ALTER TABLE runs DROP COLUMN coordination_authority; DROP INDEX idx_worktree_operations_recovery; DROP INDEX idx_worktrees_owner; DROP TABLE reconciliation_evidence; DROP TABLE mailbox_cursors; DROP INDEX idx_messages_cursor; DROP TABLE acquisition_groups; DROP INDEX idx_edit_leases_repo; DROP INDEX idx_claim_requests_owner_status; DROP INDEX idx_claim_requests_requester_status; DELETE FROM schema_migrations WHERE version IN (2,3,4,5,6,7,8,9,10,11); PRAGMA user_version=1;');
+    oldDatabase.exec('DROP TABLE result_details; DROP TABLE result_receipts; DROP TABLE mailbox_delivery_items; DROP TABLE mailbox_deliveries; DROP TABLE reconciliation_details; DROP TABLE reconciliation_receipts; DROP TABLE observations; DROP TABLE semantic_replays; ALTER TABLE session_leases DROP COLUMN attachment_kind; DROP TABLE migration_legacy_audit; DROP TABLE migration_recovery_work; DROP TABLE coordination_migrations; DROP TABLE run_resources; DROP TABLE evidence_artifacts; DROP TABLE adjudication_assignments; DROP TABLE authoritative_artifacts; DROP TABLE deadlock_resolutions; DROP TABLE wait_for_edges; DROP TABLE reservation_obligations; DROP TABLE run_terminal_intents; ALTER TABLE runs DROP COLUMN coordination_authority; DROP INDEX idx_worktree_operations_recovery; DROP INDEX idx_worktrees_owner; DROP TABLE reconciliation_evidence; DROP TABLE mailbox_cursors; DROP INDEX idx_messages_cursor; DROP TABLE acquisition_groups; DROP INDEX idx_edit_leases_repo; DROP INDEX idx_claim_requests_owner_status; DROP INDEX idx_claim_requests_requester_status; DELETE FROM schema_migrations WHERE version IN (2,3,4,5,6,7,8,9,10,11,12); PRAGMA user_version=1;');
     oldDatabase.close();
     const upgraded = await startCoordinatorServer(paths);
     try {
       const doctor = await new CoordinatorClient({ env, autoStart: false }).query('doctor');
-      assert.equal(doctor.payload['database_schema_version'], 11);
+      assert.equal(doctor.payload['database_schema_version'], 12);
       assert.equal(typeof doctor.payload['last_backup_path'], 'string');
       const database = new DatabaseSync(paths.databasePath, { readOnly: true });
       try {
@@ -313,7 +313,7 @@ void describe('transactional coordinator runtime', () => {
     });
     await initial.close();
     const oldDatabase = new DatabaseSync(paths.databasePath);
-    oldDatabase.exec('DROP TABLE observations; DROP TABLE semantic_replays; ALTER TABLE session_leases DROP COLUMN attachment_kind; DROP TABLE migration_legacy_audit; DROP TABLE migration_recovery_work; DROP TABLE coordination_migrations; DROP TABLE run_resources; DROP TABLE evidence_artifacts; DROP TABLE adjudication_assignments; DROP TABLE authoritative_artifacts; DROP TABLE deadlock_resolutions; DROP TABLE wait_for_edges; DROP TABLE reservation_obligations; DROP TABLE run_terminal_intents; ALTER TABLE runs DROP COLUMN coordination_authority; DROP INDEX idx_worktree_operations_recovery; DROP INDEX idx_worktrees_owner; DROP TABLE reconciliation_evidence; DROP TABLE mailbox_cursors; DROP INDEX idx_messages_cursor; DELETE FROM schema_migrations WHERE version IN (3,4,5,6,7,8,9,10,11); PRAGMA user_version=2;');
+    oldDatabase.exec('DROP TABLE result_details; DROP TABLE result_receipts; DROP TABLE mailbox_delivery_items; DROP TABLE mailbox_deliveries; DROP TABLE reconciliation_details; DROP TABLE reconciliation_receipts; DROP TABLE observations; DROP TABLE semantic_replays; ALTER TABLE session_leases DROP COLUMN attachment_kind; DROP TABLE migration_legacy_audit; DROP TABLE migration_recovery_work; DROP TABLE coordination_migrations; DROP TABLE run_resources; DROP TABLE evidence_artifacts; DROP TABLE adjudication_assignments; DROP TABLE authoritative_artifacts; DROP TABLE deadlock_resolutions; DROP TABLE wait_for_edges; DROP TABLE reservation_obligations; DROP TABLE run_terminal_intents; ALTER TABLE runs DROP COLUMN coordination_authority; DROP INDEX idx_worktree_operations_recovery; DROP INDEX idx_worktrees_owner; DROP TABLE reconciliation_evidence; DROP TABLE mailbox_cursors; DROP INDEX idx_messages_cursor; DELETE FROM schema_migrations WHERE version IN (3,4,5,6,7,8,9,10,11,12); PRAGMA user_version=2;');
     oldDatabase.close();
     const upgraded = await startCoordinatorServer(paths);
     try {
@@ -350,7 +350,7 @@ void describe('transactional coordinator runtime', () => {
       const legacyDigest = `sha256:${createHash('sha256').update(canonicalJson(legacySemantic), 'utf8').digest('hex')}`;
       await server.close();
       const database = new DatabaseSync(coordinatorRuntimePaths(env).databasePath);
-      database.exec("UPDATE unit_attempts SET payload_json=json_remove(payload_json, '$.role'); UPDATE acquisition_groups SET payload_json=json_remove(payload_json, '$.acquisition_kind'); UPDATE idempotency_results SET payload_json=json_remove(payload_json, '$.acquisition_group.acquisition_kind') WHERE idempotency_key='migration-v5-group'; DROP TABLE observations; DROP TABLE semantic_replays; ALTER TABLE session_leases DROP COLUMN attachment_kind; DROP TABLE migration_legacy_audit; DROP TABLE migration_recovery_work; DROP TABLE coordination_migrations; DROP TABLE run_resources; DROP TABLE evidence_artifacts; DROP TABLE adjudication_assignments; DROP TABLE authoritative_artifacts; DROP TABLE deadlock_resolutions; DROP TABLE wait_for_edges; DELETE FROM schema_migrations WHERE version IN (6,7,8,9,10,11); PRAGMA user_version=5;");
+      database.exec("UPDATE unit_attempts SET payload_json=json_remove(payload_json, '$.role'); UPDATE acquisition_groups SET payload_json=json_remove(payload_json, '$.acquisition_kind'); UPDATE idempotency_results SET payload_json=json_remove(payload_json, '$.acquisition_group.acquisition_kind') WHERE idempotency_key='migration-v5-group'; DROP TABLE result_details; DROP TABLE result_receipts; DROP TABLE mailbox_delivery_items; DROP TABLE mailbox_deliveries; DROP TABLE reconciliation_details; DROP TABLE reconciliation_receipts; DROP TABLE observations; DROP TABLE semantic_replays; ALTER TABLE session_leases DROP COLUMN attachment_kind; DROP TABLE migration_legacy_audit; DROP TABLE migration_recovery_work; DROP TABLE coordination_migrations; DROP TABLE run_resources; DROP TABLE evidence_artifacts; DROP TABLE adjudication_assignments; DROP TABLE authoritative_artifacts; DROP TABLE deadlock_resolutions; DROP TABLE wait_for_edges; DELETE FROM schema_migrations WHERE version IN (6,7,8,9,10,11,12); PRAGMA user_version=5;");
       database.prepare("UPDATE idempotency_results SET request_sha256=? WHERE idempotency_key='migration-v5-group'").run(legacyDigest);
       database.close();
       server = await startCoordinatorServer(coordinatorRuntimePaths(env));

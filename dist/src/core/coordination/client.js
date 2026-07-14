@@ -4,7 +4,7 @@ import { open, unlink } from 'node:fs/promises';
 import { connect } from 'node:net';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { parseCoordinatorRequestEnvelope, parseCoordinatorResponseEnvelope } from "./contracts.js";
+import { parseCoordinationReconciliationDetail, parseCoordinationReconciliationReceipt, parseCoordinationResultDetail, parseCoordinationResultReceipt, parseCoordinatorMailboxPage, parseCoordinatorMigrationRecoveryPage, parseCoordinatorProjectionPage, parseCoordinatorReconciliationDetailPage, parseCoordinatorRequestEnvelope, parseCoordinatorResponseEnvelope, parseCoordinatorResultDetailPage, parseCoordinatorRunCatalogPage } from "./contracts.js";
 import { coordinationFailureDefinition, CoordinationRuntimeError } from "./failures.js";
 import { AUTOPILOT_COORDINATOR_TRANSPORT_VERSION, CoordinatorFrameDecoder, encodeCoordinatorFrame } from "./ipc.js";
 import { activeCoordinationMigrationFreeze } from "./migration-paths.js";
@@ -14,11 +14,14 @@ import { classifyCoordinatorRuntimeIdentity } from "./runtime-compatibility.js";
 import { acquireSerializedProcessGuard, discardLockTombstone, quarantineExactLock, readExactLockText, restoreLockTombstone } from "./serialized-lock.js";
 import { coordinationErrorCode } from "./store.js";
 import { preparePredecessorCoordinatorUpgrade, resumeCoordinatorUpgrade } from "./upgrade.js";
-import { parseKnownCompatibleCurrentCoordinatorLock, parsePredecessorCoordinatorLock, parsePriorSchema10CurrentCoordinatorLock, parsePriorSchema9CurrentCoordinatorLock } from "./upgrade-contracts.js";
+import { parseKnownCompatibleCurrentCoordinatorLock, parsePredecessorCoordinatorLock, parsePriorSchema11CurrentCoordinatorLock, parsePriorSchema10CurrentCoordinatorLock, parsePriorSchema9CurrentCoordinatorLock } from "./upgrade-contracts.js";
 import { AUTOPILOT_COORDINATOR_PROTOCOL_VERSION } from "./types.js";
 const DEFAULT_REQUEST_TIMEOUT_MS = 5_000;
 const DEFAULT_STARTUP_TIMEOUT_MS = 10_000;
 const EMPTY_COORDINATOR_PAYLOAD = Object.freeze({});
+function isJsonMap(value) {
+    return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
 function sleep(ms) {
     return new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
 }
@@ -388,7 +391,28 @@ export class CoordinatorClient {
     async request(requestValue) {
         const request = parseCoordinatorRequestEnvelope(requestValue);
         const capability = await readOrCreateCoordinatorCapability(this.#paths);
-        return await this.#sendWithRecovery(request, capability);
+        const response = await this.#sendWithRecovery(request, capability);
+        if (response.ok) {
+            if (request.action === 'status')
+                parseCoordinatorProjectionPage(response.payload, 'status');
+            else if (request.action === 'doctor')
+                parseCoordinatorProjectionPage(response.payload, 'doctor');
+            else if (request.action === 'run-catalog')
+                parseCoordinatorRunCatalogPage(response.payload);
+            else if (request.action === 'migration-recovery')
+                parseCoordinatorMigrationRecoveryPage(response.payload);
+            else if (request.action === 'reconciliation-details')
+                parseCoordinatorReconciliationDetailPage(response.payload);
+            else if (request.action === 'result-details')
+                parseCoordinatorResultDetailPage(response.payload);
+            else if (request.action === 'drain-mailbox')
+                parseCoordinatorMailboxPage(response.payload);
+            if (response.payload['reconciliation_receipt'] !== undefined)
+                parseCoordinationReconciliationReceipt(response.payload['reconciliation_receipt']);
+            if (response.payload['result_receipt'] !== undefined)
+                parseCoordinationResultReceipt(response.payload['result_receipt']);
+        }
+        return response;
     }
     async #sendCompatibleRequestOnce(request, capability, timeoutMs) {
         if (request.action === 'handshake') {
@@ -410,7 +434,7 @@ export class CoordinatorClient {
             if (!this.#autoStart || !isConnectionFailure(error))
                 throw error;
             const freeze = activeCoordinationMigrationFreeze(this.#paths.stateRoot);
-            const recoveryAction = request.action === 'handshake' || request.action === 'status' || request.action === 'doctor' || request.action === 'export' || request.action === 'migration-recovery' || request.action === 'run-catalog' || request.action === 'attach-migration-recovery' || request.action === 'resolve-migration-recovery' || request.action === 'detach-session' || request.action === 'heartbeat';
+            const recoveryAction = request.action === 'handshake' || request.action === 'status' || request.action === 'doctor' || request.action === 'export' || request.action === 'migration-recovery' || request.action === 'run-catalog' || request.action === 'reconciliation-details' || request.action === 'result-details' || request.action === 'attach-migration-recovery' || request.action === 'resolve-migration-recovery' || request.action === 'detach-session' || request.action === 'heartbeat';
             if (freeze !== null && !(this.#allowMigrationRecoveryAutoStart && recoveryAction))
                 throw new CoordinationRuntimeError('coordinator-contention', 'coordinator auto-start is forbidden while coordination migration is frozen; only an explicit recovery client may start the imported candidate store', [freeze]);
             await this.#ensureStarted(capability);
@@ -431,34 +455,181 @@ export class CoordinatorClient {
         }
     }
     async query(action, repoId = 'global', workstreamRun = null, payload = {}) {
+        if ((action === 'status' || action === 'doctor') && Object.keys(payload).length === 0)
+            return await this.#queryProjection(action, repoId, workstreamRun);
+        return await this.#queryWire(action, repoId, workstreamRun, payload);
+    }
+    async #queryWire(action, repoId, workstreamRun, payload) {
         return await this.request({
-            schema_version: 'autopilot.coordinator_request.v1',
-            protocol_version: AUTOPILOT_COORDINATOR_PROTOCOL_VERSION,
-            request_id: `request-${randomUUID()}`,
-            action,
-            idempotency_key: null,
-            repo_id: repoId,
-            workstream_run: workstreamRun,
-            session_id: null,
-            fencing_generation: null,
-            expected_version: null,
-            payload,
+            schema_version: 'autopilot.coordinator_request.v1', protocol_version: AUTOPILOT_COORDINATOR_PROTOCOL_VERSION, request_id: `request-${randomUUID()}`,
+            action, idempotency_key: null, repo_id: repoId, workstream_run: workstreamRun, session_id: null, fencing_generation: null, expected_version: null, payload,
         });
     }
+    async #queryProjection(action, repoId, workstreamRun) {
+        const deadline = Date.now() + this.#requestTimeoutMs;
+        let summary;
+        let attempt = 0;
+        while (true) {
+            try {
+                summary = await this.#queryWire(action, repoId, workstreamRun, {});
+                break;
+            }
+            catch (error) {
+                if (!(error instanceof CoordinationRuntimeError) || error.code !== 'coordinator-contention' || Date.now() >= deadline)
+                    throw error;
+                attempt += 1;
+                await sleep(Math.min(100, 10 * attempt));
+            }
+        }
+        const projection = summary.payload['projection'];
+        const counts = summary.payload['section_counts'];
+        const scanToken = summary.payload['scan_token'];
+        if (!isJsonMap(projection) || !isJsonMap(counts) || typeof scanToken !== 'string')
+            throw new CoordinationRuntimeError('invalid-state', `${action} summary page omitted its bounded projection contract`);
+        const aggregate = { ...projection };
+        const sections = Object.keys(counts).sort((left, right) => left.localeCompare(right));
+        for (const section of sections) {
+            const count = counts[section];
+            if (typeof count !== 'number' || !Number.isSafeInteger(count) || count < 0)
+                throw new CoordinationRuntimeError('invalid-state', `${action} summary section count is invalid`, [section]);
+            const inline = projection[section];
+            if (inline !== undefined) {
+                if (!Array.isArray(inline) || inline.length !== count)
+                    throw new CoordinationRuntimeError('invalid-state', `${action} inline summary section does not match its exact count`, [section]);
+                aggregate[section] = Object.freeze([...inline]);
+                continue;
+            }
+            const items = [];
+            let cursor = null;
+            do {
+                const pagePayload = { section, scan_token: scanToken };
+                if (cursor !== null)
+                    pagePayload['cursor'] = cursor;
+                const page = await this.#queryWire(action, repoId, workstreamRun, pagePayload);
+                const pageItems = page.payload['items'];
+                const next = page.payload['next_cursor'];
+                if (!Array.isArray(pageItems) || (next !== null && typeof next !== 'string'))
+                    throw new CoordinationRuntimeError('invalid-state', `${action} detail page is malformed`, [section]);
+                items.push(...pageItems);
+                cursor = typeof next === 'string' ? next : null;
+            } while (cursor !== null);
+            if (items.length !== count)
+                throw new CoordinationRuntimeError('invalid-state', `${action} detail pages do not match their exact summary count`, [section, `expected=${String(count)}`, `actual=${String(items.length)}`]);
+            aggregate[section] = Object.freeze(items);
+        }
+        return { ...summary, payload: Object.freeze(aggregate) };
+    }
+    async reconciliationDetails(input) {
+        const receipt = parseCoordinationReconciliationReceipt(input.receipt);
+        if (receipt.repo_id !== input.repoId || receipt.workstream_run !== input.workstreamRun)
+            throw new CoordinationRuntimeError('unauthorized-client', 'reconciliation receipt does not belong to the requested attached run');
+        const emptyDigest = `sha256:${createHash('sha256').update('[]', 'utf8').digest('hex')}`;
+        if (receipt.detail_count === 0) {
+            if (receipt.details_sha256 !== emptyDigest || Object.values(receipt.counts).some((count) => count !== 0))
+                throw new CoordinationRuntimeError('invalid-state', 'empty reconciliation receipt has nonempty count or digest evidence');
+            return Object.freeze([]);
+        }
+        const details = [];
+        let cursor = null;
+        do {
+            const sessionAuthority = 'sessionId' in input;
+            const response = await this.request({
+                schema_version: 'autopilot.coordinator_request.v1', protocol_version: AUTOPILOT_COORDINATOR_PROTOCOL_VERSION, request_id: `request-${randomUUID()}`,
+                action: 'reconciliation-details', idempotency_key: null, repo_id: input.repoId, workstream_run: input.workstreamRun,
+                session_id: sessionAuthority ? input.sessionId : null, fencing_generation: sessionAuthority ? input.fencingGeneration : null, expected_version: null,
+                payload: sessionAuthority
+                    ? { reconciliation_receipt_id: receipt.reconciliation_receipt_id, cursor, session_lease_id: input.sessionLeaseId, session_token: input.sessionToken }
+                    : { reconciliation_receipt_id: receipt.reconciliation_receipt_id, cursor, child_lease_id: input.childLeaseId, child_token: input.childToken, pid: input.pid, boot_id: input.bootId },
+            });
+            const pageReceipt = parseCoordinationReconciliationReceipt(response.payload['reconciliation_receipt']);
+            if (JSON.stringify(pageReceipt) !== JSON.stringify(receipt))
+                throw new CoordinationRuntimeError('invalid-state', 'reconciliation detail page changed its exact immutable receipt');
+            const page = response.payload['details'];
+            const next = response.payload['next_cursor'];
+            if (!Array.isArray(page) || (next !== null && typeof next !== 'string'))
+                throw new CoordinationRuntimeError('invalid-state', 'reconciliation detail page is malformed');
+            details.push(...page.map((entry) => parseCoordinationReconciliationDetail(entry)));
+            cursor = typeof next === 'string' ? next : null;
+        } while (cursor !== null);
+        if (details.length !== receipt.detail_count)
+            throw new CoordinationRuntimeError('invalid-state', 'reconciliation detail pages do not match their exact receipt count');
+        const actualCounts = { 'released-lease': 0, 'released-observation': 0, 'stale-observation': 0, 'released-request': 0, notification: 0, 'offered-group': 0 };
+        for (const [index, detail] of details.entries()) {
+            if (detail.ordinal !== index + 1)
+                throw new CoordinationRuntimeError('invalid-state', 'reconciliation detail pages do not have exact contiguous ordinals');
+            actualCounts[detail.kind] += 1;
+        }
+        if (JSON.stringify(actualCounts) !== JSON.stringify(receipt.counts))
+            throw new CoordinationRuntimeError('invalid-state', 'reconciliation detail pages do not match their exact per-kind counts');
+        const digest = `sha256:${createHash('sha256').update(JSON.stringify(details), 'utf8').digest('hex')}`;
+        if (digest !== receipt.details_sha256)
+            throw new CoordinationRuntimeError('invalid-state', 'reconciliation detail pages do not match their exact receipt digest');
+        return Object.freeze(details);
+    }
+    async resultDetails(input) {
+        const receipt = parseCoordinationResultReceipt(input.receipt);
+        if (receipt.repo_id !== input.repoId || receipt.workstream_run !== input.workstreamRun)
+            throw new CoordinationRuntimeError('unauthorized-client', 'result receipt does not belong to the requested attached run');
+        const details = [];
+        let cursor = null;
+        do {
+            const response = await this.request({
+                schema_version: 'autopilot.coordinator_request.v1', protocol_version: AUTOPILOT_COORDINATOR_PROTOCOL_VERSION, request_id: `request-${randomUUID()}`,
+                action: 'result-details', idempotency_key: null, repo_id: input.repoId, workstream_run: input.workstreamRun, session_id: input.sessionId, fencing_generation: input.fencingGeneration, expected_version: null,
+                payload: { result_receipt_id: receipt.result_receipt_id, cursor, session_lease_id: input.sessionLeaseId, session_token: input.sessionToken },
+            });
+            const pageReceipt = parseCoordinationResultReceipt(response.payload['result_receipt']);
+            if (JSON.stringify(pageReceipt) !== JSON.stringify(receipt))
+                throw new CoordinationRuntimeError('invalid-state', 'result detail page changed its exact immutable receipt');
+            const page = response.payload['details'];
+            const next = response.payload['next_cursor'];
+            if (!Array.isArray(page) || (next !== null && typeof next !== 'string'))
+                throw new CoordinationRuntimeError('invalid-state', 'result detail page is malformed');
+            details.push(...page.map((entry) => parseCoordinationResultDetail(entry)));
+            cursor = typeof next === 'string' ? next : null;
+        } while (cursor !== null);
+        if (details.length !== receipt.detail_count)
+            throw new CoordinationRuntimeError('invalid-state', 'result detail pages do not match their exact receipt count');
+        const collections = {};
+        for (const [index, detail] of details.entries()) {
+            if (detail.ordinal !== index + 1)
+                throw new CoordinationRuntimeError('invalid-state', 'result detail pages do not have exact contiguous ordinals');
+            const values = collections[detail.collection] ?? [];
+            if (detail.collection_ordinal !== values.length + 1)
+                throw new CoordinationRuntimeError('invalid-state', 'result collection pages do not have exact contiguous ordinals', [detail.collection]);
+            values.push(detail.value);
+            collections[detail.collection] = values;
+        }
+        if (`sha256:${createHash('sha256').update(JSON.stringify(details), 'utf8').digest('hex')}` !== receipt.details_sha256)
+            throw new CoordinationRuntimeError('invalid-state', 'result detail pages do not match their exact receipt digest');
+        for (const [name, expected] of Object.entries(receipt.collections)) {
+            const values = collections[name] ?? [];
+            if (values.length !== expected.item_count || `sha256:${createHash('sha256').update(JSON.stringify(values), 'utf8').digest('hex')}` !== expected.items_sha256)
+                throw new CoordinationRuntimeError('invalid-state', 'result detail pages do not match their collection receipt', [name]);
+            collections[name] = values;
+        }
+        if (Object.keys(collections).length !== Object.keys(receipt.collections).length)
+            throw new CoordinationRuntimeError('invalid-state', 'result details contain an undeclared collection');
+        return Object.freeze(Object.fromEntries(Object.entries(collections).map(([name, values]) => [name, Object.freeze(values)])));
+    }
     async mutate(action, identity, payload) {
-        return await this.request({
-            schema_version: 'autopilot.coordinator_request.v1',
-            protocol_version: AUTOPILOT_COORDINATOR_PROTOCOL_VERSION,
-            request_id: `request-${randomUUID()}`,
-            action,
-            idempotency_key: identity.idempotencyKey,
-            repo_id: identity.repoId,
-            workstream_run: identity.workstreamRun,
-            session_id: identity.sessionId,
-            fencing_generation: identity.fencingGeneration,
-            expected_version: identity.expectedVersion,
-            payload,
+        const response = await this.request({
+            schema_version: 'autopilot.coordinator_request.v1', protocol_version: AUTOPILOT_COORDINATOR_PROTOCOL_VERSION, request_id: `request-${randomUUID()}`,
+            action, idempotency_key: identity.idempotencyKey, repo_id: identity.repoId, workstream_run: identity.workstreamRun, session_id: identity.sessionId,
+            fencing_generation: identity.fencingGeneration, expected_version: identity.expectedVersion, payload,
         });
+        const rawReceipt = response.payload['result_receipt'];
+        if (rawReceipt === undefined)
+            return response;
+        if (identity.sessionId === null || identity.fencingGeneration === null)
+            throw new CoordinationRuntimeError('invalid-state', `child-scoped mutation ${action} returned a parent-only result receipt`);
+        const sessionLeaseId = payload['session_lease_id'];
+        const sessionToken = payload['session_token'];
+        if (typeof sessionLeaseId !== 'string' || typeof sessionToken !== 'string')
+            throw new CoordinationRuntimeError('invalid-state', `mutation ${action} returned a result receipt without session authority for its production consumer`);
+        const receipt = parseCoordinationResultReceipt(rawReceipt);
+        const collections = await this.resultDetails({ repoId: identity.repoId, workstreamRun: identity.workstreamRun, sessionId: identity.sessionId, fencingGeneration: identity.fencingGeneration, sessionLeaseId, sessionToken, receipt });
+        return { ...response, payload: Object.freeze({ ...response.payload, ...collections }) };
     }
     async #ensureStarted(capability) {
         const deadline = Date.now() + this.#startupTimeoutMs;
@@ -489,7 +660,7 @@ export class CoordinatorClient {
                         let current = null;
                         try {
                             const parsed = JSON.parse(currentText);
-                            current = parseKnownCompatibleCurrentCoordinatorLock(parsed) ?? parsePriorSchema10CurrentCoordinatorLock(parsed) ?? parsePriorSchema9CurrentCoordinatorLock(parsed);
+                            current = parseKnownCompatibleCurrentCoordinatorLock(parsed) ?? parsePriorSchema11CurrentCoordinatorLock(parsed) ?? parsePriorSchema10CurrentCoordinatorLock(parsed) ?? parsePriorSchema9CurrentCoordinatorLock(parsed);
                         }
                         catch { /* fail below */ }
                         if (current === null)
@@ -567,7 +738,7 @@ export class CoordinatorClient {
         if (compatibility.reason === 'protocol-mismatch')
             throw new CoordinationRuntimeError('protocol-mismatch', `coordinator handshake protocol is incompatible with ${AUTOPILOT_COORDINATOR_PROTOCOL_VERSION}`);
         if (compatibility.reason === 'unknown-build')
-            throw new CoordinationRuntimeError('protocol-mismatch', `coordinator package build ${compatibility.package_build ?? '<missing>'} is outside the closed protocol-1.5/schema-11 compatibility lineage`);
+            throw new CoordinationRuntimeError('protocol-mismatch', `coordinator package build ${compatibility.package_build ?? '<missing>'} is outside the closed protocol-1.6/schema-12 compatibility lineage`);
         throw new CoordinationRuntimeError('schema-mismatch', 'coordinator readiness response omitted a valid runtime identity');
     }
     #assertSuccess(response) {
