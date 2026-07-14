@@ -11,8 +11,8 @@ import { COORDINATOR_GRANT_OFFER_SWEEP_MS, enforcePrivateAuthorityPath, ensureCo
 import { acquireSerializedProcessGuard, discardLockTombstone, quarantineExactLock, readExactLockText, restoreLockTombstone } from './serialized-lock.ts';
 import { CoordinatorStore, type StoreClock } from './store.ts';
 import { AUTOPILOT_COORDINATOR_PROTOCOL_VERSION, type CoordinatorResponseEnvelope } from './types.ts';
-import { recordCoordinatorFenceHandoff, readCoordinatorUpgradeIntent } from './upgrade.ts';
-import { COORDINATOR_UPGRADE_PATH, parseCurrentCoordinatorLock, parsePredecessorCoordinatorLock, type CurrentCoordinatorLock, type PredecessorCoordinatorLock } from './upgrade-contracts.ts';
+import { readKnownCoordinatorUpgradeIntent, recordCoordinatorFenceHandoff } from './upgrade.ts';
+import { COORDINATOR_UPGRADE_PATH, parseCurrentCoordinatorLock, parseKnownCompatibleCurrentCoordinatorLock, parsePredecessorCoordinatorLock, type CurrentCoordinatorLock, type KnownCompatibleCurrentCoordinatorLock, type PredecessorCoordinatorLock } from './upgrade-contracts.ts';
 
 type LockRecord = CurrentCoordinatorLock;
 
@@ -38,7 +38,7 @@ export class CoordinatorAlreadyRunningError extends Error {
 function failureText(error: unknown): string { return error instanceof Error ? error.message : String(error); }
 
 function sameCurrentLock(left: LockRecord, right: LockRecord): boolean {
-  return left.pid === right.pid && left.boot_id === right.boot_id && left.process_start_identity === right.process_start_identity && left.token === right.token && left.instance_id === right.instance_id && left.started_at === right.started_at;
+  return left.pid === right.pid && left.boot_id === right.boot_id && left.process_start_identity === right.process_start_identity && left.token === right.token && left.instance_id === right.instance_id && left.package_build === right.package_build && left.protocol_version === right.protocol_version && left.database_schema_version === right.database_schema_version && left.started_at === right.started_at;
 }
 
 function samePredecessorLock(left: PredecessorCoordinatorLock, right: PredecessorCoordinatorLock): boolean {
@@ -91,10 +91,12 @@ async function acquireCoordinatorLock(paths: CoordinatorRuntimePaths, adoption?:
   };
   let predecessorFence: PredecessorCoordinatorLock = { schema_version: 'autopilot.coordinator_lock.v1', pid: process.pid, boot_id: predecessorCompatibleBootId(), token: randomBytes(24).toString('hex'), started_at: record.started_at };
   try {
+    const startupIntent = await readKnownCoordinatorUpgradeIntent(paths);
+    if (startupIntent !== null && startupIntent.target.package_build !== COORDINATOR_UPGRADE_PATH.target.package_build && startupIntent.state !== 'committed') throw new CoordinationRuntimeError('recovery-required', `historical coordinator upgrade target ${startupIntent.target.package_build} is ${startupIntent.state}; startup cannot rewrite another build's intent`);
     const currentText = await readExactLockText(paths.lockPath);
     if (currentText !== null) {
-      let current: LockRecord | null = null;
-      try { current = parseCurrentCoordinatorLock(JSON.parse(currentText) as unknown); } catch { /* fail below */ }
+      let current: KnownCompatibleCurrentCoordinatorLock | null = null;
+      try { current = parseKnownCompatibleCurrentCoordinatorLock(JSON.parse(currentText) as unknown); } catch { /* fail below */ }
       if (current === null) throw new CoordinationRuntimeError('protocol-mismatch', 'current-generation lifecycle lock belongs to an unknown build');
       // PID liveness always wins. Boot-id disagreement is never stale proof.
       if (isProcessAlive(current.pid)) throw new CoordinatorAlreadyRunningError(`coordinator is already running as pid ${String(current.pid)}`);
@@ -110,8 +112,8 @@ async function acquireCoordinatorLock(paths: CoordinatorRuntimePaths, adoption?:
       let predecessor: PredecessorCoordinatorLock | null = null;
       try { predecessor = parsePredecessorCoordinatorLock(JSON.parse(predecessorText) as unknown); } catch { /* fail below */ }
       if (predecessor === null) throw new CoordinationRuntimeError('protocol-mismatch', 'predecessor lifecycle path contains an unknown lock');
-      const intent = await readCoordinatorUpgradeIntent(paths);
-      const upgradeHandoff = intent !== null && intent.predecessor_fence !== null && ['starting', 'reconnect-verified'].includes(intent.state) && samePredecessorLock(predecessor, intent.predecessor_fence);
+      const intent = await readKnownCoordinatorUpgradeIntent(paths);
+      const upgradeHandoff = intent !== null && intent.target.package_build === COORDINATOR_UPGRADE_PATH.target.package_build && intent.predecessor_fence !== null && ['starting', 'reconnect-verified'].includes(intent.state) && samePredecessorLock(predecessor, intent.predecessor_fence);
       const adoptedHandoff = adoption !== undefined && samePredecessorLock(predecessor, adoption.predecessorFence);
       const authorizedHandoff = upgradeHandoff || adoptedHandoff;
       if (isProcessAlive(predecessor.pid) && !authorizedHandoff) throw new CoordinatorAlreadyRunningError(`predecessor lifecycle path is fenced by live pid ${String(predecessor.pid)}`);
@@ -280,7 +282,7 @@ function handleSocket(socket: Socket, store: CoordinatorStore, capability: strin
             action = typeof legacy.request['action'] === 'string' ? legacy.request['action'] : null;
             const timerFailure = backgroundFailure();
             if (timerFailure !== null) throw new CoordinationRuntimeError('system-fatal', `coordinator predecessor fence maintenance failed: ${timerFailure.message}`);
-            const upgradeIntent = await readCoordinatorUpgradeIntent(paths);
+            const upgradeIntent = await readKnownCoordinatorUpgradeIntent(paths);
             if (upgradeIntent !== null && upgradeIntent.state !== 'committed' && action !== 'handshake' && action !== 'status' && action !== 'doctor') throw new CoordinationRuntimeError('coordinator-contention', 'coordinator upgrade is not durably committed; mutation/replay authority remains closed');
             response = store.replayLegacyRequest(legacy.request);
             legacyReplayProtocol = legacy.replay_protocol;
@@ -291,7 +293,7 @@ function handleSocket(socket: Socket, store: CoordinatorStore, capability: strin
             if (!authenticated(currentTransport.capability, capability)) throw new CoordinationRuntimeError('unauthorized-client', 'coordinator capability proof was rejected');
             const timerFailure = backgroundFailure();
             if (timerFailure !== null) throw new CoordinationRuntimeError('system-fatal', `coordinator predecessor fence maintenance failed: ${timerFailure.message}`);
-            const upgradeIntent = await readCoordinatorUpgradeIntent(paths);
+            const upgradeIntent = await readKnownCoordinatorUpgradeIntent(paths);
             if (upgradeIntent !== null && upgradeIntent.state !== 'committed' && action !== 'handshake' && action !== 'status' && action !== 'doctor') throw new CoordinationRuntimeError('coordinator-contention', 'coordinator upgrade is not durably committed; mutation authority remains closed');
             response = store.handle(currentTransport.request);
           }

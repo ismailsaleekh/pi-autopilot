@@ -4,34 +4,23 @@ import { open, unlink } from 'node:fs/promises';
 import { connect } from 'node:net';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { CoordinationContractError, parseCoordinatorRequestEnvelope, parseCoordinatorResponseEnvelope } from "./contracts.js";
+import { parseCoordinatorRequestEnvelope, parseCoordinatorResponseEnvelope } from "./contracts.js";
 import { coordinationFailureDefinition, CoordinationRuntimeError } from "./failures.js";
 import { AUTOPILOT_COORDINATOR_TRANSPORT_VERSION, CoordinatorFrameDecoder, encodeCoordinatorFrame } from "./ipc.js";
 import { activeCoordinationMigrationFreeze } from "./migration-paths.js";
 import { currentBootId, isProcessAlive } from "./process-identity.js";
-import { COORDINATOR_DATABASE_SCHEMA_VERSION, COORDINATOR_PACKAGE_BUILD, coordinatorRuntimePaths, enforcePrivateAuthorityPath, ensureCoordinatorPrivateRoots, readOrCreateCoordinatorCapability } from "./runtime-paths.js";
+import { COORDINATOR_DATABASE_SCHEMA_VERSION, coordinatorRuntimePaths, enforcePrivateAuthorityPath, ensureCoordinatorPrivateRoots, readOrCreateCoordinatorCapability } from "./runtime-paths.js";
+import { classifyCoordinatorRuntimeIdentity } from "./runtime-compatibility.js";
 import { acquireSerializedProcessGuard, discardLockTombstone, quarantineExactLock, readExactLockText, restoreLockTombstone } from "./serialized-lock.js";
 import { coordinationErrorCode } from "./store.js";
 import { preparePredecessorCoordinatorUpgrade, resumeCoordinatorUpgrade } from "./upgrade.js";
-import { parsePredecessorCoordinatorLock } from "./upgrade-contracts.js";
+import { parseKnownCompatibleCurrentCoordinatorLock, parsePredecessorCoordinatorLock } from "./upgrade-contracts.js";
 import { AUTOPILOT_COORDINATOR_PROTOCOL_VERSION } from "./types.js";
 const DEFAULT_REQUEST_TIMEOUT_MS = 5_000;
 const DEFAULT_STARTUP_TIMEOUT_MS = 10_000;
 const EMPTY_COORDINATOR_PAYLOAD = Object.freeze({});
 function sleep(ms) {
     return new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
-}
-function compatibilityFailure(error) {
-    if (typeof error === 'object' && error !== null) {
-        const record = error;
-        if (record['code'] === 'protocol-mismatch' || record['code'] === 'schema-mismatch')
-            return true;
-        if (record['code'] === 'invalid-coordination-contract' && Array.isArray(record['issues']) && record['issues'].some((issue) => typeof issue === 'string' && issue.includes('protocol_version')))
-            return true;
-    }
-    if (error instanceof CoordinationRuntimeError)
-        return error.code === 'protocol-mismatch' || error.code === 'schema-mismatch';
-    return error instanceof CoordinationContractError && error.issues.some((issue) => issue.includes('protocol_version'));
 }
 function errorCode(error) {
     if (error instanceof Error && 'code' in error && typeof error.code === 'string')
@@ -308,13 +297,84 @@ async function sendOnce(paths, capability, request, timeoutMs) {
         });
     });
 }
+async function sendAfterCompatibleHandshake(paths, capability, probe, request, timeoutMs, validateProbe) {
+    const socket = await connectSocket(paths.socketPath, timeoutMs);
+    const decoder = new CoordinatorFrameDecoder();
+    return await new Promise((resolveResponse, rejectResponse) => {
+        let settled = false;
+        let phase = 'probe';
+        const finishError = (error) => {
+            if (settled)
+                return;
+            settled = true;
+            clearTimeout(timer);
+            socket.destroy();
+            rejectResponse(error);
+        };
+        const finishResponse = (response) => {
+            if (settled)
+                return;
+            settled = true;
+            clearTimeout(timer);
+            socket.end();
+            resolveResponse(response);
+        };
+        const writeRequest = (value) => {
+            const transport = { transport_version: AUTOPILOT_COORDINATOR_TRANSPORT_VERSION, capability, request: value };
+            socket.write(encodeCoordinatorFrame(transport), (error) => {
+                if (error !== null && error !== undefined)
+                    finishError(error);
+            });
+        };
+        const timer = setTimeout(() => {
+            const error = new Error(`coordinator request timed out after ${String(timeoutMs)} ms`);
+            Object.assign(error, { code: 'ETIMEDOUT' });
+            finishError(error);
+        }, timeoutMs);
+        socket.on('data', (chunk) => {
+            try {
+                const frames = decoder.push(chunk);
+                if (frames.length > 1)
+                    throw new CoordinationRuntimeError('invalid-state', 'coordinator sent unsolicited response frames before the next request');
+                for (const frame of frames) {
+                    if (typeof frame === 'object' && frame !== null && !Array.isArray(frame)) {
+                        const observedProtocol = frame['protocol_version'];
+                        if (typeof observedProtocol === 'string' && observedProtocol !== AUTOPILOT_COORDINATOR_PROTOCOL_VERSION)
+                            throw new CoordinationRuntimeError('protocol-mismatch', `coordinator response protocol ${observedProtocol} is incompatible with ${AUTOPILOT_COORDINATOR_PROTOCOL_VERSION}`);
+                    }
+                    const response = parseCoordinatorResponseEnvelope(frame);
+                    if (phase === 'probe') {
+                        if (response.request_id !== probe.request_id)
+                            throw new CoordinationRuntimeError('invalid-state', 'coordinator handshake response request id mismatch');
+                        validateProbe(response);
+                        phase = 'request';
+                        writeRequest(request);
+                    }
+                    else {
+                        if (response.request_id !== request.request_id)
+                            throw new CoordinationRuntimeError('invalid-state', 'coordinator response request id mismatch');
+                        finishResponse(response);
+                    }
+                }
+            }
+            catch (error) {
+                finishError(error instanceof Error ? error : new Error(String(error)));
+            }
+        });
+        socket.once('error', finishError);
+        socket.once('close', () => {
+            if (!settled)
+                finishError(new Error('coordinator connection closed before a response'));
+        });
+        writeRequest(probe);
+    });
+}
 export class CoordinatorClient {
     #paths;
     #autoStart;
     #allowMigrationRecoveryAutoStart;
     #requestTimeoutMs;
     #startupTimeoutMs;
-    #compatibilityVerified = false;
     constructor(options = {}) {
         this.#paths = coordinatorRuntimePaths(options.env ?? process.env);
         this.#autoStart = options.autoStart !== false;
@@ -328,46 +388,46 @@ export class CoordinatorClient {
     async request(requestValue) {
         const request = parseCoordinatorRequestEnvelope(requestValue);
         const capability = await readOrCreateCoordinatorCapability(this.#paths);
-        if (!this.#compatibilityVerified && request.action !== 'handshake' && request.action !== 'status' && request.action !== 'migration-recovery' && request.action !== 'run-catalog') {
-            const probeResponse = await this.#sendWithRecovery(this.#probeRequest(), capability);
-            this.#assertCoordinatorCompatibility(probeResponse);
-            this.#compatibilityVerified = true;
-        }
-        const response = await this.#sendWithRecovery(request, capability);
-        if (request.action === 'handshake' || request.action === 'status' || request.action === 'migration-recovery' || request.action === 'run-catalog') {
+        return await this.#sendWithRecovery(request, capability);
+    }
+    async #sendCompatibleRequestOnce(request, capability, timeoutMs) {
+        if (request.action === 'handshake') {
+            const response = this.#assertSuccess(await sendOnce(this.#paths, capability, request, timeoutMs));
             this.#assertCoordinatorCompatibility(response);
-            this.#compatibilityVerified = true;
+            return response;
         }
-        return response;
+        return this.#assertSuccess(await sendAfterCompatibleHandshake(this.#paths, capability, this.#probeRequest(), request, timeoutMs, (probeResponse) => {
+            this.#assertCoordinatorCompatibility(this.#assertSuccess(probeResponse));
+        }));
     }
     async #sendWithRecovery(request, capability) {
         try {
-            return this.#assertSuccess(await sendOnce(this.#paths, capability, request, this.#requestTimeoutMs));
+            return await this.#sendCompatibleRequestOnce(request, capability, this.#requestTimeoutMs);
         }
         catch (error) {
-            if (!this.#autoStart || (!isConnectionFailure(error) && !compatibilityFailure(error)))
+            // A responding but incompatible endpoint is authoritative evidence, not a
+            // missing daemon. Never route it into replacement or predecessor upgrade.
+            if (!this.#autoStart || !isConnectionFailure(error))
                 throw error;
             const freeze = activeCoordinationMigrationFreeze(this.#paths.stateRoot);
             const recoveryAction = request.action === 'handshake' || request.action === 'status' || request.action === 'doctor' || request.action === 'export' || request.action === 'migration-recovery' || request.action === 'run-catalog' || request.action === 'attach-migration-recovery' || request.action === 'resolve-migration-recovery' || request.action === 'detach-session' || request.action === 'heartbeat';
             if (freeze !== null && !(this.#allowMigrationRecoveryAutoStart && recoveryAction))
                 throw new CoordinationRuntimeError('coordinator-contention', 'coordinator auto-start is forbidden while coordination migration is frozen; only an explicit recovery client may start the imported candidate store', [freeze]);
-            await this.#ensureStarted(capability, compatibilityFailure(error));
+            await this.#ensureStarted(capability);
             const retryDeadline = Date.now() + this.#requestTimeoutMs;
             let lastRetryError = error;
             while (Date.now() < retryDeadline) {
                 try {
-                    return this.#assertSuccess(await sendOnce(this.#paths, capability, request, Math.min(500, this.#requestTimeoutMs)));
+                    return await this.#sendCompatibleRequestOnce(request, capability, Math.min(500, this.#requestTimeoutMs));
                 }
                 catch (retryError) {
                     lastRetryError = retryError;
-                    if (!isConnectionFailure(retryError) && !compatibilityFailure(retryError))
+                    if (!isConnectionFailure(retryError))
                         throw retryError;
                     await sleep(25);
                 }
             }
-            if (isConnectionFailure(lastRetryError))
-                throw new CoordinationRuntimeError('coordinator-unavailable', lastRetryError instanceof Error ? lastRetryError.message : String(lastRetryError));
-            throw lastRetryError;
+            throw new CoordinationRuntimeError('coordinator-unavailable', lastRetryError instanceof Error ? lastRetryError.message : String(lastRetryError));
         }
     }
     async query(action, repoId = 'global', workstreamRun = null, payload = {}) {
@@ -400,7 +460,7 @@ export class CoordinatorClient {
             payload,
         });
     }
-    async #ensureStarted(capability, replaceIncompatible = false) {
+    async #ensureStarted(capability) {
         const deadline = Date.now() + this.#startupTimeoutMs;
         const lock = await acquireStartupLock(this.#paths, deadline);
         const predecessorStartupFence = await acquirePredecessorStartupFence(this.#paths, deadline).catch(async (error) => { await lock.release(); throw error; });
@@ -409,34 +469,47 @@ export class CoordinatorClient {
             const probe = this.#probeRequest();
             try {
                 const response = this.#assertSuccess(await sendOnce(this.#paths, capability, probe, Math.min(500, this.#requestTimeoutMs)));
-                this.#assertCoordinatorCompatibility(response);
+                const compatibility = this.#assertCoordinatorCompatibility(response);
                 const pendingUpgrade = await resumeCoordinatorUpgrade(this.#paths);
                 if (pendingUpgrade !== null) {
+                    if (compatibility.kind !== 'exact-target')
+                        throw new CoordinationRuntimeError('recovery-required', `upgrade reconnect reached wire-compatible build ${compatibility.package_build}, not the exact target ${pendingUpgrade.intent.target.package_build}`);
                     await pendingUpgrade.markReconnectVerified();
                     await pendingUpgrade.commit();
                 }
-                this.#compatibilityVerified = true;
                 return;
             }
             catch (error) {
-                if (!isConnectionFailure(error) && !(replaceIncompatible && compatibilityFailure(error)))
+                if (!isConnectionFailure(error))
                     throw error;
                 upgrade = await resumeCoordinatorUpgrade(this.#paths);
-                if (upgrade === null && await hasLiveExactPredecessor(this.#paths))
-                    upgrade = await preparePredecessorCoordinatorUpgrade(this.#paths, capability, deadline);
-                else if (upgrade === null && replaceIncompatible && compatibilityFailure(error))
-                    throw new CoordinationRuntimeError('protocol-mismatch', 'an incompatible current-generation coordinator cannot be replaced through the locked 1.2 predecessor path');
+                if (upgrade === null) {
+                    const currentText = await readExactLockText(this.#paths.lockPath);
+                    if (currentText !== null) {
+                        let current = null;
+                        try {
+                            current = parseKnownCompatibleCurrentCoordinatorLock(JSON.parse(currentText));
+                        }
+                        catch { /* fail below */ }
+                        if (current === null)
+                            throw new CoordinationRuntimeError('protocol-mismatch', 'current-generation lifecycle lock belongs to an unknown build; auto-start will not replace it');
+                        if (isProcessAlive(current.pid))
+                            throw new CoordinationRuntimeError('coordinator-unavailable', `wire-compatible coordinator ${current.package_build} is live as pid ${String(current.pid)} but its socket is unavailable; auto-start will not replace or reinterpret its predecessor fence`);
+                    }
+                    else if (await hasLiveExactPredecessor(this.#paths)) {
+                        upgrade = await preparePredecessorCoordinatorUpgrade(this.#paths, capability, deadline);
+                    }
+                }
             }
             if (upgrade !== null)
                 await upgrade.markStarting();
             try {
                 spawnCoordinator(this.#paths);
-                await this.#waitForCompatibleCoordinator(probe, capability, deadline);
+                await this.#waitForExactCoordinator(probe, capability, deadline);
                 if (upgrade !== null) {
                     await upgrade.markReconnectVerified();
                     await upgrade.commit();
                 }
-                this.#compatibilityVerified = true;
             }
             catch (error) {
                 if (upgrade === null)
@@ -456,20 +529,22 @@ export class CoordinatorClient {
             await lock.release();
         }
     }
-    async #waitForCompatibleCoordinator(probe, capability, deadline) {
+    async #waitForExactCoordinator(probe, capability, deadline) {
         while (Date.now() < deadline) {
             try {
                 const response = this.#assertSuccess(await sendOnce(this.#paths, capability, probe, Math.min(500, this.#requestTimeoutMs)));
-                this.#assertCoordinatorCompatibility(response);
+                const compatibility = this.#assertCoordinatorCompatibility(response);
+                if (compatibility.kind !== 'exact-target')
+                    throw new CoordinationRuntimeError('protocol-mismatch', `coordinator startup reached ${compatibility.package_build}, not this package's exact target build`);
                 return;
             }
             catch (error) {
-                if (!isConnectionFailure(error) && !compatibilityFailure(error))
+                if (!isConnectionFailure(error))
                     throw error;
                 await sleep(50);
             }
         }
-        throw new CoordinationRuntimeError('coordinator-unavailable', 'coordinator did not complete schema migration, start, and reconnect verification before the deadline');
+        throw new CoordinationRuntimeError('coordinator-unavailable', 'coordinator did not complete schema migration, start, and exact-target reconnect verification before the deadline');
     }
     #probeRequest() {
         return {
@@ -477,14 +552,22 @@ export class CoordinatorClient {
         };
     }
     #assertCoordinatorCompatibility(response) {
-        if (response.payload['schema_version'] !== 'autopilot.coordinator_handshake.v1' && response.payload['schema_version'] !== 'autopilot.coordinator_status.v1' && response.payload['schema_version'] !== 'autopilot.migration_recovery_query.v1' && response.payload['schema_version'] !== 'autopilot.coordinator_run_catalog.v1')
-            throw new CoordinationRuntimeError('schema-mismatch', 'coordinator readiness response omitted a compatible handshake schema');
-        if (response.payload['package_build'] !== COORDINATOR_PACKAGE_BUILD)
-            throw new CoordinationRuntimeError('protocol-mismatch', `coordinator package build is incompatible with ${COORDINATOR_PACKAGE_BUILD}`);
-        if (response.payload['protocol_version'] !== AUTOPILOT_COORDINATOR_PROTOCOL_VERSION)
-            throw new CoordinationRuntimeError('protocol-mismatch', 'coordinator handshake protocol version is incompatible');
-        if (response.payload['database_schema_version'] !== COORDINATOR_DATABASE_SCHEMA_VERSION)
+        if (response.payload['schema_version'] !== 'autopilot.coordinator_handshake.v1')
+            throw new CoordinationRuntimeError('schema-mismatch', 'coordinator readiness response omitted the exact handshake schema');
+        const compatibility = classifyCoordinatorRuntimeIdentity({
+            package_build: response.payload['package_build'],
+            protocol_version: response.payload['protocol_version'],
+            database_schema_version: response.payload['database_schema_version'],
+        });
+        if (compatibility.kind !== 'incompatible')
+            return compatibility;
+        if (compatibility.reason === 'schema-mismatch')
             throw new CoordinationRuntimeError('schema-mismatch', `coordinator database schema is incompatible with ${String(COORDINATOR_DATABASE_SCHEMA_VERSION)}`);
+        if (compatibility.reason === 'protocol-mismatch')
+            throw new CoordinationRuntimeError('protocol-mismatch', `coordinator handshake protocol is incompatible with ${AUTOPILOT_COORDINATOR_PROTOCOL_VERSION}`);
+        if (compatibility.reason === 'unknown-build')
+            throw new CoordinationRuntimeError('protocol-mismatch', `coordinator package build ${compatibility.package_build ?? '<missing>'} is outside the closed protocol-1.3/schema-9 compatibility lineage`);
+        throw new CoordinationRuntimeError('schema-mismatch', 'coordinator readiness response omitted a valid runtime identity');
     }
     #assertSuccess(response) {
         if (response.ok)

@@ -31,6 +31,7 @@ import {
 import { AUTOPILOT_STATE_ROOT_ENV, coordinationRootForRepo, resolveRepoIdentity } from '../../src/core/parallel-runtime.ts';
 import { coordinatorRuntimePaths } from '../../src/core/coordination/runtime-paths.ts';
 import { startCoordinatorServer } from '../../src/core/coordination/server.ts';
+import { startTaggedCoordinator, type TaggedCoordinatorProcess } from '../helpers/tagged-coordinator.ts';
 
 interface CapturedMessage {
   readonly content: string;
@@ -126,16 +127,18 @@ function publicCommands(harness: Harness): string[] {
   return [...harness.commands.keys()].sort();
 }
 
-async function withIsolatedHarness<T>(run: (harness: Harness) => Promise<T>): Promise<T> {
+async function withIsolatedHarness<T>(run: (harness: Harness) => Promise<T>, coordinatorBuild: 'current' | 'v1.0.1' = 'current'): Promise<T> {
   const root = await mkdtemp(join(tmpdir(), 'pi-autopilot-command-'));
   const project = join(root, 'project');
   const originalStateRoot = process.env[AUTOPILOT_STATE_ROOT_ENV];
   process.env[AUTOPILOT_STATE_ROOT_ENV] = join(root, 'state');
   let coordinator: Awaited<ReturnType<typeof startCoordinatorServer>> | null = null;
+  let taggedCoordinator: TaggedCoordinatorProcess | null = null;
   let harness: Harness | null = null;
   try {
     await initGitProject(project);
-    coordinator = await startCoordinatorServer(coordinatorRuntimePaths(process.env));
+    if (coordinatorBuild === 'current') coordinator = await startCoordinatorServer(coordinatorRuntimePaths(process.env));
+    else taggedCoordinator = await startTaggedCoordinator({ stateRoot: process.env[AUTOPILOT_STATE_ROOT_ENV] ?? join(root, 'state'), extractionRoot: root });
     harness = createHarness(project);
     return await run(harness);
   } finally {
@@ -143,6 +146,7 @@ async function withIsolatedHarness<T>(run: (harness: Harness) => Promise<T>): Pr
       for (const handler of harness.shutdownHandlers) await handler({ reason: 'test-complete' }, harness.ctx);
     }
     if (coordinator !== null) await coordinator.close();
+    if (taggedCoordinator !== null) await taggedCoordinator.close();
     if (originalStateRoot === undefined) delete process.env[AUTOPILOT_STATE_ROOT_ENV];
     else process.env[AUTOPILOT_STATE_ROOT_ENV] = originalStateRoot;
     await rm(root, { recursive: true, force: true });
@@ -296,6 +300,24 @@ void describe('Autopilot command SDK surface', () => {
       assert.match(message.content, /handoff after injected session/);
       assert.match(message.content, /Active workstream run:/);
     });
+  });
+
+  void it('BUG-175 injects through the actual compatible v1.0.1 coordinator without replacing its process', async () => {
+    await withIsolatedHarness(async (harness) => {
+      const stateRoot = process.env[AUTOPILOT_STATE_ROOT_ENV];
+      if (stateRoot === undefined) throw new Error('mixed-build SDK harness has no state root');
+      const paths = coordinatorRuntimePaths(process.env);
+      const before: unknown = JSON.parse(await readFile(paths.lockPath, 'utf8')) as unknown;
+      if (typeof before !== 'object' || before === null || Array.isArray(before)) throw new Error('mixed-build lifecycle lock is invalid');
+
+      await requireCommand(harness, AUTOPILOT_INJECT_COMMAND).handler('mixed-build-resume', harness.ctx);
+
+      const after: unknown = JSON.parse(await readFile(paths.lockPath, 'utf8')) as unknown;
+      assert.deepEqual(after, before, 'inject must not replace a live wire-compatible patch coordinator');
+      assert.equal(harness.notifications.some((entry) => /Autopilot injected for mixed-build-resume/u.test(entry.message)), true);
+      assert.equal(harness.notifications.some((entry) => /protocol-mismatch|package build is incompatible/u.test(entry.message)), false);
+      assert.deepEqual(harness.activeTools, [CONTEXT_BUDGET_TOOL_NAME, AUTOPILOT_RESPOND_CLAIM_REQUEST_TOOL_NAME]);
+    }, 'v1.0.1');
   });
 
   void it('queues an onboard brief without registering tools or launch authority', async () => {

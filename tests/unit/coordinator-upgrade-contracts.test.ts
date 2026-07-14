@@ -2,21 +2,35 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import { parseCoordinatorLegacyReplayTransportRequest } from '../../src/core/coordination/ipc.ts';
-import { COORDINATOR_UPGRADE_PATH, parseCoordinatorUpgradeIntent, parseCurrentCoordinatorLock, parsePredecessorCoordinatorLock, parsePredecessorStatusEnvelope } from '../../src/core/coordination/upgrade-contracts.ts';
+import { classifyCoordinatorRuntimeIdentity } from '../../src/core/coordination/runtime-compatibility.ts';
+import { COORDINATOR_UPGRADE_PATH, parseCoordinatorUpgradeIntent, parseCurrentCoordinatorLock, parseKnownCompatibleCurrentCoordinatorLock, parseKnownCoordinatorUpgradeIntent, parsePredecessorCoordinatorLock, parsePredecessorStatusEnvelope } from '../../src/core/coordination/upgrade-contracts.ts';
 
 const capability = 'a'.repeat(64);
 
-void describe('standalone coordinator upgrade contracts', () => {
+void describe('BUG-175 standalone coordinator upgrade contracts', () => {
   void it('locks one exact 1.2/schema-6/build predecessor to one exact 1.3/schema-9 target', () => {
     assert.deepEqual(COORDINATOR_UPGRADE_PATH.source, { package_build: '0.13.0-cf34', protocol_version: '1.2', database_schema_version: 6, lifecycle_lock_schema: 'autopilot.coordinator_lock.v1' });
-    assert.deepEqual(COORDINATOR_UPGRADE_PATH.target, { package_build: '1.0.2-cf39', protocol_version: '1.3', database_schema_version: 9, lifecycle_lock_schema: 'autopilot.coordinator_lock.v2' });
+    assert.deepEqual(COORDINATOR_UPGRADE_PATH.target, { package_build: '1.0.3-cf40', protocol_version: '1.3', database_schema_version: 9, lifecycle_lock_schema: 'autopilot.coordinator_lock.v2' });
     const predecessor = { schema_version: 'autopilot.coordinator_lock.v1', pid: 123, boot_id: 'boot', token: 'token', started_at: '2026-07-12T00:00:00.000Z' };
-    const current = { schema_version: 'autopilot.coordinator_lock.v2', pid: 456, boot_id: 'boot', process_start_identity: 'process-start', token: 'token', instance_id: 'instance', package_build: '1.0.2-cf39', protocol_version: '1.3', database_schema_version: 9, started_at: '2026-07-12T00:00:00.000Z' };
+    const current = { schema_version: 'autopilot.coordinator_lock.v2', pid: 456, boot_id: 'boot', process_start_identity: 'process-start', token: 'token', instance_id: 'instance', package_build: '1.0.3-cf40', protocol_version: '1.3', database_schema_version: 9, started_at: '2026-07-12T00:00:00.000Z' };
+    const compatiblePrior = { ...current, package_build: '1.0.1-cf38' };
     assert.notEqual(parsePredecessorCoordinatorLock(predecessor), null);
     assert.equal(parsePredecessorCoordinatorLock(current), null);
     assert.notEqual(parseCurrentCoordinatorLock(current), null);
-    assert.equal(parseCurrentCoordinatorLock({ ...current, package_build: '0.14.1-unknown' }), null);
+    assert.equal(parseCurrentCoordinatorLock(compatiblePrior), null, 'schema upgrades retain exact target-build parsing');
+    assert.notEqual(parseKnownCompatibleCurrentCoordinatorLock(compatiblePrior), null, 'ordinary lifecycle election recognizes an audited prior patch lock');
+    assert.equal(parseKnownCompatibleCurrentCoordinatorLock({ ...current, package_build: '0.14.1-unknown' }), null);
+    assert.equal(parseKnownCompatibleCurrentCoordinatorLock({ ...current, package_build: '1.0.1-cf38', protocol_version: '1.4' }), null);
+    assert.equal(parseKnownCompatibleCurrentCoordinatorLock({ ...current, package_build: '1.0.1-cf38', database_schema_version: 10 }), null);
     assert.equal(parsePredecessorCoordinatorLock({ ...predecessor, extra: true }), null);
+  });
+
+  void it('classifies only the closed patch lineage as ordinary wire-compatible', () => {
+    assert.equal(classifyCoordinatorRuntimeIdentity({ package_build: '1.0.3-cf40', protocol_version: '1.3', database_schema_version: 9 }).kind, 'exact-target');
+    assert.equal(classifyCoordinatorRuntimeIdentity({ package_build: '1.0.1-cf38', protocol_version: '1.3', database_schema_version: 9 }).kind, 'wire-compatible-known');
+    assert.deepEqual(classifyCoordinatorRuntimeIdentity({ package_build: 'unknown-cf40', protocol_version: '1.3', database_schema_version: 9 }), { kind: 'incompatible', reason: 'unknown-build', package_build: 'unknown-cf40' });
+    assert.deepEqual(classifyCoordinatorRuntimeIdentity({ package_build: '1.0.1-cf38', protocol_version: '1.4', database_schema_version: 9 }), { kind: 'incompatible', reason: 'protocol-mismatch', package_build: '1.0.1-cf38' });
+    assert.deepEqual(classifyCoordinatorRuntimeIdentity({ package_build: '1.0.1-cf38', protocol_version: '1.3', database_schema_version: 10 }), { kind: 'incompatible', reason: 'schema-mismatch', package_build: '1.0.1-cf38' });
   });
 
   void it('allows only exact prior-protocol idempotency replay and rejects status or unknown protocol replay', () => {
@@ -36,6 +50,10 @@ void describe('standalone coordinator upgrade contracts', () => {
       created_at: fence.started_at, updated_at: fence.started_at, failure: null,
     };
     assert.equal(parseCoordinatorUpgradeIntent(intent).predecessor_fence?.token, 'token');
+    const historicalCommitted = { ...intent, state: 'committed', target: { ...intent.target, package_build: '1.0.1-cf38' } };
+    assert.equal(parseKnownCoordinatorUpgradeIntent(historicalCommitted).target.package_build, '1.0.1-cf38');
+    assert.throws(() => parseCoordinatorUpgradeIntent(historicalCommitted), /target differs from this package/u);
+    assert.throws(() => parseKnownCoordinatorUpgradeIntent({ ...historicalCommitted, target: { ...historicalCommitted.target, package_build: 'unknown-cf99' } }), /outside the closed schema-9 build lineage/u);
     assert.throws(() => parseCoordinatorUpgradeIntent({ ...intent, source: { ...intent.source, process_start_identity: '' } }), /process_start_identity/u);
     assert.throws(() => parseCoordinatorUpgradeIntent({ ...intent, predecessor_fence: { ...fence, extra: true } }), /predecessor fence is invalid/u);
   });

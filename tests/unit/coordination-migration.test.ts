@@ -70,7 +70,7 @@ void describe('Coordination Fabric legacy migration and cutover', () => {
       if (startIdentity === null) throw new Error('test process lacks exact birth identity');
       await writeFile(paths.lockPath, `${JSON.stringify({
         schema_version: 'autopilot.coordinator_lock.v2', pid: process.pid, boot_id: currentBootId(), process_start_identity: startIdentity,
-        token: 'd'.repeat(48), instance_id: 'e'.repeat(48), package_build: '1.0.2-cf39', protocol_version: '1.3', database_schema_version: 9,
+        token: 'd'.repeat(48), instance_id: 'e'.repeat(48), package_build: '1.0.3-cf40', protocol_version: '1.3', database_schema_version: 9,
         started_at: '2026-07-12T12:00:00.000Z',
       })}\n`, 'utf8');
       const marker = join(fixture.stateRoot, 'cutovers', `${fixture.repoKey}.json`);

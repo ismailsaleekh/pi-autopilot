@@ -17,6 +17,7 @@ import {
   COORDINATOR_UPGRADE_INTENT_SCHEMA,
   COORDINATOR_UPGRADE_PATH,
   parseCoordinatorUpgradeIntent,
+  parseKnownCoordinatorUpgradeIntent,
   parseCurrentCoordinatorLock,
   parsePredecessorCoordinatorLock,
   parsePredecessorStatusEnvelope,
@@ -77,13 +78,28 @@ async function atomicWriteJson(path: string, value: unknown): Promise<void> {
   await fsyncDirectory(dirname(path));
 }
 
-export async function readCoordinatorUpgradeIntent(paths: CoordinatorRuntimePaths): Promise<CoordinatorUpgradeIntent | null> {
-  try { return parseCoordinatorUpgradeIntent(JSON.parse(await readFile(coordinatorUpgradeIntentPath(paths), 'utf8')) as unknown); }
+async function readRawCoordinatorUpgradeIntent(paths: CoordinatorRuntimePaths): Promise<unknown | null> {
+  try { return JSON.parse(await readFile(coordinatorUpgradeIntentPath(paths), 'utf8')) as unknown; }
   catch (error) {
     if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return null;
     if (error instanceof SyntaxError) throw new CoordinationRuntimeError('schema-mismatch', 'durable coordinator upgrade intent contains invalid JSON', [coordinatorUpgradeIntentPath(paths)]);
     throw error;
   }
+}
+
+/** Exact local intent reader for every writable upgrade transition. */
+export async function readCoordinatorUpgradeIntent(paths: CoordinatorRuntimePaths): Promise<CoordinatorUpgradeIntent | null> {
+  const raw = await readRawCoordinatorUpgradeIntent(paths);
+  return raw === null ? null : parseCoordinatorUpgradeIntent(raw);
+}
+
+/**
+ * Runtime reader admits historical targets only as immutable known lineage.
+ * Callers may observe them, but only a committed historical intent is inert.
+ */
+export async function readKnownCoordinatorUpgradeIntent(paths: CoordinatorRuntimePaths) {
+  const raw = await readRawCoordinatorUpgradeIntent(paths);
+  return raw === null ? null : parseKnownCoordinatorUpgradeIntent(raw);
 }
 
 async function readLock(path: string, label: string): Promise<unknown> {
@@ -581,6 +597,8 @@ export async function preparePredecessorCoordinatorUpgrade(paths: CoordinatorRun
   let retirementStarted = false;
   let incompatibleAuthorityCommitted = false;
   try {
+    const existingIntent = await readKnownCoordinatorUpgradeIntent(paths);
+    if (existingIntent !== null && (existingIntent.target.package_build !== COORDINATOR_UPGRADE_PATH.target.package_build || existingIntent.state !== 'refused')) throw new CoordinationRuntimeError('recovery-required', `new schema upgrade refuses to overwrite durable ${existingIntent.state} intent for target ${existingIntent.target.package_build}`, [coordinatorUpgradeIntentPath(paths), existingIntent.upgrade_id]);
     const lockValue = await readLock(paths.predecessorLockPath, 'predecessor lifecycle lock');
     const lock = parsePredecessorCoordinatorLock(lockValue);
     if (lock === null || !isProcessAlive(lock.pid) || lock.pid === process.pid) throw new CoordinationRuntimeError('protocol-mismatch', 'incompatible coordinator is not the exact live 1.2 predecessor');
@@ -680,8 +698,14 @@ export async function preparePredecessorCoordinatorUpgrade(paths: CoordinatorRun
 }
 
 export async function resumeCoordinatorUpgrade(paths: CoordinatorRuntimePaths): Promise<CoordinatorUpgradeTransaction | null> {
-  let intent = await readCoordinatorUpgradeIntent(paths);
-  if (intent === null || intent.state === 'committed' || intent.state === 'refused') return null;
+  const readable = await readKnownCoordinatorUpgradeIntent(paths);
+  if (readable === null) return null;
+  if (readable.target.package_build !== COORDINATOR_UPGRADE_PATH.target.package_build) {
+    if (readable.state === 'committed') return null;
+    throw new CoordinationRuntimeError('recovery-required', `historical coordinator upgrade target ${readable.target.package_build} stopped at ${readable.state}; this package will not rewrite or resume another build's intent`, [coordinatorUpgradeIntentPath(paths), readable.upgrade_id]);
+  }
+  let intent = parseCoordinatorUpgradeIntent(readable);
+  if (intent.state === 'committed' || intent.state === 'refused') return null;
   if (intent.state === 'rollback-restored') throw new CoordinationRuntimeError('recovery-required', 'schema-6 backup was restored exactly; this package cannot automatically restart the unavailable aa3e377 binary', [coordinatorUpgradeIntentPath(paths)]);
   if (intent.state === 'rollback-restoring') {
     intent = await restoreBackup(paths, intent, intent.failure ?? 'resuming interrupted rollback');
