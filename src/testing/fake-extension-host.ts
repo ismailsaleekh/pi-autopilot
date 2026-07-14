@@ -1,5 +1,5 @@
-import type { ContextBudgetToolDefinition } from '../core/context-budget.ts';
 import type {
+  AutopilotParentToolDefinition,
   ExtensionCommandContextLike,
   ExtensionCommandDefinitionLike,
   ExtensionHostLike,
@@ -34,7 +34,7 @@ export class FakeCommandContext implements ExtensionCommandContextLike {
 
 export class FakeExtensionHost implements ExtensionHostLike {
   readonly commands = new Map<string, ExtensionCommandDefinitionLike>();
-  readonly tools = new Map<string, ContextBudgetToolDefinition>();
+  readonly tools = new Map<string, AutopilotParentToolDefinition>();
   readonly messages: SentUserMessage[] = [];
   readonly coordinationMessages: SentCoordinationMessage[] = [];
 
@@ -42,7 +42,7 @@ export class FakeExtensionHost implements ExtensionHostLike {
     this.commands.set(name, definition);
   }
 
-  registerTool(tool: ContextBudgetToolDefinition): void {
+  registerTool(tool: AutopilotParentToolDefinition): void {
     this.tools.set(tool.name, tool);
   }
 
@@ -60,7 +60,7 @@ export class FakeExtensionHost implements ExtensionHostLike {
     return command;
   }
 
-  requireTool(name: string): ContextBudgetToolDefinition {
+  requireTool(name: string): AutopilotParentToolDefinition {
     const tool = this.tools.get(name);
     if (tool === undefined) throw new Error(`Missing tool ${name}`);
     return tool;

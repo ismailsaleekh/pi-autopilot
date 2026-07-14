@@ -16,6 +16,7 @@ import {
   AUTOPILOT_INJECT_COMMAND,
   AUTOPILOT_ONBOARD_COMMAND,
   AUTOPILOT_STATUS_TOOL,
+  AUTOPILOT_RESPOND_CLAIM_REQUEST_TOOL_NAME,
   CONTEXT_BUDGET_TOOL_NAME,
 } from '../../src/core/names.ts';
 import { AUTOPILOT_STATE_ROOT_ENV, coordinationRootForRepo, prepareAutopilotWorkstream, readActiveAutopilots, resolveRepoIdentity, writeActiveAutopilots, writePathClaims, type ProcessEnvLike } from '../../src/core/parallel-runtime.ts';
@@ -406,14 +407,16 @@ void describe('Pi SDK Autopilot activation', () => {
       assert.equal(harness.session.extensionRunner.getCommand(forbiddenLegacyCommand), undefined);
       assert.equal(harness.session.extensionRunner.getCommand(AUTOPILOT_STATUS_TOOL), undefined);
       assert.equal(harness.session.extensionRunner.getToolDefinition(CONTEXT_BUDGET_TOOL_NAME), undefined);
+      assert.equal(harness.session.extensionRunner.getToolDefinition(AUTOPILOT_RESPOND_CLAIM_REQUEST_TOOL_NAME), undefined);
       assert.equal(harness.session.extensionRunner.getToolDefinition(AUTOPILOT_STATUS_TOOL), undefined);
       assert.equal(harness.activeTools.includes(CONTEXT_BUDGET_TOOL_NAME), false);
+      assert.equal(harness.activeTools.includes(AUTOPILOT_RESPOND_CLAIM_REQUEST_TOOL_NAME), false);
     } finally {
       await disposeHarness(harness);
     }
   });
 
-  void it('activates context_budget and queues the Autopilot parent prompt from the SDK command', async () => {
+  void it('BUG-174 activates authenticated parent tools and queues the Autopilot parent prompt from the SDK command', async () => {
     const harness = await createSdkHarness();
     try {
       await requireCommand(harness.session, AUTOPILOT_COMMAND).handler(
@@ -422,8 +425,10 @@ void describe('Pi SDK Autopilot activation', () => {
       );
       const contextBudget = harness.session.extensionRunner.getToolDefinition(CONTEXT_BUDGET_TOOL_NAME);
       if (contextBudget === undefined) throw new Error('context_budget was not registered');
+      assert.notEqual(harness.session.extensionRunner.getToolDefinition(AUTOPILOT_RESPOND_CLAIM_REQUEST_TOOL_NAME), undefined);
       assert.equal(harness.session.extensionRunner.getToolDefinition(AUTOPILOT_STATUS_TOOL), undefined);
       assert.equal(harness.activeTools.includes(CONTEXT_BUDGET_TOOL_NAME), true);
+      assert.equal(harness.activeTools.includes(AUTOPILOT_RESPOND_CLAIM_REQUEST_TOOL_NAME), true);
       assert.equal(harness.sentMessages.length, 1);
       const message = harness.sentMessages[0];
       if (message === undefined) throw new Error('missing queued SDK prompt');
@@ -457,7 +462,9 @@ void describe('Pi SDK Autopilot activation', () => {
       );
       const contextBudget = harness.session.extensionRunner.getToolDefinition(CONTEXT_BUDGET_TOOL_NAME);
       if (contextBudget === undefined) throw new Error('context_budget was not registered by inject');
+      assert.notEqual(harness.session.extensionRunner.getToolDefinition(AUTOPILOT_RESPOND_CLAIM_REQUEST_TOOL_NAME), undefined);
       assert.equal(harness.activeTools.includes(CONTEXT_BUDGET_TOOL_NAME), true);
+      assert.equal(harness.activeTools.includes(AUTOPILOT_RESPOND_CLAIM_REQUEST_TOOL_NAME), true);
       assert.equal(harness.sentMessages.length, 0);
 
       await requireCommand(harness.session, AUTOPILOT_HANDOFF_COMMAND).handler(

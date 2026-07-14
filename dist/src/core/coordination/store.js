@@ -10,6 +10,7 @@ import { buildCoordinationWaitForEdges, compareCoordinationGrantPriority, coordi
 import { validateAuthoritativeCoordinationDocument, validatePlanningContradictionSubmission } from "./escalation.js";
 import { CoordinationRuntimeError } from "./failures.js";
 import { checkCoordinationInvariants } from "./invariants.js";
+import { proveLegacyReadAttemptTerminal } from "./legacy-read-terminal.js";
 import { COORDINATOR_BUSY_TIMEOUT_MS, COORDINATOR_DATABASE_SCHEMA_VERSION, COORDINATOR_GRANT_OFFER_TTL_MS, COORDINATOR_PACKAGE_BUILD, enforcePrivateAuthorityPath, enforceWindowsPrivateAcl, ensureCoordinatorPrivateRoots } from "./runtime-paths.js";
 import { activeCoordinationMigrationFreeze, assertCoordinationDispatchAllowed, assertCoordinationFrozenMutationAllowed, assertCoordinationMigrationRecoveryOperationAuthorized, coordinationCutoverCommitted } from "./migration-paths.js";
 import { parseRunTerminalSha, parseUnitAttemptTarget, parseUnitMergeReservationFacts, validateReconciliationEvidenceDocument, validateReservationIntegrationEvidenceDocument, validateReservationValidationArtifactChain, validateReservationValidationEvidenceDocument } from "./terminal-evidence.js";
@@ -3243,6 +3244,8 @@ export class CoordinatorStore {
         const beforeMessages = new Set(this.#db.prepare('SELECT message_id FROM messages WHERE repo_id=? ORDER BY message_id').all(repoId).map((row) => sqlString(row, 'message_id')));
         const beforeOffers = new Set(this.#db.prepare("SELECT entity_id FROM acquisition_groups WHERE repo_id=? AND json_extract(payload_json, '$.state')='grant-ready'").all(repoId).map((row) => sqlString(row, 'entity_id')));
         const releasedLeaseIds = [];
+        const run = this.#requireRun(repoId, workstreamRun);
+        this.#releaseProvenLegacyReadLeases(run, seq, releasedLeaseIds);
         const ownerRequests = this.#db.prepare('SELECT * FROM claim_requests WHERE repo_id=? AND owner_workstream_run=? ORDER BY entity_id').all(repoId, workstreamRun).map(claimRequestFromRow);
         for (const claimRequest of ownerRequests) {
             if (claimRequest.release_condition === null || !['deferred', 'acknowledged', 'delivered', 'pending'].includes(claimRequest.status) || !this.#conditionSatisfied(repoId, workstreamRun, claimRequest.release_condition))
@@ -3264,6 +3267,82 @@ export class CoordinatorStore {
         const notificationIds = this.#db.prepare('SELECT message_id FROM messages WHERE repo_id=? ORDER BY message_id').all(repoId).map((row) => sqlString(row, 'message_id')).filter((messageId) => !beforeMessages.has(messageId));
         const offeredGroupIds = this.#db.prepare("SELECT entity_id FROM acquisition_groups WHERE repo_id=? AND json_extract(payload_json, '$.state')='grant-ready' ORDER BY entity_id").all(repoId).map((row) => sqlString(row, 'entity_id')).filter((groupId) => !beforeOffers.has(groupId));
         return this.#freezeReconciliationSummary({ released_lease_ids: releasedLeaseIds, released_request_ids: releasedRequestIds, notification_ids: notificationIds, offered_group_ids: offeredGroupIds });
+    }
+    #releaseProvenLegacyReadLeases(run, seq, releasedLeaseIds) {
+        const resourceRow = this.#db.prepare('SELECT * FROM run_resources WHERE repo_id=? AND workstream_run=?').get(run.repo_id, run.workstream_run);
+        if (resourceRow === undefined)
+            return;
+        const resource = runResourceFromRow(resourceRow);
+        const groups = new Map(this.#db.prepare('SELECT * FROM acquisition_groups WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(run.repo_id, run.workstream_run).map(acquisitionGroupFromRow).map((group) => [group.acquisition_group_id, group]));
+        const leases = this.#db.prepare('SELECT * FROM edit_leases WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(run.repo_id, run.workstream_run).map(editLeaseFromRow);
+        const recoveryByLease = new Map();
+        for (const recovery of this.#db.prepare('SELECT * FROM migration_recovery_work WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(run.repo_id, run.workstream_run).map(migrationRecoveryFromRow)) {
+            const leaseId = recovery.detail['edit_lease_id'];
+            if (typeof leaseId !== 'string')
+                continue;
+            const matching = recoveryByLease.get(leaseId) ?? [];
+            matching.push(recovery);
+            recoveryByLease.set(leaseId, matching);
+        }
+        const nonterminalChildOwners = new Set(this.#db.prepare("SELECT * FROM child_leases WHERE repo_id=? AND workstream_run=? AND status IN ('preflight','running','recovery-required') ORDER BY child_lease_id").all(run.repo_id, run.workstream_run).map(childFromRow).map((child) => `${child.owner.unit_id}\0${String(child.owner.attempt)}`));
+        const proofByAttempt = new Map();
+        const updatedAttempts = new Set();
+        for (const lease of leases) {
+            const group = groups.get(lease.acquisition_group_id);
+            if (lease.mode !== 'READ' || lease.normal_release_condition.condition_type !== 'explicit-owner-release' || group?.acquisition_kind !== 'legacy-unknown')
+                continue;
+            const recoveries = recoveryByLease.get(lease.edit_lease_id) ?? [];
+            if (recoveries.some((recovery) => recovery.status === 'pending' || recovery.resolution?.resolution_type !== 'authority-retained'))
+                continue;
+            const attemptKey = `${lease.owner.unit_id}\0${String(lease.owner.attempt)}`;
+            if (nonterminalChildOwners.has(attemptKey))
+                continue;
+            let result = proofByAttempt.get(attemptKey);
+            if (result === undefined) {
+                result = proveLegacyReadAttemptTerminal({ runtimeRoot: resource.runtime_root, workstream: run.workstream, unitId: lease.owner.unit_id, attempt: lease.owner.attempt });
+                proofByAttempt.set(attemptKey, result);
+            }
+            if (!result.proven)
+                continue;
+            this.#persistLegacyReadTerminalProof(run, resource, lease, result.proof, seq);
+            this.#releaseOwnedLease(run.repo_id, run.workstream_run, lease.edit_lease_id, releasedLeaseIds);
+            if (updatedAttempts.has(attemptKey))
+                continue;
+            updatedAttempts.add(attemptKey);
+            const entityId = unitAttemptEntityId(lease.owner);
+            const attemptRow = this.#db.prepare('SELECT * FROM unit_attempts WHERE entity_id=?').get(entityId);
+            if (attemptRow === undefined)
+                continue;
+            const attempt = unitAttemptFromRow(attemptRow);
+            const state = result.proof.kind === 'superseded-by-later-attempt' ? 'superseded' : 'transport-complete';
+            if (attempt.state === state || attempt.state === 'merged' || attempt.state === 'reset' || attempt.state === 'quarantined' || attempt.state === 'superseded')
+                continue;
+            this.#updateEntity('unit_attempts', entityId, { ...attempt, state, critical_section: null, version: attempt.version + 1 });
+        }
+    }
+    #persistLegacyReadTerminalProof(run, resource, lease, proof, seq) {
+        const evidence = proof.artifacts.map((artifact) => {
+            const ref = relative(resource.main_worktree_path, artifact.path).split(sep).join('/');
+            if (ref.length === 0 || ref === '..' || ref.startsWith('../') || isAbsolute(ref))
+                throw new CoordinationRuntimeError('unauthorized-client', 'legacy READ terminal evidence escapes the durable run main worktree', [artifact.path]);
+            const identity = { ref, sha256: artifact.sha256 };
+            this.#persistEvidenceArtifact(run.repo_id, identity, artifact.bytes, 'legacy READ terminal authority release', seq);
+            return identity;
+        });
+        const primary = evidence[proof.artifacts.indexOf(proof.evidence)];
+        if (primary === undefined)
+            throw new CoordinationRuntimeError('store-corrupt', 'legacy READ terminal proof lost its primary evidence artifact');
+        const auditId = stableEntityId('legacy-read-terminal-release', [run.repo_id, run.workstream_run, lease.edit_lease_id, primary.sha256]);
+        if (this.#db.prepare('SELECT entity_id FROM migration_legacy_audit WHERE entity_id=?').get(auditId) !== undefined)
+            return;
+        const payload = {
+            schema_version: 'autopilot.migration_terminal_release.v1', repo_key: run.repo_id, workstream_run: run.workstream_run, autopilot_id: run.autopilot_id,
+            unit_id: lease.owner.unit_id, attempt: lease.owner.attempt, path: lease.path, claim_type: lease.mode,
+            mechanical_proof: proof.kind === 'completed-current-attempt' ? 'accepted-read-terminal' : 'superseded-read-terminal', evidence_source: 'legacy-read-terminal',
+            evidence_ref: primary.ref, evidence_sha256: primary.sha256, supporting_evidence: evidence, exact_git_objects: [], filesystem_postconditions: proof.mechanicalProof,
+            released_from_active_import: false, released_post_cutover: coordinationCutoverCommitted(this.#stateRoot, run.repo_id),
+        };
+        this.#db.prepare('INSERT INTO migration_legacy_audit(entity_id, repo_id, source_kind, payload_json, created_event_seq) VALUES(?, ?, ?, ?, ?)').run(auditId, run.repo_id, 'claim-event', canonicalJson(payload), seq);
     }
     #releaseOwnedLease(repoId, workstreamRun, leaseId, releasedLeaseIds) {
         const row = this.#db.prepare('SELECT * FROM edit_leases WHERE repo_id=? AND entity_id=?').get(repoId, leaseId);

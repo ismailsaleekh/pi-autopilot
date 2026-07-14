@@ -1,8 +1,8 @@
 import { existsSync } from 'node:fs';
-import { mkdir, readFile } from 'node:fs/promises';
-import { isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { mkdir } from 'node:fs/promises';
+import { join } from 'node:path';
 
-import { parseAutopilotExecutionAudit, parseAutopilotState, parseAutopilotStatusEntry } from './contracts/index.ts';
+import { proveLegacyReadAttemptTerminal } from './coordination/legacy-read-terminal.ts';
 import { appendClaimEvent, coordinationRootForRepo, readActiveAutopilots, readPathClaims, readUnitIndex, resolveAutopilotStateRoot, resolveRepoIdentity, taskRootForActiveAutopilot, withAutopilotFileLock, writeJsonAtomic, writePathClaims, type ActiveAutopilotRow, type AutopilotPathClaim, type ProcessEnvLike } from './parallel-runtime.ts';
 import { coordinationCutoverCommitted } from './coordination/migration-paths.ts';
 import { runLegacyCoordinationPreflight } from './coordination/legacy-preflight.ts';
@@ -176,96 +176,13 @@ async function proveRuntimeTerminalReadClaim(
   row: ActiveAutopilotRow,
   claim: AutopilotPathClaim,
 ): Promise<RuntimeTerminalProof> {
-  const statePath = join(row.runtime_root, 'state.json');
-  if (!existsSync(statePath)) {
-    return blockedRuntimeProof('unit attempt metadata missing and runtime state.json is absent');
-  }
-  try {
-    const state = parseAutopilotState(await readJsonFile(statePath));
-    if (claim.workstream !== row.workstream || state.workstream !== row.workstream) {
-      return blockedRuntimeProof('runtime terminal proof workstream identity mismatch');
-    }
-    const stateUnit = state.units[claim.unit_id];
-    if (stateUnit === undefined) {
-      return blockedRuntimeProof(`runtime state lacks unit ${claim.unit_id}`);
-    }
-    if (stateUnit.attempt !== claim.attempt) {
-      return blockedRuntimeProof(`runtime state unit attempt is ${String(stateUnit.attempt)}, claim attempt is ${String(claim.attempt)}`);
-    }
-    if (stateUnit.state === 'running' || state.running.includes(claim.unit_id)) {
-      return blockedRuntimeProof('runtime state marks unit attempt live: running');
-    }
-    if (stateUnit.state !== 'completed') {
-      return blockedRuntimeProof(`runtime state unit is not completed: ${stateUnit.state}`);
-    }
-    if (!state.completed.includes(claim.unit_id)) {
-      return blockedRuntimeProof('runtime state completed unit is absent from completed queue');
-    }
-    if (stateUnit.status_ref === undefined) {
-      return blockedRuntimeProof('runtime completed unit lacks status_ref');
-    }
-    const auditRef = `execution-audits/${stateUnit.unit_id}.${stateUnit.role}.attempt-${String(stateUnit.attempt)}.json`;
-    const auditPath = resolveRuntimeRef(row.runtime_root, auditRef, 'execution audit ref');
-    const audit = parseAutopilotExecutionAudit(await readJsonFile(auditPath));
-    if (
-      audit.workstream !== state.workstream ||
-      audit.unit_id !== stateUnit.unit_id ||
-      audit.role !== stateUnit.role ||
-      audit.attempt !== stateUnit.attempt
-    ) {
-      return blockedRuntimeProof('runtime execution audit identity does not match completed state unit');
-    }
-    const statusPath = resolveRuntimeRef(row.runtime_root, stateUnit.status_ref, 'status_ref');
-    const status = parseAutopilotStatusEntry(await readJsonFile(statusPath), {
-      artifactRoot: row.runtime_root,
-      executionAudit: audit,
-    });
-    if (
-      status.workstream !== state.workstream ||
-      status.unit_id !== stateUnit.unit_id ||
-      status.role !== stateUnit.role ||
-      status.attempt !== stateUnit.attempt
-    ) {
-      return blockedRuntimeProof('runtime status identity does not match completed state unit');
-    }
-    if (status.verdict !== 'DONE' && status.verdict !== 'PASS') {
-      return blockedRuntimeProof(`runtime completed unit status is not successful: ${status.verdict}`);
-    }
-    return {
-      stale: true,
-      proof: [
-        'unit attempt metadata missing; using validated runtime terminal proof',
-        `state unit status is ${stateUnit.state}`,
-        `status_ref=${stateUnit.status_ref} verdict=${status.verdict}`,
-        `audit_ref=${auditRef} classification=${audit.classification}`,
-      ],
-      blockers: [],
-    };
-  } catch (error) {
-    return blockedRuntimeProof(`runtime terminal proof invalid: ${errorMessage(error)}`);
-  }
-}
-
-function blockedRuntimeProof(blocker: string): RuntimeTerminalProof {
-  return { stale: false, proof: [], blockers: [blocker] };
-}
-
-async function readJsonFile(path: string): Promise<unknown> {
-  try {
-    return JSON.parse(await readFile(path, 'utf8')) as unknown;
-  } catch (error) {
-    throw new Error(`failed to read ${path}: ${errorMessage(error)}`);
-  }
-}
-
-function resolveRuntimeRef(runtimeRoot: string, ref: string, label: string): string {
-  const resolvedRoot = resolve(runtimeRoot);
-  const resolved = resolve(resolvedRoot, ref);
-  const rel = relative(resolvedRoot, resolved);
-  if (rel === '' || rel.startsWith('..') || isAbsolute(rel) || rel.split(sep).includes('..')) {
-    throw new Error(`${label} ${ref} escapes runtime root`);
-  }
-  return resolved;
+  const result = proveLegacyReadAttemptTerminal({ runtimeRoot: row.runtime_root, workstream: row.workstream, unitId: claim.unit_id, attempt: claim.attempt });
+  if (!result.proven) return { stale: false, proof: [], blockers: [result.reason] };
+  return {
+    stale: true,
+    proof: ['unit attempt metadata missing; using validated runtime terminal proof', ...result.proof.mechanicalProof],
+    blockers: [],
+  };
 }
 
 function claimKey(claim: AutopilotPathClaim): string {

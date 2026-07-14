@@ -321,6 +321,39 @@ void describe('Coordination Fabric claim negotiation', () => {
     }
   });
 
+  void it('BUG-174 responds by id only through the current durable owner run', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pi-autopilot-negotiation-owner-tool-'));
+    const stateRoot = join(root, 'state');
+    const env = { ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: stateRoot };
+    const server = await startCoordinatorServer(coordinatorRuntimePaths(env));
+    try {
+      const client = new CoordinatorClient({ env, autoStart: false });
+      const owner = await attachActor(client, stateRoot, 'a');
+      const requester = await attachActor(client, stateRoot, 'b');
+      const unrelated = await attachActor(client, stateRoot, 'c');
+      await owner.negotiation.acquire(acquisitionInput('a'));
+      const waiting = await requester.negotiation.acquire(acquisitionInput('b'));
+      assert.equal(waiting.outcome, 'waiting-for-peer-release');
+      const releaseRequest = (await claimRequests(client, owner)).find((entry) => entry.acquisition_group_id === 'group-b');
+      if (releaseRequest === undefined) throw new Error('missing owner release request');
+      await assert.rejects(
+        () => requester.negotiation.respondById({ requestId: releaseRequest.request_id, response: 'release-now', ownerReason: 'requester cannot release owner authority', releaseCondition: null }),
+        (error: unknown) => error instanceof CoordinationRuntimeError && error.code === 'unauthorized-client',
+      );
+      await assert.rejects(
+        () => unrelated.negotiation.respondById({ requestId: releaseRequest.request_id, response: 'release-now', ownerReason: 'unrelated run cannot see owner request', releaseCondition: null }),
+        (error: unknown) => error instanceof CoordinationRuntimeError && error.code === 'invalid-request',
+      );
+      const released = await owner.negotiation.respondById({ requestId: releaseRequest.request_id, response: 'release-now', ownerReason: 'authenticated current owner released exact authority', releaseCondition: null });
+      assert.equal(released.status, 'grant-ready');
+      assert.notEqual(released.release_event_seq, null);
+      assert.equal((await groups(client, requester))[0]?.state, 'grant-ready');
+    } finally {
+      await server.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   void it('expires an offline grant offer and gives the next fair waiter a bounded offer', async () => {
     const root = await mkdtemp(join(tmpdir(), 'pi-autopilot-negotiation-expiry-'));
     const stateRoot = join(root, 'state');

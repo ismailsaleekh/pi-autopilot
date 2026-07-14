@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { describe, it } from 'node:test';
 
-import type { AutopilotExecutionAudit, AutopilotState, AutopilotStatusEntry, AutopilotUnitSpec } from '../../src/core/contracts/index.ts';
+import type { AutopilotExecutionAudit, AutopilotReceipt, AutopilotState, AutopilotStatusEntry, AutopilotUnitSpec } from '../../src/core/contracts/index.ts';
 import { runAutopilotClaimGc } from '../../src/core/claim-gc.ts';
 import {
   AUTOPILOT_STATE_ROOT_ENV,
@@ -78,7 +79,7 @@ void describe('claim GC runtime terminal fallback', () => {
       });
       const dryCandidate = candidateForUnit(dryRun.candidates, fixture.unitId);
       assert.equal(dryCandidate.stale, false);
-      assert.equal(dryCandidate.blockers.some((blocker) => blocker.includes('live: running')), true);
+      assert.equal(dryCandidate.blockers.some((blocker) => blocker.includes('state=running')), true);
 
       const applied = await runAutopilotClaimGc({
         sourceCwd: fixture.source,
@@ -103,7 +104,7 @@ void describe('claim GC runtime terminal fallback', () => {
       });
       const candidate = candidateForUnit(applied.candidates, fixture.unitId);
       assert.equal(candidate.stale, false);
-      assert.equal(candidate.blockers.some((blocker) => blocker.includes('audit identity')), true);
+      assert.equal(candidate.blockers.some((blocker) => blocker.includes('audit')), true);
       assert.deepEqual(applied.released_claims, []);
       assert.equal((await readPathClaims(fixture.context.coordinationRoot)).length, 1);
     });
@@ -227,6 +228,7 @@ async function writeRuntimeEvidence(
   const role = fixture.spec.role;
   const verdict = role === 'validate' ? 'PASS' : 'DONE';
   const statusRef = `statuses/${fixture.unitId}.${role}.attempt-1.json`;
+  const receiptRef = `receipts/${fixture.unitId}.${role}.attempt-1.receipt.json`;
   const auditRef = `execution-audits/${fixture.unitId}.${role}.attempt-1.json`;
   const status: AutopilotStatusEntry = {
     schema_version: 'autopilot.status.v1',
@@ -301,13 +303,25 @@ async function writeRuntimeEvidence(
         state: unitState,
         attempt: 1,
         status_ref: statusRef,
+        receipt_ref: receiptRef,
         summary: completed ? 'completed' : 'running',
       },
     },
     operator_questions: [],
     next_actions: [],
   };
-  await writeJson(join(fixture.prepared.runtimeRoot, statusRef), status);
+  const statusPath = join(fixture.prepared.runtimeRoot, statusRef);
+  const statusBytes = `${JSON.stringify(status, null, 2)}\n`;
+  await mkdir(dirname(statusPath), { recursive: true });
+  await writeFile(statusPath, statusBytes, 'utf8');
+  const receipt: AutopilotReceipt = {
+    schema_version: 'autopilot.receipt.v1', tool_name: 'autopilot_emit_status', workstream: fixture.prepared.active.workstream,
+    unit_id: fixture.unitId, role, attempt: 1, emitted_at: '2026-07-11T10:00:00.000Z', status_output: statusPath,
+    status_sha256: `sha256:${createHash('sha256').update(statusBytes).digest('hex')}`, schema_sha256: `sha256:${'a'.repeat(64)}`,
+    tool_call_id: `tool-${fixture.unitId}`, provider_identity: { provider_id: 'openai-codex', requested_model_id: 'openai-codex/gpt-5.6-sol', executed_model_id: 'openai-codex/gpt-5.6-sol', api: 'openai-codex-responses', thinking_level: 'xhigh' },
+    expected_identity_hash: `sha256:${'b'.repeat(64)}`,
+  };
+  await writeJson(join(fixture.prepared.runtimeRoot, receiptRef), receipt);
   await writeJson(join(fixture.prepared.runtimeRoot, auditRef), audit);
   await writeJson(join(fixture.prepared.runtimeRoot, 'state.json'), state);
 }

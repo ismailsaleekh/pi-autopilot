@@ -517,6 +517,7 @@ export class AutopilotSessionBridge {
         const supervisor = new DurableRunSupervisorClient(input.env ?? process.env);
         const attachment = await supervisor.attach({ repo: input.repo, active: input.active, rawSessionId: input.rawSessionId });
         const bridge = new AutopilotSessionBridge(supervisor, attachment, input.sink, input.recoverOwnedOperations ?? null);
+        await input.onAttachedBeforeMailbox?.(bridge);
         await bridge.reconcileOwnedRun('session-attachment-before-mailbox-and-dispatch');
         if (bridge.#recoverOwnedOperations !== null)
             await bridge.#recoverOwnedOperations(bridge.#attachment.contextPath);

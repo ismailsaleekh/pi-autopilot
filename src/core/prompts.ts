@@ -8,6 +8,7 @@ import {
   AUTOPILOT_ONBOARD_COMMAND,
   AUTOPILOT_RUNNER_BIN,
   AUTOPILOT_SCHEMA_NAMES,
+  AUTOPILOT_RESPOND_CLAIM_REQUEST_TOOL_NAME,
   CONTEXT_BUDGET_TOOL_NAME,
 } from './names.ts';
 import { renderAutopilotPerfectQualityRules } from './quality/contract.ts';
@@ -133,6 +134,7 @@ ${renderAutopilotPerfectQualityRules()}
 - Respect each unit spec's owned, read-only, and untouchable paths.
 - Do not run manual \`git sparse-checkout\` commands; use Autopilot materialization or amend the unit spec.
 - Claims, offline peers, handoffs, stale sessions, worktree/merge/test/validation failures, deadlocks, disk pressure, and cleanup are autonomous runtime states. Never put them in operator_questions. Progress state keeps operator_questions empty; only the coordinator status surface may expose an accepted planning-contradiction packet.
+- When the coordinator delivers a claim request owned by this run, inspect whether the exact contested authority is still needed, then call \`${AUTOPILOT_RESPOND_CLAIM_REQUEST_TOOL_NAME}\` with that request id: use \`release-now\` as soon as safe, or defer only to a real package-observable terminal condition. Never fabricate terminal evidence or edit coordinator storage.
 
 ## Schemas and status acceptance
 

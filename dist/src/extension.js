@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { createContextBudgetTool, resolveContextHaltPercent } from "./core/context-budget.js";
-import { AUTOPILOT_ABORT_COMMAND, AUTOPILOT_CLAIM_GC_COMMAND, AUTOPILOT_CLOSE_COMMAND, AUTOPILOT_COMMAND, AUTOPILOT_CONFIG_COMMAND, AUTOPILOT_COORDINATION_COMMAND, AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV, AUTOPILOT_HANDOFF_COMMAND, AUTOPILOT_INJECT_COMMAND, AUTOPILOT_ONBOARD_COMMAND, CONTEXT_BUDGET_TOOL_NAME, } from "./core/names.js";
+import { AUTOPILOT_ABORT_COMMAND, AUTOPILOT_CLAIM_GC_COMMAND, AUTOPILOT_CLOSE_COMMAND, AUTOPILOT_COMMAND, AUTOPILOT_CONFIG_COMMAND, AUTOPILOT_COORDINATION_COMMAND, AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV, AUTOPILOT_HANDOFF_COMMAND, AUTOPILOT_INJECT_COMMAND, AUTOPILOT_ONBOARD_COMMAND, CONTEXT_BUDGET_TOOL_NAME, AUTOPILOT_RESPOND_CLAIM_REQUEST_TOOL_NAME, } from "./core/names.js";
 import { parseAutopilotAbortArgs, parseAutopilotArgs, parseAutopilotClaimGcArgs, parseAutopilotCloseArgs, parseAutopilotConfigArgs, parseAutopilotCoordinationArgs, parseAutopilotInjectArgs, runnerInvocationFromModuleUrl, runtimeRootForWorkstream } from "./core/paths.js";
 import { AutopilotCloseError, abortAutopilotWorkstream, closeAutopilotWorkstream } from "./core/close-runtime.js";
 import { runAutopilotClaimGc } from "./core/claim-gc.js";
@@ -9,6 +9,8 @@ import { AUTOPILOT_PARENT_MODEL_ASSIGNMENT } from "./core/model-roster.js";
 import { evaluateAutopilotWorktreeToolCall, } from "./core/git-guard.js";
 import { AutopilotParallelRuntimeError, prepareAutopilotWorkstream, recoverAutopilotWorktreeSagas, resolveRepoIdentity } from "./core/parallel-runtime.js";
 import { CoordinatorClient } from "./core/coordination/client.js";
+import { createClaimResponseTool } from "./core/coordination/claim-response-tool.js";
+import { ClaimNegotiationClient } from "./core/coordination/negotiation.js";
 import { replayPendingCoordinatorReconciliation } from "./core/coordination/reconciliation.js";
 import { AutopilotSessionBridge } from "./core/coordination/supervisor.js";
 import { ensureMainWorktreeSagaRegistered } from "./core/coordination/worktree-saga.js";
@@ -18,6 +20,7 @@ function notify(ctx, message, kind) {
 }
 export default function autopilotExtension(pi) {
     let contextBudgetRegistered = false;
+    let claimResponseToolRegistered = false;
     let worktreeGuardRegistered = false;
     let activeAutopilotWorkstream = null;
     let activeAutopilotRuntimeRoot = null;
@@ -38,6 +41,29 @@ export default function autopilotExtension(pi) {
                 pi.setActiveTools([...activeTools, CONTEXT_BUDGET_TOOL_NAME]);
             }
         }
+    }
+    function activateClaimResponseTool() {
+        if (!claimResponseToolRegistered) {
+            pi.registerTool(createClaimResponseTool(() => {
+                const context = sessionBridge?.attachment.context;
+                if (context === undefined)
+                    return null;
+                return new ClaimNegotiationClient(new CoordinatorClient({ env: { ...process.env, AUTOPILOT_STATE_ROOT: context.state_root } }), context);
+            }));
+            claimResponseToolRegistered = true;
+        }
+        if (pi.getActiveTools !== undefined && pi.setActiveTools !== undefined) {
+            const activeTools = pi.getActiveTools();
+            if (!activeTools.includes(AUTOPILOT_RESPOND_CLAIM_REQUEST_TOOL_NAME))
+                pi.setActiveTools([...activeTools, AUTOPILOT_RESPOND_CLAIM_REQUEST_TOOL_NAME]);
+        }
+    }
+    function deactivateClaimResponseTool() {
+        if (pi.getActiveTools === undefined || pi.setActiveTools === undefined)
+            return;
+        const activeTools = pi.getActiveTools();
+        if (activeTools.includes(AUTOPILOT_RESPOND_CLAIM_REQUEST_TOOL_NAME))
+            pi.setActiveTools(activeTools.filter((name) => name !== AUTOPILOT_RESPOND_CLAIM_REQUEST_TOOL_NAME));
     }
     async function activateParentModelRoster(ctx) {
         const assignment = AUTOPILOT_PARENT_MODEL_ASSIGNMENT;
@@ -91,12 +117,19 @@ export default function autopilotExtension(pi) {
         });
         worktreeGuardRegistered = true;
     }
+    function clearActiveAutopilotState() {
+        activeAutopilotWorkstream = null;
+        activeAutopilotRuntimeRoot = null;
+        activeAutopilotWorktreePath = null;
+        activeAutopilotWorkstreamRun = null;
+    }
     function rawSessionId(ctx) {
         const sessionId = ctx.sessionManager?.getSessionId();
         return sessionId === undefined || sessionId.length === 0 ? lifecycleSessionId : sessionId;
     }
     async function attachSessionBridge(prepared, ctx) {
         if (sessionBridge !== null && sessionBridge.attachment.context.workstream_run === prepared.active.workstream_run) {
+            activateClaimResponseTool();
             await recoverAutopilotWorktreeSagas({ active: prepared.active });
             await ensureMainWorktreeSagaRegistered({ active: prepared.active });
             await replayPendingCoordinatorReconciliation({ active: prepared.active });
@@ -116,6 +149,8 @@ export default function autopilotExtension(pi) {
             if (process.env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV] === priorContextPath)
                 delete process.env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV];
             sessionBridge = null;
+            deactivateClaimResponseTool();
+            clearActiveAutopilotState();
         }
         try {
             sessionBridge = await AutopilotSessionBridge.start({
@@ -126,6 +161,10 @@ export default function autopilotExtension(pi) {
                     const env = { ...process.env, [AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV]: contextPath };
                     await recoverAutopilotWorktreeSagas({ active: prepared.active, env });
                     await ensureMainWorktreeSagaRegistered({ active: prepared.active, env });
+                },
+                onAttachedBeforeMailbox: (bridge) => {
+                    sessionBridge = bridge;
+                    activateClaimResponseTool();
                 },
                 sink: {
                     send: (message, delivery, triggerTurn) => sendMessage(message, { deliverAs: delivery, triggerTurn }),
@@ -153,6 +192,8 @@ export default function autopilotExtension(pi) {
             }
             notify(ctx, `Autopilot durable run supervisor attachment failed: ${error instanceof Error ? error.message : String(error)}`, 'error');
             sessionBridge = null;
+            deactivateClaimResponseTool();
+            clearActiveAutopilotState();
             return false;
         }
     }
@@ -169,13 +210,10 @@ export default function autopilotExtension(pi) {
             if (process.env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV] === contextPath)
                 delete process.env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV];
             sessionBridge = null;
+            deactivateClaimResponseTool();
         }
-        if (activeAutopilotWorkstreamRun === workstreamRun) {
-            activeAutopilotWorkstream = null;
-            activeAutopilotRuntimeRoot = null;
-            activeAutopilotWorktreePath = null;
-            activeAutopilotWorkstreamRun = null;
-        }
+        if (activeAutopilotWorkstreamRun === workstreamRun)
+            clearActiveAutopilotState();
     }
     async function prepareAndActivateWorkstream(input) {
         try {
@@ -234,6 +272,8 @@ export default function autopilotExtension(pi) {
                 if (process.env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV] === contextPath)
                     delete process.env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV];
                 sessionBridge = null;
+                deactivateClaimResponseTool();
+                clearActiveAutopilotState();
             }
         });
     }

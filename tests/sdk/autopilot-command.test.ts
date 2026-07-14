@@ -25,6 +25,7 @@ import {
   AUTOPILOT_INJECT_COMMAND,
   AUTOPILOT_ONBOARD_COMMAND,
   AUTOPILOT_STATUS_TOOL,
+  AUTOPILOT_RESPOND_CLAIM_REQUEST_TOOL_NAME,
   CONTEXT_BUDGET_TOOL_NAME,
 } from '../../src/core/names.ts';
 import { AUTOPILOT_STATE_ROOT_ENV, coordinationRootForRepo, resolveRepoIdentity } from '../../src/core/parallel-runtime.ts';
@@ -164,7 +165,7 @@ function git(cwd: string, args: readonly string[]): void {
 }
 
 void describe('Autopilot command SDK surface', () => {
-  void it('queues the hardened parent prompt and activates context_budget only for /autopilot', async () => {
+  void it('BUG-174 queues the hardened parent prompt and activates authenticated parent tools only for /autopilot', async () => {
     await withIsolatedHarness(async (harness) => {
       await requireCommand(harness, AUTOPILOT_COMMAND).handler('demo operator scope', harness.ctx);
       assert.deepEqual(publicCommands(harness), [
@@ -178,8 +179,8 @@ void describe('Autopilot command SDK surface', () => {
         AUTOPILOT_INJECT_COMMAND,
         AUTOPILOT_ONBOARD_COMMAND,
       ]);
-      assert.deepEqual(harness.toolNames, [CONTEXT_BUDGET_TOOL_NAME]);
-      assert.deepEqual(harness.activeTools, [CONTEXT_BUDGET_TOOL_NAME]);
+      assert.deepEqual(harness.toolNames, [CONTEXT_BUDGET_TOOL_NAME, AUTOPILOT_RESPOND_CLAIM_REQUEST_TOOL_NAME]);
+      assert.deepEqual(harness.activeTools, [CONTEXT_BUDGET_TOOL_NAME, AUTOPILOT_RESPOND_CLAIM_REQUEST_TOOL_NAME]);
       assert.deepEqual(harness.selectedModels, [{ provider: 'openai-codex', id: 'gpt-5.6-sol' }]);
       assert.deepEqual(harness.thinkingLevels, ['xhigh']);
       assert.equal(harness.messages.length, 1);
@@ -187,6 +188,7 @@ void describe('Autopilot command SDK surface', () => {
       if (message === undefined) throw new Error('missing parent prompt');
       assert.equal(message.deliverAs, 'followUp');
       assert.match(message.content, /call `context_budget` with no arguments/);
+      assert.match(message.content, /autopilot_respond_claim_request/);
       assert.match(message.content, /parent\/orchestrator: openai-codex\/gpt-5\.6-sol at xhigh/);
       assert.match(message.content, /implement: openai-codex\/gpt-5\.6-terra at high/);
       assert.match(message.content, /validate: openai-codex\/gpt-5\.6-sol at xhigh/);
@@ -279,8 +281,8 @@ void describe('Autopilot command SDK surface', () => {
   void it('injects an active workstream without queueing the parent prompt and enables handoff', async () => {
     await withIsolatedHarness(async (harness) => {
       await requireCommand(harness, AUTOPILOT_INJECT_COMMAND).handler('demo', harness.ctx);
-      assert.deepEqual(harness.toolNames, [CONTEXT_BUDGET_TOOL_NAME]);
-      assert.deepEqual(harness.activeTools, [CONTEXT_BUDGET_TOOL_NAME]);
+      assert.deepEqual(harness.toolNames, [CONTEXT_BUDGET_TOOL_NAME, AUTOPILOT_RESPOND_CLAIM_REQUEST_TOOL_NAME]);
+      assert.deepEqual(harness.activeTools, [CONTEXT_BUDGET_TOOL_NAME, AUTOPILOT_RESPOND_CLAIM_REQUEST_TOOL_NAME]);
       assert.deepEqual(harness.selectedModels, [{ provider: 'openai-codex', id: 'gpt-5.6-sol' }]);
       assert.deepEqual(harness.thinkingLevels, ['xhigh']);
       assert.equal(harness.messages.length, 0);
@@ -324,8 +326,8 @@ void describe('Autopilot command SDK surface', () => {
     await withIsolatedHarness(async (harness) => {
       await requireCommand(harness, AUTOPILOT_COMMAND).handler('demo initial scope', harness.ctx);
       await requireCommand(harness, AUTOPILOT_HANDOFF_COMMAND).handler('demo is a comment, not a slug', harness.ctx);
-      assert.deepEqual(harness.toolNames, [CONTEXT_BUDGET_TOOL_NAME]);
-      assert.deepEqual(harness.activeTools, [CONTEXT_BUDGET_TOOL_NAME]);
+      assert.deepEqual(harness.toolNames, [CONTEXT_BUDGET_TOOL_NAME, AUTOPILOT_RESPOND_CLAIM_REQUEST_TOOL_NAME]);
+      assert.deepEqual(harness.activeTools, [CONTEXT_BUDGET_TOOL_NAME, AUTOPILOT_RESPOND_CLAIM_REQUEST_TOOL_NAME]);
       assert.equal(harness.messages.length, 2);
       const message = harness.messages[1];
       if (message === undefined) throw new Error('missing handoff prompt');

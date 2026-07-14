@@ -18,6 +18,7 @@ import { COORDINATOR_SCHEMA_MIGRATION_CHECKSUMS, CoordinatorStore, type Coordina
 import { backup, DatabaseSync, type SQLOutputValue } from 'node:sqlite';
 import { CoordinationRuntimeError } from './failures.ts';
 import { normalizeRepoRelativePath, pathOverlapsOrContains, resolveRepoIdentity } from '../parallel-runtime.ts';
+import { proveLegacyReadAttemptTerminal } from './legacy-read-terminal.ts';
 import type { ActiveAutopilotRow, AutopilotPathClaim, AutopilotUnitBranchInfo, AutopilotWorktreeIndexRow, ProcessEnvLike } from '../parallel-runtime.ts';
 import { parseAutopilotUnitMerge, type AutopilotUnitMerge } from '../unit-merge.ts';
 import { parseCoordinationEditLease, parseCoordinationUnitAttempt, parseCoordinationWorktreeOperation } from './contracts.ts';
@@ -56,10 +57,11 @@ interface MigrationRepositoryIdentity {
 }
 
 interface TerminalProof {
-  readonly source: 'unit-merge' | 'attempt-reset' | 'quarantine-capture' | 'run-close' | 'run-abort';
-  readonly mechanical_proof: 'accepted-unit-merge' | 'accepted-attempt-reset' | 'accepted-quarantine-capture' | 'accepted-run-terminal';
+  readonly source: 'unit-merge' | 'attempt-reset' | 'quarantine-capture' | 'run-close' | 'run-abort' | 'legacy-read-terminal';
+  readonly mechanical_proof: 'accepted-unit-merge' | 'accepted-attempt-reset' | 'accepted-quarantine-capture' | 'accepted-run-terminal' | 'accepted-read-terminal' | 'superseded-read-terminal';
   readonly evidence_ref: string;
   readonly evidence_sha256: `sha256:${string}`;
+  readonly supporting_evidence?: readonly { readonly ref: string; readonly sha256: `sha256:${string}` }[];
   readonly exact_git_objects: readonly string[];
   readonly filesystem_postconditions: readonly string[];
 }
@@ -130,6 +132,7 @@ interface LegacyMergeEvidence {
 
 interface LegacyTerminalEvidence {
   readonly attemptProof: ReadonlyMap<string, TerminalProof>;
+  readonly readProof: ReadonlyMap<string, TerminalProof>;
   readonly runProof: ReadonlyMap<string, TerminalProof>;
   readonly paths: readonly string[];
 }
@@ -617,8 +620,9 @@ function acceptedRunProof(row: ActiveAutopilotRow, index: readonly AutopilotWork
   return { source: outcome === 'closed' ? 'run-close' : 'run-abort', mechanical_proof: 'accepted-run-terminal', evidence_ref: evidenceRef(row, path), evidence_sha256: digest(readBounded(path, LEGACY_PREFLIGHT_MAX_INPUT_BYTES)), exact_git_objects: exactGitObjects, filesystem_postconditions: filesystemPostconditions };
 }
 
-function readLegacyTerminalEvidence(rows: readonly ActiveAutopilotRow[], unitMetadata: ParsedUnitMetadata, index: readonly AutopilotWorktreeIndexRow[]): LegacyTerminalEvidence {
+function readLegacyTerminalEvidence(rows: readonly ActiveAutopilotRow[], claims: readonly AutopilotPathClaim[], unitMetadata: ParsedUnitMetadata, index: readonly AutopilotWorktreeIndexRow[]): LegacyTerminalEvidence {
   const attemptProof = new Map<string, TerminalProof>();
+  const readProof = new Map<string, TerminalProof>();
   const runProof = new Map<string, TerminalProof>();
   const paths: string[] = [];
   for (const row of rows) {
@@ -675,8 +679,29 @@ function readLegacyTerminalEvidence(rows: readonly ActiveAutopilotRow[], unitMet
       }
     }
   }
+  for (const row of rows) {
+    const attempts = new Map<string, AutopilotPathClaim>();
+    for (const claim of claims) {
+      if (claim.workstream_run !== row.workstream_run || claim.autopilot_id !== row.autopilot_id || claim.claim_type !== 'READ') continue;
+      attempts.set(attemptKey(claim.workstream_run, claim.unit_id, claim.attempt), claim);
+    }
+    for (const [key, claim] of attempts) {
+      const result = proveLegacyReadAttemptTerminal({ runtimeRoot: row.runtime_root, workstream: row.workstream, unitId: claim.unit_id, attempt: claim.attempt });
+      if (!result.proven) continue;
+      paths.push(...result.proof.artifacts.map((artifact) => artifact.path));
+      readProof.set(key, {
+        source: 'legacy-read-terminal',
+        mechanical_proof: result.proof.kind === 'completed-current-attempt' ? 'accepted-read-terminal' : 'superseded-read-terminal',
+        evidence_ref: evidenceRef(row, result.proof.evidence.path),
+        evidence_sha256: result.proof.evidence.sha256,
+        supporting_evidence: result.proof.artifacts.map((artifact) => ({ ref: evidenceRef(row, artifact.path), sha256: artifact.sha256 })),
+        exact_git_objects: [],
+        filesystem_postconditions: result.proof.mechanicalProof,
+      });
+    }
+  }
   const frozenPaths = Object.freeze([...new Set(paths)].sort());
-  return { attemptProof, runProof, paths: frozenPaths };
+  return { attemptProof, readProof, runProof, paths: frozenPaths };
 }
 
 function parseWorktreeIndex(path: string): readonly AutopilotWorktreeIndexRow[] {
@@ -1111,7 +1136,7 @@ function inspectLegacy(paths: CoordinatorRuntimePaths, repoKey: string, reposito
   const unitMetadata = readUnitMetadata(rows);
   const mergeEvidence = readLegacyMergeEvidence(rows);
   const index = parseWorktreeIndex(join(worktreeRoot, '_index.json'));
-  const terminalEvidence = readLegacyTerminalEvidence(rows, unitMetadata, index);
+  const terminalEvidence = readLegacyTerminalEvidence(rows, claims, unitMetadata, index);
   const blockers = findings.filter((finding) => finding.severity === 'error').map((finding) => `${finding.code}: ${finding.detail}`);
   blockers.push(...inspectGit(rows, terminalizedRuns), ...mergeEvidence.blockers);
   for (const run of unitMetadata.missingTaskInfoRuns) {
@@ -1144,10 +1169,11 @@ function inspectLegacy(paths: CoordinatorRuntimePaths, repoKey: string, reposito
       mergeFilesystemPostconditions = Object.freeze([`main-worktree-contains:${merge.merge.integration_after}`]);
     }
     const mergeProof: TerminalProof | null = acceptedMerge && merge !== undefined ? { source: 'unit-merge', mechanical_proof: 'accepted-unit-merge', evidence_ref: merge.ref, evidence_sha256: merge.sha256, exact_git_objects: mergeExactGitObjects, filesystem_postconditions: mergeFilesystemPostconditions } : null;
-    const terminalProof = mergeProof ?? terminalEvidence.runProof.get(claim.workstream_run) ?? (metadata?.status === 'aborted' && attemptProof?.source === 'attempt-reset' ? attemptProof : metadata?.status === 'quarantined' && attemptProof?.source === 'quarantine-capture' ? attemptProof : null);
+    const readProof = claim.claim_type === 'READ' ? terminalEvidence.readProof.get(attemptKey(claim.workstream_run, claim.unit_id, claim.attempt)) : undefined;
+    const terminalProof = mergeProof ?? terminalEvidence.runProof.get(claim.workstream_run) ?? readProof ?? (metadata?.status === 'aborted' && attemptProof?.source === 'attempt-reset' ? attemptProof : metadata?.status === 'quarantined' && attemptProof?.source === 'quarantine-capture' ? attemptProof : null);
     if (terminalProof !== null) {
       terminalLeakKeys.add(claimKey(claim));
-      auditRows.push({ audit_id: entityId('terminal-release', claimKey(claim)), source_kind: 'claim-event', payload: { schema_version: 'autopilot.migration_terminal_release.v1', repo_key: repoKey, workstream_run: claim.workstream_run, autopilot_id: claim.autopilot_id, unit_id: claim.unit_id, attempt: claim.attempt, path: claim.path, claim_type: claim.claim_type, mechanical_proof: terminalProof.mechanical_proof, evidence_source: terminalProof.source, evidence_ref: terminalProof.evidence_ref, evidence_sha256: terminalProof.evidence_sha256, exact_git_objects: terminalProof.exact_git_objects, filesystem_postconditions: terminalProof.filesystem_postconditions, released_from_active_import: true } });
+      auditRows.push({ audit_id: entityId('terminal-release', claimKey(claim)), source_kind: 'claim-event', payload: { schema_version: 'autopilot.migration_terminal_release.v1', repo_key: repoKey, workstream_run: claim.workstream_run, autopilot_id: claim.autopilot_id, unit_id: claim.unit_id, attempt: claim.attempt, path: claim.path, claim_type: claim.claim_type, mechanical_proof: terminalProof.mechanical_proof, evidence_source: terminalProof.source, evidence_ref: terminalProof.evidence_ref, evidence_sha256: terminalProof.evidence_sha256, ...(terminalProof.supporting_evidence === undefined ? {} : { supporting_evidence: terminalProof.supporting_evidence }), exact_git_objects: terminalProof.exact_git_objects, filesystem_postconditions: terminalProof.filesystem_postconditions, released_from_active_import: true } });
     } else if (owner.status === 'closed' || metadata === undefined || metadata.status !== 'active' || unitMetadata.orphanAttempts.has(attemptKey(claim.workstream_run, claim.unit_id, claim.attempt))) {
       recovery.push({ recovery_id: entityId('recovery', `ambiguous\0${claimKey(claim)}`), workstream_run: claim.workstream_run, recovery_type: 'ambiguous-live-claim', detail: { claim_path: claim.path, claim_mode: claim.claim_type, unit_id: claim.unit_id, attempt: claim.attempt, edit_lease_id: entityId('migration-lease', claimKey(claim)), owner_status: owner.status, reason: 'legacy terminal status lacks independently verified immutable release evidence; authority is preserved pending supervisor recovery' } });
     }

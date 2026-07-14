@@ -13,6 +13,7 @@ import {
   AUTOPILOT_INJECT_COMMAND,
   AUTOPILOT_ONBOARD_COMMAND,
   CONTEXT_BUDGET_TOOL_NAME,
+  AUTOPILOT_RESPOND_CLAIM_REQUEST_TOOL_NAME,
 } from './core/names.ts';
 import { parseAutopilotAbortArgs, parseAutopilotArgs, parseAutopilotClaimGcArgs, parseAutopilotCloseArgs, parseAutopilotConfigArgs, parseAutopilotCoordinationArgs, parseAutopilotInjectArgs, runnerInvocationFromModuleUrl, runtimeRootForWorkstream } from './core/paths.ts';
 import { AutopilotCloseError, abortAutopilotWorkstream, closeAutopilotWorkstream } from './core/close-runtime.ts';
@@ -27,6 +28,8 @@ import {
 } from './core/git-guard.ts';
 import { AutopilotParallelRuntimeError, prepareAutopilotWorkstream, recoverAutopilotWorktreeSagas, resolveRepoIdentity, type PreparedAutopilotWorkstream } from './core/parallel-runtime.ts';
 import { CoordinatorClient } from './core/coordination/client.ts';
+import { createClaimResponseTool, type ClaimResponseToolDefinition } from './core/coordination/claim-response-tool.ts';
+import { ClaimNegotiationClient } from './core/coordination/negotiation.ts';
 import { replayPendingCoordinatorReconciliation } from './core/coordination/reconciliation.ts';
 import { AutopilotSessionBridge, type CoordinationMessageInjection } from './core/coordination/supervisor.ts';
 import { ensureMainWorktreeSagaRegistered } from './core/coordination/worktree-saga.ts';
@@ -85,9 +88,11 @@ export interface ExtensionEventRegistrar {
   (eventName: 'session_start' | 'session_shutdown', handler: ExtensionLifecycleHandler): void;
 }
 
+export type AutopilotParentToolDefinition = ReturnType<typeof createContextBudgetTool> | ClaimResponseToolDefinition;
+
 export interface ExtensionHostLike {
   registerCommand(name: string, definition: ExtensionCommandDefinitionLike): void;
-  registerTool(tool: ReturnType<typeof createContextBudgetTool>): void;
+  registerTool(tool: AutopilotParentToolDefinition): void;
   getActiveTools?(): readonly string[];
   setActiveTools?(toolNames: readonly string[]): void;
   setModel?(model: ExtensionModelLike): Promise<boolean>;
@@ -104,6 +109,7 @@ function notify(ctx: ExtensionCommandContextLike, message: string, kind: Notific
 
 export default function autopilotExtension(pi: ExtensionHostLike): void {
   let contextBudgetRegistered = false;
+  let claimResponseToolRegistered = false;
   let worktreeGuardRegistered = false;
   let activeAutopilotWorkstream: string | null = null;
   let activeAutopilotRuntimeRoot: string | null = null;
@@ -126,6 +132,27 @@ export default function autopilotExtension(pi: ExtensionHostLike): void {
         pi.setActiveTools([...activeTools, CONTEXT_BUDGET_TOOL_NAME]);
       }
     }
+  }
+
+  function activateClaimResponseTool(): void {
+    if (!claimResponseToolRegistered) {
+      pi.registerTool(createClaimResponseTool(() => {
+        const context = sessionBridge?.attachment.context;
+        if (context === undefined) return null;
+        return new ClaimNegotiationClient(new CoordinatorClient({ env: { ...process.env, AUTOPILOT_STATE_ROOT: context.state_root } }), context);
+      }));
+      claimResponseToolRegistered = true;
+    }
+    if (pi.getActiveTools !== undefined && pi.setActiveTools !== undefined) {
+      const activeTools = pi.getActiveTools();
+      if (!activeTools.includes(AUTOPILOT_RESPOND_CLAIM_REQUEST_TOOL_NAME)) pi.setActiveTools([...activeTools, AUTOPILOT_RESPOND_CLAIM_REQUEST_TOOL_NAME]);
+    }
+  }
+
+  function deactivateClaimResponseTool(): void {
+    if (pi.getActiveTools === undefined || pi.setActiveTools === undefined) return;
+    const activeTools = pi.getActiveTools();
+    if (activeTools.includes(AUTOPILOT_RESPOND_CLAIM_REQUEST_TOOL_NAME)) pi.setActiveTools(activeTools.filter((name) => name !== AUTOPILOT_RESPOND_CLAIM_REQUEST_TOOL_NAME));
   }
 
   async function activateParentModelRoster(ctx: ExtensionCommandContextLike): Promise<boolean> {
@@ -181,6 +208,13 @@ export default function autopilotExtension(pi: ExtensionHostLike): void {
     worktreeGuardRegistered = true;
   }
 
+  function clearActiveAutopilotState(): void {
+    activeAutopilotWorkstream = null;
+    activeAutopilotRuntimeRoot = null;
+    activeAutopilotWorktreePath = null;
+    activeAutopilotWorkstreamRun = null;
+  }
+
   function rawSessionId(ctx: ExtensionCommandContextLike): string {
     const sessionId = ctx.sessionManager?.getSessionId();
     return sessionId === undefined || sessionId.length === 0 ? lifecycleSessionId : sessionId;
@@ -188,6 +222,7 @@ export default function autopilotExtension(pi: ExtensionHostLike): void {
 
   async function attachSessionBridge(prepared: PreparedAutopilotWorkstream, ctx: ExtensionCommandContextLike): Promise<boolean> {
     if (sessionBridge !== null && sessionBridge.attachment.context.workstream_run === prepared.active.workstream_run) {
+      activateClaimResponseTool();
       await recoverAutopilotWorktreeSagas({ active: prepared.active });
       await ensureMainWorktreeSagaRegistered({ active: prepared.active });
       await replayPendingCoordinatorReconciliation({ active: prepared.active });
@@ -206,6 +241,8 @@ export default function autopilotExtension(pi: ExtensionHostLike): void {
       await sessionBridge.close('replaced-by-autopilot-activation');
       if (process.env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV] === priorContextPath) delete process.env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV];
       sessionBridge = null;
+      deactivateClaimResponseTool();
+      clearActiveAutopilotState();
     }
     try {
       sessionBridge = await AutopilotSessionBridge.start({
@@ -216,6 +253,10 @@ export default function autopilotExtension(pi: ExtensionHostLike): void {
           const env = { ...process.env, [AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV]: contextPath };
           await recoverAutopilotWorktreeSagas({ active: prepared.active, env });
           await ensureMainWorktreeSagaRegistered({ active: prepared.active, env });
+        },
+        onAttachedBeforeMailbox: (bridge) => {
+          sessionBridge = bridge;
+          activateClaimResponseTool();
         },
         sink: {
           send: (message, delivery, triggerTurn) => sendMessage(message, { deliverAs: delivery, triggerTurn }),
@@ -241,6 +282,8 @@ export default function autopilotExtension(pi: ExtensionHostLike): void {
       }
       notify(ctx, `Autopilot durable run supervisor attachment failed: ${error instanceof Error ? error.message : String(error)}`, 'error');
       sessionBridge = null;
+      deactivateClaimResponseTool();
+      clearActiveAutopilotState();
       return false;
     }
   }
@@ -253,13 +296,9 @@ export default function autopilotExtension(pi: ExtensionHostLike): void {
       catch (error) { notify(ctx, `Autopilot terminal run closed, but local session-bridge fencing failed loudly: ${error instanceof Error ? error.message : String(error)}`, 'error'); }
       if (process.env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV] === contextPath) delete process.env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV];
       sessionBridge = null;
+      deactivateClaimResponseTool();
     }
-    if (activeAutopilotWorkstreamRun === workstreamRun) {
-      activeAutopilotWorkstream = null;
-      activeAutopilotRuntimeRoot = null;
-      activeAutopilotWorktreePath = null;
-      activeAutopilotWorkstreamRun = null;
-    }
+    if (activeAutopilotWorkstreamRun === workstreamRun) clearActiveAutopilotState();
   }
 
   async function prepareAndActivateWorkstream(input: {
@@ -323,6 +362,8 @@ export default function autopilotExtension(pi: ExtensionHostLike): void {
         const contextPath = sessionBridge.attachment.contextPath;
         if (process.env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV] === contextPath) delete process.env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV];
         sessionBridge = null;
+        deactivateClaimResponseTool();
+        clearActiveAutopilotState();
       }
     });
   }

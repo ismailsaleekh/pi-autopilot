@@ -159,6 +159,15 @@ export class ClaimNegotiationClient {
     };
   }
 
+  async respondById(input: { readonly requestId: string; readonly response: 'release-now' | 'deferred'; readonly ownerReason: string; readonly releaseCondition: CoordinationReleaseCondition | null }): Promise<CoordinationClaimRequest> {
+    const status = await this.#client.query('status', this.#session.repo_id, this.#session.workstream_run);
+    const requests = parseEntityArray(status.payload['claim_requests'], 'status claim_requests', parseCoordinationClaimRequest);
+    const request = requests.find((candidate) => candidate.request_id === input.requestId);
+    if (request === undefined) throw new CoordinationRuntimeError('invalid-request', `claim request ${input.requestId} is not visible to the attached owner run`);
+    if (request.owner.repo_id !== this.#session.repo_id || request.owner.autopilot_id !== this.#session.autopilot_id || request.owner.workstream_run !== this.#session.workstream_run) throw new CoordinationRuntimeError('unauthorized-client', 'attached session is not the durable owner of the claim request');
+    return await this.respond({ request, response: input.response, ownerReason: input.ownerReason, releaseCondition: input.releaseCondition });
+  }
+
   async respond(input: { readonly request: CoordinationClaimRequest; readonly response: 'release-now' | 'deferred'; readonly ownerReason: string; readonly releaseCondition: CoordinationReleaseCondition | null }): Promise<CoordinationClaimRequest> {
     const condition = input.releaseCondition === null ? null : parseCoordinationReleaseCondition(input.releaseCondition);
     const response = await this.#client.mutate('respond-claim-request', this.#identity(input.request.version, `respond-claim-request:${input.request.request_id}:${String(input.request.version)}:${input.response}`), {

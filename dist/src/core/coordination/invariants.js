@@ -38,6 +38,8 @@ export function checkCoordinationInvariants(snapshot) {
     const worktrees = new Map(snapshot.worktrees.map((worktree) => [worktree.worktree_id, worktree]));
     const reservations = new Map(snapshot.change_reservations.map((reservation) => [reservation.reservation_id, reservation]));
     const pendingMigrationRecoveryLeaseIds = new Set(snapshot.migration_recovery_work.filter((work) => work.status === 'pending' && typeof work.detail['edit_lease_id'] === 'string').map((work) => work.detail['edit_lease_id']));
+    const retainedMigrationRecoveryLeaseIds = new Set(snapshot.migration_recovery_work.filter((work) => work.status === 'resolved' && work.resolution?.resolution_type === 'authority-retained' && typeof work.detail['edit_lease_id'] === 'string').map((work) => work.detail['edit_lease_id']));
+    const nonterminalChildOwners = new Set(snapshot.child_leases.filter((child) => child.status !== 'terminal').map((child) => ownerKey(child.owner)));
     findings.push(...duplicateFindings(snapshot.repositories.map((value) => value.repo_id), 'duplicate-repository', 'repositories'));
     findings.push(...duplicateFindings(snapshot.runs.map((value) => runKey(value.repo_id, value.workstream_run)), 'duplicate-run', 'runs'));
     findings.push(...duplicateFindings(snapshot.session_leases.map((value) => value.session_lease_id), 'duplicate-session-lease', 'session_leases'));
@@ -183,8 +185,12 @@ export function checkCoordinationInvariants(snapshot) {
         const group = groups.get(lease.acquisition_group_id);
         if (group === undefined)
             findings.push(finding('lease-group-missing', lease.edit_lease_id, 'acquisition group does not exist'));
-        else if (ownerKey(group.owner) !== ownerKey(lease.owner))
-            findings.push(finding('lease-group-owner-mismatch', lease.edit_lease_id, 'lease and acquisition group have different owners'));
+        else {
+            if (ownerKey(group.owner) !== ownerKey(lease.owner))
+                findings.push(finding('lease-group-owner-mismatch', lease.edit_lease_id, 'lease and acquisition group have different owners'));
+            if (group.acquisition_kind === 'legacy-unknown' && lease.normal_release_condition.condition_type === 'explicit-owner-release' && retainedMigrationRecoveryLeaseIds.has(lease.edit_lease_id) && !nonterminalChildOwners.has(ownerKey(lease.owner)))
+                findings.push(finding('retained-legacy-explicit-owner-lease', lease.edit_lease_id, 'resolved authority-retained import has no resumable child and awaits evidence-backed terminal reconciliation or authenticated owner response through autopilot_respond_claim_request', 'warning'));
+        }
     }
     for (let leftIndex = 0; leftIndex < snapshot.edit_leases.length; leftIndex += 1) {
         const left = snapshot.edit_leases[leftIndex];

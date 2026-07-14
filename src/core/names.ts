@@ -16,6 +16,7 @@ export const AUTOPILOT_COORDINATION_AUTHORITY_ENV = 'AUTOPILOT_COORDINATION_AUTH
 export const AUTOPILOT_STATUS_TOOL = 'autopilot_emit_status';
 export const AUTOPILOT_STATUS_CONTEXT_ENV = 'AUTOPILOT_AGENT_STATUS_CONTEXT';
 export const CONTEXT_BUDGET_TOOL_NAME = 'context_budget';
+export const AUTOPILOT_RESPOND_CLAIM_REQUEST_TOOL_NAME = 'autopilot_respond_claim_request';
 export const AUTOPILOT_RUNTIME_ROOT_PREFIX = '.pi/autopilot';
 
 export const AUTOPILOT_SCHEMA_NAMES = [
