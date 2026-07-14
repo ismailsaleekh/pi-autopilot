@@ -26,11 +26,12 @@ import {
   type AutopilotToolCallContextLike,
   type AutopilotToolCallEventLike,
 } from './core/git-guard.ts';
-import { AutopilotParallelRuntimeError, prepareAutopilotWorkstream, recoverAutopilotWorktreeSagas, resolveRepoIdentity, type PreparedAutopilotWorkstream } from './core/parallel-runtime.ts';
+import { AutopilotParallelRuntimeError, coordinationRootForRepo, prepareAutopilotWorkstream, recoverAutopilotWorktreeSagas, resolveRepoIdentity, type PreparedAutopilotWorkstream } from './core/parallel-runtime.ts';
 import { CoordinatorClient } from './core/coordination/client.ts';
 import { createClaimResponseTool, type ClaimResponseToolDefinition } from './core/coordination/claim-response-tool.ts';
 import { ClaimNegotiationClient } from './core/coordination/negotiation.ts';
 import { replayPendingCoordinatorReconciliation } from './core/coordination/reconciliation.ts';
+import { reconcileRetainedFailedUnitAuthority } from './core/unit-failure.ts';
 import { AutopilotSessionBridge, type CoordinationMessageInjection } from './core/coordination/supervisor.ts';
 import { ensureMainWorktreeSagaRegistered } from './core/coordination/worktree-saga.ts';
 import {
@@ -227,6 +228,8 @@ export default function autopilotExtension(pi: ExtensionHostLike): void {
       await ensureMainWorktreeSagaRegistered({ active: prepared.active });
       await replayPendingCoordinatorReconciliation({ active: prepared.active });
       await sessionBridge.reconcileOwnedRun('same-session-resume-before-mailbox-and-dispatch');
+      await reconcileRetainedFailedUnitAuthority({ context: { repo: prepared.repo, active: prepared.active, coordinationRoot: coordinationRootForRepo(prepared.active.repo_key), claimsPath: '', claimEventsPath: '' } });
+      await sessionBridge.reconcileOwnedRun('failed-unit-authority-repair-before-mailbox-and-dispatch');
       await sessionBridge.drainMailbox();
       process.env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV] = sessionBridge.attachment.contextPath;
       return true;
@@ -268,6 +271,8 @@ export default function autopilotExtension(pi: ExtensionHostLike): void {
       await ensureMainWorktreeSagaRegistered({ active: prepared.active });
       await replayPendingCoordinatorReconciliation({ active: prepared.active });
       await sessionBridge.reconcileOwnedRun('pending-evidence-replay-before-mailbox-and-dispatch');
+      await reconcileRetainedFailedUnitAuthority({ context: { repo: prepared.repo, active: prepared.active, coordinationRoot: coordinationRootForRepo(prepared.active.repo_key), claimsPath: '', claimEventsPath: '' } });
+      await sessionBridge.reconcileOwnedRun('failed-unit-authority-repair-before-mailbox-and-dispatch');
       await sessionBridge.drainMailbox();
       handoffRequested = false;
       return true;

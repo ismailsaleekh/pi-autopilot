@@ -21,12 +21,14 @@ function stringArray(value, label) {
 }
 export function parseCoordinationReconciliationSummary(value) {
     const parsed = record(value, 'coordination reconciliation summary');
-    const fields = ['notification_ids', 'offered_group_ids', 'released_lease_ids', 'released_request_ids'];
+    const fields = ['notification_ids', 'offered_group_ids', 'released_lease_ids', 'released_observation_ids', 'released_request_ids', 'stale_observation_ids'];
     const unknown = Object.keys(parsed).filter((field) => !fields.includes(field));
     if (unknown.length > 0 || fields.some((field) => !(field in parsed)))
         throw new CoordinationRuntimeError('schema-mismatch', 'coordination reconciliation summary fields are incompatible', unknown);
     return {
         released_lease_ids: stringArray(parsed['released_lease_ids'], 'released_lease_ids'),
+        released_observation_ids: stringArray(parsed['released_observation_ids'], 'released_observation_ids'),
+        stale_observation_ids: stringArray(parsed['stale_observation_ids'], 'stale_observation_ids'),
         released_request_ids: stringArray(parsed['released_request_ids'], 'released_request_ids'),
         notification_ids: stringArray(parsed['notification_ids'], 'notification_ids'),
         offered_group_ids: stringArray(parsed['offered_group_ids'], 'offered_group_ids'),

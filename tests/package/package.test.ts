@@ -525,14 +525,14 @@ void describe('package manifest and payload', () => {
     }
   });
 
-  void it('ships compiled Phase 34–35 authority, migration, and recovery behavior in exact source parity', async () => {
+  void it('ships compiled authority, observation, terminal-acceptance, migration, and recovery behavior in exact source parity', async () => {
     const sourceStore = await readFile(new URL('src/core/coordination/store.ts', root), 'utf8');
     const compiledStore = await readFile(new URL('dist/src/core/coordination/store.js', root), 'utf8');
     const sourceMigration = await readFile(new URL('src/core/coordination/migration.ts', root), 'utf8');
     const compiledMigration = await readFile(new URL('dist/src/core/coordination/migration.js', root), 'utf8');
     const sourceRunner = await readFile(new URL('src/core/agent-runner.ts', root), 'utf8');
     const compiledRunner = await readFile(new URL('dist/src/core/agent-runner.js', root), 'utf8');
-    for (const marker of ['register-authoritative-artifact', 'assign-adjudication', 'claim-adjudication-assignment', 'complete-adjudication', 'materialization-read-expansion', 'checkpoint-child', 'deadlockFixedPointMeasure', 'evidence_artifacts']) {
+    for (const marker of ['register-authoritative-artifact', 'assign-adjudication', 'claim-adjudication-assignment', 'complete-adjudication', 'terminal_evidence_ref', 'materialization-read-expansion', 'checkpoint-child', 'deadlockFixedPointMeasure', 'evidence_artifacts', 'observations']) {
       assert.equal(sourceStore.includes(marker), true, `source is missing ${marker}`);
       assert.equal(compiledStore.includes(marker), true, `compiled coordinator is stale for ${marker}`);
     }
@@ -540,7 +540,7 @@ void describe('package manifest and payload', () => {
       assert.equal(sourceMigration.includes(marker), true, `source migration is missing ${marker}`);
       assert.equal(compiledMigration.includes(marker), true, `compiled migration is stale for ${marker}`);
     }
-    for (const marker of ['preemptionSignal', 'quarantineFailedUnit', 'autonomous deadlock preemption capture']) {
+    for (const marker of ['preemptionSignal', 'quarantineFailedUnit', 'writeAutopilotChildTerminalAcceptance', 'preserveOrResetFailedSourceAttempt']) {
       assert.equal(sourceRunner.includes(marker), true, `source runner is missing ${marker}`);
       assert.equal(compiledRunner.includes(marker), true, `compiled runner is stale for ${marker}`);
     }

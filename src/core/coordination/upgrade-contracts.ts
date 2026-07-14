@@ -9,9 +9,9 @@ const COORDINATOR_UPGRADE_SOURCE = Object.freeze({
   lifecycle_lock_schema: 'autopilot.coordinator_lock.v1',
 } as const);
 const COORDINATOR_UPGRADE_TARGET = Object.freeze({
-  package_build: '1.0.3-cf40',
-  protocol_version: '1.3',
-  database_schema_version: 9,
+  package_build: '1.1.0-cf41',
+  protocol_version: '1.4',
+  database_schema_version: 10,
   lifecycle_lock_schema: CURRENT_COORDINATOR_LIFECYCLE_LOCK_SCHEMA,
 } as const);
 export const COORDINATOR_UPGRADE_PATH = Object.freeze({ source: COORDINATOR_UPGRADE_SOURCE, target: COORDINATOR_UPGRADE_TARGET });
@@ -53,14 +53,27 @@ export interface KnownCompatibleCurrentCoordinatorLock {
   readonly token: string;
   readonly instance_id: string;
   readonly package_build: KnownCoordinatorPackageBuild;
-  readonly protocol_version: '1.3';
-  readonly database_schema_version: 9;
+  readonly protocol_version: '1.4';
+  readonly database_schema_version: 10;
   readonly started_at: string;
 }
 
 /** Exact lifecycle identity minted by this package build. */
 export interface CurrentCoordinatorLock extends KnownCompatibleCurrentCoordinatorLock {
-  readonly package_build: '1.0.3-cf40';
+  readonly package_build: '1.1.0-cf41';
+}
+
+export interface PriorSchema9CurrentCoordinatorLock {
+  readonly schema_version: typeof CURRENT_COORDINATOR_LIFECYCLE_LOCK_SCHEMA;
+  readonly pid: number;
+  readonly boot_id: string;
+  readonly process_start_identity: string;
+  readonly token: string;
+  readonly instance_id: string;
+  readonly package_build: '1.0.1-cf38' | '1.0.2-cf39' | '1.0.3-cf40';
+  readonly protocol_version: '1.3';
+  readonly database_schema_version: 9;
+  readonly started_at: string;
 }
 
 export interface CoordinatorUpgradeBackup {
@@ -99,14 +112,14 @@ export interface CoordinatorUpgradeIntent extends CoordinatorUpgradeIntentFields
   readonly target: typeof COORDINATOR_UPGRADE_PATH.target;
 }
 
-/** Read-only shape for an exact, known schema-6 upgrade target from this lineage. */
+type HistoricalSchema9PackageBuild = '1.0.1-cf38' | '1.0.2-cf39' | '1.0.3-cf40';
+type KnownCoordinatorUpgradeTarget =
+  | { readonly package_build: KnownCoordinatorPackageBuild; readonly protocol_version: '1.4'; readonly database_schema_version: 10; readonly lifecycle_lock_schema: typeof CURRENT_COORDINATOR_LIFECYCLE_LOCK_SCHEMA }
+  | { readonly package_build: HistoricalSchema9PackageBuild; readonly protocol_version: '1.3'; readonly database_schema_version: 9; readonly lifecycle_lock_schema: typeof CURRENT_COORDINATOR_LIFECYCLE_LOCK_SCHEMA };
+
+/** Read-only shape for an exact known historical or current target. */
 export interface KnownCoordinatorUpgradeIntent extends CoordinatorUpgradeIntentFields {
-  readonly target: {
-    readonly package_build: KnownCoordinatorPackageBuild;
-    readonly protocol_version: '1.3';
-    readonly database_schema_version: 9;
-    readonly lifecycle_lock_schema: typeof CURRENT_COORDINATOR_LIFECYCLE_LOCK_SCHEMA;
-  };
+  readonly target: KnownCoordinatorUpgradeTarget;
 }
 
 export interface PredecessorStatus {
@@ -201,6 +214,26 @@ export function parseKnownCompatibleCurrentCoordinatorLock(value: unknown): Know
   } catch { return null; }
 }
 
+export function parsePriorSchema9CurrentCoordinatorLock(value: unknown): PriorSchema9CurrentCoordinatorLock | null {
+  try {
+    const lock = record(value, 'prior schema-9 current lifecycle lock');
+    exact(lock, ['schema_version', 'pid', 'boot_id', 'process_start_identity', 'token', 'instance_id', 'package_build', 'protocol_version', 'database_schema_version', 'started_at'], 'prior schema-9 current lifecycle lock');
+    const packageBuild = lock['package_build'];
+    if (lock['schema_version'] !== CURRENT_COORDINATOR_LIFECYCLE_LOCK_SCHEMA || (packageBuild !== '1.0.1-cf38' && packageBuild !== '1.0.2-cf39' && packageBuild !== '1.0.3-cf40') || lock['protocol_version'] !== '1.3' || lock['database_schema_version'] !== 9) return null;
+    return {
+      schema_version: CURRENT_COORDINATOR_LIFECYCLE_LOCK_SCHEMA,
+      pid: integer(lock, 'pid', 'prior schema-9 current lifecycle lock', 1),
+      boot_id: text(lock, 'boot_id', 'prior schema-9 current lifecycle lock'),
+      process_start_identity: text(lock, 'process_start_identity', 'prior schema-9 current lifecycle lock'),
+      token: text(lock, 'token', 'prior schema-9 current lifecycle lock'),
+      instance_id: text(lock, 'instance_id', 'prior schema-9 current lifecycle lock'),
+      package_build: packageBuild,
+      protocol_version: '1.3', database_schema_version: 9,
+      started_at: text(lock, 'started_at', 'prior schema-9 current lifecycle lock'),
+    };
+  } catch { return null; }
+}
+
 /** Exact-target parser retained for migration, rollback, and owned-lock checks. */
 export function parseCurrentCoordinatorLock(value: unknown): CurrentCoordinatorLock | null {
   const lock = parseKnownCompatibleCurrentCoordinatorLock(value);
@@ -226,7 +259,15 @@ export function parseKnownCoordinatorUpgradeIntent(value: unknown): KnownCoordin
   exact(target, ['package_build', 'protocol_version', 'database_schema_version', 'lifecycle_lock_schema'], 'upgrade intent target');
   if (target['lifecycle_lock_schema'] !== CURRENT_COORDINATOR_LIFECYCLE_LOCK_SCHEMA) throw new CoordinationRuntimeError('protocol-mismatch', 'upgrade intent target lifecycle lock schema is incompatible');
   const targetCompatibility = classifyCoordinatorRuntimeIdentity({ package_build: target['package_build'], protocol_version: target['protocol_version'], database_schema_version: target['database_schema_version'] });
-  if (targetCompatibility.kind === 'incompatible') throw new CoordinationRuntimeError('protocol-mismatch', 'upgrade intent target is outside the closed schema-9 build lineage');
+  const historicalBuild = target['package_build'];
+  const historicalPackage: HistoricalSchema9PackageBuild | null = historicalBuild === '1.0.1-cf38' || historicalBuild === '1.0.2-cf39' || historicalBuild === '1.0.3-cf40' ? historicalBuild : null;
+  const historicalTarget = historicalPackage !== null && target['protocol_version'] === '1.3' && target['database_schema_version'] === 9
+    ? { package_build: historicalPackage, protocol_version: '1.3' as const, database_schema_version: 9 as const, lifecycle_lock_schema: CURRENT_COORDINATOR_LIFECYCLE_LOCK_SCHEMA }
+    : null;
+  if (targetCompatibility.kind === 'incompatible' && historicalTarget === null) throw new CoordinationRuntimeError('protocol-mismatch', 'upgrade intent target is outside the closed historical-schema-9/current-schema-10 lineage');
+  const parsedTarget: KnownCoordinatorUpgradeTarget = targetCompatibility.kind === 'incompatible'
+    ? historicalTarget as NonNullable<typeof historicalTarget>
+    : { package_build: targetCompatibility.package_build, protocol_version: targetCompatibility.protocol_version, database_schema_version: targetCompatibility.database_schema_version, lifecycle_lock_schema: targetCompatibility.lifecycle_lock_schema };
   const failure = intent['failure'];
   if (failure !== null && typeof failure !== 'string') throw new CoordinationRuntimeError('schema-mismatch', 'upgrade intent failure must be nullable text');
   const predecessorFence = intent['predecessor_fence'] === null ? null : parsePredecessorCoordinatorLock(intent['predecessor_fence']);
@@ -234,7 +275,7 @@ export function parseKnownCoordinatorUpgradeIntent(value: unknown): KnownCoordin
   return {
     schema_version: COORDINATOR_UPGRADE_INTENT_SCHEMA, upgrade_id: text(intent, 'upgrade_id', 'upgrade intent'), state: intent['state'] as CoordinatorUpgradeState,
     source: parseSource(intent['source']),
-    target: { package_build: targetCompatibility.package_build, protocol_version: targetCompatibility.protocol_version, database_schema_version: targetCompatibility.database_schema_version, lifecycle_lock_schema: targetCompatibility.lifecycle_lock_schema },
+    target: parsedTarget,
     safe_checkpoints: stringArray(intent['safe_checkpoints'], 'upgrade intent safe_checkpoints'), blockers: stringArray(intent['blockers'], 'upgrade intent blockers'), predecessor_fence: predecessorFence,
     backup: intent['backup'] === null ? null : parseCoordinatorUpgradeBackup(intent['backup']), created_at: text(intent, 'created_at', 'upgrade intent'), updated_at: text(intent, 'updated_at', 'upgrade intent'), failure,
   };
@@ -243,7 +284,7 @@ export function parseKnownCoordinatorUpgradeIntent(value: unknown): KnownCoordin
 /** Writable/resumable intents remain bound to this package's exact target. */
 export function parseCoordinatorUpgradeIntent(value: unknown): CoordinatorUpgradeIntent {
   const intent = parseKnownCoordinatorUpgradeIntent(value);
-  if (intent.target.package_build !== COORDINATOR_UPGRADE_PATH.target.package_build) throw new CoordinationRuntimeError('protocol-mismatch', 'upgrade intent target differs from this package');
+  if (intent.target.package_build !== COORDINATOR_UPGRADE_PATH.target.package_build || intent.target.protocol_version !== COORDINATOR_UPGRADE_PATH.target.protocol_version || intent.target.database_schema_version !== COORDINATOR_UPGRADE_PATH.target.database_schema_version) throw new CoordinationRuntimeError('protocol-mismatch', 'upgrade intent target differs from this package');
   return { ...intent, target: COORDINATOR_UPGRADE_PATH.target };
 }
 

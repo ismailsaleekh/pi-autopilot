@@ -1,5 +1,5 @@
 import { CoordinatorClient } from "./client.js";
-import { parseCoordinationAcquisitionGroup, parseCoordinationClaimRequest, parseCoordinationEditLease, parseCoordinationReleaseCondition, parseCoordinationRequestedLease } from "./contracts.js";
+import { parseCoordinationAcquisitionGroup, parseCoordinationClaimRequest, parseCoordinationEditLease, parseCoordinationObservation, parseCoordinationReleaseCondition, parseCoordinationRequestedLease } from "./contracts.js";
 import { CoordinationRuntimeError } from "./failures.js";
 import { readCoordinatorSessionContext } from "./supervisor.js";
 import { AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV } from "../names.js";
@@ -22,6 +22,25 @@ function parseEntityArray(value, label, parser) {
     if (!Array.isArray(value))
         throw new CoordinationRuntimeError('invalid-state', `${label} is not an array`);
     return Object.freeze(value.map(parser));
+}
+function assertCompleteGrantedAuthority(group, observations, editLeases) {
+    const evidence = [];
+    for (const requested of group.requested_leases) {
+        if (requested.mode === 'READ') {
+            const matching = observations.filter((observation) => observation.path === requested.path && observation.purpose === requested.purpose && observation.execution_state === 'active' && observation.freshness === 'current' && requested.source_identity !== undefined && observation.source_identity.base_commit === requested.source_identity.base_commit && observation.source_identity.object_id === requested.source_identity.object_id && observation.source_identity.object_kind === requested.source_identity.object_kind);
+            if (matching.length !== 1)
+                evidence.push(`READ ${requested.path}:observations=${String(matching.length)}:source=${requested.source_identity === undefined ? 'unbound' : 'bound'}`);
+        }
+        else {
+            const matching = editLeases.filter((lease) => lease.path === requested.path && lease.mode === requested.mode && lease.purpose === requested.purpose);
+            if (matching.length !== 1)
+                evidence.push(`${requested.mode} ${requested.path}:leases=${String(matching.length)}`);
+        }
+    }
+    if (observations.length + editLeases.length !== group.requested_leases.length)
+        evidence.push(`cardinality=${String(observations.length + editLeases.length)}/${String(group.requested_leases.length)}`);
+    if (evidence.length > 0)
+        throw new CoordinationRuntimeError('recovery-required', 'granted acquisition lacks its exact immutable observation/edit authority set; dispatch requires a new revalidated attempt', evidence);
 }
 export class ClaimNegotiationClient {
     #client;
@@ -50,10 +69,12 @@ export class ClaimNegotiationClient {
                 const verifiedGroups = parseEntityArray(verifiedStatus.payload['acquisition_groups'], 'verified status acquisition_groups', parseCoordinationAcquisitionGroup);
                 const verified = verifiedGroups.find((group) => group.acquisition_group_id === rebound.acquisition_group_id && group.state === 'granted');
                 if (verified !== undefined) {
+                    const observations = parseEntityArray(verifiedStatus.payload['observations'], 'verified status observations', parseCoordinationObservation).filter((observation) => observation.acquisition_group_id === verified.acquisition_group_id && observation.execution_state === 'active');
                     const editLeases = parseEntityArray(verifiedStatus.payload['edit_leases'], 'verified status edit_leases', parseCoordinationEditLease).filter((lease) => lease.acquisition_group_id === verified.acquisition_group_id);
-                    if (editLeases.length !== verified.requested_leases.length || verified.grant_event_seq === null)
-                        throw new CoordinationRuntimeError('invalid-state', 'migrated acquisition authority is incomplete and requires supervisor recovery');
-                    return { outcome: 'granted', acquisitionGroup: verified, editLeases, requestRefs: [], committedEventSeq: verified.grant_event_seq };
+                    if (verified.grant_event_seq === null)
+                        throw new CoordinationRuntimeError('invalid-state', 'migrated granted acquisition lacks its grant event');
+                    assertCompleteGrantedAuthority(verified, observations, editLeases);
+                    return { outcome: 'granted', acquisitionGroup: verified, observations, editLeases, requestRefs: [], committedEventSeq: verified.grant_event_seq };
                 }
                 throw new CoordinationRuntimeError('recovery-required', 'migrated authority became terminal during current-generation reconciliation; dispatch is refused');
             }
@@ -77,11 +98,11 @@ export class ClaimNegotiationClient {
         const acquisitionGroup = parseCoordinationAcquisitionGroup(payload['acquisition_group']);
         const requestRefs = stringArray(payload['request_refs'], 'acquire-group request_refs');
         if (payload['outcome'] === 'granted') {
-            return {
-                outcome: 'granted', acquisitionGroup,
-                editLeases: parseEntityArray(payload['edit_leases'], 'acquire-group edit_leases', parseCoordinationEditLease),
-                requestRefs, committedEventSeq: committedSequence(response),
-            };
+            const status = await this.#client.query('status', this.#session.repo_id, this.#session.workstream_run);
+            const observations = parseEntityArray(status.payload['observations'], 'status observations', parseCoordinationObservation).filter((observation) => observation.acquisition_group_id === acquisitionGroup.acquisition_group_id && observation.execution_state === 'active');
+            const editLeases = parseEntityArray(status.payload['edit_leases'], 'status edit_leases', parseCoordinationEditLease).filter((lease) => lease.acquisition_group_id === acquisitionGroup.acquisition_group_id);
+            assertCompleteGrantedAuthority(acquisitionGroup, observations, editLeases);
+            return { outcome: 'granted', acquisitionGroup, observations, editLeases, requestRefs, committedEventSeq: committedSequence(response) };
         }
         if (payload['outcome'] === 'waiting-for-peer-release') {
             const status = await this.#client.query('status', this.#session.repo_id, this.#session.workstream_run);
@@ -91,11 +112,13 @@ export class ClaimNegotiationClient {
                 throw new CoordinationRuntimeError('invalid-state', 'acquisition group disappeared after a durable acquire response');
             if (current.state === 'grant-ready') {
                 const granted = await this.acknowledgeGrant(current);
-                return { outcome: 'granted', acquisitionGroup: granted.acquisitionGroup, editLeases: granted.editLeases, requestRefs, committedEventSeq: granted.committedEventSeq };
+                return { outcome: 'granted', acquisitionGroup: granted.acquisitionGroup, observations: granted.observations, editLeases: granted.editLeases, requestRefs, committedEventSeq: granted.committedEventSeq };
             }
             if (current.state === 'granted') {
+                const observations = parseEntityArray(status.payload['observations'], 'status observations', parseCoordinationObservation).filter((observation) => observation.acquisition_group_id === current.acquisition_group_id && observation.execution_state === 'active');
                 const leases = parseEntityArray(status.payload['edit_leases'], 'status edit_leases', parseCoordinationEditLease).filter((lease) => lease.acquisition_group_id === current.acquisition_group_id);
-                return { outcome: 'granted', acquisitionGroup: current, editLeases: leases, requestRefs, committedEventSeq: committedSequence(response) };
+                assertCompleteGrantedAuthority(current, observations, leases);
+                return { outcome: 'granted', acquisitionGroup: current, observations, editLeases: leases, requestRefs, committedEventSeq: committedSequence(response) };
             }
             const currentRequests = parseEntityArray(status.payload['claim_requests'], 'status claim_requests', parseCoordinationClaimRequest).filter((claimRequest) => claimRequest.acquisition_group_id === current.acquisition_group_id);
             return {
@@ -115,11 +138,11 @@ export class ClaimNegotiationClient {
             throw new CoordinationRuntimeError('stale-version', 'grant offer expired and was requeued by the coordinator');
         if (response.payload['outcome'] !== 'granted')
             throw new CoordinationRuntimeError('invalid-state', 'coordinator returned an unsupported grant acknowledgement outcome');
-        return {
-            acquisitionGroup: parseCoordinationAcquisitionGroup(response.payload['acquisition_group']),
-            editLeases: parseEntityArray(response.payload['edit_leases'], 'acknowledge-grant edit_leases', parseCoordinationEditLease),
-            committedEventSeq: committedSequence(response),
-        };
+        const acquisitionGroup = parseCoordinationAcquisitionGroup(response.payload['acquisition_group']);
+        const observations = parseEntityArray(response.payload['observations'], 'acknowledge-grant observations', parseCoordinationObservation);
+        const editLeases = parseEntityArray(response.payload['edit_leases'], 'acknowledge-grant edit_leases', parseCoordinationEditLease);
+        assertCompleteGrantedAuthority(acquisitionGroup, observations, editLeases);
+        return { acquisitionGroup, observations, editLeases, committedEventSeq: committedSequence(response) };
     }
     async respondById(input) {
         const status = await this.#client.query('status', this.#session.repo_id, this.#session.workstream_run);

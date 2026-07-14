@@ -302,7 +302,7 @@ void describe('Autopilot command SDK surface', () => {
     });
   });
 
-  void it('BUG-175 injects through the actual compatible v1.0.1 coordinator without replacing its process', async () => {
+  void it('rejects the actual protocol-1.3 v1.0.1 coordinator without replacing its process', async () => {
     await withIsolatedHarness(async (harness) => {
       const stateRoot = process.env[AUTOPILOT_STATE_ROOT_ENV];
       if (stateRoot === undefined) throw new Error('mixed-build SDK harness has no state root');
@@ -313,10 +313,10 @@ void describe('Autopilot command SDK surface', () => {
       await requireCommand(harness, AUTOPILOT_INJECT_COMMAND).handler('mixed-build-resume', harness.ctx);
 
       const after: unknown = JSON.parse(await readFile(paths.lockPath, 'utf8')) as unknown;
-      assert.deepEqual(after, before, 'inject must not replace a live wire-compatible patch coordinator');
-      assert.equal(harness.notifications.some((entry) => /Autopilot injected for mixed-build-resume/u.test(entry.message)), true);
-      assert.equal(harness.notifications.some((entry) => /protocol-mismatch|package build is incompatible/u.test(entry.message)), false);
-      assert.deepEqual(harness.activeTools, [CONTEXT_BUDGET_TOOL_NAME, AUTOPILOT_RESPOND_CLAIM_REQUEST_TOOL_NAME]);
+      assert.deepEqual(after, before, 'inject must not replace an incompatible live historical coordinator');
+      assert.equal(harness.notifications.some((entry) => /Autopilot injected for mixed-build-resume/u.test(entry.message)), false);
+      assert.equal(harness.notifications.some((entry) => /protocol|schema|incompatible/u.test(entry.message)), true);
+      assert.deepEqual(harness.activeTools, [CONTEXT_BUDGET_TOOL_NAME]);
     }, 'v1.0.1');
   });
 

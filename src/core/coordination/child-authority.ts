@@ -38,6 +38,7 @@ export class AutopilotChildLeaseHandle {
   #heartbeat: ReturnType<typeof setInterval> | null = null;
   #fatalError: Error | null = null;
   #terminal = false;
+  #terminalCompletionUncertain = false;
   readonly #preemption = new AbortController();
   #operation: Promise<void> = Promise.resolve();
 
@@ -95,7 +96,7 @@ export class AutopilotChildLeaseHandle {
     if (this.#fatalError !== null) throw new CoordinationRuntimeError('coordinator-unavailable', `child authority heartbeat failed: ${this.#fatalError.message}`);
   }
 
-  async completeAdjudication(assignmentId: string, adjudicationPath: string): Promise<void> {
+  async completeAdjudication(assignmentId: string, adjudicationPath: string, terminalEvidence: { readonly ref: string; readonly sha256: `sha256:${string}` }): Promise<void> {
     await this.#enqueue(async () => {
       if (this.#terminal) throw new CoordinationRuntimeError('invalid-state', 'terminal child cannot complete adjudication');
       this.assertHealthy();
@@ -103,7 +104,7 @@ export class AutopilotChildLeaseHandle {
       const response = await this.#client.mutate('complete-adjudication', {
         repoId: this.#session.repo_id, workstreamRun: this.#session.workstream_run, sessionId: null, fencingGeneration: null, expectedVersion: this.#child.version,
         idempotencyKey: `complete-adjudication:${assignmentId}:${this.#child.child_lease_id}`,
-      }, { assignment_id: assignmentId, adjudication_path: adjudicationPath, child_lease_id: this.#child.child_lease_id, child_token: this.#childToken, pid: this.#pid, boot_id: this.#bootId });
+      }, { assignment_id: assignmentId, adjudication_path: adjudicationPath, terminal_evidence_ref: terminalEvidence.ref, terminal_evidence_sha256: terminalEvidence.sha256, child_lease_id: this.#child.child_lease_id, child_token: this.#childToken, pid: this.#pid, boot_id: this.#bootId });
       this.#child = childFromResponse(response);
       this.#terminal = true;
     });
@@ -114,25 +115,60 @@ export class AutopilotChildLeaseHandle {
   }
 
   async markRecoveryRequired(): Promise<void> {
-    if (this.#terminal) return;
+    // A terminal mutation whose acknowledgement was lost must never be followed
+    // by a contradictory recovery-required mutation. Startup reconciliation can
+    // safely resolve a genuinely uncommitted running child after lease expiry.
+    if (this.#terminal || this.#terminalCompletionUncertain) return;
     await this.#complete('recovery-required', null, null);
   }
 
   async #complete(status: 'terminal' | 'recovery-required', evidenceRef: string | null, evidenceSha256: `sha256:${string}` | null): Promise<void> {
     await this.#enqueue(async () => {
       if (this.#terminal) return;
-      this.assertHealthy();
       this.#stopHeartbeat();
-      const response = await this.#client.mutate('complete-child', {
-        repoId: this.#session.repo_id,
-        workstreamRun: this.#session.workstream_run,
-        sessionId: null,
-        fencingGeneration: null,
-        expectedVersion: this.#child.version,
-        idempotencyKey: `complete-child:${this.#child.child_lease_id}:${status}`,
-      }, { child_lease_id: this.#child.child_lease_id, child_token: this.#childToken, pid: this.#pid, boot_id: this.#bootId, status, evidence_ref: evidenceRef, evidence_sha256: evidenceSha256 });
-      this.#child = childFromResponse(response);
-      this.#terminal = true;
+      const idempotencyKey = `complete-child:${this.#child.child_lease_id}:${status}:${evidenceSha256 ?? 'none'}`;
+      const payload = { child_lease_id: this.#child.child_lease_id, child_token: this.#childToken, pid: this.#pid, boot_id: this.#bootId, status, evidence_ref: evidenceRef, evidence_sha256: evidenceSha256 };
+      let lastError: unknown = null;
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        try {
+          const response = await this.#client.mutate('complete-child', {
+            repoId: this.#session.repo_id,
+            workstreamRun: this.#session.workstream_run,
+            sessionId: null,
+            fencingGeneration: null,
+            expectedVersion: this.#child.version,
+            idempotencyKey,
+          }, payload);
+          this.#child = childFromResponse(response);
+          this.#terminal = true;
+          return;
+        } catch (error) {
+          lastError = error;
+          let observed: CoordinationChildLease | null = null;
+          try {
+            const response = await this.#client.query('status', this.#session.repo_id, this.#session.workstream_run);
+            const childValues = response.payload['child_leases'];
+            if (!Array.isArray(childValues)) throw new CoordinationRuntimeError('invalid-state', 'coordinator status child_leases is not an array');
+            observed = childValues.map(parseCoordinationChildLease).find((candidate) => candidate.child_lease_id === this.#child.child_lease_id) ?? null;
+          } catch {
+            if (status === 'terminal') this.#terminalCompletionUncertain = true;
+            throw error;
+          }
+          if (observed === null) throw new CoordinationRuntimeError('invalid-state', 'child lease disappeared while terminal completion acknowledgement was reconciled', [this.#child.child_lease_id]);
+          if (observed.status === status) {
+            const exactEvidence = status === 'recovery-required'
+              ? observed.terminal_evidence === null
+              : observed.terminal_evidence?.ref === evidenceRef && observed.terminal_evidence.sha256 === evidenceSha256;
+            if (!exactEvidence) throw new CoordinationRuntimeError('idempotency-conflict', 'child reached the requested terminal status with different evidence', [this.#child.child_lease_id]);
+            this.#child = observed;
+            this.#terminal = true;
+            return;
+          }
+          if (observed.status !== 'running') throw new CoordinationRuntimeError('invalid-state', `child completion observed contradictory ${observed.status} state`, [this.#child.child_lease_id]);
+          this.#child = observed;
+        }
+      }
+      throw lastError instanceof Error ? lastError : new CoordinationRuntimeError('coordinator-unavailable', 'child completion failed without a typed error');
     });
   }
 

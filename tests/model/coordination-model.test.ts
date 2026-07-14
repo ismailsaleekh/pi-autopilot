@@ -127,7 +127,7 @@ void describe('Coordination Fabric pure transition model', () => {
       const left = grantCoordinationAcquisitionGroup(initial, {
         repoId: 'repo-1', workstreamRun: 'run-a', sessionId: 'session-a', fencingGeneration: 1, idempotencyKey: `left-${String(iteration)}`, requestHash, occurredAt: '2026-07-11T15:04:00.000Z', acquisitionGroupId: 'group-a', normalReleaseCondition: releaseCondition,
       });
-      const shouldBlock = overlap && (leftMode !== 'READ' || rightMode !== 'READ');
+      const shouldBlock = overlap && leftMode !== 'READ' && rightMode !== 'READ';
       if (shouldBlock) {
         assert.throws(() => grantCoordinationAcquisitionGroup(left, {
           repoId: 'repo-1', workstreamRun: 'run-b', sessionId: 'session-b', fencingGeneration: 1, idempotencyKey: `right-${String(iteration)}`, requestHash, occurredAt: '2026-07-11T15:04:01.000Z', acquisitionGroupId: 'group-b', normalReleaseCondition: releaseCondition,
@@ -155,6 +155,7 @@ function generatedGrantSnapshot(leftMode: CoordinationClaimMode, rightMode: Coor
         path: group.acquisition_group_id === 'group-a' || overlap ? 'src/shared.ts' : 'src/independent.ts',
         mode: group.acquisition_group_id === 'group-a' ? leftMode : rightMode,
         purpose: 'generated model check',
+        ...((group.acquisition_group_id === 'group-a' ? leftMode : rightMode) === 'READ' ? { source_identity: { base_commit: 'a'.repeat(40), object_id: 'b'.repeat(40), object_kind: 'blob' as const } } : {}),
       }],
       state: 'waiting',
       grant_event_seq: null,

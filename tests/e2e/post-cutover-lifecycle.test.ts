@@ -162,8 +162,9 @@ void describe('post-cutover coordinator-authoritative lifecycle', () => {
             .filter((row) => ownerUnit(row) === 'u01-implement')
             .map((row) => `${String(row['mode'])}:${String(row['path'])}`)
             .sort(),
-          ['READ:README.md', 'WRITE:src/feature.js'],
+          ['WRITE:src/feature.js'],
         );
+        assert.deepEqual(records(beforeMerge.payload['observations']).filter((row) => ownerUnit(row) === 'u01-implement').map((row) => String(row['path'])), ['README.md']);
         assert.equal(records(beforeMerge.payload['child_leases']).some((row) => ownerUnit(row) === 'u01-implement' && row['status'] === 'terminal'), true);
 
         const activeContext = {

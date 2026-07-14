@@ -6,18 +6,21 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { platform } from 'node:os';
 import { backup, DatabaseSync, type SQLOutputValue, type StatementSync } from 'node:sqlite';
 
-import { claimModesConflict, coordinationPathsOverlap, parseCoordinationAcquisitionGroup, parseCoordinationAdjudicationAssignment, parseCoordinationAuthoritativeArtifact, parseCoordinationChangeReservation, parseCoordinationChildLease, parseCoordinationClaimRequest, parseCoordinationDeadlockResolution, parseCoordinationEditLease, parseCoordinationEscalation, parseCoordinationEvent, parseCoordinationMailboxCursor, parseCoordinationMessage, parseCoordinationMigrationRecoveryWork, parseCoordinationReconciliationEvidence, parseCoordinationReleaseCondition, parseCoordinationRepository, parseCoordinationRequestedLease, parseCoordinationReservationObligation, parseCoordinationRun, parseCoordinationRunResource, parseCoordinationRunTerminalIntent, parseCoordinationSessionLease, parseCoordinationUnitAttempt, parseCoordinationWaitForEdge, parseCoordinationWorktree, parseCoordinationWorktreeOperation, parseCoordinatorRequestEnvelope } from './contracts.ts';
+import { claimModesConflict, coordinationPathsOverlap, parseCoordinationAcquisitionGroup, parseCoordinationAdjudicationAssignment, parseCoordinationAuthoritativeArtifact, parseCoordinationChangeReservation, parseCoordinationChildLease, parseCoordinationClaimRequest, parseCoordinationDeadlockResolution, parseCoordinationEditLease, parseCoordinationEscalation, parseCoordinationEvent, parseCoordinationMailboxCursor, parseCoordinationMessage, parseCoordinationMigrationRecoveryWork, parseCoordinationObservation, parseCoordinationReconciliationEvidence, parseCoordinationReleaseCondition, parseCoordinationRepository, parseCoordinationRequestedLease, parseCoordinationReservationObligation, parseCoordinationRun, parseCoordinationRunResource, parseCoordinationRunTerminalIntent, parseCoordinationSessionLease, parseCoordinationUnitAttempt, parseCoordinationWaitForEdge, parseCoordinationWorktree, parseCoordinationWorktreeOperation, parseCoordinatorRequestEnvelope } from './contracts.ts';
 import { buildCoordinationWaitForEdges, compareCoordinationGrantPriority, coordinationOwnerKey, detectCoordinationWaitCycles, MAX_GRANT_BYPASSES, selectCoordinationDeadlockVictim } from './deadlock.ts';
 import { validateAuthoritativeCoordinationDocument, validatePlanningContradictionSubmission } from './escalation.ts';
 import { CoordinationRuntimeError, type CoordinationFailureCode } from './failures.ts';
+import { assertCoordinationObservationSourceIdentity } from './observations.ts';
 import { checkCoordinationInvariants, type CoordinationInvariantFinding } from './invariants.ts';
 import { proveLegacyReadAttemptTerminal, type LegacyReadTerminalProof } from './legacy-read-terminal.ts';
 import { COORDINATOR_BUSY_TIMEOUT_MS, COORDINATOR_DATABASE_SCHEMA_VERSION, COORDINATOR_GRANT_OFFER_TTL_MS, COORDINATOR_PACKAGE_BUILD, enforcePrivateAuthorityPath, enforceWindowsPrivateAcl, ensureCoordinatorPrivateRoots, type CoordinatorRuntimePaths } from './runtime-paths.ts';
 import { activeCoordinationMigrationFreeze, assertCoordinationDispatchAllowed, assertCoordinationFrozenMutationAllowed, assertCoordinationMigrationRecoveryOperationAuthorized, coordinationCutoverCommitted } from './migration-paths.ts';
-import { parseRunTerminalSha, parseUnitAttemptTarget, parseUnitMergeReservationFacts, validateReconciliationEvidenceDocument, validateReservationIntegrationEvidenceDocument, validateReservationValidationArtifactChain, validateReservationValidationEvidenceDocument } from './terminal-evidence.ts';
+import { proveStructuredAttemptTerminal, type TrustedTerminalAttemptProof } from './terminal-attempt-proof.ts';
+import { assertAutopilotChildTerminalAcceptanceChain, AUTOPILOT_CHILD_TERMINAL_ACCEPTANCE_SCHEMA, parseAutopilotChildTerminalAcceptance } from './terminal-acceptance.ts';
+import { parseRunTerminalSha, parseUnitAttemptTarget, parseUnitFailureEvidenceFacts, parseUnitMergeReservationFacts, validateReconciliationEvidenceDocument, validateReservationIntegrationEvidenceDocument, validateReservationValidationArtifactChain, validateReservationValidationEvidenceDocument } from './terminal-evidence.ts';
 import { AUTOPILOT_COORDINATOR_PROTOCOL_VERSION, COORDINATION_WORKTREE_STATES } from './types.ts';
 import { assertPrivatePathNoAliases } from '../private-path.ts';
-import type { CoordinationAcquisitionGroup, CoordinationAcquisitionKind, CoordinationAdjudicationAssignment, CoordinationAuthoritativeArtifact, CoordinationChangeReservation, CoordinationChildLease, CoordinationClaimRequest, CoordinationDeadlockResolution, CoordinationEditLease, CoordinationEscalation, CoordinationEvent, CoordinationMailboxCursor, CoordinationMessage, CoordinationMigrationRecoveryWork, CoordinationOwnerIdentity, CoordinationReconciliationEvidence, CoordinationReconciliationSource, CoordinationReconciliationSummary, CoordinationReleaseCondition, CoordinationReleaseConditionType, CoordinationRepository, CoordinationRequestedLease, CoordinationReservationObligation, CoordinationRun, CoordinationRunResource, CoordinationRunTerminalIntent, CoordinationSessionLease, CoordinationSnapshot, CoordinationUnitAttempt, CoordinationUnitRole, CoordinationWaitForEdge, CoordinationWorktree, CoordinationWorktreeOperation, CoordinatorMutationAction, CoordinatorRequestEnvelope, CoordinatorResponseEnvelope } from './types.ts';
+import type { CoordinationAcquisitionGroup, CoordinationAcquisitionKind, CoordinationAdjudicationAssignment, CoordinationAuthoritativeArtifact, CoordinationChangeReservation, CoordinationChildLease, CoordinationClaimRequest, CoordinationDeadlockResolution, CoordinationEditLease, CoordinationEscalation, CoordinationEvent, CoordinationMailboxCursor, CoordinationMessage, CoordinationMigrationRecoveryWork, CoordinationObservation, CoordinationOwnerIdentity, CoordinationReconciliationEvidence, CoordinationReconciliationSource, CoordinationReconciliationSummary, CoordinationReleaseCondition, CoordinationReleaseConditionType, CoordinationRepository, CoordinationRequestedLease, CoordinationReservationObligation, CoordinationRun, CoordinationRunResource, CoordinationRunTerminalIntent, CoordinationSessionLease, CoordinationSnapshot, CoordinationUnitAttempt, CoordinationUnitRole, CoordinationWaitForEdge, CoordinationWorktree, CoordinationWorktreeOperation, CoordinatorMutationAction, CoordinatorRequestEnvelope, CoordinatorResponseEnvelope } from './types.ts';
 
 const DATABASE_EXPORT_SCHEMA = 'autopilot.coordinator_export.v1';
 const SHA256_PATTERN = /^sha256:[a-f0-9]{64}$/u;
@@ -389,7 +392,25 @@ CREATE TABLE semantic_replays (
 ) STRICT;
 `;
 
-export const COORDINATOR_SCHEMA_MIGRATION_CHECKSUMS = Object.freeze([MIGRATION_1, MIGRATION_2, MIGRATION_3, MIGRATION_4, MIGRATION_5, MIGRATION_6, MIGRATION_7, MIGRATION_8, MIGRATION_9].map((sql) => createHash('sha256').update(sql, 'utf8').digest('hex')));
+const MIGRATION_10 = `
+CREATE TABLE observations (
+  entity_id TEXT PRIMARY KEY,
+  repo_id TEXT NOT NULL,
+  workstream_run TEXT NOT NULL,
+  acquisition_group_id TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  execution_state TEXT NOT NULL CHECK(execution_state IN ('active','released','abandoned','cancelled')),
+  freshness TEXT NOT NULL CHECK(freshness IN ('current','stale')),
+  version INTEGER NOT NULL CHECK(version >= 1),
+  FOREIGN KEY(repo_id, workstream_run) REFERENCES runs(repo_id, workstream_run) ON DELETE RESTRICT,
+  FOREIGN KEY(repo_id, acquisition_group_id) REFERENCES acquisition_groups(repo_id, entity_id) ON DELETE RESTRICT
+) STRICT;
+CREATE INDEX idx_observations_run_state ON observations(repo_id, workstream_run, execution_state, entity_id);
+CREATE INDEX idx_observations_group ON observations(repo_id, acquisition_group_id, entity_id);
+CREATE INDEX idx_observations_freshness ON observations(repo_id, freshness, entity_id);
+`;
+
+export const COORDINATOR_SCHEMA_MIGRATION_CHECKSUMS = Object.freeze([MIGRATION_1, MIGRATION_2, MIGRATION_3, MIGRATION_4, MIGRATION_5, MIGRATION_6, MIGRATION_7, MIGRATION_8, MIGRATION_9, MIGRATION_10].map((sql) => createHash('sha256').update(sql, 'utf8').digest('hex')));
 
 export type CoordinationMigrationRecordState = 'imported' | 'verified' | 'cutover-ready' | 'cutover-committed' | 'legacy-archived';
 
@@ -949,6 +970,12 @@ function acquisitionGroupFromRow(row: SqlRow): CoordinationAcquisitionGroup {
   return entityFromRow(row, parseCoordinationAcquisitionGroup, 'acquisition group');
 }
 
+function observationFromRow(row: SqlRow): CoordinationObservation {
+  const observation = entityFromRow(row, parseCoordinationObservation, 'observation');
+  if (sqlString(row, 'execution_state') !== observation.execution_state || sqlString(row, 'freshness') !== observation.freshness || sqlString(row, 'acquisition_group_id') !== observation.acquisition_group_id) throw new CoordinationRuntimeError('store-corrupt', 'observation indexed projection disagrees with its payload');
+  return observation;
+}
+
 function editLeaseFromRow(row: SqlRow): CoordinationEditLease {
   return entityFromRow(row, parseCoordinationEditLease, 'edit lease');
 }
@@ -1202,6 +1229,7 @@ export class CoordinatorStore {
         { version: 7, sql: MIGRATION_7 },
         { version: 8, sql: MIGRATION_8 },
         { version: 9, sql: MIGRATION_9 },
+        { version: 10, sql: MIGRATION_10 },
       ] as const;
       for (const migration of migrations) {
         if (currentVersion >= migration.version) continue;
@@ -1230,6 +1258,7 @@ export class CoordinatorStore {
       if (integrityResult(db) !== 'ok') throw new CoordinationRuntimeError('store-corrupt', 'coordinator database failed post-migration integrity check');
       await enforcePrivateAuthorityPath(paths.databasePath, false);
       const store = new CoordinatorStore(db, clock, paths.stateRoot, lastBackupPath, options);
+      store.#migrateSchema9ReadLeasesToObservations();
       // A migration freeze protects a whole-database rollback boundary. Startup
       // replay/recovery is therefore deferred until the freeze is removed;
       // explicit target-repository recovery mutations remain separately fenced.
@@ -1430,7 +1459,10 @@ export class CoordinatorStore {
     for (const resource of plan.run_resources) parseCoordinationRunResource(resource);
     for (const attempt of plan.unit_attempts) parseCoordinationUnitAttempt(attempt);
     for (const group of plan.acquisition_groups) parseCoordinationAcquisitionGroup(group);
-    for (const lease of plan.edit_leases) parseCoordinationEditLease(lease);
+    for (const lease of plan.edit_leases) {
+      if (lease.mode === 'READ') parseCoordinationRequestedLease({ path: lease.path, mode: lease.mode, purpose: lease.purpose }, 'legacy imported READ observation');
+      else parseCoordinationEditLease(lease);
+    }
     for (const release of plan.terminal_releases) {
       parseCoordinationRequestedLease({ path: release.path, mode: release.mode, purpose: 'migration terminal release proof' }, 'migration terminal release');
       if (!SHA256_PATTERN.test(release.evidence_sha256) || release.evidence_ref.length === 0 || release.evidence_ref.length > 2048) throw new CoordinationRuntimeError('invalid-request', 'migration terminal release evidence identity is invalid');
@@ -1554,6 +1586,7 @@ export class CoordinatorStore {
         this.#db.prepare('INSERT INTO migration_legacy_audit(entity_id, repo_id, source_kind, payload_json, created_event_seq) VALUES(?, ?, ?, ?, ?)').run(audit.audit_id, plan.repository.repo_id, audit.source_kind, canonicalJson(audit.payload), seq);
         importedAuditCount += 1;
       }
+      this.#migrateSchema9ReadLeasesToObservations(false);
       const exactReport = { ...plan.report, equivalent_lease_count: equivalentLeaseCount, imported_run_count: importedRunCount, imported_attempt_count: importedAttemptCount, imported_lease_count: importedLeaseCount, imported_reservation_count: importedReservationCount, imported_worktree_count: importedWorktreeCount, imported_audit_count: importedAuditCount, recovery_work_count: recoveryWorkCount };
       if (exactReport.classified_claim_count !== exactReport.legacy_claim_count || exactReport.equivalent_lease_count + exactReport.imported_lease_count + exactReport.terminal_leak_count !== exactReport.legacy_claim_count) throw new CoordinationRuntimeError('invalid-state', 'migration claim reconciliation did not classify every legacy authority claim', [canonicalJson(exactReport)]);
       const idempotencyKey = `legacy-migration:${plan.migration_id}`;
@@ -1692,6 +1725,7 @@ export class CoordinatorStore {
       child_leases: this.#db.prepare('SELECT * FROM child_leases WHERE repo_id=? ORDER BY workstream_run, unit_id, attempt').all(repoId).map(childFromRow),
       unit_attempts: this.#db.prepare('SELECT * FROM unit_attempts WHERE repo_id=? ORDER BY entity_id').all(repoId).map(unitAttemptFromRow),
       acquisition_groups: this.#db.prepare('SELECT * FROM acquisition_groups WHERE repo_id=? ORDER BY entity_id').all(repoId).map(acquisitionGroupFromRow),
+      observations: this.#db.prepare('SELECT * FROM observations WHERE repo_id=? ORDER BY entity_id').all(repoId).map(observationFromRow),
       edit_leases: this.#db.prepare('SELECT * FROM edit_leases WHERE repo_id=? ORDER BY entity_id').all(repoId).map(editLeaseFromRow),
       change_reservations: this.#db.prepare('SELECT * FROM change_reservations WHERE repo_id=? ORDER BY entity_id').all(repoId).map(changeReservationFromRow),
       reservation_obligations: this.#db.prepare('SELECT * FROM reservation_obligations WHERE repo_id=? ORDER BY entity_id').all(repoId).map(reservationObligationFromRow),
@@ -1785,6 +1819,7 @@ export class CoordinatorStore {
     const pendingMessages = workstreamRun === null ? 0 : sqlInteger(asRow(this.#db.prepare("SELECT COUNT(*) AS count FROM messages WHERE repo_id=? AND recipient_workstream_run=? AND status!='acknowledged'").get(repoId, workstreamRun), 'message count'), 'count');
     const unitAttempts = workstreamRun === null ? [] : this.#db.prepare('SELECT * FROM unit_attempts WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(repoId, workstreamRun).map(unitAttemptFromRow);
     const acquisitionGroups = workstreamRun === null ? [] : this.#db.prepare('SELECT * FROM acquisition_groups WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(repoId, workstreamRun).map(acquisitionGroupFromRow);
+    const observations = workstreamRun === null ? [] : this.#db.prepare('SELECT * FROM observations WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(repoId, workstreamRun).map(observationFromRow);
     const editLeases = workstreamRun === null ? [] : this.#db.prepare('SELECT * FROM edit_leases WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(repoId, workstreamRun).map(editLeaseFromRow);
     const reservationObligations = workstreamRun === null ? [] : this.#db.prepare('SELECT * FROM reservation_obligations WHERE repo_id=? AND (workstream_run=? OR predecessor_reservation_id IN (SELECT entity_id FROM change_reservations WHERE repo_id=? AND workstream_run=?)) ORDER BY entity_id').all(repoId, workstreamRun, repoId, workstreamRun).map(reservationObligationFromRow);
     const relevantReservationIds = new Set(reservationObligations.flatMap((obligation) => [obligation.reservation_id, obligation.predecessor_reservation_id]));
@@ -1834,6 +1869,7 @@ export class CoordinatorStore {
         child_leases: children,
         unit_attempts: unitAttempts,
         acquisition_groups: acquisitionGroups,
+        observations,
         edit_leases: editLeases,
         change_reservations: changeReservations,
         reservation_obligations: reservationObligations,
@@ -2000,6 +2036,7 @@ export class CoordinatorStore {
       ['child_leases', 'repo_id, workstream_run, unit_id, attempt, child_lease_id'],
       ['unit_attempts', 'repo_id, workstream_run, entity_id'],
       ['acquisition_groups', 'repo_id, workstream_run, entity_id'],
+      ['observations', 'repo_id, workstream_run, entity_id'],
       ['edit_leases', 'repo_id, workstream_run, entity_id'],
       ['change_reservations', 'repo_id, workstream_run, entity_id'],
       ['reservation_obligations', 'repo_id, workstream_run, entity_id'],
@@ -2340,8 +2377,18 @@ export class CoordinatorStore {
       if (payloadString(request.payload, 'autopilot_id') !== run.autopilot_id) throw new CoordinationRuntimeError('unauthorized-client', 'child autopilot identity does not match its durable run');
       const attempt = this.#requireUnitAttempt(childOwner.repo_id, childOwner.workstream_run, childOwner.unit_id, childOwner.attempt);
       if (attempt.state !== 'preflight') throw new CoordinationRuntimeError('invalid-state', `child registration requires a preflight attempt, not ${attempt.state}`);
-      const seq = this.#nextEventSequence(request.repo_id);
+      const activeObservations = this.#db.prepare("SELECT * FROM observations WHERE repo_id=? AND workstream_run=? AND execution_state='active' ORDER BY entity_id").all(childOwner.repo_id, childOwner.workstream_run).map(observationFromRow).filter((observation) => sameOwner(observation.owner, childOwner));
+      if (activeObservations.length > 0) {
+        const observationRoot = this.#observationWorktreeRoot(childOwner);
+        for (const observation of activeObservations) {
+          if (observation.freshness !== 'current') throw new CoordinationRuntimeError('stale-version', 'stale observation must be refreshed in a new attempt before child registration', [observation.observation_id, observation.path]);
+          assertCoordinationObservationSourceIdentity({ cwd: observationRoot, path: observation.path, expected: observation.source_identity });
+        }
+      }
       const childId = payloadString(request.payload, 'child_lease_id');
+      const expectedChildId = `child-${childOwner.workstream_run}-${childOwner.unit_id}-${String(childOwner.attempt)}`;
+      if (childId !== expectedChildId) throw new CoordinationRuntimeError('invalid-request', 'child lease id must match its deterministic durable attempt identity', [childId, expectedChildId]);
+      const seq = this.#nextEventSequence(request.repo_id);
       const childTokenSha256 = createHash('sha256').update(payloadString(request.payload, 'child_token'), 'utf8').digest('hex');
       this.#db.prepare("INSERT INTO child_leases(child_lease_id, repo_id, autopilot_id, workstream_run, unit_id, attempt, pid, boot_id, child_token_sha256, lease_expires_at, status, terminal_evidence_ref, terminal_evidence_sha256, version) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', NULL, NULL, 1)").run(
         childId, request.repo_id, payloadString(request.payload, 'autopilot_id'), this.#workstreamRun(request), payloadString(request.payload, 'unit_id'), payloadInteger(request.payload, 'attempt'), payloadInteger(request.payload, 'pid'), payloadString(request.payload, 'boot_id'), childTokenSha256, payloadString(request.payload, 'lease_expires_at'),
@@ -2400,6 +2447,10 @@ export class CoordinatorStore {
       const evidenceRef = payloadNullableString(request.payload, 'evidence_ref');
       const evidenceSha = payloadNullableString(request.payload, 'evidence_sha256');
       if (status === 'terminal' && (evidenceRef === null || evidenceSha === null || !SHA256_PATTERN.test(evidenceSha))) throw new CoordinationRuntimeError('invalid-request', 'terminal child completion requires immutable evidence');
+      if (status === 'terminal' && evidenceRef !== null && evidenceSha !== null) {
+        const terminalDocument = parseJsonObject(Buffer.from(this.#readRunEvidenceFile(this.#requireRun(child.owner.repo_id, child.owner.workstream_run), { ref: evidenceRef, sha256: evidenceSha as `sha256:${string}` })).toString('utf8'), 'child terminal acceptance');
+        if (terminalDocument['schema_version'] !== AUTOPILOT_CHILD_TERMINAL_ACCEPTANCE_SCHEMA) throw new CoordinationRuntimeError('invalid-request', 'new terminal child completion requires parent-owned child_terminal_acceptance.v1 evidence');
+      }
       if (status === 'recovery-required' && (evidenceRef !== null || evidenceSha !== null)) throw new CoordinationRuntimeError('invalid-request', 'recovery-required child completion must not claim terminal evidence');
       const seq = this.#nextEventSequence(request.repo_id);
       this.#db.prepare('UPDATE child_leases SET status=?, terminal_evidence_ref=?, terminal_evidence_sha256=?, version=version+1 WHERE child_lease_id=?').run(status, evidenceRef, evidenceSha, childId);
@@ -2444,6 +2495,7 @@ export class CoordinatorStore {
       if (requestedRole !== 'implement' && requestedRole !== 'fix' && requestedLeases.some((lease) => lease.mode !== 'READ')) throw new CoordinationRuntimeError('invalid-request', `${requestedRole} units may acquire READ authority only`);
       const acquisitionKind = payloadAcquisitionKind(request.payload, 'acquisition_kind');
       const releaseCondition = payloadReleaseCondition(request.payload, 'normal_release_condition');
+      if ((requestedRole === 'implement' || requestedRole === 'fix') && requestedLeases.some((lease) => lease.mode !== 'READ') && releaseCondition.condition_type === 'child-terminal') throw new CoordinationRuntimeError('invalid-request', 'source-changing edit authority cannot release from child terminal alone; merge, reset, quarantine, abort, or close proof is required');
       const seq = this.#nextEventSequence(request.repo_id);
       const requestedCheckpointOrdinal = payloadInteger(request.payload, 'checkpoint_ordinal');
       const existingAttemptRow = this.#db.prepare('SELECT entity_id FROM unit_attempts WHERE entity_id=?').get(unitAttemptEntityId(owner));
@@ -2481,7 +2533,7 @@ export class CoordinatorStore {
       if (blockers.length === 0 && offeredBlockers.length === 0) {
         const granted = this.#grantGroup(currentGroup, seq);
         this.#reevaluateWaitingGroups(request.repo_id, seq);
-        return { sequence: seq, eventType: 'acquisition-group-granted', entityType: 'acquisition-group', entityId: groupId, payload: { outcome: 'granted', acquisition_group: granted.group, edit_leases: granted.leases, request_refs: [] } };
+        return { sequence: seq, eventType: 'acquisition-group-granted', entityType: 'acquisition-group', entityId: groupId, payload: { outcome: 'granted', acquisition_group: granted.group, observations: granted.observations, edit_leases: granted.leases, request_refs: [] } };
       }
       const requests = this.#ensureClaimRequests(currentGroup, blockers, seq);
       return { sequence: seq, eventType: 'acquisition-group-waiting', entityType: 'acquisition-group', entityId: groupId, payload: { outcome: 'waiting-for-peer-release', acquisition_group: currentGroup, claim_requests: requests, request_refs: requests.map((entry) => entry.request_id) } };
@@ -2502,7 +2554,7 @@ export class CoordinatorStore {
       if (offerExpired) {
         this.#reevaluateWaitingGroups(request.repo_id, seq);
         const requeued = this.#requireGroup(request.repo_id, groupId);
-        return { sequence: seq, eventType: 'grant-offer-expired', entityType: 'acquisition-group', entityId: groupId, payload: { outcome: 'offer-expired', acquisition_group: requeued, edit_leases: [] } };
+        return { sequence: seq, eventType: 'grant-offer-expired', entityType: 'acquisition-group', entityId: groupId, payload: { outcome: 'offer-expired', acquisition_group: requeued, observations: [], edit_leases: [] } };
       }
       const current = this.#requireGroup(request.repo_id, groupId);
       if (current.state !== 'grant-ready') throw new CoordinationRuntimeError('invalid-state', `acquisition group is ${current.state}, not grant-ready`);
@@ -2517,7 +2569,7 @@ export class CoordinatorStore {
         this.#updateClaimRequest(next);
       }
       this.#reevaluateWaitingGroups(request.repo_id, seq);
-      return { sequence: seq, eventType: 'acquisition-group-granted', entityType: 'acquisition-group', entityId: groupId, payload: { outcome: 'granted', acquisition_group: granted.group, edit_leases: granted.leases, request_refs: groupRequests.map((entry) => entry.request_id), grant_evidence: { acquisition_group_id: groupId, grant_event_seq: seq, lease_ids: granted.leases.map((entry) => entry.edit_lease_id) } } };
+      return { sequence: seq, eventType: 'acquisition-group-granted', entityType: 'acquisition-group', entityId: groupId, payload: { outcome: 'granted', acquisition_group: granted.group, observations: granted.observations, edit_leases: granted.leases, request_refs: groupRequests.map((entry) => entry.request_id), grant_evidence: { acquisition_group_id: groupId, grant_event_seq: seq, lease_ids: granted.leases.map((entry) => entry.edit_lease_id), observation_ids: granted.observations.map((entry) => entry.observation_id) } } };
     });
   }
 
@@ -2758,11 +2810,15 @@ export class CoordinatorStore {
       const packet: CoordinationEscalation = { schema_version: 'autopilot.planning_contradiction.v1', escalation_id: assignment.assignment_id, repo_id: assignment.repo_id, participating_runs: assignment.participating_runs, authoritative_refs: documents.map((document) => document.ref), conflicting_clauses: assignment.conflicting_clauses, exhausted_alternatives: ['sequencing', 'partitioning', 'ownership-transfer', 'rebase-revalidation', 'replanning'], adjudication, decision_options: assignment.decision_options, created_event_seq: 0, version: 1 };
       const validated = validatePlanningContradictionSubmission({ packet, adjudicationBytes: bytes, authoritativeDocuments: documents });
       if (!sameOwner(validated.adjudication.adjudicator, assignment.adjudicator)) throw new CoordinationRuntimeError('invalid-request', 'adjudication evidence identity does not exactly match the coordinator-assigned adjudicator');
+      const terminalEvidence = { ref: payloadString(request.payload, 'terminal_evidence_ref'), sha256: payloadString(request.payload, 'terminal_evidence_sha256') as `sha256:${string}` };
+      if (!SHA256_PATTERN.test(terminalEvidence.sha256)) throw new CoordinationRuntimeError('invalid-request', 'adjudication completion terminal evidence hash is invalid');
+      this.#verifyAcceptedEvidenceFile(this.#requireRun(child.owner.repo_id, child.owner.workstream_run), 'child-process', child.child_lease_id, terminalEvidence);
       const seq = this.#nextEventSequence(assignment.repo_id);
       this.#persistEvidenceArtifact(assignment.repo_id, adjudication, bytes, 'assigned independent adjudication', seq);
+      this.#acceptReconciliationEvidence({ repoId: child.owner.repo_id, workstreamRun: child.owner.workstream_run, source: 'child-process', targetId: child.child_lease_id, evidence: terminalEvidence, seq });
       const accepted: CoordinationAdjudicationAssignment = { ...assignment, state: 'accepted', adjudication, child_lease_id: child.child_lease_id, accepted_event_seq: seq, version: assignment.version + 1 };
       this.#db.prepare('UPDATE adjudication_assignments SET payload_json=?, version=? WHERE repo_id=? AND entity_id=?').run(canonicalJson(accepted), accepted.version, accepted.repo_id, accepted.assignment_id);
-      this.#db.prepare("UPDATE child_leases SET status='terminal', terminal_evidence_ref=?, terminal_evidence_sha256=?, version=version+1 WHERE child_lease_id=?").run(adjudication.ref, adjudication.sha256, child.child_lease_id);
+      this.#db.prepare("UPDATE child_leases SET status='terminal', terminal_evidence_ref=?, terminal_evidence_sha256=?, version=version+1 WHERE child_lease_id=?").run(terminalEvidence.ref, terminalEvidence.sha256, child.child_lease_id);
       const adjudicatorRun = this.#requireRun(child.owner.repo_id, child.owner.workstream_run);
       const releasedLeaseIds = this.#releaseAttemptLeases(adjudicatorRun, `${child.owner.unit_id}:${String(child.owner.attempt)}`);
       this.#updateAttemptForSatisfiedCondition(child.owner, 'child-terminal');
@@ -2785,7 +2841,9 @@ export class CoordinatorStore {
       if (assignment.state !== 'accepted' || assignment.adjudication === null || assignment.child_lease_id === null) throw new CoordinationRuntimeError('invalid-state', 'planning contradiction requires an accepted coordinator-assigned adjudication result');
       if (assignment.assignment_id !== submitted.escalation_id || canonicalJson(assignment.participating_runs) !== canonicalJson(submitted.participating_runs) || canonicalJson(assignment.conflicting_clauses) !== canonicalJson(submitted.conflicting_clauses) || canonicalJson(assignment.decision_options) !== canonicalJson(submitted.decision_options) || canonicalJson(assignment.adjudication) !== canonicalJson(submitted.adjudication)) throw new CoordinationRuntimeError('invalid-request', 'planning contradiction packet does not exactly match its accepted adjudication assignment');
       const child = childFromRow(asRow(this.#db.prepare('SELECT * FROM child_leases WHERE child_lease_id=?').get(assignment.child_lease_id), 'accepted adjudicator child'));
-      if (!sameOwner(child.owner, assignment.adjudicator) || child.status !== 'terminal' || child.terminal_evidence === null || canonicalJson(child.terminal_evidence) !== canonicalJson(assignment.adjudication)) throw new CoordinationRuntimeError('store-corrupt', 'accepted adjudication is not bound to exact terminal child evidence');
+      if (!sameOwner(child.owner, assignment.adjudicator) || child.status !== 'terminal' || child.terminal_evidence === null) throw new CoordinationRuntimeError('store-corrupt', 'accepted adjudication is not bound to terminal child acceptance evidence');
+      const childAcceptance = parseAutopilotChildTerminalAcceptance(parseJsonObject(Buffer.from(this.#verifyAcceptedEvidenceFile(this.#requireRun(child.owner.repo_id, child.owner.workstream_run), 'child-process', child.child_lease_id, child.terminal_evidence)).toString('utf8'), 'accepted adjudicator terminal evidence'));
+      if (childAcceptance.child_lease_id !== child.child_lease_id || childAcceptance.role !== 'adjudicate' || childAcceptance.unit_id !== assignment.adjudicator.unit_id || childAcceptance.attempt !== assignment.adjudicator.attempt) throw new CoordinationRuntimeError('store-corrupt', 'accepted adjudication terminal acceptance identity differs from its assignment');
       const authoritativeDocuments = assignment.authoritative_artifact_ids.map((artifactId) => {
         const artifact = authoritativeArtifactFromRow(asRow(this.#db.prepare('SELECT * FROM authoritative_artifacts WHERE repo_id=? AND entity_id=?').get(run.repo_id, artifactId), `authoritative artifact ${artifactId}`));
         return { ref: artifact.evidence, bytes: this.#loadEvidenceArtifact(run.repo_id, artifact.evidence) };
@@ -2809,6 +2867,7 @@ export class CoordinatorStore {
       const run = this.#requireRun(request.repo_id, workstreamRun);
       this.#assertVersion(run.version, request.expected_version, 'run');
       const source = this.#reconciliationSource(payloadString(request.payload, 'source'));
+      if (source === 'child-process') throw new CoordinationRuntimeError('invalid-request', 'child-process terminal evidence is accepted only through authenticated complete-child or the closed startup repair path');
       const conditionType = this.#conditionTypeForSource(source);
       const targetId = payloadString(request.payload, 'target_id');
       this.#assertReconciliationTarget(run, conditionType, targetId);
@@ -2825,11 +2884,14 @@ export class CoordinatorStore {
       });
       let convertedReservations: readonly CoordinationChangeReservation[] = [];
       let createdObligations: readonly CoordinationReservationObligation[] = [];
+      let staleObservationIds: readonly string[] = [];
       if (source === 'unit-merge') {
         this.#requireCoordinatorEditAuthority(run, 'unit-merge reservation conversion');
         const converted = this.#convertUnitMergeToReservations(run, targetId, { ref: evidenceRef, sha256: evidenceSha256 }, seq);
         convertedReservations = converted.reservations;
         createdObligations = converted.obligations;
+        const mergeFacts = parseUnitMergeReservationFacts(this.#verifyAcceptedEvidenceFile(run, source, targetId, { ref: evidenceRef, sha256: evidenceSha256 }));
+        staleObservationIds = Object.freeze(converted.reservations.flatMap((reservation) => this.#markOverlappingObservationsStale(run, reservation, mergeFacts.integrationAfter, seq)));
       }
       if (source === 'run-close') this.#assertRunCloseReservationReady(run);
       if (source === 'run-close' || source === 'run-abort') this.#assertRunTerminalExternalReady(run);
@@ -2845,12 +2907,12 @@ export class CoordinatorStore {
         this.#db.prepare('UPDATE runs SET status=?, version=version+1 WHERE repo_id=? AND workstream_run=?').run(terminalStatus, run.repo_id, run.workstream_run);
         nextRun = this.#requireRun(run.repo_id, run.workstream_run);
         if (terminalSha === null) throw new CoordinationRuntimeError('invalid-state', 'run terminal transition lost its verified terminal commit');
-        this.#terminalizeRunReservations(nextRun, source === 'run-abort' ? 'run-abort' : 'run-close', terminalSha, seq);
+        staleObservationIds = this.#terminalizeRunReservations(nextRun, source === 'run-abort' ? 'run-abort' : 'run-close', terminalSha, seq);
         directlyReleasedLeaseIds.push(...this.#releaseAllRunLeases(nextRun));
         if (terminalIntent !== null) this.#commitTerminalIntent(terminalIntent, seq);
       }
       const reconciled = this.#reconcileOwnedRun(request.repo_id, workstreamRun, seq);
-      const reconciliation = this.#freezeReconciliationSummary({ ...reconciled, released_lease_ids: [...directlyReleasedLeaseIds, ...reconciled.released_lease_ids] });
+      const reconciliation = this.#freezeReconciliationSummary({ ...reconciled, released_lease_ids: [...directlyReleasedLeaseIds, ...reconciled.released_lease_ids], stale_observation_ids: [...staleObservationIds, ...reconciled.stale_observation_ids] });
       return { sequence: seq, eventType: 'release-evidence-accepted', entityType: 'reconciliation-evidence', entityId: evidence.reconciliation_evidence_id, payload: { reconciliation_evidence: evidence, run: nextRun, reconciliation, change_reservations: convertedReservations, reservation_obligations: createdObligations } };
     });
   }
@@ -3066,6 +3128,94 @@ export class CoordinatorStore {
     );
   }
 
+  #migrateSchema9ReadLeasesToObservations(ownsTransactions = true): void {
+    const rowsByRun = new Map<string, SqlRow[]>();
+    for (const row of this.#db.prepare("SELECT * FROM edit_leases WHERE json_extract(payload_json, '$.mode')='READ' ORDER BY repo_id, workstream_run, entity_id").all()) {
+      const key = `${sqlString(row, 'repo_id')}\0${sqlString(row, 'workstream_run')}`;
+      const rows = rowsByRun.get(key) ?? [];
+      rows.push(row);
+      rowsByRun.set(key, rows);
+    }
+    for (const rows of rowsByRun.values()) {
+      const first = rows[0];
+      if (first === undefined) continue;
+      const repoId = sqlString(first, 'repo_id');
+      const workstreamRun = sqlString(first, 'workstream_run');
+      if (ownsTransactions) this.#db.exec('BEGIN IMMEDIATE');
+      try {
+        const seq = this.#nextEventSequence(repoId);
+        const touchedGroups = new Set<string>();
+        const revalidationGroups = new Set<string>();
+        for (const row of rows) {
+          const payload = parseJsonObject(sqlString(row, 'payload_json'), 'schema-9 READ lease');
+          const groupId = typeof payload['acquisition_group_id'] === 'string' ? payload['acquisition_group_id'] : '';
+          const path = typeof payload['path'] === 'string' ? payload['path'] : '';
+          const purpose = typeof payload['purpose'] === 'string' ? payload['purpose'] : '';
+          const group = this.#requireGroup(repoId, groupId);
+          if (group.owner.workstream_run !== workstreamRun || canonicalJson(payload['owner']) !== canonicalJson(group.owner)) throw new CoordinationRuntimeError('store-corrupt', 'schema-9 READ lease owner/group identity is invalid', [sqlString(row, 'entity_id')]);
+          const requested = parseCoordinationRequestedLease({ path, mode: 'READ', purpose });
+          const groupRequested = group.requested_leases.find((candidate) => candidate.mode === 'READ' && candidate.path === requested.path);
+          if (groupRequested === undefined) throw new CoordinationRuntimeError('store-corrupt', 'schema-9 READ lease is absent from its acquisition group', [sqlString(row, 'entity_id'), groupId]);
+          const childId = `child-${group.owner.workstream_run}-${group.owner.unit_id}-${String(group.owner.attempt)}`;
+          const childStatus = this.#childForOwner(group.owner)?.status ?? null;
+          const attemptRow = this.#db.prepare('SELECT * FROM unit_attempts WHERE entity_id=?').get(unitAttemptEntityId(group.owner));
+          const durableAttempt = attemptRow === undefined ? null : unitAttemptFromRow(attemptRow);
+          const attemptState = durableAttempt?.state ?? null;
+          if (groupRequested.source_identity === undefined && (childStatus === 'running' || attemptState === 'running')) throw new CoordinationRuntimeError('recovery-required', 'schema-9 READ authority belongs to a running child and lacks acquisition-time source identity; migration requires a fully drained child boundary', [childId, requested.path]);
+          const leaseId = sqlString(row, 'entity_id');
+          const retiredRecovery = this.#db.prepare("SELECT * FROM migration_recovery_work WHERE repo_id=? AND workstream_run=? AND recovery_type='ambiguous-live-claim' AND status='pending' AND json_extract(payload_json, '$.edit_lease_id')=? ORDER BY entity_id").all(repoId, workstreamRun, leaseId).map(migrationRecoveryFromRow);
+          if (groupRequested.source_identity !== undefined) {
+            const executionState = childStatus === 'terminal' || attemptState === 'transport-complete' || attemptState === 'merged'
+              ? 'released'
+              : childStatus === 'recovery-required' || (attemptState !== null && ['failed', 'reset', 'quarantined', 'superseded'].includes(attemptState))
+                ? 'abandoned'
+                : 'active';
+            const observation = parseCoordinationObservation({
+              schema_version: 'autopilot.observation.v1', observation_id: stableEntityId('observation', [repoId, groupId, requested.path, groupRequested.source_identity.base_commit, groupRequested.source_identity.object_id]),
+              owner: group.owner, acquisition_group_id: groupId, path: requested.path, purpose: requested.purpose, source_identity: groupRequested.source_identity,
+              execution_state: executionState, freshness: 'current', recorded_event_seq: typeof payload['acquired_event_seq'] === 'number' ? payload['acquired_event_seq'] : group.grant_event_seq ?? group.created_event_seq,
+              released_event_seq: executionState === 'active' ? null : seq, stale_event_seq: null, stale_by_reservation_id: null, stale_by_commit: null, version: 1,
+            });
+            this.#insertObservation(observation);
+            if (retiredRecovery.length > 0) {
+              const auditId = stableEntityId('schema-9-read-recovery-retirement', [repoId, workstreamRun, leaseId]);
+              const audit = { schema_version: 'autopilot.schema9_read_recovery_retirement.v1', repo_id: repoId, workstream_run: workstreamRun, edit_lease_id: leaseId, observation_id: observation.observation_id, source_identity: observation.source_identity, retired_recovery_work: retiredRecovery, disposition: 'read-authority-converted-to-nonblocking-observation', retired_event_seq: seq };
+              if (this.#db.prepare('SELECT entity_id FROM migration_legacy_audit WHERE entity_id=?').get(auditId) === undefined) this.#db.prepare('INSERT INTO migration_legacy_audit(entity_id, repo_id, source_kind, payload_json, created_event_seq) VALUES(?, ?, ?, ?, ?)').run(auditId, repoId, 'claim-event', canonicalJson(audit), seq);
+            }
+          } else {
+            revalidationGroups.add(groupId);
+            const retirementId = stableEntityId('schema-9-read-retirement', [repoId, workstreamRun, leaseId]);
+            const retirement = {
+              schema_version: 'autopilot.schema9_read_retirement.v1', repo_id: repoId, workstream_run: workstreamRun,
+              edit_lease_id: leaseId, acquisition_group_id: groupId, owner: group.owner, requested_read: requested,
+              original_lease_payload: payload, original_payload_sha256: `sha256:${createHash('sha256').update(canonicalJson(payload), 'utf8').digest('hex')}`,
+              retired_recovery_work: retiredRecovery,
+              disposition: 'retired-unbound-read-authority', revalidation_required: durableAttempt?.role === 'validate' || durableAttempt?.role === 'bughunt', retired_event_seq: seq,
+            };
+            if (this.#db.prepare('SELECT entity_id FROM migration_legacy_audit WHERE entity_id=?').get(retirementId) === undefined) this.#db.prepare('INSERT INTO migration_legacy_audit(entity_id, repo_id, source_kind, payload_json, created_event_seq) VALUES(?, ?, ?, ?, ?)').run(retirementId, repoId, 'claim-event', canonicalJson(retirement), seq);
+          }
+          for (const recovery of retiredRecovery) this.#db.prepare("DELETE FROM migration_recovery_work WHERE entity_id=? AND status='pending'").run(recovery.recovery_id);
+          this.#db.prepare('DELETE FROM edit_leases WHERE entity_id=?').run(leaseId);
+          touchedGroups.add(groupId);
+        }
+        for (const groupId of touchedGroups) {
+          this.#markGroupReleasedWhenEmpty(repoId, groupId);
+          if (revalidationGroups.has(groupId)) {
+            const current = this.#requireGroup(repoId, groupId);
+            if (current.state === 'granted') this.#updateEntity('acquisition_groups', groupId, { ...current, acquisition_kind: 'legacy-unknown', version: current.version + 1 });
+          }
+        }
+        const idempotencyKey = `schema-10-read-authority-migration:${workstreamRun}:${String(seq)}`;
+        const digest = `sha256:${createHash('sha256').update(idempotencyKey, 'utf8').digest('hex')}`;
+        this.#db.prepare('INSERT INTO events(repo_id, event_seq, event_type, entity_type, entity_id, idempotency_key, request_sha256, occurred_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?)').run(repoId, seq, 'read-authority-migrated-or-retired', 'run', workstreamRun, idempotencyKey, digest, this.#clock.now().toISOString());
+        if (ownsTransactions) this.#db.exec('COMMIT');
+      } catch (error) {
+        if (ownsTransactions) this.#db.exec('ROLLBACK');
+        throw error;
+      }
+    }
+  }
+
   #recoverDurableTransitionsAfterStartup(): void {
     const runs = this.#db.prepare('SELECT * FROM runs ORDER BY repo_id, workstream_run').all().map(runFromRow);
     const aggregate = this.#emptyReconciliationSummary();
@@ -3074,12 +3224,14 @@ export class CoordinatorStore {
       try {
         const seq = this.#nextEventSequence(run.repo_id);
         const recoveryMessageIds = this.#enqueueOperationRecoveryMessages(run, seq);
+        const childStateBefore = canonicalJson(this.#db.prepare('SELECT child_lease_id, status, terminal_evidence_ref, terminal_evidence_sha256, version FROM child_leases WHERE repo_id=? AND workstream_run=? ORDER BY child_lease_id').all(run.repo_id, run.workstream_run));
         const summary = this.#reconcileOwnedRun(run.repo_id, run.workstream_run, seq);
+        const childStateChanged = childStateBefore !== canonicalJson(this.#db.prepare('SELECT child_lease_id, status, terminal_evidence_ref, terminal_evidence_sha256, version FROM child_leases WHERE repo_id=? AND workstream_run=? ORDER BY child_lease_id').all(run.repo_id, run.workstream_run));
         const graphBefore = canonicalJson({ edges: this.#db.prepare('SELECT payload_json FROM wait_for_edges WHERE repo_id=? ORDER BY entity_id').all(run.repo_id).map((row) => sqlString(row, 'payload_json')), resolutions: this.#db.prepare('SELECT payload_json FROM deadlock_resolutions WHERE repo_id=? ORDER BY entity_id').all(run.repo_id).map((row) => sqlString(row, 'payload_json')) });
         this.#maintainWaitForGraph(run.repo_id, seq);
         const graphAfter = canonicalJson({ edges: this.#db.prepare('SELECT payload_json FROM wait_for_edges WHERE repo_id=? ORDER BY entity_id').all(run.repo_id).map((row) => sqlString(row, 'payload_json')), resolutions: this.#db.prepare('SELECT payload_json FROM deadlock_resolutions WHERE repo_id=? ORDER BY entity_id').all(run.repo_id).map((row) => sqlString(row, 'payload_json')) });
         const graphChanged = graphBefore !== graphAfter;
-        if (recoveryMessageIds.length === 0 && summary.released_lease_ids.length === 0 && summary.released_request_ids.length === 0 && summary.notification_ids.length === 0 && summary.offered_group_ids.length === 0 && !graphChanged) {
+        if (recoveryMessageIds.length === 0 && summary.released_lease_ids.length === 0 && summary.released_observation_ids.length === 0 && summary.stale_observation_ids.length === 0 && summary.released_request_ids.length === 0 && summary.notification_ids.length === 0 && summary.offered_group_ids.length === 0 && !graphChanged && !childStateChanged) {
           this.#db.exec('ROLLBACK');
           continue;
         }
@@ -3088,6 +3240,8 @@ export class CoordinatorStore {
         this.#db.prepare('INSERT INTO events(repo_id, event_seq, event_type, entity_type, entity_id, idempotency_key, request_sha256, occurred_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?)').run(run.repo_id, seq, 'startup-run-reconciled', 'run', run.workstream_run, idempotencyKey, digest, this.#clock.now().toISOString());
         this.#db.exec('COMMIT');
         aggregate.released_lease_ids.push(...summary.released_lease_ids);
+        aggregate.released_observation_ids.push(...summary.released_observation_ids);
+        aggregate.stale_observation_ids.push(...summary.stale_observation_ids);
         aggregate.released_request_ids.push(...summary.released_request_ids);
         aggregate.notification_ids.push(...recoveryMessageIds, ...summary.notification_ids);
         aggregate.offered_group_ids.push(...summary.offered_group_ids);
@@ -3122,8 +3276,12 @@ export class CoordinatorStore {
     const beforeMessages = new Set(this.#db.prepare('SELECT message_id FROM messages WHERE repo_id=? ORDER BY message_id').all(repoId).map((row) => sqlString(row, 'message_id')));
     const beforeOffers = new Set(this.#db.prepare("SELECT entity_id FROM acquisition_groups WHERE repo_id=? AND json_extract(payload_json, '$.state')='grant-ready'").all(repoId).map((row) => sqlString(row, 'entity_id')));
     const releasedLeaseIds: string[] = [];
+    const releasedObservationIds: string[] = [];
+    const staleObservationIds: string[] = [];
     const run = this.#requireRun(repoId, workstreamRun);
+    this.#repairPostCutoverTerminalChildren(run, seq);
     this.#releaseProvenLegacyReadLeases(run, seq, releasedLeaseIds);
+    this.#reconcileObservations(run, seq, releasedObservationIds);
     const ownerRequests = this.#db.prepare('SELECT * FROM claim_requests WHERE repo_id=? AND owner_workstream_run=? ORDER BY entity_id').all(repoId, workstreamRun).map(claimRequestFromRow);
     for (const claimRequest of ownerRequests) {
       if (claimRequest.release_condition === null || !['deferred', 'acknowledged', 'delivered', 'pending'].includes(claimRequest.status) || !this.#conditionSatisfied(repoId, workstreamRun, claimRequest.release_condition)) continue;
@@ -3141,7 +3299,63 @@ export class CoordinatorStore {
     }).map((entry) => entry.request_id);
     const notificationIds = this.#db.prepare('SELECT message_id FROM messages WHERE repo_id=? ORDER BY message_id').all(repoId).map((row) => sqlString(row, 'message_id')).filter((messageId) => !beforeMessages.has(messageId));
     const offeredGroupIds = this.#db.prepare("SELECT entity_id FROM acquisition_groups WHERE repo_id=? AND json_extract(payload_json, '$.state')='grant-ready' ORDER BY entity_id").all(repoId).map((row) => sqlString(row, 'entity_id')).filter((groupId) => !beforeOffers.has(groupId));
-    return this.#freezeReconciliationSummary({ released_lease_ids: releasedLeaseIds, released_request_ids: releasedRequestIds, notification_ids: notificationIds, offered_group_ids: offeredGroupIds });
+    return this.#freezeReconciliationSummary({ released_lease_ids: releasedLeaseIds, released_observation_ids: releasedObservationIds, stale_observation_ids: staleObservationIds, released_request_ids: releasedRequestIds, notification_ids: notificationIds, offered_group_ids: offeredGroupIds });
+  }
+
+  #repairPostCutoverTerminalChildren(run: CoordinationRun, seq: number): void {
+    const resourceRow = this.#db.prepare('SELECT * FROM run_resources WHERE repo_id=? AND workstream_run=?').get(run.repo_id, run.workstream_run);
+    if (resourceRow === undefined) return;
+    const resource = runResourceFromRow(resourceRow);
+    const children = this.#db.prepare("SELECT * FROM child_leases WHERE repo_id=? AND workstream_run=? AND status IN ('running','recovery-required') ORDER BY unit_id, attempt, child_lease_id").all(run.repo_id, run.workstream_run).map(childFromRow);
+    for (const child of children) {
+      const attemptRow = this.#db.prepare('SELECT * FROM unit_attempts WHERE entity_id=?').get(unitAttemptEntityId(child.owner));
+      if (attemptRow === undefined) continue;
+      const attempt = unitAttemptFromRow(attemptRow);
+      const result = proveStructuredAttemptTerminal({ mainWorktreePath: resource.main_worktree_path, runtimeRoot: resource.runtime_root, repoId: run.repo_id, autopilotId: run.autopilot_id, workstream: run.workstream, workstreamRun: run.workstream_run, unitId: child.owner.unit_id, attempt: child.owner.attempt, childLeaseId: child.child_lease_id, spec: attempt.spec });
+      if (!result.proven) continue;
+      const proof = result.proof;
+      for (const artifact of proof.artifacts) this.#persistEvidenceArtifact(run.repo_id, { ref: artifact.ref, sha256: artifact.sha256 }, artifact.bytes, 'post-cutover trusted terminal repair', seq);
+      this.#acceptReconciliationEvidence({ repoId: run.repo_id, workstreamRun: run.workstream_run, source: 'child-process', targetId: child.child_lease_id, evidence: { ref: proof.terminalEvidence.ref, sha256: proof.terminalEvidence.sha256 }, seq });
+      const updated = this.#db.prepare("UPDATE child_leases SET status='terminal', terminal_evidence_ref=?, terminal_evidence_sha256=?, version=version+1 WHERE child_lease_id=? AND status IN ('running','recovery-required')").run(proof.terminalEvidence.ref, proof.terminalEvidence.sha256, child.child_lease_id);
+      if (updated.changes !== 1) throw new CoordinationRuntimeError('invalid-state', 'trusted terminal repair lost its exact child transition', [child.child_lease_id]);
+      this.#updateAttemptForSatisfiedCondition(child.owner, 'child-terminal');
+      // Terminal process fact releases observations. Source-changing edit authority
+      // remains until the owning supervisor commits reset or quarantine evidence.
+      const cleanEditRelease = false;
+      this.#persistPostCutoverTerminalRepairAudit(run, child, proof, cleanEditRelease, seq);
+    }
+  }
+
+  #persistPostCutoverTerminalRepairAudit(run: CoordinationRun, child: CoordinationChildLease, proof: TrustedTerminalAttemptProof, cleanEditRelease: boolean, seq: number): void {
+    const auditId = stableEntityId('post-cutover-terminal-repair', [run.repo_id, run.workstream_run, child.child_lease_id, proof.terminalEvidence.sha256]);
+    if (this.#db.prepare('SELECT entity_id FROM migration_legacy_audit WHERE entity_id=?').get(auditId) !== undefined) return;
+    const payload = {
+      schema_version: 'autopilot.post_cutover_terminal_repair.v1', repo_id: run.repo_id, autopilot_id: run.autopilot_id, workstream_run: run.workstream_run,
+      unit_id: child.owner.unit_id, attempt: child.owner.attempt, child_lease_id: child.child_lease_id, verdict: proof.status.verdict,
+      status_ref: proof.artifacts[1]?.ref ?? null, status_sha256: proof.artifacts[1]?.sha256 ?? null,
+      receipt_ref: proof.receipt.ref, receipt_sha256: proof.receipt.sha256,
+      audit_ref: proof.artifacts[3]?.ref ?? null, audit_sha256: proof.artifacts[3]?.sha256 ?? null,
+      transport_terminalized: true, clean_zero_change_edit_release: cleanEditRelease, mechanical_proof: proof.mechanicalProof, accepted_event_seq: seq,
+    };
+    this.#db.prepare('INSERT INTO migration_legacy_audit(entity_id, repo_id, source_kind, payload_json, created_event_seq) VALUES(?, ?, ?, ?, ?)').run(auditId, run.repo_id, 'claim-event', canonicalJson(payload), seq);
+  }
+
+  #reconcileObservations(run: CoordinationRun, seq: number, releasedObservationIds: string[]): void {
+    const observations = this.#db.prepare("SELECT * FROM observations WHERE repo_id=? AND workstream_run=? AND execution_state='active' ORDER BY entity_id").all(run.repo_id, run.workstream_run).map(observationFromRow);
+    for (const observation of observations) {
+      const childStatus = this.#childForOwner(observation.owner)?.status ?? null;
+      const attemptRow = this.#db.prepare('SELECT * FROM unit_attempts WHERE entity_id=?').get(unitAttemptEntityId(observation.owner));
+      const attemptState = attemptRow === undefined ? null : unitAttemptFromRow(attemptRow).state;
+      const executionState = childStatus === 'terminal' || attemptState === 'transport-complete' || attemptState === 'merged'
+        ? 'released'
+        : childStatus === 'recovery-required' || (attemptState !== null && ['failed', 'reset', 'quarantined', 'superseded'].includes(attemptState))
+          ? 'abandoned'
+          : null;
+      if (executionState === null) continue;
+      this.#updateObservation(parseCoordinationObservation({ ...observation, execution_state: executionState, released_event_seq: seq, version: observation.version + 1 }));
+      releasedObservationIds.push(observation.observation_id);
+      this.#markGroupReleasedWhenEmpty(run.repo_id, observation.acquisition_group_id);
+    }
   }
 
   #releaseProvenLegacyReadLeases(run: CoordinationRun, seq: number, releasedLeaseIds: string[]): void {
@@ -3318,7 +3532,11 @@ export class CoordinatorStore {
     });
     const validatorChildId = `child-${run.workstream_run}-${facts.validationUnitId}-${String(facts.validationAttempt)}`;
     const acceptedChild = this.#db.prepare("SELECT * FROM reconciliation_evidence WHERE repo_id=? AND workstream_run=? AND source='child-process' AND json_extract(payload_json, '$.release_condition.target_id')=? ORDER BY entity_id").all(run.repo_id, run.workstream_run, validatorChildId).map(reconciliationEvidenceFromRow);
-    if (acceptedChild.length !== 1 || acceptedChild[0]?.release_condition.evidence?.ref !== receiptEvidence.ref || acceptedChild[0]?.release_condition.evidence?.sha256 !== receiptEvidence.sha256) throw new CoordinationRuntimeError('invalid-state', 'reservation validation is not backed by one accepted validator child receipt', [validatorChildId, receiptEvidence.ref]);
+    const terminalEvidence = acceptedChild[0]?.release_condition.evidence;
+    if (acceptedChild.length !== 1 || terminalEvidence === null || terminalEvidence === undefined) throw new CoordinationRuntimeError('invalid-state', 'reservation validation is not backed by exactly one accepted validator child', [validatorChildId]);
+    if (terminalEvidence.ref === receiptEvidence.ref && terminalEvidence.sha256 === receiptEvidence.sha256) return;
+    const acceptance = parseAutopilotChildTerminalAcceptance(parseJsonObject(Buffer.from(this.#readRunEvidenceFile(run, terminalEvidence)).toString('utf8'), 'reservation validator terminal acceptance'));
+    if (acceptance.child_lease_id !== validatorChildId || acceptance.workstream !== run.workstream || acceptance.workstream_run !== run.workstream_run || acceptance.unit_id !== facts.validationUnitId || acceptance.attempt !== facts.validationAttempt || acceptance.verdict !== 'PASS' || (acceptance.role !== 'validate' && acceptance.role !== 'bughunt') || acceptance.status.ref !== statusEvidence.ref || acceptance.status.sha256 !== statusEvidence.sha256 || acceptance.receipt.ref !== receiptEvidence.ref || acceptance.receipt.sha256 !== receiptEvidence.sha256 || acceptance.audit.ref !== auditEvidence.ref || acceptance.audit.sha256 !== auditEvidence.sha256) throw new CoordinationRuntimeError('invalid-state', 'reservation validation terminal acceptance does not bind the exact validator artifact chain', [validatorChildId, terminalEvidence.ref]);
   }
 
   #assertReservationIntegrationGitFacts(run: CoordinationRun, predecessorTerminalSha: string, integrationHead: string, protectedPaths: readonly string[], requireExactHead: boolean): void {
@@ -3401,6 +3619,14 @@ export class CoordinatorStore {
   }
 
   #assertRunCloseReservationReady(run: CoordinationRun): void {
+    const allObservations = this.#db.prepare('SELECT * FROM observations WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(run.repo_id, run.workstream_run).map(observationFromRow);
+    const unresolvedStaleObservations = allObservations.filter((stale) => stale.freshness === 'stale' && !allObservations.some((candidate) => {
+      if (candidate.freshness !== 'current' || candidate.execution_state !== 'released' || candidate.recorded_event_seq <= stale.recorded_event_seq || candidate.path !== stale.path || stale.stale_by_commit === null) return false;
+      const staleAttempt = this.#requireUnitAttempt(stale.owner.repo_id, stale.owner.workstream_run, stale.owner.unit_id, stale.owner.attempt);
+      const candidateAttempt = this.#requireUnitAttempt(candidate.owner.repo_id, candidate.owner.workstream_run, candidate.owner.unit_id, candidate.owner.attempt);
+      return staleAttempt.role === candidateAttempt.role && this.#gitCommitIsAncestor(run, stale.stale_by_commit, candidate.source_identity.base_commit);
+    }));
+    if (unresolvedStaleObservations.length > 0) throw new CoordinationRuntimeError('recovery-required', 'run close requires every stale observation to be refreshed or revalidated by a same-role terminal attempt', unresolvedStaleObservations.map((observation) => observation.observation_id));
     const activeLeases = this.#db.prepare('SELECT * FROM edit_leases WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(run.repo_id, run.workstream_run).map(editLeaseFromRow);
     const nonCloseLeases = activeLeases.filter((lease) => lease.normal_release_condition.condition_type !== 'run-closed' || lease.normal_release_condition.target_id !== run.workstream_run);
     if (nonCloseLeases.length > 0) throw new CoordinationRuntimeError('recovery-required', 'run close requires every unit edit lease to be terminally released', nonCloseLeases.map((lease) => lease.edit_lease_id));
@@ -3437,11 +3663,13 @@ export class CoordinatorStore {
     this.#assertReservationValidationArtifactChain(run, obligation.validation_evidence.ref, validationFacts);
   }
 
-  #terminalizeRunReservations(run: CoordinationRun, source: 'run-close' | 'run-abort', terminalSha: string, seq: number): void {
+  #terminalizeRunReservations(run: CoordinationRun, source: 'run-close' | 'run-abort', terminalSha: string, seq: number): readonly string[] {
+    const staleObservationIds: string[] = [];
     const reservations = this.#db.prepare("SELECT * FROM change_reservations WHERE repo_id=? AND workstream_run=? AND json_extract(payload_json, '$.released_event_seq') IS NULL ORDER BY entity_id").all(run.repo_id, run.workstream_run).map(changeReservationFromRow);
     for (const reservation of reservations) {
       const released = parseCoordinationChangeReservation({ ...reservation, released_event_seq: seq, terminal_outcome: source === 'run-close' ? 'closed' : 'aborted', terminal_sha: terminalSha, version: reservation.version + 1 });
       this.#db.prepare('UPDATE change_reservations SET payload_json=?, version=? WHERE entity_id=?').run(canonicalJson(released), released.version, released.reservation_id);
+      if (source === 'run-close') staleObservationIds.push(...this.#markOverlappingObservationsStale(run, released, terminalSha, seq));
       const dependent = this.#db.prepare("SELECT * FROM reservation_obligations WHERE repo_id=? AND predecessor_reservation_id=? AND json_extract(payload_json, '$.state')='waiting-for-predecessor' ORDER BY entity_id").all(run.repo_id, reservation.reservation_id).map(reservationObligationFromRow);
       for (const obligation of dependent) {
         const state = source === 'run-close' ? 'integration-required' : 'cancelled';
@@ -3459,6 +3687,26 @@ export class CoordinatorStore {
       const owned = this.#db.prepare("SELECT * FROM reservation_obligations WHERE repo_id=? AND workstream_run=? AND json_extract(payload_json, '$.state') NOT IN ('resolved','cancelled') ORDER BY entity_id").all(run.repo_id, run.workstream_run).map(reservationObligationFromRow);
       for (const obligation of owned) this.#updateReservationObligation(parseCoordinationReservationObligation({ ...obligation, state: 'cancelled', resolved_event_seq: seq, version: obligation.version + 1 }));
     }
+    return Object.freeze(staleObservationIds);
+  }
+
+  #markOverlappingObservationsStale(run: CoordinationRun, reservation: CoordinationChangeReservation, terminalSha: string, seq: number): readonly string[] {
+    const invalidatingAttempt = parseUnitAttemptTarget(this.#targetIdForMergeEvidence(run, reservation.merge_evidence));
+    const observations = this.#db.prepare("SELECT * FROM observations WHERE repo_id=? AND freshness='current' ORDER BY entity_id").all(run.repo_id).map(observationFromRow).filter((observation) => observation.recorded_event_seq <= seq && coordinationPathsOverlap(observation.path, reservation.path) && !(observation.owner.workstream_run === reservation.workstream_run && observation.owner.unit_id === invalidatingAttempt.unitId && observation.owner.attempt === invalidatingAttempt.attempt) && !this.#gitCommitIsAncestor(run, terminalSha, observation.source_identity.base_commit));
+    const staleIds: string[] = [];
+    for (const observation of observations) {
+      const stale = parseCoordinationObservation({ ...observation, freshness: 'stale', stale_event_seq: seq, stale_by_reservation_id: reservation.reservation_id, stale_by_commit: terminalSha, version: observation.version + 1 });
+      this.#updateObservation(stale);
+      staleIds.push(stale.observation_id);
+      const messageId = stableEntityId('message', ['observation-stale', stale.observation_id, reservation.reservation_id, String(seq)]);
+      if (this.#db.prepare('SELECT message_id FROM messages WHERE message_id=?').get(messageId) === undefined) this.#insertMessage({
+        schema_version: 'autopilot.coordination_message.v1', message_id: messageId, repo_id: run.repo_id, recipient_workstream_run: stale.owner.workstream_run,
+        message_type: 'observation-stale', correlation_id: stale.observation_id,
+        payload: { observation_id: stale.observation_id, path: stale.path, observed_base_commit: stale.source_identity.base_commit, landed_reservation_id: reservation.reservation_id, landed_commit: terminalSha, required_action: 'refresh-or-revalidate-before-closure' },
+        status: 'pending', created_event_seq: seq, delivered_event_seq: null, acknowledged_event_seq: null, version: 1,
+      });
+    }
+    return Object.freeze(staleIds);
   }
 
   #releaseAttemptLeases(run: CoordinationRun, targetId: string): readonly string[] {
@@ -3529,7 +3777,7 @@ export class CoordinatorStore {
 
   #acceptReconciliationEvidence(input: { readonly repoId: string; readonly workstreamRun: string; readonly source: CoordinationReconciliationSource; readonly targetId: string; readonly evidence: { readonly ref: string; readonly sha256: `sha256:${string}` }; readonly seq: number }): CoordinationReconciliationEvidence {
     const run = this.#requireRun(input.repoId, input.workstreamRun);
-    this.#verifyAcceptedEvidenceFile(run, input.source, input.targetId, input.evidence);
+    this.#verifyAcceptedEvidenceFile(run, input.source, input.targetId, input.evidence, input.seq);
     const conditionType = this.#conditionTypeForSource(input.source);
     this.#assertReconciliationTarget(run, conditionType, input.targetId);
     const entityId = stableEntityId('reconciliation-evidence', [input.repoId, input.workstreamRun, input.source, input.targetId, input.evidence.ref, input.evidence.sha256]);
@@ -3561,24 +3809,33 @@ export class CoordinatorStore {
     const relativeEvidence = relative(runMainRoot, evidencePath);
     if (relativeEvidence.length === 0 || relativeEvidence === '..' || relativeEvidence.startsWith(`..${sep}`) || isAbsolute(relativeEvidence)) throw new CoordinationRuntimeError('unauthorized-client', 'accepted evidence escapes the run-owned main worktree');
     let bytes: Uint8Array;
+    let descriptor: number | null = null;
     try {
       const evidenceStat = lstatSync(evidencePath);
-      if (!evidenceStat.isFile() || evidenceStat.isSymbolicLink()) throw new CoordinationRuntimeError('unauthorized-client', 'accepted evidence must be a regular non-symbolic file', [evidencePath]);
+      if (!evidenceStat.isFile() || evidenceStat.isSymbolicLink() || evidenceStat.size > MAX_COORDINATION_EVIDENCE_BYTES) throw new CoordinationRuntimeError('unauthorized-client', 'accepted evidence must be a bounded regular non-symbolic file', [evidencePath]);
       const realRunRoot = realpathSync(runMainRoot);
       const realEvidencePath = realpathSync(evidencePath);
       const relativeRealEvidence = relative(realRunRoot, realEvidencePath);
       if (relativeRealEvidence.length === 0 || relativeRealEvidence === '..' || relativeRealEvidence.startsWith(`..${sep}`) || isAbsolute(relativeRealEvidence)) throw new CoordinationRuntimeError('unauthorized-client', 'accepted evidence resolves outside the run-owned main worktree', [evidencePath, realEvidencePath]);
-      bytes = readFileSync(evidencePath);
+      descriptor = openSync(evidencePath, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
+      const opened = fstatSync(descriptor);
+      if (!opened.isFile() || opened.dev !== evidenceStat.dev || opened.ino !== evidenceStat.ino || opened.size !== evidenceStat.size || opened.mtimeMs !== evidenceStat.mtimeMs || opened.ctimeMs !== evidenceStat.ctimeMs) throw new CoordinationRuntimeError('recovery-required', 'accepted evidence identity changed while opening', [evidencePath]);
+      bytes = readFileSync(descriptor);
+      const afterDescriptor = fstatSync(descriptor);
+      const afterPath = lstatSync(evidencePath);
+      if (bytes.byteLength !== opened.size || afterDescriptor.dev !== opened.dev || afterDescriptor.ino !== opened.ino || afterDescriptor.size !== opened.size || afterDescriptor.mtimeMs !== opened.mtimeMs || afterDescriptor.ctimeMs !== opened.ctimeMs || afterPath.isSymbolicLink() || afterPath.dev !== opened.dev || afterPath.ino !== opened.ino || afterPath.size !== opened.size || afterPath.mtimeMs !== opened.mtimeMs || afterPath.ctimeMs !== opened.ctimeMs) throw new CoordinationRuntimeError('recovery-required', 'accepted evidence identity changed during descriptor read', [evidencePath]);
     } catch (error) {
       if (error instanceof CoordinationRuntimeError) throw error;
       throw new CoordinationRuntimeError('recovery-required', 'accepted evidence file is unreadable', [evidencePath, error instanceof Error ? error.message : String(error)]);
+    } finally {
+      if (descriptor !== null) closeSync(descriptor);
     }
     const actual = `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
     if (actual !== evidence.sha256) throw new CoordinationRuntimeError('invalid-state', 'accepted evidence hash does not match the run-owned artifact', [evidencePath, `expected=${evidence.sha256}`, `actual=${actual}`]);
     return bytes;
   }
 
-  #verifyAcceptedEvidenceFile(run: CoordinationRun, source: CoordinationReconciliationSource, targetId: string, evidence: { readonly ref: string; readonly sha256: `sha256:${string}` }): Uint8Array {
+  #verifyAcceptedEvidenceFile(run: CoordinationRun, source: CoordinationReconciliationSource, targetId: string, evidence: { readonly ref: string; readonly sha256: `sha256:${string}` }, persistAtEventSeq?: number): Uint8Array {
     const repository = repositoryFromRow(asRow(this.#db.prepare('SELECT * FROM repositories WHERE repo_id=?').get(run.repo_id), 'evidence repository'));
     const bytes = this.#readRunEvidenceFile(run, evidence);
     let unitId: string | null = null;
@@ -3587,22 +3844,56 @@ export class CoordinatorStore {
       const child = childFromRow(asRow(this.#db.prepare('SELECT * FROM child_leases WHERE child_lease_id=?').get(targetId), 'terminal evidence child'));
       unitId = child.owner.unit_id;
       attempt = child.owner.attempt;
+      const document = parseJsonObject(Buffer.from(bytes).toString('utf8'), 'child terminal evidence');
+      if (document['schema_version'] === AUTOPILOT_CHILD_TERMINAL_ACCEPTANCE_SCHEMA) {
+        const acceptance = parseAutopilotChildTerminalAcceptance(document);
+        const specBytes = this.#readRunEvidenceFile(run, acceptance.spec);
+        const statusBytes = this.#readRunEvidenceFile(run, acceptance.status);
+        const receiptBytes = this.#readRunEvidenceFile(run, acceptance.receipt);
+        const auditBytes = this.#readRunEvidenceFile(run, acceptance.audit);
+        const chain = assertAutopilotChildTerminalAcceptanceChain({ acceptance, child, specBytes, statusBytes, receiptBytes, auditBytes });
+        const durableAttempt = this.#requireUnitAttempt(child.owner.repo_id, child.owner.workstream_run, child.owner.unit_id, child.owner.attempt);
+        if (canonicalJson(durableAttempt.spec) !== canonicalJson(acceptance.spec) || durableAttempt.role !== chain.spec.role) throw new CoordinationRuntimeError('invalid-state', 'terminal acceptance spec identity differs from the durable unit attempt');
+        if (persistAtEventSeq !== undefined) {
+          for (const [ref, content, label] of [[acceptance.spec, specBytes, 'terminal acceptance spec'], [acceptance.status, statusBytes, 'terminal acceptance status'], [acceptance.receipt, receiptBytes, 'terminal acceptance receipt'], [acceptance.audit, auditBytes, 'terminal acceptance audit']] as const) this.#persistEvidenceArtifact(run.repo_id, ref, content, label, persistAtEventSeq);
+        }
+      }
     } else if (source === 'unit-merge' || source === 'attempt-reset' || source === 'quarantine-capture') {
       const target = parseUnitAttemptTarget(targetId);
       unitId = target.unitId;
       attempt = target.attempt;
     }
-    validateReconciliationEvidenceDocument(bytes, {
-      repoKey: repository.repo_key,
-      autopilotId: run.autopilot_id,
-      workstream: run.workstream,
-      workstreamRun: run.workstream_run,
-      source,
-      targetId,
-      unitId,
-      attempt,
-    });
+    const expectedIdentity = {
+      repoKey: repository.repo_key, autopilotId: run.autopilot_id, workstream: run.workstream, workstreamRun: run.workstream_run,
+      source, targetId, unitId, attempt,
+    };
+    validateReconciliationEvidenceDocument(bytes, expectedIdentity);
+    if (persistAtEventSeq !== undefined && (source === 'attempt-reset' || source === 'quarantine-capture')) this.#assertUnitFailureEvidenceFacts(run, source, targetId, parseUnitFailureEvidenceFacts(bytes, expectedIdentity));
+    if (persistAtEventSeq !== undefined) this.#persistEvidenceArtifact(run.repo_id, evidence, bytes, `${source} reconciliation evidence`, persistAtEventSeq);
     return bytes;
+  }
+
+  #assertUnitFailureEvidenceFacts(run: CoordinationRun, source: 'attempt-reset' | 'quarantine-capture', targetId: string, facts: ReturnType<typeof parseUnitFailureEvidenceFacts>): void {
+    const target = parseUnitAttemptTarget(targetId);
+    const worktrees = this.#db.prepare("SELECT * FROM worktrees WHERE repo_id=? AND workstream_run=? AND json_extract(payload_json, '$.kind')='unit' AND json_extract(payload_json, '$.owner.unit_id')=? AND json_extract(payload_json, '$.owner.attempt')=? ORDER BY entity_id").all(run.repo_id, run.workstream_run, target.unitId, target.attempt).map(worktreeFromRow);
+    const worktree = worktrees[0];
+    if (worktrees.length !== 1 || worktree === undefined || resolve(worktree.canonical_path) !== resolve(facts.unitWorktreePath)) throw new CoordinationRuntimeError('invalid-state', 'unit failure evidence does not identify exactly one registered owner worktree', [facts.unitWorktreePath]);
+    if (!existsSync(worktree.canonical_path)) throw new CoordinationRuntimeError('recovery-required', 'unit failure evidence worktree disappeared before coordinator verification; edit authority remains retained', [worktree.canonical_path]);
+    const commonRaw = spawnSync('git', ['rev-parse', '--git-common-dir'], { cwd: worktree.canonical_path, encoding: 'utf8', timeout: 30_000 });
+    const head = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: worktree.canonical_path, encoding: 'utf8', timeout: 30_000 });
+    const branch = spawnSync('git', ['symbolic-ref', '--quiet', '--short', 'HEAD'], { cwd: worktree.canonical_path, encoding: 'utf8', timeout: 30_000 });
+    const status = spawnSync('git', ['status', '--porcelain=v1', '-z', '--untracked-files=all', '--ignored=matching', '--ignore-submodules=none'], { cwd: worktree.canonical_path, encoding: 'utf8', timeout: 30_000, maxBuffer: 1024 * 1024 });
+    if ((commonRaw.status ?? -1) !== 0 || (head.status ?? -1) !== 0 || (branch.status ?? -1) !== 0 || (status.status ?? -1) !== 0) throw new CoordinationRuntimeError('recovery-required', 'coordinator could not verify unit failure Git postconditions', [commonRaw.stderr.trim(), head.stderr.trim(), branch.stderr.trim(), status.stderr.trim()]);
+    const actualCommon = realpathSync(isAbsolute(commonRaw.stdout.trim()) ? commonRaw.stdout.trim() : resolve(worktree.canonical_path, commonRaw.stdout.trim()));
+    if (actualCommon !== realpathSync(worktree.git_common_dir) || actualCommon !== realpathSync(facts.gitCommonDir) || branch.stdout.trim() !== worktree.branch || branch.stdout.trim() !== facts.branch || head.stdout.trim() !== facts.gitHeadAfter || status.stdout.length !== 0) throw new CoordinationRuntimeError('recovery-required', 'unit failure Git postconditions differ from durable worktree evidence', [`common=${actualCommon}`, `branch=${branch.stdout.trim()}`, `head=${head.stdout.trim()}`, `mutable=${String(status.stdout.length)}`]);
+    if (source === 'attempt-reset' && facts.action !== 'reset' && facts.action !== 'abort') throw new CoordinationRuntimeError('invalid-state', 'attempt-reset source requires reset/abort failure evidence');
+    if (source === 'quarantine-capture') {
+      if (facts.action !== 'quarantine' && facts.action !== 'preserve') throw new CoordinationRuntimeError('invalid-state', 'quarantine-capture source requires quarantine/preserve failure evidence');
+      if (facts.captureCommitSha !== facts.gitHeadAfter || facts.captureRef === null || !facts.captureRef.startsWith(`autopilot/archive/${run.workstream_run}/`)) throw new CoordinationRuntimeError('invalid-state', 'quarantine evidence capture identity is not exact');
+      const resource = runResourceFromRow(asRow(this.#db.prepare('SELECT * FROM run_resources WHERE repo_id=? AND workstream_run=?').get(run.repo_id, run.workstream_run), 'quarantine run resource'));
+      const ref = spawnSync('git', ['rev-parse', '--verify', `refs/heads/${facts.captureRef}^{commit}`], { cwd: resource.source_repo, encoding: 'utf8', timeout: 30_000 });
+      if ((ref.status ?? -1) !== 0 || ref.stdout.trim() !== facts.captureCommitSha) throw new CoordinationRuntimeError('recovery-required', 'quarantine archive ref does not preserve the exact capture commit', [facts.captureRef, ref.stdout.trim(), ref.stderr.trim()]);
+    }
   }
 
   #updateAttemptForSatisfiedCondition(owner: CoordinationOwnerIdentity, conditionType: CoordinationReleaseConditionType): void {
@@ -3655,14 +3946,18 @@ export class CoordinatorStore {
     }
   }
 
-  #emptyReconciliationSummary(): { released_lease_ids: string[]; released_request_ids: string[]; notification_ids: string[]; offered_group_ids: string[] } {
-    return { released_lease_ids: [], released_request_ids: [], notification_ids: [], offered_group_ids: [] };
+  #emptyReconciliationSummary(): { released_lease_ids: string[]; released_observation_ids: string[]; stale_observation_ids: string[]; released_request_ids: string[]; notification_ids: string[]; offered_group_ids: string[] } {
+    return { released_lease_ids: [], released_observation_ids: [], stale_observation_ids: [], released_request_ids: [], notification_ids: [], offered_group_ids: [] };
   }
 
-  #freezeReconciliationSummary(summary: { readonly released_lease_ids: readonly string[]; readonly released_request_ids: readonly string[]; readonly notification_ids: readonly string[]; readonly offered_group_ids: readonly string[] }): CoordinationReconciliationSummary {
+  #freezeReconciliationSummary(summary: { readonly released_lease_ids: readonly string[]; readonly released_observation_ids: readonly string[]; readonly stale_observation_ids: readonly string[]; readonly released_request_ids: readonly string[]; readonly notification_ids: readonly string[]; readonly offered_group_ids: readonly string[] }): CoordinationReconciliationSummary {
     return {
       released_lease_ids:
         Object.freeze([...new Set(summary.released_lease_ids)].sort()),
+      released_observation_ids:
+        Object.freeze([...new Set(summary.released_observation_ids)].sort()),
+      stale_observation_ids:
+        Object.freeze([...new Set(summary.stale_observation_ids)].sort()),
       released_request_ids:
         Object.freeze([...new Set(summary.released_request_ids)].sort()),
       notification_ids:
@@ -3712,6 +4007,12 @@ export class CoordinatorStore {
     const existing = unitAttemptFromRow(row);
     if (!sameOwner(existing.owner, attempt.owner) || canonicalJson(existing.spec) !== canonicalJson(attempt.spec) || existing.role !== attempt.role) throw new CoordinationRuntimeError('invalid-state', 'unit attempt identity was reused with different immutable spec evidence or role');
     if (existing.state === 'superseded' || existing.state === 'reset' || existing.state === 'failed' || existing.state === 'quarantined') throw new CoordinationRuntimeError('invalid-state', `unit attempt is ${existing.state}`);
+  }
+
+  #childForOwner(owner: CoordinationOwnerIdentity): CoordinationChildLease | null {
+    const rows = this.#db.prepare('SELECT * FROM child_leases WHERE repo_id=? AND autopilot_id=? AND workstream_run=? AND unit_id=? AND attempt=? ORDER BY child_lease_id').all(owner.repo_id, owner.autopilot_id, owner.workstream_run, owner.unit_id, owner.attempt).map(childFromRow);
+    if (rows.length > 1) throw new CoordinationRuntimeError('store-corrupt', 'durable attempt owns multiple child leases', [owner.workstream_run, owner.unit_id, String(owner.attempt)]);
+    return rows[0] ?? null;
   }
 
   #requireUnitAttempt(repoId: string, workstreamRun: string, unitId: string, attempt: number): CoordinationUnitAttempt {
@@ -3873,7 +4174,7 @@ export class CoordinatorStore {
 
   #assertCommittedWorktreeState(operation: CoordinationWorktreeOperation, state: string): void {
     const allowed: Readonly<Record<CoordinationWorktreeOperation['operation_type'], readonly string[]>> = {
-      create: ['active'], materialize: ['active'], commit: ['active'], merge: ['active', 'terminal'], reset: ['terminal'], quarantine: ['quarantined'], archive: ['active', 'terminal'], remove: ['removed'],
+      create: ['active'], materialize: ['active'], commit: ['active'], merge: ['active', 'terminal'], reset: ['terminal'], quarantine: ['quarantined'], archive: ['active', 'terminal', 'quarantined'], remove: ['removed'],
     };
     if (!allowed[operation.operation_type].includes(state)) throw new CoordinationRuntimeError('invalid-request', `${operation.operation_type} operation cannot commit worktree state ${state}`);
   }
@@ -3920,18 +4221,56 @@ export class CoordinatorStore {
     return Object.freeze(offered.filter((group) => group.acquisition_group_id !== groupId && group.state === 'grant-ready' && requested.some((entry) => group.requested_leases.some((offeredLease) => coordinationPathsOverlap(entry.path, offeredLease.path) && claimModesConflict(entry.mode, offeredLease.mode)))));
   }
 
-  #grantGroup(group: CoordinationAcquisitionGroup, seq: number): { readonly group: CoordinationAcquisitionGroup; readonly leases: readonly CoordinationEditLease[] } {
-    if (this.#blockingLeases(group.owner.repo_id, group.requested_leases).length > 0) throw new CoordinationRuntimeError('coordinator-contention', 'complete acquisition group became blocked before grant');
-    const leases = group.requested_leases.map((requested, index): CoordinationEditLease => ({
-      schema_version: 'autopilot.edit_lease.v1',
-      edit_lease_id: stableEntityId('lease', [group.owner.repo_id, group.acquisition_group_id, String(index), requested.mode, requested.path]),
-      owner: group.owner, acquisition_group_id: group.acquisition_group_id, path: requested.path, mode: requested.mode, purpose: requested.purpose,
-      acquired_event_seq: seq, normal_release_condition: group.normal_release_condition, version: 1,
-    }));
+  #observationWorktreeRoot(owner: CoordinationOwnerIdentity): string {
+    const attempt = this.#requireUnitAttempt(owner.repo_id, owner.workstream_run, owner.unit_id, owner.attempt);
+    const rows = attempt.role === 'implement' || attempt.role === 'fix'
+      ? this.#db.prepare("SELECT * FROM worktrees WHERE repo_id=? AND workstream_run=? AND json_extract(payload_json, '$.kind')='unit' AND json_extract(payload_json, '$.owner.unit_id')=? AND json_extract(payload_json, '$.owner.attempt')=? AND json_extract(payload_json, '$.state')!='removed' ORDER BY entity_id").all(owner.repo_id, owner.workstream_run, owner.unit_id, owner.attempt).map(worktreeFromRow)
+      : this.#db.prepare("SELECT * FROM worktrees WHERE repo_id=? AND workstream_run=? AND json_extract(payload_json, '$.kind')='main' AND json_extract(payload_json, '$.state')!='removed' ORDER BY entity_id").all(owner.repo_id, owner.workstream_run).map(worktreeFromRow);
+    if (rows.length !== 1 || rows[0] === undefined) throw new CoordinationRuntimeError('invalid-state', 'observation acquisition requires exactly one registered owner worktree', [owner.workstream_run, owner.unit_id, String(owner.attempt), `count=${String(rows.length)}`]);
+    return rows[0].canonical_path;
+  }
+
+  #insertObservation(observation: CoordinationObservation): void {
+    this.#db.prepare('INSERT INTO observations(entity_id, repo_id, workstream_run, acquisition_group_id, payload_json, execution_state, freshness, version) VALUES(?, ?, ?, ?, ?, ?, ?, ?)').run(
+      observation.observation_id, observation.owner.repo_id, observation.owner.workstream_run, observation.acquisition_group_id, canonicalJson(observation), observation.execution_state, observation.freshness, observation.version,
+    );
+  }
+
+  #updateObservation(observation: CoordinationObservation): void {
+    const result = this.#db.prepare('UPDATE observations SET payload_json=?, execution_state=?, freshness=?, version=? WHERE repo_id=? AND entity_id=?').run(canonicalJson(observation), observation.execution_state, observation.freshness, observation.version, observation.owner.repo_id, observation.observation_id);
+    if (result.changes !== 1) throw new CoordinationRuntimeError('invalid-state', `observation ${observation.observation_id} disappeared during mutation`);
+  }
+
+  #grantGroup(group: CoordinationAcquisitionGroup, seq: number): { readonly group: CoordinationAcquisitionGroup; readonly observations: readonly CoordinationObservation[]; readonly leases: readonly CoordinationEditLease[] } {
+    if (this.#blockingLeases(group.owner.repo_id, group.requested_leases).length > 0) throw new CoordinationRuntimeError('coordinator-contention', 'complete edit-intent set became blocked before grant');
+    const observations: CoordinationObservation[] = [];
+    const leases: CoordinationEditLease[] = [];
+    for (const [index, requested] of group.requested_leases.entries()) {
+      if (requested.mode === 'READ') {
+        if (requested.source_identity === undefined || requested.source_identity.object_kind === 'missing') throw new CoordinationRuntimeError('invalid-request', 'new READ observation requires an exact tracked blob/tree identity', [requested.path]);
+        assertCoordinationObservationSourceIdentity({ cwd: this.#observationWorktreeRoot(group.owner), path: requested.path, expected: requested.source_identity });
+        const observation = parseCoordinationObservation({
+          schema_version: 'autopilot.observation.v1',
+          observation_id: stableEntityId('observation', [group.owner.repo_id, group.acquisition_group_id, String(index), requested.path, requested.source_identity.base_commit, requested.source_identity.object_id]),
+          owner: group.owner, acquisition_group_id: group.acquisition_group_id, path: requested.path, purpose: requested.purpose, source_identity: requested.source_identity,
+          execution_state: 'active', freshness: 'current', recorded_event_seq: seq, released_event_seq: null, stale_event_seq: null, stale_by_reservation_id: null, stale_by_commit: null, version: 1,
+        });
+        observations.push(observation);
+        continue;
+      }
+      const lease: CoordinationEditLease = {
+        schema_version: 'autopilot.edit_lease.v1',
+        edit_lease_id: stableEntityId('lease', [group.owner.repo_id, group.acquisition_group_id, String(index), requested.mode, requested.path]),
+        owner: group.owner, acquisition_group_id: group.acquisition_group_id, path: requested.path, mode: requested.mode, purpose: requested.purpose,
+        acquired_event_seq: seq, normal_release_condition: group.normal_release_condition, version: 1,
+      };
+      leases.push(lease);
+    }
+    for (const observation of observations) this.#insertObservation(observation);
     for (const lease of leases) this.#insertEntity('edit_leases', lease.edit_lease_id, lease.owner.repo_id, lease.owner.workstream_run, lease);
     const granted: CoordinationAcquisitionGroup = { ...group, state: 'granted', grant_event_seq: seq, offer_expires_at: null, version: group.version + 1 };
     this.#updateEntity('acquisition_groups', group.acquisition_group_id, granted);
-    return { group: granted, leases };
+    return { group: granted, observations: Object.freeze(observations), leases: Object.freeze(leases) };
   }
 
   #ensureClaimRequests(group: CoordinationAcquisitionGroup, blockers: readonly CoordinationEditLease[], seq: number): readonly CoordinationClaimRequest[] {
@@ -3953,16 +4292,18 @@ export class CoordinatorStore {
         requests.push(claimRequestFromRow(existingRow));
         continue;
       }
+      const contested = group.requested_leases.filter((requested) => requested.mode !== 'READ' && owned.some((blocker) => coordinationPathsOverlap(requested.path, blocker.path) && claimModesConflict(requested.mode, blocker.mode)));
+      if (contested.length === 0) throw new CoordinationRuntimeError('store-corrupt', 'claim request blocker set has no contested edit intention');
       const claimRequest: CoordinationClaimRequest = {
         schema_version: 'autopilot.claim_request.v1', request_id: requestId, acquisition_group_id: group.acquisition_group_id,
-        requester: group.owner, owner, blocking_lease_ids: leaseIds, requested_leases: group.requested_leases, reason: group.reason,
+        requester: group.owner, owner, blocking_lease_ids: leaseIds, requested_leases: contested, reason: group.reason,
         created_event_seq: seq, status: 'pending', owner_reason: null, release_condition: null, release_event_seq: null, grant_event_seq: null, version: 1,
       };
       this.#db.prepare('INSERT INTO claim_requests(entity_id, repo_id, requester_workstream_run, owner_workstream_run, payload_json, version) VALUES(?, ?, ?, ?, ?, ?)').run(requestId, owner.repo_id, group.owner.workstream_run, owner.workstream_run, canonicalJson(claimRequest), claimRequest.version);
       const message: CoordinationMessage = {
         schema_version: 'autopilot.coordination_message.v1', message_id: stableEntityId('message', ['claim-request', requestId]), repo_id: owner.repo_id,
         recipient_workstream_run: owner.workstream_run, message_type: 'claim-request', correlation_id: requestId,
-        payload: { request_id: requestId, acquisition_group_id: group.acquisition_group_id, requester_run: group.owner.workstream_run, requester_unit: group.owner.unit_id, requester_attempt: group.owner.attempt, blocking_lease_ids: leaseIds, requested_leases: group.requested_leases, reason: group.reason },
+        payload: { request_id: requestId, acquisition_group_id: group.acquisition_group_id, requester_run: group.owner.workstream_run, requester_unit: group.owner.unit_id, requester_attempt: group.owner.attempt, blocking_lease_ids: leaseIds, requested_leases: contested, reason: group.reason },
         status: 'pending', created_event_seq: seq, delivered_event_seq: null, acknowledged_event_seq: null, version: 1,
       };
       this.#insertMessage(message);
@@ -3992,8 +4333,9 @@ export class CoordinatorStore {
   }
 
   #markGroupReleasedWhenEmpty(repoId: string, groupId: string): void {
-    const count = sqlInteger(asRow(this.#db.prepare('SELECT COUNT(*) AS count FROM edit_leases WHERE repo_id=? AND json_extract(payload_json, \'$.acquisition_group_id\')=?').get(repoId, groupId), 'group lease count'), 'count');
-    if (count !== 0) return;
+    const leaseCount = sqlInteger(asRow(this.#db.prepare('SELECT COUNT(*) AS count FROM edit_leases WHERE repo_id=? AND json_extract(payload_json, \'$.acquisition_group_id\')=?').get(repoId, groupId), 'group lease count'), 'count');
+    const observationCount = sqlInteger(asRow(this.#db.prepare("SELECT COUNT(*) AS count FROM observations WHERE repo_id=? AND acquisition_group_id=? AND execution_state='active'").get(repoId, groupId), 'active group observation count'), 'count');
+    if (leaseCount !== 0 || observationCount !== 0) return;
     const group = this.#requireGroup(repoId, groupId);
     if (group.state === 'granted') this.#updateEntity('acquisition_groups', groupId, { ...group, state: 'released', version: group.version + 1 });
   }
@@ -4210,6 +4552,8 @@ export class CoordinatorStore {
       if (child !== undefined) throw new CoordinationRuntimeError('invalid-state', 'granted acquisition group cannot be cancelled after child authority registration');
       const leases = this.#db.prepare("SELECT * FROM edit_leases WHERE repo_id=? AND json_extract(payload_json, '$.acquisition_group_id')=? ORDER BY entity_id").all(group.owner.repo_id, group.acquisition_group_id).map(editLeaseFromRow);
       for (const lease of leases) this.#db.prepare('DELETE FROM edit_leases WHERE repo_id=? AND entity_id=?').run(group.owner.repo_id, lease.edit_lease_id);
+      const observations = this.#db.prepare("SELECT * FROM observations WHERE repo_id=? AND acquisition_group_id=? AND execution_state='active' ORDER BY entity_id").all(group.owner.repo_id, group.acquisition_group_id).map(observationFromRow);
+      for (const observation of observations) this.#updateObservation(parseCoordinationObservation({ ...observation, execution_state: 'cancelled', released_event_seq: seq, version: observation.version + 1 }));
     } else if (group.state !== 'waiting' && group.state !== 'grant-ready') {
       throw new CoordinationRuntimeError('invalid-state', `cannot ${status} acquisition group in state ${group.state}`);
     }

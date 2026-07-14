@@ -1,4 +1,5 @@
-import { AUTOPILOT_COORDINATION_SNAPSHOT_SCHEMA, AUTOPILOT_COORDINATOR_PROTOCOL_VERSION, AUTOPILOT_COORDINATOR_REQUEST_SCHEMA, AUTOPILOT_COORDINATOR_RESPONSE_SCHEMA, COORDINATION_ACQUISITION_KINDS, COORDINATION_ACQUISITION_STATES, COORDINATION_CHILD_STATUSES, COORDINATION_CLAIM_MODES, COORDINATION_MESSAGE_STATUSES, COORDINATION_OPERATIONAL_ESCALATION_REASONS, COORDINATION_OPERATION_STAGES, COORDINATION_OPERATION_TYPES, COORDINATION_RELEASE_CONDITION_TYPES, COORDINATION_RECONCILIATION_SOURCES, COORDINATION_REQUEST_STATUSES, COORDINATION_RESERVATION_OBLIGATION_STATES, COORDINATION_MESSAGE_TYPES, COORDINATION_RUN_STATUSES, COORDINATION_SESSION_STATUSES, COORDINATION_SESSION_ATTACHMENT_KINDS, COORDINATION_MIGRATION_RECOVERY_RESOLUTIONS, COORDINATION_MIGRATION_RECOVERY_STATUSES, COORDINATION_MIGRATION_RECOVERY_TYPES, COORDINATION_UNIT_ROLES, COORDINATION_UNIT_STATES, COORDINATION_WORKTREE_KINDS, COORDINATION_WORKTREE_STATES, COORDINATION_WAIT_EDGE_STATES, COORDINATION_DEADLOCK_ACTIONS, COORDINATION_DEADLOCK_STATES, } from "./types.js";
+import { AUTOPILOT_CHILD_TERMINAL_ACCEPTANCE_SCHEMA } from "./terminal-acceptance.js";
+import { AUTOPILOT_COORDINATION_SNAPSHOT_SCHEMA, AUTOPILOT_COORDINATOR_PROTOCOL_VERSION, AUTOPILOT_COORDINATOR_REQUEST_SCHEMA, AUTOPILOT_COORDINATOR_RESPONSE_SCHEMA, COORDINATION_ACQUISITION_KINDS, COORDINATION_ACQUISITION_STATES, COORDINATION_CHILD_STATUSES, COORDINATION_CLAIM_MODES, COORDINATION_MESSAGE_STATUSES, COORDINATION_OPERATIONAL_ESCALATION_REASONS, COORDINATION_OPERATION_STAGES, COORDINATION_OPERATION_TYPES, COORDINATION_OBSERVATION_EXECUTION_STATES, COORDINATION_OBSERVATION_FRESHNESS_STATES, COORDINATION_OBSERVATION_OBJECT_KINDS, COORDINATION_RELEASE_CONDITION_TYPES, COORDINATION_RECONCILIATION_SOURCES, COORDINATION_REQUEST_STATUSES, COORDINATION_RESERVATION_OBLIGATION_STATES, COORDINATION_MESSAGE_TYPES, COORDINATION_RUN_STATUSES, COORDINATION_SESSION_STATUSES, COORDINATION_SESSION_ATTACHMENT_KINDS, COORDINATION_MIGRATION_RECOVERY_RESOLUTIONS, COORDINATION_MIGRATION_RECOVERY_STATUSES, COORDINATION_MIGRATION_RECOVERY_TYPES, COORDINATION_UNIT_ROLES, COORDINATION_UNIT_STATES, COORDINATION_WORKTREE_KINDS, COORDINATION_WORKTREE_STATES, COORDINATION_WAIT_EDGE_STATES, COORDINATION_DEADLOCK_ACTIONS, COORDINATION_DEADLOCK_STATES, } from "./types.js";
 const boundedString = (maxLength = 512) => ({ type: 'string', minLength: 1, maxLength });
 const identifier = () => ({ type: 'string', minLength: 1, maxLength: 192, pattern: '^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,191}$' });
 const pathSegmentIdentifier = () => ({ type: 'string', minLength: 1, maxLength: 192, pattern: '^[A-Za-z0-9][A-Za-z0-9._:@-]{0,191}$' });
@@ -30,9 +31,16 @@ const condition = () => ({
         condition_type: enumeration(COORDINATION_RELEASE_CONDITION_TYPES), target_id: identifier(), evidence: nullable(evidence()),
     },
 });
+const observationSourceIdentity = () => ({
+    type: 'object', additionalProperties: false, required: ['base_commit', 'object_id', 'object_kind'], properties: {
+        base_commit: { type: 'string', pattern: '^[a-f0-9]{40,64}$' },
+        object_id: { type: 'string', pattern: '^[a-f0-9]{40,64}$' },
+        object_kind: enumeration(COORDINATION_OBSERVATION_OBJECT_KINDS),
+    },
+});
 const requestedLease = () => ({
     type: 'object', additionalProperties: false, required: ['path', 'mode', 'purpose'], properties: {
-        path: boundedString(512), mode: enumeration(COORDINATION_CLAIM_MODES), purpose: boundedString(512),
+        path: boundedString(512), mode: enumeration(COORDINATION_CLAIM_MODES), purpose: boundedString(512), source_identity: observationSourceIdentity(),
     },
 });
 const table = (items, maxItems = 10_000) => ({ type: 'array', maxItems, items });
@@ -48,6 +56,9 @@ export const COORDINATION_RUN_RESOURCE_SCHEMA = exactObject('autopilot.coordinat
 export const COORDINATION_SESSION_LEASE_SCHEMA = exactObject('autopilot.session_lease.v2', {
     session_lease_id: identifier(), repo_id: pathSegmentIdentifier(), workstream_run: pathSegmentIdentifier(), session_id: identifier(), session_generation: integer(1), pid: integer(1), boot_id: identifier(), lease_expires_at: boundedString(32), attachment_kind: enumeration(COORDINATION_SESSION_ATTACHMENT_KINDS), status: enumeration(COORDINATION_SESSION_STATUSES), attached_event_seq: integer(), version: integer(1),
 });
+export const CHILD_TERMINAL_ACCEPTANCE_SCHEMA = exactObject(AUTOPILOT_CHILD_TERMINAL_ACCEPTANCE_SCHEMA, {
+    repo_id: pathSegmentIdentifier(), autopilot_id: pathSegmentIdentifier(), workstream: identifier(), workstream_run: pathSegmentIdentifier(), unit_id: identifier(), role: enumeration(COORDINATION_UNIT_ROLES.filter((role) => role !== 'unknown')), attempt: integer(1), child_lease_id: identifier(), verdict: enumeration(['DONE', 'PASS', 'NEEDS_FIX', 'BLOCKED']), transport_result: { const: 'accepted' }, spec: evidence(), status: evidence(), receipt: evidence(), audit: evidence(), tool_call_id: identifier(), carrier_status_sha256: { type: 'string', pattern: '^sha256:[a-f0-9]{64}$' }, audit_disposition: enumeration(['zero-change', 'accounted-changes']), created_at: boundedString(32),
+});
 export const COORDINATION_CHILD_LEASE_SCHEMA = exactObject('autopilot.child_lease.v1', {
     child_lease_id: identifier(), owner: owner(), pid: integer(1), boot_id: identifier(), lease_expires_at: boundedString(32), status: enumeration(COORDINATION_CHILD_STATUSES), terminal_evidence: nullable(evidence()), version: integer(1),
 });
@@ -57,8 +68,13 @@ export const COORDINATION_UNIT_ATTEMPT_SCHEMA = exactObject('autopilot.unit_atte
 export const COORDINATION_ACQUISITION_GROUP_SCHEMA = exactObject('autopilot.acquisition_group.v2', {
     acquisition_group_id: identifier(), owner: owner(), acquisition_kind: enumeration(COORDINATION_ACQUISITION_KINDS), requested_leases: { type: 'array', minItems: 1, maxItems: 1024, uniqueItems: true, items: requestedLease() }, reason: boundedString(1024), normal_release_condition: condition(), state: enumeration(COORDINATION_ACQUISITION_STATES), created_event_seq: integer(), fairness_event_seq: integer(), grant_event_seq: nullable(integer()), offer_expires_at: nullable(boundedString(32)), offer_count: integer(), bypass_count: integer(), version: integer(1),
 });
+export const COORDINATION_OBSERVATION_SCHEMA = exactObject('autopilot.observation.v1', {
+    observation_id: identifier(), owner: owner(), acquisition_group_id: identifier(), path: boundedString(512), purpose: boundedString(512), source_identity: observationSourceIdentity(),
+    execution_state: enumeration(COORDINATION_OBSERVATION_EXECUTION_STATES), freshness: enumeration(COORDINATION_OBSERVATION_FRESHNESS_STATES), recorded_event_seq: integer(1),
+    released_event_seq: nullable(integer(1)), stale_event_seq: nullable(integer(1)), stale_by_reservation_id: nullable(identifier()), stale_by_commit: nullable(boundedString(64)), version: integer(1),
+});
 export const COORDINATION_EDIT_LEASE_SCHEMA = exactObject('autopilot.edit_lease.v1', {
-    edit_lease_id: identifier(), owner: owner(), acquisition_group_id: identifier(), path: boundedString(512), mode: enumeration(COORDINATION_CLAIM_MODES), purpose: boundedString(512), acquired_event_seq: integer(), normal_release_condition: condition(), version: integer(1),
+    edit_lease_id: identifier(), owner: owner(), acquisition_group_id: identifier(), path: boundedString(512), mode: enumeration(['WRITE', 'EXCLUSIVE']), purpose: boundedString(512), acquired_event_seq: integer(), normal_release_condition: condition(), version: integer(1),
 });
 export const COORDINATION_CHANGE_RESERVATION_SCHEMA = exactObject('autopilot.change_reservation.v1', {
     reservation_id: identifier(), repo_id: pathSegmentIdentifier(), autopilot_id: pathSegmentIdentifier(), workstream_run: pathSegmentIdentifier(), path: boundedString(512), merge_evidence: evidence(), created_event_seq: integer(), released_event_seq: nullable(integer()), terminal_outcome: nullable(enumeration(['closed', 'aborted'])), terminal_sha: nullable(boundedString(64)), version: integer(1),
@@ -144,7 +160,7 @@ export const COORDINATION_EVENT_SCHEMA = exactObject('autopilot.coordination_eve
     repo_id: pathSegmentIdentifier(), event_seq: integer(1), event_type: identifier(), entity_type: identifier(), entity_id: identifier(), idempotency_key: identifier(), request_sha256: { type: 'string', pattern: '^sha256:[a-f0-9]{64}$' }, occurred_at: boundedString(32),
 });
 export const COORDINATION_SNAPSHOT_SCHEMA = exactObject(AUTOPILOT_COORDINATION_SNAPSHOT_SCHEMA, {
-    repository_event_seq: integer(), repositories: table(COORDINATION_REPOSITORY_SCHEMA), runs: table(COORDINATION_RUN_SCHEMA), session_leases: table(COORDINATION_SESSION_LEASE_SCHEMA), child_leases: table(COORDINATION_CHILD_LEASE_SCHEMA), unit_attempts: table(COORDINATION_UNIT_ATTEMPT_SCHEMA), acquisition_groups: table(COORDINATION_ACQUISITION_GROUP_SCHEMA), edit_leases: table(COORDINATION_EDIT_LEASE_SCHEMA), change_reservations: table(COORDINATION_CHANGE_RESERVATION_SCHEMA), reservation_obligations: table(COORDINATION_RESERVATION_OBLIGATION_SCHEMA), run_terminal_intents: table(COORDINATION_RUN_TERMINAL_INTENT_SCHEMA), claim_requests: table(COORDINATION_CLAIM_REQUEST_SCHEMA), mailbox_cursors: table(COORDINATION_MAILBOX_CURSOR_SCHEMA), reconciliation_evidence: table(COORDINATION_RECONCILIATION_EVIDENCE_SCHEMA), migration_recovery_work: table(COORDINATION_MIGRATION_RECOVERY_WORK_SCHEMA), messages: table(COORDINATION_MESSAGE_SCHEMA, 100_000), worktrees: table(COORDINATION_WORKTREE_SCHEMA), worktree_operations: table(COORDINATION_WORKTREE_OPERATION_SCHEMA), wait_for_edges: table(COORDINATION_WAIT_FOR_EDGE_SCHEMA), deadlock_resolutions: table(COORDINATION_DEADLOCK_RESOLUTION_SCHEMA), authoritative_artifacts: table(COORDINATION_AUTHORITATIVE_ARTIFACT_SCHEMA), adjudication_assignments: table(COORDINATION_ADJUDICATION_ASSIGNMENT_SCHEMA), escalations: table(COORDINATION_ESCALATION_SCHEMA), events: table(COORDINATION_EVENT_SCHEMA, 100_000),
+    repository_event_seq: integer(), repositories: table(COORDINATION_REPOSITORY_SCHEMA), runs: table(COORDINATION_RUN_SCHEMA), session_leases: table(COORDINATION_SESSION_LEASE_SCHEMA), child_leases: table(COORDINATION_CHILD_LEASE_SCHEMA), unit_attempts: table(COORDINATION_UNIT_ATTEMPT_SCHEMA), acquisition_groups: table(COORDINATION_ACQUISITION_GROUP_SCHEMA), observations: table(COORDINATION_OBSERVATION_SCHEMA), edit_leases: table(COORDINATION_EDIT_LEASE_SCHEMA), change_reservations: table(COORDINATION_CHANGE_RESERVATION_SCHEMA), reservation_obligations: table(COORDINATION_RESERVATION_OBLIGATION_SCHEMA), run_terminal_intents: table(COORDINATION_RUN_TERMINAL_INTENT_SCHEMA), claim_requests: table(COORDINATION_CLAIM_REQUEST_SCHEMA), mailbox_cursors: table(COORDINATION_MAILBOX_CURSOR_SCHEMA), reconciliation_evidence: table(COORDINATION_RECONCILIATION_EVIDENCE_SCHEMA), migration_recovery_work: table(COORDINATION_MIGRATION_RECOVERY_WORK_SCHEMA), messages: table(COORDINATION_MESSAGE_SCHEMA, 100_000), worktrees: table(COORDINATION_WORKTREE_SCHEMA), worktree_operations: table(COORDINATION_WORKTREE_OPERATION_SCHEMA), wait_for_edges: table(COORDINATION_WAIT_FOR_EDGE_SCHEMA), deadlock_resolutions: table(COORDINATION_DEADLOCK_RESOLUTION_SCHEMA), authoritative_artifacts: table(COORDINATION_AUTHORITATIVE_ARTIFACT_SCHEMA), adjudication_assignments: table(COORDINATION_ADJUDICATION_ASSIGNMENT_SCHEMA), escalations: table(COORDINATION_ESCALATION_SCHEMA), events: table(COORDINATION_EVENT_SCHEMA, 100_000),
 });
 export const COORDINATOR_REQUEST_SCHEMA = {
     $id: 'urn:pi-autopilot:coordination:coordinator-request-v1', type: 'object', additionalProperties: false,
@@ -165,9 +181,11 @@ export const AUTOPILOT_COORDINATION_JSON_SCHEMAS = Object.freeze({
     run: COORDINATION_RUN_SCHEMA,
     run_resource: COORDINATION_RUN_RESOURCE_SCHEMA,
     session_lease: COORDINATION_SESSION_LEASE_SCHEMA,
+    child_terminal_acceptance: CHILD_TERMINAL_ACCEPTANCE_SCHEMA,
     child_lease: COORDINATION_CHILD_LEASE_SCHEMA,
     unit_attempt: COORDINATION_UNIT_ATTEMPT_SCHEMA,
     acquisition_group: COORDINATION_ACQUISITION_GROUP_SCHEMA,
+    observation: COORDINATION_OBSERVATION_SCHEMA,
     edit_lease: COORDINATION_EDIT_LEASE_SCHEMA,
     change_reservation: COORDINATION_CHANGE_RESERVATION_SCHEMA,
     reservation_obligation: COORDINATION_RESERVATION_OBLIGATION_SCHEMA,

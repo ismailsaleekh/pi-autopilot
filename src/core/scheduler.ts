@@ -252,7 +252,7 @@ function findSchedulerClaimBlockers(
     for (const claim of existing) {
       if (claim.unit_id === unitId && claim.attempt === attempt && claim.path === req.path && claim.claim_type === req.claim_type) continue;
       if (!pathOverlapsOrContains(req.path, claim.path) && !matchesRepoPathPattern(req.path, claim.path) && !matchesRepoPathPattern(claim.path, req.path)) continue;
-      if (req.claim_type === 'READ' && claim.claim_type === 'READ') continue;
+      if (req.claim_type === 'READ' || claim.claim_type === 'READ') continue;
       blockers.push(`${req.claim_type} ${req.path} conflicts with ${claim.claim_type} ${claim.path} from ${claim.unit_id} attempt ${String(claim.attempt)}`);
     }
   }

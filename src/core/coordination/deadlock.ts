@@ -10,6 +10,7 @@ import type {
   CoordinationWorktree,
   CoordinationWorktreeOperation,
 } from './types.ts';
+import { claimModesConflict, coordinationPathsOverlap } from './contracts.ts';
 
 export const MAX_GRANT_BYPASSES = 8;
 
@@ -63,7 +64,12 @@ export function buildCoordinationWaitForEdges(input: {
   const activeRequestIds = new Set<string>();
   const edges: CoordinationWaitForEdge[] = [];
   for (const request of [...input.requests].sort((left, right) => left.created_event_seq - right.created_event_seq || left.request_id.localeCompare(right.request_id))) {
-    const hasBlocker = request.blocking_lease_ids.some((leaseId) => leases.has(leaseId));
+    const hasBlocker = request.blocking_lease_ids.some((leaseId) => {
+      const lease = leases.get(leaseId);
+      return lease !== undefined
+        && coordinationOwnerKey(lease.owner) === coordinationOwnerKey(request.owner)
+        && request.requested_leases.some((requested) => requested.mode !== 'READ' && coordinationPathsOverlap(requested.path, lease.path) && claimModesConflict(requested.mode, lease.mode));
+    });
     if (TERMINAL_REQUEST_STATES.has(request.status) || !hasBlocker) continue;
     activeRequestIds.add(request.request_id);
     const prior = priorByRequest.get(request.request_id);

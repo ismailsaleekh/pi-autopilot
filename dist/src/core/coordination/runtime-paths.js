@@ -11,6 +11,10 @@ export function coordinatorRuntimePaths(env = process.env) {
     const stateRoot = resolveAutopilotStateRoot(env);
     const coordinatorRoot = join(stateRoot, 'coordinator');
     const pipeHash = createHash('sha256').update(coordinatorRoot, 'utf8').digest('hex').slice(0, 24);
+    // Retain the established lifecycle authority namespace across the explicit
+    // protocol-1.3/schema-9 to protocol-1.4/schema-10 migration. Sharing the path
+    // is intentional: an older live broker is detected and fenced rather than
+    // allowing two protocol generations to open the shared database.
     const generation = 'protocol-1.3-schema-9';
     const currentPipeHash = createHash('sha256').update(`${coordinatorRoot}\0${generation}\0${process.env['USERDOMAIN'] ?? ''}\\${process.env['USERNAME'] ?? ''}`, 'utf8').digest('hex').slice(0, 32);
     const preferredPredecessorSocketPath = join(coordinatorRoot, 'coordinator.sock');

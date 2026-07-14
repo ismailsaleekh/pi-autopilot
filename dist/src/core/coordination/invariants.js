@@ -46,6 +46,7 @@ export function checkCoordinationInvariants(snapshot) {
     findings.push(...duplicateFindings(snapshot.child_leases.map((value) => value.child_lease_id), 'duplicate-child-lease', 'child_leases'));
     findings.push(...duplicateFindings(snapshot.unit_attempts.map((value) => ownerKey(value.owner)), 'duplicate-unit-attempt', 'unit_attempts'));
     findings.push(...duplicateFindings(snapshot.acquisition_groups.map((value) => value.acquisition_group_id), 'duplicate-acquisition-group', 'acquisition_groups'));
+    findings.push(...duplicateFindings(snapshot.observations.map((value) => value.observation_id), 'duplicate-observation', 'observations'));
     findings.push(...duplicateFindings(snapshot.edit_leases.map((value) => value.edit_lease_id), 'duplicate-edit-lease', 'edit_leases'));
     findings.push(...duplicateFindings(snapshot.change_reservations.map((value) => value.reservation_id), 'duplicate-reservation', 'change_reservations'));
     findings.push(...duplicateFindings(snapshot.reservation_obligations.map((value) => value.obligation_id), 'duplicate-reservation-obligation', 'reservation_obligations'));
@@ -141,9 +142,13 @@ export function checkCoordinationInvariants(snapshot) {
         if (!attempts.has(ownerKey(group.owner)))
             findings.push(finding('group-attempt-missing', group.acquisition_group_id, 'owning unit attempt does not exist'));
         const leases = snapshot.edit_leases.filter((lease) => lease.acquisition_group_id === group.acquisition_group_id);
+        const observations = snapshot.observations.filter((observation) => observation.acquisition_group_id === group.acquisition_group_id);
+        const activeObservations = observations.filter((observation) => observation.execution_state === 'active');
         if (group.state === 'waiting' || group.state === 'grant-ready' || group.state === 'released' || group.state === 'cancelled' || group.state === 'superseded') {
             if (leases.length > 0)
-                findings.push(finding('ungranted-group-holds-leases', group.acquisition_group_id, `${group.state} group holds ${String(leases.length)} active leases`));
+                findings.push(finding('ungranted-group-holds-leases', group.acquisition_group_id, `${group.state} group holds ${String(leases.length)} active edit leases`));
+            if (activeObservations.length > 0)
+                findings.push(finding('ungranted-group-holds-observations', group.acquisition_group_id, `${group.state} group holds ${String(activeObservations.length)} active observations`));
         }
         if (group.state === 'grant-ready' && group.offer_expires_at === null)
             findings.push(finding('grant-offer-expiry-missing', group.acquisition_group_id, 'grant-ready group requires a bounded offer expiry'));
@@ -152,8 +157,20 @@ export function checkCoordinationInvariants(snapshot) {
         if (group.state === 'granted') {
             const requested = new Set(group.requested_leases.map((lease) => `${lease.mode}\0${lease.path}`));
             const unexpected = leases.filter((lease) => !requested.has(`${lease.mode}\0${lease.path}`));
+            const unexpectedObservations = observations.filter((observation) => !requested.has(`READ\0${observation.path}`));
             if (unexpected.length > 0)
-                findings.push(finding('acquisition-group-unrequested-lease', group.acquisition_group_id, 'active lease set contains authority outside the requested set'));
+                findings.push(finding('acquisition-group-unrequested-lease', group.acquisition_group_id, 'active edit lease set contains authority outside the requested set'));
+            if (unexpectedObservations.length > 0)
+                findings.push(finding('acquisition-group-unrequested-observation', group.acquisition_group_id, 'observation set contains a dependency outside the requested set'));
+            const expectedActiveCount = group.requested_leases.length;
+            if (leases.length + observations.length !== expectedActiveCount) {
+                const represented = new Set([...leases.map((lease) => `${lease.mode}\0${lease.path}`), ...observations.map((observation) => `READ\0${observation.path}`)]);
+                const missing = group.requested_leases.filter((requestedLease) => !represented.has(`${requestedLease.mode}\0${requestedLease.path}`));
+                if (group.acquisition_kind === 'legacy-unknown' && missing.length > 0 && missing.every((requestedLease) => requestedLease.mode === 'READ'))
+                    findings.push(finding('legacy-granted-group-read-revalidation-required', group.acquisition_group_id, 'historical unbound READ entries were audit-retired; the retained edit authority cannot dispatch until a new attempt revalidates observations', 'warning'));
+                else
+                    findings.push(finding('granted-group-authority-incomplete', group.acquisition_group_id, `granted group has ${String(leases.length)} edit leases and ${String(observations.length)} durable observations for ${String(expectedActiveCount)} requested entries`));
+            }
             if (group.grant_event_seq === null)
                 findings.push(finding('granted-group-event-missing', group.acquisition_group_id, 'granted group requires grant_event_seq'));
         }
@@ -171,6 +188,23 @@ export function checkCoordinationInvariants(snapshot) {
             if (incompatible)
                 findings.push(finding('incompatible-grant-offers', `${left.acquisition_group_id},${right.acquisition_group_id}`, 'only one incompatible acquisition group may hold a bounded offer'));
         }
+    }
+    for (const observation of snapshot.observations) {
+        assertOwner(observation.owner, observation.observation_id);
+        const group = groups.get(observation.acquisition_group_id);
+        if (group === undefined)
+            findings.push(finding('observation-group-missing', observation.observation_id, 'observation acquisition group does not exist'));
+        else {
+            if (ownerKey(group.owner) !== ownerKey(observation.owner))
+                findings.push(finding('observation-group-owner-mismatch', observation.observation_id, 'observation and acquisition group have different owners'));
+            if (!group.requested_leases.some((requested) => requested.mode === 'READ' && requested.path === observation.path && requested.source_identity?.base_commit === observation.source_identity.base_commit && requested.source_identity.object_id === observation.source_identity.object_id && requested.source_identity.object_kind === observation.source_identity.object_kind))
+                findings.push(finding('observation-source-not-requested', observation.observation_id, 'observation source identity is absent from its immutable acquisition group'));
+        }
+        const child = snapshot.child_leases.find((candidate) => candidate.owner.repo_id === observation.owner.repo_id && candidate.owner.workstream_run === observation.owner.workstream_run && candidate.owner.unit_id === observation.owner.unit_id && candidate.owner.attempt === observation.owner.attempt);
+        if (observation.execution_state === 'active' && child !== undefined && (child.status === 'terminal' || child.status === 'recovery-required'))
+            findings.push(finding('terminal-child-retains-active-observation', observation.observation_id, `${child.status} child retains an active observation dependency`));
+        if (observation.freshness === 'stale' && observation.stale_by_reservation_id !== null && !observation.stale_by_reservation_id.startsWith('legacy-observation-migration-') && !reservations.has(observation.stale_by_reservation_id))
+            findings.push(finding('stale-observation-reservation-missing', observation.observation_id, 'stale observation does not bind a landed change reservation'));
     }
     for (const lease of snapshot.edit_leases) {
         assertOwner(lease.owner, lease.edit_lease_id);
@@ -276,6 +310,9 @@ export function checkCoordinationInvariants(snapshot) {
         const liveLeases = snapshot.edit_leases.filter((lease) => lease.owner.repo_id === run.repo_id && lease.owner.workstream_run === run.workstream_run && !pendingMigrationRecoveryLeaseIds.has(lease.edit_lease_id));
         if (liveLeases.length > 0)
             findings.push(finding('terminal-run-retains-edit-leases', run.workstream_run, `${run.status} run retains ${String(liveLeases.length)} active edit leases`));
+        const activeObservations = snapshot.observations.filter((observation) => observation.owner.repo_id === run.repo_id && observation.owner.workstream_run === run.workstream_run && observation.execution_state === 'active');
+        if (activeObservations.length > 0)
+            findings.push(finding('terminal-run-retains-active-observations', run.workstream_run, `${run.status} run retains ${String(activeObservations.length)} active observations`));
         const unresolved = snapshot.reservation_obligations.filter((obligation) => obligation.repo_id === run.repo_id && obligation.workstream_run === run.workstream_run && obligation.state !== 'resolved' && obligation.state !== 'cancelled');
         if (unresolved.length > 0)
             findings.push(finding('terminal-run-retains-reservation-obligations', run.workstream_run, `${run.status} run retains ${String(unresolved.length)} integration obligations`));

@@ -45,6 +45,8 @@ import {
   readPathClaims,
   recoverAutopilotWorktreeSagas,
   releaseClaimsForUnit,
+  readGitStatus,
+  gitHead,
   resolveAutopilotStateRoot,
   resolveRepoIdentity,
   unitWorktreePathForActiveAutopilot,
@@ -58,10 +60,12 @@ import { coordinationCutoverCommitted } from './coordination/migration-paths.ts'
 import { ClaimNegotiationClient, type ClaimGroupAcquisitionResult } from './coordination/negotiation.ts';
 import { ReservationCoordinationClient, reservationSchedulingBlockers } from './coordination/reservations.ts';
 import { PlanningContradictionClient } from './coordination/escalation.ts';
-import type { CoordinationAcquisitionGroup } from './coordination/types.ts';
-import { quarantineFailedUnit } from './unit-failure.ts';
+import { deriveCoordinationObservationSourceIdentity } from './coordination/observations.ts';
+import type { CoordinationAcquisitionGroup, CoordinationObservationSourceIdentity } from './coordination/types.ts';
+import { quarantineFailedUnit, resetFailedUnit } from './unit-failure.ts';
 import { rollbackCreatedUnitWorktree } from './worktree-cleanup.ts';
-import { AutopilotChildLeaseHandle, registerAutopilotChildAuthority } from './coordination/child-authority.ts';
+import { registerAutopilotChildAuthority, type AutopilotChildLeaseHandle } from './coordination/child-authority.ts';
+import { autopilotAuditProvesZeroSourceChange, writeAutopilotChildTerminalAcceptance } from './coordination/terminal-acceptance.ts';
 import {
   assertAutopilotSpecMaterializationDiskGate,
   expandedReadOnlyPathsForAudit,
@@ -100,6 +104,8 @@ export interface AutopilotAgentRunErrorDetails {
   readonly executionCommitSha?: string | null;
   readonly piErrorCode?: string;
   readonly statusVerdict?: AutopilotStatusEntry['verdict'];
+  readonly terminalAcceptanceOutput?: string;
+  readonly terminalAcceptanceSha256?: `sha256:${string}`;
 }
 
 export class AutopilotAgentRunError extends Error {
@@ -256,13 +262,14 @@ interface ChildAuthorityLifecycle {
   preflight: RuntimePreflightResult | null;
   env: ProcessEnv | null;
   spec: AutopilotUnitSpec | null;
+  auditBaseline: AutopilotExecutionBaseline | null;
 }
 
 export async function runAutopilotAgentFromSpecPath(
   specPath: string,
   options: AutopilotAgentRunOptions = {},
 ): Promise<AutopilotAgentRunResult> {
-  const lifecycle: ChildAuthorityLifecycle = { handle: null, completed: false, preflight: null, env: null, spec: null };
+  const lifecycle: ChildAuthorityLifecycle = { handle: null, completed: false, preflight: null, env: null, spec: null, auditBaseline: null };
   try {
     return await runAutopilotAgentFromSpecPathInternal(specPath, options, lifecycle);
   } catch (error) {
@@ -281,15 +288,21 @@ export async function runAutopilotAgentFromSpecPath(
       }
     }
     if (lifecycle.handle !== null && !lifecycle.completed) {
-      const deadlockPreempted = lifecycle.handle.preemptionSignal.aborted;
       try {
         await lifecycle.handle.markRecoveryRequired();
-        if (deadlockPreempted && lifecycle.preflight !== null && lifecycle.spec !== null && lifecycle.env !== null) {
-          await quarantineFailedUnit({ context: lifecycle.preflight.context, unitId: lifecycle.spec.unit_id, attempt: lifecycle.spec.attempt, unitWorktreePath: lifecycle.spec.cwd, summary: 'autonomous deadlock preemption capture before edit-authority release', env: lifecycle.env });
+        lifecycle.completed = true;
+        if (lifecycle.preflight !== null && lifecycle.spec !== null && lifecycle.env !== null && isSourceChangingRole(lifecycle.spec)) {
+          await preserveOrResetFailedSourceAttempt({
+            context: lifecycle.preflight.context,
+            spec: lifecycle.spec,
+            baseline: lifecycle.auditBaseline,
+            summary: `transport/recovery failure after child launch: ${errorMessage(error)}`,
+            env: lifecycle.env,
+          });
         }
       } catch (recoveryError) {
         throw new AutopilotAgentRunError('runtime-commit-failed', {
-          reason: `child attempt failed (${errorMessage(error)}) and durable child recovery/quarantine also failed: ${errorMessage(recoveryError)}`,
+          reason: `child attempt failed (${errorMessage(error)}) and durable child recovery/preservation also failed: ${errorMessage(recoveryError)}`,
           specPath,
         });
       }
@@ -329,6 +342,7 @@ async function runAutopilotAgentFromSpecPathInternal(
   lifecycle.env = env;
   lifecycle.spec = spec;
   const auditBaseline = await captureAutopilotExecutionBaseline(spec.cwd);
+  lifecycle.auditBaseline = auditBaseline;
   const auditOutput = deriveAutopilotExecutionAuditPath(spec);
   const contextPath = deriveAutopilotStatusContextPath(spec);
   await writeStatusContext(contextPath, context);
@@ -501,19 +515,6 @@ async function runAutopilotAgentFromSpecPathInternal(
     });
   }
 
-  if (!isSuccessVerdict(evidence.status)) {
-    throw new AutopilotAgentRunError('status-non-success', {
-      reason: `Autopilot status verdict ${evidence.status.verdict}: ${evidence.status.summary}`,
-      specPath,
-      statusOutput: spec.status_output,
-      receiptOutput: spec.receipt_output,
-      promptSnapshotPath: rendered.snapshotPath,
-      auditOutput,
-      auditClassification: audit.classification,
-      statusVerdict: evidence.status.verdict,
-    });
-  }
-
   if (
     piResult.isError &&
     !isBenignTerminalStatusCompletion(
@@ -530,6 +531,61 @@ async function runAutopilotAgentFromSpecPathInternal(
       promptSnapshotPath: rendered.snapshotPath,
       auditOutput,
       auditClassification: audit.classification,
+    });
+  }
+
+  const childAuthority = lifecycle.handle;
+  if (childAuthority === null) throw new AutopilotAgentRunError('runtime-commit-failed', { reason: 'durable child authority disappeared before terminal acceptance commit', specPath });
+  let terminalAcceptance: Awaited<ReturnType<typeof writeAutopilotChildTerminalAcceptance>>;
+  try {
+    terminalAcceptance = await writeAutopilotChildTerminalAcceptance({
+      mainWorktreePath: runtimePreflight.context.active.main_worktree_path,
+      runtimeRoot: runtimePreflight.context.active.runtime_root,
+      workstream: spec.workstream,
+      child: childAuthority.child,
+      specPath,
+      statusPath: spec.status_output,
+      receiptPath: spec.receipt_output,
+      auditPath: auditOutput,
+      status: evidence.status,
+      receipt: evidence.receipt,
+      audit,
+    });
+  } catch (error) {
+    throw new AutopilotAgentRunError('runtime-commit-failed', {
+      reason: `accepted structured output could not be committed as immutable child-terminal acceptance evidence: ${errorMessage(error)}`,
+      specPath,
+      statusOutput: spec.status_output,
+      receiptOutput: spec.receipt_output,
+      promptSnapshotPath: rendered.snapshotPath,
+      auditOutput,
+      auditClassification: audit.classification,
+    });
+  }
+
+  if (!isSuccessVerdict(evidence.status)) {
+    await childAuthority.completeTerminal(terminalAcceptance.evidence);
+    lifecycle.completed = true;
+    if (isSourceChangingRole(spec)) {
+      await preserveOrResetTrustedNonSuccess({
+        context: runtimePreflight.context,
+        spec,
+        audit,
+        summary: `trusted terminal ${evidence.status.verdict}: ${evidence.status.summary}`,
+        env,
+      });
+    }
+    throw new AutopilotAgentRunError('status-non-success', {
+      reason: `Autopilot status verdict ${evidence.status.verdict}: ${evidence.status.summary}`,
+      specPath,
+      statusOutput: spec.status_output,
+      receiptOutput: spec.receipt_output,
+      promptSnapshotPath: rendered.snapshotPath,
+      auditOutput,
+      auditClassification: audit.classification,
+      statusVerdict: evidence.status.verdict,
+      terminalAcceptanceOutput: terminalAcceptance.path,
+      terminalAcceptanceSha256: terminalAcceptance.evidence.sha256,
     });
   }
 
@@ -562,16 +618,11 @@ async function runAutopilotAgentFromSpecPathInternal(
     throw error;
   }
 
-  const childAuthority = lifecycle.handle;
-  if (childAuthority === null) throw new AutopilotAgentRunError('runtime-commit-failed', { reason: 'durable child authority disappeared before terminal commit', specPath });
   childAuthority.assertHealthy();
   if (adjudicationAssignment !== null && adjudicationOutput !== null) {
-    await childAuthority.completeAdjudication(adjudicationAssignment.assignment_id, adjudicationOutput);
+    await childAuthority.completeAdjudication(adjudicationAssignment.assignment_id, adjudicationOutput, terminalAcceptance.evidence);
   } else {
-    const receiptBytes = await readFile(spec.receipt_output);
-    const evidenceRelative = relative(runtimePreflight.context.active.main_worktree_path, spec.receipt_output).replace(/\\/gu, '/');
-    if (evidenceRelative.length === 0 || evidenceRelative.startsWith('../') || evidenceRelative.startsWith('/')) throw new AutopilotAgentRunError('runtime-commit-failed', { reason: 'terminal receipt evidence is outside the durable run worktree', specPath });
-    await childAuthority.completeTerminal({ ref: evidenceRelative, sha256: `sha256:${createHash('sha256').update(receiptBytes).digest('hex')}` });
+    await childAuthority.completeTerminal(terminalAcceptance.evidence);
   }
   lifecycle.completed = true;
 
@@ -589,6 +640,44 @@ async function runAutopilotAgentFromSpecPathInternal(
     executionCommitSha: executionCommit?.commit_sha ?? null,
     summary: evidence.status.summary,
   });
+}
+
+function isSourceChangingRole(spec: AutopilotUnitSpec): boolean {
+  return spec.role === 'implement' || spec.role === 'fix';
+}
+
+async function preserveOrResetTrustedNonSuccess(input: {
+  readonly context: ActiveAutopilotContext;
+  readonly spec: AutopilotUnitSpec;
+  readonly audit: AutopilotExecutionAudit;
+  readonly summary: string;
+  readonly env: ProcessEnv;
+}): Promise<void> {
+  if (autopilotAuditProvesZeroSourceChange(input.audit) && existsSync(input.spec.cwd) && readGitStatus(input.spec.cwd).changedPaths.length === 0 && gitHead(input.spec.cwd) === input.audit.baseline_head) {
+    await resetFailedUnit({ context: input.context, unitId: input.spec.unit_id, attempt: input.spec.attempt, unitWorktreePath: input.spec.cwd, summary: input.summary, ...(input.audit.baseline_head === null || input.audit.baseline_head === undefined ? {} : { baselineHead: input.audit.baseline_head }), env: input.env });
+    return;
+  }
+  await quarantineFailedUnit({ context: input.context, unitId: input.spec.unit_id, attempt: input.spec.attempt, unitWorktreePath: input.spec.cwd, summary: input.summary, ...(input.audit.baseline_head === null || input.audit.baseline_head === undefined ? {} : { baselineHead: input.audit.baseline_head }), env: input.env });
+}
+
+async function preserveOrResetFailedSourceAttempt(input: {
+  readonly context: ActiveAutopilotContext;
+  readonly spec: AutopilotUnitSpec;
+  readonly baseline: AutopilotExecutionBaseline | null;
+  readonly summary: string;
+  readonly env: ProcessEnv;
+}): Promise<void> {
+  const cleanUnchanged = input.baseline !== null
+    && input.baseline.available
+    && input.baseline.gitHead !== null
+    && existsSync(input.spec.cwd)
+    && readGitStatus(input.spec.cwd).changedPaths.length === 0
+    && gitHead(input.spec.cwd) === input.baseline.gitHead;
+  if (cleanUnchanged) {
+    await resetFailedUnit({ context: input.context, unitId: input.spec.unit_id, attempt: input.spec.attempt, unitWorktreePath: input.spec.cwd, summary: input.summary, ...(input.baseline?.gitHead === null || input.baseline?.gitHead === undefined ? {} : { baselineHead: input.baseline.gitHead }), env: input.env });
+    return;
+  }
+  await quarantineFailedUnit({ context: input.context, unitId: input.spec.unit_id, attempt: input.spec.attempt, unitWorktreePath: input.spec.cwd, summary: input.summary, ...(input.baseline?.gitHead === null || input.baseline?.gitHead === undefined ? {} : { baselineHead: input.baseline.gitHead }), env: input.env });
 }
 
 async function readAndValidateSpec(specPath: string): Promise<AutopilotUnitSpec> {
@@ -726,6 +815,14 @@ async function preflightSpecAfterWorktreePreparation(
     statusOutput: spec.status_output,
     receiptOutput: spec.receipt_output,
   });
+  const attemptSpecRef = relative(runtimeContext.active.main_worktree_path, specPath).replace(/\\/gu, '/');
+  if (attemptSpecRef.length === 0 || attemptSpecRef.startsWith('../') || attemptSpecRef.startsWith('/')) throw new AutopilotAgentRunError('spec-invalid', { reason: 'unit spec must remain inside the durable run main worktree', specPath });
+  const attemptSpecBytes = await readFile(specPath);
+  const attemptSpec = { ref: attemptSpecRef, sha256: `sha256:${createHash('sha256').update(attemptSpecBytes).digest('hex')}` as const };
+  await mkdir(dirname(spec.status_output), { recursive: true });
+  await mkdir(dirname(spec.receipt_output), { recursive: true });
+  await mkdir(spec.evidence_dir, { recursive: true });
+
   let coordinatorGroup: CoordinationAcquisitionGroup | null = null;
   const acquiredClaims = options.skipClaimAcquire === true
     ? []
@@ -746,48 +843,31 @@ async function preflightSpecAfterWorktreePreparation(
           throw error;
         });
 
-  if (options.skipClaimAcquire !== true) {
-    await materializeAutopilotSpecPaths({
+  try {
+    if (options.skipClaimAcquire !== true) await materializeAutopilotSpecPaths({
       context: runtimeContext,
       spec,
       reason: 'autopilot-agent-run preflight materialization',
       ...(options.env === undefined ? {} : { env: options.env }),
-    }).catch(async (error: unknown) => {
-      try {
-        if (coordinatorGroup !== null) {
-          const negotiation = await ClaimNegotiationClient.fromEnvironment(options.env ?? process.env);
-          await negotiation.cancelGroup({ group: coordinatorGroup, reason: 'autopilot-agent-run materialization failure prelaunch rollback' });
-        } else if (acquiredClaims.length > 0) {
-          await releaseClaimsForUnit({ context: runtimeContext, unitId: spec.unit_id, attempt: spec.attempt, reason: 'autopilot-agent-run materialization failure claim rollback' });
-        }
-      } catch (rollbackError) {
-        throw new AutopilotAgentRunError('runtime-commit-failed', {
-          reason: `materialization failed (${errorMessage(error)}) and authority rollback failed: ${errorMessage(rollbackError)}`,
-          specPath,
-          statusOutput: spec.status_output,
-          receiptOutput: spec.receipt_output,
-        });
-      }
-      if (error instanceof Error) {
-        throw new AutopilotAgentRunError('spec-invalid', {
-          reason: error.message,
-          specPath,
-          statusOutput: spec.status_output,
-          receiptOutput: spec.receipt_output,
-        });
-      }
-      throw error;
     });
+    const verifiedSpecBytes = await readFile(specPath);
+    const verifiedSpecSha = `sha256:${createHash('sha256').update(verifiedSpecBytes).digest('hex')}`;
+    if (verifiedSpecSha !== attemptSpec.sha256) throw new AutopilotAgentRunError('spec-invalid', { reason: 'unit spec changed after authority derivation; prelaunch authority was rolled back', specPath, statusOutput: spec.status_output, receiptOutput: spec.receipt_output });
+    return { context: runtimeContext, acquiredClaims, coordinatorGroup, attemptSpec };
+  } catch (error) {
+    try {
+      if (coordinatorGroup !== null) {
+        const negotiation = await ClaimNegotiationClient.fromEnvironment(options.env ?? process.env);
+        await negotiation.cancelGroup({ group: coordinatorGroup, reason: 'autopilot-agent-run post-acquisition prelaunch rollback' });
+      } else if (acquiredClaims.length > 0) {
+        await releaseClaimsForUnit({ context: runtimeContext, unitId: spec.unit_id, attempt: spec.attempt, reason: 'autopilot-agent-run post-acquisition prelaunch rollback' });
+      }
+    } catch (rollbackError) {
+      throw new AutopilotAgentRunError('runtime-commit-failed', { reason: `prelaunch failed (${errorMessage(error)}) and authority rollback failed: ${errorMessage(rollbackError)}`, specPath, statusOutput: spec.status_output, receiptOutput: spec.receipt_output });
+    }
+    if (error instanceof AutopilotAgentRunError) throw error;
+    throw new AutopilotAgentRunError('spec-invalid', { reason: errorMessage(error), specPath, statusOutput: spec.status_output, receiptOutput: spec.receipt_output });
   }
-
-  const attemptSpecRef = relative(runtimeContext.active.main_worktree_path, specPath).replace(/\\/gu, '/');
-  if (attemptSpecRef.length === 0 || attemptSpecRef.startsWith('../') || attemptSpecRef.startsWith('/')) throw new AutopilotAgentRunError('spec-invalid', { reason: 'unit spec must remain inside the durable run main worktree', specPath });
-  const attemptSpecBytes = await readFile(specPath);
-  const attemptSpec = { ref: attemptSpecRef, sha256: `sha256:${createHash('sha256').update(attemptSpecBytes).digest('hex')}` as const };
-  await mkdir(dirname(spec.status_output), { recursive: true });
-  await mkdir(dirname(spec.receipt_output), { recursive: true });
-  await mkdir(spec.evidence_dir, { recursive: true });
-  return { context: runtimeContext, acquiredClaims, coordinatorGroup, attemptSpec };
 }
 
 async function acquireCoordinatorClaimsForUnit(input: {
@@ -800,17 +880,19 @@ async function acquireCoordinatorClaimsForUnit(input: {
   if (relativeSpec.length === 0 || relativeSpec.startsWith('../') || relativeSpec.startsWith('/')) throw new AutopilotAgentRunError('spec-invalid', { reason: 'coordinator-backed unit spec must be inside the durable run main worktree', specPath: input.specPath });
   const specBytes = await readFile(input.specPath);
   const specSha256 = `sha256:${createHash('sha256').update(specBytes).digest('hex')}` as const;
-  const requested = new Map<string, { readonly path: string; readonly mode: 'READ' | 'WRITE'; readonly purpose: string }>();
+  const requested = new Map<string, { readonly path: string; readonly mode: 'READ' | 'WRITE'; readonly purpose: string; readonly source_identity?: CoordinationObservationSourceIdentity }>();
   const add = (path: string, mode: 'READ' | 'WRITE', purpose: string): void => {
     const normalized = path.replace(/\\/gu, '/');
-    requested.set(`${mode}\0${normalized}`, { path: normalized, mode, purpose });
+    requested.set(`${mode}\0${normalized}`, mode === 'READ'
+      ? { path: normalized, mode, purpose, source_identity: deriveCoordinationObservationSourceIdentity({ cwd: input.spec.cwd, path: normalized }) }
+      : { path: normalized, mode, purpose });
   };
   for (const path of input.spec.owned_paths) add(path, 'WRITE', `source authority for ${input.spec.unit_id}`);
   for (const path of input.spec.read_only_paths) add(path, 'READ', `declared read authority for ${input.spec.unit_id}`);
   for (const path of sourceReadClaimPathsForSpec(input.spec)) add(path, 'READ', `source context authority for ${input.spec.unit_id}`);
   if (requested.size === 0) return { claims: [], group: null };
   const reservationView = await (await ReservationCoordinationClient.fromEnvironment(input.env)).view();
-  const reservationBlockers = reservationSchedulingBlockers({ workstreamRun: input.context.active.workstream_run, requestedPaths: [...requested.values()].map((entry) => entry.path), view: reservationView });
+  const reservationBlockers = reservationSchedulingBlockers({ workstreamRun: input.context.active.workstream_run, requestedPaths: [...requested.values()].filter((entry) => entry.mode !== 'READ').map((entry) => entry.path), view: reservationView });
   if (reservationBlockers.ordering.length > 0 || reservationBlockers.integration.length > 0) throw new AutopilotAgentRunError('waiting-for-peer-release', {
     reason: `reservation coordination blocks dispatch: ${[...reservationBlockers.ordering, ...reservationBlockers.integration].join('; ')}`,
     specPath: input.specPath,
@@ -841,7 +923,19 @@ async function acquireCoordinatorClaimsForUnit(input: {
     receiptOutput: input.spec.receipt_output,
   });
   const now = new Date().toISOString();
-  const claims = result.editLeases.map((lease): AutopilotPathClaim => ({
+  const claims = [...result.observations.map((observation): AutopilotPathClaim => ({
+    schema_version: 'autopilot.path_claim.v1',
+    path: observation.path,
+    autopilot_id: input.context.active.autopilot_id,
+    workstream: input.context.active.workstream,
+    workstream_run: input.context.active.workstream_run,
+    unit_id: input.spec.unit_id,
+    attempt: input.spec.attempt,
+    claim_type: 'READ',
+    acquired_at: now,
+    active_run_epoch: input.context.active.active_run_epoch,
+    reason: observation.purpose,
+  })), ...result.editLeases.map((lease): AutopilotPathClaim => ({
     schema_version: 'autopilot.path_claim.v1',
     path: lease.path,
     autopilot_id: input.context.active.autopilot_id,
@@ -853,7 +947,7 @@ async function acquireCoordinatorClaimsForUnit(input: {
     acquired_at: now,
     active_run_epoch: input.context.active.active_run_epoch,
     reason: lease.purpose,
-  }));
+  }))];
   return { claims, group: result.acquisitionGroup };
 }
 

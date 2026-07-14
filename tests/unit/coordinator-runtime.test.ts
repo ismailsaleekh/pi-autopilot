@@ -97,7 +97,7 @@ function queryPayload(response: CoordinatorResponseEnvelope, field: string): rea
 function request(overrides: Partial<CoordinatorRequestEnvelope>): CoordinatorRequestEnvelope {
   return {
     schema_version: 'autopilot.coordinator_request.v1',
-    protocol_version: '1.3',
+    protocol_version: '1.4',
     request_id: `request-${randomUUID()}`,
     action: 'status',
     idempotency_key: null,
@@ -262,12 +262,12 @@ void describe('transactional coordinator runtime', () => {
     const initial = await startCoordinatorServer(paths);
     await initial.close();
     const oldDatabase = new DatabaseSync(paths.databasePath);
-    oldDatabase.exec('DROP TABLE semantic_replays; ALTER TABLE session_leases DROP COLUMN attachment_kind; DROP TABLE migration_legacy_audit; DROP TABLE migration_recovery_work; DROP TABLE coordination_migrations; DROP TABLE run_resources; DROP TABLE evidence_artifacts; DROP TABLE adjudication_assignments; DROP TABLE authoritative_artifacts; DROP TABLE deadlock_resolutions; DROP TABLE wait_for_edges; DROP TABLE reservation_obligations; DROP TABLE run_terminal_intents; ALTER TABLE runs DROP COLUMN coordination_authority; DROP INDEX idx_worktree_operations_recovery; DROP INDEX idx_worktrees_owner; DROP TABLE reconciliation_evidence; DROP TABLE mailbox_cursors; DROP INDEX idx_messages_cursor; DROP TABLE acquisition_groups; DROP INDEX idx_edit_leases_repo; DROP INDEX idx_claim_requests_owner_status; DROP INDEX idx_claim_requests_requester_status; DELETE FROM schema_migrations WHERE version IN (2,3,4,5,6,7,8,9); PRAGMA user_version=1;');
+    oldDatabase.exec('DROP TABLE observations; DROP TABLE semantic_replays; ALTER TABLE session_leases DROP COLUMN attachment_kind; DROP TABLE migration_legacy_audit; DROP TABLE migration_recovery_work; DROP TABLE coordination_migrations; DROP TABLE run_resources; DROP TABLE evidence_artifacts; DROP TABLE adjudication_assignments; DROP TABLE authoritative_artifacts; DROP TABLE deadlock_resolutions; DROP TABLE wait_for_edges; DROP TABLE reservation_obligations; DROP TABLE run_terminal_intents; ALTER TABLE runs DROP COLUMN coordination_authority; DROP INDEX idx_worktree_operations_recovery; DROP INDEX idx_worktrees_owner; DROP TABLE reconciliation_evidence; DROP TABLE mailbox_cursors; DROP INDEX idx_messages_cursor; DROP TABLE acquisition_groups; DROP INDEX idx_edit_leases_repo; DROP INDEX idx_claim_requests_owner_status; DROP INDEX idx_claim_requests_requester_status; DELETE FROM schema_migrations WHERE version IN (2,3,4,5,6,7,8,9,10); PRAGMA user_version=1;');
     oldDatabase.close();
     const upgraded = await startCoordinatorServer(paths);
     try {
       const doctor = await new CoordinatorClient({ env, autoStart: false }).query('doctor');
-      assert.equal(doctor.payload['database_schema_version'], 9);
+      assert.equal(doctor.payload['database_schema_version'], 10);
       assert.equal(typeof doctor.payload['last_backup_path'], 'string');
       const database = new DatabaseSync(paths.databasePath, { readOnly: true });
       try {
@@ -313,7 +313,7 @@ void describe('transactional coordinator runtime', () => {
     });
     await initial.close();
     const oldDatabase = new DatabaseSync(paths.databasePath);
-    oldDatabase.exec('DROP TABLE semantic_replays; ALTER TABLE session_leases DROP COLUMN attachment_kind; DROP TABLE migration_legacy_audit; DROP TABLE migration_recovery_work; DROP TABLE coordination_migrations; DROP TABLE run_resources; DROP TABLE evidence_artifacts; DROP TABLE adjudication_assignments; DROP TABLE authoritative_artifacts; DROP TABLE deadlock_resolutions; DROP TABLE wait_for_edges; DROP TABLE reservation_obligations; DROP TABLE run_terminal_intents; ALTER TABLE runs DROP COLUMN coordination_authority; DROP INDEX idx_worktree_operations_recovery; DROP INDEX idx_worktrees_owner; DROP TABLE reconciliation_evidence; DROP TABLE mailbox_cursors; DROP INDEX idx_messages_cursor; DELETE FROM schema_migrations WHERE version IN (3,4,5,6,7,8,9); PRAGMA user_version=2;');
+    oldDatabase.exec('DROP TABLE observations; DROP TABLE semantic_replays; ALTER TABLE session_leases DROP COLUMN attachment_kind; DROP TABLE migration_legacy_audit; DROP TABLE migration_recovery_work; DROP TABLE coordination_migrations; DROP TABLE run_resources; DROP TABLE evidence_artifacts; DROP TABLE adjudication_assignments; DROP TABLE authoritative_artifacts; DROP TABLE deadlock_resolutions; DROP TABLE wait_for_edges; DROP TABLE reservation_obligations; DROP TABLE run_terminal_intents; ALTER TABLE runs DROP COLUMN coordination_authority; DROP INDEX idx_worktree_operations_recovery; DROP INDEX idx_worktrees_owner; DROP TABLE reconciliation_evidence; DROP TABLE mailbox_cursors; DROP INDEX idx_messages_cursor; DELETE FROM schema_migrations WHERE version IN (3,4,5,6,7,8,9,10); PRAGMA user_version=2;');
     oldDatabase.close();
     const upgraded = await startCoordinatorServer(paths);
     try {
@@ -342,7 +342,7 @@ void describe('transactional coordinator runtime', () => {
       const sessionResponse = await attachSession(client, integer(run['version'], 'migration run version'), 1, 'session-migration-v5', 'boot-migration-v5');
       const attachedRun = record(sessionResponse.payload['run'], 'attached migration run');
       const acquireIdentity = { repoId: 'repo-runtime-test', workstreamRun: 'run-runtime-test', sessionId: 'session-migration-v5', fencingGeneration: 1, expectedVersion: integer(attachedRun['version'], 'attached migration run version'), idempotencyKey: 'migration-v5-group' };
-      const acquirePayload = { acquisition_group_id: 'group-migration-v5', acquisition_kind: 'initial', unit_id: 'unit-migration-v5', attempt: 1, requested_leases: [{ path: 'src/migration-v5.ts', mode: 'READ', purpose: 'migration fixture' }], reason: 'migration fixture', normal_release_condition: { condition_type: 'unit-merged', target_id: 'unit-migration-v5:1', evidence: null }, spec_ref: 'unit-migration-v5.json', spec_sha256: `sha256:${'d'.repeat(64)}`, role: 'implement', preemptible: true, checkpoint_ordinal: 0, session_lease_id: 'lease-session-migration-v5-1', session_token: sessionToken(1) };
+      const acquirePayload = { acquisition_group_id: 'group-migration-v5', acquisition_kind: 'initial', unit_id: 'unit-migration-v5', attempt: 1, requested_leases: [{ path: 'src/migration-v5.ts', mode: 'WRITE', purpose: 'migration fixture' }], reason: 'migration fixture', normal_release_condition: { condition_type: 'unit-merged', target_id: 'unit-migration-v5:1', evidence: null }, spec_ref: 'unit-migration-v5.json', spec_sha256: `sha256:${'d'.repeat(64)}`, role: 'implement', preemptible: true, checkpoint_ordinal: 0, session_lease_id: 'lease-session-migration-v5-1', session_token: sessionToken(1) };
       await client.mutate('acquire-group', acquireIdentity, acquirePayload);
       const legacyPayload = omitFields(acquirePayload, ['acquisition_kind', 'role']);
       const legacyRequest = { schema_version: 'autopilot.coordinator_request.v1', protocol_version: '1.1', request_id: 'legacy-retry-request', action: 'acquire-group', idempotency_key: 'migration-v5-group', repo_id: 'repo-runtime-test', workstream_run: 'run-runtime-test', session_id: 'session-migration-v5', fencing_generation: 1, expected_version: integer(attachedRun['version'], 'attached migration run version'), payload: legacyPayload };
@@ -350,7 +350,7 @@ void describe('transactional coordinator runtime', () => {
       const legacyDigest = `sha256:${createHash('sha256').update(canonicalJson(legacySemantic), 'utf8').digest('hex')}`;
       await server.close();
       const database = new DatabaseSync(coordinatorRuntimePaths(env).databasePath);
-      database.exec("UPDATE unit_attempts SET payload_json=json_remove(payload_json, '$.role'); UPDATE acquisition_groups SET payload_json=json_remove(payload_json, '$.acquisition_kind'); UPDATE idempotency_results SET payload_json=json_remove(payload_json, '$.acquisition_group.acquisition_kind') WHERE idempotency_key='migration-v5-group'; DROP TABLE semantic_replays; ALTER TABLE session_leases DROP COLUMN attachment_kind; DROP TABLE migration_legacy_audit; DROP TABLE migration_recovery_work; DROP TABLE coordination_migrations; DROP TABLE run_resources; DROP TABLE evidence_artifacts; DROP TABLE adjudication_assignments; DROP TABLE authoritative_artifacts; DROP TABLE deadlock_resolutions; DROP TABLE wait_for_edges; DELETE FROM schema_migrations WHERE version IN (6,7,8,9); PRAGMA user_version=5;");
+      database.exec("UPDATE unit_attempts SET payload_json=json_remove(payload_json, '$.role'); UPDATE acquisition_groups SET payload_json=json_remove(payload_json, '$.acquisition_kind'); UPDATE idempotency_results SET payload_json=json_remove(payload_json, '$.acquisition_group.acquisition_kind') WHERE idempotency_key='migration-v5-group'; DROP TABLE observations; DROP TABLE semantic_replays; ALTER TABLE session_leases DROP COLUMN attachment_kind; DROP TABLE migration_legacy_audit; DROP TABLE migration_recovery_work; DROP TABLE coordination_migrations; DROP TABLE run_resources; DROP TABLE evidence_artifacts; DROP TABLE adjudication_assignments; DROP TABLE authoritative_artifacts; DROP TABLE deadlock_resolutions; DROP TABLE wait_for_edges; DELETE FROM schema_migrations WHERE version IN (6,7,8,9,10); PRAGMA user_version=5;");
       database.prepare("UPDATE idempotency_results SET request_sha256=? WHERE idempotency_key='migration-v5-group'").run(legacyDigest);
       database.close();
       server = await startCoordinatorServer(coordinatorRuntimePaths(env));
@@ -433,7 +433,7 @@ void describe('transactional coordinator runtime', () => {
         (error: unknown) => error instanceof CoordinationRuntimeError && error.code === 'fenced-session',
       );
 
-      await client.mutate('acquire-group', { repoId: 'repo-runtime-test', workstreamRun: 'run-runtime-test', sessionId: 'session-second', fencingGeneration: 2, expectedVersion: integer(secondRun['version'], 'second run version'), idempotencyKey: 'acquire-child-runtime-test' }, { acquisition_group_id: 'group-runtime-test', acquisition_kind: 'initial', unit_id: 'unit-runtime-test', attempt: 1, requested_leases: [{ path: 'src/runtime.ts', mode: 'READ', purpose: 'register child fixture' }], reason: 'establish durable attempt before child', normal_release_condition: { condition_type: 'child-terminal', target_id: 'child-run-runtime-test-unit-runtime-test-1', evidence: null }, spec_ref: 'unit-runtime-test.json', spec_sha256: `sha256:${'a'.repeat(64)}`, role: 'implement', preemptible: true, checkpoint_ordinal: 0, session_lease_id: 'lease-session-second-2', session_token: sessionToken(2) });
+      await client.mutate('acquire-group', { repoId: 'repo-runtime-test', workstreamRun: 'run-runtime-test', sessionId: 'session-second', fencingGeneration: 2, expectedVersion: integer(secondRun['version'], 'second run version'), idempotencyKey: 'acquire-child-runtime-test' }, { acquisition_group_id: 'group-runtime-test', acquisition_kind: 'initial', unit_id: 'unit-runtime-test', attempt: 1, requested_leases: [{ path: 'src/runtime.ts', mode: 'WRITE', purpose: 'register child fixture' }], reason: 'establish durable attempt before child', normal_release_condition: { condition_type: 'unit-merged', target_id: 'unit-runtime-test:1', evidence: null }, spec_ref: 'unit-runtime-test.json', spec_sha256: `sha256:${'a'.repeat(64)}`, role: 'implement', preemptible: true, checkpoint_ordinal: 0, session_lease_id: 'lease-session-second-2', session_token: sessionToken(2) });
       const childToken = 'a'.repeat(64);
       const childResponse = await client.mutate('register-child', {
         repoId: 'repo-runtime-test', workstreamRun: 'run-runtime-test', sessionId: 'session-second', fencingGeneration: 2,
@@ -477,27 +477,21 @@ void describe('transactional coordinator runtime', () => {
         }),
         (error: unknown) => error instanceof CoordinationRuntimeError && error.code === 'unauthorized-client',
       );
-      const childEvidenceRef = '.pi/autopilot/runtime-test/receipts/unit-runtime-test.json';
-      const childEvidenceBytes = `${JSON.stringify({ schema_version: 'autopilot.receipt.v1', tool_name: 'autopilot_emit_status', workstream: 'runtime-test', unit_id: 'unit-runtime-test', attempt: 1 })}\n`;
-      const childEvidencePath = join(root, 'state', 'worktrees', 'repo-runtime-test', 'active', 'run-runtime-test', 'main', ...childEvidenceRef.split('/'));
-      await mkdir(dirname(childEvidencePath), { recursive: true });
-      await writeFile(childEvidencePath, childEvidenceBytes, 'utf8');
-      const childEvidenceSha = `sha256:${createHash('sha256').update(childEvidenceBytes, 'utf8').digest('hex')}`;
       const completedChild = await client.mutate('complete-child', {
         repoId: 'repo-runtime-test', workstreamRun: 'run-runtime-test', sessionId: null, fencingGeneration: null,
-        expectedVersion: integer(heartbeatChild['version'], 'heartbeat child version'), idempotencyKey: 'complete-child-after-handoff',
+        expectedVersion: integer(heartbeatChild['version'], 'heartbeat child version'), idempotencyKey: 'recover-child-after-handoff',
       }, {
-        child_lease_id: 'child-run-runtime-test-unit-runtime-test-1', child_token: childToken, pid: process.pid, boot_id: 'child-boot', status: 'terminal',
-        evidence_ref: childEvidenceRef, evidence_sha256: childEvidenceSha,
+        child_lease_id: 'child-run-runtime-test-unit-runtime-test-1', child_token: childToken, pid: process.pid, boot_id: 'child-boot', status: 'recovery-required',
+        evidence_ref: null, evidence_sha256: null,
       });
-      const terminalChild = record(completedChild.payload['child'], 'completed child');
-      assert.equal(terminalChild['status'], 'terminal');
+      const terminalChild = record(completedChild.payload['child'], 'recovery child');
+      assert.equal(terminalChild['status'], 'recovery-required');
       await assert.rejects(
         () => client.mutate('complete-child', {
           repoId: 'repo-runtime-test', workstreamRun: 'run-runtime-test', sessionId: null, fencingGeneration: null,
           expectedVersion: integer(terminalChild['version'], 'terminal child version'), idempotencyKey: 'rewrite-terminal-child',
         }, {
-          child_lease_id: 'child-run-runtime-test-unit-runtime-test-1', child_token: childToken, pid: process.pid, boot_id: 'child-boot', status: 'recovery-required', evidence_ref: null, evidence_sha256: null,
+          child_lease_id: 'child-run-runtime-test-unit-runtime-test-1', child_token: childToken, pid: process.pid, boot_id: 'child-boot', status: 'terminal', evidence_ref: null, evidence_sha256: null,
         }),
         (error: unknown) => error instanceof CoordinationRuntimeError && error.code === 'invalid-state',
       );

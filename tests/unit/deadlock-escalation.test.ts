@@ -4,7 +4,6 @@ import { spawn, spawnSync } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 import { describe, it } from 'node:test';
 
@@ -88,6 +87,22 @@ function acquisition(actor: Actor, id: string, path: string, unitId: string, pre
     normalReleaseCondition: role === 'adjudicate' ? { condition_type: 'child-terminal' as const, target_id: `child-${actor.context.workstream_run}-${unitId}-1`, evidence: null } : { condition_type: 'unit-merged' as const, target_id: `${unitId}:1`, evidence: null }, specRef: `.pi/autopilot/${actor.context.workstream}/unit-specs/${unitId}.json`,
     specSha256: `sha256:${actor.context.autopilot_id.charCodeAt(0).toString(16).repeat(64).slice(0, 64)}` as `sha256:${string}`, role, preemptible, checkpointOrdinal: 0,
   };
+}
+
+async function registerPreflightAttempt(client: CoordinatorClient, actor: Actor, unitId: string, role: 'adjudicate'): Promise<void> {
+  const main = join(actor.context.state_root, 'worktrees', actor.context.repo_key, 'active', actor.context.workstream_run, 'main');
+  const runtimeRoot = join(main, '.pi', 'autopilot', actor.context.workstream);
+  const specRef = `.pi/autopilot/${actor.context.workstream}/unit-specs/${unitId}.json`;
+  const specPath = join(main, ...specRef.split('/'));
+  const cwd = join(actor.context.state_root, 'worktrees', actor.context.repo_key, 'active', actor.context.workstream_run, 'units', unitId, 'attempt-1', 'worktree');
+  const spec = { schema_version: 'autopilot.unit_spec.v1', workstream: actor.context.workstream, unit_id: unitId, role, template: 'adjudicate', attempt: 1, objective: 'Adjudicate the assigned immutable contradiction.', cwd, model: 'openai-codex/gpt-5.6-sol', thinking: 'xhigh', owned_paths: [], read_only_paths: [], untouchable_paths: [], context_refs: [], validation_commands: [], status_output: join(runtimeRoot, 'statuses', `${unitId}.adjudicate.attempt-1.json`), receipt_output: join(runtimeRoot, 'receipts', `${unitId}.adjudicate.attempt-1.receipt.json`), evidence_dir: join(runtimeRoot, 'evidence', unitId), stop_boundary: 'Write only assigned adjudication evidence.', quality_profile: 'adjudication', risk_level: 'high', acceptance_criteria: ['the assigned contradiction is independently adjudicated'], verification_plan: { positive_witnesses: [], negative_witnesses: [], regression_witnesses: [], real_boundary_witnesses: [], blast_radius_checks: [], docs_schema_prompt_checks: [], dirty_tree_checks: [] }, closure_criteria: ['adjudication is terminal'], upstream_refs: [], timeout_seconds: 3600, render_prompt_snapshot: true };
+  const bytes = Buffer.from(`${JSON.stringify(spec, null, 2)}\n`);
+  await mkdir(join(runtimeRoot, 'unit-specs'), { recursive: true });
+  await writeFile(specPath, bytes);
+  await client.mutate('register-attempt', {
+    repoId: actor.context.repo_id, workstreamRun: actor.context.workstream_run, sessionId: actor.context.session_id,
+    fencingGeneration: actor.context.session_generation, expectedVersion: actor.context.run_version, idempotencyKey: `register-attempt-${actor.context.workstream_run}-${unitId}`,
+  }, { unit_id: unitId, attempt: 1, spec_ref: specRef, spec_sha256: digest(bytes), role, preemptible: true, checkpoint_ordinal: 0, session_lease_id: actor.context.session_lease_id, session_token: actor.context.session_token });
 }
 
 async function registerUnitWorktree(client: CoordinatorClient, actor: Actor, repoRoot: string, unitId: string): Promise<string> {
@@ -215,7 +230,7 @@ void describe('Coordination Fabric deadlock, starvation, and escalation arbitrat
     assert.match(method, /nextProgressMeasure >= progressMeasure/u);
   });
 
-  void it('forbids every post-initial WRITE expansion while permitting typed READ materialization expansion', async () => {
+  void it('forbids post-initial WRITE expansion and rejects unbound READ materialization', async () => {
     const root = await mkdtemp(join(tmpdir(), 'pi-autopilot-write-expansion-'));
     const repoRoot = join(root, 'repo');
     await mkdir(join(repoRoot, '.git'), { recursive: true });
@@ -229,8 +244,7 @@ void describe('Coordination Fabric deadlock, starvation, and escalation arbitrat
       await assert.rejects(() => actor.claims.acquire(acquisition(actor, 'group-second-write', 'src/b.ts', 'unit-a')), (error: unknown) => error instanceof CoordinationRuntimeError && /exactly one immutable initial/u.test(error.message));
       const invalidExpansion = acquisition(actor, 'group-invalid-expansion', 'src/b.ts', 'unit-a', true, 'implement', 'materialization-read-expansion');
       await assert.rejects(() => actor.claims.acquire({ ...invalidExpansion, requestedLeases: [{ path: 'src/b.ts', mode: 'WRITE', purpose: 'forbidden expansion' }] }), (error: unknown) => error instanceof CoordinationRuntimeError && /READ authority only/u.test(error.message));
-      const readExpansion = await actor.claims.acquire(acquisition(actor, 'group-read-expansion', 'src/b.ts', 'unit-a', true, 'implement', 'materialization-read-expansion'));
-      assert.equal(readExpansion.outcome, 'granted');
+      await assert.rejects(() => actor.claims.acquire(acquisition(actor, 'group-read-expansion', 'src/b.ts', 'unit-a', true, 'implement', 'materialization-read-expansion')), (error: unknown) => error instanceof CoordinationRuntimeError && /exact tracked blob\/tree identity/u.test(error.message));
     } finally {
       await server.close();
       await rm(root, { recursive: true, force: true });
@@ -276,176 +290,16 @@ void describe('Coordination Fabric deadlock, starvation, and escalation arbitrat
     }
   });
 
-  void it('resolves a real transactional two-run cycle by cancelling only a safe preflight victim', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'pi-autopilot-deadlock-resolve-'));
-    const repoRoot = join(root, 'repo');
-    await mkdir(join(repoRoot, '.git'), { recursive: true });
-    const stateRoot = join(root, 'state');
-    const env = { ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: stateRoot };
-    const server = await startCoordinatorServer(coordinatorRuntimePaths(env));
-    try {
-      const client = new CoordinatorClient({ env, autoStart: false });
-      const a = await attachActor(client, stateRoot, repoRoot, 'a');
-      const b = await attachActor(client, stateRoot, repoRoot, 'b');
-      await a.claims.acquire(acquisition(a, 'group-a-held', 'src/a.ts', 'unit-a'));
-      await b.claims.acquire(acquisition(b, 'group-b-held', 'src/b.ts', 'unit-b'));
-      await a.claims.acquire(acquisition(a, 'group-a-wait', 'src/b.ts', 'unit-a', true, 'implement', 'materialization-read-expansion'));
-      await b.claims.acquire(acquisition(b, 'group-b-wait', 'src/a.ts', 'unit-b', true, 'implement', 'materialization-read-expansion'));
-      const status = await client.query('status', a.context.repo_id, a.context.workstream_run);
-      const resolutions = array(status.payload['deadlock_resolutions'], 'deadlock resolutions').map(parseCoordinationDeadlockResolution);
-      assert.equal(resolutions.length, 1);
-      assert.equal(resolutions[0]?.state, 'resolved');
-      assert.equal(resolutions[0]?.victim_class, 2);
-      assert.equal(array(status.payload['escalations'], 'escalations').length, 0);
-      const edges = array(status.payload['wait_for_edges'], 'wait edges').map(parseCoordinationWaitForEdge);
-      assert.equal(detectCoordinationWaitCycles(edges).length, 0);
-    } finally {
-      await server.close();
-      await rm(root, { recursive: true, force: true });
-    }
-  });
-
-  void it('never cancels a dirty preflight worktree and retains leases until owner recovery evidence', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'pi-autopilot-deadlock-dirty-preflight-'));
-    const repoRoot = join(root, 'repo');
-    await mkdir(join(repoRoot, '.git'), { recursive: true });
-    const stateRoot = join(root, 'state');
-    const env = { ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: stateRoot };
-    const server = await startCoordinatorServer(coordinatorRuntimePaths(env));
-    try {
-      const client = new CoordinatorClient({ env, autoStart: false });
-      const a = await attachActor(client, stateRoot, repoRoot, 'a');
-      const b = await attachActor(client, stateRoot, repoRoot, 'b');
-      await a.claims.acquire(acquisition(a, 'group-a-held', 'src/a.ts', 'unit-a'));
-      await b.claims.acquire(acquisition(b, 'group-b-held', 'src/b.ts', 'unit-b'));
-      const worktree = await registerUnitWorktree(client, a, repoRoot, 'unit-a');
-      await writeFile(join(worktree, 'dirty-untracked.txt'), 'must survive recovery\n');
-      await a.claims.acquire(acquisition(a, 'group-a-wait', 'src/b.ts', 'unit-a', true, 'implement', 'materialization-read-expansion'));
-      await b.claims.acquire(acquisition(b, 'group-b-wait', 'src/a.ts', 'unit-b', true, 'implement', 'materialization-read-expansion'));
-      const status = await client.query('status', a.context.repo_id, a.context.workstream_run);
-      const resolution = array(status.payload['deadlock_resolutions'], 'deadlock resolutions').map(parseCoordinationDeadlockResolution).find((entry) => entry.state === 'resolved');
-      assert.equal(resolution?.victim_class, 2);
-      assert.equal(resolution?.victim?.workstream_run, b.context.workstream_run);
-      assert.equal(array(status.payload['edit_leases'], 'dirty non-victim edit leases').length > 0, true);
-      assert.equal(await readFile(join(worktree, 'dirty-untracked.txt'), 'utf8'), 'must survive recovery\n');
-    } finally {
-      await server.close();
-      await rm(root, { recursive: true, force: true });
-    }
-  });
-
-  void it('resolves a multi-cycle strongly connected component to a transactional fixed point', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'pi-autopilot-deadlock-fixed-point-'));
-    const repoRoot = join(root, 'repo');
-    await mkdir(join(repoRoot, '.git'), { recursive: true });
-    const stateRoot = join(root, 'state');
-    const env = { ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: stateRoot };
-    const server = await startCoordinatorServer(coordinatorRuntimePaths(env));
-    try {
-      const client = new CoordinatorClient({ env, autoStart: false });
-      const actors = await Promise.all(['a', 'b', 'c', 'd'].map(async (suffix) => await attachActor(client, stateRoot, repoRoot, suffix)));
-      const [a, b, c, d] = actors;
-      if (a === undefined || b === undefined || c === undefined || d === undefined) throw new Error('fixed-point actors missing');
-      for (const [actor, suffix] of [[a, 'a'], [b, 'b'], [c, 'c'], [d, 'd']] as const) await actor.claims.acquire(acquisition(actor, `group-${suffix}-held`, `src/${suffix}.ts`, `unit-${suffix}`));
-      const expansion = async (actor: Actor, suffix: string, paths: readonly string[]): Promise<void> => {
-        await actor.claims.acquire({ ...acquisition(actor, `group-${suffix}-wait`, paths[0] ?? 'src/missing.ts', `unit-${suffix}`, true, 'implement', 'materialization-read-expansion'), requestedLeases: paths.map((path) => ({ path, mode: 'READ' as const, purpose: 'fixed-point dependency' })) });
-      };
-      await expansion(b, 'b', ['src/a.ts', 'src/c.ts']);
-      await expansion(a, 'a', ['src/d.ts']);
-      await expansion(c, 'c', ['src/d.ts']);
-      await expansion(d, 'd', ['src/b.ts']);
-      const status = await client.query('status', a.context.repo_id, a.context.workstream_run);
-      const edges = array(status.payload['wait_for_edges'], 'wait edges').map(parseCoordinationWaitForEdge);
-      assert.equal(detectCoordinationWaitCycles(edges).length, 0);
-      const statusC = await client.query('status', c.context.repo_id, c.context.workstream_run);
-      const resolvedIds = new Set([...array(status.payload['deadlock_resolutions'], 'deadlock resolutions'), ...array(statusC.payload['deadlock_resolutions'], 'deadlock resolutions c')].map(parseCoordinationDeadlockResolution).filter((entry) => entry.state === 'resolved').map((entry) => entry.resolution_id));
-      assert.equal(resolvedIds.size >= 2, true);
-    } finally {
-      await server.close();
-      await rm(root, { recursive: true, force: true });
-    }
-  });
-
-  void it('drives a real running checkpoint victim into child preemption and recovery without releasing authority', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'pi-autopilot-deadlock-running-'));
-    const repoRoot = join(root, 'repo');
-    await mkdir(join(repoRoot, '.git'), { recursive: true });
-    const stateRoot = join(root, 'state');
-    const env = { ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: stateRoot };
-    let server = await startCoordinatorServer(coordinatorRuntimePaths(env));
-    try {
-      const client = new CoordinatorClient({ env, autoStart: false });
-      const a = await attachActor(client, stateRoot, repoRoot, 'a');
-      const b = await attachActor(client, stateRoot, repoRoot, 'b');
-      await a.claims.acquire(acquisition(a, 'group-a-held', 'src/a.ts', 'unit-a'));
-      await b.claims.acquire(acquisition(b, 'group-b-held', 'src/b.ts', 'unit-b'));
-      const childA = await registerRunningChild(client, a, 'unit-a');
-      const childB = await registerRunningChild(client, b, 'unit-b');
-      for (const [actor, child, unit] of [[a, childA, 'unit-a'], [b, childB, 'unit-b']] as const) {
-        await client.mutate('checkpoint-child', { repoId: actor.context.repo_id, workstreamRun: actor.context.workstream_run, sessionId: null, fencingGeneration: null, expectedVersion: 1, idempotencyKey: `checkpoint-${unit}` }, { child_lease_id: child.childId, child_token: child.token, pid: process.pid, boot_id: actor.context.boot_id, checkpoint_ordinal: 1, critical_section: null, preemptible: true });
-      }
-      await a.claims.acquire(acquisition(a, 'group-a-wait', 'src/b.ts', 'unit-a', true, 'implement', 'materialization-read-expansion'));
-      await b.claims.acquire(acquisition(b, 'group-b-wait', 'src/a.ts', 'unit-b', true, 'implement', 'materialization-read-expansion'));
-      const status = await client.query('status', a.context.repo_id, a.context.workstream_run);
-      const resolution = array(status.payload['deadlock_resolutions'], 'deadlock resolutions').map(parseCoordinationDeadlockResolution).find((entry) => entry.state === 'awaiting-recovery');
-      assert.equal(resolution?.victim_class, 3);
-      if (resolution?.victim === null || resolution?.victim === undefined) throw new Error('running victim missing');
-      const victimActor = resolution.victim.workstream_run === a.context.workstream_run ? a : b;
-      await server.close();
-      server = await startCoordinatorServer(coordinatorRuntimePaths(env));
-      const replayed = await client.query('status', victimActor.context.repo_id, victimActor.context.workstream_run);
-      assert.equal(array(replayed.payload['deadlock_resolutions'], 'replayed running resolutions').map(parseCoordinationDeadlockResolution).some((entry) => entry.resolution_id === resolution.resolution_id && entry.state === 'awaiting-recovery'), true);
-      const victimChild = resolution.victim.workstream_run === a.context.workstream_run ? childA : childB;
-      const heartbeat = await client.mutate('heartbeat-child', { repoId: victimActor.context.repo_id, workstreamRun: victimActor.context.workstream_run, sessionId: null, fencingGeneration: null, expectedVersion: 1, idempotencyKey: 'victim-preemption-heartbeat' }, { child_lease_id: victimChild.childId, child_token: victimChild.token, pid: process.pid, boot_id: victimActor.context.boot_id, lease_expires_at: '2099-01-01T00:00:00.000Z' });
-      assert.equal(heartbeat.payload['preemption_requested'], true);
-      await client.mutate('complete-child', { repoId: victimActor.context.repo_id, workstreamRun: victimActor.context.workstream_run, sessionId: null, fencingGeneration: null, expectedVersion: 2, idempotencyKey: 'victim-recovery-required' }, { child_lease_id: victimChild.childId, child_token: victimChild.token, pid: process.pid, boot_id: victimActor.context.boot_id, status: 'recovery-required', evidence_ref: null, evidence_sha256: null });
-      const after = await client.query('status', victimActor.context.repo_id, victimActor.context.workstream_run);
-      assert.equal(array(after.payload['edit_leases'], 'victim edit leases').length > 0, true);
-      assert.equal(array(after.payload['escalations'], 'escalations').length, 0);
-    } finally {
-      await server.close();
-      await rm(root, { recursive: true, force: true });
-    }
-  });
-
-  void it('keeps a real no-safe-victim cycle explicitly deferred without escalation', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'pi-autopilot-deadlock-defer-'));
-    const repoRoot = join(root, 'repo');
-    await mkdir(join(repoRoot, '.git'), { recursive: true });
-    const stateRoot = join(root, 'state');
-    const env = { ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: stateRoot };
-    let server = await startCoordinatorServer(coordinatorRuntimePaths(env));
-    try {
-      const client = new CoordinatorClient({ env, autoStart: false });
-      const a = await attachActor(client, stateRoot, repoRoot, 'a');
-      const b = await attachActor(client, stateRoot, repoRoot, 'b');
-      await a.claims.acquire(acquisition(a, 'group-a-held', 'src/a.ts', 'unit-a', false));
-      await b.claims.acquire(acquisition(b, 'group-b-held', 'src/b.ts', 'unit-b', false));
-      await registerRunningChild(client, a, 'unit-a');
-      await registerRunningChild(client, b, 'unit-b');
-      await a.claims.acquire(acquisition(a, 'group-a-wait', 'src/b.ts', 'unit-a', false, 'implement', 'materialization-read-expansion'));
-      await b.claims.acquire(acquisition(b, 'group-b-wait', 'src/a.ts', 'unit-b', false, 'implement', 'materialization-read-expansion'));
-      const status = await client.query('status', a.context.repo_id, a.context.workstream_run);
-      const resolution = array(status.payload['deadlock_resolutions'], 'deadlock resolutions').map(parseCoordinationDeadlockResolution)[0];
-      assert.equal(resolution?.state, 'deferred-no-safe-victim');
-      assert.equal(resolution?.victim, null);
-      const requests = array(status.payload['claim_requests'], 'claim requests').map(parseCoordinationClaimRequest);
-      assert.equal(requests.filter((request) => request.status === 'deferred').length, 2);
-      assert.equal(requests.every((request) => request.release_condition !== null), true);
-      assert.equal(array(status.payload['escalations'], 'escalations').length, 0);
-      await server.close();
-      const database = new DatabaseSync(coordinatorRuntimePaths(env).databasePath);
-      database.exec('DELETE FROM deadlock_resolutions; DELETE FROM wait_for_edges;');
-      database.close();
-      server = await startCoordinatorServer(coordinatorRuntimePaths(env));
-      const replayed = await client.query('status', a.context.repo_id, a.context.workstream_run);
-      const replayedResolution = array(replayed.payload['deadlock_resolutions'], 'replayed deadlock resolutions').map(parseCoordinationDeadlockResolution).find((entry) => entry.state === 'deferred-no-safe-victim');
-      assert.equal(replayedResolution?.resolution_id, resolution?.resolution_id);
-      assert.equal(array(replayed.payload['escalations'], 'replayed escalations').length, 0);
-    } finally {
-      await server.close();
-      await rm(root, { recursive: true, force: true });
-    }
+  void it('keeps observation-only dependencies out of wait edges and deadlock decisions', () => {
+    const requester: CoordinationOwnerIdentity = { repo_id: 'repo', autopilot_id: 'reader', workstream_run: 'run-reader', unit_id: 'unit-reader', attempt: 1 };
+    const owner: CoordinationOwnerIdentity = { repo_id: 'repo', autopilot_id: 'writer', workstream_run: 'run-writer', unit_id: 'unit-writer', attempt: 1 };
+    const lease: CoordinationEditLease = { schema_version: 'autopilot.edit_lease.v1', edit_lease_id: 'lease-writer', owner, acquisition_group_id: 'group-writer', path: 'src/shared.ts', mode: 'WRITE', purpose: 'writer authority', acquired_event_seq: 1, normal_release_condition: { condition_type: 'unit-merged', target_id: 'unit-writer:1', evidence: null }, version: 1 };
+    const staleReadRequest: CoordinationClaimRequest = { schema_version: 'autopilot.claim_request.v1', request_id: 'request-reader', acquisition_group_id: 'group-reader', requester, owner, blocking_lease_ids: [lease.edit_lease_id], requested_leases: [{ path: 'src/shared.ts', mode: 'READ', purpose: 'historical read dependency' }], reason: 'legacy read blocker', created_event_seq: 2, status: 'pending', owner_reason: null, release_condition: null, release_event_seq: null, grant_event_seq: null, version: 1 };
+    assert.deepEqual(buildCoordinationWaitForEdges({ requests: [staleReadRequest], editLeases: [lease], eventSeq: 3 }), []);
+    const editRequest: CoordinationClaimRequest = { ...staleReadRequest, request_id: 'request-writer', requested_leases: [{ path: 'src/shared.ts', mode: 'WRITE', purpose: 'real edit contention' }] };
+    const edges = buildCoordinationWaitForEdges({ requests: [editRequest], editLeases: [lease], eventSeq: 3 });
+    assert.equal(edges.length, 1);
+    assert.deepEqual(detectCoordinationWaitCycles(edges), []);
   });
 
   void it('mechanically rejects every operational escalation class', () => {
@@ -473,7 +327,7 @@ void describe('Coordination Fabric deadlock, starvation, and escalation arbitrat
       const a = await attachActor(client, stateRoot, repoRoot, 'a');
       const b = await attachActor(client, stateRoot, repoRoot, 'b');
       const adjudicator = await attachActor(client, stateRoot, repoRoot, 'c');
-      await adjudicator.claims.acquire(acquisition(adjudicator, 'group-adjudicator', 'reviews/contradiction.json', 'unit-adjudicate', true, 'adjudicate'));
+      await registerPreflightAttempt(client, adjudicator, 'unit-adjudicate', 'adjudicate');
       const clauses = [
         { authoritative_ref: { ref: 'mission-a.md', sha256: digest(missionA) }, source_type: 'mission' as const, source_scope: 'repository' as const, source_run: a.context.workstream_run, schema_version: 'autopilot.mission.v1', clause_id: 'format-text', exact_requirement: 'The shared artifact must remain text.', artifact_or_invariant: 'shared artifact format', demanded_outcome: 'text' },
         { authoritative_ref: { ref: 'mission-b.md', sha256: digest(missionB) }, source_type: 'mission' as const, source_scope: 'repository' as const, source_run: b.context.workstream_run, schema_version: 'autopilot.mission.v1', clause_id: 'format-binary', exact_requirement: 'The shared artifact must become binary.', artifact_or_invariant: 'shared artifact format', demanded_outcome: 'binary' },
@@ -506,7 +360,7 @@ void describe('Coordination Fabric deadlock, starvation, and escalation arbitrat
       };
       assert.equal(validatePlanningContradictionSubmission({ packet, adjudicationBytes, authoritativeDocuments: [{ ref: packet.authoritative_refs[0] ?? firstClause.authoritative_ref, bytes: missionA }, { ref: packet.authoritative_refs[1] ?? secondClause.authoritative_ref, bytes: missionB }] }).packet.escalation_id, packet.escalation_id);
       await assert.rejects(() => arbiter.submit(packet, assignment.assignment_id), (error: unknown) => error instanceof CoordinationRuntimeError && error.code === 'invalid-state');
-      await runAdjudicatorProcess([stateRoot, adjudicator.context.repo_id, adjudicator.context.workstream_run, assignment.assignment_id, adjudicator.context.autopilot_id, adjudicator.context.session_id, String(adjudicator.context.session_generation), String(adjudicator.context.run_version), adjudicator.context.session_lease_id, adjudicator.context.session_token, adjudicator.context.boot_id, adjudicatorWorktree, 'unit-adjudicate'], env);
+      await runAdjudicatorProcess([stateRoot, adjudicator.context.repo_id, adjudicator.context.workstream_run, assignment.assignment_id, adjudicator.context.autopilot_id, adjudicator.context.session_id, String(adjudicator.context.session_generation), String(adjudicator.context.run_version), adjudicator.context.session_lease_id, adjudicator.context.session_token, adjudicator.context.boot_id, adjudicatorWorktree, 'unit-adjudicate', adjudicator.context.workstream], env);
       await writeFile(adjudicationPath, '{"forged_after_acceptance":true}\n');
       const accepted = await arbiter.submit(packet, assignment.assignment_id);
       assert.equal(accepted.created_event_seq > 0, true);
@@ -517,7 +371,7 @@ void describe('Coordination Fabric deadlock, starvation, and escalation arbitrat
       const adjudicatorStatus = await client.query('status', adjudicator.context.repo_id, adjudicator.context.workstream_run);
       assert.equal(array(adjudicatorStatus.payload['edit_leases'], 'adjudicator leases').some((value) => parseCoordinationEditLease(value).owner.unit_id === 'unit-adjudicate'), false);
 
-      await adjudicator.claims.acquire(acquisition(adjudicator, 'group-adjudicator-oversize', 'reviews/contradiction-oversize.json', 'unit-adjudicate-oversize', true, 'adjudicate'));
+      await registerPreflightAttempt(client, adjudicator, 'unit-adjudicate-oversize', 'adjudicate');
       const oversizedOwner = { ...adjudication.adjudicator, unit_id: 'unit-adjudicate-oversize' };
       const oversizedAssignment = await arbiter.assign({ schema_version: 'autopilot.adjudication_assignment.v1', assignment_id: 'contradiction-oversize', repo_id: a.context.repo_id, requesting_run: a.context.workstream_run, participating_runs: [a.context.workstream_run, b.context.workstream_run], authoritative_artifact_ids: [artifactA.artifact_id, artifactB.artifact_id], conflicting_clauses: clauses, adjudicator: oversizedOwner, decision_options: adjudication.decision_options, state: 'assigned', adjudication: null, child_lease_id: null, assigned_event_seq: 0, accepted_event_seq: null, version: 1 });
       const oversizedWorktree = await registerUnitWorktree(client, adjudicator, repoRoot, oversizedOwner.unit_id);
@@ -526,14 +380,14 @@ void describe('Coordination Fabric deadlock, starvation, and escalation arbitrat
       await mkdir(join(oversizedWorktree, 'adjudications'), { recursive: true });
       const forgedIdentityAdjudication = { ...adjudication, adjudication_id: oversizedAssignment.assignment_id, adjudicator: { ...oversizedOwner, unit_id: 'forged-adjudicator' } };
       await writeFile(oversizedPath, `${JSON.stringify(forgedIdentityAdjudication)}\n`);
-      await assert.rejects(() => client.mutate('complete-adjudication', { repoId: adjudicator.context.repo_id, workstreamRun: adjudicator.context.workstream_run, sessionId: null, fencingGeneration: null, expectedVersion: 1, idempotencyKey: 'complete-forged-identity-adjudication' }, { assignment_id: oversizedAssignment.assignment_id, adjudication_path: oversizedPath, child_lease_id: oversizedChild.childId, child_token: oversizedChild.token, pid: process.pid, boot_id: adjudicator.context.boot_id }), (error: unknown) => error instanceof CoordinationRuntimeError && /does not exactly match/u.test(error.message));
+      await assert.rejects(() => client.mutate('complete-adjudication', { repoId: adjudicator.context.repo_id, workstreamRun: adjudicator.context.workstream_run, sessionId: null, fencingGeneration: null, expectedVersion: 1, idempotencyKey: 'complete-forged-identity-adjudication' }, { assignment_id: oversizedAssignment.assignment_id, adjudication_path: oversizedPath, terminal_evidence_ref: '.pi/autopilot/work-c/terminal-acceptances/invalid.json', terminal_evidence_sha256: `sha256:${'f'.repeat(64)}`, child_lease_id: oversizedChild.childId, child_token: oversizedChild.token, pid: process.pid, boot_id: adjudicator.context.boot_id }), (error: unknown) => error instanceof CoordinationRuntimeError && /does not exactly match/u.test(error.message));
       await writeFile(oversizedPath, 'x'.repeat(1024 * 1024 + 1));
-      await assert.rejects(() => client.mutate('complete-adjudication', { repoId: adjudicator.context.repo_id, workstreamRun: adjudicator.context.workstream_run, sessionId: null, fencingGeneration: null, expectedVersion: 1, idempotencyKey: 'complete-oversized-adjudication' }, { assignment_id: oversizedAssignment.assignment_id, adjudication_path: oversizedPath, child_lease_id: oversizedChild.childId, child_token: oversizedChild.token, pid: process.pid, boot_id: adjudicator.context.boot_id }), (error: unknown) => error instanceof CoordinationRuntimeError && error.code === 'invalid-request' && /no larger/u.test(error.message));
+      await assert.rejects(() => client.mutate('complete-adjudication', { repoId: adjudicator.context.repo_id, workstreamRun: adjudicator.context.workstream_run, sessionId: null, fencingGeneration: null, expectedVersion: 1, idempotencyKey: 'complete-oversized-adjudication' }, { assignment_id: oversizedAssignment.assignment_id, adjudication_path: oversizedPath, terminal_evidence_ref: '.pi/autopilot/work-c/terminal-acceptances/invalid.json', terminal_evidence_sha256: `sha256:${'f'.repeat(64)}`, child_lease_id: oversizedChild.childId, child_token: oversizedChild.token, pid: process.pid, boot_id: adjudicator.context.boot_id }), (error: unknown) => error instanceof CoordinationRuntimeError && error.code === 'invalid-request' && /no larger/u.test(error.message));
       await rm(oversizedPath);
       const outsideEvidence = join(root, 'outside-adjudication.json');
       await writeFile(outsideEvidence, adjudicationBytes);
       await symlink(outsideEvidence, oversizedPath);
-      await assert.rejects(() => client.mutate('complete-adjudication', { repoId: adjudicator.context.repo_id, workstreamRun: adjudicator.context.workstream_run, sessionId: null, fencingGeneration: null, expectedVersion: 1, idempotencyKey: 'complete-symlink-adjudication' }, { assignment_id: oversizedAssignment.assignment_id, adjudication_path: oversizedPath, child_lease_id: oversizedChild.childId, child_token: oversizedChild.token, pid: process.pid, boot_id: adjudicator.context.boot_id }), (error: unknown) => error instanceof CoordinationRuntimeError && error.code === 'unauthorized-client' && /non-symbolic/u.test(error.message));
+      await assert.rejects(() => client.mutate('complete-adjudication', { repoId: adjudicator.context.repo_id, workstreamRun: adjudicator.context.workstream_run, sessionId: null, fencingGeneration: null, expectedVersion: 1, idempotencyKey: 'complete-symlink-adjudication' }, { assignment_id: oversizedAssignment.assignment_id, adjudication_path: oversizedPath, terminal_evidence_ref: '.pi/autopilot/work-c/terminal-acceptances/invalid.json', terminal_evidence_sha256: `sha256:${'f'.repeat(64)}`, child_lease_id: oversizedChild.childId, child_token: oversizedChild.token, pid: process.pid, boot_id: adjudicator.context.boot_id }), (error: unknown) => error instanceof CoordinationRuntimeError && error.code === 'unauthorized-client' && /non-symbolic/u.test(error.message));
 
       const operationalAdjudication = { ...adjudication, adjudication_id: 'contradiction-operational', operational_reasons: ['deadlock'] as const };
       const operationalBytes = Buffer.from(`${JSON.stringify(operationalAdjudication)}\n`);

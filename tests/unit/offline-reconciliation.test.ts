@@ -5,16 +5,16 @@ import { spawnSync } from 'node:child_process';
 import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
 import { describe, it } from 'node:test';
 
 import { CoordinatorClient } from '../../src/core/coordination/client.ts';
-import { parseCoordinationAcquisitionGroup, parseCoordinationClaimRequest, parseCoordinationMailboxCursor, parseCoordinationMessage, parseCoordinationRun, parseCoordinationSessionLease } from '../../src/core/coordination/contracts.ts';
+import { parseCoordinationAcquisitionGroup, parseCoordinationClaimRequest, parseCoordinationMailboxCursor, parseCoordinationMessage, parseCoordinationRun, parseCoordinationSessionLease, parseCoordinationUnitAttempt } from '../../src/core/coordination/contracts.ts';
 import { ClaimNegotiationClient } from '../../src/core/coordination/negotiation.ts';
 import { recordCoordinatorReleaseEvidenceFromFile, replayPendingCoordinatorReconciliation, RunReconciliationClient } from '../../src/core/coordination/reconciliation.ts';
 import { ReservationCoordinationClient } from '../../src/core/coordination/reservations.ts';
 import { coordinatorRuntimePaths } from '../../src/core/coordination/runtime-paths.ts';
 import { startCoordinatorServer } from '../../src/core/coordination/server.ts';
+import { proveStructuredAttemptTerminal } from '../../src/core/coordination/terminal-attempt-proof.ts';
 import { writeCoordinatorSessionContext, type CoordinatorSessionContext } from '../../src/core/coordination/supervisor.ts';
 import type { CoordinationAcquisitionGroup, CoordinationClaimRequest, CoordinationMessage, CoordinationReleaseCondition, CoordinatorResponseEnvelope } from '../../src/core/coordination/types.ts';
 import { AUTOPILOT_STATE_ROOT_ENV, type ActiveAutopilotRow, type ProcessEnvLike } from '../../src/core/parallel-runtime.ts';
@@ -38,6 +38,11 @@ interface Harness {
 function array(value: unknown, label: string): readonly unknown[] {
   if (!Array.isArray(value)) throw new Error(`${label} is not an array`);
   return value;
+}
+
+function record(value: unknown, label: string): Readonly<Record<string, unknown>> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error(`${label} is not an object`);
+  return value as Readonly<Record<string, unknown>>;
 }
 
 function git(cwd: string, args: readonly string[]): string {
@@ -131,6 +136,35 @@ function acquisitionInput(suffix: string, condition: CoordinationReleaseConditio
   };
 }
 
+async function writeTerminalFixtureSpec(value: Harness, actor: Actor, unitId: string): Promise<`sha256:${string}`> {
+  const main = join(value.stateRoot, 'worktrees', actor.context.repo_id, 'active', actor.context.workstream_run, 'main');
+  const runtimeRoot = join(main, '.pi', 'autopilot', actor.context.workstream);
+  const spec = {
+    schema_version: 'autopilot.unit_spec.v1', workstream: actor.context.workstream, unit_id: unitId, role: 'implement', template: 'implement', attempt: 1,
+    objective: 'Exercise offline terminal reconciliation.', cwd: main, model: 'openai-codex/gpt-5.6-terra', thinking: 'high', owned_paths: ['src/shared.ts'], read_only_paths: [], untouchable_paths: [], context_refs: [], validation_commands: [],
+    status_output: join(runtimeRoot, 'statuses', `${unitId}.json`), receipt_output: join(runtimeRoot, 'receipts', `${unitId}.json`), evidence_dir: join(runtimeRoot, 'evidence', unitId), stop_boundary: 'Edit only the owned fixture.', quality_profile: 'source-change', risk_level: 'medium',
+    acceptance_criteria: ['offline completion is reconciled'], verification_plan: { positive_witnesses: [], negative_witnesses: [], regression_witnesses: [], real_boundary_witnesses: [], blast_radius_checks: [], docs_schema_prompt_checks: [], dirty_tree_checks: [] }, closure_criteria: ['terminal evidence is durable'], upstream_refs: [], timeout_seconds: 3600, render_prompt_snapshot: true,
+  };
+  return await writeEvidence(value.stateRoot, actor, `.pi/autopilot/${actor.context.workstream}/unit-specs/${unitId}.json`, `${JSON.stringify(spec)}\n`);
+}
+
+async function writeTerminalAcceptance(value: Harness, actor: Actor, unitId: string, childId: string, specSha256: `sha256:${string}`): Promise<{ readonly ref: string; readonly sha256: `sha256:${string}` }> {
+  const main = join(value.stateRoot, 'worktrees', actor.context.repo_id, 'active', actor.context.workstream_run, 'main');
+  const runtimeRoot = join(main, '.pi', 'autopilot', actor.context.workstream);
+  const head = git(main, ['rev-parse', 'HEAD']);
+  const specRef = `.pi/autopilot/${actor.context.workstream}/unit-specs/${unitId}.json`;
+  const statusRef = `.pi/autopilot/${actor.context.workstream}/statuses/${unitId}.json`;
+  const receiptRef = `.pi/autopilot/${actor.context.workstream}/receipts/${unitId}.json`;
+  const auditRef = `.pi/autopilot/${actor.context.workstream}/execution-audits/${unitId}.implement.attempt-1.json`;
+  const statusSha256 = await writeEvidence(value.stateRoot, actor, statusRef, `${JSON.stringify({ schema_version: 'autopilot.status.v1', workstream: actor.context.workstream, unit_id: unitId, role: 'implement', attempt: 1, verdict: 'BLOCKED', severity: 'major-local', summary: 'Offline terminal fixture is blocked.', changed_paths: [], findings: [], commands: [], evidence_refs: [], report_ref: null, next_action: 'resume after peer release' })}\n`);
+  const toolCallId = `tool-${unitId}`;
+  const receiptSha256 = await writeEvidence(value.stateRoot, actor, receiptRef, `${JSON.stringify({ schema_version: 'autopilot.receipt.v1', tool_name: 'autopilot_emit_status', workstream: actor.context.workstream, unit_id: unitId, role: 'implement', attempt: 1, emitted_at: '2026-07-12T10:00:00.000Z', status_output: join(runtimeRoot, 'statuses', `${unitId}.json`), status_sha256: statusSha256, schema_sha256: `sha256:${'a'.repeat(64)}`, tool_call_id: toolCallId, provider_identity: { provider_id: 'openai-codex', requested_model_id: 'openai-codex/gpt-5.6-terra', executed_model_id: 'openai-codex/gpt-5.6-terra', api: 'openai-codex-responses', thinking_level: 'high' }, expected_identity_hash: `sha256:${'b'.repeat(64)}` })}\n`);
+  const auditSha256 = await writeEvidence(value.stateRoot, actor, auditRef, `${JSON.stringify({ schema_version: 'autopilot.execution_audit.v1', workstream: actor.context.workstream, unit_id: unitId, role: 'implement', attempt: 1, audited_at: '2026-07-12T10:00:00.000Z', cwd: main, git_head: head, baseline_head: head, post_run_head: head, head_change_kind: 'none', committed_changed_paths: [], dirty_baseline: false, dirty_baseline_paths: [], dirty_relevant_paths: [], actual_changed_paths: [], status_reported_changed_paths: [], omitted_status_changes: [], reported_but_not_actual_changes: [], outside_owned_paths: [], read_only_touched_paths: [], untouchable_touched_paths: [], path_counts: { dirty_baseline_paths: 0, dirty_relevant_paths: 0, actual_changed_paths: 0, status_reported_changed_paths: 0, omitted_status_changes: 0, reported_but_not_actual_changes: 0, outside_owned_paths: 0, read_only_touched_paths: 0, untouchable_touched_paths: 0 }, truncated_path_sets: [], declared_validation_commands: [], status_reported_commands: [], command_coverage_gaps: [], classification: 'clean', evidence_refs: [], summary: 'Offline terminal fixture has zero changes.' })}\n`);
+  const ref = `.pi/autopilot/${actor.context.workstream}/terminal-acceptances/${unitId}.implement.attempt-1.json`;
+  const sha256 = await writeEvidence(value.stateRoot, actor, ref, `${JSON.stringify({ schema_version: 'autopilot.child_terminal_acceptance.v1', repo_id: actor.context.repo_id, autopilot_id: actor.context.autopilot_id, workstream: actor.context.workstream, workstream_run: actor.context.workstream_run, unit_id: unitId, role: 'implement', attempt: 1, child_lease_id: childId, verdict: 'BLOCKED', transport_result: 'accepted', spec: { ref: specRef, sha256: specSha256 }, status: { ref: statusRef, sha256: statusSha256 }, receipt: { ref: receiptRef, sha256: receiptSha256 }, audit: { ref: auditRef, sha256: auditSha256 }, tool_call_id: toolCallId, carrier_status_sha256: statusSha256, audit_disposition: 'zero-change', created_at: '2026-07-12T10:01:00.000Z' })}\n`);
+  return { ref, sha256 };
+}
+
 async function status(client: CoordinatorClient, actor: Actor): Promise<CoordinatorResponseEnvelope> {
   return await client.query('status', actor.context.repo_id, actor.context.workstream_run);
 }
@@ -169,13 +203,14 @@ async function detach(client: CoordinatorClient, actor: Actor): Promise<void> {
 }
 
 void describe('Coordination Fabric offline replay and automatic reconciliation', () => {
-  void it('releases a deferred child-terminal lease while both parents are offline, survives restart, and replays until durable acknowledgement', async () => {
+  void it('keeps source edit authority after offline child terminal, then replays exact merge release after owner resume', async () => {
     const value = await harness();
     try {
       const owner = await attachActor(value.client, value.stateRoot, 'a');
       const requester = await attachActor(value.client, value.stateRoot, 'b');
       const childId = 'child-run-a-unit-a-1';
-      const ownerGrant = await owner.negotiation.acquire(acquisitionInput('a', { condition_type: 'child-terminal', target_id: childId, evidence: null }));
+      const specSha256 = await writeTerminalFixtureSpec(value, owner, 'unit-a');
+      const ownerGrant = await owner.negotiation.acquire({ ...acquisitionInput('a', { condition_type: 'unit-merged', target_id: 'unit-a:1', evidence: null }), specSha256 });
       assert.equal(ownerGrant.outcome, 'granted');
       const childToken = 'c'.repeat(64);
       const childResponse = await value.client.mutate('register-child', {
@@ -191,24 +226,29 @@ void describe('Coordination Fabric offline replay and automatic reconciliation',
       assert.equal(waiting.outcome, 'waiting-for-peer-release');
       const ownerRequest = (await requests(value.client, owner)).find((entry) => entry.requester.workstream_run === requester.context.workstream_run);
       if (ownerRequest === undefined) throw new Error('owner request missing');
-      const deferred = await owner.negotiation.respond({ request: ownerRequest, response: 'deferred', ownerReason: 'child still owns the edit lease', releaseCondition: { condition_type: 'child-terminal', target_id: childId, evidence: null } });
+      const deferred = await owner.negotiation.respond({ request: ownerRequest, response: 'deferred', ownerReason: 'source edit authority remains through integration', releaseCondition: { condition_type: 'unit-merged', target_id: 'unit-a:1', evidence: null } });
       assert.equal(deferred.status, 'deferred');
       await detach(value.client, owner);
       await detach(value.client, requester);
 
-      const terminalEvidenceRef = '.pi/autopilot/work-a/receipts/unit-a.json';
-      const terminalEvidenceSha = await writeEvidence(value.stateRoot, owner, terminalEvidenceRef, JSON.stringify({ schema_version: 'autopilot.receipt.v1', tool_name: 'autopilot_emit_status', workstream: owner.context.workstream, unit_id: 'unit-a', attempt: 1 }) + '\n');
+      const terminalEvidence = await writeTerminalAcceptance(value, owner, 'unit-a', childId, specSha256);
       await value.client.mutate('complete-child', {
         repoId: owner.context.repo_id, workstreamRun: owner.context.workstream_run, sessionId: null, fencingGeneration: null,
         expectedVersion: childVersion, idempotencyKey: 'complete-offline-child',
-      }, { child_lease_id: childId, child_token: childToken, pid: process.pid, boot_id: 'boot-child', status: 'terminal', evidence_ref: terminalEvidenceRef, evidence_sha256: terminalEvidenceSha });
+      }, { child_lease_id: childId, child_token: childToken, pid: process.pid, boot_id: 'boot-child', status: 'terminal', evidence_ref: terminalEvidence.ref, evidence_sha256: terminalEvidence.sha256 });
       const requesterOfflineStatus = await status(value.client, requester);
       assert.equal(array(requesterOfflineStatus.payload['edit_leases'], 'requester edit leases').length, 0);
-      assert.equal((await groups(value.client, requester))[0]?.state, 'grant-ready');
-      assert.equal(typeof requesterOfflineStatus.payload['pending_messages'] === 'number' && requesterOfflineStatus.payload['pending_messages'] >= 2, true);
+      assert.equal((await groups(value.client, requester))[0]?.state, 'waiting');
 
       await value.server.close();
       value.server = await startCoordinatorServer(coordinatorRuntimePaths(value.env));
+      const resumedOwner = await attachActor(value.client, value.stateRoot, 'a-resumed', true);
+      const ownerMain = join(value.stateRoot, 'worktrees', resumedOwner.context.repo_id, 'active', resumedOwner.context.workstream_run, 'main');
+      const integrationHead = git(ownerMain, ['rev-parse', 'HEAD']);
+      const mergeRef = '.pi/autopilot/work-a/unit-merges/unit-a.json';
+      const mergeSha = await writeEvidence(value.stateRoot, resumedOwner, mergeRef, `${JSON.stringify({ schema_version: 'autopilot.unit_merge.v1', workstream_run: resumedOwner.context.workstream_run, autopilot_id: resumedOwner.context.autopilot_id, unit_id: 'unit-a', attempt: 1, merge_commit_sha: integrationHead, integration_before: integrationHead, integration_after: integrationHead, execution_commit_ref: 'execution-commits/unit-a.json', changed_paths: [] })}\n`);
+      await resumedOwner.reconciliation.recordReleaseEvidence({ source: 'unit-merge', targetId: 'unit-a:1', evidenceRef: mergeRef, evidenceSha256: mergeSha });
+      await detach(value.client, resumedOwner);
       const resumedRequester = await attachActor(value.client, value.stateRoot, 'b-resumed', true);
       await resumedRequester.reconciliation.reconcile('resume-before-dispatch');
       const firstReplay = await drain(value.client, resumedRequester, 'requester-first-replay');
@@ -232,7 +272,7 @@ void describe('Coordination Fabric offline replay and automatic reconciliation',
     }
   });
 
-  void it('releases terminal leases for merge, reset, quarantine, and run-close evidence but never from heartbeat age', async () => {
+  void it('releases exact merge/run evidence, rejects synthetic failure evidence, and never releases from heartbeat age', async () => {
     const value = await harness();
     try {
       const owner = await attachActor(value.client, value.stateRoot, 'a');
@@ -241,9 +281,11 @@ void describe('Coordination Fabric offline replay and automatic reconciliation',
         { suffix: 'r', source: 'attempt-reset' as const, condition: 'attempt-reset' as const, target: 'unit-r:1' },
         { suffix: 'q', source: 'quarantine-capture' as const, condition: 'quarantine-captured' as const, target: 'unit-q:1' },
       ];
+      const grantedGroups = new Map<string, CoordinationAcquisitionGroup>();
       for (const entry of cases) {
         const grant = await owner.negotiation.acquire(acquisitionInput(entry.suffix, { condition_type: entry.condition, target_id: entry.target, evidence: null }, `src/${entry.suffix}.ts`));
         assert.equal(grant.outcome, 'granted');
+        if (grant.outcome === 'granted') grantedGroups.set(entry.suffix, grant.acquisitionGroup);
       }
       assert.equal(array((await status(value.client, owner)).payload['edit_leases'], 'initial leases').length, 3);
       await assert.rejects(
@@ -267,18 +309,21 @@ void describe('Coordination Fabric offline replay and automatic reconciliation',
       await owner.reconciliation.reconcile('expired-heartbeat-is-classification-only');
       assert.equal(array((await status(value.client, owner)).payload['edit_leases'], 'leases after expiry reconciliation').length, 3);
 
-      for (const entry of cases) {
+      const integrationHead = git(join(value.stateRoot, 'worktrees', owner.context.repo_id, 'active', owner.context.workstream_run, 'main'), ['rev-parse', 'HEAD']);
+      const mergeRef = '.pi/autopilot/work-a/evidence/m.json';
+      const mergeSha = await writeEvidence(value.stateRoot, owner, mergeRef, `${JSON.stringify({ schema_version: 'autopilot.unit_merge.v1', workstream_run: owner.context.workstream_run, autopilot_id: owner.context.autopilot_id, unit_id: 'unit-m', attempt: 1, merge_commit_sha: integrationHead, integration_before: integrationHead, integration_after: integrationHead, execution_commit_ref: 'execution-commits/unit-m.json', changed_paths: [] })}\n`);
+      await owner.reconciliation.recordReleaseEvidence({ source: 'unit-merge', targetId: 'unit-m:1', evidenceRef: mergeRef, evidenceSha256: mergeSha });
+      for (const entry of cases.filter((candidate) => candidate.source !== 'unit-merge')) {
         const evidenceRef = `.pi/autopilot/work-a/evidence/${entry.suffix}.json`;
-        const integrationHead = git(join(value.stateRoot, 'worktrees', owner.context.repo_id, 'active', owner.context.workstream_run, 'main'), ['rev-parse', 'HEAD']);
-        const document = entry.source === 'unit-merge'
-          ? { schema_version: 'autopilot.unit_merge.v1', workstream_run: owner.context.workstream_run, autopilot_id: owner.context.autopilot_id, unit_id: 'unit-m', attempt: 1, merge_commit_sha: integrationHead, integration_before: integrationHead, integration_after: integrationHead, execution_commit_ref: 'execution-commits/unit-m.json', changed_paths: [] }
-          : entry.source === 'attempt-reset'
-            ? { schema_version: 'autopilot.unit_failure.v1', workstream_run: owner.context.workstream_run, unit_id: 'unit-r', attempt: 1, action: 'reset' }
-            : { schema_version: 'autopilot.unit_failure.v1', workstream_run: owner.context.workstream_run, unit_id: 'unit-q', attempt: 1, action: 'quarantine', capture_commit_sha: 'abc1234' };
+        const quarantine = entry.source === 'quarantine-capture';
+        const document = { schema_version: 'autopilot.unit_failure.v1', workstream: owner.context.workstream, workstream_run: owner.context.workstream_run, unit_id: `unit-${entry.suffix}`, attempt: 1, unit_worktree_path: join(value.root, `synthetic-${entry.suffix}`), dirty_paths: quarantine ? ['src/q.ts'] : [], capture_commit_sha: quarantine ? integrationHead : null, capture_ref: quarantine ? `autopilot/archive/${owner.context.workstream_run}/unit/unit-q/attempt-1/quarantine-capture` : null, git_head_before: integrationHead, git_head_after: integrationHead, git_common_dir: join(value.root, 'repository', '.git'), branch: `autopilot/unit/${owner.context.workstream_run}/unit-${entry.suffix}/attempt-1`, postcondition_worktree_clean: true, action: quarantine ? 'quarantine' : 'reset', summary: 'synthetic evidence must not release authority', created_at: '2026-07-12T10:00:00.000Z' };
         const evidenceSha256 = await writeEvidence(value.stateRoot, owner, evidenceRef, `${JSON.stringify(document)}\n`);
-        await owner.reconciliation.recordReleaseEvidence({ source: entry.source, targetId: entry.target, evidenceRef, evidenceSha256 });
+        await assert.rejects(() => owner.reconciliation.recordReleaseEvidence({ source: entry.source, targetId: entry.target, evidenceRef, evidenceSha256 }), /exactly one registered owner worktree/u);
+        const group = grantedGroups.get(entry.suffix);
+        if (group === undefined) throw new Error(`missing granted ${entry.suffix} group`);
+        await owner.negotiation.cancelGroup({ group, reason: 'synthetic failure evidence rejected before child launch' });
       }
-      assert.equal(array((await status(value.client, owner)).payload['edit_leases'], 'leases after terminal evidence').length, 0);
+      assert.equal(array((await status(value.client, owner)).payload['edit_leases'], 'leases after exact merge and prelaunch cleanup').length, 0);
 
       const closeGrant = await owner.negotiation.acquire(acquisitionInput('z', { condition_type: 'run-closed', target_id: owner.context.workstream_run, evidence: null }, 'src/close.ts'));
       assert.equal(closeGrant.outcome, 'granted');
@@ -347,36 +392,38 @@ void describe('Coordination Fabric offline replay and automatic reconciliation',
     }
   });
 
-  void it('repairs a committed terminal-child fact left before release when the coordinator restarts', async () => {
+  void it('repairs a running child from exact parent terminal acceptance after coordinator restart without releasing source edits', async () => {
     const value = await harness();
     try {
       const owner = await attachActor(value.client, value.stateRoot, 'a');
-      const requester = await attachActor(value.client, value.stateRoot, 'b');
       const childId = 'child-run-a-unit-a-1';
-      await owner.negotiation.acquire(acquisitionInput('a', { condition_type: 'child-terminal', target_id: childId, evidence: null }));
+      const specSha256 = await writeTerminalFixtureSpec(value, owner, 'unit-a');
+      await owner.negotiation.acquire({ ...acquisitionInput('a', { condition_type: 'unit-merged', target_id: 'unit-a:1', evidence: null }), specSha256 });
       const childToken = 'd'.repeat(64);
       await value.client.mutate('register-child', {
         repoId: owner.context.repo_id, workstreamRun: owner.context.workstream_run, sessionId: owner.context.session_id,
         fencingGeneration: owner.context.session_generation, expectedVersion: owner.context.run_version, idempotencyKey: 'register-restart-child',
       }, { child_lease_id: childId, autopilot_id: owner.context.autopilot_id, unit_id: 'unit-a', attempt: 1, pid: process.pid, boot_id: 'boot-child', child_token: childToken, lease_expires_at: '2099-01-01T00:00:00.000Z', session_lease_id: owner.context.session_lease_id, session_token: owner.context.session_token });
-      await requester.negotiation.acquire(acquisitionInput('b', { condition_type: 'unit-merged', target_id: 'unit-b:1', evidence: null }));
-      const recoveryEvidenceRef = '.pi/autopilot/work-a/receipts/unit-a.json';
-      const recoveryEvidenceSha = await writeEvidence(value.stateRoot, owner, recoveryEvidenceRef, JSON.stringify({ schema_version: 'autopilot.receipt.v1', tool_name: 'autopilot_emit_status', workstream: owner.context.workstream, unit_id: 'unit-a', attempt: 1 }) + '\n');
+      const acceptance = await writeTerminalAcceptance(value, owner, 'unit-a', childId, specSha256);
+      const preRestart = await status(value.client, owner);
+      const durableAttempt = array(preRestart.payload['unit_attempts'], 'terminal repair attempts').map(parseCoordinationUnitAttempt).find((attempt) => attempt.owner.unit_id === 'unit-a');
+      if (durableAttempt === undefined) throw new Error('terminal repair attempt missing');
+      const mainWorktreePath = join(value.stateRoot, 'worktrees', owner.context.repo_id, 'active', owner.context.workstream_run, 'main');
+      const proof = proveStructuredAttemptTerminal({ mainWorktreePath, runtimeRoot: join(mainWorktreePath, '.pi', 'autopilot', owner.context.workstream), repoId: owner.context.repo_id, autopilotId: owner.context.autopilot_id, workstream: owner.context.workstream, workstreamRun: owner.context.workstream_run, unitId: 'unit-a', attempt: 1, childLeaseId: childId, spec: durableAttempt.spec });
+      assert.equal(proof.proven, true, proof.proven ? undefined : proof.reason);
+      assert.equal(existsSync(join(value.stateRoot, 'worktrees', owner.context.repo_id, 'active', owner.context.workstream_run, 'main', ...acceptance.ref.split('/'))), true);
       await value.server.close();
-
-      const database = new DatabaseSync(coordinatorRuntimePaths(value.env).databasePath);
-      database.prepare("UPDATE child_leases SET status='terminal', terminal_evidence_ref=?, terminal_evidence_sha256=?, version=version+1 WHERE child_lease_id=?").run(recoveryEvidenceRef, recoveryEvidenceSha, childId);
-      database.close();
       value.server = await startCoordinatorServer(coordinatorRuntimePaths(value.env));
 
-      assert.equal(array((await status(value.client, owner)).payload['edit_leases'], 'owner leases after startup reconciliation').length, 0);
-      assert.equal((await groups(value.client, requester))[0]?.state, 'grant-ready');
-      const requesterStatus = await status(value.client, requester);
-      assert.equal(typeof requesterStatus.payload['pending_messages'] === 'number' && requesterStatus.payload['pending_messages'] >= 2, true);
+      const repaired = await status(value.client, owner);
+      const repairedChild = array(repaired.payload['child_leases'], 'repaired child leases').map((entry) => record(entry, 'repaired child')).find((entry) => entry['child_lease_id'] === childId);
+      assert.equal(repairedChild?.['status'], 'terminal');
+      assert.equal(record(repairedChild?.['terminal_evidence'], 'repaired terminal evidence')['sha256'], acceptance.sha256);
+      assert.equal(array(repaired.payload['edit_leases'], 'source edit leases after terminal repair').length, 1, 'terminal transport fact alone must retain source-changing edit authority');
       const doctor = await value.client.query('doctor');
       const startup = doctor.payload['last_startup_reconciliation'];
       if (typeof startup !== 'object' || startup === null || Array.isArray(startup)) throw new Error('startup reconciliation summary missing');
-      assert.equal(array((startup as Readonly<Record<string, unknown>>)['released_lease_ids'], 'startup released leases').length, 1);
+      assert.equal(array((startup as Readonly<Record<string, unknown>>)['released_lease_ids'], 'startup released edit leases').length, 0);
     } finally {
       await closeHarness(value);
     }

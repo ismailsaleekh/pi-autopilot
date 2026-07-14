@@ -44,10 +44,8 @@ void describe('claim GC runtime terminal fallback', () => {
       assert.equal((await readPathClaims(fixture.context.coordinationRoot)).length, 1);
 
       const contender = await prepareClaimFixture(root, 'claim-gc-contender', 'WRITE', fixture.source, false);
-      await expectRejects(
-        () => acquireClaimsForUnit({ context: contender.context, spec: contender.spec, reason: 'claim gc deadlock witness before apply' }),
-        /claim-conflict/u,
-      );
+      await acquireClaimsForUnit({ context: contender.context, spec: contender.spec, reason: 'legacy READ observation must not block isolated WRITE before cleanup' });
+      assert.equal((await readPathClaims(fixture.context.coordinationRoot)).length, 2);
 
       const applied = await runAutopilotClaimGc({
         sourceCwd: fixture.source,
@@ -57,11 +55,10 @@ void describe('claim GC runtime terminal fallback', () => {
       const appliedCandidate = candidateForUnit(applied.candidates, fixture.unitId);
       assert.equal(appliedCandidate.stale, true);
       assert.deepEqual(applied.released_claims, [`READ src/shared.ts ${fixture.unitId} attempt 1`]);
-      assert.equal((await readPathClaims(fixture.context.coordinationRoot)).length, 0);
+      assert.equal((await readPathClaims(fixture.context.coordinationRoot)).length, 1);
       const events = await readFile(join(fixture.context.coordinationRoot, CLAIM_EVENTS_FILE), 'utf8');
       assert.match(events, /autopilot claim gc mechanical stale release/u);
 
-      await acquireClaimsForUnit({ context: contender.context, spec: contender.spec, reason: 'claim gc deadlock witness after apply' });
       const claimsAfter = await readPathClaims(contender.context.coordinationRoot);
       assert.equal(claimsAfter.some((claim) => claim.autopilot_id === contender.prepared.active.autopilot_id && claim.claim_type === 'WRITE'), true);
     });

@@ -104,7 +104,7 @@ async function attachActor(harness: Harness, suffix: string): Promise<Actor> {
 function acquisitionInput(suffix: string, path = 'src/shared.ts') {
   return {
     acquisitionGroupId: `group-${suffix}`, unitId: `unit-${suffix}`, attempt: 1,
-    requestedLeases: [{ path, mode: 'WRITE' as const, purpose: `implement ${suffix}` }, { path: `docs/${suffix}.md`, mode: 'READ' as const, purpose: `read context ${suffix}` }],
+    requestedLeases: [{ path, mode: 'WRITE' as const, purpose: `implement ${suffix}` }],
     reason: `run ${suffix} changes ${path}`,
     normalReleaseCondition: { condition_type: 'unit-merged' as const, target_id: `unit-${suffix}:1`, evidence: null },
     specRef: `.pi/autopilot/work-${suffix}/unit-specs/unit-${suffix}.json`, specSha256: `sha256:${suffix.charCodeAt(0).toString(16).slice(-1).repeat(64)}` as `sha256:${string}`,
@@ -123,29 +123,55 @@ async function writeEvidence(harness: Harness, actor: Actor, ref: string, value:
 async function writeValidatorArtifacts(harness: Harness, actor: Actor, unitId: string, attempt: number): Promise<{
   readonly statusRef: string; readonly statusSha256: `sha256:${string}`; readonly receiptRef: string; readonly receiptSha256: `sha256:${string}`; readonly auditRef: string; readonly auditSha256: `sha256:${string}`;
 }> {
+  const main = join(harness.stateRoot, 'worktrees', actor.context.repo_id, 'active', actor.context.workstream_run, 'main');
+  const runtimeRoot = join(main, '.pi', 'autopilot', actor.context.workstream);
+  const head = git(main, ['rev-parse', 'HEAD']);
+  const specRef = `.pi/autopilot/${actor.context.workstream}/unit-specs/${unitId}.json`;
   const statusRef = `statuses/${unitId}.json`;
-  const statusPath = join(harness.stateRoot, 'worktrees', actor.context.repo_id, 'active', actor.context.workstream_run, 'main', '.pi', 'autopilot', actor.context.workstream, ...statusRef.split('/'));
-  const statusSha256 = await writeEvidence(harness, actor, `.pi/autopilot/${actor.context.workstream}/${statusRef}`, {
-    schema_version: 'autopilot.status.v1', workstream: actor.context.workstream, unit_id: unitId, role: 'validate', attempt, verdict: 'PASS', severity: 'clean', summary: 'Independent reservation validation passed.', changed_paths: [], findings: [], commands: [{ command: 'generic-validation', status: 'passed', exit_code: 0, summary: 'passed' }], evidence_refs: [], report_ref: null, next_action: 'close',
-  });
   const receiptRef = `receipts/${unitId}.json`;
-  const receiptSha256 = await writeEvidence(harness, actor, `.pi/autopilot/${actor.context.workstream}/${receiptRef}`, {
-    schema_version: 'autopilot.receipt.v1', tool_name: 'autopilot_emit_status', workstream: actor.context.workstream, unit_id: unitId, role: 'validate', attempt, emitted_at: '2026-07-12T10:11:00.000Z', status_output: statusPath, status_sha256: statusSha256, schema_sha256: `sha256:${'a'.repeat(64)}`, tool_call_id: `tool-${unitId}`, provider_identity: { provider_id: 'openai-codex', requested_model_id: 'openai-codex/gpt-5.6-sol', executed_model_id: 'openai-codex/gpt-5.6-sol', api: 'openai-codex-responses', thinking_level: 'xhigh' }, expected_identity_hash: `sha256:${'b'.repeat(64)}`,
-  });
   const auditRef = `execution-audits/${unitId}.json`;
-  const auditSha256 = await writeEvidence(harness, actor, `.pi/autopilot/${actor.context.workstream}/${auditRef}`, {
-    schema_version: 'autopilot.execution_audit.v1', workstream: actor.context.workstream, unit_id: unitId, role: 'validate', attempt, audited_at: '2026-07-12T10:11:00.000Z', cwd: join(harness.stateRoot, 'worktrees', actor.context.repo_id, 'active', actor.context.workstream_run, 'main'), git_head: null, dirty_baseline: false, dirty_baseline_paths: [], dirty_relevant_paths: [], actual_changed_paths: [], status_reported_changed_paths: [], omitted_status_changes: [], reported_but_not_actual_changes: [], outside_owned_paths: [], read_only_touched_paths: [], untouchable_touched_paths: [], path_counts: { dirty_baseline_paths: 0, dirty_relevant_paths: 0, actual_changed_paths: 0, status_reported_changed_paths: 0, omitted_status_changes: 0, reported_but_not_actual_changes: 0, outside_owned_paths: 0, read_only_touched_paths: 0, untouchable_touched_paths: 0 }, truncated_path_sets: [], declared_validation_commands: ['generic-validation'], status_reported_commands: ['generic-validation'], command_coverage_gaps: [], classification: 'clean', evidence_refs: [], summary: 'Independent reservation validation audit is clean.',
-  });
+  const fullStatusRef = `.pi/autopilot/${actor.context.workstream}/${statusRef}`;
+  const fullReceiptRef = `.pi/autopilot/${actor.context.workstream}/${receiptRef}`;
+  const fullAuditRef = `.pi/autopilot/${actor.context.workstream}/${auditRef}`;
+  const statusPath = join(runtimeRoot, ...statusRef.split('/'));
+  const receiptPath = join(runtimeRoot, ...receiptRef.split('/'));
+  const auditPath = join(runtimeRoot, ...auditRef.split('/'));
+  const specDocument = {
+    schema_version: 'autopilot.unit_spec.v1', workstream: actor.context.workstream, unit_id: unitId, role: 'validate', template: 'validate', attempt,
+    objective: 'Independently validate reservation integration.', cwd: main, model: 'openai-codex/gpt-5.6-sol', thinking: 'xhigh', owned_paths: [], read_only_paths: ['README.md'], untouchable_paths: [], context_refs: [], validation_commands: ['generic-validation'],
+    status_output: statusPath, receipt_output: receiptPath, evidence_dir: join(runtimeRoot, 'evidence', unitId), stop_boundary: 'Do not edit source.', quality_profile: 'validation-only', risk_level: 'low',
+    acceptance_criteria: ['reservation integration is independently validated'],
+    verification_plan: { positive_witnesses: [{ id: 'reservation-validation', command: 'generic-validation', expected_signal: 'command exits zero', required: true }], negative_witnesses: [], regression_witnesses: [], real_boundary_witnesses: [], blast_radius_checks: [], docs_schema_prompt_checks: [], dirty_tree_checks: [] },
+    closure_criteria: ['validation status is PASS'], upstream_refs: [], timeout_seconds: 3600, render_prompt_snapshot: true,
+  };
+  const specSha256 = await writeEvidence(harness, actor, specRef, specDocument);
+  const statusDocument = {
+    schema_version: 'autopilot.status.v1', workstream: actor.context.workstream, unit_id: unitId, role: 'validate', attempt, verdict: 'PASS', severity: 'clean', summary: 'Independent reservation validation passed.', changed_paths: [], findings: [], commands: [{ command: 'generic-validation', status: 'passed', exit_code: 0, summary: 'passed' }], evidence_refs: [], report_ref: null, covered_witness_ids: ['reservation-validation'], next_action: 'close',
+  };
+  const statusSha256 = await writeEvidence(harness, actor, fullStatusRef, statusDocument);
+  const receiptDocument = {
+    schema_version: 'autopilot.receipt.v1', tool_name: 'autopilot_emit_status', workstream: actor.context.workstream, unit_id: unitId, role: 'validate', attempt, emitted_at: '2026-07-12T10:11:00.000Z', status_output: statusPath, status_sha256: statusSha256, schema_sha256: `sha256:${'a'.repeat(64)}`, tool_call_id: `tool-${unitId}`, provider_identity: { provider_id: 'openai-codex', requested_model_id: 'openai-codex/gpt-5.6-sol', executed_model_id: 'openai-codex/gpt-5.6-sol', api: 'openai-codex-responses', thinking_level: 'xhigh' }, expected_identity_hash: `sha256:${'b'.repeat(64)}`,
+  };
+  const receiptSha256 = await writeEvidence(harness, actor, fullReceiptRef, receiptDocument);
+  const auditDocument = {
+    schema_version: 'autopilot.execution_audit.v1', workstream: actor.context.workstream, unit_id: unitId, role: 'validate', attempt, audited_at: '2026-07-12T10:11:00.000Z', cwd: main, git_head: head, baseline_head: head, post_run_head: head, head_change_kind: 'none', committed_changed_paths: [], dirty_baseline: false, dirty_baseline_paths: [], dirty_relevant_paths: [], actual_changed_paths: [], status_reported_changed_paths: [], omitted_status_changes: [], reported_but_not_actual_changes: [], outside_owned_paths: [], read_only_touched_paths: [], untouchable_touched_paths: [], path_counts: { dirty_baseline_paths: 0, dirty_relevant_paths: 0, actual_changed_paths: 0, status_reported_changed_paths: 0, omitted_status_changes: 0, reported_but_not_actual_changes: 0, outside_owned_paths: 0, read_only_touched_paths: 0, untouchable_touched_paths: 0 }, truncated_path_sets: [], declared_validation_commands: ['generic-validation'], status_reported_commands: ['generic-validation'], command_coverage_gaps: [], classification: 'clean', evidence_refs: [], summary: 'Independent reservation validation audit is clean.',
+  };
+  const auditSha256 = await writeEvidence(harness, actor, fullAuditRef, auditDocument);
   const childId = `child-${actor.context.workstream_run}-${unitId}-${String(attempt)}`;
-  await harness.client.mutate('register-attempt', { repoId: actor.context.repo_id, workstreamRun: actor.context.workstream_run, sessionId: actor.context.session_id, fencingGeneration: actor.context.session_generation, expectedVersion: actor.context.run_version, idempotencyKey: `register-attempt-${childId}` }, { unit_id: unitId, attempt, spec_ref: `unit-specs/${unitId}.json`, spec_sha256: `sha256:${'c'.repeat(64)}`, role: 'validate', preemptible: true, checkpoint_ordinal: 0, session_lease_id: actor.context.session_lease_id, session_token: actor.context.session_token });
+  await harness.client.mutate('register-attempt', { repoId: actor.context.repo_id, workstreamRun: actor.context.workstream_run, sessionId: actor.context.session_id, fencingGeneration: actor.context.session_generation, expectedVersion: actor.context.run_version, idempotencyKey: `register-attempt-${childId}` }, { unit_id: unitId, attempt, spec_ref: specRef, spec_sha256: specSha256, role: 'validate', preemptible: true, checkpoint_ordinal: 0, session_lease_id: actor.context.session_lease_id, session_token: actor.context.session_token });
   const childToken = createHash('sha256').update(childId, 'utf8').digest('hex');
   const registered = await harness.client.mutate('register-child', {
     repoId: actor.context.repo_id, workstreamRun: actor.context.workstream_run, sessionId: actor.context.session_id, fencingGeneration: actor.context.session_generation, expectedVersion: actor.context.run_version, idempotencyKey: `register-${childId}`,
   }, { child_lease_id: childId, autopilot_id: actor.context.autopilot_id, unit_id: unitId, attempt, pid: process.pid, boot_id: actor.context.boot_id, child_token: childToken, lease_expires_at: '2099-01-01T00:00:00.000Z', session_lease_id: actor.context.session_lease_id, session_token: actor.context.session_token });
   const child = parseCoordinationChildLease(registered.payload['child']);
+  const acceptanceRef = `.pi/autopilot/${actor.context.workstream}/terminal-acceptances/${unitId}.validate.attempt-${String(attempt)}.json`;
+  const acceptanceSha = await writeEvidence(harness, actor, acceptanceRef, {
+    schema_version: 'autopilot.child_terminal_acceptance.v1', repo_id: actor.context.repo_id, autopilot_id: actor.context.autopilot_id, workstream: actor.context.workstream, workstream_run: actor.context.workstream_run, unit_id: unitId, role: 'validate', attempt, child_lease_id: childId, verdict: 'PASS', transport_result: 'accepted',
+    spec: { ref: specRef, sha256: specSha256 }, status: { ref: fullStatusRef, sha256: statusSha256 }, receipt: { ref: fullReceiptRef, sha256: receiptSha256 }, audit: { ref: fullAuditRef, sha256: auditSha256 }, tool_call_id: `tool-${unitId}`, carrier_status_sha256: statusSha256, audit_disposition: 'zero-change', created_at: '2026-07-12T10:12:00.000Z',
+  });
   await harness.client.mutate('complete-child', {
     repoId: actor.context.repo_id, workstreamRun: actor.context.workstream_run, sessionId: null, fencingGeneration: null, expectedVersion: child.version, idempotencyKey: `complete-${childId}`,
-  }, { child_lease_id: childId, child_token: childToken, pid: process.pid, boot_id: actor.context.boot_id, status: 'terminal', evidence_ref: `.pi/autopilot/${actor.context.workstream}/${receiptRef}`, evidence_sha256: receiptSha256 });
+  }, { child_lease_id: childId, child_token: childToken, pid: process.pid, boot_id: actor.context.boot_id, status: 'terminal', evidence_ref: acceptanceRef, evidence_sha256: acceptanceSha });
   return { statusRef, statusSha256, receiptRef, receiptSha256, auditRef, auditSha256 };
 }
 
@@ -385,7 +411,7 @@ void describe('Coordination Fabric edit leases and change reservations', () => {
       const ref = `.pi/autopilot/${actor.context.workstream}/unit-merges/unit-k.implement.attempt-1.json`;
       const sha = await writeEvidence(harness, actor, ref, unitMergeDocument(actor, 'k', [], before, after));
       await assert.rejects(() => actor.reconciliation.recordReleaseEvidence({ source: 'unit-merge', targetId: 'unit-k:1', evidenceRef: ref, evidenceSha256: sha }), /changed_paths do not equal the exact Git diff/u);
-      assert.equal(values((await status(harness, actor)).payload['edit_leases'], 'leases after underreported merge').length, 2);
+      assert.equal(values((await status(harness, actor)).payload['edit_leases'], 'leases after underreported merge').length, 1);
       assert.equal(values((await status(harness, actor)).payload['change_reservations'], 'reservations after underreported merge').length, 0);
     } finally {
       await harness.server.close();
@@ -401,7 +427,7 @@ void describe('Coordination Fabric edit leases and change reservations', () => {
       assert.equal(grant.outcome, 'granted');
       await assert.rejects(() => recordUnitMerge(harness, actor, 'x', ['src/not-owned.ts']), /outside active WRITE\/EXCLUSIVE authority/u);
       const current = await status(harness, actor);
-      assert.equal(values(current.payload['edit_leases'], 'edit leases').map((entry) => parseCoordinationEditLease(entry)).length, 2);
+      assert.equal(values(current.payload['edit_leases'], 'edit leases').map((entry) => parseCoordinationEditLease(entry)).length, 1);
       assert.equal(values(current.payload['change_reservations'], 'reservations').length, 0);
       if (grant.outcome !== 'granted') throw new Error('preflight grant is missing');
       await actor.negotiation.cancelGroup({ group: grant.acquisitionGroup, reason: 'clean prelaunch rollback witness' });

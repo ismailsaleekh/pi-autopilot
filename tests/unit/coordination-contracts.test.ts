@@ -9,6 +9,7 @@ import {
   assertCoordinationInvariants,
   checkCoordinationInvariants,
   coordinationFailureDefinition,
+  parseAutopilotChildTerminalAcceptance,
   parseCoordinationEscalation,
   parseCoordinationMigrationRecoveryWork,
   parseCoordinationSnapshot,
@@ -29,6 +30,7 @@ void describe('Coordination Fabric contracts and invariants', () => {
       'authoritative_artifact',
       'change_reservation',
       'child_lease',
+      'child_terminal_acceptance',
       'claim_request',
       'contradiction_adjudication',
       'coordinator_request',
@@ -42,6 +44,7 @@ void describe('Coordination Fabric contracts and invariants', () => {
       'message',
       'migration_record',
       'migration_recovery_work',
+      'observation',
       'reconciliation_evidence',
       'repository',
       'reservation_obligation',
@@ -61,6 +64,20 @@ void describe('Coordination Fabric contracts and invariants', () => {
     }
   });
 
+  void it('strictly parses parent-owned child-terminal acceptance evidence', () => {
+    const digest = `sha256:${'a'.repeat(64)}` as const;
+    const acceptance = {
+      schema_version: 'autopilot.child_terminal_acceptance.v1', repo_id: 'repo-1', autopilot_id: 'auto-1', workstream: 'work-1', workstream_run: 'run-1',
+      unit_id: 'unit-1', role: 'validate', attempt: 2, child_lease_id: 'child-run-1-unit-1-2', verdict: 'NEEDS_FIX', transport_result: 'accepted',
+      spec: { ref: 'unit-specs/unit-1.validate.attempt-2.json', sha256: digest }, status: { ref: 'statuses/unit-1.validate.attempt-2.json', sha256: digest },
+      receipt: { ref: 'receipts/unit-1.validate.attempt-2.receipt.json', sha256: digest }, audit: { ref: 'execution-audits/unit-1.validate.attempt-2.json', sha256: digest },
+      tool_call_id: 'call-1', carrier_status_sha256: digest, audit_disposition: 'zero-change', created_at: '2026-07-14T00:00:00.000Z',
+    } as const;
+    assert.deepEqual(parseAutopilotChildTerminalAcceptance(jsonRoundTrip(acceptance)), acceptance);
+    assert.throws(() => parseAutopilotChildTerminalAcceptance({ ...acceptance, hidden_fallback: true }), /fields are not exact/u);
+    assert.throws(() => parseAutopilotChildTerminalAcceptance({ ...acceptance, carrier_status_sha256: `sha256:${'B'.repeat(64)}` }), /carrier_status_sha256 is invalid/u);
+  });
+
   void it('parses a complete snapshot from unknown and proves its invariants', () => {
     const parsed = parseCoordinationSnapshot(jsonRoundTrip(validCoordinationSnapshot()));
     assert.equal(parsed.runs.length, 2);
@@ -75,19 +92,16 @@ void describe('Coordination Fabric contracts and invariants', () => {
       () => parseCoordinationSnapshot({ ...snapshot, hidden_fallback: true }),
       /unknown fields: hidden_fallback/u,
     );
-    assert.throws(
-      () => parseCoordinationSnapshot({
-        ...snapshot,
-        acquisition_groups: snapshot.acquisition_groups.map((group) => group.acquisition_group_id === 'group-b' ? {
-          ...group,
-          requested_leases: [
-            ...group.requested_leases,
-            { path: 'src', mode: 'READ', purpose: 'incompatible parent read' },
-          ],
-        } : group),
-      }),
-      /internally incompatible authority/u,
-    );
+    assert.doesNotThrow(() => parseCoordinationSnapshot({
+      ...snapshot,
+      acquisition_groups: snapshot.acquisition_groups.map((group) => group.acquisition_group_id === 'group-b' ? {
+        ...group,
+        requested_leases: [
+          ...group.requested_leases,
+          { path: 'src', mode: 'READ', purpose: 'non-blocking parent observation', source_identity: { base_commit: 'a'.repeat(40), object_id: 'b'.repeat(40), object_kind: 'tree' } },
+        ],
+      } : group),
+    }));
     const conflicting = {
       ...snapshot,
       edit_leases: [
@@ -147,7 +161,7 @@ void describe('Coordination Fabric contracts and invariants', () => {
   void it('strictly validates versioned query and mutation envelopes', () => {
     const query = parseCoordinatorRequestEnvelope({
       schema_version: 'autopilot.coordinator_request.v1',
-      protocol_version: '1.3',
+      protocol_version: '1.4',
       request_id: 'request-1',
       action: 'status',
       idempotency_key: null,
@@ -159,7 +173,7 @@ void describe('Coordination Fabric contracts and invariants', () => {
       payload: JSON.parse('{}') as unknown,
     });
     assert.equal(query.action, 'status');
-    assert.throws(() => parseCoordinatorRequestEnvelope({ ...query, protocol_version: '1.2' }), /protocol_version must equal 1.3/u);
+    assert.throws(() => parseCoordinatorRequestEnvelope({ ...query, protocol_version: '1.2' }), /protocol_version must equal 1.4/u);
     assert.throws(
       () => parseCoordinatorRequestEnvelope({ ...query, action: 'heartbeat', payload: { lease_expires_at: '2026-07-11T16:00:00.000Z' } }),
       /mutating requests require/u,
@@ -212,7 +226,7 @@ void describe('Coordination Fabric contracts and invariants', () => {
     }), /must differ/u);
     assert.equal(parseCoordinatorResponseEnvelope({
       schema_version: 'autopilot.coordinator_response.v1',
-      protocol_version: '1.3',
+      protocol_version: '1.4',
       request_id: 'request-1',
       ok: false,
       committed_event_seq: null,

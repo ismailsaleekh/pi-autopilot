@@ -19,8 +19,8 @@ function packFilename(stdout: string): string {
   return filename;
 }
 
-void describe('BUG-175 packed mixed-build compatibility', () => {
-  void it('runs the installed 1.0.3 client through the exact live v1.0.1 coordinator without replacing it', async () => {
+void describe('packed coordinator version boundary', () => {
+  void it('rejects the exact live protocol-1.3 coordinator without replacing it', async () => {
     const root = await mkdtemp(join(tmpdir(), 'pi-autopilot-bug-175-packed-'));
     const packRoot = join(root, 'pack');
     const installRoot = join(root, 'consumer');
@@ -41,12 +41,13 @@ void describe('BUG-175 packed mixed-build compatibility', () => {
       const before = await readFile(tagged.paths.lockPath, 'utf8');
       const clientModule = pathToFileURL(join(installRoot, 'node_modules', 'pi-autopilot', 'dist', 'src', 'core', 'coordination', 'client.js')).href;
       const probe = join(root, 'installed-client-probe.mjs');
-      await writeFile(probe, `import { CoordinatorClient } from ${JSON.stringify(clientModule)};\nconst client = new CoordinatorClient({ env: { ...process.env, AUTOPILOT_STATE_ROOT: process.env.AUTOPILOT_STATE_ROOT }, autoStart: false });\nconst response = await client.query('handshake');\nconsole.log(JSON.stringify(response.payload));\n`, 'utf8');
+      await writeFile(probe, `import { CoordinatorClient } from ${JSON.stringify(clientModule)};\nconst client = new CoordinatorClient({ env: { ...process.env, AUTOPILOT_STATE_ROOT: process.env.AUTOPILOT_STATE_ROOT }, autoStart: false });\ntry { await client.query('handshake'); console.error('historical broker unexpectedly accepted'); process.exit(2); } catch (error) { console.log(JSON.stringify({ rejected: true, code: error?.code ?? null, message: error instanceof Error ? error.message : String(error) })); }\n`, 'utf8');
       const result = spawnSync(process.execPath, [probe], { cwd: installRoot, encoding: 'utf8', env: { ...process.env, AUTOPILOT_STATE_ROOT: stateRoot } });
       assert.equal(result.status, 0, result.stderr);
       const payload: unknown = JSON.parse(result.stdout.trim()) as unknown;
       if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) throw new Error('installed mixed-build probe returned malformed payload');
-      assert.equal((payload as Readonly<Record<string, unknown>>)['package_build'], '1.0.1-cf38');
+      assert.equal((payload as Readonly<Record<string, unknown>>)['rejected'], true);
+      assert.match(String((payload as Readonly<Record<string, unknown>>)['message']), /protocol|compatible|migration|schema/u);
       assert.equal(await readFile(tagged.paths.lockPath, 'utf8'), before);
     } finally {
       if (tagged !== null) await tagged.close();

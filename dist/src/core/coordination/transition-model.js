@@ -13,6 +13,7 @@ export function emptyCoordinationSnapshot() {
         child_leases: [],
         unit_attempts: [],
         acquisition_groups: [],
+        observations: [],
         edit_leases: [],
         change_reservations: [],
         reservation_obligations: [],
@@ -131,23 +132,23 @@ export function grantCoordinationAcquisitionGroup(snapshot, input) {
     if (blockers.length > 0)
         throw new CoordinationRuntimeError('coordinator-contention', 'complete acquisition group is blocked', blockers.map((lease) => lease.edit_lease_id));
     const event = nextEvent(snapshot, input, 'acquisition-group-granted', 'acquisition-group', group.acquisition_group_id);
-    const leases = group.requested_leases.map((requested, index) => ({
-        schema_version: 'autopilot.edit_lease.v1',
-        edit_lease_id: `${group.acquisition_group_id}:lease:${String(index + 1)}`,
-        owner: group.owner,
-        acquisition_group_id: group.acquisition_group_id,
-        path: requested.path,
-        mode: requested.mode,
-        purpose: requested.purpose,
-        acquired_event_seq: event.sequence,
-        normal_release_condition: input.normalReleaseCondition,
-        version: 1,
-    }));
+    const observations = [];
+    const leases = [];
+    for (const [index, requested] of group.requested_leases.entries()) {
+        if (requested.mode === 'READ') {
+            if (requested.source_identity === undefined || requested.source_identity.object_kind === 'missing')
+                throw new CoordinationRuntimeError('invalid-request', 'modeled READ observation requires exact source identity');
+            observations.push({ schema_version: 'autopilot.observation.v1', observation_id: `${group.acquisition_group_id}:observation:${String(index + 1)}`, owner: group.owner, acquisition_group_id: group.acquisition_group_id, path: requested.path, purpose: requested.purpose, source_identity: requested.source_identity, execution_state: 'active', freshness: 'current', recorded_event_seq: event.sequence, released_event_seq: null, stale_event_seq: null, stale_by_reservation_id: null, stale_by_commit: null, version: 1 });
+        }
+        else
+            leases.push({ schema_version: 'autopilot.edit_lease.v1', edit_lease_id: `${group.acquisition_group_id}:lease:${String(index + 1)}`, owner: group.owner, acquisition_group_id: group.acquisition_group_id, path: requested.path, mode: requested.mode, purpose: requested.purpose, acquired_event_seq: event.sequence, normal_release_condition: input.normalReleaseCondition, version: 1 });
+    }
     const grantedGroup = { ...group, state: 'granted', grant_event_seq: event.sequence, offer_expires_at: null, version: group.version + 1 };
     const next = {
         ...snapshot,
         repository_event_seq: event.sequence,
         acquisition_groups: snapshot.acquisition_groups.map((candidate) => candidate.acquisition_group_id === group.acquisition_group_id ? grantedGroup : candidate),
+        observations: [...snapshot.observations, ...observations],
         edit_leases: [...snapshot.edit_leases, ...leases],
         events: [...snapshot.events, event.event],
     };

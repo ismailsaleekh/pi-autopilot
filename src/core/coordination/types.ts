@@ -1,5 +1,5 @@
 export const AUTOPILOT_COORDINATION_SNAPSHOT_SCHEMA = 'autopilot.coordination_snapshot.v1' as const;
-export const AUTOPILOT_COORDINATOR_PROTOCOL_VERSION = '1.3' as const;
+export const AUTOPILOT_COORDINATOR_PROTOCOL_VERSION = '1.4' as const;
 export const AUTOPILOT_COORDINATOR_REQUEST_SCHEMA = 'autopilot.coordinator_request.v1' as const;
 export const AUTOPILOT_COORDINATOR_RESPONSE_SCHEMA = 'autopilot.coordinator_response.v1' as const;
 export const AUTOPILOT_COORDINATION_PREFLIGHT_SCHEMA = 'autopilot.coordination_preflight.v1' as const;
@@ -25,7 +25,10 @@ export const COORDINATION_OPERATION_TYPES = ['create', 'materialize', 'commit', 
 export const COORDINATION_RELEASE_CONDITION_TYPES = ['child-terminal', 'unit-merged', 'attempt-reset', 'quarantine-captured', 'run-closed', 'explicit-owner-release'] as const;
 export const COORDINATION_RECONCILIATION_SOURCES = ['child-process', 'unit-merge', 'attempt-reset', 'quarantine-capture', 'run-close', 'run-abort'] as const;
 export const COORDINATION_RESERVATION_OBLIGATION_STATES = ['waiting-for-predecessor', 'integration-required', 'resolved', 'cancelled'] as const;
-export const COORDINATION_MESSAGE_TYPES = ['claim-request', 'release-notification', 'grant-offer', 'recovery-required', 'reservation-overlap', 'reservation-landed', 'deadlock-resolution', 'adjudication-assignment'] as const;
+export const COORDINATION_MESSAGE_TYPES = ['claim-request', 'release-notification', 'grant-offer', 'recovery-required', 'reservation-overlap', 'reservation-landed', 'observation-stale', 'deadlock-resolution', 'adjudication-assignment'] as const;
+export const COORDINATION_OBSERVATION_EXECUTION_STATES = ['active', 'released', 'abandoned', 'cancelled'] as const;
+export const COORDINATION_OBSERVATION_FRESHNESS_STATES = ['current', 'stale'] as const;
+export const COORDINATION_OBSERVATION_OBJECT_KINDS = ['blob', 'tree', 'missing'] as const;
 export const COORDINATION_WAIT_EDGE_STATES = ['active', 'resolved'] as const;
 export const COORDINATION_DEADLOCK_STATES = ['detected', 'victim-selected', 'awaiting-recovery', 'resolved', 'deferred-no-safe-victim'] as const;
 export const COORDINATION_DEADLOCK_ACTIONS = ['cancel-and-supersede', 'request-reset-or-quarantine', 'none'] as const;
@@ -58,6 +61,9 @@ export type CoordinationDeadlockState = (typeof COORDINATION_DEADLOCK_STATES)[nu
 export type CoordinationDeadlockAction = (typeof COORDINATION_DEADLOCK_ACTIONS)[number];
 export type CoordinationDeadlockVictimClass = 1 | 2 | 3;
 export type CoordinationOperationalEscalationReason = (typeof COORDINATION_OPERATIONAL_ESCALATION_REASONS)[number];
+export type CoordinationObservationExecutionState = (typeof COORDINATION_OBSERVATION_EXECUTION_STATES)[number];
+export type CoordinationObservationFreshnessState = (typeof COORDINATION_OBSERVATION_FRESHNESS_STATES)[number];
+export type CoordinationObservationObjectKind = (typeof COORDINATION_OBSERVATION_OBJECT_KINDS)[number];
 
 export interface CoordinationEvidenceRef {
   readonly ref: string;
@@ -181,10 +187,18 @@ export interface CoordinationUnitAttempt {
   readonly version: number;
 }
 
+export interface CoordinationObservationSourceIdentity {
+  readonly base_commit: string;
+  readonly object_id: string;
+  readonly object_kind: CoordinationObservationObjectKind;
+}
+
 export interface CoordinationRequestedLease {
   readonly path: string;
   readonly mode: CoordinationClaimMode;
   readonly purpose: string;
+  /** Required for new READ observations; absent only on pre-redesign persisted groups. */
+  readonly source_identity?: CoordinationObservationSourceIdentity;
 }
 
 export interface CoordinationAcquisitionGroup {
@@ -202,6 +216,24 @@ export interface CoordinationAcquisitionGroup {
   readonly offer_expires_at: string | null;
   readonly offer_count: number;
   readonly bypass_count: number;
+  readonly version: number;
+}
+
+export interface CoordinationObservation {
+  readonly schema_version: 'autopilot.observation.v1';
+  readonly observation_id: string;
+  readonly owner: CoordinationOwnerIdentity;
+  readonly acquisition_group_id: string;
+  readonly path: string;
+  readonly purpose: string;
+  readonly source_identity: CoordinationObservationSourceIdentity;
+  readonly execution_state: CoordinationObservationExecutionState;
+  readonly freshness: CoordinationObservationFreshnessState;
+  readonly recorded_event_seq: number;
+  readonly released_event_seq: number | null;
+  readonly stale_event_seq: number | null;
+  readonly stale_by_reservation_id: string | null;
+  readonly stale_by_commit: string | null;
   readonly version: number;
 }
 
@@ -305,6 +337,8 @@ export interface CoordinationReconciliationEvidence {
 
 export interface CoordinationReconciliationSummary {
   readonly released_lease_ids: readonly string[];
+  readonly released_observation_ids: readonly string[];
+  readonly stale_observation_ids: readonly string[];
   readonly released_request_ids: readonly string[];
   readonly notification_ids: readonly string[];
   readonly offered_group_ids: readonly string[];
@@ -501,6 +535,7 @@ export interface CoordinationSnapshot {
   readonly child_leases: readonly CoordinationChildLease[];
   readonly unit_attempts: readonly CoordinationUnitAttempt[];
   readonly acquisition_groups: readonly CoordinationAcquisitionGroup[];
+  readonly observations: readonly CoordinationObservation[];
   readonly edit_leases: readonly CoordinationEditLease[];
   readonly change_reservations: readonly CoordinationChangeReservation[];
   readonly reservation_obligations: readonly CoordinationReservationObligation[];

@@ -1193,9 +1193,9 @@ function findClaimBlockers(existing, requested, authority) {
     return Object.freeze(blockers);
 }
 function claimTypesConflict(requested, existing) {
-    if (requested === 'READ' && existing === 'READ')
-        return false;
-    return true;
+    // READ records stable bytes in an isolated worktree; it is an observation,
+    // not shared-checkout exclusion authority.
+    return requested !== 'READ' && existing !== 'READ';
 }
 function isIdempotentSameUnitClaim(req, claim, authority) {
     return claim.autopilot_id === authority.autopilot_id &&

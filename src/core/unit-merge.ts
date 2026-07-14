@@ -7,6 +7,10 @@ import { parseAutopilotExecutionAudit, parseAutopilotExecutionCommit, parseAutop
 import { gitHead, readGitStatus, releaseClaimsForUnit, runGit, updateUnitBranchStatus, withAutopilotFileLock, writeJsonAtomic, type ActiveAutopilotContext, type ActiveAutopilotRow, type ProcessEnvLike } from './parallel-runtime.ts';
 import { cleanupTerminalUnitWorktree } from './worktree-cleanup.ts';
 import { recordCoordinatorReleaseEvidenceFromFile } from './coordination/reconciliation.ts';
+import { CoordinatorClient } from './coordination/client.ts';
+import { coordinationPathsOverlap, parseCoordinationObservation } from './coordination/contracts.ts';
+import { readCoordinatorSessionContext } from './coordination/supervisor.ts';
+import { AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV } from './names.ts';
 import { executeOwnedWorktreeSaga, WorktreeSagaCompensatedError, type WorktreeSagaInspection } from './coordination/worktree-saga.ts';
 import { recordValidationStalenessForMerge } from './validation-staleness.ts';
 
@@ -76,6 +80,10 @@ export async function mergeAutopilotUnit(input: {
     const executionCommit = parseAutopilotExecutionCommit(await readJsonFile(input.executionCommitPath));
     const blockers = mergePreflightBlockers(active, input.unitId, input.attempt, status, receipt, audit, executionCommit);
     if (blockers.length > 0) return { outcome: 'blocked', merge: null, blockers, conflict_path: null };
+    if (active.coordination_authority === 'coordinator-edit-leases-v1') {
+      const observationBlockers = await activeMainObservationBlockers(active, executionCommit.edited_claimed_paths, input.env ?? process.env);
+      if (observationBlockers.length > 0) return { outcome: 'blocked', merge: null, blockers: observationBlockers, conflict_path: null };
+    }
     const unitBranch = executionCommit.branch;
     const unitHead = gitHead(executionCommit.cwd);
     const validatedUnitHead = executionCommit.commit_sha;
@@ -233,6 +241,18 @@ export async function mergeAutopilotUnit(input: {
     });
     return { outcome: 'merged', merge, blockers: [], conflict_path: null };
   });
+}
+
+async function activeMainObservationBlockers(active: ActiveAutopilotRow, changedPaths: readonly string[], env: ProcessEnvLike): Promise<readonly string[]> {
+  const contextPath = env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV];
+  if (contextPath === undefined || contextPath.trim().length === 0) fail('coordinator-session-missing', 'unit merge requires the current owner session before mutating the shared run main worktree.');
+  const session = await readCoordinatorSessionContext(contextPath);
+  if (session.repo_id !== active.repo_key || session.autopilot_id !== active.autopilot_id || session.workstream_run !== active.workstream_run) fail('coordinator-session-mismatch', 'unit merge session does not own the run main worktree.', [session.workstream_run, active.workstream_run]);
+  const response = await new CoordinatorClient({ env: { ...env, AUTOPILOT_STATE_ROOT: session.state_root } }).query('status', session.repo_id, session.workstream_run);
+  const raw = response.payload['observations'];
+  if (!Array.isArray(raw)) fail('coordinator-status-invalid', 'coordinator status observations are not an array.');
+  const activeObservations = raw.map(parseCoordinationObservation).filter((observation) => observation.owner.workstream_run === active.workstream_run && observation.execution_state === 'active' && changedPaths.some((path) => coordinationPathsOverlap(path, observation.path)));
+  return Object.freeze(activeObservations.map((observation) => `run-main integration waits for active observation ${observation.observation_id} on ${observation.path}`));
 }
 
 export function parseAutopilotUnitMerge(value: unknown): AutopilotUnitMerge {

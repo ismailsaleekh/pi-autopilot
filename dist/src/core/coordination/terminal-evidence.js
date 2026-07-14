@@ -1,13 +1,14 @@
 import { parseAutopilotExecutionAudit, parseAutopilotReceipt, parseAutopilotStatusEntry } from "../contracts/index.js";
 import { CoordinationRuntimeError } from "./failures.js";
+import { AUTOPILOT_CHILD_TERMINAL_ACCEPTANCE_SCHEMA, parseAutopilotChildTerminalAcceptance } from "./terminal-acceptance.js";
 function record(value, label) {
     if (typeof value !== 'object' || value === null || Array.isArray(value))
         throw new CoordinationRuntimeError('invalid-state', `${label} must be a JSON object`);
     return value;
 }
-function text(value, field, label) {
+function text(value, field, label, maximum = 2048) {
     const entry = value[field];
-    if (typeof entry !== 'string' || entry.length === 0 || entry.length > 2048)
+    if (typeof entry !== 'string' || entry.length === 0 || entry.length > maximum)
         throw new CoordinationRuntimeError('invalid-state', `${label}.${field} must be bounded non-empty text`);
     return entry;
 }
@@ -68,6 +69,47 @@ export function parseUnitMergeReservationFacts(bytes) {
     if (executionCommitRef.startsWith('/') || executionCommitRef.startsWith('../') || executionCommitRef.includes('/../') || executionCommitRef.includes('\\'))
         throw new CoordinationRuntimeError('invalid-state', 'unit-merge execution_commit_ref is unsafe');
     return { changedPaths: stringArray(document, 'changed_paths', 'unit-merge reservation evidence'), integrationBefore, integrationAfter, mergeCommitSha, executionCommitRef };
+}
+export function parseUnitFailureEvidenceFacts(bytes, expected) {
+    const document = jsonDocument(bytes, 'unit failure evidence');
+    if (text(document, 'schema_version', 'unit failure evidence') !== 'autopilot.unit_failure.v1')
+        throw new CoordinationRuntimeError('invalid-state', 'unit failure evidence schema is incompatible');
+    assertIdentity(document, expected, false);
+    const action = text(document, 'action', 'unit failure evidence');
+    if (action !== 'quarantine' && action !== 'reset' && action !== 'preserve' && action !== 'abort')
+        throw new CoordinationRuntimeError('invalid-state', 'unit failure evidence action is invalid');
+    const nullableText = (field) => {
+        const value = document[field];
+        if (value === null)
+            return null;
+        if (typeof value !== 'string' || value.length < 1 || value.length > 1024)
+            throw new CoordinationRuntimeError('invalid-state', `unit failure evidence ${field} must be bounded text or null`);
+        return value;
+    };
+    const commit = (field) => {
+        const value = text(document, field, 'unit failure evidence', 64);
+        if (!/^[a-f0-9]{40,64}$/u.test(value))
+            throw new CoordinationRuntimeError('invalid-state', `unit failure evidence ${field} is not a full Git object id`);
+        return value;
+    };
+    const captureCommitSha = nullableText('capture_commit_sha');
+    if (captureCommitSha !== null && !/^[a-f0-9]{40,64}$/u.test(captureCommitSha))
+        throw new CoordinationRuntimeError('invalid-state', 'unit failure capture_commit_sha is invalid');
+    const captureRef = nullableText('capture_ref');
+    if ((action === 'quarantine' || action === 'preserve') && (captureCommitSha === null || captureRef === null))
+        throw new CoordinationRuntimeError('invalid-state', 'quarantine/preserve evidence requires an immutable capture commit and ref');
+    if ((action === 'reset' || action === 'abort') && (captureCommitSha !== null || captureRef !== null))
+        throw new CoordinationRuntimeError('invalid-state', 'clean reset/abort evidence cannot claim quarantine capture fields');
+    if (document['postcondition_worktree_clean'] !== true)
+        throw new CoordinationRuntimeError('invalid-state', 'unit failure evidence must assert a clean postcondition');
+    return {
+        action,
+        unitWorktreePath: text(document, 'unit_worktree_path', 'unit failure evidence', 1024),
+        captureCommitSha,
+        captureRef,
+        gitHeadBefore: commit('git_head_before'), gitHeadAfter: commit('git_head_after'),
+        gitCommonDir: text(document, 'git_common_dir', 'unit failure evidence', 1024), branch: text(document, 'branch', 'unit failure evidence', 512),
+    };
 }
 export function parseRunTerminalSha(bytes) {
     const document = jsonDocument(bytes, 'run terminal evidence');
@@ -152,14 +194,23 @@ export function validateReconciliationEvidenceDocument(bytes, expected) {
     const schema = text(document, 'schema_version', 'reconciliation evidence');
     switch (expected.source) {
         case 'child-process':
+            if (schema === AUTOPILOT_CHILD_TERMINAL_ACCEPTANCE_SCHEMA) {
+                const acceptance = parseAutopilotChildTerminalAcceptance(document);
+                if (acceptance.repo_id !== expected.repoKey || acceptance.autopilot_id !== expected.autopilotId || acceptance.workstream !== expected.workstream || acceptance.workstream_run !== expected.workstreamRun || acceptance.child_lease_id !== expected.targetId || expected.unitId === null || expected.attempt === null || acceptance.unit_id !== expected.unitId || acceptance.attempt !== expected.attempt)
+                    throw new CoordinationRuntimeError('invalid-state', 'child terminal acceptance identity does not match durable ownership');
+                return;
+            }
+            // Receipt evidence is admitted only for the coordinator's closed historical
+            // repair path. New complete-child mutations require the parent-owned
+            // acceptance artifact before this generic validator is reached.
             if (schema !== 'autopilot.receipt.v1')
-                throw new CoordinationRuntimeError('invalid-state', 'child-terminal evidence must be an autopilot.receipt.v1 artifact');
+                throw new CoordinationRuntimeError('invalid-state', 'child-terminal evidence must be a terminal acceptance or historical receipt artifact');
             if (text(document, 'workstream', 'reconciliation evidence') !== expected.workstream)
-                throw new CoordinationRuntimeError('invalid-state', 'child receipt workstream does not match durable ownership');
+                throw new CoordinationRuntimeError('invalid-state', 'historical child receipt workstream does not match durable ownership');
             if (expected.unitId === null || expected.attempt === null || text(document, 'unit_id', 'reconciliation evidence') !== expected.unitId || integer(document, 'attempt', 'reconciliation evidence') !== expected.attempt)
-                throw new CoordinationRuntimeError('invalid-state', 'child receipt identity does not match its process lease');
+                throw new CoordinationRuntimeError('invalid-state', 'historical child receipt identity does not match its process lease');
             if (text(document, 'tool_name', 'reconciliation evidence') !== 'autopilot_emit_status')
-                throw new CoordinationRuntimeError('invalid-state', 'child receipt does not prove the forced status carrier');
+                throw new CoordinationRuntimeError('invalid-state', 'historical child receipt does not bind the forced status tool');
             return;
         case 'unit-merge':
             if (schema !== 'autopilot.unit_merge.v1')

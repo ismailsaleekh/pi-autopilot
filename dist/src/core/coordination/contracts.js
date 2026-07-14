@@ -1,5 +1,5 @@
 import { isAbsolute, normalize } from 'node:path';
-import { AUTOPILOT_COORDINATION_SNAPSHOT_SCHEMA, AUTOPILOT_COORDINATOR_PROTOCOL_VERSION, AUTOPILOT_COORDINATOR_REQUEST_SCHEMA, AUTOPILOT_COORDINATOR_RESPONSE_SCHEMA, COORDINATION_ACQUISITION_STATES, COORDINATION_CHILD_STATUSES, COORDINATION_CLAIM_MODES, COORDINATION_MESSAGE_STATUSES, COORDINATION_OPERATIONAL_ESCALATION_REASONS, COORDINATION_OPERATION_STAGES, COORDINATION_OPERATION_TYPES, COORDINATION_RELEASE_CONDITION_TYPES, COORDINATION_RECONCILIATION_SOURCES, COORDINATION_REQUEST_STATUSES, COORDINATION_RESERVATION_OBLIGATION_STATES, COORDINATION_MESSAGE_TYPES, COORDINATION_RUN_STATUSES, COORDINATION_SESSION_STATUSES, COORDINATION_SESSION_ATTACHMENT_KINDS, COORDINATION_MIGRATION_RECOVERY_RESOLUTIONS, COORDINATION_MIGRATION_RECOVERY_STATUSES, COORDINATION_MIGRATION_RECOVERY_TYPES, COORDINATION_UNIT_ROLES, COORDINATION_UNIT_STATES, COORDINATION_WORKTREE_KINDS, COORDINATION_WORKTREE_STATES, COORDINATION_WAIT_EDGE_STATES, COORDINATION_DEADLOCK_ACTIONS, COORDINATION_DEADLOCK_STATES, } from "./types.js";
+import { AUTOPILOT_COORDINATION_SNAPSHOT_SCHEMA, AUTOPILOT_COORDINATOR_PROTOCOL_VERSION, AUTOPILOT_COORDINATOR_REQUEST_SCHEMA, AUTOPILOT_COORDINATOR_RESPONSE_SCHEMA, COORDINATION_ACQUISITION_STATES, COORDINATION_CHILD_STATUSES, COORDINATION_CLAIM_MODES, COORDINATION_MESSAGE_STATUSES, COORDINATION_OPERATIONAL_ESCALATION_REASONS, COORDINATION_OPERATION_STAGES, COORDINATION_OBSERVATION_EXECUTION_STATES, COORDINATION_OBSERVATION_FRESHNESS_STATES, COORDINATION_OBSERVATION_OBJECT_KINDS, COORDINATION_OPERATION_TYPES, COORDINATION_RELEASE_CONDITION_TYPES, COORDINATION_RECONCILIATION_SOURCES, COORDINATION_REQUEST_STATUSES, COORDINATION_RESERVATION_OBLIGATION_STATES, COORDINATION_MESSAGE_TYPES, COORDINATION_RUN_STATUSES, COORDINATION_SESSION_STATUSES, COORDINATION_SESSION_ATTACHMENT_KINDS, COORDINATION_MIGRATION_RECOVERY_RESOLUTIONS, COORDINATION_MIGRATION_RECOVERY_STATUSES, COORDINATION_MIGRATION_RECOVERY_TYPES, COORDINATION_UNIT_ROLES, COORDINATION_UNIT_STATES, COORDINATION_WORKTREE_KINDS, COORDINATION_WORKTREE_STATES, COORDINATION_WAIT_EDGE_STATES, COORDINATION_DEADLOCK_ACTIONS, COORDINATION_DEADLOCK_STATES, } from "./types.js";
 export class CoordinationContractError extends Error {
     name = 'CoordinationContractError';
     code = 'invalid-coordination-contract';
@@ -57,7 +57,7 @@ const PAYLOAD_FIELDS = {
     'register-authoritative-artifact': ['artifact_id', 'document_schema_version', 'git_commit', 'ref', 'sha256', 'source_scope', 'source_type', 'session_lease_id', 'session_token'],
     'assign-adjudication': ['assignment', 'session_lease_id', 'session_token'],
     'claim-adjudication-assignment': ['attempt', 'session_lease_id', 'session_token', 'unit_id'],
-    'complete-adjudication': ['adjudication_path', 'assignment_id', 'boot_id', 'child_lease_id', 'child_token', 'pid'],
+    'complete-adjudication': ['adjudication_path', 'assignment_id', 'boot_id', 'child_lease_id', 'child_token', 'pid', 'terminal_evidence_ref', 'terminal_evidence_sha256'],
     'submit-planning-contradiction': ['assignment_id', 'packet', 'session_lease_id', 'session_token'],
 };
 function fail(label, issue) {
@@ -249,12 +249,25 @@ export function parseCoordinationReleaseCondition(value, label = 'CoordinationRe
         evidence: parseNullableEvidence(record['evidence'], `${label}.evidence`),
     };
 }
+export function parseCoordinationObservationSourceIdentity(value, label = 'CoordinationObservationSourceIdentity') {
+    const record = object(value, label, ['base_commit', 'object_id', 'object_kind']);
+    const baseCommit = string(record, 'base_commit', label, 64);
+    const objectId = string(record, 'object_id', label, 64);
+    if (!/^[a-f0-9]{40,64}$/u.test(baseCommit) || !/^[a-f0-9]{40,64}$/u.test(objectId))
+        fail(label, 'base_commit and object_id must be lowercase Git object ids');
+    return { base_commit: baseCommit, object_id: objectId, object_kind: oneOf(record, 'object_kind', COORDINATION_OBSERVATION_OBJECT_KINDS, label) };
+}
 export function parseCoordinationRequestedLease(value, label = 'CoordinationRequestedLease') {
-    const record = object(value, label, ['mode', 'path', 'purpose']);
+    const record = object(value, label, ['mode', 'path', 'purpose'], ['source_identity']);
+    const mode = oneOf(record, 'mode', COORDINATION_CLAIM_MODES, label);
+    const sourceIdentity = record['source_identity'] === undefined ? undefined : parseCoordinationObservationSourceIdentity(record['source_identity'], `${label}.source_identity`);
+    if (mode !== 'READ' && sourceIdentity !== undefined)
+        fail(label, 'WRITE/EXCLUSIVE edit intent must not carry observation source identity');
     return {
         path: repoPath(record, 'path', label),
-        mode: oneOf(record, 'mode', COORDINATION_CLAIM_MODES, label),
+        mode,
         purpose: string(record, 'purpose', label, 512),
+        ...(sourceIdentity === undefined ? {} : { source_identity: sourceIdentity }),
     };
 }
 function assertRequestedLeaseSet(leases, label) {
@@ -436,6 +449,39 @@ export function parseCoordinationAcquisitionGroup(value) {
         version: integer(record, 'version', label, 1),
     };
 }
+export function parseCoordinationObservation(value) {
+    const label = 'CoordinationObservation';
+    const record = object(value, label, ['acquisition_group_id', 'execution_state', 'freshness', 'observation_id', 'owner', 'path', 'purpose', 'recorded_event_seq', 'released_event_seq', 'schema_version', 'source_identity', 'stale_by_commit', 'stale_by_reservation_id', 'stale_event_seq', 'version']);
+    const executionState = oneOf(record, 'execution_state', COORDINATION_OBSERVATION_EXECUTION_STATES, label);
+    const freshness = oneOf(record, 'freshness', COORDINATION_OBSERVATION_FRESHNESS_STATES, label);
+    const releasedEvent = nullableInteger(record, 'released_event_seq', label);
+    const staleEvent = nullableInteger(record, 'stale_event_seq', label);
+    const staleReservation = nullableString(record, 'stale_by_reservation_id', label, 192);
+    const staleCommit = nullableString(record, 'stale_by_commit', label, 64);
+    if ((executionState === 'active') !== (releasedEvent === null))
+        fail(label, 'active observation must be unreleased and terminal observation must carry released_event_seq');
+    if (freshness === 'current' && (staleEvent !== null || staleReservation !== null || staleCommit !== null))
+        fail(label, 'current observation cannot carry staleness evidence');
+    if (freshness === 'stale' && (staleEvent === null || staleReservation === null || staleCommit === null || !/^[a-f0-9]{7,64}$/u.test(staleCommit)))
+        fail(label, 'stale observation requires reservation, event, and terminal commit evidence');
+    return {
+        schema_version: literal(record, 'schema_version', 'autopilot.observation.v1', label),
+        observation_id: identifier(record, 'observation_id', label),
+        owner: parseCoordinationOwnerIdentity(record['owner'], `${label}.owner`),
+        acquisition_group_id: identifier(record, 'acquisition_group_id', label),
+        path: repoPath(record, 'path', label),
+        purpose: string(record, 'purpose', label, 512),
+        source_identity: parseCoordinationObservationSourceIdentity(record['source_identity'], `${label}.source_identity`),
+        execution_state: executionState,
+        freshness,
+        recorded_event_seq: integer(record, 'recorded_event_seq', label, 1),
+        released_event_seq: releasedEvent,
+        stale_event_seq: staleEvent,
+        stale_by_reservation_id: staleReservation,
+        stale_by_commit: staleCommit,
+        version: integer(record, 'version', label, 1),
+    };
+}
 export function parseCoordinationEditLease(value) {
     const label = 'CoordinationEditLease';
     const record = object(value, label, ['acquired_event_seq', 'acquisition_group_id', 'edit_lease_id', 'mode', 'normal_release_condition', 'owner', 'path', 'purpose', 'schema_version', 'version']);
@@ -445,7 +491,7 @@ export function parseCoordinationEditLease(value) {
         owner: parseCoordinationOwnerIdentity(record['owner'], `${label}.owner`),
         acquisition_group_id: identifier(record, 'acquisition_group_id', label),
         path: repoPath(record, 'path', label),
-        mode: oneOf(record, 'mode', COORDINATION_CLAIM_MODES, label),
+        mode: oneOf(record, 'mode', ['WRITE', 'EXCLUSIVE'], label),
         purpose: string(record, 'purpose', label, 512),
         acquired_event_seq: integer(record, 'acquired_event_seq', label),
         normal_release_condition: parseCoordinationReleaseCondition(record['normal_release_condition'], `${label}.normal_release_condition`),
@@ -863,7 +909,7 @@ function parseTable(record, field, parser, maxItems = 10_000) {
 }
 export function parseCoordinationSnapshot(value) {
     const label = 'CoordinationSnapshot';
-    const fields = ['acquisition_groups', 'adjudication_assignments', 'authoritative_artifacts', 'change_reservations', 'child_leases', 'claim_requests', 'deadlock_resolutions', 'edit_leases', 'escalations', 'events', 'mailbox_cursors', 'messages', 'migration_recovery_work', 'reconciliation_evidence', 'repositories', 'repository_event_seq', 'reservation_obligations', 'run_terminal_intents', 'runs', 'schema_version', 'session_leases', 'unit_attempts', 'wait_for_edges', 'worktree_operations', 'worktrees'];
+    const fields = ['acquisition_groups', 'adjudication_assignments', 'authoritative_artifacts', 'change_reservations', 'child_leases', 'claim_requests', 'deadlock_resolutions', 'edit_leases', 'escalations', 'events', 'mailbox_cursors', 'messages', 'migration_recovery_work', 'observations', 'reconciliation_evidence', 'repositories', 'repository_event_seq', 'reservation_obligations', 'run_terminal_intents', 'runs', 'schema_version', 'session_leases', 'unit_attempts', 'wait_for_edges', 'worktree_operations', 'worktrees'];
     const record = object(value, label, fields);
     return {
         schema_version: literal(record, 'schema_version', AUTOPILOT_COORDINATION_SNAPSHOT_SCHEMA, label),
@@ -874,6 +920,7 @@ export function parseCoordinationSnapshot(value) {
         child_leases: parseTable(record, 'child_leases', parseCoordinationChildLease),
         unit_attempts: parseTable(record, 'unit_attempts', parseCoordinationUnitAttempt),
         acquisition_groups: parseTable(record, 'acquisition_groups', parseCoordinationAcquisitionGroup),
+        observations: parseTable(record, 'observations', parseCoordinationObservation),
         edit_leases: parseTable(record, 'edit_leases', parseCoordinationEditLease),
         change_reservations: parseTable(record, 'change_reservations', parseCoordinationChangeReservation),
         reservation_obligations: parseTable(record, 'reservation_obligations', parseCoordinationReservationObligation),
@@ -1164,7 +1211,10 @@ export function parseCoordinatorResponseEnvelope(value) {
     };
 }
 export function claimModesConflict(left, right) {
-    return left !== 'READ' || right !== 'READ';
+    // READ is a commit/hash-bound observation in an isolated worktree. It never
+    // represents shared mutable filesystem authority and therefore cannot block
+    // an edit intention or bounded critical section.
+    return left !== 'READ' && right !== 'READ';
 }
 export function coordinationPathsOverlap(left, right) {
     const normalize = (value) => value.replace(/\/\*\*$/u, '').replace(/\/$/u, '');

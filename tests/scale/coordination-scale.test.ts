@@ -82,7 +82,7 @@ function attachRunRequest(index: number, repositoryRoot: string, stateRoot: stri
   const repositoryIndex = Math.floor(index / 2);
   const clientIndex = index % 2 === 0 ? repositoryIndex % CLIENT_COUNT : (repositoryIndex + 1) % CLIENT_COUNT;
   return {
-    schema_version: 'autopilot.coordinator_request.v1', protocol_version: '1.3', request_id: `scale-attach-run-${String(index)}`,
+    schema_version: 'autopilot.coordinator_request.v1', protocol_version: '1.4', request_id: `scale-attach-run-${String(index)}`,
     action: 'attach-run', idempotency_key: `scale-attach-run-${String(index)}`, repo_id: repository, workstream_run: run,
     session_id: null, fencing_generation: null, expected_version: 0,
     payload: {
@@ -95,7 +95,7 @@ function attachRunRequest(index: number, repositoryRoot: string, stateRoot: stri
 function recoveryHeartbeatRequest(actor: ScaleSession, ordinal: number): CoordinatorRequestEnvelope {
   const priorHeartbeats = Math.floor(ordinal / SESSION_COUNT);
   return {
-    schema_version: 'autopilot.coordinator_request.v1', protocol_version: '1.3', request_id: `scale-recovery-heartbeat-${String(ordinal)}`,
+    schema_version: 'autopilot.coordinator_request.v1', protocol_version: '1.4', request_id: `scale-recovery-heartbeat-${String(ordinal)}`,
     action: 'heartbeat', idempotency_key: `scale-recovery-heartbeat-${String(ordinal)}`, repo_id: actor.repoId, workstream_run: actor.run,
     session_id: actor.sessionId, fencing_generation: actor.generation, expected_version: 1 + priorHeartbeats,
     payload: { lease_expires_at: '2099-01-01T00:00:00.000Z', session_lease_id: actor.leaseId, session_token: actor.token },
@@ -110,7 +110,7 @@ function heartbeatCountForActor(actorIndex: number): number {
 function attachSessionRequest(index: number): CoordinatorRequestEnvelope {
   const actor = session(index);
   return {
-    schema_version: 'autopilot.coordinator_request.v1', protocol_version: '1.3', request_id: `scale-attach-session-${String(index)}`,
+    schema_version: 'autopilot.coordinator_request.v1', protocol_version: '1.4', request_id: `scale-attach-session-${String(index)}`,
     action: 'attach-session', idempotency_key: `scale-attach-session-${String(index)}`, repo_id: actor.repoId, workstream_run: actor.run,
     session_id: actor.sessionId, fencing_generation: actor.generation, expected_version: 1,
     payload: { session_lease_id: actor.leaseId, session_token: actor.token, pid: index + 10_000, boot_id: `scale-boot-${String(index)}`, lease_expires_at: '2099-01-01T00:00:00.000Z', handoff_token: null },
@@ -130,7 +130,7 @@ function acquireRequest(actor: ScaleSession, requestIndex: number | 'owner'): Co
   const groupId = `scale-group-${identity}`;
   const unitId = `scale-unit-${identity}`;
   return {
-    schema_version: 'autopilot.coordinator_request.v1', protocol_version: '1.3', request_id: `scale-acquire-${identity}`,
+    schema_version: 'autopilot.coordinator_request.v1', protocol_version: '1.4', request_id: `scale-acquire-${identity}`,
     action: 'acquire-group', idempotency_key: `scale-acquire-${identity}`, repo_id: actor.repoId, workstream_run: actor.run,
     session_id: actor.sessionId, fencing_generation: actor.generation, expected_version: actor.runVersion,
     payload: {
@@ -146,7 +146,7 @@ function acquireRequest(actor: ScaleSession, requestIndex: number | 'owner'): Co
 
 function mailboxDrainRequest(actor: ScaleSession, client: number): CoordinatorRequestEnvelope {
   return {
-    schema_version: 'autopilot.coordinator_request.v1', protocol_version: '1.3', request_id: `scale-mailbox-drain-${String(client)}`,
+    schema_version: 'autopilot.coordinator_request.v1', protocol_version: '1.4', request_id: `scale-mailbox-drain-${String(client)}`,
     action: 'drain-mailbox', idempotency_key: `scale-mailbox-drain-${String(client)}`, repo_id: actor.repoId, workstream_run: actor.run,
     session_id: actor.sessionId, fencing_generation: actor.generation, expected_version: 1 + heartbeatCountForActor(actor.index),
     payload: { delivery_id: `scale-delivery-${String(client)}`, session_lease_id: actor.leaseId, session_token: actor.token },

@@ -1,3 +1,4 @@
+import { claimModesConflict, coordinationPathsOverlap } from "./contracts.js";
 export const MAX_GRANT_BYPASSES = 8;
 const TERMINAL_REQUEST_STATES = new Set(['resolved', 'cancelled', 'superseded']);
 const TERMINAL_OPERATION_STAGES = new Set(['committed', 'compensated', 'failed']);
@@ -16,7 +17,12 @@ export function buildCoordinationWaitForEdges(input) {
     const activeRequestIds = new Set();
     const edges = [];
     for (const request of [...input.requests].sort((left, right) => left.created_event_seq - right.created_event_seq || left.request_id.localeCompare(right.request_id))) {
-        const hasBlocker = request.blocking_lease_ids.some((leaseId) => leases.has(leaseId));
+        const hasBlocker = request.blocking_lease_ids.some((leaseId) => {
+            const lease = leases.get(leaseId);
+            return lease !== undefined
+                && coordinationOwnerKey(lease.owner) === coordinationOwnerKey(request.owner)
+                && request.requested_leases.some((requested) => requested.mode !== 'READ' && coordinationPathsOverlap(requested.path, lease.path) && claimModesConflict(requested.mode, lease.mode));
+        });
         if (TERMINAL_REQUEST_STATES.has(request.status) || !hasBlocker)
             continue;
         activeRequestIds.add(request.request_id);

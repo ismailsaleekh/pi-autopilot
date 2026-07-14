@@ -2,7 +2,7 @@ import { assertCoordinationInvariants } from './invariants.ts';
 import { claimModesConflict, coordinationPathsOverlap } from './contracts.ts';
 import { buildCoordinationWaitForEdges } from './deadlock.ts';
 import { CoordinationRuntimeError } from './failures.ts';
-import { AUTOPILOT_COORDINATION_SNAPSHOT_SCHEMA, type CoordinationAcquisitionGroup, type CoordinationEditLease, type CoordinationEvent, type CoordinationMessage, type CoordinationReleaseCondition, type CoordinationSessionLease, type CoordinationSnapshot } from './types.ts';
+import { AUTOPILOT_COORDINATION_SNAPSHOT_SCHEMA, type CoordinationAcquisitionGroup, type CoordinationEditLease, type CoordinationEvent, type CoordinationMessage, type CoordinationObservation, type CoordinationReleaseCondition, type CoordinationSessionLease, type CoordinationSnapshot } from './types.ts';
 
 export function emptyCoordinationSnapshot(): CoordinationSnapshot {
   return {
@@ -14,6 +14,7 @@ export function emptyCoordinationSnapshot(): CoordinationSnapshot {
     child_leases: [],
     unit_attempts: [],
     acquisition_groups: [],
+    observations: [],
     edit_leases: [],
     change_reservations: [],
     reservation_obligations: [],
@@ -155,23 +156,20 @@ export function grantCoordinationAcquisitionGroup(snapshot: CoordinationSnapshot
   const blockers = group.requested_leases.flatMap((requested) => snapshot.edit_leases.filter((active) => active.owner.repo_id === input.repoId && coordinationPathsOverlap(active.path, requested.path) && claimModesConflict(active.mode, requested.mode)));
   if (blockers.length > 0) throw new CoordinationRuntimeError('coordinator-contention', 'complete acquisition group is blocked', blockers.map((lease) => lease.edit_lease_id));
   const event = nextEvent(snapshot, input, 'acquisition-group-granted', 'acquisition-group', group.acquisition_group_id);
-  const leases: readonly CoordinationEditLease[] = group.requested_leases.map((requested, index) => ({
-    schema_version: 'autopilot.edit_lease.v1',
-    edit_lease_id: `${group.acquisition_group_id}:lease:${String(index + 1)}`,
-    owner: group.owner,
-    acquisition_group_id: group.acquisition_group_id,
-    path: requested.path,
-    mode: requested.mode,
-    purpose: requested.purpose,
-    acquired_event_seq: event.sequence,
-    normal_release_condition: input.normalReleaseCondition,
-    version: 1,
-  }));
+  const observations: CoordinationObservation[] = [];
+  const leases: CoordinationEditLease[] = [];
+  for (const [index, requested] of group.requested_leases.entries()) {
+    if (requested.mode === 'READ') {
+      if (requested.source_identity === undefined || requested.source_identity.object_kind === 'missing') throw new CoordinationRuntimeError('invalid-request', 'modeled READ observation requires exact source identity');
+      observations.push({ schema_version: 'autopilot.observation.v1', observation_id: `${group.acquisition_group_id}:observation:${String(index + 1)}`, owner: group.owner, acquisition_group_id: group.acquisition_group_id, path: requested.path, purpose: requested.purpose, source_identity: requested.source_identity, execution_state: 'active', freshness: 'current', recorded_event_seq: event.sequence, released_event_seq: null, stale_event_seq: null, stale_by_reservation_id: null, stale_by_commit: null, version: 1 });
+    } else leases.push({ schema_version: 'autopilot.edit_lease.v1', edit_lease_id: `${group.acquisition_group_id}:lease:${String(index + 1)}`, owner: group.owner, acquisition_group_id: group.acquisition_group_id, path: requested.path, mode: requested.mode, purpose: requested.purpose, acquired_event_seq: event.sequence, normal_release_condition: input.normalReleaseCondition, version: 1 });
+  }
   const grantedGroup: CoordinationAcquisitionGroup = { ...group, state: 'granted', grant_event_seq: event.sequence, offer_expires_at: null, version: group.version + 1 };
   const next: CoordinationSnapshot = {
     ...snapshot,
     repository_event_seq: event.sequence,
     acquisition_groups: snapshot.acquisition_groups.map((candidate) => candidate.acquisition_group_id === group.acquisition_group_id ? grantedGroup : candidate),
+    observations: [...snapshot.observations, ...observations],
     edit_leases: [...snapshot.edit_leases, ...leases],
     events: [...snapshot.events, event.event],
   };

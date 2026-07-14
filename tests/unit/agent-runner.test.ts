@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { describe, it } from 'node:test';
@@ -14,7 +14,10 @@ import { coordinatorRuntimePaths } from '../../src/core/coordination/runtime-pat
 import { startCoordinatorServer } from '../../src/core/coordination/server.ts';
 import { DurableRunSupervisorClient, readCoordinatorSessionContext } from '../../src/core/coordination/supervisor.ts';
 import { CoordinatorClient } from '../../src/core/coordination/client.ts';
-import { parseCoordinationUnitAttempt } from '../../src/core/coordination/contracts.ts';
+import { parseCoordinationChildLease, parseCoordinationEditLease, parseCoordinationObservation, parseCoordinationUnitAttempt } from '../../src/core/coordination/contracts.ts';
+import { parseAutopilotChildTerminalAcceptance } from '../../src/core/coordination/terminal-acceptance.ts';
+import { RunReconciliationClient } from '../../src/core/coordination/reconciliation.ts';
+import { proveStructuredAttemptTerminal } from '../../src/core/coordination/terminal-attempt-proof.ts';
 import { autopilotModelAssignmentForRole } from '../../src/core/model-roster.ts';
 
 const TEST_DIR = dirname(fileURLToPath(import.meta.url));
@@ -620,6 +623,7 @@ void describe('autopilot-agent-run wrapper', () => {
           : spec(root);
         const specPath = await writeSpec(root, unitSpec);
         const fakePi = await writeFakePi(root);
+        let terminalError: AutopilotAgentRunError | null = null;
         await expectRejects(
           () =>
             runAutopilotAgentFromSpecPath(specPath, {
@@ -627,11 +631,79 @@ void describe('autopilot-agent-run wrapper', () => {
               env: { ...process.env, AUTOPILOT_FAKE_PI_SCENARIO: scenario },
               timeoutMsOverride: FAKE_PI_COMPLETION_TIMEOUT_MS,
             }),
-          (error: unknown) =>
-            error instanceof AutopilotAgentRunError && error.failureClass === 'status-non-success',
+          (error: unknown) => {
+            if (error instanceof AutopilotAgentRunError) terminalError = error;
+            return error instanceof AutopilotAgentRunError && error.failureClass === 'status-non-success';
+          },
         );
+        if (terminalError === null) throw new Error('status-non-success did not expose its typed terminal error');
+        const acceptedError = terminalError as AutopilotAgentRunError;
+        const acceptancePath = acceptedError.details.terminalAcceptanceOutput;
+        assert.equal(typeof acceptancePath, 'string');
+        const acceptance = parseAutopilotChildTerminalAcceptance(JSON.parse(await readFile(acceptancePath ?? '', 'utf8')) as unknown);
+        assert.equal(acceptance.verdict, scenario === 'blocked-status' ? 'BLOCKED' : 'NEEDS_FIX');
+        assert.equal(acceptance.transport_result, 'accepted');
+        const contextPath = process.env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV];
+        if (contextPath === undefined) throw new Error('missing coordinator test session context');
+        const session = await readCoordinatorSessionContext(contextPath);
+        const coordinatorStatus = await new CoordinatorClient({ env: { ...process.env, AUTOPILOT_STATE_ROOT: session.state_root } }).query('status', session.repo_id, session.workstream_run);
+        const children = (coordinatorStatus.payload['child_leases'] as readonly unknown[]).map(parseCoordinationChildLease);
+        const child = children.find((candidate) => candidate.owner.unit_id === unitSpec.unit_id && candidate.owner.attempt === unitSpec.attempt);
+        assert.equal(child?.status, 'terminal');
+        assert.equal(child?.terminal_evidence?.sha256, acceptedError.details.terminalAcceptanceSha256);
+        const observations = (coordinatorStatus.payload['observations'] as readonly unknown[]).map(parseCoordinationObservation).filter((entry) => entry.owner.unit_id === unitSpec.unit_id && entry.owner.attempt === unitSpec.attempt);
+        assert.equal(observations.every((entry) => entry.execution_state === 'released'), true);
+        const editLeases = (coordinatorStatus.payload['edit_leases'] as readonly unknown[]).map(parseCoordinationEditLease).filter((entry) => entry.owner.unit_id === unitSpec.unit_id && entry.owner.attempt === unitSpec.attempt);
+        assert.equal(editLeases.length, 0, 'clean terminal non-success must not retain edit authority');
       });
     }
+  });
+
+  void it('repairs a historical non-success leak only from an exact parent acceptance event', async () => {
+    await withTempDir(async (root) => {
+      const unitSpec = spec(root, {
+        role: 'validate', template: 'validate', owned_paths: [], validation_commands: ['true'], unit_id: 'u02-historical-validate',
+        status_output: join(root, 'worktree', '.pi', 'autopilot', 'autopilot-smoke', 'statuses', 'u02-historical-validate.validate.attempt-1.json'),
+        receipt_output: join(root, 'worktree', '.pi', 'autopilot', 'autopilot-smoke', 'receipts', 'u02-historical-validate.validate.attempt-1.receipt.json'),
+        evidence_dir: join(root, 'worktree', '.pi', 'autopilot', 'autopilot-smoke', 'evidence', 'u02-historical-validate'),
+      });
+      const specPath = await writeSpec(root, unitSpec);
+      const fakePi = await writeFakePi(root);
+      await expectRejects(
+        () => runAutopilotAgentFromSpecPath(specPath, { piExecutable: fakePi, env: { ...process.env, AUTOPILOT_FAKE_PI_SCENARIO: 'needs-fix-mismatched-carrier' }, timeoutMsOverride: FAKE_PI_COMPLETION_TIMEOUT_MS }),
+        (error: unknown) => error instanceof AutopilotAgentRunError && error.failureClass === 'invalid-structured-output',
+      );
+      const contextPath = process.env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV];
+      if (contextPath === undefined) throw new Error('missing historical repair session context');
+      const session = await readCoordinatorSessionContext(contextPath);
+      const client = new CoordinatorClient({ env: { ...process.env, AUTOPILOT_STATE_ROOT: session.state_root } });
+      const childStatus = async (): Promise<ReturnType<typeof parseCoordinationChildLease>> => {
+        const response = await client.query('status', session.repo_id, session.workstream_run);
+        const child = (response.payload['child_leases'] as readonly unknown[]).map(parseCoordinationChildLease).find((candidate) => candidate.owner.unit_id === unitSpec.unit_id);
+        if (child === undefined) throw new Error('historical repair child disappeared');
+        return child;
+      };
+      assert.equal((await childStatus()).status, 'recovery-required');
+      await (await RunReconciliationClient.fromEnvironment(process.env)).reconcile('prove artifact files alone cannot repair carrier acceptance');
+      assert.equal((await childStatus()).status, 'recovery-required');
+
+      const runtimeRoot = dirname(dirname(unitSpec.status_output));
+      await appendFile(join(runtimeRoot, 'events.jsonl'), `${JSON.stringify({
+        schema_version: 'autopilot.event.v1', id: 1, ts: new Date(Date.now() + 1_000).toISOString(), event: 'agent_completed', workstream: unitSpec.workstream,
+        unit_id: unitSpec.unit_id, role: unitSpec.role, verdict: 'NEEDS_FIX', severity: 'major-local',
+        status_ref: `statuses/${unitSpec.unit_id}.${unitSpec.role}.attempt-${String(unitSpec.attempt)}.json`,
+        receipt_ref: `receipts/${unitSpec.unit_id}.${unitSpec.role}.attempt-${String(unitSpec.attempt)}.receipt.json`, summary: 'Parent accepted the exact historical forced-output carrier.',
+      })}\n`, 'utf8');
+      const beforeRepair = await client.query('status', session.repo_id, session.workstream_run);
+      const durableAttempt = (beforeRepair.payload['unit_attempts'] as readonly unknown[]).map(parseCoordinationUnitAttempt).find((candidate) => candidate.owner.unit_id === unitSpec.unit_id);
+      if (durableAttempt === undefined) throw new Error('historical repair attempt disappeared');
+      const proof = proveStructuredAttemptTerminal({ mainWorktreePath: unitSpec.cwd, runtimeRoot, repoId: session.repo_id, autopilotId: session.autopilot_id, workstream: session.workstream, workstreamRun: session.workstream_run, unitId: unitSpec.unit_id, attempt: unitSpec.attempt, childLeaseId: (await childStatus()).child_lease_id, spec: durableAttempt.spec });
+      assert.equal(proof.proven, true, proof.proven ? undefined : proof.reason);
+      await (await RunReconciliationClient.fromEnvironment(process.env)).reconcile('repair exact historical parent-accepted non-success');
+      const repaired = await childStatus();
+      assert.equal(repaired.status, 'terminal');
+      assert.match(repaired.terminal_evidence?.ref ?? '', /receipts\//u);
+    });
   });
 
   void it('includes bounded Pi result diagnostics when Pi returns an error result', async () => {
@@ -781,7 +853,7 @@ function buildStatus(context) {
       changed_paths: [], findings: [], commands: [], evidence_refs: [], report_ref: null, next_action: 'operator decision needed'
     };
   }
-  if (scenario === 'needs-fix-status') {
+  if (scenario === 'needs-fix-status' || scenario === 'needs-fix-mismatched-carrier') {
     return {
       schema_version: 'autopilot.status.v1', workstream: unit.workstream, unit_id: unit.unit_id,
       role: unit.role, attempt: unit.attempt, verdict: 'NEEDS_FIX', severity: 'major-local', summary: 'Fix needed by fake scenario.',
@@ -870,7 +942,7 @@ function emitForcedStatus() {
     return;
   }
   const mismatchedDetails = { ...details, tool_call_id: 'call-autopilot-fake-2' };
-  if (scenario === 'mismatched-only-carrier') {
+  if (scenario === 'mismatched-only-carrier' || scenario === 'needs-fix-mismatched-carrier') {
     write({ type: 'tool_result', toolName: 'autopilot_emit_status', toolCallId: 'call-autopilot-fake-2', isError: false, details: mismatchedDetails });
     return;
   }

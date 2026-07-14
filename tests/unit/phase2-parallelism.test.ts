@@ -259,7 +259,7 @@ void describe('Phase 2 unit worktrees, claims, mergeback, staleness, and GC', ()
       const contextB = await resolveActiveAutopilotForSpec(unitSpec({ cwd: unitB.unitInfo.worktree_path, runtimeRoot: prepared.runtimeRoot, unitId: 'u02', ownedPaths: ['src/shared.ts'] }));
       await expectRejects(() => acquireClaimsForUnit({ context: contextB, spec: unitSpec({ cwd: unitB.unitInfo.worktree_path, runtimeRoot: prepared.runtimeRoot, unitId: 'u02', ownedPaths: ['src/shared.ts'] }), reason: 'phase2 conflict test' }), /claim-conflict/u);
       const readSpec = unitSpec({ cwd: unitB.unitInfo.worktree_path, runtimeRoot: prepared.runtimeRoot, unitId: 'u02-read', ownedPaths: ['src/other.ts'], readOnlyPaths: ['src/shared.ts'] });
-      await expectRejects(() => acquireClaimsForUnit({ context: contextB, spec: readSpec, reason: 'phase2 write-read conflict test' }), /claim-conflict/u);
+      await acquireClaimsForUnit({ context: contextB, spec: readSpec, reason: 'isolated READ observation must not block a disjoint edit intent' });
     });
   });
 
@@ -402,7 +402,7 @@ void describe('Phase 2 unit worktrees, claims, mergeback, staleness, and GC', ()
     });
   });
 
-  void it('unit reset and abort transitions remove their unit worktrees after recorded reset evidence', async () => {
+  void it('quarantines dirty reset/abort requests and removes only mechanically clean failed worktrees', async () => {
     await withTempDir(async (root) => {
       const source = join(root, 'source');
       await initGitSource(source);
@@ -416,19 +416,38 @@ void describe('Phase 2 unit worktrees, claims, mergeback, staleness, and GC', ()
       assert.equal(gitOut(quarantineUnit.unitInfo.worktree_path, ['show', `${quarantineRecord.capture_commit_sha}:src/quarantine.ts`]).trim(), 'captured dirty work');
       assert.deepEqual(readGitStatus(quarantineUnit.unitInfo.worktree_path).changedPaths, []);
 
+      const committedUnit = await prepareAutopilotUnitWorktree({ active: prepared.active, unitId: 'u-quarantine-committed', attempt: 1 });
+      const committedBaseline = committedUnit.unitInfo.base_sha;
+      await mkdir(join(committedUnit.unitInfo.worktree_path, 'src'), { recursive: true });
+      await writeFile(join(committedUnit.unitInfo.worktree_path, 'src', 'shared.ts'), 'clean committed failed work\n', 'utf8');
+      git(committedUnit.unitInfo.worktree_path, ['add', '--sparse', 'src/shared.ts']);
+      git(committedUnit.unitInfo.worktree_path, ['commit', '-m', 'child committed before failure']);
+      const committedHead = gitOut(committedUnit.unitInfo.worktree_path, ['rev-parse', 'HEAD']);
+      const committedRecord = await quarantineFailedUnit({ context: { repo: resolveRepoIdentity(committedUnit.unitInfo.worktree_path), active: prepared.active, coordinationRoot: coordinationRootForRepo(prepared.active.repo_key), claimsPath: '', claimEventsPath: '' }, unitId: 'u-quarantine-committed', attempt: 1, unitWorktreePath: committedUnit.unitInfo.worktree_path, baselineHead: committedBaseline, summary: 'capture clean committed failed unit', now: new Date('2026-07-08T00:00:02.500Z') });
+      assert.equal(committedRecord.git_head_before, committedHead);
+      assert.equal(committedRecord.capture_commit_sha, committedHead);
+      assert.equal(gitOut(committedUnit.unitInfo.worktree_path, ['rev-parse', `refs/heads/${committedRecord.capture_ref ?? ''}`]), committedHead);
+
       const resetUnit = await prepareAutopilotUnitWorktree({ active: prepared.active, unitId: 'u-reset', attempt: 1 });
       await mkdir(join(resetUnit.unitInfo.worktree_path, 'src'), { recursive: true });
       await writeFile(join(resetUnit.unitInfo.worktree_path, 'src', 'reset.ts'), 'reset residue\n', 'utf8');
-      await resetFailedUnit({ context: { repo: resolveRepoIdentity(resetUnit.unitInfo.worktree_path), active: prepared.active, coordinationRoot: coordinationRootForRepo(prepared.active.repo_key), claimsPath: '', claimEventsPath: '' }, unitId: 'u-reset', attempt: 1, unitWorktreePath: resetUnit.unitInfo.worktree_path, summary: 'reset failed unit', now: new Date('2026-07-08T00:00:03.000Z') });
-      assert.equal(existsSync(resetUnit.unitInfo.worktree_path), false);
-      assert.equal(gitWorktreeListContains(source, resetUnit.unitInfo.worktree_path), false);
+      const dirtyReset = await resetFailedUnit({ context: { repo: resolveRepoIdentity(resetUnit.unitInfo.worktree_path), active: prepared.active, coordinationRoot: coordinationRootForRepo(prepared.active.repo_key), claimsPath: '', claimEventsPath: '' }, unitId: 'u-reset', attempt: 1, unitWorktreePath: resetUnit.unitInfo.worktree_path, summary: 'reset failed unit', now: new Date('2026-07-08T00:00:03.000Z') });
+      assert.equal(dirtyReset.action, 'quarantine');
+      assert.equal(existsSync(resetUnit.unitInfo.worktree_path), true);
+      assert.equal(gitWorktreeListContains(source, resetUnit.unitInfo.worktree_path), true);
 
       const abortUnit = await prepareAutopilotUnitWorktree({ active: prepared.active, unitId: 'u-abort', attempt: 1 });
       await mkdir(join(abortUnit.unitInfo.worktree_path, 'src'), { recursive: true });
       await writeFile(join(abortUnit.unitInfo.worktree_path, 'src', 'abort.ts'), 'abort residue\n', 'utf8');
-      await abortFailedUnit({ context: { repo: resolveRepoIdentity(abortUnit.unitInfo.worktree_path), active: prepared.active, coordinationRoot: coordinationRootForRepo(prepared.active.repo_key), claimsPath: '', claimEventsPath: '' }, unitId: 'u-abort', attempt: 1, unitWorktreePath: abortUnit.unitInfo.worktree_path, summary: 'abort failed unit', now: new Date('2026-07-08T00:00:04.000Z') });
-      assert.equal(existsSync(abortUnit.unitInfo.worktree_path), false);
-      assert.equal(gitWorktreeListContains(source, abortUnit.unitInfo.worktree_path), false);
+      const dirtyAbort = await abortFailedUnit({ context: { repo: resolveRepoIdentity(abortUnit.unitInfo.worktree_path), active: prepared.active, coordinationRoot: coordinationRootForRepo(prepared.active.repo_key), claimsPath: '', claimEventsPath: '' }, unitId: 'u-abort', attempt: 1, unitWorktreePath: abortUnit.unitInfo.worktree_path, summary: 'abort failed unit', now: new Date('2026-07-08T00:00:04.000Z') });
+      assert.equal(dirtyAbort.action, 'quarantine');
+      assert.equal(existsSync(abortUnit.unitInfo.worktree_path), true);
+      assert.equal(gitWorktreeListContains(source, abortUnit.unitInfo.worktree_path), true);
+
+      const cleanResetUnit = await prepareAutopilotUnitWorktree({ active: prepared.active, unitId: 'u-clean-reset', attempt: 1 });
+      await resetFailedUnit({ context: { repo: resolveRepoIdentity(cleanResetUnit.unitInfo.worktree_path), active: prepared.active, coordinationRoot: coordinationRootForRepo(prepared.active.repo_key), claimsPath: '', claimEventsPath: '' }, unitId: 'u-clean-reset', attempt: 1, unitWorktreePath: cleanResetUnit.unitInfo.worktree_path, summary: 'reset clean failed unit', now: new Date('2026-07-08T00:00:05.000Z') });
+      assert.equal(existsSync(cleanResetUnit.unitInfo.worktree_path), false);
+      assert.equal(gitWorktreeListContains(source, cleanResetUnit.unitInfo.worktree_path), false);
     });
   });
 

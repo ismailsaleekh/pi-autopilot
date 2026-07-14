@@ -73,7 +73,7 @@ void describe('BUG-174 legacy READ authority release', () => {
     });
   });
 
-  void it('reconciles an already-retained post-cutover READ lease from terminal evidence and grants blocked WRITE', async () => {
+  void it('retires an unbound post-cutover READ lease without fabricating provenance and grants blocked WRITE', async () => {
     await withLegacyReadFixture(async (fixture) => {
       const repoKey = fixture.active.repo_key;
       const applied = await runCoordinationMigration({ command: 'apply', repoKey, env: fixture.env, clock: CLOCK });
@@ -83,38 +83,18 @@ void describe('BUG-174 legacy READ authority release', () => {
       await runCoordinationMigration({ command: 'cutover', repoKey, env: fixture.env, clock: CLOCK });
       await writeTerminalReadEvidence(fixture, 1, { includeUnrelatedDrift: true });
 
-      let server = await startCoordinatorServer(coordinatorRuntimePaths(fixture.env), CLOCK);
+      const server = await startCoordinatorServer(coordinatorRuntimePaths(fixture.env), CLOCK);
       try {
         const supervisor = new DurableRunSupervisorClient(fixture.env);
-        const recoveryStatus = await supervisor.client.query('status', repoKey, fixture.active.workstream_run);
-        const recoveryValues = recoveryStatus.payload['migration_recovery_work'];
-        if (!Array.isArray(recoveryValues) || recoveryValues.length !== 1) throw new Error('expected one retained-authority recovery row');
-        const recovery = parseCoordinationMigrationRecoveryWork(recoveryValues[0]);
-        const proofMustNotBypassPendingRecovery = await supervisor.client.query('status', repoKey, fixture.active.workstream_run);
-        assert.equal(Array.isArray(proofMustNotBypassPendingRecovery.payload['edit_leases']) ? proofMustNotBypassPendingRecovery.payload['edit_leases'].length : -1, 1);
-        const recoveryAttachment = await supervisor.attachMigrationRecovery({ repo: resolveRepoIdentity(fixture.source), workstreamRun: fixture.active.workstream_run, recoveryId: recovery.recovery_id, rawSessionId: 'bug-174-recovery' });
-        await supervisor.resolveMigrationRecovery({ attachment: recoveryAttachment, recoveryWork: recovery, resolution: { resolutionType: 'authority-retained' } });
-        await supervisor.detachMigrationRecovery(recoveryAttachment, 'BUG-174 retained authority reproduced');
-        const retained = await supervisor.client.query('status', repoKey, fixture.active.workstream_run);
-        assert.equal(Array.isArray(retained.payload['edit_leases']) ? retained.payload['edit_leases'].length : -1, 1);
-        const retainedDoctor = await supervisor.client.query('doctor');
-        const retainedFindings = retainedDoctor.payload['invariant_findings'];
-        assert.equal(Array.isArray(retainedFindings) && retainedFindings.some((entry) => typeof entry === 'object' && entry !== null && (entry as Readonly<Record<string, unknown>>)['code'] === 'retained-legacy-explicit-owner-lease'), true);
-      } finally { await server.close(); }
-
-      server = await startCoordinatorServer(coordinatorRuntimePaths(fixture.env), CLOCK);
-      try {
-        const client = new DurableRunSupervisorClient(fixture.env);
-        const reconciled = await client.client.query('status', repoKey, fixture.active.workstream_run);
-        assert.equal(Array.isArray(reconciled.payload['edit_leases']) ? reconciled.payload['edit_leases'].length : -1, 0);
-        assert.equal(Array.isArray(reconciled.payload['acquisition_groups']) ? (reconciled.payload['acquisition_groups'][0] as Readonly<Record<string, unknown>> | undefined)?.['state'] : null, 'released');
-        const doctor = await client.client.query('doctor');
-        const findings = doctor.payload['invariant_findings'];
-        assert.equal(Array.isArray(findings) ? findings.some((entry) => typeof entry === 'object' && entry !== null && (entry as Readonly<Record<string, unknown>>)['code'] === 'retained-legacy-explicit-owner-lease') : true, false);
+        const retired = await supervisor.client.query('status', repoKey, fixture.active.workstream_run);
+        assert.equal(Array.isArray(retired.payload['edit_leases']) ? retired.payload['edit_leases'].length : -1, 0);
+        assert.equal(Array.isArray(retired.payload['observations']) ? retired.payload['observations'].length : -1, 0, 'historical READ cannot receive a source identity after acquisition');
+        assert.equal(Array.isArray(retired.payload['migration_recovery_work']) ? retired.payload['migration_recovery_work'].length : -1, 0);
+        assert.equal(Array.isArray(retired.payload['acquisition_groups']) ? (retired.payload['acquisition_groups'][0] as Readonly<Record<string, unknown>> | undefined)?.['state'] : null, 'released');
 
         const contender = await prepareAutopilotWorkstream({ workstream: 'bug-174-contender', sourceCwd: fixture.source, coordinationSessionId: 'bug-174-contender-bootstrap', env: fixture.env, now: CLOCK.now() });
-        const attachment = await client.attach({ repo: contender.repo, active: contender.active, rawSessionId: 'bug-174-contender-session' });
-        const negotiation = new ClaimNegotiationClient(client.client, attachment.context);
+        const attachment = await supervisor.attach({ repo: contender.repo, active: contender.active, rawSessionId: 'bug-174-contender-session' });
+        const negotiation = new ClaimNegotiationClient(supervisor.client, attachment.context);
         const granted = await negotiation.acquire({
           acquisitionGroupId: 'bug-174-write-group', unitId: 'bug-174-write-unit', attempt: 1,
           requestedLeases: [{ path: 'README.md', mode: 'WRITE', purpose: 'prove historical READ no longer blocks WRITE' }],
@@ -127,11 +107,12 @@ void describe('BUG-174 legacy READ authority release', () => {
 
       const database = new DatabaseSync(coordinatorRuntimePaths(fixture.env).databasePath, { readOnly: true });
       try {
-        const audit = database.prepare("SELECT payload_json FROM migration_legacy_audit WHERE json_extract(payload_json, '$.evidence_source')='legacy-read-terminal'").get();
+        const audit = database.prepare("SELECT payload_json FROM migration_legacy_audit WHERE json_extract(payload_json, '$.schema_version')='autopilot.schema9_read_retirement.v1'").get();
         assert.notEqual(audit, undefined);
-        assert.match(String(audit?.['payload_json']), /accepted-read-terminal/u);
-        const artifactCount = database.prepare('SELECT COUNT(*) AS count FROM evidence_artifacts').get();
-        assert.equal(Number(artifactCount?.['count']) >= 4, true);
+        const payload = JSON.parse(String(audit?.['payload_json'])) as Readonly<Record<string, unknown>>;
+        assert.equal(payload['disposition'], 'retired-unbound-read-authority');
+        assert.equal(Array.isArray(payload['retired_recovery_work']) ? payload['retired_recovery_work'].length : -1, 1);
+        assert.equal('source_identity' in payload, false);
       } finally { database.close(); }
     });
   });
