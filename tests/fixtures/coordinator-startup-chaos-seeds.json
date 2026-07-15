@@ -24,6 +24,18 @@
       "seed": 13561348,
       "events": ["active-session", "running-child", "leases", "session-handoff", "socket-unlink", "clients-N", "exact-process-retirement", "replacement-exact", "startup-response-loss", "same-socket-operation"],
       "expected": "success-authority-preserved"
+    },
+    {
+      "name": "seed-cf49-05-missing-compiled-entrypoint",
+      "seed": 13561349,
+      "events": ["client-spawn", "compiled-entrypoint-missing", "operation-attempt"],
+      "expected": "fail-pre-spawn-packaging"
+    },
+    {
+      "name": "seed-cf49-06-compiled-import-failure",
+      "seed": 13561350,
+      "events": ["client-spawn", "bootstrap-report-running", "compiled-transitive-import-failure", "operation-attempt"],
+      "expected": "fail-bootstrap-import"
     }
   ]
 }

@@ -171,7 +171,7 @@ void it('replaces the real cf45 binary after socket loss while preserving an att
     assert.equal(Array.isArray(sessions) && sessions.some((entry) => record(entry, 'preserved session')['session_lease_id'] === 'lease-session-generation-9' && record(entry, 'preserved session')['status'] === 'attached'), true);
     assert.equal(isProcessAlive(priorPid), false);
     const currentLock = record(JSON.parse(await readFile(paths.lockPath, 'utf8')) as unknown, 'cf48 replacement lock');
-    assert.equal(currentLock['package_build'], '1.1.6-cf48');
+    assert.equal(currentLock['package_build'], '1.1.7-cf49');
     assert.notEqual(currentLock['pid'], priorPid);
   } finally {
     await tagged.close();
@@ -220,7 +220,7 @@ void it('identity-fences a live socketless known coordinator and preserves activ
     await waitForExit(unavailable);
     assert.equal(isProcessAlive(unavailablePid), false);
     const replacementLock = record(JSON.parse(await readFile(paths.lockPath, 'utf8')) as unknown, 'replacement lock');
-    assert.equal(replacementLock['package_build'], '1.1.6-cf48');
+    assert.equal(replacementLock['package_build'], '1.1.7-cf49');
     assert.notEqual(replacementLock['pid'], unavailablePid);
     const sessions = recoveredStatus.payload['session_leases'];
     const children = recoveredStatus.payload['child_leases'];

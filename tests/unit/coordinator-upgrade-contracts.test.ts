@@ -10,9 +10,9 @@ const capability = 'a'.repeat(64);
 void describe('BUG-175 standalone coordinator upgrade contracts', () => {
   void it('locks one exact 1.2/schema-6/build predecessor to the protocol-1.6/schema-12 byte-bounded target', () => {
     assert.deepEqual(COORDINATOR_UPGRADE_PATH.source, { package_build: '0.13.0-cf34', protocol_version: '1.2', database_schema_version: 6, lifecycle_lock_schema: 'autopilot.coordinator_lock.v1' });
-    assert.deepEqual(COORDINATOR_UPGRADE_PATH.target, { package_build: '1.1.6-cf48', protocol_version: '1.6', database_schema_version: 12, lifecycle_lock_schema: 'autopilot.coordinator_lock.v2' });
+    assert.deepEqual(COORDINATOR_UPGRADE_PATH.target, { package_build: '1.1.7-cf49', protocol_version: '1.6', database_schema_version: 12, lifecycle_lock_schema: 'autopilot.coordinator_lock.v2' });
     const predecessor = { schema_version: 'autopilot.coordinator_lock.v1', pid: 123, boot_id: 'boot', token: 'token', started_at: '2026-07-12T00:00:00.000Z' };
-    const current = { schema_version: 'autopilot.coordinator_lock.v2', pid: 456, boot_id: 'boot', process_start_identity: 'process-start', token: 'token', instance_id: 'instance', package_build: '1.1.6-cf48', protocol_version: '1.6', database_schema_version: 12, started_at: '2026-07-12T00:00:00.000Z' };
+    const current = { schema_version: 'autopilot.coordinator_lock.v2', pid: 456, boot_id: 'boot', process_start_identity: 'process-start', token: 'token', instance_id: 'instance', package_build: '1.1.7-cf49', protocol_version: '1.6', database_schema_version: 12, started_at: '2026-07-12T00:00:00.000Z' };
     const priorCf47 = { ...current, package_build: '1.1.5-cf47' };
     const priorCf46 = { ...current, package_build: '1.1.4-cf46' };
     const priorCf45 = { ...current, package_build: '1.1.3-cf45' };
@@ -46,7 +46,8 @@ void describe('BUG-175 standalone coordinator upgrade contracts', () => {
   });
 
   void it('classifies only the closed protocol-1.6/schema-12 builds as current-wire compatible', () => {
-    assert.equal(classifyCoordinatorRuntimeIdentity({ package_build: '1.1.6-cf48', protocol_version: '1.6', database_schema_version: 12 }).kind, 'exact-target');
+    assert.equal(classifyCoordinatorRuntimeIdentity({ package_build: '1.1.7-cf49', protocol_version: '1.6', database_schema_version: 12 }).kind, 'exact-target');
+    assert.equal(classifyCoordinatorRuntimeIdentity({ package_build: '1.1.6-cf48', protocol_version: '1.6', database_schema_version: 12 }).kind, 'wire-compatible-known');
     assert.equal(classifyCoordinatorRuntimeIdentity({ package_build: '1.1.5-cf47', protocol_version: '1.6', database_schema_version: 12 }).kind, 'wire-compatible-known');
     assert.equal(classifyCoordinatorRuntimeIdentity({ package_build: '1.1.4-cf46', protocol_version: '1.6', database_schema_version: 12 }).kind, 'wire-compatible-known');
     assert.equal(classifyCoordinatorRuntimeIdentity({ package_build: '1.1.3-cf45', protocol_version: '1.6', database_schema_version: 12 }).kind, 'wire-compatible-known');
@@ -54,8 +55,8 @@ void describe('BUG-175 standalone coordinator upgrade contracts', () => {
     assert.equal(classifyCoordinatorRuntimeIdentity({ package_build: '1.1.1-cf43', protocol_version: '1.6', database_schema_version: 12 }).kind, 'wire-compatible-known', 'a prior compatible patch build is wire-compatible, not the exact current build');
     assert.deepEqual(classifyCoordinatorRuntimeIdentity({ package_build: '1.0.3-cf40', protocol_version: '1.3', database_schema_version: 9 }), { kind: 'incompatible', reason: 'unknown-build', package_build: '1.0.3-cf40' });
     assert.deepEqual(classifyCoordinatorRuntimeIdentity({ package_build: 'unknown-cf42', protocol_version: '1.5', database_schema_version: 11 }), { kind: 'incompatible', reason: 'unknown-build', package_build: 'unknown-cf42' });
-    assert.deepEqual(classifyCoordinatorRuntimeIdentity({ package_build: '1.1.6-cf48', protocol_version: '1.5', database_schema_version: 12 }), { kind: 'incompatible', reason: 'protocol-mismatch', package_build: '1.1.6-cf48' });
-    assert.deepEqual(classifyCoordinatorRuntimeIdentity({ package_build: '1.1.6-cf48', protocol_version: '1.6', database_schema_version: 11 }), { kind: 'incompatible', reason: 'schema-mismatch', package_build: '1.1.6-cf48' });
+    assert.deepEqual(classifyCoordinatorRuntimeIdentity({ package_build: '1.1.7-cf49', protocol_version: '1.5', database_schema_version: 12 }), { kind: 'incompatible', reason: 'protocol-mismatch', package_build: '1.1.7-cf49' });
+    assert.deepEqual(classifyCoordinatorRuntimeIdentity({ package_build: '1.1.7-cf49', protocol_version: '1.6', database_schema_version: 11 }), { kind: 'incompatible', reason: 'schema-mismatch', package_build: '1.1.7-cf49' });
   });
 
   void it('allows only exact prior-protocol idempotency replay and rejects status or unknown protocol replay', () => {

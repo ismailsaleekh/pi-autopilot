@@ -1,11 +1,10 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { existsSync } from 'node:fs';
 import { open, unlink, type FileHandle } from 'node:fs/promises';
 import { connect, type Socket } from 'node:net';
 import { spawn } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
 
 import { parseCoordinationReconciliationDetail, parseCoordinationReconciliationReceipt, parseCoordinationResultDetail, parseCoordinationResultReceipt, parseCoordinatorMailboxPage, parseCoordinatorMigrationRecoveryPage, parseCoordinatorProjectionPage, parseCoordinatorReconciliationDetailPage, parseCoordinatorRequestEnvelope, parseCoordinatorResponseEnvelope, parseCoordinatorResultDetailPage, parseCoordinatorRunCatalogPage } from './contracts.ts';
+import { COORDINATOR_COMPILED_ENTRYPOINT_ENV, resolveCoordinatorExecutable } from './executable-resolution.ts';
 import { coordinationFailureDefinition, CoordinationRuntimeError } from './failures.ts';
 import { AUTOPILOT_COORDINATOR_TRANSPORT_VERSION, CoordinatorFrameDecoder, encodeCoordinatorFrame } from './ipc.ts';
 import { activeCoordinationMigrationFreeze } from './migration-paths.ts';
@@ -215,18 +214,12 @@ async function hasLiveExactPredecessor(paths: CoordinatorRuntimePaths): Promise<
   return lock !== null && isProcessAlive(lock.pid);
 }
 
-function coordinatorCliPath(): { readonly path: string; readonly stripTypes: boolean } {
-  const compiled = fileURLToPath(new URL('../../cli/autopilot-coordinator.js', import.meta.url));
-  if (existsSync(compiled)) return { path: compiled, stripTypes: false };
-  const source = fileURLToPath(new URL('../../cli/autopilot-coordinator.ts', import.meta.url));
-  if (existsSync(source)) return { path: source, stripTypes: true };
-  throw new CoordinationRuntimeError('coordinator-unavailable', 'packaged coordinator CLI entrypoint is missing', [compiled, source]);
-}
-
 interface SpawnedCoordinator {
   readonly child: ReturnType<typeof spawn>;
   readonly attemptId: string;
   readonly reportPath: string;
+  readonly bootstrapPath: string;
+  readonly coordinatorPath: string;
 }
 
 interface SpawnedProcessOutcome {
@@ -235,17 +228,32 @@ interface SpawnedProcessOutcome {
   readonly spawnError: string | null;
 }
 
+export function resolveCoordinatorExecutableForClientModule(): ReturnType<typeof resolveCoordinatorExecutable> {
+  return resolveCoordinatorExecutable(import.meta.url);
+}
+
 function spawnCoordinator(paths: CoordinatorRuntimePaths, env: ProcessEnvLike): SpawnedCoordinator {
-  const cli = coordinatorCliPath();
+  const executable = resolveCoordinatorExecutableForClientModule();
   const attemptId = createCoordinatorStartupAttemptId();
-  const args = [...(cli.stripTypes ? ['--experimental-strip-types'] : []), cli.path, 'serve', '--state-root', paths.stateRoot];
-  const child = spawn(process.execPath, args, {
+  const child = spawn(process.execPath, [executable.bootstrapPath, 'serve', '--state-root', paths.stateRoot], {
     detached: true,
     stdio: 'ignore',
-    env: { ...process.env, ...env, AUTOPILOT_STATE_ROOT: paths.stateRoot, [COORDINATOR_STARTUP_ATTEMPT_ID_ENV]: attemptId },
+    env: {
+      ...process.env,
+      ...env,
+      AUTOPILOT_STATE_ROOT: paths.stateRoot,
+      [COORDINATOR_STARTUP_ATTEMPT_ID_ENV]: attemptId,
+      [COORDINATOR_COMPILED_ENTRYPOINT_ENV]: executable.coordinatorPath,
+    },
   });
   child.unref();
-  return { child, attemptId, reportPath: coordinatorStartupReportPath(paths, attemptId) };
+  return {
+    child,
+    attemptId,
+    reportPath: coordinatorStartupReportPath(paths, attemptId),
+    bootstrapPath: executable.bootstrapPath,
+    coordinatorPath: executable.coordinatorPath,
+  };
 }
 
 function sameCurrentLifecycle(left: CurrentCoordinatorLock, right: CurrentCoordinatorLock): boolean {
@@ -735,6 +743,7 @@ export class CoordinatorClient {
           const cause = spawnError instanceof CoordinationRuntimeError ? spawnError : null;
           throw new CoordinationRuntimeError('coordinator-unavailable', 'coordinator startup failed before a child process could be launched', [
             'spawned_pid=unassigned', 'spawned_exit_code=none', 'spawned_signal=none',
+            'spawned_executable=unresolved',
             'exact_competing_lifecycle_owner_observed=false', 'startup_phase=spawn-resolution',
             'lifecycle_candidate=absent', 'last_endpoint_transport_failure=none',
             `startup_report_error=${spawnError instanceof Error ? spawnError.message : String(spawnError)}`,
@@ -779,7 +788,7 @@ export class CoordinatorClient {
 
     const refreshReport = (): CoordinatorStartupReport | null => {
       const observed = readCoordinatorStartupReport(reportPath, attemptId);
-      if (observed !== null && observed.spawned_pid === pid) report = observed;
+      if (observed !== null && observed.spawned_pid === pid && observed.selected_compiled_entrypoint === spawned.coordinatorPath) report = observed;
       else if (observed !== null) report = null;
       return report;
     };
@@ -791,6 +800,8 @@ export class CoordinatorClient {
         `spawned_exit_code=${outcome?.exitCode === null || outcome?.exitCode === undefined ? 'none' : String(outcome.exitCode)}`,
         `spawned_signal=${outcome?.signal ?? 'none'}`,
         `spawn_error=${outcome?.spawnError ?? 'none'}`,
+        `spawned_executable=${spawned.bootstrapPath}`,
+        `selected_compiled_entrypoint=${spawned.coordinatorPath}`,
         `exact_competing_lifecycle_owner_observed=${String(candidate !== null || currentReport?.exact_competing_lifecycle_owner_observed === true)}`,
         `startup_phase=${currentReport?.phase ?? 'spawn/readiness'}`,
         ...lifecycleEvidence(candidate),

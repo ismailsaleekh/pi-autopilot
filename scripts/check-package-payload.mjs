@@ -16,7 +16,9 @@ const files = new Set(parsed[0]?.files?.map((entry) => entry.path) ?? []);
 const required = [
   'bin/autopilot-agent-run.mjs',
   'bin/autopilot-coordinator.mjs',
+  'dist/src/cli/autopilot-coordinator-bootstrap.js',
   'dist/src/cli/autopilot-coordinator.js',
+  'dist/src/core/coordination/executable-resolution.js',
   'dist/src/core/coordination/migration.js',
   'dist/src/core/coordination/migration-paths.js',
   'dist/src/core/coordination/store.js',

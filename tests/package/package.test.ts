@@ -216,11 +216,13 @@ void describe('package manifest and payload', () => {
       'extensions/autopilot.ts',
       'src/extension.ts',
       'dist/src/cli/autopilot-agent-run.js',
+      'dist/src/cli/autopilot-coordinator-bootstrap.js',
       'dist/src/cli/autopilot-coordinator.js',
       'dist/src/cli/migration-recovery.js',
       'dist/src/core/agent-runner.js',
       'dist/src/core/close-runtime.js',
       'dist/src/core/coordination/client.js',
+      'dist/src/core/coordination/executable-resolution.js',
       'dist/src/core/coordination/contracts.js',
       'dist/src/core/coordination/invariants.js',
       'dist/src/core/coordination/legacy-preflight.js',
@@ -234,6 +236,7 @@ void describe('package manifest and payload', () => {
       'src/core/context-budget.ts',
       'src/core/coordination/index.ts',
       'src/core/coordination/client.ts',
+      'src/core/coordination/executable-resolution.ts',
       'src/core/coordination/contracts.ts',
       'src/core/coordination/invariants.ts',
       'src/core/coordination/legacy-preflight.ts',
@@ -460,11 +463,13 @@ void describe('package manifest and payload', () => {
       'src/extension.ts',
       'dist/extensions/autopilot.js',
       'dist/src/cli/autopilot-agent-run.js',
+      'dist/src/cli/autopilot-coordinator-bootstrap.js',
       'dist/src/cli/autopilot-coordinator.js',
       'dist/src/cli/migration-recovery.js',
       'dist/src/core/agent-runner.js',
       'dist/src/core/close-runtime.js',
       'dist/src/core/coordination/client.js',
+      'dist/src/core/coordination/executable-resolution.js',
       'dist/src/core/coordination/contracts.js',
       'dist/src/core/coordination/invariants.js',
       'dist/src/core/coordination/legacy-preflight.js',
@@ -477,6 +482,7 @@ void describe('package manifest and payload', () => {
       'dist/src/internal/status-extension.js',
       'src/core/context-budget.ts',
       'src/core/coordination/client.ts',
+      'src/core/coordination/executable-resolution.ts',
       'src/core/coordination/contracts.ts',
       'src/core/coordination/invariants.ts',
       'src/core/coordination/legacy-preflight.ts',
@@ -576,8 +582,15 @@ void describe('package manifest and payload', () => {
 
   void it('exposes the coordinator help path without TypeScript stripping', async () => {
     const wrapper = await readFile(new URL('bin/autopilot-coordinator.mjs', root), 'utf8');
+    const client = await readFile(new URL('src/core/coordination/client.ts', root), 'utf8');
+    const resolver = await readFile(new URL('src/core/coordination/executable-resolution.ts', root), 'utf8');
     assert.equal(wrapper.includes('--experimental-strip-types'), false);
+    assert.equal(client.includes('--experimental-strip-types'), false);
+    assert.equal(client.includes('autopilot-coordinator.ts'), false);
+    assert.equal(resolver.includes('process.cwd'), false);
+    assert.equal(resolver.includes("process.env['PATH']"), false);
     assert.match(wrapper, /'dist', 'src', 'cli', 'autopilot-coordinator\.js'/u);
+    assert.match(resolver, /autopilot-coordinator-bootstrap/u);
     const result = spawnSync(process.execPath, ['bin/autopilot-coordinator.mjs', '--help'], { cwd: root, encoding: 'utf8' });
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /autopilot-coordinator status/u);

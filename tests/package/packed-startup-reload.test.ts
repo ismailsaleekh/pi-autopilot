@@ -5,17 +5,19 @@ import { mkdir, mkdtemp, readFile, rm, unlink, writeFile } from 'node:fs/promise
 import { platform, tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { it } from 'node:test';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
 
 import { isProcessAlive } from '../../src/core/coordination/process-identity.ts';
 import { coordinatorRuntimePaths } from '../../src/core/coordination/runtime-paths.ts';
 import { AUTOPILOT_STATE_ROOT_ENV } from '../../src/core/parallel-runtime.ts';
+import { invokePackedManifestAutopilot } from '../helpers/packed-manifest-route.ts';
 
 const packageRoot = resolve(fileURLToPath(new URL('../../', import.meta.url)));
 const predecessors = [
   { label: 'cf45', commit: 'a0d8a732decdb5f7061b01a8c5ead6120cba081f', version: '1.1.3', build: '1.1.3-cf45' },
   { label: 'cf46', commit: '79fa09508def3277b9e6fb3461f7b3d753d43993', version: '1.1.4', build: '1.1.4-cf46' },
   { label: 'cf47', commit: '210d695393232c19652b664a60b9ecfc6fe0e713', version: '1.1.5', build: '1.1.5-cf47' },
+  { label: 'cf48', commit: 'a8a6078dfe1e49c2c9e61abcae10741fce20b745', version: '1.1.6', build: '1.1.6-cf48' },
 ] as const;
 
 function run(command: string, args: readonly string[], cwd: string, env: Readonly<Record<string, string | undefined>>): ReturnType<typeof spawnSync> {
@@ -91,34 +93,14 @@ async function stopCoordinator(env: Readonly<Record<string, string | undefined>>
   assert.equal(isProcessAlive(pid), false);
 }
 
-function probeInstalledBuild(consumer: string, stateRoot: string, env: Readonly<Record<string, string | undefined>>): string {
-  const clientUrl = pathToFileURL(join(consumer, 'node_modules', 'pi-autopilot', 'dist/src/core/coordination/client.js')).href;
-  const script = `import { CoordinatorClient } from ${JSON.stringify(clientUrl)}; const response=await new CoordinatorClient({env:{...process.env,AUTOPILOT_STATE_ROOT:${JSON.stringify(stateRoot)}}}).query('handshake'); console.log(response.payload.package_build);`;
-  return String(run(process.execPath, ['--input-type=module', '-e', script], consumer, env).stdout).trim();
+async function invokePackedAutopilot(consumer: string, project: string, stateRoot: string, homeRoot: string, workstream: string, env: Readonly<Record<string, string | undefined>>): Promise<void> {
+  const invocation = await invokePackedManifestAutopilot({ consumerRoot: consumer, projectRoot: project, stateRoot, homeRoot, workstream, env });
+  assert.equal(invocation.status, 0, `${invocation.stderr}\n${invocation.stdout}`);
+  assert.equal(invocation.result?.['manifestEntry'], './extensions/autopilot.ts');
+  assert.equal(invocation.result?.['messages'], 1, JSON.stringify(invocation.result?.['notifications']));
 }
 
-async function invokePackedAutopilot(consumer: string, project: string, stateRoot: string, env: Readonly<Record<string, string | undefined>>, shutdownSession = true): Promise<void> {
-  const extensionUrl = pathToFileURL(join(consumer, 'node_modules', 'pi-autopilot', 'dist/src/extension.js')).href;
-  const scriptPath = join(consumer, 'packed-autopilot-reload.mjs');
-  await writeFile(scriptPath, `
-process.env.AUTOPILOT_STATE_ROOT=${JSON.stringify(stateRoot)};
-const extension=(await import(${JSON.stringify(extensionUrl)})).default;
-const commands=new Map(), messages=[], notifications=[], shutdown=[]; let thinking='high', active=[];
-const host={registerCommand:(n,d)=>commands.set(n,d),registerTool:()=>{},getActiveTools:()=>active,setActiveTools:(v)=>{active=[...v]},setModel:()=>Promise.resolve(true),getThinkingLevel:()=>thinking,setThinkingLevel:(v)=>{thinking=v},sendUserMessage:(content)=>messages.push(content),sendMessage:()=>{},on:(name,handler)=>{if(name==='session_shutdown')shutdown.push(handler)}};
-extension(host);
-const ctx={cwd:${JSON.stringify(project)},ui:{notify:(message,kind)=>notifications.push({message,kind})},modelRegistry:{find:(provider,id)=>({provider,id})},sessionManager:{getSessionId:()=> 'packed-reload-session'},isIdle:()=>true};
-await commands.get('autopilot').handler('packed-reload-unit synthetic offline launch',ctx);
-if(${JSON.stringify(shutdownSession)}) for(const handler of shutdown) await handler({reason:'packed-test-complete'},ctx);
-if(messages.length!==1||notifications.some((entry)=>entry.kind==='error')){console.error(JSON.stringify({messages,notifications}));process.exit(3)}
-console.log(JSON.stringify({messages:messages.length,notification:notifications.at(-1)?.message??null}));
-if(${JSON.stringify(!shutdownSession)}) process.exit(0);
-`, 'utf8');
-  const result = run(process.execPath, [scriptPath], consumer, env);
-  const output: unknown = JSON.parse(String(result.stdout).trim()) as unknown;
-  assert.equal(typeof output, 'object');
-}
-
-void it('packs exact cf45/cf46/cf47 binaries and completes the isolated cf47-to-cf48 reload journey', async () => {
+void it('packs exact cf45/cf46/cf47/cf48 binaries and completes the manifest-route cf48-to-cf49 reload journey', async () => {
   const root = await mkdtemp(join(tmpdir(), 'pi-autopilot-packed-startup-reload-'));
   const cache = join(root, 'npm-cache');
   const npmEnv = { ...process.env, NPM_CONFIG_CACHE: cache, NPM_CONFIG_OFFLINE: 'true', PI_OFFLINE: '1', PI_SKIP_VERSION_CHECK: '1', PI_TELEMETRY: '0' };
@@ -135,7 +117,7 @@ void it('packs exact cf45/cf46/cf47 binaries and completes the isolated cf47-to-
       run(coordinatorBin(consumer), ['status', '--state-root', stateRoot], consumer, env);
       const predecessorLock = await lock(env);
       assert.equal(predecessorLock['package_build'], predecessor.build);
-      const project = predecessor.label === 'cf47' ? join(root, 'packed-project') : null;
+      const project = predecessor.label === 'cf48' ? join(root, 'packed-project') : null;
       if (project !== null) {
         await mkdir(project, { recursive: true });
         await writeFile(join(project, 'README.md'), '# packed reload\n', 'utf8');
@@ -144,20 +126,28 @@ void it('packs exact cf45/cf46/cf47 binaries and completes the isolated cf47-to-
         run('git', ['config', 'user.name', 'Packed Test'], project, env);
         run('git', ['add', '.'], project, env);
         run('git', ['commit', '-m', 'baseline'], project, env);
-        await invokePackedAutopilot(consumer, project, stateRoot, env, false);
+        await invokePackedAutopilot(consumer, project, stateRoot, join(root, 'packed-home-predecessor'), 'packed-reload-unit', env);
       }
       install(candidate, consumer, env);
-      assert.equal(probeInstalledBuild(consumer, stateRoot, env), predecessor.build, 'a healthy certified predecessor remains authoritative and usable');
+      const healthy = JSON.parse(String(run(coordinatorBin(consumer), ['status', '--state-root', stateRoot], consumer, env).stdout)) as Readonly<Record<string, unknown>>;
+      assert.equal((await lock(env))['package_build'], predecessor.build, 'a healthy certified predecessor remains authoritative and usable');
 
-      if (predecessor.label === 'cf47' && project !== null) {
+      if (predecessor.label === 'cf48' && project !== null) {
+        const predecessorRuns = healthy['runs'];
+        assert.equal(Array.isArray(predecessorRuns) && predecessorRuns.length, 1);
+        const originalRun = Array.isArray(predecessorRuns) ? predecessorRuns[0] : null;
         await unlink(coordinatorRuntimePaths(env).socketPath);
-        assert.equal(probeInstalledBuild(consumer, stateRoot, env), '1.1.6-cf48');
+        await invokePackedAutopilot(consumer, project, stateRoot, join(root, 'packed-home-candidate'), 'packed-reload-unit', env);
         const current = await lock(env);
-        assert.equal(current['package_build'], '1.1.6-cf48');
+        assert.equal(current['package_build'], '1.1.7-cf49');
         assert.notEqual(current['pid'], predecessorLock['pid']);
-        await invokePackedAutopilot(consumer, project, stateRoot, env);
+        await invokePackedAutopilot(consumer, project, stateRoot, join(root, 'packed-home-next'), 'packed-next-item', env);
         const status = JSON.parse(String(run(coordinatorBin(consumer), ['status', '--state-root', stateRoot], consumer, env).stdout)) as Readonly<Record<string, unknown>>;
-        assert.equal(Array.isArray(status['runs']) && status['runs'].length, 1, 'packed reload must preserve and resume the durable run');
+        const runs = status['runs'];
+        assert.equal(Array.isArray(runs) && runs.length, 2, 'reload must preserve one original run and prepare one exact next item');
+        const runIds = Array.isArray(runs) ? runs.map((runEntry) => typeof runEntry === 'object' && runEntry !== null && !Array.isArray(runEntry) ? (runEntry as Readonly<Record<string, unknown>>)['workstream_run'] : null) : [];
+        assert.equal(new Set(runIds).size, 2, 'reload must not duplicate a durable run operation');
+        assert.equal(Array.isArray(runs) && runs.some((runEntry) => typeof runEntry === 'object' && runEntry !== null && !Array.isArray(runEntry) && typeof originalRun === 'object' && originalRun !== null && !Array.isArray(originalRun) && (runEntry as Readonly<Record<string, unknown>>)['workstream_run'] === (originalRun as Readonly<Record<string, unknown>>)['workstream_run']), true, 'the durable predecessor run identity must survive replacement');
       }
       await stopCoordinator(env);
     }

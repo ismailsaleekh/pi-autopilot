@@ -1,6 +1,6 @@
 {
   "name": "pi-autopilot",
-  "version": "1.1.6",
+  "version": "1.1.7",
   "description": "Standalone perfect-quality Autopilot orchestration for Pi with transactional coordination, deterministic deadlock resolution, contradiction-only escalation, isolated worktrees, and quality gates.",
   "type": "module",
   "license": "ISC",

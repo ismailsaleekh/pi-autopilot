@@ -88,6 +88,17 @@
       "regression": "coordinator-build-compatibility: same socket handshake-operation"
     },
     {
+      "id": "compiled-bootstrap-import-failure",
+      "lock": "absent", "predecessor_fence": "absent", "endpoint": "absent", "child": "exit-nonzero", "database": "clean", "authority": "no-session", "clients": "1",
+      "allowed_mutation": [],
+      "expected_authority_owner": "none; bootstrap diagnostics are never authority",
+      "expected_endpoint": "none",
+      "retry_wait": "fail promptly with exact compiled entrypoint and bounded import cause",
+      "terminal_failure_code": "coordinator-unavailable",
+      "forbidden_effects": ["TypeScript fallback", "PATH or cwd search", "lifecycle mutation", "cause-free unavailable report"],
+      "regression": "installed-manifest-startup: corrupt compiled transitive import"
+    },
+    {
       "id": "corrupt-store-startup",
       "lock": "absent", "predecessor_fence": "absent", "endpoint": "absent", "child": "exit-nonzero", "database": "corrupt", "authority": "no-session", "clients": "1",
       "allowed_mutation": [],

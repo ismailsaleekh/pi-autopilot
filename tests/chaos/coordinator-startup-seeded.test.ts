@@ -40,6 +40,8 @@ function apply(model: StartupModel, event: string): void {
   else if (event === 'winner-endpoint-exact') model.endpoint = 'exact';
   else if (event === 'child-exit-0-with-exact-report') { model.child = 'clean-loser'; model.exactReport = true; }
   else if (event === 'winner-process-death') { model.child = 'dead'; model.terminal = 'fail-coordinator-unavailable'; }
+  else if (event === 'compiled-entrypoint-missing') { model.child = 'dead'; model.terminal = 'fail-pre-spawn-packaging'; }
+  else if (event === 'compiled-transitive-import-failure') { model.child = 'dead'; model.terminal = 'fail-bootstrap-import'; }
   else if (event === 'winner-lock-drift' || event === 'partial-metadata-write') {
     if (event === 'winner-lock-drift') { model.lock = 'drift'; model.terminal = 'fail-closed-no-operation'; }
   } else if (event === 'endpoint-replaced-unknown') { model.endpoint = 'unknown'; model.terminal = 'fail-closed-no-operation'; }

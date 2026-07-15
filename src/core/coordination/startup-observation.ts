@@ -4,6 +4,7 @@ import { mkdir, open, readdir, rename, rm, stat, writeFile } from 'node:fs/promi
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 
 import { assertPrivatePathNoAliases } from '../private-path.ts';
+import { COORDINATOR_COMPILED_ENTRYPOINT_ENV } from './executable-resolution.ts';
 import { COORDINATION_FAILURE_CODES, CoordinationRuntimeError, coordinationFailureDefinition, formatCoordinationRuntimeError, sanitizeCoordinationDiagnosticText, type CoordinationFailureClass, type CoordinationFailureCode } from './failures.ts';
 import { isExactProcessAlive } from './process-identity.ts';
 import { enforcePrivateAuthorityPath, ensureCoordinatorPrivateRoots, type CoordinatorRuntimePaths } from './runtime-paths.ts';
@@ -18,6 +19,7 @@ const STARTUP_REPORT_RETENTION = 64;
 const STARTUP_FAILURE_CLASSES: readonly CoordinationFailureClass[] = ['client-invalid', 'retryable-contention', 'fenced-client', 'owned-recovery', 'contradiction-review', 'system-fatal'];
 
 export const COORDINATOR_STARTUP_PHASES = [
+  'bootstrap/import',
   'before-lifecycle-election',
   'after-lifecycle-lock-acquisition',
   'before-private-root-capability-setup',
@@ -51,6 +53,7 @@ export interface CoordinatorStartupReport {
   readonly spawned_pid: number;
   readonly outcome: CoordinatorStartupOutcome;
   readonly phase: CoordinatorStartupPhase;
+  readonly selected_compiled_entrypoint: string | null;
   readonly exact_competing_lifecycle_owner_observed: boolean;
   readonly lifecycle: SafeCoordinatorLifecycleIdentity | null;
   readonly error: string | null;
@@ -199,6 +202,8 @@ export async function createCoordinatorStartupObserver(paths: CoordinatorRuntime
   let phase: CoordinatorStartupPhase = 'before-lifecycle-election';
   let lifecycle: CurrentCoordinatorLock | null = null;
   let outcome: CoordinatorStartupOutcome = 'running';
+  const selectedCompiledEntrypoint = env[COORDINATOR_COMPILED_ENTRYPOINT_ENV] ?? null;
+  if (selectedCompiledEntrypoint !== null && !isAbsolute(selectedCompiledEntrypoint)) throw new CoordinationRuntimeError('invalid-request', 'selected compiled coordinator entrypoint must be absolute');
 
   const publish = async (error: unknown | null): Promise<void> => {
     const bounded = error === null ? null : boundedError(error);
@@ -208,6 +213,7 @@ export async function createCoordinatorStartupObserver(paths: CoordinatorRuntime
       spawned_pid: process.pid,
       outcome,
       phase,
+      selected_compiled_entrypoint: selectedCompiledEntrypoint,
       exact_competing_lifecycle_owner_observed: outcome === 'election-loser' && lifecycle !== null,
       lifecycle: lifecycle === null ? null : safeLifecycle(lifecycle),
       error: bounded?.text ?? null,
@@ -264,7 +270,8 @@ export function readCoordinatorStartupReport(path: string, expectedAttemptId: st
     const report = value as Readonly<Record<string, unknown>>;
     const phase = report['phase'];
     const outcome = report['outcome'];
-    if (report['schema_version'] !== COORDINATOR_STARTUP_REPORT_SCHEMA || report['attempt_id'] !== expectedAttemptId || typeof report['spawned_pid'] !== 'number' || !Number.isSafeInteger(report['spawned_pid']) || report['spawned_pid'] < 1 || typeof phase !== 'string' || !COORDINATOR_STARTUP_PHASES.includes(phase as CoordinatorStartupPhase) || (outcome !== 'running' && outcome !== 'ready' && outcome !== 'election-loser' && outcome !== 'failed') || typeof report['exact_competing_lifecycle_owner_observed'] !== 'boolean' || (report['error'] !== null && typeof report['error'] !== 'string') || (report['failure_code'] !== null && (typeof report['failure_code'] !== 'string' || !COORDINATION_FAILURE_CODES.includes(report['failure_code'] as CoordinationFailureCode))) || (report['failure_class'] !== null && (typeof report['failure_class'] !== 'string' || !STARTUP_FAILURE_CLASSES.includes(report['failure_class'] as CoordinationFailureClass))) || typeof report['diagnostics_truncated'] !== 'boolean' || typeof report['omitted_code_points'] !== 'number' || !Number.isSafeInteger(report['omitted_code_points']) || report['omitted_code_points'] < 0 || typeof report['updated_at'] !== 'string') return null;
+    const selectedCompiledEntrypoint = report['selected_compiled_entrypoint'];
+    if (report['schema_version'] !== COORDINATOR_STARTUP_REPORT_SCHEMA || report['attempt_id'] !== expectedAttemptId || typeof report['spawned_pid'] !== 'number' || !Number.isSafeInteger(report['spawned_pid']) || report['spawned_pid'] < 1 || typeof phase !== 'string' || !COORDINATOR_STARTUP_PHASES.includes(phase as CoordinatorStartupPhase) || (outcome !== 'running' && outcome !== 'ready' && outcome !== 'election-loser' && outcome !== 'failed') || (selectedCompiledEntrypoint !== null && (typeof selectedCompiledEntrypoint !== 'string' || !isAbsolute(selectedCompiledEntrypoint))) || typeof report['exact_competing_lifecycle_owner_observed'] !== 'boolean' || (report['error'] !== null && typeof report['error'] !== 'string') || (report['failure_code'] !== null && (typeof report['failure_code'] !== 'string' || !COORDINATION_FAILURE_CODES.includes(report['failure_code'] as CoordinationFailureCode))) || (report['failure_class'] !== null && (typeof report['failure_class'] !== 'string' || !STARTUP_FAILURE_CLASSES.includes(report['failure_class'] as CoordinationFailureClass))) || typeof report['diagnostics_truncated'] !== 'boolean' || typeof report['omitted_code_points'] !== 'number' || !Number.isSafeInteger(report['omitted_code_points']) || report['omitted_code_points'] < 0 || typeof report['updated_at'] !== 'string') return null;
     const failureCode = report['failure_code'] as CoordinationFailureCode | null;
     const failureClass = report['failure_class'] as CoordinationFailureClass | null;
     if ((failureCode === null) !== (failureClass === null) || (failureCode !== null && coordinationFailureDefinition(failureCode).failure_class !== failureClass)) return null;
@@ -286,7 +293,7 @@ export function readCoordinatorStartupReport(path: string, expectedAttemptId: st
         started_at: candidate['started_at'],
       };
     }
-    return { schema_version: COORDINATOR_STARTUP_REPORT_SCHEMA, attempt_id: expectedAttemptId, spawned_pid: report['spawned_pid'] as number, outcome, phase: phase as CoordinatorStartupPhase, exact_competing_lifecycle_owner_observed: report['exact_competing_lifecycle_owner_observed'] as boolean, lifecycle: lifecycleIdentity, error: report['error'] as string | null, failure_code: failureCode, failure_class: failureClass, diagnostics_truncated: report['diagnostics_truncated'] as boolean, omitted_code_points: report['omitted_code_points'] as number, updated_at: report['updated_at'] as string };
+    return { schema_version: COORDINATOR_STARTUP_REPORT_SCHEMA, attempt_id: expectedAttemptId, spawned_pid: report['spawned_pid'] as number, outcome, phase: phase as CoordinatorStartupPhase, selected_compiled_entrypoint: selectedCompiledEntrypoint as string | null, exact_competing_lifecycle_owner_observed: report['exact_competing_lifecycle_owner_observed'] as boolean, lifecycle: lifecycleIdentity, error: report['error'] as string | null, failure_code: failureCode, failure_class: failureClass, diagnostics_truncated: report['diagnostics_truncated'] as boolean, omitted_code_points: report['omitted_code_points'] as number, updated_at: report['updated_at'] as string };
   } catch (error) {
     if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return null;
     return null;
