@@ -23,7 +23,7 @@ import type {
   CoordinationWorktreeState,
   CoordinatorResponseEnvelope,
 } from './types.ts';
-import { AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV } from '../names.ts';
+import { AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV, AUTOPILOT_PREFLIGHT_ROLLBACK_REASON_PREFIX } from '../names.ts';
 import type { ActiveAutopilotRow, ProcessEnvLike } from '../parallel-runtime.ts';
 
 const TERMINAL_STAGES = new Set(['committed', 'compensated', 'failed']);
@@ -821,6 +821,8 @@ function fixedAction(operation: CoordinationWorktreeOperation, env: ProcessEnvLi
   }
 }
 
+const LEGACY_POST_SAGA_WORKTREE_LEDGER_REF = '_ledger.jsonl';
+
 function missingOperationMetadata(operation: CoordinationWorktreeOperation): readonly string[] {
   if (operation.intent.metadata_refs.length === 0) return [];
   const taskRoot = operation.owner.unit_id === 'main'
@@ -835,7 +837,15 @@ function missingOperationMetadata(operation: CoordinationWorktreeOperation): rea
       runtimeRoot = typeof taskInfo['runtime_root'] === 'string' ? taskInfo['runtime_root'] : null;
     } catch { runtimeRoot = null; }
   }
-  return operation.intent.metadata_refs.filter((ref) => ![resolve(taskRoot, ref), resolve(worktreeRoot, ref), ...(runtimeRoot === null ? [] : [resolve(runtimeRoot, ref)])].some((candidate) => existsSync(candidate)));
+  return operation.intent.metadata_refs.filter((ref) => {
+    // cf46 cleanup rows incorrectly declared the append-only legacy ledger as
+    // an operation postcondition even though projection occurs after the saga
+    // and is intentionally absent after cutover. Preserve those rows as an
+    // explicit compatibility adapter; current cleanup intents declare no such
+    // false dependency.
+    if (operation.operation_type === 'remove' && operation.intent.reason.startsWith(AUTOPILOT_PREFLIGHT_ROLLBACK_REASON_PREFIX) && ref === LEGACY_POST_SAGA_WORKTREE_LEDGER_REF) return false;
+    return ![resolve(taskRoot, ref), resolve(worktreeRoot, ref), ...(runtimeRoot === null ? [] : [resolve(runtimeRoot, ref)])].some((candidate) => existsSync(candidate));
+  });
 }
 
 function fixedVerify(operation: CoordinationWorktreeOperation, env: ProcessEnvLike): readonly string[] {

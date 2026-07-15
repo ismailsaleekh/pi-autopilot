@@ -72,7 +72,7 @@ void describe('coordinator protocol and schema version boundary', () => {
       assert.equal(isProcessAlive(tagged.child.pid ?? -1), false);
       current = await startCoordinatorServer(tagged.paths);
       const handshake = await new CoordinatorClient({ env, autoStart: false }).query('handshake');
-      assert.equal(handshake.payload['package_build'], '1.1.4-cf46');
+      assert.equal(handshake.payload['package_build'], '1.1.5-cf47');
       assert.equal(handshake.payload['protocol_version'], '1.6');
       assert.equal(handshake.payload['database_schema_version'], 12);
     } finally {
@@ -227,10 +227,10 @@ void describe('coordinator protocol and schema version boundary', () => {
 
       current = await startCoordinatorServer(paths);
       const response = await new CoordinatorClient({ env, autoStart: false }).query('handshake');
-      assert.equal(response.payload['package_build'], '1.1.4-cf46');
+      assert.equal(response.payload['package_build'], '1.1.5-cf47');
       const newLock = await lockRecord(paths.lockPath);
       assert.notEqual(newLock['instance_id'], oldLock['instance_id']);
-      assert.equal(newLock['package_build'], '1.1.4-cf46');
+      assert.equal(newLock['package_build'], '1.1.5-cf47');
       assert.equal(await readFile(coordinatorUpgradeIntentPath(paths), 'utf8'), committedIntent, 'historical committed intent remains immutable forensic evidence');
     } finally {
       if (current !== null) await current.close();

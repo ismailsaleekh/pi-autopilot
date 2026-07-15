@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { describe, it } from 'node:test';
@@ -15,7 +15,7 @@ import { startCoordinatorServer } from '../../src/core/coordination/server.ts';
 import { DurableRunSupervisorClient, writeCoordinatorSessionContext, type CoordinatorSessionContext } from '../../src/core/coordination/supervisor.ts';
 import { executeOwnedWorktreeSaga, OwnedWorktreeSagaClient, recoverOwnedWorktreeSagas, WORKTREE_SAGA_BOUNDARIES } from '../../src/core/coordination/worktree-saga.ts';
 import { AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV } from '../../src/core/names.ts';
-import { AUTOPILOT_STATE_ROOT_ENV, prepareAutopilotWorkstream, recoverAutopilotWorktreeSagas, resolveRepoIdentity, type ActiveAutopilotRow, type ProcessEnvLike } from '../../src/core/parallel-runtime.ts';
+import { AUTOPILOT_STATE_ROOT_ENV, BRANCHES_FILE, MATERIALIZED_PATHS_FILE, UNIT_INDEX_FILE, UNIT_INFO_FILE, WORKTREE_LEDGER_FILE, prepareAutopilotWorkstream, readUnitIndex, recoverAutopilotWorktreeSagas, resolveRepoIdentity, type ActiveAutopilotRow, type ProcessEnvLike } from '../../src/core/parallel-runtime.ts';
 
 interface Harness {
   readonly root: string;
@@ -251,6 +251,70 @@ void describe('owner-scoped worktree and Git saga recovery', () => {
       }, value.env);
       assert.equal(actionCount, 0);
       assert.equal(result.operation?.stage, 'committed');
+    } finally {
+      await close(value);
+    }
+  });
+
+  void it('finishes an exact pre-spend rollback projection after remove response loss without touching another live child', async () => {
+    const value = await setup('z');
+    try {
+      const saga = new OwnedWorktreeSagaClient(new CoordinatorClient({ env: value.env, autoStart: false }), value.session);
+      const create = unitCreateSpec(value, 'unit-pre-spend-failure');
+      await saga.prepare(create);
+      await recoverOwnedWorktreeSagas({ active: value.active, env: value.env });
+      const taskRoot = dirname(dirname(dirname(dirname(create.intent.worktree_path))));
+      const attemptRoot = dirname(create.intent.worktree_path);
+      const branchInfo = {
+        unit_id: 'unit-pre-spend-failure', attempt: 1, branch: create.intent.branch, worktree_path: create.intent.worktree_path,
+        base_sha: value.active.target_base_sha, current_sha: value.active.target_base_sha, archive_ref: null, status: 'active' as const,
+      };
+      await writeFile(join(attemptRoot, UNIT_INFO_FILE), `${JSON.stringify({
+        schema_version: 'autopilot.unit_info.v1', workstream: value.active.workstream, workstream_run: value.active.workstream_run,
+        autopilot_id: value.active.autopilot_id, ...branchInfo, runtime_root: value.active.runtime_root,
+        created_at: value.active.started_at, checkout_mode: 'full', checkout_profile_ref: '_checkout-profile.json', materialized_paths_ref: MATERIALIZED_PATHS_FILE,
+      }, null, 2)}\n`, 'utf8');
+      await writeFile(join(attemptRoot, MATERIALIZED_PATHS_FILE), '{}\n', 'utf8');
+      await writeFile(join(taskRoot, UNIT_INDEX_FILE), `${JSON.stringify({ schema_version: 'autopilot.unit_index.v1', units: [branchInfo] }, null, 2)}\n`, 'utf8');
+      await writeFile(join(taskRoot, BRANCHES_FILE), `${JSON.stringify({ schema_version: 'autopilot.branches.v1', active_branch: value.active.branch, base_sha: value.active.target_base_sha, current_sha: value.active.target_base_sha, archive_ref: null, unit_branches: [branchInfo] }, null, 2)}\n`, 'utf8');
+
+      const coordinator = new CoordinatorClient({ env: value.env, autoStart: false });
+      await coordinator.mutate('register-attempt', {
+        repoId: value.session.repo_id, workstreamRun: value.session.workstream_run, sessionId: value.session.session_id,
+        fencingGeneration: value.session.session_generation, expectedVersion: value.session.run_version, idempotencyKey: 'register-unrelated-strategy-attempt',
+      }, {
+        unit_id: 'strategy-read-only', attempt: 1, spec_ref: 'unit-specs/strategy-read-only.json', spec_sha256: `sha256:${'a'.repeat(64)}`,
+        role: 'strategy', preemptible: true, checkpoint_ordinal: 0, session_lease_id: value.session.session_lease_id, session_token: value.session.session_token,
+      });
+      await coordinator.mutate('register-child', {
+        repoId: value.session.repo_id, workstreamRun: value.session.workstream_run, sessionId: value.session.session_id,
+        fencingGeneration: value.session.session_generation, expectedVersion: value.session.run_version, idempotencyKey: 'register-unrelated-strategy-child',
+      }, {
+        child_lease_id: 'child-run-z-strategy-read-only-1', autopilot_id: value.active.autopilot_id, unit_id: 'strategy-read-only', attempt: 1,
+        pid: process.pid, boot_id: 'strategy-child-boot', child_token: 'e'.repeat(64), session_lease_id: value.session.session_lease_id,
+        session_token: value.session.session_token, lease_expires_at: '2099-01-01T00:00:00.000Z',
+      });
+
+      const remove = {
+        ...create, operationType: 'remove' as const, operationKey: 'pre-spend-rollback-response-loss', initialWorktreeState: 'active' as const, committedWorktreeState: 'removed' as const,
+        intent: { ...create.intent, reason: 'autopilot-agent-run preflight rollback after failure: synthetic pre-spend rejection', target_sha: value.active.target_base_sha, checkout_mode: null, sparse_patterns: [], paths: [], metadata_refs: [WORKTREE_LEDGER_FILE] },
+      };
+      await saga.prepare(remove);
+      git(value.repo, ['worktree', 'remove', create.intent.worktree_path]);
+      git(value.repo, ['branch', '-D', create.intent.branch]);
+
+      const recovered = await recoverAutopilotWorktreeSagas({ active: value.active, env: value.env });
+      assert.equal(recovered.some((operation) => operation.operation_type === 'remove' && operation.owner.unit_id === 'unit-pre-spend-failure' && operation.stage === 'committed'), true);
+      assert.equal((await readUnitIndex(taskRoot)).units.some((unit) => unit.unit_id === 'unit-pre-spend-failure' && unit.attempt === 1), false);
+      const branches = JSON.parse(await readFile(join(taskRoot, BRANCHES_FILE), 'utf8')) as Readonly<Record<string, unknown>>;
+      assert.equal(Array.isArray(branches['unit_branches']) && branches['unit_branches'].length, 0);
+      assert.equal(existsSync(attemptRoot), false);
+      const replayed = await recoverAutopilotWorktreeSagas({ active: value.active, env: value.env });
+      assert.equal(replayed.some((operation) => operation.owner.unit_id === 'unit-pre-spend-failure' && operation.stage !== 'committed'), false);
+      assert.equal((await readUnitIndex(taskRoot)).units.some((unit) => unit.unit_id === 'unit-pre-spend-failure'), false);
+      const status = await coordinator.query('status', value.active.repo_key, value.active.workstream_run);
+      const children = status.payload['child_leases'];
+      assert.equal(Array.isArray(children) && children.some((entry) => typeof entry === 'object' && entry !== null && (entry as Record<string, unknown>)['child_lease_id'] === 'child-run-z-strategy-read-only-1' && (entry as Record<string, unknown>)['status'] === 'running'), true);
     } finally {
       await close(value);
     }

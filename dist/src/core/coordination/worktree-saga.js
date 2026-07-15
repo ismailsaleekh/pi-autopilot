@@ -11,7 +11,7 @@ import { coordinatorRuntimePaths } from "./runtime-paths.js";
 import { currentBootId, isProcessAlive } from "./process-identity.js";
 import { readCoordinatorSessionContext } from "./supervisor.js";
 import { deterministicWorktreeId, sameWorktreeAuthority, worktreeOwnerKindKey } from "./worktree-identity.js";
-import { AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV } from "../names.js";
+import { AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV, AUTOPILOT_PREFLIGHT_ROLLBACK_REASON_PREFIX } from "../names.js";
 const TERMINAL_STAGES = new Set(['committed', 'compensated', 'failed']);
 export const WORKTREE_SAGA_BOUNDARIES = ['after-prepare', 'before-probe', 'after-probe', 'after-start', 'before-action', 'after-action', 'after-action-report', 'before-verification', 'after-verification', 'after-evidence', 'after-verified-commit', 'after-terminal-commit'];
 async function observeBoundary(callbacks, boundary) {
@@ -802,6 +802,7 @@ function fixedAction(operation, env) {
             return;
     }
 }
+const LEGACY_POST_SAGA_WORKTREE_LEDGER_REF = '_ledger.jsonl';
 function missingOperationMetadata(operation) {
     if (operation.intent.metadata_refs.length === 0)
         return [];
@@ -820,7 +821,16 @@ function missingOperationMetadata(operation) {
             runtimeRoot = null;
         }
     }
-    return operation.intent.metadata_refs.filter((ref) => ![resolve(taskRoot, ref), resolve(worktreeRoot, ref), ...(runtimeRoot === null ? [] : [resolve(runtimeRoot, ref)])].some((candidate) => existsSync(candidate)));
+    return operation.intent.metadata_refs.filter((ref) => {
+        // cf46 cleanup rows incorrectly declared the append-only legacy ledger as
+        // an operation postcondition even though projection occurs after the saga
+        // and is intentionally absent after cutover. Preserve those rows as an
+        // explicit compatibility adapter; current cleanup intents declare no such
+        // false dependency.
+        if (operation.operation_type === 'remove' && operation.intent.reason.startsWith(AUTOPILOT_PREFLIGHT_ROLLBACK_REASON_PREFIX) && ref === LEGACY_POST_SAGA_WORKTREE_LEDGER_REF)
+            return false;
+        return ![resolve(taskRoot, ref), resolve(worktreeRoot, ref), ...(runtimeRoot === null ? [] : [resolve(runtimeRoot, ref)])].some((candidate) => existsSync(candidate));
+    });
 }
 function fixedVerify(operation, env) {
     const inspected = fixedInspection(operation, env);

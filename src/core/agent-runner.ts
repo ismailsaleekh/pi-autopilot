@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import {
   AUTOPILOT_COORDINATION_AUTHORITY_ENV,
   AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV,
+  AUTOPILOT_PREFLIGHT_ROLLBACK_REASON_PREFIX,
   AUTOPILOT_STATUS_CONTEXT_ENV,
   AUTOPILOT_STATUS_TOOL,
 } from './names.ts';
@@ -728,7 +729,7 @@ async function preflightSpec(
   } catch (error) {
     if (preparedWorktree.created) {
       try {
-        await rollbackCreatedUnitWorktree({ active: preparedWorktree.active, unitId: preparedWorktree.unitId, attempt: preparedWorktree.attempt, reason: `autopilot-agent-run preflight rollback after failure: ${errorMessage(error)}`, env: options.env ?? process.env });
+        await rollbackCreatedUnitWorktree({ active: preparedWorktree.active, unitId: preparedWorktree.unitId, attempt: preparedWorktree.attempt, reason: `${AUTOPILOT_PREFLIGHT_ROLLBACK_REASON_PREFIX} ${errorMessage(error)}`, env: options.env ?? process.env });
       } catch (rollbackError) {
         throw preflightRollbackFailure(spec, specPath, error, rollbackError);
       }

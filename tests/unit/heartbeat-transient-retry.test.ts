@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { it } from 'node:test';
 
 import { CoordinationRuntimeError } from '../../src/core/coordination/failures.ts';
-import { classifyHeartbeatFailure } from '../../src/core/coordination/supervisor.ts';
+import { classifyHeartbeatFailure, classifyHeartbeatOwnedRecoveryFailure } from '../../src/core/coordination/supervisor.ts';
 import type { CoordinationSessionLease } from '../../src/core/coordination/types.ts';
 
 // Issue: when the coordinator PID stayed live but its socket was momentarily
@@ -38,6 +38,17 @@ void it('classifies terminal authority failures as halting regardless of lease v
     const result = classifyHeartbeatFailure(new CoordinationRuntimeError(code, `terminal ${code}`, []), session(FUTURE_LEASE));
     assert.equal(result.kind, 'terminal', `${code} must halt the heartbeat loop immediately`);
   }
+});
+
+void it('keeps heartbeat authority alive while a typed owned operation blocks source-changing dispatch', () => {
+  for (const code of ['recovery-required', 'git-partial-effect', 'disk-failure', 'permission-denied'] as const) {
+    const error = new CoordinationRuntimeError(code, `owned ${code}`, [`operation=${code}`]);
+    const result = classifyHeartbeatOwnedRecoveryFailure(error);
+    assert.equal(result.kind, 'dispatch-blocked');
+    assert.equal(result.error, error);
+  }
+  const fenced = classifyHeartbeatOwnedRecoveryFailure(new CoordinationRuntimeError('fenced-session', 'generation replaced'));
+  assert.equal(fenced.kind, 'terminal');
 });
 
 void it('reports the exact lease expiry boundary so the bridge can halt once authority is genuinely lost', () => {

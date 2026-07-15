@@ -7,7 +7,7 @@ import { platform } from 'node:os';
 
 import { CoordinatorClient, durableIdentifier } from './client.ts';
 import { parseCoordinationMailboxDeliveryReceipt, parseCoordinationMessage, parseCoordinationMigrationRecoveryWork, parseOptionalCoordinationReconciliationReceipt, parseCoordinationRun, parseCoordinationRunTerminalIntent, parseCoordinationSessionLease } from './contracts.ts';
-import { CoordinationRuntimeError } from './failures.ts';
+import { CoordinationRuntimeError, formatCoordinationRuntimeError } from './failures.ts';
 import { acknowledgeCoordinationMigrationFreeze, activeCoordinationMigrationFreeze, assertMigrationPathSafe } from './migration-paths.ts';
 import { currentBootId } from './process-identity.ts';
 import { COORDINATOR_HEARTBEAT_MS, COORDINATOR_SESSION_LEASE_MS, enforcePrivateAuthorityPath, ensurePrivateAuthorityDirectory } from './runtime-paths.ts';
@@ -555,6 +555,11 @@ export class DurableRunSupervisorClient {
   }
 }
 
+export function classifyHeartbeatOwnedRecoveryFailure(error: unknown): { readonly kind: 'dispatch-blocked'; readonly error: CoordinationRuntimeError } | { readonly kind: 'terminal'; readonly error: Error } {
+  if (error instanceof CoordinationRuntimeError && error.failure_class === 'owned-recovery') return { kind: 'dispatch-blocked', error };
+  return { kind: 'terminal', error: error instanceof Error ? error : new Error(String(error)) };
+}
+
 export class AutopilotSessionBridge {
   readonly #supervisor: DurableRunSupervisorClient;
   readonly #sink: CoordinationMessageSink;
@@ -564,6 +569,7 @@ export class AutopilotSessionBridge {
   #closed = false;
   #handoffPrepared = false;
   #fatalError: Error | null = null;
+  #ownedRecoveryBlocker: CoordinationRuntimeError | null = null;
   #transientHeartbeatFailures = 0;
   #operation: Promise<void> = Promise.resolve();
 
@@ -765,7 +771,38 @@ export class AutopilotSessionBridge {
         const pendingMessages = response.payload['pending_messages'];
         if (typeof pendingMessages !== 'number' || !Number.isSafeInteger(pendingMessages) || pendingMessages < 0) throw new CoordinationRuntimeError('invalid-state', 'heartbeat response omitted its exact pending mailbox count');
         if (pendingMessages > 0) await this.#drainMailboxNow();
-        if (this.#recoverOwnedOperations !== null) await this.#recoverOwnedOperations(this.#attachment.contextPath);
+        if (this.#recoverOwnedOperations !== null) {
+          try {
+            await this.#recoverOwnedOperations(this.#attachment.contextPath);
+            if (this.#ownedRecoveryBlocker !== null) {
+              this.#ownedRecoveryBlocker = null;
+              try {
+                this.#sink.send({ customType: 'autopilot-coordination', content: 'Autopilot owned worktree recovery completed; source-changing dispatch is ready again.', display: true, details: { recovery: 'completed' } }, this.#sink.isIdle() ? 'steer' : 'followUp', false);
+              } catch {
+                // Recovery and lease renewal are authoritative; notification is
+                // best-effort and cannot revert the completed recovery state.
+              }
+            }
+          } catch (recoveryError) {
+            const classification = classifyHeartbeatOwnedRecoveryFailure(recoveryError);
+            if (classification.kind === 'terminal') throw classification.error;
+            const changed = this.#ownedRecoveryBlocker?.message !== classification.error.message;
+            this.#ownedRecoveryBlocker = classification.error;
+            if (changed) {
+              try {
+                this.#sink.send({
+                  customType: 'autopilot-coordination',
+                  content: `Autopilot heartbeat remains attached, but source-changing dispatch is blocked pending owned worktree recovery: ${formatCoordinationRuntimeError(classification.error)}`,
+                  display: true,
+                  details: { error_code: classification.error.code, recovery: 'dispatch-blocked' },
+                }, this.#sink.isIdle() ? 'steer' : 'followUp', false);
+              } catch {
+                // The durable blocker is retained and retried on every heartbeat;
+                // notification failure cannot convert it into silent dispatch.
+              }
+            }
+          }
+        }
         this.#transientHeartbeatFailures = 0;
       }).catch((error: unknown) => {
         const classification = classifyHeartbeatFailure(error, this.#attachment.session);

@@ -20,7 +20,7 @@ import {
 } from './checkout-profile.ts';
 import { assertAutopilotDiskGate } from './disk-gate.ts';
 import { applySparseCheckoutSet, createAutopilotGitWorktree, isSparseCheckoutEnabled } from './sparse-worktree.ts';
-import { cleanupTerminalUnitWorktreesForRun } from './worktree-cleanup.ts';
+import { cleanupTerminalUnitWorktreesForRun, recoverCommittedPreflightRollbackProjections } from './worktree-cleanup.ts';
 import { executeOwnedWorktreeSaga, OwnedWorktreeSagaClient, recoverOwnedWorktreeSagas, type WorktreeSagaInspection } from './coordination/worktree-saga.ts';
 import type { CoordinationRun, CoordinationRunResource, CoordinationWorktreeOperation } from './coordination/types.ts';
 import { AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV, AUTOPILOT_RUNTIME_ROOT_PREFIX } from './names.ts';
@@ -28,7 +28,8 @@ import { isValidWorkstreamSlug } from './paths.ts';
 import { parseLegacyActiveAutopilots, parseLegacyPathClaims, runLegacyCoordinationPreflight } from './coordination/legacy-preflight.ts';
 import { DurableRunSupervisorClient } from './coordination/supervisor.ts';
 import { CoordinatorClient } from './coordination/client.ts';
-import { parseCoordinationRun, parseCoordinationRunResource, parseCoordinationWorktreeOperation } from './coordination/contracts.ts';
+import { CoordinationRuntimeError } from './coordination/failures.ts';
+import { parseCoordinationChildLease, parseCoordinationRun, parseCoordinationRunResource, parseCoordinationWorktreeOperation } from './coordination/contracts.ts';
 import { assertCoordinationDispatchAllowed, assertLegacyCoordinationWritable, coordinationCutoverCommitted } from './coordination/migration-paths.ts';
 import { enforcePrivateAuthorityPath, ensurePrivateAuthorityDirectory } from './private-path.ts';
 
@@ -617,7 +618,22 @@ export async function recoverAutopilotWorktreeSagas(input: { readonly active: Ac
     if (operation.owner.workstream_run !== input.active.workstream_run || operation.operation_type !== 'create' || operation.owner.unit_id === 'main' || operation.stage === 'committed' || operation.stage === 'compensated' || operation.stage === 'failed') continue;
     recoveredUnitCreates.push(await recoverUnitCreateSagaMetadata(input.active, operation, env));
   }
-  return Object.freeze([...recoveredUnitCreates, ...await recoverOwnedWorktreeSagas({ active: input.active, env })]);
+  const recoveredOperations = await recoverOwnedWorktreeSagas({ active: input.active, env });
+  const postRecoveryClient = await OwnedWorktreeSagaClient.fromEnvironment(env);
+  const operations = await postRecoveryClient.operations();
+  const status = await new CoordinatorClient({ env }).query('status', input.active.repo_key, input.active.workstream_run);
+  const childPayload = status.payload['child_leases'];
+  if (!Array.isArray(childPayload)) throw new AutopilotParallelRuntimeError('coordination-status-invalid', 'coordinator status omitted child leases during preflight rollback recovery.');
+  const childLeases = childPayload.map((entry) => parseCoordinationChildLease(entry));
+  try {
+    await recoverCommittedPreflightRollbackProjections({ active: input.active, operations, childLeases, env });
+  } catch (error) {
+    if (error instanceof CoordinationRuntimeError) throw error;
+    const detail = error instanceof Error ? error.message : String(error);
+    const evidence = error instanceof Error && 'evidence' in error && Array.isArray(error.evidence) && error.evidence.every((entry) => typeof entry === 'string') ? error.evidence : [];
+    throw new CoordinationRuntimeError('recovery-required', `preflight rollback projection requires owned recovery: ${detail}`, evidence);
+  }
+  return Object.freeze([...recoveredUnitCreates, ...recoveredOperations]);
 }
 
 export async function updateUnitBranchStatus(input: {

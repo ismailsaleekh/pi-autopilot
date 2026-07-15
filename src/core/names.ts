@@ -12,6 +12,7 @@ export const AUTOPILOT_COORDINATION_COMMAND = 'autopilot-coordination';
 export const AUTOPILOT_RUNNER_BIN = 'autopilot-agent-run';
 export const AUTOPILOT_COORDINATOR_BIN = 'autopilot-coordinator';
 export const AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV = 'AUTOPILOT_COORDINATOR_SESSION_CONTEXT';
+export const AUTOPILOT_PREFLIGHT_ROLLBACK_REASON_PREFIX = 'autopilot-agent-run preflight rollback after failure:';
 export const AUTOPILOT_COORDINATION_AUTHORITY_ENV = 'AUTOPILOT_COORDINATION_AUTHORITY';
 export const AUTOPILOT_STATUS_TOOL = 'autopilot_emit_status';
 export const AUTOPILOT_STATUS_CONTEXT_ENV = 'AUTOPILOT_AGENT_STATUS_CONTEXT';

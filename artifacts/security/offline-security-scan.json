@@ -1,8 +1,8 @@
 {
   "schema_version": "autopilot.security_scan.v1",
   "package": "pi-autopilot",
-  "version": "1.1.4",
-  "lockfile_sha256": "sha256:e31b908de975d62a694ca5c3e6f11b9796644d45d26776c0eb128e7dc452204b",
+  "version": "1.1.5",
+  "lockfile_sha256": "sha256:96e461c07262f3211c3fde31c84d6d15a4afa0a9f059a73472111a2237005a1a",
   "production_dependency_count": 0,
   "peer_dependency_count": 1,
   "audited_lock_entry_count": 173,

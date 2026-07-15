@@ -1,10 +1,11 @@
 import { spawnSync } from 'node:child_process';
-import { existsSync, realpathSync } from 'node:fs';
+import { existsSync, lstatSync, realpathSync } from 'node:fs';
 import { readdir, readFile, rm } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
-import { AUTOPILOT_RUNTIME_ROOT_PREFIX } from './names.ts';
+import { AUTOPILOT_PREFLIGHT_ROLLBACK_REASON_PREFIX, AUTOPILOT_RUNTIME_ROOT_PREFIX } from './names.ts';
 import { executeOwnedWorktreeSaga, type WorktreeSagaInspection } from './coordination/worktree-saga.ts';
+import type { CoordinationChildLease, CoordinationWorktreeOperation } from './coordination/types.ts';
 import { coordinationCutoverCommitted } from './coordination/migration-paths.ts';
 import {
   BRANCHES_FILE,
@@ -227,6 +228,49 @@ export async function rollbackCreatedUnitWorktree(input: {
   });
 }
 
+export async function recoverCommittedPreflightRollbackProjections(input: {
+  readonly active: ActiveAutopilotRow;
+  readonly operations: readonly CoordinationWorktreeOperation[];
+  readonly childLeases: readonly CoordinationChildLease[];
+  readonly env?: ProcessEnvLike;
+  readonly now?: Date;
+}): Promise<readonly string[]> {
+  return await withCleanupLock(input.active, async () => {
+    const recovered: string[] = [];
+    const taskRoot = taskRootForActiveAutopilot(input.active);
+    for (const operation of input.operations) {
+      if (operation.stage !== 'committed' || operation.operation_type !== 'remove' || operation.owner.unit_id === 'main' || !operation.intent.reason.startsWith(AUTOPILOT_PREFLIGHT_ROLLBACK_REASON_PREFIX)) continue;
+      if (operation.owner.repo_id !== input.active.repo_key || operation.owner.autopilot_id !== input.active.autopilot_id || operation.owner.workstream_run !== input.active.workstream_run) fail('rollback-recovery-owner-mismatch', 'committed preflight rollback operation does not belong to the active run.', [operation.operation_id]);
+      if (input.childLeases.some((child) => child.owner.repo_id === operation.owner.repo_id && child.owner.workstream_run === operation.owner.workstream_run && child.owner.unit_id === operation.owner.unit_id && child.owner.attempt === operation.owner.attempt)) fail('rollback-recovery-child-exists', 'preflight rollback projection cannot retire metadata for an attempt that launched a child.', [operation.operation_id, operation.owner.unit_id, String(operation.owner.attempt)]);
+      const expectedPath = unitWorktreePathForActiveAutopilot(input.active, operation.owner.unit_id, operation.owner.attempt);
+      const expectedBranch = `autopilot/unit/${input.active.workstream_run}/${operation.owner.unit_id}/attempt-${String(operation.owner.attempt)}`;
+      if (operation.intent.worktree_path !== expectedPath || operation.intent.branch !== expectedBranch || operation.intent.target_sha === null) fail('rollback-recovery-authority-mismatch', 'preflight rollback operation disagrees with deterministic unit authority.', [operation.operation_id]);
+      const registered = gitWorktreeListPorcelain(input.active.source_repo, input.env).some((entry) => samePath(entry.path, expectedPath));
+      if (existsSync(expectedPath) || registered || branchExists(input.active.source_repo, expectedBranch, input.env)) fail('rollback-recovery-external-effect-incomplete', 'committed preflight rollback cannot project metadata while its worktree or branch remains.', [operation.operation_id, `path_present=${String(existsSync(expectedPath))}`, `git_registered=${String(registered)}`]);
+
+      const index = await readUnitIndex(taskRoot);
+      const indexed = index.units.find((unit) => unit.unit_id === operation.owner.unit_id && unit.attempt === operation.owner.attempt);
+      const branches = await readBranchesSnapshot(taskRoot);
+      const branched = branches?.unitBranches.find((unit) => unit.unit_id === operation.owner.unit_id && unit.attempt === operation.owner.attempt);
+      for (const candidate of [indexed, branched]) {
+        if (candidate === undefined) continue;
+        if (candidate.worktree_path !== expectedPath || candidate.branch !== expectedBranch || candidate.current_sha !== operation.intent.target_sha || candidate.status !== 'active') fail('rollback-recovery-projection-mismatch', 'preflight rollback metadata disagrees with the committed remove authority.', [operation.operation_id, candidate.unit_id, String(candidate.attempt), candidate.status]);
+      }
+      const attemptRoot = dirname(expectedPath);
+      if (indexed === undefined && branched === undefined && !existsSync(attemptRoot)) continue;
+      const unit: AutopilotUnitBranchInfo = indexed ?? branched ?? {
+        unit_id: operation.owner.unit_id, attempt: operation.owner.attempt, branch: expectedBranch, worktree_path: expectedPath,
+        base_sha: operation.intent.base_sha ?? operation.intent.target_sha, current_sha: operation.intent.target_sha, archive_ref: operation.intent.archive_ref, status: 'active',
+      };
+      const now = input.now ?? new Date();
+      await removeUnitMetadataForRollback(input.active, unit, now, operation.intent.reason);
+      await removeUnitAttemptRootAfterRollback(input.active, unit, now, operation.intent.reason);
+      recovered.push(operation.operation_id);
+    }
+    return Object.freeze(recovered);
+  });
+}
+
 export async function cleanupClosedAutopilotRun(input: {
   readonly active: ActiveAutopilotRow;
   readonly archiveRef: string;
@@ -417,7 +461,7 @@ async function removeRegisteredWorktree(
     intent: {
       repo_root: active.source_repo, worktree_path: worktreePath, git_common_dir: active.git_common_dir, branch: unit.branch,
       reason: input.reason, base_sha: unit.base_sha, target_sha: unit.current_sha, archive_ref: unit.archive_ref,
-      checkout_mode: null, sparse_patterns: [], paths: [], metadata_refs: [WORKTREE_LEDGER_FILE],
+      checkout_mode: null, sparse_patterns: [], paths: [], metadata_refs: input.mode === 'preflight-rollback' ? [] : [WORKTREE_LEDGER_FILE],
     },
   }, {
     inspect: inspectRemove,
@@ -677,9 +721,19 @@ async function removeUnitMetadataForRollback(active: ActiveAutopilotRow, unit: A
 }
 
 async function removeUnitAttemptRootAfterRollback(active: ActiveAutopilotRow, unit: AutopilotUnitBranchInfo, now: Date, reason: string): Promise<void> {
+  const taskRoot = taskRootForActiveAutopilot(active);
   const attemptRoot = dirname(unit.worktree_path);
-  assertPathWithinRoot(taskRootForActiveAutopilot(active), attemptRoot, 'rollback-attempt-root-outside-run');
+  assertPathWithinRoot(taskRoot, attemptRoot, 'rollback-attempt-root-outside-run');
   if (!existsSync(attemptRoot)) return;
+  const taskMetadata = lstatSync(taskRoot);
+  if (taskMetadata.isSymbolicLink() || !taskMetadata.isDirectory()) fail('rollback-task-root-substitution', 'preflight rollback refuses a symbolic or non-directory task root.', [taskRoot]);
+  let cursor = taskRoot;
+  const segments = relative(taskRoot, attemptRoot).split(sep).filter((segment) => segment.length > 0);
+  for (const segment of segments) {
+    cursor = join(cursor, segment);
+    const metadata = lstatSync(cursor);
+    if (metadata.isSymbolicLink() || !metadata.isDirectory()) fail('rollback-attempt-root-substitution', 'preflight rollback refuses a symbolic or non-directory attempt-root ancestor.', [cursor]);
+  }
   const entries = await collectResidualEntries(attemptRoot);
   const allowed = new Set<string>([UNIT_INFO_FILE, MATERIALIZED_PATHS_FILE]);
   const blockers = entries.filter((entry) => entry.directory || !allowed.has(entry.relativePath)).map((entry) => entry.relativePath);

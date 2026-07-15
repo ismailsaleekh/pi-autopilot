@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { it } from 'node:test';
@@ -12,11 +12,13 @@ import { coordinatorRuntimePaths, ensureCoordinatorPrivateRoots } from '../../sr
 import { recoverUnavailableKnownCoordinator } from '../../src/core/coordination/unavailable-recovery.ts';
 import { startCoordinatorServer } from '../../src/core/coordination/server.ts';
 import { AUTOPILOT_STATE_ROOT_ENV } from '../../src/core/parallel-runtime.ts';
+import { startTaggedCoordinator } from '../helpers/tagged-coordinator.ts';
 
 const packageRoot = resolve(fileURLToPath(new URL('../../', import.meta.url)));
 const unavailableOwner = join(packageRoot, 'tests', 'helpers', 'unavailable-coordinator-owner.ts');
 const sessionToken = 'a'.repeat(64);
 const childToken = 'b'.repeat(64);
+const CF45_COMMIT = 'a0d8a732decdb5f7061b01a8c5ead6120cba081f';
 
 function record(value: unknown, label: string): Readonly<Record<string, unknown>> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error(`${label} is not an object`);
@@ -131,6 +133,53 @@ void it('rejects lifecycle replacement during outage attestation without signali
   }
 });
 
+void it('replaces the real cf45 binary after socket loss while preserving an attached session across concurrent cf47 clients', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'pi-autopilot-real-cf45-handoff-'));
+  const stateRoot = join(root, 'state');
+  const env = { ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: stateRoot };
+  const tagged = await startTaggedCoordinator({ stateRoot, extractionRoot: root, commit: CF45_COMMIT });
+  const paths = tagged.paths;
+  try {
+    const cf45Client = new CoordinatorClient({ env, autoStart: false });
+    const attached = await cf45Client.mutate('attach-run', { repoId: 'repo-cf45-handoff', workstreamRun: 'run-cf45-handoff', sessionId: null, fencingGeneration: null, expectedVersion: 0, idempotencyKey: 'attach-run-cf45-handoff' }, {
+      repo_key: 'repo-cf45-handoff', canonical_root: '/tmp/repo-cf45-handoff', git_common_dir: '/tmp/repo-cf45-handoff/.git', autopilot_id: 'autopilot-cf45-handoff', workstream: 'cf45-handoff', coordination_authority: 'coordinator-edit-leases-v1',
+      run_resource: { schema_version: 'autopilot.coordination_run_resource.v1', repo_id: 'repo-cf45-handoff', workstream_run: 'run-cf45-handoff', source_repo: '/tmp/repo-cf45-handoff', git_common_dir: '/tmp/repo-cf45-handoff/.git', worktree_root: '/tmp/state/worktrees/repo-cf45-handoff', main_worktree_path: '/tmp/state/worktrees/repo-cf45-handoff/active/run-cf45-handoff/main', runtime_root: '/tmp/state/worktrees/repo-cf45-handoff/active/run-cf45-handoff/main/.pi/autopilot/cf45-handoff', branch: 'autopilot/run-cf45-handoff', target_branch: null, target_base_sha: '0'.repeat(40), origin_url: null, started_at: '2026-07-15T02:58:00.000Z', version: 1 },
+    });
+    const run = record(attached.payload['run'], 'cf45 run');
+    let runVersion = integer(run['version'], 'cf45 run version');
+    let session: Readonly<Record<string, unknown>> | null = null;
+    for (let generation = 1; generation <= 9; generation += 1) {
+      const finalGeneration = generation === 9;
+      const token = finalGeneration ? sessionToken : generation.toString(16).repeat(64);
+      const sessionResponse = await cf45Client.mutate('attach-session', { repoId: 'repo-cf45-handoff', workstreamRun: 'run-cf45-handoff', sessionId: `session-generation-${String(generation)}`, fencingGeneration: generation, expectedVersion: runVersion, idempotencyKey: `attach-session-cf45-handoff-${String(generation)}` }, { session_lease_id: `lease-session-generation-${String(generation)}`, session_token: token, pid: process.pid, boot_id: `session-generation-${String(generation)}-boot`, lease_expires_at: '2099-01-01T00:00:00.000Z', handoff_token: null });
+      session = record(sessionResponse.payload['session'], 'cf45 session');
+      runVersion = integer(record(sessionResponse.payload['run'], 'cf45 attached run')['version'], 'cf45 attached run version');
+    }
+    if (session === null) throw new Error('cf45 generation-9 session was not attached');
+    const priorPid = tagged.child.pid;
+    if (priorPid === undefined) throw new Error('real cf45 process has no pid');
+    await unlink(paths.socketPath);
+
+    const heartbeatClient = new CoordinatorClient({ env, startupTimeoutMs: 30_000 });
+    const statusClient = new CoordinatorClient({ env, startupTimeoutMs: 30_000 });
+    const [heartbeat, status] = await Promise.all([
+      heartbeatClient.mutate('heartbeat', { repoId: 'repo-cf45-handoff', workstreamRun: 'run-cf45-handoff', sessionId: 'session-generation-9', fencingGeneration: 9, expectedVersion: integer(session['version'], 'cf45 session version'), idempotencyKey: 'heartbeat-after-real-cf45-socket-loss' }, { session_lease_id: 'lease-session-generation-9', session_token: sessionToken, lease_expires_at: '2099-01-02T00:00:00.000Z' }),
+      statusClient.query('status', 'repo-cf45-handoff', 'run-cf45-handoff'),
+    ]);
+    assert.equal(record(heartbeat.payload['session'], 'recovered session')['status'], 'attached');
+    const sessions = status.payload['session_leases'];
+    assert.equal(Array.isArray(sessions) && sessions.some((entry) => record(entry, 'preserved session')['session_lease_id'] === 'lease-session-generation-9' && record(entry, 'preserved session')['status'] === 'attached'), true);
+    assert.equal(isProcessAlive(priorPid), false);
+    const currentLock = record(JSON.parse(await readFile(paths.lockPath, 'utf8')) as unknown, 'cf47 replacement lock');
+    assert.equal(currentLock['package_build'], '1.1.5-cf47');
+    assert.notEqual(currentLock['pid'], priorPid);
+  } finally {
+    await tagged.close();
+    await stopSpawnedCoordinator(paths.lockPath);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 void it('identity-fences a live socketless known coordinator and preserves active session and child leases', async () => {
   const root = await mkdtemp(join(tmpdir(), 'pi-autopilot-unavailable-recovery-'));
   const stateRoot = join(root, 'state');
@@ -171,7 +220,7 @@ void it('identity-fences a live socketless known coordinator and preserves activ
     await waitForExit(unavailable);
     assert.equal(isProcessAlive(unavailablePid), false);
     const replacementLock = record(JSON.parse(await readFile(paths.lockPath, 'utf8')) as unknown, 'replacement lock');
-    assert.equal(replacementLock['package_build'], '1.1.4-cf46');
+    assert.equal(replacementLock['package_build'], '1.1.5-cf47');
     assert.notEqual(replacementLock['pid'], unavailablePid);
     const sessions = recoveredStatus.payload['session_leases'];
     const children = recoveredStatus.payload['child_leases'];
