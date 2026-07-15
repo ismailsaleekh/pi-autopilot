@@ -85,7 +85,13 @@ function processStartIdentityChanged(pid: number, expected: string): boolean {
 
 function patchDrainBlockers(paths: CoordinatorRuntimePaths): PatchActivationDrainBlockers {
   // Coordinator inspection never opens the live database writable. A read-only
-  // connection observes durable drain state without mutating storage.
+  // connection observes durable drain state without mutating storage. The drain
+  // fences only GENUINELY-LIVE authority: attached/handoff-pending sessions,
+  // live child processes (preflight/starting/running), active critical sections,
+  // and incomplete worktree operations. `recovery-required` children are dead
+  // processes whose state is durable; cf44 opens the same database and its
+  // startup reconciliation (#recoverDurableTransitionsAfterStartup) handles them
+  // identically, so they are not drain blockers for a wire-compatible patch.
   const database = new DatabaseSync(paths.databasePath, { readOnly: true, timeout: 10_000 });
   try {
     const sessions: string[] = [];
@@ -93,7 +99,7 @@ function patchDrainBlockers(paths: CoordinatorRuntimePaths): PatchActivationDrai
       if (typeof row['repo_id'] === 'string' && typeof row['workstream_run'] === 'string' && typeof row['session_lease_id'] === 'string' && typeof row['status'] === 'string') sessions.push(`session-not-drained:${row['repo_id']}:${row['workstream_run']}:${row['session_lease_id']}:${row['status']}`);
     }
     const children: string[] = [];
-    for (const row of database.prepare("SELECT repo_id, workstream_run, child_lease_id, status FROM child_leases WHERE status IN ('preflight','starting','running','recovery-required') ORDER BY repo_id, workstream_run, unit_id, attempt").all()) {
+    for (const row of database.prepare("SELECT repo_id, workstream_run, child_lease_id, status FROM child_leases WHERE status IN ('preflight','starting','running') ORDER BY repo_id, workstream_run, unit_id, attempt").all()) {
       if (typeof row['repo_id'] === 'string' && typeof row['workstream_run'] === 'string' && typeof row['child_lease_id'] === 'string' && typeof row['status'] === 'string') children.push(`child-not-drained:${row['repo_id']}:${row['workstream_run']}:${row['child_lease_id']}:${row['status']}`);
     }
     const criticalSections: string[] = [];
