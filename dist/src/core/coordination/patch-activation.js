@@ -10,12 +10,13 @@ export const PATCH_ACTIVATION_REPORT_SCHEMA = 'autopilot.patch_activation.v1';
 const PATCH_DRAIN_POLL_MS = 200;
 const PATCH_DRAIN_TIMEOUT_MS = 30_000;
 /**
- * BUG-177 patch activation: a live cf43 coordinator remains authoritative until
- * every durable session, child, and critical section has drained. This verb
+ * Wire-compatible patch activation: a live known-prior coordinator remains
+ * authoritative until every durable session, child, and critical section has
+ * drained. This verb
  * refuses to edit the database, lock, socket, claims, messages, or worktrees. It
  * rechecks exact lock/process identity, signals only that exact drained process,
  * waits for its exit, and then returns. Ordinary elected startup publishes the
- * cf44 lock; this function never substitutes a PID-only signal or lock deletion.
+ * current-build lock; this function never substitutes a PID-only signal or lock deletion.
  */
 export async function activatePatchBuild(paths) {
     await ensureCoordinatorPrivateRoots(paths);
@@ -88,7 +89,7 @@ function patchDrainBlockers(paths) {
     // fences only GENUINELY-LIVE authority: attached/handoff-pending sessions,
     // live child processes (preflight/starting/running), active critical sections,
     // and incomplete worktree operations. `recovery-required` children are dead
-    // processes whose state is durable; cf44 opens the same database and its
+    // processes whose state is durable; the current build opens the same database and its
     // startup reconciliation (#recoverDurableTransitionsAfterStartup) handles them
     // identically, so they are not drain blockers for a wire-compatible patch.
     const database = new DatabaseSync(paths.databasePath, { readOnly: true, timeout: 10_000 });

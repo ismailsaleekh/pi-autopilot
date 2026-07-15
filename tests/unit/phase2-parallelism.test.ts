@@ -474,6 +474,40 @@ void describe('Phase 2 unit worktrees, claims, mergeback, staleness, and GC', ()
     });
   });
 
+  void it('BUG-178 preserves historical reset bytes and publishes regenerated current evidence at a distinct immutable path', async () => {
+    await withTempDir(async (root) => {
+      const source = join(root, 'source');
+      await initGitSource(source);
+      const prepared = await prepareAutopilotWorkstream({ workstream: 'phase2-smoke', sourceCwd: source });
+      const unit = await prepareAutopilotUnitWorktree({ active: prepared.active, unitId: 'u-historical-reset', attempt: 1 });
+      const historicalPath = join(prepared.runtimeRoot, 'quarantine', 'u-historical-reset.attempt-1.reset.json');
+      const historicalBytes = `${JSON.stringify({
+        schema_version: 'autopilot.unit_failure.v1', action: 'reset', workstream: prepared.active.workstream, workstream_run: prepared.active.workstream_run,
+        unit_id: 'u-historical-reset', attempt: 1, unit_worktree_path: unit.unitInfo.worktree_path, dirty_paths: [], capture_commit_sha: null,
+        summary: 'historical reset awaiting current-contract regeneration', created_at: '2026-07-08T00:00:04.500Z',
+      }, null, 2)}\n`;
+      await mkdir(dirname(historicalPath), { recursive: true });
+      await writeFile(historicalPath, historicalBytes, 'utf8');
+      const historicalDigest = createHash('sha256').update(historicalBytes, 'utf8').digest('hex');
+
+      const record = await resetFailedUnit({
+        context: { repo: resolveRepoIdentity(unit.unitInfo.worktree_path), active: prepared.active, coordinationRoot: coordinationRootForRepo(prepared.active.repo_key), claimsPath: '', claimEventsPath: '' },
+        unitId: 'u-historical-reset', attempt: 1, unitWorktreePath: unit.unitInfo.worktree_path, summary: 'regenerate current reset evidence', now: new Date('2026-07-08T00:00:05.000Z'),
+      });
+
+      assert.equal(record.action, 'reset');
+      assert.equal(await readFile(historicalPath, 'utf8'), historicalBytes, 'historical evidence is never overwritten');
+      const regeneratedPath = join(prepared.runtimeRoot, 'quarantine', `u-historical-reset.attempt-1.reset.regenerated-from-${historicalDigest}.json`);
+      const regenerated = JSON.parse(await readFile(regeneratedPath, 'utf8')) as Readonly<Record<string, unknown>>;
+      assert.equal(regenerated['schema_version'], 'autopilot.unit_failure.v1');
+      assert.equal(regenerated['capture_ref'], null);
+      assert.equal(regenerated['postcondition_worktree_clean'], true);
+      assert.equal(regenerated['git_head_before'], unit.unitInfo.base_sha);
+      assert.equal(regenerated['git_head_after'], unit.unitInfo.base_sha);
+      assert.equal(existsSync(unit.unitInfo.worktree_path), false);
+    });
+  });
+
   void it('runner preflight rollback removes a newly-created unlaunched unit worktree', async () => {
     await withTempDir(async (root) => {
       const source = join(root, 'source');

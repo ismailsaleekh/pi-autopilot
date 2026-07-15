@@ -6,13 +6,16 @@ export const CURRENT_COORDINATOR_LIFECYCLE_LOCK_SCHEMA = 'autopilot.coordinator_
  * reconciliation and mailbox contract. Entries are admitted only after the request/response contracts,
  * transport, mutation vocabulary, and persisted entity projections have been
  * compared byte-for-byte or behaviorally certified against the target. cf44
- * adds the BUG-177 historical unit-failure evidence ingress adapter while
- * leaving the wire/persistence contract identical to cf43; both are admitted.
+ * adds the BUG-177 historical unit-failure evidence ingress adapter; cf45 adds
+ * audit-preserving supersession and regeneration for unaccepted historical
+ * pending reset intents. The wire/persistence contract remains identical to
+ * cf43, so all three exact builds are admitted.
  *
  * This is deliberately not semver inference: an unlisted build remains
  * incompatible even when it claims the same protocol and database schema.
  */
 export const COORDINATOR_WIRE_COMPATIBILITY_MATRIX = Object.freeze([
+    Object.freeze({ package_build: '1.1.3-cf45', protocol_version: '1.6', database_schema_version: 12, lifecycle_lock_schema: CURRENT_COORDINATOR_LIFECYCLE_LOCK_SCHEMA }),
     Object.freeze({ package_build: '1.1.2-cf44', protocol_version: '1.6', database_schema_version: 12, lifecycle_lock_schema: CURRENT_COORDINATOR_LIFECYCLE_LOCK_SCHEMA }),
     Object.freeze({ package_build: '1.1.1-cf43', protocol_version: '1.6', database_schema_version: 12, lifecycle_lock_schema: CURRENT_COORDINATOR_LIFECYCLE_LOCK_SCHEMA }),
 ]);

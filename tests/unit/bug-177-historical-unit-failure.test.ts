@@ -10,6 +10,7 @@ import {
   HISTORICAL_UNIT_FAILURE_GENERATIONS,
   classifyHistoricalUnitFailureEvidenceGeneration,
   parseHistoricalUnitFailureEvidenceFacts,
+  parseHistoricalUnitFailureRegenerationCandidate,
   parseUnitFailureEvidenceFacts,
   parseUnitFailureEvidenceIngress,
   validateReconciliationEvidenceDocument,
@@ -83,6 +84,9 @@ void it('BUG-177 historical adapter admits the exact reset generation with trust
   for (const [label, path, unitId] of [['capture-commit', fixtureCaptureCommit, 'unit-bug177'], ['phase2-initial', fixturePhase2Initial, 'unit-bug177-initial']] as const) {
     const bytes = await readFixture(path);
     const ref = `.pi/autopilot/workstream-bug177/quarantine/${unitId}.attempt-1.reset.json`;
+    const candidate = parseHistoricalUnitFailureRegenerationCandidate(bytes, identity(unitId));
+    assert.equal(candidate.disposition, 'current-evidence-regeneration-required');
+    assert.equal(candidate.originalSha256, digest(bytes));
     const facts = parseHistoricalUnitFailureEvidenceFacts(bytes, identity(unitId), provenance(bytes, ref, unitId));
     assert.equal(facts.action, 'reset');
     assert.equal(facts.captureCommitSha, null);
@@ -99,6 +103,7 @@ void it('BUG-177 rejects historical quarantine/preserve, forged digest, and unpr
   const bytes = await readFixture(fixtureCaptureCommit);
   const ref = '.pi/autopilot/workstream-bug177/quarantine/unit-bug177.attempt-1.reset.json';
   const quarantineBytes = new TextEncoder().encode(`${JSON.stringify({ ...JSON.parse(new TextDecoder().decode(bytes)), action: 'quarantine' }, null, 2)}\n`);
+  assert.throws(() => parseHistoricalUnitFailureRegenerationCandidate(quarantineBytes, identity('unit-bug177')), /capture ref|recovery-required/u);
   assert.throws(() => parseHistoricalUnitFailureEvidenceFacts(quarantineBytes, identity('unit-bug177'), provenance(quarantineBytes, ref, 'unit-bug177')), /capture ref|recovery-required/u);
   const forgedProvenance: HistoricalUnitFailureEvidenceProvenance = { ...provenance(bytes, ref, 'unit-bug177'), evidenceSha256: `sha256:${'0'.repeat(64)}` };
   assert.throws(() => parseHistoricalUnitFailureEvidenceFacts(bytes, identity('unit-bug177'), forgedProvenance), /differs from its accepted coordinator provenance/u);

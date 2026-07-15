@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { existsSync } from 'node:fs';
-import { mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
+import { closeSync, constants as fsConstants, existsSync, fstatSync, lstatSync, openSync, readFileSync, realpathSync } from 'node:fs';
+import { link, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 import { CoordinatorClient } from './client.ts';
@@ -8,7 +8,7 @@ import { parseCoordinationReconciliationEvidence, parseOptionalCoordinationRecon
 import { CoordinationRuntimeError } from './failures.ts';
 import { readCoordinatorSessionContext, type CoordinatorSessionContext } from './supervisor.ts';
 import { coordinatorRuntimePaths } from './runtime-paths.ts';
-import { parseUnitAttemptTarget, validateReconciliationEvidenceDocument } from './terminal-evidence.ts';
+import { classifyHistoricalUnitFailureEvidenceGeneration, parseHistoricalUnitFailureRegenerationCandidate, parseUnitAttemptTarget, validateReconciliationEvidenceDocument, type HistoricalUnitFailureGeneration, type ReconciliationEvidenceIdentity } from './terminal-evidence.ts';
 import type { CoordinationReconciliationDetail, CoordinationReconciliationEvidence, CoordinationReconciliationSource, CoordinationReconciliationSummary, CoordinatorResponseEnvelope } from './types.ts';
 import { AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV } from '../names.ts';
 import type { ActiveAutopilotRow, ProcessEnvLike } from '../parallel-runtime.ts';
@@ -40,6 +40,24 @@ interface PendingReconciliationIntent {
   readonly evidence_ref: string;
   readonly evidence_sha256: `sha256:${string}`;
 }
+
+interface PendingReconciliationIntentSupersession {
+  readonly schema_version: 'autopilot.reconciliation_intent_supersession.v1';
+  readonly disposition: 'current-evidence-regeneration-required';
+  readonly repo_id: string;
+  readonly autopilot_id: string;
+  readonly workstream_run: string;
+  readonly source: 'attempt-reset';
+  readonly target_id: string;
+  readonly evidence_ref: string;
+  readonly evidence_sha256: `sha256:${string}`;
+  readonly pending_intent_sha256: `sha256:${string}`;
+  readonly historical_generation: HistoricalUnitFailureGeneration;
+  readonly historical_action: 'reset' | 'abort';
+}
+
+const MAX_PENDING_RECONCILIATION_INTENT_BYTES = 64 * 1024;
+const MAX_COORDINATION_EVIDENCE_BYTES = 1024 * 1024;
 
 function record(value: unknown, label: string): JsonMap {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new CoordinationRuntimeError('invalid-state', `${label} is not an object`);
@@ -198,6 +216,10 @@ function pendingIntentRoot(active: ActiveAutopilotRow): string {
   return join(active.runtime_root, 'coordination-reconciliation', 'pending');
 }
 
+function supersededIntentRoot(active: ActiveAutopilotRow): string {
+  return join(active.runtime_root, 'coordination-reconciliation', 'superseded');
+}
+
 function pendingIntentPath(active: ActiveAutopilotRow, intent: Pick<PendingReconciliationIntent, 'source' | 'target_id' | 'evidence_ref' | 'evidence_sha256'>): string {
   const id = createHash('sha256').update(`${active.repo_key}\0${active.workstream_run}\0${intent.source}\0${intent.target_id}\0${intent.evidence_ref}\0${intent.evidence_sha256}`, 'utf8').digest('hex');
   return join(pendingIntentRoot(active), `${id}.json`);
@@ -208,14 +230,94 @@ function samePendingIntent(left: PendingReconciliationIntent, right: PendingReco
 }
 
 async function existingPendingIntent(path: string): Promise<PendingReconciliationIntent | null> {
+  if (!existsSync(path)) return null;
   try {
-    const value: unknown = JSON.parse(await readFile(path, 'utf8')) as unknown;
+    const bytes = await readStableRegularFile(path, 'existing pending reconciliation intent', MAX_PENDING_RECONCILIATION_INTENT_BYTES);
+    const value: unknown = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)) as unknown;
     return parsePendingReconciliationIntent(value);
   } catch (error) {
-    if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return null;
     if (error instanceof CoordinationRuntimeError) throw error;
     throw new CoordinationRuntimeError('invalid-state', 'existing pending reconciliation intent is unreadable', [path, error instanceof Error ? error.message : String(error)]);
   }
+}
+
+export async function readStableRegularFile(path: string, label: string, maximumBytes: number): Promise<Uint8Array> {
+  let descriptor: number | null = null;
+  try {
+    const before = lstatSync(path);
+    if (!before.isFile() || before.isSymbolicLink()) throw new CoordinationRuntimeError('unauthorized-client', `${label} must be a regular non-symbolic file`, [path]);
+    const canonicalBefore = realpathSync(path);
+    descriptor = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+    const opened = fstatSync(descriptor);
+    if (!opened.isFile() || opened.size > maximumBytes) throw new CoordinationRuntimeError('invalid-request', `${label} must be a regular file no larger than ${String(maximumBytes)} bytes`, [path, `size=${String(opened.size)}`]);
+    if (opened.dev !== before.dev || opened.ino !== before.ino) throw new CoordinationRuntimeError('unauthorized-client', `${label} changed while its identity was being established`, [path]);
+    const bytes = readFileSync(descriptor);
+    const afterDescriptor = fstatSync(descriptor);
+    const afterPath = lstatSync(path);
+    const canonicalAfter = realpathSync(path);
+    if (bytes.byteLength !== opened.size || afterDescriptor.size !== opened.size || afterDescriptor.dev !== opened.dev || afterDescriptor.ino !== opened.ino || afterPath.dev !== opened.dev || afterPath.ino !== opened.ino || canonicalAfter !== canonicalBefore) throw new CoordinationRuntimeError('unauthorized-client', `${label} changed during its atomic read`, [path]);
+    return bytes;
+  } catch (error) {
+    if (error instanceof CoordinationRuntimeError) throw error;
+    throw new CoordinationRuntimeError('invalid-request', `${label} is unreadable`, [path, error instanceof Error ? error.message : String(error)]);
+  } finally {
+    if (descriptor !== null) closeSync(descriptor);
+  }
+}
+
+async function readOwnedEvidenceBytes(active: ActiveAutopilotRow, evidencePath: string): Promise<Uint8Array> {
+  const canonicalRoot = realpathSync(active.main_worktree_path);
+  const canonicalEvidence = realpathSync(evidencePath);
+  const physicalRef = relative(canonicalRoot, canonicalEvidence);
+  if (physicalRef.length === 0 || physicalRef === '..' || physicalRef.startsWith(`..${sep}`) || isAbsolute(physicalRef)) throw new CoordinationRuntimeError('unauthorized-client', 'reconciliation evidence physically escapes the run-owned main worktree', [evidencePath]);
+  return await readStableRegularFile(evidencePath, 'reconciliation evidence', MAX_COORDINATION_EVIDENCE_BYTES);
+}
+
+async function persistImmutableSupersession(path: string, supersession: PendingReconciliationIntentSupersession): Promise<void> {
+  const bytes = `${JSON.stringify(supersession, null, 2)}\n`;
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  if (existsSync(path)) {
+    const existing = new TextDecoder('utf-8', { fatal: true }).decode(await readStableRegularFile(path, 'pending reconciliation intent supersession', MAX_PENDING_RECONCILIATION_INTENT_BYTES));
+    if (existing !== bytes) throw new CoordinationRuntimeError('idempotency-conflict', 'historical pending reconciliation intent supersession differs from its immutable replay identity', [path]);
+    return;
+  }
+  const temporary = `${path}.tmp-${String(process.pid)}-${randomUUID()}`;
+  await writeFile(temporary, bytes, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+  try {
+    try { await link(temporary, path); }
+    catch (error) {
+      if (!existsSync(path)) throw error;
+      const existing = new TextDecoder('utf-8', { fatal: true }).decode(await readStableRegularFile(path, 'pending reconciliation intent supersession', MAX_PENDING_RECONCILIATION_INTENT_BYTES));
+      if (existing !== bytes) throw new CoordinationRuntimeError('idempotency-conflict', 'concurrent historical pending reconciliation supersession differs from its immutable replay identity', [path]);
+    }
+  } finally { await rm(temporary, { force: true }); }
+}
+
+function evidenceIdentity(active: ActiveAutopilotRow, intent: PendingReconciliationIntent): ReconciliationEvidenceIdentity {
+  const unitTarget = intent.source === 'unit-merge' || intent.source === 'attempt-reset' || intent.source === 'quarantine-capture' ? parseUnitAttemptTarget(intent.target_id) : null;
+  return {
+    repoKey: active.repo_key, autopilotId: active.autopilot_id, workstream: active.workstream, workstreamRun: active.workstream_run,
+    source: intent.source, targetId: intent.target_id, unitId: unitTarget?.unitId ?? null, attempt: unitTarget?.attempt ?? null,
+  };
+}
+
+async function supersedeHistoricalPendingIntent(input: { readonly active: ActiveAutopilotRow; readonly intentPath: string; readonly intentBytes: Uint8Array; readonly intent: PendingReconciliationIntent; readonly evidenceBytes: Uint8Array }): Promise<boolean> {
+  if (input.intent.source !== 'attempt-reset' && input.intent.source !== 'quarantine-capture') return false;
+  if (classifyHistoricalUnitFailureEvidenceGeneration(input.evidenceBytes) === null) return false;
+  const candidate = parseHistoricalUnitFailureRegenerationCandidate(input.evidenceBytes, evidenceIdentity(input.active, input.intent));
+  if (input.intent.source !== 'attempt-reset') throw new CoordinationRuntimeError('invalid-state', 'historical reset/abort pending evidence cannot satisfy a quarantine-capture intent', [input.intentPath]);
+  const evidenceSha256 = `sha256:${createHash('sha256').update(input.evidenceBytes).digest('hex')}` as const;
+  if (candidate.originalSha256 !== input.intent.evidence_sha256 || evidenceSha256 !== input.intent.evidence_sha256) throw new CoordinationRuntimeError('invalid-state', 'historical pending reconciliation evidence digest differs from its immutable intent', [input.intentPath]);
+  const supersession: PendingReconciliationIntentSupersession = {
+    schema_version: 'autopilot.reconciliation_intent_supersession.v1', disposition: candidate.disposition,
+    repo_id: input.intent.repo_id, autopilot_id: input.intent.autopilot_id, workstream_run: input.intent.workstream_run,
+    source: 'attempt-reset', target_id: input.intent.target_id, evidence_ref: input.intent.evidence_ref, evidence_sha256: input.intent.evidence_sha256,
+    pending_intent_sha256: `sha256:${createHash('sha256').update(input.intentBytes).digest('hex')}`,
+    historical_generation: candidate.generation, historical_action: candidate.action,
+  };
+  await persistImmutableSupersession(join(supersededIntentRoot(input.active), `${input.intentPath.slice(input.intentPath.lastIndexOf(sep) + 1)}`), supersession);
+  await rm(input.intentPath);
+  return true;
 }
 
 async function writePendingIntent(path: string, intent: PendingReconciliationIntent): Promise<void> {
@@ -226,15 +328,15 @@ async function writePendingIntent(path: string, intent: PendingReconciliationInt
     return;
   }
   const temporary = `${path}.tmp-${String(process.pid)}-${randomUUID()}`;
-  await writeFile(temporary, `${JSON.stringify(intent, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
+  await writeFile(temporary, `${JSON.stringify(intent, null, 2)}\n`, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
   try {
-    await rename(temporary, path);
-  } catch (error) {
-    if (!(error instanceof Error && 'code' in error && error.code === 'EEXIST')) throw error;
-    await rm(temporary, { force: true });
-    const raced = await existingPendingIntent(path);
-    if (raced === null || !samePendingIntent(raced, intent)) throw new CoordinationRuntimeError('idempotency-conflict', 'concurrent pending reconciliation intent differs from the requested evidence', [path]);
-  }
+    try { await link(temporary, path); }
+    catch (error) {
+      if (!existsSync(path)) throw error;
+      const raced = await existingPendingIntent(path);
+      if (raced === null || !samePendingIntent(raced, intent)) throw new CoordinationRuntimeError('idempotency-conflict', 'concurrent pending reconciliation intent differs from the requested evidence', [path]);
+    }
+  } finally { await rm(temporary, { force: true }); }
 }
 
 async function durableCoordinatorRunExists(active: ActiveAutopilotRow, env: ProcessEnvLike): Promise<boolean> {
@@ -262,7 +364,7 @@ export async function recordCoordinatorReleaseEvidenceFromFile(input: {
   if (!isAbsolute(input.evidencePath)) throw new CoordinationRuntimeError('invalid-request', 'reconciliation evidence path must be absolute');
   const evidenceRef = relative(input.active.main_worktree_path, input.evidencePath).split(sep).join('/');
   if (evidenceRef.length === 0 || evidenceRef === '..' || evidenceRef.startsWith('../') || isAbsolute(evidenceRef)) throw new CoordinationRuntimeError('unauthorized-client', 'reconciliation evidence is outside the run-owned main worktree');
-  const bytes = await readFile(input.evidencePath);
+  const bytes = await readOwnedEvidenceBytes(input.active, input.evidencePath);
   const unitTarget = input.source === 'unit-merge' || input.source === 'attempt-reset' || input.source === 'quarantine-capture' ? parseUnitAttemptTarget(input.targetId) : null;
   validateReconciliationEvidenceDocument(bytes, {
     repoKey: input.active.repo_key,
@@ -315,9 +417,12 @@ export async function replayPendingCoordinatorReconciliation(input: { readonly a
   for (const name of names) {
     const path = join(root, name);
     let value: unknown;
+    let intentBytes: Uint8Array;
     try {
-      value = JSON.parse(await readFile(path, 'utf8')) as unknown;
+      intentBytes = await readStableRegularFile(path, 'pending reconciliation intent', MAX_PENDING_RECONCILIATION_INTENT_BYTES);
+      value = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(intentBytes)) as unknown;
     } catch (error) {
+      if (error instanceof CoordinationRuntimeError) throw error;
       throw new CoordinationRuntimeError('invalid-state', 'pending reconciliation intent is unreadable', [path, error instanceof Error ? error.message : String(error)]);
     }
     const intent = parsePendingReconciliationIntent(value);
@@ -326,9 +431,10 @@ export async function replayPendingCoordinatorReconciliation(input: { readonly a
     if (expectedPath !== path) throw new CoordinationRuntimeError('invalid-state', 'pending reconciliation intent filename does not match its immutable identity', [path, expectedPath]);
     const currentEvidenceRef = relative(input.active.main_worktree_path, intent.evidence_path).split(sep).join('/');
     if (currentEvidenceRef !== intent.evidence_ref) throw new CoordinationRuntimeError('invalid-state', 'pending reconciliation evidence path no longer matches its accepted run-owned ref', [path]);
-    const currentBytes = await readFile(intent.evidence_path);
+    const currentBytes = await readOwnedEvidenceBytes(input.active, intent.evidence_path);
     const currentSha = `sha256:${createHash('sha256').update(currentBytes).digest('hex')}`;
     if (currentSha !== intent.evidence_sha256) throw new CoordinationRuntimeError('invalid-state', 'pending reconciliation evidence changed after the durable intent was written', [path, `expected=${intent.evidence_sha256}`, `actual=${currentSha}`]);
+    if (await supersedeHistoricalPendingIntent({ active: input.active, intentPath: path, intentBytes, intent, evidenceBytes: currentBytes })) continue;
     const result = await recordCoordinatorReleaseEvidenceFromFile({
       active: input.active,
       source: intent.source,

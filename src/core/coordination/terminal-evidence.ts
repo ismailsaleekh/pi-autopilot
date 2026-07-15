@@ -83,6 +83,15 @@ export interface HistoricalUnitFailureEvidenceProvenance {
   readonly schema10AppliedAt: string;
 }
 
+export interface HistoricalUnitFailureRegenerationCandidate {
+  readonly disposition: 'current-evidence-regeneration-required';
+  readonly generation: HistoricalUnitFailureGeneration;
+  readonly action: 'reset' | 'abort';
+  readonly unitWorktreePath: string;
+  readonly originalSha256: `sha256:${string}`;
+  readonly originalFields: readonly string[];
+}
+
 export interface HistoricalUnitFailureEvidenceFacts {
   readonly generation: HistoricalUnitFailureGeneration;
   readonly action: 'reset' | 'abort';
@@ -182,6 +191,7 @@ function parseFailureAction(document: JsonMap): 'quarantine' | 'reset' | 'preser
 function assertHistoricalCommonFields(document: JsonMap, expected: ReconciliationEvidenceIdentity): void {
   if (text(document, 'schema_version', 'unit failure evidence') !== 'autopilot.unit_failure.v1') throw new CoordinationRuntimeError('invalid-state', 'unit failure evidence schema is incompatible');
   assertIdentity(document, expected, false);
+  if (text(document, 'workstream', 'unit failure evidence') !== expected.workstream) throw new CoordinationRuntimeError('invalid-state', 'unit failure evidence workstream does not match durable ownership');
   text(document, 'unit_worktree_path', 'unit failure evidence', 1024);
   text(document, 'summary', 'unit failure evidence', 4096);
   const createdAt = text(document, 'created_at', 'unit failure evidence', 64);
@@ -197,25 +207,41 @@ export function classifyHistoricalUnitFailureEvidenceGeneration(bytes: Uint8Arra
   return null;
 }
 
-export function parseHistoricalUnitFailureEvidenceFacts(bytes: Uint8Array, expected: ReconciliationEvidenceIdentity, provenance: HistoricalUnitFailureEvidenceProvenance): HistoricalUnitFailureEvidenceFacts {
-  if (provenance.kind !== 'coordinator-accepted-before-schema10' || !Number.isSafeInteger(provenance.acceptedEventSeq) || provenance.acceptedEventSeq < 1 || !Number.isFinite(Date.parse(provenance.acceptedAt)) || !Number.isFinite(Date.parse(provenance.schema10AppliedAt)) || Date.parse(provenance.acceptedAt) >= Date.parse(provenance.schema10AppliedAt)) throw new CoordinationRuntimeError('invalid-state', 'historical unit failure evidence lacks a trusted pre-schema10 coordinator acceptance fence');
-  const actualSha256 = `sha256:${createHash('sha256').update(bytes).digest('hex')}` as const;
-  if (actualSha256 !== provenance.evidenceSha256) throw new CoordinationRuntimeError('invalid-state', 'historical unit failure evidence digest differs from its accepted coordinator provenance');
+/**
+ * Classify an exact historical reset/abort artifact as requiring fresh current
+ * evidence. This result is deliberately non-authorizing: it carries no
+ * normalized capture facts and must never be consumed as release evidence.
+ */
+export function parseHistoricalUnitFailureRegenerationCandidate(bytes: Uint8Array, expected: ReconciliationEvidenceIdentity): HistoricalUnitFailureRegenerationCandidate {
   const document = jsonDocument(bytes, 'historical unit failure evidence');
   const generation = classifyHistoricalUnitFailureEvidenceGeneration(bytes);
   if (generation === null) throw new CoordinationRuntimeError('invalid-state', 'unit failure evidence is not an enumerated historical producer generation');
   assertHistoricalCommonFields(document, expected);
   const action = parseFailureAction(document);
-  if (action === 'quarantine' || action === 'preserve') throw new CoordinationRuntimeError('recovery-required', 'historical quarantine/preserve evidence lacks an exact capture ref; edit authority remains retained', [provenance.evidenceRef, provenance.reconciliationEvidenceId]);
+  if (action === 'quarantine' || action === 'preserve') throw new CoordinationRuntimeError('recovery-required', 'historical quarantine/preserve evidence lacks an exact capture ref; edit authority remains retained');
   if (generation === HISTORICAL_UNIT_FAILURE_GENERATIONS.captureCommitOnly && document['capture_commit_sha'] !== null) throw new CoordinationRuntimeError('invalid-state', 'historical reset/abort evidence must carry a null capture commit');
   return {
+    disposition: 'current-evidence-regeneration-required',
     generation,
     action,
     unitWorktreePath: text(document, 'unit_worktree_path', 'historical unit failure evidence', 1024),
+    originalSha256: `sha256:${createHash('sha256').update(bytes).digest('hex')}`,
+    originalFields: Object.freeze(Object.keys(document).sort()),
+  };
+}
+
+export function parseHistoricalUnitFailureEvidenceFacts(bytes: Uint8Array, expected: ReconciliationEvidenceIdentity, provenance: HistoricalUnitFailureEvidenceProvenance): HistoricalUnitFailureEvidenceFacts {
+  if (provenance.kind !== 'coordinator-accepted-before-schema10' || !Number.isSafeInteger(provenance.acceptedEventSeq) || provenance.acceptedEventSeq < 1 || !Number.isFinite(Date.parse(provenance.acceptedAt)) || !Number.isFinite(Date.parse(provenance.schema10AppliedAt)) || Date.parse(provenance.acceptedAt) >= Date.parse(provenance.schema10AppliedAt)) throw new CoordinationRuntimeError('invalid-state', 'historical unit failure evidence lacks a trusted pre-schema10 coordinator acceptance fence');
+  const candidate = parseHistoricalUnitFailureRegenerationCandidate(bytes, expected);
+  if (candidate.originalSha256 !== provenance.evidenceSha256) throw new CoordinationRuntimeError('invalid-state', 'historical unit failure evidence digest differs from its accepted coordinator provenance');
+  return {
+    generation: candidate.generation,
+    action: candidate.action,
+    unitWorktreePath: candidate.unitWorktreePath,
     captureCommitSha: null,
     captureRef: null,
-    originalSha256: actualSha256,
-    originalFields: Object.freeze(Object.keys(document).sort()),
+    originalSha256: candidate.originalSha256,
+    originalFields: candidate.originalFields,
   };
 }
 
@@ -233,6 +259,7 @@ export function parseUnitFailureEvidenceFacts(bytes: Uint8Array, expected: Recon
   assertExactFields(document, CURRENT_UNIT_FAILURE_FIELDS, 'unit failure evidence');
   if (text(document, 'schema_version', 'unit failure evidence') !== 'autopilot.unit_failure.v1') throw new CoordinationRuntimeError('invalid-state', 'unit failure evidence schema is incompatible');
   assertIdentity(document, expected, false);
+  if (text(document, 'workstream', 'unit failure evidence') !== expected.workstream) throw new CoordinationRuntimeError('invalid-state', 'unit failure evidence workstream does not match durable ownership');
   const action = parseFailureAction(document);
   const nullableText = (field: string): string | null => {
     const value = document[field];

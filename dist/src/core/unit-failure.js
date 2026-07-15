@@ -1,18 +1,20 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { existsSync, lstatSync, readdirSync, realpathSync } from 'node:fs';
-import { mkdir, readFile } from 'node:fs/promises';
+import { link, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { recordCoordinatorReleaseEvidenceFromFile } from "./coordination/reconciliation.js";
+import { readStableRegularFile, recordCoordinatorReleaseEvidenceFromFile } from "./coordination/reconciliation.js";
 import { CoordinatorClient } from "./coordination/client.js";
 import { parseCoordinationChildLease, parseCoordinationEditLease, parseCoordinationUnitAttempt, parseCoordinationWorktree, parseCoordinationWorktreeOperation } from "./coordination/contracts.js";
 import { CoordinationRuntimeError } from "./coordination/failures.js";
 import { readCoordinatorSessionContext } from "./coordination/supervisor.js";
 import { parseAutopilotChildTerminalAcceptance } from "./coordination/terminal-acceptance.js";
+import { classifyHistoricalUnitFailureEvidenceGeneration, parseHistoricalUnitFailureRegenerationCandidate, parseUnitFailureEvidenceFacts } from "./coordination/terminal-evidence.js";
 import { AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV } from "./names.js";
 import { gitHead, readGitStatus, releaseClaimsForUnit, runGit, updateUnitBranchStatus, writeJsonAtomic } from "./parallel-runtime.js";
 import { cleanupTerminalUnitWorktree } from "./worktree-cleanup.js";
 import { executeOwnedWorktreeSaga } from "./coordination/worktree-saga.js";
+const MAX_UNIT_FAILURE_EVIDENCE_BYTES = 1024 * 1024;
 export async function reconcileRetainedFailedUnitAuthority(input) {
     if (input.context.active.coordination_authority !== 'coordinator-edit-leases-v1')
         return Object.freeze([]);
@@ -115,9 +117,10 @@ export async function acceptedTerminalVerdict(context, child, expectedRole) {
     return acceptance.verdict;
 }
 export async function quarantineFailedUnit(input) {
-    const record = await writeFailureRecord({ ...input, action: 'quarantine' });
+    const publication = await writeFailureRecord({ ...input, action: 'quarantine' });
+    const { record } = publication;
     await updateUnitBranchStatus({ active: input.context.active, unitId: input.unitId, attempt: input.attempt, status: 'quarantined', currentSha: record.git_head_after, archiveRef: record.capture_ref });
-    await recordFailureEvidence(input, record, 'quarantine-capture');
+    await recordFailureEvidence(input, publication, 'quarantine-capture');
     await releaseLegacyClaimsIfApplicable(input, 'autopilot failed unit quarantine');
     return record;
 }
@@ -182,7 +185,7 @@ async function finishCommittedQuarantine(input, operation) {
         await writeJsonAtomic(evidencePath, record);
     }
     await updateUnitBranchStatus({ active: input.context.active, unitId: input.unitId, attempt: input.attempt, status: 'quarantined', currentSha: record.git_head_after, archiveRef: record.capture_ref });
-    await recordFailureEvidence(input, record, 'quarantine-capture');
+    await recordFailureEvidence(input, { record, evidencePath }, 'quarantine-capture');
     await releaseLegacyClaimsIfApplicable(input, 'autopilot resumed failed unit quarantine publication');
     return record;
 }
@@ -191,19 +194,21 @@ export async function resetFailedUnit(input) {
     if (captured !== null)
         return captured;
     await resetWorktreeForRecordedTransition(input, 'unit-reset', 'reset');
-    const record = await writeFailureRecord({ ...input, action: 'reset' });
+    const publication = await writeFailureRecord({ ...input, action: 'reset' });
+    const { record } = publication;
     const currentSha = record.git_head_after;
     const archiveRef = null;
-    await recordFailureEvidence(input, record, 'attempt-reset');
+    await recordFailureEvidence(input, publication, 'attempt-reset');
     await releaseLegacyClaimsIfApplicable(input, 'autopilot failed unit reset');
     await updateUnitBranchStatus({ active: input.context.active, unitId: input.unitId, attempt: input.attempt, status: 'aborted', currentSha, archiveRef });
     await cleanupTerminalUnitWorktree({ active: input.context.active, unitId: input.unitId, attempt: input.attempt, allowedStatuses: ['aborted'], reason: 'autopilot failed unit reset cleanup', ...(input.env === undefined ? {} : { env: input.env }), ...(input.now === undefined ? {} : { now: input.now }) });
     return record;
 }
 export async function preserveFailedUnit(input) {
-    const record = await writeFailureRecord({ ...input, action: 'preserve' });
+    const publication = await writeFailureRecord({ ...input, action: 'preserve' });
+    const { record } = publication;
     await updateUnitBranchStatus({ active: input.context.active, unitId: input.unitId, attempt: input.attempt, status: 'quarantined', currentSha: record.git_head_after, archiveRef: record.capture_ref });
-    await recordFailureEvidence(input, record, 'quarantine-capture');
+    await recordFailureEvidence(input, publication, 'quarantine-capture');
     await releaseLegacyClaimsIfApplicable(input, 'autopilot failed unit preserve-after-quarantine-capture');
     return record;
 }
@@ -212,8 +217,9 @@ export async function abortFailedUnit(input) {
     if (captured !== null)
         return captured;
     await resetWorktreeForRecordedTransition(input, 'unit-abort-reset', 'abort');
-    const record = await writeFailureRecord({ ...input, action: 'abort' });
-    await recordFailureEvidence(input, record, 'attempt-reset');
+    const publication = await writeFailureRecord({ ...input, action: 'abort' });
+    const { record } = publication;
+    await recordFailureEvidence(input, publication, 'attempt-reset');
     await releaseLegacyClaimsIfApplicable(input, 'autopilot failed unit abort');
     const currentSha = record.git_head_after;
     const archiveRef = `autopilot/archive/${input.context.active.workstream_run}/unit/${input.unitId}/attempt-${String(input.attempt)}/aborted`;
@@ -261,15 +267,14 @@ async function captureDirtyBeforeDestructiveTransition(input) {
         return null;
     return await quarantineFailedUnit({ ...input, summary: `automatic preservation before destructive transition: ${input.summary}` });
 }
-async function recordFailureEvidence(input, record, source) {
+async function recordFailureEvidence(input, publication, source) {
     if (input.context.active.coordination_authority !== 'coordinator-edit-leases-v1')
         return;
-    const evidencePath = join(input.context.active.runtime_root, 'quarantine', `${input.unitId}.attempt-${String(input.attempt)}.${record.action}.json`);
     await recordCoordinatorReleaseEvidenceFromFile({
         active: input.context.active,
         source,
         targetId: `${input.unitId}:${String(input.attempt)}`,
-        evidencePath,
+        evidencePath: publication.evidencePath,
         ...(input.env === undefined ? {} : { env: input.env }),
     });
 }
@@ -395,6 +400,70 @@ function configuredSubmodulePaths(cwd) {
         throw new CoordinationRuntimeError('recovery-required', 'quarantine could not inspect submodule declarations', [result.stderr.trim()]);
     return Object.freeze(result.stdout.split(/\r?\n/u).filter((line) => line.length > 0).map((line) => line.slice(line.indexOf(' ') + 1).trim().replace(/\\/gu, '/')).filter((path) => path.length > 0));
 }
+function failureEvidenceIdentity(input, action) {
+    return {
+        repoKey: input.context.active.repo_key, autopilotId: input.context.active.autopilot_id, workstream: input.context.active.workstream, workstreamRun: input.context.active.workstream_run,
+        source: action === 'quarantine' || action === 'preserve' ? 'quarantine-capture' : 'attempt-reset', targetId: `${input.unitId}:${String(input.attempt)}`, unitId: input.unitId, attempt: input.attempt,
+    };
+}
+async function failureEvidencePublicationPath(input, action) {
+    const root = join(input.context.active.runtime_root, 'quarantine');
+    const path = join(root, `${input.unitId}.attempt-${String(input.attempt)}.${action}.json`);
+    if (!existsSync(path))
+        return path;
+    const bytes = await readStableRegularFile(path, 'existing unit failure evidence', MAX_UNIT_FAILURE_EVIDENCE_BYTES);
+    if (classifyHistoricalUnitFailureEvidenceGeneration(bytes) === null)
+        return path;
+    const candidate = parseHistoricalUnitFailureRegenerationCandidate(bytes, failureEvidenceIdentity(input, action));
+    if (candidate.action !== action)
+        throw new CoordinationRuntimeError('invalid-state', 'historical unit failure evidence action differs from current regeneration action', [path, candidate.action, action]);
+    return join(root, `${input.unitId}.attempt-${String(input.attempt)}.${action}.regenerated-from-${candidate.originalSha256.slice('sha256:'.length)}.json`);
+}
+function currentFailureRecordBytes(record) {
+    return `${JSON.stringify(record, null, 2)}\n`;
+}
+async function persistCurrentFailureRecord(path, record, expected) {
+    const bytes = currentFailureRecordBytes(record);
+    await mkdir(dirname(path), { recursive: true });
+    const acceptExisting = async () => {
+        const existingBytes = await readStableRegularFile(path, 'existing current unit failure evidence', MAX_UNIT_FAILURE_EVIDENCE_BYTES);
+        parseUnitFailureEvidenceFacts(existingBytes, expected);
+        let value;
+        try {
+            value = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(existingBytes));
+        }
+        catch (error) {
+            throw new CoordinationRuntimeError('invalid-state', 'existing current unit failure evidence is unreadable', [path, error instanceof Error ? error.message : String(error)]);
+        }
+        if (typeof value !== 'object' || value === null || Array.isArray(value))
+            throw new CoordinationRuntimeError('invalid-state', 'existing current unit failure evidence is not an object', [path]);
+        const existing = value;
+        if (typeof existing.created_at !== 'string' || !Number.isFinite(Date.parse(existing.created_at)))
+            throw new CoordinationRuntimeError('invalid-state', 'existing current unit failure evidence created_at is invalid', [path]);
+        const expectedBytes = currentFailureRecordBytes({ ...record, created_at: existing.created_at });
+        if (new TextDecoder().decode(existingBytes) !== expectedBytes)
+            throw new CoordinationRuntimeError('idempotency-conflict', 'existing current unit failure evidence differs from re-derived worktree facts', [path]);
+        return existing;
+    };
+    if (existsSync(path))
+        return await acceptExisting();
+    const temporary = `${path}.tmp-${String(process.pid)}-${randomUUID()}`;
+    await writeFile(temporary, bytes, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+    try {
+        try {
+            await link(temporary, path);
+        }
+        catch (error) {
+            if (!existsSync(path))
+                throw error;
+            return await acceptExisting();
+        }
+    }
+    finally {
+        await rm(temporary, { force: true });
+    }
+    return record;
+}
 async function writeFailureRecord(input) {
     const now = input.now ?? new Date();
     const before = inspectOwnedFailureWorktree(input);
@@ -408,16 +477,15 @@ async function writeFailureRecord(input) {
     const captureRef = captureCommitSha === null ? null : `autopilot/archive/${input.context.active.workstream_run}/unit/${input.unitId}/attempt-${String(input.attempt)}/${input.action}-capture`;
     if (captureRef !== null && captureCommitSha !== null)
         await archiveFailureBranch(input, captureCommitSha, captureRef, `${input.action} immutable failure capture`, 'quarantined');
-    const record = {
+    const derived = {
         schema_version: 'autopilot.unit_failure.v1', action: input.action, workstream: input.context.active.workstream, workstream_run: input.context.active.workstream_run,
         unit_id: input.unitId, attempt: input.attempt, unit_worktree_path: input.unitWorktreePath, dirty_paths: dirtyPaths,
         capture_commit_sha: captureCommitSha, capture_ref: captureRef, git_head_before: before.head, git_head_after: after.head,
         git_common_dir: after.gitCommonDir, branch: after.branch, postcondition_worktree_clean: true, summary: input.summary, created_at: now.toISOString(),
     };
-    const root = join(input.context.active.runtime_root, 'quarantine');
-    await mkdir(root, { recursive: true });
-    await writeJsonAtomic(join(root, `${input.unitId}.attempt-${String(input.attempt)}.${input.action}.json`), record);
-    return record;
+    const evidencePath = await failureEvidencePublicationPath(input, input.action);
+    const record = await persistCurrentFailureRecord(evidencePath, derived, failureEvidenceIdentity(input, input.action));
+    return { record, evidencePath };
 }
 async function failureBaselineHead(input, beforeFacts) {
     let baseline = input.baselineHead;

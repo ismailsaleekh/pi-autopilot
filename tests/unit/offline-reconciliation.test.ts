@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { describe, it } from 'node:test';
@@ -387,6 +387,70 @@ void describe('Coordination Fabric offline replay and automatic reconciliation',
       assert.equal(replayed.length, 1);
       assert.equal(array((await status(value.client, owner)).payload['edit_leases'], 'leases after pending replay').length, 0);
       assert.deepEqual((await readdir(pendingRoot, { withFileTypes: true })).map((entry) => entry.name), []);
+    } finally {
+      await closeHarness(value);
+    }
+  });
+
+  void it('BUG-178 supersedes an unaccepted historical reset intent without releasing retained authority or rewriting evidence', async () => {
+    const value = await harness();
+    try {
+      const owner = await attachActor(value.client, value.stateRoot, 'a');
+      await owner.negotiation.acquire(acquisitionInput('historical', { condition_type: 'unit-merged', target_id: 'unit-historical:1', evidence: null }, 'src/historical.ts'));
+      const mainWorktree = join(value.stateRoot, 'worktrees', owner.context.repo_id, 'active', owner.context.workstream_run, 'main');
+      const runtimeRoot = join(mainWorktree, '.pi', 'autopilot', owner.context.workstream);
+      const active: ActiveAutopilotRow = {
+        schema_version: 'autopilot.active_parent.v2', coordination_authority: 'coordinator-edit-leases-v1', autopilot_id: owner.context.autopilot_id, workstream: owner.context.workstream,
+        workstream_run: owner.context.workstream_run, repo_key: owner.context.repo_id, source_repo: join(value.root, 'repository'),
+        git_common_dir: join(value.root, 'repository', '.git'), worktree_root: join(value.stateRoot, 'worktrees', owner.context.repo_id),
+        main_worktree_path: mainWorktree, branch: `autopilot/${owner.context.workstream_run}`, runtime_root: runtimeRoot, target_branch: 'main', target_base_sha: git(mainWorktree, ['rev-parse', 'HEAD']),
+        origin_url: null, pid: process.pid, boot_id: owner.context.boot_id, status: 'active', started_at: '2026-07-11T00:00:00.000Z',
+        active_run_epoch: 1, active_epoch_started_at: '2026-07-11T00:00:00.000Z', active_run_receipt_id: 'receipt-run-a',
+      };
+      const evidenceRef = `.pi/autopilot/${owner.context.workstream}/quarantine/unit-historical.attempt-1.reset.json`;
+      const evidencePath = join(mainWorktree, ...evidenceRef.split('/'));
+      const historicalBytes = `${JSON.stringify({
+        schema_version: 'autopilot.unit_failure.v1', action: 'reset', workstream: owner.context.workstream, workstream_run: owner.context.workstream_run,
+        unit_id: 'unit-historical', attempt: 1, unit_worktree_path: join(value.root, 'historical-unit'), dirty_paths: [], capture_commit_sha: null,
+        summary: 'historical reset pending current-contract regeneration', created_at: '2026-07-11T01:00:00.000Z',
+      }, null, 2)}\n`;
+      await mkdir(dirname(evidencePath), { recursive: true });
+      await writeFile(evidencePath, historicalBytes, 'utf8');
+      const evidenceSha256 = `sha256:${createHash('sha256').update(historicalBytes, 'utf8').digest('hex')}` as const;
+      const intent = {
+        schema_version: 'autopilot.reconciliation_intent.v1', repo_id: active.repo_key, autopilot_id: active.autopilot_id, workstream_run: active.workstream_run,
+        source: 'attempt-reset', target_id: 'unit-historical:1', evidence_path: evidencePath, evidence_ref: evidenceRef, evidence_sha256: evidenceSha256,
+      } as const;
+      const intentId = createHash('sha256').update(`${active.repo_key}\0${active.workstream_run}\0${intent.source}\0${intent.target_id}\0${intent.evidence_ref}\0${intent.evidence_sha256}`, 'utf8').digest('hex');
+      const pendingRoot = join(runtimeRoot, 'coordination-reconciliation', 'pending');
+      await mkdir(pendingRoot, { recursive: true });
+      await writeFile(join(pendingRoot, `${intentId}.json`), `${JSON.stringify(intent, null, 2)}\n`, 'utf8');
+      const sessionContextPath = join(value.stateRoot, 'historical-replay-session-context.json');
+      await writeCoordinatorSessionContext(sessionContextPath, owner.context);
+      const replayEnv = { ...value.env, [AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV]: sessionContextPath };
+
+      const replayed = await replayPendingCoordinatorReconciliation({ active, env: replayEnv });
+      assert.deepEqual(replayed, [], 'historical pending evidence is never replayed as release authority');
+      assert.deepEqual((await readdir(pendingRoot)).sort(), [], 'superseded intent leaves the active replay queue');
+      const supersededRoot = join(runtimeRoot, 'coordination-reconciliation', 'superseded');
+      const supersededNames = (await readdir(supersededRoot)).sort();
+      assert.deepEqual(supersededNames, [`${intentId}.json`]);
+      const supersession = JSON.parse(await readFile(join(supersededRoot, supersededNames[0] ?? ''), 'utf8')) as Readonly<Record<string, unknown>>;
+      assert.equal(supersession['schema_version'], 'autopilot.reconciliation_intent_supersession.v1');
+      assert.equal(supersession['disposition'], 'current-evidence-regeneration-required');
+      assert.equal(supersession['evidence_sha256'], evidenceSha256);
+      assert.equal(await readFile(evidencePath, 'utf8'), historicalBytes, 'historical evidence bytes remain immutable');
+      assert.equal(array((await status(value.client, owner)).payload['edit_leases'], 'retained historical leases').length, 1, 'supersession cannot release authority');
+      assert.equal(array((await status(value.client, owner)).payload['reconciliation_evidence'], 'historical reconciliation evidence').filter((entry) => record(entry, 'reconciliation evidence')['source'] === 'attempt-reset').length, 0);
+
+      // Recreate the exact pending file to model death after immutable
+      // supersession publication but before pending-queue removal. Replay must
+      // prove the existing receipt byte-for-byte and converge without release.
+      await writeFile(join(pendingRoot, `${intentId}.json`), `${JSON.stringify(intent, null, 2)}\n`, 'utf8');
+      assert.deepEqual(await replayPendingCoordinatorReconciliation({ active, env: replayEnv }), []);
+      assert.deepEqual(await readdir(pendingRoot), []);
+      assert.deepEqual((await readdir(supersededRoot)).sort(), [`${intentId}.json`]);
+      assert.equal(array((await status(value.client, owner)).payload['edit_leases'], 'retained historical leases after idempotent replay').length, 1);
     } finally {
       await closeHarness(value);
     }
