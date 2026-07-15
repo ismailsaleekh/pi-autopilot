@@ -14,6 +14,7 @@ export * from './migration.ts';
 export * from './negotiation.ts';
 export * from './observations.ts';
 export * from './package-isolation.ts';
+export * from './patch-activation.ts';
 export * from './process-identity.ts';
 export * from './reconciliation.ts';
 export * from './reservations.ts';

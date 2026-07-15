@@ -67,7 +67,7 @@ PI_TELEMETRY=0
 CI=1
 ```
 
-The SDK and RPC suites create their own temporary Pi state and should not read or mutate user-global Pi configuration. BUG-176 certification is synthetic/sanitized and isolated: it does not read, stop, migrate, or modify any live `pcg-reval` coordinator, database, lock, socket, WAL/SHM, claims, mailbox, worktree, or artifact.
+The SDK and RPC suites create their own temporary Pi state and should not read or mutate user-global Pi configuration. BUG-176 certification is synthetic/sanitized and isolated: it does not read, stop, migrate, or modify any live production coordinator, database, lock, socket, WAL/SHM, claims, mailbox, worktree, or artifact.
 
 ## Artifacts
 

@@ -1,4 +1,5 @@
 import { CoordinationRuntimeError } from "./failures.js";
+import { COORDINATOR_PACKAGE_BUILD } from "./runtime-constants.js";
 import { classifyCoordinatorRuntimeIdentity, CURRENT_COORDINATOR_LIFECYCLE_LOCK_SCHEMA } from "./runtime-compatibility.js";
 /** Exact one-hop compatibility path from the executable aa3e377 package. */
 const COORDINATOR_UPGRADE_SOURCE = Object.freeze({
@@ -8,7 +9,7 @@ const COORDINATOR_UPGRADE_SOURCE = Object.freeze({
     lifecycle_lock_schema: 'autopilot.coordinator_lock.v1',
 });
 const COORDINATOR_UPGRADE_TARGET = Object.freeze({
-    package_build: '1.1.1-cf43',
+    package_build: COORDINATOR_PACKAGE_BUILD,
     protocol_version: '1.6',
     database_schema_version: 12,
     lifecycle_lock_schema: CURRENT_COORDINATOR_LIFECYCLE_LOCK_SCHEMA,
@@ -166,9 +167,9 @@ export function parsePriorSchema9CurrentCoordinatorLock(value) {
 /** Exact-target parser retained for migration, rollback, and owned-lock checks. */
 export function parseCurrentCoordinatorLock(value) {
     const lock = parseKnownCompatibleCurrentCoordinatorLock(value);
-    if (lock === null || lock.package_build !== COORDINATOR_UPGRADE_PATH.target.package_build)
+    if (lock === null || lock.package_build !== COORDINATOR_PACKAGE_BUILD)
         return null;
-    return { ...lock, package_build: COORDINATOR_UPGRADE_PATH.target.package_build };
+    return { ...lock, package_build: COORDINATOR_PACKAGE_BUILD };
 }
 export function parseCoordinatorUpgradeBackup(value) {
     const backup = record(value, 'upgrade backup');

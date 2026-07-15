@@ -270,8 +270,8 @@ export default function autopilotExtension(pi: ExtensionHostLike): void {
       await recoverAutopilotWorktreeSagas({ active: prepared.active });
       await ensureMainWorktreeSagaRegistered({ active: prepared.active });
       await replayPendingCoordinatorReconciliation({ active: prepared.active });
-      await sessionBridge.reconcileOwnedRun('pending-evidence-replay-before-mailbox-and-dispatch');
       await reconcileRetainedFailedUnitAuthority({ context: { repo: prepared.repo, active: prepared.active, coordinationRoot: coordinationRootForRepo(prepared.active.repo_key), claimsPath: '', claimEventsPath: '' } });
+      await sessionBridge.reconcileOwnedRun('pending-evidence-replay-before-mailbox-and-dispatch');
       await sessionBridge.reconcileOwnedRun('failed-unit-authority-repair-before-mailbox-and-dispatch');
       await sessionBridge.drainMailbox();
       handoffRequested = false;

@@ -18,7 +18,7 @@ import { activeCoordinationMigrationFreeze, assertCoordinationDispatchAllowed, a
 import { proveStructuredAttemptTerminal } from "./terminal-attempt-proof.js";
 import { classifyCoordinationIntegrationConflict } from "./integration-conflicts.js";
 import { assertAutopilotChildTerminalAcceptanceChain, AUTOPILOT_CHILD_TERMINAL_ACCEPTANCE_SCHEMA, parseAutopilotChildTerminalAcceptance } from "./terminal-acceptance.js";
-import { parseRunTerminalSha, parseUnitAttemptTarget, parseUnitFailureEvidenceFacts, parseUnitMergeReservationFacts, validateReconciliationEvidenceDocument, validateReservationIntegrationEvidenceDocument, validateReservationValidationArtifactChain, validateReservationValidationEvidenceDocument } from "./terminal-evidence.js";
+import { parseRunTerminalSha, parseUnitAttemptTarget, parseUnitFailureEvidenceIngress, parseUnitMergeReservationFacts, validateReconciliationEvidenceDocument, validateReservationIntegrationEvidenceDocument, validateReservationValidationArtifactChain, validateReservationValidationEvidenceDocument } from "./terminal-evidence.js";
 import { AUTOPILOT_COORDINATOR_PROTOCOL_VERSION, COORDINATION_WORKTREE_STATES } from "./types.js";
 import { COORDINATOR_MAX_FRAME_BYTES } from "./runtime-constants.js";
 import { assertPrivatePathNoAliases } from "../private-path.js";
@@ -4896,12 +4896,33 @@ export class CoordinatorStore {
             repoKey: repository.repo_key, autopilotId: run.autopilot_id, workstream: run.workstream, workstreamRun: run.workstream_run,
             source, targetId, unitId, attempt,
         };
-        validateReconciliationEvidenceDocument(bytes, expectedIdentity);
-        if (persistAtEventSeq !== undefined && (source === 'attempt-reset' || source === 'quarantine-capture'))
-            this.#assertUnitFailureEvidenceFacts(run, source, targetId, parseUnitFailureEvidenceFacts(bytes, expectedIdentity));
+        validateReconciliationEvidenceDocument(bytes, expectedIdentity, this.#historicalUnitFailureProvenanceFor(run, source, evidence));
+        if (persistAtEventSeq !== undefined && (source === 'attempt-reset' || source === 'quarantine-capture')) {
+            const ingress = parseUnitFailureEvidenceIngress(bytes, expectedIdentity, this.#historicalUnitFailureProvenanceFor(run, source, evidence));
+            if (ingress.kind === 'historical')
+                throw new CoordinationRuntimeError('recovery-required', 'historical unit failure evidence cannot newly release authority; reset/quarantine worktree postconditions are not verifiable after schema-10', [evidence.ref, ingress.provenance.reconciliationEvidenceId]);
+            this.#assertUnitFailureEvidenceFacts(run, source, targetId, ingress.facts);
+        }
         if (persistAtEventSeq !== undefined)
             this.#persistEvidenceArtifact(run.repo_id, evidence, bytes, `${source} reconciliation evidence`, persistAtEventSeq);
         return bytes;
+    }
+    #historicalUnitFailureProvenanceFor(run, source, evidence) {
+        if (source !== 'attempt-reset' && source !== 'quarantine-capture')
+            return null;
+        const conditionType = source === 'attempt-reset' ? 'attempt-reset' : 'quarantine-captured';
+        const row = this.#db.prepare("SELECT entity_id, json_extract(payload_json, '$.accepted_event_seq') AS accepted_event_seq FROM reconciliation_evidence WHERE repo_id=? AND workstream_run=? AND source=? AND json_extract(payload_json, '$.release_condition.condition_type')=? AND json_extract(payload_json, '$.release_condition.evidence.ref')=? AND json_extract(payload_json, '$.release_condition.evidence.sha256')=? ORDER BY entity_id LIMIT 1").get(run.repo_id, run.workstream_run, source, conditionType, evidence.ref, evidence.sha256);
+        if (row === undefined)
+            return null;
+        const reconciliationEvidenceId = sqlString(row, 'entity_id');
+        const acceptedEventSeq = sqlInteger(row, 'accepted_event_seq');
+        const acceptedEvent = asRow(this.#db.prepare('SELECT occurred_at FROM events WHERE repo_id=? AND event_seq=?').get(run.repo_id, acceptedEventSeq), 'accepted reconciliation evidence event');
+        const acceptedAt = sqlString(acceptedEvent, 'occurred_at');
+        const schema10Migration = this.#db.prepare("SELECT applied_at FROM schema_migrations WHERE version=10").get();
+        if (schema10Migration === undefined)
+            return null;
+        const schema10AppliedAt = sqlString(schema10Migration, 'applied_at');
+        return { kind: 'coordinator-accepted-before-schema10', evidenceRef: evidence.ref, evidenceSha256: evidence.sha256, reconciliationEvidenceId, acceptedEventSeq, acceptedAt, schema10AppliedAt };
     }
     #assertUnitFailureEvidenceFacts(run, source, targetId, facts) {
         const target = parseUnitAttemptTarget(targetId);

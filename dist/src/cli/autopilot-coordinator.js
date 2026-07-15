@@ -4,6 +4,7 @@ import { CoordinatorClient } from "../core/coordination/client.js";
 import { CoordinationRuntimeError } from "../core/coordination/failures.js";
 import { migrationRecoveryUsage, runMigrationRecoveryCli } from "./migration-recovery.js";
 import { coordinationMigrationUsage, runCoordinationMigration } from "../core/coordination/migration.js";
+import { activatePatchBuild, reportPatchActivationReadiness } from "../core/coordination/patch-activation.js";
 import { CoordinatorAlreadyRunningError, runCoordinatorUntilSignal } from "../core/coordination/server.js";
 import { coordinatorRuntimePaths } from "../core/coordination/runtime-paths.js";
 import { retireSchema11CoordinatorForUpgrade } from "../core/coordination/schema11-retirement.js";
@@ -17,13 +18,15 @@ function usage() {
         '       autopilot-coordinator export [--state-root <absolute-path>] [--output <absolute-path>]',
         '       autopilot-coordinator replay --replay-id <stable-id> --input <absolute-request-jsonl> [--state-root <absolute-path>]',
         '       autopilot-coordinator upgrade-schema11 [--state-root <absolute-path>]',
+        '       autopilot-coordinator activate-patch [--state-root <absolute-path>]',
+        '       autopilot-coordinator patch-readiness [--state-root <absolute-path>]',
         coordinationMigrationUsage(),
         migrationRecoveryUsage(),
     ].join('\n');
 }
 function parseArgs(argv) {
     const command = argv[0];
-    if (command !== 'serve' && command !== 'status' && command !== 'doctor' && command !== 'export' && command !== 'replay' && command !== 'upgrade-schema11' && command !== 'migrate' && command !== 'verify' && command !== 'rollback' && command !== 'cutover')
+    if (command !== 'serve' && command !== 'status' && command !== 'doctor' && command !== 'export' && command !== 'replay' && command !== 'upgrade-schema11' && command !== 'activate-patch' && command !== 'patch-readiness' && command !== 'migrate' && command !== 'verify' && command !== 'rollback' && command !== 'cutover')
         throw new Error(usage());
     let stateRoot = null;
     let repoId = 'global';
@@ -145,6 +148,14 @@ async function main(argv) {
         }
         if (args.command === 'upgrade-schema11') {
             console.log(JSON.stringify(await retireSchema11CoordinatorForUpgrade(coordinatorRuntimePaths(env)), null, 2));
+            return 0;
+        }
+        if (args.command === 'activate-patch') {
+            console.log(JSON.stringify(await activatePatchBuild(coordinatorRuntimePaths(env)), null, 2));
+            return 0;
+        }
+        if (args.command === 'patch-readiness') {
+            console.log(JSON.stringify(await reportPatchActivationReadiness(coordinatorRuntimePaths(env)), null, 2));
             return 0;
         }
         const client = new CoordinatorClient({ env });

@@ -11,6 +11,7 @@ import { acquireSerializedProcessGuard, discardLockTombstone, quarantineExactLoc
 import { CoordinatorStore } from "./store.js";
 import { AUTOPILOT_COORDINATOR_PROTOCOL_VERSION } from "./types.js";
 import { readKnownCoordinatorUpgradeIntent, recordCoordinatorFenceHandoff } from "./upgrade.js";
+import { COORDINATOR_PACKAGE_BUILD } from "./runtime-constants.js";
 import { COORDINATOR_UPGRADE_PATH, parseCurrentCoordinatorLock, parseKnownCompatibleCurrentCoordinatorLock, parsePredecessorCoordinatorLock, parsePriorSchema11CurrentCoordinatorLock, parsePriorSchema10CurrentCoordinatorLock, parsePriorSchema9CurrentCoordinatorLock } from "./upgrade-contracts.js";
 export class CoordinatorAlreadyRunningError extends Error {
     name = 'CoordinatorAlreadyRunningError';
@@ -73,7 +74,7 @@ async function acquireCoordinatorLock(paths, adoption) {
         process_start_identity: startIdentity,
         token: randomBytes(24).toString('hex'),
         instance_id: randomBytes(24).toString('hex'),
-        package_build: COORDINATOR_UPGRADE_PATH.target.package_build,
+        package_build: COORDINATOR_PACKAGE_BUILD,
         protocol_version: COORDINATOR_UPGRADE_PATH.target.protocol_version,
         database_schema_version: COORDINATOR_UPGRADE_PATH.target.database_schema_version,
         started_at: new Date().toISOString(),

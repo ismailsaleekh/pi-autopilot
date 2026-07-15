@@ -21,6 +21,14 @@ import { AUTOPILOT_COORDINATOR_PROTOCOL_VERSION, type CoordinationReconciliation
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 5_000;
 const DEFAULT_STARTUP_TIMEOUT_MS = 10_000;
+// The coordinator binds its socket only after CoordinatorStore.open completes
+// schema migration, legacy reconciliation migration, and per-run terminal-proof
+// reconciliation (real fs+git work per child). The readiness window is measured
+// from spawn so startup-lock/predecessor-fence contention cannot steal it, and is
+// bounded so a genuinely stuck coordinator still fails loudly. It is comfortably
+// below the scale-test 60s ceiling for 100k events while exceeding the heaviest
+// legitimate non-scale multi-run startup.
+const DEFAULT_COORDINATOR_READINESS_TIMEOUT_MS = 30_000;
 const EMPTY_COORDINATOR_PAYLOAD: Readonly<Record<string, unknown>> = Object.freeze({});
 
 interface JsonMap {
@@ -49,6 +57,7 @@ export interface CoordinatorClientOptions {
   readonly allowMigrationRecoveryAutoStart?: boolean;
   readonly requestTimeoutMs?: number;
   readonly startupTimeoutMs?: number;
+  readonly readinessTimeoutMs?: number;
 }
 
 export interface CoordinatorMutationIdentity {
@@ -212,7 +221,7 @@ function coordinatorCliPath(): { readonly path: string; readonly stripTypes: boo
   throw new CoordinationRuntimeError('coordinator-unavailable', 'packaged coordinator CLI entrypoint is missing', [compiled, source]);
 }
 
-function spawnCoordinator(paths: CoordinatorRuntimePaths): void {
+function spawnCoordinator(paths: CoordinatorRuntimePaths): ReturnType<typeof spawn> {
   const cli = coordinatorCliPath();
   const args = [...(cli.stripTypes ? ['--experimental-strip-types'] : []), cli.path, 'serve', '--state-root', paths.stateRoot];
   const child = spawn(process.execPath, args, {
@@ -221,6 +230,7 @@ function spawnCoordinator(paths: CoordinatorRuntimePaths): void {
     env: { ...process.env, AUTOPILOT_STATE_ROOT: paths.stateRoot },
   });
   child.unref();
+  return child;
 }
 
 function connectSocket(path: string, timeoutMs: number): Promise<Socket> {
@@ -372,6 +382,7 @@ export class CoordinatorClient {
   readonly #allowMigrationRecoveryAutoStart: boolean;
   readonly #requestTimeoutMs: number;
   readonly #startupTimeoutMs: number;
+  readonly #readinessTimeoutMs: number;
 
   constructor(options: CoordinatorClientOptions = {}) {
     this.#paths = coordinatorRuntimePaths(options.env ?? process.env);
@@ -379,6 +390,7 @@ export class CoordinatorClient {
     this.#allowMigrationRecoveryAutoStart = options.allowMigrationRecoveryAutoStart === true;
     this.#requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
     this.#startupTimeoutMs = options.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS;
+    this.#readinessTimeoutMs = options.readinessTimeoutMs ?? DEFAULT_COORDINATOR_READINESS_TIMEOUT_MS;
   }
 
   get paths(): CoordinatorRuntimePaths {
@@ -641,8 +653,10 @@ export class CoordinatorClient {
       }
       if (upgrade !== null) await upgrade.markStarting();
       try {
-        spawnCoordinator(this.#paths);
-        await this.#waitForExactCoordinator(probe, capability, deadline);
+        const child = spawnCoordinator(this.#paths);
+        // The readiness window is measured from spawn so startup-lock/predecessor-fence
+        // contention cannot steal the coordinator's migration+reconciliation window.
+        await this.#waitForExactCoordinator(probe, capability, Date.now() + this.#readinessTimeoutMs, child);
         if (upgrade !== null) {
           await upgrade.markReconnectVerified();
           await upgrade.commit();
@@ -663,8 +677,16 @@ export class CoordinatorClient {
     }
   }
 
-  async #waitForExactCoordinator(probe: CoordinatorRequestEnvelope, capability: string, deadline: number): Promise<void> {
+  async #waitForExactCoordinator(probe: CoordinatorRequestEnvelope, capability: string, deadline: number, child: ReturnType<typeof spawn>): Promise<void> {
+    // A spawned coordinator that is no longer alive has crashed; fail fast with a
+    // precise diagnostic instead of polling to a stale deadline. isProcessAlive is
+    // safe here: a false positive (extremely unlikely within the bounded readiness
+    // window) only means polling continues until the handshake succeeds or the
+    // deadline lapses.
+    const pid = child.pid;
+    if (pid === undefined) throw new CoordinationRuntimeError('coordinator-unavailable', 'spawned coordinator process did not receive a pid before readiness verification');
     while (Date.now() < deadline) {
+      if (!isProcessAlive(pid)) throw new CoordinationRuntimeError('coordinator-unavailable', 'spawned coordinator exited before reaching readiness', [`pid=${String(pid)}`]);
       try {
         const response = this.#assertSuccess(await sendOnce(this.#paths, capability, probe, Math.min(500, this.#requestTimeoutMs)));
         const compatibility = this.#assertCoordinatorCompatibility(response);
@@ -675,6 +697,7 @@ export class CoordinatorClient {
         await sleep(50);
       }
     }
+    if (!isProcessAlive(pid)) throw new CoordinationRuntimeError('coordinator-unavailable', 'spawned coordinator exited before reaching readiness', [`pid=${String(pid)}`]);
     throw new CoordinationRuntimeError('coordinator-unavailable', 'coordinator did not complete schema migration, start, and exact-target reconnect verification before the deadline');
   }
 

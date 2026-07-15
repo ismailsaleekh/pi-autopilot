@@ -14,6 +14,7 @@ export * from "./migration.js";
 export * from "./negotiation.js";
 export * from "./observations.js";
 export * from "./package-isolation.js";
+export * from "./patch-activation.js";
 export * from "./process-identity.js";
 export * from "./reconciliation.js";
 export * from "./reservations.js";

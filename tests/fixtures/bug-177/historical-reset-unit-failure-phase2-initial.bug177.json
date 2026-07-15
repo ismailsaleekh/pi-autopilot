@@ -1,0 +1,12 @@
+{
+  "schema_version": "autopilot.unit_failure.v1",
+  "action": "reset",
+  "workstream": "workstream-bug177",
+  "workstream_run": "workstream-run-bug177",
+  "unit_id": "unit-bug177-initial",
+  "attempt": 1,
+  "unit_worktree_path": "/tmp/bug177-sanitized/unit-bug177-initial/attempt-1/worktree",
+  "dirty_paths": [],
+  "summary": "sanitized pre-capture reset",
+  "created_at": "2026-07-14T16:30:00.000Z"
+}

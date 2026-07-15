@@ -60,6 +60,12 @@ function identifier(value: JsonRecord, field: string, label: string): string {
   return entry;
 }
 
+function opaqueToken(value: JsonRecord, field: string, label: string): string {
+  const entry = text(value, field, label, 200);
+  if (entry.includes('|') && entry.split('|').some((segment) => segment.length === 0)) throw new CoordinationRuntimeError('invalid-state', `${label}.${field} is not a bounded opaque token`);
+  return entry;
+}
+
 function evidence(value: unknown, label: string): CoordinationEvidenceRef {
   const entry = record(value, label);
   exact(entry, ['ref', 'sha256'], label);
@@ -104,7 +110,7 @@ export function parseAutopilotChildTerminalAcceptance(value: unknown): Autopilot
     status: evidence(entry['status'], `${label}.status`),
     receipt: evidence(entry['receipt'], `${label}.receipt`),
     audit: evidence(entry['audit'], `${label}.audit`),
-    tool_call_id: identifier(entry, 'tool_call_id', label),
+    tool_call_id: opaqueToken(entry, 'tool_call_id', label),
     carrier_status_sha256: carrierStatusSha256 as `sha256:${string}`,
     audit_disposition: auditDisposition,
     created_at: createdAt,

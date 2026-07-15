@@ -113,6 +113,32 @@ function leaseExpiry(): string {
   return new Date(Date.now() + COORDINATOR_SESSION_LEASE_MS).toISOString();
 }
 
+interface HeartbeatFailureClassification {
+  readonly kind: 'transient' | 'terminal';
+  readonly code: string;
+  readonly detail: string;
+  readonly leaseExpiryMs: number;
+}
+
+const TRANSIENT_HEARTBEAT_CODES = new Set(['coordinator-unavailable', 'coordinator-contention', 'request-timeout']);
+
+/**
+ * A heartbeat that fails because the coordinator socket is momentarily
+ * unavailable (PID live, socket down) or briefly contended must not permanently
+ * kill the session bridge while the durable session lease is still valid. Only
+ * terminal authority failures (fenced/recovery-required/schema/protocol drift)
+ * or lease expiry halt loudly. This preserves run-owned authority across a
+ * transient socket outage and lets the next heartbeat tick reattach once the
+ * coordinator socket recovers.
+ */
+export function classifyHeartbeatFailure(error: unknown, session: CoordinationSessionLease): HeartbeatFailureClassification {
+  const leaseExpiryMs = Date.parse(session.lease_expires_at);
+  const code = error instanceof CoordinationRuntimeError ? error.code : 'unknown';
+  const detail = error instanceof Error ? error.message : String(error);
+  const kind = TRANSIENT_HEARTBEAT_CODES.has(code) ? 'transient' : 'terminal';
+  return { kind, code, detail, leaseExpiryMs };
+}
+
 function messageContent(message: CoordinationMessage): string {
   const payload = JSON.stringify(message.payload);
   const bounded = payload.length <= 2_000 ? payload : `${payload.slice(0, 2_000)}…<truncated>`;
@@ -538,6 +564,7 @@ export class AutopilotSessionBridge {
   #closed = false;
   #handoffPrepared = false;
   #fatalError: Error | null = null;
+  #transientHeartbeatFailures = 0;
   #operation: Promise<void> = Promise.resolve();
 
   private constructor(supervisor: DurableRunSupervisorClient, attachment: RunSupervisorAttachment, sink: CoordinationMessageSink, recoverOwnedOperations: ((contextPath: string) => Promise<void>) | null) {
@@ -739,7 +766,26 @@ export class AutopilotSessionBridge {
         if (typeof pendingMessages !== 'number' || !Number.isSafeInteger(pendingMessages) || pendingMessages < 0) throw new CoordinationRuntimeError('invalid-state', 'heartbeat response omitted its exact pending mailbox count');
         if (pendingMessages > 0) await this.#drainMailboxNow();
         if (this.#recoverOwnedOperations !== null) await this.#recoverOwnedOperations(this.#attachment.contextPath);
+        this.#transientHeartbeatFailures = 0;
       }).catch((error: unknown) => {
+        const classification = classifyHeartbeatFailure(error, this.#attachment.session);
+        if (classification.kind === 'transient' && Date.now() < classification.leaseExpiryMs) {
+          this.#transientHeartbeatFailures = Math.min(this.#transientHeartbeatFailures + 1, Number.MAX_SAFE_INTEGER);
+          try {
+            this.#sink.send({
+              customType: 'autopilot-coordination',
+              content: `Autopilot coordination heartbeat is retrying a transient coordinator connection failure (${classification.detail}); the session lease remains valid.`,
+              display: true,
+              details: { error_code: classification.code, consecutive_failures: this.#transientHeartbeatFailures },
+            }, this.#sink.isIdle() ? 'steer' : 'followUp', false);
+          } catch {
+            // A transient connection failure must never halt the heartbeat loop
+            // while the durable session lease is still valid. The notification is
+            // best-effort; the next heartbeat tick retries against the recovered
+            // coordinator socket.
+          }
+          return;
+        }
         this.#fatalError = error instanceof Error ? error : new Error(String(error));
         this.#stopHeartbeat();
         try {

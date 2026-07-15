@@ -347,6 +347,16 @@ export function checkCoordinationInvariants(snapshot: CoordinationSnapshot): rea
   }
 
   for (const worktree of snapshot.worktrees) assertOwner(worktree.owner, worktree.worktree_id);
+  // A worktree that survives several committed operations legitimately has
+  // version > an earlier operation's authority_version; the version must stay
+  // within [that operation's authority_version, max authority_version on the
+  // worktree + 1]. A non-committed (in-flight) operation must match the exact
+  // current worktree version or it is stale and requires owned reconciliation.
+  const maxAuthorityVersionByWorktree = new Map<string, number>();
+  for (const operation of snapshot.worktree_operations) {
+    const current = maxAuthorityVersionByWorktree.get(operation.worktree_id);
+    if (current === undefined || operation.authority_version > current) maxAuthorityVersionByWorktree.set(operation.worktree_id, operation.authority_version);
+  }
   const incompleteByWorktree = new Map<string, string>();
   for (const operation of snapshot.worktree_operations) {
     assertOwner(operation.owner, operation.operation_id);
@@ -355,8 +365,11 @@ export function checkCoordinationInvariants(snapshot: CoordinationSnapshot): rea
     else {
       if (ownerKey(worktree.owner) !== ownerKey(operation.owner)) findings.push(finding('foreign-worktree-operation', operation.operation_id, 'operation owner differs from worktree owner'));
       if (worktree.canonical_path !== operation.intent.worktree_path || worktree.git_common_dir !== operation.intent.git_common_dir || worktree.branch !== operation.intent.branch) findings.push(finding('operation-intent-authority-mismatch', operation.operation_id, 'operation intent disagrees with immutable worktree authority'));
-      const expectedAuthorityVersion = operation.stage === 'committed' && worktree.version === operation.authority_version + 1 ? operation.authority_version + 1 : operation.authority_version;
-      if (worktree.version !== expectedAuthorityVersion) findings.push(finding('operation-authority-version-mismatch', operation.operation_id, 'operation authority version is not fenced to its worktree version'));
+      const maxAuthorityVersion = maxAuthorityVersionByWorktree.get(operation.worktree_id) ?? operation.authority_version;
+      const versionValid = operation.stage === 'committed'
+        ? worktree.version >= operation.authority_version && worktree.version <= maxAuthorityVersion + 1
+        : worktree.version === operation.authority_version;
+      if (!versionValid) findings.push(finding('operation-authority-version-mismatch', operation.operation_id, 'operation authority version is not fenced to its worktree version'));
     }
     if ((operation.stage === 'verified' || operation.stage === 'committed' || operation.stage === 'compensated' || operation.stage === 'failed') && operation.verification_evidence === null) findings.push(finding('operation-verification-missing', operation.operation_id, `${operation.stage} operation requires verification evidence`));
     const requiredOperationSteps = ['preflight-probe', 'external-action', 'postcondition-verification'];

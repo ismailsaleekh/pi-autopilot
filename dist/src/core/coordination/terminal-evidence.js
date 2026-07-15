@@ -1,6 +1,19 @@
+import { createHash } from 'node:crypto';
 import { parseAutopilotExecutionAudit, parseAutopilotReceipt, parseAutopilotStatusEntry } from "../contracts/index.js";
 import { CoordinationRuntimeError } from "./failures.js";
 import { AUTOPILOT_CHILD_TERMINAL_ACCEPTANCE_SCHEMA, parseAutopilotChildTerminalAcceptance } from "./terminal-acceptance.js";
+export const HISTORICAL_UNIT_FAILURE_GENERATIONS = Object.freeze({
+    phase2Initial: 'phase2-initial-no-capture-fields-653f660e',
+    captureCommitOnly: 'capture-commit-only-9bbfa0d2',
+});
+const CURRENT_UNIT_FAILURE_FIELDS = Object.freeze([
+    'action', 'attempt', 'branch', 'capture_commit_sha', 'capture_ref', 'created_at', 'dirty_paths', 'git_common_dir', 'git_head_after', 'git_head_before',
+    'postcondition_worktree_clean', 'schema_version', 'summary', 'unit_id', 'unit_worktree_path', 'workstream', 'workstream_run',
+].sort());
+const HISTORICAL_INITIAL_UNIT_FAILURE_FIELDS = Object.freeze([
+    'action', 'attempt', 'created_at', 'dirty_paths', 'schema_version', 'summary', 'unit_id', 'unit_worktree_path', 'workstream', 'workstream_run',
+].sort());
+const HISTORICAL_CAPTURE_COMMIT_UNIT_FAILURE_FIELDS = Object.freeze([...HISTORICAL_INITIAL_UNIT_FAILURE_FIELDS, 'capture_commit_sha'].sort());
 function record(value, label) {
     if (typeof value !== 'object' || value === null || Array.isArray(value))
         throw new CoordinationRuntimeError('invalid-state', `${label} must be a JSON object`);
@@ -70,14 +83,80 @@ export function parseUnitMergeReservationFacts(bytes) {
         throw new CoordinationRuntimeError('invalid-state', 'unit-merge execution_commit_ref is unsafe');
     return { changedPaths: stringArray(document, 'changed_paths', 'unit-merge reservation evidence'), integrationBefore, integrationAfter, mergeCommitSha, executionCommitRef };
 }
-export function parseUnitFailureEvidenceFacts(bytes, expected) {
-    const document = jsonDocument(bytes, 'unit failure evidence');
-    if (text(document, 'schema_version', 'unit failure evidence') !== 'autopilot.unit_failure.v1')
-        throw new CoordinationRuntimeError('invalid-state', 'unit failure evidence schema is incompatible');
-    assertIdentity(document, expected, false);
+function assertExactFields(document, expectedFields, label) {
+    const actual = Object.keys(document).sort();
+    if (actual.length !== expectedFields.length || actual.some((field, index) => field !== expectedFields[index]))
+        throw new CoordinationRuntimeError('invalid-state', `${label} fields are incompatible`, actual);
+}
+function parseFailureAction(document) {
     const action = text(document, 'action', 'unit failure evidence');
     if (action !== 'quarantine' && action !== 'reset' && action !== 'preserve' && action !== 'abort')
         throw new CoordinationRuntimeError('invalid-state', 'unit failure evidence action is invalid');
+    return action;
+}
+function assertHistoricalCommonFields(document, expected) {
+    if (text(document, 'schema_version', 'unit failure evidence') !== 'autopilot.unit_failure.v1')
+        throw new CoordinationRuntimeError('invalid-state', 'unit failure evidence schema is incompatible');
+    assertIdentity(document, expected, false);
+    text(document, 'unit_worktree_path', 'unit failure evidence', 1024);
+    text(document, 'summary', 'unit failure evidence', 4096);
+    const createdAt = text(document, 'created_at', 'unit failure evidence', 64);
+    if (!Number.isFinite(Date.parse(createdAt)))
+        throw new CoordinationRuntimeError('invalid-state', 'historical unit failure evidence created_at is invalid');
+    stringArray(document, 'dirty_paths', 'unit failure evidence');
+}
+export function classifyHistoricalUnitFailureEvidenceGeneration(bytes) {
+    const document = jsonDocument(bytes, 'historical unit failure evidence');
+    const fields = Object.keys(document).sort();
+    if (fields.length === HISTORICAL_INITIAL_UNIT_FAILURE_FIELDS.length && fields.every((field, index) => field === HISTORICAL_INITIAL_UNIT_FAILURE_FIELDS[index]))
+        return HISTORICAL_UNIT_FAILURE_GENERATIONS.phase2Initial;
+    if (fields.length === HISTORICAL_CAPTURE_COMMIT_UNIT_FAILURE_FIELDS.length && fields.every((field, index) => field === HISTORICAL_CAPTURE_COMMIT_UNIT_FAILURE_FIELDS[index]))
+        return HISTORICAL_UNIT_FAILURE_GENERATIONS.captureCommitOnly;
+    return null;
+}
+export function parseHistoricalUnitFailureEvidenceFacts(bytes, expected, provenance) {
+    if (provenance.kind !== 'coordinator-accepted-before-schema10' || !Number.isSafeInteger(provenance.acceptedEventSeq) || provenance.acceptedEventSeq < 1 || !Number.isFinite(Date.parse(provenance.acceptedAt)) || !Number.isFinite(Date.parse(provenance.schema10AppliedAt)) || Date.parse(provenance.acceptedAt) >= Date.parse(provenance.schema10AppliedAt))
+        throw new CoordinationRuntimeError('invalid-state', 'historical unit failure evidence lacks a trusted pre-schema10 coordinator acceptance fence');
+    const actualSha256 = `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
+    if (actualSha256 !== provenance.evidenceSha256)
+        throw new CoordinationRuntimeError('invalid-state', 'historical unit failure evidence digest differs from its accepted coordinator provenance');
+    const document = jsonDocument(bytes, 'historical unit failure evidence');
+    const generation = classifyHistoricalUnitFailureEvidenceGeneration(bytes);
+    if (generation === null)
+        throw new CoordinationRuntimeError('invalid-state', 'unit failure evidence is not an enumerated historical producer generation');
+    assertHistoricalCommonFields(document, expected);
+    const action = parseFailureAction(document);
+    if (action === 'quarantine' || action === 'preserve')
+        throw new CoordinationRuntimeError('recovery-required', 'historical quarantine/preserve evidence lacks an exact capture ref; edit authority remains retained', [provenance.evidenceRef, provenance.reconciliationEvidenceId]);
+    if (generation === HISTORICAL_UNIT_FAILURE_GENERATIONS.captureCommitOnly && document['capture_commit_sha'] !== null)
+        throw new CoordinationRuntimeError('invalid-state', 'historical reset/abort evidence must carry a null capture commit');
+    return {
+        generation,
+        action,
+        unitWorktreePath: text(document, 'unit_worktree_path', 'historical unit failure evidence', 1024),
+        captureCommitSha: null,
+        captureRef: null,
+        originalSha256: actualSha256,
+        originalFields: Object.freeze(Object.keys(document).sort()),
+    };
+}
+export function parseUnitFailureEvidenceIngress(bytes, expected, provenance) {
+    try {
+        return { kind: 'current', facts: parseUnitFailureEvidenceFacts(bytes, expected) };
+    }
+    catch (currentError) {
+        if (provenance === null)
+            throw currentError;
+        return { kind: 'historical', facts: parseHistoricalUnitFailureEvidenceFacts(bytes, expected, provenance), provenance };
+    }
+}
+export function parseUnitFailureEvidenceFacts(bytes, expected) {
+    const document = jsonDocument(bytes, 'unit failure evidence');
+    assertExactFields(document, CURRENT_UNIT_FAILURE_FIELDS, 'unit failure evidence');
+    if (text(document, 'schema_version', 'unit failure evidence') !== 'autopilot.unit_failure.v1')
+        throw new CoordinationRuntimeError('invalid-state', 'unit failure evidence schema is incompatible');
+    assertIdentity(document, expected, false);
+    const action = parseFailureAction(document);
     const nullableText = (field) => {
         const value = document[field];
         if (value === null)
@@ -189,7 +268,7 @@ export function validateReservationValidationArtifactChain(input) {
     if (audit.workstream !== input.workstream || audit.unit_id !== input.facts.validationUnitId || audit.attempt !== input.facts.validationAttempt || audit.role !== status.role || audit.classification !== 'clean')
         throw new CoordinationRuntimeError('invalid-state', 'reservation validator audit is not a clean independent execution audit');
 }
-export function validateReconciliationEvidenceDocument(bytes, expected) {
+export function validateReconciliationEvidenceDocument(bytes, expected, provenance = null) {
     const document = jsonDocument(bytes, 'reconciliation evidence');
     const schema = text(document, 'schema_version', 'reconciliation evidence');
     switch (expected.source) {
@@ -221,22 +300,19 @@ export function validateReconciliationEvidenceDocument(bytes, expected) {
             parseUnitMergeReservationFacts(bytes);
             return;
         case 'attempt-reset': {
-            if (schema !== 'autopilot.unit_failure.v1')
-                throw new CoordinationRuntimeError('invalid-state', 'attempt-reset release requires autopilot.unit_failure.v1 evidence');
-            assertIdentity(document, expected, false);
-            const action = text(document, 'action', 'reconciliation evidence');
+            const facts = parseUnitFailureEvidenceIngress(bytes, expected, provenance);
+            const action = facts.kind === 'historical' ? facts.facts.action : facts.facts.action;
             if (action !== 'reset' && action !== 'abort')
                 throw new CoordinationRuntimeError('invalid-state', 'attempt-reset evidence action must be reset or abort');
             return;
         }
         case 'quarantine-capture': {
-            if (schema !== 'autopilot.unit_failure.v1')
-                throw new CoordinationRuntimeError('invalid-state', 'quarantine release requires autopilot.unit_failure.v1 evidence');
-            assertIdentity(document, expected, false);
-            const action = text(document, 'action', 'reconciliation evidence');
+            const facts = parseUnitFailureEvidenceIngress(bytes, expected, provenance);
+            const action = facts.kind === 'historical' ? facts.facts.action : facts.facts.action;
             if (action !== 'quarantine' && action !== 'preserve')
                 throw new CoordinationRuntimeError('invalid-state', 'quarantine evidence action must be quarantine or preserve');
-            text(document, 'capture_commit_sha', 'reconciliation evidence');
+            if (facts.kind === 'current' && facts.facts.captureCommitSha === null)
+                throw new CoordinationRuntimeError('invalid-state', 'quarantine evidence requires a non-null capture commit');
             return;
         }
         case 'run-close':
