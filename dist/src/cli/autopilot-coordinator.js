@@ -7,6 +7,7 @@ import { coordinationMigrationUsage, runCoordinationMigration } from "../core/co
 import { activatePatchBuild, reportPatchActivationReadiness } from "../core/coordination/patch-activation.js";
 import { CoordinatorAlreadyRunningError, runCoordinatorUntilSignal } from "../core/coordination/server.js";
 import { coordinatorRuntimePaths } from "../core/coordination/runtime-paths.js";
+import { COORDINATOR_STARTUP_ATTEMPT_ID_ENV, createCoordinatorStartupAttemptId, createCoordinatorStartupObserver } from "../core/coordination/startup-observation.js";
 import { retireSchema11CoordinatorForUpgrade } from "../core/coordination/schema11-retirement.js";
 import { stageCoordinatorSemanticReplayFile } from "../core/coordination/store.js";
 import { AUTOPILOT_STATE_ROOT_ENV, resolveRepoIdentity } from "../core/parallel-runtime.js";
@@ -128,9 +129,14 @@ async function main(argv) {
         return 2;
     }
     const env = environment(args);
+    let startupObserver = null;
     try {
         if (args.command === 'serve') {
-            await runCoordinatorUntilSignal(coordinatorRuntimePaths(env));
+            const paths = coordinatorRuntimePaths(env);
+            const configuredAttempt = env[COORDINATOR_STARTUP_ATTEMPT_ID_ENV];
+            const attemptId = configuredAttempt === undefined ? createCoordinatorStartupAttemptId() : configuredAttempt;
+            startupObserver = await createCoordinatorStartupObserver(paths, attemptId, env);
+            await runCoordinatorUntilSignal(paths, startupObserver);
             return 0;
         }
         if (args.migrationCommand !== null) {
@@ -169,9 +175,11 @@ async function main(argv) {
     }
     catch (error) {
         if (error instanceof CoordinatorAlreadyRunningError && args.command === 'serve') {
+            await startupObserver?.electionLoser(error);
             console.log(error.message);
             return 0;
         }
+        await startupObserver?.failed(error);
         if (error instanceof CoordinationRuntimeError) {
             console.error(error.message);
             return error.failure_class === 'system-fatal' ? 70 : 1;

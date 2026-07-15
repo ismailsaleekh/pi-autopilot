@@ -13,6 +13,7 @@ import { CoordinatorStore, type StoreClock } from './store.ts';
 import { AUTOPILOT_COORDINATOR_PROTOCOL_VERSION, type CoordinatorResponseEnvelope } from './types.ts';
 import { readKnownCoordinatorUpgradeIntent, recordCoordinatorFenceHandoff } from './upgrade.ts';
 import { COORDINATOR_PACKAGE_BUILD } from './runtime-constants.ts';
+import type { CoordinatorStartupObserver } from './startup-observation.ts';
 import { COORDINATOR_UPGRADE_PATH, parseCurrentCoordinatorLock, parseKnownCompatibleCurrentCoordinatorLock, parsePredecessorCoordinatorLock, parsePriorSchema11CurrentCoordinatorLock, parsePriorSchema10CurrentCoordinatorLock, parsePriorSchema9CurrentCoordinatorLock, type CurrentCoordinatorLock, type KnownCompatibleCurrentCoordinatorLock, type PredecessorCoordinatorLock } from './upgrade-contracts.ts';
 
 type LockRecord = CurrentCoordinatorLock;
@@ -282,7 +283,7 @@ export interface CoordinatorServerTestHooks {
   readonly afterStoreCommitBeforeResponse?: (action: string, response: CoordinatorResponseEnvelope) => void | Promise<void>;
 }
 
-function handleSocket(socket: Socket, store: CoordinatorStore, capability: string, paths: CoordinatorRuntimePaths, lifecycle: CurrentCoordinatorLock, backgroundFailure: () => Error | null, testHooks?: CoordinatorServerTestHooks): void {
+function handleSocket(socket: Socket, store: CoordinatorStore, capability: string, paths: CoordinatorRuntimePaths, lifecycle: CurrentCoordinatorLock, backgroundFailure: () => Error | null, firstExactHandshake: () => Promise<void>, testHooks?: CoordinatorServerTestHooks): void {
   const decoder = new CoordinatorFrameDecoder();
   let chain = Promise.resolve();
   socket.on('data', (chunk: NodeBuffer) => {
@@ -320,18 +321,21 @@ function handleSocket(socket: Socket, store: CoordinatorStore, capability: strin
             const upgradeIntent = await readKnownCoordinatorUpgradeIntent(paths);
             if (upgradeIntent !== null && upgradeIntent.state !== 'committed' && action !== 'handshake' && action !== 'status' && action !== 'doctor') throw new CoordinationRuntimeError('coordinator-contention', 'coordinator upgrade is not durably committed; mutation authority remains closed');
             response = store.handle(currentTransport.request);
-            if (response.ok && currentTransport.request.action === 'handshake') response = {
-              ...response,
-              payload: {
-                ...response.payload,
-                lifecycle_lock_schema: lifecycle.schema_version,
-                lifecycle_pid: lifecycle.pid,
-                lifecycle_boot_id: lifecycle.boot_id,
-                lifecycle_process_start_identity: lifecycle.process_start_identity,
-                lifecycle_instance_id: lifecycle.instance_id,
-                lifecycle_started_at: lifecycle.started_at,
-              },
-            };
+            if (response.ok && currentTransport.request.action === 'handshake') {
+              response = {
+                ...response,
+                payload: {
+                  ...response.payload,
+                  lifecycle_lock_schema: lifecycle.schema_version,
+                  lifecycle_pid: lifecycle.pid,
+                  lifecycle_boot_id: lifecycle.boot_id,
+                  lifecycle_process_start_identity: lifecycle.process_start_identity,
+                  lifecycle_instance_id: lifecycle.instance_id,
+                  lifecycle_started_at: lifecycle.started_at,
+                },
+              };
+              await firstExactHandshake();
+            }
             if (response.ok && response.committed_event_seq !== null) await testHooks?.afterStoreCommitBeforeResponse?.(currentTransport.request.action, response);
           }
           if (response === null) throw new CoordinationRuntimeError('system-fatal', 'coordinator request parsing produced no response path');
@@ -383,27 +387,42 @@ export interface RunningCoordinator {
   close(): Promise<void>;
 }
 
-export async function startCoordinatorServer(paths: CoordinatorRuntimePaths, clock?: StoreClock, adoption?: CoordinatorStartupAdoption, testHooks?: CoordinatorServerTestHooks): Promise<RunningCoordinator> {
+export async function startCoordinatorServer(paths: CoordinatorRuntimePaths, clock?: StoreClock, adoption?: CoordinatorStartupAdoption, testHooks?: CoordinatorServerTestHooks, startupObserver?: CoordinatorStartupObserver): Promise<RunningCoordinator> {
+  await startupObserver?.transition('before-lifecycle-election');
+  await ensureCoordinatorPrivateRoots(paths);
   const lifecycleLock = await acquireCoordinatorLock(paths, adoption);
+  await startupObserver?.transition('after-lifecycle-lock-acquisition', lifecycleLock.record);
   let store: CoordinatorStore | null = null;
   let server: Server | null = null;
   let offerTimer: ReturnType<typeof setInterval> | null = null;
   let serverListening = false;
   try {
+    await startupObserver?.transition('before-private-root-capability-setup', lifecycleLock.record);
     const capability = await readOrCreateCoordinatorCapability(paths);
+    await startupObserver?.transition('after-private-root-capability-setup', lifecycleLock.record);
     if (platform() !== 'win32' && existsSync(paths.socketPath)) await unlink(paths.socketPath);
+    await startupObserver?.transition('before-sqlite-open-reconciliation', lifecycleLock.record);
     store = clock === undefined ? await CoordinatorStore.open(paths) : await CoordinatorStore.open(paths, clock);
+    await startupObserver?.transition('after-sqlite-open-reconciliation', lifecycleLock.record);
     const openedStore = store;
     let timerFailure: Error | null = null;
-    server = createServer((socket) => handleSocket(socket, openedStore, capability, paths, lifecycleLock.record, () => timerFailure, testHooks));
+    let firstHandshakeTransition: Promise<void> | null = null;
+    const firstExactHandshake = async (): Promise<void> => {
+      firstHandshakeTransition ??= startupObserver?.transition('first-exact-handshake-served', lifecycleLock.record) ?? Promise.resolve();
+      await firstHandshakeTransition;
+    };
+    server = createServer((socket) => handleSocket(socket, openedStore, capability, paths, lifecycleLock.record, () => timerFailure, firstExactHandshake, testHooks));
+    await startupObserver?.transition('before-socket-bind', lifecycleLock.record);
     await listen(server, paths.socketPath);
     serverListening = true;
+    await startupObserver?.transition('after-listen-before-lifecycle-activation', lifecycleLock.record);
     const openedServer = server;
     if (platform() !== 'win32') await chmod(paths.socketPath, 0o600);
     // Schema migration, current socket publication, and old-format fence handoff
     // all complete under one lifecycle election. Only then may another startup or
     // restore operation enter the election.
     lifecycleLock.activate();
+    await startupObserver?.transition('after-activation-before-first-handshake', lifecycleLock.record);
     offerTimer = setInterval(() => {
       void lifecycleLock.verifyOrRepairFence().then((outcome) => {
         if (outcome === 'verified') openedStore.sweepExpiredGrantOffers();
@@ -467,7 +486,7 @@ export async function startCoordinatorServer(paths: CoordinatorRuntimePaths, clo
   }
 }
 
-export async function runCoordinatorUntilSignal(paths: CoordinatorRuntimePaths): Promise<void> {
+export async function runCoordinatorUntilSignal(paths: CoordinatorRuntimePaths, startupObserver?: CoordinatorStartupObserver): Promise<void> {
   let finishSignal: (() => void) | null = null;
   const signal = new Promise<void>((resolveSignal) => {
     finishSignal = resolveSignal;
@@ -477,7 +496,7 @@ export async function runCoordinatorUntilSignal(paths: CoordinatorRuntimePaths):
   process.once('SIGTERM', finish);
   process.once('SIGHUP', finish);
   try {
-    const running = await startCoordinatorServer(paths);
+    const running = await startCoordinatorServer(paths, undefined, undefined, undefined, startupObserver);
     await signal;
     await running.close();
   } finally {

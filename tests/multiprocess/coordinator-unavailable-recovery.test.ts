@@ -133,7 +133,7 @@ void it('rejects lifecycle replacement during outage attestation without signali
   }
 });
 
-void it('replaces the real cf45 binary after socket loss while preserving an attached session across concurrent cf47 clients', async () => {
+void it('replaces the real cf45 binary after socket loss while preserving an attached session across concurrent cf48 clients', async () => {
   const root = await mkdtemp(join(tmpdir(), 'pi-autopilot-real-cf45-handoff-'));
   const stateRoot = join(root, 'state');
   const env = { ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: stateRoot };
@@ -170,8 +170,8 @@ void it('replaces the real cf45 binary after socket loss while preserving an att
     const sessions = status.payload['session_leases'];
     assert.equal(Array.isArray(sessions) && sessions.some((entry) => record(entry, 'preserved session')['session_lease_id'] === 'lease-session-generation-9' && record(entry, 'preserved session')['status'] === 'attached'), true);
     assert.equal(isProcessAlive(priorPid), false);
-    const currentLock = record(JSON.parse(await readFile(paths.lockPath, 'utf8')) as unknown, 'cf47 replacement lock');
-    assert.equal(currentLock['package_build'], '1.1.5-cf47');
+    const currentLock = record(JSON.parse(await readFile(paths.lockPath, 'utf8')) as unknown, 'cf48 replacement lock');
+    assert.equal(currentLock['package_build'], '1.1.6-cf48');
     assert.notEqual(currentLock['pid'], priorPid);
   } finally {
     await tagged.close();
@@ -220,7 +220,7 @@ void it('identity-fences a live socketless known coordinator and preserves activ
     await waitForExit(unavailable);
     assert.equal(isProcessAlive(unavailablePid), false);
     const replacementLock = record(JSON.parse(await readFile(paths.lockPath, 'utf8')) as unknown, 'replacement lock');
-    assert.equal(replacementLock['package_build'], '1.1.5-cf47');
+    assert.equal(replacementLock['package_build'], '1.1.6-cf48');
     assert.notEqual(replacementLock['pid'], unavailablePid);
     const sessions = recoveredStatus.payload['session_leases'];
     const children = recoveredStatus.payload['child_leases'];

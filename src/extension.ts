@@ -335,7 +335,11 @@ export default function autopilotExtension(pi: ExtensionHostLike): void {
         coordinationSessionId: rawSessionId(input.ctx),
       });
     } catch (error) {
-      const message = error instanceof AutopilotParallelRuntimeError ? error.message : error instanceof Error ? error.message : String(error);
+      const message = error instanceof CoordinationRuntimeError
+        ? formatCoordinationRuntimeError(error)
+        : error instanceof AutopilotParallelRuntimeError
+          ? error.message
+          : error instanceof Error ? error.message : String(error);
       const recoveryFence = error instanceof AutopilotParallelRuntimeError && error.code === 'migration-recovery-required'
         ? ' Ordinary Autopilot activation remains disabled; use an explicit recovery-only supervisor session with exact evidence.'
         : '';

@@ -322,7 +322,7 @@ function errorResponse(requestId, error) {
         payload: { message: runtime.message, evidence: runtime.evidence },
     };
 }
-function handleSocket(socket, store, capability, paths, lifecycle, backgroundFailure, testHooks) {
+function handleSocket(socket, store, capability, paths, lifecycle, backgroundFailure, firstExactHandshake, testHooks) {
     const decoder = new CoordinatorFrameDecoder();
     let chain = Promise.resolve();
     socket.on('data', (chunk) => {
@@ -373,7 +373,7 @@ function handleSocket(socket, store, capability, paths, lifecycle, backgroundFai
                         if (upgradeIntent !== null && upgradeIntent.state !== 'committed' && action !== 'handshake' && action !== 'status' && action !== 'doctor')
                             throw new CoordinationRuntimeError('coordinator-contention', 'coordinator upgrade is not durably committed; mutation authority remains closed');
                         response = store.handle(currentTransport.request);
-                        if (response.ok && currentTransport.request.action === 'handshake')
+                        if (response.ok && currentTransport.request.action === 'handshake') {
                             response = {
                                 ...response,
                                 payload: {
@@ -386,6 +386,8 @@ function handleSocket(socket, store, capability, paths, lifecycle, backgroundFai
                                     lifecycle_started_at: lifecycle.started_at,
                                 },
                             };
+                            await firstExactHandshake();
+                        }
                         if (response.ok && response.committed_event_seq !== null)
                             await testHooks?.afterStoreCommitBeforeResponse?.(currentTransport.request.action, response);
                     }
@@ -436,22 +438,36 @@ function closeServer(server) {
         });
     });
 }
-export async function startCoordinatorServer(paths, clock, adoption, testHooks) {
+export async function startCoordinatorServer(paths, clock, adoption, testHooks, startupObserver) {
+    await startupObserver?.transition('before-lifecycle-election');
+    await ensureCoordinatorPrivateRoots(paths);
     const lifecycleLock = await acquireCoordinatorLock(paths, adoption);
+    await startupObserver?.transition('after-lifecycle-lock-acquisition', lifecycleLock.record);
     let store = null;
     let server = null;
     let offerTimer = null;
     let serverListening = false;
     try {
+        await startupObserver?.transition('before-private-root-capability-setup', lifecycleLock.record);
         const capability = await readOrCreateCoordinatorCapability(paths);
+        await startupObserver?.transition('after-private-root-capability-setup', lifecycleLock.record);
         if (platform() !== 'win32' && existsSync(paths.socketPath))
             await unlink(paths.socketPath);
+        await startupObserver?.transition('before-sqlite-open-reconciliation', lifecycleLock.record);
         store = clock === undefined ? await CoordinatorStore.open(paths) : await CoordinatorStore.open(paths, clock);
+        await startupObserver?.transition('after-sqlite-open-reconciliation', lifecycleLock.record);
         const openedStore = store;
         let timerFailure = null;
-        server = createServer((socket) => handleSocket(socket, openedStore, capability, paths, lifecycleLock.record, () => timerFailure, testHooks));
+        let firstHandshakeTransition = null;
+        const firstExactHandshake = async () => {
+            firstHandshakeTransition ??= startupObserver?.transition('first-exact-handshake-served', lifecycleLock.record) ?? Promise.resolve();
+            await firstHandshakeTransition;
+        };
+        server = createServer((socket) => handleSocket(socket, openedStore, capability, paths, lifecycleLock.record, () => timerFailure, firstExactHandshake, testHooks));
+        await startupObserver?.transition('before-socket-bind', lifecycleLock.record);
         await listen(server, paths.socketPath);
         serverListening = true;
+        await startupObserver?.transition('after-listen-before-lifecycle-activation', lifecycleLock.record);
         const openedServer = server;
         if (platform() !== 'win32')
             await chmod(paths.socketPath, 0o600);
@@ -459,6 +475,7 @@ export async function startCoordinatorServer(paths, clock, adoption, testHooks) 
         // all complete under one lifecycle election. Only then may another startup or
         // restore operation enter the election.
         lifecycleLock.activate();
+        await startupObserver?.transition('after-activation-before-first-handshake', lifecycleLock.record);
         offerTimer = setInterval(() => {
             void lifecycleLock.verifyOrRepairFence().then((outcome) => {
                 if (outcome === 'verified')
@@ -531,7 +548,7 @@ export async function startCoordinatorServer(paths, clock, adoption, testHooks) 
         throw error;
     }
 }
-export async function runCoordinatorUntilSignal(paths) {
+export async function runCoordinatorUntilSignal(paths, startupObserver) {
     let finishSignal = null;
     const signal = new Promise((resolveSignal) => {
         finishSignal = resolveSignal;
@@ -541,7 +558,7 @@ export async function runCoordinatorUntilSignal(paths) {
     process.once('SIGTERM', finish);
     process.once('SIGHUP', finish);
     try {
-        const running = await startCoordinatorServer(paths);
+        const running = await startCoordinatorServer(paths, undefined, undefined, undefined, startupObserver);
         await signal;
         await running.close();
     }

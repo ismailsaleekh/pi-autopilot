@@ -7,10 +7,12 @@ export const CURRENT_COORDINATOR_LIFECYCLE_LOCK_SCHEMA = 'autopilot.coordinator_
  * Closed, audited build lineage for the protocol-1.6/schema-12 byte-bounded
  * reconciliation and mailbox contract. Entries are admitted only after the request/response contracts,
  * transport, mutation vocabulary, and persisted entity projections have been
- * compared byte-for-byte or behaviorally certified against the target. cf47
- * adds forward-only pre-spend rollback projection recovery and keeps heartbeat
- * authority alive while an owned recovery blocker closes source-changing dispatch.
- * cf46 adds endpoint-first startup attestation, exact socketless-owner recovery,
+ * compared byte-for-byte or behaviorally certified against the target. cf48
+ * adds exact delayed-winner startup waiting plus bounded atomic startup reports;
+ * it does not change the wire vocabulary or persisted schema. cf47 adds forward-only
+ * pre-spend rollback projection recovery and keeps heartbeat authority alive while
+ * an owned recovery blocker closes source-changing dispatch. cf46 adds endpoint-first
+ * startup attestation, exact socketless-owner recovery,
  * phase-accurate owned-saga recovery, transactional semantic worktree-projection
  * reconciliation, and one opaque tool-call-id runtime/schema contract. These
  * additive lifecycle behaviors do not change mutation vocabulary or persisted
@@ -21,6 +23,7 @@ export const CURRENT_COORDINATOR_LIFECYCLE_LOCK_SCHEMA = 'autopilot.coordinator_
  * incompatible even when it claims the same protocol and database schema.
  */
 export const COORDINATOR_WIRE_COMPATIBILITY_MATRIX = Object.freeze([
+  Object.freeze({ package_build: '1.1.6-cf48', protocol_version: '1.6', database_schema_version: 12, lifecycle_lock_schema: CURRENT_COORDINATOR_LIFECYCLE_LOCK_SCHEMA }),
   Object.freeze({ package_build: '1.1.5-cf47', protocol_version: '1.6', database_schema_version: 12, lifecycle_lock_schema: CURRENT_COORDINATOR_LIFECYCLE_LOCK_SCHEMA }),
   Object.freeze({ package_build: '1.1.4-cf46', protocol_version: '1.6', database_schema_version: 12, lifecycle_lock_schema: CURRENT_COORDINATOR_LIFECYCLE_LOCK_SCHEMA }),
   Object.freeze({ package_build: '1.1.3-cf45', protocol_version: '1.6', database_schema_version: 12, lifecycle_lock_schema: CURRENT_COORDINATOR_LIFECYCLE_LOCK_SCHEMA }),

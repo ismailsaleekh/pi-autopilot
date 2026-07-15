@@ -1,0 +1,29 @@
+{
+  "schema_version": "autopilot.coordinator_startup_chaos_corpus.v1",
+  "seeds": [
+    {
+      "name": "seed-cf48-01-delayed-winner-clean-loser",
+      "seed": 13561345,
+      "events": ["client-spawn", "pause-child-before-election", "winner-lock-exact", "winner-endpoint-delayed", "child-exit-0-with-exact-report", "clients-N", "winner-endpoint-exact", "same-socket-operation"],
+      "expected": "success-one-exact-winner"
+    },
+    {
+      "name": "seed-cf48-02-winner-dies-after-loser",
+      "seed": 13561346,
+      "events": ["client-spawn", "winner-lock-exact", "winner-endpoint-delayed", "child-exit-0-with-exact-report", "winner-process-death", "startup-response-loss"],
+      "expected": "fail-coordinator-unavailable"
+    },
+    {
+      "name": "seed-cf48-03-lock-drift-and-replacement",
+      "seed": 13561347,
+      "events": ["client-spawn", "winner-lock-exact", "child-exit-0-with-exact-report", "partial-metadata-write", "winner-lock-drift", "endpoint-replaced-unknown", "operation-attempt"],
+      "expected": "fail-closed-no-operation"
+    },
+    {
+      "name": "seed-cf48-04-handoff-socket-loss-multi-client",
+      "seed": 13561348,
+      "events": ["active-session", "running-child", "leases", "session-handoff", "socket-unlink", "clients-N", "exact-process-retirement", "replacement-exact", "startup-response-loss", "same-socket-operation"],
+      "expected": "success-authority-preserved"
+    }
+  ]
+}

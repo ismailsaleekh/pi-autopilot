@@ -1,0 +1,135 @@
+{
+  "schema_version": "autopilot.coordinator_lifecycle_state_matrix.v1",
+  "dimensions": {
+    "lock": ["absent", "dead", "live-exact", "live-drift", "unknown"],
+    "predecessor_fence": ["absent", "exact", "mismatched", "stale"],
+    "endpoint": ["absent", "unresponsive", "delayed", "exact", "prior", "unknown", "replaced"],
+    "child": ["running", "exit-0", "exit-nonzero", "signaled"],
+    "database": ["clean", "recoverable", "corrupt"],
+    "authority": ["no-session", "active-session", "running-child", "terminal-child", "leases"],
+    "clients": ["1", "2", "N"]
+  },
+  "rows": [
+    {
+      "id": "cold-start-single-client",
+      "lock": "absent", "predecessor_fence": "absent", "endpoint": "absent", "child": "running", "database": "clean", "authority": "no-session", "clients": "1",
+      "allowed_mutation": ["create-exact-lifecycle-authority", "open-store", "bind-endpoint"],
+      "expected_authority_owner": "spawned exact-current winner",
+      "expected_endpoint": "same-socket exact-current handshake",
+      "retry_wait": "bounded spawn-relative readiness deadline",
+      "terminal_failure_code": null,
+      "forbidden_effects": ["second writer", "PID-only signaling", "operation before handshake"],
+      "regression": "coordinator-readiness-window: fresh real coordinator"
+    },
+    {
+      "id": "delayed-winner-clean-loser-n-clients",
+      "lock": "live-exact", "predecessor_fence": "exact", "endpoint": "delayed", "child": "exit-0", "database": "clean", "authority": "active-session", "clients": "N",
+      "allowed_mutation": [],
+      "expected_authority_owner": "stable exact lock PID/process-birth/instance owner",
+      "expected_endpoint": "eventual endpoint attesting the same lifecycle identity",
+      "retry_wait": "continue only to original readiness deadline while identity remains exact",
+      "terminal_failure_code": "coordinator-unavailable",
+      "forbidden_effects": ["infer authority from exit 0", "signal winner", "delete winner lock", "release session"],
+      "regression": "coordinator-startup-state-machine: delayed winner"
+    },
+    {
+      "id": "delayed-winner-death",
+      "lock": "dead", "predecessor_fence": "exact", "endpoint": "unresponsive", "child": "exit-0", "database": "clean", "authority": "running-child", "clients": "2",
+      "allowed_mutation": [],
+      "expected_authority_owner": "none until a later separately elected startup",
+      "expected_endpoint": "none",
+      "retry_wait": "fail promptly after exact process death",
+      "terminal_failure_code": "coordinator-unavailable",
+      "forbidden_effects": ["operation dispatch", "child release", "lock deletion outside election"],
+      "regression": "coordinator-startup-state-machine: delayed winner death"
+    },
+    {
+      "id": "winner-identity-drift",
+      "lock": "live-drift", "predecessor_fence": "mismatched", "endpoint": "delayed", "child": "exit-0", "database": "recoverable", "authority": "leases", "clients": "2",
+      "allowed_mutation": [],
+      "expected_authority_owner": "unknown; fail closed",
+      "expected_endpoint": "none accepted",
+      "retry_wait": "no retry after identity drift",
+      "terminal_failure_code": "coordinator-unavailable",
+      "forbidden_effects": ["replace lock", "signal either PID", "release leases", "database repair"],
+      "regression": "coordinator-startup-state-machine: lock identity changes"
+    },
+    {
+      "id": "unknown-build-endpoint",
+      "lock": "unknown", "predecessor_fence": "stale", "endpoint": "unknown", "child": "running", "database": "clean", "authority": "terminal-child", "clients": "1",
+      "allowed_mutation": [],
+      "expected_authority_owner": "unknown; fail closed",
+      "expected_endpoint": "handshake only, never operation",
+      "retry_wait": "none",
+      "terminal_failure_code": "protocol-mismatch",
+      "forbidden_effects": ["operation frame", "automatic replacement", "terminal evidence deletion"],
+      "regression": "coordinator-build-compatibility: unknown replacement"
+    },
+    {
+      "id": "prior-endpoint-during-current-startup",
+      "lock": "live-exact", "predecessor_fence": "exact", "endpoint": "prior", "child": "running", "database": "clean", "authority": "no-session", "clients": "2",
+      "allowed_mutation": [],
+      "expected_authority_owner": "exact-current lifecycle candidate only",
+      "expected_endpoint": "prior endpoint rejected as startup winner",
+      "retry_wait": "fail on non-current handshake",
+      "terminal_failure_code": "protocol-mismatch",
+      "forbidden_effects": ["classify prior endpoint as winner", "send operation", "spawn second writer"],
+      "regression": "coordinator-build-compatibility: exact target required"
+    },
+    {
+      "id": "same-socket-replacement",
+      "lock": "live-exact", "predecessor_fence": "exact", "endpoint": "replaced", "child": "running", "database": "clean", "authority": "active-session", "clients": "1",
+      "allowed_mutation": [],
+      "expected_authority_owner": "handshaken socket owner only",
+      "expected_endpoint": "replacement receives no operation",
+      "retry_wait": "new request requires new handshake",
+      "terminal_failure_code": "coordinator-unavailable",
+      "forbidden_effects": ["operation on replacement socket", "cross-socket attestation"],
+      "regression": "coordinator-build-compatibility: same socket handshake-operation"
+    },
+    {
+      "id": "corrupt-store-startup",
+      "lock": "absent", "predecessor_fence": "absent", "endpoint": "absent", "child": "exit-nonzero", "database": "corrupt", "authority": "no-session", "clients": "1",
+      "allowed_mutation": [],
+      "expected_authority_owner": "none after exact failed-startup cleanup",
+      "expected_endpoint": "none",
+      "retry_wait": "fail promptly with structured startup report",
+      "terminal_failure_code": "store-corrupt",
+      "forbidden_effects": ["rewrite database", "legacy fallback", "generic cause-free error"],
+      "regression": "coordinator-startup-diagnostics: corrupt SQLite"
+    },
+    {
+      "id": "signal-before-election",
+      "lock": "absent", "predecessor_fence": "stale", "endpoint": "absent", "child": "signaled", "database": "recoverable", "authority": "terminal-child", "clients": "N",
+      "allowed_mutation": [],
+      "expected_authority_owner": "unchanged durable store authority",
+      "expected_endpoint": "none",
+      "retry_wait": "fail promptly with exact signal",
+      "terminal_failure_code": "coordinator-unavailable",
+      "forbidden_effects": ["lease release", "terminal evidence mutation", "infer clean loser"],
+      "regression": "coordinator-startup-diagnostics: SIGKILL"
+    },
+    {
+      "id": "live-exact-unresponsive-with-running-child",
+      "lock": "live-exact", "predecessor_fence": "exact", "endpoint": "unresponsive", "child": "running", "database": "recoverable", "authority": "running-child", "clients": "N",
+      "allowed_mutation": [],
+      "expected_authority_owner": "exact known owner until identity-fenced recovery completes",
+      "expected_endpoint": "recovered exact endpoint or separately elected replacement",
+      "retry_wait": "bounded repeated endpoint attestation",
+      "terminal_failure_code": "coordinator-unavailable",
+      "forbidden_effects": ["PID-only signal", "live-lock deletion", "running-child release"],
+      "regression": "coordinator-unavailable-recovery: real cf45 generation-9 session"
+    },
+    {
+      "id": "exact-ready-with-leases",
+      "lock": "live-exact", "predecessor_fence": "exact", "endpoint": "exact", "child": "running", "database": "clean", "authority": "leases", "clients": "N",
+      "allowed_mutation": ["same-socket authenticated requested operation"],
+      "expected_authority_owner": "exact endpoint and lifecycle owner",
+      "expected_endpoint": "exact current endpoint",
+      "retry_wait": "none after attestation",
+      "terminal_failure_code": null,
+      "forbidden_effects": ["lease fabrication", "cross-socket operation", "duplicate effect"],
+      "regression": "coordinator-process: concurrent exact winner"
+    }
+  ]
+}

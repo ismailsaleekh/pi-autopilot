@@ -8,14 +8,15 @@ import { parseCoordinationReconciliationDetail, parseCoordinationReconciliationR
 import { coordinationFailureDefinition, CoordinationRuntimeError } from "./failures.js";
 import { AUTOPILOT_COORDINATOR_TRANSPORT_VERSION, CoordinatorFrameDecoder, encodeCoordinatorFrame } from "./ipc.js";
 import { activeCoordinationMigrationFreeze } from "./migration-paths.js";
-import { currentBootId, isExactProcessAlive, isProcessAlive } from "./process-identity.js";
+import { currentBootId, isExactProcessAlive, isProcessAlive, processStartIdentity } from "./process-identity.js";
 import { COORDINATOR_DATABASE_SCHEMA_VERSION, coordinatorRuntimePaths, enforcePrivateAuthorityPath, ensureCoordinatorPrivateRoots, readOrCreateCoordinatorCapability } from "./runtime-paths.js";
 import { classifyCoordinatorRuntimeIdentity } from "./runtime-compatibility.js";
 import { acquireSerializedProcessGuard, discardLockTombstone, quarantineExactLock, readExactLockText, restoreLockTombstone } from "./serialized-lock.js";
 import { coordinationErrorCode } from "./store.js";
 import { preparePredecessorCoordinatorUpgrade, resumeCoordinatorUpgrade } from "./upgrade.js";
 import { recoverUnavailableKnownCoordinator } from "./unavailable-recovery.js";
-import { parseKnownCompatibleCurrentCoordinatorLock, parsePredecessorCoordinatorLock, parsePriorSchema11CurrentCoordinatorLock, parsePriorSchema10CurrentCoordinatorLock, parsePriorSchema9CurrentCoordinatorLock } from "./upgrade-contracts.js";
+import { COORDINATOR_STARTUP_ATTEMPT_ID_ENV, coordinatorStartupReportPath, createCoordinatorStartupAttemptId, readCoordinatorStartupReport } from "./startup-observation.js";
+import { parseCurrentCoordinatorLock, parseKnownCompatibleCurrentCoordinatorLock, parsePredecessorCoordinatorLock, parsePriorSchema11CurrentCoordinatorLock, parsePriorSchema10CurrentCoordinatorLock, parsePriorSchema9CurrentCoordinatorLock } from "./upgrade-contracts.js";
 import { AUTOPILOT_COORDINATOR_PROTOCOL_VERSION } from "./types.js";
 const DEFAULT_REQUEST_TIMEOUT_MS = 5_000;
 const DEFAULT_STARTUP_TIMEOUT_MS = 10_000;
@@ -221,16 +222,56 @@ function coordinatorCliPath() {
         return { path: source, stripTypes: true };
     throw new CoordinationRuntimeError('coordinator-unavailable', 'packaged coordinator CLI entrypoint is missing', [compiled, source]);
 }
-function spawnCoordinator(paths) {
+function spawnCoordinator(paths, env) {
     const cli = coordinatorCliPath();
+    const attemptId = createCoordinatorStartupAttemptId();
     const args = [...(cli.stripTypes ? ['--experimental-strip-types'] : []), cli.path, 'serve', '--state-root', paths.stateRoot];
     const child = spawn(process.execPath, args, {
         detached: true,
         stdio: 'ignore',
-        env: { ...process.env, AUTOPILOT_STATE_ROOT: paths.stateRoot },
+        env: { ...process.env, ...env, AUTOPILOT_STATE_ROOT: paths.stateRoot, [COORDINATOR_STARTUP_ATTEMPT_ID_ENV]: attemptId },
     });
     child.unref();
-    return child;
+    return { child, attemptId, reportPath: coordinatorStartupReportPath(paths, attemptId) };
+}
+function sameCurrentLifecycle(left, right) {
+    return left.schema_version === right.schema_version
+        && left.pid === right.pid
+        && left.boot_id === right.boot_id
+        && left.process_start_identity === right.process_start_identity
+        && left.token === right.token
+        && left.instance_id === right.instance_id
+        && left.package_build === right.package_build
+        && left.protocol_version === right.protocol_version
+        && left.database_schema_version === right.database_schema_version
+        && left.started_at === right.started_at;
+}
+function safeLifecycleMatches(lock, safe) {
+    return safe !== null
+        && safe.schema_version === lock.schema_version
+        && safe.pid === lock.pid
+        && safe.boot_id === lock.boot_id
+        && safe.process_start_identity === lock.process_start_identity
+        && safe.instance_id === lock.instance_id
+        && safe.package_build === lock.package_build
+        && safe.protocol_version === lock.protocol_version
+        && safe.database_schema_version === lock.database_schema_version
+        && safe.started_at === lock.started_at;
+}
+function lifecycleEvidence(lock) {
+    if (lock === null)
+        return ['lifecycle_candidate=absent'];
+    return [
+        'lifecycle_candidate=exact-current',
+        `lifecycle_schema=${lock.schema_version}`,
+        `lifecycle_pid=${String(lock.pid)}`,
+        `lifecycle_process_start_identity=${lock.process_start_identity}`,
+        `lifecycle_instance_id=${lock.instance_id}`,
+        `lifecycle_build=${lock.package_build}`,
+        `lifecycle_protocol=${lock.protocol_version}`,
+        `lifecycle_database_schema=${String(lock.database_schema_version)}`,
+        `lifecycle_started_at=${lock.started_at}`,
+    ];
 }
 function connectSocket(path, timeoutMs) {
     return new Promise((resolveConnect, rejectConnect) => {
@@ -382,13 +423,15 @@ async function sendAfterCompatibleHandshake(paths, capability, probe, request, t
 }
 export class CoordinatorClient {
     #paths;
+    #env;
     #autoStart;
     #allowMigrationRecoveryAutoStart;
     #requestTimeoutMs;
     #startupTimeoutMs;
     #readinessTimeoutMs;
     constructor(options = {}) {
-        this.#paths = coordinatorRuntimePaths(options.env ?? process.env);
+        this.#env = options.env ?? process.env;
+        this.#paths = coordinatorRuntimePaths(this.#env);
         this.#autoStart = options.autoStart !== false;
         this.#allowMigrationRecoveryAutoStart = options.allowMigrationRecoveryAutoStart === true;
         this.#requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
@@ -709,7 +752,21 @@ export class CoordinatorClient {
             if (upgrade !== null)
                 await upgrade.markStarting();
             try {
-                const child = spawnCoordinator(this.#paths);
+                let child;
+                try {
+                    child = spawnCoordinator(this.#paths, this.#env);
+                }
+                catch (spawnError) {
+                    const cause = spawnError instanceof CoordinationRuntimeError ? spawnError : null;
+                    throw new CoordinationRuntimeError('coordinator-unavailable', 'coordinator startup failed before a child process could be launched', [
+                        'spawned_pid=unassigned', 'spawned_exit_code=none', 'spawned_signal=none',
+                        'exact_competing_lifecycle_owner_observed=false', 'startup_phase=spawn-resolution',
+                        'lifecycle_candidate=absent', 'last_endpoint_transport_failure=none',
+                        `startup_report_error=${spawnError instanceof Error ? spawnError.message : String(spawnError)}`,
+                        'startup_report_truncated=false',
+                        ...(cause?.evidence.map((entry) => `cause=${entry}`) ?? []),
+                    ]);
+                }
                 // The readiness window is measured from spawn so startup-lock/predecessor-fence
                 // contention cannot steal the coordinator's migration+reconciliation window.
                 await this.#waitForExactCoordinator(probe, capability, Date.now() + this.#readinessTimeoutMs, child);
@@ -736,51 +793,139 @@ export class CoordinatorClient {
             await lock.release();
         }
     }
-    async #waitForExactCoordinator(probe, capability, deadline, child) {
+    async #waitForExactCoordinator(probe, capability, deadline, spawned) {
+        const { child, attemptId, reportPath } = spawned;
+        let processOutcome = child.exitCode === null
+            ? null
+            : { exitCode: child.exitCode, signal: null, spawnError: null };
+        child.once('close', (exitCode, signal) => { processOutcome = { exitCode, signal, spawnError: null }; });
         const pid = child.pid;
-        if (pid === undefined)
-            throw new CoordinationRuntimeError('coordinator-unavailable', 'spawned coordinator process did not receive a pid before readiness verification');
         let lastConnectionFailure = null;
+        let report = readCoordinatorStartupReport(reportPath, attemptId);
+        let reportLifecycleConsistent = null;
+        let winner = null;
+        const refreshReport = () => {
+            const observed = readCoordinatorStartupReport(reportPath, attemptId);
+            if (observed !== null && observed.spawned_pid === pid)
+                report = observed;
+            else if (observed !== null)
+                report = null;
+            return report;
+        };
+        const evidence = (candidate = winner) => {
+            const currentReport = refreshReport();
+            const outcome = processOutcome;
+            return [
+                `spawned_pid=${pid === undefined ? 'unassigned' : String(pid)}`,
+                `spawned_exit_code=${outcome?.exitCode === null || outcome?.exitCode === undefined ? 'none' : String(outcome.exitCode)}`,
+                `spawned_signal=${outcome?.signal ?? 'none'}`,
+                `spawn_error=${outcome?.spawnError ?? 'none'}`,
+                `exact_competing_lifecycle_owner_observed=${String(candidate !== null || currentReport?.exact_competing_lifecycle_owner_observed === true)}`,
+                `startup_phase=${currentReport?.phase ?? 'spawn/readiness'}`,
+                ...lifecycleEvidence(candidate),
+                `last_endpoint_transport_failure=${lastConnectionFailure instanceof Error ? lastConnectionFailure.message : lastConnectionFailure === null ? 'none' : String(lastConnectionFailure)}`,
+                `startup_report_outcome=${currentReport?.outcome ?? 'unavailable'}`,
+                `startup_report_error=${currentReport?.error ?? 'none'}`,
+                `startup_report_failure_code=${currentReport?.failure_code ?? 'none'}`,
+                `startup_report_failure_class=${currentReport?.failure_class ?? 'none'}`,
+                `startup_report_lifecycle_consistent=${reportLifecycleConsistent === null ? 'unknown' : String(reportLifecycleConsistent)}`,
+                `startup_report_truncated=${String(currentReport?.diagnostics_truncated ?? false)}`,
+                `startup_report_omitted_code_points=${String(currentReport?.omitted_code_points ?? 0)}`,
+            ];
+        };
+        const fail = (message, cause, candidate = winner) => {
+            if (cause instanceof CoordinationRuntimeError)
+                throw new CoordinationRuntimeError(cause.code, message, [...evidence(candidate), ...cause.evidence.map((entry) => `cause=${entry}`)]);
+            // The report is bounded diagnostic evidence, never a control or authority
+            // source. It cannot select retry policy or failure classification.
+            throw new CoordinationRuntimeError('coordinator-unavailable', message, evidence(candidate));
+        };
+        if (pid === undefined)
+            fail('coordinator spawn failed before a process id was assigned');
+        const observeWinner = async (expected) => {
+            const text = await readExactLockText(this.#paths.lockPath);
+            if (text === null)
+                return fail(expected === null ? 'clean election-loser exit had no durable exact-current lifecycle winner' : 'exact delayed startup winner lifecycle lock disappeared', undefined, expected);
+            let parsed = null;
+            try {
+                parsed = parseCurrentCoordinatorLock(JSON.parse(text));
+            }
+            catch { /* fail below */ }
+            if (parsed === null)
+                return fail(expected === null ? 'clean election-loser exit reached an unknown or non-current lifecycle lock' : 'exact delayed startup winner lifecycle identity became unknown or non-current', undefined, expected);
+            const observed = parsed;
+            if (expected !== null && !sameCurrentLifecycle(observed, expected))
+                return fail('exact delayed startup winner lifecycle identity changed before endpoint publication', undefined, expected);
+            if (!isProcessAlive(observed.pid))
+                return fail('exact delayed startup winner died before endpoint publication', undefined, observed);
+            const startIdentity = processStartIdentity(observed.pid);
+            if (startIdentity === null)
+                return fail('exact delayed startup winner process-birth identity became unavailable', undefined, observed);
+            if (startIdentity !== observed.process_start_identity)
+                return fail('exact delayed startup winner process-birth identity changed before endpoint publication', undefined, observed);
+            return observed;
+        };
         const attestEndpoint = async () => {
             try {
                 const response = this.#assertSuccess(await sendOnce(this.#paths, capability, probe, Math.min(500, this.#requestTimeoutMs)));
                 const compatibility = this.#assertCoordinatorCompatibility(response);
                 if (compatibility.kind !== 'exact-target')
                     throw new CoordinationRuntimeError('protocol-mismatch', `coordinator startup reached ${compatibility.package_build}, not this package's exact target build`);
-                await this.#assertEndpointLifecycle(response, compatibility);
+                await this.#assertEndpointLifecycle(response, compatibility, winner);
                 return true;
             }
             catch (error) {
                 if (!isConnectionFailure(error))
-                    throw error;
+                    fail('coordinator startup endpoint failed exact lifecycle attestation', error);
                 lastConnectionFailure = error;
                 return false;
             }
         };
         while (Date.now() < deadline) {
-            // Endpoint authority wins over process-local child state. A child that lost
-            // the lifecycle election may exit after the exact winner is already live.
-            if (await attestEndpoint())
+            if (winner !== null)
+                winner = await observeWinner(winner);
+            if (await attestEndpoint()) {
+                await unlink(reportPath).catch(() => undefined);
                 return;
-            if (!isProcessAlive(pid)) {
-                // Re-attest once after observing death so a winner published between the
-                // preceding connection miss and this liveness observation is accepted.
-                if (await attestEndpoint())
-                    return;
-                throw new CoordinationRuntimeError('coordinator-unavailable', 'spawned coordinator exited and no exact-current endpoint reached readiness', [`pid=${String(pid)}`, `last_transport=${lastConnectionFailure instanceof Error ? lastConnectionFailure.message : String(lastConnectionFailure)}`]);
             }
-            await sleep(50);
+            const outcome = processOutcome;
+            if (outcome !== null && winner === null) {
+                const currentReport = refreshReport();
+                if (outcome.signal !== null)
+                    fail(`spawned coordinator was terminated by signal ${outcome.signal} before readiness`);
+                if (outcome.spawnError !== null)
+                    fail('coordinator child process could not be spawned');
+                if (outcome.exitCode !== 0)
+                    fail(`spawned coordinator failed with exit code ${String(outcome.exitCode)} before readiness`);
+                winner = await observeWinner(null);
+                // The startup report is diagnostics only and never authority. Exit code
+                // zero alone is also insufficient: only the durable exact lock (including
+                // its secret token), exact process-birth identity, and stable full identity
+                // permit the original bounded readiness wait to continue.
+                if (currentReport !== null)
+                    reportLifecycleConsistent = currentReport.outcome === 'election-loser' && safeLifecycleMatches(winner, currentReport.lifecycle);
+                // A contradictory report remains visible evidence but cannot create,
+                // transfer, or revoke the durable winner's authority.
+                continue;
+            }
+            await sleep(25);
         }
-        if (await attestEndpoint())
+        if (winner !== null)
+            winner = await observeWinner(winner);
+        if (await attestEndpoint()) {
+            await unlink(reportPath).catch(() => undefined);
             return;
-        throw new CoordinationRuntimeError('coordinator-unavailable', 'coordinator did not complete schema migration, start, and exact-target lifecycle attestation before the deadline', [`spawned_pid=${String(pid)}`, `spawned_alive=${String(isProcessAlive(pid))}`]);
+        }
+        if (winner !== null)
+            fail('exact delayed startup winner did not publish its attested endpoint before the original readiness deadline');
+        fail('spawned coordinator remained unready until the original readiness deadline');
     }
     #probeRequest() {
         return {
             schema_version: 'autopilot.coordinator_request.v1', protocol_version: AUTOPILOT_COORDINATOR_PROTOCOL_VERSION, request_id: `probe-${randomUUID()}`, action: 'handshake', idempotency_key: null, repo_id: 'global', workstream_run: null, session_id: null, fencing_generation: null, expected_version: null, payload: EMPTY_COORDINATOR_PAYLOAD,
         };
     }
-    async #assertEndpointLifecycle(response, compatibility) {
+    async #assertEndpointLifecycle(response, compatibility, expectedExactOwner = null) {
         const text = await readExactLockText(this.#paths.lockPath);
         if (text === null)
             throw new CoordinationRuntimeError('coordinator-unavailable', 'coordinator handshake has no current lifecycle authority lock');
@@ -791,6 +936,8 @@ export class CoordinatorClient {
         catch { /* fail below */ }
         if (lock === null)
             throw new CoordinationRuntimeError('protocol-mismatch', 'coordinator handshake is paired with an unknown lifecycle authority lock');
+        if (expectedExactOwner !== null && !sameCurrentLifecycle(lock, expectedExactOwner))
+            throw new CoordinationRuntimeError('coordinator-unavailable', 'coordinator endpoint lifecycle lock changed from the exact delayed winner candidate', lifecycleEvidence(expectedExactOwner));
         if (lock.package_build !== compatibility.package_build || lock.protocol_version !== compatibility.protocol_version || lock.database_schema_version !== compatibility.database_schema_version)
             throw new CoordinationRuntimeError('protocol-mismatch', 'coordinator endpoint handshake disagrees with its lifecycle authority lock', [lock.package_build, compatibility.package_build]);
         if (!isExactProcessAlive(lock.pid, lock.process_start_identity))

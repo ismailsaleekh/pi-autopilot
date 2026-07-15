@@ -45,6 +45,7 @@ export function coordinatorRuntimePaths(env = process.env) {
         backupsRoot: join(coordinatorRoot, 'backups'),
         exportsRoot: join(coordinatorRoot, 'exports'),
         sessionsRoot: join(coordinatorRoot, 'sessions'),
+        startupReportsRoot: join(coordinatorRoot, 'startup-reports'),
         semanticReplayPath: join(coordinatorRoot, 'semantic-replay.jsonl'),
         semanticReplayReceiptsRoot: join(coordinatorRoot, 'semantic-replay-receipts'),
     };
@@ -58,6 +59,7 @@ export async function ensureCoordinatorPrivateRoots(paths, env = process.env) {
         paths.backupsRoot,
         paths.exportsRoot,
         paths.sessionsRoot,
+        paths.startupReportsRoot,
         paths.semanticReplayReceiptsRoot,
     ];
     if (platform() === 'win32') {

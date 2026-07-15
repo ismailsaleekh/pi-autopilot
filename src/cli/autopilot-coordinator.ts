@@ -8,6 +8,7 @@ import { coordinationMigrationUsage, runCoordinationMigration, type Coordination
 import { activatePatchBuild, reportPatchActivationReadiness } from '../core/coordination/patch-activation.ts';
 import { CoordinatorAlreadyRunningError, runCoordinatorUntilSignal } from '../core/coordination/server.ts';
 import { coordinatorRuntimePaths } from '../core/coordination/runtime-paths.ts';
+import { COORDINATOR_STARTUP_ATTEMPT_ID_ENV, createCoordinatorStartupAttemptId, createCoordinatorStartupObserver, type CoordinatorStartupObserver } from '../core/coordination/startup-observation.ts';
 import { retireSchema11CoordinatorForUpgrade } from '../core/coordination/schema11-retirement.ts';
 import { stageCoordinatorSemanticReplayFile } from '../core/coordination/store.ts';
 import { AUTOPILOT_STATE_ROOT_ENV, resolveRepoIdentity, type ProcessEnvLike } from '../core/parallel-runtime.ts';
@@ -119,9 +120,14 @@ async function main(argv: readonly string[]): Promise<number> {
     return 2;
   }
   const env = environment(args);
+  let startupObserver: CoordinatorStartupObserver | null = null;
   try {
     if (args.command === 'serve') {
-      await runCoordinatorUntilSignal(coordinatorRuntimePaths(env));
+      const paths = coordinatorRuntimePaths(env);
+      const configuredAttempt = env[COORDINATOR_STARTUP_ATTEMPT_ID_ENV];
+      const attemptId = configuredAttempt === undefined ? createCoordinatorStartupAttemptId() : configuredAttempt;
+      startupObserver = await createCoordinatorStartupObserver(paths, attemptId, env);
+      await runCoordinatorUntilSignal(paths, startupObserver);
       return 0;
     }
     if (args.migrationCommand !== null) {
@@ -158,9 +164,11 @@ async function main(argv: readonly string[]): Promise<number> {
     return 0;
   } catch (error) {
     if (error instanceof CoordinatorAlreadyRunningError && args.command === 'serve') {
+      await startupObserver?.electionLoser(error);
       console.log(error.message);
       return 0;
     }
+    await startupObserver?.failed(error);
     if (error instanceof CoordinationRuntimeError) {
       console.error(error.message);
       return error.failure_class === 'system-fatal' ? 70 : 1;

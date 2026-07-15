@@ -77,6 +77,8 @@ export const COORDINATION_FAILURE_MATRIX: readonly CoordinationFailureScenario[]
   { scenario: 'coordinator-crash-before-commit', failure_code: 'coordinator-unavailable', durable_effect: 'none', required_response: 'restart and retry the identical idempotency key', forbidden_response: 'infer that the effect committed' },
   { scenario: 'coordinator-crash-after-commit', failure_code: 'coordinator-unavailable', durable_effect: 'single-committed-effect', required_response: 'recover the committed transaction and return it on retry', forbidden_response: 'repeat the committed effect' },
   { scenario: 'known-live-owner-socket-unavailable', failure_code: 'coordinator-unavailable', durable_effect: 'unknown-until-replay', required_response: 'repeatedly re-attest, prefer endpoint recovery, otherwise retire only exact lock and process-birth identity before elected replacement', forbidden_response: 'signal by PID, delete locks, release leases, or spawn a competing writer' },
+  { scenario: 'clean-election-loser-before-winner-publication', failure_code: null, durable_effect: 'none', required_response: 'wait only to the original deadline while the exact-current lock and process-birth identity remain stable, then attest that same endpoint', forbidden_response: 'infer authority from exit zero, use the diagnostic report as authority, signal the winner, or spawn another writer' },
+  { scenario: 'spawned-coordinator-startup-failure', failure_code: 'coordinator-unavailable', durable_effect: 'none', required_response: 'report exact PID/outcome/phase/lifecycle/transport plus bounded redacted atomic startup evidence', forbidden_response: 'emit a generic cause-free exit error or treat diagnostics as mutable authority' },
   { scenario: 'store-integrity-failure', failure_code: 'store-corrupt', durable_effect: 'safety-halt', required_response: 'halt loudly and produce bounded diagnostics', forbidden_response: 'fall back to mutable legacy coordination' },
   { scenario: 'disk-capacity-or-io-failure', failure_code: 'disk-failure', durable_effect: 'prepared-recovery-work', required_response: 'retain operation intent and reconcile after capacity recovery', forbidden_response: 'report external action success without verification' },
   { scenario: 'filesystem-permission-failure', failure_code: 'permission-denied', durable_effect: 'prepared-recovery-work', required_response: 'retain owner-scoped recovery state', forbidden_response: 'delete or repair a foreign run path' },
@@ -89,13 +91,14 @@ const COORDINATION_DIAGNOSTIC_MAX_MESSAGE_CODE_POINTS = 512;
 const COORDINATION_DIAGNOSTIC_MAX_TOTAL_CODE_POINTS = 4_096;
 
 function redactCoordinationSecrets(value: string): string {
+  const secretLabels = 'session_token|capability|handoff_token|child_token|lock_token|freeze_token|lease_capability|token';
   return value
-    .replace(/\b(session_token|capability|handoff_token)(\s*[=:]\s*)[^\s,;]+/giu, '$1$2<redacted>')
-    .replace(/("(?:session_token|capability|handoff_token)"\s*:\s*")[^"]*(")/giu, '$1<redacted>$2')
+    .replace(new RegExp(`\\b(${secretLabels})(\\s*[=:]\\s*)[^\\s,;]+`, 'giu'), '$1$2<redacted>')
+    .replace(new RegExp(`(\"(?:${secretLabels})\"\\s*:\\s*\")[^\"]*(\")`, 'giu'), '$1<redacted>$2')
     .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/gu, '\uFFFD');
 }
 
-function boundedCoordinationDiagnosticText(value: string, maximumCodePoints = COORDINATION_DIAGNOSTIC_MAX_TEXT_CODE_POINTS): string {
+export function sanitizeCoordinationDiagnosticText(value: string, maximumCodePoints = COORDINATION_DIAGNOSTIC_MAX_TEXT_CODE_POINTS): string {
   const sanitized = redactCoordinationSecrets(value);
   const points = [...sanitized];
   if (points.length <= maximumCodePoints) return sanitized;
@@ -105,7 +108,7 @@ function boundedCoordinationDiagnosticText(value: string, maximumCodePoints = CO
 }
 
 function boundedCoordinationEvidence(values: readonly string[]): readonly string[] {
-  const bounded = values.map((value) => boundedCoordinationDiagnosticText(value));
+  const bounded = values.map((value) => sanitizeCoordinationDiagnosticText(value));
   const output: string[] = [];
   let consumed = 0;
   let omittedEntries = 0;
@@ -134,7 +137,7 @@ export class CoordinationRuntimeError extends Error {
   readonly evidence: readonly string[];
 
   constructor(code: CoordinationFailureCode, message: string, evidence: readonly string[] = []) {
-    super(`CoordinationRuntimeError [${code}]: ${boundedCoordinationDiagnosticText(message, COORDINATION_DIAGNOSTIC_MAX_MESSAGE_CODE_POINTS)}`);
+    super(`CoordinationRuntimeError [${code}]: ${sanitizeCoordinationDiagnosticText(message, COORDINATION_DIAGNOSTIC_MAX_MESSAGE_CODE_POINTS)}`);
     const definition = coordinationFailureDefinition(code);
     this.code = code;
     this.failure_class = definition.failure_class;
