@@ -72,7 +72,7 @@ void describe('coordinator protocol and schema version boundary', () => {
       assert.equal(isProcessAlive(tagged.child.pid ?? -1), false);
       current = await startCoordinatorServer(tagged.paths);
       const handshake = await new CoordinatorClient({ env, autoStart: false }).query('handshake');
-      assert.equal(handshake.payload['package_build'], '1.1.3-cf45');
+      assert.equal(handshake.payload['package_build'], '1.1.4-cf46');
       assert.equal(handshake.payload['protocol_version'], '1.6');
       assert.equal(handshake.payload['database_schema_version'], 12);
     } finally {
@@ -112,6 +112,9 @@ void describe('coordinator protocol and schema version boundary', () => {
     try {
       await assert.rejects(() => client.query('handshake'), /protocol|compatible|migration|schema/u);
       await tagged.close();
+      const replacementStartIdentity = processStartIdentity(process.pid);
+      if (replacementStartIdentity === null) throw new Error('replacement test process start identity is unavailable');
+      await writeFile(tagged.paths.lockPath, `${JSON.stringify({ schema_version: 'autopilot.coordinator_lock.v2', pid: process.pid, boot_id: 'compatible-replacement-boot', process_start_identity: replacementStartIdentity, token: 'compatible-replacement-token', instance_id: 'compatible-replacement-instance', package_build: '1.1.2-cf44', protocol_version: '1.6', database_schema_version: 12, started_at: '2026-07-14T00:00:00.000Z' })}\n`, 'utf8');
       let connectionCount = 0;
       const events: Array<readonly [number, string]> = [];
       fake = createServer((socket) => {
@@ -198,7 +201,7 @@ void describe('coordinator protocol and schema version boundary', () => {
       await mkdir(paths.coordinatorRoot, { recursive: true });
       await writeFile(paths.lockPath, `${JSON.stringify(currentLock)}\n`, 'utf8');
       await writeFile(paths.predecessorLockPath, `${JSON.stringify(predecessorFence)}\n`, 'utf8');
-      await assert.rejects(() => new CoordinatorClient({ env, startupTimeoutMs: 2_000 }).query('handshake'), /known coordinator 1\.0\.1-cf38 is live.*socket is unavailable/u);
+      await assert.rejects(() => new CoordinatorClient({ env, startupTimeoutMs: 2_000 }).query('handshake'), /historical coordinator 1\.0\.1-cf38 is live.*socket is unavailable.*explicit migration recovery/u);
       assert.deepEqual(await lockRecord(paths.lockPath), currentLock);
       assert.deepEqual(await lockRecord(paths.predecessorLockPath), predecessorFence);
       assert.equal(isProcessAlive(process.pid), true, 'compatibility handling must never signal the live owner');
@@ -224,10 +227,10 @@ void describe('coordinator protocol and schema version boundary', () => {
 
       current = await startCoordinatorServer(paths);
       const response = await new CoordinatorClient({ env, autoStart: false }).query('handshake');
-      assert.equal(response.payload['package_build'], '1.1.3-cf45');
+      assert.equal(response.payload['package_build'], '1.1.4-cf46');
       const newLock = await lockRecord(paths.lockPath);
       assert.notEqual(newLock['instance_id'], oldLock['instance_id']);
-      assert.equal(newLock['package_build'], '1.1.3-cf45');
+      assert.equal(newLock['package_build'], '1.1.4-cf46');
       assert.equal(await readFile(coordinatorUpgradeIntentPath(paths), 'utf8'), committedIntent, 'historical committed intent remains immutable forensic evidence');
     } finally {
       if (current !== null) await current.close();

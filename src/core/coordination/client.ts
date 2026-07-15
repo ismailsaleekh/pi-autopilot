@@ -9,12 +9,13 @@ import { parseCoordinationReconciliationDetail, parseCoordinationReconciliationR
 import { coordinationFailureDefinition, CoordinationRuntimeError } from './failures.ts';
 import { AUTOPILOT_COORDINATOR_TRANSPORT_VERSION, CoordinatorFrameDecoder, encodeCoordinatorFrame } from './ipc.ts';
 import { activeCoordinationMigrationFreeze } from './migration-paths.ts';
-import { currentBootId, isProcessAlive } from './process-identity.ts';
+import { currentBootId, isExactProcessAlive, isProcessAlive } from './process-identity.ts';
 import { COORDINATOR_DATABASE_SCHEMA_VERSION, coordinatorRuntimePaths, enforcePrivateAuthorityPath, ensureCoordinatorPrivateRoots, readOrCreateCoordinatorCapability, type CoordinatorRuntimePaths } from './runtime-paths.ts';
 import { classifyCoordinatorRuntimeIdentity, type CoordinatorRuntimeCompatibility } from './runtime-compatibility.ts';
 import { acquireSerializedProcessGuard, discardLockTombstone, quarantineExactLock, readExactLockText, restoreLockTombstone } from './serialized-lock.ts';
 import { coordinationErrorCode } from './store.ts';
 import { preparePredecessorCoordinatorUpgrade, resumeCoordinatorUpgrade, type CoordinatorUpgradeTransaction } from './upgrade.ts';
+import { recoverUnavailableKnownCoordinator } from './unavailable-recovery.ts';
 import { parseKnownCompatibleCurrentCoordinatorLock, parsePredecessorCoordinatorLock, parsePriorSchema11CurrentCoordinatorLock, parsePriorSchema10CurrentCoordinatorLock, parsePriorSchema9CurrentCoordinatorLock } from './upgrade-contracts.ts';
 import type { ProcessEnvLike } from '../parallel-runtime.ts';
 import { AUTOPILOT_COORDINATOR_PROTOCOL_VERSION, type CoordinationReconciliationDetail, type CoordinationReconciliationDetailKind, type CoordinationReconciliationReceipt, type CoordinationResultDetail, type CoordinationResultReceipt, type CoordinatorMutationAction, type CoordinatorQueryAction, type CoordinatorRequestEnvelope, type CoordinatorResponseEnvelope } from './types.ts';
@@ -297,7 +298,7 @@ async function sendOnce(paths: CoordinatorRuntimePaths, capability: string, requ
     });
     socket.once('error', finishError);
     socket.once('close', () => {
-      if (!settled) finishError(new Error('coordinator connection closed before a response'));
+      if (!settled) finishError(Object.assign(new Error('coordinator connection closed before a response'), { code: 'ECONNRESET' }));
     });
     const transport = { transport_version: AUTOPILOT_COORDINATOR_TRANSPORT_VERSION, capability, request };
     socket.write(encodeCoordinatorFrame(transport), (error) => {
@@ -312,7 +313,7 @@ async function sendAfterCompatibleHandshake(
   probe: CoordinatorRequestEnvelope,
   request: CoordinatorRequestEnvelope,
   timeoutMs: number,
-  validateProbe: (response: CoordinatorResponseEnvelope) => void,
+  validateProbe: (response: CoordinatorResponseEnvelope) => void | Promise<void>,
 ): Promise<CoordinatorResponseEnvelope> {
   const socket = await connectSocket(paths.socketPath, timeoutMs);
   const decoder = new CoordinatorFrameDecoder();
@@ -344,8 +345,9 @@ async function sendAfterCompatibleHandshake(
       Object.assign(error, { code: 'ETIMEDOUT' });
       finishError(error);
     }, timeoutMs);
+    let readChain = Promise.resolve();
     socket.on('data', (chunk: NodeBuffer) => {
-      try {
+      readChain = readChain.then(async () => {
         const frames = decoder.push(chunk);
         if (frames.length > 1) throw new CoordinationRuntimeError('invalid-state', 'coordinator sent unsolicited response frames before the next request');
         for (const frame of frames) {
@@ -356,7 +358,7 @@ async function sendAfterCompatibleHandshake(
           const response = parseCoordinatorResponseEnvelope(frame);
           if (phase === 'probe') {
             if (response.request_id !== probe.request_id) throw new CoordinationRuntimeError('invalid-state', 'coordinator handshake response request id mismatch');
-            validateProbe(response);
+            await validateProbe(response);
             phase = 'request';
             writeRequest(request);
           } else {
@@ -364,13 +366,11 @@ async function sendAfterCompatibleHandshake(
             finishResponse(response);
           }
         }
-      } catch (error) {
-        finishError(error instanceof Error ? error : new Error(String(error)));
-      }
+      }).catch((error: unknown) => finishError(error instanceof Error ? error : new Error(String(error))));
     });
     socket.once('error', finishError);
     socket.once('close', () => {
-      if (!settled) finishError(new Error('coordinator connection closed before a response'));
+      if (!settled) finishError(Object.assign(new Error('coordinator connection closed before a response'), { code: 'ECONNRESET' }));
     });
     writeRequest(probe);
   });
@@ -418,11 +418,14 @@ export class CoordinatorClient {
   async #sendCompatibleRequestOnce(request: CoordinatorRequestEnvelope, capability: string, timeoutMs: number): Promise<CoordinatorResponseEnvelope> {
     if (request.action === 'handshake') {
       const response = this.#assertSuccess(await sendOnce(this.#paths, capability, request, timeoutMs));
-      this.#assertCoordinatorCompatibility(response);
+      const compatibility = this.#assertCoordinatorCompatibility(response);
+      await this.#assertEndpointLifecycle(response, compatibility);
       return response;
     }
-    return this.#assertSuccess(await sendAfterCompatibleHandshake(this.#paths, capability, this.#probeRequest(), request, timeoutMs, (probeResponse) => {
-      this.#assertCoordinatorCompatibility(this.#assertSuccess(probeResponse));
+    return this.#assertSuccess(await sendAfterCompatibleHandshake(this.#paths, capability, this.#probeRequest(), request, timeoutMs, async (probeResponse) => {
+      const successful = this.#assertSuccess(probeResponse);
+      const compatibility = this.#assertCoordinatorCompatibility(successful);
+      await this.#assertEndpointLifecycle(successful, compatibility);
     }));
   }
 
@@ -626,6 +629,7 @@ export class CoordinatorClient {
       try {
         const response = this.#assertSuccess(await sendOnce(this.#paths, capability, probe, Math.min(500, this.#requestTimeoutMs)));
         const compatibility = this.#assertCoordinatorCompatibility(response);
+        await this.#assertEndpointLifecycle(response, compatibility);
         const pendingUpgrade = await resumeCoordinatorUpgrade(this.#paths);
         if (pendingUpgrade !== null) {
           if (compatibility.kind !== 'exact-target') throw new CoordinationRuntimeError('recovery-required', `upgrade reconnect reached wire-compatible build ${compatibility.package_build}, not the exact target ${pendingUpgrade.intent.target.package_build}`);
@@ -639,13 +643,28 @@ export class CoordinatorClient {
         if (upgrade === null) {
           const currentText = await readExactLockText(this.#paths.lockPath);
           if (currentText !== null) {
-            let current = null;
+            let known: ReturnType<typeof parseKnownCompatibleCurrentCoordinatorLock> = null;
+            let historical: ReturnType<typeof parsePriorSchema11CurrentCoordinatorLock> | ReturnType<typeof parsePriorSchema10CurrentCoordinatorLock> | ReturnType<typeof parsePriorSchema9CurrentCoordinatorLock> = null;
             try {
               const parsed: unknown = JSON.parse(currentText) as unknown;
-              current = parseKnownCompatibleCurrentCoordinatorLock(parsed) ?? parsePriorSchema11CurrentCoordinatorLock(parsed) ?? parsePriorSchema10CurrentCoordinatorLock(parsed) ?? parsePriorSchema9CurrentCoordinatorLock(parsed);
+              known = parseKnownCompatibleCurrentCoordinatorLock(parsed);
+              historical = parsePriorSchema11CurrentCoordinatorLock(parsed) ?? parsePriorSchema10CurrentCoordinatorLock(parsed) ?? parsePriorSchema9CurrentCoordinatorLock(parsed);
             } catch { /* fail below */ }
-            if (current === null) throw new CoordinationRuntimeError('protocol-mismatch', 'current-generation lifecycle lock belongs to an unknown build; auto-start will not replace it');
-            if (isProcessAlive(current.pid)) throw new CoordinationRuntimeError('coordinator-unavailable', `known coordinator ${current.package_build} is live as pid ${String(current.pid)} but its socket is unavailable; auto-start will not replace or reinterpret its predecessor fence`);
+            if (known === null && historical === null) throw new CoordinationRuntimeError('protocol-mismatch', 'current-generation lifecycle lock belongs to an unknown build; auto-start will not replace it');
+            if (known !== null) {
+              const recovery = await recoverUnavailableKnownCoordinator(this.#paths, async () => {
+                try {
+                  const response = this.#assertSuccess(await sendOnce(this.#paths, capability, probe, Math.min(500, this.#requestTimeoutMs)));
+                  const compatibility = this.#assertCoordinatorCompatibility(response);
+                  await this.#assertEndpointLifecycle(response, compatibility);
+                  return true;
+                } catch (probeError) {
+                  if (isConnectionFailure(probeError)) return false;
+                  throw probeError;
+                }
+              });
+              if (recovery.outcome === 'endpoint-recovered') return;
+            } else if (historical !== null && isProcessAlive(historical.pid)) throw new CoordinationRuntimeError('coordinator-unavailable', `historical coordinator ${historical.package_build} is live as pid ${String(historical.pid)} but its socket is unavailable; explicit migration recovery is required`);
           } else if (await hasLiveExactPredecessor(this.#paths)) {
             upgrade = await preparePredecessorCoordinatorUpgrade(this.#paths, capability, deadline);
           }
@@ -678,33 +697,55 @@ export class CoordinatorClient {
   }
 
   async #waitForExactCoordinator(probe: CoordinatorRequestEnvelope, capability: string, deadline: number, child: ReturnType<typeof spawn>): Promise<void> {
-    // A spawned coordinator that is no longer alive has crashed; fail fast with a
-    // precise diagnostic instead of polling to a stale deadline. isProcessAlive is
-    // safe here: a false positive (extremely unlikely within the bounded readiness
-    // window) only means polling continues until the handshake succeeds or the
-    // deadline lapses.
     const pid = child.pid;
     if (pid === undefined) throw new CoordinationRuntimeError('coordinator-unavailable', 'spawned coordinator process did not receive a pid before readiness verification');
-    while (Date.now() < deadline) {
-      if (!isProcessAlive(pid)) throw new CoordinationRuntimeError('coordinator-unavailable', 'spawned coordinator exited before reaching readiness', [`pid=${String(pid)}`]);
+    let lastConnectionFailure: unknown = null;
+    const attestEndpoint = async (): Promise<boolean> => {
       try {
         const response = this.#assertSuccess(await sendOnce(this.#paths, capability, probe, Math.min(500, this.#requestTimeoutMs)));
         const compatibility = this.#assertCoordinatorCompatibility(response);
         if (compatibility.kind !== 'exact-target') throw new CoordinationRuntimeError('protocol-mismatch', `coordinator startup reached ${compatibility.package_build}, not this package's exact target build`);
-        return;
+        await this.#assertEndpointLifecycle(response, compatibility);
+        return true;
       } catch (error) {
         if (!isConnectionFailure(error)) throw error;
-        await sleep(50);
+        lastConnectionFailure = error;
+        return false;
       }
+    };
+    while (Date.now() < deadline) {
+      // Endpoint authority wins over process-local child state. A child that lost
+      // the lifecycle election may exit after the exact winner is already live.
+      if (await attestEndpoint()) return;
+      if (!isProcessAlive(pid)) {
+        // Re-attest once after observing death so a winner published between the
+        // preceding connection miss and this liveness observation is accepted.
+        if (await attestEndpoint()) return;
+        throw new CoordinationRuntimeError('coordinator-unavailable', 'spawned coordinator exited and no exact-current endpoint reached readiness', [`pid=${String(pid)}`, `last_transport=${lastConnectionFailure instanceof Error ? lastConnectionFailure.message : String(lastConnectionFailure)}`]);
+      }
+      await sleep(50);
     }
-    if (!isProcessAlive(pid)) throw new CoordinationRuntimeError('coordinator-unavailable', 'spawned coordinator exited before reaching readiness', [`pid=${String(pid)}`]);
-    throw new CoordinationRuntimeError('coordinator-unavailable', 'coordinator did not complete schema migration, start, and exact-target reconnect verification before the deadline');
+    if (await attestEndpoint()) return;
+    throw new CoordinationRuntimeError('coordinator-unavailable', 'coordinator did not complete schema migration, start, and exact-target lifecycle attestation before the deadline', [`spawned_pid=${String(pid)}`, `spawned_alive=${String(isProcessAlive(pid))}`]);
   }
 
   #probeRequest(): CoordinatorRequestEnvelope {
     return {
       schema_version: 'autopilot.coordinator_request.v1', protocol_version: AUTOPILOT_COORDINATOR_PROTOCOL_VERSION, request_id: `probe-${randomUUID()}`, action: 'handshake', idempotency_key: null, repo_id: 'global', workstream_run: null, session_id: null, fencing_generation: null, expected_version: null, payload: EMPTY_COORDINATOR_PAYLOAD,
     };
+  }
+
+  async #assertEndpointLifecycle(response: CoordinatorResponseEnvelope, compatibility: Exclude<CoordinatorRuntimeCompatibility, { readonly kind: 'incompatible' }>): Promise<void> {
+    const text = await readExactLockText(this.#paths.lockPath);
+    if (text === null) throw new CoordinationRuntimeError('coordinator-unavailable', 'coordinator handshake has no current lifecycle authority lock');
+    let lock: ReturnType<typeof parseKnownCompatibleCurrentCoordinatorLock> = null;
+    try { lock = parseKnownCompatibleCurrentCoordinatorLock(JSON.parse(text) as unknown); } catch { /* fail below */ }
+    if (lock === null) throw new CoordinationRuntimeError('protocol-mismatch', 'coordinator handshake is paired with an unknown lifecycle authority lock');
+    if (lock.package_build !== compatibility.package_build || lock.protocol_version !== compatibility.protocol_version || lock.database_schema_version !== compatibility.database_schema_version) throw new CoordinationRuntimeError('protocol-mismatch', 'coordinator endpoint handshake disagrees with its lifecycle authority lock', [lock.package_build, compatibility.package_build]);
+    if (!isExactProcessAlive(lock.pid, lock.process_start_identity)) throw new CoordinationRuntimeError('coordinator-unavailable', 'coordinator lifecycle authority does not identify the live endpoint process', [`pid=${String(lock.pid)}`]);
+    if (compatibility.kind !== 'exact-target') return;
+    const payload = response.payload;
+    if (payload['lifecycle_lock_schema'] !== lock.schema_version || payload['lifecycle_pid'] !== lock.pid || payload['lifecycle_boot_id'] !== lock.boot_id || payload['lifecycle_process_start_identity'] !== lock.process_start_identity || payload['lifecycle_instance_id'] !== lock.instance_id || payload['lifecycle_started_at'] !== lock.started_at) throw new CoordinationRuntimeError('coordinator-unavailable', 'exact-current endpoint handshake does not attest its exact lifecycle identity', [`pid=${String(lock.pid)}`, `instance_id=${lock.instance_id}`]);
   }
 
   #assertCoordinatorCompatibility(response: CoordinatorResponseEnvelope): Exclude<CoordinatorRuntimeCompatibility, { readonly kind: 'incompatible' }> {

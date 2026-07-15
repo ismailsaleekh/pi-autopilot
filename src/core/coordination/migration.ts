@@ -25,6 +25,7 @@ import { parseAutopilotUnitMerge, type AutopilotUnitMerge } from '../unit-merge.
 import { parseCoordinationEditLease, parseCoordinationUnitAttempt, parseCoordinationWorktreeOperation } from './contracts.ts';
 import { AUTOPILOT_COORDINATOR_PROTOCOL_VERSION, type CoordinationAcquisitionGroup, type CoordinationChangeReservation, type CoordinationEditLease, type CoordinationReconciliationEvidence, type CoordinationRepository, type CoordinationReservationObligation, type CoordinationRun, type CoordinationRunResource, type CoordinationRunStatus, type CoordinationUnitAttempt, type CoordinationWorktree, type CoordinationWorktreeOperation, type CoordinationWorktreeState } from './types.ts';
 import { legacyConservativeIntegrationConflict } from './integration-conflicts.ts';
+import { deterministicWorktreeId } from './worktree-identity.ts';
 
 export const COORDINATION_MIGRATION_MAX_FILE_BYTES = 64 * 1024 * 1024;
 export const COORDINATION_MIGRATION_MAX_DATABASE_COMPONENT_BYTES = 256 * 1024 * 1024;
@@ -1344,10 +1345,12 @@ function buildImportPlan(inspection: LegacyInspection, repositoryIdentity: Migra
   const worktrees: CoordinationWorktree[] = [];
   for (const row of inspection.rows) {
     const mainState: CoordinationWorktreeState = row.status === 'closed' || inspection.ledgerTerminalizedRuns.has(row.workstream_run) ? 'terminal' : existsSync(row.main_worktree_path) ? 'active' : 'dirty';
-    worktrees.push({ schema_version: 'autopilot.coordination_worktree.v2', worktree_id: entityId('migration-worktree', `${row.workstream_run}\0main`), owner: { repo_id: repoKey, autopilot_id: row.autopilot_id, workstream_run: row.workstream_run, unit_id: 'main', attempt: 1 }, kind: 'main', canonical_path: row.main_worktree_path, git_common_dir: row.git_common_dir, branch: row.branch, state: mainState, version: 1 });
+    const mainOwner = { repo_id: repoKey, autopilot_id: row.autopilot_id, workstream_run: row.workstream_run, unit_id: 'main', attempt: 1 } as const;
+    worktrees.push({ schema_version: 'autopilot.coordination_worktree.v2', worktree_id: deterministicWorktreeId(mainOwner, 'main'), owner: mainOwner, kind: 'main', canonical_path: row.main_worktree_path, git_common_dir: row.git_common_dir, branch: row.branch, state: mainState, version: 1 });
     for (const unit of inspection.unitMetadata.worktrees.filter((entry) => isInside(dirname(row.main_worktree_path), entry.worktree_path))) {
       const state: CoordinationWorktreeState = unit.status === 'active' ? existsSync(unit.worktree_path) ? 'active' : 'dirty' : unit.status === 'quarantined' ? 'quarantined' : 'terminal';
-      worktrees.push({ schema_version: 'autopilot.coordination_worktree.v2', worktree_id: entityId('migration-worktree', `${row.workstream_run}\0${unit.unit_id}\0${String(unit.attempt)}`), owner: { repo_id: repoKey, autopilot_id: row.autopilot_id, workstream_run: row.workstream_run, unit_id: unit.unit_id, attempt: unit.attempt }, kind: 'unit', canonical_path: unit.worktree_path, git_common_dir: row.git_common_dir, branch: unit.branch, state, version: 1 });
+      const unitOwner = { repo_id: repoKey, autopilot_id: row.autopilot_id, workstream_run: row.workstream_run, unit_id: unit.unit_id, attempt: unit.attempt } as const;
+      worktrees.push({ schema_version: 'autopilot.coordination_worktree.v2', worktree_id: deterministicWorktreeId(unitOwner, 'unit'), owner: unitOwner, kind: 'unit', canonical_path: unit.worktree_path, git_common_dir: row.git_common_dir, branch: unit.branch, state, version: 1 });
     }
   }
   const frozenRuns = Object.freeze(runs);

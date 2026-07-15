@@ -10,6 +10,7 @@ import { coordinationCutoverCommitted } from "./migration-paths.js";
 import { coordinatorRuntimePaths } from "./runtime-paths.js";
 import { currentBootId, isProcessAlive } from "./process-identity.js";
 import { readCoordinatorSessionContext } from "./supervisor.js";
+import { deterministicWorktreeId, sameWorktreeAuthority, worktreeOwnerKindKey } from "./worktree-identity.js";
 import { AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV } from "../names.js";
 const TERMINAL_STAGES = new Set(['committed', 'compensated', 'failed']);
 export const WORKTREE_SAGA_BOUNDARIES = ['after-prepare', 'before-probe', 'after-probe', 'after-start', 'before-action', 'after-action', 'after-action-report', 'before-verification', 'after-verification', 'after-evidence', 'after-verified-commit', 'after-terminal-commit'];
@@ -23,6 +24,20 @@ export class WorktreeSagaCompensatedError extends Error {
         super(message);
         this.proof = Object.freeze([...proof]);
     }
+}
+function phaseFailure(operation, phase, error, reconciliationError) {
+    const original = error instanceof Error ? error.message : String(error);
+    const transition = reconciliationError instanceof Error ? reconciliationError.message : reconciliationError === undefined ? null : String(reconciliationError);
+    const transport = [error, reconciliationError].some((candidate) => candidate instanceof CoordinationRuntimeError
+        ? candidate.code === 'coordinator-unavailable' || candidate.code === 'coordinator-contention'
+        : candidate instanceof Error && 'code' in candidate && ['ENOENT', 'ECONNREFUSED', 'ECONNRESET', 'EPIPE', 'ETIMEDOUT'].includes(String(candidate.code)));
+    const code = error instanceof CoordinationRuntimeError && error.code === 'recovery-required' ? 'recovery-required' : transport ? 'coordinator-unavailable' : 'recovery-required';
+    return new CoordinationRuntimeError(code, `owned worktree saga ${operation.operation_id} failed during ${phase}: ${original}${transition === null ? '' : '; durable reconciling report also failed'}`, [
+        `operation_id=${operation.operation_id}`,
+        `phase=${phase}`,
+        `durable_stage=${operation.stage}`,
+        ...(transition === null ? [] : [`reconciling_transition=${transition}`]),
+    ]);
 }
 function record(value, label) {
     if (typeof value !== 'object' || value === null || Array.isArray(value))
@@ -66,9 +81,6 @@ function ownerFor(spec) {
         unit_id: spec.kind === 'main' ? 'main' : spec.unitId,
         attempt: spec.kind === 'main' ? 1 : spec.attempt,
     };
-}
-function worktreeId(owner, kind) {
-    return durableIdentifier('worktree', `${owner.repo_id}\0${owner.autopilot_id}\0${owner.workstream_run}\0${owner.unit_id}\0${String(owner.attempt)}\0${kind}`);
 }
 function operationId(owner, type, key, intent) {
     return durableIdentifier('operation', `${owner.repo_id}\0${owner.autopilot_id}\0${owner.workstream_run}\0${owner.unit_id}\0${String(owner.attempt)}\0${type}\0${key}\0${canonicalJson(intent)}`);
@@ -166,13 +178,25 @@ export class OwnedWorktreeSagaClient {
     async prepare(spec) {
         assertSessionOwnsSpec(this.#session, spec);
         const owner = ownerFor(spec);
-        const id = worktreeId(owner, spec.kind);
-        const existingWorktree = (await this.worktrees()).find((entry) => entry.worktree_id === id);
-        const worktree = existingWorktree ?? {
+        const id = deterministicWorktreeId(owner, spec.kind);
+        const proposed = {
             schema_version: 'autopilot.coordination_worktree.v2', worktree_id: id, owner, kind: spec.kind,
             canonical_path: resolve(spec.intent.worktree_path), git_common_dir: resolve(spec.intent.git_common_dir), branch: spec.intent.branch,
             state: spec.initialWorktreeState, version: 1,
         };
+        const allWorktrees = await this.worktrees();
+        const semantic = allWorktrees.filter((entry) => entry.state !== 'removed' && worktreeOwnerKindKey(entry) === worktreeOwnerKindKey(proposed));
+        if (semantic.some((entry) => !sameWorktreeAuthority(entry, proposed)))
+            throw new CoordinationRuntimeError('store-corrupt', 'active worktree owner/kind projections disagree in authority-bearing identity', semantic.map((entry) => entry.worktree_id));
+        const deterministic = semantic.find((entry) => entry.worktree_id === id);
+        const withHistory = new Set((await this.operations()).map((entry) => entry.worktree_id));
+        const historical = semantic.filter((entry) => withHistory.has(entry.worktree_id));
+        if (historical.length > 1)
+            throw new CoordinationRuntimeError('recovery-required', 'duplicate active worktree projections carry multiple operation histories', historical.map((entry) => entry.worktree_id));
+        // A terminal remove replay must retain the exact durable row/version even
+        // though it is no longer an active semantic authority candidate.
+        const existingWorktree = historical[0] ?? deterministic ?? semantic[0] ?? allWorktrees.find((entry) => entry.worktree_id === id);
+        const worktree = existingWorktree ?? proposed;
         const opId = spec.operationId ?? operationId(owner, spec.operationType, spec.operationKey, spec.intent);
         const existing = (await this.operations()).find((entry) => entry.operation_id === opId);
         if (existing !== undefined) {
@@ -243,7 +267,7 @@ async function sagaExecutionLockIsStale(lockPath) {
 async function withSagaExecutionLock(session, spec, run) {
     const owner = ownerFor(spec);
     const lockRoot = join(session.state_root, 'worktrees', session.repo_key, '.locks');
-    const lockPath = join(lockRoot, `${worktreeId(owner, spec.kind)}.saga.lock`);
+    const lockPath = join(lockRoot, `${deterministicWorktreeId(owner, spec.kind)}.saga.lock`);
     const reclaimPath = `${lockPath}.reclaim`;
     await mkdir(lockRoot, { recursive: true, mode: 0o700 });
     for (let attempt = 0; attempt < 1_400; attempt += 1) {
@@ -347,8 +371,10 @@ export async function executeOwnedWorktreeSaga(spec, callbacks, env = process.en
             });
             return { managed: true, operation: committed.operation, worktree: committed.worktree, replayed: true };
         }
+        let phase = 'prepared';
         try {
             await observeBoundary(callbacks, 'after-prepare');
+            phase = 'preflight-probe';
             await observeBoundary(callbacks, 'before-probe');
             const inspection = await callbacks.inspect();
             await observeBoundary(callbacks, 'after-probe');
@@ -356,6 +382,7 @@ export async function executeOwnedWorktreeSaga(spec, callbacks, env = process.en
                 throw new CoordinationRuntimeError('recovery-required', 'worktree operation requires owned recovery before mutation', inspection.proof);
             if (operation.stage === 'prepared' || operation.stage === 'reconciling') {
                 const preflightSteps = operation.completed_steps.includes('preflight-probe') ? operation.completed_steps : [...operation.completed_steps, 'preflight-probe'];
+                phase = 'start-report';
                 const started = await client.transition({
                     operation, stage: 'in-progress', completedSteps: preflightSteps, currentStep: 'external-action',
                     recoveryAttempts: operation.recovery_attempts + (operation.stage === 'reconciling' ? 1 : 0), verificationEvidence: null,
@@ -366,6 +393,7 @@ export async function executeOwnedWorktreeSaga(spec, callbacks, env = process.en
                 await observeBoundary(callbacks, 'after-start');
             }
             else if (operation.stage === 'in-progress' && !operation.completed_steps.includes('preflight-probe')) {
+                phase = 'start-report';
                 const probed = await client.transition({
                     operation, stage: 'in-progress', completedSteps: [...operation.completed_steps, 'preflight-probe'], currentStep: 'external-action',
                     recoveryAttempts: operation.recovery_attempts, verificationEvidence: null, errorCode: null, worktreeState: worktree.state,
@@ -375,11 +403,13 @@ export async function executeOwnedWorktreeSaga(spec, callbacks, env = process.en
                 worktree = probed.worktree;
             }
             if (inspection.outcome === 'not-applied') {
+                phase = 'external-action';
                 await observeBoundary(callbacks, 'before-action');
                 await callbacks.action();
                 await observeBoundary(callbacks, 'after-action');
             }
             if (!operation.completed_steps.includes('external-action')) {
+                phase = 'action-report';
                 const acted = await client.transition({
                     operation, stage: 'in-progress', completedSteps: [...operation.completed_steps, 'external-action'], currentStep: 'postcondition-verification',
                     recoveryAttempts: operation.recovery_attempts, verificationEvidence: null, errorCode: null, worktreeState: worktree.state,
@@ -389,12 +419,15 @@ export async function executeOwnedWorktreeSaga(spec, callbacks, env = process.en
                 worktree = acted.worktree;
             }
             await observeBoundary(callbacks, 'after-action-report');
+            phase = 'postcondition-verification';
             await observeBoundary(callbacks, 'before-verification');
             const proof = await callbacks.verify();
             await observeBoundary(callbacks, 'after-verification');
+            phase = 'evidence-write';
             const evidence = await client.writeEvidence(operation, 'verified', proof, null);
             await observeBoundary(callbacks, 'after-evidence');
             const completedWithVerification = operation.completed_steps.includes('postcondition-verification') ? operation.completed_steps : [...operation.completed_steps, 'postcondition-verification'];
+            phase = 'verified-report';
             const verified = await client.transition({
                 operation, stage: 'verified', completedSteps: completedWithVerification, currentStep: null,
                 recoveryAttempts: operation.recovery_attempts, verificationEvidence: evidence, errorCode: null, worktreeState: worktree.state,
@@ -403,6 +436,7 @@ export async function executeOwnedWorktreeSaga(spec, callbacks, env = process.en
             operation = verified.operation;
             worktree = verified.worktree;
             await observeBoundary(callbacks, 'after-verified-commit');
+            phase = 'commit-report';
             const committed = await client.transition({
                 operation, stage: 'committed', completedSteps: operation.completed_steps, currentStep: null,
                 recoveryAttempts: operation.recovery_attempts, verificationEvidence: evidence, errorCode: null,
@@ -424,15 +458,18 @@ export async function executeOwnedWorktreeSaga(spec, callbacks, env = process.en
                 throw error;
             }
             if (!TERMINAL_STAGES.has(operation.stage) && operation.stage !== 'verified') {
-                await client.transition({
-                    operation, stage: 'reconciling', completedSteps: operation.completed_steps, currentStep: operation.current_step ?? 'external-action',
-                    recoveryAttempts: operation.recovery_attempts, verificationEvidence: operation.verification_evidence, errorCode: errorCode(error),
-                    worktreeState: worktree.state, transitionKey: `reconciling-${String(operation.version)}-${randomUUID()}`,
-                }).catch((transitionError) => {
-                    throw new CoordinationRuntimeError('system-fatal', 'external worktree operation failed and its durable reconciliation transition also failed', [error instanceof Error ? error.message : String(error), transitionError instanceof Error ? transitionError.message : String(transitionError)]);
-                });
+                try {
+                    await client.transition({
+                        operation, stage: 'reconciling', completedSteps: operation.completed_steps, currentStep: phase,
+                        recoveryAttempts: operation.recovery_attempts, verificationEvidence: operation.verification_evidence, errorCode: errorCode(error),
+                        worktreeState: worktree.state, transitionKey: `reconciling-${String(operation.version)}-${phase}`,
+                    });
+                }
+                catch (transitionError) {
+                    throw phaseFailure(operation, phase, error, transitionError);
+                }
             }
-            throw error;
+            throw phaseFailure(operation, phase, error);
         }
     });
 }

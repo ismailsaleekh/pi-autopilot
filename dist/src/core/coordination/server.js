@@ -61,6 +61,7 @@ async function acquireCoordinatorLock(paths, adoption) {
     let predecessorRestore = null;
     let createdCurrent = false;
     let createdFence = false;
+    let provenStaleCurrentOwner = null;
     let activated = false;
     const startIdentity = processStartIdentity(process.pid);
     if (startIdentity === null) {
@@ -94,10 +95,18 @@ async function acquireCoordinatorLock(paths, adoption) {
             catch { /* fail below */ }
             if (current === null)
                 throw new CoordinationRuntimeError('protocol-mismatch', 'current-generation lifecycle lock belongs to an unknown build');
-            // PID liveness always wins. Boot-id disagreement is never stale proof.
-            if (isProcessAlive(current.pid))
-                throw new CoordinatorAlreadyRunningError(`coordinator is already running as pid ${String(current.pid)}`);
-            currentTombstone = await quarantineExactLock(paths.lockPath, currentText, 'dead current-generation coordinator lock');
+            // Boot-id disagreement is never stale proof. Current-generation locks also
+            // carry OS process-birth identity, so PID reuse can be distinguished from
+            // the exact coordinator without signaling or deleting by PID alone.
+            if (isProcessAlive(current.pid)) {
+                const observedStart = processStartIdentity(current.pid);
+                if (observedStart === null)
+                    throw new CoordinationRuntimeError('recovery-required', 'live current-generation PID has ambiguous process-creation identity; elected startup cannot reclaim it', [`pid=${String(current.pid)}`]);
+                if (observedStart === current.process_start_identity)
+                    throw new CoordinatorAlreadyRunningError(`coordinator is already running as pid ${String(current.pid)}`);
+            }
+            provenStaleCurrentOwner = current;
+            currentTombstone = await quarantineExactLock(paths.lockPath, currentText, 'dead or PID-reused current-generation coordinator lock');
         }
         const currentHandle = await open(paths.lockPath, 'wx', 0o600);
         try {
@@ -122,7 +131,8 @@ async function acquireCoordinatorLock(paths, adoption) {
             const upgradeHandoff = intent !== null && intent.target.package_build === COORDINATOR_UPGRADE_PATH.target.package_build && intent.predecessor_fence !== null && ['starting', 'reconnect-verified'].includes(intent.state) && samePredecessorLock(predecessor, intent.predecessor_fence);
             const adoptedHandoff = adoption !== undefined && samePredecessorLock(predecessor, adoption.predecessorFence);
             const authorizedHandoff = upgradeHandoff || adoptedHandoff;
-            if (isProcessAlive(predecessor.pid) && !authorizedHandoff)
+            const pairedProvenStaleFence = provenStaleCurrentOwner !== null && predecessor.pid === provenStaleCurrentOwner.pid && predecessor.started_at === provenStaleCurrentOwner.started_at;
+            if (isProcessAlive(predecessor.pid) && !authorizedHandoff && !pairedProvenStaleFence)
                 throw new CoordinatorAlreadyRunningError(`predecessor lifecycle path is fenced by live pid ${String(predecessor.pid)}`);
             if (authorizedHandoff) {
                 predecessorRestore = predecessor;
@@ -151,12 +161,20 @@ async function acquireCoordinatorLock(paths, adoption) {
             predecessorTombstone = null;
         }
         const verifyOrRepairFence = async () => {
-            const guard = acquireSerializedProcessGuard(paths.lifecycleElectionPath, 2_000, 'predecessor fence maintenance');
+            let guard;
+            try {
+                guard = acquireSerializedProcessGuard(paths.lifecycleElectionPath, 25, 'predecessor fence maintenance');
+            }
+            catch (error) {
+                if (error instanceof CoordinationRuntimeError && error.code === 'coordinator-contention')
+                    return 'deferred';
+                throw error;
+            }
             try {
                 const text = await readExactLockText(paths.predecessorLockPath);
                 if (text === null) {
                     await writePredecessorFence(paths.predecessorLockPath, predecessorFence);
-                    return;
+                    return 'verified';
                 }
                 const observed = parsePredecessorCoordinatorLock(JSON.parse(text));
                 if (observed !== null && samePredecessorFenceOwner(observed, predecessorFence)) {
@@ -164,7 +182,7 @@ async function acquireCoordinatorLock(paths, adoption) {
                     if (!samePredecessorLock(observed, refreshed))
                         await replacePredecessorFence(paths.predecessorLockPath, refreshed);
                     predecessorFence = refreshed;
-                    return;
+                    return 'verified';
                 }
                 if (observed === null)
                     throw new CoordinationRuntimeError('system-fatal', 'old-format predecessor fence became unreadable');
@@ -174,6 +192,7 @@ async function acquireCoordinatorLock(paths, adoption) {
                 predecessorFence = { ...predecessorFence, boot_id: predecessorCompatibleBootId() };
                 await writePredecessorFence(paths.predecessorLockPath, predecessorFence);
                 await discardLockTombstone(tombstone);
+                return 'verified';
             }
             finally {
                 guard.release();
@@ -303,7 +322,7 @@ function errorResponse(requestId, error) {
         payload: { message: runtime.message, evidence: runtime.evidence },
     };
 }
-function handleSocket(socket, store, capability, paths, backgroundFailure, testHooks) {
+function handleSocket(socket, store, capability, paths, lifecycle, backgroundFailure, testHooks) {
     const decoder = new CoordinatorFrameDecoder();
     let chain = Promise.resolve();
     socket.on('data', (chunk) => {
@@ -354,6 +373,19 @@ function handleSocket(socket, store, capability, paths, backgroundFailure, testH
                         if (upgradeIntent !== null && upgradeIntent.state !== 'committed' && action !== 'handshake' && action !== 'status' && action !== 'doctor')
                             throw new CoordinationRuntimeError('coordinator-contention', 'coordinator upgrade is not durably committed; mutation authority remains closed');
                         response = store.handle(currentTransport.request);
+                        if (response.ok && currentTransport.request.action === 'handshake')
+                            response = {
+                                ...response,
+                                payload: {
+                                    ...response.payload,
+                                    lifecycle_lock_schema: lifecycle.schema_version,
+                                    lifecycle_pid: lifecycle.pid,
+                                    lifecycle_boot_id: lifecycle.boot_id,
+                                    lifecycle_process_start_identity: lifecycle.process_start_identity,
+                                    lifecycle_instance_id: lifecycle.instance_id,
+                                    lifecycle_started_at: lifecycle.started_at,
+                                },
+                            };
                         if (response.ok && response.committed_event_seq !== null)
                             await testHooks?.afterStoreCommitBeforeResponse?.(currentTransport.request.action, response);
                     }
@@ -417,7 +449,7 @@ export async function startCoordinatorServer(paths, clock, adoption, testHooks) 
         store = clock === undefined ? await CoordinatorStore.open(paths) : await CoordinatorStore.open(paths, clock);
         const openedStore = store;
         let timerFailure = null;
-        server = createServer((socket) => handleSocket(socket, openedStore, capability, paths, () => timerFailure, testHooks));
+        server = createServer((socket) => handleSocket(socket, openedStore, capability, paths, lifecycleLock.record, () => timerFailure, testHooks));
         await listen(server, paths.socketPath);
         serverListening = true;
         const openedServer = server;
@@ -428,8 +460,9 @@ export async function startCoordinatorServer(paths, clock, adoption, testHooks) 
         // restore operation enter the election.
         lifecycleLock.activate();
         offerTimer = setInterval(() => {
-            void lifecycleLock.verifyOrRepairFence().then(() => {
-                openedStore.sweepExpiredGrantOffers();
+            void lifecycleLock.verifyOrRepairFence().then((outcome) => {
+                if (outcome === 'verified')
+                    openedStore.sweepExpiredGrantOffers();
                 timerFailure = null;
             }).catch((error) => {
                 timerFailure = error instanceof Error ? error : new Error(String(error));

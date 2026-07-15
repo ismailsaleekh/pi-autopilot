@@ -47,6 +47,25 @@ void it('reaches a freshly spawned real coordinator within the default readiness
   }
 });
 
+void it('lets independent startup clients attest one exact lifecycle winner', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'pi-autopilot-readiness-race-'));
+  const env = { ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: join(root, 'state'), PI_OFFLINE: '1', PI_SKIP_VERSION_CHECK: '1', PI_TELEMETRY: '0' };
+  try {
+    const left = new CoordinatorClient({ env });
+    const right = new CoordinatorClient({ env });
+    const [leftHandshake, rightHandshake] = await Promise.all([left.query('handshake'), right.query('handshake')]);
+    assert.equal(leftHandshake.payload['lifecycle_instance_id'], rightHandshake.payload['lifecycle_instance_id']);
+    assert.equal(leftHandshake.payload['lifecycle_pid'], rightHandshake.payload['lifecycle_pid']);
+    assert.equal(leftHandshake.payload['package_build'], rightHandshake.payload['package_build']);
+    const lock = JSON.parse(await readFile(coordinatorRuntimePaths(env).lockPath, 'utf8')) as Record<string, unknown>;
+    assert.equal(lock['instance_id'], leftHandshake.payload['lifecycle_instance_id']);
+    assert.equal(lock['pid'], leftHandshake.payload['lifecycle_pid']);
+    await stopSpawnedCoordinator(coordinatorRuntimePaths(env).lockPath);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 void it('fails loudly and quickly when the readiness window is deliberately too small', async () => {
   const root = await mkdtemp(join(tmpdir(), 'pi-autopilot-readiness-tight-'));
   const env = { ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: join(root, 'state'), PI_OFFLINE: '1', PI_SKIP_VERSION_CHECK: '1', PI_TELEMETRY: '0' };

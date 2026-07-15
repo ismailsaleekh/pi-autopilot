@@ -4,6 +4,7 @@ import { isAbsolute, normalize, relative, resolve, sep } from 'node:path';
 import { platform } from 'node:os';
 import { AUTOPILOT_JSON_SCHEMAS, AUTOPILOT_STATUS_ENTRY_JSON_SCHEMA, } from "./schemas.js";
 import { AUTOPILOT_AUDIT_CLASSIFICATION_VALUES, AUTOPILOT_CLOSURE_GATE_STATUS_VALUES, AUTOPILOT_COMMAND_STATUS_VALUES, AUTOPILOT_CONTEXT_GATE_VALUES, AUTOPILOT_DECISION_EVENT_VALUES, AUTOPILOT_EVENT_TYPE_VALUES, AUTOPILOT_EXCEPTION_STATE_VALUES, AUTOPILOT_EXECUTION_AUDIT_PATH_SET_VALUES, AUTOPILOT_EXECUTION_COMMIT_ORIGIN_VALUES, AUTOPILOT_HANDOFF_REASON_VALUES, AUTOPILOT_HEAD_CHANGE_KIND_VALUES, AUTOPILOT_QUALITY_PROFILE_VALUES, AUTOPILOT_RISK_LEVEL_VALUES, AUTOPILOT_ROLE_VALUES, AUTOPILOT_SEVERITY_VALUES, AUTOPILOT_STATUS_CHANGED_PATHS_LIMIT, AUTOPILOT_TEMPLATE_VALUES, AUTOPILOT_THINKING_VALUES, AUTOPILOT_UNIT_STATE_VALUES, AUTOPILOT_VERDICT_VALUES, AUTOPILOT_WORK_ITEM_STATE_VALUES, AUTOPILOT_WORKSTREAM_STATUS_VALUES, } from "./types.js";
+import { opaqueToolCallIdIssue } from "../tool-call-id.js";
 const ISO_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;
 const SHA256 = /^sha256:[a-f0-9]{64}$/u;
 const WORKSTREAM = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
@@ -251,7 +252,9 @@ function assertReceiptShape(value) {
         expectString(record['status_output'], '/status_output', issues, { max: 1024 });
         expectString(record['status_sha256'], '/status_sha256', issues, { pattern: SHA256 });
         expectString(record['schema_sha256'], '/schema_sha256', issues, { pattern: SHA256 });
-        expectString(record['tool_call_id'], '/tool_call_id', issues, { max: 200 });
+        const toolCallIdIssue = opaqueToolCallIdIssue(record['tool_call_id']);
+        if (toolCallIdIssue !== null)
+            issues.push(`/tool_call_id ${toolCallIdIssue}`);
         checkProviderIdentity(record['provider_identity'], '/provider_identity', issues);
         expectString(record['expected_identity_hash'], '/expected_identity_hash', issues, { pattern: SHA256 });
     }

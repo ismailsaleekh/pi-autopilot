@@ -6,6 +6,7 @@ import { parseAutopilotExecutionAudit, parseAutopilotReceipt, parseAutopilotStat
 import type { AutopilotExecutionAudit, AutopilotReceipt, AutopilotRole, AutopilotStatusEntry, AutopilotUnitSpec, AutopilotVerdict } from '../contracts/types.ts';
 import { writeJsonAtomic } from '../parallel-runtime.ts';
 import { CoordinationRuntimeError } from './failures.ts';
+import { opaqueToolCallIdIssue } from '../tool-call-id.ts';
 import type { CoordinationChildLease, CoordinationEvidenceRef } from './types.ts';
 
 export const AUTOPILOT_CHILD_TERMINAL_ACCEPTANCE_SCHEMA = 'autopilot.child_terminal_acceptance.v1' as const;
@@ -61,9 +62,10 @@ function identifier(value: JsonRecord, field: string, label: string): string {
 }
 
 function opaqueToken(value: JsonRecord, field: string, label: string): string {
-  const entry = text(value, field, label, 200);
-  if (entry.includes('|') && entry.split('|').some((segment) => segment.length === 0)) throw new CoordinationRuntimeError('invalid-state', `${label}.${field} is not a bounded opaque token`);
-  return entry;
+  const entry = value[field];
+  const issue = opaqueToolCallIdIssue(entry);
+  if (issue !== null) throw new CoordinationRuntimeError('invalid-state', `${label}.${field} ${issue}`);
+  return entry as string;
 }
 
 function evidence(value: unknown, label: string): CoordinationEvidenceRef {

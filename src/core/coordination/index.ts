@@ -31,3 +31,5 @@ export * from './transition-model.ts';
 export * from './types.ts';
 export * from './upgrade-contracts.ts';
 export * from './upgrade.ts';
+export * from './unavailable-recovery.ts';
+export * from './worktree-identity.ts';

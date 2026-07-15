@@ -31,3 +31,5 @@ export * from "./transition-model.js";
 export * from "./types.js";
 export * from "./upgrade-contracts.js";
 export * from "./upgrade.js";
+export * from "./unavailable-recovery.js";
+export * from "./worktree-identity.js";

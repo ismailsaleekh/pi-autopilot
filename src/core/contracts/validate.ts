@@ -47,6 +47,7 @@ import {
   type AutopilotVerdict,
   type AutopilotWitnessSpec,
 } from './types.ts';
+import { opaqueToolCallIdIssue } from '../tool-call-id.ts';
 
 const ISO_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;
 const SHA256 = /^sha256:[a-f0-9]{64}$/u;
@@ -330,7 +331,8 @@ function assertReceiptShape(value: unknown): void {
     expectString(record['status_output'], '/status_output', issues, { max: 1024 });
     expectString(record['status_sha256'], '/status_sha256', issues, { pattern: SHA256 });
     expectString(record['schema_sha256'], '/schema_sha256', issues, { pattern: SHA256 });
-    expectString(record['tool_call_id'], '/tool_call_id', issues, { max: 200 });
+    const toolCallIdIssue = opaqueToolCallIdIssue(record['tool_call_id']);
+    if (toolCallIdIssue !== null) issues.push(`/tool_call_id ${toolCallIdIssue}`);
     checkProviderIdentity(record['provider_identity'], '/provider_identity', issues);
     expectString(record['expected_identity_hash'], '/expected_identity_hash', issues, { pattern: SHA256 });
   }

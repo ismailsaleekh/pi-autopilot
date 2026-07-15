@@ -216,6 +216,29 @@ void describe('transactional coordinator runtime', () => {
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 
+  void it('reclaims a PID-reused known current lock and its paired predecessor fence without signaling the reused process', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pi-autopilot-coordinator-pid-reuse-'));
+    const paths = coordinatorRuntimePaths({ ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: join(root, 'state') });
+    await mkdir(paths.coordinatorRoot, { recursive: true });
+    const startedAt = '2026-07-15T00:00:00.000Z';
+    const stale = { schema_version: 'autopilot.coordinator_lock.v2', pid: process.pid, boot_id: 'stale-owner-boot', process_start_identity: 'linux-start-ticks:1', token: 'stale-owner-token', instance_id: 'stale-owner-instance', package_build: '1.1.3-cf45', protocol_version: '1.6', database_schema_version: 12, started_at: startedAt };
+    const fence = { schema_version: 'autopilot.coordinator_lock.v1', pid: process.pid, boot_id: 'stale-owner-boot', token: 'stale-fence-token', started_at: startedAt };
+    await writeFile(paths.lockPath, `${JSON.stringify(stale)}\n`, 'utf8');
+    await writeFile(paths.predecessorLockPath, `${JSON.stringify(fence)}\n`, 'utf8');
+    let server: Awaited<ReturnType<typeof startCoordinatorServer>> | null = null;
+    try {
+      server = await startCoordinatorServer(paths);
+      assert.equal(isProcessAlive(process.pid), true, 'PID reuse reconciliation must not signal the current process');
+      const current = JSON.parse(await readFile(paths.lockPath, 'utf8')) as Readonly<Record<string, unknown>>;
+      assert.equal(current['pid'], process.pid);
+      assert.notEqual(current['instance_id'], stale.instance_id);
+      assert.equal(current['process_start_identity'], processStartIdentity(process.pid));
+    } finally {
+      if (server !== null) await server.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   void it('forbids ordinary server startup from migrating an existing schema-6 authority database in place', async () => {
     const root = await mkdtemp(join(tmpdir(), 'pi-autopilot-schema6-direct-start-'));
     const paths = coordinatorRuntimePaths({ ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: join(root, 'state') });

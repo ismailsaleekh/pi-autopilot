@@ -292,13 +292,14 @@ void describe('Coordination Fabric contracts and invariants', () => {
     assert.equal(coordinationFailureDefinition('store-corrupt').failure_class, 'system-fatal');
   });
 
-  void it('locks the duplicate, timeout, stale generation, crash, corruption, disk, permission, and partial Git failure matrix', () => {
+  void it('locks duplicate, timeout, stale generation, crash, socketless-owner, corruption, disk, permission, and partial Git failures', () => {
     assert.deepEqual(COORDINATION_FAILURE_MATRIX.map((entry) => entry.scenario), [
       'client-timeout-before-response',
       'duplicate-or-delayed-request',
       'stale-session-generation',
       'coordinator-crash-before-commit',
       'coordinator-crash-after-commit',
+      'known-live-owner-socket-unavailable',
       'store-integrity-failure',
       'disk-capacity-or-io-failure',
       'filesystem-permission-failure',

@@ -532,6 +532,10 @@ void describe('package manifest and payload', () => {
     const compiledMigration = await readFile(new URL('dist/src/core/coordination/migration.js', root), 'utf8');
     const sourceRunner = await readFile(new URL('src/core/agent-runner.ts', root), 'utf8');
     const compiledRunner = await readFile(new URL('dist/src/core/agent-runner.js', root), 'utf8');
+    const sourceUnavailableRecovery = await readFile(new URL('src/core/coordination/unavailable-recovery.ts', root), 'utf8');
+    const compiledUnavailableRecovery = await readFile(new URL('dist/src/core/coordination/unavailable-recovery.js', root), 'utf8');
+    const sourceToolCallId = await readFile(new URL('src/core/tool-call-id.ts', root), 'utf8');
+    const compiledToolCallId = await readFile(new URL('dist/src/core/tool-call-id.js', root), 'utf8');
     for (const marker of ['register-authoritative-artifact', 'assign-adjudication', 'claim-adjudication-assignment', 'complete-adjudication', 'terminal_evidence_ref', 'materialization-read-expansion', 'checkpoint-child', 'deadlockFixedPointMeasure', 'evidence_artifacts', 'observations']) {
       assert.equal(sourceStore.includes(marker), true, `source is missing ${marker}`);
       assert.equal(compiledStore.includes(marker), true, `compiled coordinator is stale for ${marker}`);
@@ -543,6 +547,14 @@ void describe('package manifest and payload', () => {
     for (const marker of ['preemptionSignal', 'quarantineFailedUnit', 'writeAutopilotChildTerminalAcceptance', 'preserveOrResetFailedSourceAttempt']) {
       assert.equal(sourceRunner.includes(marker), true, `source runner is missing ${marker}`);
       assert.equal(compiledRunner.includes(marker), true, `compiled runner is stale for ${marker}`);
+    }
+    for (const marker of ['endpoint-recovered', 'process_start_identity', 'retireExactProcess']) {
+      assert.equal(sourceUnavailableRecovery.includes(marker), true, `source unavailable recovery is missing ${marker}`);
+      assert.equal(compiledUnavailableRecovery.includes(marker), true, `compiled unavailable recovery is stale for ${marker}`);
+    }
+    for (const marker of ['opaqueToolCallIdIssue', 'Unicode code points', "pattern: '^[^\\\\u0000]*$'"]) {
+      assert.equal(sourceToolCallId.includes(marker), true, `source tool-call-id contract is missing ${marker}`);
+      assert.equal(compiledToolCallId.includes(marker), true, `compiled tool-call-id contract is stale for ${marker}`);
     }
   });
 

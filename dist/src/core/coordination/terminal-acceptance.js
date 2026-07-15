@@ -4,6 +4,7 @@ import { join, relative, resolve } from 'node:path';
 import { parseAutopilotExecutionAudit, parseAutopilotReceipt, parseAutopilotStatusEntry, parseAutopilotUnitSpec } from "../contracts/index.js";
 import { writeJsonAtomic } from "../parallel-runtime.js";
 import { CoordinationRuntimeError } from "./failures.js";
+import { opaqueToolCallIdIssue } from "../tool-call-id.js";
 export const AUTOPILOT_CHILD_TERMINAL_ACCEPTANCE_SCHEMA = 'autopilot.child_terminal_acceptance.v1';
 const SHA256 = /^sha256:[a-f0-9]{64}$/u;
 const MAX_REF_LENGTH = 1024;
@@ -32,9 +33,10 @@ function identifier(value, field, label) {
     return entry;
 }
 function opaqueToken(value, field, label) {
-    const entry = text(value, field, label, 200);
-    if (entry.includes('|') && entry.split('|').some((segment) => segment.length === 0))
-        throw new CoordinationRuntimeError('invalid-state', `${label}.${field} is not a bounded opaque token`);
+    const entry = value[field];
+    const issue = opaqueToolCallIdIssue(entry);
+    if (issue !== null)
+        throw new CoordinationRuntimeError('invalid-state', `${label}.${field} ${issue}`);
     return entry;
 }
 function evidence(value, label) {

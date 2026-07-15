@@ -22,6 +22,7 @@ import {
   AUTOPILOT_WORK_ITEM_STATE_VALUES,
   AUTOPILOT_WORKSTREAM_STATUS_VALUES,
 } from './types.ts';
+import { opaqueToolCallIdJsonSchema } from '../tool-call-id.ts';
 
 export type JsonMap = Readonly<Record<string, unknown>>;
 
@@ -554,7 +555,7 @@ export const AUTOPILOT_RECEIPT_JSON_SCHEMA = {
     status_output: absolutePathSchema(),
     status_sha256: sha256Schema(),
     schema_sha256: sha256Schema(),
-    tool_call_id: boundedString(200),
+    tool_call_id: opaqueToolCallIdJsonSchema(),
     provider_identity: noExtraMap(
       {
         provider_id: boundedString(120),

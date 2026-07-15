@@ -5,6 +5,7 @@ import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { describe, it } from 'node:test';
+import { DatabaseSync } from 'node:sqlite';
 
 import { CoordinatorClient } from '../../src/core/coordination/client.ts';
 import { parseCoordinationRun, parseCoordinationSessionLease } from '../../src/core/coordination/contracts.ts';
@@ -157,6 +158,47 @@ void describe('owner-scoped worktree and Git saga recovery', () => {
     }
   });
 
+  void it('transactionally retires an exact schema-12 duplicate projection while preserving history', async () => {
+    const value = await setup('d');
+    let restarted: Awaited<ReturnType<typeof startCoordinatorServer>> | null = null;
+    try {
+      const saga = new OwnedWorktreeSagaClient(new CoordinatorClient({ env: value.env, autoStart: false }), value.session);
+      const create = unitCreateSpec(value, 'unit-duplicate');
+      await saga.prepare(create);
+      await recoverOwnedWorktreeSagas({ active: value.active, env: value.env });
+      const before = await saga.worktrees();
+      const canonical = before.find((entry) => entry.owner.unit_id === 'unit-duplicate');
+      if (canonical === undefined) throw new Error('canonical unit worktree is missing');
+      await value.server.close();
+      const database = new DatabaseSync(coordinatorRuntimePaths(value.env).databasePath);
+      try {
+        const duplicate = { ...canonical, worktree_id: 'migration-worktree-schema12-duplicate' };
+        database.prepare('INSERT INTO worktrees(entity_id, repo_id, workstream_run, payload_json, version) VALUES(?, ?, ?, ?, ?)').run(duplicate.worktree_id, duplicate.owner.repo_id, duplicate.owner.workstream_run, JSON.stringify(duplicate), duplicate.version);
+      } finally { database.close(); }
+      restarted = await startCoordinatorServer(coordinatorRuntimePaths(value.env));
+      const client = new CoordinatorClient({ env: value.env, autoStart: false });
+      const doctorBefore = await client.query('doctor');
+      const findings = doctorBefore.payload['invariant_findings'];
+      assert.equal(Array.isArray(findings) && findings.some((finding) => typeof finding === 'object' && finding !== null && (finding as Record<string, unknown>)['code'] === 'duplicate-active-worktree-authority'), true);
+
+      const next = { ...create, operationType: 'materialize' as const, operationKey: 'dedup-consumer', initialWorktreeState: 'active' as const, committedWorktreeState: 'active' as const, intent: { ...create.intent, base_sha: null, sparse_patterns: ['/src/base.ts'], paths: ['src/base.ts'] } };
+      await saga.prepare(next);
+      const status = await client.query('status', value.active.repo_key, value.active.workstream_run);
+      const worktrees = status.payload['worktrees'];
+      const operations = status.payload['worktree_operations'];
+      assert.equal(Array.isArray(worktrees), true);
+      assert.equal((worktrees as readonly Record<string, unknown>[]).filter((entry) => entry['owner'] !== null && typeof entry['owner'] === 'object' && (entry['owner'] as Record<string, unknown>)['unit_id'] === 'unit-duplicate' && entry['state'] !== 'removed').length, 1);
+      assert.equal((worktrees as readonly Record<string, unknown>[]).find((entry) => entry['worktree_id'] === 'migration-worktree-schema12-duplicate')?.['state'], 'removed');
+      assert.equal(Array.isArray(operations) && operations.length, 2);
+      const doctorAfter = await client.query('doctor');
+      const afterFindings = doctorAfter.payload['invariant_findings'];
+      assert.equal(Array.isArray(afterFindings) && afterFindings.some((finding) => typeof finding === 'object' && finding !== null && (finding as Record<string, unknown>)['code'] === 'duplicate-active-worktree-authority'), false);
+    } finally {
+      if (restarted !== null) await restarted.close();
+      await rm(value.root, { recursive: true, force: true });
+    }
+  });
+
   void it('serializes concurrent stale-lock reclaimers before the external effect', async () => {
     const value = await setup('o');
     try {
@@ -267,7 +309,16 @@ void describe('owner-scoped worktree and Git saga recovery', () => {
           verify: () => { assert.equal(existsSync(marker), true); return [`verified=${relativeMarker}`]; },
           observeBoundary: (current: typeof boundary) => { if (!injected && current === boundary) { injected = true; throw new Error(`injected boundary ${boundary}`); } },
         };
-        await assert.rejects(() => executeOwnedWorktreeSaga(spec, callbacks, value.env), new RegExp(`injected boundary ${boundary}`, 'u'));
+        const expectedPhase = boundary === 'after-prepare' ? 'prepared'
+          : boundary === 'before-probe' || boundary === 'after-probe' ? 'preflight-probe'
+            : boundary === 'after-start' ? 'start-report'
+              : boundary === 'before-action' || boundary === 'after-action' ? 'external-action'
+                : boundary === 'after-action-report' ? 'action-report'
+                  : boundary === 'before-verification' || boundary === 'after-verification' ? 'postcondition-verification'
+                    : boundary === 'after-evidence' ? 'evidence-write'
+                      : boundary === 'after-verified-commit' ? 'verified-report'
+                        : 'commit-report';
+        await assert.rejects(() => executeOwnedWorktreeSaga(spec, callbacks, value.env), (error: unknown) => error instanceof CoordinationRuntimeError && error.message.includes(`injected boundary ${boundary}`) && error.evidence.includes(`phase=${expectedPhase}`));
         const recovered = await executeOwnedWorktreeSaga(spec, { inspect: callbacks.inspect, action: callbacks.action, verify: callbacks.verify }, value.env);
         assert.equal(recovered.operation?.stage, 'committed');
         assert.equal(effectCount <= 1, true, `${boundary} repeated its external effect`);

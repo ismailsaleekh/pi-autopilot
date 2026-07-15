@@ -1,6 +1,7 @@
 import { claimModesConflict, coordinationPathsOverlap } from './contracts.ts';
 import { coordinationOwnerKey, detectCoordinationWaitCycles } from './deadlock.ts';
 import { CoordinationRuntimeError } from './failures.ts';
+import { sameWorktreeAuthority, worktreeOwnerKindKey } from './worktree-identity.ts';
 import type { CoordinationOwnerIdentity, CoordinationReleaseCondition, CoordinationSnapshot } from './types.ts';
 
 export type CoordinationInvariantSeverity = 'error' | 'warning';
@@ -347,6 +348,34 @@ export function checkCoordinationInvariants(snapshot: CoordinationSnapshot): rea
   }
 
   for (const worktree of snapshot.worktrees) assertOwner(worktree.owner, worktree.worktree_id);
+  const activeWorktreesByOwnerKind = new Map<string, typeof snapshot.worktrees>();
+  for (const worktree of snapshot.worktrees.filter((candidate) => candidate.state !== 'removed')) {
+    const key = worktreeOwnerKindKey(worktree);
+    activeWorktreesByOwnerKind.set(key, [...(activeWorktreesByOwnerKind.get(key) ?? []), worktree]);
+  }
+  for (const [key, candidates] of activeWorktreesByOwnerKind) {
+    if (candidates.length < 2) continue;
+    const first = candidates[0];
+    if (first === undefined) continue;
+    const exact = candidates.every((candidate) => sameWorktreeAuthority(first, candidate));
+    findings.push(finding(exact ? 'duplicate-active-worktree-authority' : 'conflicting-active-worktree-authority', candidates.map((candidate) => candidate.worktree_id).join(','), exact
+      ? `active worktree authority ${key} has ${String(candidates.length)} exact semantic projections`
+      : `active worktree authority ${key} disagrees in path, Git common-dir, or branch`));
+  }
+  const activeWorktrees = snapshot.worktrees.filter((candidate) => candidate.state !== 'removed');
+  for (let leftIndex = 0; leftIndex < activeWorktrees.length; leftIndex += 1) {
+    const left = activeWorktrees[leftIndex];
+    if (left === undefined) continue;
+    for (let rightIndex = leftIndex + 1; rightIndex < activeWorktrees.length; rightIndex += 1) {
+      const right = activeWorktrees[rightIndex];
+      if (right === undefined || sameWorktreeAuthority(left, right)) continue;
+      const sameOwner = ownerKey(left.owner) === ownerKey(right.owner);
+      const sameCanonicalPath = left.canonical_path === right.canonical_path;
+      if (sameOwner || sameCanonicalPath) findings.push(finding('conflicting-active-worktree-authority', `${left.worktree_id},${right.worktree_id}`, sameOwner
+        ? 'one exact owner has multiple active authority-bearing worktree projections'
+        : 'one canonical worktree path is claimed by different active owners'));
+    }
+  }
   // A worktree that survives several committed operations legitimately has
   // version > an earlier operation's authority_version; the version must stay
   // within [that operation's authority_version, max authority_version on the
@@ -381,8 +410,9 @@ export function checkCoordinationInvariants(snapshot: CoordinationSnapshot): rea
     }
     if (operation.operation_type === 'remove' && operation.stage === 'committed' && worktree?.state !== 'removed') findings.push(finding('worktree-remove-state-mismatch', operation.operation_id, 'committed remove operation requires removed worktree state'));
   }
+  const auditedProjectionRetirements = new Set(snapshot.events.filter((event) => event.event_type === 'worktree-projection-retired' && event.entity_type === 'worktree').map((event) => event.entity_id));
   for (const worktree of snapshot.worktrees) {
-    if (worktree.state === 'removed' && !snapshot.worktree_operations.some((operation) => operation.worktree_id === worktree.worktree_id && operation.operation_type === 'remove' && operation.stage === 'committed')) findings.push(finding('removed-worktree-without-commit', worktree.worktree_id, 'removed worktree state requires a committed remove operation'));
+    if (worktree.state === 'removed' && !auditedProjectionRetirements.has(worktree.worktree_id) && !snapshot.worktree_operations.some((operation) => operation.worktree_id === worktree.worktree_id && operation.operation_type === 'remove' && operation.stage === 'committed')) findings.push(finding('removed-worktree-without-commit', worktree.worktree_id, 'removed worktree state requires a committed remove operation or an audited exact-projection retirement'));
   }
 
   for (const edge of snapshot.wait_for_edges) {
