@@ -9,7 +9,7 @@ import { DatabaseSync } from 'node:sqlite';
 
 import { CoordinatorClient } from '../../src/core/coordination/client.ts';
 import { parseCoordinationRun, parseCoordinationSessionLease } from '../../src/core/coordination/contracts.ts';
-import { CoordinationRuntimeError } from '../../src/core/coordination/failures.ts';
+import { CoordinationRuntimeError, formatCoordinationRuntimeError } from '../../src/core/coordination/failures.ts';
 import { coordinatorRuntimePaths } from '../../src/core/coordination/runtime-paths.ts';
 import { startCoordinatorServer } from '../../src/core/coordination/server.ts';
 import { DurableRunSupervisorClient, writeCoordinatorSessionContext, type CoordinatorSessionContext } from '../../src/core/coordination/supervisor.ts';
@@ -39,7 +39,7 @@ function gitInput(cwd: string, args: readonly string[], input: string): string {
   return result.stdout.trim();
 }
 
-async function setup(suffix = 'a'): Promise<Harness> {
+async function setup(suffix = 'a', testHooks?: Parameters<typeof startCoordinatorServer>[3]): Promise<Harness> {
   const root = await mkdtemp(join(tmpdir(), `pi-autopilot-saga-${suffix}-`));
   const stateRoot = join(root, 'state');
   const repo = join(root, 'generic-repository');
@@ -60,7 +60,7 @@ async function setup(suffix = 'a'): Promise<Harness> {
   const taskRoot = join(stateRoot, 'worktrees', repoId, 'active', runId);
   const mainPath = join(taskRoot, 'main');
   const env = { ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: stateRoot };
-  const server = await startCoordinatorServer(coordinatorRuntimePaths(env));
+  const server = await startCoordinatorServer(coordinatorRuntimePaths(env), undefined, undefined, testHooks);
   const client = new CoordinatorClient({ env, autoStart: false });
   const runResponse = await client.mutate('attach-run', {
     repoId, workstreamRun: runId, sessionId: null, fencingGeneration: null, expectedVersion: 0, idempotencyKey: `attach-${runId}`,
@@ -151,8 +151,106 @@ void describe('owner-scoped worktree and Git saga recovery', () => {
       await writeFile(join(unitC.intent.worktree_path, 'src', 'late.ts'), 'late change\n', 'utf8');
       git(unitC.intent.worktree_path, ['add', 'src/late.ts']);
       git(unitC.intent.worktree_path, ['commit', '-m', 'foreign late branch movement']);
-      await assert.rejects(() => recoverOwnedWorktreeSagas({ active: value.active, env: value.env }), /branch_expected|branch moved|recovery/u);
+      const movedHead = git(unitC.intent.worktree_path, ['rev-parse', 'HEAD']);
+      await assert.rejects(
+        () => recoverOwnedWorktreeSagas({ active: value.active, env: value.env }),
+        (error: unknown) => error instanceof CoordinationRuntimeError
+          && error.code === 'recovery-required'
+          && error.evidence.includes(`cause_evidence[0]=branch_expected=${intendedTerminal}`)
+          && error.evidence.includes(`cause_evidence[1]=branch_actual=${movedHead}`),
+      );
       assert.equal(existsSync(unitC.intent.worktree_path), true);
+    } finally {
+      await close(value);
+    }
+  });
+
+  void it('preserves bounded typed preflight and reconciling evidence without executing an unsafe action', async () => {
+    let rejectReconcilingReport = true;
+    const value = await setup('x', {
+      afterStoreCommitBeforeResponse: (action) => {
+        if (rejectReconcilingReport && action === 'transition-operation') {
+          rejectReconcilingReport = false;
+          throw new CoordinationRuntimeError('coordinator-unavailable', 'synthetic durable report response loss', ['transition_marker=reconciling-committed']);
+        }
+      },
+    });
+    try {
+      const spec = unitCreateSpec(value, 'unit-unsafe-probe');
+      let actionCount = 0;
+      const unsafeProof = ['expected_branch=autopilot/unit/run-preflight-recovery/unit-unsafe-probe/attempt-1', 'actual_branch=foreign/unit-unsafe-probe', 'session_token=synthetic-secret-must-not-escape', ...Array.from({ length: 40 }, (_, index) => `probe_detail_${String(index).padStart(2, '0')}=${'x'.repeat(300)}`)];
+      let observed: CoordinationRuntimeError | null = null;
+      try {
+        await executeOwnedWorktreeSaga(spec, {
+          inspect: () => ({ outcome: 'unsafe', proof: unsafeProof }),
+          action: () => { actionCount += 1; },
+          verify: () => { throw new Error('verification must not run after an unsafe probe'); },
+        }, value.env);
+      } catch (error) {
+        if (!(error instanceof CoordinationRuntimeError)) throw error;
+        observed = error;
+      }
+      if (observed === null) throw new Error('unsafe preflight did not fail');
+      assert.equal(observed.code, 'recovery-required');
+      assert.equal(actionCount, 0);
+      assert.equal(observed.evidence.includes('cause_code=recovery-required'), true);
+      assert.equal(observed.evidence.includes('cause_evidence[0]=expected_branch=autopilot/unit/run-preflight-recovery/unit-unsafe-probe/attempt-1'), true);
+      assert.equal(observed.evidence.includes('cause_evidence[1]=actual_branch=foreign/unit-unsafe-probe'), true);
+      assert.equal(observed.evidence.includes('cause_evidence[2]=session_token=<redacted>'), true);
+      assert.equal(observed.evidence.some((entry) => entry.includes('synthetic-secret-must-not-escape')), false);
+      const visibleDiagnostic = formatCoordinationRuntimeError(observed);
+      assert.match(visibleDiagnostic, /cause_evidence\[0\]=expected_branch=autopilot\/unit\/run-preflight-recovery\/unit-unsafe-probe\/attempt-1/u);
+      assert.equal(/synthetic-secret-must-not-escape/u.test(visibleDiagnostic), false);
+      assert.equal(observed.evidence.includes('reconciliation_code=coordinator-unavailable'), true);
+      assert.equal(observed.evidence.includes('reconciliation_evidence[0]=failure_class=retryable-contention'), true);
+      assert.equal(observed.evidence.includes('reconciliation_evidence[1]=server_evidence[0]=transition_marker=reconciling-committed'), true);
+      assert.equal(observed.evidence.some((entry) => entry.includes('truncated')), true);
+      assert.equal(observed.evidence.length <= 32, true);
+      assert.equal(observed.evidence.every((entry) => [...entry].length <= 256), true);
+
+      const saga = new OwnedWorktreeSagaClient(new CoordinatorClient({ env: value.env, autoStart: false }), value.session);
+      const operation = (await saga.operations()).find((candidate) => candidate.owner.unit_id === 'unit-unsafe-probe');
+      assert.equal(operation?.stage, 'reconciling');
+      const status = await new CoordinatorClient({ env: value.env, autoStart: false }).query('status', value.active.repo_key, value.active.workstream_run);
+      const sessions = status.payload['session_leases'];
+      assert.equal(Array.isArray(sessions) && sessions.some((entry) => typeof entry === 'object' && entry !== null && (entry as Record<string, unknown>)['session_lease_id'] === value.session.session_lease_id && (entry as Record<string, unknown>)['status'] === 'attached'), true);
+
+      let replayed: CoordinationRuntimeError | null = null;
+      try {
+        await executeOwnedWorktreeSaga(spec, {
+          inspect: () => ({ outcome: 'unsafe', proof: unsafeProof }),
+          action: () => { actionCount += 1; },
+          verify: () => { throw new Error('verification must not run after an unsafe replay probe'); },
+        }, value.env);
+      } catch (error) {
+        if (!(error instanceof CoordinationRuntimeError)) throw error;
+        replayed = error;
+      }
+      if (replayed === null) throw new Error('unsafe replay preflight did not fail');
+      assert.equal(replayed.code, 'recovery-required');
+      assert.deepEqual(replayed.evidence.filter((entry) => entry.startsWith('cause_evidence[')).slice(0, 3), observed.evidence.filter((entry) => entry.startsWith('cause_evidence[')).slice(0, 3));
+      assert.equal(actionCount, 0);
+      assert.equal((await saga.operations()).find((candidate) => candidate.owner.unit_id === 'unit-unsafe-probe')?.stage, 'reconciling');
+    } finally {
+      await close(value);
+    }
+  });
+
+  void it('commits an already-applied exact effect without repeating the external action', async () => {
+    const value = await setup('y');
+    try {
+      const spec = unitCreateSpec(value, 'unit-applied-effect');
+      const saga = new OwnedWorktreeSagaClient(new CoordinatorClient({ env: value.env, autoStart: false }), value.session);
+      await saga.prepare(spec);
+      git(value.repo, ['worktree', 'add', '-b', spec.intent.branch, spec.intent.worktree_path, spec.intent.base_sha ?? 'HEAD']);
+      let actionCount = 0;
+      const result = await executeOwnedWorktreeSaga(spec, {
+        inspect: () => ({ outcome: 'satisfied', proof: ['worktree_registered', `head=${git(spec.intent.worktree_path, ['rev-parse', 'HEAD'])}`] }),
+        action: () => { actionCount += 1; },
+        verify: () => ['worktree_registered', `head=${git(spec.intent.worktree_path, ['rev-parse', 'HEAD'])}`],
+      }, value.env);
+      assert.equal(actionCount, 0);
+      assert.equal(result.operation?.stage, 'committed');
     } finally {
       await close(value);
     }

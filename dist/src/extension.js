@@ -9,6 +9,7 @@ import { AUTOPILOT_PARENT_MODEL_ASSIGNMENT } from "./core/model-roster.js";
 import { evaluateAutopilotWorktreeToolCall, } from "./core/git-guard.js";
 import { AutopilotParallelRuntimeError, coordinationRootForRepo, prepareAutopilotWorkstream, recoverAutopilotWorktreeSagas, resolveRepoIdentity } from "./core/parallel-runtime.js";
 import { CoordinatorClient } from "./core/coordination/client.js";
+import { CoordinationRuntimeError, formatCoordinationRuntimeError } from "./core/coordination/failures.js";
 import { createClaimResponseTool } from "./core/coordination/claim-response-tool.js";
 import { ClaimNegotiationClient } from "./core/coordination/negotiation.js";
 import { replayPendingCoordinatorReconciliation } from "./core/coordination/reconciliation.js";
@@ -195,7 +196,8 @@ export default function autopilotExtension(pi) {
                     notify(ctx, `Autopilot durable run supervisor cleanup also failed: ${closeError instanceof Error ? closeError.message : String(closeError)}`, 'error');
                 });
             }
-            notify(ctx, `Autopilot durable run supervisor attachment failed: ${error instanceof Error ? error.message : String(error)}`, 'error');
+            const attachmentFailure = error instanceof CoordinationRuntimeError ? formatCoordinationRuntimeError(error) : error instanceof Error ? error.message : String(error);
+            notify(ctx, `Autopilot durable run supervisor attachment failed: ${attachmentFailure}`, 'error');
             sessionBridge = null;
             deactivateClaimResponseTool();
             clearActiveAutopilotState();

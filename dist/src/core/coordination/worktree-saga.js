@@ -25,18 +25,32 @@ export class WorktreeSagaCompensatedError extends Error {
         this.proof = Object.freeze([...proof]);
     }
 }
+function phaseCauseEvidence(prefix, error, maximumDetails) {
+    const code = error instanceof CoordinationRuntimeError ? error.code
+        : error instanceof Error && 'code' in error && typeof error.code === 'string' ? error.code
+            : 'untyped-error';
+    const message = error instanceof Error ? error.message : String(error);
+    const details = error instanceof CoordinationRuntimeError ? error.evidence : [];
+    const included = details.slice(0, maximumDetails).map((entry, index) => `${prefix}_evidence[${String(index)}]=${entry}`);
+    return Object.freeze([
+        `${prefix}_code=${code}`,
+        `${prefix}_message=${message}`,
+        ...included,
+        ...(details.length > maximumDetails ? [`${prefix}_evidence_truncated=entries:${String(details.length - maximumDetails)}`] : []),
+    ]);
+}
 function phaseFailure(operation, phase, error, reconciliationError) {
     const original = error instanceof Error ? error.message : String(error);
-    const transition = reconciliationError instanceof Error ? reconciliationError.message : reconciliationError === undefined ? null : String(reconciliationError);
     const transport = [error, reconciliationError].some((candidate) => candidate instanceof CoordinationRuntimeError
         ? candidate.code === 'coordinator-unavailable' || candidate.code === 'coordinator-contention'
         : candidate instanceof Error && 'code' in candidate && ['ENOENT', 'ECONNREFUSED', 'ECONNRESET', 'EPIPE', 'ETIMEDOUT'].includes(String(candidate.code)));
-    const code = error instanceof CoordinationRuntimeError && error.code === 'recovery-required' ? 'recovery-required' : transport ? 'coordinator-unavailable' : 'recovery-required';
-    return new CoordinationRuntimeError(code, `owned worktree saga ${operation.operation_id} failed during ${phase}: ${original}${transition === null ? '' : '; durable reconciling report also failed'}`, [
+    const code = error instanceof CoordinationRuntimeError && error.code === 'recovery-required' ? 'recovery-required' : transport ? 'coordinator-unavailable' : error instanceof CoordinationRuntimeError ? error.code : 'recovery-required';
+    return new CoordinationRuntimeError(code, `owned worktree saga ${operation.operation_id} failed during ${phase}: ${original}${reconciliationError === undefined ? '' : '; durable reconciling report also failed'}`, [
         `operation_id=${operation.operation_id}`,
         `phase=${phase}`,
         `durable_stage=${operation.stage}`,
-        ...(transition === null ? [] : [`reconciling_transition=${transition}`]),
+        ...phaseCauseEvidence('cause', error, 10),
+        ...(reconciliationError === undefined ? [] : phaseCauseEvidence('reconciliation', reconciliationError, 8)),
     ]);
 }
 function record(value, label) {

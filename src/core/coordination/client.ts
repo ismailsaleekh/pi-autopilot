@@ -767,7 +767,13 @@ export class CoordinatorClient {
     const code = coordinationErrorCode(response.error_code);
     const definition = coordinationFailureDefinition(code);
     const message = typeof response.payload['message'] === 'string' ? response.payload['message'] : `coordinator request failed with ${code}`;
-    throw new CoordinationRuntimeError(code, message, [`failure_class=${definition.failure_class}`]);
+    const responseEvidence = response.payload['evidence'];
+    if (responseEvidence !== undefined && (!Array.isArray(responseEvidence) || responseEvidence.some((entry) => typeof entry !== 'string'))) throw new CoordinationRuntimeError('schema-mismatch', 'coordinator failure response evidence is not a string array');
+    const serverEvidence = responseEvidence === undefined ? [] : responseEvidence as readonly string[];
+    throw new CoordinationRuntimeError(code, message, [
+      `failure_class=${definition.failure_class}`,
+      ...serverEvidence.map((entry, index) => `server_evidence[${String(index)}]=${entry}`),
+    ]);
   }
 }
 

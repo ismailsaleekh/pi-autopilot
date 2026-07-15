@@ -28,6 +28,7 @@ import {
 } from './core/git-guard.ts';
 import { AutopilotParallelRuntimeError, coordinationRootForRepo, prepareAutopilotWorkstream, recoverAutopilotWorktreeSagas, resolveRepoIdentity, type PreparedAutopilotWorkstream } from './core/parallel-runtime.ts';
 import { CoordinatorClient } from './core/coordination/client.ts';
+import { CoordinationRuntimeError, formatCoordinationRuntimeError } from './core/coordination/failures.ts';
 import { createClaimResponseTool, type ClaimResponseToolDefinition } from './core/coordination/claim-response-tool.ts';
 import { ClaimNegotiationClient } from './core/coordination/negotiation.ts';
 import { replayPendingCoordinatorReconciliation } from './core/coordination/reconciliation.ts';
@@ -285,7 +286,8 @@ export default function autopilotExtension(pi: ExtensionHostLike): void {
           notify(ctx, `Autopilot durable run supervisor cleanup also failed: ${closeError instanceof Error ? closeError.message : String(closeError)}`, 'error');
         });
       }
-      notify(ctx, `Autopilot durable run supervisor attachment failed: ${error instanceof Error ? error.message : String(error)}`, 'error');
+      const attachmentFailure = error instanceof CoordinationRuntimeError ? formatCoordinationRuntimeError(error) : error instanceof Error ? error.message : String(error);
+      notify(ctx, `Autopilot durable run supervisor attachment failed: ${attachmentFailure}`, 'error');
       sessionBridge = null;
       deactivateClaimResponseTool();
       clearActiveAutopilotState();

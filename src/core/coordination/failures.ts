@@ -83,6 +83,49 @@ export const COORDINATION_FAILURE_MATRIX: readonly CoordinationFailureScenario[]
   { scenario: 'git-or-filesystem-partial-effect', failure_code: 'git-partial-effect', durable_effect: 'prepared-recovery-work', required_response: 'inspect postconditions and complete or compensate idempotently', forbidden_response: 'guess success from process termination' },
 ]);
 
+const COORDINATION_DIAGNOSTIC_MAX_EVIDENCE_ENTRIES = 32;
+const COORDINATION_DIAGNOSTIC_MAX_TEXT_CODE_POINTS = 256;
+const COORDINATION_DIAGNOSTIC_MAX_MESSAGE_CODE_POINTS = 512;
+const COORDINATION_DIAGNOSTIC_MAX_TOTAL_CODE_POINTS = 4_096;
+
+function redactCoordinationSecrets(value: string): string {
+  return value
+    .replace(/\b(session_token|capability|handoff_token)(\s*[=:]\s*)[^\s,;]+/giu, '$1$2<redacted>')
+    .replace(/("(?:session_token|capability|handoff_token)"\s*:\s*")[^"]*(")/giu, '$1<redacted>$2')
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/gu, '\uFFFD');
+}
+
+function boundedCoordinationDiagnosticText(value: string, maximumCodePoints = COORDINATION_DIAGNOSTIC_MAX_TEXT_CODE_POINTS): string {
+  const sanitized = redactCoordinationSecrets(value);
+  const points = [...sanitized];
+  if (points.length <= maximumCodePoints) return sanitized;
+  const suffix = '…[truncated]';
+  const suffixPoints = [...suffix];
+  return `${points.slice(0, Math.max(0, maximumCodePoints - suffixPoints.length)).join('')}${suffix}`;
+}
+
+function boundedCoordinationEvidence(values: readonly string[]): readonly string[] {
+  const bounded = values.map((value) => boundedCoordinationDiagnosticText(value));
+  const output: string[] = [];
+  let consumed = 0;
+  let omittedEntries = 0;
+  let omittedCodePoints = 0;
+  const entryLimit = COORDINATION_DIAGNOSTIC_MAX_EVIDENCE_ENTRIES - 1;
+  const totalLimit = COORDINATION_DIAGNOSTIC_MAX_TOTAL_CODE_POINTS - COORDINATION_DIAGNOSTIC_MAX_TEXT_CODE_POINTS;
+  for (const entry of bounded) {
+    const length = [...entry].length;
+    if (output.length >= entryLimit || consumed + length > totalLimit) {
+      omittedEntries += 1;
+      omittedCodePoints += length;
+      continue;
+    }
+    output.push(entry);
+    consumed += length;
+  }
+  if (omittedEntries > 0) output.push(`evidence_truncated=entries:${String(omittedEntries)},code_points:${String(omittedCodePoints)}`);
+  return Object.freeze(output);
+}
+
 export class CoordinationRuntimeError extends Error {
   override readonly name = 'CoordinationRuntimeError';
   readonly code: CoordinationFailureCode;
@@ -91,11 +134,15 @@ export class CoordinationRuntimeError extends Error {
   readonly evidence: readonly string[];
 
   constructor(code: CoordinationFailureCode, message: string, evidence: readonly string[] = []) {
-    super(`CoordinationRuntimeError [${code}]: ${message}`);
+    super(`CoordinationRuntimeError [${code}]: ${boundedCoordinationDiagnosticText(message, COORDINATION_DIAGNOSTIC_MAX_MESSAGE_CODE_POINTS)}`);
     const definition = coordinationFailureDefinition(code);
     this.code = code;
     this.failure_class = definition.failure_class;
     this.retry_policy = definition.retry_policy;
-    this.evidence = Object.freeze([...evidence]);
+    this.evidence = boundedCoordinationEvidence(evidence);
   }
+}
+
+export function formatCoordinationRuntimeError(error: CoordinationRuntimeError): string {
+  return error.evidence.length === 0 ? error.message : `${error.message}; evidence: ${error.evidence.join('; ')}`;
 }
