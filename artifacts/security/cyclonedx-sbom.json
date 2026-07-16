@@ -1,19 +1,19 @@
 {
   "bomFormat": "CycloneDX",
   "specVersion": "1.5",
-  "serialNumber": "urn:uuid:53905c3e-4eaa-5c71-8d62-f86388a8a36d",
+  "serialNumber": "urn:uuid:f01f05cd-c1f4-570e-8c0b-83573b13edb2",
   "version": 1,
   "metadata": {
     "component": {
       "type": "application",
       "name": "pi-autopilot",
-      "version": "1.1.7",
-      "purl": "pkg:npm/pi-autopilot@1.1.7"
+      "version": "1.1.8",
+      "purl": "pkg:npm/pi-autopilot@1.1.8"
     },
     "properties": [
       {
         "name": "pi-autopilot:lockfile-sha256",
-        "value": "sha256:53905c3e4eaa5c713d62f86388a8a36de5cbcd41799ef00fe2e1607b6814f342"
+        "value": "sha256:f01f05cdc1f4c70eac0b83573b13edb20d2ebe17965be8512aa7faab6901354b"
       }
     ]
   },

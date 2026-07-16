@@ -1,11 +1,13 @@
 import { spawnSync } from 'node:child_process';
+import { createHash, randomBytes } from 'node:crypto';
 import { existsSync, lstatSync, realpathSync } from 'node:fs';
-import { readdir, readFile, rm } from 'node:fs/promises';
+import { link, mkdir, open, readdir, readFile, rm, unlink } from 'node:fs/promises';
+import { platform } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 import { AUTOPILOT_PREFLIGHT_ROLLBACK_REASON_PREFIX, AUTOPILOT_RUNTIME_ROOT_PREFIX } from './names.ts';
 import { executeOwnedWorktreeSaga, type WorktreeSagaInspection } from './coordination/worktree-saga.ts';
-import type { CoordinationChildLease, CoordinationWorktreeOperation } from './coordination/types.ts';
+import type { CoordinationChildLease, CoordinationUnitAttempt, CoordinationWorktree, CoordinationWorktreeOperation } from './coordination/types.ts';
 import { coordinationCutoverCommitted } from './coordination/migration-paths.ts';
 import {
   BRANCHES_FILE,
@@ -228,10 +230,188 @@ export async function rollbackCreatedUnitWorktree(input: {
   });
 }
 
+function sameCoordinationOwner(left: CoordinationWorktreeOperation['owner'], right: CoordinationWorktreeOperation['owner']): boolean {
+  return left.repo_id === right.repo_id
+    && left.autopilot_id === right.autopilot_id
+    && left.workstream_run === right.workstream_run
+    && left.unit_id === right.unit_id
+    && left.attempt === right.attempt;
+}
+
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value === 'boolean' || typeof value === 'string') return JSON.stringify(value);
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) throw new AutopilotWorktreeCleanupError('rollback-supersession-evidence-invalid', 'worktree operation evidence contains a non-finite number.');
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) return `[${value.map((entry) => canonicalJson(entry)).join(',')}]`;
+  if (typeof value !== 'object') throw new AutopilotWorktreeCleanupError('rollback-supersession-evidence-invalid', 'worktree operation evidence contains a non-JSON value.');
+  const object = value as Readonly<Record<string, unknown>>;
+  return `{${Object.keys(object).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(object[key])}`).join(',')}}`;
+}
+
+async function hasExactImmutableOperationEvidence(active: ActiveAutopilotRow, operation: CoordinationWorktreeOperation): Promise<boolean> {
+  const evidence = operation.verification_evidence;
+  const expectedRef = `_saga-evidence/${operation.owner.workstream_run}/${operation.operation_id}.json`;
+  if (evidence === null || evidence.ref !== expectedRef || operation.completed_steps.length !== 3 || operation.completed_steps[0] !== 'preflight-probe' || operation.completed_steps[1] !== 'external-action' || operation.completed_steps[2] !== 'postcondition-verification' || operation.current_step !== null || operation.error_code !== null) return false;
+  const evidencePath = resolve(active.worktree_root, ...evidence.ref.split('/'));
+  const relativeEvidence = relative(resolve(active.worktree_root), evidencePath);
+  if (relativeEvidence.length === 0 || relativeEvidence === '..' || relativeEvidence.startsWith(`..${sep}`) || isAbsolute(relativeEvidence) || !existsSync(evidencePath)) return false;
+  const before = lstatSync(evidencePath);
+  if (!before.isFile() || before.isSymbolicLink() || before.size > 1024 * 1024) return false;
+  const bytes = await readFile(evidencePath);
+  const after = lstatSync(evidencePath);
+  if (before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size || bytes.byteLength !== before.size || `sha256:${createHash('sha256').update(bytes).digest('hex')}` !== evidence.sha256) return false;
+  let document: unknown;
+  try { document = JSON.parse(Buffer.from(bytes).toString('utf8')) as unknown; }
+  catch { return false; }
+  if (!isRecord(document)) return false;
+  const intentSha256 = `sha256:${createHash('sha256').update(canonicalJson(operation.intent), 'utf8').digest('hex')}`;
+  return document['schema_version'] === 'autopilot.worktree_operation_evidence.v1'
+    && document['operation_id'] === operation.operation_id
+    && document['worktree_id'] === operation.worktree_id
+    && document['operation_type'] === operation.operation_type
+    && document['terminal_stage'] === 'verified'
+    && document['intent_sha256'] === intentSha256
+    && canonicalJson(document['owner']) === canonicalJson(operation.owner);
+}
+
+async function exactLaterPackageSupersession(input: {
+  readonly active: ActiveAutopilotRow;
+  readonly rollback: CoordinationWorktreeOperation;
+  readonly operations: readonly CoordinationWorktreeOperation[];
+  readonly childLeases: readonly CoordinationChildLease[];
+  readonly unitAttempts: readonly CoordinationUnitAttempt[];
+  readonly worktrees: readonly CoordinationWorktree[];
+  readonly env?: ProcessEnvLike;
+}): Promise<{ readonly later: readonly CoordinationWorktreeOperation[] | null; readonly blocker: string | null }> {
+  const reject = (blocker: string): { readonly later: null; readonly blocker: string } => ({ later: null, blocker });
+  const rollback = input.rollback;
+  const later = input.operations
+    .filter((operation) => operation.worktree_id === rollback.worktree_id && sameCoordinationOwner(operation.owner, rollback.owner) && operation.intent_event_seq > rollback.intent_event_seq)
+    .sort((left, right) => left.intent_event_seq - right.intent_event_seq || left.operation_id.localeCompare(right.operation_id));
+  if (later.length < 4 || later.some((operation) => operation.stage !== 'committed')) return reject('later-operation-plan-not-exactly-committed');
+  const recreate = later[0];
+  const quarantine = later[ later.length - 2 ];
+  const archive = later[ later.length - 1 ];
+  const materializations = later.slice(1, -2);
+  if (recreate === undefined || quarantine === undefined || archive === undefined
+    || recreate.operation_type !== 'create'
+    || materializations.length === 0
+    || materializations.some((operation) => operation.operation_type !== 'materialize')
+    || quarantine.operation_type !== 'quarantine'
+    || archive.operation_type !== 'archive'
+    || rollback.intent.target_sha === null
+    || recreate.intent.base_sha !== rollback.intent.target_sha
+    || archive.intent.target_sha === null
+    || archive.intent.archive_ref === null
+    || recreate.authority_version <= rollback.authority_version
+    || later.some((operation, index) => index > 0 && operation.authority_version < (later[index - 1]?.authority_version ?? 0))) return reject('later-operation-shape-or-authority-order-invalid');
+  const authorityMatches = later.every((operation) => operation.intent.repo_root === rollback.intent.repo_root
+    && operation.intent.worktree_path === rollback.intent.worktree_path
+    && operation.intent.git_common_dir === rollback.intent.git_common_dir
+    && operation.intent.branch === rollback.intent.branch);
+  if (!authorityMatches) return reject('later-operation-authority-drift');
+
+  const matchingChildren = input.childLeases.filter((child) => child.owner.repo_id === rollback.owner.repo_id && child.owner.workstream_run === rollback.owner.workstream_run && child.owner.unit_id === rollback.owner.unit_id && child.owner.attempt === rollback.owner.attempt);
+  const matchingAttempts = input.unitAttempts.filter((attempt) => sameCoordinationOwner(attempt.owner, rollback.owner));
+  const matchingWorktrees = input.worktrees.filter((worktree) => worktree.worktree_id === rollback.worktree_id && worktree.owner.repo_id === rollback.owner.repo_id && worktree.owner.workstream_run === rollback.owner.workstream_run && worktree.owner.unit_id === rollback.owner.unit_id && worktree.owner.attempt === rollback.owner.attempt);
+  const child = matchingChildren[0];
+  const attempt = matchingAttempts[0];
+  const worktree = matchingWorktrees[0];
+  if (matchingChildren.length !== 1 || child === undefined || child.status !== 'recovery-required' || child.terminal_evidence !== null
+    || matchingAttempts.length !== 1 || attempt === undefined || attempt.state !== 'quarantined'
+    || matchingWorktrees.length !== 1 || worktree === undefined || worktree.kind !== 'unit' || worktree.state !== 'quarantined'
+    || worktree.canonical_path !== rollback.intent.worktree_path || worktree.git_common_dir !== rollback.intent.git_common_dir || worktree.branch !== rollback.intent.branch
+    || worktree.version !== archive.authority_version) return reject('durable-child-attempt-or-worktree-state-invalid');
+  for (const operation of [rollback, ...later]) if (!(await hasExactImmutableOperationEvidence(input.active, operation))) return reject(`immutable-operation-evidence-invalid:${operation.operation_type}`);
+
+  const taskRoot = taskRootForActiveAutopilot(input.active);
+  const index = await readUnitIndex(taskRoot);
+  const branches = await readBranchesSnapshot(taskRoot);
+  const indexed = index.units.filter((unit) => unit.unit_id === rollback.owner.unit_id && unit.attempt === rollback.owner.attempt);
+  const branched = branches?.unitBranches.filter((unit) => unit.unit_id === rollback.owner.unit_id && unit.attempt === rollback.owner.attempt) ?? [];
+  const indexUnit = indexed[0];
+  const branchUnit = branched[0];
+  if (indexed.length !== 1 || branched.length !== 1 || indexUnit === undefined || branchUnit === undefined) return reject('runtime-unit-projection-cardinality-invalid');
+  assertMatchingUnitRows(indexUnit, branchUnit);
+  if (indexUnit.status !== 'quarantined' || indexUnit.worktree_path !== worktree.canonical_path || indexUnit.branch !== worktree.branch || indexUnit.current_sha !== archive.intent.target_sha || indexUnit.archive_ref !== archive.intent.archive_ref) return reject('runtime-unit-projection-does-not-match-archive');
+
+  if (!existsSync(worktree.canonical_path)) return reject('quarantined-worktree-path-missing');
+  const worktreeMetadata = lstatSync(worktree.canonical_path);
+  if (!worktreeMetadata.isDirectory() || worktreeMetadata.isSymbolicLink()) return reject('quarantined-worktree-path-type-invalid');
+  const listed = gitWorktreeListPorcelain(input.active.source_repo, input.env).filter((entry) => samePath(entry.path, worktree.canonical_path));
+  if (listed.length !== 1 || listed[0]?.branch !== worktree.branch || listed[0]?.prunable === true) return reject('git-worktree-registration-invalid');
+  const commonRaw = runGitForCleanup(['rev-parse', '--git-common-dir'], worktree.canonical_path, runtimeGitEnv('rollback-supersession-common-dir', input.env)).trim();
+  const actualCommon = isAbsolute(commonRaw) ? commonRaw : resolve(worktree.canonical_path, commonRaw);
+  if (!samePath(actualCommon, worktree.git_common_dir)) return reject('git-common-dir-mismatch');
+  if (runGitForCleanup(['symbolic-ref', '--short', 'HEAD'], worktree.canonical_path, runtimeGitEnv('rollback-supersession-branch', input.env)).trim() !== worktree.branch) return reject('git-branch-mismatch');
+  const head = runGitForCleanup(['rev-parse', 'HEAD'], worktree.canonical_path, runtimeGitEnv('rollback-supersession-head', input.env)).trim();
+  if (head !== archive.intent.target_sha || readGitStatus(worktree.canonical_path).changedPaths.length > 0) return reject('quarantined-worktree-head-or-cleanliness-mismatch');
+  if (runGitForCleanup(['rev-parse', '--verify', `refs/heads/${archive.intent.archive_ref}`], input.active.source_repo, runtimeGitEnv('rollback-supersession-archive', input.env)).trim() !== archive.intent.target_sha) return reject('archive-ref-mismatch');
+  return { later: Object.freeze(later), blocker: null };
+}
+
+function assertNoSymlinkPath(root: string, target: string, label: string): void {
+  assertPathWithinRoot(root, target, 'rollback-supersession-audit-outside-state');
+  let cursor = resolve(root);
+  if (!existsSync(cursor) || lstatSync(cursor).isSymbolicLink() || !lstatSync(cursor).isDirectory()) fail('rollback-supersession-audit-root-invalid', `${label} root must be an existing non-symbolic directory.`, [cursor]);
+  for (const segment of relative(cursor, resolve(target)).split(sep).filter((entry) => entry.length > 0)) {
+    cursor = join(cursor, segment);
+    if (existsSync(cursor) && (lstatSync(cursor).isSymbolicLink() || (!lstatSync(cursor).isDirectory() && cursor !== resolve(target)))) fail('rollback-supersession-audit-path-invalid', `${label} contains a symbolic or non-directory ancestor.`, [cursor]);
+  }
+}
+
+async function publishRollbackSupersessionAudit(active: ActiveAutopilotRow, rollback: CoordinationWorktreeOperation, later: readonly CoordinationWorktreeOperation[]): Promise<void> {
+  const archive = later[later.length - 1];
+  if (archive === undefined || archive.operation_type !== 'archive' || archive.intent.archive_ref === null || archive.intent.target_sha === null) fail('rollback-supersession-audit-invalid', 'exact rollback supersession lost its terminal archive identity.');
+  const auditRoot = resolve(active.worktree_root, '_saga-evidence', active.workstream_run, 'supersessions');
+  const auditPath = resolve(auditRoot, `${rollback.operation_id}.json`);
+  assertNoSymlinkPath(active.worktree_root, auditRoot, 'rollback supersession audit');
+  await mkdir(auditRoot, { recursive: true, mode: 0o700 });
+  assertNoSymlinkPath(active.worktree_root, auditPath, 'rollback supersession audit');
+  const body = `${canonicalJson({
+    schema_version: 'autopilot.worktree_rollback_supersession.v1',
+    owner: rollback.owner,
+    worktree_id: rollback.worktree_id,
+    superseded_operation: { operation_id: rollback.operation_id, intent_event_seq: rollback.intent_event_seq, verification_evidence: rollback.verification_evidence },
+    later_package_operations: later.map((operation) => ({ operation_id: operation.operation_id, operation_type: operation.operation_type, intent_event_seq: operation.intent_event_seq, verification_evidence: operation.verification_evidence })),
+    terminal_archive: { archive_ref: archive.intent.archive_ref, target_sha: archive.intent.target_sha },
+    disposition: 'historical-preflight-rollback-superseded-by-exact-later-package-quarantine',
+  })}\n`;
+  if (existsSync(auditPath)) {
+    if (await readFile(auditPath, 'utf8') !== body) fail('rollback-supersession-audit-conflict', 'immutable rollback supersession audit differs from the proven package history.', [auditPath]);
+    return;
+  }
+  const temporary = `${auditPath}.tmp-${String(process.pid)}-${randomBytes(8).toString('hex')}`;
+  let handle: Awaited<ReturnType<typeof open>> | null = null;
+  try {
+    handle = await open(temporary, 'wx', 0o600);
+    await handle.writeFile(body, 'utf8');
+    await handle.sync();
+    await handle.close();
+    handle = null;
+    try { await link(temporary, auditPath); }
+    catch (error) {
+      if (!(error instanceof Error && 'code' in error && error.code === 'EEXIST')) throw error;
+      if (await readFile(auditPath, 'utf8') !== body) fail('rollback-supersession-audit-conflict', 'concurrent rollback supersession audit differs from the proven package history.', [auditPath]);
+    }
+    if (platform() !== 'win32') {
+      const directory = await open(auditRoot, 'r');
+      try { await directory.sync(); } finally { await directory.close(); }
+    }
+  } finally {
+    if (handle !== null) await handle.close();
+    await unlink(temporary).catch((error: unknown) => { if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw error; });
+  }
+}
+
 export async function recoverCommittedPreflightRollbackProjections(input: {
   readonly active: ActiveAutopilotRow;
   readonly operations: readonly CoordinationWorktreeOperation[];
   readonly childLeases: readonly CoordinationChildLease[];
+  readonly unitAttempts: readonly CoordinationUnitAttempt[];
+  readonly worktrees: readonly CoordinationWorktree[];
   readonly env?: ProcessEnvLike;
   readonly now?: Date;
 }): Promise<readonly string[]> {
@@ -241,7 +421,15 @@ export async function recoverCommittedPreflightRollbackProjections(input: {
     for (const operation of input.operations) {
       if (operation.stage !== 'committed' || operation.operation_type !== 'remove' || operation.owner.unit_id === 'main' || !operation.intent.reason.startsWith(AUTOPILOT_PREFLIGHT_ROLLBACK_REASON_PREFIX)) continue;
       if (operation.owner.repo_id !== input.active.repo_key || operation.owner.autopilot_id !== input.active.autopilot_id || operation.owner.workstream_run !== input.active.workstream_run) fail('rollback-recovery-owner-mismatch', 'committed preflight rollback operation does not belong to the active run.', [operation.operation_id]);
-      if (input.childLeases.some((child) => child.owner.repo_id === operation.owner.repo_id && child.owner.workstream_run === operation.owner.workstream_run && child.owner.unit_id === operation.owner.unit_id && child.owner.attempt === operation.owner.attempt)) fail('rollback-recovery-child-exists', 'preflight rollback projection cannot retire metadata for an attempt that launched a child.', [operation.operation_id, operation.owner.unit_id, String(operation.owner.attempt)]);
+      if (input.childLeases.some((child) => child.owner.repo_id === operation.owner.repo_id && child.owner.workstream_run === operation.owner.workstream_run && child.owner.unit_id === operation.owner.unit_id && child.owner.attempt === operation.owner.attempt)) {
+        const supersession = await exactLaterPackageSupersession({ active: input.active, rollback: operation, operations: input.operations, childLeases: input.childLeases, unitAttempts: input.unitAttempts, worktrees: input.worktrees, ...(input.env === undefined ? {} : { env: input.env }) });
+        if (supersession.later !== null) {
+          await publishRollbackSupersessionAudit(input.active, operation, supersession.later);
+          recovered.push(operation.operation_id);
+          continue;
+        }
+        fail('rollback-recovery-child-exists', 'preflight rollback projection cannot retire metadata for an attempt that launched a child without an exact later package-owned supersession chain.', [operation.operation_id, operation.owner.unit_id, String(operation.owner.attempt), `supersession_blocker=${supersession.blocker ?? 'unknown'}`]);
+      }
       const expectedPath = unitWorktreePathForActiveAutopilot(input.active, operation.owner.unit_id, operation.owner.attempt);
       const expectedBranch = `autopilot/unit/${input.active.workstream_run}/${operation.owner.unit_id}/attempt-${String(operation.owner.attempt)}`;
       if (operation.intent.worktree_path !== expectedPath || operation.intent.branch !== expectedBranch || operation.intent.target_sha === null) fail('rollback-recovery-authority-mismatch', 'preflight rollback operation disagrees with deterministic unit authority.', [operation.operation_id]);

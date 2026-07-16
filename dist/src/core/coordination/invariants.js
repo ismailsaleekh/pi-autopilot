@@ -478,8 +478,15 @@ export function checkCoordinationInvariants(snapshot) {
             else
                 incompleteByWorktree.set(operation.worktree_id, operation.operation_id);
         }
-        if (operation.operation_type === 'remove' && operation.stage === 'committed' && worktree?.state !== 'removed')
-            findings.push(finding('worktree-remove-state-mismatch', operation.operation_id, 'committed remove operation requires removed worktree state'));
+        if (operation.operation_type === 'remove' && operation.stage === 'committed' && worktree?.state !== 'removed') {
+            const laterCommittedRecreate = snapshot.worktree_operations.some((candidate) => candidate.worktree_id === operation.worktree_id
+                && candidate.operation_type === 'create'
+                && candidate.stage === 'committed'
+                && candidate.intent_event_seq > operation.intent_event_seq
+                && candidate.authority_version > operation.authority_version);
+            if (!laterCommittedRecreate)
+                findings.push(finding('worktree-remove-state-mismatch', operation.operation_id, 'committed remove operation requires removed worktree state unless a later committed recreate superseded its exact effect'));
+        }
     }
     const auditedProjectionRetirements = new Set(snapshot.events.filter((event) => event.event_type === 'worktree-projection-retired' && event.entity_type === 'worktree').map((event) => event.entity_id));
     for (const worktree of snapshot.worktrees) {

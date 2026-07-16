@@ -13,7 +13,7 @@ import { CoordinationRuntimeError, formatCoordinationRuntimeError } from '../../
 import { coordinatorRuntimePaths } from '../../src/core/coordination/runtime-paths.ts';
 import { startCoordinatorServer } from '../../src/core/coordination/server.ts';
 import { DurableRunSupervisorClient, writeCoordinatorSessionContext, type CoordinatorSessionContext } from '../../src/core/coordination/supervisor.ts';
-import { executeOwnedWorktreeSaga, OwnedWorktreeSagaClient, recoverOwnedWorktreeSagas, WORKTREE_SAGA_BOUNDARIES } from '../../src/core/coordination/worktree-saga.ts';
+import { executeOwnedWorktreeSaga, fixedWorktreeSagaCallbacks, OwnedWorktreeSagaClient, recoverOwnedWorktreeSagas, WORKTREE_SAGA_BOUNDARIES } from '../../src/core/coordination/worktree-saga.ts';
 import { AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV } from '../../src/core/names.ts';
 import { AUTOPILOT_STATE_ROOT_ENV, BRANCHES_FILE, MATERIALIZED_PATHS_FILE, UNIT_INDEX_FILE, UNIT_INFO_FILE, WORKTREE_LEDGER_FILE, prepareAutopilotWorkstream, readUnitIndex, recoverAutopilotWorktreeSagas, resolveRepoIdentity, type ActiveAutopilotRow, type ProcessEnvLike } from '../../src/core/parallel-runtime.ts';
 
@@ -320,6 +320,149 @@ void describe('owner-scoped worktree and Git saga recovery', () => {
     }
   });
 
+  void it('preserves a later package-owned quarantine when a historical preflight rollback was superseded', async () => {
+    const value = await setup('s');
+    let restarted: Awaited<ReturnType<typeof startCoordinatorServer>> | null = null;
+    try {
+      const saga = new OwnedWorktreeSagaClient(new CoordinatorClient({ env: value.env, autoStart: false }), value.session);
+      const full = unitCreateSpec(value, 'unit-superseded-rollback');
+      const create = { ...full, intent: { ...full.intent, checkout_mode: 'claim-minimal' as const, sparse_patterns: ['/src/base.ts'] } };
+      await saga.prepare(create);
+      await recoverOwnedWorktreeSagas({ active: value.active, env: value.env });
+      const taskRoot = dirname(dirname(dirname(dirname(create.intent.worktree_path))));
+      const attemptRoot = dirname(create.intent.worktree_path);
+      const activeBranchInfo = {
+        unit_id: create.unitId, attempt: create.attempt, branch: create.intent.branch, worktree_path: create.intent.worktree_path,
+        base_sha: value.active.target_base_sha, current_sha: value.active.target_base_sha, archive_ref: null, status: 'active' as const,
+      };
+      await writeFile(join(attemptRoot, UNIT_INFO_FILE), `${JSON.stringify({
+        schema_version: 'autopilot.unit_info.v1', workstream: value.active.workstream, workstream_run: value.active.workstream_run,
+        autopilot_id: value.active.autopilot_id, ...activeBranchInfo, runtime_root: value.active.runtime_root,
+        created_at: value.active.started_at, checkout_mode: 'claim-minimal', checkout_profile_ref: '_checkout-profile.json', materialized_paths_ref: MATERIALIZED_PATHS_FILE,
+      }, null, 2)}\n`, 'utf8');
+      await writeFile(join(attemptRoot, MATERIALIZED_PATHS_FILE), '{}\n', 'utf8');
+      await writeFile(join(taskRoot, UNIT_INDEX_FILE), `${JSON.stringify({ schema_version: 'autopilot.unit_index.v1', units: [activeBranchInfo] }, null, 2)}\n`, 'utf8');
+      await writeFile(join(taskRoot, BRANCHES_FILE), `${JSON.stringify({ schema_version: 'autopilot.branches.v1', active_branch: value.active.branch, base_sha: value.active.target_base_sha, current_sha: value.active.target_base_sha, archive_ref: null, unit_branches: [activeBranchInfo] }, null, 2)}\n`, 'utf8');
+
+      const rollback = {
+        ...create, operationType: 'remove' as const, operationKey: 'historical-preflight-rollback', initialWorktreeState: 'active' as const, committedWorktreeState: 'removed' as const,
+        intent: { ...create.intent, reason: 'autopilot-agent-run preflight rollback after failure: synthetic pre-spend rejection', target_sha: value.active.target_base_sha, checkout_mode: null, sparse_patterns: [], paths: [], metadata_refs: [WORKTREE_LEDGER_FILE] },
+      };
+      await saga.prepare(rollback);
+      await recoverOwnedWorktreeSagas({ active: value.active, env: value.env });
+      assert.equal(existsSync(create.intent.worktree_path), false);
+
+      const recreate = { ...create, operationKey: 'package-recreate-after-rollback' };
+      const preparedRecreate = await saga.prepare(recreate);
+      await executeOwnedWorktreeSaga(recreate, fixedWorktreeSagaCallbacks(preparedRecreate.operation, value.env), value.env);
+      const materialize = {
+        ...create, operationType: 'materialize' as const, operationKey: 'package-materialize-after-recreate', initialWorktreeState: 'active' as const, committedWorktreeState: 'active' as const,
+        intent: { ...create.intent, reason: 'package materialization after exact recreate', base_sha: null, sparse_patterns: ['/docs/context.md'], paths: ['docs/context.md'] },
+      };
+      await saga.prepare(materialize);
+      await recoverOwnedWorktreeSagas({ active: value.active, env: value.env });
+
+      const coordinator = new CoordinatorClient({ env: value.env, autoStart: false });
+      await coordinator.mutate('register-attempt', {
+        repoId: value.session.repo_id, workstreamRun: value.session.workstream_run, sessionId: value.session.session_id,
+        fencingGeneration: value.session.session_generation, expectedVersion: value.session.run_version, idempotencyKey: 'register-superseded-rollback-attempt',
+      }, {
+        unit_id: create.unitId, attempt: create.attempt, spec_ref: `unit-specs/${create.unitId}.json`, spec_sha256: `sha256:${'c'.repeat(64)}`,
+        role: 'fix', preemptible: true, checkpoint_ordinal: 0, session_lease_id: value.session.session_lease_id, session_token: value.session.session_token,
+      });
+      const childLeaseId = `child-${value.active.workstream_run}-${create.unitId}-${String(create.attempt)}`;
+      await coordinator.mutate('register-child', {
+        repoId: value.session.repo_id, workstreamRun: value.session.workstream_run, sessionId: value.session.session_id,
+        fencingGeneration: value.session.session_generation, expectedVersion: value.session.run_version, idempotencyKey: 'register-superseded-rollback-child',
+      }, {
+        child_lease_id: childLeaseId, autopilot_id: value.active.autopilot_id, unit_id: create.unitId, attempt: create.attempt,
+        pid: process.pid, boot_id: 'superseded-rollback-child-boot', child_token: 'f'.repeat(64), session_lease_id: value.session.session_lease_id,
+        session_token: value.session.session_token, lease_expires_at: '2099-01-01T00:00:00.000Z',
+      });
+
+      const quarantineBase = git(create.intent.worktree_path, ['rev-parse', 'HEAD']);
+      await writeFile(join(create.intent.worktree_path, 'src', 'quarantined.ts'), 'preserve exact failed work\n', 'utf8');
+      const quarantine = {
+        ...create, operationType: 'quarantine' as const, operationKey: 'package-quarantine-after-recreate', initialWorktreeState: 'active' as const, committedWorktreeState: 'quarantined' as const,
+        intent: { ...create.intent, reason: 'quarantine later package-owned failed work', base_sha: quarantineBase, target_sha: null, checkout_mode: null, sparse_patterns: [], paths: ['src/quarantined.ts'] },
+      };
+      await saga.prepare(quarantine);
+      await recoverOwnedWorktreeSagas({ active: value.active, env: value.env });
+      const captureHead = git(create.intent.worktree_path, ['rev-parse', 'HEAD']);
+      const archiveRef = `autopilot/archive/${value.active.workstream_run}/unit/${create.unitId}/attempt-1/capture`;
+      const archive = {
+        ...create, operationType: 'archive' as const, operationKey: 'package-archive-after-quarantine', initialWorktreeState: 'quarantined' as const, committedWorktreeState: 'quarantined' as const,
+        intent: { ...create.intent, reason: 'archive exact later quarantine capture', base_sha: quarantineBase, target_sha: captureHead, archive_ref: archiveRef, checkout_mode: null, sparse_patterns: [], paths: [] },
+      };
+      const preparedArchive = await saga.prepare(archive);
+      await executeOwnedWorktreeSaga(archive, fixedWorktreeSagaCallbacks(preparedArchive.operation, value.env), value.env);
+      const quarantinedBranchInfo = { ...activeBranchInfo, current_sha: captureHead, archive_ref: archiveRef, status: 'quarantined' as const };
+      await writeFile(join(taskRoot, UNIT_INDEX_FILE), `${JSON.stringify({ schema_version: 'autopilot.unit_index.v1', units: [quarantinedBranchInfo] }, null, 2)}\n`, 'utf8');
+      await writeFile(join(taskRoot, BRANCHES_FILE), `${JSON.stringify({ schema_version: 'autopilot.branches.v1', active_branch: value.active.branch, base_sha: value.active.target_base_sha, current_sha: value.active.target_base_sha, archive_ref: null, unit_branches: [quarantinedBranchInfo] }, null, 2)}\n`, 'utf8');
+
+      await value.server.close();
+      const database = new DatabaseSync(coordinatorRuntimePaths(value.env).databasePath);
+      try {
+        database.prepare("UPDATE child_leases SET status='recovery-required', version=version+1 WHERE child_lease_id=?").run(childLeaseId);
+        const row = database.prepare("SELECT entity_id, payload_json FROM unit_attempts WHERE repo_id=? AND workstream_run=? AND json_extract(payload_json, '$.owner.unit_id')=? AND json_extract(payload_json, '$.owner.attempt')=?").get(value.active.repo_key, value.active.workstream_run, create.unitId, create.attempt) as Readonly<Record<string, unknown>> | undefined;
+        if (row === undefined || typeof row['entity_id'] !== 'string' || typeof row['payload_json'] !== 'string') throw new Error('unit attempt fixture row is missing');
+        const payload = JSON.parse(row['payload_json']) as Record<string, unknown>;
+        const next = { ...payload, state: 'quarantined', version: Number(payload['version']) + 1 };
+        database.prepare('UPDATE unit_attempts SET payload_json=?, version=? WHERE entity_id=?').run(JSON.stringify(next), next.version, row['entity_id']);
+      } finally { database.close(); }
+      restarted = await startCoordinatorServer(coordinatorRuntimePaths(value.env));
+
+      const rejectUnprovenSupersession = async (): Promise<void> => {
+        await assert.rejects(
+          () => recoverAutopilotWorktreeSagas({ active: value.active, env: value.env }),
+          (error: unknown) => error instanceof CoordinationRuntimeError && error.code === 'recovery-required',
+        );
+      };
+      const foreignResidue = join(create.intent.worktree_path, 'src', 'foreign-residue.ts');
+      await writeFile(foreignResidue, 'foreign residue\n', 'utf8');
+      await rejectUnprovenSupersession();
+      await rm(foreignResidue);
+
+      git(value.repo, ['update-ref', `refs/heads/${archiveRef}`, quarantineBase]);
+      await rejectUnprovenSupersession();
+      git(value.repo, ['update-ref', `refs/heads/${archiveRef}`, captureHead]);
+
+      const mismatchedIndex = { ...quarantinedBranchInfo, current_sha: quarantineBase };
+      await writeFile(join(taskRoot, UNIT_INDEX_FILE), `${JSON.stringify({ schema_version: 'autopilot.unit_index.v1', units: [mismatchedIndex] }, null, 2)}\n`, 'utf8');
+      await rejectUnprovenSupersession();
+      await writeFile(join(taskRoot, UNIT_INDEX_FILE), `${JSON.stringify({ schema_version: 'autopilot.unit_index.v1', units: [quarantinedBranchInfo] }, null, 2)}\n`, 'utf8');
+
+      const archiveOperation = (await saga.operations()).find((operation) => operation.operation_type === 'archive' && operation.owner.unit_id === create.unitId);
+      if (archiveOperation?.verification_evidence === null || archiveOperation?.verification_evidence === undefined) throw new Error('archive operation evidence is missing');
+      const archiveEvidencePath = join(value.active.worktree_root, ...archiveOperation.verification_evidence.ref.split('/'));
+      const archiveEvidenceBytes = await readFile(archiveEvidencePath);
+      await writeFile(archiveEvidencePath, Buffer.concat([archiveEvidenceBytes, Buffer.from('tamper')]));
+      await rejectUnprovenSupersession();
+      await writeFile(archiveEvidencePath, archiveEvidenceBytes);
+
+      await recoverAutopilotWorktreeSagas({ active: value.active, env: value.env });
+      await recoverAutopilotWorktreeSagas({ active: value.active, env: value.env });
+      const rollbackOperation = (await saga.operations()).find((operation) => operation.intent.reason.startsWith('autopilot-agent-run preflight rollback after failure:'));
+      if (rollbackOperation === undefined) throw new Error('historical rollback operation is missing');
+      const auditPath = join(value.active.worktree_root, '_saga-evidence', value.active.workstream_run, 'supersessions', `${rollbackOperation.operation_id}.json`);
+      assert.equal(existsSync(auditPath), true);
+      const audit = JSON.parse(await readFile(auditPath, 'utf8')) as Readonly<Record<string, unknown>>;
+      assert.equal(audit['schema_version'], 'autopilot.worktree_rollback_supersession.v1');
+      assert.equal(audit['disposition'], 'historical-preflight-rollback-superseded-by-exact-later-package-quarantine');
+      assert.equal(existsSync(create.intent.worktree_path), true);
+      assert.equal(git(create.intent.worktree_path, ['status', '--porcelain']), '');
+      assert.equal(git(create.intent.worktree_path, ['rev-parse', 'HEAD']), captureHead);
+      assert.equal((await readUnitIndex(taskRoot)).units[0]?.status, 'quarantined');
+      const doctor = await new CoordinatorClient({ env: value.env, autoStart: false }).query('doctor');
+      const findings = doctor.payload['invariant_findings'];
+      assert.equal(Array.isArray(findings) && findings.some((finding) => typeof finding === 'object' && finding !== null && (finding as Record<string, unknown>)['code'] === 'worktree-remove-state-mismatch'), false);
+    } finally {
+      if (restarted !== null) await restarted.close();
+      await value.server.close().catch(() => undefined);
+      await rm(value.root, { recursive: true, force: true });
+    }
+  });
+
   void it('transactionally retires an exact schema-12 duplicate projection while preserving history', async () => {
     const value = await setup('d');
     let restarted: Awaited<ReturnType<typeof startCoordinatorServer>> | null = null;
@@ -357,6 +500,52 @@ void describe('owner-scoped worktree and Git saga recovery', () => {
       assert.equal(Array.isArray(afterFindings) && afterFindings.some((finding) => typeof finding === 'object' && finding !== null && (finding as Record<string, unknown>)['code'] === 'duplicate-active-worktree-authority'), false);
     } finally {
       if (restarted !== null) await restarted.close();
+      await rm(value.root, { recursive: true, force: true });
+    }
+  });
+
+  void it('retires a history-free terminal migration shadow only after the deterministic remove is exact', async () => {
+    const value = await setup('r');
+    let restarted: Awaited<ReturnType<typeof startCoordinatorServer>> | null = null;
+    try {
+      const saga = new OwnedWorktreeSagaClient(new CoordinatorClient({ env: value.env, autoStart: false }), value.session);
+      const create = unitCreateSpec(value, 'unit-removed-shadow');
+      const remove = {
+        ...create, operationType: 'remove' as const, operationKey: 'deterministic-remove-before-shadow', initialWorktreeState: 'terminal' as const, committedWorktreeState: 'removed' as const,
+        intent: { ...create.intent, reason: 'prepare unit worktree pre-create cleanup', target_sha: value.active.target_base_sha, checkout_mode: null, sparse_patterns: [], paths: [], metadata_refs: [] },
+      };
+      await saga.prepare(remove);
+      await recoverOwnedWorktreeSagas({ active: value.active, env: value.env });
+      const canonical = (await saga.worktrees()).find((entry) => entry.owner.unit_id === create.unitId);
+      if (canonical === undefined || canonical.state !== 'removed') throw new Error('deterministic removed projection is missing');
+      assert.equal(existsSync(canonical.canonical_path), false);
+      assert.equal(git(value.repo, ['branch', '--list', canonical.branch]), '');
+
+      await value.server.close();
+      const database = new DatabaseSync(coordinatorRuntimePaths(value.env).databasePath);
+      const shadowId = 'migration-worktree-removed-shadow';
+      try {
+        const shadow = { ...canonical, worktree_id: shadowId, state: 'terminal', version: 1 };
+        database.prepare('INSERT INTO worktrees(entity_id, repo_id, workstream_run, payload_json, version) VALUES(?, ?, ?, ?, ?)').run(shadow.worktree_id, shadow.owner.repo_id, shadow.owner.workstream_run, JSON.stringify(shadow), shadow.version);
+      } finally { database.close(); }
+      restarted = await startCoordinatorServer(coordinatorRuntimePaths(value.env));
+      const consumer = unitCreateSpec(value, 'unit-shadow-reconciliation-consumer');
+      await saga.prepare(consumer);
+      await saga.prepare(consumer);
+      const client = new CoordinatorClient({ env: value.env, autoStart: false });
+      const status = await client.query('status', value.active.repo_key, value.active.workstream_run);
+      const worktrees = status.payload['worktrees'];
+      const operations = status.payload['worktree_operations'];
+      assert.equal(Array.isArray(worktrees) && (worktrees as readonly Record<string, unknown>[]).find((entry) => entry['worktree_id'] === shadowId)?.['state'], 'removed');
+      assert.equal(Array.isArray(operations) && (operations as readonly Record<string, unknown>[]).filter((entry) => entry['worktree_id'] === canonical.worktree_id).length, 1);
+      const doctor = await client.query('doctor');
+      const findings = doctor.payload['invariant_findings'];
+      assert.equal(Array.isArray(findings) && findings.some((finding) => typeof finding === 'object' && finding !== null && ['duplicate-active-worktree-authority', 'removed-worktree-without-commit'].includes(String((finding as Record<string, unknown>)['code']))), false);
+      assert.equal(existsSync(canonical.canonical_path), false);
+      assert.equal(git(value.repo, ['branch', '--list', canonical.branch]), '');
+    } finally {
+      if (restarted !== null) await restarted.close();
+      await value.server.close().catch(() => undefined);
       await rm(value.root, { recursive: true, force: true });
     }
   });

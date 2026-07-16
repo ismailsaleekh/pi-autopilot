@@ -23,6 +23,28 @@ void describe('cf46 worktree lifecycle regressions', () => {
     assert.equal(findings.some((finding) => finding.code === 'duplicate-active-worktree-authority'), true);
   });
 
+  void it('treats a committed remove as historical only after a later higher-authority committed recreate', () => {
+    const snapshot = validCoordinationSnapshot();
+    const worktree = snapshot.worktrees[0];
+    const template = snapshot.worktree_operations[0];
+    if (worktree === undefined || template === undefined) throw new Error('fixture worktree operation is missing');
+    const evidence = { ref: '_saga-evidence/run-a/operation-remove.json', sha256: `sha256:${'a'.repeat(64)}` as const };
+    const remove = {
+      ...template, operation_id: 'operation-remove', operation_type: 'remove' as const, stage: 'committed' as const,
+      authority_version: 1, intent_event_seq: 3, intent: { ...template.intent, reason: 'historical remove', target_sha: 'b'.repeat(40) },
+      completed_steps: ['preflight-probe', 'external-action', 'postcondition-verification'], verification_evidence: evidence, version: 5,
+    };
+    const recreate = {
+      ...template, operation_id: 'operation-recreate', operation_type: 'create' as const, stage: 'committed' as const,
+      authority_version: 2, intent_event_seq: 4, intent: { ...template.intent, reason: 'later package recreate', base_sha: 'b'.repeat(40), checkout_mode: 'full' as const, sparse_patterns: [], paths: [] },
+      completed_steps: ['preflight-probe', 'external-action', 'postcondition-verification'], verification_evidence: { ref: '_saga-evidence/run-a/operation-recreate.json', sha256: `sha256:${'b'.repeat(64)}` as const }, version: 5,
+    };
+    const superseded = checkCoordinationInvariants({ ...snapshot, worktrees: [{ ...worktree, state: 'active', version: 3 }], worktree_operations: [remove, recreate] });
+    assert.equal(superseded.some((finding) => finding.code === 'worktree-remove-state-mismatch'), false);
+    const unexplained = checkCoordinationInvariants({ ...snapshot, worktrees: [{ ...worktree, state: 'active', version: 2 }], worktree_operations: [remove] });
+    assert.equal(unexplained.some((finding) => finding.code === 'worktree-remove-state-mismatch'), true);
+  });
+
   void it('reports authority and owner drift between near-duplicate projections as corruption', () => {
     const snapshot = validCoordinationSnapshot();
     const original = snapshot.worktrees[0];

@@ -5330,10 +5330,79 @@ export class CoordinatorStore {
             const retired = parseCoordinationWorktree({ ...redundant, state: 'removed', version: redundant.version + 1 });
             this.#db.prepare('UPDATE worktrees SET payload_json=?, version=? WHERE entity_id=?').run(canonicalJson(retired), retired.version, retired.worktree_id);
             const seq = this.#nextEventSequence(repoId);
-            const idempotencyKey = `internal:worktree-projection-retired:${retired.worktree_id}`;
-            const evidence = canonicalJson({ canonical_worktree_id: canonical.worktree_id, retired_worktree_id: retired.worktree_id, owner: canonical.owner, kind: canonical.kind, canonical_path: canonical.canonical_path, git_common_dir: canonical.git_common_dir, branch: canonical.branch });
-            this.#insertEvent.run(repoId, seq, 'worktree-projection-retired', 'worktree', retired.worktree_id, idempotencyKey, `sha256:${createHash('sha256').update(evidence, 'utf8').digest('hex')}`, this.#clock.now().toISOString());
+            this.#recordWorktreeProjectionRetirement(repoId, canonical, retired, seq, 'equivalent-active-projection');
         }
+        // A migration-era import could leave one non-deterministic terminal projection
+        // active after the current deterministic projection committed an exact
+        // remove. This is not the ordinary dual-active case above: the removed
+        // deterministic row and its immutable cleanup history are canonical. Retire
+        // only the exact history-free shadow after proving that no child/attempt ever
+        // used it and that the package-recorded Git absence still holds.
+        const all = this.#db.prepare('SELECT * FROM worktrees WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(repoId, workstreamRun).map(worktreeFromRow);
+        const allGroups = new Map();
+        for (const worktree of all)
+            allGroups.set(worktreeOwnerKindKey(worktree), [...(allGroups.get(worktreeOwnerKindKey(worktree)) ?? []), worktree]);
+        for (const candidates of allGroups.values()) {
+            if (candidates.length !== 2)
+                continue;
+            const first = candidates[0];
+            if (first === undefined || first.kind !== 'unit')
+                continue;
+            const deterministicId = deterministicWorktreeId(first.owner, first.kind);
+            const canonical = candidates.find((candidate) => candidate.worktree_id === deterministicId && candidate.state === 'removed');
+            const redundant = candidates.find((candidate) => candidate.worktree_id !== deterministicId && candidate.state !== 'removed');
+            if (canonical === undefined || redundant === undefined)
+                continue;
+            if (!sameWorktreeAuthority(canonical, redundant))
+                throw new CoordinationRuntimeError('store-corrupt', 'removed deterministic worktree and its active historical shadow disagree in authority-bearing identity', candidates.map((entry) => entry.worktree_id));
+            if (redundant.state !== 'terminal' || redundant.version !== 1)
+                throw new CoordinationRuntimeError('recovery-required', 'historical worktree shadow is not the exact untouched terminal migration projection', [`state=${redundant.state}`, `version=${String(redundant.version)}`]);
+            const operationsFor = (id) => this.#db.prepare('SELECT * FROM worktree_operations WHERE repo_id=? AND workstream_run=? AND json_extract(payload_json, \'$.worktree_id\')=? ORDER BY entity_id').all(repoId, workstreamRun, id).map(worktreeOperationFromRow);
+            const canonicalOperations = operationsFor(canonical.worktree_id);
+            const redundantOperations = operationsFor(redundant.worktree_id);
+            const remove = canonicalOperations[0];
+            if (canonicalOperations.length !== 1 || remove === undefined || redundantOperations.length !== 0
+                || remove.operation_type !== 'remove' || remove.stage !== 'committed' || remove.worktree_id !== canonical.worktree_id
+                || canonicalJson(remove.owner) !== canonicalJson(canonical.owner)
+                || remove.authority_version + 1 !== canonical.version || remove.intent_event_seq < 1
+                || remove.completed_steps.length !== 3 || remove.completed_steps[0] !== 'preflight-probe' || remove.completed_steps[1] !== 'external-action' || remove.completed_steps[2] !== 'postcondition-verification'
+                || remove.current_step !== null || remove.recovery_attempts !== 0 || remove.verification_evidence === null || remove.error_code !== null
+                || remove.intent.worktree_path !== canonical.canonical_path || remove.intent.git_common_dir !== canonical.git_common_dir || remove.intent.branch !== canonical.branch || remove.intent.target_sha === null) {
+                throw new CoordinationRuntimeError('recovery-required', 'historical worktree shadow lacks one exact committed deterministic remove history', candidates.map((entry) => entry.worktree_id));
+            }
+            const childExists = this.#db.prepare("SELECT 1 AS present FROM child_leases WHERE repo_id=? AND workstream_run=? AND unit_id=? AND attempt=? LIMIT 1").get(repoId, workstreamRun, canonical.owner.unit_id, canonical.owner.attempt) !== undefined;
+            const attemptExists = this.#db.prepare("SELECT 1 AS present FROM unit_attempts WHERE repo_id=? AND workstream_run=? AND json_extract(payload_json, '$.owner.unit_id')=? AND json_extract(payload_json, '$.owner.attempt')=? LIMIT 1").get(repoId, workstreamRun, canonical.owner.unit_id, canonical.owner.attempt) !== undefined;
+            if (childExists || attemptExists)
+                throw new CoordinationRuntimeError('recovery-required', 'historical worktree shadow cannot retire because its owner has child or attempt history', [canonical.owner.unit_id, String(canonical.owner.attempt)]);
+            const repository = repositoryFromRow(asRow(this.#db.prepare('SELECT * FROM repositories WHERE repo_id=?').get(repoId), 'historical worktree shadow repository'));
+            if (canonical.git_common_dir !== repository.git_common_dir || existsSync(canonical.canonical_path) || this.#gitWorktreeRegistered(repository.canonical_root, canonical.canonical_path) || this.#gitText(repository.canonical_root, ['rev-parse', '--verify', `refs/heads/${canonical.branch}`]) !== null)
+                throw new CoordinationRuntimeError('recovery-required', 'historical worktree shadow cannot retire because the exact removed Git postcondition no longer holds', [canonical.canonical_path, canonical.branch]);
+            this.#verifyOperationEvidenceFile(remove);
+            const retired = parseCoordinationWorktree({ ...redundant, state: 'removed', version: redundant.version + 1 });
+            this.#db.prepare('UPDATE worktrees SET payload_json=?, version=? WHERE entity_id=?').run(canonicalJson(retired), retired.version, retired.worktree_id);
+            const seq = this.#nextEventSequence(repoId);
+            this.#recordWorktreeProjectionRetirement(repoId, canonical, retired, seq, 'removed-deterministic-projection-canonical', remove.operation_id);
+        }
+    }
+    #recordWorktreeProjectionRetirement(repoId, canonical, retired, seq, disposition, committedRemoveOperationId = null) {
+        const idempotencyKey = `internal:worktree-projection-retired:${retired.worktree_id}`;
+        const evidence = canonicalJson({
+            schema_version: 'autopilot.worktree_projection_retirement.v1',
+            canonical_worktree_id: canonical.worktree_id,
+            retired_worktree_id: retired.worktree_id,
+            owner: canonical.owner,
+            kind: canonical.kind,
+            canonical_path: canonical.canonical_path,
+            git_common_dir: canonical.git_common_dir,
+            branch: canonical.branch,
+            disposition,
+            committed_remove_operation_id: committedRemoveOperationId,
+            retired_event_seq: seq,
+        });
+        const bytes = new TextEncoder().encode(`${evidence}\n`);
+        const sha256 = `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
+        this.#persistEvidenceArtifact(repoId, { ref: `internal/worktree-projection-retirements/${retired.worktree_id}.json`, sha256 }, bytes, 'worktree projection retirement audit', seq);
+        this.#insertEvent.run(repoId, seq, 'worktree-projection-retired', 'worktree', retired.worktree_id, idempotencyKey, sha256, this.#clock.now().toISOString());
     }
     #assertWorktreeAuthority(worktree, operation) {
         const repository = repositoryFromRow(asRow(this.#db.prepare('SELECT * FROM repositories WHERE repo_id=?').get(worktree.owner.repo_id), 'worktree repository'));
@@ -5414,7 +5483,8 @@ export class CoordinatorStore {
             throw new CoordinationRuntimeError('invalid-state', 'operation evidence is not valid JSON', [error instanceof Error ? error.message : String(error)]);
         }
         const expectedIntentSha = `sha256:${createHash('sha256').update(canonicalJson(operation.intent), 'utf8').digest('hex')}`;
-        if (parsed['schema_version'] !== 'autopilot.worktree_operation_evidence.v1' || parsed['operation_id'] !== operation.operation_id || parsed['worktree_id'] !== operation.worktree_id || parsed['operation_type'] !== operation.operation_type || parsed['terminal_stage'] !== operation.stage || parsed['intent_sha256'] !== expectedIntentSha || canonicalJson(parsed['owner']) !== canonicalJson(operation.owner))
+        const evidenceTerminalStage = operation.stage === 'committed' ? 'verified' : operation.stage;
+        if (parsed['schema_version'] !== 'autopilot.worktree_operation_evidence.v1' || parsed['operation_id'] !== operation.operation_id || parsed['worktree_id'] !== operation.worktree_id || parsed['operation_type'] !== operation.operation_type || parsed['terminal_stage'] !== evidenceTerminalStage || parsed['intent_sha256'] !== expectedIntentSha || canonicalJson(parsed['owner']) !== canonicalJson(operation.owner))
             throw new CoordinationRuntimeError('unauthorized-client', 'operation evidence identity or immutable intent does not match its durable operation');
     }
     #assertCommittedWorktreeState(operation, state) {

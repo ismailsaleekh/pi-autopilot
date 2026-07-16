@@ -18,6 +18,7 @@ const predecessors = [
   { label: 'cf46', commit: '79fa09508def3277b9e6fb3461f7b3d753d43993', version: '1.1.4', build: '1.1.4-cf46' },
   { label: 'cf47', commit: '210d695393232c19652b664a60b9ecfc6fe0e713', version: '1.1.5', build: '1.1.5-cf47' },
   { label: 'cf48', commit: 'a8a6078dfe1e49c2c9e61abcae10741fce20b745', version: '1.1.6', build: '1.1.6-cf48' },
+  { label: 'cf49', commit: '2f708ab11f261c171629e89b25c8b0ba988e9d12', version: '1.1.7', build: '1.1.7-cf49' },
 ] as const;
 
 function run(command: string, args: readonly string[], cwd: string, env: Readonly<Record<string, string | undefined>>): ReturnType<typeof spawnSync> {
@@ -100,7 +101,7 @@ async function invokePackedAutopilot(consumer: string, project: string, stateRoo
   assert.equal(invocation.result?.['messages'], 1, JSON.stringify(invocation.result?.['notifications']));
 }
 
-void it('packs exact cf45/cf46/cf47/cf48 binaries and completes the manifest-route cf48-to-cf49 reload journey', async () => {
+void it('packs exact cf45/cf46/cf47/cf48/cf49 binaries and completes the manifest-route cf49-to-cf50 reload journey', async () => {
   const root = await mkdtemp(join(tmpdir(), 'pi-autopilot-packed-startup-reload-'));
   const cache = join(root, 'npm-cache');
   const npmEnv = { ...process.env, NPM_CONFIG_CACHE: cache, NPM_CONFIG_OFFLINE: 'true', PI_OFFLINE: '1', PI_SKIP_VERSION_CHECK: '1', PI_TELEMETRY: '0' };
@@ -117,7 +118,7 @@ void it('packs exact cf45/cf46/cf47/cf48 binaries and completes the manifest-rou
       run(coordinatorBin(consumer), ['status', '--state-root', stateRoot], consumer, env);
       const predecessorLock = await lock(env);
       assert.equal(predecessorLock['package_build'], predecessor.build);
-      const project = predecessor.label === 'cf48' ? join(root, 'packed-project') : null;
+      const project = predecessor.label === 'cf49' ? join(root, 'packed-project') : null;
       if (project !== null) {
         await mkdir(project, { recursive: true });
         await writeFile(join(project, 'README.md'), '# packed reload\n', 'utf8');
@@ -132,14 +133,14 @@ void it('packs exact cf45/cf46/cf47/cf48 binaries and completes the manifest-rou
       const healthy = JSON.parse(String(run(coordinatorBin(consumer), ['status', '--state-root', stateRoot], consumer, env).stdout)) as Readonly<Record<string, unknown>>;
       assert.equal((await lock(env))['package_build'], predecessor.build, 'a healthy certified predecessor remains authoritative and usable');
 
-      if (predecessor.label === 'cf48' && project !== null) {
+      if (predecessor.label === 'cf49' && project !== null) {
         const predecessorRuns = healthy['runs'];
         assert.equal(Array.isArray(predecessorRuns) && predecessorRuns.length, 1);
         const originalRun = Array.isArray(predecessorRuns) ? predecessorRuns[0] : null;
         await unlink(coordinatorRuntimePaths(env).socketPath);
         await invokePackedAutopilot(consumer, project, stateRoot, join(root, 'packed-home-candidate'), 'packed-reload-unit', env);
         const current = await lock(env);
-        assert.equal(current['package_build'], '1.1.7-cf49');
+        assert.equal(current['package_build'], '1.1.8-cf50');
         assert.notEqual(current['pid'], predecessorLock['pid']);
         await invokePackedAutopilot(consumer, project, stateRoot, join(root, 'packed-home-next'), 'packed-next-item', env);
         const status = JSON.parse(String(run(coordinatorBin(consumer), ['status', '--state-root', stateRoot], consumer, env).stdout)) as Readonly<Record<string, unknown>>;

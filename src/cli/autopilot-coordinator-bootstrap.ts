@@ -126,7 +126,7 @@ function bootstrapInputs(): { readonly coordinatorPath: string; readonly reportP
   const manifestPath = join(packageRoot, 'package.json');
   assertPhysicalPackageFile(packageRoot, manifestPath);
   const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as Readonly<Record<string, unknown>>;
-  if (manifest['name'] !== 'pi-autopilot' || manifest['version'] !== '1.1.7') throw new Error('compiled coordinator bootstrap package identity drifted');
+  if (manifest['name'] !== 'pi-autopilot' || manifest['version'] !== '1.1.8') throw new Error('compiled coordinator bootstrap package identity drifted');
   return {
     coordinatorPath,
     reportPath: join(resolve(stateRootValue), 'coordinator', 'startup-reports', `${attemptId}.json`),

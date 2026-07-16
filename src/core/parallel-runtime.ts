@@ -29,7 +29,7 @@ import { parseLegacyActiveAutopilots, parseLegacyPathClaims, runLegacyCoordinati
 import { DurableRunSupervisorClient } from './coordination/supervisor.ts';
 import { CoordinatorClient } from './coordination/client.ts';
 import { CoordinationRuntimeError } from './coordination/failures.ts';
-import { parseCoordinationChildLease, parseCoordinationRun, parseCoordinationRunResource, parseCoordinationWorktreeOperation } from './coordination/contracts.ts';
+import { parseCoordinationChildLease, parseCoordinationRun, parseCoordinationRunResource, parseCoordinationUnitAttempt, parseCoordinationWorktree, parseCoordinationWorktreeOperation } from './coordination/contracts.ts';
 import { assertCoordinationDispatchAllowed, assertLegacyCoordinationWritable, coordinationCutoverCommitted } from './coordination/migration-paths.ts';
 import { enforcePrivateAuthorityPath, ensurePrivateAuthorityDirectory } from './private-path.ts';
 
@@ -623,10 +623,14 @@ export async function recoverAutopilotWorktreeSagas(input: { readonly active: Ac
   const operations = await postRecoveryClient.operations();
   const status = await new CoordinatorClient({ env }).query('status', input.active.repo_key, input.active.workstream_run);
   const childPayload = status.payload['child_leases'];
-  if (!Array.isArray(childPayload)) throw new AutopilotParallelRuntimeError('coordination-status-invalid', 'coordinator status omitted child leases during preflight rollback recovery.');
+  const attemptPayload = status.payload['unit_attempts'];
+  const worktreePayload = status.payload['worktrees'];
+  if (!Array.isArray(childPayload) || !Array.isArray(attemptPayload) || !Array.isArray(worktreePayload)) throw new AutopilotParallelRuntimeError('coordination-status-invalid', 'coordinator status omitted child, attempt, or worktree projections during preflight rollback recovery.');
   const childLeases = childPayload.map((entry) => parseCoordinationChildLease(entry));
+  const unitAttempts = attemptPayload.map((entry) => parseCoordinationUnitAttempt(entry));
+  const worktrees = worktreePayload.map((entry) => parseCoordinationWorktree(entry));
   try {
-    await recoverCommittedPreflightRollbackProjections({ active: input.active, operations, childLeases, env });
+    await recoverCommittedPreflightRollbackProjections({ active: input.active, operations, childLeases, unitAttempts, worktrees, env });
   } catch (error) {
     if (error instanceof CoordinationRuntimeError) throw error;
     const detail = error instanceof Error ? error.message : String(error);

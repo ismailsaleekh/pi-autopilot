@@ -84,7 +84,7 @@ async function stopCoordinator(stateRoot: string): Promise<void> {
   assert.equal(isProcessAlive(pid), false, 'isolated coordinator must stop before fixture cleanup');
 }
 
-void it('reproduces cf48 through the declared installed manifest route and starts cf49 through that same Pi SDK route', async () => {
+void it('reproduces cf48 through the declared installed manifest route and starts cf50 through that same Pi SDK route', async () => {
   const root = await mkdtemp(join(tmpdir(), 'pi-autopilot-installed-manifest-'));
   const env = { ...process.env, NPM_CONFIG_CACHE: join(root, 'npm-cache'), NPM_CONFIG_OFFLINE: 'true', PI_OFFLINE: '1', PI_SKIP_VERSION_CHECK: '1', PI_TELEMETRY: '0' };
   try {
@@ -119,7 +119,7 @@ void it('reproduces cf48 through the declared installed manifest route and start
     assert.equal(candidate.result?.['messages'], 1, notificationText(candidate));
     assert.equal(notificationText(candidate).includes('error'), false, notificationText(candidate));
     const lock = JSON.parse(await readFile(coordinatorRuntimePaths({ ...env, [AUTOPILOT_STATE_ROOT_ENV]: candidateState }).lockPath, 'utf8')) as Readonly<Record<string, unknown>>;
-    assert.equal(lock['package_build'], '1.1.7-cf49');
+    assert.equal(lock['package_build'], '1.1.8-cf50');
     await stopCoordinator(candidateState);
   } finally {
     await rm(root, { recursive: true, force: true });

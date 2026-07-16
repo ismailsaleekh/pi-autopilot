@@ -5,8 +5,12 @@ export const CURRENT_COORDINATOR_LIFECYCLE_LOCK_SCHEMA = 'autopilot.coordinator_
  * Closed, audited build lineage for the protocol-1.6/schema-12 byte-bounded
  * reconciliation and mailbox contract. Entries are admitted only after the request/response contracts,
  * transport, mutation vocabulary, and persisted entity projections have been
- * compared byte-for-byte or behaviorally certified against the target. cf49
- * closes installed manifest-path executable selection and adds pre-import bootstrap
+ * compared byte-for-byte or behaviorally certified against the target. cf50
+ * adds exact later-package supersession proof for historical preflight rollback
+ * projections and retires only history-free terminal migration shadows backed by
+ * a committed deterministic remove and exact absent Git state. It preserves all
+ * operations, child authority, and Git effects. cf49 closes installed
+ * manifest-path executable selection and adds pre-import bootstrap
  * diagnostics without changing wire or persistence contracts. Exact cf48 binary
  * behavior is certified before admission as a predecessor. cf48 adds exact
  * delayed-winner startup waiting plus bounded atomic startup reports;
@@ -24,6 +28,7 @@ export const CURRENT_COORDINATOR_LIFECYCLE_LOCK_SCHEMA = 'autopilot.coordinator_
  * incompatible even when it claims the same protocol and database schema.
  */
 export const COORDINATOR_WIRE_COMPATIBILITY_MATRIX = Object.freeze([
+    Object.freeze({ package_build: '1.1.8-cf50', protocol_version: '1.6', database_schema_version: 12, lifecycle_lock_schema: CURRENT_COORDINATOR_LIFECYCLE_LOCK_SCHEMA }),
     Object.freeze({ package_build: '1.1.7-cf49', protocol_version: '1.6', database_schema_version: 12, lifecycle_lock_schema: CURRENT_COORDINATOR_LIFECYCLE_LOCK_SCHEMA }),
     Object.freeze({ package_build: '1.1.6-cf48', protocol_version: '1.6', database_schema_version: 12, lifecycle_lock_schema: CURRENT_COORDINATOR_LIFECYCLE_LOCK_SCHEMA }),
     Object.freeze({ package_build: '1.1.5-cf47', protocol_version: '1.6', database_schema_version: 12, lifecycle_lock_schema: CURRENT_COORDINATOR_LIFECYCLE_LOCK_SCHEMA }),
