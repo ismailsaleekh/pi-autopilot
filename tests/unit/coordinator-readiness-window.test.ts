@@ -2,12 +2,15 @@ import assert from 'node:assert/strict';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { it } from 'node:test';
+import { after, it } from 'node:test';
 
 import { CoordinatorClient } from '../../src/core/coordination/client.ts';
 import { CoordinationRuntimeError } from '../../src/core/coordination/failures.ts';
 import { coordinatorRuntimePaths } from '../../src/core/coordination/runtime-paths.ts';
 import { AUTOPILOT_STATE_ROOT_ENV } from '../../src/core/parallel-runtime.ts';
+import { assertNoLeakedCoordinators, stopCoordinatorByLock, stopTestCoordinatorsForStateRoot } from '../helpers/coordinator-process-lifecycle.ts';
+
+after(async () => { await assertNoLeakedCoordinators(); });
 
 // Bug: the coordinator binds its socket only after CoordinatorStore.open
 // completes schema migration + per-run terminal-proof reconciliation, but the
@@ -21,18 +24,6 @@ import { AUTOPILOT_STATE_ROOT_ENV } from '../../src/core/parallel-runtime.ts';
 // default window. Each test shuts down the coordinator it spawned so no detached
 // daemon leaks across the suite.
 
-async function stopSpawnedCoordinator(lockPath: string): Promise<void> {
-  let text: string;
-  try { text = await readFile(lockPath, 'utf8'); }
-  catch (error) { if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return; throw error; }
-  let pid: number | undefined;
-  try { pid = (JSON.parse(text) as { readonly pid?: unknown }).pid as number | undefined; }
-  catch { return; }
-  if (typeof pid !== 'number' || !Number.isSafeInteger(pid) || pid < 1) return;
-  try { process.kill(pid, 'SIGTERM'); }
-  catch (error) { if (!(error instanceof Error && 'code' in error && error.code === 'ESRCH')) throw error; }
-}
-
 void it('reaches a freshly spawned real coordinator within the default readiness window', async () => {
   const root = await mkdtemp(join(tmpdir(), 'pi-autopilot-readiness-ok-'));
   const env = { ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: join(root, 'state'), PI_OFFLINE: '1', PI_SKIP_VERSION_CHECK: '1', PI_TELEMETRY: '0' };
@@ -41,8 +32,10 @@ void it('reaches a freshly spawned real coordinator within the default readiness
     const response = await client.query('handshake');
     assert.equal(response.payload['protocol_version'], '1.6');
     assert.equal(response.payload['database_schema_version'], 12);
-    await stopSpawnedCoordinator(coordinatorRuntimePaths(env).lockPath);
   } finally {
+    // Stop in finally: a failed assertion must never strand the detached coordinator.
+    await stopCoordinatorByLock(coordinatorRuntimePaths(env).lockPath);
+    await stopTestCoordinatorsForStateRoot(env[AUTOPILOT_STATE_ROOT_ENV] ?? '');
     await rm(root, { recursive: true, force: true });
   }
 });
@@ -60,8 +53,9 @@ void it('lets independent startup clients attest one exact lifecycle winner', as
     const lock = JSON.parse(await readFile(coordinatorRuntimePaths(env).lockPath, 'utf8')) as Record<string, unknown>;
     assert.equal(lock['instance_id'], leftHandshake.payload['lifecycle_instance_id']);
     assert.equal(lock['pid'], leftHandshake.payload['lifecycle_pid']);
-    await stopSpawnedCoordinator(coordinatorRuntimePaths(env).lockPath);
   } finally {
+    await stopCoordinatorByLock(coordinatorRuntimePaths(env).lockPath);
+    await stopTestCoordinatorsForStateRoot(env[AUTOPILOT_STATE_ROOT_ENV] ?? '');
     await rm(root, { recursive: true, force: true });
   }
 });
@@ -78,8 +72,14 @@ void it('fails loudly and quickly when the readiness window is deliberately too 
     });
     const elapsed = Date.now() - start;
     assert.ok(elapsed < 5_000, `a tiny readiness window must fail quickly, not hang (elapsed=${String(elapsed)}ms)`);
-    await stopSpawnedCoordinator(coordinatorRuntimePaths(env).lockPath);
   } finally {
+    // Leak root cause (2026-07-16): the client deadline expired before the spawned
+    // coordinator published its lock, so a lock-based SIGTERM inside the try block
+    // found nothing and the detached process survived. The stop now runs in finally,
+    // and the exact-state-root process sweep closes the publish-after-deadline
+    // window that a lock read alone cannot see.
+    await stopCoordinatorByLock(coordinatorRuntimePaths(env).lockPath);
+    await stopTestCoordinatorsForStateRoot(env[AUTOPILOT_STATE_ROOT_ENV] ?? '');
     await rm(root, { recursive: true, force: true });
   }
 });

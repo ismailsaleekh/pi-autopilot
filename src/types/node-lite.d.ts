@@ -16,6 +16,7 @@ declare const process: {
 };
 
 declare module 'node:test' {
+  export function after(fn: () => void | Promise<void>): void;
   export function describe(name: string, fn: () => void | Promise<void>): void;
   export function it(name: string, fn: () => void | Promise<void>): void;
 }
@@ -196,6 +197,11 @@ declare module 'node:child_process' {
     readonly shell?: boolean;
     readonly detached?: boolean;
   }
+  export function execFileSync(
+    command: string,
+    args: readonly string[],
+    options: { readonly encoding: 'utf8'; readonly maxBuffer?: number },
+  ): string;
   export function spawn(command: string, args: readonly string[], options?: SpawnOptionsLite): ChildProcessLite;
   export function spawnSync(
     command: string,

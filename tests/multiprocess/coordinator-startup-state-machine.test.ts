@@ -3,14 +3,17 @@ import { spawn, type ChildProcessLite } from 'node:child_process';
 import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { it } from 'node:test';
+import { after, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import { CoordinatorClient } from '../../src/core/coordination/client.ts';
 import { isProcessAlive } from '../../src/core/coordination/process-identity.ts';
 import { coordinatorRuntimePaths } from '../../src/core/coordination/runtime-paths.ts';
 import { AUTOPILOT_STATE_ROOT_ENV } from '../../src/core/parallel-runtime.ts';
+import { assertNoLeakedCoordinators, stopCoordinatorByLock, stopSpawnedChild, stopTestCoordinatorsForStateRoot } from '../helpers/coordinator-process-lifecycle.ts';
 import { armStartupBarrier, releaseStartupBarrier, STARTUP_BARRIER_ENV, waitForStartupBarrier, type StartupBoundary } from '../helpers/coordinator-startup-barrier.ts';
+
+after(async () => { await assertNoLeakedCoordinators(); });
 
 const packageRoot = resolve(fileURLToPath(new URL('../../', import.meta.url)));
 const coordinatorCli = join(packageRoot, 'src', 'cli', 'autopilot-coordinator.ts');
@@ -40,18 +43,6 @@ async function waitForReport(stateRoot: string, predicate: (report: StartupRepor
     await new Promise<void>((resolveWait) => setTimeout(resolveWait, 10));
   }
   throw new Error('coordinator startup report did not reach the required state');
-}
-
-async function stop(child: ChildProcessLite | null): Promise<void> {
-  const pid = child?.pid;
-  if (child === null || pid === undefined || !isProcessAlive(pid)) return;
-  process.kill(pid, 'SIGTERM');
-  const gracefulDeadline = Date.now() + 1_000;
-  while (Date.now() < gracefulDeadline && isProcessAlive(pid)) await new Promise<void>((resolveWait) => setTimeout(resolveWait, 10));
-  if (isProcessAlive(pid)) process.kill(pid, 'SIGKILL');
-  const hardDeadline = Date.now() + 5_000;
-  while (Date.now() < hardDeadline && isProcessAlive(pid)) await new Promise<void>((resolveWait) => setTimeout(resolveWait, 10));
-  assert.equal(isProcessAlive(pid), false, `synthetic coordinator ${String(pid)} did not exit during fixture cleanup`);
 }
 
 async function delayedWinnerFixture(root: string, readinessTimeoutMs: number): Promise<{
@@ -85,9 +76,24 @@ async function delayedWinnerFixture(root: string, readinessTimeoutMs: number): P
     await waitForStartupBarrier(winnerBarrier, 'first-exact-handshake-served', 30_000);
     return { stateRoot, env: commonEnv, winnerBarrier, winner, winnerLock, pending };
   } catch (error) {
-    await stop(winner);
+    await stopSpawnedChild(winner);
+    // The client auto-start child is detached and may have published a lock
+    // even when fixture construction failed. Stop it before the temp root can
+    // be deleted; the suite-level sweep closes the pre-lock race.
+    await stopCoordinatorByLock(coordinatorRuntimePaths(commonEnv).lockPath);
+    await stopTestCoordinatorsForStateRoot(stateRoot);
     throw new Error(`${error instanceof Error ? error.message : String(error)}; winner_exit=${String(winner.exitCode)}; winner_stderr=${winnerStderr}`);
   }
+}
+
+async function cleanupDelayedWinnerFixture(fixture: Awaited<ReturnType<typeof delayedWinnerFixture>> | null): Promise<void> {
+  await stopSpawnedChild(fixture?.winner ?? null);
+  if (fixture === null) return;
+  await stopCoordinatorByLock(coordinatorRuntimePaths(fixture.env).lockPath);
+  // A client can spawn a detached replacement in the interval after its exact
+  // winner dies and before it reports failure. That process may not have a lock
+  // yet; exact temp-state-root argv cleanup closes the pre-lock window.
+  await stopTestCoordinatorsForStateRoot(fixture.stateRoot);
 }
 
 void it('provides independently releasable real-process barriers at every startup boundary', async () => {
@@ -125,7 +131,9 @@ void it('provides independently releasable real-process barriers at every startu
       }
       await handshake;
     } finally {
-      await stop(child);
+      await stopSpawnedChild(child);
+      await stopCoordinatorByLock(coordinatorRuntimePaths(env).lockPath);
+      await stopTestCoordinatorsForStateRoot(stateRoot);
       await rm(root, { recursive: true, force: true });
     }
   }
@@ -144,7 +152,7 @@ void it('fails at the original deadline when the exact stable winner never publi
     });
   } finally {
     if (fixture !== null) await releaseStartupBarrier(fixture.winnerBarrier, 'first-exact-handshake-served').catch(() => undefined);
-    await stop(fixture?.winner ?? null);
+    await cleanupDelayedWinnerFixture(fixture);
     await rm(root, { recursive: true, force: true });
   }
 });
@@ -163,7 +171,11 @@ void it('fails promptly when the exact delayed winner dies before publication', 
       return true;
     });
   } finally {
-    await stop(fixture?.winner ?? null);
+    // Regression for S0-B: after the exact winner dies, CoordinatorClient may
+    // spawn a detached replacement before reporting the expected failure. The
+    // prior fixture removed the root without stopping that replacement; two
+    // pi-autopilot-delayed-winner-death coordinators survived for days.
+    await cleanupDelayedWinnerFixture(fixture);
     await rm(root, { recursive: true, force: true });
   }
 });
@@ -184,7 +196,7 @@ void it('fails closed when the delayed winner lock identity changes', async () =
     });
   } finally {
     if (fixture?.winner.pid !== undefined && isProcessAlive(fixture.winner.pid)) process.kill(fixture.winner.pid, 'SIGKILL');
-    await stop(fixture?.winner ?? null);
+    await cleanupDelayedWinnerFixture(fixture);
     await rm(root, { recursive: true, force: true });
   }
 });
@@ -206,7 +218,7 @@ void it('waits for the stable exact winner when the spawned election loser exits
       assert.equal(handshake.payload['lifecycle_instance_id'], fixture.winnerLock['instance_id']);
     }
   } finally {
-    await stop(fixture?.winner ?? null);
+    await cleanupDelayedWinnerFixture(fixture);
     await rm(root, { recursive: true, force: true });
   }
 });
