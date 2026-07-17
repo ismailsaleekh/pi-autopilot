@@ -301,10 +301,70 @@ export interface CoordinatorServerTestHooks {
   readonly afterStoreCommitBeforeResponse?: (action: string, response: CoordinatorResponseEnvelope) => void | Promise<void>;
 }
 
-function handleSocket(socket: Socket, store: CoordinatorStore, capability: string, paths: CoordinatorRuntimePaths, lifecycle: CurrentCoordinatorLock, backgroundFailure: () => Error | null, firstExactHandshake: () => Promise<void>, testHooks?: CoordinatorServerTestHooks): void {
+export const COORDINATOR_SHUTDOWN_DRAIN_TIMEOUT_MS = 30_000;
+
+class CoordinatorRequestDrain {
+  readonly #sockets = new Map<Socket, number>();
+  readonly #pending = new Set<Promise<void>>();
+  #draining = false;
+
+  register(socket: Socket): boolean {
+    if (this.#draining) { socket.destroy(); return false; }
+    this.#sockets.set(socket, 0);
+    socket.on('close', () => { this.#sockets.delete(socket); });
+    return true;
+  }
+
+  acceptRequest(socket: Socket): boolean {
+    if (!this.#draining && this.#sockets.has(socket)) return true;
+    socket.destroy();
+    return false;
+  }
+
+  track(socket: Socket, pending: Promise<void>): void {
+    const active = this.#sockets.get(socket);
+    if (active === undefined) throw new CoordinationRuntimeError('system-fatal', 'coordinator request began outside registered socket authority');
+    this.#sockets.set(socket, active + 1);
+    this.#pending.add(pending);
+    const settled = (): void => {
+      this.#pending.delete(pending);
+      const remaining = this.#sockets.get(socket);
+      if (remaining === undefined) return;
+      if (remaining <= 1) {
+        this.#sockets.set(socket, 0);
+        if (this.#draining) socket.destroy();
+      } else this.#sockets.set(socket, remaining - 1);
+    };
+    void pending.then(settled, settled);
+  }
+
+  beginDrain(): void {
+    if (this.#draining) return;
+    this.#draining = true;
+    for (const [socket, active] of this.#sockets) if (active === 0) socket.destroy();
+  }
+
+  async waitForDrain(timeoutMs = COORDINATOR_SHUTDOWN_DRAIN_TIMEOUT_MS): Promise<void> {
+    if (!this.#draining) throw new CoordinationRuntimeError('system-fatal', 'coordinator request drain was awaited before listener retirement began');
+    if (this.#pending.size === 0) return;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const timeout = new Promise<void>((_resolve, reject) => {
+      timer = setTimeout(() => {
+        for (const socket of this.#sockets.keys()) socket.destroy();
+        reject(new CoordinationRuntimeError('system-fatal', 'coordinator shutdown could not drain in-flight requests within the bounded deadline; store, lifecycle, and writer authority remain retained until process death', [`pending_requests=${String(this.#pending.size)}`, `timeout_ms=${String(timeoutMs)}`]));
+      }, timeoutMs);
+    });
+    try { await Promise.race([Promise.all([...this.#pending]).then(() => undefined), timeout]); }
+    finally { if (timer !== null) clearTimeout(timer); }
+  }
+}
+
+function handleSocket(socket: Socket, store: CoordinatorStore, capability: string, paths: CoordinatorRuntimePaths, lifecycle: CurrentCoordinatorLock, backgroundFailure: () => Error | null, firstExactHandshake: () => Promise<void>, requestDrain: CoordinatorRequestDrain, testHooks?: CoordinatorServerTestHooks): void {
+  if (!requestDrain.register(socket)) return;
   const decoder = new CoordinatorFrameDecoder();
   let chain = Promise.resolve();
   socket.on('data', (chunk: NodeBuffer) => {
+    if (!requestDrain.acceptRequest(socket)) return;
     chain = chain.then(async () => {
       const frames = decoder.push(chunk);
       for (const frame of frames) {
@@ -364,6 +424,7 @@ function handleSocket(socket: Socket, store: CoordinatorStore, capability: strin
         }
       }
     }).catch(() => socket.destroy());
+    requestDrain.track(socket, chain);
   });
   socket.on('end', () => {
     try {
@@ -399,6 +460,13 @@ function closeServer(server: Server): Promise<void> {
   });
 }
 
+function observeServerClose(server: Server): Promise<Error | null> {
+  return closeServer(server).then(
+    () => null,
+    (error: unknown) => error instanceof Error ? error : new Error(String(error)),
+  );
+}
+
 export interface RunningCoordinator {
   readonly paths: CoordinatorRuntimePaths;
   readonly store: CoordinatorStore;
@@ -415,6 +483,7 @@ export async function startCoordinatorServer(paths: CoordinatorRuntimePaths, clo
   let server: Server | null = null;
   let offerTimer: ReturnType<typeof setInterval> | null = null;
   let serverListening = false;
+  const requestDrain = new CoordinatorRequestDrain();
   try {
     lifecycleLock = await acquireCoordinatorLock(paths, adoption, async (plannedLifecycle) => {
       await startupObserver?.transition('before-private-root-capability-setup', plannedLifecycle);
@@ -437,7 +506,7 @@ export async function startCoordinatorServer(paths: CoordinatorRuntimePaths, clo
       firstHandshakeTransition ??= startupObserver?.transition('first-exact-handshake-served', acquiredLifecycleLock.record) ?? Promise.resolve();
       await firstHandshakeTransition;
     };
-    server = createServer((socket) => handleSocket(socket, openedStore, openedCapability, paths, acquiredLifecycleLock.record, () => timerFailure, firstExactHandshake, testHooks));
+    server = createServer((socket) => handleSocket(socket, openedStore, openedCapability, paths, acquiredLifecycleLock.record, () => timerFailure, firstExactHandshake, requestDrain, testHooks));
     await startupObserver?.transition('before-socket-bind', acquiredLifecycleLock.record);
     await listen(server, paths.socketPath);
     serverListening = true;
@@ -457,32 +526,32 @@ export async function startCoordinatorServer(paths: CoordinatorRuntimePaths, clo
         timerFailure = error instanceof Error ? error : new Error(String(error));
       });
     }, COORDINATOR_GRANT_OFFER_SWEEP_MS);
-    let closed = false;
-    let serverClosed = false;
-    let storeClosed = false;
+    let closePromise: Promise<void> | null = null;
     return {
       paths,
       store: openedStore,
-      close: async () => {
-        if (closed) return;
-        if (offerTimer !== null) clearInterval(offerTimer);
-        offerTimer = null;
-        if (!serverClosed) {
-          await closeServer(openedServer);
-          serverClosed = true;
-        }
-        if (platform() !== 'win32') {
-          await unlink(paths.socketPath).catch((unlinkError: unknown) => {
-            if (!(unlinkError instanceof Error && 'code' in unlinkError && unlinkError.code === 'ENOENT')) throw unlinkError;
-          });
-        }
-        if (!storeClosed) {
+      close: () => {
+        closePromise ??= (async () => {
+          if (offerTimer !== null) clearInterval(offerTimer);
+          offerTimer = null;
+          // Calling server.close synchronously retires listener acceptance. Only
+          // then may queued requests drain; idle/exhausted sockets are destroyed
+          // so the listener callback cannot outlive request authority.
+          const listenerClose = observeServerClose(openedServer);
+          requestDrain.beginDrain();
+          await requestDrain.waitForDrain();
+          const listenerCloseError = await listenerClose;
+          if (listenerCloseError !== null) throw listenerCloseError;
+          if (platform() !== 'win32') {
+            await unlink(paths.socketPath).catch((unlinkError: unknown) => {
+              if (!(unlinkError instanceof Error && 'code' in unlinkError && unlinkError.code === 'ENOENT')) throw unlinkError;
+            });
+          }
           openedStore.close();
-          storeClosed = true;
-        }
-        await acquiredLifecycleLock.release();
-        writerGuard.release();
-        closed = true;
+          await acquiredLifecycleLock.release();
+          writerGuard.release();
+        })();
+        return closePromise;
       },
     };
   } catch (error) {
@@ -491,9 +560,13 @@ export async function startCoordinatorServer(paths: CoordinatorRuntimePaths, clo
     offerTimer = null;
     if (server !== null && serverListening) {
       try {
-        await closeServer(server);
+        const listenerClose = observeServerClose(server);
+        requestDrain.beginDrain();
+        await requestDrain.waitForDrain();
+        const listenerCloseError = await listenerClose;
+        if (listenerCloseError !== null) throw listenerCloseError;
       } catch (closeError) {
-        cleanupFailures.push(`server-close: ${closeError instanceof Error ? closeError.message : String(closeError)}`);
+        cleanupFailures.push(`server-drain-close: ${closeError instanceof Error ? closeError.message : String(closeError)}`);
       }
     }
     try {

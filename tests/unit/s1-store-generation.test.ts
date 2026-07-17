@@ -116,6 +116,24 @@ void describe('S1 generation-addressed schema-13 store', () => {
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 
+  void it('rejects schema-13 authority index and alias-trigger tamper before writable open', async () => {
+    for (const shape of ['index', 'trigger'] as const) {
+      const root = await mkdtemp(join(tmpdir(), `pi-autopilot-s1-schema13-${shape}-tamper-`));
+      const paths = coordinatorRuntimePaths({ ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: root });
+      const store = await CoordinatorStore.open(paths);
+      const databasePath = store.currentGeneration().database_path;
+      store.close();
+      try {
+        const tamper = new DatabaseSync(databasePath);
+        try {
+          if (shape === 'index') tamper.exec('DROP INDEX idx_worktrees_current_semantic');
+          else tamper.exec('DROP TRIGGER worktree_aliases_deny_update');
+        } finally { tamper.close(); }
+        await assert.rejects(() => CoordinatorStore.open(paths), shape === 'index' ? /authority index is missing or changed/u : /alias immutability trigger is missing or changed/u);
+      } finally { await rm(root, { recursive: true, force: true }); }
+    }
+  });
+
   void it('rejects pointer/publication tamper and live-generation hardlink aliases', async () => {
     const root = await mkdtemp(join(tmpdir(), 'pi-autopilot-s1-generation-tamper-'));
     const paths = coordinatorRuntimePaths({ ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: root });
