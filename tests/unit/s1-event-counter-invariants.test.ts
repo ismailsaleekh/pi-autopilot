@@ -55,6 +55,25 @@ void describe('S1 event-counter invariant repair', () => {
     } finally { await rm(fixture.root, { recursive: true, force: true }); }
   });
 
+  void it('rolls back a derivable repair when a later authority invariant rejects the store', async () => {
+    const fixture = await seededStore('pi-autopilot-s1-counter-repair-rollback-');
+    try {
+      const tamper = new DatabaseSync(fixture.database);
+      const maximum = tamper.prepare('SELECT MAX(event_seq) AS maximum FROM events WHERE repo_id=?').get(fixture.repoId)?.['maximum'];
+      if (typeof maximum !== 'number') throw new Error('fixture event maximum is missing');
+      tamper.prepare('UPDATE repositories SET event_seq=? WHERE repo_id=?').run(maximum - 1, fixture.repoId);
+      tamper.exec('DROP TRIGGER worktree_aliases_deny_update');
+      tamper.close();
+      await assert.rejects(() => CoordinatorStore.open(fixture.paths), /alias immutability trigger is missing or changed/u);
+      const inspect = new DatabaseSync(fixture.database, { readOnly: true });
+      try {
+        assert.equal(inspect.prepare('SELECT event_seq FROM repositories WHERE repo_id=?').get(fixture.repoId)?.['event_seq'], maximum - 1);
+        assert.equal(inspect.prepare("SELECT COUNT(*) AS count FROM events WHERE repo_id=? AND event_type='store-invariant-repaired'").get(fixture.repoId)?.['count'], 0);
+        assert.equal(inspect.prepare("SELECT COUNT(*) AS count FROM evidence_artifacts WHERE repo_id=? AND label='event counter behind repair'").get(fixture.repoId)?.['count'], 0);
+      } finally { inspect.close(); }
+    } finally { await rm(fixture.root, { recursive: true, force: true }); }
+  });
+
   void it('refuses counter-ahead and missing immutable event history without guessing', async () => {
     for (const shape of ['counter-ahead', 'missing-history'] as const) {
       const fixture = await seededStore(`pi-autopilot-s1-${shape}-`);

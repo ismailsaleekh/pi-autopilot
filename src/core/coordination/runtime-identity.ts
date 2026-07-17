@@ -110,7 +110,7 @@ function assertRegularSingleLink(path: string): void {
 }
 
 export async function publishCoordinatorRuntimeIdentity(paths: CoordinatorRuntimePaths, generation: CurrentStoreGeneration, lifecycle: RuntimeLifecycleIdentity, writerGuard: CoordinatorWriterGuard, now: Date = new Date()): Promise<PublishedRuntimeIdentity> {
-  writerGuard.assertHeld();
+  writerGuard.assertHeldFor(paths);
   const pointerBytes = readFileSync(paths.currentStorePointerPath);
   if (sha256(pointerBytes) !== generation.pointer_sha256) throw new CoordinationRuntimeError('store-corrupt', 'runtime identity publication pointer changed after generation selection');
   for (const name of await readdir(paths.coordinatorRoot)) {

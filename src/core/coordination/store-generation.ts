@@ -422,7 +422,7 @@ async function recoverBarrieredFirstPublication(paths: CoordinatorRuntimePaths, 
 }
 
 export async function publishRestoredStoreGeneration(paths: CoordinatorRuntimePaths, writerGuard: CoordinatorWriterGuard, sourceDatabasePath: string, sourceDatabaseSha256: `sha256:${string}`, sourceGenerationId: string, migration: StoreGenerationMigrationAdapter, options: StoreGenerationOptions = {}): Promise<CurrentStoreGeneration> {
-  writerGuard.assertHeld();
+  writerGuard.assertHeldFor(paths);
   await ensureCoordinatorPrivateRoots(paths);
   const current = readCurrentStoreGeneration(paths);
   if (current === null || current.pointer.generation_id !== sourceGenerationId) throw new CoordinationRuntimeError('store-corrupt', 'restore source generation is not the exact current generation authority', [sourceGenerationId, current?.pointer.generation_id ?? 'missing']);
@@ -507,7 +507,7 @@ export async function publishRestoredStoreGeneration(paths: CoordinatorRuntimePa
 }
 
 export async function ensureCurrentStoreGeneration(paths: CoordinatorRuntimePaths, writerGuard: CoordinatorWriterGuard, migration: StoreGenerationMigrationAdapter, options: StoreGenerationOptions = {}): Promise<CurrentStoreGeneration> {
-  writerGuard.assertHeld();
+  writerGuard.assertHeldFor(paths);
   await ensureCoordinatorPrivateRoots(paths);
   assertContainedNoSymlinks(paths.coordinatorRoot, paths.storesRoot);
   for (const name of await readdir(paths.coordinatorRoot)) {

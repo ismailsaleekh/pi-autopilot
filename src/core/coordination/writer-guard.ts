@@ -1,5 +1,6 @@
 import { constants as fsConstants, existsSync, lstatSync, openSync, closeSync, statSync } from 'node:fs';
 import { platform } from 'node:os';
+import { resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
 import { assertPrivatePathNoAliases, enforcePrivateAuthorityPath } from '../private-path.ts';
@@ -67,6 +68,11 @@ export class CoordinatorWriterGuard {
     if (this.#released || !this.#database.isTransaction) throw new CoordinationRuntimeError('system-fatal', 'SQLite writer guard authority is not held for the writable process lifetime', [this.path]);
     const observed = assertPrivateRegularSingleLink(this.path);
     if (observed.dev !== this.#identity.dev || observed.ino !== this.#identity.ino) throw new CoordinationRuntimeError('system-fatal', 'SQLite writer guard path identity changed while authority was held', [this.path]);
+  }
+
+  assertHeldFor(paths: CoordinatorRuntimePaths): void {
+    this.assertHeld();
+    if (resolve(this.path) !== resolve(paths.writerGuardPath)) throw new CoordinationRuntimeError('system-fatal', 'SQLite writer guard belongs to a different coordinator authority root', [this.path, paths.writerGuardPath]);
   }
 
   release(): void {

@@ -1553,16 +1553,23 @@ function applySchemaMigrations(db, clock, targetVersion) {
     if (databaseUserVersion(db) !== targetVersion)
         throw new CoordinationRuntimeError('schema-mismatch', 'database did not reach the exact requested schema migration boundary');
 }
-function repairEventCounterInvariantPass(db, clock) {
+function inImmediateTransaction(db, action) {
+    if (db.isTransaction) {
+        action();
+        return;
+    }
     db.exec('BEGIN IMMEDIATE');
     try {
-        repairEventCountersBeforeSchema13Evidence(db, clock);
+        action();
         db.exec('COMMIT');
     }
     catch (error) {
         db.exec('ROLLBACK');
         throw error;
     }
+}
+function repairEventCounterInvariantPass(db, clock) {
+    inImmediateTransaction(db, () => repairEventCountersBeforeSchema13Evidence(db, clock));
 }
 function detectAndPersistLogicalRowFaults(db, clock) {
     const owner = (value) => ({ repo_id: value.owner.repo_id, workstream_run: value.owner.workstream_run, version: value.version });
@@ -1582,8 +1589,7 @@ function detectAndPersistLogicalRowFaults(db, clock) {
         { table: 'worktrees', identity: 'entity_id', parse: (row) => owner(worktreeFromRow(row)) },
         { table: 'worktree_operations', identity: 'entity_id', parse: (row) => owner(worktreeOperationFromRow(row)) },
     ];
-    db.exec('BEGIN IMMEDIATE');
-    try {
+    inImmediateTransaction(db, () => {
         for (const descriptor of singleOwnerTables) {
             for (const row of db.prepare(`SELECT * FROM ${descriptor.table} ORDER BY repo_id,workstream_run,${descriptor.identity}`).all()) {
                 const entityId = sqlString(row, descriptor.identity);
@@ -1617,12 +1623,7 @@ function detectAndPersistLogicalRowFaults(db, clock) {
             if (request === null || request.requester.repo_id !== sqlString(row, 'repo_id') || request.owner.repo_id !== sqlString(row, 'repo_id') || request.requester.workstream_run !== indexedRequester || request.owner.workstream_run !== indexedOwner)
                 throw new CoordinationRuntimeError('store-corrupt', 'claim request payload/index ambiguity has two indexed run owners and cannot be scoped safely', [sqlString(row, 'entity_id'), indexedRequester, indexedOwner]);
         }
-        db.exec('COMMIT');
-    }
-    catch (error) {
-        db.exec('ROLLBACK');
-        throw error;
-    }
+    });
 }
 function verifySchema13Projections(db) {
     if (integrityResult(db) !== 'ok' || databaseUserVersion(db) !== COORDINATOR_STORE_SCHEMA_VERSION)
@@ -1961,7 +1962,7 @@ export class CoordinatorStore {
         }
         const ownsWriterGuard = options.writerGuard === undefined;
         const writerGuard = options.writerGuard ?? await CoordinatorWriterGuard.acquire(paths);
-        writerGuard.assertHeld();
+        writerGuard.assertHeldFor(paths);
         let lastBackupPath = null;
         let openedDatabase = null;
         try {
@@ -1972,8 +1973,16 @@ export class CoordinatorStore {
             openedDatabase = db;
             try {
                 configureWritableDatabase(db);
-                runS1InvariantDetectors(storeInvariantDetectorHost({ db, clock, writerGuard, generation, migrationBoundarySchema12: false }), STORE_OPEN_INVARIANT_IDS);
                 applySchemaMigrations(db, clock, COORDINATOR_STORE_SCHEMA_VERSION);
+                db.exec('BEGIN IMMEDIATE');
+                try {
+                    runS1InvariantDetectors(storeInvariantDetectorHost({ db, clock, writerGuard, generation, migrationBoundarySchema12: false }), STORE_OPEN_INVARIANT_IDS);
+                    db.exec('COMMIT');
+                }
+                catch (error) {
+                    db.exec('ROLLBACK');
+                    throw error;
+                }
                 await enforcePrivateAuthorityPath(generation.database_path, false);
             }
             catch (error) {

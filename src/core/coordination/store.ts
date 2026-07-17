@@ -1661,10 +1661,15 @@ interface LogicalOwnedRowProjection {
   readonly version: number;
 }
 
-function repairEventCounterInvariantPass(db: DatabaseSync, clock: StoreClock): void {
+function inImmediateTransaction(db: DatabaseSync, action: () => void): void {
+  if (db.isTransaction) { action(); return; }
   db.exec('BEGIN IMMEDIATE');
-  try { repairEventCountersBeforeSchema13Evidence(db, clock); db.exec('COMMIT'); }
+  try { action(); db.exec('COMMIT'); }
   catch (error) { db.exec('ROLLBACK'); throw error; }
+}
+
+function repairEventCounterInvariantPass(db: DatabaseSync, clock: StoreClock): void {
+  inImmediateTransaction(db, () => repairEventCountersBeforeSchema13Evidence(db, clock));
 }
 
 function detectAndPersistLogicalRowFaults(db: DatabaseSync, clock: StoreClock): void {
@@ -1685,8 +1690,7 @@ function detectAndPersistLogicalRowFaults(db: DatabaseSync, clock: StoreClock): 
     { table: 'worktrees', identity: 'entity_id', parse: (row) => owner(worktreeFromRow(row)) },
     { table: 'worktree_operations', identity: 'entity_id', parse: (row) => owner(worktreeOperationFromRow(row)) },
   ];
-  db.exec('BEGIN IMMEDIATE');
-  try {
+  inImmediateTransaction(db, () => {
     for (const descriptor of singleOwnerTables) {
       for (const row of db.prepare(`SELECT * FROM ${descriptor.table} ORDER BY repo_id,workstream_run,${descriptor.identity}`).all()) {
         const entityId = sqlString(row, descriptor.identity);
@@ -1708,11 +1712,7 @@ function detectAndPersistLogicalRowFaults(db: DatabaseSync, clock: StoreClock): 
       const indexedOwner = sqlString(row, 'owner_workstream_run');
       if (request === null || request.requester.repo_id !== sqlString(row, 'repo_id') || request.owner.repo_id !== sqlString(row, 'repo_id') || request.requester.workstream_run !== indexedRequester || request.owner.workstream_run !== indexedOwner) throw new CoordinationRuntimeError('store-corrupt', 'claim request payload/index ambiguity has two indexed run owners and cannot be scoped safely', [sqlString(row, 'entity_id'), indexedRequester, indexedOwner]);
     }
-    db.exec('COMMIT');
-  } catch (error) {
-    db.exec('ROLLBACK');
-    throw error;
-  }
+  });
 }
 
 function verifySchema13Projections(db: DatabaseSync): void {
@@ -2005,7 +2005,7 @@ export class CoordinatorStore {
     }
     const ownsWriterGuard = options.writerGuard === undefined;
     const writerGuard = options.writerGuard ?? await CoordinatorWriterGuard.acquire(paths);
-    writerGuard.assertHeld();
+    writerGuard.assertHeldFor(paths);
     let lastBackupPath: string | null = null;
     let openedDatabase: DatabaseSync | null = null;
     try {
@@ -2016,8 +2016,15 @@ export class CoordinatorStore {
       openedDatabase = db;
       try {
         configureWritableDatabase(db);
-        runS1InvariantDetectors(storeInvariantDetectorHost({ db, clock, writerGuard, generation, migrationBoundarySchema12: false }), STORE_OPEN_INVARIANT_IDS);
         applySchemaMigrations(db, clock, COORDINATOR_STORE_SCHEMA_VERSION);
+        db.exec('BEGIN IMMEDIATE');
+        try {
+          runS1InvariantDetectors(storeInvariantDetectorHost({ db, clock, writerGuard, generation, migrationBoundarySchema12: false }), STORE_OPEN_INVARIANT_IDS);
+          db.exec('COMMIT');
+        } catch (error) {
+          db.exec('ROLLBACK');
+          throw error;
+        }
         await enforcePrivateAuthorityPath(generation.database_path, false);
       } catch (error) {
         db.close();

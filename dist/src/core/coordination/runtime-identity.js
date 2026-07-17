@@ -89,7 +89,7 @@ function assertRegularSingleLink(path) {
         throw new CoordinationRuntimeError('system-fatal', 'runtime identity must be a private regular single-link file', [path]);
 }
 export async function publishCoordinatorRuntimeIdentity(paths, generation, lifecycle, writerGuard, now = new Date()) {
-    writerGuard.assertHeld();
+    writerGuard.assertHeldFor(paths);
     const pointerBytes = readFileSync(paths.currentStorePointerPath);
     if (sha256(pointerBytes) !== generation.pointer_sha256)
         throw new CoordinationRuntimeError('store-corrupt', 'runtime identity publication pointer changed after generation selection');

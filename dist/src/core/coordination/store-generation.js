@@ -427,7 +427,7 @@ async function recoverBarrieredFirstPublication(paths, writerGuard, options) {
     return recovered;
 }
 export async function publishRestoredStoreGeneration(paths, writerGuard, sourceDatabasePath, sourceDatabaseSha256, sourceGenerationId, migration, options = {}) {
-    writerGuard.assertHeld();
+    writerGuard.assertHeldFor(paths);
     await ensureCoordinatorPrivateRoots(paths);
     const current = readCurrentStoreGeneration(paths);
     if (current === null || current.pointer.generation_id !== sourceGenerationId)
@@ -528,7 +528,7 @@ export async function publishRestoredStoreGeneration(paths, writerGuard, sourceD
     }
 }
 export async function ensureCurrentStoreGeneration(paths, writerGuard, migration, options = {}) {
-    writerGuard.assertHeld();
+    writerGuard.assertHeldFor(paths);
     await ensureCoordinatorPrivateRoots(paths);
     assertContainedNoSymlinks(paths.coordinatorRoot, paths.storesRoot);
     for (const name of await readdir(paths.coordinatorRoot)) {
