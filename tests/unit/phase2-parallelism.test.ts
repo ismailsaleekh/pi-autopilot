@@ -129,7 +129,7 @@ function gitOut(root: string, args: readonly string[]): string {
 
 function gitWorktreeListContains(root: string, worktreePath: string): boolean {
   const expected = normalizeTestPath(worktreePath);
-  return gitOut(root, ['worktree', 'list', '--porcelain', '--expire=never'])
+  return gitOut(root, ['worktree', 'list', '--porcelain'])
     .split('\n')
     .filter((line) => line.startsWith('worktree '))
     .map((line) => normalizeTestPath(line.slice('worktree '.length)))
@@ -440,9 +440,9 @@ void describe('Phase 2 unit worktrees, claims, mergeback, staleness, and GC', ()
       const unit = await prepareAutopilotUnitWorktree({ active: prepared.active, unitId: 'u-missing-registration', attempt: 1 });
       const branchSha = gitOut(unit.unitInfo.worktree_path, ['rev-parse', 'HEAD']);
       await updateUnitBranchStatus({ active: prepared.active, unitId: unit.unitInfo.unit_id, attempt: unit.unitInfo.attempt, status: 'aborted', currentSha: branchSha, archiveRef: null });
-      assert.equal(gitWorktreeListContains(prepared.active.source_repo, unit.unitInfo.worktree_path), true, gitOut(prepared.active.source_repo, ['worktree', 'list', '--porcelain', '--expire=never']));
+      assert.equal(gitWorktreeListContains(prepared.active.source_repo, unit.unitInfo.worktree_path), true, gitOut(prepared.active.source_repo, ['worktree', 'list', '--porcelain']));
       await rm(unit.unitInfo.worktree_path, { recursive: true, force: true });
-      assert.equal(gitWorktreeListContains(prepared.active.source_repo, unit.unitInfo.worktree_path), true, gitOut(prepared.active.source_repo, ['worktree', 'list', '--porcelain', '--expire=never']));
+      assert.equal(gitWorktreeListContains(prepared.active.source_repo, unit.unitInfo.worktree_path), true, gitOut(prepared.active.source_repo, ['worktree', 'list', '--porcelain']));
       await expectRejects(() => cleanupTerminalUnitWorktree({ active: prepared.active, unitId: unit.unitInfo.unit_id, attempt: unit.unitInfo.attempt, reason: 'I5 metadata-only reconciliation proof' }), /schema-13 exact-set metadata reconciliation/u);
       assert.equal(gitWorktreeListContains(prepared.active.source_repo, unit.unitInfo.worktree_path), true);
       assert.equal(gitOut(prepared.active.source_repo, ['rev-parse', `refs/heads/${unit.unitInfo.branch}`]), branchSha);
