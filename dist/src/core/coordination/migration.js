@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { closeSync, constants as fsConstants, copyFileSync, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdtempSync, openSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, unlinkSync } from 'node:fs';
-import { chmod, copyFile, mkdir, open, readFile, readdir, rename, rm } from 'node:fs/promises';
+import { closeSync, constants as fsConstants, copyFileSync, existsSync, fsyncSync, linkSync, lstatSync, mkdtempSync, openSync, readdirSync, realpathSync, rmSync, statSync, unlinkSync } from 'node:fs';
+import { chmod, copyFile, mkdir, open, readdir, rename, rm } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { platform, tmpdir } from 'node:os';
@@ -17,6 +17,7 @@ import { parseCurrentCoordinatorLock, parsePredecessorCoordinatorLock, parsePrio
 import { COORDINATOR_SCHEMA_MIGRATION_CHECKSUMS, CoordinatorStore } from "./store.js";
 import { backup, DatabaseSync } from 'node:sqlite';
 import { CoordinationRuntimeError } from "./failures.js";
+import { readImmutableFileBytes } from "./immutable-file.js";
 import { normalizeRepoRelativePath, pathOverlapsOrContains, resolveRepoIdentity } from "../parallel-runtime.js";
 import { proveLegacyReadAttemptTerminal } from "./legacy-read-terminal.js";
 import { parseAutopilotUnitMerge } from "../unit-merge.js";
@@ -81,12 +82,20 @@ function closedObject(value, label, requiredFields, optionalFields) {
     return row;
 }
 function readBounded(path, maximum = COORDINATION_MIGRATION_MAX_FILE_BYTES) {
-    const info = lstatSync(path);
-    if (!info.isFile() || info.isSymbolicLink())
-        failure('invalid', 'migration input must be a regular non-symlink file', [path]);
-    if (info.size > maximum)
-        failure('invalid', `migration input exceeds ${String(maximum)} bytes`, [path]);
-    return readFileSync(path);
+    try {
+        return readImmutableFileBytes({ path, maximumBytes: maximum, minimumBytes: 0, label: 'migration input' });
+    }
+    catch (error) {
+        failure('invalid', `migration input is not immutable and bounded: ${error instanceof Error ? error.message : String(error)}`, [path]);
+    }
+}
+function readBoundedDatabase(path) {
+    try {
+        return readImmutableFileBytes({ path, maximumBytes: COORDINATION_MIGRATION_MAX_DATABASE_COMPONENT_BYTES, minimumBytes: 0, label: 'migration database component' });
+    }
+    catch (error) {
+        failure('blocked', `migration database component is not immutable and bounded: ${error instanceof Error ? error.message : String(error)}`, [path]);
+    }
 }
 function assertNoDuplicateJsonKeys(text, label) {
     let index = 0;
@@ -988,20 +997,11 @@ function coordinatorDatabaseSourceIdentity(path) {
         failure('blocked', 'coordinator database snapshot source must be a regular non-symbolic file', [path]);
     if (info.size > COORDINATION_MIGRATION_MAX_DATABASE_COMPONENT_BYTES)
         failure('blocked', 'coordinator database snapshot source exceeds its bounded file ceiling', [path, String(info.size)]);
-    const descriptor = openSync(path, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
-    try {
-        const opened = fstatSync(descriptor);
-        if (!sameFileIdentity(info, opened) || opened.size !== info.size)
-            failure('blocked', 'coordinator database snapshot source identity changed while opening', [path]);
-        const bytes = readFileSync(descriptor);
-        const after = lstatSync(path);
-        if (bytes.byteLength !== info.size || !sameFileIdentity(info, after) || after.size !== info.size || after.mtimeMs !== info.mtimeMs || after.ctimeMs !== info.ctimeMs)
-            failure('blocked', 'coordinator database snapshot source identity changed during hashing', [path]);
-        return { path, exists: true, dev: info.dev, ino: info.ino, size: info.size, mtime_ms: info.mtimeMs, ctime_ms: info.ctimeMs, sha256: digest(bytes) };
-    }
-    finally {
-        closeSync(descriptor);
-    }
+    const bytes = readBoundedDatabase(path);
+    const after = lstatSync(path);
+    if (bytes.byteLength !== info.size || !sameFileIdentity(info, after) || after.size !== info.size || after.mtimeMs !== info.mtimeMs || after.ctimeMs !== info.ctimeMs)
+        failure('blocked', 'coordinator database snapshot source identity changed during hashing', [path]);
+    return { path, exists: true, dev: info.dev, ino: info.ino, size: info.size, mtime_ms: info.mtimeMs, ctime_ms: info.ctimeMs, sha256: digest(bytes) };
 }
 function coordinatorAuthorityDatabasePath(paths) {
     const current = readCurrentStoreGeneration(paths);
@@ -1573,11 +1573,9 @@ async function readJournal(stateRoot, path) {
     assertMigrationPathSafe(stateRoot, path, 'migration journal');
     if (!existsSync(path))
         return null;
-    if (!lstatSync(path).isFile() || lstatSync(path).isSymbolicLink())
-        failure('invalid', 'migration journal must be a regular non-symbolic file', [path]);
     let parsed;
     try {
-        parsed = JSON.parse(await readFile(path, 'utf8'));
+        parsed = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(readBounded(path, COORDINATION_MIGRATION_MAX_JSONL_LINE_BYTES)));
     }
     catch {
         failure('invalid', 'migration journal is unreadable', [path]);
@@ -1605,6 +1603,14 @@ function parseMigrationLockBytes(bytes, label) {
         failure('blocked', `${label} has an invalid closed identity; reclamation is refused`);
     return { pid: row['pid'], bootId: row['boot_id'], token: row['token'] };
 }
+function readMigrationLockBytes(path, label) {
+    try {
+        return readImmutableFileBytes({ path, maximumBytes: 65_536, label, errorCode: 'coordinator-contention', allowMultipleLinks: true });
+    }
+    catch (error) {
+        failure('blocked', `${label} is not immutable and bounded: ${error instanceof Error ? error.message : String(error)}`, [path]);
+    }
+}
 function migrationLockOwnerAlive(owner) {
     // Boot identity is supplementary evidence only. A live PID is never stale.
     return isProcessAlive(owner.pid);
@@ -1630,7 +1636,7 @@ function recoverMigrationLockResidues(stateRoot, path) {
     let changed = false;
     if (existsSync(reclaimPath)) {
         const reclaimIdentity = assertRegularMigrationLockResidue(stateRoot, reclaimPath, 'repository migration reclaim residue');
-        const reclaimOwner = parseMigrationLockBytes(readFileSync(reclaimPath), 'repository migration reclaim residue');
+        const reclaimOwner = parseMigrationLockBytes(readMigrationLockBytes(reclaimPath, 'repository migration reclaim residue'), 'repository migration reclaim residue');
         if (mainIdentity === null) {
             if (migrationLockOwnerAlive(reclaimOwner))
                 failure('blocked', 'live migration reclamation residue lost its elected pathname', [reclaimPath]);
@@ -1673,7 +1679,7 @@ function recoverMigrationLockResidues(stateRoot, path) {
             changed = true;
             continue;
         }
-        const owner = parseMigrationLockBytes(readFileSync(residue), 'migration lock crash residue');
+        const owner = parseMigrationLockBytes(readMigrationLockBytes(residue, 'migration lock crash residue'), 'migration lock crash residue');
         if (migrationLockOwnerAlive(owner)) {
             if (mainIdentity === null)
                 failure('blocked', 'live migration lock operation lost its elected pathname', [residue]);
@@ -1725,7 +1731,7 @@ async function acquireMigrationLock(stateRoot, path, afterBoundary, ensureParent
                     if (!existsSync(path)) {
                         if (!existsSync(releasePath))
                             failure('blocked', 'migration lock elected pathname disappeared before release', [path]);
-                        const residue = parseMigrationLockBytes(readFileSync(releasePath), 'migration release fence');
+                        const residue = parseMigrationLockBytes(readMigrationLockBytes(releasePath, 'migration release fence'), 'migration release fence');
                         if (residue.token !== token)
                             failure('blocked', 'migration release fence belongs to another lock identity', [releasePath]);
                         unlinkSync(releasePath);
@@ -1733,7 +1739,7 @@ async function acquireMigrationLock(stateRoot, path, afterBoundary, ensureParent
                         return;
                     }
                     const lockIdentity = assertRegularMigrationLockResidue(stateRoot, path, 'repository migration lock release');
-                    const owner = parseMigrationLockBytes(readFileSync(path), 'repository migration lock release');
+                    const owner = parseMigrationLockBytes(readMigrationLockBytes(path, 'repository migration lock release'), 'repository migration lock release');
                     if (owner.token !== token)
                         failure('blocked', 'migration lock ownership changed before release; no lock was removed', [path]);
                     try {
@@ -1744,7 +1750,7 @@ async function acquireMigrationLock(stateRoot, path, afterBoundary, ensureParent
                             throw error;
                     }
                     const releaseIdentity = assertRegularMigrationLockResidue(stateRoot, releasePath, 'repository migration release fence');
-                    if (!sameFileIdentity(lockIdentity, releaseIdentity) || parseMigrationLockBytes(readFileSync(releasePath), 'migration release fence').token !== token)
+                    if (!sameFileIdentity(lockIdentity, releaseIdentity) || parseMigrationLockBytes(readMigrationLockBytes(releasePath, 'migration release fence'), 'migration release fence').token !== token)
                         failure('blocked', 'migration lock identity changed while release was fenced; no lock was removed', [path, releasePath]);
                     await afterBoundary?.('after-lock-release-linked');
                     unlinkExactMigrationLockResidue(path, lockIdentity, 'repository migration lock release');
@@ -1771,7 +1777,7 @@ async function acquireMigrationLock(stateRoot, path, afterBoundary, ensureParent
                 reclaimIdentity = assertRegularMigrationLockResidue(stateRoot, reclaimPath, 'repository migration lock reclamation fence');
                 const lockIdentity = assertRegularMigrationLockResidue(stateRoot, path, 'repository migration lock before reclamation');
                 if (!sameFileIdentity(lockIdentity, reclaimIdentity)) {
-                    const residueOwner = parseMigrationLockBytes(readFileSync(reclaimPath), 'migration lock reclamation residue');
+                    const residueOwner = parseMigrationLockBytes(readMigrationLockBytes(reclaimPath, 'migration lock reclamation residue'), 'migration lock reclamation residue');
                     if (migrationLockOwnerAlive(residueOwner))
                         failure('blocked', 'migration stale-lock reclamation is owned by a live process with a different identity', [reclaimPath]);
                     unlinkExactMigrationLockResidue(reclaimPath, reclaimIdentity, 'stale migration reclaim residue');
@@ -1794,7 +1800,7 @@ async function acquireMigrationLock(stateRoot, path, afterBoundary, ensureParent
             const lockIdentity = assertRegularMigrationLockResidue(stateRoot, path, 'repository migration lock before reclamation');
             if (!sameFileIdentity(lockIdentity, reclaimIdentity))
                 failure('blocked', 'migration lock identity changed before stale-lock reclamation; no lock was removed', [path]);
-            const owner = parseMigrationLockBytes(readFileSync(reclaimPath), 'migration lock reclamation fence');
+            const owner = parseMigrationLockBytes(readMigrationLockBytes(reclaimPath, 'migration lock reclamation fence'), 'migration lock reclamation fence');
             if (migrationLockOwnerAlive(owner)) {
                 unlinkExactMigrationLockResidue(reclaimPath, reclaimIdentity, 'live migration reclaim fence');
                 fsyncParentDirectory(path);
@@ -1857,7 +1863,7 @@ async function createFreeze(stateRoot, path, repoKey, migrationId, token, now) {
     if (existsSync(path)) {
         let parsed;
         try {
-            parsed = JSON.parse(await readFile(path, 'utf8'));
+            parsed = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(readBounded(path, COORDINATION_MIGRATION_MAX_JSONL_LINE_BYTES)));
         }
         catch {
             failure('blocked', 'existing migration freeze is unreadable', [path]);
@@ -1883,7 +1889,7 @@ async function copySnapshot(stateRoot, entries, root) {
         await ensurePrivateAuthorityDirectory(dirname(target));
         assertMigrationPathSafe(stateRoot, target, 'migration snapshot file destination');
         await copyFile(entry.source_path, target, fsConstants.COPYFILE_EXCL);
-        if (digest(await readFile(target)) !== entry.sha256)
+        if (digest(readBounded(target)) !== entry.sha256)
             failure('blocked', 'snapshot copy hash verification failed', [entry.source_path]);
         if (platform() !== 'win32')
             await chmod(target, 0o400);
@@ -1911,7 +1917,8 @@ export function coordinationMigrationCoordinatorRunning(paths) {
         if (!existsSync(path))
             continue;
         try {
-            const raw = JSON.parse(readFileSync(path, 'utf8'));
+            const bytes = readImmutableFileBytes({ path, maximumBytes: 65_536, label: 'coordinator lifecycle lock', errorCode: 'coordinator-contention' });
+            const raw = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
             const lock = parseCurrentCoordinatorLock(raw) ?? parsePriorSchema11CurrentCoordinatorLock(raw) ?? parsePriorSchema10CurrentCoordinatorLock(raw) ?? parsePriorSchema9CurrentCoordinatorLock(raw) ?? parsePredecessorCoordinatorLock(raw);
             if (lock === null || isProcessAlive(lock.pid))
                 return true;
@@ -1933,7 +1940,10 @@ export async function retireCoordinationMigrationCoordinator(paths, expectedIden
     }
     let lock;
     try {
-        const value = JSON.parse(await readFile(paths.lockPath, 'utf8'));
+        const lockText = await readExactLockText(paths.lockPath);
+        if (lockText === null)
+            return [];
+        const value = JSON.parse(lockText);
         lock = parseCurrentCoordinatorLock(value) ?? parsePriorSchema11CurrentCoordinatorLock(value) ?? parsePriorSchema10CurrentCoordinatorLock(value) ?? parsePriorSchema9CurrentCoordinatorLock(value);
     }
     catch (error) {
@@ -2163,7 +2173,7 @@ async function createVerifiedPreImportBackup(paths, outputPath) {
     }
     fsyncParentDirectory(outputPath);
     await enforcePrivateAuthorityPath(outputPath, false);
-    return { path: outputPath, sha256: digest(await readFile(outputPath)) };
+    return { path: outputPath, sha256: digest(readBoundedDatabase(outputPath)) };
 }
 async function restoreBackup(paths, journal) {
     if (journal.backup_path === null || journal.backup_sha256 === null)
@@ -2171,7 +2181,7 @@ async function restoreBackup(paths, journal) {
     assertMigrationPathSafe(paths.stateRoot, journal.backup_path, 'migration database backup');
     if (!existsSync(journal.backup_path) || lstatSync(journal.backup_path).isSymbolicLink())
         failure('blocked', 'verified migration backup is unavailable');
-    if (digest(await readFile(journal.backup_path)) !== journal.backup_sha256)
+    if (digest(readBoundedDatabase(journal.backup_path)) !== journal.backup_sha256)
         failure('blocked', 'migration backup hash verification failed', [journal.backup_path]);
     const backupSchema = verifyCoordinatorDatabaseFileReadOnly(journal.backup_path);
     if (existsSync(paths.currentStorePointerPath)) {
@@ -2186,7 +2196,7 @@ async function restoreBackup(paths, journal) {
     const temporary = `${paths.databasePath}.restore-${randomBytes(8).toString('hex')}`;
     assertMigrationPathSafe(paths.stateRoot, temporary, 'migration database restore temporary');
     await copyFile(journal.backup_path, temporary);
-    if (digest(await readFile(temporary)) !== journal.backup_sha256)
+    if (digest(readBoundedDatabase(temporary)) !== journal.backup_sha256)
         failure('blocked', 'staged migration rollback differs from the verified backup', [temporary]);
     await rename(temporary, paths.databasePath);
     const descriptor = openSync(paths.databasePath, fsConstants.O_RDONLY);
@@ -2197,7 +2207,7 @@ async function restoreBackup(paths, journal) {
         closeSync(descriptor);
     }
     fsyncParentDirectory(paths.databasePath);
-    if (digest(await readFile(paths.databasePath)) !== journal.backup_sha256)
+    if (digest(readBoundedDatabase(paths.databasePath)) !== journal.backup_sha256)
         failure('blocked', 'migration rollback did not restore the byte-exact verified backup', [paths.databasePath]);
     verifyCoordinatorDatabaseFileReadOnly(paths.databasePath);
 }
@@ -2240,11 +2250,11 @@ async function archiveLegacy(stateRoot, entries, migrationPaths) {
         await ensurePrivateAuthorityDirectory(dirname(target));
         assertMigrationPathSafe(stateRoot, target, 'legacy archive destination');
         if (existsSync(entry.source_path)) {
-            if (digest(await readFile(entry.source_path)) !== entry.sha256)
+            if (digest(readBounded(entry.source_path)) !== entry.sha256)
                 failure('blocked', 'legacy source drifted during archive', [entry.source_path]);
             await rename(entry.source_path, target);
         }
-        if (!existsSync(target) || digest(await readFile(target)) !== entry.sha256)
+        if (!existsSync(target) || digest(readBounded(target)) !== entry.sha256)
             failure('blocked', 'legacy archive verification failed', [target]);
         if (platform() !== 'win32')
             await chmod(target, 0o400);
@@ -2260,7 +2270,7 @@ async function archiveLegacy(stateRoot, entries, migrationPaths) {
     const archiveManifestPath = join(migrationPaths.archiveRoot, 'manifest.json');
     const archiveManifest = { schema_version: 'autopilot.coordination_legacy_archive_manifest.v1', entries: archived.sort((left, right) => left.relative_path.localeCompare(right.relative_path)) };
     if (existsSync(archiveManifestPath)) {
-        const existing = JSON.parse(await readFile(archiveManifestPath, 'utf8'));
+        const existing = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(readBounded(archiveManifestPath, COORDINATION_MIGRATION_MAX_JSONL_LINE_BYTES)));
         if (stableJson(existing) !== stableJson(archiveManifest))
             failure('blocked', 'legacy archive manifest disagrees with archived bytes', [archiveManifestPath]);
     }
@@ -2474,7 +2484,7 @@ export async function runCoordinationMigration(input) {
             const backupJournal = journal;
             const backupResult = await withMigrationStoreAuthority(paths, 'migration apply backup', async () => {
                 if (backupJournal.backup_path !== null && backupJournal.backup_sha256 !== null) {
-                    if (backupJournal.backup_path !== backupPath || !existsSync(backupPath) || digest(await readFile(backupPath)) !== backupJournal.backup_sha256)
+                    if (backupJournal.backup_path !== backupPath || !existsSync(backupPath) || digest(readBoundedDatabase(backupPath)) !== backupJournal.backup_sha256)
                         failure('blocked', 'durable pre-import backup is missing or changed', [backupPath]);
                     verifyCoordinatorDatabaseFileReadOnly(backupPath);
                     return { path: backupPath, sha256: backupJournal.backup_sha256 };

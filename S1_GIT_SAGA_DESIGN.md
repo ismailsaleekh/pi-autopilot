@@ -60,8 +60,12 @@ never effect truth.
    metadata finalization. Unsafe facts enter owned recovery without destructive
    compensation.
 4. A stage becomes verified/committed only after immutable operation-bound
-   evidence records the canonical proof. Quarantine evidence additionally
-   records `capture_sha` and `proof_source` before authority release.
+   evidence records the canonical proof. Evidence, saga locks, task metadata,
+   migration inputs, and reconciliation approvals are read through bounded
+   `O_NOFOLLOW` descriptors with exact inode/size/time stability and single-link
+   evidence; multi-link inodes are admitted only during explicit lock fencing.
+   Quarantine evidence additionally records `capture_sha` and `proof_source`
+   before authority release.
 5. Operation identity is v2 canonical-worktree ID + operation type + complete
    immutable intent. Caller-invented IDs are rejected; an old ID is accepted
    only when resuming an already-existing historical operation.

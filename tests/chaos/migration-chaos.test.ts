@@ -93,7 +93,7 @@ void describe('migration filesystem and source-drift chaos', () => {
       await writeFile(outside, '[]\n', 'utf8');
       await rm(claims);
       await symlink(outside, claims);
-      await assert.rejects(() => runCoordinationMigration({ command: 'dry-run', repoKey: fixture.repoKey, env: fixture.env, clock: migrationTestClock() }), /non-symlink file/u);
+      await assert.rejects(() => runCoordinationMigration({ command: 'dry-run', repoKey: fixture.repoKey, env: fixture.env, clock: migrationTestClock() }), /single-link regular non-symbolic file/u);
     });
   });
 

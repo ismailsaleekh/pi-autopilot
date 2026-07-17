@@ -938,7 +938,7 @@ void describe('owner-scoped worktree and Git saga recovery', () => {
     }
   });
 
-  void it('refuses to commit a recovered Git effect until its declared metadata artifact exists', async () => {
+  void it('refuses to commit a recovered Git effect until bounded immutable metadata is present', async () => {
     const value = await setup('q');
     try {
       const saga = new OwnedWorktreeSagaClient(new CoordinatorClient({ env: value.env, autoStart: false }), value.session);
@@ -957,6 +957,24 @@ void describe('owner-scoped worktree and Git saga recovery', () => {
       const taskRoot = dirname(dirname(dirname(dirname(create.intent.worktree_path))));
       await mkdir(join(taskRoot, 'execution-commits'), { recursive: true });
       await writeFile(join(taskRoot, 'execution-commits', 'gated.json'), '{}\n', 'utf8');
+      const taskInfoPath = join(taskRoot, '_task-info.json');
+      await writeFile(taskInfoPath, `${JSON.stringify({ runtime_root: value.active.runtime_root })}\n`, 'utf8');
+      const taskInfoBytes = await readFile(taskInfoPath);
+      const externalTaskInfo = join(value.root, 'foreign-task-info.json');
+      await writeFile(externalTaskInfo, `${JSON.stringify({ runtime_root: value.active.runtime_root })}\n`, 'utf8');
+      await rm(taskInfoPath);
+      await symlink(externalTaskInfo, taskInfoPath);
+      await assert.rejects(() => recoverOwnedWorktreeSagas({ active: value.active, env: value.env }), /canonical postcondition|metadata postcondition|unreadable_metadata_root|partial-effect/u);
+      assert.equal(git(create.intent.worktree_path, ['rev-list', '--count', `${base}..HEAD`]), '1');
+      assert.notEqual((await saga.operations()).find((operation) => operation.intent.reason === 'metadata gate witness')?.stage, 'committed');
+      await rm(taskInfoPath);
+      const oversizedTaskInfo = new Uint8Array(1_048_577);
+      oversizedTaskInfo.fill(0x20);
+      await writeFile(taskInfoPath, oversizedTaskInfo);
+      await assert.rejects(() => recoverOwnedWorktreeSagas({ active: value.active, env: value.env }), /canonical postcondition|metadata postcondition|unreadable_metadata_root|partial-effect/u);
+      assert.equal(git(create.intent.worktree_path, ['rev-list', '--count', `${base}..HEAD`]), '1');
+      assert.notEqual((await saga.operations()).find((operation) => operation.intent.reason === 'metadata gate witness')?.stage, 'committed');
+      await writeFile(taskInfoPath, taskInfoBytes);
       const recovered = await recoverOwnedWorktreeSagas({ active: value.active, env: value.env });
       assert.equal(recovered.some((operation) => operation.intent.reason === 'metadata gate witness' && operation.stage === 'committed'), true);
       assert.equal(git(create.intent.worktree_path, ['rev-list', '--count', `${base}..HEAD`]), '1');

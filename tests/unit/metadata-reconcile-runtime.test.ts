@@ -214,6 +214,25 @@ void describe('I5 metadata-only worktree registration reconciliation', () => {
     }
   });
 
+  void it('rejects oversized recovery evidence before pruning registration metadata', async () => {
+    const value = await corpus(1, 'oversized-evidence');
+    try {
+      const rows = await approvals(value, 'repo-oversized-evidence');
+      const approval = rows[0];
+      if (approval === undefined) throw new Error('oversized-evidence approval disappeared');
+      const oversizedEvidence = new Uint8Array(1_048_577);
+      oversizedEvidence.fill(0x20);
+      await writeFile(approval.recovery_evidence_path, oversizedEvidence);
+      await assert.rejects(
+        () => reconcileApprovedMissingWorktreeMetadata({ approvals: rows, evidence_root: join(value.root, 'audit') }),
+        /bounded single-link regular non-symbolic file/u,
+      );
+      assert.equal(gitWorktreeRegistrationFacts(value.repo).filter((registration) => registration.prunable).length, 1);
+    } finally {
+      await rm(value.root, { recursive: true, force: true });
+    }
+  });
+
   void it('isolates a foreign repository completely', async () => {
     const owned = await corpus(1, 'owned');
     const foreign = await corpus(1, 'foreign');

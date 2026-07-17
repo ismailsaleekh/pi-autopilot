@@ -1,11 +1,12 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, lstatSync } from 'node:fs';
-import { link, mkdir, open, readFile, realpath, rm } from 'node:fs/promises';
+import { link, mkdir, open, realpath, rm } from 'node:fs/promises';
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 
 import { runGitMutation, runGitQuery, type GitProcessEnv } from '../git-process.ts';
 import { canonicalJson } from './canonical-json.ts';
 import { CoordinationRuntimeError } from './failures.ts';
+import { readImmutableFileBytes } from './immutable-file.ts';
 import {
   assertMetadataReconcileEvidence,
   parseMetadataReconcileIntent,
@@ -55,11 +56,7 @@ function assertInside(root: string, path: string, label: string): void {
 
 async function verifyRecoveryEvidence(approval: MetadataReconcileApproval): Promise<void> {
   if (!existsSync(approval.recovery_evidence_path)) throw new CoordinationRuntimeError('recovery-required', 'metadata reconciliation recovery evidence is missing', [approval.recovery_evidence_path]);
-  const before = lstatSync(approval.recovery_evidence_path);
-  if (!before.isFile() || before.isSymbolicLink() || before.size > 1024 * 1024) throw new CoordinationRuntimeError('recovery-required', 'metadata reconciliation recovery evidence is not a bounded stable regular file', [approval.recovery_evidence_path]);
-  const bytes = await readFile(approval.recovery_evidence_path);
-  const after = lstatSync(approval.recovery_evidence_path);
-  if (before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs || bytes.byteLength !== before.size) throw new CoordinationRuntimeError('recovery-required', 'metadata reconciliation recovery evidence changed during proof', [approval.recovery_evidence_path]);
+  const bytes = readImmutableFileBytes({ path: approval.recovery_evidence_path, maximumBytes: 1024 * 1024, label: 'metadata reconciliation recovery evidence' });
   const digest = `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
   if (digest !== approval.intent.recovery_evidence_sha256) throw new CoordinationRuntimeError('invalid-state', 'metadata reconciliation recovery evidence digest differs from durable approval', [approval.intent.canonical_worktree_id, digest, approval.intent.recovery_evidence_sha256]);
 }
@@ -109,10 +106,7 @@ async function prepareEvidencePath(evidenceRoot: string, canonicalWorktreeId: st
 }
 
 async function assertExistingEvidenceBytes(path: string, bytes: string): Promise<void> {
-  const before = lstatSync(path);
-  const existing = await readFile(path, 'utf8');
-  const after = lstatSync(path);
-  if (before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs || after.isSymbolicLink() || !after.isFile()) throw new CoordinationRuntimeError('recovery-required', 'metadata reconciliation evidence changed during immutable replay inspection', [path]);
+  const existing = new TextDecoder('utf-8', { fatal: true }).decode(readImmutableFileBytes({ path, maximumBytes: 1024 * 1024, label: 'metadata reconciliation immutable evidence' }));
   if (existing !== bytes) throw new CoordinationRuntimeError('idempotency-conflict', 'immutable metadata reconciliation evidence differs from the exact replay', [path]);
 }
 

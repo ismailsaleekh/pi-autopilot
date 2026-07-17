@@ -1,10 +1,11 @@
-import { existsSync, lstatSync, readFileSync, realpathSync } from 'node:fs';
+import { existsSync, lstatSync, realpathSync } from 'node:fs';
 import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 
 import { gitQueryNulStrings, gitQueryText, runGitQuery, type GitProcessEnv } from '../git-process.ts';
 import { AUTOPILOT_PREFLIGHT_ROLLBACK_REASON_PREFIX } from '../names.ts';
 import { parseMetadataReconcileIntent, type GitWorktreeRegistrationFact, type MetadataReconcileIntent } from './metadata-reconcile.ts';
 import type { CoordinationOwnerIdentity, CoordinationWorktreeKind, CoordinationWorktreeOperationIntent, CoordinationOperationStage, CoordinationWorktreeOperationType } from './types.ts';
+import { readImmutableFileBytes } from './immutable-file.ts';
 import { deterministicWorktreeId } from './worktree-identity.ts';
 
 export type WorktreePostconditionOutcome = 'satisfied' | 'not-applied' | 'unsafe';
@@ -42,6 +43,12 @@ type PostconditionHandler = (request: WorktreePostconditionRequest) => WorktreeP
 
 const MAX_PROOF_ENTRIES = 256;
 const MAX_PROOF_ENTRY_LENGTH = 1_024;
+const MAX_TASK_INFO_BYTES = 1_048_576;
+
+type TaskInfoRead =
+  | Readonly<{ kind: 'absent' }>
+  | Readonly<{ kind: 'invalid' }>
+  | Readonly<{ kind: 'valid'; value: object }>;
 
 function compare(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
@@ -79,6 +86,18 @@ function canonicalPath(path: string): string {
     cursor = parent;
   }
   return resolve(realpathSync(cursor), ...missing);
+}
+
+function readTaskInfo(path: string): TaskInfoRead {
+  if (!pathEntryExists(path)) return Object.freeze({ kind: 'absent' });
+  try {
+    const bytes = readImmutableFileBytes({ path, maximumBytes: MAX_TASK_INFO_BYTES, label: 'worktree task metadata' });
+    const parsed: unknown = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return Object.freeze({ kind: 'invalid' });
+    return Object.freeze({ kind: 'valid', value: parsed });
+  } catch {
+    return Object.freeze({ kind: 'invalid' });
+  }
 }
 
 function ordinaryRequest(request: WorktreePostconditionRequest): OrdinaryPostconditionRequest {
@@ -147,20 +166,14 @@ function metadataMissing(request: OrdinaryPostconditionRequest): readonly string
     : dirname(dirname(dirname(dirname(request.intent.worktree_path))));
   const worktreeRoot = dirname(dirname(taskRoot));
   let runtimeRoot: string | null = null;
-  const taskInfo = resolve(taskRoot, '_task-info.json');
-  if (existsSync(taskInfo)) {
-    try {
-      const value: unknown = JSON.parse(readFileSync(taskInfo, 'utf8'));
-      if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
-        const candidate = Reflect.get(value, 'runtime_root');
-        if (typeof candidate === 'string') {
-          const resolved = resolve(candidate);
-          const rel = relative(resolve(taskRoot), resolved);
-          if (rel.length > 0 && !rel.startsWith('..') && !isAbsolute(rel)) runtimeRoot = resolved;
-        }
-      }
-    } catch {
-      return Object.freeze(request.intent.metadata_refs.map((ref) => `unreadable_metadata_root=${ref}`));
+  const taskInfo = readTaskInfo(resolve(taskRoot, '_task-info.json'));
+  if (taskInfo.kind === 'invalid') return Object.freeze(request.intent.metadata_refs.map((ref) => `unreadable_metadata_root=${ref}`));
+  if (taskInfo.kind === 'valid') {
+    const candidate = Reflect.get(taskInfo.value, 'runtime_root');
+    if (typeof candidate === 'string') {
+      const resolved = resolve(candidate);
+      const rel = relative(resolve(taskRoot), resolved);
+      if (rel.length > 0 && !rel.startsWith('..') && !isAbsolute(rel)) runtimeRoot = resolved;
     }
   }
   return Object.freeze(request.intent.metadata_refs.filter((ref) => {
@@ -197,18 +210,14 @@ function physicalAuthority(request: OrdinaryPostconditionRequest): WorktreePostc
 
 function ownedRuntimeRepoPrefix(request: OrdinaryPostconditionRequest): string | null {
   if (request.owner.unit_id !== 'main') return null;
-  const taskInfo = resolve(dirname(request.intent.worktree_path), '_task-info.json');
-  if (!existsSync(taskInfo)) return null;
-  try {
-    const value: unknown = JSON.parse(readFileSync(taskInfo, 'utf8'));
-    if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
-    const runtimeRoot = Reflect.get(value, 'runtime_root');
-    if (typeof runtimeRoot !== 'string') return null;
-    const relative = runtimeRoot.startsWith(`${resolve(request.intent.worktree_path)}${sep}`)
-      ? runtimeRoot.slice(resolve(request.intent.worktree_path).length + 1).replace(/\\/gu, '/')
-      : null;
-    return relative === null || relative.length === 0 || relative.startsWith('../') ? null : relative.replace(/\/$/u, '');
-  } catch { return null; }
+  const taskInfo = readTaskInfo(resolve(dirname(request.intent.worktree_path), '_task-info.json'));
+  if (taskInfo.kind !== 'valid') return null;
+  const runtimeRoot = Reflect.get(taskInfo.value, 'runtime_root');
+  if (typeof runtimeRoot !== 'string') return null;
+  const relative = runtimeRoot.startsWith(`${resolve(request.intent.worktree_path)}${sep}`)
+    ? runtimeRoot.slice(resolve(request.intent.worktree_path).length + 1).replace(/\\/gu, '/')
+    : null;
+  return relative === null || relative.length === 0 || relative.startsWith('../') ? null : relative.replace(/\/$/u, '');
 }
 
 interface MutableWorktreeFact {
@@ -336,8 +345,13 @@ function materializePostcondition(requestInput: WorktreePostconditionRequest): W
       const absolute = resolve(request.intent.worktree_path, ...trackedPath.split('/'));
       if (!existsSync(absolute)) { missing.push(path); continue; }
       const info = lstatSync(absolute);
-      if (!info.isFile()) { unsupported.push(trackedPath); continue; }
-      if (info.size <= 1_024 && readFileSync(absolute).subarray(0, 256).toString().startsWith('version https://git-lfs.github.com/spec/v1')) lfs.push(trackedPath);
+      if (!info.isFile() || info.isSymbolicLink()) { unsupported.push(trackedPath); continue; }
+      if (info.size <= 1_024) {
+        try {
+          const bytes = readImmutableFileBytes({ path: absolute, maximumBytes: 1_024, minimumBytes: 0, label: 'materialized tracked file' });
+          if (new TextDecoder('utf-8').decode(bytes.subarray(0, 256)).startsWith('version https://git-lfs.github.com/spec/v1')) lfs.push(trackedPath);
+        } catch { unsupported.push(trackedPath); }
+      }
     }
   }
   if (unsupported.length > 0) return result('unsafe', unsupported.map((path) => `unsupported_materialized_entry=${path}`));
