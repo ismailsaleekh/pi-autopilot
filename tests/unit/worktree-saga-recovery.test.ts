@@ -11,7 +11,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { CoordinatorClient } from '../../src/core/coordination/client.ts';
 import { ClaimNegotiationClient } from '../../src/core/coordination/negotiation.ts';
 import { RunReconciliationClient } from '../../src/core/coordination/reconciliation.ts';
-import { parseCoordinationRun, parseCoordinationSessionLease } from '../../src/core/coordination/contracts.ts';
+import { parseCoordinationRun, parseCoordinationSessionLease, parseCoordinationWorktreeOperation } from '../../src/core/coordination/contracts.ts';
 import { CoordinationRuntimeError, formatCoordinationRuntimeError } from '../../src/core/coordination/failures.ts';
 import { coordinatorRuntimePaths } from '../../src/core/coordination/runtime-paths.ts';
 import { readCurrentStoreGeneration } from '../../src/core/coordination/store-generation.ts';
@@ -182,6 +182,65 @@ void describe('owner-scoped worktree and Git saga recovery', () => {
       assert.equal(existsSync(spec.intent.worktree_path), false);
     } finally {
       await close(value);
+    }
+  });
+
+  void it('replays an immutable historical alias operation through its schema-13 canonical index', async () => {
+    const value = await setup('alias');
+    let restarted: Awaited<ReturnType<typeof startCoordinatorServer>> | null = null;
+    try {
+      const create = unitCreateSpec(value, 'unit-historical-alias');
+      let actions = 0;
+      const committed = await executeOwnedWorktreeSaga(create, {
+        action: () => { actions += 1; git(value.repo, ['worktree', 'add', '-b', create.intent.branch, create.intent.worktree_path, value.active.target_base_sha]); },
+      }, value.env);
+      if (committed.operation === null || committed.operation.verification_evidence === null || committed.worktree === null) throw new Error('canonical alias fixture operation did not commit immutable evidence');
+      const operationId = committed.operation.operation_id;
+      const canonicalWorktreeId = committed.operation.worktree_id;
+      const aliasWorktreeId = 'migration-worktree-historical-alias';
+      await value.server.close();
+      const currentGeneration = readCurrentStoreGeneration(coordinatorRuntimePaths(value.env));
+      if (currentGeneration === null) throw new Error('schema-13 alias fixture generation is missing');
+      const database = new DatabaseSync(currentGeneration.database_path);
+      try {
+        const row = database.prepare('SELECT payload_json FROM worktree_operations WHERE entity_id=?').get(operationId);
+        const payloadText = row?.['payload_json'];
+        if (typeof payloadText !== 'string') throw new Error('schema-13 alias fixture operation payload is missing');
+        const historical = { ...parseCoordinationWorktreeOperation(JSON.parse(payloadText) as unknown), worktree_id: aliasWorktreeId };
+        if (historical.verification_evidence === null) throw new Error('historical alias fixture operation evidence is missing');
+        const aliasWorktree = { ...committed.worktree, worktree_id: aliasWorktreeId };
+        database.prepare('INSERT INTO worktrees(entity_id,repo_id,workstream_run,payload_json,version,canonical_worktree_id,autopilot_id,unit_id,attempt,kind,is_current_canonical) VALUES(?,?,?,?,?,?,?,?,?,?,0)').run(
+          aliasWorktreeId, aliasWorktree.owner.repo_id, aliasWorktree.owner.workstream_run, JSON.stringify(aliasWorktree), aliasWorktree.version, canonicalWorktreeId, aliasWorktree.owner.autopilot_id, aliasWorktree.owner.unit_id, aliasWorktree.owner.attempt, aliasWorktree.kind,
+        );
+        database.prepare('UPDATE worktree_operations SET payload_json=? WHERE entity_id=?').run(JSON.stringify(historical), operationId);
+        database.prepare('INSERT INTO worktree_aliases(alias_worktree_id,canonical_worktree_id,repo_id,autopilot_id,workstream_run,unit_id,attempt,kind,resolution_state,reason,evidence_sha256,created_event_seq) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)').run(
+          aliasWorktreeId, canonicalWorktreeId, historical.owner.repo_id, historical.owner.autopilot_id, historical.owner.workstream_run, historical.owner.unit_id, historical.owner.attempt, 'unit', 'resolved', 'legacy-migration-id', historical.verification_evidence.sha256, historical.intent_event_seq,
+        );
+      } finally { database.close(); }
+      restarted = await startCoordinatorServer(coordinatorRuntimePaths(value.env));
+
+      const replay = await executeOwnedWorktreeSaga({ ...create, operationId }, { action: () => { actions += 1; } }, value.env);
+      assert.equal(replay.operation?.operation_id, operationId);
+      assert.equal(replay.operation?.worktree_id, canonicalWorktreeId);
+      assert.equal(replay.replayed, true);
+      assert.equal(actions, 1);
+      assert.equal(git(create.intent.worktree_path, ['rev-parse', 'HEAD']), value.active.target_base_sha);
+
+      await restarted.close();
+      restarted = null;
+      const inspect = new DatabaseSync(currentGeneration.database_path, { readOnly: true });
+      try {
+        const row = inspect.prepare('SELECT payload_json,canonical_worktree_id FROM worktree_operations WHERE entity_id=?').get(operationId);
+        const payloadText = row?.['payload_json'];
+        if (typeof payloadText !== 'string') throw new Error('historical alias payload disappeared after replay');
+        const historical = parseCoordinationWorktreeOperation(JSON.parse(payloadText) as unknown);
+        assert.equal(historical.worktree_id, aliasWorktreeId);
+        assert.equal(row?.['canonical_worktree_id'], canonicalWorktreeId);
+      } finally { inspect.close(); }
+    } finally {
+      if (restarted !== null) await restarted.close();
+      await value.server.close().catch(() => undefined);
+      await rm(value.root, { recursive: true, force: true });
     }
   });
 
