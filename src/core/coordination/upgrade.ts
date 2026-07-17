@@ -12,7 +12,7 @@ import { CoordinatorFrameDecoder, AUTOPILOT_COORDINATOR_TRANSPORT_VERSION, encod
 import { isExactProcessAlive, isProcessAlive, predecessorCompatibleBootId, preflightProcessRetirementSupport, processStartIdentity, retireExactProcess } from './process-identity.ts';
 import { coordinatorRuntimePaths, enforcePrivateAuthorityPath, ensureCoordinatorPrivateRoots, ensurePrivateAuthorityDirectory, type CoordinatorRuntimePaths } from './runtime-paths.ts';
 import { acquireSerializedProcessGuard, discardLockTombstone, quarantineExactLock, readExactLockText } from './serialized-lock.ts';
-import { CoordinatorStore, upgradeVerifiedPrivateSchema6CopyToSchema12 } from './store.ts';
+import { upgradeVerifiedPrivateSchema6CopyToSchema12 } from './store.ts';
 import {
   COORDINATOR_UPGRADE_INTENT_SCHEMA,
   COORDINATOR_UPGRADE_PATH,
@@ -302,14 +302,10 @@ async function verifyMigrationOnCopy(paths: CoordinatorRuntimePaths, record: Coo
   await ensureCoordinatorPrivateRoots(probePaths);
   await copyFile(record.path, probePaths.databasePath, fsConstants.COPYFILE_EXCL);
   await enforcePrivateAuthorityPath(probePaths.databasePath, false);
-  let store: CoordinatorStore | null = null;
-  try {
-    await upgradeVerifiedPrivateSchema6CopyToSchema12(probePaths, record.sha256);
-    store = await CoordinatorStore.open(probePaths);
-    if (store.integrity() !== 'ok') throw new CoordinationRuntimeError('store-corrupt', 'schema migration probe failed integrity');
-    const status = store.status('global', null).payload;
-    if (status['package_build'] !== COORDINATOR_UPGRADE_PATH.target.package_build || status['protocol_version'] !== COORDINATOR_UPGRADE_PATH.target.protocol_version || status['database_schema_version'] !== COORDINATOR_UPGRADE_PATH.target.database_schema_version) throw new CoordinationRuntimeError('schema-mismatch', 'schema migration probe did not reach the locked target identity');
-  } finally { store?.close(); }
+  // The private copy remains a fixed-path schema-12 handoff. Its byte identity
+  // is verified against the exact schema-6 backup before any migration; opening
+  // CoordinatorStore here would prematurely publish schema 13 and its barrier.
+  await upgradeVerifiedPrivateSchema6CopyToSchema12(probePaths, record.sha256);
   const checkpoint = new DatabaseSync(probePaths.databasePath, { timeout: 5_000 });
   try {
     checkpoint.exec('PRAGMA wal_checkpoint(TRUNCATE)');

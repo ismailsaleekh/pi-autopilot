@@ -223,6 +223,7 @@ void describe('BUG-176 protocol-1.6 byte-bounded coordinator pagination', () => 
       if (!isJsonMap(parsedPayload)) throw new Error('cf42 fixture attach result is malformed');
       const legacyPayload = Object.fromEntries(Object.entries(parsedPayload).filter(([field]) => field !== 'reconciliation_receipt'));
       legacyPayload['reconciliation'] = detailsByField;
+      database.exec('DELETE FROM result_details; DELETE FROM result_receipts; DELETE FROM reconciliation_details; DELETE FROM reconciliation_receipts;');
       database.prepare('UPDATE idempotency_results SET request_sha256=?, payload_json=? WHERE repo_id=? AND idempotency_key=?').run(oldDigest, canonicalJson(legacyPayload), repoId, 'cf42-receipt-attach-key');
       database.prepare('UPDATE events SET request_sha256=? WHERE repo_id=? AND idempotency_key=?').run(oldDigest, repoId, 'cf42-receipt-attach-key');
     } finally { database.close(); }
@@ -255,7 +256,7 @@ void describe('BUG-176 protocol-1.6 byte-bounded coordinator pagination', () => 
       assert.deepEqual(details.map((detail) => detail.ordinal), Array.from({ length: receipt.detail_count }, (_entry, index) => index + 1));
       assert.equal(`sha256:${createHash('sha256').update(JSON.stringify(details), 'utf8').digest('hex')}`, receipt.details_sha256);
       console.log(`coordinator-reconciliation-pagination-measurement ${JSON.stringify({ detail_count: details.length, page_count: detailPageCount, old_response_bytes: encodedJsonBytes({ schema_version: 'autopilot.coordinator_response.v1', protocol_version: '1.5', request_id: 'cf42-receipt-attach-retry', ok: true, committed_event_seq: receipt.committed_event_seq, error_code: null, retryable: false, payload: { reconciliation: detailsByField } }), compact_replay_bytes: compactReplayBytes, maximum_detail_frame_bytes: maximumDetailFrameBytes })}`);
-      const migratedDatabase = new DatabaseSync(generationDatabasePath, { readOnly: true });
+      const migratedDatabase = new DatabaseSync(store.currentGeneration().database_path, { readOnly: true });
       try {
         const idempotency = migratedDatabase.prepare('SELECT request_sha256, payload_json FROM idempotency_results WHERE repo_id=? AND idempotency_key=?').get(repoId, 'cf42-receipt-attach-key');
         assert.equal(idempotency?.['request_sha256'], oldDigest, 'schema migration must preserve the exact cf42 semantic request digest');

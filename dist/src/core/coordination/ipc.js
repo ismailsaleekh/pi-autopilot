@@ -1,3 +1,4 @@
+import { parseCoordinatorAdmissionRequestEnvelope } from "./admission.js";
 import { parseCoordinatorRequestEnvelope, parseCoordinatorResponseEnvelope } from "./contracts.js";
 import { CoordinationRuntimeError } from "./failures.js";
 import { COORDINATOR_MAX_FRAME_BYTES } from "./runtime-paths.js";
@@ -38,6 +39,10 @@ export function parseCoordinatorLegacyReplayTransportRequest(value) {
 export function parseCoordinatorTransportRequest(value) {
     const shell = parseTransportShell(value);
     return { transport_version: AUTOPILOT_COORDINATOR_TRANSPORT_VERSION, capability: shell.capability, request: parseCoordinatorRequestEnvelope(shell.request) };
+}
+export function parseCoordinatorAdmissionTransportRequest(value, identity) {
+    const shell = parseTransportShell(value);
+    return { transport_version: AUTOPILOT_COORDINATOR_TRANSPORT_VERSION, capability: shell.capability, request: parseCoordinatorAdmissionRequestEnvelope(shell.request, identity) };
 }
 export function encodeCoordinatorFrame(value) {
     const payload = Buffer.from(JSON.stringify(value), 'utf8');

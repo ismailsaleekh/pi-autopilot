@@ -1,5 +1,6 @@
 import type { Socket } from 'node:net';
 
+import { parseCoordinatorAdmissionRequestEnvelope, type CoordinatorAdmissionIdentity, type CoordinatorAdmissionRequestEnvelope } from './admission.ts';
 import { parseCoordinatorRequestEnvelope, parseCoordinatorResponseEnvelope } from './contracts.ts';
 import { CoordinationRuntimeError } from './failures.ts';
 import { COORDINATOR_MAX_FRAME_BYTES } from './runtime-paths.ts';
@@ -20,6 +21,12 @@ export interface CoordinatorTransportRequest {
   readonly transport_version: typeof AUTOPILOT_COORDINATOR_TRANSPORT_VERSION;
   readonly capability: string;
   readonly request: CoordinatorRequestEnvelope;
+}
+
+export interface CoordinatorAdmissionTransportRequest {
+  readonly transport_version: typeof AUTOPILOT_COORDINATOR_TRANSPORT_VERSION;
+  readonly capability: string;
+  readonly request: CoordinatorAdmissionRequestEnvelope;
 }
 
 interface JsonMap {
@@ -57,6 +64,11 @@ export function parseCoordinatorLegacyReplayTransportRequest(value: unknown): Co
 export function parseCoordinatorTransportRequest(value: unknown): CoordinatorTransportRequest {
   const shell = parseTransportShell(value);
   return { transport_version: AUTOPILOT_COORDINATOR_TRANSPORT_VERSION, capability: shell.capability, request: parseCoordinatorRequestEnvelope(shell.request) };
+}
+
+export function parseCoordinatorAdmissionTransportRequest(value: unknown, identity: CoordinatorAdmissionIdentity): CoordinatorAdmissionTransportRequest {
+  const shell = parseTransportShell(value);
+  return { transport_version: AUTOPILOT_COORDINATOR_TRANSPORT_VERSION, capability: shell.capability, request: parseCoordinatorAdmissionRequestEnvelope(shell.request, identity) };
 }
 
 export function encodeCoordinatorFrame(value: unknown): NodeBuffer {

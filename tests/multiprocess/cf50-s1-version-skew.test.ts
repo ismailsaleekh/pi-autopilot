@@ -8,7 +8,7 @@ import { after, describe, it } from 'node:test';
 import { CoordinatorClient } from '../../src/core/coordination/client.ts';
 import { CoordinatorFrameDecoder, encodeCoordinatorFrame } from '../../src/core/coordination/ipc.ts';
 import { currentBootId, processStartIdentity } from '../../src/core/coordination/process-identity.ts';
-import { coordinatorRuntimePaths } from '../../src/core/coordination/runtime-paths.ts';
+import { COORDINATOR_API_SCHEMA_VERSION, COORDINATOR_IMPLEMENTATION_BUILD, COORDINATOR_LEGACY_FACADE_BUILD, COORDINATOR_STORE_SCHEMA_VERSION, COORDINATOR_WIRE_LINEAGE, coordinatorRuntimePaths } from '../../src/core/coordination/runtime-paths.ts';
 import { startCoordinatorServer } from '../../src/core/coordination/server.ts';
 import { AUTOPILOT_STATE_ROOT_ENV } from '../../src/core/parallel-runtime.ts';
 import {
@@ -205,6 +205,9 @@ void describe('actual cf50 ↔ current S1 candidate compatibility harness', () =
       candidate = await startCoordinatorServer(paths);
       const oldClient = await loadActualCf50Client({ installation, env, autoStart: false });
       assertLegacyCf50Handshake(await oldClient.query('handshake'));
+      const legacyStatus = await oldClient.query('status');
+      assert.equal(legacyStatus.payload['negotiated_coordinator_identity'], undefined);
+      assert.equal(legacyStatus.payload['run_scoped_logical_faults'], undefined);
       const journey = await attachAndHeartbeat(oldClient, root, 'old-to-candidate');
       const before = await lifecycleLock(paths.lockPath);
       assert.equal(before['package_build'], '1.1.8-cf50', 'the unchanged client must see the frozen cf50 lifecycle façade');
@@ -215,6 +218,36 @@ void describe('actual cf50 ↔ current S1 candidate compatibility harness', () =
       assert.notEqual(after['instance_id'], before['instance_id'], 'natural restart must publish a new endpoint instance');
       assertLegacyCf50Handshake(await oldClient.query('handshake'));
       await assertExactReplay(journey);
+    } finally {
+      if (candidate !== null) await candidate.close();
+      await stopTestCoordinatorsForStateRoot(stateRoot);
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  void it('truthfully negotiates S1 on one socket and exposes new observability only after admission', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pi-autopilot-s1-client-s1-server-'));
+    const stateRoot = join(root, 'state');
+    const env = { ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: stateRoot };
+    const paths = coordinatorRuntimePaths(env);
+    let candidate: Awaited<ReturnType<typeof startCoordinatorServer>> | null = null;
+    try {
+      candidate = await startCoordinatorServer(paths);
+      const client: VersionSkewClient = new CoordinatorClient({ env, autoStart: false });
+      const handshake = await client.query('handshake');
+      assertLegacyCf50Handshake(handshake);
+      assert.deepEqual(handshake.payload['admission_upgrade'], {
+        schema_version: 'autopilot.coordinator_admission_offer.v1', action: 'negotiate-admission', algorithm: 'hmac-sha256', wire_lineage: COORDINATOR_WIRE_LINEAGE,
+      });
+      const status = await client.query('status');
+      const identity = record(status.payload['negotiated_coordinator_identity'], 'negotiated coordinator identity');
+      assert.equal(identity['implementation_build'], COORDINATOR_IMPLEMENTATION_BUILD);
+      assert.equal(identity['wire_lineage'], COORDINATOR_WIRE_LINEAGE);
+      assert.equal(identity['api_schema_version'], COORDINATOR_API_SCHEMA_VERSION);
+      assert.equal(identity['store_schema_version'], COORDINATOR_STORE_SCHEMA_VERSION);
+      assert.equal(identity['legacy_facade_build'], COORDINATOR_LEGACY_FACADE_BUILD);
+      assert.equal(typeof identity['store_generation_id'], 'string');
+      assert.deepEqual(status.payload['run_scoped_logical_faults'], []);
     } finally {
       if (candidate !== null) await candidate.close();
       await stopTestCoordinatorsForStateRoot(stateRoot);

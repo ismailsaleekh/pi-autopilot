@@ -70,7 +70,7 @@ export interface VersionSkewResponse {
 }
 
 export interface VersionSkewClient {
-  query(action: 'handshake'): Promise<VersionSkewResponse>;
+  query(action: 'handshake' | 'status'): Promise<VersionSkewResponse>;
   mutate(action: VersionSkewMutationAction, identity: VersionSkewMutationIdentity, payload: Readonly<Record<string, unknown>>): Promise<VersionSkewResponse>;
 }
 

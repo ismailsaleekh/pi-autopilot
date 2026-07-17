@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 
 import { coordinatorRuntimePaths } from '../../src/core/coordination/runtime-paths.ts';
 import { AUTOPILOT_STATE_ROOT_ENV } from '../../src/core/parallel-runtime.ts';
+import { verifyActualCf50Fixture } from '../helpers/actual-cf50-package.ts';
 import { assertNoLeakedCoordinators, stopCoordinatorByLock, stopTestCoordinatorsForStateRoot } from '../helpers/coordinator-process-lifecycle.ts';
 import { invokePackedManifestAutopilot } from '../helpers/packed-manifest-route.ts';
 
@@ -92,18 +93,21 @@ async function invokePackedAutopilot(consumer: string, project: string, stateRoo
   assert.equal(invocation.result?.['messages'], 1, JSON.stringify(invocation.result?.['notifications']));
 }
 
-void it('packs exact cf45/cf46/cf47/cf48/cf49 binaries and completes the manifest-route cf49-to-cf50 reload journey', async () => {
+void it('routes exact cf45/cf46/cf47/cf48/cf49 packages through actual cf50 before the packed S1 candidate', async () => {
   const root = await mkdtemp(join(tmpdir(), 'pi-autopilot-packed-startup-reload-'));
   const cache = join(root, 'npm-cache');
   const npmEnv = { ...process.env, NPM_CONFIG_CACHE: cache, NPM_CONFIG_OFFLINE: 'true', PI_OFFLINE: '1', PI_SKIP_VERSION_CHECK: '1', PI_TELEMETRY: '0' };
   try {
     const candidate = await packCandidate(root, npmEnv);
+    const actualCf50 = await verifyActualCf50Fixture();
     assert.equal(existsSync(candidate), true);
+    assert.equal(existsSync(actualCf50.tarballPath), true);
     for (const predecessor of predecessors) {
       const tarball = await packCommit(predecessor, root, npmEnv);
       const consumer = join(root, `consumer-${predecessor.label}`);
       const stateRoot = join(root, `state-${predecessor.label}`);
       const env = { ...npmEnv, [AUTOPILOT_STATE_ROOT_ENV]: stateRoot };
+      const paths = coordinatorRuntimePaths(env);
       try {
         await mkdir(consumer, { recursive: true });
         install(tarball, consumer, env);
@@ -121,33 +125,56 @@ void it('packs exact cf45/cf46/cf47/cf48/cf49 binaries and completes the manifes
           run('git', ['commit', '-m', 'baseline'], project, env);
           await invokePackedAutopilot(consumer, project, stateRoot, join(root, 'packed-home-predecessor'), 'packed-reload-unit', env);
         }
-        install(candidate, consumer, env);
-        const healthy = JSON.parse(String(run(coordinatorBin(consumer), ['status', '--state-root', stateRoot], consumer, env).stdout)) as Readonly<Record<string, unknown>>;
-        assert.equal((await lock(env))['package_build'], predecessor.build, 'a healthy certified predecessor remains authoritative and usable');
 
-        if (predecessor.label === 'cf49' && project !== null) {
-          const predecessorRuns = healthy['runs'];
-          assert.equal(Array.isArray(predecessorRuns) && predecessorRuns.length, 1);
-          const originalRun = Array.isArray(predecessorRuns) ? predecessorRuns[0] : null;
-          await unlink(coordinatorRuntimePaths(env).socketPath);
+        // Historical schema-12 matrix builds are never ordinary S1 peers. The
+        // archived actual cf50 package owns that lower-layer transition first.
+        install(actualCf50.tarballPath, consumer, env);
+        const predecessorStatus = JSON.parse(String(run(coordinatorBin(consumer), ['status', '--state-root', stateRoot], consumer, env).stdout)) as Readonly<Record<string, unknown>>;
+        assert.deepEqual(await lock(env), predecessorLock, 'actual cf50 must initially use the healthy historical endpoint');
+        const predecessorRuns = predecessorStatus['runs'];
+        const originalRun = Array.isArray(predecessorRuns) ? predecessorRuns[0] : null;
+        if (project !== null) assert.equal(Array.isArray(predecessorRuns) && predecessorRuns.length, 1);
+        await unlink(paths.socketPath);
+        run(coordinatorBin(consumer), ['status', '--state-root', stateRoot], consumer, env);
+        const cf50Lock = await lock(env);
+        assert.equal(cf50Lock['package_build'], '1.1.8-cf50');
+        assert.notEqual(cf50Lock['pid'], predecessorLock['pid']);
+
+        // Installing S1 while actual cf50 is healthy must retain that process.
+        // The test then stops cf50 externally; only its natural absence permits
+        // S1 startup and schema-13 publication. S1 performs no retirement.
+        install(candidate, consumer, env);
+        const installedRuntime = await readFile(join(consumer, 'node_modules', 'pi-autopilot', 'src', 'core', 'coordination', 'runtime-constants.ts'), 'utf8');
+        assert.match(installedRuntime, /COORDINATOR_IMPLEMENTATION_BUILD = '1\.2\.0-s1'/u);
+        run(coordinatorBin(consumer), ['status', '--state-root', stateRoot], consumer, env);
+        assert.deepEqual(await lock(env), cf50Lock, 'healthy actual cf50 must remain authoritative after S1 installation');
+        await stopCoordinatorByLock(paths.lockPath);
+        const afterNaturalExit = JSON.parse(String(run(coordinatorBin(consumer), ['status', '--state-root', stateRoot], consumer, env).stdout)) as Readonly<Record<string, unknown>>;
+        const s1Lock = await lock(env);
+        assert.equal(s1Lock['package_build'], '1.1.8-cf50', 'S1 must retain the frozen lifecycle façade');
+        assert.notEqual(s1Lock['pid'], cf50Lock['pid']);
+        const runtimeIdentity = JSON.parse(await readFile(paths.runtimeIdentityPath, 'utf8')) as Readonly<Record<string, unknown>>;
+        assert.equal(runtimeIdentity['implementation_build'], '1.2.0-s1');
+        assert.equal(runtimeIdentity['store_schema_version'], 13);
+
+        if (project !== null) {
+          const s1Runs = afterNaturalExit['runs'];
+          assert.equal(Array.isArray(s1Runs) && s1Runs.length, 1, 'S1 must preserve the exact historical run through cf50');
           await invokePackedAutopilot(consumer, project, stateRoot, join(root, 'packed-home-candidate'), 'packed-reload-unit', env);
-          const current = await lock(env);
-          assert.equal(current['package_build'], '1.1.8-cf50');
-          assert.notEqual(current['pid'], predecessorLock['pid']);
           await invokePackedAutopilot(consumer, project, stateRoot, join(root, 'packed-home-next'), 'packed-next-item', env);
           const status = JSON.parse(String(run(coordinatorBin(consumer), ['status', '--state-root', stateRoot], consumer, env).stdout)) as Readonly<Record<string, unknown>>;
           const runs = status['runs'];
           assert.equal(Array.isArray(runs) && runs.length, 2, 'reload must preserve one original run and prepare one exact next item');
           const runIds = Array.isArray(runs) ? runs.map((runEntry) => typeof runEntry === 'object' && runEntry !== null && !Array.isArray(runEntry) ? (runEntry as Readonly<Record<string, unknown>>)['workstream_run'] : null) : [];
           assert.equal(new Set(runIds).size, 2, 'reload must not duplicate a durable run operation');
-          assert.equal(Array.isArray(runs) && runs.some((runEntry) => typeof runEntry === 'object' && runEntry !== null && !Array.isArray(runEntry) && typeof originalRun === 'object' && originalRun !== null && !Array.isArray(originalRun) && (runEntry as Readonly<Record<string, unknown>>)['workstream_run'] === (originalRun as Readonly<Record<string, unknown>>)['workstream_run']), true, 'the durable predecessor run identity must survive replacement');
+          assert.equal(Array.isArray(runs) && runs.some((runEntry) => typeof runEntry === 'object' && runEntry !== null && !Array.isArray(runEntry) && typeof originalRun === 'object' && originalRun !== null && !Array.isArray(originalRun) && (runEntry as Readonly<Record<string, unknown>>)['workstream_run'] === (originalRun as Readonly<Record<string, unknown>>)['workstream_run']), true, 'the durable predecessor run identity must survive cf50 and S1 continuity');
         }
       } finally {
         // A failure/assertion at every point in this predecessor iteration must
         // stop its detached coordinator before the outer temp-root removal.
         // The prior end-of-body stop was skipped by assertion failures and left
         // a real cf47 coordinator alive for days (S0-B incident).
-        await stopCoordinatorByLock(coordinatorRuntimePaths(env).lockPath);
+        await stopCoordinatorByLock(paths.lockPath);
         await stopTestCoordinatorsForStateRoot(stateRoot);
       }
     }

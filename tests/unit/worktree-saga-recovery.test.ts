@@ -14,6 +14,7 @@ import { coordinatorRuntimePaths } from '../../src/core/coordination/runtime-pat
 import { startCoordinatorServer } from '../../src/core/coordination/server.ts';
 import { DurableRunSupervisorClient, writeCoordinatorSessionContext, type CoordinatorSessionContext } from '../../src/core/coordination/supervisor.ts';
 import { executeOwnedWorktreeSaga, fixedWorktreeSagaCallbacks, OwnedWorktreeSagaClient, recoverOwnedWorktreeSagas, WORKTREE_SAGA_BOUNDARIES } from '../../src/core/coordination/worktree-saga.ts';
+import { deriveWorktreeOperationKeyV2, operationIdFromWorktreeOperationKey } from '../../src/core/coordination/worktree-operation-identity.ts';
 import { AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV } from '../../src/core/names.ts';
 import { AUTOPILOT_STATE_ROOT_ENV, BRANCHES_FILE, MATERIALIZED_PATHS_FILE, UNIT_INDEX_FILE, UNIT_INFO_FILE, WORKTREE_LEDGER_FILE, prepareAutopilotWorkstream, readUnitIndex, recoverAutopilotWorktreeSagas, resolveRepoIdentity, type ActiveAutopilotRow, type ProcessEnvLike } from '../../src/core/parallel-runtime.ts';
 
@@ -125,6 +126,11 @@ void describe('owner-scoped worktree and Git saga recovery', () => {
       const spec = unitCreateSpec(value);
       const prepared = await saga.prepare(spec);
       assert.equal(prepared.operation.stage, 'prepared');
+      const expectedKey = deriveWorktreeOperationKeyV2({ canonicalWorktreeId: prepared.worktree.worktree_id, operationType: spec.operationType, completeImmutableIntent: spec.intent });
+      assert.equal(prepared.operation.operation_id, operationIdFromWorktreeOperationKey(expectedKey));
+      const exactReplay = await saga.prepare(spec);
+      assert.equal(exactReplay.replayed, true);
+      assert.equal(exactReplay.operation.operation_id, prepared.operation.operation_id);
       const recoveredPrepared = await recoverOwnedWorktreeSagas({ active: value.active, env: value.env });
       assert.equal(recoveredPrepared.length, 1);
       assert.equal(recoveredPrepared[0]?.stage, 'committed');
@@ -386,7 +392,7 @@ void describe('owner-scoped worktree and Git saga recovery', () => {
       await recoverOwnedWorktreeSagas({ active: value.active, env: value.env });
       assert.equal(existsSync(create.intent.worktree_path), false);
 
-      const recreate = { ...create, intent: { ...create.intent, reason: 'package recreate after rollback' } };
+      const recreate = { ...create, intent: { ...create.intent, reason: 'package recreate after exact pre-spend rollback' } };
       const preparedRecreate = await saga.prepare(recreate);
       await executeOwnedWorktreeSaga(recreate, fixedWorktreeSagaCallbacks(preparedRecreate.operation, value.env), value.env);
       const materialize = {
@@ -498,9 +504,8 @@ void describe('owner-scoped worktree and Git saga recovery', () => {
     }
   });
 
-  void it('rejects schema-12 duplicate injection after generation publication instead of reviving shape-specific retirement', async () => {
+  void it('rejects duplicate injection through both the retired schema-12 path and current schema-13 generation', async () => {
     const value = await setup('d');
-    let restarted: Awaited<ReturnType<typeof startCoordinatorServer>> | null = null;
     try {
       const saga = new OwnedWorktreeSagaClient(new CoordinatorClient({ env: value.env, autoStart: false }), value.session);
       const create = unitCreateSpec(value, 'unit-duplicate');
@@ -508,27 +513,27 @@ void describe('owner-scoped worktree and Git saga recovery', () => {
       await recoverOwnedWorktreeSagas({ active: value.active, env: value.env });
       const canonical = (await saga.worktrees()).find((entry) => entry.owner.unit_id === 'unit-duplicate');
       if (canonical === undefined) throw new Error('canonical unit worktree is missing');
+      const generationDatabasePath = value.server.store.currentGeneration().database_path;
+      const pointerBefore = await readFile(coordinatorRuntimePaths(value.env).currentStorePointerPath);
       await value.server.close();
+      const duplicate = { ...canonical, worktree_id: 'migration-worktree-schema12-duplicate' };
       const fixed = new DatabaseSync(coordinatorRuntimePaths(value.env).databasePath);
       try {
-        const duplicate = { ...canonical, worktree_id: 'migration-worktree-schema12-duplicate' };
         assert.throws(() => fixed.prepare('INSERT INTO worktrees(entity_id, repo_id, workstream_run, payload_json, version) VALUES(?, ?, ?, ?, ?)').run(duplicate.worktree_id, duplicate.owner.repo_id, duplicate.owner.workstream_run, JSON.stringify(duplicate), duplicate.version), /cf50 fixed store retired by S1 generation publication/u);
       } finally { fixed.close(); }
-      restarted = await startCoordinatorServer(coordinatorRuntimePaths(value.env));
-      const status = await new CoordinatorClient({ env: value.env, autoStart: false }).query('status', value.active.repo_key, value.active.workstream_run);
-      const worktrees = status.payload['worktrees'];
-      assert.equal(Array.isArray(worktrees), true);
-      assert.equal((worktrees as readonly Record<string, unknown>[]).filter((entry) => entry['owner'] !== null && typeof entry['owner'] === 'object' && (entry['owner'] as Record<string, unknown>)['unit_id'] === 'unit-duplicate' && entry['state'] !== 'removed').length, 1);
-      assert.equal((worktrees as readonly Record<string, unknown>[]).some((entry) => entry['worktree_id'] === 'migration-worktree-schema12-duplicate'), false);
+      const database = new DatabaseSync(generationDatabasePath);
+      try {
+        database.prepare('INSERT INTO worktrees(entity_id, repo_id, workstream_run, payload_json, version) VALUES(?, ?, ?, ?, ?)').run(duplicate.worktree_id, duplicate.owner.repo_id, duplicate.owner.workstream_run, JSON.stringify(duplicate), duplicate.version);
+      } finally { database.close(); }
+      await assert.rejects(() => startCoordinatorServer(coordinatorRuntimePaths(value.env)), (error: unknown) => error instanceof CoordinationRuntimeError && error.code === 'store-corrupt' && error.evidence.includes(duplicate.worktree_id));
+      assert.deepEqual(await readFile(coordinatorRuntimePaths(value.env).currentStorePointerPath), pointerBefore);
     } finally {
-      if (restarted !== null) await restarted.close();
       await rm(value.root, { recursive: true, force: true });
     }
   });
 
-  void it('rejects a history-free terminal shadow injected through the retired schema-12 path', async () => {
+  void it('rejects a history-free terminal shadow through both retired schema-12 and current schema-13 paths', async () => {
     const value = await setup('r');
-    let restarted: Awaited<ReturnType<typeof startCoordinatorServer>> | null = null;
     try {
       const saga = new OwnedWorktreeSagaClient(new CoordinatorClient({ env: value.env, autoStart: false }), value.session);
       const create = unitCreateSpec(value, 'unit-removed-shadow');
@@ -543,21 +548,24 @@ void describe('owner-scoped worktree and Git saga recovery', () => {
       assert.equal(existsSync(canonical.canonical_path), false);
       assert.equal(git(value.repo, ['branch', '--list', canonical.branch]), '');
 
+      const generationDatabasePath = value.server.store.currentGeneration().database_path;
+      const pointerBefore = await readFile(coordinatorRuntimePaths(value.env).currentStorePointerPath);
       await value.server.close();
-      const fixed = new DatabaseSync(coordinatorRuntimePaths(value.env).databasePath);
       const shadowId = 'migration-worktree-removed-shadow';
+      const shadow = { ...canonical, worktree_id: shadowId, state: 'terminal', version: 1 };
+      const fixed = new DatabaseSync(coordinatorRuntimePaths(value.env).databasePath);
       try {
-        const shadow = { ...canonical, worktree_id: shadowId, state: 'terminal', version: 1 };
         assert.throws(() => fixed.prepare('INSERT INTO worktrees(entity_id, repo_id, workstream_run, payload_json, version) VALUES(?, ?, ?, ?, ?)').run(shadow.worktree_id, shadow.owner.repo_id, shadow.owner.workstream_run, JSON.stringify(shadow), shadow.version), /cf50 fixed store retired by S1 generation publication/u);
       } finally { fixed.close(); }
-      restarted = await startCoordinatorServer(coordinatorRuntimePaths(value.env));
-      const status = await new CoordinatorClient({ env: value.env, autoStart: false }).query('status', value.active.repo_key, value.active.workstream_run);
-      const worktrees = status.payload['worktrees'];
-      assert.equal(Array.isArray(worktrees) && (worktrees as readonly Record<string, unknown>[]).some((entry) => entry['worktree_id'] === shadowId), false);
+      const database = new DatabaseSync(generationDatabasePath);
+      try {
+        database.prepare('INSERT INTO worktrees(entity_id, repo_id, workstream_run, payload_json, version) VALUES(?, ?, ?, ?, ?)').run(shadow.worktree_id, shadow.owner.repo_id, shadow.owner.workstream_run, JSON.stringify(shadow), shadow.version);
+      } finally { database.close(); }
+      await assert.rejects(() => startCoordinatorServer(coordinatorRuntimePaths(value.env)), (error: unknown) => error instanceof CoordinationRuntimeError && error.code === 'store-corrupt' && error.evidence.includes(shadowId));
+      assert.deepEqual(await readFile(coordinatorRuntimePaths(value.env).currentStorePointerPath), pointerBefore);
       assert.equal(existsSync(canonical.canonical_path), false);
       assert.equal(git(value.repo, ['branch', '--list', canonical.branch]), '');
     } finally {
-      if (restarted !== null) await restarted.close();
       await value.server.close().catch(() => undefined);
       await rm(value.root, { recursive: true, force: true });
     }

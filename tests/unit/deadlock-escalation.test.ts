@@ -16,9 +16,9 @@ import { CoordinationRuntimeError } from '../../src/core/coordination/failures.t
 import { ClaimNegotiationClient } from '../../src/core/coordination/negotiation.ts';
 import { COORDINATOR_GRANT_OFFER_TTL_MS, coordinatorRuntimePaths } from '../../src/core/coordination/runtime-paths.ts';
 import { startCoordinatorServer } from '../../src/core/coordination/server.ts';
-import type { CoordinatorSessionContext } from '../../src/core/coordination/supervisor.ts';
 import { deterministicWorktreeId } from '../../src/core/coordination/worktree-identity.ts';
 import { deriveWorktreeOperationKeyV2, operationIdFromWorktreeOperationKey } from '../../src/core/coordination/worktree-operation-identity.ts';
+import type { CoordinatorSessionContext } from '../../src/core/coordination/supervisor.ts';
 import { COORDINATION_OPERATIONAL_ESCALATION_REASONS, type CoordinationClaimRequest, type CoordinationEditLease, type CoordinationEscalation, type CoordinationOwnerIdentity, type CoordinationWaitForEdge } from '../../src/core/coordination/types.ts';
 import { AUTOPILOT_STATE_ROOT_ENV, type ProcessEnvLike } from '../../src/core/parallel-runtime.ts';
 

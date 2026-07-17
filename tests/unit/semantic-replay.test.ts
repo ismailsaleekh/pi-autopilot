@@ -64,7 +64,7 @@ async function rewriteCorpusRecord(path: string, recordIndex: number, replacemen
 
 function eventCount(paths: ReturnType<typeof coordinatorRuntimePaths>): number {
   const generation = readCurrentStoreGeneration(paths);
-  const database = new DatabaseSync(generation === null ? paths.databasePath : generation.database_path, { readOnly: true });
+  const database = new DatabaseSync(generation?.database_path ?? paths.databasePath, { readOnly: true });
   try {
     const row = database.prepare('SELECT COUNT(*) AS count FROM events').get() as Readonly<Record<string, unknown>>;
     if (typeof row['count'] !== 'number') throw new Error('event count is not numeric');
@@ -206,7 +206,7 @@ void describe('production semantic replay startup recovery', () => {
       assert.equal(eventCount(paths), 1);
       assert.equal(existsSync(join(paths.semanticReplayReceiptsRoot, 'restore-replay.json')), true);
 
-      await CoordinatorStore.restoreGeneration(paths, baselinePath, baselineBackup.sha256);
+      await CoordinatorStore.restoreGeneration(paths, baselinePath, baselineBackup.sha256, clock);
       await stageCoordinatorSemanticReplay(paths, 'restore-replay', records);
       const restored = await CoordinatorStore.open(paths, clock);
       restored.close();

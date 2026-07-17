@@ -3,12 +3,15 @@ import { existsSync } from 'node:fs';
 import { chmod, open, rename, unlink } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { platform } from 'node:os';
-import { encodeCoordinatorFrame, parseCoordinatorLegacyReplayTransportRequest, parseCoordinatorTransportRequest, CoordinatorFrameDecoder, writeCoordinatorResponse } from "./ipc.js";
+import { createCoordinatorAdmissionOffer, createCoordinatorAdmissionResponse, COORDINATOR_ADMISSION_ACTION } from "./admission.js";
+import { assertCoordinatorAdmissionAuthorityUnchanged, captureCoordinatorAdmissionAuthority, COORDINATOR_S1_ADMISSION_IDENTITY } from "./admission-runtime.js";
+import { parseCoordinatorAdmissionTransportRequest, parseCoordinatorTransportRequest, CoordinatorFrameDecoder, writeCoordinatorResponse } from "./ipc.js";
 import { CoordinationRuntimeError } from "./failures.js";
 import { currentBootId, isProcessAlive, predecessorCompatibleBootId, processStartIdentity } from "./process-identity.js";
 import { COORDINATOR_GRANT_OFFER_SWEEP_MS, enforcePrivateAuthorityPath, ensureCoordinatorPrivateRoots, readOrCreateCoordinatorCapability } from "./runtime-paths.js";
 import { acquireSerializedProcessGuard, discardLockTombstone, quarantineExactLock, readExactLockText, restoreLockTombstone } from "./serialized-lock.js";
 import { CoordinatorStore } from "./store.js";
+import { CoordinatorSocketPeerState } from "./peer-admission-state.js";
 import { CoordinatorWriterGuard } from "./writer-guard.js";
 import { AUTOPILOT_COORDINATOR_PROTOCOL_VERSION } from "./types.js";
 import { readKnownCoordinatorUpgradeIntent, recordCoordinatorFenceHandoff } from "./upgrade.js";
@@ -29,12 +32,12 @@ function requirePreparedCapability(capability) {
         throw new CoordinationRuntimeError('system-fatal', 'lifecycle authority published before capability preparation completed');
     return capability;
 }
-function closePreparedStore(store) { store?.close(); }
 function requirePreparedWriterGuard(writerGuard) {
     if (writerGuard === null)
-        throw new CoordinationRuntimeError('system-fatal', 'coordinator writer guard was not prepared before lifecycle publication');
+        throw new CoordinationRuntimeError('system-fatal', 'lifecycle authority published before writer authority was acquired');
     return writerGuard;
 }
+function closePreparedStore(store) { store?.close(); }
 function releasePreparedWriterGuard(writerGuard) { writerGuard?.release(); }
 function sameCurrentLock(left, right) {
     return left.pid === right.pid && left.boot_id === right.boot_id && left.process_start_identity === right.process_start_identity && left.token === right.token && left.instance_id === right.instance_id && left.package_build === right.package_build && left.protocol_version === right.protocol_version && left.database_schema_version === right.database_schema_version && left.started_at === right.started_at;
@@ -109,11 +112,18 @@ async function acquireCoordinatorLock(paths, adoption, beforeAuthorityPublicatio
         const currentText = await readExactLockText(paths.lockPath);
         if (currentText !== null) {
             let current = null;
+            let knownButNotCf50 = null;
             try {
                 const parsed = JSON.parse(currentText);
-                current = parseKnownCompatibleCurrentCoordinatorLock(parsed) ?? parsePriorSchema11CurrentCoordinatorLock(parsed) ?? parsePriorSchema10CurrentCoordinatorLock(parsed) ?? parsePriorSchema9CurrentCoordinatorLock(parsed);
+                const compatible = parseKnownCompatibleCurrentCoordinatorLock(parsed);
+                if (compatible !== null && compatible.package_build !== COORDINATOR_PACKAGE_BUILD)
+                    knownButNotCf50 = compatible;
+                else
+                    current = compatible ?? parsePriorSchema11CurrentCoordinatorLock(parsed) ?? parsePriorSchema10CurrentCoordinatorLock(parsed) ?? parsePriorSchema9CurrentCoordinatorLock(parsed);
             }
             catch { /* fail below */ }
+            if (knownButNotCf50 !== null)
+                throw new CoordinationRuntimeError('protocol-mismatch', 'ordinary S1 startup accepts only the exact cf50 façade as its live or retired wire predecessor', [`observed_build=${knownButNotCf50.package_build}`]);
             if (current === null)
                 throw new CoordinationRuntimeError('protocol-mismatch', 'current-generation lifecycle lock belongs to an unknown build');
             // Boot-id disagreement is never stale proof. Current-generation locks also
@@ -326,17 +336,6 @@ function authenticated(provided, expected) {
     const right = Buffer.from(expected, 'utf8');
     return left.byteLength === right.byteLength && timingSafeEqual(left, right);
 }
-function writeLegacyReplayResponse(socket, response, protocol) {
-    const legacy = { ...response, protocol_version: protocol };
-    return new Promise((resolveWrite, rejectWrite) => {
-        socket.write(encodeCoordinatorFrame(legacy), (error) => {
-            if (error === undefined || error === null)
-                resolveWrite();
-            else
-                rejectWrite(error);
-        });
-    });
-}
 function errorResponse(requestId, error) {
     const runtime = error instanceof CoordinationRuntimeError ? error : new CoordinationRuntimeError('system-fatal', error instanceof Error ? error.message : String(error));
     return {
@@ -349,6 +348,63 @@ function errorResponse(requestId, error) {
         retryable: runtime.retry_policy !== 'never',
         payload: { message: runtime.message, evidence: runtime.evidence },
     };
+}
+function jsonObject(value) {
+    return typeof value === 'object' && value !== null && !Array.isArray(value) ? value : null;
+}
+function untrustedFrameAction(frame) {
+    const transport = jsonObject(frame);
+    const request = transport === null ? null : jsonObject(transport['request']);
+    const action = request?.['action'];
+    return typeof action === 'string' ? action : null;
+}
+function operationType(value) {
+    const operation = jsonObject(value);
+    const type = operation?.['operation_type'];
+    return typeof type === 'string' ? type : null;
+}
+function requestS1Surface(store, request) {
+    if (request.action === 'prepare-operation' && operationType(request.payload['operation']) === 'metadata-reconcile')
+        return 'canonical-worktree-aliases';
+    if (request.action !== 'transition-operation' || request.workstream_run === null)
+        return null;
+    const operationId = request.payload['operation_id'];
+    if (typeof operationId !== 'string')
+        return null;
+    const operations = store.status(request.repo_id, request.workstream_run).payload['worktree_operations'];
+    if (!Array.isArray(operations))
+        throw new CoordinationRuntimeError('store-corrupt', 'worktree operation projection is unavailable for vocabulary enforcement');
+    for (const candidate of operations) {
+        const operation = jsonObject(candidate);
+        if (operation?.['operation_id'] === operationId)
+            return operationType(operation) === 'metadata-reconcile' ? 'canonical-worktree-aliases' : null;
+    }
+    return null;
+}
+function negotiatedProjectionResponse(store, peer, request, response) {
+    if (!response.ok || (request.action !== 'status' && request.action !== 'doctor') || response.payload['section'] !== 'summary')
+        return response;
+    const projection = jsonObject(response.payload['projection']);
+    if (projection === null)
+        throw new CoordinationRuntimeError('store-corrupt', 'coordinator projection summary is malformed');
+    const negotiated = { ...projection };
+    if (peer.grantedVocabulary.has('store-generations-v1'))
+        negotiated['negotiated_coordinator_identity'] = store.negotiatedIdentityObservability();
+    if (peer.grantedVocabulary.has('scoped-logical-faults-v1'))
+        negotiated['run_scoped_logical_faults'] = store.negotiatedRunScopedFaults(request.repo_id, request.workstream_run);
+    return Object.freeze({ ...response, payload: Object.freeze({ ...response.payload, projection: Object.freeze(negotiated) }) });
+}
+function admissionEnvelope(requestId, payload) {
+    return Object.freeze({
+        schema_version: 'autopilot.coordinator_response.v1',
+        protocol_version: AUTOPILOT_COORDINATOR_PROTOCOL_VERSION,
+        request_id: requestId,
+        ok: true,
+        committed_event_seq: null,
+        error_code: null,
+        retryable: false,
+        payload: Object.freeze({ ...payload }),
+    });
 }
 export const COORDINATOR_SHUTDOWN_DRAIN_TIMEOUT_MS = 30_000;
 class CoordinatorRequestDrain {
@@ -425,7 +481,14 @@ function handleSocket(socket, store, capability, paths, lifecycle, backgroundFai
     if (!requestDrain.register(socket))
         return;
     const decoder = new CoordinatorFrameDecoder();
+    const peer = new CoordinatorSocketPeerState();
+    let handshakeAuthority = null;
+    let admittedAuthority = null;
     let chain = Promise.resolve();
+    // Transport failure is scoped to this peer. In particular, an abrupt client
+    // disconnect during an asynchronous authority check or response write must
+    // never become an unhandled EventEmitter error that terminates the service.
+    socket.on('error', () => { peer.close(); socket.destroy(); });
     socket.on('data', (chunk) => {
         if (!requestDrain.acceptRequest(socket))
             return;
@@ -435,80 +498,110 @@ function handleSocket(socket, store, capability, paths, lifecycle, backgroundFai
                 let requestId = `transport-error-${randomBytes(8).toString('hex')}`;
                 try {
                     let response = null;
-                    let legacyReplayProtocol = null;
-                    let action = null;
                     let currentTransport = null;
+                    let admissionTransport = null;
                     try {
                         currentTransport = parseCoordinatorTransportRequest(frame);
                     }
                     catch (currentProtocolError) {
-                        let legacy;
-                        try {
-                            legacy = parseCoordinatorLegacyReplayTransportRequest(frame);
+                        if (untrustedFrameAction(frame) === COORDINATOR_ADMISSION_ACTION) {
+                            try {
+                                admissionTransport = parseCoordinatorAdmissionTransportRequest(frame, COORDINATOR_S1_ADMISSION_IDENTITY);
+                            }
+                            catch (admissionError) {
+                                peer.close();
+                                throw admissionError;
+                            }
                         }
-                        catch {
+                        else
                             throw currentProtocolError;
-                        }
-                        const legacyRequestId = legacy.request['request_id'];
-                        if (typeof legacyRequestId === 'string')
-                            requestId = legacyRequestId;
-                        if (!authenticated(legacy.capability, capability))
+                    }
+                    if (admissionTransport !== null) {
+                        requestId = admissionTransport.request.request_id;
+                        if (!authenticated(admissionTransport.capability, capability))
                             throw new CoordinationRuntimeError('unauthorized-client', 'coordinator capability proof was rejected');
-                        action = typeof legacy.request['action'] === 'string' ? legacy.request['action'] : null;
-                        const timerFailure = backgroundFailure();
-                        if (timerFailure !== null)
-                            throw new CoordinationRuntimeError('system-fatal', `coordinator predecessor fence maintenance failed: ${timerFailure.message}`);
-                        const upgradeIntent = await readKnownCoordinatorUpgradeIntent(paths);
-                        if (upgradeIntent !== null && upgradeIntent.state !== 'committed' && action !== 'handshake' && action !== 'status' && action !== 'doctor')
-                            throw new CoordinationRuntimeError('coordinator-contention', 'coordinator upgrade is not durably committed; mutation/replay authority remains closed');
-                        response = store.replayLegacyRequest(legacy.request);
-                        legacyReplayProtocol = legacy.replay_protocol;
+                        peer.acceptRequest(COORDINATOR_ADMISSION_ACTION);
+                        const initial = handshakeAuthority;
+                        if (initial === null)
+                            throw new CoordinationRuntimeError('unauthorized-client', 'admission has no same-socket handshake authority');
+                        const observed = await captureCoordinatorAdmissionAuthority({ paths, expectedLifecycle: lifecycle, expectedGeneration: store.currentGeneration() });
+                        assertCoordinatorAdmissionAuthorityUnchanged(initial, observed);
+                        const admission = createCoordinatorAdmissionResponse({ request: admissionTransport.request.payload, identity: COORDINATOR_S1_ADMISSION_IDENTITY, endpoint: observed.endpoint, capability });
+                        response = admissionEnvelope(requestId, admission);
+                        peer.completeAdmission(admission);
+                        if (admission.admitted)
+                            admittedAuthority = observed;
+                        await testHooks?.afterAdmissionAttestedBeforeResponse?.(admission);
                     }
                     if (currentTransport !== null) {
                         requestId = currentTransport.request.request_id;
-                        action = currentTransport.request.action;
+                        const request = currentTransport.request;
                         if (!authenticated(currentTransport.capability, capability))
                             throw new CoordinationRuntimeError('unauthorized-client', 'coordinator capability proof was rejected');
+                        const surface = peer.state === 'awaiting-handshake' ? null : requestS1Surface(store, request);
+                        peer.acceptRequest(request.action, surface);
                         const timerFailure = backgroundFailure();
                         if (timerFailure !== null)
                             throw new CoordinationRuntimeError('system-fatal', `coordinator predecessor fence maintenance failed: ${timerFailure.message}`);
                         const upgradeIntent = await readKnownCoordinatorUpgradeIntent(paths);
-                        if (upgradeIntent !== null && upgradeIntent.state !== 'committed' && action !== 'handshake' && action !== 'status' && action !== 'doctor')
+                        if (upgradeIntent !== null && upgradeIntent.state !== 'committed' && request.action !== 'handshake' && request.action !== 'status' && request.action !== 'doctor')
                             throw new CoordinationRuntimeError('coordinator-contention', 'coordinator upgrade is not durably committed; mutation authority remains closed');
-                        response = store.handle(currentTransport.request);
-                        if (response.ok && currentTransport.request.action === 'handshake') {
-                            response = {
-                                ...response,
-                                payload: {
-                                    ...response.payload,
-                                    lifecycle_lock_schema: lifecycle.schema_version,
-                                    lifecycle_pid: lifecycle.pid,
-                                    lifecycle_boot_id: lifecycle.boot_id,
-                                    lifecycle_process_start_identity: lifecycle.process_start_identity,
-                                    lifecycle_instance_id: lifecycle.instance_id,
-                                    lifecycle_started_at: lifecycle.started_at,
-                                },
-                            };
-                            await firstExactHandshake();
+                        if (request.action === 'handshake') {
+                            handshakeAuthority = await captureCoordinatorAdmissionAuthority({ paths, expectedLifecycle: lifecycle, expectedGeneration: store.currentGeneration() });
+                            const legacy = store.handle(request);
+                            if (!legacy.ok)
+                                response = legacy;
+                            else {
+                                response = Object.freeze({
+                                    ...legacy,
+                                    payload: Object.freeze({
+                                        schema_version: 'autopilot.coordinator_handshake.v1',
+                                        package_build: lifecycle.package_build,
+                                        protocol_version: lifecycle.protocol_version,
+                                        database_schema_version: lifecycle.database_schema_version,
+                                        lifecycle_lock_schema: lifecycle.schema_version,
+                                        lifecycle_pid: lifecycle.pid,
+                                        lifecycle_boot_id: lifecycle.boot_id,
+                                        lifecycle_process_start_identity: lifecycle.process_start_identity,
+                                        lifecycle_instance_id: lifecycle.instance_id,
+                                        lifecycle_started_at: lifecycle.started_at,
+                                        admission_upgrade: createCoordinatorAdmissionOffer(COORDINATOR_S1_ADMISSION_IDENTITY),
+                                    }),
+                                });
+                                await firstExactHandshake();
+                            }
                         }
-                        if (response.ok && response.committed_event_seq !== null)
-                            await testHooks?.afterStoreCommitBeforeResponse?.(currentTransport.request.action, response);
+                        else {
+                            if (peer.peerMode === 'negotiated-s1') {
+                                const initial = admittedAuthority;
+                                if (initial === null)
+                                    throw new CoordinationRuntimeError('unauthorized-client', 'negotiated peer has no same-socket admission authority');
+                                const observed = await captureCoordinatorAdmissionAuthority({ paths, expectedLifecycle: lifecycle, expectedGeneration: store.currentGeneration() });
+                                assertCoordinatorAdmissionAuthorityUnchanged(initial, observed);
+                                await testHooks?.beforeNegotiatedStoreOperation?.(request.action);
+                            }
+                            response = store.handle(request);
+                            if (peer.peerMode === 'negotiated-s1')
+                                response = negotiatedProjectionResponse(store, peer, request, response);
+                            if (response.ok && response.committed_event_seq !== null)
+                                await testHooks?.afterStoreCommitBeforeResponse?.(request.action, response);
+                        }
                     }
                     if (response === null)
                         throw new CoordinationRuntimeError('system-fatal', 'coordinator request parsing produced no response path');
-                    if (legacyReplayProtocol !== null)
-                        await writeLegacyReplayResponse(socket, response, legacyReplayProtocol);
-                    else
-                        await writeCoordinatorResponse(socket, response);
+                    await writeCoordinatorResponse(socket, response);
                 }
                 catch (error) {
-                    await writeCoordinatorResponse(socket, errorResponse(requestId, error));
+                    peer.close();
+                    if (!socket.destroyed)
+                        await writeCoordinatorResponse(socket, errorResponse(requestId, error));
                 }
             }
-        }).catch(() => socket.destroy());
+        }).catch(() => { peer.close(); socket.destroy(); });
         requestDrain.track(socket, chain);
     });
     socket.on('end', () => {
+        peer.close();
         try {
             decoder.assertComplete();
         }
@@ -558,15 +651,20 @@ export async function startCoordinatorServer(paths, clock, adoption, testHooks, 
     const requestDrain = new CoordinatorRequestDrain();
     try {
         lifecycleLock = await acquireCoordinatorLock(paths, adoption, async (plannedLifecycle) => {
+            // The serialized lifecycle election chooses the only candidate before it
+            // attempts process-lifetime writer authority. The observer boundary is
+            // inside that election and before capability validation, so every startup
+            // phase remains independently testable without letting a loser block on
+            // the winner's writer guard.
             await startupObserver?.transition('after-lifecycle-lock-acquisition', plannedLifecycle);
+            writerGuard = await CoordinatorWriterGuard.acquire(paths);
+            const preparedWriterGuard = writerGuard;
             await startupObserver?.transition('before-private-root-capability-setup', plannedLifecycle);
             capability = await readOrCreateCoordinatorCapability(paths);
             await startupObserver?.transition('after-private-root-capability-setup', plannedLifecycle);
             if (platform() !== 'win32' && existsSync(paths.socketPath))
                 await unlink(paths.socketPath);
             await startupObserver?.transition('before-sqlite-open-reconciliation', plannedLifecycle);
-            writerGuard = await CoordinatorWriterGuard.acquire(paths);
-            const preparedWriterGuard = writerGuard;
             store = clock === undefined ? await CoordinatorStore.open(paths, undefined, { writerGuard: preparedWriterGuard }) : await CoordinatorStore.open(paths, clock, { writerGuard: preparedWriterGuard });
             await startupObserver?.transition('after-sqlite-open-reconciliation', plannedLifecycle);
             await publishCoordinatorRuntimeIdentity(paths, store.currentGeneration(), plannedLifecycle, preparedWriterGuard);
