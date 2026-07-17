@@ -543,7 +543,7 @@ void describe('coordinator multiprocess lifecycle', () => {
         sleep(10_000).then(() => ({ process: 'timeout', code: -1 })),
       ]);
       assert.notEqual(outcome.process, 'timeout');
-      assert.equal(outcome.code, 70, 'writer-guard contention is globally fatal, never a guessed lifecycle loser');
+      assert.equal(outcome.code, 0, 'an exact lifecycle-election loser exits cleanly before attempting writer-guard authority');
       const lock = await readLock(paths.lockPath);
       if (lock === null) throw new Error('missing elected coordinator lock');
       const elected = [first.pid, second.pid].filter((pid) => pid === lock.pid);
@@ -586,7 +586,7 @@ void describe('coordinator multiprocess lifecycle', () => {
         secondClosed.then((code) => ({ code, pid: second?.pid })),
         sleep(10_000).then(() => ({ code: -1, pid: -1 })),
       ]);
-      assert.equal(loser.code, 70, 'writer-guard contention remains globally fatal during stale-lock reclamation');
+      assert.equal(loser.code, 0, 'serialized stale-lock reclamation elects one candidate before writer-guard acquisition');
       assert.notEqual(loser.pid, elected.pid);
       assert.equal((await new CoordinatorClient({ env, autoStart: false }).query('doctor')).payload['integrity'], 'ok');
     } finally {
