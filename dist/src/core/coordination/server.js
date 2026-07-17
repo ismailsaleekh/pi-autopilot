@@ -30,6 +30,12 @@ function requirePreparedCapability(capability) {
     return capability;
 }
 function closePreparedStore(store) { store?.close(); }
+function requirePreparedWriterGuard(writerGuard) {
+    if (writerGuard === null)
+        throw new CoordinationRuntimeError('system-fatal', 'coordinator writer guard was not prepared before lifecycle publication');
+    return writerGuard;
+}
+function releasePreparedWriterGuard(writerGuard) { writerGuard?.release(); }
 function sameCurrentLock(left, right) {
     return left.pid === right.pid && left.boot_id === right.boot_id && left.process_start_identity === right.process_start_identity && left.token === right.token && left.instance_id === right.instance_id && left.package_build === right.package_build && left.protocol_version === right.protocol_version && left.database_schema_version === right.database_schema_version && left.started_at === right.started_at;
 }
@@ -542,7 +548,7 @@ function observeServerClose(server) {
 export async function startCoordinatorServer(paths, clock, adoption, testHooks, startupObserver) {
     await startupObserver?.transition('before-lifecycle-election');
     await ensureCoordinatorPrivateRoots(paths);
-    const writerGuard = await CoordinatorWriterGuard.acquire(paths);
+    let writerGuard = null;
     let lifecycleLock = null;
     let store = null;
     let capability = null;
@@ -552,19 +558,22 @@ export async function startCoordinatorServer(paths, clock, adoption, testHooks, 
     const requestDrain = new CoordinatorRequestDrain();
     try {
         lifecycleLock = await acquireCoordinatorLock(paths, adoption, async (plannedLifecycle) => {
+            await startupObserver?.transition('after-lifecycle-lock-acquisition', plannedLifecycle);
             await startupObserver?.transition('before-private-root-capability-setup', plannedLifecycle);
             capability = await readOrCreateCoordinatorCapability(paths);
             await startupObserver?.transition('after-private-root-capability-setup', plannedLifecycle);
             if (platform() !== 'win32' && existsSync(paths.socketPath))
                 await unlink(paths.socketPath);
             await startupObserver?.transition('before-sqlite-open-reconciliation', plannedLifecycle);
-            store = clock === undefined ? await CoordinatorStore.open(paths, undefined, { writerGuard }) : await CoordinatorStore.open(paths, clock, { writerGuard });
+            writerGuard = await CoordinatorWriterGuard.acquire(paths);
+            const preparedWriterGuard = writerGuard;
+            store = clock === undefined ? await CoordinatorStore.open(paths, undefined, { writerGuard: preparedWriterGuard }) : await CoordinatorStore.open(paths, clock, { writerGuard: preparedWriterGuard });
             await startupObserver?.transition('after-sqlite-open-reconciliation', plannedLifecycle);
-            await publishCoordinatorRuntimeIdentity(paths, store.currentGeneration(), plannedLifecycle, writerGuard);
+            await publishCoordinatorRuntimeIdentity(paths, store.currentGeneration(), plannedLifecycle, preparedWriterGuard);
             readAndVerifyCoordinatorRuntimeIdentity(paths, store.currentGeneration(), plannedLifecycle);
         });
         const acquiredLifecycleLock = lifecycleLock;
-        await startupObserver?.transition('after-lifecycle-lock-acquisition', acquiredLifecycleLock.record);
+        const openedWriterGuard = requirePreparedWriterGuard(writerGuard);
         const openedStore = requirePreparedStore(store);
         const openedCapability = requirePreparedCapability(capability);
         let timerFailure = null;
@@ -621,7 +630,7 @@ export async function startCoordinatorServer(paths, clock, adoption, testHooks, 
                     }
                     openedStore.close();
                     await acquiredLifecycleLock.release();
-                    writerGuard.release();
+                    openedWriterGuard.release();
                 })();
                 return closePromise;
             },
@@ -661,7 +670,7 @@ export async function startCoordinatorServer(paths, clock, adoption, testHooks, 
         }
         if (cleanupFailures.length > 0)
             throw new CoordinationRuntimeError('system-fatal', 'coordinator startup failed and cleanup was incomplete; writer guard remains retained until process death', [error instanceof Error ? error.message : String(error), ...cleanupFailures]);
-        writerGuard.release();
+        releasePreparedWriterGuard(writerGuard);
         throw error;
     }
 }
