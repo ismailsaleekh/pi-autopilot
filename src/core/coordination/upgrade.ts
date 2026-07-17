@@ -12,7 +12,7 @@ import { CoordinatorFrameDecoder, AUTOPILOT_COORDINATOR_TRANSPORT_VERSION, encod
 import { isExactProcessAlive, isProcessAlive, predecessorCompatibleBootId, preflightProcessRetirementSupport, processStartIdentity, retireExactProcess } from './process-identity.ts';
 import { coordinatorRuntimePaths, enforcePrivateAuthorityPath, ensureCoordinatorPrivateRoots, ensurePrivateAuthorityDirectory, type CoordinatorRuntimePaths } from './runtime-paths.ts';
 import { acquireSerializedProcessGuard, discardLockTombstone, quarantineExactLock, readExactLockText } from './serialized-lock.ts';
-import { CoordinatorStore } from './store.ts';
+import { migrateCoordinatorFixedDatabaseToApiSchema12 } from './store.ts';
 import {
   COORDINATOR_UPGRADE_INTENT_SCHEMA,
   COORDINATOR_UPGRADE_PATH,
@@ -294,13 +294,10 @@ async function verifyMigrationOnCopy(paths: CoordinatorRuntimePaths, record: Coo
   await ensureCoordinatorPrivateRoots(probePaths);
   await copyFile(record.path, probePaths.databasePath, fsConstants.COPYFILE_EXCL);
   await enforcePrivateAuthorityPath(probePaths.databasePath, false);
-  let store: CoordinatorStore | null = null;
-  try {
-    store = await CoordinatorStore.open(probePaths, undefined, { allowExistingSchemaMigration: true });
-    if (store.integrity() !== 'ok') throw new CoordinationRuntimeError('store-corrupt', 'schema migration probe failed integrity');
-    const status = store.status('global', null).payload;
-    if (status['package_build'] !== COORDINATOR_UPGRADE_PATH.target.package_build || status['protocol_version'] !== COORDINATOR_UPGRADE_PATH.target.protocol_version || status['database_schema_version'] !== COORDINATOR_UPGRADE_PATH.target.database_schema_version) throw new CoordinationRuntimeError('schema-mismatch', 'schema migration probe did not reach the locked target identity');
-  } finally { store?.close(); }
+  // Upgrade publishes an exact schema-12 fixed database. Opening the S1 store
+  // here would prematurely install its mutation-deny barrier and orphan a
+  // generation under the private probe root before target lifecycle startup.
+  migrateCoordinatorFixedDatabaseToApiSchema12(probePaths.databasePath);
   const checkpoint = new DatabaseSync(probePaths.databasePath, { timeout: 5_000 });
   try {
     checkpoint.exec('PRAGMA wal_checkpoint(TRUNCATE)');

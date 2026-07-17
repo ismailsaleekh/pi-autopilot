@@ -1,3 +1,4 @@
+export * from './admission-runtime.ts';
 export * from './admission.ts';
 export * from './canonical-json.ts';
 export * from './child-authority.ts';

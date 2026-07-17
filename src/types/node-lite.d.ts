@@ -255,6 +255,7 @@ declare module 'node:net' {
     destroy(): void;
     on(event: 'data', listener: (chunk: NodeBuffer) => void): this;
     on(event: 'end' | 'close', listener: () => void): this;
+    on(event: 'error', listener: (error: Error) => void): this;
     once(event: 'connect' | 'close', listener: () => void): this;
     once(event: 'error', listener: (error: Error) => void): this;
     off(event: 'error', listener: (error: Error) => void): this;

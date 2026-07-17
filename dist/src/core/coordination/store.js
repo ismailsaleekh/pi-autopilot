@@ -1537,6 +1537,25 @@ function applySchemaMigrations(db, clock, targetVersion) {
     if (databaseUserVersion(db) !== targetVersion)
         throw new CoordinationRuntimeError('schema-mismatch', 'database did not reach the exact requested schema migration boundary');
 }
+/**
+ * Produces the exact unbarriered API/schema-12 handoff database consumed by S1
+ * generation publication. Schema-changing predecessor upgrade owns this lower
+ * boundary; it must not open CoordinatorStore, which would publish schema 13
+ * and retire the fixed path before the target lifecycle has started.
+ */
+export function migrateCoordinatorFixedDatabaseToApiSchema12(databasePath, clock = systemClock) {
+    const db = new DatabaseSync(databasePath, { timeout: COORDINATOR_BUSY_TIMEOUT_MS, enableForeignKeyConstraints: true });
+    try {
+        configureWritableDatabase(db);
+        applySchemaMigrations(db, clock, COORDINATOR_DATABASE_SCHEMA_VERSION);
+        if (integrityResult(db) !== 'ok')
+            throw new CoordinationRuntimeError('store-corrupt', 'fixed target-schema migration failed physical integrity');
+        db.exec('PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE;');
+    }
+    finally {
+        db.close();
+    }
+}
 function repairEventCounterInvariantPass(db, clock) {
     db.exec('BEGIN IMMEDIATE');
     try {

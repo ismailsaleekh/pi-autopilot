@@ -13,6 +13,7 @@ import { retireSchema11CoordinatorForUpgrade } from '../../src/core/coordination
 import { startCoordinatorServer } from '../../src/core/coordination/server.ts';
 import { coordinatorUpgradeIntentPath, preparePredecessorCoordinatorUpgrade } from '../../src/core/coordination/upgrade.ts';
 import { AUTOPILOT_STATE_ROOT_ENV } from '../../src/core/parallel-runtime.ts';
+import { installActualCf50Package, startActualCf50Coordinator } from '../helpers/actual-cf50-package.ts';
 import { hardKillProcess } from '../helpers/hard-kill-process.ts';
 import { runTaggedCli, startTaggedCoordinator } from '../helpers/tagged-coordinator.ts';
 
@@ -52,11 +53,12 @@ function historicalUpgradeIntent(state: 'committed' | 'starting', packageBuild =
 
 
 void describe('coordinator protocol and schema version boundary', () => {
-  void it('BUG-176 drains and retires the exact live cf42 process before elected schema-12 startup', async () => {
+  void it('routes exact live cf42 retirement through actual cf50 before S1 schema-13 publication', async () => {
     const root = await mkdtemp(join(tmpdir(), 'pi-autopilot-cf42-retirement-'));
     const stateRoot = join(root, 'state');
     const env = { ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: stateRoot };
     const tagged = await startTaggedCoordinator({ stateRoot, extractionRoot: root, commit: 'a6772a2997d349b6efd357d8c10e9d6d61a60c6a' });
+    let predecessor: Awaited<ReturnType<typeof startActualCf50Coordinator>> | null = null;
     let current: Awaited<ReturnType<typeof startCoordinatorServer>> | null = null;
     try {
       const before = await lockRecord(tagged.paths.lockPath);
@@ -70,13 +72,25 @@ void describe('coordinator protocol and schema version boundary', () => {
       assert.equal(typeof report.backup_path, 'string');
       assert.equal(typeof report.backup_sha256, 'string');
       assert.equal(isProcessAlive(tagged.child.pid ?? -1), false);
+      const installation = await installActualCf50Package(root);
+      predecessor = await startActualCf50Coordinator({ installation, stateRoot });
+      const cf50Lock = await lockRecord(tagged.paths.lockPath);
+      assert.equal(cf50Lock['package_build'], '1.1.8-cf50');
+      assert.equal(cf50Lock['database_schema_version'], 12);
+      await predecessor.close();
+      predecessor = null;
       current = await startCoordinatorServer(tagged.paths);
       const handshake = await new CoordinatorClient({ env, autoStart: false }).query('handshake');
       assert.equal(handshake.payload['package_build'], '1.1.8-cf50');
       assert.equal(handshake.payload['protocol_version'], '1.6');
       assert.equal(handshake.payload['database_schema_version'], 12);
+      const runtimeIdentity = record(JSON.parse(await readFile(tagged.paths.runtimeIdentityPath, 'utf8')) as unknown, 'S1 runtime identity');
+      assert.equal(runtimeIdentity['implementation_build'], '1.2.0-s1');
+      assert.equal(runtimeIdentity['api_schema_version'], 12);
+      assert.equal(runtimeIdentity['store_schema_version'], 13);
     } finally {
       if (current !== null) await current.close();
+      if (predecessor !== null) await predecessor.close();
       await tagged.close();
       await rm(root, { recursive: true, force: true });
     }
@@ -114,7 +128,7 @@ void describe('coordinator protocol and schema version boundary', () => {
       await tagged.close();
       const replacementStartIdentity = processStartIdentity(process.pid);
       if (replacementStartIdentity === null) throw new Error('replacement test process start identity is unavailable');
-      await writeFile(tagged.paths.lockPath, `${JSON.stringify({ schema_version: 'autopilot.coordinator_lock.v2', pid: process.pid, boot_id: 'compatible-replacement-boot', process_start_identity: replacementStartIdentity, token: 'compatible-replacement-token', instance_id: 'compatible-replacement-instance', package_build: '1.1.2-cf44', protocol_version: '1.6', database_schema_version: 12, started_at: '2026-07-14T00:00:00.000Z' })}\n`, 'utf8');
+      await writeFile(tagged.paths.lockPath, `${JSON.stringify({ schema_version: 'autopilot.coordinator_lock.v2', pid: process.pid, boot_id: 'compatible-replacement-boot', process_start_identity: replacementStartIdentity, token: 'compatible-replacement-token', instance_id: 'compatible-replacement-instance', package_build: '1.1.8-cf50', protocol_version: '1.6', database_schema_version: 12, started_at: '2026-07-14T00:00:00.000Z' })}\n`, 'utf8');
       let connectionCount = 0;
       const events: Array<readonly [number, string]> = [];
       fake = createServer((socket) => {
@@ -132,7 +146,7 @@ void describe('coordinator protocol and schema version boundary', () => {
               schema_version: 'autopilot.coordinator_response.v1', protocol_version: '1.6', request_id: requestId, ok: true,
               committed_event_seq: action === 'handshake' ? null : 1, error_code: null, retryable: false,
               payload: action === 'handshake'
-                ? { schema_version: 'autopilot.coordinator_handshake.v1', package_build: '1.1.2-cf44', protocol_version: '1.6', database_schema_version: 12 }
+                ? { schema_version: 'autopilot.coordinator_handshake.v1', package_build: '1.1.8-cf50', protocol_version: '1.6', database_schema_version: 12, lifecycle_lock_schema: 'autopilot.coordinator_lock.v2', lifecycle_pid: process.pid, lifecycle_boot_id: 'compatible-replacement-boot', lifecycle_process_start_identity: replacementStartIdentity, lifecycle_instance_id: 'compatible-replacement-instance', lifecycle_started_at: '2026-07-14T00:00:00.000Z' }
                 : { accepted: true },
             }));
           }
@@ -171,7 +185,7 @@ void describe('coordinator protocol and schema version boundary', () => {
           socket.write(encodeCoordinatorFrame({
             schema_version: 'autopilot.coordinator_response.v1', protocol_version: '1.6', request_id: requestId, ok: true,
             committed_event_seq: null, error_code: null, retryable: false,
-            payload: { schema_version: 'autopilot.coordinator_handshake.v1', package_build: 'unknown-cf99', protocol_version: '1.6', database_schema_version: 12 },
+            payload: { schema_version: 'autopilot.coordinator_handshake.v1', package_build: 'unknown-cf99', protocol_version: '1.6', database_schema_version: 12, lifecycle_lock_schema: 'autopilot.coordinator_lock.v2', lifecycle_pid: process.pid, lifecycle_boot_id: 'unknown-build-boot', lifecycle_process_start_identity: 'unknown-build-process', lifecycle_instance_id: 'unknown-build-instance', lifecycle_started_at: '2026-07-14T00:00:00.000Z' },
           }));
         }
       });
@@ -180,7 +194,7 @@ void describe('coordinator protocol and schema version boundary', () => {
       await listen(fake, paths.socketPath);
       await assert.rejects(() => new CoordinatorClient({ env }).mutate('heartbeat', {
         repoId: 'repo-never-sent', workstreamRun: 'run-never-sent', sessionId: 'session-never-sent', fencingGeneration: 1, expectedVersion: 0, idempotencyKey: 'BUG-175-never-send-mutation',
-      }, { session_lease_id: 'lease-never-sent', session_token: 'f'.repeat(64), lease_expires_at: '2099-01-01T00:00:00.000Z' }), /outside the closed protocol-1\.6\/schema-12 compatibility lineage/u);
+      }, { session_lease_id: 'lease-never-sent', session_token: 'f'.repeat(64), lease_expires_at: '2099-01-01T00:00:00.000Z' }), /package_build is not the frozen cf50 façade/u);
       assert.deepEqual(actions, ['handshake']);
     } finally {
       await closeServer(fake);
@@ -208,12 +222,13 @@ void describe('coordinator protocol and schema version boundary', () => {
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 
-  void it('recovers an exact dead v1.0.1 current-generation lock but never treats it as a live replacement request', async () => {
+  void it('routes an exact dead cf38 generation through actual cf50 while preserving historical intent', async () => {
     const root = await mkdtemp(join(tmpdir(), 'pi-autopilot-bug-175-dead-'));
     const stateRoot = join(root, 'state');
     const env = { ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: stateRoot };
     const paths = coordinatorRuntimePaths(env);
     const tagged = await startTaggedCoordinator({ stateRoot, extractionRoot: root });
+    let predecessor: Awaited<ReturnType<typeof startActualCf50Coordinator>> | null = null;
     let current: Awaited<ReturnType<typeof startCoordinatorServer>> | null = null;
     try {
       const oldLock = await lockRecord(paths.lockPath);
@@ -225,6 +240,11 @@ void describe('coordinator protocol and schema version boundary', () => {
       await assert.rejects(() => preparePredecessorCoordinatorUpgrade(paths, 'e'.repeat(64), Date.now() + 2_000), /refuses to overwrite durable committed intent/u);
       assert.equal(await readFile(coordinatorUpgradeIntentPath(paths), 'utf8'), committedIntent);
 
+      const installation = await installActualCf50Package(root);
+      predecessor = await startActualCf50Coordinator({ installation, stateRoot });
+      assert.equal((await lockRecord(paths.lockPath))['package_build'], '1.1.8-cf50');
+      await predecessor.close();
+      predecessor = null;
       current = await startCoordinatorServer(paths);
       const response = await new CoordinatorClient({ env, autoStart: false }).query('handshake');
       assert.equal(response.payload['package_build'], '1.1.8-cf50');
@@ -234,6 +254,7 @@ void describe('coordinator protocol and schema version boundary', () => {
       assert.equal(await readFile(coordinatorUpgradeIntentPath(paths), 'utf8'), committedIntent, 'historical committed intent remains immutable forensic evidence');
     } finally {
       if (current !== null) await current.close();
+      if (predecessor !== null) await predecessor.close();
       await tagged.close();
       await rm(root, { recursive: true, force: true });
     }

@@ -4,7 +4,7 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync } from 'no
 import { mkdir, open, readFile, stat, unlink } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
-import { CoordinatorClient, durableIdentifier } from './client.ts';
+import { CoordinatorClient } from './client.ts';
 import { parseCoordinationWorktree, parseCoordinationWorktreeOperation } from './contracts.ts';
 import { CoordinationRuntimeError } from './failures.ts';
 import { coordinationCutoverCommitted } from './migration-paths.ts';
@@ -12,6 +12,7 @@ import { coordinatorRuntimePaths } from './runtime-paths.ts';
 import { currentBootId, isProcessAlive } from './process-identity.ts';
 import { readCoordinatorSessionContext, type CoordinatorSessionContext } from './supervisor.ts';
 import { deterministicWorktreeId, sameWorktreeAuthority, worktreeOwnerKindKey } from './worktree-identity.ts';
+import { deriveWorktreeOperationKeyV2, operationIdFromWorktreeOperationKey } from './worktree-operation-identity.ts';
 import type {
   CoordinationEvidenceRef,
   CoordinationOwnerIdentity,
@@ -39,6 +40,7 @@ export interface OwnedWorktreeOperationSpec {
   readonly kind: CoordinationWorktreeKind;
   readonly operationType: CoordinationWorktreeOperationType;
   readonly intent: CoordinationWorktreeOperationIntent;
+  /** Pre-S1 diagnostic label retained at call sites; never operation or idempotency authority. */
   readonly operationKey: string;
   readonly operationId?: string;
   readonly initialWorktreeState: CoordinationWorktreeState;
@@ -157,10 +159,6 @@ function ownerFor(spec: OwnedWorktreeOperationSpec): CoordinationOwnerIdentity {
   };
 }
 
-function operationId(owner: CoordinationOwnerIdentity, type: CoordinationWorktreeOperationType, key: string, intent: CoordinationWorktreeOperationIntent): string {
-  return durableIdentifier('operation', `${owner.repo_id}\0${owner.autopilot_id}\0${owner.workstream_run}\0${owner.unit_id}\0${String(owner.attempt)}\0${type}\0${key}\0${canonicalJson(intent)}`);
-}
-
 function operationEvidenceRef(owner: CoordinationOwnerIdentity, id: string): string {
   return `_saga-evidence/${owner.workstream_run}/${id}.json`;
 }
@@ -267,29 +265,41 @@ export class OwnedWorktreeSagaClient {
       state: spec.initialWorktreeState, version: 1,
     };
     const allWorktrees = await this.worktrees();
+    const worktreesById = new Map(allWorktrees.map((entry) => [entry.worktree_id, entry]));
+    const allOperations = await this.operations();
     const semantic = allWorktrees.filter((entry) => entry.state !== 'removed' && worktreeOwnerKindKey(entry) === worktreeOwnerKindKey(proposed));
     if (semantic.some((entry) => !sameWorktreeAuthority(entry, proposed))) throw new CoordinationRuntimeError('store-corrupt', 'active worktree owner/kind projections disagree in authority-bearing identity', semantic.map((entry) => entry.worktree_id));
     const deterministic = semantic.find((entry) => entry.worktree_id === id);
-    const withHistory = new Set((await this.operations()).map((entry) => entry.worktree_id));
+    const withHistory = new Set(allOperations.map((entry) => entry.worktree_id));
     const historical = semantic.filter((entry) => withHistory.has(entry.worktree_id));
     if (historical.length > 1) throw new CoordinationRuntimeError('recovery-required', 'duplicate active worktree projections carry multiple operation histories', historical.map((entry) => entry.worktree_id));
     // A terminal remove replay must retain the exact durable row/version even
     // though it is no longer an active semantic authority candidate.
     const existingWorktree = historical[0] ?? deterministic ?? semantic[0] ?? allWorktrees.find((entry) => entry.worktree_id === id);
     const worktree: CoordinationWorktree = existingWorktree ?? proposed;
-    const opId = spec.operationId ?? operationId(owner, spec.operationType, spec.operationKey, spec.intent);
-    const existing = (await this.operations()).find((entry) => entry.operation_id === opId);
+    const operationKey = deriveWorktreeOperationKeyV2({ canonicalWorktreeId: id, operationType: spec.operationType, completeImmutableIntent: spec.intent });
+    const canonicalOperationId = operationIdFromWorktreeOperationKey(operationKey);
+    const opId = spec.operationId ?? canonicalOperationId;
+    const exactExisting = allOperations.find((entry) => entry.operation_id === opId);
+    const semanticExisting = allOperations.filter((entry) => {
+      const operationWorktree = worktreesById.get(entry.worktree_id);
+      return operationWorktree !== undefined && operationWorktree.kind === spec.kind && sameOwner(entry.owner, owner) && entry.operation_type === spec.operationType && canonicalJson(entry.intent) === canonicalJson(spec.intent);
+    });
+    if (spec.operationId === undefined && exactExisting === undefined && semanticExisting.length > 1) throw new CoordinationRuntimeError('recovery-required', 'multiple historical operations match one canonical operation-key v2 identity', semanticExisting.map((entry) => entry.operation_id));
+    const existing = exactExisting ?? (spec.operationId === undefined ? semanticExisting[0] : undefined);
     if (existing !== undefined) {
-      if (!sameOwner(existing.owner, owner) || existing.worktree_id !== worktree.worktree_id || existing.operation_type !== spec.operationType || canonicalJson(existing.intent) !== canonicalJson(spec.intent)) throw new CoordinationRuntimeError('idempotency-conflict', 'worktree operation key was reused with different immutable intent');
+      const existingProjection = worktreesById.get(existing.worktree_id);
+      if (!sameOwner(existing.owner, owner) || existingProjection === undefined || existingProjection.kind !== spec.kind || !sameWorktreeAuthority(existingProjection, proposed) || existing.operation_type !== spec.operationType || canonicalJson(existing.intent) !== canonicalJson(spec.intent)) throw new CoordinationRuntimeError('idempotency-conflict', 'worktree operation key was reused with different canonical authority or immutable intent');
       return { operation: existing, worktree, replayed: true };
     }
+    if (spec.operationId !== undefined) throw new CoordinationRuntimeError('recovery-required', 'an explicit historical operation ID has no durable operation to recover; S1 will not mint caller-selected operation identity', [spec.operationId, canonicalOperationId]);
     const operation: CoordinationWorktreeOperation = {
       schema_version: 'autopilot.worktree_operation.v2', operation_id: opId, worktree_id: worktree.worktree_id, owner,
       operation_type: spec.operationType, stage: 'prepared', authority_version: worktree.version, intent_event_seq: 0,
       intent: spec.intent, completed_steps: [], current_step: null, recovery_attempts: 0,
       verification_evidence: null, error_code: null, version: 1,
     };
-    const response = await this.#client.mutate('prepare-operation', this.#identity(`prepare-operation:${opId}`, existingWorktree?.version ?? 0), {
+    const response = await this.#client.mutate('prepare-operation', this.#identity(operationKey.operation_key_sha256, existingWorktree?.version ?? 0), {
       worktree, operation, ...this.#proof(),
     });
     return { operation: responseOperation(response), worktree: responseWorktree(response), replayed: false };

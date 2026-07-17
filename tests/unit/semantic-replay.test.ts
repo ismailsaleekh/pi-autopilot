@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { copyFile, lstat, mkdir, mkdtemp, readFile, rm, symlink, unlink, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { platform, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
@@ -9,6 +9,7 @@ import { DatabaseSync } from 'node:sqlite';
 
 import { coordinatorRuntimePaths, windowsPrivateAclCommand } from '../../src/core/coordination/runtime-paths.ts';
 import { CoordinatorStore, stageCoordinatorSemanticReplay, stageCoordinatorSemanticReplayFile, type CoordinatorSemanticReplayRecord } from '../../src/core/coordination/store.ts';
+import { readCurrentStoreGeneration } from '../../src/core/coordination/store-generation.ts';
 import type { CoordinatorRequestEnvelope } from '../../src/core/coordination/types.ts';
 import type { ProcessEnvLike } from '../../src/core/parallel-runtime.ts';
 
@@ -61,8 +62,9 @@ async function rewriteCorpusRecord(path: string, recordIndex: number, replacemen
   await writeFile(path, `${lines.join('\n')}\n`, 'utf8');
 }
 
-function eventCount(databasePath: string): number {
-  const database = new DatabaseSync(databasePath, { readOnly: true });
+function eventCount(paths: ReturnType<typeof coordinatorRuntimePaths>): number {
+  const generation = readCurrentStoreGeneration(paths);
+  const database = new DatabaseSync(generation?.database_path ?? paths.databasePath, { readOnly: true });
   try {
     const row = database.prepare('SELECT COUNT(*) AS count FROM events').get() as Readonly<Record<string, unknown>>;
     if (typeof row['count'] !== 'number') throw new Error('event count is not numeric');
@@ -104,7 +106,7 @@ void describe('production semantic replay startup recovery', () => {
         await stageCoordinatorSemanticReplay(paths, 'malformed-corpus', [attachRun(stateRoot), attachRun(stateRoot, 'second')]);
         await rewriteCorpusRecord(paths.semanticReplayPath, 1, malformed);
         await assert.rejects(() => CoordinatorStore.open(paths, clock), /canonical JSON|valid coordinator request|current coordinator protocol/u);
-        assert.equal(eventCount(paths.databasePath), 0, 'a malformed corpus must not reduce its valid prefix');
+        assert.equal(eventCount(paths), 0, 'a malformed corpus must not reduce its valid prefix');
         assert.equal(existsSync(paths.semanticReplayPath), true, 'a rejected corpus remains for operator recovery');
       });
     }
@@ -119,7 +121,7 @@ void describe('production semantic replay startup recovery', () => {
         const runs = store.status('semantic-replay-repo', null).payload['runs'];
         assert.equal(Array.isArray(runs) ? runs.length : -1, 0);
       } finally { store.close(); }
-      assert.equal(eventCount(paths.databasePath), 0);
+      assert.equal(eventCount(paths), 0);
     });
   });
 
@@ -133,7 +135,7 @@ void describe('production semantic replay startup recovery', () => {
       lines[0] = canonicalJson({ ...header, record_count: 1, records_sha256: `sha256:${createHash('sha256').update(body, 'utf8').digest('hex')}` });
       await writeFile(paths.semanticReplayPath, `${lines[0]}\n${body}`, 'utf8');
       await assert.rejects(() => CoordinatorStore.open(paths, clock), /per-record byte bound/u);
-      assert.equal(eventCount(paths.databasePath), 0);
+      assert.equal(eventCount(paths), 0);
     });
   });
 
@@ -145,7 +147,7 @@ void describe('production semantic replay startup recovery', () => {
       lines[0] = canonicalJson({ ...header, records_sha256: `sha256:${'f'.repeat(64)}` });
       await writeFile(paths.semanticReplayPath, `${lines.join('\n')}\n`, 'utf8');
       await assert.rejects(() => CoordinatorStore.open(paths, clock), /count or digest does not match/u);
-      assert.equal(eventCount(paths.databasePath), 0);
+      assert.equal(eventCount(paths), 0);
     });
   });
 
@@ -161,7 +163,7 @@ void describe('production semantic replay startup recovery', () => {
         assert.equal(Array.isArray(runs) ? runs.length : -1, 1);
         assert.equal(recovered.integrity(), 'ok');
       } finally { recovered.close(); }
-      assert.equal(eventCount(paths.databasePath), 1);
+      assert.equal(eventCount(paths), 1);
       assert.equal(existsSync(paths.semanticReplayPath), false);
       assert.equal(existsSync(join(paths.semanticReplayReceiptsRoot, 'operator-runtime-consumption.json')), true);
     });
@@ -173,7 +175,7 @@ void describe('production semantic replay startup recovery', () => {
       await stageCoordinatorSemanticReplay(paths, 'atomic-complete', records);
       const recovered = await CoordinatorStore.open(paths, clock);
       recovered.close();
-      assert.equal(eventCount(paths.databasePath), 2);
+      assert.equal(eventCount(paths), 2);
       assert.equal(existsSync(paths.semanticReplayPath), false);
       const receiptPath = join(paths.semanticReplayReceiptsRoot, 'atomic-complete.json');
       const receiptBefore = await readFile(receiptPath, 'utf8');
@@ -185,7 +187,7 @@ void describe('production semantic replay startup recovery', () => {
       await stageCoordinatorSemanticReplay(paths, 'atomic-complete', records);
       const replayed = await CoordinatorStore.open(paths, { now: () => new Date('2099-01-01T00:00:00.000Z') });
       replayed.close();
-      assert.equal(eventCount(paths.databasePath), 2);
+      assert.equal(eventCount(paths), 2);
       assert.equal(await readFile(receiptPath, 'utf8'), receiptBefore, 'DB completion deterministically re-projects the same receipt');
       assert.equal(existsSync(paths.semanticReplayPath), false);
     });
@@ -194,23 +196,21 @@ void describe('production semantic replay startup recovery', () => {
   void it('never lets a stale filesystem receipt suppress replay after a database restore', async () => {
     await withRoot(async ({ root, stateRoot, paths }) => {
       const baseline = await CoordinatorStore.open(paths, clock);
-      baseline.close();
       const baselinePath = join(root, 'baseline.db');
-      await copyFile(paths.databasePath, baselinePath);
+      const baselineBackup = await baseline.createVerifiedBackup(baselinePath);
+      baseline.close();
       const records = [attachRun(stateRoot)] as const;
       await stageCoordinatorSemanticReplay(paths, 'restore-replay', records);
       const first = await CoordinatorStore.open(paths, clock);
       first.close();
-      assert.equal(eventCount(paths.databasePath), 1);
+      assert.equal(eventCount(paths), 1);
       assert.equal(existsSync(join(paths.semanticReplayReceiptsRoot, 'restore-replay.json')), true);
 
-      await unlink(`${paths.databasePath}-wal`).catch(() => undefined);
-      await unlink(`${paths.databasePath}-shm`).catch(() => undefined);
-      await copyFile(baselinePath, paths.databasePath);
+      await CoordinatorStore.restoreGeneration(paths, baselinePath, baselineBackup.sha256, clock);
       await stageCoordinatorSemanticReplay(paths, 'restore-replay', records);
       const restored = await CoordinatorStore.open(paths, clock);
       restored.close();
-      assert.equal(eventCount(paths.databasePath), 1, 'missing DB completion must force semantic replay despite a stale receipt');
+      assert.equal(eventCount(paths), 1, 'missing DB completion must force semantic replay despite a stale receipt');
       assert.equal(existsSync(paths.semanticReplayPath), false);
     });
   });
@@ -230,7 +230,7 @@ void describe('production semantic replay startup recovery', () => {
       await writeFile(target, '{}\n', 'utf8');
       await symlink(target, paths.semanticReplayPath, platform() === 'win32' ? 'file' : 'file');
       await assert.rejects(() => CoordinatorStore.open(paths, clock));
-      assert.equal(eventCount(paths.databasePath), 0);
+      assert.equal(eventCount(paths), 0);
     });
   });
 
@@ -241,7 +241,7 @@ void describe('production semantic replay startup recovery', () => {
       first.close();
       await stageCoordinatorSemanticReplay(paths, 'stable-replay-id', [attachRun(stateRoot), attachRun(stateRoot, 'different-corpus')]);
       await assert.rejects(() => CoordinatorStore.open(paths, clock), /reused with a different corpus identity/u);
-      assert.equal(eventCount(paths.databasePath), 1);
+      assert.equal(eventCount(paths), 1);
       assert.equal(existsSync(paths.semanticReplayPath), true);
     });
   });

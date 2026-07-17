@@ -121,15 +121,15 @@
       "regression": "coordinator-startup-diagnostics: SIGKILL"
     },
     {
-      "id": "live-exact-unresponsive-with-running-child",
-      "lock": "live-exact", "predecessor_fence": "exact", "endpoint": "unresponsive", "child": "running", "database": "recoverable", "authority": "running-child", "clients": "N",
+      "id": "live-pre-cf50-unresponsive-owner",
+      "lock": "live-drift", "predecessor_fence": "absent", "endpoint": "unresponsive", "child": "running", "database": "recoverable", "authority": "no-session", "clients": "N",
       "allowed_mutation": [],
-      "expected_authority_owner": "exact known owner until identity-fenced recovery completes",
-      "expected_endpoint": "recovered exact endpoint or separately elected replacement",
-      "retry_wait": "bounded repeated endpoint attestation",
-      "terminal_failure_code": "coordinator-unavailable",
-      "forbidden_effects": ["PID-only signal", "live-lock deletion", "running-child release"],
-      "regression": "coordinator-unavailable-recovery: real cf45 generation-9 session"
+      "expected_authority_owner": "exact pre-cf50 process and lock remain unchanged",
+      "expected_endpoint": "none accepted by ordinary S1 startup",
+      "retry_wait": "none after closed predecessor classification",
+      "terminal_failure_code": "protocol-mismatch",
+      "forbidden_effects": ["signal pre-cf50 owner", "replace owner", "delete lock", "mutate database"],
+      "regression": "coordinator-unavailable-recovery: real cf45 socket-loss refusal"
     },
     {
       "id": "exact-ready-with-leases",

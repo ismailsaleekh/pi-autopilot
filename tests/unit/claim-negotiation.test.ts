@@ -277,7 +277,7 @@ void describe('Coordination Fabric claim negotiation', () => {
     }
   });
 
-  void it('migrates schema-10 EXCLUSIVE entities and idempotent replay into explicit legacy authority', async () => {
+  void it('keeps the retired fixed cf50 store mutation-denied while S1 replays current EXCLUSIVE authority', async () => {
     const root = await mkdtemp(join(tmpdir(), 'pi-autopilot-exclusive-schema10-'));
     const stateRoot = join(root, 'state');
     const env = { ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: stateRoot };
@@ -291,30 +291,19 @@ void describe('Coordination Fabric claim negotiation', () => {
       await server.close();
 
       const database = new DatabaseSync(paths.databasePath);
-      database.exec(`
-        UPDATE acquisition_groups SET payload_json=json_remove(payload_json,'$.requested_leases[1].exclusive_operation');
-        UPDATE edit_leases SET payload_json=json_remove(payload_json,'$.exclusive_operation') WHERE json_extract(payload_json,'$.mode')='EXCLUSIVE';
-        UPDATE idempotency_results SET payload_json=json_remove(payload_json,'$.acquisition_group.requested_leases[1].exclusive_operation','$.edit_leases[1].exclusive_operation');
-        DROP TABLE result_details;
-        DROP TABLE result_receipts;
-        DROP TABLE mailbox_delivery_items;
-        DROP TABLE mailbox_deliveries;
-        DROP TABLE reconciliation_details;
-        DROP TABLE reconciliation_receipts;
-        DELETE FROM schema_migrations WHERE version>=11;
-        PRAGMA user_version=10;
-      `);
-      database.close();
+      try {
+        assert.throws(() => database.exec('INSERT INTO repositories DEFAULT VALUES'), /cf50 fixed store retired by S1 generation publication/u);
+      } finally { database.close(); }
 
       server = await startCoordinatorServer(paths);
       const status = await client.query('status', owner.context.repo_id, owner.context.workstream_run);
-      const migratedGroup = parseCoordinationAcquisitionGroup(array(status.payload['acquisition_groups'], 'migrated groups')[0]);
-      assert.equal(migratedGroup.acquisition_kind, 'legacy-unknown');
-      assert.equal(migratedGroup.requested_leases.find((lease) => lease.mode === 'EXCLUSIVE')?.exclusive_operation?.operation_kind, 'legacy-migration-exclusive');
+      const currentGroup = parseCoordinationAcquisitionGroup(array(status.payload['acquisition_groups'], 'current groups')[0]);
+      assert.equal(currentGroup.acquisition_kind, 'initial');
+      assert.equal(currentGroup.requested_leases.find((lease) => lease.mode === 'EXCLUSIVE')?.exclusive_operation?.operation_kind, 'canonical-authority-replacement');
       const replay = await owner.negotiation.acquire(input);
       assert.equal(replay.outcome, 'granted');
-      if (replay.outcome !== 'granted') throw new Error('schema-10 idempotency replay was not granted');
-      assert.equal(replay.editLeases.find((lease) => lease.mode === 'EXCLUSIVE')?.exclusive_operation?.operation_kind, 'legacy-migration-exclusive');
+      if (replay.outcome !== 'granted') throw new Error('schema-13 idempotency replay was not granted');
+      assert.equal(replay.editLeases.find((lease) => lease.mode === 'EXCLUSIVE')?.exclusive_operation?.operation_kind, 'canonical-authority-replacement');
       assert.equal((await client.query('doctor')).payload['healthy'], true);
     } finally {
       await server.close();
