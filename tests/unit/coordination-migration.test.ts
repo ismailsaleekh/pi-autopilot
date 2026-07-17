@@ -15,6 +15,7 @@ import { CoordinatorClient } from '../../src/core/coordination/client.ts';
 import { currentBootId, processStartIdentity } from '../../src/core/coordination/process-identity.ts';
 import { parseCoordinationMigrationRecoveryWork, parseCoordinationRun, parseCoordinationUnitAttempt } from '../../src/core/coordination/contracts.ts';
 import { coordinatorRuntimePaths } from '../../src/core/coordination/runtime-paths.ts';
+import { readCurrentStoreGeneration } from '../../src/core/coordination/store-generation.ts';
 import { startCoordinatorServer } from '../../src/core/coordination/server.ts';
 import { CoordinatorStore, stageCoordinatorSemanticReplay } from '../../src/core/coordination/store.ts';
 import { DurableRunSupervisorClient } from '../../src/core/coordination/supervisor.ts';
@@ -90,16 +91,16 @@ void describe('Coordination Fabric legacy migration and cutover', () => {
       const database = new DatabaseSync(databasePath);
       try { database.prepare('UPDATE schema_migrations SET checksum=? WHERE version=6').run('f'.repeat(64)); }
       finally { database.close(); }
-      await assert.rejects(() => runCoordinationMigration({ command: 'dry-run', repoKey: fixture.repoKey, env: fixture.env, clock: migrationTestClock() }), /exact locked schema-6\/7\/8\/9\/10\/11\/12 package lineage/u);
+      await assert.rejects(() => runCoordinationMigration({ command: 'dry-run', repoKey: fixture.repoKey, env: fixture.env, clock: migrationTestClock() }), /exact locked schema-6\/7\/8\/9\/10\/11\/12\/13 package lineage/u);
     });
     await withMigrationTestFixture(async (fixture) => {
       const paths = coordinatorRuntimePaths(fixture.env);
       const store = await CoordinatorStore.open(paths, migrationTestClock());
       store.close();
-      const database = new DatabaseSync(paths.databasePath);
+      const database = new DatabaseSync(readCurrentStoreGeneration(paths)?.database_path ?? paths.databasePath);
       try { database.prepare('UPDATE schema_migrations SET checksum=? WHERE version=9').run('e'.repeat(64)); }
       finally { database.close(); }
-      await assert.rejects(() => runCoordinationMigration({ command: 'dry-run', repoKey: fixture.repoKey, env: fixture.env, clock: migrationTestClock() }), /exact locked schema-6\/7\/8\/9\/10\/11\/12 package lineage/u);
+      await assert.rejects(() => runCoordinationMigration({ command: 'dry-run', repoKey: fixture.repoKey, env: fixture.env, clock: migrationTestClock() }), /exact locked schema-6\/7\/8\/9\/10\/11\/12\/13 package lineage/u);
     });
   });
 
@@ -160,11 +161,12 @@ void describe('Coordination Fabric legacy migration and cutover', () => {
       const paths = coordinatorRuntimePaths(fixture.env);
       const store = await CoordinatorStore.open(paths, fixedClock());
       store.close();
-      const database = new DatabaseSync(paths.databasePath);
+      const authorityDatabasePath = readCurrentStoreGeneration(paths)?.database_path ?? paths.databasePath;
+      const database = new DatabaseSync(authorityDatabasePath);
       try {
         database.exec('PRAGMA journal_mode=DELETE; CREATE TABLE migration_bound_filler(payload BLOB); INSERT INTO migration_bound_filler VALUES(zeroblob(73400320)); DROP TABLE migration_bound_filler;');
       } finally { database.close(); }
-      assert.equal(statSync(paths.databasePath).size > 64 * 1024 * 1024, true);
+      assert.equal(statSync(authorityDatabasePath).size > 64 * 1024 * 1024, true);
       const dry = await runCoordinationMigration({ command: 'dry-run', repoKey: fixture.repoKey, env: fixture.env, clock: fixedClock() });
       assert.equal(dry.blockers.length, 0);
     });
@@ -326,7 +328,8 @@ void describe('Coordination Fabric legacy migration and cutover', () => {
         });
         assert.equal(attached.ok, true);
       } finally { store.close(); }
-      const database = new DatabaseSync(coordinatorRuntimePaths(fixture.env).databasePath);
+      const runtimePaths = coordinatorRuntimePaths(fixture.env);
+      const database = new DatabaseSync(readCurrentStoreGeneration(runtimePaths)?.database_path ?? runtimePaths.databasePath);
       try { database.prepare("UPDATE runs SET status='closed', version=version+1 WHERE repo_id=? AND workstream_run=?").run(fixture.repoKey, active.workstream_run); }
       finally { database.close(); }
       const applied = await runCoordinationMigration({ command: 'apply', repoKey: fixture.repoKey, env: fixture.env, clock: fixedClock() });

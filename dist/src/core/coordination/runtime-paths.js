@@ -6,7 +6,7 @@ import { AUTOPILOT_STATE_ROOT_ENV, resolveAutopilotStateRoot } from "../parallel
 import { CoordinationRuntimeError } from "./failures.js";
 import { assertPrivatePathNoAliases, enforcePrivateAuthorityPath, enforceWindowsPrivateTree, ensurePrivateAuthorityDirectory, isWindowsPrivateTreeHardened, markWindowsPrivateTreeHardened } from "../private-path.js";
 export { enforcePrivateAuthorityPath, enforceWindowsPrivateAcl, enforceWindowsPrivateTree, ensurePrivateAuthorityDirectory, windowsPrivateAclCommand, windowsPrivateTreeAclCommand } from "../private-path.js";
-export { COORDINATOR_BUSY_TIMEOUT_MS, COORDINATOR_DATABASE_SCHEMA_VERSION, COORDINATOR_GRANT_OFFER_SWEEP_MS, COORDINATOR_GRANT_OFFER_TTL_MS, COORDINATOR_HEARTBEAT_MS, COORDINATOR_MAX_FRAME_BYTES, COORDINATOR_PACKAGE_BUILD, COORDINATOR_SESSION_LEASE_MS } from "./runtime-constants.js";
+export { COORDINATOR_API_SCHEMA_VERSION, COORDINATOR_BUSY_TIMEOUT_MS, COORDINATOR_DATABASE_SCHEMA_VERSION, COORDINATOR_GRANT_OFFER_SWEEP_MS, COORDINATOR_GRANT_OFFER_TTL_MS, COORDINATOR_HEARTBEAT_MS, COORDINATOR_IMPLEMENTATION_BUILD, COORDINATOR_LEGACY_FACADE_BUILD, COORDINATOR_MAX_FRAME_BYTES, COORDINATOR_PACKAGE_BUILD, COORDINATOR_SESSION_LEASE_MS, COORDINATOR_STORE_SCHEMA_VERSION, COORDINATOR_WIRE_LINEAGE } from "./runtime-constants.js";
 export function coordinatorRuntimePaths(env = process.env) {
     const stateRoot = resolveAutopilotStateRoot(env);
     const coordinatorRoot = join(stateRoot, 'coordinator');
@@ -33,6 +33,10 @@ export function coordinatorRuntimePaths(env = process.env) {
         stateRoot,
         coordinatorRoot,
         databasePath: join(coordinatorRoot, 'coordinator.db'),
+        writerGuardPath: join(coordinatorRoot, 'writer-guard.db'),
+        storesRoot: join(coordinatorRoot, 'stores'),
+        currentStorePointerPath: join(coordinatorRoot, 'current-store.json'),
+        runtimeIdentityPath: join(coordinatorRoot, 'runtime-identity.json'),
         lockPath: join(coordinatorRoot, `coordinator.${generation}.lock`),
         lifecycleElectionPath: join(coordinatorRoot, `coordinator.${generation}.lifecycle-election.db`),
         startupLockPath: join(coordinatorRoot, `coordinator.${generation}.startup.lock`),
@@ -56,6 +60,7 @@ export async function ensureCoordinatorPrivateRoots(paths, env = process.env) {
     const roots = [
         paths.stateRoot,
         paths.coordinatorRoot,
+        paths.storesRoot,
         paths.backupsRoot,
         paths.exportsRoot,
         paths.sessionsRoot,

@@ -29,8 +29,14 @@ export async function seedPhase34Schema6Database(env: ProcessEnvLike): Promise<s
   store.close();
   const database = new DatabaseSync(paths.databasePath);
   try {
+    for (const row of database.prepare("SELECT name FROM sqlite_schema WHERE type='trigger' AND name LIKE 'autopilot_s1_deny_%' ORDER BY name").all()) {
+      const name = row['name'];
+      if (typeof name !== 'string' || !/^autopilot_s1_deny_[a-f0-9]{20}_(insert|update|delete)$/u.test(name)) throw new Error('fixed-path test barrier trigger identity is invalid');
+      database.exec(`DROP TRIGGER "${name}"`);
+    }
     database.exec(`
       BEGIN IMMEDIATE;
+      DROP TABLE autopilot_s1_fixed_path_barrier;
       DROP TABLE result_details;
       DROP TABLE result_receipts;
       DROP TABLE mailbox_delivery_items;
@@ -50,6 +56,9 @@ export async function seedPhase34Schema6Database(env: ProcessEnvLike): Promise<s
       PRAGMA wal_checkpoint(TRUNCATE);
     `);
   } finally { database.close(); }
+  await rm(paths.currentStorePointerPath, { force: true });
+  await rm(paths.storesRoot, { recursive: true, force: true });
+  await mkdir(paths.storesRoot, { recursive: true, mode: 0o700 });
   return paths.databasePath;
 }
 
