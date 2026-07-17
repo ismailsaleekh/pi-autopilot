@@ -105,6 +105,26 @@ void describe('integration-time conflict classification', () => {
     } finally { await rm(value.root, { recursive: true, force: true }); }
   });
 
+  void it('fails closed when overlapping JSON cannot be parsed despite a clean textual merge', async () => {
+    const value = await fixture();
+    try {
+      const config = join(value.root, 'config.json');
+      const malformed = ['{', '  "left": 1,', '  "filler1": 1,', '  "filler2": 2,', '  "filler3": 3,', '  BROKEN_TOKEN,', '  "filler4": 4,', '  "filler5": 5,', '  "filler6": 6,', '  "right": 1', '}', ''].join('\n');
+      git(value.root, ['checkout', '-B', 'malformed-base', value.base]);
+      await writeFile(config, malformed, 'utf8');
+      git(value.root, ['add', 'config.json']);
+      git(value.root, ['commit', '-m', 'malformed json base']);
+      const malformedBase = git(value.root, ['rev-parse', 'HEAD']);
+      const predecessor = await branchCommit(value.root, malformedBase, 'malformed-predecessor', async () => replaceLine(config, 1, '  "left": 2,'));
+      const dependent = await branchCommit(value.root, malformedBase, 'malformed-dependent', async () => replaceLine(config, 9, '  "right": 2'));
+      const classification = classifyCoordinationIntegrationConflict({ repoRoot: value.root, predecessorCommit: predecessor, dependentCommit: dependent, overlappingPaths: ['config.json'] });
+      assert.equal(classification.merge_tree_status, 'clean');
+      assert.equal(classification.kind, 'semantic-key-conflict');
+      assert.equal(classification.disposition, 'repair-required');
+      assert.deepEqual(classification.semantic_keys, ['config.json#<uninspectable-json>']);
+    } finally { await rm(value.root, { recursive: true, force: true }); }
+  });
+
   void it('uses JSON semantic keys and protected surfaces even when textual integration could appear ordinary', async () => {
     const semantic = await fixture();
     try {
