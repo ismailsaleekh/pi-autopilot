@@ -25,6 +25,7 @@ import { AUTOPILOT_COORDINATOR_PROTOCOL_VERSION } from "./types.js";
 import { legacyConservativeIntegrationConflict } from "./integration-conflicts.js";
 import { deterministicWorktreeId } from "./worktree-identity.js";
 import { readCurrentStoreGeneration } from "./store-generation.js";
+import { GitQueryError, runGitQuery } from "../git-process.js";
 export const COORDINATION_MIGRATION_MAX_FILE_BYTES = 64 * 1024 * 1024;
 export const COORDINATION_MIGRATION_MAX_DATABASE_COMPONENT_BYTES = 256 * 1024 * 1024;
 export const COORDINATION_MIGRATION_MAX_TOTAL_BYTES = 256 * 1024 * 1024;
@@ -337,7 +338,7 @@ function ledgerTerminalizedRuns(rows, audit) {
             continue;
         const mainRemoved = ledger.some((entry) => entry['workstream_run'] === row.workstream_run && entry['autopilot_id'] === row.autopilot_id && entry['event'] === 'main-worktree-remove' && entry['path'] === row.main_worktree_path && Array.isArray(entry['proof']) && entry['proof'].includes('path_absent_after_remove'));
         const branchRetired = ledger.some((entry) => entry['workstream_run'] === row.workstream_run && entry['autopilot_id'] === row.autopilot_id && entry['event'] === 'branch-retire' && entry['branch'] === row.branch && Array.isArray(entry['proof']) && entry['proof'].includes('branch_deleted'));
-        const branchAbsent = gitText(row.source_repo, ['show-ref', '--verify', '--quiet', `refs/heads/${row.branch}`]) === null;
+        const branchAbsent = gitText(row.source_repo, { kind: 'ref-exists', ref: `refs/heads/${row.branch}` }) === null;
         if (mainRemoved && branchRetired && branchAbsent)
             terminalized.add(row.workstream_run);
     }
@@ -477,21 +478,39 @@ function readUnitMetadata(rows) {
     const frozenWorktrees = Object.freeze(worktrees);
     return { by_attempt: map, worktrees: frozenWorktrees, missingTaskInfoRuns, orphanAttempts };
 }
-function gitText(cwd, args) {
-    const result = spawnSync('git', [...args], { cwd, encoding: 'utf8' });
-    return result.status === 0 ? result.stdout.trim() : null;
+function migrationGitQuery(cwd, descriptor) {
+    try {
+        return runGitQuery({ cwd, descriptor });
+    }
+    catch (error) {
+        if (error instanceof GitQueryError)
+            failure('blocked', 'migration Git inspection failed', [cwd, error.message, error.diagnostic]);
+        throw error;
+    }
+}
+function migrationGitOutput(result, cwd) {
+    try {
+        return new TextDecoder('utf-8', { fatal: true }).decode(result.stdout);
+    }
+    catch {
+        return failure('blocked', 'migration Git output is not valid UTF-8', [cwd, result.descriptor]);
+    }
+}
+function gitText(cwd, descriptor) {
+    const result = migrationGitQuery(cwd, descriptor);
+    return result.negative ? null : migrationGitOutput(result, cwd).trim();
 }
 function exactCommit(repo, value) {
-    const commit = gitText(repo, ['rev-parse', '--verify', `${value}^{commit}`]);
+    const commit = gitText(repo, { kind: 'resolve-commit', revision: value });
     return commit !== null && /^[a-f0-9]{40,64}$/u.test(commit) ? commit : null;
 }
 function gitAncestor(repo, ancestor, descendant) {
-    return spawnSync('git', ['merge-base', '--is-ancestor', ancestor, descendant], { cwd: repo, encoding: 'utf8' }).status === 0;
+    return !migrationGitQuery(repo, { kind: 'is-ancestor', ancestor, descendant }).negative;
 }
 function gitWorktreeContains(repo, candidate) {
-    const output = gitText(repo, ['worktree', 'list', '--porcelain', '-z']);
+    const output = gitText(repo, { kind: 'worktree-list', nul: true });
     if (output === null)
-        return true;
+        return failure('blocked', 'migration Git worktree list unexpectedly reported absence', [repo]);
     const expected = resolve(candidate);
     return output.split('\0').some((entry) => entry.startsWith('worktree ') && resolve(entry.slice('worktree '.length)) === expected);
 }
@@ -528,11 +547,11 @@ function readLegacyMergeEvidence(rows) {
             const after = exactCommit(row.source_repo, merge.integration_after);
             const mergeCommit = exactCommit(row.source_repo, merge.merge_commit_sha);
             const unitHead = exactCommit(row.source_repo, merge.unit_head);
-            const currentHead = gitText(row.main_worktree_path, ['rev-parse', 'HEAD']);
-            const currentBranch = gitText(row.main_worktree_path, ['symbolic-ref', '--short', 'HEAD']);
-            const diff = before === null || after === null ? null : spawnSync('git', ['diff', '--name-only', '--no-renames', '-z', before, after], { cwd: row.source_repo, encoding: 'utf8' });
-            const actualPaths = diff?.status === 0 ? diff.stdout.split('\0').filter((entry) => entry.length > 0).map((entry) => entry.replace(/\\/gu, '/')).sort() : [];
-            const exact = before !== null && after !== null && mergeCommit === after && unitHead !== null && currentHead !== null && currentBranch === row.branch && gitAncestor(row.source_repo, before, after) && gitAncestor(row.source_repo, unitHead, after) && gitAncestor(row.source_repo, after, currentHead) && diff?.status === 0 && stableJson(actualPaths) === stableJson(normalizedPaths);
+            const currentHead = gitText(row.main_worktree_path, { kind: 'head' });
+            const currentBranch = gitText(row.main_worktree_path, { kind: 'current-branch' });
+            const diff = before === null || after === null ? null : migrationGitQuery(row.source_repo, { kind: 'diff-paths', from: before, to: after, noRenames: true });
+            const actualPaths = diff === null ? [] : migrationGitOutput(diff, row.source_repo).split('\0').filter((entry) => entry.length > 0).map((entry) => entry.replace(/\\/gu, '/')).sort();
+            const exact = before !== null && after !== null && mergeCommit === after && unitHead !== null && currentHead !== null && currentBranch === row.branch && gitAncestor(row.source_repo, before, after) && gitAncestor(row.source_repo, unitHead, after) && gitAncestor(row.source_repo, after, currentHead) && diff !== null && stableJson(actualPaths) === stableJson(normalizedPaths);
             if (!exact) {
                 blockers.push(`unit-merge exact Git object/ref/ancestry/diff proof failed: ${path}`);
                 continue;
@@ -551,8 +570,8 @@ function acceptedAttemptProof(row, metadata, record, path, action) {
     const base = exactCommit(row.source_repo, metadata.base_sha);
     if (current === null || base === null || !gitAncestor(row.source_repo, base, current))
         return null;
-    const branchRef = gitText(row.source_repo, ['rev-parse', '--verify', `refs/heads/${metadata.branch}`]);
-    const archiveRef = metadata.archive_ref === null ? null : gitText(row.source_repo, ['rev-parse', '--verify', `refs/heads/${metadata.archive_ref}`]);
+    const branchRef = gitText(row.source_repo, { kind: 'resolve-commit', revision: `refs/heads/${metadata.branch}` });
+    const archiveRef = metadata.archive_ref === null ? null : gitText(row.source_repo, { kind: 'resolve-commit', revision: `refs/heads/${metadata.archive_ref}` });
     const evidenceSha = digest(readBounded(path, LEGACY_PREFLIGHT_MAX_INPUT_BYTES));
     if (action === 'reset' || action === 'abort') {
         if (metadata.status !== 'aborted' || record['capture_commit_sha'] !== null || existsSync(metadata.worktree_path) || gitWorktreeContains(row.source_repo, metadata.worktree_path) || branchRef !== null || metadata.archive_ref !== null && archiveRef !== current)
@@ -568,9 +587,9 @@ function acceptedAttemptProof(row, metadata, record, path, action) {
     if (capture === null || capture !== current)
         return null;
     if (existsSync(metadata.worktree_path)) {
-        const head = gitText(metadata.worktree_path, ['rev-parse', 'HEAD']);
-        const branch = gitText(metadata.worktree_path, ['symbolic-ref', '--short', 'HEAD']);
-        const clean = gitText(metadata.worktree_path, ['status', '--porcelain=v1', '-z']);
+        const head = gitText(metadata.worktree_path, { kind: 'head' });
+        const branch = gitText(metadata.worktree_path, { kind: 'current-branch' });
+        const clean = gitText(metadata.worktree_path, { kind: 'status-porcelain' });
         if (head !== capture || branch !== metadata.branch || clean !== '' || branchRef !== capture)
             return null;
         const exactGitObjects = Object.freeze([base, capture]);
@@ -587,16 +606,16 @@ function acceptedRunProof(row, index, path, outcome, terminalValue) {
     if (row.status !== 'closed')
         return null;
     const terminal = exactCommit(row.source_repo, terminalValue);
-    if (terminal === null || existsSync(row.main_worktree_path) || gitWorktreeContains(row.source_repo, row.main_worktree_path) || gitText(row.source_repo, ['rev-parse', '--verify', `refs/heads/${row.branch}`]) !== null)
+    if (terminal === null || existsSync(row.main_worktree_path) || gitWorktreeContains(row.source_repo, row.main_worktree_path) || gitText(row.source_repo, { kind: 'resolve-commit', revision: `refs/heads/${row.branch}` }) !== null)
         return null;
     const archiveRef = `autopilot/archive/${row.workstream_run}/${outcome === 'closed' ? 'main' : 'aborted'}`;
-    if (gitText(row.source_repo, ['rev-parse', '--verify', `refs/heads/${archiveRef}`]) !== terminal)
+    if (gitText(row.source_repo, { kind: 'resolve-commit', revision: `refs/heads/${archiveRef}` }) !== terminal)
         return null;
     const indexed = index.filter((entry) => entry.workstream_run === row.workstream_run && entry.autopilot_id === row.autopilot_id && entry.status === 'archived' && resolve(entry.main_path) === resolve(row.main_worktree_path) && entry.branch === row.branch);
     if (indexed.length !== 1)
         return null;
     if (outcome === 'closed') {
-        if (row.target_branch === null || gitText(row.source_repo, ['rev-parse', '--verify', `refs/heads/${row.target_branch}`]) !== terminal)
+        if (row.target_branch === null || gitText(row.source_repo, { kind: 'resolve-commit', revision: `refs/heads/${row.target_branch}` }) !== terminal)
             return null;
     }
     const exactGitObjects = Object.freeze([terminal]);
@@ -765,16 +784,16 @@ function isInside(root, candidate) {
 }
 function captureGitSnapshot(rows, repository) {
     const snapshots = rows.map((row) => {
-        const sourceHead = existsSync(row.source_repo) ? spawnSync('git', ['rev-parse', 'HEAD'], { cwd: row.source_repo, encoding: 'utf8' }) : null;
-        const mainHead = existsSync(row.main_worktree_path) ? spawnSync('git', ['rev-parse', 'HEAD'], { cwd: row.main_worktree_path, encoding: 'utf8' }) : null;
-        const mainBranch = existsSync(row.main_worktree_path) ? spawnSync('git', ['symbolic-ref', '--short', 'HEAD'], { cwd: row.main_worktree_path, encoding: 'utf8' }) : null;
-        if (sourceHead === null || sourceHead.status !== 0 || mainHead !== null && mainHead.status !== 0 || mainBranch !== null && mainBranch.status !== 0)
+        const sourceHead = existsSync(row.source_repo) ? gitText(row.source_repo, { kind: 'head' }) : null;
+        const mainHead = existsSync(row.main_worktree_path) ? gitText(row.main_worktree_path, { kind: 'head' }) : null;
+        const mainBranch = existsSync(row.main_worktree_path) ? gitText(row.main_worktree_path, { kind: 'current-branch' }) : null;
+        if (sourceHead === null || existsSync(row.main_worktree_path) && (mainHead === null || mainBranch === null))
             failure('blocked', 'failed to capture migration Git state', [row.workstream_run]);
-        return { workstream_run: row.workstream_run, source_head: sourceHead.stdout.trim(), main_head: mainHead === null ? null : mainHead.stdout.trim(), main_branch: mainBranch === null ? null : mainBranch.stdout.trim() };
+        return { workstream_run: row.workstream_run, source_head: sourceHead, main_head: mainHead, main_branch: mainBranch };
     });
     if (snapshots.length === 0) {
-        const head = gitText(repository.canonical_root, ['rev-parse', 'HEAD']);
-        const branch = gitText(repository.canonical_root, ['symbolic-ref', '--short', 'HEAD']);
+        const head = gitText(repository.canonical_root, { kind: 'head' });
+        const branch = gitText(repository.canonical_root, { kind: 'current-branch' });
         if (head === null || branch === null)
             failure('blocked', 'failed to capture empty-repository migration Git state', [repository.canonical_root]);
         snapshots.push({ workstream_run: '@repository', source_head: head, main_head: head, main_branch: branch });
@@ -797,15 +816,9 @@ function inspectGit(rows, ledgerTerminalized) {
             blockers.push(`source repository is missing: ${row.source_repo}`);
             continue;
         }
-        const result = spawnSync('git', ['rev-parse', '--show-toplevel', '--git-common-dir'], { cwd: row.source_repo, encoding: 'utf8' });
-        if (result.status !== 0) {
-            blockers.push(`source repository Git verification failed: ${row.source_repo}`);
-            continue;
-        }
-        const lines = result.stdout.trim().split('\n');
-        const top = lines[0];
-        const common = lines[1];
-        if (top === undefined || common === undefined) {
+        const top = gitText(row.source_repo, { kind: 'show-toplevel' });
+        const common = gitText(row.source_repo, { kind: 'git-common-dir' });
+        if (top === null || common === null) {
             blockers.push(`source repository Git response is incomplete: ${row.source_repo}`);
             continue;
         }
@@ -820,8 +833,8 @@ function inspectGit(rows, ledgerTerminalized) {
             blockers.push(`source repository canonical path verification failed: ${row.workstream_run}`);
         }
         if (existsSync(row.main_worktree_path)) {
-            const branch = spawnSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: row.main_worktree_path, encoding: 'utf8' });
-            if (branch.status !== 0 || branch.stdout.trim() !== row.branch)
+            const branch = gitText(row.main_worktree_path, { kind: 'current-branch' });
+            if (branch !== row.branch)
                 blockers.push(`main worktree branch mismatch: ${row.workstream_run}`);
         }
         else if (row.status !== 'closed' && !ledgerTerminalized.has(row.workstream_run))

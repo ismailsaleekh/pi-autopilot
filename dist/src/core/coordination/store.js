@@ -1,5 +1,4 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { spawnSync } from 'node:child_process';
 import { createReadStream, chmodSync, closeSync, constants as fsConstants, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, renameSync, statSync, unlinkSync, writeSync } from 'node:fs';
 import { link, mkdir, open as openFile, rename, unlink } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
@@ -28,6 +27,7 @@ import { AUTOPILOT_WORKTREE_ALIAS_SCHEMA, deterministicWorktreeId, parseWorktree
 import { ensureCurrentStoreGeneration, publishRestoredStoreGeneration } from "./store-generation.js";
 import { CoordinatorWriterGuard } from "./writer-guard.js";
 import { deriveWorktreeOperationKeyV2, operationIdFromWorktreeOperationKey } from "./worktree-operation-identity.js";
+import { GitQueryError, runGitQuery } from "../git-process.js";
 const DATABASE_EXPORT_SCHEMA = 'autopilot.coordinator_export.v1';
 const SHA256_PATTERN = /^sha256:[a-f0-9]{64}$/u;
 const MAX_COORDINATION_EVIDENCE_BYTES = 1024 * 1024;
@@ -4020,16 +4020,16 @@ export class CoordinatorStore {
             const ref = payloadString(request.payload, 'ref');
             this.#evidencePathUnderRoot(sourceRoot, ref);
             const gitCommit = payloadString(request.payload, 'git_commit');
-            const verifiedCommit = spawnSync('git', ['rev-parse', '--verify', `${gitCommit}^{commit}`], { cwd: sourceRoot, encoding: 'utf8', timeout: 30_000 });
-            if (verifiedCommit.status !== 0 || verifiedCommit.stdout.trim() !== gitCommit)
-                throw new CoordinationRuntimeError('invalid-request', 'authoritative artifact git_commit is not the exact verified commit in its registered source repository', [gitCommit, verifiedCommit.stderr.trim()]);
-            const sourceHead = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: sourceRoot, encoding: 'utf8', timeout: 30_000 });
-            if (sourceHead.status !== 0 || sourceHead.stdout.trim() !== gitCommit)
-                throw new CoordinationRuntimeError('invalid-request', 'authoritative artifact must be registered from the exact current source authority HEAD', [gitCommit, sourceHead.stdout.trim()]);
-            const shown = spawnSync('git', ['show', `${gitCommit}:${ref}`], { cwd: sourceRoot, encoding: 'utf8', timeout: 30_000, maxBuffer: MAX_COORDINATION_EVIDENCE_BYTES + 65_536 });
-            if (shown.status !== 0)
-                throw new CoordinationRuntimeError('invalid-request', 'authoritative artifact ref is not a blob at the immutable Git commit', [ref, shown.stderr.trim()]);
-            const bytes = Buffer.from(shown.stdout, 'utf8');
+            const verifiedCommit = this.#gitQueryText(sourceRoot, { kind: 'resolve-commit', revision: gitCommit }, 'invalid-request', 'authoritative artifact Git commit verification failed');
+            if (verifiedCommit !== gitCommit)
+                throw new CoordinationRuntimeError('invalid-request', 'authoritative artifact git_commit is not the exact verified commit in its registered source repository', [gitCommit, String(verifiedCommit)]);
+            const sourceHead = this.#gitQueryText(sourceRoot, { kind: 'head' }, 'invalid-request', 'authoritative artifact source HEAD inspection failed');
+            if (sourceHead !== gitCommit)
+                throw new CoordinationRuntimeError('invalid-request', 'authoritative artifact must be registered from the exact current source authority HEAD', [gitCommit, String(sourceHead)]);
+            const shown = this.#gitQueryResult(sourceRoot, { kind: 'show-file', revision: gitCommit, path: ref }, 'invalid-request', 'authoritative artifact ref is not a blob at the immutable Git commit');
+            if (shown.stdout.byteLength > MAX_COORDINATION_EVIDENCE_BYTES)
+                throw new CoordinationRuntimeError('invalid-request', 'authoritative artifact Git blob exceeds the immutable evidence byte bound', [ref, `bytes=${String(shown.stdout.byteLength)}`]);
+            const bytes = shown.stdout;
             const evidence = { ref, sha256: payloadString(request.payload, 'sha256') };
             const actual = `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
             if (actual !== evidence.sha256)
@@ -5196,17 +5196,14 @@ export class CoordinatorStore {
     #assertReservationIntegrationGitFacts(run, predecessorTerminalSha, integrationHead, protectedPaths, requireExactHead) {
         const repository = repositoryFromRow(asRow(this.#db.prepare('SELECT * FROM repositories WHERE repo_id=?').get(run.repo_id), 'reservation integration repository'));
         const mainRoot = resolve(this.#stateRoot, 'worktrees', repository.repo_key, 'active', run.workstream_run, 'main');
-        const head = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: mainRoot, encoding: 'utf8' });
-        const currentHead = head.stdout.trim();
-        if ((head.status ?? -1) !== 0)
-            throw new CoordinationRuntimeError('invalid-state', 'reservation integration owned workstream HEAD is unreadable', [head.stderr.trim()]);
+        const currentHead = this.#gitQueryText(mainRoot, { kind: 'head' }, 'invalid-state', 'reservation integration owned workstream HEAD is unreadable');
+        if (currentHead === null)
+            throw new CoordinationRuntimeError('invalid-state', 'reservation integration owned workstream HEAD is absent');
         if (currentHead !== integrationHead) {
             if (requireExactHead || !this.#gitCommitIsAncestor(run, integrationHead, currentHead))
                 throw new CoordinationRuntimeError('invalid-state', 'reservation integration evidence is not the current owned workstream HEAD', [`actual=${currentHead}`, `evidence=${integrationHead}`]);
-            const diff = spawnSync('git', ['diff', '--name-only', '--no-renames', '-z', integrationHead, currentHead], { cwd: mainRoot, encoding: 'utf8' });
-            if ((diff.status ?? -1) !== 0)
-                throw new CoordinationRuntimeError('invalid-state', 'failed to verify post-validation reservation path stability', [diff.stderr.trim()]);
-            const changed = diff.stdout.split('\0').filter((path) => path.length > 0);
+            const diff = this.#gitQueryResult(mainRoot, { kind: 'diff-paths', from: integrationHead, to: currentHead, noRenames: true }, 'invalid-state', 'failed to verify post-validation reservation path stability');
+            const changed = this.#gitOutputText(diff, 'invalid-state', 'post-validation reservation path output is not valid UTF-8', mainRoot).split('\0').filter((path) => path.length > 0);
             const invalidating = changed.filter((path) => protectedPaths.some((protectedPath) => coordinationPathsOverlap(path, protectedPath)));
             if (invalidating.length > 0)
                 throw new CoordinationRuntimeError('invalid-state', 'resolved reservation validation became stale on overlapping paths', invalidating);
@@ -5217,38 +5214,24 @@ export class CoordinatorStore {
     #gitCommitIsAncestor(run, ancestor, descendant) {
         const repository = repositoryFromRow(asRow(this.#db.prepare('SELECT * FROM repositories WHERE repo_id=?').get(run.repo_id), 'reservation ancestry repository'));
         const mainRoot = resolve(this.#stateRoot, 'worktrees', repository.repo_key, 'active', run.workstream_run, 'main');
-        const result = spawnSync('git', ['merge-base', '--is-ancestor', ancestor, descendant], { cwd: mainRoot, encoding: 'utf8' });
-        if ((result.status ?? -1) === 0)
-            return true;
-        if ((result.status ?? -1) === 1)
-            return false;
-        throw new CoordinationRuntimeError('invalid-state', 'failed to verify predecessor landing ancestry', [ancestor, descendant, result.stderr.trim()]);
+        const result = this.#gitQueryResult(mainRoot, { kind: 'is-ancestor', ancestor, descendant }, 'invalid-state', 'failed to verify predecessor landing ancestry');
+        return !result.negative;
     }
     #assertUnitMergeGitFacts(run, facts) {
         const repository = repositoryFromRow(asRow(this.#db.prepare('SELECT * FROM repositories WHERE repo_id=?').get(run.repo_id), 'merge repository'));
         const mainRoot = resolve(this.#stateRoot, 'worktrees', repository.repo_key, 'active', run.workstream_run, 'main');
-        const git = (args) => {
-            const result = spawnSync('git', [...args], { cwd: mainRoot, encoding: 'utf8' });
-            return { status: result.status ?? -1, stdout: result.stdout, stderr: result.stderr };
-        };
-        const head = git(['rev-parse', 'HEAD']);
-        if (head.status !== 0 || facts.mergeCommitSha !== facts.integrationAfter)
-            throw new CoordinationRuntimeError('invalid-state', 'unit-merge evidence integration head or merge commit is invalid', [head.stderr.trim(), `actual=${head.stdout.trim()}`, `evidence=${facts.integrationAfter}`]);
-        const integrated = git(['merge-base', '--is-ancestor', facts.integrationAfter, head.stdout.trim()]);
-        if (integrated.status !== 0)
-            throw new CoordinationRuntimeError('invalid-state', 'unit-merge evidence integration head is not contained in the owned workstream HEAD', [facts.integrationAfter, head.stdout.trim(), integrated.stderr.trim()]);
-        for (const sha of [facts.integrationBefore, facts.integrationAfter]) {
-            const object = git(['cat-file', '-e', `${sha}^{commit}`]);
-            if (object.status !== 0)
-                throw new CoordinationRuntimeError('invalid-state', 'unit-merge evidence references a missing Git commit', [sha, object.stderr.trim()]);
-        }
-        const ancestor = git(['merge-base', '--is-ancestor', facts.integrationBefore, facts.integrationAfter]);
-        if (ancestor.status !== 0)
+        const head = this.#gitQueryText(mainRoot, { kind: 'head' }, 'invalid-state', 'unit-merge owned workstream HEAD is unreadable');
+        if (head === null || facts.mergeCommitSha !== facts.integrationAfter)
+            throw new CoordinationRuntimeError('invalid-state', 'unit-merge evidence integration head or merge commit is invalid', [`actual=${String(head)}`, `evidence=${facts.integrationAfter}`]);
+        if (this.#gitQueryResult(mainRoot, { kind: 'is-ancestor', ancestor: facts.integrationAfter, descendant: head }, 'invalid-state', 'unit-merge integration containment inspection failed').negative)
+            throw new CoordinationRuntimeError('invalid-state', 'unit-merge evidence integration head is not contained in the owned workstream HEAD', [facts.integrationAfter, head]);
+        for (const sha of [facts.integrationBefore, facts.integrationAfter])
+            if (this.#gitQueryResult(mainRoot, { kind: 'commit-exists', revision: sha }, 'invalid-state', 'unit-merge Git object inspection failed').negative)
+                throw new CoordinationRuntimeError('invalid-state', 'unit-merge evidence references a missing Git commit', [sha]);
+        if (this.#gitQueryResult(mainRoot, { kind: 'is-ancestor', ancestor: facts.integrationBefore, descendant: facts.integrationAfter }, 'invalid-state', 'unit-merge ancestry inspection failed').negative)
             throw new CoordinationRuntimeError('invalid-state', 'unit-merge integration_before is not an ancestor of integration_after', [facts.integrationBefore, facts.integrationAfter]);
-        const diff = git(['diff', '--name-only', '--no-renames', '-z', facts.integrationBefore, facts.integrationAfter]);
-        if (diff.status !== 0)
-            throw new CoordinationRuntimeError('invalid-state', 'failed to derive exact unit-merge Git diff', [diff.stderr.trim()]);
-        const actualPaths = diff.stdout.split('\0').filter((path) => path.length > 0).map((path) => path.replace(/\\/gu, '/')).sort((left, right) => left.localeCompare(right));
+        const diff = this.#gitQueryResult(mainRoot, { kind: 'diff-paths', from: facts.integrationBefore, to: facts.integrationAfter, noRenames: true }, 'invalid-state', 'failed to derive exact unit-merge Git diff');
+        const actualPaths = this.#gitOutputText(diff, 'invalid-state', 'unit-merge diff output is not valid UTF-8', mainRoot).split('\0').filter((path) => path.length > 0).map((path) => path.replace(/\\/gu, '/')).sort((left, right) => left.localeCompare(right));
         const declaredPaths = [...facts.changedPaths].sort((left, right) => left.localeCompare(right));
         if (canonicalJson(actualPaths) !== canonicalJson(declaredPaths))
             throw new CoordinationRuntimeError('invalid-state', 'unit-merge changed_paths do not equal the exact Git diff', [`actual=${actualPaths.join(',')}`, `declared=${declaredPaths.join(',')}`]);
@@ -5257,14 +5240,14 @@ export class CoordinatorStore {
         const repository = repositoryFromRow(asRow(this.#db.prepare('SELECT * FROM repositories WHERE repo_id=?').get(run.repo_id), 'terminal repository'));
         const mainRoot = resolve(this.#stateRoot, 'worktrees', repository.repo_key, 'active', run.workstream_run, 'main');
         const terminalRoot = source === 'run-close' ? repository.canonical_root : mainRoot;
-        const head = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: terminalRoot, encoding: 'utf8' });
-        if ((head.status ?? -1) !== 0 || head.stdout.trim() !== terminalSha)
-            throw new CoordinationRuntimeError('invalid-state', `${source} terminal commit is not the authoritative Git HEAD`, [head.stderr.trim(), `actual=${head.stdout.trim()}`, `evidence=${terminalSha}`]);
+        const head = this.#gitQueryText(terminalRoot, { kind: 'head' }, 'invalid-state', `${source} authoritative Git HEAD is unreadable`);
+        if (head !== terminalSha)
+            throw new CoordinationRuntimeError('invalid-state', `${source} terminal commit is not the authoritative Git HEAD`, [`actual=${String(head)}`, `evidence=${terminalSha}`]);
         const reservations = this.#db.prepare('SELECT * FROM change_reservations WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(run.repo_id, run.workstream_run).map(changeReservationFromRow);
         for (const reservation of reservations) {
             const facts = parseUnitMergeReservationFacts(this.#verifyAcceptedEvidenceFile(run, 'unit-merge', this.#targetIdForMergeEvidence(run, reservation.merge_evidence), reservation.merge_evidence));
-            const ancestor = spawnSync('git', ['merge-base', '--is-ancestor', facts.integrationAfter, terminalSha], { cwd: terminalRoot, encoding: 'utf8' });
-            if ((ancestor.status ?? -1) !== 0)
+            const ancestor = this.#gitQueryResult(terminalRoot, { kind: 'is-ancestor', ancestor: facts.integrationAfter, descendant: terminalSha }, 'invalid-state', 'terminal reservation ancestry inspection failed');
+            if (ancestor.negative)
                 throw new CoordinationRuntimeError('invalid-state', 'terminal commit does not contain every reserved accepted merge', [reservation.reservation_id, facts.integrationAfter, terminalSha]);
         }
     }
@@ -5594,15 +5577,15 @@ export class CoordinatorStore {
             throw new CoordinationRuntimeError('invalid-state', 'unit failure evidence does not identify exactly one registered owner worktree', [facts.unitWorktreePath]);
         if (!existsSync(worktree.canonical_path))
             throw new CoordinationRuntimeError('recovery-required', 'unit failure evidence worktree disappeared before coordinator verification; edit authority remains retained', [worktree.canonical_path]);
-        const commonRaw = spawnSync('git', ['rev-parse', '--git-common-dir'], { cwd: worktree.canonical_path, encoding: 'utf8', timeout: 30_000 });
-        const head = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: worktree.canonical_path, encoding: 'utf8', timeout: 30_000 });
-        const branch = spawnSync('git', ['symbolic-ref', '--quiet', '--short', 'HEAD'], { cwd: worktree.canonical_path, encoding: 'utf8', timeout: 30_000 });
-        const status = spawnSync('git', ['status', '--porcelain=v1', '-z', '--untracked-files=all', '--ignored=matching', '--ignore-submodules=none'], { cwd: worktree.canonical_path, encoding: 'utf8', timeout: 30_000, maxBuffer: 1024 * 1024 });
-        if ((commonRaw.status ?? -1) !== 0 || (head.status ?? -1) !== 0 || (branch.status ?? -1) !== 0 || (status.status ?? -1) !== 0)
-            throw new CoordinationRuntimeError('recovery-required', 'coordinator could not verify unit failure Git postconditions', [commonRaw.stderr.trim(), head.stderr.trim(), branch.stderr.trim(), status.stderr.trim()]);
-        const actualCommon = realpathSync(isAbsolute(commonRaw.stdout.trim()) ? commonRaw.stdout.trim() : resolve(worktree.canonical_path, commonRaw.stdout.trim()));
-        if (actualCommon !== realpathSync(worktree.git_common_dir) || actualCommon !== realpathSync(facts.gitCommonDir) || branch.stdout.trim() !== worktree.branch || branch.stdout.trim() !== facts.branch || head.stdout.trim() !== facts.gitHeadAfter || status.stdout.length !== 0)
-            throw new CoordinationRuntimeError('recovery-required', 'unit failure Git postconditions differ from durable worktree evidence', [`common=${actualCommon}`, `branch=${branch.stdout.trim()}`, `head=${head.stdout.trim()}`, `mutable=${String(status.stdout.length)}`]);
+        const commonRaw = this.#gitQueryText(worktree.canonical_path, { kind: 'git-common-dir' }, 'recovery-required', 'coordinator could not verify unit failure Git common directory');
+        const head = this.#gitQueryText(worktree.canonical_path, { kind: 'head' }, 'recovery-required', 'coordinator could not verify unit failure Git HEAD');
+        const branch = this.#gitQueryText(worktree.canonical_path, { kind: 'current-branch' }, 'recovery-required', 'coordinator could not verify unit failure Git branch');
+        const status = this.#gitQueryResult(worktree.canonical_path, { kind: 'status-porcelain', includeIgnored: true }, 'recovery-required', 'coordinator could not verify unit failure Git status');
+        if (commonRaw === null || head === null || branch === null)
+            throw new CoordinationRuntimeError('recovery-required', 'coordinator could not verify unit failure Git postconditions');
+        const actualCommon = realpathSync(isAbsolute(commonRaw) ? commonRaw : resolve(worktree.canonical_path, commonRaw));
+        if (actualCommon !== realpathSync(worktree.git_common_dir) || actualCommon !== realpathSync(facts.gitCommonDir) || branch !== worktree.branch || branch !== facts.branch || head !== facts.gitHeadAfter || status.stdout.byteLength !== 0)
+            throw new CoordinationRuntimeError('recovery-required', 'unit failure Git postconditions differ from durable worktree evidence', [`common=${actualCommon}`, `branch=${branch}`, `head=${head}`, `mutable=${String(status.stdout.byteLength)}`]);
         if (source === 'attempt-reset' && facts.action !== 'reset' && facts.action !== 'abort')
             throw new CoordinationRuntimeError('invalid-state', 'attempt-reset source requires reset/abort failure evidence');
         if (source === 'quarantine-capture') {
@@ -5611,9 +5594,9 @@ export class CoordinatorStore {
             if (facts.captureCommitSha !== facts.gitHeadAfter || facts.captureRef === null || !facts.captureRef.startsWith(`autopilot/archive/${run.workstream_run}/`))
                 throw new CoordinationRuntimeError('invalid-state', 'quarantine evidence capture identity is not exact');
             const resource = runResourceFromRow(asRow(this.#db.prepare('SELECT * FROM run_resources WHERE repo_id=? AND workstream_run=?').get(run.repo_id, run.workstream_run), 'quarantine run resource'));
-            const ref = spawnSync('git', ['rev-parse', '--verify', `refs/heads/${facts.captureRef}^{commit}`], { cwd: resource.source_repo, encoding: 'utf8', timeout: 30_000 });
-            if ((ref.status ?? -1) !== 0 || ref.stdout.trim() !== facts.captureCommitSha)
-                throw new CoordinationRuntimeError('recovery-required', 'quarantine archive ref does not preserve the exact capture commit', [facts.captureRef, ref.stdout.trim(), ref.stderr.trim()]);
+            const ref = this.#gitQueryText(resource.source_repo, { kind: 'resolve-commit', revision: `refs/heads/${facts.captureRef}` }, 'recovery-required', 'quarantine archive ref inspection failed');
+            if (ref !== facts.captureCommitSha)
+                throw new CoordinationRuntimeError('recovery-required', 'quarantine archive ref does not preserve the exact capture commit', [facts.captureRef, String(ref)]);
         }
     }
     #updateAttemptForSatisfiedCondition(owner, conditionType) {
@@ -6642,26 +6625,26 @@ export class CoordinatorStore {
             const facts = parseUnitMergeReservationFacts(bytes);
             const document = this.#parseMigrationRecoveryEvidence(bytes);
             const unitHeadValue = document['unit_head'];
-            const unitHead = typeof unitHeadValue === 'string' ? this.#gitText(resource.source_repo, ['rev-parse', '--verify', `${unitHeadValue}^{commit}`]) : null;
-            const before = this.#gitText(resource.source_repo, ['rev-parse', '--verify', `${facts.integrationBefore}^{commit}`]);
-            const after = this.#gitText(resource.source_repo, ['rev-parse', '--verify', `${facts.integrationAfter}^{commit}`]);
-            const mergeCommit = this.#gitText(resource.source_repo, ['rev-parse', '--verify', `${facts.mergeCommitSha}^{commit}`]);
-            const head = this.#gitText(resource.main_worktree_path, ['rev-parse', 'HEAD']);
-            const branch = this.#gitText(resource.main_worktree_path, ['symbolic-ref', '--short', 'HEAD']);
-            const beforeAncestor = before !== null && after !== null && spawnSync('git', ['merge-base', '--is-ancestor', before, after], { cwd: resource.source_repo, encoding: 'utf8', timeout: 30_000 }).status === 0;
-            const unitAncestor = unitHead !== null && after !== null && spawnSync('git', ['merge-base', '--is-ancestor', unitHead, after], { cwd: resource.source_repo, encoding: 'utf8', timeout: 30_000 }).status === 0;
-            const diff = before === null || after === null ? null : spawnSync('git', ['diff', '--name-only', '--no-renames', '-z', before, after], { cwd: resource.source_repo, encoding: 'utf8', timeout: 30_000 });
-            const actualPaths = diff?.status === 0 ? diff.stdout.split('\0').filter((entry) => entry.length > 0).map((entry) => entry.replace(/\\/gu, '/')).sort() : [];
+            const unitHead = typeof unitHeadValue === 'string' ? this.#gitQueryText(resource.source_repo, { kind: 'resolve-commit', revision: unitHeadValue }, 'invalid-state', 'migration recovery unit HEAD inspection failed') : null;
+            const before = this.#gitQueryText(resource.source_repo, { kind: 'resolve-commit', revision: facts.integrationBefore }, 'invalid-state', 'migration recovery integration-before inspection failed');
+            const after = this.#gitQueryText(resource.source_repo, { kind: 'resolve-commit', revision: facts.integrationAfter }, 'invalid-state', 'migration recovery integration-after inspection failed');
+            const mergeCommit = this.#gitQueryText(resource.source_repo, { kind: 'resolve-commit', revision: facts.mergeCommitSha }, 'invalid-state', 'migration recovery merge-commit inspection failed');
+            const head = this.#gitQueryText(resource.main_worktree_path, { kind: 'head' }, 'invalid-state', 'migration recovery main HEAD inspection failed');
+            const branch = this.#gitQueryText(resource.main_worktree_path, { kind: 'current-branch' }, 'invalid-state', 'migration recovery main branch inspection failed');
+            const beforeAncestor = before !== null && after !== null && !this.#gitQueryResult(resource.source_repo, { kind: 'is-ancestor', ancestor: before, descendant: after }, 'invalid-state', 'migration recovery integration ancestry inspection failed').negative;
+            const unitAncestor = unitHead !== null && after !== null && !this.#gitQueryResult(resource.source_repo, { kind: 'is-ancestor', ancestor: unitHead, descendant: after }, 'invalid-state', 'migration recovery unit ancestry inspection failed').negative;
+            const diff = before === null || after === null ? null : this.#gitQueryResult(resource.source_repo, { kind: 'diff-paths', from: before, to: after, noRenames: true }, 'invalid-state', 'migration recovery exact diff inspection failed');
+            const actualPaths = diff === null ? [] : this.#gitOutputText(diff, 'invalid-state', 'migration recovery exact diff output is invalid', resource.source_repo).split('\0').filter((entry) => entry.length > 0).map((entry) => entry.replace(/\\/gu, '/')).sort();
             const declaredPaths = [...facts.changedPaths].sort();
             const claimCovered = declaredPaths.some((changedPath) => coordinationPathsOverlap(claim.path, changedPath));
-            if (document['main_branch'] !== resource.branch || head !== after || after === null || mergeCommit !== after || branch !== resource.branch || !beforeAncestor || !unitAncestor || diff?.status !== 0 || canonicalJson(actualPaths) !== canonicalJson(declaredPaths) || !claimCovered)
+            if (document['main_branch'] !== resource.branch || head !== after || after === null || mergeCommit !== after || branch !== resource.branch || !beforeAncestor || !unitAncestor || diff === null || canonicalJson(actualPaths) !== canonicalJson(declaredPaths) || !claimCovered)
                 throw new CoordinationRuntimeError('invalid-state', 'unit-merge migration recovery lacks exact claim/Git object/ref/ancestry/diff postconditions', [`claim=${claim.path}`, `head=${String(head)}`, `integration_after=${String(after)}`, `branch=${String(branch)}`, `actual_paths=${actualPaths.join(',')}`, `declared_paths=${declaredPaths.join(',')}`]);
             postconditions.push(`main-head:${head}`, `main-branch:${branch}`, `claim-covered-by-diff:${claim.path}`);
         }
         else if (source === 'attempt-reset') {
             const worktree = this.#migrationRecoveryUnitWorktree(run, claim.unitId, claim.attempt);
             const document = this.#parseMigrationRecoveryEvidence(bytes);
-            if (document['unit_worktree_path'] !== worktree.canonical_path || document['capture_commit_sha'] !== null || (worktree.state !== 'terminal' && worktree.state !== 'removed') || existsSync(worktree.canonical_path) || this.#gitWorktreeRegistered(resource.source_repo, worktree.canonical_path) || this.#gitText(resource.source_repo, ['rev-parse', '--verify', `refs/heads/${worktree.branch}`]) !== null)
+            if (document['unit_worktree_path'] !== worktree.canonical_path || document['capture_commit_sha'] !== null || (worktree.state !== 'terminal' && worktree.state !== 'removed') || existsSync(worktree.canonical_path) || this.#gitWorktreeRegistered(resource.source_repo, worktree.canonical_path) || this.#gitQueryText(resource.source_repo, { kind: 'resolve-commit', revision: `refs/heads/${worktree.branch}` }, 'invalid-state', 'attempt-reset branch inspection failed') !== null)
                 throw new CoordinationRuntimeError('invalid-state', 'attempt-reset migration recovery postconditions are not exact', [worktree.canonical_path, worktree.branch, worktree.state]);
             postconditions.push(`worktree-absent:${worktree.canonical_path}`, `branch-ref-absent:${worktree.branch}`, `worktree-state:${worktree.state}`);
         }
@@ -6669,10 +6652,11 @@ export class CoordinatorStore {
             const worktree = this.#migrationRecoveryUnitWorktree(run, claim.unitId, claim.attempt);
             const document = this.#parseMigrationRecoveryEvidence(bytes);
             const capture = document['capture_commit_sha'];
-            const head = existsSync(worktree.canonical_path) ? this.#gitText(worktree.canonical_path, ['rev-parse', 'HEAD']) : null;
-            const branch = existsSync(worktree.canonical_path) ? this.#gitText(worktree.canonical_path, ['symbolic-ref', '--short', 'HEAD']) : null;
-            const branchRef = this.#gitText(resource.source_repo, ['rev-parse', '--verify', `refs/heads/${worktree.branch}`]);
-            const clean = existsSync(worktree.canonical_path) ? this.#gitText(worktree.canonical_path, ['status', '--porcelain=v1', '-z']) : null;
+            const head = existsSync(worktree.canonical_path) ? this.#gitQueryText(worktree.canonical_path, { kind: 'head' }, 'invalid-state', 'quarantine recovery HEAD inspection failed') : null;
+            const branch = existsSync(worktree.canonical_path) ? this.#gitQueryText(worktree.canonical_path, { kind: 'current-branch' }, 'invalid-state', 'quarantine recovery branch inspection failed') : null;
+            const branchRef = this.#gitQueryText(resource.source_repo, { kind: 'resolve-commit', revision: `refs/heads/${worktree.branch}` }, 'invalid-state', 'quarantine recovery branch ref inspection failed');
+            const cleanResult = existsSync(worktree.canonical_path) ? this.#gitQueryResult(worktree.canonical_path, { kind: 'status-porcelain' }, 'invalid-state', 'quarantine recovery status inspection failed') : null;
+            const clean = cleanResult === null ? null : this.#gitOutputText(cleanResult, 'invalid-state', 'quarantine recovery status output is invalid', worktree.canonical_path);
             if (document['unit_worktree_path'] !== worktree.canonical_path || worktree.state !== 'quarantined' || typeof capture !== 'string' || head !== capture || branch !== worktree.branch || branchRef !== capture || clean !== '')
                 throw new CoordinationRuntimeError('invalid-state', 'quarantine migration recovery requires the exact clean captured worktree/ref postcondition', [worktree.canonical_path, String(capture), String(head), String(branch), String(branchRef), String(clean)]);
             postconditions.push(`quarantined-head:${capture}`, `quarantined-branch:${worktree.branch}`, `clean-worktree:${worktree.canonical_path}`);
@@ -6682,7 +6666,7 @@ export class CoordinatorStore {
             const main = this.#migrationRecoveryMainWorktree(run);
             const terminalSha = parseRunTerminalSha(bytes);
             const archiveRef = `autopilot/archive/${run.workstream_run}/${source === 'run-close' ? 'main' : 'aborted'}`;
-            if (run.status !== expectedStatus || (main.state !== 'terminal' && main.state !== 'removed') || existsSync(main.canonical_path) || this.#gitWorktreeRegistered(resource.source_repo, main.canonical_path) || this.#gitText(resource.source_repo, ['rev-parse', '--verify', `refs/heads/${main.branch}`]) !== null || this.#gitText(resource.source_repo, ['rev-parse', '--verify', `refs/heads/${archiveRef}`]) !== terminalSha || source === 'run-close' && (resource.target_branch === null || this.#gitText(resource.source_repo, ['rev-parse', '--verify', `refs/heads/${resource.target_branch}`]) !== terminalSha))
+            if (run.status !== expectedStatus || (main.state !== 'terminal' && main.state !== 'removed') || existsSync(main.canonical_path) || this.#gitWorktreeRegistered(resource.source_repo, main.canonical_path) || this.#gitQueryText(resource.source_repo, { kind: 'resolve-commit', revision: `refs/heads/${main.branch}` }, 'invalid-state', 'run-terminal main branch inspection failed') !== null || this.#gitQueryText(resource.source_repo, { kind: 'resolve-commit', revision: `refs/heads/${archiveRef}` }, 'invalid-state', 'run-terminal archive ref inspection failed') !== terminalSha || source === 'run-close' && (resource.target_branch === null || this.#gitQueryText(resource.source_repo, { kind: 'resolve-commit', revision: `refs/heads/${resource.target_branch}` }, 'invalid-state', 'run-close target branch inspection failed') !== terminalSha))
                 throw new CoordinationRuntimeError('invalid-state', 'run-terminal migration recovery postconditions are not exact and terminal state was not changed', [run.status, main.state, main.canonical_path, main.branch, archiveRef, terminalSha]);
             postconditions.push(`run-status:${run.status}`, `main-worktree-absent:${main.canonical_path}`, `archive-ref:${archiveRef}:${terminalSha}`);
         }
@@ -6700,16 +6684,39 @@ export class CoordinatorStore {
             throw new CoordinationRuntimeError('invalid-state', 'migration recovery requires exactly one durable main worktree', [run.workstream_run]);
         return rows[0];
     }
-    #gitText(cwd, args) {
-        const result = spawnSync('git', [...args], { cwd, encoding: 'utf8', timeout: 30_000 });
-        return result.status === 0 ? result.stdout.trim() : null;
+    #gitQueryResult(cwd, descriptor, failureCode, message) {
+        try {
+            return runGitQuery({ cwd, descriptor });
+        }
+        catch (error) {
+            if (error instanceof GitQueryError)
+                throw new CoordinationRuntimeError(failureCode, message, [cwd, error.message, error.diagnostic]);
+            throw error;
+        }
+    }
+    #gitOutputText(result, failureCode, message, cwd) {
+        try {
+            return new TextDecoder('utf-8', { fatal: true }).decode(result.stdout);
+        }
+        catch {
+            throw new CoordinationRuntimeError(failureCode, message, [cwd, result.descriptor, 'Git output is not valid UTF-8']);
+        }
+    }
+    #gitQueryText(cwd, descriptor, failureCode, message) {
+        const result = this.#gitQueryResult(cwd, descriptor, failureCode, message);
+        return result.negative ? null : this.#gitOutputText(result, failureCode, `${message}; Git output is not valid UTF-8`, cwd).trim();
     }
     #gitWorktreeRegistered(repoRoot, candidate) {
-        const result = spawnSync('git', ['worktree', 'list', '--porcelain', '-z'], { cwd: repoRoot, encoding: 'utf8', timeout: 30_000 });
-        if (result.status !== 0)
-            throw new CoordinationRuntimeError('recovery-required', 'Git worktree registration inspection failed', [repoRoot, result.stderr]);
+        const result = this.#gitQueryResult(repoRoot, { kind: 'worktree-list', nul: true }, 'recovery-required', 'Git worktree registration inspection failed');
+        let text;
+        try {
+            text = new TextDecoder('utf-8', { fatal: true }).decode(result.stdout);
+        }
+        catch {
+            throw new CoordinationRuntimeError('recovery-required', 'Git worktree registration output is not valid UTF-8', [repoRoot]);
+        }
         const expected = resolve(candidate);
-        return result.stdout.split('\0').some((entry) => entry.startsWith('worktree ') && resolve(entry.slice('worktree '.length)) === expected);
+        return text.split('\0').some((entry) => entry.startsWith('worktree ') && resolve(entry.slice('worktree '.length)) === expected);
     }
     #requireRun(repoId, workstreamRun) {
         return runFromRow(asRow(this.#runByIdentity.get(repoId, workstreamRun), 'run'));
