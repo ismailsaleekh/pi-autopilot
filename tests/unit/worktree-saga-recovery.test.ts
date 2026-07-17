@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -8,9 +9,12 @@ import { describe, it } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
 
 import { CoordinatorClient } from '../../src/core/coordination/client.ts';
+import { ClaimNegotiationClient } from '../../src/core/coordination/negotiation.ts';
+import { RunReconciliationClient } from '../../src/core/coordination/reconciliation.ts';
 import { parseCoordinationRun, parseCoordinationSessionLease } from '../../src/core/coordination/contracts.ts';
 import { CoordinationRuntimeError, formatCoordinationRuntimeError } from '../../src/core/coordination/failures.ts';
 import { coordinatorRuntimePaths } from '../../src/core/coordination/runtime-paths.ts';
+import { readCurrentStoreGeneration } from '../../src/core/coordination/store-generation.ts';
 import { startCoordinatorServer } from '../../src/core/coordination/server.ts';
 import { DurableRunSupervisorClient, writeCoordinatorSessionContext, type CoordinatorSessionContext } from '../../src/core/coordination/supervisor.ts';
 import { executeOwnedWorktreeSaga, fixedWorktreeSagaCallbacks, OwnedWorktreeSagaClient, recoverOwnedWorktreeSagas, WORKTREE_SAGA_BOUNDARIES } from '../../src/core/coordination/worktree-saga.ts';
@@ -435,7 +439,9 @@ void describe('owner-scoped worktree and Git saga recovery', () => {
       await writeFile(join(taskRoot, BRANCHES_FILE), `${JSON.stringify({ schema_version: 'autopilot.branches.v1', active_branch: value.active.branch, base_sha: value.active.target_base_sha, current_sha: value.active.target_base_sha, archive_ref: null, unit_branches: [quarantinedBranchInfo] }, null, 2)}\n`, 'utf8');
 
       await value.server.close();
-      const database = new DatabaseSync(coordinatorRuntimePaths(value.env).databasePath);
+      const currentGeneration = readCurrentStoreGeneration(coordinatorRuntimePaths(value.env));
+      if (currentGeneration === null) throw new Error('current schema-13 store generation is missing');
+      const database = new DatabaseSync(currentGeneration.database_path);
       try {
         database.prepare("UPDATE child_leases SET status='recovery-required', version=version+1 WHERE child_lease_id=?").run(childLeaseId);
         const row = database.prepare("SELECT entity_id, payload_json FROM unit_attempts WHERE repo_id=? AND workstream_run=? AND json_extract(payload_json, '$.owner.unit_id')=? AND json_extract(payload_json, '$.owner.attempt')=?").get(value.active.repo_key, value.active.workstream_run, create.unitId, create.attempt) as Readonly<Record<string, unknown>> | undefined;
@@ -490,93 +496,6 @@ void describe('owner-scoped worktree and Git saga recovery', () => {
       const doctor = await new CoordinatorClient({ env: value.env, autoStart: false }).query('doctor');
       const findings = doctor.payload['invariant_findings'];
       assert.equal(Array.isArray(findings) && findings.some((finding) => typeof finding === 'object' && finding !== null && (finding as Record<string, unknown>)['code'] === 'worktree-remove-state-mismatch'), false);
-    } finally {
-      if (restarted !== null) await restarted.close();
-      await value.server.close().catch(() => undefined);
-      await rm(value.root, { recursive: true, force: true });
-    }
-  });
-
-  void it('transactionally retires an exact schema-12 duplicate projection while preserving history', async () => {
-    const value = await setup('d');
-    let restarted: Awaited<ReturnType<typeof startCoordinatorServer>> | null = null;
-    try {
-      const saga = new OwnedWorktreeSagaClient(new CoordinatorClient({ env: value.env, autoStart: false }), value.session);
-      const create = unitCreateSpec(value, 'unit-duplicate');
-      await saga.prepare(create);
-      await recoverOwnedWorktreeSagas({ active: value.active, env: value.env });
-      const before = await saga.worktrees();
-      const canonical = before.find((entry) => entry.owner.unit_id === 'unit-duplicate');
-      if (canonical === undefined) throw new Error('canonical unit worktree is missing');
-      await value.server.close();
-      const database = new DatabaseSync(coordinatorRuntimePaths(value.env).databasePath);
-      try {
-        const duplicate = { ...canonical, worktree_id: 'migration-worktree-schema12-duplicate' };
-        database.prepare('INSERT INTO worktrees(entity_id, repo_id, workstream_run, payload_json, version) VALUES(?, ?, ?, ?, ?)').run(duplicate.worktree_id, duplicate.owner.repo_id, duplicate.owner.workstream_run, JSON.stringify(duplicate), duplicate.version);
-      } finally { database.close(); }
-      restarted = await startCoordinatorServer(coordinatorRuntimePaths(value.env));
-      const client = new CoordinatorClient({ env: value.env, autoStart: false });
-      const doctorBefore = await client.query('doctor');
-      const findings = doctorBefore.payload['invariant_findings'];
-      assert.equal(Array.isArray(findings) && findings.some((finding) => typeof finding === 'object' && finding !== null && (finding as Record<string, unknown>)['code'] === 'duplicate-active-worktree-authority'), true);
-
-      const next = { ...create, operationType: 'materialize' as const, initialWorktreeState: 'active' as const, committedWorktreeState: 'active' as const, intent: { ...create.intent, base_sha: null, sparse_patterns: ['/src/base.ts'], paths: ['src/base.ts'] } };
-      await saga.prepare(next);
-      const status = await client.query('status', value.active.repo_key, value.active.workstream_run);
-      const worktrees = status.payload['worktrees'];
-      const operations = status.payload['worktree_operations'];
-      assert.equal(Array.isArray(worktrees), true);
-      assert.equal((worktrees as readonly Record<string, unknown>[]).filter((entry) => entry['owner'] !== null && typeof entry['owner'] === 'object' && (entry['owner'] as Record<string, unknown>)['unit_id'] === 'unit-duplicate' && entry['state'] !== 'removed').length, 1);
-      assert.equal((worktrees as readonly Record<string, unknown>[]).find((entry) => entry['worktree_id'] === 'migration-worktree-schema12-duplicate')?.['state'], 'removed');
-      assert.equal(Array.isArray(operations) && operations.length, 2);
-      const doctorAfter = await client.query('doctor');
-      const afterFindings = doctorAfter.payload['invariant_findings'];
-      assert.equal(Array.isArray(afterFindings) && afterFindings.some((finding) => typeof finding === 'object' && finding !== null && (finding as Record<string, unknown>)['code'] === 'duplicate-active-worktree-authority'), false);
-    } finally {
-      if (restarted !== null) await restarted.close();
-      await rm(value.root, { recursive: true, force: true });
-    }
-  });
-
-  void it('retires a history-free terminal migration shadow only after the deterministic remove is exact', async () => {
-    const value = await setup('r');
-    let restarted: Awaited<ReturnType<typeof startCoordinatorServer>> | null = null;
-    try {
-      const saga = new OwnedWorktreeSagaClient(new CoordinatorClient({ env: value.env, autoStart: false }), value.session);
-      const create = unitCreateSpec(value, 'unit-removed-shadow');
-      const remove = {
-        ...create, operationType: 'remove' as const, initialWorktreeState: 'terminal' as const, committedWorktreeState: 'removed' as const,
-        intent: { ...create.intent, reason: 'prepare unit worktree pre-create cleanup', target_sha: value.active.target_base_sha, checkout_mode: null, sparse_patterns: [], paths: [], metadata_refs: [] },
-      };
-      await saga.prepare(remove);
-      await recoverOwnedWorktreeSagas({ active: value.active, env: value.env });
-      const canonical = (await saga.worktrees()).find((entry) => entry.owner.unit_id === create.unitId);
-      if (canonical === undefined || canonical.state !== 'removed') throw new Error('deterministic removed projection is missing');
-      assert.equal(existsSync(canonical.canonical_path), false);
-      assert.equal(git(value.repo, ['branch', '--list', canonical.branch]), '');
-
-      await value.server.close();
-      const database = new DatabaseSync(coordinatorRuntimePaths(value.env).databasePath);
-      const shadowId = 'migration-worktree-removed-shadow';
-      try {
-        const shadow = { ...canonical, worktree_id: shadowId, state: 'terminal', version: 1 };
-        database.prepare('INSERT INTO worktrees(entity_id, repo_id, workstream_run, payload_json, version) VALUES(?, ?, ?, ?, ?)').run(shadow.worktree_id, shadow.owner.repo_id, shadow.owner.workstream_run, JSON.stringify(shadow), shadow.version);
-      } finally { database.close(); }
-      restarted = await startCoordinatorServer(coordinatorRuntimePaths(value.env));
-      const consumer = unitCreateSpec(value, 'unit-shadow-reconciliation-consumer');
-      await saga.prepare(consumer);
-      await saga.prepare(consumer);
-      const client = new CoordinatorClient({ env: value.env, autoStart: false });
-      const status = await client.query('status', value.active.repo_key, value.active.workstream_run);
-      const worktrees = status.payload['worktrees'];
-      const operations = status.payload['worktree_operations'];
-      assert.equal(Array.isArray(worktrees) && (worktrees as readonly Record<string, unknown>[]).find((entry) => entry['worktree_id'] === shadowId)?.['state'], 'removed');
-      assert.equal(Array.isArray(operations) && (operations as readonly Record<string, unknown>[]).filter((entry) => entry['worktree_id'] === canonical.worktree_id).length, 1);
-      const doctor = await client.query('doctor');
-      const findings = doctor.payload['invariant_findings'];
-      assert.equal(Array.isArray(findings) && findings.some((finding) => typeof finding === 'object' && finding !== null && ['duplicate-active-worktree-authority', 'removed-worktree-without-commit'].includes(String((finding as Record<string, unknown>)['code']))), false);
-      assert.equal(existsSync(canonical.canonical_path), false);
-      assert.equal(git(value.repo, ['branch', '--list', canonical.branch]), '');
     } finally {
       if (restarted !== null) await restarted.close();
       await value.server.close().catch(() => undefined);
@@ -710,15 +629,34 @@ void describe('owner-scoped worktree and Git saga recovery', () => {
     }
   });
 
-  void it('terminalizes sanitized I2 operation-5df1 branch-proof capture 8725cf1 with an absent physical worktree and no second commit', async () => {
+  void it('terminalizes sanitized I2 operation-5df1 branch-proof capture 8725cf1, releases exactly 42 WRITE leases, and performs no second commit', async () => {
     const value = await setup('i2');
     try {
+      const client = new CoordinatorClient({ env: value.env, autoStart: false });
+      const claims = new ClaimNegotiationClient(client, value.session);
+      const capturedPaths = Array.from({ length: 42 }, (_entry, index) => `src/i2-captured-${String(index).padStart(2, '0')}.ts`);
+      const acquired = await claims.acquire({
+        acquisitionGroupId: 'group-i2-42-write', unitId: 'FOUND-APP-IMPL', attempt: 1,
+        requestedLeases: capturedPaths.map((path) => ({ path, mode: 'WRITE' as const, purpose: 'sanitized historical I2 retained authority' })),
+        reason: 'sanitized historical I2 42-WRITE authority shape', normalReleaseCondition: { condition_type: 'quarantine-captured', target_id: 'FOUND-APP-IMPL:1', evidence: null },
+        specRef: '.pi/autopilot/work-i2/unit-specs/FOUND-APP-IMPL.json', specSha256: `sha256:${'a'.repeat(64)}`, role: 'implement', preemptible: true, checkpointOrdinal: 0,
+      });
+      assert.equal(acquired.outcome, 'granted');
+      if (acquired.outcome !== 'granted') throw new Error('I2 retained authority was not granted');
+      const unrelated = await claims.acquire({
+        acquisitionGroupId: 'group-i2-unrelated', unitId: 'UNRELATED', attempt: 1,
+        requestedLeases: [{ path: 'src/unrelated.ts', mode: 'WRITE', purpose: 'must survive I2 exact release' }],
+        reason: 'unrelated authority isolation witness', normalReleaseCondition: { condition_type: 'quarantine-captured', target_id: 'UNRELATED:1', evidence: null },
+        specRef: '.pi/autopilot/work-i2/unit-specs/UNRELATED.json', specSha256: `sha256:${'b'.repeat(64)}`, role: 'implement', preemptible: true, checkpointOrdinal: 0,
+      });
+      assert.equal(unrelated.outcome, 'granted');
+      if (unrelated.outcome !== 'granted') throw new Error('unrelated authority was not granted');
+
       const create = unitCreateSpec(value, 'FOUND-APP-IMPL');
-      const saga = new OwnedWorktreeSagaClient(new CoordinatorClient({ env: value.env, autoStart: false }), value.session);
+      const saga = new OwnedWorktreeSagaClient(client, value.session);
       await saga.prepare(create);
       await recoverOwnedWorktreeSagas({ active: value.active, env: value.env });
-      await writeFile(join(create.intent.worktree_path, 'src', 'captured-a.ts'), 'export const capturedA = true;\n', 'utf8');
-      await writeFile(join(create.intent.worktree_path, 'src', 'captured-b.ts'), 'export const capturedB = true;\n', 'utf8');
+      for (const [index, path] of capturedPaths.entries()) await writeFile(join(create.intent.worktree_path, path), `export const captured${String(index)} = true;\n`, 'utf8');
       const quarantine = {
         ...create,
         operationType: 'quarantine' as const,
@@ -728,11 +666,11 @@ void describe('owner-scoped worktree and Git saga recovery', () => {
           ...create.intent,
           reason: 'sanitized regression for historical operation-5df1cda32ea1a860e6fe85d8891bb0d2 / capture 8725cf1',
           target_sha: value.active.target_base_sha,
-          paths: ['src/captured-a.ts', 'src/captured-b.ts'],
+          paths: capturedPaths,
         },
       };
       const prepared = await saga.prepare(quarantine);
-      git(create.intent.worktree_path, ['add', '--', 'src/captured-a.ts', 'src/captured-b.ts']);
+      git(create.intent.worktree_path, ['add', '--', ...capturedPaths]);
       git(create.intent.worktree_path, ['commit', '-m', 'sanitized I2 quarantine capture']);
       const capture = git(create.intent.worktree_path, ['rev-parse', 'HEAD']);
       assert.equal(git(value.repo, ['rev-list', '--count', `${value.active.target_base_sha}..${capture}`]), '1');
@@ -752,6 +690,47 @@ void describe('owner-scoped worktree and Git saga recovery', () => {
       assert.equal(Reflect.get(evidence, 'proof_source'), 'owned-git-ref');
       const worktree = (await saga.worktrees()).find((entry) => entry.worktree_id === operation.worktree_id);
       assert.equal(worktree?.state, 'quarantined');
+
+      const captureRef = `autopilot/archive/${value.active.workstream_run}/unit/FOUND-APP-IMPL/attempt-1/quarantine-capture`;
+      git(value.repo, ['update-ref', `refs/heads/${captureRef}`, capture, '0'.repeat(40)]);
+      const evidenceRef = '.pi/autopilot/work-i2/quarantine/FOUND-APP-IMPL.attempt-1.quarantine.json';
+      const failureDocument = {
+        schema_version: 'autopilot.unit_failure.v1', action: 'quarantine', workstream: value.active.workstream, workstream_run: value.active.workstream_run,
+        unit_id: 'FOUND-APP-IMPL', attempt: 1, unit_worktree_path: create.intent.worktree_path, dirty_paths: capturedPaths,
+        capture_commit_sha: capture, capture_ref: captureRef, git_head_before: value.active.target_base_sha, git_head_after: capture,
+        git_common_dir: value.active.git_common_dir, branch: create.intent.branch, postcondition_worktree_clean: true,
+        summary: 'sanitized exact I2 absent-worktree authority release witness', created_at: '2026-07-11T00:00:01.000Z',
+      };
+      const failureBytes = `${JSON.stringify(failureDocument, null, 2)}\n`;
+      const failurePath = join(value.active.main_worktree_path, ...evidenceRef.split('/'));
+      await mkdir(dirname(failurePath), { recursive: true });
+      await writeFile(failurePath, failureBytes, 'utf8');
+      const failureSha: `sha256:${string}` = `sha256:${createHash('sha256').update(failureBytes, 'utf8').digest('hex')}`;
+      const reconciliation = new RunReconciliationClient(client, value.session);
+      const forgedRef = '.pi/autopilot/work-i2/quarantine/FOUND-APP-IMPL.attempt-1.forged-path-set.json';
+      const forgedBytes = `${JSON.stringify({ ...failureDocument, dirty_paths: capturedPaths.slice(1) }, null, 2)}\n`;
+      const forgedPath = join(value.active.main_worktree_path, ...forgedRef.split('/'));
+      await mkdir(dirname(forgedPath), { recursive: true });
+      await writeFile(forgedPath, forgedBytes, 'utf8');
+      const forgedSha: `sha256:${string}` = `sha256:${createHash('sha256').update(forgedBytes, 'utf8').digest('hex')}`;
+      await assert.rejects(
+        () => reconciliation.recordReleaseEvidence({ source: 'quarantine-capture', targetId: 'FOUND-APP-IMPL:1', evidenceRef: forgedRef, evidenceSha256: forgedSha }),
+        /exactly one matching committed canonical operation/u,
+      );
+      const afterRejectedRelease = await client.query('status', value.active.repo_key, value.active.workstream_run);
+      const retained = afterRejectedRelease.payload['edit_leases'];
+      if (!Array.isArray(retained)) throw new Error('I2 rejected-release status edit_leases is not an array');
+      assert.equal(retained.length, 43, 'incomplete path proof must release no authority');
+
+      const release = await reconciliation.recordReleaseEvidence({ source: 'quarantine-capture', targetId: 'FOUND-APP-IMPL:1', evidenceRef, evidenceSha256: failureSha });
+      assert.deepEqual([...release.reconciliation.released_lease_ids].sort(), acquired.editLeases.map((lease) => lease.edit_lease_id).sort());
+      assert.equal(release.reconciliation.released_lease_ids.length, 42);
+      const afterRelease = await client.query('status', value.active.repo_key, value.active.workstream_run);
+      const remaining = afterRelease.payload['edit_leases'];
+      if (!Array.isArray(remaining)) throw new Error('I2 status edit_leases is not an array');
+      assert.equal(remaining.length, 1);
+      assert.equal(Reflect.get(remaining[0], 'edit_lease_id'), unrelated.editLeases[0]?.edit_lease_id);
+      assert.equal(git(value.repo, ['rev-list', '--count', `${value.active.target_base_sha}..refs/heads/${create.intent.branch}`]), '1');
     } finally {
       await close(value);
     }

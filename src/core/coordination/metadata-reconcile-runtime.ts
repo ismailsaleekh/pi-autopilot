@@ -160,6 +160,10 @@ export async function reconcileApprovedMissingWorktreeMetadata(input: {
   const finalBefore = gitWorktreeRegistrationFacts(first.intent.git_common_dir, input.env);
   const alreadySatisfied = exactEqual(finalBefore, first.intent.expected_after_registrations);
   if (!alreadySatisfied && !exactEqual(finalBefore, first.intent.approved_before_registrations)) throw new CoordinationRuntimeError('recovery-required', 'Git worktree registration set changed between proof and action; refusing prune', [`observed=${String(finalBefore.length)}`, `approved=${String(first.intent.approved_before_registrations.length)}`]);
+  if (!alreadySatisfied) {
+    const actualPrunablePaths = finalBefore.filter((registration) => registration.prunable).map((registration) => registration.worktree_path).sort(compare);
+    if (!exactEqual(actualPrunablePaths, approved)) throw new CoordinationRuntimeError('recovery-required', 'global worktree prune is forbidden unless every currently prunable registration has one approved row', [...actualPrunablePaths.map((path) => `actual_prunable=${path}`), ...approved.map((path) => `approved_prunable=${path}`)]);
+  }
 
   const mutation = alreadySatisfied ? null : await runGitMutation({ descriptor: { kind: 'worktree-prune' }, cwd: first.intent.git_common_dir, ...(input.env === undefined ? {} : { env: input.env }) });
   const after = gitWorktreeRegistrationFacts(first.intent.git_common_dir, input.env);

@@ -6,10 +6,9 @@ authoritative.
 
 ## Production Git call-site inventory
 
-All non-persistence production Git calls route through
-`src/core/git-process.ts`. The mechanically enforced temporary exceptions are
-Lane-1-owned `src/core/coordination/store.ts` and `migration.ts`; the exception
-set must become empty when their owner lands the migration.
+All production Git calls, including coordinator-store verification and legacy
+migration inspection, route through `src/core/git-process.ts`. The mechanical
+guard has no production exceptions.
 
 | Consumer area | Closed descriptors used |
 |---|---|
@@ -71,9 +70,9 @@ never effect truth.
 
 - I2: the sanitized `operation-5df1…` regression proves an absent physical
   worktree terminalizes the exact branch capture with one parent/exact paths,
-  persists owned-ref capture evidence, and creates no second commit. The real
-  `8725cf1…` proof and historical exact 42-lease release remain corpus-rehearsal
-  gates and require Lane 1's absent-worktree store verification path.
+  persists owned-ref capture evidence before release, releases exactly its 42
+  WRITE leases while preserving unrelated authority, and creates no second
+  commit. The real `8725cf1…` proof remains a private corpus-rehearsal gate.
 - I5: a real 34-registration corpus proves exact-set metadata-only pruning,
   immutable before/after evidence, branch/object survival, replay, foreign-repo
   isolation, dangling-path refusal, and registration/ref proof-action drift

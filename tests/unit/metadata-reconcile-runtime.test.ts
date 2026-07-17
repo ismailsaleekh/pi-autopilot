@@ -133,6 +133,31 @@ void describe('I5 metadata-only worktree registration reconciliation', () => {
     }
   });
 
+  void it('refuses a partial approval when any other registration is globally prunable', async () => {
+    const value = await corpus(2, 'partial-approval');
+    try {
+      const rows = await approvals(value, 'repo-partial-approval');
+      const selected = rows[0];
+      if (selected === undefined) throw new Error('partial-approval row disappeared');
+      const target = selected.intent.target_registration_path;
+      const partial: MetadataReconcileApproval = {
+        ...selected,
+        intent: {
+          ...selected.intent,
+          approved_prunable_registration_paths: [target],
+          expected_after_registrations: selected.intent.approved_before_registrations.filter((registration) => registration.worktree_path !== target),
+        },
+      };
+      await assert.rejects(
+        () => reconcileApprovedMissingWorktreeMetadata({ approvals: [partial], evidence_root: join(value.root, 'audit') }),
+        /complete pre-reconcile prunable set|every currently prunable registration has one approved row/u,
+      );
+      assert.equal(gitWorktreeRegistrationFacts(value.repo).filter((registration) => registration.prunable).length, 2);
+    } finally {
+      await rm(value.root, { recursive: true, force: true });
+    }
+  });
+
   void it('refuses preserved-ref drift and dangling filesystem entries before global prune', async () => {
     const refDrift = await corpus(1, 'ref-drift');
     try {

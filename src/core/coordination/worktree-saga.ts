@@ -279,7 +279,7 @@ export class OwnedWorktreeSagaClient {
       intent: spec.intent, completed_steps: [], current_step: null, recovery_attempts: 0,
       verification_evidence: null, error_code: null, version: 1,
     };
-    const response = await this.#client.mutate('prepare-operation', this.#identity(`prepare-operation:${opId}`, existingWorktree?.version ?? 0), {
+    const response = await this.#client.mutate('prepare-operation', this.#identity(operationKey.operation_key_sha256, existingWorktree?.version ?? 0), {
       worktree, operation, ...this.#proof(),
     });
     return { operation: responseOperation(response), worktree: responseWorktree(response), replayed: false };

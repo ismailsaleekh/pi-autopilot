@@ -1,12 +1,6 @@
-import { spawnSync } from 'node:child_process';
 import { CoordinationRuntimeError } from "./failures.js";
+import { gitQueryText } from "../git-process.js";
 const GIT_OBJECT_ID = /^[a-f0-9]{40,64}$/u;
-function git(cwd, args, label) {
-    const result = spawnSync('git', ['-C', cwd, ...args], { encoding: 'utf8', timeout: 30_000, maxBuffer: 1024 * 1024 });
-    if ((result.status ?? -1) !== 0)
-        throw new CoordinationRuntimeError('invalid-request', `${label} failed while deriving observation identity`, [result.stderr.trim(), ...args]);
-    return result.stdout;
-}
 function observationObjectPath(path) {
     return path.replace(/\\/gu, '/').replace(/\/\*\*$/u, '').replace(/\/$/u, '');
 }
@@ -16,18 +10,18 @@ function observationObjectPath(path) {
  * database rather than trusting materialized filesystem bytes.
  */
 export function deriveCoordinationObservationSourceIdentity(input) {
-    const baseCommit = git(input.cwd, ['rev-parse', '--verify', 'HEAD^{commit}'], 'observation base commit').trim();
+    const baseCommit = gitQueryText({ descriptor: { kind: 'resolve-commit', revision: 'HEAD' }, cwd: input.cwd }).trim();
     if (!GIT_OBJECT_ID.test(baseCommit))
         throw new CoordinationRuntimeError('invalid-state', 'observation worktree HEAD is not a valid Git commit object id', [baseCommit]);
     const objectPath = observationObjectPath(input.path);
     if (objectPath.length === 0)
         throw new CoordinationRuntimeError('invalid-request', 'observation path must identify a bounded repository file or directory');
-    const listing = git(input.cwd, ['ls-tree', '-z', baseCommit, '--', objectPath], 'observation tree lookup');
+    const listing = gitQueryText({ descriptor: { kind: 'ls-tree-path', revision: baseCommit, path: objectPath }, cwd: input.cwd });
     const rows = listing.split('\0').filter((entry) => entry.length > 0);
     if (rows.length === 0) {
         if (input.allowMissing !== true)
             throw new CoordinationRuntimeError('invalid-request', 'READ observation path is not tracked at the exact worktree commit', [input.path, baseCommit]);
-        const rootTree = git(input.cwd, ['rev-parse', '--verify', `${baseCommit}^{tree}`], 'legacy missing observation root tree').trim();
+        const rootTree = gitQueryText({ descriptor: { kind: 'resolve-tree', revision: baseCommit }, cwd: input.cwd }).trim();
         if (!GIT_OBJECT_ID.test(rootTree))
             throw new CoordinationRuntimeError('invalid-state', 'legacy missing observation root tree is invalid', [rootTree]);
         return { base_commit: baseCommit, object_id: rootTree, object_kind: 'missing' };
