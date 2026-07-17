@@ -1050,12 +1050,28 @@ export async function stageCoordinatorSemanticReplay(paths, replayId, records) {
         return { record_count: count, records_sha256: recordsSha256 };
     }
     catch (error) {
-        if (candidate !== null)
-            await candidate.close().catch(() => undefined);
-        if (body !== null)
-            await body.close().catch(() => undefined);
-        await unlink(candidatePath).catch(() => undefined);
-        await unlink(bodyPath).catch(() => undefined);
+        const cleanupFailures = [];
+        for (const [label, handle] of [['candidate', candidate], ['body', body]]) {
+            if (handle === null)
+                continue;
+            try {
+                await handle.close();
+            }
+            catch (cleanupError) {
+                cleanupFailures.push(`${label}-close:${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`);
+            }
+        }
+        for (const path of [candidatePath, bodyPath]) {
+            try {
+                await unlink(path);
+            }
+            catch (cleanupError) {
+                if (!(cleanupError instanceof Error && 'code' in cleanupError && cleanupError.code === 'ENOENT'))
+                    cleanupFailures.push(`unlink:${path}:${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`);
+            }
+        }
+        if (cleanupFailures.length > 0)
+            throw new CoordinationRuntimeError('system-fatal', 'semantic replay staging failed and private temporary cleanup was incomplete', [error instanceof Error ? error.message : String(error), ...cleanupFailures]);
         throw error;
     }
 }
@@ -2125,7 +2141,13 @@ export class CoordinatorStore {
                 throw new CoordinationRuntimeError('invalid-state', 'semantic replay receipt projection disagrees with database completion', [receiptPath]);
         }
         finally {
-            await unlink(temporaryReceipt).catch(() => undefined);
+            try {
+                await unlink(temporaryReceipt);
+            }
+            catch (error) {
+                if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT'))
+                    throw new CoordinationRuntimeError('system-fatal', 'semantic replay receipt temporary cleanup failed', [temporaryReceipt, error instanceof Error ? error.message : String(error)]);
+            }
         }
     }
     async #removeSemanticReplayInbox(paths, expected) {
