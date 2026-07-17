@@ -26,6 +26,30 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
 }
 
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new Error(message)), timeoutMs); }),
+    ]);
+  } finally {
+    if (timer !== null) clearTimeout(timer);
+  }
+}
+
+async function completesWithin(promise: Promise<void>, timeoutMs: number): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  try {
+    return await Promise.race([
+      promise.then(() => true),
+      new Promise<boolean>((resolveTimeout) => { timer = setTimeout(() => resolveTimeout(false), timeoutMs); }),
+    ]);
+  } finally {
+    if (timer !== null) clearTimeout(timer);
+  }
+}
+
 async function waitFor(predicate: () => boolean | Promise<boolean>, timeoutMs = 10_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -143,23 +167,17 @@ class PersistentTraceClient {
     }
     let shutdownError: Error | null = null;
     try {
-      await Promise.race([
-        this.send('shutdown'),
-        sleep(10_000).then(() => { throw new Error(`persistent trace client ${this.suffix} did not acknowledge shutdown`); }),
-      ]);
+      await withTimeout(this.send('shutdown'), 10_000, `persistent trace client ${this.suffix} did not acknowledge shutdown`);
     } catch (error) { shutdownError = error instanceof Error ? error : new Error(String(error)); }
     this.#child.stdin.end();
-    let closed = await Promise.race([this.#closed.then(() => true), sleep(5_000).then(() => false)]);
+    let closed = await completesWithin(this.#closed, 5_000);
     if (!closed) {
       this.#child.kill('SIGTERM');
-      closed = await Promise.race([this.#closed.then(() => true), sleep(5_000).then(() => false)]);
+      closed = await completesWithin(this.#closed, 5_000);
     }
     if (!closed) {
       this.#child.kill('SIGKILL');
-      await Promise.race([
-        this.#closed,
-        sleep(5_000).then(() => { throw new Error(`persistent trace client ${this.suffix} survived SIGKILL`); }),
-      ]);
+      await withTimeout(this.#closed, 5_000, `persistent trace client ${this.suffix} survived SIGKILL`);
     }
     const failures = [shutdownError, this.#exitError].filter((error): error is Error => error !== null);
     if (failures.length > 0) throw new AggregateError(failures, `persistent trace client ${this.suffix} cleanup failed`);
