@@ -84,13 +84,13 @@ void it('reports a real private-capability no-follow failure without treating di
   const paths = coordinatorRuntimePaths(env);
   const target = join(root, 'synthetic-secret-target');
   try {
-    await armStartupBarrier(barrier, 'after-lifecycle-lock-acquisition');
+    await armStartupBarrier(barrier, 'before-private-root-capability-setup');
     const pending = new CoordinatorClient({ env, readinessTimeoutMs: 5_000 }).query('handshake');
-    await waitForStartupBarrier(barrier, 'after-lifecycle-lock-acquisition');
+    await waitForStartupBarrier(barrier, 'before-private-root-capability-setup');
     await writeFile(target, 'must-not-be-read-or-mutated\n', { encoding: 'utf8', mode: 0o600 });
     await unlink(paths.capabilityPath);
     await symlink(target, paths.capabilityPath);
-    await releaseStartupBarrier(barrier, 'after-lifecycle-lock-acquisition');
+    await releaseStartupBarrier(barrier, 'before-private-root-capability-setup');
     await assert.rejects(() => pending, (error: unknown) => {
       if (!(error instanceof CoordinationRuntimeError)) return false;
       assert.match(error.message, /failed with exit code 70/u);

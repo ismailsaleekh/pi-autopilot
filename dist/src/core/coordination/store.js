@@ -1801,6 +1801,33 @@ function sqliteFailure(error) {
         return new CoordinationRuntimeError('store-corrupt', message);
     return new CoordinationRuntimeError('invalid-state', message);
 }
+async function migrateHistoricalFixedDatabaseToApiBoundary(paths, clock, writerGuard) {
+    writerGuard.assertHeld();
+    assertPrivatePathNoAliases(paths.databasePath);
+    if (!existsSync(paths.databasePath) || statSync(paths.databasePath).size === 0)
+        return null;
+    const database = new DatabaseSync(paths.databasePath, { timeout: COORDINATOR_BUSY_TIMEOUT_MS, enableForeignKeyConstraints: true });
+    try {
+        configureWritableDatabase(database);
+        const sourceVersion = databaseUserVersion(database);
+        if (sourceVersion > COORDINATOR_DATABASE_SCHEMA_VERSION)
+            throw new CoordinationRuntimeError('schema-mismatch', 'historical fixed-database migration refuses a source newer than API schema 12', [`schema=${String(sourceVersion)}`]);
+        if (sourceVersion === COORDINATOR_DATABASE_SCHEMA_VERSION)
+            return null;
+        const stamp = clock.now().toISOString().replace(/[-:.]/gu, '');
+        const backupPath = join(paths.backupsRoot, `coordinator.pre-v${String(sourceVersion)}.${stamp}.db`);
+        await backup(database, backupPath);
+        await enforcePrivateAuthorityPath(backupPath, false);
+        writerGuard.assertHeld();
+        applySchemaMigrations(database, clock, COORDINATOR_DATABASE_SCHEMA_VERSION);
+        database.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+        writerGuard.assertHeld();
+        return backupPath;
+    }
+    finally {
+        database.close();
+    }
+}
 export class CoordinatorStore {
     #db;
     #clock;
@@ -1874,6 +1901,21 @@ export class CoordinatorStore {
             writerGuard.release();
         }
     }
+    /** Dedicated historical upgrade seam. Ordinary server startup never calls it. */
+    static async migrateHistoricalFixedDatabaseToApiBoundary(paths, clock = systemClock) {
+        await ensureCoordinatorPrivateRoots(paths);
+        await mkdir(paths.backupsRoot, { recursive: true, mode: 0o700 });
+        assertPrivateDirectory(paths.backupsRoot, 'coordinator backups root');
+        if (existsSync(paths.currentStorePointerPath))
+            throw new CoordinationRuntimeError('invalid-state', 'historical fixed-database migration is forbidden after S1 generation publication', [paths.currentStorePointerPath]);
+        const writerGuard = await CoordinatorWriterGuard.acquire(paths);
+        try {
+            return await migrateHistoricalFixedDatabaseToApiBoundary(paths, clock, writerGuard);
+        }
+        finally {
+            writerGuard.release();
+        }
+    }
     static async open(paths, clock = systemClock, options = {}) {
         try {
             await ensureCoordinatorPrivateRoots(paths);
@@ -1891,25 +1933,8 @@ export class CoordinatorStore {
         let openedDatabase = null;
         try {
             assertPrivatePathNoAliases(paths.databasePath);
-            const fixedExists = existsSync(paths.databasePath) && statSync(paths.databasePath).size > 0;
-            if (fixedExists && options.allowExistingSchemaMigration === true) {
-                const privateSource = new DatabaseSync(paths.databasePath, { timeout: COORDINATOR_BUSY_TIMEOUT_MS, enableForeignKeyConstraints: true });
-                try {
-                    configureWritableDatabase(privateSource);
-                    const sourceVersion = databaseUserVersion(privateSource);
-                    if (sourceVersion < COORDINATOR_DATABASE_SCHEMA_VERSION) {
-                        const stamp = clock.now().toISOString().replace(/[-:.]/gu, '');
-                        lastBackupPath = join(paths.backupsRoot, `coordinator.pre-v${String(sourceVersion)}.${stamp}.db`);
-                        await backup(privateSource, lastBackupPath);
-                        await enforcePrivateAuthorityPath(lastBackupPath, false);
-                        applySchemaMigrations(privateSource, clock, COORDINATOR_DATABASE_SCHEMA_VERSION);
-                        privateSource.exec('PRAGMA wal_checkpoint(TRUNCATE)');
-                    }
-                }
-                finally {
-                    privateSource.close();
-                }
-            }
+            if (options.allowExistingSchemaMigration === true)
+                lastBackupPath = await migrateHistoricalFixedDatabaseToApiBoundary(paths, clock, writerGuard);
             const generation = await ensureCurrentStoreGeneration(paths, writerGuard, schemaMigrationAdapter(clock), { now: () => clock.now(), ...(options.onStorePublicationBoundary === undefined ? {} : { onBoundary: options.onStorePublicationBoundary }) });
             writerGuard.assertHeld();
             const db = new DatabaseSync(generation.database_path, { timeout: COORDINATOR_BUSY_TIMEOUT_MS, enableForeignKeyConstraints: true });

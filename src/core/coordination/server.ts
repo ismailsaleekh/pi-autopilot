@@ -408,7 +408,7 @@ export interface RunningCoordinator {
 export async function startCoordinatorServer(paths: CoordinatorRuntimePaths, clock?: StoreClock, adoption?: CoordinatorStartupAdoption, testHooks?: CoordinatorServerTestHooks, startupObserver?: CoordinatorStartupObserver): Promise<RunningCoordinator> {
   await startupObserver?.transition('before-lifecycle-election');
   await ensureCoordinatorPrivateRoots(paths);
-  const writerGuard = await CoordinatorWriterGuard.acquire(paths);
+  const startupAuthority: { writerGuard: CoordinatorWriterGuard | null } = { writerGuard: null };
   let lifecycleLock: CoordinatorLock | null = null;
   let store: CoordinatorStore | null = null;
   let capability: string | null = null;
@@ -417,6 +417,12 @@ export async function startCoordinatorServer(paths: CoordinatorRuntimePaths, clo
   let serverListening = false;
   try {
     lifecycleLock = await acquireCoordinatorLock(paths, adoption, async (plannedLifecycle) => {
+      // The lifecycle election must select the candidate before it waits on the
+      // process-lifetime writer guard. Otherwise a second startup waits behind
+      // the live winner's lifetime transaction and can never observe the
+      // already-running lifecycle identity.
+      startupAuthority.writerGuard = await CoordinatorWriterGuard.acquire(paths);
+      const writerGuard = startupAuthority.writerGuard;
       await startupObserver?.transition('before-private-root-capability-setup', plannedLifecycle);
       capability = await readOrCreateCoordinatorCapability(paths);
       await startupObserver?.transition('after-private-root-capability-setup', plannedLifecycle);
@@ -428,6 +434,8 @@ export async function startCoordinatorServer(paths: CoordinatorRuntimePaths, clo
       readAndVerifyCoordinatorRuntimeIdentity(paths, store.currentGeneration(), plannedLifecycle);
     });
     const acquiredLifecycleLock = lifecycleLock;
+    const acquiredWriterGuard = startupAuthority.writerGuard;
+    if (acquiredWriterGuard === null) throw new CoordinationRuntimeError('system-fatal', 'lifecycle election completed without process-lifetime writer authority');
     await startupObserver?.transition('after-lifecycle-lock-acquisition', acquiredLifecycleLock.record);
     const openedStore = requirePreparedStore(store);
     const openedCapability = requirePreparedCapability(capability);
@@ -481,7 +489,7 @@ export async function startCoordinatorServer(paths: CoordinatorRuntimePaths, clo
           storeClosed = true;
         }
         await acquiredLifecycleLock.release();
-        writerGuard.release();
+        acquiredWriterGuard.release();
         closed = true;
       },
     };
@@ -508,8 +516,8 @@ export async function startCoordinatorServer(paths: CoordinatorRuntimePaths, clo
         cleanupFailures.push(`lock-release: ${releaseError instanceof Error ? releaseError.message : String(releaseError)}`);
       }
     }
-    if (cleanupFailures.length > 0) throw new CoordinationRuntimeError('system-fatal', 'coordinator startup failed and cleanup was incomplete; writer guard remains retained until process death', [error instanceof Error ? error.message : String(error), ...cleanupFailures]);
-    writerGuard.release();
+    if (cleanupFailures.length > 0) throw new CoordinationRuntimeError('system-fatal', 'coordinator startup failed and cleanup was incomplete; acquired authority remains retained until process death', [error instanceof Error ? error.message : String(error), ...cleanupFailures]);
+    startupAuthority.writerGuard?.release();
     throw error;
   }
 }

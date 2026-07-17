@@ -9,7 +9,7 @@ import { describe, it } from 'node:test';
 import { parseCoordinatorRuntimeIdentity, readAndVerifyCoordinatorRuntimeIdentity } from '../../src/core/coordination/runtime-identity.ts';
 import { coordinatorRuntimePaths } from '../../src/core/coordination/runtime-paths.ts';
 import { startCoordinatorServer } from '../../src/core/coordination/server.ts';
-import { parseStoreGenerationPublication, parseStorePointer } from '../../src/core/coordination/store-generation.ts';
+import { fixedStoreBarrierPublished, parseStoreGenerationPublication, parseStorePointer } from '../../src/core/coordination/store-generation.ts';
 import { CoordinatorStore, historicalStoreConservationSnapshot } from '../../src/core/coordination/store.ts';
 import { AUTOPILOT_STATE_ROOT_ENV } from '../../src/core/parallel-runtime.ts';
 
@@ -27,6 +27,7 @@ void describe('S1 generation-addressed schema-13 store', () => {
     const generation = running.store.currentGeneration();
     try {
       assert.equal(parseStorePointer(json(paths.currentStorePointerPath)).generation_id, generation.pointer.generation_id);
+      assert.equal(fixedStoreBarrierPublished(paths), true);
       const publication = parseStoreGenerationPublication(json(generation.publication_path));
       assert.equal(publication.store_schema_version, 13);
       assert.equal(publication.source_kind, 'cf50-fixed-schema12');

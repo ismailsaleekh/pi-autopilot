@@ -8,9 +8,10 @@ import { describe, it } from 'node:test';
 import { CoordinatorClient } from '../../src/core/coordination/client.ts';
 import { CoordinatorFrameDecoder, encodeCoordinatorFrame } from '../../src/core/coordination/ipc.ts';
 import { isProcessAlive, processStartIdentity } from '../../src/core/coordination/process-identity.ts';
-import { coordinatorRuntimePaths } from '../../src/core/coordination/runtime-paths.ts';
+import { coordinatorRuntimePaths, type CoordinatorRuntimePaths } from '../../src/core/coordination/runtime-paths.ts';
 import { retireSchema11CoordinatorForUpgrade } from '../../src/core/coordination/schema11-retirement.ts';
 import { startCoordinatorServer } from '../../src/core/coordination/server.ts';
+import { CoordinatorStore } from '../../src/core/coordination/store.ts';
 import { coordinatorUpgradeIntentPath, preparePredecessorCoordinatorUpgrade } from '../../src/core/coordination/upgrade.ts';
 import { AUTOPILOT_STATE_ROOT_ENV } from '../../src/core/parallel-runtime.ts';
 import { hardKillProcess } from '../helpers/hard-kill-process.ts';
@@ -38,6 +39,14 @@ async function listen(server: Server, path: string): Promise<void> {
 
 async function closeServer(server: Server): Promise<void> {
   await new Promise<void>((resolveClose, rejectClose) => server.close((error) => error === undefined ? resolveClose() : rejectClose(error)));
+}
+
+async function migrateHistoricalFixedStore(paths: CoordinatorRuntimePaths): Promise<void> {
+  const store = await CoordinatorStore.open(paths, undefined, { allowExistingSchemaMigration: true });
+  try {
+    assert.equal(store.currentGeneration().publication.source_kind, 'cf50-fixed-schema12');
+    assert.equal(store.currentGeneration().publication.store_schema_version, 13);
+  } finally { store.close(); }
 }
 
 function historicalUpgradeIntent(state: 'committed' | 'starting', packageBuild = '1.0.1-cf38'): JsonMap {
@@ -70,6 +79,7 @@ void describe('coordinator protocol and schema version boundary', () => {
       assert.equal(typeof report.backup_path, 'string');
       assert.equal(typeof report.backup_sha256, 'string');
       assert.equal(isProcessAlive(tagged.child.pid ?? -1), false);
+      await migrateHistoricalFixedStore(tagged.paths);
       current = await startCoordinatorServer(tagged.paths);
       const handshake = await new CoordinatorClient({ env, autoStart: false }).query('handshake');
       assert.equal(handshake.payload['package_build'], '1.1.8-cf50');
@@ -224,6 +234,7 @@ void describe('coordinator protocol and schema version boundary', () => {
       await writeFile(coordinatorUpgradeIntentPath(paths), committedIntent, 'utf8');
       await assert.rejects(() => preparePredecessorCoordinatorUpgrade(paths, 'e'.repeat(64), Date.now() + 2_000), /refuses to overwrite durable committed intent/u);
       assert.equal(await readFile(coordinatorUpgradeIntentPath(paths), 'utf8'), committedIntent);
+      await migrateHistoricalFixedStore(paths);
 
       current = await startCoordinatorServer(paths);
       const response = await new CoordinatorClient({ env, autoStart: false }).query('handshake');

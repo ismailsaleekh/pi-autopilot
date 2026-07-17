@@ -361,6 +361,23 @@ async function captureFixedSource(paths: CoordinatorRuntimePaths, target: string
   } finally { source.close(); }
 }
 
+export async function storeGenerationPublicationPresent(paths: CoordinatorRuntimePaths): Promise<boolean> {
+  if (existsSync(paths.currentStorePointerPath)) return true;
+  if (!existsSync(paths.storesRoot)) return false;
+  return (await readdir(paths.storesRoot)).some((name) => STORE_GENERATION_ID_PATTERN.test(name));
+}
+
+export function fixedStoreBarrierPublished(paths: CoordinatorRuntimePaths): boolean {
+  if (!existsSync(paths.databasePath)) return false;
+  const database = new DatabaseSync(paths.databasePath, { readOnly: true, timeout: 5_000 });
+  try {
+    const barrier = fixedBarrierRecord(database);
+    if (barrier === null) return false;
+    verifyFixedBarrier(database, barrier);
+    return true;
+  } finally { database.close(); }
+}
+
 function verifyPublishedFixedBarrier(paths: CoordinatorRuntimePaths): FixedBarrierRecord {
   if (!existsSync(paths.databasePath)) throw new CoordinationRuntimeError('store-corrupt', 'published S1 authority has no fixed-path schema-12 barrier');
   const fixed = new DatabaseSync(paths.databasePath, { readOnly: true, timeout: 5_000 });

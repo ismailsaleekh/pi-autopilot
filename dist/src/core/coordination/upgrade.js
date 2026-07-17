@@ -12,6 +12,7 @@ import { isExactProcessAlive, isProcessAlive, predecessorCompatibleBootId, prefl
 import { coordinatorRuntimePaths, enforcePrivateAuthorityPath, ensureCoordinatorPrivateRoots, ensurePrivateAuthorityDirectory } from "./runtime-paths.js";
 import { acquireSerializedProcessGuard, discardLockTombstone, quarantineExactLock, readExactLockText } from "./serialized-lock.js";
 import { CoordinatorStore } from "./store.js";
+import { fixedStoreBarrierPublished, storeGenerationPublicationPresent } from "./store-generation.js";
 import { COORDINATOR_UPGRADE_INTENT_SCHEMA, COORDINATOR_UPGRADE_PATH, parseCoordinatorUpgradeIntent, parseKnownCoordinatorUpgradeIntent, parseCurrentCoordinatorLock, parsePredecessorCoordinatorLock, parsePredecessorStatusEnvelope, } from "./upgrade-contracts.js";
 const UPGRADE_DRAIN_TIMEOUT_MS = 2_000;
 const UPGRADE_POLL_MS = 50;
@@ -310,7 +311,7 @@ async function verifyBackup(record) {
     }
 }
 async function migratedPrivateDatabasePath(paths, upgradeId) {
-    return join(upgradeRoot(paths), upgradeId, 'target-state', 'coordinator', 'coordinator.db');
+    return join(upgradeRoot(paths), upgradeId, 'target-state', 'migrated-fixed-schema12.db');
 }
 async function verifyMigrationOnCopy(paths, record, upgradeId, retain = false) {
     const root = join(upgradeRoot(paths), upgradeId, retain ? 'target-state' : 'migration-probe-state');
@@ -319,9 +320,15 @@ async function verifyMigrationOnCopy(paths, record, upgradeId, retain = false) {
     await ensureCoordinatorPrivateRoots(probePaths);
     await copyFile(record.path, probePaths.databasePath, fsConstants.COPYFILE_EXCL);
     await enforcePrivateAuthorityPath(probePaths.databasePath, false);
+    await CoordinatorStore.migrateHistoricalFixedDatabaseToApiBoundary(probePaths);
+    const retainedTarget = await migratedPrivateDatabasePath(paths, upgradeId);
+    if (retain) {
+        await copyFile(probePaths.databasePath, retainedTarget, fsConstants.COPYFILE_EXCL);
+        await enforcePrivateAuthorityPath(retainedTarget, false);
+    }
     let store = null;
     try {
-        store = await CoordinatorStore.open(probePaths, undefined, { allowExistingSchemaMigration: true });
+        store = await CoordinatorStore.open(probePaths);
         if (store.integrity() !== 'ok')
             throw new CoordinationRuntimeError('store-corrupt', 'schema migration probe failed integrity');
         const status = store.status('global', null).payload;
@@ -342,17 +349,18 @@ async function verifyMigrationOnCopy(paths, record, upgradeId, retain = false) {
     }
     await unlink(`${probePaths.databasePath}-wal`).catch(() => undefined);
     await unlink(`${probePaths.databasePath}-shm`).catch(() => undefined);
-    const handle = await open(probePaths.databasePath, 'r');
+    const synchronizedPath = retain ? retainedTarget : probePaths.databasePath;
+    const handle = await open(synchronizedPath, 'r');
     try {
         await handle.sync();
     }
     finally {
         await handle.close();
     }
-    await fsyncDirectory(dirname(probePaths.databasePath));
+    await fsyncDirectory(dirname(synchronizedPath));
     if (!retain)
         await rm(root, { recursive: true, force: true });
-    return probePaths.databasePath;
+    return synchronizedPath;
 }
 async function waitForExactRetirement(pid, processIdentity, deadline) {
     while (Date.now() < deadline) {
@@ -609,9 +617,23 @@ async function copyExactBackupForRestore(paths, backupRecord, upgradeId) {
 async function restoreBackup(paths, intentValue, failure) {
     if (intentValue.backup === null)
         throw new CoordinationRuntimeError('recovery-required', 'upgrade rollback has no verified final backup');
+    const generationPublicationPresent = await storeGenerationPublicationPresent(paths);
+    if (generationPublicationPresent)
+        throw new CoordinationRuntimeError('recovery-required', 'schema-6 rollback is forbidden after S1 generation publication; exact target recovery is required', [paths.currentStorePointerPath]);
+    let fixedBarrierPublished = false;
+    let barrierInspectionFailure = null;
+    try {
+        fixedBarrierPublished = fixedStoreBarrierPublished(paths);
+    }
+    catch (error) {
+        barrierInspectionFailure = failureMessage(error);
+    }
+    if (fixedBarrierPublished)
+        throw new CoordinationRuntimeError('recovery-required', 'schema-6 rollback is forbidden after the S1 fixed-path barrier; exact target recovery is required', [paths.databasePath]);
+    const rollbackFailure = barrierInspectionFailure === null ? failureMessage(failure) : `${failureMessage(failure)}; pre-publication fixed-target inspection failed: ${barrierInspectionFailure}`;
     const backupRecord = intentValue.backup;
     const guard = acquireSerializedProcessGuard(paths.lifecycleElectionPath, 10_000, 'coordinator lifecycle election for rollback');
-    let intent = await writeIntent(paths, intentValue, 'rollback-restoring', { failure: failureMessage(failure) });
+    let intent = await writeIntent(paths, intentValue, 'rollback-restoring', { failure: rollbackFailure });
     try {
         await verifyBackup(backupRecord);
         const currentText = await readExactLockText(paths.lockPath);
@@ -660,7 +682,7 @@ async function restoreBackup(paths, intentValue, failure) {
             const tombstone = await quarantineExactLock(paths.predecessorLockPath, fenceText, 'rollback predecessor fence');
             await discardLockTombstone(tombstone);
         }
-        intent = await writeIntent(paths, intent, 'rollback-restored', { predecessor_fence: null, failure: failureMessage(failure) });
+        intent = await writeIntent(paths, intent, 'rollback-restored', { predecessor_fence: null, failure: rollbackFailure });
         return intent;
     }
     finally {

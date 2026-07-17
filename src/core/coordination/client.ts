@@ -760,13 +760,14 @@ export class CoordinatorClient {
         }
       } catch (error) {
         if (upgrade === null) throw error;
+        const startupCause = [error instanceof Error ? error.message : String(error), ...(error instanceof CoordinationRuntimeError ? error.evidence.map((entry) => `startup_cause=${entry}`) : [])];
         try {
           await upgrade.rollback(error);
         } catch (rollbackError) {
           await upgrade.markRecoveryRequired(rollbackError).catch(() => undefined);
-          throw new CoordinationRuntimeError('recovery-required', 'coordinator upgrade failed and exact verified-backup restoration also failed', [error instanceof Error ? error.message : String(error), rollbackError instanceof Error ? rollbackError.message : String(rollbackError)]);
+          throw new CoordinationRuntimeError('recovery-required', 'coordinator upgrade failed and exact verified-backup restoration also failed', [...startupCause, rollbackError instanceof Error ? rollbackError.message : String(rollbackError)]);
         }
-        throw new CoordinationRuntimeError('recovery-required', 'coordinator upgrade failed; the exact schema-6 backup was restored, but this package cannot automatically restart the unavailable aa3e377 binary', [error instanceof Error ? error.message : String(error), `upgrade_id=${upgrade.intent.upgrade_id}`]);
+        throw new CoordinationRuntimeError('recovery-required', 'coordinator upgrade failed; the exact schema-6 backup was restored, but this package cannot automatically restart the unavailable aa3e377 binary', [...startupCause, `upgrade_id=${upgrade.intent.upgrade_id}`]);
       }
     } finally {
       await predecessorStartupFence.release();
