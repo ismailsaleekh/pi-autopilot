@@ -66,7 +66,7 @@ void describe('BUG-176 coordinator response-boundary hard-kill recovery', () => 
       const sessions = status.payload['session_leases'];
       if (!Array.isArray(sessions)) throw new Error('restarted coordinator status omitted sessions');
       assert.equal(sessions.length, 1, 'hard-kill retry must not create a second generation');
-      const database = new DatabaseSync(paths.databasePath, { readOnly: true });
+      const database = new DatabaseSync(restarted.store.currentGeneration().database_path, { readOnly: true });
       try {
         const event = database.prepare('SELECT COUNT(*) AS count FROM events WHERE repo_id=? AND idempotency_key=?').get(repoId, request.idempotency_key ?? '');
         const result = database.prepare('SELECT COUNT(*) AS count FROM idempotency_results WHERE repo_id=? AND idempotency_key=?').get(repoId, request.idempotency_key ?? '');
@@ -93,7 +93,7 @@ void describe('BUG-176 coordinator response-boundary hard-kill recovery', () => 
       assert.deepEqual(await resultClient.request(resultRequest), committedResult);
       const expandedResult = await resultClient.mutate('acquire-group', { repoId, workstreamRun: runId, sessionId: session.session_id, fencingGeneration: 1, expectedVersion: run.version, idempotencyKey: 'response-crash-acquire-group' }, resultRequest.payload);
       assert.equal(Array.isArray(expandedResult.payload['edit_leases']) && expandedResult.payload['edit_leases'].length, requestedLeases.length);
-      const resultDatabase = new DatabaseSync(paths.databasePath, { readOnly: true });
+      const resultDatabase = new DatabaseSync(restarted.store.currentGeneration().database_path, { readOnly: true });
       try {
         assert.equal(resultDatabase.prepare('SELECT COUNT(*) AS count FROM events WHERE repo_id=? AND idempotency_key=?').get(repoId, resultRequest.idempotency_key ?? '')?.['count'], 1);
         assert.equal(resultDatabase.prepare('SELECT COUNT(*) AS count FROM idempotency_results WHERE repo_id=? AND idempotency_key=?').get(repoId, resultRequest.idempotency_key ?? '')?.['count'], 1);
