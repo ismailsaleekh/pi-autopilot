@@ -9,6 +9,8 @@ import { DatabaseSync } from 'node:sqlite';
 
 import { runCoordinationMigration, type CoordinationMigrationCommand, type CoordinationMigrationCrashBoundary } from '../../src/core/coordination/migration.ts';
 import { isProcessAlive } from '../../src/core/coordination/process-identity.ts';
+import { coordinatorRuntimePaths } from '../../src/core/coordination/runtime-paths.ts';
+import { readCurrentStoreGeneration } from '../../src/core/coordination/store-generation.ts';
 import { hardKillProcess } from '../helpers/hard-kill-process.ts';
 import { migrationTestClock, withMigrationTestFixture } from '../helpers/migration-fixture.ts';
 
@@ -76,8 +78,9 @@ void describe('migration transition crash recovery', () => {
         command: 'cutover', repoKey: fixture.repoKey, env: fixture.env, clock: migrationTestClock(),
         afterBoundary: (boundary) => { if (boundary === 'after-cutover-marker-before-journal') throw new Error('marker crash'); },
       }), /marker crash/u);
-      const databasePath = join(fixture.stateRoot, 'coordinator', 'coordinator.db');
-      const database = new DatabaseSync(databasePath);
+      const generation = readCurrentStoreGeneration(coordinatorRuntimePaths(fixture.env));
+      if (generation === null) throw new Error('cutover marker fixture has no current schema-13 generation');
+      const database = new DatabaseSync(generation.database_path);
       try { database.exec("UPDATE repositories SET version=version+1 WHERE repo_id='" + fixture.repoKey.replace(/'/gu, "''") + "'"); database.exec('PRAGMA wal_checkpoint(TRUNCATE)'); }
       finally { database.close(); }
       await assert.rejects(
