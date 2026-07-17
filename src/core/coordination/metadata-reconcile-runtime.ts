@@ -32,6 +32,11 @@ export interface MetadataReconcileBatchResult {
   readonly mutation_report: 'reported' | 'effect-unknown' | 'already-satisfied';
 }
 
+export interface MetadataReconcileEvidenceRoot {
+  readonly canonical_worktree_id: string;
+  readonly evidence_root: string;
+}
+
 function compare(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
 }
@@ -119,14 +124,29 @@ async function publishEvidence(input: {
  */
 export async function reconcileApprovedMissingWorktreeMetadata(input: {
   readonly approvals: readonly MetadataReconcileApproval[];
-  readonly evidence_root: string;
+  readonly evidence_root?: string;
+  readonly evidence_roots?: readonly MetadataReconcileEvidenceRoot[];
   readonly env?: GitProcessEnv;
   readonly observe_before_final_drift_check?: () => Promise<void> | void;
 }): Promise<MetadataReconcileBatchResult> {
   if (input.approvals.length === 0) throw new CoordinationRuntimeError('invalid-request', 'metadata reconciliation requires at least one approved row');
+  if ((input.evidence_root === undefined) === (input.evidence_roots === undefined)) throw new CoordinationRuntimeError('invalid-request', 'metadata reconciliation requires exactly one evidence-root authority form');
   const approvals = input.approvals.map((approval) => ({ ...approval, intent: parseMetadataReconcileIntent(approval.intent) }));
   const first = approvals[0];
   if (first === undefined) throw new CoordinationRuntimeError('invalid-request', 'metadata reconciliation approval set disappeared');
+  const evidenceRoots = new Map<string, string>();
+  if (input.evidence_root !== undefined) {
+    for (const approval of approvals) evidenceRoots.set(approval.intent.canonical_worktree_id, input.evidence_root);
+  } else {
+    for (const entry of input.evidence_roots ?? []) {
+      if (evidenceRoots.has(entry.canonical_worktree_id)) throw new CoordinationRuntimeError('invalid-request', 'metadata reconciliation evidence-root map contains a duplicate canonical worktree', [entry.canonical_worktree_id]);
+      evidenceRoots.set(entry.canonical_worktree_id, entry.evidence_root);
+    }
+    const canonicalIds = new Set(approvals.map((approval) => approval.intent.canonical_worktree_id));
+    const missing = [...canonicalIds].filter((canonicalId) => !evidenceRoots.has(canonicalId)).sort(compare);
+    const unexpected = [...evidenceRoots.keys()].filter((canonicalId) => !canonicalIds.has(canonicalId)).sort(compare);
+    if (missing.length > 0 || unexpected.length > 0) throw new CoordinationRuntimeError('invalid-request', 'metadata reconciliation evidence-root map differs from the exact approval set', [...missing.map((entry) => `missing=${entry}`), ...unexpected.map((entry) => `unexpected=${entry}`)]);
+  }
   for (const approval of approvals) {
     const canonicalId = deterministicWorktreeId({
       repo_id: approval.semantic_identity.repo_id,
@@ -183,7 +203,9 @@ export async function reconcileApprovedMissingWorktreeMetadata(input: {
       preserved_refs_after: refsAfter,
     };
     assertMetadataReconcileEvidence(approval.intent, evidence);
-    evidencePaths.push(await publishEvidence({ evidenceRoot: input.evidence_root, approval, evidence }));
+    const evidenceRoot = evidenceRoots.get(approval.intent.canonical_worktree_id);
+    if (evidenceRoot === undefined) throw new CoordinationRuntimeError('invalid-state', 'metadata reconciliation approval lost its exact evidence-root authority', [approval.intent.canonical_worktree_id]);
+    evidencePaths.push(await publishEvidence({ evidenceRoot, approval, evidence }));
   }
   return Object.freeze({
     evidence_paths: Object.freeze(evidencePaths.sort(compare)),
