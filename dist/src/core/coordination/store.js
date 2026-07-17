@@ -11,8 +11,10 @@ import { validateAuthoritativeCoordinationDocument, validatePlanningContradictio
 import { CoordinationRuntimeError } from "./failures.js";
 import { assertCoordinationObservationSourceIdentity } from "./observations.js";
 import { checkCoordinationInvariants } from "./invariants.js";
+import { runS1InvariantDetectors } from "./invariant-registry.js";
 import { proveLegacyReadAttemptTerminal } from "./legacy-read-terminal.js";
-import { COORDINATOR_BUSY_TIMEOUT_MS, COORDINATOR_DATABASE_SCHEMA_VERSION, COORDINATOR_GRANT_OFFER_TTL_MS, COORDINATOR_PACKAGE_BUILD, enforcePrivateAuthorityPath, enforceWindowsPrivateAcl, ensureCoordinatorPrivateRoots } from "./runtime-paths.js";
+import { AUTOPILOT_RUN_SCOPED_FAULT_SCHEMA, parseRunScopedLogicalFault } from "./logical-faults.js";
+import { COORDINATOR_BUSY_TIMEOUT_MS, COORDINATOR_DATABASE_SCHEMA_VERSION, COORDINATOR_GRANT_OFFER_TTL_MS, COORDINATOR_IMPLEMENTATION_BUILD, COORDINATOR_LEGACY_FACADE_BUILD, COORDINATOR_PACKAGE_BUILD, COORDINATOR_STORE_SCHEMA_VERSION, COORDINATOR_WIRE_LINEAGE, enforcePrivateAuthorityPath, enforceWindowsPrivateAcl, ensureCoordinatorPrivateRoots } from "./runtime-paths.js";
 import { byteBudgetPage, COORDINATOR_MAX_PAGE_ENTITY_BYTES, COORDINATOR_PAGE_TARGET_BYTES, encodePaginationCursor, encodedJsonBytes, paginationCursorState, paginationRevision, paginationScope, parsePaginationCursor } from "./pagination.js";
 import { activeCoordinationMigrationFreeze, assertCoordinationDispatchAllowed, assertCoordinationFrozenMutationAllowed, assertCoordinationMigrationRecoveryOperationAuthorized, coordinationCutoverCommitted } from "./migration-paths.js";
 import { proveStructuredAttemptTerminal } from "./terminal-attempt-proof.js";
@@ -22,7 +24,10 @@ import { parseRunTerminalSha, parseUnitAttemptTarget, parseUnitFailureEvidenceIn
 import { AUTOPILOT_COORDINATOR_PROTOCOL_VERSION, COORDINATION_WORKTREE_STATES } from "./types.js";
 import { COORDINATOR_MAX_FRAME_BYTES } from "./runtime-constants.js";
 import { assertPrivatePathNoAliases } from "../private-path.js";
-import { deterministicWorktreeId, sameWorktreeAuthority, worktreeOwnerKindKey } from "./worktree-identity.js";
+import { AUTOPILOT_WORKTREE_ALIAS_SCHEMA, deterministicWorktreeId, parseWorktreeAlias, worktreeOwnerKindKey } from "./worktree-identity.js";
+import { ensureCurrentStoreGeneration, publishRestoredStoreGeneration } from "./store-generation.js";
+import { CoordinatorWriterGuard } from "./writer-guard.js";
+import { deriveWorktreeOperationKeyV2, operationIdFromWorktreeOperationKey } from "./worktree-operation-identity.js";
 const DATABASE_EXPORT_SCHEMA = 'autopilot.coordinator_export.v1';
 const SHA256_PATTERN = /^sha256:[a-f0-9]{64}$/u;
 const MAX_COORDINATION_EVIDENCE_BYTES = 1024 * 1024;
@@ -545,7 +550,69 @@ CREATE TABLE result_details (
 ) STRICT, WITHOUT ROWID;
 CREATE INDEX idx_result_details_collection ON result_details(result_receipt_id, collection_name, collection_ordinal);
 `;
-export const COORDINATOR_SCHEMA_MIGRATION_CHECKSUMS = Object.freeze([MIGRATION_1, MIGRATION_2, MIGRATION_3, MIGRATION_4, MIGRATION_5, MIGRATION_6, MIGRATION_7, MIGRATION_8, MIGRATION_9, MIGRATION_10, MIGRATION_11, MIGRATION_12].map((sql) => createHash('sha256').update(sql, 'utf8').digest('hex')));
+const MIGRATION_13 = `
+ALTER TABLE worktrees ADD COLUMN canonical_worktree_id TEXT;
+ALTER TABLE worktrees ADD COLUMN autopilot_id TEXT;
+ALTER TABLE worktrees ADD COLUMN unit_id TEXT;
+ALTER TABLE worktrees ADD COLUMN attempt INTEGER CHECK(attempt IS NULL OR attempt >= 1);
+ALTER TABLE worktrees ADD COLUMN kind TEXT CHECK(kind IS NULL OR kind IN ('main','unit'));
+ALTER TABLE worktrees ADD COLUMN is_current_canonical INTEGER NOT NULL DEFAULT 0 CHECK(is_current_canonical IN (0,1));
+ALTER TABLE worktree_operations ADD COLUMN canonical_worktree_id TEXT;
+CREATE TABLE worktree_aliases (
+  alias_worktree_id TEXT PRIMARY KEY,
+  canonical_worktree_id TEXT NOT NULL,
+  repo_id TEXT NOT NULL,
+  autopilot_id TEXT NOT NULL,
+  workstream_run TEXT NOT NULL,
+  unit_id TEXT NOT NULL,
+  attempt INTEGER NOT NULL CHECK(attempt >= 1),
+  kind TEXT NOT NULL CHECK(kind IN ('main','unit')),
+  resolution_state TEXT NOT NULL CHECK(resolution_state IN ('resolved','identity-recovery-pending')),
+  reason TEXT NOT NULL CHECK(reason IN ('legacy-migration-id','duplicate-semantic-projection')),
+  evidence_sha256 TEXT NOT NULL CHECK(length(evidence_sha256)=71),
+  created_event_seq INTEGER NOT NULL CHECK(created_event_seq >= 1),
+  CHECK(alias_worktree_id <> canonical_worktree_id),
+  FOREIGN KEY(repo_id, workstream_run) REFERENCES runs(repo_id, workstream_run) ON DELETE RESTRICT,
+  FOREIGN KEY(repo_id, created_event_seq) REFERENCES events(repo_id, event_seq) ON DELETE RESTRICT
+) STRICT;
+CREATE TRIGGER worktree_aliases_deny_update BEFORE UPDATE ON worktree_aliases BEGIN SELECT RAISE(ABORT, 'worktree aliases are immutable'); END;
+CREATE TRIGGER worktree_aliases_deny_delete BEFORE DELETE ON worktree_aliases BEGIN SELECT RAISE(ABORT, 'worktree aliases are immutable'); END;
+CREATE TRIGGER worktree_aliases_deny_chain_insert BEFORE INSERT ON worktree_aliases WHEN
+  EXISTS(SELECT 1 FROM worktree_aliases WHERE alias_worktree_id=NEW.canonical_worktree_id)
+  OR EXISTS(SELECT 1 FROM worktree_aliases WHERE canonical_worktree_id=NEW.alias_worktree_id)
+BEGIN SELECT RAISE(ABORT, 'worktree alias chains are forbidden'); END;
+CREATE TABLE run_scoped_faults (
+  fault_id TEXT PRIMARY KEY,
+  invariant_id TEXT NOT NULL,
+  repo_id TEXT NOT NULL,
+  workstream_run TEXT NOT NULL,
+  entity_type TEXT NOT NULL,
+  entity_id TEXT NOT NULL,
+  fault_code TEXT NOT NULL,
+  detail_json TEXT NOT NULL,
+  status TEXT NOT NULL CHECK(status IN ('active','resolved')),
+  created_event_seq INTEGER NOT NULL CHECK(created_event_seq >= 1),
+  resolved_event_seq INTEGER CHECK(resolved_event_seq IS NULL OR resolved_event_seq >= created_event_seq),
+  version INTEGER NOT NULL CHECK(version >= 1),
+  FOREIGN KEY(repo_id, workstream_run) REFERENCES runs(repo_id, workstream_run) ON DELETE RESTRICT,
+  FOREIGN KEY(repo_id, created_event_seq) REFERENCES events(repo_id, event_seq) ON DELETE RESTRICT,
+  FOREIGN KEY(repo_id, resolved_event_seq) REFERENCES events(repo_id, event_seq) ON DELETE RESTRICT
+) STRICT;
+CREATE UNIQUE INDEX idx_run_scoped_faults_active ON run_scoped_faults(invariant_id, repo_id, workstream_run, entity_type, entity_id) WHERE status='active';
+CREATE INDEX idx_run_scoped_faults_run ON run_scoped_faults(repo_id, workstream_run, status, fault_id);
+CREATE INDEX idx_worktree_aliases_canonical ON worktree_aliases(canonical_worktree_id, alias_worktree_id);
+CREATE INDEX idx_worktrees_canonical ON worktrees(repo_id, canonical_worktree_id, entity_id);
+CREATE UNIQUE INDEX idx_worktrees_current_semantic ON worktrees(repo_id, workstream_run, autopilot_id, unit_id, attempt, kind) WHERE is_current_canonical=1;
+CREATE INDEX idx_worktree_operations_canonical ON worktree_operations(repo_id, workstream_run, canonical_worktree_id, entity_id);
+`;
+const COORDINATOR_SCHEMA_MIGRATIONS = Object.freeze([
+    { version: 1, sql: MIGRATION_1 }, { version: 2, sql: MIGRATION_2 }, { version: 3, sql: MIGRATION_3 },
+    { version: 4, sql: MIGRATION_4 }, { version: 5, sql: MIGRATION_5 }, { version: 6, sql: MIGRATION_6 },
+    { version: 7, sql: MIGRATION_7 }, { version: 8, sql: MIGRATION_8 }, { version: 9, sql: MIGRATION_9 },
+    { version: 10, sql: MIGRATION_10 }, { version: 11, sql: MIGRATION_11 }, { version: 12, sql: MIGRATION_12 },
+    { version: 13, sql: MIGRATION_13 },
+]);
+export const COORDINATOR_SCHEMA_MIGRATION_CHECKSUMS = Object.freeze(COORDINATOR_SCHEMA_MIGRATIONS.map((migration) => createHash('sha256').update(migration.sql, 'utf8').digest('hex')));
 function asRow(value, label) {
     if (value === undefined)
         throw new CoordinationRuntimeError('invalid-state', `${label} row is missing`);
@@ -573,6 +640,54 @@ function sqlInteger(row, field) {
 }
 function sqlNullableInteger(row, field) {
     return row[field] === null ? null : sqlInteger(row, field);
+}
+function updateConservationValue(hash, value) {
+    if (value === null) {
+        hash.update('n:0:', 'utf8');
+        return;
+    }
+    if (value instanceof Uint8Array) {
+        hash.update(`b:${String(value.byteLength)}:`, 'utf8');
+        hash.update(value);
+        return;
+    }
+    const text = String(value);
+    hash.update(`${typeof value === 'number' || typeof value === 'bigint' ? 'i' : 's'}:${String(Buffer.byteLength(text, 'utf8'))}:`, 'utf8');
+    hash.update(text, 'utf8');
+}
+function conservationSection(db, query, fields) {
+    const hash = createHash('sha256');
+    let count = 0;
+    for (const row of db.prepare(query).iterate()) {
+        count += 1;
+        hash.update(`row:${String(count)}\0`, 'utf8');
+        for (const field of fields) {
+            hash.update(`${field}\0`, 'utf8');
+            const value = row[field];
+            if (value === undefined)
+                throw new CoordinationRuntimeError('store-corrupt', 'historical conservation query omitted a required field', [field]);
+            updateConservationValue(hash, value);
+            hash.update('\0', 'utf8');
+        }
+    }
+    return Object.freeze({ count, sha256: `sha256:${hash.digest('hex')}` });
+}
+function historicalConservationSnapshot(db) {
+    return Object.freeze({
+        events: conservationSection(db, 'SELECT repo_id,event_seq,event_type,entity_type,entity_id,idempotency_key,request_sha256,occurred_at FROM events ORDER BY repo_id,event_seq', ['repo_id', 'event_seq', 'event_type', 'entity_type', 'entity_id', 'idempotency_key', 'request_sha256', 'occurred_at']),
+        worktree_operations: conservationSection(db, 'SELECT entity_id,repo_id,workstream_run,payload_json,version FROM worktree_operations ORDER BY repo_id,workstream_run,entity_id', ['entity_id', 'repo_id', 'workstream_run', 'payload_json', 'version']),
+        idempotency_results: conservationSection(db, 'SELECT repo_id,idempotency_key,request_sha256,committed_event_seq,payload_json FROM idempotency_results ORDER BY repo_id,idempotency_key', ['repo_id', 'idempotency_key', 'request_sha256', 'committed_event_seq', 'payload_json']),
+        evidence_artifacts: conservationSection(db, 'SELECT entity_id,repo_id,sha256,ref,label,content,size_bytes,created_event_seq FROM evidence_artifacts ORDER BY repo_id,created_event_seq,entity_id', ['entity_id', 'repo_id', 'sha256', 'ref', 'label', 'content', 'size_bytes', 'created_event_seq']),
+    });
+}
+export function historicalStoreConservationSnapshot(databasePath) {
+    const db = new DatabaseSync(databasePath, { readOnly: true, timeout: COORDINATOR_BUSY_TIMEOUT_MS });
+    try {
+        return historicalConservationSnapshot(db);
+    }
+    finally {
+        db.close();
+    }
 }
 function payloadString(payload, field) {
     const value = payload[field];
@@ -1101,6 +1216,19 @@ function worktreeFromRow(row) {
 function worktreeOperationFromRow(row) {
     return entityFromRow(row, parseCoordinationWorktreeOperation, 'worktree operation');
 }
+function canonicalWorktreeFromRow(row) {
+    const worktree = worktreeFromRow(row);
+    const canonicalId = sqlString(row, 'canonical_worktree_id');
+    const expected = deterministicWorktreeId(worktree.owner, worktree.kind);
+    if (canonicalId !== expected)
+        throw new CoordinationRuntimeError('store-corrupt', 'indexed canonical worktree ID disagrees with semantic identity', [worktree.worktree_id, canonicalId, expected]);
+    return worktree.worktree_id === canonicalId ? worktree : parseCoordinationWorktree({ ...worktree, worktree_id: canonicalId });
+}
+function canonicalWorktreeOperationFromRow(row) {
+    const operation = worktreeOperationFromRow(row);
+    const canonicalId = sqlString(row, 'canonical_worktree_id');
+    return operation.worktree_id === canonicalId ? operation : parseCoordinationWorktreeOperation({ ...operation, worktree_id: canonicalId });
+}
 function waitForEdgeFromRow(row) {
     return entityFromRow(row, parseCoordinationWaitForEdge, 'wait-for edge');
 }
@@ -1196,6 +1324,23 @@ function migrationRecordFromRow(row) {
         version: sqlInteger(row, 'version'),
     });
 }
+function runScopedFaultFromRow(row) {
+    return parseRunScopedLogicalFault({
+        schema_version: AUTOPILOT_RUN_SCOPED_FAULT_SCHEMA,
+        fault_id: sqlString(row, 'fault_id'),
+        invariant_id: sqlString(row, 'invariant_id'),
+        repo_id: sqlString(row, 'repo_id'),
+        workstream_run: sqlString(row, 'workstream_run'),
+        entity_type: sqlString(row, 'entity_type'),
+        entity_id: sqlString(row, 'entity_id'),
+        fault_code: sqlString(row, 'fault_code'),
+        detail: parseJsonObject(sqlString(row, 'detail_json'), 'run-scoped fault detail'),
+        status: sqlString(row, 'status'),
+        created_event_seq: sqlInteger(row, 'created_event_seq'),
+        resolved_event_seq: sqlNullableInteger(row, 'resolved_event_seq'),
+        version: sqlInteger(row, 'version'),
+    });
+}
 function migrationRecoveryFromRow(row) {
     const resolutionJson = sqlNullableString(row, 'resolution_json');
     return parseCoordinationMigrationRecoveryWork({
@@ -1212,12 +1357,417 @@ function migrationRecoveryFromRow(row) {
         version: sqlInteger(row, 'version'),
     });
 }
+function internalEvidenceEvent(db, clock, input) {
+    const sequence = sqlInteger(asRow(db.prepare('UPDATE repositories SET event_seq=event_seq+1 WHERE repo_id=? RETURNING event_seq').get(input.repoId), 'internal event sequence'), 'event_seq');
+    const body = new TextEncoder().encode(`${canonicalJson(input.detail)}\n`);
+    const evidenceSha256 = `sha256:${createHash('sha256').update(body).digest('hex')}`;
+    const artifactId = stableEntityId('evidence', [input.eventType, input.repoId, input.entityId, String(sequence)]);
+    db.prepare('INSERT INTO evidence_artifacts(entity_id, repo_id, sha256, ref, label, content, size_bytes, created_event_seq) VALUES(?, ?, ?, ?, ?, ?, ?, ?)').run(artifactId, input.repoId, evidenceSha256, `internal/s1-store/${input.eventType}/${input.entityId}.${String(sequence)}.json`, input.label, body, body.byteLength, sequence);
+    db.prepare('INSERT INTO events(repo_id,event_seq,event_type,entity_type,entity_id,idempotency_key,request_sha256,occurred_at) VALUES(?,?,?,?,?,?,?,?)').run(input.repoId, sequence, input.eventType, input.entityType, input.entityId, `internal:s1:${input.eventType}:${input.entityId}:${String(sequence)}`, evidenceSha256, clock.now().toISOString());
+    return { eventSeq: sequence, evidenceSha256 };
+}
+function repairEventCountersBeforeSchema13Evidence(db, clock) {
+    for (const row of db.prepare('SELECT repo_id,event_seq FROM repositories ORDER BY repo_id').all()) {
+        const repoId = sqlString(row, 'repo_id');
+        const counter = sqlInteger(row, 'event_seq');
+        const facts = asRow(db.prepare('SELECT COUNT(*) AS event_count,COALESCE(MAX(event_seq),0) AS maximum FROM events WHERE repo_id=?').get(repoId), 'event counter facts');
+        const count = sqlInteger(facts, 'event_count');
+        const maximum = sqlInteger(facts, 'maximum');
+        if (count !== maximum)
+            throw new CoordinationRuntimeError('store-corrupt', 'event history has a missing sequence and cannot be repaired mechanically', [repoId, `count=${String(count)}`, `maximum=${String(maximum)}`]);
+        if (counter > maximum)
+            throw new CoordinationRuntimeError('store-corrupt', 'repository event counter is ahead of immutable event history', [repoId, `counter=${String(counter)}`, `maximum=${String(maximum)}`]);
+        if (counter === maximum)
+            continue;
+        db.prepare('UPDATE repositories SET event_seq=? WHERE repo_id=?').run(maximum, repoId);
+        internalEvidenceEvent(db, clock, {
+            repoId,
+            eventType: 'store-invariant-repaired',
+            entityType: 'repository',
+            entityId: repoId,
+            label: 'event counter behind repair',
+            detail: { schema_version: 'autopilot.store_invariant_repair.v1', invariant_id: 'F4-EVENT-COUNTER-BEHIND', repo_id: repoId, observed_counter: counter, observed_maximum_event_seq: maximum, repair: 'advance-to-maximum-then-allocate-audit-event' },
+        });
+    }
+}
+function persistRunFaultAtEvent(db, plan, createdEventSeq) {
+    const faultId = stableEntityId('run-fault', [plan.invariant_id, plan.repo_id, plan.workstream_run, plan.entity_type, plan.entity_id]);
+    if (db.prepare("SELECT fault_id FROM run_scoped_faults WHERE invariant_id=? AND repo_id=? AND workstream_run=? AND entity_type=? AND entity_id=? AND status='active'").get(plan.invariant_id, plan.repo_id, plan.workstream_run, plan.entity_type, plan.entity_id) !== undefined)
+        return;
+    db.prepare("INSERT INTO run_scoped_faults(fault_id,invariant_id,repo_id,workstream_run,entity_type,entity_id,fault_code,detail_json,status,created_event_seq,resolved_event_seq,version) VALUES(?,?,?,?,?,?,?,?,'active',?,NULL,1)").run(faultId, plan.invariant_id, plan.repo_id, plan.workstream_run, plan.entity_type, plan.entity_id, plan.fault_code, canonicalJson(plan.detail), createdEventSeq);
+}
+function persistRunFault(db, clock, plan) {
+    const faultId = stableEntityId('run-fault', [plan.invariant_id, plan.repo_id, plan.workstream_run, plan.entity_type, plan.entity_id]);
+    if (db.prepare("SELECT fault_id FROM run_scoped_faults WHERE invariant_id=? AND repo_id=? AND workstream_run=? AND entity_type=? AND entity_id=? AND status='active'").get(plan.invariant_id, plan.repo_id, plan.workstream_run, plan.entity_type, plan.entity_id) !== undefined)
+        return;
+    const event = internalEvidenceEvent(db, clock, { repoId: plan.repo_id, eventType: 'run-scoped-fault-recorded', entityType: plan.entity_type, entityId: plan.entity_id, label: 'run-scoped logical store fault', detail: { schema_version: 'autopilot.run_scoped_fault.v1', fault_id: faultId, ...plan } });
+    persistRunFaultAtEvent(db, plan, event.eventSeq);
+}
+function canonicalizeSchema13Worktrees(db, clock) {
+    const before = historicalConservationSnapshot(db);
+    const aliasPlans = [];
+    const faultPlans = [];
+    const canonicalByRawId = new Map();
+    const groups = new Map();
+    for (const row of db.prepare('SELECT * FROM worktrees ORDER BY repo_id,workstream_run,entity_id').all()) {
+        try {
+            const worktree = worktreeFromRow(row);
+            const canonicalId = deterministicWorktreeId(worktree.owner, worktree.kind);
+            canonicalByRawId.set(worktree.worktree_id, canonicalId);
+            const key = worktreeOwnerKindKey(worktree);
+            groups.set(key, [...(groups.get(key) ?? []), worktree]);
+        }
+        catch (error) {
+            faultPlans.push({ invariant_id: 'F3-CANONICAL-IDENTITY', repo_id: sqlString(row, 'repo_id'), workstream_run: sqlString(row, 'workstream_run'), entity_type: 'worktree', entity_id: sqlString(row, 'entity_id'), fault_code: 'identity-recovery-pending', detail: { reason: 'malformed-payload-not-used-for-ownership', indexed_owner_only: true, parser_error: error instanceof Error ? error.message : String(error) } });
+        }
+    }
+    for (const candidates of groups.values()) {
+        const first = candidates[0];
+        if (first === undefined)
+            continue;
+        const canonicalId = deterministicWorktreeId(first.owner, first.kind);
+        const deterministic = candidates.find((candidate) => candidate.worktree_id === canonicalId);
+        const operationCounts = new Map(candidates.map((candidate) => {
+            let count = 0;
+            for (const operationRow of db.prepare('SELECT payload_json FROM worktree_operations WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(candidate.owner.repo_id, candidate.owner.workstream_run)) {
+                try {
+                    if (parseJsonObject(sqlString(operationRow, 'payload_json'), 'worktree operation identity count')['worktree_id'] === candidate.worktree_id)
+                        count += 1;
+                }
+                catch { /* malformed operation is persisted as a scoped fault below */ }
+            }
+            return [candidate.worktree_id, count];
+        }));
+        const ordered = [...candidates].sort((left, right) => (operationCounts.get(right.worktree_id) ?? 0) - (operationCounts.get(left.worktree_id) ?? 0) || left.worktree_id.localeCompare(right.worktree_id));
+        const current = deterministic ?? ordered[0];
+        if (current === undefined)
+            throw new CoordinationRuntimeError('store-corrupt', 'canonical worktree group has no current projection');
+        const pending = candidates.length > 1;
+        for (const candidate of candidates) {
+            db.prepare('UPDATE worktrees SET canonical_worktree_id=?,autopilot_id=?,unit_id=?,attempt=?,kind=?,is_current_canonical=? WHERE entity_id=?').run(canonicalId, candidate.owner.autopilot_id, candidate.owner.unit_id, candidate.owner.attempt, candidate.kind, candidate.worktree_id === current.worktree_id ? 1 : 0, candidate.worktree_id);
+            if (candidate.worktree_id === canonicalId)
+                continue;
+            aliasPlans.push({
+                alias: { schema_version: AUTOPILOT_WORKTREE_ALIAS_SCHEMA, alias_worktree_id: candidate.worktree_id, canonical_worktree_id: canonicalId, repo_id: candidate.owner.repo_id, autopilot_id: candidate.owner.autopilot_id, workstream_run: candidate.owner.workstream_run, unit_id: candidate.owner.unit_id, attempt: candidate.owner.attempt, kind: candidate.kind, resolution_state: pending ? 'identity-recovery-pending' : 'resolved', reason: pending ? 'duplicate-semantic-projection' : 'legacy-migration-id' },
+                detail: { schema_version: 'autopilot.worktree_alias_migration_evidence.v1', alias_worktree_id: candidate.worktree_id, canonical_worktree_id: canonicalId, semantic_identity: { ...candidate.owner, kind: candidate.kind }, candidate_ids: candidates.map((entry) => entry.worktree_id).sort(), operation_counts: Object.fromEntries([...operationCounts.entries()].sort()), external_git_registration_branch_ref_facts: pending ? 'required-before-resolution' : 'not-required-single-projection', classification: pending ? 'identity-recovery-pending' : 'resolved' },
+            });
+        }
+        if (pending)
+            faultPlans.push({ invariant_id: 'F3-SEMANTIC-UNIQUENESS', repo_id: first.owner.repo_id, workstream_run: first.owner.workstream_run, entity_type: 'worktree', entity_id: canonicalId, fault_code: 'identity-recovery-pending', detail: { canonical_worktree_id: canonicalId, candidate_ids: candidates.map((entry) => entry.worktree_id).sort(), current_projection_id: current.worktree_id, external_git_facts_required: true, destructive_authority: 'blocked' } });
+    }
+    for (const row of db.prepare('SELECT entity_id,repo_id,workstream_run,payload_json FROM worktree_operations ORDER BY repo_id,workstream_run,entity_id').all()) {
+        const operationId = sqlString(row, 'entity_id');
+        let rawWorktreeId = null;
+        try {
+            const payload = parseJsonObject(sqlString(row, 'payload_json'), 'worktree operation during canonical migration');
+            const value = payload['worktree_id'];
+            if (typeof value === 'string')
+                rawWorktreeId = value;
+        }
+        catch {
+            rawWorktreeId = null;
+        }
+        const canonicalId = rawWorktreeId === null ? undefined : canonicalByRawId.get(rawWorktreeId);
+        if (canonicalId === undefined) {
+            faultPlans.push({ invariant_id: 'F3-OPERATION-CANONICAL-INDEX', repo_id: sqlString(row, 'repo_id'), workstream_run: sqlString(row, 'workstream_run'), entity_type: 'worktree-operation', entity_id: operationId, fault_code: 'identity-recovery-pending', detail: { reason: 'operation-worktree-identity-unresolvable', raw_payload_not_used_for_owner_scope: true } });
+            continue;
+        }
+        db.prepare('UPDATE worktree_operations SET canonical_worktree_id=? WHERE entity_id=?').run(canonicalId, operationId);
+    }
+    const afterProjection = historicalConservationSnapshot(db);
+    if (canonicalJson(before) !== canonicalJson(afterProjection))
+        throw new CoordinationRuntimeError('store-corrupt', 'schema-13 canonical projection migration changed historical payload/content bytes', [canonicalJson(before), canonicalJson(afterProjection)]);
+    repairEventCountersBeforeSchema13Evidence(db, clock);
+    for (const plan of aliasPlans) {
+        const event = internalEvidenceEvent(db, clock, { repoId: plan.alias.repo_id, eventType: 'worktree-alias-registered', entityType: 'worktree-alias', entityId: plan.alias.alias_worktree_id, label: 'schema-13 worktree alias migration', detail: plan.detail });
+        db.prepare('INSERT INTO worktree_aliases(alias_worktree_id,canonical_worktree_id,repo_id,autopilot_id,workstream_run,unit_id,attempt,kind,resolution_state,reason,evidence_sha256,created_event_seq) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)').run(plan.alias.alias_worktree_id, plan.alias.canonical_worktree_id, plan.alias.repo_id, plan.alias.autopilot_id, plan.alias.workstream_run, plan.alias.unit_id, plan.alias.attempt, plan.alias.kind, plan.alias.resolution_state, plan.alias.reason, event.evidenceSha256, event.eventSeq);
+    }
+    for (const plan of faultPlans)
+        persistRunFault(db, clock, plan);
+}
 function integrityResult(db) {
     const row = asRow(db.prepare('PRAGMA integrity_check').get(), 'integrity_check');
     const value = row['integrity_check'];
     if (typeof value !== 'string')
         throw new CoordinationRuntimeError('store-corrupt', 'integrity check returned an invalid result');
     return value;
+}
+function configureWritableDatabase(db) {
+    db.exec(`PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA temp_store=FILE; PRAGMA busy_timeout=${String(COORDINATOR_BUSY_TIMEOUT_MS)}; PRAGMA trusted_schema=OFF;`);
+}
+function databaseUserVersion(db) {
+    return sqlInteger(asRow(db.prepare('PRAGMA user_version').get(), 'user_version'), 'user_version');
+}
+function applySchemaMigrations(db, clock, targetVersion) {
+    const currentVersion = databaseUserVersion(db);
+    if (currentVersion > targetVersion)
+        throw new CoordinationRuntimeError('schema-mismatch', `database schema ${String(currentVersion)} is newer than migration target ${String(targetVersion)}`);
+    for (const migration of COORDINATOR_SCHEMA_MIGRATIONS) {
+        if (migration.version > targetVersion || currentVersion >= migration.version)
+            continue;
+        const checksum = createHash('sha256').update(migration.sql, 'utf8').digest('hex');
+        db.exec('BEGIN IMMEDIATE');
+        try {
+            db.exec(migration.sql);
+            if (migration.version === COORDINATOR_STORE_SCHEMA_VERSION)
+                canonicalizeSchema13Worktrees(db, clock);
+            db.prepare('INSERT INTO schema_migrations(version, checksum, applied_at) VALUES(?, ?, ?)').run(migration.version, checksum, clock.now().toISOString());
+            db.exec(`PRAGMA user_version=${String(migration.version)}`);
+            db.exec('COMMIT');
+        }
+        catch (error) {
+            db.exec('ROLLBACK');
+            throw error;
+        }
+    }
+    for (const migration of COORDINATOR_SCHEMA_MIGRATIONS) {
+        if (migration.version > targetVersion)
+            continue;
+        let migrationRow;
+        try {
+            migrationRow = db.prepare('SELECT version, checksum FROM schema_migrations WHERE version=?').get(migration.version);
+        }
+        catch (error) {
+            throw new CoordinationRuntimeError('schema-mismatch', 'coordinator migration journal is unavailable', [error instanceof Error ? error.message : String(error)]);
+        }
+        const expectedChecksum = createHash('sha256').update(migration.sql, 'utf8').digest('hex');
+        if (migrationRow === undefined || sqlInteger(migrationRow, 'version') !== migration.version || sqlString(migrationRow, 'checksum') !== expectedChecksum)
+            throw new CoordinationRuntimeError('schema-mismatch', `coordinator migration ${String(migration.version)} checksum does not match the package schema`);
+    }
+    if (databaseUserVersion(db) !== targetVersion)
+        throw new CoordinationRuntimeError('schema-mismatch', 'database did not reach the exact requested schema migration boundary');
+}
+function repairEventCounterInvariantPass(db, clock) {
+    db.exec('BEGIN IMMEDIATE');
+    try {
+        repairEventCountersBeforeSchema13Evidence(db, clock);
+        db.exec('COMMIT');
+    }
+    catch (error) {
+        db.exec('ROLLBACK');
+        throw error;
+    }
+}
+function detectAndPersistLogicalRowFaults(db, clock) {
+    const owner = (value) => ({ repo_id: value.owner.repo_id, workstream_run: value.owner.workstream_run, version: value.version });
+    const singleOwnerTables = [
+        { table: 'run_resources', identity: 'entity_id', parse: (row) => { const value = runResourceFromRow(row); return { repo_id: value.repo_id, workstream_run: value.workstream_run, version: value.version }; } },
+        { table: 'unit_attempts', identity: 'entity_id', parse: (row) => owner(unitAttemptFromRow(row)) },
+        { table: 'acquisition_groups', identity: 'entity_id', parse: (row) => owner(acquisitionGroupFromRow(row)) },
+        { table: 'observations', identity: 'entity_id', parse: (row) => owner(observationFromRow(row)) },
+        { table: 'edit_leases', identity: 'entity_id', parse: (row) => owner(editLeaseFromRow(row)) },
+        { table: 'change_reservations', identity: 'entity_id', parse: (row) => { const value = changeReservationFromRow(row); return { repo_id: value.repo_id, workstream_run: value.workstream_run, version: value.version }; } },
+        { table: 'reservation_obligations', identity: 'entity_id', parse: (row) => { const value = reservationObligationFromRow(row); return { repo_id: value.repo_id, workstream_run: value.workstream_run, version: value.version }; } },
+        { table: 'run_terminal_intents', identity: 'entity_id', parse: (row) => { const value = runTerminalIntentFromRow(row); return { repo_id: value.repo_id, workstream_run: value.workstream_run, version: value.version }; } },
+        { table: 'reconciliation_evidence', identity: 'entity_id', parse: (row) => { const value = reconciliationEvidenceFromRow(row); return { repo_id: value.repo_id, workstream_run: value.workstream_run, version: value.version }; } },
+        { table: 'reconciliation_receipts', identity: 'entity_id', parse: (row) => { const value = reconciliationReceiptFromRow(row); return { repo_id: value.repo_id, workstream_run: value.workstream_run, version: value.version }; } },
+        { table: 'mailbox_deliveries', identity: 'delivery_id', parse: (row) => { const value = mailboxDeliveryFromRow(row); return { repo_id: value.repo_id, workstream_run: value.workstream_run, version: value.version }; } },
+        { table: 'result_receipts', identity: 'entity_id', parse: (row) => { const value = resultReceiptFromRow(row); return { repo_id: value.repo_id, workstream_run: value.workstream_run, version: value.version }; } },
+        { table: 'worktrees', identity: 'entity_id', parse: (row) => owner(worktreeFromRow(row)) },
+        { table: 'worktree_operations', identity: 'entity_id', parse: (row) => owner(worktreeOperationFromRow(row)) },
+    ];
+    db.exec('BEGIN IMMEDIATE');
+    try {
+        for (const descriptor of singleOwnerTables) {
+            for (const row of db.prepare(`SELECT * FROM ${descriptor.table} ORDER BY repo_id,workstream_run,${descriptor.identity}`).all()) {
+                const entityId = sqlString(row, descriptor.identity);
+                let projection = null;
+                let parserError = null;
+                try {
+                    projection = descriptor.parse(row);
+                }
+                catch (error) {
+                    parserError = error instanceof Error ? error.message : String(error);
+                }
+                const indexedRepo = sqlString(row, 'repo_id');
+                const indexedRun = sqlString(row, 'workstream_run');
+                if (projection !== null && (projection.repo_id !== indexedRepo || projection.workstream_run !== indexedRun))
+                    throw new CoordinationRuntimeError('store-corrupt', 'logical payload/index ownership is ambiguous and cannot be scoped safely', [descriptor.table, entityId, `indexed=${indexedRepo}:${indexedRun}`, `payload=${projection.repo_id}:${projection.workstream_run}`]);
+                const indexedVersion = sqlInteger(row, 'version');
+                if (projection === null || projection.version !== indexedVersion)
+                    persistRunFault(db, clock, { invariant_id: 'F4-PAYLOAD-INDEX-AMBIGUITY', repo_id: indexedRepo, workstream_run: indexedRun, entity_type: descriptor.table, entity_id: entityId, fault_code: 'logical-row-fault', detail: { reason: projection === null ? 'payload-contract-or-index-projection-invalid' : 'payload-version-index-mismatch', parser_error: parserError, indexed_version: indexedVersion, payload_version: projection?.version ?? null, owner_scope_source: 'indexed-columns-only' } });
+            }
+        }
+        for (const row of db.prepare('SELECT * FROM claim_requests ORDER BY repo_id,entity_id').all()) {
+            let request = null;
+            try {
+                request = claimRequestFromRow(row);
+            }
+            catch {
+                request = null;
+            }
+            const indexedRequester = sqlString(row, 'requester_workstream_run');
+            const indexedOwner = sqlString(row, 'owner_workstream_run');
+            if (request === null || request.requester.repo_id !== sqlString(row, 'repo_id') || request.owner.repo_id !== sqlString(row, 'repo_id') || request.requester.workstream_run !== indexedRequester || request.owner.workstream_run !== indexedOwner)
+                throw new CoordinationRuntimeError('store-corrupt', 'claim request payload/index ambiguity has two indexed run owners and cannot be scoped safely', [sqlString(row, 'entity_id'), indexedRequester, indexedOwner]);
+        }
+        db.exec('COMMIT');
+    }
+    catch (error) {
+        db.exec('ROLLBACK');
+        throw error;
+    }
+}
+function verifySchema13Projections(db) {
+    if (integrityResult(db) !== 'ok' || databaseUserVersion(db) !== COORDINATOR_STORE_SCHEMA_VERSION)
+        throw new CoordinationRuntimeError('store-corrupt', 'schema-13 database failed physical integrity or schema identity');
+    const missingWorktreeProjection = db.prepare("SELECT entity_id,repo_id,workstream_run FROM worktrees WHERE canonical_worktree_id IS NULL OR autopilot_id IS NULL OR unit_id IS NULL OR attempt IS NULL OR kind IS NULL LIMIT 1").get();
+    if (missingWorktreeProjection !== undefined) {
+        const covered = db.prepare("SELECT fault_id FROM run_scoped_faults WHERE repo_id=? AND workstream_run=? AND entity_type='worktree' AND entity_id=? AND status='active'").get(sqlString(missingWorktreeProjection, 'repo_id'), sqlString(missingWorktreeProjection, 'workstream_run'), sqlString(missingWorktreeProjection, 'entity_id'));
+        if (covered === undefined)
+            throw new CoordinationRuntimeError('store-corrupt', 'schema-13 worktree lacks canonical projection without a scoped fault', [sqlString(missingWorktreeProjection, 'entity_id')]);
+    }
+    const missingOperationProjection = db.prepare('SELECT entity_id,repo_id,workstream_run FROM worktree_operations WHERE canonical_worktree_id IS NULL LIMIT 1').get();
+    if (missingOperationProjection !== undefined) {
+        const covered = db.prepare("SELECT fault_id FROM run_scoped_faults WHERE repo_id=? AND workstream_run=? AND entity_type='worktree-operation' AND entity_id=? AND status='active'").get(sqlString(missingOperationProjection, 'repo_id'), sqlString(missingOperationProjection, 'workstream_run'), sqlString(missingOperationProjection, 'entity_id'));
+        if (covered === undefined)
+            throw new CoordinationRuntimeError('store-corrupt', 'schema-13 operation lacks canonical projection without a scoped fault', [sqlString(missingOperationProjection, 'entity_id')]);
+    }
+    const invalidCurrentGroup = db.prepare('SELECT repo_id,workstream_run,autopilot_id,unit_id,attempt,kind,COUNT(*) AS projection_count,SUM(is_current_canonical) AS current_count FROM worktrees WHERE canonical_worktree_id IS NOT NULL GROUP BY repo_id,workstream_run,autopilot_id,unit_id,attempt,kind HAVING SUM(is_current_canonical)<>1 LIMIT 1').get();
+    if (invalidCurrentGroup !== undefined)
+        throw new CoordinationRuntimeError('store-corrupt', 'schema-13 semantic identity does not have exactly one current projection', [sqlString(invalidCurrentGroup, 'repo_id'), sqlString(invalidCurrentGroup, 'workstream_run'), sqlString(invalidCurrentGroup, 'unit_id'), `projection_count=${String(sqlInteger(invalidCurrentGroup, 'projection_count'))}`, `current_count=${String(sqlInteger(invalidCurrentGroup, 'current_count'))}`]);
+    for (const row of db.prepare('SELECT * FROM worktrees WHERE canonical_worktree_id IS NOT NULL ORDER BY repo_id,workstream_run,entity_id').all()) {
+        let worktree;
+        try {
+            worktree = worktreeFromRow(row);
+        }
+        catch {
+            const fault = db.prepare("SELECT fault_id FROM run_scoped_faults WHERE repo_id=? AND workstream_run=? AND entity_type='worktrees' AND entity_id=? AND status='active'").get(sqlString(row, 'repo_id'), sqlString(row, 'workstream_run'), sqlString(row, 'entity_id'));
+            if (fault !== undefined)
+                continue;
+            throw new CoordinationRuntimeError('store-corrupt', 'schema-13 worktree projection cannot be parsed and has no scoped fault', [sqlString(row, 'entity_id')]);
+        }
+        const expected = deterministicWorktreeId(worktree.owner, worktree.kind);
+        if (sqlString(row, 'canonical_worktree_id') !== expected || sqlString(row, 'autopilot_id') !== worktree.owner.autopilot_id || sqlString(row, 'unit_id') !== worktree.owner.unit_id || sqlInteger(row, 'attempt') !== worktree.owner.attempt || sqlString(row, 'kind') !== worktree.kind)
+            throw new CoordinationRuntimeError('store-corrupt', 'schema-13 worktree indexed identity disagrees with its exact semantic payload', [worktree.worktree_id]);
+    }
+    const unaliasedHistorical = db.prepare('SELECT entity_id,repo_id,workstream_run,canonical_worktree_id FROM worktrees WHERE canonical_worktree_id IS NOT NULL AND entity_id<>canonical_worktree_id AND NOT EXISTS(SELECT 1 FROM worktree_aliases aliases WHERE aliases.alias_worktree_id=worktrees.entity_id AND aliases.canonical_worktree_id=worktrees.canonical_worktree_id) LIMIT 1').get();
+    if (unaliasedHistorical !== undefined)
+        throw new CoordinationRuntimeError('store-corrupt', 'schema-13 historical non-canonical worktree has no immutable direct alias', [sqlString(unaliasedHistorical, 'entity_id'), sqlString(unaliasedHistorical, 'canonical_worktree_id')]);
+    const aliasChain = db.prepare('SELECT left_alias.alias_worktree_id FROM worktree_aliases left_alias JOIN worktree_aliases right_alias ON right_alias.alias_worktree_id=left_alias.canonical_worktree_id OR right_alias.canonical_worktree_id=left_alias.alias_worktree_id LIMIT 1').get();
+    if (aliasChain !== undefined)
+        throw new CoordinationRuntimeError('store-corrupt', 'schema-13 alias registry contains a chain');
+    const requiredIndexes = [
+        ['idx_run_scoped_faults_active', "where status='active'"], ['idx_run_scoped_faults_run', 'workstream_run'],
+        ['idx_worktree_aliases_canonical', 'canonical_worktree_id'], ['idx_worktrees_canonical', 'canonical_worktree_id'],
+        ['idx_worktrees_current_semantic', 'where is_current_canonical=1'], ['idx_worktree_operations_canonical', 'canonical_worktree_id'],
+    ];
+    for (const [indexName, requiredSql] of requiredIndexes) {
+        const index = db.prepare("SELECT sql FROM sqlite_schema WHERE type='index' AND name=?").get(indexName);
+        if (index === undefined || !sqlString(index, 'sql').toLowerCase().includes(requiredSql))
+            throw new CoordinationRuntimeError('store-corrupt', 'schema-13 authority index is missing or changed', [indexName]);
+    }
+    for (const triggerName of ['worktree_aliases_deny_update', 'worktree_aliases_deny_delete', 'worktree_aliases_deny_chain_insert']) {
+        const trigger = db.prepare("SELECT sql FROM sqlite_schema WHERE type='trigger' AND name=? AND tbl_name='worktree_aliases'").get(triggerName);
+        if (trigger === undefined || !sqlString(trigger, 'sql').includes(triggerName === 'worktree_aliases_deny_chain_insert' ? 'worktree alias chains are forbidden' : 'worktree aliases are immutable'))
+            throw new CoordinationRuntimeError('store-corrupt', 'schema-13 alias immutability trigger is missing or changed', [triggerName]);
+    }
+    for (const row of db.prepare('SELECT * FROM worktree_aliases ORDER BY alias_worktree_id').all()) {
+        const alias = parseWorktreeAlias({ schema_version: AUTOPILOT_WORKTREE_ALIAS_SCHEMA, alias_worktree_id: sqlString(row, 'alias_worktree_id'), canonical_worktree_id: sqlString(row, 'canonical_worktree_id'), repo_id: sqlString(row, 'repo_id'), autopilot_id: sqlString(row, 'autopilot_id'), workstream_run: sqlString(row, 'workstream_run'), unit_id: sqlString(row, 'unit_id'), attempt: sqlInteger(row, 'attempt'), kind: sqlString(row, 'kind'), resolution_state: sqlString(row, 'resolution_state'), reason: sqlString(row, 'reason'), evidence_sha256: sqlString(row, 'evidence_sha256'), created_event_seq: sqlInteger(row, 'created_event_seq') });
+        if (deterministicWorktreeId({ repo_id: alias.repo_id, autopilot_id: alias.autopilot_id, workstream_run: alias.workstream_run, unit_id: alias.unit_id, attempt: alias.attempt }, alias.kind) !== alias.canonical_worktree_id)
+            throw new CoordinationRuntimeError('store-corrupt', 'schema-13 alias target disagrees with deterministic semantic identity', [alias.alias_worktree_id]);
+        const historical = db.prepare('SELECT canonical_worktree_id,repo_id,workstream_run,autopilot_id,unit_id,attempt,kind FROM worktrees WHERE entity_id=?').get(alias.alias_worktree_id);
+        if (historical === undefined || sqlString(historical, 'canonical_worktree_id') !== alias.canonical_worktree_id || sqlString(historical, 'repo_id') !== alias.repo_id || sqlString(historical, 'workstream_run') !== alias.workstream_run || sqlString(historical, 'autopilot_id') !== alias.autopilot_id || sqlString(historical, 'unit_id') !== alias.unit_id || sqlInteger(historical, 'attempt') !== alias.attempt || sqlString(historical, 'kind') !== alias.kind)
+            throw new CoordinationRuntimeError('store-corrupt', 'schema-13 alias does not preserve an exact historical worktree projection', [alias.alias_worktree_id]);
+    }
+    for (const row of db.prepare('SELECT * FROM worktree_operations WHERE canonical_worktree_id IS NOT NULL ORDER BY repo_id,workstream_run,entity_id').all()) {
+        let operation;
+        try {
+            operation = worktreeOperationFromRow(row);
+        }
+        catch {
+            const fault = db.prepare("SELECT fault_id FROM run_scoped_faults WHERE repo_id=? AND workstream_run=? AND entity_type='worktree_operations' AND entity_id=? AND status='active'").get(sqlString(row, 'repo_id'), sqlString(row, 'workstream_run'), sqlString(row, 'entity_id'));
+            if (fault !== undefined)
+                continue;
+            throw new CoordinationRuntimeError('store-corrupt', 'schema-13 operation projection cannot be parsed and has no scoped fault', [sqlString(row, 'entity_id')]);
+        }
+        const identity = db.prepare('SELECT canonical_worktree_id FROM worktrees WHERE entity_id=? UNION ALL SELECT canonical_worktree_id FROM worktree_aliases WHERE alias_worktree_id=?').all(operation.worktree_id, operation.worktree_id);
+        const targets = [...new Set(identity.map((candidate) => sqlString(candidate, 'canonical_worktree_id')))];
+        if (targets.length !== 1 || targets[0] !== sqlString(row, 'canonical_worktree_id'))
+            throw new CoordinationRuntimeError('store-corrupt', 'schema-13 operation canonical index does not resolve exactly one immutable worktree identity', [operation.operation_id, operation.worktree_id]);
+    }
+    for (const row of db.prepare('SELECT repo_id,event_seq FROM repositories ORDER BY repo_id').all()) {
+        const facts = asRow(db.prepare('SELECT COUNT(*) AS event_count,COALESCE(MAX(event_seq),0) AS maximum FROM events WHERE repo_id=?').get(sqlString(row, 'repo_id')), 'schema-13 event facts');
+        if (sqlInteger(row, 'event_seq') !== sqlInteger(facts, 'maximum') || sqlInteger(facts, 'event_count') !== sqlInteger(facts, 'maximum'))
+            throw new CoordinationRuntimeError('store-corrupt', 'schema-13 event counter/history invariant is not exact', [sqlString(row, 'repo_id')]);
+    }
+}
+function verifyIdentityRecoveryCoverage(db) {
+    const uncovered = db.prepare("SELECT aliases.alias_worktree_id,aliases.canonical_worktree_id,aliases.repo_id,aliases.workstream_run FROM worktree_aliases aliases WHERE aliases.resolution_state='identity-recovery-pending' AND NOT EXISTS(SELECT 1 FROM run_scoped_faults faults WHERE faults.invariant_id='F3-SEMANTIC-UNIQUENESS' AND faults.repo_id=aliases.repo_id AND faults.workstream_run=aliases.workstream_run AND faults.entity_type='worktree' AND faults.entity_id=aliases.canonical_worktree_id AND faults.status='active') LIMIT 1").get();
+    if (uncovered !== undefined)
+        throw new CoordinationRuntimeError('store-corrupt', 'identity-recovery-pending alias has no exact active run-scoped fence', [sqlString(uncovered, 'alias_worktree_id'), sqlString(uncovered, 'canonical_worktree_id')]);
+}
+function storeInvariantDetectorHost(input) {
+    let logicalSchemaVerified = false;
+    const verifyLogicalSchema = () => {
+        if (logicalSchemaVerified)
+            return;
+        verifySchema13Projections(input.db);
+        logicalSchemaVerified = true;
+    };
+    return {
+        detectPhysicalIntegrity: () => { if (integrityResult(input.db) !== 'ok')
+            throw new CoordinationRuntimeError('store-corrupt', 'schema-13 database failed physical integrity'); },
+        detectStoreGeneration: () => {
+            if (input.generation.pointer.generation_id !== input.generation.publication.generation_id || input.generation.pointer.store_schema_version !== COORDINATOR_STORE_SCHEMA_VERSION || input.generation.publication.store_schema_version !== COORDINATOR_STORE_SCHEMA_VERSION)
+                throw new CoordinationRuntimeError('store-corrupt', 'selected store generation identity is internally contradictory');
+        },
+        detectWriterGuard: () => input.writerGuard.assertHeld(),
+        detectMigrationBoundary: () => { if (!input.migrationBoundarySchema12 || databaseUserVersion(input.db) !== COORDINATOR_DATABASE_SCHEMA_VERSION)
+            throw new CoordinationRuntimeError('schema-mismatch', 'private generation migration requires exact cf50 schema 12'); },
+        detectEventCounterBehind: () => repairEventCounterInvariantPass(input.db, input.clock),
+        detectEventCounterAhead: verifyLogicalSchema,
+        detectPayloadIndexAmbiguity: () => detectAndPersistLogicalRowFaults(input.db, input.clock),
+        detectCanonicalIdentity: verifyLogicalSchema,
+        detectAliasOneHop: verifyLogicalSchema,
+        detectSemanticUniqueness: verifyLogicalSchema,
+        detectOperationCanonicalIndex: verifyLogicalSchema,
+        detectIdentityRecovery: () => verifyIdentityRecoveryCoverage(input.db),
+    };
+}
+const STORE_OPEN_INVARIANT_IDS = Object.freeze([
+    'F4-WRITER-GUARD', 'F4-STORE-GENERATION', 'F4-PHYSICAL-INTEGRITY', 'F4-EVENT-COUNTER-BEHIND',
+    'F4-PAYLOAD-INDEX-AMBIGUITY', 'F4-EVENT-COUNTER-AHEAD', 'F3-CANONICAL-IDENTITY', 'F3-ALIAS-ONE-HOP',
+    'F3-SEMANTIC-UNIQUENESS', 'F3-OPERATION-CANONICAL-INDEX', 'F3-IDENTITY-RECOVERY',
+]);
+function schemaMigrationAdapter(clock) {
+    return {
+        prepareFreshSchema12: async (databasePath) => {
+            const db = new DatabaseSync(databasePath, { timeout: COORDINATOR_BUSY_TIMEOUT_MS, enableForeignKeyConstraints: true });
+            try {
+                configureWritableDatabase(db);
+                applySchemaMigrations(db, clock, COORDINATOR_DATABASE_SCHEMA_VERSION);
+                db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+            }
+            finally {
+                db.close();
+            }
+        },
+        migrateSchema12To13: async (databasePath) => {
+            const db = new DatabaseSync(databasePath, { timeout: COORDINATOR_BUSY_TIMEOUT_MS, enableForeignKeyConstraints: true });
+            try {
+                configureWritableDatabase(db);
+                if (databaseUserVersion(db) !== COORDINATOR_DATABASE_SCHEMA_VERSION)
+                    throw new CoordinationRuntimeError('schema-mismatch', 'private generation migration requires exact cf50 schema 12');
+                applySchemaMigrations(db, clock, COORDINATOR_STORE_SCHEMA_VERSION);
+                verifySchema13Projections(db);
+                db.exec('PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE;');
+                return COORDINATOR_SCHEMA_MIGRATION_CHECKSUMS;
+            }
+            finally {
+                db.close();
+            }
+        },
+        verifySchema13: async (databasePath) => {
+            const db = new DatabaseSync(databasePath, { readOnly: true, timeout: COORDINATOR_BUSY_TIMEOUT_MS });
+            try {
+                verifySchema13Projections(db);
+            }
+            finally {
+                db.close();
+            }
+        },
+    };
 }
 function migrationRecoveryCoversRetainedAuthority(db, repoId, finding) {
     const pendingLeaseIds = (workstreamRun) => new Set(db.prepare("SELECT payload_json FROM migration_recovery_work WHERE repo_id=? AND workstream_run=? AND recovery_type='ambiguous-live-claim' AND status='pending' ORDER BY entity_id").all(repoId, workstreamRun).map((row) => {
@@ -1254,6 +1804,10 @@ export class CoordinatorStore {
     #db;
     #clock;
     #stateRoot;
+    #databasePath;
+    #writerGuard;
+    #ownsWriterGuard;
+    #generation;
     #lastBackupPath;
     #lastStartupReconciliation = null;
     #semanticReplayTransactionActive = false;
@@ -1269,10 +1823,14 @@ export class CoordinatorStore {
     #sessionByLeaseId;
     #pendingMigrationRecoveryByRun;
     #updateSessionHeartbeat;
-    constructor(db, clock, stateRoot, lastBackupPath, options) {
+    constructor(db, clock, stateRoot, databasePath, writerGuard, ownsWriterGuard, generation, lastBackupPath, options) {
         this.#db = db;
         this.#clock = clock;
         this.#stateRoot = stateRoot;
+        this.#databasePath = databasePath;
+        this.#writerGuard = writerGuard;
+        this.#ownsWriterGuard = ownsWriterGuard;
+        this.#generation = generation;
         this.#lastBackupPath = lastBackupPath;
         this.#onSemanticReplayBoundary = options.onSemanticReplayBoundary;
         this.#idempotencyLookup = db.prepare('SELECT request_sha256, committed_event_seq, payload_json FROM idempotency_results WHERE repo_id=? AND idempotency_key=?');
@@ -1305,6 +1863,16 @@ export class CoordinatorStore {
       ) STRICT;
     `);
     }
+    static async restoreGeneration(paths, sourceDatabasePath, sourceDatabaseSha256, clock = systemClock, onBoundary) {
+        const writerGuard = await CoordinatorWriterGuard.acquire(paths);
+        try {
+            const current = await ensureCurrentStoreGeneration(paths, writerGuard, schemaMigrationAdapter(clock));
+            return await publishRestoredStoreGeneration(paths, writerGuard, sourceDatabasePath, sourceDatabaseSha256, current.pointer.generation_id, schemaMigrationAdapter(clock), { now: () => clock.now(), ...(onBoundary === undefined ? {} : { onBoundary }) });
+        }
+        finally {
+            writerGuard.release();
+        }
+    }
     static async open(paths, clock = systemClock, options = {}) {
         try {
             await ensureCoordinatorPrivateRoots(paths);
@@ -1315,92 +1883,48 @@ export class CoordinatorStore {
         catch (error) {
             throw sqliteFailure(error);
         }
-        let existed;
+        const ownsWriterGuard = options.writerGuard === undefined;
+        const writerGuard = options.writerGuard ?? await CoordinatorWriterGuard.acquire(paths);
+        writerGuard.assertHeld();
+        let lastBackupPath = null;
+        let openedDatabase = null;
         try {
             assertPrivatePathNoAliases(paths.databasePath);
-            existed = existsSync(paths.databasePath) && statSync(paths.databasePath).size > 0;
-        }
-        catch (error) {
-            throw sqliteFailure(error);
-        }
-        let db;
-        try {
-            db = new DatabaseSync(paths.databasePath, { timeout: COORDINATOR_BUSY_TIMEOUT_MS, enableForeignKeyConstraints: true });
-        }
-        catch (error) {
-            throw sqliteFailure(error);
-        }
-        let lastBackupPath = null;
-        try {
-            db.exec(`PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA temp_store=FILE; PRAGMA busy_timeout=${String(COORDINATOR_BUSY_TIMEOUT_MS)}; PRAGMA trusted_schema=OFF;`);
-            if (integrityResult(db) !== 'ok')
-                throw new CoordinationRuntimeError('store-corrupt', 'coordinator database failed startup integrity check');
-            const versionRow = asRow(db.prepare('PRAGMA user_version').get(), 'user_version');
-            const currentVersion = sqlInteger(versionRow, 'user_version');
-            if (currentVersion > COORDINATOR_DATABASE_SCHEMA_VERSION)
-                throw new CoordinationRuntimeError('schema-mismatch', `database schema ${String(currentVersion)} is newer than supported schema ${String(COORDINATOR_DATABASE_SCHEMA_VERSION)}`);
-            if (currentVersion === 6 && existed && options.allowExistingSchemaMigration !== true)
-                throw new CoordinationRuntimeError('schema-mismatch', 'existing predecessor schema 6 requires the private verified migration path; in-place server migration is forbidden');
-            if (currentVersion < COORDINATOR_DATABASE_SCHEMA_VERSION && existed) {
-                const stamp = clock.now().toISOString().replace(/[-:.]/gu, '');
-                lastBackupPath = join(paths.backupsRoot, `coordinator.pre-v${String(currentVersion)}.${stamp}.db`);
-                await backup(db, lastBackupPath);
-                await enforcePrivateAuthorityPath(lastBackupPath, false);
-                const backupDb = new DatabaseSync(lastBackupPath, { readOnly: true });
+            const fixedExists = existsSync(paths.databasePath) && statSync(paths.databasePath).size > 0;
+            if (fixedExists && options.allowExistingSchemaMigration === true) {
+                const privateSource = new DatabaseSync(paths.databasePath, { timeout: COORDINATOR_BUSY_TIMEOUT_MS, enableForeignKeyConstraints: true });
                 try {
-                    if (integrityResult(backupDb) !== 'ok')
-                        throw new CoordinationRuntimeError('store-corrupt', 'pre-migration backup failed integrity verification');
+                    configureWritableDatabase(privateSource);
+                    const sourceVersion = databaseUserVersion(privateSource);
+                    if (sourceVersion < COORDINATOR_DATABASE_SCHEMA_VERSION) {
+                        const stamp = clock.now().toISOString().replace(/[-:.]/gu, '');
+                        lastBackupPath = join(paths.backupsRoot, `coordinator.pre-v${String(sourceVersion)}.${stamp}.db`);
+                        await backup(privateSource, lastBackupPath);
+                        await enforcePrivateAuthorityPath(lastBackupPath, false);
+                        applySchemaMigrations(privateSource, clock, COORDINATOR_DATABASE_SCHEMA_VERSION);
+                        privateSource.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+                    }
                 }
                 finally {
-                    backupDb.close();
+                    privateSource.close();
                 }
             }
-            const migrations = [
-                { version: 1, sql: MIGRATION_1 },
-                { version: 2, sql: MIGRATION_2 },
-                { version: 3, sql: MIGRATION_3 },
-                { version: 4, sql: MIGRATION_4 },
-                { version: 5, sql: MIGRATION_5 },
-                { version: 6, sql: MIGRATION_6 },
-                { version: 7, sql: MIGRATION_7 },
-                { version: 8, sql: MIGRATION_8 },
-                { version: 9, sql: MIGRATION_9 },
-                { version: 10, sql: MIGRATION_10 },
-                { version: 11, sql: MIGRATION_11 },
-                { version: 12, sql: MIGRATION_12 },
-            ];
-            for (const migration of migrations) {
-                if (currentVersion >= migration.version)
-                    continue;
-                const checksum = createHash('sha256').update(migration.sql, 'utf8').digest('hex');
-                db.exec('BEGIN IMMEDIATE');
-                try {
-                    db.exec(migration.sql);
-                    db.prepare('INSERT INTO schema_migrations(version, checksum, applied_at) VALUES(?, ?, ?)').run(migration.version, checksum, clock.now().toISOString());
-                    db.exec(`PRAGMA user_version=${String(migration.version)}`);
-                    db.exec('COMMIT');
-                }
-                catch (error) {
-                    db.exec('ROLLBACK');
-                    throw error;
-                }
+            const generation = await ensureCurrentStoreGeneration(paths, writerGuard, schemaMigrationAdapter(clock), { now: () => clock.now(), ...(options.onStorePublicationBoundary === undefined ? {} : { onBoundary: options.onStorePublicationBoundary }) });
+            writerGuard.assertHeld();
+            const db = new DatabaseSync(generation.database_path, { timeout: COORDINATOR_BUSY_TIMEOUT_MS, enableForeignKeyConstraints: true });
+            openedDatabase = db;
+            try {
+                configureWritableDatabase(db);
+                runS1InvariantDetectors(storeInvariantDetectorHost({ db, clock, writerGuard, generation, migrationBoundarySchema12: false }), STORE_OPEN_INVARIANT_IDS);
+                applySchemaMigrations(db, clock, COORDINATOR_STORE_SCHEMA_VERSION);
+                await enforcePrivateAuthorityPath(generation.database_path, false);
             }
-            for (const migration of migrations) {
-                let migrationRow;
-                try {
-                    migrationRow = db.prepare('SELECT version, checksum FROM schema_migrations WHERE version=?').get(migration.version);
-                }
-                catch (error) {
-                    throw new CoordinationRuntimeError('schema-mismatch', 'coordinator migration journal is unavailable', [error instanceof Error ? error.message : String(error)]);
-                }
-                const expectedChecksum = createHash('sha256').update(migration.sql, 'utf8').digest('hex');
-                if (migrationRow === undefined || sqlInteger(migrationRow, 'version') !== migration.version || sqlString(migrationRow, 'checksum') !== expectedChecksum)
-                    throw new CoordinationRuntimeError('schema-mismatch', `coordinator migration ${String(migration.version)} checksum does not match the package schema`);
+            catch (error) {
+                db.close();
+                openedDatabase = null;
+                throw error;
             }
-            if (integrityResult(db) !== 'ok')
-                throw new CoordinationRuntimeError('store-corrupt', 'coordinator database failed post-migration integrity check');
-            await enforcePrivateAuthorityPath(paths.databasePath, false);
-            const store = new CoordinatorStore(db, clock, paths.stateRoot, lastBackupPath, options);
+            const store = new CoordinatorStore(db, clock, paths.stateRoot, generation.database_path, writerGuard, ownsWriterGuard, generation, lastBackupPath, options);
             store.#migrateLegacyReconciliationResults();
             store.#migrateSchema9ReadLeasesToObservations();
             // A migration freeze protects a whole-database rollback boundary. Startup
@@ -1413,19 +1937,67 @@ export class CoordinatorStore {
             return store;
         }
         catch (error) {
-            db.close();
+            openedDatabase?.close();
+            if (ownsWriterGuard)
+                writerGuard.release();
             if (error instanceof CoordinationRuntimeError)
                 throw error;
             throw sqliteFailure(error);
         }
     }
-    close() {
+    currentGeneration() {
+        return this.#generation;
+    }
+    negotiatedIdentityObservability() {
+        this.#writerGuard.assertHeld();
+        return Object.freeze({ implementation_build: COORDINATOR_IMPLEMENTATION_BUILD, wire_lineage: COORDINATOR_WIRE_LINEAGE, api_schema_version: COORDINATOR_DATABASE_SCHEMA_VERSION, store_schema_version: COORDINATOR_STORE_SCHEMA_VERSION, legacy_facade_build: COORDINATOR_LEGACY_FACADE_BUILD, store_generation_id: this.#generation.pointer.generation_id, current_store_pointer_sha256: this.#generation.pointer_sha256 });
+    }
+    negotiatedRunScopedFaults(repoId, workstreamRun) {
+        this.#writerGuard.assertHeld();
+        const rows = workstreamRun === null
+            ? this.#db.prepare("SELECT * FROM run_scoped_faults WHERE repo_id=? AND status='active' ORDER BY workstream_run,fault_id").all(repoId)
+            : this.#db.prepare("SELECT * FROM run_scoped_faults WHERE repo_id=? AND workstream_run=? AND status='active' ORDER BY fault_id").all(repoId, workstreamRun);
+        return Object.freeze(rows.map(runScopedFaultFromRow));
+    }
+    canonicalWorktreeIdentity(repoId, worktreeId) {
+        this.#writerGuard.assertHeld();
+        const aliasRow = this.#db.prepare('SELECT * FROM worktree_aliases WHERE alias_worktree_id=?').get(worktreeId);
+        if (aliasRow !== undefined) {
+            const alias = parseWorktreeAlias({ schema_version: AUTOPILOT_WORKTREE_ALIAS_SCHEMA, alias_worktree_id: sqlString(aliasRow, 'alias_worktree_id'), canonical_worktree_id: sqlString(aliasRow, 'canonical_worktree_id'), repo_id: sqlString(aliasRow, 'repo_id'), autopilot_id: sqlString(aliasRow, 'autopilot_id'), workstream_run: sqlString(aliasRow, 'workstream_run'), unit_id: sqlString(aliasRow, 'unit_id'), attempt: sqlInteger(aliasRow, 'attempt'), kind: sqlString(aliasRow, 'kind'), resolution_state: sqlString(aliasRow, 'resolution_state'), reason: sqlString(aliasRow, 'reason'), evidence_sha256: sqlString(aliasRow, 'evidence_sha256'), created_event_seq: sqlInteger(aliasRow, 'created_event_seq') });
+            if (alias.repo_id !== repoId)
+                return null;
+            return Object.freeze({ canonical_worktree_id: alias.canonical_worktree_id, resolution_state: alias.resolution_state, workstream_run: alias.workstream_run });
+        }
+        const row = this.#db.prepare('SELECT canonical_worktree_id,workstream_run FROM worktrees WHERE repo_id=? AND entity_id=?').get(repoId, worktreeId);
+        if (row === undefined)
+            return null;
+        const canonical = sqlString(row, 'canonical_worktree_id');
+        if (canonical !== worktreeId)
+            throw new CoordinationRuntimeError('store-corrupt', 'non-canonical historical worktree lacks its immutable alias', [repoId, worktreeId, canonical]);
+        return Object.freeze({ canonical_worktree_id: canonical, resolution_state: 'canonical', workstream_run: sqlString(row, 'workstream_run') });
+    }
+    checkpointAndClose() {
+        this.#writerGuard.assertHeld();
+        const checkpoint = asRow(this.#db.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get(), 'WAL checkpoint');
+        const busy = checkpoint['busy'];
+        if (typeof busy === 'number' && busy !== 0)
+            throw new CoordinationRuntimeError('system-fatal', 'current store WAL checkpoint remained busy during ordered shutdown', [this.#databasePath, `busy=${String(busy)}`]);
         this.#db.close();
+        for (const suffix of ['-wal', '-shm'])
+            if (existsSync(`${this.#databasePath}${suffix}`))
+                throw new CoordinationRuntimeError('system-fatal', 'current store WAL/SHM teardown is incomplete; writer authority remains retained until process death', [`${this.#databasePath}${suffix}`]);
+    }
+    close() {
+        this.checkpointAndClose();
+        if (this.#ownsWriterGuard)
+            this.#writerGuard.release();
     }
     integrity() {
+        this.#writerGuard.assertHeld();
         return integrityResult(this.#db);
     }
     replaySemanticEventBatch(records) {
+        this.#writerGuard.assertHeld();
         if (records.length < 1 || records.length > COORDINATOR_SEMANTIC_REPLAY_BATCH_SIZE)
             throw new CoordinationRuntimeError('invalid-request', 'semantic replay batch size is outside the production bound');
         if (this.#semanticReplayTransactionActive)
@@ -1466,8 +2038,13 @@ export class CoordinatorStore {
     }
     #allInvariantFindings() {
         const findings = [];
-        for (const row of this.#db.prepare('SELECT repo_id FROM repositories ORDER BY repo_id').all())
-            findings.push(...checkCoordinationInvariants(this.#snapshotForRepository(sqlString(row, 'repo_id'))));
+        for (const row of this.#db.prepare('SELECT repo_id FROM repositories ORDER BY repo_id').all()) {
+            const repoId = sqlString(row, 'repo_id');
+            const scoped = this.#db.prepare("SELECT fault_id,workstream_run,fault_code FROM run_scoped_faults WHERE repo_id=? AND status='active' ORDER BY workstream_run,fault_id").all(repoId);
+            if (scoped.length > 0)
+                continue;
+            findings.push(...checkCoordinationInvariants(this.#snapshotForRepository(repoId)));
+        }
         return Object.freeze(findings);
     }
     #semanticReplayCompletion(header) {
@@ -1611,17 +2188,23 @@ export class CoordinatorStore {
         await this.#semanticReplayBoundary('inbox-cleaned');
     }
     async createVerifiedBackup(outputPath) {
+        this.#writerGuard.assertHeld();
         const target = resolve(outputPath);
         mkdirSync(dirname(target), { recursive: true, mode: 0o700 });
         await backup(this.#db, target);
-        const backupDb = new DatabaseSync(target, { readOnly: true });
+        const backupDb = new DatabaseSync(target);
         try {
+            const journalMode = sqlString(asRow(backupDb.prepare('PRAGMA journal_mode=DELETE').get(), 'backup journal mode'), 'journal_mode').toLowerCase();
+            if (journalMode !== 'delete')
+                throw new CoordinationRuntimeError('store-corrupt', 'migration backup could not retire WAL journal authority', [target, journalMode]);
             if (integrityResult(backupDb) !== 'ok')
                 throw new CoordinationRuntimeError('store-corrupt', 'migration backup failed integrity verification', [target]);
         }
         finally {
             backupDb.close();
         }
+        if (existsSync(`${target}-wal`) || existsSync(`${target}-shm`))
+            throw new CoordinationRuntimeError('store-corrupt', 'migration backup retained WAL/SHM authority after close', [target]);
         if (platform() !== 'win32')
             chmodSync(target, 0o600);
         const sha256 = `sha256:${createHash('sha256').update(readFileSync(target)).digest('hex')}`;
@@ -1629,6 +2212,7 @@ export class CoordinatorStore {
         return { path: target, sha256 };
     }
     importLegacyCoordination(plan) {
+        this.#writerGuard.assertHeld();
         parseCoordinationRepository(plan.repository);
         for (const run of plan.runs)
             parseCoordinationRun(run);
@@ -1695,6 +2279,8 @@ export class CoordinatorStore {
                 seq = sqlInteger(existingRepositoryRow, 'event_seq') + 1;
                 this.#db.prepare('UPDATE repositories SET event_seq=? WHERE repo_id=?').run(seq, plan.repository.repo_id);
             }
+            const migrationIdempotencyKey = `legacy-migration:${plan.migration_id}`;
+            this.#db.prepare('INSERT INTO events(repo_id, event_seq, event_type, entity_type, entity_id, idempotency_key, request_sha256, occurred_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?)').run(plan.repository.repo_id, seq, 'legacy-coordination-imported', 'migration', plan.migration_id, migrationIdempotencyKey, plan.snapshot_sha256, now);
             for (const run of plan.runs) {
                 const existingRunRow = this.#db.prepare('SELECT * FROM runs WHERE repo_id=? AND workstream_run=?').get(run.repo_id, run.workstream_run);
                 if (existingRunRow === undefined) {
@@ -1779,17 +2365,57 @@ export class CoordinatorStore {
             for (const obligation of plan.reservation_obligations)
                 if (this.#db.prepare('SELECT entity_id FROM reservation_obligations WHERE entity_id=?').get(obligation.obligation_id) === undefined && this.#db.prepare('SELECT entity_id FROM change_reservations WHERE entity_id=?').get(obligation.reservation_id) !== undefined && this.#db.prepare('SELECT entity_id FROM change_reservations WHERE entity_id=?').get(obligation.predecessor_reservation_id) !== undefined)
                     this.#db.prepare('INSERT INTO reservation_obligations(entity_id, repo_id, workstream_run, reservation_id, predecessor_reservation_id, payload_json, version) VALUES(?, ?, ?, ?, ?, ?, ?)').run(obligation.obligation_id, obligation.repo_id, obligation.workstream_run, obligation.reservation_id, obligation.predecessor_reservation_id, canonicalJson({ ...obligation, created_event_seq: seq }), obligation.version);
-            for (const worktree of plan.worktrees) {
-                const existing = this.#db.prepare("SELECT * FROM worktrees WHERE repo_id=? AND workstream_run=? AND json_extract(payload_json, '$.owner.unit_id')=? AND json_extract(payload_json, '$.owner.attempt')=?").get(worktree.owner.repo_id, worktree.owner.workstream_run, worktree.owner.unit_id, worktree.owner.attempt);
-                if (existing === undefined) {
-                    this.#db.prepare('INSERT INTO worktrees(entity_id, repo_id, workstream_run, payload_json, version) VALUES(?, ?, ?, ?, ?)').run(worktree.worktree_id, worktree.owner.repo_id, worktree.owner.workstream_run, canonicalJson(worktree), worktree.version);
+            const incomingWorktreeGroups = new Map();
+            for (const worktree of plan.worktrees)
+                incomingWorktreeGroups.set(worktreeOwnerKindKey(worktree), [...(incomingWorktreeGroups.get(worktreeOwnerKindKey(worktree)) ?? []), worktree]);
+            for (const incoming of incomingWorktreeGroups.values()) {
+                const first = incoming[0];
+                if (first === undefined)
+                    continue;
+                const incomingById = new Map();
+                for (const worktree of incoming) {
+                    const duplicate = incomingById.get(worktree.worktree_id);
+                    if (duplicate !== undefined && canonicalJson(duplicate) !== canonicalJson(worktree))
+                        throw new CoordinationRuntimeError('invalid-state', 'legacy import repeats one worktree ID with contradictory payloads', [worktree.worktree_id]);
+                    incomingById.set(worktree.worktree_id, worktree);
+                }
+                const existingRows = this.#db.prepare('SELECT * FROM worktrees WHERE repo_id=? AND workstream_run=? AND autopilot_id=? AND unit_id=? AND attempt=? AND kind=? ORDER BY entity_id').all(first.owner.repo_id, first.owner.workstream_run, first.owner.autopilot_id, first.owner.unit_id, first.owner.attempt, first.kind);
+                const existing = existingRows.map(worktreeFromRow);
+                for (const worktree of incomingById.values()) {
+                    const sameId = existing.find((candidate) => candidate.worktree_id === worktree.worktree_id);
+                    if (sameId !== undefined && canonicalJson(sameId) !== canonicalJson(worktree))
+                        throw new CoordinationRuntimeError('invalid-state', 'legacy worktree ID disagrees with existing immutable history', [worktree.worktree_id]);
+                }
+                const combined = [...existing, ...[...incomingById.values()].filter((candidate) => !existing.some((prior) => prior.worktree_id === candidate.worktree_id))];
+                const canonicalId = deterministicWorktreeId(first.owner, first.kind);
+                const existingCurrentId = existingRows.find((row) => sqlInteger(row, 'is_current_canonical') === 1)?.['entity_id'];
+                const candidateIds = combined.map((candidate) => candidate.worktree_id).sort();
+                const currentId = candidateIds.includes(canonicalId) ? canonicalId : typeof existingCurrentId === 'string' ? existingCurrentId : candidateIds[0];
+                if (currentId === undefined)
+                    throw new CoordinationRuntimeError('store-corrupt', 'legacy worktree semantic group has no projection');
+                this.#db.prepare('UPDATE worktrees SET is_current_canonical=0 WHERE repo_id=? AND workstream_run=? AND autopilot_id=? AND unit_id=? AND attempt=? AND kind=?').run(first.owner.repo_id, first.owner.workstream_run, first.owner.autopilot_id, first.owner.unit_id, first.owner.attempt, first.kind);
+                for (const worktree of combined) {
+                    if (existing.some((candidate) => candidate.worktree_id === worktree.worktree_id))
+                        continue;
+                    this.#db.prepare('INSERT INTO worktrees(entity_id, repo_id, workstream_run, payload_json, version, canonical_worktree_id, autopilot_id, unit_id, attempt, kind, is_current_canonical) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)').run(worktree.worktree_id, worktree.owner.repo_id, worktree.owner.workstream_run, canonicalJson(worktree), worktree.version, canonicalId, worktree.owner.autopilot_id, worktree.owner.unit_id, worktree.owner.attempt, worktree.kind);
                     importedWorktreeCount += 1;
                 }
-                else {
-                    const current = worktreeFromRow(existing);
-                    if (current.canonical_path !== worktree.canonical_path || current.git_common_dir !== worktree.git_common_dir || current.branch !== worktree.branch || current.kind !== worktree.kind)
-                        throw new CoordinationRuntimeError('invalid-state', 'legacy worktree disagrees with existing coordinator ownership', [worktree.worktree_id]);
+                this.#db.prepare('UPDATE worktrees SET is_current_canonical=1 WHERE entity_id=?').run(currentId);
+                const identityPending = candidateIds.length > 1;
+                for (const worktree of combined) {
+                    if (worktree.worktree_id === canonicalId)
+                        continue;
+                    const priorAlias = this.#db.prepare('SELECT * FROM worktree_aliases WHERE alias_worktree_id=?').get(worktree.worktree_id);
+                    if (priorAlias !== undefined) {
+                        const alias = parseWorktreeAlias({ schema_version: AUTOPILOT_WORKTREE_ALIAS_SCHEMA, alias_worktree_id: sqlString(priorAlias, 'alias_worktree_id'), canonical_worktree_id: sqlString(priorAlias, 'canonical_worktree_id'), repo_id: sqlString(priorAlias, 'repo_id'), autopilot_id: sqlString(priorAlias, 'autopilot_id'), workstream_run: sqlString(priorAlias, 'workstream_run'), unit_id: sqlString(priorAlias, 'unit_id'), attempt: sqlInteger(priorAlias, 'attempt'), kind: sqlString(priorAlias, 'kind'), resolution_state: sqlString(priorAlias, 'resolution_state'), reason: sqlString(priorAlias, 'reason'), evidence_sha256: sqlString(priorAlias, 'evidence_sha256'), created_event_seq: sqlInteger(priorAlias, 'created_event_seq') });
+                        if (alias.canonical_worktree_id !== canonicalId || worktreeOwnerKindKey(worktree) !== `${alias.repo_id}\0${alias.autopilot_id}\0${alias.workstream_run}\0${alias.unit_id}\0${String(alias.attempt)}\0${alias.kind}`)
+                            throw new CoordinationRuntimeError('store-corrupt', 'existing worktree alias disagrees with imported semantic identity', [worktree.worktree_id]);
+                        continue;
+                    }
+                    this.#db.prepare('INSERT INTO worktree_aliases(alias_worktree_id,canonical_worktree_id,repo_id,autopilot_id,workstream_run,unit_id,attempt,kind,resolution_state,reason,evidence_sha256,created_event_seq) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)').run(worktree.worktree_id, canonicalId, worktree.owner.repo_id, worktree.owner.autopilot_id, worktree.owner.workstream_run, worktree.owner.unit_id, worktree.owner.attempt, worktree.kind, identityPending ? 'identity-recovery-pending' : 'resolved', identityPending ? 'duplicate-semantic-projection' : 'legacy-migration-id', plan.snapshot_sha256, seq);
                 }
+                if (identityPending)
+                    persistRunFaultAtEvent(this.#db, { invariant_id: 'F3-SEMANTIC-UNIQUENESS', repo_id: first.owner.repo_id, workstream_run: first.owner.workstream_run, entity_type: 'worktree', entity_id: canonicalId, fault_code: 'identity-recovery-pending', detail: { canonical_worktree_id: canonicalId, candidate_ids: candidateIds, current_projection_id: currentId, source: 'legacy-import-snapshot', source_snapshot_sha256: plan.snapshot_sha256, external_git_facts_required: true, destructive_authority: 'blocked' } }, seq);
             }
             for (const recovery of plan.recovery_work) {
                 if (this.#db.prepare('SELECT repo_id FROM runs WHERE repo_id=? AND workstream_run=?').get(plan.repository.repo_id, recovery.workstream_run) === undefined)
@@ -1811,8 +2437,6 @@ export class CoordinatorStore {
             const exactReport = { ...plan.report, equivalent_lease_count: equivalentLeaseCount, imported_run_count: importedRunCount, imported_attempt_count: importedAttemptCount, imported_lease_count: importedLeaseCount, imported_reservation_count: importedReservationCount, imported_worktree_count: importedWorktreeCount, imported_audit_count: importedAuditCount, recovery_work_count: recoveryWorkCount };
             if (exactReport.classified_claim_count !== exactReport.legacy_claim_count || exactReport.equivalent_lease_count + exactReport.imported_lease_count + exactReport.terminal_leak_count !== exactReport.legacy_claim_count)
                 throw new CoordinationRuntimeError('invalid-state', 'migration claim reconciliation did not classify every legacy authority claim', [canonicalJson(exactReport)]);
-            const idempotencyKey = `legacy-migration:${plan.migration_id}`;
-            this.#db.prepare('INSERT INTO events(repo_id, event_seq, event_type, entity_type, entity_id, idempotency_key, request_sha256, occurred_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?)').run(plan.repository.repo_id, seq, 'legacy-coordination-imported', 'migration', plan.migration_id, idempotencyKey, plan.snapshot_sha256, now);
             this.#db.prepare("INSERT INTO coordination_migrations(repo_id, migration_id, snapshot_sha256, journal_path, state, report_json, imported_at, updated_at, version) VALUES(?, ?, ?, ?, 'imported', ?, ?, ?, 1)").run(plan.repository.repo_id, plan.migration_id, plan.snapshot_sha256, plan.journal_path, canonicalJson(exactReport), now, now);
             const invariantFindings = checkCoordinationInvariants(this.#snapshotForRepository(plan.repository.repo_id)).filter((finding) => finding.severity === 'error' && !migrationRecoveryCoversRetainedAuthority(this.#db, plan.repository.repo_id, finding));
             if (invariantFindings.length > 0)
@@ -1858,18 +2482,21 @@ export class CoordinatorStore {
         return { integrity, invariant_findings: findings };
     }
     databaseDigest() {
+        this.#writerGuard.assertHeld();
         this.#db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
         if (integrityResult(this.#db) !== 'ok')
             throw new CoordinationRuntimeError('store-corrupt', 'database failed integrity before cutover digest');
-        return `sha256:${createHash('sha256').update(readFileSync(resolve(this.#stateRoot, 'coordinator', 'coordinator.db'))).digest('hex')}`;
+        return `sha256:${createHash('sha256').update(readFileSync(this.#databasePath)).digest('hex')}`;
     }
     updateMigrationState(repoId, migrationId, state, report) {
+        this.#writerGuard.assertHeld();
         const row = this.#db.prepare('SELECT migration_id, version FROM coordination_migrations WHERE repo_id=?').get(repoId);
         if (row === undefined || sqlString(row, 'migration_id') !== migrationId)
             throw new CoordinationRuntimeError('invalid-state', 'migration import record is missing or mismatched');
         this.#db.prepare('UPDATE coordination_migrations SET state=?, report_json=?, updated_at=?, version=version+1 WHERE repo_id=? AND migration_id=?').run(state, canonicalJson(report), this.#clock.now().toISOString(), repoId, migrationId);
     }
     sweepExpiredGrantOffers() {
+        this.#writerGuard.assertHeld();
         if (activeCoordinationMigrationFreeze(this.#stateRoot) !== null)
             return 0;
         const now = this.#clock.now().toISOString();
@@ -1918,6 +2545,7 @@ export class CoordinatorStore {
     }
     handle(request) {
         try {
+            this.#writerGuard.assertHeld();
             const effect = this.#dispatch(request);
             const response = {
                 schema_version: 'autopilot.coordinator_response.v1',
@@ -1968,8 +2596,8 @@ export class CoordinatorStore {
             reconciliation_evidence: this.#db.prepare('SELECT * FROM reconciliation_evidence WHERE repo_id=? ORDER BY entity_id').all(repoId).map(reconciliationEvidenceFromRow),
             migration_recovery_work: this.#db.prepare('SELECT * FROM migration_recovery_work WHERE repo_id=? ORDER BY entity_id').all(repoId).map(migrationRecoveryFromRow),
             messages: this.#db.prepare('SELECT * FROM messages WHERE repo_id=? ORDER BY created_event_seq, message_id').all(repoId).map(messageFromRow),
-            worktrees: this.#db.prepare('SELECT * FROM worktrees WHERE repo_id=? ORDER BY entity_id').all(repoId).map(worktreeFromRow),
-            worktree_operations: this.#db.prepare('SELECT * FROM worktree_operations WHERE repo_id=? ORDER BY entity_id').all(repoId).map(worktreeOperationFromRow),
+            worktrees: this.#db.prepare('SELECT * FROM worktrees WHERE repo_id=? AND is_current_canonical=1 ORDER BY canonical_worktree_id').all(repoId).map(canonicalWorktreeFromRow),
+            worktree_operations: this.#db.prepare('SELECT * FROM worktree_operations WHERE repo_id=? AND canonical_worktree_id IS NOT NULL ORDER BY canonical_worktree_id,entity_id').all(repoId).map(canonicalWorktreeOperationFromRow),
             wait_for_edges: this.#db.prepare('SELECT * FROM wait_for_edges WHERE repo_id=? ORDER BY entity_id').all(repoId).map(waitForEdgeFromRow),
             deadlock_resolutions: this.#db.prepare('SELECT * FROM deadlock_resolutions WHERE repo_id=? ORDER BY entity_id').all(repoId).map(deadlockResolutionFromRow),
             authoritative_artifacts: this.#db.prepare('SELECT * FROM authoritative_artifacts WHERE repo_id=? ORDER BY entity_id').all(repoId).map(authoritativeArtifactFromRow),
@@ -2138,9 +2766,15 @@ export class CoordinatorStore {
         const runs = workstreamRun === null
             ? (repoId === 'global' ? this.#db.prepare('SELECT * FROM runs ORDER BY repo_id, workstream_run').all() : this.#db.prepare('SELECT * FROM runs WHERE repo_id=? ORDER BY workstream_run').all(repoId)).map(runFromRow)
             : this.#db.prepare('SELECT * FROM runs WHERE repo_id=? AND workstream_run=?').all(repoId, workstreamRun).map(runFromRow);
+        const runScopedFaults = workstreamRun === null
+            ? (repoId === 'global' ? this.#db.prepare("SELECT * FROM run_scoped_faults WHERE status='active' ORDER BY repo_id,workstream_run,fault_id").all() : this.#db.prepare("SELECT * FROM run_scoped_faults WHERE repo_id=? AND status='active' ORDER BY workstream_run,fault_id").all(repoId)).map(runScopedFaultFromRow)
+            : this.#db.prepare("SELECT * FROM run_scoped_faults WHERE repo_id=? AND workstream_run=? AND status='active' ORDER BY fault_id").all(repoId, workstreamRun).map(runScopedFaultFromRow);
+        const statusDetailRun = workstreamRun !== null && !runScopedFaults.some((fault) => fault.invariant_id === 'F4-PAYLOAD-INDEX-AMBIGUITY');
         const runResources = workstreamRun === null
-            ? (repoId === 'global' ? this.#db.prepare('SELECT * FROM run_resources ORDER BY repo_id, workstream_run').all() : this.#db.prepare('SELECT * FROM run_resources WHERE repo_id=? ORDER BY workstream_run').all(repoId)).map(runResourceFromRow)
-            : this.#db.prepare('SELECT * FROM run_resources WHERE repo_id=? AND workstream_run=?').all(repoId, workstreamRun).map(runResourceFromRow);
+            ? (repoId === 'global'
+                ? this.#db.prepare("SELECT * FROM run_resources WHERE NOT EXISTS(SELECT 1 FROM run_scoped_faults faults WHERE faults.repo_id=run_resources.repo_id AND faults.workstream_run=run_resources.workstream_run AND faults.status='active') ORDER BY repo_id,workstream_run").all()
+                : this.#db.prepare("SELECT * FROM run_resources WHERE repo_id=? AND NOT EXISTS(SELECT 1 FROM run_scoped_faults faults WHERE faults.repo_id=run_resources.repo_id AND faults.workstream_run=run_resources.workstream_run AND faults.status='active') ORDER BY workstream_run").all(repoId)).map(runResourceFromRow)
+            : statusDetailRun ? this.#db.prepare('SELECT * FROM run_resources WHERE repo_id=? AND workstream_run=?').all(repoId, workstreamRun).map(runResourceFromRow) : [];
         const sessions = workstreamRun === null
             ? (repoId === 'global' ? this.#db.prepare('SELECT * FROM session_leases ORDER BY repo_id, workstream_run, session_generation').all() : this.#db.prepare('SELECT * FROM session_leases WHERE repo_id=? ORDER BY workstream_run, session_generation').all(repoId)).map(sessionFromRow)
             : this.#db.prepare('SELECT * FROM session_leases WHERE repo_id=? AND workstream_run=? ORDER BY session_generation').all(repoId, workstreamRun).map(sessionFromRow);
@@ -2148,30 +2782,30 @@ export class CoordinatorStore {
             ? (repoId === 'global' ? this.#db.prepare('SELECT * FROM child_leases ORDER BY repo_id, workstream_run, unit_id, attempt').all() : this.#db.prepare('SELECT * FROM child_leases WHERE repo_id=? ORDER BY workstream_run, unit_id, attempt').all(repoId)).map(childFromRow)
             : this.#db.prepare('SELECT * FROM child_leases WHERE repo_id=? AND workstream_run=? ORDER BY unit_id, attempt').all(repoId, workstreamRun).map(childFromRow);
         const pendingMessages = workstreamRun === null ? 0 : sqlInteger(asRow(this.#db.prepare("SELECT COUNT(*) AS count FROM messages WHERE repo_id=? AND recipient_workstream_run=? AND status!='acknowledged'").get(repoId, workstreamRun), 'message count'), 'count');
-        const unitAttempts = workstreamRun === null ? [] : this.#db.prepare('SELECT * FROM unit_attempts WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(repoId, workstreamRun).map(unitAttemptFromRow);
-        const acquisitionGroups = workstreamRun === null ? [] : this.#db.prepare('SELECT * FROM acquisition_groups WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(repoId, workstreamRun).map(acquisitionGroupFromRow);
-        const observations = workstreamRun === null ? [] : this.#db.prepare('SELECT * FROM observations WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(repoId, workstreamRun).map(observationFromRow);
-        const editLeases = workstreamRun === null ? [] : this.#db.prepare('SELECT * FROM edit_leases WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(repoId, workstreamRun).map(editLeaseFromRow);
-        const reservationObligations = workstreamRun === null ? [] : this.#db.prepare('SELECT * FROM reservation_obligations WHERE repo_id=? AND (workstream_run=? OR predecessor_reservation_id IN (SELECT entity_id FROM change_reservations WHERE repo_id=? AND workstream_run=?)) ORDER BY entity_id').all(repoId, workstreamRun, repoId, workstreamRun).map(reservationObligationFromRow);
+        const unitAttempts = !statusDetailRun ? [] : this.#db.prepare('SELECT * FROM unit_attempts WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(repoId, workstreamRun).map(unitAttemptFromRow);
+        const acquisitionGroups = !statusDetailRun ? [] : this.#db.prepare('SELECT * FROM acquisition_groups WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(repoId, workstreamRun).map(acquisitionGroupFromRow);
+        const observations = !statusDetailRun ? [] : this.#db.prepare('SELECT * FROM observations WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(repoId, workstreamRun).map(observationFromRow);
+        const editLeases = !statusDetailRun ? [] : this.#db.prepare('SELECT * FROM edit_leases WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(repoId, workstreamRun).map(editLeaseFromRow);
+        const reservationObligations = !statusDetailRun ? [] : this.#db.prepare('SELECT * FROM reservation_obligations WHERE repo_id=? AND (workstream_run=? OR predecessor_reservation_id IN (SELECT entity_id FROM change_reservations WHERE repo_id=? AND workstream_run=?)) ORDER BY entity_id').all(repoId, workstreamRun, repoId, workstreamRun).map(reservationObligationFromRow);
         const relevantReservationIds = new Set(reservationObligations.flatMap((obligation) => [obligation.reservation_id, obligation.predecessor_reservation_id]));
-        const changeReservations = workstreamRun === null ? [] : this.#db.prepare('SELECT * FROM change_reservations WHERE repo_id=? ORDER BY entity_id').all(repoId).map(changeReservationFromRow).filter((reservation) => reservation.workstream_run === workstreamRun || relevantReservationIds.has(reservation.reservation_id));
-        const runTerminalIntents = workstreamRun === null ? [] : this.#db.prepare('SELECT * FROM run_terminal_intents WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(repoId, workstreamRun).map(runTerminalIntentFromRow);
-        const claimRequests = workstreamRun === null ? [] : this.#db.prepare('SELECT * FROM claim_requests WHERE repo_id=? AND (requester_workstream_run=? OR owner_workstream_run=?) ORDER BY entity_id').all(repoId, workstreamRun, workstreamRun).map(claimRequestFromRow);
+        const changeReservations = !statusDetailRun ? [] : this.#db.prepare('SELECT * FROM change_reservations WHERE repo_id=? ORDER BY entity_id').all(repoId).map(changeReservationFromRow).filter((reservation) => reservation.workstream_run === workstreamRun || relevantReservationIds.has(reservation.reservation_id));
+        const runTerminalIntents = !statusDetailRun ? [] : this.#db.prepare('SELECT * FROM run_terminal_intents WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(repoId, workstreamRun).map(runTerminalIntentFromRow);
+        const claimRequests = !statusDetailRun ? [] : this.#db.prepare('SELECT * FROM claim_requests WHERE repo_id=? AND (requester_workstream_run=? OR owner_workstream_run=?) ORDER BY entity_id').all(repoId, workstreamRun, workstreamRun).map(claimRequestFromRow);
         const mailboxCursors = workstreamRun === null
             ? (repoId === 'global' ? this.#db.prepare('SELECT * FROM mailbox_cursors ORDER BY repo_id, workstream_run').all() : this.#db.prepare('SELECT * FROM mailbox_cursors WHERE repo_id=? ORDER BY workstream_run').all(repoId)).map(mailboxCursorFromRow)
             : this.#db.prepare('SELECT * FROM mailbox_cursors WHERE repo_id=? AND workstream_run=?').all(repoId, workstreamRun).map(mailboxCursorFromRow);
-        const reconciliationEvidence = workstreamRun === null ? [] : this.#db.prepare('SELECT * FROM reconciliation_evidence WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(repoId, workstreamRun).map(reconciliationEvidenceFromRow);
-        const reconciliationReceipts = workstreamRun === null ? [] : this.#db.prepare('SELECT * FROM reconciliation_receipts WHERE repo_id=? AND workstream_run=? ORDER BY committed_event_seq, entity_id').all(repoId, workstreamRun).map(reconciliationReceiptFromRow);
-        const mailboxDeliveries = workstreamRun === null ? [] : this.#db.prepare('SELECT * FROM mailbox_deliveries WHERE repo_id=? AND workstream_run=? ORDER BY delivery_id').all(repoId, workstreamRun).map(mailboxDeliveryFromRow);
-        const resultReceipts = workstreamRun === null ? [] : this.#db.prepare('SELECT * FROM result_receipts WHERE repo_id=? AND workstream_run=? ORDER BY committed_event_seq, entity_id').all(repoId, workstreamRun).map(resultReceiptFromRow);
-        const worktrees = workstreamRun === null ? [] : this.#db.prepare('SELECT * FROM worktrees WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(repoId, workstreamRun).map(worktreeFromRow);
-        const worktreeOperations = workstreamRun === null ? [] : this.#db.prepare('SELECT * FROM worktree_operations WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(repoId, workstreamRun).map(worktreeOperationFromRow);
-        const waitForEdges = workstreamRun === null ? [] : this.#db.prepare("SELECT * FROM wait_for_edges WHERE repo_id=? AND (json_extract(payload_json, '$.requester.workstream_run')=? OR json_extract(payload_json, '$.blocker.workstream_run')=?) ORDER BY entity_id").all(repoId, workstreamRun, workstreamRun).map(waitForEdgeFromRow);
+        const reconciliationEvidence = !statusDetailRun ? [] : this.#db.prepare('SELECT * FROM reconciliation_evidence WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(repoId, workstreamRun).map(reconciliationEvidenceFromRow);
+        const reconciliationReceipts = !statusDetailRun ? [] : this.#db.prepare('SELECT * FROM reconciliation_receipts WHERE repo_id=? AND workstream_run=? ORDER BY committed_event_seq, entity_id').all(repoId, workstreamRun).map(reconciliationReceiptFromRow);
+        const mailboxDeliveries = !statusDetailRun ? [] : this.#db.prepare('SELECT * FROM mailbox_deliveries WHERE repo_id=? AND workstream_run=? ORDER BY delivery_id').all(repoId, workstreamRun).map(mailboxDeliveryFromRow);
+        const resultReceipts = !statusDetailRun ? [] : this.#db.prepare('SELECT * FROM result_receipts WHERE repo_id=? AND workstream_run=? ORDER BY committed_event_seq, entity_id').all(repoId, workstreamRun).map(resultReceiptFromRow);
+        const worktrees = !statusDetailRun ? [] : this.#db.prepare('SELECT * FROM worktrees WHERE repo_id=? AND workstream_run=? AND is_current_canonical=1 ORDER BY canonical_worktree_id').all(repoId, workstreamRun).map(canonicalWorktreeFromRow);
+        const worktreeOperations = !statusDetailRun ? [] : this.#db.prepare('SELECT * FROM worktree_operations WHERE repo_id=? AND workstream_run=? AND canonical_worktree_id IS NOT NULL ORDER BY canonical_worktree_id,entity_id').all(repoId, workstreamRun).map(canonicalWorktreeOperationFromRow);
+        const waitForEdges = !statusDetailRun ? [] : this.#db.prepare("SELECT * FROM wait_for_edges WHERE repo_id=? AND (json_extract(payload_json, '$.requester.workstream_run')=? OR json_extract(payload_json, '$.blocker.workstream_run')=?) ORDER BY entity_id").all(repoId, workstreamRun, workstreamRun).map(waitForEdgeFromRow);
         const relevantEdgeIds = new Set(waitForEdges.map((edge) => edge.edge_id));
-        const deadlockResolutions = workstreamRun === null ? [] : this.#db.prepare('SELECT * FROM deadlock_resolutions WHERE repo_id=? ORDER BY entity_id').all(repoId).map(deadlockResolutionFromRow).filter((resolution) => resolution.cycle_edge_ids.some((edgeId) => relevantEdgeIds.has(edgeId)));
-        const authoritativeArtifacts = workstreamRun === null ? [] : this.#db.prepare('SELECT * FROM authoritative_artifacts WHERE repo_id=? AND source_run=? ORDER BY entity_id').all(repoId, workstreamRun).map(authoritativeArtifactFromRow);
-        const adjudicationAssignments = workstreamRun === null ? [] : this.#db.prepare('SELECT * FROM adjudication_assignments WHERE repo_id=? ORDER BY entity_id').all(repoId).map(adjudicationAssignmentFromRow).filter((assignment) => assignment.requesting_run === workstreamRun || assignment.participating_runs.includes(workstreamRun) || assignment.adjudicator.workstream_run === workstreamRun);
-        const escalations = workstreamRun === null ? [] : this.#db.prepare('SELECT * FROM escalations WHERE repo_id=? ORDER BY entity_id').all(repoId).map(escalationFromRow).filter((escalation) => escalation.participating_runs.includes(workstreamRun));
+        const deadlockResolutions = !statusDetailRun ? [] : this.#db.prepare('SELECT * FROM deadlock_resolutions WHERE repo_id=? ORDER BY entity_id').all(repoId).map(deadlockResolutionFromRow).filter((resolution) => resolution.cycle_edge_ids.some((edgeId) => relevantEdgeIds.has(edgeId)));
+        const authoritativeArtifacts = !statusDetailRun ? [] : this.#db.prepare('SELECT * FROM authoritative_artifacts WHERE repo_id=? AND source_run=? ORDER BY entity_id').all(repoId, workstreamRun).map(authoritativeArtifactFromRow);
+        const adjudicationAssignments = !statusDetailRun ? [] : this.#db.prepare('SELECT * FROM adjudication_assignments WHERE repo_id=? ORDER BY entity_id').all(repoId).map(adjudicationAssignmentFromRow).filter((assignment) => assignment.requesting_run === workstreamRun || assignment.participating_runs.includes(workstreamRun) || assignment.adjudicator.workstream_run === workstreamRun);
+        const escalations = !statusDetailRun ? [] : this.#db.prepare('SELECT * FROM escalations WHERE repo_id=? ORDER BY entity_id').all(repoId).map(escalationFromRow).filter((escalation) => escalation.participating_runs.includes(workstreamRun));
         const migrations = (repoId === 'global'
             ? this.#db.prepare('SELECT repo_id, migration_id, snapshot_sha256, journal_path, state, report_json, imported_at, updated_at, version FROM coordination_migrations ORDER BY repo_id').all().map(migrationRecordFromRow)
             : this.#db.prepare('SELECT repo_id, migration_id, snapshot_sha256, journal_path, state, report_json, imported_at, updated_at, version FROM coordination_migrations WHERE repo_id=?').all(repoId).map(migrationRecordFromRow))
@@ -2561,7 +3195,7 @@ export class CoordinatorStore {
             write_authority_released: false,
         }));
         const migrations = this.#db.prepare('SELECT version, checksum, applied_at FROM schema_migrations ORDER BY version').all().map((row) => ({ version: sqlInteger(row, 'version'), checksum: sqlString(row, 'checksum'), applied_at: sqlString(row, 'applied_at') }));
-        const incompleteOperations = this.#db.prepare("SELECT * FROM worktree_operations WHERE json_extract(payload_json, '$.stage') NOT IN ('committed','compensated','failed') ORDER BY repo_id, workstream_run, entity_id").all().map(worktreeOperationFromRow);
+        const incompleteOperations = this.#db.prepare("SELECT * FROM worktree_operations WHERE canonical_worktree_id IS NOT NULL AND json_extract(payload_json, '$.stage') NOT IN ('committed','compensated','failed') ORDER BY repo_id, workstream_run, canonical_worktree_id, entity_id").all().map(canonicalWorktreeOperationFromRow);
         const pendingReservationObligations = this.#db.prepare("SELECT * FROM reservation_obligations WHERE json_extract(payload_json, '$.state') IN ('waiting-for-predecessor','integration-required') ORDER BY repo_id, workstream_run, entity_id").all().map(reservationObligationFromRow);
         const preparedRunTerminalIntents = this.#db.prepare("SELECT * FROM run_terminal_intents WHERE json_extract(payload_json, '$.state')='prepared' ORDER BY repo_id, workstream_run, entity_id").all().map(runTerminalIntentFromRow);
         const activeWaitForEdges = this.#db.prepare("SELECT * FROM wait_for_edges WHERE json_extract(payload_json, '$.state')='active' ORDER BY repo_id, entity_id").all().map(waitForEdgeFromRow);
@@ -2633,7 +3267,9 @@ export class CoordinatorStore {
             ['result_receipts', 'repo_id, workstream_run, committed_event_seq, entity_id'],
             ['result_details', 'result_receipt_id, ordinal'],
             ['worktrees', 'repo_id, workstream_run, entity_id'],
-            ['worktree_operations', 'repo_id, workstream_run, entity_id'],
+            ['worktree_operations', 'repo_id, workstream_run, canonical_worktree_id, entity_id'],
+            ['worktree_aliases', 'repo_id, workstream_run, canonical_worktree_id, alias_worktree_id'],
+            ['run_scoped_faults', 'repo_id, workstream_run, status, fault_id'],
             ['merge_operations', 'repo_id, workstream_run, entity_id'],
             ['wait_for_edges', 'repo_id, entity_id'],
             ['deadlock_resolutions', 'repo_id, entity_id'],
@@ -2791,7 +3427,6 @@ export class CoordinatorStore {
             if (suppliedHandoffToken !== null && pendingHandoff === undefined)
                 throw new CoordinationRuntimeError('fenced-session', 'handoff token is missing, consumed, or belongs to another run');
             const effectiveHandoffToken = pendingHandoff === undefined ? null : sqlString(pendingHandoff, 'handoff_token');
-            this.#reconcileSemanticWorktreeDuplicates(run.repo_id, run.workstream_run);
             const seq = this.#nextEventSequence(request.repo_id);
             this.#db.prepare("UPDATE session_leases SET status='fenced', version=version+1 WHERE repo_id=? AND workstream_run=? AND status='attached'").run(request.repo_id, workstreamRun);
             if (effectiveHandoffToken !== null) {
@@ -2821,8 +3456,7 @@ export class CoordinatorStore {
                 throw new CoordinationRuntimeError('unauthorized-client', 'terminal-cleanup recovery attachment does not match the committed terminal intent');
             if ((run.status === 'closed' ? 'closed' : 'aborted') !== intent.outcome)
                 throw new CoordinationRuntimeError('store-corrupt', 'terminal run status disagrees with its committed terminal intent');
-            this.#reconcileSemanticWorktreeDuplicates(run.repo_id, run.workstream_run);
-            const mainRows = this.#db.prepare("SELECT * FROM worktrees WHERE repo_id=? AND workstream_run=? AND json_extract(payload_json, '$.kind')='main' AND json_extract(payload_json, '$.owner.unit_id')='main'").all(request.repo_id, workstreamRun).map(worktreeFromRow);
+            const mainRows = this.#db.prepare("SELECT * FROM worktrees WHERE repo_id=? AND workstream_run=? AND kind='main' AND unit_id='main' AND is_current_canonical=1").all(request.repo_id, workstreamRun).map(canonicalWorktreeFromRow);
             if (mainRows.length !== 1 || mainRows[0] === undefined)
                 throw new CoordinationRuntimeError('store-corrupt', 'terminal-cleanup recovery requires exactly one durable main worktree');
             if (mainRows[0].state === 'removed')
@@ -2853,7 +3487,6 @@ export class CoordinatorStore {
             const exactPending = this.#db.prepare("SELECT entity_id FROM migration_recovery_work WHERE entity_id=? AND repo_id=? AND workstream_run=? AND status='pending'").get(recoveryId, request.repo_id, workstreamRun);
             if (exactPending === undefined)
                 throw new CoordinationRuntimeError('invalid-state', 'migration recovery attachment requires the exact pending recovery row', [recoveryId]);
-            this.#reconcileSemanticWorktreeDuplicates(run.repo_id, run.workstream_run);
             const nextGeneration = run.active_session_generation + 1;
             if (request.fencing_generation !== nextGeneration)
                 throw new CoordinationRuntimeError('stale-version', `next migration recovery generation must be ${String(nextGeneration)}`);
@@ -2952,7 +3585,8 @@ export class CoordinatorStore {
     heartbeatSession(request) {
         return this.#sessionMutation(request, 'session-heartbeat', (session, seq) => {
             this.#updateSessionHeartbeat.run(payloadString(request.payload, 'lease_expires_at'), session.session_lease_id);
-            const reconciliation = this.#repositoryHasCoordinationGraph(request.repo_id)
+            const scopedFaultActive = this.#db.prepare("SELECT fault_id FROM run_scoped_faults WHERE repo_id=? AND workstream_run=? AND status='active' LIMIT 1").get(request.repo_id, session.workstream_run) !== undefined;
+            const reconciliation = !scopedFaultActive && this.#repositoryHasCoordinationGraph(request.repo_id)
                 ? this.#reconcileOwnedRun(request.repo_id, session.workstream_run, seq)
                 : this.#freezeReconciliationSummary(this.#emptyReconciliationSummary());
             const reconciliationReceipt = this.#persistReconciliationReceipt(request.repo_id, session.workstream_run, request.action, seq, reconciliation);
@@ -2968,9 +3602,12 @@ export class CoordinatorStore {
             if (this.#preparedTerminalIntent(run.repo_id, run.workstream_run) !== null)
                 throw new CoordinationRuntimeError('invalid-state', 'run terminal preparation fences new attempt dispatch');
             const owner = { repo_id: run.repo_id, autopilot_id: run.autopilot_id, workstream_run: run.workstream_run, unit_id: payloadString(request.payload, 'unit_id'), attempt: payloadInteger(request.payload, 'attempt') };
+            const role = payloadUnitRole(request.payload, 'role');
+            if (role === 'implement' || role === 'fix')
+                this.#assertSourceChangingDispatchAllowed(run.repo_id, run.workstream_run, 'register-attempt');
             if (payloadInteger(request.payload, 'checkpoint_ordinal') !== 0)
                 throw new CoordinationRuntimeError('invalid-request', 'attempt registration must begin at checkpoint ordinal 0');
-            const attempt = { schema_version: 'autopilot.unit_attempt.v1', owner, state: 'preflight', role: payloadUnitRole(request.payload, 'role'), spec: { ref: payloadString(request.payload, 'spec_ref'), sha256: payloadString(request.payload, 'spec_sha256') }, preemptible: payloadBoolean(request.payload, 'preemptible'), checkpoint_ordinal: 0, critical_section: null, version: 1 };
+            const attempt = { schema_version: 'autopilot.unit_attempt.v1', owner, state: 'preflight', role, spec: { ref: payloadString(request.payload, 'spec_ref'), sha256: payloadString(request.payload, 'spec_sha256') }, preemptible: payloadBoolean(request.payload, 'preemptible'), checkpoint_ordinal: 0, critical_section: null, version: 1 };
             const existing = this.#db.prepare('SELECT * FROM unit_attempts WHERE entity_id=?').get(unitAttemptEntityId(owner));
             if (existing !== undefined) {
                 this.#insertOrVerifyUnitAttempt(attempt);
@@ -2992,6 +3629,8 @@ export class CoordinatorStore {
             if (payloadString(request.payload, 'autopilot_id') !== run.autopilot_id)
                 throw new CoordinationRuntimeError('unauthorized-client', 'child autopilot identity does not match its durable run');
             const attempt = this.#requireUnitAttempt(childOwner.repo_id, childOwner.workstream_run, childOwner.unit_id, childOwner.attempt);
+            if (attempt.role === 'implement' || attempt.role === 'fix')
+                this.#assertSourceChangingDispatchAllowed(run.repo_id, run.workstream_run, 'register-child');
             if (attempt.state !== 'preflight')
                 throw new CoordinationRuntimeError('invalid-state', `child registration requires a preflight attempt, not ${attempt.state}`);
             const activeObservations = this.#db.prepare("SELECT * FROM observations WHERE repo_id=? AND workstream_run=? AND execution_state='active' ORDER BY entity_id").all(childOwner.repo_id, childOwner.workstream_run).map(observationFromRow).filter((observation) => sameOwner(observation.owner, childOwner));
@@ -3118,7 +3757,6 @@ export class CoordinatorStore {
         return this.#mutation(request, () => {
             this.#requireCurrentSession(request);
             const run = this.#requireRun(request.repo_id, this.#workstreamRun(request));
-            this.#reconcileSemanticWorktreeDuplicates(run.repo_id, run.workstream_run);
             this.#requireCoordinatorEditAuthority(run, 'acquisition-group creation');
             this.#assertVersion(run.version, request.expected_version, 'run');
             if (this.#preparedTerminalIntent(run.repo_id, run.workstream_run) !== null)
@@ -3132,6 +3770,8 @@ export class CoordinatorStore {
                 attempt: payloadInteger(request.payload, 'attempt'),
             };
             const requestedLeases = payloadRequestedLeases(request.payload);
+            if (requestedLeases.some((lease) => lease.mode !== 'READ'))
+                this.#assertSourceChangingDispatchAllowed(run.repo_id, run.workstream_run, 'acquire-group');
             const requestedRole = payloadUnitRole(request.payload, 'role');
             if (requestedRole !== 'implement' && requestedRole !== 'fix' && requestedLeases.some((lease) => lease.mode !== 'READ'))
                 throw new CoordinationRuntimeError('invalid-request', `${requestedRole} units may acquire READ authority only`);
@@ -3236,7 +3876,8 @@ export class CoordinatorStore {
                 return { sequence: seq, eventType: 'grant-offer-expired', entityType: 'acquisition-group', entityId: groupId, payload: { outcome: 'offer-expired', acquisition_group: requeued, observations: [], edit_leases: [] } };
             }
             const current = this.#requireGroup(request.repo_id, groupId);
-            this.#reconcileSemanticWorktreeDuplicates(current.owner.repo_id, current.owner.workstream_run);
+            if (current.requested_leases.some((lease) => lease.mode !== 'READ'))
+                this.#assertSourceChangingDispatchAllowed(current.owner.repo_id, current.owner.workstream_run, 'acknowledge-grant');
             if (current.state !== 'grant-ready')
                 throw new CoordinationRuntimeError('invalid-state', `acquisition group is ${current.state}, not grant-ready`);
             if (current.offer_expires_at === null || Date.parse(current.offer_expires_at) <= this.#clock.now().getTime())
@@ -3511,7 +4152,7 @@ export class CoordinatorStore {
             const attempt = this.#requireUnitAttempt(child.owner.repo_id, child.owner.workstream_run, child.owner.unit_id, child.owner.attempt);
             if (attempt.role !== 'adjudicate' || attempt.state !== 'running')
                 throw new CoordinationRuntimeError('invalid-state', 'adjudication completion requires the assigned running adjudication attempt');
-            const unitWorktrees = this.#db.prepare("SELECT * FROM worktrees WHERE repo_id=? AND workstream_run=? AND json_extract(payload_json, '$.kind')='unit' AND json_extract(payload_json, '$.owner.unit_id')=? AND json_extract(payload_json, '$.owner.attempt')=? AND json_extract(payload_json, '$.state')!='removed' ORDER BY entity_id").all(child.owner.repo_id, child.owner.workstream_run, child.owner.unit_id, child.owner.attempt).map(worktreeFromRow);
+            const unitWorktrees = this.#db.prepare("SELECT * FROM worktrees WHERE repo_id=? AND workstream_run=? AND kind='unit' AND unit_id=? AND attempt=? AND is_current_canonical=1 AND json_extract(payload_json, '$.state')!='removed' ORDER BY canonical_worktree_id").all(child.owner.repo_id, child.owner.workstream_run, child.owner.unit_id, child.owner.attempt).map(canonicalWorktreeFromRow);
             if (unitWorktrees.length !== 1)
                 throw new CoordinationRuntimeError('invalid-state', 'adjudication evidence requires exactly one active durable adjudicator unit worktree');
             const unitWorktree = unitWorktrees[0];
@@ -3888,7 +4529,7 @@ export class CoordinatorStore {
         return this.#mutation(request, () => {
             this.#requireCurrentSession(request);
             const run = this.#requireRun(request.repo_id, this.#workstreamRun(request));
-            this.#reconcileSemanticWorktreeDuplicates(run.repo_id, run.workstream_run);
+            this.#assertSourceChangingDispatchAllowed(run.repo_id, run.workstream_run, 'prepare-operation');
             const worktree = parseCoordinationWorktree(request.payload['worktree']);
             const suppliedOperation = parseCoordinationWorktreeOperation(request.payload['operation']);
             const terminalIntent = this.#preparedTerminalIntent(run.repo_id, run.workstream_run);
@@ -3904,26 +4545,33 @@ export class CoordinatorStore {
             if (suppliedOperation.stage !== 'prepared' || suppliedOperation.intent_event_seq !== 0 || suppliedOperation.version !== 1 || suppliedOperation.authority_version !== worktree.version || suppliedOperation.completed_steps.length !== 0 || suppliedOperation.current_step !== null || suppliedOperation.recovery_attempts !== 0 || suppliedOperation.verification_evidence !== null || suppliedOperation.error_code !== null)
                 throw new CoordinationRuntimeError('invalid-request', 'new worktree operation must use the canonical prepared state');
             this.#assertWorktreeAuthority(worktree, suppliedOperation);
-            const existingWorktreeRow = this.#db.prepare('SELECT * FROM worktrees WHERE entity_id=?').get(worktree.worktree_id);
+            const canonicalWorktreeId = deterministicWorktreeId(worktree.owner, worktree.kind);
+            const operationKey = deriveWorktreeOperationKeyV2({ canonicalWorktreeId, operationType: suppliedOperation.operation_type, completeImmutableIntent: suppliedOperation.intent });
+            const expectedOperationId = operationIdFromWorktreeOperationKey(operationKey);
+            if (suppliedOperation.operation_id !== expectedOperationId || request.idempotency_key !== operationKey.operation_key_sha256)
+                throw new CoordinationRuntimeError('invalid-request', 'new worktree operation identity must equal operation-key v2 for its canonical identity and complete immutable intent', [expectedOperationId, operationKey.operation_key_sha256]);
+            const existingWorktreeRow = this.#db.prepare('SELECT * FROM worktrees WHERE repo_id=? AND workstream_run=? AND autopilot_id=? AND unit_id=? AND attempt=? AND kind=? AND is_current_canonical=1').get(worktree.owner.repo_id, worktree.owner.workstream_run, worktree.owner.autopilot_id, worktree.owner.unit_id, worktree.owner.attempt, worktree.kind);
             if (existingWorktreeRow === undefined) {
+                if (worktree.worktree_id !== canonicalWorktreeId)
+                    throw new CoordinationRuntimeError('invalid-request', 'new worktree projection must use its deterministic canonical ID');
                 if (request.expected_version !== 0)
                     throw new CoordinationRuntimeError('stale-version', 'new worktree registration requires expected_version 0');
-                this.#db.prepare('INSERT INTO worktrees(entity_id, repo_id, workstream_run, payload_json, version) VALUES(?, ?, ?, ?, ?)').run(worktree.worktree_id, request.repo_id, run.workstream_run, canonicalJson(worktree), worktree.version);
+                this.#db.prepare('INSERT INTO worktrees(entity_id, repo_id, workstream_run, payload_json, version, canonical_worktree_id, autopilot_id, unit_id, attempt, kind, is_current_canonical) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)').run(worktree.worktree_id, request.repo_id, run.workstream_run, canonicalJson(worktree), worktree.version, canonicalWorktreeId, worktree.owner.autopilot_id, worktree.owner.unit_id, worktree.owner.attempt, worktree.kind);
             }
             else {
-                const existingWorktree = worktreeFromRow(existingWorktreeRow);
+                const existingWorktree = canonicalWorktreeFromRow(existingWorktreeRow);
                 this.#assertVersion(existingWorktree.version, request.expected_version, 'worktree');
                 if (canonicalJson(existingWorktree) !== canonicalJson(worktree))
-                    throw new CoordinationRuntimeError('idempotency-conflict', 'worktree identity was reused with different immutable authority');
+                    throw new CoordinationRuntimeError('idempotency-conflict', 'canonical worktree identity was reused with different immutable authority');
             }
             if (this.#db.prepare('SELECT entity_id FROM worktree_operations WHERE entity_id=?').get(suppliedOperation.operation_id) !== undefined)
                 throw new CoordinationRuntimeError('stale-version', 'worktree operation already exists; retry its original idempotency key or query status');
-            const nonterminal = this.#db.prepare("SELECT entity_id FROM worktree_operations WHERE repo_id=? AND workstream_run=? AND json_extract(payload_json, '$.worktree_id')=? AND json_extract(payload_json, '$.stage') NOT IN ('committed','compensated','failed') LIMIT 1").get(request.repo_id, run.workstream_run, worktree.worktree_id);
+            const nonterminal = this.#db.prepare("SELECT entity_id FROM worktree_operations WHERE repo_id=? AND workstream_run=? AND canonical_worktree_id=? AND json_extract(payload_json, '$.stage') NOT IN ('committed','compensated','failed') LIMIT 1").get(request.repo_id, run.workstream_run, canonicalWorktreeId);
             if (nonterminal !== undefined)
                 throw new CoordinationRuntimeError('coordinator-contention', 'worktree already has an incomplete owner operation');
             const seq = this.#nextEventSequence(request.repo_id);
             const operation = { ...suppliedOperation, intent_event_seq: seq };
-            this.#db.prepare('INSERT INTO worktree_operations(entity_id, repo_id, workstream_run, payload_json, version) VALUES(?, ?, ?, ?, ?)').run(operation.operation_id, request.repo_id, run.workstream_run, canonicalJson(operation), operation.version);
+            this.#db.prepare('INSERT INTO worktree_operations(entity_id, repo_id, workstream_run, payload_json, version, canonical_worktree_id) VALUES(?, ?, ?, ?, ?, ?)').run(operation.operation_id, request.repo_id, run.workstream_run, canonicalJson(operation), operation.version, canonicalWorktreeId);
             return { sequence: seq, eventType: 'worktree-operation-prepared', entityType: 'worktree-operation', entityId: operation.operation_id, payload: { worktree, operation } };
         });
     }
@@ -3931,12 +4579,14 @@ export class CoordinatorStore {
         return this.#mutation(request, () => {
             this.#requireCurrentSession(request);
             const operationId = payloadString(request.payload, 'operation_id');
+            this.#assertSourceChangingDispatchAllowed(request.repo_id, this.#workstreamRun(request), 'transition-operation');
             const operationRow = asRow(this.#db.prepare('SELECT * FROM worktree_operations WHERE entity_id=?').get(operationId), 'worktree operation');
             const operation = worktreeOperationFromRow(operationRow);
             if (operation.owner.repo_id !== request.repo_id || operation.owner.workstream_run !== this.#workstreamRun(request))
                 throw new CoordinationRuntimeError('unauthorized-client', 'session cannot transition a foreign-run worktree operation');
             this.#assertVersion(operation.version, request.expected_version, 'worktree operation');
-            const worktreeRow = asRow(this.#db.prepare('SELECT * FROM worktrees WHERE entity_id=?').get(operation.worktree_id), 'worktree');
+            const canonicalWorktreeId = sqlString(operationRow, 'canonical_worktree_id');
+            const worktreeRow = asRow(this.#db.prepare('SELECT * FROM worktrees WHERE repo_id=? AND canonical_worktree_id=? AND is_current_canonical=1').get(operation.owner.repo_id, canonicalWorktreeId), 'canonical worktree');
             const worktree = worktreeFromRow(worktreeRow);
             if (!sameOwner(worktree.owner, operation.owner))
                 throw new CoordinationRuntimeError('store-corrupt', 'worktree operation ownership changed');
@@ -3975,6 +4625,7 @@ export class CoordinatorStore {
         });
     }
     enqueueMessageForTest(message) {
+        this.#writerGuard.assertHeld();
         const parsed = parseCoordinationMessage(message);
         this.#db.prepare('INSERT INTO messages(message_id, repo_id, recipient_workstream_run, message_type, correlation_id, payload_json, status, created_event_seq, delivered_event_seq, acknowledged_event_seq, version) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(parsed.message_id, parsed.repo_id, parsed.recipient_workstream_run, parsed.message_type, parsed.correlation_id, canonicalJson(parsed.payload), parsed.status, parsed.created_event_seq, parsed.delivered_event_seq, parsed.acknowledged_event_seq, parsed.version);
     }
@@ -4172,6 +4823,8 @@ export class CoordinatorStore {
     #recoverDurableTransitionsAfterStartup() {
         const runs = this.#db.prepare('SELECT * FROM runs ORDER BY repo_id, workstream_run').all().map(runFromRow);
         for (const run of runs) {
+            if (this.#db.prepare("SELECT fault_id FROM run_scoped_faults WHERE repo_id=? AND workstream_run=? AND status='active' LIMIT 1").get(run.repo_id, run.workstream_run) !== undefined)
+                continue;
             this.#db.exec('BEGIN IMMEDIATE');
             try {
                 const seq = this.#nextEventSequence(run.repo_id);
@@ -4935,7 +5588,7 @@ export class CoordinatorStore {
     }
     #assertUnitFailureEvidenceFacts(run, source, targetId, facts) {
         const target = parseUnitAttemptTarget(targetId);
-        const worktrees = this.#db.prepare("SELECT * FROM worktrees WHERE repo_id=? AND workstream_run=? AND json_extract(payload_json, '$.kind')='unit' AND json_extract(payload_json, '$.owner.unit_id')=? AND json_extract(payload_json, '$.owner.attempt')=? ORDER BY entity_id").all(run.repo_id, run.workstream_run, target.unitId, target.attempt).map(worktreeFromRow);
+        const worktrees = this.#db.prepare("SELECT * FROM worktrees WHERE repo_id=? AND workstream_run=? AND kind='unit' AND unit_id=? AND attempt=? AND is_current_canonical=1 ORDER BY canonical_worktree_id").all(run.repo_id, run.workstream_run, target.unitId, target.attempt).map(canonicalWorktreeFromRow);
         const worktree = worktrees[0];
         if (worktrees.length !== 1 || worktree === undefined || resolve(worktree.canonical_path) !== resolve(facts.unitWorktreePath))
             throw new CoordinationRuntimeError('invalid-state', 'unit failure evidence does not identify exactly one registered owner worktree', [facts.unitWorktreePath]);
@@ -5202,7 +5855,7 @@ export class CoordinatorStore {
         return target;
     }
     #requireRunMainRoot(repoId, workstreamRun) {
-        const rows = this.#db.prepare("SELECT * FROM worktrees WHERE repo_id=? AND workstream_run=? AND json_extract(payload_json, '$.kind')='main' AND json_extract(payload_json, '$.state')!='removed' ORDER BY entity_id").all(repoId, workstreamRun).map(worktreeFromRow);
+        const rows = this.#db.prepare("SELECT * FROM worktrees WHERE repo_id=? AND workstream_run=? AND kind='main' AND is_current_canonical=1 AND json_extract(payload_json, '$.state')!='removed' ORDER BY canonical_worktree_id").all(repoId, workstreamRun).map(canonicalWorktreeFromRow);
         if (rows.length !== 1)
             throw new CoordinationRuntimeError('invalid-state', 'run-main authoritative evidence requires exactly one active durable main worktree', [workstreamRun, `count=${String(rows.length)}`]);
         const worktree = rows[0];
@@ -5276,136 +5929,6 @@ export class CoordinatorStore {
      * recovery blockers. The caller already owns the mutation transaction, so the
      * projection update and audit event commit or roll back together.
      */
-    #reconcileSemanticWorktreeDuplicates(repoId, workstreamRun) {
-        const active = this.#db.prepare("SELECT * FROM worktrees WHERE repo_id=? AND workstream_run=? AND json_extract(payload_json, '$.state')!='removed' ORDER BY entity_id").all(repoId, workstreamRun).map(worktreeFromRow);
-        for (let leftIndex = 0; leftIndex < active.length; leftIndex += 1) {
-            const left = active[leftIndex];
-            if (left === undefined)
-                continue;
-            for (let rightIndex = leftIndex + 1; rightIndex < active.length; rightIndex += 1) {
-                const right = active[rightIndex];
-                if (right === undefined || sameWorktreeAuthority(left, right))
-                    continue;
-                const sameOwner = canonicalJson(left.owner) === canonicalJson(right.owner);
-                if (sameOwner || left.canonical_path === right.canonical_path)
-                    throw new CoordinationRuntimeError('store-corrupt', sameOwner
-                        ? 'one exact owner has conflicting active worktree authority projections'
-                        : 'one canonical worktree path is claimed by conflicting active owners', [left.worktree_id, right.worktree_id]);
-            }
-        }
-        const groups = new Map();
-        for (const worktree of active)
-            groups.set(worktreeOwnerKindKey(worktree), [...(groups.get(worktreeOwnerKindKey(worktree)) ?? []), worktree]);
-        for (const candidates of groups.values()) {
-            if (candidates.length < 2)
-                continue;
-            if (candidates.length !== 2)
-                throw new CoordinationRuntimeError('store-corrupt', 'active worktree authority has more than two semantic projections', candidates.map((entry) => entry.worktree_id));
-            const first = candidates[0];
-            const second = candidates[1];
-            if (first === undefined || second === undefined)
-                throw new CoordinationRuntimeError('store-corrupt', 'semantic worktree duplicate set changed during reconciliation');
-            if (!sameWorktreeAuthority(first, second))
-                throw new CoordinationRuntimeError('store-corrupt', 'active worktree owner/kind projections conflict in authority-bearing identity', candidates.map((entry) => entry.worktree_id));
-            if (first.state !== second.state)
-                throw new CoordinationRuntimeError('recovery-required', 'exact worktree projections disagree in lifecycle state', candidates.map((entry) => `${entry.worktree_id}:${entry.state}`));
-            const operationsFor = (id) => this.#db.prepare('SELECT * FROM worktree_operations WHERE repo_id=? AND workstream_run=? AND json_extract(payload_json, \'$.worktree_id\')=? ORDER BY entity_id').all(repoId, workstreamRun, id).map(worktreeOperationFromRow);
-            const firstOperations = operationsFor(first.worktree_id);
-            const secondOperations = operationsFor(second.worktree_id);
-            const incomplete = [...firstOperations, ...secondOperations].filter((operation) => !['committed', 'compensated', 'failed'].includes(operation.stage));
-            if (incomplete.length > 0)
-                throw new CoordinationRuntimeError('recovery-required', 'duplicate worktree projection has an incomplete operation history', incomplete.map((entry) => entry.operation_id));
-            const normalizeHistory = (operations) => canonicalJson(operations.map(({ operation_id: _operationId, worktree_id: _worktreeId, ...operation }) => operation));
-            if (firstOperations.length > 0 && secondOperations.length > 0 && normalizeHistory(firstOperations) !== normalizeHistory(secondOperations))
-                throw new CoordinationRuntimeError('recovery-required', 'duplicate worktree projections carry conflicting operation histories', candidates.map((entry) => entry.worktree_id));
-            const histories = candidates.filter((candidate) => (candidate.worktree_id === first.worktree_id ? firstOperations : secondOperations).length > 0);
-            const deterministicId = deterministicWorktreeId(first.owner, first.kind);
-            const canonical = histories.length === 1 ? histories[0] : candidates.find((candidate) => candidate.worktree_id === deterministicId);
-            if (canonical === undefined)
-                throw new CoordinationRuntimeError('recovery-required', 'duplicate worktree projections lack a mechanically selectable deterministic canonical row', candidates.map((entry) => entry.worktree_id));
-            const redundant = canonical.worktree_id === first.worktree_id ? second : first;
-            if (canonical.version !== redundant.version) {
-                const canonicalOperations = canonical.worktree_id === first.worktree_id ? firstOperations : secondOperations;
-                if (histories.length !== 1 || canonicalOperations.length === 0 || redundant.version !== 1 || canonical.version < redundant.version)
-                    throw new CoordinationRuntimeError('recovery-required', 'duplicate worktree projection versions are not explained by one canonical operation history', candidates.map((entry) => `${entry.worktree_id}:v${String(entry.version)}`));
-            }
-            const retired = parseCoordinationWorktree({ ...redundant, state: 'removed', version: redundant.version + 1 });
-            this.#db.prepare('UPDATE worktrees SET payload_json=?, version=? WHERE entity_id=?').run(canonicalJson(retired), retired.version, retired.worktree_id);
-            const seq = this.#nextEventSequence(repoId);
-            this.#recordWorktreeProjectionRetirement(repoId, canonical, retired, seq, 'equivalent-active-projection');
-        }
-        // A migration-era import could leave one non-deterministic terminal projection
-        // active after the current deterministic projection committed an exact
-        // remove. This is not the ordinary dual-active case above: the removed
-        // deterministic row and its immutable cleanup history are canonical. Retire
-        // only the exact history-free shadow after proving that no child/attempt ever
-        // used it and that the package-recorded Git absence still holds.
-        const all = this.#db.prepare('SELECT * FROM worktrees WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(repoId, workstreamRun).map(worktreeFromRow);
-        const allGroups = new Map();
-        for (const worktree of all)
-            allGroups.set(worktreeOwnerKindKey(worktree), [...(allGroups.get(worktreeOwnerKindKey(worktree)) ?? []), worktree]);
-        for (const candidates of allGroups.values()) {
-            if (candidates.length !== 2)
-                continue;
-            const first = candidates[0];
-            if (first === undefined || first.kind !== 'unit')
-                continue;
-            const deterministicId = deterministicWorktreeId(first.owner, first.kind);
-            const canonical = candidates.find((candidate) => candidate.worktree_id === deterministicId && candidate.state === 'removed');
-            const redundant = candidates.find((candidate) => candidate.worktree_id !== deterministicId && candidate.state !== 'removed');
-            if (canonical === undefined || redundant === undefined)
-                continue;
-            if (!sameWorktreeAuthority(canonical, redundant))
-                throw new CoordinationRuntimeError('store-corrupt', 'removed deterministic worktree and its active historical shadow disagree in authority-bearing identity', candidates.map((entry) => entry.worktree_id));
-            if (redundant.state !== 'terminal' || redundant.version !== 1)
-                throw new CoordinationRuntimeError('recovery-required', 'historical worktree shadow is not the exact untouched terminal migration projection', [`state=${redundant.state}`, `version=${String(redundant.version)}`]);
-            const operationsFor = (id) => this.#db.prepare('SELECT * FROM worktree_operations WHERE repo_id=? AND workstream_run=? AND json_extract(payload_json, \'$.worktree_id\')=? ORDER BY entity_id').all(repoId, workstreamRun, id).map(worktreeOperationFromRow);
-            const canonicalOperations = operationsFor(canonical.worktree_id);
-            const redundantOperations = operationsFor(redundant.worktree_id);
-            const remove = canonicalOperations[0];
-            if (canonicalOperations.length !== 1 || remove === undefined || redundantOperations.length !== 0
-                || remove.operation_type !== 'remove' || remove.stage !== 'committed' || remove.worktree_id !== canonical.worktree_id
-                || canonicalJson(remove.owner) !== canonicalJson(canonical.owner)
-                || remove.authority_version + 1 !== canonical.version || remove.intent_event_seq < 1
-                || remove.completed_steps.length !== 3 || remove.completed_steps[0] !== 'preflight-probe' || remove.completed_steps[1] !== 'external-action' || remove.completed_steps[2] !== 'postcondition-verification'
-                || remove.current_step !== null || remove.recovery_attempts !== 0 || remove.verification_evidence === null || remove.error_code !== null
-                || remove.intent.worktree_path !== canonical.canonical_path || remove.intent.git_common_dir !== canonical.git_common_dir || remove.intent.branch !== canonical.branch || remove.intent.target_sha === null) {
-                throw new CoordinationRuntimeError('recovery-required', 'historical worktree shadow lacks one exact committed deterministic remove history', candidates.map((entry) => entry.worktree_id));
-            }
-            const childExists = this.#db.prepare("SELECT 1 AS present FROM child_leases WHERE repo_id=? AND workstream_run=? AND unit_id=? AND attempt=? LIMIT 1").get(repoId, workstreamRun, canonical.owner.unit_id, canonical.owner.attempt) !== undefined;
-            const attemptExists = this.#db.prepare("SELECT 1 AS present FROM unit_attempts WHERE repo_id=? AND workstream_run=? AND json_extract(payload_json, '$.owner.unit_id')=? AND json_extract(payload_json, '$.owner.attempt')=? LIMIT 1").get(repoId, workstreamRun, canonical.owner.unit_id, canonical.owner.attempt) !== undefined;
-            if (childExists || attemptExists)
-                throw new CoordinationRuntimeError('recovery-required', 'historical worktree shadow cannot retire because its owner has child or attempt history', [canonical.owner.unit_id, String(canonical.owner.attempt)]);
-            const repository = repositoryFromRow(asRow(this.#db.prepare('SELECT * FROM repositories WHERE repo_id=?').get(repoId), 'historical worktree shadow repository'));
-            if (canonical.git_common_dir !== repository.git_common_dir || existsSync(canonical.canonical_path) || this.#gitWorktreeRegistered(repository.canonical_root, canonical.canonical_path) || this.#gitText(repository.canonical_root, ['rev-parse', '--verify', `refs/heads/${canonical.branch}`]) !== null)
-                throw new CoordinationRuntimeError('recovery-required', 'historical worktree shadow cannot retire because the exact removed Git postcondition no longer holds', [canonical.canonical_path, canonical.branch]);
-            this.#verifyOperationEvidenceFile(remove);
-            const retired = parseCoordinationWorktree({ ...redundant, state: 'removed', version: redundant.version + 1 });
-            this.#db.prepare('UPDATE worktrees SET payload_json=?, version=? WHERE entity_id=?').run(canonicalJson(retired), retired.version, retired.worktree_id);
-            const seq = this.#nextEventSequence(repoId);
-            this.#recordWorktreeProjectionRetirement(repoId, canonical, retired, seq, 'removed-deterministic-projection-canonical', remove.operation_id);
-        }
-    }
-    #recordWorktreeProjectionRetirement(repoId, canonical, retired, seq, disposition, committedRemoveOperationId = null) {
-        const idempotencyKey = `internal:worktree-projection-retired:${retired.worktree_id}`;
-        const evidence = canonicalJson({
-            schema_version: 'autopilot.worktree_projection_retirement.v1',
-            canonical_worktree_id: canonical.worktree_id,
-            retired_worktree_id: retired.worktree_id,
-            owner: canonical.owner,
-            kind: canonical.kind,
-            canonical_path: canonical.canonical_path,
-            git_common_dir: canonical.git_common_dir,
-            branch: canonical.branch,
-            disposition,
-            committed_remove_operation_id: committedRemoveOperationId,
-            retired_event_seq: seq,
-        });
-        const bytes = new TextEncoder().encode(`${evidence}\n`);
-        const sha256 = `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
-        this.#persistEvidenceArtifact(repoId, { ref: `internal/worktree-projection-retirements/${retired.worktree_id}.json`, sha256 }, bytes, 'worktree projection retirement audit', seq);
-        this.#insertEvent.run(repoId, seq, 'worktree-projection-retired', 'worktree', retired.worktree_id, idempotencyKey, sha256, this.#clock.now().toISOString());
-    }
     #assertWorktreeAuthority(worktree, operation) {
         const repository = repositoryFromRow(asRow(this.#db.prepare('SELECT * FROM repositories WHERE repo_id=?').get(worktree.owner.repo_id), 'worktree repository'));
         if (operation.intent.repo_root !== repository.canonical_root || worktree.git_common_dir !== repository.git_common_dir || operation.intent.git_common_dir !== repository.git_common_dir)
@@ -5548,8 +6071,8 @@ export class CoordinatorStore {
     #observationWorktreeRoot(owner) {
         const attempt = this.#requireUnitAttempt(owner.repo_id, owner.workstream_run, owner.unit_id, owner.attempt);
         const rows = attempt.role === 'implement' || attempt.role === 'fix'
-            ? this.#db.prepare("SELECT * FROM worktrees WHERE repo_id=? AND workstream_run=? AND json_extract(payload_json, '$.kind')='unit' AND json_extract(payload_json, '$.owner.unit_id')=? AND json_extract(payload_json, '$.owner.attempt')=? AND json_extract(payload_json, '$.state')!='removed' ORDER BY entity_id").all(owner.repo_id, owner.workstream_run, owner.unit_id, owner.attempt).map(worktreeFromRow)
-            : this.#db.prepare("SELECT * FROM worktrees WHERE repo_id=? AND workstream_run=? AND json_extract(payload_json, '$.kind')='main' AND json_extract(payload_json, '$.state')!='removed' ORDER BY entity_id").all(owner.repo_id, owner.workstream_run).map(worktreeFromRow);
+            ? this.#db.prepare("SELECT * FROM worktrees WHERE repo_id=? AND workstream_run=? AND kind='unit' AND unit_id=? AND attempt=? AND is_current_canonical=1 AND json_extract(payload_json, '$.state')!='removed' ORDER BY canonical_worktree_id").all(owner.repo_id, owner.workstream_run, owner.unit_id, owner.attempt).map(canonicalWorktreeFromRow)
+            : this.#db.prepare("SELECT * FROM worktrees WHERE repo_id=? AND workstream_run=? AND kind='main' AND is_current_canonical=1 AND json_extract(payload_json, '$.state')!='removed' ORDER BY canonical_worktree_id").all(owner.repo_id, owner.workstream_run).map(canonicalWorktreeFromRow);
         if (rows.length !== 1 || rows[0] === undefined)
             throw new CoordinationRuntimeError('invalid-state', 'observation acquisition requires exactly one registered owner worktree', [owner.workstream_run, owner.unit_id, String(owner.attempt), `count=${String(rows.length)}`]);
         return rows[0].canonical_path;
@@ -5763,7 +6286,7 @@ export class CoordinatorStore {
                 const attempts = this.#db.prepare('SELECT * FROM unit_attempts WHERE repo_id=? ORDER BY entity_id').all(repoId).map(unitAttemptFromRow);
                 const groups = this.#db.prepare('SELECT * FROM acquisition_groups WHERE repo_id=? ORDER BY entity_id').all(repoId).map(acquisitionGroupFromRow);
                 const children = this.#db.prepare('SELECT * FROM child_leases WHERE repo_id=? ORDER BY child_lease_id').all(repoId).map(childFromRow);
-                const worktrees = this.#db.prepare('SELECT * FROM worktrees WHERE repo_id=? ORDER BY entity_id').all(repoId).map(worktreeFromRow);
+                const worktrees = this.#db.prepare('SELECT * FROM worktrees WHERE repo_id=? AND is_current_canonical=1 ORDER BY canonical_worktree_id').all(repoId).map(canonicalWorktreeFromRow);
                 const operations = this.#db.prepare('SELECT * FROM worktree_operations WHERE repo_id=? ORDER BY entity_id').all(repoId).map(worktreeOperationFromRow);
                 const victim = selectCoordinationDeadlockVictim(cycle, { attempts, acquisitionGroups: groups, claimRequests: requests, childLeases: children, worktrees, worktreeOperations: operations });
                 if (existingResolution !== null && victim === null)
@@ -5938,6 +6461,7 @@ export class CoordinatorStore {
         });
     }
     #mutation(request, apply) {
+        this.#writerGuard.assertHeld();
         const idempotencyKey = request.idempotency_key;
         if (idempotencyKey === null)
             throw new CoordinationRuntimeError('invalid-request', 'mutation lacks idempotency key');
@@ -6165,13 +6689,13 @@ export class CoordinatorStore {
         return Object.freeze(postconditions);
     }
     #migrationRecoveryUnitWorktree(run, unitId, attempt) {
-        const rows = this.#db.prepare("SELECT * FROM worktrees WHERE repo_id=? AND workstream_run=? AND json_extract(payload_json, '$.owner.unit_id')=? AND json_extract(payload_json, '$.owner.attempt')=? ORDER BY entity_id").all(run.repo_id, run.workstream_run, unitId, attempt).map(worktreeFromRow);
+        const rows = this.#db.prepare('SELECT * FROM worktrees WHERE repo_id=? AND workstream_run=? AND unit_id=? AND attempt=? AND kind=\'unit\' AND is_current_canonical=1 ORDER BY canonical_worktree_id').all(run.repo_id, run.workstream_run, unitId, attempt).map(canonicalWorktreeFromRow);
         if (rows.length !== 1 || rows[0] === undefined)
             throw new CoordinationRuntimeError('invalid-state', 'migration recovery requires exactly one matching durable unit worktree', [unitId, String(attempt)]);
         return rows[0];
     }
     #migrationRecoveryMainWorktree(run) {
-        const rows = this.#db.prepare("SELECT * FROM worktrees WHERE repo_id=? AND workstream_run=? AND json_extract(payload_json, '$.kind')='main' ORDER BY entity_id").all(run.repo_id, run.workstream_run).map(worktreeFromRow);
+        const rows = this.#db.prepare("SELECT * FROM worktrees WHERE repo_id=? AND workstream_run=? AND kind='main' AND is_current_canonical=1 ORDER BY canonical_worktree_id").all(run.repo_id, run.workstream_run).map(canonicalWorktreeFromRow);
         if (rows.length !== 1 || rows[0] === undefined)
             throw new CoordinationRuntimeError('invalid-state', 'migration recovery requires exactly one durable main worktree', [run.workstream_run]);
         return rows[0];
@@ -6189,6 +6713,12 @@ export class CoordinatorStore {
     }
     #requireRun(repoId, workstreamRun) {
         return runFromRow(asRow(this.#runByIdentity.get(repoId, workstreamRun), 'run'));
+    }
+    #assertSourceChangingDispatchAllowed(repoId, workstreamRun, action) {
+        const faults = this.#db.prepare("SELECT fault_id,invariant_id,fault_code FROM run_scoped_faults WHERE repo_id=? AND workstream_run=? AND status='active' ORDER BY fault_id LIMIT 33").all(repoId, workstreamRun);
+        if (faults.length === 0)
+            return;
+        throw new CoordinationRuntimeError('recovery-required', `source-changing dispatch ${action} is fenced by run-scoped logical store faults`, faults.slice(0, 32).map((row) => `${sqlString(row, 'fault_id')}:${sqlString(row, 'invariant_id')}:${sqlString(row, 'fault_code')}`));
     }
     #requireCoordinatorEditAuthority(run, operation) {
         if (run.coordination_authority !== 'coordinator-edit-leases-v1')

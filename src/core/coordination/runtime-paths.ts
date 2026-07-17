@@ -10,13 +10,18 @@ import { assertPrivatePathNoAliases, enforcePrivateAuthorityPath, enforceWindows
 export { enforcePrivateAuthorityPath, enforceWindowsPrivateAcl, enforceWindowsPrivateTree, ensurePrivateAuthorityDirectory, windowsPrivateAclCommand, windowsPrivateTreeAclCommand } from '../private-path.ts';
 export type { WindowsPrivateAclCommand } from '../private-path.ts';
 
-export { COORDINATOR_BUSY_TIMEOUT_MS, COORDINATOR_DATABASE_SCHEMA_VERSION, COORDINATOR_GRANT_OFFER_SWEEP_MS, COORDINATOR_GRANT_OFFER_TTL_MS, COORDINATOR_HEARTBEAT_MS, COORDINATOR_MAX_FRAME_BYTES, COORDINATOR_PACKAGE_BUILD, COORDINATOR_SESSION_LEASE_MS } from './runtime-constants.ts';
+export { COORDINATOR_API_SCHEMA_VERSION, COORDINATOR_BUSY_TIMEOUT_MS, COORDINATOR_DATABASE_SCHEMA_VERSION, COORDINATOR_GRANT_OFFER_SWEEP_MS, COORDINATOR_GRANT_OFFER_TTL_MS, COORDINATOR_HEARTBEAT_MS, COORDINATOR_IMPLEMENTATION_BUILD, COORDINATOR_LEGACY_FACADE_BUILD, COORDINATOR_MAX_FRAME_BYTES, COORDINATOR_PACKAGE_BUILD, COORDINATOR_SESSION_LEASE_MS, COORDINATOR_STORE_SCHEMA_VERSION, COORDINATOR_WIRE_LINEAGE } from './runtime-constants.ts';
 
 export interface CoordinatorRuntimePaths {
   readonly stateRoot: string;
   readonly coordinatorRoot: string;
+  /** Fixed cf50 schema-12 source/barrier. Never the S1 current store. */
   readonly databasePath: string;
-  /** Current-generation paths are deliberately invisible to protocol 1.2. */
+  readonly writerGuardPath: string;
+  readonly storesRoot: string;
+  readonly currentStorePointerPath: string;
+  readonly runtimeIdentityPath: string;
+  /** Current-generation paths are deliberately invisible to legacy peers. */
   readonly lockPath: string;
   readonly lifecycleElectionPath: string;
   readonly startupLockPath: string;
@@ -61,6 +66,10 @@ export function coordinatorRuntimePaths(env: ProcessEnvLike = process.env): Coor
     stateRoot,
     coordinatorRoot,
     databasePath: join(coordinatorRoot, 'coordinator.db'),
+    writerGuardPath: join(coordinatorRoot, 'writer-guard.db'),
+    storesRoot: join(coordinatorRoot, 'stores'),
+    currentStorePointerPath: join(coordinatorRoot, 'current-store.json'),
+    runtimeIdentityPath: join(coordinatorRoot, 'runtime-identity.json'),
     lockPath: join(coordinatorRoot, `coordinator.${generation}.lock`),
     lifecycleElectionPath: join(coordinatorRoot, `coordinator.${generation}.lifecycle-election.db`),
     startupLockPath: join(coordinatorRoot, `coordinator.${generation}.startup.lock`),
@@ -85,6 +94,7 @@ export async function ensureCoordinatorPrivateRoots(paths: CoordinatorRuntimePat
   const roots = [
     paths.stateRoot,
     paths.coordinatorRoot,
+    paths.storesRoot,
     paths.backupsRoot,
     paths.exportsRoot,
     paths.sessionsRoot,
