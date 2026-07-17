@@ -13,8 +13,10 @@ import { encodeCoordinatorFrame, parseCoordinatorLegacyReplayTransportRequest, p
 import { isProcessAlive, predecessorCompatibleBootEstimate, processStartIdentity, retireExactProcess } from '../../src/core/coordination/process-identity.ts';
 import { coordinatorRuntimePaths, windowsPrivateAclCommand, windowsPrivateTreeAclCommand } from '../../src/core/coordination/runtime-paths.ts';
 import { startCoordinatorServer } from '../../src/core/coordination/server.ts';
+import { CoordinatorStore } from '../../src/core/coordination/store.ts';
 import type { CoordinationMessage, CoordinatorRequestEnvelope, CoordinatorResponseEnvelope } from '../../src/core/coordination/types.ts';
 import { AUTOPILOT_STATE_ROOT_ENV } from '../../src/core/parallel-runtime.ts';
+import { seedPhase34Schema6Database, stageCurrentGenerationAsExactSchema12 } from '../helpers/migration-fixture.ts';
 
 const EMPTY_COORDINATOR_PAYLOAD: Readonly<Record<string, unknown>> = Object.freeze({});
 
@@ -241,21 +243,19 @@ void describe('transactional coordinator runtime', () => {
 
   void it('forbids ordinary server startup from migrating an existing schema-6 authority database in place', async () => {
     const root = await mkdtemp(join(tmpdir(), 'pi-autopilot-schema6-direct-start-'));
-    const paths = coordinatorRuntimePaths({ ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: join(root, 'state') });
+    const env = { ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: join(root, 'state') };
+    const paths = coordinatorRuntimePaths(env);
     try {
-      const initialized = await startCoordinatorServer(paths);
-      await initialized.close();
-      const database = new DatabaseSync(paths.databasePath);
-      try { database.exec('PRAGMA user_version=6'); }
-      finally { database.close(); }
-      await assert.rejects(() => startCoordinatorServer(paths), (error: unknown) => error instanceof CoordinationRuntimeError && error.code === 'schema-mismatch' && /private verified migration path/u.test(error.message));
+      await seedPhase34Schema6Database(env);
+      await assert.rejects(() => startCoordinatorServer(paths), (error: unknown) => error instanceof CoordinationRuntimeError && error.code === 'schema-mismatch' && /exact cf50 schema 12/u.test(error.message));
       const unchanged = new DatabaseSync(paths.databasePath, { readOnly: true });
-      try { assert.equal((unchanged.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 6); }
+      try { assert.equal(unchanged.prepare('PRAGMA user_version').get()?.['user_version'], 6); }
       finally { unchanged.close(); }
+      assert.equal(existsSync(paths.currentStorePointerPath), false);
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 
-  void it('backs up and verifies an existing pre-schema database before migration', async () => {
+  void it('rejects an unversioned pre-schema database before S1 publication without rewriting it', async () => {
     const root = await mkdtemp(join(tmpdir(), 'pi-autopilot-coordinator-migration-'));
     const env = { ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: join(root, 'state') };
     const paths = coordinatorRuntimePaths(env);
@@ -263,19 +263,15 @@ void describe('transactional coordinator runtime', () => {
     const legacy = new DatabaseSync(paths.databasePath);
     legacy.exec('CREATE TABLE legacy_marker(value TEXT); INSERT INTO legacy_marker(value) VALUES(\'before-migration\');');
     legacy.close();
-    const server = await startCoordinatorServer(paths);
     try {
-      const client = new CoordinatorClient({ env, autoStart: false });
-      const doctor = await client.query('doctor');
-      const backupPath = doctor.payload['last_backup_path'];
-      assert.equal(typeof backupPath, 'string');
-      if (typeof backupPath !== 'string') throw new Error('missing backup path');
-      assert.equal(existsSync(backupPath), true);
-      assert.equal(doctor.payload['integrity'], 'ok');
-    } finally {
-      await server.close();
-      await rm(root, { recursive: true, force: true });
-    }
+      await assert.rejects(() => startCoordinatorServer(paths), (error: unknown) => error instanceof CoordinationRuntimeError && error.code === 'schema-mismatch' && /exact cf50 schema 12/u.test(error.message));
+      const unchanged = new DatabaseSync(paths.databasePath, { readOnly: true });
+      try {
+        assert.equal(unchanged.prepare('PRAGMA user_version').get()?.['user_version'], 0);
+        assert.equal(unchanged.prepare('SELECT value FROM legacy_marker').get()?.['value'], 'before-migration');
+      } finally { unchanged.close(); }
+      assert.equal(existsSync(paths.currentStorePointerPath), false);
+    } finally { await rm(root, { recursive: true, force: true }); }
   });
 
   void it('backs up and upgrades a valid schema-1 coordinator through the claim-negotiation migration', async () => {
@@ -283,24 +279,27 @@ void describe('transactional coordinator runtime', () => {
     const env = { ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: join(root, 'state') };
     const paths = coordinatorRuntimePaths(env);
     const initial = await startCoordinatorServer(paths);
+    const sourceGeneration = initial.store.currentGeneration();
     await initial.close();
+    await stageCurrentGenerationAsExactSchema12(paths, sourceGeneration);
     const oldDatabase = new DatabaseSync(paths.databasePath);
     oldDatabase.exec('DROP TABLE result_details; DROP TABLE result_receipts; DROP TABLE mailbox_delivery_items; DROP TABLE mailbox_deliveries; DROP TABLE reconciliation_details; DROP TABLE reconciliation_receipts; DROP TABLE observations; DROP TABLE semantic_replays; ALTER TABLE session_leases DROP COLUMN attachment_kind; DROP TABLE migration_legacy_audit; DROP TABLE migration_recovery_work; DROP TABLE coordination_migrations; DROP TABLE run_resources; DROP TABLE evidence_artifacts; DROP TABLE adjudication_assignments; DROP TABLE authoritative_artifacts; DROP TABLE deadlock_resolutions; DROP TABLE wait_for_edges; DROP TABLE reservation_obligations; DROP TABLE run_terminal_intents; ALTER TABLE runs DROP COLUMN coordination_authority; DROP INDEX idx_worktree_operations_recovery; DROP INDEX idx_worktrees_owner; DROP TABLE reconciliation_evidence; DROP TABLE mailbox_cursors; DROP INDEX idx_messages_cursor; DROP TABLE acquisition_groups; DROP INDEX idx_edit_leases_repo; DROP INDEX idx_claim_requests_owner_status; DROP INDEX idx_claim_requests_requester_status; DELETE FROM schema_migrations WHERE version IN (2,3,4,5,6,7,8,9,10,11,12); PRAGMA user_version=1;');
     oldDatabase.close();
-    const upgraded = await startCoordinatorServer(paths);
+    const upgraded = await CoordinatorStore.open(paths, undefined, { allowExistingSchemaMigration: true });
     try {
-      const doctor = await new CoordinatorClient({ env, autoStart: false }).query('doctor');
+      const doctor = upgraded.doctor();
       assert.equal(doctor.payload['database_schema_version'], 12);
-      assert.equal(typeof doctor.payload['last_backup_path'], 'string');
-      const database = new DatabaseSync(paths.databasePath, { readOnly: true });
+      const backupPath = doctor.payload['last_backup_path'];
+      assert.equal(typeof backupPath, 'string');
+      if (typeof backupPath !== 'string') throw new Error('schema-1 migration omitted its verified backup path');
+      assert.equal(existsSync(backupPath), true);
+      const database = new DatabaseSync(upgraded.currentGeneration().database_path, { readOnly: true });
       try {
         const migration = record(database.prepare('SELECT version FROM schema_migrations WHERE version=2').get(), 'migration 2');
         assert.equal(migration['version'], 2);
-      } finally {
-        database.close();
-      }
+      } finally { database.close(); }
     } finally {
-      await upgraded.close();
+      upgraded.close();
       await rm(root, { recursive: true, force: true });
     }
   });
@@ -334,10 +333,14 @@ void describe('transactional coordinator runtime', () => {
       message_type: 'recovery-required', correlation_id: 'migration-pending', payload: { reason: 'pending migration witness' }, status: 'pending', created_event_seq: 6,
       delivered_event_seq: null, acknowledged_event_seq: null, version: 1,
     });
+    const sourceGeneration = initial.store.currentGeneration();
     await initial.close();
+    await stageCurrentGenerationAsExactSchema12(paths, sourceGeneration);
     const oldDatabase = new DatabaseSync(paths.databasePath);
     oldDatabase.exec('DROP TABLE result_details; DROP TABLE result_receipts; DROP TABLE mailbox_delivery_items; DROP TABLE mailbox_deliveries; DROP TABLE reconciliation_details; DROP TABLE reconciliation_receipts; DROP TABLE observations; DROP TABLE semantic_replays; ALTER TABLE session_leases DROP COLUMN attachment_kind; DROP TABLE migration_legacy_audit; DROP TABLE migration_recovery_work; DROP TABLE coordination_migrations; DROP TABLE run_resources; DROP TABLE evidence_artifacts; DROP TABLE adjudication_assignments; DROP TABLE authoritative_artifacts; DROP TABLE deadlock_resolutions; DROP TABLE wait_for_edges; DROP TABLE reservation_obligations; DROP TABLE run_terminal_intents; ALTER TABLE runs DROP COLUMN coordination_authority; DROP INDEX idx_worktree_operations_recovery; DROP INDEX idx_worktrees_owner; DROP TABLE reconciliation_evidence; DROP TABLE mailbox_cursors; DROP INDEX idx_messages_cursor; DELETE FROM schema_migrations WHERE version IN (3,4,5,6,7,8,9,10,11,12); PRAGMA user_version=2;');
     oldDatabase.close();
+    const migrated = await CoordinatorStore.open(paths, undefined, { allowExistingSchemaMigration: true });
+    migrated.close();
     const upgraded = await startCoordinatorServer(paths);
     try {
       const status = await new CoordinatorClient({ env, autoStart: false }).query('status', 'repo-runtime-test', 'run-runtime-test');
@@ -371,12 +374,17 @@ void describe('transactional coordinator runtime', () => {
       const legacyRequest = { schema_version: 'autopilot.coordinator_request.v1', protocol_version: '1.1', request_id: 'legacy-retry-request', action: 'acquire-group', idempotency_key: 'migration-v5-group', repo_id: 'repo-runtime-test', workstream_run: 'run-runtime-test', session_id: 'session-migration-v5', fencing_generation: 1, expected_version: integer(attachedRun['version'], 'attached migration run version'), payload: legacyPayload };
       const legacySemantic = { schema_version: legacyRequest.schema_version, protocol_version: legacyRequest.protocol_version, action: legacyRequest.action, repo_id: legacyRequest.repo_id, workstream_run: legacyRequest.workstream_run, session_id: null, fencing_generation: null, expected_version: null, payload: omitFields(legacyPayload, ['session_lease_id', 'session_token']) };
       const legacyDigest = `sha256:${createHash('sha256').update(canonicalJson(legacySemantic), 'utf8').digest('hex')}`;
+      const sourceGeneration = server.store.currentGeneration();
       await server.close();
-      const database = new DatabaseSync(coordinatorRuntimePaths(env).databasePath);
+      const paths = coordinatorRuntimePaths(env);
+      await stageCurrentGenerationAsExactSchema12(paths, sourceGeneration);
+      const database = new DatabaseSync(paths.databasePath);
       database.exec("UPDATE unit_attempts SET payload_json=json_remove(payload_json, '$.role'); UPDATE acquisition_groups SET payload_json=json_remove(payload_json, '$.acquisition_kind'); UPDATE idempotency_results SET payload_json=json_remove(payload_json, '$.acquisition_group.acquisition_kind') WHERE idempotency_key='migration-v5-group'; DROP TABLE result_details; DROP TABLE result_receipts; DROP TABLE mailbox_delivery_items; DROP TABLE mailbox_deliveries; DROP TABLE reconciliation_details; DROP TABLE reconciliation_receipts; DROP TABLE observations; DROP TABLE semantic_replays; ALTER TABLE session_leases DROP COLUMN attachment_kind; DROP TABLE migration_legacy_audit; DROP TABLE migration_recovery_work; DROP TABLE coordination_migrations; DROP TABLE run_resources; DROP TABLE evidence_artifacts; DROP TABLE adjudication_assignments; DROP TABLE authoritative_artifacts; DROP TABLE deadlock_resolutions; DROP TABLE wait_for_edges; DELETE FROM schema_migrations WHERE version IN (6,7,8,9,10,11,12); PRAGMA user_version=5;");
       database.prepare("UPDATE idempotency_results SET request_sha256=? WHERE idempotency_key='migration-v5-group'").run(legacyDigest);
       database.close();
-      server = await startCoordinatorServer(coordinatorRuntimePaths(env));
+      const migrated = await CoordinatorStore.open(paths, undefined, { allowExistingSchemaMigration: true });
+      migrated.close();
+      server = await startCoordinatorServer(paths);
       const status = await client.query('status', 'repo-runtime-test', 'run-runtime-test');
       const attempt = record(queryPayload(status, 'unit_attempts')[0], 'migrated attempt');
       const group = record(queryPayload(status, 'acquisition_groups')[0], 'migrated group');
@@ -395,8 +403,9 @@ void describe('transactional coordinator runtime', () => {
     const env = { ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: join(root, 'state') };
     const paths = coordinatorRuntimePaths(env);
     const server = await startCoordinatorServer(paths);
+    const currentDatabasePath = server.store.currentGeneration().database_path;
     await server.close();
-    const database = new DatabaseSync(paths.databasePath);
+    const database = new DatabaseSync(currentDatabasePath);
     database.prepare("UPDATE schema_migrations SET checksum='tampered' WHERE version=1").run();
     database.close();
     try {

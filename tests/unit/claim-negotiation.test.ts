@@ -12,9 +12,11 @@ import { parseCoordinationAcquisitionGroup, parseCoordinationClaimRequest, parse
 import { CoordinationRuntimeError } from '../../src/core/coordination/failures.ts';
 import { coordinatorRuntimePaths, COORDINATOR_GRANT_OFFER_TTL_MS } from '../../src/core/coordination/runtime-paths.ts';
 import { startCoordinatorServer } from '../../src/core/coordination/server.ts';
+import { CoordinatorStore } from '../../src/core/coordination/store.ts';
 import type { CoordinatorSessionContext } from '../../src/core/coordination/supervisor.ts';
 import type { CoordinationClaimRequest, CoordinationMessage, CoordinationReleaseCondition } from '../../src/core/coordination/types.ts';
 import { AUTOPILOT_STATE_ROOT_ENV } from '../../src/core/parallel-runtime.ts';
+import { stageCurrentGenerationAsExactSchema12 } from '../helpers/migration-fixture.ts';
 
 interface Actor {
   readonly context: CoordinatorSessionContext;
@@ -288,7 +290,9 @@ void describe('Coordination Fabric claim negotiation', () => {
       const owner = await attachActor(client, stateRoot, 'schema10');
       const input = acquisitionInput('schema10');
       assert.equal((await owner.negotiation.acquire(input)).outcome, 'granted');
+      const generation = server.store.currentGeneration();
       await server.close();
+      await stageCurrentGenerationAsExactSchema12(paths, generation);
 
       const database = new DatabaseSync(paths.databasePath);
       database.exec(`
@@ -306,6 +310,8 @@ void describe('Coordination Fabric claim negotiation', () => {
       `);
       database.close();
 
+      const migrated = await CoordinatorStore.open(paths, undefined, { allowExistingSchemaMigration: true });
+      migrated.close();
       server = await startCoordinatorServer(paths);
       const status = await client.query('status', owner.context.repo_id, owner.context.workstream_run);
       const migratedGroup = parseCoordinationAcquisitionGroup(array(status.payload['acquisition_groups'], 'migrated groups')[0]);

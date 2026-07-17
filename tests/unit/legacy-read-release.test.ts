@@ -12,6 +12,7 @@ import { runCoordinationMigration } from '../../src/core/coordination/migration.
 import { parseCoordinationMigrationRecoveryWork } from '../../src/core/coordination/contracts.ts';
 import { ClaimNegotiationClient } from '../../src/core/coordination/negotiation.ts';
 import { coordinatorRuntimePaths } from '../../src/core/coordination/runtime-paths.ts';
+import { readCurrentStoreGeneration } from '../../src/core/coordination/store-generation.ts';
 import { startCoordinatorServer } from '../../src/core/coordination/server.ts';
 import { DurableRunSupervisorClient } from '../../src/core/coordination/supervisor.ts';
 import { proveLegacyReadAttemptTerminal } from '../../src/core/coordination/legacy-read-terminal.ts';
@@ -105,7 +106,10 @@ void describe('BUG-174 legacy READ authority release', () => {
         assert.equal(granted.outcome, 'granted');
       } finally { await server.close(); }
 
-      const database = new DatabaseSync(coordinatorRuntimePaths(fixture.env).databasePath, { readOnly: true });
+      const paths = coordinatorRuntimePaths(fixture.env);
+      const current = readCurrentStoreGeneration(paths);
+      if (current === null) throw new Error('BUG-174 audit assertion requires a published current generation');
+      const database = new DatabaseSync(current.database_path, { readOnly: true });
       try {
         const audit = database.prepare("SELECT payload_json FROM migration_legacy_audit WHERE json_extract(payload_json, '$.schema_version')='autopilot.schema9_read_retirement.v1'").get();
         assert.notEqual(audit, undefined);
