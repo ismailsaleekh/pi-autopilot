@@ -3,6 +3,7 @@ declare const process: {
   readonly env: { [key: string]: string | undefined };
   readonly execPath: string;
   readonly pid: number;
+  readonly getuid?: () => number;
   readonly stdin: import('node:readline').ReadableInput;
   cwd(): string;
   chdir(directory: string): void;
@@ -43,6 +44,8 @@ declare module 'node:fs' {
     readonly ctimeMs: number;
     readonly dev: number;
     readonly ino: number;
+    readonly nlink: number;
+    readonly uid: number;
     isFile(): boolean;
     isDirectory(): boolean;
     isSymbolicLink(): boolean;
@@ -152,7 +155,7 @@ declare module 'node:url' {
 declare module 'node:child_process' {
   export interface SpawnSyncOptions {
     readonly cwd?: string | URL;
-    readonly encoding?: 'utf8';
+    readonly encoding: 'utf8';
     readonly env?: { readonly [key: string]: string | undefined };
     readonly input?: string;
     readonly timeout?: number;
@@ -165,6 +168,20 @@ declare module 'node:child_process' {
     readonly stderr: string;
     readonly error?: Error;
   }
+  export interface SpawnSyncBufferOptions {
+    readonly cwd?: string | URL;
+    readonly env?: { readonly [key: string]: string | undefined };
+    readonly input?: string | Uint8Array;
+    readonly timeout?: number;
+    readonly maxBuffer?: number;
+  }
+  export interface SpawnSyncBufferReturns {
+    readonly status: number | null;
+    readonly signal: string | null;
+    readonly stdout: NodeBuffer;
+    readonly stderr: NodeBuffer;
+    readonly error?: Error;
+  }
   export interface ChildProcessDataChunk extends Uint8Array {
     toString(): string;
     toString(encoding: 'utf8'): string;
@@ -172,6 +189,7 @@ declare module 'node:child_process' {
   export interface ChildProcessWritablePipe {
     write(data: string, callback?: (error: Error | null | undefined) => void): void;
     end(): void;
+    on(event: 'error', listener: (error: Error) => void): void;
   }
   export interface ChildProcessReadablePipe {
     on(event: 'data', listener: (chunk: ChildProcessDataChunk) => void): void;
@@ -189,6 +207,7 @@ declare module 'node:child_process' {
     on(event: 'error', listener: (error: Error) => void): void;
     on(event: 'close', listener: (code: number | null, signal: string | null) => void): void;
     once(event: 'close', listener: (code: number | null, signal: string | null) => void): void;
+    once(event: 'error', listener: (error: Error) => void): void;
   }
   export interface SpawnOptionsLite {
     readonly cwd?: string;
@@ -206,7 +225,12 @@ declare module 'node:child_process' {
   export function spawnSync(
     command: string,
     args: readonly string[],
-    options?: SpawnSyncOptions,
+    options?: SpawnSyncBufferOptions,
+  ): SpawnSyncBufferReturns;
+  export function spawnSync(
+    command: string,
+    args: readonly string[],
+    options: SpawnSyncOptions,
   ): SpawnSyncReturns;
 }
 
@@ -218,6 +242,11 @@ declare module 'node:async_hooks' {
 }
 
 declare module 'node:crypto' {
+  export interface Hmac {
+    update(data: string | Uint8Array, inputEncoding?: 'utf8'): Hmac;
+    digest(encoding: 'hex'): string;
+  }
+  export function createHmac(algorithm: string, key: Uint8Array): Hmac;
   export function randomBytes(size: number): { toString(encoding: 'hex'): string };
   export function randomUUID(): string;
   export function timingSafeEqual(left: Uint8Array, right: Uint8Array): boolean;
@@ -228,11 +257,11 @@ declare interface NodeBuffer extends Uint8Array {
   readUInt32BE(offset: number): number;
   writeUInt32BE(value: number, offset: number): number;
   subarray(start?: number, end?: number): NodeBuffer;
-  toString(encoding?: 'utf8'): string;
+  toString(encoding?: 'utf8' | 'hex'): string;
 }
 
 declare const Buffer: {
-  from(value: string | Uint8Array, encoding?: 'utf8'): NodeBuffer;
+  from(value: string | Uint8Array, encoding?: 'utf8' | 'hex'): NodeBuffer;
   byteLength(value: string, encoding?: 'utf8'): number;
   alloc(size: number): NodeBuffer;
   allocUnsafe(size: number): NodeBuffer;
@@ -247,6 +276,7 @@ declare module 'node:net' {
     destroy(): void;
     on(event: 'data', listener: (chunk: NodeBuffer) => void): this;
     on(event: 'end' | 'close', listener: () => void): this;
+    on(event: 'error', listener: (error: Error) => void): this;
     once(event: 'connect' | 'close', listener: () => void): this;
     once(event: 'error', listener: (error: Error) => void): this;
     off(event: 'error', listener: (error: Error) => void): this;

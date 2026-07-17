@@ -1,13 +1,12 @@
 import { createHash } from 'node:crypto';
 import { basename } from 'node:path';
-import { spawnSync } from 'node:child_process';
 
+import { gitQueryNulStrings, gitQueryText, runGitQuery } from '../git-process.ts';
 import { coordinationPathsOverlap } from './contracts.ts';
 import { CoordinationRuntimeError } from './failures.ts';
 import type { CoordinationIntegrationConflict } from './types.ts';
 
 const GIT_OBJECT = /^[a-f0-9]{40,64}$/u;
-const MAX_GIT_OUTPUT_BYTES = 8 * 1024 * 1024;
 const MAX_SEMANTIC_JSON_BYTES = 1024 * 1024;
 const MAX_CONFLICT_EVIDENCE = 128;
 
@@ -38,7 +37,7 @@ export function classifyCoordinationIntegrationConflict(input: {
 }): CoordinationIntegrationConflict {
   assertCommit(input.repoRoot, input.predecessorCommit, 'predecessor commit');
   assertCommit(input.repoRoot, input.dependentCommit, 'dependent commit');
-  const mergeBase = git(input.repoRoot, ['merge-base', input.predecessorCommit, input.dependentCommit], 'integration merge-base').trim();
+  const mergeBase = gitQueryText({ descriptor: { kind: 'merge-base', left: input.predecessorCommit, right: input.dependentCommit }, cwd: input.repoRoot }).trim();
   if (!GIT_OBJECT.test(mergeBase)) throw new CoordinationRuntimeError('invalid-state', 'integration merge-base is not a full Git object id', [mergeBase]);
   const paths = sortedUnique(input.overlappingPaths.map(normalizePath));
   if (paths.length === 0) throw new CoordinationRuntimeError('invalid-request', 'integration conflict classification requires at least one actual overlapping path');
@@ -50,7 +49,7 @@ export function classifyCoordinationIntegrationConflict(input: {
   const actualOverlap = paths.filter((path) => predecessorChanged.some((changed) => coordinationPathsOverlap(changed, path)) && dependentChanged.some((changed) => coordinationPathsOverlap(changed, path)));
   const classifiedPaths = actualOverlap.length > 0 ? actualOverlap : paths;
 
-  const mergeTree = mergeTreeStatus(input.repoRoot, predecessor.commit, dependent.commit, classifiedPaths);
+  const mergeTree = mergeTreeStatus(input.repoRoot, mergeBase, predecessor.commit, dependent.commit, classifiedPaths);
   const predecessorHunks = diffHunks(input.repoRoot, mergeBase, predecessor.commit, classifiedPaths);
   const dependentHunks = diffHunks(input.repoRoot, mergeBase, dependent.commit, classifiedPaths);
   const overlappingHunks = overlappingHunkEvidence(predecessorHunks, dependentHunks);
@@ -134,28 +133,29 @@ export function isDefaultProtectedSurface(path: string): boolean {
   return segments.includes('migrations') || segments.includes('schema-migrations') || normalized.startsWith('.github/workflows/');
 }
 
-function mergeTreeStatus(repoRoot: string, predecessorCommit: string, dependentCommit: string, relevantPaths: readonly string[]): { readonly status: 'clean' | 'conflict'; readonly conflictPaths: readonly string[] } {
-  const result = spawnSync('git', ['merge-tree', '--write-tree', '--name-only', '-z', '--no-messages', predecessorCommit, dependentCommit], { cwd: repoRoot, encoding: 'utf8', maxBuffer: MAX_GIT_OUTPUT_BYTES });
-  const status = result.status ?? -1;
-  if (status !== 0 && status !== 1) throw new CoordinationRuntimeError('invalid-state', 'git merge-tree failed during integration classification', [result.stderr.trim(), `status=${String(status)}`]);
-  if (status === 0) return { status: 'clean', conflictPaths: Object.freeze([]) };
-  const values = result.stdout.split('\0').map((value) => value.trim()).filter((value) => value.length > 0 && !GIT_OBJECT.test(value)).map(normalizePath);
-  const relevant = values.filter((path) => relevantPaths.some((candidate) => coordinationPathsOverlap(path, candidate)));
-  // If Git reports a conflict but this Git version does not expose parseable
-  // path names, fail conservatively for the classified pair rather than claim a
-  // clean merge from missing output.
-  return { status: relevant.length > 0 || values.length === 0 ? 'conflict' : 'clean', conflictPaths: Object.freeze(sortedUnique(relevant)) };
+function mergeTreeStatus(repoRoot: string, base: string, predecessorCommit: string, dependentCommit: string, relevantPaths: readonly string[]): { readonly status: 'clean' | 'conflict'; readonly conflictPaths: readonly string[] } {
+  // Three-tree analysis is read-only; unlike --write-tree it does not mutate
+  // the object database merely to classify a conflict. Legacy merge-tree has
+  // no NUL path mode, so path identity is never inferred from its text. A
+  // conflict conservatively binds the already typed relevant-path authority.
+  const output = gitQueryText({ descriptor: { kind: 'merge-tree-analysis', base, left: predecessorCommit, right: dependentCommit }, cwd: repoRoot });
+  const conflict = /^(?:removed in local|removed in remote|added in both|warning: Cannot merge binary files)/mu.test(output)
+    || output.includes('<<<<<<< .our')
+    || output.includes('>>>>>>> .their');
+  return conflict
+    ? { status: 'conflict', conflictPaths: Object.freeze([...relevantPaths]) }
+    : { status: 'clean', conflictPaths: Object.freeze([]) };
 }
 
 function changedPaths(repoRoot: string, base: string, commit: string, paths: readonly string[]): readonly string[] {
-  const output = git(repoRoot, ['diff', '--name-only', '--no-renames', '-z', base, commit, '--', ...paths], 'integration changed paths');
-  return Object.freeze(sortedUnique(output.split('\0').filter((path) => path.length > 0).map(normalizePath)));
+  const output = gitQueryNulStrings({ descriptor: { kind: 'diff-paths', from: base, to: commit, noRenames: true, paths }, cwd: repoRoot });
+  return Object.freeze(sortedUnique(output.map(normalizePath)));
 }
 
 function diffHunks(repoRoot: string, base: string, commit: string, paths: readonly string[]): readonly DiffHunk[] {
   const hunks: DiffHunk[] = [];
   for (const path of paths) {
-    const output = git(repoRoot, ['diff', '--no-ext-diff', '--no-color', '--unified=0', base, commit, '--', path], `integration hunk diff ${path}`);
+    const output = gitQueryText({ descriptor: { kind: 'diff-text', from: base, to: commit, path, unifiedLines: 0 }, cwd: repoRoot });
     for (const line of output.split('\n')) {
       const match = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/u.exec(line);
       if (match === null) continue;
@@ -191,8 +191,7 @@ function deleteModifyPaths(repoRoot: string, base: string, predecessorCommit: st
 }
 
 function diffFilterPaths(repoRoot: string, base: string, commit: string, filter: string, paths: readonly string[]): readonly string[] {
-  const output = git(repoRoot, ['diff', `--diff-filter=${filter}`, '--name-only', '--no-renames', '-z', base, commit, '--', ...paths], `integration ${filter} paths`);
-  return Object.freeze(sortedUnique(output.split('\0').filter((path) => path.length > 0).map(normalizePath)));
+  return Object.freeze(sortedUnique(gitQueryNulStrings({ descriptor: { kind: 'diff-paths', from: base, to: commit, filter, noRenames: true, paths }, cwd: repoRoot }).map(normalizePath)));
 }
 
 function sharedJsonSemanticKeys(repoRoot: string, base: string, predecessorCommit: string, dependentCommit: string, paths: readonly string[]): readonly string[] {
@@ -210,9 +209,9 @@ function sharedJsonSemanticKeys(repoRoot: string, base: string, predecessorCommi
 }
 
 function gitJsonObject(repoRoot: string, commit: string, path: string): unknown | undefined {
-  const result = spawnSync('git', ['show', `${commit}:${path}`], { cwd: repoRoot, encoding: 'utf8', maxBuffer: MAX_SEMANTIC_JSON_BYTES + 1 });
-  if ((result.status ?? -1) !== 0 || Buffer.byteLength(result.stdout, 'utf8') > MAX_SEMANTIC_JSON_BYTES) return undefined;
-  try { return JSON.parse(result.stdout) as unknown; }
+  const result = runGitQuery({ descriptor: { kind: 'show-file', revision: commit, path, allowAbsent: true }, cwd: repoRoot });
+  if (result.negative || result.stdout.byteLength > MAX_SEMANTIC_JSON_BYTES) return undefined;
+  try { return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(result.stdout)) as unknown; }
   catch { return undefined; }
 }
 
@@ -263,14 +262,8 @@ function stableJson(value: unknown): string {
 
 function assertCommit(repoRoot: string, commit: string, label: string): void {
   if (!GIT_OBJECT.test(commit)) throw new CoordinationRuntimeError('invalid-request', `${label} must be a full lowercase Git object id`, [commit]);
-  const result = spawnSync('git', ['cat-file', '-e', `${commit}^{commit}`], { cwd: repoRoot, encoding: 'utf8' });
-  if ((result.status ?? -1) !== 0) throw new CoordinationRuntimeError('invalid-state', `${label} is unavailable in the repository object database`, [commit, result.stderr.trim()]);
-}
-
-function git(repoRoot: string, args: readonly string[], label: string): string {
-  const result = spawnSync('git', [...args], { cwd: repoRoot, encoding: 'utf8', maxBuffer: MAX_GIT_OUTPUT_BYTES });
-  if ((result.status ?? -1) !== 0) throw new CoordinationRuntimeError('invalid-state', `${label} failed`, [result.stderr.trim(), ...args]);
-  return result.stdout;
+  const result = runGitQuery({ descriptor: { kind: 'commit-exists', revision: commit }, cwd: repoRoot });
+  if (result.negative) throw new CoordinationRuntimeError('invalid-state', `${label} is unavailable in the repository object database`, [commit]);
 }
 
 function normalizePath(path: string): string {

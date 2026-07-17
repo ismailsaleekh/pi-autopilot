@@ -1,17 +1,20 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { spawnSync } from 'node:child_process';
-import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync } from 'node:fs';
-import { mkdir, open, readFile, stat, unlink } from 'node:fs/promises';
+import { existsSync, lstatSync, mkdirSync, realpathSync } from 'node:fs';
+import { mkdir, open, readFile, unlink } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { CoordinatorClient, durableIdentifier } from "./client.js";
+import { CoordinatorClient } from "./client.js";
 import { parseCoordinationWorktree, parseCoordinationWorktreeOperation } from "./contracts.js";
 import { CoordinationRuntimeError } from "./failures.js";
+import { canonicalJson } from "./canonical-json.js";
 import { coordinationCutoverCommitted } from "./migration-paths.js";
 import { coordinatorRuntimePaths } from "./runtime-paths.js";
 import { currentBootId, isProcessAlive } from "./process-identity.js";
 import { readCoordinatorSessionContext } from "./supervisor.js";
 import { deterministicWorktreeId, sameWorktreeAuthority, worktreeOwnerKindKey } from "./worktree-identity.js";
-import { AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV, AUTOPILOT_PREFLIGHT_ROLLBACK_REASON_PREFIX } from "../names.js";
+import { deriveWorktreeOperationKeyV2, operationIdFromWorktreeOperationKey } from "./worktree-operation-identity.js";
+import { gitWorktreeRegistrationFacts, inspectWorktreePostcondition } from "./worktree-postconditions.js";
+import { gitQueryText, runGitMutation, runGitQuery } from "../git-process.js";
+import { AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV } from "../names.js";
 const TERMINAL_STAGES = new Set(['committed', 'compensated', 'failed']);
 export const WORKTREE_SAGA_BOUNDARIES = ['after-prepare', 'before-probe', 'after-probe', 'after-start', 'before-action', 'after-action', 'after-action-report', 'before-verification', 'after-verification', 'after-evidence', 'after-verified-commit', 'after-terminal-commit'];
 async function observeBoundary(callbacks, boundary) {
@@ -53,11 +56,6 @@ function phaseFailure(operation, phase, error, reconciliationError) {
         ...(reconciliationError === undefined ? [] : phaseCauseEvidence('reconciliation', reconciliationError, 8)),
     ]);
 }
-function record(value, label) {
-    if (typeof value !== 'object' || value === null || Array.isArray(value))
-        throw new CoordinationRuntimeError('invalid-state', `${label} is not an object`);
-    return value;
-}
 function array(value, label) {
     if (!Array.isArray(value))
         throw new CoordinationRuntimeError('invalid-state', `${label} is not an array`);
@@ -72,21 +70,6 @@ function responseWorktree(response) {
 function sameOwner(left, right) {
     return left.repo_id === right.repo_id && left.autopilot_id === right.autopilot_id && left.workstream_run === right.workstream_run && left.unit_id === right.unit_id && left.attempt === right.attempt;
 }
-function canonicalJson(value) {
-    if (value === null || typeof value === 'boolean' || typeof value === 'string')
-        return JSON.stringify(value);
-    if (typeof value === 'number') {
-        if (!Number.isFinite(value))
-            throw new CoordinationRuntimeError('invalid-request', 'saga evidence contains a non-finite number');
-        return JSON.stringify(value);
-    }
-    if (Array.isArray(value))
-        return `[${value.map((entry) => canonicalJson(entry)).join(',')}]`;
-    if (typeof value !== 'object')
-        throw new CoordinationRuntimeError('invalid-request', 'saga evidence contains a non-JSON value');
-    const object = value;
-    return `{${Object.keys(object).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(object[key])}`).join(',')}}`;
-}
 function ownerFor(spec) {
     return {
         repo_id: spec.active.repo_key,
@@ -95,9 +78,6 @@ function ownerFor(spec) {
         unit_id: spec.kind === 'main' ? 'main' : spec.unitId,
         attempt: spec.kind === 'main' ? 1 : spec.attempt,
     };
-}
-function operationId(owner, type, key, intent) {
-    return durableIdentifier('operation', `${owner.repo_id}\0${owner.autopilot_id}\0${owner.workstream_run}\0${owner.unit_id}\0${String(owner.attempt)}\0${type}\0${key}\0${canonicalJson(intent)}`);
 }
 function operationEvidenceRef(owner, id) {
     return `_saga-evidence/${owner.workstream_run}/${id}.json`;
@@ -119,6 +99,8 @@ async function writeImmutableEvidence(input) {
         completed_steps: input.operation.completed_steps,
         intent_sha256: `sha256:${createHash('sha256').update(canonicalJson(input.operation.intent), 'utf8').digest('hex')}`,
         proof: [...input.proof],
+        proof_source: input.proofSource,
+        capture_sha: input.captureSha,
         error_code: input.errorCode,
     })}\n`;
     await mkdir(dirname(path), { recursive: true, mode: 0o700 });
@@ -141,10 +123,10 @@ async function writeImmutableEvidence(input) {
     }
     return { ref, sha256: `sha256:${createHash('sha256').update(body, 'utf8').digest('hex')}` };
 }
-function assertSessionOwnsSpec(session, spec) {
-    if (session.repo_id !== spec.active.repo_key || session.repo_key !== spec.active.repo_key || session.autopilot_id !== spec.active.autopilot_id || session.workstream_run !== spec.active.workstream_run)
-        throw new CoordinationRuntimeError('unauthorized-client', 'worktree saga session does not own the requested active run');
-    if (spec.attempt < 1 || spec.unitId.length === 0)
+function assertSpecMatchesActiveAuthority(spec) {
+    if (spec.operationType === 'metadata-reconcile')
+        throw new CoordinationRuntimeError('invalid-request', 'metadata reconciliation must use its dedicated exact-set runtime');
+    if (spec.attempt < 1 || spec.unitId.length === 0 || (spec.kind === 'main' && spec.unitId !== 'main'))
         throw new CoordinationRuntimeError('invalid-request', 'worktree saga requires a durable unit attempt identity');
     if (resolve(spec.intent.repo_root) !== resolve(spec.active.source_repo) || resolve(spec.intent.git_common_dir) !== resolve(spec.active.git_common_dir))
         throw new CoordinationRuntimeError('unauthorized-client', 'worktree saga intent repository identity does not match the active run');
@@ -153,6 +135,14 @@ function assertSessionOwnsSpec(session, spec) {
         : resolve(dirname(spec.active.main_worktree_path), 'units', spec.unitId, `attempt-${String(spec.attempt)}`, 'worktree');
     if (resolve(spec.intent.worktree_path) !== expectedPath)
         throw new CoordinationRuntimeError('unauthorized-client', 'worktree saga path is not derived from its durable owner', [spec.intent.worktree_path, expectedPath]);
+    const expectedBranch = spec.kind === 'main' ? spec.active.branch : `autopilot/unit/${spec.active.workstream_run}/${spec.unitId}/attempt-${String(spec.attempt)}`;
+    if (spec.intent.branch !== expectedBranch)
+        throw new CoordinationRuntimeError('unauthorized-client', 'worktree saga branch is not derived from its durable owner', [spec.intent.branch, expectedBranch]);
+}
+function assertSessionOwnsSpec(session, spec) {
+    assertSpecMatchesActiveAuthority(spec);
+    if (session.repo_id !== spec.active.repo_key || session.repo_key !== spec.active.repo_key || session.autopilot_id !== spec.active.autopilot_id || session.workstream_run !== spec.active.workstream_run)
+        throw new CoordinationRuntimeError('unauthorized-client', 'worktree saga session does not own the requested active run');
 }
 async function durableRunExists(active, env) {
     const paths = coordinatorRuntimePaths(env);
@@ -199,22 +189,33 @@ export class OwnedWorktreeSagaClient {
             state: spec.initialWorktreeState, version: 1,
         };
         const allWorktrees = await this.worktrees();
+        const allOperations = await this.operations();
+        const operationKey = deriveWorktreeOperationKeyV2({ canonicalWorktreeId: id, operationType: spec.operationType, completeImmutableIntent: spec.intent });
+        const canonicalOperationId = operationIdFromWorktreeOperationKey(operationKey);
+        if (spec.operationId !== undefined && !allOperations.some((entry) => entry.operation_id === spec.operationId))
+            throw new CoordinationRuntimeError('invalid-request', 'caller-supplied worktree operation ID is allowed only to resume an existing historical operation', [spec.operationId, canonicalOperationId]);
+        const opId = spec.operationId ?? canonicalOperationId;
+        const existing = allOperations.find((entry) => entry.operation_id === opId);
         const semantic = allWorktrees.filter((entry) => entry.state !== 'removed' && worktreeOwnerKindKey(entry) === worktreeOwnerKindKey(proposed));
         if (semantic.some((entry) => !sameWorktreeAuthority(entry, proposed)))
             throw new CoordinationRuntimeError('store-corrupt', 'active worktree owner/kind projections disagree in authority-bearing identity', semantic.map((entry) => entry.worktree_id));
         const deterministic = semantic.find((entry) => entry.worktree_id === id);
-        const withHistory = new Set((await this.operations()).map((entry) => entry.worktree_id));
+        const withHistory = new Set(allOperations.map((entry) => entry.worktree_id));
         const historical = semantic.filter((entry) => withHistory.has(entry.worktree_id));
         if (historical.length > 1)
             throw new CoordinationRuntimeError('recovery-required', 'duplicate active worktree projections carry multiple operation histories', historical.map((entry) => entry.worktree_id));
-        // A terminal remove replay must retain the exact durable row/version even
-        // though it is no longer an active semantic authority candidate.
-        const existingWorktree = historical[0] ?? deterministic ?? semantic[0] ?? allWorktrees.find((entry) => entry.worktree_id === id);
+        const operationWorktree = existing === undefined ? undefined : allWorktrees.find((entry) => entry.worktree_id === existing.worktree_id) ?? semantic[0];
+        if (existing !== undefined && operationWorktree === undefined)
+            throw new CoordinationRuntimeError('store-corrupt', 'existing worktree operation has no current canonical semantic projection', [existing.operation_id, existing.worktree_id, id]);
+        if (operationWorktree !== undefined && !sameWorktreeAuthority(operationWorktree, proposed))
+            throw new CoordinationRuntimeError('store-corrupt', 'historical operation worktree authority differs from canonical semantic ownership', [operationWorktree.worktree_id, id]);
+        // Replays preserve the operation's immutable historical payload ID. New
+        // operations route through the canonical semantic projection selected by
+        // the schema-13 store/alias layer.
+        const existingWorktree = operationWorktree ?? historical[0] ?? deterministic ?? semantic[0] ?? allWorktrees.find((entry) => entry.worktree_id === id);
         const worktree = existingWorktree ?? proposed;
-        const opId = spec.operationId ?? operationId(owner, spec.operationType, spec.operationKey, spec.intent);
-        const existing = (await this.operations()).find((entry) => entry.operation_id === opId);
         if (existing !== undefined) {
-            if (!sameOwner(existing.owner, owner) || existing.worktree_id !== worktree.worktree_id || existing.operation_type !== spec.operationType || canonicalJson(existing.intent) !== canonicalJson(spec.intent))
+            if (!sameOwner(existing.owner, owner) || existing.operation_type !== spec.operationType || canonicalJson(existing.intent) !== canonicalJson(spec.intent))
                 throw new CoordinationRuntimeError('idempotency-conflict', 'worktree operation key was reused with different immutable intent');
             return { operation: existing, worktree, replayed: true };
         }
@@ -224,7 +225,7 @@ export class OwnedWorktreeSagaClient {
             intent: spec.intent, completed_steps: [], current_step: null, recovery_attempts: 0,
             verification_evidence: null, error_code: null, version: 1,
         };
-        const response = await this.#client.mutate('prepare-operation', this.#identity(`prepare-operation:${opId}`, existingWorktree?.version ?? 0), {
+        const response = await this.#client.mutate('prepare-operation', this.#identity(operationKey.operation_key_sha256, existingWorktree?.version ?? 0), {
             worktree, operation, ...this.#proof(),
         });
         return { operation: responseOperation(response), worktree: responseWorktree(response), replayed: false };
@@ -243,8 +244,8 @@ export class OwnedWorktreeSagaClient {
         });
         return { operation: responseOperation(response), worktree: responseWorktree(response) };
     }
-    async writeEvidence(operation, stage, proof, errorCode) {
-        return await writeImmutableEvidence({ session: this.#session, operation, stage, proof, errorCode });
+    async writeEvidence(operation, stage, inspection, proof, errorCode) {
+        return await writeImmutableEvidence({ session: this.#session, operation, stage, proof, proofSource: inspection?.proof_source ?? null, captureSha: inspection?.capture_sha ?? null, errorCode });
     }
     #identity(idempotencyKey, expectedVersion) {
         return {
@@ -256,6 +257,67 @@ export class OwnedWorktreeSagaClient {
         return { session_lease_id: this.#session.session_lease_id, session_token: this.#session.session_token };
     }
 }
+function operationKind(owner) {
+    return owner.unit_id === 'main' ? 'main' : 'unit';
+}
+function inspectOperation(operation, env) {
+    if (operation.operation_type === 'metadata-reconcile')
+        throw new CoordinationRuntimeError('recovery-required', 'metadata reconciliation uses its dedicated exact-set runtime', [operation.operation_id]);
+    const kind = operationKind(operation.owner);
+    return inspectWorktreePostcondition({
+        operationType: operation.operation_type,
+        owner: operation.owner,
+        kind,
+        canonicalWorktreeId: deterministicWorktreeId(operation.owner, kind),
+        intent: operation.intent,
+        durableStage: operation.stage,
+        env,
+    });
+}
+function operationTypeSet(...values) {
+    return new Set(values);
+}
+const COMMITTED_SUPERSEDING_OPERATIONS = Object.freeze({
+    create: operationTypeSet('materialize', 'commit', 'merge', 'reset', 'quarantine', 'remove'),
+    materialize: operationTypeSet('remove'),
+    commit: operationTypeSet('commit', 'merge', 'reset', 'quarantine', 'remove'),
+    merge: operationTypeSet('commit', 'merge', 'reset', 'quarantine', 'remove'),
+    reset: operationTypeSet('commit', 'merge', 'quarantine', 'remove'),
+    quarantine: operationTypeSet('remove'),
+    archive: operationTypeSet(),
+    remove: operationTypeSet(),
+    'metadata-reconcile': operationTypeSet(),
+});
+async function inspectCommittedOperation(client, operation, env) {
+    const direct = inspectOperation(operation, env);
+    if (direct.outcome === 'satisfied')
+        return direct;
+    const supersedingTypes = COMMITTED_SUPERSEDING_OPERATIONS[operation.operation_type];
+    const later = (await client.operations()).filter((candidate) => candidate.stage === 'committed'
+        && candidate.intent_event_seq > operation.intent_event_seq
+        && sameOwner(candidate.owner, operation.owner)
+        && supersedingTypes.has(candidate.operation_type))
+        .sort((left, right) => right.intent_event_seq - left.intent_event_seq);
+    for (const candidate of later) {
+        const current = inspectOperation(candidate, env);
+        if (current.outcome !== 'satisfied')
+            continue;
+        return Object.freeze({
+            outcome: 'satisfied',
+            proof: Object.freeze([`historical_operation_superseded_by=${candidate.operation_id}`, `superseding_operation_type=${candidate.operation_type}`, ...current.proof]),
+            effect_applied: true,
+            capture_sha: null,
+            proof_source: current.proof_source,
+        });
+    }
+    return direct;
+}
+export function inspectOwnedWorktreeSpecPostcondition(spec, env) {
+    if (spec.operationType === 'metadata-reconcile')
+        throw new CoordinationRuntimeError('recovery-required', 'metadata reconciliation uses its dedicated exact-set runtime');
+    const owner = ownerFor(spec);
+    return inspectWorktreePostcondition({ operationType: spec.operationType, owner, kind: spec.kind, canonicalWorktreeId: deterministicWorktreeId(owner, spec.kind), intent: spec.intent, env });
+}
 function errorCode(error) {
     if (error instanceof CoordinationRuntimeError)
         return error.code;
@@ -265,17 +327,18 @@ function errorCode(error) {
 }
 async function sagaExecutionLockIsStale(lockPath) {
     try {
-        const parsed = record(JSON.parse(await readFile(lockPath, 'utf8')), 'saga execution lock');
-        const pid = parsed['pid'];
-        const bootId = parsed['boot_id'];
+        const parsed = JSON.parse(await readFile(lockPath, 'utf8'));
+        if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed))
+            return false;
+        const pid = Reflect.get(parsed, 'pid');
+        const bootId = Reflect.get(parsed, 'boot_id');
         if (typeof pid !== 'number' || !Number.isSafeInteger(pid) || pid < 1 || typeof bootId !== 'string')
-            return true;
-        // Never reclaim a lock while its PID is alive merely because boot evidence differs.
+            return false;
+        // Never reclaim malformed/ambiguous evidence or a live PID from elapsed time.
         return !isProcessAlive(pid);
     }
     catch {
-        const lockStat = await stat(lockPath).catch(() => null);
-        return lockStat !== null && Date.now() - lockStat.mtimeMs > 30_000;
+        return false;
     }
 }
 async function withSagaExecutionLock(session, spec, run) {
@@ -348,6 +411,7 @@ async function withSagaExecutionLock(session, spec, run) {
     throw new CoordinationRuntimeError('coordinator-contention', 'timed out acquiring owner-scoped worktree saga execution lock', [lockPath]);
 }
 export async function executeOwnedWorktreeSaga(spec, callbacks, env = process.env) {
+    assertSpecMatchesActiveAuthority(spec);
     const contextPath = env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV];
     if (contextPath === undefined || contextPath.trim().length === 0) {
         if (coordinationCutoverCommitted(coordinatorRuntimePaths(env).stateRoot, spec.active.repo_key))
@@ -357,12 +421,31 @@ export async function executeOwnedWorktreeSaga(spec, callbacks, env = process.en
         if (await durableRunExists(spec.active, env))
             throw new CoordinationRuntimeError('unauthorized-client', 'durable run exists but no current session can authorize its worktree mutation');
         assertExternalWorktreeAuthority(spec, env, spec.active.worktree_root);
-        const inspection = await callbacks.inspect();
+        const inspection = inspectOwnedWorktreeSpecPostcondition(spec, env);
         if (inspection.outcome === 'unsafe')
             throw new CoordinationRuntimeError('recovery-required', 'unmanaged legacy worktree operation found unsafe external state', inspection.proof);
-        if (inspection.outcome === 'not-applied')
-            await callbacks.action();
-        await callbacks.verify();
+        if (inspection.outcome === 'not-applied') {
+            let actionError;
+            if (!inspection.effect_applied) {
+                try {
+                    await callbacks.action();
+                }
+                catch (error) {
+                    actionError = error;
+                }
+            }
+            const actionInspection = inspectOwnedWorktreeSpecPostcondition(spec, env);
+            if (actionError !== undefined && actionInspection.outcome === 'unsafe')
+                throw actionError;
+            if (actionInspection.effect_applied)
+                await callbacks.finalize?.();
+            const verified = inspectOwnedWorktreeSpecPostcondition(spec, env);
+            if (verified.outcome !== 'satisfied') {
+                if (actionError !== undefined)
+                    throw actionError;
+                throw new CoordinationRuntimeError('recovery-required', 'unmanaged worktree operation did not satisfy its canonical postcondition', verified.proof);
+            }
+        }
         return { managed: false, operation: null, worktree: null, replayed: false };
     }
     const client = await OwnedWorktreeSagaClient.fromEnvironment(env);
@@ -372,12 +455,17 @@ export async function executeOwnedWorktreeSaga(spec, callbacks, env = process.en
         let worktree = prepared.worktree;
         assertExternalWorktreeAuthority(spec, env, join(client.session.state_root, 'worktrees', client.session.repo_key));
         if (operation.stage === 'committed') {
-            await callbacks.verify();
+            const committedInspection = await inspectCommittedOperation(client, operation, env);
+            if (committedInspection.outcome !== 'satisfied')
+                throw new CoordinationRuntimeError('recovery-required', 'committed worktree operation disagrees with its canonical postcondition', committedInspection.proof);
             return { managed: true, operation, worktree, replayed: true };
         }
         if (operation.stage === 'compensated' || operation.stage === 'failed')
             throw new CoordinationRuntimeError('recovery-required', `worktree operation is terminal at ${operation.stage}`, [operation.operation_id]);
         if (operation.stage === 'verified') {
+            const verifiedInspection = inspectOperation(operation, env);
+            if (verifiedInspection.outcome !== 'satisfied')
+                throw new CoordinationRuntimeError('recovery-required', 'verified worktree operation no longer satisfies its canonical postcondition', verifiedInspection.proof);
             const committed = await client.transition({
                 operation, stage: 'committed', completedSteps: operation.completed_steps, currentStep: null,
                 recoveryAttempts: operation.recovery_attempts, verificationEvidence: operation.verification_evidence, errorCode: null,
@@ -390,7 +478,7 @@ export async function executeOwnedWorktreeSaga(spec, callbacks, env = process.en
             await observeBoundary(callbacks, 'after-prepare');
             phase = 'preflight-probe';
             await observeBoundary(callbacks, 'before-probe');
-            const inspection = await callbacks.inspect();
+            const inspection = inspectOperation(operation, env);
             await observeBoundary(callbacks, 'after-probe');
             if (inspection.outcome === 'unsafe')
                 throw new CoordinationRuntimeError('recovery-required', 'worktree operation requires owned recovery before mutation', inspection.proof);
@@ -416,11 +504,34 @@ export async function executeOwnedWorktreeSaga(spec, callbacks, env = process.en
                 operation = probed.operation;
                 worktree = probed.worktree;
             }
+            else if (operation.stage === 'in-progress') {
+                phase = 'start-report';
+                const fenced = await client.transition({
+                    operation, stage: 'in-progress', completedSteps: operation.completed_steps, currentStep: 'external-action',
+                    recoveryAttempts: operation.recovery_attempts, verificationEvidence: operation.verification_evidence, errorCode: operation.error_code,
+                    worktreeState: worktree.state, transitionKey: `recovery-authority-${String(operation.version)}`,
+                });
+                operation = fenced.operation;
+                worktree = fenced.worktree;
+            }
+            let actionError;
             if (inspection.outcome === 'not-applied') {
                 phase = 'external-action';
                 await observeBoundary(callbacks, 'before-action');
-                await callbacks.action();
+                if (!inspection.effect_applied) {
+                    try {
+                        await callbacks.action();
+                    }
+                    catch (error) {
+                        actionError = error;
+                    }
+                }
                 await observeBoundary(callbacks, 'after-action');
+                const actionInspection = inspectOperation(operation, env);
+                if (actionError !== undefined && actionInspection.outcome === 'unsafe')
+                    throw actionError;
+                if (actionInspection.effect_applied)
+                    await callbacks.finalize?.();
             }
             if (!operation.completed_steps.includes('external-action')) {
                 phase = 'action-report';
@@ -435,10 +546,16 @@ export async function executeOwnedWorktreeSaga(spec, callbacks, env = process.en
             await observeBoundary(callbacks, 'after-action-report');
             phase = 'postcondition-verification';
             await observeBoundary(callbacks, 'before-verification');
-            const proof = await callbacks.verify();
+            const verifiedInspection = inspectOperation(operation, env);
+            if (verifiedInspection.outcome !== 'satisfied') {
+                if (actionError !== undefined)
+                    throw actionError;
+                throw new CoordinationRuntimeError('recovery-required', 'worktree operation canonical postcondition is not satisfied', verifiedInspection.proof);
+            }
+            const proof = verifiedInspection.proof;
             await observeBoundary(callbacks, 'after-verification');
             phase = 'evidence-write';
-            const evidence = await client.writeEvidence(operation, 'verified', proof, null);
+            const evidence = await client.writeEvidence(operation, 'verified', verifiedInspection, proof, null);
             await observeBoundary(callbacks, 'after-evidence');
             const completedWithVerification = operation.completed_steps.includes('postcondition-verification') ? operation.completed_steps : [...operation.completed_steps, 'postcondition-verification'];
             phase = 'verified-report';
@@ -463,7 +580,7 @@ export async function executeOwnedWorktreeSaga(spec, callbacks, env = process.en
             if (error instanceof CoordinationRuntimeError && (error.code === 'fenced-session' || error.code === 'unauthorized-client' || error.code === 'stale-version'))
                 throw error;
             if (error instanceof WorktreeSagaCompensatedError && !TERMINAL_STAGES.has(operation.stage) && operation.stage !== 'verified') {
-                const evidence = await client.writeEvidence(operation, 'compensated', error.proof, 'git-partial-effect');
+                const evidence = await client.writeEvidence(operation, 'compensated', null, error.proof, 'git-partial-effect');
                 await client.transition({
                     operation, stage: 'compensated', completedSteps: operation.completed_steps, currentStep: null,
                     recoveryAttempts: operation.recovery_attempts, verificationEvidence: evidence, errorCode: null,
@@ -487,14 +604,6 @@ export async function executeOwnedWorktreeSaga(spec, callbacks, env = process.en
         }
     });
 }
-function git(args, cwd, env, input) {
-    const result = spawnSync('git', [...args], { cwd, encoding: 'utf8', env: { ...process.env, ...env, AUTOPILOT_RUNTIME: '1', AUTOPILOT_RUNTIME_AUTHORITY: 'owned-worktree-saga', GIT_LFS_SKIP_SMUDGE: '1', GIT_AUTHOR_NAME: 'autopilot-runtime', GIT_AUTHOR_EMAIL: 'autopilot-runtime@example.invalid', GIT_COMMITTER_NAME: 'autopilot-runtime', GIT_COMMITTER_EMAIL: 'autopilot-runtime@example.invalid' }, ...(input === undefined ? {} : { input }) });
-    if (result.error !== undefined)
-        throw new CoordinationRuntimeError('git-partial-effect', `git ${args.join(' ')} failed to spawn`, [result.error.message]);
-    if ((result.status ?? -1) !== 0)
-        throw new CoordinationRuntimeError('git-partial-effect', `git ${args.join(' ')} exited with status ${String(result.status ?? -1)}`, [result.stderr.trim(), result.stdout.trim()]);
-    return result.stdout.trim();
-}
 function canonicalPath(path) {
     let cursor = resolve(path);
     const missingSegments = [];
@@ -506,23 +615,6 @@ function canonicalPath(path) {
         cursor = parent;
     }
     return resolve(realpathSync(cursor), ...missingSegments);
-}
-function worktreeEntries(repoRoot, env) {
-    return git(['worktree', 'list', '--porcelain'], repoRoot, env).split('\n').filter((line) => line.startsWith('worktree ')).map((line) => canonicalPath(line.slice('worktree '.length)));
-}
-function registeredBranch(repoRoot, worktreePath, env) {
-    const expected = canonicalPath(worktreePath);
-    let currentPath = null;
-    for (const line of git(['worktree', 'list', '--porcelain'], repoRoot, env).split('\n')) {
-        if (line.startsWith('worktree '))
-            currentPath = canonicalPath(line.slice('worktree '.length));
-        else if (line.startsWith('branch ') && currentPath === expected)
-            return line.slice('branch refs/heads/'.length);
-    }
-    return null;
-}
-function isRegistered(intent, env) {
-    return worktreeEntries(intent.repo_root, env).includes(canonicalPath(intent.worktree_path));
 }
 function assertNoSymlinkSegments(ownedRoot, target, label) {
     const lexicalRoot = resolve(ownedRoot);
@@ -542,312 +634,138 @@ function assertNoSymlinkSegments(ownedRoot, target, label) {
 function assertExternalWorktreeAuthority(spec, env, ownedWorktreeRoot) {
     const intent = spec.intent;
     assertNoSymlinkSegments(ownedWorktreeRoot, intent.worktree_path, 'worktree authority');
-    const present = existsSync(intent.worktree_path);
-    const registered = isRegistered(intent, env);
-    const absentCreate = spec.operationType === 'create' && !present && !registered;
-    const absentRemove = spec.operationType === 'remove' && !present;
-    if (!absentCreate && !absentRemove && (!present || !registered))
-        throw new CoordinationRuntimeError('recovery-required', 'external worktree path and Git registration disagree with durable authority', [`path_present=${String(present)}`, `git_registered=${String(registered)}`]);
-    if (!present) {
-        if (registered && registeredBranch(intent.repo_root, intent.worktree_path, env) !== intent.branch)
-            throw new CoordinationRuntimeError('recovery-required', 'stale worktree metadata branch disagrees with durable authority', [intent.branch]);
+    if (!existsSync(intent.worktree_path))
         return;
-    }
-    const commonRaw = git(['rev-parse', '--git-common-dir'], intent.worktree_path, env);
+    const commonRaw = gitQueryText({ descriptor: { kind: 'git-common-dir' }, cwd: intent.worktree_path, env }).trim();
     const actualCommon = canonicalPath(isAbsolute(commonRaw) ? commonRaw : resolve(intent.worktree_path, commonRaw));
     const expectedCommon = canonicalPath(intent.git_common_dir);
     if (actualCommon !== expectedCommon)
         throw new CoordinationRuntimeError('recovery-required', 'external worktree Git common-dir disagrees with durable repository authority', [`expected=${expectedCommon}`, `actual=${actualCommon}`]);
 }
-function changedPaths(path, env) {
-    return git(['status', '--porcelain=v1', '-z', '--untracked-files=all'], path, env).split('\0').filter((entry) => entry.length >= 4).map((entry) => entry.slice(3).replace(/\\/gu, '/')).sort();
+function ownedMaterializationDirectory(worktreePath, path) {
+    const normalized = path.replace(/\\/gu, '/').replace(/^\.\//u, '');
+    if (normalized.length === 0 || normalized.startsWith('/') || normalized.includes('\0') || normalized.split('/').some((segment) => segment === '..' || segment === ''))
+        throw new CoordinationRuntimeError('invalid-state', 'materialize intent contains an unbounded repository path', [path]);
+    const wildcard = normalized.search(/[?*[{]/u);
+    const prefix = wildcard < 0 ? normalized : normalized.slice(0, wildcard);
+    const literal = prefix.replace(/\/$/u, '');
+    const directoryRelative = wildcard < 0 ? dirname(literal) : literal.length === 0 ? '.' : prefix.endsWith('/') ? literal : dirname(literal);
+    const directory = resolve(worktreePath, ...directoryRelative.split('/'));
+    const rel = relative(resolve(worktreePath), directory);
+    if (rel.startsWith('..') || isAbsolute(rel))
+        throw new CoordinationRuntimeError('invalid-state', 'materialize intent escapes its owned worktree', [path, worktreePath]);
+    return directory;
 }
-function head(path, env) {
-    return git(['rev-parse', 'HEAD'], path, env);
+function sagaGitEnv(env) {
+    return {
+        ...process.env,
+        ...env,
+        AUTOPILOT_RUNTIME: '1',
+        AUTOPILOT_RUNTIME_AUTHORITY: 'owned-worktree-saga',
+        GIT_LFS_SKIP_SMUDGE: '1',
+        GIT_AUTHOR_NAME: 'autopilot-runtime',
+        GIT_AUTHOR_EMAIL: 'autopilot-runtime@example.invalid',
+        GIT_COMMITTER_NAME: 'autopilot-runtime',
+        GIT_COMMITTER_EMAIL: 'autopilot-runtime@example.invalid',
+    };
 }
-function branch(path, env) {
-    return git(['rev-parse', '--abbrev-ref', 'HEAD'], path, env);
-}
-function fixedInspection(operation, env) {
+async function fixedAction(operation, env) {
+    if (operation.operation_type === 'metadata-reconcile')
+        throw new CoordinationRuntimeError('recovery-required', 'metadata reconciliation requires the exact-set metadata runtime', [operation.operation_id]);
     const intent = operation.intent;
-    const present = existsSync(intent.worktree_path);
-    const registered = isRegistered(intent, env);
-    if (present !== registered) {
-        if (operation.operation_type === 'remove' && !present && registered) {
-            const metadataBranch = registeredBranch(intent.repo_root, intent.worktree_path, env);
-            if (metadataBranch !== intent.branch)
-                return { outcome: 'unsafe', proof: [`expected_metadata_branch=${intent.branch}`, `actual_metadata_branch=${String(metadataBranch)}`] };
-        }
-        else
-            return { outcome: 'unsafe', proof: [`path_present=${String(present)}`, `git_registered=${String(registered)}`] };
-    }
-    if (operation.operation_type === 'create') {
-        if (!present) {
-            const branchCheck = spawnSync('git', ['show-ref', '--verify', '--quiet', `refs/heads/${intent.branch}`], { cwd: intent.repo_root, encoding: 'utf8' });
-            if ((branchCheck.status ?? -1) !== 0)
-                return { outcome: 'not-applied', proof: ['path_absent', 'git_registration_absent', 'branch_absent'] };
-            const branchSha = git(['rev-parse', `refs/heads/${intent.branch}`], intent.repo_root, env);
-            return branchSha === intent.base_sha ? { outcome: 'not-applied', proof: ['path_absent', 'git_registration_absent', 'branch_precreated_at_base'] } : { outcome: 'unsafe', proof: [`branch_expected=${String(intent.base_sha)}`, `branch_actual=${branchSha}`] };
-        }
-        if (branch(intent.worktree_path, env) !== intent.branch)
-            return { outcome: 'unsafe', proof: ['registered_branch_mismatch'] };
-        const currentHead = head(intent.worktree_path, env);
-        if (intent.base_sha !== null && currentHead !== intent.base_sha)
-            return { outcome: 'unsafe', proof: [`expected_head=${intent.base_sha}`, `actual_head=${currentHead}`] };
-        if (intent.checkout_mode !== null && intent.checkout_mode !== 'full') {
-            const sparse = spawnSync('git', ['config', '--bool', 'core.sparseCheckout'], { cwd: intent.worktree_path, encoding: 'utf8' });
-            if ((sparse.status ?? -1) !== 0 || sparse.stdout.trim() !== 'true')
-                return { outcome: 'not-applied', proof: ['worktree_registered', 'sparse_configuration_incomplete'] };
-        }
-        const taskRoot = operation.owner.unit_id === 'main'
-            ? dirname(intent.worktree_path)
-            : dirname(dirname(dirname(dirname(intent.worktree_path))));
-        const missingMetadata = intent.metadata_refs.filter((ref) => !existsSync(resolve(taskRoot, ...ref.split('/'))));
-        return missingMetadata.length === 0
-            ? { outcome: 'satisfied', proof: ['worktree_registered', `head=${currentHead}`, ...(intent.metadata_refs.length > 0 ? ['operation_metadata_complete'] : [])] }
-            : { outcome: 'not-applied', proof: ['worktree_registered', ...missingMetadata.map((ref) => `missing_metadata=${ref}`)] };
-    }
-    if (operation.operation_type === 'remove') {
-        const branchCheck = spawnSync('git', ['show-ref', '--verify', '--quiet', `refs/heads/${intent.branch}`], { cwd: intent.repo_root, encoding: 'utf8' });
-        const branchPresent = (branchCheck.status ?? -1) === 0;
-        if (branchPresent && intent.target_sha !== null) {
-            const branchSha = git(['rev-parse', `refs/heads/${intent.branch}`], intent.repo_root, env);
-            if (branchSha !== intent.target_sha)
-                return { outcome: 'unsafe', proof: [`branch_expected=${intent.target_sha}`, `branch_actual=${branchSha}`] };
-        }
-        if (!present)
-            return branchPresent ? { outcome: 'not-applied', proof: ['path_absent', 'git_registration_absent', 'branch_present'] } : { outcome: 'satisfied', proof: ['path_absent', 'git_registration_absent', 'branch_absent'] };
-        const dirty = changedPaths(intent.worktree_path, env);
-        return dirty.length === 0 ? { outcome: 'not-applied', proof: ['worktree_clean'] } : { outcome: 'unsafe', proof: dirty.map((path) => `dirty=${path}`) };
-    }
-    if (!present)
-        return { outcome: 'unsafe', proof: ['owned_worktree_missing'] };
-    if (operation.operation_type === 'reset') {
-        const dirty = changedPaths(intent.worktree_path, env);
-        if (dirty.length > 0)
-            return { outcome: 'unsafe', proof: dirty.map((path) => `uncaptured_dirty=${path}`) };
-        const currentHead = head(intent.worktree_path, env);
-        return intent.target_sha === null || currentHead === intent.target_sha ? { outcome: 'satisfied', proof: [`head=${currentHead}`, 'worktree_clean'] } : { outcome: 'unsafe', proof: [`expected_head=${intent.target_sha}`, `actual_head=${currentHead}`] };
-    }
-    if (operation.operation_type === 'archive') {
-        if (intent.archive_ref === null || intent.target_sha === null)
-            return { outcome: 'unsafe', proof: ['archive_intent_incomplete'] };
-        const result = spawnSync('git', ['rev-parse', '--verify', `refs/heads/${intent.archive_ref}`], { cwd: intent.repo_root, encoding: 'utf8' });
-        if ((result.status ?? -1) !== 0)
-            return { outcome: 'not-applied', proof: ['archive_ref_absent'] };
-        const actual = result.stdout.trim();
-        return actual === intent.target_sha ? { outcome: 'satisfied', proof: [`archive_ref=${intent.archive_ref}`, `archive_sha=${actual}`] } : { outcome: 'unsafe', proof: [`archive_expected=${intent.target_sha}`, `archive_actual=${actual}`] };
-    }
-    if (operation.operation_type === 'merge' && intent.archive_ref !== null && intent.target_sha !== null && intent.base_sha !== null) {
-        const currentBranch = git(['rev-parse', '--abbrev-ref', 'HEAD'], intent.repo_root, env);
-        const currentHead = head(intent.repo_root, env);
-        if (currentBranch !== intent.archive_ref)
-            return { outcome: 'unsafe', proof: [`expected_target_branch=${intent.archive_ref}`, `actual_branch=${currentBranch}`] };
-        if (currentHead === intent.target_sha)
-            return { outcome: 'satisfied', proof: [`target_head=${currentHead}`] };
-        return currentHead === intent.base_sha ? { outcome: 'not-applied', proof: [`target_head=${currentHead}`] } : { outcome: 'unsafe', proof: [`expected_before=${intent.base_sha}`, `actual_head=${currentHead}`] };
-    }
-    if (operation.operation_type === 'merge' && intent.target_sha !== null && intent.base_sha !== null) {
-        const mergeHeadPath = git(['rev-parse', '--git-path', 'MERGE_HEAD'], intent.worktree_path, env);
-        const currentHead = head(intent.worktree_path, env);
-        if (existsSync(isAbsolute(mergeHeadPath) ? mergeHeadPath : resolve(intent.worktree_path, mergeHeadPath)))
-            return currentHead === intent.base_sha
-                ? { outcome: 'not-applied', proof: ['interrupted_merge_conflict', `head=${currentHead}`] }
-                : { outcome: 'unsafe', proof: ['interrupted_merge_head_moved', `expected_head=${intent.base_sha}`, `actual_head=${currentHead}`] };
-        if (changedPaths(intent.worktree_path, env).length > 0)
-            return { outcome: 'unsafe', proof: ['merge_target_dirty_without_owned_merge_state'] };
-        if (currentHead === intent.base_sha) {
-            const alreadyAncestor = spawnSync('git', ['merge-base', '--is-ancestor', intent.target_sha, currentHead], { cwd: intent.worktree_path, encoding: 'utf8' });
-            return (alreadyAncestor.status ?? -1) === 0 ? { outcome: 'satisfied', proof: [`merged_source=${intent.target_sha}`, `head=${currentHead}`, 'worktree_clean'] } : { outcome: 'not-applied', proof: [`head=${currentHead}`, 'worktree_clean'] };
-        }
-        const parents = git(['rev-list', '--parents', '-n', '1', currentHead], intent.worktree_path, env).split(/\s+/u).slice(1);
-        return parents.includes(intent.base_sha) && parents.includes(intent.target_sha)
-            ? { outcome: 'satisfied', proof: [`merged_source=${intent.target_sha}`, `head=${currentHead}`, `base_parent=${intent.base_sha}`, 'worktree_clean'] }
-            : { outcome: 'unsafe', proof: [`expected_base_parent=${intent.base_sha}`, `expected_source_parent=${intent.target_sha}`, `actual_head=${currentHead}`, ...parents.map((parent) => `actual_parent=${parent}`)] };
-    }
-    if (operation.operation_type === 'commit' || operation.operation_type === 'quarantine') {
-        const currentHead = head(intent.worktree_path, env);
-        const dirty = changedPaths(intent.worktree_path, env);
-        if (dirty.length > 0)
-            return { outcome: 'not-applied', proof: dirty.map((path) => `dirty=${path}`) };
-        if (intent.target_sha !== null)
-            return currentHead === intent.target_sha ? { outcome: 'satisfied', proof: [`head=${currentHead}`, 'worktree_clean'] } : { outcome: 'unsafe', proof: [`expected_head=${intent.target_sha}`, `actual_head=${currentHead}`] };
-        if (intent.base_sha === null || currentHead === intent.base_sha)
-            return operation.operation_type === 'quarantine' && intent.paths.length === 0 ? { outcome: 'satisfied', proof: [`head=${currentHead}`, 'worktree_clean'] } : { outcome: 'not-applied', proof: [`head=${currentHead}`, 'worktree_clean'] };
-        const parents = git(['rev-list', '--parents', '-n', '1', currentHead], intent.worktree_path, env).split(/\s+/u).slice(1);
-        const actualPaths = git(['diff', '--name-only', intent.base_sha, currentHead, '--'], intent.worktree_path, env).split('\n').filter((path) => path.length > 0).sort((left, right) => left.localeCompare(right));
-        const expectedPaths = [...intent.paths].sort((left, right) => left.localeCompare(right));
-        const exactPaths = actualPaths.length === expectedPaths.length && actualPaths.every((path, index) => path === expectedPaths[index]);
-        const baseRelation = spawnSync('git', ['merge-base', '--is-ancestor', intent.base_sha, currentHead], { cwd: intent.worktree_path, encoding: 'utf8' });
-        const expectedHistory = operation.operation_type === 'commit' ? (baseRelation.status ?? -1) === 0 : parents.length === 1 && parents[0] === intent.base_sha;
-        return expectedHistory && exactPaths
-            ? { outcome: 'satisfied', proof: [`head=${currentHead}`, `base=${intent.base_sha}`, ...actualPaths.map((path) => `committed=${path}`), 'worktree_clean'] }
-            : { outcome: 'unsafe', proof: [`expected_base=${intent.base_sha}`, ...parents.map((parent) => `actual_parent=${parent}`), ...expectedPaths.map((path) => `expected_path=${path}`), ...actualPaths.map((path) => `actual_path=${path}`)] };
-    }
-    if (operation.operation_type === 'materialize') {
-        const sparse = spawnSync('git', ['config', '--bool', 'core.sparseCheckout'], { cwd: intent.worktree_path, encoding: 'utf8' });
-        if ((sparse.status ?? -1) !== 0 || sparse.stdout.trim() !== 'true')
-            return { outcome: 'unsafe', proof: ['sparse_checkout_disabled'] };
-        const missing = [];
-        const lfsPointers = [];
-        for (const path of intent.paths) {
-            const result = spawnSync('git', ['ls-files', '-t', '--', path], { cwd: intent.worktree_path, encoding: 'utf8' });
-            if ((result.status ?? -1) !== 0 || result.stdout.split('\n').some((line) => line.startsWith('S '))) {
-                missing.push(path);
-                continue;
-            }
-            for (const line of result.stdout.split('\n').filter((entry) => entry.length > 2 && !entry.startsWith('S '))) {
-                const trackedPath = line.slice(2);
-                const absolute = resolve(intent.worktree_path, ...trackedPath.split('/'));
-                if (!existsSync(absolute)) {
-                    if (!missing.includes(path))
-                        missing.push(path);
-                    continue;
-                }
-                const fileInfo = lstatSync(absolute);
-                if (!fileInfo.isFile() || fileInfo.size > 1_024)
-                    continue;
-                if (readFileSync(absolute).subarray(0, 256).toString().startsWith('version https://git-lfs.github.com/spec/v1'))
-                    lfsPointers.push(trackedPath);
-            }
-        }
-        if (lfsPointers.length > 0)
-            return { outcome: 'unsafe', proof: lfsPointers.map((path) => `lfs_pointer=${path}`) };
-        return missing.length === 0 ? { outcome: 'satisfied', proof: ['sparse_checkout_enabled', ...intent.paths.map((path) => `materialized=${path}`), 'lfs_pointer_check_passed'] } : { outcome: 'not-applied', proof: missing.map((path) => `skip_worktree=${path}`) };
-    }
-    return { outcome: 'not-applied', proof: ['postcondition_not_yet_satisfied'] };
-}
-function fixedAction(operation, env) {
-    const intent = operation.intent;
+    const gitEnv = sagaGitEnv(env);
     switch (operation.operation_type) {
         case 'create': {
             if (intent.base_sha === null || intent.checkout_mode === null)
                 throw new CoordinationRuntimeError('invalid-state', 'create operation intent lacks base_sha or checkout_mode');
-            const branchCheck = spawnSync('git', ['show-ref', '--verify', '--quiet', `refs/heads/${intent.branch}`], { cwd: intent.repo_root, encoding: 'utf8' });
-            const branchExists = (branchCheck.status ?? -1) === 0;
-            const registered = isRegistered(intent, env);
-            if (!registered && intent.checkout_mode === 'full')
-                git(branchExists ? ['worktree', 'add', intent.worktree_path, intent.branch] : ['worktree', 'add', '-b', intent.branch, intent.worktree_path, intent.base_sha], intent.repo_root, env);
-            else if (!registered)
-                git(branchExists ? ['worktree', 'add', '--no-checkout', intent.worktree_path, intent.branch] : ['worktree', 'add', '--no-checkout', '-b', intent.branch, intent.worktree_path, intent.base_sha], intent.repo_root, env);
+            const branchRef = `refs/heads/${intent.branch}`;
+            const branchExists = !runGitQuery({ descriptor: { kind: 'ref-exists', ref: branchRef }, cwd: intent.repo_root, env: gitEnv }).negative;
+            if (branchExists) {
+                const actual = gitQueryText({ descriptor: { kind: 'resolve-revision', revision: branchRef, verify: true }, cwd: intent.repo_root, env: gitEnv }).trim();
+                if (actual !== intent.base_sha)
+                    throw new CoordinationRuntimeError('recovery-required', 'create branch moved between canonical probe and action', [intent.branch, `expected=${intent.base_sha}`, `actual=${actual}`]);
+            }
+            const registered = gitWorktreeRegistrationFacts(intent.repo_root, gitEnv).some((entry) => entry.worktree_path === canonicalPath(intent.worktree_path));
+            if (!registered)
+                await runGitMutation({ descriptor: { kind: 'worktree-add', path: intent.worktree_path, branch: intent.branch, startPoint: branchExists ? null : intent.base_sha, createBranch: !branchExists, noCheckout: intent.checkout_mode !== 'full' }, cwd: intent.repo_root, env: gitEnv });
             if (intent.checkout_mode !== 'full') {
                 if (intent.sparse_patterns.length === 0)
                     throw new CoordinationRuntimeError('invalid-state', 'sparse create operation lacks patterns');
-                git(['sparse-checkout', 'set', '--no-cone', '--skip-checks', '--stdin'], intent.worktree_path, env, `${intent.sparse_patterns.join('\n')}\n`);
-                git(['checkout', '--force', intent.branch], intent.worktree_path, env);
+                await runGitMutation({ descriptor: { kind: 'sparse-checkout-set', patterns: intent.sparse_patterns }, cwd: intent.worktree_path, env: gitEnv });
+                await runGitMutation({ descriptor: { kind: 'checkout-force', branch: intent.branch }, cwd: intent.worktree_path, env: gitEnv });
             }
             return;
         }
         case 'materialize':
             if (intent.sparse_patterns.length > 0)
-                git(['sparse-checkout', 'add', '--skip-checks', '--stdin'], intent.worktree_path, env, `${intent.sparse_patterns.join('\n')}\n`);
-            for (const path of intent.paths) {
-                const normalized = path.replace(/\/\*\*$/u, '');
-                const target = resolve(intent.worktree_path, ...normalized.split('/'));
-                mkdirSync(path.endsWith('/**') ? target : dirname(target), { recursive: true });
-            }
+                await runGitMutation({ descriptor: { kind: 'sparse-checkout-add', patterns: intent.sparse_patterns }, cwd: intent.worktree_path, env: gitEnv });
+            for (const path of intent.paths)
+                mkdirSync(ownedMaterializationDirectory(intent.worktree_path, path), { recursive: true });
             return;
         case 'commit':
-        case 'quarantine':
-            if (changedPaths(intent.worktree_path, env).length === 0)
+        case 'quarantine': {
+            const status = runGitQuery({ descriptor: { kind: 'status-porcelain', ...(operation.operation_type === 'quarantine' ? { includeIgnored: true } : {}) }, cwd: intent.worktree_path, env: gitEnv });
+            if (status.stdout.length === 0)
                 return;
-            git(['add', '--sparse', '-A', '--', ...intent.paths], intent.worktree_path, env);
-            git(['commit', '--no-verify', '-m', `${operation.operation_type} ${operation.owner.workstream_run} ${operation.owner.unit_id} attempt ${String(operation.owner.attempt)}`], intent.worktree_path, env);
+            await runGitMutation({ descriptor: { kind: 'stage-paths', paths: operation.operation_type === 'quarantine' ? ['.'] : intent.paths, sparse: true, force: operation.operation_type === 'quarantine' }, cwd: intent.worktree_path, env: gitEnv });
+            const staged = runGitQuery({ descriptor: { kind: 'staged-clean' }, cwd: intent.worktree_path, env: gitEnv });
+            if (staged.negative)
+                await runGitMutation({ descriptor: { kind: 'commit', message: `${operation.operation_type} ${operation.owner.workstream_run} ${operation.owner.unit_id} attempt ${String(operation.owner.attempt)}` }, cwd: intent.worktree_path, env: gitEnv });
             return;
-        case 'merge':
+        }
+        case 'merge': {
             if (intent.target_sha === null)
                 throw new CoordinationRuntimeError('invalid-state', 'merge operation intent lacks target_sha');
-            if (fixedInspection(operation, env).outcome !== 'satisfied') {
-                if (intent.archive_ref !== null)
-                    git(['merge', '--ff-only', intent.target_sha], intent.repo_root, env);
-                else {
-                    const mergeHeadPath = git(['rev-parse', '--git-path', 'MERGE_HEAD'], intent.worktree_path, env);
-                    if (existsSync(isAbsolute(mergeHeadPath) ? mergeHeadPath : resolve(intent.worktree_path, mergeHeadPath))) {
-                        if (intent.base_sha === null || head(intent.worktree_path, env) !== intent.base_sha)
-                            throw new CoordinationRuntimeError('recovery-required', 'interrupted merge cannot be safely compensated because target HEAD moved');
-                        git(['merge', '--abort'], intent.worktree_path, env);
-                        throw new WorktreeSagaCompensatedError('interrupted conflicting merge was restored to its exact pre-merge HEAD', [`base_head=${intent.base_sha}`, `source_head=${intent.target_sha}`]);
-                    }
-                    git(['merge', '--no-ff', '--no-edit', '-m', `autopilot saga merge ${operation.owner.workstream_run} ${operation.owner.unit_id}`, intent.target_sha], intent.worktree_path, env);
-                }
+            if (inspectOperation(operation, env).outcome === 'satisfied')
+                return;
+            if (intent.archive_ref !== null) {
+                await runGitMutation({ descriptor: { kind: 'merge', mode: 'ff-only', target: intent.target_sha }, cwd: intent.repo_root, env: gitEnv });
+                return;
             }
+            const mergeHeadPath = gitQueryText({ descriptor: { kind: 'git-path', name: 'MERGE_HEAD' }, cwd: intent.worktree_path, env: gitEnv }).trim();
+            if (existsSync(isAbsolute(mergeHeadPath) ? mergeHeadPath : resolve(intent.worktree_path, mergeHeadPath))) {
+                const currentHead = gitQueryText({ descriptor: { kind: 'head' }, cwd: intent.worktree_path, env: gitEnv }).trim();
+                if (intent.base_sha === null || currentHead !== intent.base_sha)
+                    throw new CoordinationRuntimeError('recovery-required', 'interrupted merge cannot be safely compensated because target HEAD moved');
+                await runGitMutation({ descriptor: { kind: 'merge-abort' }, cwd: intent.worktree_path, env: gitEnv });
+                const afterAbort = inspectOperation(operation, env);
+                if (afterAbort.outcome === 'unsafe')
+                    throw new CoordinationRuntimeError('recovery-required', 'interrupted merge abort did not restore safe repository state', afterAbort.proof);
+                throw new WorktreeSagaCompensatedError('interrupted conflicting merge was restored to its exact pre-merge HEAD', [`base_head=${intent.base_sha}`, `source_head=${intent.target_sha}`]);
+            }
+            await runGitMutation({ descriptor: { kind: 'merge', mode: 'no-ff', message: `autopilot saga merge ${operation.owner.workstream_run} ${operation.owner.unit_id}`, target: intent.target_sha }, cwd: intent.worktree_path, env: gitEnv });
             return;
+        }
         case 'reset':
-            git(['reset', '--hard', intent.target_sha ?? 'HEAD'], intent.worktree_path, env);
+            await runGitMutation({ descriptor: { kind: 'reset-hard', target: intent.target_sha ?? 'HEAD' }, cwd: intent.worktree_path, env: gitEnv });
             return;
         case 'archive':
             if (intent.archive_ref === null || intent.target_sha === null)
                 throw new CoordinationRuntimeError('invalid-state', 'archive operation intent lacks ref or target');
-            git(['update-ref', `refs/heads/${intent.archive_ref}`, intent.target_sha, '0'.repeat(40)], intent.repo_root, env);
+            await runGitMutation({ descriptor: { kind: 'update-ref-create', ref: `refs/heads/${intent.archive_ref}`, target: intent.target_sha, expectedOld: '0'.repeat(40) }, cwd: intent.repo_root, env: gitEnv });
             return;
-        case 'remove':
-            if (existsSync(intent.worktree_path)) {
-                if (changedPaths(intent.worktree_path, env).length > 0)
-                    throw new CoordinationRuntimeError('recovery-required', 'dirty worktree cannot be removed; quarantine capture is required first', intent.paths);
-                git(['worktree', 'remove', intent.worktree_path], intent.repo_root, env);
+        case 'remove': {
+            const branchRef = `refs/heads/${intent.branch}`;
+            const branchBefore = runGitQuery({ descriptor: { kind: 'ref-exists', ref: branchRef }, cwd: intent.repo_root, env: gitEnv });
+            if (!branchBefore.negative) {
+                if (intent.target_sha === null)
+                    throw new CoordinationRuntimeError('invalid-state', 'remove operation intent lacks the expected branch SHA');
+                const actualBefore = gitQueryText({ descriptor: { kind: 'resolve-revision', revision: branchRef, verify: true }, cwd: intent.repo_root, env: gitEnv }).trim();
+                if (actualBefore !== intent.target_sha)
+                    throw new CoordinationRuntimeError('recovery-required', 'owned branch moved after operation intent; refusing retirement', [intent.branch, actualBefore, intent.target_sha]);
             }
-            else if (isRegistered(intent, env)) {
-                git(['worktree', 'remove', intent.worktree_path], intent.repo_root, env);
-            }
-            {
-                const branchCheck = spawnSync('git', ['show-ref', '--verify', '--quiet', `refs/heads/${intent.branch}`], { cwd: intent.repo_root, encoding: 'utf8' });
-                if ((branchCheck.status ?? -1) === 0) {
-                    if (intent.target_sha !== null && git(['rev-parse', `refs/heads/${intent.branch}`], intent.repo_root, env) !== intent.target_sha)
-                        throw new CoordinationRuntimeError('recovery-required', 'owned branch moved after operation intent; refusing retirement', [intent.branch]);
-                    if (intent.target_sha === null)
-                        throw new CoordinationRuntimeError('invalid-state', 'remove operation intent lacks the expected branch SHA');
-                    git(['update-ref', '-d', `refs/heads/${intent.branch}`, intent.target_sha], intent.repo_root, env);
-                }
+            const registered = gitWorktreeRegistrationFacts(intent.repo_root, gitEnv).some((entry) => entry.worktree_path === canonicalPath(intent.worktree_path));
+            if (existsSync(intent.worktree_path) || registered)
+                await runGitMutation({ descriptor: { kind: 'worktree-remove', path: intent.worktree_path }, cwd: intent.repo_root, env: gitEnv });
+            const branchAfter = runGitQuery({ descriptor: { kind: 'ref-exists', ref: branchRef }, cwd: intent.repo_root, env: gitEnv });
+            if (!branchAfter.negative) {
+                if (intent.target_sha === null)
+                    throw new CoordinationRuntimeError('recovery-required', 'owned branch appeared during remove without an authorized expected SHA', [intent.branch]);
+                await runGitMutation({ descriptor: { kind: 'update-ref-delete', ref: branchRef, expectedOld: intent.target_sha }, cwd: intent.repo_root, env: gitEnv });
             }
             return;
-    }
-}
-const LEGACY_POST_SAGA_WORKTREE_LEDGER_REF = '_ledger.jsonl';
-function missingOperationMetadata(operation) {
-    if (operation.intent.metadata_refs.length === 0)
-        return [];
-    const taskRoot = operation.owner.unit_id === 'main'
-        ? dirname(operation.intent.worktree_path)
-        : dirname(dirname(dirname(dirname(operation.intent.worktree_path))));
-    const worktreeRoot = dirname(dirname(taskRoot));
-    const taskInfoPath = join(taskRoot, '_task-info.json');
-    let runtimeRoot = null;
-    if (existsSync(taskInfoPath)) {
-        try {
-            const taskInfo = record(JSON.parse(readFileSync(taskInfoPath, 'utf8')), 'task info for operation metadata recovery');
-            runtimeRoot = typeof taskInfo['runtime_root'] === 'string' ? taskInfo['runtime_root'] : null;
-        }
-        catch {
-            runtimeRoot = null;
         }
     }
-    return operation.intent.metadata_refs.filter((ref) => {
-        // cf46 cleanup rows incorrectly declared the append-only legacy ledger as
-        // an operation postcondition even though projection occurs after the saga
-        // and is intentionally absent after cutover. Preserve those rows as an
-        // explicit compatibility adapter; current cleanup intents declare no such
-        // false dependency.
-        if (operation.operation_type === 'remove' && operation.intent.reason.startsWith(AUTOPILOT_PREFLIGHT_ROLLBACK_REASON_PREFIX) && ref === LEGACY_POST_SAGA_WORKTREE_LEDGER_REF)
-            return false;
-        return ![resolve(taskRoot, ref), resolve(worktreeRoot, ref), ...(runtimeRoot === null ? [] : [resolve(runtimeRoot, ref)])].some((candidate) => existsSync(candidate));
-    });
-}
-function fixedVerify(operation, env) {
-    const inspected = fixedInspection(operation, env);
-    if (inspected.outcome !== 'satisfied')
-        throw new CoordinationRuntimeError('git-partial-effect', 'worktree operation postcondition is not satisfied', inspected.proof);
-    const missingMetadata = missingOperationMetadata(operation);
-    if (missingMetadata.length > 0)
-        throw new CoordinationRuntimeError('git-partial-effect', 'worktree operation metadata postcondition is not satisfied', missingMetadata.map((ref) => `missing_metadata=${ref}`));
-    const intent = operation.intent;
-    if (existsSync(intent.worktree_path)) {
-        const actualCommon = resolve(git(['rev-parse', '--git-common-dir'], intent.worktree_path, env).startsWith('/') ? git(['rev-parse', '--git-common-dir'], intent.worktree_path, env) : join(intent.worktree_path, git(['rev-parse', '--git-common-dir'], intent.worktree_path, env)));
-        const expectedCommon = existsSync(intent.git_common_dir) ? realpathSync(intent.git_common_dir) : resolve(intent.git_common_dir);
-        const normalizedActual = existsSync(actualCommon) ? realpathSync(actualCommon) : actualCommon;
-        if (normalizedActual !== expectedCommon)
-            throw new CoordinationRuntimeError('unauthorized-client', 'worktree Git common-dir identity does not match durable authority', [normalizedActual, expectedCommon]);
-    }
-    return inspected.proof;
 }
 export async function ensureMainWorktreeSagaRegistered(input) {
     const env = input.env ?? process.env;
@@ -862,39 +780,22 @@ export async function ensureMainWorktreeSagaRegistered(input) {
             throw new CoordinationRuntimeError('store-corrupt', 'main worktree operation disappeared');
         if (existing.stage !== 'committed')
             throw new CoordinationRuntimeError('recovery-required', 'main worktree create operation must recover before registration can complete', [existing.operation_id, existing.stage]);
+        const inspected = await inspectCommittedOperation(client, existing, env);
+        if (inspected.outcome !== 'satisfied')
+            throw new CoordinationRuntimeError('recovery-required', 'committed main worktree registration disagrees with canonical postcondition truth', inspected.proof);
         return existing;
     }
-    const inspect = () => {
-        if (!existsSync(active.main_worktree_path))
-            return { outcome: 'unsafe', proof: ['main_worktree_missing'] };
-        const intent = {
-            repo_root: active.source_repo, worktree_path: active.main_worktree_path, git_common_dir: active.git_common_dir, branch: active.branch,
-            reason: 'register existing package-created main worktree with durable saga authority', base_sha: active.target_base_sha, target_sha: null,
-            archive_ref: null, checkout_mode: null, sparse_patterns: [], paths: [], metadata_refs: [],
-        };
-        if (!isRegistered(intent, env))
-            return { outcome: 'unsafe', proof: ['main_worktree_not_git_registered'] };
-        const actualBranch = branch(active.main_worktree_path, env);
-        return actualBranch === active.branch ? { outcome: 'satisfied', proof: ['main_worktree_registered', `branch=${actualBranch}`, `head=${head(active.main_worktree_path, env)}`] } : { outcome: 'unsafe', proof: [`expected_branch=${active.branch}`, `actual_branch=${actualBranch}`] };
-    };
+    const registrationHead = gitQueryText({ descriptor: { kind: 'head' }, cwd: active.main_worktree_path, env }).trim();
     const result = await executeOwnedWorktreeSaga({
         active, unitId: 'main', attempt: 1, kind: 'main', operationType: 'create',
-        operationKey: `main-create:${active.workstream_run}:${active.target_base_sha}`,
         initialWorktreeState: 'planned', committedWorktreeState: 'active',
         intent: {
             repo_root: active.source_repo, worktree_path: active.main_worktree_path, git_common_dir: active.git_common_dir, branch: active.branch,
-            reason: 'register package-created main worktree with durable owner authority', base_sha: active.target_base_sha, target_sha: null,
+            reason: 'register package-created main worktree with durable owner authority', base_sha: registrationHead, target_sha: null,
             archive_ref: null, checkout_mode: null, sparse_patterns: [], paths: [], metadata_refs: ['_task-info.json', '_branches.json', '_unit-index.json'],
         },
     }, {
-        inspect,
         action: () => { throw new CoordinationRuntimeError('recovery-required', 'main worktree creation did not reach durable registration; bootstrap recovery evidence is required'); },
-        verify: () => {
-            const inspected = inspect();
-            if (inspected.outcome !== 'satisfied')
-                throw new CoordinationRuntimeError('recovery-required', 'main worktree registration postcondition failed', inspected.proof);
-            return inspected.proof;
-        },
     }, env);
     if (result.operation === null)
         throw new CoordinationRuntimeError('invalid-state', 'durable main worktree registration unexpectedly used an unmanaged path');
@@ -914,27 +815,19 @@ export async function recoverOwnedWorktreeSagas(input) {
             throw new CoordinationRuntimeError('store-corrupt', 'recoverable operation lacks exact worktree ownership', [candidate.operation_id]);
         const spec = {
             active: input.active, unitId: candidate.owner.unit_id, attempt: candidate.owner.attempt, kind: worktree.kind,
-            operationType: candidate.operation_type, intent: candidate.intent, operationKey: `recovery:${candidate.operation_id}`, operationId: candidate.operation_id,
+            operationType: candidate.operation_type, intent: candidate.intent, operationId: candidate.operation_id,
             initialWorktreeState: worktree.state,
             committedWorktreeState: candidate.operation_type === 'remove' ? 'removed'
                 : candidate.operation_type === 'quarantine' ? 'quarantined'
                     : candidate.operation_type === 'reset' || candidate.operation_type === 'archive' ? 'terminal'
                         : worktree.state === 'planned' ? 'active' : worktree.state,
         };
-        const result = await executeOwnedWorktreeSaga(spec, {
-            inspect: () => fixedInspection(candidate, env),
-            action: () => fixedAction(candidate, env),
-            verify: () => fixedVerify(candidate, env),
-        }, env);
+        const result = await executeOwnedWorktreeSaga(spec, { action: async () => { await fixedAction(candidate, env); } }, env);
         if (result.operation !== null)
             recovered.push(result.operation);
     }
     return Object.freeze(recovered);
 }
 export function fixedWorktreeSagaCallbacks(operation, env = process.env) {
-    return {
-        inspect: () => fixedInspection(operation, env),
-        action: () => fixedAction(operation, env),
-        verify: () => fixedVerify(operation, env),
-    };
+    return { action: async () => { await fixedAction(operation, env); } };
 }

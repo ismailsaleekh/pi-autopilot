@@ -90,6 +90,21 @@ void describe('integration-time conflict classification', () => {
     } finally { await rm(value.root, { recursive: true, force: true }); }
   });
 
+  void it('classifies delete/modify from read-only three-tree analysis without writing merge objects', async () => {
+    const value = await fixture();
+    try {
+      const path = join(value.root, 'src', 'shared.ts');
+      const predecessor = await branchCommit(value.root, value.base, 'predecessor-delete', async () => rm(path));
+      const dependent = await branchCommit(value.root, value.base, 'dependent-modify', async () => replaceLine(path, 2, 'dependent-keeps-and-modifies'));
+      const objectsBefore = git(value.root, ['count-objects', '-v']);
+      const classification = classifyCoordinationIntegrationConflict({ repoRoot: value.root, predecessorCommit: predecessor, dependentCommit: dependent, overlappingPaths: ['src/shared.ts'] });
+      assert.equal(classification.kind, 'delete-modify-conflict');
+      assert.equal(classification.merge_tree_status, 'conflict');
+      assert.deepEqual(classification.overlapping_paths, ['src/shared.ts']);
+      assert.equal(git(value.root, ['count-objects', '-v']), objectsBefore, 'classification must not use merge-tree --write-tree');
+    } finally { await rm(value.root, { recursive: true, force: true }); }
+  });
+
   void it('uses JSON semantic keys and protected surfaces even when textual integration could appear ordinary', async () => {
     const semantic = await fixture();
     try {

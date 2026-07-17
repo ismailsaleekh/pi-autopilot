@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { mkdtemp, readFile, rm, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -7,6 +8,7 @@ import { it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import { CoordinatorClient } from '../../src/core/coordination/client.ts';
+import { CoordinationRuntimeError } from '../../src/core/coordination/failures.ts';
 import { isExactProcessAlive, isProcessAlive, processStartIdentity, retireExactProcess } from '../../src/core/coordination/process-identity.ts';
 import { coordinatorRuntimePaths, ensureCoordinatorPrivateRoots } from '../../src/core/coordination/runtime-paths.ts';
 import { recoverUnavailableKnownCoordinator } from '../../src/core/coordination/unavailable-recovery.ts';
@@ -133,46 +135,26 @@ void it('rejects lifecycle replacement during outage attestation without signali
   }
 });
 
-void it('replaces the real cf45 binary after socket loss while preserving an attached session across concurrent cf48 clients', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'pi-autopilot-real-cf45-handoff-'));
+void it('does not signal or replace the real cf45 binary after socket loss', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'pi-autopilot-real-cf45-refusal-'));
   const stateRoot = join(root, 'state');
   const env = { ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: stateRoot };
   const tagged = await startTaggedCoordinator({ stateRoot, extractionRoot: root, commit: CF45_COMMIT });
   const paths = tagged.paths;
   try {
-    const cf45Client = new CoordinatorClient({ env, autoStart: false });
-    const attached = await cf45Client.mutate('attach-run', { repoId: 'repo-cf45-handoff', workstreamRun: 'run-cf45-handoff', sessionId: null, fencingGeneration: null, expectedVersion: 0, idempotencyKey: 'attach-run-cf45-handoff' }, {
-      repo_key: 'repo-cf45-handoff', canonical_root: '/tmp/repo-cf45-handoff', git_common_dir: '/tmp/repo-cf45-handoff/.git', autopilot_id: 'autopilot-cf45-handoff', workstream: 'cf45-handoff', coordination_authority: 'coordinator-edit-leases-v1',
-      run_resource: { schema_version: 'autopilot.coordination_run_resource.v1', repo_id: 'repo-cf45-handoff', workstream_run: 'run-cf45-handoff', source_repo: '/tmp/repo-cf45-handoff', git_common_dir: '/tmp/repo-cf45-handoff/.git', worktree_root: '/tmp/state/worktrees/repo-cf45-handoff', main_worktree_path: '/tmp/state/worktrees/repo-cf45-handoff/active/run-cf45-handoff/main', runtime_root: '/tmp/state/worktrees/repo-cf45-handoff/active/run-cf45-handoff/main/.pi/autopilot/cf45-handoff', branch: 'autopilot/run-cf45-handoff', target_branch: null, target_base_sha: '0'.repeat(40), origin_url: null, started_at: '2026-07-15T02:58:00.000Z', version: 1 },
-    });
-    const run = record(attached.payload['run'], 'cf45 run');
-    let runVersion = integer(run['version'], 'cf45 run version');
-    let session: Readonly<Record<string, unknown>> | null = null;
-    for (let generation = 1; generation <= 9; generation += 1) {
-      const finalGeneration = generation === 9;
-      const token = finalGeneration ? sessionToken : generation.toString(16).repeat(64);
-      const sessionResponse = await cf45Client.mutate('attach-session', { repoId: 'repo-cf45-handoff', workstreamRun: 'run-cf45-handoff', sessionId: `session-generation-${String(generation)}`, fencingGeneration: generation, expectedVersion: runVersion, idempotencyKey: `attach-session-cf45-handoff-${String(generation)}` }, { session_lease_id: `lease-session-generation-${String(generation)}`, session_token: token, pid: process.pid, boot_id: `session-generation-${String(generation)}-boot`, lease_expires_at: '2099-01-01T00:00:00.000Z', handoff_token: null });
-      session = record(sessionResponse.payload['session'], 'cf45 session');
-      runVersion = integer(record(sessionResponse.payload['run'], 'cf45 attached run')['version'], 'cf45 attached run version');
-    }
-    if (session === null) throw new Error('cf45 generation-9 session was not attached');
     const priorPid = tagged.child.pid;
     if (priorPid === undefined) throw new Error('real cf45 process has no pid');
+    const lockBefore = record(JSON.parse(await readFile(paths.lockPath, 'utf8')) as unknown, 'real cf45 lock before socket loss');
+    assert.equal(lockBefore['package_build'], '1.1.3-cf45');
     await unlink(paths.socketPath);
 
-    const heartbeatClient = new CoordinatorClient({ env, startupTimeoutMs: 30_000 });
-    const statusClient = new CoordinatorClient({ env, startupTimeoutMs: 30_000 });
-    const [heartbeat, status] = await Promise.all([
-      heartbeatClient.mutate('heartbeat', { repoId: 'repo-cf45-handoff', workstreamRun: 'run-cf45-handoff', sessionId: 'session-generation-9', fencingGeneration: 9, expectedVersion: integer(session['version'], 'cf45 session version'), idempotencyKey: 'heartbeat-after-real-cf45-socket-loss' }, { session_lease_id: 'lease-session-generation-9', session_token: sessionToken, lease_expires_at: '2099-01-02T00:00:00.000Z' }),
-      statusClient.query('status', 'repo-cf45-handoff', 'run-cf45-handoff'),
-    ]);
-    assert.equal(record(heartbeat.payload['session'], 'recovered session')['status'], 'attached');
-    const sessions = status.payload['session_leases'];
-    assert.equal(Array.isArray(sessions) && sessions.some((entry) => record(entry, 'preserved session')['session_lease_id'] === 'lease-session-generation-9' && record(entry, 'preserved session')['status'] === 'attached'), true);
-    assert.equal(isProcessAlive(priorPid), false);
-    const currentLock = record(JSON.parse(await readFile(paths.lockPath, 'utf8')) as unknown, 'cf48 replacement lock');
-    assert.equal(currentLock['package_build'], '1.1.8-cf50');
-    assert.notEqual(currentLock['pid'], priorPid);
+    const clients = [new CoordinatorClient({ env, startupTimeoutMs: 30_000 }), new CoordinatorClient({ env, startupTimeoutMs: 30_000 })];
+    for (const client of clients) {
+      await assert.rejects(() => client.query('status'), (error: unknown) => error instanceof CoordinationRuntimeError && error.code === 'protocol-mismatch' && /only the exact cf50 predecessor façade lock/u.test(error.message));
+    }
+    assert.equal(isProcessAlive(priorPid), true, 'ordinary S1 startup must not signal a real pre-cf50 matrix owner');
+    assert.deepEqual(record(JSON.parse(await readFile(paths.lockPath, 'utf8')) as unknown, 'real cf45 lock after refusal'), lockBefore);
+    assert.equal(existsSync(paths.socketPath), false);
   } finally {
     await tagged.close();
     await stopSpawnedCoordinator(paths.lockPath);
@@ -180,7 +162,7 @@ void it('replaces the real cf45 binary after socket loss while preserving an att
   }
 });
 
-void it('identity-fences a live socketless known coordinator and preserves active session and child leases', async () => {
+void it('refuses to reinterpret a live socketless pre-cf50 matrix build as the S1 predecessor', async () => {
   const root = await mkdtemp(join(tmpdir(), 'pi-autopilot-unavailable-recovery-'));
   const stateRoot = join(root, 'state');
   const env = { ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: stateRoot };
@@ -216,23 +198,12 @@ void it('identity-fences a live socketless known coordinator and preserves activ
     await writeFile(paths.predecessorLockPath, `${JSON.stringify(oldFence)}\n`, 'utf8');
 
     const recoveringClient = new CoordinatorClient({ env });
-    const recoveredStatus = await recoveringClient.query('status', 'repo-unavailable', 'run-unavailable');
-    await waitForExit(unavailable);
-    assert.equal(isProcessAlive(unavailablePid), false);
-    const replacementLock = record(JSON.parse(await readFile(paths.lockPath, 'utf8')) as unknown, 'replacement lock');
-    assert.equal(replacementLock['package_build'], '1.1.8-cf50');
-    assert.notEqual(replacementLock['pid'], unavailablePid);
-    const sessions = recoveredStatus.payload['session_leases'];
-    const children = recoveredStatus.payload['child_leases'];
-    const leases = recoveredStatus.payload['edit_leases'];
-    assert.equal(Array.isArray(sessions) && sessions.some((entry) => record(entry, 'session row')['session_lease_id'] === 'lease-session-unavailable' && record(entry, 'session row')['status'] === 'attached'), true);
-    assert.equal(Array.isArray(children) && children.some((entry) => record(entry, 'child row')['child_lease_id'] === 'child-run-unavailable-unit-response-loss-1' && record(entry, 'child row')['status'] === 'running'), true);
-    assert.equal(Array.isArray(leases) && leases.length, 1, 'WRITE authority must survive coordinator replacement');
-
-    const heartbeat = await recoveringClient.mutate('heartbeat', { repoId: 'repo-unavailable', workstreamRun: 'run-unavailable', sessionId: 'session-unavailable', fencingGeneration: 1, expectedVersion: integer(session['version'], 'session version'), idempotencyKey: 'heartbeat-after-unavailable-recovery' }, { session_lease_id: 'lease-session-unavailable', session_token: sessionToken, lease_expires_at: '2099-01-02T00:00:00.000Z' });
-    assert.equal(record(heartbeat.payload['session'], 'heartbeat session')['status'], 'attached');
-    const childHeartbeat = await recoveringClient.mutate('heartbeat-child', { repoId: 'repo-unavailable', workstreamRun: 'run-unavailable', sessionId: null, fencingGeneration: null, expectedVersion: integer(child['version'], 'child version'), idempotencyKey: 'child-heartbeat-after-unavailable-recovery' }, { child_lease_id: 'child-run-unavailable-unit-response-loss-1', child_token: childToken, pid: process.pid, boot_id: 'child-boot-unavailable', lease_expires_at: '2099-01-02T00:00:00.000Z' });
-    assert.equal(record(childHeartbeat.payload['child'], 'heartbeat child')['status'], 'running');
+    await assert.rejects(() => recoveringClient.query('status', 'repo-unavailable', 'run-unavailable'), (error: unknown) => error instanceof CoordinationRuntimeError && error.code === 'protocol-mismatch' && /only the exact cf50 predecessor façade lock/u.test(error.message));
+    assert.equal(isProcessAlive(unavailablePid), true, 'ordinary S1 startup must not signal a pre-cf50 matrix owner');
+    assert.deepEqual(record(JSON.parse(await readFile(paths.lockPath, 'utf8')) as unknown, 'unchanged pre-cf50 lock'), oldLock);
+    assert.equal(existsSync(paths.socketPath), false);
+    assert.equal(integer(session['version'], 'retained session version') >= 1, true);
+    assert.equal(integer(child['version'], 'retained child version') >= 1, true);
   } finally {
     if (initial !== null) await initial.close();
     if (unavailable !== null) await retireSyntheticOwner(unavailable);

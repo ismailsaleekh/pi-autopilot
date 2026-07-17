@@ -10,7 +10,7 @@ import { legacyMigrationExclusiveOperation } from "./exclusive-policy.js";
 import { parseLegacyActiveAutopilots, parseLegacyPathClaims, checkLegacyCoordinationInvariants, LEGACY_PREFLIGHT_MAX_INPUT_BYTES } from "./legacy-preflight.js";
 import { activeCoordinationMigrationFreeze, assertMigrationPathSafe, coordinationGlobalMigrationLockPath, coordinationMigrationPaths, COORDINATION_CUTOVER_MARKER_SCHEMA, COORDINATION_FREEZE_ACK_SCHEMA, COORDINATION_FREEZE_SCHEMA, COORDINATION_MIGRATION_JOURNAL_SCHEMA, readCoordinationCutoverMarker } from "./migration-paths.js";
 import { currentBootId, isExactProcessAlive, isProcessAlive, predecessorCompatibleBootId, preflightProcessRetirementSupport, retireExactProcess } from "./process-identity.js";
-import { COORDINATOR_DATABASE_SCHEMA_VERSION, COORDINATOR_PACKAGE_BUILD, coordinatorRuntimePaths, enforcePrivateAuthorityPath, enforceWindowsPrivateTree, ensureCoordinatorPrivateRoots, ensurePrivateAuthorityDirectory } from "./runtime-paths.js";
+import { COORDINATOR_DATABASE_SCHEMA_VERSION, COORDINATOR_PACKAGE_BUILD, COORDINATOR_STORE_SCHEMA_VERSION, coordinatorRuntimePaths, enforcePrivateAuthorityPath, enforceWindowsPrivateTree, ensureCoordinatorPrivateRoots, ensurePrivateAuthorityDirectory } from "./runtime-paths.js";
 import { acquireSerializedProcessGuard, discardLockTombstone, quarantineExactLock, readExactLockText, restoreLockTombstone } from "./serialized-lock.js";
 import { startCoordinatorServer } from "./server.js";
 import { parseCurrentCoordinatorLock, parsePredecessorCoordinatorLock, parsePriorSchema11CurrentCoordinatorLock, parsePriorSchema10CurrentCoordinatorLock, parsePriorSchema9CurrentCoordinatorLock } from "./upgrade-contracts.js";
@@ -24,6 +24,8 @@ import { parseCoordinationEditLease, parseCoordinationUnitAttempt, parseCoordina
 import { AUTOPILOT_COORDINATOR_PROTOCOL_VERSION } from "./types.js";
 import { legacyConservativeIntegrationConflict } from "./integration-conflicts.js";
 import { deterministicWorktreeId } from "./worktree-identity.js";
+import { readCurrentStoreGeneration } from "./store-generation.js";
+import { GitQueryError, runGitQuery } from "../git-process.js";
 export const COORDINATION_MIGRATION_MAX_FILE_BYTES = 64 * 1024 * 1024;
 export const COORDINATION_MIGRATION_MAX_DATABASE_COMPONENT_BYTES = 256 * 1024 * 1024;
 export const COORDINATION_MIGRATION_MAX_TOTAL_BYTES = 256 * 1024 * 1024;
@@ -336,7 +338,7 @@ function ledgerTerminalizedRuns(rows, audit) {
             continue;
         const mainRemoved = ledger.some((entry) => entry['workstream_run'] === row.workstream_run && entry['autopilot_id'] === row.autopilot_id && entry['event'] === 'main-worktree-remove' && entry['path'] === row.main_worktree_path && Array.isArray(entry['proof']) && entry['proof'].includes('path_absent_after_remove'));
         const branchRetired = ledger.some((entry) => entry['workstream_run'] === row.workstream_run && entry['autopilot_id'] === row.autopilot_id && entry['event'] === 'branch-retire' && entry['branch'] === row.branch && Array.isArray(entry['proof']) && entry['proof'].includes('branch_deleted'));
-        const branchAbsent = gitText(row.source_repo, ['show-ref', '--verify', '--quiet', `refs/heads/${row.branch}`]) === null;
+        const branchAbsent = gitText(row.source_repo, { kind: 'ref-exists', ref: `refs/heads/${row.branch}` }) === null;
         if (mainRemoved && branchRetired && branchAbsent)
             terminalized.add(row.workstream_run);
     }
@@ -476,21 +478,39 @@ function readUnitMetadata(rows) {
     const frozenWorktrees = Object.freeze(worktrees);
     return { by_attempt: map, worktrees: frozenWorktrees, missingTaskInfoRuns, orphanAttempts };
 }
-function gitText(cwd, args) {
-    const result = spawnSync('git', [...args], { cwd, encoding: 'utf8' });
-    return result.status === 0 ? result.stdout.trim() : null;
+function migrationGitQuery(cwd, descriptor) {
+    try {
+        return runGitQuery({ cwd, descriptor });
+    }
+    catch (error) {
+        if (error instanceof GitQueryError)
+            failure('blocked', 'migration Git inspection failed', [cwd, error.message, error.diagnostic]);
+        throw error;
+    }
+}
+function migrationGitOutput(result, cwd) {
+    try {
+        return new TextDecoder('utf-8', { fatal: true }).decode(result.stdout);
+    }
+    catch {
+        return failure('blocked', 'migration Git output is not valid UTF-8', [cwd, result.descriptor]);
+    }
+}
+function gitText(cwd, descriptor) {
+    const result = migrationGitQuery(cwd, descriptor);
+    return result.negative ? null : migrationGitOutput(result, cwd).trim();
 }
 function exactCommit(repo, value) {
-    const commit = gitText(repo, ['rev-parse', '--verify', `${value}^{commit}`]);
+    const commit = gitText(repo, { kind: 'resolve-commit', revision: value });
     return commit !== null && /^[a-f0-9]{40,64}$/u.test(commit) ? commit : null;
 }
 function gitAncestor(repo, ancestor, descendant) {
-    return spawnSync('git', ['merge-base', '--is-ancestor', ancestor, descendant], { cwd: repo, encoding: 'utf8' }).status === 0;
+    return !migrationGitQuery(repo, { kind: 'is-ancestor', ancestor, descendant }).negative;
 }
 function gitWorktreeContains(repo, candidate) {
-    const output = gitText(repo, ['worktree', 'list', '--porcelain', '-z']);
+    const output = gitText(repo, { kind: 'worktree-list', nul: true });
     if (output === null)
-        return true;
+        return failure('blocked', 'migration Git worktree list unexpectedly reported absence', [repo]);
     const expected = resolve(candidate);
     return output.split('\0').some((entry) => entry.startsWith('worktree ') && resolve(entry.slice('worktree '.length)) === expected);
 }
@@ -527,11 +547,11 @@ function readLegacyMergeEvidence(rows) {
             const after = exactCommit(row.source_repo, merge.integration_after);
             const mergeCommit = exactCommit(row.source_repo, merge.merge_commit_sha);
             const unitHead = exactCommit(row.source_repo, merge.unit_head);
-            const currentHead = gitText(row.main_worktree_path, ['rev-parse', 'HEAD']);
-            const currentBranch = gitText(row.main_worktree_path, ['symbolic-ref', '--short', 'HEAD']);
-            const diff = before === null || after === null ? null : spawnSync('git', ['diff', '--name-only', '--no-renames', '-z', before, after], { cwd: row.source_repo, encoding: 'utf8' });
-            const actualPaths = diff?.status === 0 ? diff.stdout.split('\0').filter((entry) => entry.length > 0).map((entry) => entry.replace(/\\/gu, '/')).sort() : [];
-            const exact = before !== null && after !== null && mergeCommit === after && unitHead !== null && currentHead !== null && currentBranch === row.branch && gitAncestor(row.source_repo, before, after) && gitAncestor(row.source_repo, unitHead, after) && gitAncestor(row.source_repo, after, currentHead) && diff?.status === 0 && stableJson(actualPaths) === stableJson(normalizedPaths);
+            const currentHead = gitText(row.main_worktree_path, { kind: 'head' });
+            const currentBranch = gitText(row.main_worktree_path, { kind: 'current-branch' });
+            const diff = before === null || after === null ? null : migrationGitQuery(row.source_repo, { kind: 'diff-paths', from: before, to: after, noRenames: true });
+            const actualPaths = diff === null ? [] : migrationGitOutput(diff, row.source_repo).split('\0').filter((entry) => entry.length > 0).map((entry) => entry.replace(/\\/gu, '/')).sort();
+            const exact = before !== null && after !== null && mergeCommit === after && unitHead !== null && currentHead !== null && currentBranch === row.branch && gitAncestor(row.source_repo, before, after) && gitAncestor(row.source_repo, unitHead, after) && gitAncestor(row.source_repo, after, currentHead) && diff !== null && stableJson(actualPaths) === stableJson(normalizedPaths);
             if (!exact) {
                 blockers.push(`unit-merge exact Git object/ref/ancestry/diff proof failed: ${path}`);
                 continue;
@@ -550,8 +570,8 @@ function acceptedAttemptProof(row, metadata, record, path, action) {
     const base = exactCommit(row.source_repo, metadata.base_sha);
     if (current === null || base === null || !gitAncestor(row.source_repo, base, current))
         return null;
-    const branchRef = gitText(row.source_repo, ['rev-parse', '--verify', `refs/heads/${metadata.branch}`]);
-    const archiveRef = metadata.archive_ref === null ? null : gitText(row.source_repo, ['rev-parse', '--verify', `refs/heads/${metadata.archive_ref}`]);
+    const branchRef = gitText(row.source_repo, { kind: 'resolve-commit', revision: `refs/heads/${metadata.branch}` });
+    const archiveRef = metadata.archive_ref === null ? null : gitText(row.source_repo, { kind: 'resolve-commit', revision: `refs/heads/${metadata.archive_ref}` });
     const evidenceSha = digest(readBounded(path, LEGACY_PREFLIGHT_MAX_INPUT_BYTES));
     if (action === 'reset' || action === 'abort') {
         if (metadata.status !== 'aborted' || record['capture_commit_sha'] !== null || existsSync(metadata.worktree_path) || gitWorktreeContains(row.source_repo, metadata.worktree_path) || branchRef !== null || metadata.archive_ref !== null && archiveRef !== current)
@@ -567,9 +587,9 @@ function acceptedAttemptProof(row, metadata, record, path, action) {
     if (capture === null || capture !== current)
         return null;
     if (existsSync(metadata.worktree_path)) {
-        const head = gitText(metadata.worktree_path, ['rev-parse', 'HEAD']);
-        const branch = gitText(metadata.worktree_path, ['symbolic-ref', '--short', 'HEAD']);
-        const clean = gitText(metadata.worktree_path, ['status', '--porcelain=v1', '-z']);
+        const head = gitText(metadata.worktree_path, { kind: 'head' });
+        const branch = gitText(metadata.worktree_path, { kind: 'current-branch' });
+        const clean = gitText(metadata.worktree_path, { kind: 'status-porcelain' });
         if (head !== capture || branch !== metadata.branch || clean !== '' || branchRef !== capture)
             return null;
         const exactGitObjects = Object.freeze([base, capture]);
@@ -586,16 +606,16 @@ function acceptedRunProof(row, index, path, outcome, terminalValue) {
     if (row.status !== 'closed')
         return null;
     const terminal = exactCommit(row.source_repo, terminalValue);
-    if (terminal === null || existsSync(row.main_worktree_path) || gitWorktreeContains(row.source_repo, row.main_worktree_path) || gitText(row.source_repo, ['rev-parse', '--verify', `refs/heads/${row.branch}`]) !== null)
+    if (terminal === null || existsSync(row.main_worktree_path) || gitWorktreeContains(row.source_repo, row.main_worktree_path) || gitText(row.source_repo, { kind: 'resolve-commit', revision: `refs/heads/${row.branch}` }) !== null)
         return null;
     const archiveRef = `autopilot/archive/${row.workstream_run}/${outcome === 'closed' ? 'main' : 'aborted'}`;
-    if (gitText(row.source_repo, ['rev-parse', '--verify', `refs/heads/${archiveRef}`]) !== terminal)
+    if (gitText(row.source_repo, { kind: 'resolve-commit', revision: `refs/heads/${archiveRef}` }) !== terminal)
         return null;
     const indexed = index.filter((entry) => entry.workstream_run === row.workstream_run && entry.autopilot_id === row.autopilot_id && entry.status === 'archived' && resolve(entry.main_path) === resolve(row.main_worktree_path) && entry.branch === row.branch);
     if (indexed.length !== 1)
         return null;
     if (outcome === 'closed') {
-        if (row.target_branch === null || gitText(row.source_repo, ['rev-parse', '--verify', `refs/heads/${row.target_branch}`]) !== terminal)
+        if (row.target_branch === null || gitText(row.source_repo, { kind: 'resolve-commit', revision: `refs/heads/${row.target_branch}` }) !== terminal)
             return null;
     }
     const exactGitObjects = Object.freeze([terminal]);
@@ -764,16 +784,16 @@ function isInside(root, candidate) {
 }
 function captureGitSnapshot(rows, repository) {
     const snapshots = rows.map((row) => {
-        const sourceHead = existsSync(row.source_repo) ? spawnSync('git', ['rev-parse', 'HEAD'], { cwd: row.source_repo, encoding: 'utf8' }) : null;
-        const mainHead = existsSync(row.main_worktree_path) ? spawnSync('git', ['rev-parse', 'HEAD'], { cwd: row.main_worktree_path, encoding: 'utf8' }) : null;
-        const mainBranch = existsSync(row.main_worktree_path) ? spawnSync('git', ['symbolic-ref', '--short', 'HEAD'], { cwd: row.main_worktree_path, encoding: 'utf8' }) : null;
-        if (sourceHead === null || sourceHead.status !== 0 || mainHead !== null && mainHead.status !== 0 || mainBranch !== null && mainBranch.status !== 0)
+        const sourceHead = existsSync(row.source_repo) ? gitText(row.source_repo, { kind: 'head' }) : null;
+        const mainHead = existsSync(row.main_worktree_path) ? gitText(row.main_worktree_path, { kind: 'head' }) : null;
+        const mainBranch = existsSync(row.main_worktree_path) ? gitText(row.main_worktree_path, { kind: 'current-branch' }) : null;
+        if (sourceHead === null || existsSync(row.main_worktree_path) && (mainHead === null || mainBranch === null))
             failure('blocked', 'failed to capture migration Git state', [row.workstream_run]);
-        return { workstream_run: row.workstream_run, source_head: sourceHead.stdout.trim(), main_head: mainHead === null ? null : mainHead.stdout.trim(), main_branch: mainBranch === null ? null : mainBranch.stdout.trim() };
+        return { workstream_run: row.workstream_run, source_head: sourceHead, main_head: mainHead, main_branch: mainBranch };
     });
     if (snapshots.length === 0) {
-        const head = gitText(repository.canonical_root, ['rev-parse', 'HEAD']);
-        const branch = gitText(repository.canonical_root, ['symbolic-ref', '--short', 'HEAD']);
+        const head = gitText(repository.canonical_root, { kind: 'head' });
+        const branch = gitText(repository.canonical_root, { kind: 'current-branch' });
         if (head === null || branch === null)
             failure('blocked', 'failed to capture empty-repository migration Git state', [repository.canonical_root]);
         snapshots.push({ workstream_run: '@repository', source_head: head, main_head: head, main_branch: branch });
@@ -796,15 +816,9 @@ function inspectGit(rows, ledgerTerminalized) {
             blockers.push(`source repository is missing: ${row.source_repo}`);
             continue;
         }
-        const result = spawnSync('git', ['rev-parse', '--show-toplevel', '--git-common-dir'], { cwd: row.source_repo, encoding: 'utf8' });
-        if (result.status !== 0) {
-            blockers.push(`source repository Git verification failed: ${row.source_repo}`);
-            continue;
-        }
-        const lines = result.stdout.trim().split('\n');
-        const top = lines[0];
-        const common = lines[1];
-        if (top === undefined || common === undefined) {
+        const top = gitText(row.source_repo, { kind: 'show-toplevel' });
+        const common = gitText(row.source_repo, { kind: 'git-common-dir' });
+        if (top === null || common === null) {
             blockers.push(`source repository Git response is incomplete: ${row.source_repo}`);
             continue;
         }
@@ -819,8 +833,8 @@ function inspectGit(rows, ledgerTerminalized) {
             blockers.push(`source repository canonical path verification failed: ${row.workstream_run}`);
         }
         if (existsSync(row.main_worktree_path)) {
-            const branch = spawnSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: row.main_worktree_path, encoding: 'utf8' });
-            if (branch.status !== 0 || branch.stdout.trim() !== row.branch)
+            const branch = gitText(row.main_worktree_path, { kind: 'current-branch' });
+            if (branch !== row.branch)
                 blockers.push(`main worktree branch mismatch: ${row.workstream_run}`);
         }
         else if (row.status !== 'closed' && !ledgerTerminalized.has(row.workstream_run))
@@ -839,6 +853,7 @@ const SCHEMA_7_TABLES = Object.freeze([...SCHEMA_6_TABLES, 'coordination_migrati
 const SCHEMA_9_TABLES = Object.freeze([...SCHEMA_7_TABLES, 'semantic_replays'].sort());
 const SCHEMA_10_TABLES = Object.freeze([...SCHEMA_9_TABLES, 'observations'].sort());
 const SCHEMA_12_TABLES = Object.freeze([...SCHEMA_10_TABLES, 'mailbox_deliveries', 'mailbox_delivery_items', 'reconciliation_details', 'reconciliation_receipts', 'result_details', 'result_receipts'].sort());
+const SCHEMA_13_TABLES = Object.freeze([...SCHEMA_12_TABLES, 'run_scoped_faults', 'worktree_aliases'].sort());
 const COORDINATION_MIGRATION_MAX_DATABASE_ROWS = 100_000;
 const COORDINATION_MIGRATION_MAX_DATABASE_JSON_BYTES = 1024 * 1024;
 function sqlText(row, field, label, maximum = 2048) {
@@ -894,8 +909,8 @@ function assertReadOnlySchema(database) {
     if (versionRow === undefined)
         failure('blocked', 'coordinator database has no schema version');
     const version = sqlSafeInteger(versionRow, 'user_version', 'coordinator database');
-    if (version !== 6 && version !== 7 && version !== 8 && version !== 9 && version !== 10 && version !== 11 && version !== 12)
-        failure('blocked', `migration inspection supports only exact coordinator schema 6 through the current schema ${String(COORDINATOR_DATABASE_SCHEMA_VERSION)}`, [`schema=${String(version)}`]);
+    if (version !== 6 && version !== 7 && version !== 8 && version !== 9 && version !== 10 && version !== 11 && version !== 12 && version !== 13)
+        failure('blocked', `migration inspection supports only exact coordinator schema 6 through private store schema ${String(COORDINATOR_STORE_SCHEMA_VERSION)}`, [`schema=${String(version)}`]);
     const integrityRow = database.prepare('PRAGMA integrity_check(1)').get();
     if (integrityRow === undefined || integrityRow['integrity_check'] !== 'ok')
         failure('blocked', 'coordinator database failed read-only integrity inspection');
@@ -903,7 +918,7 @@ function assertReadOnlySchema(database) {
     if (schemaRows.length > 64)
         failure('blocked', 'coordinator database schema contains too many tables');
     const actual = schemaRows.map((row) => sqlText(row, 'name', 'coordinator schema table', 128));
-    const expected = version === 6 ? [...SCHEMA_6_TABLES].sort() : version === 12 ? SCHEMA_12_TABLES : version >= 10 ? SCHEMA_10_TABLES : version === 9 ? SCHEMA_9_TABLES : SCHEMA_7_TABLES;
+    const expected = version === 6 ? [...SCHEMA_6_TABLES].sort() : version === 13 ? SCHEMA_13_TABLES : version === 12 ? SCHEMA_12_TABLES : version >= 10 ? SCHEMA_10_TABLES : version === 9 ? SCHEMA_9_TABLES : SCHEMA_7_TABLES;
     if (stableJson(actual) !== stableJson(expected))
         failure('blocked', `coordinator schema ${String(version)} table profile is not exact`, [`expected=${stableJson(expected)}`, `actual=${stableJson(actual)}`]);
     assertExactTableColumns(database, 'repositories', ['repo_id', 'repo_key', 'canonical_root', 'git_common_dir', 'event_seq', 'created_event_seq', 'version']);
@@ -912,7 +927,9 @@ function assertReadOnlySchema(database) {
     assertExactTableColumns(database, 'child_leases', ['child_lease_id', 'repo_id', 'autopilot_id', 'workstream_run', 'unit_id', 'attempt', 'pid', 'boot_id', 'child_token_sha256', 'lease_expires_at', 'status', 'terminal_evidence_ref', 'terminal_evidence_sha256', 'version']);
     assertExactTableColumns(database, 'unit_attempts', ['entity_id', 'repo_id', 'workstream_run', 'payload_json', 'version']);
     assertExactTableColumns(database, 'edit_leases', ['entity_id', 'repo_id', 'workstream_run', 'payload_json', 'version']);
-    assertExactTableColumns(database, 'worktree_operations', ['entity_id', 'repo_id', 'workstream_run', 'payload_json', 'version']);
+    assertExactTableColumns(database, 'worktree_operations', ['entity_id', 'repo_id', 'workstream_run', 'payload_json', 'version', ...(version >= 13 ? ['canonical_worktree_id'] : [])]);
+    if (version >= 13)
+        assertExactTableColumns(database, 'worktrees', ['entity_id', 'repo_id', 'workstream_run', 'payload_json', 'version', 'canonical_worktree_id', 'autopilot_id', 'unit_id', 'attempt', 'kind', 'is_current_canonical']);
     assertExactTableColumns(database, 'schema_migrations', ['version', 'checksum', 'applied_at']);
     if (version >= 7) {
         assertExactTableColumns(database, 'coordination_migrations', ['repo_id', 'migration_id', 'snapshot_sha256', 'journal_path', 'state', 'report_json', 'imported_at', 'updated_at', 'version']);
@@ -931,6 +948,10 @@ function assertReadOnlySchema(database) {
         assertExactTableColumns(database, 'result_details', ['result_receipt_id', 'ordinal', 'collection_name', 'collection_ordinal', 'payload_json']);
         assertExactTableColumns(database, 'mailbox_delivery_items', ['delivery_id', 'ordinal', 'message_id', 'snapshot_delivered_event_seq', 'snapshot_message_version']);
     }
+    if (version >= 13) {
+        assertExactTableColumns(database, 'worktree_aliases', ['alias_worktree_id', 'canonical_worktree_id', 'repo_id', 'autopilot_id', 'workstream_run', 'unit_id', 'attempt', 'kind', 'resolution_state', 'reason', 'evidence_sha256', 'created_event_seq']);
+        assertExactTableColumns(database, 'run_scoped_faults', ['fault_id', 'invariant_id', 'repo_id', 'workstream_run', 'entity_type', 'entity_id', 'fault_code', 'detail_json', 'status', 'created_event_seq', 'resolved_event_seq', 'version']);
+    }
     const migrationRows = boundedDatabaseRows(database, 'schema_migrations', 'SELECT version, checksum FROM schema_migrations ORDER BY version');
     if (migrationRows.length !== version)
         failure('blocked', 'coordinator schema migration journal length is not exact');
@@ -939,7 +960,7 @@ function assertReadOnlySchema(database) {
         const checksum = row === undefined ? null : sqlText(row, 'checksum', 'schema migration', 64);
         const checksumMatches = checksum === COORDINATOR_SCHEMA_MIGRATION_CHECKSUMS[index];
         if (row === undefined || sqlSafeInteger(row, 'version', 'schema migration') !== index + 1 || !checksumMatches)
-            failure('blocked', 'coordinator schema migration journal is malformed, discontinuous, or not the exact locked schema-6/7/8/9/10/11/12 package lineage');
+            failure('blocked', 'coordinator schema migration journal is malformed, discontinuous, or not the exact locked schema-6/7/8/9/10/11/12/13 package lineage');
     }
     return version;
 }
@@ -966,6 +987,10 @@ function coordinatorDatabaseSourceIdentity(path) {
         closeSync(descriptor);
     }
 }
+function coordinatorAuthorityDatabasePath(paths) {
+    const current = readCurrentStoreGeneration(paths);
+    return current?.database_path ?? paths.databasePath;
+}
 function coordinatorDatabaseSourceIdentities(databasePath) {
     const identities = Object.freeze([databasePath, `${databasePath}-wal`, `${databasePath}-shm`].map(coordinatorDatabaseSourceIdentity));
     const total = identities.reduce((sum, entry) => sum + entry.size, 0);
@@ -986,8 +1011,9 @@ function assertCoordinatorDatabaseSourceStable(expected) {
  * opens only the disposable copy, and removes it in a finally block.
  */
 function copiedCoordinatorDatabase(paths, writerAuthorityAcquired) {
-    assertMigrationPathSafe(paths.stateRoot, paths.databasePath, 'read-only coordinator database inspection');
-    const source = coordinatorDatabaseSourceIdentities(paths.databasePath);
+    const authorityDatabasePath = coordinatorAuthorityDatabasePath(paths);
+    assertMigrationPathSafe(paths.stateRoot, authorityDatabasePath, 'read-only coordinator database inspection');
+    const source = coordinatorDatabaseSourceIdentities(authorityDatabasePath);
     const database = source[0];
     if (database === undefined || !database.exists)
         failure('blocked', 'coordinator database disappeared before copied inspection');
@@ -1000,12 +1026,12 @@ function copiedCoordinatorDatabase(paths, writerAuthorityAcquired) {
         rmSync(root, { recursive: true, force: true });
         failure('blocked', 'disposable coordinator inspection root must be outside the state root', [root]);
     }
-    const targetDatabase = join(root, basename(paths.databasePath));
+    const targetDatabase = join(root, basename(authorityDatabasePath));
     try {
         for (const entry of source) {
             if (!entry.exists)
                 continue;
-            const suffix = entry.path.slice(paths.databasePath.length);
+            const suffix = entry.path.slice(authorityDatabasePath.length);
             const target = `${targetDatabase}${suffix}`;
             copyFileSync(entry.path, target, fsConstants.COPYFILE_EXCL);
             const copied = coordinatorDatabaseSourceIdentity(target);
@@ -1030,7 +1056,7 @@ function openImmutableCoordinatorDatabase(path) {
     return new DatabaseSync(url, { readOnly: true, timeout: 1_000, enableForeignKeyConstraints: false });
 }
 function inspectCoordinatorReadOnly(paths, repoKey, writerAuthorityAcquired = false) {
-    if (!existsSync(paths.databasePath))
+    if (!existsSync(paths.currentStorePointerPath) && !existsSync(paths.databasePath))
         return null;
     const copied = copiedCoordinatorDatabase(paths, writerAuthorityAcquired);
     let database;
@@ -2085,12 +2111,13 @@ function verifyCoordinatorDatabaseFileReadOnly(path) {
     }
 }
 async function createVerifiedPreImportBackup(paths, outputPath) {
-    assertMigrationPathSafe(paths.stateRoot, paths.databasePath, 'pre-import coordinator database');
+    const authorityDatabasePath = coordinatorAuthorityDatabasePath(paths);
+    assertMigrationPathSafe(paths.stateRoot, authorityDatabasePath, 'pre-import coordinator database');
     assertMigrationPathSafe(paths.stateRoot, outputPath, 'migration database backup destination');
     await mkdir(dirname(outputPath), { recursive: true, mode: 0o700 });
     if (existsSync(outputPath))
         await rm(outputPath, { force: true });
-    const source = new DatabaseSync(paths.databasePath, { readOnly: true, timeout: 1_000, enableForeignKeyConstraints: false });
+    const source = new DatabaseSync(authorityDatabasePath, { readOnly: true, timeout: 1_000, enableForeignKeyConstraints: false });
     try {
         assertReadOnlySchema(source);
         await backup(source, outputPath);
@@ -2098,6 +2125,18 @@ async function createVerifiedPreImportBackup(paths, outputPath) {
     finally {
         source.close();
     }
+    const normalized = new DatabaseSync(outputPath, { timeout: 1_000, enableForeignKeyConstraints: false });
+    try {
+        const mode = normalized.prepare('PRAGMA journal_mode=DELETE').get();
+        if (mode?.['journal_mode'] !== 'delete')
+            failure('blocked', 'migration backup could not retire WAL journal authority', [outputPath]);
+        assertReadOnlySchema(normalized);
+    }
+    finally {
+        normalized.close();
+    }
+    if (existsSync(`${outputPath}-wal`) || existsSync(`${outputPath}-shm`))
+        failure('blocked', 'migration backup retained WAL/SHM authority after close', [outputPath]);
     verifyCoordinatorDatabaseFileReadOnly(outputPath);
     const descriptor = openSync(outputPath, fsConstants.O_RDONLY);
     try {
@@ -2114,20 +2153,25 @@ async function restoreBackup(paths, journal) {
     if (journal.backup_path === null || journal.backup_sha256 === null)
         failure('blocked', 'verified migration backup is unavailable');
     assertMigrationPathSafe(paths.stateRoot, journal.backup_path, 'migration database backup');
-    assertMigrationPathSafe(paths.stateRoot, paths.databasePath, 'migration database restore destination');
     if (!existsSync(journal.backup_path) || lstatSync(journal.backup_path).isSymbolicLink())
         failure('blocked', 'verified migration backup is unavailable');
     if (digest(await readFile(journal.backup_path)) !== journal.backup_sha256)
         failure('blocked', 'migration backup hash verification failed', [journal.backup_path]);
+    const backupSchema = verifyCoordinatorDatabaseFileReadOnly(journal.backup_path);
+    if (existsSync(paths.currentStorePointerPath)) {
+        if (backupSchema !== COORDINATOR_DATABASE_SCHEMA_VERSION && backupSchema !== COORDINATOR_STORE_SCHEMA_VERSION)
+            failure('blocked', 'generation-addressed rollback requires an exact schema-12 or schema-13 backup', [journal.backup_path, `schema=${String(backupSchema)}`]);
+        await CoordinatorStore.restoreGeneration(paths, journal.backup_path, journal.backup_sha256);
+        return;
+    }
+    assertMigrationPathSafe(paths.stateRoot, paths.databasePath, 'migration database restore destination');
     await rm(`${paths.databasePath}-wal`, { force: true });
     await rm(`${paths.databasePath}-shm`, { force: true });
     const temporary = `${paths.databasePath}.restore-${randomBytes(8).toString('hex')}`;
     assertMigrationPathSafe(paths.stateRoot, temporary, 'migration database restore temporary');
     await copyFile(journal.backup_path, temporary);
-    assertMigrationPathSafe(paths.stateRoot, temporary, 'migration database restore temporary');
     if (digest(await readFile(temporary)) !== journal.backup_sha256)
         failure('blocked', 'staged migration rollback differs from the verified backup', [temporary]);
-    assertMigrationPathSafe(paths.stateRoot, paths.databasePath, 'migration database restore destination');
     await rename(temporary, paths.databasePath);
     const descriptor = openSync(paths.databasePath, fsConstants.O_RDONLY);
     try {
@@ -2142,14 +2186,18 @@ async function restoreBackup(paths, journal) {
     verifyCoordinatorDatabaseFileReadOnly(paths.databasePath);
 }
 async function restorePreImportBoundary(paths, journal) {
-    if (journal.database_existed_before)
+    if (journal.backup_path !== null && journal.backup_sha256 !== null) {
         await restoreBackup(paths, journal);
-    else {
-        assertMigrationPathSafe(paths.stateRoot, paths.databasePath, 'migration candidate database removal');
-        await rm(`${paths.databasePath}-wal`, { force: true });
-        await rm(`${paths.databasePath}-shm`, { force: true });
-        await rm(paths.databasePath, { force: true });
+        return;
     }
+    if (existsSync(paths.currentStorePointerPath))
+        failure('blocked', 'generation-addressed rollback has no verified pre-import generation backup');
+    if (journal.database_existed_before)
+        failure('blocked', 'pre-generation rollback lost its verified database backup');
+    assertMigrationPathSafe(paths.stateRoot, paths.databasePath, 'migration candidate database removal');
+    await rm(`${paths.databasePath}-wal`, { force: true });
+    await rm(`${paths.databasePath}-shm`, { force: true });
+    await rm(paths.databasePath, { force: true });
 }
 async function promoteRuntimeProjections(stateRoot, entries, repoKey) {
     for (const entry of entries.filter((candidate) => candidate.exists && candidate.relative_path.endsWith('/_task-info.json'))) {
@@ -2308,7 +2356,7 @@ export async function runCoordinationMigration(input) {
             if (migration === null || migration === undefined || migration.migration_id !== marker.migration_id || migration.snapshot_sha256 !== marker.snapshot_sha256)
                 failure('blocked', 'cutover marker is not bound to the exact coordinator migration record');
             if (migration.state === 'cutover-ready') {
-                const source = coordinatorDatabaseSourceIdentities(paths.databasePath);
+                const source = coordinatorDatabaseSourceIdentities(coordinatorAuthorityDatabasePath(paths));
                 if (source[0]?.sha256 !== marker.database_sha256 || source[1]?.exists === true && (source[1]?.size ?? 0) > 0)
                     failure('blocked', 'forward cutover resume database bytes disagree with the committed marker digest', [`expected=${marker.database_sha256}`, `actual=${source[0]?.sha256 ?? 'missing'}`]);
             }
@@ -2328,7 +2376,7 @@ export async function runCoordinationMigration(input) {
             inspection = reconcileMixedCoordinatorAuthority(coordinator, inspection);
             const migrationId = `migration-${createHash('sha256').update(`${input.repoKey}\0${now.toISOString()}\0${randomBytes(16).toString('hex')}`, 'utf8').digest('hex').slice(0, 32)}`;
             const report = baseReport('apply', input.repoKey, inspection, now, 'planned', migrationId, null, null, null);
-            journal = { schema_version: COORDINATION_MIGRATION_JOURNAL_SCHEMA, migration_id: migrationId, repo_key: input.repoKey, state: 'planned', freeze_token: randomBytes(32).toString('hex'), created_at: now.toISOString(), updated_at: now.toISOString(), snapshot_sha256: null, snapshot_entries: [], git_snapshot: [], backup_path: null, backup_sha256: null, database_existed_before: existsSync(paths.databasePath), repository_root: repository.canonical_root, repository_git_common_dir: repository.git_common_dir, completed_effects: ['migration-authority-journaled-before-freeze'], report };
+            journal = { schema_version: COORDINATION_MIGRATION_JOURNAL_SCHEMA, migration_id: migrationId, repo_key: input.repoKey, state: 'planned', freeze_token: randomBytes(32).toString('hex'), created_at: now.toISOString(), updated_at: now.toISOString(), snapshot_sha256: null, snapshot_entries: [], git_snapshot: [], backup_path: null, backup_sha256: null, database_existed_before: existsSync(paths.currentStorePointerPath) || existsSync(paths.databasePath), repository_root: repository.canonical_root, repository_git_common_dir: repository.git_common_dir, completed_effects: ['migration-authority-journaled-before-freeze'], report };
             await writeJournal(paths.stateRoot, migrationPaths.journalPath, journal);
             await input.afterBoundary?.('after-plan');
         }
@@ -2415,10 +2463,10 @@ export async function runCoordinationMigration(input) {
                     verifyCoordinatorDatabaseFileReadOnly(backupPath);
                     return { path: backupPath, sha256: backupJournal.backup_sha256 };
                 }
-                if (!existsSync(paths.databasePath)) {
+                if (!existsSync(paths.currentStorePointerPath) && !existsSync(paths.databasePath)) {
                     // A brand-new candidate is permitted only under lifecycle election and
                     // the live predecessor exclusion fence.
-                    const initializingStore = await CoordinatorStore.open(paths, clock, { allowExistingSchemaMigration: true });
+                    const initializingStore = await CoordinatorStore.open(paths, clock);
                     initializingStore.close();
                 }
                 return await createVerifiedPreImportBackup(paths, backupPath);
@@ -2436,7 +2484,7 @@ export async function runCoordinationMigration(input) {
             const finalReport = baseReport('apply', input.repoKey, inspection, now, 'imported', journal.migration_id, snapshotSha, backupResult.path, null);
             const plan = buildImportPlan(inspection, repository, input.repoKey, journal.migration_id, snapshotSha, migrationPaths.journalPath, finalReport);
             const committedReport = await withMigrationStoreAuthority(paths, 'migration apply import', async () => {
-                const importStore = await CoordinatorStore.open(paths, clock, { allowExistingSchemaMigration: true });
+                const importStore = await CoordinatorStore.open(paths, clock);
                 try {
                     const effect = importStore.importLegacyCoordination(plan);
                     return parseMigrationReport(effect.payload['report']);
@@ -2510,7 +2558,7 @@ export async function runCoordinationMigration(input) {
                 failure('blocked', 'filesystem/Git verification failed', fsBlockers);
             const verifyJournal = journal;
             return await withMigrationStoreAuthority(paths, 'migration verify', async () => {
-                const store = await CoordinatorStore.open(paths, clock, { allowExistingSchemaMigration: true });
+                const store = await CoordinatorStore.open(paths, clock);
                 try {
                     store.verifyMigrationImport(input.repoKey, verifyJournal.migration_id);
                     const verifiedReport = { ...verifyJournal.report, command: 'verify', state: 'verified', dry_run: false, created_at: now.toISOString() };
@@ -2556,7 +2604,7 @@ export async function runCoordinationMigration(input) {
                 const drift = Object.freeze([...recheckEntries(journal.snapshot_entries), ...recheckGitSnapshot(journal.git_snapshot, driftInspection.rows, repository)]);
                 if (drift.length > 0)
                     failure('blocked', 'legacy source or Git state drift rejected cutover', drift);
-                const store = await CoordinatorStore.open(paths, clock, { allowExistingSchemaMigration: true });
+                const store = await CoordinatorStore.open(paths, clock);
                 let databaseSha;
                 try {
                     store.verifyMigrationImport(input.repoKey, journal.migration_id);
@@ -2574,7 +2622,7 @@ export async function runCoordinationMigration(input) {
                 journal = nextJournal(journal, 'cutover-committed', committedReport, now, ['source-hashes-rechecked-before-cutover', 'cutover-marker-committed']);
                 await writeJournal(paths.stateRoot, migrationPaths.journalPath, journal);
                 await input.afterBoundary?.('after-cutover-marker');
-                const recordStore = await CoordinatorStore.open(paths, clock, { allowExistingSchemaMigration: true });
+                const recordStore = await CoordinatorStore.open(paths, clock);
                 try {
                     recordStore.updateMigrationState(input.repoKey, journal.migration_id, 'cutover-committed', committedReport);
                 }
@@ -2587,7 +2635,7 @@ export async function runCoordinationMigration(input) {
             await input.afterBoundary?.('after-runtime-projections');
             await archiveLegacy(paths.stateRoot, journal.snapshot_entries, migrationPaths);
             await input.afterBoundary?.('after-legacy-files-archived-before-store');
-            const postStore = await CoordinatorStore.open(paths, clock, { allowExistingSchemaMigration: true });
+            const postStore = await CoordinatorStore.open(paths, clock);
             try {
                 postStore.verifyMigrationImport(input.repoKey, journal.migration_id);
                 finalReport = { ...journal.report, command: 'cutover', state: 'legacy-archived', dry_run: false, cutover_marker_path: migrationPaths.cutoverMarkerPath, created_at: now.toISOString() };

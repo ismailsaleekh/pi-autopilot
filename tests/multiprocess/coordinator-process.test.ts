@@ -26,6 +26,30 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
 }
 
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new Error(message)), timeoutMs); }),
+    ]);
+  } finally {
+    if (timer !== null) clearTimeout(timer);
+  }
+}
+
+async function completesWithin(promise: Promise<void>, timeoutMs: number): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  try {
+    return await Promise.race([
+      promise.then(() => true),
+      new Promise<boolean>((resolveTimeout) => { timer = setTimeout(() => resolveTimeout(false), timeoutMs); }),
+    ]);
+  } finally {
+    if (timer !== null) clearTimeout(timer);
+  }
+}
+
 async function waitFor(predicate: () => boolean | Promise<boolean>, timeoutMs = 10_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -90,6 +114,7 @@ class PersistentTraceClient {
   #stdout = '';
   #stderr = '';
   #sequence = 0;
+  #exitError: Error | null = null;
 
   constructor(stateRoot: string, suffix: string) {
     this.suffix = suffix;
@@ -113,8 +138,11 @@ class PersistentTraceClient {
       }
     });
     this.#child.on('error', (error) => this.#fail(error));
-    this.#child.on('close', (code) => {
-      if (code !== 0 || this.#pending.size > 0) this.#fail(new Error(`persistent trace client ${suffix} exited ${String(code)}: ${this.#stderr}`));
+    this.#child.on('close', (code, signal) => {
+      if (code !== 0 || this.#pending.size > 0) {
+        this.#exitError = new Error(`persistent trace client ${suffix} exited code=${String(code)} signal=${signal ?? 'none'}: ${this.#stderr}`);
+        this.#fail(this.#exitError);
+      }
       this.#resolveClosed?.();
       this.#resolveClosed = null;
     });
@@ -132,13 +160,28 @@ class PersistentTraceClient {
   }
 
   async stop(): Promise<void> {
-    if (this.#child.killed) return;
-    try { await this.send('shutdown'); } catch { /* process cleanup still follows */ }
+    if (this.#child.exitCode !== null) {
+      await this.#closed;
+      if (this.#exitError !== null) throw this.#exitError;
+      return;
+    }
+    let shutdownError: Error | null = null;
+    try {
+      await withTimeout(this.send('shutdown'), 10_000, `persistent trace client ${this.suffix} did not acknowledge shutdown`);
+    } catch (error) { shutdownError = error instanceof Error ? error : new Error(String(error)); }
     this.#child.stdin.end();
-    await this.#closed;
+    let closed = await completesWithin(this.#closed, 5_000);
+    if (!closed) {
+      this.#child.kill('SIGTERM');
+      closed = await completesWithin(this.#closed, 5_000);
+    }
+    if (!closed) {
+      this.#child.kill('SIGKILL');
+      await withTimeout(this.#closed, 5_000, `persistent trace client ${this.suffix} survived SIGKILL`);
+    }
+    const failures = [shutdownError, this.#exitError].filter((error): error is Error => error !== null);
+    if (failures.length > 0) throw new AggregateError(failures, `persistent trace client ${this.suffix} cleanup failed`);
   }
-
-  kill(): void { if (!this.#child.killed) this.#child.kill('SIGTERM'); }
 
   #onLine(line: string): void {
     let value: unknown;
@@ -309,6 +352,7 @@ async function certifyPersistentReleaseTrace(clientCount: number): Promise<void>
   const states = new Map<string, string>();
   const currentGroups = new Map<string, { readonly groupId: string; readonly attempt: number }>();
   const committedSequences = new Map<string, number>();
+  let traceError: unknown = null;
   try {
     await waitFor(() => existsSync(paths.lockPath) && existsSync(paths.capabilityPath));
     await waitForCoordinator(coordinator);
@@ -512,12 +556,17 @@ async function certifyPersistentReleaseTrace(clientCount: number): Promise<void>
     }
     assert.equal(observedHolders.size, clientCount, 'every persistent client must receive contested authority exactly once');
     assert.equal([...states.values()].filter((state) => state === 'granted').length, 1);
-  } finally {
-    await Promise.all([...actors.values()].map(async (actor) => await actor.stop().catch(() => undefined)));
-    for (const actor of actors.values()) actor.kill();
-    await stopCoordinator(paths.lockPath);
-    if (!server.killed) server.kill('SIGTERM');
-    await rm(root, { recursive: true, force: true });
+  } catch (error) { traceError = error; }
+
+  const cleanupFailures: unknown[] = [];
+  for (const result of await Promise.allSettled([...actors.values()].map(async (actor) => await actor.stop()))) {
+    if (result.status === 'rejected') cleanupFailures.push(result.reason);
+  }
+  try { await stopCoordinator(paths.lockPath); } catch (error) { cleanupFailures.push(error); }
+  if (!server.killed && server.exitCode === null) server.kill('SIGTERM');
+  try { await rm(root, { recursive: true, force: true }); } catch (error) { cleanupFailures.push(error); }
+  if (traceError !== null || cleanupFailures.length > 0) {
+    throw new AggregateError([...(traceError === null ? [] : [traceError]), ...cleanupFailures], `${String(clientCount)}-client persistent release trace or cleanup failed`);
   }
 }
 
@@ -540,10 +589,10 @@ void describe('coordinator multiprocess lifecycle', () => {
       const outcome = await Promise.race([
         firstClosed.then((code) => ({ process: 'first', code })),
         secondClosed.then((code) => ({ process: 'second', code })),
-        sleep(5_000).then(() => ({ process: 'timeout', code: -1 })),
+        sleep(10_000).then(() => ({ process: 'timeout', code: -1 })),
       ]);
       assert.notEqual(outcome.process, 'timeout');
-      assert.equal(outcome.code, 0);
+      assert.equal(outcome.code, 0, 'an exact lifecycle-election loser exits cleanly before attempting writer-guard authority');
       const lock = await readLock(paths.lockPath);
       if (lock === null) throw new Error('missing elected coordinator lock');
       const elected = [first.pid, second.pid].filter((pid) => pid === lock.pid);
@@ -584,9 +633,9 @@ void describe('coordinator multiprocess lifecycle', () => {
       const loser = await Promise.race([
         firstClosed.then((code) => ({ code, pid: first?.pid })),
         secondClosed.then((code) => ({ code, pid: second?.pid })),
-        sleep(5_000).then(() => ({ code: -1, pid: -1 })),
+        sleep(10_000).then(() => ({ code: -1, pid: -1 })),
       ]);
-      assert.equal(loser.code, 0);
+      assert.equal(loser.code, 0, 'serialized stale-lock reclamation elects one candidate before writer-guard acquisition');
       assert.notEqual(loser.pid, elected.pid);
       assert.equal((await new CoordinatorClient({ env, autoStart: false }).query('doctor')).payload['integrity'], 'ok');
     } finally {

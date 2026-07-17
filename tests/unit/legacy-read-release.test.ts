@@ -84,6 +84,7 @@ void describe('BUG-174 legacy READ authority release', () => {
       await writeTerminalReadEvidence(fixture, 1, { includeUnrelatedDrift: true });
 
       const server = await startCoordinatorServer(coordinatorRuntimePaths(fixture.env), CLOCK);
+      const generationDatabasePath = server.store.currentGeneration().database_path;
       try {
         const supervisor = new DurableRunSupervisorClient(fixture.env);
         const retired = await supervisor.client.query('status', repoKey, fixture.active.workstream_run);
@@ -105,7 +106,7 @@ void describe('BUG-174 legacy READ authority release', () => {
         assert.equal(granted.outcome, 'granted');
       } finally { await server.close(); }
 
-      const database = new DatabaseSync(coordinatorRuntimePaths(fixture.env).databasePath, { readOnly: true });
+      const database = new DatabaseSync(generationDatabasePath, { readOnly: true });
       try {
         const audit = database.prepare("SELECT payload_json FROM migration_legacy_audit WHERE json_extract(payload_json, '$.schema_version')='autopilot.schema9_read_retirement.v1'").get();
         assert.notEqual(audit, undefined);

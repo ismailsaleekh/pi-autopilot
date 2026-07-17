@@ -198,6 +198,7 @@ void describe('BUG-176 protocol-1.6 byte-bounded coordinator pagination', () => 
     const sessionToken = digest('cf42-receipt-session-token');
     const attachPayload = { session_lease_id: 'cf42-receipt-session-lease', session_token: sessionToken, pid: process.pid, boot_id: 'cf42-receipt-boot', lease_expires_at: '2099-01-01T00:00:00.000Z', handoff_token: null };
     let store = await CoordinatorStore.open(paths, { now: () => new Date('2026-07-14T00:00:00.000Z') });
+    const generationDatabasePath = store.currentGeneration().database_path;
     try {
       assert.equal(store.handle(mutation({ requestId: 'cf42-receipt-run-request', action: 'attach-run', idempotency_key: 'cf42-receipt-run-key', repo_id: repoId, workstream_run: run, session_id: null, fencing_generation: null, expected_version: 0, payload: { repo_key: repoId, canonical_root: join(root, 'repository'), git_common_dir: join(root, 'repository', '.git'), autopilot_id: 'cf42-receipt-autopilot', workstream: 'cf42-receipt-workstream', coordination_authority: 'coordinator-edit-leases-v1', run_resource: { schema_version: 'autopilot.coordination_run_resource.v1', repo_id: repoId, workstream_run: run, source_repo: join(root, 'repository'), git_common_dir: join(root, 'repository', '.git'), worktree_root: join(root, 'worktrees'), main_worktree_path: join(root, 'worktrees', 'main'), runtime_root: join(root, 'worktrees', 'main', '.pi', 'autopilot', 'cf42-receipt-workstream'), branch: 'autopilot/cf42-receipt', target_branch: null, target_base_sha: '0'.repeat(40), origin_url: null, started_at: '2026-07-14T00:00:00.000Z', version: 1 } } })).ok, true);
       assert.equal(store.handle(mutation({ requestId: 'cf42-receipt-attach-request', action: 'attach-session', idempotency_key: 'cf42-receipt-attach-key', repo_id: repoId, workstream_run: run, session_id: 'cf42-receipt-session', fencing_generation: 1, expected_version: 1, payload: attachPayload })).ok, true);
@@ -213,7 +214,7 @@ void describe('BUG-176 protocol-1.6 byte-bounded coordinator pagination', () => 
     const oldRequest: Readonly<Record<string, unknown>> = { schema_version: 'autopilot.coordinator_request.v1', protocol_version: '1.5', request_id: 'cf42-receipt-attach-retry', action: 'attach-session', idempotency_key: 'cf42-receipt-attach-key', repo_id: repoId, workstream_run: run, session_id: 'cf42-receipt-session', fencing_generation: 1, expected_version: 1, payload: attachPayload };
     const oldSemantic = { schema_version: 'autopilot.coordinator_request.v1', protocol_version: '1.5', action: 'attach-session', repo_id: repoId, workstream_run: run, session_id: 'cf42-receipt-session', fencing_generation: 1, expected_version: 1, payload: attachPayload };
     const oldDigest = `sha256:${createHash('sha256').update(canonicalJson(oldSemantic), 'utf8').digest('hex')}`;
-    const database = new DatabaseSync(paths.databasePath);
+    const database = new DatabaseSync(generationDatabasePath);
     try {
       const row = database.prepare('SELECT payload_json FROM idempotency_results WHERE repo_id=? AND idempotency_key=?').get(repoId, 'cf42-receipt-attach-key');
       const payloadText = row?.['payload_json'];
@@ -222,7 +223,7 @@ void describe('BUG-176 protocol-1.6 byte-bounded coordinator pagination', () => 
       if (!isJsonMap(parsedPayload)) throw new Error('cf42 fixture attach result is malformed');
       const legacyPayload = Object.fromEntries(Object.entries(parsedPayload).filter(([field]) => field !== 'reconciliation_receipt'));
       legacyPayload['reconciliation'] = detailsByField;
-      database.exec('DROP TABLE result_details; DROP TABLE result_receipts; DROP TABLE mailbox_delivery_items; DROP TABLE mailbox_deliveries; DROP TABLE reconciliation_details; DROP TABLE reconciliation_receipts; DELETE FROM schema_migrations WHERE version=12; PRAGMA user_version=11;');
+      database.exec('DELETE FROM result_details; DELETE FROM result_receipts; DELETE FROM reconciliation_details; DELETE FROM reconciliation_receipts;');
       database.prepare('UPDATE idempotency_results SET request_sha256=?, payload_json=? WHERE repo_id=? AND idempotency_key=?').run(oldDigest, canonicalJson(legacyPayload), repoId, 'cf42-receipt-attach-key');
       database.prepare('UPDATE events SET request_sha256=? WHERE repo_id=? AND idempotency_key=?').run(oldDigest, repoId, 'cf42-receipt-attach-key');
     } finally { database.close(); }
@@ -255,7 +256,7 @@ void describe('BUG-176 protocol-1.6 byte-bounded coordinator pagination', () => 
       assert.deepEqual(details.map((detail) => detail.ordinal), Array.from({ length: receipt.detail_count }, (_entry, index) => index + 1));
       assert.equal(`sha256:${createHash('sha256').update(JSON.stringify(details), 'utf8').digest('hex')}`, receipt.details_sha256);
       console.log(`coordinator-reconciliation-pagination-measurement ${JSON.stringify({ detail_count: details.length, page_count: detailPageCount, old_response_bytes: encodedJsonBytes({ schema_version: 'autopilot.coordinator_response.v1', protocol_version: '1.5', request_id: 'cf42-receipt-attach-retry', ok: true, committed_event_seq: receipt.committed_event_seq, error_code: null, retryable: false, payload: { reconciliation: detailsByField } }), compact_replay_bytes: compactReplayBytes, maximum_detail_frame_bytes: maximumDetailFrameBytes })}`);
-      const migratedDatabase = new DatabaseSync(paths.databasePath, { readOnly: true });
+      const migratedDatabase = new DatabaseSync(store.currentGeneration().database_path, { readOnly: true });
       try {
         const idempotency = migratedDatabase.prepare('SELECT request_sha256, payload_json FROM idempotency_results WHERE repo_id=? AND idempotency_key=?').get(repoId, 'cf42-receipt-attach-key');
         assert.equal(idempotency?.['request_sha256'], oldDigest, 'schema migration must preserve the exact cf42 semantic request digest');

@@ -1,4 +1,4 @@
-import { spawn, spawnSync } from 'node:child_process';
+import { runGitQuery } from './git-process.ts';
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
@@ -223,10 +223,10 @@ export function parseAutopilotCheckoutProfile(value: unknown, source = '<profile
 
 export async function scanTrackedTree(repoRoot: string, now: Date = new Date()): Promise<AutopilotTrackedTreeScan> {
   const resolvedRepoRoot = resolve(repoRoot);
-  const headSha = gitOut(['rev-parse', 'HEAD'], resolvedRepoRoot).trim();
+  const headSha = decodeUtf8(runGitQuery({ descriptor: { kind: 'head' }, cwd: resolvedRepoRoot }).stdout, 'git HEAD').trim();
   const entries: AutopilotTrackedTreeEntry[] = [];
   let totalBytes = 0;
-  await streamGitLsTree(['ls-tree', '-r', '-l', '--full-tree', '-z', headSha], resolvedRepoRoot, (record) => {
+  await streamGitLsTree(headSha, resolvedRepoRoot, (record) => {
     const entry = parseTrackedTreeRecord(record);
     entries.push(entry);
     totalBytes += entry.byte_count;
@@ -409,105 +409,23 @@ function parseMaterializationConfig(value: unknown, defaults: AutopilotCheckoutM
   });
 }
 
-const GIT_STDERR_EVIDENCE_BYTES = 65_536;
 const STRICT_UTF8_DECODER = new TextDecoder('utf-8', { fatal: true });
-const LOSSY_UTF8_DECODER = new TextDecoder('utf-8');
 
 async function streamGitLsTree(
-  args: readonly string[],
+  revision: string,
   cwd: string,
   onRecord: (record: Uint8Array) => void,
 ): Promise<void> {
-  await new Promise<void>((resolvePromise, rejectPromise) => {
-    const child = spawn('git', [...args], { cwd, stdio: ['pipe', 'pipe', 'pipe'] });
-    child.stdin.end();
-    let pendingChunks: Uint8Array[] = [];
-    let pendingBytes = 0;
-    const stderrChunks: Uint8Array[] = [];
-    let stderrCapturedBytes = 0;
-    let stderrDroppedBytes = 0;
-    let terminalError: Error | null = null;
-
-    const rememberError = (error: Error): void => {
-      if (terminalError !== null) return;
-      terminalError = error;
-      child.kill('SIGTERM');
-    };
-
-    child.stdout.on('data', (value: Uint8Array) => {
-      if (terminalError !== null) return;
-      try {
-        let cursor = 0;
-        while (cursor < value.length) {
-          const delimiter = value.indexOf(0, cursor);
-          if (delimiter < 0) {
-            const tail = value.subarray(cursor);
-            if (tail.length > 0) {
-              pendingChunks.push(tail);
-              pendingBytes += tail.length;
-            }
-            return;
-          }
-          const segment = value.subarray(cursor, delimiter);
-          let record: Uint8Array;
-          if (pendingBytes === 0) {
-            record = segment;
-          } else {
-            if (segment.length > 0) pendingChunks.push(segment);
-            record = concatByteChunks(pendingChunks, pendingBytes + segment.length);
-          }
-          pendingChunks = [];
-          pendingBytes = 0;
-          if (record.length > 0) onRecord(record);
-          cursor = delimiter + 1;
-        }
-      } catch (error) {
-        rememberError(error instanceof Error ? error : new Error(String(error)));
-      }
-    });
-    child.stdout.on('error', (error: Error) => {
-      rememberError(new AutopilotCheckoutProfileError('git-stdout-stream-failed', `git ${args.join(' ')} stdout stream failed: ${error.message}`));
-    });
-    child.stderr.on('data', (value: Uint8Array) => {
-      const remaining = Math.max(0, GIT_STDERR_EVIDENCE_BYTES - stderrCapturedBytes);
-      const captured = value.subarray(0, remaining);
-      if (captured.length > 0) {
-        stderrChunks.push(captured);
-        stderrCapturedBytes += captured.length;
-      }
-      stderrDroppedBytes += value.length - captured.length;
-    });
-    child.stderr.on('error', (error: Error) => {
-      rememberError(new AutopilotCheckoutProfileError('git-stderr-stream-failed', `git ${args.join(' ')} stderr stream failed: ${error.message}`));
-    });
-    child.on('error', (error: Error) => {
-      rememberError(new AutopilotCheckoutProfileError('git-spawn-failed', `git ${args.join(' ')} failed to spawn: ${error.message}`));
-    });
-    child.on('close', (code, signal) => {
-      if (terminalError !== null) {
-        rejectPromise(terminalError);
-        return;
-      }
-      const stderr = boundedStderrEvidence(stderrChunks, stderrDroppedBytes);
-      if (code !== 0) {
-        rejectPromise(new AutopilotCheckoutProfileError(
-          'git-command-failed',
-          `git ${args.join(' ')} exited with status ${code === null ? 'null' : String(code)}${signal === null ? '' : ` (signal ${signal})`}.`,
-          stderr.length === 0 ? [] : [stderr],
-        ));
-        return;
-      }
-      if (pendingBytes > 0) {
-        rejectPromise(new AutopilotCheckoutProfileError(
-          'invalid-ls-tree-output',
-          'git ls-tree output ended without a NUL record delimiter.',
-          [`trailing_bytes=${String(pendingBytes)}`],
-        ));
-        return;
-      }
-      resolvePromise();
-    });
-  });
+  const output = runGitQuery({ descriptor: { kind: 'ls-tree-recursive', revision, includeSize: true }, cwd }).stdout;
+  let cursor = 0;
+  while (cursor < output.length) {
+    const delimiter = output.indexOf(0, cursor);
+    if (delimiter < 0) {
+      fail('invalid-ls-tree-output', 'git ls-tree output ended without a NUL record delimiter.', [`trailing_bytes=${String(output.length - cursor)}`]);
+    }
+    if (delimiter > cursor) onRecord(output.subarray(cursor, delimiter));
+    cursor = delimiter + 1;
+  }
 }
 
 function parseTrackedTreeRecord(raw: Uint8Array): AutopilotTrackedTreeEntry {
@@ -538,24 +456,6 @@ function parseTrackedTreeRecord(raw: Uint8Array): AutopilotTrackedTreeEntry {
   return Object.freeze({ path, byte_count: byteCount, object_type: objectType });
 }
 
-function boundedStderrEvidence(chunks: readonly Uint8Array[], droppedBytes: number): string {
-  const capturedBytes = concatByteChunks(chunks, chunks.reduce((sum, chunk) => sum + chunk.length, 0));
-  const captured = LOSSY_UTF8_DECODER.decode(capturedBytes).trim();
-  if (droppedBytes === 0) return captured;
-  const suffix = `[stderr truncated; dropped_bytes=${String(droppedBytes)}]`;
-  return captured.length === 0 ? suffix : `${captured}\n${suffix}`;
-}
-
-function concatByteChunks(chunks: readonly Uint8Array[], totalLength: number): Uint8Array {
-  const joined = new Uint8Array(totalLength);
-  let offset = 0;
-  for (const chunk of chunks) {
-    joined.set(chunk, offset);
-    offset += chunk.length;
-  }
-  return joined;
-}
-
 function decodeUtf8(value: Uint8Array, label: string): string {
   try {
     return STRICT_UTF8_DECODER.decode(value);
@@ -566,13 +466,6 @@ function decodeUtf8(value: Uint8Array, label: string): string {
 
 function bytesToHex(value: Uint8Array): string {
   return [...value].map((byte) => byte.toString(16).padStart(2, '0')).join('');
-}
-
-function gitOut(args: readonly string[], cwd: string): string {
-  const result = spawnSync('git', [...args], { cwd, encoding: 'utf8' });
-  if (result.error !== undefined) fail('git-spawn-failed', `git ${args.join(' ')} failed to spawn: ${result.error.message}`);
-  if ((result.status ?? -1) !== 0) fail('git-command-failed', `git ${args.join(' ')} exited with status ${String(result.status ?? -1)}.`, [result.stderr.trim(), result.stdout.trim()]);
-  return result.stdout;
 }
 
 function parseGitObjectType(value: string | undefined): AutopilotTrackedTreeEntry['object_type'] {

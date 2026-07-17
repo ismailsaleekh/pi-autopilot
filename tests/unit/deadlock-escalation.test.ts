@@ -16,6 +16,8 @@ import { CoordinationRuntimeError } from '../../src/core/coordination/failures.t
 import { ClaimNegotiationClient } from '../../src/core/coordination/negotiation.ts';
 import { COORDINATOR_GRANT_OFFER_TTL_MS, coordinatorRuntimePaths } from '../../src/core/coordination/runtime-paths.ts';
 import { startCoordinatorServer } from '../../src/core/coordination/server.ts';
+import { deterministicWorktreeId } from '../../src/core/coordination/worktree-identity.ts';
+import { deriveWorktreeOperationKeyV2, operationIdFromWorktreeOperationKey } from '../../src/core/coordination/worktree-operation-identity.ts';
 import type { CoordinatorSessionContext } from '../../src/core/coordination/supervisor.ts';
 import { COORDINATION_OPERATIONAL_ESCALATION_REASONS, type CoordinationClaimRequest, type CoordinationEditLease, type CoordinationEscalation, type CoordinationOwnerIdentity, type CoordinationWaitForEdge } from '../../src/core/coordination/types.ts';
 import { AUTOPILOT_STATE_ROOT_ENV, type ProcessEnvLike } from '../../src/core/parallel-runtime.ts';
@@ -113,10 +115,13 @@ async function registerUnitWorktree(client: CoordinatorClient, actor: Actor, rep
   const owner: CoordinationOwnerIdentity = { repo_id: actor.context.repo_id, autopilot_id: actor.context.autopilot_id, workstream_run: actor.context.workstream_run, unit_id: unitId, attempt: 1 };
   const worktreePath = join(actor.context.state_root, 'worktrees', actor.context.repo_key, 'active', actor.context.workstream_run, 'units', unitId, 'attempt-1', 'worktree');
   const branch = `autopilot/unit/${actor.context.workstream_run}/${unitId}/attempt-1`;
+  const worktreeId = deterministicWorktreeId(owner, 'unit');
+  const intent = { repo_root: repoRoot, worktree_path: worktreePath, git_common_dir: join(repoRoot, '.git'), branch, reason: 'register adjudicator fixture worktree', base_sha: 'a'.repeat(40), target_sha: null, archive_ref: null, checkout_mode: 'full' as const, sparse_patterns: [], paths: [], metadata_refs: [] };
+  const operationKey = deriveWorktreeOperationKeyV2({ canonicalWorktreeId: worktreeId, operationType: 'create', completeImmutableIntent: intent });
   await mkdir(worktreePath, { recursive: true });
-  await client.mutate('prepare-operation', { repoId: actor.context.repo_id, workstreamRun: actor.context.workstream_run, sessionId: actor.context.session_id, fencingGeneration: actor.context.session_generation, expectedVersion: 0, idempotencyKey: `register-unit-${actor.context.workstream_run}-${unitId}` }, {
-    worktree: { schema_version: 'autopilot.coordination_worktree.v2', worktree_id: `unit-${actor.context.workstream_run}-${unitId}`, owner, kind: 'unit', canonical_path: worktreePath, git_common_dir: join(repoRoot, '.git'), branch, state: 'planned', version: 1 },
-    operation: { schema_version: 'autopilot.worktree_operation.v2', operation_id: `create-unit-${actor.context.workstream_run}-${unitId}`, worktree_id: `unit-${actor.context.workstream_run}-${unitId}`, owner, operation_type: 'create', stage: 'prepared', authority_version: 1, intent_event_seq: 0, intent: { repo_root: repoRoot, worktree_path: worktreePath, git_common_dir: join(repoRoot, '.git'), branch, reason: 'register adjudicator fixture worktree', base_sha: 'a'.repeat(40), target_sha: null, archive_ref: null, checkout_mode: 'full', sparse_patterns: [], paths: [], metadata_refs: [] }, completed_steps: [], current_step: null, recovery_attempts: 0, verification_evidence: null, error_code: null, version: 1 },
+  await client.mutate('prepare-operation', { repoId: actor.context.repo_id, workstreamRun: actor.context.workstream_run, sessionId: actor.context.session_id, fencingGeneration: actor.context.session_generation, expectedVersion: 0, idempotencyKey: operationKey.operation_key_sha256 }, {
+    worktree: { schema_version: 'autopilot.coordination_worktree.v2', worktree_id: worktreeId, owner, kind: 'unit', canonical_path: worktreePath, git_common_dir: join(repoRoot, '.git'), branch, state: 'planned', version: 1 },
+    operation: { schema_version: 'autopilot.worktree_operation.v2', operation_id: operationIdFromWorktreeOperationKey(operationKey), worktree_id: worktreeId, owner, operation_type: 'create', stage: 'prepared', authority_version: 1, intent_event_seq: 0, intent, completed_steps: [], current_step: null, recovery_attempts: 0, verification_evidence: null, error_code: null, version: 1 },
     session_lease_id: actor.context.session_lease_id, session_token: actor.context.session_token,
   });
   return worktreePath;

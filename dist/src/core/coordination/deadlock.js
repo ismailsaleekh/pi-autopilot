@@ -2,7 +2,7 @@ import { claimModesConflict, coordinationPathsOverlap } from "./contracts.js";
 export const MAX_GRANT_BYPASSES = 8;
 const TERMINAL_REQUEST_STATES = new Set(['resolved', 'cancelled', 'superseded']);
 const TERMINAL_OPERATION_STAGES = new Set(['committed', 'compensated', 'failed']);
-const GIT_CRITICAL_OPERATIONS = new Set(['merge', 'reset', 'quarantine', 'archive', 'remove']);
+const GIT_CRITICAL_OPERATIONS = new Set(['merge', 'reset', 'quarantine', 'archive', 'remove', 'metadata-reconcile']);
 export function compareCoordinationGrantPriority(left, right) {
     const leftStarved = left.bypass_count >= MAX_GRANT_BYPASSES ? 0 : 1;
     const rightStarved = right.bypass_count >= MAX_GRANT_BYPASSES ? 0 : 1;

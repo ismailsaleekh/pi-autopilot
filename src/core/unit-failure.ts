@@ -1,5 +1,4 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { spawnSync } from 'node:child_process';
 import { existsSync, lstatSync, readdirSync, realpathSync } from 'node:fs';
 import { link, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
@@ -12,10 +11,13 @@ import { readCoordinatorSessionContext } from './coordination/supervisor.ts';
 import { parseAutopilotChildTerminalAcceptance } from './coordination/terminal-acceptance.ts';
 import { classifyHistoricalUnitFailureEvidenceGeneration, parseHistoricalUnitFailureRegenerationCandidate, parseUnitFailureEvidenceFacts, type ReconciliationEvidenceIdentity } from './coordination/terminal-evidence.ts';
 import { AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV } from './names.ts';
-import { gitHead, readGitStatus, releaseClaimsForUnit, runGit, updateUnitBranchStatus, writeJsonAtomic, type ActiveAutopilotContext, type ProcessEnvLike } from './parallel-runtime.ts';
+import { gitHead, readGitStatus, releaseClaimsForUnit, updateUnitBranchStatus, writeJsonAtomic, type ActiveAutopilotContext, type ProcessEnvLike } from './parallel-runtime.ts';
+import { gitQueryNulStrings, gitQueryText, runGitMutation, runGitQuery } from './git-process.ts';
 import { cleanupTerminalUnitWorktree } from './worktree-cleanup.ts';
-import { executeOwnedWorktreeSaga, type WorktreeSagaInspection } from './coordination/worktree-saga.ts';
+import { executeOwnedWorktreeSaga } from './coordination/worktree-saga.ts';
 import type { CoordinationWorktreeOperation } from './coordination/types.ts';
+import { inspectWorktreePostcondition } from './coordination/worktree-postconditions.ts';
+import { deterministicWorktreeId } from './coordination/worktree-identity.ts';
 
 export type AutopilotUnitFailureAction = 'quarantine' | 'reset' | 'preserve' | 'abort';
 
@@ -145,21 +147,46 @@ export async function quarantineFailedUnit(input: UnitFailureInput): Promise<Aut
   return record;
 }
 
+async function committedQuarantineCaptureProof(input: UnitFailureInput, operation: CoordinationWorktreeOperation): Promise<{ readonly captureSha: string; readonly proofSource: 'physical-worktree' | 'owned-git-ref' }> {
+  const canonicalId = deterministicWorktreeId(operation.owner, 'unit');
+  const inspection = inspectWorktreePostcondition({ operationType: 'quarantine', owner: operation.owner, kind: 'unit', canonicalWorktreeId: canonicalId, intent: operation.intent, env: input.env ?? process.env });
+  if (inspection.outcome !== 'satisfied' || inspection.capture_sha === null || (inspection.proof_source !== 'physical-worktree' && inspection.proof_source !== 'owned-git-ref')) throw new CoordinationRuntimeError('recovery-required', 'committed quarantine no longer has exact canonical capture proof', inspection.proof);
+  const evidence = operation.verification_evidence;
+  if (evidence === null) throw new CoordinationRuntimeError('recovery-required', 'committed quarantine lacks immutable canonical verification evidence', [operation.operation_id]);
+  const expectedRef = `_saga-evidence/${operation.owner.workstream_run}/${operation.operation_id}.json`;
+  if (evidence.ref !== expectedRef) throw new CoordinationRuntimeError('invalid-state', 'committed quarantine verification evidence ref is not operation-bound', [evidence.ref, expectedRef]);
+  const evidencePath = resolve(input.context.active.worktree_root, ...evidence.ref.split('/'));
+  const bytes = await readStableRegularFile(evidencePath, 'committed quarantine canonical evidence', MAX_UNIT_FAILURE_EVIDENCE_BYTES);
+  if (`sha256:${createHash('sha256').update(bytes).digest('hex')}` !== evidence.sha256) throw new CoordinationRuntimeError('invalid-state', 'committed quarantine verification evidence digest changed', [evidence.ref]);
+  let value: unknown;
+  try { value = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)) as unknown; }
+  catch (error) { throw new CoordinationRuntimeError('invalid-state', 'committed quarantine verification evidence is invalid JSON', [evidence.ref, error instanceof Error ? error.message : String(error)]); }
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new CoordinationRuntimeError('invalid-state', 'committed quarantine verification evidence is not an object', [evidence.ref]);
+  if (Reflect.get(value, 'operation_id') !== operation.operation_id || Reflect.get(value, 'terminal_stage') !== 'verified' || Reflect.get(value, 'capture_sha') !== inspection.capture_sha || Reflect.get(value, 'proof_source') !== inspection.proof_source) throw new CoordinationRuntimeError('invalid-state', 'committed quarantine immutable evidence disagrees with current exact capture proof', [operation.operation_id]);
+  return { captureSha: inspection.capture_sha, proofSource: inspection.proof_source };
+}
+
 async function finishCommittedQuarantine(input: UnitFailureInput, operation: CoordinationWorktreeOperation): Promise<AutopilotUnitFailureRecord> {
   if (operation.owner.repo_id !== input.context.active.repo_key || operation.owner.autopilot_id !== input.context.active.autopilot_id || operation.owner.workstream_run !== input.context.active.workstream_run || operation.owner.unit_id !== input.unitId || operation.owner.attempt !== input.attempt || resolve(operation.intent.worktree_path) !== resolve(input.unitWorktreePath)) throw new CoordinationRuntimeError('invalid-state', 'committed quarantine operation identity differs from retained authority ownership', [operation.operation_id]);
-  const facts = inspectOwnedFailureWorktree(input);
+  const captureProof = await committedQuarantineCaptureProof(input, operation);
+  const facts: OwnedFailureWorktreeFacts = existsSync(input.unitWorktreePath) ? inspectOwnedFailureWorktree(input) : {
+    head: captureProof.captureSha,
+    branch: operation.intent.branch,
+    gitCommonDir: operation.intent.git_common_dir,
+    mutablePaths: Object.freeze([]),
+    ignoredPaths: Object.freeze([]),
+  };
   if (facts.mutablePaths.length > 0) throw new CoordinationRuntimeError('recovery-required', 'committed quarantine worktree regained mutable residue before evidence publication', facts.mutablePaths.slice(0, 128));
   const baseSha = operation.intent.base_sha;
   const preCaptureHead = operation.intent.target_sha;
   if (baseSha === null || preCaptureHead === null) throw new CoordinationRuntimeError('recovery-required', 'committed quarantine operation lacks exact baseline and pre-capture heads', [operation.operation_id]);
   if (operation.intent.paths.length === 0 && (facts.head !== preCaptureHead || facts.head === baseSha)) throw new CoordinationRuntimeError('recovery-required', 'clean committed quarantine does not prove source commits after the attempt baseline', [operation.operation_id, baseSha, preCaptureHead, facts.head]);
-  const ancestor = spawnSync('git', ['merge-base', '--is-ancestor', baseSha, facts.head], { cwd: input.unitWorktreePath, encoding: 'utf8', timeout: 30_000 });
-  const diff = spawnSync('git', ['diff', '--name-only', '--no-renames', '-z', baseSha, facts.head], { cwd: input.unitWorktreePath, encoding: 'utf8', timeout: 30_000, maxBuffer: 1024 * 1024 });
-  if ((ancestor.status ?? -1) !== 0 || (diff.status ?? -1) !== 0) throw new CoordinationRuntimeError('recovery-required', 'committed quarantine capture is not an inspectable descendant of its pre-capture head', [baseSha, facts.head, ancestor.stderr.trim(), diff.stderr.trim()]);
-  const capturedPaths = diff.stdout.split('\0').filter((path) => path.length > 0).map((path) => path.replace(/\\/gu, '/'));
-  const overlaps = (left: string, right: string): boolean => left === right || left.startsWith(`${right}/`) || right.startsWith(`${left}/`);
-  const uncovered = operation.intent.paths.filter((path) => !capturedPaths.some((candidate) => overlaps(path, candidate)));
-  if ((operation.intent.paths.length > 0 && capturedPaths.length === 0) || uncovered.length > 0) throw new CoordinationRuntimeError('recovery-required', 'committed quarantine capture does not preserve every originally mutable path', uncovered.length > 0 ? uncovered : operation.intent.paths);
+  const ancestor = runGitQuery({ descriptor: { kind: 'is-ancestor', ancestor: baseSha, descendant: facts.head }, cwd: input.context.active.source_repo });
+  if (ancestor.negative) throw new CoordinationRuntimeError('recovery-required', 'committed quarantine capture is not an inspectable descendant of its pre-capture head', [baseSha, facts.head]);
+  const capturedPaths = gitQueryNulStrings({ descriptor: { kind: 'diff-paths', from: baseSha, to: facts.head, noRenames: true }, cwd: input.context.active.source_repo }).map((path) => path.replace(/\\/gu, '/'));
+  const expectedPaths = [...operation.intent.paths].sort((left, right) => left < right ? -1 : left > right ? 1 : 0);
+  const actualPaths = [...capturedPaths].sort((left, right) => left < right ? -1 : left > right ? 1 : 0);
+  if (expectedPaths.length !== actualPaths.length || expectedPaths.some((path, index) => path !== actualPaths[index])) throw new CoordinationRuntimeError('recovery-required', 'committed quarantine capture path set differs from immutable intent', [...expectedPaths.map((path) => `expected=${path}`), ...actualPaths.map((path) => `actual=${path}`)]);
   const action: 'quarantine' | 'preserve' = operation.intent.reason.startsWith('preserve ') ? 'preserve' : 'quarantine';
   const captureRef = `autopilot/archive/${input.context.active.workstream_run}/unit/${input.unitId}/attempt-${String(input.attempt)}/${action}-capture`;
   await archiveFailureBranch(input, facts.head, captureRef, `${action} immutable failure capture recovery`, 'quarantined');
@@ -245,28 +272,17 @@ async function releaseLegacyClaimsIfApplicable(input: UnitFailureInput, reason: 
 
 async function archiveFailureBranch(input: UnitFailureInput, sha: string, archiveRef: string, reason: string, worktreeState: 'terminal' | 'quarantined' = 'terminal'): Promise<void> {
   const active = input.context.active;
-  const branch = existsSync(input.unitWorktreePath) ? runGit(['rev-parse', '--abbrev-ref', 'HEAD'], input.unitWorktreePath).trim() : `autopilot/unit/${active.workstream_run}/${input.unitId}/attempt-${String(input.attempt)}`;
-  const inspect = (): WorktreeSagaInspection => {
-    const result = spawnSync('git', ['rev-parse', '--verify', `refs/heads/${archiveRef}`], { cwd: active.source_repo, encoding: 'utf8' });
-    if ((result.status ?? -1) !== 0) return { outcome: 'not-applied', proof: ['archive_ref_absent'] };
-    return result.stdout.trim() === sha ? { outcome: 'satisfied', proof: [`archive_ref=${archiveRef}`, `archive_sha=${sha}`] } : { outcome: 'unsafe', proof: [`expected=${sha}`, `actual=${result.stdout.trim()}`] };
-  };
+  const branch = existsSync(input.unitWorktreePath) ? gitQueryText({ descriptor: { kind: 'current-branch' }, cwd: input.unitWorktreePath }).trim() : `autopilot/unit/${active.workstream_run}/${input.unitId}/attempt-${String(input.attempt)}`;
   await executeOwnedWorktreeSaga({
     active, unitId: input.unitId, attempt: input.attempt, kind: 'unit', operationType: 'archive',
-    operationKey: `failure-archive:${archiveRef}:${sha}`, initialWorktreeState: worktreeState, committedWorktreeState: worktreeState,
+    initialWorktreeState: worktreeState, committedWorktreeState: worktreeState,
     intent: {
       repo_root: active.source_repo, worktree_path: input.unitWorktreePath, git_common_dir: active.git_common_dir, branch,
       reason, base_sha: active.target_base_sha, target_sha: sha, archive_ref: archiveRef, checkout_mode: null,
       sparse_patterns: [], paths: [], metadata_refs: [],
     },
   }, {
-    inspect,
-    action: () => { runGit(['update-ref', `refs/heads/${archiveRef}`, sha, '0'.repeat(40)], active.source_repo, { AUTOPILOT_RUNTIME: '1', AUTOPILOT_RUNTIME_AUTHORITY: 'unit-failure-archive' }); },
-    verify: () => {
-      const inspected = inspect();
-      if (inspected.outcome !== 'satisfied') throw new Error(`failure archive saga postcondition failed: ${inspected.proof.join(', ')}`);
-      return inspected.proof;
-    },
+    action: async () => { await runGitMutation({ descriptor: { kind: 'update-ref-create', ref: `refs/heads/${archiveRef}`, target: sha, expectedOld: '0'.repeat(40) }, cwd: active.source_repo, env: { AUTOPILOT_RUNTIME: '1', AUTOPILOT_RUNTIME_AUTHORITY: 'unit-failure-archive' } }); },
   }, input.env ?? process.env);
 }
 
@@ -290,18 +306,10 @@ async function recordFailureEvidence(input: UnitFailureInput, publication: Publi
 async function resetWorktreeForRecordedTransition(input: UnitFailureInput, authority: string, action: 'reset' | 'abort'): Promise<void> {
   if (!existsSync(input.unitWorktreePath)) throw new CoordinationRuntimeError('recovery-required', 'owned failed-unit worktree is missing before reset; edit authority remains retained', [input.unitWorktreePath]);
   const active = input.context.active;
-  const branch = runGit(['rev-parse', '--abbrev-ref', 'HEAD'], input.unitWorktreePath).trim();
+  const branch = gitQueryText({ descriptor: { kind: 'current-branch' }, cwd: input.unitWorktreePath }).trim();
   const target = gitHead(input.unitWorktreePath);
-  const inspect = (): WorktreeSagaInspection => {
-    if (!existsSync(input.unitWorktreePath)) return { outcome: 'unsafe', proof: ['owned_worktree_missing_before_reset'] };
-    const dirty = readGitStatus(input.unitWorktreePath).changedPaths;
-    if (dirty.length > 0) return { outcome: 'unsafe', proof: dirty.map((path) => `uncaptured_dirty=${path}`) };
-    const currentHead = gitHead(input.unitWorktreePath);
-    return currentHead === target ? { outcome: 'satisfied', proof: [`head=${currentHead}`, 'worktree_clean'] } : { outcome: 'unsafe', proof: [`expected_head=${target}`, `actual_head=${currentHead}`] };
-  };
   await executeOwnedWorktreeSaga({
     active, unitId: input.unitId, attempt: input.attempt, kind: 'unit', operationType: 'reset',
-    operationKey: `${action}:${input.unitId}:${String(input.attempt)}:${target}`,
     initialWorktreeState: 'active', committedWorktreeState: 'terminal',
     intent: {
       repo_root: active.source_repo, worktree_path: input.unitWorktreePath, git_common_dir: active.git_common_dir, branch,
@@ -309,14 +317,8 @@ async function resetWorktreeForRecordedTransition(input: UnitFailureInput, autho
       checkout_mode: null, sparse_patterns: [], paths: readGitStatus(input.unitWorktreePath).changedPaths, metadata_refs: [],
     },
   }, {
-    inspect,
-    action: () => {
-      runGit(['reset', '--hard', target], input.unitWorktreePath, { AUTOPILOT_RUNTIME: '1', AUTOPILOT_RUNTIME_AUTHORITY: authority });
-    },
-    verify: () => {
-      const inspected = inspect();
-      if (inspected.outcome !== 'satisfied' || gitHead(input.unitWorktreePath) !== target) throw new Error(`failed-unit ${action} saga did not restore clean head ${target}: ${inspected.proof.join(', ')}`);
-      return inspected.proof;
+    action: async () => {
+      await runGitMutation({ descriptor: { kind: 'reset-hard', target }, cwd: input.unitWorktreePath, env: { AUTOPILOT_RUNTIME: '1', AUTOPILOT_RUNTIME_AUTHORITY: authority } });
     },
   }, input.env ?? process.env);
 }
@@ -361,18 +363,18 @@ function parseFullStatus(output: string): { readonly mutablePaths: readonly stri
 function inspectOwnedFailureWorktree(input: UnitFailureInput): OwnedFailureWorktreeFacts {
   if (!existsSync(input.unitWorktreePath)) throw new CoordinationRuntimeError('recovery-required', 'owned failed-unit worktree is missing; refusing to substitute a base SHA or release edit authority', [input.unitWorktreePath]);
   const root = realpathSync(input.unitWorktreePath);
-  const top = realpathSync(runGit(['rev-parse', '--show-toplevel'], input.unitWorktreePath).trim());
+  const top = realpathSync(gitQueryText({ descriptor: { kind: 'show-toplevel' }, cwd: input.unitWorktreePath }).trim());
   if (root !== top) throw new CoordinationRuntimeError('unauthorized-client', 'failed-unit worktree path is not its exact Git toplevel', [root, top]);
-  const commonRaw = runGit(['rev-parse', '--git-common-dir'], input.unitWorktreePath).trim();
+  const commonRaw = gitQueryText({ descriptor: { kind: 'git-common-dir' }, cwd: input.unitWorktreePath }).trim();
   const common = realpathSync(isAbsolute(commonRaw) ? commonRaw : resolve(root, commonRaw));
   const expectedCommon = realpathSync(input.context.active.git_common_dir);
   if (common !== expectedCommon) throw new CoordinationRuntimeError('unauthorized-client', 'failed-unit worktree belongs to a foreign Git common directory', [common, expectedCommon]);
-  const branch = runGit(['symbolic-ref', '--quiet', '--short', 'HEAD'], input.unitWorktreePath).trim();
+  const branch = gitQueryText({ descriptor: { kind: 'current-branch' }, cwd: input.unitWorktreePath }).trim();
   const expectedBranch = `autopilot/unit/${input.context.active.workstream_run}/${input.unitId}/attempt-${String(input.attempt)}`;
   if (branch !== expectedBranch) throw new CoordinationRuntimeError('invalid-state', 'failed-unit worktree branch differs from deterministic durable ownership', [branch, expectedBranch]);
   const head = gitHead(input.unitWorktreePath);
   if (!/^[a-f0-9]{40,64}$/u.test(head)) throw new CoordinationRuntimeError('invalid-state', 'failed-unit worktree HEAD is not a full Git object id', [head]);
-  const status = parseFullStatus(runGit(['status', '--porcelain=v1', '-z', '--untracked-files=all', '--ignored=matching', '--ignore-submodules=none'], input.unitWorktreePath));
+  const status = parseFullStatus(gitQueryText({ descriptor: { kind: 'status-porcelain', includeIgnored: true }, cwd: input.unitWorktreePath }));
   return { head, branch, gitCommonDir: common, mutablePaths: status.mutablePaths, ignoredPaths: status.ignoredPaths };
 }
 
@@ -396,10 +398,10 @@ function assertNoNestedRepositoryResidue(root: string, paths: readonly string[])
 }
 
 function configuredSubmodulePaths(cwd: string): readonly string[] {
-  const result = spawnSync('git', ['config', '--file', '.gitmodules', '--get-regexp', '^[.]?submodule[.].*[.]path$'], { cwd, encoding: 'utf8', timeout: 30_000, maxBuffer: 1024 * 1024 });
-  if ((result.status ?? -1) === 1) return Object.freeze([]);
-  if ((result.status ?? -1) !== 0) throw new CoordinationRuntimeError('recovery-required', 'quarantine could not inspect submodule declarations', [result.stderr.trim()]);
-  return Object.freeze(result.stdout.split(/\r?\n/u).filter((line) => line.length > 0).map((line) => line.slice(line.indexOf(' ') + 1).trim().replace(/\\/gu, '/')).filter((path) => path.length > 0));
+  const result = runGitQuery({ descriptor: { kind: 'config-regexp', file: '.gitmodules', pattern: '^[.]?submodule[.].*[.]path$' }, cwd });
+  if (result.negative) return Object.freeze([]);
+  const output = new TextDecoder('utf-8', { fatal: true }).decode(result.stdout);
+  return Object.freeze(output.split('\0').filter((record) => record.length > 0).map((record) => record.slice(record.indexOf('\n') + 1).replace(/\\/gu, '/')).filter((path) => path.length > 0));
 }
 
 function failureEvidenceIdentity(input: UnitFailureInput, action: AutopilotUnitFailureAction): ReconciliationEvidenceIdentity {
@@ -475,7 +477,7 @@ async function writeFailureRecord(input: UnitFailureInput & { readonly action: A
   return { record, evidencePath };
 }
 
-async function failureBaselineHead(input: UnitFailureInput, beforeFacts: OwnedFailureWorktreeFacts): Promise<string> {
+async function assertFailureBaselineAncestor(input: UnitFailureInput, beforeFacts: OwnedFailureWorktreeFacts): Promise<void> {
   let baseline = input.baselineHead;
   if (baseline === undefined) {
     try {
@@ -490,49 +492,36 @@ async function failureBaselineHead(input: UnitFailureInput, beforeFacts: OwnedFa
     }
   }
   if (!/^[a-f0-9]{40,64}$/u.test(baseline)) throw new CoordinationRuntimeError('invalid-state', 'failed-unit baseline is not a full Git object id', [baseline]);
-  const ancestor = spawnSync('git', ['merge-base', '--is-ancestor', baseline, beforeFacts.head], { cwd: input.unitWorktreePath, encoding: 'utf8', timeout: 30_000 });
-  if ((ancestor.status ?? -1) !== 0) throw new CoordinationRuntimeError('recovery-required', 'failed-unit pre-capture HEAD does not descend from its exact attempt baseline', [baseline, beforeFacts.head, ancestor.stderr.trim()]);
-  return baseline;
+  const ancestor = runGitQuery({ descriptor: { kind: 'is-ancestor', ancestor: baseline, descendant: beforeFacts.head }, cwd: input.unitWorktreePath });
+  if (ancestor.negative) throw new CoordinationRuntimeError('recovery-required', 'failed-unit pre-capture HEAD does not descend from its exact attempt baseline', [baseline, beforeFacts.head]);
 }
 
 async function captureQuarantineSnapshot(input: UnitFailureInput & { readonly action: AutopilotUnitFailureAction }, beforeFacts: OwnedFailureWorktreeFacts): Promise<string> {
   const active = input.context.active;
-  const baselineHead = await failureBaselineHead(input, beforeFacts);
+  await assertFailureBaselineAncestor(input, beforeFacts);
   assertNoNestedRepositoryResidue(input.unitWorktreePath, beforeFacts.mutablePaths);
   const submodules = configuredSubmodulePaths(input.unitWorktreePath);
   const changedSubmodules = submodules.filter((submodule) => beforeFacts.mutablePaths.some((path) => path === submodule || path.startsWith(`${submodule}/`) || submodule.startsWith(`${path}/`)));
   if (changedSubmodules.length > 0) throw new CoordinationRuntimeError('recovery-required', 'quarantine cannot certify dirty submodule bytes as an immutable superproject capture', changedSubmodules);
-  const inspect = (): WorktreeSagaInspection => {
-    const facts = inspectOwnedFailureWorktree(input);
-    return facts.mutablePaths.length === 0 ? { outcome: 'satisfied', proof: [`head=${facts.head}`, `branch=${facts.branch}`, `git_common_dir=${facts.gitCommonDir}`, 'quarantine_capture_immutable', 'worktree_clean_including_ignored'] } : { outcome: 'not-applied', proof: facts.mutablePaths.slice(0, 128).map((path) => `mutable=${path}`) };
-  };
   await executeOwnedWorktreeSaga({
     active, unitId: input.unitId, attempt: input.attempt, kind: 'unit', operationType: 'quarantine',
-    operationKey: `${input.action}:${input.unitId}:${String(input.attempt)}:${beforeFacts.head}`,
     initialWorktreeState: 'active', committedWorktreeState: 'quarantined',
     intent: {
       repo_root: active.source_repo, worktree_path: input.unitWorktreePath, git_common_dir: active.git_common_dir, branch: beforeFacts.branch,
-      reason: `${input.action} dirty failed work before releasing edit authority`, base_sha: baselineHead, target_sha: beforeFacts.head, archive_ref: null,
+      reason: `${input.action} dirty failed work before releasing edit authority`, base_sha: beforeFacts.head, target_sha: beforeFacts.head, archive_ref: null,
       checkout_mode: null, sparse_patterns: [], paths: beforeFacts.mutablePaths, metadata_refs: [],
     },
   }, {
-    inspect,
-    action: () => {
+    action: async () => {
       if (inspectOwnedFailureWorktree(input).mutablePaths.length === 0) return;
       const env = {
         AUTOPILOT_RUNTIME: '1', AUTOPILOT_RUNTIME_AUTHORITY: 'unit-quarantine-capture',
         GIT_AUTHOR_NAME: 'autopilot-runtime', GIT_AUTHOR_EMAIL: 'autopilot-runtime@example.invalid',
         GIT_COMMITTER_NAME: 'autopilot-runtime', GIT_COMMITTER_EMAIL: 'autopilot-runtime@example.invalid',
       };
-      runGit(['add', '--sparse', '-f', '-A', '--', '.'], input.unitWorktreePath, env);
-      const staged = spawnSync('git', ['diff', '--cached', '--quiet', '--exit-code'], { cwd: input.unitWorktreePath, encoding: 'utf8', env: { ...process.env, ...env } });
-      if ((staged.status ?? -1) === 1) runGit(['commit', '--no-verify', '-m', `autopilot quarantine capture ${active.workstream_run} ${input.unitId} attempt ${String(input.attempt)}`], input.unitWorktreePath, env);
-      else if ((staged.status ?? -1) !== 0) throw new CoordinationRuntimeError('recovery-required', 'quarantine could not verify its staged capture', [staged.stderr.trim()]);
-    },
-    verify: () => {
-      const inspected = inspect();
-      if (inspected.outcome !== 'satisfied') throw new CoordinationRuntimeError('recovery-required', 'quarantine capture left mutable or ignored paths', inspected.proof);
-      return inspected.proof;
+      await runGitMutation({ descriptor: { kind: 'stage-paths', paths: ['.'], sparse: true, force: true }, cwd: input.unitWorktreePath, env });
+      const staged = runGitQuery({ descriptor: { kind: 'staged-clean' }, cwd: input.unitWorktreePath, env: { ...process.env, ...env } });
+      if (staged.negative) await runGitMutation({ descriptor: { kind: 'commit', message: `autopilot quarantine capture ${active.workstream_run} ${input.unitId} attempt ${String(input.attempt)}` }, cwd: input.unitWorktreePath, env });
     },
   }, input.env ?? process.env);
   return inspectOwnedFailureWorktree(input).head;

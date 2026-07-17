@@ -4,15 +4,20 @@ import { chmod, open, rename, unlink } from 'node:fs/promises';
 import { createServer, type Server, type Socket } from 'node:net';
 import { platform } from 'node:os';
 
-import { encodeCoordinatorFrame, parseCoordinatorLegacyReplayTransportRequest, parseCoordinatorTransportRequest, CoordinatorFrameDecoder, writeCoordinatorResponse, type CoordinatorLegacyReplayProtocol } from './ipc.ts';
+import { createCoordinatorAdmissionOffer, createCoordinatorAdmissionResponse, COORDINATOR_ADMISSION_ACTION, type CoordinatorAdmissionResponse } from './admission.ts';
+import { assertCoordinatorAdmissionAuthorityUnchanged, captureServingCoordinatorAdmissionAuthority, COORDINATOR_S1_ADMISSION_IDENTITY, type CoordinatorAdmissionAuthoritySnapshot } from './admission-runtime.ts';
+import { parseCoordinatorAdmissionTransportRequest, parseCoordinatorTransportRequest, CoordinatorFrameDecoder, writeCoordinatorResponse } from './ipc.ts';
 import { CoordinationRuntimeError } from './failures.ts';
 import { currentBootId, isProcessAlive, predecessorCompatibleBootId, processStartIdentity } from './process-identity.ts';
 import { COORDINATOR_GRANT_OFFER_SWEEP_MS, enforcePrivateAuthorityPath, ensureCoordinatorPrivateRoots, readOrCreateCoordinatorCapability, type CoordinatorRuntimePaths } from './runtime-paths.ts';
 import { acquireSerializedProcessGuard, discardLockTombstone, quarantineExactLock, readExactLockText, restoreLockTombstone } from './serialized-lock.ts';
 import { CoordinatorStore, type StoreClock } from './store.ts';
-import { AUTOPILOT_COORDINATOR_PROTOCOL_VERSION, type CoordinatorResponseEnvelope } from './types.ts';
+import { CoordinatorSocketPeerState, type CoordinatorS1Surface } from './peer-admission-state.ts';
+import { CoordinatorWriterGuard } from './writer-guard.ts';
+import { AUTOPILOT_COORDINATOR_PROTOCOL_VERSION, type CoordinatorRequestEnvelope, type CoordinatorResponseEnvelope } from './types.ts';
 import { readKnownCoordinatorUpgradeIntent, recordCoordinatorFenceHandoff } from './upgrade.ts';
 import { COORDINATOR_PACKAGE_BUILD } from './runtime-constants.ts';
+import { publishCoordinatorRuntimeIdentity, readAndVerifyCoordinatorRuntimeIdentity } from './runtime-identity.ts';
 import type { CoordinatorStartupObserver } from './startup-observation.ts';
 import { COORDINATOR_UPGRADE_PATH, parseCurrentCoordinatorLock, parseKnownCompatibleCurrentCoordinatorLock, parsePredecessorCoordinatorLock, parsePriorSchema11CurrentCoordinatorLock, parsePriorSchema10CurrentCoordinatorLock, parsePriorSchema9CurrentCoordinatorLock, type CurrentCoordinatorLock, type KnownCompatibleCurrentCoordinatorLock, type PredecessorCoordinatorLock } from './upgrade-contracts.ts';
 
@@ -38,6 +43,25 @@ export class CoordinatorAlreadyRunningError extends Error {
 }
 
 function failureText(error: unknown): string { return error instanceof Error ? error.message : String(error); }
+
+function requirePreparedStore(store: CoordinatorStore | null): CoordinatorStore {
+  if (store === null) throw new CoordinationRuntimeError('system-fatal', 'lifecycle authority published before store preparation completed');
+  return store;
+}
+
+function requirePreparedCapability(capability: string | null): string {
+  if (capability === null) throw new CoordinationRuntimeError('system-fatal', 'lifecycle authority published before capability preparation completed');
+  return capability;
+}
+
+function requirePreparedWriterGuard(writerGuard: CoordinatorWriterGuard | null): CoordinatorWriterGuard {
+  if (writerGuard === null) throw new CoordinationRuntimeError('system-fatal', 'lifecycle authority published before writer authority was acquired');
+  return writerGuard;
+}
+
+function closePreparedStore(store: CoordinatorStore | null): void { store?.close(); }
+
+function releasePreparedWriterGuard(writerGuard: CoordinatorWriterGuard | null): void { writerGuard?.release(); }
 
 function sameCurrentLock(left: LockRecord, right: LockRecord): boolean {
   return left.pid === right.pid && left.boot_id === right.boot_id && left.process_start_identity === right.process_start_identity && left.token === right.token && left.instance_id === right.instance_id && left.package_build === right.package_build && left.protocol_version === right.protocol_version && left.database_schema_version === right.database_schema_version && left.started_at === right.started_at;
@@ -66,7 +90,7 @@ async function replacePredecessorFence(path: string, fence: PredecessorCoordinat
   await enforcePrivateAuthorityPath(path, false);
 }
 
-async function acquireCoordinatorLock(paths: CoordinatorRuntimePaths, adoption?: CoordinatorStartupAdoption): Promise<CoordinatorLock> {
+async function acquireCoordinatorLock(paths: CoordinatorRuntimePaths, adoption?: CoordinatorStartupAdoption, beforeAuthorityPublication?: (record: LockRecord) => Promise<void>): Promise<CoordinatorLock> {
   await ensureCoordinatorPrivateRoots(paths);
   const election = adoption === undefined
     ? acquireSerializedProcessGuard(paths.lifecycleElectionPath, 10_000, 'coordinator lifecycle election')
@@ -74,6 +98,8 @@ async function acquireCoordinatorLock(paths: CoordinatorRuntimePaths, adoption?:
   let currentTombstone: string | null = null;
   let predecessorTombstone: string | null = null;
   let predecessorRestore: PredecessorCoordinatorLock | null = null;
+  let upgradeHandoffPredecessor: PredecessorCoordinatorLock | null = null;
+  let predecessorWasAbsent = false;
   let createdCurrent = false;
   let createdFence = false;
   let provenStaleCurrentOwner: KnownCompatibleCurrentCoordinatorLock | ReturnType<typeof parsePriorSchema11CurrentCoordinatorLock> | ReturnType<typeof parsePriorSchema10CurrentCoordinatorLock> | ReturnType<typeof parsePriorSchema9CurrentCoordinatorLock> = null;
@@ -99,10 +125,14 @@ async function acquireCoordinatorLock(paths: CoordinatorRuntimePaths, adoption?:
     const currentText = await readExactLockText(paths.lockPath);
     if (currentText !== null) {
       let current: KnownCompatibleCurrentCoordinatorLock | ReturnType<typeof parsePriorSchema11CurrentCoordinatorLock> | ReturnType<typeof parsePriorSchema10CurrentCoordinatorLock> | ReturnType<typeof parsePriorSchema9CurrentCoordinatorLock> = null;
+      let knownButNotCf50: KnownCompatibleCurrentCoordinatorLock | null = null;
       try {
         const parsed: unknown = JSON.parse(currentText) as unknown;
-        current = parseKnownCompatibleCurrentCoordinatorLock(parsed) ?? parsePriorSchema11CurrentCoordinatorLock(parsed) ?? parsePriorSchema10CurrentCoordinatorLock(parsed) ?? parsePriorSchema9CurrentCoordinatorLock(parsed);
+        const compatible = parseKnownCompatibleCurrentCoordinatorLock(parsed);
+        if (compatible !== null && compatible.package_build !== COORDINATOR_PACKAGE_BUILD) knownButNotCf50 = compatible;
+        else current = compatible ?? parsePriorSchema11CurrentCoordinatorLock(parsed) ?? parsePriorSchema10CurrentCoordinatorLock(parsed) ?? parsePriorSchema9CurrentCoordinatorLock(parsed);
       } catch { /* fail below */ }
+      if (knownButNotCf50 !== null) throw new CoordinationRuntimeError('protocol-mismatch', 'ordinary S1 startup accepts only the exact cf50 façade as its live or retired wire predecessor', [`observed_build=${knownButNotCf50.package_build}`]);
       if (current === null) throw new CoordinationRuntimeError('protocol-mismatch', 'current-generation lifecycle lock belongs to an unknown build');
       // Boot-id disagreement is never stale proof. Current-generation locks also
       // carry OS process-birth identity, so PID reuse can be distinguished from
@@ -115,10 +145,6 @@ async function acquireCoordinatorLock(paths: CoordinatorRuntimePaths, adoption?:
       provenStaleCurrentOwner = current;
       currentTombstone = await quarantineExactLock(paths.lockPath, currentText, 'dead or PID-reused current-generation coordinator lock');
     }
-    const currentHandle = await open(paths.lockPath, 'wx', 0o600);
-    try { await currentHandle.writeFile(`${JSON.stringify(record)}\n`, 'utf8'); await currentHandle.sync(); } finally { await currentHandle.close(); }
-    await enforcePrivateAuthorityPath(paths.lockPath, false);
-    createdCurrent = true;
 
     const predecessorText = await readExactLockText(paths.predecessorLockPath);
     if (predecessorText !== null) {
@@ -133,19 +159,25 @@ async function acquireCoordinatorLock(paths: CoordinatorRuntimePaths, adoption?:
       if (isProcessAlive(predecessor.pid) && !authorizedHandoff && !pairedProvenStaleFence) throw new CoordinatorAlreadyRunningError(`predecessor lifecycle path is fenced by live pid ${String(predecessor.pid)}`);
       if (authorizedHandoff) {
         predecessorRestore = predecessor;
-        await replacePredecessorFence(paths.predecessorLockPath, predecessorFence);
-        createdFence = true;
-        if (upgradeHandoff) await recordCoordinatorFenceHandoff(paths, predecessor, predecessorFence);
-        adoption?.adopted(predecessorFence);
-      } else {
-        predecessorTombstone = await quarantineExactLock(paths.predecessorLockPath, predecessorText, 'dead predecessor fence replacement');
-        await writePredecessorFence(paths.predecessorLockPath, predecessorFence);
-        createdFence = true;
-      }
-    } else {
-      await writePredecessorFence(paths.predecessorLockPath, predecessorFence);
-      createdFence = true;
-    }
+        if (upgradeHandoff) upgradeHandoffPredecessor = predecessor;
+      } else predecessorTombstone = await quarantineExactLock(paths.predecessorLockPath, predecessorText, 'dead predecessor fence replacement');
+    } else predecessorWasAbsent = true;
+
+    // The lifecycle election remains held, but no new S1 lock/fence exists yet.
+    // Generation verification/migration and the digest-bound runtime sidecar
+    // therefore complete before lifecycle/socket reachability.
+    await beforeAuthorityPublication?.(record);
+
+    const currentHandle = await open(paths.lockPath, 'wx', 0o600);
+    try { await currentHandle.writeFile(`${JSON.stringify(record)}\n`, 'utf8'); await currentHandle.sync(); } finally { await currentHandle.close(); }
+    await enforcePrivateAuthorityPath(paths.lockPath, false);
+    createdCurrent = true;
+    if (predecessorRestore !== null) await replacePredecessorFence(paths.predecessorLockPath, predecessorFence);
+    else if (predecessorTombstone !== null || predecessorWasAbsent) await writePredecessorFence(paths.predecessorLockPath, predecessorFence);
+    else throw new CoordinationRuntimeError('system-fatal', 'predecessor fence publication state is incomplete');
+    createdFence = true;
+    if (upgradeHandoffPredecessor !== null) await recordCoordinatorFenceHandoff(paths, upgradeHandoffPredecessor, predecessorFence);
+    if (predecessorRestore !== null) adoption?.adopted(predecessorFence);
     if (currentTombstone !== null) { await discardLockTombstone(currentTombstone); currentTombstone = null; }
     if (predecessorTombstone !== null) { await discardLockTombstone(predecessorTombstone); predecessorTombstone = null; }
 
@@ -254,16 +286,6 @@ function authenticated(provided: string, expected: string): boolean {
   return left.byteLength === right.byteLength && timingSafeEqual(left, right);
 }
 
-function writeLegacyReplayResponse(socket: Socket, response: CoordinatorResponseEnvelope, protocol: CoordinatorLegacyReplayProtocol): Promise<void> {
-  const legacy = { ...response, protocol_version: protocol };
-  return new Promise<void>((resolveWrite, rejectWrite) => {
-    socket.write(encodeCoordinatorFrame(legacy), (error) => {
-      if (error === undefined || error === null) resolveWrite();
-      else rejectWrite(error);
-    });
-  });
-}
-
 function errorResponse(requestId: string, error: unknown): CoordinatorResponseEnvelope {
   const runtime = error instanceof CoordinationRuntimeError ? error : new CoordinationRuntimeError('system-fatal', error instanceof Error ? error.message : String(error));
   return {
@@ -281,73 +303,226 @@ function errorResponse(requestId: string, error: unknown): CoordinatorResponseEn
 export interface CoordinatorServerTestHooks {
   /** Explicit subprocess-only crash witness after a committed response is durable and before socket encoding. */
   readonly afterStoreCommitBeforeResponse?: (action: string, response: CoordinatorResponseEnvelope) => void | Promise<void>;
+  /** Isolated authority-tamper witness after signing and before the admission frame is written. */
+  readonly afterAdmissionAttestedBeforeResponse?: (response: CoordinatorAdmissionResponse) => void | Promise<void>;
+  /** Isolated witness proving endpoint revalidation occurs before a negotiated operation reaches the store. */
+  readonly beforeNegotiatedStoreOperation?: (action: string) => void | Promise<void>;
 }
 
-function handleSocket(socket: Socket, store: CoordinatorStore, capability: string, paths: CoordinatorRuntimePaths, lifecycle: CurrentCoordinatorLock, backgroundFailure: () => Error | null, firstExactHandshake: () => Promise<void>, testHooks?: CoordinatorServerTestHooks): void {
+interface JsonObject { readonly [key: string]: unknown }
+
+function jsonObject(value: unknown): JsonObject | null {
+  return typeof value === 'object' && value !== null && !Array.isArray(value) ? value as JsonObject : null;
+}
+
+function untrustedFrameAction(frame: unknown): string | null {
+  const transport = jsonObject(frame);
+  const request = transport === null ? null : jsonObject(transport['request']);
+  const action = request?.['action'];
+  return typeof action === 'string' ? action : null;
+}
+
+function operationType(value: unknown): string | null {
+  const operation = jsonObject(value);
+  const type = operation?.['operation_type'];
+  return typeof type === 'string' ? type : null;
+}
+
+function requestS1Surface(store: CoordinatorStore, request: CoordinatorRequestEnvelope): CoordinatorS1Surface | null {
+  if (request.action === 'prepare-operation' && operationType(request.payload['operation']) === 'metadata-reconcile') return 'canonical-worktree-aliases';
+  if (request.action !== 'transition-operation' || request.workstream_run === null) return null;
+  const operationId = request.payload['operation_id'];
+  if (typeof operationId !== 'string') return null;
+  const operations = store.status(request.repo_id, request.workstream_run).payload['worktree_operations'];
+  if (!Array.isArray(operations)) throw new CoordinationRuntimeError('store-corrupt', 'worktree operation projection is unavailable for vocabulary enforcement');
+  for (const candidate of operations) {
+    const operation = jsonObject(candidate);
+    if (operation?.['operation_id'] === operationId) return operationType(operation) === 'metadata-reconcile' ? 'canonical-worktree-aliases' : null;
+  }
+  return null;
+}
+
+function negotiatedProjectionResponse(store: CoordinatorStore, peer: CoordinatorSocketPeerState, request: CoordinatorRequestEnvelope, response: CoordinatorResponseEnvelope): CoordinatorResponseEnvelope {
+  if (!response.ok || (request.action !== 'status' && request.action !== 'doctor') || response.payload['section'] !== 'summary') return response;
+  const projection = jsonObject(response.payload['projection']);
+  if (projection === null) throw new CoordinationRuntimeError('store-corrupt', 'coordinator projection summary is malformed');
+  const negotiated: Record<string, unknown> = { ...projection };
+  if (peer.grantedVocabulary.has('store-generations-v1')) negotiated['negotiated_coordinator_identity'] = store.negotiatedIdentityObservability();
+  if (peer.grantedVocabulary.has('scoped-logical-faults-v1')) negotiated['run_scoped_logical_faults'] = store.negotiatedRunScopedFaults(request.repo_id, request.workstream_run);
+  return Object.freeze({ ...response, payload: Object.freeze({ ...response.payload, projection: Object.freeze(negotiated) }) });
+}
+
+function admissionEnvelope(requestId: string, payload: CoordinatorAdmissionResponse): CoordinatorResponseEnvelope {
+  return Object.freeze({
+    schema_version: 'autopilot.coordinator_response.v1',
+    protocol_version: AUTOPILOT_COORDINATOR_PROTOCOL_VERSION,
+    request_id: requestId,
+    ok: true,
+    committed_event_seq: null,
+    error_code: null,
+    retryable: false,
+    payload: Object.freeze({ ...payload }),
+  });
+}
+
+export const COORDINATOR_SHUTDOWN_DRAIN_TIMEOUT_MS = 30_000;
+
+class CoordinatorRequestDrain {
+  readonly #sockets = new Map<Socket, number>();
+  readonly #pending = new Set<Promise<void>>();
+  #draining = false;
+
+  register(socket: Socket): boolean {
+    if (this.#draining) { socket.destroy(); return false; }
+    this.#sockets.set(socket, 0);
+    socket.on('close', () => { this.#sockets.delete(socket); });
+    return true;
+  }
+
+  acceptRequest(socket: Socket): boolean {
+    if (!this.#draining && this.#sockets.has(socket)) return true;
+    socket.destroy();
+    return false;
+  }
+
+  track(socket: Socket, pending: Promise<void>): void {
+    const active = this.#sockets.get(socket);
+    if (active === undefined) throw new CoordinationRuntimeError('system-fatal', 'coordinator request began outside registered socket authority');
+    this.#sockets.set(socket, active + 1);
+    this.#pending.add(pending);
+    const settled = (): void => {
+      this.#pending.delete(pending);
+      const remaining = this.#sockets.get(socket);
+      if (remaining === undefined) return;
+      if (remaining <= 1) {
+        this.#sockets.set(socket, 0);
+        if (this.#draining) socket.destroy();
+      } else this.#sockets.set(socket, remaining - 1);
+    };
+    void pending.then(settled, settled);
+  }
+
+  beginDrain(): void {
+    if (this.#draining) return;
+    this.#draining = true;
+    for (const [socket, active] of this.#sockets) if (active === 0) socket.destroy();
+  }
+
+  async waitForDrain(timeoutMs = COORDINATOR_SHUTDOWN_DRAIN_TIMEOUT_MS): Promise<void> {
+    if (!this.#draining) throw new CoordinationRuntimeError('system-fatal', 'coordinator request drain was awaited before listener retirement began');
+    if (this.#pending.size === 0) return;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const timeout = new Promise<void>((_resolve, reject) => {
+      timer = setTimeout(() => {
+        for (const socket of this.#sockets.keys()) socket.destroy();
+        reject(new CoordinationRuntimeError('system-fatal', 'coordinator shutdown could not drain in-flight requests within the bounded deadline; store, lifecycle, and writer authority remain retained until process death', [`pending_requests=${String(this.#pending.size)}`, `timeout_ms=${String(timeoutMs)}`]));
+      }, timeoutMs);
+    });
+    try { await Promise.race([Promise.all([...this.#pending]).then(() => undefined), timeout]); }
+    finally { if (timer !== null) clearTimeout(timer); }
+  }
+}
+
+function handleSocket(socket: Socket, store: CoordinatorStore, capability: string, paths: CoordinatorRuntimePaths, lifecycle: CurrentCoordinatorLock, backgroundFailure: () => Error | null, firstExactHandshake: () => Promise<void>, requestDrain: CoordinatorRequestDrain, testHooks?: CoordinatorServerTestHooks): void {
+  if (!requestDrain.register(socket)) return;
   const decoder = new CoordinatorFrameDecoder();
+  const peer = new CoordinatorSocketPeerState();
+  let handshakeAuthority: CoordinatorAdmissionAuthoritySnapshot | null = null;
+  let admittedAuthority: CoordinatorAdmissionAuthoritySnapshot | null = null;
   let chain = Promise.resolve();
+  // Transport failure is scoped to this peer. In particular, an abrupt client
+  // disconnect during an asynchronous authority check or response write must
+  // never become an unhandled EventEmitter error that terminates the service.
+  socket.on('error', () => { peer.close(); socket.destroy(); });
   socket.on('data', (chunk: NodeBuffer) => {
+    if (!requestDrain.acceptRequest(socket)) return;
     chain = chain.then(async () => {
       const frames = decoder.push(chunk);
       for (const frame of frames) {
         let requestId = `transport-error-${randomBytes(8).toString('hex')}`;
         try {
           let response: CoordinatorResponseEnvelope | null = null;
-          let legacyReplayProtocol: CoordinatorLegacyReplayProtocol | null = null;
-          let action: string | null = null;
           let currentTransport: ReturnType<typeof parseCoordinatorTransportRequest> | null = null;
+          let admissionTransport: ReturnType<typeof parseCoordinatorAdmissionTransportRequest> | null = null;
           try { currentTransport = parseCoordinatorTransportRequest(frame); }
           catch (currentProtocolError) {
-            let legacy: ReturnType<typeof parseCoordinatorLegacyReplayTransportRequest>;
-            try { legacy = parseCoordinatorLegacyReplayTransportRequest(frame); }
-            catch { throw currentProtocolError; }
-            const legacyRequestId = legacy.request['request_id'];
-            if (typeof legacyRequestId === 'string') requestId = legacyRequestId;
-            if (!authenticated(legacy.capability, capability)) throw new CoordinationRuntimeError('unauthorized-client', 'coordinator capability proof was rejected');
-            action = typeof legacy.request['action'] === 'string' ? legacy.request['action'] : null;
-            const timerFailure = backgroundFailure();
-            if (timerFailure !== null) throw new CoordinationRuntimeError('system-fatal', `coordinator predecessor fence maintenance failed: ${timerFailure.message}`);
-            const upgradeIntent = await readKnownCoordinatorUpgradeIntent(paths);
-            if (upgradeIntent !== null && upgradeIntent.state !== 'committed' && action !== 'handshake' && action !== 'status' && action !== 'doctor') throw new CoordinationRuntimeError('coordinator-contention', 'coordinator upgrade is not durably committed; mutation/replay authority remains closed');
-            response = store.replayLegacyRequest(legacy.request);
-            legacyReplayProtocol = legacy.replay_protocol;
+            if (untrustedFrameAction(frame) === COORDINATOR_ADMISSION_ACTION) {
+              try { admissionTransport = parseCoordinatorAdmissionTransportRequest(frame, COORDINATOR_S1_ADMISSION_IDENTITY); }
+              catch (admissionError) { peer.close(); throw admissionError; }
+            } else throw currentProtocolError;
+          }
+          if (admissionTransport !== null) {
+            requestId = admissionTransport.request.request_id;
+            if (!authenticated(admissionTransport.capability, capability)) throw new CoordinationRuntimeError('unauthorized-client', 'coordinator capability proof was rejected');
+            peer.acceptRequest(COORDINATOR_ADMISSION_ACTION);
+            const initial = handshakeAuthority;
+            if (initial === null) throw new CoordinationRuntimeError('unauthorized-client', 'admission has no same-socket handshake authority');
+            const observed = await captureServingCoordinatorAdmissionAuthority({ paths, expectedLifecycle: lifecycle, expectedGeneration: store.currentGeneration() });
+            assertCoordinatorAdmissionAuthorityUnchanged(initial, observed);
+            const admission = createCoordinatorAdmissionResponse({ request: admissionTransport.request.payload, identity: COORDINATOR_S1_ADMISSION_IDENTITY, endpoint: observed.endpoint, capability });
+            response = admissionEnvelope(requestId, admission);
+            peer.completeAdmission(admission);
+            if (admission.admitted) admittedAuthority = observed;
+            await testHooks?.afterAdmissionAttestedBeforeResponse?.(admission);
           }
           if (currentTransport !== null) {
             requestId = currentTransport.request.request_id;
-            action = currentTransport.request.action;
+            const request = currentTransport.request;
             if (!authenticated(currentTransport.capability, capability)) throw new CoordinationRuntimeError('unauthorized-client', 'coordinator capability proof was rejected');
+            const surface = peer.state === 'awaiting-handshake' ? null : requestS1Surface(store, request);
+            peer.acceptRequest(request.action, surface);
             const timerFailure = backgroundFailure();
             if (timerFailure !== null) throw new CoordinationRuntimeError('system-fatal', `coordinator predecessor fence maintenance failed: ${timerFailure.message}`);
             const upgradeIntent = await readKnownCoordinatorUpgradeIntent(paths);
-            if (upgradeIntent !== null && upgradeIntent.state !== 'committed' && action !== 'handshake' && action !== 'status' && action !== 'doctor') throw new CoordinationRuntimeError('coordinator-contention', 'coordinator upgrade is not durably committed; mutation authority remains closed');
-            response = store.handle(currentTransport.request);
-            if (response.ok && currentTransport.request.action === 'handshake') {
-              response = {
-                ...response,
-                payload: {
-                  ...response.payload,
-                  lifecycle_lock_schema: lifecycle.schema_version,
-                  lifecycle_pid: lifecycle.pid,
-                  lifecycle_boot_id: lifecycle.boot_id,
-                  lifecycle_process_start_identity: lifecycle.process_start_identity,
-                  lifecycle_instance_id: lifecycle.instance_id,
-                  lifecycle_started_at: lifecycle.started_at,
-                },
-              };
-              await firstExactHandshake();
+            if (upgradeIntent !== null && upgradeIntent.state !== 'committed' && request.action !== 'handshake' && request.action !== 'status' && request.action !== 'doctor') throw new CoordinationRuntimeError('coordinator-contention', 'coordinator upgrade is not durably committed; mutation authority remains closed');
+            if (request.action === 'handshake') {
+              handshakeAuthority = await captureServingCoordinatorAdmissionAuthority({ paths, expectedLifecycle: lifecycle, expectedGeneration: store.currentGeneration() });
+              const legacy = store.handle(request);
+              if (!legacy.ok) response = legacy;
+              else {
+                response = Object.freeze({
+                  ...legacy,
+                  payload: Object.freeze({
+                    schema_version: 'autopilot.coordinator_handshake.v1',
+                    package_build: lifecycle.package_build,
+                    protocol_version: lifecycle.protocol_version,
+                    database_schema_version: lifecycle.database_schema_version,
+                    lifecycle_lock_schema: lifecycle.schema_version,
+                    lifecycle_pid: lifecycle.pid,
+                    lifecycle_boot_id: lifecycle.boot_id,
+                    lifecycle_process_start_identity: lifecycle.process_start_identity,
+                    lifecycle_instance_id: lifecycle.instance_id,
+                    lifecycle_started_at: lifecycle.started_at,
+                    admission_upgrade: createCoordinatorAdmissionOffer(COORDINATOR_S1_ADMISSION_IDENTITY),
+                  }),
+                });
+                await firstExactHandshake();
+              }
+            } else {
+              if (peer.peerMode === 'negotiated-s1') {
+                const initial = admittedAuthority;
+                if (initial === null) throw new CoordinationRuntimeError('unauthorized-client', 'negotiated peer has no same-socket admission authority');
+                const observed = await captureServingCoordinatorAdmissionAuthority({ paths, expectedLifecycle: lifecycle, expectedGeneration: store.currentGeneration() });
+                assertCoordinatorAdmissionAuthorityUnchanged(initial, observed);
+                await testHooks?.beforeNegotiatedStoreOperation?.(request.action);
+              }
+              response = store.handle(request);
+              if (peer.peerMode === 'negotiated-s1') response = negotiatedProjectionResponse(store, peer, request, response);
+              if (response.ok && response.committed_event_seq !== null) await testHooks?.afterStoreCommitBeforeResponse?.(request.action, response);
             }
-            if (response.ok && response.committed_event_seq !== null) await testHooks?.afterStoreCommitBeforeResponse?.(currentTransport.request.action, response);
           }
           if (response === null) throw new CoordinationRuntimeError('system-fatal', 'coordinator request parsing produced no response path');
-          if (legacyReplayProtocol !== null) await writeLegacyReplayResponse(socket, response, legacyReplayProtocol);
-          else await writeCoordinatorResponse(socket, response);
+          await writeCoordinatorResponse(socket, response);
         } catch (error) {
-          await writeCoordinatorResponse(socket, errorResponse(requestId, error));
+          peer.close();
+          if (!socket.destroyed) await writeCoordinatorResponse(socket, errorResponse(requestId, error));
         }
       }
-    }).catch(() => socket.destroy());
+    }).catch(() => { peer.close(); socket.destroy(); });
+    requestDrain.track(socket, chain);
   });
   socket.on('end', () => {
+    peer.close();
     try {
       decoder.assertComplete();
     } catch {
@@ -381,6 +556,13 @@ function closeServer(server: Server): Promise<void> {
   });
 }
 
+function observeServerClose(server: Server): Promise<Error | null> {
+  return closeServer(server).then(
+    () => null,
+    (error: unknown) => error instanceof Error ? error : new Error(String(error)),
+  );
+}
+
 export interface RunningCoordinator {
   readonly paths: CoordinatorRuntimePaths;
   readonly store: CoordinatorStore;
@@ -390,72 +572,90 @@ export interface RunningCoordinator {
 export async function startCoordinatorServer(paths: CoordinatorRuntimePaths, clock?: StoreClock, adoption?: CoordinatorStartupAdoption, testHooks?: CoordinatorServerTestHooks, startupObserver?: CoordinatorStartupObserver): Promise<RunningCoordinator> {
   await startupObserver?.transition('before-lifecycle-election');
   await ensureCoordinatorPrivateRoots(paths);
-  const lifecycleLock = await acquireCoordinatorLock(paths, adoption);
-  await startupObserver?.transition('after-lifecycle-lock-acquisition', lifecycleLock.record);
+  let writerGuard: CoordinatorWriterGuard | null = null;
+  let lifecycleLock: CoordinatorLock | null = null;
   let store: CoordinatorStore | null = null;
+  let capability: string | null = null;
   let server: Server | null = null;
   let offerTimer: ReturnType<typeof setInterval> | null = null;
   let serverListening = false;
+  const requestDrain = new CoordinatorRequestDrain();
   try {
-    await startupObserver?.transition('before-private-root-capability-setup', lifecycleLock.record);
-    const capability = await readOrCreateCoordinatorCapability(paths);
-    await startupObserver?.transition('after-private-root-capability-setup', lifecycleLock.record);
-    if (platform() !== 'win32' && existsSync(paths.socketPath)) await unlink(paths.socketPath);
-    await startupObserver?.transition('before-sqlite-open-reconciliation', lifecycleLock.record);
-    store = clock === undefined ? await CoordinatorStore.open(paths) : await CoordinatorStore.open(paths, clock);
-    await startupObserver?.transition('after-sqlite-open-reconciliation', lifecycleLock.record);
-    const openedStore = store;
+    lifecycleLock = await acquireCoordinatorLock(paths, adoption, async (plannedLifecycle) => {
+      // The serialized lifecycle election chooses the only candidate before it
+      // attempts process-lifetime writer authority. The observer boundary is
+      // inside that election and before capability validation, so every startup
+      // phase remains independently testable without letting a loser block on
+      // the winner's writer guard.
+      await startupObserver?.transition('after-lifecycle-lock-acquisition', plannedLifecycle);
+      writerGuard = await CoordinatorWriterGuard.acquire(paths);
+      const preparedWriterGuard = writerGuard;
+      await startupObserver?.transition('before-private-root-capability-setup', plannedLifecycle);
+      capability = await readOrCreateCoordinatorCapability(paths);
+      await startupObserver?.transition('after-private-root-capability-setup', plannedLifecycle);
+      if (platform() !== 'win32' && existsSync(paths.socketPath)) await unlink(paths.socketPath);
+      await startupObserver?.transition('before-sqlite-open-reconciliation', plannedLifecycle);
+      store = clock === undefined ? await CoordinatorStore.open(paths, undefined, { writerGuard: preparedWriterGuard }) : await CoordinatorStore.open(paths, clock, { writerGuard: preparedWriterGuard });
+      await startupObserver?.transition('after-sqlite-open-reconciliation', plannedLifecycle);
+      await publishCoordinatorRuntimeIdentity(paths, store.currentGeneration(), plannedLifecycle, preparedWriterGuard);
+      readAndVerifyCoordinatorRuntimeIdentity(paths, store.currentGeneration(), plannedLifecycle);
+    });
+    const acquiredLifecycleLock = lifecycleLock;
+    const openedWriterGuard = requirePreparedWriterGuard(writerGuard);
+    const openedStore = requirePreparedStore(store);
+    const openedCapability = requirePreparedCapability(capability);
     let timerFailure: Error | null = null;
     let firstHandshakeTransition: Promise<void> | null = null;
     const firstExactHandshake = async (): Promise<void> => {
-      firstHandshakeTransition ??= startupObserver?.transition('first-exact-handshake-served', lifecycleLock.record) ?? Promise.resolve();
+      firstHandshakeTransition ??= startupObserver?.transition('first-exact-handshake-served', acquiredLifecycleLock.record) ?? Promise.resolve();
       await firstHandshakeTransition;
     };
-    server = createServer((socket) => handleSocket(socket, openedStore, capability, paths, lifecycleLock.record, () => timerFailure, firstExactHandshake, testHooks));
-    await startupObserver?.transition('before-socket-bind', lifecycleLock.record);
+    server = createServer((socket) => handleSocket(socket, openedStore, openedCapability, paths, acquiredLifecycleLock.record, () => timerFailure, firstExactHandshake, requestDrain, testHooks));
+    await startupObserver?.transition('before-socket-bind', acquiredLifecycleLock.record);
     await listen(server, paths.socketPath);
     serverListening = true;
-    await startupObserver?.transition('after-listen-before-lifecycle-activation', lifecycleLock.record);
+    await startupObserver?.transition('after-listen-before-lifecycle-activation', acquiredLifecycleLock.record);
     const openedServer = server;
     if (platform() !== 'win32') await chmod(paths.socketPath, 0o600);
     // Schema migration, current socket publication, and old-format fence handoff
     // all complete under one lifecycle election. Only then may another startup or
     // restore operation enter the election.
-    lifecycleLock.activate();
-    await startupObserver?.transition('after-activation-before-first-handshake', lifecycleLock.record);
+    acquiredLifecycleLock.activate();
+    await startupObserver?.transition('after-activation-before-first-handshake', acquiredLifecycleLock.record);
     offerTimer = setInterval(() => {
-      void lifecycleLock.verifyOrRepairFence().then((outcome) => {
+      void acquiredLifecycleLock.verifyOrRepairFence().then((outcome) => {
         if (outcome === 'verified') openedStore.sweepExpiredGrantOffers();
         timerFailure = null;
       }).catch((error: unknown) => {
         timerFailure = error instanceof Error ? error : new Error(String(error));
       });
     }, COORDINATOR_GRANT_OFFER_SWEEP_MS);
-    let closed = false;
-    let serverClosed = false;
-    let storeClosed = false;
+    let closePromise: Promise<void> | null = null;
     return {
       paths,
       store: openedStore,
-      close: async () => {
-        if (closed) return;
-        if (offerTimer !== null) clearInterval(offerTimer);
-        offerTimer = null;
-        if (!serverClosed) {
-          await closeServer(openedServer);
-          serverClosed = true;
-        }
-        if (platform() !== 'win32') {
-          await unlink(paths.socketPath).catch((unlinkError: unknown) => {
-            if (!(unlinkError instanceof Error && 'code' in unlinkError && unlinkError.code === 'ENOENT')) throw unlinkError;
-          });
-        }
-        if (!storeClosed) {
+      close: () => {
+        closePromise ??= (async () => {
+          if (offerTimer !== null) clearInterval(offerTimer);
+          offerTimer = null;
+          // Calling server.close synchronously retires listener acceptance. Only
+          // then may queued requests drain; idle/exhausted sockets are destroyed
+          // so the listener callback cannot outlive request authority.
+          const listenerClose = observeServerClose(openedServer);
+          requestDrain.beginDrain();
+          await requestDrain.waitForDrain();
+          const listenerCloseError = await listenerClose;
+          if (listenerCloseError !== null) throw listenerCloseError;
+          if (platform() !== 'win32') {
+            await unlink(paths.socketPath).catch((unlinkError: unknown) => {
+              if (!(unlinkError instanceof Error && 'code' in unlinkError && unlinkError.code === 'ENOENT')) throw unlinkError;
+            });
+          }
           openedStore.close();
-          storeClosed = true;
-        }
-        await lifecycleLock.release();
-        closed = true;
+          await acquiredLifecycleLock.release();
+          openedWriterGuard.release();
+        })();
+        return closePromise;
       },
     };
   } catch (error) {
@@ -464,24 +664,29 @@ export async function startCoordinatorServer(paths: CoordinatorRuntimePaths, clo
     offerTimer = null;
     if (server !== null && serverListening) {
       try {
-        await closeServer(server);
+        const listenerClose = observeServerClose(server);
+        requestDrain.beginDrain();
+        await requestDrain.waitForDrain();
+        const listenerCloseError = await listenerClose;
+        if (listenerCloseError !== null) throw listenerCloseError;
       } catch (closeError) {
-        cleanupFailures.push(`server-close: ${closeError instanceof Error ? closeError.message : String(closeError)}`);
-      }
-    }
-    if (store !== null) {
-      try {
-        store.close();
-      } catch (closeError) {
-        cleanupFailures.push(`store-close: ${closeError instanceof Error ? closeError.message : String(closeError)}`);
+        cleanupFailures.push(`server-drain-close: ${closeError instanceof Error ? closeError.message : String(closeError)}`);
       }
     }
     try {
-      await lifecycleLock.abortStartup();
-    } catch (releaseError) {
-      cleanupFailures.push(`lock-release: ${releaseError instanceof Error ? releaseError.message : String(releaseError)}`);
+      closePreparedStore(store);
+    } catch (closeError) {
+      cleanupFailures.push(`store-close: ${closeError instanceof Error ? closeError.message : String(closeError)}`);
     }
-    if (cleanupFailures.length > 0) throw new CoordinationRuntimeError('system-fatal', 'coordinator startup failed and cleanup was incomplete', [error instanceof Error ? error.message : String(error), ...cleanupFailures]);
+    if (lifecycleLock !== null) {
+      try {
+        await lifecycleLock.abortStartup();
+      } catch (releaseError) {
+        cleanupFailures.push(`lock-release: ${releaseError instanceof Error ? releaseError.message : String(releaseError)}`);
+      }
+    }
+    if (cleanupFailures.length > 0) throw new CoordinationRuntimeError('system-fatal', 'coordinator startup failed and cleanup was incomplete; writer guard remains retained until process death', [error instanceof Error ? error.message : String(error), ...cleanupFailures]);
+    releasePreparedWriterGuard(writerGuard);
     throw error;
   }
 }
