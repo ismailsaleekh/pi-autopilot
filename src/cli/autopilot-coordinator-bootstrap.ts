@@ -7,6 +7,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 const ATTEMPT_ENV = 'AUTOPILOT_COORDINATOR_STARTUP_ATTEMPT_ID';
 const ENTRYPOINT_ENV = 'AUTOPILOT_COORDINATOR_COMPILED_ENTRYPOINT';
 const REPORT_SCHEMA = 'autopilot.coordinator_startup_report.v1';
+const PACKAGE_VERSION = '1.2.0';
 const MAX_ERROR_CODE_POINTS = 4_096;
 const MAX_REPORT_BYTES = 32 * 1024;
 
@@ -126,7 +127,7 @@ function bootstrapInputs(): { readonly coordinatorPath: string; readonly reportP
   const manifestPath = join(packageRoot, 'package.json');
   assertPhysicalPackageFile(packageRoot, manifestPath);
   const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as Readonly<Record<string, unknown>>;
-  if (manifest['name'] !== 'pi-autopilot' || manifest['version'] !== '1.1.8') throw new Error('compiled coordinator bootstrap package identity drifted');
+  if (manifest['name'] !== 'pi-autopilot' || manifest['version'] !== PACKAGE_VERSION) throw new Error('compiled coordinator bootstrap package identity drifted');
   return {
     coordinatorPath,
     reportPath: join(resolve(stateRootValue), 'coordinator', 'startup-reports', `${attemptId}.json`),

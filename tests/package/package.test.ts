@@ -22,6 +22,7 @@ interface PackageBin {
 
 interface PackageJson {
   readonly name: string;
+  readonly version: string;
   readonly type: string;
   readonly author: string;
   readonly keywords: readonly string[];
@@ -102,6 +103,7 @@ function parsePackageJson(value: unknown): PackageJson {
   if (!isJsonMap(publishConfig)) throw new TypeError('publishConfig must be an object');
   return {
     name: requireString(field(value, 'name'), 'name'),
+    version: requireString(field(value, 'version'), 'version'),
     type: requireString(field(value, 'type'), 'type'),
     author: requireString(field(value, 'author'), 'author'),
     keywords: requireStringArray(field(value, 'keywords'), 'keywords'),
@@ -170,6 +172,7 @@ void describe('package manifest and payload', () => {
   void it('declares the Autopilot package surfaces', async () => {
     const pkg = await packageJson();
     assert.equal(pkg.name, 'pi-autopilot');
+    assert.equal(pkg.version, '1.2.0');
     assert.equal(pkg.type, 'module');
     assert.equal(pkg.author, 'Ismail Salikhodjaev <ismailsalikhodjaev@gmail.com>');
     assert.deepEqual(pkg.repository, {
