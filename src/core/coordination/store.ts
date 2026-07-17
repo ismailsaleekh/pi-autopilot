@@ -3785,6 +3785,7 @@ export class CoordinatorStore {
       const requestedWorktreeState = payloadString(request.payload, 'worktree_state');
       if (!(COORDINATION_WORKTREE_STATES as readonly string[]).includes(requestedWorktreeState)) throw new CoordinationRuntimeError('invalid-request', 'worktree_state is invalid');
       if (next.stage !== 'committed' && requestedWorktreeState !== worktree.state) throw new CoordinationRuntimeError('invalid-request', 'worktree state may change only when an operation commits');
+      if (next.operation_type === 'metadata-reconcile' && requestedWorktreeState !== worktree.state) throw new CoordinationRuntimeError('invalid-request', 'metadata reconciliation cannot change worktree lifecycle state');
       if (next.stage === 'committed') this.#assertCommittedWorktreeState(next, requestedWorktreeState);
       const seq = this.#nextEventSequence(request.repo_id);
       this.#db.prepare('UPDATE worktree_operations SET payload_json=?, version=? WHERE entity_id=?').run(canonicalJson(next), next.version, next.operation_id);
@@ -5166,6 +5167,7 @@ export class CoordinatorStore {
   #assertCommittedWorktreeState(operation: CoordinationWorktreeOperation, state: string): void {
     const allowed: Readonly<Record<CoordinationWorktreeOperation['operation_type'], readonly string[]>> = {
       create: ['active'], materialize: ['active'], commit: ['active'], merge: ['active', 'terminal'], reset: ['terminal'], quarantine: ['quarantined'], archive: ['active', 'terminal', 'quarantined'], remove: ['removed'],
+      'metadata-reconcile': [...COORDINATION_WORKTREE_STATES],
     };
     if (!allowed[operation.operation_type].includes(state)) throw new CoordinationRuntimeError('invalid-request', `${operation.operation_type} operation cannot commit worktree state ${state}`);
   }
