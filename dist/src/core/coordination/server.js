@@ -4,7 +4,7 @@ import { chmod, open, rename, unlink } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { platform } from 'node:os';
 import { createCoordinatorAdmissionOffer, createCoordinatorAdmissionResponse, COORDINATOR_ADMISSION_ACTION } from "./admission.js";
-import { assertCoordinatorAdmissionAuthorityUnchanged, captureCoordinatorAdmissionAuthority, COORDINATOR_S1_ADMISSION_IDENTITY } from "./admission-runtime.js";
+import { assertCoordinatorAdmissionAuthorityUnchanged, captureServingCoordinatorAdmissionAuthority, COORDINATOR_S1_ADMISSION_IDENTITY } from "./admission-runtime.js";
 import { parseCoordinatorAdmissionTransportRequest, parseCoordinatorTransportRequest, CoordinatorFrameDecoder, writeCoordinatorResponse } from "./ipc.js";
 import { CoordinationRuntimeError } from "./failures.js";
 import { currentBootId, isProcessAlive, predecessorCompatibleBootId, processStartIdentity } from "./process-identity.js";
@@ -524,7 +524,7 @@ function handleSocket(socket, store, capability, paths, lifecycle, backgroundFai
                         const initial = handshakeAuthority;
                         if (initial === null)
                             throw new CoordinationRuntimeError('unauthorized-client', 'admission has no same-socket handshake authority');
-                        const observed = await captureCoordinatorAdmissionAuthority({ paths, expectedLifecycle: lifecycle, expectedGeneration: store.currentGeneration() });
+                        const observed = await captureServingCoordinatorAdmissionAuthority({ paths, expectedLifecycle: lifecycle, expectedGeneration: store.currentGeneration() });
                         assertCoordinatorAdmissionAuthorityUnchanged(initial, observed);
                         const admission = createCoordinatorAdmissionResponse({ request: admissionTransport.request.payload, identity: COORDINATOR_S1_ADMISSION_IDENTITY, endpoint: observed.endpoint, capability });
                         response = admissionEnvelope(requestId, admission);
@@ -547,7 +547,7 @@ function handleSocket(socket, store, capability, paths, lifecycle, backgroundFai
                         if (upgradeIntent !== null && upgradeIntent.state !== 'committed' && request.action !== 'handshake' && request.action !== 'status' && request.action !== 'doctor')
                             throw new CoordinationRuntimeError('coordinator-contention', 'coordinator upgrade is not durably committed; mutation authority remains closed');
                         if (request.action === 'handshake') {
-                            handshakeAuthority = await captureCoordinatorAdmissionAuthority({ paths, expectedLifecycle: lifecycle, expectedGeneration: store.currentGeneration() });
+                            handshakeAuthority = await captureServingCoordinatorAdmissionAuthority({ paths, expectedLifecycle: lifecycle, expectedGeneration: store.currentGeneration() });
                             const legacy = store.handle(request);
                             if (!legacy.ok)
                                 response = legacy;
@@ -576,7 +576,7 @@ function handleSocket(socket, store, capability, paths, lifecycle, backgroundFai
                                 const initial = admittedAuthority;
                                 if (initial === null)
                                     throw new CoordinationRuntimeError('unauthorized-client', 'negotiated peer has no same-socket admission authority');
-                                const observed = await captureCoordinatorAdmissionAuthority({ paths, expectedLifecycle: lifecycle, expectedGeneration: store.currentGeneration() });
+                                const observed = await captureServingCoordinatorAdmissionAuthority({ paths, expectedLifecycle: lifecycle, expectedGeneration: store.currentGeneration() });
                                 assertCoordinatorAdmissionAuthorityUnchanged(initial, observed);
                                 await testHooks?.beforeNegotiatedStoreOperation?.(request.action);
                             }

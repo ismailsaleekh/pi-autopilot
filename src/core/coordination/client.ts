@@ -4,7 +4,7 @@ import { open, unlink, type FileHandle } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 
 import { createCoordinatorAdmissionRequest, verifyCoordinatorAdmissionResponse } from './admission.ts';
-import { assertCoordinatorAdmissionAuthorityUnchanged, captureCoordinatorAdmissionAuthority, COORDINATOR_S1_ADMISSION_IDENTITY, verifyCoordinatorS1RecoveryAuthority, type CoordinatorAdmissionAuthoritySnapshot } from './admission-runtime.ts';
+import { assertCoordinatorAdmissionAuthorityUnchanged, captureCoordinatorAdmissionAuthority, COORDINATOR_S1_ADMISSION_IDENTITY, recaptureCoordinatorAdmissionAuthority, verifyCoordinatorS1RecoveryAuthority, type CoordinatorAdmissionAuthoritySnapshot } from './admission-runtime.ts';
 import { parseCoordinationReconciliationDetail, parseCoordinationReconciliationReceipt, parseCoordinationResultDetail, parseCoordinationResultReceipt, parseCoordinatorMailboxPage, parseCoordinatorMigrationRecoveryPage, parseCoordinatorProjectionPage, parseCoordinatorReconciliationDetailPage, parseCoordinatorRequestEnvelope, parseCoordinatorResultDetailPage, parseCoordinatorRunCatalogPage } from './contracts.ts';
 import { COORDINATOR_COMPILED_ENTRYPOINT_ENV, resolveCoordinatorExecutable } from './executable-resolution.ts';
 import { coordinationFailureDefinition, CoordinationRuntimeError } from './failures.ts';
@@ -382,7 +382,7 @@ export class CoordinatorClient {
         },
       }),
       verifyEndpointUnchanged: async (endpoint) => {
-        const observed = await captureCoordinatorAdmissionAuthority({
+        const observed = await recaptureCoordinatorAdmissionAuthority({
           paths: this.#paths,
           expectedLifecycle: endpoint.authority.lifecycle,
           expectedGeneration: endpoint.authority.generation,

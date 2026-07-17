@@ -3,7 +3,7 @@ import { existsSync } from 'node:fs';
 import { open, unlink } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { createCoordinatorAdmissionRequest, verifyCoordinatorAdmissionResponse } from "./admission.js";
-import { assertCoordinatorAdmissionAuthorityUnchanged, captureCoordinatorAdmissionAuthority, COORDINATOR_S1_ADMISSION_IDENTITY, verifyCoordinatorS1RecoveryAuthority } from "./admission-runtime.js";
+import { assertCoordinatorAdmissionAuthorityUnchanged, captureCoordinatorAdmissionAuthority, COORDINATOR_S1_ADMISSION_IDENTITY, recaptureCoordinatorAdmissionAuthority, verifyCoordinatorS1RecoveryAuthority } from "./admission-runtime.js";
 import { parseCoordinationReconciliationDetail, parseCoordinationReconciliationReceipt, parseCoordinationResultDetail, parseCoordinationResultReceipt, parseCoordinatorMailboxPage, parseCoordinatorMigrationRecoveryPage, parseCoordinatorProjectionPage, parseCoordinatorReconciliationDetailPage, parseCoordinatorRequestEnvelope, parseCoordinatorResultDetailPage, parseCoordinatorRunCatalogPage } from "./contracts.js";
 import { COORDINATOR_COMPILED_ENTRYPOINT_ENV, resolveCoordinatorExecutable } from "./executable-resolution.js";
 import { coordinationFailureDefinition, CoordinationRuntimeError } from "./failures.js";
@@ -363,7 +363,7 @@ export class CoordinatorClient {
                 },
             }),
             verifyEndpointUnchanged: async (endpoint) => {
-                const observed = await captureCoordinatorAdmissionAuthority({
+                const observed = await recaptureCoordinatorAdmissionAuthority({
                     paths: this.#paths,
                     expectedLifecycle: endpoint.authority.lifecycle,
                     expectedGeneration: endpoint.authority.generation,

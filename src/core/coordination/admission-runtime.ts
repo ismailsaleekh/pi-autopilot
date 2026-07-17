@@ -12,7 +12,7 @@ import {
   COORDINATOR_WIRE_LINEAGE,
   type CoordinatorRuntimePaths,
 } from './runtime-paths.ts';
-import { readCurrentStoreGeneration, type CurrentStoreGeneration } from './store-generation.ts';
+import { assertCurrentStoreGenerationAuthority, readCurrentStoreAdmissionGeneration, readCurrentStoreGeneration, type CurrentStoreGeneration } from './store-generation.ts';
 import { assertPrivatePathNoAliases } from '../private-path.ts';
 import { parseCurrentCoordinatorLock, type CurrentCoordinatorLock } from './upgrade-contracts.ts';
 
@@ -90,6 +90,7 @@ async function readVerifiedS1Authority(input: {
   readonly paths: CoordinatorRuntimePaths;
   readonly expectedLifecycle: CurrentCoordinatorLock;
   readonly expectedGeneration?: CurrentStoreGeneration;
+  readonly verifyPhysicalStore: boolean;
 }): Promise<{
   readonly lifecycle: CurrentCoordinatorLock;
   readonly legacyLockBytes: Uint8Array;
@@ -100,13 +101,12 @@ async function readVerifiedS1Authority(input: {
   const legacyLockBytes = await readFile(input.paths.lockPath);
   const lifecycle = parseLegacyLockBytes(legacyLockBytes);
   if (!sameExactLifecycle(lifecycle, input.expectedLifecycle)) throw new CoordinationRuntimeError('coordinator-unavailable', 'legacy façade lock changed from the serving lifecycle');
-  const generation = readCurrentStoreGeneration(input.paths);
+  const generation = input.verifyPhysicalStore
+    ? readCurrentStoreGeneration(input.paths)
+    : input.expectedGeneration === undefined
+      ? readCurrentStoreAdmissionGeneration(input.paths)
+      : assertCurrentStoreGenerationAuthority(input.paths, input.expectedGeneration);
   if (generation === null) throw new CoordinationRuntimeError('store-corrupt', 'S1 authority has no current store generation');
-  if (input.expectedGeneration !== undefined
-    && (generation.pointer.generation_id !== input.expectedGeneration.pointer.generation_id
-      || generation.pointer_sha256 !== input.expectedGeneration.pointer_sha256)) {
-    throw new CoordinationRuntimeError('store-corrupt', 'S1 authority store generation changed from the serving store');
-  }
   const runtime = readAndVerifyCoordinatorRuntimeIdentity(input.paths, generation, lifecycle);
   assertRuntimeIdentity(runtime, lifecycle, generation);
   return Object.freeze({ lifecycle, legacyLockBytes, generation, runtime });
@@ -117,17 +117,11 @@ export async function verifyCoordinatorS1RecoveryAuthority(input: {
   readonly paths: CoordinatorRuntimePaths;
   readonly expectedLifecycle: CurrentCoordinatorLock;
 }): Promise<void> {
-  await readVerifiedS1Authority(input);
+  await readVerifiedS1Authority({ ...input, verifyPhysicalStore: true });
 }
 
-export async function captureCoordinatorAdmissionAuthority(input: {
-  readonly paths: CoordinatorRuntimePaths;
-  readonly expectedLifecycle: CurrentCoordinatorLock;
-  readonly expectedGeneration?: CurrentStoreGeneration;
-}): Promise<CoordinatorAdmissionAuthoritySnapshot> {
-  const verified = await readVerifiedS1Authority(input);
+function admissionAuthoritySnapshot(verified: Awaited<ReturnType<typeof readVerifiedS1Authority>>): CoordinatorAdmissionAuthoritySnapshot {
   const { lifecycle, legacyLockBytes, generation, runtime } = verified;
-  if (!isExactProcessAlive(lifecycle.pid, lifecycle.process_start_identity)) throw new CoordinationRuntimeError('coordinator-unavailable', 'legacy façade lifecycle does not identify the exact live process', [`pid=${String(lifecycle.pid)}`]);
   const legacyLockSha256 = sha256CoordinatorAuthorityBytes(legacyLockBytes);
   return Object.freeze({
     lifecycle,
@@ -149,6 +143,36 @@ export async function captureCoordinatorAdmissionAuthority(input: {
   });
 }
 
+/** Initial client-side capture verifies the exact OS process-birth identity. */
+export async function captureCoordinatorAdmissionAuthority(input: {
+  readonly paths: CoordinatorRuntimePaths;
+  readonly expectedLifecycle: CurrentCoordinatorLock;
+  readonly expectedGeneration?: CurrentStoreGeneration;
+}): Promise<CoordinatorAdmissionAuthoritySnapshot> {
+  const verified = await readVerifiedS1Authority({ ...input, verifyPhysicalStore: false });
+  if (!isExactProcessAlive(verified.lifecycle.pid, verified.lifecycle.process_start_identity)) throw new CoordinationRuntimeError('coordinator-unavailable', 'legacy façade lifecycle does not identify the exact live process', [`pid=${String(verified.lifecycle.pid)}`]);
+  return admissionAuthoritySnapshot(verified);
+}
+
+/** Same-socket recapture: the kernel-bound socket already proved liveness. */
+export async function recaptureCoordinatorAdmissionAuthority(input: {
+  readonly paths: CoordinatorRuntimePaths;
+  readonly expectedLifecycle: CurrentCoordinatorLock;
+  readonly expectedGeneration: CurrentStoreGeneration;
+}): Promise<CoordinatorAdmissionAuthoritySnapshot> {
+  return admissionAuthoritySnapshot(await readVerifiedS1Authority({ ...input, verifyPhysicalStore: false }));
+}
+
+/** Server-side capture proves the serving lifecycle is this executing process. */
+export async function captureServingCoordinatorAdmissionAuthority(input: {
+  readonly paths: CoordinatorRuntimePaths;
+  readonly expectedLifecycle: CurrentCoordinatorLock;
+  readonly expectedGeneration: CurrentStoreGeneration;
+}): Promise<CoordinatorAdmissionAuthoritySnapshot> {
+  if (input.expectedLifecycle.pid !== process.pid) throw new CoordinationRuntimeError('system-fatal', 'serving admission lifecycle does not belong to this coordinator process');
+  return admissionAuthoritySnapshot(await readVerifiedS1Authority({ ...input, verifyPhysicalStore: false }));
+}
+
 export function assertCoordinatorAdmissionAuthorityUnchanged(
   expected: CoordinatorAdmissionAuthoritySnapshot,
   observed: CoordinatorAdmissionAuthoritySnapshot,
@@ -157,6 +181,8 @@ export function assertCoordinatorAdmissionAuthorityUnchanged(
     || expected.runtimeIdentitySha256 !== observed.runtimeIdentitySha256
     || expected.generation.pointer.generation_id !== observed.generation.pointer.generation_id
     || expected.generation.pointer_sha256 !== observed.generation.pointer_sha256
+    || expected.generation.database_file_identity.device !== observed.generation.database_file_identity.device
+    || expected.generation.database_file_identity.inode !== observed.generation.database_file_identity.inode
     || !sameExactLifecycle(expected.lifecycle, observed.lifecycle)) {
     throw new CoordinationRuntimeError('coordinator-unavailable', 'coordinator admission authority changed between socket phases');
   }

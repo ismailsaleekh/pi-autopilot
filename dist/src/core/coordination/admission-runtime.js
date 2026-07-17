@@ -4,7 +4,7 @@ import { CoordinationRuntimeError } from "./failures.js";
 import { isExactProcessAlive } from "./process-identity.js";
 import { readAndVerifyCoordinatorRuntimeIdentity } from "./runtime-identity.js";
 import { COORDINATOR_API_SCHEMA_VERSION, COORDINATOR_IMPLEMENTATION_BUILD, COORDINATOR_LEGACY_FACADE_BUILD, COORDINATOR_STORE_SCHEMA_VERSION, COORDINATOR_WIRE_LINEAGE, } from "./runtime-paths.js";
-import { readCurrentStoreGeneration } from "./store-generation.js";
+import { assertCurrentStoreGenerationAuthority, readCurrentStoreAdmissionGeneration, readCurrentStoreGeneration } from "./store-generation.js";
 import { assertPrivatePathNoAliases } from "../private-path.js";
 import { parseCurrentCoordinatorLock } from "./upgrade-contracts.js";
 export const COORDINATOR_S1_ADMISSION_IDENTITY = Object.freeze({
@@ -73,27 +73,23 @@ async function readVerifiedS1Authority(input) {
     const lifecycle = parseLegacyLockBytes(legacyLockBytes);
     if (!sameExactLifecycle(lifecycle, input.expectedLifecycle))
         throw new CoordinationRuntimeError('coordinator-unavailable', 'legacy façade lock changed from the serving lifecycle');
-    const generation = readCurrentStoreGeneration(input.paths);
+    const generation = input.verifyPhysicalStore
+        ? readCurrentStoreGeneration(input.paths)
+        : input.expectedGeneration === undefined
+            ? readCurrentStoreAdmissionGeneration(input.paths)
+            : assertCurrentStoreGenerationAuthority(input.paths, input.expectedGeneration);
     if (generation === null)
         throw new CoordinationRuntimeError('store-corrupt', 'S1 authority has no current store generation');
-    if (input.expectedGeneration !== undefined
-        && (generation.pointer.generation_id !== input.expectedGeneration.pointer.generation_id
-            || generation.pointer_sha256 !== input.expectedGeneration.pointer_sha256)) {
-        throw new CoordinationRuntimeError('store-corrupt', 'S1 authority store generation changed from the serving store');
-    }
     const runtime = readAndVerifyCoordinatorRuntimeIdentity(input.paths, generation, lifecycle);
     assertRuntimeIdentity(runtime, lifecycle, generation);
     return Object.freeze({ lifecycle, legacyLockBytes, generation, runtime });
 }
 /** Verifies dead-or-live S1 disk identity without granting socket admission authority. */
 export async function verifyCoordinatorS1RecoveryAuthority(input) {
-    await readVerifiedS1Authority(input);
+    await readVerifiedS1Authority({ ...input, verifyPhysicalStore: true });
 }
-export async function captureCoordinatorAdmissionAuthority(input) {
-    const verified = await readVerifiedS1Authority(input);
+function admissionAuthoritySnapshot(verified) {
     const { lifecycle, legacyLockBytes, generation, runtime } = verified;
-    if (!isExactProcessAlive(lifecycle.pid, lifecycle.process_start_identity))
-        throw new CoordinationRuntimeError('coordinator-unavailable', 'legacy façade lifecycle does not identify the exact live process', [`pid=${String(lifecycle.pid)}`]);
     const legacyLockSha256 = sha256CoordinatorAuthorityBytes(legacyLockBytes);
     return Object.freeze({
         lifecycle,
@@ -114,11 +110,30 @@ export async function captureCoordinatorAdmissionAuthority(input) {
         }),
     });
 }
+/** Initial client-side capture verifies the exact OS process-birth identity. */
+export async function captureCoordinatorAdmissionAuthority(input) {
+    const verified = await readVerifiedS1Authority({ ...input, verifyPhysicalStore: false });
+    if (!isExactProcessAlive(verified.lifecycle.pid, verified.lifecycle.process_start_identity))
+        throw new CoordinationRuntimeError('coordinator-unavailable', 'legacy façade lifecycle does not identify the exact live process', [`pid=${String(verified.lifecycle.pid)}`]);
+    return admissionAuthoritySnapshot(verified);
+}
+/** Same-socket recapture: the kernel-bound socket already proved liveness. */
+export async function recaptureCoordinatorAdmissionAuthority(input) {
+    return admissionAuthoritySnapshot(await readVerifiedS1Authority({ ...input, verifyPhysicalStore: false }));
+}
+/** Server-side capture proves the serving lifecycle is this executing process. */
+export async function captureServingCoordinatorAdmissionAuthority(input) {
+    if (input.expectedLifecycle.pid !== process.pid)
+        throw new CoordinationRuntimeError('system-fatal', 'serving admission lifecycle does not belong to this coordinator process');
+    return admissionAuthoritySnapshot(await readVerifiedS1Authority({ ...input, verifyPhysicalStore: false }));
+}
 export function assertCoordinatorAdmissionAuthorityUnchanged(expected, observed) {
     if (expected.legacyLockSha256 !== observed.legacyLockSha256
         || expected.runtimeIdentitySha256 !== observed.runtimeIdentitySha256
         || expected.generation.pointer.generation_id !== observed.generation.pointer.generation_id
         || expected.generation.pointer_sha256 !== observed.generation.pointer_sha256
+        || expected.generation.database_file_identity.device !== observed.generation.database_file_identity.device
+        || expected.generation.database_file_identity.inode !== observed.generation.database_file_identity.inode
         || !sameExactLifecycle(expected.lifecycle, observed.lifecycle)) {
         throw new CoordinationRuntimeError('coordinator-unavailable', 'coordinator admission authority changed between socket phases');
     }

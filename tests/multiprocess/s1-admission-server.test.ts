@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { copyFile, mkdtemp, readFile, rename, rm, unlink, writeFile } from 'node:fs/promises';
 import { connect, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -170,6 +170,41 @@ void describe('integrated S1 admission server security', () => {
         if (running !== null) await running.close();
         await rm(root, { recursive: true, force: true });
       }
+    }
+  });
+
+  void it('rejects live generation inode replacement before a negotiated operation reaches the store', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pi-autopilot-s1-generation-inode-'));
+    const stateRoot = join(root, 'state');
+    const env = { ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: stateRoot };
+    const paths = coordinatorRuntimePaths(env);
+    let running: Awaited<ReturnType<typeof startCoordinatorServer>> | null = null;
+    let originalPath: string | null = null;
+    let replacementPath: string | null = null;
+    let negotiatedStoreOperations = 0;
+    try {
+      running = await startCoordinatorServer(paths, undefined, undefined, {
+        afterAdmissionAttestedBeforeResponse: async () => {
+          if (running === null) throw new Error('generation inode fixture lost its server');
+          replacementPath = running.store.currentGeneration().database_path;
+          originalPath = `${replacementPath}.serving-inode`;
+          await rename(replacementPath, originalPath);
+          await copyFile(originalPath, replacementPath);
+        },
+        beforeNegotiatedStoreOperation: () => { negotiatedStoreOperations += 1; },
+      });
+      const client = new CoordinatorClient({ env, autoStart: false });
+      await assert.rejects(() => client.query('status'), (error: unknown) => error instanceof CoordinationRuntimeError && (error.code === 'store-corrupt' || error.code === 'coordinator-unavailable'));
+      assert.equal(negotiatedStoreOperations, 0);
+    } finally {
+      if (originalPath !== null && replacementPath !== null) {
+        await unlink(replacementPath).catch((error: unknown) => {
+          if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw error;
+        });
+        await rename(originalPath, replacementPath);
+      }
+      if (running !== null) await running.close();
+      await rm(root, { recursive: true, force: true });
     }
   });
 

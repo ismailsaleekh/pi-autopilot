@@ -44,12 +44,18 @@ export interface CoordinatorStorePointer {
   readonly published_at: string;
 }
 
+export interface StoreDatabaseFileIdentity {
+  readonly device: number;
+  readonly inode: number;
+}
+
 export interface CurrentStoreGeneration {
   readonly pointer: CoordinatorStorePointer;
   readonly pointer_sha256: `sha256:${string}`;
   readonly publication: CoordinatorStoreGenerationPublication;
   readonly generation_path: string;
   readonly database_path: string;
+  readonly database_file_identity: StoreDatabaseFileIdentity;
   readonly publication_path: string;
 }
 
@@ -160,11 +166,15 @@ export function parseStorePointer(value: unknown): CoordinatorStorePointer {
   });
 }
 
-function parseJsonFile(path: string, label: string): unknown {
+function parseJsonBytes(bytes: Uint8Array, path: string, label: string): unknown {
   let parsed: unknown;
-  try { parsed = JSON.parse(readFileSync(path, 'utf8')) as unknown; }
+  try { parsed = JSON.parse(Buffer.from(bytes).toString('utf8')) as unknown; }
   catch (error) { throw new CoordinationRuntimeError('store-corrupt', `${label} is unreadable or invalid JSON`, [path, error instanceof Error ? error.message : String(error)]); }
   return parsed;
+}
+
+function parseJsonFile(path: string, label: string): unknown {
+  return parseJsonBytes(readFileSync(path), path, label);
 }
 
 function assertOwnedPrivateObject(path: string, kind: 'file' | 'directory', requireSingleLink: boolean): void {
@@ -176,6 +186,16 @@ function assertOwnedPrivateObject(path: string, kind: 'file' | 'directory', requ
     const getuid = process.getuid;
     if (getuid !== undefined && metadata.uid !== getuid()) throw new CoordinationRuntimeError('system-fatal', 'store generation owner differs from the coordinator process user', [path, `uid=${String(metadata.uid)}`]);
   }
+}
+
+function storeDatabaseFileIdentity(path: string): StoreDatabaseFileIdentity {
+  assertOwnedPrivateObject(path, 'file', true);
+  const metadata = lstatSync(path);
+  return Object.freeze({ device: metadata.dev, inode: metadata.ino });
+}
+
+function sameStoreDatabaseFileIdentity(left: StoreDatabaseFileIdentity, right: StoreDatabaseFileIdentity): boolean {
+  return left.device === right.device && left.inode === right.inode;
 }
 
 function assertContainedNoSymlinks(root: string, target: string): void {
@@ -250,31 +270,71 @@ async function atomicReplacePointer(paths: CoordinatorRuntimePaths, pointer: Coo
   }
 }
 
-function readVerifiedGeneration(paths: CoordinatorRuntimePaths, pointer: CoordinatorStorePointer): CurrentStoreGeneration {
+function readStableCurrentStoreGeneration(paths: CoordinatorRuntimePaths, verifyDatabaseContents: boolean): CurrentStoreGeneration | null {
+  if (!existsSync(paths.currentStorePointerPath)) return null;
+  assertContainedNoSymlinks(paths.coordinatorRoot, paths.currentStorePointerPath);
+  assertOwnedPrivateObject(paths.currentStorePointerPath, 'file', true);
+  const pointerBytes = readFileSync(paths.currentStorePointerPath);
+  const pointerSha256 = sha256Bytes(pointerBytes);
+  const pointer = parseStorePointer(parseJsonBytes(pointerBytes, paths.currentStorePointerPath, 'current store pointer'));
   const expectedRelative = `stores/${pointer.generation_id}`;
   if (pointer.relative_generation_path !== expectedRelative) throw new CoordinationRuntimeError('store-corrupt', 'store pointer generation path disagrees with its ID');
   const generation = generationPaths(paths, pointer.generation_id);
   assertContainedNoSymlinks(paths.coordinatorRoot, generation.directory);
   assertOwnedPrivateObject(generation.directory, 'directory', false);
-  assertOwnedPrivateObject(generation.database, 'file', true);
+  const databaseIdentity = storeDatabaseFileIdentity(generation.database);
   assertOwnedPrivateObject(generation.publication, 'file', true);
   const publicationBytes = readFileSync(generation.publication);
   if (sha256Bytes(publicationBytes) !== pointer.publication_sha256) throw new CoordinationRuntimeError('store-corrupt', 'store pointer publication digest is invalid', [generation.publication]);
-  const publication = parseStoreGenerationPublication(parseJsonFile(generation.publication, 'store generation publication'));
+  const publication = parseStoreGenerationPublication(parseJsonBytes(publicationBytes, generation.publication, 'store generation publication'));
   if (publication.generation_id !== pointer.generation_id || publication.store_schema_version !== pointer.store_schema_version) throw new CoordinationRuntimeError('store-corrupt', 'store generation publication identity disagrees with its pointer');
   if (publication.source_kind === 'cf50-fixed-schema12' && pointer.previous_generation_id !== null) throw new CoordinationRuntimeError('store-corrupt', 'first-generation publication has a contradictory predecessor pointer');
   if (publication.source_kind === 's1-generation-restore' && pointer.previous_generation_id !== publication.source_generation_id) throw new CoordinationRuntimeError('store-corrupt', 'restored generation source disagrees with its predecessor pointer');
-  verifyDatabase(generation.database, COORDINATOR_STORE_SCHEMA_VERSION);
-  const pointerBytes = readFileSync(paths.currentStorePointerPath);
-  return Object.freeze({ pointer, pointer_sha256: sha256Bytes(pointerBytes), publication, generation_path: generation.directory, database_path: generation.database, publication_path: generation.publication });
+  if (verifyDatabaseContents) verifyDatabase(generation.database, COORDINATOR_STORE_SCHEMA_VERSION);
+  const finalDatabaseIdentity = storeDatabaseFileIdentity(generation.database);
+  if (!sameStoreDatabaseFileIdentity(databaseIdentity, finalDatabaseIdentity)
+    || sha256Bytes(readFileSync(paths.currentStorePointerPath)) !== pointerSha256
+    || sha256Bytes(readFileSync(generation.publication)) !== pointer.publication_sha256) {
+    throw new CoordinationRuntimeError('store-corrupt', 'store generation authority changed during verification');
+  }
+  return Object.freeze({
+    pointer,
+    pointer_sha256: pointerSha256,
+    publication,
+    generation_path: generation.directory,
+    database_path: generation.database,
+    database_file_identity: databaseIdentity,
+    publication_path: generation.publication,
+  });
+}
+
+/**
+ * Reads only immutable pointer/publication bytes and live database inode
+ * authority. Admission uses this bounded path; physical SQLite integrity and
+ * the fixed barrier remain mandatory at startup/publication, not five times per
+ * ordinary socket request.
+ */
+export function readCurrentStoreAdmissionGeneration(paths: CoordinatorRuntimePaths): CurrentStoreGeneration | null {
+  return readStableCurrentStoreGeneration(paths, false);
+}
+
+export function assertCurrentStoreGenerationAuthority(paths: CoordinatorRuntimePaths, expected: CurrentStoreGeneration): CurrentStoreGeneration {
+  const observed = readCurrentStoreAdmissionGeneration(paths);
+  if (observed === null
+    || observed.pointer_sha256 !== expected.pointer_sha256
+    || observed.pointer.generation_id !== expected.pointer.generation_id
+    || observed.pointer.publication_sha256 !== expected.pointer.publication_sha256
+    || !sameStoreDatabaseFileIdentity(observed.database_file_identity, expected.database_file_identity)) {
+    throw new CoordinationRuntimeError('store-corrupt', 'current store generation changed from the serving database authority');
+  }
+  return observed;
 }
 
 export function readCurrentStoreGeneration(paths: CoordinatorRuntimePaths): CurrentStoreGeneration | null {
-  if (!existsSync(paths.currentStorePointerPath)) return null;
-  assertContainedNoSymlinks(paths.coordinatorRoot, paths.currentStorePointerPath);
-  assertOwnedPrivateObject(paths.currentStorePointerPath, 'file', true);
-  const current = readVerifiedGeneration(paths, parseStorePointer(parseJsonFile(paths.currentStorePointerPath, 'current store pointer')));
+  const current = readStableCurrentStoreGeneration(paths, true);
+  if (current === null) return null;
   verifyPublishedFixedBarrier(paths);
+  assertCurrentStoreGenerationAuthority(paths, current);
   return current;
 }
 
