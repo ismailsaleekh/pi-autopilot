@@ -511,6 +511,7 @@ void describe('package manifest and payload', () => {
       assert.ok(files.includes(file), file);
     }
     assert.equal(files.some((file) => file.startsWith('tests/')), false);
+    assert.equal(files.includes('tests/fixtures/releases/cf50/pi-autopilot-1.1.8-cf50.tgz'), false, 'the actual cf50 skew fixture must never ship in the npm payload');
     assert.equal(files.some((file) => file.includes('node_modules')), false);
   });
 

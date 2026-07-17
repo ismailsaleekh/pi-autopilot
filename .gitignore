@@ -3,5 +3,6 @@ artifacts/*
 !artifacts/security/
 !artifacts/security/*.json
 *.tgz
+!tests/fixtures/releases/cf50/pi-autopilot-1.1.8-cf50.tgz
 
 .pi/

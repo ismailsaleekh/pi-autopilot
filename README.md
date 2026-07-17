@@ -149,6 +149,7 @@ Default automated coverage is offline and no-spend: unit tests cover transaction
 npm run build
 npm run typecheck
 npm run test:package
+npm run test:version-skew
 npm run test
 npm run pack:dry-run
 ```

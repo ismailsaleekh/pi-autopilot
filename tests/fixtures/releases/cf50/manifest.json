@@ -1,0 +1,14 @@
+{
+  "schema_version": "autopilot.actual_release_fixture.v1",
+  "package": "pi-autopilot",
+  "version": "1.1.8",
+  "implementation_build": "1.1.8-cf50",
+  "wire_protocol_version": "1.6",
+  "api_schema_version": 12,
+  "source_commit": "55b9d2381d9c889babde500ce035709c825450f1",
+  "tarball": "pi-autopilot-1.1.8-cf50.tgz",
+  "tarball_size_bytes": 1090668,
+  "tarball_sha256": "sha256:e98ccee99e95d5ba9c958c91c354eef40326fa21cf89a8ba37bd10e6650485a7",
+  "source_release_manifest_schema": "autopilot.local_release.v1",
+  "source_release_id": "cf50-20260715T211057Z"
+}

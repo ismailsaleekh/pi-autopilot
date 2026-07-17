@@ -46,6 +46,7 @@
     "test:e2e": "node --experimental-strip-types --test --test-concurrency=1 tests/e2e/*.test.ts",
     "test:model": "node --experimental-strip-types --test tests/model/*.test.ts",
     "test:multiprocess": "node --experimental-strip-types --test tests/multiprocess/*.test.ts",
+    "test:version-skew": "npm run build && node --experimental-strip-types --test --test-concurrency=1 tests/multiprocess/cf50-s1-version-skew.test.ts",
     "test:upgrade": "node --experimental-strip-types --test --test-concurrency=1 tests/multiprocess/coordinator-upgrade-process.test.ts",
     "test:crash": "node --experimental-strip-types --test --test-concurrency=1 tests/crash/*.test.ts",
     "test:chaos": "node --experimental-strip-types --test --test-concurrency=1 tests/chaos/*.test.ts",
