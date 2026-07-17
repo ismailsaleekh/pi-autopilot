@@ -152,7 +152,7 @@ declare module 'node:url' {
 declare module 'node:child_process' {
   export interface SpawnSyncOptions {
     readonly cwd?: string | URL;
-    readonly encoding?: 'utf8';
+    readonly encoding: 'utf8';
     readonly env?: { readonly [key: string]: string | undefined };
     readonly input?: string;
     readonly timeout?: number;
@@ -163,6 +163,20 @@ declare module 'node:child_process' {
     readonly signal: string | null;
     readonly stdout: string;
     readonly stderr: string;
+    readonly error?: Error;
+  }
+  export interface SpawnSyncBufferOptions {
+    readonly cwd?: string | URL;
+    readonly env?: { readonly [key: string]: string | undefined };
+    readonly input?: string | Uint8Array;
+    readonly timeout?: number;
+    readonly maxBuffer?: number;
+  }
+  export interface SpawnSyncBufferReturns {
+    readonly status: number | null;
+    readonly signal: string | null;
+    readonly stdout: NodeBuffer;
+    readonly stderr: NodeBuffer;
     readonly error?: Error;
   }
   export interface ChildProcessDataChunk extends Uint8Array {
@@ -189,6 +203,7 @@ declare module 'node:child_process' {
     on(event: 'error', listener: (error: Error) => void): void;
     on(event: 'close', listener: (code: number | null, signal: string | null) => void): void;
     once(event: 'close', listener: (code: number | null, signal: string | null) => void): void;
+    once(event: 'error', listener: (error: Error) => void): void;
   }
   export interface SpawnOptionsLite {
     readonly cwd?: string;
@@ -206,7 +221,12 @@ declare module 'node:child_process' {
   export function spawnSync(
     command: string,
     args: readonly string[],
-    options?: SpawnSyncOptions,
+    options?: SpawnSyncBufferOptions,
+  ): SpawnSyncBufferReturns;
+  export function spawnSync(
+    command: string,
+    args: readonly string[],
+    options: SpawnSyncOptions,
   ): SpawnSyncReturns;
 }
 
