@@ -81,7 +81,7 @@ function queryCommand(descriptor) {
         }
         case 'diff-text': return { argv: ['diff', '--no-ext-diff', '--no-color', `--unified=${String(unifiedLines(descriptor.unifiedLines))}`, atom(descriptor.from, 'from revision'), atom(descriptor.to, 'to revision'), '--', atom(descriptor.path, 'diff path', true)], acceptedExitCodes: [0], negativeExitCodes: [] };
         case 'staged-clean': return { argv: ['diff', '--cached', '--quiet', '--exit-code'], acceptedExitCodes: [0, 1], negativeExitCodes: [1] };
-        case 'worktree-list': return { argv: ['worktree', 'list', '--porcelain', ...(descriptor.nul === true ? ['-z'] : [])], acceptedExitCodes: [0], negativeExitCodes: [] };
+        case 'worktree-list': return { argv: ['worktree', 'list', '--porcelain', '--expire=never', ...(descriptor.nul === true ? ['-z'] : [])], acceptedExitCodes: [0], negativeExitCodes: [] };
         case 'config-get': return { argv: ['config', ...(descriptor.file === undefined ? [] : ['--file', atom(descriptor.file, 'config file', true)]), '--get', atom(descriptor.key, 'config key')], acceptedExitCodes: [0, 1], negativeExitCodes: [1] };
         case 'config-bool': return { argv: ['config', '--bool', atom(descriptor.key, 'config key')], acceptedExitCodes: [0, 1], negativeExitCodes: [1] };
         case 'config-regexp': return { argv: ['config', '-z', '--file', atom(descriptor.file, 'config file', true), '--get-regexp', atom(descriptor.pattern, 'config pattern', true)], acceptedExitCodes: [0, 1], negativeExitCodes: [1] };

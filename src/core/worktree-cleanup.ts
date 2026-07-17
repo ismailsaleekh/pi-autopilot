@@ -593,10 +593,17 @@ async function removeRegisteredWorktree(
   const listedBefore = gitWorktreeListPorcelain(active.source_repo, input.env);
   const registeredBefore = listedBefore.some((entry) => samePath(entry.path, worktreePath));
   if (!existsSync(worktreePath)) {
+    if (registeredBefore) {
+      await appendLedger(active, {
+        mode: input.mode, event: 'worktree-cleanup-blocked', reason: input.reason, now: input.now, path: worktreePath,
+        ...ledgerUnitFields(unit), blockers: ['path-missing registration requires schema-13 approved metadata-reconcile; destructive remove is forbidden'],
+      });
+      fail('metadata-reconcile-approval-required', 'path-missing Git registration must use the schema-13 exact-set metadata reconciliation runtime.', [worktreePath, unit.branch]);
+    }
     acc.reconciledMissingPaths.push(worktreePath);
     await appendLedger(active, {
       mode: input.mode, event: 'worktree-missing-reconcile', reason: input.reason, now: input.now, path: worktreePath,
-      ...ledgerUnitFields(unit), proof: [registeredBefore ? 'git_metadata_present_before_prune' : 'git_metadata_absent_before_prune'],
+      ...ledgerUnitFields(unit), proof: ['git_metadata_absent_before_remove_replay'],
     });
   }
   if (existsSync(worktreePath) && !registeredBefore) {
@@ -656,15 +663,17 @@ async function removeMainWorktree(
   const listedBefore = gitWorktreeListPorcelain(active.source_repo, env);
   const registeredBefore = listedBefore.some((entry) => samePath(entry.path, mainPath));
   if (!existsSync(mainPath)) {
+    if (registeredBefore) {
+      await appendLedger(active, {
+        mode: 'closed-run-cleanup', event: 'main-worktree-cleanup-blocked', reason, now, path: mainPath, branch: active.branch,
+        blockers: ['path-missing registration requires schema-13 approved metadata-reconcile; destructive remove is forbidden'],
+      });
+      fail('metadata-reconcile-approval-required', 'path-missing main Git registration must use the schema-13 exact-set metadata reconciliation runtime.', [mainPath, active.branch]);
+    }
     acc.reconciledMissingPaths.push(mainPath);
     await appendLedger(active, {
-      mode: 'closed-run-cleanup',
-      event: 'main-worktree-missing-reconcile',
-      reason,
-      now,
-      path: mainPath,
-      branch: active.branch,
-      proof: [registeredBefore ? 'git_metadata_present_before_prune' : 'git_metadata_absent_before_prune'],
+      mode: 'closed-run-cleanup', event: 'main-worktree-missing-reconcile', reason, now, path: mainPath, branch: active.branch,
+      proof: ['git_metadata_absent_before_remove_replay'],
     });
   }
   if (existsSync(mainPath) && !registeredBefore) {

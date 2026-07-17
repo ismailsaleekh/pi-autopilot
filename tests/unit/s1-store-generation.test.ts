@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { existsSync, linkSync, readFileSync, writeFileSync } from 'node:fs';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -17,6 +18,23 @@ function json(path: string): unknown { return JSON.parse(readFileSync(path, 'utf
 function record(value: unknown, label: string): Readonly<Record<string, unknown>> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error(`${label} is not an object`);
   return value as Readonly<Record<string, unknown>>;
+}
+
+async function retireTestPublicationToExactSchema12(paths: ReturnType<typeof coordinatorRuntimePaths>): Promise<void> {
+  const store = await CoordinatorStore.open(paths);
+  store.close();
+  const fixed = new DatabaseSync(paths.databasePath);
+  try {
+    for (const row of fixed.prepare("SELECT name FROM sqlite_schema WHERE type='trigger' AND name LIKE 'autopilot_s1_deny_%' ORDER BY name").all()) {
+      const name = row['name'];
+      if (typeof name !== 'string' || !/^autopilot_s1_deny_[a-f0-9]{20}_(insert|update|delete)$/u.test(name)) throw new Error('fixture found an unknown fixed-path trigger');
+      fixed.exec(`DROP TRIGGER "${name}"`);
+    }
+    fixed.exec('DROP TABLE autopilot_s1_fixed_path_barrier');
+  } finally { fixed.close(); }
+  await rm(paths.currentStorePointerPath, { force: true });
+  await rm(paths.storesRoot, { recursive: true, force: true });
+  await mkdir(paths.storesRoot, { recursive: true, mode: 0o700 });
 }
 
 void describe('S1 generation-addressed schema-13 store', () => {
@@ -48,6 +66,16 @@ void describe('S1 generation-addressed schema-13 store', () => {
       });
       assert.equal(running.store.handshake().payload['database_schema_version'], 12);
       assert.equal(running.store.handshake().payload['package_build'], '1.1.8-cf50');
+      const legacyMigrations = running.store.doctor().payload['migrations'];
+      assert.equal(Array.isArray(legacyMigrations) && legacyMigrations.every((entry) => record(entry, 'legacy migration')['version'] !== 13), true);
+      const legacyExportPath = join(root, 'legacy-export.json');
+      running.store.exportTo(legacyExportPath);
+      const legacyExport = record(json(legacyExportPath), 'legacy export');
+      assert.equal(legacyExport['database_schema_version'], 12);
+      assert.equal('worktree_aliases' in legacyExport, false);
+      assert.equal('run_scoped_faults' in legacyExport, false);
+      const exportedMigrations = legacyExport['schema_migrations'];
+      assert.equal(Array.isArray(exportedMigrations) && exportedMigrations.every((entry) => record(entry, 'exported migration')['version'] !== 13), true);
       const sidecarBefore = readFileSync(paths.runtimeIdentityPath);
       const sidecar = parseCoordinatorRuntimeIdentity(json(paths.runtimeIdentityPath));
       const lock = record(json(paths.lockPath), 'lifecycle lock');
@@ -96,6 +124,48 @@ void describe('S1 generation-addressed schema-13 store', () => {
       assert.equal(existsSync(`${restored.database_path}-shm`), false);
       const reopened = await CoordinatorStore.open(paths);
       try { assert.equal(reopened.currentGeneration().pointer.generation_id, restored.pointer.generation_id); }
+      finally { reopened.close(); }
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  void it('refuses publication while a stale reader retains fixed-source WAL authority', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pi-autopilot-s1-generation-stale-reader-'));
+    const paths = coordinatorRuntimePaths({ ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: root });
+    await retireTestPublicationToExactSchema12(paths);
+    const reader = new DatabaseSync(paths.databasePath);
+    try {
+      reader.exec('PRAGMA journal_mode=WAL; BEGIN');
+      reader.prepare('SELECT COUNT(*) AS count FROM schema_migrations').get();
+      const writer = new DatabaseSync(paths.databasePath);
+      try { writer.prepare('UPDATE schema_migrations SET applied_at=? WHERE version=1').run('2026-07-16T00:00:00.000Z'); }
+      finally { writer.close(); }
+      assert.equal(existsSync(`${paths.databasePath}-wal`), true);
+      await assert.rejects(() => CoordinatorStore.open(paths), /WAL checkpoint could not retire|retire WAL journal mode/u);
+      assert.equal(existsSync(paths.currentStorePointerPath), false);
+    } finally {
+      if (reader.isTransaction) reader.exec('ROLLBACK');
+      reader.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  void it('leaves the prior pointer authoritative when a restore source has a forged migration journal', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pi-autopilot-s1-generation-restore-journal-'));
+    const paths = coordinatorRuntimePaths({ ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: root });
+    const store = await CoordinatorStore.open(paths);
+    const currentGenerationId = store.currentGeneration().pointer.generation_id;
+    const backupPath = join(paths.backupsRoot, 'forged-journal-source.db');
+    try { await store.createVerifiedBackup(backupPath); }
+    finally { store.close(); }
+    try {
+      const tamper = new DatabaseSync(backupPath);
+      try { tamper.prepare('UPDATE schema_migrations SET checksum=? WHERE version=13').run('0'.repeat(64)); }
+      finally { tamper.close(); }
+      const forgedDigest = `sha256:${createHash('sha256').update(readFileSync(backupPath)).digest('hex')}` as const;
+      await assert.rejects(() => CoordinatorStore.restoreGeneration(paths, backupPath, forgedDigest), /checksum does not match/u);
+      assert.equal(parseStorePointer(json(paths.currentStorePointerPath)).generation_id, currentGenerationId);
+      const reopened = await CoordinatorStore.open(paths);
+      try { assert.equal(reopened.currentGeneration().pointer.generation_id, currentGenerationId); }
       finally { reopened.close(); }
     } finally { await rm(root, { recursive: true, force: true }); }
   });

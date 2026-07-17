@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, realpathSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { describe, it } from 'node:test';
 
 import type { AutopilotExecutionAudit, AutopilotExecutionCommit, AutopilotReceipt, AutopilotState, AutopilotStatusEntry, AutopilotUnitSpec } from '../../src/core/contracts/index.ts';
@@ -129,7 +129,7 @@ function gitOut(root: string, args: readonly string[]): string {
 
 function gitWorktreeListContains(root: string, worktreePath: string): boolean {
   const expected = normalizeTestPath(worktreePath);
-  return gitOut(root, ['worktree', 'list', '--porcelain'])
+  return gitOut(root, ['worktree', 'list', '--porcelain', '--expire=never'])
     .split('\n')
     .filter((line) => line.startsWith('worktree '))
     .map((line) => normalizeTestPath(line.slice('worktree '.length)))
@@ -137,8 +137,15 @@ function gitWorktreeListContains(root: string, worktreePath: string): boolean {
 }
 
 function normalizeTestPath(path: string): string {
-  if (!existsSync(path)) return path;
-  return realpathSync(path);
+  let cursor = resolve(path);
+  const missing: string[] = [];
+  while (!existsSync(cursor)) {
+    const parent = dirname(cursor);
+    if (parent === cursor) return resolve(path);
+    missing.unshift(basename(cursor));
+    cursor = parent;
+  }
+  return resolve(realpathSync(cursor), ...missing);
 }
 
 void describe('Phase 2 scheduler config and deterministic scheduler', () => {
@@ -422,6 +429,23 @@ void describe('Phase 2 unit worktrees, claims, mergeback, staleness, and GC', ()
       const nextA = await prepareAutopilotUnitWorktree({ active: runA.active, unitId: 'u-new', attempt: 1 });
       assert.equal(existsSync(nextA.unitInfo.worktree_path), true);
       assert.equal(existsSync(oldB.unitInfo.worktree_path), true);
+    });
+  });
+
+  void it('fails closed instead of deleting a surviving branch for a path-missing Git registration', async () => {
+    await withTempDir(async (root) => {
+      const source = join(root, 'source');
+      await initGitSource(source);
+      const prepared = await prepareAutopilotWorkstream({ workstream: 'phase2-smoke', sourceCwd: source });
+      const unit = await prepareAutopilotUnitWorktree({ active: prepared.active, unitId: 'u-missing-registration', attempt: 1 });
+      const branchSha = gitOut(unit.unitInfo.worktree_path, ['rev-parse', 'HEAD']);
+      await updateUnitBranchStatus({ active: prepared.active, unitId: unit.unitInfo.unit_id, attempt: unit.unitInfo.attempt, status: 'aborted', currentSha: branchSha, archiveRef: null });
+      assert.equal(gitWorktreeListContains(prepared.active.source_repo, unit.unitInfo.worktree_path), true, gitOut(prepared.active.source_repo, ['worktree', 'list', '--porcelain', '--expire=never']));
+      await rm(unit.unitInfo.worktree_path, { recursive: true, force: true });
+      assert.equal(gitWorktreeListContains(prepared.active.source_repo, unit.unitInfo.worktree_path), true, gitOut(prepared.active.source_repo, ['worktree', 'list', '--porcelain', '--expire=never']));
+      await expectRejects(() => cleanupTerminalUnitWorktree({ active: prepared.active, unitId: unit.unitInfo.unit_id, attempt: unit.unitInfo.attempt, reason: 'I5 metadata-only reconciliation proof' }), /schema-13 exact-set metadata reconciliation/u);
+      assert.equal(gitWorktreeListContains(prepared.active.source_repo, unit.unitInfo.worktree_path), true);
+      assert.equal(gitOut(prepared.active.source_repo, ['rev-parse', `refs/heads/${unit.unitInfo.branch}`]), branchSha);
     });
   });
 

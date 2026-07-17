@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { closeSync, constants as fsConstants, existsSync, fsyncSync, lstatSync, openSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { closeSync, constants as fsConstants, copyFileSync, existsSync, fsyncSync, lstatSync, openSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { mkdir, open, readdir, rename, rm, unlink } from 'node:fs/promises';
 import { platform } from 'node:os';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
@@ -317,6 +317,7 @@ function verifyFixedBarrier(database: DatabaseSync, expected?: FixedBarrierRecor
 }
 
 function installFixedBarrier(paths: CoordinatorRuntimePaths, evidence: FixedBarrierRecord): void {
+  if (existsSync(`${paths.databasePath}-wal`) || existsSync(`${paths.databasePath}-shm`)) throw new CoordinationRuntimeError('store-corrupt', 'fixed cf50 source retained WAL/SHM authority before barrier installation', [paths.databasePath]);
   const database = new DatabaseSync(paths.databasePath, { timeout: 10_000 });
   try {
     database.exec('PRAGMA busy_timeout=10000; PRAGMA synchronous=FULL; BEGIN EXCLUSIVE');
@@ -329,6 +330,7 @@ function installFixedBarrier(paths: CoordinatorRuntimePaths, evidence: FixedBarr
     const version = sqliteValue(database.prepare('PRAGMA user_version').get(), 'user_version', 'fixed source schema');
     const integrity = sqliteValue(database.prepare('PRAGMA integrity_check').get(), 'integrity_check', 'fixed source integrity');
     if (version !== COORDINATOR_API_SCHEMA_VERSION || integrity !== 'ok') throw new CoordinationRuntimeError('store-corrupt', 'fixed cf50 source is not exact schema-12 integrity before barrier installation');
+    if (fileSha256(paths.databasePath) !== evidence.source_database_sha256) throw new CoordinationRuntimeError('store-corrupt', 'fixed cf50 source changed after verified generation capture', [paths.databasePath]);
     database.exec(`CREATE TABLE ${quoteIdentifier(FIXED_BARRIER_TABLE)}(schema_version TEXT PRIMARY KEY, source_database_sha256 TEXT NOT NULL, generation_id TEXT NOT NULL, publication_sha256 TEXT NOT NULL) STRICT`);
     database.prepare(`INSERT INTO ${quoteIdentifier(FIXED_BARRIER_TABLE)}(schema_version, source_database_sha256, generation_id, publication_sha256) VALUES(?, ?, ?, ?)`).run(COORDINATOR_FIXED_PATH_BARRIER_SCHEMA, evidence.source_database_sha256, evidence.generation_id, evidence.publication_sha256);
     const tables = database.prepare("SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all().map((row) => {
@@ -343,22 +345,37 @@ function installFixedBarrier(paths: CoordinatorRuntimePaths, evidence: FixedBarr
     if (database.isTransaction) database.exec('ROLLBACK');
     throw error;
   } finally { database.close(); }
+  if (existsSync(`${paths.databasePath}-wal`) || existsSync(`${paths.databasePath}-shm`)) throw new CoordinationRuntimeError('store-corrupt', 'fixed-path barrier publication retained WAL/SHM authority', [paths.databasePath]);
   syncFile(paths.databasePath);
   syncDirectory(paths.coordinatorRoot);
 }
 
 async function captureFixedSource(paths: CoordinatorRuntimePaths, target: string): Promise<`sha256:${string}`> {
   const source = new DatabaseSync(paths.databasePath, { timeout: 10_000 });
+  let transaction = false;
   try {
     if (fixedBarrierRecord(source) !== null) throw new CoordinationRuntimeError('store-corrupt', 'fixed cf50 source was barriered before a complete generation became recoverable');
-    source.exec('PRAGMA busy_timeout=10000; PRAGMA wal_checkpoint(TRUNCATE)');
+    source.exec('PRAGMA busy_timeout=10000');
+    const checkpoint = source.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get();
+    if (checkpoint === undefined || checkpoint['busy'] !== 0) throw new CoordinationRuntimeError('store-corrupt', 'fixed cf50 source WAL checkpoint could not retire every reader/writer snapshot', [paths.databasePath, `busy=${String(checkpoint?.['busy'])}`]);
+    const journal = source.prepare('PRAGMA journal_mode=DELETE').get();
+    if (journal?.['journal_mode'] !== 'delete') throw new CoordinationRuntimeError('store-corrupt', 'fixed cf50 source did not retire WAL journal mode before capture', [paths.databasePath, String(journal?.['journal_mode'])]);
+    if (existsSync(`${paths.databasePath}-wal`) || existsSync(`${paths.databasePath}-shm`)) throw new CoordinationRuntimeError('store-corrupt', 'fixed cf50 source retained WAL/SHM after successful checkpoint retirement', [paths.databasePath]);
+    source.exec('BEGIN EXCLUSIVE');
+    transaction = true;
     const integrity = sqliteValue(source.prepare('PRAGMA integrity_check').get(), 'integrity_check', 'fixed source integrity');
     const version = sqliteValue(source.prepare('PRAGMA user_version').get(), 'user_version', 'fixed source schema');
     if (integrity !== 'ok' || version !== COORDINATOR_API_SCHEMA_VERSION) throw new CoordinationRuntimeError('schema-mismatch', 'S1 migration input must be exact cf50 schema 12', [`integrity=${String(integrity)}`, `schema=${String(version)}`]);
     const digest = fileSha256(paths.databasePath);
-    await backup(source, target);
+    copyFileSync(paths.databasePath, target, fsConstants.COPYFILE_EXCL);
+    if (fileSha256(paths.databasePath) !== digest || fileSha256(target) !== digest) throw new CoordinationRuntimeError('store-corrupt', 'fixed cf50 source changed or diverged during exact generation capture', [paths.databasePath, target]);
+    source.exec('ROLLBACK');
+    transaction = false;
     return digest;
-  } finally { source.close(); }
+  } finally {
+    if (transaction && source.isTransaction) source.exec('ROLLBACK');
+    source.close();
+  }
 }
 
 function verifyPublishedFixedBarrier(paths: CoordinatorRuntimePaths): FixedBarrierRecord {

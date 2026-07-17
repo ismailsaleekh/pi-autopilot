@@ -1333,7 +1333,9 @@ function canonicalWorktreeFromRow(row: SqlRow): CoordinationWorktree {
 function canonicalWorktreeOperationFromRow(row: SqlRow): CoordinationWorktreeOperation {
   const operation = worktreeOperationFromRow(row);
   const canonicalId = sqlString(row, 'canonical_worktree_id');
-  return operation.worktree_id === canonicalId ? operation : parseCoordinationWorktreeOperation({ ...operation, worktree_id: canonicalId });
+  const expected = deterministicWorktreeId(operation.owner, operation.owner.unit_id === 'main' ? 'main' : 'unit');
+  if (canonicalId !== expected) throw new CoordinationRuntimeError('store-corrupt', 'operation canonical index disagrees with its immutable payload owner', [operation.operation_id, canonicalId, expected]);
+  return operation;
 }
 
 function waitForEdgeFromRow(row: SqlRow): CoordinationWaitForEdge {
@@ -1555,7 +1557,7 @@ function canonicalizeSchema13Worktrees(db: DatabaseSync, clock: StoreClock): voi
       const key = worktreeOwnerKindKey(worktree);
       groups.set(key, [...(groups.get(key) ?? []), worktree]);
     } catch (error) {
-      faultPlans.push({ invariant_id: 'F3-CANONICAL-IDENTITY', repo_id: sqlString(row, 'repo_id'), workstream_run: sqlString(row, 'workstream_run'), entity_type: 'worktree', entity_id: sqlString(row, 'entity_id'), fault_code: 'identity-recovery-pending', detail: { reason: 'malformed-payload-not-used-for-ownership', indexed_owner_only: true, parser_error: error instanceof Error ? error.message : String(error) } });
+      faultPlans.push({ invariant_id: 'F3-CANONICAL-IDENTITY', repo_id: sqlString(row, 'repo_id'), workstream_run: sqlString(row, 'workstream_run'), entity_type: 'worktrees', entity_id: sqlString(row, 'entity_id'), fault_code: 'identity-recovery-pending', detail: { reason: 'malformed-payload-not-used-for-ownership', indexed_owner_only: true, parser_error: error instanceof Error ? error.message : String(error) } });
     }
   }
   for (const candidates of groups.values()) {
@@ -1586,17 +1588,17 @@ function canonicalizeSchema13Worktrees(db: DatabaseSync, clock: StoreClock): voi
     }
     if (pending) faultPlans.push({ invariant_id: 'F3-SEMANTIC-UNIQUENESS', repo_id: first.owner.repo_id, workstream_run: first.owner.workstream_run, entity_type: 'worktree', entity_id: canonicalId, fault_code: 'identity-recovery-pending', detail: { canonical_worktree_id: canonicalId, candidate_ids: candidates.map((entry) => entry.worktree_id).sort(), current_projection_id: current.worktree_id, external_git_facts_required: true, destructive_authority: 'blocked' } });
   }
-  for (const row of db.prepare('SELECT entity_id,repo_id,workstream_run,payload_json FROM worktree_operations ORDER BY repo_id,workstream_run,entity_id').all()) {
+  for (const row of db.prepare('SELECT * FROM worktree_operations ORDER BY repo_id,workstream_run,entity_id').all()) {
     const operationId = sqlString(row, 'entity_id');
-    let rawWorktreeId: string | null = null;
-    try {
-      const payload = parseJsonObject(sqlString(row, 'payload_json'), 'worktree operation during canonical migration');
-      const value = payload['worktree_id'];
-      if (typeof value === 'string') rawWorktreeId = value;
-    } catch { rawWorktreeId = null; }
-    const canonicalId = rawWorktreeId === null ? undefined : canonicalByRawId.get(rawWorktreeId);
+    let operation: CoordinationWorktreeOperation;
+    try { operation = worktreeOperationFromRow(row); }
+    catch (error) {
+      faultPlans.push({ invariant_id: 'F4-PAYLOAD-INDEX-AMBIGUITY', repo_id: sqlString(row, 'repo_id'), workstream_run: sqlString(row, 'workstream_run'), entity_type: 'worktree_operations', entity_id: operationId, fault_code: 'logical-row-fault', detail: { reason: 'operation-payload-contract-invalid', indexed_owner_only: true, parser_error: error instanceof Error ? error.message : String(error) } });
+      continue;
+    }
+    const canonicalId = canonicalByRawId.get(operation.worktree_id);
     if (canonicalId === undefined) {
-      faultPlans.push({ invariant_id: 'F3-OPERATION-CANONICAL-INDEX', repo_id: sqlString(row, 'repo_id'), workstream_run: sqlString(row, 'workstream_run'), entity_type: 'worktree-operation', entity_id: operationId, fault_code: 'identity-recovery-pending', detail: { reason: 'operation-worktree-identity-unresolvable', raw_payload_not_used_for_owner_scope: true } });
+      faultPlans.push({ invariant_id: 'F3-OPERATION-CANONICAL-INDEX', repo_id: sqlString(row, 'repo_id'), workstream_run: sqlString(row, 'workstream_run'), entity_type: 'worktree_operations', entity_id: operationId, fault_code: 'identity-recovery-pending', detail: { reason: 'operation-worktree-identity-unresolvable', raw_payload_not_used_for_owner_scope: true } });
       continue;
     }
     db.prepare('UPDATE worktree_operations SET canonical_worktree_id=? WHERE entity_id=?').run(canonicalId, operationId);
@@ -1717,16 +1719,10 @@ function detectAndPersistLogicalRowFaults(db: DatabaseSync, clock: StoreClock): 
 
 function verifySchema13Projections(db: DatabaseSync): void {
   if (integrityResult(db) !== 'ok' || databaseUserVersion(db) !== COORDINATOR_STORE_SCHEMA_VERSION) throw new CoordinationRuntimeError('store-corrupt', 'schema-13 database failed physical integrity or schema identity');
-  const missingWorktreeProjection = db.prepare("SELECT entity_id,repo_id,workstream_run FROM worktrees WHERE canonical_worktree_id IS NULL OR autopilot_id IS NULL OR unit_id IS NULL OR attempt IS NULL OR kind IS NULL LIMIT 1").get();
-  if (missingWorktreeProjection !== undefined) {
-    const covered = db.prepare("SELECT fault_id FROM run_scoped_faults WHERE repo_id=? AND workstream_run=? AND entity_type='worktree' AND entity_id=? AND status='active'").get(sqlString(missingWorktreeProjection, 'repo_id'), sqlString(missingWorktreeProjection, 'workstream_run'), sqlString(missingWorktreeProjection, 'entity_id'));
-    if (covered === undefined) throw new CoordinationRuntimeError('store-corrupt', 'schema-13 worktree lacks canonical projection without a scoped fault', [sqlString(missingWorktreeProjection, 'entity_id')]);
-  }
-  const missingOperationProjection = db.prepare('SELECT entity_id,repo_id,workstream_run FROM worktree_operations WHERE canonical_worktree_id IS NULL LIMIT 1').get();
-  if (missingOperationProjection !== undefined) {
-    const covered = db.prepare("SELECT fault_id FROM run_scoped_faults WHERE repo_id=? AND workstream_run=? AND entity_type='worktree-operation' AND entity_id=? AND status='active'").get(sqlString(missingOperationProjection, 'repo_id'), sqlString(missingOperationProjection, 'workstream_run'), sqlString(missingOperationProjection, 'entity_id'));
-    if (covered === undefined) throw new CoordinationRuntimeError('store-corrupt', 'schema-13 operation lacks canonical projection without a scoped fault', [sqlString(missingOperationProjection, 'entity_id')]);
-  }
+  const missingWorktreeProjection = db.prepare("SELECT worktrees.entity_id FROM worktrees WHERE (canonical_worktree_id IS NULL OR autopilot_id IS NULL OR unit_id IS NULL OR attempt IS NULL OR kind IS NULL) AND NOT EXISTS(SELECT 1 FROM run_scoped_faults faults WHERE faults.repo_id=worktrees.repo_id AND faults.workstream_run=worktrees.workstream_run AND faults.entity_type='worktrees' AND faults.entity_id=worktrees.entity_id AND faults.status='active') LIMIT 1").get();
+  if (missingWorktreeProjection !== undefined) throw new CoordinationRuntimeError('store-corrupt', 'schema-13 worktree lacks canonical projection without an exact scoped fault', [sqlString(missingWorktreeProjection, 'entity_id')]);
+  const missingOperationProjection = db.prepare("SELECT worktree_operations.entity_id FROM worktree_operations WHERE canonical_worktree_id IS NULL AND NOT EXISTS(SELECT 1 FROM run_scoped_faults faults WHERE faults.repo_id=worktree_operations.repo_id AND faults.workstream_run=worktree_operations.workstream_run AND faults.entity_type='worktree_operations' AND faults.entity_id=worktree_operations.entity_id AND faults.status='active') LIMIT 1").get();
+  if (missingOperationProjection !== undefined) throw new CoordinationRuntimeError('store-corrupt', 'schema-13 operation lacks canonical projection without an exact scoped fault', [sqlString(missingOperationProjection, 'entity_id')]);
   const invalidCurrentGroup = db.prepare('SELECT repo_id,workstream_run,autopilot_id,unit_id,attempt,kind,COUNT(*) AS projection_count,SUM(is_current_canonical) AS current_count FROM worktrees WHERE canonical_worktree_id IS NOT NULL GROUP BY repo_id,workstream_run,autopilot_id,unit_id,attempt,kind HAVING SUM(is_current_canonical)<>1 LIMIT 1').get();
   if (invalidCurrentGroup !== undefined) throw new CoordinationRuntimeError('store-corrupt', 'schema-13 semantic identity does not have exactly one current projection', [sqlString(invalidCurrentGroup, 'repo_id'), sqlString(invalidCurrentGroup, 'workstream_run'), sqlString(invalidCurrentGroup, 'unit_id'), `projection_count=${String(sqlInteger(invalidCurrentGroup, 'projection_count'))}`, `current_count=${String(sqlInteger(invalidCurrentGroup, 'current_count'))}`]);
   for (const row of db.prepare('SELECT * FROM worktrees WHERE canonical_worktree_id IS NOT NULL ORDER BY repo_id,workstream_run,entity_id').all()) {
@@ -1857,8 +1853,10 @@ function schemaMigrationAdapter(clock: StoreClock, writerGuard: CoordinatorWrite
     },
     verifySchema13: async (databasePath) => {
       const db = new DatabaseSync(databasePath, { readOnly: true, timeout: COORDINATOR_BUSY_TIMEOUT_MS });
-      try { verifySchema13Projections(db); }
-      finally { db.close(); }
+      try {
+        applySchemaMigrations(db, clock, COORDINATOR_STORE_SCHEMA_VERSION);
+        verifySchema13Projections(db);
+      } finally { db.close(); }
     },
   };
 }
@@ -3159,7 +3157,7 @@ export class CoordinatorStore {
       classification: 'heartbeat-expired-recovery-check',
       write_authority_released: false,
     }));
-    const migrations = this.#db.prepare('SELECT version, checksum, applied_at FROM schema_migrations ORDER BY version').all().map((row) => ({ version: sqlInteger(row, 'version'), checksum: sqlString(row, 'checksum'), applied_at: sqlString(row, 'applied_at') }));
+    const migrations = this.#db.prepare('SELECT version, checksum, applied_at FROM schema_migrations WHERE version<=? ORDER BY version').all(COORDINATOR_DATABASE_SCHEMA_VERSION).map((row) => ({ version: sqlInteger(row, 'version'), checksum: sqlString(row, 'checksum'), applied_at: sqlString(row, 'applied_at') }));
     const incompleteOperations = this.#db.prepare("SELECT * FROM worktree_operations WHERE canonical_worktree_id IS NOT NULL AND json_extract(payload_json, '$.stage') NOT IN ('committed','compensated','failed') ORDER BY repo_id, workstream_run, canonical_worktree_id, entity_id").all().map(canonicalWorktreeOperationFromRow);
     const pendingReservationObligations = this.#db.prepare("SELECT * FROM reservation_obligations WHERE json_extract(payload_json, '$.state') IN ('waiting-for-predecessor','integration-required') ORDER BY repo_id, workstream_run, entity_id").all().map(reservationObligationFromRow);
     const preparedRunTerminalIntents = this.#db.prepare("SELECT * FROM run_terminal_intents WHERE json_extract(payload_json, '$.state')='prepared' ORDER BY repo_id, workstream_run, entity_id").all().map(runTerminalIntentFromRow);
@@ -3232,9 +3230,7 @@ export class CoordinatorStore {
       ['result_receipts', 'repo_id, workstream_run, committed_event_seq, entity_id'],
       ['result_details', 'result_receipt_id, ordinal'],
       ['worktrees', 'repo_id, workstream_run, entity_id'],
-      ['worktree_operations', 'repo_id, workstream_run, canonical_worktree_id, entity_id'],
-      ['worktree_aliases', 'repo_id, workstream_run, canonical_worktree_id, alias_worktree_id'],
-      ['run_scoped_faults', 'repo_id, workstream_run, status, fault_id'],
+      ['worktree_operations', 'repo_id, workstream_run, entity_id'],
       ['merge_operations', 'repo_id, workstream_run, entity_id'],
       ['wait_for_edges', 'repo_id, entity_id'],
       ['deadlock_resolutions', 'repo_id, entity_id'],
@@ -3251,6 +3247,9 @@ export class CoordinatorStore {
       ['schema_migrations', 'version'],
     ] as const;
     const tableQueries = new Map<string, string>(tables.map(([table, order]) => [table, `SELECT * FROM ${table} ORDER BY ${order}`]));
+    tableQueries.set('worktrees', 'SELECT entity_id,repo_id,workstream_run,payload_json,version FROM worktrees ORDER BY repo_id,workstream_run,entity_id');
+    tableQueries.set('worktree_operations', 'SELECT entity_id,repo_id,workstream_run,payload_json,version FROM worktree_operations ORDER BY repo_id,workstream_run,entity_id');
+    tableQueries.set('schema_migrations', `SELECT version,checksum,applied_at FROM schema_migrations WHERE version<=${String(COORDINATOR_DATABASE_SCHEMA_VERSION)} ORDER BY version`);
     tableQueries.set('evidence_artifacts', 'SELECT entity_id, repo_id, sha256, ref, label, size_bytes, created_event_seq, lower(hex(content)) AS content_hex FROM evidence_artifacts ORDER BY repo_id, created_event_seq, entity_id');
     const keys = ['schema_version', 'database_schema_version', ...tableQueries.keys()].sort((left, right) => left.localeCompare(right));
     const hash = createHash('sha256');
@@ -3391,7 +3390,9 @@ export class CoordinatorStore {
       this.#db.prepare('UPDATE runs SET active_session_generation=?, status=?, version=version+1 WHERE repo_id=? AND workstream_run=?').run(nextGeneration, terminalPreparation === null ? 'active' : 'merging', request.repo_id, workstreamRun);
       const nextRun = this.#requireRun(request.repo_id, workstreamRun);
       const session = sessionFromRow(asRow(this.#db.prepare('SELECT * FROM session_leases WHERE session_lease_id=?').get(payloadString(request.payload, 'session_lease_id')), 'attached session'));
-      const reconciliation = this.#reconcileOwnedRun(request.repo_id, workstreamRun, seq);
+      const reconciliation = this.#activeRunFaults(request.repo_id, workstreamRun).length === 0
+        ? this.#reconcileOwnedRun(request.repo_id, workstreamRun, seq)
+        : this.#freezeReconciliationSummary(this.#emptyReconciliationSummary());
       const reconciliationReceipt = this.#persistReconciliationReceipt(request.repo_id, workstreamRun, request.action, seq, reconciliation);
       return { sequence: seq, eventType: 'session-attached', entityType: 'session-lease', entityId: session.session_lease_id, payload: { run: nextRun, session, ...this.#reconciliationReceiptPayload(reconciliationReceipt) } };
     });
@@ -3422,7 +3423,9 @@ export class CoordinatorStore {
       this.#db.prepare('UPDATE runs SET active_session_generation=?, version=version+1 WHERE repo_id=? AND workstream_run=?').run(nextGeneration, request.repo_id, workstreamRun);
       const nextRun = this.#requireRun(request.repo_id, workstreamRun);
       const session = sessionFromRow(asRow(this.#db.prepare('SELECT * FROM session_leases WHERE session_lease_id=?').get(payloadString(request.payload, 'session_lease_id')), 'attached terminal recovery session'));
-      const reconciliation = this.#reconcileOwnedRun(request.repo_id, workstreamRun, seq);
+      const reconciliation = this.#activeRunFaults(request.repo_id, workstreamRun).length === 0
+        ? this.#reconcileOwnedRun(request.repo_id, workstreamRun, seq)
+        : this.#freezeReconciliationSummary(this.#emptyReconciliationSummary());
       const reconciliationReceipt = this.#persistReconciliationReceipt(request.repo_id, workstreamRun, request.action, seq, reconciliation);
       return { sequence: seq, eventType: 'terminal-cleanup-recovery-attached', entityType: 'session-lease', entityId: session.session_lease_id, payload: { run: nextRun, session, ...this.#reconciliationReceiptPayload(reconciliationReceipt), terminal_intent: intent } };
     });
@@ -3471,6 +3474,7 @@ export class CoordinatorStore {
       if (leases.length !== 1 || leases[0] === undefined) throw new CoordinationRuntimeError('store-corrupt', 'pending migration recovery no longer has exactly one matching imported authority lease', [recoveryId, claim.editLeaseId]);
       const evidence = { ref: payloadString(request.payload, 'evidence_ref'), sha256: payloadString(request.payload, 'evidence_sha256') as `sha256:${string}` };
       const resolutionType = payloadString(request.payload, 'resolution_type');
+      if (resolutionType === 'authority-released') this.#assertAuthorityCriticalMutationAllowed(run.repo_id, run.workstream_run, 'migration recovery authority release');
       const releaseSourceValue = payloadNullableString(request.payload, 'release_source');
       const releaseTargetId = payloadNullableString(request.payload, 'release_target_id');
       const seq = this.#nextEventSequence(request.repo_id);
@@ -3628,6 +3632,7 @@ export class CoordinatorStore {
       const criticalSection = payloadNullableString(request.payload, 'critical_section');
       const preemptible = payloadBoolean(request.payload, 'preemptible');
       const activeExclusive = this.#activeExclusiveLeases(attempt.owner);
+      if (attempt.critical_section !== null && criticalSection === null) this.#assertAuthorityCriticalMutationAllowed(attempt.owner.repo_id, attempt.owner.workstream_run, 'EXCLUSIVE critical-section exit');
       if (criticalSection !== null && !activeExclusive.some((lease) => lease.exclusive_operation?.critical_section === criticalSection)) throw new CoordinationRuntimeError('invalid-request', 'child cannot enter a critical section without its exact active EXCLUSIVE operation', [criticalSection]);
       if (criticalSection !== null && (preemptible || criticalSection !== attempt.critical_section)) throw new CoordinationRuntimeError('invalid-request', 'active EXCLUSIVE checkpoint must preserve its exact non-preemptible critical section', [criticalSection, String(preemptible)]);
       if (attempt.critical_section !== null && criticalSection === null && !preemptible) throw new CoordinationRuntimeError('invalid-request', 'critical-section exit must restore attempt preemptibility before releasing EXCLUSIVE authority');
@@ -3650,6 +3655,7 @@ export class CoordinatorStore {
       this.#assertChildAuthority(request, child, childRow);
       this.#assertVersion(child.version, request.expected_version, 'child lease');
       if (child.status !== 'running') throw new CoordinationRuntimeError('invalid-state', `child lease is ${child.status}`);
+      this.#assertAuthorityCriticalMutationAllowed(child.owner.repo_id, child.owner.workstream_run, 'child terminal acceptance and authority release');
       const status = payloadString(request.payload, 'status');
       const evidenceRef = payloadNullableString(request.payload, 'evidence_ref');
       const evidenceSha = payloadNullableString(request.payload, 'evidence_sha256');
@@ -3819,6 +3825,7 @@ export class CoordinatorStore {
       const claimRequest = this.#requireClaimRequest(requestId);
       this.#assertRequestOwner(request, claimRequest);
       this.#assertVersion(claimRequest.version, request.expected_version, 'claim request');
+      this.#assertAuthorityCriticalMutationAllowed(claimRequest.owner.repo_id, claimRequest.owner.workstream_run, 'claim response reconciliation or authority release');
       if (!['pending', 'delivered', 'acknowledged', 'deferred'].includes(claimRequest.status)) throw new CoordinationRuntimeError('invalid-state', `claim request is ${claimRequest.status}`);
       const seq = this.#nextEventSequence(request.repo_id);
       const offersExpired = this.#expireGrantOffers(request.repo_id, seq);
@@ -4030,6 +4037,7 @@ export class CoordinatorStore {
       this.#assertChildAuthority(request, child, childRow);
       this.#assertVersion(child.version, request.expected_version, 'child lease');
       if (child.status !== 'running') throw new CoordinationRuntimeError('invalid-state', `adjudicator child lease is ${child.status}`);
+      this.#assertAuthorityCriticalMutationAllowed(child.owner.repo_id, child.owner.workstream_run, 'adjudication terminal acceptance and authority release');
       const assignmentId = payloadString(request.payload, 'assignment_id');
       const assignmentRow = asRow(this.#db.prepare('SELECT * FROM adjudication_assignments WHERE repo_id=? AND entity_id=?').get(request.repo_id, assignmentId), 'adjudication assignment');
       const assignment = adjudicationAssignmentFromRow(assignmentRow);
@@ -4113,6 +4121,7 @@ export class CoordinatorStore {
       const workstreamRun = this.#workstreamRun(request);
       const run = this.#requireRun(request.repo_id, workstreamRun);
       this.#assertVersion(run.version, request.expected_version, 'run');
+      this.#assertAuthorityCriticalMutationAllowed(run.repo_id, run.workstream_run, 'terminal/reconciliation evidence acceptance and authority release');
       const source = this.#reconciliationSource(payloadString(request.payload, 'source'));
       if (source === 'child-process') throw new CoordinationRuntimeError('invalid-request', 'child-process terminal evidence is accepted only through authenticated complete-child or the closed startup repair path');
       const conditionType = this.#conditionTypeForSource(source);
@@ -4171,6 +4180,7 @@ export class CoordinatorStore {
       const workstreamRun = this.#workstreamRun(request);
       const run = this.#requireRun(request.repo_id, workstreamRun);
       this.#requireCoordinatorEditAuthority(run, 'reservation resolution');
+      this.#assertAuthorityCriticalMutationAllowed(run.repo_id, run.workstream_run, 'reservation integration acceptance');
       const obligationId = payloadString(request.payload, 'obligation_id');
       const obligation = reservationObligationFromRow(asRow(this.#db.prepare('SELECT * FROM reservation_obligations WHERE repo_id=? AND entity_id=?').get(request.repo_id, obligationId), 'reservation obligation'));
       this.#assertVersion(obligation.version, request.expected_version, 'reservation obligation');
@@ -4214,6 +4224,7 @@ export class CoordinatorStore {
       const run = this.#requireRun(request.repo_id, this.#workstreamRun(request));
       this.#requireCoordinatorEditAuthority(run, 'run terminal preparation');
       this.#assertVersion(run.version, request.expected_version, 'run');
+      this.#assertAuthorityCriticalMutationAllowed(run.repo_id, run.workstream_run, 'run terminal preparation');
       if (this.#preparedTerminalIntent(run.repo_id, run.workstream_run) !== null) throw new CoordinationRuntimeError('coordinator-contention', 'run already has a prepared terminal intent');
       const outcomeValue = payloadString(request.payload, 'outcome');
       if (outcomeValue !== 'closed' && outcomeValue !== 'aborted') throw new CoordinationRuntimeError('invalid-request', 'terminal outcome must be closed or aborted');
@@ -4253,6 +4264,7 @@ export class CoordinatorStore {
       const workstreamRun = this.#workstreamRun(request);
       const run = this.#requireRun(request.repo_id, workstreamRun);
       this.#assertVersion(run.version, request.expected_version, 'run');
+      this.#assertAuthorityCriticalMutationAllowed(run.repo_id, run.workstream_run, 'run authority reconciliation');
       const seq = this.#nextEventSequence(request.repo_id);
       const reconciliation = this.#reconcileOwnedRun(request.repo_id, workstreamRun, seq);
       const reconciliationReceipt = this.#persistReconciliationReceipt(request.repo_id, workstreamRun, request.action, seq, reconciliation);
@@ -6341,10 +6353,18 @@ export class CoordinatorStore {
     return runFromRow(asRow(this.#runByIdentity.get(repoId, workstreamRun), 'run'));
   }
 
-  #assertSourceChangingDispatchAllowed(repoId: string, workstreamRun: string, action: string): void {
-    const faults = this.#db.prepare("SELECT fault_id,invariant_id,fault_code FROM run_scoped_faults WHERE repo_id=? AND workstream_run=? AND status='active' ORDER BY fault_id LIMIT 33").all(repoId, workstreamRun);
+  #activeRunFaults(repoId: string, workstreamRun: string): readonly SqlRow[] {
+    return this.#db.prepare("SELECT fault_id,invariant_id,fault_code FROM run_scoped_faults WHERE repo_id=? AND workstream_run=? AND status='active' ORDER BY fault_id LIMIT 33").all(repoId, workstreamRun);
+  }
+
+  #assertAuthorityCriticalMutationAllowed(repoId: string, workstreamRun: string, action: string): void {
+    const faults = this.#activeRunFaults(repoId, workstreamRun);
     if (faults.length === 0) return;
-    throw new CoordinationRuntimeError('recovery-required', `source-changing dispatch ${action} is fenced by run-scoped logical store faults`, faults.slice(0, 32).map((row) => `${sqlString(row, 'fault_id')}:${sqlString(row, 'invariant_id')}:${sqlString(row, 'fault_code')}`));
+    throw new CoordinationRuntimeError('recovery-required', `authority-critical mutation ${action} is fenced by run-scoped logical store faults`, faults.slice(0, 32).map((row) => `${sqlString(row, 'fault_id')}:${sqlString(row, 'invariant_id')}:${sqlString(row, 'fault_code')}`));
+  }
+
+  #assertSourceChangingDispatchAllowed(repoId: string, workstreamRun: string, action: string): void {
+    this.#assertAuthorityCriticalMutationAllowed(repoId, workstreamRun, `source-changing dispatch:${action}`);
   }
 
   #requireCoordinatorEditAuthority(run: CoordinationRun, operation: string): void {

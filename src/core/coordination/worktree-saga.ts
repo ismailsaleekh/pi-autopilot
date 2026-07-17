@@ -261,8 +261,8 @@ export class OwnedWorktreeSagaClient {
     const withHistory = new Set(allOperations.map((entry) => entry.worktree_id));
     const historical = semantic.filter((entry) => withHistory.has(entry.worktree_id));
     if (historical.length > 1) throw new CoordinationRuntimeError('recovery-required', 'duplicate active worktree projections carry multiple operation histories', historical.map((entry) => entry.worktree_id));
-    const operationWorktree = existing === undefined ? undefined : allWorktrees.find((entry) => entry.worktree_id === existing.worktree_id);
-    if (existing !== undefined && operationWorktree === undefined) throw new CoordinationRuntimeError('store-corrupt', 'existing worktree operation has no exact historical projection', [existing.operation_id, existing.worktree_id]);
+    const operationWorktree = existing === undefined ? undefined : allWorktrees.find((entry) => entry.worktree_id === existing.worktree_id) ?? semantic[0];
+    if (existing !== undefined && operationWorktree === undefined) throw new CoordinationRuntimeError('store-corrupt', 'existing worktree operation has no current canonical semantic projection', [existing.operation_id, existing.worktree_id, id]);
     if (operationWorktree !== undefined && !sameWorktreeAuthority(operationWorktree, proposed)) throw new CoordinationRuntimeError('store-corrupt', 'historical operation worktree authority differs from canonical semantic ownership', [operationWorktree.worktree_id, id]);
     // Replays preserve the operation's immutable historical payload ID. New
     // operations route through the canonical semantic projection selected by
@@ -541,6 +541,15 @@ export async function executeOwnedWorktreeSaga(spec: OwnedWorktreeOperationSpec,
       });
       operation = probed.operation;
       worktree = probed.worktree;
+    } else if (operation.stage === 'in-progress') {
+      phase = 'start-report';
+      const fenced = await client.transition({
+        operation, stage: 'in-progress', completedSteps: operation.completed_steps, currentStep: 'external-action',
+        recoveryAttempts: operation.recovery_attempts, verificationEvidence: operation.verification_evidence, errorCode: operation.error_code,
+        worktreeState: worktree.state, transitionKey: `recovery-authority-${String(operation.version)}`,
+      });
+      operation = fenced.operation;
+      worktree = fenced.worktree;
     }
     let actionError: unknown;
     if (inspection.outcome === 'not-applied') {

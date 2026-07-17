@@ -11,6 +11,8 @@ import { CoordinatorStore, historicalStoreConservationSnapshot } from '../../src
 import type { CoordinationOwnerIdentity, CoordinationWorktree, CoordinationWorktreeOperation } from '../../src/core/coordination/types.ts';
 import { deterministicWorktreeId } from '../../src/core/coordination/worktree-identity.ts';
 
+function isRecord(value: unknown): value is Readonly<Record<string, unknown>> { return typeof value === 'object' && value !== null && !Array.isArray(value); }
+
 function canonicalJson(value: unknown): string {
   if (value === null || typeof value === 'boolean' || typeof value === 'number' || typeof value === 'string') return JSON.stringify(value);
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
@@ -83,9 +85,14 @@ void describe('S1 schema-13 historical twin migration', () => {
       const faults = migrated.negotiatedRunScopedFaults(repoId, run);
       assert.equal(faults.length, 46);
       assert.equal(faults.every((fault) => fault.invariant_id === 'F3-SEMANTIC-UNIQUENESS' && fault.fault_code === 'identity-recovery-pending'), true);
+      const currentOperations = migrated.status(repoId, run).payload['worktree_operations'];
+      if (!Array.isArray(currentOperations)) throw new Error('migrated current operations are missing');
       for (let index = 0; index < 46; index += 1) {
-        const owner: CoordinationOwnerIdentity = { repo_id: repoId, autopilot_id: autopilot, workstream_run: run, unit_id: `unit-${String(index).padStart(2, '0')}`, attempt: 1 };
-        assert.deepEqual(migrated.canonicalWorktreeIdentity(repoId, `migration-worktree-twin-${String(index).padStart(2, '0')}`), { canonical_worktree_id: deterministicWorktreeId(owner, 'unit'), resolution_state: 'identity-recovery-pending', workstream_run: run });
+        const suffix = String(index).padStart(2, '0');
+        const owner: CoordinationOwnerIdentity = { repo_id: repoId, autopilot_id: autopilot, workstream_run: run, unit_id: `unit-${suffix}`, attempt: 1 };
+        assert.deepEqual(migrated.canonicalWorktreeIdentity(repoId, `migration-worktree-twin-${suffix}`), { canonical_worktree_id: deterministicWorktreeId(owner, 'unit'), resolution_state: 'identity-recovery-pending', workstream_run: run });
+        const operation = currentOperations.find((entry) => isRecord(entry) && entry['operation_id'] === `historical-operation-${suffix}`);
+        assert.equal(isRecord(operation) ? operation['worktree_id'] : null, `migration-worktree-twin-${suffix}`, 'current routing must not rewrite immutable historical operation identity');
       }
     } finally { migrated.close(); }
 
@@ -110,5 +117,57 @@ void describe('S1 schema-13 historical twin migration', () => {
     const reopened = await CoordinatorStore.open(paths);
     try { assert.equal(reopened.negotiatedRunScopedFaults(repoId, run).length, 46); }
     finally { reopened.close(); await rm(root, { recursive: true, force: true }); }
+  });
+
+  void it('scopes a malformed but indexed operation row to its provable run during migration', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pi-autopilot-s1-malformed-operation-'));
+    const paths = coordinatorRuntimePaths({ ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: root });
+    await retireTestPublicationToExactSchema12(paths);
+    const repoId = 'repo-malformed-operation';
+    const run = 'run-malformed-operation';
+    const owner: CoordinationOwnerIdentity = { repo_id: repoId, autopilot_id: 'autopilot-malformed-operation', workstream_run: run, unit_id: 'unit-malformed-operation', attempt: 1 };
+    const worktreeId = deterministicWorktreeId(owner, 'unit');
+    const worktree: CoordinationWorktree = { schema_version: 'autopilot.coordination_worktree.v2', worktree_id: worktreeId, owner, kind: 'unit', canonical_path: join(root, 'worktrees', 'unit'), git_common_dir: join(root, 'repository', '.git'), branch: `autopilot/unit/${run}/${owner.unit_id}/attempt-1`, state: 'active', version: 1 };
+    const fixed = new DatabaseSync(paths.databasePath);
+    try {
+      fixed.exec('BEGIN IMMEDIATE');
+      fixed.prepare('INSERT INTO repositories(repo_id,repo_key,canonical_root,git_common_dir,event_seq,created_event_seq,version) VALUES(?,?,?,?,1,1,1)').run(repoId, repoId, join(root, 'repository'), join(root, 'repository', '.git'));
+      fixed.prepare("INSERT INTO runs(repo_id,autopilot_id,workstream,workstream_run,status,active_session_generation,created_event_seq,version,coordination_authority) VALUES(?,?,?,?,'recovering',0,1,1,'coordinator-edit-leases-v1')").run(repoId, owner.autopilot_id, 'malformed-operation', run);
+      fixed.prepare("INSERT INTO events(repo_id,event_seq,event_type,entity_type,entity_id,idempotency_key,request_sha256,occurred_at) VALUES(?,1,'historical-seed','repository',?,'historical-seed',?,'2026-07-15T23:59:59.000Z')").run(repoId, repoId, `sha256:${'c'.repeat(64)}`);
+      fixed.prepare('INSERT INTO worktrees(entity_id,repo_id,workstream_run,payload_json,version) VALUES(?,?,?,?,1)').run(worktreeId, repoId, run, canonicalJson(worktree));
+      fixed.prepare('INSERT INTO worktree_operations(entity_id,repo_id,workstream_run,payload_json,version) VALUES(?,?,?,?,1)').run('malformed-operation', repoId, run, canonicalJson({ worktree_id: worktreeId, owner }));
+      fixed.exec('COMMIT; PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE');
+    } catch (error) {
+      if (fixed.isTransaction) fixed.exec('ROLLBACK');
+      throw error;
+    } finally { fixed.close(); }
+
+    const migrated = await CoordinatorStore.open(paths);
+    try {
+      const faults = migrated.negotiatedRunScopedFaults(repoId, run);
+      assert.equal(faults.some((fault) => fault.invariant_id === 'F4-PAYLOAD-INDEX-AMBIGUITY' && fault.entity_type === 'worktree_operations' && fault.entity_id === 'malformed-operation'), true);
+      const currentOperations = migrated.status(repoId, run).payload['worktree_operations'];
+      assert.equal(Array.isArray(currentOperations) ? currentOperations.length : -1, 0);
+    } finally { migrated.close(); }
+    const reopened = await CoordinatorStore.open(paths);
+    const generationPath = reopened.currentGeneration().database_path;
+    try { assert.equal(reopened.negotiatedRunScopedFaults(repoId, run).some((fault) => fault.entity_id === 'malformed-operation'), true); }
+    finally { reopened.close(); }
+
+    const uncoveredOperation: CoordinationWorktreeOperation = {
+      schema_version: 'autopilot.worktree_operation.v2', operation_id: 'uncovered-operation', worktree_id: worktreeId, owner,
+      operation_type: 'materialize', stage: 'prepared', authority_version: 1, intent_event_seq: 1,
+      intent: { repo_root: join(root, 'repository'), worktree_path: worktree.canonical_path, git_common_dir: worktree.git_common_dir, branch: worktree.branch, reason: 'uncovered projection proof', base_sha: 'd'.repeat(40), target_sha: null, archive_ref: null, checkout_mode: 'full', sparse_patterns: [], paths: [], metadata_refs: [] },
+      completed_steps: [], current_step: null, recovery_attempts: 0, verification_evidence: null, error_code: null, version: 1,
+    };
+    const tamper = new DatabaseSync(generationPath);
+    try { tamper.prepare('INSERT INTO worktree_operations(entity_id,repo_id,workstream_run,payload_json,version,canonical_worktree_id) VALUES(?,?,?,?,1,NULL)').run(uncoveredOperation.operation_id, repoId, run, canonicalJson(uncoveredOperation)); }
+    finally { tamper.close(); }
+    try {
+      await assert.rejects(() => CoordinatorStore.open(paths), /operation lacks canonical projection without an exact scoped fault/u);
+      const inspect = new DatabaseSync(generationPath, { readOnly: true });
+      try { assert.equal(inspect.prepare("SELECT COUNT(*) AS count FROM run_scoped_faults WHERE entity_id='uncovered-operation'").get()?.['count'], 0); }
+      finally { inspect.close(); }
+    } finally { await rm(root, { recursive: true, force: true }); }
   });
 });
