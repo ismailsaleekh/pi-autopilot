@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync, type ChildProcessLite } from 'node:child_process';
+import { linkSync, renameSync, writeFileSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -7,6 +8,7 @@ import { describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import { AUTOPILOT_STATE_ROOT_ENV } from '../../src/core/parallel-runtime.ts';
+import { coordinatorRuntimePaths } from '../../src/core/coordination/runtime-paths.ts';
 import { hardKillProcess } from '../helpers/hard-kill-process.ts';
 
 const packageRoot = resolve(fileURLToPath(new URL('../../', import.meta.url)));
@@ -50,6 +52,39 @@ async function waitForClose(child: ChildProcessLite): Promise<void> {
 }
 
 void describe('S1 SQLite process-lifetime writer guard', () => {
+  void it('rejects a hardlink-aliased guard before acquiring authority', async () => {
+    const stateRoot = await mkdtemp(join(tmpdir(), 'pi-autopilot-writer-guard-hardlink-'));
+    const paths = coordinatorRuntimePaths({ ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: stateRoot });
+    try {
+      const initialized = spawnSync(process.execPath, ['--experimental-strip-types', helper, '5000', 'once'], { cwd: packageRoot, env: { ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: stateRoot }, encoding: 'utf8', timeout: 10_000 });
+      assert.equal(initialized.status, 0, initialized.stderr);
+      linkSync(paths.writerGuardPath, `${paths.writerGuardPath}.forbidden-hardlink`);
+      const rejected = spawnSync(process.execPath, ['--experimental-strip-types', helper, '100', 'once'], { cwd: packageRoot, env: { ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: stateRoot }, encoding: 'utf8', timeout: 10_000 });
+      assert.equal(rejected.status, 70, rejected.stderr);
+      assert.match(rejected.stdout, /hardlink aliases/u);
+    } finally { await rm(stateRoot, { recursive: true, force: true }); }
+  });
+
+  void it('detects guard-path inode replacement while the original transaction is held', async () => {
+    const stateRoot = await mkdtemp(join(tmpdir(), 'pi-autopilot-writer-guard-replaced-'));
+    const paths = coordinatorRuntimePaths({ ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: stateRoot });
+    const holder = startHolder(stateRoot);
+    let retired = false;
+    try {
+      await firstLine(holder);
+      renameSync(paths.writerGuardPath, `${paths.writerGuardPath}.displaced`);
+      writeFileSync(paths.writerGuardPath, new Uint8Array(), { mode: 0o600 });
+      await waitForClose(holder);
+      retired = true;
+      assert.notEqual(holder.exitCode, 0);
+      const recovered = spawnSync(process.execPath, ['--experimental-strip-types', helper, '5000', 'once'], { cwd: packageRoot, env: { ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: stateRoot }, encoding: 'utf8', timeout: 10_000 });
+      assert.equal(recovered.status, 0, recovered.stderr);
+    } finally {
+      if (!retired) { hardKillProcess(holder); await waitForClose(holder); }
+      await rm(stateRoot, { recursive: true, force: true });
+    }
+  });
+
   void it('excludes a second process and recovers only after hard process death', async () => {
     const stateRoot = await mkdtemp(join(tmpdir(), 'pi-autopilot-writer-guard-'));
     const holder = startHolder(stateRoot);
