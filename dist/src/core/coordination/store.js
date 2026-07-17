@@ -1730,7 +1730,27 @@ const STORE_OPEN_INVARIANT_IDS = Object.freeze([
     'F4-PAYLOAD-INDEX-AMBIGUITY', 'F4-EVENT-COUNTER-AHEAD', 'F3-CANONICAL-IDENTITY', 'F3-ALIAS-ONE-HOP',
     'F3-SEMANTIC-UNIQUENESS', 'F3-OPERATION-CANONICAL-INDEX', 'F3-IDENTITY-RECOVERY',
 ]);
-function schemaMigrationAdapter(clock) {
+function migrationInvariantDetectorHost(db, writerGuard) {
+    const unavailable = () => { throw new CoordinationRuntimeError('system-fatal', 'an unrelated invariant detector was invoked during the closed schema-12 migration phase'); };
+    return {
+        detectPhysicalIntegrity: unavailable,
+        detectStoreGeneration: unavailable,
+        detectWriterGuard: () => writerGuard.assertHeld(),
+        detectMigrationBoundary: () => {
+            if (databaseUserVersion(db) !== COORDINATOR_DATABASE_SCHEMA_VERSION)
+                throw new CoordinationRuntimeError('schema-mismatch', 'private generation migration requires exact cf50 schema 12');
+        },
+        detectEventCounterBehind: unavailable,
+        detectEventCounterAhead: unavailable,
+        detectPayloadIndexAmbiguity: unavailable,
+        detectCanonicalIdentity: unavailable,
+        detectAliasOneHop: unavailable,
+        detectSemanticUniqueness: unavailable,
+        detectOperationCanonicalIndex: unavailable,
+        detectIdentityRecovery: unavailable,
+    };
+}
+function schemaMigrationAdapter(clock, writerGuard) {
     return {
         prepareFreshSchema12: async (databasePath) => {
             const db = new DatabaseSync(databasePath, { timeout: COORDINATOR_BUSY_TIMEOUT_MS, enableForeignKeyConstraints: true });
@@ -1747,8 +1767,7 @@ function schemaMigrationAdapter(clock) {
             const db = new DatabaseSync(databasePath, { timeout: COORDINATOR_BUSY_TIMEOUT_MS, enableForeignKeyConstraints: true });
             try {
                 configureWritableDatabase(db);
-                if (databaseUserVersion(db) !== COORDINATOR_DATABASE_SCHEMA_VERSION)
-                    throw new CoordinationRuntimeError('schema-mismatch', 'private generation migration requires exact cf50 schema 12');
+                runS1InvariantDetectors(migrationInvariantDetectorHost(db, writerGuard), ['F4-WRITER-GUARD', 'F4-MIGRATION-BOUNDARY']);
                 applySchemaMigrations(db, clock, COORDINATOR_STORE_SCHEMA_VERSION);
                 verifySchema13Projections(db);
                 db.exec('PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE;');
@@ -1866,8 +1885,9 @@ export class CoordinatorStore {
     static async restoreGeneration(paths, sourceDatabasePath, sourceDatabaseSha256, clock = systemClock, onBoundary) {
         const writerGuard = await CoordinatorWriterGuard.acquire(paths);
         try {
-            const current = await ensureCurrentStoreGeneration(paths, writerGuard, schemaMigrationAdapter(clock));
-            return await publishRestoredStoreGeneration(paths, writerGuard, sourceDatabasePath, sourceDatabaseSha256, current.pointer.generation_id, schemaMigrationAdapter(clock), { now: () => clock.now(), ...(onBoundary === undefined ? {} : { onBoundary }) });
+            const migration = schemaMigrationAdapter(clock, writerGuard);
+            const current = await ensureCurrentStoreGeneration(paths, writerGuard, migration);
+            return await publishRestoredStoreGeneration(paths, writerGuard, sourceDatabasePath, sourceDatabaseSha256, current.pointer.generation_id, migration, { now: () => clock.now(), ...(onBoundary === undefined ? {} : { onBoundary }) });
         }
         finally {
             writerGuard.release();
@@ -1909,7 +1929,7 @@ export class CoordinatorStore {
                     privateSource.close();
                 }
             }
-            const generation = await ensureCurrentStoreGeneration(paths, writerGuard, schemaMigrationAdapter(clock), { now: () => clock.now(), ...(options.onStorePublicationBoundary === undefined ? {} : { onBoundary: options.onStorePublicationBoundary }) });
+            const generation = await ensureCurrentStoreGeneration(paths, writerGuard, schemaMigrationAdapter(clock, writerGuard), { now: () => clock.now(), ...(options.onStorePublicationBoundary === undefined ? {} : { onBoundary: options.onStorePublicationBoundary }) });
             writerGuard.assertHeld();
             const db = new DatabaseSync(generation.database_path, { timeout: COORDINATOR_BUSY_TIMEOUT_MS, enableForeignKeyConstraints: true });
             openedDatabase = db;
