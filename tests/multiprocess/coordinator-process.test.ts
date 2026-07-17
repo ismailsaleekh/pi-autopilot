@@ -90,6 +90,7 @@ class PersistentTraceClient {
   #stdout = '';
   #stderr = '';
   #sequence = 0;
+  #exitError: Error | null = null;
 
   constructor(stateRoot: string, suffix: string) {
     this.suffix = suffix;
@@ -113,8 +114,11 @@ class PersistentTraceClient {
       }
     });
     this.#child.on('error', (error) => this.#fail(error));
-    this.#child.on('close', (code) => {
-      if (code !== 0 || this.#pending.size > 0) this.#fail(new Error(`persistent trace client ${suffix} exited ${String(code)}: ${this.#stderr}`));
+    this.#child.on('close', (code, signal) => {
+      if (code !== 0 || this.#pending.size > 0) {
+        this.#exitError = new Error(`persistent trace client ${suffix} exited code=${String(code)} signal=${signal ?? 'none'}: ${this.#stderr}`);
+        this.#fail(this.#exitError);
+      }
       this.#resolveClosed?.();
       this.#resolveClosed = null;
     });
@@ -132,13 +136,34 @@ class PersistentTraceClient {
   }
 
   async stop(): Promise<void> {
-    if (this.#child.killed) return;
-    try { await this.send('shutdown'); } catch { /* process cleanup still follows */ }
+    if (this.#child.exitCode !== null) {
+      await this.#closed;
+      if (this.#exitError !== null) throw this.#exitError;
+      return;
+    }
+    let shutdownError: Error | null = null;
+    try {
+      await Promise.race([
+        this.send('shutdown'),
+        sleep(10_000).then(() => { throw new Error(`persistent trace client ${this.suffix} did not acknowledge shutdown`); }),
+      ]);
+    } catch (error) { shutdownError = error instanceof Error ? error : new Error(String(error)); }
     this.#child.stdin.end();
-    await this.#closed;
+    let closed = await Promise.race([this.#closed.then(() => true), sleep(5_000).then(() => false)]);
+    if (!closed) {
+      this.#child.kill('SIGTERM');
+      closed = await Promise.race([this.#closed.then(() => true), sleep(5_000).then(() => false)]);
+    }
+    if (!closed) {
+      this.#child.kill('SIGKILL');
+      await Promise.race([
+        this.#closed,
+        sleep(5_000).then(() => { throw new Error(`persistent trace client ${this.suffix} survived SIGKILL`); }),
+      ]);
+    }
+    const failures = [shutdownError, this.#exitError].filter((error): error is Error => error !== null);
+    if (failures.length > 0) throw new AggregateError(failures, `persistent trace client ${this.suffix} cleanup failed`);
   }
-
-  kill(): void { if (!this.#child.killed) this.#child.kill('SIGTERM'); }
 
   #onLine(line: string): void {
     let value: unknown;
@@ -309,6 +334,7 @@ async function certifyPersistentReleaseTrace(clientCount: number): Promise<void>
   const states = new Map<string, string>();
   const currentGroups = new Map<string, { readonly groupId: string; readonly attempt: number }>();
   const committedSequences = new Map<string, number>();
+  let traceError: unknown = null;
   try {
     await waitFor(() => existsSync(paths.lockPath) && existsSync(paths.capabilityPath));
     await waitForCoordinator(coordinator);
@@ -512,12 +538,17 @@ async function certifyPersistentReleaseTrace(clientCount: number): Promise<void>
     }
     assert.equal(observedHolders.size, clientCount, 'every persistent client must receive contested authority exactly once');
     assert.equal([...states.values()].filter((state) => state === 'granted').length, 1);
-  } finally {
-    await Promise.all([...actors.values()].map(async (actor) => await actor.stop().catch(() => undefined)));
-    for (const actor of actors.values()) actor.kill();
-    await stopCoordinator(paths.lockPath);
-    if (!server.killed) server.kill('SIGTERM');
-    await rm(root, { recursive: true, force: true });
+  } catch (error) { traceError = error; }
+
+  const cleanupFailures: unknown[] = [];
+  for (const result of await Promise.allSettled([...actors.values()].map(async (actor) => await actor.stop()))) {
+    if (result.status === 'rejected') cleanupFailures.push(result.reason);
+  }
+  try { await stopCoordinator(paths.lockPath); } catch (error) { cleanupFailures.push(error); }
+  if (!server.killed && server.exitCode === null) server.kill('SIGTERM');
+  try { await rm(root, { recursive: true, force: true }); } catch (error) { cleanupFailures.push(error); }
+  if (traceError !== null || cleanupFailures.length > 0) {
+    throw new AggregateError([...(traceError === null ? [] : [traceError]), ...cleanupFailures], `${String(clientCount)}-client persistent release trace or cleanup failed`);
   }
 }
 
