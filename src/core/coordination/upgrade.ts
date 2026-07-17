@@ -296,7 +296,7 @@ async function verifyMigrationOnCopy(paths: CoordinatorRuntimePaths, record: Coo
   await enforcePrivateAuthorityPath(probePaths.databasePath, false);
   let store: CoordinatorStore | null = null;
   try {
-    await upgradeVerifiedPrivateSchema6CopyToSchema12(probePaths);
+    await upgradeVerifiedPrivateSchema6CopyToSchema12(probePaths, record.sha256);
     store = await CoordinatorStore.open(probePaths);
     if (store.integrity() !== 'ok') throw new CoordinationRuntimeError('store-corrupt', 'schema migration probe failed integrity');
     const status = store.status('global', null).payload;

@@ -1895,13 +1895,16 @@ function sqliteFailure(error: unknown): CoordinationRuntimeError {
  * isolated, already verified schema-6 copy into the exact schema-12 input that
  * S1 generation publication accepts. It never opens or reinterprets S1 store
  * authority in place. */
-export async function upgradeVerifiedPrivateSchema6CopyToSchema12(paths: CoordinatorRuntimePaths, clock: StoreClock = systemClock): Promise<void> {
+export async function upgradeVerifiedPrivateSchema6CopyToSchema12(paths: CoordinatorRuntimePaths, verifiedSourceSha256: `sha256:${string}`, clock: StoreClock = systemClock): Promise<void> {
   await ensureCoordinatorPrivateRoots(paths);
   assertPrivatePathNoAliases(paths.databasePath);
   await enforcePrivateAuthorityPath(paths.databasePath, false);
+  const sourceDigest = (): `sha256:${string}` => `sha256:${createHash('sha256').update(readFileSync(paths.databasePath)).digest('hex')}`;
+  if (!SHA256_PATTERN.test(verifiedSourceSha256) || sourceDigest() !== verifiedSourceSha256) throw new CoordinationRuntimeError('store-corrupt', 'verified private schema-6 copy differs from exact upgrade backup evidence', [paths.databasePath]);
   const writerGuard = await CoordinatorWriterGuard.acquire(paths);
   try {
     writerGuard.assertHeld();
+    if (sourceDigest() !== verifiedSourceSha256) throw new CoordinationRuntimeError('store-corrupt', 'verified private schema-6 copy changed before guarded transformation', [paths.databasePath]);
     const database = new DatabaseSync(paths.databasePath, { timeout: COORDINATOR_BUSY_TIMEOUT_MS, enableForeignKeyConstraints: true });
     try {
       configureWritableDatabase(database);
