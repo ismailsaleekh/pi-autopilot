@@ -60,10 +60,13 @@ Status: implementation design for `s1-lane1-f3f4-store`; authority is
 
 ## Conservation proof strategy
 
-Before schema-13 migration, hash every `events`, `worktree_operations`,
-`idempotency_results`, and `evidence_artifacts` payload/content cell in primary
-key order. After migration, recompute the same hashes and exact row counts.
-Migration may add projection/index/alias/fault rows only. Existing historical
+Before schema-13 migration, record the primary key and byte-level authority
+cells of every existing `events`, `worktree_operations`, `idempotency_results`,
+and `evidence_artifacts` row. After migration, recompute that exact preexisting
+key set and require identical bytes with no missing row. Migration may append
+immutable audit events/evidence required to bind new aliases, scoped faults, and
+counter repair, and may add projection/index/alias/fault rows; appended audit
+rows are distinguished from the frozen historical key set. Existing historical
 payload/content bytes are never updated.
 
 ## Path/publication authority

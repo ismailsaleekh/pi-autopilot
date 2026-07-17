@@ -97,6 +97,7 @@ void describe('S1 schema-13 historical twin migration', () => {
       assert.equal(inspect.prepare('SELECT COUNT(*) AS count FROM worktrees').get()?.['count'], 92);
       assert.equal(inspect.prepare('SELECT COUNT(*) AS count FROM worktree_aliases').get()?.['count'], 46);
       assert.equal(inspect.prepare('SELECT payload_json FROM idempotency_results WHERE repo_id=? AND idempotency_key=?').get(repoId, 'historical-result')?.['payload_json'], '{"historical":true}');
+      assert.equal(canonicalJson(inspect.prepare('SELECT event_type,entity_type,entity_id,idempotency_key,request_sha256,occurred_at FROM events WHERE repo_id=? AND event_seq=1').get(repoId)), canonicalJson({ event_type: 'historical-seed', entity_type: 'repository', entity_id: repoId, idempotency_key: 'historical-seed', request_sha256: initialDigest, occurred_at: '2026-07-15T23:59:59.000Z' }));
       assert.deepEqual(inspect.prepare('SELECT content FROM evidence_artifacts WHERE entity_id=?').get('historical-evidence')?.['content'], new TextEncoder().encode('immutable-historical-evidence\0bytes'));
       for (const [operationId, payload] of operationPayloads) assert.equal(inspect.prepare('SELECT payload_json FROM worktree_operations WHERE entity_id=?').get(operationId)?.['payload_json'], payload);
     } finally { inspect.close(); }
