@@ -325,6 +325,35 @@ void describe('owner-scoped worktree and Git saga recovery', () => {
     }
   });
 
+  void it('rejects operation-evidence symlink substitution and resumes without repeating the applied effect', async () => {
+    const value = await setup('evidence-link');
+    try {
+      const spec = unitCreateSpec(value, 'unit-evidence-link');
+      const saga = new OwnedWorktreeSagaClient(new CoordinatorClient({ env: value.env, autoStart: false }), value.session);
+      const prepared = await saga.prepare(spec);
+      const evidencePath = join(value.active.worktree_root, '_saga-evidence', value.active.workstream_run, `${prepared.operation.operation_id}.json`);
+      const external = join(value.root, 'external-evidence.json');
+      await writeFile(external, 'external bytes must survive\n', 'utf8');
+      await mkdir(dirname(evidencePath), { recursive: true });
+      await symlink(external, evidencePath);
+      let actions = 0;
+      const callbacks = { action: () => { actions += 1; git(value.repo, ['worktree', 'add', '-b', spec.intent.branch, spec.intent.worktree_path, value.active.target_base_sha]); } };
+      await assert.rejects(
+        () => executeOwnedWorktreeSaga(spec, callbacks, value.env),
+        (error: unknown) => error instanceof CoordinationRuntimeError && error.code === 'recovery-required' && error.message.includes('symlink substitution'),
+      );
+      assert.equal(await readFile(external, 'utf8'), 'external bytes must survive\n');
+      assert.equal(actions, 1);
+      await rm(evidencePath);
+      const recovered = await executeOwnedWorktreeSaga(spec, callbacks, value.env);
+      assert.equal(recovered.operation?.stage, 'committed');
+      assert.equal(actions, 1);
+      assert.equal(git(spec.intent.worktree_path, ['rev-parse', 'HEAD']), value.active.target_base_sha);
+    } finally {
+      await close(value);
+    }
+  });
+
   void it('replays a committed canonical key through a later committed reset without repeating its historical effect', async () => {
     const value = await setup('sup');
     try {

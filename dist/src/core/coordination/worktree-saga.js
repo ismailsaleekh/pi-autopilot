@@ -85,6 +85,17 @@ function operationEvidenceRef(owner, id) {
 function operationEvidencePath(session, ref) {
     return join(session.state_root, 'worktrees', session.repo_key, ...ref.split('/'));
 }
+async function assertImmutableEvidenceBytes(path, expected) {
+    const before = lstatSync(path);
+    if (!before.isFile() || before.isSymbolicLink() || before.size > 1024 * 1024)
+        throw new CoordinationRuntimeError('recovery-required', 'worktree operation evidence must be a bounded regular non-symbolic file', [path]);
+    const actual = await readFile(path, 'utf8');
+    const after = lstatSync(path);
+    if (!after.isFile() || after.isSymbolicLink() || before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs)
+        throw new CoordinationRuntimeError('recovery-required', 'worktree operation evidence identity changed during immutable inspection', [path]);
+    if (actual !== expected)
+        throw new CoordinationRuntimeError('idempotency-conflict', 'immutable worktree operation evidence differs from the existing artifact', [path]);
+}
 async function writeImmutableEvidence(input) {
     const ref = operationEvidenceRef(input.operation.owner, input.operation.operation_id);
     const path = operationEvidencePath(input.session, ref);
@@ -104,6 +115,7 @@ async function writeImmutableEvidence(input) {
         error_code: input.errorCode,
     })}\n`;
     await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+    assertNoSymlinkSegments(join(input.session.state_root, 'worktrees', input.session.repo_key), path, 'operation evidence');
     try {
         const handle = await open(path, 'wx', 0o600);
         try {
@@ -117,10 +129,11 @@ async function writeImmutableEvidence(input) {
     catch (error) {
         if (!(error instanceof Error && 'code' in error && error.code === 'EEXIST'))
             throw error;
-        const existing = await readFile(path, 'utf8');
-        if (existing !== body)
-            throw new CoordinationRuntimeError('idempotency-conflict', 'immutable worktree operation evidence differs from the existing artifact', [path]);
+        assertNoSymlinkSegments(join(input.session.state_root, 'worktrees', input.session.repo_key), path, 'operation evidence');
+        await assertImmutableEvidenceBytes(path, body);
     }
+    assertNoSymlinkSegments(join(input.session.state_root, 'worktrees', input.session.repo_key), path, 'operation evidence');
+    await assertImmutableEvidenceBytes(path, body);
     return { ref, sha256: `sha256:${createHash('sha256').update(body, 'utf8').digest('hex')}` };
 }
 function assertSpecMatchesActiveAuthority(spec) {
