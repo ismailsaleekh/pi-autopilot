@@ -1,4 +1,3 @@
-import { spawnSync } from 'node:child_process';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, normalize, relative, resolve, sep } from 'node:path';
 
@@ -13,6 +12,7 @@ import {
   type AutopilotStatusEntry,
   type AutopilotUnitSpec,
 } from '../contracts/types.ts';
+import { GitQueryError, gitQueryNulStrings, runGitQuery } from '../git-process.ts';
 
 export interface AutopilotExecutionBaseline {
   readonly cwd: string;
@@ -265,18 +265,11 @@ function committedChangedPaths(
   postRunHead: string | null,
 ): readonly string[] {
   if (baselineHead === null || postRunHead === null || baselineHead === postRunHead) return [];
-  const result = spawnSync('git', ['-C', cwd, 'diff', '--name-only', '-z', baselineHead, postRunHead], {
-    encoding: 'utf8',
-  });
-  if (result.status !== 0) return [];
-  return Object.freeze(result.stdout.split('\0').filter((path) => path.length > 0).map(toPosixRelativePath).sort());
+  return Object.freeze(gitQueryNulStrings({ descriptor: { kind: 'diff-paths', from: baselineHead, to: postRunHead }, cwd }).map(toPosixRelativePath).sort());
 }
 
 function isAncestor(cwd: string, ancestor: string, descendant: string): boolean {
-  const result = spawnSync('git', ['-C', cwd, 'merge-base', '--is-ancestor', ancestor, descendant], {
-    encoding: 'utf8',
-  });
-  return result.status === 0;
+  return !runGitQuery({ descriptor: { kind: 'is-ancestor', ancestor, descendant }, cwd }).negative;
 }
 
 function boundedAuditPathSet(
@@ -322,29 +315,27 @@ function truncatedAuditPathSets(
 }
 
 function readGitStatusSnapshot(cwd: string): GitStatusSnapshot {
-  const status = spawnSync('git', ['-C', cwd, 'status', '--porcelain=v1', '-z', '--untracked-files=all'], {
-    encoding: 'utf8',
-  });
-  if (status.status !== 0) {
+  try {
+    const status = runGitQuery({ descriptor: { kind: 'status-porcelain' }, cwd });
+    const gitHead = readGitHead(cwd);
+    if (gitHead === null) return Object.freeze({ available: false, gitHead: null, changedPaths: [], summary: 'git status succeeded but HEAD was unavailable' });
     return Object.freeze({
-      available: false,
-      gitHead: null,
-      changedPaths: [],
-      summary: boundedText(status.stderr),
+      available: true,
+      gitHead,
+      changedPaths: parsePorcelainStatusPaths(new TextDecoder('utf-8', { fatal: true }).decode(status.stdout)),
+      summary: 'git status snapshot captured',
     });
+  } catch (error) {
+    if (!(error instanceof GitQueryError)) throw error;
+    return Object.freeze({ available: false, gitHead: null, changedPaths: [], summary: boundedText(error.diagnostic || error.message) });
   }
-  return Object.freeze({
-    available: true,
-    gitHead: readGitHead(cwd),
-    changedPaths: parsePorcelainStatusPaths(status.stdout),
-    summary: 'git status snapshot captured',
-  });
 }
 
 function readGitHead(cwd: string): string | null {
-  const result = spawnSync('git', ['-C', cwd, 'rev-parse', 'HEAD'], { encoding: 'utf8' });
-  if (result.status !== 0) return null;
-  const head = result.stdout.trim();
+  let result: ReturnType<typeof runGitQuery>;
+  try { result = runGitQuery({ descriptor: { kind: 'head' }, cwd }); }
+  catch (error) { if (error instanceof GitQueryError) return null; throw error; }
+  const head = new TextDecoder('utf-8', { fatal: true }).decode(result.stdout).trim();
   return head.length === 0 ? null : head;
 }
 

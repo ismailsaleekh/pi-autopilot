@@ -7,7 +7,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { authorityCandidatesForSpec, deriveAutopilotAuthority } from "./authority.js";
 import { AUTOPILOT_CHECKOUT_PROFILE_SNAPSHOT_FILE, checkoutProfileSnapshotFromResolved, parseCheckoutProfileSnapshot, readCheckoutProfileSnapshot, resolveAutopilotCheckoutProfile, sparseIncludePatternsForPaths, } from "./checkout-profile.js";
 import { assertAutopilotDiskGate } from "./disk-gate.js";
-import { applySparseCheckoutSet, createAutopilotGitWorktree, isSparseCheckoutEnabled } from "./sparse-worktree.js";
+import { applySparseCheckoutSet, createAutopilotGitWorktree } from "./sparse-worktree.js";
 import { cleanupTerminalUnitWorktreesForRun, recoverCommittedPreflightRollbackProjections } from "./worktree-cleanup.js";
 import { executeOwnedWorktreeSaga, OwnedWorktreeSagaClient, recoverOwnedWorktreeSagas } from "./coordination/worktree-saga.js";
 import { AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV, AUTOPILOT_RUNTIME_ROOT_PREFIX } from "./names.js";
@@ -19,6 +19,7 @@ import { CoordinationRuntimeError } from "./coordination/failures.js";
 import { parseCoordinationChildLease, parseCoordinationRun, parseCoordinationRunResource, parseCoordinationUnitAttempt, parseCoordinationWorktree, parseCoordinationWorktreeOperation } from "./coordination/contracts.js";
 import { assertCoordinationDispatchAllowed, assertLegacyCoordinationWritable, coordinationCutoverCommitted } from "./coordination/migration-paths.js";
 import { enforcePrivateAuthorityPath, ensurePrivateAuthorityDirectory } from "./private-path.js";
+import { gitQueryText, runGitMutation, runGitQuery } from "./git-process.js";
 export const AUTOPILOT_STATE_ROOT_ENV = 'AUTOPILOT_STATE_ROOT';
 export const AUTOPILOT_RUNTIME_ENV = 'AUTOPILOT_RUNTIME';
 export const AUTOPILOT_RUNTIME_VALUE = '1';
@@ -246,7 +247,6 @@ export async function prepareAutopilotUnitWorktree(input) {
             attempt: input.attempt,
             kind: 'unit',
             operationType: 'create',
-            operationKey: `unit-create:${input.unitId}:${String(input.attempt)}:${baseSha}`,
             initialWorktreeState: 'planned',
             committedWorktreeState: 'active',
             intent: {
@@ -264,23 +264,12 @@ export async function prepareAutopilotUnitWorktree(input) {
                 metadata_refs: metadataRefs,
             },
         }, {
-            inspect: () => {
-                if (!existsSync(unitWorktreePath))
-                    return { outcome: 'not-applied', proof: ['unit_worktree_absent'] };
-                const actualBranch = runGit(['rev-parse', '--abbrev-ref', 'HEAD'], unitWorktreePath, env).trim();
-                if (actualBranch !== branch)
-                    return { outcome: 'unsafe', proof: [`expected_branch=${branch}`, `actual_branch=${actualBranch}`] };
-                if (checkout.mode !== 'legacy-full' && checkout.mode !== 'full' && !isSparseCheckoutEnabled(unitWorktreePath, env))
-                    return { outcome: 'not-applied', proof: ['unit_worktree_registered', 'sparse_configuration_incomplete'] };
-                const metadataComplete = existsSync(join(unitAttemptRoot, UNIT_INFO_FILE)) && existsSync(join(taskRoot, UNIT_INDEX_FILE)) && existsSync(join(taskRoot, BRANCHES_FILE));
-                return metadataComplete ? { outcome: 'satisfied', proof: ['unit_worktree_registered', 'unit_metadata_complete'] } : { outcome: 'not-applied', proof: ['unit_worktree_registered', 'unit_metadata_incomplete'] };
-            },
             action: async () => {
                 if (existsSync(unitAttemptRoot) && !existsSync(unitWorktreePath) && (await readdir(unitAttemptRoot, { withFileTypes: true })).length > 0)
                     fail('unit-worktree-path-exists', 'unit attempt path contains unrelated residue before recoverable worktree creation.', [unitAttemptRoot]);
                 await mkdir(unitAttemptRoot, { recursive: true });
                 if (!existsSync(unitWorktreePath)) {
-                    createAutopilotGitWorktree({
+                    await createAutopilotGitWorktree({
                         repoRoot: input.active.source_repo,
                         worktreePath: unitWorktreePath,
                         branch,
@@ -291,9 +280,11 @@ export async function prepareAutopilotUnitWorktree(input) {
                     });
                 }
                 if (checkout.mode !== 'legacy-full' && checkout.mode !== 'full') {
-                    applySparseCheckoutSet(unitWorktreePath, sparsePatterns, env);
-                    runGit(['checkout', '--force', branch], unitWorktreePath, { ...env, [AUTOPILOT_RUNTIME_ENV]: AUTOPILOT_RUNTIME_VALUE });
+                    await applySparseCheckoutSet(unitWorktreePath, sparsePatterns, env);
+                    await runGitMutation({ descriptor: { kind: 'checkout-force', branch }, cwd: unitWorktreePath, env: { ...env, [AUTOPILOT_RUNTIME_ENV]: AUTOPILOT_RUNTIME_VALUE } });
                 }
+            },
+            finalize: async () => {
                 if (input.unitSpec !== undefined)
                     await ensureFutureOwnedParentDirs(unitWorktreePath, input.unitSpec.owned_paths);
                 await writeJsonAtomic(join(unitAttemptRoot, UNIT_INFO_FILE), unitInfo);
@@ -312,16 +303,6 @@ export async function prepareAutopilotUnitWorktree(input) {
                         });
                     }
                 }
-            },
-            verify: async () => {
-                const actualBranch = runGit(['rev-parse', '--abbrev-ref', 'HEAD'], unitWorktreePath, env).trim();
-                const actualHead = gitHead(unitWorktreePath);
-                if (actualBranch !== branch || actualHead !== baseSha)
-                    fail('unit-worktree-create-postcondition', 'unit worktree create saga postcondition failed.', [actualBranch, actualHead, branch, baseSha]);
-                const indexed = (await readUnitIndex(taskRoot)).units.find((candidate) => candidate.unit_id === input.unitId && candidate.attempt === input.attempt);
-                if (indexed === undefined || indexed.worktree_path !== unitWorktreePath || indexed.branch !== branch)
-                    fail('unit-worktree-create-postcondition', 'unit worktree metadata is incomplete after saga action.', metadataRefs);
-                return ['git_worktree_registered', `branch=${branch}`, `head=${baseSha}`, 'unit_metadata_complete'];
             },
         }, env);
         return { unitInfo, created: true, resumed: false };
@@ -348,33 +329,22 @@ async function recoverUnitCreateSagaMetadata(active, operation, env) {
         created_at: active.started_at, checkout_mode: checkoutMode, checkout_profile_ref: checkout.checkoutProfileRef, materialized_paths_ref: MATERIALIZED_PATHS_FILE,
     };
     const branchInfo = branchInfoFromUnitInfo(unitInfo);
-    const inspect = () => {
-        if (!existsSync(unitWorktreePath))
-            return { outcome: 'not-applied', proof: ['unit_worktree_absent'] };
-        const actualBranch = runGit(['rev-parse', '--abbrev-ref', 'HEAD'], unitWorktreePath, env).trim();
-        const actualHead = gitHead(unitWorktreePath);
-        if (actualBranch !== operation.intent.branch || actualHead !== baseSha)
-            return { outcome: 'unsafe', proof: [`expected_branch=${operation.intent.branch}`, `actual_branch=${actualBranch}`, `expected_head=${baseSha}`, `actual_head=${actualHead}`] };
-        if (operation.intent.checkout_mode !== 'full' && !isSparseCheckoutEnabled(unitWorktreePath, env))
-            return { outcome: 'not-applied', proof: ['unit_worktree_registered', 'sparse_configuration_incomplete'] };
-        const missingMetadata = operation.intent.metadata_refs.filter((ref) => !existsSync(resolve(taskRoot, ...ref.split('/'))));
-        return missingMetadata.length === 0 ? { outcome: 'satisfied', proof: ['unit_worktree_registered', 'unit_metadata_complete'] } : { outcome: 'not-applied', proof: missingMetadata.map((ref) => `missing_metadata=${ref}`) };
-    };
     const result = await executeOwnedWorktreeSaga({
-        active, unitId, attempt, kind: 'unit', operationType: 'create', operationKey: '', operationId: operation.operation_id,
+        active, unitId, attempt, kind: 'unit', operationType: 'create', operationId: operation.operation_id,
         initialWorktreeState: 'planned', committedWorktreeState: 'active', intent: operation.intent,
     }, {
-        inspect,
         action: async () => {
             if (existsSync(unitAttemptRoot) && !existsSync(unitWorktreePath) && (await readdir(unitAttemptRoot, { withFileTypes: true })).length > 0)
                 fail('unit-worktree-path-exists', 'unit attempt path contains unrelated residue before recoverable worktree creation.', [unitAttemptRoot]);
             await mkdir(unitAttemptRoot, { recursive: true });
             if (!existsSync(unitWorktreePath))
-                createAutopilotGitWorktree({ repoRoot: active.source_repo, worktreePath: unitWorktreePath, branch: operation.intent.branch, startPoint: baseSha, mode: operation.intent.checkout_mode ?? 'full', sparsePatterns: operation.intent.sparse_patterns, env: { ...env, [AUTOPILOT_RUNTIME_ENV]: AUTOPILOT_RUNTIME_VALUE } });
+                await createAutopilotGitWorktree({ repoRoot: active.source_repo, worktreePath: unitWorktreePath, branch: operation.intent.branch, startPoint: baseSha, mode: operation.intent.checkout_mode ?? 'full', sparsePatterns: operation.intent.sparse_patterns, env: { ...env, [AUTOPILOT_RUNTIME_ENV]: AUTOPILOT_RUNTIME_VALUE } });
             if (operation.intent.checkout_mode !== 'full') {
-                applySparseCheckoutSet(unitWorktreePath, operation.intent.sparse_patterns, env);
-                runGit(['checkout', '--force', operation.intent.branch], unitWorktreePath, { ...env, [AUTOPILOT_RUNTIME_ENV]: AUTOPILOT_RUNTIME_VALUE });
+                await applySparseCheckoutSet(unitWorktreePath, operation.intent.sparse_patterns, env);
+                await runGitMutation({ descriptor: { kind: 'checkout-force', branch: operation.intent.branch }, cwd: unitWorktreePath, env: { ...env, [AUTOPILOT_RUNTIME_ENV]: AUTOPILOT_RUNTIME_VALUE } });
             }
+        },
+        finalize: async () => {
             await ensureFutureOwnedParentDirs(unitWorktreePath, operation.intent.paths);
             await writeJsonAtomic(join(unitAttemptRoot, UNIT_INFO_FILE), unitInfo);
             const currentIndex = await readUnitIndex(taskRoot);
@@ -387,8 +357,6 @@ async function recoverUnitCreateSagaMetadata(active, operation, env) {
                     await appendJsonl(ledgerPath, { schema_version: 'autopilot.worktree_ledger.v1', event: 'unit-create', ts: active.started_at, workstream: active.workstream, workstream_run: active.workstream_run, autopilot_id: active.autopilot_id, unit_id: unitId, attempt, branch: operation.intent.branch, unit_path: unitWorktreePath, base_sha: baseSha });
             }
         },
-        verify: () => { const inspected = inspect(); if (inspected.outcome !== 'satisfied')
-            fail('unit-create-recovery-postcondition', 'recovered unit create metadata remains incomplete.', inspected.proof); return inspected.proof; },
     }, env);
     if (result.operation === null)
         fail('unit-create-recovery-unmanaged', 'durable unit create recovery unexpectedly ran without coordinator authority.', [operation.operation_id]);
@@ -748,36 +716,25 @@ export async function ensureWorktreeCleanForLaunch(input) {
     }
 }
 export function readGitStatus(cwd) {
-    const output = runGit(['status', '--porcelain=v1', '-z', '--untracked-files=all'], cwd);
+    const output = gitQueryText({ descriptor: { kind: 'status-porcelain' }, cwd });
     return parseStatusPorcelainZ(output);
 }
 export function gitHead(cwd) {
-    return runGit(['rev-parse', 'HEAD'], cwd).trim();
-}
-export function runGit(args, cwd, env = process.env) {
-    const result = spawnSync('git', [...args], { cwd, encoding: 'utf8', env: { ...process.env, ...env } });
-    if (result.error !== undefined) {
-        fail('git-spawn-failed', `git ${args.join(' ')} failed to spawn: ${result.error.message}`);
-    }
-    if ((result.status ?? -1) !== 0) {
-        fail('git-command-failed', `git ${args.join(' ')} exited with status ${String(result.status ?? -1)}.`, [
-            result.stderr.trim(),
-            result.stdout.trim(),
-        ]);
-    }
-    return result.stdout;
+    return gitQueryText({ descriptor: { kind: 'head' }, cwd }).trim();
 }
 export function resolveRepoIdentity(cwd) {
-    const repoRoot = realpathExisting(runGit(['rev-parse', '--show-toplevel'], cwd).trim(), 'git repo root');
-    const commonDirRaw = runGit(['rev-parse', '--git-common-dir'], repoRoot).trim();
+    const repoRoot = realpathExisting(gitQueryText({ descriptor: { kind: 'show-toplevel' }, cwd }).trim(), 'git repo root');
+    const commonDirRaw = gitQueryText({ descriptor: { kind: 'git-common-dir' }, cwd: repoRoot }).trim();
     const gitCommonDir = realpathExisting(isAbsolute(commonDirRaw) ? commonDirRaw : resolve(repoRoot, commonDirRaw), 'git common dir');
     const keyHash = sha256Text(`autopilot.repo_key.v1\n${gitCommonDir}\n`);
     const repoKey = `sha256-${keyHash}`;
-    const headSha = runGit(['rev-parse', 'HEAD'], repoRoot).trim();
-    const targetBranchResult = spawnSync('git', ['symbolic-ref', '--quiet', '--short', 'HEAD'], { cwd: repoRoot, encoding: 'utf8' });
-    const targetBranch = targetBranchResult.status === 0 ? targetBranchResult.stdout.trim() || null : null;
-    const originResult = spawnSync('git', ['config', '--get', 'remote.origin.url'], { cwd: repoRoot, encoding: 'utf8' });
-    const originUrl = originResult.status === 0 ? sanitizeOriginUrl(originResult.stdout.trim()) : null;
+    const headSha = gitQueryText({ descriptor: { kind: 'head' }, cwd: repoRoot }).trim();
+    const targetBranchResult = runGitQuery({ descriptor: { kind: 'current-branch' }, cwd: repoRoot });
+    const targetBranchText = new TextDecoder('utf-8', { fatal: true }).decode(targetBranchResult.stdout).trim();
+    const targetBranch = targetBranchResult.negative ? null : targetBranchText || null;
+    const originResult = runGitQuery({ descriptor: { kind: 'config-get', key: 'remote.origin.url' }, cwd: repoRoot });
+    const originText = new TextDecoder('utf-8', { fatal: true }).decode(originResult.stdout).trim();
+    const originUrl = originResult.negative ? null : sanitizeOriginUrl(originText);
     return { repoRoot, gitCommonDir, repoKey, headSha, targetBranch, originUrl };
 }
 export function isAutopilotRuntimeRepoPath(repoRelativePath, workstream) {
@@ -892,43 +849,28 @@ async function recoverCoordinatorBootstrapWorkstream(input) {
     const bootstrapBranches = bootstrap['branches'];
     if (!isRecord(bootstrapTaskInfo) || (bootstrapTaskInfo['schema_version'] !== 'autopilot.task_info.v1' && bootstrapTaskInfo['schema_version'] !== 'autopilot.task_info.v2') || !isRecord(bootstrapBranches) || bootstrapBranches['schema_version'] !== 'autopilot.branches.v1')
         fail('bootstrap-state-invalid', 'worktree bootstrap metadata is malformed.', [bootstrapPath]);
-    const bootstrapMetadataPaths = [join(taskRoot, AUTOPILOT_CHECKOUT_PROFILE_SNAPSHOT_FILE), join(taskRoot, TASK_INFO_FILE), join(taskRoot, BRANCHES_FILE), join(taskRoot, UNIT_INDEX_FILE)];
     const attachment = await new DurableRunSupervisorClient(input.env).attach({ repo: input.repo, active, rawSessionId: input.coordinationSessionId });
     const recoveryEnv = { ...input.env, [AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV]: attachment.contextPath };
     {
-        const inspect = () => {
-            if (!existsSync(active.main_worktree_path))
-                return { outcome: 'not-applied', proof: ['main_worktree_absent'] };
-            const actualBranch = runGit(['rev-parse', '--abbrev-ref', 'HEAD'], active.main_worktree_path, input.env).trim();
-            const actualHead = gitHead(active.main_worktree_path);
-            if (actualBranch !== active.branch || actualHead !== active.target_base_sha)
-                return { outcome: 'unsafe', proof: [`actual_branch=${actualBranch}`, `actual_head=${actualHead}`] };
-            if (profileSnapshot.profile.mode !== 'full' && !isSparseCheckoutEnabled(active.main_worktree_path, input.env))
-                return { outcome: 'not-applied', proof: ['main_worktree_registered', 'sparse_configuration_incomplete'] };
-            const missingMetadata = bootstrapMetadataPaths.filter((path) => !existsSync(path));
-            return missingMetadata.length === 0 ? { outcome: 'satisfied', proof: ['main_worktree_registered', 'main_metadata_complete', `branch=${actualBranch}`, `head=${actualHead}`] } : { outcome: 'not-applied', proof: ['main_worktree_registered', ...missingMetadata.map((path) => `missing_metadata=${path}`)] };
-        };
         await executeOwnedWorktreeSaga({
-            active, unitId: 'main', attempt: 1, kind: 'main', operationType: 'create', operationKey: `main-create:${active.workstream_run}:${active.target_base_sha}`,
-            initialWorktreeState: 'planned', committedWorktreeState: 'active',
+            active, unitId: 'main', attempt: 1, kind: 'main', operationType: 'create', initialWorktreeState: 'planned', committedWorktreeState: 'active',
             intent: { repo_root: active.source_repo, worktree_path: active.main_worktree_path, git_common_dir: active.git_common_dir, branch: active.branch, reason: 'create isolated Autopilot main worktree', base_sha: active.target_base_sha, target_sha: null, archive_ref: null, checkout_mode: profileSnapshot.profile.mode, sparse_patterns: profileSnapshot.base_patterns, paths: [], metadata_refs: [AUTOPILOT_CHECKOUT_PROFILE_SNAPSHOT_FILE, TASK_INFO_FILE, BRANCHES_FILE, UNIT_INDEX_FILE] },
         }, {
-            inspect,
             action: async () => {
                 if (!existsSync(active.main_worktree_path))
-                    createAutopilotGitWorktree({ repoRoot: active.source_repo, worktreePath: active.main_worktree_path, branch: active.branch, startPoint: active.target_base_sha, mode: profileSnapshot.profile.mode, sparsePatterns: profileSnapshot.base_patterns, env: { ...input.env, [AUTOPILOT_RUNTIME_ENV]: AUTOPILOT_RUNTIME_VALUE } });
+                    await createAutopilotGitWorktree({ repoRoot: active.source_repo, worktreePath: active.main_worktree_path, branch: active.branch, startPoint: active.target_base_sha, mode: profileSnapshot.profile.mode, sparsePatterns: profileSnapshot.base_patterns, env: { ...input.env, [AUTOPILOT_RUNTIME_ENV]: AUTOPILOT_RUNTIME_VALUE } });
                 if (profileSnapshot.profile.mode !== 'full') {
-                    applySparseCheckoutSet(active.main_worktree_path, profileSnapshot.base_patterns, input.env);
-                    runGit(['checkout', '--force', active.branch], active.main_worktree_path, { ...input.env, [AUTOPILOT_RUNTIME_ENV]: AUTOPILOT_RUNTIME_VALUE });
+                    await applySparseCheckoutSet(active.main_worktree_path, profileSnapshot.base_patterns, input.env);
+                    await runGitMutation({ descriptor: { kind: 'checkout-force', branch: active.branch }, cwd: active.main_worktree_path, env: { ...input.env, [AUTOPILOT_RUNTIME_ENV]: AUTOPILOT_RUNTIME_VALUE } });
                 }
+            },
+            finalize: async () => {
                 await mkdir(active.runtime_root, { recursive: true });
                 await writeJsonAtomic(join(taskRoot, AUTOPILOT_CHECKOUT_PROFILE_SNAPSHOT_FILE), profileSnapshot);
                 await writeJsonAtomic(join(taskRoot, TASK_INFO_FILE), bootstrapTaskInfo);
                 await writeJsonAtomic(join(taskRoot, BRANCHES_FILE), bootstrapBranches);
                 await writeJsonAtomic(join(taskRoot, UNIT_INDEX_FILE), { schema_version: 'autopilot.unit_index.v1', units: [] });
             },
-            verify: () => { const inspected = inspect(); if (inspected.outcome !== 'satisfied')
-                fail('bootstrap-recovery-postcondition', 'recovered main create postcondition failed.', inspected.proof); return inspected.proof; },
         }, recoveryEnv);
     }
     if (!existsSync(active.main_worktree_path))
@@ -1008,29 +950,9 @@ async function createNewWorkstream(input) {
         const attachment = await new DurableRunSupervisorClient(input.env).attach({ repo: input.repo, active: row, rawSessionId: input.coordinationSessionId });
         sagaEnv = { ...input.env, [AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV]: attachment.contextPath };
     }
-    const mainMetadataPaths = [
-        join(taskRoot, AUTOPILOT_CHECKOUT_PROFILE_SNAPSHOT_FILE),
-        join(taskRoot, TASK_INFO_FILE),
-        join(taskRoot, BRANCHES_FILE),
-        join(taskRoot, UNIT_INDEX_FILE),
-    ];
-    const inspectMainCreate = () => {
-        if (!existsSync(mainWorktreePath))
-            return { outcome: 'not-applied', proof: ['main_worktree_absent'] };
-        const actualBranch = runGit(['rev-parse', '--abbrev-ref', 'HEAD'], mainWorktreePath, input.env).trim();
-        const actualHead = gitHead(mainWorktreePath);
-        if (actualBranch !== branch || actualHead !== input.repo.headSha)
-            return { outcome: 'unsafe', proof: [`expected_branch=${branch}`, `actual_branch=${actualBranch}`, `expected_head=${input.repo.headSha}`, `actual_head=${actualHead}`] };
-        if (checkoutProfile.profile.mode !== 'full' && !isSparseCheckoutEnabled(mainWorktreePath, input.env))
-            return { outcome: 'not-applied', proof: ['main_worktree_registered', 'sparse_configuration_incomplete'] };
-        const missingMetadata = mainMetadataPaths.filter((path) => !existsSync(path));
-        return missingMetadata.length === 0
-            ? { outcome: 'satisfied', proof: ['main_worktree_registered', 'main_metadata_complete', `branch=${branch}`, `head=${actualHead}`] }
-            : { outcome: 'not-applied', proof: ['main_worktree_registered', ...missingMetadata.map((path) => `missing_metadata=${path}`)] };
-    };
     await executeOwnedWorktreeSaga({
         active: row, unitId: 'main', attempt: 1, kind: 'main', operationType: 'create',
-        operationKey: `main-create:${workstreamRun}:${input.repo.headSha}`, initialWorktreeState: 'planned', committedWorktreeState: 'active',
+        initialWorktreeState: 'planned', committedWorktreeState: 'active',
         intent: {
             repo_root: input.repo.repoRoot, worktree_path: mainWorktreePath, git_common_dir: input.repo.gitCommonDir, branch,
             reason: 'create isolated Autopilot main worktree', base_sha: input.repo.headSha, target_sha: null, archive_ref: null,
@@ -1038,30 +960,25 @@ async function createNewWorkstream(input) {
             metadata_refs: [AUTOPILOT_CHECKOUT_PROFILE_SNAPSHOT_FILE, TASK_INFO_FILE, BRANCHES_FILE, UNIT_INDEX_FILE],
         },
     }, {
-        inspect: inspectMainCreate,
         action: async () => {
             if (!existsSync(mainWorktreePath)) {
-                createAutopilotGitWorktree({
+                await createAutopilotGitWorktree({
                     repoRoot: input.repo.repoRoot, worktreePath: mainWorktreePath, branch, startPoint: input.repo.headSha,
                     mode: checkoutProfile.profile.mode, sparsePatterns: checkoutProfile.base_patterns,
                     env: { ...input.env, [AUTOPILOT_RUNTIME_ENV]: AUTOPILOT_RUNTIME_VALUE },
                 });
             }
             if (checkoutProfile.profile.mode !== 'full') {
-                applySparseCheckoutSet(mainWorktreePath, checkoutProfile.base_patterns, input.env);
-                runGit(['checkout', '--force', branch], mainWorktreePath, { ...input.env, [AUTOPILOT_RUNTIME_ENV]: AUTOPILOT_RUNTIME_VALUE });
+                await applySparseCheckoutSet(mainWorktreePath, checkoutProfile.base_patterns, input.env);
+                await runGitMutation({ descriptor: { kind: 'checkout-force', branch }, cwd: mainWorktreePath, env: { ...input.env, [AUTOPILOT_RUNTIME_ENV]: AUTOPILOT_RUNTIME_VALUE } });
             }
+        },
+        finalize: async () => {
             await mkdir(runtimeRoot, { recursive: true });
             await writeJsonAtomic(join(taskRoot, AUTOPILOT_CHECKOUT_PROFILE_SNAPSHOT_FILE), profileSnapshot);
             await writeJsonAtomic(join(taskRoot, TASK_INFO_FILE), taskInfo);
             await writeJsonAtomic(join(taskRoot, BRANCHES_FILE), branches);
             await writeJsonAtomic(join(taskRoot, UNIT_INDEX_FILE), { schema_version: 'autopilot.unit_index.v1', units: [] });
-        },
-        verify: () => {
-            const inspected = inspectMainCreate();
-            if (inspected.outcome !== 'satisfied')
-                fail('main-worktree-create-postcondition', 'main worktree create saga postcondition failed.', inspected.proof);
-            return inspected.proof;
         },
     }, sagaEnv);
     await mkdir(runtimeRoot, { recursive: true });
@@ -1565,11 +1482,8 @@ function sortedStrings(values) {
     return Object.freeze([...values].sort((left, right) => left.localeCompare(right)));
 }
 function assertBranchAvailable(repoRoot, branch) {
-    const result = spawnSync('git', ['show-ref', '--verify', '--quiet', `refs/heads/${branch}`], { cwd: repoRoot, encoding: 'utf8' });
-    if (result.status === 0)
+    if (!runGitQuery({ descriptor: { kind: 'ref-exists', ref: `refs/heads/${branch}` }, cwd: repoRoot }).negative)
         fail('branch-exists', 'Autopilot branch already exists before worktree creation.', [branch]);
-    if (result.status !== 1)
-        fail('branch-check-failed', 'git show-ref failed while checking Autopilot branch availability.', [branch, result.stderr]);
 }
 export async function withAutopilotFileLock(lockPath, holderId, run, options = {}) {
     const handle = await acquireFileLock(lockPath, holderId, options.timeoutMs ?? DEFAULT_LOCK_TIMEOUT_MS);

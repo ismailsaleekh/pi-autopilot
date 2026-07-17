@@ -1,5 +1,6 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { platform } from 'node:os';
+import { isAbsolute } from 'node:path';
 
 export const GIT_QUERY_MAX_OUTPUT_BYTES = 64 * 1024 * 1024;
 export const GIT_MUTATION_DIAGNOSTIC_BYTES = 256 * 1024;
@@ -24,6 +25,7 @@ export type GitQueryDescriptor =
   | { readonly kind: 'commit-exists'; readonly revision: string }
   | { readonly kind: 'is-ancestor'; readonly ancestor: string; readonly descendant: string }
   | { readonly kind: 'merge-base'; readonly left: string; readonly right: string }
+  | { readonly kind: 'merge-tree-analysis'; readonly base: string; readonly left: string; readonly right: string }
   | { readonly kind: 'status-porcelain'; readonly includeIgnored?: boolean }
   | { readonly kind: 'diff-paths'; readonly from: string; readonly to: string; readonly paths?: readonly string[]; readonly noRenames?: boolean; readonly filter?: string }
   | { readonly kind: 'diff-text'; readonly from: string; readonly to: string; readonly path: string; readonly unifiedLines: number }
@@ -54,8 +56,7 @@ export type GitMutationDescriptor =
   | { readonly kind: 'merge-abort' }
   | { readonly kind: 'reset-hard'; readonly target: string }
   | { readonly kind: 'update-ref-create'; readonly ref: string; readonly target: string; readonly expectedOld: string }
-  | { readonly kind: 'update-ref-delete'; readonly ref: string; readonly expectedOld: string }
-  | { readonly kind: 'merge-tree-write'; readonly left: string; readonly right: string };
+  | { readonly kind: 'update-ref-delete'; readonly ref: string; readonly expectedOld: string };
 
 export interface GitQueryResult {
   readonly descriptor: GitQueryDescriptor['kind'];
@@ -139,6 +140,30 @@ function atoms(values: readonly string[], label: string, allowLeadingDash = fals
   return values.map((value) => atom(value, label, allowLeadingDash));
 }
 
+function absolutePath(value: string, label: string): string {
+  atom(value, label, true);
+  if (!isAbsolute(value)) throw new GitProcessDescriptorError(`${label} must be absolute`);
+  return value;
+}
+
+function repoPath(value: string, label: string): string {
+  atom(value, label, true);
+  const normalized = value.replace(/\\/gu, '/');
+  if (isAbsolute(value) || normalized.split('/').some((segment) => segment === '..' || segment === '')) throw new GitProcessDescriptorError(`${label} must be bounded repository-relative authority`);
+  return value;
+}
+
+function autopilotRef(value: string): string {
+  atom(value, 'Autopilot ref');
+  if (!value.startsWith('refs/heads/autopilot/')) throw new GitProcessDescriptorError('mutating ref must be under refs/heads/autopilot/');
+  return value;
+}
+
+function unifiedLines(value: number): number {
+  if (!Number.isSafeInteger(value) || value < 0 || value > 10_000) throw new GitProcessDescriptorError('unified line count must be a bounded non-negative integer');
+  return value;
+}
+
 function queryCommand(descriptor: GitQueryDescriptor): QueryCommand {
   switch (descriptor.kind) {
     case 'head': return { argv: ['rev-parse', 'HEAD'], acceptedExitCodes: [0], negativeExitCodes: [] };
@@ -146,22 +171,26 @@ function queryCommand(descriptor: GitQueryDescriptor): QueryCommand {
     case 'git-common-dir': return { argv: ['rev-parse', '--git-common-dir'], acceptedExitCodes: [0], negativeExitCodes: [] };
     case 'git-path': return { argv: ['rev-parse', '--git-path', atom(descriptor.name, 'Git path', true)], acceptedExitCodes: [0], negativeExitCodes: [] };
     case 'current-branch': return { argv: ['symbolic-ref', '--quiet', '--short', 'HEAD'], acceptedExitCodes: [0, 1], negativeExitCodes: [1] };
-    case 'resolve-revision': return { argv: ['rev-parse', ...(descriptor.verify === true ? ['--verify'] : []), atom(descriptor.revision, 'revision')], acceptedExitCodes: [0, 1, 128], negativeExitCodes: descriptor.verify === true ? [1, 128] : [] };
+    case 'resolve-revision': return { argv: ['rev-parse', ...(descriptor.verify === true ? ['--verify'] : []), atom(descriptor.revision, 'revision')], acceptedExitCodes: descriptor.verify === true ? [0, 1, 128] : [0], negativeExitCodes: descriptor.verify === true ? [1, 128] : [] };
     case 'resolve-commit': return { argv: ['rev-parse', '--verify', `${atom(descriptor.revision, 'commit revision')}^{commit}`], acceptedExitCodes: [0, 1, 128], negativeExitCodes: [1, 128] };
     case 'resolve-tree': return { argv: ['rev-parse', '--verify', `${atom(descriptor.revision, 'tree revision')}^{tree}`], acceptedExitCodes: [0, 1, 128], negativeExitCodes: [1, 128] };
     case 'ref-exists': return { argv: ['show-ref', '--verify', '--quiet', atom(descriptor.ref, 'ref')], acceptedExitCodes: [0, 1], negativeExitCodes: [1] };
     case 'commit-exists': return { argv: ['cat-file', '-e', `${atom(descriptor.revision, 'commit revision')}^{commit}`], acceptedExitCodes: [0, 1, 128], negativeExitCodes: [1, 128] };
     case 'is-ancestor': return { argv: ['merge-base', '--is-ancestor', atom(descriptor.ancestor, 'ancestor'), atom(descriptor.descendant, 'descendant')], acceptedExitCodes: [0, 1], negativeExitCodes: [1] };
     case 'merge-base': return { argv: ['merge-base', atom(descriptor.left, 'left commit'), atom(descriptor.right, 'right commit')], acceptedExitCodes: [0, 1], negativeExitCodes: [1] };
-    case 'status-porcelain': return { argv: ['status', '--porcelain=v1', '-z', '--untracked-files=all', ...(descriptor.includeIgnored === true ? ['--ignored=matching', '--ignore-submodules=none'] : [])], acceptedExitCodes: [0], negativeExitCodes: [] };
-    case 'diff-paths': return { argv: ['diff', '--name-only', ...(descriptor.noRenames === true ? ['--no-renames'] : []), ...(descriptor.filter === undefined ? [] : [`--diff-filter=${atom(descriptor.filter, 'diff filter')}`]), '-z', atom(descriptor.from, 'from revision'), atom(descriptor.to, 'to revision'), '--', ...atoms(descriptor.paths ?? [], 'diff path', true)], acceptedExitCodes: [0], negativeExitCodes: [] };
-    case 'diff-text': return { argv: ['diff', '--no-ext-diff', '--no-color', `--unified=${String(descriptor.unifiedLines)}`, atom(descriptor.from, 'from revision'), atom(descriptor.to, 'to revision'), '--', atom(descriptor.path, 'diff path', true)], acceptedExitCodes: [0], negativeExitCodes: [] };
+    case 'merge-tree-analysis': return { argv: ['merge-tree', atom(descriptor.base, 'merge base'), atom(descriptor.left, 'left commit'), atom(descriptor.right, 'right commit')], acceptedExitCodes: [0], negativeExitCodes: [] };
+    case 'status-porcelain': return { argv: ['status', '--porcelain=v1', '-z', '--untracked-files=all', ...(descriptor.includeIgnored === true ? ['--ignored=traditional', '--ignore-submodules=none'] : [])], acceptedExitCodes: [0], negativeExitCodes: [] };
+    case 'diff-paths': {
+      if (descriptor.filter !== undefined && !/^[ACDMRTUXB*]+$/u.test(descriptor.filter)) throw new GitProcessDescriptorError('diff filter is invalid');
+      return { argv: ['diff', '--name-only', ...(descriptor.noRenames === true ? ['--no-renames'] : []), ...(descriptor.filter === undefined ? [] : [`--diff-filter=${descriptor.filter}`]), '-z', atom(descriptor.from, 'from revision'), atom(descriptor.to, 'to revision'), '--', ...atoms(descriptor.paths ?? [], 'diff path', true)], acceptedExitCodes: [0], negativeExitCodes: [] };
+    }
+    case 'diff-text': return { argv: ['diff', '--no-ext-diff', '--no-color', `--unified=${String(unifiedLines(descriptor.unifiedLines))}`, atom(descriptor.from, 'from revision'), atom(descriptor.to, 'to revision'), '--', atom(descriptor.path, 'diff path', true)], acceptedExitCodes: [0], negativeExitCodes: [] };
     case 'staged-clean': return { argv: ['diff', '--cached', '--quiet', '--exit-code'], acceptedExitCodes: [0, 1], negativeExitCodes: [1] };
     case 'worktree-list': return { argv: ['worktree', 'list', '--porcelain', ...(descriptor.nul === true ? ['-z'] : [])], acceptedExitCodes: [0], negativeExitCodes: [] };
     case 'config-get': return { argv: ['config', ...(descriptor.file === undefined ? [] : ['--file', atom(descriptor.file, 'config file', true)]), '--get', atom(descriptor.key, 'config key')], acceptedExitCodes: [0, 1], negativeExitCodes: [1] };
     case 'config-bool': return { argv: ['config', '--bool', atom(descriptor.key, 'config key')], acceptedExitCodes: [0, 1], negativeExitCodes: [1] };
-    case 'config-regexp': return { argv: ['config', '--file', atom(descriptor.file, 'config file', true), '--get-regexp', atom(descriptor.pattern, 'config pattern', true)], acceptedExitCodes: [0, 1], negativeExitCodes: [1] };
-    case 'ls-files-state': return { argv: ['ls-files', '-t', '--', ...atoms(descriptor.paths, 'tracked path', true)], acceptedExitCodes: [0], negativeExitCodes: [] };
+    case 'config-regexp': return { argv: ['config', '-z', '--file', atom(descriptor.file, 'config file', true), '--get-regexp', atom(descriptor.pattern, 'config pattern', true)], acceptedExitCodes: [0, 1], negativeExitCodes: [1] };
+    case 'ls-files-state': return { argv: ['ls-files', '-t', '-z', '--', ...atoms(descriptor.paths, 'tracked path', true)], acceptedExitCodes: [0], negativeExitCodes: [] };
     case 'ls-tree-path': return { argv: ['ls-tree', '-z', atom(descriptor.revision, 'tree revision'), '--', atom(descriptor.path, 'tree path', true)], acceptedExitCodes: [0], negativeExitCodes: [] };
     case 'ls-tree-recursive': return { argv: ['ls-tree', '-r', ...(descriptor.includeSize ? ['-l'] : []), '--full-tree', '-z', atom(descriptor.revision, 'tree revision')], acceptedExitCodes: [0], negativeExitCodes: [] };
     case 'show-file': return { argv: ['show', `${atom(descriptor.revision, 'show revision')}:${atom(descriptor.path, 'show path', true)}`], acceptedExitCodes: descriptor.allowAbsent === true ? [0, 128] : [0], negativeExitCodes: descriptor.allowAbsent === true ? [128] : [] };
@@ -174,7 +203,10 @@ function queryCommand(descriptor: GitQueryDescriptor): QueryCommand {
 
 function patternsInput(patterns: readonly string[]): Uint8Array {
   if (patterns.length === 0) throw new GitProcessDescriptorError('sparse-checkout mutation requires non-empty patterns');
-  for (const pattern of patterns) atom(pattern, 'sparse pattern', true);
+  for (const pattern of patterns) {
+    atom(pattern, 'sparse pattern', true);
+    if (pattern.includes('\n') || pattern.includes('\r')) throw new GitProcessDescriptorError('sparse pattern must be one physical input line');
+  }
   return new TextEncoder().encode(`${patterns.join('\n')}\n`);
 }
 
@@ -184,26 +216,25 @@ function mutationCommand(descriptor: GitMutationDescriptor): MutationCommand {
       const common = ['worktree', 'add', ...(descriptor.noCheckout ? ['--no-checkout'] : [])];
       if (descriptor.createBranch) {
         if (descriptor.startPoint === null) throw new GitProcessDescriptorError('new worktree branch requires a start point');
-        return { argv: [...common, '-b', atom(descriptor.branch, 'branch'), atom(descriptor.path, 'worktree path', true), atom(descriptor.startPoint, 'start point')], input: null };
+        return { argv: [...common, '-b', atom(descriptor.branch, 'branch'), '--', absolutePath(descriptor.path, 'worktree path'), atom(descriptor.startPoint, 'start point')], input: null };
       }
-      return { argv: [...common, atom(descriptor.path, 'worktree path', true), atom(descriptor.branch, 'branch')], input: null };
+      return { argv: [...common, '--', absolutePath(descriptor.path, 'worktree path'), atom(descriptor.branch, 'branch')], input: null };
     }
-    case 'worktree-remove': return { argv: ['worktree', 'remove', '--', atom(descriptor.path, 'worktree path', true)], input: null };
+    case 'worktree-remove': return { argv: ['worktree', 'remove', '--', absolutePath(descriptor.path, 'worktree path')], input: null };
     case 'worktree-prune': return { argv: ['worktree', 'prune', '--expire', 'now'], input: null };
     case 'sparse-checkout-set': return { argv: ['sparse-checkout', 'set', '--no-cone', '--skip-checks', '--stdin'], input: patternsInput(descriptor.patterns) };
     case 'sparse-checkout-add': return { argv: ['sparse-checkout', 'add', '--skip-checks', '--stdin'], input: patternsInput(descriptor.patterns) };
     case 'checkout-force': return { argv: ['checkout', '--force', atom(descriptor.branch, 'branch')], input: null };
     case 'stage-paths': {
       if (descriptor.paths.length === 0) throw new GitProcessDescriptorError('stage mutation requires at least one path');
-      return { argv: ['add', ...(descriptor.sparse === true ? ['--sparse'] : []), ...(descriptor.force === true ? ['-f'] : []), '-A', '--', ...atoms(descriptor.paths, 'stage path', true)], input: null };
+      return { argv: ['--literal-pathspecs', 'add', ...(descriptor.sparse === true ? ['--sparse'] : []), ...(descriptor.force === true ? ['-f'] : []), '-A', '--', ...descriptor.paths.map((path) => repoPath(path, 'stage path'))], input: null };
     }
     case 'commit': return { argv: ['commit', '--quiet', '--no-verify', '-m', atom(descriptor.message, 'commit message', true)], input: null };
     case 'merge': return { argv: ['merge', descriptor.mode === 'ff-only' ? '--ff-only' : '--no-ff', ...(descriptor.mode === 'no-ff' ? ['--no-edit'] : []), ...(descriptor.message === undefined ? [] : ['-m', atom(descriptor.message, 'merge message', true)]), atom(descriptor.target, 'merge target')], input: null };
     case 'merge-abort': return { argv: ['merge', '--abort'], input: null };
     case 'reset-hard': return { argv: ['reset', '--hard', atom(descriptor.target, 'reset target')], input: null };
-    case 'update-ref-create': return { argv: ['update-ref', atom(descriptor.ref, 'ref'), atom(descriptor.target, 'target'), atom(descriptor.expectedOld, 'expected old object')], input: null };
-    case 'update-ref-delete': return { argv: ['update-ref', '-d', atom(descriptor.ref, 'ref'), atom(descriptor.expectedOld, 'expected old object')], input: null };
-    case 'merge-tree-write': return { argv: ['merge-tree', '--write-tree', '--name-only', '-z', '--no-messages', atom(descriptor.left, 'left commit'), atom(descriptor.right, 'right commit')], input: null };
+    case 'update-ref-create': return { argv: ['update-ref', autopilotRef(descriptor.ref), atom(descriptor.target, 'target'), atom(descriptor.expectedOld, 'expected old object')], input: null };
+    case 'update-ref-delete': return { argv: ['update-ref', '-d', autopilotRef(descriptor.ref), atom(descriptor.expectedOld, 'expected old object')], input: null };
   }
 }
 
@@ -216,19 +247,56 @@ export function gitMutationArgv(descriptor: GitMutationDescriptor): readonly str
 }
 
 function boundedDiagnostic(stdout: Uint8Array, stderr: Uint8Array, droppedBytes = 0): string {
+  let remaining = GIT_MUTATION_DIAGNOSTIC_BYTES;
+  const retain = (value: Uint8Array): Uint8Array => {
+    const bytes = value.subarray(0, remaining);
+    remaining -= bytes.byteLength;
+    return bytes;
+  };
+  const retainedStderr = retain(stderr);
+  const retainedStdout = retain(stdout);
+  const omitted = droppedBytes + stderr.byteLength - retainedStderr.byteLength + stdout.byteLength - retainedStdout.byteLength;
   const decode = (value: Uint8Array): string => new TextDecoder('utf-8', { fatal: false }).decode(value);
-  const raw = [decode(stderr).trim(), decode(stdout).trim()].filter((value) => value.length > 0).join('\n');
+  const raw = [decode(retainedStderr).trim(), decode(retainedStdout).trim()].filter((value) => value.length > 0).join('\n');
   const redacted = raw
     .replace(/([a-z][a-z0-9+.-]*:\/\/)[^\s/@]+@/giu, '$1<redacted>@')
     .replace(/\b(capability|credential|password|token|secret)([=: ]+)[^\s]+/giu, '$1$2<redacted>')
     .replace(/\b(?:ghp|github_pat|sk)-[A-Za-z0-9_-]+\b/gu, '<redacted>');
-  return droppedBytes === 0 ? redacted : `${redacted}${redacted.length === 0 ? '' : '\n'}[diagnostic truncated; dropped_bytes=${String(droppedBytes)}]`;
+  return omitted === 0 ? redacted : `${redacted}${redacted.length === 0 ? '' : '\n'}[diagnostic truncated; dropped_bytes=${String(omitted)}]`;
 }
 
 function queryErrorCode(error: Error): GitQueryError['code'] {
   if ('code' in error && error.code === 'ETIMEDOUT') return 'timeout';
   if ('code' in error && error.code === 'ENOBUFS') return 'output-overflow';
   return 'spawn-failure';
+}
+
+export function gitQueryText(input: {
+  readonly descriptor: GitQueryDescriptor;
+  readonly cwd: string;
+  readonly env?: GitProcessEnv;
+  readonly timeoutMs?: number;
+}): string {
+  return new TextDecoder('utf-8', { fatal: true }).decode(runGitQuery(input).stdout);
+}
+
+export function gitQueryNulStrings(input: {
+  readonly descriptor: GitQueryDescriptor;
+  readonly cwd: string;
+  readonly env?: GitProcessEnv;
+  readonly timeoutMs?: number;
+}): readonly string[] {
+  const bytes = runGitQuery(input).stdout;
+  const decoder = new TextDecoder('utf-8', { fatal: true });
+  const values: string[] = [];
+  let cursor = 0;
+  while (cursor < bytes.length) {
+    const delimiter = bytes.indexOf(0, cursor);
+    if (delimiter < 0) throw new GitQueryError('unexpected-exit', input.descriptor.kind, 'NUL-delimited Git query ended with an unterminated record');
+    if (delimiter > cursor) values.push(decoder.decode(bytes.subarray(cursor, delimiter)));
+    cursor = delimiter + 1;
+  }
+  return Object.freeze(values);
 }
 
 export function runGitQuery(input: {
@@ -247,13 +315,13 @@ export function runGitQuery(input: {
     cwd: input.cwd,
     env: { ...process.env, ...input.env, GIT_TERMINAL_PROMPT: '0' },
     timeout: input.timeoutMs ?? GIT_DEFAULT_QUERY_TIMEOUT_MS,
-    // Node applies maxBuffer independently to stdout/stderr. Halving the
-    // package-wide allowance guarantees combined retained query bytes never
-    // exceed the frozen 64 MiB ceiling.
-    maxBuffer: GIT_QUERY_MAX_OUTPUT_BYTES / 2,
+    // spawnSync applies this independently to stdout/stderr. The explicit
+    // combined check below is the authoritative retained-output ceiling.
+    maxBuffer: GIT_QUERY_MAX_OUTPUT_BYTES + 1,
   });
   const stdout = new Uint8Array(result.stdout);
   const stderr = new Uint8Array(result.stderr);
+  if (stdout.byteLength + stderr.byteLength > GIT_QUERY_MAX_OUTPUT_BYTES) throw new GitQueryError('output-overflow', input.descriptor.kind, `Git query exceeded the ${String(GIT_QUERY_MAX_OUTPUT_BYTES)}-byte retained output ceiling`, boundedDiagnostic(stdout, stderr));
   if (result.error !== undefined) {
     const code = queryErrorCode(result.error);
     throw new GitQueryError(code, input.descriptor.kind, result.error.message, boundedDiagnostic(stdout, stderr));
@@ -310,9 +378,9 @@ async function terminateProcessTree(child: ReturnType<typeof spawn>): Promise<vo
   }
   try { process.kill(-child.pid, 'SIGTERM'); } catch { try { child.kill('SIGTERM'); } catch { return; } }
   await wait(GIT_TERMINATION_GRACE_MS);
-  if (child.exitCode === null) {
-    try { process.kill(-child.pid, 'SIGKILL'); } catch { try { child.kill('SIGKILL'); } catch { return; } }
-  }
+  // The group can outlive its leader; always attempt the hard group kill after
+  // grace rather than trusting only the direct child's exitCode.
+  try { process.kill(-child.pid, 'SIGKILL'); } catch { if (child.exitCode === null) try { child.kill('SIGKILL'); } catch { return; } }
 }
 
 export async function runGitMutation(input: {
@@ -342,6 +410,7 @@ export async function runGitMutation(input: {
     child.stderr.on('data', (chunk: Uint8Array) => captureChunk(stderr, chunk));
     child.stdout.on('error', () => { unknownReason = 'stdout-failure'; void terminateProcessTree(child); });
     child.stderr.on('error', () => { unknownReason = 'stderr-failure'; void terminateProcessTree(child); });
+    child.stdin.on('error', () => { unknownReason = 'stdin-failure'; void terminateProcessTree(child); });
     child.on('error', () => { unknownReason = 'spawn-failure'; });
     if (command.input === null) child.stdin.end();
     else child.stdin.write(new TextDecoder().decode(command.input), (error) => {
@@ -357,13 +426,15 @@ export async function runGitMutation(input: {
       clearTimeout(timeout);
       const stdoutBytes = concatenate(stdout.chunks, stdout.retainedBytes);
       const stderrBytes = concatenate(stderr.chunks, stderr.retainedBytes);
-      const droppedBytes = stdout.droppedBytes + stderr.droppedBytes;
+      const streamDroppedBytes = stdout.droppedBytes + stderr.droppedBytes;
+      const diagnosticDroppedBytes = Math.max(0, stdoutBytes.byteLength + stderrBytes.byteLength - GIT_MUTATION_DIAGNOSTIC_BYTES);
+      const droppedBytes = streamDroppedBytes + diagnosticDroppedBytes;
       const reason = unknownReason
         ?? (signal === null ? null : 'signal')
         ?? (code === null ? 'report-loss' : null)
         ?? (droppedBytes > 0 ? 'diagnostic-truncation' : null);
       if (reason !== null || droppedBytes > 0) {
-        resolvePromise({ kind: 'effect-unknown', descriptor: input.descriptor.kind, reason: reason ?? 'diagnostic-truncation', exitCode: code, signal, diagnostic: boundedDiagnostic(stdoutBytes, stderrBytes, droppedBytes), droppedBytes });
+        resolvePromise({ kind: 'effect-unknown', descriptor: input.descriptor.kind, reason: reason ?? 'diagnostic-truncation', exitCode: code, signal, diagnostic: boundedDiagnostic(stdoutBytes, stderrBytes, streamDroppedBytes), droppedBytes });
         return;
       }
       resolvePromise({ kind: 'reported', descriptor: input.descriptor.kind, exitCode: code ?? -1, stdout: stdoutBytes, stderr: stderrBytes, diagnostic: boundedDiagnostic(stdoutBytes, stderrBytes) });

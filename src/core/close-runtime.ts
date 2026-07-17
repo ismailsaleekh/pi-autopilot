@@ -1,4 +1,3 @@
-import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { closeSync, constants as fsConstants, existsSync, fstatSync, lstatSync, openSync, readFileSync } from 'node:fs';
 import { lstat, mkdir, open, readFile, readdir, realpath, rename, writeFile } from 'node:fs/promises';
@@ -22,9 +21,10 @@ import {
 import { evaluateAutopilotClosureGate } from './lifecycle/index.ts';
 import { parseAutopilotUnitMerge, type AutopilotUnitMerge } from './unit-merge.ts';
 import { cleanupClosedAutopilotRun } from './worktree-cleanup.ts';
-import { executeOwnedWorktreeSaga, OwnedWorktreeSagaClient, WorktreeSagaCompensatedError, type WorktreeSagaInspection } from './coordination/worktree-saga.ts';
+import { executeOwnedWorktreeSaga, inspectOwnedWorktreeSpecPostcondition, OwnedWorktreeSagaClient, WorktreeSagaCompensatedError } from './coordination/worktree-saga.ts';
 import { AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV, AUTOPILOT_RUNTIME_ROOT_PREFIX } from './names.ts';
 import { CoordinatorClient } from './coordination/client.ts';
+import { CoordinationRuntimeError } from './coordination/failures.ts';
 import { parseCoordinationReconciliationEvidence, parseCoordinationRun, parseCoordinationRunTerminalIntent, parseCoordinationSessionLease, parseCoordinationWorktree } from './coordination/contracts.ts';
 import { DurableRunSupervisorClient, readCoordinatorSessionContext } from './coordination/supervisor.ts';
 import { recordCoordinatorReleaseEvidenceFromFile } from './coordination/reconciliation.ts';
@@ -56,7 +56,6 @@ import {
   readWorktreeIndex,
   resolveAutopilotStateRoot,
   resolveRepoIdentity,
-  runGit,
   taskRootForActiveAutopilot,
   updateTaskInfoStatus,
   withAutopilotFileLock,
@@ -69,6 +68,7 @@ import {
   type AutopilotParentStatus,
   type ProcessEnvLike,
 } from './parallel-runtime.ts';
+import { gitQueryNulStrings, gitQueryText, runGitMutation, runGitQuery } from './git-process.ts';
 import { assertCoordinationDispatchAllowed, coordinationCutoverCommitted } from './coordination/migration-paths.ts';
 import { coordinatorRuntimePaths } from './coordination/runtime-paths.ts';
 import { currentBootId } from './coordination/process-identity.ts';
@@ -1353,29 +1353,24 @@ async function integrateTargetIntoWorkstream(input: { readonly active: ActiveAut
   const workstreamHead = gitHead(input.active.main_worktree_path);
   if (isAncestor(input.active.main_worktree_path, input.targetHead, workstreamHead)) return null;
   const targetBranch = requireTargetBranch(input.active);
-  const inspect = (): WorktreeSagaInspection => {
-    const dirty = readGitStatus(input.active.main_worktree_path).changedPaths.filter((path) => !isAutopilotRuntimeRepoPath(path, input.active.workstream));
-    if (dirty.length > 0) return { outcome: 'unsafe', proof: dirty.map((path) => `dirty=${path}`) };
-    const current = gitHead(input.active.main_worktree_path);
-    if (isAncestor(input.active.main_worktree_path, input.targetHead, current)) return { outcome: 'satisfied', proof: [`merged_target=${input.targetHead}`, `head=${current}`] };
-    return current === workstreamHead ? { outcome: 'not-applied', proof: [`head=${current}`] } : { outcome: 'unsafe', proof: [`expected_head=${workstreamHead}`, `actual_head=${current}`] };
+  const mergeSpec = {
+    active: input.active, unitId: 'main', attempt: 1, kind: 'main' as const, operationType: 'merge' as const,
+    initialWorktreeState: 'active' as const, committedWorktreeState: 'active' as const,
+    intent: { repo_root: input.active.source_repo, worktree_path: input.active.main_worktree_path, git_common_dir: input.active.git_common_dir, branch: input.active.branch, reason: 'integrate current target before close', base_sha: workstreamHead, target_sha: input.targetHead, archive_ref: null, checkout_mode: null, sparse_patterns: [], paths: [], metadata_refs: [] },
   };
   try {
-    await executeOwnedWorktreeSaga({
-      active: input.active, unitId: 'main', attempt: 1, kind: 'main', operationType: 'merge',
-      operationKey: `close-integration:${workstreamHead}:${input.targetHead}`, initialWorktreeState: 'active', committedWorktreeState: 'active',
-      intent: { repo_root: input.active.source_repo, worktree_path: input.active.main_worktree_path, git_common_dir: input.active.git_common_dir, branch: input.active.branch, reason: 'integrate current target before close', base_sha: workstreamHead, target_sha: input.targetHead, archive_ref: null, checkout_mode: null, sparse_patterns: [], paths: [], metadata_refs: [] },
-    }, {
-      inspect,
-      action: () => {
-        try { runGit(['merge', '--no-ff', '--no-edit', '-m', `autopilot close integration ${input.active.workstream_run}`, targetBranch], input.active.main_worktree_path, runtimeGitEnv('close-integration')); }
-        catch (error) {
-          const abort = spawnSync('git', ['merge', '--abort'], { cwd: input.active.main_worktree_path, encoding: 'utf8', env: runtimeGitEnv('close-integration') });
-          if (abort.status !== 0 && readGitStatus(input.active.main_worktree_path).changedPaths.length > 0) fail('integration-merge-conflict', `target merge into workstream conflicted and merge --abort failed: ${errorMessage(error)}`, [abort.stderr.trim()]);
-          throw new WorktreeSagaCompensatedError(`target merge into workstream conflicted: ${errorMessage(error)}`, [`workstream_head=${workstreamHead}`, `target_head=${input.targetHead}`]);
-        }
+    await executeOwnedWorktreeSaga(mergeSpec, {
+      action: async () => {
+        const merge = await runGitMutation({ descriptor: { kind: 'merge', mode: 'no-ff', message: `autopilot close integration ${input.active.workstream_run}`, target: targetBranch }, cwd: input.active.main_worktree_path, env: runtimeGitEnv('close-integration') });
+        const postcondition = inspectOwnedWorktreeSpecPostcondition(mergeSpec, input.env);
+        if (postcondition.effect_applied) return;
+        if (postcondition.outcome === 'unsafe') fail('integration-merge-conflict', 'target merge canonical probe found unsafe repository state.', postcondition.proof);
+        if (!postcondition.proof.includes('interrupted_merge')) throw new CoordinationRuntimeError('recovery-required', 'target merge did not apply and left no canonically compensable merge state', [...postcondition.proof, `mutation_report=${merge.kind}`, `mutation_diagnostic=${merge.diagnostic}`]);
+        const abort = await runGitMutation({ descriptor: { kind: 'merge-abort' }, cwd: input.active.main_worktree_path, env: runtimeGitEnv('close-integration') });
+        const restored = inspectOwnedWorktreeSpecPostcondition(mergeSpec, input.env);
+        if (restored.outcome !== 'not-applied' || restored.effect_applied || restored.proof.includes('interrupted_merge')) fail('integration-merge-conflict', 'target merge into workstream conflicted and canonical abort probe failed.', [merge.diagnostic, abort.diagnostic, ...restored.proof]);
+        throw new WorktreeSagaCompensatedError(`target merge into workstream conflicted: ${merge.diagnostic}`, [`workstream_head=${workstreamHead}`, `target_head=${input.targetHead}`]);
       },
-      verify: () => { const inspected = inspect(); if (inspected.outcome !== 'satisfied') fail('integration-merge-postcondition', 'close integration merge saga postcondition failed.', inspected.proof); return inspected.proof; },
     }, input.env);
   } catch (error) {
     if (error instanceof WorktreeSagaCompensatedError) fail('integration-merge-conflict', `${error.message}; targeted revalidation required before close`, error.proof);
@@ -1388,21 +1383,12 @@ async function integrateTargetIntoWorkstream(input: { readonly active: ActiveAut
 async function fastForwardTargetToWorkstream(input: { readonly active: ActiveAutopilotRow; readonly sourceRepo: string; readonly branch: string; readonly targetBefore: string; readonly env: ProcessEnvLike }): Promise<void> {
   const desired = gitHead(input.active.main_worktree_path);
   const targetBranch = requireTargetBranch(input.active);
-  const inspect = (): WorktreeSagaInspection => {
-    const currentBranch = runGit(['rev-parse', '--abbrev-ref', 'HEAD'], input.sourceRepo).trim();
-    const current = gitHead(input.sourceRepo);
-    if (currentBranch !== targetBranch) return { outcome: 'unsafe', proof: [`expected_branch=${targetBranch}`, `actual_branch=${currentBranch}`] };
-    if (current === desired) return { outcome: 'satisfied', proof: [`target_head=${current}`] };
-    return current === input.targetBefore ? { outcome: 'not-applied', proof: [`target_head=${current}`] } : { outcome: 'unsafe', proof: [`expected_before=${input.targetBefore}`, `actual_head=${current}`] };
-  };
   await executeOwnedWorktreeSaga({
     active: input.active, unitId: 'main', attempt: 1, kind: 'main', operationType: 'merge',
-    operationKey: `close-final-fast-forward:${targetBranch}:${input.targetBefore}:${desired}`, initialWorktreeState: 'active', committedWorktreeState: 'active',
+    initialWorktreeState: 'active', committedWorktreeState: 'active',
     intent: { repo_root: input.sourceRepo, worktree_path: input.active.main_worktree_path, git_common_dir: input.active.git_common_dir, branch: input.active.branch, reason: 'atomically fast-forward captured target to validated workstream', base_sha: input.targetBefore, target_sha: desired, archive_ref: targetBranch, checkout_mode: null, sparse_patterns: [], paths: [], metadata_refs: [] },
   }, {
-    inspect,
-    action: () => { runGit(['merge', '--ff-only', input.branch], input.sourceRepo, runtimeGitEnv('final-merge')); },
-    verify: () => { const inspected = inspect(); if (inspected.outcome !== 'satisfied') fail('final-merge-postcondition', 'final target fast-forward saga postcondition failed.', inspected.proof); return inspected.proof; },
+    action: async () => { await runGitMutation({ descriptor: { kind: 'merge', mode: 'ff-only', target: input.branch }, cwd: input.sourceRepo, env: runtimeGitEnv('final-merge') }); },
   }, input.env);
 }
 
@@ -1768,38 +1754,35 @@ function requireTargetBranch(row: ActiveAutopilotRow): string {
 }
 
 function revParse(cwd: string, ref: string): string {
-  return runGit(['rev-parse', ref], cwd).trim();
+  return gitQueryText({ descriptor: { kind: 'resolve-revision', revision: ref }, cwd }).trim();
 }
 
 function latestCommitForPath(cwd: string, fromExclusive: string, toInclusive: string, path: string): string | null {
-  const output = runGit(['log', '-1', '--format=%H', `${fromExclusive}..${toInclusive}`, '--', path], cwd).trim();
+  const output = gitQueryText({ descriptor: { kind: 'last-commit-for-path', fromExclusive, toInclusive, path }, cwd }).trim();
   return output.length === 0 ? null : output;
 }
 
 function revList(cwd: string, fromExclusive: string, toInclusive: string): readonly string[] {
-  const output = runGit(['rev-list', `${fromExclusive}..${toInclusive}`], cwd).trim();
+  const output = gitQueryText({ descriptor: { kind: 'rev-list-range', fromExclusive, toInclusive }, cwd }).trim();
   if (output.length === 0) return [];
   return Object.freeze(output.split('\n').filter((line) => line.length > 0));
 }
 
 function diffPaths(cwd: string, left: string, right: string): readonly string[] {
-  const output = runGit(['diff', '--name-only', '-z', left, right], cwd);
-  return Object.freeze(output.split('\0').filter((path) => path.length > 0).map((path) => path.replace(/\\/gu, '/')).sort((a, b) => a.localeCompare(b)));
+  return Object.freeze(gitQueryNulStrings({ descriptor: { kind: 'diff-paths', from: left, to: right }, cwd }).map((path) => path.replace(/\\/gu, '/')).sort((a, b) => a.localeCompare(b)));
 }
 
 function currentBranch(cwd: string): string | null {
-  const result = spawnSync('git', ['symbolic-ref', '--quiet', '--short', 'HEAD'], { cwd, encoding: 'utf8' });
-  return result.status === 0 ? result.stdout.trim() : null;
+  const result = runGitQuery({ descriptor: { kind: 'current-branch' }, cwd });
+  return result.negative ? null : new TextDecoder('utf-8', { fatal: true }).decode(result.stdout).trim();
 }
 
 function commitExists(cwd: string, sha: string): boolean {
-  const result = spawnSync('git', ['cat-file', '-e', `${sha}^{commit}`], { cwd, encoding: 'utf8' });
-  return result.status === 0;
+  return !runGitQuery({ descriptor: { kind: 'commit-exists', revision: sha }, cwd }).negative;
 }
 
 function isAncestor(cwd: string, ancestor: string, descendant: string): boolean {
-  const result = spawnSync('git', ['merge-base', '--is-ancestor', ancestor, descendant], { cwd, encoding: 'utf8' });
-  return result.status === 0;
+  return !runGitQuery({ descriptor: { kind: 'is-ancestor', ancestor, descendant }, cwd }).negative;
 }
 
 function intersectingPaths(paths: readonly string[], patterns: readonly string[]): readonly string[] {

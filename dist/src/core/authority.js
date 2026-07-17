@@ -1,8 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { link, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
+import { gitQueryText } from "./git-process.js";
 import { normalizeMaterializationPath, pathMatchesMaterializationPattern, scanTrackedTree, trackedEntriesForMaterializationPath, } from "./checkout-profile.js";
 import { AUTOPILOT_RUNTIME_ROOT_PREFIX } from "./names.js";
 import { coordinationExclusiveOperation } from "./coordination/exclusive-policy.js";
@@ -380,10 +380,9 @@ function requireTrackedScope(scope) {
     return scope;
 }
 function repositoryHead(cwd) {
-    const result = spawnSync('git', ['rev-parse', '--verify', 'HEAD'], { cwd, encoding: 'utf8' });
-    const head = result.stdout.trim();
-    if ((result.status ?? -1) !== 0 || !/^[a-f0-9]{40,64}$/u.test(head))
-        fail('invalid-base-commit', 'authority derivation could not verify the final repository HEAD', [cwd, result.stderr.trim()]);
+    const head = gitQueryText({ descriptor: { kind: 'resolve-revision', revision: 'HEAD', verify: true }, cwd }).trim();
+    if (!/^[a-f0-9]{40,64}$/u.test(head))
+        fail('invalid-base-commit', 'authority derivation could not verify the final repository HEAD', [cwd]);
     return head;
 }
 function authorityPurpose(grouped, path) {

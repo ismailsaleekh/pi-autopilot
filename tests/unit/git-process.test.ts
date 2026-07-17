@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -8,6 +9,7 @@ import { describe, it } from 'node:test';
 import {
   GIT_MUTATION_DIAGNOSTIC_BYTES,
   GitProcessDescriptorError,
+  GitQueryError,
   gitMutationArgv,
   gitProcessTreeTerminationKind,
   gitQueryArgv,
@@ -41,7 +43,8 @@ async function repository(prefix: string): Promise<{ readonly root: string; read
 void describe('package-owned Git process boundary', () => {
   void it('maps the closed query descriptor matrix and rejects option/NUL injection', () => {
     assert.deepEqual(gitQueryArgv({ kind: 'head' }), ['rev-parse', 'HEAD']);
-    assert.deepEqual(gitQueryArgv({ kind: 'status-porcelain', includeIgnored: true }), ['status', '--porcelain=v1', '-z', '--untracked-files=all', '--ignored=matching', '--ignore-submodules=none']);
+    assert.deepEqual(gitQueryArgv({ kind: 'status-porcelain', includeIgnored: true }), ['status', '--porcelain=v1', '-z', '--untracked-files=all', '--ignored=traditional', '--ignore-submodules=none']);
+    assert.deepEqual(gitQueryArgv({ kind: 'merge-tree-analysis', base: 'a'.repeat(40), left: 'b'.repeat(40), right: 'c'.repeat(40) }), ['merge-tree', 'a'.repeat(40), 'b'.repeat(40), 'c'.repeat(40)]);
     assert.deepEqual(gitQueryArgv({ kind: 'diff-paths', from: 'a'.repeat(40), to: 'b'.repeat(40), paths: ['space name', '-leading', 'unicodé/雪'], noRenames: true }), ['diff', '--name-only', '--no-renames', '-z', 'a'.repeat(40), 'b'.repeat(40), '--', 'space name', '-leading', 'unicodé/雪']);
     assert.deepEqual(gitQueryArgv({ kind: 'is-ancestor', ancestor: 'a'.repeat(40), descendant: 'b'.repeat(40) }), ['merge-base', '--is-ancestor', 'a'.repeat(40), 'b'.repeat(40)]);
     assert.throws(() => gitQueryArgv({ kind: 'resolve-revision', revision: '--upload-pack=attacker' }), GitProcessDescriptorError);
@@ -49,11 +52,14 @@ void describe('package-owned Git process boundary', () => {
   });
 
   void it('maps the closed mutation descriptor matrix without shell interpolation', () => {
-    assert.deepEqual(gitMutationArgv({ kind: 'worktree-add', path: '/tmp/work tree', branch: 'autopilot/run/unit', startPoint: 'a'.repeat(40), createBranch: true, noCheckout: true }), ['worktree', 'add', '--no-checkout', '-b', 'autopilot/run/unit', '/tmp/work tree', 'a'.repeat(40)]);
-    assert.deepEqual(gitMutationArgv({ kind: 'stage-paths', paths: ['space name', '-leading', 'unicodé/雪'], sparse: true, force: true }), ['add', '--sparse', '-f', '-A', '--', 'space name', '-leading', 'unicodé/雪']);
+    assert.deepEqual(gitMutationArgv({ kind: 'worktree-add', path: '/tmp/work tree', branch: 'autopilot/run/unit', startPoint: 'a'.repeat(40), createBranch: true, noCheckout: true }), ['worktree', 'add', '--no-checkout', '-b', 'autopilot/run/unit', '--', '/tmp/work tree', 'a'.repeat(40)]);
+    assert.deepEqual(gitMutationArgv({ kind: 'stage-paths', paths: ['space name', '-leading', 'unicodé/雪'], sparse: true, force: true }), ['--literal-pathspecs', 'add', '--sparse', '-f', '-A', '--', 'space name', '-leading', 'unicodé/雪']);
     assert.deepEqual(gitMutationArgv({ kind: 'update-ref-delete', ref: 'refs/heads/autopilot/run', expectedOld: 'b'.repeat(40) }), ['update-ref', '-d', 'refs/heads/autopilot/run', 'b'.repeat(40)]);
     assert.throws(() => gitMutationArgv({ kind: 'merge', target: '--exec=attacker', mode: 'ff-only' }), GitProcessDescriptorError);
     assert.throws(() => gitMutationArgv({ kind: 'stage-paths', paths: [] }), GitProcessDescriptorError);
+    assert.throws(() => gitMutationArgv({ kind: 'stage-paths', paths: ['../escape'] }), GitProcessDescriptorError);
+    assert.throws(() => gitMutationArgv({ kind: 'update-ref-delete', ref: 'refs/heads/foreign', expectedOld: 'b'.repeat(40) }), GitProcessDescriptorError);
+    assert.throws(() => gitMutationArgv({ kind: 'sparse-checkout-set', patterns: ['src/**\nforged'] }), GitProcessDescriptorError);
   });
 
   void it('preserves NUL-delimited path bytes for spaces, Unicode, leading dashes, rename, delete, and empty output', async () => {
@@ -90,6 +96,35 @@ void describe('package-owned Git process boundary', () => {
       const ancestor = runGitQuery({ descriptor: { kind: 'is-ancestor', ancestor: head, descendant: head }, cwd: value.repo });
       assert.equal(ancestor.exitCode, 0);
       assert.equal(ancestor.negative, false);
+      assert.throws(() => runGitQuery({ descriptor: { kind: 'head' }, cwd: value.repo, env: { PATH: join(value.root, 'missing') } }), (error: unknown) => error instanceof GitQueryError && error.code === 'spawn-failure');
+      const bin = join(value.root, 'bin');
+      await mkdir(bin);
+      const wrapper = join(bin, 'git');
+      await writeFile(wrapper, '#!/bin/sh\nsleep 2\n', 'utf8');
+      await chmod(wrapper, 0o755);
+      assert.throws(() => runGitQuery({ descriptor: { kind: 'head' }, cwd: value.repo, env: { PATH: `${bin}:/bin:/usr/bin` }, timeoutMs: 20 }), (error: unknown) => error instanceof GitQueryError && error.code === 'timeout');
+      await writeFile(wrapper, '#!/bin/sh\nkill -TERM $$\n', 'utf8');
+      assert.throws(() => runGitQuery({ descriptor: { kind: 'head' }, cwd: value.repo, env: { PATH: `${bin}:/bin:/usr/bin` } }), (error: unknown) => error instanceof GitQueryError && error.code === 'signal');
+    } finally {
+      await rm(value.root, { recursive: true, force: true });
+    }
+  });
+
+  void it('fails loudly when combined retained query output exceeds 64 MiB and still bounds diagnostics', async () => {
+    const value = await repository('pi-autopilot-git-query-overflow-');
+    try {
+      const bin = join(value.root, 'bin');
+      await mkdir(bin);
+      const wrapper = join(bin, 'git');
+      await writeFile(wrapper, "#!/bin/sh\ndd if=/dev/zero bs=1048576 count=33 2>/dev/null\ndd if=/dev/zero bs=1048576 count=33 1>&2 2>/dev/null\n", 'utf8');
+      await chmod(wrapper, 0o755);
+      assert.throws(
+        () => runGitQuery({ descriptor: { kind: 'head' }, cwd: value.repo, env: { PATH: `${bin}:${process.env['PATH'] ?? ''}` } }),
+        (error: unknown) => error instanceof GitQueryError
+          && error.code === 'output-overflow'
+          && error.diagnostic.includes('diagnostic truncated')
+          && Buffer.byteLength(error.diagnostic, 'utf8') <= GIT_MUTATION_DIAGNOSTIC_BYTES + 128,
+      );
     } finally {
       await rm(value.root, { recursive: true, force: true });
     }
@@ -127,7 +162,7 @@ void describe('package-owned Git process boundary', () => {
       const bin = join(value.root, 'bin');
       await mkdir(bin);
       const wrapper = join(bin, 'git');
-      await writeFile(wrapper, `#!/bin/sh\n"${realGit}" "$@"\nstatus=$?\nif [ "$1" = "commit" ]; then dd if=/dev/zero bs=1048577 count=1 2>/dev/null | tr '\\000' X; fi\nexit $status\n`, 'utf8');
+      await writeFile(wrapper, `#!/bin/sh\n"${realGit}" "$@"\nstatus=$?\nif [ "$1" = "commit" ]; then dd if=/dev/zero bs=1048577 count=1 2>/dev/null; fi\nexit $status\n`, 'utf8');
       await chmod(wrapper, 0o755);
       const result = await runGitMutation({
         descriptor: { kind: 'commit', message: 'capture once' }, cwd: value.repo,
@@ -158,12 +193,15 @@ void describe('package-owned Git process boundary', () => {
       const bin = join(value.root, 'bin');
       await mkdir(bin);
       const wrapper = join(bin, 'git');
-      await writeFile(wrapper, '#!/bin/sh\nif [ "$1" = "checkout" ]; then sleep 30 & wait; fi\nkill -TERM $$\n', 'utf8');
+      const descendantMarker = join(value.root, 'descendant-survived');
+      await writeFile(wrapper, '#!/bin/sh\nif [ "$1" = "checkout" ]; then (sleep 1; echo survived > "$AUTOPILOT_TEST_MARKER") & wait; fi\nkill -TERM $$\n', 'utf8');
       await chmod(wrapper, 0o755);
-      const timeout = await runGitMutation({ descriptor: { kind: 'checkout-force', branch: 'master' }, cwd: value.repo, env: { PATH: `${bin}:/bin:/usr/bin` }, timeoutMs: 25 });
+      const timeout = await runGitMutation({ descriptor: { kind: 'checkout-force', branch: 'master' }, cwd: value.repo, env: { PATH: `${bin}:/bin:/usr/bin`, AUTOPILOT_TEST_MARKER: descendantMarker }, timeoutMs: 25 });
       assert.equal(timeout.kind, 'effect-unknown');
       if (timeout.kind !== 'effect-unknown') throw new Error('timeout unexpectedly reported');
       assert.equal(timeout.reason, 'timeout');
+      await new Promise<void>((resolvePromise) => setTimeout(resolvePromise, 1_200));
+      assert.equal(existsSync(descendantMarker), false, 'timed-out Git descendants must not survive their process group');
 
       await writeFile(wrapper, '#!/bin/sh\nkill -TERM $$\n', 'utf8');
       const signalled = await runGitMutation({ descriptor: { kind: 'checkout-force', branch: 'master' }, cwd: value.repo, env: { PATH: `${bin}:/bin:/usr/bin` } });

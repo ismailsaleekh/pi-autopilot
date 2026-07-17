@@ -16,7 +16,7 @@ import { RunReconciliationClient } from '../../src/core/coordination/reconciliat
 import { ReservationCoordinationClient, preparePendingReservationIntegrations, reconcilePendingReservationResolutions, reservationCloseBlockers, reservationSchedulingBlockers } from '../../src/core/coordination/reservations.ts';
 import { coordinatorRuntimePaths } from '../../src/core/coordination/runtime-paths.ts';
 import { startCoordinatorServer } from '../../src/core/coordination/server.ts';
-import { ensureMainWorktreeSagaRegistered, executeOwnedWorktreeSaga, type WorktreeSagaInspection } from '../../src/core/coordination/worktree-saga.ts';
+import { ensureMainWorktreeSagaRegistered, executeOwnedWorktreeSaga } from '../../src/core/coordination/worktree-saga.ts';
 import { writeCoordinatorSessionContext, type CoordinatorSessionContext } from '../../src/core/coordination/supervisor.ts';
 import type { CoordinationReservationObligation, CoordinatorResponseEnvelope } from '../../src/core/coordination/types.ts';
 import { AUTOPILOT_STATE_ROOT_ENV, type ActiveAutopilotRow, type ProcessEnvLike } from '../../src/core/parallel-runtime.ts';
@@ -89,6 +89,10 @@ async function attachActor(harness: Harness, suffix: string): Promise<Actor> {
   const mainWorktree = join(harness.stateRoot, 'worktrees', repoId, 'active', workstreamRun, 'main');
   await mkdir(dirname(mainWorktree), { recursive: true });
   git(join(harness.root, 'repository'), ['worktree', 'add', '-b', `autopilot/${workstreamRun}`, mainWorktree, 'main']);
+  const taskRoot = dirname(mainWorktree);
+  await writeFile(join(taskRoot, '_task-info.json'), `${JSON.stringify({ runtime_root: join(mainWorktree, '.pi', 'autopilot', `work-${suffix}`) })}\n`, 'utf8');
+  await writeFile(join(taskRoot, '_branches.json'), '{"units":[]}\n', 'utf8');
+  await writeFile(join(taskRoot, '_unit-index.json'), '{"units":[]}\n', 'utf8');
   const context: CoordinatorSessionContext = {
     schema_version: 'autopilot.coordinator_session_context.v1', state_root: harness.stateRoot, repo_id: repoId, repo_key: repoId,
     autopilot_id: attachedRun.autopilot_id, workstream: attachedRun.workstream, workstream_run: attachedRun.workstream_run,
@@ -292,12 +296,10 @@ void describe('Coordination Fabric edit leases and change reservations', () => {
       await ensureMainWorktreeSagaRegistered({ active: firstActive, env: firstEnv });
       const firstIntent = await first.reservations.prepareRunTerminal('closed');
       assert.deepEqual(firstIntent.reservation_ids, [firstReservations[0]?.reservation_id]);
-      let terminalOperationApplied = false;
-      const inspectTerminalOperation = (): WorktreeSagaInspection => terminalOperationApplied ? { outcome: 'satisfied', proof: ['terminal-operation-applied'] } : { outcome: 'not-applied', proof: ['terminal-operation-pending'] };
       await executeOwnedWorktreeSaga({
-        active: firstActive, unitId: 'main', attempt: 1, kind: 'main', operationType: 'merge', operationKey: 'terminal-close-operation-witness', initialWorktreeState: 'active', committedWorktreeState: 'active',
+        active: firstActive, unitId: 'main', attempt: 1, kind: 'main', operationType: 'merge', initialWorktreeState: 'active', committedWorktreeState: 'active',
         intent: { repo_root: firstActive.source_repo, worktree_path: firstActive.main_worktree_path, git_common_dir: firstActive.git_common_dir, branch: firstActive.branch, reason: 'integrate current target before close', base_sha: git(firstActive.main_worktree_path, ['rev-parse', 'HEAD']), target_sha: git(firstActive.main_worktree_path, ['rev-parse', 'HEAD']), archive_ref: null, checkout_mode: null, sparse_patterns: [], paths: [], metadata_refs: [] },
-      }, { inspect: inspectTerminalOperation, action: () => { terminalOperationApplied = true; }, verify: () => inspectTerminalOperation().proof }, firstEnv);
+      }, { action: () => undefined }, firstEnv);
       const firstTerminal = await terminalEvidence(harness, first, 'closed');
       await first.reconciliation.recordReleaseEvidence({ source: 'run-close', targetId: first.context.workstream_run, evidenceRef: firstTerminal.ref, evidenceSha256: firstTerminal.sha });
 
