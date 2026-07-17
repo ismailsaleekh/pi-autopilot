@@ -3,6 +3,7 @@ declare const process: {
   readonly env: { [key: string]: string | undefined };
   readonly execPath: string;
   readonly pid: number;
+  readonly getuid?: () => number;
   readonly stdin: import('node:readline').ReadableInput;
   cwd(): string;
   chdir(directory: string): void;
@@ -43,6 +44,8 @@ declare module 'node:fs' {
     readonly ctimeMs: number;
     readonly dev: number;
     readonly ino: number;
+    readonly nlink: number;
+    readonly uid: number;
     isFile(): boolean;
     isDirectory(): boolean;
     isSymbolicLink(): boolean;
