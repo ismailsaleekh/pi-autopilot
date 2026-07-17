@@ -5,7 +5,6 @@ import { CoordinatorClient } from '../core/coordination/client.ts';
 import { CoordinationRuntimeError } from '../core/coordination/failures.ts';
 import { migrationRecoveryUsage, runMigrationRecoveryCli } from './migration-recovery.ts';
 import { coordinationMigrationUsage, runCoordinationMigration, type CoordinationMigrationCommand } from '../core/coordination/migration.ts';
-import { activatePatchBuild, reportPatchActivationReadiness } from '../core/coordination/patch-activation.ts';
 import { CoordinatorAlreadyRunningError, runCoordinatorUntilSignal } from '../core/coordination/server.ts';
 import { coordinatorRuntimePaths } from '../core/coordination/runtime-paths.ts';
 import { COORDINATOR_STARTUP_ATTEMPT_ID_ENV, createCoordinatorStartupAttemptId, createCoordinatorStartupObserver, type CoordinatorStartupObserver } from '../core/coordination/startup-observation.ts';
@@ -14,7 +13,7 @@ import { stageCoordinatorSemanticReplayFile } from '../core/coordination/store.t
 import { AUTOPILOT_STATE_ROOT_ENV, resolveRepoIdentity, type ProcessEnvLike } from '../core/parallel-runtime.ts';
 
 interface CliArgs {
-  readonly command: 'serve' | 'status' | 'doctor' | 'export' | 'replay' | 'upgrade-schema11' | 'activate-patch' | 'patch-readiness' | 'migrate' | 'verify' | 'rollback' | 'cutover';
+  readonly command: 'serve' | 'status' | 'doctor' | 'export' | 'replay' | 'upgrade-schema11' | 'migrate' | 'verify' | 'rollback' | 'cutover';
   readonly stateRoot: string | null;
   readonly repoId: string;
   readonly repoKey: string | null;
@@ -34,8 +33,6 @@ function usage(): string {
     '       autopilot-coordinator export [--state-root <absolute-path>] [--output <absolute-path>]',
     '       autopilot-coordinator replay --replay-id <stable-id> --input <absolute-request-jsonl> [--state-root <absolute-path>]',
     '       autopilot-coordinator upgrade-schema11 [--state-root <absolute-path>]',
-    '       autopilot-coordinator activate-patch [--state-root <absolute-path>]',
-    '       autopilot-coordinator patch-readiness [--state-root <absolute-path>]',
     coordinationMigrationUsage(),
     migrationRecoveryUsage(),
   ].join('\n');
@@ -43,7 +40,7 @@ function usage(): string {
 
 function parseArgs(argv: readonly string[]): CliArgs {
   const command = argv[0];
-  if (command !== 'serve' && command !== 'status' && command !== 'doctor' && command !== 'export' && command !== 'replay' && command !== 'upgrade-schema11' && command !== 'activate-patch' && command !== 'patch-readiness' && command !== 'migrate' && command !== 'verify' && command !== 'rollback' && command !== 'cutover') throw new Error(usage());
+  if (command !== 'serve' && command !== 'status' && command !== 'doctor' && command !== 'export' && command !== 'replay' && command !== 'upgrade-schema11' && command !== 'migrate' && command !== 'verify' && command !== 'rollback' && command !== 'cutover') throw new Error(usage());
   let stateRoot: string | null = null;
   let repoId = 'global';
   let repoKey: string | null = null;
@@ -144,14 +141,6 @@ async function main(argv: readonly string[]): Promise<number> {
     }
     if (args.command === 'upgrade-schema11') {
       console.log(JSON.stringify(await retireSchema11CoordinatorForUpgrade(coordinatorRuntimePaths(env)), null, 2));
-      return 0;
-    }
-    if (args.command === 'activate-patch') {
-      console.log(JSON.stringify(await activatePatchBuild(coordinatorRuntimePaths(env)), null, 2));
-      return 0;
-    }
-    if (args.command === 'patch-readiness') {
-      console.log(JSON.stringify(await reportPatchActivationReadiness(coordinatorRuntimePaths(env)), null, 2));
       return 0;
     }
     const client = new CoordinatorClient({ env });

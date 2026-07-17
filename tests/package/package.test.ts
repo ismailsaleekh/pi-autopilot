@@ -221,8 +221,12 @@ void describe('package manifest and payload', () => {
       'dist/src/cli/migration-recovery.js',
       'dist/src/core/agent-runner.js',
       'dist/src/core/close-runtime.js',
+      'dist/src/core/coordination/admission.js',
       'dist/src/core/coordination/client.js',
       'dist/src/core/coordination/executable-resolution.js',
+      'dist/src/core/coordination/negotiated-transport.js',
+      'dist/src/core/coordination/peer-admission-state.js',
+      'dist/src/core/coordination/peer-classification.js',
       'dist/src/core/coordination/contracts.js',
       'dist/src/core/coordination/invariants.js',
       'dist/src/core/coordination/legacy-preflight.js',
@@ -235,8 +239,12 @@ void describe('package manifest and payload', () => {
       'dist/src/internal/status-extension.js',
       'src/core/context-budget.ts',
       'src/core/coordination/index.ts',
+      'src/core/coordination/admission.ts',
       'src/core/coordination/client.ts',
       'src/core/coordination/executable-resolution.ts',
+      'src/core/coordination/negotiated-transport.ts',
+      'src/core/coordination/peer-admission-state.ts',
+      'src/core/coordination/peer-classification.ts',
       'src/core/coordination/contracts.ts',
       'src/core/coordination/invariants.ts',
       'src/core/coordination/legacy-preflight.ts',
@@ -468,8 +476,12 @@ void describe('package manifest and payload', () => {
       'dist/src/cli/migration-recovery.js',
       'dist/src/core/agent-runner.js',
       'dist/src/core/close-runtime.js',
+      'dist/src/core/coordination/admission.js',
       'dist/src/core/coordination/client.js',
       'dist/src/core/coordination/executable-resolution.js',
+      'dist/src/core/coordination/negotiated-transport.js',
+      'dist/src/core/coordination/peer-admission-state.js',
+      'dist/src/core/coordination/peer-classification.js',
       'dist/src/core/coordination/contracts.js',
       'dist/src/core/coordination/invariants.js',
       'dist/src/core/coordination/legacy-preflight.js',
@@ -481,8 +493,12 @@ void describe('package manifest and payload', () => {
       'dist/src/core/coordination/worktree-saga.js',
       'dist/src/internal/status-extension.js',
       'src/core/context-budget.ts',
+      'src/core/coordination/admission.ts',
       'src/core/coordination/client.ts',
       'src/core/coordination/executable-resolution.ts',
+      'src/core/coordination/negotiated-transport.ts',
+      'src/core/coordination/peer-admission-state.ts',
+      'src/core/coordination/peer-classification.ts',
       'src/core/coordination/contracts.ts',
       'src/core/coordination/invariants.ts',
       'src/core/coordination/legacy-preflight.ts',
@@ -565,6 +581,21 @@ void describe('package manifest and payload', () => {
     }
   });
 
+  void it('ships the admission HMAC security boundary in compiled parity', async () => {
+    const sourceAdmission = await readFile(new URL('src/core/coordination/admission.ts', root), 'utf8');
+    const compiledAdmission = await readFile(new URL('dist/src/core/coordination/admission.js', root), 'utf8');
+    const sourceTransport = await readFile(new URL('src/core/coordination/negotiated-transport.ts', root), 'utf8');
+    const compiledTransport = await readFile(new URL('dist/src/core/coordination/negotiated-transport.js', root), 'utf8');
+    for (const marker of ['pi-autopilot/admission/v1\\0', "Buffer.from(capability, 'hex')", 'canonicalJson(unsigned)', 'timingSafeEqual(actualHmac, expectedHmac)']) {
+      assert.equal(sourceAdmission.includes(marker), true, `source admission is missing ${marker}`);
+      assert.equal(compiledAdmission.includes(marker), true, `compiled admission is stale for ${marker}`);
+    }
+    for (const marker of ['runCoordinatorNegotiatedTransport', 'CoordinatorSocketChannel', 'multiple or unsolicited response frames', 'coordinator connection closed between protocol phases']) {
+      assert.equal(sourceTransport.includes(marker), true, `source negotiated transport is missing ${marker}`);
+      assert.equal(compiledTransport.includes(marker), true, `compiled negotiated transport is stale for ${marker}`);
+    }
+  });
+
   void it('exposes the runner help path without Node type stripping', async () => {
     const wrapper = await readFile(new URL('bin/autopilot-agent-run.mjs', root), 'utf8');
     assert.equal(wrapper.includes('--experimental-strip-types'), false);
@@ -584,12 +615,18 @@ void describe('package manifest and payload', () => {
   void it('exposes the coordinator help path without TypeScript stripping', async () => {
     const wrapper = await readFile(new URL('bin/autopilot-coordinator.mjs', root), 'utf8');
     const client = await readFile(new URL('src/core/coordination/client.ts', root), 'utf8');
+    const coordinatorCli = await readFile(new URL('src/cli/autopilot-coordinator.ts', root), 'utf8');
+    const coordinationIndex = await readFile(new URL('src/core/coordination/index.ts', root), 'utf8');
     const resolver = await readFile(new URL('src/core/coordination/executable-resolution.ts', root), 'utf8');
     assert.equal(wrapper.includes('--experimental-strip-types'), false);
     assert.equal(client.includes('--experimental-strip-types'), false);
     assert.equal(client.includes('autopilot-coordinator.ts'), false);
     assert.equal(resolver.includes('process.cwd'), false);
     assert.equal(resolver.includes("process.env['PATH']"), false);
+    assert.equal(existsSync(new URL('src/core/coordination/patch-activation.ts', root)), false);
+    assert.equal(coordinatorCli.includes('activate-patch'), false);
+    assert.equal(coordinatorCli.includes('patch-readiness'), false);
+    assert.equal(coordinationIndex.includes('patch-activation'), false);
     assert.match(wrapper, /'dist', 'src', 'cli', 'autopilot-coordinator\.js'/u);
     assert.match(resolver, /autopilot-coordinator-bootstrap/u);
     const result = spawnSync(process.execPath, ['bin/autopilot-coordinator.mjs', '--help'], { cwd: root, encoding: 'utf8' });
@@ -599,6 +636,11 @@ void describe('package manifest and payload', () => {
     assert.match(result.stdout, /--input <absolute-request-jsonl>/u);
     assert.match(result.stdout, /migrate --dry-run/u);
     assert.match(result.stdout, /verify \[--repo-key/u);
+    assert.equal(result.stdout.includes('activate-patch'), false);
+    assert.equal(result.stdout.includes('patch-readiness'), false);
+    const obsolete = spawnSync(process.execPath, ['bin/autopilot-coordinator.mjs', 'activate-patch'], { cwd: root, encoding: 'utf8' });
+    assert.equal(obsolete.status, 2);
+    assert.match(obsolete.stderr, /usage: autopilot-coordinator serve/u);
     const invalid = spawnSync(process.execPath, ['bin/autopilot-coordinator.mjs', 'migrate', '--repo-key', 'missing-mode'], { cwd: root, encoding: 'utf8' });
     assert.equal(invalid.status, 2);
     assert.match(invalid.stderr, /requires a mode/u);
