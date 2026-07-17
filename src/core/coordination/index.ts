@@ -20,7 +20,6 @@ export * from './observations.ts';
 export * from './peer-admission-state.ts';
 export * from './peer-classification.ts';
 export * from './package-isolation.ts';
-export * from './patch-activation.ts';
 export * from './process-identity.ts';
 export * from './reconciliation.ts';
 export * from './reservations.ts';

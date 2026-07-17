@@ -7,6 +7,7 @@ import { COORDINATOR_COMPILED_ENTRYPOINT_ENV, resolveCoordinatorExecutable } fro
 import { coordinationFailureDefinition, CoordinationRuntimeError } from "./failures.js";
 import { AUTOPILOT_COORDINATOR_TRANSPORT_VERSION, CoordinatorFrameDecoder, encodeCoordinatorFrame } from "./ipc.js";
 import { activeCoordinationMigrationFreeze } from "./migration-paths.js";
+import { runCoordinatorLegacySameSocketTransport } from "./negotiated-transport.js";
 import { currentBootId, isExactProcessAlive, isProcessAlive, processStartIdentity } from "./process-identity.js";
 import { COORDINATOR_DATABASE_SCHEMA_VERSION, coordinatorRuntimePaths, enforcePrivateAuthorityPath, ensureCoordinatorPrivateRoots, readOrCreateCoordinatorCapability } from "./runtime-paths.js";
 import { classifyCoordinatorRuntimeIdentity } from "./runtime-compatibility.js";
@@ -356,73 +357,13 @@ async function sendOnce(paths, capability, request, timeoutMs) {
     });
 }
 async function sendAfterCompatibleHandshake(paths, capability, probe, request, timeoutMs, validateProbe) {
-    const socket = await connectSocket(paths.socketPath, timeoutMs);
-    const decoder = new CoordinatorFrameDecoder();
-    return await new Promise((resolveResponse, rejectResponse) => {
-        let settled = false;
-        let phase = 'probe';
-        const finishError = (error) => {
-            if (settled)
-                return;
-            settled = true;
-            clearTimeout(timer);
-            socket.destroy();
-            rejectResponse(error);
-        };
-        const finishResponse = (response) => {
-            if (settled)
-                return;
-            settled = true;
-            clearTimeout(timer);
-            socket.end();
-            resolveResponse(response);
-        };
-        const writeRequest = (value) => {
-            const transport = { transport_version: AUTOPILOT_COORDINATOR_TRANSPORT_VERSION, capability, request: value };
-            socket.write(encodeCoordinatorFrame(transport), (error) => {
-                if (error !== null && error !== undefined)
-                    finishError(error);
-            });
-        };
-        const timer = setTimeout(() => {
-            const error = new Error(`coordinator request timed out after ${String(timeoutMs)} ms`);
-            Object.assign(error, { code: 'ETIMEDOUT' });
-            finishError(error);
-        }, timeoutMs);
-        let readChain = Promise.resolve();
-        socket.on('data', (chunk) => {
-            readChain = readChain.then(async () => {
-                const frames = decoder.push(chunk);
-                if (frames.length > 1)
-                    throw new CoordinationRuntimeError('invalid-state', 'coordinator sent unsolicited response frames before the next request');
-                for (const frame of frames) {
-                    if (typeof frame === 'object' && frame !== null && !Array.isArray(frame)) {
-                        const observedProtocol = frame['protocol_version'];
-                        if (typeof observedProtocol === 'string' && observedProtocol !== AUTOPILOT_COORDINATOR_PROTOCOL_VERSION)
-                            throw new CoordinationRuntimeError('protocol-mismatch', `coordinator response protocol ${observedProtocol} is incompatible with ${AUTOPILOT_COORDINATOR_PROTOCOL_VERSION}`);
-                    }
-                    const response = parseCoordinatorResponseEnvelope(frame);
-                    if (phase === 'probe') {
-                        if (response.request_id !== probe.request_id)
-                            throw new CoordinationRuntimeError('invalid-state', 'coordinator handshake response request id mismatch');
-                        await validateProbe(response);
-                        phase = 'request';
-                        writeRequest(request);
-                    }
-                    else {
-                        if (response.request_id !== request.request_id)
-                            throw new CoordinationRuntimeError('invalid-state', 'coordinator response request id mismatch');
-                        finishResponse(response);
-                    }
-                }
-            }).catch((error) => finishError(error instanceof Error ? error : new Error(String(error))));
-        });
-        socket.once('error', finishError);
-        socket.once('close', () => {
-            if (!settled)
-                finishError(Object.assign(new Error('coordinator connection closed before a response'), { code: 'ECONNRESET' }));
-        });
-        writeRequest(probe);
+    return await runCoordinatorLegacySameSocketTransport({
+        socketPath: paths.socketPath,
+        capability,
+        timeoutMs,
+        handshake: probe,
+        operation: request,
+        validateHandshake: validateProbe,
     });
 }
 export class CoordinatorClient {

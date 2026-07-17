@@ -584,12 +584,18 @@ void describe('package manifest and payload', () => {
   void it('exposes the coordinator help path without TypeScript stripping', async () => {
     const wrapper = await readFile(new URL('bin/autopilot-coordinator.mjs', root), 'utf8');
     const client = await readFile(new URL('src/core/coordination/client.ts', root), 'utf8');
+    const coordinatorCli = await readFile(new URL('src/cli/autopilot-coordinator.ts', root), 'utf8');
+    const coordinationIndex = await readFile(new URL('src/core/coordination/index.ts', root), 'utf8');
     const resolver = await readFile(new URL('src/core/coordination/executable-resolution.ts', root), 'utf8');
     assert.equal(wrapper.includes('--experimental-strip-types'), false);
     assert.equal(client.includes('--experimental-strip-types'), false);
     assert.equal(client.includes('autopilot-coordinator.ts'), false);
     assert.equal(resolver.includes('process.cwd'), false);
     assert.equal(resolver.includes("process.env['PATH']"), false);
+    assert.equal(existsSync(new URL('src/core/coordination/patch-activation.ts', root)), false);
+    assert.equal(coordinatorCli.includes('activate-patch'), false);
+    assert.equal(coordinatorCli.includes('patch-readiness'), false);
+    assert.equal(coordinationIndex.includes('patch-activation'), false);
     assert.match(wrapper, /'dist', 'src', 'cli', 'autopilot-coordinator\.js'/u);
     assert.match(resolver, /autopilot-coordinator-bootstrap/u);
     const result = spawnSync(process.execPath, ['bin/autopilot-coordinator.mjs', '--help'], { cwd: root, encoding: 'utf8' });
@@ -599,6 +605,11 @@ void describe('package manifest and payload', () => {
     assert.match(result.stdout, /--input <absolute-request-jsonl>/u);
     assert.match(result.stdout, /migrate --dry-run/u);
     assert.match(result.stdout, /verify \[--repo-key/u);
+    assert.equal(result.stdout.includes('activate-patch'), false);
+    assert.equal(result.stdout.includes('patch-readiness'), false);
+    const obsolete = spawnSync(process.execPath, ['bin/autopilot-coordinator.mjs', 'activate-patch'], { cwd: root, encoding: 'utf8' });
+    assert.equal(obsolete.status, 2);
+    assert.match(obsolete.stderr, /usage: autopilot-coordinator serve/u);
     const invalid = spawnSync(process.execPath, ['bin/autopilot-coordinator.mjs', 'migrate', '--repo-key', 'missing-mode'], { cwd: root, encoding: 'utf8' });
     assert.equal(invalid.status, 2);
     assert.match(invalid.stderr, /requires a mode/u);
