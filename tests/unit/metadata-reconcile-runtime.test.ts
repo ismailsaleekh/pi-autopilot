@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -115,7 +116,7 @@ void describe('I5 metadata-only worktree registration reconciliation', () => {
     }
   });
 
-  void it('refuses proof/action drift while retaining every approved registration', async () => {
+  void it('refuses proof/action drift without pruning approved registrations', async () => {
     const value = await corpus(2, 'drift');
     try {
       const rows = await approvals(value, 'repo-drift');
@@ -128,6 +129,31 @@ void describe('I5 metadata-only worktree registration reconciliation', () => {
       const current = gitWorktreeRegistrationFacts(value.repo);
       for (const path of value.paths) assert.equal(current.some((entry) => entry.worktree_path === path && entry.prunable), true);
       assert.equal(current.some((entry) => entry.worktree_path === extra && !entry.prunable), true);
+    } finally {
+      await rm(value.root, { recursive: true, force: true });
+    }
+  });
+
+  void it('refuses a partial approval when another registration is globally prunable', async () => {
+    const value = await corpus(2, 'partial-approval');
+    try {
+      const rows = await approvals(value, 'repo-partial-approval');
+      const selected = rows[0];
+      if (selected === undefined) throw new Error('partial-approval row disappeared');
+      const target = selected.intent.target_registration_path;
+      const partial: MetadataReconcileApproval = {
+        ...selected,
+        intent: {
+          ...selected.intent,
+          approved_prunable_registration_paths: [target],
+          expected_after_registrations: selected.intent.approved_before_registrations.filter((registration) => registration.worktree_path !== target),
+        },
+      };
+      await assert.rejects(
+        () => reconcileApprovedMissingWorktreeMetadata({ approvals: [partial], evidence_root: join(value.root, 'audit') }),
+        /complete pre-reconcile prunable set|every currently prunable registration has one approved row/u,
+      );
+      assert.equal(gitWorktreeRegistrationFacts(value.repo).filter((registration) => registration.prunable).length, 2);
     } finally {
       await rm(value.root, { recursive: true, force: true });
     }
@@ -163,6 +189,47 @@ void describe('I5 metadata-only worktree registration reconciliation', () => {
       assert.equal(gitWorktreeRegistrationFacts(dangling.repo).some((entry) => entry.worktree_path === path && entry.prunable), true);
     } finally {
       await rm(dangling.root, { recursive: true, force: true });
+    }
+  });
+
+  void it('rejects a substituted evidence directory before pruning registration metadata', async () => {
+    const value = await corpus(1, 'evidence-symlink');
+    try {
+      const rows = await approvals(value, 'repo-evidence-symlink');
+      const auditRoot = join(value.root, 'audit');
+      const external = join(value.root, 'external-evidence-target');
+      await mkdir(auditRoot);
+      await mkdir(external);
+      await symlink(external, join(auditRoot, 'metadata-reconcile'));
+      await assert.rejects(
+        () => reconcileApprovedMissingWorktreeMetadata({ approvals: rows, evidence_root: auditRoot }),
+        /evidence directory is a symbolic or non-directory entry/u,
+      );
+      assert.equal(gitWorktreeRegistrationFacts(value.repo).filter((registration) => registration.prunable).length, 1);
+      const canonicalId = rows[0]?.intent.canonical_worktree_id;
+      if (canonicalId === undefined) throw new Error('evidence-symlink canonical row disappeared');
+      assert.equal(existsSync(join(external, `${canonicalId}.json`)), false);
+    } finally {
+      await rm(value.root, { recursive: true, force: true });
+    }
+  });
+
+  void it('rejects oversized recovery evidence before pruning registration metadata', async () => {
+    const value = await corpus(1, 'oversized-evidence');
+    try {
+      const rows = await approvals(value, 'repo-oversized-evidence');
+      const approval = rows[0];
+      if (approval === undefined) throw new Error('oversized-evidence approval disappeared');
+      const oversizedEvidence = new Uint8Array(1_048_577);
+      oversizedEvidence.fill(0x20);
+      await writeFile(approval.recovery_evidence_path, oversizedEvidence);
+      await assert.rejects(
+        () => reconcileApprovedMissingWorktreeMetadata({ approvals: rows, evidence_root: join(value.root, 'audit') }),
+        /bounded single-link regular non-symbolic file/u,
+      );
+      assert.equal(gitWorktreeRegistrationFacts(value.repo).filter((registration) => registration.prunable).length, 1);
+    } finally {
+      await rm(value.root, { recursive: true, force: true });
     }
   });
 

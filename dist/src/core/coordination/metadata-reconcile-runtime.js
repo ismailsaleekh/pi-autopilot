@@ -1,10 +1,11 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, lstatSync } from 'node:fs';
-import { link, mkdir, open, readFile, rm } from 'node:fs/promises';
-import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
+import { link, mkdir, open, realpath, rm } from 'node:fs/promises';
+import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { runGitMutation, runGitQuery } from "../git-process.js";
 import { canonicalJson } from "./canonical-json.js";
 import { CoordinationRuntimeError } from "./failures.js";
+import { readImmutableFileBytes } from "./immutable-file.js";
 import { assertMetadataReconcileEvidence, parseMetadataReconcileIntent, } from "./metadata-reconcile.js";
 import { deriveWorktreeOperationKeyV2 } from "./worktree-operation-identity.js";
 import { gitWorktreeRegistrationFacts, inspectWorktreePostcondition } from "./worktree-postconditions.js";
@@ -34,13 +35,7 @@ function assertInside(root, path, label) {
 async function verifyRecoveryEvidence(approval) {
     if (!existsSync(approval.recovery_evidence_path))
         throw new CoordinationRuntimeError('recovery-required', 'metadata reconciliation recovery evidence is missing', [approval.recovery_evidence_path]);
-    const before = lstatSync(approval.recovery_evidence_path);
-    if (!before.isFile() || before.isSymbolicLink() || before.size > 1024 * 1024)
-        throw new CoordinationRuntimeError('recovery-required', 'metadata reconciliation recovery evidence is not a bounded stable regular file', [approval.recovery_evidence_path]);
-    const bytes = await readFile(approval.recovery_evidence_path);
-    const after = lstatSync(approval.recovery_evidence_path);
-    if (before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size || bytes.byteLength !== before.size)
-        throw new CoordinationRuntimeError('recovery-required', 'metadata reconciliation recovery evidence changed during proof', [approval.recovery_evidence_path]);
+    const bytes = readImmutableFileBytes({ path: approval.recovery_evidence_path, maximumBytes: 1024 * 1024, label: 'metadata reconciliation recovery evidence' });
     const digest = `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
     if (digest !== approval.intent.recovery_evidence_sha256)
         throw new CoordinationRuntimeError('invalid-state', 'metadata reconciliation recovery evidence digest differs from durable approval', [approval.intent.canonical_worktree_id, digest, approval.intent.recovery_evidence_sha256]);
@@ -67,14 +62,42 @@ function inspectApproval(approval, env) {
         ...(env === undefined ? {} : { env }),
     });
 }
+async function prepareEvidencePath(evidenceRoot, canonicalWorktreeId) {
+    const root = resolve(evidenceRoot);
+    await mkdir(root, { recursive: true, mode: 0o700 });
+    const rootInfo = lstatSync(root);
+    if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink())
+        throw new CoordinationRuntimeError('unauthorized-client', 'metadata reconciliation evidence root must be a real directory', [root]);
+    const directory = resolve(root, 'metadata-reconcile');
+    if (existsSync(directory)) {
+        const info = lstatSync(directory);
+        if (!info.isDirectory() || info.isSymbolicLink())
+            throw new CoordinationRuntimeError('unauthorized-client', 'metadata reconciliation evidence directory is a symbolic or non-directory entry', [directory]);
+    }
+    else
+        await mkdir(directory, { mode: 0o700 });
+    const rootPhysical = await realpath(root);
+    const directoryPhysical = await realpath(directory);
+    assertInside(rootPhysical, resolve(directoryPhysical, `${canonicalWorktreeId}.json`), 'metadata reconciliation physical evidence');
+    const path = resolve(directory, `${canonicalWorktreeId}.json`);
+    assertInside(root, path, 'metadata reconciliation evidence');
+    if (existsSync(path)) {
+        const info = lstatSync(path);
+        if (!info.isFile() || info.isSymbolicLink())
+            throw new CoordinationRuntimeError('unauthorized-client', 'metadata reconciliation evidence destination is not a regular non-symbolic file', [path]);
+    }
+    return path;
+}
+async function assertExistingEvidenceBytes(path, bytes) {
+    const existing = new TextDecoder('utf-8', { fatal: true }).decode(readImmutableFileBytes({ path, maximumBytes: 1024 * 1024, label: 'metadata reconciliation immutable evidence' }));
+    if (existing !== bytes)
+        throw new CoordinationRuntimeError('idempotency-conflict', 'immutable metadata reconciliation evidence differs from the exact replay', [path]);
+}
 async function publishEvidence(input) {
-    const path = resolve(input.evidenceRoot, 'metadata-reconcile', `${input.approval.intent.canonical_worktree_id}.json`);
-    assertInside(input.evidenceRoot, path, 'metadata reconciliation evidence');
-    await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+    const path = await prepareEvidencePath(input.evidenceRoot, input.approval.intent.canonical_worktree_id);
     const bytes = `${canonicalJson(input.evidence)}\n`;
     if (existsSync(path)) {
-        if (await readFile(path, 'utf8') !== bytes)
-            throw new CoordinationRuntimeError('idempotency-conflict', 'immutable metadata reconciliation evidence differs from the exact replay', [path]);
+        await assertExistingEvidenceBytes(path, bytes);
         return path;
     }
     const temporary = `${path}.tmp-${String(process.pid)}-${randomUUID()}`;
@@ -92,12 +115,14 @@ async function publishEvidence(input) {
     catch (error) {
         if (!(error instanceof Error && 'code' in error && error.code === 'EEXIST'))
             throw error;
-        if (await readFile(path, 'utf8') !== bytes)
-            throw new CoordinationRuntimeError('idempotency-conflict', 'concurrent metadata reconciliation evidence differs from exact replay', [path]);
+        await prepareEvidencePath(input.evidenceRoot, input.approval.intent.canonical_worktree_id);
+        await assertExistingEvidenceBytes(path, bytes);
     }
     finally {
         await rm(temporary, { force: true });
     }
+    await prepareEvidencePath(input.evidenceRoot, input.approval.intent.canonical_worktree_id);
+    await assertExistingEvidenceBytes(path, bytes);
     return path;
 }
 /**
@@ -131,6 +156,7 @@ export async function reconcileApprovedMissingWorktreeMetadata(input) {
         if (pathEntryExists(approval.intent.target_registration_path))
             throw new CoordinationRuntimeError('recovery-required', 'metadata reconciliation target path has a physical or symbolic filesystem entry; metadata-only prune is forbidden', [approval.intent.target_registration_path]);
         await verifyRecoveryEvidence(approval);
+        await prepareEvidencePath(input.evidence_root, approval.intent.canonical_worktree_id);
     }
     const targets = approvals.map((approval) => approval.intent.target_registration_path).sort(compare);
     const approved = [...first.intent.approved_prunable_registration_paths].sort(compare);
@@ -152,6 +178,11 @@ export async function reconcileApprovedMissingWorktreeMetadata(input) {
     const alreadySatisfied = exactEqual(finalBefore, first.intent.expected_after_registrations);
     if (!alreadySatisfied && !exactEqual(finalBefore, first.intent.approved_before_registrations))
         throw new CoordinationRuntimeError('recovery-required', 'Git worktree registration set changed between proof and action; refusing prune', [`observed=${String(finalBefore.length)}`, `approved=${String(first.intent.approved_before_registrations.length)}`]);
+    if (!alreadySatisfied) {
+        const actualPrunablePaths = finalBefore.filter((registration) => registration.prunable).map((registration) => registration.worktree_path).sort(compare);
+        if (!exactEqual(actualPrunablePaths, approved))
+            throw new CoordinationRuntimeError('recovery-required', 'global worktree prune is forbidden unless every currently prunable registration has one approved row', [...actualPrunablePaths.map((path) => `actual_prunable=${path}`), ...approved.map((path) => `approved_prunable=${path}`)]);
+    }
     const mutation = alreadySatisfied ? null : await runGitMutation({ descriptor: { kind: 'worktree-prune' }, cwd: first.intent.git_common_dir, ...(input.env === undefined ? {} : { env: input.env }) });
     const after = gitWorktreeRegistrationFacts(first.intent.git_common_dir, input.env);
     const afterInspection = inspectApproval(first, input.env);

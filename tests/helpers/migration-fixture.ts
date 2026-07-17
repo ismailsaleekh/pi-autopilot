@@ -1,13 +1,14 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { chmod, copyFile, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
 import { currentBootId, isProcessAlive } from '../../src/core/coordination/process-identity.ts';
-import { coordinatorRuntimePaths } from '../../src/core/coordination/runtime-paths.ts';
+import { coordinatorRuntimePaths, type CoordinatorRuntimePaths } from '../../src/core/coordination/runtime-paths.ts';
+import type { CurrentStoreGeneration } from '../../src/core/coordination/store-generation.ts';
 import { CoordinatorStore } from '../../src/core/coordination/store.ts';
 import { parseCurrentCoordinatorLock, parsePredecessorCoordinatorLock } from '../../src/core/coordination/upgrade-contracts.ts';
 import { coordinationRootForRepo, prepareAutopilotWorkstream, resolveRepoIdentity, writeActiveAutopilots, writePathClaims, type AutopilotPathClaim, type ProcessEnvLike } from '../../src/core/parallel-runtime.ts';
@@ -22,21 +23,72 @@ export interface MigrationTestFixture {
 
 export function migrationTestClock(): { readonly now: () => Date } { return { now: () => new Date('2026-07-12T12:00:00.000Z') }; }
 
+/**
+ * Reifies the closed current generation as an exact unbarriered schema-12
+ * predecessor fixture. Production never runs this reverse projection: tests use
+ * it only to exercise the package-owned historical schema upgrade chain before
+ * S1 publishes a new generation.
+ */
+export async function stageCurrentGenerationAsExactSchema12(paths: CoordinatorRuntimePaths, current: CurrentStoreGeneration): Promise<string> {
+  if (!existsSync(paths.currentStorePointerPath) || !existsSync(current.database_path)) throw new Error('schema-12 predecessor fixture requires a published current generation');
+  if (existsSync(`${current.database_path}-wal`) || existsSync(`${current.database_path}-shm`)) throw new Error('schema-12 predecessor fixture refuses a live or incompletely closed generation');
+  const stagingPath = `${paths.databasePath}.schema12-fixture-${String(process.pid)}`;
+  await rm(stagingPath, { force: true });
+  try {
+    await copyFile(current.database_path, stagingPath);
+    const database = new DatabaseSync(stagingPath);
+    try {
+      const version = database.prepare('PRAGMA user_version').get()?.['user_version'];
+      if (version !== 13) throw new Error(`schema-12 predecessor fixture expected schema 13, found ${String(version)}`);
+      database.exec(`
+        PRAGMA foreign_keys=OFF;
+        BEGIN IMMEDIATE;
+        DROP INDEX idx_worktree_aliases_canonical;
+        DROP INDEX idx_worktrees_canonical;
+        DROP INDEX idx_worktrees_current_semantic;
+        DROP INDEX idx_worktree_operations_canonical;
+        DROP TABLE worktree_aliases;
+        DROP TABLE run_scoped_faults;
+        ALTER TABLE worktree_operations DROP COLUMN canonical_worktree_id;
+        ALTER TABLE worktrees DROP COLUMN is_current_canonical;
+        ALTER TABLE worktrees DROP COLUMN kind;
+        ALTER TABLE worktrees DROP COLUMN attempt;
+        ALTER TABLE worktrees DROP COLUMN unit_id;
+        ALTER TABLE worktrees DROP COLUMN autopilot_id;
+        ALTER TABLE worktrees DROP COLUMN canonical_worktree_id;
+        DELETE FROM schema_migrations WHERE version=13;
+        PRAGMA user_version=12;
+        COMMIT;
+        PRAGMA wal_checkpoint(TRUNCATE);
+        PRAGMA journal_mode=DELETE;
+      `);
+      const integrity = database.prepare('PRAGMA integrity_check').get()?.['integrity_check'];
+      const stagedVersion = database.prepare('PRAGMA user_version').get()?.['user_version'];
+      if (integrity !== 'ok' || stagedVersion !== 12) throw new Error(`schema-12 predecessor fixture is invalid: integrity=${String(integrity)} schema=${String(stagedVersion)}`);
+    } catch (error) {
+      if (database.isTransaction) database.exec('ROLLBACK');
+      throw error;
+    } finally { database.close(); }
+    await rm(paths.currentStorePointerPath, { force: true });
+    await rm(paths.storesRoot, { recursive: true, force: true });
+    await mkdir(paths.storesRoot, { recursive: true, mode: 0o700 });
+    await rm(paths.databasePath, { force: true });
+    await rename(stagingPath, paths.databasePath);
+    return paths.databasePath;
+  } finally { await rm(stagingPath, { force: true }); }
+}
+
 /** Creates the exact Phase-34 schema boundary from the current migration chain. */
 export async function seedPhase34Schema6Database(env: ProcessEnvLike): Promise<string> {
   const paths = coordinatorRuntimePaths(env);
   const store = await CoordinatorStore.open(paths, migrationTestClock());
+  const generation = store.currentGeneration();
   store.close();
+  await stageCurrentGenerationAsExactSchema12(paths, generation);
   const database = new DatabaseSync(paths.databasePath);
   try {
-    for (const row of database.prepare("SELECT name FROM sqlite_schema WHERE type='trigger' AND name LIKE 'autopilot_s1_deny_%' ORDER BY name").all()) {
-      const name = row['name'];
-      if (typeof name !== 'string' || !/^autopilot_s1_deny_[a-f0-9]{20}_(insert|update|delete)$/u.test(name)) throw new Error('fixed-path test barrier trigger identity is invalid');
-      database.exec(`DROP TRIGGER "${name}"`);
-    }
     database.exec(`
       BEGIN IMMEDIATE;
-      DROP TABLE autopilot_s1_fixed_path_barrier;
       DROP TABLE result_details;
       DROP TABLE result_receipts;
       DROP TABLE mailbox_delivery_items;
@@ -56,9 +108,6 @@ export async function seedPhase34Schema6Database(env: ProcessEnvLike): Promise<s
       PRAGMA wal_checkpoint(TRUNCATE);
     `);
   } finally { database.close(); }
-  await rm(paths.currentStorePointerPath, { force: true });
-  await rm(paths.storesRoot, { recursive: true, force: true });
-  await mkdir(paths.storesRoot, { recursive: true, mode: 0o700 });
   return paths.databasePath;
 }
 

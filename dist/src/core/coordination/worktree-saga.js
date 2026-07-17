@@ -1,11 +1,12 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, lstatSync, mkdirSync, realpathSync } from 'node:fs';
-import { mkdir, open, readFile, unlink } from 'node:fs/promises';
+import { mkdir, open, unlink } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { CoordinatorClient } from "./client.js";
 import { parseCoordinationWorktree, parseCoordinationWorktreeOperation } from "./contracts.js";
 import { CoordinationRuntimeError } from "./failures.js";
 import { canonicalJson } from "./canonical-json.js";
+import { readImmutableFileBytes } from "./immutable-file.js";
 import { coordinationCutoverCommitted } from "./migration-paths.js";
 import { coordinatorRuntimePaths } from "./runtime-paths.js";
 import { currentBootId, isProcessAlive } from "./process-identity.js";
@@ -85,6 +86,11 @@ function operationEvidenceRef(owner, id) {
 function operationEvidencePath(session, ref) {
     return join(session.state_root, 'worktrees', session.repo_key, ...ref.split('/'));
 }
+async function assertImmutableEvidenceBytes(path, expected) {
+    const actual = new TextDecoder('utf-8', { fatal: true }).decode(readImmutableFileBytes({ path, maximumBytes: 1024 * 1024, label: 'worktree operation evidence' }));
+    if (actual !== expected)
+        throw new CoordinationRuntimeError('idempotency-conflict', 'immutable worktree operation evidence differs from the existing artifact', [path]);
+}
 async function writeImmutableEvidence(input) {
     const ref = operationEvidenceRef(input.operation.owner, input.operation.operation_id);
     const path = operationEvidencePath(input.session, ref);
@@ -104,6 +110,7 @@ async function writeImmutableEvidence(input) {
         error_code: input.errorCode,
     })}\n`;
     await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+    assertNoSymlinkSegments(join(input.session.state_root, 'worktrees', input.session.repo_key), path, 'operation evidence');
     try {
         const handle = await open(path, 'wx', 0o600);
         try {
@@ -117,10 +124,11 @@ async function writeImmutableEvidence(input) {
     catch (error) {
         if (!(error instanceof Error && 'code' in error && error.code === 'EEXIST'))
             throw error;
-        const existing = await readFile(path, 'utf8');
-        if (existing !== body)
-            throw new CoordinationRuntimeError('idempotency-conflict', 'immutable worktree operation evidence differs from the existing artifact', [path]);
+        assertNoSymlinkSegments(join(input.session.state_root, 'worktrees', input.session.repo_key), path, 'operation evidence');
+        await assertImmutableEvidenceBytes(path, body);
     }
+    assertNoSymlinkSegments(join(input.session.state_root, 'worktrees', input.session.repo_key), path, 'operation evidence');
+    await assertImmutableEvidenceBytes(path, body);
     return { ref, sha256: `sha256:${createHash('sha256').update(body, 'utf8').digest('hex')}` };
 }
 function assertSpecMatchesActiveAuthority(spec) {
@@ -327,7 +335,8 @@ function errorCode(error) {
 }
 async function sagaExecutionLockIsStale(lockPath) {
     try {
-        const parsed = JSON.parse(await readFile(lockPath, 'utf8'));
+        const bytes = readImmutableFileBytes({ path: lockPath, maximumBytes: 4_096, label: 'worktree saga execution lock' });
+        const parsed = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
         if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed))
             return false;
         const pid = Reflect.get(parsed, 'pid');
@@ -357,9 +366,10 @@ async function withSagaExecutionLock(session, spec, run) {
             const handle = await open(lockPath, 'wx', 0o600);
             acquiredLock = true;
             const token = randomUUID();
+            const lockBody = `${JSON.stringify({ schema_version: 'autopilot.saga_execution_lock.v1', pid: process.pid, boot_id: currentBootId(), token })}\n`;
             try {
                 try {
-                    await handle.writeFile(`${JSON.stringify({ schema_version: 'autopilot.saga_execution_lock.v1', pid: process.pid, boot_id: currentBootId(), token })}\n`, 'utf8');
+                    await handle.writeFile(lockBody, 'utf8');
                     await handle.sync();
                 }
                 finally {
@@ -376,8 +386,14 @@ async function withSagaExecutionLock(session, spec, run) {
                 return await run();
             }
             finally {
-                const current = await readFile(lockPath, 'utf8').catch(() => '');
-                if (current.includes(token))
+                let current;
+                try {
+                    current = new TextDecoder('utf-8', { fatal: true }).decode(readImmutableFileBytes({ path: lockPath, maximumBytes: 4_096, label: 'worktree saga execution lock' }));
+                }
+                catch (error) {
+                    throw new CoordinationRuntimeError('system-fatal', 'worktree saga execution lock became unreadable before release', [lockPath, error instanceof Error ? error.message : String(error)]);
+                }
+                if (current === lockBody)
                     await unlink(lockPath);
                 else
                     throw new CoordinationRuntimeError('system-fatal', 'worktree saga execution lock ownership changed before release', [lockPath]);

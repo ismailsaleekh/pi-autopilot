@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -8,13 +9,18 @@ import { describe, it } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
 
 import { CoordinatorClient } from '../../src/core/coordination/client.ts';
-import { parseCoordinationRun, parseCoordinationSessionLease } from '../../src/core/coordination/contracts.ts';
+import { ClaimNegotiationClient } from '../../src/core/coordination/negotiation.ts';
+import { RunReconciliationClient } from '../../src/core/coordination/reconciliation.ts';
+import { parseCoordinationRun, parseCoordinationSessionLease, parseCoordinationWorktreeOperation } from '../../src/core/coordination/contracts.ts';
 import { CoordinationRuntimeError, formatCoordinationRuntimeError } from '../../src/core/coordination/failures.ts';
 import { coordinatorRuntimePaths } from '../../src/core/coordination/runtime-paths.ts';
+import { readCurrentStoreGeneration } from '../../src/core/coordination/store-generation.ts';
 import { startCoordinatorServer } from '../../src/core/coordination/server.ts';
 import { DurableRunSupervisorClient, writeCoordinatorSessionContext, type CoordinatorSessionContext } from '../../src/core/coordination/supervisor.ts';
 import { executeOwnedWorktreeSaga, fixedWorktreeSagaCallbacks, OwnedWorktreeSagaClient, recoverOwnedWorktreeSagas, WORKTREE_SAGA_BOUNDARIES } from '../../src/core/coordination/worktree-saga.ts';
 import { deriveWorktreeOperationKeyV2, operationIdFromWorktreeOperationKey } from '../../src/core/coordination/worktree-operation-identity.ts';
+import { inspectWorktreePostcondition } from '../../src/core/coordination/worktree-postconditions.ts';
+import { deterministicWorktreeId } from '../../src/core/coordination/worktree-identity.ts';
 import { AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV } from '../../src/core/names.ts';
 import { AUTOPILOT_STATE_ROOT_ENV, BRANCHES_FILE, MATERIALIZED_PATHS_FILE, UNIT_INDEX_FILE, UNIT_INFO_FILE, WORKTREE_LEDGER_FILE, prepareAutopilotWorkstream, readUnitIndex, recoverAutopilotWorktreeSagas, resolveRepoIdentity, type ActiveAutopilotRow, type ProcessEnvLike } from '../../src/core/parallel-runtime.ts';
 
@@ -185,6 +191,65 @@ void describe('owner-scoped worktree and Git saga recovery', () => {
     }
   });
 
+  void it('replays an immutable historical alias operation through its schema-13 canonical index', async () => {
+    const value = await setup('alias');
+    let restarted: Awaited<ReturnType<typeof startCoordinatorServer>> | null = null;
+    try {
+      const create = unitCreateSpec(value, 'unit-historical-alias');
+      let actions = 0;
+      const committed = await executeOwnedWorktreeSaga(create, {
+        action: () => { actions += 1; git(value.repo, ['worktree', 'add', '-b', create.intent.branch, create.intent.worktree_path, value.active.target_base_sha]); },
+      }, value.env);
+      if (committed.operation === null || committed.operation.verification_evidence === null || committed.worktree === null) throw new Error('canonical alias fixture operation did not commit immutable evidence');
+      const operationId = committed.operation.operation_id;
+      const canonicalWorktreeId = committed.operation.worktree_id;
+      const aliasWorktreeId = 'migration-worktree-historical-alias';
+      await value.server.close();
+      const currentGeneration = readCurrentStoreGeneration(coordinatorRuntimePaths(value.env));
+      if (currentGeneration === null) throw new Error('schema-13 alias fixture generation is missing');
+      const database = new DatabaseSync(currentGeneration.database_path);
+      try {
+        const row = database.prepare('SELECT payload_json FROM worktree_operations WHERE entity_id=?').get(operationId);
+        const payloadText = row?.['payload_json'];
+        if (typeof payloadText !== 'string') throw new Error('schema-13 alias fixture operation payload is missing');
+        const historical = { ...parseCoordinationWorktreeOperation(JSON.parse(payloadText) as unknown), worktree_id: aliasWorktreeId };
+        if (historical.verification_evidence === null) throw new Error('historical alias fixture operation evidence is missing');
+        const aliasWorktree = { ...committed.worktree, worktree_id: aliasWorktreeId };
+        database.prepare('INSERT INTO worktrees(entity_id,repo_id,workstream_run,payload_json,version,canonical_worktree_id,autopilot_id,unit_id,attempt,kind,is_current_canonical) VALUES(?,?,?,?,?,?,?,?,?,?,0)').run(
+          aliasWorktreeId, aliasWorktree.owner.repo_id, aliasWorktree.owner.workstream_run, JSON.stringify(aliasWorktree), aliasWorktree.version, canonicalWorktreeId, aliasWorktree.owner.autopilot_id, aliasWorktree.owner.unit_id, aliasWorktree.owner.attempt, aliasWorktree.kind,
+        );
+        database.prepare('UPDATE worktree_operations SET payload_json=? WHERE entity_id=?').run(JSON.stringify(historical), operationId);
+        database.prepare('INSERT INTO worktree_aliases(alias_worktree_id,canonical_worktree_id,repo_id,autopilot_id,workstream_run,unit_id,attempt,kind,resolution_state,reason,evidence_sha256,created_event_seq) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)').run(
+          aliasWorktreeId, canonicalWorktreeId, historical.owner.repo_id, historical.owner.autopilot_id, historical.owner.workstream_run, historical.owner.unit_id, historical.owner.attempt, 'unit', 'resolved', 'legacy-migration-id', historical.verification_evidence.sha256, historical.intent_event_seq,
+        );
+      } finally { database.close(); }
+      restarted = await startCoordinatorServer(coordinatorRuntimePaths(value.env));
+
+      const replay = await executeOwnedWorktreeSaga({ ...create, operationId }, { action: () => { actions += 1; } }, value.env);
+      assert.equal(replay.operation?.operation_id, operationId);
+      assert.equal(replay.operation?.worktree_id, aliasWorktreeId);
+      assert.equal(replay.replayed, true);
+      assert.equal(actions, 1);
+      assert.equal(git(create.intent.worktree_path, ['rev-parse', 'HEAD']), value.active.target_base_sha);
+
+      await restarted.close();
+      restarted = null;
+      const inspect = new DatabaseSync(currentGeneration.database_path, { readOnly: true });
+      try {
+        const row = inspect.prepare('SELECT payload_json,canonical_worktree_id FROM worktree_operations WHERE entity_id=?').get(operationId);
+        const payloadText = row?.['payload_json'];
+        if (typeof payloadText !== 'string') throw new Error('historical alias payload disappeared after replay');
+        const historical = parseCoordinationWorktreeOperation(JSON.parse(payloadText) as unknown);
+        assert.equal(historical.worktree_id, aliasWorktreeId);
+        assert.equal(row?.['canonical_worktree_id'], canonicalWorktreeId);
+      } finally { inspect.close(); }
+    } finally {
+      if (restarted !== null) await restarted.close();
+      await value.server.close().catch(() => undefined);
+      await rm(value.root, { recursive: true, force: true });
+    }
+  });
+
   void it('preserves bounded typed preflight and reconciling evidence without executing an unsafe action', async () => {
     let rejectReconcilingReport = true;
     const value = await setup('x', {
@@ -261,6 +326,35 @@ void describe('owner-scoped worktree and Git saga recovery', () => {
       }, value.env);
       assert.equal(actionCount, 0);
       assert.equal(result.operation?.stage, 'committed');
+    } finally {
+      await close(value);
+    }
+  });
+
+  void it('rejects operation-evidence symlink substitution and resumes without repeating the applied effect', async () => {
+    const value = await setup('evidence-link');
+    try {
+      const spec = unitCreateSpec(value, 'unit-evidence-link');
+      const saga = new OwnedWorktreeSagaClient(new CoordinatorClient({ env: value.env, autoStart: false }), value.session);
+      const prepared = await saga.prepare(spec);
+      const evidencePath = join(value.active.worktree_root, '_saga-evidence', value.active.workstream_run, `${prepared.operation.operation_id}.json`);
+      const external = join(value.root, 'external-evidence.json');
+      await writeFile(external, 'external bytes must survive\n', 'utf8');
+      await mkdir(dirname(evidencePath), { recursive: true });
+      await symlink(external, evidencePath);
+      let actions = 0;
+      const callbacks = { action: () => { actions += 1; git(value.repo, ['worktree', 'add', '-b', spec.intent.branch, spec.intent.worktree_path, value.active.target_base_sha]); } };
+      await assert.rejects(
+        () => executeOwnedWorktreeSaga(spec, callbacks, value.env),
+        (error: unknown) => error instanceof CoordinationRuntimeError && error.code === 'recovery-required' && error.message.includes('symlink substitution'),
+      );
+      assert.equal(await readFile(external, 'utf8'), 'external bytes must survive\n');
+      assert.equal(actions, 1);
+      await rm(evidencePath);
+      const recovered = await executeOwnedWorktreeSaga(spec, callbacks, value.env);
+      assert.equal(recovered.operation?.stage, 'committed');
+      assert.equal(actions, 1);
+      assert.equal(git(spec.intent.worktree_path, ['rev-parse', 'HEAD']), value.active.target_base_sha);
     } finally {
       await close(value);
     }
@@ -697,15 +791,34 @@ void describe('owner-scoped worktree and Git saga recovery', () => {
     }
   });
 
-  void it('terminalizes sanitized I2 operation-5df1 branch-proof capture 8725cf1 with an absent physical worktree and no second commit', async () => {
+  void it('terminalizes sanitized I2 operation-5df1 branch-proof capture 8725cf1, releases exactly 42 WRITE leases, and performs no second commit', async () => {
     const value = await setup('i2');
     try {
+      const client = new CoordinatorClient({ env: value.env, autoStart: false });
+      const claims = new ClaimNegotiationClient(client, value.session);
+      const capturedPaths = Array.from({ length: 42 }, (_entry, index) => `src/i2-captured-${String(index).padStart(2, '0')}.ts`);
+      const acquired = await claims.acquire({
+        acquisitionGroupId: 'group-i2-42-write', unitId: 'FOUND-APP-IMPL', attempt: 1,
+        requestedLeases: capturedPaths.map((path) => ({ path, mode: 'WRITE' as const, purpose: 'sanitized historical I2 retained authority' })),
+        reason: 'sanitized historical I2 42-WRITE authority shape', normalReleaseCondition: { condition_type: 'quarantine-captured', target_id: 'FOUND-APP-IMPL:1', evidence: null },
+        specRef: '.pi/autopilot/work-i2/unit-specs/FOUND-APP-IMPL.json', specSha256: `sha256:${'a'.repeat(64)}`, role: 'implement', preemptible: true, checkpointOrdinal: 0,
+      });
+      assert.equal(acquired.outcome, 'granted');
+      if (acquired.outcome !== 'granted') throw new Error('I2 retained authority was not granted');
+      const unrelated = await claims.acquire({
+        acquisitionGroupId: 'group-i2-unrelated', unitId: 'UNRELATED', attempt: 1,
+        requestedLeases: [{ path: 'src/unrelated.ts', mode: 'WRITE', purpose: 'must survive I2 exact release' }],
+        reason: 'unrelated authority isolation witness', normalReleaseCondition: { condition_type: 'quarantine-captured', target_id: 'UNRELATED:1', evidence: null },
+        specRef: '.pi/autopilot/work-i2/unit-specs/UNRELATED.json', specSha256: `sha256:${'b'.repeat(64)}`, role: 'implement', preemptible: true, checkpointOrdinal: 0,
+      });
+      assert.equal(unrelated.outcome, 'granted');
+      if (unrelated.outcome !== 'granted') throw new Error('unrelated authority was not granted');
+
       const create = unitCreateSpec(value, 'FOUND-APP-IMPL');
-      const saga = new OwnedWorktreeSagaClient(new CoordinatorClient({ env: value.env, autoStart: false }), value.session);
+      const saga = new OwnedWorktreeSagaClient(client, value.session);
       await saga.prepare(create);
       await recoverOwnedWorktreeSagas({ active: value.active, env: value.env });
-      await writeFile(join(create.intent.worktree_path, 'src', 'captured-a.ts'), 'export const capturedA = true;\n', 'utf8');
-      await writeFile(join(create.intent.worktree_path, 'src', 'captured-b.ts'), 'export const capturedB = true;\n', 'utf8');
+      for (const [index, path] of capturedPaths.entries()) await writeFile(join(create.intent.worktree_path, path), `export const captured${String(index)} = true;\n`, 'utf8');
       const quarantine = {
         ...create,
         operationType: 'quarantine' as const,
@@ -715,11 +828,11 @@ void describe('owner-scoped worktree and Git saga recovery', () => {
           ...create.intent,
           reason: 'sanitized regression for historical operation-5df1cda32ea1a860e6fe85d8891bb0d2 / capture 8725cf1',
           target_sha: value.active.target_base_sha,
-          paths: ['src/captured-a.ts', 'src/captured-b.ts'],
+          paths: capturedPaths,
         },
       };
       const prepared = await saga.prepare(quarantine);
-      git(create.intent.worktree_path, ['add', '--', 'src/captured-a.ts', 'src/captured-b.ts']);
+      git(create.intent.worktree_path, ['add', '--', ...capturedPaths]);
       git(create.intent.worktree_path, ['commit', '-m', 'sanitized I2 quarantine capture']);
       const capture = git(create.intent.worktree_path, ['rev-parse', 'HEAD']);
       assert.equal(git(value.repo, ['rev-list', '--count', `${value.active.target_base_sha}..${capture}`]), '1');
@@ -739,6 +852,56 @@ void describe('owner-scoped worktree and Git saga recovery', () => {
       assert.equal(Reflect.get(evidence, 'proof_source'), 'owned-git-ref');
       const worktree = (await saga.worktrees()).find((entry) => entry.worktree_id === operation.worktree_id);
       assert.equal(worktree?.state, 'quarantined');
+
+      const captureRef = `autopilot/archive/${value.active.workstream_run}/unit/FOUND-APP-IMPL/attempt-1/quarantine-capture`;
+      git(value.repo, ['update-ref', `refs/heads/${captureRef}`, capture, '0'.repeat(40)]);
+      const evidenceRef = '.pi/autopilot/work-i2/quarantine/FOUND-APP-IMPL.attempt-1.quarantine.json';
+      const failureDocument = {
+        schema_version: 'autopilot.unit_failure.v1', action: 'quarantine', workstream: value.active.workstream, workstream_run: value.active.workstream_run,
+        unit_id: 'FOUND-APP-IMPL', attempt: 1, unit_worktree_path: create.intent.worktree_path, dirty_paths: capturedPaths,
+        capture_commit_sha: capture, capture_ref: captureRef, git_head_before: value.active.target_base_sha, git_head_after: capture,
+        git_common_dir: value.active.git_common_dir, branch: create.intent.branch, postcondition_worktree_clean: true,
+        summary: 'sanitized exact I2 absent-worktree authority release witness', created_at: '2026-07-11T00:00:01.000Z',
+      };
+      const failureBytes = `${JSON.stringify(failureDocument, null, 2)}\n`;
+      const failurePath = join(value.active.main_worktree_path, ...evidenceRef.split('/'));
+      await mkdir(dirname(failurePath), { recursive: true });
+      await writeFile(failurePath, failureBytes, 'utf8');
+      const failureSha: `sha256:${string}` = `sha256:${createHash('sha256').update(failureBytes, 'utf8').digest('hex')}`;
+      const reconciliation = new RunReconciliationClient(client, value.session);
+      const forgedRef = '.pi/autopilot/work-i2/quarantine/FOUND-APP-IMPL.attempt-1.forged-path-set.json';
+      const forgedBytes = `${JSON.stringify({ ...failureDocument, dirty_paths: capturedPaths.slice(1) }, null, 2)}\n`;
+      const forgedPath = join(value.active.main_worktree_path, ...forgedRef.split('/'));
+      await mkdir(dirname(forgedPath), { recursive: true });
+      await writeFile(forgedPath, forgedBytes, 'utf8');
+      const forgedSha: `sha256:${string}` = `sha256:${createHash('sha256').update(forgedBytes, 'utf8').digest('hex')}`;
+      await assert.rejects(
+        () => reconciliation.recordReleaseEvidence({ source: 'quarantine-capture', targetId: 'FOUND-APP-IMPL:1', evidenceRef: forgedRef, evidenceSha256: forgedSha }),
+        /exactly one matching committed canonical operation/u,
+      );
+      const afterRejectedRelease = await client.query('status', value.active.repo_key, value.active.workstream_run);
+      const retained = afterRejectedRelease.payload['edit_leases'];
+      if (!Array.isArray(retained)) throw new Error('I2 rejected-release status edit_leases is not an array');
+      assert.equal(retained.length, 43, 'incomplete path proof must release no authority');
+
+      const release = await reconciliation.recordReleaseEvidence({ source: 'quarantine-capture', targetId: 'FOUND-APP-IMPL:1', evidenceRef, evidenceSha256: failureSha });
+      assert.deepEqual([...release.reconciliation.released_lease_ids].sort(), acquired.editLeases.map((lease) => lease.edit_lease_id).sort());
+      assert.equal(release.reconciliation.released_lease_ids.length, 42);
+      const afterRelease = await client.query('status', value.active.repo_key, value.active.workstream_run);
+      const remaining = afterRelease.payload['edit_leases'];
+      if (!Array.isArray(remaining)) throw new Error('I2 status edit_leases is not an array');
+      assert.equal(remaining.length, 1);
+      assert.equal(Reflect.get(remaining[0], 'edit_lease_id'), unrelated.editLeases[0]?.edit_lease_id);
+      assert.equal(git(value.repo, ['rev-list', '--count', `${value.active.target_base_sha}..refs/heads/${create.intent.branch}`]), '1');
+
+      git(value.repo, ['update-ref', '-d', `refs/heads/${create.intent.branch}`, capture]);
+      const archiveOnly = inspectWorktreePostcondition({
+        operationType: 'quarantine', owner: operation.owner, kind: 'unit', canonicalWorktreeId: deterministicWorktreeId(operation.owner, 'unit'),
+        intent: { ...operation.intent, archive_ref: captureRef }, durableStage: operation.stage,
+      });
+      assert.equal(archiveOnly.outcome, 'satisfied', archiveOnly.proof.join('\n'));
+      assert.equal(archiveOnly.proof_source, 'owned-git-ref');
+      assert.equal(archiveOnly.capture_sha, capture);
     } finally {
       await close(value);
     }
@@ -847,7 +1010,7 @@ void describe('owner-scoped worktree and Git saga recovery', () => {
     }
   });
 
-  void it('refuses to commit a recovered Git effect until its declared metadata artifact exists', async () => {
+  void it('refuses to commit a recovered Git effect until bounded immutable metadata is present', async () => {
     const value = await setup('q');
     try {
       const saga = new OwnedWorktreeSagaClient(new CoordinatorClient({ env: value.env, autoStart: false }), value.session);
@@ -866,6 +1029,24 @@ void describe('owner-scoped worktree and Git saga recovery', () => {
       const taskRoot = dirname(dirname(dirname(dirname(create.intent.worktree_path))));
       await mkdir(join(taskRoot, 'execution-commits'), { recursive: true });
       await writeFile(join(taskRoot, 'execution-commits', 'gated.json'), '{}\n', 'utf8');
+      const taskInfoPath = join(taskRoot, '_task-info.json');
+      await writeFile(taskInfoPath, `${JSON.stringify({ runtime_root: value.active.runtime_root })}\n`, 'utf8');
+      const taskInfoBytes = await readFile(taskInfoPath);
+      const externalTaskInfo = join(value.root, 'foreign-task-info.json');
+      await writeFile(externalTaskInfo, `${JSON.stringify({ runtime_root: value.active.runtime_root })}\n`, 'utf8');
+      await rm(taskInfoPath);
+      await symlink(externalTaskInfo, taskInfoPath);
+      await assert.rejects(() => recoverOwnedWorktreeSagas({ active: value.active, env: value.env }), /canonical postcondition|metadata postcondition|unreadable_metadata_root|partial-effect/u);
+      assert.equal(git(create.intent.worktree_path, ['rev-list', '--count', `${base}..HEAD`]), '1');
+      assert.notEqual((await saga.operations()).find((operation) => operation.intent.reason === 'metadata gate witness')?.stage, 'committed');
+      await rm(taskInfoPath);
+      const oversizedTaskInfo = new Uint8Array(1_048_577);
+      oversizedTaskInfo.fill(0x20);
+      await writeFile(taskInfoPath, oversizedTaskInfo);
+      await assert.rejects(() => recoverOwnedWorktreeSagas({ active: value.active, env: value.env }), /canonical postcondition|metadata postcondition|unreadable_metadata_root|partial-effect/u);
+      assert.equal(git(create.intent.worktree_path, ['rev-list', '--count', `${base}..HEAD`]), '1');
+      assert.notEqual((await saga.operations()).find((operation) => operation.intent.reason === 'metadata gate witness')?.stage, 'committed');
+      await writeFile(taskInfoPath, taskInfoBytes);
       const recovered = await recoverOwnedWorktreeSagas({ active: value.active, env: value.env });
       assert.equal(recovered.some((operation) => operation.intent.reason === 'metadata gate witness' && operation.stage === 'committed'), true);
       assert.equal(git(create.intent.worktree_path, ['rev-list', '--count', `${base}..HEAD`]), '1');

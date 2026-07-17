@@ -303,7 +303,7 @@ async function verifyMigrationOnCopy(paths: CoordinatorRuntimePaths, record: Coo
   await copyFile(record.path, probePaths.databasePath, fsConstants.COPYFILE_EXCL);
   await enforcePrivateAuthorityPath(probePaths.databasePath, false);
   // The private copy remains a fixed-path schema-12 handoff. Its byte identity
-  // is verified against the exact schema-6 backup before any migration; opening
+  // is verified against the exact schema-6 backup before migration; opening
   // CoordinatorStore here would prematurely publish schema 13 and its barrier.
   await upgradeVerifiedPrivateSchema6CopyToSchema12(probePaths, record.sha256);
   const checkpoint = new DatabaseSync(probePaths.databasePath, { timeout: 5_000 });

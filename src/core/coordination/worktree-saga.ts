@@ -1,12 +1,13 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, lstatSync, mkdirSync, realpathSync } from 'node:fs';
-import { mkdir, open, readFile, unlink } from 'node:fs/promises';
+import { mkdir, open, unlink } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 import { CoordinatorClient } from './client.ts';
 import { parseCoordinationWorktree, parseCoordinationWorktreeOperation } from './contracts.ts';
 import { CoordinationRuntimeError } from './failures.ts';
 import { canonicalJson } from './canonical-json.ts';
+import { readImmutableFileBytes } from './immutable-file.ts';
 import { coordinationCutoverCommitted } from './migration-paths.ts';
 import { coordinatorRuntimePaths } from './runtime-paths.ts';
 import { currentBootId, isProcessAlive } from './process-identity.ts';
@@ -140,6 +141,11 @@ function operationEvidencePath(session: CoordinatorSessionContext, ref: string):
   return join(session.state_root, 'worktrees', session.repo_key, ...ref.split('/'));
 }
 
+async function assertImmutableEvidenceBytes(path: string, expected: string): Promise<void> {
+  const actual = new TextDecoder('utf-8', { fatal: true }).decode(readImmutableFileBytes({ path, maximumBytes: 1024 * 1024, label: 'worktree operation evidence' }));
+  if (actual !== expected) throw new CoordinationRuntimeError('idempotency-conflict', 'immutable worktree operation evidence differs from the existing artifact', [path]);
+}
+
 async function writeImmutableEvidence(input: {
   readonly session: CoordinatorSessionContext;
   readonly operation: CoordinationWorktreeOperation;
@@ -167,6 +173,7 @@ async function writeImmutableEvidence(input: {
     error_code: input.errorCode,
   })}\n`;
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  assertNoSymlinkSegments(join(input.session.state_root, 'worktrees', input.session.repo_key), path, 'operation evidence');
   try {
     const handle = await open(path, 'wx', 0o600);
     try {
@@ -177,9 +184,11 @@ async function writeImmutableEvidence(input: {
     }
   } catch (error) {
     if (!(error instanceof Error && 'code' in error && error.code === 'EEXIST')) throw error;
-    const existing = await readFile(path, 'utf8');
-    if (existing !== body) throw new CoordinationRuntimeError('idempotency-conflict', 'immutable worktree operation evidence differs from the existing artifact', [path]);
+    assertNoSymlinkSegments(join(input.session.state_root, 'worktrees', input.session.repo_key), path, 'operation evidence');
+    await assertImmutableEvidenceBytes(path, body);
   }
+  assertNoSymlinkSegments(join(input.session.state_root, 'worktrees', input.session.repo_key), path, 'operation evidence');
+  await assertImmutableEvidenceBytes(path, body);
   return { ref, sha256: `sha256:${createHash('sha256').update(body, 'utf8').digest('hex')}` };
 }
 
@@ -397,7 +406,8 @@ function errorCode(error: unknown): string {
 
 async function sagaExecutionLockIsStale(lockPath: string): Promise<boolean> {
   try {
-    const parsed: unknown = JSON.parse(await readFile(lockPath, 'utf8'));
+    const bytes = readImmutableFileBytes({ path: lockPath, maximumBytes: 4_096, label: 'worktree saga execution lock' });
+    const parsed: unknown = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
     if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return false;
     const pid = Reflect.get(parsed, 'pid');
     const bootId = Reflect.get(parsed, 'boot_id');
@@ -423,9 +433,10 @@ async function withSagaExecutionLock<T>(session: CoordinatorSessionContext, spec
       const handle = await open(lockPath, 'wx', 0o600);
       acquiredLock = true;
       const token = randomUUID();
+      const lockBody = `${JSON.stringify({ schema_version: 'autopilot.saga_execution_lock.v1', pid: process.pid, boot_id: currentBootId(), token })}\n`;
       try {
         try {
-          await handle.writeFile(`${JSON.stringify({ schema_version: 'autopilot.saga_execution_lock.v1', pid: process.pid, boot_id: currentBootId(), token })}\n`, 'utf8');
+          await handle.writeFile(lockBody, 'utf8');
           await handle.sync();
         } finally {
           await handle.close();
@@ -439,8 +450,10 @@ async function withSagaExecutionLock<T>(session: CoordinatorSessionContext, spec
       try {
         return await run();
       } finally {
-        const current = await readFile(lockPath, 'utf8').catch(() => '');
-        if (current.includes(token)) await unlink(lockPath);
+        let current: string;
+        try { current = new TextDecoder('utf-8', { fatal: true }).decode(readImmutableFileBytes({ path: lockPath, maximumBytes: 4_096, label: 'worktree saga execution lock' })); }
+        catch (error) { throw new CoordinationRuntimeError('system-fatal', 'worktree saga execution lock became unreadable before release', [lockPath, error instanceof Error ? error.message : String(error)]); }
+        if (current === lockBody) await unlink(lockPath);
         else throw new CoordinationRuntimeError('system-fatal', 'worktree saga execution lock ownership changed before release', [lockPath]);
       }
     } catch (error) {

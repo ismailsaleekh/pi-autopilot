@@ -1,13 +1,15 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { existsSync, lstatSync, realpathSync } from 'node:fs';
-import { link, mkdir, open, readdir, readFile, rm, unlink } from 'node:fs/promises';
+import { link, mkdir, open, readdir, rm, unlink } from 'node:fs/promises';
 import { platform } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { AUTOPILOT_PREFLIGHT_ROLLBACK_REASON_PREFIX, AUTOPILOT_RUNTIME_ROOT_PREFIX } from "./names.js";
 import { gitQueryText, runGitMutation, runGitQuery } from "./git-process.js";
+import { readImmutableFileBytes } from "./coordination/immutable-file.js";
 import { executeOwnedWorktreeSaga } from "./coordination/worktree-saga.js";
 import { coordinationCutoverCommitted } from "./coordination/migration-paths.js";
 import { BRANCHES_FILE, MATERIALIZED_PATHS_FILE, UNIT_INDEX_FILE, UNIT_INFO_FILE, WORKTREE_LEDGER_FILE, appendJsonl, readGitStatus, readUnitIndex, taskRootForActiveAutopilot, unitWorktreePathForActiveAutopilot, withAutopilotFileLock, writeJsonAtomic, writeUnitIndex, } from "./parallel-runtime.js";
+const MAX_CLEANUP_EVIDENCE_BYTES = 1_048_576;
 export class AutopilotWorktreeCleanupError extends Error {
     name = 'AutopilotWorktreeCleanupError';
     code;
@@ -143,16 +145,18 @@ async function hasExactImmutableOperationEvidence(active, operation) {
     const relativeEvidence = relative(resolve(active.worktree_root), evidencePath);
     if (relativeEvidence.length === 0 || relativeEvidence === '..' || relativeEvidence.startsWith(`..${sep}`) || isAbsolute(relativeEvidence) || !existsSync(evidencePath))
         return false;
-    const before = lstatSync(evidencePath);
-    if (!before.isFile() || before.isSymbolicLink() || before.size > 1024 * 1024)
+    let bytes;
+    try {
+        bytes = readImmutableFileBytes({ path: evidencePath, maximumBytes: MAX_CLEANUP_EVIDENCE_BYTES, label: 'rollback supersession operation evidence' });
+    }
+    catch {
         return false;
-    const bytes = await readFile(evidencePath);
-    const after = lstatSync(evidencePath);
-    if (before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size || bytes.byteLength !== before.size || `sha256:${createHash('sha256').update(bytes).digest('hex')}` !== evidence.sha256)
+    }
+    if (`sha256:${createHash('sha256').update(bytes).digest('hex')}` !== evidence.sha256)
         return false;
     let document;
     try {
-        document = JSON.parse(Buffer.from(bytes).toString('utf8'));
+        document = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
     }
     catch {
         return false;
@@ -171,6 +175,8 @@ async function hasExactImmutableOperationEvidence(active, operation) {
 async function exactLaterPackageSupersession(input) {
     const reject = (blocker) => ({ later: null, blocker });
     const rollback = input.rollback;
+    if (rollback.operation_type === 'metadata-reconcile')
+        return reject('metadata-reconcile-cannot-supersede-preflight-rollback');
     const later = input.operations
         .filter((operation) => operation.worktree_id === rollback.worktree_id && sameCoordinationOwner(operation.owner, rollback.owner) && operation.intent_event_seq > rollback.intent_event_seq)
         .sort((left, right) => left.intent_event_seq - right.intent_event_seq || left.operation_id.localeCompare(right.operation_id));
@@ -193,7 +199,8 @@ async function exactLaterPackageSupersession(input) {
         || recreate.authority_version <= rollback.authority_version
         || later.some((operation, index) => index > 0 && operation.authority_version < (later[index - 1]?.authority_version ?? 0)))
         return reject('later-operation-shape-or-authority-order-invalid');
-    const authorityMatches = later.every((operation) => operation.intent.repo_root === rollback.intent.repo_root
+    const authorityMatches = later.every((operation) => operation.operation_type !== 'metadata-reconcile'
+        && operation.intent.repo_root === rollback.intent.repo_root
         && operation.intent.worktree_path === rollback.intent.worktree_path
         && operation.intent.git_common_dir === rollback.intent.git_common_dir
         && operation.intent.branch === rollback.intent.branch);
@@ -247,6 +254,17 @@ async function exactLaterPackageSupersession(input) {
         return reject('archive-ref-mismatch');
     return { later: Object.freeze(later), blocker: null };
 }
+function assertExactRollbackAudit(path, body, conflictMessage) {
+    let actual;
+    try {
+        actual = new TextDecoder('utf-8', { fatal: true }).decode(readImmutableFileBytes({ path, maximumBytes: MAX_CLEANUP_EVIDENCE_BYTES, label: 'rollback supersession audit' }));
+    }
+    catch (error) {
+        fail('rollback-supersession-audit-invalid', 'immutable rollback supersession audit could not be inspected safely.', [path, errorMessage(error)]);
+    }
+    if (actual !== body)
+        fail('rollback-supersession-audit-conflict', conflictMessage, [path]);
+}
 function assertNoSymlinkPath(root, target, label) {
     assertPathWithinRoot(root, target, 'rollback-supersession-audit-outside-state');
     let cursor = resolve(root);
@@ -276,9 +294,10 @@ async function publishRollbackSupersessionAudit(active, rollback, later) {
         terminal_archive: { archive_ref: archive.intent.archive_ref, target_sha: archive.intent.target_sha },
         disposition: 'historical-preflight-rollback-superseded-by-exact-later-package-quarantine',
     })}\n`;
+    if (Buffer.byteLength(body, 'utf8') > MAX_CLEANUP_EVIDENCE_BYTES)
+        fail('rollback-supersession-audit-invalid', 'rollback supersession audit exceeds its immutable byte ceiling.', [auditPath]);
     if (existsSync(auditPath)) {
-        if (await readFile(auditPath, 'utf8') !== body)
-            fail('rollback-supersession-audit-conflict', 'immutable rollback supersession audit differs from the proven package history.', [auditPath]);
+        assertExactRollbackAudit(auditPath, body, 'immutable rollback supersession audit differs from the proven package history.');
         return;
     }
     const temporary = `${auditPath}.tmp-${String(process.pid)}-${randomBytes(8).toString('hex')}`;
@@ -295,8 +314,7 @@ async function publishRollbackSupersessionAudit(active, rollback, later) {
         catch (error) {
             if (!(error instanceof Error && 'code' in error && error.code === 'EEXIST'))
                 throw error;
-            if (await readFile(auditPath, 'utf8') !== body)
-                fail('rollback-supersession-audit-conflict', 'concurrent rollback supersession audit differs from the proven package history.', [auditPath]);
+            assertExactRollbackAudit(auditPath, body, 'concurrent rollback supersession audit differs from the proven package history.');
         }
         if (platform() !== 'win32') {
             const directory = await open(auditRoot, 'r');
@@ -895,7 +913,8 @@ async function readBranchesSnapshot(taskRoot) {
         return null;
     let parsed;
     try {
-        parsed = JSON.parse(await readFile(path, 'utf8'));
+        const bytes = readImmutableFileBytes({ path, maximumBytes: MAX_CLEANUP_EVIDENCE_BYTES, label: 'worktree cleanup branches snapshot' });
+        parsed = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
     }
     catch (error) {
         fail('invalid-branches-info', `failed to read _branches.json: ${errorMessage(error)}`, [path]);

@@ -1,8 +1,10 @@
 import { randomUUID } from 'node:crypto';
-import { readFile, rename, rm } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { rename, rm } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { CoordinationRuntimeError } from "./failures.js";
+import { readImmutableFileBytes } from "./immutable-file.js";
 import { assertPrivatePathNoAliases, enforceWindowsPrivateAcl, ensurePrivateAuthorityDirectorySync } from "../private-path.js";
 import { platform } from 'node:os';
 function failureMessage(error) {
@@ -36,12 +38,14 @@ export function acquireSerializedProcessGuard(databasePath, timeoutMs, label) {
     };
 }
 export async function readExactLockText(path) {
+    if (!existsSync(path))
+        return null;
     try {
         assertPrivatePathNoAliases(path);
-        return await readFile(path, 'utf8');
+        return new TextDecoder('utf-8', { fatal: true }).decode(readImmutableFileBytes({ path, maximumBytes: 65_536, label: 'serialized process lock', errorCode: 'coordinator-contention' }));
     }
     catch (error) {
-        if (error instanceof Error && 'code' in error && error.code === 'ENOENT')
+        if (!existsSync(path))
             return null;
         throw error;
     }

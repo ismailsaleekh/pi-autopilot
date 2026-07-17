@@ -173,10 +173,15 @@ function sharedJsonSemanticKeys(repoRoot, base, predecessorCommit, dependentComm
         const baseJson = gitJsonObject(repoRoot, base, path);
         const predecessorJson = gitJsonObject(repoRoot, predecessorCommit, path);
         const dependentJson = gitJsonObject(repoRoot, dependentCommit, path);
-        if (baseJson === undefined || predecessorJson === undefined || dependentJson === undefined)
+        const unsafe = [baseJson, predecessorJson, dependentJson].filter((inspection) => inspection.kind === 'unsafe');
+        if (unsafe.length > 0) {
+            shared.push(`${path}#<uninspectable-json>`);
             continue;
-        const predecessorKeys = new Set(changedJsonPointers(baseJson, predecessorJson));
-        const dependentKeys = new Set(changedJsonPointers(baseJson, dependentJson));
+        }
+        if (baseJson.kind !== 'parsed' || predecessorJson.kind !== 'parsed' || dependentJson.kind !== 'parsed')
+            continue;
+        const predecessorKeys = new Set(changedJsonPointers(baseJson.value, predecessorJson.value));
+        const dependentKeys = new Set(changedJsonPointers(baseJson.value, dependentJson.value));
         for (const key of semanticPointerOverlap(predecessorKeys, dependentKeys))
             shared.push(`${path}#${key}`);
     }
@@ -184,13 +189,15 @@ function sharedJsonSemanticKeys(repoRoot, base, predecessorCommit, dependentComm
 }
 function gitJsonObject(repoRoot, commit, path) {
     const result = runGitQuery({ descriptor: { kind: 'show-file', revision: commit, path, allowAbsent: true }, cwd: repoRoot });
-    if (result.negative || result.stdout.byteLength > MAX_SEMANTIC_JSON_BYTES)
-        return undefined;
+    if (result.negative)
+        return { kind: 'absent' };
+    if (result.stdout.byteLength > MAX_SEMANTIC_JSON_BYTES)
+        return { kind: 'unsafe', reason: 'oversized' };
     try {
-        return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(result.stdout));
+        return { kind: 'parsed', value: JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(result.stdout)) };
     }
     catch {
-        return undefined;
+        return { kind: 'unsafe', reason: 'invalid-json' };
     }
 }
 function changedJsonPointers(before, after, pointer = '') {

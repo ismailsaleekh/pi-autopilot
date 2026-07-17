@@ -194,25 +194,36 @@ function diffFilterPaths(repoRoot: string, base: string, commit: string, filter:
   return Object.freeze(sortedUnique(gitQueryNulStrings({ descriptor: { kind: 'diff-paths', from: base, to: commit, filter, noRenames: true, paths }, cwd: repoRoot }).map(normalizePath)));
 }
 
+type GitJsonInspection =
+  | { readonly kind: 'absent' }
+  | { readonly kind: 'parsed'; readonly value: unknown }
+  | { readonly kind: 'unsafe'; readonly reason: 'oversized' | 'invalid-json' };
+
 function sharedJsonSemanticKeys(repoRoot: string, base: string, predecessorCommit: string, dependentCommit: string, paths: readonly string[]): readonly string[] {
   const shared: string[] = [];
   for (const path of paths.filter((candidate) => candidate.endsWith('.json'))) {
     const baseJson = gitJsonObject(repoRoot, base, path);
     const predecessorJson = gitJsonObject(repoRoot, predecessorCommit, path);
     const dependentJson = gitJsonObject(repoRoot, dependentCommit, path);
-    if (baseJson === undefined || predecessorJson === undefined || dependentJson === undefined) continue;
-    const predecessorKeys = new Set(changedJsonPointers(baseJson, predecessorJson));
-    const dependentKeys = new Set(changedJsonPointers(baseJson, dependentJson));
+    const unsafe = [baseJson, predecessorJson, dependentJson].filter((inspection) => inspection.kind === 'unsafe');
+    if (unsafe.length > 0) {
+      shared.push(`${path}#<uninspectable-json>`);
+      continue;
+    }
+    if (baseJson.kind !== 'parsed' || predecessorJson.kind !== 'parsed' || dependentJson.kind !== 'parsed') continue;
+    const predecessorKeys = new Set(changedJsonPointers(baseJson.value, predecessorJson.value));
+    const dependentKeys = new Set(changedJsonPointers(baseJson.value, dependentJson.value));
     for (const key of semanticPointerOverlap(predecessorKeys, dependentKeys)) shared.push(`${path}#${key}`);
   }
   return sortedUnique(shared);
 }
 
-function gitJsonObject(repoRoot: string, commit: string, path: string): unknown | undefined {
+function gitJsonObject(repoRoot: string, commit: string, path: string): GitJsonInspection {
   const result = runGitQuery({ descriptor: { kind: 'show-file', revision: commit, path, allowAbsent: true }, cwd: repoRoot });
-  if (result.negative || result.stdout.byteLength > MAX_SEMANTIC_JSON_BYTES) return undefined;
-  try { return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(result.stdout)) as unknown; }
-  catch { return undefined; }
+  if (result.negative) return { kind: 'absent' };
+  if (result.stdout.byteLength > MAX_SEMANTIC_JSON_BYTES) return { kind: 'unsafe', reason: 'oversized' };
+  try { return { kind: 'parsed', value: JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(result.stdout)) as unknown }; }
+  catch { return { kind: 'unsafe', reason: 'invalid-json' }; }
 }
 
 function changedJsonPointers(before: unknown, after: unknown, pointer = ''): readonly string[] {
