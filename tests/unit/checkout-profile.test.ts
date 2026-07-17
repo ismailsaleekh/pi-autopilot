@@ -49,8 +49,8 @@ function largeTreeFastImport(entryCount: number): string {
   return lines.join('\n');
 }
 
-void describe('streamed tracked-tree scan', () => {
-  void it('scans ls-tree output larger than spawnSync maxBuffer without buffering the command output', async () => {
+void describe('bounded tracked-tree Git query', () => {
+  void it('scans NUL-delimited ls-tree output larger than Node’s historical 1 MiB child-output default', async () => {
     await withTempRepo(async (repoRoot) => {
       const entryCount = 6_000;
       git(repoRoot, ['fast-import', '--quiet'], largeTreeFastImport(entryCount));
