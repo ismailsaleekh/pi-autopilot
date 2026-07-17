@@ -11,7 +11,7 @@ import { CoordinatorFrameDecoder, AUTOPILOT_COORDINATOR_TRANSPORT_VERSION, encod
 import { isExactProcessAlive, isProcessAlive, predecessorCompatibleBootId, preflightProcessRetirementSupport, processStartIdentity, retireExactProcess } from "./process-identity.js";
 import { coordinatorRuntimePaths, enforcePrivateAuthorityPath, ensureCoordinatorPrivateRoots, ensurePrivateAuthorityDirectory } from "./runtime-paths.js";
 import { acquireSerializedProcessGuard, discardLockTombstone, quarantineExactLock, readExactLockText } from "./serialized-lock.js";
-import { CoordinatorStore } from "./store.js";
+import { CoordinatorStore, upgradeVerifiedPrivateSchema6CopyToSchema12 } from "./store.js";
 import { COORDINATOR_UPGRADE_INTENT_SCHEMA, COORDINATOR_UPGRADE_PATH, parseCoordinatorUpgradeIntent, parseKnownCoordinatorUpgradeIntent, parseCurrentCoordinatorLock, parsePredecessorCoordinatorLock, parsePredecessorStatusEnvelope, } from "./upgrade-contracts.js";
 const UPGRADE_DRAIN_TIMEOUT_MS = 2_000;
 const UPGRADE_POLL_MS = 50;
@@ -321,7 +321,8 @@ async function verifyMigrationOnCopy(paths, record, upgradeId, retain = false) {
     await enforcePrivateAuthorityPath(probePaths.databasePath, false);
     let store = null;
     try {
-        store = await CoordinatorStore.open(probePaths, undefined, { allowExistingSchemaMigration: true });
+        await upgradeVerifiedPrivateSchema6CopyToSchema12(probePaths);
+        store = await CoordinatorStore.open(probePaths);
         if (store.integrity() !== 'ok')
             throw new CoordinationRuntimeError('store-corrupt', 'schema migration probe failed integrity');
         const status = store.status('global', null).payload;

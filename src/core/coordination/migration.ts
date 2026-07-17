@@ -2222,7 +2222,7 @@ export async function runCoordinationMigration(input: { readonly command: Coordi
         if (!existsSync(paths.currentStorePointerPath) && !existsSync(paths.databasePath)) {
           // A brand-new candidate is permitted only under lifecycle election and
           // the live predecessor exclusion fence.
-          const initializingStore = await CoordinatorStore.open(paths, clock, { allowExistingSchemaMigration: true });
+          const initializingStore = await CoordinatorStore.open(paths, clock);
           initializingStore.close();
         }
         return await createVerifiedPreImportBackup(paths, backupPath);
@@ -2237,7 +2237,7 @@ export async function runCoordinationMigration(input: { readonly command: Coordi
       const finalReport = baseReport('apply', input.repoKey, inspection, now, 'imported', journal.migration_id, snapshotSha, backupResult.path, null);
       const plan = buildImportPlan(inspection, repository, input.repoKey, journal.migration_id, snapshotSha, migrationPaths.journalPath, finalReport);
       const committedReport = await withMigrationStoreAuthority(paths, 'migration apply import', async () => {
-        const importStore = await CoordinatorStore.open(paths, clock, { allowExistingSchemaMigration: true });
+        const importStore = await CoordinatorStore.open(paths, clock);
         try {
           const effect = importStore.importLegacyCoordination(plan);
           return parseMigrationReport(effect.payload['report']);
@@ -2301,7 +2301,7 @@ export async function runCoordinationMigration(input: { readonly command: Coordi
       if (fsBlockers.length > 0) failure('blocked', 'filesystem/Git verification failed', fsBlockers);
       const verifyJournal = journal;
       return await withMigrationStoreAuthority(paths, 'migration verify', async () => {
-        const store = await CoordinatorStore.open(paths, clock, { allowExistingSchemaMigration: true });
+        const store = await CoordinatorStore.open(paths, clock);
         try {
           store.verifyMigrationImport(input.repoKey, verifyJournal.migration_id);
           const verifiedReport = { ...verifyJournal.report, command: 'verify' as const, state: 'verified' as const, dry_run: false, created_at: now.toISOString() };
@@ -2338,7 +2338,7 @@ export async function runCoordinationMigration(input: { readonly command: Coordi
       const driftInspection = inspectLegacy(paths, input.repoKey, repository);
       const drift = Object.freeze([...recheckEntries(journal.snapshot_entries), ...recheckGitSnapshot(journal.git_snapshot, driftInspection.rows, repository)]);
       if (drift.length > 0) failure('blocked', 'legacy source or Git state drift rejected cutover', drift);
-      const store = await CoordinatorStore.open(paths, clock, { allowExistingSchemaMigration: true });
+      const store = await CoordinatorStore.open(paths, clock);
       let databaseSha: `sha256:${string}`;
       try { store.verifyMigrationImport(input.repoKey, journal.migration_id); databaseSha = store.databaseDigest(); }
       finally { store.close(); }
@@ -2348,14 +2348,14 @@ export async function runCoordinationMigration(input: { readonly command: Coordi
       await input.afterBoundary?.('after-cutover-marker-before-journal');
       const committedReport = { ...journal.report, command: 'cutover' as const, state: 'cutover-committed' as const, dry_run: false, cutover_marker_path: migrationPaths.cutoverMarkerPath, created_at: now.toISOString() };
       journal = nextJournal(journal, 'cutover-committed', committedReport, now, ['source-hashes-rechecked-before-cutover', 'cutover-marker-committed']); await writeJournal(paths.stateRoot, migrationPaths.journalPath, journal); await input.afterBoundary?.('after-cutover-marker');
-      const recordStore = await CoordinatorStore.open(paths, clock, { allowExistingSchemaMigration: true }); try { recordStore.updateMigrationState(input.repoKey, journal.migration_id, 'cutover-committed', committedReport); } finally { recordStore.close(); }
+      const recordStore = await CoordinatorStore.open(paths, clock); try { recordStore.updateMigrationState(input.repoKey, journal.migration_id, 'cutover-committed', committedReport); } finally { recordStore.close(); }
       await input.afterBoundary?.('after-cutover-store');
     }
     await promoteRuntimeProjections(paths.stateRoot, journal.snapshot_entries, input.repoKey);
     await input.afterBoundary?.('after-runtime-projections');
     await archiveLegacy(paths.stateRoot, journal.snapshot_entries, migrationPaths);
     await input.afterBoundary?.('after-legacy-files-archived-before-store');
-    const postStore = await CoordinatorStore.open(paths, clock, { allowExistingSchemaMigration: true });
+    const postStore = await CoordinatorStore.open(paths, clock);
     try {
       postStore.verifyMigrationImport(input.repoKey, journal.migration_id);
       finalReport = { ...journal.report, command: 'cutover', state: 'legacy-archived', dry_run: false, cutover_marker_path: migrationPaths.cutoverMarkerPath, created_at: now.toISOString() };

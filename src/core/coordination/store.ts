@@ -889,9 +889,6 @@ export interface CoordinatorStoreOpenOptions {
   /** Observability hook used by crash certification and embedders. It runs at
    * durable replay boundaries; throwing fails startup without hiding state. */
   readonly onSemanticReplayBoundary?: (boundary: CoordinatorSemanticReplayBoundary) => void | Promise<void>;
-  /** Private migration capability. Ordinary server startup never migrates an
-   * existing lower-schema authority database in place. */
-  readonly allowExistingSchemaMigration?: boolean;
   /** Exact process-lifetime authority supplied by server startup. Direct store
    * consumers acquire and own a guard automatically. */
   readonly writerGuard?: CoordinatorWriterGuard;
@@ -1885,6 +1882,32 @@ function sqliteFailure(error: unknown): CoordinationRuntimeError {
   return new CoordinationRuntimeError('invalid-state', message);
 }
 
+/** Existing exact-build upgrade-chain adapter. It may transform only an
+ * isolated, already verified schema-6 copy into the exact schema-12 input that
+ * S1 generation publication accepts. It never opens or reinterprets S1 store
+ * authority in place. */
+export async function upgradeVerifiedPrivateSchema6CopyToSchema12(paths: CoordinatorRuntimePaths, clock: StoreClock = systemClock): Promise<void> {
+  await ensureCoordinatorPrivateRoots(paths);
+  assertPrivatePathNoAliases(paths.databasePath);
+  await enforcePrivateAuthorityPath(paths.databasePath, false);
+  const writerGuard = await CoordinatorWriterGuard.acquire(paths);
+  try {
+    writerGuard.assertHeld();
+    const database = new DatabaseSync(paths.databasePath, { timeout: COORDINATOR_BUSY_TIMEOUT_MS, enableForeignKeyConstraints: true });
+    try {
+      configureWritableDatabase(database);
+      const integrity = integrityResult(database);
+      const version = databaseUserVersion(database);
+      if (integrity !== 'ok' || version !== 6) throw new CoordinationRuntimeError('schema-mismatch', 'verified private upgrade copy must retain exact schema-6 integrity before schema-12 transformation', [`integrity=${integrity}`, `schema=${String(version)}`]);
+      applySchemaMigrations(database, clock, COORDINATOR_DATABASE_SCHEMA_VERSION);
+      if (databaseUserVersion(database) !== COORDINATOR_DATABASE_SCHEMA_VERSION || integrityResult(database) !== 'ok') throw new CoordinationRuntimeError('store-corrupt', 'verified private upgrade copy did not reach exact schema-12 integrity');
+      database.exec('PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE;');
+    } finally { database.close(); }
+    for (const suffix of ['-wal', '-shm']) if (existsSync(`${paths.databasePath}${suffix}`)) throw new CoordinationRuntimeError('store-corrupt', 'verified private schema-12 upgrade retained WAL/SHM authority', [`${paths.databasePath}${suffix}`]);
+    await enforcePrivateAuthorityPath(paths.databasePath, false);
+  } finally { writerGuard.release(); }
+}
+
 export class CoordinatorStore {
   readonly #db: DatabaseSync;
   readonly #clock: StoreClock;
@@ -1975,22 +1998,6 @@ export class CoordinatorStore {
     let openedDatabase: DatabaseSync | null = null;
     try {
       assertPrivatePathNoAliases(paths.databasePath);
-      const fixedExists = existsSync(paths.databasePath) && statSync(paths.databasePath).size > 0;
-      if (fixedExists && options.allowExistingSchemaMigration === true) {
-        const privateSource = new DatabaseSync(paths.databasePath, { timeout: COORDINATOR_BUSY_TIMEOUT_MS, enableForeignKeyConstraints: true });
-        try {
-          configureWritableDatabase(privateSource);
-          const sourceVersion = databaseUserVersion(privateSource);
-          if (sourceVersion < COORDINATOR_DATABASE_SCHEMA_VERSION) {
-            const stamp = clock.now().toISOString().replace(/[-:.]/gu, '');
-            lastBackupPath = join(paths.backupsRoot, `coordinator.pre-v${String(sourceVersion)}.${stamp}.db`);
-            await backup(privateSource, lastBackupPath);
-            await enforcePrivateAuthorityPath(lastBackupPath, false);
-            applySchemaMigrations(privateSource, clock, COORDINATOR_DATABASE_SCHEMA_VERSION);
-            privateSource.exec('PRAGMA wal_checkpoint(TRUNCATE)');
-          }
-        } finally { privateSource.close(); }
-      }
       const generation = await ensureCurrentStoreGeneration(paths, writerGuard, schemaMigrationAdapter(clock, writerGuard), { now: () => clock.now(), ...(options.onStorePublicationBoundary === undefined ? {} : { onBoundary: options.onStorePublicationBoundary }) });
       writerGuard.assertHeld();
       const db = new DatabaseSync(generation.database_path, { timeout: COORDINATOR_BUSY_TIMEOUT_MS, enableForeignKeyConstraints: true });

@@ -12,7 +12,7 @@ import { CoordinatorFrameDecoder, AUTOPILOT_COORDINATOR_TRANSPORT_VERSION, encod
 import { isExactProcessAlive, isProcessAlive, predecessorCompatibleBootId, preflightProcessRetirementSupport, processStartIdentity, retireExactProcess } from './process-identity.ts';
 import { coordinatorRuntimePaths, enforcePrivateAuthorityPath, ensureCoordinatorPrivateRoots, ensurePrivateAuthorityDirectory, type CoordinatorRuntimePaths } from './runtime-paths.ts';
 import { acquireSerializedProcessGuard, discardLockTombstone, quarantineExactLock, readExactLockText } from './serialized-lock.ts';
-import { CoordinatorStore } from './store.ts';
+import { CoordinatorStore, upgradeVerifiedPrivateSchema6CopyToSchema12 } from './store.ts';
 import {
   COORDINATOR_UPGRADE_INTENT_SCHEMA,
   COORDINATOR_UPGRADE_PATH,
@@ -296,7 +296,8 @@ async function verifyMigrationOnCopy(paths: CoordinatorRuntimePaths, record: Coo
   await enforcePrivateAuthorityPath(probePaths.databasePath, false);
   let store: CoordinatorStore | null = null;
   try {
-    store = await CoordinatorStore.open(probePaths, undefined, { allowExistingSchemaMigration: true });
+    await upgradeVerifiedPrivateSchema6CopyToSchema12(probePaths);
+    store = await CoordinatorStore.open(probePaths);
     if (store.integrity() !== 'ok') throw new CoordinationRuntimeError('store-corrupt', 'schema migration probe failed integrity');
     const status = store.status('global', null).payload;
     if (status['package_build'] !== COORDINATOR_UPGRADE_PATH.target.package_build || status['protocol_version'] !== COORDINATOR_UPGRADE_PATH.target.protocol_version || status['database_schema_version'] !== COORDINATOR_UPGRADE_PATH.target.database_schema_version) throw new CoordinationRuntimeError('schema-mismatch', 'schema migration probe did not reach the locked target identity');
