@@ -115,7 +115,7 @@ void describe('I5 metadata-only worktree registration reconciliation', () => {
     }
   });
 
-  void it('refuses proof/action drift without pruning any approved registration', async () => {
+  void it('refuses proof/action drift while retaining every approved registration', async () => {
     const value = await corpus(2, 'drift');
     try {
       const rows = await approvals(value, 'repo-drift');
