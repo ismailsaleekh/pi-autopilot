@@ -565,6 +565,21 @@ void describe('package manifest and payload', () => {
     }
   });
 
+  void it('ships the admission HMAC security boundary in compiled parity', async () => {
+    const sourceAdmission = await readFile(new URL('src/core/coordination/admission.ts', root), 'utf8');
+    const compiledAdmission = await readFile(new URL('dist/src/core/coordination/admission.js', root), 'utf8');
+    const sourceTransport = await readFile(new URL('src/core/coordination/negotiated-transport.ts', root), 'utf8');
+    const compiledTransport = await readFile(new URL('dist/src/core/coordination/negotiated-transport.js', root), 'utf8');
+    for (const marker of ['pi-autopilot/admission/v1\\0', "Buffer.from(capability, 'hex')", 'canonicalJson(unsigned)', 'timingSafeEqual(actualHmac, expectedHmac)']) {
+      assert.equal(sourceAdmission.includes(marker), true, `source admission is missing ${marker}`);
+      assert.equal(compiledAdmission.includes(marker), true, `compiled admission is stale for ${marker}`);
+    }
+    for (const marker of ['runCoordinatorNegotiatedTransport', 'CoordinatorSocketChannel', 'multiple or unsolicited response frames', 'coordinator connection closed between protocol phases']) {
+      assert.equal(sourceTransport.includes(marker), true, `source negotiated transport is missing ${marker}`);
+      assert.equal(compiledTransport.includes(marker), true, `compiled negotiated transport is stale for ${marker}`);
+    }
+  });
+
   void it('exposes the runner help path without Node type stripping', async () => {
     const wrapper = await readFile(new URL('bin/autopilot-agent-run.mjs', root), 'utf8');
     assert.equal(wrapper.includes('--experimental-strip-types'), false);
