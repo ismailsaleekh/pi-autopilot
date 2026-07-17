@@ -59,6 +59,14 @@ export function coordinatorUpgradeIntentPath(paths: CoordinatorRuntimePaths): st
 function upgradeRoot(paths: CoordinatorRuntimePaths): string { return join(paths.coordinatorRoot, 'upgrades'); }
 function sleep(ms: number): Promise<void> { return new Promise((resolveWait) => setTimeout(resolveWait, ms)); }
 
+async function unlinkIfExists(path: string): Promise<void> {
+  try { await unlink(path); }
+  catch (error) {
+    if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return;
+    throw error;
+  }
+}
+
 async function fsyncDirectory(path: string): Promise<void> {
   if (platform() === 'win32') return;
   const directory = await open(path, 'r');
@@ -307,8 +315,8 @@ async function verifyMigrationOnCopy(paths: CoordinatorRuntimePaths, record: Coo
     checkpoint.exec('PRAGMA wal_checkpoint(TRUNCATE)');
     if ((checkpoint.prepare('PRAGMA integrity_check').get() as JsonRecord | undefined)?.['integrity_check'] !== 'ok' || (checkpoint.prepare('PRAGMA user_version').get() as JsonRecord | undefined)?.['user_version'] !== COORDINATOR_UPGRADE_PATH.target.database_schema_version) throw new CoordinationRuntimeError('store-corrupt', 'private migrated target failed final target-schema verification');
   } finally { checkpoint.close(); }
-  await unlink(`${probePaths.databasePath}-wal`).catch(() => undefined);
-  await unlink(`${probePaths.databasePath}-shm`).catch(() => undefined);
+  await unlinkIfExists(`${probePaths.databasePath}-wal`);
+  await unlinkIfExists(`${probePaths.databasePath}-shm`);
   const handle = await open(probePaths.databasePath, 'r');
   try { await handle.sync(); } finally { await handle.close(); }
   await fsyncDirectory(dirname(probePaths.databasePath));
@@ -515,7 +523,11 @@ async function copyExactBackupForRestore(paths: CoordinatorRuntimePaths, backupR
   const handle = await open(temporary, 'r');
   try { await handle.sync(); } finally { await handle.close(); }
   const stagedDigest = `sha256:${createHash('sha256').update(await readFile(temporary)).digest('hex')}`;
-  if (stagedDigest !== expectedDigest) { await unlink(temporary).catch(() => undefined); throw new CoordinationRuntimeError('store-corrupt', 'staged rollback copy differs from the verified backup'); }
+  if (stagedDigest !== expectedDigest) {
+    try { await unlinkIfExists(temporary); }
+    catch (cleanupError) { throw new CoordinationRuntimeError('system-fatal', 'staged rollback digest failed and its untrusted temporary copy could not be removed', [temporary, cleanupError instanceof Error ? cleanupError.message : String(cleanupError)]); }
+    throw new CoordinationRuntimeError('store-corrupt', 'staged rollback copy differs from the verified backup');
+  }
   if (existsSync(paths.databasePath)) {
     const failed = join(paths.backupsRoot, `coordinator.failed-upgrade.${upgradeId}.db`);
     await unlink(failed).catch((error: unknown) => { if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw error; });
@@ -554,8 +566,8 @@ async function restoreBackup(paths: CoordinatorRuntimePaths, intentValue: Coordi
     await unlink(`${paths.databasePath}-wal`).catch((error: unknown) => { if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw error; });
     await unlink(`${paths.databasePath}-shm`).catch((error: unknown) => { if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw error; });
     await copyExactBackupForRestore(paths, backupRecord, intent.upgrade_id);
-    await unlink(`${paths.databasePath}-wal`).catch(() => undefined);
-    await unlink(`${paths.databasePath}-shm`).catch(() => undefined);
+    await unlinkIfExists(`${paths.databasePath}-wal`);
+    await unlinkIfExists(`${paths.databasePath}-shm`);
     const restoredDigest = `sha256:${createHash('sha256').update(await readFile(paths.databasePath)).digest('hex')}`;
     if (restoredDigest !== backupRecord.sha256) throw new CoordinationRuntimeError('store-corrupt', 'restored database is not byte-exactly the verified backup');
     quiescentDatabaseReadiness(paths.databasePath);
@@ -691,7 +703,8 @@ export async function preparePredecessorCoordinatorUpgrade(paths: CoordinatorRun
       if (!incompatibleAuthorityCommitted) {
         const sourceStillExact = isExactProcessAlive(intent.source.pid, intent.source.process_start_identity);
         const state: CoordinatorUpgradeState = !retirementStarted && sourceStillExact ? 'refused' : 'recovery-required';
-        await writeIntent(paths, intent, state, { failure: failureMessage(error), blockers: error instanceof CoordinationRuntimeError ? error.evidence : [] }).catch(() => undefined);
+        try { await writeIntent(paths, intent, state, { failure: failureMessage(error), blockers: error instanceof CoordinationRuntimeError ? error.evidence : [] }); }
+        catch (intentError) { throw new CoordinationRuntimeError('system-fatal', 'coordinator upgrade failed and its durable failure intent could not be published', [failureMessage(error), failureMessage(intentError)]); }
       }
     }
     throw error;
