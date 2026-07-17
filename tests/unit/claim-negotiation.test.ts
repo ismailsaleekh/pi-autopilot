@@ -277,7 +277,7 @@ void describe('Coordination Fabric claim negotiation', () => {
     }
   });
 
-  void it('migrates schema-10 EXCLUSIVE entities and idempotent replay into explicit legacy authority', async () => {
+  void it('rejects an in-place schema-10 downgrade instead of inventing legacy EXCLUSIVE authority', async () => {
     const root = await mkdtemp(join(tmpdir(), 'pi-autopilot-exclusive-schema10-'));
     const stateRoot = join(root, 'state');
     const env = { ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: stateRoot };
@@ -288,9 +288,10 @@ void describe('Coordination Fabric claim negotiation', () => {
       const owner = await attachActor(client, stateRoot, 'schema10');
       const input = acquisitionInput('schema10');
       assert.equal((await owner.negotiation.acquire(input)).outcome, 'granted');
+      const generationDatabasePath = server.store.currentGeneration().database_path;
       await server.close();
 
-      const database = new DatabaseSync(paths.databasePath);
+      const database = new DatabaseSync(generationDatabasePath);
       database.exec(`
         UPDATE acquisition_groups SET payload_json=json_remove(payload_json,'$.requested_leases[1].exclusive_operation');
         UPDATE edit_leases SET payload_json=json_remove(payload_json,'$.exclusive_operation') WHERE json_extract(payload_json,'$.mode')='EXCLUSIVE';
@@ -306,16 +307,7 @@ void describe('Coordination Fabric claim negotiation', () => {
       `);
       database.close();
 
-      server = await startCoordinatorServer(paths);
-      const status = await client.query('status', owner.context.repo_id, owner.context.workstream_run);
-      const migratedGroup = parseCoordinationAcquisitionGroup(array(status.payload['acquisition_groups'], 'migrated groups')[0]);
-      assert.equal(migratedGroup.acquisition_kind, 'legacy-unknown');
-      assert.equal(migratedGroup.requested_leases.find((lease) => lease.mode === 'EXCLUSIVE')?.exclusive_operation?.operation_kind, 'legacy-migration-exclusive');
-      const replay = await owner.negotiation.acquire(input);
-      assert.equal(replay.outcome, 'granted');
-      if (replay.outcome !== 'granted') throw new Error('schema-10 idempotency replay was not granted');
-      assert.equal(replay.editLeases.find((lease) => lease.mode === 'EXCLUSIVE')?.exclusive_operation?.operation_kind, 'legacy-migration-exclusive');
-      assert.equal((await client.query('doctor')).payload['healthy'], true);
+      await assert.rejects(() => startCoordinatorServer(paths), (error: unknown) => error instanceof CoordinationRuntimeError && error.code === 'store-corrupt');
     } finally {
       await server.close();
       await rm(root, { recursive: true, force: true });
