@@ -5670,15 +5670,7 @@ export class CoordinatorStore {
     const evidencePath = resolve(this.#stateRoot, 'worktrees', repository.repo_key, evidence.ref);
     const relativeEvidence = relative(evidenceRoot, evidencePath);
     if (relativeEvidence.length === 0 || relativeEvidence === '..' || relativeEvidence.startsWith(`..${sep}`) || isAbsolute(relativeEvidence)) throw new CoordinationRuntimeError('unauthorized-client', 'operation evidence escapes its run-owned evidence root');
-    let bytes: Uint8Array;
-    try {
-      const evidenceStat = lstatSync(evidencePath);
-      if (!evidenceStat.isFile() || evidenceStat.isSymbolicLink()) throw new CoordinationRuntimeError('unauthorized-client', 'operation evidence must be a regular non-symbolic file', [evidencePath]);
-      bytes = readFileSync(evidencePath);
-    } catch (error) {
-      if (error instanceof CoordinationRuntimeError) throw error;
-      throw new CoordinationRuntimeError('recovery-required', 'operation evidence file is unreadable', [evidencePath, error instanceof Error ? error.message : String(error)]);
-    }
+    const bytes = this.#readRegularEvidenceFile(evidencePath, 'operation evidence');
     const actual = `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
     if (actual !== evidence.sha256) throw new CoordinationRuntimeError('invalid-state', 'operation evidence hash does not match immutable artifact', [evidencePath, `expected=${evidence.sha256}`, `actual=${actual}`]);
     let parsed: Readonly<Record<string, unknown>>;
