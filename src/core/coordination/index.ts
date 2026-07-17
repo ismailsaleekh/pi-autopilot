@@ -1,3 +1,4 @@
+export * from './canonical-json.ts';
 export * from './child-authority.ts';
 export * from './client.ts';
 export * from './contracts.ts';
@@ -10,6 +11,7 @@ export * from './invariants.ts';
 export * from './integration-conflicts.ts';
 export * from './legacy-preflight.ts';
 export * from './migration-paths.ts';
+export * from './metadata-reconcile.ts';
 export * from './migration.ts';
 export * from './negotiation.ts';
 export * from './observations.ts';
@@ -33,3 +35,4 @@ export * from './upgrade-contracts.ts';
 export * from './upgrade.ts';
 export * from './unavailable-recovery.ts';
 export * from './worktree-identity.ts';
+export * from './worktree-operation-identity.ts';
