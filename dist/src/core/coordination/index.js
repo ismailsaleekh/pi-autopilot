@@ -14,6 +14,7 @@ export * from "./legacy-preflight.js";
 export * from "./logical-faults.js";
 export * from "./migration-paths.js";
 export * from "./metadata-reconcile.js";
+export * from "./metadata-reconcile-runtime.js";
 export * from "./migration.js";
 export * from "./negotiation.js";
 export * from "./observations.js";

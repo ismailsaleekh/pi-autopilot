@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, lstatSync } from 'node:fs';
-import { link, mkdir, open, readFile, rm } from 'node:fs/promises';
+import { link, mkdir, open, readFile, realpath, rm } from 'node:fs/promises';
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 
 import { runGitMutation, runGitQuery, type GitProcessEnv } from '../git-process.ts';
@@ -59,7 +59,7 @@ async function verifyRecoveryEvidence(approval: MetadataReconcileApproval): Prom
   if (!before.isFile() || before.isSymbolicLink() || before.size > 1024 * 1024) throw new CoordinationRuntimeError('recovery-required', 'metadata reconciliation recovery evidence is not a bounded stable regular file', [approval.recovery_evidence_path]);
   const bytes = await readFile(approval.recovery_evidence_path);
   const after = lstatSync(approval.recovery_evidence_path);
-  if (before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size || bytes.byteLength !== before.size) throw new CoordinationRuntimeError('recovery-required', 'metadata reconciliation recovery evidence changed during proof', [approval.recovery_evidence_path]);
+  if (before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs || bytes.byteLength !== before.size) throw new CoordinationRuntimeError('recovery-required', 'metadata reconciliation recovery evidence changed during proof', [approval.recovery_evidence_path]);
   const digest = `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
   if (digest !== approval.intent.recovery_evidence_sha256) throw new CoordinationRuntimeError('invalid-state', 'metadata reconciliation recovery evidence digest differs from durable approval', [approval.intent.canonical_worktree_id, digest, approval.intent.recovery_evidence_sha256]);
 }
@@ -86,17 +86,45 @@ function inspectApproval(approval: MetadataReconcileApproval, env?: GitProcessEn
   });
 }
 
+async function prepareEvidencePath(evidenceRoot: string, canonicalWorktreeId: string): Promise<string> {
+  const root = resolve(evidenceRoot);
+  await mkdir(root, { recursive: true, mode: 0o700 });
+  const rootInfo = lstatSync(root);
+  if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink()) throw new CoordinationRuntimeError('unauthorized-client', 'metadata reconciliation evidence root must be a real directory', [root]);
+  const directory = resolve(root, 'metadata-reconcile');
+  if (existsSync(directory)) {
+    const info = lstatSync(directory);
+    if (!info.isDirectory() || info.isSymbolicLink()) throw new CoordinationRuntimeError('unauthorized-client', 'metadata reconciliation evidence directory is a symbolic or non-directory entry', [directory]);
+  } else await mkdir(directory, { mode: 0o700 });
+  const rootPhysical = await realpath(root);
+  const directoryPhysical = await realpath(directory);
+  assertInside(rootPhysical, resolve(directoryPhysical, `${canonicalWorktreeId}.json`), 'metadata reconciliation physical evidence');
+  const path = resolve(directory, `${canonicalWorktreeId}.json`);
+  assertInside(root, path, 'metadata reconciliation evidence');
+  if (existsSync(path)) {
+    const info = lstatSync(path);
+    if (!info.isFile() || info.isSymbolicLink()) throw new CoordinationRuntimeError('unauthorized-client', 'metadata reconciliation evidence destination is not a regular non-symbolic file', [path]);
+  }
+  return path;
+}
+
+async function assertExistingEvidenceBytes(path: string, bytes: string): Promise<void> {
+  const before = lstatSync(path);
+  const existing = await readFile(path, 'utf8');
+  const after = lstatSync(path);
+  if (before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs || after.isSymbolicLink() || !after.isFile()) throw new CoordinationRuntimeError('recovery-required', 'metadata reconciliation evidence changed during immutable replay inspection', [path]);
+  if (existing !== bytes) throw new CoordinationRuntimeError('idempotency-conflict', 'immutable metadata reconciliation evidence differs from the exact replay', [path]);
+}
+
 async function publishEvidence(input: {
   readonly evidenceRoot: string;
   readonly approval: MetadataReconcileApproval;
   readonly evidence: MetadataReconcileEvidence;
 }): Promise<string> {
-  const path = resolve(input.evidenceRoot, 'metadata-reconcile', `${input.approval.intent.canonical_worktree_id}.json`);
-  assertInside(input.evidenceRoot, path, 'metadata reconciliation evidence');
-  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  const path = await prepareEvidencePath(input.evidenceRoot, input.approval.intent.canonical_worktree_id);
   const bytes = `${canonicalJson(input.evidence)}\n`;
   if (existsSync(path)) {
-    if (await readFile(path, 'utf8') !== bytes) throw new CoordinationRuntimeError('idempotency-conflict', 'immutable metadata reconciliation evidence differs from the exact replay', [path]);
+    await assertExistingEvidenceBytes(path, bytes);
     return path;
   }
   const temporary = `${path}.tmp-${String(process.pid)}-${randomUUID()}`;
@@ -108,8 +136,11 @@ async function publishEvidence(input: {
   try { await link(temporary, path); }
   catch (error) {
     if (!(error instanceof Error && 'code' in error && error.code === 'EEXIST')) throw error;
-    if (await readFile(path, 'utf8') !== bytes) throw new CoordinationRuntimeError('idempotency-conflict', 'concurrent metadata reconciliation evidence differs from exact replay', [path]);
+    await prepareEvidencePath(input.evidenceRoot, input.approval.intent.canonical_worktree_id);
+    await assertExistingEvidenceBytes(path, bytes);
   } finally { await rm(temporary, { force: true }); }
+  await prepareEvidencePath(input.evidenceRoot, input.approval.intent.canonical_worktree_id);
+  await assertExistingEvidenceBytes(path, bytes);
   return path;
 }
 
@@ -143,6 +174,7 @@ export async function reconcileApprovedMissingWorktreeMetadata(input: {
       || !exactEqual(approval.intent.preserved_refs, first.intent.preserved_refs)) throw new CoordinationRuntimeError('invalid-state', 'metadata reconciliation rows disagree on complete batch before/after/ref facts', [approval.intent.canonical_worktree_id]);
     if (pathEntryExists(approval.intent.target_registration_path)) throw new CoordinationRuntimeError('recovery-required', 'metadata reconciliation target path has a physical or symbolic filesystem entry; metadata-only prune is forbidden', [approval.intent.target_registration_path]);
     await verifyRecoveryEvidence(approval);
+    await prepareEvidencePath(input.evidence_root, approval.intent.canonical_worktree_id);
   }
   const targets = approvals.map((approval) => approval.intent.target_registration_path).sort(compare);
   const approved = [...first.intent.approved_prunable_registration_paths].sort(compare);

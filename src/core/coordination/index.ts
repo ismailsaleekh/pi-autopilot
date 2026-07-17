@@ -14,6 +14,7 @@ export * from './legacy-preflight.ts';
 export * from './logical-faults.ts';
 export * from './migration-paths.ts';
 export * from './metadata-reconcile.ts';
+export * from './metadata-reconcile-runtime.ts';
 export * from './migration.ts';
 export * from './negotiation.ts';
 export * from './observations.ts';

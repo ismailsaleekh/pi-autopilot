@@ -18,6 +18,8 @@ import { readCurrentStoreGeneration } from '../../src/core/coordination/store-ge
 import { startCoordinatorServer } from '../../src/core/coordination/server.ts';
 import { DurableRunSupervisorClient, writeCoordinatorSessionContext, type CoordinatorSessionContext } from '../../src/core/coordination/supervisor.ts';
 import { executeOwnedWorktreeSaga, fixedWorktreeSagaCallbacks, OwnedWorktreeSagaClient, recoverOwnedWorktreeSagas, WORKTREE_SAGA_BOUNDARIES } from '../../src/core/coordination/worktree-saga.ts';
+import { inspectWorktreePostcondition } from '../../src/core/coordination/worktree-postconditions.ts';
+import { deterministicWorktreeId } from '../../src/core/coordination/worktree-identity.ts';
 import { AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV } from '../../src/core/names.ts';
 import { AUTOPILOT_STATE_ROOT_ENV, BRANCHES_FILE, MATERIALIZED_PATHS_FILE, UNIT_INDEX_FILE, UNIT_INFO_FILE, WORKTREE_LEDGER_FILE, prepareAutopilotWorkstream, readUnitIndex, recoverAutopilotWorktreeSagas, resolveRepoIdentity, type ActiveAutopilotRow, type ProcessEnvLike } from '../../src/core/parallel-runtime.ts';
 
@@ -731,6 +733,15 @@ void describe('owner-scoped worktree and Git saga recovery', () => {
       assert.equal(remaining.length, 1);
       assert.equal(Reflect.get(remaining[0], 'edit_lease_id'), unrelated.editLeases[0]?.edit_lease_id);
       assert.equal(git(value.repo, ['rev-list', '--count', `${value.active.target_base_sha}..refs/heads/${create.intent.branch}`]), '1');
+
+      git(value.repo, ['update-ref', '-d', `refs/heads/${create.intent.branch}`, capture]);
+      const archiveOnly = inspectWorktreePostcondition({
+        operationType: 'quarantine', owner: operation.owner, kind: 'unit', canonicalWorktreeId: deterministicWorktreeId(operation.owner, 'unit'),
+        intent: { ...operation.intent, archive_ref: captureRef }, durableStage: operation.stage,
+      });
+      assert.equal(archiveOnly.outcome, 'satisfied', archiveOnly.proof.join('\n'));
+      assert.equal(archiveOnly.proof_source, 'owned-git-ref');
+      assert.equal(archiveOnly.capture_sha, capture);
     } finally {
       await close(value);
     }

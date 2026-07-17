@@ -26,6 +26,7 @@ import { parseCoordinationEditLease, parseCoordinationUnitAttempt, parseCoordina
 import { AUTOPILOT_COORDINATOR_PROTOCOL_VERSION, type CoordinationAcquisitionGroup, type CoordinationChangeReservation, type CoordinationEditLease, type CoordinationReconciliationEvidence, type CoordinationRepository, type CoordinationReservationObligation, type CoordinationRun, type CoordinationRunResource, type CoordinationRunStatus, type CoordinationUnitAttempt, type CoordinationWorktree, type CoordinationWorktreeOperation, type CoordinationWorktreeState } from './types.ts';
 import { legacyConservativeIntegrationConflict } from './integration-conflicts.ts';
 import { deterministicWorktreeId } from './worktree-identity.ts';
+import { inspectWorktreePostcondition } from './worktree-postconditions.ts';
 import { readCurrentStoreGeneration } from './store-generation.ts';
 import { runGitQuery, type GitQueryDescriptor } from '../git-process.ts';
 
@@ -606,21 +607,36 @@ function acceptedAttemptProof(row: ActiveAutopilotRow, metadata: AutopilotUnitBr
     return { source: 'attempt-reset', mechanical_proof: 'accepted-attempt-reset', evidence_ref: evidenceRef(row, path), evidence_sha256: evidenceSha, exact_git_objects: exactGitObjects, filesystem_postconditions: filesystemPostconditions };
   }
   const captureValue = record['capture_commit_sha'];
-  if (metadata.status !== 'quarantined' || typeof captureValue !== 'string') return null;
+  const captureRefValue = record['capture_ref'];
+  const preCaptureValue = record['git_head_before'];
+  const dirtyValue = record['dirty_paths'];
+  if (metadata.status !== 'quarantined' || typeof captureValue !== 'string' || typeof captureRefValue !== 'string' || captureRefValue !== metadata.archive_ref || typeof preCaptureValue !== 'string' || !Array.isArray(dirtyValue) || dirtyValue.some((entry) => typeof entry !== 'string')) return null;
   const capture = exactCommit(row.source_repo, captureValue);
-  if (capture === null || capture !== current) return null;
+  const preCapture = exactCommit(row.source_repo, preCaptureValue);
+  if (capture === null || capture !== current || preCapture === null || record['git_head_after'] !== capture || record['branch'] !== metadata.branch || resolve(String(record['git_common_dir'])) !== resolve(row.git_common_dir)) return null;
+  const owner = { repo_id: row.repo_key, autopilot_id: row.autopilot_id, workstream_run: row.workstream_run, unit_id: metadata.unit_id, attempt: metadata.attempt };
+  const canonicalWorktreeId = deterministicWorktreeId(owner, 'unit');
+  const inspection = inspectWorktreePostcondition({
+    operationType: 'quarantine', owner, kind: 'unit', canonicalWorktreeId,
+    intent: {
+      repo_root: row.source_repo, worktree_path: metadata.worktree_path, git_common_dir: row.git_common_dir, branch: metadata.branch,
+      reason: `${action} legacy quarantine evidence`, base_sha: preCapture, target_sha: preCapture,
+      archive_ref: existsSync(metadata.worktree_path) ? null : metadata.archive_ref,
+      checkout_mode: null, sparse_patterns: [], paths: dirtyValue.map((entry) => String(entry)), metadata_refs: [],
+    },
+  });
+  if (inspection.outcome !== 'satisfied' || inspection.capture_sha !== capture) return null;
   if (existsSync(metadata.worktree_path)) {
-    const head = gitText(metadata.worktree_path, { kind: 'head' });
-    const branch = gitText(metadata.worktree_path, { kind: 'current-branch' });
-    const clean = gitText(metadata.worktree_path, { kind: 'status-porcelain' });
-    if (head !== capture || branch !== metadata.branch || clean !== '' || branchRef !== capture) return null;
-    const exactGitObjects = Object.freeze([base, capture]);
+    if (inspection.proof_source !== 'physical-worktree' || branchRef !== capture || archiveRef !== capture) return null;
+    const exactGitObjects = Object.freeze([base, preCapture, capture]);
     const filesystemPostconditions = Object.freeze([`clean-worktree-head:${metadata.worktree_path}:${capture}`, `branch-ref:${metadata.branch}:${capture}`]);
     return { source: 'quarantine-capture', mechanical_proof: 'accepted-quarantine-capture', evidence_ref: evidenceRef(row, path), evidence_sha256: evidenceSha, exact_git_objects: exactGitObjects, filesystem_postconditions: filesystemPostconditions };
   }
-  if (metadata.archive_ref === null || archiveRef !== capture || gitWorktreeContains(row.source_repo, metadata.worktree_path)) return null;
-  const exactGitObjects = Object.freeze([base, capture, archiveRef]);
-  const filesystemPostconditions = Object.freeze([`worktree-absent:${metadata.worktree_path}`, `git-worktree-registration-absent:${metadata.worktree_path}`, `archive-ref:${metadata.archive_ref}:${capture}`]);
+  const selectedRef = metadata.archive_ref === null ? metadata.branch : metadata.archive_ref;
+  const selectedSha = metadata.archive_ref === null ? branchRef : archiveRef;
+  if (inspection.proof_source !== 'owned-git-ref' || selectedSha !== capture || gitWorktreeContains(row.source_repo, metadata.worktree_path)) return null;
+  const exactGitObjects = Object.freeze([base, preCapture, capture]);
+  const filesystemPostconditions = Object.freeze([`worktree-absent:${metadata.worktree_path}`, `git-worktree-registration-absent:${metadata.worktree_path}`, `owned-ref:${selectedRef}:${capture}`]);
   return { source: 'quarantine-capture', mechanical_proof: 'accepted-quarantine-capture', evidence_ref: evidenceRef(row, path), evidence_sha256: evidenceSha, exact_git_objects: exactGitObjects, filesystem_postconditions: filesystemPostconditions };
 }
 

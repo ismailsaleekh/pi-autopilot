@@ -373,6 +373,7 @@ function quarantinePostcondition(requestInput) {
     if (intent.base_sha === null)
         return result('unsafe', ['quarantine_base_sha_absent']);
     const expectedBranch = `refs/heads/${intent.branch}`;
+    const expectedCaptureRef = intent.archive_ref === null ? expectedBranch : `refs/heads/${intent.archive_ref}`;
     if (existsSync(intent.worktree_path)) {
         const authority = physicalAuthority(request);
         if (authority !== null)
@@ -400,17 +401,18 @@ function quarantinePostcondition(requestInput) {
     const substituted = registrationFacts.all.filter((entry) => entry.branch_ref === expectedBranch && !registrations.includes(entry));
     if (substituted.length > 0 || registrations.length > 1 || registrations.some((entry) => entry.branch_ref !== expectedBranch))
         return result('unsafe', [...registrations, ...substituted].map((entry) => `registration=${entry.worktree_path}:${String(entry.branch_ref)}:${entry.head_sha}`), 'owned-git-ref');
-    const branchQuery = runGitQuery({ descriptor: { kind: 'resolve-commit', revision: expectedBranch }, cwd: intent.repo_root, ...(request.env === undefined ? {} : { env: request.env }) });
+    const branchQuery = runGitQuery({ descriptor: { kind: 'resolve-commit', revision: expectedCaptureRef }, cwd: intent.repo_root, ...(request.env === undefined ? {} : { env: request.env }) });
     if (branchQuery.negative)
-        return result('unsafe', ['owned_capture_branch_absent', `expected_ref=${expectedBranch}`], 'owned-git-ref');
+        return result('unsafe', ['owned_capture_ref_absent', `expected_ref=${expectedCaptureRef}`], 'owned-git-ref');
     const capture = new TextDecoder('utf-8', { fatal: true }).decode(branchQuery.stdout).trim();
-    if (registrations.some((entry) => entry.head_sha !== capture))
-        return result('unsafe', registrations.map((entry) => `registration_head=${entry.head_sha}:capture_head=${capture}`), 'owned-git-ref');
+    const mismatchedRegistrations = registrations.filter((entry) => entry.head_sha !== capture && !(intent.archive_ref !== null && entry.prunable));
+    if (mismatchedRegistrations.length > 0)
+        return result('unsafe', mismatchedRegistrations.map((entry) => `registration_head=${entry.head_sha}:capture_head=${capture}`), 'owned-git-ref');
     const parents = gitQueryText({ descriptor: { kind: 'rev-list-parents', revision: capture }, cwd: intent.repo_root, ...(request.env === undefined ? {} : { env: request.env }) }).trim().split(/\s+/u).slice(1);
     const paths = exactDiffPaths(request, intent.base_sha, capture);
     if (parents.length !== 1 || parents[0] !== intent.base_sha || !samePaths(intent.paths, paths))
-        return result('unsafe', [`capture_sha=${capture}`, `owned_ref=${expectedBranch}`, ...parents.map((parent) => `actual_parent=${parent}`), ...intent.paths.map((path) => `expected_path=${path}`), ...paths.map((path) => `actual_path=${path}`)], 'owned-git-ref');
-    return effectWithMetadata(request, [`base=${intent.base_sha}`, `capture_sha=${capture}`, `owned_ref=${expectedBranch}`, ...paths.map((path) => `captured=${path}`)], 'owned-git-ref', capture);
+        return result('unsafe', [`capture_sha=${capture}`, `owned_ref=${expectedCaptureRef}`, ...parents.map((parent) => `actual_parent=${parent}`), ...intent.paths.map((path) => `expected_path=${path}`), ...paths.map((path) => `actual_path=${path}`)], 'owned-git-ref');
+    return effectWithMetadata(request, [`base=${intent.base_sha}`, `capture_sha=${capture}`, `owned_ref=${expectedCaptureRef}`, ...paths.map((path) => `captured=${path}`)], 'owned-git-ref', capture);
 }
 function resetPostcondition(requestInput) {
     const request = ordinaryRequest(requestInput);

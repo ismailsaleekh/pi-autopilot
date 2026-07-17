@@ -5264,35 +5264,47 @@ export class CoordinatorStore {
     const worktrees = this.#db.prepare("SELECT * FROM worktrees WHERE repo_id=? AND workstream_run=? AND kind='unit' AND unit_id=? AND attempt=? AND is_current_canonical=1 ORDER BY canonical_worktree_id").all(run.repo_id, run.workstream_run, target.unitId, target.attempt).map(canonicalWorktreeFromRow);
     const worktree = worktrees[0];
     if (worktrees.length !== 1 || worktree === undefined || resolve(worktree.canonical_path) !== resolve(facts.unitWorktreePath)) throw new CoordinationRuntimeError('invalid-state', 'unit failure evidence does not identify exactly one registered owner worktree', [facts.unitWorktreePath]);
-    if (source === 'attempt-reset' && facts.action !== 'reset' && facts.action !== 'abort') throw new CoordinationRuntimeError('invalid-state', 'attempt-reset source requires reset/abort failure evidence');
-    if (source === 'quarantine-capture' && facts.action !== 'quarantine' && facts.action !== 'preserve') throw new CoordinationRuntimeError('invalid-state', 'quarantine-capture source requires quarantine/preserve failure evidence');
-    if (!existsSync(worktree.canonical_path)) {
-      if (source !== 'quarantine-capture') throw new CoordinationRuntimeError('recovery-required', 'unit failure evidence worktree disappeared before coordinator verification; edit authority remains retained', [worktree.canonical_path]);
-      this.#assertAbsentQuarantineEvidenceFacts(run, worktree, facts, evidenceBytes);
+    if (source === 'attempt-reset') {
+      if (facts.action !== 'reset' && facts.action !== 'abort') throw new CoordinationRuntimeError('invalid-state', 'attempt-reset source requires reset/abort failure evidence');
+      this.#assertResetEvidenceFacts(run, worktree, facts, evidenceBytes);
       return;
     }
-    const commonRaw = this.#gitText(worktree.canonical_path, { kind: 'git-common-dir' });
-    const head = this.#gitText(worktree.canonical_path, { kind: 'head' });
-    const branch = this.#gitText(worktree.canonical_path, { kind: 'current-branch' });
-    const status = this.#gitQuery(worktree.canonical_path, { kind: 'status-porcelain', includeIgnored: true });
-    if (commonRaw === null || head === null || branch === null || status.negative) throw new CoordinationRuntimeError('recovery-required', 'coordinator could not verify unit failure Git postconditions');
-    const actualCommon = realpathSync(isAbsolute(commonRaw) ? commonRaw : resolve(worktree.canonical_path, commonRaw));
-    if (actualCommon !== realpathSync(worktree.git_common_dir) || actualCommon !== realpathSync(facts.gitCommonDir) || branch !== worktree.branch || branch !== facts.branch || head !== facts.gitHeadAfter || status.stdout.length !== 0) throw new CoordinationRuntimeError('recovery-required', 'unit failure Git postconditions differ from durable worktree evidence', [`common=${actualCommon}`, `branch=${branch}`, `head=${head}`, `mutable=${String(status.stdout.length)}`]);
     if (source === 'quarantine-capture') {
-      if (facts.captureCommitSha !== facts.gitHeadAfter || facts.captureRef === null || !facts.captureRef.startsWith(`autopilot/archive/${run.workstream_run}/`)) throw new CoordinationRuntimeError('invalid-state', 'quarantine evidence capture identity is not exact');
-      const resource = runResourceFromRow(asRow(this.#db.prepare('SELECT * FROM run_resources WHERE repo_id=? AND workstream_run=?').get(run.repo_id, run.workstream_run), 'quarantine run resource'));
-      const ref = this.#gitText(resource.source_repo, { kind: 'resolve-commit', revision: `refs/heads/${facts.captureRef}` });
-      if (ref !== facts.captureCommitSha) throw new CoordinationRuntimeError('recovery-required', 'quarantine archive ref does not preserve the exact capture commit', [facts.captureRef, String(ref)]);
+      if (facts.action !== 'quarantine' && facts.action !== 'preserve') throw new CoordinationRuntimeError('invalid-state', 'quarantine-capture source requires quarantine/preserve failure evidence');
+      this.#assertQuarantineEvidenceFacts(run, worktree, facts, evidenceBytes);
+      return;
     }
   }
 
-  #assertAbsentQuarantineEvidenceFacts(run: CoordinationRun, worktree: CoordinationWorktree, facts: ReturnType<typeof parseUnitFailureEvidenceFacts>, evidenceBytes: Uint8Array): void {
-    if (worktree.state !== 'quarantined' || facts.captureCommitSha === null || facts.captureCommitSha !== facts.gitHeadAfter || facts.captureRef === null) throw new CoordinationRuntimeError('invalid-state', 'absent-worktree quarantine evidence lacks a durable quarantined capture identity', [worktree.worktree_id]);
-    const expectedCaptureRef = `autopilot/archive/${run.workstream_run}/unit/${worktree.owner.unit_id}/attempt-${String(worktree.owner.attempt)}/${facts.action}-capture`;
-    if (facts.captureRef !== expectedCaptureRef || facts.branch !== worktree.branch || resolve(facts.gitCommonDir) !== resolve(worktree.git_common_dir)) throw new CoordinationRuntimeError('invalid-state', 'absent-worktree quarantine evidence disagrees with its durable owner identity', [facts.captureRef, expectedCaptureRef, facts.branch, worktree.branch]);
-    const document = parseJsonObject(Buffer.from(evidenceBytes).toString('utf8'), 'absent-worktree quarantine evidence');
+  #assertResetEvidenceFacts(run: CoordinationRun, worktree: CoordinationWorktree, facts: ReturnType<typeof parseUnitFailureEvidenceFacts>, evidenceBytes: Uint8Array): void {
+    if (worktree.state !== 'terminal' || facts.captureCommitSha !== null || facts.captureRef !== null || !existsSync(worktree.canonical_path) || facts.branch !== worktree.branch || resolve(facts.gitCommonDir) !== resolve(worktree.git_common_dir)) throw new CoordinationRuntimeError('invalid-state', 'reset evidence disagrees with its durable terminal worktree owner', [worktree.worktree_id]);
+    const document = parseJsonObject(Buffer.from(evidenceBytes).toString('utf8'), 'reset evidence');
     const dirtyValue = document['dirty_paths'];
-    if (!Array.isArray(dirtyValue) || dirtyValue.some((path) => typeof path !== 'string')) throw new CoordinationRuntimeError('invalid-state', 'absent-worktree quarantine evidence dirty_paths are invalid');
+    if (!Array.isArray(dirtyValue) || dirtyValue.some((path) => typeof path !== 'string')) throw new CoordinationRuntimeError('invalid-state', 'reset evidence dirty_paths are invalid');
+    const dirtyPaths = dirtyValue.map((path) => String(path));
+    const canonicalWorktreeId = deterministicWorktreeId(worktree.owner, 'unit');
+    const candidates = this.#db.prepare("SELECT * FROM worktree_operations WHERE repo_id=? AND workstream_run=? AND canonical_worktree_id=? AND json_extract(payload_json, '$.operation_type')='reset' AND json_extract(payload_json, '$.stage')='committed' ORDER BY json_extract(payload_json, '$.intent_event_seq') DESC, entity_id").all(run.repo_id, run.workstream_run, canonicalWorktreeId).map(worktreeOperationFromRow).filter((operation) =>
+      operation.intent.worktree_path === worktree.canonical_path
+      && operation.intent.git_common_dir === worktree.git_common_dir
+      && operation.intent.branch === worktree.branch
+      && operation.intent.base_sha === facts.gitHeadBefore
+      && operation.intent.target_sha === facts.gitHeadAfter
+      && canonicalJson(operation.intent.paths) === canonicalJson(dirtyPaths)
+      && operation.intent.reason.startsWith(`${facts.action} `));
+    if (candidates.length !== 1 || candidates[0] === undefined) throw new CoordinationRuntimeError('recovery-required', 'reset release requires exactly one matching committed canonical operation', candidates.map((operation) => operation.operation_id));
+    const operation = candidates[0];
+    const operationEvidence = this.#verifyOperationEvidenceFile(operation);
+    const inspection = inspectWorktreePostcondition({ operationType: 'reset', owner: operation.owner, kind: 'unit', canonicalWorktreeId, intent: operation.intent, durableStage: operation.stage });
+    if (inspection.outcome !== 'satisfied' || inspection.effect_applied !== true || operationEvidence['capture_sha'] !== null || operationEvidence['proof_source'] !== inspection.proof_source) throw new CoordinationRuntimeError('recovery-required', 'reset canonical proof is incomplete or disagrees with immutable operation evidence', [operation.operation_id, ...inspection.proof]);
+  }
+
+  #assertQuarantineEvidenceFacts(run: CoordinationRun, worktree: CoordinationWorktree, facts: ReturnType<typeof parseUnitFailureEvidenceFacts>, evidenceBytes: Uint8Array): void {
+    if (worktree.state !== 'quarantined' || facts.captureCommitSha === null || facts.captureCommitSha !== facts.gitHeadAfter || facts.captureRef === null) throw new CoordinationRuntimeError('invalid-state', 'quarantine evidence lacks a durable quarantined capture identity', [worktree.worktree_id]);
+    const expectedCaptureRef = `autopilot/archive/${run.workstream_run}/unit/${worktree.owner.unit_id}/attempt-${String(worktree.owner.attempt)}/${facts.action}-capture`;
+    if (facts.captureRef !== expectedCaptureRef || facts.branch !== worktree.branch || resolve(facts.gitCommonDir) !== resolve(worktree.git_common_dir)) throw new CoordinationRuntimeError('invalid-state', 'quarantine evidence disagrees with its durable owner identity', [facts.captureRef, expectedCaptureRef, facts.branch, worktree.branch]);
+    const document = parseJsonObject(Buffer.from(evidenceBytes).toString('utf8'), 'quarantine evidence');
+    const dirtyValue = document['dirty_paths'];
+    if (!Array.isArray(dirtyValue) || dirtyValue.some((path) => typeof path !== 'string')) throw new CoordinationRuntimeError('invalid-state', 'quarantine evidence dirty_paths are invalid');
     const dirtyPaths = dirtyValue.map((path) => String(path));
     const canonicalWorktreeId = deterministicWorktreeId(worktree.owner, 'unit');
     const candidates = this.#db.prepare("SELECT * FROM worktree_operations WHERE repo_id=? AND workstream_run=? AND canonical_worktree_id=? AND json_extract(payload_json, '$.operation_type')='quarantine' AND json_extract(payload_json, '$.stage')='committed' ORDER BY json_extract(payload_json, '$.intent_event_seq') DESC, entity_id").all(run.repo_id, run.workstream_run, canonicalWorktreeId).map(worktreeOperationFromRow).filter((operation) =>
@@ -5303,17 +5315,18 @@ export class CoordinatorStore {
       && operation.intent.target_sha === facts.gitHeadBefore
       && canonicalJson(operation.intent.paths) === canonicalJson(dirtyPaths)
       && (facts.action === 'preserve') === operation.intent.reason.startsWith('preserve '));
-    if (candidates.length !== 1 || candidates[0] === undefined) throw new CoordinationRuntimeError('recovery-required', 'absent-worktree quarantine release requires exactly one matching committed canonical operation', candidates.map((operation) => operation.operation_id));
+    if (candidates.length !== 1 || candidates[0] === undefined) throw new CoordinationRuntimeError('recovery-required', 'quarantine release requires exactly one matching committed canonical operation', candidates.map((operation) => operation.operation_id));
     const operation = candidates[0];
     const operationEvidence = this.#verifyOperationEvidenceFile(operation);
     const inspection = (() => {
       try { return inspectWorktreePostcondition({ operationType: 'quarantine', owner: operation.owner, kind: 'unit', canonicalWorktreeId, intent: operation.intent, durableStage: operation.stage }); }
-      catch (error) { throw new CoordinationRuntimeError('recovery-required', 'absent-worktree canonical quarantine inspection failed', [operation.operation_id, error instanceof Error ? error.message : String(error)]); }
+      catch (error) { throw new CoordinationRuntimeError('recovery-required', 'canonical quarantine inspection failed', [operation.operation_id, error instanceof Error ? error.message : String(error)]); }
     })();
-    if (inspection.outcome !== 'satisfied' || inspection.proof_source !== 'owned-git-ref' || inspection.capture_sha !== facts.captureCommitSha || operationEvidence['capture_sha'] !== facts.captureCommitSha || operationEvidence['proof_source'] !== 'owned-git-ref') throw new CoordinationRuntimeError('recovery-required', 'absent-worktree quarantine branch proof is incomplete or disagrees with immutable operation evidence', [operation.operation_id, `outcome=${inspection.outcome}`, `proof_source=${inspection.proof_source}`, `capture=${String(inspection.capture_sha)}`]);
-    const resource = runResourceFromRow(asRow(this.#db.prepare('SELECT * FROM run_resources WHERE repo_id=? AND workstream_run=?').get(run.repo_id, run.workstream_run), 'absent quarantine run resource'));
+    const expectedProofSource = existsSync(worktree.canonical_path) ? 'physical-worktree' : 'owned-git-ref';
+    if (inspection.outcome !== 'satisfied' || inspection.proof_source !== expectedProofSource || inspection.capture_sha !== facts.captureCommitSha || operationEvidence['capture_sha'] !== facts.captureCommitSha || operationEvidence['proof_source'] !== expectedProofSource) throw new CoordinationRuntimeError('recovery-required', 'quarantine canonical proof is incomplete or disagrees with immutable operation evidence', [operation.operation_id, `outcome=${inspection.outcome}`, `proof_source=${inspection.proof_source}`, `capture=${String(inspection.capture_sha)}`]);
+    const resource = runResourceFromRow(asRow(this.#db.prepare('SELECT * FROM run_resources WHERE repo_id=? AND workstream_run=?').get(run.repo_id, run.workstream_run), 'quarantine run resource'));
     const archiveCapture = this.#gitText(resource.source_repo, { kind: 'resolve-commit', revision: `refs/heads/${facts.captureRef}` });
-    if (archiveCapture !== facts.captureCommitSha) throw new CoordinationRuntimeError('recovery-required', 'absent-worktree quarantine archive ref does not preserve the exact canonical capture', [facts.captureRef, String(archiveCapture), facts.captureCommitSha]);
+    if (archiveCapture !== facts.captureCommitSha) throw new CoordinationRuntimeError('recovery-required', 'quarantine archive ref does not preserve the exact canonical capture', [facts.captureRef, String(archiveCapture), facts.captureCommitSha]);
   }
 
   #updateAttemptForSatisfiedCondition(owner: CoordinationOwnerIdentity, conditionType: CoordinationReleaseConditionType): void {
@@ -6265,13 +6278,23 @@ export class CoordinatorStore {
     } else if (source === 'quarantine-capture') {
       const worktree = this.#migrationRecoveryUnitWorktree(run, claim.unitId, claim.attempt);
       const document = this.#parseMigrationRecoveryEvidence(bytes);
-      const capture = document['capture_commit_sha'];
-      const head = existsSync(worktree.canonical_path) ? this.#gitText(worktree.canonical_path, { kind: 'head' }) : null;
-      const branch = existsSync(worktree.canonical_path) ? this.#gitText(worktree.canonical_path, { kind: 'current-branch' }) : null;
-      const branchRef = this.#gitText(resource.source_repo, { kind: 'resolve-commit', revision: `refs/heads/${worktree.branch}` });
-      const clean = existsSync(worktree.canonical_path) ? this.#gitText(worktree.canonical_path, { kind: 'status-porcelain' }) : null;
-      if (document['unit_worktree_path'] !== worktree.canonical_path || worktree.state !== 'quarantined' || typeof capture !== 'string' || head !== capture || branch !== worktree.branch || branchRef !== capture || clean !== '') throw new CoordinationRuntimeError('invalid-state', 'quarantine migration recovery requires the exact clean captured worktree/ref postcondition', [worktree.canonical_path, String(capture), String(head), String(branch), String(branchRef), String(clean)]);
-      postconditions.push(`quarantined-head:${capture}`, `quarantined-branch:${worktree.branch}`, `clean-worktree:${worktree.canonical_path}`);
+      const repository = repositoryFromRow(asRow(this.#db.prepare('SELECT * FROM repositories WHERE repo_id=?').get(run.repo_id), 'quarantine migration recovery repository'));
+      const facts = parseUnitFailureEvidenceFacts(bytes, { repoKey: repository.repo_key, autopilotId: run.autopilot_id, workstream: run.workstream, workstreamRun: run.workstream_run, source, targetId, unitId: claim.unitId, attempt: claim.attempt });
+      const dirtyValue = document['dirty_paths'];
+      if (worktree.state !== 'quarantined' || document['unit_worktree_path'] !== worktree.canonical_path || facts.captureCommitSha === null || facts.captureRef === null || !Array.isArray(dirtyValue) || dirtyValue.some((entry) => typeof entry !== 'string') || facts.branch !== worktree.branch || resolve(facts.gitCommonDir) !== resolve(worktree.git_common_dir)) throw new CoordinationRuntimeError('invalid-state', 'quarantine migration recovery evidence does not bind its exact durable worktree owner', [worktree.canonical_path]);
+      const canonicalWorktreeId = deterministicWorktreeId(worktree.owner, 'unit');
+      const inspection = inspectWorktreePostcondition({
+        operationType: 'quarantine', owner: worktree.owner, kind: 'unit', canonicalWorktreeId,
+        intent: {
+          repo_root: resource.source_repo, worktree_path: worktree.canonical_path, git_common_dir: worktree.git_common_dir, branch: worktree.branch,
+          reason: `${facts.action} migration recovery`, base_sha: facts.gitHeadBefore, target_sha: facts.gitHeadBefore,
+          archive_ref: existsSync(worktree.canonical_path) ? null : facts.captureRef,
+          checkout_mode: null, sparse_patterns: [], paths: dirtyValue.map((entry) => String(entry)), metadata_refs: [],
+        },
+      });
+      const archiveCapture = this.#gitText(resource.source_repo, { kind: 'resolve-commit', revision: `refs/heads/${facts.captureRef}` });
+      if (inspection.outcome !== 'satisfied' || inspection.capture_sha !== facts.captureCommitSha || archiveCapture !== facts.captureCommitSha) throw new CoordinationRuntimeError('invalid-state', 'quarantine migration recovery lacks the canonical exact commit/parent/path/ref postcondition', [worktree.canonical_path, ...inspection.proof, `archive_capture=${String(archiveCapture)}`]);
+      postconditions.push(`quarantined-capture:${facts.captureCommitSha}`, `quarantine-proof-source:${inspection.proof_source}`, `quarantine-owned-ref:${facts.captureRef}`);
     } else {
       const expectedStatus = source === 'run-close' ? 'closed' : 'aborted';
       const main = this.#migrationRecoveryMainWorktree(run);

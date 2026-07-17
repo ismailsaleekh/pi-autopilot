@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -115,7 +116,7 @@ void describe('I5 metadata-only worktree registration reconciliation', () => {
     }
   });
 
-  void it('refuses proof/action drift without pruning any approved registration', async () => {
+  void it('refuses proof/action drift without pruning approved registrations', async () => {
     const value = await corpus(2, 'drift');
     try {
       const rows = await approvals(value, 'repo-drift');
@@ -133,7 +134,7 @@ void describe('I5 metadata-only worktree registration reconciliation', () => {
     }
   });
 
-  void it('refuses a partial approval when any other registration is globally prunable', async () => {
+  void it('refuses a partial approval when another registration is globally prunable', async () => {
     const value = await corpus(2, 'partial-approval');
     try {
       const rows = await approvals(value, 'repo-partial-approval');
@@ -188,6 +189,28 @@ void describe('I5 metadata-only worktree registration reconciliation', () => {
       assert.equal(gitWorktreeRegistrationFacts(dangling.repo).some((entry) => entry.worktree_path === path && entry.prunable), true);
     } finally {
       await rm(dangling.root, { recursive: true, force: true });
+    }
+  });
+
+  void it('rejects a substituted evidence directory before pruning registration metadata', async () => {
+    const value = await corpus(1, 'evidence-symlink');
+    try {
+      const rows = await approvals(value, 'repo-evidence-symlink');
+      const auditRoot = join(value.root, 'audit');
+      const external = join(value.root, 'external-evidence-target');
+      await mkdir(auditRoot);
+      await mkdir(external);
+      await symlink(external, join(auditRoot, 'metadata-reconcile'));
+      await assert.rejects(
+        () => reconcileApprovedMissingWorktreeMetadata({ approvals: rows, evidence_root: auditRoot }),
+        /evidence directory is a symbolic or non-directory entry/u,
+      );
+      assert.equal(gitWorktreeRegistrationFacts(value.repo).filter((registration) => registration.prunable).length, 1);
+      const canonicalId = rows[0]?.intent.canonical_worktree_id;
+      if (canonicalId === undefined) throw new Error('evidence-symlink canonical row disappeared');
+      assert.equal(existsSync(join(external, `${canonicalId}.json`)), false);
+    } finally {
+      await rm(value.root, { recursive: true, force: true });
     }
   });
 
