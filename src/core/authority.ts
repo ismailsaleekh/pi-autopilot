@@ -1,10 +1,10 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { link, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
 import type { AutopilotUnitSpec, AutopilotVerificationPlan, AutopilotWitnessSpec } from './contracts/types.ts';
+import { gitQueryText } from './git-process.ts';
 import {
   normalizeMaterializationPath,
   pathMatchesMaterializationPattern,
@@ -443,9 +443,8 @@ function requireTrackedScope(scope: AutopilotAuthorityScope): 'tracked-file' | '
 }
 
 function repositoryHead(cwd: string): string {
-  const result = spawnSync('git', ['rev-parse', '--verify', 'HEAD'], { cwd, encoding: 'utf8' });
-  const head = result.stdout.trim();
-  if ((result.status ?? -1) !== 0 || !/^[a-f0-9]{40,64}$/u.test(head)) fail('invalid-base-commit', 'authority derivation could not verify the final repository HEAD', [cwd, result.stderr.trim()]);
+  const head = gitQueryText({ descriptor: { kind: 'resolve-revision', revision: 'HEAD', verify: true }, cwd }).trim();
+  if (!/^[a-f0-9]{40,64}$/u.test(head)) fail('invalid-base-commit', 'authority derivation could not verify the final repository HEAD', [cwd]);
   return head;
 }
 

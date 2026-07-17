@@ -1,6 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { spawnSync } from 'node:child_process';
 import { readFile, readdir } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
@@ -12,8 +11,9 @@ import { readCoordinatorSessionContext, writeCoordinatorSessionContext, type Coo
 import type { CoordinationChangeReservation, CoordinationEditLease, CoordinationIntegrationConflict, CoordinationReservationObligation, CoordinationRunTerminalIntent } from './types.ts';
 import { parseAutopilotUnitMerge, type AutopilotUnitMerge } from '../unit-merge.ts';
 import { AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV } from '../names.ts';
-import { gitHead, readGitStatus, runGit, writeJsonAtomic, type ActiveAutopilotRow, type ProcessEnvLike } from '../parallel-runtime.ts';
-import { executeOwnedWorktreeSaga, WorktreeSagaCompensatedError, type WorktreeSagaInspection } from './worktree-saga.ts';
+import { gitHead, writeJsonAtomic, type ActiveAutopilotRow, type ProcessEnvLike } from '../parallel-runtime.ts';
+import { gitQueryNulStrings, runGitMutation, runGitQuery } from '../git-process.ts';
+import { executeOwnedWorktreeSaga, inspectOwnedWorktreeSpecPostcondition, WorktreeSagaCompensatedError } from './worktree-saga.ts';
 import { classifyCoordinationIntegrationConflict } from './integration-conflicts.ts';
 import { recordValidationStalenessForReservationIntegration, reservationValidationStalenessPath } from '../validation-staleness.ts';
 
@@ -199,30 +199,36 @@ export async function preparePendingReservationIntegrations(active: ActiveAutopi
     // classification in evidence and require a fresh independent PASS rather
     // than perpetually re-emitting a repair route.
     const before = currentHead;
+    let after = before;
+    const persistIntegrationEvidence = async (): Promise<void> => {
+      after = gitHead(active.main_worktree_path);
+      const changedPaths = diffPaths(active.main_worktree_path, before, after);
+      await writeJsonAtomic(integrationPath, {
+        schema_version: 'autopilot.reservation_integration.v1', repo_id: obligation.repo_id, autopilot_id: active.autopilot_id, workstream: active.workstream, workstream_run: active.workstream_run,
+        obligation_id: obligation.obligation_id, reservation_id: obligation.reservation_id, predecessor_reservation_id: obligation.predecessor_reservation_id,
+        predecessor_released_event_seq: obligation.predecessor_released_event_seq, predecessor_terminal_sha: obligation.predecessor_terminal_sha, covered_paths: obligation.overlapping_paths,
+        integration_head: after, integration_before: before, changed_paths: changedPaths, classification: currentClassification, integrated_at: now.toISOString(),
+      });
+    };
     if (!predecessorAlreadyIntegrated) {
-      const inspect = (): WorktreeSagaInspection => {
-        const dirty = readGitStatus(active.main_worktree_path).changedPaths.filter((path) => !path.startsWith('.pi/autopilot/'));
-        if (dirty.length > 0) return { outcome: 'unsafe', proof: dirty.map((path) => `dirty=${path}`) };
-        const head = gitHead(active.main_worktree_path);
-        if (gitAncestor(active.main_worktree_path, obligation.predecessor_terminal_sha ?? '', head)) return { outcome: 'satisfied', proof: [`predecessor=${obligation.predecessor_terminal_sha}`, `head=${head}`] };
-        return head === before ? { outcome: 'not-applied', proof: [`head=${head}`] } : { outcome: 'unsafe', proof: [`expected=${before}`, `actual=${head}`] };
+      const mergeSpec = {
+        active, unitId: 'main', attempt: 1, kind: 'main' as const, operationType: 'merge' as const, initialWorktreeState: 'active' as const, committedWorktreeState: 'active' as const,
+        intent: { repo_root: active.source_repo, worktree_path: active.main_worktree_path, git_common_dir: active.git_common_dir, branch: active.branch, reason: `ordered reservation integration ${obligation.obligation_id}`, base_sha: before, target_sha: obligation.predecessor_terminal_sha, archive_ref: null, checkout_mode: null, sparse_patterns: [], paths: obligation.overlapping_paths, metadata_refs: [relative(active.main_worktree_path, integrationPath).replace(/\\/gu, '/')] },
       };
       try {
-        await executeOwnedWorktreeSaga({
-          active, unitId: 'main', attempt: 1, kind: 'main', operationType: 'merge', operationKey: `reservation-integration:${obligation.obligation_id}:${before}:${obligation.predecessor_terminal_sha}`,
-          initialWorktreeState: 'active', committedWorktreeState: 'active',
-          intent: { repo_root: active.source_repo, worktree_path: active.main_worktree_path, git_common_dir: active.git_common_dir, branch: active.branch, reason: `ordered reservation integration ${obligation.obligation_id}`, base_sha: before, target_sha: obligation.predecessor_terminal_sha, archive_ref: null, checkout_mode: null, sparse_patterns: [], paths: obligation.overlapping_paths, metadata_refs: [relative(active.main_worktree_path, integrationPath).replace(/\\/gu, '/')] },
-        }, {
-          inspect,
-          action: () => {
-            try { runGit(['merge', '--no-ff', '--no-edit', '-m', `autopilot reservation integration ${obligation.obligation_id}`, obligation.predecessor_terminal_sha ?? ''], active.main_worktree_path, reservationGitEnv(env)); }
-            catch (error) {
-              const abort = spawnSync('git', ['merge', '--abort'], { cwd: active.main_worktree_path, encoding: 'utf8', env: reservationGitEnv(env) });
-              if ((abort.status ?? -1) !== 0 && readGitStatus(active.main_worktree_path).changedPaths.length > 0) throw new CoordinationRuntimeError('recovery-required', 'reservation merge conflicted and abort failed', [obligation.obligation_id, abort.stderr.trim()]);
-              throw new WorktreeSagaCompensatedError(`reservation integration conflicted: ${error instanceof Error ? error.message : String(error)}`, [obligation.obligation_id]);
-            }
+        await executeOwnedWorktreeSaga(mergeSpec, {
+          action: async () => {
+            const merge = await runGitMutation({ descriptor: { kind: 'merge', mode: 'no-ff', message: `autopilot reservation integration ${obligation.obligation_id}`, target: obligation.predecessor_terminal_sha ?? '' }, cwd: active.main_worktree_path, env: reservationGitEnv(env) });
+            const postcondition = inspectOwnedWorktreeSpecPostcondition(mergeSpec, env);
+            if (postcondition.effect_applied) return;
+            if (postcondition.outcome === 'unsafe') throw new CoordinationRuntimeError('recovery-required', 'reservation merge canonical probe found unsafe repository state', postcondition.proof);
+            if (!postcondition.proof.includes('interrupted_merge')) throw new CoordinationRuntimeError('recovery-required', 'reservation merge did not apply and left no canonically compensable merge state', [...postcondition.proof, `mutation_report=${merge.kind}`, `mutation_diagnostic=${merge.diagnostic}`]);
+            const abort = await runGitMutation({ descriptor: { kind: 'merge-abort' }, cwd: active.main_worktree_path, env: reservationGitEnv(env) });
+            const restored = inspectOwnedWorktreeSpecPostcondition(mergeSpec, env);
+            if (restored.outcome !== 'not-applied' || restored.effect_applied || restored.proof.includes('interrupted_merge')) throw new CoordinationRuntimeError('recovery-required', 'reservation merge conflicted and canonical abort probe failed', [obligation.obligation_id, abort.diagnostic, ...restored.proof]);
+            throw new WorktreeSagaCompensatedError(`reservation integration conflicted: ${merge.diagnostic}`, [obligation.obligation_id]);
           },
-          verify: () => { const result = inspect(); if (result.outcome !== 'satisfied') throw new CoordinationRuntimeError('invalid-state', 'reservation integration postcondition failed', result.proof); return result.proof; },
+          finalize: persistIntegrationEvidence,
         }, env);
       } catch (error) {
         if (!(error instanceof WorktreeSagaCompensatedError)) throw error;
@@ -230,15 +236,9 @@ export async function preparePendingReservationIntegrations(active: ActiveAutopi
         repairPaths.push(await writeReservationRepairRoute(active, obligation, reclassified, before, now));
         continue;
       }
+    } else {
+      await persistIntegrationEvidence();
     }
-    const after = gitHead(active.main_worktree_path);
-    const changedPaths = diffPaths(active.main_worktree_path, before, after);
-    await writeJsonAtomic(integrationPath, {
-      schema_version: 'autopilot.reservation_integration.v1', repo_id: obligation.repo_id, autopilot_id: active.autopilot_id, workstream: active.workstream, workstream_run: active.workstream_run,
-      obligation_id: obligation.obligation_id, reservation_id: obligation.reservation_id, predecessor_reservation_id: obligation.predecessor_reservation_id,
-      predecessor_released_event_seq: obligation.predecessor_released_event_seq, predecessor_terminal_sha: obligation.predecessor_terminal_sha, covered_paths: obligation.overlapping_paths,
-      integration_head: after, integration_before: before, changed_paths: changedPaths, classification: currentClassification, integrated_at: now.toISOString(),
-    });
     evidencePaths.push(integrationPath);
     stalePaths.push(...await reconcileReservationIntegrationStaleness(active, obligation, integrationPath, now));
   }
@@ -299,15 +299,14 @@ export async function reservationCloseBlockers(active: ActiveAutopilotRow, env: 
     const integrationHead = textField(integration, 'integration_head', obligation.integration_evidence.ref);
     if (currentHead === null) blockers.push(`Coordination Fabric: resolved obligation ${obligation.obligation_id} cannot verify its current integration head`);
     else if (integrationHead !== currentHead) {
-      const ancestry = spawnSync('git', ['merge-base', '--is-ancestor', integrationHead, currentHead], { cwd: active.main_worktree_path, encoding: 'utf8' });
-      const diff = spawnSync('git', ['diff', '--name-only', '--no-renames', '-z', integrationHead, currentHead], { cwd: active.main_worktree_path, encoding: 'utf8' });
-      const changed = (diff.status ?? -1) === 0 ? diff.stdout.split('\0').filter((path) => path.length > 0) : [];
+      const ancestry = runGitQuery({ descriptor: { kind: 'is-ancestor', ancestor: integrationHead, descendant: currentHead }, cwd: active.main_worktree_path });
+      const changed = gitQueryNulStrings({ descriptor: { kind: 'diff-paths', from: integrationHead, to: currentHead, noRenames: true }, cwd: active.main_worktree_path });
       const invalidating = changed.filter((path) => obligation.overlapping_paths.some((protectedPath) => coordinationPathsOverlap(path, protectedPath)));
-      if ((ancestry.status ?? -1) !== 0 || (diff.status ?? -1) !== 0 || invalidating.length > 0) blockers.push(`Coordination Fabric: resolved obligation ${obligation.obligation_id} is stale at integration head ${currentHead}${invalidating.length > 0 ? ` on ${invalidating.join(', ')}` : ''}`);
+      if (ancestry.negative || invalidating.length > 0) blockers.push(`Coordination Fabric: resolved obligation ${obligation.obligation_id} is stale at integration head ${currentHead}${invalidating.length > 0 ? ` on ${invalidating.join(', ')}` : ''}`);
     }
     if (currentHead !== null && obligation.predecessor_terminal_sha !== null) {
-      const ancestry = spawnSync('git', ['merge-base', '--is-ancestor', obligation.predecessor_terminal_sha, currentHead], { cwd: active.main_worktree_path, encoding: 'utf8' });
-      if ((ancestry.status ?? -1) !== 0) blockers.push(`Coordination Fabric: resolved obligation ${obligation.obligation_id} integration head does not contain predecessor commit ${obligation.predecessor_terminal_sha}`);
+      const ancestry = runGitQuery({ descriptor: { kind: 'is-ancestor', ancestor: obligation.predecessor_terminal_sha, descendant: currentHead }, cwd: active.main_worktree_path });
+      if (ancestry.negative) blockers.push(`Coordination Fabric: resolved obligation ${obligation.obligation_id} integration head does not contain predecessor commit ${obligation.predecessor_terminal_sha}`);
     }
     if (textField(validation, 'integration_head', obligation.validation_evidence.ref) !== integrationHead || textField(validation, 'verdict', obligation.validation_evidence.ref) !== 'PASS') blockers.push(`Coordination Fabric: resolved obligation ${obligation.obligation_id} lacks a current validation PASS`);
   }
@@ -420,16 +419,12 @@ function record(value: unknown): value is Readonly<Record<string, unknown>> {
 }
 
 function gitAncestor(cwd: string, ancestor: string, descendant: string): boolean {
-  const result = spawnSync('git', ['merge-base', '--is-ancestor', ancestor, descendant], { cwd, encoding: 'utf8' });
-  if ((result.status ?? -1) === 0) return true;
-  if ((result.status ?? -1) === 1) return false;
-  throw new CoordinationRuntimeError('invalid-state', 'reservation ancestry check failed', [ancestor, descendant, result.stderr.trim()]);
+  return !runGitQuery({ descriptor: { kind: 'is-ancestor', ancestor, descendant }, cwd }).negative;
 }
 
 function diffPaths(cwd: string, before: string, after: string): readonly string[] {
   if (before === after) return Object.freeze([]);
-  const output = runGit(['diff', '--name-only', '--no-renames', '-z', before, after], cwd);
-  return Object.freeze(output.split('\0').filter((path) => path.length > 0).map((path) => path.replace(/\\/gu, '/')).sort((left, right) => left.localeCompare(right)));
+  return Object.freeze(gitQueryNulStrings({ descriptor: { kind: 'diff-paths', from: before, to: after, noRenames: true }, cwd }).map((path) => path.replace(/\\/gu, '/')).sort((left, right) => left.localeCompare(right)));
 }
 
 function reservationGitEnv(env: ProcessEnvLike): Record<string, string> {

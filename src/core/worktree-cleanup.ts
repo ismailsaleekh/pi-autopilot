@@ -1,4 +1,3 @@
-import { spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { existsSync, lstatSync, realpathSync } from 'node:fs';
 import { link, mkdir, open, readdir, readFile, rm, unlink } from 'node:fs/promises';
@@ -6,7 +5,8 @@ import { platform } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 import { AUTOPILOT_PREFLIGHT_ROLLBACK_REASON_PREFIX, AUTOPILOT_RUNTIME_ROOT_PREFIX } from './names.ts';
-import { executeOwnedWorktreeSaga, type WorktreeSagaInspection } from './coordination/worktree-saga.ts';
+import { gitQueryText, runGitMutation, runGitQuery } from './git-process.ts';
+import { executeOwnedWorktreeSaga } from './coordination/worktree-saga.ts';
 import type { CoordinationChildLease, CoordinationUnitAttempt, CoordinationWorktree, CoordinationWorktreeOperation } from './coordination/types.ts';
 import { coordinationCutoverCommitted } from './coordination/migration-paths.ts';
 import {
@@ -342,13 +342,13 @@ async function exactLaterPackageSupersession(input: {
   if (!worktreeMetadata.isDirectory() || worktreeMetadata.isSymbolicLink()) return reject('quarantined-worktree-path-type-invalid');
   const listed = gitWorktreeListPorcelain(input.active.source_repo, input.env).filter((entry) => samePath(entry.path, worktree.canonical_path));
   if (listed.length !== 1 || listed[0]?.branch !== worktree.branch || listed[0]?.prunable === true) return reject('git-worktree-registration-invalid');
-  const commonRaw = runGitForCleanup(['rev-parse', '--git-common-dir'], worktree.canonical_path, runtimeGitEnv('rollback-supersession-common-dir', input.env)).trim();
+  const commonRaw = gitQueryText({ descriptor: { kind: 'git-common-dir' }, cwd: worktree.canonical_path, env: runtimeGitEnv('rollback-supersession-common-dir', input.env) }).trim();
   const actualCommon = isAbsolute(commonRaw) ? commonRaw : resolve(worktree.canonical_path, commonRaw);
   if (!samePath(actualCommon, worktree.git_common_dir)) return reject('git-common-dir-mismatch');
-  if (runGitForCleanup(['symbolic-ref', '--short', 'HEAD'], worktree.canonical_path, runtimeGitEnv('rollback-supersession-branch', input.env)).trim() !== worktree.branch) return reject('git-branch-mismatch');
-  const head = runGitForCleanup(['rev-parse', 'HEAD'], worktree.canonical_path, runtimeGitEnv('rollback-supersession-head', input.env)).trim();
+  if (gitQueryText({ descriptor: { kind: 'current-branch' }, cwd: worktree.canonical_path, env: runtimeGitEnv('rollback-supersession-branch', input.env) }).trim() !== worktree.branch) return reject('git-branch-mismatch');
+  const head = gitQueryText({ descriptor: { kind: 'head' }, cwd: worktree.canonical_path, env: runtimeGitEnv('rollback-supersession-head', input.env) }).trim();
   if (head !== archive.intent.target_sha || readGitStatus(worktree.canonical_path).changedPaths.length > 0) return reject('quarantined-worktree-head-or-cleanliness-mismatch');
-  if (runGitForCleanup(['rev-parse', '--verify', `refs/heads/${archive.intent.archive_ref}`], input.active.source_repo, runtimeGitEnv('rollback-supersession-archive', input.env)).trim() !== archive.intent.target_sha) return reject('archive-ref-mismatch');
+  if (gitQueryText({ descriptor: { kind: 'resolve-revision', revision: `refs/heads/${archive.intent.archive_ref}`, verify: true }, cwd: input.active.source_repo, env: runtimeGitEnv('rollback-supersession-archive', input.env) }).trim() !== archive.intent.target_sha) return reject('archive-ref-mismatch');
   return { later: Object.freeze(later), blocker: null };
 }
 
@@ -473,14 +473,8 @@ export async function cleanupClosedAutopilotRun(input: {
     const now = input.now ?? new Date();
     const acc = emptyAccumulator();
     const units = await loadScopedUnitRows(input.active);
-    const inspectMainArchive = (): WorktreeSagaInspection => {
-      const result = spawnSync('git', ['rev-parse', '--verify', `refs/heads/${input.archiveRef}`], { cwd: input.active.source_repo, encoding: 'utf8', env: runtimeGitEnv('worktree-cleanup-archive-inspect', input.env) });
-      if ((result.status ?? -1) !== 0) return { outcome: 'not-applied', proof: ['archive_ref_absent'] };
-      return result.stdout.trim() === input.archiveSha ? { outcome: 'satisfied', proof: [`archive_ref=${input.archiveRef}`, `archive_sha=${input.archiveSha}`] } : { outcome: 'unsafe', proof: [`expected=${input.archiveSha}`, `actual=${result.stdout.trim()}`] };
-    };
     await executeOwnedWorktreeSaga({
       active: input.active, unitId: 'main', attempt: 1, kind: 'main', operationType: 'archive',
-      operationKey: `main-archive:${input.archiveRef}:${input.archiveSha}`,
       initialWorktreeState: 'active', committedWorktreeState: 'terminal',
       intent: {
         repo_root: input.active.source_repo, worktree_path: input.active.main_worktree_path, git_common_dir: input.active.git_common_dir,
@@ -488,13 +482,7 @@ export async function cleanupClosedAutopilotRun(input: {
         archive_ref: input.archiveRef, checkout_mode: null, sparse_patterns: [], paths: [], metadata_refs: [`_archive/${input.active.workstream_run}`],
       },
     }, {
-      inspect: inspectMainArchive,
-      action: () => { runGitForCleanup(['update-ref', `refs/heads/${input.archiveRef}`, input.archiveSha, '0'.repeat(40)], input.active.source_repo, runtimeGitEnv('worktree-cleanup-archive-ref', input.env)); },
-      verify: () => {
-        const inspected = inspectMainArchive();
-        if (inspected.outcome !== 'satisfied') fail('main-archive-postcondition', 'main archive ref saga postcondition failed.', inspected.proof);
-        return inspected.proof;
-      },
+      action: async () => { await runGitMutation({ descriptor: { kind: 'update-ref-create', ref: `refs/heads/${input.archiveRef}`, target: input.archiveSha, expectedOld: '0'.repeat(40) }, cwd: input.active.source_repo, env: runtimeGitEnv('worktree-cleanup-archive-ref', input.env) }); },
     }, input.env ?? process.env);
     await input.observeTerminalBoundary?.('after-archive-ref');
     await appendLedger(input.active, {
@@ -544,7 +532,7 @@ export async function cleanupClosedAutopilotRun(input: {
 }
 
 export function gitWorktreeListPorcelain(repoRoot: string, env: ProcessEnvLike = process.env): readonly WorktreeListEntry[] {
-  const output = runGitForCleanup(['worktree', 'list', '--porcelain'], repoRoot, runtimeGitEnv('worktree-cleanup-list', env));
+  const output = gitQueryText({ descriptor: { kind: 'worktree-list' }, cwd: repoRoot, env: runtimeGitEnv('worktree-cleanup-list', env) });
   return parseWorktreeList(output);
 }
 
@@ -626,45 +614,22 @@ async function removeRegisteredWorktree(
     });
     fail(input.dirtyBlockCode, input.dirtyBlockMessage, dirtyPaths);
   }
-  const inspectRemove = (): WorktreeSagaInspection => {
-    const listed = gitWorktreeListPorcelain(active.source_repo, input.env);
-    const present = existsSync(worktreePath);
-    const registered = listed.some((entry) => samePath(entry.path, worktreePath));
-    if (present !== registered) {
-      const metadata = listed.find((entry) => samePath(entry.path, worktreePath));
-      if (present || !registered || metadata?.branch !== unit.branch) return { outcome: 'unsafe', proof: [`path_present=${String(present)}`, `git_registered=${String(registered)}`, `expected_metadata_branch=${unit.branch}`, `actual_metadata_branch=${String(metadata?.branch ?? null)}`] };
-    }
-    if (!present) {
-      if (!branchExists(active.source_repo, unit.branch, input.env)) return { outcome: 'satisfied', proof: ['path_absent', 'git_registration_absent', 'branch_absent'] };
-      const actualBranchSha = runGitForCleanup(['rev-parse', `refs/heads/${unit.branch}`], active.source_repo, runtimeGitEnv('worktree-cleanup-branch-head', input.env)).trim();
-      return actualBranchSha === unit.current_sha ? { outcome: 'not-applied', proof: ['path_absent', 'branch_present'] } : { outcome: 'unsafe', proof: [`branch_expected=${unit.current_sha}`, `branch_actual=${actualBranchSha}`] };
-    }
-    const dirty = readGitStatus(worktreePath).changedPaths;
-    return dirty.length === 0 ? { outcome: 'not-applied', proof: ['worktree_clean'] } : { outcome: 'unsafe', proof: dirty.map((path) => `dirty=${path}`) };
-  };
   await executeOwnedWorktreeSaga({
     active, unitId: unit.unit_id, attempt: unit.attempt, kind: 'unit', operationType: 'remove',
-    operationKey: `remove:${unit.unit_id}:${String(unit.attempt)}:${unit.current_sha}`,
     initialWorktreeState: 'terminal', committedWorktreeState: 'removed',
     intent: {
       repo_root: active.source_repo, worktree_path: worktreePath, git_common_dir: active.git_common_dir, branch: unit.branch,
       reason: input.reason, base_sha: unit.base_sha, target_sha: unit.current_sha, archive_ref: unit.archive_ref,
-      checkout_mode: null, sparse_patterns: [], paths: [], metadata_refs: input.mode === 'preflight-rollback' ? [] : [WORKTREE_LEDGER_FILE],
+      checkout_mode: null, sparse_patterns: [], paths: [], metadata_refs: [],
     },
   }, {
-    inspect: inspectRemove,
-    action: () => {
-      if (existsSync(worktreePath) || gitWorktreeListPorcelain(active.source_repo, input.env).some((entry) => samePath(entry.path, worktreePath))) runGitForCleanup(['worktree', 'remove', worktreePath], active.source_repo, runtimeGitEnv('worktree-cleanup-remove', input.env));
+    action: async () => {
+      if (existsSync(worktreePath) || gitWorktreeListPorcelain(active.source_repo, input.env).some((entry) => samePath(entry.path, worktreePath))) await runGitMutation({ descriptor: { kind: 'worktree-remove', path: worktreePath }, cwd: active.source_repo, env: runtimeGitEnv('worktree-cleanup-remove', input.env) });
       if (branchExists(active.source_repo, unit.branch, input.env)) {
-        const actualBranchSha = runGitForCleanup(['rev-parse', `refs/heads/${unit.branch}`], active.source_repo, runtimeGitEnv('worktree-cleanup-branch-head', input.env)).trim();
+        const actualBranchSha = gitQueryText({ descriptor: { kind: 'resolve-revision', revision: `refs/heads/${unit.branch}`, verify: true }, cwd: active.source_repo, env: runtimeGitEnv('worktree-cleanup-branch-head', input.env) }).trim();
         if (actualBranchSha !== unit.current_sha) fail('branch-retire-sha-mismatch', 'owned branch moved after cleanup intent; refusing retirement.', [unit.branch, `expected=${unit.current_sha}`, `actual=${actualBranchSha}`]);
-        runGitForCleanup(['update-ref', '-d', `refs/heads/${unit.branch}`, unit.current_sha], active.source_repo, runtimeGitEnv('worktree-cleanup-branch-retire', input.env));
+        await runGitMutation({ descriptor: { kind: 'update-ref-delete', ref: `refs/heads/${unit.branch}`, expectedOld: unit.current_sha }, cwd: active.source_repo, env: runtimeGitEnv('worktree-cleanup-branch-retire', input.env) });
       }
-    },
-    verify: () => {
-      const inspected = inspectRemove();
-      if (inspected.outcome !== 'satisfied') fail('worktree-remove-incomplete', 'owned worktree remove saga postcondition failed.', inspected.proof);
-      return inspected.proof;
     },
   }, input.env ?? process.env);
   if (existsSync(worktreePath)) fail('worktree-remove-incomplete', 'worktree remove saga committed but the path still exists.', [worktreePath]);
@@ -727,50 +692,30 @@ async function removeMainWorktree(
     });
     fail('dirty-main-worktree', 'refusing to remove main worktree with dirty source residue.', dirtySourcePaths);
   }
-  const inspectMainRemove = (): WorktreeSagaInspection => {
-    const listed = gitWorktreeListPorcelain(active.source_repo, env);
-    const present = existsSync(mainPath);
-    const registered = listed.some((entry) => samePath(entry.path, mainPath));
-    if (present !== registered) {
-      const metadata = listed.find((entry) => samePath(entry.path, mainPath));
-      if (present || !registered || metadata?.branch !== active.branch) return { outcome: 'unsafe', proof: [`path_present=${String(present)}`, `git_registered=${String(registered)}`, `expected_metadata_branch=${active.branch}`, `actual_metadata_branch=${String(metadata?.branch ?? null)}`] };
-    }
-    if (!present) {
-      if (!branchExists(active.source_repo, active.branch, env)) return removeActiveTaskDir && existsSync(taskRootForActiveAutopilot(active))
-        ? { outcome: 'not-applied', proof: ['path_absent', 'git_registration_absent', 'branch_absent', 'active_task_dir_present'] }
-        : { outcome: 'satisfied', proof: ['path_absent', 'git_registration_absent', 'branch_absent', ...(removeActiveTaskDir ? ['active_task_dir_absent'] : [])] };
-      const actualBranchSha = runGitForCleanup(['rev-parse', `refs/heads/${active.branch}`], active.source_repo, runtimeGitEnv('worktree-cleanup-branch-head', env)).trim();
-      return actualBranchSha === expectedSha ? { outcome: 'not-applied', proof: ['path_absent', 'branch_present'] } : { outcome: 'unsafe', proof: [`branch_expected=${expectedSha}`, `branch_actual=${actualBranchSha}`] };
-    }
-    const dirty = readGitStatus(mainPath).changedPaths.filter((path) => !isRuntimeRepoPath(active, path));
-    return dirty.length === 0 ? { outcome: 'not-applied', proof: ['main_source_clean'] } : { outcome: 'unsafe', proof: dirty.map((path) => `dirty=${path}`) };
-  };
+  if (removeActiveTaskDir && !existsSync(mainPath) && !registeredBefore && !branchExists(active.source_repo, active.branch, env) && existsSync(taskRootForActiveAutopilot(active))) {
+    await removeActiveTaskDirectory(active, units, acc, reason, now, env);
+  }
   await executeOwnedWorktreeSaga({
     active, unitId: 'main', attempt: 1, kind: 'main', operationType: 'remove',
-    operationKey: `remove-main:${active.workstream_run}:${expectedSha}`,
     initialWorktreeState: 'terminal', committedWorktreeState: 'removed',
     intent: {
       repo_root: active.source_repo, worktree_path: mainPath, git_common_dir: active.git_common_dir, branch: active.branch,
       reason, base_sha: active.target_base_sha, target_sha: expectedSha, archive_ref: null, checkout_mode: null,
-      sparse_patterns: [], paths: [], metadata_refs: [`_archive/${active.workstream_run}`],
+      sparse_patterns: [], paths: [`${AUTOPILOT_RUNTIME_ROOT_PREFIX}/${active.workstream}`], metadata_refs: [`_archive/${active.workstream_run}`],
     },
   }, {
-    inspect: inspectMainRemove,
     action: async () => {
       await removeArchivedRuntimeResidue(active, reason, now);
-      if (existsSync(mainPath) || gitWorktreeListPorcelain(active.source_repo, env).some((entry) => samePath(entry.path, mainPath))) runGitForCleanup(['worktree', 'remove', mainPath], active.source_repo, runtimeGitEnv('worktree-cleanup-remove-main', env));
+      if (existsSync(mainPath) || gitWorktreeListPorcelain(active.source_repo, env).some((entry) => samePath(entry.path, mainPath))) await runGitMutation({ descriptor: { kind: 'worktree-remove', path: mainPath }, cwd: active.source_repo, env: runtimeGitEnv('worktree-cleanup-remove-main', env) });
       if (branchExists(active.source_repo, active.branch, env)) {
-        const actualBranchSha = runGitForCleanup(['rev-parse', `refs/heads/${active.branch}`], active.source_repo, runtimeGitEnv('worktree-cleanup-branch-head', env)).trim();
+        const actualBranchSha = gitQueryText({ descriptor: { kind: 'resolve-revision', revision: `refs/heads/${active.branch}`, verify: true }, cwd: active.source_repo, env: runtimeGitEnv('worktree-cleanup-branch-head', env) }).trim();
         if (actualBranchSha !== expectedSha) fail('branch-retire-sha-mismatch', 'main branch moved after cleanup intent; refusing retirement.', [active.branch, `expected=${expectedSha}`, `actual=${actualBranchSha}`]);
-        runGitForCleanup(['update-ref', '-d', `refs/heads/${active.branch}`, expectedSha], active.source_repo, runtimeGitEnv('worktree-cleanup-branch-retire', env));
+        await runGitMutation({ descriptor: { kind: 'update-ref-delete', ref: `refs/heads/${active.branch}`, expectedOld: expectedSha }, cwd: active.source_repo, env: runtimeGitEnv('worktree-cleanup-branch-retire', env) });
       }
       if (removeActiveTaskDir) await removeActiveTaskDirectory(active, units, acc, reason, now, env);
     },
-    verify: () => {
-      const inspected = inspectMainRemove();
-      if (inspected.outcome !== 'satisfied') fail('main-worktree-remove-incomplete', 'main worktree remove saga postcondition failed.', inspected.proof);
+    finalize: () => {
       if (removeActiveTaskDir && existsSync(taskRootForActiveAutopilot(active))) fail('active-task-dir-remains', 'main remove saga cannot commit while active task metadata remains.', [taskRootForActiveAutopilot(active)]);
-      return inspected.proof;
     },
   }, env ?? process.env);
   if (existsSync(mainPath)) fail('main-worktree-remove-incomplete', 'main worktree remove saga committed but the main path still exists.', [mainPath]);
@@ -818,10 +763,7 @@ async function removeEmptyDirectoryIfPresent(path: string): Promise<void> {
 }
 
 function branchExists(repoRoot: string, branch: string, env?: ProcessEnvLike): boolean {
-  const result = spawnSync('git', ['show-ref', '--verify', '--quiet', `refs/heads/${branch}`], { cwd: repoRoot, encoding: 'utf8', env: runtimeGitEnv('worktree-cleanup-branch-check', env) });
-  if ((result.status ?? -1) === 0) return true;
-  if ((result.status ?? -1) === 1) return false;
-  fail('branch-check-failed', 'failed to inspect owned branch before cleanup.', [branch, result.stderr.trim()]);
+  return !runGitQuery({ descriptor: { kind: 'ref-exists', ref: `refs/heads/${branch}` }, cwd: repoRoot, env: runtimeGitEnv('worktree-cleanup-branch-check', env) }).negative;
 }
 
 async function retireBranchIfPresent(
@@ -837,9 +779,9 @@ async function retireBranchIfPresent(
 ): Promise<void> {
   const existed = branchExists(active.source_repo, branch, env);
   if (existed) {
-    const actualSha = runGitForCleanup(['rev-parse', `refs/heads/${branch}`], active.source_repo, runtimeGitEnv('worktree-cleanup-branch-head', env)).trim();
+    const actualSha = gitQueryText({ descriptor: { kind: 'resolve-revision', revision: `refs/heads/${branch}`, verify: true }, cwd: active.source_repo, env: runtimeGitEnv('worktree-cleanup-branch-head', env) }).trim();
     if (actualSha !== expectedSha) fail('branch-retire-sha-mismatch', 'owned branch moved before retirement; refusing deletion.', [branch, `expected=${expectedSha}`, `actual=${actualSha}`]);
-    runGitForCleanup(['update-ref', '-d', `refs/heads/${branch}`, expectedSha], active.source_repo, runtimeGitEnv('worktree-cleanup-branch-retire', env));
+    await runGitMutation({ descriptor: { kind: 'update-ref-delete', ref: `refs/heads/${branch}`, expectedOld: expectedSha }, cwd: active.source_repo, env: runtimeGitEnv('worktree-cleanup-branch-retire', env) });
   }
   acc.retiredBranches.push(branch);
   await appendLedger(active, {
@@ -1283,13 +1225,6 @@ async function appendLedger(active: ActiveAutopilotRow, input: {
     ...(input.blockers === undefined ? {} : { blockers: input.blockers }),
   };
   if (!coordinationCutoverCommitted(dirname(dirname(active.worktree_root)), active.repo_key)) await appendJsonl(join(active.worktree_root, WORKTREE_LEDGER_FILE), row);
-}
-
-function runGitForCleanup(args: readonly string[], cwd: string, env: ProcessEnvLike): string {
-  const result = spawnSync('git', [...args], { cwd, encoding: 'utf8', env });
-  if (result.error !== undefined) fail('git-spawn-failed', `git ${args.join(' ')} failed to spawn: ${result.error.message}`);
-  if ((result.status ?? -1) !== 0) fail('git-command-failed', `git ${args.join(' ')} exited with status ${String(result.status ?? -1)}.`, [result.stderr.trim(), result.stdout.trim()]);
-  return result.stdout;
 }
 
 function runtimeGitEnv(authority: string, env: ProcessEnvLike = process.env): Record<string, string | undefined> {

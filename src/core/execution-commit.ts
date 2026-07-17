@@ -3,7 +3,7 @@ import { dirname, resolve } from 'node:path';
 
 import { parseAutopilotExecutionCommit } from './contracts/index.ts';
 import type { AutopilotExecutionAudit, AutopilotExecutionCommit, AutopilotExecutionCommitOrigin, AutopilotStatusEntry, AutopilotUnitSpec } from './contracts/types.ts';
-import { executeOwnedWorktreeSaga, type WorktreeSagaInspection } from './coordination/worktree-saga.ts';
+import { executeOwnedWorktreeSaga } from './coordination/worktree-saga.ts';
 import {
   AUTOPILOT_RUNTIME_ENV,
   AUTOPILOT_RUNTIME_VALUE,
@@ -14,8 +14,8 @@ import {
   isAutopilotRuntimeRepoPath,
   matchesRepoPathPattern,
   readGitStatus,
-  runGit,
 } from './parallel-runtime.ts';
+import { gitQueryNulStrings, gitQueryText, runGitMutation } from './git-process.ts';
 
 export class AutopilotExecutionCommitError extends Error {
   override readonly name = 'AutopilotExecutionCommitError';
@@ -96,19 +96,6 @@ export async function commitAutopilotExecution(input: {
   let commitSubject = `autopilot captured child commit ${input.spec.unit_id} attempt ${String(input.spec.attempt)}`;
   const beforeHead = input.audit.baseline_head ?? headBeforeRuntimeCommit;
   if (dirtyClaimedPaths.length > 0) commitSubject = `autopilot runtime commit ${input.spec.unit_id} attempt ${String(input.spec.attempt)}`;
-  const inspectCommit = (): WorktreeSagaInspection => {
-    const currentHead = gitHead(input.spec.cwd);
-    const currentDirty = readGitStatus(input.spec.cwd).changedPaths.filter((path) => !isAutopilotRuntimeRepoPath(path, input.spec.workstream));
-    if (currentDirty.some((path) => !dirtyClaimedPaths.includes(path))) return { outcome: 'unsafe', proof: currentDirty.map((path) => `unexpected_dirty=${path}`) };
-    if (currentDirty.length > 0) return { outcome: 'not-applied', proof: currentDirty.map((path) => `dirty=${path}`) };
-    if (currentHead !== beforeHead) {
-      const actualPaths = committedDiffPaths(input.spec.cwd, beforeHead, currentHead);
-      const expectedPaths = [...editedClaimedPaths].sort((left, right) => left.localeCompare(right));
-      if (actualPaths.length !== expectedPaths.length || actualPaths.some((path, index) => path !== expectedPaths[index])) return { outcome: 'unsafe', proof: [...expectedPaths.map((path) => `expected_path=${path}`), ...actualPaths.map((path) => `actual_path=${path}`)] };
-      return { outcome: 'satisfied', proof: [`head=${currentHead}`, ...actualPaths.map((path) => `committed=${path}`), 'source_worktree_clean'] };
-    }
-    return { outcome: 'unsafe', proof: ['no_dirty_edits_and_head_not_advanced'] };
-  };
   const commitPath = input.commitPath ?? deriveAutopilotExecutionCommitPath(input.spec);
   let durableRecord: AutopilotExecutionCommit | null = null;
   const persistExecutionCommit = async (): Promise<AutopilotExecutionCommit> => {
@@ -138,7 +125,6 @@ export async function commitAutopilotExecution(input: {
     attempt: input.spec.attempt,
     kind: 'unit',
     operationType: 'commit',
-    operationKey: `execution-commit:${input.spec.unit_id}:${String(input.spec.attempt)}:${beforeHead}`,
     initialWorktreeState: 'active',
     committedWorktreeState: 'active',
     intent: {
@@ -156,23 +142,19 @@ export async function commitAutopilotExecution(input: {
       metadata_refs: [relativeArtifactRef(input.commitPath ?? deriveAutopilotExecutionCommitPath(input.spec), input.context.active.runtime_root)],
     },
   }, {
-    inspect: inspectCommit,
-    action: () => {
+    action: async () => {
       if (dirtyClaimedPaths.length === 0) return;
-      runGit(['add', '--', ...dirtyClaimedPaths], input.spec.cwd, runtimeGitEnv(input.env));
+      await runGitMutation({ descriptor: { kind: 'stage-paths', paths: dirtyClaimedPaths }, cwd: input.spec.cwd, env: runtimeGitEnv(input.env) });
       const staged = readGitStatus(input.spec.cwd);
       const stagedSource = staged.stagedPaths.filter((path) => !isAutopilotRuntimeRepoPath(path, input.spec.workstream));
       for (const stagedPath of stagedSource) {
         if (!dirtyClaimedPaths.includes(stagedPath)) fail('staged-path-set-mismatch', 'runtime staging included a source path outside dirty claimed edits.', [stagedPath]);
       }
-      runGit(['commit', '--no-verify', '-m', commitSubject], input.spec.cwd, runtimeGitEnv(input.env));
-      runtimeCommitCreated = true;
+      await runGitMutation({ descriptor: { kind: 'commit', message: commitSubject }, cwd: input.spec.cwd, env: runtimeGitEnv(input.env) });
+      runtimeCommitCreated = gitHead(input.spec.cwd) !== beforeHead;
     },
-    verify: async () => {
-      const inspected = inspectCommit();
-      if (inspected.outcome !== 'satisfied') fail('commit-saga-postcondition', 'execution commit saga did not produce a clean advanced HEAD.', inspected.proof);
+    finalize: async () => {
       durableRecord = await persistExecutionCommit();
-      return [...inspected.proof, `execution_commit_ref=${relativeArtifactRef(commitPath, input.context.active.runtime_root)}`];
     },
   }, input.env ?? process.env);
 
@@ -200,12 +182,11 @@ function activeWriteClaimPaths(input: {
 }
 
 function committedDiffPaths(cwd: string, beforeHead: string, afterHead: string): readonly string[] {
-  const output = runGit(['diff', '--name-only', '-z', beforeHead, afterHead], cwd);
-  return Object.freeze(output.split('\0').filter((path) => path.length > 0).map((path) => path.replace(/\\/gu, '/')).sort());
+  return Object.freeze(gitQueryNulStrings({ descriptor: { kind: 'diff-paths', from: beforeHead, to: afterHead }, cwd }).map((path) => path.replace(/\\/gu, '/')).sort());
 }
 
 function commitRange(cwd: string, beforeHead: string, afterHead: string): readonly string[] {
-  const output = runGit(['rev-list', '--reverse', `${beforeHead}..${afterHead}`], cwd);
+  const output = gitQueryText({ descriptor: { kind: 'rev-list-range', fromExclusive: beforeHead, toInclusive: afterHead, reverse: true }, cwd });
   const shas = output.split('\n').map((line) => line.trim()).filter((line) => line.length > 0);
   return Object.freeze(shas.includes(afterHead) ? shas : [...shas, afterHead]);
 }
@@ -217,7 +198,7 @@ function executionCommitOrigin(runtimeCommitCreated: boolean, childCommitCapture
 }
 
 function currentBranch(cwd: string): string {
-  const branch = runGit(['rev-parse', '--abbrev-ref', 'HEAD'], cwd).trim();
+  const branch = gitQueryText({ descriptor: { kind: 'current-branch' }, cwd }).trim();
   if (branch.length === 0 || branch === 'HEAD') fail('detached-execution-head', 'source-changing runtime commit requires the unit worktree to be on a named branch.');
   return branch;
 }

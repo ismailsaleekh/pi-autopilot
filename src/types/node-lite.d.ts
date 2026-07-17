@@ -186,6 +186,7 @@ declare module 'node:child_process' {
   export interface ChildProcessWritablePipe {
     write(data: string, callback?: (error: Error | null | undefined) => void): void;
     end(): void;
+    on(event: 'error', listener: (error: Error) => void): void;
   }
   export interface ChildProcessReadablePipe {
     on(event: 'data', listener: (chunk: ChildProcessDataChunk) => void): void;
