@@ -1,3 +1,4 @@
+export * from './admission.ts';
 export * from './canonical-json.ts';
 export * from './child-authority.ts';
 export * from './client.ts';
@@ -13,8 +14,11 @@ export * from './legacy-preflight.ts';
 export * from './migration-paths.ts';
 export * from './metadata-reconcile.ts';
 export * from './migration.ts';
+export * from './negotiated-transport.ts';
 export * from './negotiation.ts';
 export * from './observations.ts';
+export * from './peer-admission-state.ts';
+export * from './peer-classification.ts';
 export * from './package-isolation.ts';
 export * from './patch-activation.ts';
 export * from './process-identity.ts';

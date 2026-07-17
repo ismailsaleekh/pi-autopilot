@@ -218,6 +218,11 @@ declare module 'node:async_hooks' {
 }
 
 declare module 'node:crypto' {
+  export interface Hmac {
+    update(data: string | Uint8Array, inputEncoding?: 'utf8'): Hmac;
+    digest(encoding: 'hex'): string;
+  }
+  export function createHmac(algorithm: string, key: Uint8Array): Hmac;
   export function randomBytes(size: number): { toString(encoding: 'hex'): string };
   export function randomUUID(): string;
   export function timingSafeEqual(left: Uint8Array, right: Uint8Array): boolean;
@@ -228,11 +233,11 @@ declare interface NodeBuffer extends Uint8Array {
   readUInt32BE(offset: number): number;
   writeUInt32BE(value: number, offset: number): number;
   subarray(start?: number, end?: number): NodeBuffer;
-  toString(encoding?: 'utf8'): string;
+  toString(encoding?: 'utf8' | 'hex'): string;
 }
 
 declare const Buffer: {
-  from(value: string | Uint8Array, encoding?: 'utf8'): NodeBuffer;
+  from(value: string | Uint8Array, encoding?: 'utf8' | 'hex'): NodeBuffer;
   byteLength(value: string, encoding?: 'utf8'): number;
   alloc(size: number): NodeBuffer;
   allocUnsafe(size: number): NodeBuffer;
