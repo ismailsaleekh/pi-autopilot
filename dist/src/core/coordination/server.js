@@ -364,6 +364,8 @@ function operationType(value) {
     return typeof type === 'string' ? type : null;
 }
 function requestS1Surface(store, request) {
+    if (request.action === 'resolve-run-scoped-fault')
+        return 'scoped-logical-faults';
     if (request.action === 'prepare-operation' && operationType(request.payload['operation']) === 'metadata-reconcile')
         return 'canonical-worktree-aliases';
     if (request.action !== 'transition-operation' || request.workstream_run === null)
@@ -392,6 +394,8 @@ function negotiatedProjectionResponse(store, peer, request, response) {
         negotiated['negotiated_coordinator_identity'] = store.negotiatedIdentityObservability();
     if (peer.grantedVocabulary.has('scoped-logical-faults-v1'))
         negotiated['run_scoped_logical_faults'] = store.negotiatedRunScopedFaults(request.repo_id, request.workstream_run);
+    if (peer.grantedVocabulary.has('canonical-worktree-aliases-v1'))
+        negotiated['negotiated_identity_recovery'] = store.negotiatedIdentityRecovery(request.repo_id, request.workstream_run);
     return Object.freeze({ ...response, payload: Object.freeze({ ...response.payload, projection: Object.freeze(negotiated) }) });
 }
 function admissionEnvelope(requestId, payload) {
@@ -580,7 +584,7 @@ function handleSocket(socket, store, capability, paths, lifecycle, backgroundFai
                                 assertCoordinatorAdmissionAuthorityUnchanged(initial, observed);
                                 await testHooks?.beforeNegotiatedStoreOperation?.(request.action);
                             }
-                            response = store.handle(request);
+                            response = store.handle(request, peer.peerMode === 'negotiated-s1' ? 'negotiated-s1' : 'cf50-legacy');
                             if (peer.peerMode === 'negotiated-s1')
                                 response = negotiatedProjectionResponse(store, peer, request, response);
                             if (response.ok && response.committed_event_seq !== null)

@@ -329,6 +329,7 @@ function operationType(value: unknown): string | null {
 }
 
 function requestS1Surface(store: CoordinatorStore, request: CoordinatorRequestEnvelope): CoordinatorS1Surface | null {
+  if (request.action === 'resolve-run-scoped-fault') return 'scoped-logical-faults';
   if (request.action === 'prepare-operation' && operationType(request.payload['operation']) === 'metadata-reconcile') return 'canonical-worktree-aliases';
   if (request.action !== 'transition-operation' || request.workstream_run === null) return null;
   const operationId = request.payload['operation_id'];
@@ -349,6 +350,7 @@ function negotiatedProjectionResponse(store: CoordinatorStore, peer: Coordinator
   const negotiated: Record<string, unknown> = { ...projection };
   if (peer.grantedVocabulary.has('store-generations-v1')) negotiated['negotiated_coordinator_identity'] = store.negotiatedIdentityObservability();
   if (peer.grantedVocabulary.has('scoped-logical-faults-v1')) negotiated['run_scoped_logical_faults'] = store.negotiatedRunScopedFaults(request.repo_id, request.workstream_run);
+  if (peer.grantedVocabulary.has('canonical-worktree-aliases-v1')) negotiated['negotiated_identity_recovery'] = store.negotiatedIdentityRecovery(request.repo_id, request.workstream_run);
   return Object.freeze({ ...response, payload: Object.freeze({ ...response.payload, projection: Object.freeze(negotiated) }) });
 }
 
@@ -506,7 +508,7 @@ function handleSocket(socket: Socket, store: CoordinatorStore, capability: strin
                 assertCoordinatorAdmissionAuthorityUnchanged(initial, observed);
                 await testHooks?.beforeNegotiatedStoreOperation?.(request.action);
               }
-              response = store.handle(request);
+              response = store.handle(request, peer.peerMode === 'negotiated-s1' ? 'negotiated-s1' : 'cf50-legacy');
               if (peer.peerMode === 'negotiated-s1') response = negotiatedProjectionResponse(store, peer, request, response);
               if (response.ok && response.committed_event_seq !== null) await testHooks?.afterStoreCommitBeforeResponse?.(request.action, response);
             }

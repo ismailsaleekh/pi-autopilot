@@ -393,7 +393,13 @@ export function checkCoordinationInvariants(snapshot: CoordinationSnapshot): rea
     if (worktree === undefined) findings.push(finding('operation-worktree-missing', operation.operation_id, 'worktree does not exist'));
     else {
       if (ownerKey(worktree.owner) !== ownerKey(operation.owner)) findings.push(finding('foreign-worktree-operation', operation.operation_id, 'operation owner differs from worktree owner'));
-      if (worktree.canonical_path !== operation.intent.worktree_path || worktree.git_common_dir !== operation.intent.git_common_dir || worktree.branch !== operation.intent.branch) findings.push(finding('operation-intent-authority-mismatch', operation.operation_id, 'operation intent disagrees with immutable worktree authority'));
+      const intentAuthorityMatches = operation.operation_type === 'metadata-reconcile'
+        ? worktree.canonical_path === operation.intent.target_registration_path
+          && worktree.git_common_dir === operation.intent.git_common_dir
+          && operation.intent.canonical_worktree_id === worktree.worktree_id
+          && operation.intent.approved_before_registrations.some((registration) => registration.worktree_path === worktree.canonical_path && registration.branch_ref === `refs/heads/${worktree.branch}`)
+        : worktree.canonical_path === operation.intent.worktree_path && worktree.git_common_dir === operation.intent.git_common_dir && worktree.branch === operation.intent.branch;
+      if (!intentAuthorityMatches) findings.push(finding('operation-intent-authority-mismatch', operation.operation_id, 'operation intent disagrees with immutable worktree authority'));
       const maxAuthorityVersion = maxAuthorityVersionByWorktree.get(operation.worktree_id) ?? operation.authority_version;
       const versionValid = operation.stage === 'committed'
         ? worktree.version >= operation.authority_version && worktree.version <= maxAuthorityVersion + 1

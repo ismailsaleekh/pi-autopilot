@@ -1,3 +1,5 @@
+import type { MetadataReconcileIntent } from './metadata-reconcile.ts';
+
 export const AUTOPILOT_COORDINATION_SNAPSHOT_SCHEMA = 'autopilot.coordination_snapshot.v1' as const;
 export const AUTOPILOT_COORDINATOR_PROTOCOL_VERSION = '1.6' as const;
 export const AUTOPILOT_COORDINATOR_REQUEST_SCHEMA = 'autopilot.coordinator_request.v1' as const;
@@ -498,16 +500,14 @@ export interface CoordinationWorktreeOperationIntent {
   readonly metadata_refs: readonly string[];
 }
 
-export interface CoordinationWorktreeOperation {
+interface CoordinationWorktreeOperationBase {
   readonly schema_version: 'autopilot.worktree_operation.v2';
   readonly operation_id: string;
   readonly worktree_id: string;
   readonly owner: CoordinationOwnerIdentity;
-  readonly operation_type: CoordinationWorktreeOperationType;
   readonly stage: CoordinationOperationStage;
   readonly authority_version: number;
   readonly intent_event_seq: number;
-  readonly intent: CoordinationWorktreeOperationIntent;
   readonly completed_steps: readonly string[];
   readonly current_step: string | null;
   readonly recovery_attempts: number;
@@ -515,6 +515,22 @@ export interface CoordinationWorktreeOperation {
   readonly error_code: string | null;
   readonly version: number;
 }
+
+export type CoordinationOrdinaryWorktreeOperationType = Exclude<CoordinationWorktreeOperationType, 'metadata-reconcile'>;
+
+export type CoordinationOrdinaryWorktreeOperation = {
+  readonly [OperationType in CoordinationOrdinaryWorktreeOperationType]: CoordinationWorktreeOperationBase & {
+    readonly operation_type: OperationType;
+    readonly intent: CoordinationWorktreeOperationIntent;
+  };
+}[CoordinationOrdinaryWorktreeOperationType];
+
+export type CoordinationWorktreeOperation =
+  | CoordinationOrdinaryWorktreeOperation
+  | (CoordinationWorktreeOperationBase & {
+      readonly operation_type: 'metadata-reconcile';
+      readonly intent: MetadataReconcileIntent;
+    });
 
 export interface CoordinationWaitForEdge {
   readonly schema_version: 'autopilot.wait_for_edge.v1';
@@ -662,7 +678,7 @@ export interface CoordinationSnapshot {
 }
 
 export type CoordinatorQueryAction = 'handshake' | 'status' | 'doctor' | 'export' | 'migration-recovery' | 'run-catalog' | 'reconciliation-details' | 'result-details';
-export type CoordinatorMutationAction = 'attach-run' | 'attach-session' | 'attach-terminal-recovery' | 'attach-migration-recovery' | 'resolve-migration-recovery' | 'detach-session' | 'prepare-handoff' | 'heartbeat' | 'register-attempt' | 'register-child' | 'heartbeat-child' | 'checkpoint-child' | 'complete-child' | 'drain-mailbox' | 'acquire-group' | 'acknowledge-grant' | 'respond-claim-request' | 'cancel-claim-request' | 'cancel-acquisition-group' | 'supersede-attempt' | 'acknowledge-message' | 'record-release-evidence' | 'resolve-reservation-obligation' | 'prepare-run-terminal' | 'cancel-run-terminal' | 'reconcile-run' | 'prepare-operation' | 'transition-operation' | 'register-authoritative-artifact' | 'assign-adjudication' | 'claim-adjudication-assignment' | 'complete-adjudication' | 'submit-planning-contradiction';
+export type CoordinatorMutationAction = 'attach-run' | 'attach-session' | 'attach-terminal-recovery' | 'attach-migration-recovery' | 'resolve-migration-recovery' | 'detach-session' | 'prepare-handoff' | 'heartbeat' | 'register-attempt' | 'register-child' | 'heartbeat-child' | 'checkpoint-child' | 'complete-child' | 'drain-mailbox' | 'acquire-group' | 'acknowledge-grant' | 'respond-claim-request' | 'cancel-claim-request' | 'cancel-acquisition-group' | 'supersede-attempt' | 'acknowledge-message' | 'record-release-evidence' | 'resolve-reservation-obligation' | 'prepare-run-terminal' | 'cancel-run-terminal' | 'reconcile-run' | 'prepare-operation' | 'transition-operation' | 'resolve-run-scoped-fault' | 'register-authoritative-artifact' | 'assign-adjudication' | 'claim-adjudication-assignment' | 'complete-adjudication' | 'submit-planning-contradiction';
 
 export interface CoordinatorRequestEnvelope {
   readonly schema_version: typeof AUTOPILOT_COORDINATOR_REQUEST_SCHEMA;

@@ -101,7 +101,7 @@ export async function reconcileRetainedFailedUnitAuthority(input: {
     const worktree = worktrees.find((candidate) => candidate.kind === 'unit' && candidate.owner.unit_id === lease.owner.unit_id && candidate.owner.attempt === lease.owner.attempt && candidate.state !== 'removed');
     if (worktree === undefined) throw new CoordinationRuntimeError('recovery-required', 'terminal source-changing attempt retains edit authority without one recoverable registered unit worktree', [lease.edit_lease_id, child.child_lease_id]);
     if (worktree.state === 'quarantined') {
-      const operation = operations.filter((candidate) => candidate.worktree_id === worktree.worktree_id && candidate.operation_type === 'quarantine' && candidate.stage === 'committed').sort((left, right) => right.intent_event_seq - left.intent_event_seq)[0];
+      const operation = operations.filter((candidate): candidate is Extract<CoordinationWorktreeOperation, { readonly operation_type: 'quarantine' }> => candidate.worktree_id === worktree.worktree_id && candidate.operation_type === 'quarantine' && candidate.stage === 'committed').sort((left, right) => right.intent_event_seq - left.intent_event_seq)[0];
       if (operation === undefined) throw new CoordinationRuntimeError('recovery-required', 'quarantined retained authority lacks its committed capture operation', [worktree.worktree_id]);
       records.push(await finishCommittedQuarantine({ context: input.context, unitId: lease.owner.unit_id, attempt: lease.owner.attempt, unitWorktreePath: worktree.canonical_path, summary: 'resume immutable quarantine publication for retained failed-attempt authority', env }, operation));
       processed.add(ownerKey);
@@ -147,7 +147,7 @@ export async function quarantineFailedUnit(input: UnitFailureInput): Promise<Aut
   return record;
 }
 
-async function committedQuarantineCaptureProof(input: UnitFailureInput, operation: CoordinationWorktreeOperation): Promise<{ readonly captureSha: string; readonly proofSource: 'physical-worktree' | 'owned-git-ref' }> {
+async function committedQuarantineCaptureProof(input: UnitFailureInput, operation: Extract<CoordinationWorktreeOperation, { readonly operation_type: 'quarantine' }>): Promise<{ readonly captureSha: string; readonly proofSource: 'physical-worktree' | 'owned-git-ref' }> {
   const canonicalId = deterministicWorktreeId(operation.owner, 'unit');
   const inspection = inspectWorktreePostcondition({ operationType: 'quarantine', owner: operation.owner, kind: 'unit', canonicalWorktreeId: canonicalId, intent: operation.intent, env: input.env ?? process.env });
   if (inspection.outcome !== 'satisfied' || inspection.capture_sha === null || (inspection.proof_source !== 'physical-worktree' && inspection.proof_source !== 'owned-git-ref')) throw new CoordinationRuntimeError('recovery-required', 'committed quarantine no longer has exact canonical capture proof', inspection.proof);
@@ -166,7 +166,7 @@ async function committedQuarantineCaptureProof(input: UnitFailureInput, operatio
   return { captureSha: inspection.capture_sha, proofSource: inspection.proof_source };
 }
 
-async function finishCommittedQuarantine(input: UnitFailureInput, operation: CoordinationWorktreeOperation): Promise<AutopilotUnitFailureRecord> {
+async function finishCommittedQuarantine(input: UnitFailureInput, operation: Extract<CoordinationWorktreeOperation, { readonly operation_type: 'quarantine' }>): Promise<AutopilotUnitFailureRecord> {
   if (operation.owner.repo_id !== input.context.active.repo_key || operation.owner.autopilot_id !== input.context.active.autopilot_id || operation.owner.workstream_run !== input.context.active.workstream_run || operation.owner.unit_id !== input.unitId || operation.owner.attempt !== input.attempt || resolve(operation.intent.worktree_path) !== resolve(input.unitWorktreePath)) throw new CoordinationRuntimeError('invalid-state', 'committed quarantine operation identity differs from retained authority ownership', [operation.operation_id]);
   const captureProof = await committedQuarantineCaptureProof(input, operation);
   const facts: OwnedFailureWorktreeFacts = existsSync(input.unitWorktreePath) ? inspectOwnedFailureWorktree(input) : {

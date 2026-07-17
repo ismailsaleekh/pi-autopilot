@@ -483,7 +483,7 @@ void describe('owner-scoped worktree and Git saga recovery', () => {
 
       await recoverAutopilotWorktreeSagas({ active: value.active, env: value.env });
       await recoverAutopilotWorktreeSagas({ active: value.active, env: value.env });
-      const rollbackOperation = (await saga.operations()).find((operation) => operation.intent.reason.startsWith('autopilot-agent-run preflight rollback after failure:'));
+      const rollbackOperation = (await saga.operations()).find((operation) => operation.operation_type !== 'metadata-reconcile' && operation.intent.reason.startsWith('autopilot-agent-run preflight rollback after failure:'));
       if (rollbackOperation === undefined) throw new Error('historical rollback operation is missing');
       const auditPath = join(value.active.worktree_root, '_saga-evidence', value.active.workstream_run, 'supersessions', `${rollbackOperation.operation_id}.json`);
       assert.equal(existsSync(auditPath), true);
@@ -650,7 +650,7 @@ void describe('owner-scoped worktree and Git saga recovery', () => {
           action: () => { if (failOnce) { failOnce = false; throw Object.assign(new Error(`simulated ${code}`), { code }); } git(value.repo, ['update-ref', `refs/heads/${archiveRef}`, target, '0'.repeat(40)]); },
         };
         await assert.rejects(() => executeOwnedWorktreeSaga(operation, callbacks, value.env), new RegExp(`simulated ${code}`, 'u'));
-        assert.equal((await saga.operations()).find((entry) => entry.intent.reason === `${code} recovery witness`)?.error_code, code);
+        assert.equal((await saga.operations()).find((entry) => entry.operation_type !== 'metadata-reconcile' && entry.intent.reason === `${code} recovery witness`)?.error_code, code);
         const recovered = await executeOwnedWorktreeSaga(operation, callbacks, value.env);
         assert.equal(recovered.operation?.stage, 'committed');
       }
@@ -862,12 +862,12 @@ void describe('owner-scoped worktree and Git saga recovery', () => {
       git(create.intent.worktree_path, ['commit', '-m', 'simulated response-loss gated commit']);
       await assert.rejects(() => recoverOwnedWorktreeSagas({ active: value.active, env: value.env }), /canonical postcondition|metadata postcondition|missing_metadata|partial-effect/u);
       assert.equal(git(create.intent.worktree_path, ['rev-list', '--count', `${base}..HEAD`]), '1');
-      assert.notEqual((await saga.operations()).find((operation) => operation.intent.reason === 'metadata gate witness')?.stage, 'committed');
+      assert.notEqual((await saga.operations()).find((operation) => operation.operation_type !== 'metadata-reconcile' && operation.intent.reason === 'metadata gate witness')?.stage, 'committed');
       const taskRoot = dirname(dirname(dirname(dirname(create.intent.worktree_path))));
       await mkdir(join(taskRoot, 'execution-commits'), { recursive: true });
       await writeFile(join(taskRoot, 'execution-commits', 'gated.json'), '{}\n', 'utf8');
       const recovered = await recoverOwnedWorktreeSagas({ active: value.active, env: value.env });
-      assert.equal(recovered.some((operation) => operation.intent.reason === 'metadata gate witness' && operation.stage === 'committed'), true);
+      assert.equal(recovered.some((operation) => operation.operation_type !== 'metadata-reconcile' && operation.intent.reason === 'metadata gate witness' && operation.stage === 'committed'), true);
       assert.equal(git(create.intent.worktree_path, ['rev-list', '--count', `${base}..HEAD`]), '1');
     } finally {
       await close(value);

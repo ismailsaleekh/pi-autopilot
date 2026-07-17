@@ -83,6 +83,7 @@ void describe('Coordination Fabric pure transition model', () => {
       const original = base.worktree_operations[0];
       const originalWorktree = base.worktrees[0];
       if (original === undefined || originalWorktree === undefined) throw new Error('operation model fixture missing');
+      if (original.operation_type === 'metadata-reconcile') throw new Error('ordinary operation model fixture unexpectedly uses metadata reconciliation');
       const verified = stage === 'verified' || stage === 'committed';
       const terminalWithEvidence = verified || stage === 'compensated' || stage === 'failed';
       const operation: CoordinationWorktreeOperation = {

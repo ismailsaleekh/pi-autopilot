@@ -124,8 +124,6 @@ async function writeImmutableEvidence(input) {
     return { ref, sha256: `sha256:${createHash('sha256').update(body, 'utf8').digest('hex')}` };
 }
 function assertSpecMatchesActiveAuthority(spec) {
-    if (spec.operationType === 'metadata-reconcile')
-        throw new CoordinationRuntimeError('invalid-request', 'metadata reconciliation must use its dedicated exact-set runtime');
     if (spec.attempt < 1 || spec.unitId.length === 0 || (spec.kind === 'main' && spec.unitId !== 'main'))
         throw new CoordinationRuntimeError('invalid-request', 'worktree saga requires a durable unit attempt identity');
     if (resolve(spec.intent.repo_root) !== resolve(spec.active.source_repo) || resolve(spec.intent.git_common_dir) !== resolve(spec.active.git_common_dir))
@@ -313,8 +311,6 @@ async function inspectCommittedOperation(client, operation, env) {
     return direct;
 }
 export function inspectOwnedWorktreeSpecPostcondition(spec, env) {
-    if (spec.operationType === 'metadata-reconcile')
-        throw new CoordinationRuntimeError('recovery-required', 'metadata reconciliation uses its dedicated exact-set runtime');
     const owner = ownerFor(spec);
     return inspectWorktreePostcondition({ operationType: spec.operationType, owner, kind: spec.kind, canonicalWorktreeId: deterministicWorktreeId(owner, spec.kind), intent: spec.intent, env });
 }
@@ -813,6 +809,8 @@ export async function recoverOwnedWorktreeSagas(input) {
         const worktree = (await client.worktrees()).find((entry) => entry.worktree_id === candidate.worktree_id);
         if (worktree === undefined || !sameOwner(worktree.owner, candidate.owner))
             throw new CoordinationRuntimeError('store-corrupt', 'recoverable operation lacks exact worktree ownership', [candidate.operation_id]);
+        if (candidate.operation_type === 'metadata-reconcile')
+            throw new CoordinationRuntimeError('recovery-required', 'metadata reconciliation requires its exact-set production consumer', [candidate.operation_id]);
         const spec = {
             active: input.active, unitId: candidate.owner.unit_id, attempt: candidate.owner.attempt, kind: worktree.kind,
             operationType: candidate.operation_type, intent: candidate.intent, operationId: candidate.operation_id,

@@ -28,6 +28,7 @@ void describe('cf46 worktree lifecycle regressions', () => {
     const worktree = snapshot.worktrees[0];
     const template = snapshot.worktree_operations[0];
     if (worktree === undefined || template === undefined) throw new Error('fixture worktree operation is missing');
+    if (template.operation_type === 'metadata-reconcile') throw new Error('ordinary lifecycle fixture unexpectedly uses metadata reconciliation');
     const evidence = { ref: '_saga-evidence/run-a/operation-remove.json', sha256: `sha256:${'a'.repeat(64)}` as const };
     const remove = {
       ...template, operation_id: 'operation-remove', operation_type: 'remove' as const, stage: 'committed' as const,

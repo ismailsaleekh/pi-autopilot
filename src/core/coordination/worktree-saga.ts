@@ -21,6 +21,7 @@ import type {
   CoordinationWorktree,
   CoordinationWorktreeKind,
   CoordinationWorktreeOperation,
+  CoordinationOrdinaryWorktreeOperationType,
   CoordinationWorktreeOperationIntent,
   CoordinationWorktreeOperationType,
   CoordinationWorktreeState,
@@ -36,7 +37,7 @@ export interface OwnedWorktreeOperationSpec {
   readonly unitId: string;
   readonly attempt: number;
   readonly kind: CoordinationWorktreeKind;
-  readonly operationType: CoordinationWorktreeOperationType;
+  readonly operationType: CoordinationOrdinaryWorktreeOperationType;
   readonly intent: CoordinationWorktreeOperationIntent;
   readonly operationId?: string;
   readonly initialWorktreeState: CoordinationWorktreeState;
@@ -184,7 +185,6 @@ async function writeImmutableEvidence(input: {
 }
 
 function assertSpecMatchesActiveAuthority(spec: OwnedWorktreeOperationSpec): void {
-  if (spec.operationType === 'metadata-reconcile') throw new CoordinationRuntimeError('invalid-request', 'metadata reconciliation must use its dedicated exact-set runtime');
   if (spec.attempt < 1 || spec.unitId.length === 0 || (spec.kind === 'main' && spec.unitId !== 'main')) throw new CoordinationRuntimeError('invalid-request', 'worktree saga requires a durable unit attempt identity');
   if (resolve(spec.intent.repo_root) !== resolve(spec.active.source_repo) || resolve(spec.intent.git_common_dir) !== resolve(spec.active.git_common_dir)) throw new CoordinationRuntimeError('unauthorized-client', 'worktree saga intent repository identity does not match the active run');
   const expectedPath = spec.kind === 'main'
@@ -384,7 +384,6 @@ async function inspectCommittedOperation(client: OwnedWorktreeSagaClient, operat
 }
 
 export function inspectOwnedWorktreeSpecPostcondition(spec: OwnedWorktreeOperationSpec, env: ProcessEnvLike): WorktreePostconditionResult {
-  if (spec.operationType === 'metadata-reconcile') throw new CoordinationRuntimeError('recovery-required', 'metadata reconciliation uses its dedicated exact-set runtime');
   const owner = ownerFor(spec);
   return inspectWorktreePostcondition({ operationType: spec.operationType, owner, kind: spec.kind, canonicalWorktreeId: deterministicWorktreeId(owner, spec.kind), intent: spec.intent, env });
 }
@@ -813,6 +812,7 @@ export async function recoverOwnedWorktreeSagas(input: { readonly active: Active
     if (TERMINAL_STAGES.has(candidate.stage)) continue;
     const worktree = (await client.worktrees()).find((entry) => entry.worktree_id === candidate.worktree_id);
     if (worktree === undefined || !sameOwner(worktree.owner, candidate.owner)) throw new CoordinationRuntimeError('store-corrupt', 'recoverable operation lacks exact worktree ownership', [candidate.operation_id]);
+    if (candidate.operation_type === 'metadata-reconcile') throw new CoordinationRuntimeError('recovery-required', 'metadata reconciliation requires its exact-set production consumer', [candidate.operation_id]);
     const spec: OwnedWorktreeOperationSpec = {
       active: input.active, unitId: candidate.owner.unit_id, attempt: candidate.owner.attempt, kind: worktree.kind,
       operationType: candidate.operation_type, intent: candidate.intent, operationId: candidate.operation_id,

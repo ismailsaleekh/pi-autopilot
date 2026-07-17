@@ -9,10 +9,12 @@ import { buildCoordinationWaitForEdges, compareCoordinationGrantPriority, coordi
 import { validateAuthoritativeCoordinationDocument, validatePlanningContradictionSubmission } from "./escalation.js";
 import { CoordinationRuntimeError } from "./failures.js";
 import { assertCoordinationObservationSourceIdentity } from "./observations.js";
+import { parseIdentityFaultResolutionEvidence } from "./identity-fault-resolution-contract.js";
 import { checkCoordinationInvariants } from "./invariants.js";
 import { runS1InvariantDetectors } from "./invariant-registry.js";
 import { proveLegacyReadAttemptTerminal } from "./legacy-read-terminal.js";
 import { AUTOPILOT_RUN_SCOPED_FAULT_SCHEMA, parseRunScopedLogicalFault } from "./logical-faults.js";
+import { assertMetadataReconcileEvidence, parseMetadataReconcileEvidence } from "./metadata-reconcile.js";
 import { COORDINATOR_BUSY_TIMEOUT_MS, COORDINATOR_DATABASE_SCHEMA_VERSION, COORDINATOR_GRANT_OFFER_TTL_MS, COORDINATOR_IMPLEMENTATION_BUILD, COORDINATOR_LEGACY_FACADE_BUILD, COORDINATOR_PACKAGE_BUILD, COORDINATOR_STORE_SCHEMA_VERSION, COORDINATOR_WIRE_LINEAGE, enforcePrivateAuthorityPath, enforceWindowsPrivateAcl, ensureCoordinatorPrivateRoots } from "./runtime-paths.js";
 import { byteBudgetPage, COORDINATOR_MAX_PAGE_ENTITY_BYTES, COORDINATOR_PAGE_TARGET_BYTES, encodePaginationCursor, encodedJsonBytes, paginationCursorState, paginationRevision, paginationScope, parsePaginationCursor } from "./pagination.js";
 import { activeCoordinationMigrationFreeze, assertCoordinationDispatchAllowed, assertCoordinationFrozenMutationAllowed, assertCoordinationMigrationRecoveryOperationAuthorized, coordinationCutoverCommitted } from "./migration-paths.js";
@@ -23,10 +25,11 @@ import { parseRunTerminalSha, parseUnitAttemptTarget, parseUnitFailureEvidenceIn
 import { AUTOPILOT_COORDINATOR_PROTOCOL_VERSION, COORDINATION_WORKTREE_STATES } from "./types.js";
 import { COORDINATOR_MAX_FRAME_BYTES } from "./runtime-constants.js";
 import { assertPrivatePathNoAliases } from "../private-path.js";
-import { AUTOPILOT_WORKTREE_ALIAS_SCHEMA, deterministicWorktreeId, parseWorktreeAlias, worktreeOwnerKindKey } from "./worktree-identity.js";
+import { AUTOPILOT_WORKTREE_ALIAS_SCHEMA, deterministicWorktreeId, parseWorktreeAlias, sameWorktreeAuthority, worktreeOwnerKindKey } from "./worktree-identity.js";
 import { ensureCurrentStoreGeneration, publishRestoredStoreGeneration } from "./store-generation.js";
 import { CoordinatorWriterGuard } from "./writer-guard.js";
 import { deriveWorktreeOperationKeyV2, operationIdFromWorktreeOperationKey } from "./worktree-operation-identity.js";
+import { gitWorktreeRegistrationFacts } from "./worktree-postconditions.js";
 import { GitQueryError, runGitQuery } from "../git-process.js";
 const DATABASE_EXPORT_SCHEMA = 'autopilot.coordinator_export.v1';
 const SHA256_PATTERN = /^sha256:[a-f0-9]{64}$/u;
@@ -37,7 +40,7 @@ export const COORDINATOR_MAX_SEMANTIC_REPLAY_RECORDS = 100_000;
 const COORDINATOR_MAX_SEMANTIC_REPLAY_BYTES = 128 * 1024 * 1024;
 const COORDINATOR_MAX_SEMANTIC_REPLAY_LINE_BYTES = 1024 * 1024;
 const COORDINATOR_SEMANTIC_REPLAY_BATCH_SIZE = 1_000;
-const RUN_OWNED_IDEMPOTENCY_ACTIONS = new Set(['resolve-migration-recovery', 'register-attempt', 'acquire-group', 'acknowledge-grant', 'respond-claim-request', 'cancel-claim-request', 'cancel-acquisition-group', 'supersede-attempt', 'acknowledge-message', 'record-release-evidence', 'resolve-reservation-obligation', 'prepare-run-terminal', 'cancel-run-terminal', 'reconcile-run', 'prepare-operation', 'transition-operation', 'register-authoritative-artifact', 'assign-adjudication', 'claim-adjudication-assignment', 'submit-planning-contradiction']);
+const RUN_OWNED_IDEMPOTENCY_ACTIONS = new Set(['resolve-migration-recovery', 'register-attempt', 'acquire-group', 'acknowledge-grant', 'respond-claim-request', 'cancel-claim-request', 'cancel-acquisition-group', 'supersede-attempt', 'acknowledge-message', 'record-release-evidence', 'resolve-reservation-obligation', 'prepare-run-terminal', 'cancel-run-terminal', 'reconcile-run', 'prepare-operation', 'transition-operation', 'resolve-run-scoped-fault', 'register-authoritative-artifact', 'assign-adjudication', 'claim-adjudication-assignment', 'submit-planning-contradiction']);
 const TERMINAL_SESSION_ACTIONS = new Set(['resolve-migration-recovery', 'detach-session', 'heartbeat', 'drain-mailbox', 'acknowledge-message', 'record-release-evidence', 'reconcile-run', 'reconciliation-details', 'result-details', 'prepare-operation', 'transition-operation']);
 const MIGRATION_RECOVERY_SESSION_ACTIONS = new Set(['resolve-migration-recovery', 'detach-session', 'heartbeat']);
 const STATUS_SECTIONS = ['repositories', 'runs', 'run_resources', 'session_leases', 'child_leases', 'unit_attempts', 'acquisition_groups', 'observations', 'edit_leases', 'change_reservations', 'reservation_obligations', 'run_terminal_intents', 'claim_requests', 'mailbox_cursors', 'reconciliation_evidence', 'reconciliation_receipts', 'mailbox_deliveries', 'result_receipts', 'worktrees', 'worktree_operations', 'wait_for_edges', 'deadlock_resolutions', 'authoritative_artifacts', 'adjudication_assignments', 'escalations', 'coordination_migrations', 'migration_recovery_work'];
@@ -1705,9 +1708,31 @@ function verifySchema13Projections(db) {
     }
 }
 function verifyIdentityRecoveryCoverage(db) {
-    const uncovered = db.prepare("SELECT aliases.alias_worktree_id,aliases.canonical_worktree_id,aliases.repo_id,aliases.workstream_run FROM worktree_aliases aliases WHERE aliases.resolution_state='identity-recovery-pending' AND NOT EXISTS(SELECT 1 FROM run_scoped_faults faults WHERE faults.invariant_id='F3-SEMANTIC-UNIQUENESS' AND faults.repo_id=aliases.repo_id AND faults.workstream_run=aliases.workstream_run AND faults.entity_type='worktree' AND faults.entity_id=aliases.canonical_worktree_id AND faults.status='active') LIMIT 1").get();
+    const uncovered = db.prepare("SELECT aliases.alias_worktree_id,aliases.canonical_worktree_id,aliases.repo_id,aliases.workstream_run FROM worktree_aliases aliases WHERE aliases.resolution_state='identity-recovery-pending' AND NOT EXISTS(SELECT 1 FROM run_scoped_faults faults WHERE faults.invariant_id='F3-SEMANTIC-UNIQUENESS' AND faults.repo_id=aliases.repo_id AND faults.workstream_run=aliases.workstream_run AND faults.entity_type='worktree' AND faults.entity_id=aliases.canonical_worktree_id AND (faults.status='active' OR (faults.status='resolved' AND faults.resolved_event_seq IS NOT NULL))) LIMIT 1").get();
     if (uncovered !== undefined)
-        throw new CoordinationRuntimeError('store-corrupt', 'identity-recovery-pending alias has no exact active run-scoped fence', [sqlString(uncovered, 'alias_worktree_id'), sqlString(uncovered, 'canonical_worktree_id')]);
+        throw new CoordinationRuntimeError('store-corrupt', 'identity-recovery-pending alias has no exact active-or-audited-resolved run-scoped fault', [sqlString(uncovered, 'alias_worktree_id'), sqlString(uncovered, 'canonical_worktree_id')]);
+    const unauditedResolution = db.prepare("SELECT faults.fault_id FROM run_scoped_faults faults WHERE faults.invariant_id='F3-SEMANTIC-UNIQUENESS' AND faults.status='resolved' AND NOT EXISTS(SELECT 1 FROM events WHERE events.repo_id=faults.repo_id AND events.event_seq=faults.resolved_event_seq AND events.event_type='run-scoped-fault-resolved' AND events.entity_type='run-scoped-fault' AND events.entity_id=faults.fault_id) LIMIT 1").get();
+    if (unauditedResolution !== undefined)
+        throw new CoordinationRuntimeError('store-corrupt', 'resolved canonical identity fault has no exact immutable resolution event', [sqlString(unauditedResolution, 'fault_id')]);
+    for (const row of db.prepare("SELECT * FROM run_scoped_faults WHERE invariant_id='F3-SEMANTIC-UNIQUENESS' AND status='resolved' ORDER BY fault_id").all()) {
+        const fault = runScopedFaultFromRow(row);
+        const event = asRow(db.prepare("SELECT idempotency_key,request_sha256,event_type,entity_type,entity_id FROM events WHERE repo_id=? AND event_seq=?").get(fault.repo_id, fault.resolved_event_seq), 'canonical identity resolution event');
+        const result = asRow(db.prepare('SELECT request_sha256,committed_event_seq,payload_json FROM idempotency_results WHERE repo_id=? AND idempotency_key=?').get(fault.repo_id, sqlString(event, 'idempotency_key')), 'canonical identity resolution idempotency result');
+        if (sqlString(event, 'event_type') !== 'run-scoped-fault-resolved' || sqlString(event, 'entity_type') !== 'run-scoped-fault' || sqlString(event, 'entity_id') !== fault.fault_id
+            || sqlString(result, 'request_sha256') !== sqlString(event, 'request_sha256') || sqlInteger(result, 'committed_event_seq') !== fault.resolved_event_seq)
+            throw new CoordinationRuntimeError('store-corrupt', 'canonical identity resolution event and idempotency authority disagree', [fault.fault_id]);
+        const payload = parseJsonObject(sqlString(result, 'payload_json'), 'canonical identity resolution result');
+        const recordedFault = parseRunScopedLogicalFault(payload['run_scoped_fault']);
+        const resolution = parseIdentityFaultResolutionEvidence(payload['identity_resolution']);
+        const evidenceRef = payload['resolution_evidence'];
+        if (!isJsonMap(evidenceRef) || canonicalJson(Object.keys(evidenceRef).sort()) !== canonicalJson(['ref', 'sha256']) || typeof evidenceRef['ref'] !== 'string' || !SHA256_PATTERN.test(String(evidenceRef['sha256'])))
+            throw new CoordinationRuntimeError('store-corrupt', 'canonical identity resolution result lacks exact evidence authority', [fault.fault_id]);
+        const expectedRef = `_saga-evidence/${fault.workstream_run}/identity-recovery/${fault.fault_id}.json`;
+        const expectedEvidenceSha256 = `sha256:${createHash('sha256').update(`${canonicalJson(resolution)}\n`, 'utf8').digest('hex')}`;
+        if (canonicalJson(recordedFault) !== canonicalJson(fault) || resolution.fault_id !== fault.fault_id || resolution.repo_id !== fault.repo_id || resolution.workstream_run !== fault.workstream_run || resolution.canonical_worktree_id !== fault.entity_id || evidenceRef['ref'] !== expectedRef || evidenceRef['sha256'] !== expectedEvidenceSha256
+            || payload['event_type'] !== 'run-scoped-fault-resolved' || payload['entity_type'] !== 'run-scoped-fault' || payload['entity_id'] !== fault.fault_id)
+            throw new CoordinationRuntimeError('store-corrupt', 'canonical identity resolution audit payload differs from durable fault authority', [fault.fault_id]);
+    }
 }
 function storeInvariantDetectorHost(input) {
     let logicalSchemaVerified = false;
@@ -2013,6 +2038,36 @@ export class CoordinatorStore {
     negotiatedIdentityObservability() {
         this.#writerGuard.assertHeld();
         return Object.freeze({ implementation_build: COORDINATOR_IMPLEMENTATION_BUILD, wire_lineage: COORDINATOR_WIRE_LINEAGE, api_schema_version: COORDINATOR_DATABASE_SCHEMA_VERSION, store_schema_version: COORDINATOR_STORE_SCHEMA_VERSION, legacy_facade_build: COORDINATOR_LEGACY_FACADE_BUILD, store_generation_id: this.#generation.pointer.generation_id, current_store_pointer_sha256: this.#generation.pointer_sha256 });
+    }
+    negotiatedIdentityRecovery(repoId, workstreamRun) {
+        this.#writerGuard.assertHeld();
+        const faultRows = workstreamRun === null
+            ? this.#db.prepare("SELECT * FROM run_scoped_faults WHERE repo_id=? AND invariant_id='F3-SEMANTIC-UNIQUENESS' AND status IN ('active','resolved') ORDER BY workstream_run,fault_id LIMIT 129").all(repoId)
+            : this.#db.prepare("SELECT * FROM run_scoped_faults WHERE repo_id=? AND workstream_run=? AND invariant_id='F3-SEMANTIC-UNIQUENESS' AND status IN ('active','resolved') ORDER BY fault_id LIMIT 129").all(repoId, workstreamRun);
+        if (faultRows.length > 128)
+            throw new CoordinationRuntimeError('invalid-state', 'canonical identity recovery projection exceeds its negotiated bound');
+        return Object.freeze(faultRows.map((row) => {
+            const fault = runScopedFaultFromRow(row);
+            const candidateIds = fault.detail['candidate_ids'];
+            const currentProjectionId = fault.detail['current_projection_id'];
+            if (!Array.isArray(candidateIds) || !candidateIds.every((candidate) => typeof candidate === 'string') || typeof currentProjectionId !== 'string')
+                throw new CoordinationRuntimeError('store-corrupt', 'canonical identity fault detail lacks its frozen candidate classification', [fault.fault_id]);
+            const sortedCandidates = [...candidateIds].sort();
+            const candidateWorktrees = sortedCandidates.map((candidateId) => worktreeFromRow(asRow(this.#db.prepare('SELECT * FROM worktrees WHERE repo_id=? AND workstream_run=? AND entity_id=?').get(fault.repo_id, fault.workstream_run, candidateId), 'identity recovery candidate worktree')));
+            const candidateOperationIds = sortedCandidates.map((candidateId) => Object.freeze({
+                worktree_id: candidateId,
+                operation_ids: Object.freeze(this.#db.prepare("SELECT entity_id FROM worktree_operations WHERE repo_id=? AND workstream_run=? AND json_extract(payload_json, '$.worktree_id')=? ORDER BY entity_id").all(fault.repo_id, fault.workstream_run, candidateId).map((operationRow) => sqlString(operationRow, 'entity_id'))),
+            }));
+            return Object.freeze({
+                fault,
+                fault_id: fault.fault_id,
+                canonical_worktree_id: fault.entity_id,
+                selected_current_worktree_id: currentProjectionId,
+                candidate_worktree_ids: Object.freeze(sortedCandidates),
+                candidate_worktrees: Object.freeze(candidateWorktrees),
+                candidate_operation_ids: Object.freeze(candidateOperationIds),
+            });
+        }));
     }
     negotiatedRunScopedFaults(repoId, workstreamRun) {
         this.#writerGuard.assertHeld();
@@ -2611,10 +2666,16 @@ export class CoordinatorStore {
             throw new CoordinationRuntimeError('idempotency-conflict', 'legacy request has no exact pre-migration idempotency result');
         return { schema_version: 'autopilot.coordinator_response.v1', protocol_version: AUTOPILOT_COORDINATOR_PROTOCOL_VERSION, request_id: requestId, ok: true, committed_event_seq: sqlInteger(prior, 'committed_event_seq'), error_code: null, retryable: false, payload: parseJsonObject(sqlString(prior, 'payload_json'), 'legacy idempotency result') };
     }
-    handle(request) {
+    handle(request, facade = 'negotiated-s1') {
         try {
             this.#writerGuard.assertHeld();
-            const effect = this.#dispatch(request);
+            const effect = facade === 'cf50-legacy' && request.action === 'status'
+                ? this.legacyStatusPage(request)
+                : facade === 'cf50-legacy' && request.action === 'doctor'
+                    ? this.legacyDoctorPage(request)
+                    : facade === 'cf50-legacy' && request.action === 'export'
+                        ? this.exportTo(payloadString(request.payload, 'output_path'), false)
+                        : this.#dispatch(request);
             const response = {
                 schema_version: 'autopilot.coordinator_response.v1',
                 protocol_version: AUTOPILOT_COORDINATOR_PROTOCOL_VERSION,
@@ -2688,7 +2749,7 @@ export class CoordinatorStore {
             case 'handshake': return this.handshake();
             case 'status': return this.statusPage(request);
             case 'doctor': return this.doctorPage(request);
-            case 'export': return this.exportTo(payloadString(request.payload, 'output_path'));
+            case 'export': return this.exportTo(payloadString(request.payload, 'output_path'), true);
             case 'migration-recovery': return this.migrationRecovery(request);
             case 'run-catalog': return this.runCatalog(request.repo_id, request.workstream_run, request.payload);
             case 'reconciliation-details': return this.reconciliationDetails(request);
@@ -2721,6 +2782,7 @@ export class CoordinatorStore {
             case 'reconcile-run': return this.reconcileRun(request);
             case 'prepare-operation': return this.prepareOperation(request);
             case 'transition-operation': return this.transitionOperation(request);
+            case 'resolve-run-scoped-fault': return this.resolveRunScopedFault(request);
             case 'register-authoritative-artifact': return this.registerAuthoritativeArtifact(request);
             case 'assign-adjudication': return this.assignAdjudication(request);
             case 'claim-adjudication-assignment': return this.claimAdjudicationAssignment(request);
@@ -2733,19 +2795,35 @@ export class CoordinatorStore {
     }
     statusPage(request) {
         const complete = request.payload['scan_token'] === undefined ? this.status(request.repo_id, request.workstream_run).payload : null;
-        return this.#projectionPage('status', request, complete, STATUS_SECTIONS, null);
+        return this.#projectionPage('status', request, complete, STATUS_SECTIONS, null, 'negotiated-s1');
+    }
+    legacyStatusPage(request) {
+        const complete = request.payload['scan_token'] === undefined ? this.#legacyProjection(this.status(request.repo_id, request.workstream_run).payload, 'worktree_operations') : null;
+        return this.#projectionPage('status', request, complete, STATUS_SECTIONS, null, 'cf50-legacy');
     }
     doctorPage(request) {
         const observedAt = request.payload['scan_token'] === undefined ? this.#clock.now().toISOString() : null;
         const complete = observedAt === null ? null : this.doctor(new Date(observedAt)).payload;
-        return this.#projectionPage('doctor', request, complete, DOCTOR_SECTIONS, observedAt);
+        return this.#projectionPage('doctor', request, complete, DOCTOR_SECTIONS, observedAt, 'negotiated-s1');
     }
-    #projectionPage(kind, request, initialComplete, sections, initialSnapshot) {
+    legacyDoctorPage(request) {
+        const observedAt = request.payload['scan_token'] === undefined ? this.#clock.now().toISOString() : null;
+        const complete = observedAt === null ? null : this.#legacyProjection(this.doctor(new Date(observedAt)).payload, 'incomplete_worktree_operations');
+        return this.#projectionPage('doctor', request, complete, DOCTOR_SECTIONS, observedAt, 'cf50-legacy');
+    }
+    #legacyProjection(complete, operationSection) {
+        const operations = complete[operationSection];
+        if (!Array.isArray(operations))
+            throw new CoordinationRuntimeError('store-corrupt', `legacy façade projection lacks ${operationSection}`);
+        const ordinary = operations.filter((entry) => parseCoordinationWorktreeOperation(entry).operation_type !== 'metadata-reconcile');
+        return Object.freeze({ ...complete, [operationSection]: Object.freeze(ordinary) });
+    }
+    #projectionPage(kind, request, initialComplete, sections, initialSnapshot, facade) {
         const sectionValue = request.payload['section'];
         const section = sectionValue === undefined ? 'summary' : typeof sectionValue === 'string' ? sectionValue : (() => { throw new CoordinationRuntimeError('invalid-request', `${kind} section must be bounded text`); })();
         if (section !== 'summary' && !sections.includes(section))
             throw new CoordinationRuntimeError('invalid-request', `${kind} section is unsupported`, [section]);
-        const scopeSha256 = paginationScope([kind, request.repo_id, request.workstream_run]);
+        const scopeSha256 = paginationScope([kind, facade, request.repo_id, request.workstream_run]);
         const suppliedScan = request.payload['scan_token'];
         const now = Date.now();
         for (const [token, scan] of this.#projectionScans)
@@ -3308,7 +3386,7 @@ export class CoordinatorStore {
             },
         };
     }
-    exportTo(outputPath) {
+    exportTo(outputPath, includeNegotiatedS1Vocabulary = false) {
         const target = resolve(outputPath);
         mkdirSync(dirname(target), { recursive: true, mode: 0o700 });
         const tables = [
@@ -3353,7 +3431,13 @@ export class CoordinatorStore {
         ];
         const tableQueries = new Map(tables.map(([table, order]) => [table, `SELECT * FROM ${table} ORDER BY ${order}`]));
         tableQueries.set('worktrees', 'SELECT entity_id,repo_id,workstream_run,payload_json,version FROM worktrees ORDER BY repo_id,workstream_run,entity_id');
-        tableQueries.set('worktree_operations', 'SELECT entity_id,repo_id,workstream_run,payload_json,version FROM worktree_operations ORDER BY repo_id,workstream_run,entity_id');
+        tableQueries.set('worktree_operations', includeNegotiatedS1Vocabulary
+            ? 'SELECT entity_id,repo_id,workstream_run,payload_json,version FROM worktree_operations ORDER BY repo_id,workstream_run,entity_id'
+            : "SELECT entity_id,repo_id,workstream_run,payload_json,version FROM worktree_operations WHERE json_extract(payload_json, '$.operation_type')!='metadata-reconcile' ORDER BY repo_id,workstream_run,entity_id");
+        if (!includeNegotiatedS1Vocabulary) {
+            tableQueries.set('events', "SELECT * FROM events WHERE NOT(entity_type='worktree-operation' AND entity_id IN (SELECT entity_id FROM worktree_operations WHERE json_extract(payload_json, '$.operation_type')='metadata-reconcile')) AND event_type!='run-scoped-fault-resolved' ORDER BY repo_id,event_seq");
+            tableQueries.set('idempotency_results', "SELECT * FROM idempotency_results WHERE COALESCE(json_extract(payload_json, '$.operation.operation_type'),'')!='metadata-reconcile' AND json_type(payload_json, '$.identity_resolution') IS NULL ORDER BY repo_id,idempotency_key");
+        }
         tableQueries.set('schema_migrations', `SELECT version,checksum,applied_at FROM schema_migrations WHERE version<=${String(COORDINATOR_DATABASE_SCHEMA_VERSION)} ORDER BY version`);
         tableQueries.set('evidence_artifacts', 'SELECT entity_id, repo_id, sha256, ref, label, size_bytes, created_event_seq, lower(hex(content)) AS content_hex FROM evidence_artifacts ORDER BY repo_id, created_event_seq, entity_id');
         const keys = ['schema_version', 'database_schema_version', ...tableQueries.keys()].sort((left, right) => left.localeCompare(right));
@@ -4708,6 +4792,111 @@ export class CoordinatorStore {
             return { sequence: seq, eventType: `worktree-operation-${next.stage}`, entityType: 'worktree-operation', entityId: next.operation_id, payload: { operation: next, worktree: nextWorktree } };
         });
     }
+    resolveRunScopedFault(request) {
+        return this.#mutation(request, () => {
+            this.#requireCurrentSession(request);
+            const faultId = payloadString(request.payload, 'fault_id');
+            const evidenceRef = payloadString(request.payload, 'resolution_evidence_ref');
+            const evidenceSha256 = payloadString(request.payload, 'resolution_evidence_sha256');
+            if (!SHA256_PATTERN.test(evidenceSha256))
+                throw new CoordinationRuntimeError('invalid-request', 'identity fault resolution evidence digest is invalid');
+            const faultRow = asRow(this.#db.prepare('SELECT * FROM run_scoped_faults WHERE fault_id=?').get(faultId), 'run-scoped fault');
+            const fault = runScopedFaultFromRow(faultRow);
+            if (fault.repo_id !== request.repo_id || fault.workstream_run !== this.#workstreamRun(request))
+                throw new CoordinationRuntimeError('unauthorized-client', 'session cannot resolve a foreign run-scoped fault');
+            this.#assertVersion(fault.version, request.expected_version, 'run-scoped fault');
+            if (fault.status !== 'active' || fault.invariant_id !== 'F3-SEMANTIC-UNIQUENESS' || fault.fault_code !== 'identity-recovery-pending' || fault.entity_type !== 'worktree')
+                throw new CoordinationRuntimeError('invalid-state', 'only an active canonical semantic-uniqueness fault has a mechanical resolution path', [fault.fault_id, fault.status, fault.invariant_id]);
+            const repository = repositoryFromRow(asRow(this.#db.prepare('SELECT * FROM repositories WHERE repo_id=?').get(fault.repo_id), 'identity fault repository'));
+            const expectedRef = `_saga-evidence/${fault.workstream_run}/identity-recovery/${fault.fault_id}.json`;
+            if (evidenceRef !== expectedRef)
+                throw new CoordinationRuntimeError('unauthorized-client', 'identity fault resolution evidence ref is not derived from its exact fault owner', [evidenceRef, expectedRef]);
+            const evidenceRoot = resolve(this.#stateRoot, 'worktrees', repository.repo_key, '_saga-evidence', fault.workstream_run, 'identity-recovery');
+            const evidencePath = resolve(this.#stateRoot, 'worktrees', repository.repo_key, evidenceRef);
+            const relativeEvidence = relative(evidenceRoot, evidencePath);
+            if (relativeEvidence.length === 0 || relativeEvidence === '..' || relativeEvidence.startsWith(`..${sep}`) || isAbsolute(relativeEvidence))
+                throw new CoordinationRuntimeError('unauthorized-client', 'identity fault resolution evidence escapes its run-owned root');
+            let bytes;
+            try {
+                const before = lstatSync(evidencePath);
+                if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1 || before.size < 2 || before.size > MAX_COORDINATION_EVIDENCE_BYTES)
+                    throw new CoordinationRuntimeError('unauthorized-client', 'identity fault resolution evidence must be a bounded regular unaliased file', [evidencePath]);
+                bytes = readFileSync(evidencePath);
+                const after = lstatSync(evidencePath);
+                if (before.dev !== after.dev || before.ino !== after.ino || after.nlink !== 1 || before.size !== after.size || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs || bytes.byteLength !== before.size)
+                    throw new CoordinationRuntimeError('recovery-required', 'identity fault resolution evidence changed during verification', [evidencePath]);
+            }
+            catch (error) {
+                if (error instanceof CoordinationRuntimeError)
+                    throw error;
+                throw new CoordinationRuntimeError('recovery-required', 'identity fault resolution evidence is unreadable', [evidencePath, error instanceof Error ? error.message : String(error)]);
+            }
+            const actualSha256 = `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
+            if (actualSha256 !== evidenceSha256)
+                throw new CoordinationRuntimeError('invalid-state', 'identity fault resolution evidence digest differs from immutable request authority', [evidencePath, actualSha256, evidenceSha256]);
+            let evidenceValue;
+            try {
+                evidenceValue = JSON.parse(Buffer.from(bytes).toString('utf8'));
+            }
+            catch (error) {
+                throw new CoordinationRuntimeError('invalid-state', 'identity fault resolution evidence is invalid JSON', [error instanceof Error ? error.message : String(error)]);
+            }
+            const evidence = parseIdentityFaultResolutionEvidence(evidenceValue);
+            if (evidence.fault_id !== fault.fault_id || evidence.repo_id !== fault.repo_id || evidence.workstream_run !== fault.workstream_run || evidence.canonical_worktree_id !== fault.entity_id)
+                throw new CoordinationRuntimeError('invalid-state', 'identity fault resolution evidence owner differs from the exact active fault');
+            const detailCandidates = fault.detail['candidate_ids'];
+            const detailCurrent = fault.detail['current_projection_id'];
+            if (!Array.isArray(detailCandidates) || !detailCandidates.every((candidate) => typeof candidate === 'string') || typeof detailCurrent !== 'string'
+                || canonicalJson([...detailCandidates].sort()) !== canonicalJson(evidence.candidate_worktree_ids)
+                || detailCurrent !== evidence.selected_current_worktree_id)
+                throw new CoordinationRuntimeError('invalid-state', 'identity fault resolution evidence differs from the frozen migration classification');
+            const candidateRows = evidence.candidate_worktree_ids.map((worktreeId) => asRow(this.#db.prepare('SELECT * FROM worktrees WHERE repo_id=? AND workstream_run=? AND entity_id=?').get(fault.repo_id, fault.workstream_run, worktreeId), 'identity fault candidate worktree'));
+            if (candidateRows.some((row) => sqlString(row, 'canonical_worktree_id') !== evidence.canonical_worktree_id))
+                throw new CoordinationRuntimeError('store-corrupt', 'identity fault candidate canonical indexes differ from their frozen resolution identity');
+            const worktrees = candidateRows.map(worktreeFromRow);
+            const selected = worktrees.find((worktree) => worktree.worktree_id === evidence.selected_current_worktree_id);
+            if (selected === undefined || deterministicWorktreeId(selected.owner, selected.kind) !== evidence.canonical_worktree_id)
+                throw new CoordinationRuntimeError('invalid-state', 'identity fault selected projection does not derive the exact canonical identity');
+            const selectedRow = asRow(this.#db.prepare('SELECT is_current_canonical FROM worktrees WHERE entity_id=?').get(selected.worktree_id), 'identity fault selected projection');
+            if (sqlInteger(selectedRow, 'is_current_canonical') !== 1 || worktrees.some((worktree) => !sameWorktreeAuthority(worktree, selected)))
+                throw new CoordinationRuntimeError('invalid-state', 'identity fault candidates do not share the exact selected authority');
+            const actualOperationRows = evidence.candidate_worktree_ids.map((worktreeId) => Object.freeze({
+                worktree_id: worktreeId,
+                operation_ids: Object.freeze(this.#db.prepare('SELECT entity_id FROM worktree_operations WHERE repo_id=? AND workstream_run=? AND json_extract(payload_json, \'$.worktree_id\')=? ORDER BY entity_id').all(fault.repo_id, fault.workstream_run, worktreeId).map((row) => sqlString(row, 'entity_id'))),
+            }));
+            if (canonicalJson(actualOperationRows) !== canonicalJson(evidence.candidate_operation_ids))
+                throw new CoordinationRuntimeError('invalid-state', 'identity fault resolution evidence does not cover the exact immutable operation histories');
+            let currentRegistrations;
+            try {
+                currentRegistrations = gitWorktreeRegistrationFacts(selected.git_common_dir);
+            }
+            catch (error) {
+                throw new CoordinationRuntimeError('recovery-required', 'identity fault resolution could not inspect exact current Git registrations', [selected.git_common_dir, error instanceof Error ? error.message : String(error)]);
+            }
+            if (canonicalJson(currentRegistrations) !== canonicalJson(evidence.observed_registrations))
+                throw new CoordinationRuntimeError('recovery-required', 'identity fault resolution registration evidence drifted before commit', [selected.git_common_dir]);
+            const registration = currentRegistrations.find((entry) => entry.worktree_path === selected.canonical_path && entry.branch_ref === `refs/heads/${selected.branch}`);
+            const preservedBranch = evidence.preserved_refs.find((entry) => entry.ref === `refs/heads/${selected.branch}`);
+            const currentBranchSha = this.#gitQueryText(selected.git_common_dir, { kind: 'resolve-commit', revision: `refs/heads/${selected.branch}` }, 'recovery-required', 'identity fault resolution branch-ref inspection failed');
+            const expectedPreservedRefs = currentBranchSha === null ? [] : [{ ref: `refs/heads/${selected.branch}`, sha: currentBranchSha }];
+            if (canonicalJson(evidence.preserved_refs) !== canonicalJson(expectedPreservedRefs) || registration === undefined || preservedBranch === undefined || registration.head_sha !== preservedBranch.sha || currentBranchSha !== preservedBranch.sha)
+                throw new CoordinationRuntimeError('recovery-required', 'identity fault resolution lacks exact current Git registration and branch-ref agreement', [selected.canonical_path, selected.branch]);
+            const seq = this.#nextEventSequence(fault.repo_id);
+            const resolved = parseRunScopedLogicalFault({ ...fault, status: 'resolved', resolved_event_seq: seq, version: fault.version + 1 });
+            return {
+                sequence: seq,
+                eventType: 'run-scoped-fault-resolved',
+                entityType: 'run-scoped-fault',
+                entityId: fault.fault_id,
+                payload: { run_scoped_fault: resolved, identity_resolution: evidence, resolution_evidence: { ref: evidenceRef, sha256: evidenceSha256 } },
+                afterEventInserted: () => {
+                    const updated = this.#db.prepare("UPDATE run_scoped_faults SET status='resolved',resolved_event_seq=?,version=version+1 WHERE fault_id=? AND status='active' AND version=?").run(seq, fault.fault_id, fault.version);
+                    if (updated.changes !== 1)
+                        throw new CoordinationRuntimeError('coordinator-contention', 'identity fault changed before its exact audited resolution commit', [fault.fault_id]);
+                },
+            };
+        });
+    }
     enqueueMessageForTest(message) {
         this.#writerGuard.assertHeld();
         const parsed = parseCoordinationMessage(message);
@@ -5998,10 +6187,6 @@ export class CoordinatorStore {
      */
     #assertWorktreeAuthority(worktree, operation) {
         const repository = repositoryFromRow(asRow(this.#db.prepare('SELECT * FROM repositories WHERE repo_id=?').get(worktree.owner.repo_id), 'worktree repository'));
-        if (operation.intent.repo_root !== repository.canonical_root || worktree.git_common_dir !== repository.git_common_dir || operation.intent.git_common_dir !== repository.git_common_dir)
-            throw new CoordinationRuntimeError('unauthorized-client', 'worktree operation repository identity disagrees with the registered repository');
-        if (operation.intent.worktree_path !== worktree.canonical_path || operation.intent.branch !== worktree.branch)
-            throw new CoordinationRuntimeError('invalid-request', 'operation intent disagrees with immutable worktree identity');
         const repoWorktreeRoot = resolve(this.#stateRoot, 'worktrees', repository.repo_key);
         const taskRoot = resolve(repoWorktreeRoot, 'active', worktree.owner.workstream_run);
         const expectedPath = worktree.kind === 'main'
@@ -6014,6 +6199,25 @@ export class CoordinatorStore {
             : `autopilot/unit/${worktree.owner.workstream_run}/${worktree.owner.unit_id}/attempt-${String(worktree.owner.attempt)}`;
         if (worktree.branch !== expectedBranch)
             throw new CoordinationRuntimeError('unauthorized-client', 'worktree branch is not derived from its durable owner', [worktree.branch, expectedBranch]);
+        if (operation.operation_type === 'metadata-reconcile') {
+            const canonicalWorktreeId = deterministicWorktreeId(worktree.owner, worktree.kind);
+            const target = operation.intent.approved_before_registrations.find((registration) => registration.worktree_path === operation.intent.target_registration_path);
+            if (operation.intent.repo_id !== repository.repo_id
+                || operation.intent.git_common_dir !== repository.git_common_dir
+                || worktree.git_common_dir !== repository.git_common_dir
+                || operation.intent.canonical_worktree_id !== canonicalWorktreeId)
+                throw new CoordinationRuntimeError('unauthorized-client', 'metadata reconciliation repository/canonical identity disagrees with durable worktree authority');
+            if (operation.intent.target_registration_path !== worktree.canonical_path
+                || target === undefined
+                || target.prunable !== true
+                || target.branch_ref !== `refs/heads/${worktree.branch}`)
+                throw new CoordinationRuntimeError('invalid-request', 'metadata reconciliation target registration disagrees with immutable worktree identity');
+            return;
+        }
+        if (operation.intent.repo_root !== repository.canonical_root || worktree.git_common_dir !== repository.git_common_dir || operation.intent.git_common_dir !== repository.git_common_dir)
+            throw new CoordinationRuntimeError('unauthorized-client', 'worktree operation repository identity disagrees with the registered repository');
+        if (operation.intent.worktree_path !== worktree.canonical_path || operation.intent.branch !== worktree.branch)
+            throw new CoordinationRuntimeError('invalid-request', 'operation intent disagrees with immutable worktree identity');
         if (operation.operation_type === 'create' && operation.intent.base_sha === null)
             throw new CoordinationRuntimeError('invalid-request', 'create operation requires immutable base_sha');
         if (operation.operation_type === 'create' && operation.intent.checkout_mode !== null && operation.intent.checkout_mode !== 'full' && operation.intent.sparse_patterns.length === 0)
@@ -6044,12 +6248,14 @@ export class CoordinatorStore {
         if (evidence === null)
             throw new CoordinationRuntimeError('invalid-request', 'operation evidence is missing');
         const repository = repositoryFromRow(asRow(this.#db.prepare('SELECT * FROM repositories WHERE repo_id=?').get(operation.owner.repo_id), 'operation evidence repository'));
-        const expectedPrefix = `_saga-evidence/${operation.owner.workstream_run}/`;
-        if (!evidence.ref.startsWith(expectedPrefix) || evidence.ref !== `${expectedPrefix}${operation.operation_id}.json`)
-            throw new CoordinationRuntimeError('unauthorized-client', 'operation evidence ref is not derived from its durable owner and operation', [evidence.ref]);
-        const evidenceRoot = resolve(this.#stateRoot, 'worktrees', repository.repo_key, '_saga-evidence', operation.owner.workstream_run);
+        const runEvidenceRoot = resolve(this.#stateRoot, 'worktrees', repository.repo_key, '_saga-evidence', operation.owner.workstream_run);
+        const expectedRef = operation.operation_type === 'metadata-reconcile'
+            ? `_saga-evidence/${operation.owner.workstream_run}/metadata-reconcile/${operation.intent.canonical_worktree_id}.json`
+            : `_saga-evidence/${operation.owner.workstream_run}/${operation.operation_id}.json`;
+        if (evidence.ref !== expectedRef)
+            throw new CoordinationRuntimeError('unauthorized-client', 'operation evidence ref is not derived from its durable owner and operation', [evidence.ref, expectedRef]);
         const evidencePath = resolve(this.#stateRoot, 'worktrees', repository.repo_key, evidence.ref);
-        const relativeEvidence = relative(evidenceRoot, evidencePath);
+        const relativeEvidence = relative(runEvidenceRoot, evidencePath);
         if (relativeEvidence.length === 0 || relativeEvidence === '..' || relativeEvidence.startsWith(`..${sep}`) || isAbsolute(relativeEvidence))
             throw new CoordinationRuntimeError('unauthorized-client', 'operation evidence escapes its run-owned evidence root');
         let bytes;
@@ -6067,13 +6273,22 @@ export class CoordinatorStore {
         const actual = `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
         if (actual !== evidence.sha256)
             throw new CoordinationRuntimeError('invalid-state', 'operation evidence hash does not match immutable artifact', [evidencePath, `expected=${evidence.sha256}`, `actual=${actual}`]);
-        let parsed;
+        let parsedValue;
         try {
-            parsed = parseJsonObject(Buffer.from(bytes).toString('utf8'), 'operation evidence');
+            parsedValue = JSON.parse(Buffer.from(bytes).toString('utf8'));
         }
         catch (error) {
             throw new CoordinationRuntimeError('invalid-state', 'operation evidence is not valid JSON', [error instanceof Error ? error.message : String(error)]);
         }
+        if (operation.operation_type === 'metadata-reconcile') {
+            const metadataEvidence = parseMetadataReconcileEvidence(parsedValue);
+            assertMetadataReconcileEvidence(operation.intent, metadataEvidence);
+            const operationKey = deriveWorktreeOperationKeyV2({ canonicalWorktreeId: operation.intent.canonical_worktree_id, operationType: operation.operation_type, completeImmutableIntent: operation.intent });
+            if (metadataEvidence.operation_key_sha256 !== operationKey.operation_key_sha256 || operation.operation_id !== operationIdFromWorktreeOperationKey(operationKey))
+                throw new CoordinationRuntimeError('unauthorized-client', 'metadata reconciliation evidence does not bind its canonical operation-key v2 identity');
+            return;
+        }
+        const parsed = parseJsonObject(canonicalJson(parsedValue), 'operation evidence');
         const expectedIntentSha = `sha256:${createHash('sha256').update(canonicalJson(operation.intent), 'utf8').digest('hex')}`;
         const evidenceTerminalStage = operation.stage === 'committed' ? 'verified' : operation.stage;
         if (parsed['schema_version'] !== 'autopilot.worktree_operation_evidence.v1' || parsed['operation_id'] !== operation.operation_id || parsed['worktree_id'] !== operation.worktree_id || parsed['operation_type'] !== operation.operation_type || parsed['terminal_stage'] !== evidenceTerminalStage || parsed['intent_sha256'] !== expectedIntentSha || canonicalJson(parsed['owner']) !== canonicalJson(operation.owner))
@@ -6572,6 +6787,7 @@ export class CoordinatorStore {
                 this.#assertResponseFitsFrame(responseFor(committed), request.action);
             }
             this.#insertEvent.run(request.repo_id, result.sequence, result.eventType, result.entityType, result.entityId, idempotencyKey, digest, this.#clock.now().toISOString());
+            result.afterEventInserted?.();
             this.#insertIdempotencyResult.run(request.repo_id, idempotencyKey, digest, result.sequence, canonicalJson(committed.payload));
             if (ownsTransaction)
                 this.#db.exec('COMMIT');
