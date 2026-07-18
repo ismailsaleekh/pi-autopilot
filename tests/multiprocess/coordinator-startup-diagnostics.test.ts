@@ -123,7 +123,11 @@ void it('reports a real private-capability no-follow failure without treating di
     catch (error) { cleanupFailures.push(error); }
   }
   if (pending !== null) await Promise.allSettled([pending]);
-  try { await stopTestCoordinatorsForStateRoot(stateRoot); } catch (error) { cleanupFailures.push(error); }
-  try { await rm(root, { recursive: true, force: true }); } catch (error) { cleanupFailures.push(error); }
+  let coordinatorCleanupProven = true;
+  try { await stopTestCoordinatorsForStateRoot(stateRoot); }
+  catch (error) { coordinatorCleanupProven = false; cleanupFailures.push(error); }
+  if (coordinatorCleanupProven) {
+    try { await rm(root, { recursive: true, force: true }); } catch (error) { cleanupFailures.push(error); }
+  } else cleanupFailures.push(new Error(`startup diagnostic root retained because coordinator cleanup was not proven: ${root}`));
   throwTestOrCleanupFailure(testFailure, cleanupFailures, 'private-capability startup diagnostic or cleanup failed');
 });

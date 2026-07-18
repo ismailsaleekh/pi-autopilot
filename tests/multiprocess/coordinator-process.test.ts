@@ -566,7 +566,9 @@ async function certifyPersistentReleaseTrace(clientCount: number): Promise<void>
   try { await stopCoordinator(paths.lockPath); } catch (error) { cleanupFailures.push(error); }
   try { await stopSpawnedChild(server); } catch (error) { cleanupFailures.push(error); }
   try { await stopTestCoordinatorsForStateRoot(stateRoot); } catch (error) { cleanupFailures.push(error); }
-  try { await rm(root, { recursive: true, force: true }); } catch (error) { cleanupFailures.push(error); }
+  if (cleanupFailures.length === 0) {
+    try { await rm(root, { recursive: true, force: true }); } catch (error) { cleanupFailures.push(error); }
+  } else cleanupFailures.push(new Error(`release-trace root retained because process cleanup was not proven: ${root}`));
   if (traceError !== null || cleanupFailures.length > 0) {
     throw new AggregateError([...(traceError === null ? [] : [traceError]), ...cleanupFailures], `${String(clientCount)}-client persistent release trace or cleanup failed`);
   }

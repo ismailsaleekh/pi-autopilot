@@ -15,7 +15,7 @@ import { gitHead, readGitStatus, releaseClaimsForUnit, updateUnitBranchStatus, w
 import { gitQueryNulStrings, gitQueryText, runGitMutation, runGitQuery } from './git-process.ts';
 import { cleanupTerminalUnitWorktree } from './worktree-cleanup.ts';
 import { executeOwnedWorktreeSaga } from './coordination/worktree-saga.ts';
-import type { CoordinationWorktreeOperation } from './coordination/types.ts';
+import type { CoordinationWorktree, CoordinationWorktreeOperation } from './coordination/types.ts';
 import { inspectWorktreePostcondition } from './coordination/worktree-postconditions.ts';
 import { deterministicWorktreeId } from './coordination/worktree-identity.ts';
 
@@ -57,6 +57,25 @@ interface UnitFailureInput {
 interface PublishedUnitFailureRecord {
   readonly record: AutopilotUnitFailureRecord;
   readonly evidencePath: string;
+}
+
+export function latestCommittedQuarantineOperationForWorktree(
+  worktree: CoordinationWorktree,
+  operations: readonly CoordinationWorktreeOperation[],
+): Extract<CoordinationWorktreeOperation, { readonly operation_type: 'quarantine' }> | null {
+  const canonicalWorktreeId = deterministicWorktreeId(worktree.owner, worktree.kind);
+  if (worktree.worktree_id !== canonicalWorktreeId) throw new CoordinationRuntimeError('invalid-state', 'retained failed-unit reconciliation requires the current canonical worktree projection', [worktree.worktree_id, canonicalWorktreeId]);
+  return operations.filter((candidate): candidate is Extract<CoordinationWorktreeOperation, { readonly operation_type: 'quarantine' }> => {
+    const candidateKind = candidate.owner.unit_id === 'main' ? 'main' : 'unit';
+    return deterministicWorktreeId(candidate.owner, candidateKind) === canonicalWorktreeId
+      && candidate.owner.repo_id === worktree.owner.repo_id
+      && candidate.owner.autopilot_id === worktree.owner.autopilot_id
+      && candidate.owner.workstream_run === worktree.owner.workstream_run
+      && candidate.owner.unit_id === worktree.owner.unit_id
+      && candidate.owner.attempt === worktree.owner.attempt
+      && candidate.operation_type === 'quarantine'
+      && candidate.stage === 'committed';
+  }).sort((left, right) => right.intent_event_seq - left.intent_event_seq || left.operation_id.localeCompare(right.operation_id))[0] ?? null;
 }
 
 export async function reconcileRetainedFailedUnitAuthority(input: {
@@ -101,8 +120,8 @@ export async function reconcileRetainedFailedUnitAuthority(input: {
     const worktree = worktrees.find((candidate) => candidate.kind === 'unit' && candidate.owner.unit_id === lease.owner.unit_id && candidate.owner.attempt === lease.owner.attempt && candidate.state !== 'removed');
     if (worktree === undefined) throw new CoordinationRuntimeError('recovery-required', 'terminal source-changing attempt retains edit authority without one recoverable registered unit worktree', [lease.edit_lease_id, child.child_lease_id]);
     if (worktree.state === 'quarantined') {
-      const operation = operations.filter((candidate): candidate is Extract<CoordinationWorktreeOperation, { readonly operation_type: 'quarantine' }> => candidate.worktree_id === worktree.worktree_id && candidate.operation_type === 'quarantine' && candidate.stage === 'committed').sort((left, right) => right.intent_event_seq - left.intent_event_seq)[0];
-      if (operation === undefined) throw new CoordinationRuntimeError('recovery-required', 'quarantined retained authority lacks its committed capture operation', [worktree.worktree_id]);
+      const operation = latestCommittedQuarantineOperationForWorktree(worktree, operations);
+      if (operation === null) throw new CoordinationRuntimeError('recovery-required', 'quarantined retained authority lacks its committed capture operation', [worktree.worktree_id]);
       records.push(await finishCommittedQuarantine({ context: input.context, unitId: lease.owner.unit_id, attempt: lease.owner.attempt, unitWorktreePath: worktree.canonical_path, summary: 'resume immutable quarantine publication for retained failed-attempt authority', env }, operation));
       processed.add(ownerKey);
       continue;

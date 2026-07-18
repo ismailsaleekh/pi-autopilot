@@ -7,6 +7,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'nod
 import { AUTOPILOT_PREFLIGHT_ROLLBACK_REASON_PREFIX, AUTOPILOT_RUNTIME_ROOT_PREFIX } from './names.ts';
 import { gitQueryText, runGitMutation, runGitQuery } from './git-process.ts';
 import { readImmutableFileBytes } from './coordination/immutable-file.ts';
+import { deterministicWorktreeId } from './coordination/worktree-identity.ts';
 import { executeOwnedWorktreeSaga } from './coordination/worktree-saga.ts';
 import type { CoordinationChildLease, CoordinationUnitAttempt, CoordinationWorktree, CoordinationWorktreeOperation } from './coordination/types.ts';
 import { coordinationCutoverCommitted } from './coordination/migration-paths.ts';
@@ -289,8 +290,9 @@ async function exactLaterPackageSupersession(input: {
 }): Promise<{ readonly later: readonly CoordinationWorktreeOperation[] | null; readonly blocker: string | null }> {
   const reject = (blocker: string): { readonly later: null; readonly blocker: string } => ({ later: null, blocker });
   const rollback = input.rollback;
+  const canonicalWorktreeId = deterministicWorktreeId(rollback.owner, 'unit');
   const later = input.operations
-    .filter((operation) => operation.worktree_id === rollback.worktree_id && sameCoordinationOwner(operation.owner, rollback.owner) && operation.intent_event_seq > rollback.intent_event_seq)
+    .filter((operation) => deterministicWorktreeId(operation.owner, operation.owner.unit_id === 'main' ? 'main' : 'unit') === canonicalWorktreeId && sameCoordinationOwner(operation.owner, rollback.owner) && operation.intent_event_seq > rollback.intent_event_seq)
     .sort((left, right) => left.intent_event_seq - right.intent_event_seq || left.operation_id.localeCompare(right.operation_id));
   if (later.some((operation) => operation.operation_type === 'metadata-reconcile')) return reject('later-operation-plan-contains-metadata-reconciliation');
   const ordinaryLater = later.filter((operation): operation is Exclude<CoordinationWorktreeOperation, { readonly operation_type: 'metadata-reconcile' }> => operation.operation_type !== 'metadata-reconcile');
@@ -319,7 +321,7 @@ async function exactLaterPackageSupersession(input: {
 
   const matchingChildren = input.childLeases.filter((child) => child.owner.repo_id === rollback.owner.repo_id && child.owner.workstream_run === rollback.owner.workstream_run && child.owner.unit_id === rollback.owner.unit_id && child.owner.attempt === rollback.owner.attempt);
   const matchingAttempts = input.unitAttempts.filter((attempt) => sameCoordinationOwner(attempt.owner, rollback.owner));
-  const matchingWorktrees = input.worktrees.filter((worktree) => worktree.worktree_id === rollback.worktree_id && worktree.owner.repo_id === rollback.owner.repo_id && worktree.owner.workstream_run === rollback.owner.workstream_run && worktree.owner.unit_id === rollback.owner.unit_id && worktree.owner.attempt === rollback.owner.attempt);
+  const matchingWorktrees = input.worktrees.filter((worktree) => worktree.worktree_id === canonicalWorktreeId && deterministicWorktreeId(worktree.owner, worktree.kind) === canonicalWorktreeId && worktree.owner.repo_id === rollback.owner.repo_id && worktree.owner.workstream_run === rollback.owner.workstream_run && worktree.owner.unit_id === rollback.owner.unit_id && worktree.owner.attempt === rollback.owner.attempt);
   const child = matchingChildren[0];
   const attempt = matchingAttempts[0];
   const worktree = matchingWorktrees[0];

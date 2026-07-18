@@ -1,7 +1,7 @@
 import { claimModesConflict, coordinationPathsOverlap } from "./contracts.js";
 import { coordinationOwnerKey, detectCoordinationWaitCycles } from "./deadlock.js";
 import { CoordinationRuntimeError } from "./failures.js";
-import { sameWorktreeAuthority, worktreeOwnerKindKey } from "./worktree-identity.js";
+import { deterministicWorktreeId, sameWorktreeAuthority, worktreeOwnerKindKey } from "./worktree-identity.js";
 const TERMINAL_REQUEST_STATES = new Set(['resolved', 'cancelled', 'superseded']);
 const LIVE_RUN_STATES = new Set(['active', 'paused', 'merging', 'blocked', 'recovering']);
 function ownerKey(owner) {
@@ -37,6 +37,10 @@ export function checkCoordinationInvariants(snapshot) {
     const attempts = new Map(snapshot.unit_attempts.map((attempt) => [ownerKey(attempt.owner), attempt]));
     const groups = new Map(snapshot.acquisition_groups.map((group) => [group.acquisition_group_id, group]));
     const worktrees = new Map(snapshot.worktrees.map((worktree) => [worktree.worktree_id, worktree]));
+    const currentWorktreeIdentity = (operation) => {
+        const canonicalWorktreeId = deterministicWorktreeId(operation.owner, operation.owner.unit_id === 'main' ? 'main' : 'unit');
+        return worktrees.has(canonicalWorktreeId) ? canonicalWorktreeId : operation.worktree_id;
+    };
     const reservations = new Map(snapshot.change_reservations.map((reservation) => [reservation.reservation_id, reservation]));
     const pendingMigrationRecoveryLeaseIds = new Set(snapshot.migration_recovery_work.filter((work) => work.status === 'pending' && typeof work.detail['edit_lease_id'] === 'string').map((work) => work.detail['edit_lease_id']));
     const retainedMigrationRecoveryLeaseIds = new Set(snapshot.migration_recovery_work.filter((work) => work.status === 'resolved' && work.resolution?.resolution_type === 'authority-retained' && typeof work.detail['edit_lease_id'] === 'string').map((work) => work.detail['edit_lease_id']));
@@ -444,14 +448,16 @@ export function checkCoordinationInvariants(snapshot) {
     // current worktree version or it is stale and requires owned reconciliation.
     const maxAuthorityVersionByWorktree = new Map();
     for (const operation of snapshot.worktree_operations) {
-        const current = maxAuthorityVersionByWorktree.get(operation.worktree_id);
+        const currentWorktreeId = currentWorktreeIdentity(operation);
+        const current = maxAuthorityVersionByWorktree.get(currentWorktreeId);
         if (current === undefined || operation.authority_version > current)
-            maxAuthorityVersionByWorktree.set(operation.worktree_id, operation.authority_version);
+            maxAuthorityVersionByWorktree.set(currentWorktreeId, operation.authority_version);
     }
     const incompleteByWorktree = new Map();
     for (const operation of snapshot.worktree_operations) {
         assertOwner(operation.owner, operation.operation_id);
-        const worktree = worktrees.get(operation.worktree_id);
+        const currentWorktreeId = currentWorktreeIdentity(operation);
+        const worktree = worktrees.get(currentWorktreeId);
         if (worktree === undefined)
             findings.push(finding('operation-worktree-missing', operation.operation_id, 'worktree does not exist'));
         else {
@@ -465,7 +471,7 @@ export function checkCoordinationInvariants(snapshot) {
                 : worktree.canonical_path === operation.intent.worktree_path && worktree.git_common_dir === operation.intent.git_common_dir && worktree.branch === operation.intent.branch;
             if (!intentAuthorityMatches)
                 findings.push(finding('operation-intent-authority-mismatch', operation.operation_id, 'operation intent disagrees with immutable worktree authority'));
-            const maxAuthorityVersion = maxAuthorityVersionByWorktree.get(operation.worktree_id) ?? operation.authority_version;
+            const maxAuthorityVersion = maxAuthorityVersionByWorktree.get(currentWorktreeId) ?? operation.authority_version;
             const versionValid = operation.stage === 'committed'
                 ? worktree.version >= operation.authority_version && worktree.version <= maxAuthorityVersion + 1
                 : worktree.version === operation.authority_version;
@@ -478,14 +484,14 @@ export function checkCoordinationInvariants(snapshot) {
         if ((operation.stage === 'verified' || operation.stage === 'committed') && (operation.completed_steps.length !== requiredOperationSteps.length || requiredOperationSteps.some((step, index) => operation.completed_steps[index] !== step)))
             findings.push(finding('operation-step-plan-incomplete', operation.operation_id, 'verified operation lacks the closed probe/action/verification step plan'));
         if (!['committed', 'compensated', 'failed'].includes(operation.stage)) {
-            const prior = incompleteByWorktree.get(operation.worktree_id);
+            const prior = incompleteByWorktree.get(currentWorktreeId);
             if (prior !== undefined)
                 findings.push(finding('concurrent-worktree-operations', operation.operation_id, `worktree already has incomplete operation ${prior}`));
             else
-                incompleteByWorktree.set(operation.worktree_id, operation.operation_id);
+                incompleteByWorktree.set(currentWorktreeId, operation.operation_id);
         }
         if (operation.operation_type === 'remove' && operation.stage === 'committed' && worktree?.state !== 'removed') {
-            const laterCommittedRecreate = snapshot.worktree_operations.some((candidate) => candidate.worktree_id === operation.worktree_id
+            const laterCommittedRecreate = snapshot.worktree_operations.some((candidate) => currentWorktreeIdentity(candidate) === currentWorktreeId
                 && candidate.operation_type === 'create'
                 && candidate.stage === 'committed'
                 && candidate.intent_event_seq > operation.intent_event_seq
@@ -496,7 +502,7 @@ export function checkCoordinationInvariants(snapshot) {
     }
     const auditedProjectionRetirements = new Set(snapshot.events.filter((event) => event.event_type === 'worktree-projection-retired' && event.entity_type === 'worktree').map((event) => event.entity_id));
     for (const worktree of snapshot.worktrees) {
-        if (worktree.state === 'removed' && !auditedProjectionRetirements.has(worktree.worktree_id) && !snapshot.worktree_operations.some((operation) => operation.worktree_id === worktree.worktree_id && operation.operation_type === 'remove' && operation.stage === 'committed'))
+        if (worktree.state === 'removed' && !auditedProjectionRetirements.has(worktree.worktree_id) && !snapshot.worktree_operations.some((operation) => currentWorktreeIdentity(operation) === worktree.worktree_id && operation.operation_type === 'remove' && operation.stage === 'committed'))
             findings.push(finding('removed-worktree-without-commit', worktree.worktree_id, 'removed worktree state requires a committed remove operation or an audited exact-projection retirement'));
     }
     for (const edge of snapshot.wait_for_edges) {

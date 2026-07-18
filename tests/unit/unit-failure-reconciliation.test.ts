@@ -5,13 +5,28 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { it } from 'node:test';
 
-import type { CoordinationChildLease } from '../../src/core/coordination/types.ts';
+import type { CoordinationChildLease, CoordinationWorktree, CoordinationWorktreeOperation } from '../../src/core/coordination/types.ts';
 import type { ActiveAutopilotContext } from '../../src/core/parallel-runtime.ts';
-import { acceptedTerminalVerdict } from '../../src/core/unit-failure.ts';
+import { deterministicWorktreeId } from '../../src/core/coordination/worktree-identity.ts';
+import { acceptedTerminalVerdict, latestCommittedQuarantineOperationForWorktree } from '../../src/core/unit-failure.ts';
 
 function digest(bytes: string): `sha256:${string}` {
   return `sha256:${createHash('sha256').update(bytes, 'utf8').digest('hex')}`;
 }
+
+void it('selects a historical aliased quarantine operation through the current canonical worktree identity', () => {
+  const owner = { repo_id: 'repo-alias', autopilot_id: 'auto-alias', workstream_run: 'run-alias', unit_id: 'unit-alias', attempt: 2 } as const;
+  const worktree: CoordinationWorktree = {
+    schema_version: 'autopilot.coordination_worktree.v2', worktree_id: deterministicWorktreeId(owner, 'unit'), owner, kind: 'unit', canonical_path: '/tmp/unit-alias', git_common_dir: '/tmp/repo-alias/.git', branch: 'autopilot/unit-alias', state: 'quarantined', version: 4,
+  };
+  const historical: CoordinationWorktreeOperation = {
+    schema_version: 'autopilot.worktree_operation.v2', operation_id: 'operation-historical-quarantine', worktree_id: 'migration-worktree-historical-quarantine', owner, operation_type: 'quarantine', stage: 'committed', authority_version: 3, intent_event_seq: 41,
+    intent: { repo_root: '/tmp/repo-alias', worktree_path: worktree.canonical_path, git_common_dir: worktree.git_common_dir, branch: worktree.branch, reason: 'retain failed work', base_sha: null, target_sha: null, archive_ref: 'refs/autopilot/archive/unit-alias', checkout_mode: null, sparse_patterns: [], paths: [], metadata_refs: [] },
+    completed_steps: ['preflight-probe', 'external-action', 'postcondition-verification'], current_step: null, recovery_attempts: 0, verification_evidence: { ref: '_saga-evidence/run-alias/operation-historical-quarantine.json', sha256: `sha256:${'a'.repeat(64)}` }, error_code: null, version: 4,
+  };
+  assert.equal(latestCommittedQuarantineOperationForWorktree(worktree, [historical]), historical);
+  assert.throws(() => latestCommittedQuarantineOperationForWorktree({ ...worktree, worktree_id: historical.worktree_id }, [historical]), /current canonical worktree projection/u);
+});
 
 void it('distinguishes successful source terminal evidence from failure recovery before quarantine reconciliation', async () => {
   const root = await mkdtemp(join(tmpdir(), 'pi-autopilot-terminal-verdict-'));

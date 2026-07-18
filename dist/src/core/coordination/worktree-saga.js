@@ -201,24 +201,30 @@ export class OwnedWorktreeSagaClient {
         if (spec.operationId !== undefined && !allOperations.some((entry) => entry.operation_id === spec.operationId))
             throw new CoordinationRuntimeError('invalid-request', 'caller-supplied worktree operation ID is allowed only to resume an existing historical operation', [spec.operationId, canonicalOperationId]);
         const opId = spec.operationId ?? canonicalOperationId;
-        const existing = allOperations.find((entry) => entry.operation_id === opId);
-        const semantic = allWorktrees.filter((entry) => entry.state !== 'removed' && worktreeOwnerKindKey(entry) === worktreeOwnerKindKey(proposed));
+        const exactExisting = allOperations.find((entry) => entry.operation_id === opId);
+        const semanticExisting = allOperations.filter((entry) => operationKind(entry.owner) === spec.kind
+            && sameOwner(entry.owner, owner)
+            && entry.operation_type === spec.operationType
+            && canonicalJson(entry.intent) === canonicalJson(spec.intent));
+        if (semanticExisting.length > 1)
+            throw new CoordinationRuntimeError('recovery-required', 'multiple historical operations match one canonical operation-key v2 identity', semanticExisting.map((entry) => entry.operation_id));
+        const existing = exactExisting ?? (spec.operationId === undefined ? semanticExisting[0] : undefined);
+        const semantic = allWorktrees.filter((entry) => worktreeOwnerKindKey(entry) === worktreeOwnerKindKey(proposed));
+        if (semantic.length > 1)
+            throw new CoordinationRuntimeError('recovery-required', 'multiple current worktree projections match one canonical semantic identity', semantic.map((entry) => entry.worktree_id));
         if (semantic.some((entry) => !sameWorktreeAuthority(entry, proposed)))
-            throw new CoordinationRuntimeError('store-corrupt', 'active worktree owner/kind projections disagree in authority-bearing identity', semantic.map((entry) => entry.worktree_id));
-        const deterministic = semantic.find((entry) => entry.worktree_id === id);
-        const withHistory = new Set(allOperations.map((entry) => entry.worktree_id));
-        const historical = semantic.filter((entry) => withHistory.has(entry.worktree_id));
-        if (historical.length > 1)
-            throw new CoordinationRuntimeError('recovery-required', 'duplicate active worktree projections carry multiple operation histories', historical.map((entry) => entry.worktree_id));
-        const operationWorktree = existing === undefined ? undefined : allWorktrees.find((entry) => entry.worktree_id === existing.worktree_id) ?? semantic[0];
+            throw new CoordinationRuntimeError('store-corrupt', 'current worktree projection disagrees in authority-bearing identity', semantic.map((entry) => entry.worktree_id));
+        const canonicalProjection = allWorktrees.find((entry) => entry.worktree_id === id);
+        const operationWorktree = existing === undefined ? undefined : canonicalProjection ?? semantic[0] ?? allWorktrees.find((entry) => entry.worktree_id === existing.worktree_id);
         if (existing !== undefined && operationWorktree === undefined)
             throw new CoordinationRuntimeError('store-corrupt', 'existing worktree operation has no current canonical semantic projection', [existing.operation_id, existing.worktree_id, id]);
         if (operationWorktree !== undefined && !sameWorktreeAuthority(operationWorktree, proposed))
             throw new CoordinationRuntimeError('store-corrupt', 'historical operation worktree authority differs from canonical semantic ownership', [operationWorktree.worktree_id, id]);
         // Replays preserve the operation's immutable historical payload ID. New
         // operations route through the canonical semantic projection selected by
-        // the schema-13 store/alias layer.
-        const existingWorktree = operationWorktree ?? historical[0] ?? deterministic ?? semantic[0] ?? allWorktrees.find((entry) => entry.worktree_id === id);
+        // the schema-13 store/alias layer. The raw-ID fallback is only for a
+        // pre-schema-13 historical projection when no canonical projection exists.
+        const existingWorktree = operationWorktree ?? canonicalProjection ?? semantic[0];
         const worktree = existingWorktree ?? proposed;
         if (existing !== undefined) {
             if (!sameOwner(existing.owner, owner) || existing.operation_type !== spec.operationType || canonicalJson(existing.intent) !== canonicalJson(spec.intent))
@@ -819,12 +825,17 @@ export async function recoverOwnedWorktreeSagas(input) {
     if (client.session.repo_id !== input.active.repo_key || client.session.autopilot_id !== input.active.autopilot_id || client.session.workstream_run !== input.active.workstream_run)
         throw new CoordinationRuntimeError('unauthorized-client', 'worktree saga recovery session does not own the active run');
     const recovered = [];
-    for (const candidate of await client.operations()) {
+    const operations = await client.operations();
+    const worktrees = await client.worktrees();
+    for (const candidate of operations) {
         if (TERMINAL_STAGES.has(candidate.stage))
             continue;
-        const worktree = (await client.worktrees()).find((entry) => entry.worktree_id === candidate.worktree_id);
-        if (worktree === undefined || !sameOwner(worktree.owner, candidate.owner))
-            throw new CoordinationRuntimeError('store-corrupt', 'recoverable operation lacks exact worktree ownership', [candidate.operation_id]);
+        const kind = operationKind(candidate.owner);
+        const canonicalWorktreeId = deterministicWorktreeId(candidate.owner, kind);
+        const matchingWorktrees = worktrees.filter((entry) => entry.worktree_id === canonicalWorktreeId && entry.kind === kind && sameOwner(entry.owner, candidate.owner));
+        const worktree = matchingWorktrees[0];
+        if (matchingWorktrees.length !== 1 || worktree === undefined)
+            throw new CoordinationRuntimeError('store-corrupt', 'recoverable operation lacks exactly one canonical worktree owner', [candidate.operation_id, candidate.worktree_id, canonicalWorktreeId]);
         if (candidate.operation_type === 'metadata-reconcile')
             throw new CoordinationRuntimeError('recovery-required', 'metadata reconciliation requires its exact-set production consumer', [candidate.operation_id]);
         const spec = {

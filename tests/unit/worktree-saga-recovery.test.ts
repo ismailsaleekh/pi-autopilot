@@ -250,6 +250,53 @@ void describe('owner-scoped worktree and Git saga recovery', () => {
     }
   });
 
+  void it('recovers a nonterminal historical alias operation and replays it without minting a v2 duplicate', async () => {
+    const value = await setup('alias-recovery');
+    let restarted: Awaited<ReturnType<typeof startCoordinatorServer>> | null = null;
+    try {
+      const saga = new OwnedWorktreeSagaClient(new CoordinatorClient({ env: value.env, autoStart: false }), value.session);
+      const create = unitCreateSpec(value, 'unit-historical-alias-recovery');
+      const prepared = await saga.prepare(create);
+      const canonicalWorktreeId = prepared.worktree.worktree_id;
+      const aliasWorktreeId = 'migration-worktree-historical-alias-recovery';
+      const historicalOperationId = 'operation-historical-alias-recovery';
+      await value.server.close();
+      const currentGeneration = readCurrentStoreGeneration(coordinatorRuntimePaths(value.env));
+      if (currentGeneration === null) throw new Error('historical alias recovery generation is missing');
+      const database = new DatabaseSync(currentGeneration.database_path);
+      try {
+        const historicalOperation = { ...prepared.operation, operation_id: historicalOperationId, worktree_id: aliasWorktreeId };
+        const aliasWorktree = { ...prepared.worktree, worktree_id: aliasWorktreeId };
+        const aliasEvidenceSha = `sha256:${createHash('sha256').update(JSON.stringify(historicalOperation), 'utf8').digest('hex')}`;
+        database.prepare('UPDATE worktree_operations SET entity_id=?,payload_json=? WHERE entity_id=?').run(historicalOperationId, JSON.stringify(historicalOperation), prepared.operation.operation_id);
+        database.prepare('INSERT INTO worktrees(entity_id,repo_id,workstream_run,payload_json,version,canonical_worktree_id,autopilot_id,unit_id,attempt,kind,is_current_canonical) VALUES(?,?,?,?,?,?,?,?,?,?,0)').run(
+          aliasWorktreeId, aliasWorktree.owner.repo_id, aliasWorktree.owner.workstream_run, JSON.stringify(aliasWorktree), aliasWorktree.version, canonicalWorktreeId, aliasWorktree.owner.autopilot_id, aliasWorktree.owner.unit_id, aliasWorktree.owner.attempt, aliasWorktree.kind,
+        );
+        database.prepare('INSERT INTO worktree_aliases(alias_worktree_id,canonical_worktree_id,repo_id,autopilot_id,workstream_run,unit_id,attempt,kind,resolution_state,reason,evidence_sha256,created_event_seq) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)').run(
+          aliasWorktreeId, canonicalWorktreeId, historicalOperation.owner.repo_id, historicalOperation.owner.autopilot_id, historicalOperation.owner.workstream_run, historicalOperation.owner.unit_id, historicalOperation.owner.attempt, 'unit', 'resolved', 'legacy-migration-id', aliasEvidenceSha, historicalOperation.intent_event_seq,
+        );
+      } finally { database.close(); }
+      restarted = await startCoordinatorServer(coordinatorRuntimePaths(value.env));
+
+      const recovered = await recoverOwnedWorktreeSagas({ active: value.active, env: value.env });
+      const historical = recovered.find((operation) => operation.operation_id === historicalOperationId);
+      assert.equal(historical?.stage, 'committed');
+      assert.equal(historical?.worktree_id, aliasWorktreeId, 'immutable historical operation ID must remain raw');
+      assert.equal(existsSync(create.intent.worktree_path), true);
+      let duplicateActions = 0;
+      const replay = await executeOwnedWorktreeSaga(create, { action: () => { duplicateActions += 1; } }, value.env);
+      assert.equal(replay.replayed, true);
+      assert.equal(replay.operation?.operation_id, historicalOperationId);
+      assert.equal(duplicateActions, 0, 'implicit canonical replay must not execute a duplicate external effect');
+      const matching = (await saga.operations()).filter((operation) => operation.owner.unit_id === create.unitId && operation.operation_type === 'create' && JSON.stringify(operation.intent) === JSON.stringify(create.intent));
+      assert.deepEqual(matching.map((operation) => operation.operation_id), [historicalOperationId]);
+    } finally {
+      if (restarted !== null) await restarted.close();
+      await value.server.close().catch(() => undefined);
+      await rm(value.root, { recursive: true, force: true });
+    }
+  });
+
   void it('preserves bounded typed preflight and reconciling evidence without executing an unsafe action', async () => {
     let rejectReconcilingReport = true;
     const value = await setup('x', {
@@ -534,8 +581,21 @@ void describe('owner-scoped worktree and Git saga recovery', () => {
       await writeFile(join(taskRoot, UNIT_INDEX_FILE), `${JSON.stringify({ schema_version: 'autopilot.unit_index.v1', units: [quarantinedBranchInfo] }, null, 2)}\n`, 'utf8');
       await writeFile(join(taskRoot, BRANCHES_FILE), `${JSON.stringify({ schema_version: 'autopilot.branches.v1', active_branch: value.active.branch, base_sha: value.active.target_base_sha, current_sha: value.active.target_base_sha, archive_ref: null, unit_branches: [quarantinedBranchInfo] }, null, 2)}\n`, 'utf8');
 
+      const rollbackBeforeAlias = (await saga.operations()).find((operation) => operation.operation_type === 'remove' && operation.intent.reason.startsWith('autopilot-agent-run preflight rollback after failure:'));
+      if (rollbackBeforeAlias?.verification_evidence === null || rollbackBeforeAlias?.verification_evidence === undefined) throw new Error('superseded rollback evidence is missing before alias migration');
+      const canonicalProjection = (await saga.worktrees()).find((worktree) => worktree.owner.unit_id === create.unitId && worktree.owner.attempt === create.attempt);
+      if (canonicalProjection === undefined) throw new Error('superseded rollback canonical worktree is missing');
+      const rollbackAliasId = 'migration-worktree-superseded-rollback';
+      const rollbackEvidencePath = join(value.active.worktree_root, ...rollbackBeforeAlias.verification_evidence.ref.split('/'));
+      const rollbackEvidence = JSON.parse(await readFile(rollbackEvidencePath, 'utf8')) as Readonly<Record<string, unknown>>;
+      const historicalRollbackEvidenceBytes = `${JSON.stringify({ ...rollbackEvidence, worktree_id: rollbackAliasId })}\n`;
+      const historicalRollbackEvidenceSha = `sha256:${createHash('sha256').update(historicalRollbackEvidenceBytes, 'utf8').digest('hex')}` as const;
+      const historicalRollback = { ...rollbackBeforeAlias, worktree_id: rollbackAliasId, verification_evidence: { ...rollbackBeforeAlias.verification_evidence, sha256: historicalRollbackEvidenceSha } };
+      const aliasProjection = { ...canonicalProjection, worktree_id: rollbackAliasId };
+
       const generationDatabasePath = value.server.store.currentGeneration().database_path;
       await value.server.close();
+      await writeFile(rollbackEvidencePath, historicalRollbackEvidenceBytes, 'utf8');
       const database = new DatabaseSync(generationDatabasePath);
       try {
         database.prepare("UPDATE child_leases SET status='recovery-required', version=version+1 WHERE child_lease_id=?").run(childLeaseId);
@@ -544,6 +604,13 @@ void describe('owner-scoped worktree and Git saga recovery', () => {
         const payload = JSON.parse(row['payload_json']) as Record<string, unknown>;
         const next = { ...payload, state: 'quarantined', version: Number(payload['version']) + 1 };
         database.prepare('UPDATE unit_attempts SET payload_json=?, version=? WHERE entity_id=?').run(JSON.stringify(next), next.version, row['entity_id']);
+        database.prepare('UPDATE worktree_operations SET payload_json=? WHERE entity_id=?').run(JSON.stringify(historicalRollback), historicalRollback.operation_id);
+        database.prepare('INSERT INTO worktrees(entity_id,repo_id,workstream_run,payload_json,version,canonical_worktree_id,autopilot_id,unit_id,attempt,kind,is_current_canonical) VALUES(?,?,?,?,?,?,?,?,?,?,0)').run(
+          rollbackAliasId, aliasProjection.owner.repo_id, aliasProjection.owner.workstream_run, JSON.stringify(aliasProjection), aliasProjection.version, canonicalProjection.worktree_id, aliasProjection.owner.autopilot_id, aliasProjection.owner.unit_id, aliasProjection.owner.attempt, aliasProjection.kind,
+        );
+        database.prepare('INSERT INTO worktree_aliases(alias_worktree_id,canonical_worktree_id,repo_id,autopilot_id,workstream_run,unit_id,attempt,kind,resolution_state,reason,evidence_sha256,created_event_seq) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)').run(
+          rollbackAliasId, canonicalProjection.worktree_id, historicalRollback.owner.repo_id, historicalRollback.owner.autopilot_id, historicalRollback.owner.workstream_run, historicalRollback.owner.unit_id, historicalRollback.owner.attempt, aliasProjection.kind, 'resolved', 'legacy-migration-id', historicalRollbackEvidenceSha, historicalRollback.intent_event_seq,
+        );
       } finally { database.close(); }
       restarted = await startCoordinatorServer(coordinatorRuntimePaths(value.env));
 
