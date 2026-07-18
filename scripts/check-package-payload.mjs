@@ -37,7 +37,16 @@ const required = [
   'artifacts/security/offline-security-scan.json',
 ];
 const missing = required.filter((path) => !files.has(path));
-const forbidden = [...files].filter((path) => path.startsWith('tests/') || path === '.pi' || path.startsWith('.pi/') || path.includes('/.pi/'));
+const forbidden = [...files].filter((path) => path.startsWith('tests/')
+  || path.startsWith('tools/')
+  || path === '.pi'
+  || path.startsWith('.pi/')
+  || path.includes('/.pi/')
+  || /(?:s1-corpus|corpus-clone|corpus-rehearsal|rehearsal-result|live-witness|transition-backup|actual-cf50|cf50.*\.tgz)/iu.test(path)
+  || /(?:^|\/)private(?:\/|$)/u.test(path)
+  || /(?:^|\/)(?:capability(?:\.key)?|c5-sandbox\.sb)$/u.test(path)
+  || path.endsWith('.sb')
+  || path.endsWith('.s1-corpus-request.json'));
 let securityScanError = null;
 let lockfileSha256 = null;
 let securityScanLockfileSha256 = null;

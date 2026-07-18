@@ -259,7 +259,11 @@ void describe('Autopilot command SDK surface', () => {
       if (typeof evidenceRef !== 'string') throw new Error('missing main create evidence ref');
       const stateRoot = process.env[AUTOPILOT_STATE_ROOT_ENV];
       if (stateRoot === undefined) throw new Error('missing state root');
-      assert.match(await readFile(join(stateRoot, 'worktrees', repo.repoKey, ...evidenceRef.split('/')), 'utf8'), /main_metadata_complete/u);
+      const evidenceDocument: unknown = JSON.parse(await readFile(join(stateRoot, 'worktrees', repo.repoKey, ...evidenceRef.split('/')), 'utf8')) as unknown;
+      if (typeof evidenceDocument !== 'object' || evidenceDocument === null || Array.isArray(evidenceDocument)) throw new Error('main create evidence document is malformed');
+      const proof = (evidenceDocument as Readonly<Record<string, unknown>>)['proof'];
+      if (!Array.isArray(proof) || !proof.every((entry) => typeof entry === 'string')) throw new Error('main create evidence proof is malformed');
+      assert.equal(proof.includes('metadata_complete'), true);
     });
   });
 

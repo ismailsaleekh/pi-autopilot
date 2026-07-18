@@ -308,6 +308,7 @@ void describe('integrated S1 admission server security', () => {
       assert.equal(typeof legacyProjection, 'object');
       assert.equal(JSON.stringify(legacyProjection).includes('negotiated_coordinator_identity'), false);
       assert.equal(JSON.stringify(legacyProjection).includes('run_scoped_logical_faults'), false);
+      assert.equal(JSON.stringify(legacyProjection).includes('negotiated_identity_recovery'), false);
       const owner = { repo_id: 'legacy-repo', autopilot_id: 'legacy-autopilot', workstream_run: 'legacy-run', unit_id: 'legacy-unit', attempt: 1 };
       const worktreeId = `worktree-${'55'.repeat(16)}`;
       const metadataOnly = await legacy.exchange(asRecord({
@@ -320,7 +321,13 @@ void describe('integrated S1 admission server security', () => {
           operation: {
             schema_version: 'autopilot.worktree_operation.v2', operation_id: 'legacy-metadata-operation', worktree_id: worktreeId, owner,
             operation_type: 'metadata-reconcile', stage: 'prepared', authority_version: 1, intent_event_seq: 0,
-            intent: { repo_root: join(root, 'legacy-repo'), worktree_path: join(root, 'legacy-worktree'), git_common_dir: join(root, 'legacy-repo', '.git'), branch: 'autopilot/unit/legacy-run/legacy-unit/attempt-1', reason: 'legacy peer must not access S1 metadata vocabulary', base_sha: '7'.repeat(40), target_sha: null, archive_ref: null, checkout_mode: 'full', sparse_patterns: [], paths: [], metadata_refs: [] },
+            intent: {
+              schema_version: 'autopilot.worktree_metadata_reconcile_intent.v1', repo_id: owner.repo_id, canonical_worktree_id: worktreeId,
+              git_common_dir: join(root, 'legacy-repo', '.git'), target_registration_path: join(root, 'legacy-worktree'),
+              approved_before_registrations: [{ worktree_path: join(root, 'legacy-worktree'), head_sha: '7'.repeat(40), branch_ref: 'refs/heads/autopilot/unit/legacy-run/legacy-unit/attempt-1', prunable: true }],
+              approved_prunable_registration_paths: [join(root, 'legacy-worktree')], expected_after_registrations: [],
+              preserved_refs: [{ ref: 'refs/heads/autopilot/unit/legacy-run/legacy-unit/attempt-1', sha: '7'.repeat(40) }], recovery_evidence_sha256: `sha256:${'9'.repeat(64)}`,
+            },
             completed_steps: [], current_step: null, recovery_attempts: 0, verification_evidence: null, error_code: null, version: 1,
           },
         },
@@ -328,6 +335,17 @@ void describe('integrated S1 admission server security', () => {
       assert.equal(metadataOnly.ok, false);
       assert.equal(metadataOnly.error_code, 'unauthorized-client');
       legacy.close();
+
+      const legacyFault = await RawCoordinatorSocket.open(paths.socketPath);
+      assert.equal((await legacyFault.exchange(asRecord(request('handshake', 'legacy-fault-handshake')), capability)).ok, true);
+      const legacyResolution = await legacyFault.exchange(asRecord({
+        schema_version: 'autopilot.coordinator_request.v1', protocol_version: '1.6', request_id: 'legacy-identity-fault-resolution', action: 'resolve-run-scoped-fault',
+        idempotency_key: 'legacy-identity-fault-resolution-key', repo_id: 'legacy-repo', workstream_run: 'legacy-run', session_id: 'legacy-session', fencing_generation: 1, expected_version: 1,
+        payload: { fault_id: 'fault-legacy', resolution_evidence_ref: '_saga-evidence/legacy-run/identity-recovery/fault-legacy.json', resolution_evidence_sha256: `sha256:${'8'.repeat(64)}`, session_lease_id: 'legacy-session-lease', session_token: '66'.repeat(32) },
+      }), capability);
+      assert.equal(legacyResolution.ok, false);
+      assert.equal(legacyResolution.error_code, 'unauthorized-client');
+      legacyFault.close();
 
       const duplicate = await RawCoordinatorSocket.open(paths.socketPath);
       assert.equal((await duplicate.exchange(asRecord(request('handshake', 'duplicate-handshake')), capability)).ok, true);

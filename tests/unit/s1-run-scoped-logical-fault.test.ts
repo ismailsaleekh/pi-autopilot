@@ -69,6 +69,10 @@ void describe('S1 run-scoped logical store faults', () => {
       assert.equal('run_scoped_faults' in status.payload, false, 'legacy status grammar must not expose negotiated S1 vocabulary');
       const doctor = store.handle(request({ request_id: 'doctor-faulted', action: 'doctor', idempotency_key: null, repo_id: 'global', workstream_run: null, session_id: null, fencing_generation: null, expected_version: null, payload: {} }));
       assert.equal(doctor.ok, true, JSON.stringify(doctor.payload));
+      const doctorProjection = doctor.payload['projection'];
+      if (typeof doctorProjection !== 'object' || doctorProjection === null || Array.isArray(doctorProjection)) throw new Error('doctor summary projection is malformed');
+      assert.equal(Reflect.get(doctorProjection, 'integrity'), 'ok');
+      assert.equal(Reflect.get(doctorProjection, 'healthy'), true, 'one correctly scoped logical row fault must not make repository-wide doctor unhealthy');
       assert.equal('run_scoped_faults' in doctor.payload, false, 'legacy doctor grammar must remain unchanged');
     } finally { store.close(); }
 

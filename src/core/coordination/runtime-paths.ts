@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { mkdir, open, readFile } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
 import { platform, tmpdir } from 'node:os';
 
 import { AUTOPILOT_STATE_ROOT_ENV, resolveAutopilotStateRoot, type ProcessEnvLike } from '../parallel-runtime.ts';
@@ -10,7 +10,7 @@ import { assertPrivatePathNoAliases, enforcePrivateAuthorityPath, enforceWindows
 export { enforcePrivateAuthorityPath, enforceWindowsPrivateAcl, enforceWindowsPrivateTree, ensurePrivateAuthorityDirectory, windowsPrivateAclCommand, windowsPrivateTreeAclCommand } from '../private-path.ts';
 export type { WindowsPrivateAclCommand } from '../private-path.ts';
 
-export { COORDINATOR_API_SCHEMA_VERSION, COORDINATOR_BUSY_TIMEOUT_MS, COORDINATOR_DATABASE_SCHEMA_VERSION, COORDINATOR_GRANT_OFFER_SWEEP_MS, COORDINATOR_GRANT_OFFER_TTL_MS, COORDINATOR_HEARTBEAT_MS, COORDINATOR_IMPLEMENTATION_BUILD, COORDINATOR_LEGACY_FACADE_BUILD, COORDINATOR_MAX_FRAME_BYTES, COORDINATOR_PACKAGE_BUILD, COORDINATOR_SESSION_LEASE_MS, COORDINATOR_STORE_SCHEMA_VERSION, COORDINATOR_WIRE_LINEAGE } from './runtime-constants.ts';
+export { COORDINATOR_API_SCHEMA_VERSION, COORDINATOR_BUSY_TIMEOUT_MS, COORDINATOR_DATABASE_SCHEMA_VERSION, COORDINATOR_GRANT_OFFER_SWEEP_MS, COORDINATOR_GRANT_OFFER_TTL_MS, COORDINATOR_HEARTBEAT_MS, COORDINATOR_IMPLEMENTATION_BUILD, COORDINATOR_LEGACY_FACADE_BUILD, COORDINATOR_MAX_FRAME_BYTES, COORDINATOR_PACKAGE_BUILD, COORDINATOR_PACKAGE_VERSION, COORDINATOR_SESSION_LEASE_MS, COORDINATOR_STORE_SCHEMA_VERSION, COORDINATOR_WIRE_LINEAGE } from './runtime-constants.ts';
 
 export interface CoordinatorRuntimePaths {
   readonly stateRoot: string;
@@ -40,6 +40,13 @@ export interface CoordinatorRuntimePaths {
   readonly semanticReplayReceiptsRoot: string;
 }
 
+function coordinatorTemporaryRoot(env: ProcessEnvLike): string {
+  const configured = env['TMPDIR'] ?? env['TEMP'] ?? env['TMP'];
+  if (configured === undefined || configured.length === 0) return tmpdir();
+  if (!isAbsolute(configured)) throw new CoordinationRuntimeError('invalid-request', 'coordinator temporary root must be absolute when configured');
+  return resolve(configured);
+}
+
 export function coordinatorRuntimePaths(env: ProcessEnvLike = process.env): CoordinatorRuntimePaths {
   const stateRoot = resolveAutopilotStateRoot(env);
   const coordinatorRoot = join(stateRoot, 'coordinator');
@@ -49,19 +56,20 @@ export function coordinatorRuntimePaths(env: ProcessEnvLike = process.env): Coor
   // is intentional: an older live broker is detected and fenced rather than
   // allowing two protocol generations to open the shared database.
   const generation = 'protocol-1.3-schema-9';
-  const currentPipeHash = createHash('sha256').update(`${coordinatorRoot}\0${generation}\0${process.env['USERDOMAIN'] ?? ''}\\${process.env['USERNAME'] ?? ''}`, 'utf8').digest('hex').slice(0, 32);
+  const currentPipeHash = createHash('sha256').update(`${coordinatorRoot}\0${generation}\0${env['USERDOMAIN'] ?? ''}\\${env['USERNAME'] ?? ''}`, 'utf8').digest('hex').slice(0, 32);
+  const temporaryRoot = coordinatorTemporaryRoot(env);
   const preferredPredecessorSocketPath = join(coordinatorRoot, 'coordinator.sock');
   const predecessorSocketPath = platform() === 'win32'
     ? `\\\\.\\pipe\\pi-autopilot-${pipeHash}`
     : Buffer.byteLength(preferredPredecessorSocketPath, 'utf8') <= 100
       ? preferredPredecessorSocketPath
-      : join(tmpdir(), `pi-autopilot-${pipeHash}.sock`);
+      : join(temporaryRoot, `pi-autopilot-${pipeHash}.sock`);
   const preferredCurrentSocketPath = join(coordinatorRoot, `coordinator.${generation}.sock`);
   const socketPath = platform() === 'win32'
     ? `\\\\.\\pipe\\pi-autopilot-${currentPipeHash}`
     : Buffer.byteLength(preferredCurrentSocketPath, 'utf8') <= 100
       ? preferredCurrentSocketPath
-      : join(tmpdir(), `pi-autopilot-${currentPipeHash}.sock`);
+      : join(temporaryRoot, `pi-autopilot-${currentPipeHash}.sock`);
   return {
     stateRoot,
     coordinatorRoot,

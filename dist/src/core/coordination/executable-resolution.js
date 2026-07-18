@@ -2,7 +2,7 @@ import { lstatSync, readFileSync, realpathSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CoordinationRuntimeError } from "./failures.js";
-import { COORDINATOR_PACKAGE_BUILD } from "./runtime-constants.js";
+import { COORDINATOR_PACKAGE_VERSION } from "./runtime-constants.js";
 export const COORDINATOR_COMPILED_ENTRYPOINT_ENV = 'AUTOPILOT_COORDINATOR_COMPILED_ENTRYPOINT';
 const PACKAGE_NAME = 'pi-autopilot';
 const SOURCE_CLIENT_RELATIVE_PATH = join('src', 'core', 'coordination', 'client.ts');
@@ -56,12 +56,6 @@ function assertClosedPackagePath(packageRoot, target, label) {
         ]);
     }
 }
-function expectedPackageVersion() {
-    const suffix = COORDINATOR_PACKAGE_BUILD.lastIndexOf('-cf');
-    if (suffix < 1)
-        throw new CoordinationRuntimeError('system-fatal', 'coordinator package build does not encode a package version');
-    return COORDINATOR_PACKAGE_BUILD.slice(0, suffix);
-}
 function verifyPackageIdentity(packageRoot) {
     const manifestPath = join(packageRoot, 'package.json');
     assertClosedPackagePath(packageRoot, manifestPath, 'coordinator package manifest');
@@ -75,7 +69,7 @@ function verifyPackageIdentity(packageRoot) {
     if (typeof manifest !== 'object' || manifest === null || Array.isArray(manifest))
         throw new CoordinationRuntimeError('coordinator-unavailable', 'coordinator package manifest has invalid package identity', [`package_root=${packageRoot}`]);
     const record = manifest;
-    const expectedVersion = expectedPackageVersion();
+    const expectedVersion = COORDINATOR_PACKAGE_VERSION;
     if (record['name'] !== PACKAGE_NAME || record['version'] !== expectedVersion) {
         throw new CoordinationRuntimeError('coordinator-unavailable', 'coordinator package identity does not match the running client build', [
             `package_root=${packageRoot}`,

@@ -303,16 +303,18 @@ async function verifyMigrationOnCopy(paths: CoordinatorRuntimePaths, record: Coo
   await copyFile(record.path, probePaths.databasePath, fsConstants.COPYFILE_EXCL);
   await enforcePrivateAuthorityPath(probePaths.databasePath, false);
   // The private copy remains a fixed-path schema-12 handoff. Its byte identity
-  // is verified against the exact schema-6 backup before migration; opening
+  // is verified against the exact schema-6 backup before migration begins; opening
   // CoordinatorStore here would prematurely publish schema 13 and its barrier.
   await upgradeVerifiedPrivateSchema6CopyToSchema12(probePaths, record.sha256);
   const checkpoint = new DatabaseSync(probePaths.databasePath, { timeout: 5_000 });
   try {
-    checkpoint.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+    const checkpointResult = checkpoint.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get() as JsonRecord | undefined;
+    if (checkpointResult?.['busy'] !== 0) throw new CoordinationRuntimeError('store-corrupt', 'private migrated target retained a busy WAL snapshot');
+    const journal = checkpoint.prepare('PRAGMA journal_mode=DELETE').get() as JsonRecord | undefined;
+    if (journal?.['journal_mode'] !== 'delete') throw new CoordinationRuntimeError('store-corrupt', 'private migrated target did not retire WAL journal authority');
     if ((checkpoint.prepare('PRAGMA integrity_check').get() as JsonRecord | undefined)?.['integrity_check'] !== 'ok' || (checkpoint.prepare('PRAGMA user_version').get() as JsonRecord | undefined)?.['user_version'] !== COORDINATOR_UPGRADE_PATH.target.database_schema_version) throw new CoordinationRuntimeError('store-corrupt', 'private migrated target failed final target-schema verification');
   } finally { checkpoint.close(); }
-  await unlinkIfExists(`${probePaths.databasePath}-wal`);
-  await unlinkIfExists(`${probePaths.databasePath}-shm`);
+  if (existsSync(`${probePaths.databasePath}-wal`) || existsSync(`${probePaths.databasePath}-shm`)) throw new CoordinationRuntimeError('store-corrupt', 'private migrated target retained WAL/SHM after verified journal retirement', [probePaths.databasePath]);
   const handle = await open(probePaths.databasePath, 'r');
   try { await handle.sync(); } finally { await handle.close(); }
   await fsyncDirectory(dirname(probePaths.databasePath));
@@ -464,10 +466,15 @@ async function publishMigratedPrivateDatabase(paths: CoordinatorRuntimePaths, ba
   const current = databaseVersionAndIntegrity(paths.databasePath);
   if (current.version === COORDINATOR_UPGRADE_PATH.target.database_schema_version && current.integrity === 'ok') return;
   if (current.version !== COORDINATOR_UPGRADE_BARRIER_SCHEMA_VERSION || current.integrity !== 'ok') throw new CoordinationRuntimeError('schema-mismatch', 'target-schema publication requires the exact incompatible migration barrier');
-  const barrier = new DatabaseSync(paths.databasePath, { readOnly: true, timeout: 5_000 });
+  const barrier = new DatabaseSync(paths.databasePath, { timeout: 5_000 });
   try {
     if (installedBarrierBackupDigest(barrier, upgradeId) !== backupRecord.sha256) throw new CoordinationRuntimeError('store-corrupt', 'target-schema publication backup does not match the committed barrier digest');
+    const checkpoint = barrier.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get() as JsonRecord | undefined;
+    if (checkpoint?.['busy'] !== 0) throw new CoordinationRuntimeError('store-corrupt', 'committed upgrade barrier retained a busy predecessor WAL snapshot');
+    const journal = barrier.prepare('PRAGMA journal_mode=DELETE').get() as JsonRecord | undefined;
+    if (journal?.['journal_mode'] !== 'delete') throw new CoordinationRuntimeError('store-corrupt', 'committed upgrade barrier did not retire predecessor WAL authority');
   } finally { barrier.close(); }
+  if (existsSync(`${paths.databasePath}-wal`) || existsSync(`${paths.databasePath}-shm`)) throw new CoordinationRuntimeError('store-corrupt', 'committed upgrade barrier retained WAL/SHM after predecessor retirement', [paths.databasePath]);
   const staged = await verifyMigrationOnCopy(paths, backupRecord, upgradeId, true);
   if (staged !== await migratedPrivateDatabasePath(paths, upgradeId)) throw new CoordinationRuntimeError('system-fatal', 'private migration target path changed unexpectedly');
   await rename(staged, paths.databasePath);

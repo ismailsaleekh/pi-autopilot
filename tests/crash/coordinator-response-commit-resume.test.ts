@@ -47,7 +47,7 @@ void describe('BUG-176 coordinator response-boundary hard-kill recovery', () => 
     try {
       await waitUntil(() => existsSync(paths.socketPath), 'crash-child coordinator socket');
       const request: CoordinatorRequestEnvelope = { schema_version: 'autopilot.coordinator_request.v1', protocol_version: AUTOPILOT_COORDINATOR_PROTOCOL_VERSION, request_id: 'response-crash-attach-session', action: 'attach-session', idempotency_key: 'response-crash-attach-session', repo_id: repoId, workstream_run: runId, session_id: 'response-crash-session', fencing_generation: 1, expected_version: 1, payload: { session_lease_id: 'response-crash-session-lease', session_token: sessionToken, pid: process.pid, boot_id: 'response-crash-boot', lease_expires_at: '2099-01-01T00:00:00.000Z', handoff_token: null } };
-      await assert.rejects(() => new CoordinatorClient({ env, autoStart: false, requestTimeoutMs: 5_000 }).request(request), /closed before a response|ECONNRESET|unavailable/u);
+      await assert.rejects(() => new CoordinatorClient({ env, autoStart: false, requestTimeoutMs: 5_000 }).request(request), /closed before a response|closed between protocol phases|ECONNRESET|unavailable/u);
       const childExit = await childClosed;
       assert.equal(childExit.signal, 'SIGKILL');
       const committed = parseCoordinatorResponseEnvelope(JSON.parse(await readFile(evidencePath, 'utf8')));
@@ -83,7 +83,7 @@ void describe('BUG-176 coordinator response-boundary hard-kill recovery', () => 
       await waitUntil(() => existsSync(paths.socketPath), 'result-receipt crash-child coordinator socket');
       const requestedLeases = Array.from({ length: 1_024 }, (_entry, index) => ({ path: `fixtures/${String(index).padStart(4, '0')}-${'p'.repeat(160)}.json`, mode: 'WRITE' as const, purpose: `crash-bound result ${String(index)} ${'q'.repeat(160)}` }));
       const resultRequest: CoordinatorRequestEnvelope = { schema_version: 'autopilot.coordinator_request.v1', protocol_version: AUTOPILOT_COORDINATOR_PROTOCOL_VERSION, request_id: 'response-crash-acquire-group', action: 'acquire-group', idempotency_key: 'response-crash-acquire-group', repo_id: repoId, workstream_run: runId, session_id: session.session_id, fencing_generation: 1, expected_version: run.version, payload: { acquisition_group_id: 'response-crash-group', acquisition_kind: 'initial', unit_id: 'response-crash-unit', attempt: 1, requested_leases: requestedLeases, reason: 'prove result receipt crash durability', normal_release_condition: { condition_type: 'unit-merged', target_id: 'response-crash-unit:1', evidence: null }, spec_ref: 'unit-specs/response-crash-unit.json', spec_sha256: `sha256:${digest('response-crash-spec')}`, role: 'implement', preemptible: true, checkpoint_ordinal: 0, session_lease_id: session.session_lease_id, session_token: sessionToken } };
-      await assert.rejects(() => new CoordinatorClient({ env, autoStart: false, requestTimeoutMs: 5_000 }).request(resultRequest), /closed before a response|ECONNRESET|unavailable/u);
+      await assert.rejects(() => new CoordinatorClient({ env, autoStart: false, requestTimeoutMs: 5_000 }).request(resultRequest), /closed before a response|closed between protocol phases|ECONNRESET|unavailable/u);
       assert.equal((await resultChildClosed).signal, 'SIGKILL');
       const committedResult = parseCoordinatorResponseEnvelope(JSON.parse(await readFile(resultEvidencePath, 'utf8')));
       assert.equal(committedResult.ok, true);

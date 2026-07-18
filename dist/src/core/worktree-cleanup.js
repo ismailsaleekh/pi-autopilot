@@ -175,17 +175,18 @@ async function hasExactImmutableOperationEvidence(active, operation) {
 async function exactLaterPackageSupersession(input) {
     const reject = (blocker) => ({ later: null, blocker });
     const rollback = input.rollback;
-    if (rollback.operation_type === 'metadata-reconcile')
-        return reject('metadata-reconcile-cannot-supersede-preflight-rollback');
     const later = input.operations
         .filter((operation) => operation.worktree_id === rollback.worktree_id && sameCoordinationOwner(operation.owner, rollback.owner) && operation.intent_event_seq > rollback.intent_event_seq)
         .sort((left, right) => left.intent_event_seq - right.intent_event_seq || left.operation_id.localeCompare(right.operation_id));
-    if (later.length < 4 || later.some((operation) => operation.stage !== 'committed'))
+    if (later.some((operation) => operation.operation_type === 'metadata-reconcile'))
+        return reject('later-operation-plan-contains-metadata-reconciliation');
+    const ordinaryLater = later.filter((operation) => operation.operation_type !== 'metadata-reconcile');
+    if (ordinaryLater.length < 4 || ordinaryLater.some((operation) => operation.stage !== 'committed'))
         return reject('later-operation-plan-not-exactly-committed');
-    const recreate = later[0];
-    const quarantine = later[later.length - 2];
-    const archive = later[later.length - 1];
-    const materializations = later.slice(1, -2);
+    const recreate = ordinaryLater[0];
+    const quarantine = ordinaryLater[ordinaryLater.length - 2];
+    const archive = ordinaryLater[ordinaryLater.length - 1];
+    const materializations = ordinaryLater.slice(1, -2);
     if (recreate === undefined || quarantine === undefined || archive === undefined
         || recreate.operation_type !== 'create'
         || materializations.length === 0
@@ -197,10 +198,9 @@ async function exactLaterPackageSupersession(input) {
         || archive.intent.target_sha === null
         || archive.intent.archive_ref === null
         || recreate.authority_version <= rollback.authority_version
-        || later.some((operation, index) => index > 0 && operation.authority_version < (later[index - 1]?.authority_version ?? 0)))
+        || ordinaryLater.some((operation, index) => index > 0 && operation.authority_version < (ordinaryLater[index - 1]?.authority_version ?? 0)))
         return reject('later-operation-shape-or-authority-order-invalid');
-    const authorityMatches = later.every((operation) => operation.operation_type !== 'metadata-reconcile'
-        && operation.intent.repo_root === rollback.intent.repo_root
+    const authorityMatches = ordinaryLater.every((operation) => operation.intent.repo_root === rollback.intent.repo_root
         && operation.intent.worktree_path === rollback.intent.worktree_path
         && operation.intent.git_common_dir === rollback.intent.git_common_dir
         && operation.intent.branch === rollback.intent.branch);
@@ -218,7 +218,7 @@ async function exactLaterPackageSupersession(input) {
         || worktree.canonical_path !== rollback.intent.worktree_path || worktree.git_common_dir !== rollback.intent.git_common_dir || worktree.branch !== rollback.intent.branch
         || worktree.version !== archive.authority_version)
         return reject('durable-child-attempt-or-worktree-state-invalid');
-    for (const operation of [rollback, ...later])
+    for (const operation of [rollback, ...ordinaryLater])
         if (!(await hasExactImmutableOperationEvidence(input.active, operation)))
             return reject(`immutable-operation-evidence-invalid:${operation.operation_type}`);
     const taskRoot = taskRootForActiveAutopilot(input.active);
@@ -252,7 +252,7 @@ async function exactLaterPackageSupersession(input) {
         return reject('quarantined-worktree-head-or-cleanliness-mismatch');
     if (gitQueryText({ descriptor: { kind: 'resolve-revision', revision: `refs/heads/${archive.intent.archive_ref}`, verify: true }, cwd: input.active.source_repo, env: runtimeGitEnv('rollback-supersession-archive', input.env) }).trim() !== archive.intent.target_sha)
         return reject('archive-ref-mismatch');
-    return { later: Object.freeze(later), blocker: null };
+    return { later: Object.freeze(ordinaryLater), blocker: null };
 }
 function assertExactRollbackAudit(path, body, conflictMessage) {
     let actual;

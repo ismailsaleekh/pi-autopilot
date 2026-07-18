@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { isAbsolute, normalize } from 'node:path';
 
 import { COORDINATION_EXCLUSIVE_MAX_EXPECTED_DURATION_MS } from './exclusive-policy.ts';
+import { parseMetadataReconcileIntent } from './metadata-reconcile.ts';
 import {
   AUTOPILOT_COORDINATION_SNAPSHOT_SCHEMA,
   AUTOPILOT_COORDINATOR_PROTOCOL_VERSION,
@@ -107,7 +108,7 @@ const SHA256 = /^sha256:[a-f0-9]{64}$/u;
 const CHILD_TOKEN = /^[a-f0-9]{64}$/u;
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,191}$/u;
 const QUERY_ACTIONS = ['handshake', 'status', 'doctor', 'export', 'migration-recovery', 'run-catalog', 'reconciliation-details', 'result-details'] as const;
-const MUTATION_ACTIONS = ['attach-run', 'attach-session', 'attach-terminal-recovery', 'attach-migration-recovery', 'resolve-migration-recovery', 'detach-session', 'prepare-handoff', 'heartbeat', 'register-attempt', 'register-child', 'heartbeat-child', 'checkpoint-child', 'complete-child',  'drain-mailbox', 'acquire-group', 'acknowledge-grant', 'respond-claim-request', 'cancel-claim-request', 'cancel-acquisition-group', 'supersede-attempt', 'acknowledge-message', 'record-release-evidence', 'resolve-reservation-obligation', 'prepare-run-terminal', 'cancel-run-terminal', 'reconcile-run', 'prepare-operation', 'transition-operation', 'register-authoritative-artifact', 'assign-adjudication', 'claim-adjudication-assignment', 'complete-adjudication', 'submit-planning-contradiction'] as const;
+const MUTATION_ACTIONS = ['attach-run', 'attach-session', 'attach-terminal-recovery', 'attach-migration-recovery', 'resolve-migration-recovery', 'detach-session', 'prepare-handoff', 'heartbeat', 'register-attempt', 'register-child', 'heartbeat-child', 'checkpoint-child', 'complete-child',  'drain-mailbox', 'acquire-group', 'acknowledge-grant', 'respond-claim-request', 'cancel-claim-request', 'cancel-acquisition-group', 'supersede-attempt', 'acknowledge-message', 'record-release-evidence', 'resolve-reservation-obligation', 'prepare-run-terminal', 'cancel-run-terminal', 'reconcile-run', 'prepare-operation', 'transition-operation', 'resolve-run-scoped-fault', 'register-authoritative-artifact', 'assign-adjudication', 'claim-adjudication-assignment', 'complete-adjudication', 'submit-planning-contradiction'] as const;
 const MESSAGE_TYPES = COORDINATION_MESSAGE_TYPES;
 const WORKTREE_STATES = COORDINATION_WORKTREE_STATES;
 const OPERATION_TYPES = COORDINATION_OPERATION_TYPES;
@@ -149,6 +150,7 @@ const PAYLOAD_FIELDS: Readonly<Record<CoordinatorQueryAction | CoordinatorMutati
   'reconcile-run': ['reason', 'session_lease_id', 'session_token'],
   'prepare-operation': ['operation', 'session_lease_id', 'session_token', 'worktree'],
   'transition-operation': ['completed_steps', 'current_step', 'error_code', 'operation_id', 'recovery_attempts', 'session_lease_id', 'session_token', 'stage', 'verification_evidence', 'worktree_state'],
+  'resolve-run-scoped-fault': ['fault_id', 'resolution_evidence_ref', 'resolution_evidence_sha256', 'session_lease_id', 'session_token'],
   'register-authoritative-artifact': ['artifact_id', 'document_schema_version', 'git_commit', 'ref', 'sha256', 'source_scope', 'source_type', 'session_lease_id', 'session_token'],
   'assign-adjudication': ['assignment', 'session_lease_id', 'session_token'],
   'claim-adjudication-assignment': ['attempt', 'session_lease_id', 'session_token', 'unit_id'],
@@ -1014,16 +1016,15 @@ export function parseCoordinationWorktreeOperationIntent(value: unknown): Coordi
 export function parseCoordinationWorktreeOperation(value: unknown): CoordinationWorktreeOperation {
   const label = 'CoordinationWorktreeOperation';
   const record = object(value, label, ['authority_version', 'completed_steps', 'current_step', 'error_code', 'intent', 'intent_event_seq', 'operation_id', 'operation_type', 'owner', 'recovery_attempts', 'schema_version', 'stage', 'verification_evidence', 'version', 'worktree_id']);
-  return {
+  const operationType = oneOf(record, 'operation_type', OPERATION_TYPES, label);
+  const common = {
     schema_version: literal(record, 'schema_version', 'autopilot.worktree_operation.v2', label),
     operation_id: identifier(record, 'operation_id', label),
     worktree_id: identifier(record, 'worktree_id', label),
     owner: parseCoordinationOwnerIdentity(record['owner'], `${label}.owner`),
-    operation_type: oneOf(record, 'operation_type', OPERATION_TYPES, label),
     stage: oneOf(record, 'stage', COORDINATION_OPERATION_STAGES, label),
     authority_version: integer(record, 'authority_version', label, 1),
     intent_event_seq: integer(record, 'intent_event_seq', label),
-    intent: parseCoordinationWorktreeOperationIntent(record['intent']),
     completed_steps: uniqueStrings(record['completed_steps'], `${label}.completed_steps`, 0, 128),
     current_step: nullableString(record, 'current_step', label, 192),
     recovery_attempts: integer(record, 'recovery_attempts', label),
@@ -1031,6 +1032,9 @@ export function parseCoordinationWorktreeOperation(value: unknown): Coordination
     error_code: nullableString(record, 'error_code', label, 128),
     version: integer(record, 'version', label, 1),
   };
+  return operationType === 'metadata-reconcile'
+    ? { ...common, operation_type: operationType, intent: parseMetadataReconcileIntent(record['intent']) }
+    : { ...common, operation_type: operationType, intent: parseCoordinationWorktreeOperationIntent(record['intent']) };
 }
 
 function parseExhaustedAlternative(value: string, label: string): CoordinationEscalation['exhausted_alternatives'][number] {

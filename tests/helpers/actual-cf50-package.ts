@@ -47,7 +47,7 @@ export interface ActualCf50CoordinatorProcess {
   close(): Promise<void>;
 }
 
-export type VersionSkewMutationAction = 'attach-run' | 'attach-session' | 'heartbeat';
+export type VersionSkewMutationAction = 'attach-run' | 'attach-session' | 'heartbeat' | 'register-attempt' | 'acquire-group' | 'detach-session';
 
 export interface VersionSkewMutationIdentity {
   readonly repoId: string;

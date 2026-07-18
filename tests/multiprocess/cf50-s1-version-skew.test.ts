@@ -208,6 +208,8 @@ void describe('actual cf50 ↔ current S1 candidate compatibility harness', () =
       const legacyStatus = await oldClient.query('status');
       assert.equal(legacyStatus.payload['negotiated_coordinator_identity'], undefined);
       assert.equal(legacyStatus.payload['run_scoped_logical_faults'], undefined);
+      assert.equal(legacyStatus.payload['negotiated_worktree_aliases'], undefined);
+      assert.equal(legacyStatus.payload['negotiated_identity_recovery'], undefined);
       const journey = await attachAndHeartbeat(oldClient, root, 'old-to-candidate');
       const before = await lifecycleLock(paths.lockPath);
       assert.equal(before['package_build'], '1.1.8-cf50', 'the unchanged client must see the frozen cf50 lifecycle façade');
