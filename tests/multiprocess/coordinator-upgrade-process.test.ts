@@ -15,6 +15,8 @@ import { CoordinationRuntimeError } from '../../src/core/coordination/failures.t
 import { CoordinatorFrameDecoder, AUTOPILOT_COORDINATOR_TRANSPORT_VERSION, encodeCoordinatorFrame } from '../../src/core/coordination/ipc.ts';
 import { isProcessAlive, predecessorCompatibleBootEstimate, predecessorCompatibleBootId } from '../../src/core/coordination/process-identity.ts';
 import { coordinatorRuntimePaths, readOrCreateCoordinatorCapability, type CoordinatorRuntimePaths } from '../../src/core/coordination/runtime-paths.ts';
+import { fixedStoreBarrierPublished } from '../../src/core/coordination/store-generation.ts';
+import { CoordinatorStore } from '../../src/core/coordination/store.ts';
 import { COORDINATOR_UPGRADE_BARRIER_SCHEMA_VERSION, preparePredecessorCoordinatorUpgrade, readCoordinatorUpgradeIntent } from '../../src/core/coordination/upgrade.ts';
 import { parseCurrentCoordinatorLock, parsePredecessorCoordinatorLock } from '../../src/core/coordination/upgrade-contracts.ts';
 import { AUTOPILOT_STATE_ROOT_ENV } from '../../src/core/parallel-runtime.ts';
@@ -427,10 +429,59 @@ void describe('exact aa3e377 coordinator upgrade choreography', () => {
       await upgrade.rollback(new Error('simulated target startup loss'));
       assert.deepEqual(await readFile(paths.databasePath), await readFile(backup.path));
       assert.equal(schemaVersion(paths.databasePath), 6);
-      assert.equal((await readCoordinatorUpgradeIntent(paths))?.state, 'rollback-restored');
+      const restoredIntent = await readCoordinatorUpgradeIntent(paths);
+      assert.equal(restoredIntent?.state, 'rollback-restored');
+      assert.match(restoredIntent?.failure ?? '', /pre-publication fixed-target inspection failed: file is not a database/u);
       assert.equal(existsSync(paths.lockPath), false);
       await assert.rejects(() => new CoordinatorClient({ env, startupTimeoutMs: 3_000 }).query('status'), (error: unknown) => error instanceof CoordinationRuntimeError && error.code === 'recovery-required');
       assert.equal(schemaVersion(paths.databasePath), 6);
+    } finally { await stop(predecessor); await rm(root, { recursive: true, force: true }); }
+  });
+
+  void it('never overwrites published S1 generation or fixed-barrier authority with a schema-6 rollback', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pi-autopilot-published-rollback-'));
+    const stateRoot = join(root, 'state');
+    const paths = coordinatorRuntimePaths({ ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: stateRoot });
+    const built = await archiveAndBuildExactPredecessor(root);
+    const predecessor = startCoordinator(built.bin, built.root, stateRoot);
+    try {
+      await waitForExactPredecessor(predecessor, stateRoot);
+      const capability = await readOrCreateCoordinatorCapability(paths);
+      const upgrade = await preparePredecessorCoordinatorUpgrade(paths, capability, Date.now() + 20_000);
+      await upgrade.markStarting();
+      const backup = upgrade.intent.backup;
+      if (backup === null) throw new Error('published rollback fixture backup is missing');
+
+      const target = await CoordinatorStore.open(paths);
+      const generation = target.currentGeneration();
+      target.close();
+      const pointerBefore = await readFile(paths.currentStorePointerPath);
+      const publicationBefore = await readFile(generation.publication_path);
+      const generationBefore = await readFile(generation.database_path);
+      const fixedBefore = await readFile(paths.databasePath);
+      await assert.rejects(
+        () => upgrade.rollback(new Error('must not cross generation publication')),
+        (error: unknown) => error instanceof CoordinationRuntimeError && error.code === 'recovery-required' && /forbidden after S1 generation publication/u.test(error.message),
+      );
+      assert.deepEqual(await readFile(paths.currentStorePointerPath), pointerBefore);
+      assert.deepEqual(await readFile(generation.publication_path), publicationBefore);
+      assert.deepEqual(await readFile(generation.database_path), generationBefore);
+      assert.deepEqual(await readFile(paths.databasePath), fixedBefore);
+      assert.equal((await readCoordinatorUpgradeIntent(paths))?.state, 'starting', 'publication refusal must precede durable rollback state');
+
+      await rm(paths.currentStorePointerPath, { force: true });
+      await rm(paths.storesRoot, { recursive: true, force: true });
+      await mkdir(paths.storesRoot, { recursive: true, mode: 0o700 });
+      assert.equal(fixedStoreBarrierPublished(paths), true);
+      const barrierBefore = await readFile(paths.databasePath);
+      await assert.rejects(
+        () => upgrade.rollback(new Error('must not cross fixed barrier publication')),
+        (error: unknown) => error instanceof CoordinationRuntimeError && error.code === 'recovery-required' && /forbidden after the S1 fixed-path barrier/u.test(error.message),
+      );
+      assert.deepEqual(await readFile(paths.databasePath), barrierBefore);
+      assert.equal(schemaVersion(paths.databasePath), 12);
+      assert.notEqual(createHash('sha256').update(barrierBefore).digest('hex'), createHash('sha256').update(await readFile(backup.path)).digest('hex'));
+      assert.equal((await readCoordinatorUpgradeIntent(paths))?.state, 'starting');
     } finally { await stop(predecessor); await rm(root, { recursive: true, force: true }); }
   });
 });

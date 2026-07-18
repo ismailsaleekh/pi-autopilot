@@ -428,6 +428,34 @@ async function captureFixedSource(paths, target) {
         source.close();
     }
 }
+/** Any pointer or generation-shaped directory is durable S1 authority. Rollback
+ * callers use this conservative probe so an orphaned-but-recoverable generation
+ * can never be overwritten by a historical fixed-store restore. */
+export async function storeGenerationPublicationPresent(paths) {
+    if (existsSync(paths.currentStorePointerPath))
+        return true;
+    if (!existsSync(paths.storesRoot))
+        return false;
+    assertOwnedPrivateObject(paths.storesRoot, 'directory', false);
+    return (await readdir(paths.storesRoot)).some((name) => STORE_GENERATION_ID_PATTERN.test(name));
+}
+/** Verify, rather than merely detect, the immutable schema-12 mutation barrier. */
+export function fixedStoreBarrierPublished(paths) {
+    if (!existsSync(paths.databasePath))
+        return false;
+    assertOwnedPrivateObject(paths.databasePath, 'file', true);
+    const database = new DatabaseSync(paths.databasePath, { readOnly: true, timeout: 5_000 });
+    try {
+        const barrier = fixedBarrierRecord(database);
+        if (barrier === null)
+            return false;
+        verifyFixedBarrier(database, barrier);
+        return true;
+    }
+    finally {
+        database.close();
+    }
+}
 function verifyPublishedFixedBarrier(paths) {
     if (!existsSync(paths.databasePath))
         throw new CoordinationRuntimeError('store-corrupt', 'published S1 authority has no fixed-path schema-12 barrier');

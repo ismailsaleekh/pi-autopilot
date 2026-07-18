@@ -13,6 +13,7 @@ import { isExactProcessAlive, isProcessAlive, predecessorCompatibleBootId, prefl
 import { coordinatorRuntimePaths, enforcePrivateAuthorityPath, ensureCoordinatorPrivateRoots, ensurePrivateAuthorityDirectory, type CoordinatorRuntimePaths } from './runtime-paths.ts';
 import { acquireSerializedProcessGuard, discardLockTombstone, quarantineExactLock, readExactLockText } from './serialized-lock.ts';
 import { upgradeVerifiedPrivateSchema6CopyToSchema12 } from './store.ts';
+import { fixedStoreBarrierPublished, storeGenerationPublicationPresent } from './store-generation.ts';
 import {
   COORDINATOR_UPGRADE_INTENT_SCHEMA,
   COORDINATOR_UPGRADE_PATH,
@@ -541,12 +542,42 @@ async function copyExactBackupForRestore(paths: CoordinatorRuntimePaths, backupR
   await fsyncDirectory(dirname(paths.databasePath));
 }
 
+async function inspectSchema6RollbackPrecedesS1Publication(paths: CoordinatorRuntimePaths): Promise<string | null> {
+  let generationPublished: boolean;
+  try { generationPublished = await storeGenerationPublicationPresent(paths); }
+  catch (error) {
+    if (error instanceof CoordinationRuntimeError) throw error;
+    throw new CoordinationRuntimeError('store-corrupt', 'schema-6 rollback could not inspect S1 generation authority', [paths.storesRoot, failureMessage(error)]);
+  }
+  if (generationPublished) throw new CoordinationRuntimeError('recovery-required', 'schema-6 rollback is forbidden after S1 generation publication; exact target recovery is required', [paths.currentStorePointerPath]);
+  let barrierPublished: boolean;
+  try { barrierPublished = fixedStoreBarrierPublished(paths); }
+  catch (error) {
+    // The exact upgrade rollback exists specifically to recover an unreadable
+    // pre-publication target. S1 publication always creates a generation-shaped
+    // directory before installing its fixed barrier, so the absence proven
+    // above makes verified-backup restoration safe while retaining this failure
+    // in durable intent evidence rather than silently reinterpreting it.
+    return failureMessage(error);
+  }
+  if (barrierPublished) throw new CoordinationRuntimeError('recovery-required', 'schema-6 rollback is forbidden after the S1 fixed-path barrier; exact target recovery is required', [paths.databasePath]);
+  return null;
+}
+
 async function restoreBackup(paths: CoordinatorRuntimePaths, intentValue: CoordinatorUpgradeIntent, failure: unknown): Promise<CoordinatorUpgradeIntent> {
   if (intentValue.backup === null) throw new CoordinationRuntimeError('recovery-required', 'upgrade rollback has no verified final backup');
   const backupRecord = intentValue.backup;
   const guard = acquireSerializedProcessGuard(paths.lifecycleElectionPath, 10_000, 'coordinator lifecycle election for rollback');
-  let intent = await writeIntent(paths, intentValue, 'rollback-restoring', { failure: failureMessage(failure) });
+  let intent = intentValue;
   try {
+    // Check under lifecycle election before changing durable rollback state. A
+    // second check after exact target retirement closes publication by a winner
+    // that had already passed election when rollback began.
+    const initialBarrierInspectionFailure = await inspectSchema6RollbackPrecedesS1Publication(paths);
+    let rollbackFailure = initialBarrierInspectionFailure === null
+      ? failureMessage(failure)
+      : `${failureMessage(failure)}; pre-publication fixed-target inspection failed: ${initialBarrierInspectionFailure}`;
+    intent = await writeIntent(paths, intent, 'rollback-restoring', { failure: rollbackFailure });
     await verifyBackup(backupRecord);
     const currentText = await readExactLockText(paths.lockPath);
     if (currentText !== null) {
@@ -564,6 +595,11 @@ async function restoreBackup(paths: CoordinatorRuntimePaths, intentValue: Coordi
         const tombstone = await quarantineExactLock(paths.lockPath, remaining, 'failed target lock');
         await discardLockTombstone(tombstone);
       }
+    }
+    const finalBarrierInspectionFailure = await inspectSchema6RollbackPrecedesS1Publication(paths);
+    if (finalBarrierInspectionFailure !== null && finalBarrierInspectionFailure !== initialBarrierInspectionFailure) {
+      rollbackFailure = `${rollbackFailure}; post-retirement fixed-target inspection failed: ${finalBarrierInspectionFailure}`;
+      intent = await writeIntent(paths, intent, 'rollback-restoring', { failure: rollbackFailure });
     }
     if (platform() !== 'win32') await unlink(paths.socketPath).catch((error: unknown) => { if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw error; });
     await unlink(`${paths.databasePath}-wal`).catch((error: unknown) => { if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw error; });
@@ -583,7 +619,7 @@ async function restoreBackup(paths: CoordinatorRuntimePaths, intentValue: Coordi
       const tombstone = await quarantineExactLock(paths.predecessorLockPath, fenceText, 'rollback predecessor fence');
       await discardLockTombstone(tombstone);
     }
-    intent = await writeIntent(paths, intent, 'rollback-restored', { predecessor_fence: null, failure: failureMessage(failure) });
+    intent = await writeIntent(paths, intent, 'rollback-restored', { predecessor_fence: null, failure: rollbackFailure });
     return intent;
   } finally { guard.release(); }
 }
