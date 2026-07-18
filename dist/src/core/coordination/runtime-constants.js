@@ -1,4 +1,6 @@
 export const COORDINATOR_IMPLEMENTATION_BUILD = '1.2.0-s1';
+/** Physical npm package identity; never derive this from the legacy wire façade. */
+export const COORDINATOR_PACKAGE_VERSION = '1.2.0';
 export const COORDINATOR_LEGACY_FACADE_BUILD = '1.1.8-cf50';
 export const COORDINATOR_WIRE_LINEAGE = 'protocol-1.6-api-schema-12';
 export const COORDINATOR_API_SCHEMA_VERSION = 12;

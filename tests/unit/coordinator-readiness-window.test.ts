@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, it } from 'node:test';
 
-import { CoordinatorClient } from '../../src/core/coordination/client.ts';
+import { COORDINATOR_AUTOSTART_DISABLED_ENV, CoordinatorClient } from '../../src/core/coordination/client.ts';
 import { CoordinationRuntimeError } from '../../src/core/coordination/failures.ts';
 import { coordinatorRuntimePaths } from '../../src/core/coordination/runtime-paths.ts';
 import { AUTOPILOT_STATE_ROOT_ENV } from '../../src/core/parallel-runtime.ts';
@@ -58,6 +59,17 @@ void it('lets independent startup clients attest one exact lifecycle winner', as
     await stopTestCoordinatorsForStateRoot(env[AUTOPILOT_STATE_ROOT_ENV] ?? '');
     await rm(root, { recursive: true, force: true });
   }
+});
+
+void it('lets a closed harness environment prohibit every implicit detached coordinator spawn', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'pi-autopilot-readiness-disabled-'));
+  const env = { ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: join(root, 'state'), [COORDINATOR_AUTOSTART_DISABLED_ENV]: '1' };
+  try {
+    const client = new CoordinatorClient({ env });
+    await assert.rejects(() => client.query('handshake'));
+    assert.equal(existsSync(coordinatorRuntimePaths(env).lockPath), false);
+    assert.throws(() => new CoordinatorClient({ env: { ...env, [COORDINATOR_AUTOSTART_DISABLED_ENV]: 'yes' } }), /must be 1 when set/u);
+  } finally { await stopTestCoordinatorsForStateRoot(env[AUTOPILOT_STATE_ROOT_ENV] ?? ''); await rm(root, { recursive: true, force: true }); }
 });
 
 void it('fails loudly and quickly when the readiness window is deliberately too small', async () => {

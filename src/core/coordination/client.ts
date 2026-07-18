@@ -22,6 +22,7 @@ import { parseCurrentCoordinatorLock, parseKnownCompatibleCurrentCoordinatorLock
 import type { ProcessEnvLike } from '../parallel-runtime.ts';
 import { AUTOPILOT_COORDINATOR_PROTOCOL_VERSION, type CoordinationReconciliationDetail, type CoordinationReconciliationDetailKind, type CoordinationReconciliationReceipt, type CoordinationResultDetail, type CoordinationResultReceipt, type CoordinatorMutationAction, type CoordinatorQueryAction, type CoordinatorRequestEnvelope, type CoordinatorResponseEnvelope } from './types.ts';
 
+export const COORDINATOR_AUTOSTART_DISABLED_ENV = 'AUTOPILOT_COORDINATOR_AUTOSTART_DISABLED' as const;
 const DEFAULT_REQUEST_TIMEOUT_MS = 5_000;
 const DEFAULT_STARTUP_TIMEOUT_MS = 10_000;
 // The coordinator binds its socket only after CoordinatorStore.open completes
@@ -324,7 +325,9 @@ export class CoordinatorClient {
   constructor(options: CoordinatorClientOptions = {}) {
     this.#env = options.env ?? process.env;
     this.#paths = coordinatorRuntimePaths(this.#env);
-    this.#autoStart = options.autoStart !== false;
+    const autoStartDisabled = options.env?.[COORDINATOR_AUTOSTART_DISABLED_ENV];
+    if (autoStartDisabled !== undefined && autoStartDisabled !== '1') throw new CoordinationRuntimeError('invalid-request', `${COORDINATOR_AUTOSTART_DISABLED_ENV} must be 1 when set`);
+    this.#autoStart = options.autoStart !== false && autoStartDisabled !== '1';
     this.#allowMigrationRecoveryAutoStart = options.allowMigrationRecoveryAutoStart === true;
     this.#requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
     this.#startupTimeoutMs = options.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS;

@@ -3,8 +3,11 @@ declare const process: {
   readonly env: { [key: string]: string | undefined };
   readonly execPath: string;
   readonly pid: number;
+  readonly platform: 'aix' | 'android' | 'cygwin' | 'darwin' | 'freebsd' | 'haiku' | 'linux' | 'netbsd' | 'openbsd' | 'sunos' | 'win32';
   readonly getuid?: () => number;
   readonly stdin: import('node:readline').ReadableInput;
+  readonly stdout: { write(value: string): boolean };
+  readonly stderr: { write(value: string): boolean };
   cwd(): string;
   chdir(directory: string): void;
   memoryUsage(): { readonly rss: number; readonly heapTotal: number; readonly heapUsed: number; readonly external: number; readonly arrayBuffers: number };
@@ -46,16 +49,20 @@ declare module 'node:fs' {
     readonly ino: number;
     readonly nlink: number;
     readonly uid: number;
+    readonly mode: number;
     isFile(): boolean;
     isDirectory(): boolean;
     isSymbolicLink(): boolean;
+    isSocket(): boolean;
   }
   export function existsSync(path: string | URL): boolean;
   export function copyFileSync(source: string | URL, destination: string | URL, mode?: number): void;
   export function mkdtempSync(prefix: string): string;
   export function readFileSync(path: string | URL | number): Uint8Array;
   export function readFileSync(path: string | URL, encoding: 'utf8'): string;
+  export function readlinkSync(path: string | URL): string;
   export function readSync(fd: number, buffer: Uint8Array, offset: number, length: number, position: number | null): number;
+  export function readdirSync(path: string | URL): string[];
   export function readdirSync(path: string | URL, options: { readonly withFileTypes: true }): import('node:fs/promises').Dirent[];
   export function realpathSync(path: string | URL): string;
   export function lstatSync(path: string | URL): Stats;
@@ -63,20 +70,22 @@ declare module 'node:fs' {
   export function chmodSync(path: string | URL, mode: number): void;
   export function openSync(path: string | URL, flags: number | string, mode?: number): number;
   export function writeSync(fd: number, data: string): number;
-  export function writeSync(fd: number, buffer: Uint8Array, offset: number, length: number): number;
+  export function writeSync(fd: number, buffer: Uint8Array, offset: number, length: number, position?: number | null): number;
   export function writeFileSync(fd: number, data: string, encoding?: 'utf8'): void;
   export function writeFileSync(path: string | URL, data: string | Uint8Array, options?: { readonly encoding?: 'utf8'; readonly flag?: string; readonly mode?: number }): void;
   export function linkSync(existingPath: string | URL, newPath: string | URL): void;
   export interface ReadStream extends AsyncIterable<string> { destroy(): void; }
+  export interface BinaryReadStream extends AsyncIterable<Uint8Array> { destroy(): void; }
   export function createReadStream(path: string | URL, options: { readonly encoding: 'utf8'; readonly fd?: number; readonly autoClose?: boolean }): ReadStream;
+  export function createReadStream(path: string | URL, options?: { readonly highWaterMark?: number; readonly fd?: number; readonly autoClose?: boolean }): BinaryReadStream;
   export function unlinkSync(path: string | URL): void;
   export function rmSync(path: string | URL, options?: { readonly recursive?: boolean; readonly force?: boolean }): void;
-  export function linkSync(existingPath: string | URL, newPath: string | URL): void;
   export function fstatSync(fd: number): Stats;
   export function closeSync(fd: number): void;
   export function fsyncSync(fd: number): void;
   export namespace constants {
     const O_RDONLY: number;
+    const O_RDWR: number;
     const O_WRONLY: number;
     const O_CREAT: number;
     const O_EXCL: number;
@@ -257,7 +266,7 @@ declare interface NodeBuffer extends Uint8Array {
   readUInt32BE(offset: number): number;
   writeUInt32BE(value: number, offset: number): number;
   subarray(start?: number, end?: number): NodeBuffer;
-  toString(encoding?: 'utf8' | 'hex'): string;
+  toString(encoding?: 'utf8' | 'hex' | 'base64'): string;
 }
 
 declare const Buffer: {

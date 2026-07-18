@@ -725,6 +725,12 @@ void describe('owner-scoped worktree and Git saga recovery', () => {
       assert.equal(git(value.repo, ['rev-list', '--count', `${value.active.target_base_sha}..${capture}`]), '1');
       await rm(create.intent.worktree_path, { recursive: true, force: false });
 
+      git(value.repo, ['update-ref', '-d', `refs/heads/${create.intent.branch}`, capture]);
+      await assert.rejects(() => recoverOwnedWorktreeSagas({ active: value.active, env: value.env }), (error: unknown) => error instanceof CoordinationRuntimeError && error.code === 'recovery-required' && error.message.includes(prepared.operation.operation_id));
+      const withheld = (await saga.operations()).find((entry) => entry.operation_id === prepared.operation.operation_id);
+      assert.notEqual(withheld?.stage, 'committed', 'proof-withheld control must not terminalize authority');
+      git(value.repo, ['update-ref', `refs/heads/${create.intent.branch}`, capture, '0'.repeat(40)]);
+
       const recovered = await recoverOwnedWorktreeSagas({ active: value.active, env: value.env });
       const operation = recovered.find((entry) => entry.operation_id === prepared.operation.operation_id);
       assert.equal(operation?.stage, 'committed');

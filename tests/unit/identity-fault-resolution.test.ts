@@ -135,7 +135,11 @@ void describe('I3 audited canonical identity fault resolution', () => {
 
       const statusBefore = await client.query('status', repoId, run);
       const recoveryBefore = statusBefore.payload['negotiated_identity_recovery'];
+      const aliasesBefore = statusBefore.payload['negotiated_worktree_aliases'];
       assert.equal(Array.isArray(recoveryBefore), true);
+      assert.equal(Array.isArray(aliasesBefore), true);
+      assert.equal(Array.isArray(aliasesBefore) && typeof aliasesBefore[0] === 'object' && aliasesBefore[0] !== null ? (aliasesBefore[0] as Record<string, unknown>)['alias_worktree_id'] : null, historical.worktree_id);
+      assert.equal(Array.isArray(aliasesBefore) && typeof aliasesBefore[0] === 'object' && aliasesBefore[0] !== null ? (aliasesBefore[0] as Record<string, unknown>)['canonical_worktree_id'] : null, canonical.worktree_id);
       const faultId = Array.isArray(recoveryBefore) && typeof recoveryBefore[0] === 'object' && recoveryBefore[0] !== null ? (recoveryBefore[0] as Record<string, unknown>)['fault_id'] : null;
       if (typeof faultId !== 'string') throw new Error('negotiated identity recovery omitted its fault ID');
       git(repo, ['update-ref', '-d', `refs/heads/${branch}`]);
@@ -177,6 +181,7 @@ void describe('I3 audited canonical identity fault resolution', () => {
       const reopened = await CoordinatorStore.open(paths);
       try {
         assert.equal(reopened.negotiatedRunScopedFaults(repoId, run).length, 0);
+        assert.deepEqual(reopened.negotiatedWorktreeAliases(repoId, run).map((alias) => [alias.alias_worktree_id, alias.canonical_worktree_id]), [[historical.worktree_id, canonical.worktree_id]]);
         const projection = reopened.negotiatedIdentityRecovery(repoId, run);
         assert.equal((projection[0]?.['fault'] as Record<string, unknown>)['status'], 'resolved');
         const exportRequest = (requestId: string, outputPath: string) => ({

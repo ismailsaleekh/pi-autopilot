@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const packageRoot = fileURLToPath(new URL('../../', import.meta.url));
-const allTypeScriptRoots = ['extensions', 'src', 'tests'];
+const allTypeScriptRoots = ['extensions', 'src', 'tests', 'tools'];
 
 interface Violation {
   readonly file: string;
@@ -133,7 +133,7 @@ void describe('type-safety standard', () => {
   });
 
   void it('uses fileURLToPath rather than URL.pathname for module-relative filesystem paths', async () => {
-    const filesystemSources = await filesFor(['src', 'tests', 'scripts'], /\.(?:[cm]?js|tsx?)$/u);
+    const filesystemSources = await filesFor(['src', 'tests', 'tools', 'scripts'], /\.(?:[cm]?js|tsx?)$/u);
     const violations = await scan(filesystemSources, [
       { rule: 'URL pathname filesystem conversion', pattern: /import\.meta\.url[^\n]*\.pathname/u },
     ]);

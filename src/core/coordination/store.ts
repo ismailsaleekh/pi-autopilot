@@ -1325,6 +1325,10 @@ function worktreeOperationFromRow(row: SqlRow): CoordinationWorktreeOperation {
   return entityFromRow(row, parseCoordinationWorktreeOperation, 'worktree operation');
 }
 
+function worktreeAliasFromRow(row: SqlRow): WorktreeAlias {
+  return parseWorktreeAlias({ schema_version: AUTOPILOT_WORKTREE_ALIAS_SCHEMA, alias_worktree_id: sqlString(row, 'alias_worktree_id'), canonical_worktree_id: sqlString(row, 'canonical_worktree_id'), repo_id: sqlString(row, 'repo_id'), autopilot_id: sqlString(row, 'autopilot_id'), workstream_run: sqlString(row, 'workstream_run'), unit_id: sqlString(row, 'unit_id'), attempt: sqlInteger(row, 'attempt'), kind: sqlString(row, 'kind'), resolution_state: sqlString(row, 'resolution_state'), reason: sqlString(row, 'reason'), evidence_sha256: sqlString(row, 'evidence_sha256'), created_event_seq: sqlInteger(row, 'created_event_seq') });
+}
+
 function canonicalWorktreeFromRow(row: SqlRow): CoordinationWorktree {
   const worktree = worktreeFromRow(row);
   const canonicalId = sqlString(row, 'canonical_worktree_id');
@@ -2107,6 +2111,15 @@ export class CoordinatorStore {
     }));
   }
 
+  negotiatedWorktreeAliases(repoId: string, workstreamRun: string | null): readonly WorktreeAlias[] {
+    this.#writerGuard.assertHeld();
+    const rows = workstreamRun === null
+      ? this.#db.prepare('SELECT * FROM worktree_aliases WHERE repo_id=? ORDER BY workstream_run,alias_worktree_id LIMIT 129').all(repoId)
+      : this.#db.prepare('SELECT * FROM worktree_aliases WHERE repo_id=? AND workstream_run=? ORDER BY alias_worktree_id LIMIT 129').all(repoId, workstreamRun);
+    if (rows.length > 128) throw new CoordinationRuntimeError('invalid-state', 'canonical worktree alias projection exceeds its negotiated bound');
+    return Object.freeze(rows.map(worktreeAliasFromRow));
+  }
+
   negotiatedRunScopedFaults(repoId: string, workstreamRun: string | null): readonly RunScopedLogicalFault[] {
     this.#writerGuard.assertHeld();
     const rows = workstreamRun === null
@@ -2119,7 +2132,7 @@ export class CoordinatorStore {
     this.#writerGuard.assertHeld();
     const aliasRow = this.#db.prepare('SELECT * FROM worktree_aliases WHERE alias_worktree_id=?').get(worktreeId);
     if (aliasRow !== undefined) {
-      const alias = parseWorktreeAlias({ schema_version: AUTOPILOT_WORKTREE_ALIAS_SCHEMA, alias_worktree_id: sqlString(aliasRow, 'alias_worktree_id'), canonical_worktree_id: sqlString(aliasRow, 'canonical_worktree_id'), repo_id: sqlString(aliasRow, 'repo_id'), autopilot_id: sqlString(aliasRow, 'autopilot_id'), workstream_run: sqlString(aliasRow, 'workstream_run'), unit_id: sqlString(aliasRow, 'unit_id'), attempt: sqlInteger(aliasRow, 'attempt'), kind: sqlString(aliasRow, 'kind'), resolution_state: sqlString(aliasRow, 'resolution_state'), reason: sqlString(aliasRow, 'reason'), evidence_sha256: sqlString(aliasRow, 'evidence_sha256'), created_event_seq: sqlInteger(aliasRow, 'created_event_seq') });
+      const alias = worktreeAliasFromRow(aliasRow);
       if (alias.repo_id !== repoId) return null;
       return Object.freeze({ canonical_worktree_id: alias.canonical_worktree_id, resolution_state: alias.resolution_state, workstream_run: alias.workstream_run });
     }
