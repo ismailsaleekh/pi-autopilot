@@ -7,6 +7,7 @@ import { after, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import { CoordinatorClient } from '../../src/core/coordination/client.ts';
+import { CoordinationRuntimeError } from '../../src/core/coordination/failures.ts';
 import { isProcessAlive } from '../../src/core/coordination/process-identity.ts';
 import { coordinatorRuntimePaths } from '../../src/core/coordination/runtime-paths.ts';
 import { AUTOPILOT_STATE_ROOT_ENV } from '../../src/core/parallel-runtime.ts';
@@ -166,8 +167,12 @@ void it('fails promptly when the exact delayed winner dies before publication', 
     process.kill(fixture.winner.pid, 'SIGKILL');
     const active = fixture;
     await assert.rejects(() => active.pending, (error: unknown) => {
-      if (!(error instanceof Error)) return false;
-      assert.match(error.message, /exact delayed startup winner died before endpoint publication/u);
+      if (!(error instanceof CoordinationRuntimeError)) return false;
+      assert.equal(error.code, 'coordinator-unavailable');
+      // A SIGKILLed child can remain kill(0)-visible as a zombie after libproc
+      // has retired its birth record. Both observations fail closed on the same
+      // exact delayed winner; neither permits replacement or endpoint use.
+      assert.match(error.message, /exact delayed startup winner (?:died before endpoint publication|process-birth identity became unavailable)/u);
       return true;
     });
   } finally {
