@@ -184,8 +184,11 @@ void describe('owner-scoped worktree and Git saga recovery', () => {
       const saga = new OwnedWorktreeSagaClient(new CoordinatorClient({ env: value.env, autoStart: false }), value.session);
       const spec = { ...unitCreateSpec(value, 'unit-operation-id'), operationId: 'operation-caller-invented' };
       await assert.rejects(() => saga.prepare(spec), (error: unknown) => error instanceof CoordinationRuntimeError && error.code === 'invalid-request' && error.message.includes('existing historical operation'));
+      const reservedMainUnit = unitCreateSpec(value, 'main');
+      await assert.rejects(() => saga.prepare(reservedMainUnit), (error: unknown) => error instanceof CoordinationRuntimeError && error.code === 'invalid-request' && error.message.includes('reserves unit ID main'));
       assert.equal((await saga.operations()).some((operation) => operation.operation_id === spec.operationId), false);
       assert.equal(existsSync(spec.intent.worktree_path), false);
+      assert.equal(existsSync(reservedMainUnit.intent.worktree_path), false);
     } finally {
       await close(value);
     }

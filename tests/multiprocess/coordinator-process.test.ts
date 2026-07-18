@@ -115,7 +115,7 @@ class PersistentTraceClient {
   readonly suffix: string;
   readonly #child: ChildProcessLite;
   readonly #pid: number | null;
-  #processStartIdentity: string | null;
+  readonly #processStartIdentity: string | null;
   readonly #pending = new Map<string, { readonly resolve: (value: Readonly<Record<string, unknown>>) => void; readonly reject: (error: Error) => void }>();
   readonly #ready: Promise<void>;
   readonly #closed: Promise<void>;
@@ -124,6 +124,7 @@ class PersistentTraceClient {
   #rejectReady: ((error: Error) => void) | null = null;
   #stdout = '';
   #stderr = '';
+  readonly #stdinErrors: Error[] = [];
   #sequence = 0;
   #exitError: Error | null = null;
   #closedObserved = false;
@@ -140,6 +141,7 @@ class PersistentTraceClient {
     });
     this.#pid = this.#child.pid ?? null;
     this.#processStartIdentity = this.#pid === null ? null : processStartIdentity(this.#pid);
+    this.#child.stdin.on('error', (error) => { this.#stdinErrors.push(error); this.#fail(error); });
     this.#child.stderr.on('data', (chunk) => { this.#stderr += chunk.toString('utf8'); });
     this.#child.stdout.on('data', (chunk) => {
       this.#stdout += chunk.toString('utf8');
@@ -165,12 +167,7 @@ class PersistentTraceClient {
 
   async ready(): Promise<void> {
     if (this.#pid === null) throw new Error(`persistent trace client ${this.suffix} has no spawned PID`);
-    const deadline = Date.now() + 5_000;
-    while (this.#processStartIdentity === null && Date.now() < deadline && isProcessAlive(this.#pid)) {
-      await sleep(25);
-      this.#processStartIdentity = processStartIdentity(this.#pid);
-    }
-    if (this.#processStartIdentity === null) throw new Error(`persistent trace client ${this.suffix} has no exact process-start identity`);
+    if (this.#processStartIdentity === null) throw new Error(`persistent trace client ${this.suffix} has no exact process-start identity captured at spawn`);
     await this.#ready;
   }
 
@@ -203,6 +200,7 @@ class PersistentTraceClient {
       closed = await completesWithin(this.#closed, 5_000);
     }
     if (!closed || !this.#closedObserved) failures.push(new Error(`persistent trace client ${this.suffix} did not produce exact child-close proof`));
+    failures.push(...this.#stdinErrors);
     if (this.#exitError !== null) failures.push(this.#exitError);
     if (failures.length > 0) throw new AggregateError(failures, `persistent trace client ${this.suffix} cleanup failed`);
   }

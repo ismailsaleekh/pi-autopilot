@@ -132,8 +132,8 @@ async function writeImmutableEvidence(input) {
     return { ref, sha256: `sha256:${createHash('sha256').update(body, 'utf8').digest('hex')}` };
 }
 function assertSpecMatchesActiveAuthority(spec) {
-    if (spec.attempt < 1 || spec.unitId.length === 0 || (spec.kind === 'main' && spec.unitId !== 'main'))
-        throw new CoordinationRuntimeError('invalid-request', 'worktree saga requires a durable unit attempt identity');
+    if (spec.attempt < 1 || spec.unitId.length === 0 || (spec.kind === 'main' && spec.unitId !== 'main') || (spec.kind === 'unit' && spec.unitId === 'main'))
+        throw new CoordinationRuntimeError('invalid-request', 'worktree saga requires a durable unit attempt identity and reserves unit ID main for the main worktree');
     if (resolve(spec.intent.repo_root) !== resolve(spec.active.source_repo) || resolve(spec.intent.git_common_dir) !== resolve(spec.active.git_common_dir))
         throw new CoordinationRuntimeError('unauthorized-client', 'worktree saga intent repository identity does not match the active run');
     const expectedPath = spec.kind === 'main'
