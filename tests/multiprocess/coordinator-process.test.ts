@@ -4,14 +4,14 @@ import { existsSync } from 'node:fs';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { describe, it } from 'node:test';
+import { after, describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import { CoordinatorClient } from '../../src/core/coordination/client.ts';
-import { isProcessAlive } from '../../src/core/coordination/process-identity.ts';
+import { isExactProcessAlive } from '../../src/core/coordination/process-identity.ts';
 import { coordinatorRuntimePaths } from '../../src/core/coordination/runtime-paths.ts';
 import { AUTOPILOT_STATE_ROOT_ENV } from '../../src/core/parallel-runtime.ts';
-import { stopSpawnedChild, stopTestCoordinatorsForStateRoot } from '../helpers/coordinator-process-lifecycle.ts';
+import { assertNoLeakedCoordinators, stopCoordinatorByLock, stopSpawnedChild, stopTestCoordinatorsForStateRoot } from '../helpers/coordinator-process-lifecycle.ts';
 
 const packageRoot = resolve(fileURLToPath(new URL('../../', import.meta.url)));
 const coordinatorCli = join(packageRoot, 'src', 'cli', 'autopilot-coordinator.ts');
@@ -21,6 +21,7 @@ const RELEASE_TRACE_SEED = 0x40cf09;
 
 interface LockRecord {
   readonly pid: number;
+  readonly process_start_identity: string;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -75,11 +76,18 @@ async function readLock(path: string): Promise<LockRecord | null> {
   try {
     const parsed: unknown = JSON.parse(await readFile(path, 'utf8')) as unknown;
     if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return null;
-    const pid = (parsed as Readonly<Record<string, unknown>>)['pid'];
-    return typeof pid === 'number' && Number.isSafeInteger(pid) && pid > 0 ? { pid } : null;
+    const record = parsed as Readonly<Record<string, unknown>>;
+    const pid = record['pid'];
+    const processStartIdentity = record['process_start_identity'];
+    return typeof pid === 'number' && Number.isSafeInteger(pid) && pid > 0 && typeof processStartIdentity === 'string' && processStartIdentity.length > 0 ? { pid, process_start_identity: processStartIdentity } : null;
   } catch {
     return null;
   }
+}
+
+function hardKillExactLock(record: LockRecord, label: string): void {
+  assert.equal(isExactProcessAlive(record.pid, record.process_start_identity), true, `${label} lifecycle process identity changed before hard kill`);
+  process.kill(record.pid, 'SIGKILL');
 }
 
 function startServe(stateRoot: string): ChildProcessLite {
@@ -320,14 +328,25 @@ function closeResult(child: ChildProcessLite): Promise<number | null> {
   return new Promise((resolveClose) => child.on('close', (code) => resolveClose(code)));
 }
 
-async function stopCoordinator(lockPath: string): Promise<void> {
-  const lock = await readLock(lockPath);
-  if (lock === null) return;
-  if (isProcessAlive(lock.pid)) process.kill(lock.pid, 'SIGTERM');
-  await waitFor(() => !isProcessAlive(lock.pid));
-  if (!existsSync(lockPath)) return;
-  const stale = await readLock(lockPath);
-  if (stale === null || stale.pid !== lock.pid) throw new Error('coordinator lifecycle identity changed while stopping test process');
+async function finishCoordinatorProcessTest(input: {
+  readonly primaryFailure: unknown | null;
+  readonly root: string;
+  readonly stateRoot: string;
+  readonly lockPath: string;
+  readonly children: readonly (ChildProcessLite | null)[];
+  readonly label: string;
+}): Promise<void> {
+  const cleanupFailures: unknown[] = [];
+  try { await stopCoordinatorByLock(input.lockPath); } catch (error) { cleanupFailures.push(error); }
+  for (const result of await Promise.allSettled(input.children.map(async (child) => await stopSpawnedChild(child)))) {
+    if (result.status === 'rejected') cleanupFailures.push(result.reason);
+  }
+  try { await stopTestCoordinatorsForStateRoot(input.stateRoot); } catch (error) { cleanupFailures.push(error); }
+  if (cleanupFailures.length === 0) {
+    try { await rm(input.root, { recursive: true, force: true }); } catch (error) { cleanupFailures.push(error); }
+  } else cleanupFailures.push(new Error(`${input.label} root retained because exact process cleanup was not proven: ${input.root}`));
+  if (input.primaryFailure !== null && cleanupFailures.length === 0) throw input.primaryFailure;
+  if (input.primaryFailure !== null || cleanupFailures.length > 0) throw new AggregateError([...(input.primaryFailure === null ? [] : [input.primaryFailure]), ...cleanupFailures], `${input.label} or cleanup failed`);
 }
 
 function numericField(record: Readonly<Record<string, unknown>>, field: string): number {
@@ -458,11 +477,10 @@ async function certifyPersistentReleaseTrace(clientCount: number): Promise<void>
       } else {
         const elected = await readLock(paths.lockPath);
         if (elected === null) throw new Error('missing coordinator lock before seeded interleaving crash');
-        process.kill(elected.pid, 'SIGKILL');
+        hardKillExactLock(elected, 'seeded interleaving crash');
         await waitFor(async () => {
           const current = await readLock(paths.lockPath);
-          if (current === null) return true;
-          try { process.kill(current.pid, 0); return false; } catch { return true; }
+          return current === null || !isExactProcessAlive(current.pid, current.process_start_identity);
         });
         coordinator = new CoordinatorClient({ env });
         await waitForCoordinator(coordinator);
@@ -563,7 +581,7 @@ async function certifyPersistentReleaseTrace(clientCount: number): Promise<void>
   for (const result of await Promise.allSettled([...actors.values()].map(async (actor) => await actor.stop()))) {
     if (result.status === 'rejected') cleanupFailures.push(result.reason);
   }
-  try { await stopCoordinator(paths.lockPath); } catch (error) { cleanupFailures.push(error); }
+  try { await stopCoordinatorByLock(paths.lockPath); } catch (error) { cleanupFailures.push(error); }
   try { await stopSpawnedChild(server); } catch (error) { cleanupFailures.push(error); }
   try { await stopTestCoordinatorsForStateRoot(stateRoot); } catch (error) { cleanupFailures.push(error); }
   if (cleanupFailures.length === 0) {
@@ -575,6 +593,8 @@ async function certifyPersistentReleaseTrace(clientCount: number): Promise<void>
 }
 
 void describe('coordinator multiprocess lifecycle', () => {
+  after(async () => { await assertNoLeakedCoordinators(); });
+
   void it('elects one writer from concurrent starts', async () => {
     const root = await mkdtemp(join(tmpdir(), 'pi-autopilot-coordinator-process-'));
     const stateRoot = join(root, 'state');
@@ -584,6 +604,7 @@ void describe('coordinator multiprocess lifecycle', () => {
     const second = startServe(stateRoot);
     const firstClosed = closeResult(first);
     const secondClosed = closeResult(second);
+    let testFailure: unknown = null;
     try {
       await waitFor(() => existsSync(paths.lockPath) && existsSync(paths.capabilityPath));
       const client = new CoordinatorClient({ env, autoStart: false });
@@ -601,12 +622,8 @@ void describe('coordinator multiprocess lifecycle', () => {
       if (lock === null) throw new Error('missing elected coordinator lock');
       const elected = [first.pid, second.pid].filter((pid) => pid === lock.pid);
       assert.equal(elected.length, 1);
-    } finally {
-      await stopCoordinator(paths.lockPath);
-      if (!first.killed) first.kill('SIGTERM');
-      if (!second.killed) second.kill('SIGTERM');
-      await rm(root, { recursive: true, force: true });
-    }
+    } catch (error) { testFailure = error; }
+    await finishCoordinatorProcessTest({ primaryFailure: testFailure, root, stateRoot, lockPath: paths.lockPath, children: [first, second], label: 'concurrent coordinator election' });
   });
 
   void it('serializes two exact stale lifecycle-lock reclaimers without a dual writer window', async () => {
@@ -617,13 +634,14 @@ void describe('coordinator multiprocess lifecycle', () => {
     const predecessor = startServe(stateRoot);
     let first: ChildProcessLite | null = null;
     let second: ChildProcessLite | null = null;
+    let testFailure: unknown = null;
     try {
       await waitFor(() => existsSync(paths.lockPath));
       await waitForCoordinator(new CoordinatorClient({ env, autoStart: false }));
       const stale = await readLock(paths.lockPath);
       if (stale === null) throw new Error('missing lifecycle lock before hard stop');
-      process.kill(stale.pid, 'SIGKILL');
-      await waitFor(() => !isProcessAlive(stale.pid));
+      hardKillExactLock(stale, 'stale lifecycle predecessor');
+      await waitFor(() => !isExactProcessAlive(stale.pid, stale.process_start_identity));
       assert.equal((await readLock(paths.lockPath))?.pid, stale.pid, 'hard stop must leave the exact stale identity for elected reclamation');
 
       first = startServe(stateRoot);
@@ -642,13 +660,8 @@ void describe('coordinator multiprocess lifecycle', () => {
       assert.equal(loser.code, 0, 'serialized stale-lock reclamation elects one candidate before writer-guard acquisition');
       assert.notEqual(loser.pid, elected.pid);
       assert.equal((await new CoordinatorClient({ env, autoStart: false }).query('doctor')).payload['integrity'], 'ok');
-    } finally {
-      await stopCoordinator(paths.lockPath);
-      if (!predecessor.killed) predecessor.kill('SIGTERM');
-      if (first !== null && !first.killed) first.kill('SIGTERM');
-      if (second !== null && !second.killed) second.kill('SIGTERM');
-      await rm(root, { recursive: true, force: true });
-    }
+    } catch (error) { testFailure = error; }
+    await finishCoordinatorProcessTest({ primaryFailure: testFailure, root, stateRoot, lockPath: paths.lockPath, children: [predecessor, first, second], label: 'stale lifecycle election' });
   });
 
   void it('grants overlapping speculative WRITE intentions to independent worktree processes without claim negotiation', async () => {
@@ -657,6 +670,7 @@ void describe('coordinator multiprocess lifecycle', () => {
     const env = { ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: stateRoot };
     const paths = coordinatorRuntimePaths(env);
     const server = startServe(stateRoot);
+    let testFailure: unknown = null;
     try {
       await waitFor(() => existsSync(paths.lockPath) && existsSync(paths.capabilityPath));
       await waitForCoordinator(new CoordinatorClient({ env, autoStart: false }));
@@ -668,11 +682,8 @@ void describe('coordinator multiprocess lifecycle', () => {
       const secondRun = await new CoordinatorClient({ env, autoStart: false }).query('status', 'repo-process-negotiation', 'run-x');
       assert.equal(Array.isArray(firstRun.payload['edit_leases']) ? firstRun.payload['edit_leases'].length : -1, 1);
       assert.equal(Array.isArray(secondRun.payload['edit_leases']) ? secondRun.payload['edit_leases'].length : -1, 1);
-    } finally {
-      await stopCoordinator(paths.lockPath);
-      if (!server.killed) server.kill('SIGTERM');
-      await rm(root, { recursive: true, force: true });
-    }
+    } catch (error) { testFailure = error; }
+    await finishCoordinatorProcessTest({ primaryFailure: testFailure, root, stateRoot, lockPath: paths.lockPath, children: [server], label: 'speculative write process' });
   });
 
   void it('replays an offline requester release across a hard coordinator restart before reacquisition', async () => {
@@ -681,6 +692,7 @@ void describe('coordinator multiprocess lifecycle', () => {
     const env = { ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: stateRoot };
     const paths = coordinatorRuntimePaths(env);
     const server = startServe(stateRoot);
+    let testFailure: unknown = null;
     try {
       await waitFor(() => existsSync(paths.lockPath) && existsSync(paths.capabilityPath));
       await waitForCoordinator(new CoordinatorClient({ env, autoStart: false }));
@@ -692,16 +704,10 @@ void describe('coordinator multiprocess lifecycle', () => {
       assert.equal(release['status'], 'grant-ready');
       const elected = await readLock(paths.lockPath);
       if (elected === null) throw new Error('missing coordinator lock before offline replay kill');
-      process.kill(elected.pid, 'SIGKILL');
+      hardKillExactLock(elected, 'offline replay coordinator');
       await waitFor(async () => {
         const current = await readLock(paths.lockPath);
-        if (current === null) return true;
-        try {
-          process.kill(current.pid, 0);
-          return false;
-        } catch {
-          return true;
-        }
+        return current === null || !isExactProcessAlive(current.pid, current.process_start_identity);
       });
       const restartedClient = new CoordinatorClient({ env });
       const replayStatus = await restartedClient.query('status', 'repo-process-negotiation', 'run-b');
@@ -713,11 +719,8 @@ void describe('coordinator multiprocess lifecycle', () => {
       assert.equal(grant['lease_count'], 2);
       const status = await new CoordinatorClient({ env, autoStart: false }).query('status', 'repo-process-negotiation', 'run-b');
       assert.equal(Array.isArray(status.payload['edit_leases']) ? status.payload['edit_leases'].length : -1, 2);
-    } finally {
-      await stopCoordinator(paths.lockPath);
-      if (!server.killed) server.kill('SIGTERM');
-      await rm(root, { recursive: true, force: true });
-    }
+    } catch (error) { testFailure = error; }
+    await finishCoordinatorProcessTest({ primaryFailure: testFailure, root, stateRoot, lockPath: paths.lockPath, children: [server], label: 'offline requester replay' });
   });
 
   void it('does not synthesize wait edges or deadlocks for disjoint EXCLUSIVE operations in independent processes', async () => {
@@ -726,6 +729,7 @@ void describe('coordinator multiprocess lifecycle', () => {
     const env = { ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: stateRoot };
     const paths = coordinatorRuntimePaths(env);
     const server = startServe(stateRoot);
+    let testFailure: unknown = null;
     try {
       await waitFor(() => existsSync(paths.lockPath) && existsSync(paths.capabilityPath));
       const client = new CoordinatorClient({ env, autoStart: false });
@@ -739,11 +743,8 @@ void describe('coordinator multiprocess lifecycle', () => {
       assert.equal(Array.isArray(resolutions) ? resolutions.length : -1, 0);
       const escalations = status.payload['escalations'];
       assert.equal(Array.isArray(escalations) ? escalations.length : -1, 0);
-    } finally {
-      await stopCoordinator(paths.lockPath);
-      if (!server.killed) server.kill('SIGTERM');
-      await rm(root, { recursive: true, force: true });
-    }
+    } catch (error) { testFailure = error; }
+    await finishCoordinatorProcessTest({ primaryFailure: testFailure, root, stateRoot, lockPath: paths.lockPath, children: [server], label: 'disjoint exclusive process' });
   });
 
   for (const clientCount of [5, 10, 32]) {
@@ -758,6 +759,7 @@ void describe('coordinator multiprocess lifecycle', () => {
     const env = { ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: stateRoot };
     const paths = coordinatorRuntimePaths(env);
     const server = startServe(stateRoot);
+    let testFailure: unknown = null;
     try {
       await waitFor(() => existsSync(paths.lockPath) && existsSync(paths.capabilityPath));
       const client = new CoordinatorClient({ env });
@@ -777,26 +779,17 @@ void describe('coordinator multiprocess lifecycle', () => {
       });
       const lock = await readLock(paths.lockPath);
       if (lock === null) throw new Error('missing coordinator lock before kill');
-      process.kill(lock.pid, 'SIGKILL');
+      hardKillExactLock(lock, 'restart recovery coordinator');
       await waitFor(async () => {
         const current = await readLock(paths.lockPath);
-        if (current === null) return true;
-        try {
-          process.kill(current.pid, 0);
-          return false;
-        } catch {
-          return true;
-        }
+        return current === null || !isExactProcessAlive(current.pid, current.process_start_identity);
       });
       const recovered = await client.query('status', 'repo-process-test', 'run-process-test');
       const runs = recovered.payload['runs'];
       assert.equal(Array.isArray(runs) ? runs.length : -1, 1);
       const doctor = await client.query('doctor');
       assert.equal(doctor.payload['integrity'], 'ok');
-    } finally {
-      await stopCoordinator(paths.lockPath);
-      if (!server.killed) server.kill('SIGTERM');
-      await rm(root, { recursive: true, force: true });
-    }
+    } catch (error) { testFailure = error; }
+    await finishCoordinatorProcessTest({ primaryFailure: testFailure, root, stateRoot, lockPath: paths.lockPath, children: [server], label: 'hard restart recovery' });
   });
 });
