@@ -8,7 +8,7 @@ import { after, describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import { CoordinatorClient } from '../../src/core/coordination/client.ts';
-import { isExactProcessAlive } from '../../src/core/coordination/process-identity.ts';
+import { isExactProcessAlive, isProcessAlive, processStartIdentity, retireExactProcess } from '../../src/core/coordination/process-identity.ts';
 import { coordinatorRuntimePaths } from '../../src/core/coordination/runtime-paths.ts';
 import { AUTOPILOT_STATE_ROOT_ENV } from '../../src/core/parallel-runtime.ts';
 import { assertNoLeakedCoordinators, stopCoordinatorByLock, stopSpawnedChild, stopTestCoordinatorsForStateRoot } from '../helpers/coordinator-process-lifecycle.ts';
@@ -114,6 +114,8 @@ function runNegotiationClient(stateRoot: string, action: 'attach-acquire' | 'att
 class PersistentTraceClient {
   readonly suffix: string;
   readonly #child: ChildProcessLite;
+  readonly #pid: number | null;
+  #processStartIdentity: string | null;
   readonly #pending = new Map<string, { readonly resolve: (value: Readonly<Record<string, unknown>>) => void; readonly reject: (error: Error) => void }>();
   readonly #ready: Promise<void>;
   readonly #closed: Promise<void>;
@@ -124,6 +126,7 @@ class PersistentTraceClient {
   #stderr = '';
   #sequence = 0;
   #exitError: Error | null = null;
+  #closedObserved = false;
 
   constructor(stateRoot: string, suffix: string) {
     this.suffix = suffix;
@@ -135,6 +138,8 @@ class PersistentTraceClient {
       stdio: ['pipe', 'pipe', 'pipe'],
       shell: false,
     });
+    this.#pid = this.#child.pid ?? null;
+    this.#processStartIdentity = this.#pid === null ? null : processStartIdentity(this.#pid);
     this.#child.stderr.on('data', (chunk) => { this.#stderr += chunk.toString('utf8'); });
     this.#child.stdout.on('data', (chunk) => {
       this.#stdout += chunk.toString('utf8');
@@ -148,6 +153,7 @@ class PersistentTraceClient {
     });
     this.#child.on('error', (error) => this.#fail(error));
     this.#child.on('close', (code, signal) => {
+      this.#closedObserved = true;
       if (code !== 0 || this.#pending.size > 0) {
         this.#exitError = new Error(`persistent trace client ${suffix} exited code=${String(code)} signal=${signal ?? 'none'}: ${this.#stderr}`);
         this.#fail(this.#exitError);
@@ -157,7 +163,16 @@ class PersistentTraceClient {
     });
   }
 
-  async ready(): Promise<void> { await this.#ready; }
+  async ready(): Promise<void> {
+    if (this.#pid === null) throw new Error(`persistent trace client ${this.suffix} has no spawned PID`);
+    const deadline = Date.now() + 5_000;
+    while (this.#processStartIdentity === null && Date.now() < deadline && isProcessAlive(this.#pid)) {
+      await sleep(25);
+      this.#processStartIdentity = processStartIdentity(this.#pid);
+    }
+    if (this.#processStartIdentity === null) throw new Error(`persistent trace client ${this.suffix} has no exact process-start identity`);
+    await this.#ready;
+  }
 
   async send(action: string, fields: Readonly<Record<string, unknown>> = {}): Promise<Readonly<Record<string, unknown>>> {
     await this.#ready;
@@ -169,27 +184,43 @@ class PersistentTraceClient {
   }
 
   async stop(): Promise<void> {
-    if (this.#child.exitCode !== null) {
-      await this.#closed;
-      if (this.#exitError !== null) throw this.#exitError;
-      return;
+    const failures: Error[] = [];
+    if (this.#child.exitCode === null) {
+      try { await withTimeout(this.send('shutdown'), 10_000, `persistent trace client ${this.suffix} did not acknowledge shutdown`); }
+      catch (error) { failures.push(error instanceof Error ? error : new Error(String(error))); }
+      try { this.#child.stdin.end(); }
+      catch (error) { failures.push(error instanceof Error ? error : new Error(String(error))); }
     }
-    let shutdownError: Error | null = null;
-    try {
-      await withTimeout(this.send('shutdown'), 10_000, `persistent trace client ${this.suffix} did not acknowledge shutdown`);
-    } catch (error) { shutdownError = error instanceof Error ? error : new Error(String(error)); }
-    this.#child.stdin.end();
     let closed = await completesWithin(this.#closed, 5_000);
     if (!closed) {
-      this.#child.kill('SIGTERM');
+      try { this.#signalExact('SIGTERM'); }
+      catch (error) { failures.push(error instanceof Error ? error : new Error(String(error))); }
       closed = await completesWithin(this.#closed, 5_000);
     }
     if (!closed) {
-      this.#child.kill('SIGKILL');
-      await withTimeout(this.#closed, 5_000, `persistent trace client ${this.suffix} survived SIGKILL`);
+      try { this.#signalExact('SIGKILL'); }
+      catch (error) { failures.push(error instanceof Error ? error : new Error(String(error))); }
+      closed = await completesWithin(this.#closed, 5_000);
     }
-    const failures = [shutdownError, this.#exitError].filter((error): error is Error => error !== null);
+    if (!closed || !this.#closedObserved) failures.push(new Error(`persistent trace client ${this.suffix} did not produce exact child-close proof`));
+    if (this.#exitError !== null) failures.push(this.#exitError);
     if (failures.length > 0) throw new AggregateError(failures, `persistent trace client ${this.suffix} cleanup failed`);
+  }
+
+  assertStopped(): void {
+    if (!this.#closedObserved) throw new Error(`persistent trace client ${this.suffix} lacks final child-close proof`);
+    if (this.#pid !== null && this.#processStartIdentity !== null && isExactProcessAlive(this.#pid, this.#processStartIdentity)) throw new Error(`persistent trace client ${this.suffix} exact child is still alive after cleanup`);
+  }
+
+  #signalExact(signal: 'SIGTERM' | 'SIGKILL'): void {
+    if (this.#pid === null || this.#processStartIdentity === null) throw new Error(`persistent trace client ${this.suffix} cannot signal without exact spawn identity`);
+    if (!isProcessAlive(this.#pid)) return;
+    if (!isExactProcessAlive(this.#pid, this.#processStartIdentity)) throw new Error(`persistent trace client ${this.suffix} process identity changed before ${signal}`);
+    if (signal === 'SIGTERM') retireExactProcess(this.#pid, this.#processStartIdentity);
+    else {
+      if (!isExactProcessAlive(this.#pid, this.#processStartIdentity)) throw new Error(`persistent trace client ${this.suffix} process identity changed before forced kill`);
+      process.kill(this.#pid, 'SIGKILL');
+    }
   }
 
   #onLine(line: string): void {
@@ -580,6 +611,9 @@ async function certifyPersistentReleaseTrace(clientCount: number): Promise<void>
   const cleanupFailures: unknown[] = [];
   for (const result of await Promise.allSettled([...actors.values()].map(async (actor) => await actor.stop()))) {
     if (result.status === 'rejected') cleanupFailures.push(result.reason);
+  }
+  for (const actor of actors.values()) {
+    try { actor.assertStopped(); } catch (error) { cleanupFailures.push(error); }
   }
   try { await stopCoordinatorByLock(paths.lockPath); } catch (error) { cleanupFailures.push(error); }
   try { await stopSpawnedChild(server); } catch (error) { cleanupFailures.push(error); }
