@@ -71,7 +71,7 @@ const wait=(ms)=>new Promise((resolve)=>setTimeout(resolve,ms));
 try {
   const client=new Client({env,autoStart:false,startupTimeoutMs:30000,readinessTimeoutMs:60000});
   const deadline=Date.now()+90000; let response=null; let lastClientError='none';
-  while(Date.now()<deadline&&response===null){if(child.exitCode!==null)throw new Error('coordinator exited '+String(child.exitCode)+' '+String(diagnostics.length));try{const value=await client.query('handshake');if(value.ok)response=value;else lastClientError=String(value.error_code)}catch(error){lastClientError=error instanceof Error?error.message:String(error)}if(response===null)await wait(50)}
+  while(Date.now()<deadline&&response===null){if(child.exitCode!==null)throw new Error('coordinator exited '+String(child.exitCode)+' diagnostics='+JSON.stringify(diagnostics.slice(-8192))+' last_client_error='+JSON.stringify(lastClientError.slice(-2048)));try{const value=await client.query('handshake');if(value.ok)response=value;else lastClientError=String(value.error_code)}catch(error){lastClientError=error instanceof Error?error.message:String(error)}if(response===null)await wait(50)}
   if(response===null||response.payload?.package_build!=='1.1.8-cf50')throw new Error('sandboxed coordinator handshake failed '+String(lastClientError.length));
   process.stdout.write('sandbox-coordinator-roundtrip-ok\\n');
 } finally {
