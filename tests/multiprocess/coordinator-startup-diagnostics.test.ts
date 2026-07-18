@@ -10,6 +10,7 @@ import { CoordinationRuntimeError } from '../../src/core/coordination/failures.t
 import { coordinatorRuntimePaths } from '../../src/core/coordination/runtime-paths.ts';
 import { AUTOPILOT_STATE_ROOT_ENV } from '../../src/core/parallel-runtime.ts';
 import { armStartupBarrier, releaseStartupBarrier, STARTUP_BARRIER_ENV, waitForStartupBarrier } from '../helpers/coordinator-startup-barrier.ts';
+import { stopTestCoordinatorsForStateRoot } from '../helpers/coordinator-process-lifecycle.ts';
 
 function sha256(value: string): string {
   return createHash('sha256').update(value, 'utf8').digest('hex');
@@ -18,6 +19,12 @@ function sha256(value: string): string {
 function evidenceValue(error: CoordinationRuntimeError, prefix: string): string | null {
   const entry = error.evidence.find((candidate) => candidate.startsWith(prefix));
   return entry === undefined ? null : entry.slice(prefix.length);
+}
+
+function throwTestOrCleanupFailure(primary: unknown | null, cleanup: readonly unknown[], message: string): void {
+  if (primary === null && cleanup.length === 0) return;
+  if (primary !== null && cleanup.length === 0) throw primary;
+  throw new AggregateError([...(primary === null ? [] : [primary]), ...cleanup], message);
 }
 
 void it('reports a real corrupt SQLite startup failure with exact process and phase evidence', async () => {
@@ -83,15 +90,22 @@ void it('reports a real private-capability no-follow failure without treating di
   const env = { ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: stateRoot, [STARTUP_BARRIER_ENV]: barrier, PI_OFFLINE: '1' };
   const paths = coordinatorRuntimePaths(env);
   const target = join(root, 'synthetic-secret-target');
+  let pending: Promise<unknown> | null = null;
+  let barrierArmed = false;
+  let barrierReleased = false;
+  let testFailure: unknown | null = null;
   try {
-    await armStartupBarrier(barrier, 'after-lifecycle-lock-acquisition');
-    const pending = new CoordinatorClient({ env, readinessTimeoutMs: 5_000 }).query('handshake');
-    await waitForStartupBarrier(barrier, 'after-lifecycle-lock-acquisition');
+    await armStartupBarrier(barrier, 'before-private-root-capability-setup');
+    barrierArmed = true;
+    pending = new CoordinatorClient({ env, readinessTimeoutMs: 5_000 }).query('handshake');
+    await waitForStartupBarrier(barrier, 'before-private-root-capability-setup');
     await writeFile(target, 'must-not-be-read-or-mutated\n', { encoding: 'utf8', mode: 0o600 });
     await unlink(paths.capabilityPath);
     await symlink(target, paths.capabilityPath);
-    await releaseStartupBarrier(barrier, 'after-lifecycle-lock-acquisition');
-    await assert.rejects(() => pending, (error: unknown) => {
+    await releaseStartupBarrier(barrier, 'before-private-root-capability-setup');
+    barrierReleased = true;
+    const startup = pending;
+    await assert.rejects(() => startup, (error: unknown) => {
       if (!(error instanceof CoordinationRuntimeError)) return false;
       assert.match(error.message, /failed with exit code 70/u);
       assert.equal(evidenceValue(error, 'startup_phase='), 'before-private-root-capability-setup');
@@ -101,5 +115,15 @@ void it('reports a real private-capability no-follow failure without treating di
     });
     assert.equal(await readFile(target, 'utf8'), 'must-not-be-read-or-mutated\n');
     assert.equal((await lstat(paths.capabilityPath)).isSymbolicLink(), true, 'diagnostic handling must not repair an authority-path attack');
-  } finally { await rm(root, { recursive: true, force: true }); }
+  } catch (error) { testFailure = error; }
+
+  const cleanupFailures: unknown[] = [];
+  if (barrierArmed && !barrierReleased) {
+    try { await releaseStartupBarrier(barrier, 'before-private-root-capability-setup'); }
+    catch (error) { cleanupFailures.push(error); }
+  }
+  if (pending !== null) await Promise.allSettled([pending]);
+  try { await stopTestCoordinatorsForStateRoot(stateRoot); } catch (error) { cleanupFailures.push(error); }
+  try { await rm(root, { recursive: true, force: true }); } catch (error) { cleanupFailures.push(error); }
+  throwTestOrCleanupFailure(testFailure, cleanupFailures, 'private-capability startup diagnostic or cleanup failed');
 });

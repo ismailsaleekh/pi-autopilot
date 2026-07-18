@@ -11,6 +11,7 @@ import { CoordinatorClient } from '../../src/core/coordination/client.ts';
 import { isProcessAlive } from '../../src/core/coordination/process-identity.ts';
 import { coordinatorRuntimePaths } from '../../src/core/coordination/runtime-paths.ts';
 import { AUTOPILOT_STATE_ROOT_ENV } from '../../src/core/parallel-runtime.ts';
+import { stopSpawnedChild, stopTestCoordinatorsForStateRoot } from '../helpers/coordinator-process-lifecycle.ts';
 
 const packageRoot = resolve(fileURLToPath(new URL('../../', import.meta.url)));
 const coordinatorCli = join(packageRoot, 'src', 'cli', 'autopilot-coordinator.ts');
@@ -563,7 +564,8 @@ async function certifyPersistentReleaseTrace(clientCount: number): Promise<void>
     if (result.status === 'rejected') cleanupFailures.push(result.reason);
   }
   try { await stopCoordinator(paths.lockPath); } catch (error) { cleanupFailures.push(error); }
-  if (!server.killed && server.exitCode === null) server.kill('SIGTERM');
+  try { await stopSpawnedChild(server); } catch (error) { cleanupFailures.push(error); }
+  try { await stopTestCoordinatorsForStateRoot(stateRoot); } catch (error) { cleanupFailures.push(error); }
   try { await rm(root, { recursive: true, force: true }); } catch (error) { cleanupFailures.push(error); }
   if (traceError !== null || cleanupFailures.length > 0) {
     throw new AggregateError([...(traceError === null ? [] : [traceError]), ...cleanupFailures], `${String(clientCount)}-client persistent release trace or cleanup failed`);
@@ -742,9 +744,11 @@ void describe('coordinator multiprocess lifecycle', () => {
     }
   });
 
-  void it('runs seeded reproducible 5, 10, and 32-client persistent randomized release traces', async () => {
-    for (const clientCount of [5, 10, 32]) await certifyPersistentReleaseTrace(clientCount);
-  });
+  for (const clientCount of [5, 10, 32]) {
+    void it(`runs the seeded reproducible ${String(clientCount)}-client persistent randomized release trace`, async () => {
+      await certifyPersistentReleaseTrace(clientCount);
+    });
+  }
 
   void it('recovers committed state after a hard coordinator kill and client restart', async () => {
     const root = await mkdtemp(join(tmpdir(), 'pi-autopilot-coordinator-restart-'));

@@ -12,6 +12,7 @@ import type { CurrentStoreGeneration } from '../../src/core/coordination/store-g
 import { CoordinatorStore } from '../../src/core/coordination/store.ts';
 import { parseCurrentCoordinatorLock, parsePredecessorCoordinatorLock } from '../../src/core/coordination/upgrade-contracts.ts';
 import { coordinationRootForRepo, prepareAutopilotWorkstream, resolveRepoIdentity, writeActiveAutopilots, writePathClaims, type AutopilotPathClaim, type ProcessEnvLike } from '../../src/core/parallel-runtime.ts';
+import { stopTestCoordinatorsForStateRoot } from './coordinator-process-lifecycle.ts';
 
 export interface MigrationTestFixture {
   readonly root: string;
@@ -111,12 +112,32 @@ export async function seedPhase34Schema6Database(env: ProcessEnvLike): Promise<s
   return paths.databasePath;
 }
 
+async function finishMigrationTestFixture(root: string, stateRoot: string, fixtureFailure: unknown | null): Promise<readonly number[]> {
+  let coordinatorPids: readonly number[] = [];
+  let authorityCleanupFailed = false;
+  const cleanupFailures: unknown[] = [];
+  try { coordinatorPids = await terminateExactMigrationFixtureCoordinator(stateRoot); }
+  catch (error) { authorityCleanupFailed = true; cleanupFailures.push(error); }
+  try { await stopTestCoordinatorsForStateRoot(stateRoot); }
+  catch (error) { authorityCleanupFailed = true; cleanupFailures.push(error); }
+  if (authorityCleanupFailed) {
+    cleanupFailures.push(new Error(`migration fixture root retained because coordinator authority cleanup was not proven: ${root}`));
+  } else {
+    try { await makeRemovable(root); } catch (error) { cleanupFailures.push(error); }
+    try { await rm(root, { recursive: true, force: true }); } catch (error) { cleanupFailures.push(error); }
+  }
+  const failures = [...(fixtureFailure === null ? [] : [fixtureFailure]), ...cleanupFailures];
+  if (failures.length === 1) throw failures[0];
+  if (failures.length > 1) throw new AggregateError(failures, 'migration fixture execution or cleanup failed');
+  return coordinatorPids;
+}
+
 export async function withEmptyMigrationTestFixture(run: (fixture: MigrationTestFixture) => Promise<void>): Promise<readonly number[]> {
   const root = await mkdtemp(join(tmpdir(), 'autopilot-empty-migration-proof-'));
   const source = join(root, 'source');
   const stateRoot = join(root, 'state');
   const env: ProcessEnvLike = { ...process.env, AUTOPILOT_STATE_ROOT: stateRoot };
-  let coordinatorPids: readonly number[] = [];
+  let fixtureFailure: unknown | null = null;
   try {
     await mkdir(source, { recursive: true });
     await writeFile(join(source, 'README.md'), '# empty legacy coordination repository\n', 'utf8');
@@ -126,12 +147,8 @@ export async function withEmptyMigrationTestFixture(run: (fixture: MigrationTest
     }
     await mkdir(stateRoot, { recursive: true });
     await run({ root, source, stateRoot, repoKey: resolveRepoIdentity(source).repoKey, env });
-  } finally {
-    coordinatorPids = await terminateExactMigrationFixtureCoordinator(stateRoot);
-    await makeRemovable(root);
-    await rm(root, { recursive: true, force: true });
-  }
-  return coordinatorPids;
+  } catch (error) { fixtureFailure = error; }
+  return await finishMigrationTestFixture(root, stateRoot, fixtureFailure);
 }
 
 export async function withMigrationTestFixture(run: (fixture: MigrationTestFixture) => Promise<void>): Promise<readonly number[]> {
@@ -139,7 +156,7 @@ export async function withMigrationTestFixture(run: (fixture: MigrationTestFixtu
   const source = join(root, 'source');
   const stateRoot = join(root, 'state');
   const env: ProcessEnvLike = { ...process.env, AUTOPILOT_STATE_ROOT: stateRoot };
-  let coordinatorPids: readonly number[] = [];
+  let fixtureFailure: unknown | null = null;
   try {
     await mkdir(source, { recursive: true });
     await writeFile(join(source, 'README.md'), '# generic migration repository\n', 'utf8');
@@ -154,12 +171,8 @@ export async function withMigrationTestFixture(run: (fixture: MigrationTestFixtu
     const claim: AutopilotPathClaim = { schema_version: 'autopilot.path_claim.v1', path: 'src/future.ts', autopilot_id: dormant.autopilot_id, workstream: dormant.workstream, workstream_run: dormant.workstream_run, unit_id: 'unit-old-session', attempt: 1, claim_type: 'WRITE', acquired_at: '2026-07-12T11:01:00.000Z', active_run_epoch: 1, reason: 'old-session durable ownership proof' };
     await writePathClaims(coordinationRoot, [claim]);
     await run({ root, source, stateRoot, repoKey: prepared.active.repo_key, env });
-  } finally {
-    coordinatorPids = await terminateExactMigrationFixtureCoordinator(stateRoot);
-    await makeRemovable(root);
-    await rm(root, { recursive: true, force: true });
-  }
-  return coordinatorPids;
+  } catch (error) { fixtureFailure = error; }
+  return await finishMigrationTestFixture(root, stateRoot, fixtureFailure);
 }
 
 export async function terminateExactMigrationFixtureCoordinator(stateRoot: string): Promise<readonly number[]> {
@@ -198,10 +211,11 @@ export async function terminateExactMigrationFixtureCoordinator(stateRoot: strin
 
 async function makeRemovable(root: string): Promise<void> {
   if (!existsSync(root)) return;
-  await chmod(root, 0o700).catch(() => undefined);
+  await chmod(root, 0o700);
   for (const entry of await readdir(root, { withFileTypes: true })) {
     const path = join(root, entry.name);
+    if (entry.isSymbolicLink()) continue;
     if (entry.isDirectory()) await makeRemovable(path);
-    else await chmod(path, 0o600).catch(() => undefined);
+    else await chmod(path, 0o600);
   }
 }
