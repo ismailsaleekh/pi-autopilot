@@ -1,4 +1,4 @@
-import { runGitQuery } from "./git-process.js";
+import { runGitQuery, runGitStreamingLsTree, checkedAdd, GitStreamingQueryError } from "./git-process.js";
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
@@ -137,12 +137,17 @@ export function parseAutopilotCheckoutProfile(value, source = '<profile>') {
 export async function scanTrackedTree(repoRoot, now = new Date()) {
     const resolvedRepoRoot = resolve(repoRoot);
     const headSha = decodeUtf8(runGitQuery({ descriptor: { kind: 'head' }, cwd: resolvedRepoRoot }).stdout, 'git HEAD').trim();
+    const commitOid = decodeUtf8(runGitQuery({ descriptor: { kind: 'resolve-commit', revision: headSha }, cwd: resolvedRepoRoot }).stdout, 'git commit').trim();
     const entries = [];
     let totalBytes = 0;
-    await streamGitLsTree(headSha, resolvedRepoRoot, (record) => {
-        const entry = parseTrackedTreeRecord(record);
-        entries.push(entry);
-        totalBytes += entry.byte_count;
+    await runGitStreamingLsTree({
+        commit: commitOid,
+        cwd: resolvedRepoRoot,
+        onRecord: (record) => {
+            const entry = trackedEntryFromStreamRecord(record);
+            entries.push(entry);
+            totalBytes = checkedAdd(totalBytes, entry.byte_count, 'tracked-tree-total-overflow');
+        },
     });
     const sortedEntries = Object.freeze(entries.sort((left, right) => left.path.localeCompare(right.path)));
     return Object.freeze({
@@ -227,7 +232,14 @@ export function estimateBytesForMaterializationPaths(scan, paths) {
             matched.set(entry.path, entry.byte_count);
         }
     }
-    return [...matched.values()].reduce((sum, bytes) => sum + bytes, 0);
+    try {
+        return [...matched.values()].reduce((sum, bytes) => checkedAdd(sum, bytes, 'checkout-estimate-overflow'), 0);
+    }
+    catch (error) {
+        if (error instanceof GitStreamingQueryError)
+            fail(error.code, error.message);
+        throw error;
+    }
 }
 export function submodulePathsForMaterialization(scan, paths) {
     const out = [];
@@ -310,46 +322,23 @@ function parseMaterializationConfig(value, defaults, source) {
     });
 }
 const STRICT_UTF8_DECODER = new TextDecoder('utf-8', { fatal: true });
-async function streamGitLsTree(revision, cwd, onRecord) {
-    const output = runGitQuery({ descriptor: { kind: 'ls-tree-recursive', revision, includeSize: true }, cwd }).stdout;
-    let cursor = 0;
-    while (cursor < output.length) {
-        const delimiter = output.indexOf(0, cursor);
-        if (delimiter < 0) {
-            fail('invalid-ls-tree-output', 'git ls-tree output ended without a NUL record delimiter.', [`trailing_bytes=${String(output.length - cursor)}`]);
-        }
-        if (delimiter > cursor)
-            onRecord(output.subarray(cursor, delimiter));
-        cursor = delimiter + 1;
-    }
-}
-function parseTrackedTreeRecord(raw) {
-    const tabIndex = raw.indexOf(9);
-    if (tabIndex < 0) {
-        fail('invalid-ls-tree-output', 'git ls-tree output did not contain a path separator.', [bytesToHex(raw.subarray(0, 120))]);
-    }
-    const meta = decodeUtf8(raw.subarray(0, tabIndex), 'git ls-tree metadata').trim().split(/\s+/u);
-    if (meta.length < 4) {
-        fail('invalid-ls-tree-output', 'git ls-tree output did not contain mode, type, object id, and size metadata.', [bytesToHex(raw.subarray(0, 120))]);
-    }
-    let decodedPath;
-    try {
-        decodedPath = STRICT_UTF8_DECODER.decode(raw.subarray(tabIndex + 1));
-    }
-    catch (error) {
-        fail('invalid-ls-tree-output', `git ls-tree path was not valid UTF-8: ${errorMessage(error)}`, [bytesToHex(raw.subarray(tabIndex + 1, tabIndex + 61))]);
-    }
+function trackedEntryFromStreamRecord(record) {
+    const decodedPath = decodeStreamPathBytes(record.path_bytes);
     const path = normalizeRepoRelativePath(decodedPath);
-    const objectType = parseGitObjectType(meta[1]);
-    const byteToken = meta[3];
-    if (byteToken === undefined || (!/^\d+$/u.test(byteToken) && byteToken !== '-')) {
-        fail('invalid-ls-tree-output', 'git ls-tree output contained an invalid object-size token.', [byteToken ?? '<missing>', path]);
-    }
-    const byteCount = byteToken === '-' ? 0 : Number(byteToken);
+    const objectType = record.object_type === 'blob' || record.object_type === 'tree' || record.object_type === 'commit' ? record.object_type : 'unknown';
+    const byteCount = record.size ?? 0;
     if (!Number.isSafeInteger(byteCount)) {
-        fail('invalid-ls-tree-output', 'git ls-tree object size exceeded the JavaScript safe-integer range.', [byteToken, path]);
+        fail('invalid-ls-tree-output', 'git ls-tree object size exceeded the JavaScript safe-integer range.', [String(record.size), path]);
     }
     return Object.freeze({ path, byte_count: byteCount, object_type: objectType });
+}
+function decodeStreamPathBytes(bytes) {
+    try {
+        return STRICT_UTF8_DECODER.decode(bytes);
+    }
+    catch (error) {
+        fail('invalid-ls-tree-output', `git ls-tree path was not valid UTF-8: ${errorMessage(error)}`, [bytesToHex(bytes.subarray(0, 61))]);
+    }
 }
 function decodeUtf8(value, label) {
     try {
@@ -361,11 +350,6 @@ function decodeUtf8(value, label) {
 }
 function bytesToHex(value) {
     return [...value].map((byte) => byte.toString(16).padStart(2, '0')).join('');
-}
-function parseGitObjectType(value) {
-    if (value === 'blob' || value === 'tree' || value === 'commit' || value === 'tag')
-        return value;
-    return 'unknown';
 }
 function patternToApproximateMaterializationPath(pattern) {
     if (pattern.startsWith('!'))

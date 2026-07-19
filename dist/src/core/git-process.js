@@ -1,11 +1,25 @@
 import { spawn, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { platform } from 'node:os';
 import { isAbsolute } from 'node:path';
 export const GIT_QUERY_MAX_OUTPUT_BYTES = 64 * 1024 * 1024;
 export const GIT_MUTATION_DIAGNOSTIC_BYTES = 256 * 1024;
 export const GIT_DEFAULT_QUERY_TIMEOUT_MS = 30_000;
 export const GIT_DEFAULT_MUTATION_TIMEOUT_MS = 120_000;
-const GIT_TERMINATION_GRACE_MS = 1_000;
+export const GIT_TERMINATION_GRACE_MS = 1_000;
+// D58 streaming-query frozen constants.
+export const GIT_STREAM_WIRE_MAX_BYTES = 268_435_456;
+export const GIT_STREAM_ENTRY_MAX = 500_000;
+export const GIT_STREAM_PATH_MAX_BYTES = 134_217_728;
+export const GIT_STREAM_RECORD_MAX_BYTES = 1_048_576;
+export const GIT_STREAM_OBJECT_TOTAL_MAX_BYTES = Number.MAX_SAFE_INTEGER;
+export const GIT_STREAM_DIAGNOSTIC_MAX_BYTES = 262_144;
+export const GIT_STREAM_TIMEOUT_MS = 30_000;
+export const GIT_FORCE_KILL_WAIT_MS = 2_000;
+export const GIT_PIPE_DRAIN_WAIT_MS = 1_000;
+export const GIT_STREAM_TOTAL_DEADLINE_MS = 35_000;
+export const GIT_STREAM_STDERR_RETAIN_PREFIX = 131_072;
+export const GIT_STREAM_STDERR_RETAIN_SUFFIX = 131_072;
 export class GitProcessDescriptorError extends Error {
     name = 'GitProcessDescriptorError';
     constructor(message) {
@@ -58,6 +72,12 @@ function unifiedLines(value) {
         throw new GitProcessDescriptorError('unified line count must be a bounded non-negative integer');
     return value;
 }
+function streamingCommitOid(value) {
+    atom(value, 'streaming tree commit');
+    if (!/^[0-9a-f]{40}$/u.test(value))
+        throw new GitProcessDescriptorError('streaming tree commit must be exactly 40 lowercase-hex object id sealed from HEAD^{commit}');
+    return value;
+}
 function queryCommand(descriptor) {
     switch (descriptor.kind) {
         case 'head': return { argv: ['rev-parse', 'HEAD'], acceptedExitCodes: [0], negativeExitCodes: [] };
@@ -88,6 +108,7 @@ function queryCommand(descriptor) {
         case 'ls-files-state': return { argv: ['ls-files', '-t', '-z', '--', ...atoms(descriptor.paths, 'tracked path', true)], acceptedExitCodes: [0], negativeExitCodes: [] };
         case 'ls-tree-path': return { argv: ['ls-tree', '-z', atom(descriptor.revision, 'tree revision'), '--', atom(descriptor.path, 'tree path', true)], acceptedExitCodes: [0], negativeExitCodes: [] };
         case 'ls-tree-recursive': return { argv: ['ls-tree', '-r', ...(descriptor.includeSize ? ['-l'] : []), '--full-tree', '-z', atom(descriptor.revision, 'tree revision')], acceptedExitCodes: [0], negativeExitCodes: [] };
+        case 'ls-tree-recursive-stream': return { argv: ['ls-tree', '-r', '-l', '--full-tree', '-z', streamingCommitOid(descriptor.commit)], acceptedExitCodes: [0], negativeExitCodes: [] };
         case 'show-file': return { argv: ['show', `${atom(descriptor.revision, 'show revision')}:${atom(descriptor.path, 'show path', true)}`], acceptedExitCodes: descriptor.allowAbsent === true ? [0, 128] : [0], negativeExitCodes: descriptor.allowAbsent === true ? [128] : [] };
         case 'rev-list-parents': return { argv: ['rev-list', '--parents', '-n', '1', atom(descriptor.revision, 'revision')], acceptedExitCodes: [0], negativeExitCodes: [] };
         case 'rev-list-range': return { argv: ['rev-list', ...(descriptor.reverse === true ? ['--reverse'] : []), `${atom(descriptor.fromExclusive, 'range start')}..${atom(descriptor.toInclusive, 'range end')}`], acceptedExitCodes: [0], negativeExitCodes: [] };
@@ -333,4 +354,472 @@ export async function runGitMutation(input) {
             resolvePromise({ kind: 'reported', descriptor: input.descriptor.kind, exitCode: code ?? -1, stdout: stdoutBytes, stderr: stderrBytes, diagnostic: boundedDiagnostic(stdoutBytes, stderrBytes) });
         });
     });
+}
+export class GitStreamingQueryError extends Error {
+    name = 'GitStreamingQueryError';
+    code;
+    terminalState;
+    diagnostic;
+    rootPid;
+    constructor(code, message, options = {}) {
+        super(`GitStreamingQueryError [${code}]: ${message}`);
+        this.code = code;
+        this.terminalState = options.terminalState ?? null;
+        this.diagnostic = options.diagnostic ?? '';
+        this.rootPid = options.rootPid ?? null;
+    }
+}
+function streamingOverflow(code, message) {
+    return new GitStreamingQueryError(code, message);
+}
+export function checkedAdd(augend, addend, overflowCode) {
+    if (!Number.isSafeInteger(augend) || !Number.isSafeInteger(addend) || augend < 0 || addend < 0) {
+        throw streamingOverflow(overflowCode, `checked addition rejected a non-safe non-negative operand (${String(augend)} + ${String(addend)})`);
+    }
+    const result = augend + addend;
+    if (!Number.isSafeInteger(result))
+        throw streamingOverflow(overflowCode, `checked addition overflowed the safe-integer range (${String(augend)} + ${String(addend)})`);
+    return result;
+}
+export function checkedMultiply(multiplicand, multiplier, overflowCode) {
+    if (!Number.isSafeInteger(multiplicand) || !Number.isSafeInteger(multiplier) || multiplicand < 0 || multiplier < 0) {
+        throw streamingOverflow(overflowCode, `checked multiplication rejected a non-safe non-negative operand (${String(multiplicand)} * ${String(multiplier)})`);
+    }
+    if (multiplicand !== 0 && multiplier > Number.MAX_SAFE_INTEGER / multiplicand) {
+        throw streamingOverflow(overflowCode, `checked multiplication overflowed the safe-integer range (${String(multiplicand)} * ${String(multiplier)})`);
+    }
+    return multiplicand * multiplier;
+}
+export function checkedCeilMultiply(value, numerator, denominator, overflowCode) {
+    if (!Number.isSafeInteger(value) || !Number.isSafeInteger(numerator) || !Number.isSafeInteger(denominator)) {
+        throw streamingOverflow(overflowCode, 'checked ceil-multiply requires safe-integer operands');
+    }
+    if (value < 0 || numerator < 0 || denominator <= 0) {
+        throw streamingOverflow(overflowCode, 'checked ceil-multiply requires non-negative value/numerator and positive denominator');
+    }
+    const scaled = checkedMultiply(value, numerator, overflowCode);
+    return Math.ceil(scaled / denominator);
+}
+function bytesToUtf8(bytes) {
+    return new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+}
+function strictUtf8(bytes) {
+    try {
+        return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    }
+    catch (error) {
+        throw streamingOverflow('invalid-ls-tree-output', `git ls-tree bytes were not valid UTF-8: ${errorMessage(error)}`);
+    }
+}
+function decodeStreamPath(raw) {
+    // Paths retain their decoded bytes and are never normalized into a different identity.
+    for (let index = 0; index < raw.length; index += 1) {
+        const byte = raw[index];
+        if (byte === 0x2f /* / */)
+            continue;
+        if (byte === 0x5c /* backslash */)
+            throw streamingOverflow('invalid-ls-tree-output', 'git ls-tree path contained a backslash');
+    }
+    if (raw.length === 0)
+        throw streamingOverflow('invalid-ls-tree-output', 'git ls-tree path was empty');
+    const segments = bytesToUtf8(raw).split('/');
+    if (segments.some((segment) => segment.length === 0 || segment === '.' || segment === '..')) {
+        throw streamingOverflow('invalid-ls-tree-output', 'git ls-tree path contained an empty, dot, or dot-dot segment');
+    }
+    return raw;
+}
+function parseStreamingRecord(raw) {
+    if (raw.length === 0)
+        throw streamingOverflow('invalid-ls-tree-output', 'git ls-tree emitted an empty record');
+    const tabIndex = raw.indexOf(9 /* TAB */);
+    if (tabIndex < 0)
+        throw streamingOverflow('invalid-ls-tree-output', 'git ls-tree record did not contain a path separator');
+    const meta = strictUtf8(raw.subarray(0, tabIndex)).trim().split(/\s+/u);
+    if (meta.length !== 4)
+        throw streamingOverflow('invalid-ls-tree-output', 'git ls-tree metadata did not contain exactly mode, type, object id, and size');
+    const [mode, type, oid, sizeToken] = meta;
+    const pathBytes = decodeStreamPath(raw.subarray(tabIndex + 1));
+    if (!/^[0-9a-f]{40}$/u.test(oid))
+        throw streamingOverflow('invalid-ls-tree-output', 'git ls-tree object id was not exactly 40 lowercase hex');
+    if (mode === '100644' || mode === '100755' || mode === '120000') {
+        if (type !== 'blob')
+            throw streamingOverflow('invalid-ls-tree-output', `git ls-tree mode ${mode} requires object type blob`);
+        if (!/^\d+$/u.test(sizeToken))
+            throw streamingOverflow('invalid-ls-tree-output', `git ls-tree blob size was not decimal (${sizeToken})`);
+        if (!Number.isSafeInteger(Number(sizeToken)))
+            throw streamingOverflow('invalid-ls-tree-output', 'git ls-tree blob size exceeded the safe-integer range');
+        return Object.freeze({ mode, object_type: 'blob', oid, size: Number(sizeToken), path_bytes: pathBytes });
+    }
+    if (mode === '160000') {
+        if (type !== 'commit')
+            throw streamingOverflow('invalid-ls-tree-output', 'git ls-tree mode 160000 requires object type commit');
+        if (sizeToken !== '-')
+            throw streamingOverflow('invalid-ls-tree-output', 'git ls-tree commit (gitlink) size must be a dash');
+        return Object.freeze({ mode: '160000', object_type: 'commit', oid, size: null, path_bytes: pathBytes });
+    }
+    if (mode === '040000') {
+        if (type !== 'tree')
+            throw streamingOverflow('invalid-ls-tree-output', 'git ls-tree mode 040000 requires object type tree');
+        if (sizeToken !== '-')
+            throw streamingOverflow('invalid-ls-tree-output', 'git ls-tree tree size must be a dash');
+        return Object.freeze({ mode: '040000', object_type: 'tree', oid, size: null, path_bytes: pathBytes });
+    }
+    throw streamingOverflow('invalid-ls-tree-output', `git ls-tree mode was not an accepted pair (${mode} ${type})`);
+}
+function newStderrAccumulator() {
+    return { total: 0, hash: createHash('sha256'), prefix: [], prefixBytes: 0, suffix: new Uint8Array(0) };
+}
+function feedStderr(acc, chunk) {
+    acc.total = checkedAdd(acc.total, chunk.length, 'stream-diagnostic-overflow');
+    acc.hash.update(chunk);
+    const remainingPrefix = GIT_STREAM_STDERR_RETAIN_PREFIX - acc.prefixBytes;
+    if (remainingPrefix > 0) {
+        const taken = chunk.subarray(0, Math.min(chunk.length, remainingPrefix));
+        if (taken.length > 0) {
+            acc.prefix.push(new Uint8Array(taken));
+            acc.prefixBytes += taken.length;
+        }
+    }
+    // Maintain a rolling suffix window of the last GIT_STREAM_STDERR_RETAIN_SUFFIX bytes.
+    const desired = Math.min(acc.total, GIT_STREAM_STDERR_RETAIN_SUFFIX);
+    if (desired === 0) {
+        acc.suffix = new Uint8Array(0);
+        return;
+    }
+    const merged = new Uint8Array(desired);
+    // If the existing suffix plus this chunk exceeds the window, keep the tail.
+    const startInChunk = Math.max(0, chunk.length - desired);
+    const carry = Math.min(acc.suffix.length, desired - (chunk.length - startInChunk));
+    merged.set(acc.suffix.subarray(acc.suffix.length - carry), 0);
+    merged.set(chunk.subarray(startInChunk), carry);
+    acc.suffix = merged;
+}
+function finalizeStderr(acc) {
+    const sha256 = acc.total === 0 ? null : `sha256:${acc.hash.digest('hex')}`;
+    const prefixBytes = concatenate(acc.prefix, acc.prefixBytes);
+    const retained = concatenate([prefixBytes, acc.suffix], prefixBytes.length + acc.suffix.length);
+    const retainedCeiling = GIT_STREAM_STDERR_RETAIN_PREFIX + GIT_STREAM_STDERR_RETAIN_SUFFIX;
+    const dropped = Math.max(0, acc.total - retainedCeiling);
+    return { bytes: acc.total, sha256, retained, dropped };
+}
+function stderrDiagnostic(acc, extra) {
+    const { bytes, sha256, retained, dropped } = finalizeStderr(acc);
+    const decoded = new TextDecoder('utf-8', { fatal: false }).decode(retained).trim();
+    const parts = [decoded];
+    if (extra.length > 0)
+        parts.push(extra);
+    parts.push(`stderr_total_bytes=${String(bytes)}`);
+    parts.push(`stderr_sha256=${sha256 ?? '<none>'}`);
+    if (dropped > 0)
+        parts.push(`stderr_dropped_bytes=${String(dropped)}`);
+    return parts.filter((value) => value.length > 0).join('\n');
+}
+/**
+ * Streams `git ls-tree -r -l --full-tree -z <commit>` without retaining the complete
+ * raw output. Each parsed record is delivered to `onRecord`. Read failure is loud
+ * and never effect-unknown. The settle-once process lifecycle enforces the
+ * absolute 35-second deadline and reports authority-critical
+ * `git-process-containment-failed` for any unconfirmed reap.
+ */
+export async function runGitStreamingLsTree(input) {
+    const clock = input.clock ?? Date.now;
+    const start = clock();
+    let command;
+    try {
+        command = queryCommand({ kind: 'ls-tree-recursive-stream', commit: input.commit });
+    }
+    catch (error) {
+        if (error instanceof GitProcessDescriptorError)
+            throw new GitStreamingQueryError('invalid-descriptor', error.message);
+        throw error;
+    }
+    const argv = command.argv;
+    const remainingMs = (limit) => {
+        const elapsed = clock() - start;
+        return Math.max(0, limit - elapsed);
+    };
+    return await new Promise((resolve, reject) => {
+        let pid = null;
+        let spawnEventConfirmed = false;
+        let terminalState = null;
+        let closeObserved = false;
+        let pending = [];
+        let pendingBytes = 0;
+        let wireBytes = 0;
+        let entryCount = 0;
+        let pathBytes = 0;
+        let objectTotal = 0;
+        let firstError = null;
+        const stderrAcc = newStderrAccumulator();
+        const finish = (state, summaryExitCode, summarySignal) => {
+            if (terminalState !== null)
+                return;
+            terminalState = state;
+        };
+        const failLoud = (error) => {
+            if (firstError === null)
+                firstError = error;
+            beginTermination('grace-terminating');
+        };
+        const reapTimer = setTimeout(() => {
+            if (terminalState === null)
+                finish('containment-failed', null, null);
+            onDeadline();
+        }, remainingMs(GIT_STREAM_TOTAL_DEADLINE_MS));
+        const execTimer = setTimeout(() => {
+            if (terminalState !== null)
+                return;
+            if (!spawnEventConfirmed) {
+                const rootPid = pid;
+                finish('spawn-unconfirmed', null, null);
+                firstError = new GitStreamingQueryError('git-process-containment-failed', 'git ls-tree spawn did not settle before the execution deadline', { terminalState: 'spawn-unconfirmed', rootPid });
+            }
+            else {
+                beginTermination('grace-terminating');
+            }
+            onDeadline();
+        }, remainingMs(GIT_STREAM_TIMEOUT_MS));
+        const dispose = () => {
+            clearTimeout(reapTimer);
+            clearTimeout(execTimer);
+        };
+        const settle = () => {
+            if (firstError !== null) {
+                dispose();
+                reject(firstError);
+                return;
+            }
+            const stderr = finalizeStderr(stderrAcc);
+            if (stderr.bytes > GIT_STREAM_DIAGNOSTIC_MAX_BYTES) {
+                dispose();
+                reject(new GitStreamingQueryError('stream-diagnostic-overflow', `git ls-tree stderr exceeded the ${String(GIT_STREAM_DIAGNOSTIC_MAX_BYTES)}-byte diagnostic ceiling`, { diagnostic: stderrDiagnostic(stderrAcc, '') }));
+                return;
+            }
+            if (stderr.bytes > 0) {
+                dispose();
+                reject(new GitStreamingQueryError('invalid-ls-tree-output', 'git ls-tree produced non-empty stderr; success requires empty stderr', { diagnostic: stderrDiagnostic(stderrAcc, '') }));
+                return;
+            }
+            const state = terminalState ?? 'exited';
+            dispose();
+            resolve(Object.freeze({
+                descriptor: 'ls-tree-recursive-stream',
+                exit_code: lastExitCode,
+                signal: lastSignal,
+                wire_bytes: wireBytes,
+                entry_count: entryCount,
+                path_bytes: pathBytes,
+                object_total_bytes: objectTotal,
+                stderr_bytes: stderr.bytes,
+                stderr_sha256: stderr.sha256,
+                terminal_state: state,
+            }));
+        };
+        let lastExitCode = null;
+        let lastSignal = null;
+        function flushPending() {
+            while (pending.length > 0) {
+                const delimiter = indexOfPendingNul();
+                if (delimiter < 0)
+                    break;
+                const recordBytes = drainPending(delimiter);
+                if (recordBytes.length === 0)
+                    continue;
+                try {
+                    const record = parseStreamingRecord(recordBytes);
+                    entryCount = checkedAdd(entryCount, 1, 'git-stream-entry-overflow');
+                    pathBytes = checkedAdd(pathBytes, record.path_bytes.length, 'git-stream-path-overflow');
+                    if (record.object_type === 'blob' && record.size !== null)
+                        objectTotal = checkedAdd(objectTotal, record.size, 'tracked-tree-total-overflow');
+                    input.onRecord(record);
+                }
+                catch (error) {
+                    if (error instanceof GitStreamingQueryError) {
+                        failLoud(error);
+                        return;
+                    }
+                    throw error;
+                }
+            }
+        }
+        function indexOfPendingNul() {
+            let offset = 0;
+            for (const chunk of pending) {
+                const at = chunk.indexOf(0);
+                if (at >= 0)
+                    return offset + at;
+                offset += chunk.length;
+            }
+            return -1;
+        }
+        function drainPending(upToExclusive) {
+            const out = new Uint8Array(upToExclusive);
+            let written = 0;
+            while (pending.length > 0 && written < upToExclusive) {
+                const chunk = pending[0];
+                if (chunk === undefined)
+                    break;
+                const need = upToExclusive - written;
+                if (chunk.length <= need) {
+                    out.set(chunk, written);
+                    written += chunk.length;
+                    pending.shift();
+                    pendingBytes -= chunk.length;
+                }
+                else {
+                    out.set(chunk.subarray(0, need), written);
+                    written += need;
+                    pending[0] = new Uint8Array(chunk.subarray(need));
+                    pendingBytes -= need;
+                }
+            }
+            // Drop the trailing NUL delimiter byte as well.
+            if (pending.length > 0) {
+                const head = pending[0];
+                if (head !== undefined) {
+                    pending[0] = new Uint8Array(head.subarray(1));
+                    pendingBytes -= 1;
+                }
+            }
+            return out;
+        }
+        let terminating = false;
+        let forceKilled = false;
+        function beginTermination(_entryState) {
+            if (terminating)
+                return;
+            terminating = true;
+            void terminateStreamingTree();
+        }
+        async function terminateStreamingTree() {
+            if (pid === null)
+                return;
+            if (gitProcessTreeTerminationKind() === 'windows-task-tree') {
+                await new Promise((resolveKill) => {
+                    const killer = spawn('taskkill.exe', ['/pid', String(pid), '/t', '/f'], { stdio: 'ignore', shell: false });
+                    killer.once('close', () => resolveKill());
+                    killer.once('error', () => resolveKill());
+                });
+                return;
+            }
+            try {
+                process.kill(-pid, 'SIGTERM');
+            }
+            catch {
+                try {
+                    childHandle.kill('SIGTERM');
+                }
+                catch { /* ignore */ }
+            }
+            await wait(Math.min(GIT_TERMINATION_GRACE_MS, remainingMs(GIT_STREAM_TOTAL_DEADLINE_MS)));
+            if (terminalState !== null || closeObserved)
+                return;
+            try {
+                process.kill(-pid, 'SIGKILL');
+                forceKilled = true;
+            }
+            catch {
+                if (!closeObserved) {
+                    try {
+                        childHandle.kill('SIGKILL');
+                        forceKilled = true;
+                    }
+                    catch { /* ignore */ }
+                }
+            }
+            await wait(Math.min(GIT_FORCE_KILL_WAIT_MS, remainingMs(GIT_STREAM_TOTAL_DEADLINE_MS)));
+        }
+        function onDeadline() {
+            if (terminalState === 'containment-failed' || terminalState === 'spawn-unconfirmed') {
+                dispose();
+                if (firstError === null) {
+                    firstError = new GitStreamingQueryError('git-process-containment-failed', 'git ls-tree process containment could not be confirmed within the absolute deadline', { terminalState, rootPid: pid });
+                }
+                reject(firstError);
+            }
+        }
+        let childHandle;
+        try {
+            childHandle = spawn('git', argv, {
+                cwd: input.cwd,
+                env: { ...process.env, ...input.env, GIT_TERMINAL_PROMPT: '0' },
+                stdio: ['pipe', 'pipe', 'pipe'],
+                shell: false,
+                detached: platform() !== 'win32',
+            });
+        }
+        catch (error) {
+            dispose();
+            reject(new GitStreamingQueryError('invalid-ls-tree-output', `git ls-tree spawn threw synchronously: ${errorMessage(error)}`));
+            return;
+        }
+        const handleEvents = childHandle;
+        handleEvents.once('spawn', () => {
+            spawnEventConfirmed = true;
+            pid = childHandle.pid ?? null;
+        });
+        childHandle.once('error', (error) => {
+            if (terminalState !== null)
+                return;
+            if (!spawnEventConfirmed) {
+                finish('spawn-failed', null, null);
+                dispose();
+                reject(new GitStreamingQueryError('invalid-ls-tree-output', `git ls-tree failed to spawn: ${errorMessage(error)}`, { terminalState: 'spawn-failed', rootPid: null }));
+            }
+            else {
+                failLoud(new GitStreamingQueryError('invalid-ls-tree-output', `git ls-tree stream error after spawn: ${errorMessage(error)}`));
+            }
+        });
+        childHandle.stdin.on('error', () => { failLoud(new GitStreamingQueryError('invalid-ls-tree-output', 'git ls-tree stdin stream errored')); });
+        childHandle.stdin.end();
+        childHandle.stdout.on('data', (chunk) => {
+            if (terminalState !== null)
+                return;
+            try {
+                wireBytes = checkedAdd(wireBytes, chunk.length, 'git-stream-wire-overflow');
+                pending.push(new Uint8Array(chunk));
+                pendingBytes = checkedAdd(pendingBytes, chunk.length, 'git-stream-record-overflow');
+                flushPending();
+                if (pendingBytes > GIT_STREAM_RECORD_MAX_BYTES)
+                    throw streamingOverflow('git-stream-record-overflow', `git ls-tree pending record exceeded the ${String(GIT_STREAM_RECORD_MAX_BYTES)}-byte record ceiling`);
+                if (wireBytes > GIT_STREAM_WIRE_MAX_BYTES)
+                    throw streamingOverflow('git-stream-wire-overflow', `git ls-tree wire output exceeded the ${String(GIT_STREAM_WIRE_MAX_BYTES)}-byte ceiling`);
+            }
+            catch (error) {
+                if (error instanceof GitStreamingQueryError) {
+                    failLoud(error);
+                    return;
+                }
+                throw error;
+            }
+        });
+        childHandle.stdout.on('error', () => { failLoud(new GitStreamingQueryError('invalid-ls-tree-output', 'git ls-tree stdout stream errored')); });
+        childHandle.stderr.on('data', (chunk) => { feedStderr(stderrAcc, chunk); });
+        childHandle.stderr.on('error', () => { failLoud(new GitStreamingQueryError('invalid-ls-tree-output', 'git ls-tree stderr stream errored')); });
+        childHandle.once('close', (code, signal) => {
+            if (terminalState !== null)
+                return;
+            closeObserved = true;
+            lastExitCode = code;
+            lastSignal = signal;
+            const terminalForTermination = forceKilled ? 'force-terminated' : 'grace-terminated';
+            const state = terminating ? terminalForTermination : 'exited';
+            if (firstError === null) {
+                if (state !== 'exited') {
+                    firstError = new GitStreamingQueryError('invalid-ls-tree-output', `git ls-tree was ${state} before producing a complete stream`, { terminalState: state, rootPid: pid, diagnostic: stderrDiagnostic(stderrAcc, '') });
+                }
+                else if (code !== 0) {
+                    firstError = new GitStreamingQueryError('invalid-ls-tree-output', `git ls-tree exited with status ${String(code ?? -1)}`, { diagnostic: stderrDiagnostic(stderrAcc, '') });
+                }
+                else if (pendingBytes > 0) {
+                    firstError = new GitStreamingQueryError('invalid-ls-tree-output', 'git ls-tree stream ended with a partial final record (no terminal NUL)', { diagnostic: stderrDiagnostic(stderrAcc, `pending_bytes=${String(pendingBytes)}`) });
+                }
+            }
+            finish(state, code, signal);
+            settle();
+        });
+    });
+}
+function errorMessage(error) {
+    return error instanceof Error ? error.message : String(error);
 }

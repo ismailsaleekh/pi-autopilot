@@ -62,7 +62,12 @@
     "test": "npm run typecheck && npm run test:type-safety && npm run security:scan && npm run test:unit && npm run test:e2e && npm run test:model && npm run test:multiprocess && npm run test:crash && npm run test:chaos && npm run test:scale && npm run test:sdk && npm run test:rpc && npm run test:package && npm run payload:check",
     "test:release": "npm run test && npm run security:audit && npm run sbom",
     "prepack": "npm run build && npm run security:scan -- --quiet && npm run sbom",
-    "pack:dry-run": "npm pack --dry-run"
+    "pack:dry-run": "npm pack --dry-run",
+    "test:d65-stream": "node --experimental-strip-types --test --test-concurrency=1 tests/unit/git-streaming-query.test.ts tests/unit/checkout-profile-streaming.test.ts tests/multiprocess/git-streaming-process.test.ts",
+    "test:d65-extract": "node --experimental-strip-types --test --test-concurrency=1 tests/unit/terminal-acceptance-role-registry.test.ts tests/e2e/extract-terminal-chain.test.ts",
+    "test:d65-graph": "node --experimental-strip-types --test --test-concurrency=1 tests/unit/semantic-graph-contract.test.ts tests/multiprocess/semantic-graph-authority.test.ts tests/crash/semantic-graph-publication.test.ts",
+    "test:d65-cap": "node --experimental-strip-types --test --test-concurrency=1 tests/unit/launch-policy-contract.test.ts tests/multiprocess/launch-policy-enforcement.test.ts tests/crash/launch-policy-replay.test.ts",
+    "test:d65": "npm run test:d65-stream && npm run test:d65-extract && npm run test:d65-graph && npm run test:d65-cap"
   },
   "pi": {
     "extensions": [
