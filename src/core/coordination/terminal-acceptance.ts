@@ -2,7 +2,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { link, readFile, unlink } from 'node:fs/promises';
 import { join, relative, resolve } from 'node:path';
 
-import { parseAutopilotExecutionAudit, parseAutopilotReceipt, parseAutopilotStatusEntry, parseAutopilotUnitSpec } from '../contracts/index.ts';
+import { AUTOPILOT_ROLE_VALUES, parseAutopilotExecutionAudit, parseAutopilotReceipt, parseAutopilotStatusEntry, parseAutopilotUnitSpec } from '../contracts/index.ts';
 import type { AutopilotExecutionAudit, AutopilotReceipt, AutopilotRole, AutopilotStatusEntry, AutopilotUnitSpec, AutopilotVerdict } from '../contracts/types.ts';
 import { writeJsonAtomic } from '../parallel-runtime.ts';
 import { CoordinationRuntimeError } from './failures.ts';
@@ -84,7 +84,10 @@ export function parseAutopilotChildTerminalAcceptance(value: unknown): Autopilot
   exact(entry, ['schema_version', 'repo_id', 'autopilot_id', 'workstream', 'workstream_run', 'unit_id', 'role', 'attempt', 'child_lease_id', 'verdict', 'transport_result', 'spec', 'status', 'receipt', 'audit', 'tool_call_id', 'carrier_status_sha256', 'audit_disposition', 'created_at'], label);
   if (entry['schema_version'] !== AUTOPILOT_CHILD_TERMINAL_ACCEPTANCE_SCHEMA) throw new CoordinationRuntimeError('invalid-state', 'terminal acceptance schema is incompatible');
   const role = text(entry, 'role', label) as AutopilotRole;
-  if (!['implement', 'validate', 'fix', 'bughunt', 'strategy', 'adjudicate'].includes(role)) throw new CoordinationRuntimeError('invalid-state', 'terminal acceptance role is invalid');
+  // Terminal acceptance consumes the ONE shared package role registry
+  // (AUTOPILOT_ROLE_VALUES) rather than a private terminal-role list; every
+  // declared role, including `extract`, is admissible terminal evidence.
+  if (!AUTOPILOT_ROLE_VALUES.includes(role)) throw new CoordinationRuntimeError('invalid-state', 'terminal acceptance role is invalid');
   const attempt = entry['attempt'];
   if (typeof attempt !== 'number' || !Number.isSafeInteger(attempt) || attempt < 1) throw new CoordinationRuntimeError('invalid-state', 'terminal acceptance attempt must be a positive integer');
   const verdict = text(entry, 'verdict', label) as AutopilotVerdict;
