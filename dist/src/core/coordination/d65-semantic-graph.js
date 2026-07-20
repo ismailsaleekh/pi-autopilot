@@ -295,16 +295,20 @@ export function parseD65RunTerminalIntentV2(value) {
 export const D65_GRAPH_PUBLICATION_SCHEMA = 'autopilot.graph_publication.v1';
 export const D65_GRAPH_PUBLICATION_STAGES = ['prepared', 'authority-committed', 'publication-committed', 'registered'];
 export const D65_GRAPH_PRIOR_AUTHORITY_KINDS = ['bootstrap', 'complete'];
+// The exact closed field set of autopilot.graph_publication.v1, in declaration
+// order. Single source of truth shared by the parser and the residue's
+// transition-specific field CAS so the two can never drift apart.
+export const D65_GRAPH_PUBLICATION_FIELDS = Object.freeze([
+    'schema_version', 'publication_id', 'program_id', 'repo_id', 'autopilot_id', 'workstream_run',
+    'graph_sequence', 'artifact_id', 'stage', 'prior_authority_kind', 'prior_graph_sha256',
+    'prior_publication_commit', 'prior_registration_event_seq', 'authority_base_commit',
+    'authority_path_count', 'authority_path_manifest_sha256', 'authority_commit', 'authority_tree',
+    'covered_event_seq', 'publication_commit', 'publication_tree', 'graph_ref', 'graph_sha256',
+    'graph_byte_count', 'registration_event_seq', 'created_at', 'updated_at',
+]);
 export function parseD65GraphPublication(value) {
     const label = D65_GRAPH_PUBLICATION_SCHEMA;
-    const record = object(value, label, [
-        'schema_version', 'publication_id', 'program_id', 'repo_id', 'autopilot_id', 'workstream_run',
-        'graph_sequence', 'artifact_id', 'stage', 'prior_authority_kind', 'prior_graph_sha256',
-        'prior_publication_commit', 'prior_registration_event_seq', 'authority_base_commit',
-        'authority_path_count', 'authority_path_manifest_sha256', 'authority_commit', 'authority_tree',
-        'covered_event_seq', 'publication_commit', 'publication_tree', 'graph_ref', 'graph_sha256',
-        'graph_byte_count', 'registration_event_seq', 'created_at', 'updated_at',
-    ]);
+    const record = object(value, label, [...D65_GRAPH_PUBLICATION_FIELDS]);
     literal(record, 'schema_version', D65_GRAPH_PUBLICATION_SCHEMA, label);
     const stage = oneOf(record, 'stage', D65_GRAPH_PUBLICATION_STAGES, label);
     const priorKind = oneOf(record, 'prior_authority_kind', D65_GRAPH_PRIOR_AUTHORITY_KINDS, label);

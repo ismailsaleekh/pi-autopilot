@@ -182,11 +182,12 @@ void describe('D65 bootstrap attach-run crash-safe atomicity', () => {
   });
 });
 
-import { mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import {
   advanceD65GraphPublicationResidue,
   cleanupD65GraphPublicationResidue,
   createD65GraphPublicationResidue,
+  d65GraphPublicationLockPath,
   d65GraphPublicationPending,
   d65GraphPublicationResiduePath,
   readD65GraphPublicationResidue,
@@ -224,8 +225,12 @@ void describe('D65 graph publication residue saga lifecycle', () => {
       advanceD65GraphPublicationResidue(mainWorktree, residue('authority-committed', { authority_commit: 'd'.repeat(40), authority_tree: 'e'.repeat(40) }) as never);
       // Skipping a stage rejects (monotonic one-step).
       assert.throws(() => advanceD65GraphPublicationResidue(mainWorktree, residue('registered', { authority_commit: 'd'.repeat(40), authority_tree: 'e'.repeat(40), publication_commit: 'f'.repeat(40), publication_tree: '0'.repeat(40), graph_ref: 'semantic-graphs/00000000000000000002/graph.json', graph_sha256: `sha256:${'1'.repeat(64)}`, graph_byte_count: 4096, registration_event_seq: 6 }) as never), /must advance exactly one step/u);
-      // Changing an immutable identity field across a stage rejects.
-      assert.throws(() => advanceD65GraphPublicationResidue(mainWorktree, residue('publication-committed', { publication_id: 'pub-2', authority_commit: 'd'.repeat(40), authority_tree: 'e'.repeat(40), publication_commit: 'f'.repeat(40), publication_tree: '0'.repeat(40), graph_ref: 'semantic-graphs/00000000000000000002/graph.json', graph_sha256: `sha256:${'1'.repeat(64)}`, graph_byte_count: 4096 }) as never), /immutable field publication_id changed/u);
+      // Changing an immutable identity field across a stage rejects (transition CAS).
+      assert.throws(() => advanceD65GraphPublicationResidue(mainWorktree, residue('publication-committed', { publication_id: 'pub-2', authority_commit: 'd'.repeat(40), authority_tree: 'e'.repeat(40), publication_commit: 'f'.repeat(40), publication_tree: '0'.repeat(40), graph_ref: 'semantic-graphs/00000000000000000002/graph.json', graph_sha256: `sha256:${'1'.repeat(64)}`, graph_byte_count: 4096 }) as never), /field publication_id changed outside the authority-committed->publication-committed transition CAS/u);
+      // Transition-specific field CAS: re-mutating an EARLIER transition's field
+      // (authority_commit, sealed by the prepared->authority-committed advance)
+      // during authority-committed->publication-committed rejects.
+      assert.throws(() => advanceD65GraphPublicationResidue(mainWorktree, residue('publication-committed', { authority_commit: '9'.repeat(40), authority_tree: 'e'.repeat(40), publication_commit: 'f'.repeat(40), publication_tree: '0'.repeat(40), graph_ref: 'semantic-graphs/00000000000000000002/graph.json', graph_sha256: `sha256:${'1'.repeat(64)}`, graph_byte_count: 4096 }) as never), /field authority_commit changed outside the authority-committed->publication-committed transition CAS/u);
 
       // authority-committed -> publication-committed
       advanceD65GraphPublicationResidue(mainWorktree, residue('publication-committed', { authority_commit: 'd'.repeat(40), authority_tree: 'e'.repeat(40), publication_commit: 'f'.repeat(40), publication_tree: '0'.repeat(40), graph_ref: 'semantic-graphs/00000000000000000002/graph.json', graph_sha256: `sha256:${'1'.repeat(64)}`, graph_byte_count: 4096 }) as never);
@@ -240,6 +245,44 @@ void describe('D65 graph publication residue saga lifecycle', () => {
       assert.equal(readD65GraphPublicationResidue(mainWorktree), null);
       assert.equal(d65GraphPublicationPending(mainWorktree), false);
       void d65GraphPublicationResiduePath;
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  void it('proves durable-write persistence, one-step CAS, and the package-owned per-run publication lock', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pi-autopilot-graph-residue-durable-'));
+    try {
+      const mainWorktree = join(root, 'active', 'run-1', 'main');
+      mkdirSync(mainWorktree, { recursive: true });
+      const residueFile = d65GraphPublicationResiduePath(mainWorktree);
+      const lockFile = d65GraphPublicationLockPath(mainWorktree);
+
+      // Create writes canonical JSON + trailing LF and the durable write
+      // survives a fresh read (post-write verification is internal).
+      createD65GraphPublicationResidue(mainWorktree, residue('prepared') as never);
+      const onDisk = readFileSync(residueFile, 'utf8');
+      assert.equal(onDisk.endsWith('\n'), true);
+      assert.equal(onDisk, `${canonicalJson(readD65GraphPublicationResidue(mainWorktree))}\n`);
+      // The lock file is released after every rewrite (no leaked lock).
+      assert.equal(existsSync(lockFile), false);
+
+      // A held lock fails closed: a pre-existing lock file blocks create/advance.
+      writeFileSync(lockFile, `${String(process.pid)}\n`, { encoding: 'utf8', mode: 0o600 });
+      assert.throws(() => advanceD65GraphPublicationResidue(mainWorktree, residue('authority-committed', { authority_commit: 'd'.repeat(40), authority_tree: 'e'.repeat(40) }) as never), /per-run graph publication lock is already held/u);
+      rmSync(lockFile);
+
+      // Skipping a stage still rejects even with the lock free.
+      assert.throws(() => advanceD65GraphPublicationResidue(mainWorktree, residue('publication-committed', { authority_commit: 'd'.repeat(40), authority_tree: 'e'.repeat(40), publication_commit: 'f'.repeat(40), publication_tree: '0'.repeat(40), graph_ref: 'semantic-graphs/00000000000000000002/graph.json', graph_sha256: `sha256:${'1'.repeat(64)}`, graph_byte_count: 4096 }) as never), /must advance exactly one step/u);
+
+      // prepared -> authority-committed may change only G/tree; changing covered
+      // authority (covered_event_seq is sealed at creation) is outside the CAS.
+      assert.throws(() => advanceD65GraphPublicationResidue(mainWorktree, residue('authority-committed', { authority_commit: 'd'.repeat(40), authority_tree: 'e'.repeat(40), covered_event_seq: 9 }) as never), /field covered_event_seq changed outside the prepared->authority-committed transition CAS/u);
+
+      // A clean one-step advance succeeds and releases the lock.
+      advanceD65GraphPublicationResidue(mainWorktree, residue('authority-committed', { authority_commit: 'd'.repeat(40), authority_tree: 'e'.repeat(40) }) as never);
+      assert.equal(existsSync(lockFile), false);
+      assert.equal(readD65GraphPublicationResidue(mainWorktree)?.stage, 'authority-committed');
     } finally {
       await rm(root, { recursive: true, force: true });
     }
