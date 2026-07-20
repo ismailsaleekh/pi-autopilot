@@ -646,4 +646,16 @@ void describe('D65 complete-graph loader/replayer', () => {
     const loaded = loadD65CompleteGraph(graph, reader({ [ref]: bytes }));
     assert.throws(() => assertD65QueueMemberValues(loaded, 'unit_ready'), /must be exactly \{identity\} equal to its enclosing identity/u);
   });
+
+  void it('rejects when the aggregate referenced authority bytes exceed the 512 MiB ceiling', () => {
+    // A single core blob may legitimately declare a byte_count near the ceiling,
+    // but the aggregate over the five core blobs must exceed 512 MiB and be
+    // rejected. Use a large declared byte_count on the events core blob so the
+    // aggregate trips the ceiling without materializing real bytes.
+    const base = root({ ...ALL_EMPTY });
+    const core = (base['core'] as Record<string, Record<string, unknown>>);
+    core['events'] = { ...core['events'], byte_count: 536_870_913 };
+    const graph = parseD65CompleteGraph(base);
+    assert.throws(() => loadD65CompleteGraph(graph, reader({})), /aggregate referenced authority bytes exceed the 512 MiB ceiling/u);
+  });
 });
