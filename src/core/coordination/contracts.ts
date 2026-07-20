@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { isAbsolute, normalize } from 'node:path';
 
+import { parseD65AttachRunBootstrapGraphPayload } from './d65-semantic-graph.ts';
 import { COORDINATION_EXCLUSIVE_MAX_EXPECTED_DURATION_MS } from './exclusive-policy.ts';
 import { parseMetadataReconcileIntent } from './metadata-reconcile.ts';
 import {
@@ -1260,7 +1261,13 @@ function parsePayload(value: unknown, action: CoordinatorQueryAction | Coordinat
     const unknownFields = Object.keys(value).filter((key) => !PAYLOAD_FIELDS[action].includes(key));
     if (unknownFields.length > 0) fail(label, `contains unknown fields: ${unknownFields.sort().join(', ')}`);
     payload = value;
-  } else payload = object(value, label, PAYLOAD_FIELDS[action], action === 'detach-session' || action === 'heartbeat' ? ['migration_operation_token'] : action === 'drain-mailbox' ? ['cursor'] : action === 'reconciliation-details' ? ['boot_id', 'child_lease_id', 'child_token', 'pid', 'session_lease_id', 'session_token'] : []);
+  } else payload = object(value, label, PAYLOAD_FIELDS[action], action === 'detach-session' || action === 'heartbeat' ? ['migration_operation_token'] : action === 'drain-mailbox' ? ['cursor'] : action === 'reconciliation-details' ? ['boot_id', 'child_lease_id', 'child_token', 'pid', 'session_lease_id', 'session_token'] : action === 'attach-run' ? ['bootstrap_graph'] : []);
+  // D65-A1 additive: current-build attach-run may carry an optional
+  // `bootstrap_graph` object; legacy/cf50 attach-run omits it unchanged. The
+  // exact strict projection is validated in the store's bootstrap transaction.
+  if (action === 'attach-run' && payload['bootstrap_graph'] !== undefined) {
+    parseD65AttachRunBootstrapGraphPayload(payload['bootstrap_graph']);
+  }
   for (const field of PAYLOAD_FIELDS[action]) {
     const entry = payload[field];
     if (optionalPagePayload && entry === undefined) continue;

@@ -1,0 +1,308 @@
+import assert from 'node:assert/strict';
+import { generateKeyPairSync, sign } from 'node:crypto';
+import { describe, it } from 'node:test';
+
+import {
+  D65_ALLOWED_BOOTSTRAP_OPERATIONS,
+  D65_ATTACH_RUN_RESULT_V2_SCHEMA,
+  D65_TERMINAL_INTENT_V2_SCHEMA,
+  TERMINAL_INTENT_CANCELLATION_MAX,
+  canonicalSha256,
+  parseD65AttachRunResultV2,
+  parseD65AuthorityShard,
+  parseD65BootstrapGraphRef,
+  parseD65CompleteGraph,
+  parseD65GraphPublication,
+  parseD65ProjectionIndex,
+  parseD65ProjectionShard,
+  parseD65RunTerminalIntentV2,
+  parseD65SemanticGraphBootstrap,
+} from '../../src/core/coordination/d65-semantic-graph.ts';
+import {
+  D65_ED25519_SPKI_BYTE_COUNT,
+  decodeUnpaddedBase64Url,
+  encodeUnpaddedBase64Url,
+  parseD65TrustAnchorSpki,
+  verifyD65Signature,
+} from '../../src/core/coordination/d65-trust.ts';
+
+const OID = (char: string): string => char.repeat(40);
+const DIGEST = (char: string): `sha256:${string}` => `sha256:${char.repeat(64)}` as const;
+const EMPTY_INDEX = { entry_count: 0, total_bytes: 0, sha256: canonicalSha256([]), shards: [] };
+
+function bootstrapFixture(): Record<string, unknown> {
+  return {
+    schema_version: 'autopilot.semantic_graph_bootstrap.v1',
+    program_id: 'program-1', graph_sequence: 1, prior_graph_sha256: null,
+    repo_id: 'repo-1', autopilot_id: 'auto-1', workstream: 'kbg-finalize-fresh', workstream_run: 'run-1',
+    run_timestamp: '2026-07-19T00:00:00.000Z', run_nonce: 'a1b2c3',
+    content_commit: OID('a'), content_tree: OID('b'), package_commit: OID('c'), package_tree: OID('d'),
+    prospective_run: { schema_version: 'autopilot.coordination_run.v1', workstream_run: 'run-1' },
+    prospective_resource: { schema_version: 'autopilot.coordination_run_resource.v1', target_base_sha: OID('a') },
+    covered_event_seq: 0,
+    trust_anchor_ref: '.pi/autopilot-trust/d65/program-1/operator-ed25519.spki',
+    trust_anchor_sha256: DIGEST('e'),
+    allowed_bootstrap_operations: [...D65_ALLOWED_BOOTSTRAP_OPERATIONS],
+    created_at: '2026-07-19T00:00:01.000Z',
+  };
+}
+
+void describe('D65 semantic-graph bootstrap contract', () => {
+  void it('parses a valid bootstrap envelope and freezes the exact ordered operations', () => {
+    const parsed = parseD65SemanticGraphBootstrap(bootstrapFixture());
+    assert.equal(parsed.graph_sequence, 1);
+    assert.equal(parsed.covered_event_seq, 0);
+    assert.deepEqual([...parsed.allowed_bootstrap_operations], [...D65_ALLOWED_BOOTSTRAP_OPERATIONS]);
+    assert.equal(parsed.run_nonce, 'a1b2c3');
+  });
+
+  void it('rejects unknown fields, wrong sequence, non-null prior digest, and malformed operations', () => {
+    assert.throws(() => parseD65SemanticGraphBootstrap({ ...bootstrapFixture(), extra: 1 }), /unknown fields/u);
+    assert.throws(() => parseD65SemanticGraphBootstrap({ ...bootstrapFixture(), graph_sequence: 2 }), /graph_sequence must be exactly 1/u);
+    assert.throws(() => parseD65SemanticGraphBootstrap({ ...bootstrapFixture(), prior_graph_sha256: DIGEST('f') }), /prior_graph_sha256 must be null/u);
+    assert.throws(() => parseD65SemanticGraphBootstrap({ ...bootstrapFixture(), covered_event_seq: 1 }), /covered_event_seq must be exactly 0/u);
+    assert.throws(() => parseD65SemanticGraphBootstrap({ ...bootstrapFixture(), run_nonce: 'ABCDEF' }), /run_nonce must be exactly six lowercase hex/u);
+    assert.throws(() => parseD65SemanticGraphBootstrap({ ...bootstrapFixture(), run_nonce: 'a1b2c' }), /run_nonce/u);
+    assert.throws(() => parseD65SemanticGraphBootstrap({ ...bootstrapFixture(), content_commit: 'a'.repeat(39) }), /content_commit must be a full 40-lowercase-hex/u);
+    assert.throws(() => parseD65SemanticGraphBootstrap({ ...bootstrapFixture(), allowed_bootstrap_operations: [...D65_ALLOWED_BOOTSTRAP_OPERATIONS].reverse() }), /exact ordered frozen array/u);
+    const missingOp = [...D65_ALLOWED_BOOTSTRAP_OPERATIONS].slice(0, 7);
+    assert.throws(() => parseD65SemanticGraphBootstrap({ ...bootstrapFixture(), allowed_bootstrap_operations: missingOp }), /exact ordered frozen array/u);
+  });
+});
+
+void describe('D65 run terminal intent v2 contract', () => {
+  function intentFixture(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      schema_version: D65_TERMINAL_INTENT_V2_SCHEMA, terminal_intent_id: 'terminal-intent:run-1:00000000000000000001',
+      repo_id: 'repo-1', workstream_run: 'run-1', intent_attempt: 1, prior_terminal_intent_id: null, prior_terminal_intent_sha256: null,
+      outcome: 'closed', state: 'prepared', reservation_ids: ['reservation-a', 'reservation-b'],
+      terminal_effect_sets: { blocking_owned_obligations: [], foreign_dependent_obligations: [], abort_owned_obligations: [], other_nonterminal_obligations: [] },
+      prepared_event_seq: 10, terminal_event_seq: null, version: 1, ...overrides,
+    };
+  }
+
+  void it('parses the first prepared closed intent', () => {
+    const parsed = parseD65RunTerminalIntentV2(intentFixture());
+    assert.equal(parsed.intent_attempt, 1);
+    assert.equal(parsed.prior_terminal_intent_id, null);
+    assert.equal(parsed.state, 'prepared');
+  });
+
+  void it('enforces the three-cancel bound and mandatory fourth noncancellable abort', () => {
+    // Attempt 4 must be abort.
+    assert.throws(() => parseD65RunTerminalIntentV2(intentFixture({ intent_attempt: TERMINAL_INTENT_CANCELLATION_MAX + 1, outcome: 'closed', prior_terminal_intent_id: 'terminal-intent:run-1:00000000000000000003', prior_terminal_intent_sha256: DIGEST('a') })), /mandatory fourth attempt must be a noncancellable abort/u);
+    // Attempt 5 rejects.
+    assert.throws(() => parseD65RunTerminalIntentV2(intentFixture({ intent_attempt: 5, outcome: 'aborted', prior_terminal_intent_id: 'x', prior_terminal_intent_sha256: DIGEST('a') })), /intent_attempt must be <= 4/u);
+    // Attempt 4 abort parses.
+    const abort4 = parseD65RunTerminalIntentV2(intentFixture({ intent_attempt: 4, outcome: 'aborted', prior_terminal_intent_id: 'terminal-intent:run-1:00000000000000000003', prior_terminal_intent_sha256: DIGEST('a') }));
+    assert.equal(abort4.outcome, 'aborted');
+  });
+
+  void it('binds the prior chain and terminal event sequence to state', () => {
+    assert.throws(() => parseD65RunTerminalIntentV2(intentFixture({ intent_attempt: 2 })), /must name the exact prior intent id and digest/u);
+    assert.throws(() => parseD65RunTerminalIntentV2(intentFixture({ prior_terminal_intent_id: 'x', prior_terminal_intent_sha256: DIGEST('a') })), /attempt 1 must carry null prior chain fields/u);
+    assert.throws(() => parseD65RunTerminalIntentV2(intentFixture({ state: 'committed', terminal_event_seq: null })), /committed\/cancelled intent requires a terminal_event_seq/u);
+    assert.throws(() => parseD65RunTerminalIntentV2(intentFixture({ state: 'prepared', terminal_event_seq: 11 })), /prepared intent has no terminal_event_seq/u);
+  });
+
+  void it('rejects duplicate obligation identities and unsorted rows', () => {
+    const dupSets = { blocking_owned_obligations: [], foreign_dependent_obligations: [
+      { schema_version: 'autopilot.reservation_obligation.v1', obligation_id: 'ob-2' },
+      { schema_version: 'autopilot.reservation_obligation.v1', obligation_id: 'ob-1' },
+    ], abort_owned_obligations: [], other_nonterminal_obligations: [] };
+    assert.throws(() => parseD65RunTerminalIntentV2(intentFixture({ terminal_effect_sets: dupSets })), /sorted by obligation_id decoded bytes/u);
+  });
+});
+
+void describe('D65 graph publication saga residue contract', () => {
+  function publicationFixture(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      schema_version: 'autopilot.graph_publication.v1', publication_id: 'pub-1', program_id: 'program-1',
+      repo_id: 'repo-1', autopilot_id: 'auto-1', workstream_run: 'run-1', graph_sequence: 2, artifact_id: 'semantic-graph:00000000000000000002',
+      stage: 'prepared', prior_authority_kind: 'bootstrap', prior_graph_sha256: DIGEST('a'), prior_publication_commit: null,
+      prior_registration_event_seq: 1, authority_base_commit: OID('b'), authority_path_count: 5, authority_path_manifest_sha256: DIGEST('c'),
+      authority_commit: null, authority_tree: null, covered_event_seq: 3, publication_commit: null, publication_tree: null,
+      graph_ref: null, graph_sha256: null, graph_byte_count: null, registration_event_seq: null,
+      created_at: '2026-07-19T00:00:00.000Z', updated_at: '2026-07-19T00:00:00.000Z', ...overrides,
+    };
+  }
+
+  void it('parses each monotonic stage with the correct null discipline', () => {
+    assert.equal(parseD65GraphPublication(publicationFixture()).stage, 'prepared');
+    const registered = parseD65GraphPublication(publicationFixture({
+      stage: 'registered', authority_commit: OID('d'), authority_tree: OID('e'),
+      publication_commit: OID('f'), publication_tree: OID('0'), graph_ref: 'semantic-graphs/00000000000000000002/graph.json',
+      graph_sha256: DIGEST('1'), graph_byte_count: 4096, registration_event_seq: 4,
+    }));
+    assert.equal(registered.stage, 'registered');
+    assert.equal(registered.registration_event_seq, 4);
+  });
+
+  void it('rejects stage/field presence mismatches and bootstrap prior-publication commits', () => {
+    assert.throws(() => parseD65GraphPublication(publicationFixture({ prior_authority_kind: 'bootstrap', prior_publication_commit: OID('9') })), /bootstrap prior authority must have null prior_publication_commit/u);
+    assert.throws(() => parseD65GraphPublication(publicationFixture({ prior_authority_kind: 'complete', prior_publication_commit: null })), /complete prior authority requires prior_publication_commit/u);
+    assert.throws(() => parseD65GraphPublication(publicationFixture({ stage: 'authority-committed' })), /authority commit\/tree presence must match stage/u);
+    assert.throws(() => parseD65GraphPublication(publicationFixture({ registration_event_seq: 4 })), /registration_event_seq presence must match/u);
+  });
+});
+
+void describe('D65 authority and projection shard contracts', () => {
+  void it('parses an authority shard and checks byte-sum, sort, and range', () => {
+    const shard = parseD65AuthorityShard({
+      schema_version: 'autopilot.semantic_graph_authority_shard.v1', program_id: 'program-1', repo_id: 'repo-1', workstream_run: 'run-1',
+      graph_sequence: 2, collection: 'specs', entry_count: 2, total_bytes: 30, first_identity: 'spec-a', last_identity: 'spec-b',
+      entries: [
+        { identity: 'spec-a', ref: 'unit-specs/a.json', git_mode: '100644', git_blob_oid: OID('a'), sha256: DIGEST('a'), byte_count: 10, document_schema_version: 'autopilot.unit_spec.v1' },
+        { identity: 'spec-b', ref: 'unit-specs/b.json', git_mode: '100644', git_blob_oid: OID('b'), sha256: DIGEST('b'), byte_count: 20, document_schema_version: 'autopilot.unit_spec.v1' },
+      ],
+    });
+    assert.equal(shard.entry_count, 2);
+    assert.equal(shard.total_bytes, 30);
+  });
+
+  void it('rejects an authority shard with a wrong byte sum or unsorted entries', () => {
+    const base = {
+      schema_version: 'autopilot.semantic_graph_authority_shard.v1', program_id: 'program-1', repo_id: 'repo-1', workstream_run: 'run-1',
+      graph_sequence: 2, collection: 'specs', entry_count: 2, total_bytes: 30, first_identity: 'spec-a', last_identity: 'spec-b',
+      entries: [
+        { identity: 'spec-b', ref: 'unit-specs/b.json', git_mode: '100644', git_blob_oid: OID('b'), sha256: DIGEST('b'), byte_count: 20, document_schema_version: null },
+        { identity: 'spec-a', ref: 'unit-specs/a.json', git_mode: '100644', git_blob_oid: OID('a'), sha256: DIGEST('a'), byte_count: 10, document_schema_version: null },
+      ],
+    };
+    assert.throws(() => parseD65AuthorityShard(base), /sorted by decoded identity bytes/u);
+    assert.throws(() => parseD65AuthorityShard({ ...base, total_bytes: 99, entries: [base.entries[1], base.entries[0]] }), /total_bytes must equal/u);
+  });
+
+  void it('parses a projection shard and verifies value_sha256 recomputation', () => {
+    const value = { identity: 'unit-a' };
+    const shard = parseD65ProjectionShard({
+      schema_version: 'autopilot.semantic_graph_projection_shard.v1', program_id: 'program-1', repo_id: 'repo-1', workstream_run: 'run-1',
+      graph_sequence: 2, projection_kind: 'unit_ready', entry_count: 1, total_bytes: 20, first_identity: 'unit-a', last_identity: 'unit-a',
+      entries: [{ identity: 'unit-a', kind: 'queue-member', value_sha256: canonicalSha256(value), value }],
+    });
+    assert.equal(shard.entries.length, 1);
+    assert.throws(() => parseD65ProjectionShard({
+      schema_version: 'autopilot.semantic_graph_projection_shard.v1', program_id: 'program-1', repo_id: 'repo-1', workstream_run: 'run-1',
+      graph_sequence: 2, projection_kind: 'unit_ready', entry_count: 1, total_bytes: 20, first_identity: 'unit-a', last_identity: 'unit-a',
+      entries: [{ identity: 'unit-a', kind: 'queue-member', value_sha256: DIGEST('9'), value }],
+    }), /value_sha256 must equal SHA-256 of the RFC-8785 value bytes plus LF/u);
+  });
+});
+
+void describe('D65 projection index contract', () => {
+  void it('accepts an empty index only with the canonical [] digest', () => {
+    const parsed = parseD65ProjectionIndex(EMPTY_INDEX, 'idx');
+    assert.equal(parsed.entry_count, 0);
+    assert.throws(() => parseD65ProjectionIndex({ ...EMPTY_INDEX, sha256: DIGEST('a') }, 'idx'), /empty index digest must be SHA-256 of canonical \[\] plus LF/u);
+    assert.throws(() => parseD65ProjectionIndex({ entry_count: 0, total_bytes: 5, sha256: canonicalSha256([]), shards: [] }, 'idx'), /empty index must have zero bytes/u);
+  });
+
+  void it('checks descriptor range contiguity and aggregate entry sums', () => {
+    const shards = [
+      { ref: 'semantic-graphs/00000000000000000002/authorities/0.json', sha256: DIGEST('a'), byte_count: 100, entry_count: 2, first_identity: 'a', last_identity: 'b' },
+      { ref: 'semantic-graphs/00000000000000000002/authorities/1.json', sha256: DIGEST('b'), byte_count: 100, entry_count: 1, first_identity: 'c', last_identity: 'c' },
+    ];
+    const parsed = parseD65ProjectionIndex({ entry_count: 3, total_bytes: 200, sha256: DIGEST('c'), shards }, 'idx');
+    assert.equal(parsed.entry_count, 3);
+    // overlap rejects
+    const overlap = [shards[0], { ...shards[1], first_identity: 'b' }];
+    assert.throws(() => parseD65ProjectionIndex({ entry_count: 3, total_bytes: 200, sha256: DIGEST('c'), shards: overlap }, 'idx'), /no gap or overlap/u);
+    // wrong sum rejects
+    assert.throws(() => parseD65ProjectionIndex({ entry_count: 9, total_bytes: 200, sha256: DIGEST('c'), shards }, 'idx'), /aggregate entry_count must equal/u);
+  });
+});
+
+void describe('D65 attach_run_result.v2 contract', () => {
+  void it('parses the closed v2 attach result and its bootstrap-graph/trust anchor', () => {
+    const result = parseD65AttachRunResultV2({
+      schema_version: D65_ATTACH_RUN_RESULT_V2_SCHEMA,
+      repository: { schema_version: 'autopilot.coordination_repository.v1', repo_id: 'repo-1', version: 1 },
+      run: { schema_version: 'autopilot.coordination_run.v1', workstream_run: 'run-1', version: 1 },
+      run_resource: { schema_version: 'autopilot.coordination_run_resource.v1', version: 1 },
+      mailbox_cursor: { schema_version: 'autopilot.mailbox_cursor.v1', version: 1 },
+      bootstrap_graph: { ref: '.pi/autopilot-bootstrap/run-1/bootstrap.json', sha256: DIGEST('a'), byte_count: 2048, git_commit: OID('a'), covered_event_seq: 0 },
+      bootstrap_artifact: { schema_version: 'autopilot.authoritative_artifact.v1', artifact_id: 'semantic-graph-bootstrap:run-1' },
+      trust_anchor: { trust_anchor_ref: '.pi/autopilot-trust/d65/program-1/operator-ed25519.spki', trust_anchor_sha256: DIGEST('b'), git_commit: OID('a'), git_mode: '100644', git_type: 'blob', git_blob_oid: OID('c'), byte_count: 44 },
+    });
+    assert.equal(result.bootstrap_graph.covered_event_seq, 0);
+    assert.equal(result.trust_anchor.byte_count, 44);
+  });
+
+  void it('rejects a non-zero covered event seq and a non-44-byte trust anchor', () => {
+    assert.throws(() => parseD65BootstrapGraphRef({ ref: '.pi/autopilot-bootstrap/run-1/bootstrap.json', sha256: DIGEST('a'), byte_count: 2048, git_commit: OID('a'), covered_event_seq: 1 }, 'g'), /covered_event_seq must be exactly 0/u);
+  });
+});
+
+void describe('D65 complete graph root contract', () => {
+  function coreEntry(schema: string | null, records: number | null): Record<string, unknown> {
+    return { ref: 'runtime/mission.md', git_mode: '100644', git_blob_oid: OID('a'), sha256: DIGEST('a'), byte_count: 100, record_count: records, document_schema_version: schema };
+  }
+  function completeFixture(): Record<string, unknown> {
+    const collections: Record<string, unknown> = {};
+    for (const key of ['authorities', 'specs', 'statuses', 'receipts', 'audits', 'execution_commits', 'terminal_acceptances', 'unit_merge_intents', 'unit_merges', 'integration_analyses', 'quarantine', 'reconciliation', 'evidence']) collections[key] = { ...EMPTY_INDEX };
+    const queue: Record<string, unknown> = {};
+    for (const key of ['unit_ready', 'unit_running', 'unit_blocked', 'unit_completed', 'unit_held', 'work_audit_review', 'work_validation_ready']) queue[key] = { ...EMPTY_INDEX };
+    return {
+      schema_version: 'autopilot.semantic_graph.v1', program_id: 'program-1', mode: 'complete', graph_sequence: 2,
+      prior_graph_sha256: DIGEST('a'), prior_event_seq: 1, repo_id: 'repo-1', autopilot_id: 'auto-1', workstream: 'kbg-finalize-fresh', workstream_run: 'run-1',
+      covered_authority_commit: OID('b'), covered_authority_tree: OID('c'), covered_event_seq: 5,
+      bootstrap_charter: { repository: {}, run: {}, run_resource: {}, mailbox_cursor: {}, bootstrap_graph: {}, bootstrap_artifact: {}, trust_anchor: {}, attach_event: {}, attach_result: {} },
+      core: { mission: coreEntry(null, null), master_plan: coreEntry('autopilot.master_plan.v1', 1), state: coreEntry('autopilot.state.v1', 1), decision_log: coreEntry('autopilot.decision.v1', 3), events: coreEntry('autopilot.event.v1', 4) },
+      collections, work_items: { ...EMPTY_INDEX }, bughunt: { ...EMPTY_INDEX }, closure: null, queue_projection: queue,
+      exceptions: { ...EMPTY_INDEX }, coordinator_projection: { ...EMPTY_INDEX }, created_at: '2026-07-19T00:00:00.000Z',
+    };
+  }
+
+  void it('parses the first complete graph root with all indexes empty', () => {
+    const parsed = parseD65CompleteGraph(completeFixture());
+    assert.equal(parsed.graph_sequence, 2);
+    assert.equal(parsed.closure, null);
+    assert.equal(parsed.core.mission.record_count, null);
+  });
+
+  void it('rejects sequence below 2, wrong mode, and unknown fields', () => {
+    assert.throws(() => parseD65CompleteGraph({ ...completeFixture(), graph_sequence: 1 }), /graph_sequence must be a safe integer >= 2/u);
+    assert.throws(() => parseD65CompleteGraph({ ...completeFixture(), mode: 'bootstrap-plan-only' }), /mode must equal complete/u);
+    assert.throws(() => parseD65CompleteGraph({ ...completeFixture(), extra: true }), /unknown fields/u);
+  });
+});
+
+void describe('D65 trust anchor SPKI binary contract', () => {
+  function realAnchor(): { spki: Uint8Array; privateKey: import('node:crypto').KeyObject } {
+    const { publicKey, privateKey } = generateKeyPairSync('ed25519');
+    const spki = new Uint8Array(publicKey.export({ format: 'der', type: 'spki' }) as unknown as Uint8Array);
+    return { spki, privateKey };
+  }
+
+  void it('parses exactly 44 canonical SPKI bytes and verifies domain-separated signatures', () => {
+    const { spki, privateKey } = realAnchor();
+    const anchor = parseD65TrustAnchorSpki(spki);
+    assert.equal(anchor.spki.byteLength, D65_ED25519_SPKI_BYTE_COUNT);
+    const message = new TextEncoder().encode('{"policy_version":1}');
+    const domain = Buffer.from('AUTOPILOT-D65-LAUNCH-POLICY\u0000', 'utf8');
+    const signed = Buffer.concat([domain, Buffer.from(message)]);
+    const signature = encodeUnpaddedBase64Url(new Uint8Array(sign(null, signed, privateKey) as unknown as Uint8Array));
+    assert.equal(verifyD65Signature({ trustAnchor: anchor, purpose: 'launch-policy', message, signature }), true);
+    // Wrong purpose (domain confusion) fails.
+    assert.equal(verifyD65Signature({ trustAnchor: anchor, purpose: 'parent-loss', message, signature }), false);
+    // Padded/aliased signature rejects.
+    assert.equal(verifyD65Signature({ trustAnchor: anchor, purpose: 'launch-policy', message, signature: `${signature}=` }), false);
+  });
+
+  void it('rejects wrong byte count, wrong prefix, and non-canonical DER', () => {
+    const { spki } = realAnchor();
+    assert.throws(() => parseD65TrustAnchorSpki(spki.subarray(0, 43)), /exactly 44 canonical SPKI bytes/u);
+    const badPrefix = Uint8Array.from(spki); badPrefix[0] = 0x31;
+    assert.throws(() => parseD65TrustAnchorSpki(badPrefix), /canonical Ed25519 DER header/u);
+    const trailing = new Uint8Array(45); trailing.set(spki, 0);
+    assert.throws(() => parseD65TrustAnchorSpki(trailing), /exactly 44 canonical SPKI bytes/u);
+  });
+
+  void it('round-trips unpadded base64url and rejects padded/alias forms', () => {
+    const bytes = Uint8Array.from([1, 2, 3, 4, 5]);
+    const encoded = encodeUnpaddedBase64Url(bytes);
+    assert.deepEqual([...(decodeUnpaddedBase64Url(encoded) ?? [])], [...bytes]);
+    assert.equal(decodeUnpaddedBase64Url(`${encoded}=`), null);
+    assert.equal(decodeUnpaddedBase64Url('has space'), null);
+  });
+});

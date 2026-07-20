@@ -20,6 +20,7 @@ import { byteBudgetPage, COORDINATOR_MAX_PAGE_ENTITY_BYTES, COORDINATOR_PAGE_TAR
 import { activeCoordinationMigrationFreeze, assertCoordinationDispatchAllowed, assertCoordinationFrozenMutationAllowed, assertCoordinationMigrationRecoveryOperationAuthorized, coordinationCutoverCommitted } from "./migration-paths.js";
 import { proveStructuredAttemptTerminal } from "./terminal-attempt-proof.js";
 import { classifyCoordinationIntegrationConflict } from "./integration-conflicts.js";
+import { deriveD65BootstrapTransaction } from "./d65-bootstrap-transaction.js";
 import { assertAutopilotChildTerminalAcceptanceChain, AUTOPILOT_CHILD_TERMINAL_ACCEPTANCE_SCHEMA, parseAutopilotChildTerminalAcceptance } from "./terminal-acceptance.js";
 import { parseRunTerminalSha, parseUnitAttemptTarget, parseUnitFailureEvidenceIngress, parseUnitMergeReservationFacts, validateReconciliationEvidenceDocument, validateReservationIntegrationEvidenceDocument, validateReservationValidationArtifactChain, validateReservationValidationEvidenceDocument } from "./terminal-evidence.js";
 import { AUTOPILOT_COORDINATOR_PROTOCOL_VERSION, COORDINATION_WORKTREE_STATES } from "./types.js";
@@ -3567,8 +3568,66 @@ export class CoordinatorStore {
             this.#db.prepare('INSERT INTO run_resources(entity_id, repo_id, workstream_run, payload_json, version) VALUES(?, ?, ?, ?, ?)').run(`run-resource:${request.repo_id}:${workstreamRun}`, request.repo_id, workstreamRun, canonicalJson(resource), resource.version);
             this.#db.prepare('INSERT INTO mailbox_cursors(repo_id, workstream_run, delivered_through_event_seq, acknowledged_through_event_seq, version) VALUES(?, ?, 0, 0, 1)').run(request.repo_id, workstreamRun);
             const run = runFromRow(asRow(this.#db.prepare('SELECT * FROM runs WHERE repo_id=? AND workstream_run=?').get(request.repo_id, workstreamRun), 'created run'));
+            // D65-A1: a current-build attach-run carrying `bootstrap_graph` atomically
+            // creates the bootstrap-artifact/trust rows and the closed
+            // `autopilot.attach_run_result.v2` effect. Legacy/cf50 attach-run omits
+            // the object and keeps the exact old `{run}` result bytes below.
+            if (request.payload['bootstrap_graph'] !== undefined) {
+                return this.#applyD65BootstrapGraph(request, seq, run, resource, existingRepoRow !== undefined);
+            }
             return { sequence: seq, eventType: 'run-attached', entityType: 'run', entityId: workstreamRun, payload: { run } };
         });
+    }
+    #applyD65BootstrapGraph(request, seq, run, resource, repositoryPreexisted) {
+        // A D65 run requires a fresh empty coordinator repository identity: a
+        // pre-existing `repositories` row rejects, and the attach receipt B is
+        // exactly event sequence 1.
+        if (repositoryPreexisted || seq !== 1)
+            throw new CoordinationRuntimeError('invalid-request', 'D65 bootstrap attach-run requires a fresh empty coordinator repository (attach receipt B = event 1)');
+        const workstreamRun = run.workstream_run;
+        const repository = repositoryFromRow(asRow(this.#db.prepare('SELECT * FROM repositories WHERE repo_id=?').get(request.repo_id), 'bootstrap repository'));
+        const mailboxCursor = mailboxCursorFromRow(asRow(this.#db.prepare('SELECT * FROM mailbox_cursors WHERE repo_id=? AND workstream_run=?').get(request.repo_id, workstreamRun), 'bootstrap mailbox cursor'));
+        const canonicalRoot = repository.canonical_root;
+        const git = {
+            resolveCommit: (revision) => {
+                const resolved = this.#gitQueryText(canonicalRoot, { kind: 'resolve-commit', revision }, 'invalid-request', 'bootstrap graph commit verification failed');
+                if (resolved === null || !/^[a-f0-9]{40}$/u.test(resolved))
+                    throw new CoordinationRuntimeError('invalid-request', 'bootstrap graph commit did not resolve to a 40-hex commit', [revision, String(resolved)]);
+                return resolved;
+            },
+            readBlob: (commit, path) => this.#readD65TrackedBlob(canonicalRoot, commit, path),
+        };
+        const derived = deriveD65BootstrapTransaction({
+            payload: request.payload['bootstrap_graph'],
+            repoId: request.repo_id,
+            workstreamRun,
+            attachEventSeq: seq,
+            repository: repository,
+            run: run,
+            runResource: resource,
+            mailboxCursor: mailboxCursor,
+            git,
+        });
+        // Persist the immutable bootstrap and trust evidence bytes.
+        this.#persistEvidenceArtifact(request.repo_id, derived.bootstrapGraphRef, derived.bootstrapBytes, 'semantic graph bootstrap', seq);
+        this.#persistEvidenceArtifact(request.repo_id, { ref: derived.trustAnchor.trust_anchor_ref, sha256: derived.trustAnchor.trust_anchor_sha256 }, derived.trustBytes, 'operator trust anchor', seq);
+        // Register the deterministic bootstrap authoritative artifact row.
+        const artifact = derived.bootstrapArtifact;
+        this.#db.prepare('INSERT INTO authoritative_artifacts(entity_id, repo_id, source_run, payload_json, version) VALUES(?, ?, ?, ?, ?)').run(String(artifact['artifact_id']), request.repo_id, workstreamRun, canonicalJson(artifact), 1);
+        return { sequence: seq, eventType: 'run-attached', entityType: 'run', entityId: workstreamRun, payload: derived.attachResult };
+    }
+    #readD65TrackedBlob(canonicalRoot, commit, path) {
+        const listing = this.#gitQueryText(canonicalRoot, { kind: 'ls-tree-path', revision: commit, path }, 'invalid-request', 'bootstrap graph tree entry inspection failed');
+        const rows = (listing ?? '').split('\0').filter((entry) => entry.length > 0);
+        if (rows.length !== 1)
+            throw new CoordinationRuntimeError('invalid-request', 'bootstrap graph path did not resolve to exactly one tracked Git blob', [path, `count=${String(rows.length)}`]);
+        const match = /^([0-7]{6}) (blob) ([a-f0-9]{40})\t/u.exec(rows[0] ?? '');
+        if (match === null || match[1] === undefined || match[3] === undefined)
+            throw new CoordinationRuntimeError('invalid-request', 'bootstrap graph Git tree entry is malformed or not a blob', [path, rows[0] ?? '']);
+        const shown = this.#gitQueryResult(canonicalRoot, { kind: 'show-file', revision: commit, path }, 'invalid-request', 'bootstrap graph blob is not readable at the immutable commit');
+        if (shown.stdout.byteLength > MAX_COORDINATION_EVIDENCE_BYTES)
+            throw new CoordinationRuntimeError('invalid-request', 'bootstrap graph blob exceeds the immutable evidence byte bound', [path]);
+        return { mode: match[1], type: 'blob', oid: match[3], bytes: shown.stdout };
     }
     attachSession(request) {
         return this.#mutation(request, () => {

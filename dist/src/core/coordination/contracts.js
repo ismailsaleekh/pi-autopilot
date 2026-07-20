@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { isAbsolute, normalize } from 'node:path';
+import { parseD65AttachRunBootstrapGraphPayload } from "./d65-semantic-graph.js";
 import { COORDINATION_EXCLUSIVE_MAX_EXPECTED_DURATION_MS } from "./exclusive-policy.js";
 import { parseMetadataReconcileIntent } from "./metadata-reconcile.js";
 import { AUTOPILOT_COORDINATION_SNAPSHOT_SCHEMA, AUTOPILOT_COORDINATOR_PROTOCOL_VERSION, AUTOPILOT_COORDINATOR_REQUEST_SCHEMA, AUTOPILOT_COORDINATOR_RESPONSE_SCHEMA, COORDINATION_ACQUISITION_STATES, COORDINATION_CHILD_STATUSES, COORDINATION_CLAIM_MODES, COORDINATION_EXCLUSIVE_OPERATION_KINDS, COORDINATION_EXCLUSIVE_RELEASE_TRIGGERS, COORDINATION_EXCLUSIVE_RESOURCE_SCOPES, COORDINATION_MESSAGE_STATUSES, COORDINATION_INTEGRATION_CONFLICT_KINDS, COORDINATION_INTEGRATION_DISPOSITIONS, COORDINATION_MERGE_TREE_STATUSES, COORDINATION_OPERATIONAL_ESCALATION_REASONS, COORDINATION_OPERATION_STAGES, COORDINATION_OBSERVATION_EXECUTION_STATES, COORDINATION_OBSERVATION_FRESHNESS_STATES, COORDINATION_OBSERVATION_OBJECT_KINDS, COORDINATION_OPERATION_TYPES, COORDINATION_RELEASE_CONDITION_TYPES, COORDINATION_RECONCILIATION_DETAIL_KINDS, COORDINATION_RECONCILIATION_SOURCES, COORDINATION_REQUEST_STATUSES, COORDINATION_RESERVATION_OBLIGATION_STATES, COORDINATION_MESSAGE_TYPES, COORDINATION_RUN_STATUSES, COORDINATION_SESSION_STATUSES, COORDINATION_SESSION_ATTACHMENT_KINDS, COORDINATION_MIGRATION_RECOVERY_RESOLUTIONS, COORDINATION_MIGRATION_RECOVERY_STATUSES, COORDINATION_MIGRATION_RECOVERY_TYPES, COORDINATION_UNIT_ROLES, COORDINATION_UNIT_STATES, COORDINATION_WORKTREE_KINDS, COORDINATION_WORKTREE_STATES, COORDINATION_WAIT_EDGE_STATES, COORDINATION_DEADLOCK_ACTIONS, COORDINATION_DEADLOCK_STATES, } from "./types.js";
@@ -1210,7 +1211,13 @@ function parsePayload(value, action) {
         payload = value;
     }
     else
-        payload = object(value, label, PAYLOAD_FIELDS[action], action === 'detach-session' || action === 'heartbeat' ? ['migration_operation_token'] : action === 'drain-mailbox' ? ['cursor'] : action === 'reconciliation-details' ? ['boot_id', 'child_lease_id', 'child_token', 'pid', 'session_lease_id', 'session_token'] : []);
+        payload = object(value, label, PAYLOAD_FIELDS[action], action === 'detach-session' || action === 'heartbeat' ? ['migration_operation_token'] : action === 'drain-mailbox' ? ['cursor'] : action === 'reconciliation-details' ? ['boot_id', 'child_lease_id', 'child_token', 'pid', 'session_lease_id', 'session_token'] : action === 'attach-run' ? ['bootstrap_graph'] : []);
+    // D65-A1 additive: current-build attach-run may carry an optional
+    // `bootstrap_graph` object; legacy/cf50 attach-run omits it unchanged. The
+    // exact strict projection is validated in the store's bootstrap transaction.
+    if (action === 'attach-run' && payload['bootstrap_graph'] !== undefined) {
+        parseD65AttachRunBootstrapGraphPayload(payload['bootstrap_graph']);
+    }
     for (const field of PAYLOAD_FIELDS[action]) {
         const entry = payload[field];
         if (optionalPagePayload && entry === undefined)
