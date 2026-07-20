@@ -415,13 +415,38 @@ void describe('D65 non-self-referential graph registration', () => {
     events: { ref: 'runtime/events.jsonl', schema: 'autopilot.event.v1', records: 4, body: '{"e":1}\n{"e":2}\n{"e":3}\n{"e":4}\n' },
   } as const;
 
-  function completeGraph(authorityCommit: string, authorityTree: string, queueOverride?: Record<string, unknown>): Record<string, unknown> {
+  // Build a real single-member queue projection index plus its exact on-disk
+  // shard blob. The shard entry is exactly {identity,kind,value_sha256,value}
+  // with value {identity}; the index sha256 is the canonical digest of the
+  // complete identity-sorted entry array and total_bytes the summed RFC-8785+LF
+  // entry bytes, matching the loader/replayer's checks.
+  function realQueueShard(queueKind: string, identity: string): { index: Record<string, unknown>; shard: { ref: string; bytes: string } } {
+    const ref = `semantic-graphs/00000000000000000002/queue/${queueKind}-0.json`;
+    const value = { identity };
+    const valueSha = sha(`${canonicalJson(value)}\n`);
+    const entry = { identity, kind: queueKind, value_sha256: valueSha, value };
+    const shardObject = {
+      schema_version: 'autopilot.semantic_graph_projection_shard.v1', program_id: 'program-1', repo_id: 'repo-graph-reg', workstream_run: 'run-g',
+      graph_sequence: 2, projection_kind: queueKind, entry_count: 1, total_bytes: Buffer.byteLength(`${canonicalJson(entry)}\n`, 'utf8'),
+      first_identity: identity, last_identity: identity, entries: [entry],
+    };
+    const shardBytes = `${canonicalJson(shardObject)}\n`;
+    const index = {
+      entry_count: 1, total_bytes: Buffer.byteLength(`${canonicalJson(entry)}\n`, 'utf8'), sha256: sha(`${canonicalJson([entry])}\n`),
+      shards: [{ ref, sha256: sha(shardBytes), byte_count: Buffer.byteLength(shardBytes, 'utf8'), entry_count: 1, first_identity: identity, last_identity: identity }],
+    };
+    return { index, shard: { ref, bytes: shardBytes } };
+  }
+
+  function completeGraph(authorityCommit: string, authorityTree: string, queueOverride?: Record<string, unknown>): { root: Record<string, unknown>; shards: readonly { ref: string; bytes: string }[] } {
     const collections: Record<string, unknown> = {};
     for (const key of ['authorities', 'specs', 'statuses', 'receipts', 'audits', 'execution_commits', 'terminal_acceptances', 'unit_merge_intents', 'unit_merges', 'integration_analyses', 'quarantine', 'reconciliation', 'evidence']) collections[key] = { ...EMPTY };
-    const oneMember = { entry_count: 1, total_bytes: 40, sha256: `sha256:${'b'.repeat(64)}`, shards: [{ ref: 'semantic-graphs/00000000000000000002/queue/unit_ready-0.json', sha256: `sha256:${'b'.repeat(64)}`, byte_count: 40, entry_count: 1, first_identity: 'unit-a', last_identity: 'unit-a' }] };
-    const queue: Record<string, unknown> = { unit_ready: oneMember, unit_running: { ...EMPTY }, unit_blocked: { ...EMPTY }, unit_completed: { ...EMPTY }, unit_held: { ...EMPTY }, work_audit_review: { ...EMPTY }, work_validation_ready: { ...EMPTY }, ...queueOverride };
+    const ready = realQueueShard('unit_ready', 'unit-a');
+    const queue: Record<string, unknown> = { unit_ready: ready.index, unit_running: { ...EMPTY }, unit_blocked: { ...EMPTY }, unit_completed: { ...EMPTY }, unit_held: { ...EMPTY }, work_audit_review: { ...EMPTY }, work_validation_ready: { ...EMPTY }, ...queueOverride };
+    // Emit the real shard only when the queue still references it (no override).
+    const shards = queueOverride?.['unit_ready'] === undefined ? [ready.shard] : [];
     const core = (entry: { ref: string; schema: string | null; records: number | null; body: string }): Record<string, unknown> => ({ ref: entry.ref, git_mode: '100644', git_blob_oid: 'a'.repeat(40), sha256: sha(entry.body), byte_count: Buffer.byteLength(entry.body, 'utf8'), record_count: entry.records, document_schema_version: entry.schema });
-    return {
+    const root = {
       schema_version: 'autopilot.semantic_graph.v1', program_id: 'program-1', mode: 'complete', graph_sequence: 2,
       prior_graph_sha256: `sha256:${'a'.repeat(64)}`, prior_event_seq: 1, repo_id: 'repo-graph-reg', autopilot_id: 'auto-g', workstream: 'work-g', workstream_run: 'run-g',
       covered_authority_commit: authorityCommit, covered_authority_tree: authorityTree, covered_event_seq: 5,
@@ -429,6 +454,14 @@ void describe('D65 non-self-referential graph registration', () => {
       core: { mission: core(CORE_FILES.mission), master_plan: core(CORE_FILES.master_plan), state: core(CORE_FILES.state), decision_log: core(CORE_FILES.decision_log), events: core(CORE_FILES.events) },
       collections, work_items: { ...EMPTY }, bughunt: { ...EMPTY }, closure: null, queue_projection: queue, exceptions: { ...EMPTY }, coordinator_projection: { ...EMPTY }, created_at: '2026-07-19T00:00:00.000Z',
     };
+    return { root, shards };
+  }
+
+  async function writeGraphShards(repoRoot: string, shards: readonly { ref: string; bytes: string }[]): Promise<void> {
+    for (const shard of shards) {
+      await mkdir(join(repoRoot, join(...shard.ref.split('/').slice(0, -1))), { recursive: true });
+      await writeFile(join(repoRoot, shard.ref), shard.bytes, 'utf8');
+    }
   }
 
   async function commitAuthorityCore(repoRoot: string): Promise<{ commit: string; tree: string }> {
@@ -445,9 +478,11 @@ void describe('D65 non-self-referential graph registration', () => {
       const authority = await commitAuthorityCore(repoRoot);
       const g = authority.commit;
       const graphRef = 'semantic-graphs/00000000000000000002/graph.json';
-      const graphBytes = JSON.stringify(completeGraph(g, authority.tree));
+      const built = completeGraph(g, authority.tree);
+      const graphBytes = JSON.stringify(built.root);
       await mkdir(join(repoRoot, 'semantic-graphs', '00000000000000000002'), { recursive: true });
       await writeFile(join(repoRoot, graphRef), graphBytes, 'utf8');
+      await writeGraphShards(repoRoot, built.shards);
       git(repoRoot, ['add', '.']);
       git(repoRoot, ['commit', '-m', 'publish graph 2']);
       const h = git(repoRoot, ['rev-parse', 'HEAD']);
@@ -468,7 +503,7 @@ void describe('D65 non-self-referential graph registration', () => {
       const g = authority.commit;
       const graphRef = 'semantic-graphs/00000000000000000002/graph.json';
       // Claim unit_ready is empty though the state has one ready unit.
-      const graphBytes = JSON.stringify(completeGraph(g, authority.tree, { unit_ready: { ...EMPTY } }));
+      const graphBytes = JSON.stringify(completeGraph(g, authority.tree, { unit_ready: { ...EMPTY } }).root);
       await mkdir(join(repoRoot, 'semantic-graphs', '00000000000000000002'), { recursive: true });
       await writeFile(join(repoRoot, graphRef), graphBytes, 'utf8');
       git(repoRoot, ['add', '.']);
@@ -486,15 +521,76 @@ void describe('D65 non-self-referential graph registration', () => {
     });
   });
 
+  void it('rejects a queue whose count is correct but whose loaded shard member identity is wrong', async () => {
+    await withHarness(async ({ client, stateRoot, repoRoot }) => {
+      const ctx = await attach(client, stateRoot, repoRoot, 'm');
+      const authority = await commitAuthorityCore(repoRoot);
+      const g = authority.commit;
+      const graphRef = 'semantic-graphs/00000000000000000002/graph.json';
+      // The index count stays 1 (matches the derived queue size), but the real
+      // shard names a WRONG member identity (unit-zzz), which the counts-only
+      // check cannot catch. The loader/replayer must load the shard and reject
+      // the member mismatch against the derived equation (unit-a).
+      const wrong = realQueueShard('unit_ready', 'unit-zzz');
+      const built = completeGraph(g, authority.tree, { unit_ready: wrong.index });
+      const graphBytes = JSON.stringify(built.root);
+      await mkdir(join(repoRoot, 'semantic-graphs', '00000000000000000002'), { recursive: true });
+      await writeFile(join(repoRoot, graphRef), graphBytes, 'utf8');
+      await writeGraphShards(repoRoot, [wrong.shard]);
+      git(repoRoot, ['add', '.']);
+      git(repoRoot, ['commit', '-m', 'publish graph 2 with wrong member']);
+      const h = git(repoRoot, ['rev-parse', 'HEAD']);
+      const graphSha = `sha256:${createHash('sha256').update(graphBytes).digest('hex')}` as `sha256:${string}`;
+      const status0 = await client.query('status', ctx.repoId, ctx.runId);
+      const runVersion = (status0.payload['runs'] as Array<Record<string, unknown>>)[0]?.['version'] as number;
+      await assert.rejects(
+        () => client.mutate('register-authoritative-artifact', { repoId: ctx.repoId, workstreamRun: ctx.runId, sessionId: ctx.sessionId, fencingGeneration: 1, expectedVersion: runVersion, idempotencyKey: 'register-graph-m' }, {
+          artifact_id: 'semantic-graph:00000000000000000002', source_type: 'task', source_scope: 'repository', document_schema_version: 'autopilot.semantic_graph.v1', git_commit: h, ref: graphRef, sha256: graphSha, session_lease_id: ctx.sessionLeaseId, session_token: ctx.sessionToken,
+        }),
+        /unit_ready members do not equal the derived equation/u,
+      );
+    });
+  });
+
+  void it('rejects a queue whose loaded shard blob is missing at the publication commit', async () => {
+    await withHarness(async ({ client, stateRoot, repoRoot }) => {
+      const ctx = await attach(client, stateRoot, repoRoot, 'n');
+      const authority = await commitAuthorityCore(repoRoot);
+      const g = authority.commit;
+      const graphRef = 'semantic-graphs/00000000000000000002/graph.json';
+      // Declare a real unit_ready index/shard but DO NOT commit the shard blob:
+      // the loader must fail loudly because the declared shard is absent at H.
+      const built = completeGraph(g, authority.tree);
+      const graphBytes = JSON.stringify(built.root);
+      await mkdir(join(repoRoot, 'semantic-graphs', '00000000000000000002'), { recursive: true });
+      await writeFile(join(repoRoot, graphRef), graphBytes, 'utf8');
+      // Intentionally skip writeGraphShards so the shard blob is absent at H.
+      git(repoRoot, ['add', '.']);
+      git(repoRoot, ['commit', '-m', 'publish graph 2 with missing shard']);
+      const h = git(repoRoot, ['rev-parse', 'HEAD']);
+      const graphSha = `sha256:${createHash('sha256').update(graphBytes).digest('hex')}` as `sha256:${string}`;
+      const status0 = await client.query('status', ctx.repoId, ctx.runId);
+      const runVersion = (status0.payload['runs'] as Array<Record<string, unknown>>)[0]?.['version'] as number;
+      await assert.rejects(
+        () => client.mutate('register-authoritative-artifact', { repoId: ctx.repoId, workstreamRun: ctx.runId, sessionId: ctx.sessionId, fencingGeneration: 1, expectedVersion: runVersion, idempotencyKey: 'register-graph-n' }, {
+          artifact_id: 'semantic-graph:00000000000000000002', source_type: 'task', source_scope: 'repository', document_schema_version: 'autopilot.semantic_graph.v1', git_commit: h, ref: graphRef, sha256: graphSha, session_lease_id: ctx.sessionLeaseId, session_token: ctx.sessionToken,
+        }),
+        /shard blob is not readable at the publication commit/u,
+      );
+    });
+  });
+
   void it('advances the graph publication residue from publication-committed to registered on registration', async () => {
     await withHarness(async ({ client, stateRoot, repoRoot }) => {
       const ctx = await attach(client, stateRoot, repoRoot, 'r');
       const authority = await commitAuthorityCore(repoRoot);
       const g = authority.commit;
       const graphRef = 'semantic-graphs/00000000000000000002/graph.json';
-      const graphBytes = JSON.stringify(completeGraph(g, authority.tree));
+      const built = completeGraph(g, authority.tree);
+      const graphBytes = JSON.stringify(built.root);
       await mkdir(join(repoRoot, 'semantic-graphs', '00000000000000000002'), { recursive: true });
       await writeFile(join(repoRoot, graphRef), graphBytes, 'utf8');
+      await writeGraphShards(repoRoot, built.shards);
       git(repoRoot, ['add', '.']);
       git(repoRoot, ['commit', '-m', 'publish graph 2']);
       const h = git(repoRoot, ['rev-parse', 'HEAD']);
@@ -530,7 +626,7 @@ void describe('D65 non-self-referential graph registration', () => {
       const g = authority.commit;
       const graphRef = 'semantic-graphs/00000000000000000002/graph.json';
       // Wrong covered_authority_tree.
-      const graphBytes = JSON.stringify(completeGraph(g, 'd'.repeat(40)));
+      const graphBytes = JSON.stringify(completeGraph(g, 'd'.repeat(40)).root);
       await mkdir(join(repoRoot, 'semantic-graphs', '00000000000000000002'), { recursive: true });
       await writeFile(join(repoRoot, graphRef), graphBytes, 'utf8');
       git(repoRoot, ['add', '.']);
@@ -554,7 +650,7 @@ void describe('D65 non-self-referential graph registration', () => {
       const authority = await commitAuthorityCore(repoRoot);
       const g = authority.commit;
       const graphRef = 'semantic-graphs/00000000000000000002/graph.json';
-      const graphBytes = JSON.stringify(completeGraph(g, authority.tree));
+      const graphBytes = JSON.stringify(completeGraph(g, authority.tree).root);
       await mkdir(join(repoRoot, 'semantic-graphs', '00000000000000000002'), { recursive: true });
       await writeFile(join(repoRoot, graphRef), graphBytes, 'utf8');
       await writeFile(join(repoRoot, 'product.ts'), 'export const x = 1;\n', 'utf8');

@@ -26,8 +26,9 @@ import { assertD65AppendOnlyAttempt, assertD65TerminalEffectSetsExact, buildD65P
 import { parseD65RunTerminalIntentV2, type D65RunTerminalIntentV2 } from './d65-semantic-graph.ts';
 import { d65SemanticGraphArtifactId, validateD65GraphPublication } from './d65-graph-publication.ts';
 import { advanceD65GraphPublicationResidue, readD65GraphPublicationResidue } from './d65-graph-publication-residue.ts';
-import { assertD65QueueProjectionCounts } from './d65-graph-queues.ts';
-import { parseAutopilotState } from '../contracts/index.ts';
+import { assertD65QueueProjectionCounts, assertD65QueueProjectionMembers, D65_QUEUE_KEYS } from './d65-graph-queues.ts';
+import { assertD65QueueMemberValues, d65ProjectionIdentities, loadD65CompleteGraph } from './d65-graph-loader.ts';
+import { parseAutopilotState, type AutopilotState } from '../contracts/index.ts';
 import { assertAutopilotChildTerminalAcceptanceChain, AUTOPILOT_CHILD_TERMINAL_ACCEPTANCE_SCHEMA, parseAutopilotChildTerminalAcceptance } from './terminal-acceptance.ts';
 import { parseRunTerminalSha, parseUnitAttemptTarget, parseUnitFailureEvidenceFacts, parseUnitFailureEvidenceIngress, parseUnitMergeReservationFacts, validateReconciliationEvidenceDocument, validateReservationIntegrationEvidenceDocument, validateReservationValidationArtifactChain, validateReservationValidationEvidenceDocument, type HistoricalUnitFailureEvidenceProvenance } from './terminal-evidence.ts';
 import { AUTOPILOT_COORDINATOR_PROTOCOL_VERSION, COORDINATION_WORKTREE_STATES } from './types.ts';
@@ -4500,10 +4501,40 @@ export class CoordinatorStore {
     // Load and verify the authority tree + all five core blobs from G, then
     // prove the graph's queue-projection index counts equal the derived queue
     // equations from the authority state blob.
-    this.#validateD65GraphAuthority(sourceRoot, facts.authorityCommit, facts.graph);
+    const state = this.#validateD65GraphAuthority(sourceRoot, facts.authorityCommit, facts.graph);
+    // D65-A5 loader/replayer: load every authority + projection shard from the
+    // publication commit H (root + shards live under semantic-graphs/<seq>/ in
+    // H), prove blob<->descriptor<->shard<->aggregate agreement, contiguous
+    // ranges, the 512 MiB / 200,000-entry aggregate ceilings, and the closed
+    // queue value shape; then prove the loaded queue MEMBER identities equal the
+    // derived equation from the authority state (counts alone are never
+    // acceptance).
+    const loaded = loadD65CompleteGraph(facts.graph, (ref) => this.#readD65GraphShardBlob(sourceRoot, publicationCommit, ref));
+    for (const queueKind of D65_QUEUE_KEYS) assertD65QueueMemberValues(loaded, queueKind);
+    assertD65QueueProjectionMembers({
+      state,
+      members: {
+        unit_ready: d65ProjectionIdentities(loaded, 'unit_ready'),
+        unit_running: d65ProjectionIdentities(loaded, 'unit_running'),
+        unit_blocked: d65ProjectionIdentities(loaded, 'unit_blocked'),
+        unit_completed: d65ProjectionIdentities(loaded, 'unit_completed'),
+        unit_held: d65ProjectionIdentities(loaded, 'unit_held'),
+        work_audit_review: d65ProjectionIdentities(loaded, 'work_audit_review'),
+        work_validation_ready: d65ProjectionIdentities(loaded, 'work_validation_ready'),
+      },
+    });
   }
 
-  #validateD65GraphAuthority(sourceRoot: string, authorityCommit: string, graph: { readonly covered_authority_tree: string; readonly core: { readonly mission: { readonly ref: string; readonly sha256: `sha256:${string}`; readonly byte_count: number }; readonly master_plan: { readonly ref: string; readonly sha256: `sha256:${string}`; readonly byte_count: number }; readonly state: { readonly ref: string; readonly sha256: `sha256:${string}`; readonly byte_count: number }; readonly decision_log: { readonly ref: string; readonly sha256: `sha256:${string}`; readonly byte_count: number }; readonly events: { readonly ref: string; readonly sha256: `sha256:${string}`; readonly byte_count: number } }; readonly queue_projection: Parameters<typeof assertD65QueueProjectionCounts>[0]['indexes'] }): void {
+  // Read one repository-relative graph shard blob at the exact publication commit
+  // H for the loader/replayer. The blob must be a regular blob at H and within
+  // the immutable evidence byte bound; absence or a non-blob path fails loudly.
+  #readD65GraphShardBlob(sourceRoot: string, publicationCommit: string, ref: string): Uint8Array {
+    const shown = this.#gitQueryResult(sourceRoot, { kind: 'show-file', revision: publicationCommit, path: ref }, 'invalid-request', 'semantic graph shard blob is not readable at the publication commit');
+    if (shown.stdout.byteLength > MAX_COORDINATION_EVIDENCE_BYTES) throw new CoordinationRuntimeError('invalid-request', 'semantic graph shard blob exceeds the immutable evidence byte bound', [ref]);
+    return shown.stdout;
+  }
+
+  #validateD65GraphAuthority(sourceRoot: string, authorityCommit: string, graph: { readonly covered_authority_tree: string; readonly core: { readonly mission: { readonly ref: string; readonly sha256: `sha256:${string}`; readonly byte_count: number }; readonly master_plan: { readonly ref: string; readonly sha256: `sha256:${string}`; readonly byte_count: number }; readonly state: { readonly ref: string; readonly sha256: `sha256:${string}`; readonly byte_count: number }; readonly decision_log: { readonly ref: string; readonly sha256: `sha256:${string}`; readonly byte_count: number }; readonly events: { readonly ref: string; readonly sha256: `sha256:${string}`; readonly byte_count: number } }; readonly queue_projection: Parameters<typeof assertD65QueueProjectionCounts>[0]['indexes'] }): AutopilotState {
     // covered_authority_tree must equal the actual tree of G.
     const actualTree = this.#gitQueryText(sourceRoot, { kind: 'resolve-tree', revision: authorityCommit }, 'invalid-request', 'semantic graph authority tree inspection failed');
     if (actualTree !== graph.covered_authority_tree) throw new CoordinationRuntimeError('invalid-request', 'semantic-graph-artifact-invalid: covered_authority_tree does not match the authority commit tree', [String(actualTree), graph.covered_authority_tree]);
@@ -4516,10 +4547,13 @@ export class CoordinatorStore {
       const actual = `sha256:${createHash('sha256').update(shown.stdout).digest('hex')}`;
       if (actual !== entry.sha256) throw new CoordinationRuntimeError('invalid-request', 'semantic-graph-artifact-invalid: core descriptor sha256 does not match the authority blob', [entry.ref]);
     }
-    // Prove the queue projection against the authority state blob.
+    // Prove the queue projection index COUNTS against the authority state blob.
+    // Full MEMBER identity equality is proven by the loader/replayer once the
+    // projection shards are loaded from the publication commit.
     const stateShown = this.#gitQueryResult(sourceRoot, { kind: 'show-file', revision: authorityCommit, path: graph.core.state.ref }, 'invalid-request', 'semantic graph authority state blob is not readable at the covered authority commit');
     const state = parseAutopilotState(parseJsonObject(new TextDecoder('utf-8', { fatal: true }).decode(stateShown.stdout), 'semantic graph authority state'));
     assertD65QueueProjectionCounts({ state, indexes: graph.queue_projection });
+    return state;
   }
 
   #d65PriorIntentChain(repoId: string, workstreamRun: string): { readonly attempts: readonly D65RunTerminalIntentV2[] } {

@@ -52,6 +52,13 @@ import {
   parseD65ParentLoss,
 } from '../../src/core/coordination/d65-continuation.ts';
 import { validateAuthoritativeCoordinationDocument } from '../../src/core/coordination/escalation.ts';
+import { canonicalJson } from '../../src/core/coordination/canonical-json.ts';
+import {
+  assertD65QueueMemberValues,
+  d65ProjectionIdentities,
+  loadD65CompleteGraph,
+  type D65GraphBlobReader,
+} from '../../src/core/coordination/d65-graph-loader.ts';
 // The compiled dist manifest must expose the identical closed set (source/dist
 // parity, freeze §9.5). Importing the built .js proves it byte-for-contract.
 // @ts-expect-error - dist is emitted JavaScript without a .d.ts sidecar.
@@ -533,5 +540,110 @@ void describe('D65 trust anchor SPKI binary contract', () => {
     assert.deepEqual([...(decodeUnpaddedBase64Url(encoded) ?? [])], [...bytes]);
     assert.equal(decodeUnpaddedBase64Url(`${encoded}=`), null);
     assert.equal(decodeUnpaddedBase64Url('has space'), null);
+  });
+});
+
+void describe('D65 complete-graph loader/replayer', () => {
+  const OID2 = (char: string): string => char.repeat(40);
+  const DIGEST2 = (char: string): `sha256:${string}` => `sha256:${char.repeat(64)}` as const;
+  const EMPTY = { entry_count: 0, total_bytes: 0, sha256: canonicalSha256([]), shards: [] };
+  const shaText = (text: string): `sha256:${string}` => bytesSha256(Buffer.from(text, 'utf8'));
+
+  function queueShard(kind: string, identity: string): { index: Record<string, unknown>; ref: string; bytes: string } {
+    const ref = `semantic-graphs/00000000000000000002/queue/${kind}-0.json`;
+    const value = { identity };
+    const entry = { identity, kind, value_sha256: shaText(`${canonicalJson(value)}\n`), value };
+    const shardObject = {
+      schema_version: 'autopilot.semantic_graph_projection_shard.v1', program_id: 'p', repo_id: 'r', workstream_run: 'run',
+      graph_sequence: 2, projection_kind: kind, entry_count: 1, total_bytes: Buffer.byteLength(`${canonicalJson(entry)}\n`, 'utf8'),
+      first_identity: identity, last_identity: identity, entries: [entry],
+    };
+    const bytes = `${canonicalJson(shardObject)}\n`;
+    const index = {
+      entry_count: 1, total_bytes: Buffer.byteLength(`${canonicalJson(entry)}\n`, 'utf8'), sha256: shaText(`${canonicalJson([entry])}\n`),
+      shards: [{ ref, sha256: shaText(bytes), byte_count: Buffer.byteLength(bytes, 'utf8'), entry_count: 1, first_identity: identity, last_identity: identity }],
+    };
+    return { index, ref, bytes };
+  }
+
+  function coreEntry2(schema: string | null, records: number | null, body: string): Record<string, unknown> {
+    return { ref: `runtime/${schema ?? 'mission'}.f`, git_mode: '100644', git_blob_oid: OID2('a'), sha256: shaText(body), byte_count: Buffer.byteLength(body, 'utf8'), record_count: records, document_schema_version: schema };
+  }
+
+  function root(queue: Record<string, unknown>): Record<string, unknown> {
+    const collections: Record<string, unknown> = {};
+    for (const key of ['authorities', 'specs', 'statuses', 'receipts', 'audits', 'execution_commits', 'terminal_acceptances', 'unit_merge_intents', 'unit_merges', 'integration_analyses', 'quarantine', 'reconciliation', 'evidence']) collections[key] = { ...EMPTY };
+    return {
+      schema_version: 'autopilot.semantic_graph.v1', program_id: 'p', mode: 'complete', graph_sequence: 2,
+      prior_graph_sha256: DIGEST2('a'), prior_event_seq: 1, repo_id: 'r', autopilot_id: 'a', workstream: 'w', workstream_run: 'run',
+      covered_authority_commit: OID2('b'), covered_authority_tree: OID2('c'), covered_event_seq: 5,
+      bootstrap_charter: { repository: {}, run: {}, run_resource: {}, mailbox_cursor: {}, bootstrap_graph: {}, bootstrap_artifact: {}, trust_anchor: {}, attach_event: {}, attach_result: {} },
+      core: { mission: coreEntry2(null, null, '# m\n'), master_plan: coreEntry2('autopilot.master_plan.v1', 1, '{}\n'), state: coreEntry2('autopilot.state.v1', 1, '{}\n'), decision_log: coreEntry2('autopilot.decision.v1', 1, '{}\n'), events: coreEntry2('autopilot.event.v1', 1, '{}\n') },
+      collections, work_items: { ...EMPTY }, bughunt: { ...EMPTY }, closure: null, queue_projection: queue, exceptions: { ...EMPTY }, coordinator_projection: { ...EMPTY }, created_at: '2026-07-19T00:00:00.000Z',
+    };
+  }
+
+  const ALL_EMPTY: Record<string, unknown> = {
+    unit_ready: { ...EMPTY }, unit_running: { ...EMPTY }, unit_blocked: { ...EMPTY }, unit_completed: { ...EMPTY },
+    unit_held: { ...EMPTY }, work_audit_review: { ...EMPTY }, work_validation_ready: { ...EMPTY },
+  };
+
+  const reader = (blobs: Readonly<Record<string, string>>): D65GraphBlobReader => (ref) => {
+    const bytes = blobs[ref];
+    if (bytes === undefined) throw new Error(`missing blob ${ref}`);
+    return Buffer.from(bytes, 'utf8');
+  };
+
+  void it('loads a single-member queue shard and exposes identities plus value shape', () => {
+    const ready = queueShard('unit_ready', 'unit-a');
+    const graph = parseD65CompleteGraph(root({ ...ALL_EMPTY, unit_ready: ready.index }));
+    const loaded = loadD65CompleteGraph(graph, reader({ [ready.ref]: ready.bytes }));
+    assert.deepEqual([...d65ProjectionIdentities(loaded, 'unit_ready')], ['unit-a']);
+    assert.deepEqual([...d65ProjectionIdentities(loaded, 'unit_running')], []);
+    assertD65QueueMemberValues(loaded, 'unit_ready');
+  });
+
+  void it('loads an all-empty graph with no shard reads and counts the five core blobs', () => {
+    const graph = parseD65CompleteGraph(root({ ...ALL_EMPTY }));
+    const loaded = loadD65CompleteGraph(graph, reader({}));
+    assert.equal(loaded.aggregateReferencedEntries >= 5, true);
+    assert.deepEqual([...d65ProjectionIdentities(loaded, 'unit_ready')], []);
+  });
+
+  void it('rejects a shard blob whose bytes do not match the descriptor byte_count', () => {
+    const ready = queueShard('unit_ready', 'unit-a');
+    const graph = parseD65CompleteGraph(root({ ...ALL_EMPTY, unit_ready: ready.index }));
+    assert.throws(() => loadD65CompleteGraph(graph, reader({ [ready.ref]: `${ready.bytes} ` })), /byte_count does not match its descriptor/u);
+  });
+
+  void it('rejects a shard blob whose sha256 does not match the descriptor', () => {
+    const ready = queueShard('unit_ready', 'unit-a');
+    const tampered = ready.bytes.replace('unit-a', 'unit-b');
+    const descByteCount = (ready.index as { shards: { byte_count: number }[] }).shards[0]?.byte_count;
+    assert.equal(Buffer.byteLength(tampered, 'utf8'), descByteCount);
+    const graph = parseD65CompleteGraph(root({ ...ALL_EMPTY, unit_ready: ready.index }));
+    assert.throws(() => loadD65CompleteGraph(graph, reader({ [ready.ref]: tampered })), /sha256 does not match its descriptor/u);
+  });
+
+  void it('rejects a shard whose projection_kind does not match its index', () => {
+    const ready = queueShard('unit_ready', 'unit-a');
+    const other = queueShard('unit_running', 'unit-a');
+    const index = { ...(ready.index as Record<string, unknown>), shards: [{ ...(ready.index as { shards: Record<string, unknown>[] }).shards[0], sha256: shaText(other.bytes), byte_count: Buffer.byteLength(other.bytes, 'utf8') }] };
+    const graph = parseD65CompleteGraph(root({ ...ALL_EMPTY, unit_ready: index }));
+    assert.throws(() => loadD65CompleteGraph(graph, reader({ [ready.ref]: other.bytes })), /projection_kind does not match the index/u);
+  });
+
+  void it('rejects a queue value that is not exactly {identity}', () => {
+    const kind = 'unit_ready';
+    const identity = 'unit-a';
+    const ref = `semantic-graphs/00000000000000000002/queue/${kind}-0.json`;
+    const value = { identity, extra: true };
+    const entry = { identity, kind, value_sha256: shaText(`${canonicalJson(value)}\n`), value };
+    const shardObject = { schema_version: 'autopilot.semantic_graph_projection_shard.v1', program_id: 'p', repo_id: 'r', workstream_run: 'run', graph_sequence: 2, projection_kind: kind, entry_count: 1, total_bytes: Buffer.byteLength(`${canonicalJson(entry)}\n`, 'utf8'), first_identity: identity, last_identity: identity, entries: [entry] };
+    const bytes = `${canonicalJson(shardObject)}\n`;
+    const index = { entry_count: 1, total_bytes: Buffer.byteLength(`${canonicalJson(entry)}\n`, 'utf8'), sha256: shaText(`${canonicalJson([entry])}\n`), shards: [{ ref, sha256: shaText(bytes), byte_count: Buffer.byteLength(bytes, 'utf8'), entry_count: 1, first_identity: identity, last_identity: identity }] };
+    const graph = parseD65CompleteGraph(root({ ...ALL_EMPTY, unit_ready: index }));
+    const loaded = loadD65CompleteGraph(graph, reader({ [ref]: bytes }));
+    assert.throws(() => assertD65QueueMemberValues(loaded, 'unit_ready'), /must be exactly \{identity\} equal to its enclosing identity/u);
   });
 });
