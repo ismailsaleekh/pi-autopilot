@@ -181,3 +181,67 @@ void describe('D65 bootstrap attach-run crash-safe atomicity', () => {
     }
   });
 });
+
+import { mkdirSync } from 'node:fs';
+import {
+  advanceD65GraphPublicationResidue,
+  cleanupD65GraphPublicationResidue,
+  createD65GraphPublicationResidue,
+  d65GraphPublicationPending,
+  d65GraphPublicationResiduePath,
+  readD65GraphPublicationResidue,
+} from '../../src/core/coordination/d65-graph-publication-residue.ts';
+
+function residue(stage: string, overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  const base = {
+    schema_version: 'autopilot.graph_publication.v1', publication_id: 'pub-1', program_id: 'program-1',
+    repo_id: 'repo-1', autopilot_id: 'auto-1', workstream_run: 'run-1', graph_sequence: 2, artifact_id: 'semantic-graph:00000000000000000002',
+    stage, prior_authority_kind: 'bootstrap', prior_graph_sha256: `sha256:${'a'.repeat(64)}`, prior_publication_commit: null,
+    prior_registration_event_seq: 1, authority_base_commit: 'b'.repeat(40), authority_path_count: 5, authority_path_manifest_sha256: `sha256:${'c'.repeat(64)}`,
+    authority_commit: null, authority_tree: null, covered_event_seq: 5, publication_commit: null, publication_tree: null,
+    graph_ref: null, graph_sha256: null, graph_byte_count: null, registration_event_seq: null,
+    created_at: '2026-07-19T00:00:00.000Z', updated_at: '2026-07-19T00:00:00.000Z',
+  };
+  return { ...base, ...overrides };
+}
+
+void describe('D65 graph publication residue saga lifecycle', () => {
+  void it('walks the four monotonic stages with crash-safe recovery re-reads and descriptor-safe cleanup', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pi-autopilot-graph-residue-'));
+    try {
+      const mainWorktree = join(root, 'active', 'run-1', 'main');
+      mkdirSync(mainWorktree, { recursive: true });
+
+      // prepared
+      createD65GraphPublicationResidue(mainWorktree, residue('prepared') as never);
+      assert.equal(d65GraphPublicationPending(mainWorktree), true);
+      // A second create rejects.
+      assert.throws(() => createD65GraphPublicationResidue(mainWorktree, residue('prepared') as never), /already exists/u);
+
+      // Simulate a crash: recover by re-reading the residue, then advance.
+      assert.equal(readD65GraphPublicationResidue(mainWorktree)?.stage, 'prepared');
+      // prepared -> authority-committed
+      advanceD65GraphPublicationResidue(mainWorktree, residue('authority-committed', { authority_commit: 'd'.repeat(40), authority_tree: 'e'.repeat(40) }) as never);
+      // Skipping a stage rejects (monotonic one-step).
+      assert.throws(() => advanceD65GraphPublicationResidue(mainWorktree, residue('registered', { authority_commit: 'd'.repeat(40), authority_tree: 'e'.repeat(40), publication_commit: 'f'.repeat(40), publication_tree: '0'.repeat(40), graph_ref: 'semantic-graphs/00000000000000000002/graph.json', graph_sha256: `sha256:${'1'.repeat(64)}`, graph_byte_count: 4096, registration_event_seq: 6 }) as never), /must advance exactly one step/u);
+      // Changing an immutable identity field across a stage rejects.
+      assert.throws(() => advanceD65GraphPublicationResidue(mainWorktree, residue('publication-committed', { publication_id: 'pub-2', authority_commit: 'd'.repeat(40), authority_tree: 'e'.repeat(40), publication_commit: 'f'.repeat(40), publication_tree: '0'.repeat(40), graph_ref: 'semantic-graphs/00000000000000000002/graph.json', graph_sha256: `sha256:${'1'.repeat(64)}`, graph_byte_count: 4096 }) as never), /immutable field publication_id changed/u);
+
+      // authority-committed -> publication-committed
+      advanceD65GraphPublicationResidue(mainWorktree, residue('publication-committed', { authority_commit: 'd'.repeat(40), authority_tree: 'e'.repeat(40), publication_commit: 'f'.repeat(40), publication_tree: '0'.repeat(40), graph_ref: 'semantic-graphs/00000000000000000002/graph.json', graph_sha256: `sha256:${'1'.repeat(64)}`, graph_byte_count: 4096 }) as never);
+      // Cleanup before registered is terminal.
+      assert.throws(() => cleanupD65GraphPublicationResidue(mainWorktree), /cleanup requires the registered stage/u);
+      // publication-committed -> registered
+      advanceD65GraphPublicationResidue(mainWorktree, residue('registered', { authority_commit: 'd'.repeat(40), authority_tree: 'e'.repeat(40), publication_commit: 'f'.repeat(40), publication_tree: '0'.repeat(40), graph_ref: 'semantic-graphs/00000000000000000002/graph.json', graph_sha256: `sha256:${'1'.repeat(64)}`, graph_byte_count: 4096, registration_event_seq: 6 }) as never);
+      assert.equal(d65GraphPublicationPending(mainWorktree), false);
+
+      // Descriptor-safe cleanup removes the residue and proves absence.
+      cleanupD65GraphPublicationResidue(mainWorktree);
+      assert.equal(readD65GraphPublicationResidue(mainWorktree), null);
+      assert.equal(d65GraphPublicationPending(mainWorktree), false);
+      void d65GraphPublicationResiduePath;
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});

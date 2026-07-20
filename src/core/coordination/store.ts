@@ -25,6 +25,7 @@ import { deriveD65BootstrapTransaction, type D65GitBlobObserver } from './d65-bo
 import { assertD65AppendOnlyAttempt, assertD65TerminalEffectSetsExact, buildD65PreparedTerminalIntentV2, computeD65ObligationPartition, d65TerminalIntentId } from './d65-terminal-intent.ts';
 import { parseD65RunTerminalIntentV2, type D65RunTerminalIntentV2 } from './d65-semantic-graph.ts';
 import { d65SemanticGraphArtifactId, validateD65GraphPublication } from './d65-graph-publication.ts';
+import { advanceD65GraphPublicationResidue, readD65GraphPublicationResidue } from './d65-graph-publication-residue.ts';
 import { assertD65QueueProjectionCounts } from './d65-graph-queues.ts';
 import { parseAutopilotState } from '../contracts/index.ts';
 import { assertAutopilotChildTerminalAcceptanceChain, AUTOPILOT_CHILD_TERMINAL_ACCEPTANCE_SCHEMA, parseAutopilotChildTerminalAcceptance } from './terminal-acceptance.ts';
@@ -4128,7 +4129,14 @@ export class CoordinatorStore {
       const artifact: CoordinationAuthoritativeArtifact = { schema_version: 'autopilot.authoritative_artifact.v1', artifact_id: artifactId, repo_id: run.repo_id, source_run: run.workstream_run, source_type: sourceType, source_scope: sourceScope, document_schema_version: documentSchemaVersion, git_commit: gitCommit, evidence, registered_event_seq: seq, version: 1 };
       this.#db.prepare('INSERT INTO authoritative_artifacts(entity_id, repo_id, source_run, payload_json, version) VALUES(?, ?, ?, ?, ?)').run(artifact.artifact_id, artifact.repo_id, artifact.source_run, canonicalJson(artifact), artifact.version);
       this.#persistEvidenceArtifact(run.repo_id, artifact.evidence, bytes, `authoritative ${sourceType}`, seq);
-      return { sequence: seq, eventType: 'authoritative-artifact-registered', entityType: 'authoritative-artifact', entityId: artifact.artifact_id, payload: { authoritative_artifact: artifact } };
+      // D65-A2: registering a complete graph advances its publication saga
+      // residue to the terminal `registered` stage recording this exact R, so
+      // dispatch is no longer graph-publication-pending. The advance runs after
+      // the DB row insert as the final publication step (afterEventInserted).
+      const finalizeResidue = documentSchemaVersion === 'autopilot.semantic_graph.v1'
+        ? this.#d65GraphResidueFinalizer(run.repo_id, run.workstream_run, artifactId, gitCommit, seq)
+        : undefined;
+      return { sequence: seq, eventType: 'authoritative-artifact-registered', entityType: 'authoritative-artifact', entityId: artifact.artifact_id, payload: { authoritative_artifact: artifact }, ...(finalizeResidue === undefined ? {} : { afterEventInserted: finalizeResidue }) };
     });
   }
 
@@ -4450,6 +4458,23 @@ export class CoordinatorStore {
   // The parsed graph names G (covered_authority_commit); we verify H (gitCommit)
   // has exactly one parent equal to G and that the G..H diff touches only graph
   // paths. The artifact id must be the deterministic sequence id.
+  // Return a finalizer that advances the graph publication residue (if present)
+  // from publication-committed to registered recording this exact R. Absence is
+  // permitted (the saga residue is optional graph-consumer state); a residue at
+  // any other stage or bound to a different graph is terminal.
+  #d65GraphResidueFinalizer(repoId: string, workstreamRun: string, artifactId: string, publicationCommit: string, registrationEventSeq: number): (() => void) | undefined {
+    const resourceRow = this.#db.prepare('SELECT * FROM run_resources WHERE repo_id=? AND workstream_run=?').get(repoId, workstreamRun);
+    if (resourceRow === undefined) return undefined;
+    const mainWorktreePath = runResourceFromRow(resourceRow).main_worktree_path;
+    const current = readD65GraphPublicationResidue(mainWorktreePath);
+    if (current === null) return undefined;
+    if (current.artifact_id !== artifactId || current.publication_commit !== publicationCommit) throw new CoordinationRuntimeError('invalid-state', 'graph publication residue does not bind the registered graph artifact/commit', [current.artifact_id, artifactId]);
+    if (current.stage !== 'publication-committed') throw new CoordinationRuntimeError('invalid-state', `graph publication residue must be publication-committed before registration, found ${current.stage}`);
+    return () => {
+      advanceD65GraphPublicationResidue(mainWorktreePath, { ...current, stage: 'registered', registration_event_seq: registrationEventSeq, updated_at: this.#clock.now().toISOString() });
+    };
+  }
+
   #validateD65GraphRegistration(sourceRoot: string, publicationCommit: string, graphRef: string, sealedGraphSha256: `sha256:${string}`, graphRootBytes: Uint8Array, artifactId: string): void {
     const parentListing = this.#gitQueryText(sourceRoot, { kind: 'rev-list-parents', revision: publicationCommit }, 'invalid-request', 'semantic graph publication parent inspection failed');
     const publicationParents = (parentListing ?? '').trim().split(/\s+/u).filter((entry) => entry.length > 0);

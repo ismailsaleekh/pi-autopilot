@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash, generateKeyPairSync } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
@@ -483,6 +483,43 @@ void describe('D65 non-self-referential graph registration', () => {
         }),
         /unit_ready index entry_count 0 does not equal the derived queue size 1/u,
       );
+    });
+  });
+
+  void it('advances the graph publication residue from publication-committed to registered on registration', async () => {
+    await withHarness(async ({ client, stateRoot, repoRoot }) => {
+      const ctx = await attach(client, stateRoot, repoRoot, 'r');
+      const authority = await commitAuthorityCore(repoRoot);
+      const g = authority.commit;
+      const graphRef = 'semantic-graphs/00000000000000000002/graph.json';
+      const graphBytes = JSON.stringify(completeGraph(g, authority.tree));
+      await mkdir(join(repoRoot, 'semantic-graphs', '00000000000000000002'), { recursive: true });
+      await writeFile(join(repoRoot, graphRef), graphBytes, 'utf8');
+      git(repoRoot, ['add', '.']);
+      git(repoRoot, ['commit', '-m', 'publish graph 2']);
+      const h = git(repoRoot, ['rev-parse', 'HEAD']);
+      const graphSha = `sha256:${createHash('sha256').update(graphBytes).digest('hex')}` as `sha256:${string}`;
+      // Seal a publication-committed residue bound to this exact artifact/H at
+      // the run's main-worktree sibling.
+      const mainWorktreeSibling = join(stateRoot, 'wt', ctx.repoId, 'active', ctx.runId);
+      await mkdir(mainWorktreeSibling, { recursive: true });
+      const residueBytes = `${canonicalJson({
+        schema_version: 'autopilot.graph_publication.v1', publication_id: 'pub-1', program_id: 'program-1', repo_id: 'repo-1', autopilot_id: 'auto-1', workstream_run: 'run-1',
+        graph_sequence: 2, artifact_id: 'semantic-graph:00000000000000000002', stage: 'publication-committed', prior_authority_kind: 'bootstrap', prior_graph_sha256: `sha256:${'a'.repeat(64)}`, prior_publication_commit: null,
+        prior_registration_event_seq: 1, authority_base_commit: g, authority_path_count: 5, authority_path_manifest_sha256: `sha256:${'c'.repeat(64)}`, authority_commit: g, authority_tree: authority.tree,
+        covered_event_seq: 5, publication_commit: h, publication_tree: git(repoRoot, ['rev-parse', 'HEAD^{tree}']), graph_ref: graphRef, graph_sha256: graphSha, graph_byte_count: Buffer.byteLength(graphBytes, 'utf8'), registration_event_seq: null,
+        created_at: '2026-07-19T00:00:00.000Z', updated_at: '2026-07-19T00:00:00.000Z',
+      })}\n`;
+      await writeFile(join(mainWorktreeSibling, '_graph-publication.json'), residueBytes, { encoding: 'utf8', mode: 0o600 });
+      const status0 = await client.query('status', ctx.repoId, ctx.runId);
+      const runVersion = (status0.payload['runs'] as Array<Record<string, unknown>>)[0]?.['version'] as number;
+      const registered = await client.mutate('register-authoritative-artifact', { repoId: ctx.repoId, workstreamRun: ctx.runId, sessionId: ctx.sessionId, fencingGeneration: 1, expectedVersion: runVersion, idempotencyKey: 'register-graph-r' }, {
+        artifact_id: 'semantic-graph:00000000000000000002', source_type: 'task', source_scope: 'repository', document_schema_version: 'autopilot.semantic_graph.v1', git_commit: h, ref: graphRef, sha256: graphSha, session_lease_id: ctx.sessionLeaseId, session_token: ctx.sessionToken,
+      });
+      assert.equal(registered.committed_event_seq !== null, true);
+      const finalResidue = JSON.parse(await readFile(join(mainWorktreeSibling, '_graph-publication.json'), 'utf8')) as Record<string, unknown>;
+      assert.equal(finalResidue['stage'], 'registered');
+      assert.equal(finalResidue['registration_event_seq'], registered.committed_event_seq);
     });
   });
 
