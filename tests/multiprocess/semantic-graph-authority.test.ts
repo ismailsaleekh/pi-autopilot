@@ -8,12 +8,15 @@ import { describe, it } from 'node:test';
 
 import { CoordinatorClient } from '../../src/core/coordination/client.ts';
 import { canonicalJson } from '../../src/core/coordination/canonical-json.ts';
+import { parseCoordinationRun, parseCoordinationSessionLease } from '../../src/core/coordination/contracts.ts';
 import { coordinatorRuntimePaths } from '../../src/core/coordination/runtime-paths.ts';
 import { startCoordinatorServer } from '../../src/core/coordination/server.ts';
 import {
   parseD65AttachRunResultV2,
+  parseD65RunTerminalIntentV2,
 } from '../../src/core/coordination/d65-semantic-graph.ts';
 import { D65_ALLOWED_BOOTSTRAP_OPERATIONS } from '../../src/core/coordination/d65-semantic-graph.ts';
+import { d65TerminalIntentId } from '../../src/core/coordination/d65-terminal-intent.ts';
 import { AUTOPILOT_STATE_ROOT_ENV, type ProcessEnvLike } from '../../src/core/parallel-runtime.ts';
 
 interface Harness {
@@ -240,5 +243,159 @@ void describe('D65 semantic-graph bootstrap attach-run transaction', () => {
       await harness.server.close();
       await rm(harness.root, { recursive: true, force: true });
     }
+  });
+});
+const EMPTY_EFFECT_SETS = { blocking_owned_obligations: [], foreign_dependent_obligations: [], abort_owned_obligations: [], other_nonterminal_obligations: [] };
+
+interface Ctx {
+  readonly client: CoordinatorClient;
+  readonly repoId: string;
+  readonly runId: string;
+  readonly sessionId: string;
+  readonly sessionLeaseId: string;
+  readonly sessionToken: string;
+  runVersion: number;
+}
+
+async function attach(client: CoordinatorClient, stateRoot: string, repoRoot: string, suffix: string): Promise<Ctx> {
+  const repoId = 'repo-terminal-v2';
+  const runId = `run-${suffix}`;
+  const runResponse = await client.mutate('attach-run', { repoId, workstreamRun: runId, sessionId: null, fencingGeneration: null, expectedVersion: 0, idempotencyKey: `attach-run-${suffix}` }, {
+    repo_key: repoId, canonical_root: repoRoot, git_common_dir: join(repoRoot, '.git'), autopilot_id: `autopilot-${suffix}`, workstream: `work-${suffix}`, coordination_authority: 'coordinator-edit-leases-v1',
+    run_resource: {
+      schema_version: 'autopilot.coordination_run_resource.v1', repo_id: repoId, workstream_run: runId, source_repo: repoRoot, git_common_dir: join(repoRoot, '.git'), worktree_root: join(stateRoot, 'wt', repoId),
+      main_worktree_path: join(stateRoot, 'wt', repoId, 'active', runId, 'main'), runtime_root: join(stateRoot, 'wt', repoId, 'active', runId, 'main', '.pi', 'autopilot', `work-${suffix}`),
+      branch: `autopilot/${runId}`, target_branch: null, target_base_sha: '0'.repeat(40), origin_url: null, started_at: '2026-07-12T00:00:00.000Z', version: 1,
+    },
+  });
+  const run = parseCoordinationRun(runResponse.payload['run']);
+  const token = createHash('sha256').update(suffix).digest('hex');
+  const sessionResponse = await client.mutate('attach-session', { repoId, workstreamRun: runId, sessionId: `session-${suffix}`, fencingGeneration: 1, expectedVersion: run.version, idempotencyKey: `attach-session-${suffix}` }, {
+    session_lease_id: `session-lease-${suffix}`, session_token: token, pid: process.pid, boot_id: `boot-${suffix}`, lease_expires_at: '2099-01-01T00:00:00.000Z', handoff_token: null,
+  });
+  const attachedRun = parseCoordinationRun(sessionResponse.payload['run']);
+  const session = parseCoordinationSessionLease(sessionResponse.payload['session']);
+  return { client, repoId, runId, sessionId: session.session_id, sessionLeaseId: session.session_lease_id, sessionToken: token, runVersion: attachedRun.version };
+}
+
+async function prepareV2(ctx: Ctx, attempt: number, outcome: 'closed' | 'aborted', priorId: string | null, priorSha: `sha256:${string}` | null): Promise<ReturnType<typeof parseD65RunTerminalIntentV2>> {
+  const response = await ctx.client.mutate('prepare-run-terminal', { repoId: ctx.repoId, workstreamRun: ctx.runId, sessionId: ctx.sessionId, fencingGeneration: 1, expectedVersion: ctx.runVersion, idempotencyKey: `prepare-v2-${attempt}` }, {
+    outcome, terminal_intent_id: d65TerminalIntentId(ctx.runId, attempt), session_lease_id: ctx.sessionLeaseId, session_token: ctx.sessionToken,
+    intent_attempt: attempt, prior_terminal_intent_id: priorId, prior_terminal_intent_sha256: priorSha, terminal_effect_sets: EMPTY_EFFECT_SETS,
+  });
+  const intent = parseD65RunTerminalIntentV2(response.payload['run_terminal_intent']);
+  ctx.runVersion = parseCoordinationRun(response.payload['run']).version;
+  return intent;
+}
+
+async function cancelV2(ctx: Ctx, intent: ReturnType<typeof parseD65RunTerminalIntentV2>): Promise<void> {
+  const response = await ctx.client.mutate('cancel-run-terminal', { repoId: ctx.repoId, workstreamRun: ctx.runId, sessionId: ctx.sessionId, fencingGeneration: 1, expectedVersion: intent.version, idempotencyKey: `cancel-v2-${intent.intent_attempt}` }, {
+    terminal_intent_id: intent.terminal_intent_id, reason: 'operator re-plan', session_lease_id: ctx.sessionLeaseId, session_token: ctx.sessionToken,
+  });
+  ctx.runVersion = parseCoordinationRun(response.payload['run']).version;
+}
+
+function digestOf(intent: ReturnType<typeof parseD65RunTerminalIntentV2>): `sha256:${string}` {
+  return `sha256:${createHash('sha256').update(`${canonicalJson(intent)}\n`, 'utf8').digest('hex')}`;
+}
+
+async function withHarness(run: (ctx: { client: CoordinatorClient; stateRoot: string; repoRoot: string; close: () => Promise<void> }) => Promise<void>): Promise<void> {
+  const root = await mkdtemp(join(tmpdir(), 'pi-autopilot-terminal-v2-'));
+  const repoRoot = join(root, 'repo');
+  await mkdir(repoRoot, { recursive: true });
+  git(repoRoot, ['init', '-b', 'main']);
+  await writeFile(join(repoRoot, 'README.md'), 'base\n', 'utf8');
+  git(repoRoot, ['add', 'README.md']);
+  git(repoRoot, ['commit', '-m', 'base']);
+  const stateRoot = join(root, 'state');
+  const env: ProcessEnvLike = { ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: stateRoot };
+  const server = await startCoordinatorServer(coordinatorRuntimePaths(env));
+  const client = new CoordinatorClient({ env, autoStart: false });
+  try {
+    await run({ client, stateRoot, repoRoot, close: async () => { await server.close(); } });
+  } finally {
+    await server.close();
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
+void describe('D65-A3 append-only terminal-intent v2', () => {
+  void it('prepares a first v2 intent, moves the run to merging, and projects a v1-compatible status row', async () => {
+    await withHarness(async ({ client, stateRoot, repoRoot }) => {
+      const ctx = await attach(client, stateRoot, repoRoot, 'a');
+      const intent = await prepareV2(ctx, 1, 'closed', null, null);
+      assert.equal(intent.schema_version, 'autopilot.run_terminal_intent.v2');
+      assert.equal(intent.intent_attempt, 1);
+      assert.equal(intent.state, 'prepared');
+      assert.equal(intent.prior_terminal_intent_id, null);
+      // Status projects the v2 row through the v1-compatible shape without throwing.
+      const status = await client.query('status', ctx.repoId, ctx.runId);
+      const intents = status.payload['run_terminal_intents'] as Array<Record<string, unknown>>;
+      assert.equal(intents.length, 1);
+      assert.equal(intents[0]?.['schema_version'], 'autopilot.run_terminal_intent.v1');
+      assert.equal(intents[0]?.['state'], 'prepared');
+      const runs = status.payload['runs'] as Array<Record<string, unknown>>;
+      assert.equal(runs[0]?.['status'], 'merging');
+    });
+  });
+
+  void it('enforces the append-only chain: cancel then attempt+1 with exact prior id/digest', async () => {
+    await withHarness(async ({ client, stateRoot, repoRoot }) => {
+      const ctx = await attach(client, stateRoot, repoRoot, 'b');
+      const first = await prepareV2(ctx, 1, 'closed', null, null);
+      await cancelV2(ctx, first);
+      const cancelledFirst = parseD65RunTerminalIntentV2({ ...first, state: 'cancelled', terminal_event_seq: first.prepared_event_seq + 1, version: first.version + 1 });
+      // Attempt 2 must name the exact cancelled first row id + digest.
+      const second = await prepareV2(ctx, 2, 'closed', cancelledFirst.terminal_intent_id, digestOf(cancelledFirst));
+      assert.equal(second.intent_attempt, 2);
+      assert.equal(second.prior_terminal_intent_id, cancelledFirst.terminal_intent_id);
+      // A wrong prior digest rejects.
+      await cancelV2(ctx, second);
+      await assert.rejects(
+        () => prepareV2(ctx, 3, 'closed', d65TerminalIntentId(ctx.runId, 2), `sha256:${'0'.repeat(64)}`),
+        /does not bind the exact latest attempt bytes/u,
+      );
+    });
+  });
+
+  void it('binds the 3-cancel bound and mandatory fourth noncancellable abort', async () => {
+    await withHarness(async ({ client, stateRoot, repoRoot }) => {
+      const ctx = await attach(client, stateRoot, repoRoot, 'c');
+      let prior = await prepareV2(ctx, 1, 'closed', null, null);
+      for (let attempt = 2; attempt <= 3; attempt += 1) {
+        await cancelV2(ctx, prior);
+        const cancelled = parseD65RunTerminalIntentV2({ ...prior, state: 'cancelled', terminal_event_seq: prior.prepared_event_seq + 1, version: prior.version + 1 });
+        prior = await prepareV2(ctx, attempt, 'closed', cancelled.terminal_intent_id, digestOf(cancelled));
+      }
+      // After the third cancellation, only attempt 4 abort may follow.
+      await cancelV2(ctx, prior);
+      const cancelledThird = parseD65RunTerminalIntentV2({ ...prior, state: 'cancelled', terminal_event_seq: prior.prepared_event_seq + 1, version: prior.version + 1 });
+      // A close attempt 4 rejects; only abort is allowed.
+      await assert.rejects(
+        () => prepareV2(ctx, 4, 'closed', cancelledThird.terminal_intent_id, digestOf(cancelledThird)),
+        /mandatory fourth terminal intent attempt must be a noncancellable abort/u,
+      );
+      const abort = await prepareV2(ctx, 4, 'aborted', cancelledThird.terminal_intent_id, digestOf(cancelledThird));
+      assert.equal(abort.outcome, 'aborted');
+      // The mandatory fourth abort is noncancellable.
+      await assert.rejects(
+        () => cancelV2(ctx, abort),
+        /the mandatory fourth abort intent is noncancellable/u,
+      );
+    });
+  });
+
+  void it('still creates an unchanged v1 intent when the D65 fields are omitted', async () => {
+    await withHarness(async ({ client, stateRoot, repoRoot }) => {
+      const ctx = await attach(client, stateRoot, repoRoot, 'd');
+      const response = await client.mutate('prepare-run-terminal', { repoId: ctx.repoId, workstreamRun: ctx.runId, sessionId: ctx.sessionId, fencingGeneration: 1, expectedVersion: ctx.runVersion, idempotencyKey: 'prepare-v1' }, {
+        outcome: 'closed', terminal_intent_id: 'legacy-terminal-intent-1', session_lease_id: ctx.sessionLeaseId, session_token: ctx.sessionToken,
+      });
+      assert.equal(response.payload['run_terminal_intent'] !== undefined, true);
+      const intent = response.payload['run_terminal_intent'] as Record<string, unknown>;
+      assert.equal(intent['schema_version'], 'autopilot.run_terminal_intent.v1');
+      assert.equal(intent['terminal_intent_id'], 'legacy-terminal-intent-1');
+      assert.equal(Object.prototype.hasOwnProperty.call(intent, 'intent_attempt'), false);
+    });
   });
 });

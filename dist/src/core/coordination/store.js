@@ -21,6 +21,8 @@ import { activeCoordinationMigrationFreeze, assertCoordinationDispatchAllowed, a
 import { proveStructuredAttemptTerminal } from "./terminal-attempt-proof.js";
 import { classifyCoordinationIntegrationConflict } from "./integration-conflicts.js";
 import { deriveD65BootstrapTransaction } from "./d65-bootstrap-transaction.js";
+import { assertD65AppendOnlyAttempt, assertD65TerminalEffectSetsExact, buildD65PreparedTerminalIntentV2, computeD65ObligationPartition, d65TerminalIntentId } from "./d65-terminal-intent.js";
+import { parseD65RunTerminalIntentV2 } from "./d65-semantic-graph.js";
 import { assertAutopilotChildTerminalAcceptanceChain, AUTOPILOT_CHILD_TERMINAL_ACCEPTANCE_SCHEMA, parseAutopilotChildTerminalAcceptance } from "./terminal-acceptance.js";
 import { parseRunTerminalSha, parseUnitAttemptTarget, parseUnitFailureEvidenceIngress, parseUnitMergeReservationFacts, validateReconciliationEvidenceDocument, validateReservationIntegrationEvidenceDocument, validateReservationValidationArtifactChain, validateReservationValidationEvidenceDocument } from "./terminal-evidence.js";
 import { AUTOPILOT_COORDINATOR_PROTOCOL_VERSION, COORDINATION_WORKTREE_STATES } from "./types.js";
@@ -1222,6 +1224,18 @@ function reservationObligationFromRow(row) {
     return entityFromRow(row, parseCoordinationReservationObligation, 'reservation obligation');
 }
 function runTerminalIntentFromRow(row) {
+    // D65-A3: a v2 append-only intent row is projected to the v1-compatible
+    // CoordinationRunTerminalIntent shape for status/doctor/invariant consumers.
+    // The extra v2 fields (intent_attempt/prior chain/effect sets) are surfaced
+    // only through the semantic-graph coordinator projection, never lost.
+    const payload = parseJsonObject(sqlString(row, 'payload_json'), 'run terminal intent');
+    if (payload['schema_version'] === 'autopilot.run_terminal_intent.v2') {
+        const v2 = parseD65RunTerminalIntentV2(payload);
+        return {
+            schema_version: 'autopilot.run_terminal_intent.v1', terminal_intent_id: v2.terminal_intent_id, repo_id: v2.repo_id, workstream_run: v2.workstream_run,
+            outcome: v2.outcome, state: v2.state, reservation_ids: v2.reservation_ids, prepared_event_seq: v2.prepared_event_seq, terminal_event_seq: v2.terminal_event_seq, version: v2.version,
+        };
+    }
     return entityFromRow(row, parseCoordinationRunTerminalIntent, 'run terminal intent');
 }
 function claimRequestFromRow(row) {
@@ -4601,6 +4615,12 @@ export class CoordinatorStore {
             // validation can then classify/cancel safely without a concurrent dispatch.
             const seq = this.#nextEventSequence(run.repo_id);
             const reservationIds = this.#db.prepare("SELECT entity_id FROM change_reservations WHERE repo_id=? AND workstream_run=? AND json_extract(payload_json, '$.released_event_seq') IS NULL ORDER BY entity_id").all(run.repo_id, run.workstream_run).map((row) => sqlString(row, 'entity_id'));
+            // D65-A3: a current-build prepare-run-terminal carrying intent_attempt
+            // creates an append-only autopilot.run_terminal_intent.v2 with the exact
+            // repository-wide obligation partition; omission preserves unchanged v1.
+            if (request.payload['intent_attempt'] !== undefined) {
+                return this.#applyD65TerminalIntentV2(request, run, seq, outcomeValue, reservationIds);
+            }
             const intent = parseCoordinationRunTerminalIntent({ schema_version: 'autopilot.run_terminal_intent.v1', terminal_intent_id: payloadString(request.payload, 'terminal_intent_id'), repo_id: run.repo_id, workstream_run: run.workstream_run, outcome: outcomeValue, state: 'prepared', reservation_ids: reservationIds, prepared_event_seq: seq, terminal_event_seq: null, version: 1 });
             const nextRun = parseCoordinationRun({ ...run, status: 'merging', version: run.version + 1 });
             this.#db.prepare('INSERT INTO run_terminal_intents(entity_id, repo_id, workstream_run, payload_json, version) VALUES(?, ?, ?, ?, ?)').run(intent.terminal_intent_id, intent.repo_id, intent.workstream_run, canonicalJson(intent), intent.version);
@@ -4608,10 +4628,46 @@ export class CoordinatorStore {
             return { sequence: seq, eventType: 'run-terminal-prepared', entityType: 'run-terminal-intent', entityId: intent.terminal_intent_id, payload: { run_terminal_intent: intent, run: nextRun } };
         });
     }
+    // D65-A3 append-only terminal-intent v2 preparation. Validates the exact
+    // append-only attempt chain (3-cancel bound + mandatory 4th abort), recomputes
+    // the repository-wide nonterminal obligation partition, byte-matches the
+    // request's sealed terminal_effect_sets, creates the v2 row version 1, and
+    // moves the run active->merging with run version+1.
+    #applyD65TerminalIntentV2(request, run, seq, outcome, reservationIds) {
+        const intentAttempt = request.payload['intent_attempt'];
+        if (typeof intentAttempt !== 'number' || !Number.isSafeInteger(intentAttempt) || intentAttempt < 1)
+            throw new CoordinationRuntimeError('invalid-request', 'intent_attempt must be a positive integer');
+        const priorId = request.payload['prior_terminal_intent_id'] === null ? null : payloadString(request.payload, 'prior_terminal_intent_id');
+        const priorShaValue = request.payload['prior_terminal_intent_sha256'];
+        const priorSha = priorShaValue === null ? null : priorShaValue;
+        const requestedId = payloadString(request.payload, 'terminal_intent_id');
+        if (requestedId !== d65TerminalIntentId(run.workstream_run, intentAttempt))
+            throw new CoordinationRuntimeError('invalid-request', 'terminal_intent_id must be the deterministic v2 id for this attempt');
+        const priorChain = this.#d65PriorIntentChain(run.repo_id, run.workstream_run);
+        assertD65AppendOnlyAttempt({ workstreamRun: run.workstream_run, intentAttempt, priorTerminalIntentId: priorId, priorTerminalIntentSha256: priorSha, outcome, priorChain });
+        const nonterminalObligations = this.#db.prepare("SELECT * FROM reservation_obligations WHERE repo_id=? AND json_extract(payload_json, '$.state') IN ('waiting-for-predecessor','integration-required') ORDER BY entity_id").all(run.repo_id).map(reservationObligationFromRow);
+        const computed = computeD65ObligationPartition({ workstreamRun: run.workstream_run, outcome, intentReservationIds: reservationIds, nonterminalObligations });
+        const sealed = assertD65TerminalEffectSetsExact({ outcome, requested: request.payload['terminal_effect_sets'], computed });
+        const intent = buildD65PreparedTerminalIntentV2({ workstreamRun: run.workstream_run, repoId: run.repo_id, intentAttempt, priorTerminalIntentId: priorId, priorTerminalIntentSha256: priorSha, outcome, reservationIds, terminalEffectSets: sealed, preparedEventSeq: seq });
+        const nextRun = parseCoordinationRun({ ...run, status: 'merging', version: run.version + 1 });
+        this.#db.prepare('INSERT INTO run_terminal_intents(entity_id, repo_id, workstream_run, payload_json, version) VALUES(?, ?, ?, ?, ?)').run(intent.terminal_intent_id, intent.repo_id, intent.workstream_run, canonicalJson(intent), intent.version);
+        this.#db.prepare("UPDATE runs SET status='merging', version=? WHERE repo_id=? AND workstream_run=?").run(nextRun.version, run.repo_id, run.workstream_run);
+        return { sequence: seq, eventType: 'run-terminal-prepared', entityType: 'run-terminal-intent', entityId: intent.terminal_intent_id, payload: { run_terminal_intent: intent, run: nextRun } };
+    }
+    #d65PriorIntentChain(repoId, workstreamRun) {
+        const rows = this.#db.prepare("SELECT payload_json FROM run_terminal_intents WHERE repo_id=? AND workstream_run=? AND json_extract(payload_json, '$.schema_version')='autopilot.run_terminal_intent.v2' ORDER BY json_extract(payload_json, '$.intent_attempt')").all(repoId, workstreamRun);
+        const attempts = rows.map((row) => parseD65RunTerminalIntentV2(parseJsonObject(sqlString(row, 'payload_json'), 'run terminal intent v2')));
+        return { attempts };
+    }
     cancelRunTerminal(request) {
         return this.#mutation(request, () => {
             this.#requireCurrentSession(request);
-            const intent = runTerminalIntentFromRow(asRow(this.#db.prepare('SELECT * FROM run_terminal_intents WHERE repo_id=? AND entity_id=?').get(request.repo_id, payloadString(request.payload, 'terminal_intent_id')), 'run terminal intent'));
+            const rawRow = asRow(this.#db.prepare('SELECT * FROM run_terminal_intents WHERE repo_id=? AND entity_id=?').get(request.repo_id, payloadString(request.payload, 'terminal_intent_id')), 'run terminal intent');
+            const rawPayload = parseJsonObject(sqlString(rawRow, 'payload_json'), 'run terminal intent');
+            if (rawPayload['schema_version'] === 'autopilot.run_terminal_intent.v2') {
+                return this.#applyD65CancelTerminalIntentV2(request, parseD65RunTerminalIntentV2(rawPayload));
+            }
+            const intent = runTerminalIntentFromRow(rawRow);
             if (intent.workstream_run !== this.#workstreamRun(request))
                 throw new CoordinationRuntimeError('unauthorized-client', 'session cannot cancel a foreign run terminal intent');
             const run = this.#requireRun(request.repo_id, intent.workstream_run);
@@ -4625,6 +4681,25 @@ export class CoordinatorStore {
             this.#db.prepare("UPDATE runs SET status='blocked', version=? WHERE repo_id=? AND workstream_run=?").run(nextRun.version, run.repo_id, run.workstream_run);
             return { sequence: seq, eventType: 'run-terminal-cancelled', entityType: 'run-terminal-intent', entityId: cancelled.terminal_intent_id, payload: { run_terminal_intent: cancelled, run: nextRun, reason: payloadString(request.payload, 'reason') } };
         });
+    }
+    // D65-A3: cancelling a prepared v2 intent increments intent+run versions by
+    // one, moves the run merging->active, and preserves the append-only row.
+    // Attempt 4 (mandatory abort) cannot cancel.
+    #applyD65CancelTerminalIntentV2(request, intent) {
+        if (intent.workstream_run !== this.#workstreamRun(request))
+            throw new CoordinationRuntimeError('unauthorized-client', 'session cannot cancel a foreign run terminal intent');
+        const run = this.#requireRun(request.repo_id, intent.workstream_run);
+        this.#assertVersion(intent.version, request.expected_version, 'run terminal intent');
+        if (intent.state !== 'prepared')
+            throw new CoordinationRuntimeError('invalid-state', `run terminal intent is ${intent.state}`);
+        if (intent.outcome === 'aborted' && intent.intent_attempt === 4)
+            throw new CoordinationRuntimeError('invalid-state', 'the mandatory fourth abort intent is noncancellable');
+        const seq = this.#nextEventSequence(request.repo_id);
+        const cancelled = parseD65RunTerminalIntentV2({ ...intent, state: 'cancelled', terminal_event_seq: seq, version: intent.version + 1 });
+        const nextRun = parseCoordinationRun({ ...run, status: 'active', version: run.version + 1 });
+        this.#db.prepare('UPDATE run_terminal_intents SET payload_json=?, version=? WHERE entity_id=?').run(canonicalJson(cancelled), cancelled.version, cancelled.terminal_intent_id);
+        this.#db.prepare("UPDATE runs SET status='active', version=? WHERE repo_id=? AND workstream_run=?").run(nextRun.version, run.repo_id, run.workstream_run);
+        return { sequence: seq, eventType: 'run-terminal-cancelled', entityType: 'run-terminal-intent', entityId: cancelled.terminal_intent_id, payload: { run_terminal_intent: cancelled, run: nextRun, reason: payloadString(request.payload, 'reason') } };
     }
     reconcileRun(request) {
         return this.#mutation(request, () => {
