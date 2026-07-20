@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto';
 
 import { parseAutopilotMasterPlan, parseAutopilotUnitSpec } from '../contracts/index.ts';
+import { parseD65LaunchPolicy, parseD65CapacityDecision, parseD65SubscriptionProbe } from './d65-launch-policy.ts';
+import { parseD65CompleteGraph, parseD65RunTerminalIntentV2 } from './d65-semantic-graph.ts';
 import { CoordinatorClient } from './client.ts';
 import { parseCoordinationAdjudicationAssignment, parseCoordinationAuthoritativeArtifact, parseCoordinationContradictionAdjudication, parseCoordinationEscalation } from './contracts.ts';
 import { CoordinationRuntimeError } from './failures.ts';
@@ -175,6 +177,11 @@ export function validateAuthoritativeCoordinationDocument(sourceType: 'mission' 
     if (sourceType === 'master-plan') {
       if (schemaVersion !== 'autopilot.master_plan.v1') throw new Error('master-plan schema version mismatch');
       parseAutopilotMasterPlan(parsed);
+    } else if (D65_TASK_DOCUMENT_PARSERS[schemaVersion] !== undefined) {
+      // D65-A1/A4: signed/authority package-run documents register through the
+      // existing register-authoritative-artifact action as source_type=task and
+      // are strictly parsed at the lowest layer here. No new action/table.
+      D65_TASK_DOCUMENT_PARSERS[schemaVersion](parsed);
     } else {
       if (schemaVersion !== 'autopilot.unit_spec.v1') throw new Error('task schema version mismatch');
       parseAutopilotUnitSpec(parsed);
@@ -183,6 +190,15 @@ export function validateAuthoritativeCoordinationDocument(sourceType: 'mission' 
     throw reject(`authoritative ${sourceType} is not schema-valid`, [error instanceof Error ? error.message : String(error)]);
   }
 }
+
+/** The D65 authority documents that may register as source_type=task. */
+const D65_TASK_DOCUMENT_PARSERS: Readonly<Record<string, (value: unknown) => unknown>> = Object.freeze({
+  'autopilot.launch_policy.v1': parseD65LaunchPolicy,
+  'autopilot.capacity_decision.v1': parseD65CapacityDecision,
+  'autopilot.subscription_probe.v1': parseD65SubscriptionProbe,
+  'autopilot.semantic_graph.v1': parseD65CompleteGraph,
+  'autopilot.run_terminal_intent.v2': parseD65RunTerminalIntentV2,
+});
 
 function parseJson(bytes: Uint8Array, label: string): unknown {
   try {
