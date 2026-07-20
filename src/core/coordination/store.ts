@@ -25,6 +25,8 @@ import { deriveD65BootstrapTransaction, type D65GitBlobObserver } from './d65-bo
 import { assertD65AppendOnlyAttempt, assertD65TerminalEffectSetsExact, buildD65PreparedTerminalIntentV2, computeD65ObligationPartition, d65TerminalIntentId } from './d65-terminal-intent.ts';
 import { parseD65RunTerminalIntentV2, type D65RunTerminalIntentV2 } from './d65-semantic-graph.ts';
 import { d65SemanticGraphArtifactId, validateD65GraphPublication } from './d65-graph-publication.ts';
+import { assertD65QueueProjectionCounts } from './d65-graph-queues.ts';
+import { parseAutopilotState } from '../contracts/index.ts';
 import { assertAutopilotChildTerminalAcceptanceChain, AUTOPILOT_CHILD_TERMINAL_ACCEPTANCE_SCHEMA, parseAutopilotChildTerminalAcceptance } from './terminal-acceptance.ts';
 import { parseRunTerminalSha, parseUnitAttemptTarget, parseUnitFailureEvidenceFacts, parseUnitFailureEvidenceIngress, parseUnitMergeReservationFacts, validateReconciliationEvidenceDocument, validateReservationIntegrationEvidenceDocument, validateReservationValidationArtifactChain, validateReservationValidationEvidenceDocument, type HistoricalUnitFailureEvidenceProvenance } from './terminal-evidence.ts';
 import { AUTOPILOT_COORDINATOR_PROTOCOL_VERSION, COORDINATION_WORKTREE_STATES } from './types.ts';
@@ -4470,6 +4472,19 @@ export class CoordinatorStore {
     });
     if (facts.artifactId !== artifactId) throw new CoordinationRuntimeError('invalid-request', 'semantic-graph-artifact-invalid: artifact id is not the deterministic graph sequence id', [artifactId, facts.artifactId]);
     if (facts.artifactId !== d65SemanticGraphArtifactId(facts.graph.graph_sequence)) throw new CoordinationRuntimeError('invalid-request', 'semantic-graph-artifact-invalid: graph sequence id mismatch');
+    // Load the authority state blob from G and prove the graph's queue-projection
+    // index counts equal the derived queue equations from that state.
+    this.#validateD65GraphQueueProjection(sourceRoot, facts.authorityCommit, facts.graph);
+  }
+
+  #validateD65GraphQueueProjection(sourceRoot: string, authorityCommit: string, graph: { readonly core: { readonly state: { readonly ref: string; readonly sha256: `sha256:${string}` } }; readonly queue_projection: Parameters<typeof assertD65QueueProjectionCounts>[0]['indexes'] }): void {
+    const stateRef = graph.core.state.ref;
+    const shown = this.#gitQueryResult(sourceRoot, { kind: 'show-file', revision: authorityCommit, path: stateRef }, 'invalid-request', 'semantic graph authority state blob is not readable at the covered authority commit');
+    if (shown.stdout.byteLength > MAX_COORDINATION_EVIDENCE_BYTES) throw new CoordinationRuntimeError('invalid-request', 'semantic graph authority state blob exceeds the immutable evidence byte bound');
+    const actual = `sha256:${createHash('sha256').update(shown.stdout).digest('hex')}`;
+    if (actual !== graph.core.state.sha256) throw new CoordinationRuntimeError('invalid-request', 'semantic-graph-artifact-invalid: state core descriptor sha256 does not match the authority blob');
+    const state = parseAutopilotState(parseJsonObject(new TextDecoder('utf-8', { fatal: true }).decode(shown.stdout), 'semantic graph authority state'));
+    assertD65QueueProjectionCounts({ state, indexes: graph.queue_projection });
   }
 
   #d65PriorIntentChain(repoId: string, workstreamRun: string): { readonly attempts: readonly D65RunTerminalIntentV2[] } {

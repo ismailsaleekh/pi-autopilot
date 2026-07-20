@@ -37,6 +37,16 @@ import {
   validateD65GraphPublication,
 } from '../../src/core/coordination/d65-graph-publication.ts';
 import { bytesSha256 } from '../../src/core/coordination/d65-semantic-graph.ts';
+import {
+  assertD65QueueProjectionCounts,
+  assertD65QueueProjectionMembers,
+  assertD65UnitTransition,
+  assertD65WorkItemTransition,
+  deriveD65QueueProjection,
+  isD65LegalUnitEdge,
+  isD65LegalWorkItemEdge,
+} from '../../src/core/coordination/d65-graph-queues.ts';
+import type { AutopilotState } from '../../src/core/contracts/types.ts';
 // The compiled dist manifest must expose the identical closed set (source/dist
 // parity, freeze §9.5). Importing the built .js proves it byte-for-contract.
 // @ts-expect-error - dist is emitted JavaScript without a .d.ts sidecar.
@@ -336,6 +346,51 @@ void describe('D65 non-self-referential graph publication validation', () => {
     assert.throws(() => validateD65GraphPublication({ observation: { publicationCommit: H, publicationParents: [H, OID('5')], diffPaths: [graphRef], graphRootBytes: bytes, sealedGraphSha256: bytesSha256(bytes), graphRef }, expectedAuthorityCommit: G, expectedCoveredEventSeq: 5 }), /sole parent is not the covered authority commit G/u);
     const bytes2 = completeGraphBytes();
     assert.throws(() => validateD65GraphPublication({ observation: { publicationCommit: H, publicationParents: [H, G], diffPaths: [graphRef], graphRootBytes: bytes2, sealedGraphSha256: bytesSha256(bytes2), graphRef }, expectedAuthorityCommit: G, expectedCoveredEventSeq: 9 }), /covered_event_seq disagrees/u);
+  });
+});
+
+function stateFixture(units: Record<string, string>, workItems: Record<string, string> = {}): AutopilotState {
+  return {
+    schema_version: 'autopilot.state.v1', workstream: 'w', updated_at: '2026-07-19T00:00:00.000Z', status: 'running',
+    context_gate: { gate: 'ok', percent: 10 }, last_event_id: 1, ready_queue: [], running: [], blocked: [], completed: [],
+    units: Object.fromEntries(Object.entries(units).map(([id, state]) => [id, { unit_id: id, role: 'implement', state: state as never, attempt: 1, summary: 's' }])),
+    operator_questions: [], next_actions: ['x'],
+    ...(Object.keys(workItems).length === 0 ? {} : { work_items: Object.fromEntries(Object.entries(workItems).map(([id, state]) => [id, { work_item_id: id, state: state as never, source_changing: true, unit_ids: [], summary: 's' }])) }),
+  } as AutopilotState;
+}
+
+void describe('D65 complete-graph queue equations and transitions', () => {
+  void it('derives the seven queue indexes from state and partitions the unit set', () => {
+    const state = stateFixture({ a: 'ready', b: 'running', c: 'blocked', d: 'failed', e: 'completed', f: 'queued' }, { w1: 'audit-review', w2: 'validation-ready', w3: 'revalidation-ready', w4: 'planned' });
+    const queues = deriveD65QueueProjection(state);
+    assert.deepEqual([...queues.unit_ready], ['a']);
+    assert.deepEqual([...queues.unit_running], ['b']);
+    assert.deepEqual([...queues.unit_blocked], ['c', 'd']);
+    assert.deepEqual([...queues.unit_completed], ['e']);
+    assert.deepEqual([...queues.unit_held], ['f']);
+    assert.deepEqual([...queues.work_audit_review], ['w1']);
+    assert.deepEqual([...queues.work_validation_ready], ['w2', 'w3']);
+    assert.doesNotThrow(() => assertD65QueueProjectionMembers({ state, members: queues }));
+  });
+
+  void it('rejects index counts that disagree with the derived queue sizes', () => {
+    const state = stateFixture({ a: 'ready', b: 'ready' });
+    const emptyIndex = { entry_count: 0, total_bytes: 0, sha256: canonicalSha256([]), shards: [] };
+    const indexes = { unit_ready: emptyIndex, unit_running: emptyIndex, unit_blocked: emptyIndex, unit_completed: emptyIndex, unit_held: emptyIndex, work_audit_review: emptyIndex, work_validation_ready: emptyIndex };
+    assert.throws(() => assertD65QueueProjectionCounts({ state, indexes }), /unit_ready index entry_count 0 does not equal the derived queue size 2/u);
+  });
+
+  void it('encodes the closed legal unit and work-item edge relations', () => {
+    assert.equal(isD65LegalUnitEdge('ready', 'running'), true);
+    assert.equal(isD65LegalUnitEdge('completed', 'ready'), false);
+    assert.equal(isD65LegalWorkItemEdge('validation-ready', 'validated'), true);
+    assert.equal(isD65LegalWorkItemEdge('closed', 'running'), false);
+    // Recovery edge requires attempt+1 plus evidence.
+    assert.throws(() => assertD65UnitTransition({ unitId: 'u', from: 'blocked', to: 'ready', fromAttempt: 1, toAttempt: 1, hasRecoveryEvidence: true }), /recovery edge requires attempt\+1/u);
+    assert.throws(() => assertD65UnitTransition({ unitId: 'u', from: 'blocked', to: 'ready', fromAttempt: 1, toAttempt: 2, hasRecoveryEvidence: false }), /requires accepted recovery\/decision evidence/u);
+    assert.doesNotThrow(() => assertD65UnitTransition({ unitId: 'u', from: 'blocked', to: 'ready', fromAttempt: 1, toAttempt: 2, hasRecoveryEvidence: true }));
+    assert.throws(() => assertD65UnitTransition({ unitId: 'u', from: 'ready', to: 'ready', fromAttempt: 1, toAttempt: 1, hasRecoveryEvidence: false }), /undocumented same-state mutation/u);
+    assert.throws(() => assertD65WorkItemTransition({ workItemId: 'w', from: 'planned', to: 'validated' }), /is not a legal edge/u);
   });
 });
 
