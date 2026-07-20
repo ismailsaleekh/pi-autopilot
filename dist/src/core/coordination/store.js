@@ -23,6 +23,7 @@ import { classifyCoordinationIntegrationConflict } from "./integration-conflicts
 import { deriveD65BootstrapTransaction } from "./d65-bootstrap-transaction.js";
 import { assertD65AppendOnlyAttempt, assertD65TerminalEffectSetsExact, buildD65PreparedTerminalIntentV2, computeD65ObligationPartition, d65TerminalIntentId } from "./d65-terminal-intent.js";
 import { parseD65RunTerminalIntentV2 } from "./d65-semantic-graph.js";
+import { d65SemanticGraphArtifactId, validateD65GraphPublication } from "./d65-graph-publication.js";
 import { assertAutopilotChildTerminalAcceptanceChain, AUTOPILOT_CHILD_TERMINAL_ACCEPTANCE_SCHEMA, parseAutopilotChildTerminalAcceptance } from "./terminal-acceptance.js";
 import { parseRunTerminalSha, parseUnitAttemptTarget, parseUnitFailureEvidenceIngress, parseUnitMergeReservationFacts, validateReconciliationEvidenceDocument, validateReservationIntegrationEvidenceDocument, validateReservationValidationArtifactChain, validateReservationValidationEvidenceDocument } from "./terminal-evidence.js";
 import { AUTOPILOT_COORDINATOR_PROTOCOL_VERSION, COORDINATION_WORKTREE_STATES } from "./types.js";
@@ -4285,6 +4286,13 @@ export class CoordinatorStore {
             const documentSchemaVersion = payloadString(request.payload, 'document_schema_version');
             validateAuthoritativeCoordinationDocument(sourceType, documentSchemaVersion, bytes);
             const artifactId = payloadString(request.payload, 'artifact_id');
+            // D65-A2: a complete-graph root registers at its publication commit H with
+            // non-self-referential publication rules (sole-parent-G, graph-only diff,
+            // self-exclusion). The artifact id is the deterministic
+            // semantic-graph:<20-digit-sequence>; graph_commit is H = current HEAD.
+            if (documentSchemaVersion === 'autopilot.semantic_graph.v1') {
+                this.#validateD65GraphRegistration(sourceRoot, gitCommit, ref, evidence.sha256, bytes, artifactId);
+            }
             if (this.#db.prepare('SELECT entity_id FROM authoritative_artifacts WHERE repo_id=? AND entity_id=?').get(run.repo_id, artifactId) !== undefined)
                 throw new CoordinationRuntimeError('stale-version', 'authoritative artifact id already exists');
             const seq = this.#nextEventSequence(run.repo_id);
@@ -4653,6 +4661,39 @@ export class CoordinatorStore {
         this.#db.prepare('INSERT INTO run_terminal_intents(entity_id, repo_id, workstream_run, payload_json, version) VALUES(?, ?, ?, ?, ?)').run(intent.terminal_intent_id, intent.repo_id, intent.workstream_run, canonicalJson(intent), intent.version);
         this.#db.prepare("UPDATE runs SET status='merging', version=? WHERE repo_id=? AND workstream_run=?").run(nextRun.version, run.repo_id, run.workstream_run);
         return { sequence: seq, eventType: 'run-terminal-prepared', entityType: 'run-terminal-intent', entityId: intent.terminal_intent_id, payload: { run_terminal_intent: intent, run: nextRun } };
+    }
+    // D65-A2 non-self-referential publication validation at graph registration.
+    // The parsed graph names G (covered_authority_commit); we verify H (gitCommit)
+    // has exactly one parent equal to G and that the G..H diff touches only graph
+    // paths. The artifact id must be the deterministic sequence id.
+    #validateD65GraphRegistration(sourceRoot, publicationCommit, graphRef, sealedGraphSha256, graphRootBytes, artifactId) {
+        const parentListing = this.#gitQueryText(sourceRoot, { kind: 'rev-list-parents', revision: publicationCommit }, 'invalid-request', 'semantic graph publication parent inspection failed');
+        const publicationParents = (parentListing ?? '').trim().split(/\s+/u).filter((entry) => entry.length > 0);
+        const soleParent = publicationParents[1];
+        if (soleParent === undefined)
+            throw new CoordinationRuntimeError('invalid-request', 'semantic-graph-artifact-invalid: publication commit H has no parent');
+        const diffResult = this.#gitQueryResult(sourceRoot, { kind: 'diff-paths', from: soleParent, to: publicationCommit, noRenames: true }, 'invalid-request', 'semantic graph publication diff inspection failed');
+        const diffPaths = new TextDecoder('utf-8', { fatal: true }).decode(diffResult.stdout).split('\0').filter((entry) => entry.length > 0);
+        // The graph itself names G (covered_authority_commit) and its covered E; the
+        // validator proves H's sole parent equals that G and the diff is graph-only.
+        const declared = parseJsonObject(new TextDecoder('utf-8', { fatal: true }).decode(graphRootBytes), 'semantic graph root');
+        if (typeof declared !== 'object' || declared === null || Array.isArray(declared))
+            throw new CoordinationRuntimeError('invalid-request', 'semantic graph root must be an object');
+        const declaredAuthority = declared['covered_authority_commit'];
+        const declaredCovered = declared['covered_event_seq'];
+        if (typeof declaredAuthority !== 'string')
+            throw new CoordinationRuntimeError('invalid-request', 'semantic graph covered_authority_commit is invalid');
+        if (typeof declaredCovered !== 'number')
+            throw new CoordinationRuntimeError('invalid-request', 'semantic graph covered_event_seq is invalid');
+        const facts = validateD65GraphPublication({
+            observation: { publicationCommit, publicationParents, diffPaths, graphRootBytes, sealedGraphSha256, graphRef },
+            expectedAuthorityCommit: declaredAuthority,
+            expectedCoveredEventSeq: declaredCovered,
+        });
+        if (facts.artifactId !== artifactId)
+            throw new CoordinationRuntimeError('invalid-request', 'semantic-graph-artifact-invalid: artifact id is not the deterministic graph sequence id', [artifactId, facts.artifactId]);
+        if (facts.artifactId !== d65SemanticGraphArtifactId(facts.graph.graph_sequence))
+            throw new CoordinationRuntimeError('invalid-request', 'semantic-graph-artifact-invalid: graph sequence id mismatch');
     }
     #d65PriorIntentChain(repoId, workstreamRun) {
         const rows = this.#db.prepare("SELECT payload_json FROM run_terminal_intents WHERE repo_id=? AND workstream_run=? AND json_extract(payload_json, '$.schema_version')='autopilot.run_terminal_intent.v2' ORDER BY json_extract(payload_json, '$.intent_attempt')").all(repoId, workstreamRun);

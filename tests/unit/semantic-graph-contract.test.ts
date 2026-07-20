@@ -31,6 +31,12 @@ import {
   D65_CONTRACT_SCHEMA_VERSIONS,
   d65ParserFor,
 } from '../../src/core/coordination/d65-contract-manifest.ts';
+import {
+  d65GraphPathPrefix,
+  d65SemanticGraphArtifactId,
+  validateD65GraphPublication,
+} from '../../src/core/coordination/d65-graph-publication.ts';
+import { bytesSha256 } from '../../src/core/coordination/d65-semantic-graph.ts';
 // The compiled dist manifest must expose the identical closed set (source/dist
 // parity, freeze §9.5). Importing the built .js proves it byte-for-contract.
 // @ts-expect-error - dist is emitted JavaScript without a .d.ts sidecar.
@@ -274,6 +280,62 @@ void describe('D65 complete graph root contract', () => {
     assert.throws(() => parseD65CompleteGraph({ ...completeFixture(), graph_sequence: 1 }), /graph_sequence must be a safe integer >= 2/u);
     assert.throws(() => parseD65CompleteGraph({ ...completeFixture(), mode: 'bootstrap-plan-only' }), /mode must equal complete/u);
     assert.throws(() => parseD65CompleteGraph({ ...completeFixture(), extra: true }), /unknown fields/u);
+  });
+});
+
+function completeGraphBytes(overrides: Record<string, unknown> = {}): Uint8Array {
+  const collections: Record<string, unknown> = {};
+  for (const key of ['authorities', 'specs', 'statuses', 'receipts', 'audits', 'execution_commits', 'terminal_acceptances', 'unit_merge_intents', 'unit_merges', 'integration_analyses', 'quarantine', 'reconciliation', 'evidence']) collections[key] = { ...EMPTY_INDEX };
+  const queue: Record<string, unknown> = {};
+  for (const key of ['unit_ready', 'unit_running', 'unit_blocked', 'unit_completed', 'unit_held', 'work_audit_review', 'work_validation_ready']) queue[key] = { ...EMPTY_INDEX };
+  const graph = {
+    schema_version: 'autopilot.semantic_graph.v1', program_id: 'program-1', mode: 'complete', graph_sequence: 2,
+    prior_graph_sha256: DIGEST('a'), prior_event_seq: 1, repo_id: 'repo-1', autopilot_id: 'auto-1', workstream: 'kbg-finalize-fresh', workstream_run: 'run-1',
+    covered_authority_commit: OID('b'), covered_authority_tree: OID('c'), covered_event_seq: 5,
+    bootstrap_charter: { repository: {}, run: {}, run_resource: {}, mailbox_cursor: {}, bootstrap_graph: {}, bootstrap_artifact: {}, trust_anchor: {}, attach_event: {}, attach_result: {} },
+    core: {
+      mission: { ref: 'runtime/mission.md', git_mode: '100644', git_blob_oid: OID('a'), sha256: DIGEST('a'), byte_count: 100, record_count: null, document_schema_version: null },
+      master_plan: { ref: 'runtime/master-plan.json', git_mode: '100644', git_blob_oid: OID('a'), sha256: DIGEST('a'), byte_count: 100, record_count: 1, document_schema_version: 'autopilot.master_plan.v1' },
+      state: { ref: 'runtime/state.json', git_mode: '100644', git_blob_oid: OID('a'), sha256: DIGEST('a'), byte_count: 100, record_count: 1, document_schema_version: 'autopilot.state.v1' },
+      decision_log: { ref: 'runtime/decisions.jsonl', git_mode: '100644', git_blob_oid: OID('a'), sha256: DIGEST('a'), byte_count: 100, record_count: 3, document_schema_version: 'autopilot.decision.v1' },
+      events: { ref: 'runtime/events.jsonl', git_mode: '100644', git_blob_oid: OID('a'), sha256: DIGEST('a'), byte_count: 100, record_count: 4, document_schema_version: 'autopilot.event.v1' },
+    },
+    collections, work_items: { ...EMPTY_INDEX }, bughunt: { ...EMPTY_INDEX }, closure: null, queue_projection: queue,
+    exceptions: { ...EMPTY_INDEX }, coordinator_projection: { ...EMPTY_INDEX }, created_at: '2026-07-19T00:00:00.000Z', ...overrides,
+  };
+  return new TextEncoder().encode(JSON.stringify(graph));
+}
+
+void describe('D65 non-self-referential graph publication validation', () => {
+  const H = OID('7');
+  const G = OID('b');
+  const graphRef = `${d65GraphPathPrefix(2)}graph.json`;
+
+  void it('accepts a graph-only publication with sole parent G and correct self-exclusion', () => {
+    const bytes = completeGraphBytes();
+    const facts = validateD65GraphPublication({
+      observation: { publicationCommit: H, publicationParents: [H, G], diffPaths: [graphRef, `${d65GraphPathPrefix(2)}authorities/0.json`], graphRootBytes: bytes, sealedGraphSha256: bytesSha256(bytes), graphRef },
+      expectedAuthorityCommit: G, expectedCoveredEventSeq: 5,
+    });
+    assert.equal(facts.artifactId, d65SemanticGraphArtifactId(2));
+    assert.equal(facts.authorityCommit, G);
+  });
+
+  void it('rejects a wrong sealed digest, multi-parent H, and a non-graph diff path', () => {
+    const bytes = completeGraphBytes();
+    const good = { publicationCommit: H, publicationParents: [H, G], diffPaths: [graphRef], graphRootBytes: bytes, sealedGraphSha256: bytesSha256(bytes), graphRef };
+    assert.throws(() => validateD65GraphPublication({ observation: { ...good, sealedGraphSha256: DIGEST('9') }, expectedAuthorityCommit: G, expectedCoveredEventSeq: 5 }), /graph root blob does not match the sealed graph_sha256/u);
+    assert.throws(() => validateD65GraphPublication({ observation: { ...good, publicationParents: [H, G, OID('4')] }, expectedAuthorityCommit: G, expectedCoveredEventSeq: 5 }), /must have exactly one parent/u);
+    assert.throws(() => validateD65GraphPublication({ observation: { ...good, diffPaths: [graphRef, 'src/product.ts'] }, expectedAuthorityCommit: G, expectedCoveredEventSeq: 5 }), /changes a non-graph path/u);
+  });
+
+  void it('rejects a parent that is not the covered authority commit G and a covered-seq mismatch', () => {
+    // The graph names G in covered_authority_commit but H's actual sole parent
+    // is a different commit -> sole-parent-G violation.
+    const bytes = completeGraphBytes();
+    assert.throws(() => validateD65GraphPublication({ observation: { publicationCommit: H, publicationParents: [H, OID('5')], diffPaths: [graphRef], graphRootBytes: bytes, sealedGraphSha256: bytesSha256(bytes), graphRef }, expectedAuthorityCommit: G, expectedCoveredEventSeq: 5 }), /sole parent is not the covered authority commit G/u);
+    const bytes2 = completeGraphBytes();
+    assert.throws(() => validateD65GraphPublication({ observation: { publicationCommit: H, publicationParents: [H, G], diffPaths: [graphRef], graphRootBytes: bytes2, sealedGraphSha256: bytesSha256(bytes2), graphRef }, expectedAuthorityCommit: G, expectedCoveredEventSeq: 9 }), /covered_event_seq disagrees/u);
   });
 });
 

@@ -24,6 +24,7 @@ import { classifyCoordinationIntegrationConflict } from './integration-conflicts
 import { deriveD65BootstrapTransaction, type D65GitBlobObserver } from './d65-bootstrap-transaction.ts';
 import { assertD65AppendOnlyAttempt, assertD65TerminalEffectSetsExact, buildD65PreparedTerminalIntentV2, computeD65ObligationPartition, d65TerminalIntentId } from './d65-terminal-intent.ts';
 import { parseD65RunTerminalIntentV2, type D65RunTerminalIntentV2 } from './d65-semantic-graph.ts';
+import { d65SemanticGraphArtifactId, validateD65GraphPublication } from './d65-graph-publication.ts';
 import { assertAutopilotChildTerminalAcceptanceChain, AUTOPILOT_CHILD_TERMINAL_ACCEPTANCE_SCHEMA, parseAutopilotChildTerminalAcceptance } from './terminal-acceptance.ts';
 import { parseRunTerminalSha, parseUnitAttemptTarget, parseUnitFailureEvidenceFacts, parseUnitFailureEvidenceIngress, parseUnitMergeReservationFacts, validateReconciliationEvidenceDocument, validateReservationIntegrationEvidenceDocument, validateReservationValidationArtifactChain, validateReservationValidationEvidenceDocument, type HistoricalUnitFailureEvidenceProvenance } from './terminal-evidence.ts';
 import { AUTOPILOT_COORDINATOR_PROTOCOL_VERSION, COORDINATION_WORKTREE_STATES } from './types.ts';
@@ -4113,6 +4114,13 @@ export class CoordinatorStore {
       const documentSchemaVersion = payloadString(request.payload, 'document_schema_version');
       validateAuthoritativeCoordinationDocument(sourceType, documentSchemaVersion, bytes);
       const artifactId = payloadString(request.payload, 'artifact_id');
+      // D65-A2: a complete-graph root registers at its publication commit H with
+      // non-self-referential publication rules (sole-parent-G, graph-only diff,
+      // self-exclusion). The artifact id is the deterministic
+      // semantic-graph:<20-digit-sequence>; graph_commit is H = current HEAD.
+      if (documentSchemaVersion === 'autopilot.semantic_graph.v1') {
+        this.#validateD65GraphRegistration(sourceRoot, gitCommit, ref, evidence.sha256, bytes, artifactId);
+      }
       if (this.#db.prepare('SELECT entity_id FROM authoritative_artifacts WHERE repo_id=? AND entity_id=?').get(run.repo_id, artifactId) !== undefined) throw new CoordinationRuntimeError('stale-version', 'authoritative artifact id already exists');
       const seq = this.#nextEventSequence(run.repo_id);
       const artifact: CoordinationAuthoritativeArtifact = { schema_version: 'autopilot.authoritative_artifact.v1', artifact_id: artifactId, repo_id: run.repo_id, source_run: run.workstream_run, source_type: sourceType, source_scope: sourceScope, document_schema_version: documentSchemaVersion, git_commit: gitCommit, evidence, registered_event_seq: seq, version: 1 };
@@ -4434,6 +4442,34 @@ export class CoordinatorStore {
     this.#db.prepare('INSERT INTO run_terminal_intents(entity_id, repo_id, workstream_run, payload_json, version) VALUES(?, ?, ?, ?, ?)').run(intent.terminal_intent_id, intent.repo_id, intent.workstream_run, canonicalJson(intent), intent.version);
     this.#db.prepare("UPDATE runs SET status='merging', version=? WHERE repo_id=? AND workstream_run=?").run(nextRun.version, run.repo_id, run.workstream_run);
     return { sequence: seq, eventType: 'run-terminal-prepared', entityType: 'run-terminal-intent', entityId: intent.terminal_intent_id, payload: { run_terminal_intent: intent as unknown as Readonly<Record<string, unknown>>, run: nextRun } };
+  }
+
+  // D65-A2 non-self-referential publication validation at graph registration.
+  // The parsed graph names G (covered_authority_commit); we verify H (gitCommit)
+  // has exactly one parent equal to G and that the G..H diff touches only graph
+  // paths. The artifact id must be the deterministic sequence id.
+  #validateD65GraphRegistration(sourceRoot: string, publicationCommit: string, graphRef: string, sealedGraphSha256: `sha256:${string}`, graphRootBytes: Uint8Array, artifactId: string): void {
+    const parentListing = this.#gitQueryText(sourceRoot, { kind: 'rev-list-parents', revision: publicationCommit }, 'invalid-request', 'semantic graph publication parent inspection failed');
+    const publicationParents = (parentListing ?? '').trim().split(/\s+/u).filter((entry) => entry.length > 0);
+    const soleParent = publicationParents[1];
+    if (soleParent === undefined) throw new CoordinationRuntimeError('invalid-request', 'semantic-graph-artifact-invalid: publication commit H has no parent');
+    const diffResult = this.#gitQueryResult(sourceRoot, { kind: 'diff-paths', from: soleParent, to: publicationCommit, noRenames: true }, 'invalid-request', 'semantic graph publication diff inspection failed');
+    const diffPaths = new TextDecoder('utf-8', { fatal: true }).decode(diffResult.stdout).split('\0').filter((entry) => entry.length > 0);
+    // The graph itself names G (covered_authority_commit) and its covered E; the
+    // validator proves H's sole parent equals that G and the diff is graph-only.
+    const declared = parseJsonObject(new TextDecoder('utf-8', { fatal: true }).decode(graphRootBytes), 'semantic graph root');
+    if (typeof declared !== 'object' || declared === null || Array.isArray(declared)) throw new CoordinationRuntimeError('invalid-request', 'semantic graph root must be an object');
+    const declaredAuthority = (declared as Record<string, unknown>)['covered_authority_commit'];
+    const declaredCovered = (declared as Record<string, unknown>)['covered_event_seq'];
+    if (typeof declaredAuthority !== 'string') throw new CoordinationRuntimeError('invalid-request', 'semantic graph covered_authority_commit is invalid');
+    if (typeof declaredCovered !== 'number') throw new CoordinationRuntimeError('invalid-request', 'semantic graph covered_event_seq is invalid');
+    const facts = validateD65GraphPublication({
+      observation: { publicationCommit, publicationParents, diffPaths, graphRootBytes, sealedGraphSha256, graphRef },
+      expectedAuthorityCommit: declaredAuthority,
+      expectedCoveredEventSeq: declaredCovered,
+    });
+    if (facts.artifactId !== artifactId) throw new CoordinationRuntimeError('invalid-request', 'semantic-graph-artifact-invalid: artifact id is not the deterministic graph sequence id', [artifactId, facts.artifactId]);
+    if (facts.artifactId !== d65SemanticGraphArtifactId(facts.graph.graph_sequence)) throw new CoordinationRuntimeError('invalid-request', 'semantic-graph-artifact-invalid: graph sequence id mismatch');
   }
 
   #d65PriorIntentChain(repoId: string, workstreamRun: string): { readonly attempts: readonly D65RunTerminalIntentV2[] } {
