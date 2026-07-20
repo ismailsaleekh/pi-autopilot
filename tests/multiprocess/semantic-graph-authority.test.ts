@@ -299,6 +299,98 @@ function digestOf(intent: ReturnType<typeof parseD65RunTerminalIntentV2>): `sha2
   return `sha256:${createHash('sha256').update(`${canonicalJson(intent)}\n`, 'utf8').digest('hex')}`;
 }
 
+interface BootstrapCtx extends Ctx {
+  /** Accepted bootstrap artifact digest = first complete graph prior_graph_sha256. */
+  readonly priorGraphSha256: string;
+  /** Bootstrap attach receipt B = first complete graph prior_event_seq. */
+  readonly priorEventSeq: number;
+  /** Coordinator event sequence after bootstrap attach + session attach = E. */
+  readonly coveredEventSeq: number;
+}
+
+/**
+ * Attach a real D65 bootstrap-backed run in `repoRoot`: commit the 44-byte
+ * operator SPKI + a matching bootstrap envelope on a bootstrap branch, run the
+ * atomic `attach-run` bootstrap transaction (creating the deterministic
+ * `semantic-graph-bootstrap:<run>` artifact at receipt B=1), attach a session,
+ * and return the exact CAS values (bootstrap digest, attach receipt, and the
+ * current coordinator event sequence E) the first complete graph must bind. This
+ * makes the registration fixtures faithful to the store's authoritative
+ * sequence instead of synthetic prior/covered values.
+ */
+async function bootstrapAttach(client: CoordinatorClient, stateRoot: string, repoRoot: string, suffix: string): Promise<BootstrapCtx> {
+  const repoId = `graph-reg-${suffix}`;
+  const runId = `run-${suffix}`;
+  const autopilotId = `autopilot-${suffix}`;
+  const workstream = `work-${suffix}`;
+  const contentCommit = git(repoRoot, ['rev-parse', 'HEAD']);
+  const contentTree = git(repoRoot, ['rev-parse', 'HEAD^{tree}']);
+  const runResource: Readonly<Record<string, unknown>> = {
+    schema_version: 'autopilot.coordination_run_resource.v1', repo_id: repoId, workstream_run: runId,
+    source_repo: repoRoot, git_common_dir: join(repoRoot, '.git'), worktree_root: join(stateRoot, 'wt', repoId),
+    main_worktree_path: join(stateRoot, 'wt', repoId, 'active', runId, 'main'), runtime_root: join(stateRoot, 'wt', repoId, 'active', runId, 'main', '.pi', 'autopilot', workstream),
+    branch: `autopilot/${runId}`, target_branch: 'main', target_base_sha: contentCommit, origin_url: null,
+    started_at: '2026-07-19T00:00:00.000Z', version: 1,
+  };
+  const prospectiveRun: Readonly<Record<string, unknown>> = {
+    schema_version: 'autopilot.coordination_run.v1', repo_id: repoId, autopilot_id: autopilotId, workstream, workstream_run: runId,
+    coordination_authority: 'coordinator-edit-leases-v1', status: 'active', active_session_generation: 0, created_event_seq: 1, version: 1,
+  };
+  const { publicKey } = generateKeyPairSync('ed25519');
+  const spki = Buffer.from(publicKey.export({ format: 'der', type: 'spki' }) as unknown as Uint8Array);
+  const trustRef = `.pi/autopilot-trust/d65/program-${suffix}/operator-ed25519.spki`;
+  const trustSha256 = `sha256:${createHash('sha256').update(spki).digest('hex')}` as `sha256:${string}`;
+  const bootstrapRef = `.pi/autopilot-bootstrap/${runId}/bootstrap.json`;
+  const bootstrap = {
+    schema_version: 'autopilot.semantic_graph_bootstrap.v1', program_id: `program-${suffix}`, graph_sequence: 1, prior_graph_sha256: null,
+    repo_id: repoId, autopilot_id: autopilotId, workstream, workstream_run: runId,
+    run_timestamp: '2026-07-19T00:00:00.000Z', run_nonce: 'abcdef',
+    content_commit: contentCommit, content_tree: contentTree, package_commit: 'a'.repeat(40), package_tree: 'b'.repeat(40),
+    prospective_run: prospectiveRun, prospective_resource: runResource, covered_event_seq: 0,
+    trust_anchor_ref: trustRef, trust_anchor_sha256: trustSha256,
+    allowed_bootstrap_operations: [...D65_ALLOWED_BOOTSTRAP_OPERATIONS], created_at: '2026-07-19T00:00:01.000Z',
+  };
+  const bootstrapBytes = `${JSON.stringify(bootstrap, null, 2)}\n`;
+  const bootstrapSha256 = sha256(bootstrapBytes);
+  git(repoRoot, ['checkout', '-b', `autopilot/bootstrap/${runId}`, contentCommit]);
+  await mkdir(join(repoRoot, `.pi/autopilot-trust/d65/program-${suffix}`), { recursive: true });
+  await writeFile(join(repoRoot, trustRef), spki);
+  await mkdir(join(repoRoot, `.pi/autopilot-bootstrap/${runId}`), { recursive: true });
+  await writeFile(join(repoRoot, bootstrapRef), bootstrapBytes, 'utf8');
+  git(repoRoot, ['add', '.']);
+  git(repoRoot, ['commit', '-m', 'bootstrap overlay']);
+  const bootstrapCommit = git(repoRoot, ['rev-parse', 'HEAD']);
+  git(repoRoot, ['checkout', 'main']);
+  const runResponse = await client.mutate('attach-run', { repoId, workstreamRun: runId, sessionId: null, fencingGeneration: null, expectedVersion: 0, idempotencyKey: `attach-run-${suffix}` }, {
+    repo_key: repoId, canonical_root: repoRoot, git_common_dir: join(repoRoot, '.git'),
+    autopilot_id: autopilotId, workstream, coordination_authority: 'coordinator-edit-leases-v1', run_resource: runResource,
+    bootstrap_graph: {
+      schema_version: 'autopilot.semantic_graph_bootstrap.v1', ref: bootstrapRef, sha256: bootstrapSha256, byte_count: Buffer.byteLength(bootstrapBytes, 'utf8'),
+      git_commit: bootstrapCommit, covered_event_seq: 0, prospective_run: prospectiveRun, prospective_resource: runResource,
+      trust_anchor_ref: trustRef, trust_anchor_sha256: trustSha256,
+    },
+  });
+  const { event_type: _et, entity_type: _ent, entity_id: _eid, ...attachEffect } = runResponse.payload as Record<string, unknown>;
+  const attachResult = parseD65AttachRunResultV2(attachEffect);
+  const bootstrapEvidence = attachResult.bootstrap_artifact['evidence'] as Record<string, unknown>;
+  const priorGraphSha256 = bootstrapEvidence['sha256'] as string;
+  const priorEventSeq = attachResult.bootstrap_artifact['registered_event_seq'] as number;
+  const run = parseCoordinationRun(attachResult.run as unknown);
+  const token = createHash('sha256').update(`bootstrap-${suffix}`).digest('hex');
+  const sessionResponse = await client.mutate('attach-session', { repoId, workstreamRun: runId, sessionId: `session-${suffix}`, fencingGeneration: 1, expectedVersion: run.version, idempotencyKey: `attach-session-${suffix}` }, {
+    session_lease_id: `session-lease-${suffix}`, session_token: token, pid: process.pid, boot_id: `boot-${suffix}`, lease_expires_at: '2099-01-01T00:00:00.000Z', handoff_token: null,
+  });
+  const attachedRun = parseCoordinationRun(sessionResponse.payload['run']);
+  const session = parseCoordinationSessionLease(sessionResponse.payload['session']);
+  // E = the coordinator event sequence covered by the first complete graph =
+  // the highest committed event so far. attach-run committed receipt B=1 and
+  // attach-session committed event 2, so the session-attached committed event
+  // sequence is exactly the current head E (no coordinator event occurs between
+  // here and graph registration).
+  const coveredEventSeq = sessionResponse.committed_event_seq as number;
+  return { client, repoId, runId, sessionId: session.session_id, sessionLeaseId: session.session_lease_id, sessionToken: token, runVersion: attachedRun.version, priorGraphSha256, priorEventSeq, coveredEventSeq };
+}
+
 async function withHarness(run: (ctx: { client: CoordinatorClient; stateRoot: string; repoRoot: string; close: () => Promise<void> }) => Promise<void>): Promise<void> {
   const root = await mkdtemp(join(tmpdir(), 'pi-autopilot-terminal-v2-'));
   const repoRoot = join(root, 'repo');
@@ -438,7 +530,17 @@ void describe('D65 non-self-referential graph registration', () => {
     return { index, shard: { ref, bytes: shardBytes } };
   }
 
-  function completeGraph(authorityCommit: string, authorityTree: string, queueOverride?: Record<string, unknown>): { root: Record<string, unknown>; shards: readonly { ref: string; bytes: string }[] } {
+  // The prior-tuple + R=E+1 CAS fields the registration gate now binds to real
+  // store state. `bootstrapAttach` supplies these from the actual bootstrap
+  // artifact (prior digest / attach receipt) and the current coordinator event
+  // sequence so the first complete graph (sequence 2) is faithful.
+  interface GraphCas {
+    readonly priorGraphSha256: string;
+    readonly priorEventSeq: number;
+    readonly coveredEventSeq: number;
+  }
+
+  function completeGraph(authorityCommit: string, authorityTree: string, cas: GraphCas, queueOverride?: Record<string, unknown>): { root: Record<string, unknown>; shards: readonly { ref: string; bytes: string }[] } {
     const collections: Record<string, unknown> = {};
     for (const key of ['authorities', 'specs', 'statuses', 'receipts', 'audits', 'execution_commits', 'terminal_acceptances', 'unit_merge_intents', 'unit_merges', 'integration_analyses', 'quarantine', 'reconciliation', 'evidence']) collections[key] = { ...EMPTY };
     const ready = realQueueShard('unit_ready', 'unit-a');
@@ -448,8 +550,8 @@ void describe('D65 non-self-referential graph registration', () => {
     const core = (entry: { ref: string; schema: string | null; records: number | null; body: string }): Record<string, unknown> => ({ ref: entry.ref, git_mode: '100644', git_blob_oid: 'a'.repeat(40), sha256: sha(entry.body), byte_count: Buffer.byteLength(entry.body, 'utf8'), record_count: entry.records, document_schema_version: entry.schema });
     const root = {
       schema_version: 'autopilot.semantic_graph.v1', program_id: 'program-1', mode: 'complete', graph_sequence: 2,
-      prior_graph_sha256: `sha256:${'a'.repeat(64)}`, prior_event_seq: 1, repo_id: 'repo-graph-reg', autopilot_id: 'auto-g', workstream: 'work-g', workstream_run: 'run-g',
-      covered_authority_commit: authorityCommit, covered_authority_tree: authorityTree, covered_event_seq: 5,
+      prior_graph_sha256: cas.priorGraphSha256, prior_event_seq: cas.priorEventSeq, repo_id: 'repo-graph-reg', autopilot_id: 'auto-g', workstream: 'work-g', workstream_run: 'run-g',
+      covered_authority_commit: authorityCommit, covered_authority_tree: authorityTree, covered_event_seq: cas.coveredEventSeq,
       bootstrap_charter: { repository: {}, run: {}, run_resource: {}, mailbox_cursor: {}, bootstrap_graph: {}, bootstrap_artifact: {}, trust_anchor: {}, attach_event: {}, attach_result: {} },
       core: { mission: core(CORE_FILES.mission), master_plan: core(CORE_FILES.master_plan), state: core(CORE_FILES.state), decision_log: core(CORE_FILES.decision_log), events: core(CORE_FILES.events) },
       collections, work_items: { ...EMPTY }, bughunt: { ...EMPTY }, closure: null, queue_projection: queue, exceptions: { ...EMPTY }, coordinator_projection: { ...EMPTY }, created_at: '2026-07-19T00:00:00.000Z',
@@ -474,11 +576,11 @@ void describe('D65 non-self-referential graph registration', () => {
 
   void it('registers a graph-only publication with a queue projection that matches the authority state', async () => {
     await withHarness(async ({ client, stateRoot, repoRoot }) => {
-      const ctx = await attach(client, stateRoot, repoRoot, 'g');
+      const ctx = await bootstrapAttach(client, stateRoot, repoRoot, 'g');
       const authority = await commitAuthorityCore(repoRoot);
       const g = authority.commit;
       const graphRef = 'semantic-graphs/00000000000000000002/graph.json';
-      const built = completeGraph(g, authority.tree);
+      const built = completeGraph(g, authority.tree, ctx);
       const graphBytes = JSON.stringify(built.root);
       await mkdir(join(repoRoot, 'semantic-graphs', '00000000000000000002'), { recursive: true });
       await writeFile(join(repoRoot, graphRef), graphBytes, 'utf8');
@@ -498,12 +600,12 @@ void describe('D65 non-self-referential graph registration', () => {
 
   void it('rejects a queue projection whose index counts disagree with the authority state', async () => {
     await withHarness(async ({ client, stateRoot, repoRoot }) => {
-      const ctx = await attach(client, stateRoot, repoRoot, 'q');
+      const ctx = await bootstrapAttach(client, stateRoot, repoRoot, 'q');
       const authority = await commitAuthorityCore(repoRoot);
       const g = authority.commit;
       const graphRef = 'semantic-graphs/00000000000000000002/graph.json';
       // Claim unit_ready is empty though the state has one ready unit.
-      const graphBytes = JSON.stringify(completeGraph(g, authority.tree, { unit_ready: { ...EMPTY } }).root);
+      const graphBytes = JSON.stringify(completeGraph(g, authority.tree, ctx, { unit_ready: { ...EMPTY } }).root);
       await mkdir(join(repoRoot, 'semantic-graphs', '00000000000000000002'), { recursive: true });
       await writeFile(join(repoRoot, graphRef), graphBytes, 'utf8');
       git(repoRoot, ['add', '.']);
@@ -523,7 +625,7 @@ void describe('D65 non-self-referential graph registration', () => {
 
   void it('rejects a queue whose count is correct but whose loaded shard member identity is wrong', async () => {
     await withHarness(async ({ client, stateRoot, repoRoot }) => {
-      const ctx = await attach(client, stateRoot, repoRoot, 'm');
+      const ctx = await bootstrapAttach(client, stateRoot, repoRoot, 'm');
       const authority = await commitAuthorityCore(repoRoot);
       const g = authority.commit;
       const graphRef = 'semantic-graphs/00000000000000000002/graph.json';
@@ -532,7 +634,7 @@ void describe('D65 non-self-referential graph registration', () => {
       // check cannot catch. The loader/replayer must load the shard and reject
       // the member mismatch against the derived equation (unit-a).
       const wrong = realQueueShard('unit_ready', 'unit-zzz');
-      const built = completeGraph(g, authority.tree, { unit_ready: wrong.index });
+      const built = completeGraph(g, authority.tree, ctx, { unit_ready: wrong.index });
       const graphBytes = JSON.stringify(built.root);
       await mkdir(join(repoRoot, 'semantic-graphs', '00000000000000000002'), { recursive: true });
       await writeFile(join(repoRoot, graphRef), graphBytes, 'utf8');
@@ -554,13 +656,13 @@ void describe('D65 non-self-referential graph registration', () => {
 
   void it('rejects a queue whose loaded shard blob is missing at the publication commit', async () => {
     await withHarness(async ({ client, stateRoot, repoRoot }) => {
-      const ctx = await attach(client, stateRoot, repoRoot, 'n');
+      const ctx = await bootstrapAttach(client, stateRoot, repoRoot, 'n');
       const authority = await commitAuthorityCore(repoRoot);
       const g = authority.commit;
       const graphRef = 'semantic-graphs/00000000000000000002/graph.json';
       // Declare a real unit_ready index/shard but DO NOT commit the shard blob:
       // the loader must fail loudly because the declared shard is absent at H.
-      const built = completeGraph(g, authority.tree);
+      const built = completeGraph(g, authority.tree, ctx);
       const graphBytes = JSON.stringify(built.root);
       await mkdir(join(repoRoot, 'semantic-graphs', '00000000000000000002'), { recursive: true });
       await writeFile(join(repoRoot, graphRef), graphBytes, 'utf8');
@@ -582,11 +684,11 @@ void describe('D65 non-self-referential graph registration', () => {
 
   void it('advances the graph publication residue from publication-committed to registered on registration', async () => {
     await withHarness(async ({ client, stateRoot, repoRoot }) => {
-      const ctx = await attach(client, stateRoot, repoRoot, 'r');
+      const ctx = await bootstrapAttach(client, stateRoot, repoRoot, 'r');
       const authority = await commitAuthorityCore(repoRoot);
       const g = authority.commit;
       const graphRef = 'semantic-graphs/00000000000000000002/graph.json';
-      const built = completeGraph(g, authority.tree);
+      const built = completeGraph(g, authority.tree, ctx);
       const graphBytes = JSON.stringify(built.root);
       await mkdir(join(repoRoot, 'semantic-graphs', '00000000000000000002'), { recursive: true });
       await writeFile(join(repoRoot, graphRef), graphBytes, 'utf8');
@@ -621,12 +723,13 @@ void describe('D65 non-self-referential graph registration', () => {
 
   void it('rejects a graph whose covered_authority_tree does not match the authority commit tree', async () => {
     await withHarness(async ({ client, stateRoot, repoRoot }) => {
-      const ctx = await attach(client, stateRoot, repoRoot, 't');
+      const ctx = await bootstrapAttach(client, stateRoot, repoRoot, 't');
       const authority = await commitAuthorityCore(repoRoot);
       const g = authority.commit;
       const graphRef = 'semantic-graphs/00000000000000000002/graph.json';
-      // Wrong covered_authority_tree.
-      const graphBytes = JSON.stringify(completeGraph(g, 'd'.repeat(40)).root);
+      // Wrong covered_authority_tree (CAS fields stay faithful so the tree check
+      // is the sole failure).
+      const graphBytes = JSON.stringify(completeGraph(g, 'd'.repeat(40), ctx).root);
       await mkdir(join(repoRoot, 'semantic-graphs', '00000000000000000002'), { recursive: true });
       await writeFile(join(repoRoot, graphRef), graphBytes, 'utf8');
       git(repoRoot, ['add', '.']);
@@ -646,11 +749,11 @@ void describe('D65 non-self-referential graph registration', () => {
 
   void it('rejects a publication commit that also changes a non-graph product path', async () => {
     await withHarness(async ({ client, stateRoot, repoRoot }) => {
-      const ctx = await attach(client, stateRoot, repoRoot, 'p');
+      const ctx = await bootstrapAttach(client, stateRoot, repoRoot, 'p');
       const authority = await commitAuthorityCore(repoRoot);
       const g = authority.commit;
       const graphRef = 'semantic-graphs/00000000000000000002/graph.json';
-      const graphBytes = JSON.stringify(completeGraph(g, authority.tree).root);
+      const graphBytes = JSON.stringify(completeGraph(g, authority.tree, ctx).root);
       await mkdir(join(repoRoot, 'semantic-graphs', '00000000000000000002'), { recursive: true });
       await writeFile(join(repoRoot, graphRef), graphBytes, 'utf8');
       await writeFile(join(repoRoot, 'product.ts'), 'export const x = 1;\n', 'utf8');
@@ -666,6 +769,111 @@ void describe('D65 non-self-referential graph registration', () => {
         }),
         /changes a non-graph path/u,
       );
+    });
+  });
+
+  // Sub-part 2a: prior-tuple CAS + R=E+1. Each negative keeps everything else
+  // faithful and tampers exactly one bound field so the CAS is the sole cause.
+  async function publishAndRegister(client: CoordinatorClient, repoRoot: string, ctx: BootstrapCtx, cas: GraphCas): Promise<void> {
+    const authority = await commitAuthorityCore(repoRoot);
+    const graphRef = 'semantic-graphs/00000000000000000002/graph.json';
+    const built = completeGraph(authority.commit, authority.tree, cas);
+    const graphBytes = JSON.stringify(built.root);
+    await mkdir(join(repoRoot, 'semantic-graphs', '00000000000000000002'), { recursive: true });
+    await writeFile(join(repoRoot, graphRef), graphBytes, 'utf8');
+    await writeGraphShards(repoRoot, built.shards);
+    git(repoRoot, ['add', '.']);
+    git(repoRoot, ['commit', '-m', 'publish graph 2 (cas negative)']);
+    const h = git(repoRoot, ['rev-parse', 'HEAD']);
+    const graphSha = `sha256:${createHash('sha256').update(graphBytes).digest('hex')}` as `sha256:${string}`;
+    const status0 = await client.query('status', ctx.repoId, ctx.runId);
+    const runVersion = (status0.payload['runs'] as Array<Record<string, unknown>>)[0]?.['version'] as number;
+    await client.mutate('register-authoritative-artifact', { repoId: ctx.repoId, workstreamRun: ctx.runId, sessionId: ctx.sessionId, fencingGeneration: 1, expectedVersion: runVersion, idempotencyKey: 'register-graph-cas' }, {
+      artifact_id: 'semantic-graph:00000000000000000002', source_type: 'task', source_scope: 'repository', document_schema_version: 'autopilot.semantic_graph.v1', git_commit: h, ref: graphRef, sha256: graphSha, session_lease_id: ctx.sessionLeaseId, session_token: ctx.sessionToken,
+    });
+  }
+
+  void it('rejects a first complete graph whose covered_event_seq is not the current head (R=E+1)', async () => {
+    await withHarness(async ({ client, stateRoot, repoRoot }) => {
+      const ctx = await bootstrapAttach(client, stateRoot, repoRoot, 'e');
+      await assert.rejects(
+        () => publishAndRegister(client, repoRoot, ctx, { priorGraphSha256: ctx.priorGraphSha256, priorEventSeq: ctx.priorEventSeq, coveredEventSeq: ctx.coveredEventSeq + 1 }),
+        /semantic-graph-cas-conflict: graph covered_event_seq must equal the current coordinator event sequence/u,
+      );
+    });
+  });
+
+  void it('rejects a first complete graph whose prior_graph_sha256 is not the accepted bootstrap digest', async () => {
+    await withHarness(async ({ client, stateRoot, repoRoot }) => {
+      const ctx = await bootstrapAttach(client, stateRoot, repoRoot, 'd');
+      await assert.rejects(
+        () => publishAndRegister(client, repoRoot, ctx, { priorGraphSha256: `sha256:${'a'.repeat(64)}`, priorEventSeq: ctx.priorEventSeq, coveredEventSeq: ctx.coveredEventSeq }),
+        /semantic-graph-cas-conflict: first complete graph prior_graph_sha256 is not the accepted bootstrap digest/u,
+      );
+    });
+  });
+
+  void it('rejects a first complete graph whose prior_event_seq is not the bootstrap attach receipt', async () => {
+    await withHarness(async ({ client, stateRoot, repoRoot }) => {
+      const ctx = await bootstrapAttach(client, stateRoot, repoRoot, 'b');
+      await assert.rejects(
+        () => publishAndRegister(client, repoRoot, ctx, { priorGraphSha256: ctx.priorGraphSha256, priorEventSeq: ctx.priorEventSeq + 41, coveredEventSeq: ctx.coveredEventSeq }),
+        /semantic-graph-cas-conflict: first complete graph prior_event_seq is not the bootstrap attach receipt/u,
+      );
+    });
+  });
+
+  // Namespace-squatter regression: register-authoritative-artifact accepts a
+  // caller-chosen artifact_id, so a NON-graph authoritative artifact (here a
+  // valid mission) can be registered under a `semantic-graph:<20-digit>` id. The
+  // prior-graph CAS query must bind document_schema_version to the complete
+  // graph schema, not just the id prefix; otherwise the squatter would be
+  // mistaken for the prior graph and would break the legitimate first-graph
+  // (bootstrap-parented) registration. This proves the fix: the first real graph
+  // (sequence 2) still registers successfully despite the squatter.
+  void it('ignores a non-graph artifact squatting the semantic-graph:<seq> id and still accepts the first complete graph', async () => {
+    await withHarness(async ({ client, stateRoot, repoRoot }) => {
+      const ctx = await bootstrapAttach(client, stateRoot, repoRoot, 's');
+      // Commit a valid mission document and register it under a graph-shaped id.
+      const missionRef = 'runtime/mission.md';
+      const missionBody = '# Mission\n## Goal\ng\n## Non-goals / exclusions\nn\n## Perfect-quality bar\np\n## Definition of done\nd\n## Key constraints\nk\n## Current strategy summary\nc\n## Open questions\no\n';
+      await mkdir(join(repoRoot, 'runtime'), { recursive: true });
+      await writeFile(join(repoRoot, missionRef), missionBody, 'utf8');
+      git(repoRoot, ['add', '.']);
+      git(repoRoot, ['commit', '-m', 'mission squatter']);
+      const missionCommit = git(repoRoot, ['rev-parse', 'HEAD']);
+      const missionSha = `sha256:${createHash('sha256').update(missionBody).digest('hex')}` as `sha256:${string}`;
+      const status1 = await client.query('status', ctx.repoId, ctx.runId);
+      const version1 = (status1.payload['runs'] as Array<Record<string, unknown>>)[0]?.['version'] as number;
+      // The squatter uses a HIGHER graph-shaped id than the legitimate seq 2 so
+      // that, without the schema predicate, DESC would pick it as the prior.
+      await client.mutate('register-authoritative-artifact', { repoId: ctx.repoId, workstreamRun: ctx.runId, sessionId: ctx.sessionId, fencingGeneration: 1, expectedVersion: version1, idempotencyKey: 'register-mission-squatter' }, {
+        artifact_id: 'semantic-graph:00000000000000000009', source_type: 'mission', source_scope: 'repository', document_schema_version: 'autopilot.mission.v1', git_commit: missionCommit, ref: missionRef, sha256: missionSha, session_lease_id: ctx.sessionLeaseId, session_token: ctx.sessionToken,
+      });
+      // Now publish + register the legitimate first complete graph (sequence 2).
+      // It must chain to the BOOTSTRAP tuple (not the ...0009 squatter). The
+      // authority core is committed on top of the mission commit; covered E is
+      // unchanged because registering the mission emitted one coordinator event,
+      // so recompute the current head for the graph's covered_event_seq.
+      const status2 = await client.query('status', ctx.repoId, ctx.runId);
+      const missionRegisteredHead = ctx.coveredEventSeq + 1;
+      void status2;
+      const authority = await commitAuthorityCore(repoRoot);
+      const graphRef = 'semantic-graphs/00000000000000000002/graph.json';
+      const built = completeGraph(authority.commit, authority.tree, { priorGraphSha256: ctx.priorGraphSha256, priorEventSeq: ctx.priorEventSeq, coveredEventSeq: missionRegisteredHead });
+      const graphBytes = JSON.stringify(built.root);
+      await mkdir(join(repoRoot, 'semantic-graphs', '00000000000000000002'), { recursive: true });
+      await writeFile(join(repoRoot, graphRef), graphBytes, 'utf8');
+      await writeGraphShards(repoRoot, built.shards);
+      git(repoRoot, ['add', '.']);
+      git(repoRoot, ['commit', '-m', 'publish graph 2 over squatter']);
+      const h = git(repoRoot, ['rev-parse', 'HEAD']);
+      const graphSha = `sha256:${createHash('sha256').update(graphBytes).digest('hex')}` as `sha256:${string}`;
+      const version2 = (status2.payload['runs'] as Array<Record<string, unknown>>)[0]?.['version'] as number;
+      const registered = await client.mutate('register-authoritative-artifact', { repoId: ctx.repoId, workstreamRun: ctx.runId, sessionId: ctx.sessionId, fencingGeneration: 1, expectedVersion: version2, idempotencyKey: 'register-graph-over-squatter' }, {
+        artifact_id: 'semantic-graph:00000000000000000002', source_type: 'task', source_scope: 'repository', document_schema_version: 'autopilot.semantic_graph.v1', git_commit: h, ref: graphRef, sha256: graphSha, session_lease_id: ctx.sessionLeaseId, session_token: ctx.sessionToken,
+      });
+      assert.equal(registered.committed_event_seq !== null, true);
     });
   });
 });

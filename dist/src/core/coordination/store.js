@@ -23,7 +23,7 @@ import { classifyCoordinationIntegrationConflict } from "./integration-conflicts
 import { deriveD65BootstrapTransaction } from "./d65-bootstrap-transaction.js";
 import { assertD65AppendOnlyAttempt, assertD65TerminalEffectSetsExact, buildD65PreparedTerminalIntentV2, computeD65ObligationPartition, d65TerminalIntentId } from "./d65-terminal-intent.js";
 import { parseD65RunTerminalIntentV2 } from "./d65-semantic-graph.js";
-import { d65SemanticGraphArtifactId, validateD65GraphPublication } from "./d65-graph-publication.js";
+import { d65SemanticGraphArtifactId, d65SemanticGraphSequenceFromArtifactId, validateD65GraphPublication } from "./d65-graph-publication.js";
 import { advanceD65GraphPublicationResidue, readD65GraphPublicationResidue } from "./d65-graph-publication-residue.js";
 import { assertD65QueueProjectionCounts, assertD65QueueProjectionMembers, D65_QUEUE_KEYS } from "./d65-graph-queues.js";
 import { assertD65QueueMemberValues, d65ProjectionIdentities, loadD65CompleteGraph } from "./d65-graph-loader.js";
@@ -4295,7 +4295,7 @@ export class CoordinatorStore {
             // self-exclusion). The artifact id is the deterministic
             // semantic-graph:<20-digit-sequence>; graph_commit is H = current HEAD.
             if (documentSchemaVersion === 'autopilot.semantic_graph.v1') {
-                this.#validateD65GraphRegistration(sourceRoot, gitCommit, ref, evidence.sha256, bytes, artifactId);
+                this.#validateD65GraphRegistration(run.repo_id, run.workstream_run, sourceRoot, gitCommit, ref, evidence.sha256, bytes, artifactId);
             }
             if (this.#db.prepare('SELECT entity_id FROM authoritative_artifacts WHERE repo_id=? AND entity_id=?').get(run.repo_id, artifactId) !== undefined)
                 throw new CoordinationRuntimeError('stale-version', 'authoritative artifact id already exists');
@@ -4697,7 +4697,52 @@ export class CoordinatorStore {
             advanceD65GraphPublicationResidue(mainWorktreePath, { ...current, stage: 'registered', registration_event_seq: registrationEventSeq, updated_at: this.#clock.now().toISOString() });
         };
     }
-    #validateD65GraphRegistration(sourceRoot, publicationCommit, graphRef, sealedGraphSha256, graphRootBytes, artifactId) {
+    // D65-A5 loader/replayer sub-part 2a. The current repositories.event_seq is E
+    // (the sequence BEFORE `#nextEventSequence` allocates the registration event
+    // R); the plan requires R=E+1, so the graph's declared covered_event_seq must
+    // equal that current event_seq. The graph_sequence chains strictly: the first
+    // complete graph is sequence 2 whose prior_graph_sha256 is the accepted
+    // bootstrap digest and prior_event_seq is the bootstrap attach receipt B;
+    // every later graph is prior+1, names the prior accepted complete digest, and
+    // prior_event_seq equals that prior graph's registration R. Fork/gap/rollback
+    // and any prior-tuple mismatch are `semantic-graph-cas-conflict`.
+    #assertD65GraphSequenceCas(repoId, workstreamRun, graph) {
+        // R = E + 1: E is the store's current event sequence at validation time.
+        const currentEventSeq = sqlInteger(asRow(this.#db.prepare('SELECT event_seq FROM repositories WHERE repo_id=?').get(repoId), 'graph registration repository sequence'), 'event_seq');
+        if (graph.covered_event_seq !== currentEventSeq)
+            throw new CoordinationRuntimeError('invalid-request', 'semantic-graph-cas-conflict: graph covered_event_seq must equal the current coordinator event sequence so the registration event is exactly R=E+1', [`covered_event_seq=${String(graph.covered_event_seq)}`, `event_seq=${String(currentEventSeq)}`]);
+        // Resolve the highest accepted complete graph for this run (if any) and the
+        // bootstrap artifact (the prior authority of the first complete graph). The
+        // prior-graph predicate MUST bind the authoritative complete-graph document
+        // schema, not merely the id prefix: `register-authoritative-artifact`
+        // accepts a caller-chosen artifact_id, so a non-graph task artifact (e.g. a
+        // launch policy) could otherwise squat the `semantic-graph:<20-digit>`
+        // namespace and be mistaken for the prior graph. Requiring
+        // document_schema_version='autopilot.semantic_graph.v1' closes that fork.
+        const priorGraphRow = this.#db.prepare("SELECT * FROM authoritative_artifacts WHERE repo_id=? AND source_run=? AND entity_id LIKE 'semantic-graph:%' AND json_extract(payload_json, '$.document_schema_version')='autopilot.semantic_graph.v1' ORDER BY entity_id DESC LIMIT 1").get(repoId, workstreamRun);
+        if (priorGraphRow === undefined) {
+            // First complete graph: sequence must be exactly 2 and prior authority is
+            // the bootstrap artifact accepted by attach-run.
+            if (graph.graph_sequence !== 2)
+                throw new CoordinationRuntimeError('invalid-request', 'semantic-graph-cas-conflict: the first complete graph must be sequence 2', [`graph_sequence=${String(graph.graph_sequence)}`]);
+            const bootstrap = authoritativeArtifactFromRow(asRow(this.#db.prepare('SELECT * FROM authoritative_artifacts WHERE repo_id=? AND entity_id=?').get(repoId, `semantic-graph-bootstrap:${workstreamRun}`), 'graph registration bootstrap artifact'));
+            if (graph.prior_graph_sha256 !== bootstrap.evidence.sha256)
+                throw new CoordinationRuntimeError('invalid-request', 'semantic-graph-cas-conflict: first complete graph prior_graph_sha256 is not the accepted bootstrap digest', [graph.prior_graph_sha256, bootstrap.evidence.sha256]);
+            if (graph.prior_event_seq !== bootstrap.registered_event_seq)
+                throw new CoordinationRuntimeError('invalid-request', 'semantic-graph-cas-conflict: first complete graph prior_event_seq is not the bootstrap attach receipt', [`prior_event_seq=${String(graph.prior_event_seq)}`, `attach_receipt=${String(bootstrap.registered_event_seq)}`]);
+            return;
+        }
+        // Later complete graph: chain to the prior accepted complete graph tuple.
+        const prior = authoritativeArtifactFromRow(asRow(priorGraphRow, 'graph registration prior complete graph artifact'));
+        const priorSequence = d65SemanticGraphSequenceFromArtifactId(prior.artifact_id);
+        if (graph.graph_sequence !== priorSequence + 1)
+            throw new CoordinationRuntimeError('invalid-request', 'semantic-graph-cas-conflict: graph_sequence must be exactly the prior accepted graph sequence plus one', [`graph_sequence=${String(graph.graph_sequence)}`, `prior_sequence=${String(priorSequence)}`]);
+        if (graph.prior_graph_sha256 !== prior.evidence.sha256)
+            throw new CoordinationRuntimeError('invalid-request', 'semantic-graph-cas-conflict: prior_graph_sha256 is not the prior accepted complete graph digest', [graph.prior_graph_sha256, prior.evidence.sha256]);
+        if (graph.prior_event_seq !== prior.registered_event_seq)
+            throw new CoordinationRuntimeError('invalid-request', 'semantic-graph-cas-conflict: prior_event_seq is not the prior accepted graph registration event R', [`prior_event_seq=${String(graph.prior_event_seq)}`, `prior_R=${String(prior.registered_event_seq)}`]);
+    }
+    #validateD65GraphRegistration(repoId, workstreamRun, sourceRoot, publicationCommit, graphRef, sealedGraphSha256, graphRootBytes, artifactId) {
         const parentListing = this.#gitQueryText(sourceRoot, { kind: 'rev-list-parents', revision: publicationCommit }, 'invalid-request', 'semantic graph publication parent inspection failed');
         const publicationParents = (parentListing ?? '').trim().split(/\s+/u).filter((entry) => entry.length > 0);
         const soleParent = publicationParents[1];
@@ -4725,6 +4770,13 @@ export class CoordinatorStore {
             throw new CoordinationRuntimeError('invalid-request', 'semantic-graph-artifact-invalid: artifact id is not the deterministic graph sequence id', [artifactId, facts.artifactId]);
         if (facts.artifactId !== d65SemanticGraphArtifactId(facts.graph.graph_sequence))
             throw new CoordinationRuntimeError('invalid-request', 'semantic-graph-artifact-invalid: graph sequence id mismatch');
+        // D65-A5 loader/replayer sub-part 2a: bind the graph identity to the store's
+        // authoritative sequence. The plan requires R=E+1 (the registration event R
+        // is exactly the graph's covered E plus one), a strict graph_sequence chain,
+        // and prior-tuple CAS against the highest accepted graph/bootstrap artifact
+        // (fork/gap/rollback are `semantic-graph-cas-conflict`). Root/G/H shape or
+        // queue counts alone are never acceptance.
+        this.#assertD65GraphSequenceCas(repoId, workstreamRun, facts.graph);
         // Load and verify the authority tree + all five core blobs from G, then
         // prove the graph's queue-projection index counts equal the derived queue
         // equations from the authority state blob.

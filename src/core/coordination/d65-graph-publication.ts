@@ -15,6 +15,23 @@ export function d65SemanticGraphArtifactId(graphSequence: number): string {
   return `semantic-graph:${String(graphSequence).padStart(20, '0')}`;
 }
 
+/**
+ * The exact complete-graph sequence encoded in a `semantic-graph:<20-digit>`
+ * artifact id. The suffix must be exactly 20 ASCII digits decoding to a safe
+ * integer >= 2 whose canonical padded id round-trips; any other shape is a
+ * loud failure (never a silent parse-and-continue).
+ */
+export function d65SemanticGraphSequenceFromArtifactId(artifactId: string): number {
+  const prefix = 'semantic-graph:';
+  if (!artifactId.startsWith(prefix)) throw new CoordinationRuntimeError('invalid-request', 'semantic graph artifact id lacks the deterministic prefix', [artifactId]);
+  const suffix = artifactId.slice(prefix.length);
+  if (!/^[0-9]{20}$/u.test(suffix)) throw new CoordinationRuntimeError('invalid-request', 'semantic graph artifact id suffix is not exactly 20 digits', [artifactId]);
+  const sequence = Number(suffix);
+  if (!Number.isSafeInteger(sequence) || sequence < 2) throw new CoordinationRuntimeError('invalid-request', 'semantic graph artifact id sequence is out of range', [artifactId]);
+  if (d65SemanticGraphArtifactId(sequence) !== artifactId) throw new CoordinationRuntimeError('invalid-request', 'semantic graph artifact id is not the canonical padded form', [artifactId]);
+  return sequence;
+}
+
 /** The frozen graph publication path prefix for a sequence. */
 export function d65GraphPathPrefix(graphSequence: number): string {
   return `semantic-graphs/${String(graphSequence).padStart(20, '0')}/`;
