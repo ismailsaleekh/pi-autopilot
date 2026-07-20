@@ -187,6 +187,129 @@ void describe('D58 streaming recursive ls-tree query', () => {
       assert.equal(records[0]?.object_type, 'blob');
     });
   });
+
+  void it('enforces the finite entry ceiling with git-stream-entry-overflow, not just the safe-integer guard', async () => {
+    await withTempRepo(async (repoRoot) => {
+      // Three tracked blobs; a tightening-only entry ceiling of 2 must reject the
+      // third record loudly. The frozen 500k ceiling is unreachable in a unit
+      // test, so the tightening seam proves the real comparison exists (the bug
+      // was that only checkedAdd's safe-integer bound applied and the finite
+      // GIT_STREAM_ENTRY_MAX ceiling was never compared).
+      await writeFile(join(repoRoot, 'a.txt'), 'a\n');
+      await writeFile(join(repoRoot, 'b.txt'), 'b\n');
+      await writeFile(join(repoRoot, 'c.txt'), 'c\n');
+      git(repoRoot, ['add', '.']);
+      git(repoRoot, ['commit', '-m', 'three']);
+      const commit = headCommit(repoRoot);
+      let delivered = 0;
+      await assert.rejects(
+        () => runGitStreamingLsTree({ commit, cwd: repoRoot, maxEntries: 2, onRecord: () => { delivered += 1; } }),
+        (error: unknown) => error instanceof GitStreamingQueryError && error.code === 'git-stream-entry-overflow',
+      );
+      // The first two records were delivered before the third tripped the cap.
+      assert.equal(delivered, 2);
+      // The same three-entry tree streams cleanly under the frozen ceiling.
+      const records: GitLsTreeStreamRecord[] = [];
+      const summary = await runGitStreamingLsTree({ commit, cwd: repoRoot, onRecord: (record) => { records.push(record); } });
+      assert.equal(summary.entry_count, 3);
+      assert.equal(records.length, 3);
+    });
+  });
+
+  void it('enforces the finite cumulative path-byte ceiling with git-stream-path-overflow', async () => {
+    await withTempRepo(async (repoRoot) => {
+      // Two 9-byte paths => 18 cumulative path bytes. The ceiling is cumulative
+      // across the whole stream (not per record), so a tightening ceiling of 8
+      // rejects at the first record and a ceiling of 17 rejects at the second.
+      await writeFile(join(repoRoot, 'alpha.txt'), 'a\n');
+      await writeFile(join(repoRoot, 'bravo.txt'), 'b\n');
+      git(repoRoot, ['add', '.']);
+      git(repoRoot, ['commit', '-m', 'two']);
+      const commit = headCommit(repoRoot);
+      await assert.rejects(
+        () => runGitStreamingLsTree({ commit, cwd: repoRoot, maxPathBytes: 8, onRecord: () => { } }),
+        (error: unknown) => error instanceof GitStreamingQueryError && error.code === 'git-stream-path-overflow',
+      );
+      let delivered = 0;
+      await assert.rejects(
+        () => runGitStreamingLsTree({ commit, cwd: repoRoot, maxPathBytes: 17, onRecord: () => { delivered += 1; } }),
+        (error: unknown) => error instanceof GitStreamingQueryError && error.code === 'git-stream-path-overflow',
+      );
+      // Only the first 9-byte path was delivered before the cumulative 18 tripped 17.
+      assert.equal(delivered, 1);
+      // The exact cumulative 18 bytes stays within a ceiling of 18.
+      const summary = await runGitStreamingLsTree({ commit, cwd: repoRoot, maxPathBytes: 18, onRecord: () => { } });
+      assert.equal(summary.path_bytes, 'alpha.txt'.length + 'bravo.txt'.length);
+      assert.equal(summary.entry_count, 2);
+    });
+  });
+
+  void it('enforces the per-record byte ceiling on a COMPLETE record, not only an in-progress one', async () => {
+    await withTempRepo(async (repoRoot) => {
+      // A single small blob produces one complete NUL-terminated ls-tree record
+      // (~50-60 bytes: mode type oid size TAB path NUL). Before the per-record
+      // fix, flushPending drained and delivered a COMPLETE record before the
+      // post-flush pendingBytes>RECORD_MAX check could fire, so a complete
+      // oversized record silently bypassed the ceiling (independent reviewer
+      // reproduced this with a real >1 MiB path). A tightening record ceiling
+      // below the record size must now reject the complete record BEFORE onRecord.
+      await writeFile(join(repoRoot, 'x.txt'), 'x\n');
+      git(repoRoot, ['add', '.']);
+      git(repoRoot, ['commit', '-m', 'one blob']);
+      const commit = headCommit(repoRoot);
+      let delivered = 0;
+      await assert.rejects(
+        () => runGitStreamingLsTree({ commit, cwd: repoRoot, maxRecordBytes: 20, onRecord: () => { delivered += 1; } }),
+        (error: unknown) => error instanceof GitStreamingQueryError && error.code === 'git-stream-record-overflow',
+      );
+      // The complete oversized record must be rejected BEFORE it is delivered.
+      assert.equal(delivered, 0);
+      // Measure the exact record size INCLUDING its terminal NUL from wire_bytes
+      // (a single-record stream is exactly the record + its terminal NUL).
+      const measured = await runGitStreamingLsTree({ commit, cwd: repoRoot, maxRecordBytes: GIT_STREAM_RECORD_MAX_BYTES, onRecord: () => { } });
+      const recordLenWithNul = measured.wire_bytes;
+      // The ceiling is on the NUL-INCLUSIVE record length: a ceiling one byte
+      // below it must reject (the D58 grammar counts the trailing NUL), and a
+      // ceiling exactly equal to it must accept.
+      await assert.rejects(
+        () => runGitStreamingLsTree({ commit, cwd: repoRoot, maxRecordBytes: recordLenWithNul - 1, onRecord: () => { } }),
+        (error: unknown) => error instanceof GitStreamingQueryError && error.code === 'git-stream-record-overflow',
+      );
+      const records: GitLsTreeStreamRecord[] = [];
+      const summary = await runGitStreamingLsTree({ commit, cwd: repoRoot, maxRecordBytes: recordLenWithNul, onRecord: (record) => { records.push(record); } });
+      assert.equal(summary.entry_count, 1);
+      assert.equal(records.length, 1);
+    });
+  });
+
+  void it('rejects a containment-ceiling override that would loosen or malform the frozen cap', async () => {
+    await withTempRepo(async (repoRoot) => {
+      git(repoRoot, ['commit', '--allow-empty', '-m', 'one']);
+      const commit = headCommit(repoRoot);
+      // Loosening the frozen entry ceiling is rejected as an invalid descriptor:
+      // the seam can only tighten containment, never weaken it.
+      await assert.rejects(
+        () => runGitStreamingLsTree({ commit, cwd: repoRoot, maxEntries: GIT_STREAM_ENTRY_MAX + 1, onRecord: () => { } }),
+        (error: unknown) => error instanceof GitStreamingQueryError && error.code === 'invalid-descriptor',
+      );
+      await assert.rejects(
+        () => runGitStreamingLsTree({ commit, cwd: repoRoot, maxPathBytes: GIT_STREAM_PATH_MAX_BYTES + 1, onRecord: () => { } }),
+        (error: unknown) => error instanceof GitStreamingQueryError && error.code === 'invalid-descriptor',
+      );
+      await assert.rejects(
+        () => runGitStreamingLsTree({ commit, cwd: repoRoot, maxEntries: 0, onRecord: () => { } }),
+        (error: unknown) => error instanceof GitStreamingQueryError && error.code === 'invalid-descriptor',
+      );
+      await assert.rejects(
+        () => runGitStreamingLsTree({ commit, cwd: repoRoot, maxPathBytes: 1.5, onRecord: () => { } }),
+        (error: unknown) => error instanceof GitStreamingQueryError && error.code === 'invalid-descriptor',
+      );
+      await assert.rejects(
+        () => runGitStreamingLsTree({ commit, cwd: repoRoot, maxRecordBytes: GIT_STREAM_RECORD_MAX_BYTES + 1, onRecord: () => { } }),
+        (error: unknown) => error instanceof GitStreamingQueryError && error.code === 'invalid-descriptor',
+      );
+    });
+  });
 });
 
 void describe('D58 streaming checked arithmetic', () => {

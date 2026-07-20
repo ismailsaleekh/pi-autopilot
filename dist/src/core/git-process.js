@@ -372,6 +372,24 @@ export class GitStreamingQueryError extends Error {
 function streamingOverflow(code, message) {
     return new GitStreamingQueryError(code, message);
 }
+/**
+ * Resolve a finite per-stream containment ceiling. The frozen constant is the
+ * production ceiling and the default. A caller-supplied override (used by the
+ * lowest-layer containment tests, mirroring the injectable `clock` seam) may
+ * only make the bound STRICTER: it must be a positive safe integer no greater
+ * than the frozen ceiling. A non-integer, non-positive, or loosening override
+ * fails loudly as an invalid descriptor so the seam can never weaken the
+ * contractual containment ceiling.
+ */
+function resolveStreamCap(override, frozenCeiling, label) {
+    if (override === undefined)
+        return frozenCeiling;
+    if (!Number.isSafeInteger(override) || override < 1)
+        throw new GitStreamingQueryError('invalid-descriptor', `git ls-tree ${label} ceiling override must be a positive safe integer`);
+    if (override > frozenCeiling)
+        throw new GitStreamingQueryError('invalid-descriptor', `git ls-tree ${label} ceiling override may only tighten the frozen ${String(frozenCeiling)} ceiling`);
+    return override;
+}
 export function checkedAdd(augend, addend, overflowCode) {
     if (!Number.isSafeInteger(augend) || !Number.isSafeInteger(addend) || augend < 0 || addend < 0) {
         throw streamingOverflow(overflowCode, `checked addition rejected a non-safe non-negative operand (${String(augend)} + ${String(addend)})`);
@@ -523,6 +541,9 @@ function stderrDiagnostic(acc, extra) {
  */
 export async function runGitStreamingLsTree(input) {
     const clock = input.clock ?? Date.now;
+    const entryMax = resolveStreamCap(input.maxEntries, GIT_STREAM_ENTRY_MAX, 'entry');
+    const pathMax = resolveStreamCap(input.maxPathBytes, GIT_STREAM_PATH_MAX_BYTES, 'path byte');
+    const recordMax = resolveStreamCap(input.maxRecordBytes, GIT_STREAM_RECORD_MAX_BYTES, 'record byte');
     const start = clock();
     let command;
     try {
@@ -626,9 +647,26 @@ export async function runGitStreamingLsTree(input) {
                 if (recordBytes.length === 0)
                     continue;
                 try {
+                    // A complete NUL-terminated record must itself be within the record
+                    // ceiling. The post-flush `pendingBytes` check only bounds an
+                    // in-progress (not-yet-terminated) record; without this per-record
+                    // check a complete oversized record whose terminal NUL arrives in the
+                    // same chunk would be drained (dropping pendingBytes) and delivered
+                    // before that check could fire, silently bypassing the ceiling. The
+                    // D58 record grammar is `<mode> <type> <oid> <size>\t<path><NUL>`, so
+                    // the record's full byte length INCLUDES its terminal NUL delimiter
+                    // (drainPending strips that NUL from `recordBytes`); the ceiling is on
+                    // that complete NUL-inclusive length, consistent with the in-progress
+                    // `pendingBytes` bound which counts the NUL bytes it holds.
+                    if (recordBytes.length + 1 > recordMax)
+                        throw streamingOverflow('git-stream-record-overflow', `git ls-tree record exceeded the ${String(recordMax)}-byte record ceiling`);
                     const record = parseStreamingRecord(recordBytes);
                     entryCount = checkedAdd(entryCount, 1, 'git-stream-entry-overflow');
+                    if (entryCount > entryMax)
+                        throw streamingOverflow('git-stream-entry-overflow', `git ls-tree entry count exceeded the ${String(entryMax)}-entry ceiling`);
                     pathBytes = checkedAdd(pathBytes, record.path_bytes.length, 'git-stream-path-overflow');
+                    if (pathBytes > pathMax)
+                        throw streamingOverflow('git-stream-path-overflow', `git ls-tree cumulative path bytes exceeded the ${String(pathMax)}-byte ceiling`);
                     if (record.object_type === 'blob' && record.size !== null)
                         objectTotal = checkedAdd(objectTotal, record.size, 'tracked-tree-total-overflow');
                     input.onRecord(record);
@@ -780,8 +818,8 @@ export async function runGitStreamingLsTree(input) {
                 pending.push(new Uint8Array(chunk));
                 pendingBytes = checkedAdd(pendingBytes, chunk.length, 'git-stream-record-overflow');
                 flushPending();
-                if (pendingBytes > GIT_STREAM_RECORD_MAX_BYTES)
-                    throw streamingOverflow('git-stream-record-overflow', `git ls-tree pending record exceeded the ${String(GIT_STREAM_RECORD_MAX_BYTES)}-byte record ceiling`);
+                if (pendingBytes > recordMax)
+                    throw streamingOverflow('git-stream-record-overflow', `git ls-tree pending record exceeded the ${String(recordMax)}-byte record ceiling`);
                 if (wireBytes > GIT_STREAM_WIRE_MAX_BYTES)
                     throw streamingOverflow('git-stream-wire-overflow', `git ls-tree wire output exceeded the ${String(GIT_STREAM_WIRE_MAX_BYTES)}-byte ceiling`);
             }
