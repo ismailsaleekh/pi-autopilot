@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { parseAutopilotMasterPlan, parseAutopilotUnitSpec } from '../contracts/index.ts';
 import { parseD65LaunchPolicy, parseD65CapacityDecision, parseD65SubscriptionProbe } from './d65-launch-policy.ts';
 import { parseD65CompleteGraph, parseD65RunTerminalIntentV2 } from './d65-semantic-graph.ts';
+import { parseD65ContinuationEvent, parseD65ParentLoss } from './d65-continuation.ts';
 import { CoordinatorClient } from './client.ts';
 import { parseCoordinationAdjudicationAssignment, parseCoordinationAuthoritativeArtifact, parseCoordinationContradictionAdjudication, parseCoordinationEscalation } from './contracts.ts';
 import { CoordinationRuntimeError } from './failures.ts';
@@ -198,6 +199,8 @@ const D65_TASK_DOCUMENT_PARSERS: Readonly<Record<string, (value: unknown) => unk
   'autopilot.subscription_probe.v1': parseD65SubscriptionProbe,
   'autopilot.semantic_graph.v1': parseD65CompleteGraph,
   'autopilot.run_terminal_intent.v2': parseD65RunTerminalIntentV2,
+  'autopilot.continuation_event.v1': parseD65ContinuationEvent,
+  'autopilot.parent_loss.v1': parseD65ParentLoss,
 });
 
 function parseJson(bytes: Uint8Array, label: string): unknown {

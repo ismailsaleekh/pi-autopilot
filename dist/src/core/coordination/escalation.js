@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { parseAutopilotMasterPlan, parseAutopilotUnitSpec } from "../contracts/index.js";
 import { parseD65LaunchPolicy, parseD65CapacityDecision, parseD65SubscriptionProbe } from "./d65-launch-policy.js";
 import { parseD65CompleteGraph, parseD65RunTerminalIntentV2 } from "./d65-semantic-graph.js";
+import { parseD65ContinuationEvent, parseD65ParentLoss } from "./d65-continuation.js";
 import { CoordinatorClient } from "./client.js";
 import { parseCoordinationAdjudicationAssignment, parseCoordinationAuthoritativeArtifact, parseCoordinationContradictionAdjudication, parseCoordinationEscalation } from "./contracts.js";
 import { CoordinationRuntimeError } from "./failures.js";
@@ -192,6 +193,8 @@ const D65_TASK_DOCUMENT_PARSERS = Object.freeze({
     'autopilot.subscription_probe.v1': parseD65SubscriptionProbe,
     'autopilot.semantic_graph.v1': parseD65CompleteGraph,
     'autopilot.run_terminal_intent.v2': parseD65RunTerminalIntentV2,
+    'autopilot.continuation_event.v1': parseD65ContinuationEvent,
+    'autopilot.parent_loss.v1': parseD65ParentLoss,
 });
 function parseJson(bytes, label) {
     try {

@@ -28,6 +28,12 @@ import {
   parseD65ProgramHeartbeat,
   parseD65SubscriptionProbe,
 } from './d65-launch-policy.ts';
+import {
+  D65_CONTINUATION_EVENT_SCHEMA,
+  D65_PARENT_LOSS_SCHEMA,
+  parseD65ContinuationEvent,
+  parseD65ParentLoss,
+} from './d65-continuation.ts';
 
 // D65-A1/A2/A3/A4 source/dist contract manifest (freeze §9.2/§9.5). Every D65
 // package schema is closed, versioned, size-bounded, parsed at the lowest
@@ -35,8 +41,10 @@ import {
 // single authoritative enumeration; the parity test proves the compiled dist
 // module exposes exactly the same closed set so no contract silently drifts.
 
-/** The two ownership classes for D65 package schemas (freeze §9.2). */
-export type D65SchemaOwner = 'graph-store-consumer' | 'cap-one-consumer';
+/** The ownership classes for D65 package schemas (freeze §9.2). Graph/failure
+ * hooks (continuation/parent-loss) are immutable task evidence, not a fifth
+ * consumer. */
+export type D65SchemaOwner = 'graph-store-consumer' | 'cap-one-consumer' | 'graph-failure-hook';
 
 export interface D65ContractManifestEntry {
   readonly schema_version: string;
@@ -66,6 +74,8 @@ export const D65_CONTRACT_MANIFEST: readonly D65ContractManifestEntry[] = Object
     { schema_version: D65_PROGRAM_HEARTBEAT_SCHEMA, owner: 'cap-one-consumer', parse: parseD65ProgramHeartbeat },
     { schema_version: D65_HEARTBEAT_ACCEPTANCE_RESULT_SCHEMA, owner: 'cap-one-consumer', parse: parseD65HeartbeatAcceptanceResult },
     { schema_version: D65_HEARTBEAT_HIGH_WATER_SCHEMA, owner: 'cap-one-consumer', parse: parseD65HeartbeatHighWater },
+    { schema_version: D65_CONTINUATION_EVENT_SCHEMA, owner: 'graph-failure-hook', parse: parseD65ContinuationEvent },
+    { schema_version: D65_PARENT_LOSS_SCHEMA, owner: 'graph-failure-hook', parse: parseD65ParentLoss },
   ] as const)
     .map((entry) => Object.freeze(entry))
     .sort((left, right) => (left.schema_version < right.schema_version ? -1 : left.schema_version > right.schema_version ? 1 : 0)),

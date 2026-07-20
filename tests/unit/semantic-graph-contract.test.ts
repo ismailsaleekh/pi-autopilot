@@ -47,6 +47,11 @@ import {
   isD65LegalWorkItemEdge,
 } from '../../src/core/coordination/d65-graph-queues.ts';
 import type { AutopilotState } from '../../src/core/contracts/types.ts';
+import {
+  parseD65ContinuationEvent,
+  parseD65ParentLoss,
+} from '../../src/core/coordination/d65-continuation.ts';
+import { validateAuthoritativeCoordinationDocument } from '../../src/core/coordination/escalation.ts';
 // The compiled dist manifest must expose the identical closed set (source/dist
 // parity, freeze §9.5). Importing the built .js proves it byte-for-contract.
 // @ts-expect-error - dist is emitted JavaScript without a .d.ts sidecar.
@@ -359,6 +364,66 @@ function stateFixture(units: Record<string, string>, workItems: Record<string, s
   } as AutopilotState;
 }
 
+void describe('D65 continuation event contract', () => {
+  const REF = (c: string): { ref: string; sha256: `sha256:${string}`; byte_count: number } => ({ ref: `authority/continuation/${c}.json`, sha256: DIGEST(c), byte_count: 128 });
+  function continuationFixture(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      schema_version: 'autopilot.continuation_event.v1', program_id: 'program-1', event_id: 'event-1', event_sequence: 1,
+      repo_id: 'repo-1', workstream_run: 'run-1', trigger: 'subscription-failure', class: 'provider-capacity-blocked',
+      provider: 'openai-codex', failed_spec_ref: REF('a'), failed_receipt_ref: REF('b'), unit_id: 'unit-1', attempt: 1,
+      session_lease_id: null, child_lease_id: 'child-1', observed_at: '2026-07-19T00:00:00.000Z', cooldown_until: '2026-07-19T00:15:00.000Z',
+      retry_ordinal: null, successor_id: null, evidence_refs: [], prior_graph_sha256: null, result_graph_sequence: null, operator_decision_ref: null, ...overrides,
+    };
+  }
+  void it('parses a subscription-failure continuation and binds provider/unit nullability', () => {
+    const parsed = parseD65ContinuationEvent(continuationFixture());
+    assert.equal(parsed.trigger, 'subscription-failure');
+    assert.equal(parsed.provider, 'openai-codex');
+  });
+  void it('rejects provider fields on a non-subscription trigger and unit fields on a non-unit trigger', () => {
+    assert.throws(() => parseD65ContinuationEvent(continuationFixture({ trigger: 'parent-loss', class: 'parent-recovering' })), /provider\/failed_spec_ref\/failed_receipt_ref are only present for subscription failures/u);
+    assert.throws(() => parseD65ContinuationEvent(continuationFixture({ trigger: 'other', class: 'continuation-unclassified', provider: null, failed_spec_ref: null, failed_receipt_ref: null })), /unit\/attempt\/child fields are only present for unit failures/u);
+    assert.throws(() => parseD65ContinuationEvent(continuationFixture({ trigger: 'other', class: 'coordinator-blocked', provider: null, failed_spec_ref: null, failed_receipt_ref: null, unit_id: null, attempt: null, child_lease_id: null })), /trigger `other` maps only to class `continuation-unclassified`/u);
+    assert.throws(() => parseD65ContinuationEvent(continuationFixture({ operator_decision_ref: 'x' })), /operator_decision_ref must be null under D65/u);
+  });
+});
+
+void describe('D65 parent loss contract', () => {
+  const REF = (c: string): { ref: string; sha256: `sha256:${string}`; byte_count: number } => ({ ref: `authority/${c}.json`, sha256: DIGEST(c), byte_count: 128 });
+  function parentLossFixture(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      schema_version: 'autopilot.parent_loss.v1', program_id: 'program-1', event_id: 'event-1', repo_id: 'repo-1', workstream_run: 'run-1',
+      lost_physical_session_file_identity: { path: '/state/session.json', device: 1, inode: 2, session_id: null },
+      lost_coordinator_session_identity: { session_lease_id: 'lease-old', generation: 1 },
+      successor_physical_session_file_identity: { path: '/state/session-2.json', device: 1, inode: 3, session_id: null },
+      successor_session_id: 'session-2', successor_session_lease_id: 'lease-new', successor_generation: 2, successor_pid: 4321, successor_boot_id: 'boot-2',
+      last_graph: REF('a'), last_policy: REF('b'), last_heartbeat: REF('c'), status_ref: REF('d'), doctor_ref: REF('e'),
+      observed_at: '2026-07-19T00:00:00.000Z', successor_budget: 1, operator_decision_ref: null, issued_at: '2026-07-19T00:00:01.000Z',
+      trust_anchor_ref: '.pi/autopilot-trust/d65/program-1/operator-ed25519.spki', trust_anchor_sha256: DIGEST('0'), signer_key_id: DIGEST('1'), signature: 'sigSIG_-', ...overrides,
+    };
+  }
+  void it('parses a signed parent-loss candidate with budget 1', () => {
+    const parsed = parseD65ParentLoss(parentLossFixture());
+    assert.equal(parsed.successor_budget, 1);
+    assert.equal(parsed.successor_generation, 2);
+  });
+  void it('rejects a non-1 budget, non-null operator decision, and padded signature', () => {
+    assert.throws(() => parseD65ParentLoss(parentLossFixture({ successor_budget: 2 })), /successor_budget must be exactly 1/u);
+    assert.throws(() => parseD65ParentLoss(parentLossFixture({ operator_decision_ref: 'x' })), /operator_decision_ref must be null under D65/u);
+    assert.throws(() => parseD65ParentLoss(parentLossFixture({ signature: 'sig=' })), /signature must be unpadded base64url/u);
+  });
+
+  void it('is admitted by the store authoritative-document validator as a task document', () => {
+    // The actual store consumer: register-authoritative-artifact -> this gate.
+    const parentLoss = parentLossFixture();
+    const bytes = new TextEncoder().encode(JSON.stringify(parentLoss));
+    assert.doesNotThrow(() => validateAuthoritativeCoordinationDocument('task', 'autopilot.parent_loss.v1', bytes));
+    // A malformed parent-loss (budget 2) is rejected as not schema-valid.
+    const badBytes = new TextEncoder().encode(JSON.stringify(parentLossFixture({ successor_budget: 2 })));
+    assert.throws(() => validateAuthoritativeCoordinationDocument('task', 'autopilot.parent_loss.v1', badBytes), /not schema-valid/u);
+  });
+});
+
 void describe('D65 complete-graph queue equations and transitions', () => {
   void it('derives the seven queue indexes from state and partitions the unit set', () => {
     const state = stateFixture({ a: 'ready', b: 'running', c: 'blocked', d: 'failed', e: 'completed', f: 'queued' }, { w1: 'audit-review', w2: 'validation-ready', w3: 'revalidation-ready', w4: 'planned' });
@@ -399,9 +464,11 @@ void describe('D65 source/dist contract manifest parity', () => {
     assert.deepEqual([...D65_CONTRACT_SCHEMA_VERSIONS], [
       'autopilot.attach_run_result.v2',
       'autopilot.capacity_decision.v1',
+      'autopilot.continuation_event.v1',
       'autopilot.graph_publication.v1',
       'autopilot.heartbeat_high_water.v1',
       'autopilot.launch_policy.v1',
+      'autopilot.parent_loss.v1',
       'autopilot.program_heartbeat.v1',
       'autopilot.program_heartbeat_acceptance_result.v1',
       'autopilot.run_terminal_intent.v2',
@@ -423,7 +490,7 @@ void describe('D65 source/dist contract manifest parity', () => {
   void it('binds every manifest entry to its exact lowest-layer parser and rejects unknown schemas', () => {
     for (const entry of D65_CONTRACT_MANIFEST) {
       assert.equal(d65ParserFor(entry.schema_version), entry.parse);
-      assert.equal(entry.owner === 'graph-store-consumer' || entry.owner === 'cap-one-consumer', true);
+      assert.equal(entry.owner === 'graph-store-consumer' || entry.owner === 'cap-one-consumer' || entry.owner === 'graph-failure-hook', true);
     }
     assert.throws(() => d65ParserFor('autopilot.not_a_schema.v9'), /no D65 contract parser is registered/u);
   });

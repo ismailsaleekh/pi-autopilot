@@ -913,3 +913,25 @@ export function parseD65AttachRunBootstrapGraphPayload(value: unknown): D65Attac
     trust_anchor_sha256: sha256Field(record, 'trust_anchor_sha256', label),
   };
 }
+
+// ---- {ref,sha256,byte_count} evidence ref (continuation/parent-loss) ---------
+
+export interface D65EvidenceRefWithCount {
+  readonly ref: string;
+  readonly sha256: `sha256:${string}`;
+  readonly byte_count: number;
+}
+
+/** Parse a closed `{ref,sha256,byte_count}` evidence reference. */
+export function parseD65EvidenceRefWithCount(value: unknown, label: string): D65EvidenceRefWithCount {
+  const record = object(value, label, ['ref', 'sha256', 'byte_count']);
+  return {
+    ref: repoRelativePath(record, 'ref', label, 1024),
+    sha256: sha256Field(record, 'sha256', label),
+    byte_count: integer(record, 'byte_count', label, 0),
+  };
+}
+
+export function parseD65NullableEvidenceRefWithCount(value: unknown, label: string): D65EvidenceRefWithCount | null {
+  return value === null ? null : parseD65EvidenceRefWithCount(value, label);
+}
