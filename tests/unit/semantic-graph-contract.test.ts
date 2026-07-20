@@ -25,6 +25,16 @@ import {
   parseD65TrustAnchorSpki,
   verifyD65Signature,
 } from '../../src/core/coordination/d65-trust.ts';
+import {
+  D65_BINARY_TRUST_ANCHOR_SCHEMA,
+  D65_CONTRACT_MANIFEST,
+  D65_CONTRACT_SCHEMA_VERSIONS,
+  d65ParserFor,
+} from '../../src/core/coordination/d65-contract-manifest.ts';
+// The compiled dist manifest must expose the identical closed set (source/dist
+// parity, freeze §9.5). Importing the built .js proves it byte-for-contract.
+// @ts-expect-error - dist is emitted JavaScript without a .d.ts sidecar.
+import { D65_CONTRACT_SCHEMA_VERSIONS as DIST_D65_CONTRACT_SCHEMA_VERSIONS } from '../../dist/src/core/coordination/d65-contract-manifest.js';
 
 const OID = (char: string): string => char.repeat(40);
 const DIGEST = (char: string): `sha256:${string}` => `sha256:${char.repeat(64)}` as const;
@@ -264,6 +274,41 @@ void describe('D65 complete graph root contract', () => {
     assert.throws(() => parseD65CompleteGraph({ ...completeFixture(), graph_sequence: 1 }), /graph_sequence must be a safe integer >= 2/u);
     assert.throws(() => parseD65CompleteGraph({ ...completeFixture(), mode: 'bootstrap-plan-only' }), /mode must equal complete/u);
     assert.throws(() => parseD65CompleteGraph({ ...completeFixture(), extra: true }), /unknown fields/u);
+  });
+});
+
+void describe('D65 source/dist contract manifest parity', () => {
+  void it('enumerates the exact closed set of D65 JSON schemas in sorted order', () => {
+    assert.deepEqual([...D65_CONTRACT_SCHEMA_VERSIONS], [
+      'autopilot.attach_run_result.v2',
+      'autopilot.capacity_decision.v1',
+      'autopilot.graph_publication.v1',
+      'autopilot.heartbeat_high_water.v1',
+      'autopilot.launch_policy.v1',
+      'autopilot.program_heartbeat.v1',
+      'autopilot.program_heartbeat_acceptance_result.v1',
+      'autopilot.run_terminal_intent.v2',
+      'autopilot.semantic_graph.v1',
+      'autopilot.semantic_graph_authority_shard.v1',
+      'autopilot.semantic_graph_bootstrap.v1',
+      'autopilot.semantic_graph_projection_shard.v1',
+      'autopilot.subscription_probe.v1',
+    ]);
+    // The one explicitly frozen binary contract is not a JSON schema.
+    assert.equal(D65_BINARY_TRUST_ANCHOR_SCHEMA, 'autopilot.operator_trust_anchor.v1');
+    assert.equal(D65_CONTRACT_SCHEMA_VERSIONS.includes(D65_BINARY_TRUST_ANCHOR_SCHEMA), false);
+  });
+
+  void it('exposes a byte-identical manifest in the compiled dist module', () => {
+    assert.deepEqual([...(DIST_D65_CONTRACT_SCHEMA_VERSIONS as readonly string[])], [...D65_CONTRACT_SCHEMA_VERSIONS]);
+  });
+
+  void it('binds every manifest entry to its exact lowest-layer parser and rejects unknown schemas', () => {
+    for (const entry of D65_CONTRACT_MANIFEST) {
+      assert.equal(d65ParserFor(entry.schema_version), entry.parse);
+      assert.equal(entry.owner === 'graph-store-consumer' || entry.owner === 'cap-one-consumer', true);
+    }
+    assert.throws(() => d65ParserFor('autopilot.not_a_schema.v9'), /no D65 contract parser is registered/u);
   });
 });
 
