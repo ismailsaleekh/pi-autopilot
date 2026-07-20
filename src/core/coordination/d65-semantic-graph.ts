@@ -14,7 +14,7 @@ import { CoordinationRuntimeError } from './failures.ts';
 // ---- shared bounded primitives (independent of contracts.ts to keep this a
 // self-contained lowest layer that both the store and tests can import) -------
 
-type JsonObject = Readonly<Record<string, unknown>>;
+export type JsonObject = Readonly<Record<string, unknown>>;
 
 const SHA256 = /^sha256:[a-f0-9]{64}$/u;
 const GIT_OID = /^[a-f0-9]{40}$/u;
@@ -762,7 +762,7 @@ export function parseD65ProjectionIndex(value: unknown, label: string): D65Proje
   return { entry_count: entryCount, total_bytes: totalBytes, sha256: digest, shards: Object.freeze(shards) };
 }
 
-const D65_CORE_KEYS = ['mission', 'master_plan', 'state', 'decision_log', 'events'] as const;
+export const D65_CORE_KEYS = ['mission', 'master_plan', 'state', 'decision_log', 'events'] as const;
 
 export interface D65CoreEntry {
   readonly ref: string;
@@ -787,12 +787,14 @@ function coreEntry(value: unknown, label: string): D65CoreEntry {
   };
 }
 
-const D65_COLLECTION_KEYS = [
+export const D65_COLLECTION_KEYS = [
   'authorities', 'specs', 'statuses', 'receipts', 'audits', 'execution_commits', 'terminal_acceptances',
   'unit_merge_intents', 'unit_merges', 'integration_analyses', 'quarantine', 'reconciliation', 'evidence',
 ] as const;
 
-const D65_QUEUE_KEYS = [
+export const D65_PROJECTION_INDEX_KEYS = ['work_items', 'bughunt', 'exceptions', 'coordinator_projection'] as const;
+
+export const D65_QUEUE_KEYS = [
   'unit_ready', 'unit_running', 'unit_blocked', 'unit_completed', 'unit_held', 'work_audit_review', 'work_validation_ready',
 ] as const;
 

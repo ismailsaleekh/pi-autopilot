@@ -25,7 +25,6 @@ import { deriveD65BootstrapTransaction, type D65GitBlobObserver } from './d65-bo
 import { assertD65AppendOnlyAttempt, assertD65TerminalEffectSetsExact, buildD65PreparedTerminalIntentV2, computeD65ObligationPartition, d65TerminalIntentId } from './d65-terminal-intent.ts';
 import { parseD65RunTerminalIntentV2, type D65CompleteGraph, type D65RunTerminalIntentV2 } from './d65-semantic-graph.ts';
 import { d65SemanticGraphArtifactId, d65SemanticGraphSequenceFromArtifactId, validateD65GraphPublication } from './d65-graph-publication.ts';
-import { advanceD65GraphPublicationResidue, readD65GraphPublicationResidue } from './d65-graph-publication-residue.ts';
 import { assertD65QueueProjectionCounts, assertD65QueueProjectionMembers, D65_QUEUE_KEYS } from './d65-graph-queues.ts';
 import { assertD65QueueMemberValues, d65ProjectionIdentities, loadD65CompleteGraph } from './d65-graph-loader.ts';
 import { parseAutopilotState, type AutopilotState } from '../contracts/index.ts';
@@ -4130,14 +4129,16 @@ export class CoordinatorStore {
       const artifact: CoordinationAuthoritativeArtifact = { schema_version: 'autopilot.authoritative_artifact.v1', artifact_id: artifactId, repo_id: run.repo_id, source_run: run.workstream_run, source_type: sourceType, source_scope: sourceScope, document_schema_version: documentSchemaVersion, git_commit: gitCommit, evidence, registered_event_seq: seq, version: 1 };
       this.#db.prepare('INSERT INTO authoritative_artifacts(entity_id, repo_id, source_run, payload_json, version) VALUES(?, ?, ?, ?, ?)').run(artifact.artifact_id, artifact.repo_id, artifact.source_run, canonicalJson(artifact), artifact.version);
       this.#persistEvidenceArtifact(run.repo_id, artifact.evidence, bytes, `authoritative ${sourceType}`, seq);
-      // D65-A2: registering a complete graph advances its publication saga
-      // residue to the terminal `registered` stage recording this exact R, so
-      // dispatch is no longer graph-publication-pending. The advance runs after
-      // the DB row insert as the final publication step (afterEventInserted).
-      const finalizeResidue = documentSchemaVersion === 'autopilot.semantic_graph.v1'
-        ? this.#d65GraphResidueFinalizer(run.repo_id, run.workstream_run, artifactId, gitCommit, seq)
-        : undefined;
-      return { sequence: seq, eventType: 'authoritative-artifact-registered', entityType: 'authoritative-artifact', entityId: artifact.artifact_id, payload: { authoritative_artifact: artifact }, ...(finalizeResidue === undefined ? {} : { afterEventInserted: finalizeResidue }) };
+      // D65-A5 point 1 (freeze §9.4): the graph-registration SQLite transaction
+      // inserts ONLY the exact artifact row, the `authoritative-artifact-
+      // registered` R event, the evidence blob, and the idempotency result, then
+      // COMMITs with NO residue filesystem mutation. The graph-publication saga
+      // residue advance `publication-committed -> registered` is the RUNTIME
+      // graph consumer's responsibility, performed ONLY after a committed
+      // response, or after response-loss recovery independently proves this exact
+      // immutable artifact/event/result (see lookupCommittedGraphRegistration).
+      // A rollback can never coexist with a registered residue.
+      return { sequence: seq, eventType: 'authoritative-artifact-registered', entityType: 'authoritative-artifact', entityId: artifact.artifact_id, payload: { authoritative_artifact: artifact } };
     });
   }
 
@@ -4455,25 +4456,62 @@ export class CoordinatorStore {
     return { sequence: seq, eventType: 'run-terminal-prepared', entityType: 'run-terminal-intent', entityId: intent.terminal_intent_id, payload: { run_terminal_intent: intent as unknown as Readonly<Record<string, unknown>>, run: nextRun } };
   }
 
-  // D65-A2 non-self-referential publication validation at graph registration.
-  // The parsed graph names G (covered_authority_commit); we verify H (gitCommit)
-  // has exactly one parent equal to G and that the G..H diff touches only graph
-  // paths. The artifact id must be the deterministic sequence id.
-  // Return a finalizer that advances the graph publication residue (if present)
-  // from publication-committed to registered recording this exact R. Absence is
-  // permitted (the saga residue is optional graph-consumer state); a residue at
-  // any other stage or bound to a different graph is terminal.
-  #d65GraphResidueFinalizer(repoId: string, workstreamRun: string, artifactId: string, publicationCommit: string, registrationEventSeq: number): (() => void) | undefined {
-    const resourceRow = this.#db.prepare('SELECT * FROM run_resources WHERE repo_id=? AND workstream_run=?').get(repoId, workstreamRun);
-    if (resourceRow === undefined) return undefined;
-    const mainWorktreePath = runResourceFromRow(resourceRow).main_worktree_path;
-    const current = readD65GraphPublicationResidue(mainWorktreePath);
-    if (current === null) return undefined;
-    if (current.artifact_id !== artifactId || current.publication_commit !== publicationCommit) throw new CoordinationRuntimeError('invalid-state', 'graph publication residue does not bind the registered graph artifact/commit', [current.artifact_id, artifactId]);
-    if (current.stage !== 'publication-committed') throw new CoordinationRuntimeError('invalid-state', `graph publication residue must be publication-committed before registration, found ${current.stage}`);
-    return () => {
-      advanceD65GraphPublicationResidue(mainWorktreePath, { ...current, stage: 'registered', registration_event_seq: registrationEventSeq, updated_at: this.#clock.now().toISOString() });
-    };
+  // D65-A5 point 1 (freeze §9.4) response-loss recovery. The runtime graph-
+  // publication saga, after submitting `register-authoritative-artifact` for the
+  // graph at publication commit H, may lose the response. Before advancing its
+  // residue `publication-committed -> registered` it must PROVE the immutable
+  // artifact/event/idempotency-result committed byte-identically, or that they
+  // are (consistently) absent so it retries the byte-identical register. This
+  // read-only, no-mutation lookup surfaces exactly that proof over the existing
+  // schema-13 rows (authoritative_artifacts + events + idempotency_results); it
+  // NEVER infers success and never soft-assumes a partial commit.
+  //
+  //  - present-and-consistent: returns `{ registrationEventSeq: R }` only when
+  //    the artifact row, its `authoritative-artifact-registered` event at R, and
+  //    the idempotency result all exist and HARD-equal git_commit===H,
+  //    evidence.sha256===sealed digest, and registered_event_seq===E+1.
+  //  - clean absence: returns `null` (caller retries the byte-identical request)
+  //    only when the artifact row AND its registration event AND idempotency
+  //    result are ALL absent for the graph identity.
+  //  - any partial or mismatch: throws `invalid-state` (terminal). A rollback can
+  //    never leave a half-committed registration, so a partial is always a
+  //    corrupt/forbidden state, never "assume committed".
+  lookupCommittedGraphRegistration(
+    repoId: string,
+    workstreamRun: string,
+    input: { readonly artifactId: string; readonly publicationCommit: string; readonly graphSha256: `sha256:${string}`; readonly coveredEventSeq: number },
+  ): { readonly registrationEventSeq: number } | null {
+    const expectedR = input.coveredEventSeq + 1;
+    const artifactRow = this.#db.prepare('SELECT * FROM authoritative_artifacts WHERE repo_id=? AND entity_id=?').get(repoId, input.artifactId);
+    // Locate the immutable registration event (event_type + entity binding) and
+    // its idempotency result independently of the artifact row so a half-written
+    // state (any one of the three present without the others) is provably
+    // terminal rather than silently treated as absent or committed.
+    const eventRow = this.#db.prepare("SELECT event_seq, idempotency_key, request_sha256 FROM events WHERE repo_id=? AND event_type='authoritative-artifact-registered' AND entity_type='authoritative-artifact' AND entity_id=?").get(repoId, input.artifactId);
+    if (artifactRow === undefined) {
+      // Clean absence requires the event to be absent too; a dangling event with
+      // no artifact row is a corrupt half-commit (never reachable under a single
+      // atomic transaction) and is terminal, never a soft retry.
+      if (eventRow !== undefined) throw new CoordinationRuntimeError('invalid-state', 'graph registration event exists without its committed authoritative artifact row', [input.artifactId]);
+      return null;
+    }
+    // The artifact row is present: EVERY bound field must HARD-equal the sealed
+    // publication tuple or the state is terminal (never null, never assume).
+    const artifact = authoritativeArtifactFromRow(asRow(artifactRow, `committed graph registration artifact ${input.artifactId}`));
+    if (artifact.document_schema_version !== 'autopilot.semantic_graph.v1') throw new CoordinationRuntimeError('invalid-state', 'committed registration lookup found a non-graph artifact under the graph artifact id', [input.artifactId, artifact.document_schema_version]);
+    if (artifact.source_run !== workstreamRun) throw new CoordinationRuntimeError('invalid-state', 'committed graph registration source run does not match the recovering run', [artifact.source_run, workstreamRun]);
+    if (artifact.git_commit !== input.publicationCommit) throw new CoordinationRuntimeError('invalid-state', 'committed graph registration git_commit does not match the sealed publication commit H', [artifact.git_commit, input.publicationCommit]);
+    if (artifact.evidence.sha256 !== input.graphSha256) throw new CoordinationRuntimeError('invalid-state', 'committed graph registration evidence digest does not match the sealed graph_sha256', [artifact.evidence.sha256, input.graphSha256]);
+    if (artifact.registered_event_seq !== expectedR) throw new CoordinationRuntimeError('invalid-state', 'committed graph registration event sequence is not exactly R=E+1', [`registered_event_seq=${String(artifact.registered_event_seq)}`, `expected_R=${String(expectedR)}`]);
+    if (eventRow === undefined) throw new CoordinationRuntimeError('invalid-state', 'committed graph registration artifact exists without its immutable registration event', [input.artifactId]);
+    const eventSeq = sqlInteger(eventRow, 'event_seq');
+    if (eventSeq !== expectedR) throw new CoordinationRuntimeError('invalid-state', 'committed graph registration event is not at R=E+1', [`event_seq=${String(eventSeq)}`, `expected_R=${String(expectedR)}`]);
+    const idempotencyKey = sqlString(eventRow, 'idempotency_key');
+    const resultRow = this.#db.prepare('SELECT committed_event_seq, request_sha256 FROM idempotency_results WHERE repo_id=? AND idempotency_key=?').get(repoId, idempotencyKey);
+    if (resultRow === undefined) throw new CoordinationRuntimeError('invalid-state', 'committed graph registration event exists without its immutable idempotency result', [input.artifactId, idempotencyKey]);
+    if (sqlInteger(resultRow, 'committed_event_seq') !== expectedR) throw new CoordinationRuntimeError('invalid-state', 'committed graph registration idempotency result does not commit exactly R=E+1', [`committed_event_seq=${String(sqlInteger(resultRow, 'committed_event_seq'))}`, `expected_R=${String(expectedR)}`]);
+    if (sqlString(resultRow, 'request_sha256') !== sqlString(eventRow, 'request_sha256')) throw new CoordinationRuntimeError('invalid-state', 'committed graph registration event and idempotency result bind different request digests', [input.artifactId]);
+    return { registrationEventSeq: expectedR };
   }
 
   // D65-A5 loader/replayer sub-part 2a. The current repositories.event_seq is E

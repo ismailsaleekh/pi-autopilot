@@ -59,6 +59,12 @@ import {
   loadD65CompleteGraph,
   type D65GraphBlobReader,
 } from '../../src/core/coordination/d65-graph-loader.ts';
+import {
+  buildD65CompleteGraph,
+  type D65AuthorityInput,
+  type D65GraphBody,
+  type D65GraphHeader,
+} from '../../src/core/coordination/d65-graph-producer.ts';
 // The compiled dist manifest must expose the identical closed set (source/dist
 // parity, freeze §9.5). Importing the built .js proves it byte-for-contract.
 // @ts-expect-error - dist is emitted JavaScript without a .d.ts sidecar.
@@ -657,5 +663,126 @@ void describe('D65 complete-graph loader/replayer', () => {
     core['events'] = { ...core['events'], byte_count: 536_870_913 };
     const graph = parseD65CompleteGraph(base);
     assert.throws(() => loadD65CompleteGraph(graph, reader({})), /aggregate referenced authority bytes exceed the 512 MiB ceiling/u);
+  });
+});
+
+void describe('D65 complete-graph producer round-trips with the loader', () => {
+  const OID3 = (char: string): string => char.repeat(40);
+  const DIGEST3 = (char: string): `sha256:${string}` => `sha256:${char.repeat(64)}` as const;
+
+  function header(graphSequence = 2): D65GraphHeader {
+    return {
+      program_id: 'program-1', repo_id: 'repo-1', autopilot_id: 'auto-1', workstream: 'kbg-finalize-fresh', workstream_run: 'run-1',
+      graph_sequence: graphSequence, prior_graph_sha256: DIGEST3('a'), prior_event_seq: 1,
+      covered_authority_commit: OID3('b'), covered_authority_tree: OID3('c'), covered_event_seq: 5,
+      created_at: '2026-07-19T00:00:00.000Z',
+      bootstrap_charter: { repository: {}, run: {}, run_resource: {}, mailbox_cursor: {}, bootstrap_graph: {}, bootstrap_artifact: {}, trust_anchor: {}, attach_event: {}, attach_result: {} },
+    };
+  }
+
+  function coreEntryFixture(schema: string | null, records: number | null, body: string): Record<string, unknown> {
+    return { ref: `runtime/${schema ?? 'mission'}.f`, git_mode: '100644', git_blob_oid: OID3('a'), sha256: bytesSha256(Buffer.from(body, 'utf8')), byte_count: Buffer.byteLength(body, 'utf8'), record_count: records, document_schema_version: schema };
+  }
+
+  function emptyBody(): D65GraphBody {
+    const collections = {} as Record<string, readonly D65AuthorityInput[]>;
+    for (const key of ['authorities', 'specs', 'statuses', 'receipts', 'audits', 'execution_commits', 'terminal_acceptances', 'unit_merge_intents', 'unit_merges', 'integration_analyses', 'quarantine', 'reconciliation', 'evidence']) collections[key] = [];
+    return {
+      core: {
+        mission: coreEntryFixture(null, null, '# m\n') as never,
+        master_plan: coreEntryFixture('autopilot.master_plan.v1', 1, '{}\n') as never,
+        state: coreEntryFixture('autopilot.state.v1', 1, '{}\n') as never,
+        decision_log: coreEntryFixture('autopilot.decision.v1', 1, '{}\n') as never,
+        events: coreEntryFixture('autopilot.event.v1', 1, '{}\n') as never,
+      } as never,
+      collections: collections as never,
+      projections: { work_items: [], bughunt: [], exceptions: [], coordinator_projection: [] } as never,
+      queues: { unit_ready: [], unit_running: [], unit_blocked: [], unit_completed: [], unit_held: [], work_audit_review: [], work_validation_ready: [] } as never,
+      closure: null,
+    };
+  }
+
+  function loaderReader(produced: { readonly shards: readonly { readonly ref: string; readonly bytes: Uint8Array }[] }): D65GraphBlobReader {
+    const map = new Map<string, Uint8Array>();
+    for (const shard of produced.shards) map.set(shard.ref, shard.bytes);
+    return (ref) => {
+      const bytes = map.get(ref);
+      if (bytes === undefined) throw new Error(`producer emitted no blob for ${ref}`);
+      return bytes;
+    };
+  }
+
+  void it('produces an all-empty graph the loader accepts (no shard reads, five core blobs)', () => {
+    const produced = buildD65CompleteGraph(header(), emptyBody());
+    // The produced root parses as autopilot.semantic_graph.v1.
+    const graph = parseD65CompleteGraph(produced.root);
+    // No shards emitted for an all-empty graph.
+    assert.equal(produced.shards.length, 0);
+    // The loader accepts the produced root + (no) shards.
+    const loaded = loadD65CompleteGraph(graph, loaderReader(produced));
+    assert.equal(loaded.aggregateReferencedEntries >= 5, true);
+    // Root ref lives under the graph prefix.
+    assert.equal(produced.rootRef, 'semantic-graphs/00000000000000000002/graph.json');
+    // Root bytes are exactly canonical JSON + LF.
+    assert.equal(new TextDecoder().decode(produced.rootBytes), `${canonicalJson(produced.root)}\n`);
+  });
+
+  void it('produces populated queue + authority + projection shards the loader round-trips member-for-member', () => {
+    const body = emptyBody();
+    const populated: D65GraphBody = {
+      ...body,
+      collections: { ...body.collections, specs: [
+        { identity: 'spec-b', ref: 'runtime/specs/spec-b.json', git_mode: '100644', git_blob_oid: OID3('2'), sha256: DIGEST3('2'), byte_count: 120, document_schema_version: 'autopilot.spec.v1' },
+        { identity: 'spec-a', ref: 'runtime/specs/spec-a.json', git_mode: '100644', git_blob_oid: OID3('1'), sha256: DIGEST3('1'), byte_count: 100, document_schema_version: 'autopilot.spec.v1' },
+      ] } as never,
+      queues: { ...body.queues, unit_ready: [
+        { identity: 'unit-2', kind: 'unit_ready', value: { identity: 'unit-2' } },
+        { identity: 'unit-1', kind: 'unit_ready', value: { identity: 'unit-1' } },
+      ] } as never,
+      projections: { ...body.projections, work_items: [
+        { identity: 'work-1', kind: 'work_items', value: { identity: 'work-1', state: 'planned' } },
+      ] } as never,
+    };
+    const produced = buildD65CompleteGraph(header(), populated);
+    const graph = parseD65CompleteGraph(produced.root);
+    const loaded = loadD65CompleteGraph(graph, loaderReader(produced));
+    // Queue members are exposed sorted by identity and pass the {identity} value shape.
+    assert.deepEqual([...d65ProjectionIdentities(loaded, 'unit_ready')], ['unit-1', 'unit-2']);
+    assertD65QueueMemberValues(loaded, 'unit_ready');
+    // The authority collection round-trips its two sorted members.
+    assert.equal(loaded.authorities['specs']?.entries.length, 2);
+    assert.deepEqual(loaded.authorities['specs']?.entries.map((entry) => entry.identity), ['spec-a', 'spec-b']);
+    // The standalone projection round-trips.
+    assert.deepEqual([...d65ProjectionIdentities(loaded, 'work_items')], ['work-1']);
+  });
+
+  void it('rejects a queue member value that is not exactly {identity}', () => {
+    const body = emptyBody();
+    const bad: D65GraphBody = {
+      ...body,
+      queues: { ...body.queues, unit_ready: [{ identity: 'unit-1', kind: 'unit_ready', value: { identity: 'unit-1', extra: true } }] } as never,
+    };
+    assert.throws(() => buildD65CompleteGraph(header(), bad), /queue unit_ready member value must be exactly \{identity\}/u);
+  });
+
+  void it('rejects a duplicate authority identity and a projection kind mismatch', () => {
+    const body = emptyBody();
+    const dup: D65GraphBody = {
+      ...body,
+      collections: { ...body.collections, specs: [
+        { identity: 'spec-a', ref: 'runtime/specs/a.json', git_mode: '100644', git_blob_oid: OID3('1'), sha256: DIGEST3('1'), byte_count: 100, document_schema_version: null },
+        { identity: 'spec-a', ref: 'runtime/specs/a2.json', git_mode: '100644', git_blob_oid: OID3('2'), sha256: DIGEST3('2'), byte_count: 100, document_schema_version: null },
+      ] } as never,
+    };
+    assert.throws(() => buildD65CompleteGraph(header(), dup), /members must be strictly identity-sorted with no duplicate/u);
+    const mismatch: D65GraphBody = {
+      ...body,
+      projections: { ...body.projections, work_items: [{ identity: 'w', kind: 'bughunt', value: { identity: 'w' } }] } as never,
+    };
+    assert.throws(() => buildD65CompleteGraph(header(), mismatch), /member kind mismatch/u);
+  });
+
+  void it('rejects graph_sequence below 2', () => {
+    assert.throws(() => buildD65CompleteGraph(header(1), emptyBody()), /graph_sequence must be a safe integer >= 2/u);
   });
 });

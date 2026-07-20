@@ -587,7 +587,7 @@ export function parseD65ProjectionIndex(value, label) {
     }
     return { entry_count: entryCount, total_bytes: totalBytes, sha256: digest, shards: Object.freeze(shards) };
 }
-const D65_CORE_KEYS = ['mission', 'master_plan', 'state', 'decision_log', 'events'];
+export const D65_CORE_KEYS = ['mission', 'master_plan', 'state', 'decision_log', 'events'];
 function coreEntry(value, label) {
     const record = object(value, label, ['ref', 'git_mode', 'git_blob_oid', 'sha256', 'byte_count', 'record_count', 'document_schema_version']);
     return {
@@ -600,11 +600,12 @@ function coreEntry(value, label) {
         document_schema_version: nullableStr(record, 'document_schema_version', label, 128),
     };
 }
-const D65_COLLECTION_KEYS = [
+export const D65_COLLECTION_KEYS = [
     'authorities', 'specs', 'statuses', 'receipts', 'audits', 'execution_commits', 'terminal_acceptances',
     'unit_merge_intents', 'unit_merges', 'integration_analyses', 'quarantine', 'reconciliation', 'evidence',
 ];
-const D65_QUEUE_KEYS = [
+export const D65_PROJECTION_INDEX_KEYS = ['work_items', 'bughunt', 'exceptions', 'coordinator_projection'];
+export const D65_QUEUE_KEYS = [
     'unit_ready', 'unit_running', 'unit_blocked', 'unit_completed', 'unit_held', 'work_audit_review', 'work_validation_ready',
 ];
 export function parseD65CompleteGraph(value) {

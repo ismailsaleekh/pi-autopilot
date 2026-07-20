@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { describe, it } from 'node:test';
 
 import { CoordinatorClient } from '../../src/core/coordination/client.ts';
+import { CoordinatorStore } from '../../src/core/coordination/store.ts';
 import { canonicalJson } from '../../src/core/coordination/canonical-json.ts';
 import { parseCoordinationRun, parseCoordinationSessionLease } from '../../src/core/coordination/contracts.ts';
 import { coordinatorRuntimePaths } from '../../src/core/coordination/runtime-paths.ts';
@@ -682,7 +683,7 @@ void describe('D65 non-self-referential graph registration', () => {
     });
   });
 
-  void it('advances the graph publication residue from publication-committed to registered on registration', async () => {
+  void it('commits graph registration WITHOUT advancing the residue (SR-1: residue stays publication-committed; the runtime saga advances it after the committed response)', async () => {
     await withHarness(async ({ client, stateRoot, repoRoot }) => {
       const ctx = await bootstrapAttach(client, stateRoot, repoRoot, 'r');
       const authority = await commitAuthorityCore(repoRoot);
@@ -714,11 +715,150 @@ void describe('D65 non-self-referential graph registration', () => {
       const registered = await client.mutate('register-authoritative-artifact', { repoId: ctx.repoId, workstreamRun: ctx.runId, sessionId: ctx.sessionId, fencingGeneration: 1, expectedVersion: runVersion, idempotencyKey: 'register-graph-r' }, {
         artifact_id: 'semantic-graph:00000000000000000002', source_type: 'task', source_scope: 'repository', document_schema_version: 'autopilot.semantic_graph.v1', git_commit: h, ref: graphRef, sha256: graphSha, session_lease_id: ctx.sessionLeaseId, session_token: ctx.sessionToken,
       });
+      // The store COMMITS the artifact + R event + idempotency result...
       assert.equal(registered.committed_event_seq !== null, true);
+      // ...but performs NO residue filesystem mutation (SR-1 / freeze §9.4): the
+      // residue is UNCHANGED at publication-committed with R still null. The
+      // runtime graph-publication saga (Lane A) is the sole owner of the
+      // publication-committed -> registered advance, and only after the committed
+      // response. A rollback can never coexist with a registered residue.
       const finalResidue = JSON.parse(await readFile(join(mainWorktreeSibling, '_graph-publication.json'), 'utf8')) as Record<string, unknown>;
-      assert.equal(finalResidue['stage'], 'registered');
-      assert.equal(finalResidue['registration_event_seq'], registered.committed_event_seq);
+      assert.equal(finalResidue['stage'], 'publication-committed');
+      assert.equal(finalResidue['registration_event_seq'], null);
     });
+  });
+
+  // SR-3 (P1): the register-authoritative-artifact idempotency key binds the
+  // exact payload tuple (artifact_id + git_commit=H + sha256=digest + covered E
+  // transitively via the sealed graph bytes), so a response-loss retry with the
+  // byte-identical request replays the SAME committed effect (no second
+  // registration, no residue), and a retry that changes any bound field under
+  // the same idempotency key is an idempotency-conflict, never a silent second
+  // registration. This is the exact contract Lane A's runtime saga relies on when
+  // it re-submits the identical register after a lost response.
+  void it('replays a byte-identical register idempotently (SR-3) and rejects a changed tuple under the same key as idempotency-conflict', async () => {
+    await withHarness(async ({ client, stateRoot, repoRoot }) => {
+      const ctx = await bootstrapAttach(client, stateRoot, repoRoot, 'i');
+      const authority = await commitAuthorityCore(repoRoot);
+      const g = authority.commit;
+      const graphRef = 'semantic-graphs/00000000000000000002/graph.json';
+      const built = completeGraph(g, authority.tree, ctx);
+      const graphBytes = JSON.stringify(built.root);
+      await mkdir(join(repoRoot, 'semantic-graphs', '00000000000000000002'), { recursive: true });
+      await writeFile(join(repoRoot, graphRef), graphBytes, 'utf8');
+      await writeGraphShards(repoRoot, built.shards);
+      git(repoRoot, ['add', '.']);
+      git(repoRoot, ['commit', '-m', 'publish graph 2 (idempotent register)']);
+      const h = git(repoRoot, ['rev-parse', 'HEAD']);
+      const graphSha = `sha256:${createHash('sha256').update(graphBytes).digest('hex')}` as `sha256:${string}`;
+      const status0 = await client.query('status', ctx.repoId, ctx.runId);
+      const runVersion = (status0.payload['runs'] as Array<Record<string, unknown>>)[0]?.['version'] as number;
+      const registerPayload = {
+        artifact_id: 'semantic-graph:00000000000000000002', source_type: 'task', source_scope: 'repository', document_schema_version: 'autopilot.semantic_graph.v1', git_commit: h, ref: graphRef, sha256: graphSha, session_lease_id: ctx.sessionLeaseId, session_token: ctx.sessionToken,
+      } as const;
+      const identity = { repoId: ctx.repoId, workstreamRun: ctx.runId, sessionId: ctx.sessionId, fencingGeneration: 1, expectedVersion: runVersion, idempotencyKey: 'register-graph-idem' } as const;
+      const first = await client.mutate('register-authoritative-artifact', identity, { ...registerPayload });
+      assert.equal(first.committed_event_seq !== null, true);
+      const committedR = first.committed_event_seq;
+      // Byte-identical replay (simulated response loss): SAME committed_event_seq,
+      // SAME payload effect, and the events table still holds exactly one
+      // registration event for this key (no second registration).
+      const replay = await client.mutate('register-authoritative-artifact', identity, { ...registerPayload });
+      assert.equal(replay.committed_event_seq, committedR);
+      assert.equal(canonicalJson(replay.payload['authoritative_artifact']), canonicalJson(first.payload['authoritative_artifact']));
+      // A changed bound field (a different publication commit H) under the SAME
+      // idempotency key is a loud idempotency-conflict, never a silent second
+      // registration. Publish a second, distinct graph-only commit to get a real
+      // different H that still resolves in the repo.
+      git(repoRoot, ['commit', '--allow-empty', '-m', 'a distinct later commit']);
+      const h2 = git(repoRoot, ['rev-parse', 'HEAD']);
+      assert.notEqual(h2, h);
+      await assert.rejects(
+        () => client.mutate('register-authoritative-artifact', identity, { ...registerPayload, git_commit: h2 }),
+        /idempotency key was reused with a different request/u,
+      );
+    });
+  });
+
+  // SR-2 (P0): the response-loss recovery lookup the runtime graph-publication
+  // saga (Lane A) calls after a lost register response. It is a read-only,
+  // no-mutation CoordinatorStore method (NOT a coordinator action) that proves
+  // the exact immutable artifact/event/idempotency result committed
+  // byte-identically (returns R=E+1), or that they are consistently absent
+  // (returns null so the caller retries the byte-identical register), and throws
+  // invalid-state on ANY partial/mismatch — it NEVER infers success. Here we
+  // register a REAL first complete graph through the coordinator, stop the
+  // server, and open a direct store exactly as the runtime saga's store gateway
+  // adapter does.
+  void it('surfaces the exact committed graph registration for response-loss recovery and fails closed on absence/mismatch (SR-2)', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pi-autopilot-graph-sr2-'));
+    const repoRoot = join(root, 'repo');
+    await mkdir(repoRoot, { recursive: true });
+    git(repoRoot, ['init', '-b', 'main']);
+    await writeFile(join(repoRoot, 'README.md'), 'base\n', 'utf8');
+    git(repoRoot, ['add', 'README.md']);
+    git(repoRoot, ['commit', '-m', 'base']);
+    const stateRoot = join(root, 'state');
+    const env: ProcessEnvLike = { ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: stateRoot };
+    const server = await startCoordinatorServer(coordinatorRuntimePaths(env));
+    const client = new CoordinatorClient({ env, autoStart: false });
+    let committedR: number;
+    let artifactId: string;
+    let publicationCommit: string;
+    let graphSha: `sha256:${string}`;
+    let coveredEventSeq: number;
+    let repoId: string;
+    let runId: string;
+    try {
+      const ctx = await bootstrapAttach(client, stateRoot, repoRoot, 'sr2');
+      repoId = ctx.repoId;
+      runId = ctx.runId;
+      coveredEventSeq = ctx.coveredEventSeq;
+      const authority = await commitAuthorityCore(repoRoot);
+      const graphRef = 'semantic-graphs/00000000000000000002/graph.json';
+      const built = completeGraph(authority.commit, authority.tree, ctx);
+      const graphBytes = JSON.stringify(built.root);
+      await mkdir(join(repoRoot, 'semantic-graphs', '00000000000000000002'), { recursive: true });
+      await writeFile(join(repoRoot, graphRef), graphBytes, 'utf8');
+      await writeGraphShards(repoRoot, built.shards);
+      git(repoRoot, ['add', '.']);
+      git(repoRoot, ['commit', '-m', 'publish graph 2 (sr2)']);
+      publicationCommit = git(repoRoot, ['rev-parse', 'HEAD']);
+      graphSha = `sha256:${createHash('sha256').update(graphBytes).digest('hex')}` as `sha256:${string}`;
+      artifactId = 'semantic-graph:00000000000000000002';
+      const status0 = await client.query('status', ctx.repoId, ctx.runId);
+      const runVersion = (status0.payload['runs'] as Array<Record<string, unknown>>)[0]?.['version'] as number;
+      const registered = await client.mutate('register-authoritative-artifact', { repoId: ctx.repoId, workstreamRun: ctx.runId, sessionId: ctx.sessionId, fencingGeneration: 1, expectedVersion: runVersion, idempotencyKey: 'register-graph-sr2' }, {
+        artifact_id: artifactId, source_type: 'task', source_scope: 'repository', document_schema_version: 'autopilot.semantic_graph.v1', git_commit: publicationCommit, ref: graphRef, sha256: graphSha, session_lease_id: ctx.sessionLeaseId, session_token: ctx.sessionToken,
+      });
+      assert.equal(registered.committed_event_seq !== null, true);
+      committedR = registered.committed_event_seq as number;
+    } finally {
+      await server.close();
+    }
+    // Open a direct store exactly as the runtime saga's store gateway adapter
+    // does (the server has released the writer guard).
+    const store = await CoordinatorStore.open(coordinatorRuntimePaths(env));
+    try {
+      // Committed-and-consistent: returns R=E+1.
+      const proven = store.lookupCommittedGraphRegistration(repoId, runId, { artifactId, publicationCommit, graphSha256: graphSha, coveredEventSeq });
+      assert.notEqual(proven, null);
+      assert.equal(proven?.registrationEventSeq, committedR);
+      assert.equal(proven?.registrationEventSeq, coveredEventSeq + 1);
+      // Clean absence: an unregistered graph id returns null (retry).
+      assert.equal(store.lookupCommittedGraphRegistration(repoId, runId, { artifactId: 'semantic-graph:00000000000000000003', publicationCommit, graphSha256: graphSha, coveredEventSeq: coveredEventSeq + 1 }), null);
+      // Terminal mismatch: wrong H, wrong digest, wrong E each throw invalid-state
+      // (never null, never assume committed).
+      assert.throws(() => store.lookupCommittedGraphRegistration(repoId, runId, { artifactId, publicationCommit: 'f'.repeat(40), graphSha256: graphSha, coveredEventSeq }), /git_commit does not match the sealed publication commit H/u);
+      assert.throws(() => store.lookupCommittedGraphRegistration(repoId, runId, { artifactId, publicationCommit, graphSha256: `sha256:${'0'.repeat(64)}`, coveredEventSeq }), /evidence digest does not match the sealed graph_sha256/u);
+      assert.throws(() => store.lookupCommittedGraphRegistration(repoId, runId, { artifactId, publicationCommit, graphSha256: graphSha, coveredEventSeq: coveredEventSeq + 5 }), /event sequence is not exactly R=E\+1/u);
+      // Terminal mismatch: a foreign recovering run cannot claim another run's
+      // registered graph.
+      assert.throws(() => store.lookupCommittedGraphRegistration(repoId, 'run-other', { artifactId, publicationCommit, graphSha256: graphSha, coveredEventSeq }), /source run does not match the recovering run/u);
+    } finally {
+      store.close();
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   void it('rejects a graph whose covered_authority_tree does not match the authority commit tree', async () => {

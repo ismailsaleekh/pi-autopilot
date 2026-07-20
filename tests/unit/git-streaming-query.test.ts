@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -8,14 +9,20 @@ import {
   GIT_STREAM_ENTRY_MAX,
   GIT_STREAM_PATH_MAX_BYTES,
   GIT_STREAM_RECORD_MAX_BYTES,
+  GIT_STREAM_TIMEOUT_MS,
   GIT_STREAM_WIRE_MAX_BYTES,
+  GitPlumbingError,
   GitStreamingQueryError,
   checkedAdd,
   checkedCeilMultiply,
   checkedMultiply,
+  gitPlumbingArgv,
+  runGitPlumbing,
   runGitStreamingLsTree,
+  type GitCommitIdentity,
   type GitLsTreeStreamRecord,
 } from '../../src/core/git-process.ts';
+import type { ChildProcessLite, ChildProcessReadablePipe, ChildProcessWritablePipe } from 'node:child_process';
 
 import { describe, it } from 'node:test';
 
@@ -310,6 +317,71 @@ void describe('D58 streaming recursive ls-tree query', () => {
       );
     });
   });
+
+  void it('surfaces the OBSERVED child PID (not null) when a PID exists but the spawn event never settles by the deadline', async () => {
+    // Finding B (D58 containment matrix): the contract says an unconfirmed spawn
+    // resolves to `spawn-unconfirmed` with `root_pid` equal to the OBSERVED PID
+    // if any else null. The local `pid` is only assigned inside the `spawn`
+    // settle-event handler; if the child exposes a PID on its handle but the
+    // `spawn` event never fires before the 30s execution deadline, the observed
+    // PID must still be surfaced for process-tree containment. This is otherwise
+    // nondeterministic against libuv, so it is proven with the injectable spawn
+    // seam + the injectable clock: a controlled child that carries `pid` but
+    // emits NO `spawn` event, and a clock that has already passed the execution
+    // deadline so the exec timer fires immediately. Every settle-once rule and
+    // the containment report path are the exact production code. The
+    // spawn-unconfirmed path performs NO termination, so the fake PID is never
+    // signalled.
+    await withTempRepo(async (repoRoot) => {
+      git(repoRoot, ['commit', '--allow-empty', '-m', 'one']);
+      const commit = headCommit(repoRoot);
+      const OBSERVED_PID = 424242;
+      const child = fakeUnsettledChild(OBSERVED_PID);
+      // A clock already past the 30000 ms execution deadline makes remainingMs(exec)
+      // resolve to 0 so the exec timer fires on the next tick with the spawn still
+      // unconfirmed (the fake never emits `spawn`).
+      let ticks = 0;
+      const clock = (): number => (ticks++ === 0 ? 0 : GIT_STREAM_TIMEOUT_MS + 1);
+      let caught: unknown = null;
+      try {
+        await runGitStreamingLsTree({ commit, cwd: repoRoot, clock, onRecord: () => { }, spawnChild: () => child.handle });
+      } catch (error) {
+        caught = error;
+      }
+      assert.ok(caught instanceof GitStreamingQueryError, 'an unconfirmed spawn must fail loudly');
+      const err = caught as GitStreamingQueryError;
+      assert.equal(err.code, 'git-process-containment-failed');
+      assert.equal(err.terminalState, 'spawn-unconfirmed');
+      // The crux of Finding B: root_pid is the OBSERVED handle PID, not null.
+      assert.equal(err.rootPid, OBSERVED_PID);
+    });
+  });
+
+  void it('reports root_pid null for an unconfirmed spawn when the handle exposes no observable PID', async () => {
+    // The paired negative: when no PID is observable on the handle either, the
+    // contract keeps root_pid null (no PID is invented). Same unsettled-spawn
+    // path, handle.pid === undefined. This case exercises the UNCHANGED `pid`
+    // path, so it passes with and without the Finding B fix (guarding the fix
+    // is scoped to the observed-PID branch only).
+    await withTempRepo(async (repoRoot) => {
+      git(repoRoot, ['commit', '--allow-empty', '-m', 'one']);
+      const commit = headCommit(repoRoot);
+      const child = fakeUnsettledChild(undefined);
+      let ticks = 0;
+      const clock = (): number => (ticks++ === 0 ? 0 : GIT_STREAM_TIMEOUT_MS + 1);
+      let caught: unknown = null;
+      try {
+        await runGitStreamingLsTree({ commit, cwd: repoRoot, clock, onRecord: () => { }, spawnChild: () => child.handle });
+      } catch (error) {
+        caught = error;
+      }
+      assert.ok(caught instanceof GitStreamingQueryError);
+      const err = caught as GitStreamingQueryError;
+      assert.equal(err.code, 'git-process-containment-failed');
+      assert.equal(err.terminalState, 'spawn-unconfirmed');
+      assert.equal(err.rootPid, null);
+    });
+  });
 });
 
 void describe('D58 streaming checked arithmetic', () => {
@@ -341,3 +413,176 @@ async function chmodReadWrite(path: string): Promise<void> {
   const { chmod } = await import('node:fs/promises');
   await chmod(path, 0o755);
 }
+
+/**
+ * A controlled `ChildProcessLite` for the D58 spawn-lifecycle containment tests:
+ * it carries a fixed `pid` (or undefined) but NEVER emits the `spawn` settle
+ * event, `data`, `error`, or `close`, modelling a child observed with a PID whose
+ * `spawn` event has not fired by the execution deadline. Its pipes and control
+ * methods are inert no-ops; the streaming lifecycle never reads its streams on
+ * the spawn-unconfirmed path (which performs no termination). Only the fields the
+ * production code actually touches are populated, expressed entirely with the
+ * package's existing `ChildProcessLite` type surface (no node type widening).
+ */
+function fakeUnsettledChild(pid: number | undefined): { readonly handle: ChildProcessLite } {
+  const readable: ChildProcessReadablePipe = { on: () => { } };
+  const writable: ChildProcessWritablePipe = { write: () => { }, end: () => { }, on: () => { } };
+  const handle: ChildProcessLite = {
+    stdin: writable,
+    stdout: readable,
+    stderr: readable,
+    killed: false,
+    pid,
+    exitCode: null,
+    kill: () => { },
+    unref: () => { },
+    // Never invokes any listener: no `spawn`, `error`, or `close` ever fires.
+    on: () => { },
+    once: () => { },
+  };
+  return { handle };
+}
+
+const IDENTITY: GitCommitIdentity = Object.freeze({ name: 'autopilot', email: 'autopilot@invalid', date: '1700000000 +0000' });
+
+const encoder = new TextEncoder();
+
+/** Assert an emitted oid is present and a 40-hex string, narrowing the type. */
+function requireOid(oid: string | null, label: string): string {
+  if (oid === null || !/^[0-9a-f]{40}$/u.test(oid)) throw new Error(`${label} must be a 40-hex object id (got ${String(oid)})`);
+  return oid;
+}
+
+void describe('D65 isolated-index Git plumbing', () => {
+  void it('builds a sole-parent G with the base tree plus exactly the graph blobs, without touching the shared index', async () => {
+    await withTempRepo(async (repoRoot) => {
+      // A base commit with a product file (which must survive into G's tree).
+      await writeFile(join(repoRoot, 'product.txt'), 'product content\n');
+      git(repoRoot, ['add', '.']);
+      git(repoRoot, ['commit', '-m', 'base']);
+      const base = git(repoRoot, ['rev-parse', 'HEAD']);
+      const baseTree = git(repoRoot, ['rev-parse', 'HEAD^{tree}']);
+      const indexFile = join(repoRoot, '..', `iso-${String(process.pid)}.index`);
+
+      // hash-object: write the two graph blobs.
+      const rootBytes = encoder.encode('{"schema":"graph-root"}\n');
+      const shardBytes = encoder.encode('{"schema":"graph-shard"}\n');
+      const rootOid = requireOid(runGitPlumbing({ descriptor: { kind: 'hash-object-write', bytes: rootBytes }, cwd: repoRoot, indexFile }).oid, 'root blob');
+      const shardOid = requireOid(runGitPlumbing({ descriptor: { kind: 'hash-object-write', bytes: shardBytes }, cwd: repoRoot, indexFile }).oid, 'shard blob');
+
+      // read-tree base -> update-index graph blobs -> write-tree.
+      assert.equal(runGitPlumbing({ descriptor: { kind: 'read-tree', tree: baseTree }, cwd: repoRoot, indexFile }).oid, null);
+      assert.equal(runGitPlumbing({
+        descriptor: {
+          kind: 'update-index-cacheinfo',
+          entries: [
+            { oid: rootOid, path: 'semantic-graphs/00000000000000000002/graph.json' },
+            { oid: shardOid, path: 'semantic-graphs/00000000000000000002/authorities/00000.json' },
+          ],
+        },
+        cwd: repoRoot,
+        indexFile,
+      }).oid, null);
+      const gTree = requireOid(runGitPlumbing({ descriptor: { kind: 'write-tree' }, cwd: repoRoot, indexFile }).oid, 'G tree');
+
+      // commit-tree sole parent = base.
+      const g = requireOid(runGitPlumbing({ descriptor: { kind: 'commit-tree', tree: gTree, parents: [base], message: 'graph authority G\n', identity: IDENTITY }, cwd: repoRoot, indexFile }).oid, 'G commit');
+
+      // G has exactly one parent and it is base.
+      const parents = git(repoRoot, ['rev-list', '--parents', '-n', '1', g]).split(/\s+/u);
+      assert.deepEqual(parents, [g, base]);
+      // G's diff vs base is exactly the two graph paths (product.txt preserved).
+      const diff = git(repoRoot, ['diff', '--name-only', base, g]).split('\n').filter((line) => line.length > 0).sort();
+      assert.deepEqual(diff, ['semantic-graphs/00000000000000000002/authorities/00000.json', 'semantic-graphs/00000000000000000002/graph.json']);
+      // product.txt is still present in G's tree (base tree preserved).
+      assert.equal(git(repoRoot, ['ls-tree', '--name-only', g, 'product.txt']), 'product.txt');
+      // The graph blobs in G are byte-exact to what we wrote.
+      assert.equal(git(repoRoot, ['cat-file', 'blob', `${g}:semantic-graphs/00000000000000000002/graph.json`]), '{"schema":"graph-root"}');
+
+      // The shared .git/index was never touched: HEAD status is still clean and
+      // the isolated index file lives outside the worktree.
+      assert.equal(git(repoRoot, ['status', '--porcelain=v1']), '');
+      assert.ok(existsSync(indexFile), 'the isolated index file exists outside the worktree');
+      // .git/index either matches the base commit or is absent-of-staged-graph:
+      // `git status` clean above already proves no graph paths were staged.
+    });
+  });
+
+  void it('builds a graph-only H with sole parent G and reproduces byte-identical commits under the fixed identity', async () => {
+    await withTempRepo(async (repoRoot) => {
+      await writeFile(join(repoRoot, 'product.txt'), 'product\n');
+      git(repoRoot, ['add', '.']);
+      git(repoRoot, ['commit', '-m', 'base']);
+      const base = git(repoRoot, ['rev-parse', 'HEAD']);
+      const baseTree = git(repoRoot, ['rev-parse', 'HEAD^{tree}']);
+      const indexFile = join(repoRoot, '..', `iso-h-${String(process.pid)}.index`);
+
+      const rootOid = requireOid(runGitPlumbing({ descriptor: { kind: 'hash-object-write', bytes: encoder.encode('root\n') }, cwd: repoRoot, indexFile }).oid, 'root blob');
+      runGitPlumbing({ descriptor: { kind: 'read-tree', tree: baseTree }, cwd: repoRoot, indexFile });
+      runGitPlumbing({ descriptor: { kind: 'update-index-cacheinfo', entries: [{ oid: rootOid, path: 'semantic-graphs/00000000000000000002/graph.json' }] }, cwd: repoRoot, indexFile });
+      const gTree = requireOid(runGitPlumbing({ descriptor: { kind: 'write-tree' }, cwd: repoRoot, indexFile }).oid, 'G tree');
+      const g1 = requireOid(runGitPlumbing({ descriptor: { kind: 'commit-tree', tree: gTree, parents: [base], message: 'G\n', identity: IDENTITY }, cwd: repoRoot, indexFile }).oid, 'G1');
+      const g2 = requireOid(runGitPlumbing({ descriptor: { kind: 'commit-tree', tree: gTree, parents: [base], message: 'G\n', identity: IDENTITY }, cwd: repoRoot, indexFile }).oid, 'G2');
+      // Deterministic: same tree/parent/message/identity => byte-identical commit id.
+      assert.equal(g1, g2);
+
+      // H is graph-only: its tree equals G's tree (no further authority change),
+      // sole parent G. commit-tree over the same tree with parent G.
+      const h = requireOid(runGitPlumbing({ descriptor: { kind: 'commit-tree', tree: gTree, parents: [g1], message: 'H\n', identity: IDENTITY }, cwd: repoRoot, indexFile }).oid, 'H');
+      const hParents = git(repoRoot, ['rev-list', '--parents', '-n', '1', h]).split(/\s+/u);
+      assert.deepEqual(hParents, [h, g1]);
+      // G..H diff is empty (graph-only publication commit carries no new tree change here).
+      assert.equal(git(repoRoot, ['diff', '--name-only', g1, h]), '');
+    });
+  });
+
+  void it('rejects malformed descriptors loudly (bad oid, bad path, empty entries, bad identity, missing parent)', async () => {
+    await withTempRepo(async (repoRoot) => {
+      git(repoRoot, ['commit', '--allow-empty', '-m', 'base']);
+      const base = git(repoRoot, ['rev-parse', 'HEAD']);
+      const baseTree = git(repoRoot, ['rev-parse', 'HEAD^{tree}']);
+      const indexFile = join(repoRoot, '..', `iso-neg-${String(process.pid)}.index`);
+      const rejects = (fn: () => void, note: string): void => {
+        assert.throws(fn, (error: unknown) => error instanceof GitPlumbingError && error.code === 'invalid-descriptor', note);
+      };
+      // Non-40-hex tree oid.
+      rejects(() => runGitPlumbing({ descriptor: { kind: 'read-tree', tree: 'HEAD' }, cwd: repoRoot, indexFile }), 'read-tree non-hex');
+      // Uppercase / abbreviated oid.
+      rejects(() => runGitPlumbing({ descriptor: { kind: 'read-tree', tree: baseTree.toUpperCase() }, cwd: repoRoot, indexFile }), 'read-tree uppercase');
+      // Empty cacheinfo entries.
+      rejects(() => runGitPlumbing({ descriptor: { kind: 'update-index-cacheinfo', entries: [] }, cwd: repoRoot, indexFile }), 'empty entries');
+      // Cacheinfo path with a comma.
+      rejects(() => runGitPlumbing({ descriptor: { kind: 'update-index-cacheinfo', entries: [{ oid: '0'.repeat(40), path: 'a,b.json' }] }, cwd: repoRoot, indexFile }), 'comma path');
+      // Absolute / traversal cacheinfo path.
+      rejects(() => runGitPlumbing({ descriptor: { kind: 'update-index-cacheinfo', entries: [{ oid: '0'.repeat(40), path: '/etc/passwd' }] }, cwd: repoRoot, indexFile }), 'absolute path');
+      rejects(() => runGitPlumbing({ descriptor: { kind: 'update-index-cacheinfo', entries: [{ oid: '0'.repeat(40), path: '../escape.json' }] }, cwd: repoRoot, indexFile }), 'traversal path');
+      // Duplicate cacheinfo path.
+      rejects(() => runGitPlumbing({ descriptor: { kind: 'update-index-cacheinfo', entries: [{ oid: '0'.repeat(40), path: 'a.json' }, { oid: '1'.repeat(40), path: 'a.json' }] }, cwd: repoRoot, indexFile }), 'dup path');
+      // commit-tree with no parents.
+      rejects(() => runGitPlumbing({ descriptor: { kind: 'commit-tree', tree: baseTree, parents: [], message: 'm', identity: IDENTITY }, cwd: repoRoot, indexFile }), 'no parent');
+      // commit-tree with malformed identity date.
+      rejects(() => runGitPlumbing({ descriptor: { kind: 'commit-tree', tree: baseTree, parents: [base], message: 'm', identity: { name: 'a', email: 'b', date: 'not-a-date' } }, cwd: repoRoot, indexFile }), 'bad date');
+      // Index-using operation with a non-absolute index file.
+      rejects(() => runGitPlumbing({ descriptor: { kind: 'write-tree' }, cwd: repoRoot, indexFile: 'relative.index' }), 'relative index');
+    });
+  });
+
+  void it('fails loudly (not silently) when git rejects the operation', async () => {
+    await withTempRepo(async (repoRoot) => {
+      const indexFile = join(repoRoot, '..', `iso-fail-${String(process.pid)}.index`);
+      // read-tree of a well-formed but non-existent tree oid must fail loud.
+      assert.throws(
+        () => runGitPlumbing({ descriptor: { kind: 'read-tree', tree: '0'.repeat(40) }, cwd: repoRoot, indexFile }),
+        (error: unknown) => error instanceof GitPlumbingError && error.code === 'unexpected-exit',
+      );
+    });
+  });
+
+  void it('exposes a stable argv for each plumbing descriptor', () => {
+    assert.deepEqual(gitPlumbingArgv({ kind: 'hash-object-write', bytes: new Uint8Array() }), ['hash-object', '-w', '--stdin']);
+    assert.deepEqual(gitPlumbingArgv({ kind: 'read-tree', tree: '0'.repeat(40) }), ['read-tree', '0'.repeat(40)]);
+    assert.deepEqual(gitPlumbingArgv({ kind: 'write-tree' }), ['write-tree']);
+    assert.deepEqual(gitPlumbingArgv({ kind: 'update-index-cacheinfo', entries: [{ oid: '0'.repeat(40), path: 'g.json' }] }), ['update-index', '--add', '--cacheinfo', `100644,${'0'.repeat(40)},g.json`]);
+    assert.deepEqual(gitPlumbingArgv({ kind: 'commit-tree', tree: '0'.repeat(40), parents: ['1'.repeat(40)], message: 'm', identity: IDENTITY }), ['commit-tree', '0'.repeat(40), '-p', '1'.repeat(40)]);
+  });
+});

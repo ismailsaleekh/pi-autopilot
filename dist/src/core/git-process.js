@@ -161,6 +161,72 @@ export function gitQueryArgv(descriptor) {
 export function gitMutationArgv(descriptor) {
     return Object.freeze([...mutationCommand(descriptor).argv]);
 }
+// --- Isolated-index plumbing command building + execution --------------------
+/** A 40-lowercase-hex object id (blob/tree/commit), validated at the boundary. */
+function gitObjectId(value, label) {
+    if (!/^[0-9a-f]{40}$/u.test(value))
+        throw new GitProcessDescriptorError(`${label} must be exactly 40 lowercase-hex characters`);
+    return value;
+}
+/** A repo-relative path usable in `update-index --cacheinfo`: bounded, NUL/comma/newline-free. */
+function cacheinfoPath(value, label) {
+    const path = repoPath(value, label);
+    if (path.includes(',') || path.includes('\n') || path.includes('\r'))
+        throw new GitProcessDescriptorError(`${label} must not contain a comma or newline`);
+    return path;
+}
+function commitIdentityEnv(identity) {
+    const name = atom(identity.name, 'commit identity name', true);
+    const email = atom(identity.email, 'commit identity email', true);
+    const date = atom(identity.date, 'commit identity date', true);
+    if (name.includes('\n') || email.includes('\n') || date.includes('\n'))
+        throw new GitProcessDescriptorError('commit identity fields must be single-line');
+    if (!/^[0-9]+ [+-][0-9]{4}$/u.test(date))
+        throw new GitProcessDescriptorError('commit identity date must be exactly `<unix-seconds> <±HHMM>`');
+    return {
+        GIT_AUTHOR_NAME: name, GIT_AUTHOR_EMAIL: email, GIT_AUTHOR_DATE: date,
+        GIT_COMMITTER_NAME: name, GIT_COMMITTER_EMAIL: email, GIT_COMMITTER_DATE: date,
+    };
+}
+function plumbingCommand(descriptor) {
+    switch (descriptor.kind) {
+        case 'hash-object-write':
+            return { argv: ['hash-object', '-w', '--stdin'], input: descriptor.bytes, env: {}, usesIndex: false };
+        case 'read-tree':
+            return { argv: ['read-tree', gitObjectId(descriptor.tree, 'read-tree tree')], input: null, env: {}, usesIndex: true };
+        case 'update-index-cacheinfo': {
+            if (descriptor.entries.length === 0)
+                throw new GitProcessDescriptorError('update-index requires at least one cacheinfo entry');
+            const seen = new Set();
+            const args = [];
+            for (const entry of descriptor.entries) {
+                const oid = gitObjectId(entry.oid, 'cacheinfo blob oid');
+                const path = cacheinfoPath(entry.path, 'cacheinfo path');
+                if (seen.has(path))
+                    throw new GitProcessDescriptorError(`cacheinfo path is duplicated: ${path}`);
+                seen.add(path);
+                // Mode is fixed 100644 (regular graph blob); the saga never publishes exec/symlink/gitlink modes.
+                args.push('--cacheinfo', `100644,${oid},${path}`);
+            }
+            return { argv: ['update-index', '--add', ...args], input: null, env: {}, usesIndex: true };
+        }
+        case 'write-tree':
+            return { argv: ['write-tree'], input: null, env: {}, usesIndex: true };
+        case 'commit-tree': {
+            const tree = gitObjectId(descriptor.tree, 'commit-tree tree');
+            if (descriptor.parents.length === 0)
+                throw new GitProcessDescriptorError('commit-tree requires at least one parent');
+            const parentArgs = [];
+            for (const parent of descriptor.parents) {
+                parentArgs.push('-p', gitObjectId(parent, 'commit-tree parent'));
+            }
+            return { argv: ['commit-tree', tree, ...parentArgs], input: new TextEncoder().encode(descriptor.message), env: commitIdentityEnv(descriptor.identity), usesIndex: true };
+        }
+    }
+}
+export function gitPlumbingArgv(descriptor) {
+    return Object.freeze([...plumbingCommand(descriptor).argv]);
+}
 function boundedDiagnostic(stdout, stderr, droppedBytes = 0) {
     let remaining = GIT_MUTATION_DIAGNOSTIC_BYTES;
     const retain = (value) => {
@@ -236,6 +302,86 @@ export function runGitQuery(input) {
     if (!command.acceptedExitCodes.includes(exitCode))
         throw new GitQueryError('unexpected-exit', input.descriptor.kind, `Git query exited with status ${String(exitCode)}`, boundedDiagnostic(stdout, stderr));
     return Object.freeze({ descriptor: input.descriptor.kind, exitCode, stdout, stderr, negative: command.negativeExitCodes.includes(exitCode) });
+}
+export class GitPlumbingError extends Error {
+    name = 'GitPlumbingError';
+    code;
+    descriptor;
+    diagnostic;
+    constructor(code, descriptor, message, diagnostic = '') {
+        super(`GitPlumbingError [${code}/${descriptor}]: ${message}`);
+        this.code = code;
+        this.descriptor = descriptor;
+        this.diagnostic = diagnostic;
+    }
+}
+/**
+ * Execute one typed isolated-index plumbing operation. `indexFile` MUST be an
+ * absolute path OUTSIDE the working tree (never `.git/index`); index-using
+ * operations run against exactly that isolated GIT_INDEX_FILE so the shared
+ * staged index is never read or written. hash-object / write-tree / commit-tree
+ * emit a single 40-hex object id validated before return; read-tree and
+ * update-index emit no object and return `oid: null`. Every failure is loud.
+ */
+export function runGitPlumbing(input) {
+    let command;
+    try {
+        command = plumbingCommand(input.descriptor);
+    }
+    catch (error) {
+        if (error instanceof GitProcessDescriptorError)
+            throw new GitPlumbingError('invalid-descriptor', input.descriptor.kind, error.message);
+        throw error;
+    }
+    if (command.usesIndex) {
+        try {
+            absolutePath(input.indexFile, 'isolated index file');
+        }
+        catch (error) {
+            if (error instanceof GitProcessDescriptorError)
+                throw new GitPlumbingError('invalid-descriptor', input.descriptor.kind, error.message);
+            throw error;
+        }
+    }
+    const result = spawnSync('git', command.argv, {
+        cwd: input.cwd,
+        env: {
+            ...process.env,
+            ...input.env,
+            ...command.env,
+            // The isolated index is bound ONLY for index-using operations; hash-object
+            // never reads an index, so it is left unbound there.
+            ...(command.usesIndex ? { GIT_INDEX_FILE: input.indexFile } : {}),
+            GIT_TERMINAL_PROMPT: '0',
+        },
+        ...(command.input === null ? {} : { input: command.input }),
+        timeout: input.timeoutMs ?? GIT_DEFAULT_QUERY_TIMEOUT_MS,
+        maxBuffer: GIT_QUERY_MAX_OUTPUT_BYTES + 1,
+    });
+    const stdout = new Uint8Array(result.stdout);
+    const stderr = new Uint8Array(result.stderr);
+    if (stdout.byteLength + stderr.byteLength > GIT_QUERY_MAX_OUTPUT_BYTES)
+        throw new GitPlumbingError('output-overflow', input.descriptor.kind, `Git plumbing exceeded the ${String(GIT_QUERY_MAX_OUTPUT_BYTES)}-byte retained output ceiling`, boundedDiagnostic(stdout, stderr));
+    if (result.error !== undefined) {
+        const code = queryErrorCode(result.error);
+        throw new GitPlumbingError(code === 'output-overflow' ? 'output-overflow' : code, input.descriptor.kind, result.error.message, boundedDiagnostic(stdout, stderr));
+    }
+    if (result.signal !== null)
+        throw new GitPlumbingError('signal', input.descriptor.kind, `Git plumbing ended by signal ${result.signal}`, boundedDiagnostic(stdout, stderr));
+    const exitCode = result.status ?? -1;
+    if (exitCode !== 0)
+        throw new GitPlumbingError('unexpected-exit', input.descriptor.kind, `Git plumbing exited with status ${String(exitCode)}`, boundedDiagnostic(stdout, stderr));
+    // read-tree / update-index emit no object id; their stdout must be empty.
+    const emitsOid = input.descriptor.kind === 'hash-object-write' || input.descriptor.kind === 'write-tree' || input.descriptor.kind === 'commit-tree';
+    if (!emitsOid) {
+        if (stdout.byteLength !== 0)
+            throw new GitPlumbingError('unexpected-exit', input.descriptor.kind, 'index plumbing operation unexpectedly produced stdout', boundedDiagnostic(stdout, stderr));
+        return Object.freeze({ descriptor: input.descriptor.kind, oid: null });
+    }
+    const text = new TextDecoder('utf-8', { fatal: true }).decode(stdout).trim();
+    if (!/^[0-9a-f]{40}$/u.test(text))
+        throw new GitPlumbingError('invalid-object-id', input.descriptor.kind, `Git plumbing did not emit exactly one 40-hex object id`, boundedDiagnostic(stdout, stderr));
+    return Object.freeze({ descriptor: input.descriptor.kind, oid: text });
 }
 function captureChunk(stream, chunk) {
     const remaining = Math.max(0, GIT_MUTATION_DIAGNOSTIC_BYTES - stream.retainedBytes);
@@ -541,6 +687,7 @@ function stderrDiagnostic(acc, extra) {
  */
 export async function runGitStreamingLsTree(input) {
     const clock = input.clock ?? Date.now;
+    const spawnChild = input.spawnChild ?? spawn;
     const entryMax = resolveStreamCap(input.maxEntries, GIT_STREAM_ENTRY_MAX, 'entry');
     const pathMax = resolveStreamCap(input.maxPathBytes, GIT_STREAM_PATH_MAX_BYTES, 'path byte');
     const recordMax = resolveStreamCap(input.maxRecordBytes, GIT_STREAM_RECORD_MAX_BYTES, 'record byte');
@@ -591,7 +738,13 @@ export async function runGitStreamingLsTree(input) {
             if (terminalState !== null)
                 return;
             if (!spawnEventConfirmed) {
-                const rootPid = pid;
+                // Finding B: surface the OBSERVED child PID when a PID exists on the handle
+                // but the `spawn` settle event never fired before the execution deadline
+                // (contract: root_pid = observed PID if any else null). `pid` is only set
+                // inside the `spawn` handler; sample `childHandle.pid` as the observed
+                // fallback so the containment report carries the real PID for the
+                // process-tree teardown instead of null.
+                const rootPid = pid ?? (childHandle.pid ?? null);
                 finish('spawn-unconfirmed', null, null);
                 firstError = new GitStreamingQueryError('git-process-containment-failed', 'git ls-tree spawn did not settle before the execution deadline', { terminalState: 'spawn-unconfirmed', rootPid });
             }
@@ -778,7 +931,7 @@ export async function runGitStreamingLsTree(input) {
         }
         let childHandle;
         try {
-            childHandle = spawn('git', argv, {
+            childHandle = spawnChild('git', argv, {
                 cwd: input.cwd,
                 env: { ...process.env, ...input.env, GIT_TERMINAL_PROMPT: '0' },
                 stdio: ['pipe', 'pipe', 'pipe'],
