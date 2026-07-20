@@ -4696,19 +4696,31 @@ export class CoordinatorStore {
             throw new CoordinationRuntimeError('invalid-request', 'semantic-graph-artifact-invalid: artifact id is not the deterministic graph sequence id', [artifactId, facts.artifactId]);
         if (facts.artifactId !== d65SemanticGraphArtifactId(facts.graph.graph_sequence))
             throw new CoordinationRuntimeError('invalid-request', 'semantic-graph-artifact-invalid: graph sequence id mismatch');
-        // Load the authority state blob from G and prove the graph's queue-projection
-        // index counts equal the derived queue equations from that state.
-        this.#validateD65GraphQueueProjection(sourceRoot, facts.authorityCommit, facts.graph);
+        // Load and verify the authority tree + all five core blobs from G, then
+        // prove the graph's queue-projection index counts equal the derived queue
+        // equations from the authority state blob.
+        this.#validateD65GraphAuthority(sourceRoot, facts.authorityCommit, facts.graph);
     }
-    #validateD65GraphQueueProjection(sourceRoot, authorityCommit, graph) {
-        const stateRef = graph.core.state.ref;
-        const shown = this.#gitQueryResult(sourceRoot, { kind: 'show-file', revision: authorityCommit, path: stateRef }, 'invalid-request', 'semantic graph authority state blob is not readable at the covered authority commit');
-        if (shown.stdout.byteLength > MAX_COORDINATION_EVIDENCE_BYTES)
-            throw new CoordinationRuntimeError('invalid-request', 'semantic graph authority state blob exceeds the immutable evidence byte bound');
-        const actual = `sha256:${createHash('sha256').update(shown.stdout).digest('hex')}`;
-        if (actual !== graph.core.state.sha256)
-            throw new CoordinationRuntimeError('invalid-request', 'semantic-graph-artifact-invalid: state core descriptor sha256 does not match the authority blob');
-        const state = parseAutopilotState(parseJsonObject(new TextDecoder('utf-8', { fatal: true }).decode(shown.stdout), 'semantic graph authority state'));
+    #validateD65GraphAuthority(sourceRoot, authorityCommit, graph) {
+        // covered_authority_tree must equal the actual tree of G.
+        const actualTree = this.#gitQueryText(sourceRoot, { kind: 'resolve-tree', revision: authorityCommit }, 'invalid-request', 'semantic graph authority tree inspection failed');
+        if (actualTree !== graph.covered_authority_tree)
+            throw new CoordinationRuntimeError('invalid-request', 'semantic-graph-artifact-invalid: covered_authority_tree does not match the authority commit tree', [String(actualTree), graph.covered_authority_tree]);
+        // Verify each of the five fixed core authority blobs at G.
+        const coreBlobs = [graph.core.mission, graph.core.master_plan, graph.core.state, graph.core.decision_log, graph.core.events];
+        for (const entry of coreBlobs) {
+            const shown = this.#gitQueryResult(sourceRoot, { kind: 'show-file', revision: authorityCommit, path: entry.ref }, 'invalid-request', 'semantic graph authority core blob is not readable at the covered authority commit');
+            if (shown.stdout.byteLength > MAX_COORDINATION_EVIDENCE_BYTES)
+                throw new CoordinationRuntimeError('invalid-request', 'semantic graph authority core blob exceeds the immutable evidence byte bound', [entry.ref]);
+            if (shown.stdout.byteLength !== entry.byte_count)
+                throw new CoordinationRuntimeError('invalid-request', 'semantic-graph-artifact-invalid: core descriptor byte_count does not match the authority blob', [entry.ref, `bytes=${String(shown.stdout.byteLength)}`]);
+            const actual = `sha256:${createHash('sha256').update(shown.stdout).digest('hex')}`;
+            if (actual !== entry.sha256)
+                throw new CoordinationRuntimeError('invalid-request', 'semantic-graph-artifact-invalid: core descriptor sha256 does not match the authority blob', [entry.ref]);
+        }
+        // Prove the queue projection against the authority state blob.
+        const stateShown = this.#gitQueryResult(sourceRoot, { kind: 'show-file', revision: authorityCommit, path: graph.core.state.ref }, 'invalid-request', 'semantic graph authority state blob is not readable at the covered authority commit');
+        const state = parseAutopilotState(parseJsonObject(new TextDecoder('utf-8', { fatal: true }).decode(stateShown.stdout), 'semantic graph authority state'));
         assertD65QueueProjectionCounts({ state, indexes: graph.queue_projection });
     }
     #d65PriorIntentChain(repoId, workstreamRun) {

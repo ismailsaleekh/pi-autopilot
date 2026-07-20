@@ -403,52 +403,49 @@ void describe('D65-A3 append-only terminal-intent v2', () => {
 void describe('D65 non-self-referential graph registration', () => {
   const EMPTY = { entry_count: 0, total_bytes: 0, sha256: `sha256:${createHash('sha256').update('[]\n', 'utf8').digest('hex')}`, shards: [] };
 
-  // A minimal valid autopilot.state.v1 with one ready unit -> unit_ready has 1
-  // member, all other queues empty.
-  function stateBlob(): string {
-    const state = {
-      schema_version: 'autopilot.state.v1', workstream: 'work-g', updated_at: '2026-07-19T00:00:00.000Z', status: 'running',
-      context_gate: { gate: 'ok', percent: 10 }, last_event_id: 1,
-      ready_queue: ['unit-a'], running: [], blocked: [], completed: [],
-      units: { 'unit-a': { unit_id: 'unit-a', role: 'implement', state: 'ready', attempt: 1, summary: 'ready unit' } },
-      operator_questions: [], next_actions: ['dispatch'],
-    };
-    return `${JSON.stringify(state, null, 2)}\n`;
-  }
+  function sha(bytes: string): `sha256:${string}` { return `sha256:${createHash('sha256').update(bytes, 'utf8').digest('hex')}`; }
 
-  function completeGraph(authorityCommit: string, stateSha: `sha256:${string}`, queueOverride?: Record<string, unknown>): Record<string, unknown> {
+  // The five fixed core authority documents. state has one ready unit -> the
+  // unit_ready queue has one member, all other queues empty.
+  const CORE_FILES = {
+    mission: { ref: 'runtime/mission.md', schema: null as string | null, records: null as number | null, body: '# Mission\n' },
+    master_plan: { ref: 'runtime/master-plan.json', schema: 'autopilot.master_plan.v1', records: 1, body: '{"schema_version":"autopilot.master_plan.v1"}\n' },
+    state: { ref: 'runtime/state.json', schema: 'autopilot.state.v1', records: 1, body: `${JSON.stringify({ schema_version: 'autopilot.state.v1', workstream: 'work-g', updated_at: '2026-07-19T00:00:00.000Z', status: 'running', context_gate: { gate: 'ok', percent: 10 }, last_event_id: 1, ready_queue: ['unit-a'], running: [], blocked: [], completed: [], units: { 'unit-a': { unit_id: 'unit-a', role: 'implement', state: 'ready', attempt: 1, summary: 'ready unit' } }, operator_questions: [], next_actions: ['dispatch'] }, null, 2)}\n` },
+    decision_log: { ref: 'runtime/decisions.jsonl', schema: 'autopilot.decision.v1', records: 3, body: '{"a":1}\n{"a":2}\n{"a":3}\n' },
+    events: { ref: 'runtime/events.jsonl', schema: 'autopilot.event.v1', records: 4, body: '{"e":1}\n{"e":2}\n{"e":3}\n{"e":4}\n' },
+  } as const;
+
+  function completeGraph(authorityCommit: string, authorityTree: string, queueOverride?: Record<string, unknown>): Record<string, unknown> {
     const collections: Record<string, unknown> = {};
     for (const key of ['authorities', 'specs', 'statuses', 'receipts', 'audits', 'execution_commits', 'terminal_acceptances', 'unit_merge_intents', 'unit_merges', 'integration_analyses', 'quarantine', 'reconciliation', 'evidence']) collections[key] = { ...EMPTY };
-    // Derived queues from stateBlob(): unit_ready has one member, all else empty.
     const oneMember = { entry_count: 1, total_bytes: 40, sha256: `sha256:${'b'.repeat(64)}`, shards: [{ ref: 'semantic-graphs/00000000000000000002/queue/unit_ready-0.json', sha256: `sha256:${'b'.repeat(64)}`, byte_count: 40, entry_count: 1, first_identity: 'unit-a', last_identity: 'unit-a' }] };
     const queue: Record<string, unknown> = { unit_ready: oneMember, unit_running: { ...EMPTY }, unit_blocked: { ...EMPTY }, unit_completed: { ...EMPTY }, unit_held: { ...EMPTY }, work_audit_review: { ...EMPTY }, work_validation_ready: { ...EMPTY }, ...queueOverride };
-    const core = (ref: string, schema: string | null, records: number | null, sha: `sha256:${string}`): Record<string, unknown> => ({ ref, git_mode: '100644', git_blob_oid: 'a'.repeat(40), sha256: sha, byte_count: 100, record_count: records, document_schema_version: schema });
+    const core = (entry: { ref: string; schema: string | null; records: number | null; body: string }): Record<string, unknown> => ({ ref: entry.ref, git_mode: '100644', git_blob_oid: 'a'.repeat(40), sha256: sha(entry.body), byte_count: Buffer.byteLength(entry.body, 'utf8'), record_count: entry.records, document_schema_version: entry.schema });
     return {
       schema_version: 'autopilot.semantic_graph.v1', program_id: 'program-1', mode: 'complete', graph_sequence: 2,
       prior_graph_sha256: `sha256:${'a'.repeat(64)}`, prior_event_seq: 1, repo_id: 'repo-graph-reg', autopilot_id: 'auto-g', workstream: 'work-g', workstream_run: 'run-g',
-      covered_authority_commit: authorityCommit, covered_authority_tree: 'c'.repeat(40), covered_event_seq: 5,
+      covered_authority_commit: authorityCommit, covered_authority_tree: authorityTree, covered_event_seq: 5,
       bootstrap_charter: { repository: {}, run: {}, run_resource: {}, mailbox_cursor: {}, bootstrap_graph: {}, bootstrap_artifact: {}, trust_anchor: {}, attach_event: {}, attach_result: {} },
-      core: { mission: core('runtime/mission.md', null, null, `sha256:${'a'.repeat(64)}`), master_plan: core('runtime/master-plan.json', 'autopilot.master_plan.v1', 1, `sha256:${'a'.repeat(64)}`), state: core('runtime/state.json', 'autopilot.state.v1', 1, stateSha), decision_log: core('runtime/decisions.jsonl', 'autopilot.decision.v1', 3, `sha256:${'a'.repeat(64)}`), events: core('runtime/events.jsonl', 'autopilot.event.v1', 4, `sha256:${'a'.repeat(64)}`) },
+      core: { mission: core(CORE_FILES.mission), master_plan: core(CORE_FILES.master_plan), state: core(CORE_FILES.state), decision_log: core(CORE_FILES.decision_log), events: core(CORE_FILES.events) },
       collections, work_items: { ...EMPTY }, bughunt: { ...EMPTY }, closure: null, queue_projection: queue, exceptions: { ...EMPTY }, coordinator_projection: { ...EMPTY }, created_at: '2026-07-19T00:00:00.000Z',
     };
   }
 
-  async function commitAuthorityState(repoRoot: string): Promise<`sha256:${string}`> {
-    const bytes = stateBlob();
+  async function commitAuthorityCore(repoRoot: string): Promise<{ commit: string; tree: string }> {
     await mkdir(join(repoRoot, 'runtime'), { recursive: true });
-    await writeFile(join(repoRoot, 'runtime', 'state.json'), bytes, 'utf8');
+    for (const entry of Object.values(CORE_FILES)) await writeFile(join(repoRoot, entry.ref), entry.body, 'utf8');
     git(repoRoot, ['add', '.']);
-    git(repoRoot, ['commit', '-m', 'authority state']);
-    return `sha256:${createHash('sha256').update(bytes, 'utf8').digest('hex')}`;
+    git(repoRoot, ['commit', '-m', 'authority core']);
+    return { commit: git(repoRoot, ['rev-parse', 'HEAD']), tree: git(repoRoot, ['rev-parse', 'HEAD^{tree}']) };
   }
 
   void it('registers a graph-only publication with a queue projection that matches the authority state', async () => {
     await withHarness(async ({ client, stateRoot, repoRoot }) => {
       const ctx = await attach(client, stateRoot, repoRoot, 'g');
-      const stateSha = await commitAuthorityState(repoRoot);
-      const g = git(repoRoot, ['rev-parse', 'HEAD']);
+      const authority = await commitAuthorityCore(repoRoot);
+      const g = authority.commit;
       const graphRef = 'semantic-graphs/00000000000000000002/graph.json';
-      const graphBytes = JSON.stringify(completeGraph(g, stateSha));
+      const graphBytes = JSON.stringify(completeGraph(g, authority.tree));
       await mkdir(join(repoRoot, 'semantic-graphs', '00000000000000000002'), { recursive: true });
       await writeFile(join(repoRoot, graphRef), graphBytes, 'utf8');
       git(repoRoot, ['add', '.']);
@@ -467,11 +464,11 @@ void describe('D65 non-self-referential graph registration', () => {
   void it('rejects a queue projection whose index counts disagree with the authority state', async () => {
     await withHarness(async ({ client, stateRoot, repoRoot }) => {
       const ctx = await attach(client, stateRoot, repoRoot, 'q');
-      const stateSha = await commitAuthorityState(repoRoot);
-      const g = git(repoRoot, ['rev-parse', 'HEAD']);
+      const authority = await commitAuthorityCore(repoRoot);
+      const g = authority.commit;
       const graphRef = 'semantic-graphs/00000000000000000002/graph.json';
       // Claim unit_ready is empty though the state has one ready unit.
-      const graphBytes = JSON.stringify(completeGraph(g, stateSha, { unit_ready: { ...EMPTY } }));
+      const graphBytes = JSON.stringify(completeGraph(g, authority.tree, { unit_ready: { ...EMPTY } }));
       await mkdir(join(repoRoot, 'semantic-graphs', '00000000000000000002'), { recursive: true });
       await writeFile(join(repoRoot, graphRef), graphBytes, 'utf8');
       git(repoRoot, ['add', '.']);
@@ -489,13 +486,38 @@ void describe('D65 non-self-referential graph registration', () => {
     });
   });
 
+  void it('rejects a graph whose covered_authority_tree does not match the authority commit tree', async () => {
+    await withHarness(async ({ client, stateRoot, repoRoot }) => {
+      const ctx = await attach(client, stateRoot, repoRoot, 't');
+      const authority = await commitAuthorityCore(repoRoot);
+      const g = authority.commit;
+      const graphRef = 'semantic-graphs/00000000000000000002/graph.json';
+      // Wrong covered_authority_tree.
+      const graphBytes = JSON.stringify(completeGraph(g, 'd'.repeat(40)));
+      await mkdir(join(repoRoot, 'semantic-graphs', '00000000000000000002'), { recursive: true });
+      await writeFile(join(repoRoot, graphRef), graphBytes, 'utf8');
+      git(repoRoot, ['add', '.']);
+      git(repoRoot, ['commit', '-m', 'publish graph 2 with wrong tree']);
+      const h = git(repoRoot, ['rev-parse', 'HEAD']);
+      const graphSha = `sha256:${createHash('sha256').update(graphBytes).digest('hex')}` as `sha256:${string}`;
+      const status0 = await client.query('status', ctx.repoId, ctx.runId);
+      const runVersion = (status0.payload['runs'] as Array<Record<string, unknown>>)[0]?.['version'] as number;
+      await assert.rejects(
+        () => client.mutate('register-authoritative-artifact', { repoId: ctx.repoId, workstreamRun: ctx.runId, sessionId: ctx.sessionId, fencingGeneration: 1, expectedVersion: runVersion, idempotencyKey: 'register-graph-t' }, {
+          artifact_id: 'semantic-graph:00000000000000000002', source_type: 'task', source_scope: 'repository', document_schema_version: 'autopilot.semantic_graph.v1', git_commit: h, ref: graphRef, sha256: graphSha, session_lease_id: ctx.sessionLeaseId, session_token: ctx.sessionToken,
+        }),
+        /covered_authority_tree does not match the authority commit tree/u,
+      );
+    });
+  });
+
   void it('rejects a publication commit that also changes a non-graph product path', async () => {
     await withHarness(async ({ client, stateRoot, repoRoot }) => {
       const ctx = await attach(client, stateRoot, repoRoot, 'p');
-      const stateSha = await commitAuthorityState(repoRoot);
-      const g = git(repoRoot, ['rev-parse', 'HEAD']);
+      const authority = await commitAuthorityCore(repoRoot);
+      const g = authority.commit;
       const graphRef = 'semantic-graphs/00000000000000000002/graph.json';
-      const graphBytes = JSON.stringify(completeGraph(g, stateSha));
+      const graphBytes = JSON.stringify(completeGraph(g, authority.tree));
       await mkdir(join(repoRoot, 'semantic-graphs', '00000000000000000002'), { recursive: true });
       await writeFile(join(repoRoot, graphRef), graphBytes, 'utf8');
       await writeFile(join(repoRoot, 'product.ts'), 'export const x = 1;\n', 'utf8');
