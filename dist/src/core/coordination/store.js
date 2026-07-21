@@ -24,6 +24,7 @@ import { deriveD65BootstrapTransaction } from "./d65-bootstrap-transaction.js";
 import { assertD65AppendOnlyAttempt, assertD65TerminalEffectSetsExact, buildD65PreparedTerminalIntentV2, computeD65ObligationPartition, d65TerminalIntentId } from "./d65-terminal-intent.js";
 import { parseD65RunTerminalIntentV2, parseD65SemanticGraphBootstrap } from "./d65-semantic-graph.js";
 import { parseD65LaunchPolicy } from "./d65-launch-policy.js";
+import { recoveryTransitionAllowed } from "./d65-dispatch-predicates.js";
 import { parseD65TrustAnchorSpki, verifyD65Signature } from "./d65-trust.js";
 import { d65SemanticGraphArtifactId, d65SemanticGraphSequenceFromArtifactId, validateD65GraphPublication } from "./d65-graph-publication.js";
 import { assertD65QueueProjectionCounts, assertD65QueueProjectionMembers, D65_QUEUE_KEYS } from "./d65-graph-queues.js";
@@ -5121,8 +5122,29 @@ export class CoordinatorStore {
         this.#assertVersion(intent.version, request.expected_version, 'run terminal intent');
         if (intent.state !== 'prepared')
             throw new CoordinationRuntimeError('invalid-state', `run terminal intent is ${intent.state}`);
-        if (intent.outcome === 'aborted' && intent.intent_attempt === 4)
-            throw new CoordinationRuntimeError('invalid-state', 'the mandatory fourth abort intent is noncancellable');
+        // D65-I4: `cancel-run-terminal` is frozen recovery cell #8. The pure
+        // `recoveryTransitionAllowed` predicate is the authoritative cancellability
+        // gate at this coordinator transaction boundary (fresh plan §2.3 line
+        // 183: "Recovery actions call only the table predicate at their coordinator
+        // transaction boundary"). A D65 run with a prepared terminal intent is
+        // definitionally in the terminal tail (its prepare moved it active->merging),
+        // so the run's D65 dispatch reason is exactly `terminal-tail`; no provider
+        // reason is tracked yet, so the store faithfully asserts the no-provider
+        // subset the cell tolerates. `terminal_prepared_cancellable` is false for the
+        // mandatory fourth abort, which is exactly the frozen non-cancellable case.
+        const cancellable = !(intent.outcome === 'aborted' && intent.intent_attempt === 4);
+        const verdict = recoveryTransitionAllowed({
+            action: 'cancel-run-terminal',
+            global_stop_reasons: [],
+            row_stop_reasons: ['terminal-tail'],
+            run_state: run.status,
+            graph: { complete_graph_current: false, graph_publication_pending: false },
+            policy: { policy_current: false },
+            heartbeat: { governing_heartbeat_current: false, provider_state: 'blocked' },
+            bindings: { attached_session_current: true, policy_trust_current: true, no_pending_publication: true, terminal_prepared_cancellable: cancellable, terminal_after_commit: false, accepted_continuation_reason: null, covered_semantic_reason: null, attach_terminal_recovery: false },
+        });
+        if (!verdict.allowed)
+            throw new CoordinationRuntimeError('invalid-state', 'the mandatory fourth abort intent is noncancellable: cancel-run-terminal is fenced by the D65 recovery predicate', verdict.denied_by.slice());
         const seq = this.#nextEventSequence(request.repo_id);
         const cancelled = parseD65RunTerminalIntentV2({ ...intent, state: 'cancelled', terminal_event_seq: seq, version: intent.version + 1 });
         const nextRun = parseCoordinationRun({ ...run, status: 'active', version: run.version + 1 });
