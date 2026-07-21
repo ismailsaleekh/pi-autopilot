@@ -1,5 +1,14 @@
 # Autopilot
 
+> **Agents: start at the docs, not this README.** The agent-first documentation is
+> the navigable, always-current source of truth for working *on* this package:
+> read [`AUTOPILOT-INSTRUCTIONS.md`](AUTOPILOT-INSTRUCTIONS.md) (the mandatory
+> gateway) → [`docs/INDEX.md`](docs/INDEX.md) (machine-navigable surface + subsystem
+> index) → [`docs/read-before-edit.md`](docs/read-before-edit.md) (source → owning-doc
+> read-gate). Load [`docs/manifest.json`](docs/manifest.json) for O(1) navigation.
+> The docs are kept current by a deterministic, offline freshness gate — see
+> [`docs/subsystems/docs-freshness-gate.md`](docs/subsystems/docs-freshness-gate.md).
+
 Autopilot is a standalone Pi extension package for dependency-cleared child-agent orchestration. It provides `/autopilot`, session binding/handoff, coordination diagnostics, scheduler configuration, deterministic close/abort, the parent `context_budget` gate, Quality vNext contracts, perfect-quality doctrine, scope/protected-path adjudication, work-item lifecycle, terminal closure, runtime close/merge/abort, forced-output/status, state-store, isolated per-unit worktrees, and execution audits, the `autopilot-agent-run` child runner, and the compiled `autopilot-coordinator` transactional local broker. Durable run supervisors and session fencing through explicit generations preserve run and child ownership across Pi session replacement.
 
 ## Install
@@ -149,8 +158,11 @@ npm run typecheck
 npm run test:package
 npm run test:version-skew
 npm run test
+npm run docs:verify
 npm run pack:dry-run
 ```
+
+`docs:verify` runs the deterministic, offline docs-freshness gate (checks C0–C11); it also runs inside `test:package` and `prepack`. Use `npm run docs:generate` to regenerate factual doc regions from code and `npm run docs:attest` to re-stamp doc hashes and rebuild `docs/manifest.json`. See [`docs/subsystems/docs-freshness-gate.md`](docs/subsystems/docs-freshness-gate.md).
 
 Release QA also runs cross-platform packed installs, docs and closed-repository scans, `security:scan`, registry `security:audit`, deterministic CycloneDX `sbom`, and `payload:check` from this standalone repo.
 

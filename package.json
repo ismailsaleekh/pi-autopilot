@@ -28,6 +28,8 @@
     "scripts/",
     "templates/",
     "artifacts/security/",
+    "docs/",
+    "AUTOPILOT-INSTRUCTIONS.md",
     "README.md",
     "TESTING.md",
     "TEST_PLAN.md",
@@ -61,8 +63,11 @@
     "payload:check": "npm run build && node scripts/check-package-payload.mjs",
     "test": "npm run typecheck && npm run test:type-safety && npm run security:scan && npm run test:unit && npm run test:e2e && npm run test:model && npm run test:multiprocess && npm run test:crash && npm run test:chaos && npm run test:scale && npm run test:sdk && npm run test:rpc && npm run test:package && npm run payload:check",
     "test:release": "npm run test && npm run security:audit && npm run sbom",
-    "prepack": "npm run build && npm run security:scan -- --quiet && npm run sbom",
-    "pack:dry-run": "npm pack --dry-run"
+    "prepack": "npm run build && npm run security:scan -- --quiet && npm run sbom && node scripts/docs-verify.mjs --quiet",
+    "pack:dry-run": "npm pack --dry-run",
+    "docs:generate": "node scripts/docs-generate.mjs",
+    "docs:verify": "npm run build && node scripts/docs-verify.mjs",
+    "docs:attest": "npm run build && node scripts/docs-verify.mjs --write"
   },
   "pi": {
     "extensions": [

@@ -35,6 +35,8 @@ jobs:
       - run: npm ci --ignore-scripts
       - name: Complete deterministic offline gate
         run: npm test
+      - name: Deterministic docs-freshness gate (C0–C11)
+        run: node scripts/docs-verify.mjs
       - name: Packed generic-repository migration rehearsals
         run: npm run test:packed-migration
       - run: npm run pack:dry-run

@@ -2,6 +2,9 @@ node_modules/
 artifacts/*
 !artifacts/security/
 !artifacts/security/*.json
+!artifacts/docs-semantic/
+!artifacts/docs-semantic/*.json
+!artifacts/docs-semantic/README.md
 *.tgz
 !tests/fixtures/releases/cf50/pi-autopilot-1.1.8-cf50.tgz
 

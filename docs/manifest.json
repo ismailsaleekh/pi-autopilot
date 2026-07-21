@@ -1,0 +1,382 @@
+{
+  "schema_version": "autopilot.docs_manifest.v1",
+  "generator": "scripts/docs-generate.mjs",
+  "coverage_floor": 7,
+  "surface_to_docs": {
+    "/autopilot": [
+      "commands/autopilot"
+    ],
+    "/autopilot-abort": [
+      "commands/autopilot-abort"
+    ],
+    "/autopilot-claim-gc": [
+      "commands/autopilot-claim-gc"
+    ],
+    "/autopilot-close": [
+      "commands/autopilot-close"
+    ],
+    "/autopilot-config": [
+      "commands/autopilot-config"
+    ],
+    "/autopilot-coordination": [
+      "commands/autopilot-coordination",
+      "subsystems/coordination"
+    ],
+    "/autopilot-handoff": [
+      "commands/autopilot-handoff"
+    ],
+    "/autopilot-inject": [
+      "commands/autopilot-inject"
+    ],
+    "/autopilot-onboard": [
+      "commands/autopilot-onboard"
+    ],
+    "autopilot-agent-run": [
+      "cli/autopilot-agent-run"
+    ],
+    "autopilot-coordinator": [
+      "cli/autopilot-coordinator",
+      "subsystems/coordination"
+    ],
+    "autopilot.decision.v1": [
+      "subsystems/contracts-and-schemas"
+    ],
+    "autopilot.event.v1": [
+      "subsystems/contracts-and-schemas"
+    ],
+    "autopilot.execution_audit.v1": [
+      "subsystems/contracts-and-schemas"
+    ],
+    "autopilot.execution_commit.v1": [
+      "subsystems/contracts-and-schemas"
+    ],
+    "autopilot.handoff.v1": [
+      "subsystems/contracts-and-schemas"
+    ],
+    "autopilot.master_plan.v1": [
+      "subsystems/contracts-and-schemas"
+    ],
+    "autopilot.receipt.v1": [
+      "subsystems/contracts-and-schemas"
+    ],
+    "autopilot.state.v1": [
+      "subsystems/contracts-and-schemas"
+    ],
+    "autopilot.status.v1": [
+      "subsystems/contracts-and-schemas"
+    ],
+    "autopilot.unit_spec.v1": [
+      "subsystems/contracts-and-schemas"
+    ],
+    "autopilot_emit_status": [
+      "tools/autopilot_emit_status"
+    ],
+    "autopilot_materialize_context": [
+      "tools/autopilot_materialize_context"
+    ],
+    "autopilot_respond_claim_request": [
+      "subsystems/coordination",
+      "tools/autopilot_respond_claim_request"
+    ],
+    "context_budget": [
+      "tools/context_budget"
+    ]
+  },
+  "source_to_docs": {
+    "src/cli/autopilot-agent-run.ts": [
+      "cli/autopilot-agent-run"
+    ],
+    "src/cli/autopilot-coordinator.ts": [
+      "cli/autopilot-coordinator"
+    ],
+    "src/core/context-budget.ts": [
+      "tools/context_budget"
+    ],
+    "src/core/contracts/index.ts": [
+      "subsystems/contracts-and-schemas"
+    ],
+    "src/core/coordination/admission.ts": [
+      "subsystems/coordination"
+    ],
+    "src/core/coordination/deadlock.ts": [
+      "subsystems/coordination"
+    ],
+    "src/core/coordination/index.ts": [
+      "subsystems/coordination"
+    ],
+    "src/core/materialization.ts": [
+      "tools/autopilot_materialize_context"
+    ],
+    "src/core/scheduler-config.ts": [
+      "commands/autopilot-config"
+    ],
+    "src/internal/status-extension.ts": [
+      "tools/autopilot_emit_status"
+    ]
+  },
+  "docs": {
+    "INDEX": {
+      "mode": "generated",
+      "review_policy": "contract",
+      "stability": "stable",
+      "covers_surfaces": [],
+      "covers_sources": [],
+      "signature_hash": null,
+      "body_hash": null,
+      "semantic_attestation": null
+    },
+    "cli/autopilot-agent-run": {
+      "mode": "mixed",
+      "review_policy": "contract",
+      "stability": "stable",
+      "covers_surfaces": [
+        "autopilot-agent-run"
+      ],
+      "covers_sources": [
+        "src/cli/autopilot-agent-run.ts"
+      ],
+      "signature_hash": "sha256:5298322afe0cf9324fc5cfca76d34a89bb80689084858a866e079cd3c41b8bf5",
+      "body_hash": "sha256:4ef466016304b0507e25ced63c0cc3fd178e3e250e69d26b62df841a7c1e8afd",
+      "semantic_attestation": null
+    },
+    "cli/autopilot-coordinator": {
+      "mode": "mixed",
+      "review_policy": "contract",
+      "stability": "stable",
+      "covers_surfaces": [
+        "autopilot-coordinator"
+      ],
+      "covers_sources": [
+        "src/cli/autopilot-coordinator.ts"
+      ],
+      "signature_hash": "sha256:1a89bbead9981028b0af3e587eec96b435c6bacce76484a5345014f7ea9a3bec",
+      "body_hash": "sha256:65943e4191602fe26f8f31c580ac3a17b8bada9e980118749aa799c0d7210a02",
+      "semantic_attestation": null
+    },
+    "commands/autopilot": {
+      "mode": "authored",
+      "review_policy": "contract",
+      "stability": "stable",
+      "covers_surfaces": [
+        "/autopilot"
+      ],
+      "covers_sources": [],
+      "signature_hash": null,
+      "body_hash": null,
+      "semantic_attestation": null
+    },
+    "commands/autopilot-abort": {
+      "mode": "authored",
+      "review_policy": "contract",
+      "stability": "stable",
+      "covers_surfaces": [
+        "/autopilot-abort"
+      ],
+      "covers_sources": [],
+      "signature_hash": null,
+      "body_hash": null,
+      "semantic_attestation": null
+    },
+    "commands/autopilot-claim-gc": {
+      "mode": "authored",
+      "review_policy": "contract",
+      "stability": "stable",
+      "covers_surfaces": [
+        "/autopilot-claim-gc"
+      ],
+      "covers_sources": [],
+      "signature_hash": null,
+      "body_hash": null,
+      "semantic_attestation": null
+    },
+    "commands/autopilot-close": {
+      "mode": "authored",
+      "review_policy": "contract",
+      "stability": "stable",
+      "covers_surfaces": [
+        "/autopilot-close"
+      ],
+      "covers_sources": [],
+      "signature_hash": null,
+      "body_hash": null,
+      "semantic_attestation": null
+    },
+    "commands/autopilot-config": {
+      "mode": "authored",
+      "review_policy": "contract",
+      "stability": "stable",
+      "covers_surfaces": [
+        "/autopilot-config"
+      ],
+      "covers_sources": [
+        "src/core/scheduler-config.ts"
+      ],
+      "signature_hash": "sha256:77ba52d4e6714f14c69e74f568dbe65098d678845965e91e0e96ab9d9c04d55c",
+      "body_hash": "sha256:b26c2893078435ac600005e61e86901c28f21fa885cd14b055c59cb17689edea",
+      "semantic_attestation": null
+    },
+    "commands/autopilot-coordination": {
+      "mode": "authored",
+      "review_policy": "contract",
+      "stability": "stable",
+      "covers_surfaces": [
+        "/autopilot-coordination"
+      ],
+      "covers_sources": [],
+      "signature_hash": null,
+      "body_hash": null,
+      "semantic_attestation": null
+    },
+    "commands/autopilot-handoff": {
+      "mode": "authored",
+      "review_policy": "contract",
+      "stability": "stable",
+      "covers_surfaces": [
+        "/autopilot-handoff"
+      ],
+      "covers_sources": [],
+      "signature_hash": null,
+      "body_hash": null,
+      "semantic_attestation": null
+    },
+    "commands/autopilot-inject": {
+      "mode": "authored",
+      "review_policy": "contract",
+      "stability": "stable",
+      "covers_surfaces": [
+        "/autopilot-inject"
+      ],
+      "covers_sources": [],
+      "signature_hash": null,
+      "body_hash": null,
+      "semantic_attestation": null
+    },
+    "commands/autopilot-onboard": {
+      "mode": "authored",
+      "review_policy": "contract",
+      "stability": "stable",
+      "covers_surfaces": [
+        "/autopilot-onboard"
+      ],
+      "covers_sources": [],
+      "signature_hash": null,
+      "body_hash": null,
+      "semantic_attestation": null
+    },
+    "read-before-edit": {
+      "mode": "generated",
+      "review_policy": "contract",
+      "stability": "stable",
+      "covers_surfaces": [],
+      "covers_sources": [],
+      "signature_hash": null,
+      "body_hash": null,
+      "semantic_attestation": null
+    },
+    "subsystems/contracts-and-schemas": {
+      "mode": "mixed",
+      "review_policy": "contract",
+      "stability": "stable",
+      "covers_surfaces": [
+        "autopilot.decision.v1",
+        "autopilot.event.v1",
+        "autopilot.execution_audit.v1",
+        "autopilot.execution_commit.v1",
+        "autopilot.handoff.v1",
+        "autopilot.master_plan.v1",
+        "autopilot.receipt.v1",
+        "autopilot.state.v1",
+        "autopilot.status.v1",
+        "autopilot.unit_spec.v1"
+      ],
+      "covers_sources": [
+        "src/core/contracts/index.ts"
+      ],
+      "signature_hash": "sha256:13c5284a7cf9be90ba2c6df340e484198016a06417322c5c44f09418650f4b87",
+      "body_hash": "sha256:1d9d0bb91681dc069c58b5ad63d34126c4c2ff221b51afd2b02f48b1ebbd7a6c",
+      "semantic_attestation": null
+    },
+    "subsystems/coordination": {
+      "mode": "mixed",
+      "review_policy": "behavioral",
+      "stability": "stable",
+      "covers_surfaces": [
+        "/autopilot-coordination",
+        "autopilot-coordinator",
+        "autopilot_respond_claim_request"
+      ],
+      "covers_sources": [
+        "src/core/coordination/admission.ts",
+        "src/core/coordination/deadlock.ts",
+        "src/core/coordination/index.ts"
+      ],
+      "signature_hash": "sha256:7dcfdcc868f120781150ae32025fae87d3b683d3a8f20a6a4c29665c6fafa656",
+      "body_hash": "sha256:4c39eddae3f6182bf47cfb73b4472158c477ced0099020f4a742b6812c918466",
+      "semantic_attestation": null
+    },
+    "subsystems/docs-freshness-gate": {
+      "mode": "authored",
+      "review_policy": "contract",
+      "stability": "stable",
+      "covers_surfaces": [],
+      "covers_sources": [],
+      "signature_hash": null,
+      "body_hash": null,
+      "semantic_attestation": null
+    },
+    "tools/autopilot_emit_status": {
+      "mode": "authored",
+      "review_policy": "contract",
+      "stability": "stable",
+      "covers_surfaces": [
+        "autopilot_emit_status"
+      ],
+      "covers_sources": [
+        "src/internal/status-extension.ts"
+      ],
+      "signature_hash": "sha256:82786edeaa54051548f1e7a5b3d5257408d8f7b836481e5e5a227e774ffd5dba",
+      "body_hash": "sha256:c2754e6daa340656aed8c8ef5f45c7564cfec2eb48c985481ef43a63a77d0931",
+      "semantic_attestation": null
+    },
+    "tools/autopilot_materialize_context": {
+      "mode": "authored",
+      "review_policy": "contract",
+      "stability": "stable",
+      "covers_surfaces": [
+        "autopilot_materialize_context"
+      ],
+      "covers_sources": [
+        "src/core/materialization.ts"
+      ],
+      "signature_hash": "sha256:f0ca7e1372e2fec8cef56466fe19dab6f1451f4d218895b3fe697880e327557a",
+      "body_hash": "sha256:1bb128bbe01dd1dfd8a128579c875ecaeafac698574325693648eecb234603e7",
+      "semantic_attestation": null
+    },
+    "tools/autopilot_respond_claim_request": {
+      "mode": "authored",
+      "review_policy": "contract",
+      "stability": "stable",
+      "covers_surfaces": [
+        "autopilot_respond_claim_request"
+      ],
+      "covers_sources": [],
+      "signature_hash": null,
+      "body_hash": null,
+      "semantic_attestation": null
+    },
+    "tools/context_budget": {
+      "mode": "authored",
+      "review_policy": "behavioral",
+      "stability": "stable",
+      "covers_surfaces": [
+        "context_budget"
+      ],
+      "covers_sources": [
+        "src/core/context-budget.ts"
+      ],
+      "signature_hash": "sha256:4e147d6b32a3a88923a3b886d262a4384fb0dcd17c2d53412f2cf73e047c54f4",
+      "body_hash": "sha256:a2d8cd38e853fafe2788e23acfa84ce775d2100fe66c38c7de4940cb7316b38d",
+      "semantic_attestation": null
+    }
+  }
+}

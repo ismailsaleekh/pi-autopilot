@@ -14,6 +14,7 @@ npm run test:upgrade
 npm run test:packed-migration
 npm run test:version-skew
 npm run test
+npm run docs:verify
 npm run pack:dry-run
 npm run payload:check
 npm run security:scan
@@ -26,7 +27,7 @@ Also run release docs audits and forbidden legacy-runtime scans before cutting a
 
 ## Package payload checklist
 
-1. Confirm `npm run pack:dry-run` includes `bin/`, `dist/`, `extensions/`, `src/`, `templates/`, the compiled coordinator bootstrap and migrations, deliberate `artifacts/security/` evidence, README, TESTING, TEST_PLAN, PUBLISHING, and LICENSE.
+1. Confirm `npm run pack:dry-run` includes `bin/`, `dist/`, `extensions/`, `src/`, `templates/`, the agent-first docs tree (`docs/` + `AUTOPILOT-INSTRUCTIONS.md`), the compiled coordinator bootstrap and migrations, deliberate `artifacts/security/` evidence, README, TESTING, TEST_PLAN, PUBLISHING, and LICENSE. `prepack` runs `docs:verify` so stale docs block publish.
 2. Confirm tests, transient artifacts, dependency directories, and local runtime state are excluded from the tarball.
 3. Verify `pi.extensions` points at `./extensions/autopilot.ts`; package bins expose `autopilot-agent-run` and `autopilot-coordinator` through compiled `dist/src/cli/*.js`; and installed auto-start resolves the contained `dist/src/cli/autopilot-coordinator-bootstrap.js` plus one `dist/src/cli/autopilot-coordinator.js`. Missing/aliased payloads must fail before spawn with no TypeScript, PATH, cwd, global-install, ancestor, or checkout fallback.
 4. Verify `/autopilot`, `/autopilot-inject`, `/autopilot-onboard`, `/autopilot-handoff`, `/autopilot-config`, `/autopilot-claim-gc`, `/autopilot-coordination`, `/autopilot-close`, and `/autopilot-abort` load from the installed package and not from repo-local prompt files. The proof must give the installed package directory to Pi’s real loader, follow the declared `pi.extensions` manifest entry, and invoke the command; importing `dist/src/extension.js` directly is not valid proof.

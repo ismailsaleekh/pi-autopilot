@@ -1,0 +1,14 @@
+{
+  "schema_version": "autopilot.docs_semantic_attestation.v1",
+  "doc_id": "subsystems/coordination",
+  "reviewed_body_hash": "sha256:4c39eddae3f6182bf47cfb73b4472158c477ced0099020f4a742b6812c918466",
+  "verdict": "PASS",
+  "reviewer": "validate-role (offline agentic review, PR-1 baseline)",
+  "reviewed_at": "2026-07-21T00:00:00.000Z",
+  "covers_sources": [
+    "src/core/coordination/index.ts",
+    "src/core/coordination/admission.ts",
+    "src/core/coordination/deadlock.ts"
+  ],
+  "notes": "Admission handshake (domain pi-autopilot/admission/v1, hmac-sha256), MAX_GRANT_BYPASSES=8, age-never-authorizes-release, safe-victim selection, and no-safe-victim deferral all match admission.ts + deadlock.ts. Barrel transitive coverage confirmed."
+}

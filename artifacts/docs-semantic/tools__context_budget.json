@@ -1,0 +1,12 @@
+{
+  "schema_version": "autopilot.docs_semantic_attestation.v1",
+  "doc_id": "tools/context_budget",
+  "reviewed_body_hash": "sha256:a2d8cd38e853fafe2788e23acfa84ce775d2100fe66c38c7de4940cb7316b38d",
+  "verdict": "PASS",
+  "reviewer": "validate-role (offline agentic review, PR-1 baseline)",
+  "reviewed_at": "2026-07-21T00:00:00.000Z",
+  "covers_sources": [
+    "src/core/context-budget.ts"
+  ],
+  "notes": "Prose accurately describes the ok/halt/unknown gate, the default 85% threshold, the AUTOPILOT_CONTEXT_HALT_PERCENT override, and parent-only availability. Verified against src/core/context-budget.ts."
+}
