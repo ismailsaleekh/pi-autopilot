@@ -22,13 +22,41 @@ here are not yet governed by a doc; coverage ratchets up per PR (C8 floor).
 | Source path | Owning doc(s) |
 | --- | --- |
 | `src/cli/autopilot-agent-run.ts` | [`cli/autopilot-agent-run`](cli/autopilot-agent-run.md) |
+| `src/cli/autopilot-coordinator-bootstrap.ts` | [`cli/autopilot-coordinator`](cli/autopilot-coordinator.md) |
 | `src/cli/autopilot-coordinator.ts` | [`cli/autopilot-coordinator`](cli/autopilot-coordinator.md) |
+| `src/cli/migration-recovery.ts` | [`concepts/migration-cutover`](concepts/migration-cutover.md) |
+| `src/core/adjudication/index.ts` | [`subsystems/quality-and-closure`](subsystems/quality-and-closure.md) |
+| `src/core/agent-runner.ts` | [`subsystems/runner-and-forced-output`](subsystems/runner-and-forced-output.md) |
+| `src/core/authority.ts` | [`subsystems/runner-and-forced-output`](subsystems/runner-and-forced-output.md) |
+| `src/core/checkout-profile.ts` | [`subsystems/worktrees`](subsystems/worktrees.md) |
+| `src/core/claim-gc.ts` | [`commands/autopilot-claim-gc`](commands/autopilot-claim-gc.md) |
+| `src/core/close-runtime.ts` | [`subsystems/close-lifecycle`](subsystems/close-lifecycle.md) |
 | `src/core/context-budget.ts` | [`tools/context_budget`](tools/context_budget.md) |
 | `src/core/contracts/index.ts` | [`subsystems/contracts-and-schemas`](subsystems/contracts-and-schemas.md) |
 | `src/core/coordination/admission.ts` | [`subsystems/coordination`](subsystems/coordination.md) |
-| `src/core/coordination/deadlock.ts` | [`subsystems/coordination`](subsystems/coordination.md) |
+| `src/core/coordination/deadlock.ts` | [`concepts/deadlock`](concepts/deadlock.md), [`subsystems/coordination`](subsystems/coordination.md) |
 | `src/core/coordination/index.ts` | [`subsystems/coordination`](subsystems/coordination.md) |
-| `src/core/materialization.ts` | [`tools/autopilot_materialize_context`](tools/autopilot_materialize_context.md) |
+| `src/core/disk-gate.ts` | [`subsystems/worktrees`](subsystems/worktrees.md) |
+| `src/core/execution-audit/index.ts` | [`subsystems/runner-and-forced-output`](subsystems/runner-and-forced-output.md) |
+| `src/core/execution-commit.ts` | [`subsystems/close-lifecycle`](subsystems/close-lifecycle.md) |
+| `src/core/forced-output/index.ts` | [`subsystems/runner-and-forced-output`](subsystems/runner-and-forced-output.md) |
+| `src/core/git-guard.ts` | [`subsystems/worktrees`](subsystems/worktrees.md) |
+| `src/core/git-process.ts` | [`subsystems/worktrees`](subsystems/worktrees.md) |
+| `src/core/lifecycle/index.ts` | [`subsystems/quality-and-closure`](subsystems/quality-and-closure.md) |
+| `src/core/materialization.ts` | [`subsystems/worktrees`](subsystems/worktrees.md), [`tools/autopilot_materialize_context`](tools/autopilot_materialize_context.md) |
+| `src/core/model-roster.ts` | [`subsystems/runner-and-forced-output`](subsystems/runner-and-forced-output.md) |
+| `src/core/names.ts` | [`subsystems/contracts-and-schemas`](subsystems/contracts-and-schemas.md) |
+| `src/core/parallel-runtime.ts` | [`subsystems/worktrees`](subsystems/worktrees.md) |
+| `src/core/prompt-renderer/index.ts` | [`subsystems/runner-and-forced-output`](subsystems/runner-and-forced-output.md) |
+| `src/core/quality/contract.ts` | [`subsystems/quality-and-closure`](subsystems/quality-and-closure.md) |
+| `src/core/quality/spec-gate.ts` | [`subsystems/quality-and-closure`](subsystems/quality-and-closure.md) |
 | `src/core/scheduler-config.ts` | [`commands/autopilot-config`](commands/autopilot-config.md) |
+| `src/core/scheduler.ts` | [`subsystems/runner-and-forced-output`](subsystems/runner-and-forced-output.md) |
+| `src/core/sparse-worktree.ts` | [`subsystems/worktrees`](subsystems/worktrees.md) |
+| `src/core/state-store/index.ts` | [`subsystems/quality-and-closure`](subsystems/quality-and-closure.md) |
+| `src/core/unit-failure.ts` | [`subsystems/runner-and-forced-output`](subsystems/runner-and-forced-output.md) |
+| `src/core/unit-merge.ts` | [`subsystems/close-lifecycle`](subsystems/close-lifecycle.md) |
+| `src/core/validation-staleness.ts` | [`subsystems/close-lifecycle`](subsystems/close-lifecycle.md) |
+| `src/core/worktree-cleanup.ts` | [`subsystems/close-lifecycle`](subsystems/close-lifecycle.md) |
 | `src/internal/status-extension.ts` | [`tools/autopilot_emit_status`](tools/autopilot_emit_status.md) |
 <!-- GENERATED:read-before-edit END -->

@@ -15,8 +15,9 @@ covers_surfaces:
   - autopilot.execution_commit.v1
 covers_sources:
   - src/core/contracts/index.ts
-signature_hash: 'sha256:13c5284a7cf9be90ba2c6df340e484198016a06417322c5c44f09418650f4b87'
-body_hash: 'sha256:1d9d0bb91681dc069c58b5ad63d34126c4c2ff221b51afd2b02f48b1ebbd7a6c'
+  - src/core/names.ts
+signature_hash: 'sha256:09d5b894b45a6ee909d86cc0f308ba3e12e25aad1bf7b6bb02c08611fa3eded0'
+body_hash: 'sha256:4d9d32c4b79509ce30973a0bc16de7d1d7ecc51dd91b2a89a8f8d7e424fd228c'
 stability: stable
 ---
 

@@ -155,7 +155,9 @@ export function loadDocsModel() {
  * program-consumed navigation + coverage index (design §5.2). It is deterministic:
  * all maps are emitted with sorted keys/arrays.
  */
-export function buildManifest(model, coverageFloor) {
+export function buildManifest(model, coverageState) {
+  const coverageFloor = typeof coverageState === 'number' ? coverageState : coverageState.floor;
+  const fullCoverageRequired = typeof coverageState === 'number' ? false : coverageState.fullCoverageRequired === true;
   const surfaceToDocs = new Map();
   const sourceToDocs = new Map();
   const docEntries = {};
@@ -191,6 +193,7 @@ export function buildManifest(model, coverageFloor) {
     schema_version: MANIFEST_SCHEMA,
     generator: 'scripts/docs-generate.mjs',
     coverage_floor: coverageFloor,
+    full_coverage_required: fullCoverageRequired,
     surface_to_docs: sortedRecord(surfaceToDocs),
     source_to_docs: sortedRecord(sourceToDocs),
     docs: sortObjectKeys(docEntries),

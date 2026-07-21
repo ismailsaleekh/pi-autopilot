@@ -83,16 +83,19 @@ async function main() {
     }
   }
 
-  // Manifest: preserve the existing coverage floor (only docs-verify --write ratchets it).
+  // Manifest: preserve the existing coverage floor + full-coverage flag (only
+  // docs-verify --write ratchets them).
   const manifestAbsolute = resolve(PACKAGE_ROOT, MANIFEST_PATH);
   let existingFloor = 0;
+  let existingFullCoverage = false;
   try {
     const existing = JSON.parse(readFileSync(manifestAbsolute, 'utf8'));
     if (typeof existing.coverage_floor === 'number') existingFloor = existing.coverage_floor;
+    if (existing.full_coverage_required === true) existingFullCoverage = true;
   } catch {
     existingFloor = 0;
   }
-  const manifestText = serializeManifest(buildManifest(model, existingFloor));
+  const manifestText = serializeManifest(buildManifest(model, { floor: existingFloor, fullCoverageRequired: existingFullCoverage }));
   let manifestCurrent = '';
   try {
     manifestCurrent = readFileSync(manifestAbsolute, 'utf8');

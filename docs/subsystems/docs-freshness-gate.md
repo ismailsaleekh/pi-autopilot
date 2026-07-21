@@ -51,7 +51,7 @@ Every doc region is exactly one of two modes, each with the strongest possible c
 | C5 | Every fact-pin's compiled value equals `expect` and its `text` appears verbatim. |
 | C6 | Every intra-docs / README→docs / gateway link + `#anchor` resolves. |
 | C7 | `manifest.json` equals a fresh rebuild; no generated region has two owners. |
-| C8 | The code-computed boundary set is fully covered; the coverage floor only ratchets up. |
+| C8 | The code-computed boundary set (surface exporters + `src/cli/*.ts` + `src/core/*/index.ts` barrels) is covered; the floor only ratchets up, and once full coverage is reached it latches (`full_coverage_required`) so any new boundary file is a hard failure until documented. |
 | C9 | No banned stale phrase appears in authored prose. |
 | C10 | `docs/` + gateway ship in the npm payload. |
 | C11 | Every triggered `behavioral` doc has a current PASS semantic attestation keyed to the current `body_hash`. |

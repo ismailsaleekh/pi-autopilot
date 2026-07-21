@@ -19,7 +19,7 @@
 // doc) is deterministic here; the PRODUCTION of that attestation is a separate,
 // agentic, offline validate-role review recorded under artifacts/docs-semantic/.
 
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { resolve } from 'node:path';
 
@@ -208,13 +208,15 @@ async function run() {
   const manifestAbsolute = resolve(PACKAGE_ROOT, MANIFEST_PATH);
   const currentManifestText = existsSync(manifestAbsolute) ? readFileSync(manifestAbsolute, 'utf8') : '';
   let coverageFloor = 0;
+  let fullCoverageRequired = false;
   try {
     const parsed = JSON.parse(currentManifestText);
     if (typeof parsed.coverage_floor === 'number') coverageFloor = parsed.coverage_floor;
+    if (parsed.full_coverage_required === true) fullCoverageRequired = true;
   } catch {
     coverageFloor = 0;
   }
-  const rebuiltManifest = serializeManifest(buildManifest(model, coverageFloor));
+  const rebuiltManifest = serializeManifest(buildManifest(model, { floor: coverageFloor, fullCoverageRequired }));
   if (rebuiltManifest !== currentManifestText) {
     findings.add('C7', MANIFEST_PATH, 'manifest.json does not equal a fresh rebuild from frontmatter; run "npm run docs:attest"');
   }
@@ -249,9 +251,13 @@ async function run() {
   if (boundaryCovered < coverageFloor) {
     findings.add('C8', MANIFEST_PATH, `coverage regressed: ${String(boundaryCovered)} boundary files covered but the manifest floor is ${String(coverageFloor)} (floor may only ratchet up). Run "npm run docs:attest" only after restoring coverage.`);
   }
-  if (coverageFloor >= boundary.size && uncovered.length > 0) {
+  // Once full coverage has been reached (recorded in the manifest), it is a HARD
+  // invariant: any NEW uncovered boundary file (e.g. a brand-new subsystem barrel or
+  // CLI entrypoint) fails loudly until documented. This is what makes "add a new
+  // surface -> a doc is required" mechanical rather than advisory.
+  if (fullCoverageRequired && uncovered.length > 0) {
     for (const boundaryFile of uncovered) {
-      findings.add('C8', boundaryFile, 'boundary source has no owning doc but the coverage floor requires 100% (add it to a subsystem doc covers_sources)');
+      findings.add('C8', boundaryFile, 'new boundary source has no owning doc; full docs coverage is required (add it to a subsystem/cli/command doc covers_sources)');
     }
   }
   // Every doc must be in the manifest (orphan detection, FM9).
@@ -317,22 +323,25 @@ function stripGeneratedRegions(body) {
 }
 
 function computeBoundarySet() {
+  // The "must-document" boundary is computed FROM CODE so a genuinely new surface
+  // exporter, CLI entrypoint, or subsystem barrel is automatically required to have a
+  // doc (design section 4/17). Nothing here is a hardcoded doc list.
   const boundary = new Set(SURFACE_EXPORTER_FILES);
-  // Every CLI entrypoint.
-  boundary.add('src/cli/autopilot-agent-run.ts');
-  boundary.add('src/cli/autopilot-coordinator.ts');
-  // Every subsystem barrel (src/core/*/index.ts).
-  for (const barrel of [
-    'src/core/adjudication/index.ts',
-    'src/core/contracts/index.ts',
-    'src/core/coordination/index.ts',
-    'src/core/execution-audit/index.ts',
-    'src/core/forced-output/index.ts',
-    'src/core/lifecycle/index.ts',
-    'src/core/prompt-renderer/index.ts',
-    'src/core/state-store/index.ts',
-  ]) {
-    if (existsSync(resolve(PACKAGE_ROOT, barrel))) boundary.add(barrel);
+  // Every CLI entrypoint: src/cli/*.ts (excluding *.d.ts).
+  const cliDir = resolve(PACKAGE_ROOT, 'src/cli');
+  if (existsSync(cliDir)) {
+    for (const entry of readdirSync(cliDir)) {
+      if (entry.endsWith('.ts') && !entry.endsWith('.d.ts')) boundary.add(`src/cli/${entry}`);
+    }
+  }
+  // Every subsystem barrel: src/core/*/index.ts, discovered dynamically.
+  const coreDir = resolve(PACKAGE_ROOT, 'src/core');
+  if (existsSync(coreDir)) {
+    for (const entry of readdirSync(coreDir, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const barrel = `src/core/${entry.name}/index.ts`;
+      if (existsSync(resolve(PACKAGE_ROOT, barrel))) boundary.add(barrel);
+    }
   }
   return boundary;
 }
@@ -383,16 +392,21 @@ async function restamp(model, surfaces) {
   }
   const manifestAbsolute = resolve(PACKAGE_ROOT, MANIFEST_PATH);
   let previousFloor = 0;
+  let previousFullCoverage = false;
   try {
     const parsed = JSON.parse(readFileSync(manifestAbsolute, 'utf8'));
     if (typeof parsed.coverage_floor === 'number') previousFloor = parsed.coverage_floor;
+    if (parsed.full_coverage_required === true) previousFullCoverage = true;
   } catch {
     previousFloor = 0;
   }
   const nextFloor = Math.max(previousFloor, boundaryCovered);
-  const manifestText = serializeManifest(buildManifest(reloaded, nextFloor));
+  // full_coverage_required latches true once the boundary is fully covered and is
+  // never unset, so a later brand-new boundary file is a hard C8 failure.
+  const fullCoverageRequired = previousFullCoverage || boundaryCovered >= boundary.size;
+  const manifestText = serializeManifest(buildManifest(reloaded, { floor: nextFloor, fullCoverageRequired }));
   writeFileSync(manifestAbsolute, manifestText, 'utf8');
-  console.log(`re-stamped ${String(stamped)} doc(s); rebuilt manifest (coverage_floor=${String(nextFloor)}). read-before-edit + generated regions are owned by docs:generate.`);
+  console.log(`re-stamped ${String(stamped)} doc(s); rebuilt manifest (coverage_floor=${String(nextFloor)}, full_coverage_required=${String(fullCoverageRequired)}). read-before-edit + generated regions are owned by docs:generate.`);
   void surfaces;
   void sourceToDocs;
 }

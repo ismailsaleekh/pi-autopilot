@@ -278,105 +278,11 @@ void describe('package manifest and payload', () => {
     }
   });
 
-  void it('documents current Autopilot surfaces across package docs', async () => {
-    for (const file of DOC_FILES) {
-      const text = await docText(file);
-      for (const surface of ['autopilot-agent-run', 'autopilot-coordinator', 'autopilot-coordination', 'context_budget', 'autopilot-inject', 'autopilot-onboard', 'autopilot-handoff', 'autopilot-config', 'autopilot-claim-gc', 'autopilot-close', 'autopilot-abort']) {
-        assert.match(text, literalPattern(surface), `${file} missing ${surface}`);
-      }
-    }
-
-    const readme = await docText('README.md');
-    const plan = await docText('TEST_PLAN.md');
-    for (const surface of [
-      '/autopilot',
-      '/autopilot-inject',
-      '/autopilot-onboard',
-      '/autopilot-handoff',
-      '/autopilot-config',
-      '/autopilot-claim-gc',
-      '/autopilot-coordination',
-      '/autopilot-close',
-      '/autopilot-abort',
-      'context_budget',
-      'autopilot-agent-run',
-      '.pi/autopilot/<workstream>/',
-      'autopilot_emit_status',
-      'forced-output/status',
-      'state-store',
-      'autopilot.master_plan.v1',
-      'autopilot.decision.v1',
-      'autopilot.execution_audit.v1',
-      'perfect-quality',
-      'scope/protected-path adjudication',
-      'work-item lifecycle',
-      'terminal closure',
-      'runtime close/merge/abort',
-      'per-unit worktrees',
-      'autopilot.unit_merge.v1',
-      'validation staleness',
-      'fake-Pi',
-      'offline SDK/RPC/package gates',
-      'sparse by default',
-      '.autopilot/checkout-profile.json',
-      'autopilot_materialize_context',
-      'openai-codex/gpt-5.6-sol',
-      'openai-codex/gpt-5.6-terra',
-      'openai-codex/gpt-5.6-luna',
-      'Coordination Fabric Phases 27–35',
-      'end-to-end peer claim negotiation',
-      'change reservations',
-      'automatic terminal-evidence reconciliation',
-      'read-only canonical preflight',
-      'standalone production surfaces',
-      'transactional coordinator',
-      'durable run supervisor',
-      'session fencing',
-    ]) {
-      assert.match(readme, literalPattern(surface), `README missing ${surface}`);
-      assert.match(plan, literalPattern(surface), `TEST_PLAN missing ${surface}`);
-    }
-  });
-
-  void it('maps README promises to TEST_PLAN rows', async () => {
-    const readme = await docText('README.md');
-    const plan = await docText('TEST_PLAN.md');
-    const mappings = [
-      { claim: 'Commands', row: 'Public commands are `/autopilot`, `/autopilot-inject`, `/autopilot-onboard`, `/autopilot-handoff`, `/autopilot-config`, `/autopilot-claim-gc`, `/autopilot-coordination`, `/autopilot-close`, and `/autopilot-abort`' },
-      { claim: 'Coordination Fabric Phases 27–35', row: 'Coordination Fabric contracts and protocol lock' },
-      { claim: 'durable, resumable, one-way migration and cutover', row: 'Verified legacy migration and one-way cutover' },
-      { claim: 'change reservations', row: 'Edit lease / change reservation separation' },
-      { claim: 'end-to-end peer claim negotiation', row: 'End-to-end peer claim negotiation' },
-      { claim: 'automatic terminal-evidence reconciliation', row: 'Offline mailbox replay and automatic reconciliation' },
-      { claim: 'read-only canonical preflight', row: 'Legacy coordination preflight has real consumers' },
-      { claim: 'standalone production surfaces', row: 'Standalone package boundary' },
-      { claim: 'context_budget', row: '`context_budget` parent gate' },
-      { claim: 'Fixed model roster', row: 'Fixed parent and child model roster' },
-      { claim: 'Contracts, templates, and state-store', row: 'Contracts/templates are schema-backed and package-owned' },
-      { claim: 'perfect-quality', row: 'Perfect-quality doctrine is package-owned' },
-      { claim: 'scope/protected-path adjudication', row: 'Scope/protected-path adjudication blocks silent closure' },
-      { claim: 'work-item lifecycle', row: 'Work-item lifecycle separates transport success from closure' },
-      { claim: 'closure gates', row: 'Terminal closure gate rejects unresolved semantic risk' },
-      { claim: 'runtime close/merge/abort', row: 'Runtime close/merge/abort is deterministic and local-only' },
-      { claim: 'per-unit worktrees', row: 'Phase 2 per-unit worktrees isolate source-changing units' },
-      { claim: 'sparse by default', row: 'Sparse-by-default worktrees and checkout profiles' },
-      { claim: 'autopilot_materialize_context', row: 'Sparse materialization tool is child-only' },
-      { claim: 'forced-output/status', row: 'Forced-output/status tool is child-only' },
-      { claim: 'state-store', row: 'State store' },
-      { claim: 'autopilot-agent-run', row: '`autopilot-agent-run` bin is shipped' },
-      { claim: 'fake-Pi', row: 'Runner accepts valid fake child' },
-      { claim: 'parent prompt', row: 'Parent prompt requires `context_budget`' },
-      { claim: 'onboard prompt', row: 'Onboard prompt is read-only' },
-      { claim: 'handoff prompt', row: 'Handoff prompt uses the active workstream' },
-      { claim: 'offline SDK/RPC/package gates', row: 'Offline SDK/RPC/package gates are provider-free' },
-      { claim: 'pack:dry-run', row: 'Published package payload' },
-      { claim: 'Known limitations', row: 'Remaining limitations are documented' },
-    ];
-    for (const mapping of mappings) {
-      assert.match(readme, literalPattern(mapping.claim), `README missing claim ${mapping.claim}`);
-      assert.match(plan, literalPattern(mapping.row), `TEST_PLAN missing row ${mapping.row}`);
-    }
-  });
+  // NOTE: the former 'documents current Autopilot surfaces across package docs' and
+  // 'maps README promises to TEST_PLAN rows' presence-only checks were ABSORBED into
+  // tests/package/docs-contract.test.ts (single source of truth, design section 11).
+  // Surface coverage against code is enforced by the docs freshness gate (C1); the
+  // TEST_PLAN capability-row ledger and thin-hub README routing are asserted there.
 
   void it('keeps pack and test instructions coherent', async () => {
     const pkg = await packageJson();

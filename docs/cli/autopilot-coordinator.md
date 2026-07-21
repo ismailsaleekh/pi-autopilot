@@ -6,8 +6,9 @@ covers_surfaces:
   - autopilot-coordinator
 covers_sources:
   - src/cli/autopilot-coordinator.ts
-signature_hash: 'sha256:1a89bbead9981028b0af3e587eec96b435c6bacce76484a5345014f7ea9a3bec'
-body_hash: 'sha256:65943e4191602fe26f8f31c580ac3a17b8bada9e980118749aa799c0d7210a02'
+  - src/cli/autopilot-coordinator-bootstrap.ts
+signature_hash: 'sha256:29d0ffebe8ddb994b739dc1176426a97f475537d0436864b7bf7c28398424d33'
+body_hash: 'sha256:9809f7983db902d74b2203cb31ef525f45c2dc49b9a8aa076ccf609c506719a3'
 stability: stable
 ---
 
@@ -48,6 +49,11 @@ autopilot-coordinator recovery list|show|doctor|drain-stale-sessions --repo-root
 
 ## Behavior notes
 
+- The published bin resolves and imports the compiled bootstrap
+  (`src/cli/autopilot-coordinator-bootstrap.ts` → `dist/…/autopilot-coordinator-bootstrap.js`),
+  which publishes private bounded atomic `bootstrap/import` evidence before importing
+  the compiled coordinator. Package identity drift, symlinks, path escape, or a missing
+  compiled payload fail before spawn — never a TypeScript/PATH/cwd fallback.
 - `serve` runs the single-writer election and the coordinator until signalled;
   startup is diagnostics-only and never grants authority.
 - `migrate/verify/rollback/cutover` are the one-way legacy migration lifecycle; they

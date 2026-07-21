@@ -1,19 +1,22 @@
 {
   "schema_version": "autopilot.docs_manifest.v1",
   "generator": "scripts/docs-generate.mjs",
-  "coverage_floor": 7,
+  "coverage_floor": 17,
+  "full_coverage_required": true,
   "surface_to_docs": {
     "/autopilot": [
       "commands/autopilot"
     ],
     "/autopilot-abort": [
-      "commands/autopilot-abort"
+      "commands/autopilot-abort",
+      "subsystems/close-lifecycle"
     ],
     "/autopilot-claim-gc": [
       "commands/autopilot-claim-gc"
     ],
     "/autopilot-close": [
-      "commands/autopilot-close"
+      "commands/autopilot-close",
+      "subsystems/close-lifecycle"
     ],
     "/autopilot-config": [
       "commands/autopilot-config"
@@ -32,7 +35,8 @@
       "commands/autopilot-onboard"
     ],
     "autopilot-agent-run": [
-      "cli/autopilot-agent-run"
+      "cli/autopilot-agent-run",
+      "subsystems/runner-and-forced-output"
     ],
     "autopilot-coordinator": [
       "cli/autopilot-coordinator",
@@ -69,6 +73,7 @@
       "subsystems/contracts-and-schemas"
     ],
     "autopilot_emit_status": [
+      "subsystems/runner-and-forced-output",
       "tools/autopilot_emit_status"
     ],
     "autopilot_materialize_context": [
@@ -86,8 +91,32 @@
     "src/cli/autopilot-agent-run.ts": [
       "cli/autopilot-agent-run"
     ],
+    "src/cli/autopilot-coordinator-bootstrap.ts": [
+      "cli/autopilot-coordinator"
+    ],
     "src/cli/autopilot-coordinator.ts": [
       "cli/autopilot-coordinator"
+    ],
+    "src/cli/migration-recovery.ts": [
+      "concepts/migration-cutover"
+    ],
+    "src/core/adjudication/index.ts": [
+      "subsystems/quality-and-closure"
+    ],
+    "src/core/agent-runner.ts": [
+      "subsystems/runner-and-forced-output"
+    ],
+    "src/core/authority.ts": [
+      "subsystems/runner-and-forced-output"
+    ],
+    "src/core/checkout-profile.ts": [
+      "subsystems/worktrees"
+    ],
+    "src/core/claim-gc.ts": [
+      "commands/autopilot-claim-gc"
+    ],
+    "src/core/close-runtime.ts": [
+      "subsystems/close-lifecycle"
     ],
     "src/core/context-budget.ts": [
       "tools/context_budget"
@@ -99,16 +128,78 @@
       "subsystems/coordination"
     ],
     "src/core/coordination/deadlock.ts": [
+      "concepts/deadlock",
       "subsystems/coordination"
     ],
     "src/core/coordination/index.ts": [
       "subsystems/coordination"
     ],
+    "src/core/disk-gate.ts": [
+      "subsystems/worktrees"
+    ],
+    "src/core/execution-audit/index.ts": [
+      "subsystems/runner-and-forced-output"
+    ],
+    "src/core/execution-commit.ts": [
+      "subsystems/close-lifecycle"
+    ],
+    "src/core/forced-output/index.ts": [
+      "subsystems/runner-and-forced-output"
+    ],
+    "src/core/git-guard.ts": [
+      "subsystems/worktrees"
+    ],
+    "src/core/git-process.ts": [
+      "subsystems/worktrees"
+    ],
+    "src/core/lifecycle/index.ts": [
+      "subsystems/quality-and-closure"
+    ],
     "src/core/materialization.ts": [
+      "subsystems/worktrees",
       "tools/autopilot_materialize_context"
+    ],
+    "src/core/model-roster.ts": [
+      "subsystems/runner-and-forced-output"
+    ],
+    "src/core/names.ts": [
+      "subsystems/contracts-and-schemas"
+    ],
+    "src/core/parallel-runtime.ts": [
+      "subsystems/worktrees"
+    ],
+    "src/core/prompt-renderer/index.ts": [
+      "subsystems/runner-and-forced-output"
+    ],
+    "src/core/quality/contract.ts": [
+      "subsystems/quality-and-closure"
+    ],
+    "src/core/quality/spec-gate.ts": [
+      "subsystems/quality-and-closure"
     ],
     "src/core/scheduler-config.ts": [
       "commands/autopilot-config"
+    ],
+    "src/core/scheduler.ts": [
+      "subsystems/runner-and-forced-output"
+    ],
+    "src/core/sparse-worktree.ts": [
+      "subsystems/worktrees"
+    ],
+    "src/core/state-store/index.ts": [
+      "subsystems/quality-and-closure"
+    ],
+    "src/core/unit-failure.ts": [
+      "subsystems/runner-and-forced-output"
+    ],
+    "src/core/unit-merge.ts": [
+      "subsystems/close-lifecycle"
+    ],
+    "src/core/validation-staleness.ts": [
+      "subsystems/close-lifecycle"
+    ],
+    "src/core/worktree-cleanup.ts": [
+      "subsystems/close-lifecycle"
     ],
     "src/internal/status-extension.ts": [
       "tools/autopilot_emit_status"
@@ -147,10 +238,11 @@
         "autopilot-coordinator"
       ],
       "covers_sources": [
+        "src/cli/autopilot-coordinator-bootstrap.ts",
         "src/cli/autopilot-coordinator.ts"
       ],
-      "signature_hash": "sha256:1a89bbead9981028b0af3e587eec96b435c6bacce76484a5345014f7ea9a3bec",
-      "body_hash": "sha256:65943e4191602fe26f8f31c580ac3a17b8bada9e980118749aa799c0d7210a02",
+      "signature_hash": "sha256:29d0ffebe8ddb994b739dc1176426a97f475537d0436864b7bf7c28398424d33",
+      "body_hash": "sha256:9809f7983db902d74b2203cb31ef525f45c2dc49b9a8aa076ccf609c506719a3",
       "semantic_attestation": null
     },
     "commands/autopilot": {
@@ -184,9 +276,11 @@
       "covers_surfaces": [
         "/autopilot-claim-gc"
       ],
-      "covers_sources": [],
-      "signature_hash": null,
-      "body_hash": null,
+      "covers_sources": [
+        "src/core/claim-gc.ts"
+      ],
+      "signature_hash": "sha256:a6472737429f22fb020001b6c9985fed9fdfc6091a199da3d844a4e69cfe27f0",
+      "body_hash": "sha256:0e8c3dc93b046114d277d5adda933fab590ce3138d66a0fdf10bc8ca2c5815a8",
       "semantic_attestation": null
     },
     "commands/autopilot-close": {
@@ -263,6 +357,140 @@
       "body_hash": null,
       "semantic_attestation": null
     },
+    "concepts/admission": {
+      "mode": "authored",
+      "review_policy": "contract",
+      "stability": "stable",
+      "covers_surfaces": [],
+      "covers_sources": [],
+      "signature_hash": null,
+      "body_hash": null,
+      "semantic_attestation": null
+    },
+    "concepts/deadlock": {
+      "mode": "mixed",
+      "review_policy": "behavioral",
+      "stability": "stable",
+      "covers_surfaces": [],
+      "covers_sources": [
+        "src/core/coordination/deadlock.ts"
+      ],
+      "signature_hash": "sha256:9766db34befae19994853481579db521d05a6e2155c560cecdbedef60e654c3c",
+      "body_hash": "sha256:e2d9297fef650edd3aa669a5cb9968faa882e2e1678b7c504873c9ef3d05b5a9",
+      "semantic_attestation": null
+    },
+    "concepts/generations-and-fencing": {
+      "mode": "authored",
+      "review_policy": "contract",
+      "stability": "stable",
+      "covers_surfaces": [],
+      "covers_sources": [],
+      "signature_hash": null,
+      "body_hash": null,
+      "semantic_attestation": null
+    },
+    "concepts/leases-and-observations": {
+      "mode": "authored",
+      "review_policy": "contract",
+      "stability": "stable",
+      "covers_surfaces": [],
+      "covers_sources": [],
+      "signature_hash": null,
+      "body_hash": null,
+      "semantic_attestation": null
+    },
+    "concepts/migration-cutover": {
+      "mode": "mixed",
+      "review_policy": "contract",
+      "stability": "stable",
+      "covers_surfaces": [],
+      "covers_sources": [
+        "src/cli/migration-recovery.ts"
+      ],
+      "signature_hash": "sha256:572bf897cd91ce0e6023ae60cd84c52c8d4a3abe9c84155412e9cacc9717a473",
+      "body_hash": "sha256:9e6ecf62ca7ad97a25396e45a195419f147110edeb52a29b393389851ff2c53c",
+      "semantic_attestation": null
+    },
+    "concepts/reservations": {
+      "mode": "authored",
+      "review_policy": "contract",
+      "stability": "stable",
+      "covers_surfaces": [],
+      "covers_sources": [],
+      "signature_hash": null,
+      "body_hash": null,
+      "semantic_attestation": null
+    },
+    "concepts/sagas": {
+      "mode": "authored",
+      "review_policy": "contract",
+      "stability": "stable",
+      "covers_surfaces": [],
+      "covers_sources": [],
+      "signature_hash": null,
+      "body_hash": null,
+      "semantic_attestation": null
+    },
+    "concepts/terminal-evidence": {
+      "mode": "authored",
+      "review_policy": "contract",
+      "stability": "stable",
+      "covers_surfaces": [],
+      "covers_sources": [],
+      "signature_hash": null,
+      "body_hash": null,
+      "semantic_attestation": null
+    },
+    "operations/abort-workstream": {
+      "mode": "authored",
+      "review_policy": "contract",
+      "stability": "stable",
+      "covers_surfaces": [],
+      "covers_sources": [],
+      "signature_hash": null,
+      "body_hash": null,
+      "semantic_attestation": null
+    },
+    "operations/close-workstream": {
+      "mode": "authored",
+      "review_policy": "contract",
+      "stability": "stable",
+      "covers_surfaces": [],
+      "covers_sources": [],
+      "signature_hash": null,
+      "body_hash": null,
+      "semantic_attestation": null
+    },
+    "operations/crash-recovery": {
+      "mode": "authored",
+      "review_policy": "contract",
+      "stability": "stable",
+      "covers_surfaces": [],
+      "covers_sources": [],
+      "signature_hash": null,
+      "body_hash": null,
+      "semantic_attestation": null
+    },
+    "operations/handoff": {
+      "mode": "authored",
+      "review_policy": "contract",
+      "stability": "stable",
+      "covers_surfaces": [],
+      "covers_sources": [],
+      "signature_hash": null,
+      "body_hash": null,
+      "semantic_attestation": null
+    },
+    "operations/start-run": {
+      "mode": "authored",
+      "review_policy": "contract",
+      "stability": "stable",
+      "covers_surfaces": [],
+      "covers_sources": [],
+      "signature_hash": null,
+      "body_hash": null,
+      "semantic_attestation": null
+    },
     "read-before-edit": {
       "mode": "generated",
       "review_policy": "contract",
@@ -271,6 +499,35 @@
       "covers_sources": [],
       "signature_hash": null,
       "body_hash": null,
+      "semantic_attestation": null
+    },
+    "runtime-state/paths": {
+      "mode": "authored",
+      "review_policy": "contract",
+      "stability": "stable",
+      "covers_surfaces": [],
+      "covers_sources": [],
+      "signature_hash": null,
+      "body_hash": null,
+      "semantic_attestation": null
+    },
+    "subsystems/close-lifecycle": {
+      "mode": "authored",
+      "review_policy": "behavioral",
+      "stability": "stable",
+      "covers_surfaces": [
+        "/autopilot-abort",
+        "/autopilot-close"
+      ],
+      "covers_sources": [
+        "src/core/close-runtime.ts",
+        "src/core/execution-commit.ts",
+        "src/core/unit-merge.ts",
+        "src/core/validation-staleness.ts",
+        "src/core/worktree-cleanup.ts"
+      ],
+      "signature_hash": "sha256:008aa231a2414d2bcb29cc62696f7587634857ea043568428bd1f286fbc446b9",
+      "body_hash": "sha256:4d8335f54b7af16e0cb7758ec3c4ca3bf247eeb91ed6697e1bb44ac60da6a929",
       "semantic_attestation": null
     },
     "subsystems/contracts-and-schemas": {
@@ -290,10 +547,11 @@
         "autopilot.unit_spec.v1"
       ],
       "covers_sources": [
-        "src/core/contracts/index.ts"
+        "src/core/contracts/index.ts",
+        "src/core/names.ts"
       ],
-      "signature_hash": "sha256:13c5284a7cf9be90ba2c6df340e484198016a06417322c5c44f09418650f4b87",
-      "body_hash": "sha256:1d9d0bb91681dc069c58b5ad63d34126c4c2ff221b51afd2b02f48b1ebbd7a6c",
+      "signature_hash": "sha256:09d5b894b45a6ee909d86cc0f308ba3e12e25aad1bf7b6bb02c08611fa3eded0",
+      "body_hash": "sha256:4d9d32c4b79509ce30973a0bc16de7d1d7ecc51dd91b2a89a8f8d7e424fd228c",
       "semantic_attestation": null
     },
     "subsystems/coordination": {
@@ -322,6 +580,62 @@
       "covers_sources": [],
       "signature_hash": null,
       "body_hash": null,
+      "semantic_attestation": null
+    },
+    "subsystems/quality-and-closure": {
+      "mode": "authored",
+      "review_policy": "behavioral",
+      "stability": "stable",
+      "covers_surfaces": [],
+      "covers_sources": [
+        "src/core/adjudication/index.ts",
+        "src/core/lifecycle/index.ts",
+        "src/core/quality/contract.ts",
+        "src/core/quality/spec-gate.ts",
+        "src/core/state-store/index.ts"
+      ],
+      "signature_hash": "sha256:4364c2c6133369f29b7b1270545272492ed677c8048cb0eab4faf99a558a6408",
+      "body_hash": "sha256:1934cbfc1425b3718ced056044a3c8c7ae558b797120d69642681f05108d7290",
+      "semantic_attestation": null
+    },
+    "subsystems/runner-and-forced-output": {
+      "mode": "authored",
+      "review_policy": "behavioral",
+      "stability": "stable",
+      "covers_surfaces": [
+        "autopilot-agent-run",
+        "autopilot_emit_status"
+      ],
+      "covers_sources": [
+        "src/core/agent-runner.ts",
+        "src/core/authority.ts",
+        "src/core/execution-audit/index.ts",
+        "src/core/forced-output/index.ts",
+        "src/core/model-roster.ts",
+        "src/core/prompt-renderer/index.ts",
+        "src/core/scheduler.ts",
+        "src/core/unit-failure.ts"
+      ],
+      "signature_hash": "sha256:8bc80a9446fa7d7930f3c67100e313588fdf1d8facf6b8a1c8edc342c5908cc1",
+      "body_hash": "sha256:2f27474fcea9823a35921bf9d4a57a16d3ac7d88e4bf928068a6ac82eddfeb60",
+      "semantic_attestation": null
+    },
+    "subsystems/worktrees": {
+      "mode": "authored",
+      "review_policy": "behavioral",
+      "stability": "stable",
+      "covers_surfaces": [],
+      "covers_sources": [
+        "src/core/checkout-profile.ts",
+        "src/core/disk-gate.ts",
+        "src/core/git-guard.ts",
+        "src/core/git-process.ts",
+        "src/core/materialization.ts",
+        "src/core/parallel-runtime.ts",
+        "src/core/sparse-worktree.ts"
+      ],
+      "signature_hash": "sha256:0eeff457993c215861207651e76cdbb50fde38538a0d897d2ea49ef9640ea902",
+      "body_hash": "sha256:fa7fe6840faf0f28c169675fa484fff8cbaba839561ca9edd89b51be3c352c19",
       "semantic_attestation": null
     },
     "tools/autopilot_emit_status": {
@@ -376,6 +690,16 @@
       ],
       "signature_hash": "sha256:4e147d6b32a3a88923a3b886d262a4384fb0dcd17c2d53412f2cf73e047c54f4",
       "body_hash": "sha256:a2d8cd38e853fafe2788e23acfa84ce775d2100fe66c38c7de4940cb7316b38d",
+      "semantic_attestation": null
+    },
+    "troubleshooting/failures": {
+      "mode": "authored",
+      "review_policy": "contract",
+      "stability": "stable",
+      "covers_surfaces": [],
+      "covers_sources": [],
+      "signature_hash": null,
+      "body_hash": null,
       "semantic_attestation": null
     }
   }

@@ -110,4 +110,44 @@ Before editing any source, consult [`read-before-edit.md`](read-before-edit.md).
 | Subsystem | Doc |
 |---|---|
 | Coordination Fabric | [`subsystems/coordination.md`](subsystems/coordination.md) |
+| Close / merge / abort lifecycle | [`subsystems/close-lifecycle.md`](subsystems/close-lifecycle.md) |
+| Worktrees + sparse checkout + git guard | [`subsystems/worktrees.md`](subsystems/worktrees.md) |
+| Runner + forced output + execution audit | [`subsystems/runner-and-forced-output.md`](subsystems/runner-and-forced-output.md) |
+| Quality vNext + terminal closure | [`subsystems/quality-and-closure.md`](subsystems/quality-and-closure.md) |
+| Contracts + schemas | [`subsystems/contracts-and-schemas.md`](subsystems/contracts-and-schemas.md) |
 | Docs freshness gate | [`subsystems/docs-freshness-gate.md`](subsystems/docs-freshness-gate.md) |
+
+## Concepts (invariants + rationale)
+
+| Concept | Doc |
+|---|---|
+| Observations / edit leases / EXCLUSIVE | [`concepts/leases-and-observations.md`](concepts/leases-and-observations.md) |
+| Change reservations + integration risk | [`concepts/reservations.md`](concepts/reservations.md) |
+| Generations + session fencing | [`concepts/generations-and-fencing.md`](concepts/generations-and-fencing.md) |
+| Owner-scoped worktree sagas | [`concepts/sagas.md`](concepts/sagas.md) |
+| S1 / cf50 admission | [`concepts/admission.md`](concepts/admission.md) |
+| Wait-for graph + deadlock | [`concepts/deadlock.md`](concepts/deadlock.md) |
+| Terminal evidence + reconciliation | [`concepts/terminal-evidence.md`](concepts/terminal-evidence.md) |
+| One-way migration + cutover | [`concepts/migration-cutover.md`](concepts/migration-cutover.md) |
+
+## Runtime state
+
+| Topic | Doc |
+|---|---|
+| Full path schema | [`runtime-state/paths.md`](runtime-state/paths.md) |
+
+## Operations (task recipes)
+
+| Task | Doc |
+|---|---|
+| Start or resume a run | [`operations/start-run.md`](operations/start-run.md) |
+| Hand off a run | [`operations/handoff.md`](operations/handoff.md) |
+| Close (land) a workstream | [`operations/close-workstream.md`](operations/close-workstream.md) |
+| Abort a workstream | [`operations/abort-workstream.md`](operations/abort-workstream.md) |
+| Crash / interrupted-operation recovery | [`operations/crash-recovery.md`](operations/crash-recovery.md) |
+
+## Troubleshooting
+
+| Topic | Doc |
+|---|---|
+| Symptom → cause → fix | [`troubleshooting/failures.md`](troubleshooting/failures.md) |
