@@ -67,7 +67,7 @@ interface BootstrapFixture {
  * branch, and return the attach-run payload whose prospective run/resource
  * byte-equal the rows the transaction will create (created_event_seq=1).
  */
-async function buildBootstrap(harness: Harness, suffix: string): Promise<BootstrapFixture> {
+async function buildBootstrap(harness: Harness, suffix: string, resourceOverrides: Readonly<Record<string, unknown>> = {}): Promise<BootstrapFixture> {
   const repoId = `graph-repo-${suffix}`;
   const workstreamRun = `run-${suffix}`;
   const autopilotId = `autopilot-${suffix}`;
@@ -77,12 +77,17 @@ async function buildBootstrap(harness: Harness, suffix: string): Promise<Bootstr
   const packageCommit = 'a'.repeat(40);
   const packageTree = 'b'.repeat(40);
 
+  // One shared resource object flows into all three prospective positions
+  // (bootstrap.prospective_resource, attach.run_resource, and
+  // attach.bootstrap_graph.prospective_resource); overrides therefore keep the
+  // three byte-equal while letting a negative decouple target_base_sha from the
+  // content-result commit.
   const runResource: Readonly<Record<string, unknown>> = {
     schema_version: 'autopilot.coordination_run_resource.v1', repo_id: repoId, workstream_run: workstreamRun,
     source_repo: harness.repository, git_common_dir: join(harness.repository, '.git'), worktree_root: join(harness.stateRoot, 'worktrees', repoId),
     main_worktree_path: join(harness.stateRoot, 'worktrees', repoId, 'active', workstreamRun, 'main'), runtime_root: join(harness.stateRoot, 'worktrees', repoId, 'active', workstreamRun, 'main', '.pi', 'autopilot', workstream),
     branch: `autopilot/${workstreamRun}`, target_branch: 'main', target_base_sha: contentCommit, origin_url: null,
-    started_at: '2026-07-19T00:00:00.000Z', version: 1,
+    started_at: '2026-07-19T00:00:00.000Z', version: 1, ...resourceOverrides,
   };
   // The exact run row the transaction creates at B=1.
   const prospectiveRun: Readonly<Record<string, unknown>> = {
@@ -210,6 +215,34 @@ void describe('D65 semantic-graph bootstrap attach-run transaction', () => {
       const catalog = await harness.client.query('run-catalog', fixture.repoId, null);
       const runs = catalog.payload['runs'];
       assert.equal(Array.isArray(runs) && runs.length === 0, true);
+    } finally {
+      await harness.server.close();
+      await rm(harness.root, { recursive: true, force: true });
+    }
+  });
+
+  void it('rejects a bootstrap whose run resource target_base_sha is not the content-result commit', async () => {
+    const harness = await createHarness();
+    try {
+      // A real, distinct B0-style commit that is NOT the content-result commit.
+      const contentCommit = git(harness.repository, ['rev-parse', 'HEAD']);
+      await writeFile(join(harness.repository, 'later.txt'), 'a distinct real commit\n', 'utf8');
+      git(harness.repository, ['add', '.']);
+      git(harness.repository, ['commit', '-m', 'distinct commit']);
+      const otherCommit = git(harness.repository, ['rev-parse', 'HEAD']);
+      git(harness.repository, ['checkout', contentCommit]);
+      assert.notEqual(otherCommit, contentCommit);
+      // All three prospective_resource copies still byte-equal each other, so the
+      // prospective checks pass; only the frozen target_base_sha=content_commit
+      // binding catches the substitution.
+      const fixture = await buildBootstrap(harness, 'targetbase', { target_base_sha: otherCommit });
+      await assert.rejects(
+        () => harness.client.mutate('attach-run', { repoId: fixture.repoId, workstreamRun: fixture.workstreamRun, sessionId: null, fencingGeneration: null, expectedVersion: 0, idempotencyKey: 'attach-run-targetbase' }, fixture.attachPayload),
+        /run resource target_base_sha must equal the content-result commit/u,
+      );
+      // No repository/run rows leaked from the rolled-back transaction.
+      const catalog = await harness.client.query('run-catalog', fixture.repoId, null);
+      assert.equal(Array.isArray(catalog.payload['runs']) && (catalog.payload['runs'] as unknown[]).length === 0, true);
     } finally {
       await harness.server.close();
       await rm(harness.root, { recursive: true, force: true });

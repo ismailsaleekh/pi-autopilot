@@ -42,6 +42,17 @@ export function deriveD65BootstrapTransaction(input) {
     requireByteEqual(bootstrap.prospective_resource, input.runResource, 'bootstrap prospective_resource');
     requireByteEqual(payload.prospective_run, input.run, 'attach-run bootstrap_graph prospective_run');
     requireByteEqual(payload.prospective_resource, input.runResource, 'attach-run bootstrap_graph prospective_resource');
+    // Byte-for-contract (freeze §9.1; fresh plan §2.3 line 84/96): the prospective
+    // resource `target_base_sha` equals the row content-result commit, NOT B0 or
+    // the separate bootstrap/trust overlay commit. The launch policy separately
+    // binds common B0 through `base_commit`; substituting B0 for the content result
+    // (or the content result for B0) in EITHER position rejects. Because the
+    // prospective checks above already prove `input.runResource` byte-equals the
+    // signed/created resource, binding the created row's target here fixes the
+    // resource position for the whole D65 run identity.
+    const resourceTargetBaseSha = input.runResource['target_base_sha'];
+    if (typeof resourceTargetBaseSha !== 'string' || resourceTargetBaseSha !== bootstrap.content_commit)
+        throw new CoordinationRuntimeError('invalid-request', 'bootstrap run resource target_base_sha must equal the content-result commit (content_commit)', [String(resourceTargetBaseSha), bootstrap.content_commit]);
     const bootstrapArtifactId = `semantic-graph-bootstrap:${input.workstreamRun}`;
     const bootstrapArtifact = Object.freeze({
         schema_version: 'autopilot.authoritative_artifact.v1',

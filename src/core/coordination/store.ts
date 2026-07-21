@@ -23,7 +23,9 @@ import { proveStructuredAttemptTerminal, type TrustedTerminalAttemptProof } from
 import { classifyCoordinationIntegrationConflict } from './integration-conflicts.ts';
 import { deriveD65BootstrapTransaction, type D65GitBlobObserver } from './d65-bootstrap-transaction.ts';
 import { assertD65AppendOnlyAttempt, assertD65TerminalEffectSetsExact, buildD65PreparedTerminalIntentV2, computeD65ObligationPartition, d65TerminalIntentId } from './d65-terminal-intent.ts';
-import { parseD65RunTerminalIntentV2, type D65CompleteGraph, type D65RunTerminalIntentV2 } from './d65-semantic-graph.ts';
+import { parseD65RunTerminalIntentV2, parseD65SemanticGraphBootstrap, type D65CompleteGraph, type D65RunTerminalIntentV2 } from './d65-semantic-graph.ts';
+import { parseD65LaunchPolicy } from './d65-launch-policy.ts';
+import { parseD65TrustAnchorSpki, verifyD65Signature } from './d65-trust.ts';
 import { d65SemanticGraphArtifactId, d65SemanticGraphSequenceFromArtifactId, validateD65GraphPublication } from './d65-graph-publication.ts';
 import { assertD65QueueProjectionCounts, assertD65QueueProjectionMembers, D65_QUEUE_KEYS } from './d65-graph-queues.ts';
 import { assertD65QueueMemberValues, d65ProjectionIdentities, loadD65CompleteGraph } from './d65-graph-loader.ts';
@@ -4099,6 +4101,12 @@ export class CoordinatorStore {
       if (sourceType !== 'mission' && sourceType !== 'master-plan' && sourceType !== 'task') throw new CoordinationRuntimeError('invalid-request', 'authoritative artifact source_type is unsupported');
       const sourceScope = payloadString(request.payload, 'source_scope');
       if (sourceScope !== 'repository' && sourceScope !== 'run-main') throw new CoordinationRuntimeError('invalid-request', 'authoritative artifact source_scope is unsupported');
+      const documentSchemaVersion = payloadString(request.payload, 'document_schema_version');
+      // D65 package-run documents use the frozen existing task/run-main
+      // registration surface. Reject a launch policy before resolving or reading
+      // any repository-scoped path; repository scope belongs only to bootstrap.
+      if (documentSchemaVersion === 'autopilot.launch_policy.v1' && (sourceType !== 'task' || sourceScope !== 'run-main')) throw new CoordinationRuntimeError('invalid-request', 'launch-policy-invalid: launch policy registration requires source_type=task and source_scope=run-main', [sourceType, sourceScope]);
+      if (documentSchemaVersion === 'autopilot.launch_policy.v1' && run.status !== 'active') throw new CoordinationRuntimeError('invalid-request', 'launch-policy-invalid: launch policy registration requires an active run', [run.status]);
       const repository = repositoryFromRow(asRow(this.#db.prepare('SELECT * FROM repositories WHERE repo_id=?').get(run.repo_id), 'authoritative artifact repository'));
       const sourceRoot = sourceScope === 'repository' ? repository.canonical_root : this.#requireRunMainRoot(run.repo_id, run.workstream_run);
       const ref = payloadString(request.payload, 'ref');
@@ -4114,8 +4122,19 @@ export class CoordinatorStore {
       const evidence = { ref, sha256: payloadString(request.payload, 'sha256') as `sha256:${string}` };
       const actual = `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
       if (actual !== evidence.sha256) throw new CoordinationRuntimeError('invalid-request', 'authoritative artifact hash does not match immutable Git blob bytes', [evidence.sha256, actual]);
-      const documentSchemaVersion = payloadString(request.payload, 'document_schema_version');
-      validateAuthoritativeCoordinationDocument(sourceType, documentSchemaVersion, bytes);
+      if (documentSchemaVersion === 'autopilot.launch_policy.v1') {
+        try {
+          const rawPolicy = parseJsonObject(new TextDecoder('utf-8', { fatal: true }).decode(bytes), 'launch policy');
+          for (const field of ['parallel_cap', 'maximum_parallel_cap', 'expected_checkout_units'] as const) {
+            const value = rawPolicy[field];
+            if (typeof value === 'number' && value !== 1) throw new CoordinationRuntimeError('invalid-request', `launch-policy-cap-unauthorized: ${field} must remain exactly 1 under D65`, [`${field}=${String(value)}`]);
+          }
+          validateAuthoritativeCoordinationDocument(sourceType, documentSchemaVersion, bytes);
+        } catch (error) {
+          if (error instanceof CoordinationRuntimeError && error.message.includes('launch-policy-cap-unauthorized:')) throw error;
+          throw new CoordinationRuntimeError('invalid-request', 'launch-policy-invalid: policy document is malformed', [error instanceof Error ? error.message : String(error)]);
+        }
+      } else validateAuthoritativeCoordinationDocument(sourceType, documentSchemaVersion, bytes);
       const artifactId = payloadString(request.payload, 'artifact_id');
       // D65-A2: a complete-graph root registers at its publication commit H with
       // non-self-referential publication rules (sole-parent-G, graph-only diff,
@@ -4123,6 +4142,17 @@ export class CoordinatorStore {
       // semantic-graph:<20-digit-sequence>; graph_commit is H = current HEAD.
       if (documentSchemaVersion === 'autopilot.semantic_graph.v1') {
         this.#validateD65GraphRegistration(run.repo_id, run.workstream_run, sourceRoot, gitCommit, ref, evidence.sha256, bytes, artifactId);
+      }
+      // D65-A1 immutable cap-one launch policy (fresh plan §2.3 line 84/86/110,
+      // freeze §9.4). The signed policy registers through this existing action;
+      // beyond the structural parse it must be coordinator-AUTHENTICATED against
+      // the accepted bootstrap artifact: SPKI/signature, package/B0/run/roster/
+      // graph-digest identity, one-parent one-policy-path commit descending from
+      // content_result_commit, mode-0700 evidence root, cap/max/expected==1, and
+      // policy-before-parent-planning ordering. This runs pre-commit; a failure
+      // rolls the whole register transaction back.
+      if (documentSchemaVersion === 'autopilot.launch_policy.v1') {
+        this.#validateD65LaunchPolicyRegistration(run.repo_id, run.workstream_run, sourceRoot, gitCommit, ref, bytes);
       }
       if (this.#db.prepare('SELECT entity_id FROM authoritative_artifacts WHERE repo_id=? AND entity_id=?').get(run.repo_id, artifactId) !== undefined) throw new CoordinationRuntimeError('stale-version', 'authoritative artifact id already exists');
       const seq = this.#nextEventSequence(run.repo_id);
@@ -4512,6 +4542,145 @@ export class CoordinatorStore {
     if (sqlInteger(resultRow, 'committed_event_seq') !== expectedR) throw new CoordinationRuntimeError('invalid-state', 'committed graph registration idempotency result does not commit exactly R=E+1', [`committed_event_seq=${String(sqlInteger(resultRow, 'committed_event_seq'))}`, `expected_R=${String(expectedR)}`]);
     if (sqlString(resultRow, 'request_sha256') !== sqlString(eventRow, 'request_sha256')) throw new CoordinationRuntimeError('invalid-state', 'committed graph registration event and idempotency result bind different request digests', [input.artifactId]);
     return { registrationEventSeq: expectedR };
+  }
+
+  // D65-A1 immutable cap-one launch-policy authority. Structural parsing alone
+  // is insufficient: registration authenticates the operator-signed policy
+  // against the accepted bootstrap/SPKI, the exact package/run identities, the
+  // common B0 derived from content_result_commit's sole parent, and the
+  // one-parent/one-path policy commit. The signed roster digest becomes policy
+  // authority here; later runtime gates compare the actual roster to it because
+  // D65 freezes no second coordinator roster artifact. v1 is the sole D65 edge.
+  #validateD65LaunchPolicyRegistration(repoId: string, workstreamRun: string, sourceRoot: string, policyCommit: string, ref: string, policyBytes: Uint8Array): void {
+    const invalid = (issue: string, evidence: readonly string[] = []): never => { throw new CoordinationRuntimeError('invalid-request', `launch-policy-invalid: ${issue}`, evidence); };
+    const casConflict = (issue: string, evidence: readonly string[] = []): never => { throw new CoordinationRuntimeError('invalid-request', `launch-policy-cas-conflict: ${issue}`, evidence); };
+    const policy = parseD65LaunchPolicy(parseJsonObject(new TextDecoder('utf-8', { fatal: true }).decode(policyBytes), 'launch policy'));
+    if (ref !== `authority/launch-policies/${policy.policy_id}.json`) invalid('policy path must be authority/launch-policies/<policy_id>.json', [ref, policy.policy_id]);
+    if (policy.repo_id !== repoId || policy.workstream_run !== workstreamRun) invalid('policy repo/run identity does not match the registering run', [policy.repo_id, policy.workstream_run]);
+    // Artifact IDs remain caller-chosen under API 12, so policy-chain CAS is
+    // keyed by run + document schema. D65 authorizes only absent->v1: any
+    // existing policy is rollback/same-version divergence, and absent->vN>1 is
+    // an initial gap. Both fail with the frozen CAS literal before deeper work.
+    const existingPolicy = this.#db.prepare("SELECT entity_id FROM authoritative_artifacts WHERE repo_id=? AND source_run=? AND json_extract(payload_json, '$.document_schema_version')='autopilot.launch_policy.v1' LIMIT 1").get(repoId, workstreamRun);
+    if (existingPolicy !== undefined) casConflict('an accepted launch policy already exists for this run (D65 permits only absent-to-v1)', [sqlString(existingPolicy, 'entity_id')]);
+    if (policy.policy_version !== 1) casConflict('the initial policy chain must begin at version 1 (gap)', [`policy_version=${String(policy.policy_version)}`]);
+
+    // The deterministic bootstrap artifact is the only accepted source for the
+    // row-specific content result, package tuple, attach receipt, and SPKI.
+    const bootstrapArtifact = authoritativeArtifactFromRow(asRow(this.#db.prepare('SELECT * FROM authoritative_artifacts WHERE repo_id=? AND entity_id=?').get(repoId, `semantic-graph-bootstrap:${workstreamRun}`), 'launch policy bootstrap artifact'));
+    if (bootstrapArtifact.source_run !== workstreamRun || bootstrapArtifact.source_type !== 'task' || bootstrapArtifact.source_scope !== 'repository' || bootstrapArtifact.document_schema_version !== 'autopilot.semantic_graph_bootstrap.v1') invalid('accepted bootstrap artifact identity is not the frozen D65 bootstrap row', [bootstrapArtifact.artifact_id]);
+    const bootstrap = parseD65SemanticGraphBootstrap(parseJsonObject(new TextDecoder('utf-8', { fatal: true }).decode(this.#loadEvidenceArtifact(repoId, bootstrapArtifact.evidence)), 'launch policy bootstrap envelope'));
+    if (bootstrap.repo_id !== repoId || bootstrap.workstream_run !== workstreamRun) invalid('accepted bootstrap envelope does not name the registering run', [bootstrap.repo_id, bootstrap.workstream_run]);
+    const anchorBytes = this.#loadEvidenceArtifact(repoId, { ref: bootstrap.trust_anchor_ref, sha256: bootstrap.trust_anchor_sha256 });
+    const anchor = parseD65TrustAnchorSpki(anchorBytes);
+
+    // Byte-for-contract, bootstrap.content_commit is content_result_commit and
+    // MUST have exactly one parent: the distinct common B0. Resolve both trees
+    // from Git rather than trusting or conflating the signed fields.
+    const contentParentListing = this.#gitQueryText(sourceRoot, { kind: 'rev-list-parents', revision: bootstrap.content_commit }, 'invalid-request', 'bootstrap content-result parent inspection failed');
+    const contentParents = (contentParentListing ?? '').trim().split(/\s+/u).filter((entry) => entry.length > 0);
+    const b0Commit = contentParents.length === 2 ? contentParents[1] : undefined;
+    if (b0Commit === undefined) throw new CoordinationRuntimeError('invalid-request', 'launch-policy-invalid: accepted content_result_commit must have exactly one parent B0', [`parents=${contentParents.slice(1).join(',') || 'none'}`]);
+    const contentResultTree = this.#gitQueryText(sourceRoot, { kind: 'resolve-tree', revision: bootstrap.content_commit }, 'invalid-request', 'bootstrap content-result tree inspection failed');
+    if (contentResultTree !== bootstrap.content_tree) invalid('accepted bootstrap content_tree does not match content_result_commit', [String(contentResultTree), bootstrap.content_tree]);
+    const b0Tree = this.#gitQueryText(sourceRoot, { kind: 'resolve-tree', revision: b0Commit }, 'invalid-request', 'B0 tree inspection failed');
+    if (b0Tree === null) throw new CoordinationRuntimeError('invalid-request', 'launch-policy-invalid: B0 tree is not resolvable from content_result_commit', [b0Commit]);
+
+    if (policy.program_id !== bootstrap.program_id) invalid('policy program_id does not match the accepted bootstrap', [policy.program_id, bootstrap.program_id]);
+    if (policy.base_commit !== b0Commit) invalid('policy base_commit is not B0 (content_result_commit substitution)', [policy.base_commit, b0Commit]);
+    if (policy.base_tree !== b0Tree) invalid('policy base_tree is not the resolved B0 tree', [policy.base_tree, b0Tree]);
+    if (policy.package_commit !== bootstrap.package_commit) invalid('policy package_commit is not the accepted bootstrap package commit', [policy.package_commit, bootstrap.package_commit]);
+    if (policy.package_tree !== bootstrap.package_tree) invalid('policy package_tree is not the accepted bootstrap package tree', [policy.package_tree, bootstrap.package_tree]);
+    if (policy.bootstrap_graph_sha256 !== bootstrapArtifact.evidence.sha256) invalid('policy bootstrap_graph_sha256 is not the accepted bootstrap digest', [policy.bootstrap_graph_sha256, bootstrapArtifact.evidence.sha256]);
+    if (policy.bootstrap_receipt_event_seq !== bootstrapArtifact.registered_event_seq) invalid('policy bootstrap_receipt_event_seq is not the bootstrap attach receipt', [`receipt=${String(policy.bootstrap_receipt_event_seq)}`, `B=${String(bootstrapArtifact.registered_event_seq)}`]);
+    if (policy.trust_anchor_ref !== bootstrap.trust_anchor_ref) invalid('policy trust_anchor_ref is not the accepted bootstrap trust anchor ref (path substitution)', [policy.trust_anchor_ref, bootstrap.trust_anchor_ref]);
+    if (policy.trust_anchor_sha256 !== anchor.sha256 || policy.trust_anchor_sha256 !== bootstrap.trust_anchor_sha256) invalid('policy trust_anchor_sha256 is not the accepted 44-byte SPKI digest (key substitution)', [policy.trust_anchor_sha256, anchor.sha256]);
+    if (policy.signer_key_id !== anchor.sha256) invalid('policy signer_key_id is not the accepted trust anchor SPKI digest', [policy.signer_key_id, anchor.sha256]);
+
+    // Signatures cover domain || RFC-8785(policy without signature), with NO LF.
+    const { signature: _signature, ...policyWithoutSignature } = policy;
+    void _signature;
+    const signedMessage = new TextEncoder().encode(canonicalJson(policyWithoutSignature));
+    if (!verifyD65Signature({ trustAnchor: anchor, purpose: 'launch-policy', message: signedMessage, signature: policy.signature })) invalid('policy signature is not a valid domain-separated Ed25519 signature by the accepted operator key');
+
+    // The policy binds the canonical realpath of one exact mode-0700 directory.
+    // It must be authority-distinct from every clone/worktree/runtime/state root
+    // visible to this coordinator. The external launch audit proves the same
+    // relation across the six separately rooted coordinators.
+    let evidenceRootReal: string;
+    let evidenceRootStat: ReturnType<typeof lstatSync>;
+    try {
+      const before = lstatSync(policy.program_evidence_root);
+      evidenceRootReal = realpathSync(policy.program_evidence_root);
+      const after = lstatSync(policy.program_evidence_root);
+      const realAfter = realpathSync(policy.program_evidence_root);
+      if (before.dev !== after.dev || before.ino !== after.ino || before.mode !== after.mode || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs || evidenceRootReal !== realAfter) invalid('policy program_evidence_root changed during authentication', [policy.program_evidence_root]);
+      evidenceRootStat = after;
+    } catch (error) {
+      if (error instanceof CoordinationRuntimeError) throw error;
+      throw new CoordinationRuntimeError('invalid-request', 'launch-policy-invalid: policy program_evidence_root is not an accessible real directory', [policy.program_evidence_root, error instanceof Error ? error.message : String(error)]);
+    }
+    if (evidenceRootReal !== policy.program_evidence_root || !evidenceRootStat.isDirectory() || evidenceRootStat.isSymbolicLink()) invalid('policy program_evidence_root must be its canonical real directory path', [policy.program_evidence_root, evidenceRootReal]);
+    if ((evidenceRootStat.mode & 0o777) !== 0o700) invalid('policy program_evidence_root must have exact mode 0700', [policy.program_evidence_root, `mode=${(evidenceRootStat.mode & 0o777).toString(8)}`]);
+    const pathContains = (root: string, candidate: string): boolean => {
+      const rel = relative(root, candidate);
+      return rel.length === 0 || (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+    };
+    const protectedPaths = new Set<string>([resolve(this.#stateRoot), realpathSync(this.#stateRoot)]);
+    for (const row of this.#db.prepare('SELECT * FROM repositories ORDER BY repo_id').all()) {
+      const repository = repositoryFromRow(row);
+      for (const path of [repository.canonical_root, repository.git_common_dir]) {
+        protectedPaths.add(resolve(path));
+        if (existsSync(path)) protectedPaths.add(realpathSync(path));
+      }
+    }
+    for (const row of this.#db.prepare('SELECT payload_json FROM run_resources ORDER BY repo_id,workstream_run').all()) {
+      const resource = parseCoordinationRunResource(parseJsonObject(sqlString(row, 'payload_json'), 'launch policy protected run resource'));
+      for (const path of [resource.source_repo, resource.git_common_dir, resource.worktree_root, resource.main_worktree_path, resource.runtime_root]) {
+        protectedPaths.add(resolve(path));
+        if (existsSync(path)) protectedPaths.add(realpathSync(path));
+      }
+    }
+    for (const protectedPath of protectedPaths) {
+      if (pathContains(protectedPath, evidenceRootReal) || pathContains(evidenceRootReal, protectedPath)) invalid('policy program_evidence_root overlaps a coordinator clone/state/session/worktree/runtime root', [evidenceRootReal, protectedPath]);
+    }
+
+    // Registration requires the exact completed bootstrap main-worktree edge:
+    // one active canonical main and its sole committed create operation. A
+    // planned/terminal main or an unresolved/additional operation is not the
+    // clean active main authority from which policy registration is allowed.
+    const mainRows = this.#db.prepare("SELECT * FROM worktrees WHERE repo_id=? AND workstream_run=? AND kind='main' AND is_current_canonical=1 ORDER BY canonical_worktree_id").all(repoId, workstreamRun);
+    if (mainRows.length !== 1) invalid('launch policy registration requires exactly one canonical main worktree', [`count=${String(mainRows.length)}`]);
+    const mainRow = mainRows[0];
+    if (mainRow === undefined) throw new CoordinationRuntimeError('invalid-request', 'launch-policy-invalid: canonical main worktree disappeared during validation');
+    const main = canonicalWorktreeFromRow(mainRow);
+    if (main.state !== 'active' || main.canonical_path !== sourceRoot) invalid('launch policy registration requires the exact active run-main worktree', [main.state, main.canonical_path, sourceRoot]);
+    const mainOperations = this.#db.prepare('SELECT * FROM worktree_operations WHERE repo_id=? AND workstream_run=? AND canonical_worktree_id=? ORDER BY entity_id').all(repoId, workstreamRun, sqlString(mainRow, 'canonical_worktree_id')).map(worktreeOperationFromRow);
+    if (mainOperations.length !== 1 || mainOperations[0]?.operation_type !== 'create' || mainOperations[0]?.stage !== 'committed') invalid('launch policy registration requires the sole main-worktree create operation to be committed', mainOperations.map((operation) => `${operation.operation_id}:${operation.operation_type}:${operation.stage}`));
+
+    // A clean run-main HEAD detects product/source planning writes before policy
+    // registration; the no-event parent model boundary itself is additionally
+    // fenced by the runtime policy gate and cannot be inferred retrospectively
+    // from SQLite.
+    const statusResult = this.#gitQueryResult(sourceRoot, { kind: 'status-porcelain', includeIgnored: false }, 'invalid-request', 'launch policy run-main cleanliness inspection failed');
+    if (statusResult.stdout.byteLength !== 0) invalid('launch policy must register from a clean run-main worktree before parent planning', [`status_bytes=${String(statusResult.stdout.byteLength)}`]);
+
+    // policy_authority_commit H has one parent equal to content_result_commit;
+    // the complete diff is exactly the previously absent policy path. Thus the
+    // launch overlay is a sibling and can never enter policy/G/H ancestry.
+    const parentListing = this.#gitQueryText(sourceRoot, { kind: 'rev-list-parents', revision: policyCommit }, 'invalid-request', 'launch policy commit parent inspection failed');
+    const parents = (parentListing ?? '').trim().split(/\s+/u).filter((entry) => entry.length > 0);
+    const soleParent = parents.length === 2 ? parents[1] : undefined;
+    if (soleParent === undefined) throw new CoordinationRuntimeError('invalid-request', 'launch-policy-invalid: policy_authority_commit must have exactly one parent', [`parents=${parents.slice(1).join(',') || 'none'}`]);
+    if (soleParent !== bootstrap.content_commit) invalid('policy_authority_commit sole parent is not content_result_commit', [soleParent, bootstrap.content_commit]);
+    const diffResult = this.#gitQueryResult(sourceRoot, { kind: 'diff-paths', from: soleParent, to: policyCommit, noRenames: true }, 'invalid-request', 'launch policy commit diff inspection failed');
+    const diffPaths = new TextDecoder('utf-8', { fatal: true }).decode(diffResult.stdout).split('\0').filter((entry) => entry.length > 0);
+    if (diffPaths.length !== 1 || diffPaths[0] !== ref) invalid('policy_authority_commit must change exactly the single previously-absent policy path', [`paths=${diffPaths.join(',')}`, ref]);
+    const parentListingAtPath = this.#gitQueryText(sourceRoot, { kind: 'ls-tree-path', revision: soleParent, path: ref }, 'invalid-request', 'launch policy parent path inspection failed');
+    if ((parentListingAtPath ?? '').trim().length !== 0) invalid('policy path must be previously absent at content_result_commit (no replacement)', [ref]);
+
+    const acceptedGraph = this.#db.prepare("SELECT entity_id FROM authoritative_artifacts WHERE repo_id=? AND source_run=? AND json_extract(payload_json, '$.document_schema_version')='autopilot.semantic_graph.v1' LIMIT 1").get(repoId, workstreamRun);
+    if (acceptedGraph !== undefined) casConflict('a complete graph is already accepted; launch policy registration is late', [sqlString(acceptedGraph, 'entity_id')]);
   }
 
   // D65-A5 loader/replayer sub-part 2a. The current repositories.event_seq is E
