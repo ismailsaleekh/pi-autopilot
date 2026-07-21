@@ -7,6 +7,10 @@ covers_sources: []
 stability: stable
 ---
 
+<p align="center">
+  <img src="../logo.png" alt="Autopilot" width="120" height="120" />
+</p>
+
 # Autopilot Documentation Index
 
 Machine-navigable index of every public surface and subsystem. The tables below are

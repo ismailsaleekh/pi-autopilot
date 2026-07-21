@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="logo.png" alt="Autopilot" width="128" height="128" />
+</p>
+
 # Autopilot — Mandatory Agent Instructions
 
 **Read this before you read code, edit code, or run anything in this package.**

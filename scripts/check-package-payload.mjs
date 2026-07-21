@@ -31,6 +31,7 @@ const required = [
   'TESTING.md',
   'PUBLISHING.md',
   'AUTOPILOT-INSTRUCTIONS.md',
+  'logo.png',
   'docs/INDEX.md',
   'docs/read-before-edit.md',
   'docs/manifest.json',

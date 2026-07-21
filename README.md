@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="logo.png" alt="Autopilot" width="240" height="240" />
+</p>
+
 # Autopilot
 
 > **Agents: start at the docs, not this README.** The agent-first documentation is

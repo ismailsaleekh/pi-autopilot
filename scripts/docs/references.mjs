@@ -37,13 +37,21 @@ export function anchorsOf(markdown) {
   return anchors;
 }
 
-/** Extract markdown links `[text](target)` from a body, ignoring code fences. */
+/**
+ * Extract link targets from a body, ignoring code fences: Markdown links
+ * `[text](target)` AND HTML image sources `<img src="target">`. Both must resolve
+ * (C6), so a broken logo/image path fails the gate exactly like a broken doc link.
+ */
 export function extractLinks(markdown) {
   const withoutFences = markdown.replace(/```[\s\S]*?```/gu, (block) => block.replace(/[^\n]/gu, ' '));
   const links = [];
-  const pattern = /\[[^\]]*\]\(([^)]+)\)/gu;
+  const linkPattern = /\[[^\]]*\]\(([^)]+)\)/gu;
   let match;
-  while ((match = pattern.exec(withoutFences)) !== null) {
+  while ((match = linkPattern.exec(withoutFences)) !== null) {
+    links.push(match[1].trim());
+  }
+  const imgPattern = /<img\b[^>]*?\bsrc\s*=\s*["']([^"']+)["']/giu;
+  while ((match = imgPattern.exec(withoutFences)) !== null) {
     links.push(match[1].trim());
   }
   return links;
