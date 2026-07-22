@@ -1,0 +1,19 @@
+{
+  "schema_version": "autopilot.unit_failure.v1",
+  "action": "reset",
+  "workstream": "workstream-bug177",
+  "workstream_run": "workstream-run-bug177",
+  "unit_id": "unit-current",
+  "attempt": 1,
+  "unit_worktree_path": "/tmp/bug177-sanitized/unit-current/attempt-1/worktree",
+  "dirty_paths": [],
+  "capture_commit_sha": null,
+  "capture_ref": null,
+  "git_head_before": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "git_head_after": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "git_common_dir": "/tmp/bug177-sanitized/.git",
+  "branch": "autopilot/unit/workstream-run-bug177/unit-current/attempt-1",
+  "postcondition_worktree_clean": true,
+  "summary": "sanitized current reset evidence",
+  "created_at": "2026-07-14T16:30:00.000Z"
+}
