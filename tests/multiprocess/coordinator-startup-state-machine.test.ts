@@ -70,7 +70,14 @@ async function delayedWinnerFixture(root: string, readinessTimeoutMs: number): P
   });
   winner.stderr?.on('data', (chunk) => { winnerStderr += chunk.toString('utf8'); });
   try {
-    await waitForReport(stateRoot, (report) => report.spawned_pid === winner.pid && report.phase === 'after-activation-before-first-handshake', 30_000);
+    // The client parent can discover the direct winner and complete its first
+    // handshake while its own auto-start child is still paused before election.
+    // Startup reports are current-state files, not append-only phase history, so
+    // polling must admit the immediately-successor phase rather than requiring
+    // observation of a transient predecessor byte state.
+    await waitForReport(stateRoot, (report) => report.spawned_pid === winner.pid && (
+      report.phase === 'after-activation-before-first-handshake' || report.phase === 'first-exact-handshake-served'
+    ), 30_000);
     const winnerLock = JSON.parse(await readFile(coordinatorRuntimePaths(commonEnv).lockPath, 'utf8')) as Readonly<Record<string, unknown>>;
     await releaseStartupBarrier(loserBarrier, 'before-lifecycle-election');
     await waitForReport(stateRoot, (report) => report.outcome === 'election-loser', 30_000);

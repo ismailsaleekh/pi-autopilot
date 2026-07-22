@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { platform, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -174,8 +174,8 @@ void describe('transactional coordinator runtime', () => {
       const status = await client.query('status', 'repo-runtime-test', 'run-runtime-test');
       assert.equal(queryPayload(status, 'runs').length, 1);
 
-      const exportOne = join(root, 'export-one.json');
-      const exportTwo = join(root, 'export-two.json');
+      const exportOne = join(client.paths.exportsRoot, 'export-one.json');
+      const exportTwo = join(client.paths.exportsRoot, 'export-two.json');
       await client.query('export', 'global', null, { output_path: exportOne });
       await client.query('export', 'global', null, { output_path: exportTwo });
       assert.equal(await readFile(exportOne, 'utf8'), await readFile(exportTwo, 'utf8'));
@@ -185,6 +185,44 @@ void describe('transactional coordinator runtime', () => {
       const doctor = await client.query('doctor');
       assert.equal(doctor.payload['healthy'], true);
       assert.equal(doctor.payload['integrity'], 'ok');
+    });
+  });
+
+  void it('confines export output to pre-existing private no-follow directories', async () => {
+    await withCoordinator(async ({ root, client }) => {
+      await assert.rejects(
+        () => client.query('export', 'global', null, { output_path: join(root, 'outside-export.json') }),
+        /must remain below the private coordinator exports root/u,
+      );
+      const privateDirectory = join(client.paths.exportsRoot, 'private-request');
+      await mkdir(privateDirectory, { mode: 0o700 });
+      const validTarget = join(privateDirectory, 'valid.json');
+      await client.query('export', 'global', null, { output_path: validTarget });
+      assert.equal(existsSync(validTarget), true);
+      if (platform() !== 'win32') {
+        const permissiveDirectory = join(client.paths.exportsRoot, 'permissive-request');
+        await mkdir(permissiveDirectory, { mode: 0o755 });
+        await chmod(permissiveDirectory, 0o755);
+        await assert.rejects(
+          () => client.query('export', 'global', null, { output_path: join(permissiveDirectory, 'forbidden.json') }),
+          /parent directories must be exact mode 0700/u,
+        );
+        const victim = join(root, 'victim.txt');
+        await writeFile(victim, 'preserve\n', 'utf8');
+        const parentAlias = join(client.paths.exportsRoot, 'parent-alias');
+        await symlink(privateDirectory, parentAlias, 'dir');
+        await assert.rejects(
+          () => client.query('export', 'global', null, { output_path: join(parentAlias, 'escaped.json') }),
+          /must contain only real private directories/u,
+        );
+        const targetAlias = join(client.paths.exportsRoot, 'target-alias.json');
+        await symlink(victim, targetAlias, 'file');
+        await assert.rejects(
+          () => client.query('export', 'global', null, { output_path: targetAlias }),
+          /must be an absent or single-link regular file/u,
+        );
+        assert.equal(await readFile(victim, 'utf8'), 'preserve\n');
+      }
     });
   });
 

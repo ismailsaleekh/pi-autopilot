@@ -143,14 +143,42 @@ void describe('D58 streaming recursive ls-tree query', () => {
     });
   });
 
-  void it('reports a spawn failure when the git binary cannot be resolved (containment-shaped read failure)', async () => {
+  void it('reports error-before-PID as the exact spawn-failed terminal state', async () => {
     await withTempRepo(async (repoRoot) => {
       git(repoRoot, ['commit', '--allow-empty', '-m', 'one']);
       const commit = headCommit(repoRoot);
       await assert.rejects(
         () => runGitStreamingLsTree({ commit, cwd: repoRoot, env: { PATH: '/nonexistent-dir-for-autopilot-test' }, onRecord: () => { } }),
-        (error: unknown) => error instanceof GitStreamingQueryError && (error.code === 'invalid-ls-tree-output' || error.code === 'git-process-containment-failed'),
+        (error: unknown) => error instanceof GitStreamingQueryError && error.code === 'invalid-ls-tree-output' && error.terminalState === 'spawn-failed' && error.rootPid === null,
       );
+    });
+  });
+
+  void it('returns the exact caught value when spawn throws synchronously before any child exists', async () => {
+    await withTempRepo(async (repoRoot) => {
+      git(repoRoot, ['commit', '--allow-empty', '-m', 'one']);
+      const marker = new Error('synthetic exact synchronous spawn throw');
+      await assert.rejects(
+        () => runGitStreamingLsTree({ commit: headCommit(repoRoot), cwd: repoRoot, onRecord: () => { }, spawnChild: () => { throw marker; } }),
+        (error: unknown) => error === marker,
+      );
+    });
+  });
+
+  void it('rejects a NUL-delimited empty record instead of silently skipping it', async () => {
+    await withTempRepo(async (repoRoot) => {
+      git(repoRoot, ['commit', '--allow-empty', '-m', 'one']);
+      const commit = headCommit(repoRoot);
+      const bin = join(repoRoot, '..', 'stream-empty-record-bin');
+      await mkdir(bin, { recursive: true });
+      const wrapper = join(bin, 'git');
+      await writeFile(wrapper, '#!/bin/sh\nprintf "\\0"\n', 'utf8');
+      await chmodReadWrite(wrapper);
+      await assert.rejects(
+        () => runGitStreamingLsTree({ commit, cwd: repoRoot, env: { PATH: `${bin}:/usr/bin:/bin` }, onRecord: () => { } }),
+        (error: unknown) => error instanceof GitStreamingQueryError && error.code === 'invalid-ls-tree-output' && /empty record/u.test(error.message),
+      );
+      await rm(bin, { recursive: true, force: true });
     });
   });
 
@@ -562,8 +590,11 @@ void describe('D65 isolated-index Git plumbing', () => {
       rejects(() => runGitPlumbing({ descriptor: { kind: 'commit-tree', tree: baseTree, parents: [], message: 'm', identity: IDENTITY }, cwd: repoRoot, indexFile }), 'no parent');
       // commit-tree with malformed identity date.
       rejects(() => runGitPlumbing({ descriptor: { kind: 'commit-tree', tree: baseTree, parents: [base], message: 'm', identity: { name: 'a', email: 'b', date: 'not-a-date' } }, cwd: repoRoot, indexFile }), 'bad date');
-      // Index-using operation with a non-absolute index file.
+      // Index-using operations require an absolute path outside both worktree
+      // and Git common directory; neither shared index can be touched.
       rejects(() => runGitPlumbing({ descriptor: { kind: 'write-tree' }, cwd: repoRoot, indexFile: 'relative.index' }), 'relative index');
+      rejects(() => runGitPlumbing({ descriptor: { kind: 'write-tree' }, cwd: repoRoot, indexFile: join(repoRoot, 'isolated.index') }), 'worktree-contained index');
+      rejects(() => runGitPlumbing({ descriptor: { kind: 'write-tree' }, cwd: repoRoot, indexFile: join(repoRoot, '.git', 'index') }), 'shared Git index');
     });
   });
 

@@ -50,7 +50,9 @@ const PROVIDER_REASONS: readonly D65StopReason[] = Object.freeze(['provider-bloc
  * `covered_semantic_reason` binding outside this set is rejected so a caller can
  * never smuggle a forbidden reason (e.g. policy-invalid) through the binding.
  */
-const GRAPH_COVERED_SEMANTIC_REASONS: readonly D65StopReason[] = Object.freeze(['graph-incomplete', 'graph-drift', 'progress-stale']);
+const GRAPH_COVERED_SEMANTIC_REASONS: readonly D65StopReason[] = Object.freeze([
+  'graph-incomplete', 'graph-drift', 'progress-stale', 'handoff-pending', 'parent-recovering', 'unit-recovering', 'terminal-tail',
+]);
 
 /**
  * The exact legal `accepted_continuation_reason` values for the
@@ -59,11 +61,12 @@ const GRAPH_COVERED_SEMANTIC_REASONS: readonly D65StopReason[] = Object.freeze([
  * non-provider, non-blocker semantic continuation row reason. The six/seven
  * non-clearable blockers (line 181) and provider reasons are EXCLUDED so the
  * required-reason exemption can never be used to smuggle a blocker or a second
- * provider reason. `unit-recovering` is handled as an explicit optional extra,
- * not as the accepted continuation reason itself.
+ * provider reason. `unit-recovering` is the required continuation reason for
+ * unit/provider recovery artifacts and remains an optional extra for the other
+ * incident classes.
  */
 const LEGAL_ACCEPTED_CONTINUATION_REASONS: readonly D65StopReason[] = Object.freeze([
-  'parent-recovering', 'handoff-pending', 'terminal-tail', 'graph-incomplete', 'graph-drift', 'progress-stale',
+  'parent-recovering', 'handoff-pending', 'terminal-tail', 'graph-incomplete', 'graph-drift', 'progress-stale', 'unit-recovering',
 ]);
 
 export interface D65GraphTuple {

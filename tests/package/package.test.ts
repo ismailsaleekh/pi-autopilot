@@ -194,7 +194,39 @@ void describe('package manifest and payload', () => {
       assert.equal(typeof pkg.scripts[script], 'string', script);
     }
     assert.match(pkg.scripts['prepack'] ?? '', /security:scan -- --quiet && npm run sbom/u, 'prepack must regenerate security evidence before SBOM');
+    assert.match(pkg.scripts['test:multiprocess'] ?? '', /--test-concurrency=1/u, 'resource-heavy real-process files must be serialized so fixed startup deadlines are not invalidated by cross-file load');
     for (const dir of ['bin/', 'dist/', 'extensions/', 'src/', 'templates/', 'artifacts/security/']) assert.ok(pkg.files.includes(dir), dir);
+  });
+
+  void it('pins shrinkwrapped Pi integrity and Linux native libc selectors without exceptions', async () => {
+    const lockValue = parseJson(await readFile(new URL('package-lock.json', root), 'utf8'));
+    if (!isJsonMap(lockValue)) throw new TypeError('package-lock.json must be an object');
+    const packagesValue = field(lockValue, 'packages');
+    if (!isJsonMap(packagesValue)) throw new TypeError('package-lock packages must be an object');
+    const requireLockPackage = (path: string): JsonMap => {
+      const value = field(packagesValue, path);
+      if (!isJsonMap(value)) throw new TypeError(`package-lock entry missing: ${path}`);
+      return value;
+    };
+    const piRoot = 'node_modules/@earendil-works/pi-coding-agent/node_modules/';
+    const integrityByPackage = new Map<string, string>([
+      ['@earendil-works/pi-agent-core', 'sha512-yqbh68CyhqxMov/jUogFJfMqlu2Gd37GAki+tr59YCmAPHfomiCA5ESzusXtpGzABeiZFC/OrRdQ4GwCCOMIHA=='],
+      ['@earendil-works/pi-ai', 'sha512-hzHE7Z8l5mgJk+ke67Lge0rwS2+wbKJrFKl9o5M1R1rh33+cCT7D1AHz1OAtX5wFs90E1/BTGhyJRTUHaMxGvQ=='],
+      ['@earendil-works/pi-tui', 'sha512-OMEe+Zt8oQYi/rCq3upxsTlIScWL0FPhXwQus34TbQb3EmTx88S7Uzx32JxvQiEeWOw8eDCdJf2PBUBE9r6wIg=='],
+    ]);
+    for (const [name, integrity] of integrityByPackage) {
+      const entry = requireLockPackage(`${piRoot}${name}`);
+      assert.equal(field(entry, 'version'), '0.81.1');
+      assert.equal(field(entry, 'integrity'), integrity);
+    }
+    const libcByPackage = new Map<string, string>([
+      ['@mariozechner/clipboard-linux-arm64-gnu', 'glibc'],
+      ['@mariozechner/clipboard-linux-arm64-musl', 'musl'],
+      ['@mariozechner/clipboard-linux-riscv64-gnu', 'glibc'],
+      ['@mariozechner/clipboard-linux-x64-gnu', 'glibc'],
+      ['@mariozechner/clipboard-linux-x64-musl', 'musl'],
+    ]);
+    for (const [name, libc] of libcByPackage) assert.deepEqual(field(requireLockPackage(`${piRoot}${name}`), 'libc'), [libc]);
   });
 
   void it('has required docs and runtime files', async () => {
@@ -213,6 +245,13 @@ void describe('package manifest and payload', () => {
       'dist/src/core/coordination/immutable-file.js',
       'artifacts/security/cyclonedx-sbom.json',
       'artifacts/security/offline-security-scan.json',
+      'scripts/check-package-payload.mjs',
+      'scripts/check-production-git-spawns.mjs',
+      'scripts/generate-sbom.mjs',
+      'scripts/run-certified-command.mjs',
+      'scripts/security-scan.mjs',
+      'scripts/test-packed-consumer-release.mjs',
+      'scripts/verify-packed-consumer.mjs',
       'README.md',
       'TESTING.md',
       'TEST_PLAN.md',

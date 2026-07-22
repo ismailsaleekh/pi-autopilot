@@ -53,26 +53,40 @@ import {
 } from '../../src/core/coordination/d65-continuation.ts';
 import { validateAuthoritativeCoordinationDocument } from '../../src/core/coordination/escalation.ts';
 import { canonicalJson } from '../../src/core/coordination/canonical-json.ts';
+import { parseCoordinationRun, parseCoordinationRunResource } from '../../src/core/coordination/contracts.ts';
+import { buildD65CoordinatorProjectionMembers } from '../../src/core/coordination/d65-coordinator-projection.ts';
 import {
   assertD65QueueMemberValues,
   d65ProjectionIdentities,
   loadD65CompleteGraph,
   type D65GraphBlobReader,
 } from '../../src/core/coordination/d65-graph-loader.ts';
+import { d65BootstrapCharterFixture } from '../helpers/d65-graph-charter-fixture.ts';
+import { d65GraphAuthorityIdentity } from '../../src/core/coordination/d65-graph-authority.ts';
+import { d65GraphProjectionIdentity } from '../../src/core/coordination/d65-graph-projections.ts';
 import {
   buildD65CompleteGraph,
   type D65AuthorityInput,
   type D65GraphBody,
   type D65GraphHeader,
 } from '../../src/core/coordination/d65-graph-producer.ts';
-// The compiled dist manifest must expose the identical closed set (source/dist
-// parity, freeze §9.5). Importing the built .js proves it byte-for-contract.
-// @ts-expect-error - dist is emitted JavaScript without a .d.ts sidecar.
-import { D65_CONTRACT_SCHEMA_VERSIONS as DIST_D65_CONTRACT_SCHEMA_VERSIONS } from '../../dist/src/core/coordination/d65-contract-manifest.js';
+// Variable-path import avoids pretending that emitted JS has declaration
+// authority. Runtime validation below proves the dist export's closed type.
+const distManifestModulePath = '../../dist/src/core/coordination/d65-contract-manifest.js';
+const distManifestModule: unknown = await import(distManifestModulePath);
+function distSchemaVersions(value: unknown): readonly string[] {
+  if (typeof value !== 'object' || value === null || Array.isArray(value) || !('D65_CONTRACT_SCHEMA_VERSIONS' in value)) throw new Error('dist D65 manifest module omitted its schema-version export');
+  const versions = value.D65_CONTRACT_SCHEMA_VERSIONS;
+  if (!Array.isArray(versions) || versions.some((entry) => typeof entry !== 'string')) throw new Error('dist D65 schema-version export is not a string array');
+  return versions;
+}
+const DIST_D65_CONTRACT_SCHEMA_VERSIONS = distSchemaVersions(distManifestModule);
 
 const OID = (char: string): string => char.repeat(40);
 const DIGEST = (char: string): `sha256:${string}` => `sha256:${char.repeat(64)}` as const;
 const EMPTY_INDEX = { entry_count: 0, total_bytes: 0, sha256: canonicalSha256([]), shards: [] };
+const EMPTY_BOOTSTRAP_CHARTER = d65BootstrapCharterFixture({ repoId: 'repo-1', autopilotId: 'auto-1', workstream: 'kbg-finalize-fresh', workstreamRun: 'run-1', programId: 'program-1' });
+const LOADER_BOOTSTRAP_CHARTER = d65BootstrapCharterFixture({ repoId: 'r', autopilotId: 'a', workstream: 'w', workstreamRun: 'run', programId: 'p' });
 
 function bootstrapFixture(): Record<string, unknown> {
   return {
@@ -290,7 +304,7 @@ void describe('D65 complete graph root contract', () => {
       schema_version: 'autopilot.semantic_graph.v1', program_id: 'program-1', mode: 'complete', graph_sequence: 2,
       prior_graph_sha256: DIGEST('a'), prior_event_seq: 1, repo_id: 'repo-1', autopilot_id: 'auto-1', workstream: 'kbg-finalize-fresh', workstream_run: 'run-1',
       covered_authority_commit: OID('b'), covered_authority_tree: OID('c'), covered_event_seq: 5,
-      bootstrap_charter: { repository: {}, run: {}, run_resource: {}, mailbox_cursor: {}, bootstrap_graph: {}, bootstrap_artifact: {}, trust_anchor: {}, attach_event: {}, attach_result: {} },
+      bootstrap_charter: EMPTY_BOOTSTRAP_CHARTER,
       core: { mission: coreEntry(null, null), master_plan: coreEntry('autopilot.master_plan.v1', 1), state: coreEntry('autopilot.state.v1', 1), decision_log: coreEntry('autopilot.decision.v1', 3), events: coreEntry('autopilot.event.v1', 4) },
       collections, work_items: { ...EMPTY_INDEX }, bughunt: { ...EMPTY_INDEX }, closure: null, queue_projection: queue,
       exceptions: { ...EMPTY_INDEX }, coordinator_projection: { ...EMPTY_INDEX }, created_at: '2026-07-19T00:00:00.000Z',
@@ -320,7 +334,7 @@ function completeGraphBytes(overrides: Record<string, unknown> = {}): Uint8Array
     schema_version: 'autopilot.semantic_graph.v1', program_id: 'program-1', mode: 'complete', graph_sequence: 2,
     prior_graph_sha256: DIGEST('a'), prior_event_seq: 1, repo_id: 'repo-1', autopilot_id: 'auto-1', workstream: 'kbg-finalize-fresh', workstream_run: 'run-1',
     covered_authority_commit: OID('b'), covered_authority_tree: OID('c'), covered_event_seq: 5,
-    bootstrap_charter: { repository: {}, run: {}, run_resource: {}, mailbox_cursor: {}, bootstrap_graph: {}, bootstrap_artifact: {}, trust_anchor: {}, attach_event: {}, attach_result: {} },
+    bootstrap_charter: EMPTY_BOOTSTRAP_CHARTER,
     core: {
       mission: { ref: 'runtime/mission.md', git_mode: '100644', git_blob_oid: OID('a'), sha256: DIGEST('a'), byte_count: 100, record_count: null, document_schema_version: null },
       master_plan: { ref: 'runtime/master-plan.json', git_mode: '100644', git_blob_oid: OID('a'), sha256: DIGEST('a'), byte_count: 100, record_count: 1, document_schema_version: 'autopilot.master_plan.v1' },
@@ -331,7 +345,7 @@ function completeGraphBytes(overrides: Record<string, unknown> = {}): Uint8Array
     collections, work_items: { ...EMPTY_INDEX }, bughunt: { ...EMPTY_INDEX }, closure: null, queue_projection: queue,
     exceptions: { ...EMPTY_INDEX }, coordinator_projection: { ...EMPTY_INDEX }, created_at: '2026-07-19T00:00:00.000Z', ...overrides,
   };
-  return new TextEncoder().encode(JSON.stringify(graph));
+  return new TextEncoder().encode(`${canonicalJson(graph)}\n`);
 }
 
 void describe('D65 non-self-referential graph publication validation', () => {
@@ -497,7 +511,7 @@ void describe('D65 source/dist contract manifest parity', () => {
   });
 
   void it('exposes a byte-identical manifest in the compiled dist module', () => {
-    assert.deepEqual([...(DIST_D65_CONTRACT_SCHEMA_VERSIONS as readonly string[])], [...D65_CONTRACT_SCHEMA_VERSIONS]);
+    assert.deepEqual([...DIST_D65_CONTRACT_SCHEMA_VERSIONS], [...D65_CONTRACT_SCHEMA_VERSIONS]);
   });
 
   void it('binds every manifest entry to its exact lowest-layer parser and rejects unknown schemas', () => {
@@ -512,7 +526,9 @@ void describe('D65 source/dist contract manifest parity', () => {
 void describe('D65 trust anchor SPKI binary contract', () => {
   function realAnchor(): { spki: Uint8Array; privateKey: import('node:crypto').KeyObject } {
     const { publicKey, privateKey } = generateKeyPairSync('ed25519');
-    const spki = new Uint8Array(publicKey.export({ format: 'der', type: 'spki' }) as unknown as Uint8Array);
+    const exportedSpki = publicKey.export({ format: 'der', type: 'spki' });
+    if (!(exportedSpki instanceof Uint8Array)) throw new Error('Ed25519 SPKI export was not binary DER');
+    const spki = new Uint8Array(exportedSpki);
     return { spki, privateKey };
   }
 
@@ -523,7 +539,7 @@ void describe('D65 trust anchor SPKI binary contract', () => {
     const message = new TextEncoder().encode('{"policy_version":1}');
     const domain = Buffer.from('AUTOPILOT-D65-LAUNCH-POLICY\u0000', 'utf8');
     const signed = Buffer.concat([domain, Buffer.from(message)]);
-    const signature = encodeUnpaddedBase64Url(new Uint8Array(sign(null, signed, privateKey) as unknown as Uint8Array));
+    const signature = encodeUnpaddedBase64Url(new Uint8Array(sign(null, signed, privateKey)));
     assert.equal(verifyD65Signature({ trustAnchor: anchor, purpose: 'launch-policy', message, signature }), true);
     // Wrong purpose (domain confusion) fails.
     assert.equal(verifyD65Signature({ trustAnchor: anchor, purpose: 'parent-loss', message, signature }), false);
@@ -576,6 +592,18 @@ void describe('D65 complete-graph loader/replayer', () => {
     return { ref: `runtime/${schema ?? 'mission'}.f`, git_mode: '100644', git_blob_oid: OID2('a'), sha256: shaText(body), byte_count: Buffer.byteLength(body, 'utf8'), record_count: records, document_schema_version: schema };
   }
 
+  function coordinatorShard(): { index: Record<string, unknown>; ref: string; bytes: string } {
+    const run = parseCoordinationRun({ schema_version: 'autopilot.coordination_run.v1', repo_id: 'r', autopilot_id: 'a', workstream: 'w', workstream_run: 'run', coordination_authority: 'coordinator-edit-leases-v1', status: 'active', active_session_generation: 0, created_event_seq: 1, version: 1 });
+    const resource = parseCoordinationRunResource({ schema_version: 'autopilot.coordination_run_resource.v1', repo_id: 'r', workstream_run: 'run', source_repo: '/tmp/source', git_common_dir: '/tmp/source/.git', worktree_root: '/tmp/wt', main_worktree_path: '/tmp/wt/main', runtime_root: '/tmp/runtime', branch: 'run', target_branch: null, target_base_sha: OID2('a'), origin_url: null, started_at: '2026-07-19T00:00:00.000Z', version: 1 });
+    const members = buildD65CoordinatorProjectionMembers({ run, resource, sessions: [], children: [], attempts: [], faults: [], reservations: [], edit_leases: [], acquisition_groups: [], worktrees: [], operations: [], terminal_intents: [], current_terminal_intent_id: null, authoritative_artifacts: [], covered_event_seq: 5, run_version: 1 });
+    const entries = members.map((member) => ({ identity: member.identity, kind: member.kind, value_sha256: canonicalSha256(member.value), value: member.value }));
+    const totalBytes = entries.reduce((sum, entry) => sum + Buffer.byteLength(`${canonicalJson(entry)}\n`, 'utf8'), 0);
+    const ref = 'semantic-graphs/00000000000000000002/projections/coordinator_projection/0.json';
+    const shard = { schema_version: 'autopilot.semantic_graph_projection_shard.v1', program_id: 'p', repo_id: 'r', workstream_run: 'run', graph_sequence: 2, projection_kind: 'coordinator_projection', entry_count: entries.length, total_bytes: totalBytes, first_identity: entries[0]?.identity, last_identity: entries[entries.length - 1]?.identity, entries };
+    const bytes = `${canonicalJson(shard)}\n`;
+    return { ref, bytes, index: { entry_count: entries.length, total_bytes: totalBytes, sha256: canonicalSha256(entries), shards: [{ ref, sha256: shaText(bytes), byte_count: Buffer.byteLength(bytes, 'utf8'), entry_count: entries.length, first_identity: entries[0]?.identity, last_identity: entries[entries.length - 1]?.identity }] } };
+  }
+
   function root(queue: Record<string, unknown>): Record<string, unknown> {
     const collections: Record<string, unknown> = {};
     for (const key of ['authorities', 'specs', 'statuses', 'receipts', 'audits', 'execution_commits', 'terminal_acceptances', 'unit_merge_intents', 'unit_merges', 'integration_analyses', 'quarantine', 'reconciliation', 'evidence']) collections[key] = { ...EMPTY };
@@ -583,9 +611,9 @@ void describe('D65 complete-graph loader/replayer', () => {
       schema_version: 'autopilot.semantic_graph.v1', program_id: 'p', mode: 'complete', graph_sequence: 2,
       prior_graph_sha256: DIGEST2('a'), prior_event_seq: 1, repo_id: 'r', autopilot_id: 'a', workstream: 'w', workstream_run: 'run',
       covered_authority_commit: OID2('b'), covered_authority_tree: OID2('c'), covered_event_seq: 5,
-      bootstrap_charter: { repository: {}, run: {}, run_resource: {}, mailbox_cursor: {}, bootstrap_graph: {}, bootstrap_artifact: {}, trust_anchor: {}, attach_event: {}, attach_result: {} },
+      bootstrap_charter: LOADER_BOOTSTRAP_CHARTER,
       core: { mission: coreEntry2(null, null, '# m\n'), master_plan: coreEntry2('autopilot.master_plan.v1', 1, '{}\n'), state: coreEntry2('autopilot.state.v1', 1, '{}\n'), decision_log: coreEntry2('autopilot.decision.v1', 1, '{}\n'), events: coreEntry2('autopilot.event.v1', 1, '{}\n') },
-      collections, work_items: { ...EMPTY }, bughunt: { ...EMPTY }, closure: null, queue_projection: queue, exceptions: { ...EMPTY }, coordinator_projection: { ...EMPTY }, created_at: '2026-07-19T00:00:00.000Z',
+      collections, work_items: { ...EMPTY }, bughunt: { ...EMPTY }, closure: null, queue_projection: queue, exceptions: { ...EMPTY }, coordinator_projection: coordinatorShard().index, created_at: '2026-07-19T00:00:00.000Z',
     };
   }
 
@@ -594,8 +622,17 @@ void describe('D65 complete-graph loader/replayer', () => {
     unit_held: { ...EMPTY }, work_audit_review: { ...EMPTY }, work_validation_ready: { ...EMPTY },
   };
 
-  const reader = (blobs: Readonly<Record<string, string>>): D65GraphBlobReader => (ref) => {
-    const bytes = blobs[ref];
+  const CORE_BLOBS: Readonly<Record<string, string>> = Object.freeze({
+    'runtime/mission.f': '# m\n',
+    'runtime/autopilot.master_plan.v1.f': '{}\n',
+    'runtime/autopilot.state.v1.f': '{}\n',
+    'runtime/autopilot.decision.v1.f': '{}\n',
+    'runtime/autopilot.event.v1.f': '{}\n',
+  });
+  const reader = (blobs: Readonly<Record<string, string>>, missingRef: string | null = null): D65GraphBlobReader => (ref) => {
+    if (ref === missingRef) throw new Error(`missing blob ${ref}`);
+    const coordinator = coordinatorShard();
+    const bytes = ref === coordinator.ref ? coordinator.bytes : blobs[ref] ?? CORE_BLOBS[ref];
     if (bytes === undefined) throw new Error(`missing blob ${ref}`);
     return Buffer.from(bytes, 'utf8');
   };
@@ -609,11 +646,17 @@ void describe('D65 complete-graph loader/replayer', () => {
     assertD65QueueMemberValues(loaded, 'unit_ready');
   });
 
-  void it('loads an all-empty graph with no shard reads and counts the five core blobs', () => {
+  void it('loads an otherwise-empty graph with only its mandatory coordinator shard', () => {
     const graph = parseD65CompleteGraph(root({ ...ALL_EMPTY }));
     const loaded = loadD65CompleteGraph(graph, reader({}));
     assert.equal(loaded.aggregateReferencedEntries >= 5, true);
     assert.deepEqual([...d65ProjectionIdentities(loaded, 'unit_ready')], []);
+  });
+
+  void it('rejects a missing or tampered fixed core authority blob', () => {
+    const graph = parseD65CompleteGraph(root({ ...ALL_EMPTY }));
+    assert.throws(() => loadD65CompleteGraph(graph, reader({}, graph.core.mission.ref)), /missing blob/u);
+    assert.throws(() => loadD65CompleteGraph(graph, reader({ [graph.core.mission.ref]: '# x\n' })), /core authority blob sha256 does not match/u);
   });
 
   void it('rejects a shard blob whose bytes do not match the descriptor byte_count', () => {
@@ -653,16 +696,14 @@ void describe('D65 complete-graph loader/replayer', () => {
     assert.throws(() => assertD65QueueMemberValues(loaded, 'unit_ready'), /must be exactly \{identity\} equal to its enclosing identity/u);
   });
 
-  void it('rejects when the aggregate referenced authority bytes exceed the 512 MiB ceiling', () => {
-    // A single core blob may legitimately declare a byte_count near the ceiling,
-    // but the aggregate over the five core blobs must exceed 512 MiB and be
-    // rejected. Use a large declared byte_count on the events core blob so the
-    // aggregate trips the ceiling without materializing real bytes.
+  void it('rejects an oversized declared core reference before reading its blob', () => {
     const base = root({ ...ALL_EMPTY });
     const core = (base['core'] as Record<string, Record<string, unknown>>);
     core['events'] = { ...core['events'], byte_count: 536_870_913 };
     const graph = parseD65CompleteGraph(base);
-    assert.throws(() => loadD65CompleteGraph(graph, reader({})), /aggregate referenced authority bytes exceed the 512 MiB ceiling/u);
+    let reads = 0;
+    assert.throws(() => loadD65CompleteGraph(graph, (ref) => { reads += 1; return reader({})(ref); }), /aggregate referenced authority bytes exceed the 512 MiB ceiling/u);
+    assert.equal(reads, 0, 'aggregate preflight must reject before crossing the blob-reader boundary');
   });
 });
 
@@ -676,7 +717,7 @@ void describe('D65 complete-graph producer round-trips with the loader', () => {
       graph_sequence: graphSequence, prior_graph_sha256: DIGEST3('a'), prior_event_seq: 1,
       covered_authority_commit: OID3('b'), covered_authority_tree: OID3('c'), covered_event_seq: 5,
       created_at: '2026-07-19T00:00:00.000Z',
-      bootstrap_charter: { repository: {}, run: {}, run_resource: {}, mailbox_cursor: {}, bootstrap_graph: {}, bootstrap_artifact: {}, trust_anchor: {}, attach_event: {}, attach_result: {} },
+      bootstrap_charter: EMPTY_BOOTSTRAP_CHARTER,
     };
   }
 
@@ -687,6 +728,9 @@ void describe('D65 complete-graph producer round-trips with the loader', () => {
   function emptyBody(): D65GraphBody {
     const collections = {} as Record<string, readonly D65AuthorityInput[]>;
     for (const key of ['authorities', 'specs', 'statuses', 'receipts', 'audits', 'execution_commits', 'terminal_acceptances', 'unit_merge_intents', 'unit_merges', 'integration_analyses', 'quarantine', 'reconciliation', 'evidence']) collections[key] = [];
+    const run = parseCoordinationRun({ schema_version: 'autopilot.coordination_run.v1', repo_id: 'repo-1', autopilot_id: 'auto-1', workstream: 'kbg-finalize-fresh', workstream_run: 'run-1', coordination_authority: 'coordinator-edit-leases-v1', status: 'active', active_session_generation: 0, created_event_seq: 1, version: 1 });
+    const resource = parseCoordinationRunResource({ schema_version: 'autopilot.coordination_run_resource.v1', repo_id: 'repo-1', workstream_run: 'run-1', source_repo: '/tmp/source', git_common_dir: '/tmp/source/.git', worktree_root: '/tmp/worktrees', main_worktree_path: '/tmp/worktrees/main', runtime_root: '/tmp/runtime', branch: 'run-1', target_branch: null, target_base_sha: OID3('a'), origin_url: null, started_at: '2026-07-19T00:00:00.000Z', version: 1 });
+    const coordinatorProjection = buildD65CoordinatorProjectionMembers({ run, resource, sessions: [], children: [], attempts: [], faults: [], reservations: [], edit_leases: [], acquisition_groups: [], worktrees: [], operations: [], terminal_intents: [], current_terminal_intent_id: null, authoritative_artifacts: [], covered_event_seq: 5, run_version: 1 });
     return {
       core: {
         mission: coreEntryFixture(null, null, '# m\n') as never,
@@ -696,7 +740,7 @@ void describe('D65 complete-graph producer round-trips with the loader', () => {
         events: coreEntryFixture('autopilot.event.v1', 1, '{}\n') as never,
       } as never,
       collections: collections as never,
-      projections: { work_items: [], bughunt: [], exceptions: [], coordinator_projection: [] } as never,
+      projections: { work_items: [], bughunt: [], exceptions: [], coordinator_projection: coordinatorProjection } as never,
       queues: { unit_ready: [], unit_running: [], unit_blocked: [], unit_completed: [], unit_held: [], work_audit_review: [], work_validation_ready: [] } as never,
       closure: null,
     };
@@ -705,6 +749,8 @@ void describe('D65 complete-graph producer round-trips with the loader', () => {
   function loaderReader(produced: { readonly shards: readonly { readonly ref: string; readonly bytes: Uint8Array }[] }): D65GraphBlobReader {
     const map = new Map<string, Uint8Array>();
     for (const shard of produced.shards) map.set(shard.ref, shard.bytes);
+    map.set('runtime/mission.f', Buffer.from('# m\n', 'utf8'));
+    for (const schema of ['autopilot.master_plan.v1', 'autopilot.state.v1', 'autopilot.decision.v1', 'autopilot.event.v1']) map.set(`runtime/${schema}.f`, Buffer.from('{}\n', 'utf8'));
     return (ref) => {
       const bytes = map.get(ref);
       if (bytes === undefined) throw new Error(`producer emitted no blob for ${ref}`);
@@ -712,13 +758,13 @@ void describe('D65 complete-graph producer round-trips with the loader', () => {
     };
   }
 
-  void it('produces an all-empty graph the loader accepts (no shard reads, five core blobs)', () => {
+  void it('produces an otherwise-empty graph with the mandatory coordinator singleton shard', () => {
     const produced = buildD65CompleteGraph(header(), emptyBody());
     // The produced root parses as autopilot.semantic_graph.v1.
     const graph = parseD65CompleteGraph(produced.root);
-    // No shards emitted for an all-empty graph.
-    assert.equal(produced.shards.length, 0);
-    // The loader accepts the produced root + (no) shards.
+    // The five mandatory coordinator singleton entries require one shard.
+    assert.equal(produced.shards.length, 1);
+    // The loader accepts the produced root and reconstructs those singletons.
     const loaded = loadD65CompleteGraph(graph, loaderReader(produced));
     assert.equal(loaded.aggregateReferencedEntries >= 5, true);
     // Root ref lives under the graph prefix.
@@ -732,15 +778,15 @@ void describe('D65 complete-graph producer round-trips with the loader', () => {
     const populated: D65GraphBody = {
       ...body,
       collections: { ...body.collections, specs: [
-        { identity: 'spec-b', ref: 'runtime/specs/spec-b.json', git_mode: '100644', git_blob_oid: OID3('2'), sha256: DIGEST3('2'), byte_count: 120, document_schema_version: 'autopilot.spec.v1' },
-        { identity: 'spec-a', ref: 'runtime/specs/spec-a.json', git_mode: '100644', git_blob_oid: OID3('1'), sha256: DIGEST3('1'), byte_count: 100, document_schema_version: 'autopilot.spec.v1' },
+        { identity: d65GraphAuthorityIdentity('specs', 'runtime/specs/spec-b.json'), ref: 'runtime/specs/spec-b.json', git_mode: '100644', git_blob_oid: OID3('2'), sha256: DIGEST3('2'), byte_count: 120, document_schema_version: 'autopilot.unit_spec.v1' },
+        { identity: d65GraphAuthorityIdentity('specs', 'runtime/specs/spec-a.json'), ref: 'runtime/specs/spec-a.json', git_mode: '100644', git_blob_oid: OID3('1'), sha256: DIGEST3('1'), byte_count: 100, document_schema_version: 'autopilot.unit_spec.v1' },
       ] } as never,
       queues: { ...body.queues, unit_ready: [
         { identity: 'unit-2', kind: 'unit_ready', value: { identity: 'unit-2' } },
         { identity: 'unit-1', kind: 'unit_ready', value: { identity: 'unit-1' } },
       ] } as never,
       projections: { ...body.projections, work_items: [
-        { identity: 'work-1', kind: 'work_items', value: { identity: 'work-1', state: 'planned' } },
+        { identity: d65GraphProjectionIdentity('work-item', 'work-1'), kind: 'work_items', value: { work_item_id: 'work-1', state: 'planned', source_changing: false, unit_ids: [], implementation_unit_id: null, validation_unit_id: null, audit_ref: null, status_ref: null, validation_status_ref: null, summary: 'planned' } },
       ] } as never,
     };
     const produced = buildD65CompleteGraph(header(), populated);
@@ -751,9 +797,9 @@ void describe('D65 complete-graph producer round-trips with the loader', () => {
     assertD65QueueMemberValues(loaded, 'unit_ready');
     // The authority collection round-trips its two sorted members.
     assert.equal(loaded.authorities['specs']?.entries.length, 2);
-    assert.deepEqual(loaded.authorities['specs']?.entries.map((entry) => entry.identity), ['spec-a', 'spec-b']);
+    assert.deepEqual(loaded.authorities['specs']?.entries.map((entry) => entry.identity), [d65GraphAuthorityIdentity('specs', 'runtime/specs/spec-a.json'), d65GraphAuthorityIdentity('specs', 'runtime/specs/spec-b.json')].sort());
     // The standalone projection round-trips.
-    assert.deepEqual([...d65ProjectionIdentities(loaded, 'work_items')], ['work-1']);
+    assert.deepEqual([...d65ProjectionIdentities(loaded, 'work_items')], [d65GraphProjectionIdentity('work-item', 'work-1')]);
   });
 
   void it('rejects a queue member value that is not exactly {identity}', () => {
@@ -770,8 +816,8 @@ void describe('D65 complete-graph producer round-trips with the loader', () => {
     const dup: D65GraphBody = {
       ...body,
       collections: { ...body.collections, specs: [
-        { identity: 'spec-a', ref: 'runtime/specs/a.json', git_mode: '100644', git_blob_oid: OID3('1'), sha256: DIGEST3('1'), byte_count: 100, document_schema_version: null },
-        { identity: 'spec-a', ref: 'runtime/specs/a2.json', git_mode: '100644', git_blob_oid: OID3('2'), sha256: DIGEST3('2'), byte_count: 100, document_schema_version: null },
+        { identity: d65GraphAuthorityIdentity('specs', 'runtime/specs/a.json'), ref: 'runtime/specs/a.json', git_mode: '100644', git_blob_oid: OID3('1'), sha256: DIGEST3('1'), byte_count: 100, document_schema_version: null },
+        { identity: d65GraphAuthorityIdentity('specs', 'runtime/specs/a.json'), ref: 'runtime/specs/a2.json', git_mode: '100644', git_blob_oid: OID3('2'), sha256: DIGEST3('2'), byte_count: 100, document_schema_version: null },
       ] } as never,
     };
     assert.throws(() => buildD65CompleteGraph(header(), dup), /members must be strictly identity-sorted with no duplicate/u);
@@ -779,7 +825,7 @@ void describe('D65 complete-graph producer round-trips with the loader', () => {
       ...body,
       projections: { ...body.projections, work_items: [{ identity: 'w', kind: 'bughunt', value: { identity: 'w' } }] } as never,
     };
-    assert.throws(() => buildD65CompleteGraph(header(), mismatch), /member kind mismatch/u);
+    assert.throws(() => buildD65CompleteGraph(header(), mismatch), /projection member kind differs from its index/u);
   });
 
   void it('rejects graph_sequence below 2', () => {

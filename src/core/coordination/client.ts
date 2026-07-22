@@ -6,6 +6,7 @@ import { spawn } from 'node:child_process';
 import { createCoordinatorAdmissionRequest, verifyCoordinatorAdmissionResponse } from './admission.ts';
 import { assertCoordinatorAdmissionAuthorityUnchanged, captureCoordinatorAdmissionAuthority, COORDINATOR_S1_ADMISSION_IDENTITY, recaptureCoordinatorAdmissionAuthority, verifyCoordinatorS1RecoveryAuthority, type CoordinatorAdmissionAuthoritySnapshot } from './admission-runtime.ts';
 import { parseCoordinationReconciliationDetail, parseCoordinationReconciliationReceipt, parseCoordinationResultDetail, parseCoordinationResultReceipt, parseCoordinatorMailboxPage, parseCoordinatorMigrationRecoveryPage, parseCoordinatorProjectionPage, parseCoordinatorReconciliationDetailPage, parseCoordinatorRequestEnvelope, parseCoordinatorResultDetailPage, parseCoordinatorRunCatalogPage } from './contracts.ts';
+import { parseD65DispatchAuthorityEnvelope, type D65DispatchAuthorityFrame, type D65DispatchAuthorityRequestContext } from './d65-dispatch-authority.ts';
 import { COORDINATOR_COMPILED_ENTRYPOINT_ENV, resolveCoordinatorExecutable } from './executable-resolution.ts';
 import { coordinationFailureDefinition, CoordinationRuntimeError } from './failures.ts';
 import { activeCoordinationMigrationFreeze } from './migration-paths.ts';
@@ -343,7 +344,8 @@ export class CoordinatorClient {
     const capability = await readOrCreateCoordinatorCapability(this.#paths);
     const response = await this.#sendWithRecovery(request, capability);
     if (response.ok) {
-      if (request.action === 'status') parseCoordinatorProjectionPage(response.payload, 'status');
+      if (request.action === 'status' && request.payload['dispatch_authority_context'] !== undefined) parseD65DispatchAuthorityEnvelope(response.payload);
+      else if (request.action === 'status') parseCoordinatorProjectionPage(response.payload, 'status');
       else if (request.action === 'doctor') parseCoordinatorProjectionPage(response.payload, 'doctor');
       else if (request.action === 'run-catalog') parseCoordinatorRunCatalogPage(response.payload);
       else if (request.action === 'migration-recovery') parseCoordinatorMigrationRecoveryPage(response.payload);
@@ -452,6 +454,12 @@ export class CoordinatorClient {
       }
       throw new CoordinationRuntimeError('coordinator-unavailable', lastRetryError instanceof Error ? lastRetryError.message : String(lastRetryError));
     }
+  }
+
+  /** Fresh negotiated-S1 SR-5 read; no frame is cached on the client. */
+  async readD65DispatchAuthority(repoId: string, workstreamRun: string, context: D65DispatchAuthorityRequestContext): Promise<D65DispatchAuthorityFrame> {
+    const response = await this.#queryWire('status', repoId, workstreamRun, { dispatch_authority_context: context });
+    return parseD65DispatchAuthorityEnvelope(response.payload);
   }
 
   async query(action: CoordinatorQueryAction, repoId = 'global', workstreamRun: string | null = null, payload: Readonly<Record<string, unknown>> = {}): Promise<CoordinatorResponseEnvelope> {

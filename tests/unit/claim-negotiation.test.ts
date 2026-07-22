@@ -10,6 +10,7 @@ import { coordinationExclusiveOperation } from '../../src/core/coordination/excl
 import { ClaimNegotiationClient } from '../../src/core/coordination/negotiation.ts';
 import { parseCoordinationAcquisitionGroup, parseCoordinationClaimRequest, parseCoordinationMessage, parseCoordinationRun, parseCoordinationSessionLease } from '../../src/core/coordination/contracts.ts';
 import { CoordinationRuntimeError } from '../../src/core/coordination/failures.ts';
+import { d65SemanticEventWorkstreamRuns, type D65AcceptedEventResultJoin } from '../../src/core/coordination/d65-semantic-version.ts';
 import { coordinatorRuntimePaths, COORDINATOR_GRANT_OFFER_TTL_MS } from '../../src/core/coordination/runtime-paths.ts';
 import { startCoordinatorServer } from '../../src/core/coordination/server.ts';
 import type { CoordinatorSessionContext } from '../../src/core/coordination/supervisor.ts';
@@ -508,6 +509,22 @@ void describe('Coordination Fabric claim negotiation', () => {
 
       now = new Date(now.getTime() + COORDINATOR_GRANT_OFFER_TTL_MS + 1);
       assert.equal(server.store.sweepExpiredGrantOffers(), 1);
+      const database = new DatabaseSync(server.store.currentGeneration().database_path, { readOnly: true });
+      try {
+        const raw = record(database.prepare("SELECT e.repo_id,e.event_seq,e.event_type,e.entity_type,e.entity_id,e.idempotency_key,e.request_sha256,r.repo_id AS result_repo_id,r.idempotency_key AS result_key,r.request_sha256 AS result_request,r.committed_event_seq AS result_seq,r.payload_json AS result_payload FROM events e JOIN idempotency_results r ON r.repo_id=e.repo_id AND r.idempotency_key=e.idempotency_key WHERE e.repo_id=? AND e.event_type='grant-offers-expired' ORDER BY e.event_seq DESC LIMIT 1").get(owner.context.repo_id), 'grant sweep immutable event/result');
+        const resultPayload = record(JSON.parse(String(raw['result_payload'])) as unknown, 'grant sweep result payload');
+        assert.deepEqual(array(resultPayload['affected_acquisition_group_ids'], 'affected group ids'), ['group-b', 'group-c']);
+        assert.deepEqual(array(resultPayload['affected_workstream_runs'], 'affected workstream runs'), ['run-b', 'run-c']);
+        const joined: D65AcceptedEventResultJoin = {
+          repo_id: String(raw['repo_id']), event_seq: Number(raw['event_seq']), event_type: String(raw['event_type']), entity_type: String(raw['entity_type']), entity_id: String(raw['entity_id']), idempotency_key: String(raw['idempotency_key']), request_sha256: String(raw['request_sha256']),
+          result: { repo_id: String(raw['result_repo_id']), idempotency_key: String(raw['result_key']), request_sha256: String(raw['result_request']), committed_event_seq: Number(raw['result_seq']), payload: resultPayload },
+        };
+        assert.deepEqual(d65SemanticEventWorkstreamRuns(joined), ['run-b', 'run-c']);
+        const wrongDigest = `sha256:${'0'.repeat(64)}`;
+        const joinedResult = joined.result;
+        if (joinedResult === null) throw new Error('grant sweep fixture lost its immutable result');
+        assert.throws(() => d65SemanticEventWorkstreamRuns({ ...joined, request_sha256: wrongDigest, result: { ...joinedResult, request_sha256: wrongDigest } }), /digest does not equal its immutable event request digest/u);
+      } finally { database.close(); }
       const newcomerResult = await newcomer.negotiation.acquire(acquisitionInput('d'));
       assert.equal(newcomerResult.outcome, 'waiting-for-peer-release');
       const expired = (await groups(client, offlineFirst))[0];

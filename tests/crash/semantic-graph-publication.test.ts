@@ -51,7 +51,9 @@ async function buildFixture(root: string, repository: string, suffix: string): P
   };
 
   const { publicKey } = generateKeyPairSync('ed25519');
-  const spki = Buffer.from(publicKey.export({ format: 'der', type: 'spki' }) as unknown as Uint8Array);
+  const exportedSpki = publicKey.export({ format: 'der', type: 'spki' });
+  if (!(exportedSpki instanceof Uint8Array)) throw new Error('Ed25519 SPKI export was not binary DER');
+  const spki = Buffer.from(exportedSpki);
   const trustRef = `.pi/autopilot-trust/d65/program-${suffix}/operator-ed25519.spki`;
   const trustSha256 = `sha256:${createHash('sha256').update(spki).digest('hex')}` as `sha256:${string}`;
 

@@ -113,11 +113,11 @@ export function computeD65ObligationPartition(input: {
   // Every foreign-dependent row must be exactly waiting-for-predecessor.
   for (const obligation of foreignDependent) if (obligation.state !== 'waiting-for-predecessor') throw new CoordinationRuntimeError('invalid-state', `foreign-dependent obligation ${obligation.obligation_id} must be waiting-for-predecessor`);
   return {
-    blocking_owned_obligations: sortById(blocking) as unknown as readonly Record<string, unknown>[],
-    foreign_dependent_obligations: sortById(foreignDependent) as unknown as readonly Record<string, unknown>[],
-    abort_owned_obligations: sortById(abortOwned) as unknown as readonly Record<string, unknown>[],
-    other_nonterminal_obligations: sortById(other) as unknown as readonly Record<string, unknown>[],
-  } as D65TerminalEffectSets;
+    blocking_owned_obligations: Object.freeze(sortById(blocking).map((row) => Object.freeze({ ...row }))),
+    foreign_dependent_obligations: Object.freeze(sortById(foreignDependent).map((row) => Object.freeze({ ...row }))),
+    abort_owned_obligations: Object.freeze(sortById(abortOwned).map((row) => Object.freeze({ ...row }))),
+    other_nonterminal_obligations: Object.freeze(sortById(other).map((row) => Object.freeze({ ...row }))),
+  };
 }
 
 /**

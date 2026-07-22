@@ -11,6 +11,9 @@ import { acknowledgeCoordinationMigrationFreeze, activeCoordinationMigrationFree
 import { currentBootId } from "./process-identity.js";
 import { COORDINATOR_HEARTBEAT_MS, COORDINATOR_SESSION_LEASE_MS, enforcePrivateAuthorityPath, ensurePrivateAuthorityDirectory } from "./runtime-paths.js";
 export const AUTOPILOT_COORDINATOR_SESSION_CONTEXT_SCHEMA = 'autopilot.coordinator_session_context.v1';
+function isSha256Digest(value) {
+    return /^sha256:[a-f0-9]{64}$/u.test(value);
+}
 const SESSION_CONTEXT_FIELDS = ['autopilot_id', 'boot_id', 'pid', 'repo_id', 'repo_key', 'run_version', 'schema_version', 'session_generation', 'session_id', 'session_lease_id', 'session_token', 'session_version', 'state_root', 'workstream', 'workstream_run'];
 const AUTHORITY_TOKEN = /^[a-f0-9]{64}$/u;
 function isJsonMap(value) {
@@ -361,6 +364,38 @@ export class DurableRunSupervisorClient {
         };
         const contextPath = join(this.#client.paths.sessionsRoot, `${createHash('sha256').update(`${repoId}\0${run.workstream_run}\0${session.session_lease_id}`, 'utf8').digest('hex')}.json`);
         await writeCoordinatorSessionContext(contextPath, context);
+        // A D65 parent-loss attach (null-handoff over a complete graph) records the
+        // verified candidate digest in its immutable result; the successor session
+        // must immediately run the frozen attach→graph→artifact→graph recovery
+        // cadence before any other effect. The driver never crosses a model/
+        // product/new-work boundary; failure preserves the attach and fails loud.
+        if (typeof attachSession.payload['parent_loss_candidate_sha256'] === 'string') {
+            const candidateDigest = attachSession.payload['parent_loss_candidate_sha256'];
+            if (!isSha256Digest(candidateDigest))
+                throw new CoordinationRuntimeError('store-corrupt', 'parent-loss attach returned a noncanonical candidate digest');
+            const { driveD65ParentLossRecoveryFromEnvironment } = await import("./d65-graph-successor-runtime.js");
+            const recoveryEnv = { ...process.env, AUTOPILOT_COORDINATOR_SESSION_CONTEXT: contextPath };
+            await driveD65ParentLossRecoveryFromEnvironment({ env: recoveryEnv, continuationSequence: 1, expectedCandidateSha256: candidateDigest });
+        }
+        else if (session.session_generation > 1) {
+            // A successor attach over an accepted D65 complete graph is only legal
+            // through a planned handoff (the store rejects null-handoff without the
+            // sealed candidate). The attach event itself is semantic: publish its
+            // exact one-event successor graph and require the governing heartbeat
+            // before any drain/reconciliation/dispatch (fresh plan sessions row).
+            const statusAfterAttach = await this.#client.query('status', repoId, run.workstream_run);
+            const artifactsValue = statusAfterAttach.payload['authoritative_artifacts'];
+            const hasCompleteGraph = Array.isArray(artifactsValue) && artifactsValue.some((value) => typeof value === 'object' && value !== null && value['document_schema_version'] === 'autopilot.semantic_graph.v1');
+            if (hasCompleteGraph) {
+                const { publishD65CoordinatorOnlySuccessorFromEnvironment } = await import("./d65-graph-successor-runtime.js");
+                const { ensureD65ProgramHeartbeatForGraphFromEnvironment } = await import("./d65-runtime-dispatch.js");
+                const recoveryEnv = { ...process.env, AUTOPILOT_COORDINATOR_SESSION_CONTEXT: contextPath };
+                const published = await publishD65CoordinatorOnlySuccessorFromEnvironment({ env: recoveryEnv });
+                if (published.semanticEventType !== null && published.semanticEventType !== 'session-attached')
+                    throw new CoordinationRuntimeError('invalid-state', 'planned-handoff attach graph covered a semantic event other than session-attached', [published.semanticEventType]);
+                await ensureD65ProgramHeartbeatForGraphFromEnvironment({ graphSequence: published.graphSequence, graphSha256: published.graphSha256, env: recoveryEnv });
+            }
+        }
         return { run: attachedRun, session, contextPath, context };
     }
     async consumeReconciliationReceipt(response, context) {

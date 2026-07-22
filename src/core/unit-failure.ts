@@ -4,8 +4,9 @@ import { link, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 import { readStableRegularFile, recordCoordinatorReleaseEvidenceFromFile } from './coordination/reconciliation.ts';
+import { ensureD65WorktreeStageCadenceFromEnvironment } from './coordination/d65-graph-successor-runtime.ts';
 import { CoordinatorClient } from './coordination/client.ts';
-import { parseCoordinationChildLease, parseCoordinationEditLease, parseCoordinationUnitAttempt, parseCoordinationWorktree, parseCoordinationWorktreeOperation } from './coordination/contracts.ts';
+import { parseCoordinationAuthoritativeArtifact, parseCoordinationChildLease, parseCoordinationEditLease, parseCoordinationReconciliationEvidence, parseCoordinationRunResource, parseCoordinationUnitAttempt, parseCoordinationWorktree, parseCoordinationWorktreeOperation } from './coordination/contracts.ts';
 import { CoordinationRuntimeError } from './coordination/failures.ts';
 import { readCoordinatorSessionContext } from './coordination/supervisor.ts';
 import { parseAutopilotChildTerminalAcceptance } from './coordination/terminal-acceptance.ts';
@@ -160,8 +161,9 @@ export async function acceptedTerminalVerdict(context: ActiveAutopilotContext, c
 export async function quarantineFailedUnit(input: UnitFailureInput): Promise<AutopilotUnitFailureRecord> {
   const publication = await writeFailureRecord({ ...input, action: 'quarantine' });
   const { record } = publication;
-  await updateUnitBranchStatus({ active: input.context.active, unitId: input.unitId, attempt: input.attempt, status: 'quarantined', currentSha: record.git_head_after, archiveRef: record.capture_ref });
+  await updateUnitBranchStatus({ active: input.context.active, unitId: input.unitId, attempt: input.attempt, status: 'quarantined', currentSha: record.git_head_after, archiveRef: record.capture_ref, env: input.env ?? process.env, recovery: 'unit-recovery' });
   await recordFailureEvidence(input, publication, 'quarantine-capture');
+  await ensureD65WorktreeStageCadenceFromEnvironment(input.env ?? process.env);
   await releaseLegacyClaimsIfApplicable(input, 'autopilot failed unit quarantine');
   return record;
 }
@@ -238,13 +240,65 @@ async function finishCommittedQuarantine(input: UnitFailureInput, operation: Ext
     await mkdir(dirname(evidencePath), { recursive: true });
     await writeJsonAtomic(evidencePath, record);
   }
-  await updateUnitBranchStatus({ active: input.context.active, unitId: input.unitId, attempt: input.attempt, status: 'quarantined', currentSha: record.git_head_after, archiveRef: record.capture_ref });
+  await updateUnitBranchStatus({ active: input.context.active, unitId: input.unitId, attempt: input.attempt, status: 'quarantined', currentSha: record.git_head_after, archiveRef: record.capture_ref, env: input.env ?? process.env, recovery: 'unit-recovery' });
   await recordFailureEvidence(input, { record, evidencePath }, 'quarantine-capture');
+  await ensureD65WorktreeStageCadenceFromEnvironment(input.env ?? process.env);
   await releaseLegacyClaimsIfApplicable(input, 'autopilot resumed failed unit quarantine publication');
   return record;
 }
 
+async function resumeRemovedResetFailure(input: UnitFailureInput): Promise<AutopilotUnitFailureRecord> {
+  if (input.context.active.coordination_authority !== 'coordinator-edit-leases-v1') throw new CoordinationRuntimeError('recovery-required', 'missing failed-unit worktree has no coordinator recovery authority', [input.unitWorktreePath]);
+  const evidencePath = await failureEvidencePublicationPath(input, 'reset');
+  if (!existsSync(evidencePath)) throw new CoordinationRuntimeError('recovery-required', 'missing failed-unit worktree has no immutable reset evidence', [input.unitWorktreePath, evidencePath]);
+  const evidenceBytes = await readStableRegularFile(evidencePath, 'removed unit reset evidence', MAX_UNIT_FAILURE_EVIDENCE_BYTES);
+  const facts = parseUnitFailureEvidenceFacts(evidenceBytes, failureEvidenceIdentity(input, 'reset'));
+  if (facts.action !== 'reset' || resolve(facts.unitWorktreePath) !== resolve(input.unitWorktreePath) || realpathSync(facts.gitCommonDir) !== realpathSync(input.context.active.git_common_dir) || facts.branch !== `autopilot/unit/${input.context.active.workstream_run}/${input.unitId}/attempt-${String(input.attempt)}` || facts.gitHeadBefore !== facts.gitHeadAfter) throw new CoordinationRuntimeError('invalid-state', 'removed unit reset evidence differs from its exact clean owner identity', [evidencePath]);
+  let value: unknown;
+  try { value = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(evidenceBytes)) as unknown; }
+  catch (error) { throw new CoordinationRuntimeError('invalid-state', 'removed unit reset evidence is unreadable', [evidencePath, error instanceof Error ? error.message : String(error)]); }
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new CoordinationRuntimeError('invalid-state', 'removed unit reset evidence is not an object', [evidencePath]);
+  const field = (name: string): unknown => Reflect.get(value, name);
+  const dirtyPaths = field('dirty_paths');
+  const summary = field('summary');
+  const createdAt = field('created_at');
+  if (!Array.isArray(dirtyPaths) || dirtyPaths.some((entry) => typeof entry !== 'string') || dirtyPaths.length !== 0 || typeof summary !== 'string' || summary.length === 0 || typeof createdAt !== 'string' || !Number.isFinite(Date.parse(createdAt))) throw new CoordinationRuntimeError('invalid-state', 'removed unit reset evidence has invalid bounded publication fields', [evidencePath]);
+  const contextPath = (input.env ?? process.env)[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV];
+  if (contextPath === undefined || contextPath.trim().length === 0) throw new CoordinationRuntimeError('unauthorized-client', 'removed unit reset recovery requires its durable coordinator session');
+  const session = await readCoordinatorSessionContext(contextPath);
+  if (session.repo_id !== input.context.active.repo_key || session.autopilot_id !== input.context.active.autopilot_id || session.workstream_run !== input.context.active.workstream_run) throw new CoordinationRuntimeError('unauthorized-client', 'removed unit reset recovery session differs from its exact owner');
+  const status = await new CoordinatorClient({ env: input.env ?? process.env }).query('status', session.repo_id, session.workstream_run);
+  const array = (candidate: unknown, label: string): readonly unknown[] => {
+    if (!Array.isArray(candidate)) throw new CoordinationRuntimeError('invalid-state', `removed unit reset recovery status omitted ${label}`);
+    return candidate;
+  };
+  const operations = array(status.payload['worktree_operations'], 'worktree_operations').map(parseCoordinationWorktreeOperation).filter((operation) => operation.owner.repo_id === session.repo_id && operation.owner.autopilot_id === session.autopilot_id && operation.owner.workstream_run === session.workstream_run && operation.owner.unit_id === input.unitId && operation.owner.attempt === input.attempt);
+  const resetOperations = operations.filter((operation) => operation.operation_type === 'reset' && operation.stage === 'committed');
+  const removeOperations = operations.filter((operation) => operation.operation_type === 'remove' && operation.stage !== 'compensated' && operation.stage !== 'failed');
+  if (resetOperations.length !== 1 || removeOperations.length !== 1) throw new CoordinationRuntimeError('recovery-required', 'missing failed-unit worktree lacks one committed reset and one durable remove operation', [...resetOperations.map((operation) => operation.operation_id), ...removeOperations.map((operation) => operation.operation_id)]);
+  const resetOperation = resetOperations[0];
+  const removeOperation = removeOperations[0];
+  if (resetOperation === undefined || removeOperation === undefined || !('worktree_path' in resetOperation.intent) || !('worktree_path' in removeOperation.intent) || resolve(resetOperation.intent.worktree_path) !== resolve(input.unitWorktreePath) || resolve(removeOperation.intent.worktree_path) !== resolve(input.unitWorktreePath) || resetOperation.intent.branch !== facts.branch || removeOperation.intent.branch !== facts.branch || resetOperation.intent.base_sha !== facts.gitHeadAfter || resetOperation.intent.target_sha !== facts.gitHeadAfter || resetOperation.intent.paths.length !== 0 || removeOperation.intent.target_sha !== facts.gitHeadAfter || removeOperation.intent_event_seq <= resetOperation.intent_event_seq) throw new CoordinationRuntimeError('invalid-state', 'durable reset/remove operations differ from immutable removed-unit evidence', [evidencePath]);
+  const attempts = array(status.payload['unit_attempts'], 'unit_attempts').map(parseCoordinationUnitAttempt).filter((attempt) => attempt.owner.unit_id === input.unitId && attempt.owner.attempt === input.attempt);
+  if (attempts.length !== 1 || attempts[0]?.state !== 'reset') throw new CoordinationRuntimeError('invalid-state', 'removed unit reset recovery lacks the exact released attempt state', attempts.map((attempt) => attempt.state));
+  const worktrees = array(status.payload['worktrees'], 'worktrees').map(parseCoordinationWorktree).filter((worktree) => worktree.owner.unit_id === input.unitId && worktree.owner.attempt === input.attempt);
+  if (worktrees.length !== 1 || (worktrees[0]?.state !== 'terminal' && worktrees[0]?.state !== 'removed') || resolve(worktrees[0].canonical_path) !== resolve(input.unitWorktreePath)) throw new CoordinationRuntimeError('invalid-state', 'removed unit reset recovery lacks the exact terminal canonical worktree projection');
+  const evidenceRef = relative(input.context.active.main_worktree_path, evidencePath).replace(/\\/gu, '/');
+  const evidenceSha256 = `sha256:${createHash('sha256').update(evidenceBytes).digest('hex')}`;
+  const accepted = array(status.payload['reconciliation_evidence'], 'reconciliation_evidence').map(parseCoordinationReconciliationEvidence).filter((entry) => entry.source === 'attempt-reset' && entry.release_condition.target_id === `${input.unitId}:${String(input.attempt)}` && entry.release_condition.evidence?.ref === evidenceRef && entry.release_condition.evidence.sha256 === evidenceSha256);
+  if (accepted.length !== 1) throw new CoordinationRuntimeError('invalid-state', 'removed unit reset recovery lacks one exact accepted release-evidence row', [evidenceRef, evidenceSha256]);
+  const record: AutopilotUnitFailureRecord = {
+    schema_version: 'autopilot.unit_failure.v1', action: 'reset', workstream: input.context.active.workstream, workstream_run: input.context.active.workstream_run,
+    unit_id: input.unitId, attempt: input.attempt, unit_worktree_path: facts.unitWorktreePath, dirty_paths: Object.freeze([]), capture_commit_sha: null, capture_ref: null,
+    git_head_before: facts.gitHeadBefore, git_head_after: facts.gitHeadAfter, git_common_dir: facts.gitCommonDir, branch: facts.branch, postcondition_worktree_clean: true,
+    summary, created_at: createdAt,
+  };
+  await cleanupTerminalUnitWorktree({ active: input.context.active, unitId: input.unitId, attempt: input.attempt, allowedStatuses: ['aborted'], reason: 'autopilot failed unit reset cleanup', ...(input.env === undefined ? {} : { env: input.env }), ...(input.now === undefined ? {} : { now: input.now }) });
+  return record;
+}
+
 export async function resetFailedUnit(input: UnitFailureInput): Promise<AutopilotUnitFailureRecord> {
+  if (!existsSync(input.unitWorktreePath)) return await resumeRemovedResetFailure(input);
   const captured = await captureDirtyBeforeDestructiveTransition(input);
   if (captured !== null) return captured;
   await resetWorktreeForRecordedTransition(input, 'unit-reset', 'reset');
@@ -253,8 +307,9 @@ export async function resetFailedUnit(input: UnitFailureInput): Promise<Autopilo
   const currentSha = record.git_head_after;
   const archiveRef = null;
   await recordFailureEvidence(input, publication, 'attempt-reset');
+  await ensureD65WorktreeStageCadenceFromEnvironment(input.env ?? process.env);
   await releaseLegacyClaimsIfApplicable(input, 'autopilot failed unit reset');
-  await updateUnitBranchStatus({ active: input.context.active, unitId: input.unitId, attempt: input.attempt, status: 'aborted', currentSha, archiveRef });
+  await updateUnitBranchStatus({ active: input.context.active, unitId: input.unitId, attempt: input.attempt, status: 'aborted', currentSha, archiveRef, env: input.env ?? process.env, recovery: 'unit-recovery' });
   await cleanupTerminalUnitWorktree({ active: input.context.active, unitId: input.unitId, attempt: input.attempt, allowedStatuses: ['aborted'], reason: 'autopilot failed unit reset cleanup', ...(input.env === undefined ? {} : { env: input.env }), ...(input.now === undefined ? {} : { now: input.now }) });
   return record;
 }
@@ -262,8 +317,9 @@ export async function resetFailedUnit(input: UnitFailureInput): Promise<Autopilo
 export async function preserveFailedUnit(input: UnitFailureInput): Promise<AutopilotUnitFailureRecord> {
   const publication = await writeFailureRecord({ ...input, action: 'preserve' });
   const { record } = publication;
-  await updateUnitBranchStatus({ active: input.context.active, unitId: input.unitId, attempt: input.attempt, status: 'quarantined', currentSha: record.git_head_after, archiveRef: record.capture_ref });
+  await updateUnitBranchStatus({ active: input.context.active, unitId: input.unitId, attempt: input.attempt, status: 'quarantined', currentSha: record.git_head_after, archiveRef: record.capture_ref, env: input.env ?? process.env, recovery: 'unit-recovery' });
   await recordFailureEvidence(input, publication, 'quarantine-capture');
+  await ensureD65WorktreeStageCadenceFromEnvironment(input.env ?? process.env);
   await releaseLegacyClaimsIfApplicable(input, 'autopilot failed unit preserve-after-quarantine-capture');
   return record;
 }
@@ -275,11 +331,12 @@ export async function abortFailedUnit(input: UnitFailureInput): Promise<Autopilo
   const publication = await writeFailureRecord({ ...input, action: 'abort' });
   const { record } = publication;
   await recordFailureEvidence(input, publication, 'attempt-reset');
+  await ensureD65WorktreeStageCadenceFromEnvironment(input.env ?? process.env);
   await releaseLegacyClaimsIfApplicable(input, 'autopilot failed unit abort');
   const currentSha = record.git_head_after;
   const archiveRef = `autopilot/archive/${input.context.active.workstream_run}/unit/${input.unitId}/attempt-${String(input.attempt)}/aborted`;
   await archiveFailureBranch(input, currentSha, archiveRef, 'unit abort preservation archive');
-  await updateUnitBranchStatus({ active: input.context.active, unitId: input.unitId, attempt: input.attempt, status: 'aborted', currentSha, archiveRef });
+  await updateUnitBranchStatus({ active: input.context.active, unitId: input.unitId, attempt: input.attempt, status: 'aborted', currentSha, archiveRef, env: input.env ?? process.env, recovery: 'unit-recovery' });
   await cleanupTerminalUnitWorktree({ active: input.context.active, unitId: input.unitId, attempt: input.attempt, allowedStatuses: ['aborted'], reason: 'autopilot failed unit abort cleanup', ...(input.env === undefined ? {} : { env: input.env }), ...(input.now === undefined ? {} : { now: input.now }) });
   return record;
 }
@@ -311,8 +368,56 @@ async function captureDirtyBeforeDestructiveTransition(input: UnitFailureInput):
   return await quarantineFailedUnit({ ...input, summary: `automatic preservation before destructive transition: ${input.summary}` });
 }
 
+async function commitD65FailureEvidence(input: UnitFailureInput, publication: PublishedUnitFailureRecord): Promise<void> {
+  const env = input.env ?? process.env;
+  const contextPath = env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV];
+  if (contextPath === undefined || contextPath.trim().length === 0) return;
+  const session = await readCoordinatorSessionContext(contextPath);
+  const client = new CoordinatorClient({ env });
+  const status = await client.query('status', session.repo_id, session.workstream_run);
+  const artifactsValue = status.payload['authoritative_artifacts'];
+  const resourcesValue = status.payload['run_resources'];
+  if (!Array.isArray(artifactsValue) || !Array.isArray(resourcesValue) || resourcesValue.length !== 1 || resourcesValue[0] === undefined) throw new CoordinationRuntimeError('invalid-state', 'D65 unit failure evidence commit lacks one exact artifact/resource projection');
+  const artifacts = artifactsValue.map(parseCoordinationAuthoritativeArtifact);
+  const bootstrap = artifacts.some((artifact) => artifact.artifact_id === `semantic-graph-bootstrap:${session.workstream_run}` && artifact.document_schema_version === 'autopilot.semantic_graph_bootstrap.v1');
+  const graphs = artifacts.filter((artifact) => artifact.document_schema_version === 'autopilot.semantic_graph.v1').sort((left, right) => left.artifact_id.localeCompare(right.artifact_id));
+  if (!bootstrap) {
+    if (graphs.length > 0) throw new CoordinationRuntimeError('invalid-state', 'complete graph exists without D65 bootstrap authority');
+    return;
+  }
+  const graph = graphs[graphs.length - 1];
+  if (graph === undefined) return;
+  const resource = parseCoordinationRunResource(resourcesValue[0]);
+  const evidenceRef = relative(resource.main_worktree_path, publication.evidencePath).replace(/\\/gu, '/');
+  if (evidenceRef.length === 0 || evidenceRef === '..' || evidenceRef.startsWith('../') || isAbsolute(evidenceRef)) throw new CoordinationRuntimeError('unauthorized-client', 'unit failure evidence path escapes run-main authority', [publication.evidencePath]);
+  const expectedBytes = await readFile(publication.evidencePath);
+  const expectedDigest = `sha256:${createHash('sha256').update(expectedBytes).digest('hex')}`;
+  let head = gitQueryText({ descriptor: { kind: 'head' }, cwd: resource.main_worktree_path }).trim();
+  if (head === graph.git_commit) {
+    const acceptedBytes = runGitQuery({ descriptor: { kind: 'show-file', revision: head, path: evidenceRef, allowAbsent: true }, cwd: resource.main_worktree_path });
+    if (!acceptedBytes.negative) {
+      const acceptedDigest = `sha256:${createHash('sha256').update(acceptedBytes.stdout).digest('hex')}`;
+      if (acceptedDigest !== expectedDigest) throw new CoordinationRuntimeError('idempotency-conflict', 'accepted graph contains different unit failure evidence bytes', [evidenceRef, expectedDigest, acceptedDigest]);
+      return;
+    }
+    if (runGitQuery({ descriptor: { kind: 'staged-clean' }, cwd: resource.main_worktree_path }).negative) throw new CoordinationRuntimeError('invalid-state', 'unit failure evidence refuses to commit over a nonempty shared index', [evidenceRef]);
+    const gitEnv: ProcessEnvLike = { ...env, GIT_AUTHOR_NAME: 'autopilot-runtime', GIT_AUTHOR_EMAIL: 'autopilot-runtime@example.invalid', GIT_COMMITTER_NAME: 'autopilot-runtime', GIT_COMMITTER_EMAIL: 'autopilot-runtime@example.invalid', GIT_AUTHOR_DATE: publication.record.created_at, GIT_COMMITTER_DATE: publication.record.created_at };
+    const staged = await runGitMutation({ descriptor: { kind: 'stage-paths', paths: [evidenceRef], sparse: true }, cwd: resource.main_worktree_path, env: gitEnv });
+    if (staged.kind !== 'reported' || staged.exitCode !== 0) throw new CoordinationRuntimeError('invalid-state', 'unit failure evidence staging failed', [staged.kind === 'reported' ? staged.diagnostic : staged.reason]);
+    const committed = await runGitMutation({ descriptor: { kind: 'commit', message: `autopilot: ${publication.record.action} unit failure evidence` }, cwd: resource.main_worktree_path, env: gitEnv });
+    if (committed.kind !== 'reported' || committed.exitCode !== 0) throw new CoordinationRuntimeError('invalid-state', 'unit failure evidence commit failed', [committed.kind === 'reported' ? committed.diagnostic : committed.reason]);
+    head = gitQueryText({ descriptor: { kind: 'head' }, cwd: resource.main_worktree_path }).trim();
+  }
+  const parents = gitQueryText({ descriptor: { kind: 'rev-list-parents', revision: head }, cwd: resource.main_worktree_path }).trim().split(/\s+/u).filter((entry) => entry.length > 0);
+  const paths = gitQueryNulStrings({ descriptor: { kind: 'diff-paths', from: graph.git_commit, to: head, noRenames: true }, cwd: resource.main_worktree_path });
+  const committedBytes = runGitQuery({ descriptor: { kind: 'show-file', revision: head, path: evidenceRef }, cwd: resource.main_worktree_path }).stdout;
+  const committedDigest = `sha256:${createHash('sha256').update(committedBytes).digest('hex')}`;
+  if (parents.length !== 2 || parents[1] !== graph.git_commit || paths.length !== 1 || paths[0] !== evidenceRef || committedDigest !== expectedDigest) throw new CoordinationRuntimeError('idempotency-conflict', 'unit failure evidence commit differs from its exact one-parent one-ref stage', [head, graph.git_commit, evidenceRef, expectedDigest, committedDigest]);
+}
+
 async function recordFailureEvidence(input: UnitFailureInput, publication: PublishedUnitFailureRecord, source: 'attempt-reset' | 'quarantine-capture'): Promise<void> {
   if (input.context.active.coordination_authority !== 'coordinator-edit-leases-v1') return;
+  await commitD65FailureEvidence(input, publication);
   await recordCoordinatorReleaseEvidenceFromFile({
     active: input.context.active,
     source,

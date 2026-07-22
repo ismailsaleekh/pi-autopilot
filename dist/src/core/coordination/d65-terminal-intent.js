@@ -97,10 +97,10 @@ export function computeD65ObligationPartition(input) {
         if (obligation.state !== 'waiting-for-predecessor')
             throw new CoordinationRuntimeError('invalid-state', `foreign-dependent obligation ${obligation.obligation_id} must be waiting-for-predecessor`);
     return {
-        blocking_owned_obligations: sortById(blocking),
-        foreign_dependent_obligations: sortById(foreignDependent),
-        abort_owned_obligations: sortById(abortOwned),
-        other_nonterminal_obligations: sortById(other),
+        blocking_owned_obligations: Object.freeze(sortById(blocking).map((row) => Object.freeze({ ...row }))),
+        foreign_dependent_obligations: Object.freeze(sortById(foreignDependent).map((row) => Object.freeze({ ...row }))),
+        abort_owned_obligations: Object.freeze(sortById(abortOwned).map((row) => Object.freeze({ ...row }))),
+        other_nonterminal_obligations: Object.freeze(sortById(other).map((row) => Object.freeze({ ...row }))),
     };
 }
 /**

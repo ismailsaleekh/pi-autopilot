@@ -5,6 +5,7 @@ import { spawn } from 'node:child_process';
 import { createCoordinatorAdmissionRequest, verifyCoordinatorAdmissionResponse } from "./admission.js";
 import { assertCoordinatorAdmissionAuthorityUnchanged, captureCoordinatorAdmissionAuthority, COORDINATOR_S1_ADMISSION_IDENTITY, recaptureCoordinatorAdmissionAuthority, verifyCoordinatorS1RecoveryAuthority } from "./admission-runtime.js";
 import { parseCoordinationReconciliationDetail, parseCoordinationReconciliationReceipt, parseCoordinationResultDetail, parseCoordinationResultReceipt, parseCoordinatorMailboxPage, parseCoordinatorMigrationRecoveryPage, parseCoordinatorProjectionPage, parseCoordinatorReconciliationDetailPage, parseCoordinatorRequestEnvelope, parseCoordinatorResultDetailPage, parseCoordinatorRunCatalogPage } from "./contracts.js";
+import { parseD65DispatchAuthorityEnvelope } from "./d65-dispatch-authority.js";
 import { COORDINATOR_COMPILED_ENTRYPOINT_ENV, resolveCoordinatorExecutable } from "./executable-resolution.js";
 import { coordinationFailureDefinition, CoordinationRuntimeError } from "./failures.js";
 import { activeCoordinationMigrationFreeze } from "./migration-paths.js";
@@ -315,7 +316,9 @@ export class CoordinatorClient {
         const capability = await readOrCreateCoordinatorCapability(this.#paths);
         const response = await this.#sendWithRecovery(request, capability);
         if (response.ok) {
-            if (request.action === 'status')
+            if (request.action === 'status' && request.payload['dispatch_authority_context'] !== undefined)
+                parseD65DispatchAuthorityEnvelope(response.payload);
+            else if (request.action === 'status')
                 parseCoordinatorProjectionPage(response.payload, 'status');
             else if (request.action === 'doctor')
                 parseCoordinatorProjectionPage(response.payload, 'doctor');
@@ -436,6 +439,11 @@ export class CoordinatorClient {
             }
             throw new CoordinationRuntimeError('coordinator-unavailable', lastRetryError instanceof Error ? lastRetryError.message : String(lastRetryError));
         }
+    }
+    /** Fresh negotiated-S1 SR-5 read; no frame is cached on the client. */
+    async readD65DispatchAuthority(repoId, workstreamRun, context) {
+        const response = await this.#queryWire('status', repoId, workstreamRun, { dispatch_authority_context: context });
+        return parseD65DispatchAuthorityEnvelope(response.payload);
     }
     async query(action, repoId = 'global', workstreamRun = null, payload = {}) {
         if ((action === 'status' || action === 'doctor') && Object.keys(payload).length === 0)

@@ -492,20 +492,30 @@ function providerHealth(value: unknown, label: string): D65ProviderHealth {
   const state = oneOf(record, 'state', D65_PROVIDER_STATES, label);
   const cooldownUntil = record['cooldown_until'] === null ? null : timestamp(record, 'cooldown_until', label);
   const probeRun = nullableStr(record, 'probe_workstream_run', label, 192);
+  const probeRef = record['probe_ref'] === null ? null : repoRelativePath(record, 'probe_ref', label);
+  const probeSha = nullableSha256Field(record, 'probe_sha256', label);
   const consumption = record['consumption_event_seq'] === null ? null : integer(record, 'consumption_event_seq', label, 1);
-  // State-specific nullability (fresh plan §3.2).
-  if (state === 'healthy' && (cooldownUntil !== null || probeRun !== null)) fail(label, 'initial healthy provider must have null cooldown/probe-run');
-  if (state === 'retry-authorized' && probeRun === null) fail(label, 'retry-authorized provider must cite one accepted probe run');
-  if (state === 'exhausted' && cooldownUntil !== null) fail(label, 'exhausted provider must have null cooldown');
+  const observationRef = record['observation_ref'] === null ? null : repoRelativePath(record, 'observation_ref', label);
+  const observationSha = nullableSha256Field(record, 'observation_sha256', label);
+  if (observationRef === null || observationSha === null) fail(label, 'provider health must cite one exact launch, continuation, probe, or consumption observation');
+  // Exact state-specific probe tuple (fresh plan §3.2). Healthy has two legal
+  // forms only: initial health with a wholly null probe tuple, or post-consume
+  // health retaining the exact probe triple and citing consumption.
+  const probeTriplePresent = probeRun !== null && probeRef !== null && probeSha !== null;
+  const probeTripleAbsent = probeRun === null && probeRef === null && probeSha === null;
+  if (state === 'healthy' && (cooldownUntil !== null || !((probeTripleAbsent && consumption === null) || (probeTriplePresent && consumption !== null)))) fail(label, 'healthy provider must be initial-null or exact post-consume probe authority');
+  if (state === 'blocked' && (cooldownUntil === null || !probeTripleAbsent || consumption !== null)) fail(label, 'blocked provider must carry cooldown and no probe/consumption tuple');
+  if (state === 'retry-authorized' && (cooldownUntil === null || !probeTriplePresent || consumption !== null)) fail(label, 'retry-authorized provider must carry cooldown plus one unconsumed probe triple');
+  if (state === 'exhausted' && (cooldownUntil !== null || !probeTripleAbsent || consumption !== null)) fail(label, 'exhausted provider must have null cooldown/probe/consumption tuple');
   return {
     provider: identifier(record, 'provider', label),
     state,
-    observation_ref: record['observation_ref'] === null ? null : repoRelativePath(record, 'observation_ref', label),
-    observation_sha256: nullableSha256Field(record, 'observation_sha256', label),
+    observation_ref: observationRef,
+    observation_sha256: observationSha,
     cooldown_until: cooldownUntil,
     probe_workstream_run: probeRun,
-    probe_ref: record['probe_ref'] === null ? null : repoRelativePath(record, 'probe_ref', label),
-    probe_sha256: nullableSha256Field(record, 'probe_sha256', label),
+    probe_ref: probeRef,
+    probe_sha256: probeSha,
     consumption_event_seq: consumption,
   };
 }

@@ -31,8 +31,12 @@ const required = [
   'TESTING.md',
   'PUBLISHING.md',
   'scripts/check-package-payload.mjs',
+  'scripts/check-production-git-spawns.mjs',
   'scripts/generate-sbom.mjs',
+  'scripts/run-certified-command.mjs',
   'scripts/security-scan.mjs',
+  'scripts/test-packed-consumer-release.mjs',
+  'scripts/verify-packed-consumer.mjs',
   'artifacts/security/cyclonedx-sbom.json',
   'artifacts/security/offline-security-scan.json',
 ];

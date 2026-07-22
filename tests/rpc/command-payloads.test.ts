@@ -42,9 +42,18 @@ interface RpcNotifyRequest {
   readonly notifyType?: 'info' | 'warning' | 'error';
 }
 
+interface RpcCommandSourceInfo {
+  readonly path: string;
+  readonly source: string;
+  readonly scope: string;
+  readonly origin: string;
+}
+
 interface RpcCommandInfo {
   readonly name: string;
   readonly description?: string;
+  readonly source?: string;
+  readonly sourceInfo?: RpcCommandSourceInfo;
 }
 
 interface RpcRunResult {
@@ -107,11 +116,22 @@ function requireCommandInfo(value: unknown): RpcCommandInfo {
   if (!isJsonMap(value)) throw new TypeError('RPC command entry must be a map');
   const name = field(value, 'name');
   const description = field(value, 'description');
+  const source = field(value, 'source');
+  const sourceInfoValue = field(value, 'sourceInfo');
   if (typeof name !== 'string') throw new TypeError('RPC command entry missing name');
-  if (description !== undefined && typeof description !== 'string') {
-    throw new TypeError('RPC command description must be text when present');
+  if (description !== undefined && typeof description !== 'string') throw new TypeError('RPC command description must be text when present');
+  if (source !== undefined && typeof source !== 'string') throw new TypeError('RPC command source must be text when present');
+  let sourceInfo: RpcCommandSourceInfo | undefined;
+  if (sourceInfoValue !== undefined) {
+    if (!isJsonMap(sourceInfoValue)) throw new TypeError('RPC command sourceInfo must be a map when present');
+    const path = field(sourceInfoValue, 'path');
+    const sourceKind = field(sourceInfoValue, 'source');
+    const scope = field(sourceInfoValue, 'scope');
+    const origin = field(sourceInfoValue, 'origin');
+    if (typeof path !== 'string' || typeof sourceKind !== 'string' || typeof scope !== 'string' || typeof origin !== 'string') throw new TypeError('RPC command sourceInfo fields must be text');
+    sourceInfo = { path, source: sourceKind, scope, origin };
   }
-  return description === undefined ? { name } : { name, description };
+  return { name, ...(description === undefined ? {} : { description }), ...(source === undefined ? {} : { source }), ...(sourceInfo === undefined ? {} : { sourceInfo }) };
 }
 
 function commandsFrom(response: RpcCommandResponse): RpcCommandInfo[] {
@@ -129,6 +149,29 @@ function requireListedCommand(commands: readonly RpcCommandInfo[], name: string)
   const command = commands.find((entry) => entry.name === name);
   if (command === undefined) throw new Error(`missing listed command ${name}`);
   return command;
+}
+
+const expectedAutopilotCommands = Object.freeze([
+  AUTOPILOT_COMMAND,
+  AUTOPILOT_ABORT_COMMAND,
+  AUTOPILOT_CLAIM_GC_COMMAND,
+  AUTOPILOT_CLOSE_COMMAND,
+  AUTOPILOT_CONFIG_COMMAND,
+  AUTOPILOT_COORDINATION_COMMAND,
+  AUTOPILOT_HANDOFF_COMMAND,
+  AUTOPILOT_INJECT_COMMAND,
+  AUTOPILOT_ONBOARD_COMMAND,
+].sort());
+
+function assertExactRpcCommandAuthority(commands: readonly RpcCommandInfo[]): void {
+  const autopilot = commands.filter((command) => command.sourceInfo?.path === extensionPath);
+  assert.deepEqual(commandNames(autopilot), expectedAutopilotCommands);
+  for (const command of autopilot) assert.deepEqual(command.sourceInfo, { path: extensionPath, source: 'cli', scope: 'temporary', origin: 'top-level' });
+  const host = commands.filter((command) => command.sourceInfo?.path !== extensionPath);
+  assert.equal(host.length, 1);
+  assert.equal(host[0]?.name, 'llama');
+  assert.equal(host[0]?.source, 'extension');
+  assert.deepEqual(host[0]?.sourceInfo, { path: '<inline:llama.cpp>', source: 'inline', scope: 'temporary', origin: 'top-level' });
 }
 
 function notifications(events: readonly unknown[]): RpcNotifyRequest[] {
@@ -304,20 +347,10 @@ function spawnPiRpc(
 }
 
 void describe('Pi RPC Autopilot command wiring', () => {
-  void it('reports only the Autopilot slash commands over pi --mode rpc', async () => {
+  void it('reports exactly nine Autopilot commands beside the pinned Pi inline llama command', async () => {
     const { events } = await runRpc([{ id: 'commands', type: 'get_commands' }]);
     const commands = commandsFrom(requireResponse(events, 'commands'));
-    assert.deepEqual(commandNames(commands), [
-      AUTOPILOT_COMMAND,
-      AUTOPILOT_ABORT_COMMAND,
-      AUTOPILOT_CLAIM_GC_COMMAND,
-      AUTOPILOT_CLOSE_COMMAND,
-      AUTOPILOT_CONFIG_COMMAND,
-      AUTOPILOT_COORDINATION_COMMAND,
-      AUTOPILOT_HANDOFF_COMMAND,
-      AUTOPILOT_INJECT_COMMAND,
-      AUTOPILOT_ONBOARD_COMMAND,
-    ]);
+    assertExactRpcCommandAuthority(commands);
     assert.match(requireListedCommand(commands, AUTOPILOT_COMMAND).description ?? '', /Start or resume Autopilot/);
     assert.match(
       requireListedCommand(commands, AUTOPILOT_ONBOARD_COMMAND).description ?? '',
@@ -377,17 +410,7 @@ void describe('Pi RPC Autopilot command wiring', () => {
     ]);
 
     const commands = commandsFrom(requireResponse(events, 'commands'));
-    assert.deepEqual(commandNames(commands), [
-      AUTOPILOT_COMMAND,
-      AUTOPILOT_ABORT_COMMAND,
-      AUTOPILOT_CLAIM_GC_COMMAND,
-      AUTOPILOT_CLOSE_COMMAND,
-      AUTOPILOT_CONFIG_COMMAND,
-      AUTOPILOT_COORDINATION_COMMAND,
-      AUTOPILOT_HANDOFF_COMMAND,
-      AUTOPILOT_INJECT_COMMAND,
-      AUTOPILOT_ONBOARD_COMMAND,
-    ]);
+    assertExactRpcCommandAuthority(commands);
     const onboard = requireResponse(events, 'onboard');
     const handoffBefore = requireResponse(events, 'handoff-before');
     assert.equal(onboard.success, true, onboard.error);

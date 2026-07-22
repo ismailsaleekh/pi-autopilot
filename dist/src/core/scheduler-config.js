@@ -2,6 +2,7 @@ import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { writeJsonAtomic } from "./parallel-runtime.js";
+import { assertD65OrdinaryBoundaryFromEnvironment } from "./coordination/d65-runtime-dispatch.js";
 export const AUTOPILOT_DEFAULT_PARALLEL_CAP = 8;
 export const AUTOPILOT_MIN_PARALLEL_CAP = 1;
 export const AUTOPILOT_MAX_PARALLEL_CAP = 32;
@@ -51,6 +52,9 @@ export async function readSchedulerConfig(input) {
 }
 export async function writeSchedulerConfig(input) {
     assertValidParallelCap(input.parallelCap);
+    const d65 = await assertD65OrdinaryBoundaryFromEnvironment('config-write', input.env ?? process.env);
+    if (d65 && input.parallelCap !== 1)
+        fail('launch-policy-cap-unauthorized', 'D65 scheduler parallel_cap must remain exactly 1.', [String(input.parallelCap)]);
     const config = {
         schema_version: 'autopilot.scheduler_config.v1',
         workstream: input.workstream,

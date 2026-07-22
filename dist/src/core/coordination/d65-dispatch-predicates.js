@@ -26,7 +26,9 @@ const PROVIDER_REASONS = Object.freeze(['provider-blocked', 'provider-exhausted'
  * `covered_semantic_reason` binding outside this set is rejected so a caller can
  * never smuggle a forbidden reason (e.g. policy-invalid) through the binding.
  */
-const GRAPH_COVERED_SEMANTIC_REASONS = Object.freeze(['graph-incomplete', 'graph-drift', 'progress-stale']);
+const GRAPH_COVERED_SEMANTIC_REASONS = Object.freeze([
+    'graph-incomplete', 'graph-drift', 'progress-stale', 'handoff-pending', 'parent-recovering', 'unit-recovering', 'terminal-tail',
+]);
 /**
  * The exact legal `accepted_continuation_reason` values for the
  * continuation/parent-loss/probe `register-authoritative-artifact` cell (fresh
@@ -34,11 +36,12 @@ const GRAPH_COVERED_SEMANTIC_REASONS = Object.freeze(['graph-incomplete', 'graph
  * non-provider, non-blocker semantic continuation row reason. The six/seven
  * non-clearable blockers (line 181) and provider reasons are EXCLUDED so the
  * required-reason exemption can never be used to smuggle a blocker or a second
- * provider reason. `unit-recovering` is handled as an explicit optional extra,
- * not as the accepted continuation reason itself.
+ * provider reason. `unit-recovering` is the required continuation reason for
+ * unit/provider recovery artifacts and remains an optional extra for the other
+ * incident classes.
  */
 const LEGAL_ACCEPTED_CONTINUATION_REASONS = Object.freeze([
-    'parent-recovering', 'handoff-pending', 'terminal-tail', 'graph-incomplete', 'graph-drift', 'progress-stale',
+    'parent-recovering', 'handoff-pending', 'terminal-tail', 'graph-incomplete', 'graph-drift', 'progress-stale', 'unit-recovering',
 ]);
 // ---- reason-array validation (fail-closed) ----------------------------------
 /** True iff `reasons` is a complete decoded-byte-sorted array of unique known reasons. */

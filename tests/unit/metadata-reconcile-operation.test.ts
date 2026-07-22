@@ -162,8 +162,8 @@ void describe('persisted metadata reconciliation operation consumer', () => {
         const smuggledPage = store.handle({ ...statusRequest, request_id: 'metadata-facade-scan-smuggling', payload: { section: 'worktree_operations', scan_token: negotiatedScanToken } }, 'cf50-legacy');
         assert.equal(smuggledPage.ok, false);
         assert.equal(smuggledPage.error_code, 'unauthorized-client', 'scan tokens must be bound to the negotiated or legacy façade that created them');
-        const legacyExportPath = join(root, 'legacy-export.json');
-        const negotiatedExportPath = join(root, 'negotiated-export.json');
+        const legacyExportPath = join(paths.exportsRoot, 'legacy-export.json');
+        const negotiatedExportPath = join(paths.exportsRoot, 'negotiated-export.json');
         const exportRequest = (requestId: string, outputPath: string): CoordinatorRequestEnvelope => ({
           schema_version: 'autopilot.coordinator_request.v1', protocol_version: '1.6', request_id: requestId, action: 'export', idempotency_key: null,
           repo_id: repoId, workstream_run: workstreamRun, session_id: null, fencing_generation: null, expected_version: null, payload: { output_path: outputPath },

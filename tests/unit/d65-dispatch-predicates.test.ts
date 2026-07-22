@@ -132,11 +132,13 @@ void describe('D65-I4 recoveryTransitionAllowed — per-cell positives', () => {
     // The accepted continuation reason must be PRESENT; here it is progress-stale.
     assertAllowed(baseRecovery('register-authoritative-artifact', { row_stop_reasons: ['progress-stale'], bindings: bindings({ accepted_continuation_reason: 'progress-stale' }) }));
     assertAllowed(baseRecovery('register-authoritative-artifact', { row_stop_reasons: ['progress-stale', 'provider-blocked', 'unit-recovering'].sort((a, b) => (a < b ? -1 : 1)) as D65StopReason[], bindings: bindings({ accepted_continuation_reason: 'progress-stale' }) }));
+    assertAllowed(baseRecovery('register-authoritative-artifact', { row_stop_reasons: ['provider-blocked', 'unit-recovering'], bindings: bindings({ accepted_continuation_reason: 'unit-recovering' }) }));
   });
   void it('graph-publication: exactly graph-publication-pending (+ one covered semantic / one provider), prior graph current', () => {
     // Prior graph tuple must be CURRENT (complete_graph_current true) with a pending publication.
     assertAllowed(baseRecovery('graph-publication', { row_stop_reasons: ['graph-publication-pending'], graph: { complete_graph_current: true, graph_publication_pending: true } }));
     assertAllowed(baseRecovery('graph-publication', { row_stop_reasons: ['graph-incomplete', 'graph-publication-pending'].sort((a, b) => (a < b ? -1 : 1)) as D65StopReason[], graph: { complete_graph_current: true, graph_publication_pending: true }, bindings: bindings({ covered_semantic_reason: 'graph-incomplete' }) }));
+    assertAllowed(baseRecovery('graph-publication', { row_stop_reasons: ['graph-publication-pending', 'handoff-pending'].sort((a, b) => (a < b ? -1 : 1)) as D65StopReason[], graph: { complete_graph_current: true, graph_publication_pending: true }, bindings: bindings({ covered_semantic_reason: 'handoff-pending' }) }));
   });
   void it('unit-recovery: unit-recovering + at most one provider', () => {
     assertAllowed(baseRecovery('unit-recovery', { row_stop_reasons: ['unit-recovering'] }));
@@ -212,6 +214,11 @@ void describe('D65-I4 recoveryTransitionAllowed — negatives', () => {
   void it('terminal-tail rejects lease-invalid unless attach_terminal_recovery is set', () => {
     assertDenied(baseRecovery('terminal-tail', { row_stop_reasons: ['lease-invalid', 'terminal-tail'].sort((a, b) => (a < b ? -1 : 1)) as D65StopReason[], bindings: bindings({ attach_terminal_recovery: false }) }), 'row-reasons-not-permitted');
   });
+  void it('unit-recovery rejects a wrong reason, stale session, and a second provider reason', () => {
+    assertDenied(baseRecovery('unit-recovery', { row_stop_reasons: ['provider-blocked'] }), 'row-reasons-not-permitted');
+    assertDenied(baseRecovery('unit-recovery', { row_stop_reasons: ['unit-recovering'], bindings: bindings({ attached_session_current: false }) }), 'session-not-current');
+    assertDenied(baseRecovery('unit-recovery', { row_stop_reasons: ['provider-blocked', 'provider-exhausted', 'unit-recovering'].sort((a, b) => (a < b ? -1 : 1)) as D65StopReason[] }), 'row-reasons-not-permitted');
+  });
   void it('register-attempt rejects a non-retry provider state or extra row reason', () => {
     assertDenied(baseRecovery('register-attempt', { row_stop_reasons: ['provider-blocked'], heartbeat: { governing_heartbeat_current: true, provider_state: 'healthy' } }), 'provider-state-not-permitted');
     assertDenied(baseRecovery('register-attempt', { row_stop_reasons: ['provider-blocked', 'unit-recovering'].sort((a, b) => (a < b ? -1 : 1)) as D65StopReason[], heartbeat: { governing_heartbeat_current: true, provider_state: 'retry-authorized' } }), 'row-reasons-not-permitted');
@@ -254,7 +261,9 @@ void describe('D65-I4 totality guarantee', () => {
     }
   });
   void it('an impossible action value returns unknown-action rather than throwing', () => {
-    const verdict = recoveryTransitionAllowed(baseRecovery('accept-program-heartbeat', { action: 'not-a-real-action' as unknown as D65RecoveryAction }));
+    const malformed = baseRecovery('accept-program-heartbeat');
+    Object.defineProperty(malformed, 'action', { value: 'not-a-real-action', enumerable: true });
+    const verdict = recoveryTransitionAllowed(malformed);
     assert.equal(verdict.allowed, false);
     if (!verdict.allowed) assert.ok(verdict.denied_by.includes('unknown-action'));
   });
