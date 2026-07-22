@@ -6,7 +6,7 @@ covers_surfaces: []
 covers_sources:
   - src/cli/migration-recovery.ts
 signature_hash: 'sha256:572bf897cd91ce0e6023ae60cd84c52c8d4a3abe9c84155412e9cacc9717a473'
-body_hash: 'sha256:9e6ecf62ca7ad97a25396e45a195419f147110edeb52a29b393389851ff2c53c'
+body_hash: 'sha256:e20d279d91ba379c5799bcc5a67e8ddd0be67ee0236e2bb5292d6b137efc9c06'
 stability: stable
 ---
 
@@ -34,7 +34,10 @@ run/unit/attempt ownership. Historical READ claims are excluded from active impo
 when a bounded no-follow snapshot proves either a later canonical attempt or an exact
 completed state/status/receipt/execution-audit chain. WRITE/EXCLUSIVE release remains
 limited to stronger Git-backed terminal evidence; ambiguous authority is imported and
-queued as typed supervisor recovery work.
+queued as typed supervisor recovery work. The recovery CLI constructs a typed release
+resolution only after source, target identity, and evidence bytes are all present, then
+reuses that immutable input for each fenced recovery mutation; partial release authority
+fails before the supervisor operation.
 
 ## verify / rollback / cutover
 

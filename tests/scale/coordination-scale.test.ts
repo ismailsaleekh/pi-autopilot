@@ -301,16 +301,16 @@ void describe('Coordination Fabric release-scale corpus', () => {
           assert.equal(replay.ok, true, `mailbox drain replay ${String(client)} failed`);
           assert.ok(Date.now() - queryStarted < MAX_INDEXED_QUERY_MS, `actual mailbox-drain query ${String(client)} exceeded one second`);
         }
-        const firstExportPath = join(root, 'scale-export.json');
+        const firstExportPath = join(paths.exportsRoot, 'scale-export.json');
         const firstExport = imported.exportTo(firstExportPath);
-        const secondExport = imported.exportTo(join(root, 'scale-export-repeat.json'));
+        const secondExport = imported.exportTo(join(paths.exportsRoot, 'scale-export-repeat.json'));
         assert.equal(firstExport.payload['sha256'], secondExport.payload['sha256']);
         const exactExportBytes = await readFile(firstExportPath);
         assert.equal(exactExportBytes[exactExportBytes.byteLength - 1], 0x0a, 'deterministic export must end in one newline byte');
         assert.equal(firstExport.payload['sha256'], `sha256:${createHash('sha256').update(exactExportBytes).digest('hex')}`, 'export digest must cover exact file bytes including newline');
       } finally { imported.close(); }
 
-      const summary = await parseDeterministicExport(join(root, 'scale-export.json'));
+      const summary = await parseDeterministicExport(join(paths.exportsRoot, 'scale-export.json'));
       assert.equal(summary.counts['events'], EVENT_COUNT);
       assert.equal(summary.counts['claim_requests'], REQUEST_COUNT);
       assert.equal(summary.counts['repositories'], REPOSITORY_COUNT);
@@ -318,7 +318,7 @@ void describe('Coordination Fabric release-scale corpus', () => {
       assert.equal(summary.logicalClients.size, CLIENT_COUNT);
 
       const databaseBytes = await sqliteFootprint(paths.databasePath);
-      const exportBytes = (await stat(join(root, 'scale-export.json'))).size;
+      const exportBytes = (await stat(join(paths.exportsRoot, 'scale-export.json'))).size;
       const rss = Math.max(process.memoryUsage().rss, process.resourceUsage().maxRSS * 1024);
       assert.ok(replayDuration < MAX_DURATION_MS, `staging and transactional replay took ${String(replayDuration)}ms`);
       assert.ok(databaseBytes < MAX_DATABASE_BYTES, `database+WAL+SHM used ${String(databaseBytes)} bytes`);

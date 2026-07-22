@@ -50,6 +50,9 @@ invariant-bearing files below are called out because their behavior is load-bear
 | Single-writer IPC server | `src/core/coordination/server.ts` |
 | Durable run supervisor + session bridge | `src/core/coordination/supervisor.ts` |
 | Peer claim negotiation | `src/core/coordination/negotiation.ts` |
+| D65 complete semantic graph | `src/core/coordination/d65-semantic-graph.ts`, `src/core/coordination/d65-graph-loader.ts` |
+| D65 signed launch policy + heartbeat | `src/core/coordination/d65-launch-policy.ts`, `src/core/coordination/d65-heartbeat-gate.ts` |
+| D65 successor/recovery publication | `src/core/coordination/d65-graph-successor-runtime.ts`, `src/core/coordination/d65-graph-publisher.ts` |
 
 ## Admission (S1 / cf50)
 
@@ -62,6 +65,27 @@ raw 32-byte capability key. When no offer is present, the S1 client accepts only
 exact digest-pinned `known-cf50-predecessor` path; it never infers compatibility
 from semver or protocol alone, and never falls back after an offered negotiation
 fails.
+
+## D65 semantic authority
+
+Current-build D65 runs bootstrap from immutable Git authority and then operate only
+against a coordinator-accepted complete semantic graph. The graph binds core runtime
+documents, authority/evidence collections, exact queue equations, coordinator
+projections, transition replay, and the prior graph/event tuple. Publication is a
+crash-resumable Git G/H plus coordinator registration saga: database registration
+commits before the filesystem residue advances from `publication-committed` to
+`registered`, and response-loss recovery accepts only the byte-identical registered
+result.
+
+The coordinator verifies the highest purpose-signed launch policy and a
+session-authenticated, monotonic program heartbeat at the wired runtime boundaries
+(child/model spawn and other consumed ordinary boundaries). The policy binds
+package/run/graph/roster identity and cap-one limits. Provider failure recovery
+uses an accepted continuation, externally signed one-use subscription probe, exact
+failed spec/receipt identity, successor graph, and governing retry-authorized
+heartbeat; no component self-signs operator authority or substitutes a provider.
+Every semantic mutation requires its successor graph before ordinary re-entry, except
+the closed prepared-terminal tail.
 
 ## Deadlock resolution (invariants)
 

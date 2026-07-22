@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { link, readFile, unlink } from 'node:fs/promises';
 import { join, relative, resolve } from 'node:path';
-import { parseAutopilotExecutionAudit, parseAutopilotReceipt, parseAutopilotStatusEntry, parseAutopilotUnitSpec } from "../contracts/index.js";
+import { AUTOPILOT_ROLE_VALUES, parseAutopilotExecutionAudit, parseAutopilotReceipt, parseAutopilotStatusEntry, parseAutopilotUnitSpec } from "../contracts/index.js";
 import { writeJsonAtomic } from "../parallel-runtime.js";
 import { CoordinationRuntimeError } from "./failures.js";
 import { opaqueToolCallIdIssue } from "../tool-call-id.js";
@@ -57,7 +57,10 @@ export function parseAutopilotChildTerminalAcceptance(value) {
     if (entry['schema_version'] !== AUTOPILOT_CHILD_TERMINAL_ACCEPTANCE_SCHEMA)
         throw new CoordinationRuntimeError('invalid-state', 'terminal acceptance schema is incompatible');
     const role = text(entry, 'role', label);
-    if (!['implement', 'validate', 'fix', 'bughunt', 'strategy', 'adjudicate'].includes(role))
+    // Terminal acceptance consumes the ONE shared package role registry
+    // (AUTOPILOT_ROLE_VALUES) rather than a private terminal-role list; every
+    // declared role, including `extract`, is admissible terminal evidence.
+    if (!AUTOPILOT_ROLE_VALUES.includes(role))
         throw new CoordinationRuntimeError('invalid-state', 'terminal acceptance role is invalid');
     const attempt = entry['attempt'];
     if (typeof attempt !== 'number' || !Number.isSafeInteger(attempt) || attempt < 1)

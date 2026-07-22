@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process';
+import { checkedAdd, checkedCeilMultiply, checkedMultiply, GitStreamingQueryError } from "./git-process.js";
 export class AutopilotDiskGateError extends Error {
     name = 'AutopilotDiskGateError';
     code;
@@ -29,21 +30,57 @@ export function assertAutopilotDiskGate(input) {
     return Object.freeze({ free_bytes: freeBytes, projection });
 }
 export function projectAutopilotDiskUse(input) {
-    const expectedWorktreeCount = input.worktreeCount ?? 1 + (input.expectedParallelUnits ?? input.diskGate.expected_parallel_units);
-    const perWorktreeEstimate = Math.max(1_048_576, Math.ceil(input.perWorktreeEstimateBytes));
-    const additionalMaterialization = Math.max(0, Math.ceil(input.additionalMaterializationBytes ?? 0));
-    const headroom = input.diskGate.headroom_factor;
-    const variableBytes = (perWorktreeEstimate * expectedWorktreeCount) + additionalMaterialization;
-    const projected = Math.ceil(variableBytes * headroom) + input.diskGate.floor_free_bytes;
-    return Object.freeze({
-        profile_mode: input.profileMode,
-        expected_worktree_count: expectedWorktreeCount,
-        per_worktree_estimate_bytes: perWorktreeEstimate,
-        additional_materialization_bytes: additionalMaterialization,
-        headroom_factor: headroom,
-        floor_free_bytes: input.diskGate.floor_free_bytes,
-        projected_required_bytes: projected,
-    });
+    try {
+        const expectedParallelUnits = input.expectedParallelUnits ?? input.diskGate.expected_parallel_units;
+        const expectedWorktreeCount = input.worktreeCount ?? checkedAdd(1, expectedParallelUnits, 'disk-projection-overflow');
+        const perWorktreeEstimate = Math.max(1_048_576, Math.ceil(input.perWorktreeEstimateBytes));
+        const additionalMaterialization = Math.max(0, Math.ceil(input.additionalMaterializationBytes ?? 0));
+        if (!Number.isSafeInteger(perWorktreeEstimate) || !Number.isSafeInteger(additionalMaterialization) || !Number.isSafeInteger(expectedWorktreeCount)) {
+            fail('disk-projection-overflow', 'disk projection rejected a non-safe-integer operand.');
+        }
+        const { numerator, denominator } = parseHeadroomFactor(input.diskGate.headroom_factor);
+        const variableBytes = checkedAdd(checkedMultiply(perWorktreeEstimate, expectedWorktreeCount, 'disk-projection-overflow'), additionalMaterialization, 'disk-projection-overflow');
+        const headroomBytes = checkedCeilMultiply(variableBytes, numerator, denominator, 'disk-projection-overflow');
+        const projected = checkedAdd(headroomBytes, input.diskGate.floor_free_bytes, 'disk-projection-overflow');
+        const headroom = input.diskGate.headroom_factor;
+        return Object.freeze({
+            profile_mode: input.profileMode,
+            expected_worktree_count: expectedWorktreeCount,
+            per_worktree_estimate_bytes: perWorktreeEstimate,
+            additional_materialization_bytes: additionalMaterialization,
+            headroom_factor: headroom,
+            floor_free_bytes: input.diskGate.floor_free_bytes,
+            projected_required_bytes: projected,
+        });
+    }
+    catch (error) {
+        if (error instanceof AutopilotDiskGateError)
+            throw error;
+        if (error instanceof GitStreamingQueryError)
+            fail(error.code, error.message);
+        throw error;
+    }
+}
+function parseHeadroomFactor(headroom) {
+    if (!Number.isFinite(headroom) || headroom <= 0)
+        fail('disk-projection-overflow', 'headroom_factor must be a finite positive number.', [String(headroom)]);
+    const text = String(headroom);
+    if (text.startsWith('-'))
+        fail('disk-projection-overflow', 'headroom_factor must be positive.', [text]);
+    const parts = text.split('.');
+    const intDigits = parts[0] ?? '';
+    const fracDigits = parts.length > 1 ? (parts[1] ?? '') : '';
+    if (parts.length > 2 || !/^\d*$/u.test(intDigits) || !/^\d*$/u.test(fracDigits)) {
+        fail('disk-projection-overflow', 'headroom_factor must be a finite decimal number.', [text]);
+    }
+    if (fracDigits.length > 15)
+        fail('disk-projection-overflow', 'headroom_factor has too many fractional digits for exact projection.', [text]);
+    const denominator = fracDigits.length === 0 ? 1 : 10 ** fracDigits.length;
+    const numerator = (Number(intDigits.length === 0 ? '0' : intDigits) * denominator) + (fracDigits.length === 0 ? 0 : Number(fracDigits.length === 0 ? '0' : fracDigits));
+    if (!Number.isSafeInteger(numerator) || !Number.isSafeInteger(denominator)) {
+        fail('disk-projection-overflow', 'headroom_factor numerator/denominator exceeded the safe-integer range.', [text]);
+    }
+    return Object.freeze({ numerator, denominator });
 }
 export function probeFilesystemFreeBytes(path) {
     const result = spawnSync('df', ['-Pk', path], { encoding: 'utf8' });

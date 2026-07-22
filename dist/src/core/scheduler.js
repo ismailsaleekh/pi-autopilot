@@ -3,8 +3,10 @@ import { join } from 'node:path';
 import { deriveAutopilotAuthority, persistAutopilotAuthority } from "./authority.js";
 import { parseAutopilotUnitSpec } from "./contracts/validate.js";
 import { matchesRepoPathPattern, pathOverlapsOrContains, writeJsonAtomic } from "./parallel-runtime.js";
+import { assertD65OrdinaryBoundaryFromEnvironment } from "./coordination/d65-runtime-dispatch.js";
 import { reservationSchedulingBlockers } from "./coordination/reservations.js";
 export async function writeDispatchArtifacts(input) {
+    await assertD65OrdinaryBoundaryFromEnvironment('scheduler-dispatch', input.env ?? process.env);
     const dispatchPath = join(input.runtimeRoot, 'dispatches', `${input.dispatch.dispatch_id}.json`);
     const claimSnapshotPath = join(input.runtimeRoot, 'claim-snapshots', `${input.dispatch.dispatch_id}.json`);
     await mkdir(join(input.runtimeRoot, 'dispatches'), { recursive: true });

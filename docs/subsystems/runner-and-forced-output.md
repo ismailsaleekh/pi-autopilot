@@ -14,8 +14,8 @@ covers_sources:
   - src/core/execution-audit/index.ts
   - src/core/prompt-renderer/index.ts
   - src/core/model-roster.ts
-signature_hash: 'sha256:8bc80a9446fa7d7930f3c67100e313588fdf1d8facf6b8a1c8edc342c5908cc1'
-body_hash: 'sha256:2f27474fcea9823a35921bf9d4a57a16d3ac7d88e4bf928068a6ac82eddfeb60'
+signature_hash: 'sha256:47fe11d6fcd66ed33f128f0590a3f0016f1653ef6ea3646d86eb1c655c7064a3'
+body_hash: 'sha256:fdd2c483b68ac174452b69431618cb515a725fb030530ce03d1b6f0b460a3d41'
 stability: stable
 ---
 
@@ -37,6 +37,7 @@ the runtime behind it.
 | Receipt/hash/status carrier validation | `src/core/forced-output/index.ts` |
 | Actual-change/audit helpers | `src/core/execution-audit/index.ts` |
 | Template loading/filling/validation | `src/core/prompt-renderer/index.ts` |
+| D65 graph/policy/heartbeat dispatch gate | `src/core/coordination/d65-runtime-dispatch.ts` |
 
 ## Scheduler
 
@@ -44,7 +45,13 @@ Within one workstream, file-disjoint dependency-cleared units run in parallel up
 `parallel_cap` — only through per-unit worktrees. Shared-file or stale-validation risk
 reduces the batch rather than weakening quality. Skips use the explicit
 `waiting-for-peer-release` state and retain exact request refs. See the
-[defaults table](../INDEX.md#default-constants) for `parallel_cap`.
+[defaults table](../INDEX.md#default-constants) for `parallel_cap`. A D65 run carries a
+signed launch policy whose cap fields are authenticated as exactly one; the runtime
+gates child-model spawn and other ordinary boundaries on the accepted complete-graph /
+policy / heartbeat tuple, and any semantic event fences ordinary dispatch until the
+mandatory successor graph is accepted. Note: the signed cap fields are enforced as an
+authenticated tuple; the scheduler dispatch planner and prospective child-registration
+transition are not yet independently capped to one by the merged consumers.
 
 ## Authority derivation
 
@@ -74,7 +81,9 @@ ranges on the unit branch.
 `spec-invalid`, `waiting-for-peer-release`, `pi-spawn-failed`, `missing-structured-output`,
 `invalid-structured-output`, `status-non-success`, `runtime-commit-failed`. Dirty
 baselines are attribution blockers only when they overlap unit-owned or protected
-surfaces; unrelated dirty paths are recorded as audit caveats.
+surfaces; unrelated dirty paths are recorded as audit caveats. D65 authority failures
+are fail-closed graph, launch-policy, heartbeat, or recovery-transition failures; they
+never fall through to model execution.
 
 ## Model roster
 

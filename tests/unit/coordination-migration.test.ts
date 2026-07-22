@@ -129,7 +129,7 @@ void describe('Coordination Fabric legacy migration and cutover', () => {
         assert.equal(Array.isArray(status.payload['coordination_migrations']) ? status.payload['coordination_migrations'].length : -1, 1);
         const doctor = importedStore.doctor();
         assert.equal(Array.isArray(doctor.payload['pending_migration_recovery_work']) ? doctor.payload['pending_migration_recovery_work'].length : -1, 1);
-        const exportPath = join(dirname(fixture.stateRoot), 'migration-export.json');
+        const exportPath = join(coordinatorRuntimePaths(fixture.env).exportsRoot, 'migration-export.json');
         importedStore.exportTo(exportPath);
         const exported = await readFile(exportPath, 'utf8');
         assert.match(exported, /coordination_migrations/u);

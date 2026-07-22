@@ -25,7 +25,9 @@ import { executeOwnedWorktreeSaga, inspectOwnedWorktreeSpecPostcondition, OwnedW
 import { AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV, AUTOPILOT_RUNTIME_ROOT_PREFIX } from './names.ts';
 import { CoordinatorClient } from './coordination/client.ts';
 import { CoordinationRuntimeError } from './coordination/failures.ts';
-import { parseCoordinationReconciliationEvidence, parseCoordinationRun, parseCoordinationRunTerminalIntent, parseCoordinationSessionLease, parseCoordinationWorktree } from './coordination/contracts.ts';
+import { parseCoordinationAuthoritativeArtifact, parseCoordinationReconciliationEvidence, parseCoordinationRun, parseCoordinationRunTerminalIntent, parseCoordinationSessionLease, parseCoordinationWorktree } from './coordination/contracts.ts';
+import { assertD65OrdinaryBoundaryFromEnvironment, assertD65RecoveryBoundaryFromEnvironment, ensureD65ProgramHeartbeatForGraphFromEnvironment } from './coordination/d65-runtime-dispatch.ts';
+import { publishD65CoordinatorOnlySuccessorFromEnvironment } from './coordination/d65-graph-successor-runtime.ts';
 import { DurableRunSupervisorClient, readCoordinatorSessionContext } from './coordination/supervisor.ts';
 import { recordCoordinatorReleaseEvidenceFromFile } from './coordination/reconciliation.ts';
 import { ReservationCoordinationClient, preparePendingReservationIntegrations, preparedRunTerminalIntent, reconcilePendingReservationResolutions, reservationCloseBlockers, resolvedReservationIntegrations } from './coordination/reservations.ts';
@@ -224,6 +226,28 @@ function fail(code: string, message: string, evidence: readonly string[] = []): 
   throw new AutopilotCloseError(code, message, evidence);
 }
 
+async function isD65CoordinatorRun(active: ActiveAutopilotRow, env: ProcessEnvLike): Promise<boolean> {
+  if (active.coordination_authority !== 'coordinator-edit-leases-v1') return false;
+  const status = await new CoordinatorClient({ env }).query('status', active.repo_key, active.workstream_run);
+  const artifacts = status.payload['authoritative_artifacts'];
+  if (!Array.isArray(artifacts)) throw new AutopilotCloseError('coordination-authority-invalid', 'D65 classification lacks authoritative_artifacts.');
+  const bootstrapId = `semantic-graph-bootstrap:${active.workstream_run}`;
+  return artifacts.map(parseCoordinationAuthoritativeArtifact).some((artifact) => artifact.artifact_id === bootstrapId && artifact.document_schema_version === 'autopilot.semantic_graph_bootstrap.v1');
+}
+
+const TERMINAL_RECOVERY_BINDINGS = Object.freeze({ attached_session_current: false, policy_trust_current: false, no_pending_publication: false, terminal_prepared_cancellable: false, terminal_after_commit: false, accepted_continuation_reason: null, covered_semantic_reason: null, attach_terminal_recovery: false });
+const TERMINAL_AFTER_COMMIT_BINDINGS = Object.freeze({ ...TERMINAL_RECOVERY_BINDINGS, terminal_after_commit: true });
+
+async function assertD65TerminalCleanupBoundary(active: ActiveAutopilotRow, env: ProcessEnvLike): Promise<void> {
+  if (await isD65CoordinatorRun(active, env)) await assertD65RecoveryBoundaryFromEnvironment('terminal-tail', TERMINAL_AFTER_COMMIT_BINDINGS, env);
+}
+
+async function publishAndAuthenticateD65PreparedTerminalSuccessor(env: ProcessEnvLike, createdAt: string): Promise<void> {
+  const published = await publishD65CoordinatorOnlySuccessorFromEnvironment({ env, createdAt });
+  if (published.semanticEventType !== null && published.semanticEventType !== 'run-terminal-prepared') throw new AutopilotCloseError('terminal-successor-event-mismatch', 'D65 terminal successor publication covered a semantic event other than terminal preparation.', [published.semanticEventType]);
+  await ensureD65ProgramHeartbeatForGraphFromEnvironment({ graphSequence: published.graphSequence, graphSha256: published.graphSha256, env });
+}
+
 export async function closeAutopilotWorkstream(options: AutopilotCloseOptions): Promise<AutopilotCloseResult> {
   let env = options.env ?? process.env;
   const now = options.now ?? new Date();
@@ -265,17 +289,43 @@ export async function closeAutopilotWorkstream(options: AutopilotCloseOptions): 
     async () => {
       let active = await setActiveStatus(prepared.coordinationRoot, prepared.active, 'merging', now, null);
       const context: PreparedCloseContext = { ...prepared, active };
-      const attemptPath = await writeCloseAttempt(context, now);
       const coordinatorAuthority = active.coordination_authority === 'coordinator-edit-leases-v1';
       if (coordinatorAuthority && env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV] === undefined) fail('coordination-authority-unavailable', 'Coordinator-backed close requires its durable coordinator session; refusing legacy fallback.');
+      const d65 = coordinatorAuthority && await isD65CoordinatorRun(active, env);
+      const attemptPath = await writeCloseAttempt(context, now, d65);
       let terminalIntent: CoordinationRunTerminalIntent | null = coordinatorAuthority ? await preparedRunTerminalIntent(active, env) : null;
       if (terminalIntent !== null && terminalIntent.outcome !== 'closed') fail('terminal-intent-outcome-mismatch', 'prepared coordinator terminal intent is for abort, not close.', [terminalIntent.terminal_intent_id]);
       let coordinatorTerminalCommitted = false;
       let targetLanded = false;
       try {
+        const existingManifestPath = terminalCleanupManifestPath(active);
+        if (d65 && existsSync(existingManifestPath)) {
+          const manifest = await readTerminalCleanupManifest(active);
+          if (manifest.outcome !== 'closed') fail('terminal-intent-outcome-mismatch', 'existing D65 terminal cleanup manifest is not a close intent.', [existingManifestPath]);
+          const workstreamAfter = gitHead(active.main_worktree_path);
+          if (manifest.terminal_sha !== workstreamAfter || manifest.result.target_after !== workstreamAfter || manifest.result.workstream_after !== workstreamAfter) fail('terminal-successor-context-mismatch', 'prepared D65 close manifest no longer equals the immutable workstream terminal authority.', [manifest.terminal_sha, workstreamAfter]);
+          if (terminalIntent === null) terminalIntent = await (await ReservationCoordinationClient.fromEnvironment(env)).prepareRunTerminal('closed');
+          if (terminalIntent.outcome !== 'closed') fail('terminal-intent-outcome-mismatch', 'prepared coordinator terminal intent is for abort, not close.', [terminalIntent.terminal_intent_id]);
+          await publishAndAuthenticateD65PreparedTerminalSuccessor(env, manifest.prepared_at);
+          await assertD65RecoveryBoundaryFromEnvironment('terminal-tail', TERMINAL_RECOVERY_BINDINGS, env);
+          let targetAfter = gitHead(context.repo.repoRoot);
+          if (targetAfter !== manifest.terminal_sha) {
+            if (targetAfter !== manifest.result.target_before) fail('terminal-successor-context-mismatch', 'D65 close resume target is neither the immutable pre-effect authority nor the terminal authority.', [targetAfter, manifest.result.target_before ?? '<null>', manifest.terminal_sha]);
+            await fastForwardD65TerminalTarget({ active, sourceRepo: context.repo.repoRoot, targetBefore: targetAfter });
+            targetAfter = gitHead(context.repo.repoRoot);
+          }
+          if (targetAfter !== manifest.terminal_sha) fail('terminal-successor-context-mismatch', 'D65 close terminal Git effect did not land the immutable prepared authority.', [targetAfter, manifest.terminal_sha]);
+          targetLanded = true;
+          await writeAndRecordRunTerminalEvidence(active, 'closed', targetAfter, env, new Date(manifest.prepared_at));
+          coordinatorTerminalCommitted = true;
+          active = await setActiveStatus(context.coordinationRoot, active, 'closed', new Date(manifest.prepared_at), manifest.prepared_at);
+          const terminalResult = await completeTerminalCleanup({ context: { ...context, active }, manifest, env }, options.observeTerminalCleanupBoundary);
+          await detachExistingTerminalSession(sessionBinding, active, 'close-terminal-cleanup-finished');
+          return terminalResult;
+        }
         // The coordinator transaction changes the durable run to merging and
         // installs the launch fence before validation can observe mutable state.
-        if (coordinatorAuthority && terminalIntent === null) terminalIntent = await (await ReservationCoordinationClient.fromEnvironment(env)).prepareRunTerminal('closed');
+        if (coordinatorAuthority && !d65 && terminalIntent === null) terminalIntent = await (await ReservationCoordinationClient.fromEnvironment(env)).prepareRunTerminal('closed');
         if (coordinatorAuthority) await options.observeCloseRaceBoundary?.('after-durable-launch-fence-before-validation');
         await validateTerminalArchiveSources(context);
         if (coordinatorAuthority) {
@@ -313,11 +363,14 @@ export async function closeAutopilotWorkstream(options: AutopilotCloseOptions): 
 
         const targetBefore = gitHead(context.repo.repoRoot);
         const workstreamBefore = gitHead(active.main_worktree_path);
-        const integrationCommitSha = await integrateTargetIntoWorkstream({ active, targetHead: targetBefore, env });
+        if (d65 && terminalIntent === null) await assertD65OrdinaryBoundaryFromEnvironment('unit-merge', env);
+        const integrationCommitSha = d65 && terminalIntent !== null ? null : await integrateTargetIntoWorkstream({ active, targetHead: targetBefore, env });
         const workstreamAfter = gitHead(active.main_worktree_path);
-        const changedPaths = terminalIntent !== null && targetBefore === workstreamBefore
-          ? diffPaths(active.main_worktree_path, active.target_base_sha, workstreamAfter)
-          : diffPaths(active.main_worktree_path, targetBefore, workstreamAfter);
+        const changedPaths = d65
+          ? validation.preIntegrationChangedPaths
+          : terminalIntent !== null && targetBefore === workstreamBefore
+            ? diffPaths(active.main_worktree_path, active.target_base_sha, workstreamAfter)
+            : diffPaths(active.main_worktree_path, targetBefore, workstreamAfter);
         const postIntegrationBlockers = validation.unitMerges.length > 0
           ? phaseTwoCloseBlockers(active, validation.unitMerges, [], changedPaths)
           : finalDiffBlockers(changedPaths, validation.retainedWriteClaims, validation.executionCommits);
@@ -347,10 +400,34 @@ export async function closeAutopilotWorkstream(options: AutopilotCloseOptions): 
           return { ...result, close_result_path: resultPath };
         }
 
-        await fastForwardTargetToWorkstream({ active, sourceRepo: context.repo.repoRoot, branch: active.branch, targetBefore, env });
+        const archiveRef = `autopilot/archive/${active.workstream_run}/main`;
+        await assertPrivateTerminalArchiveAncestry(context, true);
+        await options.observeCloseRaceBoundary?.('after-private-archive-staging-before-terminal-commit');
+        await assertPrivateTerminalArchiveAncestry(context, true);
+        const proposedClosedActive: ActiveAutopilotRow = { ...active, status: 'closed', active_epoch_started_at: now.toISOString() };
+        const proposedClosedContext: PreparedCloseContext = { ...context, active: proposedClosedActive };
+        const mergeId = buildId('merge', active.workstream_run, now);
+        const preparedTargetAfter = workstreamAfter;
+        if (d65 && terminalIntent === null) terminalIntent = await (await ReservationCoordinationClient.fromEnvironment(env)).prepareRunTerminal('closed');
+        if (d65) {
+          await publishAndAuthenticateD65PreparedTerminalSuccessor(env, now.toISOString());
+          await assertD65RecoveryBoundaryFromEnvironment('terminal-tail', TERMINAL_RECOVERY_BINDINGS, env);
+        }
+        const manifest = await prepareTerminalCleanupManifest({
+          context: proposedClosedContext, outcome: 'closed', terminalSha: preparedTargetAfter, archiveRef, now,
+          result: buildCloseResult({
+            outcome: 'closed', active: proposedClosedActive, repoKey: context.repo.repoKey, targetBefore, targetAfter: preparedTargetAfter, workstreamBefore, workstreamAfter,
+            integrationCommitSha, changedPaths, releasedClaims: validation.retainedClaims.map((claim) => `${claim.claim_type} ${claim.path}`),
+            archivedRuntimePath: join(context.worktreeRoot, '_archive', active.workstream_run, 'runtime'), archiveRef, mergeId, blockers: [],
+            closeResultPath: join(context.worktreeRoot, '_archive', active.workstream_run, '_close-result.json'), now,
+          }),
+        });
+        await observeTerminalBoundary(options, 'after-terminal-manifest');
+        if (d65) await fastForwardD65TerminalTarget({ active, sourceRepo: context.repo.repoRoot, targetBefore });
+        else await fastForwardTargetToWorkstream({ active, sourceRepo: context.repo.repoRoot, branch: active.branch, targetBefore, env });
         targetLanded = true;
         const targetAfter = gitHead(context.repo.repoRoot);
-        const mergeId = buildId('merge', active.workstream_run, now);
+        if (targetAfter !== preparedTargetAfter) fail('terminal-successor-context-mismatch', 'close terminal Git effect differs from its immutable prepared workstream authority.', [targetAfter, preparedTargetAfter]);
         const mergeEvent: AutopilotMergeEvent = {
           schema_version: 'autopilot.merge_event.v1',
           merge_id: mergeId,
@@ -372,25 +449,10 @@ export async function closeAutopilotWorkstream(options: AutopilotCloseOptions): 
           await appendJsonl(join(context.coordinationRoot, MERGE_LOG_FILE), parseMergeEvent(mergeEvent));
           await appendForeignMergeAcks(context, validation.nonIntersectingForeignMerges, now);
         }
-
-        const archiveRef = `autopilot/archive/${active.workstream_run}/main`;
-        await assertPrivateTerminalArchiveAncestry(context, true);
-        await options.observeCloseRaceBoundary?.('after-private-archive-staging-before-terminal-commit');
-        await assertPrivateTerminalArchiveAncestry(context, true);
-        active = await setActiveStatus(context.coordinationRoot, active, 'closed', now, now.toISOString());
-        const closedContext: PreparedCloseContext = { ...context, active };
-        const manifest = await prepareTerminalCleanupManifest({
-          context: closedContext, outcome: 'closed', terminalSha: targetAfter, archiveRef, now,
-          result: buildCloseResult({
-            outcome: 'closed', active, repoKey: context.repo.repoKey, targetBefore, targetAfter, workstreamBefore, workstreamAfter,
-            integrationCommitSha, changedPaths, releasedClaims: validation.retainedClaims.map((claim) => `${claim.claim_type} ${claim.path}`),
-            archivedRuntimePath: join(context.worktreeRoot, '_archive', active.workstream_run, 'runtime'), archiveRef, mergeId, blockers: [],
-            closeResultPath: join(context.worktreeRoot, '_archive', active.workstream_run, '_close-result.json'), now,
-          }),
-        });
-        await observeTerminalBoundary(options, 'after-terminal-manifest');
         await writeAndRecordRunTerminalEvidence(active, 'closed', targetAfter, env, now);
         coordinatorTerminalCommitted = true;
+        active = await setActiveStatus(context.coordinationRoot, active, 'closed', now, now.toISOString());
+        const closedContext: PreparedCloseContext = { ...context, active };
         await observeTerminalBoundary(options, 'after-terminal-commit');
         const terminalResult = await completeTerminalCleanup({ context: closedContext, manifest, env }, options.observeTerminalCleanupBoundary);
         await detachExistingTerminalSession(sessionBinding, active, 'close-terminal-cleanup-finished');
@@ -398,10 +460,13 @@ export async function closeAutopilotWorkstream(options: AutopilotCloseOptions): 
 
       } catch (error) {
         if (coordinatorTerminalCommitted) fail('terminal-cleanup-recovery-required', `Coordinator close is terminal; remaining archive/worktree cleanup must resume forward-only after attempt ${attemptPath}: ${errorMessage(error)}`, [active.workstream_run]);
+        if (d65 && terminalIntent !== null) fail('terminal-successor-required', `D65 close is durably prepared${targetLanded ? ' after final product mutation' : ''}; publish/accept its prepared-terminal successor graph and governing heartbeat, then resume the same intent: ${errorMessage(error)}`, [terminalIntent.terminal_intent_id]);
         const recoveryFailures: string[] = [];
         if (terminalIntent !== null && !targetLanded) {
-          try { await (await ReservationCoordinationClient.fromEnvironment(env)).cancelRunTerminal(terminalIntent, 'close failed before final target mutation'); }
-          catch (recoveryError) { recoveryFailures.push(`terminal-intent cancellation failed: ${errorMessage(recoveryError)}`); }
+          try {
+            await (await ReservationCoordinationClient.fromEnvironment(env)).cancelRunTerminal(terminalIntent, 'close failed before final target mutation');
+            terminalIntent = null;
+          } catch (recoveryError) { recoveryFailures.push(`terminal-intent cancellation/cadence failed: ${errorMessage(recoveryError)}`); }
         }
         try { await setActiveStatus(prepared.coordinationRoot, active, 'blocked', now, null); }
         catch (recoveryError) { recoveryFailures.push(`active-row recovery classification failed: ${errorMessage(recoveryError)}`); }
@@ -460,15 +525,33 @@ export async function abortAutopilotWorkstream(options: AutopilotCloseOptions): 
     async () => {
       let active = await setActiveStatus(prepared.coordinationRoot, prepared.active, 'merging', now, null);
       const context: PreparedCloseContext = { ...prepared, active };
-      const attemptPath = await writeCloseAttempt(context, now);
       const coordinatorAuthority = active.coordination_authority === 'coordinator-edit-leases-v1';
       if (coordinatorAuthority && env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV] === undefined) fail('coordination-authority-unavailable', 'Coordinator-backed abort requires its durable coordinator session; refusing legacy fallback.');
+      const d65 = coordinatorAuthority && await isD65CoordinatorRun(active, env);
+      const attemptPath = await writeCloseAttempt(context, now, d65);
       let terminalIntent: CoordinationRunTerminalIntent | null = coordinatorAuthority ? await preparedRunTerminalIntent(active, env) : null;
       if (terminalIntent !== null && terminalIntent.outcome !== 'aborted') fail('terminal-intent-outcome-mismatch', 'prepared coordinator terminal intent is for close, not abort.', [terminalIntent.terminal_intent_id]);
       let coordinatorTerminalCommitted = false;
       try {
+        const existingManifestPath = terminalCleanupManifestPath(active);
+        if (d65 && existsSync(existingManifestPath)) {
+          const manifest = await readTerminalCleanupManifest(active);
+          if (manifest.outcome !== 'aborted') fail('terminal-intent-outcome-mismatch', 'existing D65 terminal cleanup manifest is not an abort intent.', [existingManifestPath]);
+          const terminalSha = existsSync(active.main_worktree_path) ? gitHead(active.main_worktree_path) : manifest.terminal_sha;
+          if (manifest.terminal_sha !== terminalSha || manifest.result.workstream_after !== terminalSha) fail('terminal-successor-context-mismatch', 'prepared D65 abort manifest no longer equals the preserved workstream authority.', [manifest.terminal_sha, terminalSha]);
+          if (terminalIntent === null) terminalIntent = await (await ReservationCoordinationClient.fromEnvironment(env)).prepareRunTerminal('aborted');
+          if (terminalIntent.outcome !== 'aborted') fail('terminal-intent-outcome-mismatch', 'prepared coordinator terminal intent is for close, not abort.', [terminalIntent.terminal_intent_id]);
+          await publishAndAuthenticateD65PreparedTerminalSuccessor(env, manifest.prepared_at);
+          await assertD65RecoveryBoundaryFromEnvironment('terminal-tail', TERMINAL_RECOVERY_BINDINGS, env);
+          await writeAndRecordRunTerminalEvidence(active, 'aborted', terminalSha, env, new Date(manifest.prepared_at));
+          coordinatorTerminalCommitted = true;
+          active = await setActiveStatus(context.coordinationRoot, active, 'closed', new Date(manifest.prepared_at), manifest.prepared_at);
+          const terminalResult = await completeTerminalCleanup({ context: { ...context, active }, manifest, env }, options.observeTerminalCleanupBoundary);
+          await detachExistingTerminalSession(sessionBinding, active, 'abort-terminal-cleanup-finished');
+          return terminalResult;
+        }
         // Abort uses the same durable pre-validation launch fence as close.
-        if (coordinatorAuthority && terminalIntent === null) terminalIntent = await (await ReservationCoordinationClient.fromEnvironment(env)).prepareRunTerminal('aborted');
+        if (coordinatorAuthority && !d65 && terminalIntent === null) terminalIntent = await (await ReservationCoordinationClient.fromEnvironment(env)).prepareRunTerminal('aborted');
         if (coordinatorAuthority) await options.observeCloseRaceBoundary?.('after-durable-launch-fence-before-validation');
         await validateTerminalArchiveSources(context);
         const latestBlockers = await abortReadinessBlockers(active, env);
@@ -501,18 +584,19 @@ export async function abortAutopilotWorkstream(options: AutopilotCloseOptions): 
         }
         const archiveRef = `autopilot/archive/${active.workstream_run}/aborted`;
         const workstreamHead = gitHead(active.main_worktree_path);
+        if (d65 && terminalIntent === null) await assertD65OrdinaryBoundaryFromEnvironment('ordinary-state-advance', env);
         await assertPrivateTerminalArchiveAncestry(context, true);
         await options.observeCloseRaceBoundary?.('after-private-archive-staging-before-terminal-commit');
         await assertPrivateTerminalArchiveAncestry(context, true);
-        active = await setActiveStatus(context.coordinationRoot, active, 'closed', now, now.toISOString());
-        const closedContext: PreparedCloseContext = { ...context, active };
+        const proposedClosedActive: ActiveAutopilotRow = { ...active, status: 'closed', active_epoch_started_at: now.toISOString() };
+        const proposedClosedContext: PreparedCloseContext = { ...context, active: proposedClosedActive };
         const latestRetainedClaims = active.coordination_authority === 'legacy-path-claims-v1'
-          ? (await readPathClaims(closedContext.coordinationRoot)).filter((claim) => claim.autopilot_id === active.autopilot_id && claim.workstream_run === active.workstream_run)
+          ? (await readPathClaims(proposedClosedContext.coordinationRoot)).filter((claim) => claim.autopilot_id === active.autopilot_id && claim.workstream_run === active.workstream_run)
           : [];
         const manifest = await prepareTerminalCleanupManifest({
-          context: closedContext, outcome: 'aborted', terminalSha: workstreamHead, archiveRef, now,
+          context: proposedClosedContext, outcome: 'aborted', terminalSha: workstreamHead, archiveRef, now,
           result: buildCloseResult({
-            outcome: 'aborted', active, repoKey: context.repo.repoKey, targetBefore: gitHead(context.repo.repoRoot), targetAfter: null,
+            outcome: 'aborted', active: proposedClosedActive, repoKey: context.repo.repoKey, targetBefore: gitHead(context.repo.repoRoot), targetAfter: null,
             workstreamBefore: workstreamHead, workstreamAfter: workstreamHead, integrationCommitSha: null, changedPaths,
             releasedClaims: latestRetainedClaims.map((claim) => `${claim.claim_type} ${claim.path}`),
             archivedRuntimePath: join(context.worktreeRoot, '_archive', active.workstream_run, 'runtime'), archiveRef, mergeId: null, blockers: [],
@@ -520,8 +604,15 @@ export async function abortAutopilotWorkstream(options: AutopilotCloseOptions): 
           }),
         });
         await observeTerminalBoundary(options, 'after-terminal-manifest');
+        if (d65 && terminalIntent === null) terminalIntent = await (await ReservationCoordinationClient.fromEnvironment(env)).prepareRunTerminal('aborted');
+        if (d65) {
+          await publishAndAuthenticateD65PreparedTerminalSuccessor(env, now.toISOString());
+          await assertD65RecoveryBoundaryFromEnvironment('terminal-tail', TERMINAL_RECOVERY_BINDINGS, env);
+        }
         await writeAndRecordRunTerminalEvidence(active, 'aborted', workstreamHead, env, now);
         coordinatorTerminalCommitted = true;
+        active = await setActiveStatus(context.coordinationRoot, active, 'closed', now, now.toISOString());
+        const closedContext: PreparedCloseContext = { ...context, active };
         await observeTerminalBoundary(options, 'after-terminal-commit');
         const terminalResult = await completeTerminalCleanup({ context: closedContext, manifest, env }, options.observeTerminalCleanupBoundary);
         await detachExistingTerminalSession(sessionBinding, active, 'abort-terminal-cleanup-finished');
@@ -529,6 +620,7 @@ export async function abortAutopilotWorkstream(options: AutopilotCloseOptions): 
 
       } catch (error) {
         if (coordinatorTerminalCommitted) fail('terminal-cleanup-recovery-required', `Coordinator abort is terminal; remaining archive/worktree cleanup must resume forward-only after attempt ${attemptPath}: ${errorMessage(error)}`, [active.workstream_run]);
+        if (d65 && terminalIntent !== null) fail('terminal-successor-required', `D65 abort is durably prepared; publish/accept its prepared-terminal successor graph and governing heartbeat, then resume the same intent: ${errorMessage(error)}`, [terminalIntent.terminal_intent_id]);
         const recoveryFailures: string[] = [];
         if (terminalIntent !== null) {
           try { await (await ReservationCoordinationClient.fromEnvironment(env)).cancelRunTerminal(terminalIntent, 'abort failed before coordinator terminal commit'); }
@@ -553,7 +645,15 @@ export async function recoverAutopilotTerminalCleanup(options: AutopilotCloseOpt
   const paths = coordinatorRuntimePaths(baseEnv);
   if (!coordinationCutoverCommitted(resolveAutopilotStateRoot(baseEnv), repo.repoKey) && !existsSync(paths.databasePath)) return null;
   const worktreeRoot = worktreeRootForRepo(repo.repoKey, baseEnv);
-  let terminalRows = (await readCoordinatorActiveAutopilots(repo, worktreeRoot, baseEnv, true)).filter((row) => row.workstream === options.workstream && row.status === 'closed' && (options.workstreamRun === undefined || options.workstreamRun === null || row.workstream_run === options.workstreamRun));
+  const candidateRows = (await readCoordinatorActiveAutopilots(repo, worktreeRoot, baseEnv, true)).filter((row) => row.workstream === options.workstream && (options.workstreamRun === undefined || options.workstreamRun === null || row.workstream_run === options.workstreamRun));
+  const terminalRowsByCoordinator: ActiveAutopilotRow[] = [];
+  for (const row of candidateRows) {
+    const candidateStatus = await new CoordinatorClient({ env: baseEnv }).query('status', repo.repoKey, row.workstream_run);
+    const candidateRuns = arrayField(candidateStatus.payload['runs'], 'terminal cleanup candidate runs').map((value) => parseCoordinationRun(value));
+    const candidateRun = candidateRuns[0];
+    if (candidateRuns.length === 1 && candidateRun !== undefined && (candidateRun.status === 'closed' || candidateRun.status === 'aborted')) terminalRowsByCoordinator.push(row);
+  }
+  let terminalRows = terminalRowsByCoordinator;
   if (terminalRows.length === 0) return null;
   if ((options.workstreamRun === undefined || options.workstreamRun === null) && terminalRows.length > 0) {
     const pending: ActiveAutopilotRow[] = [];
@@ -677,10 +777,14 @@ async function prepareTerminalCleanupManifest(input: { readonly context: Prepare
 
 async function completeTerminalCleanup(recovery: TerminalCleanupRecovery, observer?: (boundary: AutopilotTerminalCleanupBoundary) => Promise<void> | void): Promise<AutopilotCloseResult> {
   const { context, manifest, env } = recovery;
+  await assertD65TerminalCleanupBoundary(context.active, env);
   await updateTaskInfoStatus(context.active, 'closed');
+  await assertD65TerminalCleanupBoundary(context.active, env);
   await updateTaskInfoClosedAt(context.active, manifest.prepared_at);
+  await assertD65TerminalCleanupBoundary(context.active, env);
   await updateBranchesInfo(context.active, manifest.archive_ref, manifest.terminal_sha);
   await observer?.('after-terminal-projections');
+  await assertD65TerminalCleanupBoundary(context.active, env);
   const archivedRuntimePath = await archiveRuntimeArtifacts(context, manifest.archive_ref, new Date(manifest.prepared_at));
   if (archivedRuntimePath !== manifest.archive_runtime_path) fail('terminal-cleanup-path-mismatch', 'Runtime archive path disagrees with immutable terminal cleanup intent.', [archivedRuntimePath, manifest.archive_runtime_path]);
   await observer?.('after-runtime-archive');
@@ -689,8 +793,10 @@ async function completeTerminalCleanup(recovery: TerminalCleanupRecovery, observ
     : [];
   await releaseRetainedClaims(context, retainedClaims, new Date(manifest.prepared_at));
   if (!coordinationCutoverCommitted(resolveAutopilotStateRoot(env), context.active.repo_key)) await archiveWorktreeIndex(context.active, new Date(manifest.prepared_at));
+  await assertD65TerminalCleanupBoundary(context.active, env);
   await writeJsonAtomic(manifest.result_path, manifest.result);
   await observer?.('after-result-projection');
+  await assertD65TerminalCleanupBoundary(context.active, env);
   await cleanupClosedAutopilotRun({
     active: context.active, archiveRef: manifest.archive_ref, archiveSha: manifest.terminal_sha,
     reason: manifest.outcome === 'closed' ? 'autopilot close terminal-cleanup recovery' : 'autopilot abort terminal-cleanup recovery',
@@ -858,7 +964,7 @@ async function validateCloseReadiness(context: PreparedCloseContext, now: Date, 
   if (coordinatorAuthority && retainedClaims.length > 0) blockers.push(`coordinator-backed run has forbidden legacy path-claim authority: ${retainedClaims.map((claim) => `${claim.claim_type}:${claim.path}`).join(', ')}`);
   const targetHead = targetBranch === null ? gitHead(context.repo.repoRoot) : revParse(context.repo.repoRoot, `refs/heads/${targetBranch}`);
   const workstreamHead = existsSync(active.main_worktree_path) ? gitHead(active.main_worktree_path) : active.target_base_sha;
-  const preIntegrationChangedPaths = commitExists(active.main_worktree_path, active.target_base_sha)
+  const rawPreIntegrationChangedPaths = commitExists(active.main_worktree_path, active.target_base_sha)
     ? diffPaths(active.main_worktree_path, active.target_base_sha, workstreamHead)
     : [];
   const targetDeltaPaths = commitExists(context.repo.repoRoot, active.target_base_sha)
@@ -870,6 +976,16 @@ async function validateCloseReadiness(context: PreparedCloseContext, now: Date, 
     commit.autopilot_id === active.autopilot_id && commit.workstream_run === active.workstream_run,
   );
   const unitMerges = relevantUnitMerges(active, artifacts.unitMerges);
+  // A D65 run's main branch necessarily contains graph/policy/runtime authority
+  // commits. Their exact paths and commit chain are already authenticated by
+  // complete-graph registration and are not product edits requiring fabricated
+  // unit claims/execution commits. Product close authority is the complete set
+  // of accepted unit-merge changed paths; any unpaired Git movement has already
+  // been rejected by the graph publisher/store before terminal preparation.
+  const d65 = coordinatorAuthority && await isD65CoordinatorRun(active, env);
+  const preIntegrationChangedPaths = d65
+    ? sortedUnique(unitMerges.flatMap((merge) => [...merge.changed_paths]))
+    : rawPreIntegrationChangedPaths;
   const closeSurfacePaths = unitMerges.length > 0
     ? sortedUnique(unitMerges.flatMap((merge) => [...merge.changed_paths]))
     : retainedWriteClaims.map((claim) => claim.path);
@@ -882,7 +998,7 @@ async function validateCloseReadiness(context: PreparedCloseContext, now: Date, 
   }
   blockers.push(...phaseTwoCloseBlockers(active, unitMerges, artifacts.validationStalenessRefs, preIntegrationChangedPaths));
   blockers.push(...await unitWorktreeResidueBlockers(active));
-  blockers.push(...branchCommitBlockers(active, executionCommits, unitMerges));
+  if (!d65) blockers.push(...branchCommitBlockers(active, executionCommits, unitMerges));
   blockers.push(...await incompleteSagaBlockers(active, env));
   blockers.push(...await reservationCloseBlockers(active, env));
   const reservationIntegrations = await resolvedReservationIntegrations(active, env);
@@ -1380,6 +1496,16 @@ async function integrateTargetIntoWorkstream(input: { readonly active: ActiveAut
   return after === workstreamHead ? null : after;
 }
 
+async function fastForwardD65TerminalTarget(input: { readonly active: ActiveAutopilotRow; readonly sourceRepo: string; readonly targetBefore: string }): Promise<void> {
+  const desired = gitHead(input.active.main_worktree_path);
+  const current = gitHead(input.sourceRepo);
+  if (current === desired) return;
+  if (current !== input.targetBefore) fail('terminal-successor-context-mismatch', 'D65 terminal target moved away from its immutable pre-effect authority.', [current, input.targetBefore, desired]);
+  if (!isAncestor(input.sourceRepo, current, desired)) fail('terminal-successor-context-mismatch', 'D65 terminal authority is not a fast-forward descendant of the immutable target.', [current, desired]);
+  const mutation = await runGitMutation({ descriptor: { kind: 'merge', mode: 'ff-only', target: input.active.branch }, cwd: input.sourceRepo, env: runtimeGitEnv('d65-terminal-final-merge') });
+  if (mutation.kind !== 'reported' || mutation.exitCode !== 0 || gitHead(input.sourceRepo) !== desired) throw new CoordinationRuntimeError('git-partial-effect', 'D65 terminal Git effect did not report and verify one exact fast-forward', [mutation.kind === 'reported' ? mutation.diagnostic : mutation.reason, current, desired]);
+}
+
 async function fastForwardTargetToWorkstream(input: { readonly active: ActiveAutopilotRow; readonly sourceRepo: string; readonly branch: string; readonly targetBefore: string; readonly env: ProcessEnvLike }): Promise<void> {
   const desired = gitHead(input.active.main_worktree_path);
   const targetBranch = requireTargetBranch(input.active);
@@ -1434,8 +1560,10 @@ async function updateBranchesInfo(row: ActiveAutopilotRow, archiveRef: string, c
   await writeJsonAtomic(path, { ...value, current_sha: currentSha, archive_ref: archiveRef });
 }
 
-async function writeCloseAttempt(context: PreparedCloseContext, now: Date): Promise<string> {
-  const attemptPath = join(context.active.runtime_root, 'close', `attempt-${safeTimestamp(now)}.json`);
+async function writeCloseAttempt(context: PreparedCloseContext, now: Date, outsideRunAuthority = false): Promise<string> {
+  const attemptPath = outsideRunAuthority
+    ? join(taskRootForActiveAutopilot(context.active), '_close-attempts', `attempt-${safeTimestamp(now)}.json`)
+    : join(context.active.runtime_root, 'close', `attempt-${safeTimestamp(now)}.json`);
   await writeJsonAtomic(attemptPath, {
     schema_version: 'autopilot.close_attempt.v1',
     workstream: context.active.workstream,

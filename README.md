@@ -87,9 +87,11 @@ level is unavailable. OpenRouter and other metered frontier routes remain forbid
 Each capability is a concise pointer into the docs, where its behavior, invariants, and
 source files live.
 
-- **Coordination Fabric Phases 27–35** — a transactional coordinator, durable run
-  supervisor, session fencing, end-to-end peer claim negotiation, change reservations,
-  and automatic terminal-evidence reconciliation.
+- **Coordination Fabric Phases 27–35 + D65 semantic authority** — a transactional
+  coordinator, durable run supervisor, session fencing, peer claim negotiation,
+  change reservations, automatic terminal-evidence reconciliation, and current-build
+  complete-graph/launch-policy/program-heartbeat gates with crash-resumable successor
+  publication.
   → [`docs/subsystems/coordination.md`](docs/subsystems/coordination.md),
   [`docs/concepts/`](docs/concepts/admission.md)
 - **Runtime close/merge/abort** — deterministic, local-only close/abort with per-unit

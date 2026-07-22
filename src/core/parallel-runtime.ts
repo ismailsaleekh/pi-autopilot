@@ -29,6 +29,7 @@ import { parseLegacyActiveAutopilots, parseLegacyPathClaims, runLegacyCoordinati
 import { DurableRunSupervisorClient } from './coordination/supervisor.ts';
 import { CoordinatorClient } from './coordination/client.ts';
 import { CoordinationRuntimeError } from './coordination/failures.ts';
+import { assertD65OrdinaryBoundaryFromEnvironment, assertD65RecoveryBoundaryFromEnvironment } from './coordination/d65-runtime-dispatch.ts';
 import { parseCoordinationChildLease, parseCoordinationRun, parseCoordinationRunResource, parseCoordinationUnitAttempt, parseCoordinationWorktree, parseCoordinationWorktreeOperation } from './coordination/contracts.ts';
 import { assertCoordinationDispatchAllowed, assertLegacyCoordinationWritable, coordinationCutoverCommitted } from './coordination/migration-paths.ts';
 import { enforcePrivateAuthorityPath, ensurePrivateAuthorityDirectory } from './private-path.ts';
@@ -421,18 +422,27 @@ export async function prepareAutopilotUnitWorktree(input: {
   return await withAutopilotFileLock(lockPath, `unit-worktree:${input.active.autopilot_id}:${input.unitId}:${String(input.attempt)}`, async () => {
     const existing = await readUnitIndex(taskRoot);
     const found = existing.units.find((unit) => unit.unit_id === input.unitId && unit.attempt === input.attempt);
+    let resumableUnitInfo: AutopilotUnitInfo | null = null;
     if (found !== undefined) {
       if (!isSamePath(found.worktree_path, unitWorktreePath)) fail('unit-worktree-projection-mismatch', 'unit index path disagrees with its deterministic run-owned worktree path.', [found.worktree_path, unitWorktreePath]);
       const infoPath = unitInfoPathForBranch(taskRoot, found);
       const info = existsSync(infoPath) ? parseUnitInfo(JSON.parse(await readFile(infoPath, 'utf8')) as unknown) : unitInfoFromBranch(input.active, found, now);
-      return { unitInfo: info, created: false, resumed: true };
+      if (input.active.coordination_authority !== 'coordinator-edit-leases-v1') return { unitInfo: info, created: false, resumed: true };
+      const client = await OwnedWorktreeSagaClient.fromEnvironment(env);
+      const pending = (await client.operations()).filter((operation) => operation.owner.repo_id === input.active.repo_key && operation.owner.autopilot_id === input.active.autopilot_id && operation.owner.workstream_run === input.active.workstream_run && operation.owner.unit_id === input.unitId && operation.owner.attempt === input.attempt && operation.operation_type === 'create' && operation.stage !== 'committed' && operation.stage !== 'compensated' && operation.stage !== 'failed');
+      if (pending.length === 0) return { unitInfo: info, created: false, resumed: true };
+      if (pending.length !== 1) throw new CoordinationRuntimeError('store-corrupt', 'unit index owner has multiple incomplete durable create operations', pending.map((operation) => operation.operation_id));
+      resumableUnitInfo = info;
     }
+    await assertD65OrdinaryBoundaryFromEnvironment('unit-release', env);
     await cleanupTerminalUnitWorktreesForRun({ active: input.active, reason: 'prepare unit worktree pre-create cleanup', env, now });
+    await assertD65OrdinaryBoundaryFromEnvironment('checkout-disk-estimate', env);
     const checkout = await checkoutMetadataForTaskRoot(taskRoot);
     const unitClaimPaths = input.unitSpec === undefined ? [] : materializationPathsForCheckoutBootstrap(input.unitSpec);
     const sparsePatterns = checkout.mode === 'full' || checkout.mode === 'legacy-full'
       ? []
       : sortedUnique([...checkout.basePatterns, ...sparseIncludePatternsForPaths(unitClaimPaths)]);
+    await assertD65OrdinaryBoundaryFromEnvironment('checkout-disk-estimate', env);
     assertAutopilotDiskGate({
       path: input.active.worktree_root,
       projection: {
@@ -443,8 +453,20 @@ export async function prepareAutopilotUnitWorktree(input: {
         worktreeCount: 1,
       },
     });
-    const baseSha = gitHead(input.active.main_worktree_path);
-    const unitInfo: AutopilotUnitInfo = {
+    const pendingCreates = input.active.coordination_authority === 'coordinator-edit-leases-v1'
+      ? (await (await OwnedWorktreeSagaClient.fromEnvironment(env)).operations()).filter((operation) => operation.owner.repo_id === input.active.repo_key && operation.owner.autopilot_id === input.active.autopilot_id && operation.owner.workstream_run === input.active.workstream_run && operation.owner.unit_id === input.unitId && operation.owner.attempt === input.attempt && operation.operation_type === 'create' && operation.stage !== 'compensated' && operation.stage !== 'failed')
+      : [];
+    if (pendingCreates.length > 1) throw new CoordinationRuntimeError('store-corrupt', 'unit worktree preparation found multiple durable create operations for one owner', pendingCreates.map((operation) => operation.operation_id));
+    const pendingCreate = pendingCreates[0];
+    let baseSha = gitHead(input.active.main_worktree_path);
+    if (pendingCreate !== undefined) {
+      const intent = pendingCreate.intent;
+      if (!('worktree_path' in intent) || !('branch' in intent) || !('base_sha' in intent) || !('reason' in intent)) throw new CoordinationRuntimeError('store-corrupt', 'unit worktree create operation has a metadata-reconcile intent', [pendingCreate.operation_id]);
+      if (intent.base_sha === null) throw new CoordinationRuntimeError('store-corrupt', 'unit worktree create operation lost its immutable base SHA');
+      if (intent.worktree_path !== unitWorktreePath || intent.branch !== branch || intent.git_common_dir !== input.active.git_common_dir || intent.reason !== 'prepare source-changing unit worktree') throw new CoordinationRuntimeError('idempotency-conflict', 'durable unit worktree create operation differs from the requested deterministic owner identity', [pendingCreate.operation_id]);
+      baseSha = intent.base_sha;
+    }
+    const unitInfo: AutopilotUnitInfo = resumableUnitInfo ?? {
       schema_version: 'autopilot.unit_info.v1',
       workstream: input.active.workstream,
       workstream_run: input.active.workstream_run,
@@ -469,69 +491,74 @@ export async function prepareAutopilotUnitWorktree(input: {
       UNIT_INDEX_FILE,
       BRANCHES_FILE,
     ];
-    await executeOwnedWorktreeSaga({
-      active: input.active,
-      unitId: input.unitId,
-      attempt: input.attempt,
-      kind: 'unit',
-      operationType: 'create',
-      initialWorktreeState: 'planned',
-      committedWorktreeState: 'active',
-      intent: {
-        repo_root: input.active.source_repo,
-        worktree_path: unitWorktreePath,
-        git_common_dir: input.active.git_common_dir,
-        branch,
-        reason: 'prepare source-changing unit worktree',
-        base_sha: baseSha,
-        target_sha: null,
-        archive_ref: null,
-        checkout_mode: checkout.mode === 'legacy-full' ? 'full' : checkout.mode,
-        sparse_patterns: sparsePatterns,
-        paths: unitClaimPaths,
-        metadata_refs: metadataRefs,
-      },
-    }, {
-      action: async () => {
-        if (existsSync(unitAttemptRoot) && !existsSync(unitWorktreePath) && (await readdir(unitAttemptRoot, { withFileTypes: true })).length > 0) fail('unit-worktree-path-exists', 'unit attempt path contains unrelated residue before recoverable worktree creation.', [unitAttemptRoot]);
-        await mkdir(unitAttemptRoot, { recursive: true });
-        if (!existsSync(unitWorktreePath)) {
-          await createAutopilotGitWorktree({
-            repoRoot: input.active.source_repo,
-            worktreePath: unitWorktreePath,
-            branch,
-            startPoint: baseSha,
-            mode: checkout.mode === 'legacy-full' ? 'full' : checkout.mode,
-            sparsePatterns,
-            env: { ...env, [AUTOPILOT_RUNTIME_ENV]: AUTOPILOT_RUNTIME_VALUE },
+    await assertD65OrdinaryBoundaryFromEnvironment('missing-worktree-creation', env);
+    const createPhysicalWorktree = async (): Promise<void> => {
+      if (existsSync(unitAttemptRoot) && !existsSync(unitWorktreePath) && (await readdir(unitAttemptRoot, { withFileTypes: true })).length > 0) fail('unit-worktree-path-exists', 'unit attempt path contains unrelated residue before recoverable worktree creation.', [unitAttemptRoot]);
+      await mkdir(unitAttemptRoot, { recursive: true });
+      if (!existsSync(unitWorktreePath)) {
+        await createAutopilotGitWorktree({
+          repoRoot: input.active.source_repo,
+          worktreePath: unitWorktreePath,
+          branch,
+          startPoint: baseSha,
+          mode: checkout.mode === 'legacy-full' ? 'full' : checkout.mode,
+          sparsePatterns,
+          env: { ...env, [AUTOPILOT_RUNTIME_ENV]: AUTOPILOT_RUNTIME_VALUE },
+        });
+      }
+      if (checkout.mode !== 'legacy-full' && checkout.mode !== 'full') {
+        await applySparseCheckoutSet(unitWorktreePath, sparsePatterns, env);
+        await runGitMutation({ descriptor: { kind: 'checkout-force', branch }, cwd: unitWorktreePath, env: { ...env, [AUTOPILOT_RUNTIME_ENV]: AUTOPILOT_RUNTIME_VALUE } });
+      }
+    };
+    const finalizeUnitWorktree = async (): Promise<void> => {
+      if (input.unitSpec !== undefined) await ensureFutureOwnedParentDirs(unitWorktreePath, input.unitSpec.owned_paths);
+      await writeJsonAtomic(join(unitAttemptRoot, UNIT_INFO_FILE), unitInfo);
+      const currentIndex = await readUnitIndex(taskRoot);
+      await writeUnitIndex(taskRoot, { schema_version: 'autopilot.unit_index.v1', units: [...currentIndex.units.filter((candidate) => !(candidate.unit_id === input.unitId && candidate.attempt === input.attempt)), branchInfo] });
+      await upsertUnitBranchInfo(taskRoot, branchInfo);
+      if (!coordinationCutoverCommitted(resolveAutopilotStateRoot(env), input.active.repo_key)) {
+        const ledgerPath = join(input.active.worktree_root, WORKTREE_LEDGER_FILE);
+        const ledgerMarker = `\"event\":\"unit-create\"`;
+        const existingLedger = existsSync(ledgerPath) ? await readFile(ledgerPath, 'utf8') : '';
+        if (!existingLedger.split('\n').some((line) => line.includes(ledgerMarker) && line.includes(`\"workstream_run\":\"${input.active.workstream_run}\"`) && line.includes(`\"unit_id\":\"${input.unitId}\"`) && line.includes(`\"attempt\":${String(input.attempt)}`))) {
+          await appendJsonl(ledgerPath, {
+            schema_version: 'autopilot.worktree_ledger.v1', event: 'unit-create', ts: now.toISOString(), workstream: input.active.workstream,
+            workstream_run: input.active.workstream_run, autopilot_id: input.active.autopilot_id, unit_id: input.unitId, attempt: input.attempt,
+            branch, unit_path: unitWorktreePath, base_sha: baseSha,
           });
         }
-        if (checkout.mode !== 'legacy-full' && checkout.mode !== 'full') {
-          await applySparseCheckoutSet(unitWorktreePath, sparsePatterns, env);
-          await runGitMutation({ descriptor: { kind: 'checkout-force', branch }, cwd: unitWorktreePath, env: { ...env, [AUTOPILOT_RUNTIME_ENV]: AUTOPILOT_RUNTIME_VALUE } });
-        }
-      },
-      finalize: async () => {
-        if (input.unitSpec !== undefined) await ensureFutureOwnedParentDirs(unitWorktreePath, input.unitSpec.owned_paths);
-        await writeJsonAtomic(join(unitAttemptRoot, UNIT_INFO_FILE), unitInfo);
-        const currentIndex = await readUnitIndex(taskRoot);
-        await writeUnitIndex(taskRoot, { schema_version: 'autopilot.unit_index.v1', units: [...currentIndex.units.filter((candidate) => !(candidate.unit_id === input.unitId && candidate.attempt === input.attempt)), branchInfo] });
-        await upsertUnitBranchInfo(taskRoot, branchInfo);
-        if (!coordinationCutoverCommitted(resolveAutopilotStateRoot(env), input.active.repo_key)) {
-          const ledgerPath = join(input.active.worktree_root, WORKTREE_LEDGER_FILE);
-          const ledgerMarker = `\"event\":\"unit-create\"`;
-          const existingLedger = existsSync(ledgerPath) ? await readFile(ledgerPath, 'utf8') : '';
-          if (!existingLedger.split('\n').some((line) => line.includes(ledgerMarker) && line.includes(`\"workstream_run\":\"${input.active.workstream_run}\"`) && line.includes(`\"unit_id\":\"${input.unitId}\"`) && line.includes(`\"attempt\":${String(input.attempt)}`))) {
-            await appendJsonl(ledgerPath, {
-              schema_version: 'autopilot.worktree_ledger.v1', event: 'unit-create', ts: now.toISOString(), workstream: input.active.workstream,
-              workstream_run: input.active.workstream_run, autopilot_id: input.active.autopilot_id, unit_id: input.unitId, attempt: input.attempt,
-              branch, unit_path: unitWorktreePath, base_sha: baseSha,
-            });
-          }
-        }
-      },
-    }, env);
-    return { unitInfo, created: true, resumed: false };
+      }
+    };
+    if (input.active.coordination_authority === 'coordinator-edit-leases-v1') {
+      await executeOwnedWorktreeSaga({
+        active: input.active,
+        unitId: input.unitId,
+        attempt: input.attempt,
+        kind: 'unit',
+        operationType: 'create',
+        initialWorktreeState: 'planned',
+        committedWorktreeState: 'active',
+        intent: {
+          repo_root: input.active.source_repo,
+          worktree_path: unitWorktreePath,
+          git_common_dir: input.active.git_common_dir,
+          branch,
+          reason: 'prepare source-changing unit worktree',
+          base_sha: baseSha,
+          target_sha: null,
+          archive_ref: null,
+          checkout_mode: checkout.mode === 'legacy-full' ? 'full' : checkout.mode,
+          sparse_patterns: sparsePatterns,
+          paths: unitClaimPaths,
+          metadata_refs: metadataRefs,
+        },
+      }, { action: createPhysicalWorktree, finalize: finalizeUnitWorktree }, env);
+    } else {
+      await createPhysicalWorktree();
+      await finalizeUnitWorktree();
+    }
+    return { unitInfo, created: resumableUnitInfo === null, resumed: resumableUnitInfo !== null };
   });
 }
 
@@ -624,7 +651,12 @@ export async function updateUnitBranchStatus(input: {
   readonly status: AutopilotUnitBranchInfo['status'];
   readonly currentSha: string;
   readonly archiveRef: string | null;
+  readonly env?: ProcessEnvLike;
+  readonly recovery?: 'unit-recovery';
 }): Promise<void> {
+  const env = input.env ?? process.env;
+  if (input.recovery === 'unit-recovery') await assertD65RecoveryBoundaryFromEnvironment('unit-recovery', { attached_session_current: true, policy_trust_current: true, no_pending_publication: true, terminal_prepared_cancellable: false, terminal_after_commit: false, accepted_continuation_reason: null, covered_semantic_reason: null, attach_terminal_recovery: false }, env);
+  else await assertD65OrdinaryBoundaryFromEnvironment('ordinary-state-advance', env);
   const taskRoot = taskRootForActiveAutopilot(input.active);
   const index = await readUnitIndex(taskRoot);
   const nextUnits = index.units.map((unit) => unit.unit_id === input.unitId && unit.attempt === input.attempt
@@ -1477,14 +1509,8 @@ function unitInfoFromBranch(active: ActiveAutopilotRow, branch: AutopilotUnitBra
 
 async function upsertUnitBranchInfo(taskRoot: string, branchInfo: AutopilotUnitBranchInfo): Promise<void> {
   const path = join(taskRoot, BRANCHES_FILE);
-  const branches = existsSync(path) ? parseBranchesInfo(await readJson(path)) : {
-    schema_version: 'autopilot.branches.v1' as const,
-    active_branch: '',
-    base_sha: branchInfo.base_sha,
-    current_sha: branchInfo.base_sha,
-    archive_ref: null,
-    unit_branches: [],
-  };
+  if (!existsSync(path)) fail('unit-branch-authority-missing', 'unit branch projection requires the durable run-main branch authority.', [path]);
+  const branches = parseBranchesInfo(await readJson(path));
   const unitBranches = branches.unit_branches.filter((unit) => !(unit.unit_id === branchInfo.unit_id && unit.attempt === branchInfo.attempt));
   await writeJsonAtomic(path, { ...branches, unit_branches: [...unitBranches, branchInfo] });
 }

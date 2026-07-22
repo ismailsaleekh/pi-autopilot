@@ -6,8 +6,8 @@ covers_surfaces:
   - autopilot-agent-run
 covers_sources:
   - src/cli/autopilot-agent-run.ts
-signature_hash: 'sha256:5298322afe0cf9324fc5cfca76d34a89bb80689084858a866e079cd3c41b8bf5'
-body_hash: 'sha256:4ef466016304b0507e25ced63c0cc3fd178e3e250e69d26b62df841a7c1e8afd'
+signature_hash: 'sha256:6a2b2a4d670b47bf0757d6cd542538122a0183d625023be72212d51161cfee73'
+body_hash: 'sha256:3c1559deb04c48210b6757dccea5b763bb55e8797999e472f95f87d2dc7f8de9'
 stability: stable
 ---
 
@@ -31,7 +31,11 @@ observations/edit-intentions/exclusives, renders the child prompt, and either dr
 or launches Pi in RPC mode with the internal compiled status tool and worktree guard.
 
 Live runs require the current private coordinator session context and register a child
-lease before model spend.
+lease before model spend. Current-build D65 runs additionally validate the accepted
+complete semantic graph, highest signed launch policy, and governing program heartbeat
+before runner preflight, after acquisition, and immediately before child-model spawn.
+A semantic coordinator event suspends re-entry until its exact successor graph is
+published and accepted.
 
 ## Exit classes
 

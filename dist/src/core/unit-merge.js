@@ -14,6 +14,7 @@ import { AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV } from "./names.js";
 import { executeOwnedWorktreeSaga, inspectOwnedWorktreeSpecPostcondition, WorktreeSagaCompensatedError } from "./coordination/worktree-saga.js";
 import { recordValidationStalenessForMerge } from "./validation-staleness.js";
 import { classifyCoordinationIntegrationConflict } from "./coordination/integration-conflicts.js";
+import { assertD65OrdinaryBoundaryFromEnvironment } from "./coordination/d65-runtime-dispatch.js";
 export class AutopilotUnitMergeError extends Error {
     name = 'AutopilotUnitMergeError';
     code;
@@ -129,6 +130,7 @@ export async function mergeAutopilotUnit(input) {
             },
         };
         try {
+            await assertD65OrdinaryBoundaryFromEnvironment('unit-merge', input.env ?? process.env);
             await executeOwnedWorktreeSaga(mergeSpec, {
                 action: async () => {
                     const merge = await runGitMutation({ descriptor: { kind: 'merge', mode: 'no-ff', message: `autopilot unit merge ${active.workstream_run} ${input.unitId} attempt ${String(input.attempt)}`, target: validatedUnitHead }, cwd: active.main_worktree_path, env: runtimeGitEnv('unit-merge', input.env) });
@@ -194,7 +196,7 @@ export async function mergeAutopilotUnit(input) {
         }, {
             action: async () => { await runGitMutation({ descriptor: { kind: 'update-ref-create', ref: `refs/heads/${archiveRef}`, target: validatedUnitHead, expectedOld: '0'.repeat(40) }, cwd: active.source_repo, env: runtimeGitEnv('unit-archive', input.env) }); },
         }, input.env ?? process.env);
-        await updateUnitBranchStatus({ active, unitId: input.unitId, attempt: input.attempt, status: 'merged', currentSha: validatedUnitHead, archiveRef });
+        await updateUnitBranchStatus({ active, unitId: input.unitId, attempt: input.attempt, status: 'merged', currentSha: validatedUnitHead, archiveRef, env: input.env ?? process.env });
         await cleanupTerminalUnitWorktree({
             active,
             unitId: input.unitId,

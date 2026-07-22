@@ -5,6 +5,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { describe, it } from 'node:test';
 
 import { CoordinatorClient } from '../../src/core/coordination/client.ts';
@@ -13,6 +14,7 @@ import { ClaimNegotiationClient } from '../../src/core/coordination/negotiation.
 import { recordCoordinatorReleaseEvidenceFromFile, replayPendingCoordinatorReconciliation, RunReconciliationClient } from '../../src/core/coordination/reconciliation.ts';
 import { ReservationCoordinationClient } from '../../src/core/coordination/reservations.ts';
 import { coordinatorRuntimePaths } from '../../src/core/coordination/runtime-paths.ts';
+import { d65SemanticEventWorkstreamRuns, type D65AcceptedEventResultJoin } from '../../src/core/coordination/d65-semantic-version.ts';
 import { startCoordinatorServer } from '../../src/core/coordination/server.ts';
 import { proveStructuredAttemptTerminal } from '../../src/core/coordination/terminal-attempt-proof.ts';
 import { writeCoordinatorSessionContext, type CoordinatorSessionContext } from '../../src/core/coordination/supervisor.ts';
@@ -487,6 +489,16 @@ void describe('Coordination Fabric offline replay and automatic reconciliation',
       const doctor = await value.client.query('doctor');
       const startup = parseCoordinationReconciliationReceipt(doctor.payload['last_startup_reconciliation']);
       assert.equal(startup.counts['released-lease'], 0);
+      const database = new DatabaseSync(value.server.store.currentGeneration().database_path, { readOnly: true });
+      try {
+        const raw = record(database.prepare("SELECT e.repo_id,e.event_seq,e.event_type,e.entity_type,e.entity_id,e.idempotency_key,e.request_sha256,r.repo_id AS result_repo_id,r.idempotency_key AS result_key,r.request_sha256 AS result_request,r.committed_event_seq AS result_seq,r.payload_json AS result_payload FROM events e JOIN idempotency_results r ON r.repo_id=e.repo_id AND r.idempotency_key=e.idempotency_key WHERE e.repo_id=? AND e.event_type='startup-run-reconciled' AND e.entity_id=? ORDER BY e.event_seq DESC LIMIT 1").get(owner.context.repo_id, owner.context.workstream_run), 'startup reconciliation immutable event/result');
+        const resultPayload = record(JSON.parse(String(raw['result_payload'])) as unknown, 'startup reconciliation result payload');
+        const joined: D65AcceptedEventResultJoin = {
+          repo_id: String(raw['repo_id']), event_seq: Number(raw['event_seq']), event_type: String(raw['event_type']), entity_type: String(raw['entity_type']), entity_id: String(raw['entity_id']), idempotency_key: String(raw['idempotency_key']), request_sha256: String(raw['request_sha256']),
+          result: { repo_id: String(raw['result_repo_id']), idempotency_key: String(raw['result_key']), request_sha256: String(raw['result_request']), committed_event_seq: Number(raw['result_seq']), payload: resultPayload },
+        };
+        assert.deepEqual(d65SemanticEventWorkstreamRuns(joined), [owner.context.workstream_run]);
+      } finally { database.close(); }
     } finally {
       await closeHarness(value);
     }

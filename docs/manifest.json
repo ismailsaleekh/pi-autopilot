@@ -226,8 +226,8 @@
       "covers_sources": [
         "src/cli/autopilot-agent-run.ts"
       ],
-      "signature_hash": "sha256:5298322afe0cf9324fc5cfca76d34a89bb80689084858a866e079cd3c41b8bf5",
-      "body_hash": "sha256:4ef466016304b0507e25ced63c0cc3fd178e3e250e69d26b62df841a7c1e8afd",
+      "signature_hash": "sha256:6a2b2a4d670b47bf0757d6cd542538122a0183d625023be72212d51161cfee73",
+      "body_hash": "sha256:3c1559deb04c48210b6757dccea5b763bb55e8797999e472f95f87d2dc7f8de9",
       "semantic_attestation": null
     },
     "cli/autopilot-coordinator": {
@@ -305,8 +305,8 @@
       "covers_sources": [
         "src/core/scheduler-config.ts"
       ],
-      "signature_hash": "sha256:77ba52d4e6714f14c69e74f568dbe65098d678845965e91e0e96ab9d9c04d55c",
-      "body_hash": "sha256:b26c2893078435ac600005e61e86901c28f21fa885cd14b055c59cb17689edea",
+      "signature_hash": "sha256:43e8155a67fbd7eb33da2c6adc12bfff0250e9c25e80e1daf6daf1ebb8f393c8",
+      "body_hash": "sha256:135f1e5ef634a74c4cd2bbafdf1b015ecf7e939509d2c2e488e209f79429c304",
       "semantic_attestation": null
     },
     "commands/autopilot-coordination": {
@@ -408,7 +408,7 @@
         "src/cli/migration-recovery.ts"
       ],
       "signature_hash": "sha256:572bf897cd91ce0e6023ae60cd84c52c8d4a3abe9c84155412e9cacc9717a473",
-      "body_hash": "sha256:9e6ecf62ca7ad97a25396e45a195419f147110edeb52a29b393389851ff2c53c",
+      "body_hash": "sha256:e20d279d91ba379c5799bcc5a67e8ddd0be67ee0236e2bb5292d6b137efc9c06",
       "semantic_attestation": null
     },
     "concepts/reservations": {
@@ -527,7 +527,7 @@
         "src/core/worktree-cleanup.ts"
       ],
       "signature_hash": "sha256:008aa231a2414d2bcb29cc62696f7587634857ea043568428bd1f286fbc446b9",
-      "body_hash": "sha256:4d8335f54b7af16e0cb7758ec3c4ca3bf247eeb91ed6697e1bb44ac60da6a929",
+      "body_hash": "sha256:1c4821ee2baa48c290ddd6974e45fe6baea85d1177b8c82ba5c44a266b9543e3",
       "semantic_attestation": null
     },
     "subsystems/contracts-and-schemas": {
@@ -616,8 +616,8 @@
         "src/core/scheduler.ts",
         "src/core/unit-failure.ts"
       ],
-      "signature_hash": "sha256:8bc80a9446fa7d7930f3c67100e313588fdf1d8facf6b8a1c8edc342c5908cc1",
-      "body_hash": "sha256:2f27474fcea9823a35921bf9d4a57a16d3ac7d88e4bf928068a6ac82eddfeb60",
+      "signature_hash": "sha256:47fe11d6fcd66ed33f128f0590a3f0016f1653ef6ea3646d86eb1c655c7064a3",
+      "body_hash": "sha256:fdd2c483b68ac174452b69431618cb515a725fb030530ce03d1b6f0b460a3d41",
       "semantic_attestation": null
     },
     "subsystems/worktrees": {
@@ -634,8 +634,8 @@
         "src/core/parallel-runtime.ts",
         "src/core/sparse-worktree.ts"
       ],
-      "signature_hash": "sha256:0eeff457993c215861207651e76cdbb50fde38538a0d897d2ea49ef9640ea902",
-      "body_hash": "sha256:fa7fe6840faf0f28c169675fa484fff8cbaba839561ca9edd89b51be3c352c19",
+      "signature_hash": "sha256:82853603ad9b97c2a62ec6f2374efb085e1db7f7ae15d7af9a3d4cae2abde577",
+      "body_hash": "sha256:34615d7f7346ada422a3b9c839065014eca3cee4ff7c8229acde5650afefe6f6",
       "semantic_attestation": null
     },
     "tools/autopilot_emit_status": {

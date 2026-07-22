@@ -194,6 +194,7 @@ void describe('package manifest and payload', () => {
       assert.equal(typeof pkg.scripts[script], 'string', script);
     }
     assert.match(pkg.scripts['prepack'] ?? '', /security:scan -- --quiet && npm run sbom/u, 'prepack must regenerate security evidence before SBOM');
+    assert.match(pkg.scripts['test:multiprocess'] ?? '', /--test-concurrency=1/u, 'resource-heavy real-process files must be serialized so fixed startup deadlines are not invalidated by cross-file load');
     for (const dir of ['bin/', 'dist/', 'extensions/', 'src/', 'templates/', 'artifacts/security/']) assert.ok(pkg.files.includes(dir), dir);
   });
 
@@ -213,6 +214,13 @@ void describe('package manifest and payload', () => {
       'dist/src/core/coordination/immutable-file.js',
       'artifacts/security/cyclonedx-sbom.json',
       'artifacts/security/offline-security-scan.json',
+      'scripts/check-package-payload.mjs',
+      'scripts/check-production-git-spawns.mjs',
+      'scripts/generate-sbom.mjs',
+      'scripts/run-certified-command.mjs',
+      'scripts/security-scan.mjs',
+      'scripts/test-packed-consumer-release.mjs',
+      'scripts/verify-packed-consumer.mjs',
       'README.md',
       'TESTING.md',
       'TEST_PLAN.md',

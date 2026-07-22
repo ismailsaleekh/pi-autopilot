@@ -28,11 +28,14 @@ export type CoordinatorSocketRequestDisposition =
   | { readonly kind: 'negotiated-operation'; readonly peerMode: 'negotiated-s1' };
 
 export type CoordinatorS1Surface =
+  | 'd65-current-build'
   | 'canonical-worktree-aliases'
   | 'scoped-logical-faults'
   | 'store-generations';
 
 const SURFACE_VOCABULARY: Readonly<Record<CoordinatorS1Surface, CoordinatorAdmissionVocabulary>> = Object.freeze({
+  // Reuses existing signed admission authority; no new vocabulary/wire identity.
+  'd65-current-build': 'admission-v1',
   'canonical-worktree-aliases': 'canonical-worktree-aliases-v1',
   'scoped-logical-faults': 'scoped-logical-faults-v1',
   'store-generations': 'store-generations-v1',

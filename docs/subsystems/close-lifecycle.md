@@ -12,7 +12,7 @@ covers_sources:
   - src/core/validation-staleness.ts
   - src/core/worktree-cleanup.ts
 signature_hash: 'sha256:008aa231a2414d2bcb29cc62696f7587634857ea043568428bd1f286fbc446b9'
-body_hash: 'sha256:4d8335f54b7af16e0cb7758ec3c4ca3bf247eeb91ed6697e1bb44ac60da6a929'
+body_hash: 'sha256:1c4821ee2baa48c290ddd6974e45fe6baea85d1177b8c82ba5c44a266b9543e3'
 stability: stable
 ---
 
@@ -44,6 +44,8 @@ checkout or remotes.
 5. No remaining validation-staleness artifacts, unresolved reservation repair,
    foreign/manual target-path intersections, or dirty/running/quarantined unit
    worktrees.
+6. A D65 run has an accepted complete graph, launch policy, governing heartbeat, and
+   no pending graph publication before entering its prepared terminal boundary.
 
 ## Close effects (in order)
 
@@ -56,6 +58,12 @@ run-owned paths (`active/<workstream-run>/main/` + terminal unit `worktree/`) �
 the active task directory after archive → reconcile only exact run-owned stale
 `git worktree` metadata (never a global prune) → verify no run-owned path remains →
 retire the branch to `autopilot/archive/<workstream-run>/main`.
+
+D65 close/abort first appends `autopilot.run_terminal_intent.v2`, publishes its
+successor graph, and then enters a contiguous no-reentry terminal tail. The runtime
+replays that tail against the prepared graph and precomputed effect partition; after
+main-worktree removal, only the exact scoped terminal recovery is permitted. It never
+fabricates a post-removal graph registration or re-enters ordinary dispatch.
 
 ## Abort
 

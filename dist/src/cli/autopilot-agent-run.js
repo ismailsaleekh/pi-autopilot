@@ -1,5 +1,11 @@
 #!/usr/bin/env node
+import { isAbsolute, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { AutopilotAgentRunError, runAutopilotAgentFromSpecPath } from "../core/agent-runner.js";
+import { driveD65SubscriptionFailureRecoveryFromEnvironment } from "../core/coordination/d65-graph-successor-runtime.js";
+import { CoordinationRuntimeError, formatCoordinationRuntimeError } from "../core/coordination/failures.js";
+import { readStableRegularFile } from "../core/coordination/reconciliation.js";
+const MAX_RECOVERY_AUTHORITY_BYTES = 1024 * 1024;
 const EXIT_BY_FAILURE_CLASS = Object.freeze({
     'spec-invalid': 2,
     'waiting-for-peer-release': 3,
@@ -9,7 +15,7 @@ const EXIT_BY_FAILURE_CLASS = Object.freeze({
     'status-non-success': 30,
     'runtime-commit-failed': 31,
 });
-async function main(argv) {
+export async function runAutopilotAgentCli(argv, env = process.env) {
     let args;
     try {
         args = parseArgs(argv);
@@ -22,8 +28,20 @@ async function main(argv) {
         return message === 'autopilot-agent-run help' ? 0 : 2;
     }
     try {
+        if (args.mode === 'recover-d65-subscription') {
+            const continuationBytes = await readStableRegularFile(args.continuationPath, 'D65 subscription continuation CLI input', MAX_RECOVERY_AUTHORITY_BYTES);
+            const probeBytes = await readStableRegularFile(args.probePath, 'D65 subscription probe CLI input', MAX_RECOVERY_AUTHORITY_BYTES);
+            const boundAuthorityFiles = [];
+            for (const file of args.boundFiles)
+                boundAuthorityFiles.push(Object.freeze({ ref: file.ref, bytes: await readStableRegularFile(file.path, `D65 subscription bound authority ${file.ref}`, MAX_RECOVERY_AUTHORITY_BYTES) }));
+            const recovered = await driveD65SubscriptionFailureRecoveryFromEnvironment({ env, recovery: { continuationBytes, probeBytes, continuationSequence: args.continuationSequence, boundAuthorityFiles: Object.freeze(boundAuthorityFiles) } });
+            const payload = { status: 'recovered', mode: args.mode, ...recovered };
+            console.log(args.json ? JSON.stringify(payload) : `autopilot-agent-run recovered D65 subscription failure continuation_graph=${String(recovered.continuationGraphSequence)} probe_graph=${String(recovered.probeGraphSequence)}`);
+            return 0;
+        }
         const result = await runAutopilotAgentFromSpecPath(args.specPath, {
             dryRun: args.dryRun,
+            env,
             ...(args.piExecutable === undefined ? {} : { piExecutable: args.piExecutable }),
         });
         if (args.json) {
@@ -51,7 +69,12 @@ async function main(argv) {
         return 0;
     }
     catch (error) {
-        if (error instanceof AutopilotAgentRunError) {
+        if (args.mode === 'recover-d65-subscription' && error instanceof CoordinationRuntimeError) {
+            const payload = { status: 'recovery-pending', mode: args.mode, failure_code: error.code, failure_class: error.failure_class, retry_policy: error.retry_policy, reason: formatCoordinationRuntimeError(error) };
+            console.error(args.json ? JSON.stringify(payload) : `autopilot-agent-run D65 subscription recovery paused: ${payload.reason}`);
+            return 40;
+        }
+        if (args.mode === 'run' && error instanceof AutopilotAgentRunError) {
             const payload = {
                 status: 'failed',
                 failure_class: error.failureClass,
@@ -77,6 +100,8 @@ async function main(argv) {
     }
 }
 function parseArgs(argv) {
+    if (argv[0] === 'recover-d65-subscription')
+        return parseSubscriptionRecoveryArgs(argv.slice(1));
     let dryRun = false;
     let json = false;
     let piExecutable;
@@ -114,10 +139,67 @@ function parseArgs(argv) {
     const specPath = positional[0];
     if (specPath === undefined)
         throw new Error('expected <unit-spec.json>');
-    return { specPath, dryRun, json, ...(piExecutable === undefined ? {} : { piExecutable }) };
+    return { mode: 'run', specPath, dryRun, json, ...(piExecutable === undefined ? {} : { piExecutable }) };
+}
+function parseSubscriptionRecoveryArgs(argv) {
+    let continuationPath;
+    let probePath;
+    let continuationSequence;
+    let json = false;
+    const boundFiles = [];
+    for (let index = 0; index < argv.length; index += 1) {
+        const arg = argv[index];
+        if (arg === undefined)
+            continue;
+        if (arg === '--json') {
+            json = true;
+            continue;
+        }
+        if (arg === '--help' || arg === '-h')
+            throw new Error('autopilot-agent-run help');
+        const value = argv[index + 1];
+        if (value === undefined || value.startsWith('--'))
+            throw new Error(`${arg} requires a value`);
+        if (arg === '--continuation')
+            continuationPath = value;
+        else if (arg === '--probe')
+            probePath = value;
+        else if (arg === '--continuation-sequence') {
+            if (!/^\d+$/u.test(value))
+                throw new Error('--continuation-sequence requires a positive decimal integer');
+            continuationSequence = Number(value);
+            if (!Number.isSafeInteger(continuationSequence) || continuationSequence < 1)
+                throw new Error('--continuation-sequence requires a positive safe integer');
+        }
+        else if (arg === '--bound') {
+            const path = argv[index + 2];
+            if (path === undefined || path.startsWith('--'))
+                throw new Error('--bound requires <repo-relative-ref> <absolute-file>');
+            boundFiles.push(Object.freeze({ ref: value, path }));
+            index += 1;
+        }
+        else
+            throw new Error(`unknown recovery option ${arg}`);
+        index += 1;
+    }
+    if (continuationPath === undefined || probePath === undefined || continuationSequence === undefined)
+        throw new Error('recover-d65-subscription requires --continuation, --probe, and --continuation-sequence');
+    for (const path of [continuationPath, probePath, ...boundFiles.map((file) => file.path)])
+        if (!isAbsolute(path))
+            throw new Error('subscription recovery authority file paths must be absolute');
+    if (boundFiles.length === 0 || new Set(boundFiles.map((file) => file.ref)).size !== boundFiles.length)
+        throw new Error('recover-d65-subscription requires unique --bound refs');
+    return Object.freeze({ mode: 'recover-d65-subscription', continuationPath, probePath, continuationSequence, boundFiles: Object.freeze(boundFiles), json });
 }
 function usage() {
-    return 'usage: autopilot-agent-run [--dry-run] [--json] [--pi-executable <path>] <unit-spec.json>\n';
+    return [
+        'usage: autopilot-agent-run [--dry-run] [--json] [--pi-executable <path>] <unit-spec.json>',
+        '       autopilot-agent-run recover-d65-subscription --continuation <absolute-json> --probe <absolute-json> --continuation-sequence <n> --bound <repo-relative-ref> <absolute-file> [--bound <ref> <file> ...] [--json]',
+        '',
+    ].join('\n');
 }
-const exitCode = await main(process.argv.slice(2));
-process.exit(exitCode);
+const invokedPath = process.argv[1];
+if (invokedPath !== undefined && pathToFileURL(resolve(invokedPath)).href === import.meta.url) {
+    const exitCode = await runAutopilotAgentCli(process.argv.slice(2));
+    process.exit(exitCode);
+}

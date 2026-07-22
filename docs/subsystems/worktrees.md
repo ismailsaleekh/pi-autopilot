@@ -11,8 +11,8 @@ covers_sources:
   - src/core/materialization.ts
   - src/core/git-guard.ts
   - src/core/git-process.ts
-signature_hash: 'sha256:0eeff457993c215861207651e76cdbb50fde38538a0d897d2ea49ef9640ea902'
-body_hash: 'sha256:fa7fe6840faf0f28c169675fa484fff8cbaba839561ca9edd89b51be3c352c19'
+signature_hash: 'sha256:82853603ad9b97c2a62ec6f2374efb085e1db7f7ae15d7af9a3d4cae2abde577'
+body_hash: 'sha256:34615d7f7346ada422a3b9c839065014eca3cee4ff7c8229acde5650afefe6f6'
 stability: stable
 ---
 
@@ -32,6 +32,7 @@ This subsystem prepares, sizes, materializes, and guards those worktrees.
 | Authority materialization into worktrees | `src/core/materialization.ts` |
 | Worktree-scoped parent/child git guard | `src/core/git-guard.ts` |
 | Bounded, NUL-safe git process boundary | `src/core/git-process.ts` |
+| D65 graph publication + worktree cadence | `src/core/coordination/d65-graph-publisher.ts`, `src/core/coordination/worktree-saga.ts` |
 
 ## Worktree layout
 
@@ -59,6 +60,16 @@ falling back to a full checkout.
   `AUTOPILOT_CHECKOUT_PROFILE=/absolute/path`; explicit `full` mode is opt-in only and
   still passes the disk gate.
 
+For D65 runs, the signed launch policy also binds `expected_checkout_units=1` and
+`maximum_parallel_cap=1`. In complete mode, ordinary create/materialize,
+missing-worktree creation, and disk boundaries validate the current complete semantic
+graph, policy, and heartbeat. The bootstrap main-worktree create and unit-removal
+(terminal-tail) effects instead use closed charter/recovery paths (the bootstrap
+charter for main create before policy/heartbeat exist; the `unit-recovery` and terminal
+tail cells for reset/quarantine/remove), which bind row/session conditions but do not
+re-require the full graph/policy/heartbeat tuple. Semantic worktree transitions in the
+ordinary path require a successor graph before ordinary dispatch can resume.
+
 ## The git guard
 
 Parent and child sessions may use local git inside registered Autopilot worktrees
@@ -67,7 +78,10 @@ rejects git whose effective cwd/work-tree is outside the active worktree, plus e
 git remapping, remote/external subcommands, and shared branch/tag mutation. The
 `git-process.ts` boundary is a single closed process with bounded raw-byte queries,
 NUL-safe parsing, drained mutations, process-tree timeout termination, and redacted
-diagnostics — no raw production Git exceptions escape.
+diagnostics — no raw production Git exceptions escape. Recursive tracked-tree sizing
+uses the streaming `ls-tree-recursive-stream` descriptor with separate entry-count,
+cumulative-path-byte, per-record, and total lifecycle bounds; it never raises the
+64 MiB retained-output ceiling or truncates authority into a false success.
 
 ## Related
 

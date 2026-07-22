@@ -364,6 +364,8 @@ function operationType(value) {
     return typeof type === 'string' ? type : null;
 }
 function requestS1Surface(store, request) {
+    if (request.action === 'accept-program-heartbeat' || request.action === 'status' && request.payload['dispatch_authority_context'] !== undefined)
+        return 'd65-current-build';
     if (request.action === 'resolve-run-scoped-fault')
         return 'scoped-logical-faults';
     if (request.action === 'prepare-operation' && operationType(request.payload['operation']) === 'metadata-reconcile')

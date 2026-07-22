@@ -16,6 +16,7 @@ import { coordinationCutoverCommitted } from "./coordination/migration-paths.js"
 import { ClaimNegotiationClient } from "./coordination/negotiation.js";
 import { ReservationCoordinationClient, reservationSchedulingBlockers } from "./coordination/reservations.js";
 import { PlanningContradictionClient } from "./coordination/escalation.js";
+import { assertD65OrdinaryBoundaryFromEnvironment } from "./coordination/d65-runtime-dispatch.js";
 import { quarantineFailedUnit, resetFailedUnit } from "./unit-failure.js";
 import { rollbackCreatedUnitWorktree } from "./worktree-cleanup.js";
 import { registerAutopilotChildAuthority } from "./coordination/child-authority.js";
@@ -120,6 +121,8 @@ async function runAutopilotAgentFromSpecPathInternal(specPath, options, lifecycl
         });
     }
     const env = { ...process.env, ...(options.env ?? {}) };
+    if (options.dryRun !== true)
+        await assertD65OrdinaryBoundaryFromEnvironment('runner-preflight', env);
     const runtimePreflight = await preflightSpec(spec, specPath, {
         skipStaleOutputCheck: options.dryRun === true,
         skipClaimAcquire: options.dryRun === true,
@@ -129,6 +132,8 @@ async function runAutopilotAgentFromSpecPathInternal(specPath, options, lifecycl
     lifecycle.preflight = runtimePreflight;
     lifecycle.env = env;
     lifecycle.spec = spec;
+    if (options.dryRun !== true)
+        await assertD65OrdinaryBoundaryFromEnvironment('post-acquisition-output', env);
     const auditBaseline = await captureAutopilotExecutionBaseline(spec.cwd);
     lifecycle.auditBaseline = auditBaseline;
     const auditOutput = deriveAutopilotExecutionAuditPath(spec);
@@ -186,6 +191,7 @@ async function runAutopilotAgentFromSpecPathInternal(specPath, options, lifecycl
         });
     }
     try {
+        await assertD65OrdinaryBoundaryFromEnvironment('post-acquisition-output', env);
         lifecycle.handle = await registerAutopilotChildAuthority(spec, runtimePreflight.attemptSpec, env, runtimePreflight.authority.exclusives[0]?.critical_section ?? null);
     }
     catch (error) {
@@ -215,6 +221,7 @@ async function runAutopilotAgentFromSpecPathInternal(specPath, options, lifecycl
     };
     let piResult;
     try {
+        await assertD65OrdinaryBoundaryFromEnvironment('child-model-spawn', env);
         piResult = await runPiPromptWithStatusCarrier(spawnSpec, rendered.text);
     }
     catch (error) {
@@ -565,9 +572,6 @@ async function preflightSpecAfterWorktreePreparation(spec, specPath, options = {
         throw new AutopilotAgentRunError('spec-invalid', { reason: 'unit spec must remain inside the durable run main worktree', specPath });
     const attemptSpecBytes = await readFile(specPath);
     const attemptSpec = { ref: attemptSpecRef, sha256: `sha256:${createHash('sha256').update(attemptSpecBytes).digest('hex')}` };
-    await mkdir(dirname(spec.status_output), { recursive: true });
-    await mkdir(dirname(spec.receipt_output), { recursive: true });
-    await mkdir(spec.evidence_dir, { recursive: true });
     let coordinatorGroup = null;
     const acquiredClaims = options.skipClaimAcquire === true
         ? []
@@ -589,6 +593,12 @@ async function preflightSpecAfterWorktreePreparation(spec, specPath, options = {
             });
     try {
         if (options.skipClaimAcquire !== true)
+            await assertD65OrdinaryBoundaryFromEnvironment('post-acquisition-output', options.env ?? process.env);
+        await mkdir(dirname(spec.status_output), { recursive: true });
+        await mkdir(dirname(spec.receipt_output), { recursive: true });
+        await mkdir(spec.evidence_dir, { recursive: true });
+        if (options.skipClaimAcquire !== true) {
+            await assertD65OrdinaryBoundaryFromEnvironment('post-acquisition-output', options.env ?? process.env);
             await materializeAutopilotSpecPaths({
                 context: runtimeContext,
                 spec,
@@ -596,6 +606,7 @@ async function preflightSpecAfterWorktreePreparation(spec, specPath, options = {
                 reason: 'autopilot-agent-run preflight materialization',
                 ...(options.env === undefined ? {} : { env: options.env }),
             });
+        }
         const verifiedSpecBytes = await readFile(specPath);
         const verifiedSpecSha = `sha256:${createHash('sha256').update(verifiedSpecBytes).digest('hex')}`;
         if (verifiedSpecSha !== attemptSpec.sha256)
@@ -744,6 +755,7 @@ async function prepareMissingSourceChangingUnitWorktree(spec, env, skipSagaRecov
             receiptOutput: spec.receipt_output,
         });
     }
+    await assertD65OrdinaryBoundaryFromEnvironment('missing-worktree-creation', env);
     const prepared = await prepareAutopilotUnitWorktree({ active, unitId: spec.unit_id, attempt: spec.attempt, unitSpec: spec, env });
     return prepared.created ? { created: true, active, unitId: spec.unit_id, attempt: spec.attempt } : { created: false };
 }

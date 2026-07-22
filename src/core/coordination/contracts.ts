@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto';
 import { isAbsolute, normalize } from 'node:path';
 
+import { parseD65AttachRunBootstrapGraphPayload, parseD65TerminalEffectSets } from './d65-semantic-graph.ts';
+import { parseD65DispatchAuthorityRequestContext } from './d65-dispatch-authority.ts';
 import { COORDINATION_EXCLUSIVE_MAX_EXPECTED_DURATION_MS } from './exclusive-policy.ts';
 import { parseMetadataReconcileIntent } from './metadata-reconcile.ts';
 import {
@@ -108,14 +110,14 @@ const SHA256 = /^sha256:[a-f0-9]{64}$/u;
 const CHILD_TOKEN = /^[a-f0-9]{64}$/u;
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,191}$/u;
 const QUERY_ACTIONS = ['handshake', 'status', 'doctor', 'export', 'migration-recovery', 'run-catalog', 'reconciliation-details', 'result-details'] as const;
-const MUTATION_ACTIONS = ['attach-run', 'attach-session', 'attach-terminal-recovery', 'attach-migration-recovery', 'resolve-migration-recovery', 'detach-session', 'prepare-handoff', 'heartbeat', 'register-attempt', 'register-child', 'heartbeat-child', 'checkpoint-child', 'complete-child',  'drain-mailbox', 'acquire-group', 'acknowledge-grant', 'respond-claim-request', 'cancel-claim-request', 'cancel-acquisition-group', 'supersede-attempt', 'acknowledge-message', 'record-release-evidence', 'resolve-reservation-obligation', 'prepare-run-terminal', 'cancel-run-terminal', 'reconcile-run', 'prepare-operation', 'transition-operation', 'resolve-run-scoped-fault', 'register-authoritative-artifact', 'assign-adjudication', 'claim-adjudication-assignment', 'complete-adjudication', 'submit-planning-contradiction'] as const;
+const MUTATION_ACTIONS = ['attach-run', 'attach-session', 'attach-terminal-recovery', 'attach-migration-recovery', 'resolve-migration-recovery', 'detach-session', 'prepare-handoff', 'heartbeat', 'accept-program-heartbeat', 'register-attempt', 'register-child', 'heartbeat-child', 'checkpoint-child', 'complete-child',  'drain-mailbox', 'acquire-group', 'acknowledge-grant', 'respond-claim-request', 'cancel-claim-request', 'cancel-acquisition-group', 'supersede-attempt', 'acknowledge-message', 'record-release-evidence', 'resolve-reservation-obligation', 'prepare-run-terminal', 'cancel-run-terminal', 'reconcile-run', 'prepare-operation', 'transition-operation', 'resolve-run-scoped-fault', 'register-authoritative-artifact', 'assign-adjudication', 'claim-adjudication-assignment', 'complete-adjudication', 'submit-planning-contradiction'] as const;
 const MESSAGE_TYPES = COORDINATION_MESSAGE_TYPES;
 const WORKTREE_STATES = COORDINATION_WORKTREE_STATES;
 const OPERATION_TYPES = COORDINATION_OPERATION_TYPES;
 const EXHAUSTED_ALTERNATIVES = ['sequencing', 'partitioning', 'ownership-transfer', 'rebase-revalidation', 'replanning'] as const;
 const PAYLOAD_FIELDS: Readonly<Record<CoordinatorQueryAction | CoordinatorMutationAction, readonly string[]>> = {
   handshake: [],
-  status: ['cursor', 'scan_token', 'section'],
+  status: ['cursor', 'dispatch_authority_context', 'scan_token', 'section'],
   doctor: ['cursor', 'scan_token', 'section'],
   export: ['output_path'],
   'migration-recovery': ['cursor_recovery_id', 'cursor_run', 'include_resolved', 'limit', 'recovery_id'],
@@ -130,6 +132,7 @@ const PAYLOAD_FIELDS: Readonly<Record<CoordinatorQueryAction | CoordinatorMutati
   'detach-session': ['reason', 'session_lease_id', 'session_token'],
   'prepare-handoff': ['handoff_token', 'session_lease_id', 'session_token'],
   heartbeat: ['lease_expires_at', 'session_lease_id', 'session_token'],
+  'accept-program-heartbeat': ['acceptance_kind', 'expected_prior_sequence', 'expected_prior_sha256', 'heartbeat_ref', 'heartbeat_sha256', 'program_id', 'session_lease_id', 'session_token', 'workstream_run'],
   'register-attempt': ['attempt', 'checkpoint_ordinal', 'preemptible', 'role', 'session_lease_id', 'session_token', 'spec_ref', 'spec_sha256', 'unit_id'],
   'register-child': ['attempt', 'autopilot_id', 'boot_id', 'child_lease_id', 'child_token', 'lease_expires_at', 'pid', 'session_lease_id', 'session_token', 'unit_id'],
   'heartbeat-child': ['boot_id', 'child_lease_id', 'child_token', 'lease_expires_at', 'pid'],
@@ -1260,7 +1263,31 @@ function parsePayload(value: unknown, action: CoordinatorQueryAction | Coordinat
     const unknownFields = Object.keys(value).filter((key) => !PAYLOAD_FIELDS[action].includes(key));
     if (unknownFields.length > 0) fail(label, `contains unknown fields: ${unknownFields.sort().join(', ')}`);
     payload = value;
-  } else payload = object(value, label, PAYLOAD_FIELDS[action], action === 'detach-session' || action === 'heartbeat' ? ['migration_operation_token'] : action === 'drain-mailbox' ? ['cursor'] : action === 'reconciliation-details' ? ['boot_id', 'child_lease_id', 'child_token', 'pid', 'session_lease_id', 'session_token'] : []);
+  } else payload = object(value, label, PAYLOAD_FIELDS[action], action === 'detach-session' || action === 'heartbeat' ? ['migration_operation_token'] : action === 'drain-mailbox' ? ['cursor'] : action === 'reconciliation-details' ? ['boot_id', 'child_lease_id', 'child_token', 'pid', 'session_lease_id', 'session_token'] : action === 'attach-run' ? ['bootstrap_graph'] : action === 'prepare-run-terminal' ? ['intent_attempt', 'prior_terminal_intent_id', 'prior_terminal_intent_sha256', 'terminal_effect_sets'] : []);
+  // D65-A3 additive: current-build prepare-run-terminal may carry the v2
+  // append-only intent fields; a D65 run requires all four together, legacy/cf50
+  // omits all four and creates unchanged v1. The exact strict projection is
+  // validated in the store's terminal-intent-v2 transaction.
+  if (action === 'prepare-run-terminal') {
+    const d65Fields = ['intent_attempt', 'prior_terminal_intent_id', 'prior_terminal_intent_sha256', 'terminal_effect_sets'] as const;
+    const present = d65Fields.filter((field) => payload[field] !== undefined);
+    if (present.length !== 0 && present.length !== d65Fields.length) fail(label, 'D65 prepare-run-terminal requires all of intent_attempt, prior_terminal_intent_id, prior_terminal_intent_sha256, terminal_effect_sets together or none');
+    if (present.length === d65Fields.length) {
+      const intentAttempt = payload['intent_attempt'];
+      if (typeof intentAttempt !== 'number' || !Number.isSafeInteger(intentAttempt) || intentAttempt < 1) fail(label, 'intent_attempt must be a positive safe integer');
+      const priorId = payload['prior_terminal_intent_id'];
+      if (priorId !== null && (typeof priorId !== 'string' || priorId.length === 0 || priorId.length > 192)) fail(label, 'prior_terminal_intent_id must be null or a bounded identifier');
+      const priorSha = payload['prior_terminal_intent_sha256'];
+      if (priorSha !== null && (typeof priorSha !== 'string' || !SHA256.test(priorSha))) fail(label, 'prior_terminal_intent_sha256 must be null or sha256:<64 lowercase hex>');
+      parseD65TerminalEffectSets(payload['terminal_effect_sets'], `${label}.terminal_effect_sets`);
+    }
+  }
+  // D65-A1 additive: current-build attach-run may carry an optional
+  // `bootstrap_graph` object; legacy/cf50 attach-run omits it unchanged. The
+  // exact strict projection is validated in the store's bootstrap transaction.
+  if (action === 'attach-run' && payload['bootstrap_graph'] !== undefined) {
+    parseD65AttachRunBootstrapGraphPayload(payload['bootstrap_graph']);
+  }
   for (const field of PAYLOAD_FIELDS[action]) {
     const entry = payload[field];
     if (optionalPagePayload && entry === undefined) continue;
@@ -1299,6 +1326,20 @@ function parsePayload(value: unknown, action: CoordinatorQueryAction | Coordinat
       if (entry !== null && (typeof entry !== 'string' || entry.length === 0 || entry.length > 1024)) fail(label, 'owner_reason must be null or bounded non-empty text');
     } else if (field === 'lease_expires_at') {
       timestamp(payload, field, label);
+    } else if (field === 'dispatch_authority_context') {
+      parseD65DispatchAuthorityRequestContext(entry);
+    } else if (field === 'program_id' || field === 'workstream_run') {
+      identifier(payload, field, label);
+    } else if (field === 'heartbeat_ref') {
+      repoPath(payload, field, label);
+    } else if (field === 'heartbeat_sha256') {
+      if (typeof entry !== 'string' || !SHA256.test(entry)) fail(label, 'heartbeat_sha256 must use sha256:<64 lowercase hex>');
+    } else if (field === 'acceptance_kind') {
+      oneOf(payload, field, ['catch-up', 'governing'] as const, label);
+    } else if (field === 'expected_prior_sequence') {
+      if (entry !== null && (typeof entry !== 'number' || !Number.isSafeInteger(entry) || entry < 1)) fail(label, 'expected_prior_sequence must be null or a positive safe integer');
+    } else if (field === 'expected_prior_sha256') {
+      if (entry !== null && (typeof entry !== 'string' || !SHA256.test(entry))) fail(label, 'expected_prior_sha256 must be null or sha256:<64 lowercase hex>');
     } else if (field === 'response') {
       oneOf(payload, field, ['release-now', 'deferred'] as const, label);
     } else if (field === 'operation') {
