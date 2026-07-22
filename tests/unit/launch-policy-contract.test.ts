@@ -104,7 +104,7 @@ void describe('D65 program heartbeat contract', () => {
     return {
       schema_version: 'autopilot.program_heartbeat.v1', program_id: 'program-1', sequence: 1, prior_sha256: null,
       issued_at: '2026-07-19T00:00:00.000Z', valid_until: '2026-07-19T00:15:00.000Z', package_commit: OID('a'), package_tree: OID('b'),
-      base_commit: OID('c'), base_tree: OID('d'), rows: [row()], provider_health: [{ provider: 'openai-codex', state: 'healthy', observation_ref: null, observation_sha256: null, cooldown_until: null, probe_workstream_run: null, probe_ref: null, probe_sha256: null, consumption_event_seq: null }],
+      base_commit: OID('c'), base_tree: OID('d'), rows: [row()], provider_health: [{ provider: 'openai-codex', state: 'healthy', observation_ref: 'authority/provider-launch/openai-codex.json', observation_sha256: DIGEST('6'), cooldown_until: null, probe_workstream_run: null, probe_ref: null, probe_sha256: null, consumption_event_seq: null }],
       dispatch_allowed: false, stop_reasons: ['operator-stop'], trust_anchor_ref: '.pi/autopilot-trust/d65/program-1/operator-ed25519.spki', trust_anchor_sha256: DIGEST('0'), signer_key_id: DIGEST('1'), signature: 'sigSIG_-', ...overrides,
     };
   }
@@ -118,6 +118,17 @@ void describe('D65 program heartbeat contract', () => {
     assert.throws(() => parseD65ProgramHeartbeat(heartbeatFixture({ valid_until: '2026-07-19T00:10:00.000Z' })), /valid_until must be exactly issued_at \+ 15 minutes/u);
     assert.throws(() => parseD65ProgramHeartbeat(heartbeatFixture({ dispatch_allowed: true })), /global dispatch_allowed requires empty global stop_reasons/u);
     assert.throws(() => parseD65ProgramHeartbeat(heartbeatFixture({ dispatch_allowed: false, stop_reasons: [] })), /a false global dispatch value requires at least one global reason/u);
+  });
+  void it('enforces exact provider probe nullability for blocked, retry, consumed-healthy, and exhausted states', () => {
+    const base = { provider: 'openai-codex', observation_ref: 'authority/provider.json', observation_sha256: DIGEST('a') };
+    const retry = { ...base, state: 'retry-authorized', cooldown_until: '2026-07-19T00:00:00.000Z', probe_workstream_run: 'run-1', probe_ref: 'authority/subscription-probes/00000000000000000001-probe-1.json', probe_sha256: DIGEST('b'), consumption_event_seq: null };
+    assert.equal(parseD65ProgramHeartbeat(heartbeatFixture({ provider_health: [retry] })).provider_health[0]?.state, 'retry-authorized');
+    const consumed = { ...retry, state: 'healthy', cooldown_until: null, consumption_event_seq: 9 };
+    assert.equal(parseD65ProgramHeartbeat(heartbeatFixture({ provider_health: [consumed] })).provider_health[0]?.consumption_event_seq, 9);
+    assert.throws(() => parseD65ProgramHeartbeat(heartbeatFixture({ provider_health: [{ ...base, state: 'healthy', observation_ref: null, observation_sha256: null, cooldown_until: null, probe_workstream_run: null, probe_ref: null, probe_sha256: null, consumption_event_seq: null }] })), /must cite one exact/u);
+    assert.throws(() => parseD65ProgramHeartbeat(heartbeatFixture({ provider_health: [{ ...retry, probe_sha256: null }] })), /retry-authorized provider must carry cooldown plus one unconsumed probe triple/u);
+    assert.throws(() => parseD65ProgramHeartbeat(heartbeatFixture({ provider_health: [{ ...base, state: 'blocked', cooldown_until: null, probe_workstream_run: null, probe_ref: null, probe_sha256: null, consumption_event_seq: null }] })), /blocked provider must carry cooldown/u);
+    assert.throws(() => parseD65ProgramHeartbeat(heartbeatFixture({ provider_health: [{ ...base, state: 'exhausted', cooldown_until: null, probe_workstream_run: 'run-1', probe_ref: retry.probe_ref, probe_sha256: DIGEST('b'), consumption_event_seq: null }] })), /exhausted provider must have null cooldown\/probe\/consumption tuple/u);
   });
   void it('requires row/provider identity sorting and known stop reasons', () => {
     const two = heartbeatFixture({ rows: [row({ workstream: 'zzz-later', workstream_run: 'run-2' }), row({ workstream: 'aaa-earlier', workstream_run: 'run-3' })] });

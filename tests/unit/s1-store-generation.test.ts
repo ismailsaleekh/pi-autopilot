@@ -68,7 +68,7 @@ void describe('S1 generation-addressed schema-13 store', () => {
       assert.equal(running.store.handshake().payload['package_build'], '1.1.8-cf50');
       const legacyMigrations = running.store.doctor().payload['migrations'];
       assert.equal(Array.isArray(legacyMigrations) && legacyMigrations.every((entry) => record(entry, 'legacy migration')['version'] !== 13), true);
-      const legacyExportPath = join(root, 'legacy-export.json');
+      const legacyExportPath = join(paths.exportsRoot, 'legacy-export.json');
       running.store.exportTo(legacyExportPath);
       const legacyExport = record(json(legacyExportPath), 'legacy export');
       assert.equal(legacyExport['database_schema_version'], 12);

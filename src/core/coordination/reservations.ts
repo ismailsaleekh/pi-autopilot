@@ -4,7 +4,12 @@ import { readFile, readdir } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 import { CoordinatorClient } from './client.ts';
-import { coordinationPathsOverlap, parseCoordinationChangeReservation, parseCoordinationEditLease, parseCoordinationIntegrationConflict, parseCoordinationReservationObligation, parseCoordinationRun, parseCoordinationRunTerminalIntent } from './contracts.ts';
+import { coordinationPathsOverlap, parseCoordinationAuthoritativeArtifact, parseCoordinationChangeReservation, parseCoordinationEditLease, parseCoordinationIntegrationConflict, parseCoordinationReservationObligation, parseCoordinationRun, parseCoordinationRunResource, parseCoordinationRunTerminalIntent } from './contracts.ts';
+import { canonicalJson } from './canonical-json.ts';
+import { loadD65CompleteGraph } from './d65-graph-loader.ts';
+import { canonicalSha256, parseD65CompleteGraph, parseD65RunTerminalIntentV2, type D65RunTerminalIntentV2 } from './d65-semantic-graph.ts';
+import { computeD65ObligationPartition, d65TerminalIntentId } from './d65-terminal-intent.ts';
+import { d65SemanticGraphSequenceFromArtifactId } from './d65-graph-publication.ts';
 import { CoordinationRuntimeError } from './failures.ts';
 import { coordinatorRuntimePaths } from './runtime-paths.ts';
 import { readCoordinatorSessionContext, writeCoordinatorSessionContext, type CoordinatorSessionContext } from './supervisor.ts';
@@ -13,6 +18,7 @@ import { parseAutopilotUnitMerge, type AutopilotUnitMerge } from '../unit-merge.
 import { AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV } from '../names.ts';
 import { gitHead, writeJsonAtomic, type ActiveAutopilotRow, type ProcessEnvLike } from '../parallel-runtime.ts';
 import { gitQueryNulStrings, runGitMutation, runGitQuery } from '../git-process.ts';
+import { assertD65OrdinaryBoundaryFromEnvironment, assertD65RecoveryBoundaryFromEnvironment } from './d65-runtime-dispatch.ts';
 import { executeOwnedWorktreeSaga, inspectOwnedWorktreeSpecPostcondition, WorktreeSagaCompensatedError } from './worktree-saga.ts';
 import { classifyCoordinationIntegrationConflict } from './integration-conflicts.ts';
 import { recordValidationStalenessForReservationIntegration, reservationValidationStalenessPath } from '../validation-staleness.ts';
@@ -48,15 +54,76 @@ function stateRootForActive(active: ActiveAutopilotRow): string {
   return stateRoot;
 }
 
+/** Preserve the frozen v1 runtime façade while validating every v2 response byte. */
+function terminalIntentCompatible(value: unknown): CoordinationRunTerminalIntent {
+  if (typeof value === 'object' && value !== null && !Array.isArray(value) && (value as Readonly<Record<string, unknown>>)['schema_version'] === 'autopilot.run_terminal_intent.v2') {
+    return d65TerminalIntentV1Projection(parseD65RunTerminalIntentV2(value));
+  }
+  return parseCoordinationRunTerminalIntent(value);
+}
+
+function d65TerminalIntentV1Projection(intent: D65RunTerminalIntentV2): CoordinationRunTerminalIntent {
+  return parseCoordinationRunTerminalIntent({
+    schema_version: 'autopilot.run_terminal_intent.v1', terminal_intent_id: intent.terminal_intent_id,
+    repo_id: intent.repo_id, workstream_run: intent.workstream_run, outcome: intent.outcome,
+    state: intent.state, reservation_ids: intent.reservation_ids, prepared_event_seq: intent.prepared_event_seq,
+    terminal_event_seq: intent.terminal_event_seq, version: intent.version,
+  });
+}
+
+function readGitBlob(repoRoot: string, revision: string, path: string): Uint8Array {
+  return runGitQuery({ cwd: repoRoot, descriptor: { kind: 'show-file', revision, path } }).stdout;
+}
+
+function parseJsonBytes(bytes: Uint8Array, label: string): unknown {
+  let text: string;
+  try { text = new TextDecoder('utf-8', { fatal: true }).decode(bytes); }
+  catch (error) { throw new CoordinationRuntimeError('invalid-state', `${label} is not valid UTF-8`, [error instanceof Error ? error.message : String(error)]); }
+  try { return JSON.parse(text) as unknown; }
+  catch (error) { throw new CoordinationRuntimeError('invalid-state', `${label} is not valid JSON`, [error instanceof Error ? error.message : String(error)]); }
+}
+
+function loadAcceptedD65TerminalHistory(status: Readonly<Record<string, unknown>>, repoId: string, workstreamRun: string): readonly D65RunTerminalIntentV2[] {
+  const artifacts = parseArray(status['authoritative_artifacts'], 'status.authoritative_artifacts', parseCoordinationAuthoritativeArtifact);
+  const graphArtifacts = artifacts.filter((artifact) => artifact.document_schema_version === 'autopilot.semantic_graph.v1').sort((left, right) => d65SemanticGraphSequenceFromArtifactId(left.artifact_id) - d65SemanticGraphSequenceFromArtifactId(right.artifact_id));
+  const latest = graphArtifacts[graphArtifacts.length - 1];
+  if (latest === undefined) throw new CoordinationRuntimeError('invalid-state', 'D65 terminal preparation requires an accepted complete graph');
+  const resources = parseArray(status['run_resources'], 'status.run_resources', parseCoordinationRunResource);
+  if (resources.length !== 1 || resources[0]?.repo_id !== repoId || resources[0].workstream_run !== workstreamRun) throw new CoordinationRuntimeError('invalid-state', 'D65 terminal preparation requires exactly one matching run resource');
+  const repositoryRoot = resources[0].main_worktree_path;
+  const rootBytes = readGitBlob(repositoryRoot, latest.git_commit, latest.evidence.ref);
+  const actualRootSha = `sha256:${createHash('sha256').update(rootBytes).digest('hex')}`;
+  if (actualRootSha !== latest.evidence.sha256) throw new CoordinationRuntimeError('invalid-state', 'accepted D65 graph root bytes diverge from the committed artifact digest', [latest.artifact_id, actualRootSha, latest.evidence.sha256]);
+  const graph = parseD65CompleteGraph(parseJsonBytes(rootBytes, 'accepted D65 graph root'));
+  if (graph.repo_id !== repoId || graph.workstream_run !== workstreamRun || d65SemanticGraphSequenceFromArtifactId(latest.artifact_id) !== graph.graph_sequence) throw new CoordinationRuntimeError('invalid-state', 'accepted D65 graph identity differs from terminal preparation scope');
+  const loaded = loadD65CompleteGraph(graph, (ref) => readGitBlob(repositoryRoot, latest.git_commit, ref));
+  const attempts = loaded.coordinatorProjection.terminal_intents.map((intent) => {
+    if (intent.schema_version !== 'autopilot.run_terminal_intent.v2') throw new CoordinationRuntimeError('invalid-state', 'D65 graph terminal history contains a legacy v1 intent');
+    return parseD65RunTerminalIntentV2(intent);
+  });
+  const statusRows = parseArray(status['run_terminal_intents'], 'status.run_terminal_intents', parseCoordinationRunTerminalIntent);
+  if (statusRows.length !== attempts.length) throw new CoordinationRuntimeError('invalid-state', 'accepted D65 graph does not cover the complete current terminal-intent history');
+  for (let index = 0; index < attempts.length; index += 1) {
+    const attempt = attempts[index];
+    const statusRow = statusRows[index];
+    if (attempt === undefined || statusRow === undefined) throw new CoordinationRuntimeError('invalid-state', 'D65 terminal history cardinality changed after exact length comparison');
+    const projected = d65TerminalIntentV1Projection(attempt);
+    if (canonicalJson(projected) !== canonicalJson(statusRow)) throw new CoordinationRuntimeError('invalid-state', 'accepted D65 graph terminal-intent history differs from current coordinator state', [projected.terminal_intent_id]);
+  }
+  return Object.freeze(attempts);
+}
+
 export class ReservationCoordinationClient {
   readonly #client: CoordinatorClient;
   #session: CoordinatorSessionContext;
   readonly #contextPath: string | null;
+  readonly #env: ProcessEnvLike | null;
 
-  constructor(client: CoordinatorClient, session: CoordinatorSessionContext, contextPath: string | null = null) {
+  constructor(client: CoordinatorClient, session: CoordinatorSessionContext, contextPath: string | null = null, env: ProcessEnvLike | null = null) {
     this.#client = client;
     this.#session = session;
     this.#contextPath = contextPath;
+    this.#env = env;
   }
 
   get session(): CoordinatorSessionContext { return this.#session; }
@@ -65,7 +132,8 @@ export class ReservationCoordinationClient {
     const contextPath = env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV];
     if (contextPath === undefined || contextPath.trim().length === 0) throw new CoordinationRuntimeError('unauthorized-client', `${AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV} is required for reservation coordination`);
     const session = await readCoordinatorSessionContext(contextPath);
-    return new ReservationCoordinationClient(new CoordinatorClient({ env: { ...env, AUTOPILOT_STATE_ROOT: session.state_root } }), session, contextPath);
+    const runtimeEnv = { ...env, AUTOPILOT_STATE_ROOT: session.state_root };
+    return new ReservationCoordinationClient(new CoordinatorClient({ env: runtimeEnv }), session, contextPath, runtimeEnv);
   }
 
   async view(): Promise<ReservationCoordinationView> {
@@ -74,7 +142,32 @@ export class ReservationCoordinationClient {
   }
 
   async prepareRunTerminal(outcome: 'closed' | 'aborted'): Promise<CoordinationRunTerminalIntent> {
-    const terminalIntentId = `terminal-${this.#session.workstream_run}-${randomUUID()}`;
+    const status = await this.#client.query('status', this.#session.repo_id, this.#session.workstream_run);
+    const artifacts = parseArray(status.payload['authoritative_artifacts'], 'status.authoritative_artifacts', parseCoordinationAuthoritativeArtifact);
+    const d65 = artifacts.some((artifact) => artifact.artifact_id === `semantic-graph-bootstrap:${this.#session.workstream_run}` && artifact.document_schema_version === 'autopilot.semantic_graph_bootstrap.v1');
+    let terminalIntentId: string;
+    let d65Payload: Readonly<Record<string, unknown>> = {};
+    const runtimeEnv = this.#env;
+    if (d65) {
+      if (runtimeEnv === null) throw new CoordinationRuntimeError('unauthorized-client', 'D65 terminal preparation requires the production environment-backed dispatch authority');
+      const attempts = loadAcceptedD65TerminalHistory(status.payload, this.#session.repo_id, this.#session.workstream_run);
+      const latest = attempts[attempts.length - 1];
+      if (latest !== undefined && latest.state !== 'cancelled') throw new CoordinationRuntimeError('invalid-state', `D65 terminal preparation cannot follow a ${latest.state} terminal intent`);
+      const intentAttempt = (latest?.intent_attempt ?? 0) + 1;
+      terminalIntentId = d65TerminalIntentId(this.#session.workstream_run, intentAttempt);
+      const reservations = parseArray(status.payload['change_reservations'], 'status.change_reservations', parseCoordinationChangeReservation).filter((reservation) => reservation.workstream_run === this.#session.workstream_run && reservation.released_event_seq === null).map((reservation) => reservation.reservation_id).sort();
+      // Doctor owns the repository-wide complete nonterminal obligation view;
+      // run-scoped status alone intentionally omits unrelated rows and therefore
+      // can never be terminal partition authority.
+      const doctor = await this.#client.query('doctor', this.#session.repo_id, this.#session.workstream_run);
+      const obligations = parseArray(doctor.payload['pending_reservation_obligations'], 'doctor.pending_reservation_obligations', parseCoordinationReservationObligation).filter((obligation) => obligation.repo_id === this.#session.repo_id && (obligation.state === 'waiting-for-predecessor' || obligation.state === 'integration-required'));
+      const terminalEffectSets = computeD65ObligationPartition({ workstreamRun: this.#session.workstream_run, outcome, intentReservationIds: reservations, nonterminalObligations: obligations });
+      d65Payload = { intent_attempt: intentAttempt, prior_terminal_intent_id: latest?.terminal_intent_id ?? null, prior_terminal_intent_sha256: latest === undefined ? null : canonicalSha256(latest), terminal_effect_sets: terminalEffectSets };
+    } else terminalIntentId = `terminal-${this.#session.workstream_run}-${randomUUID()}`;
+    if (d65) {
+      if (runtimeEnv === null) throw new CoordinationRuntimeError('unauthorized-client', 'D65 terminal preparation lost its production dispatch authority');
+      await assertD65OrdinaryBoundaryFromEnvironment('ordinary-state-advance', runtimeEnv);
+    }
     const response = await this.#client.mutate('prepare-run-terminal', {
       repoId: this.#session.repo_id,
       workstreamRun: this.#session.workstream_run,
@@ -82,14 +175,22 @@ export class ReservationCoordinationClient {
       fencingGeneration: this.#session.session_generation,
       expectedVersion: this.#session.run_version,
       idempotencyKey: `prepare-run-terminal:${terminalIntentId}`,
-    }, { outcome, terminal_intent_id: terminalIntentId, session_lease_id: this.#session.session_lease_id, session_token: this.#session.session_token });
+    }, { outcome, terminal_intent_id: terminalIntentId, ...d65Payload, session_lease_id: this.#session.session_lease_id, session_token: this.#session.session_token });
     const run = parseCoordinationRun(response.payload['run']);
     this.#session = { ...this.#session, run_version: run.version };
     if (this.#contextPath !== null) await writeCoordinatorSessionContext(this.#contextPath, this.#session);
-    return parseCoordinationRunTerminalIntent(response.payload['run_terminal_intent']);
+    return terminalIntentCompatible(response.payload['run_terminal_intent']);
   }
 
   async cancelRunTerminal(intent: CoordinationRunTerminalIntent, reason: string): Promise<CoordinationRunTerminalIntent> {
+    const runtimeEnv = this.#env;
+    if (intent.terminal_intent_id.startsWith(`terminal-intent:${this.#session.workstream_run}:`)) {
+      if (runtimeEnv === null) throw new CoordinationRuntimeError('unauthorized-client', 'D65 terminal cancellation requires production recovery authority');
+      const ordinalText = intent.terminal_intent_id.slice(intent.terminal_intent_id.lastIndexOf(':') + 1);
+      const ordinal = Number(ordinalText);
+      const cancellable = Number.isSafeInteger(ordinal) && ordinal >= 1 && ordinal <= 3;
+      await assertD65RecoveryBoundaryFromEnvironment('cancel-run-terminal', { attached_session_current: false, policy_trust_current: false, no_pending_publication: false, terminal_prepared_cancellable: cancellable, terminal_after_commit: false, accepted_continuation_reason: null, covered_semantic_reason: null, attach_terminal_recovery: false }, runtimeEnv);
+    }
     const response = await this.#client.mutate('cancel-run-terminal', {
       repoId: this.#session.repo_id,
       workstreamRun: this.#session.workstream_run,
@@ -101,7 +202,7 @@ export class ReservationCoordinationClient {
     const run = parseCoordinationRun(response.payload['run']);
     this.#session = { ...this.#session, run_version: run.version };
     if (this.#contextPath !== null) await writeCoordinatorSessionContext(this.#contextPath, this.#session);
-    return parseCoordinationRunTerminalIntent(response.payload['run_terminal_intent']);
+    return terminalIntentCompatible(response.payload['run_terminal_intent']);
   }
 
   async resolve(input: ReservationResolutionInput): Promise<CoordinationReservationObligation> {

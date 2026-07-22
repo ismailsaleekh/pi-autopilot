@@ -188,8 +188,8 @@ void describe('I3 audited canonical identity fault resolution', () => {
           schema_version: 'autopilot.coordinator_request.v1' as const, protocol_version: '1.6' as const, request_id: requestId, action: 'export' as const, idempotency_key: null,
           repo_id: repoId, workstream_run: run, session_id: null, fencing_generation: null, expected_version: null, payload: { output_path: outputPath },
         });
-        const legacyExportPath = join(root, 'legacy-identity-export.json');
-        const negotiatedExportPath = join(root, 'negotiated-identity-export.json');
+        const legacyExportPath = join(paths.exportsRoot, 'legacy-identity-export.json');
+        const negotiatedExportPath = join(paths.exportsRoot, 'negotiated-identity-export.json');
         assert.equal(reopened.handle(exportRequest('legacy-identity-export', legacyExportPath), 'cf50-legacy').ok, true);
         assert.equal(reopened.handle(exportRequest('negotiated-identity-export', negotiatedExportPath), 'negotiated-s1').ok, true);
         assert.equal((await readFile(legacyExportPath, 'utf8')).includes('identity_resolution'), false, 'anonymous cf50 export must not expose S1 identity-resolution vocabulary');

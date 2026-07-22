@@ -71,13 +71,29 @@ function withD65PublicationLock<T>(mainWorktreePath: string, action: () => T): T
     }
     throw error;
   }
+  let outcome: Readonly<{ value: T }> | null = null;
+  let actionError: unknown = null;
   try {
-    try { writeSync(descriptor, Buffer.from(`${String(process.pid)}\n`, 'utf8'), 0, Buffer.byteLength(`${String(process.pid)}\n`, 'utf8'), null); fsyncSync(descriptor); } catch { /* lock content is advisory; presence is authority */ }
-    return action();
-  } finally {
-    closeSync(descriptor);
-    try { unlinkSync(lockPath); } catch { /* best-effort release; a stale lock fails closed on next acquire */ }
+    const content = Buffer.from(`${String(process.pid)}\n`, 'utf8');
+    let written = 0;
+    while (written < content.byteLength) written += writeSync(descriptor, content, written, content.byteLength - written, null);
+    fsyncSync(descriptor);
+    outcome = Object.freeze({ value: action() });
+  } catch (error) {
+    actionError = error;
   }
+  let releaseError: unknown = null;
+  try { closeSync(descriptor); }
+  catch (error) { releaseError = error; }
+  try { unlinkSync(lockPath); }
+  catch (error) { releaseError = releaseError ?? error; }
+  if (actionError !== null) {
+    if (releaseError !== null) throw new CoordinationRuntimeError('invalid-state', 'graph publication action failed and its package lock could not be released', [actionError instanceof Error ? actionError.message : String(actionError), releaseError instanceof Error ? releaseError.message : String(releaseError), lockPath]);
+    throw actionError;
+  }
+  if (releaseError !== null) throw new CoordinationRuntimeError('invalid-state', 'graph publication package lock could not be released', [releaseError instanceof Error ? releaseError.message : String(releaseError), lockPath]);
+  if (outcome === null) throw new CoordinationRuntimeError('invalid-state', 'graph publication lock action did not complete');
+  return outcome.value;
 }
 
 const STAGE_ORDER: Readonly<Record<D65GraphPublicationStage, number>> = Object.freeze({
@@ -100,13 +116,16 @@ export function readD65GraphPublicationResidue(mainWorktreePath: string): D65Gra
       throw error;
     }
     if (!before.isFile() || before.isSymbolicLink()) throw new CoordinationRuntimeError('unauthorized-client', 'graph publication residue must be a regular non-symbolic file', [path]);
-    if (before.nlink !== 1) throw new CoordinationRuntimeError('unauthorized-client', 'graph publication residue must have link count one', [path]);
+    if (before.nlink !== 1 || (platform() !== 'win32' && (before.mode & 0o777) !== 0o600)) throw new CoordinationRuntimeError('unauthorized-client', 'graph publication residue must have one link and exact mode 0600', [path]);
     descriptor = openSync(path, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
     const opened = fstatSync(descriptor);
     if (!opened.isFile() || opened.size > D65_GRAPH_PUBLICATION_RESIDUE_MAX_BYTES) throw new CoordinationRuntimeError('invalid-request', 'graph publication residue exceeds its 1 MiB bound', [path]);
     if (opened.dev !== before.dev || opened.ino !== before.ino || opened.nlink !== 1) throw new CoordinationRuntimeError('unauthorized-client', 'graph publication residue identity changed during read', [path]);
     const bytes = readFileSync(descriptor);
-    return parseD65GraphPublication(parseJson(bytes, 'graph publication residue'));
+    const parsed = parseD65GraphPublication(parseJson(bytes, 'graph publication residue'));
+    const canonical = new TextEncoder().encode(`${canonicalJson(parsed)}\n`);
+    if (bytes.byteLength !== canonical.byteLength || bytes.some((byte, index) => byte !== canonical[index])) throw new CoordinationRuntimeError('invalid-state', 'graph publication residue bytes are not canonical JSON plus exactly one LF', [path]);
+    return parsed;
   } finally {
     if (descriptor !== null) closeSync(descriptor);
   }
@@ -131,7 +150,8 @@ function writeResidueAtomic(mainWorktreePath: string, residue: D65GraphPublicati
   try {
     renameSync(temporary, path);
   } catch (error) {
-    try { unlinkSync(temporary); } catch { /* best-effort cleanup */ }
+    try { unlinkSync(temporary); }
+    catch (cleanupError) { throw new CoordinationRuntimeError('invalid-state', 'graph publication residue rename failed and its temporary file could not be removed', [error instanceof Error ? error.message : String(error), cleanupError instanceof Error ? cleanupError.message : String(cleanupError), temporary]); }
     throw error;
   }
   // Fsync the parent directory so the rename (name→inode binding) is durable.
@@ -209,7 +229,16 @@ export function cleanupD65GraphPublicationResidue(mainWorktreePath: string): voi
     if (current === null) return;
     if (current.stage !== 'registered') throw new CoordinationRuntimeError('invalid-state', 'graph publication residue cleanup requires the registered stage');
     const path = d65GraphPublicationResiduePath(mainWorktreePath);
-    unlinkSync(path);
+    const before = lstatSync(path);
+    const descriptor = openSync(path, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
+    try {
+      const opened = fstatSync(descriptor);
+      const immediate = lstatSync(path);
+      if (opened.dev !== before.dev || opened.ino !== before.ino || opened.nlink !== 1 || immediate.dev !== opened.dev || immediate.ino !== opened.ino || immediate.nlink !== 1) throw new CoordinationRuntimeError('invalid-state', 'graph publication residue identity changed before descriptor-pinned cleanup', [path]);
+      unlinkSync(path);
+      const unlinked = fstatSync(descriptor);
+      if (unlinked.dev !== opened.dev || unlinked.ino !== opened.ino || unlinked.nlink !== 0) throw new CoordinationRuntimeError('invalid-state', 'graph publication residue cleanup did not unlink the opened inode', [path]);
+    } finally { closeSync(descriptor); }
     fsyncResidueDirectory(mainWorktreePath);
     if (readD65GraphPublicationResidue(mainWorktreePath) !== null) throw new CoordinationRuntimeError('invalid-state', 'graph publication residue persisted after cleanup');
   });

@@ -1,7 +1,8 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { existsSync, lstatSync, realpathSync } from 'node:fs';
 import { platform } from 'node:os';
-import { isAbsolute } from 'node:path';
+import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 export const GIT_QUERY_MAX_OUTPUT_BYTES = 64 * 1024 * 1024;
 export const GIT_MUTATION_DIAGNOSTIC_BYTES = 256 * 1024;
 export const GIT_DEFAULT_QUERY_TIMEOUT_MS = 30_000;
@@ -20,6 +21,7 @@ export const GIT_PIPE_DRAIN_WAIT_MS = 1_000;
 export const GIT_STREAM_TOTAL_DEADLINE_MS = 35_000;
 export const GIT_STREAM_STDERR_RETAIN_PREFIX = 131_072;
 export const GIT_STREAM_STDERR_RETAIN_SUFFIX = 131_072;
+const EMPTY_GIT_PROCESS_ENV = Object.freeze(Object.create(null));
 export class GitProcessDescriptorError extends Error {
     name = 'GitProcessDescriptorError';
     constructor(message) {
@@ -94,6 +96,7 @@ function queryCommand(descriptor) {
         case 'merge-base': return { argv: ['merge-base', atom(descriptor.left, 'left commit'), atom(descriptor.right, 'right commit')], acceptedExitCodes: [0, 1], negativeExitCodes: [1] };
         case 'merge-tree-analysis': return { argv: ['merge-tree', atom(descriptor.base, 'merge base'), atom(descriptor.left, 'left commit'), atom(descriptor.right, 'right commit')], acceptedExitCodes: [0], negativeExitCodes: [] };
         case 'status-porcelain': return { argv: ['status', '--porcelain=v1', '-z', '--untracked-files=all', ...(descriptor.includeIgnored === true ? ['--ignored=traditional', '--ignore-submodules=none'] : [])], acceptedExitCodes: [0], negativeExitCodes: [] };
+        case 'status-porcelain-lines': return { argv: ['status', '--porcelain=v1', '--untracked-files=all'], acceptedExitCodes: [0], negativeExitCodes: [] };
         case 'diff-paths': {
             if (descriptor.filter !== undefined && !/^[ACDMRTUXB*]+$/u.test(descriptor.filter))
                 throw new GitProcessDescriptorError('diff filter is invalid');
@@ -142,6 +145,11 @@ function mutationCommand(descriptor) {
         case 'sparse-checkout-set': return { argv: ['sparse-checkout', 'set', '--no-cone', '--skip-checks', '--stdin'], input: patternsInput(descriptor.patterns) };
         case 'sparse-checkout-add': return { argv: ['sparse-checkout', 'add', '--skip-checks', '--stdin'], input: patternsInput(descriptor.patterns) };
         case 'checkout-force': return { argv: ['checkout', '--force', atom(descriptor.branch, 'branch')], input: null };
+        case 'checkout-paths-from-tree': {
+            if (descriptor.paths.length === 0)
+                throw new GitProcessDescriptorError('tree checkout requires at least one path');
+            return { argv: ['checkout', atom(descriptor.treeish, 'tree checkout revision'), '--', ...descriptor.paths.map((path) => repoPath(path, 'tree checkout path'))], input: null };
+        }
         case 'stage-paths': {
             if (descriptor.paths.length === 0)
                 throw new GitProcessDescriptorError('stage mutation requires at least one path');
@@ -151,6 +159,7 @@ function mutationCommand(descriptor) {
         case 'merge': return { argv: ['merge', descriptor.mode === 'ff-only' ? '--ff-only' : '--no-ff', ...(descriptor.mode === 'no-ff' ? ['--no-edit'] : []), ...(descriptor.message === undefined ? [] : ['-m', atom(descriptor.message, 'merge message', true)]), atom(descriptor.target, 'merge target')], input: null };
         case 'merge-abort': return { argv: ['merge', '--abort'], input: null };
         case 'reset-hard': return { argv: ['reset', '--hard', atom(descriptor.target, 'reset target')], input: null };
+        case 'reset-mixed': return { argv: ['reset', '--mixed', '--quiet', atom(descriptor.target, 'reset target')], input: null };
         case 'update-ref-create': return { argv: ['update-ref', autopilotRef(descriptor.ref), atom(descriptor.target, 'target'), atom(descriptor.expectedOld, 'expected old object')], input: null };
         case 'update-ref-delete': return { argv: ['update-ref', '-d', autopilotRef(descriptor.ref), atom(descriptor.expectedOld, 'expected old object')], input: null };
     }
@@ -175,6 +184,52 @@ function cacheinfoPath(value, label) {
         throw new GitProcessDescriptorError(`${label} must not contain a comma or newline`);
     return path;
 }
+function manifestPathIdentity(value, label) {
+    if (value.length === 0)
+        throw new GitProcessDescriptorError(`${label} must be non-empty`);
+    let segmentStart = 0;
+    for (let index = 0; index <= value.length; index += 1) {
+        const byte = index === value.length ? 0x2f : value[index];
+        if (byte === 0 || byte === 0x5c)
+            throw new GitProcessDescriptorError(`${label} must be NUL-free and use Git slash separators`);
+        if (byte !== 0x2f)
+            continue;
+        const segment = value.subarray(segmentStart, index);
+        if (segment.length === 0 || (segment.length === 1 && segment[0] === 0x2e) || (segment.length === 2 && segment[0] === 0x2e && segment[1] === 0x2e)) {
+            throw new GitProcessDescriptorError(`${label} must not contain empty, dot, or dot-dot segments`);
+        }
+        segmentStart = index + 1;
+    }
+    return Buffer.from(value).toString('hex');
+}
+function manifestIndexInput(entries) {
+    if (entries.length === 0)
+        throw new GitProcessDescriptorError('update-index manifest requires at least one entry');
+    if (entries.length > GIT_STREAM_ENTRY_MAX)
+        throw new GitProcessDescriptorError('update-index manifest exceeds the bounded entry ceiling');
+    const encoder = new TextEncoder();
+    const records = [];
+    const seen = new Set();
+    let total = 0;
+    for (const entry of entries) {
+        const identity = manifestPathIdentity(entry.pathBytes, 'manifest path');
+        if (seen.has(identity))
+            throw new GitProcessDescriptorError(`manifest path is duplicated: ${identity}`);
+        seen.add(identity);
+        const oid = entry.mode === '0'
+            ? (entry.oid === null ? '0'.repeat(40) : (() => { throw new GitProcessDescriptorError('mode 0 manifest deletion requires null oid'); })())
+            : (entry.oid === null ? (() => { throw new GitProcessDescriptorError('non-deletion manifest entry requires an object id'); })() : gitObjectId(entry.oid, 'manifest object id'));
+        const prefix = encoder.encode(`${entry.mode} ${oid}\t`);
+        const record = new Uint8Array(prefix.length + entry.pathBytes.length + 1);
+        record.set(prefix, 0);
+        record.set(entry.pathBytes, prefix.length);
+        records.push(record);
+        total += record.length;
+        if (!Number.isSafeInteger(total) || total > GIT_STREAM_WIRE_MAX_BYTES)
+            throw new GitProcessDescriptorError('update-index manifest exceeds the bounded wire-byte ceiling');
+    }
+    return concatenate(records, total);
+}
 function commitIdentityEnv(identity) {
     const name = atom(identity.name, 'commit identity name', true);
     const email = atom(identity.email, 'commit identity email', true);
@@ -191,9 +246,9 @@ function commitIdentityEnv(identity) {
 function plumbingCommand(descriptor) {
     switch (descriptor.kind) {
         case 'hash-object-write':
-            return { argv: ['hash-object', '-w', '--stdin'], input: descriptor.bytes, env: {}, usesIndex: false };
+            return { argv: ['hash-object', '-w', '--stdin'], input: descriptor.bytes, env: EMPTY_GIT_PROCESS_ENV, usesIndex: false };
         case 'read-tree':
-            return { argv: ['read-tree', gitObjectId(descriptor.tree, 'read-tree tree')], input: null, env: {}, usesIndex: true };
+            return { argv: ['read-tree', gitObjectId(descriptor.tree, 'read-tree tree')], input: null, env: EMPTY_GIT_PROCESS_ENV, usesIndex: true };
         case 'update-index-cacheinfo': {
             if (descriptor.entries.length === 0)
                 throw new GitProcessDescriptorError('update-index requires at least one cacheinfo entry');
@@ -205,13 +260,15 @@ function plumbingCommand(descriptor) {
                 if (seen.has(path))
                     throw new GitProcessDescriptorError(`cacheinfo path is duplicated: ${path}`);
                 seen.add(path);
-                // Mode is fixed 100644 (regular graph blob); the saga never publishes exec/symlink/gitlink modes.
+                // Mode is fixed 100644 because this descriptor is graph-root/shard-only.
                 args.push('--cacheinfo', `100644,${oid},${path}`);
             }
-            return { argv: ['update-index', '--add', ...args], input: null, env: {}, usesIndex: true };
+            return { argv: ['update-index', '--add', ...args], input: null, env: EMPTY_GIT_PROCESS_ENV, usesIndex: true };
         }
+        case 'update-index-manifest':
+            return { argv: ['update-index', '-z', '--index-info'], input: manifestIndexInput(descriptor.entries), env: EMPTY_GIT_PROCESS_ENV, usesIndex: true };
         case 'write-tree':
-            return { argv: ['write-tree'], input: null, env: {}, usesIndex: true };
+            return { argv: ['write-tree'], input: null, env: EMPTY_GIT_PROCESS_ENV, usesIndex: true };
         case 'commit-tree': {
             const tree = gitObjectId(descriptor.tree, 'commit-tree tree');
             if (descriptor.parents.length === 0)
@@ -323,6 +380,25 @@ export class GitPlumbingError extends Error {
  * emit a single 40-hex object id validated before return; read-tree and
  * update-index emit no object and return `oid: null`. Every failure is loud.
  */
+function assertIsolatedIndexPath(cwd, indexFile, descriptor) {
+    absolutePath(indexFile, 'isolated index file');
+    const worktree = realpathSync(cwd);
+    const parent = realpathSync(dirname(indexFile));
+    const isolated = resolve(parent, basename(indexFile));
+    const commonValue = gitQueryText({ cwd: worktree, descriptor: { kind: 'git-common-dir' } }).trim();
+    const common = realpathSync(isAbsolute(commonValue) ? commonValue : resolve(worktree, commonValue));
+    const inside = (root, candidate) => {
+        const rel = relative(root, candidate);
+        return rel.length === 0 || rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel);
+    };
+    if (inside(worktree, isolated) || inside(common, isolated))
+        throw new GitPlumbingError('invalid-descriptor', descriptor, 'isolated index file must be outside the worktree and Git common directory', isolated);
+    if (existsSync(isolated)) {
+        const stat = lstatSync(isolated);
+        if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1)
+            throw new GitPlumbingError('invalid-descriptor', descriptor, 'isolated index file must be a one-link regular non-symbolic file', isolated);
+    }
+}
 export function runGitPlumbing(input) {
     let command;
     try {
@@ -335,7 +411,7 @@ export function runGitPlumbing(input) {
     }
     if (command.usesIndex) {
         try {
-            absolutePath(input.indexFile, 'isolated index file');
+            assertIsolatedIndexPath(input.cwd, input.indexFile, input.descriptor.kind);
         }
         catch (error) {
             if (error instanceof GitProcessDescriptorError)
@@ -500,6 +576,12 @@ export async function runGitMutation(input) {
             resolvePromise({ kind: 'reported', descriptor: input.descriptor.kind, exitCode: code ?? -1, stdout: stdoutBytes, stderr: stderrBytes, diagnostic: boundedDiagnostic(stdoutBytes, stderrBytes) });
         });
     });
+}
+function spawnObservable(value) {
+    const candidate = Reflect.get(value, 'once');
+    if (typeof candidate !== 'function')
+        throw new GitStreamingQueryError('invalid-descriptor', 'spawn child does not expose the required once(event) contract');
+    return { once: (event, listener) => { Reflect.apply(candidate, value, [event, listener]); } };
 }
 export class GitStreamingQueryError extends Error {
     name = 'GitStreamingQueryError';
@@ -797,8 +879,10 @@ export async function runGitStreamingLsTree(input) {
                 if (delimiter < 0)
                     break;
                 const recordBytes = drainPending(delimiter);
-                if (recordBytes.length === 0)
-                    continue;
+                if (recordBytes.length === 0) {
+                    failLoud(new GitStreamingQueryError('invalid-ls-tree-output', 'git ls-tree emitted an empty record'));
+                    return;
+                }
                 try {
                     // A complete NUL-terminated record must itself be within the record
                     // ceiling. The post-flush `pendingBytes` check only bounds an
@@ -940,12 +1024,15 @@ export async function runGitStreamingLsTree(input) {
             });
         }
         catch (error) {
+            // A synchronous spawn throw occurs before any child identity can exist.
+            // Preserve the exact caught value; wrapping it would falsely turn a
+            // pre-spawn caller/runtime failure into Git output or containment state.
             dispose();
-            reject(new GitStreamingQueryError('invalid-ls-tree-output', `git ls-tree spawn threw synchronously: ${errorMessage(error)}`));
+            reject(error);
             return;
         }
-        const handleEvents = childHandle;
-        handleEvents.once('spawn', () => {
+        const spawnEventSource = spawnObservable(childHandle);
+        spawnEventSource.once('spawn', () => {
             spawnEventConfirmed = true;
             pid = childHandle.pid ?? null;
         });

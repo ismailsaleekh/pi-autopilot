@@ -23,14 +23,40 @@ import { proveStructuredAttemptTerminal, type TrustedTerminalAttemptProof } from
 import { classifyCoordinationIntegrationConflict } from './integration-conflicts.ts';
 import { deriveD65BootstrapTransaction, type D65GitBlobObserver } from './d65-bootstrap-transaction.ts';
 import { assertD65AppendOnlyAttempt, assertD65TerminalEffectSetsExact, buildD65PreparedTerminalIntentV2, computeD65ObligationPartition, d65TerminalIntentId } from './d65-terminal-intent.ts';
-import { parseD65RunTerminalIntentV2, parseD65SemanticGraphBootstrap, type D65CompleteGraph, type D65RunTerminalIntentV2 } from './d65-semantic-graph.ts';
-import { parseD65LaunchPolicy } from './d65-launch-policy.ts';
-import { recoveryTransitionAllowed } from './d65-dispatch-predicates.ts';
+import { parseD65CompleteGraph, parseD65RunTerminalIntentV2, parseD65SemanticGraphBootstrap, type D65CompleteGraph, type D65RunTerminalIntentV2 } from './d65-semantic-graph.ts';
+import {
+  applyD65GraphRegistrationBaseline,
+  assertD65CoordinatorProjectionEqual,
+  projectD65ChildLease,
+  projectD65SessionLease,
+  type D65AttemptProjection,
+  type D65CoordinatorProjectionSnapshot,
+} from './d65-coordinator-projection.ts';
+import { computeD65SemanticVersionCounts, d65SemanticEventWorkstreamRuns, isPureD65ChildHeartbeat, isPureD65SessionHeartbeat, type D65AcceptedEventResultJoin } from './d65-semantic-version.ts';
+import {
+  D65_HEARTBEAT_ACCEPTANCE_RESULT_SCHEMA,
+  parseD65HeartbeatAcceptanceResult,
+  parseD65LaunchPolicy,
+  parseD65ProgramHeartbeat,
+  parseD65SubscriptionProbe,
+  type D65HeartbeatAcceptanceResult,
+  type D65LaunchPolicy,
+  type D65ProgramHeartbeat,
+} from './d65-launch-policy.ts';
+import { computeD65SemanticSnapshotSha256 } from './d65-semantic-normalizer.ts';
+import { ordinaryDispatchAllowed, recoveryTransitionAllowed, type D65RecoveryBindings } from './d65-dispatch-predicates.ts';
+import { D65_DISPATCH_AUTHORITY_ENVELOPE_SCHEMA, parseD65DispatchAuthorityEnvelope, parseD65DispatchAuthorityRequestContext, type D65DispatchAuthorityFrame, type D65DispatchAuthorityRequestContext } from './d65-dispatch-authority.ts';
+import { readD65GraphPublicationResidue } from './d65-graph-publication-residue.ts';
+import { parseD65ContinuationEvent, parseD65ParentLoss } from './d65-continuation.ts';
 import { parseD65TrustAnchorSpki, verifyD65Signature } from './d65-trust.ts';
-import { d65SemanticGraphArtifactId, d65SemanticGraphSequenceFromArtifactId, validateD65GraphPublication } from './d65-graph-publication.ts';
-import { assertD65QueueProjectionCounts, assertD65QueueProjectionMembers, D65_QUEUE_KEYS } from './d65-graph-queues.ts';
-import { assertD65QueueMemberValues, d65ProjectionIdentities, loadD65CompleteGraph } from './d65-graph-loader.ts';
-import { parseAutopilotState, type AutopilotState } from '../contracts/index.ts';
+import { d65GraphPathPrefix, d65SemanticGraphArtifactId, d65SemanticGraphSequenceFromArtifactId, validateD65GraphPublication } from './d65-graph-publication.ts';
+import { assertD65QueueProjectionCounts, assertD65QueueProjectionMembers, assertD65UnitTransition, assertD65WorkItemTransition, D65_QUEUE_KEYS } from './d65-graph-queues.ts';
+import { assertD65QueueMemberValues, d65ProjectionIdentities, loadD65CompleteGraph, type D65LoadedGraph } from './d65-graph-loader.ts';
+import { assertD65DiscoveredGraphBodyEqual, discoverD65GraphBody } from './d65-graph-body.ts';
+import { parseD65BootstrapCharter, reconstructD65BootstrapCharter } from './d65-bootstrap-charter.ts';
+import { validateD65FirstCompleteGraph } from './d65-first-complete-graph.ts';
+import type { D65GraphAuthorityReader, D65GraphTreeLeaf } from './d65-graph-authority.ts';
+import { parseAutopilotReceipt, parseAutopilotState, parseAutopilotUnitSpec, type AutopilotState } from '../contracts/index.ts';
 import { assertAutopilotChildTerminalAcceptanceChain, AUTOPILOT_CHILD_TERMINAL_ACCEPTANCE_SCHEMA, parseAutopilotChildTerminalAcceptance } from './terminal-acceptance.ts';
 import { parseRunTerminalSha, parseUnitAttemptTarget, parseUnitFailureEvidenceFacts, parseUnitFailureEvidenceIngress, parseUnitMergeReservationFacts, validateReconciliationEvidenceDocument, validateReservationIntegrationEvidenceDocument, validateReservationValidationArtifactChain, validateReservationValidationEvidenceDocument, type HistoricalUnitFailureEvidenceProvenance } from './terminal-evidence.ts';
 import { AUTOPILOT_COORDINATOR_PROTOCOL_VERSION, COORDINATION_WORKTREE_STATES } from './types.ts';
@@ -53,7 +79,7 @@ export const COORDINATOR_MAX_SEMANTIC_REPLAY_RECORDS = 100_000;
 const COORDINATOR_MAX_SEMANTIC_REPLAY_BYTES = 128 * 1024 * 1024;
 const COORDINATOR_MAX_SEMANTIC_REPLAY_LINE_BYTES = 1024 * 1024;
 const COORDINATOR_SEMANTIC_REPLAY_BATCH_SIZE = 1_000;
-const RUN_OWNED_IDEMPOTENCY_ACTIONS = new Set(['resolve-migration-recovery', 'register-attempt', 'acquire-group', 'acknowledge-grant', 'respond-claim-request', 'cancel-claim-request', 'cancel-acquisition-group', 'supersede-attempt', 'acknowledge-message', 'record-release-evidence', 'resolve-reservation-obligation', 'prepare-run-terminal', 'cancel-run-terminal', 'reconcile-run', 'prepare-operation', 'transition-operation', 'resolve-run-scoped-fault', 'register-authoritative-artifact', 'assign-adjudication', 'claim-adjudication-assignment', 'submit-planning-contradiction']);
+const RUN_OWNED_IDEMPOTENCY_ACTIONS = new Set(['resolve-migration-recovery', 'accept-program-heartbeat', 'register-attempt', 'acquire-group', 'acknowledge-grant', 'respond-claim-request', 'cancel-claim-request', 'cancel-acquisition-group', 'supersede-attempt', 'acknowledge-message', 'record-release-evidence', 'resolve-reservation-obligation', 'prepare-run-terminal', 'cancel-run-terminal', 'reconcile-run', 'prepare-operation', 'transition-operation', 'resolve-run-scoped-fault', 'register-authoritative-artifact', 'assign-adjudication', 'claim-adjudication-assignment', 'submit-planning-contradiction']);
 const TERMINAL_SESSION_ACTIONS = new Set(['resolve-migration-recovery', 'detach-session', 'heartbeat', 'drain-mailbox', 'acknowledge-message', 'record-release-evidence', 'reconcile-run', 'reconciliation-details', 'result-details', 'prepare-operation', 'transition-operation']);
 const MIGRATION_RECOVERY_SESSION_ACTIONS = new Set(['resolve-migration-recovery', 'detach-session', 'heartbeat']);
 const STATUS_SECTIONS = ['repositories', 'runs', 'run_resources', 'session_leases', 'child_leases', 'unit_attempts', 'acquisition_groups', 'observations', 'edit_leases', 'change_reservations', 'reservation_obligations', 'run_terminal_intents', 'claim_requests', 'mailbox_cursors', 'reconciliation_evidence', 'reconciliation_receipts', 'mailbox_deliveries', 'result_receipts', 'worktrees', 'worktree_operations', 'wait_for_edges', 'deadlock_resolutions', 'authoritative_artifacts', 'adjudication_assignments', 'escalations', 'coordination_migrations', 'migration_recovery_work'] as const;
@@ -81,6 +107,16 @@ interface ProjectionScan {
 
 interface IdempotentEffect extends StoreEffect {
   readonly replayed: boolean;
+}
+
+interface D65TerminalFirstEffectBaseline {
+  readonly run: CoordinationRun;
+  readonly intent: D65RunTerminalIntentV2;
+  readonly reservations: readonly CoordinationChangeReservation[];
+  readonly obligations: readonly CoordinationReservationObligation[];
+  readonly leases: readonly CoordinationEditLease[];
+  readonly groups: readonly CoordinationAcquisitionGroup[];
+  readonly forbidden_bytes: string;
 }
 
 interface SqlRow {
@@ -1969,6 +2005,7 @@ export class CoordinatorStore {
   readonly #db: DatabaseSync;
   readonly #clock: StoreClock;
   readonly #stateRoot: string;
+  readonly #exportsRoot: string;
   readonly #databasePath: string;
   readonly #writerGuard: CoordinatorWriterGuard;
   readonly #ownsWriterGuard: boolean;
@@ -1977,6 +2014,9 @@ export class CoordinatorStore {
   #lastStartupReconciliation: CoordinationReconciliationReceipt | null = null;
   #semanticReplayTransactionActive = false;
   readonly #semanticReplayGraphlessRepositories = new Set<string>();
+  readonly #semanticReplayNonD65Runs = new Set<string>();
+  readonly #semanticReplayWithoutCompleteGraph = new Set<string>();
+  readonly #semanticReplayFaultFreeRuns = new Set<string>();
   readonly #projectionScans = new Map<string, ProjectionScan>();
   readonly #onSemanticReplayBoundary: CoordinatorStoreOpenOptions['onSemanticReplayBoundary'];
   readonly #idempotencyLookup: StatementSync;
@@ -1989,10 +2029,11 @@ export class CoordinatorStore {
   readonly #pendingMigrationRecoveryByRun: StatementSync;
   readonly #updateSessionHeartbeat: StatementSync;
 
-  private constructor(db: DatabaseSync, clock: StoreClock, stateRoot: string, databasePath: string, writerGuard: CoordinatorWriterGuard, ownsWriterGuard: boolean, generation: CurrentStoreGeneration, lastBackupPath: string | null, options: CoordinatorStoreOpenOptions) {
+  private constructor(db: DatabaseSync, clock: StoreClock, stateRoot: string, exportsRoot: string, databasePath: string, writerGuard: CoordinatorWriterGuard, ownsWriterGuard: boolean, generation: CurrentStoreGeneration, lastBackupPath: string | null, options: CoordinatorStoreOpenOptions) {
     this.#db = db;
     this.#clock = clock;
     this.#stateRoot = stateRoot;
+    this.#exportsRoot = exportsRoot;
     this.#databasePath = databasePath;
     this.#writerGuard = writerGuard;
     this.#ownsWriterGuard = ownsWriterGuard;
@@ -2076,7 +2117,7 @@ export class CoordinatorStore {
         openedDatabase = null;
         throw error;
       }
-      const store = new CoordinatorStore(db, clock, paths.stateRoot, generation.database_path, writerGuard, ownsWriterGuard, generation, lastBackupPath, options);
+      const store = new CoordinatorStore(db, clock, paths.stateRoot, paths.exportsRoot, generation.database_path, writerGuard, ownsWriterGuard, generation, lastBackupPath, options);
       store.#migrateLegacyReconciliationResults();
       store.#migrateSchema9ReadLeasesToObservations();
       // A migration freeze protects a whole-database rollback boundary. Startup
@@ -2201,15 +2242,26 @@ export class CoordinatorStore {
     } finally {
       this.#semanticReplayTransactionActive = false;
       this.#semanticReplayGraphlessRepositories.clear();
+      this.#semanticReplayNonD65Runs.clear();
+      this.#semanticReplayWithoutCompleteGraph.clear();
+      this.#semanticReplayFaultFreeRuns.clear();
     }
   }
 
   #reduceSemanticReplayRecords(records: readonly CoordinatorSemanticReplayRecord[], trackReplayState: boolean): readonly { readonly committed_event_seq: number; readonly replayed: boolean }[] {
     const results: { readonly committed_event_seq: number; readonly replayed: boolean }[] = [];
     for (const record of records) {
-      if (record.action !== 'heartbeat') this.#semanticReplayGraphlessRepositories.delete(record.repo_id);
       const prior = trackReplayState ? this.#db.prepare('SELECT event_seq FROM events WHERE repo_id=? AND idempotency_key=?').get(record.repo_id, record.idempotency_key) : undefined;
       const response = this.handle(record);
+      if (record.action !== 'heartbeat') {
+        this.#semanticReplayGraphlessRepositories.delete(record.repo_id);
+        if (record.workstream_run !== null) {
+          const key = `${record.repo_id}\0${record.workstream_run}`;
+          this.#semanticReplayNonD65Runs.delete(key);
+          this.#semanticReplayWithoutCompleteGraph.delete(key);
+          this.#semanticReplayFaultFreeRuns.delete(key);
+        }
+      }
       if (!response.ok || response.committed_event_seq === null) throw new CoordinationRuntimeError('invalid-state', 'semantic replay reducer rejected a request', [record.request_id, String(response.error_code), String(response.payload['message'] ?? '')]);
       if (trackReplayState) results.push({ committed_event_seq: response.committed_event_seq, replayed: prior !== undefined });
     }
@@ -2335,11 +2387,17 @@ export class CoordinatorStore {
       transactionOpen = false;
       this.#semanticReplayTransactionActive = false;
       this.#semanticReplayGraphlessRepositories.clear();
+      this.#semanticReplayNonD65Runs.clear();
+      this.#semanticReplayWithoutCompleteGraph.clear();
+      this.#semanticReplayFaultFreeRuns.clear();
       await this.#semanticReplayBoundary('database-completed');
     } catch (error) {
       if (transactionOpen) this.#db.exec('ROLLBACK');
       this.#semanticReplayTransactionActive = false;
       this.#semanticReplayGraphlessRepositories.clear();
+      this.#semanticReplayNonD65Runs.clear();
+      this.#semanticReplayWithoutCompleteGraph.clear();
+      this.#semanticReplayFaultFreeRuns.clear();
       throw error;
     } finally { closeSync(descriptor); }
 
@@ -2607,14 +2665,21 @@ export class CoordinatorStore {
       try {
         const seq = this.#nextEventSequence(repoId);
         const before = sqlInteger(asRow(this.#db.prepare("SELECT COUNT(*) AS count FROM acquisition_groups WHERE repo_id=? AND json_extract(payload_json, '$.state')='grant-ready' AND json_extract(payload_json, '$.offer_expires_at')<=?").get(repoId, now), 'expired offer count'), 'count');
+        const groupsBefore = new Map(this.#db.prepare('SELECT * FROM acquisition_groups WHERE repo_id=? ORDER BY entity_id').all(repoId).map(acquisitionGroupFromRow).map((group) => [group.acquisition_group_id, canonicalJson(group)]));
         if (!this.#expireGrantOffers(repoId, seq)) {
           this.#db.exec('ROLLBACK');
           continue;
         }
         this.#reevaluateWaitingGroups(repoId, seq);
+        const changedGroups = this.#db.prepare('SELECT * FROM acquisition_groups WHERE repo_id=? ORDER BY entity_id').all(repoId).map(acquisitionGroupFromRow).filter((group) => groupsBefore.get(group.acquisition_group_id) !== canonicalJson(group));
+        const affectedWorkstreamRuns = [...new Set(changedGroups.map((group) => group.owner.workstream_run))].sort();
+        if (changedGroups.length === 0 || affectedWorkstreamRuns.length === 0) throw new CoordinationRuntimeError('store-corrupt', 'grant-offer expiry sweep changed no durably owned acquisition group');
         const idempotencyKey = `grant-offer-expiry:${repoId}:${String(seq)}`;
-        const digest = `sha256:${createHash('sha256').update(idempotencyKey, 'utf8').digest('hex')}`;
-        this.#db.prepare('INSERT INTO events(repo_id, event_seq, event_type, entity_type, entity_id, idempotency_key, request_sha256, occurred_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?)').run(repoId, seq, 'grant-offers-expired', 'repository', repoId, idempotencyKey, digest, now);
+        const resultPayload = Object.freeze({ affected_acquisition_group_ids: Object.freeze(changedGroups.map((group) => group.acquisition_group_id).sort()), affected_workstream_runs: Object.freeze(affectedWorkstreamRuns), event_type: 'grant-offers-expired', entity_type: 'repository', entity_id: repoId });
+        if (encodedJsonBytes(resultPayload) > COORDINATOR_MAX_PAGE_ENTITY_BYTES) throw new CoordinationRuntimeError('frame-too-large', 'grant-offer expiry sweep immutable owner result exceeds the bounded entity ceiling');
+        const digest = `sha256:${createHash('sha256').update(`${canonicalJson(resultPayload)}\n`, 'utf8').digest('hex')}`;
+        this.#insertEvent.run(repoId, seq, 'grant-offers-expired', 'repository', repoId, idempotencyKey, digest, now);
+        this.#insertIdempotencyResult.run(repoId, idempotencyKey, digest, seq, canonicalJson(resultPayload));
         this.#db.exec('COMMIT');
         expiredCount += before;
       } catch (error) {
@@ -2735,6 +2800,7 @@ export class CoordinatorStore {
       case 'detach-session': return this.detachSession(request);
       case 'prepare-handoff': return this.prepareHandoff(request);
       case 'heartbeat': return this.heartbeatSession(request);
+      case 'accept-program-heartbeat': return this.acceptProgramHeartbeat(request);
       case 'register-attempt': return this.registerAttempt(request);
       case 'register-child': return this.registerChild(request);
       case 'heartbeat-child': return this.heartbeatChild(request);
@@ -2769,7 +2835,13 @@ export class CoordinatorStore {
   }
 
   statusPage(request: CoordinatorRequestEnvelope): StoreEffect {
-    const complete = request.payload['scan_token'] === undefined ? this.status(request.repo_id, request.workstream_run).payload : null;
+    if (request.payload['dispatch_authority_context'] !== undefined) {
+      if (request.workstream_run === null || request.payload['scan_token'] !== undefined || request.payload['section'] !== undefined || request.payload['cursor'] !== undefined) throw new CoordinationRuntimeError('invalid-request', 'D65 dispatch authority status request must be one unpaginated run-scoped envelope');
+      const context = parseD65DispatchAuthorityRequestContext(request.payload['dispatch_authority_context']);
+      const frame = this.readD65DispatchAuthorityFrame(request.repo_id, request.workstream_run, context);
+      return { committedEventSeq: null, payload: Object.freeze({ schema_version: D65_DISPATCH_AUTHORITY_ENVELOPE_SCHEMA, dispatch_authority_frame: frame }) };
+    }
+    const complete = request.payload['scan_token'] === undefined ? this.#d65NegotiatedQuerySnapshot('status', request.repo_id, request.workstream_run) : null;
     return this.#projectionPage('status', request, complete, STATUS_SECTIONS, null, 'negotiated-s1');
   }
 
@@ -2779,8 +2851,9 @@ export class CoordinatorStore {
   }
 
   doctorPage(request: CoordinatorRequestEnvelope): StoreEffect {
-    const observedAt = request.payload['scan_token'] === undefined ? this.#clock.now().toISOString() : null;
-    const complete = observedAt === null ? null : this.doctor(new Date(observedAt)).payload;
+    const complete = request.payload['scan_token'] === undefined ? this.#d65NegotiatedQuerySnapshot('doctor', request.repo_id, request.workstream_run) : null;
+    const observedAt = complete === null ? null : complete['observed_at'];
+    if (observedAt !== null && typeof observedAt !== 'string') throw new CoordinationRuntimeError('store-corrupt', 'negotiated doctor snapshot omitted its query observed_at');
     return this.#projectionPage('doctor', request, complete, DOCTOR_SECTIONS, observedAt, 'negotiated-s1');
   }
 
@@ -2788,6 +2861,100 @@ export class CoordinatorStore {
     const observedAt = request.payload['scan_token'] === undefined ? this.#clock.now().toISOString() : null;
     const complete = observedAt === null ? null : this.#legacyProjection(this.doctor(new Date(observedAt)).payload, 'incomplete_worktree_operations');
     return this.#projectionPage('doctor', request, complete, DOCTOR_SECTIONS, observedAt, 'cf50-legacy');
+  }
+
+  #d65RepositoryLivenessHistory(repoId: string, coveredEventSeq: number): readonly D65AcceptedEventResultJoin[] {
+    const rows = this.#db.prepare("SELECT e.repo_id,e.event_seq,e.event_type,e.entity_type,e.entity_id,e.idempotency_key,e.request_sha256,r.repo_id AS result_repo_id,r.idempotency_key AS result_idempotency_key,r.request_sha256 AS result_request_sha256,r.committed_event_seq AS result_event_seq,r.payload_json AS result_payload_json FROM events e LEFT JOIN idempotency_results r ON r.repo_id=e.repo_id AND r.idempotency_key=e.idempotency_key WHERE e.repo_id=? AND e.event_seq<=? AND e.event_type IN ('session-heartbeat','child-heartbeat','program-heartbeat-accepted') ORDER BY e.event_seq").all(repoId, coveredEventSeq);
+    return Object.freeze(rows.map((raw) => {
+      const row = asRow(raw, 'D65 repository liveness history');
+      const resultPayload = sqlNullableString(row, 'result_payload_json');
+      const result = resultPayload === null ? null : Object.freeze({ repo_id: sqlString(row, 'result_repo_id'), idempotency_key: sqlString(row, 'result_idempotency_key'), request_sha256: sqlString(row, 'result_request_sha256'), committed_event_seq: sqlInteger(row, 'result_event_seq'), payload: parseJsonObject(resultPayload, 'D65 repository liveness result') });
+      return Object.freeze({ repo_id: sqlString(row, 'repo_id'), event_seq: sqlInteger(row, 'event_seq'), event_type: sqlString(row, 'event_type'), entity_type: sqlString(row, 'entity_type'), entity_id: sqlString(row, 'entity_id'), idempotency_key: sqlString(row, 'idempotency_key'), request_sha256: sqlString(row, 'request_sha256'), result });
+    }));
+  }
+
+  #d65SemanticStatusRows(complete: Readonly<Record<string, unknown>>): Readonly<Record<string, unknown>> {
+    const sessionsValue = complete['session_leases'];
+    const childrenValue = complete['child_leases'];
+    if (!Array.isArray(sessionsValue) || !Array.isArray(childrenValue)) throw new CoordinationRuntimeError('store-corrupt', 'status semantic projection lacks session/child arrays');
+    const countCache = new Map<string, ReturnType<typeof computeD65SemanticVersionCounts>>();
+    const countsFor = (repoId: string): ReturnType<typeof computeD65SemanticVersionCounts> => {
+      const cached = countCache.get(repoId);
+      if (cached !== undefined) return cached;
+      const repository = this.#db.prepare('SELECT event_seq FROM repositories WHERE repo_id=?').get(repoId);
+      if (repository === undefined) throw new CoordinationRuntimeError('store-corrupt', 'semantic status row names a missing repository', [repoId]);
+      const covered = sqlInteger(repository, 'event_seq');
+      const counts = computeD65SemanticVersionCounts(this.#d65RepositoryLivenessHistory(repoId, covered), covered);
+      countCache.set(repoId, counts);
+      return counts;
+    };
+    const sessions = sessionsValue.map((value) => {
+      const session = parseCoordinationSessionLease(value);
+      return projectD65SessionLease(session, countsFor(session.repo_id).sessionPureLeaseEvents.get(session.session_lease_id) ?? 0);
+    });
+    const children = childrenValue.map((value) => {
+      const child = parseCoordinationChildLease(value);
+      return projectD65ChildLease(child, countsFor(child.owner.repo_id).childPureLeaseEvents.get(child.child_lease_id) ?? 0);
+    });
+    return Object.freeze({ ...complete, session_leases: Object.freeze(sessions), child_leases: Object.freeze(children) });
+  }
+
+  #d65SemanticLeaseExpiry(kind: 'session' | 'child', repoId: string, entityId: string): string {
+    const entityType = kind === 'session' ? 'session-lease' : 'child-lease';
+    const rows = this.#db.prepare('SELECT e.*,r.payload_json AS result_payload,r.repo_id AS result_repo_id,r.idempotency_key AS result_key,r.request_sha256 AS result_request,r.committed_event_seq AS result_seq FROM events e LEFT JOIN idempotency_results r ON r.repo_id=e.repo_id AND r.idempotency_key=e.idempotency_key WHERE e.repo_id=? AND e.entity_type=? AND e.entity_id=? ORDER BY e.event_seq DESC').all(repoId, entityType, entityId);
+    for (const raw of rows) {
+      const row = asRow(raw, 'D65 semantic lease event');
+      const payloadText = sqlNullableString(row, 'result_payload');
+      if (payloadText === null) throw new CoordinationRuntimeError('store-corrupt', 'semantic lease event lacks exact result payload', [entityId]);
+      const payload = parseJsonObject(payloadText, 'D65 semantic lease result');
+      const joined: D65AcceptedEventResultJoin = { repo_id: repoId, event_seq: sqlInteger(row, 'event_seq'), event_type: sqlString(row, 'event_type'), entity_type: sqlString(row, 'entity_type'), entity_id: entityId, idempotency_key: sqlString(row, 'idempotency_key'), request_sha256: sqlString(row, 'request_sha256'), result: { repo_id: sqlString(row, 'result_repo_id'), idempotency_key: sqlString(row, 'result_key'), request_sha256: sqlString(row, 'result_request'), committed_event_seq: sqlInteger(row, 'result_seq'), payload } };
+      if (kind === 'session' && joined.event_type === 'session-heartbeat' && isPureD65SessionHeartbeat(joined)) continue;
+      if (kind === 'child' && joined.event_type === 'child-heartbeat' && isPureD65ChildHeartbeat(joined)) continue;
+      const value = payload[kind];
+      if (value === undefined) continue;
+      return kind === 'session' ? parseCoordinationSessionLease(value).lease_expires_at : parseCoordinationChildLease(value).lease_expires_at;
+    }
+    throw new CoordinationRuntimeError('store-corrupt', `D65 ${kind} lease has no semantic creation/status result`, [entityId]);
+  }
+
+  #d65SemanticDoctorRows(complete: Readonly<Record<string, unknown>>, coordinatorTime: string): Readonly<Record<string, unknown>> {
+    const sessions = this.#db.prepare("SELECT * FROM session_leases WHERE status IN ('attached','handoff-pending') ORDER BY repo_id,workstream_run,session_generation").all().map(sessionFromRow).flatMap((session) => {
+      const expiry = this.#d65SemanticLeaseExpiry('session', session.repo_id, session.session_lease_id);
+      return Date.parse(expiry) < Date.parse(coordinatorTime) ? [{ session_lease_id: session.session_lease_id, repo_id: session.repo_id, workstream_run: session.workstream_run, status: session.status, lease_expires_at: expiry, classification: 'heartbeat-expired-recovery-check', write_authority_released: false }] : [];
+    });
+    const children = this.#db.prepare("SELECT * FROM child_leases WHERE status='running' ORDER BY repo_id,workstream_run,child_lease_id").all().map(childFromRow).flatMap((child) => {
+      const expiry = this.#d65SemanticLeaseExpiry('child', child.owner.repo_id, child.child_lease_id);
+      return Date.parse(expiry) < Date.parse(coordinatorTime) ? [{ child_lease_id: child.child_lease_id, repo_id: child.owner.repo_id, workstream_run: child.owner.workstream_run, lease_expires_at: expiry, classification: 'heartbeat-expired-recovery-check', write_authority_released: false }] : [];
+    });
+    return Object.freeze({ ...complete, expired_session_classifications: Object.freeze(sessions), expired_child_classifications: Object.freeze(children) });
+  }
+
+  /** One read transaction; sample coordinator time after BEGIN and before rows. */
+  #d65NegotiatedQuerySnapshot(kind: 'status' | 'doctor', repoId: string, workstreamRun: string | null): Readonly<Record<string, unknown>> {
+    this.#db.exec('BEGIN');
+    try {
+      const coordinatorTime = this.#clock.now().toISOString();
+      const additions = {
+        negotiated_coordinator_identity: this.negotiatedIdentityObservability(),
+        run_scoped_logical_faults: this.negotiatedRunScopedFaults(repoId, workstreamRun),
+        negotiated_worktree_aliases: this.negotiatedWorktreeAliases(repoId, workstreamRun),
+        negotiated_identity_recovery: this.negotiatedIdentityRecovery(repoId, workstreamRun),
+      };
+      const raw = kind === 'status' ? this.status(repoId, workstreamRun).payload : this.doctor(new Date(coordinatorTime)).payload;
+      // Endpoint output retains its complete existing row bytes. Only the digest
+      // input substitutes semantic session/child projections; this avoids a
+      // negotiated payload shape change while making pure lease renewals stable.
+      const semantic = kind === 'status' ? this.#d65SemanticStatusRows(raw) : this.#d65SemanticDoctorRows(raw, coordinatorTime);
+      const accepted = workstreamRun === null ? null : this.#highestAcceptedProgramHeartbeat(repoId, workstreamRun);
+      const semanticBeforeDigest = Object.freeze({ ...semantic, ...additions, coordinator_time: coordinatorTime, accepted_program_heartbeat: accepted, semantic_snapshot_sha256: null });
+      const digest = computeD65SemanticSnapshotSha256(kind, semanticBeforeDigest);
+      const complete = Object.freeze({ ...raw, ...additions, coordinator_time: coordinatorTime, accepted_program_heartbeat: accepted, semantic_snapshot_sha256: digest });
+      this.#db.exec('COMMIT');
+      return complete;
+    } catch (error) {
+      this.#db.exec('ROLLBACK');
+      throw error;
+    }
   }
 
   #legacyProjection(complete: Readonly<Record<string, unknown>>, operationSection: 'worktree_operations' | 'incomplete_worktree_operations'): Readonly<Record<string, unknown>> {
@@ -3313,9 +3480,44 @@ export class CoordinatorStore {
     };
   }
 
-  exportTo(outputPath: string, includeNegotiatedS1Vocabulary = false): StoreEffect {
+  #assertPrivateExportTarget(outputPath: string): { readonly target: string; readonly parent: string } {
+    if (!isAbsolute(outputPath)) throw new CoordinationRuntimeError('invalid-request', 'coordinator export output_path must be absolute');
+    const root = resolve(this.#exportsRoot);
     const target = resolve(outputPath);
-    mkdirSync(dirname(target), { recursive: true, mode: 0o700 });
+    const relativeTarget = relative(root, target);
+    if (relativeTarget.length === 0 || relativeTarget === '..' || relativeTarget.startsWith(`..${sep}`) || isAbsolute(relativeTarget)) throw new CoordinationRuntimeError('invalid-request', 'coordinator export output_path must remain below the private coordinator exports root', [target, root]);
+    const parent = dirname(target);
+    const relativeParent = relative(root, parent);
+    const components = relativeParent.length === 0 ? [] : relativeParent.split(sep);
+    let current = root;
+    for (const component of ['', ...components]) {
+      if (component.length > 0) current = join(current, component);
+      let metadata: ReturnType<typeof lstatSync>;
+      try { metadata = lstatSync(current); }
+      catch (error) { throw new CoordinationRuntimeError('invalid-request', 'coordinator export parent path must already exist below the private exports root', [current, error instanceof Error ? error.message : String(error)]); }
+      if (!metadata.isDirectory() || metadata.isSymbolicLink()) throw new CoordinationRuntimeError('invalid-request', 'coordinator export parent path must contain only real private directories', [current]);
+      assertPrivatePathNoAliases(current);
+      if (platform() !== 'win32') {
+        if ((metadata.mode & 0o777) !== 0o700) throw new CoordinationRuntimeError('invalid-request', 'coordinator export parent directories must be exact mode 0700', [current, `mode=${(metadata.mode & 0o777).toString(8)}`]);
+        const getuid = process.getuid;
+        if (getuid !== undefined && metadata.uid !== getuid()) throw new CoordinationRuntimeError('invalid-request', 'coordinator export parent owner differs from the coordinator process user', [current, `uid=${String(metadata.uid)}`]);
+      }
+    }
+    if (existsSync(target)) {
+      const metadata = lstatSync(target);
+      if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1) throw new CoordinationRuntimeError('invalid-request', 'coordinator export target must be an absent or single-link regular file', [target]);
+      assertPrivatePathNoAliases(target);
+      if (platform() !== 'win32') {
+        if ((metadata.mode & 0o777) !== 0o600) throw new CoordinationRuntimeError('invalid-request', 'existing coordinator export target must be exact mode 0600', [target, `mode=${(metadata.mode & 0o777).toString(8)}`]);
+        const getuid = process.getuid;
+        if (getuid !== undefined && metadata.uid !== getuid()) throw new CoordinationRuntimeError('invalid-request', 'coordinator export target owner differs from the coordinator process user', [target, `uid=${String(metadata.uid)}`]);
+      }
+    }
+    return Object.freeze({ target, parent });
+  }
+
+  exportTo(outputPath: string, includeNegotiatedS1Vocabulary = false): StoreEffect {
+    const { target, parent } = this.#assertPrivateExportTarget(outputPath);
     const tables = [
       ['repositories', 'repo_id'],
       ['runs', 'repo_id, workstream_run'],
@@ -3364,13 +3566,16 @@ export class CoordinatorStore {
     if (!includeNegotiatedS1Vocabulary) {
       tableQueries.set('events', "SELECT * FROM events WHERE NOT(entity_type='worktree-operation' AND entity_id IN (SELECT entity_id FROM worktree_operations WHERE json_extract(payload_json, '$.operation_type')='metadata-reconcile')) AND event_type!='run-scoped-fault-resolved' ORDER BY repo_id,event_seq");
       tableQueries.set('idempotency_results', "SELECT * FROM idempotency_results WHERE COALESCE(json_extract(payload_json, '$.operation.operation_type'),'')!='metadata-reconcile' AND json_type(payload_json, '$.identity_resolution') IS NULL ORDER BY repo_id,idempotency_key");
+    } else {
+      tableQueries.set('worktrees', 'SELECT entity_id,repo_id,workstream_run,canonical_worktree_id,is_current_canonical,payload_json,version FROM worktrees ORDER BY repo_id,workstream_run,entity_id');
+      tableQueries.set('run_scoped_faults', 'SELECT fault_id,invariant_id,repo_id,workstream_run,entity_type,entity_id,fault_code,detail_json,status,created_event_seq,resolved_event_seq,version FROM run_scoped_faults ORDER BY repo_id,workstream_run,fault_id');
     }
     tableQueries.set('schema_migrations', `SELECT version,checksum,applied_at FROM schema_migrations WHERE version<=${String(COORDINATOR_DATABASE_SCHEMA_VERSION)} ORDER BY version`);
     tableQueries.set('evidence_artifacts', 'SELECT entity_id, repo_id, sha256, ref, label, size_bytes, created_event_seq, lower(hex(content)) AS content_hex FROM evidence_artifacts ORDER BY repo_id, created_event_seq, entity_id');
     const keys = ['schema_version', 'database_schema_version', ...tableQueries.keys()].sort((left, right) => left.localeCompare(right));
     const hash = createHash('sha256');
     const temporary = `${target}.tmp-${String(process.pid)}-${randomBytes(8).toString('hex')}`;
-    const descriptor = openSync(temporary, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL, 0o600);
+    const descriptor = openSync(temporary, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | (fsConstants.O_NOFOLLOW ?? 0), 0o600);
     let buffered = '';
     let bufferedBytes = 0;
     const flush = (): void => {
@@ -3421,12 +3626,23 @@ export class CoordinatorStore {
       throw error;
     }
     closeSync(descriptor);
-    if (platform() === 'win32') enforceWindowsPrivateAcl(temporary, false);
-    else chmodSync(temporary, 0o600);
-    renameSync(temporary, target);
-    if (platform() !== 'win32') {
-      const parent = openSync(dirname(target), fsConstants.O_RDONLY);
-      try { fsyncSync(parent); } finally { closeSync(parent); }
+    try {
+      if (platform() === 'win32') enforceWindowsPrivateAcl(temporary, false);
+      else chmodSync(temporary, 0o600);
+      const temporaryMetadata = lstatSync(temporary);
+      if (!temporaryMetadata.isFile() || temporaryMetadata.isSymbolicLink() || temporaryMetadata.nlink !== 1 || (platform() !== 'win32' && (temporaryMetadata.mode & 0o777) !== 0o600)) throw new CoordinationRuntimeError('system-fatal', 'coordinator export temporary file lost its exact private identity', [temporary]);
+      renameSync(temporary, target);
+      this.#assertPrivateExportTarget(target);
+      if (platform() !== 'win32') {
+        const parentDescriptor = openSync(parent, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
+        try {
+          if (!fstatSync(parentDescriptor).isDirectory()) throw new CoordinationRuntimeError('system-fatal', 'coordinator export parent ceased to be a directory before durability sync', [parent]);
+          fsyncSync(parentDescriptor);
+        } finally { closeSync(parentDescriptor); }
+      }
+    } catch (error) {
+      if (existsSync(temporary)) unlinkSync(temporary);
+      throw error;
     }
     return { committedEventSeq: null, payload: { schema_version: 'autopilot.coordinator_export_result.v1', output_path: target, sha256: `sha256:${hash.digest('hex')}` } };
   }
@@ -3503,10 +3719,10 @@ export class CoordinatorStore {
       repoId: request.repo_id,
       workstreamRun,
       attachEventSeq: seq,
-      repository: repository as unknown as Readonly<Record<string, unknown>>,
-      run: run as unknown as Readonly<Record<string, unknown>>,
-      runResource: resource as unknown as Readonly<Record<string, unknown>>,
-      mailboxCursor: mailboxCursor as unknown as Readonly<Record<string, unknown>>,
+      repository: Object.freeze({ ...repository }),
+      run: Object.freeze({ ...run }),
+      runResource: Object.freeze({ ...resource }),
+      mailboxCursor: Object.freeze({ ...mailboxCursor }),
       git,
     });
     // Persist the immutable bootstrap and trust evidence bytes.
@@ -3515,7 +3731,7 @@ export class CoordinatorStore {
     // Register the deterministic bootstrap authoritative artifact row.
     const artifact = derived.bootstrapArtifact;
     this.#db.prepare('INSERT INTO authoritative_artifacts(entity_id, repo_id, source_run, payload_json, version) VALUES(?, ?, ?, ?, ?)').run(String(artifact['artifact_id']), request.repo_id, workstreamRun, canonicalJson(artifact), 1);
-    return { sequence: seq, eventType: 'run-attached', entityType: 'run', entityId: workstreamRun, payload: derived.attachResult as unknown as Readonly<Record<string, unknown>> };
+    return { sequence: seq, eventType: 'run-attached', entityType: 'run', entityId: workstreamRun, payload: Object.freeze({ ...derived.attachResult }) };
   }
 
   #readD65TrackedBlob(canonicalRoot: string, commit: string, path: string): { readonly mode: string; readonly type: 'blob'; readonly oid: string; readonly bytes: Uint8Array } {
@@ -3547,6 +3763,44 @@ export class CoordinatorStore {
         : this.#db.prepare("SELECT handoff_token FROM handoffs WHERE handoff_token=? AND repo_id=? AND workstream_run=? AND status='pending'").get(suppliedHandoffToken, request.repo_id, workstreamRun);
       if (suppliedHandoffToken !== null && pendingHandoff === undefined) throw new CoordinationRuntimeError('fenced-session', 'handoff token is missing, consumed, or belongs to another run');
       const effectiveHandoffToken = pendingHandoff === undefined ? null : sqlString(pendingHandoff, 'handoff_token');
+      let parentLossCandidateSha256: `sha256:${string}` | null = null;
+      if (this.#hasD65CompleteGraph(run.repo_id, run.workstream_run)) {
+        if (effectiveHandoffToken === null) {
+          // The exact-once null-handoff parent-loss attach: transaction-time
+          // no-follow/signature/digest/request equality against the fixed
+          // policy-root candidate. It records the candidate digest, fences the
+          // old row, creates the named next generation, and suppresses baseline
+          // reconciliation; any mismatch rolls back all rows.
+          parentLossCandidateSha256 = this.#verifyD65ParentLossAttach(request, run, nextGeneration, sessionId);
+        } else {
+          const handoff = asRow(this.#db.prepare("SELECT from_session_lease_id FROM handoffs WHERE handoff_token=? AND repo_id=? AND workstream_run=? AND status='pending'").get(effectiveHandoffToken, run.repo_id, run.workstream_run), 'D65 planned handoff');
+          const predecessor = sessionFromRow(asRow(this.#db.prepare('SELECT * FROM session_leases WHERE session_lease_id=?').get(sqlString(handoff, 'from_session_lease_id')), 'D65 planned handoff predecessor'));
+          const context: D65DispatchAuthorityRequestContext = Object.freeze({ expected_version: run.version, session_lease_id: predecessor.session_lease_id, session_id: predecessor.session_id, session_generation: predecessor.session_generation });
+          this.#assertD65RecoveryMutationAllowed(request, run, 'planned-handoff', { attached_session_current: true, policy_trust_current: true, no_pending_publication: true, terminal_prepared_cancellable: false, terminal_after_commit: false, accepted_continuation_reason: null, covered_semantic_reason: null, attach_terminal_recovery: false }, context, true);
+          // Planned turnover is preauthorized by one registered continuation
+          // already included in the accepted graph. The continuation names the
+          // predecessor and the proposed successor lease; every handoff evidence
+          // ref is itself present in that graph. A token row alone is not
+          // semantic successor authority.
+          const proposedLeaseId = payloadString(request.payload, 'session_lease_id');
+          const continuationRows = this.#db.prepare("SELECT * FROM authoritative_artifacts WHERE repo_id=? AND source_run=? AND json_extract(payload_json, '$.document_schema_version')='autopilot.continuation_event.v1' ORDER BY entity_id").all(run.repo_id, run.workstream_run).map(authoritativeArtifactFromRow).map((artifact) => ({ artifact, continuation: parseD65ContinuationEvent(parseJsonObject(new TextDecoder('utf-8', { fatal: true }).decode(this.#loadEvidenceArtifact(run.repo_id, artifact.evidence)), 'planned handoff continuation')) })).filter((entry) => entry.continuation.trigger === 'planned-turnover' && entry.continuation.class === 'handoff-pending' && entry.continuation.session_lease_id === predecessor.session_lease_id && entry.continuation.successor_id === proposedLeaseId);
+          const planned = continuationRows[0];
+          if (continuationRows.length !== 1 || planned === undefined) throw new CoordinationRuntimeError('invalid-state', 'D65 planned handoff requires one accepted successor continuation bound to its durable handoff token row', [predecessor.session_lease_id, proposedLeaseId, `count=${String(continuationRows.length)}`]);
+          const graphHead = this.#d65AcceptedGraphHead(run.repo_id, run.workstream_run);
+          const graph = parseD65CompleteGraph(parseJsonObject(new TextDecoder('utf-8', { fatal: true }).decode(this.#loadEvidenceArtifact(run.repo_id, graphHead.artifact.evidence)), 'planned handoff accepted graph'));
+          const resource = runResourceFromRow(asRow(this.#db.prepare('SELECT * FROM run_resources WHERE repo_id=? AND workstream_run=?').get(run.repo_id, run.workstream_run), 'planned handoff resource'));
+          const loaded = loadD65CompleteGraph(graph, (ref) => this.#readD65GraphShardBlob(resource.main_worktree_path, graphHead.artifact.git_commit, ref));
+          const authorityEntries = Object.values(loaded.authorities).flatMap((collection) => collection.entries);
+          const included = (ref: string, sha256: string, byteCount: number, schema: string | null): boolean => authorityEntries.filter((entry) => entry.ref === ref && entry.sha256 === sha256 && entry.byte_count === byteCount && entry.document_schema_version === schema).length === 1;
+          const plannedBytes = this.#loadEvidenceArtifact(run.repo_id, planned.artifact.evidence);
+          if (!included(planned.artifact.evidence.ref, planned.artifact.evidence.sha256, plannedBytes.byteLength, 'autopilot.continuation_event.v1') || planned.continuation.evidence_refs.some((evidence) => !included(evidence.ref, evidence.sha256, evidence.byte_count, null))) throw new CoordinationRuntimeError('invalid-state', 'D65 planned handoff continuation/evidence is not exactly included in the accepted graph');
+          if (planned.continuation.result_graph_sequence !== graph.graph_sequence) throw new CoordinationRuntimeError('invalid-state', 'D65 planned handoff continuation does not name the accepted result graph sequence', [String(planned.continuation.result_graph_sequence), String(graph.graph_sequence)]);
+          const heartbeatHead = this.#highestAcceptedProgramHeartbeat(run.repo_id, run.workstream_run);
+          if (heartbeatHead === null) throw new CoordinationRuntimeError('invalid-state', 'D65 planned handoff lacks a governing heartbeat');
+          const heartbeat = this.#d65VerifyAcceptedHeartbeatHead(heartbeatHead, this.#d65AcceptedLaunchPolicy(run.repo_id, run.workstream_run), run, this.#clock.now().toISOString());
+          if (!heartbeat.governingCurrent || heartbeat.row.last_handoff_sha256 !== planned.artifact.evidence.sha256) throw new CoordinationRuntimeError('invalid-state', 'D65 planned handoff heartbeat does not bind the accepted continuation digest', [String(heartbeat.row.last_handoff_sha256), planned.artifact.evidence.sha256]);
+        }
+      }
       const seq = this.#nextEventSequence(request.repo_id);
       this.#db.prepare("UPDATE session_leases SET status='fenced', version=version+1 WHERE repo_id=? AND workstream_run=? AND status='attached'").run(request.repo_id, workstreamRun);
       if (effectiveHandoffToken !== null) {
@@ -3561,12 +3815,116 @@ export class CoordinatorStore {
       this.#db.prepare('UPDATE runs SET active_session_generation=?, status=?, version=version+1 WHERE repo_id=? AND workstream_run=?').run(nextGeneration, terminalPreparation === null ? 'active' : 'merging', request.repo_id, workstreamRun);
       const nextRun = this.#requireRun(request.repo_id, workstreamRun);
       const session = sessionFromRow(asRow(this.#db.prepare('SELECT * FROM session_leases WHERE session_lease_id=?').get(payloadString(request.payload, 'session_lease_id')), 'attached session'));
-      const reconciliation = this.#activeRunFaults(request.repo_id, workstreamRun).length === 0
+      const reconciliation = !this.#hasD65CompleteGraph(request.repo_id, workstreamRun) && this.#activeRunFaults(request.repo_id, workstreamRun).length === 0
         ? this.#reconcileOwnedRun(request.repo_id, workstreamRun, seq)
         : this.#freezeReconciliationSummary(this.#emptyReconciliationSummary());
       const reconciliationReceipt = this.#persistReconciliationReceipt(request.repo_id, workstreamRun, request.action, seq, reconciliation);
-      return { sequence: seq, eventType: 'session-attached', entityType: 'session-lease', entityId: session.session_lease_id, payload: { run: nextRun, session, ...this.#reconciliationReceiptPayload(reconciliationReceipt) } };
+      // The parent-loss branch records the exact verified candidate digest in
+      // the immutable session-attached event/result; a planned/legacy attach
+      // carries no candidate field.
+      const attachPayload = parentLossCandidateSha256 === null
+        ? { run: nextRun, session, ...this.#reconciliationReceiptPayload(reconciliationReceipt) }
+        : { run: nextRun, session, parent_loss_candidate_sha256: parentLossCandidateSha256, ...this.#reconciliationReceiptPayload(reconciliationReceipt) };
+      return { sequence: seq, eventType: 'session-attached', entityType: 'session-lease', entityId: session.session_lease_id, payload: attachPayload };
     });
+  }
+
+  /**
+   * The exact-once D65 parent-loss attach verifier (fresh plan §3.1 parent-loss
+   * row; freeze §9.4). Inside the unchanged-request attach-session transaction
+   * it resolves the policy-bound evidence-root realpath, opens ONLY the fixed
+   * candidate with no-follow/one-link/mode-0600 descriptor checks, verifies
+   * SPKI/signature/program/run identity, exact current graph/policy/heartbeat
+   * digests, the lost attached-but-expired row, the proposed request session/
+   * lease/generation/PID/boot identity, one unused budget, and zero pending
+   * handoff. Returns the candidate digest recorded in `session-attached`.
+   * Any mismatch throws and the surrounding transaction rolls back all rows.
+   */
+  #verifyD65ParentLossAttach(request: CoordinatorRequestEnvelope, run: CoordinationRun, nextGeneration: number, sessionId: string): `sha256:${string}` {
+    const invalid = (issue: string, evidence: readonly string[] = []): never => { throw new CoordinationRuntimeError('recovery-required', `parent-loss-attach-invalid: ${issue}`, evidence); };
+    // Zero pending handoff is a precondition (the caller reaches here only with
+    // no pending handoff token, but a pending row for this run still rejects).
+    if (this.#db.prepare("SELECT handoff_token FROM handoffs WHERE repo_id=? AND workstream_run=? AND status='pending' LIMIT 1").get(run.repo_id, run.workstream_run) !== undefined) invalid('parent-loss attach requires zero pending handoff');
+    const acceptedPolicy = this.#d65AcceptedLaunchPolicy(run.repo_id, run.workstream_run);
+    const root = realpathSync(acceptedPolicy.policy.program_evidence_root);
+    if (root !== acceptedPolicy.policy.program_evidence_root) invalid('program evidence root is no longer its canonical real path', [acceptedPolicy.policy.program_evidence_root]);
+    const candidatePath = resolve(root, 'parent-loss', run.workstream_run, 'candidate.json');
+    const relCandidate = relative(root, candidatePath);
+    if (relCandidate.length === 0 || relCandidate === '..' || relCandidate.startsWith(`..${sep}`) || isAbsolute(relCandidate)) invalid('parent-loss candidate path escapes the policy evidence root');
+    const bytes = this.#readD65ExternalPrivateFile(candidatePath, 'D65 parent-loss candidate');
+    const digest = `sha256:${createHash('sha256').update(bytes).digest('hex')}` as `sha256:${string}`;
+    let candidate: ReturnType<typeof parseD65ParentLoss>;
+    try { candidate = parseD65ParentLoss(parseJsonObject(new TextDecoder('utf-8', { fatal: true }).decode(bytes), 'D65 parent-loss candidate')); }
+    catch (error) { return invalid('parent-loss candidate is malformed', [error instanceof Error ? error.message : String(error)]); }
+    // Purpose-domain signature over RFC 8785 bytes of every field except signature.
+    const { signature: _signature, ...unsigned } = candidate;
+    void _signature;
+    if (candidate.trust_anchor_ref !== acceptedPolicy.policy.trust_anchor_ref || candidate.trust_anchor_sha256 !== acceptedPolicy.policy.trust_anchor_sha256 || candidate.signer_key_id !== acceptedPolicy.anchor.sha256) invalid('parent-loss candidate trust tuple does not equal accepted policy authority');
+    if (!verifyD65Signature({ trustAnchor: acceptedPolicy.anchor, purpose: 'parent-loss', message: new TextEncoder().encode(canonicalJson(unsigned)), signature: candidate.signature })) invalid('parent-loss candidate signature is not valid for the accepted trust anchor');
+    if (candidate.program_id !== acceptedPolicy.policy.program_id || candidate.repo_id !== run.repo_id || candidate.workstream_run !== run.workstream_run) invalid('parent-loss candidate program/run identity mismatch');
+    // One unused budget FIRST: repeated/candidate-replay no-handoff loss is
+    // parent-recovery-exhausted regardless of the later predecessor state.
+    const consumed = this.#db.prepare("SELECT r.idempotency_key FROM idempotency_results r JOIN events e ON e.repo_id=r.repo_id AND e.idempotency_key=r.idempotency_key WHERE r.repo_id=? AND e.event_type='session-attached' AND json_extract(r.payload_json, '$.parent_loss_candidate_sha256')=? LIMIT 1").get(run.repo_id, digest) !== undefined;
+    if (consumed) throw new CoordinationRuntimeError('recovery-required', 'parent-recovery-exhausted: parent-loss candidate was already consumed by a prior attach', [digest]);
+    // Exact current graph/policy/heartbeat bytes and identities — digest-only
+    // comparison is insufficient because a signed candidate could otherwise
+    // cite an alternate ref or byte count for the same hash.
+    const graphHead = this.#d65AcceptedGraphHead(run.repo_id, run.workstream_run);
+    const graphBytes = this.#loadEvidenceArtifact(run.repo_id, graphHead.artifact.evidence);
+    if (candidate.last_graph.ref !== graphHead.artifact.evidence.ref || candidate.last_graph.sha256 !== graphHead.sha256 || candidate.last_graph.byte_count !== graphBytes.byteLength) invalid('parent-loss candidate does not name the exact current accepted graph evidence tuple', [candidate.last_graph.ref, graphHead.artifact.evidence.ref, candidate.last_graph.sha256, graphHead.sha256]);
+    const policyBytes = this.#loadEvidenceArtifact(run.repo_id, acceptedPolicy.artifact.evidence);
+    if (candidate.last_policy.ref !== acceptedPolicy.artifact.evidence.ref || candidate.last_policy.sha256 !== acceptedPolicy.artifact.evidence.sha256 || candidate.last_policy.byte_count !== policyBytes.byteLength) invalid('parent-loss candidate does not name the exact accepted launch policy evidence tuple');
+    const head = this.#highestAcceptedProgramHeartbeat(run.repo_id, run.workstream_run);
+    if (head === null) return invalid('parent-loss candidate requires an accepted governing heartbeat');
+    const heartbeatPath = this.#d65ExternalHeartbeatPath(acceptedPolicy.policy, head.heartbeat_ref);
+    const heartbeatBytes = this.#readD65ExternalPrivateFile(heartbeatPath, 'D65 parent-loss governing heartbeat');
+    if (candidate.last_heartbeat.ref !== head.heartbeat_ref || candidate.last_heartbeat.sha256 !== head.heartbeat_sha256 || candidate.last_heartbeat.byte_count !== heartbeatBytes.byteLength) invalid('parent-loss candidate does not name the exact highest accepted heartbeat evidence tuple');
+    // Lost attached-but-expired predecessor row and its signed coordinator
+    // identity. The package identity object is already closed/bounded by the
+    // parent-loss parser; these non-null coordinator fields must equal the sole
+    // residual predecessor rather than remaining caller-selected prose.
+    const attachedRows = this.#db.prepare("SELECT * FROM session_leases WHERE repo_id=? AND workstream_run=? AND status='attached' AND session_generation=? AND attachment_kind='dispatch'").all(run.repo_id, run.workstream_run, run.active_session_generation).map(sessionFromRow);
+    const lost = attachedRows[0];
+    if (attachedRows.length !== 1 || lost === undefined) return invalid('parent-loss attach requires exactly one residual attached predecessor session');
+    const lostIdentity = candidate.lost_coordinator_session_identity;
+    if (lostIdentity['session_id'] !== lost.session_id || lostIdentity['pid'] !== lost.pid || lostIdentity['boot_id'] !== lost.boot_id) invalid('parent-loss candidate lost coordinator identity does not equal the residual predecessor session');
+    const sampledAt = this.#clock.now().toISOString();
+    if (Date.parse(lost.lease_expires_at) >= Date.parse(sampledAt)) invalid('parent-loss predecessor session lease has not expired at coordinator time', [lost.lease_expires_at, sampledAt]);
+    const verifiedHeartbeat = this.#d65VerifyAcceptedHeartbeatHead(head, acceptedPolicy, run, sampledAt);
+    const heartbeatReasons = verifiedHeartbeat.row.stop_reasons;
+    if (!verifiedHeartbeat.governingCurrent || verifiedHeartbeat.heartbeat.stop_reasons.length !== 0 || !heartbeatReasons.includes('parent-recovering') || heartbeatReasons.some((reason) => reason !== 'parent-recovering' && reason !== 'provider-blocked' && reason !== 'provider-exhausted') || heartbeatReasons.filter((reason) => reason === 'provider-blocked' || reason === 'provider-exhausted').length > 1) invalid('parent-loss attach requires the exact current governing parent-recovering heartbeat cell', [...heartbeatReasons]);
+    // The signed status/doctor evidence files are policy-root relative, private,
+    // byte-bound records of successful authenticated query envelopes. Their
+    // semantic digests must still equal this unchanged transaction boundary.
+    const readObservation = (evidence: typeof candidate.status_ref, label: 'status' | 'doctor'): CoordinatorResponseEnvelope => {
+      const observationPath = resolve(root, evidence.ref);
+      const observationRel = relative(root, observationPath);
+      if (observationRel.length === 0 || observationRel === '..' || observationRel.startsWith(`..${sep}`) || isAbsolute(observationRel)) invalid(`${label} evidence ref escapes the policy evidence root`, [evidence.ref]);
+      const observationBytes = this.#readD65ExternalPrivateFile(observationPath, `D65 parent-loss ${label} evidence`);
+      const actual = `sha256:${createHash('sha256').update(observationBytes).digest('hex')}`;
+      if (actual !== evidence.sha256 || observationBytes.byteLength !== evidence.byte_count) invalid(`${label} evidence bytes do not equal the signed parent-loss tuple`, [evidence.ref, evidence.sha256, actual]);
+      let response: CoordinatorResponseEnvelope;
+      try { response = parseCoordinatorResponseEnvelope(parseJsonObject(new TextDecoder('utf-8', { fatal: true }).decode(observationBytes), `D65 parent-loss ${label} evidence`)); }
+      catch (error) { return invalid(`${label} evidence is not a closed coordinator response`, [error instanceof Error ? error.message : String(error)]); }
+      if (!response.ok || response.committed_event_seq !== null || response.error_code !== null || response.retryable) invalid(`${label} evidence is not a successful read-only coordinator response`);
+      return response;
+    };
+    const statusObservation = readObservation(candidate.status_ref, 'status');
+    const doctorObservation = readObservation(candidate.doctor_ref, 'doctor');
+    const statusDigest = this.#d65CurrentSemanticEndpointDigest('status', run.repo_id, run.workstream_run, sampledAt);
+    const doctorDigest = this.#d65CurrentSemanticEndpointDigest('doctor', run.repo_id, run.workstream_run, sampledAt);
+    if (statusObservation.payload['semantic_snapshot_sha256'] !== statusDigest || doctorObservation.payload['semantic_snapshot_sha256'] !== doctorDigest) invalid('parent-loss status/doctor evidence no longer equals current coordinator semantic authority', [String(statusObservation.payload['semantic_snapshot_sha256']), statusDigest, String(doctorObservation.payload['semantic_snapshot_sha256']), doctorDigest]);
+    const statusRuns = statusObservation.payload['runs'];
+    if (!Array.isArray(statusRuns) || statusRuns.length !== 1 || parseCoordinationRun(statusRuns[0]).workstream_run !== run.workstream_run) invalid('parent-loss status evidence does not contain the exact coordinator run');
+    const statusTime = statusObservation.payload['coordinator_time'];
+    const doctorTime = doctorObservation.payload['coordinator_time'];
+    if (typeof statusTime !== 'string' || typeof doctorTime !== 'string' || Date.parse(statusTime) > Date.parse(doctorTime) || Date.parse(doctorTime) - Date.parse(statusTime) > 5_000 || Date.parse(doctorTime) > Date.parse(candidate.observed_at) || Date.parse(candidate.observed_at) > Date.parse(candidate.issued_at) || Date.parse(candidate.issued_at) > Date.parse(sampledAt)) invalid('parent-loss observation/issue times are not an ordered current coordinator sample', [String(statusTime), String(doctorTime), candidate.observed_at, candidate.issued_at, sampledAt]);
+    // Proposed request identity must equal the sealed successor tuple.
+    const proposedLeaseId = payloadString(request.payload, 'session_lease_id');
+    const proposedPid = payloadInteger(request.payload, 'pid');
+    const proposedBootId = payloadString(request.payload, 'boot_id');
+    if (candidate.successor_session_id !== sessionId || candidate.successor_session_lease_id !== proposedLeaseId || candidate.successor_generation !== nextGeneration || candidate.successor_pid !== proposedPid || candidate.successor_boot_id !== proposedBootId) invalid('parent-loss candidate successor identity does not equal the attach request', [candidate.successor_session_id, sessionId, String(candidate.successor_generation), String(nextGeneration)]);
+    return digest;
   }
 
   attachTerminalRecovery(request: CoordinatorRequestEnvelope): IdempotentEffect {
@@ -3579,27 +3937,59 @@ export class CoordinatorStore {
       const intent = runTerminalIntentFromRow(asRow(this.#db.prepare("SELECT * FROM run_terminal_intents WHERE repo_id=? AND workstream_run=? AND json_extract(payload_json, '$.state')='committed' ORDER BY entity_id LIMIT 1").get(request.repo_id, workstreamRun), 'committed terminal recovery intent'));
       if (intent.terminal_intent_id !== payloadString(request.payload, 'terminal_intent_id')) throw new CoordinationRuntimeError('unauthorized-client', 'terminal-cleanup recovery attachment does not match the committed terminal intent');
       if ((run.status === 'closed' ? 'closed' : 'aborted') !== intent.outcome) throw new CoordinationRuntimeError('store-corrupt', 'terminal run status disagrees with its committed terminal intent');
+      const rawIntent = parseJsonObject(sqlString(asRow(this.#db.prepare('SELECT payload_json FROM run_terminal_intents WHERE repo_id=? AND entity_id=?').get(request.repo_id, intent.terminal_intent_id), 'terminal recovery intent schema'), 'payload_json'), 'terminal recovery intent schema');
+      if (rawIntent['schema_version'] !== 'autopilot.run_terminal_intent.v2') return this.#applyLegacyTerminalRecoveryAttachment(request, run, intent, sessionId);
+      this.#assertD65TerminalTailPrefix(run);
+      this.#assertD65RecoveryMutationAllowed(request, run, 'terminal-tail', { attached_session_current: false, policy_trust_current: true, no_pending_publication: true, terminal_prepared_cancellable: false, terminal_after_commit: true, accepted_continuation_reason: null, covered_semantic_reason: null, attach_terminal_recovery: true });
       const mainRows = this.#db.prepare("SELECT * FROM worktrees WHERE repo_id=? AND workstream_run=? AND kind='main' AND unit_id='main' AND is_current_canonical=1").all(request.repo_id, workstreamRun).map(canonicalWorktreeFromRow);
-      if (mainRows.length !== 1 || mainRows[0] === undefined) throw new CoordinationRuntimeError('store-corrupt', 'terminal-cleanup recovery requires exactly one durable main worktree');
-      if (mainRows[0].state === 'removed') throw new CoordinationRuntimeError('invalid-state', 'terminal-cleanup recovery is already complete');
+      if (mainRows.length !== 1 || mainRows[0] === undefined || mainRows[0].state !== 'removed') throw new CoordinationRuntimeError('invalid-state', 'D65 terminal recovery is admitted only after exact main-worktree removal');
+      const predecessorRows = this.#db.prepare("SELECT * FROM session_leases WHERE repo_id=? AND workstream_run=? AND status IN ('attached','handoff-pending') ORDER BY session_generation").all(request.repo_id, workstreamRun);
+      if (predecessorRows.length !== 1 || predecessorRows[0] === undefined) throw new CoordinationRuntimeError('invalid-state', 'D65 terminal recovery requires exactly one residual attached predecessor session');
+      const predecessor = sessionFromRow(predecessorRows[0]);
+      const sampledAt = this.#clock.now().toISOString();
+      if (predecessor.status !== 'attached' || Date.parse(predecessor.lease_expires_at) >= Date.parse(sampledAt)) throw new CoordinationRuntimeError('invalid-state', 'D65 terminal recovery predecessor must be attached and expired at coordinator time');
+      const residualCount = sqlInteger(asRow(this.#db.prepare("SELECT (SELECT COUNT(*) FROM child_leases WHERE repo_id=? AND workstream_run=? AND status IN ('preflight','running','recovery-required')) + (SELECT COUNT(*) FROM edit_leases WHERE repo_id=? AND workstream_run=?) + (SELECT COUNT(*) FROM change_reservations WHERE repo_id=? AND workstream_run=? AND json_extract(payload_json, '$.released_event_seq') IS NULL) + (SELECT COUNT(*) FROM worktree_operations WHERE repo_id=? AND workstream_run=? AND json_extract(payload_json, '$.stage') NOT IN ('committed','compensated','failed')) AS count").get(request.repo_id, workstreamRun, request.repo_id, workstreamRun, request.repo_id, workstreamRun, request.repo_id, workstreamRun), 'terminal recovery residual count'), 'count');
+      if (residualCount !== 0) throw new CoordinationRuntimeError('invalid-state', 'D65 terminal recovery found authority beyond the sole expired predecessor session', [`count=${String(residualCount)}`]);
       const nextGeneration = run.active_session_generation + 1;
       if (request.fencing_generation !== nextGeneration) throw new CoordinationRuntimeError('stale-version', `next terminal recovery generation must be ${String(nextGeneration)}`);
-      const seq = this.#nextEventSequence(request.repo_id);
-      this.#db.prepare("UPDATE session_leases SET status='fenced', version=version+1 WHERE repo_id=? AND workstream_run=? AND status IN ('attached','handoff-pending')").run(request.repo_id, workstreamRun);
+      const attachSeq = this.#nextEventSequence(request.repo_id);
+      this.#db.prepare("UPDATE session_leases SET status='fenced', version=version+1 WHERE session_lease_id=?").run(predecessor.session_lease_id);
+      const fencedPredecessor = sessionFromRow(asRow(this.#db.prepare('SELECT * FROM session_leases WHERE session_lease_id=?').get(predecessor.session_lease_id), 'fenced terminal recovery predecessor'));
+      if (fencedPredecessor.status !== 'fenced' || fencedPredecessor.version !== predecessor.version + 1) throw new CoordinationRuntimeError('store-corrupt', 'D65 terminal recovery did not exactly fence its expired predecessor');
       const sessionTokenSha256 = createHash('sha256').update(payloadString(request.payload, 'session_token'), 'utf8').digest('hex');
-      this.#db.prepare("INSERT INTO session_leases(session_lease_id, repo_id, workstream_run, session_id, session_generation, pid, boot_id, session_token_sha256, lease_expires_at, status, attached_event_seq, version, attachment_kind) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, 'attached', ?, 1, 'terminal-recovery')").run(
-        payloadString(request.payload, 'session_lease_id'), request.repo_id, workstreamRun, sessionId, nextGeneration,
-        payloadInteger(request.payload, 'pid'), payloadString(request.payload, 'boot_id'), sessionTokenSha256, payloadString(request.payload, 'lease_expires_at'), seq,
-      );
+      this.#db.prepare("INSERT INTO session_leases(session_lease_id, repo_id, workstream_run, session_id, session_generation, pid, boot_id, session_token_sha256, lease_expires_at, status, attached_event_seq, version, attachment_kind) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, 'attached', ?, 1, 'terminal-recovery')").run(payloadString(request.payload, 'session_lease_id'), request.repo_id, workstreamRun, sessionId, nextGeneration, payloadInteger(request.payload, 'pid'), payloadString(request.payload, 'boot_id'), sessionTokenSha256, payloadString(request.payload, 'lease_expires_at'), attachSeq);
       this.#db.prepare('UPDATE runs SET active_session_generation=?, version=version+1 WHERE repo_id=? AND workstream_run=?').run(nextGeneration, request.repo_id, workstreamRun);
       const nextRun = this.#requireRun(request.repo_id, workstreamRun);
-      const session = sessionFromRow(asRow(this.#db.prepare('SELECT * FROM session_leases WHERE session_lease_id=?').get(payloadString(request.payload, 'session_lease_id')), 'attached terminal recovery session'));
-      const reconciliation = this.#activeRunFaults(request.repo_id, workstreamRun).length === 0
-        ? this.#reconcileOwnedRun(request.repo_id, workstreamRun, seq)
-        : this.#freezeReconciliationSummary(this.#emptyReconciliationSummary());
-      const reconciliationReceipt = this.#persistReconciliationReceipt(request.repo_id, workstreamRun, request.action, seq, reconciliation);
-      return { sequence: seq, eventType: 'terminal-cleanup-recovery-attached', entityType: 'session-lease', entityId: session.session_lease_id, payload: { run: nextRun, session, ...this.#reconciliationReceiptPayload(reconciliationReceipt), terminal_intent: intent } };
+      const attached = sessionFromRow(asRow(this.#db.prepare('SELECT * FROM session_leases WHERE session_lease_id=?').get(payloadString(request.payload, 'session_lease_id')), 'attached terminal recovery session'));
+      const digest = requestDigest(request);
+      const internalKey = `terminal-recovery-attach:${createHash('sha256').update(String(request.idempotency_key), 'utf8').digest('hex')}`;
+      const attachedPayload = this.#commitDescription(attachSeq, 'terminal-cleanup-recovery-attached', 'session-lease', attached.session_lease_id, { run: nextRun, session: attached, predecessor_session: fencedPredecessor, terminal_intent: intent }).payload;
+      this.#insertEvent.run(request.repo_id, attachSeq, 'terminal-cleanup-recovery-attached', 'session-lease', attached.session_lease_id, internalKey, digest, sampledAt);
+      this.#insertIdempotencyResult.run(request.repo_id, internalKey, digest, attachSeq, canonicalJson(attachedPayload));
+      const detachSeq = this.#nextEventSequence(request.repo_id);
+      this.#db.prepare("UPDATE session_leases SET status='detached', version=version+1 WHERE session_lease_id=?").run(attached.session_lease_id);
+      const detached = sessionFromRow(asRow(this.#db.prepare('SELECT * FROM session_leases WHERE session_lease_id=?').get(attached.session_lease_id), 'detached terminal recovery session'));
+      return { sequence: detachSeq, eventType: 'session-detached', entityType: 'session-lease', entityId: detached.session_lease_id, payload: { run: nextRun, session: detached, terminal_intent: intent, reason: 'terminal-recovery-immediate-detach' }, occurredAt: sampledAt, suppressWaitGraphMaintenance: true };
     });
+  }
+
+  #applyLegacyTerminalRecoveryAttachment(request: CoordinatorRequestEnvelope, run: CoordinationRun, intent: CoordinationRunTerminalIntent, sessionId: string): { readonly sequence: number; readonly eventType: string; readonly entityType: string; readonly entityId: string; readonly payload: Readonly<Record<string, unknown>> } {
+    const workstreamRun = run.workstream_run;
+    const mainRows = this.#db.prepare("SELECT * FROM worktrees WHERE repo_id=? AND workstream_run=? AND kind='main' AND unit_id='main' AND is_current_canonical=1").all(request.repo_id, workstreamRun).map(canonicalWorktreeFromRow);
+    if (mainRows.length !== 1 || mainRows[0] === undefined) throw new CoordinationRuntimeError('store-corrupt', 'terminal-cleanup recovery requires exactly one durable main worktree');
+    if (mainRows[0].state === 'removed') throw new CoordinationRuntimeError('invalid-state', 'terminal-cleanup recovery is already complete');
+    const nextGeneration = run.active_session_generation + 1;
+    if (request.fencing_generation !== nextGeneration) throw new CoordinationRuntimeError('stale-version', `next terminal recovery generation must be ${String(nextGeneration)}`);
+    const seq = this.#nextEventSequence(request.repo_id);
+    this.#db.prepare("UPDATE session_leases SET status='fenced', version=version+1 WHERE repo_id=? AND workstream_run=? AND status IN ('attached','handoff-pending')").run(request.repo_id, workstreamRun);
+    const sessionTokenSha256 = createHash('sha256').update(payloadString(request.payload, 'session_token'), 'utf8').digest('hex');
+    this.#db.prepare("INSERT INTO session_leases(session_lease_id, repo_id, workstream_run, session_id, session_generation, pid, boot_id, session_token_sha256, lease_expires_at, status, attached_event_seq, version, attachment_kind) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, 'attached', ?, 1, 'terminal-recovery')").run(payloadString(request.payload, 'session_lease_id'), request.repo_id, workstreamRun, sessionId, nextGeneration, payloadInteger(request.payload, 'pid'), payloadString(request.payload, 'boot_id'), sessionTokenSha256, payloadString(request.payload, 'lease_expires_at'), seq);
+    this.#db.prepare('UPDATE runs SET active_session_generation=?, version=version+1 WHERE repo_id=? AND workstream_run=?').run(nextGeneration, request.repo_id, workstreamRun);
+    const nextRun = this.#requireRun(request.repo_id, workstreamRun);
+    const session = sessionFromRow(asRow(this.#db.prepare('SELECT * FROM session_leases WHERE session_lease_id=?').get(payloadString(request.payload, 'session_lease_id')), 'attached terminal recovery session'));
+    const reconciliation = this.#activeRunFaults(request.repo_id, workstreamRun).length === 0 ? this.#reconcileOwnedRun(request.repo_id, workstreamRun, seq) : this.#freezeReconciliationSummary(this.#emptyReconciliationSummary());
+    const receipt = this.#persistReconciliationReceipt(request.repo_id, workstreamRun, request.action, seq, reconciliation);
+    return { sequence: seq, eventType: 'terminal-cleanup-recovery-attached', entityType: 'session-lease', entityId: session.session_lease_id, payload: { run: nextRun, session, ...this.#reconciliationReceiptPayload(receipt), terminal_intent: intent } };
   }
 
   attachMigrationRecovery(request: CoordinatorRequestEnvelope): IdempotentEffect {
@@ -3608,6 +3998,7 @@ export class CoordinatorStore {
       const sessionId = this.#sessionId(request);
       const run = this.#requireRun(request.repo_id, workstreamRun);
       this.#assertVersion(run.version, request.expected_version, 'migration recovery run');
+      if (this.#isD65Run(run.repo_id, run.workstream_run)) throw new CoordinationRuntimeError('invalid-state', 'D65 complete-mode has no migration-recovery attachment cell');
       this.#requireCoordinatorEditAuthority(run, 'migration recovery attachment');
       const recoveryId = payloadString(request.payload, 'recovery_id');
       const exactPending = this.#db.prepare("SELECT entity_id FROM migration_recovery_work WHERE entity_id=? AND repo_id=? AND workstream_run=? AND status='pending'").get(recoveryId, request.repo_id, workstreamRun);
@@ -3640,6 +4031,7 @@ export class CoordinatorStore {
       if (work.status !== 'pending') throw new CoordinationRuntimeError('invalid-state', 'migration recovery work is already terminal; use the original idempotency key to replay its result', [recoveryId]);
       if (work.recovery_type !== 'ambiguous-live-claim') throw new CoordinationRuntimeError('recovery-required', `recovery type ${work.recovery_type} has no safe authority mutation`, [recoveryId]);
       const run = this.#requireRun(request.repo_id, work.workstream_run);
+      if (this.#isD65Run(run.repo_id, run.workstream_run)) throw new CoordinationRuntimeError('invalid-state', 'D65 complete-mode has no migration-recovery resolution cell');
       const claim = this.#migrationRecoveryClaim(work);
       const leases = this.#db.prepare('SELECT * FROM edit_leases WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(request.repo_id, work.workstream_run).map(editLeaseFromRow).filter((lease) => lease.edit_lease_id === claim.editLeaseId && lease.owner.unit_id === claim.unitId && lease.owner.attempt === claim.attempt && lease.path === claim.path && lease.mode === claim.mode);
       if (leases.length !== 1 || leases[0] === undefined) throw new CoordinationRuntimeError('store-corrupt', 'pending migration recovery no longer has exactly one matching imported authority lease', [recoveryId, claim.editLeaseId]);
@@ -3687,7 +4079,15 @@ export class CoordinatorStore {
   }
 
   detachSession(request: CoordinatorRequestEnvelope): IdempotentEffect {
-    return this.#sessionMutation(request, 'session-detached', (session) => {
+    return this.#sessionMutation(request, 'session-detached', (session, seq) => {
+      const run = this.#requireRun(request.repo_id, session.workstream_run);
+      if (this.#isD65Run(run.repo_id, run.workstream_run) && (run.status === 'closed' || run.status === 'aborted')) {
+        this.#assertD65TerminalTailPrefix(run, seq);
+        this.#assertD65RecoveryMutationAllowed(request, run, 'terminal-tail', { attached_session_current: true, policy_trust_current: true, no_pending_publication: true, terminal_prepared_cancellable: false, terminal_after_commit: true, accepted_continuation_reason: null, covered_semantic_reason: null, attach_terminal_recovery: false });
+        this.#assertD65TerminalTailFinalBeforeDetach(run, session.session_lease_id);
+      } else if (this.#hasD65CompleteGraph(run.repo_id, run.workstream_run)) {
+        this.#assertD65OrdinaryMutationAllowed(request, run, 'detach-session');
+      }
       this.#db.prepare("UPDATE session_leases SET status='detached', version=version+1 WHERE session_lease_id=?").run(session.session_lease_id);
       return { entityId: session.session_lease_id, payload: { session: sessionFromRow(asRow(this.#db.prepare('SELECT * FROM session_leases WHERE session_lease_id=?').get(session.session_lease_id), 'detached session')), reason: payloadString(request.payload, 'reason') } };
     });
@@ -3695,6 +4095,8 @@ export class CoordinatorStore {
 
   prepareHandoff(request: CoordinatorRequestEnvelope): IdempotentEffect {
     return this.#sessionMutation(request, 'session-handoff-prepared', (session, seq) => {
+      const run = this.#requireRun(request.repo_id, session.workstream_run);
+      if (this.#hasD65CompleteGraph(run.repo_id, run.workstream_run)) this.#assertD65OrdinaryMutationAllowed(request, run, 'prepare-handoff');
       const token = payloadString(request.payload, 'handoff_token');
       this.#db.prepare("UPDATE session_leases SET status='handoff-pending', version=version+1 WHERE session_lease_id=?").run(session.session_lease_id);
       this.#db.prepare("INSERT INTO handoffs(handoff_token, repo_id, workstream_run, from_session_lease_id, status, created_event_seq, consumed_event_seq) VALUES(?, ?, ?, ?, 'pending', ?, NULL)").run(token, request.repo_id, this.#workstreamRun(request), session.session_lease_id, seq);
@@ -3704,9 +4106,15 @@ export class CoordinatorStore {
 
   heartbeatSession(request: CoordinatorRequestEnvelope): IdempotentEffect {
     return this.#sessionMutation(request, 'session-heartbeat', (session, seq) => {
+      const run = this.#requireRun(request.repo_id, session.workstream_run);
+      if (this.#isD65Run(run.repo_id, run.workstream_run) && (run.status === 'closed' || run.status === 'aborted')) throw new CoordinationRuntimeError('invalid-state', 'D65 terminal tail forbids a session heartbeat after its first terminal effect');
       this.#updateSessionHeartbeat.run(payloadString(request.payload, 'lease_expires_at'), session.session_lease_id);
-      const scopedFaultActive = this.#db.prepare("SELECT fault_id FROM run_scoped_faults WHERE repo_id=? AND workstream_run=? AND status='active' LIMIT 1").get(request.repo_id, session.workstream_run) !== undefined;
-      const reconciliation = !scopedFaultActive && this.#repositoryHasCoordinationGraph(request.repo_id)
+      const runKey = `${request.repo_id}\0${session.workstream_run}`;
+      const faultFreeCached = this.#semanticReplayTransactionActive && this.#semanticReplayFaultFreeRuns.has(runKey);
+      const scopedFaultActive = !faultFreeCached && this.#db.prepare("SELECT fault_id FROM run_scoped_faults WHERE repo_id=? AND workstream_run=? AND status='active' LIMIT 1").get(request.repo_id, session.workstream_run) !== undefined;
+      if (!scopedFaultActive && this.#semanticReplayTransactionActive) this.#semanticReplayFaultFreeRuns.add(runKey);
+      const d65Complete = this.#hasD65CompleteGraph(request.repo_id, session.workstream_run);
+      const reconciliation = !d65Complete && !scopedFaultActive && this.#repositoryHasCoordinationGraph(request.repo_id)
         ? this.#reconcileOwnedRun(request.repo_id, session.workstream_run, seq)
         : this.#freezeReconciliationSummary(this.#emptyReconciliationSummary());
       const reconciliationReceipt = this.#persistReconciliationReceipt(request.repo_id, session.workstream_run, request.action, seq, reconciliation);
@@ -3715,11 +4123,181 @@ export class CoordinatorStore {
     });
   }
 
+  /**
+   * The sole D65 API-12 mutation. It authenticates one external signed program
+   * heartbeat and appends only its normalized-liveness event/result; no run,
+   * lease, row, worktree, product, model, or ordinary-dispatch state mutates.
+   */
+  acceptProgramHeartbeat(request: CoordinatorRequestEnvelope): IdempotentEffect {
+    return this.#mutation(request, () => {
+      const session = this.#requireCurrentSession(request);
+      if (session.attachment_kind !== 'dispatch') throw new CoordinationRuntimeError('unauthorized-client', 'accept-program-heartbeat requires the exact attached dispatch session');
+      const run = this.#requireRun(request.repo_id, this.#workstreamRun(request));
+      this.#assertVersion(run.version, request.expected_version, 'run');
+      if (payloadString(request.payload, 'workstream_run') !== run.workstream_run) throw new CoordinationRuntimeError('unauthorized-client', 'heartbeat payload workstream_run does not equal its envelope run');
+      const acceptedPolicy = this.#d65AcceptedLaunchPolicy(run.repo_id, run.workstream_run);
+      if (payloadString(request.payload, 'program_id') !== acceptedPolicy.policy.program_id) throw new CoordinationRuntimeError('unauthorized-client', 'heartbeat payload program_id does not equal the accepted launch policy');
+
+      // One coordinator CLOCK_REALTIME sample, after transaction/session/version
+      // authority is established and before any candidate/status rows are read.
+      const coordinatorTime = this.#clock.now().toISOString();
+      const coordinatorMs = Date.parse(coordinatorTime);
+      const heartbeatRef = payloadString(request.payload, 'heartbeat_ref');
+      const candidatePath = this.#d65ExternalHeartbeatPath(acceptedPolicy.policy, heartbeatRef);
+      const bytes = this.#readD65ExternalPrivateFile(candidatePath, 'D65 program heartbeat');
+      const actualDigest = `sha256:${createHash('sha256').update(bytes).digest('hex')}` as `sha256:${string}`;
+      const requestedDigest = payloadString(request.payload, 'heartbeat_sha256') as `sha256:${string}`;
+      if (actualDigest !== requestedDigest) throw new CoordinationRuntimeError('invalid-request', 'program heartbeat external bytes do not match heartbeat_sha256', [requestedDigest, actualDigest]);
+      let heartbeat: D65ProgramHeartbeat;
+      try { heartbeat = parseD65ProgramHeartbeat(parseJsonObject(new TextDecoder('utf-8', { fatal: true }).decode(bytes), 'D65 program heartbeat')); }
+      catch (error) { throw new CoordinationRuntimeError('invalid-request', 'program heartbeat bytes are malformed', [error instanceof Error ? error.message : String(error)]); }
+      const expectedRef = `program-heartbeats/${String(heartbeat.sequence).padStart(20, '0')}.json`;
+      if (heartbeatRef !== expectedRef) throw new CoordinationRuntimeError('invalid-request', 'program heartbeat_ref is not the canonical sequence path', [heartbeatRef, expectedRef]);
+      if (heartbeat.program_id !== acceptedPolicy.policy.program_id || heartbeat.trust_anchor_ref !== acceptedPolicy.policy.trust_anchor_ref || heartbeat.trust_anchor_sha256 !== acceptedPolicy.policy.trust_anchor_sha256 || heartbeat.signer_key_id !== acceptedPolicy.anchor.sha256) throw new CoordinationRuntimeError('unauthorized-client', 'program heartbeat identity/trust tuple does not equal accepted policy authority');
+      if (heartbeat.package_commit !== acceptedPolicy.policy.package_commit || heartbeat.package_tree !== acceptedPolicy.policy.package_tree || heartbeat.base_commit !== acceptedPolicy.policy.base_commit || heartbeat.base_tree !== acceptedPolicy.policy.base_tree) throw new CoordinationRuntimeError('unauthorized-client', 'program heartbeat package/base tuple does not equal accepted policy authority');
+      const { signature: _signature, ...unsignedHeartbeat } = heartbeat;
+      void _signature;
+      if (!verifyD65Signature({ trustAnchor: acceptedPolicy.anchor, purpose: 'program-heartbeat', message: new TextEncoder().encode(canonicalJson(unsignedHeartbeat)), signature: heartbeat.signature })) throw new CoordinationRuntimeError('unauthorized-client', 'program heartbeat signature is not valid for the accepted trust anchor and purpose domain');
+      if (heartbeat.provider_health.length !== 1 || heartbeat.provider_health[0]?.provider !== 'openai-codex') throw new CoordinationRuntimeError('unauthorized-client', 'D65 fixed Pi-subscription roster requires exactly one openai-codex provider-health row');
+      if (Date.parse(heartbeat.issued_at) > coordinatorMs) throw new CoordinationRuntimeError('invalid-request', 'program heartbeat issued_at is in the coordinator future', [heartbeat.issued_at, coordinatorTime]);
+
+      const kind = payloadString(request.payload, 'acceptance_kind');
+      if (kind !== 'catch-up' && kind !== 'governing') throw new CoordinationRuntimeError('invalid-request', 'program heartbeat acceptance_kind must be catch-up or governing');
+      if (kind === 'governing' && coordinatorMs >= Date.parse(heartbeat.valid_until)) throw new CoordinationRuntimeError('invalid-request', 'governing program heartbeat is expired at coordinator time', [heartbeat.valid_until, coordinatorTime]);
+      const head = this.#highestAcceptedProgramHeartbeat(run.repo_id, run.workstream_run);
+      if (head !== null && coordinatorMs < Date.parse(head.coordinator_time)) throw new CoordinationRuntimeError('invalid-state', 'coordinator-clock-rollback: coordinator time precedes the durable accepted heartbeat head', [coordinatorTime, head.coordinator_time]);
+      const expectedPriorSequence = request.payload['expected_prior_sequence'];
+      const expectedPriorSha = request.payload['expected_prior_sha256'];
+      if ((expectedPriorSequence === null) !== (expectedPriorSha === null)) throw new CoordinationRuntimeError('invalid-request', 'expected heartbeat prior sequence/digest must both be null or both be present');
+      if (head === null) {
+        if (expectedPriorSequence !== null || expectedPriorSha !== null || heartbeat.sequence !== 1 || heartbeat.prior_sha256 !== null) throw new CoordinationRuntimeError('stale-version', 'initial heartbeat acceptance requires sequence 1 and exact null local/signed prior');
+      } else {
+        if (expectedPriorSequence !== head.sequence || expectedPriorSha !== head.heartbeat_sha256) throw new CoordinationRuntimeError('stale-version', 'expected heartbeat prior does not equal the durable local head');
+        if (heartbeat.sequence !== head.sequence + 1 || heartbeat.prior_sha256 !== head.heartbeat_sha256) throw new CoordinationRuntimeError('stale-version', 'heartbeat chain has a fork, gap, rollback, or wrong signed prior');
+      }
+      const existingSequence = this.#acceptedProgramHeartbeatAtSequence(run.repo_id, run.workstream_run, heartbeat.sequence);
+      if (existingSequence !== null) throw new CoordinationRuntimeError('idempotency-conflict', 'heartbeat sequence identity was already accepted with a different request/kind/digest', [String(heartbeat.sequence), existingSequence.heartbeat_sha256, existingSequence.acceptance_kind]);
+
+      const heartbeatRow = heartbeat.rows.find((row) => row.workstream_run === run.workstream_run);
+      if (heartbeatRow === undefined || heartbeat.rows.filter((row) => row.workstream_run === run.workstream_run).length !== 1 || heartbeatRow.workstream !== run.workstream) throw new CoordinationRuntimeError('unauthorized-client', 'program heartbeat does not contain exactly one row for the coordinator run');
+      if (heartbeatRow.coordinator_session_lease_id !== session.session_lease_id) throw new CoordinationRuntimeError('fenced-session', 'program heartbeat row does not name the exact attached dispatch session lease');
+      if (heartbeatRow.launch_policy_sha256 !== acceptedPolicy.artifact.evidence.sha256) throw new CoordinationRuntimeError('unauthorized-client', 'program heartbeat row does not name the accepted launch policy digest');
+      const graphHead = this.#d65AcceptedGraphHead(run.repo_id, run.workstream_run);
+      if (kind === 'governing' && this.#hasD65CompleteGraph(run.repo_id, run.workstream_run) && !this.#d65CompleteGraphCurrent(run.repo_id, run.workstream_run)) throw new CoordinationRuntimeError('stale-version', 'governing heartbeat cannot mask a semantic event that requires successor graph N+1');
+      if (kind === 'governing' && (heartbeatRow.accepted_graph_sequence !== graphHead.sequence || heartbeatRow.accepted_graph_sha256 !== graphHead.sha256)) throw new CoordinationRuntimeError('stale-version', 'governing program heartbeat row does not name the current accepted graph tuple');
+      if (kind === 'governing') {
+        const statusDigest = this.#d65CurrentSemanticEndpointDigest('status', run.repo_id, run.workstream_run, coordinatorTime);
+        const doctorDigest = this.#d65CurrentSemanticEndpointDigest('doctor', run.repo_id, run.workstream_run, coordinatorTime);
+        if (heartbeatRow.status_sha256 !== statusDigest || heartbeatRow.doctor_sha256 !== doctorDigest) throw new CoordinationRuntimeError('stale-version', 'governing program heartbeat status/doctor digests do not equal current coordinator semantic authority', [String(heartbeatRow.status_sha256), statusDigest, String(heartbeatRow.doctor_sha256), doctorDigest]);
+      }
+      // Provider observations are byte-backed authority, not fields made true
+      // by the program signature. Initial health is anchored in the accepted
+      // launch policy. Every later state names this run's exact accepted
+      // continuation/probe bytes, and post-consume health additionally binds
+      // the immutable attempt-registration event/result.
+      let validatedContinuation: ReturnType<typeof parseD65ContinuationEvent> | null = null;
+      let validatedProbe: ReturnType<typeof parseD65SubscriptionProbe> | null = null;
+      for (const provider of heartbeat.provider_health) {
+        if (provider.observation_ref === null || provider.observation_sha256 === null) throw new CoordinationRuntimeError('invalid-request', 'provider observation authority is incomplete', [provider.provider]);
+        if (provider.state === 'healthy' && provider.probe_ref === null) {
+          // The already accepted, purpose-signed launch policy is the frozen
+          // initial launch/roster authority: it binds program, run, trust,
+          // package/base, and authenticated roster in one immutable artifact.
+          if (provider.observation_ref !== acceptedPolicy.artifact.evidence.ref || provider.observation_sha256 !== acceptedPolicy.artifact.evidence.sha256) throw new CoordinationRuntimeError('invalid-request', 'initial healthy provider observation does not equal accepted launch policy authority', [provider.provider, provider.observation_ref, provider.observation_sha256]);
+          continue;
+        }
+        if (provider.state === 'blocked' || provider.state === 'exhausted') {
+          const continuationRows = this.#db.prepare("SELECT * FROM authoritative_artifacts WHERE repo_id=? AND source_run=? AND json_extract(payload_json, '$.document_schema_version')='autopilot.continuation_event.v1' AND json_extract(payload_json, '$.evidence.ref')=?").all(run.repo_id, run.workstream_run, provider.observation_ref).map(authoritativeArtifactFromRow);
+          const continuationArtifact = continuationRows[0];
+          if (continuationRows.length !== 1 || continuationArtifact === undefined || continuationArtifact.evidence.sha256 !== provider.observation_sha256) throw new CoordinationRuntimeError('invalid-request', 'provider failure observation does not name one exact accepted continuation', [provider.provider, provider.observation_ref]);
+          const continuation = parseD65ContinuationEvent(parseJsonObject(new TextDecoder('utf-8', { fatal: true }).decode(this.#loadEvidenceArtifact(run.repo_id, continuationArtifact.evidence)), 'heartbeat provider-failure continuation'));
+          const blockedExact = provider.state === 'blocked' && continuation.class === 'provider-capacity-blocked' && continuation.retry_ordinal === 1 && continuation.cooldown_until === provider.cooldown_until;
+          const exhaustedExact = provider.state === 'exhausted' && continuation.class === 'unit-retry-exhausted' && continuation.retry_ordinal === 2 && continuation.cooldown_until === null;
+          if (continuation.program_id !== heartbeat.program_id || continuation.repo_id !== run.repo_id || continuation.workstream_run !== run.workstream_run || continuationArtifact.source_run !== run.workstream_run || continuation.trigger !== 'subscription-failure' || continuation.provider !== provider.provider || !(blockedExact || exhaustedExact)) throw new CoordinationRuntimeError('invalid-request', 'provider failure observation continuation does not equal the signed provider state', [provider.provider, provider.state, continuation.event_id]);
+          validatedContinuation = continuation;
+          continue;
+        }
+        if (provider.probe_workstream_run === null || provider.probe_ref === null || provider.probe_sha256 === null || provider.observation_ref !== provider.probe_ref || provider.observation_sha256 !== provider.probe_sha256) throw new CoordinationRuntimeError('invalid-request', 'retry/post-consume provider observation must equal its exact probe tuple', [provider.provider]);
+        const probeRows = this.#db.prepare("SELECT * FROM authoritative_artifacts WHERE repo_id=? AND source_run=? AND json_extract(payload_json, '$.document_schema_version')='autopilot.subscription_probe.v1' AND json_extract(payload_json, '$.evidence.ref')=?").all(run.repo_id, run.workstream_run, provider.probe_ref).map(authoritativeArtifactFromRow);
+        const probeArtifact = probeRows[0];
+        if (probeRows.length !== 1 || probeArtifact === undefined || probeArtifact.evidence.sha256 !== provider.probe_sha256) throw new CoordinationRuntimeError('invalid-request', 'heartbeat retry authority does not name one exact registered probe', [provider.provider, provider.probe_ref]);
+        const probe = parseD65SubscriptionProbe(parseJsonObject(new TextDecoder('utf-8', { fatal: true }).decode(this.#loadEvidenceArtifact(run.repo_id, probeArtifact.evidence)), 'heartbeat subscription probe'));
+        if (probe.provider !== provider.provider || probe.repo_id !== run.repo_id || provider.probe_workstream_run !== run.workstream_run || probe.workstream_run !== run.workstream_run || probe.workstream_run !== probeArtifact.source_run || probe.program_id !== heartbeat.program_id || provider.cooldown_until !== (provider.state === 'healthy' ? null : probe.cooldown_until) || !(Date.parse(probe.issued_at) <= coordinatorMs && coordinatorMs < Date.parse(probe.expires_at))) throw new CoordinationRuntimeError('invalid-request', 'heartbeat provider tuple diverges from the registered live probe', [provider.provider]);
+        validatedProbe = probe;
+        if (provider.state === 'retry-authorized') continue;
+        if (provider.consumption_event_seq === null) throw new CoordinationRuntimeError('invalid-request', 'post-probe healthy heartbeat must cite consumption sequence');
+        const consumptionRow = this.#db.prepare("SELECT r.payload_json FROM events e JOIN idempotency_results r ON r.repo_id=e.repo_id AND r.idempotency_key=e.idempotency_key AND r.request_sha256=e.request_sha256 AND r.committed_event_seq=e.event_seq WHERE e.repo_id=? AND e.event_seq=? AND e.event_type='unit-attempt-registered'").get(run.repo_id, provider.consumption_event_seq);
+        if (consumptionRow === undefined) throw new CoordinationRuntimeError('invalid-request', 'post-probe healthy heartbeat consumption event does not exist', [provider.provider, String(provider.consumption_event_seq)]);
+        const consumption = parseJsonObject(sqlString(consumptionRow, 'payload_json'), 'heartbeat probe consumption');
+        const consumedAttempt = parseCoordinationUnitAttempt(consumption['unit_attempt']);
+        if (consumedAttempt.owner.workstream_run !== run.workstream_run || consumption['consumed_probe_artifact_id'] !== probeArtifact.artifact_id || consumption['consumed_probe_sha256'] !== probeArtifact.evidence.sha256 || consumption['consumed_probe_sequence'] !== probe.probe_sequence || consumption['consumed_probe_provider'] !== probe.provider || consumption['consumed_probe_trigger_continuation_sha256'] !== probe.trigger_continuation_sha256) throw new CoordinationRuntimeError('invalid-request', 'post-probe healthy heartbeat consumption event/result does not bind the exact probe tuple', [provider.provider, String(provider.consumption_event_seq)]);
+      }
+
+      const currentProvider = heartbeat.provider_health[0];
+      if (currentProvider === undefined) throw new CoordinationRuntimeError('invalid-request', 'program heartbeat lacks its fixed provider row');
+      const rowBlocked = heartbeatRow.stop_reasons.includes('provider-blocked');
+      const rowExhausted = heartbeatRow.stop_reasons.includes('provider-exhausted');
+      if ((currentProvider.state === 'healthy' && (rowBlocked || rowExhausted)) || ((currentProvider.state === 'blocked' || currentProvider.state === 'retry-authorized') && (!rowBlocked || rowExhausted)) || (currentProvider.state === 'exhausted' && (!rowExhausted || rowBlocked))) throw new CoordinationRuntimeError('invalid-request', 'provider-health state and current row provider stop reasons are not the exact total mapping', [currentProvider.state, ...heartbeatRow.stop_reasons]);
+      const previousProvider = head === null ? null : this.#d65VerifyAcceptedHeartbeatHead(head, acceptedPolicy, run, coordinatorTime).heartbeat.provider_health[0] ?? null;
+      if (previousProvider === null) {
+        if (currentProvider.state !== 'healthy' || currentProvider.probe_ref !== null) throw new CoordinationRuntimeError('invalid-request', 'initial program heartbeat must begin at launch-policy-backed healthy provider state');
+      } else if (previousProvider.state === 'healthy' && previousProvider.probe_ref === null) {
+        const retainedInitial = currentProvider.state === 'healthy' && currentProvider.probe_ref === null && currentProvider.observation_ref === previousProvider.observation_ref && currentProvider.observation_sha256 === previousProvider.observation_sha256;
+        if (!(retainedInitial || currentProvider.state === 'blocked')) throw new CoordinationRuntimeError('invalid-request', 'initial healthy provider state may only remain byte-identical or advance to the first blocked continuation');
+      } else if (previousProvider.state === 'blocked') {
+        const retainedBlock = currentProvider.state === 'blocked' && currentProvider.observation_ref === previousProvider.observation_ref && currentProvider.observation_sha256 === previousProvider.observation_sha256 && currentProvider.cooldown_until === previousProvider.cooldown_until;
+        const authorizedRetry = currentProvider.state === 'retry-authorized' && validatedProbe !== null && validatedProbe.trigger_continuation_ref === previousProvider.observation_ref && validatedProbe.trigger_continuation_sha256 === previousProvider.observation_sha256;
+        if (!(retainedBlock || authorizedRetry)) throw new CoordinationRuntimeError('invalid-request', 'blocked provider state may only remain exact or advance through its bound accepted probe');
+      } else if (previousProvider.state === 'retry-authorized') {
+        const sameProbe = currentProvider.probe_workstream_run === previousProvider.probe_workstream_run && currentProvider.probe_ref === previousProvider.probe_ref && currentProvider.probe_sha256 === previousProvider.probe_sha256;
+        if (!sameProbe || !((currentProvider.state === 'retry-authorized' && currentProvider.consumption_event_seq === null) || (currentProvider.state === 'healthy' && currentProvider.consumption_event_seq !== null))) throw new CoordinationRuntimeError('invalid-request', 'retry-authorized provider may only retain its probe or advance through exact consumption');
+      } else if (previousProvider.state === 'healthy') {
+        const retainedHealthy = currentProvider.state === 'healthy' && currentProvider.probe_workstream_run === previousProvider.probe_workstream_run && currentProvider.probe_ref === previousProvider.probe_ref && currentProvider.probe_sha256 === previousProvider.probe_sha256 && currentProvider.consumption_event_seq === previousProvider.consumption_event_seq;
+        if (!retainedHealthy && currentProvider.state !== 'exhausted') throw new CoordinationRuntimeError('invalid-request', 'post-consume healthy provider may only remain exact or advance to exhausted');
+        if (currentProvider.state === 'exhausted') {
+          const priorProbeRows = this.#db.prepare("SELECT * FROM authoritative_artifacts WHERE repo_id=? AND source_run=? AND json_extract(payload_json, '$.document_schema_version')='autopilot.subscription_probe.v1' AND json_extract(payload_json, '$.evidence.ref')=?").all(run.repo_id, run.workstream_run, previousProvider.probe_ref).map(authoritativeArtifactFromRow);
+          const priorProbeArtifact = priorProbeRows[0];
+          if (priorProbeRows.length !== 1 || priorProbeArtifact === undefined || priorProbeArtifact.evidence.sha256 !== previousProvider.probe_sha256 || validatedContinuation === null) throw new CoordinationRuntimeError('invalid-request', 'exhausted provider transition lacks its exact prior consumed probe and successor continuation');
+          const priorProbe = parseD65SubscriptionProbe(parseJsonObject(new TextDecoder('utf-8', { fatal: true }).decode(this.#loadEvidenceArtifact(run.repo_id, priorProbeArtifact.evidence)), 'exhausted provider prior probe'));
+          if (validatedContinuation.attempt !== priorProbe.successor_attempt || validatedContinuation.provider !== priorProbe.provider) throw new CoordinationRuntimeError('invalid-request', 'exhausted provider continuation is not the consumed probe successor failure');
+        }
+      } else {
+        const retainedExhausted = currentProvider.state === 'exhausted' && currentProvider.observation_ref === previousProvider.observation_ref && currentProvider.observation_sha256 === previousProvider.observation_sha256;
+        if (!retainedExhausted) throw new CoordinationRuntimeError('invalid-request', 'exhausted provider state is terminal and may only remain byte-identical');
+      }
+
+      const providerState = currentProvider.state;
+      const verdict = recoveryTransitionAllowed({ action: 'accept-program-heartbeat', global_stop_reasons: heartbeat.stop_reasons, row_stop_reasons: heartbeatRow.stop_reasons, run_state: run.status, graph: { complete_graph_current: true, graph_publication_pending: false }, policy: { policy_current: true }, heartbeat: { governing_heartbeat_current: kind === 'governing', provider_state: providerState }, bindings: { attached_session_current: true, policy_trust_current: true, no_pending_publication: true, terminal_prepared_cancellable: false, terminal_after_commit: false, accepted_continuation_reason: null, covered_semantic_reason: null, attach_terminal_recovery: false } });
+      if (!verdict.allowed) throw new CoordinationRuntimeError('invalid-state', 'accept-program-heartbeat is fenced by the D65 recovery predicate', verdict.denied_by.slice());
+
+      const idempotencyIdentity = { repo_id: run.repo_id, workstream_run: run.workstream_run, sequence: heartbeat.sequence, heartbeat_sha256: requestedDigest, acceptance_kind: kind };
+      const expectedKey = `accept-program-heartbeat:sha256:${createHash('sha256').update(`${canonicalJson(idempotencyIdentity)}\n`, 'utf8').digest('hex')}`;
+      if (request.idempotency_key !== expectedKey) throw new CoordinationRuntimeError('invalid-request', 'accept-program-heartbeat idempotency key is not the exact RFC-8785 identity digest', [String(request.idempotency_key), expectedKey]);
+      const seq = this.#nextEventSequence(run.repo_id);
+      const result: D65HeartbeatAcceptanceResult = Object.freeze({ schema_version: D65_HEARTBEAT_ACCEPTANCE_RESULT_SCHEMA, program_id: heartbeat.program_id, repo_id: run.repo_id, workstream_run: run.workstream_run, sequence: heartbeat.sequence, heartbeat_ref: heartbeatRef, heartbeat_sha256: requestedDigest, acceptance_kind: kind, prior_sha256: heartbeat.prior_sha256, issued_at: heartbeat.issued_at, valid_until: heartbeat.valid_until, coordinator_time: coordinatorTime });
+      return { sequence: seq, eventType: 'program-heartbeat-accepted', entityType: 'program-heartbeat', entityId: run.workstream_run, payload: Object.freeze({ ...result }), occurredAt: coordinatorTime };
+    });
+  }
+
   registerAttempt(request: CoordinatorRequestEnvelope): IdempotentEffect {
     return this.#mutation(request, () => {
       this.#requireCurrentSession(request);
       const run = this.#requireRun(request.repo_id, this.#workstreamRun(request));
       this.#assertVersion(run.version, request.expected_version, 'run');
+      let consumedProbe: Readonly<{ artifact_id: string; sha256: `sha256:${string}`; probe_sequence: number; provider: string; trigger_continuation_sha256: `sha256:${string}`; coordinator_time: string }> | null = null;
+      if (this.#hasD65CompleteGraph(run.repo_id, run.workstream_run)) {
+        // One coordinator CLOCK_REALTIME sample after session/version checks and
+        // before eligibility. It is reused by the dispatch frame, expiry proof,
+        // and immutable consumption result — never sampled independently.
+        const coordinatorTime = this.#clock.now().toISOString();
+        const frame = this.#d65DispatchAuthorityFrameInTransaction(run.repo_id, run.workstream_run, this.#d65MutationContext(request, run.version), coordinatorTime);
+        const ordinary = ordinaryDispatchAllowed({ global_stop_reasons: frame.global_stop_reasons, row_stop_reasons: frame.row_stop_reasons, run_state: frame.run_state, graph: frame.graph, policy: frame.policy, heartbeat: frame.heartbeat, session: frame.session });
+        if (!ordinary.allowed) {
+          const verdict = recoveryTransitionAllowed({ action: 'register-attempt', global_stop_reasons: frame.global_stop_reasons, row_stop_reasons: frame.row_stop_reasons, run_state: frame.run_state, graph: frame.graph, policy: frame.policy, heartbeat: frame.heartbeat, bindings: { attached_session_current: frame.session.attached_session_current && frame.session.lease_current && frame.session.expected_version_current, policy_trust_current: frame.policy.policy_current, no_pending_publication: !frame.graph.graph_publication_pending, terminal_prepared_cancellable: false, terminal_after_commit: false, accepted_continuation_reason: null, covered_semantic_reason: null, attach_terminal_recovery: false } });
+          if (!verdict.allowed) throw new CoordinationRuntimeError('invalid-state', 'D65 ordinary mutation register-attempt is fenced at its coordinator transaction boundary', [...ordinary.allowed ? [] : ordinary.denied_by, ...verdict.denied_by]);
+          consumedProbe = this.#d65ResolveConsumableProbe(run, payloadString(request.payload, 'unit_id'), payloadInteger(request.payload, 'attempt'), payloadString(request.payload, 'spec_ref'), payloadString(request.payload, 'spec_sha256'), coordinatorTime);
+        }
+      }
       if (this.#preparedTerminalIntent(run.repo_id, run.workstream_run) !== null) throw new CoordinationRuntimeError('invalid-state', 'run terminal preparation fences new attempt dispatch');
       const owner: CoordinationOwnerIdentity = { repo_id: run.repo_id, autopilot_id: run.autopilot_id, workstream_run: run.workstream_run, unit_id: payloadString(request.payload, 'unit_id'), attempt: payloadInteger(request.payload, 'attempt') };
       const role = payloadUnitRole(request.payload, 'role');
@@ -3727,14 +4305,162 @@ export class CoordinatorStore {
       if (payloadInteger(request.payload, 'checkpoint_ordinal') !== 0) throw new CoordinationRuntimeError('invalid-request', 'attempt registration must begin at checkpoint ordinal 0');
       const attempt: CoordinationUnitAttempt = { schema_version: 'autopilot.unit_attempt.v1', owner, state: 'preflight', role, spec: { ref: payloadString(request.payload, 'spec_ref'), sha256: payloadString(request.payload, 'spec_sha256') as `sha256:${string}` }, preemptible: payloadBoolean(request.payload, 'preemptible'), checkpoint_ordinal: 0, critical_section: null, version: 1 };
       const existing = this.#db.prepare('SELECT * FROM unit_attempts WHERE entity_id=?').get(unitAttemptEntityId(owner));
+      if (existing === undefined && consumedProbe === null && this.#hasD65CompleteGraph(run.repo_id, run.workstream_run)) this.#d65AssertOrdinaryAttemptGraphAuthority(run, owner.unit_id, owner.attempt, attempt.spec.ref, attempt.spec.sha256, role);
       if (existing !== undefined) {
+        if (consumedProbe !== null) throw new CoordinationRuntimeError('invalid-state', 'probe consumption cannot target an already-existing attempt; only the exact new successor row is authorized', [unitAttemptEntityId(owner)]);
+        if (this.#hasD65CompleteGraph(run.repo_id, run.workstream_run)) {
+          const consumedRegistration = this.#db.prepare("SELECT e.event_seq FROM events e JOIN idempotency_results r ON r.repo_id=e.repo_id AND r.idempotency_key=e.idempotency_key AND r.request_sha256=e.request_sha256 AND r.committed_event_seq=e.event_seq WHERE e.repo_id=? AND e.event_type='unit-attempt-registered' AND e.entity_id=? AND json_extract(r.payload_json, '$.consumed_probe_artifact_id') IS NOT NULL LIMIT 1").get(run.repo_id, unitAttemptEntityId(owner));
+          if (consumedRegistration !== undefined) throw new CoordinationRuntimeError('invalid-state', 'a probe-authorized attempt cannot be re-verified by a distinct request after its exact-once consumption', [unitAttemptEntityId(owner)]);
+        }
         this.#insertOrVerifyUnitAttempt(attempt);
         return { sequence: this.#nextEventSequence(run.repo_id), eventType: 'unit-attempt-verified', entityType: 'unit-attempt', entityId: unitAttemptEntityId(owner), payload: { unit_attempt: unitAttemptFromRow(existing) } };
       }
       const seq = this.#nextEventSequence(run.repo_id);
       this.#insertEntity('unit_attempts', unitAttemptEntityId(owner), owner.repo_id, owner.workstream_run, attempt);
-      return { sequence: seq, eventType: 'unit-attempt-registered', entityType: 'unit-attempt', entityId: unitAttemptEntityId(owner), payload: { unit_attempt: attempt } };
+      // The immutable unit-attempt-registered event/result records the exact
+      // consumption tuple at the consumption sequence; the request shape is
+      // unchanged and non-probe registrations carry no consumption fields.
+      const payload = consumedProbe === null
+        ? { unit_attempt: attempt }
+        : { unit_attempt: attempt, consumed_probe_artifact_id: consumedProbe.artifact_id, consumed_probe_sha256: consumedProbe.sha256, consumed_probe_sequence: consumedProbe.probe_sequence, consumed_probe_provider: consumedProbe.provider, consumed_probe_trigger_continuation_sha256: consumedProbe.trigger_continuation_sha256, consumed_probe_coordinator_time: consumedProbe.coordinator_time };
+      return { sequence: seq, eventType: 'unit-attempt-registered', entityType: 'unit-attempt', entityId: unitAttemptEntityId(owner), payload };
     });
+  }
+
+  /** Require one new ordinary attempt to be preauthorized by current G. */
+  #d65AssertOrdinaryAttemptGraphAuthority(run: CoordinationRun, unitId: string, attempt: number, specRef: string, specSha256: `sha256:${string}`, role: CoordinationUnitRole): void {
+    const graphHead = this.#d65AcceptedGraphHead(run.repo_id, run.workstream_run);
+    if (graphHead.artifact.document_schema_version !== 'autopilot.semantic_graph.v1') throw new CoordinationRuntimeError('invalid-state', 'ordinary attempt requires an accepted complete graph');
+    const resource = runResourceFromRow(asRow(this.#db.prepare('SELECT * FROM run_resources WHERE repo_id=? AND workstream_run=?').get(run.repo_id, run.workstream_run), 'ordinary attempt graph resource'));
+    const graph = parseD65CompleteGraph(parseJsonObject(new TextDecoder('utf-8', { fatal: true }).decode(this.#loadEvidenceArtifact(run.repo_id, graphHead.artifact.evidence)), 'ordinary attempt accepted graph'));
+    const loaded = loadD65CompleteGraph(graph, (ref) => this.#readD65GraphShardBlob(resource.main_worktree_path, graphHead.artifact.git_commit, ref));
+    const specs = loaded.authorities['specs']?.entries.filter((entry) => entry.ref === specRef && entry.sha256 === specSha256 && entry.document_schema_version === 'autopilot.unit_spec.v1') ?? [];
+    if (specs.length !== 1) throw new CoordinationRuntimeError('invalid-state', 'ordinary attempt spec is not one exact accepted graph authority', [specRef, specSha256]);
+    const specBytes = this.#readD65GraphShardBlob(resource.main_worktree_path, graph.covered_authority_commit, specRef);
+    const actual = `sha256:${createHash('sha256').update(specBytes).digest('hex')}`;
+    if (actual !== specSha256) throw new CoordinationRuntimeError('invalid-state', 'ordinary attempt spec bytes differ from accepted graph authority', [specRef, specSha256, actual]);
+    const spec = parseAutopilotUnitSpec(parseJsonObject(new TextDecoder('utf-8', { fatal: true }).decode(specBytes), 'ordinary attempt spec'));
+    const stateBytes = this.#readD65GraphShardBlob(resource.main_worktree_path, graph.covered_authority_commit, graph.core.state.ref);
+    const state = parseAutopilotState(parseJsonObject(new TextDecoder('utf-8', { fatal: true }).decode(stateBytes), 'ordinary attempt graph state'));
+    const unit = state.units[unitId];
+    const workItems = Object.values(state.work_items ?? {}).filter((item) => item.unit_ids.includes(unitId));
+    const specAbsolute = resolve(resource.main_worktree_path, ...specRef.split('/'));
+    const stateSpecRef = relative(resource.runtime_root, specAbsolute).replace(/\\/gu, '/');
+    if (stateSpecRef.length === 0 || stateSpecRef === '..' || stateSpecRef.startsWith('../') || isAbsolute(stateSpecRef)) throw new CoordinationRuntimeError('invalid-state', 'ordinary attempt spec is outside the graph runtime authority root', [specRef, resource.runtime_root]);
+    if (spec.unit_id !== unitId || spec.attempt !== attempt || spec.role !== role || unit === undefined || unit.attempt !== attempt || unit.role !== role || unit.spec_ref !== stateSpecRef || workItems.length !== 1) throw new CoordinationRuntimeError('invalid-state', 'ordinary attempt is not authorized by one exact graph state/spec/work-item tuple', [unitId, String(attempt), stateSpecRef, role, `work_items=${String(workItems.length)}`]);
+    if (loaded.coordinatorProjection.attempts.some((entry) => entry.attempt.owner.unit_id === unitId && entry.attempt.owner.attempt === attempt)) throw new CoordinationRuntimeError('invalid-state', 'ordinary attempt graph must truthfully project the proposed row absent before registration', [unitId, String(attempt)]);
+  }
+
+  /**
+   * Deterministically resolve EXACTLY ONE accepted, unexpired, unconsumed
+   * subscription probe for the proposed successor tuple from registered
+   * artifact bytes. Zero or multiple candidates reject; the probe binds the
+   * exact accepted provider-failure continuation trigger, the exact failed
+   * attempt, and `successor_attempt = attempt`. Initial and non-provider-retry
+   * attempts never reach this resolver (ordinary dispatch admits them).
+   */
+  #d65ResolveConsumableProbe(run: CoordinationRun, unitId: string, attempt: number, successorSpecRef: string, successorSpecSha256: string, coordinatorTime: string): Readonly<{ artifact_id: string; sha256: `sha256:${string}`; probe_sequence: number; provider: string; trigger_continuation_sha256: `sha256:${string}`; coordinator_time: string }> {
+    if (!/^sha256:[a-f0-9]{64}$/u.test(successorSpecSha256)) throw new CoordinationRuntimeError('invalid-request', 'probe-authorized successor spec_sha256 is not canonical');
+    const coordinatorMs = Date.parse(coordinatorTime);
+    const acceptedPolicy = this.#d65AcceptedLaunchPolicy(run.repo_id, run.workstream_run);
+    const graphHead = this.#d65AcceptedGraphHead(run.repo_id, run.workstream_run);
+    if (graphHead.artifact.document_schema_version !== 'autopilot.semantic_graph.v1') throw new CoordinationRuntimeError('invalid-state', 'probe consumption requires an accepted complete graph');
+    const resource = runResourceFromRow(asRow(this.#db.prepare('SELECT * FROM run_resources WHERE repo_id=? AND workstream_run=?').get(run.repo_id, run.workstream_run), 'probe consumption run resource'));
+    const graph = parseD65CompleteGraph(parseJsonObject(new TextDecoder('utf-8', { fatal: true }).decode(this.#loadEvidenceArtifact(run.repo_id, graphHead.artifact.evidence)), 'probe consumption accepted graph'));
+    const loaded = loadD65CompleteGraph(graph, (ref) => this.#readD65GraphShardBlob(resource.main_worktree_path, graphHead.artifact.git_commit, ref));
+    const authorityEntries = Object.values(loaded.authorities).flatMap((collection) => collection.entries);
+    const exactAuthorityEntry = (ref: string, sha256: string, schema: string) => authorityEntries.filter((entry) => entry.ref === ref && entry.sha256 === sha256 && entry.document_schema_version === schema);
+    const readAuthority = (ref: string, expectedSha256: string, label: string): Uint8Array => {
+      const bytes = this.#readD65GraphShardBlob(resource.main_worktree_path, graph.covered_authority_commit, ref);
+      const actual = `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
+      if (actual !== expectedSha256) throw new CoordinationRuntimeError('invalid-state', `${label} bytes differ from their accepted graph authority digest`, [ref, expectedSha256, actual]);
+      return bytes;
+    };
+
+    const probeRows = this.#db.prepare("SELECT * FROM authoritative_artifacts WHERE repo_id=? AND source_run=? AND json_extract(payload_json, '$.document_schema_version')='autopilot.subscription_probe.v1' ORDER BY entity_id").all(run.repo_id, run.workstream_run).map(authoritativeArtifactFromRow);
+    const parsedProbes = probeRows.map((artifact) => {
+      const probeBytes = this.#loadEvidenceArtifact(run.repo_id, artifact.evidence);
+      const probe = parseD65SubscriptionProbe(parseJsonObject(new TextDecoder('utf-8', { fatal: true }).decode(probeBytes), 'registered subscription probe'));
+      const expectedRef = `authority/subscription-probes/${String(probe.probe_sequence).padStart(20, '0')}-${probe.probe_id}.json`;
+      if (artifact.source_type !== 'task' || artifact.source_scope !== 'run-main' || artifact.evidence.ref !== expectedRef || probe.program_id !== acceptedPolicy.policy.program_id || probe.repo_id !== run.repo_id || probe.workstream_run !== run.workstream_run || probe.trust_anchor_ref !== acceptedPolicy.policy.trust_anchor_ref || probe.trust_anchor_sha256 !== acceptedPolicy.policy.trust_anchor_sha256 || probe.signer_key_id !== acceptedPolicy.anchor.sha256) throw new CoordinationRuntimeError('invalid-state', 'registered subscription probe identity/path/trust tuple is not exact', [artifact.artifact_id]);
+      const { signature: _signature, ...unsigned } = probe;
+      void _signature;
+      if (!verifyD65Signature({ trustAnchor: acceptedPolicy.anchor, purpose: 'subscription-probe', message: new TextEncoder().encode(canonicalJson(unsigned)), signature: probe.signature })) throw new CoordinationRuntimeError('invalid-state', 'registered subscription probe signature is invalid', [artifact.artifact_id]);
+      return Object.freeze({ artifact, probe });
+    });
+    // Prove each local (program,provider,run) chain has one contiguous sequence
+    // and exact prior digest. A fork/gap is authority corruption, not a skipped
+    // candidate. This check runs before target filtering.
+    const chains = new Map<string, typeof parsedProbes>();
+    for (const parsed of parsedProbes) {
+      const key = `${parsed.probe.program_id}\0${parsed.probe.provider}\0${parsed.probe.workstream_run}`;
+      chains.set(key, [...(chains.get(key) ?? []), parsed]);
+    }
+    for (const chain of chains.values()) {
+      const ordered = [...chain].sort((left, right) => left.probe.probe_sequence - right.probe.probe_sequence || left.artifact.artifact_id.localeCompare(right.artifact.artifact_id));
+      for (let index = 0; index < ordered.length; index += 1) {
+        const current = ordered[index];
+        if (current === undefined || current.probe.probe_sequence !== index + 1) throw new CoordinationRuntimeError('invalid-state', 'registered subscription probe local chain has a fork or gap');
+        const prior = ordered[index - 1];
+        const expectedPrior = prior?.artifact.evidence.sha256 ?? null;
+        if (current.probe.prior_probe_sha256 !== expectedPrior) throw new CoordinationRuntimeError('invalid-state', 'registered subscription probe local chain names the wrong immediate prior digest', [current.artifact.artifact_id]);
+      }
+    }
+
+    const candidates: typeof parsedProbes = [];
+    for (const parsed of parsedProbes) {
+      const { artifact, probe } = parsed;
+      if (probe.unit_id !== unitId || probe.successor_attempt !== attempt) continue;
+      if (!(Date.parse(probe.issued_at) <= coordinatorMs && coordinatorMs < Date.parse(probe.expires_at))) continue;
+      const consumed = this.#db.prepare("SELECT r.idempotency_key FROM idempotency_results r JOIN events e ON e.repo_id=r.repo_id AND e.idempotency_key=r.idempotency_key WHERE r.repo_id=? AND e.event_type='unit-attempt-registered' AND json_extract(r.payload_json, '$.consumed_probe_artifact_id')=? LIMIT 1").get(run.repo_id, artifact.artifact_id) !== undefined;
+      if (consumed) continue;
+      candidates.push(parsed);
+    }
+    const sole = candidates[0];
+    if (candidates.length !== 1 || sole === undefined) throw new CoordinationRuntimeError('invalid-state', 'probe consumption requires exactly one accepted, unexpired, unconsumed subscription probe for the successor tuple', [unitId, String(attempt), `candidates=${String(candidates.length)}`]);
+    const { artifact, probe } = sole;
+    if (exactAuthorityEntry(artifact.evidence.ref, artifact.evidence.sha256, 'autopilot.subscription_probe.v1').length !== 1) throw new CoordinationRuntimeError('invalid-state', 'accepted complete graph does not include the exact registered subscription probe', [artifact.artifact_id]);
+
+    const triggerRows = this.#db.prepare("SELECT * FROM authoritative_artifacts WHERE repo_id=? AND source_run=? AND json_extract(payload_json, '$.document_schema_version')='autopilot.continuation_event.v1' AND json_extract(payload_json, '$.evidence.ref')=?").all(run.repo_id, run.workstream_run, probe.trigger_continuation_ref).map(authoritativeArtifactFromRow);
+    const triggerArtifact = triggerRows[0];
+    if (triggerRows.length !== 1 || triggerArtifact === undefined || triggerArtifact.evidence.sha256 !== probe.trigger_continuation_sha256 || exactAuthorityEntry(triggerArtifact.evidence.ref, triggerArtifact.evidence.sha256, 'autopilot.continuation_event.v1').length !== 1) throw new CoordinationRuntimeError('invalid-state', 'probe trigger continuation is not the exact accepted graph authority', [probe.trigger_continuation_ref]);
+    const trigger = parseD65ContinuationEvent(parseJsonObject(new TextDecoder('utf-8', { fatal: true }).decode(this.#loadEvidenceArtifact(run.repo_id, triggerArtifact.evidence)), 'probe trigger continuation'));
+    if (trigger.trigger !== 'subscription-failure' || trigger.class !== 'provider-capacity-blocked' || trigger.repo_id !== run.repo_id || trigger.workstream_run !== run.workstream_run || trigger.unit_id !== unitId || trigger.attempt !== probe.failed_attempt || trigger.provider !== probe.provider || trigger.retry_ordinal !== probe.retry_ordinal || trigger.cooldown_until !== probe.cooldown_until || trigger.failed_spec_ref === null || trigger.failed_receipt_ref === null) throw new CoordinationRuntimeError('invalid-state', 'probe trigger continuation does not bind the exact first provider-failure tuple', [trigger.event_id]);
+
+    const failedSpecEntries = exactAuthorityEntry(trigger.failed_spec_ref.ref, trigger.failed_spec_ref.sha256, 'autopilot.unit_spec.v1');
+    const failedReceiptEntries = exactAuthorityEntry(trigger.failed_receipt_ref.ref, trigger.failed_receipt_ref.sha256, 'autopilot.receipt.v1');
+    if (failedSpecEntries.length !== 1 || failedReceiptEntries.length !== 1) throw new CoordinationRuntimeError('invalid-state', 'probe failed spec/receipt are not exact accepted graph authorities');
+    const failedSpecBytes = readAuthority(trigger.failed_spec_ref.ref, trigger.failed_spec_ref.sha256, 'probe failed spec');
+    const failedReceiptBytes = readAuthority(trigger.failed_receipt_ref.ref, trigger.failed_receipt_ref.sha256, 'probe failed receipt');
+    if (failedSpecBytes.byteLength !== trigger.failed_spec_ref.byte_count || failedReceiptBytes.byteLength !== trigger.failed_receipt_ref.byte_count) throw new CoordinationRuntimeError('invalid-state', 'probe failed spec/receipt byte counts differ from the trigger continuation');
+    const failedSpec = parseAutopilotUnitSpec(parseJsonObject(new TextDecoder('utf-8', { fatal: true }).decode(failedSpecBytes), 'probe failed spec'));
+    const failedReceipt = parseAutopilotReceipt(parseJsonObject(new TextDecoder('utf-8', { fatal: true }).decode(failedReceiptBytes), 'probe failed receipt'));
+    if (failedSpec.unit_id !== unitId || failedSpec.attempt !== probe.failed_attempt || failedReceipt.unit_id !== unitId || failedReceipt.attempt !== probe.failed_attempt || failedReceipt.provider_identity.provider_id !== probe.provider || failedReceipt.provider_identity.requested_model_id !== failedSpec.model || failedReceipt.provider_identity.executed_model_id !== failedSpec.model) throw new CoordinationRuntimeError('invalid-state', 'probe failed spec/receipt/provider/model identities do not match', [unitId, String(probe.failed_attempt), probe.provider]);
+
+    const successorEntries = exactAuthorityEntry(successorSpecRef, successorSpecSha256, 'autopilot.unit_spec.v1');
+    if (successorEntries.length !== 1) throw new CoordinationRuntimeError('invalid-state', 'probe successor spec is not one exact accepted graph authority', [successorSpecRef]);
+    const successorSpec = parseAutopilotUnitSpec(parseJsonObject(new TextDecoder('utf-8', { fatal: true }).decode(readAuthority(successorSpecRef, successorSpecSha256, 'probe successor spec')), 'probe successor spec'));
+    if (successorSpec.unit_id !== unitId || successorSpec.attempt !== attempt || successorSpec.model !== failedSpec.model) throw new CoordinationRuntimeError('invalid-state', 'probe successor spec changes the authorized unit/attempt/model tuple', [successorSpec.unit_id, String(successorSpec.attempt), successorSpec.model]);
+
+    const graphState = parseAutopilotState(parseJsonObject(new TextDecoder('utf-8', { fatal: true }).decode(readAuthority(graph.core.state.ref, graph.core.state.sha256, 'probe graph state')), 'probe graph state'));
+    const unit = graphState.units[unitId];
+    const workItems = Object.values(graphState.work_items ?? {}).filter((item) => item.unit_ids.includes(unitId));
+    const successorAbsolute = resolve(resource.main_worktree_path, ...successorSpecRef.split('/'));
+    const stateSpecRef = relative(resource.runtime_root, successorAbsolute).replace(/\\/gu, '/');
+    if (stateSpecRef.length === 0 || stateSpecRef === '..' || stateSpecRef.startsWith('../') || isAbsolute(stateSpecRef)) throw new CoordinationRuntimeError('invalid-state', 'probe successor spec is outside the graph runtime authority root', [successorSpecRef, resource.runtime_root]);
+    if (unit === undefined || unit.attempt !== attempt || unit.spec_ref !== stateSpecRef || workItems.length !== 1) throw new CoordinationRuntimeError('invalid-state', 'probe successor is not authorized by one exact graph state/work-item tuple', [unitId, String(attempt), stateSpecRef, `work_items=${String(workItems.length)}`]);
+    const projectedSuccessor = loaded.coordinatorProjection.attempts.filter((entry) => entry.attempt.owner.unit_id === unitId && entry.attempt.owner.attempt === attempt);
+    if (projectedSuccessor.length !== 0 || this.#db.prepare("SELECT entity_id FROM unit_attempts WHERE repo_id=? AND workstream_run=? AND json_extract(payload_json, '$.owner.unit_id')=? AND json_extract(payload_json, '$.owner.attempt')=?").get(run.repo_id, run.workstream_run, unitId, attempt) !== undefined) throw new CoordinationRuntimeError('invalid-state', 'probe successor attempt must remain absent before its atomic registration', [unitId, String(attempt)]);
+    const priorAttempt = loaded.coordinatorProjection.attempts.filter((entry) => entry.attempt.owner.unit_id === unitId && entry.attempt.owner.attempt === probe.failed_attempt);
+    if (priorAttempt.length !== 1 || (priorAttempt[0]?.attempt.state !== 'reset' && priorAttempt[0]?.attempt.state !== 'quarantined')) throw new CoordinationRuntimeError('invalid-state', 'probe consumption requires exact prior reset/quarantine coordinator proof', [unitId, String(probe.failed_attempt)]);
+
+    const heartbeatHead = this.#highestAcceptedProgramHeartbeat(run.repo_id, run.workstream_run);
+    if (heartbeatHead === null) throw new CoordinationRuntimeError('invalid-state', 'probe consumption lacks an accepted heartbeat head');
+    const heartbeat = this.#d65VerifyAcceptedHeartbeatHead(heartbeatHead, acceptedPolicy, run, coordinatorTime);
+    const retryRows = heartbeat.heartbeat.provider_health.filter((entry) => entry.state === 'retry-authorized');
+    const retry = retryRows[0];
+    if (!heartbeat.governingCurrent || retryRows.length !== 1 || retry === undefined || retry.provider !== probe.provider || retry.probe_workstream_run !== run.workstream_run || retry.probe_ref !== artifact.evidence.ref || retry.probe_sha256 !== artifact.evidence.sha256 || retry.consumption_event_seq !== null || retry.cooldown_until !== probe.cooldown_until) throw new CoordinationRuntimeError('invalid-state', 'governing heartbeat does not expose exactly this probe as retry-authorized', [artifact.artifact_id]);
+    return Object.freeze({ artifact_id: artifact.artifact_id, sha256: artifact.evidence.sha256, probe_sequence: probe.probe_sequence, provider: probe.provider, trigger_continuation_sha256: probe.trigger_continuation_sha256, coordinator_time: coordinatorTime });
   }
 
   registerChild(request: CoordinatorRequestEnvelope): IdempotentEffect {
@@ -3742,6 +4468,7 @@ export class CoordinatorStore {
       const session = this.#requireCurrentSession(request);
       const run = this.#requireRun(request.repo_id, this.#workstreamRun(request));
       this.#assertVersion(run.version, request.expected_version, 'run');
+      if (this.#hasD65CompleteGraph(run.repo_id, run.workstream_run)) this.#assertD65OrdinaryMutationAllowed(request, run, 'register-child');
       if (this.#preparedTerminalIntent(run.repo_id, run.workstream_run) !== null) throw new CoordinationRuntimeError('invalid-state', 'run terminal preparation fences new child registration');
       const childOwner: CoordinationOwnerIdentity = { repo_id: run.repo_id, autopilot_id: run.autopilot_id, workstream_run: run.workstream_run, unit_id: payloadString(request.payload, 'unit_id'), attempt: payloadInteger(request.payload, 'attempt') };
       if (payloadString(request.payload, 'autopilot_id') !== run.autopilot_id) throw new CoordinationRuntimeError('unauthorized-client', 'child autopilot identity does not match its durable run');
@@ -3796,6 +4523,8 @@ export class CoordinatorStore {
       this.#assertVersion(child.version, request.expected_version, 'child lease');
       if (child.status !== 'running') throw new CoordinationRuntimeError('invalid-state', `child lease is ${child.status}`);
       const attempt = this.#requireUnitAttempt(child.owner.repo_id, child.owner.workstream_run, child.owner.unit_id, child.owner.attempt);
+      const run = this.#requireRun(child.owner.repo_id, child.owner.workstream_run);
+      if (this.#hasD65CompleteGraph(run.repo_id, run.workstream_run)) this.#assertD65OrdinaryMutationAllowed(request, run, 'checkpoint-child', this.#d65CurrentDispatchContext(run));
       if (attempt.state !== 'running') throw new CoordinationRuntimeError('invalid-state', `child checkpoint requires a running attempt, not ${attempt.state}`);
       const checkpointOrdinal = payloadInteger(request.payload, 'checkpoint_ordinal');
       if (checkpointOrdinal !== attempt.checkpoint_ordinal + 1) throw new CoordinationRuntimeError('stale-version', 'child checkpoint ordinal must advance exactly one durable boundary at a time');
@@ -3826,8 +4555,13 @@ export class CoordinatorStore {
       this.#assertChildAuthority(request, child, childRow);
       this.#assertVersion(child.version, request.expected_version, 'child lease');
       if (child.status !== 'running') throw new CoordinationRuntimeError('invalid-state', `child lease is ${child.status}`);
-      this.#assertAuthorityCriticalMutationAllowed(child.owner.repo_id, child.owner.workstream_run, 'child terminal acceptance and authority release');
+      const run = this.#requireRun(child.owner.repo_id, child.owner.workstream_run);
       const status = payloadString(request.payload, 'status');
+      if (this.#hasD65CompleteGraph(run.repo_id, run.workstream_run)) {
+        if (status === 'recovery-required') this.#assertD65RecoveryMutationAllowed(request, run, 'unit-recovery', { attached_session_current: true, policy_trust_current: false, no_pending_publication: false, terminal_prepared_cancellable: false, terminal_after_commit: false, accepted_continuation_reason: null, covered_semantic_reason: null, attach_terminal_recovery: false }, this.#d65CurrentDispatchContext(run));
+        else this.#assertD65OrdinaryMutationAllowed(request, run, 'complete-child', this.#d65CurrentDispatchContext(run));
+      }
+      this.#assertAuthorityCriticalMutationAllowed(child.owner.repo_id, child.owner.workstream_run, 'child terminal acceptance and authority release');
       const evidenceRef = payloadNullableString(request.payload, 'evidence_ref');
       const evidenceSha = payloadNullableString(request.payload, 'evidence_sha256');
       if (status === 'terminal' && (evidenceRef === null || evidenceSha === null || !SHA256_PATTERN.test(evidenceSha))) throw new CoordinationRuntimeError('invalid-request', 'terminal child completion requires immutable evidence');
@@ -3868,6 +4602,7 @@ export class CoordinatorStore {
       const run = this.#requireRun(request.repo_id, this.#workstreamRun(request));
       this.#requireCoordinatorEditAuthority(run, 'acquisition-group creation');
       this.#assertVersion(run.version, request.expected_version, 'run');
+      if (this.#hasD65CompleteGraph(run.repo_id, run.workstream_run)) this.#assertD65OrdinaryMutationAllowed(request, run, 'acquire-group');
       if (this.#preparedTerminalIntent(run.repo_id, run.workstream_run) !== null) throw new CoordinationRuntimeError('invalid-state', 'run terminal preparation fences new acquisition groups');
       const groupId = payloadString(request.payload, 'acquisition_group_id');
       const owner: CoordinationOwnerIdentity = {
@@ -3960,8 +4695,10 @@ export class CoordinatorStore {
       this.#requireCurrentSession(request);
       const groupId = payloadString(request.payload, 'acquisition_group_id');
       const group = this.#requireGroup(request.repo_id, groupId);
-      this.#requireCoordinatorEditAuthority(this.#requireRun(group.owner.repo_id, group.owner.workstream_run), 'grant acknowledgement');
+      const run = this.#requireRun(group.owner.repo_id, group.owner.workstream_run);
+      this.#requireCoordinatorEditAuthority(run, 'grant acknowledgement');
       this.#assertGroupOwner(request, group);
+      if (this.#hasD65CompleteGraph(run.repo_id, run.workstream_run)) this.#assertD65OrdinaryMutationAllowed(request, run, 'acknowledge-grant');
       if (this.#preparedTerminalIntent(group.owner.repo_id, group.owner.workstream_run) !== null) throw new CoordinationRuntimeError('invalid-state', 'run terminal preparation fences grant acknowledgement');
       this.#assertVersion(group.version, request.expected_version, 'acquisition group');
       const seq = this.#nextEventSequence(request.repo_id);
@@ -3996,6 +4733,8 @@ export class CoordinatorStore {
       const claimRequest = this.#requireClaimRequest(requestId);
       this.#assertRequestOwner(request, claimRequest);
       this.#assertVersion(claimRequest.version, request.expected_version, 'claim request');
+      const run = this.#requireRun(claimRequest.owner.repo_id, claimRequest.owner.workstream_run);
+      if (this.#hasD65CompleteGraph(run.repo_id, run.workstream_run)) this.#assertD65OrdinaryMutationAllowed(request, run, 'respond-claim-request');
       this.#assertAuthorityCriticalMutationAllowed(claimRequest.owner.repo_id, claimRequest.owner.workstream_run, 'claim response reconciliation or authority release');
       if (!['pending', 'delivered', 'acknowledged', 'deferred'].includes(claimRequest.status)) throw new CoordinationRuntimeError('invalid-state', `claim request is ${claimRequest.status}`);
       const seq = this.#nextEventSequence(request.repo_id);
@@ -4053,6 +4792,8 @@ export class CoordinatorStore {
       this.#assertRequestRequester(request, claimRequest);
       this.#assertVersion(claimRequest.version, request.expected_version, 'claim request');
       const group = this.#requireGroup(request.repo_id, claimRequest.acquisition_group_id);
+      const run = this.#requireRun(request.repo_id, claimRequest.requester.workstream_run);
+      if (this.#hasD65CompleteGraph(run.repo_id, run.workstream_run)) this.#assertD65OrdinaryMutationAllowed(request, run, 'cancel-claim-request');
       if (group.state === 'granted') throw new CoordinationRuntimeError('invalid-state', 'a granted acquisition group must release through its owner lifecycle');
       const seq = this.#nextEventSequence(request.repo_id);
       this.#cancelGroup(group, 'cancelled', seq);
@@ -4067,6 +4808,8 @@ export class CoordinatorStore {
       const group = this.#requireGroup(request.repo_id, payloadString(request.payload, 'acquisition_group_id'));
       this.#assertGroupOwner(request, group);
       this.#assertVersion(group.version, request.expected_version, 'acquisition group');
+      const run = this.#requireRun(group.owner.repo_id, group.owner.workstream_run);
+      if (this.#hasD65CompleteGraph(run.repo_id, run.workstream_run)) this.#assertD65OrdinaryMutationAllowed(request, run, 'cancel-acquisition-group');
       const seq = this.#nextEventSequence(request.repo_id);
       this.#cancelGroup(group, 'cancelled', seq);
       this.#reevaluateWaitingGroups(request.repo_id, seq);
@@ -4082,6 +4825,7 @@ export class CoordinatorStore {
       const attemptNumber = payloadInteger(request.payload, 'attempt');
       const attempt = this.#requireUnitAttempt(request.repo_id, run.workstream_run, unitId, attemptNumber);
       this.#assertVersion(attempt.version, request.expected_version, 'unit attempt');
+      if (this.#hasD65CompleteGraph(run.repo_id, run.workstream_run)) this.#assertD65OrdinaryMutationAllowed(request, run, 'supersede-attempt');
       const seq = this.#nextEventSequence(request.repo_id);
       const groups = this.#groupsForAttempt(attempt.owner);
       if (groups.some((group) => group.state === 'granted')) throw new CoordinationRuntimeError('invalid-state', 'running/granted attempt must release or quarantine before supersession');
@@ -4103,20 +4847,102 @@ export class CoordinatorStore {
       const sourceScope = payloadString(request.payload, 'source_scope');
       if (sourceScope !== 'repository' && sourceScope !== 'run-main') throw new CoordinationRuntimeError('invalid-request', 'authoritative artifact source_scope is unsupported');
       const documentSchemaVersion = payloadString(request.payload, 'document_schema_version');
+      const ref = payloadString(request.payload, 'ref');
       // D65 package-run documents use the frozen existing task/run-main
       // registration surface. Reject a launch policy before resolving or reading
       // any repository-scoped path; repository scope belongs only to bootstrap.
       if (documentSchemaVersion === 'autopilot.launch_policy.v1' && (sourceType !== 'task' || sourceScope !== 'run-main')) throw new CoordinationRuntimeError('invalid-request', 'launch-policy-invalid: launch policy registration requires source_type=task and source_scope=run-main', [sourceType, sourceScope]);
+      if (documentSchemaVersion === 'autopilot.semantic_graph.v1' && (sourceType !== 'task' || sourceScope !== 'run-main')) throw new CoordinationRuntimeError('invalid-request', 'semantic-graph-artifact-invalid: semantic graph registration requires source_type=task and source_scope=run-main', [sourceType, sourceScope]);
       if (documentSchemaVersion === 'autopilot.launch_policy.v1' && run.status !== 'active') throw new CoordinationRuntimeError('invalid-request', 'launch-policy-invalid: launch policy registration requires an active run', [run.status]);
+      // Bootstrap mode permits only its explicit charter operations: the sole
+      // artifact registrations before the first complete graph are the signed
+      // launch policy (register-launch-policy) and the complete graph itself
+      // (publish-complete-graph). Any other schema — including a mission/task
+      // document squatting a semantic-graph:<seq> id — rejects loudly.
+      if (this.#isD65Run(run.repo_id, run.workstream_run) && !this.#hasD65CompleteGraph(run.repo_id, run.workstream_run) && documentSchemaVersion !== 'autopilot.launch_policy.v1' && documentSchemaVersion !== 'autopilot.semantic_graph.v1') throw new CoordinationRuntimeError('invalid-request', 'semantic-graph-bootstrap-operation-denied: bootstrap mode permits only launch-policy and complete-graph artifact registration', [documentSchemaVersion, payloadString(request.payload, 'artifact_id')]);
+      // Every D65 semantic-graph registration is gated: the first publication
+      // (sequence 2) has its own exact bootstrap-prior admission and every
+      // successor requires the accepted prior complete graph. There is no
+      // residue-optional or policy-optional bypass.
+      if (documentSchemaVersion === 'autopilot.semantic_graph.v1' && this.#isD65Run(run.repo_id, run.workstream_run)) this.#assertD65GraphPublicationMutationAllowed(request, run);
+      // Continuation/parent-loss/probe registrations in complete mode are
+      // recovery actions: global [], the artifact's accepted continuation
+      // reason plus only its affecting provider reason and/or unit-recovering,
+      // current graph/policy/session, no pending publication. Ordinary
+      // dispatch admits every other complete-mode task registration.
+      const d65RecoveryArtifact = documentSchemaVersion === 'autopilot.continuation_event.v1' || documentSchemaVersion === 'autopilot.parent_loss.v1' || documentSchemaVersion === 'autopilot.subscription_probe.v1';
+      if (d65RecoveryArtifact && this.#isD65Run(run.repo_id, run.workstream_run)) {
+        // Path grammar is frozen: continuation events and the byte-identical
+        // parent-loss artifact live under the runtime authority/continuation/
+        // root; probes under authority/subscription-probes/ (fresh plan §2.3/§3.1).
+        const requestedRef = payloadString(request.payload, 'ref');
+        const resourceRow = runResourceFromRow(asRow(this.#db.prepare('SELECT * FROM run_resources WHERE repo_id=? AND workstream_run=?').get(run.repo_id, run.workstream_run), 'D65 recovery artifact run resource'));
+        const runtimePrefix = relative(resourceRow.main_worktree_path, resourceRow.runtime_root).replace(/\\/gu, '/');
+        if (documentSchemaVersion === 'autopilot.continuation_event.v1' && !new RegExp(`^${runtimePrefix.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')}/authority/continuation/[0-9]{20}-[A-Za-z0-9._:@-]+\\.json$`, 'u').test(requestedRef)) throw new CoordinationRuntimeError('invalid-request', 'continuation event ref is not the frozen runtime authority/continuation path', [requestedRef]);
+        if (documentSchemaVersion === 'autopilot.parent_loss.v1' && !new RegExp(`^${runtimePrefix.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')}/authority/continuation/[0-9]{20}-parent-loss\\.json$`, 'u').test(requestedRef)) throw new CoordinationRuntimeError('invalid-request', 'parent-loss artifact ref is not the frozen runtime authority/continuation parent-loss path', [requestedRef]);
+        if (documentSchemaVersion === 'autopilot.subscription_probe.v1' && !/^authority\/subscription-probes\/[0-9]{20}-[A-Za-z0-9._:@-]+\.json$/u.test(requestedRef)) throw new CoordinationRuntimeError('invalid-request', 'subscription probe ref is not the frozen authority/subscription-probes path', [requestedRef]);
+      }
+      if (this.#isD65Run(run.repo_id, run.workstream_run) && this.#hasD65CompleteGraph(run.repo_id, run.workstream_run) && documentSchemaVersion !== 'autopilot.semantic_graph.v1') {
+        if (sourceType !== 'task' || sourceScope !== 'run-main') throw new CoordinationRuntimeError('invalid-request', 'D65 complete-mode artifact registration requires source_type=task and source_scope=run-main');
+        // Registration runs after its one-parent immutable artifact commit, so
+        // physical HEAD is intentionally one exact commit beyond accepted H.
+        // Prove that commit NOW (sole parent H, diff exactly this ref) before
+        // evaluating dispatch against the logical prior graph. Any extra path,
+        // parent, merge, or stale base rejects before coordinator row effect.
+        const resource = runResourceFromRow(asRow(this.#db.prepare('SELECT * FROM run_resources WHERE repo_id=? AND workstream_run=?').get(run.repo_id, run.workstream_run), 'D65 artifact registration resource'));
+        const requestedCommit = payloadString(request.payload, 'git_commit');
+        const currentHead = this.#gitQueryText(resource.main_worktree_path, { kind: 'head' }, 'invalid-request', 'D65 artifact registration HEAD inspection failed');
+        const priorGraph = this.#d65AcceptedGraphHead(run.repo_id, run.workstream_run);
+        const parentListing = (this.#gitQueryText(resource.main_worktree_path, { kind: 'rev-list-parents', revision: requestedCommit }, 'invalid-request', 'D65 artifact commit parent inspection failed') ?? '').trim().split(/\s+/u).filter((entry) => entry.length > 0);
+        const diff = this.#gitQueryResult(resource.main_worktree_path, { kind: 'diff-paths', from: priorGraph.artifact.git_commit, to: requestedCommit, noRenames: true }, 'invalid-request', 'D65 artifact commit diff inspection failed');
+        const changedPaths = new TextDecoder('utf-8', { fatal: true }).decode(diff.stdout).split('\0').filter((entry) => entry.length > 0);
+        const allowedPaths = new Map<string, { readonly sha256: `sha256:${string}`; readonly byte_count: number } | null>([[ref, null]]);
+        if (documentSchemaVersion === 'autopilot.continuation_event.v1') {
+          const continuationBytes = this.#gitQueryResult(resource.main_worktree_path, { kind: 'show-file', revision: requestedCommit, path: ref }, 'invalid-request', 'D65 continuation artifact blob inspection failed').stdout;
+          const continuation = parseD65ContinuationEvent(parseJsonObject(new TextDecoder('utf-8', { fatal: true }).decode(continuationBytes), 'D65 continuation artifact commit'));
+          for (const evidence of [...continuation.evidence_refs, ...(continuation.failed_spec_ref === null ? [] : [continuation.failed_spec_ref]), ...(continuation.failed_receipt_ref === null ? [] : [continuation.failed_receipt_ref])]) allowedPaths.set(evidence.ref, evidence);
+        }
+        const commitShapeExact = currentHead === requestedCommit && parentListing.length === 2 && parentListing[1] === priorGraph.artifact.git_commit && changedPaths.includes(ref) && changedPaths.length > 0 && changedPaths.every((path) => allowedPaths.has(path));
+        if (!commitShapeExact) throw new CoordinationRuntimeError('invalid-request', 'D65 artifact registration commit is not the exact one-parent prescribed-path successor of accepted H', [String(currentHead), requestedCommit, ...parentListing.slice(1), ...changedPaths.slice(0, 8)]);
+        for (const path of changedPaths) {
+          const expected = allowedPaths.get(path);
+          if (expected === undefined) throw new CoordinationRuntimeError('store-corrupt', 'D65 prescribed artifact path disappeared during commit validation', [path]);
+          if (expected === null) continue;
+          const memberBytes = this.#gitQueryResult(resource.main_worktree_path, { kind: 'show-file', revision: requestedCommit, path }, 'invalid-request', 'D65 continuation embedded evidence inspection failed').stdout;
+          const memberDigest = `sha256:${createHash('sha256').update(memberBytes).digest('hex')}`;
+          if (memberDigest !== expected.sha256 || memberBytes.byteLength !== expected.byte_count) throw new CoordinationRuntimeError('invalid-request', 'D65 continuation embedded evidence commit bytes differ from their immutable binding', [path, expected.sha256, memberDigest]);
+        }
+        const logicalGraphCurrent = this.#d65CompleteGraphCurrent(run.repo_id, run.workstream_run);
+        if (!logicalGraphCurrent) throw new CoordinationRuntimeError('invalid-state', 'D65 artifact registration prior graph is not semantically current');
+        const frame = this.#d65DispatchAuthorityFrameInTransaction(run.repo_id, run.workstream_run, this.#d65MutationContext(request, run.version), this.#clock.now().toISOString(), true);
+        const rowReasons = frame.row_stop_reasons.length === 1 && frame.row_stop_reasons[0] === 'graph-drift' ? Object.freeze([]) : frame.row_stop_reasons;
+        const evaluationGraph = Object.freeze({ ...frame.graph, complete_graph_current: true });
+        const ordinary = ordinaryDispatchAllowed({ global_stop_reasons: frame.global_stop_reasons, row_stop_reasons: rowReasons, run_state: frame.run_state, graph: evaluationGraph, policy: frame.policy, heartbeat: frame.heartbeat, session: frame.session });
+        if (d65RecoveryArtifact) {
+          // Recovery documents NEVER ride ordinary dispatch. They require one
+          // exact continuation reason even when the row would otherwise be
+          // ordinary-clear, so a probe/continuation cannot become an untyped
+          // task artifact.
+          const legalContinuationReasons = ['graph-drift', 'graph-incomplete', 'handoff-pending', 'parent-recovering', 'progress-stale', 'terminal-tail', 'unit-recovering'] as const;
+          const present = rowReasons.filter((reason) => (legalContinuationReasons as readonly string[]).includes(reason));
+          if (present.length !== 1 || present[0] === undefined) throw new CoordinationRuntimeError('invalid-state', 'D65 recovery artifact registration requires exactly one accepted continuation row reason', [...rowReasons]);
+          const verdict = recoveryTransitionAllowed({ action: 'register-authoritative-artifact', global_stop_reasons: frame.global_stop_reasons, row_stop_reasons: rowReasons, run_state: frame.run_state, graph: evaluationGraph, policy: frame.policy, heartbeat: frame.heartbeat, bindings: { attached_session_current: frame.session.attached_session_current && frame.session.lease_current && frame.session.expected_version_current, policy_trust_current: frame.policy.policy_current, no_pending_publication: !frame.graph.graph_publication_pending, terminal_prepared_cancellable: false, terminal_after_commit: false, accepted_continuation_reason: present[0], covered_semantic_reason: null, attach_terminal_recovery: false } });
+          if (!verdict.allowed) throw new CoordinationRuntimeError('invalid-state', 'D65 recovery artifact registration is fenced at its coordinator transaction boundary', verdict.denied_by.slice());
+        } else if (!ordinary.allowed) {
+          throw new CoordinationRuntimeError('invalid-state', 'D65 ordinary mutation register-authoritative-artifact is fenced at its coordinator transaction boundary', ordinary.denied_by.slice());
+        }
+      }
       const repository = repositoryFromRow(asRow(this.#db.prepare('SELECT * FROM repositories WHERE repo_id=?').get(run.repo_id), 'authoritative artifact repository'));
       const sourceRoot = sourceScope === 'repository' ? repository.canonical_root : this.#requireRunMainRoot(run.repo_id, run.workstream_run);
-      const ref = payloadString(request.payload, 'ref');
       this.#evidencePathUnderRoot(sourceRoot, ref);
       const gitCommit = payloadString(request.payload, 'git_commit');
       const verifiedCommit = this.#gitQueryText(sourceRoot, { kind: 'resolve-commit', revision: gitCommit }, 'invalid-request', 'authoritative artifact Git commit verification failed');
       if (verifiedCommit !== gitCommit) throw new CoordinationRuntimeError('invalid-request', 'authoritative artifact git_commit is not the exact verified commit in its registered source repository', [gitCommit, String(verifiedCommit)]);
       const sourceHead = this.#gitQueryText(sourceRoot, { kind: 'head' }, 'invalid-request', 'authoritative artifact source HEAD inspection failed');
-      if (sourceHead !== gitCommit) throw new CoordinationRuntimeError('invalid-request', 'authoritative artifact must be registered from the exact current source authority HEAD', [gitCommit, String(sourceHead)]);
+      // A semantic graph registers graph-only H while the run-main remains at
+      // its covered authority G. Every other artifact still registers from exact
+      // current HEAD. #validateD65GraphRegistration proves H^=G=sourceHead.
+      if (documentSchemaVersion !== 'autopilot.semantic_graph.v1' && sourceHead !== gitCommit) throw new CoordinationRuntimeError('invalid-request', 'authoritative artifact must be registered from the exact current source authority HEAD', [gitCommit, String(sourceHead)]);
       const shown = this.#gitQueryResult(sourceRoot, { kind: 'show-file', revision: gitCommit, path: ref }, 'invalid-request', 'authoritative artifact ref is not a blob at the immutable Git commit');
       if (shown.stdout.byteLength > MAX_COORDINATION_EVIDENCE_BYTES) throw new CoordinationRuntimeError('invalid-request', 'authoritative artifact Git blob exceeds the immutable evidence byte bound', [ref, `bytes=${String(shown.stdout.byteLength)}`]);
       const bytes = shown.stdout;
@@ -4136,6 +4962,53 @@ export class CoordinatorStore {
           throw new CoordinationRuntimeError('invalid-request', 'launch-policy-invalid: policy document is malformed', [error instanceof Error ? error.message : String(error)]);
         }
       } else validateAuthoritativeCoordinationDocument(sourceType, documentSchemaVersion, bytes);
+      if (documentSchemaVersion === 'autopilot.subscription_probe.v1' && this.#isD65Run(run.repo_id, run.workstream_run)) {
+        const probe = parseD65SubscriptionProbe(parseJsonObject(new TextDecoder('utf-8', { fatal: true }).decode(bytes), 'registered subscription probe'));
+        const acceptedPolicy = this.#d65AcceptedLaunchPolicy(run.repo_id, run.workstream_run);
+        const expectedRef = `authority/subscription-probes/${String(probe.probe_sequence).padStart(20, '0')}-${probe.probe_id}.json`;
+        if (ref !== expectedRef || probe.program_id !== acceptedPolicy.policy.program_id || probe.repo_id !== run.repo_id || probe.workstream_run !== run.workstream_run || probe.trust_anchor_ref !== acceptedPolicy.policy.trust_anchor_ref || probe.trust_anchor_sha256 !== acceptedPolicy.policy.trust_anchor_sha256 || probe.signer_key_id !== acceptedPolicy.anchor.sha256) throw new CoordinationRuntimeError('invalid-request', 'subscription probe identity/path/trust tuple does not equal accepted D65 authority', [ref, expectedRef]);
+        const { signature: _signature, ...unsignedProbe } = probe;
+        void _signature;
+        if (!verifyD65Signature({ trustAnchor: acceptedPolicy.anchor, purpose: 'subscription-probe', message: new TextEncoder().encode(canonicalJson(unsignedProbe)), signature: probe.signature })) throw new CoordinationRuntimeError('unauthorized-client', 'subscription probe signature is invalid for the accepted trust anchor');
+        const coordinatorMs = Date.parse(this.#clock.now().toISOString());
+        if (!(Date.parse(probe.issued_at) <= coordinatorMs && coordinatorMs < Date.parse(probe.expires_at))) throw new CoordinationRuntimeError('invalid-request', 'subscription probe is early or expired at registration coordinator time', [probe.issued_at, probe.expires_at]);
+        const triggerRows = this.#db.prepare("SELECT * FROM authoritative_artifacts WHERE repo_id=? AND source_run=? AND json_extract(payload_json, '$.document_schema_version')='autopilot.continuation_event.v1' AND json_extract(payload_json, '$.evidence.ref')=?").all(run.repo_id, run.workstream_run, probe.trigger_continuation_ref).map(authoritativeArtifactFromRow);
+        const triggerArtifact = triggerRows[0];
+        if (triggerRows.length !== 1 || triggerArtifact === undefined || triggerArtifact.evidence.sha256 !== probe.trigger_continuation_sha256) throw new CoordinationRuntimeError('invalid-request', 'subscription probe trigger is not one exact accepted continuation artifact', [probe.trigger_continuation_ref]);
+        const trigger = parseD65ContinuationEvent(parseJsonObject(new TextDecoder('utf-8', { fatal: true }).decode(this.#loadEvidenceArtifact(run.repo_id, triggerArtifact.evidence)), 'subscription probe trigger'));
+        if (trigger.trigger !== 'subscription-failure' || trigger.class !== 'provider-capacity-blocked' || trigger.provider !== probe.provider || trigger.repo_id !== run.repo_id || trigger.workstream_run !== run.workstream_run || trigger.unit_id !== probe.unit_id || trigger.attempt !== probe.failed_attempt || trigger.retry_ordinal !== probe.retry_ordinal || trigger.cooldown_until !== probe.cooldown_until) throw new CoordinationRuntimeError('invalid-request', 'subscription probe does not bind the exact accepted first-failure continuation tuple');
+        const priors = this.#db.prepare("SELECT * FROM authoritative_artifacts WHERE repo_id=? AND source_run=? AND json_extract(payload_json, '$.document_schema_version')='autopilot.subscription_probe.v1' ORDER BY entity_id").all(run.repo_id, run.workstream_run).map(authoritativeArtifactFromRow).map((artifact) => ({ artifact, probe: parseD65SubscriptionProbe(parseJsonObject(new TextDecoder('utf-8', { fatal: true }).decode(this.#loadEvidenceArtifact(run.repo_id, artifact.evidence)), 'prior registered subscription probe')) })).filter((entry) => entry.probe.program_id === probe.program_id && entry.probe.provider === probe.provider && entry.probe.workstream_run === probe.workstream_run).sort((left, right) => left.probe.probe_sequence - right.probe.probe_sequence);
+        const prior = priors[priors.length - 1];
+        if (probe.probe_sequence !== priors.length + 1 || probe.prior_probe_sha256 !== (prior?.artifact.evidence.sha256 ?? null)) throw new CoordinationRuntimeError('stale-version', 'subscription probe local chain has a gap, fork, or wrong immediate prior', [String(probe.probe_sequence), String(priors.length + 1)]);
+      }
+      if (documentSchemaVersion === 'autopilot.continuation_event.v1' && this.#isD65Run(run.repo_id, run.workstream_run)) {
+        const continuation = parseD65ContinuationEvent(parseJsonObject(new TextDecoder('utf-8', { fatal: true }).decode(bytes), 'registered continuation event'));
+        const expectedSuffix = `${String(continuation.event_sequence).padStart(20, '0')}-${continuation.event_id}.json`;
+        if (!ref.endsWith(`/authority/continuation/${expectedSuffix}`) || continuation.repo_id !== run.repo_id || continuation.workstream_run !== run.workstream_run) throw new CoordinationRuntimeError('invalid-request', 'continuation event path/sequence/id/run tuple is not exact', [ref, expectedSuffix]);
+        if (continuation.trigger === 'parent-loss') {
+          const currentSession = this.#requireCurrentSession(request);
+          const graphHead = this.#d65AcceptedGraphHead(run.repo_id, run.workstream_run);
+          const evidence = continuation.evidence_refs[0];
+          const parentRows = evidence === undefined ? [] : this.#db.prepare("SELECT * FROM authoritative_artifacts WHERE repo_id=? AND source_run=? AND json_extract(payload_json, '$.document_schema_version')='autopilot.parent_loss.v1' AND json_extract(payload_json, '$.evidence.ref')=?").all(run.repo_id, run.workstream_run, evidence.ref).map(authoritativeArtifactFromRow);
+          const parent = parentRows[0];
+          if (continuation.class !== 'parent-recovering' || continuation.session_lease_id !== currentSession.session_lease_id || continuation.successor_id !== currentSession.session_lease_id || continuation.evidence_refs.length !== 1 || parentRows.length !== 1 || parent === undefined || evidence === undefined || evidence.sha256 !== parent.evidence.sha256 || continuation.prior_graph_sha256 !== graphHead.sha256 || continuation.result_graph_sequence !== d65SemanticGraphSequenceFromArtifactId(graphHead.artifact.artifact_id) + 1) throw new CoordinationRuntimeError('invalid-request', 'parent-loss continuation does not bind the current session/parent artifact/prior-result graph tuple');
+        }
+      }
+      if (documentSchemaVersion === 'autopilot.parent_loss.v1' && this.#isD65Run(run.repo_id, run.workstream_run)) {
+        // The committed parent-loss artifact must be byte-identical to the one
+        // fixed candidate authenticated/consumed by THIS successor attach. A
+        // second validly signed candidate, alternate candidate path, or digest
+        // from another generation has no registration authority.
+        const currentSession = this.#requireCurrentSession(request);
+        const attachedEvent = asRow(this.#db.prepare("SELECT event_seq,idempotency_key,request_sha256 FROM events WHERE repo_id=? AND event_seq=? AND event_type='session-attached' AND entity_type='session-lease' AND entity_id=?").get(run.repo_id, currentSession.attached_event_seq, currentSession.session_lease_id), 'parent-loss registration attach event');
+        const attachedResult = asRow(this.#db.prepare('SELECT request_sha256,committed_event_seq,payload_json FROM idempotency_results WHERE repo_id=? AND idempotency_key=?').get(run.repo_id, sqlString(attachedEvent, 'idempotency_key')), 'parent-loss registration attach result');
+        if (sqlString(attachedResult, 'request_sha256') !== sqlString(attachedEvent, 'request_sha256') || sqlInteger(attachedResult, 'committed_event_seq') !== currentSession.attached_event_seq) throw new CoordinationRuntimeError('store-corrupt', 'parent-loss successor attach event/result identity is inconsistent');
+        const attachedPayload = parseJsonObject(sqlString(attachedResult, 'payload_json'), 'parent-loss successor attach result');
+        const attachedDigest = attachedPayload['parent_loss_candidate_sha256'];
+        if (attachedDigest !== actual) throw new CoordinationRuntimeError('invalid-request', 'parent-loss artifact bytes are not byte-identical to the candidate consumed by the current successor attach', [String(attachedDigest), actual]);
+        const parentLoss = parseD65ParentLoss(parseJsonObject(new TextDecoder('utf-8', { fatal: true }).decode(bytes), 'registered parent-loss artifact'));
+        if (parentLoss.successor_session_id !== currentSession.session_id || parentLoss.successor_session_lease_id !== currentSession.session_lease_id || parentLoss.successor_generation !== currentSession.session_generation || parentLoss.successor_pid !== currentSession.pid || parentLoss.successor_boot_id !== currentSession.boot_id) throw new CoordinationRuntimeError('invalid-request', 'parent-loss artifact successor identity differs from the current candidate-authorized session');
+      }
       const artifactId = payloadString(request.payload, 'artifact_id');
       // D65-A2: a complete-graph root registers at its publication commit H with
       // non-self-referential publication rules (sole-parent-G, graph-only diff,
@@ -4178,6 +5051,7 @@ export class CoordinatorStore {
       this.#requireCurrentSession(request);
       const run = this.#requireRun(request.repo_id, this.#workstreamRun(request));
       this.#assertVersion(run.version, request.expected_version, 'run');
+      if (this.#hasD65CompleteGraph(run.repo_id, run.workstream_run)) this.#assertD65OrdinaryMutationAllowed(request, run, 'assign-adjudication');
       const proposed = parseCoordinationAdjudicationAssignment(request.payload['assignment']);
       if (proposed.repo_id !== run.repo_id || proposed.requesting_run !== run.workstream_run || !proposed.participating_runs.includes(run.workstream_run)) throw new CoordinationRuntimeError('unauthorized-client', 'adjudication assignment must be requested by a participating durable run');
       if (proposed.state !== 'assigned' || proposed.adjudication !== null || proposed.child_lease_id !== null || proposed.assigned_event_seq !== 0 || proposed.accepted_event_seq !== null || proposed.version !== 1) throw new CoordinationRuntimeError('invalid-request', 'new adjudication assignment must use the canonical uncommitted assigned state');
@@ -4226,6 +5100,7 @@ export class CoordinatorStore {
       this.#requireCurrentSession(request);
       const run = this.#requireRun(request.repo_id, this.#workstreamRun(request));
       this.#assertVersion(run.version, request.expected_version, 'run');
+      if (this.#hasD65CompleteGraph(run.repo_id, run.workstream_run)) this.#assertD65OrdinaryMutationAllowed(request, run, 'claim-adjudication-assignment');
       const unitId = payloadString(request.payload, 'unit_id');
       const attempt = payloadInteger(request.payload, 'attempt');
       const assignments = this.#db.prepare("SELECT * FROM adjudication_assignments WHERE repo_id=? AND json_extract(payload_json, '$.state')='assigned' AND json_extract(payload_json, '$.adjudicator.workstream_run')=? AND json_extract(payload_json, '$.adjudicator.unit_id')=? AND json_extract(payload_json, '$.adjudicator.attempt')=? ORDER BY entity_id").all(run.repo_id, run.workstream_run, unitId, attempt).map(adjudicationAssignmentFromRow);
@@ -4252,6 +5127,8 @@ export class CoordinatorStore {
       this.#assertChildAuthority(request, child, childRow);
       this.#assertVersion(child.version, request.expected_version, 'child lease');
       if (child.status !== 'running') throw new CoordinationRuntimeError('invalid-state', `adjudicator child lease is ${child.status}`);
+      const run = this.#requireRun(child.owner.repo_id, child.owner.workstream_run);
+      if (this.#hasD65CompleteGraph(run.repo_id, run.workstream_run)) this.#assertD65OrdinaryMutationAllowed(request, run, 'complete-adjudication', this.#d65CurrentDispatchContext(run));
       this.#assertAuthorityCriticalMutationAllowed(child.owner.repo_id, child.owner.workstream_run, 'adjudication terminal acceptance and authority release');
       const assignmentId = payloadString(request.payload, 'assignment_id');
       const assignmentRow = asRow(this.#db.prepare('SELECT * FROM adjudication_assignments WHERE repo_id=? AND entity_id=?').get(request.repo_id, assignmentId), 'adjudication assignment');
@@ -4302,6 +5179,7 @@ export class CoordinatorStore {
       this.#requireCurrentSession(request);
       const run = this.#requireRun(request.repo_id, this.#workstreamRun(request));
       this.#assertVersion(run.version, request.expected_version, 'run');
+      if (this.#hasD65CompleteGraph(run.repo_id, run.workstream_run)) this.#assertD65OrdinaryMutationAllowed(request, run, 'submit-planning-contradiction');
       const submitted = parseCoordinationEscalation(request.payload['packet']);
       if (submitted.repo_id !== run.repo_id || !submitted.participating_runs.includes(run.workstream_run)) throw new CoordinationRuntimeError('unauthorized-client', 'planning contradiction must include the submitting durable run');
       if (submitted.created_event_seq !== 0 || submitted.version !== 1) throw new CoordinationRuntimeError('invalid-request', 'new planning contradiction packet must use created_event_seq 0 and version 1 before coordinator commit');
@@ -4341,10 +5219,19 @@ export class CoordinatorStore {
       if (source === 'child-process') throw new CoordinationRuntimeError('invalid-request', 'child-process terminal evidence is accepted only through authenticated complete-child or the closed startup repair path');
       const conditionType = this.#conditionTypeForSource(source);
       const targetId = payloadString(request.payload, 'target_id');
-      this.#assertReconciliationTarget(run, conditionType, targetId);
-      const seq = this.#nextEventSequence(request.repo_id);
       const evidenceRef = payloadString(request.payload, 'evidence_ref');
       const evidenceSha256 = payloadString(request.payload, 'evidence_sha256') as `sha256:${string}`;
+      this.#assertReconciliationTarget(run, conditionType, targetId);
+      let d65FirstEffectBaseline: D65TerminalFirstEffectBaseline | null = null;
+      if ((source === 'run-close' || source === 'run-abort') && this.#isD65Run(run.repo_id, run.workstream_run)) {
+        this.#assertD65TerminalTailEntry(run, source);
+        this.#assertD65RecoveryMutationAllowed(request, run, 'terminal-tail', { attached_session_current: true, policy_trust_current: true, no_pending_publication: true, terminal_prepared_cancellable: false, terminal_after_commit: false, accepted_continuation_reason: null, covered_semantic_reason: null, attach_terminal_recovery: false });
+        d65FirstEffectBaseline = this.#captureD65TerminalFirstEffectBaseline(run);
+      } else if (this.#hasD65CompleteGraph(run.repo_id, run.workstream_run)) {
+        if (source === 'attempt-reset' || source === 'quarantine-capture') this.#assertD65UnitRecoveryEvidenceMutationAllowed(request, run, evidenceRef, evidenceSha256);
+        else this.#assertD65OrdinaryMutationAllowed(request, run, 'record-release-evidence');
+      }
+      const seq = this.#nextEventSequence(request.repo_id);
       const evidence = this.#acceptReconciliationEvidence({
         repoId: request.repo_id,
         workstreamRun,
@@ -4385,6 +5272,10 @@ export class CoordinatorStore {
       const reconciled = this.#reconcileOwnedRun(request.repo_id, workstreamRun, seq);
       const reconciliation = this.#freezeReconciliationSummary({ ...reconciled, released_lease_ids: [...directlyReleasedLeaseIds, ...reconciled.released_lease_ids], stale_observation_ids: [...staleObservationIds, ...reconciled.stale_observation_ids] });
       const reconciliationReceipt = this.#persistReconciliationReceipt(request.repo_id, run.workstream_run, request.action, seq, reconciliation);
+      if (d65FirstEffectBaseline !== null) {
+        if (terminalSha === null || (source !== 'run-close' && source !== 'run-abort')) throw new CoordinationRuntimeError('store-corrupt', 'D65 terminal first-effect verification lost terminal identity');
+        this.#assertD65TerminalFirstEffectExact(d65FirstEffectBaseline, source, terminalSha, seq);
+      }
       return { sequence: seq, eventType: 'release-evidence-accepted', entityType: 'reconciliation-evidence', entityId: evidence.reconciliation_evidence_id, payload: { reconciliation_evidence: evidence, run: nextRun, ...this.#reconciliationReceiptPayload(reconciliationReceipt), change_reservations: convertedReservations, reservation_obligations: createdObligations } };
     });
   }
@@ -4399,6 +5290,7 @@ export class CoordinatorStore {
       const obligationId = payloadString(request.payload, 'obligation_id');
       const obligation = reservationObligationFromRow(asRow(this.#db.prepare('SELECT * FROM reservation_obligations WHERE repo_id=? AND entity_id=?').get(request.repo_id, obligationId), 'reservation obligation'));
       this.#assertVersion(obligation.version, request.expected_version, 'reservation obligation');
+      if (this.#hasD65CompleteGraph(run.repo_id, run.workstream_run)) this.#assertD65OrdinaryMutationAllowed(request, run, 'resolve-reservation-obligation');
       if (obligation.workstream_run !== workstreamRun) throw new CoordinationRuntimeError('unauthorized-client', 'session cannot resolve a foreign-run reservation obligation');
       if ((obligation.state !== 'integration-required' && obligation.state !== 'resolved') || obligation.predecessor_released_event_seq === null || obligation.predecessor_terminal_sha === null) throw new CoordinationRuntimeError('invalid-state', `reservation obligation is ${obligation.state} without refreshable predecessor landing authority`);
       const dependentReservation = changeReservationFromRow(asRow(this.#db.prepare('SELECT * FROM change_reservations WHERE repo_id=? AND entity_id=?').get(run.repo_id, obligation.reservation_id), 'dependent reservation'));
@@ -4446,14 +5338,15 @@ export class CoordinatorStore {
       // Readiness is deliberately checked at terminal commit, not here. This
       // transaction must always establish the durable launch fence first; close
       // validation can then classify/cancel safely without a concurrent dispatch.
+      const d65Bootstrap = this.#isD65Run(run.repo_id, run.workstream_run);
+      if (d65Bootstrap) this.#assertD65OrdinaryMutationAllowed(request, run, 'prepare-run-terminal');
       const seq = this.#nextEventSequence(run.repo_id);
       const reservationIds = this.#db.prepare("SELECT entity_id FROM change_reservations WHERE repo_id=? AND workstream_run=? AND json_extract(payload_json, '$.released_event_seq') IS NULL ORDER BY entity_id").all(run.repo_id, run.workstream_run).map((row) => sqlString(row, 'entity_id'));
-      // D65-A3: a current-build prepare-run-terminal carrying intent_attempt
-      // creates an append-only autopilot.run_terminal_intent.v2 with the exact
-      // repository-wide obligation partition; omission preserves unchanged v1.
-      if (request.payload['intent_attempt'] !== undefined) {
-        return this.#applyD65TerminalIntentV2(request, run, seq, outcomeValue, reservationIds);
-      }
+      // D65-A3: a D65 bootstrap-backed run MUST create append-only v2. Legacy
+      // omission remains byte-compatible only when no D65 bootstrap authority
+      // exists for the run.
+      if (request.payload['intent_attempt'] !== undefined) return this.#applyD65TerminalIntentV2(request, run, seq, outcomeValue, reservationIds);
+      if (d65Bootstrap) throw new CoordinationRuntimeError('invalid-request', 'D65 prepare-run-terminal requires append-only intent v2 attempt/prior/effect-set fields');
       const intent = parseCoordinationRunTerminalIntent({ schema_version: 'autopilot.run_terminal_intent.v1', terminal_intent_id: payloadString(request.payload, 'terminal_intent_id'), repo_id: run.repo_id, workstream_run: run.workstream_run, outcome: outcomeValue, state: 'prepared', reservation_ids: reservationIds, prepared_event_seq: seq, terminal_event_seq: null, version: 1 });
       const nextRun = parseCoordinationRun({ ...run, status: 'merging', version: run.version + 1 });
       this.#db.prepare('INSERT INTO run_terminal_intents(entity_id, repo_id, workstream_run, payload_json, version) VALUES(?, ?, ?, ?, ?)').run(intent.terminal_intent_id, intent.repo_id, intent.workstream_run, canonicalJson(intent), intent.version);
@@ -4484,7 +5377,294 @@ export class CoordinatorStore {
     const nextRun = parseCoordinationRun({ ...run, status: 'merging', version: run.version + 1 });
     this.#db.prepare('INSERT INTO run_terminal_intents(entity_id, repo_id, workstream_run, payload_json, version) VALUES(?, ?, ?, ?, ?)').run(intent.terminal_intent_id, intent.repo_id, intent.workstream_run, canonicalJson(intent), intent.version);
     this.#db.prepare("UPDATE runs SET status='merging', version=? WHERE repo_id=? AND workstream_run=?").run(nextRun.version, run.repo_id, run.workstream_run);
-    return { sequence: seq, eventType: 'run-terminal-prepared', entityType: 'run-terminal-intent', entityId: intent.terminal_intent_id, payload: { run_terminal_intent: intent as unknown as Readonly<Record<string, unknown>>, run: nextRun } };
+    return { sequence: seq, eventType: 'run-terminal-prepared', entityType: 'run-terminal-intent', entityId: intent.terminal_intent_id, payload: { run_terminal_intent: Object.freeze({ ...intent }), run: nextRun } };
+  }
+
+  /**
+   * SR-5 committed dispatch-authority read. Exactly one read transaction is
+   * opened, then one coordinator realtime sample is taken before any authority
+   * row. No mutation or residue write occurs. Partial/corrupt authority throws;
+   * legitimate missing bootstrap policy/heartbeat returns an explicitly fenced
+   * frame rather than synthetic health.
+   */
+  readD65DispatchAuthorityFrame(repoId: string, workstreamRun: string, context: D65DispatchAuthorityRequestContext): D65DispatchAuthorityFrame {
+    this.#writerGuard.assertHeld();
+    if (!Number.isSafeInteger(context.expected_version) || context.expected_version < 1 || !Number.isSafeInteger(context.session_generation) || context.session_generation < 1) throw new CoordinationRuntimeError('invalid-request', 'D65 dispatch authority caller context has invalid version/generation');
+    this.#db.exec('BEGIN');
+    try {
+      const frame = this.#d65DispatchAuthorityFrameInTransaction(repoId, workstreamRun, context, this.#clock.now().toISOString());
+      this.#db.exec('COMMIT');
+      return frame;
+    } catch (error) {
+      this.#db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  /** Same SR-5 proof while an existing mutation transaction is already open. */
+  #d65DispatchAuthorityFrameInTransaction(repoId: string, workstreamRun: string, context: D65DispatchAuthorityRequestContext, coordinatorTime: string, allowHandoffPendingSession = false): D65DispatchAuthorityFrame {
+    const run = this.#requireRun(repoId, workstreamRun);
+    const resource = runResourceFromRow(asRow(this.#db.prepare('SELECT * FROM run_resources WHERE repo_id=? AND workstream_run=?').get(repoId, workstreamRun), 'D65 dispatch run resource'));
+    const sessionRow = this.#db.prepare('SELECT * FROM session_leases WHERE repo_id=? AND workstream_run=? AND session_lease_id=?').get(repoId, workstreamRun, context.session_lease_id);
+    const session = sessionRow === undefined ? null : sessionFromRow(sessionRow);
+    const attachedSessionCurrent = session !== null && session.session_id === context.session_id && session.session_generation === context.session_generation && session.session_generation === run.active_session_generation && session.attachment_kind === 'dispatch' && (session.status === 'attached' || (allowHandoffPendingSession && session.status === 'handoff-pending'));
+    const leaseCurrent = attachedSessionCurrent && Date.parse(session.lease_expires_at) > Date.parse(coordinatorTime);
+    const policyCount = sqlInteger(asRow(this.#db.prepare("SELECT COUNT(*) AS count FROM authoritative_artifacts WHERE repo_id=? AND source_run=? AND json_extract(payload_json, '$.document_schema_version')='autopilot.launch_policy.v1'").get(repoId, workstreamRun), 'D65 policy count'), 'count');
+    if (policyCount > 1) throw new CoordinationRuntimeError('store-corrupt', 'D65 dispatch authority has multiple accepted launch policies');
+    const acceptedPolicy = policyCount === 0 ? null : this.#d65AcceptedLaunchPolicy(repoId, workstreamRun);
+    const residue = readD65GraphPublicationResidue(resource.main_worktree_path);
+    const publicationPending = residue !== null && residue.stage !== 'registered';
+    let completeGraphCurrent = this.#d65CompleteGraphCurrent(repoId, workstreamRun);
+    if (this.#hasD65CompleteGraph(repoId, workstreamRun) && run.status !== 'closed' && run.status !== 'aborted') {
+      const acceptedGraph = this.#d65AcceptedGraphHead(repoId, workstreamRun);
+      const mainHead = this.#gitQueryText(resource.main_worktree_path, { kind: 'head' }, 'invalid-state', 'D65 dispatch run-main HEAD inspection failed');
+      if (mainHead !== acceptedGraph.artifact.git_commit) completeGraphCurrent = false;
+    }
+    const head = this.#highestAcceptedProgramHeartbeat(repoId, workstreamRun);
+    let globalReasons: readonly import('./d65-launch-policy.ts').D65StopReason[] = Object.freeze(['heartbeat-stale']);
+    let rowReasons: readonly import('./d65-launch-policy.ts').D65StopReason[] = Object.freeze([]);
+    let governingCurrent = false;
+    let providerState: import('./d65-dispatch-predicates.ts').D65ProviderDispatchState = 'blocked';
+    if (head !== null) {
+      if (acceptedPolicy === null) throw new CoordinationRuntimeError('store-corrupt', 'accepted program heartbeat exists without accepted launch policy authority');
+      const authority = this.#d65VerifyAcceptedHeartbeatHead(head, acceptedPolicy, run, coordinatorTime);
+      globalReasons = authority.heartbeat.stop_reasons;
+      rowReasons = authority.row.stop_reasons;
+      governingCurrent = authority.governingCurrent;
+      providerState = authority.providerState;
+    }
+    if ((run.status === 'closed' || run.status === 'aborted') && rowReasons.includes('terminal-tail')) {
+      rowReasons = Object.freeze([...new Set([...rowReasons, 'row-closed' as const])].sort());
+    }
+    // The signed heartbeat describes the last accepted graph boundary. Once a
+    // semantic event makes that graph stale, expose one concrete graph-drift
+    // reason unless the heartbeat already carries the incident reason that the
+    // successor graph covers. Once the crash-safe publisher residue exists,
+    // graph-publication-pending is additionally mandatory. This keeps reason
+    // arrays total and gives the graph-publication recovery cell its exact row.
+    const semanticReasons: readonly import('./d65-launch-policy.ts').D65StopReason[] = ['graph-incomplete', 'graph-drift', 'progress-stale', 'handoff-pending', 'parent-recovering', 'unit-recovering', 'terminal-tail'];
+    if (this.#hasD65CompleteGraph(repoId, workstreamRun) && !completeGraphCurrent && !rowReasons.some((reason) => semanticReasons.includes(reason))) rowReasons = Object.freeze([...new Set([...rowReasons, 'graph-drift' as const])].sort());
+    if (publicationPending && !rowReasons.includes('graph-publication-pending')) rowReasons = Object.freeze([...new Set([...rowReasons, 'graph-publication-pending' as const])].sort());
+    const activeChildren = sqlInteger(asRow(this.#db.prepare("SELECT COUNT(*) AS count FROM child_leases WHERE repo_id=? AND workstream_run=? AND status='running'").get(repoId, workstreamRun), 'D65 active child count'), 'count');
+    const capCurrent = acceptedPolicy !== null && acceptedPolicy.policy.parallel_cap === 1 && acceptedPolicy.policy.maximum_parallel_cap === 1 && acceptedPolicy.policy.expected_checkout_units === 1 && activeChildren <= 1;
+    return Object.freeze({
+      global_stop_reasons: globalReasons, row_stop_reasons: rowReasons, run_state: run.status,
+      graph: Object.freeze({ complete_graph_current: completeGraphCurrent, graph_publication_pending: publicationPending }),
+      policy: Object.freeze({ policy_current: acceptedPolicy !== null }),
+      heartbeat: Object.freeze({ governing_heartbeat_current: governingCurrent, provider_state: providerState }),
+      session: Object.freeze({ attached_session_current: attachedSessionCurrent, expected_version_current: context.expected_version === run.version, lease_current: leaseCurrent, cap_current: capCurrent }),
+    });
+  }
+
+  #isD65Run(repoId: string, workstreamRun: string): boolean {
+    const key = `${repoId}\0${workstreamRun}`;
+    if (this.#semanticReplayTransactionActive && this.#semanticReplayNonD65Runs.has(key)) return false;
+    const present = this.#db.prepare("SELECT entity_id FROM authoritative_artifacts WHERE repo_id=? AND source_run=? AND json_extract(payload_json, '$.document_schema_version')='autopilot.semantic_graph_bootstrap.v1' LIMIT 1").get(repoId, workstreamRun) !== undefined;
+    if (!present && this.#semanticReplayTransactionActive) this.#semanticReplayNonD65Runs.add(key);
+    return present;
+  }
+
+  #hasD65CompleteGraph(repoId: string, workstreamRun: string): boolean {
+    const key = `${repoId}\0${workstreamRun}`;
+    if (this.#semanticReplayTransactionActive && this.#semanticReplayWithoutCompleteGraph.has(key)) return false;
+    const present = this.#db.prepare("SELECT entity_id FROM authoritative_artifacts WHERE repo_id=? AND source_run=? AND json_extract(payload_json, '$.document_schema_version')='autopilot.semantic_graph.v1' LIMIT 1").get(repoId, workstreamRun) !== undefined;
+    if (!present && this.#semanticReplayTransactionActive) this.#semanticReplayWithoutCompleteGraph.add(key);
+    return present;
+  }
+
+  #d65MutationContext(request: CoordinatorRequestEnvelope, expectedRunVersion: number): D65DispatchAuthorityRequestContext {
+    const generation = request.fencing_generation;
+    if (generation === null) throw new CoordinationRuntimeError('invalid-request', 'D65 mutation dispatch context requires a fencing generation');
+    return Object.freeze({ expected_version: expectedRunVersion, session_lease_id: payloadString(request.payload, 'session_lease_id'), session_id: this.#sessionId(request), session_generation: generation });
+  }
+
+  #d65CurrentDispatchContext(run: CoordinationRun): D65DispatchAuthorityRequestContext {
+    const rows = this.#db.prepare("SELECT * FROM session_leases WHERE repo_id=? AND workstream_run=? AND session_generation=? AND attachment_kind='dispatch' AND status='attached'").all(run.repo_id, run.workstream_run, run.active_session_generation).map(sessionFromRow);
+    if (rows.length !== 1 || rows[0] === undefined) throw new CoordinationRuntimeError('invalid-state', 'D65 child mutation lacks one current parent dispatch session');
+    const session = rows[0];
+    return Object.freeze({ expected_version: run.version, session_lease_id: session.session_lease_id, session_id: session.session_id, session_generation: session.session_generation });
+  }
+
+  #assertD65OrdinaryMutationAllowed(request: CoordinatorRequestEnvelope, run: CoordinationRun, boundary: string, context: D65DispatchAuthorityRequestContext = this.#d65MutationContext(request, run.version)): void {
+    if (!this.#isD65Run(run.repo_id, run.workstream_run)) return;
+    const frame = this.#d65DispatchAuthorityFrameInTransaction(run.repo_id, run.workstream_run, context, this.#clock.now().toISOString());
+    const verdict = ordinaryDispatchAllowed({ global_stop_reasons: frame.global_stop_reasons, row_stop_reasons: frame.row_stop_reasons, run_state: frame.run_state, graph: frame.graph, policy: frame.policy, heartbeat: frame.heartbeat, session: frame.session });
+    if (!verdict.allowed) throw new CoordinationRuntimeError('invalid-state', `D65 ordinary mutation ${boundary} is fenced at its coordinator transaction boundary`, verdict.denied_by.slice());
+  }
+
+  #assertD65RecoveryMutationAllowed(request: CoordinatorRequestEnvelope, run: CoordinationRun, action: Parameters<typeof recoveryTransitionAllowed>[0]['action'], bindings: D65RecoveryBindings, context: D65DispatchAuthorityRequestContext = this.#d65MutationContext(request, run.version), allowHandoffPendingSession = false): void {
+    if (!this.#isD65Run(run.repo_id, run.workstream_run)) return;
+    const frame = this.#d65DispatchAuthorityFrameInTransaction(run.repo_id, run.workstream_run, context, this.#clock.now().toISOString(), allowHandoffPendingSession);
+    const verdict = recoveryTransitionAllowed({ action, global_stop_reasons: frame.global_stop_reasons, row_stop_reasons: frame.row_stop_reasons, run_state: frame.run_state, graph: frame.graph, policy: frame.policy, heartbeat: frame.heartbeat, bindings: { ...bindings, attached_session_current: frame.session.attached_session_current && frame.session.lease_current, policy_trust_current: frame.policy.policy_current, no_pending_publication: !frame.graph.graph_publication_pending } });
+    if (!verdict.allowed) throw new CoordinationRuntimeError('invalid-state', `D65 recovery mutation ${action} is fenced at its coordinator transaction boundary`, verdict.denied_by.slice());
+  }
+
+  /**
+   * Unit reset/quarantine evidence is written and committed before its release
+   * transaction. Prove that physical HEAD is exactly one one-path child of the
+   * accepted H, then evaluate the frozen unit-recovery cell against logical H.
+   * This is not an ordinary-dispatch bypass: only the exact requested evidence
+   * blob may occupy the intentional pre-event Git edge.
+   */
+  #assertD65UnitRecoveryEvidenceMutationAllowed(request: CoordinatorRequestEnvelope, run: CoordinationRun, evidenceRef: string, evidenceSha256: `sha256:${string}`): void {
+    const resource = runResourceFromRow(asRow(this.#db.prepare('SELECT * FROM run_resources WHERE repo_id=? AND workstream_run=?').get(run.repo_id, run.workstream_run), 'D65 unit recovery evidence resource'));
+    this.#evidencePathUnderRoot(resource.main_worktree_path, evidenceRef);
+    const prior = this.#d65AcceptedGraphHead(run.repo_id, run.workstream_run);
+    const headValue = this.#gitQueryText(resource.main_worktree_path, { kind: 'head' }, 'invalid-request', 'D65 unit recovery evidence HEAD inspection failed');
+    if (headValue === null) throw new CoordinationRuntimeError('invalid-request', 'D65 unit recovery evidence HEAD is absent');
+    const head = headValue;
+    const parents = (this.#gitQueryText(resource.main_worktree_path, { kind: 'rev-list-parents', revision: head }, 'invalid-request', 'D65 unit recovery evidence parent inspection failed') ?? '').trim().split(/\s+/u).filter((entry) => entry.length > 0);
+    const diff = this.#gitQueryResult(resource.main_worktree_path, { kind: 'diff-paths', from: prior.artifact.git_commit, to: head, noRenames: true }, 'invalid-request', 'D65 unit recovery evidence diff inspection failed');
+    const paths = new TextDecoder('utf-8', { fatal: true }).decode(diff.stdout).split('\0').filter((entry) => entry.length > 0);
+    const bytes = this.#gitQueryResult(resource.main_worktree_path, { kind: 'show-file', revision: head, path: evidenceRef }, 'invalid-request', 'D65 unit recovery evidence blob inspection failed').stdout;
+    const digest = `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
+    if (parents.length !== 2 || parents[1] !== prior.artifact.git_commit || paths.length !== 1 || paths[0] !== evidenceRef || digest !== evidenceSha256) throw new CoordinationRuntimeError('invalid-request', 'D65 unit recovery evidence commit is not the exact one-parent one-ref successor of accepted H', [head, prior.artifact.git_commit, ...parents.slice(1), ...paths, evidenceSha256, digest]);
+    if (!this.#d65CompleteGraphCurrent(run.repo_id, run.workstream_run)) throw new CoordinationRuntimeError('invalid-state', 'D65 unit recovery evidence prior graph is not semantically current');
+    const frame = this.#d65DispatchAuthorityFrameInTransaction(run.repo_id, run.workstream_run, this.#d65MutationContext(request, run.version), this.#clock.now().toISOString());
+    const rowReasons = Object.freeze(frame.row_stop_reasons.filter((reason) => reason !== 'graph-drift'));
+    const verdict = recoveryTransitionAllowed({ action: 'unit-recovery', global_stop_reasons: frame.global_stop_reasons, row_stop_reasons: rowReasons, run_state: frame.run_state, graph: { complete_graph_current: true, graph_publication_pending: frame.graph.graph_publication_pending }, policy: frame.policy, heartbeat: frame.heartbeat, bindings: { attached_session_current: frame.session.attached_session_current && frame.session.lease_current && frame.session.expected_version_current, policy_trust_current: frame.policy.policy_current, no_pending_publication: !frame.graph.graph_publication_pending, terminal_prepared_cancellable: false, terminal_after_commit: false, accepted_continuation_reason: null, covered_semantic_reason: null, attach_terminal_recovery: false } });
+    if (!verdict.allowed) throw new CoordinationRuntimeError('invalid-state', 'D65 unit recovery evidence mutation is fenced at its coordinator transaction boundary', verdict.denied_by.slice());
+  }
+
+  /** Classify coordinator-only maintenance without fallback authority. */
+  #assertD65MaintenanceMutationAllowed(request: CoordinatorRequestEnvelope, run: CoordinationRun, boundary: string): void {
+    if (!this.#hasD65CompleteGraph(run.repo_id, run.workstream_run)) return;
+    const frame = this.#d65DispatchAuthorityFrameInTransaction(run.repo_id, run.workstream_run, this.#d65MutationContext(request, run.version), this.#clock.now().toISOString());
+    const recoveryAction = frame.row_stop_reasons.includes('handoff-pending') ? 'planned-handoff' : frame.row_stop_reasons.includes('parent-recovering') ? 'parent-loss' : null;
+    if (recoveryAction === null) {
+      const ordinary = ordinaryDispatchAllowed({ global_stop_reasons: frame.global_stop_reasons, row_stop_reasons: frame.row_stop_reasons, run_state: frame.run_state, graph: frame.graph, policy: frame.policy, heartbeat: frame.heartbeat, session: frame.session });
+      if (!ordinary.allowed) throw new CoordinationRuntimeError('invalid-state', `D65 maintenance mutation ${boundary} is fenced at its coordinator transaction boundary`, ordinary.denied_by.slice());
+      return;
+    }
+    const recovery = recoveryTransitionAllowed({ action: recoveryAction, global_stop_reasons: frame.global_stop_reasons, row_stop_reasons: frame.row_stop_reasons, run_state: frame.run_state, graph: frame.graph, policy: frame.policy, heartbeat: frame.heartbeat, bindings: { attached_session_current: frame.session.attached_session_current && frame.session.lease_current && frame.session.expected_version_current, policy_trust_current: frame.policy.policy_current, no_pending_publication: !frame.graph.graph_publication_pending, terminal_prepared_cancellable: false, terminal_after_commit: false, accepted_continuation_reason: null, covered_semantic_reason: null, attach_terminal_recovery: false } });
+    if (!recovery.allowed) throw new CoordinationRuntimeError('invalid-state', `D65 maintenance recovery ${boundary} is fenced at its coordinator transaction boundary`, recovery.denied_by.slice());
+  }
+
+  /**
+   * Gate EVERY D65 semantic-graph registration. The first publication (sequence
+   * 2) uses its separate exact admission: prior authority is the accepted
+   * bootstrap graph, a current signed policy and the initial governing heartbeat
+   * exist, the governing row reason is exactly graph-publication-pending, the
+   * durable publication-committed residue binds this exact registration, and the
+   * session is current; the exact sequence-2 B→E charter replay follows in
+   * #validateD65GraphRegistration. Successor publication requires the accepted
+   * prior complete graph tuple. Graph registration uses the accepted prior tuple
+   * even though one covered semantic event makes ordinary dispatch stale.
+   */
+  #assertD65GraphPublicationMutationAllowed(request: CoordinatorRequestEnvelope, run: CoordinationRun): void {
+    const artifactId = payloadString(request.payload, 'artifact_id');
+    const requestedRef = payloadString(request.payload, 'ref');
+    const requestedSha = payloadString(request.payload, 'sha256');
+    const requestedCommit = payloadString(request.payload, 'git_commit');
+    const frame = this.#d65DispatchAuthorityFrameInTransaction(run.repo_id, run.workstream_run, this.#d65MutationContext(request, run.version), this.#clock.now().toISOString(), true);
+    const resource = runResourceFromRow(asRow(this.#db.prepare('SELECT * FROM run_resources WHERE repo_id=? AND workstream_run=?').get(run.repo_id, run.workstream_run), 'D65 graph registration run resource'));
+    const residue = readD65GraphPublicationResidue(resource.main_worktree_path);
+    if (residue === null) throw new CoordinationRuntimeError('invalid-state', 'semantic-graph-publication-pending: D65 graph registration requires its durable pending publication residue', [artifactId]);
+    if (residue.stage !== 'publication-committed') throw new CoordinationRuntimeError('invalid-state', 'semantic-graph-publication-pending: D65 graph registration requires the exact publication-committed residue stage', [artifactId, residue.stage]);
+    if (residue.repo_id !== run.repo_id || residue.workstream_run !== run.workstream_run || residue.artifact_id !== artifactId || d65SemanticGraphArtifactId(residue.graph_sequence) !== artifactId) throw new CoordinationRuntimeError('invalid-state', 'semantic-graph-cas-conflict: pending publication residue does not bind this exact graph registration identity', [artifactId, residue.artifact_id, String(residue.graph_sequence)]);
+    if (residue.publication_commit !== requestedCommit || residue.graph_ref !== requestedRef || residue.graph_sha256 !== requestedSha) throw new CoordinationRuntimeError('invalid-state', 'semantic-graph-cas-conflict: pending publication residue does not bind the exact registered H/ref/digest tuple', [artifactId, String(residue.publication_commit), requestedCommit]);
+    const graphHead = this.#d65AcceptedGraphHead(run.repo_id, run.workstream_run);
+    const priorComplete = this.#db.prepare("SELECT entity_id FROM authoritative_artifacts WHERE repo_id=? AND source_run=? AND json_extract(payload_json, '$.document_schema_version')='autopilot.semantic_graph.v1' LIMIT 1").get(run.repo_id, run.workstream_run) !== undefined;
+    let coveredReason: import('./d65-launch-policy.ts').D65StopReason | null = null;
+    if (!priorComplete) {
+      // First-publication admission: prior authority is the accepted bootstrap
+      // graph and no complete graph may already be accepted.
+      if (graphHead.sequence !== 1 || graphHead.artifact.document_schema_version !== 'autopilot.semantic_graph_bootstrap.v1') throw new CoordinationRuntimeError('store-corrupt', 'D65 first graph registration prior head is not the accepted bootstrap graph', [graphHead.artifact.artifact_id]);
+      if (residue.prior_authority_kind !== 'bootstrap' || residue.prior_graph_sha256 !== graphHead.sha256 || residue.prior_publication_commit !== null || residue.prior_registration_event_seq !== graphHead.artifact.registered_event_seq) throw new CoordinationRuntimeError('invalid-state', 'semantic-graph-cas-conflict: first publication residue does not bind the accepted bootstrap prior tuple', [residue.prior_authority_kind, residue.prior_graph_sha256, graphHead.sha256]);
+      if (!frame.policy.policy_current) throw new CoordinationRuntimeError('invalid-state', 'semantic-graph-bootstrap-operation-denied: first complete graph registration requires the accepted signed launch policy');
+      const head = this.#highestAcceptedProgramHeartbeat(run.repo_id, run.workstream_run);
+      if (head === null || head.sequence !== 1 || head.acceptance_kind !== 'governing') throw new CoordinationRuntimeError('invalid-state', 'semantic-graph-bootstrap-operation-denied: first complete graph registration requires the initial governing program heartbeat', [head === null ? '<absent>' : `${String(head.sequence)}/${head.acceptance_kind}`]);
+      if (frame.row_stop_reasons.length !== 1 || frame.row_stop_reasons[0] !== 'graph-publication-pending') throw new CoordinationRuntimeError('invalid-state', 'semantic-graph-bootstrap-operation-denied: first complete graph registration requires row reason exactly graph-publication-pending', [...frame.row_stop_reasons]);
+    } else {
+      // Successor publication: the accepted prior complete graph is mandatory
+      // and the residue must bind its exact (digest,H,R) tuple.
+      if (graphHead.artifact.document_schema_version !== 'autopilot.semantic_graph.v1') throw new CoordinationRuntimeError('store-corrupt', 'D65 successor graph registration prior head is not an accepted complete graph', [graphHead.artifact.artifact_id]);
+      if (residue.prior_authority_kind !== 'complete' || residue.prior_graph_sha256 !== graphHead.sha256 || residue.prior_publication_commit !== graphHead.artifact.git_commit || residue.prior_registration_event_seq !== graphHead.artifact.registered_event_seq) throw new CoordinationRuntimeError('invalid-state', 'semantic-graph-cas-conflict: successor publication residue does not bind the accepted prior complete graph tuple', [residue.prior_authority_kind, residue.prior_graph_sha256, graphHead.sha256]);
+      const coveredReasons = frame.row_stop_reasons.filter((reason) => reason === 'graph-incomplete' || reason === 'graph-drift' || reason === 'progress-stale' || reason === 'handoff-pending' || reason === 'parent-recovering' || reason === 'unit-recovering' || reason === 'terminal-tail');
+      if (coveredReasons.length > 1) throw new CoordinationRuntimeError('invalid-state', 'D65 graph publication heartbeat carries multiple covered semantic reasons', coveredReasons);
+      coveredReason = coveredReasons[0] ?? null;
+    }
+    const graph = Object.freeze({ complete_graph_current: true, graph_publication_pending: frame.graph.graph_publication_pending });
+    const verdict = recoveryTransitionAllowed({ action: 'graph-publication', global_stop_reasons: frame.global_stop_reasons, row_stop_reasons: frame.row_stop_reasons, run_state: frame.run_state, graph, policy: frame.policy, heartbeat: frame.heartbeat, bindings: { attached_session_current: frame.session.attached_session_current && frame.session.lease_current && frame.session.expected_version_current, policy_trust_current: frame.policy.policy_current, no_pending_publication: !frame.graph.graph_publication_pending, terminal_prepared_cancellable: false, terminal_after_commit: false, accepted_continuation_reason: null, covered_semantic_reason: coveredReason, attach_terminal_recovery: false } });
+    if (!verdict.allowed) throw new CoordinationRuntimeError('invalid-state', 'D65 graph registration is fenced at its coordinator transaction boundary', verdict.denied_by.slice());
+  }
+
+  #d65AcceptedGraphState(repoId: string, workstreamRun: string): AutopilotState {
+    const row = asRow(this.#db.prepare("SELECT * FROM authoritative_artifacts WHERE repo_id=? AND source_run=? AND json_extract(payload_json, '$.document_schema_version')='autopilot.semantic_graph.v1' ORDER BY entity_id DESC LIMIT 1").get(repoId, workstreamRun), 'D65 accepted graph state artifact');
+    const artifact = authoritativeArtifactFromRow(row);
+    const graph = parseD65CompleteGraph(parseJsonObject(new TextDecoder('utf-8', { fatal: true }).decode(this.#loadEvidenceArtifact(repoId, artifact.evidence)), 'D65 accepted graph state root'));
+    const resource = runResourceFromRow(asRow(this.#db.prepare('SELECT * FROM run_resources WHERE repo_id=? AND workstream_run=?').get(repoId, workstreamRun), 'D65 accepted graph state resource'));
+    const bytes = this.#readD65GraphShardBlob(resource.main_worktree_path, artifact.git_commit, graph.core.state.ref);
+    const actual = `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
+    if (actual !== graph.core.state.sha256 || bytes.byteLength !== graph.core.state.byte_count) throw new CoordinationRuntimeError('store-corrupt', 'D65 accepted graph state blob differs from its root descriptor');
+    return parseAutopilotState(parseJsonObject(new TextDecoder('utf-8', { fatal: true }).decode(bytes), 'D65 accepted graph state'));
+  }
+
+  #d65CompleteGraphCurrent(repoId: string, workstreamRun: string): boolean {
+    const row = this.#db.prepare("SELECT * FROM authoritative_artifacts WHERE repo_id=? AND source_run=? AND json_extract(payload_json, '$.document_schema_version')='autopilot.semantic_graph.v1' ORDER BY entity_id DESC LIMIT 1").get(repoId, workstreamRun);
+    if (row === undefined) return false;
+    const artifact = authoritativeArtifactFromRow(row);
+    const graph = parseD65CompleteGraph(parseJsonObject(new TextDecoder('utf-8', { fatal: true }).decode(this.#loadEvidenceArtifact(repoId, artifact.evidence)), 'accepted complete graph root'));
+    if (graph.repo_id !== repoId || graph.workstream_run !== workstreamRun || artifact.artifact_id !== d65SemanticGraphArtifactId(graph.graph_sequence) || artifact.registered_event_seq !== graph.covered_event_seq + 1) throw new CoordinationRuntimeError('store-corrupt', 'accepted complete graph artifact tuple is internally inconsistent');
+    const registrationEvent = asRow(this.#db.prepare("SELECT idempotency_key FROM events WHERE repo_id=? AND event_type='authoritative-artifact-registered' AND entity_id=?").get(repoId, artifact.artifact_id), 'accepted graph registration event');
+    const proven = this.lookupCommittedGraphRegistration(repoId, workstreamRun, { artifactId: artifact.artifact_id, publicationCommit: artifact.git_commit, graphRef: artifact.evidence.ref, graphSha256: artifact.evidence.sha256, coveredEventSeq: graph.covered_event_seq, idempotencyKey: sqlString(registrationEvent, 'idempotency_key') });
+    if (proven === null || proven.registrationEventSeq !== artifact.registered_event_seq) throw new CoordinationRuntimeError('store-corrupt', 'accepted complete graph lacks its exact registration event/result tuple');
+    const currentE = sqlInteger(asRow(this.#db.prepare('SELECT event_seq FROM repositories WHERE repo_id=?').get(repoId), 'D65 graph liveness repository'), 'event_seq');
+    const totalSuffix = sqlInteger(asRow(this.#db.prepare('SELECT COUNT(*) AS count FROM events WHERE repo_id=? AND event_seq>?').get(repoId, artifact.registered_event_seq), 'D65 graph suffix count'), 'count');
+    const suffix = this.#d65AcceptedHistory(repoId, currentE, artifact.registered_event_seq);
+    if (suffix.length !== totalSuffix) throw new CoordinationRuntimeError('store-corrupt', 'D65 graph suffix history is not a complete repository event range');
+    for (const event of suffix) {
+      // A repository event owned solely by another run advances the shared E
+      // counter but cannot make this run's accepted graph stale. Ownership is
+      // proved from the exact immutable event/result pair, never inferred from
+      // event_type or a recursively discovered related run field.
+      if (!d65SemanticEventWorkstreamRuns(event).includes(workstreamRun)) continue;
+      if (event.event_type === 'session-heartbeat') { if (!isPureD65SessionHeartbeat(event)) return false; continue; }
+      if (event.event_type === 'child-heartbeat') { if (!isPureD65ChildHeartbeat(event)) return false; continue; }
+      if (event.event_type === 'program-heartbeat-accepted') {
+        const payload = event.result?.payload;
+        if (payload === undefined) throw new CoordinationRuntimeError('store-corrupt', 'program heartbeat liveness event lacks exact result');
+        const result = parseD65HeartbeatAcceptanceResult(payload);
+        if (result.repo_id !== repoId || result.workstream_run !== workstreamRun || event.entity_type !== 'program-heartbeat' || event.entity_id !== workstreamRun) throw new CoordinationRuntimeError('store-corrupt', 'program heartbeat liveness event/result identity mismatch');
+        continue;
+      }
+      return false;
+    }
+    return true;
+  }
+
+  #d65VerifyAcceptedHeartbeatHead(head: D65HeartbeatAcceptanceResult, acceptedPolicy: Readonly<{ policy: D65LaunchPolicy; artifact: CoordinationAuthoritativeArtifact; anchor: ReturnType<typeof parseD65TrustAnchorSpki> }>, run: CoordinationRun, coordinatorTime: string): Readonly<{ heartbeat: D65ProgramHeartbeat; row: D65ProgramHeartbeat['rows'][number]; governingCurrent: boolean; providerState: import('./d65-dispatch-predicates.ts').D65ProviderDispatchState }> {
+    const path = this.#d65ExternalHeartbeatPath(acceptedPolicy.policy, head.heartbeat_ref);
+    const bytes = this.#readD65ExternalPrivateFile(path, 'accepted D65 program heartbeat');
+    const digest = `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
+    if (digest !== head.heartbeat_sha256) throw new CoordinationRuntimeError('invalid-state', 'accepted external heartbeat bytes are missing or mismatch their durable coordinator head', [head.heartbeat_ref, head.heartbeat_sha256, digest]);
+    const heartbeat = parseD65ProgramHeartbeat(parseJsonObject(new TextDecoder('utf-8', { fatal: true }).decode(bytes), 'accepted D65 program heartbeat'));
+    const { signature: _signature, ...unsigned } = heartbeat;
+    void _signature;
+    if (!verifyD65Signature({ trustAnchor: acceptedPolicy.anchor, purpose: 'program-heartbeat', message: new TextEncoder().encode(canonicalJson(unsigned)), signature: heartbeat.signature })) throw new CoordinationRuntimeError('invalid-state', 'accepted external heartbeat signature no longer verifies');
+    if (heartbeat.program_id !== head.program_id || heartbeat.sequence !== head.sequence || heartbeat.prior_sha256 !== head.prior_sha256 || heartbeat.issued_at !== head.issued_at || heartbeat.valid_until !== head.valid_until || heartbeat.trust_anchor_ref !== acceptedPolicy.policy.trust_anchor_ref || heartbeat.trust_anchor_sha256 !== acceptedPolicy.policy.trust_anchor_sha256 || heartbeat.signer_key_id !== acceptedPolicy.anchor.sha256) throw new CoordinationRuntimeError('store-corrupt', 'accepted heartbeat result does not byte-bind its signed external record');
+    const matches = heartbeat.rows.filter((row) => row.workstream_run === run.workstream_run);
+    const row = matches[0];
+    if (matches.length !== 1 || row === undefined || row.workstream !== run.workstream) throw new CoordinationRuntimeError('store-corrupt', 'accepted heartbeat record does not contain exactly one row identity for its coordinator run');
+    const now = Date.parse(coordinatorTime);
+    const graphHead = this.#d65AcceptedGraphHead(run.repo_id, run.workstream_run);
+    const attached = this.#db.prepare("SELECT session_lease_id FROM session_leases WHERE repo_id=? AND workstream_run=? AND session_generation=? AND attachment_kind='dispatch' AND status IN ('attached','handoff-pending')").get(run.repo_id, run.workstream_run, run.active_session_generation);
+    const statusDigest = this.#d65CurrentSemanticEndpointDigest('status', run.repo_id, run.workstream_run, coordinatorTime);
+    const doctorDigest = this.#d65CurrentSemanticEndpointDigest('doctor', run.repo_id, run.workstream_run, coordinatorTime);
+    const governingCurrent = head.acceptance_kind === 'governing'
+      && Date.parse(head.issued_at) <= now && now < Date.parse(head.valid_until)
+      && row.launch_policy_sha256 === acceptedPolicy.artifact.evidence.sha256
+      && row.accepted_graph_sequence === graphHead.sequence && row.accepted_graph_sha256 === graphHead.sha256
+      && attached !== undefined && row.coordinator_session_lease_id === sqlString(attached, 'session_lease_id')
+      && row.status_sha256 === statusDigest && row.doctor_sha256 === doctorDigest;
+    let providerState: import('./d65-dispatch-predicates.ts').D65ProviderDispatchState = 'healthy';
+    if (row.stop_reasons.includes('provider-exhausted')) providerState = 'exhausted';
+    else if (row.stop_reasons.includes('provider-blocked')) {
+      const retry = heartbeat.provider_health.filter((provider) => provider.state === 'retry-authorized' && provider.probe_workstream_run === run.workstream_run);
+      if (retry.length > 1) throw new CoordinationRuntimeError('invalid-state', 'accepted heartbeat provider authority is ambiguous for a provider-blocked row');
+      providerState = retry.length === 1 ? 'retry-authorized' : 'blocked';
+    }
+    return Object.freeze({ heartbeat, row, governingCurrent, providerState });
   }
 
   // D65-A5 point 1 (freeze §9.4) response-loss recovery. The runtime graph-
@@ -4510,38 +5690,30 @@ export class CoordinatorStore {
   lookupCommittedGraphRegistration(
     repoId: string,
     workstreamRun: string,
-    input: { readonly artifactId: string; readonly publicationCommit: string; readonly graphSha256: `sha256:${string}`; readonly coveredEventSeq: number },
+    input: { readonly artifactId: string; readonly publicationCommit: string; readonly graphRef: string; readonly graphSha256: `sha256:${string}`; readonly coveredEventSeq: number; readonly idempotencyKey: string },
   ): { readonly registrationEventSeq: number } | null {
     const expectedR = input.coveredEventSeq + 1;
+    const expectedKey = input.idempotencyKey;
     const artifactRow = this.#db.prepare('SELECT * FROM authoritative_artifacts WHERE repo_id=? AND entity_id=?').get(repoId, input.artifactId);
-    // Locate the immutable registration event (event_type + entity binding) and
-    // its idempotency result independently of the artifact row so a half-written
-    // state (any one of the three present without the others) is provably
-    // terminal rather than silently treated as absent or committed.
-    const eventRow = this.#db.prepare("SELECT event_seq, idempotency_key, request_sha256 FROM events WHERE repo_id=? AND event_type='authoritative-artifact-registered' AND entity_type='authoritative-artifact' AND entity_id=?").get(repoId, input.artifactId);
-    if (artifactRow === undefined) {
-      // Clean absence requires the event to be absent too; a dangling event with
-      // no artifact row is a corrupt half-commit (never reachable under a single
-      // atomic transaction) and is terminal, never a soft retry.
-      if (eventRow !== undefined) throw new CoordinationRuntimeError('invalid-state', 'graph registration event exists without its committed authoritative artifact row', [input.artifactId]);
-      return null;
-    }
-    // The artifact row is present: EVERY bound field must HARD-equal the sealed
-    // publication tuple or the state is terminal (never null, never assume).
+    const eventRows = this.#db.prepare("SELECT event_seq, idempotency_key, request_sha256 FROM events WHERE repo_id=? AND event_type='authoritative-artifact-registered' AND entity_type='authoritative-artifact' AND entity_id=?").all(repoId, input.artifactId);
+    const resultRow = this.#db.prepare('SELECT committed_event_seq, request_sha256, payload_json FROM idempotency_results WHERE repo_id=? AND idempotency_key=?').get(repoId, expectedKey);
+    if (artifactRow === undefined && eventRows.length === 0 && resultRow === undefined) return null;
+    if (artifactRow === undefined || eventRows.length !== 1 || resultRow === undefined) throw new CoordinationRuntimeError('invalid-state', 'graph registration response-loss authority is partial or duplicated', [input.artifactId, `events=${String(eventRows.length)}`]);
+    const eventRow = eventRows[0];
+    if (eventRow === undefined) throw new CoordinationRuntimeError('invalid-state', 'graph registration event disappeared after exact cardinality check');
     const artifact = authoritativeArtifactFromRow(asRow(artifactRow, `committed graph registration artifact ${input.artifactId}`));
-    if (artifact.document_schema_version !== 'autopilot.semantic_graph.v1') throw new CoordinationRuntimeError('invalid-state', 'committed registration lookup found a non-graph artifact under the graph artifact id', [input.artifactId, artifact.document_schema_version]);
-    if (artifact.source_run !== workstreamRun) throw new CoordinationRuntimeError('invalid-state', 'committed graph registration source run does not match the recovering run', [artifact.source_run, workstreamRun]);
+    if (artifact.artifact_id !== input.artifactId || artifact.repo_id !== repoId || artifact.source_run !== workstreamRun || artifact.source_type !== 'task' || artifact.source_scope !== 'run-main' || artifact.document_schema_version !== 'autopilot.semantic_graph.v1' || artifact.version !== 1) throw new CoordinationRuntimeError('invalid-state', 'committed graph registration artifact identity/scope/version is not exact', [input.artifactId]);
     if (artifact.git_commit !== input.publicationCommit) throw new CoordinationRuntimeError('invalid-state', 'committed graph registration git_commit does not match the sealed publication commit H', [artifact.git_commit, input.publicationCommit]);
+    if (artifact.evidence.ref !== input.graphRef) throw new CoordinationRuntimeError('invalid-state', 'committed graph registration evidence ref does not match the sealed graph ref', [artifact.evidence.ref, input.graphRef]);
     if (artifact.evidence.sha256 !== input.graphSha256) throw new CoordinationRuntimeError('invalid-state', 'committed graph registration evidence digest does not match the sealed graph_sha256', [artifact.evidence.sha256, input.graphSha256]);
     if (artifact.registered_event_seq !== expectedR) throw new CoordinationRuntimeError('invalid-state', 'committed graph registration event sequence is not exactly R=E+1', [`registered_event_seq=${String(artifact.registered_event_seq)}`, `expected_R=${String(expectedR)}`]);
-    if (eventRow === undefined) throw new CoordinationRuntimeError('invalid-state', 'committed graph registration artifact exists without its immutable registration event', [input.artifactId]);
     const eventSeq = sqlInteger(eventRow, 'event_seq');
-    if (eventSeq !== expectedR) throw new CoordinationRuntimeError('invalid-state', 'committed graph registration event is not at R=E+1', [`event_seq=${String(eventSeq)}`, `expected_R=${String(expectedR)}`]);
-    const idempotencyKey = sqlString(eventRow, 'idempotency_key');
-    const resultRow = this.#db.prepare('SELECT committed_event_seq, request_sha256 FROM idempotency_results WHERE repo_id=? AND idempotency_key=?').get(repoId, idempotencyKey);
-    if (resultRow === undefined) throw new CoordinationRuntimeError('invalid-state', 'committed graph registration event exists without its immutable idempotency result', [input.artifactId, idempotencyKey]);
-    if (sqlInteger(resultRow, 'committed_event_seq') !== expectedR) throw new CoordinationRuntimeError('invalid-state', 'committed graph registration idempotency result does not commit exactly R=E+1', [`committed_event_seq=${String(sqlInteger(resultRow, 'committed_event_seq'))}`, `expected_R=${String(expectedR)}`]);
-    if (sqlString(resultRow, 'request_sha256') !== sqlString(eventRow, 'request_sha256')) throw new CoordinationRuntimeError('invalid-state', 'committed graph registration event and idempotency result bind different request digests', [input.artifactId]);
+    if (eventSeq !== expectedR || sqlString(eventRow, 'idempotency_key') !== expectedKey) throw new CoordinationRuntimeError('invalid-state', 'committed graph registration event does not bind exact R/idempotency identity', [input.artifactId]);
+    if (sqlInteger(resultRow, 'committed_event_seq') !== expectedR || sqlString(resultRow, 'request_sha256') !== sqlString(eventRow, 'request_sha256')) throw new CoordinationRuntimeError('invalid-state', 'committed graph registration idempotency result does not bind exact R/request digest', [input.artifactId]);
+    const resultPayload = parseJsonObject(sqlString(resultRow, 'payload_json'), 'committed graph registration result');
+    if (Object.keys(resultPayload).sort().join(',') !== 'authoritative_artifact,entity_id,entity_type,event_type' || resultPayload['event_type'] !== 'authoritative-artifact-registered' || resultPayload['entity_type'] !== 'authoritative-artifact' || resultPayload['entity_id'] !== input.artifactId) throw new CoordinationRuntimeError('invalid-state', 'committed graph registration idempotency payload is not the exact closed registration effect');
+    const resultArtifact = parseCoordinationAuthoritativeArtifact(resultPayload['authoritative_artifact']);
+    if (canonicalJson(resultArtifact) !== canonicalJson(artifact)) throw new CoordinationRuntimeError('invalid-state', 'committed graph registration result artifact differs from the authoritative artifact row');
     return { registrationEventSeq: expectedR };
   }
 
@@ -4684,6 +5856,22 @@ export class CoordinatorStore {
     if (acceptedGraph !== undefined) casConflict('a complete graph is already accepted; launch policy registration is late', [sqlString(acceptedGraph, 'entity_id')]);
   }
 
+  #reconstructD65BootstrapCharter(repoId: string, workstreamRun: string) {
+    const eventRow = asRow(this.#db.prepare("SELECT * FROM events WHERE repo_id=? AND event_seq=1 AND event_type='run-attached' AND entity_type='run' AND entity_id=?").get(repoId, workstreamRun), 'D65 bootstrap B event');
+    const event = eventFromRow(eventRow);
+    const resultRow = asRow(this.#db.prepare('SELECT * FROM idempotency_results WHERE repo_id=? AND idempotency_key=?').get(repoId, event.idempotency_key), 'D65 bootstrap B idempotency result');
+    return reconstructD65BootstrapCharter({
+      event,
+      result: {
+        repo_id: repoId,
+        idempotency_key: event.idempotency_key,
+        request_sha256: sqlString(resultRow, 'request_sha256'),
+        committed_event_seq: sqlInteger(resultRow, 'committed_event_seq'),
+        payload: parseJsonObject(sqlString(resultRow, 'payload_json'), 'D65 bootstrap B result payload'),
+      },
+    });
+  }
+
   // D65-A5 loader/replayer sub-part 2a. The current repositories.event_seq is E
   // (the sequence BEFORE `#nextEventSequence` allocates the registration event
   // R); the plan requires R=E+1, so the graph's declared covered_event_seq must
@@ -4728,6 +5916,9 @@ export class CoordinatorStore {
     const publicationParents = (parentListing ?? '').trim().split(/\s+/u).filter((entry) => entry.length > 0);
     const soleParent = publicationParents[1];
     if (soleParent === undefined) throw new CoordinationRuntimeError('invalid-request', 'semantic-graph-artifact-invalid: publication commit H has no parent');
+    const runMainHead = this.#gitQueryText(sourceRoot, { kind: 'head' }, 'invalid-request', 'semantic graph covered authority HEAD inspection failed');
+    if (runMainHead !== soleParent) throw new CoordinationRuntimeError('invalid-request', 'semantic-graph-artifact-invalid: publication H sole parent G is not the exact current run authority HEAD', [soleParent, String(runMainHead)]);
+    this.#assertD65RegularGitBlob(sourceRoot, publicationCommit, graphRef, null, 'semantic graph root');
     const diffResult = this.#gitQueryResult(sourceRoot, { kind: 'diff-paths', from: soleParent, to: publicationCommit, noRenames: true }, 'invalid-request', 'semantic graph publication diff inspection failed');
     const diffPaths = new TextDecoder('utf-8', { fatal: true }).decode(diffResult.stdout).split('\0').filter((entry) => entry.length > 0);
     // The graph itself names G (covered_authority_commit) and its covered E; the
@@ -4745,6 +5936,9 @@ export class CoordinatorStore {
     });
     if (facts.artifactId !== artifactId) throw new CoordinationRuntimeError('invalid-request', 'semantic-graph-artifact-invalid: artifact id is not the deterministic graph sequence id', [artifactId, facts.artifactId]);
     if (facts.artifactId !== d65SemanticGraphArtifactId(facts.graph.graph_sequence)) throw new CoordinationRuntimeError('invalid-request', 'semantic-graph-artifact-invalid: graph sequence id mismatch');
+    const graphPrefix = d65GraphPathPrefix(facts.graph.graph_sequence);
+    const priorPrefixEntry = this.#gitQueryText(sourceRoot, { kind: 'ls-tree-path', revision: soleParent, path: graphPrefix.slice(0, -1) }, 'invalid-request', 'semantic graph authority-prefix inspection failed');
+    if ((priorPrefixEntry ?? '').trim().length !== 0) throw new CoordinationRuntimeError('invalid-request', 'semantic-graph-discovery-mismatch: authority G already contains the publication sequence prefix', [graphPrefix]);
     // D65-A5 loader/replayer sub-part 2a: bind the graph identity to the store's
     // authoritative sequence. The plan requires R=E+1 (the registration event R
     // is exactly the graph's covered E plus one), a strict graph_sequence chain,
@@ -4764,6 +5958,46 @@ export class CoordinatorStore {
     // derived equation from the authority state (counts alone are never
     // acceptance).
     const loaded = loadD65CompleteGraph(facts.graph, (ref) => this.#readD65GraphShardBlob(sourceRoot, publicationCommit, ref));
+    const expectedPublicationPaths = new Set<string>([graphRef]);
+    const indexes = [...Object.values(facts.graph.collections), facts.graph.work_items, facts.graph.bughunt, facts.graph.exceptions, facts.graph.coordinator_projection, ...Object.values(facts.graph.queue_projection)];
+    for (const index of indexes) for (const descriptor of index.shards) {
+      if (expectedPublicationPaths.has(descriptor.ref)) throw new CoordinationRuntimeError('invalid-request', 'semantic-graph-discovery-mismatch: graph publication path is referenced more than once', [descriptor.ref]);
+      expectedPublicationPaths.add(descriptor.ref);
+    }
+    const actualPublicationPaths = new Set(diffPaths);
+    if (actualPublicationPaths.size !== expectedPublicationPaths.size || [...expectedPublicationPaths].some((path) => !actualPublicationPaths.has(path))) throw new CoordinationRuntimeError('invalid-request', 'semantic-graph-discovery-mismatch: publication H diff is not exactly graph root plus referenced shards', [`actual=${[...actualPublicationPaths].sort().join(',')}`, `expected=${[...expectedPublicationPaths].sort().join(',')}`]);
+    // The additive coordinator_projection freeze is consumed here, at the real
+    // registration authority boundary. R=E+1 proves the store is still exactly
+    // at E, so compare every reconstructed member/version against committed
+    // coordinator state before inserting the graph's own future artifact row.
+    const committedProjection = this.#d65CoordinatorProjectionAt(repoId, workstreamRun, facts.graph.covered_event_seq, artifactId);
+    assertD65CoordinatorProjectionEqual(loaded.coordinatorProjection, committedProjection, canonicalJson);
+    const loadedCharter = parseD65BootstrapCharter(facts.graph.bootstrap_charter);
+    const reconstructedCharter = this.#reconstructD65BootstrapCharter(repoId, workstreamRun);
+    if (canonicalJson(loadedCharter) !== canonicalJson(reconstructedCharter)) throw new CoordinationRuntimeError('invalid-request', 'semantic-graph-bootstrap-charter-invalid: graph charter does not equal immutable B event/result authority');
+    const runtimePrefix = relative(committedProjection.resource.main_worktree_path, committedProjection.resource.runtime_root).replace(/\\/gu, '/');
+    if (runtimePrefix.length === 0 || runtimePrefix === '..' || runtimePrefix.startsWith('../') || isAbsolute(runtimePrefix)) throw new CoordinationRuntimeError('invalid-request', 'semantic-graph-discovery-mismatch: run runtime root is not an exact descendant of its main worktree', [committedProjection.resource.main_worktree_path, committedProjection.resource.runtime_root]);
+    const independentlyDiscovered = discoverD65GraphBody({
+      readGitAtG: this.#d65GraphAuthorityReader(sourceRoot, facts.authorityCommit),
+      acceptedArtifacts: committedProjection.authoritative_artifacts,
+      coordinatorProjection: committedProjection,
+      repoId,
+      workstreamRun,
+      workstream: committedProjection.run.workstream,
+      runtimePrefix,
+    });
+    assertD65DiscoveredGraphBodyEqual(loaded, independentlyDiscovered.body);
+    if (facts.graph.graph_sequence === 2) {
+      const acceptedPolicy = this.#d65AcceptedLaunchPolicy(repoId, workstreamRun);
+      const parentLine = this.#gitQueryText(sourceRoot, { kind: 'rev-list-parents', revision: facts.authorityCommit }, 'invalid-request', 'first complete graph G parent inspection failed');
+      const parents = (parentLine ?? '').trim().split(/\s+/u).filter((entry) => entry.length > 0);
+      const diff = this.#gitQueryResult(sourceRoot, { kind: 'diff-paths', from: acceptedPolicy.artifact.git_commit, to: facts.authorityCommit, noRenames: true }, 'invalid-request', 'first complete graph parent-planning diff inspection failed');
+      const authorityDiffPaths = new TextDecoder('utf-8', { fatal: true }).decode(diff.stdout).split('\0').filter((entry) => entry.length > 0);
+      validateD65FirstCompleteGraph({ graph: facts.graph, charter: reconstructedCharter, historyBThroughE: this.#d65AcceptedHistory(repoId, facts.graph.covered_event_seq), policyArtifact: acceptedPolicy.artifact, policy: acceptedPolicy.policy, authorityCommitParents: parents, authorityDiffPaths });
+    } else {
+      this.#assertD65SuccessorGraphReplay(repoId, workstreamRun, sourceRoot, loaded, state);
+      this.#assertD65SuccessorAuthorityMovement(repoId, workstreamRun, sourceRoot, facts.authorityCommit, independentlyDiscovered);
+    }
     for (const queueKind of D65_QUEUE_KEYS) assertD65QueueMemberValues(loaded, queueKind);
     assertD65QueueProjectionMembers({
       state,
@@ -4779,22 +6013,363 @@ export class CoordinatorStore {
     });
   }
 
+  /**
+   * Successor G must explain exact Git authority movement: G is the prior
+   * accepted H when no intervening Git mutation occurred, or the exact current
+   * main-authority tip reached from that H solely through package-accepted
+   * Git/store saga effects covered through E. Each first-parent step pairs to
+   * its event/evidence: a one-parent authority-artifact commit changing only
+   * `authority/` paths with a covered accepted artifact registration at that
+   * exact commit, or a runtime unit merge whose exact `merge_commit_sha` is a
+   * discovered `unit-merges/` evidence member at G. Any unpaired parent,
+   * hidden commit, manual merge, or unexplained product/source change rejects.
+   */
+  #assertD65SuccessorAuthorityMovement(repoId: string, workstreamRun: string, sourceRoot: string, authorityCommit: string, discovered: ReturnType<typeof discoverD65GraphBody>): void {
+    const priorArtifact = authoritativeArtifactFromRow(asRow(this.#db.prepare("SELECT * FROM authoritative_artifacts WHERE repo_id=? AND source_run=? AND json_extract(payload_json, '$.document_schema_version')='autopilot.semantic_graph.v1' ORDER BY entity_id DESC LIMIT 1").get(repoId, workstreamRun), 'D65 successor prior graph artifact'));
+    const priorH = priorArtifact.git_commit;
+    const gParents = (this.#gitQueryText(sourceRoot, { kind: 'rev-list-parents', revision: authorityCommit }, 'invalid-request', 'successor authority G parent inspection failed') ?? '').trim().split(/\s+/u).filter((entry) => entry.length > 0);
+    const gParent = gParents[1];
+    if (gParents.length !== 2 || gParent === undefined) throw new CoordinationRuntimeError('invalid-request', 'semantic-graph-artifact-invalid: successor authority G must have exactly one parent', gParents);
+    // Collect the exact accepted merge_commit_sha set from the independently
+    // discovered unit-merges evidence at G and every covered accepted artifact
+    // commit; every intermediate first-parent step must be one of them.
+    const mergeCommits = new Set<string>();
+    for (const entry of discovered.authority.collections.unit_merges) {
+      const parsed = discovered.authority.parsed_by_ref.get(entry.ref);
+      if (parsed === undefined || typeof parsed !== 'object' || parsed === null) throw new CoordinationRuntimeError('store-corrupt', 'discovered unit-merge evidence lacks its parsed value', [entry.ref]);
+      const sha = (parsed as Record<string, unknown>)['merge_commit_sha'];
+      if (typeof sha === 'string' && /^[a-f0-9]{40}$/u.test(sha)) mergeCommits.add(sha);
+    }
+    // Every accepted artifact commit pairs the exact evidence refs it created.
+    const recoveryEvidence = this.#db.prepare("SELECT * FROM reconciliation_evidence WHERE repo_id=? AND workstream_run=? AND source IN ('attempt-reset','quarantine-capture') ORDER BY entity_id").all(repoId, workstreamRun).map(reconciliationEvidenceFromRow).flatMap((entry) => entry.release_condition.evidence === null ? [] : [entry.release_condition.evidence]);
+    const artifactRefsByCommit = new Map<string, Set<string>>();
+    for (const artifactRow of this.#db.prepare('SELECT * FROM authoritative_artifacts WHERE repo_id=? AND source_run=?').all(repoId, workstreamRun).map(authoritativeArtifactFromRow)) {
+      const refs = artifactRefsByCommit.get(artifactRow.git_commit) ?? new Set<string>();
+      refs.add(artifactRow.evidence.ref);
+      if (artifactRow.document_schema_version === 'autopilot.continuation_event.v1') {
+        const continuation = parseD65ContinuationEvent(parseJsonObject(new TextDecoder('utf-8', { fatal: true }).decode(this.#loadEvidenceArtifact(repoId, artifactRow.evidence)), 'accepted continuation artifact movement'));
+        const embedded = [...continuation.evidence_refs, ...(continuation.failed_spec_ref === null ? [] : [continuation.failed_spec_ref]), ...(continuation.failed_receipt_ref === null ? [] : [continuation.failed_receipt_ref])];
+        for (const evidence of embedded) {
+          const bytes = this.#gitQueryResult(sourceRoot, { kind: 'show-file', revision: artifactRow.git_commit, path: evidence.ref }, 'invalid-request', 'accepted continuation embedded evidence is absent at its artifact commit').stdout;
+          const digest = `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
+          if (digest !== evidence.sha256 || bytes.byteLength !== evidence.byte_count) throw new CoordinationRuntimeError('invalid-request', 'accepted continuation embedded evidence differs at its artifact commit', [evidence.ref, evidence.sha256, digest]);
+          refs.add(evidence.ref);
+        }
+      }
+      artifactRefsByCommit.set(artifactRow.git_commit, refs);
+    }
+    let cursor = gParent;
+    for (let step = 0; step < 10_000; step += 1) {
+      if (cursor === priorH) return;
+      const parents = (this.#gitQueryText(sourceRoot, { kind: 'rev-list-parents', revision: cursor }, 'invalid-request', 'successor authority-movement parent inspection failed') ?? '').trim().split(/\s+/u).filter((entry) => entry.length > 0);
+      const stepParents = parents.slice(1);
+      const firstParent = stepParents[0];
+      if (firstParent === undefined) throw new CoordinationRuntimeError('invalid-request', 'semantic-graph-transition-invalid: successor authority movement reached a rootless commit before the prior accepted H', [cursor, priorH]);
+      if (mergeCommits.has(cursor)) { cursor = firstParent; continue; }
+      const artifactRefs = artifactRefsByCommit.get(cursor);
+      if (stepParents.length === 1 && artifactRefs !== undefined) {
+        // A one-parent authority-artifact commit changes exactly its accepted
+        // immutable artifact paths and nothing else.
+        const diff = this.#gitQueryResult(sourceRoot, { kind: 'diff-paths', from: firstParent, to: cursor, noRenames: true }, 'invalid-request', 'successor authority-artifact diff inspection failed');
+        const paths = new TextDecoder('utf-8', { fatal: true }).decode(diff.stdout).split('\0').filter((entry) => entry.length > 0);
+        if (paths.length === 0 || paths.some((path) => !artifactRefs.has(path))) throw new CoordinationRuntimeError('invalid-request', 'semantic-graph-transition-invalid: authority-artifact commit changes a path outside its accepted immutable artifact set', [cursor, ...paths.slice(0, 8)]);
+        cursor = firstParent;
+        continue;
+      }
+      if (stepParents.length === 1) {
+        const diff = this.#gitQueryResult(sourceRoot, { kind: 'diff-paths', from: firstParent, to: cursor, noRenames: true }, 'invalid-request', 'successor unit-recovery evidence diff inspection failed');
+        const paths = new TextDecoder('utf-8', { fatal: true }).decode(diff.stdout).split('\0').filter((entry) => entry.length > 0);
+        const evidence = paths.length === 1 ? recoveryEvidence.filter((entry) => entry.ref === paths[0]) : [];
+        const accepted = evidence[0];
+        if (evidence.length === 1 && accepted !== undefined && paths[0] !== undefined) {
+          const bytes = this.#gitQueryResult(sourceRoot, { kind: 'show-file', revision: cursor, path: paths[0] }, 'invalid-request', 'successor unit-recovery evidence blob inspection failed').stdout;
+          const digest = `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
+          if (digest !== accepted.sha256) throw new CoordinationRuntimeError('invalid-request', 'semantic-graph-transition-invalid: unit-recovery evidence commit bytes differ from accepted reconciliation authority', [paths[0], accepted.sha256, digest]);
+          cursor = firstParent;
+          continue;
+        }
+      }
+      throw new CoordinationRuntimeError('invalid-request', 'semantic-graph-transition-invalid: successor authority movement contains an unpaired Git commit between the prior accepted H and G', [cursor, priorH, `parents=${String(stepParents.length)}`]);
+    }
+    throw new CoordinationRuntimeError('invalid-request', 'semantic-graph-transition-invalid: successor authority movement did not reach the prior accepted H within its bounded walk', [priorH, authorityCommit]);
+  }
+
+  /** Exact B(N) + liveness* + one-semantic-event successor proof. */
+  #assertD65SuccessorGraphReplay(repoId: string, workstreamRun: string, sourceRoot: string, current: D65LoadedGraph, currentState: AutopilotState): void {
+    const priorArtifact = authoritativeArtifactFromRow(asRow(this.#db.prepare("SELECT * FROM authoritative_artifacts WHERE repo_id=? AND source_run=? AND json_extract(payload_json, '$.document_schema_version')='autopilot.semantic_graph.v1' ORDER BY entity_id DESC LIMIT 1").get(repoId, workstreamRun), 'D65 successor prior graph'));
+    const priorRoot = parseD65CompleteGraph(parseJsonObject(new TextDecoder('utf-8', { fatal: true }).decode(this.#loadEvidenceArtifact(repoId, priorArtifact.evidence)), 'D65 successor prior graph root'));
+    if (priorRoot.graph_sequence + 1 !== current.graph.graph_sequence || priorArtifact.registered_event_seq !== priorRoot.covered_event_seq + 1) throw new CoordinationRuntimeError('store-corrupt', 'D65 successor prior graph tuple is internally inconsistent');
+    const priorRegistrationEvent = asRow(this.#db.prepare("SELECT idempotency_key FROM events WHERE repo_id=? AND event_type='authoritative-artifact-registered' AND entity_id=?").get(repoId, priorArtifact.artifact_id), 'D65 successor prior graph registration event');
+    const proven = this.lookupCommittedGraphRegistration(repoId, workstreamRun, { artifactId: priorArtifact.artifact_id, publicationCommit: priorArtifact.git_commit, graphRef: priorArtifact.evidence.ref, graphSha256: priorArtifact.evidence.sha256, coveredEventSeq: priorRoot.covered_event_seq, idempotencyKey: sqlString(priorRegistrationEvent, 'idempotency_key') });
+    if (proven?.registrationEventSeq !== priorArtifact.registered_event_seq) throw new CoordinationRuntimeError('store-corrupt', 'D65 successor prior graph lacks exact R event/result authority');
+    const priorLoaded = loadD65CompleteGraph(priorRoot, (ref) => this.#readD65GraphShardBlob(sourceRoot, priorArtifact.git_commit, ref));
+    const baseline = applyD65GraphRegistrationBaseline({ prior: priorLoaded.coordinatorProjection, artifact: priorArtifact });
+    const suffixRows = this.#db.prepare("SELECT e.*,r.repo_id AS result_repo_id,r.idempotency_key AS result_key,r.request_sha256 AS result_request,r.committed_event_seq AS result_seq,r.payload_json AS result_payload FROM events e LEFT JOIN idempotency_results r ON r.repo_id=e.repo_id AND r.idempotency_key=e.idempotency_key WHERE e.repo_id=? AND e.event_seq>? AND e.event_seq<=? ORDER BY e.event_seq").all(repoId, priorArtifact.registered_event_seq, current.graph.covered_event_seq);
+    if (suffixRows.length !== current.graph.covered_event_seq - priorArtifact.registered_event_seq) throw new CoordinationRuntimeError('store-corrupt', 'D65 successor suffix is not a contiguous event range');
+    let semanticType: string | null = null;
+    let subscriptionRecovery: ReturnType<typeof parseD65ContinuationEvent> | null = null;
+    for (let index = 0; index < suffixRows.length; index += 1) {
+      const row = asRow(suffixRows[index], 'D65 successor event');
+      const eventSeq = sqlInteger(row, 'event_seq');
+      if (eventSeq !== priorArtifact.registered_event_seq + index + 1) throw new CoordinationRuntimeError('store-corrupt', 'D65 successor event range has a gap', [String(eventSeq)]);
+      const idempotencyKey = sqlString(row, 'idempotency_key');
+      const requestSha = sqlString(row, 'request_sha256');
+      const payloadText = sqlNullableString(row, 'result_payload');
+      if (sqlNullableString(row, 'result_repo_id') !== repoId || sqlNullableString(row, 'result_key') !== idempotencyKey || sqlNullableString(row, 'result_request') !== requestSha || sqlNullableInteger(row, 'result_seq') !== eventSeq || payloadText === null) throw new CoordinationRuntimeError('store-corrupt', 'D65 successor event lacks its exact immutable result join', [String(eventSeq)]);
+      const payload = parseJsonObject(payloadText, 'D65 successor result');
+      const eventType = sqlString(row, 'event_type');
+      const joined: D65AcceptedEventResultJoin = { repo_id: repoId, event_seq: eventSeq, event_type: eventType, entity_type: sqlString(row, 'entity_type'), entity_id: sqlString(row, 'entity_id'), idempotency_key: idempotencyKey, request_sha256: requestSha, result: { repo_id: repoId, idempotency_key: idempotencyKey, request_sha256: requestSha, committed_event_seq: eventSeq, payload } };
+      // Repository event sequences are shared across runs. Only an event whose
+      // exact immutable result names this run as a semantic owner can authorize
+      // this run's N+1; unrelated runs are transparent wherever interleaved.
+      if (!d65SemanticEventWorkstreamRuns(joined).includes(workstreamRun)) continue;
+      let pure = false;
+      if (eventType === 'session-heartbeat') {
+        const identity = joined.entity_id;
+        const owned = [...baseline.sessions, ...current.coordinatorProjection.sessions].some((session) => session.session_lease_id === identity);
+        pure = owned && isPureD65SessionHeartbeat(joined);
+      } else if (eventType === 'child-heartbeat') {
+        const identity = joined.entity_id;
+        const owned = [...baseline.children, ...current.coordinatorProjection.children].some((child) => child.child_lease_id === identity);
+        pure = owned && isPureD65ChildHeartbeat(joined);
+      } else if (eventType === 'program-heartbeat-accepted') {
+        const acceptance = parseD65HeartbeatAcceptanceResult(payload);
+        pure = acceptance.repo_id === repoId && acceptance.workstream_run === workstreamRun && joined.entity_id === workstreamRun;
+      }
+      if (pure) {
+        if (semanticType !== null) throw new CoordinationRuntimeError('invalid-state', 'semantic-graph-transition-invalid: normalized liveness appears after the successor semantic event');
+        continue;
+      }
+      if (semanticType !== null) throw new CoordinationRuntimeError('invalid-state', 'semantic-graph-transition-invalid: successor collapses more than one semantic event', [semanticType, eventType]);
+      semanticType = eventType;
+      if (eventType === 'authoritative-artifact-registered') {
+        const artifact = parseCoordinationAuthoritativeArtifact(payload['authoritative_artifact']);
+        if (artifact.repo_id !== repoId || artifact.source_run !== workstreamRun || artifact.document_schema_version !== 'autopilot.continuation_event.v1') continue;
+        const continuation = parseD65ContinuationEvent(parseJsonObject(new TextDecoder('utf-8', { fatal: true }).decode(this.#loadEvidenceArtifact(repoId, artifact.evidence)), 'successor subscription-recovery continuation'));
+        if (continuation.trigger === 'subscription-failure' && continuation.class === 'provider-capacity-blocked') subscriptionRecovery = continuation;
+      }
+    }
+    if (semanticType === null) throw new CoordinationRuntimeError('invalid-request', 'semantic-graph-cas-conflict: no-event N+1 is forbidden; coordinator-transient recovery retains the same accepted graph tuple');
+    const allowed = this.#d65ProjectionSectionsForSemanticEvent(semanticType);
+    const keys: readonly (keyof D65CoordinatorProjectionSnapshot)[] = ['run','resource','sessions','children','attempts','faults','reservations','edit_leases','acquisition_groups','worktrees','operations','terminal_intents','current_terminal_intent_id','authoritative_artifacts','run_version'];
+    for (const key of keys) if (!allowed.has(key) && canonicalJson(baseline[key]) !== canonicalJson(current.coordinatorProjection[key])) throw new CoordinationRuntimeError('invalid-state', `semantic-graph-transition-invalid: ${semanticType} changed forbidden coordinator projection section ${key}`);
+    const priorStateBytes = this.#readD65GraphShardBlob(sourceRoot, priorArtifact.git_commit, priorRoot.core.state.ref);
+    if (`sha256:${createHash('sha256').update(priorStateBytes).digest('hex')}` !== priorRoot.core.state.sha256) throw new CoordinationRuntimeError('store-corrupt', 'D65 successor prior state bytes disagree with the prior graph root');
+    const priorState = parseAutopilotState(parseJsonObject(new TextDecoder('utf-8', { fatal: true }).decode(priorStateBytes), 'D65 successor prior state'));
+    const priorUnitIds = Object.keys(priorState.units).sort();
+    const currentUnitIds = Object.keys(currentState.units).sort();
+    if (canonicalJson(priorUnitIds) !== canonicalJson(currentUnitIds)) throw new CoordinationRuntimeError('invalid-state', 'semantic-graph-transition-invalid: complete-mode unit identities were created or deleted');
+    for (const unitId of priorUnitIds) {
+      const before = priorState.units[unitId];
+      const after = currentState.units[unitId];
+      if (before === undefined || after === undefined) throw new CoordinationRuntimeError('store-corrupt', 'D65 successor unit identity disappeared after exact key-set comparison', [unitId]);
+      if (canonicalJson(before) === canonicalJson(after)) continue;
+      const successorSpecRef = after.spec_ref;
+      const successorSpecEntries = successorSpecRef === undefined ? [] : (current.authorities['specs']?.entries ?? []).filter((entry) => {
+        const runtimeRelative = relative(dirname(current.graph.core.state.ref), entry.ref).replace(/\\/gu, '/');
+        return entry.ref === successorSpecRef || runtimeRelative === successorSpecRef;
+      });
+      const successorSpecEntry = successorSpecEntries.length === 1 ? successorSpecEntries[0] : undefined;
+      const exactSubscriptionRecovery = subscriptionRecovery !== null
+        && subscriptionRecovery.repo_id === repoId
+        && subscriptionRecovery.workstream_run === workstreamRun
+        && subscriptionRecovery.unit_id === unitId
+        && subscriptionRecovery.attempt === before.attempt
+        && subscriptionRecovery.retry_ordinal !== null
+        && after.attempt === before.attempt + 1
+        && successorSpecEntry !== undefined
+        && successorSpecEntry.document_schema_version === 'autopilot.unit_spec.v1'
+        && subscriptionRecovery.evidence_refs.some((evidence) => evidence.ref === current.graph.core.state.ref && evidence.sha256 === current.graph.core.state.sha256 && evidence.byte_count === current.graph.core.state.byte_count)
+        && subscriptionRecovery.evidence_refs.some((evidence) => evidence.ref === successorSpecEntry.ref && evidence.sha256 === successorSpecEntry.sha256 && evidence.byte_count === successorSpecEntry.byte_count);
+      assertD65UnitTransition({ unitId, from: before.state, to: after.state, fromAttempt: before.attempt, toAttempt: after.attempt, hasRecoveryEvidence: semanticType === 'unit-attempt-registered' || semanticType === 'adjudication-accepted' || semanticType === 'run-scoped-fault-resolved' || exactSubscriptionRecovery });
+    }
+    const priorItems = priorState.work_items ?? {};
+    const currentItems = currentState.work_items ?? {};
+    const priorItemIds = Object.keys(priorItems).sort();
+    if (canonicalJson(priorItemIds) !== canonicalJson(Object.keys(currentItems).sort())) throw new CoordinationRuntimeError('invalid-state', 'semantic-graph-transition-invalid: complete-mode work-item identities were created or deleted');
+    for (const workItemId of priorItemIds) {
+      const before = priorItems[workItemId];
+      const after = currentItems[workItemId];
+      if (before === undefined || after === undefined) throw new CoordinationRuntimeError('store-corrupt', 'D65 successor work-item identity disappeared after exact key-set comparison', [workItemId]);
+      if (canonicalJson(before) === canonicalJson(after)) continue;
+      assertD65WorkItemTransition({ workItemId, from: before.state, to: after.state });
+    }
+  }
+
+  #d65ProjectionSectionsForSemanticEvent(eventType: string): ReadonlySet<keyof D65CoordinatorProjectionSnapshot> {
+    const map: Readonly<Record<string, readonly (keyof D65CoordinatorProjectionSnapshot)[]>> = Object.freeze({
+      'session-attached': ['run','sessions','run_version'], 'session-handoff-prepared': ['sessions'], 'session-detached': ['sessions'],
+      'unit-attempt-registered': ['attempts'], 'unit-attempt-verified': ['attempts'], 'unit-attempt-checkpointed': ['attempts'], 'unit-attempt-superseded': ['attempts','acquisition_groups','edit_leases'],
+      'child-registered': ['children','attempts'], 'child-terminal': ['children','attempts','acquisition_groups','edit_leases'], 'child-recovery-required': ['children','attempts'],
+      'acquisition-group-waiting': ['attempts','acquisition_groups'], 'acquisition-group-granted': ['attempts','acquisition_groups','edit_leases'], 'acquisition-group-cancelled': ['acquisition_groups','edit_leases'], 'grant-offer-expired': ['acquisition_groups'], 'grant-offers-expired': ['acquisition_groups'],
+      'claim-request-cancelled': ['acquisition_groups','edit_leases'], 'claim-request-deferred': [], 'claim-request-released': ['acquisition_groups','edit_leases'],
+      'release-evidence-accepted': ['run','attempts','reservations','edit_leases','acquisition_groups','terminal_intents','current_terminal_intent_id','run_version'],
+      'reservation-obligation-resolved': [], 'run-reconciled': ['attempts','reservations','edit_leases','acquisition_groups'], 'startup-run-reconciled': ['children','attempts','reservations','edit_leases','acquisition_groups'],
+      'run-terminal-prepared': ['run','terminal_intents','current_terminal_intent_id','run_version'], 'run-terminal-cancelled': ['run','terminal_intents','current_terminal_intent_id','run_version'],
+      'run-scoped-fault-recorded': ['faults'], 'run-scoped-fault-resolved': ['faults'], 'authoritative-artifact-registered': ['authoritative_artifacts'],
+      'mailbox-drained': [], 'worktree-operation-prepared': ['worktrees','operations'], 'worktree-operation-in-progress': ['worktrees','operations'], 'worktree-operation-verified': ['worktrees','operations'], 'worktree-operation-reconciling': ['worktrees','operations'], 'worktree-operation-committed': ['worktrees','operations'], 'worktree-operation-compensated': ['worktrees','operations'], 'worktree-operation-failed': ['worktrees','operations'],
+      'message-acknowledged': [], 'adjudication-assigned': [], 'adjudication-assignment-claimed': [], 'adjudication-accepted': [], 'planning-contradiction-accepted': [], 'migration-recovery-attached': ['run','sessions','run_version'], 'migration-recovery-resolved': ['edit_leases','acquisition_groups'],
+    });
+    const sections = map[eventType];
+    if (sections === undefined) throw new CoordinationRuntimeError('invalid-state', `semantic-graph-transition-invalid: event ${eventType} has no closed D65 successor handler`);
+    return new Set(sections);
+  }
+
+  #d65AcceptedHistory(repoId: string, coveredEventSeq: number, afterEventSeq = 0): readonly D65AcceptedEventResultJoin[] {
+    if (!Number.isSafeInteger(afterEventSeq) || afterEventSeq < 0 || afterEventSeq > coveredEventSeq) throw new CoordinationRuntimeError('store-corrupt', 'D65 accepted history range is invalid', [String(afterEventSeq), String(coveredEventSeq)]);
+    const rows = this.#db.prepare(
+      'SELECT e.repo_id,e.event_seq,e.event_type,e.entity_type,e.entity_id,e.idempotency_key,e.request_sha256,r.repo_id AS result_repo_id,r.idempotency_key AS result_idempotency_key,r.request_sha256 AS result_request_sha256,r.committed_event_seq AS result_event_seq,r.payload_json AS result_payload_json FROM events e LEFT JOIN idempotency_results r ON r.repo_id=e.repo_id AND r.idempotency_key=e.idempotency_key WHERE e.repo_id=? AND e.event_seq>? AND e.event_seq<=? ORDER BY e.event_seq',
+    ).all(repoId, afterEventSeq, coveredEventSeq);
+    return Object.freeze(rows.map((raw) => {
+      const row = asRow(raw, 'D65 accepted event history');
+      const resultRepo = sqlNullableString(row, 'result_repo_id');
+      const resultKey = sqlNullableString(row, 'result_idempotency_key');
+      const resultRequest = sqlNullableString(row, 'result_request_sha256');
+      const resultSequence = sqlNullableInteger(row, 'result_event_seq');
+      const resultPayload = sqlNullableString(row, 'result_payload_json');
+      const result = resultRepo === null || resultKey === null || resultRequest === null || resultSequence === null || resultPayload === null ? null : Object.freeze({ repo_id: resultRepo, idempotency_key: resultKey, request_sha256: resultRequest, committed_event_seq: resultSequence, payload: parseJsonObject(resultPayload, 'D65 accepted event result') });
+      return Object.freeze({ repo_id: sqlString(row, 'repo_id'), event_seq: sqlInteger(row, 'event_seq'), event_type: sqlString(row, 'event_type'), entity_type: sqlString(row, 'entity_type'), entity_id: sqlString(row, 'entity_id'), idempotency_key: sqlString(row, 'idempotency_key'), request_sha256: sqlString(row, 'request_sha256'), result });
+    }));
+  }
+
+  /** Exact event/result history used to compute semantic session/child versions. */
+  #d65SemanticHistory(repoId: string, workstreamRun: string, coveredEventSeq: number): readonly D65AcceptedEventResultJoin[] {
+    const rows = this.#db.prepare(
+      "SELECT e.repo_id,e.event_seq,e.event_type,e.entity_type,e.entity_id,e.idempotency_key,e.request_sha256,r.repo_id AS result_repo_id,r.idempotency_key AS result_idempotency_key,r.request_sha256 AS result_request_sha256,r.committed_event_seq AS result_event_seq,r.payload_json AS result_payload_json FROM events e LEFT JOIN idempotency_results r ON r.repo_id=e.repo_id AND r.idempotency_key=e.idempotency_key WHERE e.repo_id=? AND e.event_seq<=? AND ((e.event_type='session-heartbeat' AND e.entity_id IN (SELECT session_lease_id FROM session_leases WHERE repo_id=? AND workstream_run=?)) OR (e.event_type='child-heartbeat' AND e.entity_id IN (SELECT child_lease_id FROM child_leases WHERE repo_id=? AND workstream_run=?)) OR (e.event_type='program-heartbeat-accepted' AND e.entity_id=?)) ORDER BY e.event_seq",
+    ).all(repoId, coveredEventSeq, repoId, workstreamRun, repoId, workstreamRun, workstreamRun);
+    return Object.freeze(rows.map((raw) => {
+      const row = asRow(raw, 'D65 semantic event history');
+      const resultRepo = sqlNullableString(row, 'result_repo_id');
+      const resultKey = sqlNullableString(row, 'result_idempotency_key');
+      const resultRequest = sqlNullableString(row, 'result_request_sha256');
+      const resultSequence = sqlNullableInteger(row, 'result_event_seq');
+      const resultPayload = sqlNullableString(row, 'result_payload_json');
+      const result = resultRepo === null || resultKey === null || resultRequest === null || resultSequence === null || resultPayload === null
+        ? null
+        : Object.freeze({ repo_id: resultRepo, idempotency_key: resultKey, request_sha256: resultRequest, committed_event_seq: resultSequence, payload: parseJsonObject(resultPayload, 'D65 semantic idempotency result') });
+      return Object.freeze({ repo_id: sqlString(row, 'repo_id'), event_seq: sqlInteger(row, 'event_seq'), event_type: sqlString(row, 'event_type'), entity_type: sqlString(row, 'entity_type'), entity_id: sqlString(row, 'entity_id'), idempotency_key: sqlString(row, 'idempotency_key'), request_sha256: sqlString(row, 'request_sha256'), result });
+    }));
+  }
+
+  /**
+   * Derive an attempt's immutable `consumed_probe` projection from its unique
+   * `unit-attempt-registered` event/result, revalidated against the registered
+   * probe bytes. Null for every non-probe registration (fresh plan §2.3).
+   */
+  #d65ConsumedProbeProjection(repoId: string, attempt: CoordinationUnitAttempt): D65AttemptProjection['consumed_probe'] {
+    const entityId = unitAttemptEntityId(attempt.owner);
+    const rows = this.#db.prepare("SELECT e.event_seq, r.payload_json FROM events e JOIN idempotency_results r ON r.repo_id=e.repo_id AND r.idempotency_key=e.idempotency_key WHERE e.repo_id=? AND e.event_type='unit-attempt-registered' AND e.entity_id=? ORDER BY e.event_seq").all(repoId, entityId);
+    if (rows.length === 0) return null;
+    const row = rows[0];
+    if (rows.length !== 1 || row === undefined) throw new CoordinationRuntimeError('store-corrupt', 'unit attempt has more than one immutable registration event', [entityId]);
+    const payload = parseJsonObject(sqlString(asRow(row, 'attempt registration result'), 'payload_json'), 'attempt registration result');
+    const artifactId = payload['consumed_probe_artifact_id'];
+    if (artifactId === undefined) return null;
+    if (typeof artifactId !== 'string') throw new CoordinationRuntimeError('store-corrupt', 'attempt registration consumption artifact id is malformed', [entityId]);
+    const artifact = authoritativeArtifactFromRow(asRow(this.#db.prepare('SELECT * FROM authoritative_artifacts WHERE repo_id=? AND entity_id=?').get(repoId, artifactId), 'consumed probe artifact'));
+    const probe = parseD65SubscriptionProbe(parseJsonObject(new TextDecoder('utf-8', { fatal: true }).decode(this.#loadEvidenceArtifact(repoId, artifact.evidence)), 'consumed probe bytes'));
+    if (payload['consumed_probe_sha256'] !== artifact.evidence.sha256 || payload['consumed_probe_sequence'] !== probe.probe_sequence || payload['consumed_probe_provider'] !== probe.provider || payload['consumed_probe_trigger_continuation_sha256'] !== probe.trigger_continuation_sha256) throw new CoordinationRuntimeError('store-corrupt', 'attempt registration consumption tuple diverges from the registered probe bytes', [entityId, artifactId]);
+    const coordinatorTime = payload['consumed_probe_coordinator_time'];
+    if (typeof coordinatorTime !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u.test(coordinatorTime) || !(Date.parse(probe.issued_at) <= Date.parse(coordinatorTime) && Date.parse(coordinatorTime) < Date.parse(probe.expires_at))) throw new CoordinationRuntimeError('store-corrupt', 'attempt registration consumption coordinator time is missing or outside the signed probe window', [entityId, String(coordinatorTime)]);
+    return Object.freeze({ artifact_id: artifactId, sha256: artifact.evidence.sha256, probe_sequence: probe.probe_sequence, provider: probe.provider, trigger_continuation_sha256: probe.trigger_continuation_sha256, consumption_event_seq: sqlInteger(asRow(row, 'attempt registration event'), 'event_seq') });
+  }
+
+  /** Reconstruct committed coordinator state at E through the exact frozen row parsers. */
+  #d65CoordinatorProjectionAt(repoId: string, workstreamRun: string, coveredEventSeq: number, futureGraphArtifactId: string | null = null): D65CoordinatorProjectionSnapshot {
+    const repositorySequence = sqlInteger(asRow(this.#db.prepare('SELECT event_seq FROM repositories WHERE repo_id=?').get(repoId), 'D65 coordinator projection repository'), 'event_seq');
+    if (repositorySequence !== coveredEventSeq) throw new CoordinationRuntimeError('invalid-request', 'semantic-graph-projection-mismatch: committed repository sequence is not the requested E boundary', [String(repositorySequence), String(coveredEventSeq)]);
+    const run = this.#requireRun(repoId, workstreamRun);
+    const resourceRows = this.#db.prepare('SELECT * FROM run_resources WHERE repo_id=? AND workstream_run=?').all(repoId, workstreamRun);
+    if (resourceRows.length !== 1 || resourceRows[0] === undefined) throw new CoordinationRuntimeError('store-corrupt', 'D65 coordinator projection requires exactly one run resource', [`count=${String(resourceRows.length)}`]);
+    const resource = runResourceFromRow(resourceRows[0]);
+    const semanticCounts = computeD65SemanticVersionCounts(this.#d65SemanticHistory(repoId, workstreamRun, coveredEventSeq), coveredEventSeq);
+    const sessions = this.#db.prepare('SELECT * FROM session_leases WHERE repo_id=? AND workstream_run=? ORDER BY session_lease_id').all(repoId, workstreamRun).map((row) => {
+      const session = sessionFromRow(row);
+      return projectD65SessionLease(session, semanticCounts.sessionPureLeaseEvents.get(session.session_lease_id) ?? 0);
+    });
+    const children = this.#db.prepare('SELECT * FROM child_leases WHERE repo_id=? AND workstream_run=? ORDER BY child_lease_id').all(repoId, workstreamRun).map((row) => {
+      const child = childFromRow(row);
+      return projectD65ChildLease(child, semanticCounts.childPureLeaseEvents.get(child.child_lease_id) ?? 0);
+    });
+    const attempts: readonly D65AttemptProjection[] = Object.freeze(this.#db.prepare('SELECT * FROM unit_attempts WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(repoId, workstreamRun).map((row) => {
+      const attempt = unitAttemptFromRow(row);
+      return Object.freeze({ attempt, consumed_probe: this.#d65ConsumedProbeProjection(repoId, attempt) });
+    }));
+    const faults = this.#db.prepare('SELECT * FROM run_scoped_faults WHERE repo_id=? AND workstream_run=? ORDER BY fault_id').all(repoId, workstreamRun).map(runScopedFaultFromRow);
+    const reservations = this.#db.prepare('SELECT * FROM change_reservations WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(repoId, workstreamRun).map(changeReservationFromRow);
+    const editLeases = this.#db.prepare('SELECT * FROM edit_leases WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(repoId, workstreamRun).map(editLeaseFromRow);
+    const acquisitionGroups = this.#db.prepare('SELECT * FROM acquisition_groups WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(repoId, workstreamRun).map(acquisitionGroupFromRow);
+    const worktrees = this.#db.prepare('SELECT * FROM worktrees WHERE repo_id=? AND workstream_run=? AND is_current_canonical=1 ORDER BY canonical_worktree_id').all(repoId, workstreamRun).map(canonicalWorktreeFromRow);
+    const operations = this.#db.prepare('SELECT * FROM worktree_operations WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(repoId, workstreamRun).map(worktreeOperationFromRow);
+    const terminalIntents = this.#db.prepare('SELECT payload_json FROM run_terminal_intents WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(repoId, workstreamRun).map((row) => {
+      const value = parseJsonObject(sqlString(row, 'payload_json'), 'D65 terminal intent projection');
+      return value['schema_version'] === 'autopilot.run_terminal_intent.v2' ? parseD65RunTerminalIntentV2(value) : parseCoordinationRunTerminalIntent(value);
+    });
+    const currentIntents = terminalIntents.filter((intent) => intent.state === 'prepared' || intent.state === 'committed');
+    if (currentIntents.length > 1) throw new CoordinationRuntimeError('store-corrupt', 'D65 coordinator projection has more than one current terminal intent');
+    const artifacts = this.#db.prepare('SELECT * FROM authoritative_artifacts WHERE repo_id=? AND source_run=? ORDER BY entity_id').all(repoId, workstreamRun).map(authoritativeArtifactFromRow).filter((artifact) => artifact.artifact_id !== futureGraphArtifactId);
+    return Object.freeze({ run, resource, sessions: Object.freeze(sessions), children: Object.freeze(children), attempts, faults: Object.freeze(faults), reservations: Object.freeze(reservations), edit_leases: Object.freeze(editLeases), acquisition_groups: Object.freeze(acquisitionGroups), worktrees: Object.freeze(worktrees), operations: Object.freeze(operations), terminal_intents: Object.freeze(terminalIntents), current_terminal_intent_id: currentIntents[0]?.terminal_intent_id ?? null, authoritative_artifacts: Object.freeze(artifacts), covered_event_seq: coveredEventSeq, run_version: run.version });
+  }
+
+  #d65GraphAuthorityReader(sourceRoot: string, authorityCommit: string): D65GraphAuthorityReader {
+    const listing = this.#gitQueryResult(sourceRoot, { kind: 'ls-tree-recursive', revision: authorityCommit, includeSize: false }, 'invalid-request', 'semantic graph authority recursive tree inspection failed');
+    let decoded: string;
+    try { decoded = new TextDecoder('utf-8', { fatal: true }).decode(listing.stdout); }
+    catch (error) { throw new CoordinationRuntimeError('invalid-request', 'semantic-graph-discovery-mismatch: authority tree contains a non-UTF-8 path', [error instanceof Error ? error.message : String(error)]); }
+    const entries: D65GraphTreeLeaf[] = decoded.split('\0').filter((record) => record.length > 0).map((record) => {
+      const tab = record.indexOf('\t');
+      const metadata = tab < 0 ? [] : record.slice(0, tab).split(/\s+/u);
+      const ref = tab < 0 ? '' : record.slice(tab + 1);
+      const mode = metadata[0];
+      const type = metadata[1];
+      const oid = metadata[2];
+      if ((mode !== '100644' && mode !== '100755' && mode !== '120000' && mode !== '160000') || (type !== 'blob' && type !== 'commit') || oid === undefined || !/^[a-f0-9]{40}$/u.test(oid) || ref.length === 0) throw new CoordinationRuntimeError('invalid-request', 'semantic-graph-discovery-mismatch: recursive authority tree row is malformed', [record]);
+      return Object.freeze({ ref, mode, type, oid });
+    });
+    const byRef = new Map(entries.map((entry) => [entry.ref, entry] as const));
+    return Object.freeze({
+      entries: Object.freeze(entries),
+      readBlob: (ref: string): Uint8Array => {
+        const entry = byRef.get(ref);
+        if (entry === undefined || entry.type !== 'blob') throw new CoordinationRuntimeError('invalid-request', 'semantic-graph-discovery-mismatch: requested authority ref is not one listed blob', [ref]);
+        return this.#gitQueryResult(sourceRoot, { kind: 'show-file', revision: authorityCommit, path: ref }, 'invalid-request', 'semantic graph authority blob is not readable at G').stdout;
+      },
+    });
+  }
+
+  #assertD65RegularGitBlob(sourceRoot: string, revision: string, ref: string, expectedOid: string | null, label: string): string {
+    const listing = this.#gitQueryResult(sourceRoot, { kind: 'ls-tree-path', revision, path: ref }, 'invalid-request', `${label} Git tree inspection failed`);
+    const records = new TextDecoder('utf-8', { fatal: true }).decode(listing.stdout).split('\0').filter((record) => record.length > 0);
+    const record = records[0];
+    if (records.length !== 1 || record === undefined) throw new CoordinationRuntimeError('invalid-request', `${label} must resolve to exactly one Git tree entry`, [ref]);
+    const tab = record.indexOf('\t');
+    const metadata = tab < 0 ? [] : record.slice(0, tab).split(/\s+/u);
+    const listedPath = tab < 0 ? '' : record.slice(tab + 1);
+    const mode = metadata[0];
+    const type = metadata[1];
+    const oid = metadata[2];
+    if (mode !== '100644' || type !== 'blob' || oid === undefined || !/^[0-9a-f]{40}$/u.test(oid) || listedPath !== ref || expectedOid !== null && oid !== expectedOid) throw new CoordinationRuntimeError('invalid-request', `${label} must be the exact mode-100644 regular Git blob`, [ref, record]);
+    return oid;
+  }
+
   // Read one repository-relative graph shard blob at the exact publication commit
   // H for the loader/replayer. The blob must be a regular blob at H and within
   // the immutable evidence byte bound; absence or a non-blob path fails loudly.
   #readD65GraphShardBlob(sourceRoot: string, publicationCommit: string, ref: string): Uint8Array {
+    this.#assertD65RegularGitBlob(sourceRoot, publicationCommit, ref, null, 'semantic graph shard');
     const shown = this.#gitQueryResult(sourceRoot, { kind: 'show-file', revision: publicationCommit, path: ref }, 'invalid-request', 'semantic graph shard blob is not readable at the publication commit');
     if (shown.stdout.byteLength > MAX_COORDINATION_EVIDENCE_BYTES) throw new CoordinationRuntimeError('invalid-request', 'semantic graph shard blob exceeds the immutable evidence byte bound', [ref]);
     return shown.stdout;
   }
 
-  #validateD65GraphAuthority(sourceRoot: string, authorityCommit: string, graph: { readonly covered_authority_tree: string; readonly core: { readonly mission: { readonly ref: string; readonly sha256: `sha256:${string}`; readonly byte_count: number }; readonly master_plan: { readonly ref: string; readonly sha256: `sha256:${string}`; readonly byte_count: number }; readonly state: { readonly ref: string; readonly sha256: `sha256:${string}`; readonly byte_count: number }; readonly decision_log: { readonly ref: string; readonly sha256: `sha256:${string}`; readonly byte_count: number }; readonly events: { readonly ref: string; readonly sha256: `sha256:${string}`; readonly byte_count: number } }; readonly queue_projection: Parameters<typeof assertD65QueueProjectionCounts>[0]['indexes'] }): AutopilotState {
+  #validateD65GraphAuthority(sourceRoot: string, authorityCommit: string, graph: { readonly covered_authority_tree: string; readonly core: { readonly mission: { readonly ref: string; readonly git_blob_oid: string; readonly sha256: `sha256:${string}`; readonly byte_count: number }; readonly master_plan: { readonly ref: string; readonly git_blob_oid: string; readonly sha256: `sha256:${string}`; readonly byte_count: number }; readonly state: { readonly ref: string; readonly git_blob_oid: string; readonly sha256: `sha256:${string}`; readonly byte_count: number }; readonly decision_log: { readonly ref: string; readonly git_blob_oid: string; readonly sha256: `sha256:${string}`; readonly byte_count: number }; readonly events: { readonly ref: string; readonly git_blob_oid: string; readonly sha256: `sha256:${string}`; readonly byte_count: number } }; readonly queue_projection: Parameters<typeof assertD65QueueProjectionCounts>[0]['indexes'] }): AutopilotState {
     // covered_authority_tree must equal the actual tree of G.
     const actualTree = this.#gitQueryText(sourceRoot, { kind: 'resolve-tree', revision: authorityCommit }, 'invalid-request', 'semantic graph authority tree inspection failed');
     if (actualTree !== graph.covered_authority_tree) throw new CoordinationRuntimeError('invalid-request', 'semantic-graph-artifact-invalid: covered_authority_tree does not match the authority commit tree', [String(actualTree), graph.covered_authority_tree]);
     // Verify each of the five fixed core authority blobs at G.
     const coreBlobs = [graph.core.mission, graph.core.master_plan, graph.core.state, graph.core.decision_log, graph.core.events] as const;
     for (const entry of coreBlobs) {
+      this.#assertD65RegularGitBlob(sourceRoot, authorityCommit, entry.ref, entry.git_blob_oid, 'semantic graph authority core');
       const shown = this.#gitQueryResult(sourceRoot, { kind: 'show-file', revision: authorityCommit, path: entry.ref }, 'invalid-request', 'semantic graph authority core blob is not readable at the covered authority commit');
       if (shown.stdout.byteLength > MAX_COORDINATION_EVIDENCE_BYTES) throw new CoordinationRuntimeError('invalid-request', 'semantic graph authority core blob exceeds the immutable evidence byte bound', [entry.ref]);
       if (shown.stdout.byteLength !== entry.byte_count) throw new CoordinationRuntimeError('invalid-request', 'semantic-graph-artifact-invalid: core descriptor byte_count does not match the authority blob', [entry.ref, `bytes=${String(shown.stdout.byteLength)}`]);
@@ -4868,12 +6443,13 @@ export class CoordinatorStore {
       bindings: { attached_session_current: true, policy_trust_current: true, no_pending_publication: true, terminal_prepared_cancellable: cancellable, terminal_after_commit: false, accepted_continuation_reason: null, covered_semantic_reason: null, attach_terminal_recovery: false },
     });
     if (!verdict.allowed) throw new CoordinationRuntimeError('invalid-state', 'the mandatory fourth abort intent is noncancellable: cancel-run-terminal is fenced by the D65 recovery predicate', verdict.denied_by.slice());
+    this.#assertD65RecoveryMutationAllowed(request, run, 'cancel-run-terminal', { attached_session_current: true, policy_trust_current: true, no_pending_publication: true, terminal_prepared_cancellable: cancellable, terminal_after_commit: false, accepted_continuation_reason: null, covered_semantic_reason: null, attach_terminal_recovery: false });
     const seq = this.#nextEventSequence(request.repo_id);
     const cancelled = parseD65RunTerminalIntentV2({ ...intent, state: 'cancelled', terminal_event_seq: seq, version: intent.version + 1 });
     const nextRun = parseCoordinationRun({ ...run, status: 'active', version: run.version + 1 });
     this.#db.prepare('UPDATE run_terminal_intents SET payload_json=?, version=? WHERE entity_id=?').run(canonicalJson(cancelled), cancelled.version, cancelled.terminal_intent_id);
     this.#db.prepare("UPDATE runs SET status='active', version=? WHERE repo_id=? AND workstream_run=?").run(nextRun.version, run.repo_id, run.workstream_run);
-    return { sequence: seq, eventType: 'run-terminal-cancelled', entityType: 'run-terminal-intent', entityId: cancelled.terminal_intent_id, payload: { run_terminal_intent: cancelled as unknown as Readonly<Record<string, unknown>>, run: nextRun, reason: payloadString(request.payload, 'reason') } };
+    return { sequence: seq, eventType: 'run-terminal-cancelled', entityType: 'run-terminal-intent', entityId: cancelled.terminal_intent_id, payload: { run_terminal_intent: Object.freeze({ ...cancelled }), run: nextRun, reason: payloadString(request.payload, 'reason') } };
   }
 
   reconcileRun(request: CoordinatorRequestEnvelope): IdempotentEffect {
@@ -4882,6 +6458,7 @@ export class CoordinatorStore {
       const workstreamRun = this.#workstreamRun(request);
       const run = this.#requireRun(request.repo_id, workstreamRun);
       this.#assertVersion(run.version, request.expected_version, 'run');
+      this.#assertD65MaintenanceMutationAllowed(request, run, 'reconcile-run');
       this.#assertAuthorityCriticalMutationAllowed(run.repo_id, run.workstream_run, 'run authority reconciliation');
       const seq = this.#nextEventSequence(request.repo_id);
       const reconciliation = this.#reconcileOwnedRun(request.repo_id, workstreamRun, seq);
@@ -4893,6 +6470,8 @@ export class CoordinatorStore {
   drainMailbox(request: CoordinatorRequestEnvelope): IdempotentEffect {
     return this.#sessionMutation(request, 'mailbox-drained', (session, seq) => {
       const workstreamRun = this.#workstreamRun(request);
+      const run = this.#requireRun(request.repo_id, workstreamRun);
+      this.#assertD65MaintenanceMutationAllowed(request, run, 'drain-mailbox');
       const deliveryId = payloadString(request.payload, 'delivery_id');
       const cursorValue = request.payload['cursor'];
       const existingRow = this.#db.prepare('SELECT * FROM mailbox_deliveries WHERE delivery_id=?').get(deliveryId);
@@ -4981,6 +6560,8 @@ export class CoordinatorStore {
       const message = messageFromRow(asRow(this.#db.prepare('SELECT * FROM messages WHERE message_id=?').get(messageId), 'message'));
       if (message.repo_id !== request.repo_id || message.recipient_workstream_run !== this.#workstreamRun(request)) throw new CoordinationRuntimeError('unauthorized-client', 'session does not own mailbox message');
       this.#assertVersion(message.version, request.expected_version, 'message');
+      const run = this.#requireRun(request.repo_id, message.recipient_workstream_run);
+      this.#assertD65MaintenanceMutationAllowed(request, run, 'acknowledge-message');
       if (message.status !== 'delivered') throw new CoordinationRuntimeError('invalid-state', `message is ${message.status}`);
       const seq = this.#nextEventSequence(request.repo_id);
       this.#db.prepare("UPDATE messages SET status='acknowledged', acknowledged_event_seq=?, version=version+1 WHERE message_id=?").run(seq, messageId);
@@ -5000,13 +6581,25 @@ export class CoordinatorStore {
     return this.#mutation(request, () => {
       this.#requireCurrentSession(request);
       const run = this.#requireRun(request.repo_id, this.#workstreamRun(request));
-      this.#assertSourceChangingDispatchAllowed(run.repo_id, run.workstream_run, 'prepare-operation');
       const worktree = parseCoordinationWorktree(request.payload['worktree']);
       const suppliedOperation = parseCoordinationWorktreeOperation(request.payload['operation']);
       const terminalIntent = this.#preparedTerminalIntent(run.repo_id, run.workstream_run);
-      if (terminalIntent !== null) {
-        const terminalCloseOperation = terminalIntent.outcome === 'closed' && worktree.kind === 'main' && suppliedOperation.owner.unit_id === 'main' && suppliedOperation.operation_type === 'merge' && (suppliedOperation.intent.reason === 'integrate current target before close' || suppliedOperation.intent.reason === 'atomically fast-forward captured target to validated workstream');
-        if (!terminalCloseOperation) throw new CoordinationRuntimeError('invalid-state', 'run terminal preparation fences non-terminal worktree operations');
+      const d65 = this.#isD65Run(run.repo_id, run.workstream_run);
+      if (d65 && run.status === 'merging' && terminalIntent !== null) throw new CoordinationRuntimeError('invalid-state', 'D65 prepared-terminal graph forbids product/worktree mutation before the terminal first effect');
+      if (d65 && (run.status === 'closed' || run.status === 'aborted')) {
+        this.#assertD65TerminalTailPrefix(run);
+        this.#assertD65RecoveryMutationAllowed(request, run, 'terminal-tail', { attached_session_current: true, policy_trust_current: true, no_pending_publication: true, terminal_prepared_cancellable: false, terminal_after_commit: true, accepted_continuation_reason: null, covered_semantic_reason: null, attach_terminal_recovery: false });
+        if (worktree.kind !== 'main' || suppliedOperation.owner.unit_id !== 'main' || (suppliedOperation.operation_type !== 'archive' && suppliedOperation.operation_type !== 'remove')) throw new CoordinationRuntimeError('invalid-state', 'D65 terminal tail permits only main archive/remove cleanup operations');
+      } else {
+        if (d65 && this.#hasD65CompleteGraph(run.repo_id, run.workstream_run)) {
+          if (suppliedOperation.operation_type === 'reset' || suppliedOperation.operation_type === 'quarantine' || (suppliedOperation.operation_type === 'remove' && worktree.kind === 'unit')) this.#assertD65RecoveryMutationAllowed(request, run, 'unit-recovery', { attached_session_current: true, policy_trust_current: false, no_pending_publication: false, terminal_prepared_cancellable: false, terminal_after_commit: false, accepted_continuation_reason: null, covered_semantic_reason: null, attach_terminal_recovery: false });
+          else this.#assertD65OrdinaryMutationAllowed(request, run, 'prepare-operation');
+        }
+        this.#assertSourceChangingDispatchAllowed(run.repo_id, run.workstream_run, 'prepare-operation');
+        if (terminalIntent !== null) {
+          const terminalCloseOperation = terminalIntent.outcome === 'closed' && worktree.kind === 'main' && suppliedOperation.owner.unit_id === 'main' && suppliedOperation.operation_type === 'merge' && (suppliedOperation.intent.reason === 'integrate current target before close' || suppliedOperation.intent.reason === 'atomically fast-forward captured target to validated workstream');
+          if (!terminalCloseOperation) throw new CoordinationRuntimeError('invalid-state', 'run terminal preparation fences non-terminal worktree operations');
+        }
       }
       if (worktree.owner.repo_id !== request.repo_id || worktree.owner.workstream_run !== run.workstream_run || worktree.owner.autopilot_id !== run.autopilot_id) throw new CoordinationRuntimeError('unauthorized-client', 'worktree registration owner does not match the attached durable run');
       if (!sameOwner(worktree.owner, suppliedOperation.owner) || suppliedOperation.worktree_id !== worktree.worktree_id) throw new CoordinationRuntimeError('unauthorized-client', 'operation owner does not exactly match its worktree owner');
@@ -5027,8 +6620,11 @@ export class CoordinatorStore {
         if (canonicalJson(existingWorktree) !== canonicalJson(worktree)) throw new CoordinationRuntimeError('idempotency-conflict', 'canonical worktree identity was reused with different immutable authority');
       }
       if (this.#db.prepare('SELECT entity_id FROM worktree_operations WHERE entity_id=?').get(suppliedOperation.operation_id) !== undefined) throw new CoordinationRuntimeError('stale-version', 'worktree operation already exists; retry its original idempotency key or query status');
-      const nonterminal = this.#db.prepare("SELECT entity_id FROM worktree_operations WHERE repo_id=? AND workstream_run=? AND canonical_worktree_id=? AND json_extract(payload_json, '$.stage') NOT IN ('committed','compensated','failed') LIMIT 1").get(request.repo_id, run.workstream_run, canonicalWorktreeId);
-      if (nonterminal !== undefined) throw new CoordinationRuntimeError('coordinator-contention', 'worktree already has an incomplete owner operation');
+      const nonterminal = this.#db.prepare("SELECT * FROM worktree_operations WHERE repo_id=? AND workstream_run=? AND canonical_worktree_id=? AND json_extract(payload_json, '$.stage') NOT IN ('committed','compensated','failed') LIMIT 1").get(request.repo_id, run.workstream_run, canonicalWorktreeId);
+      if (nonterminal !== undefined) {
+        const current = worktreeOperationFromRow(asRow(nonterminal, 'nonterminal worktree operation'));
+        throw new CoordinationRuntimeError('coordinator-contention', 'worktree already has an incomplete owner operation', [current.operation_id, suppliedOperation.operation_id, canonicalJson(current.intent), canonicalJson(suppliedOperation.intent)]);
+      }
       const seq = this.#nextEventSequence(request.repo_id);
       const operation: CoordinationWorktreeOperation = { ...suppliedOperation, intent_event_seq: seq };
       this.#db.prepare('INSERT INTO worktree_operations(entity_id, repo_id, workstream_run, payload_json, version, canonical_worktree_id) VALUES(?, ?, ?, ?, ?, ?)').run(operation.operation_id, request.repo_id, run.workstream_run, canonicalJson(operation), operation.version, canonicalWorktreeId);
@@ -5040,9 +6636,20 @@ export class CoordinatorStore {
     return this.#mutation(request, () => {
       this.#requireCurrentSession(request);
       const operationId = payloadString(request.payload, 'operation_id');
-      this.#assertSourceChangingDispatchAllowed(request.repo_id, this.#workstreamRun(request), 'transition-operation');
       const operationRow = asRow(this.#db.prepare('SELECT * FROM worktree_operations WHERE entity_id=?').get(operationId), 'worktree operation');
       const operation = worktreeOperationFromRow(operationRow);
+      const run = this.#requireRun(request.repo_id, this.#workstreamRun(request));
+      if (this.#isD65Run(run.repo_id, run.workstream_run) && (run.status === 'closed' || run.status === 'aborted')) {
+        this.#assertD65TerminalTailPrefix(run);
+        this.#assertD65RecoveryMutationAllowed(request, run, 'terminal-tail', { attached_session_current: true, policy_trust_current: true, no_pending_publication: true, terminal_prepared_cancellable: false, terminal_after_commit: true, accepted_continuation_reason: null, covered_semantic_reason: null, attach_terminal_recovery: false });
+        if (operation.owner.unit_id !== 'main' || (operation.operation_type !== 'archive' && operation.operation_type !== 'remove')) throw new CoordinationRuntimeError('invalid-state', 'D65 terminal tail transition is not a main archive/remove cleanup operation');
+      } else {
+        if (this.#isD65Run(run.repo_id, run.workstream_run) && this.#hasD65CompleteGraph(run.repo_id, run.workstream_run)) {
+          if (operation.operation_type === 'reset' || operation.operation_type === 'quarantine' || (operation.operation_type === 'remove' && operation.owner.unit_id !== 'main')) this.#assertD65RecoveryMutationAllowed(request, run, 'unit-recovery', { attached_session_current: true, policy_trust_current: false, no_pending_publication: false, terminal_prepared_cancellable: false, terminal_after_commit: false, accepted_continuation_reason: null, covered_semantic_reason: null, attach_terminal_recovery: false });
+          else this.#assertD65OrdinaryMutationAllowed(request, run, 'transition-operation');
+        }
+        this.#assertSourceChangingDispatchAllowed(request.repo_id, this.#workstreamRun(request), 'transition-operation');
+      }
       if (operation.owner.repo_id !== request.repo_id || operation.owner.workstream_run !== this.#workstreamRun(request)) throw new CoordinationRuntimeError('unauthorized-client', 'session cannot transition a foreign-run worktree operation');
       this.#assertVersion(operation.version, request.expected_version, 'worktree operation');
       const canonicalWorktreeId = sqlString(operationRow, 'canonical_worktree_id');
@@ -5089,6 +6696,8 @@ export class CoordinatorStore {
       const fault = runScopedFaultFromRow(faultRow);
       if (fault.repo_id !== request.repo_id || fault.workstream_run !== this.#workstreamRun(request)) throw new CoordinationRuntimeError('unauthorized-client', 'session cannot resolve a foreign run-scoped fault');
       this.#assertVersion(fault.version, request.expected_version, 'run-scoped fault');
+      const run = this.#requireRun(fault.repo_id, fault.workstream_run);
+      if (this.#hasD65CompleteGraph(run.repo_id, run.workstream_run)) this.#assertD65RecoveryMutationAllowed(request, run, 'unit-recovery', { attached_session_current: true, policy_trust_current: false, no_pending_publication: false, terminal_prepared_cancellable: false, terminal_after_commit: false, accepted_continuation_reason: null, covered_semantic_reason: null, attach_terminal_recovery: false });
       if (fault.status !== 'active' || fault.invariant_id !== 'F3-SEMANTIC-UNIQUENESS' || fault.fault_code !== 'identity-recovery-pending' || fault.entity_type !== 'worktree') throw new CoordinationRuntimeError('invalid-state', 'only an active canonical semantic-uniqueness fault has a mechanical resolution path', [fault.fault_id, fault.status, fault.invariant_id]);
       const repository = repositoryFromRow(asRow(this.#db.prepare('SELECT * FROM repositories WHERE repo_id=?').get(fault.repo_id), 'identity fault repository'));
       const expectedRef = `_saga-evidence/${fault.workstream_run}/identity-recovery/${fault.fault_id}.json`;
@@ -5351,10 +6960,13 @@ export class CoordinatorStore {
           continue;
         }
         const idempotencyKey = `startup-reconciliation:${run.workstream_run}:${String(seq)}`;
-        const digest = `sha256:${createHash('sha256').update(idempotencyKey, 'utf8').digest('hex')}`;
-        this.#db.prepare('INSERT INTO events(repo_id, event_seq, event_type, entity_type, entity_id, idempotency_key, request_sha256, occurred_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?)').run(run.repo_id, seq, 'startup-run-reconciled', 'run', run.workstream_run, idempotencyKey, digest, this.#clock.now().toISOString());
         const persistedSummary = this.#freezeReconciliationSummary({ ...summary, notification_ids: [...recoveryMessageIds, ...summary.notification_ids] });
-        this.#lastStartupReconciliation = this.#persistReconciliationReceipt(run.repo_id, run.workstream_run, 'startup-reconciliation', seq, persistedSummary, true);
+        const receipt = this.#persistReconciliationReceipt(run.repo_id, run.workstream_run, 'startup-reconciliation', seq, persistedSummary, true);
+        const resultPayload = Object.freeze({ run: this.#requireRun(run.repo_id, run.workstream_run), reconciliation_receipt: receipt, event_type: 'startup-run-reconciled', entity_type: 'run', entity_id: run.workstream_run });
+        const digest = `sha256:${createHash('sha256').update(`${canonicalJson(resultPayload)}\n`, 'utf8').digest('hex')}`;
+        this.#insertEvent.run(run.repo_id, seq, 'startup-run-reconciled', 'run', run.workstream_run, idempotencyKey, digest, this.#clock.now().toISOString());
+        this.#insertIdempotencyResult.run(run.repo_id, idempotencyKey, digest, seq, canonicalJson(resultPayload));
+        this.#lastStartupReconciliation = receipt;
         this.#db.exec('COMMIT');
       } catch (error) {
         this.#db.exec('ROLLBACK');
@@ -5864,10 +7476,265 @@ export class CoordinatorStore {
     const expectedOutcome = source === 'run-abort' ? 'aborted' : 'closed';
     if (intent.outcome !== expectedOutcome) throw new CoordinationRuntimeError('invalid-state', `prepared terminal intent outcome ${intent.outcome} does not match ${expectedOutcome}`);
     if (canonicalJson(intent.reservation_ids) !== canonicalJson(reservations)) throw new CoordinationRuntimeError('coordinator-contention', 'change reservation set drifted after terminal preparation', [...intent.reservation_ids, ...reservations]);
+    const raw = parseJsonObject(sqlString(asRow(this.#db.prepare('SELECT payload_json FROM run_terminal_intents WHERE repo_id=? AND entity_id=?').get(run.repo_id, intent.terminal_intent_id), 'prepared terminal intent bytes'), 'payload_json'), 'prepared terminal intent bytes');
+    if (raw['schema_version'] === 'autopilot.run_terminal_intent.v2') {
+      const v2 = parseD65RunTerminalIntentV2(raw);
+      const nonterminal = this.#db.prepare("SELECT * FROM reservation_obligations WHERE repo_id=? AND json_extract(payload_json, '$.state') IN ('waiting-for-predecessor','integration-required') ORDER BY entity_id").all(run.repo_id).map(reservationObligationFromRow);
+      const recomputed = computeD65ObligationPartition({ workstreamRun: run.workstream_run, outcome: v2.outcome, intentReservationIds: reservations, nonterminalObligations: nonterminal });
+      assertD65TerminalEffectSetsExact({ outcome: v2.outcome, requested: v2.terminal_effect_sets, computed: recomputed });
+    }
     return intent;
   }
 
+  /** Exhaustive D65 no-successor tail entry over the committed transaction state. */
+  #assertD65TerminalTailEntry(run: CoordinationRun, source: 'run-close' | 'run-abort'): void {
+    if (run.status !== 'merging') throw new CoordinationRuntimeError('invalid-state', 'D65 terminal tail requires a merging run');
+    const compatible = this.#assertPreparedTerminalIntent(run, source);
+    if (compatible === null) throw new CoordinationRuntimeError('invalid-state', 'D65 terminal tail requires exactly one prepared v2 intent');
+    const raw = parseJsonObject(sqlString(asRow(this.#db.prepare('SELECT payload_json FROM run_terminal_intents WHERE repo_id=? AND entity_id=?').get(run.repo_id, compatible.terminal_intent_id), 'D65 terminal tail intent'), 'payload_json'), 'D65 terminal tail intent');
+    if (raw['schema_version'] !== 'autopilot.run_terminal_intent.v2') throw new CoordinationRuntimeError('invalid-state', 'D65 terminal tail cannot enter from a legacy intent');
+    const intent = parseD65RunTerminalIntentV2(raw);
+    if (intent.state !== 'prepared') throw new CoordinationRuntimeError('invalid-state', 'D65 terminal tail intent is not prepared');
+    if (!this.#d65CompleteGraphCurrent(run.repo_id, run.workstream_run)) throw new CoordinationRuntimeError('invalid-state', 'D65 terminal tail requires the accepted prepared-terminal graph B(N) plus only normalized liveness');
+    const graphState = this.#d65AcceptedGraphState(run.repo_id, run.workstream_run);
+    if (graphState.status !== 'completed' || graphState.closure_gate?.status !== 'passed' || graphState.closure_gate.blocking_reasons.length !== 0) throw new CoordinationRuntimeError('invalid-state', 'D65 terminal tail requires a completed authority state with a passed unblocked closure gate');
+    const nonterminalUnits = Object.entries(graphState.units).filter(([, unit]) => unit.state !== 'completed').map(([unitId]) => unitId);
+    const nonterminalWorkItems = Object.entries(graphState.work_items ?? {}).filter(([, item]) => item.state !== 'closed').map(([workItemId]) => workItemId);
+    if (nonterminalUnits.length !== 0 || nonterminalWorkItems.length !== 0) throw new CoordinationRuntimeError('invalid-state', 'D65 terminal tail requires every file/work queue terminal with no held, ready, running, blocked, audit, or validation work', [...nonterminalUnits, ...nonterminalWorkItems]);
+    const currentIntentCount = sqlInteger(asRow(this.#db.prepare("SELECT COUNT(*) AS count FROM run_terminal_intents WHERE repo_id=? AND workstream_run=? AND json_extract(payload_json, '$.state') IN ('prepared','committed')").get(run.repo_id, run.workstream_run), 'D65 terminal current intent count'), 'count');
+    if (currentIntentCount !== 1) throw new CoordinationRuntimeError('store-corrupt', 'D65 terminal tail requires one derived current intent pointer', [`count=${String(currentIntentCount)}`]);
+    const liveSessions = this.#db.prepare("SELECT * FROM session_leases WHERE repo_id=? AND workstream_run=? AND status IN ('attached','handoff-pending') ORDER BY session_generation").all(run.repo_id, run.workstream_run).map(sessionFromRow);
+    if (liveSessions.length !== 1 || liveSessions[0]?.status !== 'attached' || liveSessions[0].attachment_kind !== 'dispatch' || liveSessions[0].session_generation !== run.active_session_generation) throw new CoordinationRuntimeError('invalid-state', 'D65 terminal tail requires exactly one current attached dispatch session');
+    const activeChildren = this.#db.prepare("SELECT * FROM child_leases WHERE repo_id=? AND workstream_run=? AND status!='terminal' ORDER BY child_lease_id").all(run.repo_id, run.workstream_run).map(childFromRow);
+    if (activeChildren.length !== 0) throw new CoordinationRuntimeError('invalid-state', 'D65 terminal tail has a nonterminal child', activeChildren.map((child) => child.child_lease_id));
+    const nonterminalAttempts = this.#db.prepare("SELECT * FROM unit_attempts WHERE repo_id=? AND workstream_run=? AND json_extract(payload_json, '$.state') IN ('queued','preflight','running') ORDER BY entity_id").all(run.repo_id, run.workstream_run).map(unitAttemptFromRow);
+    if (nonterminalAttempts.length !== 0 || this.#db.prepare("SELECT entity_id FROM unit_attempts WHERE repo_id=? AND workstream_run=? AND json_extract(payload_json, '$.critical_section') IS NOT NULL LIMIT 1").get(run.repo_id, run.workstream_run) !== undefined) throw new CoordinationRuntimeError('invalid-state', 'D65 terminal tail has a nonterminal attempt or active critical section', nonterminalAttempts.map((attempt) => `${attempt.owner.unit_id}:${String(attempt.owner.attempt)}`));
+    if (this.#activeRunFaults(run.repo_id, run.workstream_run).length !== 0) throw new CoordinationRuntimeError('invalid-state', 'D65 terminal tail has an active run-scoped fault');
+    if (this.#db.prepare("SELECT entity_id FROM migration_recovery_work WHERE repo_id=? AND workstream_run=? AND status='pending' LIMIT 1").get(run.repo_id, run.workstream_run) !== undefined) throw new CoordinationRuntimeError('invalid-state', 'D65 terminal tail has pending migration recovery');
+    const assignments = this.#db.prepare("SELECT entity_id FROM adjudication_assignments WHERE repo_id=? AND json_extract(payload_json, '$.state')='assigned' AND (json_extract(payload_json, '$.requesting_run')=? OR EXISTS(SELECT 1 FROM json_each(json_extract(payload_json, '$.participating_runs')) WHERE value=?)) LIMIT 1").get(run.repo_id, run.workstream_run, run.workstream_run);
+    if (assignments !== undefined) throw new CoordinationRuntimeError('invalid-state', 'D65 terminal tail has a pending adjudication assignment');
+    if (this.#db.prepare("SELECT entity_id FROM escalations WHERE repo_id=? AND EXISTS(SELECT 1 FROM json_each(json_extract(payload_json, '$.participating_runs')) WHERE value=?) LIMIT 1").get(run.repo_id, run.workstream_run) !== undefined) throw new CoordinationRuntimeError('invalid-state', 'D65 terminal tail has an unresolved escalation');
+    if (this.#db.prepare("SELECT message_id FROM messages WHERE repo_id=? AND recipient_workstream_run=? AND status!='acknowledged' LIMIT 1").get(run.repo_id, run.workstream_run) !== undefined) throw new CoordinationRuntimeError('invalid-state', 'D65 terminal tail has an unacknowledged mailbox item');
+    const activeEdges = this.#db.prepare("SELECT * FROM wait_for_edges WHERE repo_id=? AND json_extract(payload_json, '$.state')='active' AND (json_extract(payload_json, '$.requester.workstream_run')=? OR json_extract(payload_json, '$.blocker.workstream_run')=?) ORDER BY entity_id").all(run.repo_id, run.workstream_run, run.workstream_run).map(waitForEdgeFromRow);
+    if (activeEdges.length !== 0) throw new CoordinationRuntimeError('invalid-state', 'D65 terminal tail has an active wait edge', activeEdges.map((edge) => edge.edge_id));
+    const openDeadlocks = this.#db.prepare("SELECT * FROM deadlock_resolutions WHERE repo_id=? AND json_extract(payload_json, '$.state')!='resolved' ORDER BY entity_id").all(run.repo_id).map(deadlockResolutionFromRow).filter((resolution) => resolution.victim?.workstream_run === run.workstream_run || resolution.cycle_edge_ids.some((id) => activeEdges.some((edge) => edge.edge_id === id)));
+    if (openDeadlocks.length !== 0) throw new CoordinationRuntimeError('invalid-state', 'D65 terminal tail has an open deadlock', openDeadlocks.map((resolution) => resolution.resolution_id));
+    const badObservations = this.#db.prepare("SELECT * FROM observations WHERE repo_id=? AND workstream_run=? AND (execution_state NOT IN ('released','cancelled') OR freshness='stale') ORDER BY entity_id").all(run.repo_id, run.workstream_run).map(observationFromRow);
+    if (badObservations.length !== 0) throw new CoordinationRuntimeError('invalid-state', 'D65 terminal tail has active/abandoned/stale observations', badObservations.map((observation) => observation.observation_id));
+    const operations = this.#db.prepare("SELECT * FROM worktree_operations WHERE repo_id=? AND workstream_run=? AND json_extract(payload_json, '$.stage') NOT IN ('committed','compensated','failed') ORDER BY entity_id").all(run.repo_id, run.workstream_run).map(worktreeOperationFromRow);
+    if (operations.length !== 0) throw new CoordinationRuntimeError('invalid-state', 'D65 terminal tail has a nonterminal worktree operation', operations.map((operation) => operation.operation_id));
+    const worktrees = this.#db.prepare("SELECT * FROM worktrees WHERE repo_id=? AND workstream_run=? AND is_current_canonical=1 AND json_extract(payload_json, '$.state') NOT IN ('active','terminal','removed') ORDER BY entity_id").all(run.repo_id, run.workstream_run).map(canonicalWorktreeFromRow);
+    if (worktrees.length !== 0) throw new CoordinationRuntimeError('invalid-state', 'D65 terminal tail has a dirty, quarantined, or unresolved worktree', worktrees.map((worktree) => worktree.worktree_id));
+    const groups = this.#db.prepare("SELECT * FROM acquisition_groups WHERE repo_id=? AND workstream_run=? ORDER BY entity_id").all(run.repo_id, run.workstream_run).map(acquisitionGroupFromRow);
+    const activeLeases = this.#db.prepare('SELECT * FROM edit_leases WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(run.repo_id, run.workstream_run).map(editLeaseFromRow);
+    for (const lease of activeLeases) if (lease.normal_release_condition.condition_type !== 'run-closed' || lease.normal_release_condition.target_id !== run.workstream_run) throw new CoordinationRuntimeError('invalid-state', 'D65 terminal tail active lease is not exact close-owned authority', [lease.edit_lease_id]);
+    const activeLeaseGroups = new Set(activeLeases.map((lease) => lease.acquisition_group_id));
+    for (const group of groups) {
+      if (group.state === 'waiting' || group.state === 'grant-ready') throw new CoordinationRuntimeError('invalid-state', 'D65 terminal tail has a waiting or grant-ready acquisition group', [group.acquisition_group_id]);
+      if (group.state === 'granted' && !activeLeaseGroups.has(group.acquisition_group_id)) throw new CoordinationRuntimeError('invalid-state', 'D65 terminal tail granted group has no exact close-owned lease', [group.acquisition_group_id]);
+    }
+    const resource = runResourceFromRow(asRow(this.#db.prepare('SELECT * FROM run_resources WHERE repo_id=? AND workstream_run=?').get(run.repo_id, run.workstream_run), 'D65 terminal tail resource'));
+    if (readD65GraphPublicationResidue(resource.main_worktree_path) !== null) throw new CoordinationRuntimeError('invalid-state', 'D65 terminal tail cannot enter with graph publication residue');
+  }
+
+  /** Replay the exact no-reentry suffix from the last accepted graph R. */
+  #assertD65TerminalTailPrefix(run: CoordinationRun, reservedEventSeq?: number): void {
+    const graphArtifact = authoritativeArtifactFromRow(asRow(this.#db.prepare("SELECT * FROM authoritative_artifacts WHERE repo_id=? AND source_run=? AND json_extract(payload_json, '$.document_schema_version')='autopilot.semantic_graph.v1' ORDER BY entity_id DESC LIMIT 1").get(run.repo_id, run.workstream_run), 'D65 terminal tail graph'));
+    const repositorySeq = sqlInteger(asRow(this.#db.prepare('SELECT event_seq FROM repositories WHERE repo_id=?').get(run.repo_id), 'D65 terminal tail repository sequence'), 'event_seq');
+    if (reservedEventSeq !== undefined && reservedEventSeq !== repositorySeq) throw new CoordinationRuntimeError('store-corrupt', 'D65 terminal tail reserved event is not the current transaction sequence', [String(reservedEventSeq), String(repositorySeq)]);
+    const acceptedRepositorySeq = reservedEventSeq === undefined ? repositorySeq : repositorySeq - 1;
+    const rows = this.#db.prepare("SELECT e.*,r.repo_id AS result_repo_id,r.idempotency_key AS result_key,r.request_sha256 AS result_request,r.committed_event_seq AS result_seq,r.payload_json AS result_payload FROM events e LEFT JOIN idempotency_results r ON r.repo_id=e.repo_id AND r.idempotency_key=e.idempotency_key WHERE e.repo_id=? AND e.event_seq>? ORDER BY e.event_seq").all(run.repo_id, graphArtifact.registered_event_seq);
+    if (rows.length !== acceptedRepositorySeq - graphArtifact.registered_event_seq) throw new CoordinationRuntimeError('store-corrupt', 'D65 terminal tail event range is not contiguous from accepted R', [`rows=${String(rows.length)}`, `repository_seq=${String(acceptedRepositorySeq)}`, `graph_registration_seq=${String(graphArtifact.registered_event_seq)}`]);
+    let released = false;
+    let detached = false;
+    for (let index = 0; index < rows.length; index += 1) {
+      const row = asRow(rows[index], 'D65 terminal tail event');
+      const eventSeq = sqlInteger(row, 'event_seq');
+      if (eventSeq !== graphArtifact.registered_event_seq + index + 1) throw new CoordinationRuntimeError('store-corrupt', 'D65 terminal tail event sequence has a gap', [String(eventSeq)]);
+      const eventKey = sqlString(row, 'idempotency_key');
+      const eventRequest = sqlString(row, 'request_sha256');
+      if (sqlNullableString(row, 'result_repo_id') !== run.repo_id || sqlNullableString(row, 'result_key') !== eventKey || sqlNullableString(row, 'result_request') !== eventRequest || sqlNullableInteger(row, 'result_seq') !== eventSeq) throw new CoordinationRuntimeError('store-corrupt', 'D65 terminal tail event lacks its exact immutable idempotency result', [String(eventSeq), eventKey]);
+      const payloadText = sqlNullableString(row, 'result_payload');
+      if (payloadText === null) throw new CoordinationRuntimeError('store-corrupt', 'D65 terminal tail event result payload is missing', [String(eventSeq)]);
+      const payload = parseJsonObject(payloadText, 'D65 terminal tail result payload');
+      const eventType = sqlString(row, 'event_type');
+      if (detached) throw new CoordinationRuntimeError('invalid-state', 'D65 terminal tail contains an event after final session detach', [String(eventSeq), eventType]);
+      if (eventType === 'session-heartbeat') {
+        if (released) throw new CoordinationRuntimeError('invalid-state', 'D65 terminal tail contains an unnecessary session heartbeat after its first terminal effect', [String(eventSeq)]);
+        const joined: D65AcceptedEventResultJoin = { repo_id: run.repo_id, event_seq: eventSeq, event_type: eventType, entity_type: sqlString(row, 'entity_type'), entity_id: sqlString(row, 'entity_id'), idempotency_key: eventKey, request_sha256: eventRequest, result: { repo_id: run.repo_id, idempotency_key: eventKey, request_sha256: eventRequest, committed_event_seq: eventSeq, payload } };
+        if (!isPureD65SessionHeartbeat(joined)) throw new CoordinationRuntimeError('invalid-state', 'D65 terminal tail contains a semantic session heartbeat');
+        continue;
+      }
+      if (eventType === 'program-heartbeat-accepted') {
+        if (released) throw new CoordinationRuntimeError('invalid-state', 'D65 terminal tail contains an unnecessary program heartbeat after its first terminal effect', [String(eventSeq)]);
+        parseD65HeartbeatAcceptanceResult(payload);
+        continue;
+      }
+      if (!released) {
+        if (eventType !== 'release-evidence-accepted' || sqlString(row, 'entity_type') !== 'reconciliation-evidence') throw new CoordinationRuntimeError('invalid-state', 'D65 terminal tail first semantic event is not exact release-evidence-accepted', [String(eventSeq), eventType]);
+        const terminalRun = parseCoordinationRun(payload['run']);
+        if (terminalRun.repo_id !== run.repo_id || terminalRun.workstream_run !== run.workstream_run || (terminalRun.status !== 'closed' && terminalRun.status !== 'aborted')) throw new CoordinationRuntimeError('invalid-state', 'D65 terminal first event result does not bind the terminal run');
+        released = true;
+        continue;
+      }
+      if (eventType === 'worktree-operation-prepared' || eventType.startsWith('worktree-operation-')) {
+        const operation = parseCoordinationWorktreeOperation(payload['operation']);
+        if (operation.owner.repo_id !== run.repo_id || operation.owner.workstream_run !== run.workstream_run || operation.owner.unit_id !== 'main' || (operation.operation_type !== 'archive' && operation.operation_type !== 'remove')) throw new CoordinationRuntimeError('invalid-state', 'D65 terminal tail contains a non-cleanup worktree operation', [operation.operation_id, operation.operation_type]);
+        continue;
+      }
+      if (eventType === 'terminal-cleanup-recovery-attached') {
+        const session = parseCoordinationSessionLease(payload['session']);
+        const predecessor = parseCoordinationSessionLease(payload['predecessor_session']);
+        if (session.repo_id !== run.repo_id || session.workstream_run !== run.workstream_run || session.attachment_kind !== 'terminal-recovery' || predecessor.repo_id !== run.repo_id || predecessor.workstream_run !== run.workstream_run || predecessor.status !== 'fenced' || predecessor.session_generation >= session.session_generation) throw new CoordinationRuntimeError('invalid-state', 'D65 terminal recovery event identity/postimage is invalid');
+        continue;
+      }
+      if (eventType === 'session-detached') {
+        const session = parseCoordinationSessionLease(payload['session']);
+        if (session.repo_id !== run.repo_id || session.workstream_run !== run.workstream_run) throw new CoordinationRuntimeError('invalid-state', 'D65 terminal detach event names a foreign session');
+        detached = true;
+        continue;
+      }
+      throw new CoordinationRuntimeError('invalid-state', 'D65 terminal tail contains a forbidden semantic event', [String(eventSeq), eventType]);
+    }
+    if ((run.status === 'closed' || run.status === 'aborted') && !released) throw new CoordinationRuntimeError('store-corrupt', 'terminal D65 run has no release-evidence-accepted first effect after accepted R');
+    if (run.status === 'merging' && released) throw new CoordinationRuntimeError('store-corrupt', 'merging D65 run already contains a terminal commit in its tail');
+  }
+
+  #assertD65TerminalTailFinalBeforeDetach(run: CoordinationRun, sessionLeaseId: string): void {
+    const intentRow = asRow(this.#db.prepare("SELECT payload_json FROM run_terminal_intents WHERE repo_id=? AND workstream_run=? AND json_extract(payload_json, '$.state')='committed' ORDER BY entity_id DESC LIMIT 1").get(run.repo_id, run.workstream_run), 'D65 final terminal intent');
+    const intent = parseD65RunTerminalIntentV2(parseJsonObject(sqlString(intentRow, 'payload_json'), 'D65 final terminal intent'));
+    if ((run.status === 'closed' ? 'closed' : 'aborted') !== intent.outcome || intent.terminal_event_seq === null) throw new CoordinationRuntimeError('store-corrupt', 'D65 final run and committed intent do not match');
+    const liveSessions = this.#db.prepare("SELECT session_lease_id FROM session_leases WHERE repo_id=? AND workstream_run=? AND status IN ('attached','handoff-pending') ORDER BY session_generation").all(run.repo_id, run.workstream_run).map((row) => sqlString(row, 'session_lease_id'));
+    if (liveSessions.length !== 1 || liveSessions[0] !== sessionLeaseId) throw new CoordinationRuntimeError('invalid-state', 'D65 final detach requires the sole current attached session', liveSessions);
+    const activeChild = this.#db.prepare("SELECT child_lease_id FROM child_leases WHERE repo_id=? AND workstream_run=? AND status!='terminal' LIMIT 1").get(run.repo_id, run.workstream_run);
+    const activeFault = this.#db.prepare("SELECT fault_id FROM run_scoped_faults WHERE repo_id=? AND workstream_run=? AND status='active' LIMIT 1").get(run.repo_id, run.workstream_run);
+    const activeLease = this.#db.prepare('SELECT entity_id FROM edit_leases WHERE repo_id=? AND workstream_run=? LIMIT 1').get(run.repo_id, run.workstream_run);
+    const activeReservation = this.#db.prepare("SELECT entity_id FROM change_reservations WHERE repo_id=? AND workstream_run=? AND json_extract(payload_json, '$.released_event_seq') IS NULL LIMIT 1").get(run.repo_id, run.workstream_run);
+    const ownedObligation = this.#db.prepare("SELECT entity_id FROM reservation_obligations WHERE repo_id=? AND workstream_run=? AND json_extract(payload_json, '$.state') IN ('waiting-for-predecessor','integration-required') LIMIT 1").get(run.repo_id, run.workstream_run);
+    const activeOperation = this.#db.prepare("SELECT entity_id FROM worktree_operations WHERE repo_id=? AND workstream_run=? AND json_extract(payload_json, '$.stage') NOT IN ('committed','compensated','failed') LIMIT 1").get(run.repo_id, run.workstream_run);
+    if (activeChild !== undefined || activeFault !== undefined || activeLease !== undefined || activeReservation !== undefined || ownedObligation !== undefined || activeOperation !== undefined) throw new CoordinationRuntimeError('invalid-state', 'D65 final tail retains source-run child/fault/lease/reservation/obligation/operation authority');
+    const remainingWorktrees = this.#db.prepare("SELECT entity_id FROM worktrees WHERE repo_id=? AND workstream_run=? AND is_current_canonical=1 AND json_extract(payload_json, '$.state')!='removed' ORDER BY entity_id").all(run.repo_id, run.workstream_run).map((row) => sqlString(row, 'entity_id'));
+    if (remainingWorktrees.length !== 0) throw new CoordinationRuntimeError('invalid-state', 'D65 final tail requires every owned worktree removed', remainingWorktrees);
+    for (const sealed of intent.terminal_effect_sets.foreign_dependent_obligations) {
+      const prior = parseCoordinationReservationObligation(sealed);
+      const current = reservationObligationFromRow(asRow(this.#db.prepare('SELECT * FROM reservation_obligations WHERE repo_id=? AND entity_id=?').get(run.repo_id, prior.obligation_id), 'D65 final foreign obligation'));
+      const state = intent.outcome === 'closed' ? 'integration-required' : 'cancelled';
+      if (current.version !== prior.version + 1 || current.state !== state || (intent.outcome === 'closed' ? current.predecessor_released_event_seq !== intent.terminal_event_seq || current.predecessor_terminal_sha === null : current.resolved_event_seq !== intent.terminal_event_seq)) throw new CoordinationRuntimeError('invalid-state', 'D65 final foreign obligation differs from its sealed version+1 postimage', [prior.obligation_id]);
+    }
+    for (const sealed of intent.terminal_effect_sets.abort_owned_obligations) {
+      const prior = parseCoordinationReservationObligation(sealed);
+      const current = reservationObligationFromRow(asRow(this.#db.prepare('SELECT * FROM reservation_obligations WHERE repo_id=? AND entity_id=?').get(run.repo_id, prior.obligation_id), 'D65 final abort-owned obligation'));
+      if (current.version !== prior.version + 1 || current.state !== 'cancelled' || current.resolved_event_seq !== intent.terminal_event_seq) throw new CoordinationRuntimeError('invalid-state', 'D65 final abort-owned obligation differs from its sealed version+1 postimage', [prior.obligation_id]);
+    }
+    if (this.#db.prepare("SELECT entity_id FROM reservation_obligations WHERE repo_id=? AND json_extract(payload_json, '$.state')='waiting-for-predecessor' AND predecessor_reservation_id IN (SELECT entity_id FROM change_reservations WHERE repo_id=? AND workstream_run=?) LIMIT 1").get(run.repo_id, run.repo_id, run.workstream_run) !== undefined) throw new CoordinationRuntimeError('invalid-state', 'D65 final tail retains a predecessor-linked waiting obligation');
+    const session = sessionFromRow(asRow(this.#db.prepare('SELECT * FROM session_leases WHERE repo_id=? AND session_lease_id=?').get(run.repo_id, sessionLeaseId), 'D65 final session'));
+    // The terminal tail deliberately consumes NO heartbeat after its first
+    // semantic effect. Therefore the prepared-graph heartbeat's status/doctor
+    // digest is expected to be stale after commit; requiring a newly governing
+    // heartbeat here would contradict the closed no-reentry suffix. Revalidate
+    // instead its signed bytes, time, graph/policy/session tuple and exact
+    // precommit terminal-tail reason while #assertD65TerminalTailPrefix proves
+    // no postcommit acceptance exists.
+    const coordinatorTime = this.#clock.now().toISOString();
+    const acceptedPolicy = this.#d65AcceptedLaunchPolicy(run.repo_id, run.workstream_run);
+    const heartbeatHead = this.#highestAcceptedProgramHeartbeat(run.repo_id, run.workstream_run);
+    if (heartbeatHead === null) throw new CoordinationRuntimeError('invalid-state', 'D65 final tail lacks its prepared-graph heartbeat authority');
+    const verified = this.#d65VerifyAcceptedHeartbeatHead(heartbeatHead, acceptedPolicy, run, coordinatorTime);
+    const graphHead = this.#d65AcceptedGraphHead(run.repo_id, run.workstream_run);
+    if (heartbeatHead.acceptance_kind !== 'governing' || Date.parse(heartbeatHead.issued_at) > Date.parse(coordinatorTime) || Date.parse(coordinatorTime) >= Date.parse(heartbeatHead.valid_until) || verified.row.accepted_graph_sequence !== graphHead.sequence || verified.row.accepted_graph_sha256 !== graphHead.sha256 || verified.row.launch_policy_sha256 !== acceptedPolicy.artifact.evidence.sha256 || verified.row.coordinator_session_lease_id !== session.session_lease_id || verified.heartbeat.stop_reasons.length !== 0 || !verified.row.stop_reasons.includes('terminal-tail')) throw new CoordinationRuntimeError('invalid-state', 'D65 final tail lacks the exact valid prepared-graph terminal heartbeat tuple');
+  }
+
+  #captureD65TerminalFirstEffectBaseline(run: CoordinationRun): D65TerminalFirstEffectBaseline {
+    const rawIntent = parseJsonObject(sqlString(asRow(this.#db.prepare("SELECT payload_json FROM run_terminal_intents WHERE repo_id=? AND workstream_run=? AND json_extract(payload_json, '$.state')='prepared'").get(run.repo_id, run.workstream_run), 'D65 terminal baseline intent'), 'payload_json'), 'D65 terminal baseline intent');
+    const forbidden = {
+      resource: this.#db.prepare('SELECT * FROM run_resources WHERE repo_id=? AND workstream_run=?').all(run.repo_id, run.workstream_run).map(runResourceFromRow),
+      sessions: this.#db.prepare('SELECT * FROM session_leases WHERE repo_id=? AND workstream_run=? ORDER BY session_generation').all(run.repo_id, run.workstream_run).map(sessionFromRow),
+      children: this.#db.prepare('SELECT * FROM child_leases WHERE repo_id=? AND workstream_run=? ORDER BY child_lease_id').all(run.repo_id, run.workstream_run).map(childFromRow),
+      attempts: this.#db.prepare('SELECT * FROM unit_attempts WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(run.repo_id, run.workstream_run).map(unitAttemptFromRow),
+      faults: this.#db.prepare('SELECT * FROM run_scoped_faults WHERE repo_id=? AND workstream_run=? ORDER BY fault_id').all(run.repo_id, run.workstream_run).map(runScopedFaultFromRow),
+      worktrees: this.#db.prepare('SELECT * FROM worktrees WHERE repo_id=? AND workstream_run=? AND is_current_canonical=1 ORDER BY canonical_worktree_id').all(run.repo_id, run.workstream_run).map(canonicalWorktreeFromRow),
+      operations: this.#db.prepare('SELECT * FROM worktree_operations WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(run.repo_id, run.workstream_run).map(worktreeOperationFromRow),
+      artifacts: this.#db.prepare('SELECT * FROM authoritative_artifacts WHERE repo_id=? AND source_run=? ORDER BY entity_id').all(run.repo_id, run.workstream_run).map(authoritativeArtifactFromRow),
+      adjudications: this.#db.prepare('SELECT * FROM adjudication_assignments WHERE repo_id=? ORDER BY entity_id').all(run.repo_id).map(adjudicationAssignmentFromRow),
+      escalations: this.#db.prepare('SELECT * FROM escalations WHERE repo_id=? ORDER BY entity_id').all(run.repo_id).map(escalationFromRow),
+      migration: this.#db.prepare('SELECT * FROM migration_recovery_work WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(run.repo_id, run.workstream_run).map(migrationRecoveryFromRow),
+    };
+    return Object.freeze({
+      run,
+      intent: parseD65RunTerminalIntentV2(rawIntent),
+      reservations: Object.freeze(this.#db.prepare('SELECT * FROM change_reservations WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(run.repo_id, run.workstream_run).map(changeReservationFromRow)),
+      obligations: Object.freeze(this.#db.prepare('SELECT * FROM reservation_obligations WHERE repo_id=? ORDER BY entity_id').all(run.repo_id).map(reservationObligationFromRow)),
+      leases: Object.freeze(this.#db.prepare('SELECT * FROM edit_leases WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(run.repo_id, run.workstream_run).map(editLeaseFromRow)),
+      groups: Object.freeze(this.#db.prepare('SELECT * FROM acquisition_groups WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(run.repo_id, run.workstream_run).map(acquisitionGroupFromRow)),
+      forbidden_bytes: canonicalJson(forbidden),
+    });
+  }
+
+  #assertD65TerminalFirstEffectExact(baseline: D65TerminalFirstEffectBaseline, source: 'run-close' | 'run-abort', terminalSha: string, seq: number): void {
+    const run = this.#requireRun(baseline.run.repo_id, baseline.run.workstream_run);
+    const expectedRun = parseCoordinationRun({ ...baseline.run, status: source === 'run-close' ? 'closed' : 'aborted', version: baseline.run.version + 1 });
+    if (canonicalJson(run) !== canonicalJson(expectedRun)) throw new CoordinationRuntimeError('invalid-state', 'D65 terminal first effect changed the run outside its exact status/version postimage');
+    const currentReservations = this.#db.prepare('SELECT * FROM change_reservations WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(run.repo_id, run.workstream_run).map(changeReservationFromRow);
+    const terminalReservationIds = new Set(baseline.intent.reservation_ids);
+    const expectedReservations = baseline.reservations.map((reservation) => terminalReservationIds.has(reservation.reservation_id) ? parseCoordinationChangeReservation({ ...reservation, released_event_seq: seq, terminal_outcome: source === 'run-close' ? 'closed' : 'aborted', terminal_sha: terminalSha, version: reservation.version + 1 }) : reservation);
+    if (canonicalJson(currentReservations) !== canonicalJson(expectedReservations)) throw new CoordinationRuntimeError('invalid-state', 'D65 terminal first effect does not equal the sealed reservation postimages');
+    const remainingLeases = this.#db.prepare('SELECT * FROM edit_leases WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(run.repo_id, run.workstream_run).map(editLeaseFromRow);
+    if (remainingLeases.length !== 0) throw new CoordinationRuntimeError('invalid-state', 'D65 terminal first effect did not release exactly all close-owned leases', remainingLeases.map((lease) => lease.edit_lease_id));
+    const releasedGroupIds = new Set(baseline.leases.map((lease) => lease.acquisition_group_id));
+    const expectedGroups = baseline.groups.map((group) => group.state === 'granted' && releasedGroupIds.has(group.acquisition_group_id) ? parseCoordinationAcquisitionGroup({ ...group, state: 'released', version: group.version + 1 }) : group);
+    const currentGroups = this.#db.prepare('SELECT * FROM acquisition_groups WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(run.repo_id, run.workstream_run).map(acquisitionGroupFromRow);
+    if (canonicalJson(currentGroups) !== canonicalJson(expectedGroups)) throw new CoordinationRuntimeError('invalid-state', 'D65 terminal first effect changed acquisition groups outside exact close-owned release');
+    const sealedRows = [...baseline.intent.terminal_effect_sets.foreign_dependent_obligations, ...baseline.intent.terminal_effect_sets.abort_owned_obligations].map(parseCoordinationReservationObligation);
+    const sealedIds = new Set(sealedRows.map((obligation) => obligation.obligation_id));
+    const expectedObligations = baseline.obligations.map((obligation) => {
+      if (!sealedIds.has(obligation.obligation_id)) return obligation;
+      if (source === 'run-close') return parseCoordinationReservationObligation({ ...obligation, state: 'integration-required', predecessor_released_event_seq: seq, predecessor_terminal_sha: terminalSha, version: obligation.version + 1 });
+      return parseCoordinationReservationObligation({ ...obligation, state: 'cancelled', predecessor_released_event_seq: null, predecessor_terminal_sha: null, resolved_event_seq: seq, version: obligation.version + 1 });
+    });
+    const currentObligations = this.#db.prepare('SELECT * FROM reservation_obligations WHERE repo_id=? ORDER BY entity_id').all(run.repo_id).map(reservationObligationFromRow);
+    if (canonicalJson(currentObligations) !== canonicalJson(expectedObligations)) throw new CoordinationRuntimeError('invalid-state', 'D65 terminal first effect changed an obligation outside the sealed exact version+1 postimages');
+    const currentIntentRaw = parseJsonObject(sqlString(asRow(this.#db.prepare('SELECT payload_json FROM run_terminal_intents WHERE repo_id=? AND entity_id=?').get(run.repo_id, baseline.intent.terminal_intent_id), 'D65 terminal first-effect intent'), 'payload_json'), 'D65 terminal first-effect intent');
+    const expectedIntent = parseD65RunTerminalIntentV2({ ...baseline.intent, state: 'committed', terminal_event_seq: seq, version: baseline.intent.version + 1 });
+    if (canonicalJson(parseD65RunTerminalIntentV2(currentIntentRaw)) !== canonicalJson(expectedIntent)) throw new CoordinationRuntimeError('invalid-state', 'D65 terminal first effect does not equal the sealed intent commit postimage');
+    const forbidden = {
+      resource: this.#db.prepare('SELECT * FROM run_resources WHERE repo_id=? AND workstream_run=?').all(run.repo_id, run.workstream_run).map(runResourceFromRow),
+      sessions: this.#db.prepare('SELECT * FROM session_leases WHERE repo_id=? AND workstream_run=? ORDER BY session_generation').all(run.repo_id, run.workstream_run).map(sessionFromRow),
+      children: this.#db.prepare('SELECT * FROM child_leases WHERE repo_id=? AND workstream_run=? ORDER BY child_lease_id').all(run.repo_id, run.workstream_run).map(childFromRow),
+      attempts: this.#db.prepare('SELECT * FROM unit_attempts WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(run.repo_id, run.workstream_run).map(unitAttemptFromRow),
+      faults: this.#db.prepare('SELECT * FROM run_scoped_faults WHERE repo_id=? AND workstream_run=? ORDER BY fault_id').all(run.repo_id, run.workstream_run).map(runScopedFaultFromRow),
+      worktrees: this.#db.prepare('SELECT * FROM worktrees WHERE repo_id=? AND workstream_run=? AND is_current_canonical=1 ORDER BY canonical_worktree_id').all(run.repo_id, run.workstream_run).map(canonicalWorktreeFromRow),
+      operations: this.#db.prepare('SELECT * FROM worktree_operations WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(run.repo_id, run.workstream_run).map(worktreeOperationFromRow),
+      artifacts: this.#db.prepare('SELECT * FROM authoritative_artifacts WHERE repo_id=? AND source_run=? ORDER BY entity_id').all(run.repo_id, run.workstream_run).map(authoritativeArtifactFromRow),
+      adjudications: this.#db.prepare('SELECT * FROM adjudication_assignments WHERE repo_id=? ORDER BY entity_id').all(run.repo_id).map(adjudicationAssignmentFromRow),
+      escalations: this.#db.prepare('SELECT * FROM escalations WHERE repo_id=? ORDER BY entity_id').all(run.repo_id).map(escalationFromRow),
+      migration: this.#db.prepare('SELECT * FROM migration_recovery_work WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(run.repo_id, run.workstream_run).map(migrationRecoveryFromRow),
+    };
+    if (canonicalJson(forbidden) !== baseline.forbidden_bytes) throw new CoordinationRuntimeError('invalid-state', 'D65 terminal first effect changed forbidden child/attempt/fault/worktree/artifact/adjudication/migration authority');
+  }
+
   #commitTerminalIntent(intent: CoordinationRunTerminalIntent, seq: number): void {
+    const row = asRow(this.#db.prepare('SELECT payload_json FROM run_terminal_intents WHERE entity_id=?').get(intent.terminal_intent_id), 'prepared terminal intent commit bytes');
+    const raw = parseJsonObject(sqlString(row, 'payload_json'), 'prepared terminal intent commit bytes');
+    if (raw['schema_version'] === 'autopilot.run_terminal_intent.v2') {
+      const v2 = parseD65RunTerminalIntentV2(raw);
+      // First-effect equality: every sealed foreign/abort-owned obligation must
+      // now be exactly its version+1 prescribed postimage; no inferred row.
+      for (const sealed of v2.terminal_effect_sets.foreign_dependent_obligations) {
+        const prior = parseCoordinationReservationObligation(sealed);
+        const current = reservationObligationFromRow(asRow(this.#db.prepare('SELECT * FROM reservation_obligations WHERE repo_id=? AND entity_id=?').get(v2.repo_id, prior.obligation_id), 'terminal foreign dependent postimage'));
+        const expectedState = v2.outcome === 'closed' ? 'integration-required' : 'cancelled';
+        if (current.version !== prior.version + 1 || current.state !== expectedState || (v2.outcome === 'closed' ? current.predecessor_released_event_seq !== seq || current.predecessor_terminal_sha === null : current.resolved_event_seq !== seq || current.predecessor_released_event_seq !== null || current.predecessor_terminal_sha !== null)) throw new CoordinationRuntimeError('invalid-state', 'D65 terminal first effect does not equal sealed foreign-dependent obligation postimages', [prior.obligation_id]);
+      }
+      for (const sealed of v2.terminal_effect_sets.abort_owned_obligations) {
+        const prior = parseCoordinationReservationObligation(sealed);
+        const current = reservationObligationFromRow(asRow(this.#db.prepare('SELECT * FROM reservation_obligations WHERE repo_id=? AND entity_id=?').get(v2.repo_id, prior.obligation_id), 'terminal abort-owned postimage'));
+        if (v2.outcome !== 'aborted' || current.version !== prior.version + 1 || current.state !== 'cancelled' || current.resolved_event_seq !== seq) throw new CoordinationRuntimeError('invalid-state', 'D65 terminal first effect does not equal sealed abort-owned obligation postimages', [prior.obligation_id]);
+      }
+      const committed = parseD65RunTerminalIntentV2({ ...v2, state: 'committed', terminal_event_seq: seq, version: v2.version + 1 });
+      const result = this.#db.prepare('UPDATE run_terminal_intents SET payload_json=?, version=? WHERE entity_id=?').run(canonicalJson(committed), committed.version, committed.terminal_intent_id);
+      if (result.changes !== 1) throw new CoordinationRuntimeError('invalid-state', 'prepared D65 terminal intent disappeared during commit');
+      return;
+    }
     const committed = parseCoordinationRunTerminalIntent({ ...intent, state: 'committed', terminal_event_seq: seq, version: intent.version + 1 });
     const result = this.#db.prepare('UPDATE run_terminal_intents SET payload_json=?, version=? WHERE entity_id=?').run(canonicalJson(committed), committed.version, committed.terminal_intent_id);
     if (result.changes !== 1) throw new CoordinationRuntimeError('invalid-state', 'prepared run terminal intent disappeared during commit');
@@ -6035,7 +7902,7 @@ export class CoordinatorStore {
   }
 
   #assertResetEvidenceFacts(run: CoordinationRun, worktree: CoordinationWorktree, facts: ReturnType<typeof parseUnitFailureEvidenceFacts>, evidenceBytes: Uint8Array): void {
-    if (worktree.state !== 'terminal' || facts.captureCommitSha !== null || facts.captureRef !== null || !existsSync(worktree.canonical_path) || facts.branch !== worktree.branch || resolve(facts.gitCommonDir) !== resolve(worktree.git_common_dir)) throw new CoordinationRuntimeError('invalid-state', 'reset evidence disagrees with its durable terminal worktree owner', [worktree.worktree_id]);
+    if (worktree.state !== 'terminal' || facts.captureCommitSha !== null || facts.captureRef !== null || !existsSync(worktree.canonical_path) || facts.branch !== worktree.branch || realpathSync(facts.gitCommonDir) !== realpathSync(worktree.git_common_dir)) throw new CoordinationRuntimeError('invalid-state', 'reset evidence disagrees with its durable terminal worktree owner', [worktree.worktree_id, `state=${worktree.state}`, `path_exists=${String(existsSync(worktree.canonical_path))}`, `branch=${facts.branch}`, `expected_branch=${worktree.branch}`, `git_common_dir=${realpathSync(facts.gitCommonDir)}`, `expected_git_common_dir=${realpathSync(worktree.git_common_dir)}`, `capture_commit=${String(facts.captureCommitSha)}`, `capture_ref=${String(facts.captureRef)}`]);
     const document = parseJsonObject(Buffer.from(evidenceBytes).toString('utf8'), 'reset evidence');
     const dirtyValue = document['dirty_paths'];
     if (!Array.isArray(dirtyValue) || dirtyValue.some((path) => typeof path !== 'string')) throw new CoordinationRuntimeError('invalid-state', 'reset evidence dirty_paths are invalid');
@@ -6061,7 +7928,7 @@ export class CoordinatorStore {
   #assertQuarantineEvidenceFacts(run: CoordinationRun, worktree: CoordinationWorktree, facts: ReturnType<typeof parseUnitFailureEvidenceFacts>, evidenceBytes: Uint8Array): void {
     if (worktree.state !== 'quarantined' || facts.captureCommitSha === null || facts.captureCommitSha !== facts.gitHeadAfter || facts.captureRef === null) throw new CoordinationRuntimeError('invalid-state', 'quarantine evidence lacks a durable quarantined capture identity', [worktree.worktree_id]);
     const expectedCaptureRef = `autopilot/archive/${run.workstream_run}/unit/${worktree.owner.unit_id}/attempt-${String(worktree.owner.attempt)}/${facts.action}-capture`;
-    if (facts.captureRef !== expectedCaptureRef || facts.branch !== worktree.branch || resolve(facts.gitCommonDir) !== resolve(worktree.git_common_dir)) throw new CoordinationRuntimeError('invalid-state', 'quarantine evidence disagrees with its durable owner identity', [facts.captureRef, expectedCaptureRef, facts.branch, worktree.branch]);
+    if (facts.captureRef !== expectedCaptureRef || facts.branch !== worktree.branch || realpathSync(facts.gitCommonDir) !== realpathSync(worktree.git_common_dir)) throw new CoordinationRuntimeError('invalid-state', 'quarantine evidence disagrees with its durable owner identity', [facts.captureRef, expectedCaptureRef, facts.branch, worktree.branch]);
     const document = parseJsonObject(Buffer.from(evidenceBytes).toString('utf8'), 'quarantine evidence');
     const dirtyValue = document['dirty_paths'];
     if (!Array.isArray(dirtyValue) || dirtyValue.some((path) => typeof path !== 'string')) throw new CoordinationRuntimeError('invalid-state', 'quarantine evidence dirty_paths are invalid');
@@ -6333,6 +8200,100 @@ export class CoordinatorStore {
     const worktree = rows[0];
     if (worktree === undefined) throw new CoordinationRuntimeError('invalid-state', 'run-main worktree disappeared');
     return worktree.canonical_path;
+  }
+
+  #d65AcceptedLaunchPolicy(repoId: string, workstreamRun: string): Readonly<{ policy: D65LaunchPolicy; artifact: CoordinationAuthoritativeArtifact; anchor: ReturnType<typeof parseD65TrustAnchorSpki> }> {
+    const rows = this.#db.prepare("SELECT * FROM authoritative_artifacts WHERE repo_id=? AND source_run=? AND json_extract(payload_json, '$.document_schema_version')='autopilot.launch_policy.v1' ORDER BY entity_id").all(repoId, workstreamRun);
+    if (rows.length !== 1 || rows[0] === undefined) throw new CoordinationRuntimeError('invalid-state', 'launch-policy-invalid: D65 authority requires exactly one accepted launch policy', [`count=${String(rows.length)}`]);
+    const artifact = authoritativeArtifactFromRow(rows[0]);
+    const policyBytes = this.#loadEvidenceArtifact(repoId, artifact.evidence);
+    const policy = parseD65LaunchPolicy(parseJsonObject(new TextDecoder('utf-8', { fatal: true }).decode(policyBytes), 'accepted D65 launch policy'));
+    if (policy.repo_id !== repoId || policy.workstream_run !== workstreamRun || artifact.evidence.ref !== `authority/launch-policies/${policy.policy_id}.json`) throw new CoordinationRuntimeError('invalid-state', 'launch-policy-invalid: accepted policy row/path identity is inconsistent');
+    const bootstrapArtifact = authoritativeArtifactFromRow(asRow(this.#db.prepare('SELECT * FROM authoritative_artifacts WHERE repo_id=? AND entity_id=?').get(repoId, `semantic-graph-bootstrap:${workstreamRun}`), 'accepted heartbeat bootstrap artifact'));
+    const bootstrap = parseD65SemanticGraphBootstrap(parseJsonObject(new TextDecoder('utf-8', { fatal: true }).decode(this.#loadEvidenceArtifact(repoId, bootstrapArtifact.evidence)), 'accepted heartbeat bootstrap'));
+    const anchorBytes = this.#loadEvidenceArtifact(repoId, { ref: bootstrap.trust_anchor_ref, sha256: bootstrap.trust_anchor_sha256 });
+    const anchor = parseD65TrustAnchorSpki(anchorBytes);
+    if (policy.program_id !== bootstrap.program_id || policy.trust_anchor_ref !== bootstrap.trust_anchor_ref || policy.trust_anchor_sha256 !== anchor.sha256 || policy.signer_key_id !== anchor.sha256) throw new CoordinationRuntimeError('invalid-state', 'launch-policy-invalid: accepted policy trust/bootstrap tuple no longer verifies');
+    const { signature: _signature, ...unsignedPolicy } = policy;
+    void _signature;
+    if (!verifyD65Signature({ trustAnchor: anchor, purpose: 'launch-policy', message: new TextEncoder().encode(canonicalJson(unsignedPolicy)), signature: policy.signature })) throw new CoordinationRuntimeError('invalid-state', 'launch-policy-invalid: accepted policy signature no longer verifies');
+    return Object.freeze({ policy, artifact, anchor });
+  }
+
+  #d65ExternalHeartbeatPath(policy: D65LaunchPolicy, ref: string): string {
+    if (!/^program-heartbeats\/[0-9]{20}\.json$/u.test(ref)) throw new CoordinationRuntimeError('invalid-request', 'program heartbeat_ref is not in the frozen evidence path grammar', [ref]);
+    return this.#d65ExternalAuthorityPath(policy, ref, 'program heartbeat');
+  }
+
+  #d65ExternalAuthorityPath(policy: D65LaunchPolicy, ref: string, label: string): string {
+    if (ref.length === 0 || ref.includes('\\') || ref.startsWith('/') || ref === '..' || ref.startsWith('../') || ref.includes('/../') || ref.includes('\u0000')) throw new CoordinationRuntimeError('invalid-request', `${label} ref is not a normalized evidence-root-relative path`, [ref]);
+    const root = realpathSync(policy.program_evidence_root);
+    if (root !== policy.program_evidence_root) throw new CoordinationRuntimeError('invalid-state', 'launch-policy-invalid: program evidence root is no longer its canonical real path');
+    const candidate = resolve(root, ...ref.split('/'));
+    const rel = relative(root, candidate);
+    if (rel.length === 0 || rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) throw new CoordinationRuntimeError('unauthorized-client', `${label} path escapes the accepted evidence root`, [ref]);
+    let canonical: string;
+    try { canonical = realpathSync(candidate); }
+    catch (error) { throw new CoordinationRuntimeError('invalid-request', `${label} is unavailable at its signed evidence-root path`, [ref, error instanceof Error ? error.message : String(error)]); }
+    if (canonical !== candidate) throw new CoordinationRuntimeError('unauthorized-client', `${label} path contains a symbolic-link alias`, [ref, candidate, canonical]);
+    return candidate;
+  }
+
+  #readD65ExternalPrivateFile(path: string, label: string): Uint8Array {
+    const before = lstatSync(path);
+    if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1 || (before.mode & 0o777) !== 0o600) throw new CoordinationRuntimeError('unauthorized-client', `${label} must be one-link, no-follow, regular mode 0600`, [path, `mode=${(before.mode & 0o777).toString(8)}`, `nlink=${String(before.nlink)}`]);
+    const bytes = this.#readRegularEvidenceFile(path, label);
+    const after = lstatSync(path);
+    if (after.dev !== before.dev || after.ino !== before.ino || after.nlink !== 1 || after.mode !== before.mode || after.size !== before.size) throw new CoordinationRuntimeError('unauthorized-client', `${label} descriptor identity changed during stable read`, [path]);
+    return bytes;
+  }
+
+  #highestAcceptedProgramHeartbeat(repoId: string, workstreamRun: string): D65HeartbeatAcceptanceResult | null {
+    const event = this.#db.prepare("SELECT event_seq,event_type,entity_type,entity_id,idempotency_key,request_sha256 FROM events WHERE repo_id=? AND event_type='program-heartbeat-accepted' AND entity_type='program-heartbeat' AND entity_id=? ORDER BY event_seq DESC LIMIT 1").get(repoId, workstreamRun);
+    if (event === undefined) return null;
+    const eventRow = asRow(event, 'accepted heartbeat head event');
+    const key = sqlString(eventRow, 'idempotency_key');
+    const result = this.#db.prepare('SELECT repo_id,idempotency_key,request_sha256,committed_event_seq,payload_json FROM idempotency_results WHERE repo_id=? AND idempotency_key=?').get(repoId, key);
+    if (result === undefined) throw new CoordinationRuntimeError('store-corrupt', 'accepted heartbeat head event lacks its immutable exact idempotency result', [repoId, workstreamRun, key]);
+    const resultRow = asRow(result, 'accepted heartbeat head result');
+    if (sqlString(resultRow, 'repo_id') !== repoId || sqlString(resultRow, 'idempotency_key') !== key || sqlString(resultRow, 'request_sha256') !== sqlString(eventRow, 'request_sha256') || sqlInteger(resultRow, 'committed_event_seq') !== sqlInteger(eventRow, 'event_seq')) throw new CoordinationRuntimeError('store-corrupt', 'accepted heartbeat head event/result join is mismatched', [repoId, workstreamRun, key]);
+    const parsed = parseD65HeartbeatAcceptanceResult(parseJsonObject(sqlString(resultRow, 'payload_json'), 'accepted heartbeat head result'));
+    if (parsed.repo_id !== repoId || parsed.workstream_run !== workstreamRun) throw new CoordinationRuntimeError('store-corrupt', 'accepted heartbeat head result identity disagrees with event scope');
+    return parsed;
+  }
+
+  #acceptedProgramHeartbeatAtSequence(repoId: string, workstreamRun: string, sequence: number): D65HeartbeatAcceptanceResult | null {
+    const rows = this.#db.prepare("SELECT r.payload_json FROM events e JOIN idempotency_results r ON r.repo_id=e.repo_id AND r.idempotency_key=e.idempotency_key AND r.request_sha256=e.request_sha256 AND r.committed_event_seq=e.event_seq WHERE e.repo_id=? AND e.event_type='program-heartbeat-accepted' AND e.entity_type='program-heartbeat' AND e.entity_id=? ORDER BY e.event_seq").all(repoId, workstreamRun);
+    for (const row of rows) {
+      const parsed = parseD65HeartbeatAcceptanceResult(parseJsonObject(sqlString(row, 'payload_json'), 'accepted heartbeat sequence result'));
+      if (parsed.sequence === sequence) return parsed;
+    }
+    return null;
+  }
+
+  #d65AcceptedGraphHead(repoId: string, workstreamRun: string): Readonly<{ sequence: number; sha256: `sha256:${string}`; artifact: CoordinationAuthoritativeArtifact }> {
+    const complete = this.#db.prepare("SELECT * FROM authoritative_artifacts WHERE repo_id=? AND source_run=? AND json_extract(payload_json, '$.document_schema_version')='autopilot.semantic_graph.v1' ORDER BY entity_id DESC LIMIT 1").get(repoId, workstreamRun);
+    if (complete !== undefined) {
+      const artifact = authoritativeArtifactFromRow(complete);
+      return Object.freeze({ sequence: d65SemanticGraphSequenceFromArtifactId(artifact.artifact_id), sha256: artifact.evidence.sha256, artifact });
+    }
+    const artifact = authoritativeArtifactFromRow(asRow(this.#db.prepare('SELECT * FROM authoritative_artifacts WHERE repo_id=? AND entity_id=?').get(repoId, `semantic-graph-bootstrap:${workstreamRun}`), 'accepted bootstrap graph head'));
+    return Object.freeze({ sequence: 1, sha256: artifact.evidence.sha256, artifact });
+  }
+
+  #d65CurrentSemanticEndpointDigest(kind: 'status' | 'doctor', repoId: string, workstreamRun: string, coordinatorTime: string): `sha256:${string}` {
+    const additions = {
+      negotiated_coordinator_identity: this.negotiatedIdentityObservability(),
+      run_scoped_logical_faults: this.negotiatedRunScopedFaults(repoId, workstreamRun),
+      negotiated_worktree_aliases: this.negotiatedWorktreeAliases(repoId, workstreamRun),
+      negotiated_identity_recovery: this.negotiatedIdentityRecovery(repoId, workstreamRun),
+    };
+    if (kind === 'doctor') {
+      const rawDoctor = this.doctor(new Date(coordinatorTime)).payload;
+      return computeD65SemanticSnapshotSha256('doctor', Object.freeze({ ...this.#d65SemanticDoctorRows(rawDoctor, coordinatorTime), ...additions }));
+    }
+    const raw = this.status(repoId, workstreamRun).payload;
+    return computeD65SemanticSnapshotSha256('status', Object.freeze({ ...this.#d65SemanticStatusRows(raw), ...additions }));
   }
 
   #readRegularEvidenceFile(path: string, label: string): Uint8Array {
@@ -6886,7 +8847,7 @@ export class CoordinatorStore {
     });
   }
 
-  #mutation(request: CoordinatorRequestEnvelope, apply: () => { readonly sequence: number; readonly eventType: string; readonly entityType: string; readonly entityId: string; readonly payload: Readonly<Record<string, unknown>>; readonly afterEventInserted?: () => void }): IdempotentEffect {
+  #mutation(request: CoordinatorRequestEnvelope, apply: () => { readonly sequence: number; readonly eventType: string; readonly entityType: string; readonly entityId: string; readonly payload: Readonly<Record<string, unknown>>; readonly occurredAt?: string; readonly suppressWaitGraphMaintenance?: boolean; readonly afterEventInserted?: () => void }): IdempotentEffect {
     this.#writerGuard.assertHeld();
     const idempotencyKey = request.idempotency_key;
     if (idempotencyKey === null) throw new CoordinationRuntimeError('invalid-request', 'mutation lacks idempotency key');
@@ -6910,7 +8871,7 @@ export class CoordinatorStore {
           if (oversizedIndex >= 0) throw new CoordinationRuntimeError('frame-too-large', `coordinator action ${request.action} produced an oversized single collection entity`, [field, `ordinal=${String(oversizedIndex + 1)}`]);
         }
       }
-      if (request.action !== 'heartbeat' || this.#repositoryHasCoordinationGraph(request.repo_id)) this.#maintainWaitForGraph(request.repo_id, result.sequence);
+      if (result.suppressWaitGraphMaintenance !== true && (request.action !== 'heartbeat' || this.#repositoryHasCoordinationGraph(request.repo_id))) this.#maintainWaitForGraph(request.repo_id, result.sequence);
       let committed = this.#commitDescription(result.sequence, result.eventType, result.entityType, result.entityId, result.payload);
       const responseFor = (effect: StoreEffect): CoordinatorResponseEnvelope => ({ schema_version: 'autopilot.coordinator_response.v1', protocol_version: AUTOPILOT_COORDINATOR_PROTOCOL_VERSION, request_id: request.request_id, ok: true, committed_event_seq: effect.committedEventSeq, error_code: null, retryable: false, payload: effect.payload });
       try { this.#assertResponseFitsFrame(responseFor(committed), request.action); }
@@ -6920,7 +8881,7 @@ export class CoordinatorStore {
         committed = { committedEventSeq: result.sequence, payload: externalized };
         this.#assertResponseFitsFrame(responseFor(committed), request.action);
       }
-      this.#insertEvent.run(request.repo_id, result.sequence, result.eventType, result.entityType, result.entityId, idempotencyKey, digest, this.#clock.now().toISOString());
+      this.#insertEvent.run(request.repo_id, result.sequence, result.eventType, result.entityType, result.entityId, idempotencyKey, digest, result.occurredAt ?? this.#clock.now().toISOString());
       result.afterEventInserted?.();
       this.#insertIdempotencyResult.run(request.repo_id, idempotencyKey, digest, result.sequence, canonicalJson(committed.payload));
       if (ownsTransaction) this.#db.exec('COMMIT');
@@ -6946,7 +8907,8 @@ export class CoordinatorStore {
     try {
       const parsed = parseCoordinatorResponseEnvelope(response);
       if (parsed.ok) {
-        if (action === 'status') parseCoordinatorProjectionPage(parsed.payload, 'status');
+        if (action === 'status' && parsed.payload['schema_version'] === D65_DISPATCH_AUTHORITY_ENVELOPE_SCHEMA) parseD65DispatchAuthorityEnvelope(parsed.payload);
+        else if (action === 'status') parseCoordinatorProjectionPage(parsed.payload, 'status');
         else if (action === 'doctor') parseCoordinatorProjectionPage(parsed.payload, 'doctor');
         else if (action === 'run-catalog') parseCoordinatorRunCatalogPage(parsed.payload);
         else if (action === 'migration-recovery') parseCoordinatorMigrationRecoveryPage(parsed.payload);
@@ -6962,6 +8924,9 @@ export class CoordinatorStore {
   }
 
   #commitDescription(sequence: number, eventType: string, entityType: string, entityId: string, payload: Readonly<Record<string, unknown>>): StoreEffect {
+    // D65's acceptance result is a frozen closed object persisted byte-for-byte;
+    // generic diagnostic event metadata lives in `events`, never inside it.
+    if (eventType === 'program-heartbeat-accepted') return { committedEventSeq: sequence, payload };
     return { committedEventSeq: sequence, payload: { ...payload, event_type: eventType, entity_type: entityType, entity_id: entityId } };
   }
 
@@ -7143,7 +9108,8 @@ export class CoordinatorStore {
     const generation = request.fencing_generation;
     if (generation === null || generation !== run.active_session_generation) throw new CoordinationRuntimeError('fenced-session', 'session generation is no longer current');
     let row = this.#attachedSessionByIdentity.get(request.repo_id, run.workstream_run, sessionId, generation);
-    if (row === undefined && request.action === 'detach-session') row = this.#db.prepare("SELECT * FROM session_leases WHERE repo_id=? AND workstream_run=? AND session_id=? AND session_generation=? AND status='handoff-pending'").get(request.repo_id, run.workstream_run, sessionId, generation);
+    const handoffCadenceAction = request.action === 'detach-session' || (this.#isD65Run(run.repo_id, run.workstream_run) && (request.action === 'register-authoritative-artifact' || request.action === 'accept-program-heartbeat'));
+    if (row === undefined && handoffCadenceAction) row = this.#db.prepare("SELECT * FROM session_leases WHERE repo_id=? AND workstream_run=? AND session_id=? AND session_generation=? AND status='handoff-pending'").get(request.repo_id, run.workstream_run, sessionId, generation);
     if (row === undefined) throw new CoordinationRuntimeError('fenced-session', 'session is not attached to the durable run supervisor');
     if (sqlString(row, 'session_lease_id') !== payloadString(request.payload, 'session_lease_id')) throw new CoordinationRuntimeError('unauthorized-client', 'session lease identity does not match current authority');
     this.#assertCapability(row, 'session_token_sha256', payloadString(request.payload, 'session_token'), 'session');
@@ -7169,8 +9135,15 @@ export class CoordinatorStore {
     if (session.attachment_kind === 'migration-recovery') assertCoordinationMigrationRecoveryOperationAuthorized(this.#stateRoot, request.payload['migration_operation_token']);
     const run = this.#requireRun(request.repo_id, this.#workstreamRun(request));
     if (session.repo_id !== request.repo_id || session.workstream_run !== run.workstream_run || session.session_id !== request.session_id || session.session_generation !== request.fencing_generation || session.session_generation !== run.active_session_generation) throw new CoordinationRuntimeError('fenced-session', 'idempotent replay session is no longer the current generation');
-    const allowedStatus = request.action === 'prepare-handoff' ? 'handoff-pending' : request.action === 'detach-session' ? 'detached' : 'attached';
-    if (session.status !== allowedStatus) throw new CoordinationRuntimeError('fenced-session', `idempotent replay requires session status ${allowedStatus}`);
+    const d65HandoffCadenceReplay = this.#isD65Run(run.repo_id, run.workstream_run) && (request.action === 'register-authoritative-artifact' || request.action === 'accept-program-heartbeat');
+    const allowedStatuses: readonly CoordinationSessionLease['status'][] = request.action === 'prepare-handoff'
+      ? ['handoff-pending']
+      : request.action === 'detach-session' || request.action === 'attach-terminal-recovery'
+        ? ['detached']
+        : d65HandoffCadenceReplay
+          ? ['attached', 'handoff-pending']
+          : ['attached'];
+    if (!allowedStatuses.includes(session.status)) throw new CoordinationRuntimeError('fenced-session', `idempotent replay requires session status in ${allowedStatuses.join('|')}`);
     this.#assertCapability(row, 'session_token_sha256', payloadString(request.payload, 'session_token'), 'session');
   }
 

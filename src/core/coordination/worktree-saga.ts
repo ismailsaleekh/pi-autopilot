@@ -9,6 +9,8 @@ import { CoordinationRuntimeError } from './failures.ts';
 import { canonicalJson } from './canonical-json.ts';
 import { readImmutableFileBytes } from './immutable-file.ts';
 import { coordinationCutoverCommitted } from './migration-paths.ts';
+import { assertD65BootstrapMainWorktreeEffectBoundaryFromEnvironment, assertD65OrdinaryBoundaryFromEnvironment, assertD65RecoveryBoundaryFromEnvironment } from './d65-runtime-dispatch.ts';
+import { ensureD65WorktreeStageCadenceFromEnvironment } from './d65-graph-successor-runtime.ts';
 import { coordinatorRuntimePaths } from './runtime-paths.ts';
 import { currentBootId, isProcessAlive } from './process-identity.ts';
 import { readCoordinatorSessionContext, type CoordinatorSessionContext } from './supervisor.ts';
@@ -482,6 +484,44 @@ async function withSagaExecutionLock<T>(session: CoordinatorSessionContext, spec
   throw new CoordinationRuntimeError('coordinator-contention', 'timed out acquiring owner-scoped worktree saga execution lock', [lockPath]);
 }
 
+/**
+ * The crash-safe per-stage D65 cadence: after each accepted complete-mode
+ * worktree-operation stage event, publish the exact one-event successor graph
+ * and require the externally signed governing heartbeat before the next
+ * semantic effect. Terminal-tail operations are excluded (the tail is proved by
+ * contiguous replay, never by post-removal graph registration); bootstrap-mode
+ * and legacy runs are no-ops inside the cadence helper itself.
+ */
+async function d65WorktreeStageCadence(spec: OwnedWorktreeOperationSpec, env: ProcessEnvLike): Promise<void> {
+  if (spec.active.status === 'closed') return; // closed/aborted terminal tail: contiguous replay, no N+1
+  await ensureD65WorktreeStageCadenceFromEnvironment(env);
+}
+
+async function assertD65WorktreeEffectBoundary(spec: OwnedWorktreeOperationSpec, env: ProcessEnvLike): Promise<void> {
+  if (spec.active.status === 'closed') {
+    await assertD65RecoveryBoundaryFromEnvironment('terminal-tail', { attached_session_current: false, policy_trust_current: false, no_pending_publication: false, terminal_prepared_cancellable: false, terminal_after_commit: true, accepted_continuation_reason: null, covered_semantic_reason: null, attach_terminal_recovery: false }, env);
+    return;
+  }
+  if (spec.operationType === 'reset' || spec.operationType === 'quarantine' || (spec.operationType === 'remove' && spec.kind === 'unit')) {
+    await assertD65RecoveryBoundaryFromEnvironment('unit-recovery', { attached_session_current: false, policy_trust_current: false, no_pending_publication: false, terminal_prepared_cancellable: false, terminal_after_commit: false, accepted_continuation_reason: null, covered_semantic_reason: null, attach_terminal_recovery: false }, env);
+    return;
+  }
+  if (spec.operationType === 'create' || spec.operationType === 'materialize') {
+    // The frozen bootstrap charter authorizes exactly one external worktree
+    // mutation — the sole canonical main/create — before the launch policy and
+    // initial heartbeat exist. The narrow fail-closed bootstrap authority path
+    // decides: `true` authorizes that one exact effect; a bootstrap-window
+    // mismatch throws without effect; `false` (not in the bootstrap window)
+    // falls through to the unchanged ordinary dispatch gate.
+    const bootstrapAuthorized = await assertD65BootstrapMainWorktreeEffectBoundaryFromEnvironment({ kind: spec.kind, unitId: spec.unitId, attempt: spec.attempt, operationType: spec.operationType, intent: spec.intent }, env);
+    if (bootstrapAuthorized) return;
+    await assertD65OrdinaryBoundaryFromEnvironment('missing-worktree-creation', env);
+    return;
+  }
+  const boundary = spec.operationType === 'merge' ? 'unit-merge' : 'unit-release';
+  await assertD65OrdinaryBoundaryFromEnvironment(boundary, env);
+}
+
 export async function executeOwnedWorktreeSaga(spec: OwnedWorktreeOperationSpec, callbacks: WorktreeSagaCallbacks, env: ProcessEnvLike = process.env): Promise<WorktreeSagaResult> {
   assertSpecMatchesActiveAuthority(spec);
   const contextPath = env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV];
@@ -513,6 +553,11 @@ export async function executeOwnedWorktreeSaga(spec: OwnedWorktreeOperationSpec,
   const prepared = await client.prepare(spec);
   let operation = prepared.operation;
   let worktree = prepared.worktree;
+  // Crash-safe stage cadence: the prepare event (or an interrupted prior run's
+  // last stage event) requires its successor graph + heartbeat before the next
+  // semantic effect. Resume recognizes an already-published graph without a
+  // no-event N+1.
+  if (!TERMINAL_STAGES.has(operation.stage)) await d65WorktreeStageCadence(spec, env);
   assertExternalWorktreeAuthority(spec, env, join(client.session.state_root, 'worktrees', client.session.repo_key));
   if (operation.stage === 'committed') {
     const committedInspection = await inspectCommittedOperation(client, operation, env);
@@ -528,6 +573,7 @@ export async function executeOwnedWorktreeSaga(spec: OwnedWorktreeOperationSpec,
       recoveryAttempts: operation.recovery_attempts, verificationEvidence: operation.verification_evidence, errorCode: null,
       worktreeState: spec.committedWorktreeState, transitionKey: `committed-${String(operation.version)}`,
     });
+    await d65WorktreeStageCadence(spec, env);
     return { managed: true, operation: committed.operation, worktree: committed.worktree, replayed: true };
   }
   let phase: WorktreeSagaExecutionPhase = 'prepared';
@@ -548,6 +594,7 @@ export async function executeOwnedWorktreeSaga(spec: OwnedWorktreeOperationSpec,
       });
       operation = started.operation;
       worktree = started.worktree;
+      await d65WorktreeStageCadence(spec, env);
       await observeBoundary(callbacks, 'after-start');
     } else if (operation.stage === 'in-progress' && !operation.completed_steps.includes('preflight-probe')) {
       phase = 'start-report';
@@ -558,27 +605,30 @@ export async function executeOwnedWorktreeSaga(spec: OwnedWorktreeOperationSpec,
       });
       operation = probed.operation;
       worktree = probed.worktree;
+      await d65WorktreeStageCadence(spec, env);
     } else if (operation.stage === 'in-progress') {
+      // The durable in-progress row already names the exact current step. A
+      // resume must not append a same-state "recovery authority" event: that
+      // would itself require N+1 and make every retry an infinite graph/event
+      // loop before the external effect. Revalidate the existing row and move
+      // forward under its already accepted successor graph + heartbeat.
       phase = 'start-report';
-      const fenced = await client.transition({
-        operation, stage: 'in-progress', completedSteps: operation.completed_steps, currentStep: 'external-action',
-        recoveryAttempts: operation.recovery_attempts, verificationEvidence: operation.verification_evidence, errorCode: operation.error_code,
-        worktreeState: worktree.state, transitionKey: `recovery-authority-${String(operation.version)}`,
-      });
-      operation = fenced.operation;
-      worktree = fenced.worktree;
     }
     let actionError: unknown;
     if (inspection.outcome === 'not-applied') {
       phase = 'external-action';
       await observeBoundary(callbacks, 'before-action');
       if (!inspection.effect_applied) {
+        await assertD65WorktreeEffectBoundary(spec, env);
         try { await callbacks.action(); } catch (error) { actionError = error; }
       }
       await observeBoundary(callbacks, 'after-action');
       const actionInspection = inspectOperation(operation, env);
       if (actionError !== undefined && actionInspection.outcome === 'unsafe') throw actionError;
-      if (actionInspection.effect_applied) await callbacks.finalize?.();
+      if (actionInspection.effect_applied && callbacks.finalize !== undefined) {
+        await assertD65WorktreeEffectBoundary(spec, env);
+        await callbacks.finalize();
+      }
     }
     if (!operation.completed_steps.includes('external-action')) {
       phase = 'action-report';
@@ -589,6 +639,7 @@ export async function executeOwnedWorktreeSaga(spec: OwnedWorktreeOperationSpec,
       });
       operation = acted.operation;
       worktree = acted.worktree;
+      await d65WorktreeStageCadence(spec, env);
     }
     await observeBoundary(callbacks, 'after-action-report');
     phase = 'postcondition-verification';
@@ -612,6 +663,7 @@ export async function executeOwnedWorktreeSaga(spec: OwnedWorktreeOperationSpec,
     });
     operation = verified.operation;
     worktree = verified.worktree;
+    await d65WorktreeStageCadence(spec, env);
     await observeBoundary(callbacks, 'after-verified-commit');
     phase = 'commit-report';
     const committed = await client.transition({
@@ -619,9 +671,15 @@ export async function executeOwnedWorktreeSaga(spec: OwnedWorktreeOperationSpec,
       recoveryAttempts: operation.recovery_attempts, verificationEvidence: evidence, errorCode: null,
       worktreeState: spec.committedWorktreeState, transitionKey: `committed-${String(operation.version)}`,
     });
+    await d65WorktreeStageCadence(spec, env);
     await observeBoundary(callbacks, 'after-terminal-commit');
     return { managed: true, operation: committed.operation, worktree: committed.worktree, replayed: prepared.replayed };
   } catch (error) {
+    // Waiting for the independently signed next D65 heartbeat is an expected
+    // crash-resume pause, not a failed worktree effect. Appending a reconciling
+    // event here would itself stale the just-published graph and make the
+    // external heartbeat impossible to accept.
+    if (error instanceof CoordinationRuntimeError && error.code === 'recovery-required' && error.evidence.includes('d65-heartbeat-authority-pending')) throw error;
     if (error instanceof CoordinationRuntimeError && (error.code === 'fenced-session' || error.code === 'unauthorized-client' || error.code === 'stale-version')) throw error;
     if (error instanceof WorktreeSagaCompensatedError && !TERMINAL_STAGES.has(operation.stage) && operation.stage !== 'verified') {
       const evidence = await client.writeEvidence(operation, 'compensated', null, error.proof, 'git-partial-effect');

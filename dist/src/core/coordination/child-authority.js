@@ -6,6 +6,7 @@ import { currentBootId } from "./process-identity.js";
 import { COORDINATOR_HEARTBEAT_MS, COORDINATOR_SESSION_LEASE_MS } from "./runtime-paths.js";
 import { readCoordinatorSessionContext } from "./supervisor.js";
 import { AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV } from "../names.js";
+import { assertD65OrdinaryBoundaryFromEnvironment, assertD65RecoveryBoundaryFromEnvironment } from "./d65-runtime-dispatch.js";
 function requireRecord(value, label) {
     if (typeof value !== 'object' || value === null || Array.isArray(value))
         throw new CoordinationRuntimeError('invalid-state', `${label} is not an object`);
@@ -23,6 +24,7 @@ export class AutopilotChildLeaseHandle {
     #childToken;
     #pid;
     #bootId;
+    #env;
     #child;
     #heartbeat = null;
     #fatalError = null;
@@ -30,13 +32,14 @@ export class AutopilotChildLeaseHandle {
     #terminalCompletionUncertain = false;
     #preemption = new AbortController();
     #operation = Promise.resolve();
-    constructor(client, session, child, childToken, pid, bootId) {
+    constructor(client, session, child, childToken, pid, bootId, env = process.env) {
         this.#client = client;
         this.#session = session;
         this.#child = child;
         this.#childToken = childToken;
         this.#pid = pid;
         this.#bootId = bootId;
+        this.#env = env;
         const heartbeat = setInterval(() => {
             void this.#enqueue(async () => {
                 if (this.#terminal)
@@ -72,12 +75,14 @@ export class AutopilotChildLeaseHandle {
         await this.#enqueue(async () => {
             if (this.#terminal)
                 throw new CoordinationRuntimeError('invalid-state', 'terminal child cannot record a checkpoint');
+            await assertD65OrdinaryBoundaryFromEnvironment('ordinary-state-advance', this.#env);
             await this.#client.mutate('checkpoint-child', {
                 repoId: this.#session.repo_id, workstreamRun: this.#session.workstream_run, sessionId: null, fencingGeneration: null,
                 expectedVersion: this.#child.version, idempotencyKey: `checkpoint-child:${this.#child.child_lease_id}:${String(checkpointOrdinal)}`,
             }, { child_lease_id: this.#child.child_lease_id, child_token: this.#childToken, pid: this.#pid, boot_id: this.#bootId, checkpoint_ordinal: checkpointOrdinal, critical_section: criticalSection, preemptible });
         });
     }
+    suspendForGraphSuccessor() { this.#stopHeartbeat(); }
     assertHealthy() {
         if (this.#fatalError !== null)
             throw new CoordinationRuntimeError('coordinator-unavailable', `child authority heartbeat failed: ${this.#fatalError.message}`);
@@ -115,6 +120,10 @@ export class AutopilotChildLeaseHandle {
             if (this.#terminal)
                 return;
             this.#stopHeartbeat();
+            if (status === 'terminal')
+                await assertD65OrdinaryBoundaryFromEnvironment('ordinary-state-advance', this.#env);
+            else
+                await assertD65RecoveryBoundaryFromEnvironment('unit-recovery', { attached_session_current: false, policy_trust_current: false, no_pending_publication: false, terminal_prepared_cancellable: false, terminal_after_commit: false, accepted_continuation_reason: null, covered_semantic_reason: null, attach_terminal_recovery: false }, this.#env);
             const idempotencyKey = `complete-child:${this.#child.child_lease_id}:${status}:${evidenceSha256 ?? 'none'}`;
             const payload = { child_lease_id: this.#child.child_lease_id, child_token: this.#childToken, pid: this.#pid, boot_id: this.#bootId, status, evidence_ref: evidenceRef, evidence_sha256: evidenceSha256 };
             let lastError = null;
@@ -193,10 +202,12 @@ export async function registerAutopilotChildAuthority(spec, specEvidence, env = 
     const childToken = randomBytes(32).toString('hex');
     const pid = process.pid;
     const bootId = currentBootId();
+    await assertD65OrdinaryBoundaryFromEnvironment('ordinary-state-advance', env);
     await client.mutate('register-attempt', {
         repoId: session.repo_id, workstreamRun: session.workstream_run, sessionId: session.session_id, fencingGeneration: session.session_generation, expectedVersion: session.run_version,
         idempotencyKey: `register-attempt:${session.workstream_run}:${spec.unit_id}:${String(spec.attempt)}`,
     }, { unit_id: spec.unit_id, attempt: spec.attempt, spec_ref: specEvidence.ref, spec_sha256: specEvidence.sha256, role: spec.role, preemptible: initialCriticalSection === null, checkpoint_ordinal: 0, session_lease_id: session.session_lease_id, session_token: session.session_token });
+    await assertD65OrdinaryBoundaryFromEnvironment('ordinary-state-advance', env);
     const response = await client.mutate('register-child', {
         repoId: session.repo_id,
         workstreamRun: session.workstream_run,
@@ -216,7 +227,13 @@ export async function registerAutopilotChildAuthority(spec, specEvidence, env = 
         session_token: session.session_token,
         lease_expires_at: childExpiry(),
     });
-    const handle = new AutopilotChildLeaseHandle(client, session, childFromResponse(response), childToken, pid, bootId);
-    await handle.checkpoint(1, initialCriticalSection, initialCriticalSection === null);
+    const handle = new AutopilotChildLeaseHandle(client, session, childFromResponse(response), childToken, pid, bootId, env);
+    try {
+        await handle.checkpoint(1, initialCriticalSection, initialCriticalSection === null);
+    }
+    catch (error) {
+        handle.suspendForGraphSuccessor();
+        throw error;
+    }
     return handle;
 }

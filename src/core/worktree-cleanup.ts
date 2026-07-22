@@ -6,11 +6,13 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'nod
 
 import { AUTOPILOT_PREFLIGHT_ROLLBACK_REASON_PREFIX, AUTOPILOT_RUNTIME_ROOT_PREFIX } from './names.ts';
 import { gitQueryText, runGitMutation, runGitQuery } from './git-process.ts';
+import { CoordinationRuntimeError } from './coordination/failures.ts';
 import { readImmutableFileBytes } from './coordination/immutable-file.ts';
 import { deterministicWorktreeId } from './coordination/worktree-identity.ts';
 import { executeOwnedWorktreeSaga } from './coordination/worktree-saga.ts';
 import type { CoordinationChildLease, CoordinationUnitAttempt, CoordinationWorktree, CoordinationWorktreeOperation } from './coordination/types.ts';
 import { coordinationCutoverCommitted } from './coordination/migration-paths.ts';
+import { assertD65OrdinaryBoundaryFromEnvironment, assertD65RecoveryBoundaryFromEnvironment } from './coordination/d65-runtime-dispatch.ts';
 import {
   BRANCHES_FILE,
   MATERIALIZED_PATHS_FILE,
@@ -132,6 +134,7 @@ export async function cleanupTerminalUnitWorktreesForRun(input: {
     const units = await loadScopedUnitRows(input.active);
     for (const unit of units) {
       if (isCleanTerminalStatus(unit.status)) {
+        await assertD65OrdinaryBoundaryFromEnvironment('unit-release', input.env ?? process.env);
         await cleanupTerminalUnit(input.active, unit, acc, {
           mode: 'terminal-unit-prune',
           reason: input.reason,
@@ -176,6 +179,7 @@ export async function cleanupTerminalUnitWorktree(input: {
       });
       fail('unit-status-not-terminal', 'refusing to remove a unit worktree whose metadata status is not an allowed clean terminal state.', [unit.unit_id, String(unit.attempt), unit.status]);
     }
+    await assertD65RecoveryBoundaryFromEnvironment('unit-recovery', { attached_session_current: false, policy_trust_current: false, no_pending_publication: false, terminal_prepared_cancellable: false, terminal_after_commit: false, accepted_continuation_reason: null, covered_semantic_reason: null, attach_terminal_recovery: false }, input.env ?? process.env);
     await cleanupTerminalUnit(input.active, unit, acc, {
       mode: 'terminal-unit-transition',
       reason: input.reason,
@@ -216,6 +220,7 @@ export async function rollbackCreatedUnitWorktree(input: {
       });
       fail('rollback-unit-not-active', 'preflight rollback only applies to the active unit attempt created for the failed launch.', [unit.unit_id, String(unit.attempt), unit.status]);
     }
+    await assertD65RecoveryBoundaryFromEnvironment('unit-recovery', { attached_session_current: false, policy_trust_current: false, no_pending_publication: false, terminal_prepared_cancellable: false, terminal_after_commit: false, accepted_continuation_reason: null, covered_semantic_reason: null, attach_terminal_recovery: false }, input.env ?? process.env);
     await removeRegisteredWorktree(input.active, unit.worktree_path, acc, {
       mode: 'preflight-rollback',
       reason: input.reason,
@@ -729,7 +734,12 @@ async function removeMainWorktree(
   }, {
     action: async () => {
       await removeArchivedRuntimeResidue(active, reason, now);
-      if (existsSync(mainPath) || gitWorktreeListPorcelain(active.source_repo, env).some((entry) => samePath(entry.path, mainPath))) await runGitMutation({ descriptor: { kind: 'worktree-remove', path: mainPath }, cwd: active.source_repo, env: runtimeGitEnv('worktree-cleanup-remove-main', env) });
+      if (existsSync(mainPath) || gitWorktreeListPorcelain(active.source_repo, env).some((entry) => samePath(entry.path, mainPath))) {
+        const removal = await runGitMutation({ descriptor: { kind: 'worktree-remove', path: mainPath }, cwd: active.source_repo, env: runtimeGitEnv('worktree-cleanup-remove-main', env) });
+        if (removal.kind !== 'reported' || removal.exitCode !== 0) throw new CoordinationRuntimeError('git-partial-effect', 'main worktree removal did not report success', [removal.kind === 'reported' ? removal.diagnostic : removal.reason]);
+        const stillRegistered = gitWorktreeListPorcelain(active.source_repo, env).some((entry) => samePath(entry.path, mainPath));
+        if (existsSync(mainPath) || stillRegistered) throw new CoordinationRuntimeError('recovery-required', 'main worktree removal reported success without its exact path/registration postcondition', [mainPath, `path_exists=${String(existsSync(mainPath))}`, `registered=${String(stillRegistered)}`]);
+      }
       if (branchExists(active.source_repo, active.branch, env)) {
         const actualBranchSha = gitQueryText({ descriptor: { kind: 'resolve-revision', revision: `refs/heads/${active.branch}`, verify: true }, cwd: active.source_repo, env: runtimeGitEnv('worktree-cleanup-branch-head', env) }).trim();
         if (actualBranchSha !== expectedSha) fail('branch-retire-sha-mismatch', 'main branch moved after cleanup intent; refusing retirement.', [active.branch, `expected=${expectedSha}`, `actual=${actualBranchSha}`]);
@@ -761,6 +771,34 @@ async function removeArchivedRuntimeResidue(active: ActiveAutopilotRow, reason: 
     fail('runtime-root-not-run-owned', 'refusing main cleanup because runtime_root is not the deterministic path inside the main worktree.', [active.runtime_root, expectedRuntimeRoot]);
   }
   if (!existsSync(active.runtime_root)) return;
+  const trackedMissionRef = `${AUTOPILOT_RUNTIME_ROOT_PREFIX}/${active.workstream}/mission.md`;
+  const trackedMission = runGitQuery({ descriptor: { kind: 'show-file', revision: gitQueryText({ descriptor: { kind: 'head' }, cwd: active.main_worktree_path }).trim(), path: trackedMissionRef, allowAbsent: true }, cwd: active.main_worktree_path });
+  // D65 graph authority tracks the runtime core. Deleting it before the Git
+  // worktree-remove operation would manufacture a dirty deletion postimage and
+  // make the owner saga unrecoverable. Remove only terminal-tail files that are
+  // provably absent from HEAD; any dirty tracked authority is a hard blocker.
+  // The worktree removal itself then deletes the clean tracked core.
+  if (!trackedMission.negative) {
+    const runtimePrefix = `${AUTOPILOT_RUNTIME_ROOT_PREFIX}/${active.workstream}/`;
+    const head = gitQueryText({ descriptor: { kind: 'head' }, cwd: active.main_worktree_path }).trim();
+    const entries = await collectResidualEntries(active.runtime_root);
+    for (const entry of entries.filter((candidate) => !candidate.directory)) {
+      const path = `${runtimePrefix}${entry.relativePath}`;
+      const tracked = runGitQuery({ descriptor: { kind: 'show-file', revision: head, path, allowAbsent: true }, cwd: active.main_worktree_path });
+      const absolute = resolve(active.runtime_root, ...entry.relativePath.split('/'));
+      assertPathWithinRoot(active.runtime_root, absolute, 'terminal-runtime-residue-outside-owned-root');
+      const metadata = lstatSync(absolute);
+      if (metadata.isSymbolicLink()) fail('terminal-runtime-residue-symlink', 'D65 terminal cleanup refuses a runtime symlink.', [path]);
+      if (tracked.negative) await rm(absolute, { recursive: false, force: false });
+    }
+    for (const entry of [...entries].filter((candidate) => candidate.directory).sort((left, right) => right.relativePath.length - left.relativePath.length)) {
+      const absolute = resolve(active.runtime_root, ...entry.relativePath.split('/'));
+      if ((await readdir(absolute)).length === 0) await rm(absolute, { recursive: true, force: false });
+    }
+    const residual = readGitStatus(active.main_worktree_path).changedPaths.filter((candidate) => candidate.startsWith(runtimePrefix));
+    if (residual.length > 0) throw new CoordinationRuntimeError('recovery-required', 'D65 terminal runtime residue remained after exact untracked cleanup', residual);
+    return;
+  }
   await rm(active.runtime_root, { recursive: true, force: false });
   await removeEmptyDirectoryIfPresent(join(active.main_worktree_path, AUTOPILOT_RUNTIME_ROOT_PREFIX));
   await removeEmptyDirectoryIfPresent(join(active.main_worktree_path, '.pi'));
@@ -996,6 +1034,8 @@ function isAllowedTaskResidual(entry: ResidualEntry, units: readonly AutopilotUn
   if (entry.relativePath === 'units' && entry.directory) return true;
   if (entry.relativePath === '.locks' && entry.directory) return true;
   if (entry.relativePath.startsWith('.locks/')) return true;
+  if (entry.relativePath === '_close-attempts' && entry.directory) return true;
+  if (!entry.directory && /^_close-attempts\/attempt-[0-9]{8}T[0-9]{9}Z\.json$/u.test(entry.relativePath)) return true;
   for (const unit of units) {
     const unitRoot = `units/${unit.unit_id}`;
     const attemptRoot = `${unitRoot}/attempt-${String(unit.attempt)}`;

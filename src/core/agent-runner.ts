@@ -62,6 +62,7 @@ import { coordinationCutoverCommitted } from './coordination/migration-paths.ts'
 import { ClaimNegotiationClient, type ClaimGroupAcquisitionResult } from './coordination/negotiation.ts';
 import { ReservationCoordinationClient, reservationSchedulingBlockers } from './coordination/reservations.ts';
 import { PlanningContradictionClient } from './coordination/escalation.ts';
+import { assertD65OrdinaryBoundaryFromEnvironment } from './coordination/d65-runtime-dispatch.ts';
 import type { CoordinationAcquisitionGroup } from './coordination/types.ts';
 import { quarantineFailedUnit, resetFailedUnit } from './unit-failure.ts';
 import { rollbackCreatedUnitWorktree } from './worktree-cleanup.ts';
@@ -332,6 +333,7 @@ async function runAutopilotAgentFromSpecPathInternal(
   }
 
   const env = { ...process.env, ...(options.env ?? {}) };
+  if (options.dryRun !== true) await assertD65OrdinaryBoundaryFromEnvironment('runner-preflight', env);
   const runtimePreflight = await preflightSpec(spec, specPath, {
     skipStaleOutputCheck: options.dryRun === true,
     skipClaimAcquire: options.dryRun === true,
@@ -341,6 +343,7 @@ async function runAutopilotAgentFromSpecPathInternal(
   lifecycle.preflight = runtimePreflight;
   lifecycle.env = env;
   lifecycle.spec = spec;
+  if (options.dryRun !== true) await assertD65OrdinaryBoundaryFromEnvironment('post-acquisition-output', env);
   const auditBaseline = await captureAutopilotExecutionBaseline(spec.cwd);
   lifecycle.auditBaseline = auditBaseline;
   const auditOutput = deriveAutopilotExecutionAuditPath(spec);
@@ -400,6 +403,7 @@ async function runAutopilotAgentFromSpecPathInternal(
   }
 
   try {
+    await assertD65OrdinaryBoundaryFromEnvironment('post-acquisition-output', env);
     lifecycle.handle = await registerAutopilotChildAuthority(spec, runtimePreflight.attemptSpec, env, runtimePreflight.authority.exclusives[0]?.critical_section ?? null);
   } catch (error) {
     throw new AutopilotAgentRunError('spec-invalid', {
@@ -430,6 +434,7 @@ async function runAutopilotAgentFromSpecPathInternal(
 
   let piResult: PiResult;
   try {
+    await assertD65OrdinaryBoundaryFromEnvironment('child-model-spawn', env);
     piResult = await runPiPromptWithStatusCarrier(spawnSpec, rendered.text);
   } catch (error) {
     if (error instanceof AutopilotPiRunError) {
@@ -828,9 +833,6 @@ async function preflightSpecAfterWorktreePreparation(
   if (attemptSpecRef.length === 0 || attemptSpecRef.startsWith('../') || attemptSpecRef.startsWith('/')) throw new AutopilotAgentRunError('spec-invalid', { reason: 'unit spec must remain inside the durable run main worktree', specPath });
   const attemptSpecBytes = await readFile(specPath);
   const attemptSpec = { ref: attemptSpecRef, sha256: `sha256:${createHash('sha256').update(attemptSpecBytes).digest('hex')}` as const };
-  await mkdir(dirname(spec.status_output), { recursive: true });
-  await mkdir(dirname(spec.receipt_output), { recursive: true });
-  await mkdir(spec.evidence_dir, { recursive: true });
 
   let coordinatorGroup: CoordinationAcquisitionGroup | null = null;
   const acquiredClaims = options.skipClaimAcquire === true
@@ -853,13 +855,20 @@ async function preflightSpecAfterWorktreePreparation(
         });
 
   try {
-    if (options.skipClaimAcquire !== true) await materializeAutopilotSpecPaths({
+    if (options.skipClaimAcquire !== true) await assertD65OrdinaryBoundaryFromEnvironment('post-acquisition-output', options.env ?? process.env);
+    await mkdir(dirname(spec.status_output), { recursive: true });
+    await mkdir(dirname(spec.receipt_output), { recursive: true });
+    await mkdir(spec.evidence_dir, { recursive: true });
+    if (options.skipClaimAcquire !== true) {
+      await assertD65OrdinaryBoundaryFromEnvironment('post-acquisition-output', options.env ?? process.env);
+      await materializeAutopilotSpecPaths({
       context: runtimeContext,
       spec,
       authority,
       reason: 'autopilot-agent-run preflight materialization',
-      ...(options.env === undefined ? {} : { env: options.env }),
-    });
+        ...(options.env === undefined ? {} : { env: options.env }),
+      });
+    }
     const verifiedSpecBytes = await readFile(specPath);
     const verifiedSpecSha = `sha256:${createHash('sha256').update(verifiedSpecBytes).digest('hex')}`;
     if (verifiedSpecSha !== attemptSpec.sha256) throw new AutopilotAgentRunError('spec-invalid', { reason: 'unit spec changed after authority derivation; prelaunch authority was rolled back', specPath, statusOutput: spec.status_output, receiptOutput: spec.receipt_output });
@@ -998,6 +1007,7 @@ async function prepareMissingSourceChangingUnitWorktree(spec: AutopilotUnitSpec,
       receiptOutput: spec.receipt_output,
     });
   }
+  await assertD65OrdinaryBoundaryFromEnvironment('missing-worktree-creation', env);
   const prepared = await prepareAutopilotUnitWorktree({ active, unitId: spec.unit_id, attempt: spec.attempt, unitSpec: spec, env });
   return prepared.created ? { created: true, active, unitId: spec.unit_id, attempt: spec.attempt } : { created: false };
 }

@@ -4,7 +4,8 @@ import { join } from 'node:path';
 import type { AutopilotMasterPlan, AutopilotState, AutopilotUnitSpec } from './contracts/types.ts';
 import { deriveAutopilotAuthority, persistAutopilotAuthority, type AutopilotAuthorityArtifact } from './authority.ts';
 import { parseAutopilotUnitSpec } from './contracts/validate.ts';
-import { matchesRepoPathPattern, pathOverlapsOrContains, writeJsonAtomic, type AutopilotClaimType } from './parallel-runtime.ts';
+import { matchesRepoPathPattern, pathOverlapsOrContains, writeJsonAtomic, type AutopilotClaimType, type ProcessEnvLike } from './parallel-runtime.ts';
+import { assertD65OrdinaryBoundaryFromEnvironment } from './coordination/d65-runtime-dispatch.ts';
 import type { AutopilotSchedulerConfig } from './scheduler-config.ts';
 import { reservationSchedulingBlockers, type ReservationCoordinationView } from './coordination/reservations.ts';
 
@@ -97,7 +98,9 @@ export async function writeDispatchArtifacts(input: {
   readonly runtimeRoot: string;
   readonly dispatch: AutopilotDispatchPlan;
   readonly claims: readonly AutopilotSchedulerClaimView[];
+  readonly env?: ProcessEnvLike;
 }): Promise<{ readonly dispatchPath: string; readonly claimSnapshotPath: string }> {
+  await assertD65OrdinaryBoundaryFromEnvironment('scheduler-dispatch', input.env ?? process.env);
   const dispatchPath = join(input.runtimeRoot, 'dispatches', `${input.dispatch.dispatch_id}.json`);
   const claimSnapshotPath = join(input.runtimeRoot, 'claim-snapshots', `${input.dispatch.dispatch_id}.json`);
   await mkdir(join(input.runtimeRoot, 'dispatches'), { recursive: true });

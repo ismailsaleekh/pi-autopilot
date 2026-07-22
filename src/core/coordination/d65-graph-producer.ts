@@ -1,5 +1,15 @@
 import { CoordinationRuntimeError } from './failures.ts';
+import { assertD65BootstrapCharterIdentity, parseD65BootstrapCharter } from './d65-bootstrap-charter.ts';
+import { d65GraphAuthorityIdentity, type D65GraphAuthorityCollection } from './d65-graph-authority.ts';
 import { canonicalJson } from './canonical-json.ts';
+import {
+  D65_COORDINATOR_PROJECTION_KINDS,
+  reconstructD65CoordinatorProjection,
+} from './d65-coordinator-projection.ts';
+import {
+  assertD65ProjectionMembersClosed,
+  parseD65ClosureProjection,
+} from './d65-graph-projections.ts';
 import {
   D65_AUTHORITY_SHARD_SCHEMA,
   D65_COLLECTION_KEYS,
@@ -50,7 +60,7 @@ export function canonicalBlobText(value: unknown): string {
 export interface D65AuthorityInput {
   readonly identity: string;
   readonly ref: string;
-  readonly git_mode: '100644' | '100755' | '120000';
+  readonly git_mode: '100644';
   readonly git_blob_oid: string;
   readonly sha256: `sha256:${string}`;
   readonly byte_count: number;
@@ -150,13 +160,18 @@ function emptyIndex(): D65ProjectionIndex {
  * the actual shard blob bytes.
  */
 function buildAuthorityIndex(
-  collection: string,
+  collection: D65GraphAuthorityCollection,
   entries: readonly D65AuthorityInput[],
   header: D65GraphHeader,
 ): BuiltIndex {
   if (entries.length === 0) return { index: emptyIndex(), shards: Object.freeze([]), referencedBytes: 0, referencedEntries: 0 };
   const sorted = [...entries].sort((left, right) => (left.identity < right.identity ? -1 : left.identity > right.identity ? 1 : 0));
   assertSortedUnique(sorted.map((entry) => entry.identity), `authority ${collection}`);
+  for (const entry of sorted) {
+    if (entry.git_mode !== '100644') fail(`authority ${collection} entry must be mode 100644`, [entry.ref, entry.git_mode]);
+    const expectedIdentity = d65GraphAuthorityIdentity(collection, entry.ref);
+    if (entry.identity !== expectedIdentity) fail(`authority ${collection} identity does not bind its complete ref`, [entry.identity, expectedIdentity, entry.ref]);
+  }
   const memberEntries = sorted.map((entry) => ({
     identity: entry.identity,
     ref: entry.ref,
@@ -212,10 +227,16 @@ function buildProjectionIndex(
   if (members.length === 0) return { index: emptyIndex(), shards: Object.freeze([]), referencedBytes: 0, referencedEntries: 0 };
   const sorted = [...members].sort((left, right) => (left.identity < right.identity ? -1 : left.identity > right.identity ? 1 : 0));
   assertSortedUnique(sorted.map((member) => member.identity), `projection ${projectionKind}`);
+  assertD65ProjectionMembersClosed(projectionKind, sorted);
   const memberEntries = sorted.map((member) => {
-    if (member.kind !== projectionKind) fail(`projection ${projectionKind} member kind mismatch`, [member.identity, member.kind]);
+    if (projectionKind === 'coordinator_projection') {
+      if (!D65_COORDINATOR_PROJECTION_KINDS.includes(member.kind as never)) fail('coordinator_projection member kind is outside the additive frozen enum', [member.identity, member.kind]);
+    } else if (member.kind !== projectionKind) fail(`projection ${projectionKind} member kind mismatch`, [member.identity, member.kind]);
     return { identity: member.identity, kind: member.kind, value_sha256: canonicalSha256(member.value), value: member.value };
   });
+  if (projectionKind === 'coordinator_projection') {
+    reconstructD65CoordinatorProjection(memberEntries, { repoId: header.repo_id, workstreamRun: header.workstream_run, coveredEventSeq: header.covered_event_seq });
+  }
   const totalBytes = memberEntries.reduce((sum, entry) => sum + utf8Bytes(canonicalBlobText(entry)), 0);
   const firstIdentity = memberEntries[0]?.identity ?? '';
   const lastIdentity = memberEntries[memberEntries.length - 1]?.identity ?? '';
@@ -257,6 +278,8 @@ function buildProjectionIndex(
  */
 export function buildD65CompleteGraph(header: D65GraphHeader, body: D65GraphBody): D65ProducedGraph {
   if (!Number.isSafeInteger(header.graph_sequence) || header.graph_sequence < 2) fail('graph_sequence must be a safe integer >= 2');
+  const bootstrapCharter = parseD65BootstrapCharter(header.bootstrap_charter);
+  assertD65BootstrapCharterIdentity(bootstrapCharter, { repo_id: header.repo_id, autopilot_id: header.autopilot_id, workstream: header.workstream, workstream_run: header.workstream_run });
 
   const producedShards: D65ProducedShard[] = [];
   let aggregateBytes = 0;
@@ -328,7 +351,7 @@ export function buildD65CompleteGraph(header: D65GraphHeader, body: D65GraphBody
     collections: Object.freeze(collections),
     work_items: projectionIndexes.work_items,
     bughunt: projectionIndexes.bughunt,
-    closure: body.closure,
+    closure: parseD65ClosureProjection(body.closure),
     queue_projection: Object.freeze(queues),
     exceptions: projectionIndexes.exceptions,
     coordinator_projection: projectionIndexes.coordinator_projection,

@@ -7,7 +7,7 @@ import { parseCoordinationMigrationRecoveryWork, parseCoordinationRun, parseCoor
 import { CoordinationRuntimeError } from '../core/coordination/failures.ts';
 import { COORDINATOR_HEARTBEAT_MS, coordinatorRuntimePaths } from '../core/coordination/runtime-paths.ts';
 import { acquireSerializedProcessGuard } from '../core/coordination/serialized-lock.ts';
-import { DurableRunSupervisorClient, readCoordinatorSessionContext, readMigrationRecoveryEvidenceFile, type RunSupervisorAttachment } from '../core/coordination/supervisor.ts';
+import { DurableRunSupervisorClient, readCoordinatorSessionContext, readMigrationRecoveryEvidenceFile, type MigrationRecoveryResolutionInput, type RunSupervisorAttachment } from '../core/coordination/supervisor.ts';
 import { currentBootId, isProcessAlive } from '../core/coordination/process-identity.ts';
 import type { CoordinationMigrationRecoveryWork, CoordinationReconciliationSource, CoordinationRun } from '../core/coordination/types.ts';
 import { AUTOPILOT_STATE_ROOT_ENV, readCoordinatorRunCatalog, resolveRepoIdentity, type ProcessEnvLike } from '../core/parallel-runtime.ts';
@@ -173,6 +173,12 @@ async function executeMigrationRecoveryCli(argv: readonly string[], baseEnv: Pro
   const first = unresolved[0];
   const workstreamRun = args.run;
   if (first === undefined || workstreamRun === null) throw new CoordinationRuntimeError('invalid-state', 'recovery target disappeared');
+  const releasedResolution = args.command === 'release-with-evidence'
+    ? (() => {
+      if (args.source === null || args.targetId === null || evidenceBytes === null) throw new CoordinationRuntimeError('invalid-request', 'release-authority requires source, target, and evidence bytes');
+      return { resolutionType: 'authority-released' as const, releaseSource: args.source, releaseTargetId: args.targetId, evidenceBytes };
+    })()
+    : null;
   return await supervisor.withMigrationRecoveryAuthority(async () => {
   let attachment = await supervisor.attachMigrationRecovery({ repo, workstreamRun, recoveryId: first.recovery_id, rawSessionId: `recovery-cli-${process.pid}-${randomUUID()}` });
   let primary: unknown = null;
@@ -184,7 +190,13 @@ async function executeMigrationRecoveryCli(argv: readonly string[], baseEnv: Pro
         attachment = await supervisor.heartbeatMigrationRecovery(attachment);
         nextHeartbeatAt = Date.now() + COORDINATOR_HEARTBEAT_MS;
       }
-      results.push(await supervisor.resolveMigrationRecovery({ attachment, recoveryWork: work, resolution: args.command === 'retain-authority' ? { resolutionType: 'authority-retained' } : { resolutionType: 'authority-released', releaseSource: args.source!, releaseTargetId: args.targetId!, evidenceBytes: evidenceBytes! } }));
+      let resolution: MigrationRecoveryResolutionInput;
+      if (args.command === 'retain-authority') resolution = { resolutionType: 'authority-retained' };
+      else {
+        if (releasedResolution === null) throw new CoordinationRuntimeError('invalid-state', 'release resolution authority disappeared');
+        resolution = releasedResolution;
+      }
+      results.push(await supervisor.resolveMigrationRecovery({ attachment, recoveryWork: work, resolution }));
     }
   } catch (error) { primary = error; }
   try { await detach(supervisor, attachment); } catch (error) { primary = primary === null ? error : new AggregateError([primary, error], 'recovery mutation and fenced detach both failed'); }

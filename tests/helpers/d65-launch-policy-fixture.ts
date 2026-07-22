@@ -120,7 +120,9 @@ export async function bootstrapPolicyRun(input: {
     coordination_authority: 'coordinator-edit-leases-v1', status: 'active', active_session_generation: 0, created_event_seq: 1, version: 1,
   };
   const { publicKey, privateKey } = generateKeyPairSync('ed25519');
-  const spki = Buffer.from(publicKey.export({ format: 'der', type: 'spki' }) as unknown as Uint8Array);
+  const exportedSpki = publicKey.export({ format: 'der', type: 'spki' });
+  if (!(exportedSpki instanceof Uint8Array)) throw new Error('Ed25519 SPKI export was not binary DER');
+  const spki = Buffer.from(exportedSpki);
   const trustRef = `.pi/autopilot-trust/d65/${programId}/operator-ed25519.spki`;
   const trustSha256 = sha256(spki);
   const bootstrapRef = `.pi/autopilot-bootstrap/${runId}/bootstrap.json`;
@@ -235,7 +237,7 @@ export function launchPolicyFields(ctx: PolicyCtx, programEvidenceRoot: string, 
 export function signPolicy(ctx: PolicyCtx, fields: Record<string, unknown>, signatureOverride?: string): string {
   const domain = Buffer.from('AUTOPILOT-D65-LAUNCH-POLICY\u0000', 'utf8');
   const message = Buffer.from(canonicalJson(fields), 'utf8');
-  const signature = signatureOverride ?? encodeUnpaddedBase64Url(new Uint8Array(sign(null, Buffer.concat([domain, message]), ctx.privateKey) as unknown as Uint8Array));
+  const signature = signatureOverride ?? encodeUnpaddedBase64Url(new Uint8Array(sign(null, Buffer.concat([domain, message]), ctx.privateKey)));
   return `${JSON.stringify({ ...fields, signature }, null, 2)}\n`;
 }
 

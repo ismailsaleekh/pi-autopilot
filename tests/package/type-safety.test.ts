@@ -18,6 +18,8 @@ interface Violation {
 interface Check {
   readonly rule: string;
   readonly pattern: RegExp;
+  /** Compiler directives are comment authority; type-shape rules inspect code only. */
+  readonly includeCommentsAndStrings?: boolean;
 }
 
 interface JsonMap {
@@ -57,16 +59,51 @@ async function filesFor(roots: readonly string[], filePattern?: RegExp): Promise
   return nested.flat().sort();
 }
 
+function codeWithoutCommentsAndStrings(source: string): string {
+  let state: 'code' | 'line-comment' | 'block-comment' | 'single' | 'double' | 'template' = 'code';
+  let escaped = false;
+  let output = '';
+  for (let index = 0; index < source.length; index += 1) {
+    const char = source[index] ?? '';
+    const next = source[index + 1] ?? '';
+    if (state === 'code') {
+      if (char === '/' && next === '/') { output += '  '; index += 1; state = 'line-comment'; continue; }
+      if (char === '/' && next === '*') { output += '  '; index += 1; state = 'block-comment'; continue; }
+      if (char === "'") { output += ' '; state = 'single'; escaped = false; continue; }
+      if (char === '"') { output += ' '; state = 'double'; escaped = false; continue; }
+      if (char === '`') { output += ' '; state = 'template'; escaped = false; continue; }
+      output += char;
+      continue;
+    }
+    if (state === 'line-comment') {
+      if (char === '\n' || char === '\r') { output += char; state = 'code'; }
+      else output += ' ';
+      continue;
+    }
+    if (state === 'block-comment') {
+      if (char === '*' && next === '/') { output += '  '; index += 1; state = 'code'; }
+      else output += char === '\n' || char === '\r' ? char : ' ';
+      continue;
+    }
+    if (char === '\n' || char === '\r') output += char;
+    else output += ' ';
+    if (escaped) { escaped = false; continue; }
+    if (char === '\\') { escaped = true; continue; }
+    if ((state === 'single' && char === "'") || (state === 'double' && char === '"') || (state === 'template' && char === '`')) state = 'code';
+  }
+  return output;
+}
+
 async function scan(files: readonly string[], checks: readonly Check[]): Promise<Violation[]> {
   const violations: Violation[] = [];
   for (const file of files) {
     const text = await readFile(file, 'utf8');
-    const lines = text.split(/\r?\n/);
-    for (const [index, line] of lines.entries()) {
+    const rawLines = text.split(/\r?\n/);
+    const codeLines = codeWithoutCommentsAndStrings(text).split(/\r?\n/);
+    for (const [index, rawLine] of rawLines.entries()) {
       for (const check of checks) {
-        if (check.pattern.test(line)) {
-          violations.push({ file, line: index + 1, rule: check.rule, text: line.trim() });
-        }
+        const inspected = check.includeCommentsAndStrings === true ? rawLine : (codeLines[index] ?? '');
+        if (check.pattern.test(inspected)) violations.push({ file, line: index + 1, rule: check.rule, text: rawLine.trim() });
       }
     }
   }
@@ -98,7 +135,7 @@ void describe('type-safety standard', () => {
     const emptyStructuralPattern = /(?:[\w)]\s*:\s*\{\s*\}\s*(?:[=;,)]|$)|(?:as|<|extends\s+|implements\s+|\btype\s+\w+\s*=)\s*\{\s*\})/;
     const violations = await scan(await filesFor(allTypeScriptRoots), [
       { rule: 'explicit top-type escape', pattern: explicitTopTypePattern },
-      { rule: 'compiler suppression', pattern: /@ts-(?:ignore|expect-error|nocheck)/ },
+      { rule: 'compiler suppression', pattern: /@ts-(?:ignore|expect-error|nocheck)/, includeCommentsAndStrings: true },
       { rule: 'double assertion', pattern: /\bas\s+(?:unknown|never)\s+as\b/ },
       { rule: 'broad callable/object type', pattern: broadCallablePattern },
       { rule: 'empty structural type', pattern: emptyStructuralPattern },

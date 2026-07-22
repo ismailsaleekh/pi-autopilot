@@ -1,3 +1,4 @@
+import { canonicalJson } from './canonical-json.ts';
 import { CoordinationRuntimeError } from './failures.ts';
 import { bytesSha256, parseD65CompleteGraph, type D65CompleteGraph } from './d65-semantic-graph.ts';
 
@@ -10,6 +11,10 @@ import { bytesSha256, parseD65CompleteGraph, type D65CompleteGraph } from './d65
 // authority-critical `semantic-graph-artifact-invalid` / `-discovery-mismatch`.
 
 /** The deterministic graph artifact id `semantic-graph:<20-digit-sequence>`. */
+export function d65GraphRegistrationIdempotencyKey(artifactId: string, graphSha256: `sha256:${string}`): string {
+  return `register-authoritative-artifact:${artifactId}:${graphSha256}`;
+}
+
 export function d65SemanticGraphArtifactId(graphSequence: number): string {
   if (!Number.isSafeInteger(graphSequence) || graphSequence < 2) throw new CoordinationRuntimeError('invalid-request', 'complete graph sequence must be >= 2');
   return `semantic-graph:${String(graphSequence).padStart(20, '0')}`;
@@ -80,6 +85,8 @@ export function validateD65GraphPublication(input: {
   // 1. Graph root blob integrity.
   if (bytesSha256(observation.graphRootBytes) !== observation.sealedGraphSha256) throw new CoordinationRuntimeError('invalid-request', 'semantic-graph-artifact-invalid: graph root blob does not match the sealed graph_sha256');
   const graph = parseD65CompleteGraph(parseJsonObject(observation.graphRootBytes, 'semantic graph root'));
+  const canonicalRoot = new TextEncoder().encode(`${canonicalJson(graph)}\n`);
+  if (canonicalRoot.byteLength !== observation.graphRootBytes.byteLength || canonicalRoot.some((byte, index) => byte !== observation.graphRootBytes[index])) throw new CoordinationRuntimeError('invalid-request', 'semantic-graph-artifact-invalid: graph root is not RFC-8785 canonical JSON plus exactly one LF');
 
   // 2. Authority binding.
   if (graph.covered_authority_commit !== input.expectedAuthorityCommit) throw new CoordinationRuntimeError('invalid-request', 'semantic-graph-artifact-invalid: graph covered_authority_commit disagrees with the registration authority commit', [graph.covered_authority_commit, input.expectedAuthorityCommit]);

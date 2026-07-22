@@ -329,6 +329,7 @@ function operationType(value: unknown): string | null {
 }
 
 function requestS1Surface(store: CoordinatorStore, request: CoordinatorRequestEnvelope): CoordinatorS1Surface | null {
+  if (request.action === 'accept-program-heartbeat' || request.action === 'status' && request.payload['dispatch_authority_context'] !== undefined) return 'd65-current-build';
   if (request.action === 'resolve-run-scoped-fault') return 'scoped-logical-faults';
   if (request.action === 'prepare-operation' && operationType(request.payload['operation']) === 'metadata-reconcile') return 'canonical-worktree-aliases';
   if (request.action !== 'transition-operation' || request.workstream_run === null) return null;
