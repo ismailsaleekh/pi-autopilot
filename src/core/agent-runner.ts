@@ -97,10 +97,12 @@ import {
 } from './prompt-renderer/index.ts';
 import { recoverRuntimeRosterSelection, runtimeRosterSnapshotPath } from './roster/snapshot.ts';
 import { preRunSelectionPath, resolveRosterScopePaths, rosterRevisionPath, type RosterSha256 } from './roster/paths.ts';
+import { readCustomRosterCertificationAuthority, verifyCustomRosterManifestForRoster } from './roster/custom-certification.ts';
 import { computeAutopilotRosterContractObjectHash, parseAutopilotHistoricalFixedRosterAdapterResult, parseAutopilotRoster } from './roster/contracts.ts';
 import { bytesEqual, parseCanonicalPreRunSelectionBytes, type RunSelectionDiagnostic } from './roster/run-selection.ts';
 import { assertUnitSpecMatchesPinnedFacts, resolvePinnedRoleRuntimeFacts } from './roster/runtime-spec.ts';
 import { unitSpecAuthorityProjection, type AutopilotRuntimeUnitSpec } from './roster/runtime-consumers.ts';
+import type { Roster } from './roster/provider-recipes.ts';
 
 type JsonRecord = Readonly<Record<string, unknown>>;
 type ProcessEnv = Readonly<Record<string, string | undefined>>;
@@ -908,8 +910,10 @@ async function authenticateSpecBundleBeforePreflight(input: {
     const roster = await readAuthenticatedRosterForSelection({
       selection,
       mainWorktreePath: runtimeContext.active.main_worktree_path,
+      trustedProjectRoot: runtimeContext.active.source_repo,
       stateRoot,
     });
+    await assertCustomRosterCertificationForRunner({ selection, roster, stateRoot, trustedProjectRoot: runtimeContext.active.source_repo });
     const facts = resolvePinnedRoleRuntimeFacts({
       selection,
       roster,
@@ -1137,10 +1141,11 @@ function v2SpecSelectionIssues(
 async function readAuthenticatedRosterForSelection(input: {
   readonly selection: AuthenticatedPreRunSelection;
   readonly mainWorktreePath: string;
+  readonly trustedProjectRoot: string;
   readonly stateRoot: string | undefined;
 }): Promise<ReturnType<typeof parseAutopilotRoster>> {
   const paths = input.selection.scope === 'trusted-project'
-    ? resolveRosterScopePaths({ scope: 'trusted-project', ...(input.stateRoot === undefined ? {} : { stateRoot: input.stateRoot }), trustedProjectRoot: input.mainWorktreePath })
+    ? resolveRosterScopePaths({ scope: 'trusted-project', ...(input.stateRoot === undefined ? {} : { stateRoot: input.stateRoot }), trustedProjectRoot: input.trustedProjectRoot })
     : resolveRosterScopePaths({ scope: 'user', ...(input.stateRoot === undefined ? {} : { stateRoot: input.stateRoot }) });
   const rosterPath = rosterRevisionPath(paths, input.selection);
   const rosterBytes = await readFile(rosterPath);
@@ -1152,6 +1157,37 @@ async function readAuthenticatedRosterForSelection(input: {
   if (roster.assignment_set_sha256 !== input.selection.assignment_set_sha256) issues.push('assignment_set_sha256 does not match recovered pre-run selection');
   if (issues.length > 0) throw new Error(issues.join('; '));
   return roster;
+}
+
+async function assertCustomRosterCertificationForRunner(input: {
+  readonly selection: AuthenticatedPreRunSelection;
+  readonly roster: ReturnType<typeof parseAutopilotRoster>;
+  readonly stateRoot: string | undefined;
+  readonly trustedProjectRoot: string;
+}): Promise<void> {
+  if (input.roster.generation_source !== 'user-custom') return;
+  const customRoster = input.roster as unknown as Roster;
+  const paths = input.selection.scope === 'trusted-project'
+    ? resolveRosterScopePaths({ scope: 'trusted-project', ...(input.stateRoot === undefined ? {} : { stateRoot: input.stateRoot }), trustedProjectRoot: input.trustedProjectRoot })
+    : resolveRosterScopePaths({ scope: 'user', ...(input.stateRoot === undefined ? {} : { stateRoot: input.stateRoot }) });
+  const authorityRead = await readCustomRosterCertificationAuthority({ paths, roster: customRoster });
+  if (!authorityRead.ok) {
+    throw new Error(`custom roster certification authority ${authorityRead.reason} for ${input.roster.roster_id}@${String(input.roster.roster_revision)}`);
+  }
+  const authority = authorityRead.authority;
+  if (
+    authority.roster_id !== input.roster.roster_id ||
+    authority.roster_revision !== input.roster.roster_revision ||
+    authority.roster_sha256 !== input.roster.roster_sha256 ||
+    authority.roster_sha256 !== input.selection.roster_sha256 ||
+    authority.manifest_sha256 !== authority.qualification_manifest.manifest_sha256
+  ) {
+    throw new Error('custom roster certification authority binding does not match authenticated roster selection');
+  }
+  const verification = verifyCustomRosterManifestForRoster({ roster: customRoster, manifest: authority.qualification_manifest });
+  if (!verification.ok) {
+    throw new Error(`custom roster certification authority is not trusted/current for launch: ${verification.issues.map((issue) => issue.code).join(', ')}`);
+  }
 }
 
 function formatRunSelectionDiagnostics(diagnostics: readonly { readonly code: string; readonly severity?: string }[]): string {

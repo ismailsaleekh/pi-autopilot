@@ -48,7 +48,7 @@ If the user asks for custom or mixed roles, do **not** send a caller-built roste
 - exactly one `role_assignment_intent` item for every role (`parent`, `strategy`, `implement`, `validate`, `fix`, `adjudicate`, `bughunt`, `extract`), with explicit `role`, `provider_id`, `model_id`, `api`, and `thinking` plus optional `service_tier`, `cache_policy`, and `system_prompt_profile`;
 - `qualification_manifest` as `null` unless the package has supplied an exact custom_roster certification manifest for the exact roster.
 
-The package, not you, resolves the current model registry inventory and registered route policies, builds the canonical `generation_source: user-custom` roster, and returns `autopilot.roster_tool_result.v2` with `custom_validation`, `custom_roster`, `approval_binding`, and zero writes. Unknown fields are errors. A structurally valid custom roster is **not ready**: it remains blocked until `custom_validation.certification_status` is `autopilot-certified` for the exact `validation_result_sha256`, `roster_sha256`, and `manifest_sha256`. With the current empty custom trust registry, custom save attempts must block with zero writes; report that honestly.
+The package, not you, resolves the current model registry inventory and registered route policies, builds the canonical `generation_source: user-custom` roster, and returns `autopilot.roster_tool_result.v2` with a closed `custom_proposal`, `custom_validation`, `custom_roster`, `approval_binding`, and zero writes. Unknown fields are errors. A structurally valid custom roster is **not ready**: it remains blocked until `custom_validation.certification_status` is `autopilot-certified` for the exact `custom_proposal_sha256`, `validation_result_sha256`, `roster_sha256`, and `manifest_sha256`. With the current empty custom trust registry, custom save attempts must block with zero writes; report that honestly.
 
 ### 3. Approval gate before save
 
@@ -68,7 +68,7 @@ original_command: <exact original /autopilot command>
 
 Reject stale, partial, reordered, duplicate, hash-mismatched, ambiguous, rejecting, or refining user turns. Do not save from a thumbs-up, menu choice, or implied consent unless you can honestly interpret it as approval of the current presented proposal. Do not compute substitute hashes; the canonical hashes are the contract hashes returned by the roster operation.
 
-For custom v2 proposals, the approval presentation and `save` request must also bind the exact `validation_result_sha256`, `roster_sha256`, and `manifest_sha256` from `approval_binding`; structural validation alone is not approval to launch.
+For custom v2 proposals, the approval presentation and `save` request must also bind the exact `custom_proposal_sha256`, `validation_result_sha256`, `roster_sha256`, `manifest_sha256`, and `approval_sha256` from `approval_binding`; structural validation alone is not approval to launch.
 
 ### 4. Save (the only write action)
 

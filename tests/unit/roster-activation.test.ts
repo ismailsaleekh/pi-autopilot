@@ -5,6 +5,7 @@ import { dirname, join } from 'node:path';
 import { describe, it } from 'node:test';
 
 import autopilotExtension, {
+  trustedProjectForRequest,
   type AutopilotRosterActivationResolution,
   type ExtensionCommandContextLike,
   type ExtensionCommandDefinitionLike,
@@ -406,6 +407,27 @@ void describe('D69 W2 roster activation', () => {
     assert.equal(pi.activeTools.length, 0);
     assert.equal(pi.messages.length, 0);
     assert.ok(events.some((event) => event.includes('ROSTER_READBACK_MISMATCH')));
+  });
+
+  void it('rejects caller-supplied trusted-project roots that do not match the current host context before storage', async () => {
+    await withTempDir(async (root) => {
+      const events: string[] = [];
+      const actualRoot = join(root, 'actual');
+      const attackerRoot = join(root, 'attacker');
+      await mkdir(actualRoot, { recursive: true });
+      await mkdir(attackerRoot, { recursive: true });
+      const ctx = { ...makeContext(events), cwd: actualRoot, isProjectTrusted: () => true };
+      const mismatch = await trustedProjectForRequest({ scope: 'trusted-project', trusted_project_root: attackerRoot }, ctx);
+      assert.equal(mismatch.ok, false);
+      if (mismatch.ok) throw new Error('trusted-project root mismatch unexpectedly accepted');
+      assert.deepEqual(mismatch.diagnostics.map((diagnostic) => diagnostic.code), ['ROSTER_STORAGE_TRUST_REQUIRED']);
+
+      const match = await trustedProjectForRequest({ scope: 'trusted-project', trusted_project_root: actualRoot }, ctx);
+      assert.equal(match.ok, true);
+      if (!match.ok) throw new Error('trusted-project root match unexpectedly rejected');
+      assert.equal(match.trustedProject?.root, await realpath(actualRoot));
+      assert.equal(await match.trustedProject?.isProjectTrusted(), true);
+    });
   });
 
   void it('blocks stored user-custom rosters even when assignments claim ready if exact custom registry authority is absent', async () => {

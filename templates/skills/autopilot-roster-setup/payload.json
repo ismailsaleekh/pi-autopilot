@@ -8,8 +8,8 @@
   "resources": {
     "skill_md": {
       "path": "templates/skills/autopilot-roster-setup/SKILL.md",
-      "sha256": "sha256:6b81233b9f94c4e842e39beb4a9eb2f048da74b52b474df40beeec5a7c6f632f",
-      "byte_count": 8770
+      "sha256": "sha256:45a9f0df9b7b091d23297f2cc9c7e157b69518c94044f63114cede52470dccdd",
+      "byte_count": 8869
     }
   },
   "authorities": [
@@ -87,9 +87,11 @@
       "default_roster_revision",
       "default_roster_sha256",
       "original_command",
+      "custom_proposal_sha256_for_custom_v2",
       "validation_result_sha256_for_custom_v2",
       "roster_sha256_for_custom_v2",
-      "manifest_sha256_for_custom_v2"
+      "manifest_sha256_for_custom_v2",
+      "approval_sha256_for_custom_v2"
     ],
     "post_save": [
       "fresh_pi_session_required",

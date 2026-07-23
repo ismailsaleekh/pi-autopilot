@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { dirname } from 'node:path';
+import { realpathSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
 
 import { createContextBudgetTool, resolveContextHaltPercent } from './core/context-budget.ts';
 import {
@@ -754,11 +755,11 @@ function materializeRosterPublicationForCandidate(input: {
   readonly customManifests?: ReadonlyMap<Digest, QualificationManifest> | undefined;
   readonly customValidations?: ReadonlyMap<Digest, { readonly ok: boolean; readonly status: string; readonly result_sha256: Digest }> | undefined;
 }): { readonly roster: RosterContract; readonly bytes: Uint8Array; readonly custom_manifest: QualificationManifest | null; readonly custom_validation_result_sha256: Digest | null } {
-  if (input.candidate.readiness_authority !== 'custom-roster-registry.v1') {
+  const bytes = input.customRosterBytes?.get(input.candidate.roster_sha256);
+  if (bytes === undefined) {
     const roster = materializeRosterForCandidate(input.candidate, input.scope);
     return { roster, bytes: rosterBytes(roster), custom_manifest: null, custom_validation_result_sha256: null };
   }
-  const bytes = input.customRosterBytes?.get(input.candidate.roster_sha256);
   const manifest = input.customManifests?.get(input.candidate.roster_sha256);
   const validation = input.customValidations?.get(input.candidate.roster_sha256);
   if (bytes === undefined || manifest === undefined || validation === undefined || validation.ok !== true || validation.status !== 'certified') {
@@ -834,10 +835,47 @@ function buildRosterConfig(input: {
   return { config: parsed, bytes: new TextEncoder().encode(autopilotRosterContractCanonicalJson(parsed)) };
 }
 
-function trustedProjectForRequest(request: { readonly scope: RosterStorageScope; readonly trusted_project_root: string | null }): { readonly root: string; readonly isProjectTrusted: () => true } | undefined {
-  if (request.scope !== 'trusted-project') return undefined;
-  if (request.trusted_project_root === null) return undefined;
-  return { root: request.trusted_project_root, isProjectTrusted: () => true };
+type TrustedProjectStorageContext = { readonly root: string; readonly isProjectTrusted: () => boolean | Promise<boolean> };
+
+type TrustedProjectResolution =
+  | { readonly ok: true; readonly trustedProject: TrustedProjectStorageContext | undefined; readonly trustedProjectRoot: string | undefined }
+  | { readonly ok: false; readonly diagnostics: readonly RosterDiagnostic[] };
+
+export async function trustedProjectForRequest(
+  request: { readonly scope: RosterStorageScope; readonly trusted_project_root: string | null },
+  ctx: unknown,
+): Promise<TrustedProjectResolution> {
+  if (request.scope !== 'trusted-project') return { ok: true, trustedProject: undefined, trustedProjectRoot: undefined };
+  const commandCtx = commandContextFromUnknown(ctx);
+  if (commandCtx === null || request.trusted_project_root === null) {
+    return { ok: false, diagnostics: [rosterDiagnostic('ROSTER_STORAGE_TRUST_REQUIRED')] };
+  }
+  const hostRoot = normalizeTrustedProjectRoot(trustedProjectRoot(commandCtx));
+  const requestedRoot = normalizeTrustedProjectRoot(request.trusted_project_root);
+  if (hostRoot === null || requestedRoot === null || hostRoot !== requestedRoot) {
+    return { ok: false, diagnostics: [rosterDiagnostic('ROSTER_STORAGE_TRUST_REQUIRED')] };
+  }
+  if (!await projectTrusted(commandCtx)) {
+    return { ok: false, diagnostics: [rosterDiagnostic('ROSTER_STORAGE_TRUST_REQUIRED')] };
+  }
+  return {
+    ok: true,
+    trustedProject: { root: hostRoot, isProjectTrusted: () => projectTrusted(commandCtx) },
+    trustedProjectRoot: hostRoot,
+  };
+}
+
+function commandContextFromUnknown(ctx: unknown): ExtensionCommandContextLike | null {
+  if (typeof ctx !== 'object' || ctx === null) return null;
+  return ctx as ExtensionCommandContextLike;
+}
+
+function normalizeTrustedProjectRoot(path: string): string | null {
+  try {
+    return realpathSync(resolve(path));
+  } catch {
+    return null;
+  }
 }
 
 function notify(ctx: ExtensionCommandContextLike, message: string, kind: NotificationKind): void {
@@ -925,18 +963,20 @@ export default function autopilotExtension(pi: ExtensionHostLike, dependencies: 
       saveApproved: async (input) => {
         const request = input.request;
         const stateRoot = dependencies.rosterStateRoot;
-        const trustedProject = trustedProjectForRequest(request);
-        if (request.scope === 'trusted-project' && trustedProject === undefined) {
+        const trustedProjectResolution = await trustedProjectForRequest(request, input.ctx);
+        if (!trustedProjectResolution.ok) {
           return {
             ok: false,
             status: 'blocked' as const,
             receipt: null,
-            diagnostics: [rosterDiagnostic('ROSTER_STORAGE_TRUST_REQUIRED')],
+            diagnostics: trustedProjectResolution.diagnostics,
             write_count: 0,
             lock_count: 0,
             files_touched: [],
           };
         }
+        const trustedProject = trustedProjectResolution.trustedProject;
+        const trustedProjectRootForStorage = trustedProjectResolution.trustedProjectRoot;
         try {
           const storage = createProductionRosterStorage(stateRoot);
           const read = await storage.readDefaultRoster(trustedProject === undefined ? { scope: request.scope } : { scope: request.scope, trustedProject });
@@ -972,8 +1012,8 @@ export default function autopilotExtension(pi: ExtensionHostLike, dependencies: 
             if (publication.custom_manifest === null || publication.custom_validation_result_sha256 === null) continue;
             const paths = request.scope === 'trusted-project'
               ? stateRoot === undefined
-                ? resolveRosterScopePaths({ scope: request.scope, trustedProjectRoot: request.trusted_project_root ?? undefined })
-                : resolveRosterScopePaths({ scope: request.scope, stateRoot, trustedProjectRoot: request.trusted_project_root ?? undefined })
+                ? resolveRosterScopePaths({ scope: request.scope, trustedProjectRoot: trustedProjectRootForStorage })
+                : resolveRosterScopePaths({ scope: request.scope, stateRoot, trustedProjectRoot: trustedProjectRootForStorage })
               : stateRoot === undefined
                 ? resolveRosterScopePaths({ scope: request.scope })
                 : resolveRosterScopePaths({ scope: request.scope, stateRoot });
@@ -1007,7 +1047,7 @@ export default function autopilotExtension(pi: ExtensionHostLike, dependencies: 
             default_roster_sha256: input.default_roster_sha256,
             previous_config_sha256: read.config_sha256,
             stateRoot,
-            trustedProjectRoot: request.trusted_project_root ?? undefined,
+            trustedProjectRoot: trustedProjectRootForStorage,
             now: clock(),
           });
           const saved = await storage.saveApprovedDefault({

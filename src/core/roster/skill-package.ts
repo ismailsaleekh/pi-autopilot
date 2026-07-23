@@ -10,10 +10,10 @@ export const AUTOPILOT_ROSTER_SETUP_PAYLOAD_PATH = 'templates/skills/autopilot-r
 export const AUTOPILOT_ROSTER_SETUP_PACKAGE_SKILL_ENTRY = './templates/skills/autopilot-roster-setup';
 export const AUTOPILOT_ROSTER_SETUP_FREEZE_ID = 'phase37-roster-w0-2026-07-22';
 export const AUTOPILOT_ROSTER_SETUP_PI_MINIMUM_VERSION = '0.80.6';
-export const AUTOPILOT_ROSTER_SETUP_SKILL_SHA256 = 'sha256:6b81233b9f94c4e842e39beb4a9eb2f048da74b52b474df40beeec5a7c6f632f';
-export const AUTOPILOT_ROSTER_SETUP_SKILL_BYTE_COUNT = 8770;
-export const AUTOPILOT_ROSTER_SETUP_PAYLOAD_SHA256 = 'sha256:c1cc8cf77e19cdc1723fcffc931fd690abcb62b9438e60e74fe6d81682cabb0a';
-export const AUTOPILOT_ROSTER_SETUP_PAYLOAD_BYTE_COUNT = 3328;
+export const AUTOPILOT_ROSTER_SETUP_SKILL_SHA256 = 'sha256:45a9f0df9b7b091d23297f2cc9c7e157b69518c94044f63114cede52470dccdd';
+export const AUTOPILOT_ROSTER_SETUP_SKILL_BYTE_COUNT = 8869;
+export const AUTOPILOT_ROSTER_SETUP_PAYLOAD_SHA256 = 'sha256:fdea917a5a810d5dc1f82ee780320424321df36f0f7e401c35332665713eb456';
+export const AUTOPILOT_ROSTER_SETUP_PAYLOAD_BYTE_COUNT = 3413;
 
 const PACKAGE_NAME = 'pi-autopilot';
 const SOURCE_MODULE_RELATIVE_PATH = join('src', 'core', 'roster', 'skill-package.ts');
@@ -94,9 +94,11 @@ export interface AutopilotRosterSetupSkillPayload {
       'default_roster_revision',
       'default_roster_sha256',
       'original_command',
+      'custom_proposal_sha256_for_custom_v2',
       'validation_result_sha256_for_custom_v2',
       'roster_sha256_for_custom_v2',
       'manifest_sha256_for_custom_v2',
+      'approval_sha256_for_custom_v2',
     ];
     readonly post_save: readonly ['fresh_pi_session_required', 'retry_exact_original_autopilot_command', 'never_auto_start'];
   };
@@ -305,7 +307,9 @@ function assertSkillContentContract(skillText: string): void {
     'autopilot.roster_tool_request.v2',
     'role_assignment_intent',
     'structurally valid custom roster is **not ready**',
+    'custom_proposal_sha256',
     'validation_result_sha256',
+    'approval_sha256',
     'Recommend Cruise only when',
     'project trust',
     'secret-free',
@@ -400,7 +404,7 @@ function validatePayload(payload: JsonRecord, skillByteCount: number): Autopilot
   expectBoolean(conversation['blocked_and_converged_honesty_required'], true, 'payload blocked_and_converged_honesty_required');
   expectBoolean(conversation['approval_requires_exact_restatement'], false, 'payload approval_requires_exact_restatement');
   expectString(conversation['approval_authorization'], 'nonempty bounded user/rpc/interactive turn after current package-bound presentation; setup agent interprets approval semantics', 'payload approval_authorization');
-  expectStringArray(conversation['approval_fields'], ['scope', 'candidate_set_sha256', 'approved_roster_sha256s_in_order', 'default_roster_id', 'default_roster_revision', 'default_roster_sha256', 'original_command', 'validation_result_sha256_for_custom_v2', 'roster_sha256_for_custom_v2', 'manifest_sha256_for_custom_v2'], 'payload approval_fields');
+  expectStringArray(conversation['approval_fields'], ['scope', 'candidate_set_sha256', 'approved_roster_sha256s_in_order', 'default_roster_id', 'default_roster_revision', 'default_roster_sha256', 'original_command', 'custom_proposal_sha256_for_custom_v2', 'validation_result_sha256_for_custom_v2', 'roster_sha256_for_custom_v2', 'manifest_sha256_for_custom_v2', 'approval_sha256_for_custom_v2'], 'payload approval_fields');
   expectStringArray(conversation['post_save'], ['fresh_pi_session_required', 'retry_exact_original_autopilot_command', 'never_auto_start'], 'payload post_save');
 
   return payload as unknown as AutopilotRosterSetupSkillPayload;

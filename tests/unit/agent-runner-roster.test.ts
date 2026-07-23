@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { describe, it } from 'node:test';
@@ -20,6 +20,7 @@ import {
 import { buildCanonicalPreRunSelection } from '../../src/core/roster/run-selection.ts';
 import { canonicalRosterJson } from '../../src/core/roster/canonical.ts';
 import { resolveRosterScopePaths, rosterRevisionPath } from '../../src/core/roster/paths.ts';
+import { buildUserCustomRosterFromAssignments } from '../../src/core/roster/custom-certification.ts';
 import { requestProfileFromAssignment } from '../../src/core/roster/runtime-spec.ts';
 
 const MANIFEST = readJsonObject(resolve('design/phase37/roster-contract-freeze.v1.json'));
@@ -68,10 +69,49 @@ void describe('agent runner roster v2 identity', () => {
       assert.match(prompt, /roster_runtime_identity/u);
     });
   });
+
+  void it('blocks activation-bypassed user-custom v2 child runs when canonical custom authority is absent', async () => {
+    await withTempDir(async (root) => {
+      const source = join(root, 'source');
+      await initGitSource(source);
+      const prepared = await prepareAutopilotWorkstream({ workstream: 'rosterw3', sourceCwd: source });
+      const supervisor = new DurableRunSupervisorClient(process.env);
+      const attachment = await supervisor.attach({ repo: prepared.repo, active: prepared.active, rawSessionId: 'roster-runner-parent-custom' });
+      process.env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV] = attachment.contextPath;
+
+      const seed = generatedRoster(1);
+      const customRoster = buildUserCustomRosterFromAssignments({
+        slug: 'runner-block',
+        display_name: 'Runner custom block',
+        scope: 'user',
+        profile_id: 'precision',
+        assignments: arrayAt(seed, 'assignments').map((entry) => objectAtValue(entry)) as never,
+        created_at: '2026-07-24T00:00:00.000Z',
+      });
+      const { selection, assignment, requestProfile } = await installRosterAuthority({
+        stateRoot: process.env[AUTOPILOT_STATE_ROOT_ENV] ?? '',
+        mainWorktreePath: prepared.mainWorktreePath,
+        workstream: prepared.active.workstream,
+        repoId: prepared.active.repo_key,
+        workstreamRun: prepared.active.workstream_run,
+        role: 'validate',
+        roster: customRoster as unknown as Readonly<Record<string, unknown>>,
+      });
+      const unitSpec = parseAutopilotUnitSpecV2(makeUnitSpecV2(prepared.mainWorktreePath, prepared.runtimeRoot, requestProfile, selection, assignment));
+      const specPath = join(prepared.runtimeRoot, 'unit-specs', 'u01validate.validate.attempt-1.json');
+      await mkdir(dirname(specPath), { recursive: true });
+      await writeFile(specPath, `${JSON.stringify(unitSpec, null, 2)}\n`, 'utf8');
+
+      await assert.rejects(
+        async () => await runAutopilotAgentFromSpecPath(specPath, { dryRun: true }),
+        /unit_spec\.v2 failed external roster\/selection authentication before preflight authority derivation: custom roster certification authority absent/u,
+      );
+    });
+  });
 });
 
 async function withTempDir<T>(run: (root: string) => Promise<T>): Promise<T> {
-  const root = await mkdtemp(join(tmpdir(), 'autopilot-agent-runner-roster-'));
+  const root = await mkdtemp(join(await realpath(tmpdir()), 'autopilot-agent-runner-roster-'));
   const originalStateRoot = process.env[AUTOPILOT_STATE_ROOT_ENV];
   const originalSessionContext = process.env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV];
   process.env[AUTOPILOT_STATE_ROOT_ENV] = join(root, 'autopilot-state');
@@ -154,13 +194,14 @@ async function installRosterAuthority(input: {
   readonly repoId: string;
   readonly workstreamRun: string;
   readonly role: AutopilotUnitSpecV2['role'];
+  readonly roster?: Readonly<Record<string, unknown>> | undefined;
 }): Promise<{
   readonly selection: Readonly<Record<string, unknown>>;
   readonly roster: Readonly<Record<string, unknown>>;
   readonly assignment: Readonly<Record<string, unknown>>;
   readonly requestProfile: AutopilotRosterRequestProfileV1;
 }> {
-  const roster = cloneRecord(generatedRoster(1));
+  const roster = cloneRecord(input.roster ?? generatedRoster(1));
   const assignment = arrayAt(roster, 'assignments').map(objectAtValue).find((entry) => entry['role'] === input.role);
   if (assignment === undefined) throw new Error(`missing ${input.role} assignment`);
   const fixtureSelection = objectAt(REGISTRY, 'synthetic_pre_run_selection');

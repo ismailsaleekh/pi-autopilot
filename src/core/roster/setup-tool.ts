@@ -17,10 +17,12 @@ import {
 } from './provider-recipes.ts';
 import { applyW4ProviderRegistryReadinessToCandidateSet } from './providers/index.ts';
 import {
+  CUSTOM_ROSTER_INTENT_REQUEST_SCHEMA,
   CUSTOM_ROSTER_TOOL_UNSUPPORTED_DIAGNOSTIC,
   isCustomRosterUnsupportedToolPayload,
   validateCustomRosterIntentSetupRequest,
   verifyCustomRosterManifestForRoster,
+  type CustomRosterIntentSetupRequest,
   type CustomRosterIntentValidationResult,
 } from './custom-certification.ts';
 export {
@@ -42,6 +44,8 @@ export type {
 } from './custom-certification.ts';
 import {
   ROSTER_DIAGNOSTIC_CODES,
+  ROSTER_PROFILES,
+  ROSTER_ROLE_ORDER,
   type Digest,
   type RosterDiagnostic,
   type RosterDiagnosticCode,
@@ -58,6 +62,8 @@ const REQUEST_SCHEMA = 'autopilot.roster_tool_request.v1' as const;
 const RESULT_SCHEMA = 'autopilot.roster_tool_result.v1' as const;
 const REQUEST_SCHEMA_V2 = 'autopilot.roster_tool_request.v2' as const;
 const RESULT_SCHEMA_V2 = 'autopilot.roster_tool_result.v2' as const;
+export const CUSTOM_CANDIDATE_SCHEMA_V2 = 'autopilot.custom_roster_candidate.v2' as const;
+export const CUSTOM_PROPOSAL_SCHEMA_V2 = 'autopilot.custom_roster_proposal.v2' as const;
 const CUSTOM_APPROVAL_SCHEMA_V2 = 'autopilot.custom_roster_approval.v2' as const;
 const CUSTOM_APPROVAL_BINDING_SCHEMA_V2 = 'autopilot.custom_roster_approval_binding.v2' as const;
 const CUSTOM_SAVE_RECEIPT_SCHEMA_V2 = 'autopilot.custom_roster_setup_receipt.v2' as const;
@@ -112,25 +118,61 @@ interface RosterToolResultPreimage {
 
 type RosterToolResult = RosterToolResultPreimage & { readonly result_sha256: Digest };
 
-interface CustomRosterApprovalBindingV2 {
-  readonly schema_version: typeof CUSTOM_APPROVAL_BINDING_SCHEMA_V2;
+export interface CustomRosterCandidateV2 {
+  readonly schema_version: typeof CUSTOM_CANDIDATE_SCHEMA_V2;
+  readonly candidate_id: string;
+  readonly scope: RosterScope;
+  readonly profile_id: string;
+  readonly roster_id: string;
+  readonly roster_revision: number;
+  readonly assignment_set_sha256: Digest;
+  readonly roster_sha256: Digest;
+  readonly inventory_sha256: Digest;
+  readonly validation_result_sha256: Digest;
+  readonly manifest_sha256: Digest | null;
+  readonly validation_status: CustomRosterIntentValidationResult['validation']['status'];
+  readonly certification_status: CustomRosterIntentValidationResult['validation']['certification_status'];
+  readonly diagnostic_codes: readonly string[];
+  readonly custom_candidate_sha256: Digest;
+}
+
+export interface CustomRosterProposalV2 {
+  readonly schema_version: typeof CUSTOM_PROPOSAL_SCHEMA_V2;
+  readonly proposal_id: string;
+  readonly scope: RosterScope;
+  readonly inventory_sha256: Digest;
   readonly validation_result_sha256: Digest;
   readonly roster_sha256: Digest;
   readonly manifest_sha256: Digest | null;
+  readonly custom_candidate: CustomRosterCandidateV2;
+  readonly proposal_sha256: Digest;
+}
+
+interface CustomRosterApprovalBindingV2 {
+  readonly schema_version: typeof CUSTOM_APPROVAL_BINDING_SCHEMA_V2;
+  readonly custom_proposal_sha256: Digest;
+  readonly validation_result_sha256: Digest;
+  readonly roster_sha256: Digest;
+  readonly manifest_sha256: Digest | null;
+  readonly approval_sha256: Digest;
 }
 
 interface CustomRosterApprovalV2 {
   readonly schema_version: typeof CUSTOM_APPROVAL_SCHEMA_V2;
+  readonly custom_proposal_sha256: Digest;
   readonly validation_result_sha256: Digest;
   readonly roster_sha256: Digest;
   readonly manifest_sha256: Digest | null;
+  readonly approval_sha256: Digest;
 }
 
 interface CustomRosterSaveReceiptV2 {
   readonly schema_version: typeof CUSTOM_SAVE_RECEIPT_SCHEMA_V2;
+  readonly custom_proposal_sha256: Digest;
   readonly validation_result_sha256: Digest;
   readonly roster_sha256: Digest;
   readonly manifest_sha256: Digest | null;
+  readonly approval_sha256: Digest;
   readonly storage_receipt_sha256: Digest | null;
   readonly config_sha256: Digest | null;
   readonly custom_authority_path: string | null;
@@ -146,6 +188,7 @@ interface RosterToolResultV2Preimage {
   readonly ok: boolean;
   readonly status: ResultStatus;
   readonly candidate_set: RosterCandidateSet | null;
+  readonly custom_proposal: CustomRosterProposalV2 | null;
   readonly custom_validation: CustomRosterIntentValidationResult['validation'] | null;
   readonly custom_roster: Roster | null;
   readonly approval_binding: CustomRosterApprovalBindingV2 | null;
@@ -269,9 +312,11 @@ interface ControllerApprovalInput extends RosterSetupApprovalPresentationInput {
 }
 
 interface ControllerCustomApprovalInput extends ControllerApprovalInput {
+  readonly custom_proposal_sha256: Digest;
   readonly validation_result_sha256: Digest;
   readonly roster_sha256: Digest;
   readonly manifest_sha256: Digest | null;
+  readonly approval_sha256: Digest;
 }
 
 interface ControllerApprovalResult {
@@ -294,6 +339,7 @@ interface RosterSetupHostAuthorization {
 
 interface SaveCapabilityInput {
   readonly request: AnyRosterToolRequest;
+  readonly ctx: unknown;
   readonly candidate_set: RosterCandidateSet;
   readonly approved_roster_sha256s: readonly Digest[];
   readonly default_roster_id: string;
@@ -307,7 +353,10 @@ interface SaveCapabilityInput {
 
 interface RememberedCustomProposal {
   readonly request: RosterToolProposeCustomRequestV2;
+  readonly intent_request: CustomRosterIntentSetupRequest;
+  readonly inventory_sha256: Digest;
   readonly candidate_set: RosterCandidateSet;
+  readonly custom_proposal: CustomRosterProposalV2;
   readonly validation_result: CustomRosterIntentValidationResult['validation'];
   readonly roster: Roster;
   readonly roster_bytes: Uint8Array;
@@ -378,6 +427,54 @@ const BASE_PARAMETER_REQUIRED = Object.freeze([
   'original_command',
 ] as const);
 
+const DIGEST_PARAMETER_SCHEMA = Object.freeze({ type: 'string', minLength: 71, maxLength: 71, pattern: DIGEST_PATTERN.source } as const);
+const NULL_PARAMETER_SCHEMA = Object.freeze({ type: 'null' } as const);
+const CUSTOM_ROLE_INTENT_PARAMETER_SCHEMA = Object.freeze({
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    role: { type: 'string', enum: [...ROSTER_ROLE_ORDER] },
+    provider_id: { type: 'string', minLength: 1, maxLength: 64, pattern: '^[a-z][a-z0-9-]{0,63}$' },
+    model_id: { type: 'string', minLength: 1, maxLength: 120, pattern: '^[A-Za-z0-9][A-Za-z0-9._:/-]{0,119}$' },
+    api: { type: 'string', enum: ['openai-codex-responses', 'anthropic-messages', 'openai-completions'] },
+    thinking: { type: 'string', enum: ['high', 'xhigh'] },
+    service_tier: { anyOf: [{ type: 'string', enum: ['priority'] }, NULL_PARAMETER_SCHEMA] },
+    cache_policy: { type: 'string', enum: ['provider-default', 'none', 'short', 'long'] },
+    system_prompt_profile: { type: 'string', enum: ['pi-default.v1', 'anthropic-autopilot-sanitized.v1'] },
+  },
+  required: ['role', 'provider_id', 'model_id', 'api', 'thinking'],
+} as const);
+const CUSTOM_ROSTER_INTENT_REQUEST_PARAMETER_SCHEMA = Object.freeze({
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    schema_version: { type: 'string', enum: [CUSTOM_ROSTER_INTENT_REQUEST_SCHEMA] },
+    request_id: { type: 'string', minLength: 1, maxLength: 96, pattern: '^[a-z][a-z0-9-]{0,95}$' },
+    natural_language_request: { type: 'string', minLength: 1, maxLength: 16000 },
+    profile_id: { type: 'string', enum: ROSTER_PROFILES.map((profile) => profile.profile_id) },
+    role_assignment_intent: {
+      type: 'array',
+      minItems: ROSTER_ROLE_ORDER.length,
+      maxItems: ROSTER_ROLE_ORDER.length,
+      items: CUSTOM_ROLE_INTENT_PARAMETER_SCHEMA,
+    },
+    qualification_manifest: { anyOf: [NULL_PARAMETER_SCHEMA, { type: 'object' }] },
+  },
+  required: ['schema_version', 'request_id', 'natural_language_request', 'profile_id', 'role_assignment_intent', 'qualification_manifest'],
+} as const);
+const CUSTOM_ROSTER_APPROVAL_PARAMETER_SCHEMA_V2 = Object.freeze({
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    schema_version: { type: 'string', enum: [CUSTOM_APPROVAL_SCHEMA_V2] },
+    custom_proposal_sha256: DIGEST_PARAMETER_SCHEMA,
+    validation_result_sha256: DIGEST_PARAMETER_SCHEMA,
+    roster_sha256: DIGEST_PARAMETER_SCHEMA,
+    manifest_sha256: { anyOf: [DIGEST_PARAMETER_SCHEMA, NULL_PARAMETER_SCHEMA] },
+    approval_sha256: DIGEST_PARAMETER_SCHEMA,
+  },
+  required: ['schema_version', 'custom_proposal_sha256', 'validation_result_sha256', 'roster_sha256', 'manifest_sha256', 'approval_sha256'],
+} as const);
 const PARAMETER_SCHEMA = Object.freeze({
   oneOf: [
     {
@@ -395,10 +492,52 @@ const PARAMETER_SCHEMA = Object.freeze({
       additionalProperties: false,
       properties: {
         schema_version: { type: 'string', enum: [REQUEST_SCHEMA_V2] },
-        action: { type: 'string', enum: [...INPUT_ACTIONS_V2] },
+        action: { type: 'string', enum: ['propose-custom'] },
         ...BASE_PARAMETER_PROPERTIES,
-        custom_roster_request: {},
-        custom_roster_approval: {},
+        approval_token: NULL_PARAMETER_SCHEMA,
+        candidate_set_sha256: NULL_PARAMETER_SCHEMA,
+        approved_roster_sha256s: { type: 'array', minItems: 0, maxItems: 0, uniqueItems: true, items: DIGEST_PARAMETER_SCHEMA },
+        default_roster_id: NULL_PARAMETER_SCHEMA,
+        default_roster_revision: NULL_PARAMETER_SCHEMA,
+        default_roster_sha256: NULL_PARAMETER_SCHEMA,
+        custom_roster_request: CUSTOM_ROSTER_INTENT_REQUEST_PARAMETER_SCHEMA,
+        custom_roster_approval: NULL_PARAMETER_SCHEMA,
+      },
+      required: [...BASE_PARAMETER_REQUIRED, 'custom_roster_request', 'custom_roster_approval'],
+    },
+    {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        schema_version: { type: 'string', enum: [REQUEST_SCHEMA_V2] },
+        action: { type: 'string', enum: ['save'] },
+        ...BASE_PARAMETER_PROPERTIES,
+        approval_token: { type: 'string', minLength: 16, maxLength: 200, pattern: TOKEN_PATTERN.source },
+        candidate_set_sha256: DIGEST_PARAMETER_SCHEMA,
+        approved_roster_sha256s: { type: 'array', minItems: 1, maxItems: 16, uniqueItems: true, items: DIGEST_PARAMETER_SCHEMA },
+        default_roster_id: { type: 'string', minLength: 1, maxLength: 96, pattern: '^[a-z][a-z0-9-]{0,95}$' },
+        default_roster_revision: { type: 'integer', minimum: 1 },
+        default_roster_sha256: DIGEST_PARAMETER_SCHEMA,
+        custom_roster_request: NULL_PARAMETER_SCHEMA,
+        custom_roster_approval: CUSTOM_ROSTER_APPROVAL_PARAMETER_SCHEMA_V2,
+      },
+      required: [...BASE_PARAMETER_REQUIRED, 'custom_roster_request', 'custom_roster_approval'],
+    },
+    {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        schema_version: { type: 'string', enum: [REQUEST_SCHEMA_V2] },
+        action: { type: 'string', enum: ['reject'] },
+        ...BASE_PARAMETER_PROPERTIES,
+        approval_token: NULL_PARAMETER_SCHEMA,
+        candidate_set_sha256: NULL_PARAMETER_SCHEMA,
+        approved_roster_sha256s: { type: 'array', minItems: 0, maxItems: 0, uniqueItems: true, items: DIGEST_PARAMETER_SCHEMA },
+        default_roster_id: NULL_PARAMETER_SCHEMA,
+        default_roster_revision: NULL_PARAMETER_SCHEMA,
+        default_roster_sha256: NULL_PARAMETER_SCHEMA,
+        custom_roster_request: NULL_PARAMETER_SCHEMA,
+        custom_roster_approval: NULL_PARAMETER_SCHEMA,
       },
       required: [...BASE_PARAMETER_REQUIRED, 'custom_roster_request', 'custom_roster_approval'],
     },
@@ -619,6 +758,7 @@ async function dispatchRosterToolActionV2(input: {
       ok: false,
       status: 'blocked',
       candidate_set: null,
+      custom_proposal: null,
       custom_validation: null,
       custom_roster: null,
       approval_binding: null,
@@ -725,6 +865,7 @@ async function proposeCustomAction(
       ok: false,
       status: 'failed',
       candidate_set: null,
+      custom_proposal: null,
       custom_validation: built.validation,
       custom_roster: null,
       approval_binding: null,
@@ -736,11 +877,35 @@ async function proposeCustomAction(
       files_touched: [],
     });
   }
-  const candidateSet = customCandidateSetForValidation({ inventory, roster: built.roster, validation: built.validation, manifest_sha256: built.qualification_manifest_sha256 });
-  const approvalBinding = customApprovalBindingForValidation(built.validation, built.roster, built.qualification_manifest_sha256);
+  if (built.request === null) {
+    return materializeResultV2({
+      schema_version: RESULT_SCHEMA_V2,
+      action: 'propose-custom',
+      ok: false,
+      status: 'failed',
+      candidate_set: null,
+      custom_proposal: null,
+      custom_validation: built.validation,
+      custom_roster: null,
+      approval_binding: null,
+      receipt: null,
+      custom_receipt: null,
+      diagnostics: diagnosticsFromExternal(built.validation.diagnostics),
+      write_count: 0,
+      lock_count: 0,
+      files_touched: [],
+    });
+  }
+  const inventorySha256 = normalizeRosterInventory(inventory).inventory_sha256;
+  const customProposal = customProposalForValidation({ inventory_sha256: inventorySha256, roster: built.roster, validation: built.validation, manifest_sha256: built.qualification_manifest_sha256 });
+  const candidateSet = customCandidateSetForValidation({ inventory, roster: built.roster, custom_proposal: customProposal });
+  const approvalBinding = customApprovalBindingForValidation(customProposal, built.validation, built.roster, built.qualification_manifest_sha256);
   const remembered: RememberedCustomProposal = Object.freeze({
     request,
+    intent_request: built.request,
+    inventory_sha256: inventorySha256,
     candidate_set: candidateSet,
+    custom_proposal: customProposal,
     validation_result: built.validation,
     roster: built.roster,
     roster_bytes: built.roster_bytes,
@@ -755,6 +920,7 @@ async function proposeCustomAction(
     ok: built.validation.ok,
     status: built.validation.ok ? 'proposed' : built.validation.status === 'failed' ? 'failed' : 'blocked',
     candidate_set: candidateSet,
+    custom_proposal: customProposal,
     custom_validation: built.validation,
     custom_roster: built.roster,
     approval_binding: approvalBinding,
@@ -775,6 +941,7 @@ function rejectActionV2(request: RosterToolRejectCustomRequestV2, controller: Re
     ok: true,
     status: 'rejected',
     candidate_set: null,
+    custom_proposal: null,
     custom_validation: null,
     custom_roster: null,
     approval_binding: null,
@@ -811,6 +978,7 @@ async function saveAction(
   try {
     const saved = await options.saveApproved({
       request,
+      ctx,
       candidate_set: candidateSet,
       approved_roster_sha256s: request.approved_roster_sha256s,
       default_roster_id: request.default_roster_id ?? '',
@@ -825,48 +993,56 @@ async function saveAction(
 
 async function saveCustomAction(
   request: RosterToolSaveCustomRequestV2,
-  _ctx: unknown,
+  ctx: unknown,
   options: CreateRosterSetupToolOptions,
   controller: ReturnType<typeof createController>,
 ): Promise<RosterToolResultV2> {
   const proposal = controller.currentCustomProposal();
   if (proposal === null) return saveBlockedV2(['ROSTER_APPROVAL_STALE_CANDIDATE_SET']);
-  const candidateSet = proposal.candidate_set;
   if (request.candidate_set_sha256 === null) return saveBlockedV2(['ROSTER_APPROVAL_STALE_CANDIDATE_SET'], proposal);
-  const approvalDiagnostics = validateCandidateSetApproval(candidateSet, request.candidate_set_sha256, request.approved_roster_sha256s);
-  if (approvalDiagnostics.length > 0) return saveBlockedV2(approvalDiagnostics.map((diagnostic) => diagnostic.code), proposal);
-  if (!defaultTupleMatches(request, candidateSet)) return saveBlockedV2(['ROSTER_APPROVAL_STALE_CANDIDATE_SET'], proposal);
-  if (!controller.consumeCustomApproval(request, proposal)) return saveBlockedV2(['ROSTER_APPROVAL_STALE_CANDIDATE_SET'], proposal);
-  const freshVerification = proposal.qualification_manifest === null
-    ? null
-    : verifyCustomRosterManifestForRoster({ roster: proposal.roster, manifest: proposal.qualification_manifest });
-  if (
-    proposal.validation_result.ok !== true ||
-    proposal.validation_result.status !== 'certified' ||
-    freshVerification?.ok !== true ||
-    request.custom_roster_approval.validation_result_sha256 !== proposal.validation_result.result_sha256 ||
-    request.custom_roster_approval.roster_sha256 !== proposal.roster.roster_sha256 ||
-    request.custom_roster_approval.manifest_sha256 !== proposal.manifest_sha256
-  ) {
-    return saveBlockedV2(['ROSTER_QUALIFICATION_REQUIRED', ...proposal.validation_result.diagnostics.map((diagnostic) => diagnostic.code)], proposal);
+  if (!sameCustomApprovalRequestBinding(request.custom_roster_approval, proposal.approval_binding)) {
+    return saveBlockedV2(['ROSTER_APPROVAL_STALE_CANDIDATE_SET'], proposal);
   }
-  if (options.saveApproved === undefined) return saveFailedV2(['ROSTER_READBACK_MISMATCH'], proposal);
+
+  const freshProposal = await rebuildCustomProposalForSave({ request, ctx, options, proposal });
+  if (freshProposal === null || !sameRememberedCustomProposal(proposal, freshProposal)) {
+    return saveBlockedV2(['ROSTER_APPROVAL_STALE_CANDIDATE_SET'], proposal);
+  }
+
+  const candidateSet = freshProposal.candidate_set;
+  const approvalDiagnostics = validateCandidateSetApproval(candidateSet, request.candidate_set_sha256, request.approved_roster_sha256s);
+  if (approvalDiagnostics.length > 0) return saveBlockedV2(approvalDiagnostics.map((diagnostic) => diagnostic.code), freshProposal);
+  if (!defaultTupleMatches(request, candidateSet)) return saveBlockedV2(['ROSTER_APPROVAL_STALE_CANDIDATE_SET'], freshProposal);
+  if (!controller.consumeCustomApproval(request, freshProposal)) return saveBlockedV2(['ROSTER_APPROVAL_STALE_CANDIDATE_SET'], freshProposal);
+
+  const freshVerification = freshProposal.qualification_manifest === null
+    ? null
+    : verifyCustomRosterManifestForRoster({ roster: freshProposal.roster, manifest: freshProposal.qualification_manifest });
+  if (
+    freshProposal.validation_result.ok !== true ||
+    freshProposal.validation_result.status !== 'certified' ||
+    freshVerification?.ok !== true
+  ) {
+    return saveBlockedV2(['ROSTER_QUALIFICATION_REQUIRED', ...freshProposal.validation_result.diagnostics.map((diagnostic) => diagnostic.code)], freshProposal);
+  }
+  if (options.saveApproved === undefined) return saveFailedV2(['ROSTER_READBACK_MISMATCH'], freshProposal);
   try {
     const saved = await options.saveApproved({
       request,
+      ctx,
       candidate_set: candidateSet,
       approved_roster_sha256s: request.approved_roster_sha256s,
       default_roster_id: request.default_roster_id ?? '',
       default_roster_revision: request.default_roster_revision ?? 0,
       default_roster_sha256: request.default_roster_sha256 ?? 'sha256:0000000000000000000000000000000000000000000000000000000000000000',
-      custom_rosters_by_sha256: new Map([[proposal.roster.roster_sha256, proposal.roster]]),
-      custom_roster_bytes_by_sha256: new Map([[proposal.roster.roster_sha256, proposal.roster_bytes]]),
-      custom_manifests_by_roster_sha256: proposal.qualification_manifest === null ? new Map() : new Map([[proposal.roster.roster_sha256, proposal.qualification_manifest]]),
-      custom_validation_results_by_roster_sha256: new Map([[proposal.roster.roster_sha256, proposal.validation_result]]),
+      custom_rosters_by_sha256: new Map([[freshProposal.roster.roster_sha256, freshProposal.roster]]),
+      custom_roster_bytes_by_sha256: new Map([[freshProposal.roster.roster_sha256, freshProposal.roster_bytes]]),
+      custom_manifests_by_roster_sha256: freshProposal.qualification_manifest === null ? new Map() : new Map([[freshProposal.roster.roster_sha256, freshProposal.qualification_manifest]]),
+      custom_validation_results_by_roster_sha256: new Map([[freshProposal.roster.roster_sha256, freshProposal.validation_result]]),
     });
-    return normalizeSaveCapabilityResultV2(request, proposal, saved);
+    return normalizeSaveCapabilityResultV2(request, freshProposal, saved);
   } catch {
-    return saveFailedV2(['ROSTER_READBACK_MISMATCH'], proposal);
+    return saveFailedV2(['ROSTER_READBACK_MISMATCH'], freshProposal);
   }
 }
 
@@ -880,6 +1056,42 @@ async function currentInventory(
   }
   if (options.inventory !== undefined) return normalizeRosterInventory(options.inventory);
   return await resolveRosterSetupInventoryFromContext({ ctx: setupContext(ctx), scope: request.scope });
+}
+
+async function rebuildCustomProposalForSave(input: {
+  readonly request: RosterToolSaveCustomRequestV2;
+  readonly ctx: unknown;
+  readonly options: CreateRosterSetupToolOptions;
+  readonly proposal: RememberedCustomProposal;
+}): Promise<RememberedCustomProposal | null> {
+  try {
+    const inventory = await currentInventory(input.request, input.ctx, input.options);
+    const built = validateCustomRosterIntentSetupRequest({
+      request: input.proposal.intent_request,
+      inventory,
+      scope: input.request.scope,
+    });
+    if (built.request === null || built.roster === null || built.roster_bytes === null) return null;
+    const inventorySha256 = normalizeRosterInventory(inventory).inventory_sha256;
+    const customProposal = customProposalForValidation({ inventory_sha256: inventorySha256, roster: built.roster, validation: built.validation, manifest_sha256: built.qualification_manifest_sha256 });
+    const candidateSet = customCandidateSetForValidation({ inventory, roster: built.roster, custom_proposal: customProposal });
+    const approvalBinding = customApprovalBindingForValidation(customProposal, built.validation, built.roster, built.qualification_manifest_sha256);
+    return Object.freeze({
+      request: input.proposal.request,
+      intent_request: built.request,
+      inventory_sha256: inventorySha256,
+      candidate_set: candidateSet,
+      custom_proposal: customProposal,
+      validation_result: built.validation,
+      roster: built.roster,
+      roster_bytes: built.roster_bytes,
+      qualification_manifest: built.qualification_manifest,
+      manifest_sha256: built.qualification_manifest_sha256,
+      approval_binding: approvalBinding,
+    });
+  } catch {
+    return null;
+  }
 }
 
 async function currentProposal(
@@ -979,9 +1191,11 @@ function buildCustomApprovalPresentation(proposal: RememberedCustomProposal): Cu
     default_roster_revision: proposal.roster.roster_revision,
     default_roster_sha256: proposal.roster.roster_sha256,
     original_command: proposal.request.original_command,
+    custom_proposal_sha256: proposal.custom_proposal.proposal_sha256,
     validation_result_sha256: proposal.validation_result.result_sha256,
     roster_sha256: proposal.roster.roster_sha256,
     manifest_sha256: proposal.manifest_sha256,
+    approval_sha256: proposal.approval_binding.approval_sha256,
   };
   const presentationText = renderCustomRosterSetupApprovalPresentation(input);
   const preimage = {
@@ -993,9 +1207,11 @@ function buildCustomApprovalPresentation(proposal: RememberedCustomProposal): Cu
     default_roster_revision: input.default_roster_revision,
     default_roster_sha256: input.default_roster_sha256,
     original_command: input.original_command,
+    custom_proposal_sha256: input.custom_proposal_sha256,
     validation_result_sha256: input.validation_result_sha256,
     roster_sha256: input.roster_sha256,
     manifest_sha256: input.manifest_sha256,
+    approval_sha256: input.approval_sha256,
     presentation_text: presentationText,
   };
   return Object.freeze({ schema_version: REQUEST_SCHEMA_V2, ...input, presentation_text: presentationText, presentation_sha256: canonicalSha256(preimage) });
@@ -1024,9 +1240,11 @@ export function renderCustomRosterSetupApprovalPresentation(input: ControllerCus
     `default_roster_id: ${input.default_roster_id}`,
     `default_roster_revision: ${String(input.default_roster_revision)}`,
     `default_roster_sha256: ${input.default_roster_sha256}`,
+    `custom_proposal_sha256: ${input.custom_proposal_sha256}`,
     `validation_result_sha256: ${input.validation_result_sha256}`,
     `roster_sha256: ${input.roster_sha256}`,
     `manifest_sha256: ${input.manifest_sha256 ?? 'null'}`,
+    `approval_sha256: ${input.approval_sha256}`,
     `original_command: ${input.original_command}`,
   ].join('\n');
 }
@@ -1043,19 +1261,16 @@ function isBoundedNonEmptyHostInput(text: string): boolean {
 function customCandidateSetForValidation(input: {
   readonly inventory: RosterInventory;
   readonly roster: Roster;
-  readonly validation: CustomRosterIntentValidationResult['validation'];
-  readonly manifest_sha256: Digest | null;
+  readonly custom_proposal: CustomRosterProposalV2;
 }): RosterCandidateSet {
-  const candidate = customCandidateForValidation(input.roster, input.validation, input.manifest_sha256);
+  const candidate = customV1CandidateForProposal(input.roster, input.custom_proposal);
   const withoutIdAndHash = {
     schema_version: 'autopilot.roster_candidate_set.v1' as const,
     scope: input.roster.scope,
     inventory_sha256: normalizeRosterInventory(input.inventory).inventory_sha256,
     recipe_registry_sha256: canonicalSha256({
-      schema_version: 'autopilot.custom_roster_candidate_set_authority.v2',
-      validation_result_sha256: input.validation.result_sha256,
-      roster_sha256: input.roster.roster_sha256,
-      manifest_sha256: input.manifest_sha256,
+      schema_version: 'autopilot.custom_roster_candidate_set_reference.v2',
+      custom_proposal_sha256: input.custom_proposal.proposal_sha256,
     }),
     candidates: [candidate],
     recommended_profile_id: input.roster.profile_id,
@@ -1066,11 +1281,11 @@ function customCandidateSetForValidation(input: {
     ...withoutIdAndHash,
     candidate_set_id: `candidate-set-${candidateSetIdHash}`,
   };
-  return { ...withoutHash, candidate_set_sha256: canonicalSha256(withoutHash) };
+  const candidateSet = { ...withoutHash, candidate_set_sha256: canonicalSha256(withoutHash) };
+  return parseAutopilotRosterContract('autopilot.roster_candidate_set.v1', candidateSet) as unknown as RosterCandidateSet;
 }
 
-function customCandidateForValidation(roster: Roster, validation: CustomRosterIntentValidationResult['validation'], manifestSha256: Digest | null): RosterCandidate {
-  const certificationOk = validation.ok === true && validation.status === 'certified';
+function customV1CandidateForProposal(roster: Roster, proposal: CustomRosterProposalV2): RosterCandidate {
   const routePolicyId = roster.route_policy_ids.length === 1 ? roster.route_policy_ids[0] ?? 'custom-roster-route-v1' : 'custom-roster-mixed-v1';
   const withoutHash = {
     schema_version: 'autopilot.roster_candidate.v1' as const,
@@ -1086,30 +1301,87 @@ function customCandidateForValidation(roster: Roster, validation: CustomRosterIn
     roster_revision: roster.roster_revision,
     assignment_set_sha256: roster.assignment_set_sha256,
     roster_sha256: roster.roster_sha256,
-    candidate_state: certificationOk ? 'w4-certified-ready' as const : 'qualification-required' as const,
-    launch_readiness: certificationOk ? 'w4-certified-ready' as const : 'not-ready-until-w4' as const,
-    qualification_state: certificationOk ? 'w4-certified-ready' as const : 'qualification-required' as const,
+    candidate_state: 'qualification-required' as const,
+    launch_readiness: 'not-ready-until-w4' as const,
+    qualification_state: 'qualification-required' as const,
     non_certifying_seed: false,
     synthetic_fixture_ready_only: false,
     converges_with: null as string | null,
-    diagnostic_codes: certificationOk ? [] : ['ROSTER_QUALIFICATION_REQUIRED' as const],
-    readiness_authority: certificationOk ? 'custom-roster-registry.v1' as const : null,
+    diagnostic_codes: ['ROSTER_QUALIFICATION_REQUIRED' as const],
+    readiness_authority: null,
     provider_pack_id: null,
     certification_manifest_id: null,
-    certification_manifest_sha256: manifestSha256,
-    recipe_sha256: canonicalSha256({ schema_version: 'autopilot.custom_roster_recipe_binding.v2', roster_sha256: roster.roster_sha256, validation_result_sha256: validation.result_sha256 }),
+    certification_manifest_sha256: proposal.manifest_sha256,
+    recipe_sha256: canonicalSha256({ schema_version: 'autopilot.custom_roster_recipe_reference.v2', custom_proposal_sha256: proposal.proposal_sha256 }),
     route_policy_sha256: canonicalSha256({ schema_version: 'autopilot.custom_roster_route_policy_set.v2', route_policy_ids: roster.route_policy_ids }),
   } satisfies Omit<RosterCandidate, 'candidate_sha256'>;
   return { ...withoutHash, candidate_sha256: canonicalSha256(withoutHash) };
 }
 
-function customApprovalBindingForValidation(validation: CustomRosterIntentValidationResult['validation'], roster: Roster, manifestSha256: Digest | null): CustomRosterApprovalBindingV2 {
-  return Object.freeze({
-    schema_version: CUSTOM_APPROVAL_BINDING_SCHEMA_V2,
+function customProposalForValidation(input: {
+  readonly inventory_sha256: Digest;
+  readonly roster: Roster;
+  readonly validation: CustomRosterIntentValidationResult['validation'];
+  readonly manifest_sha256: Digest | null;
+}): CustomRosterProposalV2 {
+  const customCandidate = customCandidateV2ForValidation(input);
+  const withoutHash = {
+    schema_version: CUSTOM_PROPOSAL_SCHEMA_V2,
+    proposal_id: `custom-proposal-${input.roster.roster_sha256.slice('sha256:'.length, 'sha256:'.length + 16)}`,
+    scope: input.roster.scope,
+    inventory_sha256: input.inventory_sha256,
+    validation_result_sha256: input.validation.result_sha256,
+    roster_sha256: input.roster.roster_sha256,
+    manifest_sha256: input.manifest_sha256,
+    custom_candidate: customCandidate,
+  } satisfies Omit<CustomRosterProposalV2, 'proposal_sha256'>;
+  return Object.freeze({ ...withoutHash, proposal_sha256: canonicalSha256(withoutHash) });
+}
+
+function customCandidateV2ForValidation(input: {
+  readonly inventory_sha256: Digest;
+  readonly roster: Roster;
+  readonly validation: CustomRosterIntentValidationResult['validation'];
+  readonly manifest_sha256: Digest | null;
+}): CustomRosterCandidateV2 {
+  const withoutHash = {
+    schema_version: CUSTOM_CANDIDATE_SCHEMA_V2,
+    candidate_id: `${input.roster.profile_id}-${input.roster.roster_id}`.slice(0, 96),
+    scope: input.roster.scope,
+    profile_id: input.roster.profile_id,
+    roster_id: input.roster.roster_id,
+    roster_revision: input.roster.roster_revision,
+    assignment_set_sha256: input.roster.assignment_set_sha256,
+    roster_sha256: input.roster.roster_sha256,
+    inventory_sha256: input.inventory_sha256,
+    validation_result_sha256: input.validation.result_sha256,
+    manifest_sha256: input.manifest_sha256,
+    validation_status: input.validation.status,
+    certification_status: input.validation.certification_status,
+    diagnostic_codes: uniqueSortedStrings(input.validation.diagnostics.map((diagnostic) => diagnostic.code)),
+  } satisfies Omit<CustomRosterCandidateV2, 'custom_candidate_sha256'>;
+  return Object.freeze({ ...withoutHash, custom_candidate_sha256: canonicalSha256(withoutHash) });
+}
+
+function customApprovalBindingForValidation(proposal: CustomRosterProposalV2, validation: CustomRosterIntentValidationResult['validation'], roster: Roster, manifestSha256: Digest | null): CustomRosterApprovalBindingV2 {
+  const approvalSha256 = customApprovalSha256({
+    custom_proposal_sha256: proposal.proposal_sha256,
     validation_result_sha256: validation.result_sha256,
     roster_sha256: roster.roster_sha256,
     manifest_sha256: manifestSha256,
   });
+  return Object.freeze({
+    schema_version: CUSTOM_APPROVAL_BINDING_SCHEMA_V2,
+    custom_proposal_sha256: proposal.proposal_sha256,
+    validation_result_sha256: validation.result_sha256,
+    roster_sha256: roster.roster_sha256,
+    manifest_sha256: manifestSha256,
+    approval_sha256: approvalSha256,
+  });
+}
+
+function customApprovalSha256(input: Omit<CustomRosterApprovalV2, 'schema_version' | 'approval_sha256'>): Digest {
+  return canonicalSha256({ schema_version: CUSTOM_APPROVAL_SCHEMA_V2, ...input });
 }
 
 function customSaveReceiptV2(input: {
@@ -1120,9 +1392,11 @@ function customSaveReceiptV2(input: {
 }): CustomRosterSaveReceiptV2 {
   const withoutHash = {
     schema_version: CUSTOM_SAVE_RECEIPT_SCHEMA_V2,
+    custom_proposal_sha256: input.proposal.custom_proposal.proposal_sha256,
     validation_result_sha256: input.proposal.validation_result.result_sha256,
     roster_sha256: input.proposal.roster.roster_sha256,
     manifest_sha256: input.proposal.manifest_sha256,
+    approval_sha256: input.proposal.approval_binding.approval_sha256,
     storage_receipt_sha256: input.receipt.receipt_sha256,
     config_sha256: input.receipt.config_sha256,
     custom_authority_path: input.saved.custom_authority_path ?? null,
@@ -1170,6 +1444,7 @@ function saveBlockedV2(codes: readonly string[], proposal: RememberedCustomPropo
     ok: false,
     status: 'blocked',
     candidate_set: null,
+    custom_proposal: proposal?.custom_proposal ?? null,
     custom_validation: proposal?.validation_result ?? null,
     custom_roster: null,
     approval_binding: proposal?.approval_binding ?? null,
@@ -1204,6 +1479,7 @@ function saveFailedV2(codes: readonly string[], proposal: RememberedCustomPropos
     ok: false,
     status: 'failed',
     candidate_set: null,
+    custom_proposal: proposal?.custom_proposal ?? null,
     custom_validation: proposal?.validation_result ?? null,
     custom_roster: null,
     approval_binding: proposal?.approval_binding ?? null,
@@ -1290,6 +1566,7 @@ function normalizeSaveCapabilityResultV2(
       ok: true,
       status: 'saved',
       candidate_set: null,
+      custom_proposal: proposal.custom_proposal,
       custom_validation: proposal.validation_result,
       custom_roster: null,
       approval_binding: proposal.approval_binding,
@@ -1308,6 +1585,7 @@ function normalizeSaveCapabilityResultV2(
     ok: false,
     status,
     candidate_set: null,
+    custom_proposal: proposal.custom_proposal,
     custom_validation: proposal.validation_result,
     custom_roster: null,
     approval_binding: proposal.approval_binding,
@@ -1372,9 +1650,11 @@ function approvalSnapshotFromPresentation(presentation: AnyApprovalPresentation,
 function customApprovalBindingFromPresentation(presentation: CustomApprovalPresentation): CustomRosterApprovalBindingV2 {
   return Object.freeze({
     schema_version: CUSTOM_APPROVAL_BINDING_SCHEMA_V2,
+    custom_proposal_sha256: presentation.custom_proposal_sha256,
     validation_result_sha256: presentation.validation_result_sha256,
     roster_sha256: presentation.roster_sha256,
     manifest_sha256: presentation.manifest_sha256,
+    approval_sha256: presentation.approval_sha256,
   });
 }
 
@@ -1427,16 +1707,39 @@ function approvalSnapshotMatchesCandidateSet(approval: ApprovalSnapshot, candida
 
 function sameCustomApprovalBinding(left: CustomRosterApprovalBindingV2, right: CustomRosterApprovalBindingV2): boolean {
   return left.schema_version === right.schema_version &&
+    left.custom_proposal_sha256 === right.custom_proposal_sha256 &&
     left.validation_result_sha256 === right.validation_result_sha256 &&
     left.roster_sha256 === right.roster_sha256 &&
-    left.manifest_sha256 === right.manifest_sha256;
+    left.manifest_sha256 === right.manifest_sha256 &&
+    left.approval_sha256 === right.approval_sha256;
 }
 
 function sameCustomApprovalRequestBinding(left: CustomRosterApprovalV2, right: CustomRosterApprovalBindingV2): boolean {
   return left.schema_version === CUSTOM_APPROVAL_SCHEMA_V2 &&
+    left.custom_proposal_sha256 === right.custom_proposal_sha256 &&
     left.validation_result_sha256 === right.validation_result_sha256 &&
     left.roster_sha256 === right.roster_sha256 &&
-    left.manifest_sha256 === right.manifest_sha256;
+    left.manifest_sha256 === right.manifest_sha256 &&
+    left.approval_sha256 === right.approval_sha256 &&
+    left.approval_sha256 === customApprovalSha256({
+      custom_proposal_sha256: left.custom_proposal_sha256,
+      validation_result_sha256: left.validation_result_sha256,
+      roster_sha256: left.roster_sha256,
+      manifest_sha256: left.manifest_sha256,
+    });
+}
+
+function sameRememberedCustomProposal(left: RememberedCustomProposal, right: RememberedCustomProposal): boolean {
+  return left.inventory_sha256 === right.inventory_sha256 &&
+    left.candidate_set.candidate_set_sha256 === right.candidate_set.candidate_set_sha256 &&
+    left.custom_proposal.proposal_sha256 === right.custom_proposal.proposal_sha256 &&
+    canonicalSha256(left.custom_proposal) === canonicalSha256(right.custom_proposal) &&
+    left.validation_result.result_sha256 === right.validation_result.result_sha256 &&
+    canonicalSha256(left.validation_result) === canonicalSha256(right.validation_result) &&
+    left.roster.roster_sha256 === right.roster.roster_sha256 &&
+    sameBytes(left.roster_bytes, right.roster_bytes) &&
+    left.manifest_sha256 === right.manifest_sha256 &&
+    sameCustomApprovalBinding(left.approval_binding, right.approval_binding);
 }
 
 function resultForFailure(action: ResultAction, status: Extract<ResultStatus, 'blocked' | 'failed'>, codes: readonly string[]): RosterToolResult {
@@ -1461,6 +1764,7 @@ function resultForFailureV2(action: ResultActionV2, status: Extract<ResultStatus
     ok: false,
     status,
     candidate_set: null,
+    custom_proposal: null,
     custom_validation: null,
     custom_roster: null,
     approval_binding: null,
@@ -1500,6 +1804,12 @@ function materializeResult(preimage: RosterToolResultPreimage): RosterToolResult
 }
 
 function materializeResultV2(preimage: RosterToolResultV2Preimage): RosterToolResultV2 {
+  if (preimage.candidate_set !== null) {
+    assertAutopilotRosterContract('autopilot.roster_candidate_set.v1', preimage.candidate_set);
+  }
+  if (preimage.custom_proposal !== null && parseCustomRosterProposalV2(preimage.custom_proposal) === null) {
+    throw new Error('invalid custom roster proposal v2');
+  }
   const normalizedPreimage = {
     ...preimage,
     diagnostics: sortDiagnostics(preimage.diagnostics),
@@ -1524,9 +1834,11 @@ function boundedResultText(result: AnyRosterToolResult): string {
     candidate_set_sha256: result.candidate_set?.candidate_set_sha256 ?? null,
     candidate_count: result.candidate_set?.candidates.length ?? 0,
     candidate_roster_sha256s: result.candidate_set?.candidates.map((candidate) => candidate.roster_sha256).slice(0, 16) ?? [],
+    custom_proposal_sha256: result.schema_version === RESULT_SCHEMA_V2 ? result.custom_proposal?.proposal_sha256 ?? null : null,
     custom_validation_result_sha256: result.schema_version === RESULT_SCHEMA_V2 ? result.custom_validation?.result_sha256 ?? null : null,
     custom_roster_sha256: result.schema_version === RESULT_SCHEMA_V2 ? result.custom_roster?.roster_sha256 ?? result.approval_binding?.roster_sha256 ?? null : null,
     custom_manifest_sha256: result.schema_version === RESULT_SCHEMA_V2 ? result.approval_binding?.manifest_sha256 ?? null : null,
+    custom_approval_sha256: result.schema_version === RESULT_SCHEMA_V2 ? result.approval_binding?.approval_sha256 ?? null : null,
     receipt_sha256: result.receipt?.receipt_sha256 ?? null,
     custom_receipt_sha256: result.schema_version === RESULT_SCHEMA_V2 ? result.custom_receipt?.receipt_sha256 ?? null : null,
     diagnostics: result.diagnostics.map((diagnostic) => diagnostic.code),
@@ -1621,11 +1933,29 @@ function parseRequestV2(record: Readonly<Record<string, unknown>>): ParseRequest
     return { ok: true, request: { schema_version: REQUEST_SCHEMA_V2, action, ...base, custom_roster_request: record['custom_roster_request'], custom_roster_approval: null } };
   }
   if (action === 'reject') {
-    if (record['custom_roster_request'] !== null || record['custom_roster_approval'] !== null) return parseFailure('inspect', 'reject', false, REQUEST_SCHEMA_V2);
+    if (
+      base.approval_token !== null ||
+      base.candidate_set_sha256 !== null ||
+      base.approved_roster_sha256s.length !== 0 ||
+      base.default_roster_id !== null ||
+      base.default_roster_revision !== null ||
+      base.default_roster_sha256 !== null ||
+      record['custom_roster_request'] !== null ||
+      record['custom_roster_approval'] !== null
+    ) return parseFailure('inspect', 'reject', false, REQUEST_SCHEMA_V2);
     return { ok: true, request: { schema_version: REQUEST_SCHEMA_V2, action, ...base, custom_roster_request: null, custom_roster_approval: null } };
   }
   const approval = parseCustomApprovalV2(record['custom_roster_approval']);
-  if (record['custom_roster_request'] !== null || approval === null || base.approval_token === null) return parseFailure('inspect', 'save', false, REQUEST_SCHEMA_V2);
+  if (
+    record['custom_roster_request'] !== null ||
+    approval === null ||
+    base.approval_token === null ||
+    base.candidate_set_sha256 === null ||
+    base.approved_roster_sha256s.length === 0 ||
+    base.default_roster_id === null ||
+    base.default_roster_revision === null ||
+    base.default_roster_sha256 === null
+  ) return parseFailure('inspect', 'save', false, REQUEST_SCHEMA_V2);
   return { ok: true, request: { schema_version: REQUEST_SCHEMA_V2, action, ...base, custom_roster_request: null, custom_roster_approval: approval } };
 }
 
@@ -1663,16 +1993,100 @@ function parseBaseFields(record: Readonly<Record<string, unknown>>): Omit<Roster
   };
 }
 
-function parseCustomApprovalV2(value: unknown): CustomRosterApprovalV2 | null {
+function parseCustomCandidateV2(value: unknown): CustomRosterCandidateV2 | null {
   if (!isPlainRecord(value)) return null;
-  const expected = new Set(['schema_version', 'validation_result_sha256', 'roster_sha256', 'manifest_sha256']);
+  const expected = new Set(['schema_version', 'candidate_id', 'scope', 'profile_id', 'roster_id', 'roster_revision', 'assignment_set_sha256', 'roster_sha256', 'inventory_sha256', 'validation_result_sha256', 'manifest_sha256', 'validation_status', 'certification_status', 'diagnostic_codes', 'custom_candidate_sha256']);
   const keys = Object.keys(value);
   if (keys.length !== expected.size || !keys.every((key) => expected.has(key))) return null;
+  const assignmentSet = digestField(value['assignment_set_sha256']);
+  const rosterSha = digestField(value['roster_sha256']);
+  const inventorySha = digestField(value['inventory_sha256']);
+  const validationSha = digestField(value['validation_result_sha256']);
+  const manifestSha = nullableDigest(value['manifest_sha256']);
+  const candidateSha = digestField(value['custom_candidate_sha256']);
+  const diagnostics = stringArray(value['diagnostic_codes'], /^ROSTER_[A-Z0-9_]+$/u);
+  if (
+    value['schema_version'] !== CUSTOM_CANDIDATE_SCHEMA_V2 ||
+    typeof value['candidate_id'] !== 'string' || value['candidate_id'].length === 0 || value['candidate_id'].length > 96 ||
+    scopeField(value['scope']) === null ||
+    typeof value['profile_id'] !== 'string' || !ROSTER_PROFILES.some((profile) => profile.profile_id === value['profile_id']) ||
+    typeof value['roster_id'] !== 'string' || !/^[a-z][a-z0-9-]{0,95}$/u.test(value['roster_id']) ||
+    typeof value['roster_revision'] !== 'number' || !Number.isSafeInteger(value['roster_revision']) || value['roster_revision'] < 1 ||
+    assignmentSet === null || rosterSha === null || inventorySha === null || validationSha === null || manifestSha === undefined || candidateSha === null ||
+    !isCustomValidationStatus(value['validation_status']) ||
+    !isCustomCertificationStatus(value['certification_status']) ||
+    diagnostics === null
+  ) return null;
+  const withoutHash = {
+    schema_version: CUSTOM_CANDIDATE_SCHEMA_V2,
+    candidate_id: value['candidate_id'],
+    scope: scopeField(value['scope']) as RosterScope,
+    profile_id: value['profile_id'],
+    roster_id: value['roster_id'],
+    roster_revision: value['roster_revision'],
+    assignment_set_sha256: assignmentSet,
+    roster_sha256: rosterSha,
+    inventory_sha256: inventorySha,
+    validation_result_sha256: validationSha,
+    manifest_sha256: manifestSha,
+    validation_status: value['validation_status'],
+    certification_status: value['certification_status'],
+    diagnostic_codes: diagnostics,
+  } satisfies Omit<CustomRosterCandidateV2, 'custom_candidate_sha256'>;
+  if (canonicalSha256(withoutHash) !== candidateSha) return null;
+  return Object.freeze({ ...withoutHash, custom_candidate_sha256: candidateSha });
+}
+
+export function parseCustomRosterProposalV2(value: unknown): CustomRosterProposalV2 | null {
+  if (!isPlainRecord(value)) return null;
+  const expected = new Set(['schema_version', 'proposal_id', 'scope', 'inventory_sha256', 'validation_result_sha256', 'roster_sha256', 'manifest_sha256', 'custom_candidate', 'proposal_sha256']);
+  const keys = Object.keys(value);
+  if (keys.length !== expected.size || !keys.every((key) => expected.has(key))) return null;
+  const inventorySha = digestField(value['inventory_sha256']);
+  const validationSha = digestField(value['validation_result_sha256']);
+  const rosterSha = digestField(value['roster_sha256']);
+  const manifestSha = nullableDigest(value['manifest_sha256']);
+  const proposalSha = digestField(value['proposal_sha256']);
+  const customCandidate = parseCustomCandidateV2(value['custom_candidate']);
+  const scope = scopeField(value['scope']);
+  if (
+    value['schema_version'] !== CUSTOM_PROPOSAL_SCHEMA_V2 ||
+    typeof value['proposal_id'] !== 'string' || !/^custom-proposal-[a-f0-9]{16}$/u.test(value['proposal_id']) ||
+    scope === null || inventorySha === null || validationSha === null || rosterSha === null || manifestSha === undefined || proposalSha === null || customCandidate === null ||
+    customCandidate.scope !== scope ||
+    customCandidate.inventory_sha256 !== inventorySha ||
+    customCandidate.validation_result_sha256 !== validationSha ||
+    customCandidate.roster_sha256 !== rosterSha ||
+    customCandidate.manifest_sha256 !== manifestSha
+  ) return null;
+  const withoutHash = {
+    schema_version: CUSTOM_PROPOSAL_SCHEMA_V2,
+    proposal_id: value['proposal_id'],
+    scope,
+    inventory_sha256: inventorySha,
+    validation_result_sha256: validationSha,
+    roster_sha256: rosterSha,
+    manifest_sha256: manifestSha,
+    custom_candidate: customCandidate,
+  } satisfies Omit<CustomRosterProposalV2, 'proposal_sha256'>;
+  if (canonicalSha256(withoutHash) !== proposalSha) return null;
+  return Object.freeze({ ...withoutHash, proposal_sha256: proposalSha });
+}
+
+function parseCustomApprovalV2(value: unknown): CustomRosterApprovalV2 | null {
+  if (!isPlainRecord(value)) return null;
+  const expected = new Set(['schema_version', 'custom_proposal_sha256', 'validation_result_sha256', 'roster_sha256', 'manifest_sha256', 'approval_sha256']);
+  const keys = Object.keys(value);
+  if (keys.length !== expected.size || !keys.every((key) => expected.has(key))) return null;
+  const customProposal = digestField(value['custom_proposal_sha256']);
   const validation = digestField(value['validation_result_sha256']);
   const roster = digestField(value['roster_sha256']);
   const manifest = nullableDigest(value['manifest_sha256']);
-  if (value['schema_version'] !== CUSTOM_APPROVAL_SCHEMA_V2 || validation === null || roster === null || manifest === undefined) return null;
-  return Object.freeze({ schema_version: CUSTOM_APPROVAL_SCHEMA_V2, validation_result_sha256: validation, roster_sha256: roster, manifest_sha256: manifest });
+  const approval = digestField(value['approval_sha256']);
+  if (value['schema_version'] !== CUSTOM_APPROVAL_SCHEMA_V2 || customProposal === null || validation === null || roster === null || manifest === undefined || approval === null) return null;
+  const parsed = Object.freeze({ schema_version: CUSTOM_APPROVAL_SCHEMA_V2, custom_proposal_sha256: customProposal, validation_result_sha256: validation, roster_sha256: roster, manifest_sha256: manifest, approval_sha256: approval });
+  if (parsed.approval_sha256 !== customApprovalSha256({ custom_proposal_sha256: customProposal, validation_result_sha256: validation, roster_sha256: roster, manifest_sha256: manifest })) return null;
+  return parsed;
 }
 
 function parseFailure(
@@ -1787,6 +2201,26 @@ function digestArrayField(value: unknown): readonly Digest[] | null {
   return output;
 }
 
+function stringArray(value: unknown, pattern: RegExp): readonly string[] | null {
+  if (!Array.isArray(value) || value.length > 64) return null;
+  const output: string[] = [];
+  for (const item of value) {
+    if (typeof item !== 'string' || !pattern.test(item)) return null;
+    output.push(item);
+  }
+  const sorted = [...output].sort((left, right) => left.localeCompare(right));
+  if (new Set(output).size !== output.length || !sameStrings(output, sorted)) return null;
+  return Object.freeze(output);
+}
+
+function isCustomValidationStatus(value: unknown): value is CustomRosterIntentValidationResult['validation']['status'] {
+  return value === 'failed' || value === 'blocked' || value === 'certified';
+}
+
+function isCustomCertificationStatus(value: unknown): value is CustomRosterIntentValidationResult['validation']['certification_status'] {
+  return value === 'absent' || value === 'invalid' || value === 'untrusted' || value === 'autopilot-certified';
+}
+
 function nullableRosterId(value: unknown): string | null | undefined {
   if (value === null) return null;
   if (typeof value === 'string' && /^[a-z][a-z0-9-]{0,95}$/u.test(value)) return value;
@@ -1814,6 +2248,14 @@ function nonNegativeInteger(value: number): number {
 
 function sameStrings(left: readonly string[], right: readonly string[]): boolean {
   return left.length === right.length && left.every((entry, index) => right[index] === entry);
+}
+
+function sameBytes(left: Uint8Array, right: Uint8Array): boolean {
+  if (left.byteLength !== right.byteLength) return false;
+  for (let index = 0; index < left.byteLength; index += 1) {
+    if (left[index] !== right[index]) return false;
+  }
+  return true;
 }
 
 function approvedRosterSha256sPreservePresentedOrder(presentedRosterSha256s: readonly Digest[], approvedRosterSha256s: readonly Digest[]): boolean {
