@@ -46,12 +46,22 @@ async function withTempDir<T>(run: (root: string) => Promise<T>): Promise<T> {
   }
 }
 
+function assertCloseTestDigest(value: string): asserts value is `sha256:${string}` {
+  assert.match(value, /^sha256:[a-f0-9]{64}$/u);
+}
+
+function closeTestDigest(hex: '9' | 'a' | 'b' | 'c' | 'd' | 'e' | 'f'): `sha256:${string}` {
+  const digest = `sha256:${hex.repeat(64)}`;
+  assertCloseTestDigest(digest);
+  return digest;
+}
+
 function closeTransitionRef(label: 'from' | 'to' | 'fork'): AutopilotSavedRosterRefV1 {
   return {
     roster_id: `${label}-close-roster`,
     roster_revision: 1,
-    roster_sha256: `sha256:${(label === 'from' ? 'a' : label === 'to' ? 'b' : 'e').repeat(64)}`,
-    assignment_set_sha256: `sha256:${(label === 'from' ? 'c' : label === 'to' ? 'd' : 'f').repeat(64)}`,
+    roster_sha256: closeTestDigest(label === 'from' ? 'a' : label === 'to' ? 'b' : 'e'),
+    assignment_set_sha256: closeTestDigest(label === 'from' ? 'c' : label === 'to' ? 'd' : 'f'),
     path: `/authority/${label}-close-roster.json`,
   };
 }
@@ -71,9 +81,9 @@ async function installCloseRosterSelection(input: {
       scope: 'user',
       roster_id: closeTransitionRef('from').roster_id,
       roster_revision: closeTransitionRef('from').roster_revision,
-      roster_sha256: closeTransitionRef('from').roster_sha256,
-      assignment_set_sha256: closeTransitionRef('from').assignment_set_sha256,
-      config_sha256: `sha256:${'9'.repeat(64)}`,
+      roster_sha256: closeTestDigest('a'),
+      assignment_set_sha256: closeTestDigest('c'),
+      config_sha256: closeTestDigest('9'),
     },
   });
   await mkdir(dirname(canonical.selection_path), { recursive: true, mode: 0o700 });

@@ -187,8 +187,11 @@ const ZERO_SHA: RosterSha256 = 'sha256:00000000000000000000000000000000000000000
 const UTC_MS_Z_PATTERN = /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$/u;
 const TRANSITION_ID_PATTERN = /^[a-z][a-z0-9-]{0,119}$/u;
 
+export type SavedRosterSelectionRef = Pick<PreRunSelection, 'scope' | 'roster_id' | 'roster_revision' | 'roster_sha256' | 'assignment_set_sha256'>;
+export type AuthenticatedPreRunSelectionRef = Pick<PreRunSelection, 'scope' | 'roster_id' | 'roster_revision' | 'roster_sha256' | 'assignment_set_sha256' | 'selection_sha256'>;
+
 export function savedRosterRefForSelection(input: {
-  readonly selection: Pick<PreRunSelection, 'scope' | 'roster_id' | 'roster_revision' | 'roster_sha256' | 'assignment_set_sha256'>;
+  readonly selection: SavedRosterSelectionRef;
   readonly stateRoot?: string | undefined;
   readonly trustedProjectRoot?: string | undefined;
 }): AutopilotSavedRosterRefV1 {

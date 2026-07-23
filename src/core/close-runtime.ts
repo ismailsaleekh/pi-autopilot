@@ -77,7 +77,7 @@ import { currentBootId } from './coordination/process-identity.ts';
 import { enforcePrivateAuthorityPath, ensurePrivateAuthorityDirectory } from './private-path.ts';
 import { parseValidationEvidence, validationCanCloseSourceWork, type AutopilotValidationEvidence } from './validation-staleness.ts';
 import { computeAutopilotRosterContractObjectHash, parseAutopilotReceiptV2, parseAutopilotUnitSpecV2 } from './roster/contracts.ts';
-import { consumeCommittedExistingRunRosterTransition, listCommittedExistingRunRosterTransitions, resolveCommittedExistingRunRosterTransitionChain, savedRosterRefForSelection, type AutopilotSavedRosterRefV1 } from './roster/transition.ts';
+import { consumeCommittedExistingRunRosterTransition, listCommittedExistingRunRosterTransitions, resolveCommittedExistingRunRosterTransitionChain, savedRosterRefForSelection, type AuthenticatedPreRunSelectionRef, type AutopilotSavedRosterRefV1 } from './roster/transition.ts';
 import { recoverRuntimeRosterSelection } from './roster/snapshot.ts';
 import { resolveRosterScopePaths, rosterRevisionPath } from './roster/paths.ts';
 import { readAuthorityFileIfPresent } from './roster/transaction.ts';
@@ -1386,7 +1386,7 @@ async function transitionHasFreshTargetValidation(input: {
   readonly terminal: { readonly id: string; readonly toRoster: AutopilotSavedRosterRefV1; readonly artifactSha256: `sha256:${string}` };
   readonly approvedAtMs: number;
   readonly targetRoster: ReturnType<typeof parseAutopilotRoster> | null;
-  readonly fromSelection: Parameters<typeof savedRosterRefForSelection>[0]['selection'];
+  readonly fromSelection: AuthenticatedPreRunSelectionRef;
 }): Promise<boolean> {
   for (const ref of input.validationRefs) {
     try {
@@ -1408,7 +1408,7 @@ async function transitionValidationEvidenceForMerge(input: {
   readonly terminal: { readonly id: string; readonly toRoster: AutopilotSavedRosterRefV1; readonly artifactSha256: `sha256:${string}` };
   readonly approvedAtMs: number;
   readonly targetRoster: ReturnType<typeof parseAutopilotRoster> | null;
-  readonly fromSelection: Parameters<typeof savedRosterRefForSelection>[0]['selection'];
+  readonly fromSelection: AuthenticatedPreRunSelectionRef;
 }): Promise<boolean> {
   for (const ref of input.validationRefs) {
     try {
@@ -1429,7 +1429,7 @@ async function validationEvidenceAuthenticatesTransitionTarget(input: {
   readonly evidence: AutopilotValidationEvidence;
   readonly terminal: { readonly id: string; readonly toRoster: AutopilotSavedRosterRefV1; readonly artifactSha256: `sha256:${string}` };
   readonly targetRoster: ReturnType<typeof parseAutopilotRoster> | null;
-  readonly fromSelection: Parameters<typeof savedRosterRefForSelection>[0]['selection'];
+  readonly fromSelection: AuthenticatedPreRunSelectionRef;
 }): Promise<boolean> {
   if (input.targetRoster === null) return false;
   const statusPath = join(input.context.active.runtime_root, input.evidence.status_ref);
@@ -1482,7 +1482,7 @@ async function findRuntimeUnitSpecForReceipt(runtimeRoot: string, receipt: Retur
 async function maxFromRosterAttemptForUnitForClose(input: {
   readonly runtimeRoot: string;
   readonly unitId: string;
-  readonly fromSelection: Parameters<typeof savedRosterRefForSelection>[0]['selection'];
+  readonly fromSelection: AuthenticatedPreRunSelectionRef;
 }): Promise<number> {
   let max = 0;
   for (const rootName of ['unit-specs', 'receipts']) {
