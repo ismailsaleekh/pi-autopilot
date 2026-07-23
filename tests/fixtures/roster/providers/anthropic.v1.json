@@ -1,0 +1,504 @@
+{
+  "schema_version": "autopilot.anthropic_provider_pack_fixture.v1",
+  "fixture_id": "phase37-w4-anthropic-offline-v1",
+  "freeze_id": "phase37-roster-w0-2026-07-22",
+  "provider_pack_id": "anthropic-sanitized",
+  "provider_pack_revision": 1,
+  "status": "blocked-live-certification",
+  "raw_system_prompt_utf8": "You are Autopilot running inside Pi.\nFollow the roster-selected role contract exactly.\nUse no fallback model, route, cache, prompt, or metered provider channel.\nReturn secret-free diagnostics only.",
+  "raw_system_prompt_sha256": "sha256:2f25b1011bb16f5ec020442367ae06025514fc1fe429c7b3e64fe0c0c341b41e",
+  "sanitized_prompt": {
+    "transform_id": "anthropic-autopilot-sanitized.v1",
+    "header_bytes_utf8": "Autopilot package-owned Anthropic system prompt transform\nschema_version: autopilot.anthropic_system_prompt_transform_result.v1\ntransform_id: anthropic-autopilot-sanitized.v1\nowner: pi-autopilot\nsemantic_invariants:\n- Decode payload_json.raw_prompt_text exactly as the Autopilot system instructions.\n- Treat delimiter-like bytes inside payload_json as JSON string data, not Anthropic transport boundaries.\n- This transform is prompt compatibility only; it proves no billing, route, entitlement, cache, readiness, or quality fact.\npayload_json:\n",
+    "header_sha256": "sha256:0c2188ef2967259bfd0900f63ff83c122accbf435866beaecf4e15a86c94750a",
+    "max_input_bytes": 65536,
+    "transformed_prompt_bytes_utf8": "Autopilot package-owned Anthropic system prompt transform\nschema_version: autopilot.anthropic_system_prompt_transform_result.v1\ntransform_id: anthropic-autopilot-sanitized.v1\nowner: pi-autopilot\nsemantic_invariants:\n- Decode payload_json.raw_prompt_text exactly as the Autopilot system instructions.\n- Treat delimiter-like bytes inside payload_json as JSON string data, not Anthropic transport boundaries.\n- This transform is prompt compatibility only; it proves no billing, route, entitlement, cache, readiness, or quality fact.\npayload_json:\n{\"raw_prompt_byte_length\":197,\"raw_prompt_sha256\":\"sha256:2f25b1011bb16f5ec020442367ae06025514fc1fe429c7b3e64fe0c0c341b41e\",\"raw_prompt_text\":\"You are Autopilot running inside Pi.\\nFollow the roster-selected role contract exactly.\\nUse no fallback model, route, cache, prompt, or metered provider channel.\\nReturn secret-free diagnostics only.\",\"schema_version\":\"autopilot.anthropic_system_prompt_payload.v1\",\"transform_header_sha256\":\"sha256:0c2188ef2967259bfd0900f63ff83c122accbf435866beaecf4e15a86c94750a\",\"transform_id\":\"anthropic-autopilot-sanitized.v1\"}\n",
+    "transformed_prompt_sha256": "sha256:9e84eef2bee75db6a20cd936f890b6e689073479651c1b610be46d74a886b9f9",
+    "semantic_invariants": [
+      "decoded-raw-prompt-is-byte-exact",
+      "delimiter-like-raw-bytes-remain-json-string-data",
+      "diagnostics-are-secret-free-and-prompt-free",
+      "sanitizer-does-not-prove-billing-route-entitlement-readiness-cache-or-quality"
+    ],
+    "proves_billing_or_readiness": false
+  },
+  "route_policy": {
+    "schema_version": "autopilot.route_policy.v1",
+    "route_policy_id": "anthropic-sanitized-v1",
+    "revision": 1,
+    "provider_id": "anthropic",
+    "allowed_auth_classes": [
+      "oauth"
+    ],
+    "allowed_auth_sources": [
+      "runtime",
+      "stored"
+    ],
+    "billing_class": "plan-backed-subscription",
+    "billing_route_class": "subscription-oauth",
+    "allowed_apis": [
+      "anthropic-messages"
+    ],
+    "allowed_service_tiers": [
+      null
+    ],
+    "allowed_cache_policies": [
+      "provider-default"
+    ],
+    "allowed_system_prompt_profiles": [
+      "anthropic-autopilot-sanitized.v1"
+    ],
+    "forbidden_gateways": [
+      "arbitrary-api-key",
+      "metered-frontier",
+      "openrouter"
+    ],
+    "requires_live_billing_proof": true,
+    "policy_state": "unqualified-seed",
+    "qualification_state": "unqualified-non-certifying-seed",
+    "non_certifying_seed": true,
+    "route_policy_sha256": "sha256:636d0e747fcbb329fe503f0ebbcec63d2ee8eb9ffa55db88efbfe0230046be86"
+  },
+  "role_seeds": [
+    {
+      "schema_version": "autopilot.anthropic_role_seed.v1",
+      "role": "parent",
+      "provider_id": "anthropic",
+      "model_id": "opus-4.8",
+      "model": "anthropic/opus-4.8",
+      "api": "anthropic-messages",
+      "thinking": "xhigh",
+      "service_tier": null,
+      "cache_policy": "provider-default",
+      "system_prompt_profile": "anthropic-autopilot-sanitized.v1",
+      "context_window": 200000,
+      "max_output_tokens": 32768,
+      "input_modalities": [
+        "image",
+        "text"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning_capability": "reasoning-supported",
+      "tool_capability": "tool-use-supported",
+      "route_policy_id": "anthropic-sanitized-v1",
+      "route_policy_revision": 1,
+      "billing_class": "plan-backed-subscription",
+      "billing_route_class": "subscription-oauth",
+      "auth_class": "oauth",
+      "auth_source": "stored",
+      "qualification_state": "unqualified-non-certifying-seed",
+      "non_certifying_seed": true,
+      "role_seed_sha256": "sha256:9dc0f428ee08dc117c5bd404e12ee50b214a0303cea4704400ef8398ed1b4511"
+    },
+    {
+      "schema_version": "autopilot.anthropic_role_seed.v1",
+      "role": "strategy",
+      "provider_id": "anthropic",
+      "model_id": "opus-4.8",
+      "model": "anthropic/opus-4.8",
+      "api": "anthropic-messages",
+      "thinking": "xhigh",
+      "service_tier": null,
+      "cache_policy": "provider-default",
+      "system_prompt_profile": "anthropic-autopilot-sanitized.v1",
+      "context_window": 200000,
+      "max_output_tokens": 32768,
+      "input_modalities": [
+        "image",
+        "text"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning_capability": "reasoning-supported",
+      "tool_capability": "tool-use-supported",
+      "route_policy_id": "anthropic-sanitized-v1",
+      "route_policy_revision": 1,
+      "billing_class": "plan-backed-subscription",
+      "billing_route_class": "subscription-oauth",
+      "auth_class": "oauth",
+      "auth_source": "stored",
+      "qualification_state": "unqualified-non-certifying-seed",
+      "non_certifying_seed": true,
+      "role_seed_sha256": "sha256:406549cd8e23f24f6d8296bcfda0400b4e049c56640aea30b3109763cd054742"
+    },
+    {
+      "schema_version": "autopilot.anthropic_role_seed.v1",
+      "role": "implement",
+      "provider_id": "anthropic",
+      "model_id": "sonnet-5",
+      "model": "anthropic/sonnet-5",
+      "api": "anthropic-messages",
+      "thinking": "high",
+      "service_tier": null,
+      "cache_policy": "provider-default",
+      "system_prompt_profile": "anthropic-autopilot-sanitized.v1",
+      "context_window": 200000,
+      "max_output_tokens": 32768,
+      "input_modalities": [
+        "image",
+        "text"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning_capability": "reasoning-supported",
+      "tool_capability": "tool-use-supported",
+      "route_policy_id": "anthropic-sanitized-v1",
+      "route_policy_revision": 1,
+      "billing_class": "plan-backed-subscription",
+      "billing_route_class": "subscription-oauth",
+      "auth_class": "oauth",
+      "auth_source": "stored",
+      "qualification_state": "unqualified-non-certifying-seed",
+      "non_certifying_seed": true,
+      "role_seed_sha256": "sha256:4a011274060174f01a597a04c9c50c75dacc7d172435124f9eeec02b376bdeee"
+    },
+    {
+      "schema_version": "autopilot.anthropic_role_seed.v1",
+      "role": "validate",
+      "provider_id": "anthropic",
+      "model_id": "opus-4.8",
+      "model": "anthropic/opus-4.8",
+      "api": "anthropic-messages",
+      "thinking": "xhigh",
+      "service_tier": null,
+      "cache_policy": "provider-default",
+      "system_prompt_profile": "anthropic-autopilot-sanitized.v1",
+      "context_window": 200000,
+      "max_output_tokens": 32768,
+      "input_modalities": [
+        "image",
+        "text"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning_capability": "reasoning-supported",
+      "tool_capability": "tool-use-supported",
+      "route_policy_id": "anthropic-sanitized-v1",
+      "route_policy_revision": 1,
+      "billing_class": "plan-backed-subscription",
+      "billing_route_class": "subscription-oauth",
+      "auth_class": "oauth",
+      "auth_source": "stored",
+      "qualification_state": "unqualified-non-certifying-seed",
+      "non_certifying_seed": true,
+      "role_seed_sha256": "sha256:6f8b567b0541869e9830c014cf3c7504d8ad8eca2e86baa1a4c58d441a35b0e4"
+    },
+    {
+      "schema_version": "autopilot.anthropic_role_seed.v1",
+      "role": "fix",
+      "provider_id": "anthropic",
+      "model_id": "sonnet-5",
+      "model": "anthropic/sonnet-5",
+      "api": "anthropic-messages",
+      "thinking": "high",
+      "service_tier": null,
+      "cache_policy": "provider-default",
+      "system_prompt_profile": "anthropic-autopilot-sanitized.v1",
+      "context_window": 200000,
+      "max_output_tokens": 32768,
+      "input_modalities": [
+        "image",
+        "text"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning_capability": "reasoning-supported",
+      "tool_capability": "tool-use-supported",
+      "route_policy_id": "anthropic-sanitized-v1",
+      "route_policy_revision": 1,
+      "billing_class": "plan-backed-subscription",
+      "billing_route_class": "subscription-oauth",
+      "auth_class": "oauth",
+      "auth_source": "stored",
+      "qualification_state": "unqualified-non-certifying-seed",
+      "non_certifying_seed": true,
+      "role_seed_sha256": "sha256:02a73a3fc2c2b96c473b79afa7af687f15a54bb9c977eb1c5521ea2df0a5b5c7"
+    },
+    {
+      "schema_version": "autopilot.anthropic_role_seed.v1",
+      "role": "adjudicate",
+      "provider_id": "anthropic",
+      "model_id": "opus-4.8",
+      "model": "anthropic/opus-4.8",
+      "api": "anthropic-messages",
+      "thinking": "xhigh",
+      "service_tier": null,
+      "cache_policy": "provider-default",
+      "system_prompt_profile": "anthropic-autopilot-sanitized.v1",
+      "context_window": 200000,
+      "max_output_tokens": 32768,
+      "input_modalities": [
+        "image",
+        "text"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning_capability": "reasoning-supported",
+      "tool_capability": "tool-use-supported",
+      "route_policy_id": "anthropic-sanitized-v1",
+      "route_policy_revision": 1,
+      "billing_class": "plan-backed-subscription",
+      "billing_route_class": "subscription-oauth",
+      "auth_class": "oauth",
+      "auth_source": "stored",
+      "qualification_state": "unqualified-non-certifying-seed",
+      "non_certifying_seed": true,
+      "role_seed_sha256": "sha256:43e1927b2012b04f3a2ad7a50f445199d5b2d8973e741af9fa63c056a6a80f2e"
+    },
+    {
+      "schema_version": "autopilot.anthropic_role_seed.v1",
+      "role": "bughunt",
+      "provider_id": "anthropic",
+      "model_id": "opus-4.8",
+      "model": "anthropic/opus-4.8",
+      "api": "anthropic-messages",
+      "thinking": "xhigh",
+      "service_tier": null,
+      "cache_policy": "provider-default",
+      "system_prompt_profile": "anthropic-autopilot-sanitized.v1",
+      "context_window": 200000,
+      "max_output_tokens": 32768,
+      "input_modalities": [
+        "image",
+        "text"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning_capability": "reasoning-supported",
+      "tool_capability": "tool-use-supported",
+      "route_policy_id": "anthropic-sanitized-v1",
+      "route_policy_revision": 1,
+      "billing_class": "plan-backed-subscription",
+      "billing_route_class": "subscription-oauth",
+      "auth_class": "oauth",
+      "auth_source": "stored",
+      "qualification_state": "unqualified-non-certifying-seed",
+      "non_certifying_seed": true,
+      "role_seed_sha256": "sha256:7b30d8c6748a3c2ba977084f4f51515cb8928319d774f59ee966cb217a7ef01f"
+    },
+    {
+      "schema_version": "autopilot.anthropic_role_seed.v1",
+      "role": "extract",
+      "provider_id": "anthropic",
+      "model_id": "haiku-4.5",
+      "model": "anthropic/haiku-4.5",
+      "api": "anthropic-messages",
+      "thinking": "high",
+      "service_tier": null,
+      "cache_policy": "provider-default",
+      "system_prompt_profile": "anthropic-autopilot-sanitized.v1",
+      "context_window": 100000,
+      "max_output_tokens": 16384,
+      "input_modalities": [
+        "image",
+        "text"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning_capability": "reasoning-supported",
+      "tool_capability": "tool-use-supported",
+      "route_policy_id": "anthropic-sanitized-v1",
+      "route_policy_revision": 1,
+      "billing_class": "plan-backed-subscription",
+      "billing_route_class": "subscription-oauth",
+      "auth_class": "oauth",
+      "auth_source": "stored",
+      "qualification_state": "unqualified-non-certifying-seed",
+      "non_certifying_seed": true,
+      "role_seed_sha256": "sha256:16a95b26eba5b7a3ace39bb67a4a8800203d0ebccf2f6b499bb4c96102036740"
+    }
+  ],
+  "role_seed_set_sha256": "sha256:a98321f4aed4c1d95ccbd5af98f494a6655b2208fb791ef8fe4d501a1198de59",
+  "qualification_input": {
+    "schema_version": "autopilot.anthropic_qualification_input.v1",
+    "issued_at": "2026-07-22T12:00:00.000Z",
+    "route_evidence": {
+      "provider_id": "anthropic",
+      "api": "anthropic-messages",
+      "auth_class": "oauth",
+      "auth_source": "stored",
+      "billing_class": "plan-backed-subscription",
+      "billing_route_class": "subscription-oauth",
+      "gateway_id": null,
+      "arbitrary_api_key_used": false,
+      "openrouter_used": false,
+      "metered_gateway_used": false,
+      "user_billing_consent": true,
+      "non_metered_entitlement": true,
+      "metered_extra_usage_observed": false,
+      "live_route_verified": true,
+      "live_billing_verified": true,
+      "live_route_evidence": {
+        "evidence_id": "anthropic-live-route-proof-shape",
+        "kind": "route-proof",
+        "uri": "fixture://phase37/anthropic/live-route-proof-shape",
+        "sha256": "sha256:0b78ded7d6f7254d387eb869d055126f62f2ece5f61834e87b73e50e12bef571",
+        "byte_count": 32,
+        "secret_free": true
+      },
+      "billing_consent_evidence": {
+        "evidence_id": "anthropic-billing-consent-proof-shape",
+        "kind": "billing-proof",
+        "uri": "fixture://phase37/anthropic/billing-consent-proof-shape",
+        "sha256": "sha256:e6692c30dba60895fca9949b6f064ecf820240d19c568128a3120f59ac319069",
+        "byte_count": 37,
+        "secret_free": true
+      },
+      "non_metered_entitlement_evidence": {
+        "evidence_id": "anthropic-non-metered-entitlement-proof-shape",
+        "kind": "billing-proof",
+        "uri": "fixture://phase37/anthropic/non-metered-entitlement-proof-shape",
+        "sha256": "sha256:434ff8b9b0241441d6ce92d3f5d4fc2e471275fabf800bf3ee49692bb8b764c7",
+        "byte_count": 45,
+        "secret_free": true
+      }
+    },
+    "prompt_evidence": {
+      "transform_id": "anthropic-autopilot-sanitized.v1",
+      "transform_header_sha256": "sha256:0c2188ef2967259bfd0900f63ff83c122accbf435866beaecf4e15a86c94750a",
+      "raw_prompt_sha256": "sha256:2f25b1011bb16f5ec020442367ae06025514fc1fe429c7b3e64fe0c0c341b41e",
+      "transformed_prompt_sha256": "sha256:9e84eef2bee75db6a20cd936f890b6e689073479651c1b610be46d74a886b9f9",
+      "request_prompt_sha256": "sha256:9e84eef2bee75db6a20cd936f890b6e689073479651c1b610be46d74a886b9f9",
+      "response_prompt_sha256": "sha256:9e84eef2bee75db6a20cd936f890b6e689073479651c1b610be46d74a886b9f9"
+    },
+    "cache_evidence": {
+      "requested_cache_policy": "provider-default",
+      "observed_cache_policy": "provider-default",
+      "provider_cache_behavior": "provider-default",
+      "cache_fallback_used": false
+    },
+    "role_execution_evidence": [
+      {
+        "role": "parent",
+        "requested_model_id": "opus-4.8",
+        "executed_model_id": "opus-4.8",
+        "api": "anthropic-messages",
+        "thinking": "xhigh",
+        "service_tier": null,
+        "cache_policy": "provider-default",
+        "system_prompt_profile": "anthropic-autopilot-sanitized.v1",
+        "route_policy_id": "anthropic-sanitized-v1",
+        "route_policy_revision": 1,
+        "request_prompt_sha256": "sha256:9e84eef2bee75db6a20cd936f890b6e689073479651c1b610be46d74a886b9f9",
+        "response_prompt_sha256": "sha256:9e84eef2bee75db6a20cd936f890b6e689073479651c1b610be46d74a886b9f9",
+        "fallback_used": false
+      },
+      {
+        "role": "strategy",
+        "requested_model_id": "opus-4.8",
+        "executed_model_id": "opus-4.8",
+        "api": "anthropic-messages",
+        "thinking": "xhigh",
+        "service_tier": null,
+        "cache_policy": "provider-default",
+        "system_prompt_profile": "anthropic-autopilot-sanitized.v1",
+        "route_policy_id": "anthropic-sanitized-v1",
+        "route_policy_revision": 1,
+        "request_prompt_sha256": "sha256:9e84eef2bee75db6a20cd936f890b6e689073479651c1b610be46d74a886b9f9",
+        "response_prompt_sha256": "sha256:9e84eef2bee75db6a20cd936f890b6e689073479651c1b610be46d74a886b9f9",
+        "fallback_used": false
+      },
+      {
+        "role": "implement",
+        "requested_model_id": "sonnet-5",
+        "executed_model_id": "sonnet-5",
+        "api": "anthropic-messages",
+        "thinking": "high",
+        "service_tier": null,
+        "cache_policy": "provider-default",
+        "system_prompt_profile": "anthropic-autopilot-sanitized.v1",
+        "route_policy_id": "anthropic-sanitized-v1",
+        "route_policy_revision": 1,
+        "request_prompt_sha256": "sha256:9e84eef2bee75db6a20cd936f890b6e689073479651c1b610be46d74a886b9f9",
+        "response_prompt_sha256": "sha256:9e84eef2bee75db6a20cd936f890b6e689073479651c1b610be46d74a886b9f9",
+        "fallback_used": false
+      },
+      {
+        "role": "validate",
+        "requested_model_id": "opus-4.8",
+        "executed_model_id": "opus-4.8",
+        "api": "anthropic-messages",
+        "thinking": "xhigh",
+        "service_tier": null,
+        "cache_policy": "provider-default",
+        "system_prompt_profile": "anthropic-autopilot-sanitized.v1",
+        "route_policy_id": "anthropic-sanitized-v1",
+        "route_policy_revision": 1,
+        "request_prompt_sha256": "sha256:9e84eef2bee75db6a20cd936f890b6e689073479651c1b610be46d74a886b9f9",
+        "response_prompt_sha256": "sha256:9e84eef2bee75db6a20cd936f890b6e689073479651c1b610be46d74a886b9f9",
+        "fallback_used": false
+      },
+      {
+        "role": "fix",
+        "requested_model_id": "sonnet-5",
+        "executed_model_id": "sonnet-5",
+        "api": "anthropic-messages",
+        "thinking": "high",
+        "service_tier": null,
+        "cache_policy": "provider-default",
+        "system_prompt_profile": "anthropic-autopilot-sanitized.v1",
+        "route_policy_id": "anthropic-sanitized-v1",
+        "route_policy_revision": 1,
+        "request_prompt_sha256": "sha256:9e84eef2bee75db6a20cd936f890b6e689073479651c1b610be46d74a886b9f9",
+        "response_prompt_sha256": "sha256:9e84eef2bee75db6a20cd936f890b6e689073479651c1b610be46d74a886b9f9",
+        "fallback_used": false
+      },
+      {
+        "role": "adjudicate",
+        "requested_model_id": "opus-4.8",
+        "executed_model_id": "opus-4.8",
+        "api": "anthropic-messages",
+        "thinking": "xhigh",
+        "service_tier": null,
+        "cache_policy": "provider-default",
+        "system_prompt_profile": "anthropic-autopilot-sanitized.v1",
+        "route_policy_id": "anthropic-sanitized-v1",
+        "route_policy_revision": 1,
+        "request_prompt_sha256": "sha256:9e84eef2bee75db6a20cd936f890b6e689073479651c1b610be46d74a886b9f9",
+        "response_prompt_sha256": "sha256:9e84eef2bee75db6a20cd936f890b6e689073479651c1b610be46d74a886b9f9",
+        "fallback_used": false
+      },
+      {
+        "role": "bughunt",
+        "requested_model_id": "opus-4.8",
+        "executed_model_id": "opus-4.8",
+        "api": "anthropic-messages",
+        "thinking": "xhigh",
+        "service_tier": null,
+        "cache_policy": "provider-default",
+        "system_prompt_profile": "anthropic-autopilot-sanitized.v1",
+        "route_policy_id": "anthropic-sanitized-v1",
+        "route_policy_revision": 1,
+        "request_prompt_sha256": "sha256:9e84eef2bee75db6a20cd936f890b6e689073479651c1b610be46d74a886b9f9",
+        "response_prompt_sha256": "sha256:9e84eef2bee75db6a20cd936f890b6e689073479651c1b610be46d74a886b9f9",
+        "fallback_used": false
+      },
+      {
+        "role": "extract",
+        "requested_model_id": "haiku-4.5",
+        "executed_model_id": "haiku-4.5",
+        "api": "anthropic-messages",
+        "thinking": "high",
+        "service_tier": null,
+        "cache_policy": "provider-default",
+        "system_prompt_profile": "anthropic-autopilot-sanitized.v1",
+        "route_policy_id": "anthropic-sanitized-v1",
+        "route_policy_revision": 1,
+        "request_prompt_sha256": "sha256:9e84eef2bee75db6a20cd936f890b6e689073479651c1b610be46d74a886b9f9",
+        "response_prompt_sha256": "sha256:9e84eef2bee75db6a20cd936f890b6e689073479651c1b610be46d74a886b9f9",
+        "fallback_used": false
+      }
+    ]
+  },
+  "expected_artifact_sha256": "sha256:f32409d5b25735a8a86ccb2b84cf9ae9a2e571e52fb5aef15580594e958dba87",
+  "fixture_sha256": "sha256:63eb8c78d524d15996f9582830157c847ae1bc9fd41472f7573330b703770622"
+}
