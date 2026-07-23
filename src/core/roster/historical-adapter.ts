@@ -1,5 +1,9 @@
 import type { AutopilotRosterContractBySchemaVersion } from '../contracts/types.ts';
-import { parseRosterJsonWithDuplicateKeyRejection, sha256Utf8 } from './canonical.ts';
+import {
+  AutopilotRosterCanonicalizationError,
+  parseRosterJsonWithDuplicateKeyRejection,
+  sha256Utf8,
+} from './canonical.ts';
 import {
   AUTOPILOT_ROSTER_PACKAGE_VERSION_TARGET,
   makeAutopilotRosterDiagnostic,
@@ -78,6 +82,24 @@ const RECEIPT_KEYS = new Set([
   'emitted_at',
 ]);
 const ROLE_KEYS = new Set(['role', 'provider_id', 'model_id', 'model', 'api', 'thinking']);
+const HISTORICAL_ROLE_NAMES = new Set<HistoricalRole['role']>([
+  'parent',
+  'strategy',
+  'implement',
+  'validate',
+  'fix',
+  'adjudicate',
+  'bughunt',
+  'extract',
+]);
+const HISTORICAL_API_VALUES = new Set<HistoricalRole['api']>([
+  'openai-codex-responses',
+  'anthropic-messages',
+  'openai-completions',
+]);
+const HISTORICAL_THINKING_VALUES = new Set<HistoricalRole['thinking']>(['high', 'xhigh']);
+const PROVIDER_ID_PATTERN = /^[a-z][a-z0-9-]{0,63}$/u;
+const MODEL_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,119}$/u;
 
 export function adaptHistoricalFixedRosterEvidence(value: unknown): HistoricalResult {
   const request = parseAutopilotHistoricalFixedRosterAdapterRequest(value);
@@ -238,29 +260,73 @@ function parseHistoricalJsonObject(text: string): Readonly<Record<string, unknow
   try {
     const parsed = parseRosterJsonWithDuplicateKeyRejection(text);
     return recordValue(parsed);
-  } catch {
-    return null;
+  } catch (error) {
+    if (error instanceof SyntaxError || error instanceof AutopilotRosterCanonicalizationError) return null;
+    throw error;
   }
 }
 
 function parseHistoricalRoleArray(value: unknown): readonly HistoricalRole[] | null {
   if (!Array.isArray(value) || value.length !== FIXED_HISTORICAL_ROLES.length) return null;
   const roles: HistoricalRole[] = [];
+  const seenRoles = new Set<HistoricalRole['role']>();
   for (const item of value) {
     const record = recordValue(item);
-    if (record === null || !hasOnlyKeys(record, ROLE_KEYS)) return null;
-    const roleRecord: Record<string, unknown> = {
-      schema_version: 'autopilot.historical_fixed_roster_role.v1',
-      role: record['role'],
-      provider_id: record['provider_id'],
-      model_id: record['model_id'],
-      model: record['model'],
-      api: record['api'],
-      thinking: record['thinking'],
-    };
-    roles.push(parseAutopilotRosterContract('autopilot.historical_fixed_roster_role.v1', roleRecord));
+    if (record === null || !hasExactKeys(record, ROLE_KEYS)) return null;
+    const parsedRole = parseHistoricalRoleRecord(record);
+    if (parsedRole === null || seenRoles.has(parsedRole.role)) return null;
+    seenRoles.add(parsedRole.role);
+    roles.push(parsedRole);
   }
   return Object.freeze(roles);
+}
+
+function parseHistoricalRoleRecord(record: Readonly<Record<string, unknown>>): HistoricalRole | null {
+  const role = record['role'];
+  const providerId = record['provider_id'];
+  const modelId = record['model_id'];
+  const model = record['model'];
+  const api = record['api'];
+  const thinking = record['thinking'];
+  if (
+    !isHistoricalRoleName(role) ||
+    !isProviderId(providerId) ||
+    !isModelId(modelId) ||
+    model !== `${providerId}/${modelId}` ||
+    !isHistoricalApi(api) ||
+    !isHistoricalThinking(thinking)
+  ) {
+    return null;
+  }
+  return parseAutopilotRosterContract('autopilot.historical_fixed_roster_role.v1', {
+    schema_version: 'autopilot.historical_fixed_roster_role.v1',
+    role,
+    provider_id: providerId,
+    model_id: modelId,
+    model,
+    api,
+    thinking,
+  });
+}
+
+function isHistoricalRoleName(value: unknown): value is HistoricalRole['role'] {
+  return typeof value === 'string' && (HISTORICAL_ROLE_NAMES as ReadonlySet<string>).has(value);
+}
+
+function isHistoricalApi(value: unknown): value is HistoricalRole['api'] {
+  return typeof value === 'string' && (HISTORICAL_API_VALUES as ReadonlySet<string>).has(value);
+}
+
+function isHistoricalThinking(value: unknown): value is HistoricalRole['thinking'] {
+  return typeof value === 'string' && (HISTORICAL_THINKING_VALUES as ReadonlySet<string>).has(value);
+}
+
+function isProviderId(value: unknown): value is string {
+  return typeof value === 'string' && PROVIDER_ID_PATTERN.test(value);
+}
+
+function isModelId(value: unknown): value is string {
+  return typeof value === 'string' && MODEL_ID_PATTERN.test(value);
 }
 
 function historicalRole(
@@ -337,4 +403,9 @@ function recordValue(value: unknown): Readonly<Record<string, unknown>> | null {
 
 function hasOnlyKeys(record: Readonly<Record<string, unknown>>, allowed: ReadonlySet<string>): boolean {
   return Object.keys(record).every((key) => allowed.has(key));
+}
+
+function hasExactKeys(record: Readonly<Record<string, unknown>>, allowed: ReadonlySet<string>): boolean {
+  const keys = Object.keys(record);
+  return keys.length === allowed.size && keys.every((key) => allowed.has(key));
 }
