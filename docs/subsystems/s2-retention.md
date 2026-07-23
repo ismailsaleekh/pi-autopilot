@@ -57,11 +57,13 @@ configured cold archive root against the exact repo/run/event/kind/policy tuple.
 GC refuses escaped ids, invalid ids, missing or malformed markers, foreign owners,
 policy mismatches, wrong kinds, active/dirty/quarantined/sole-copy candidates,
 unverified cold archives, symlinks, hardlinks, non-directory candidates, ambiguous
-nested owner markers, and missing unledgered paths. Containment checks for the
-operation id and inflight path happen before `mkdir`, `rename`, or `rm` side effects.
-The ledger is append-only NDJSON written through a no-follow single-link descriptor;
-duplicate and replay decisions read the bounded ledger through the immutable descriptor
-reader and require exact repo/run/kind/policy matches.
+nested owner markers, and missing unledgered paths. The default policy is
+`autopilot-s2-e-retention-v1`: 1,048,576-byte cold proofs, 2,048-byte hot summaries,
+64 candidates per GC kind per run, and transition-backup GC enabled. Containment checks
+for the operation id and inflight path happen before `mkdir`, `rename`, or `rm` side
+effects. The ledger is append-only NDJSON written through a no-follow single-link
+descriptor; duplicate and replay decisions read the bounded ledger through the immutable
+descriptor reader and require exact repo/run/kind/policy matches.
 
 The only supported restart replay removes inflight candidates that already have an
 exact `candidate-renamed` ledger event and still pass marker, tree, containment, and
@@ -72,9 +74,11 @@ deletion path.
 ## Durable per-run pressure state
 
 The pressure-state file is canonical JSON at `_s2-retention-pressure-state.json` under
-the retention root. It is read with descriptor-pinned byte bounds and written atomically
-with fsync/rename. A disk-pressure event pauses only new worktree creation for the
-offending run; evidence and diagnostics lanes remain open so integration can publish
-terminal evidence and pressure diagnostics even while creation is paused. Disk-gate
-failures record the offending run in this file, missing-worktree creation refuses only
-that run while the event is current, and unrelated runs continue or restart normally.
+the retention root. It is read with descriptor-pinned byte bounds (64 KiB) and written
+atomically with fsync/rename through a non-symbolic parent directory. A disk-pressure
+event pauses only new worktree creation for the offending run; evidence and diagnostics
+lanes remain open so integration can publish terminal evidence and pressure diagnostics
+even while creation is paused. Clearing is event-sequence fenced: a stale clear for a
+previous pressure event leaves the current pause intact. Disk-gate failures record the
+offending run in this file, missing-worktree creation refuses only that run while the
+event is current, and unrelated runs continue or restart normally.

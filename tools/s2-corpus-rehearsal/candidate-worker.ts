@@ -10,7 +10,7 @@ import { DurableRunSupervisorClient, type RunSupervisorAttachment } from '../../
 import { recoverOwnedWorktreeSagas } from '../../src/core/coordination/worktree-saga.ts';
 import { AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV } from '../../src/core/names.ts';
 import { AUTOPILOT_STATE_ROOT_ENV, type ActiveAutopilotRow, type AutopilotRepoIdentity, type ProcessEnvLike } from '../../src/core/parallel-runtime.ts';
-import type { ActionResult, CorpusBlocker, DurableRunContract, Sha256Digest } from './contracts.ts';
+import { S2_D_DURABLE_RUN_ACTIONS, type ActionResult, type CorpusBlocker, type DurableRunContract, type Sha256Digest } from './contracts.ts';
 
 interface WorkerInput {
   readonly state_root: string;
@@ -41,16 +41,98 @@ function text(value: unknown, label: string): string {
   return value;
 }
 
+function nullableText(value: unknown, label: string): string | null {
+  if (value === null) return null;
+  return text(value, label);
+}
+
+function integer(value: unknown, label: string, minimum = 0): number {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < minimum) throw new Error(`${label} must be an integer >= ${String(minimum)}`);
+  return value;
+}
+
+function sha(value: unknown, label: string): Sha256Digest {
+  const parsed = text(value, label);
+  if (!/^sha256:[a-f0-9]{64}$/u.test(parsed)) throw new Error(`${label} must be a sha256 digest`);
+  return parsed as Sha256Digest;
+}
+
+function literal<T extends string>(value: unknown, allowed: readonly T[], label: string): T {
+  const parsed = text(value, label);
+  if (!allowed.includes(parsed as T)) throw new Error(`${label} is invalid`);
+  return parsed as T;
+}
+
+function parseRequiredActions(value: unknown): typeof S2_D_DURABLE_RUN_ACTIONS {
+  if (!Array.isArray(value) || value.length !== S2_D_DURABLE_RUN_ACTIONS.length) throw new Error('contract.required_actions must be exact');
+  for (const [index, action] of S2_D_DURABLE_RUN_ACTIONS.entries()) if (value[index] !== action) throw new Error('contract.required_actions ordering is invalid');
+  return S2_D_DURABLE_RUN_ACTIONS;
+}
+
+function parseContract(value: unknown): DurableRunContract {
+  const row = record(value, 'S2-D candidate worker input.contract');
+  return Object.freeze({
+    corpus_id: text(row['corpus_id'], 'contract.corpus_id'),
+    run_id_sha256: sha(row['run_id_sha256'], 'contract.run_id_sha256'),
+    repo_id_sha256: sha(row['repo_id_sha256'], 'contract.repo_id_sha256'),
+    required_actions: parseRequiredActions(row['required_actions']),
+    attachment_strategy: literal(row['attachment_strategy'], ['safe-attachment', 'owned-recovery'] as const, 'contract.attachment_strategy'),
+    terminal_attempt_lease: literal(row['terminal_attempt_lease'], ['no-retained-terminal-attempt-lease', 'retained-terminal-attempt-recovery-required', 'retained-terminal-attempt-reconciled'] as const, 'contract.terminal_attempt_lease'),
+    authority_version_mismatch: literal(row['authority_version_mismatch'], ['no-operation-authority-version-mismatch', 'operation-authority-version-mismatch-blocked', 'operation-authority-version-mismatch-recovered'] as const, 'contract.authority_version_mismatch'),
+    evidence_sha256: sha(row['evidence_sha256'], 'contract.evidence_sha256'),
+  });
+}
+
+function parseRepo(value: unknown): AutopilotRepoIdentity {
+  const row = record(value, 'repo');
+  return Object.freeze({
+    repoRoot: text(row['repoRoot'], 'repo.repoRoot'),
+    gitCommonDir: text(row['gitCommonDir'], 'repo.gitCommonDir'),
+    repoKey: text(row['repoKey'], 'repo.repoKey'),
+    headSha: text(row['headSha'], 'repo.headSha'),
+    targetBranch: nullableText(row['targetBranch'], 'repo.targetBranch'),
+    originUrl: nullableText(row['originUrl'], 'repo.originUrl'),
+  });
+}
+
+function parseActive(value: unknown): ActiveAutopilotRow {
+  const row = record(value, 'active');
+  return Object.freeze({
+    schema_version: literal(row['schema_version'], ['autopilot.active_parent.v2'] as const, 'active.schema_version'),
+    coordination_authority: literal(row['coordination_authority'], ['legacy-path-claims-v1', 'coordinator-edit-leases-v1'] as const, 'active.coordination_authority'),
+    autopilot_id: text(row['autopilot_id'], 'active.autopilot_id'),
+    workstream: text(row['workstream'], 'active.workstream'),
+    workstream_run: text(row['workstream_run'], 'active.workstream_run'),
+    repo_key: text(row['repo_key'], 'active.repo_key'),
+    source_repo: text(row['source_repo'], 'active.source_repo'),
+    git_common_dir: text(row['git_common_dir'], 'active.git_common_dir'),
+    worktree_root: text(row['worktree_root'], 'active.worktree_root'),
+    main_worktree_path: text(row['main_worktree_path'], 'active.main_worktree_path'),
+    branch: text(row['branch'], 'active.branch'),
+    runtime_root: text(row['runtime_root'], 'active.runtime_root'),
+    target_branch: nullableText(row['target_branch'], 'active.target_branch'),
+    target_base_sha: text(row['target_base_sha'], 'active.target_base_sha'),
+    origin_url: nullableText(row['origin_url'], 'active.origin_url'),
+    pid: integer(row['pid'], 'active.pid', 1),
+    boot_id: text(row['boot_id'], 'active.boot_id'),
+    status: literal(row['status'], ['active', 'paused', 'merging', 'blocked', 'crashed', 'closed'] as const, 'active.status'),
+    started_at: text(row['started_at'], 'active.started_at'),
+    active_run_epoch: integer(row['active_run_epoch'], 'active.active_run_epoch', 1),
+    active_epoch_started_at: text(row['active_epoch_started_at'], 'active.active_epoch_started_at'),
+    active_run_receipt_id: text(row['active_run_receipt_id'], 'active.active_run_receipt_id'),
+  });
+}
+
 function inputFromJson(value: unknown): WorkerInput {
   const row = record(value, 'S2-D candidate worker input');
-  const contract = record(row['contract'], 'S2-D candidate worker input.contract') as unknown as DurableRunContract;
+  const contract = parseContract(row['contract']);
   return {
     state_root: text(row['state_root'], 'state_root'),
     corpus_id: text(row['corpus_id'], 'corpus_id'),
-    run_id_sha256: text(row['run_id_sha256'], 'run_id_sha256') as Sha256Digest,
-    repo_id_sha256: text(row['repo_id_sha256'], 'repo_id_sha256') as Sha256Digest,
-    repo: record(row['repo'], 'repo') as unknown as AutopilotRepoIdentity,
-    active: record(row['active'], 'active') as unknown as ActiveAutopilotRow,
+    run_id_sha256: sha(row['run_id_sha256'], 'run_id_sha256'),
+    repo_id_sha256: sha(row['repo_id_sha256'], 'repo_id_sha256'),
+    repo: parseRepo(row['repo']),
+    active: parseActive(row['active']),
     contract,
   };
 }

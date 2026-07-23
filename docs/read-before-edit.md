@@ -21,6 +21,7 @@ here are not yet governed by a doc; coverage ratchets up per PR (C8 floor).
 <!-- GENERATED:read-before-edit START (source: docs/manifest.json) -->
 | Source path | Owning doc(s) |
 | --- | --- |
+| `bin/autopilot-s2-corpus-rehearsal.mjs` | [`tools/s2-corpus-rehearsal`](tools/s2-corpus-rehearsal.md) |
 | `src/cli/autopilot-agent-run.ts` | [`cli/autopilot-agent-run`](cli/autopilot-agent-run.md) |
 | `src/cli/autopilot-coordinator-bootstrap.ts` | [`cli/autopilot-coordinator`](cli/autopilot-coordinator.md) |
 | `src/cli/autopilot-coordinator.ts` | [`cli/autopilot-coordinator`](cli/autopilot-coordinator.md) |
@@ -63,4 +64,8 @@ here are not yet governed by a doc; coverage ratchets up per PR (C8 floor).
 | `src/core/validation-staleness.ts` | [`subsystems/close-lifecycle`](subsystems/close-lifecycle.md) |
 | `src/core/worktree-cleanup.ts` | [`subsystems/close-lifecycle`](subsystems/close-lifecycle.md) |
 | `src/internal/status-extension.ts` | [`tools/autopilot_emit_status`](tools/autopilot_emit_status.md) |
+| `tools/s2-corpus-rehearsal/candidate-worker.ts` | [`tools/s2-corpus-rehearsal`](tools/s2-corpus-rehearsal.md) |
+| `tools/s2-corpus-rehearsal/cli.ts` | [`tools/s2-corpus-rehearsal`](tools/s2-corpus-rehearsal.md) |
+| `tools/s2-corpus-rehearsal/contracts.ts` | [`tools/s2-corpus-rehearsal`](tools/s2-corpus-rehearsal.md) |
+| `tools/s2-corpus-rehearsal/release-gate.ts` | [`tools/s2-corpus-rehearsal`](tools/s2-corpus-rehearsal.md) |
 <!-- GENERATED:read-before-edit END -->

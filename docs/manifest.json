@@ -88,6 +88,9 @@
     ]
   },
   "source_to_docs": {
+    "bin/autopilot-s2-corpus-rehearsal.mjs": [
+      "tools/s2-corpus-rehearsal"
+    ],
     "src/cli/autopilot-agent-run.ts": [
       "cli/autopilot-agent-run"
     ],
@@ -215,6 +218,18 @@
     ],
     "src/internal/status-extension.ts": [
       "tools/autopilot_emit_status"
+    ],
+    "tools/s2-corpus-rehearsal/candidate-worker.ts": [
+      "tools/s2-corpus-rehearsal"
+    ],
+    "tools/s2-corpus-rehearsal/cli.ts": [
+      "tools/s2-corpus-rehearsal"
+    ],
+    "tools/s2-corpus-rehearsal/contracts.ts": [
+      "tools/s2-corpus-rehearsal"
+    ],
+    "tools/s2-corpus-rehearsal/release-gate.ts": [
+      "tools/s2-corpus-rehearsal"
     ]
   },
   "docs": {
@@ -717,6 +732,22 @@
       ],
       "signature_hash": "sha256:4e147d6b32a3a88923a3b886d262a4384fb0dcd17c2d53412f2cf73e047c54f4",
       "body_hash": "sha256:a2d8cd38e853fafe2788e23acfa84ce775d2100fe66c38c7de4940cb7316b38d",
+      "semantic_attestation": null
+    },
+    "tools/s2-corpus-rehearsal": {
+      "mode": "authored",
+      "review_policy": "contract",
+      "stability": "evolving",
+      "covers_surfaces": [],
+      "covers_sources": [
+        "bin/autopilot-s2-corpus-rehearsal.mjs",
+        "tools/s2-corpus-rehearsal/candidate-worker.ts",
+        "tools/s2-corpus-rehearsal/cli.ts",
+        "tools/s2-corpus-rehearsal/contracts.ts",
+        "tools/s2-corpus-rehearsal/release-gate.ts"
+      ],
+      "signature_hash": "sha256:042171c49c2597678d3b079ac0a4341cf68ceb54c3f76ea9be7e266d4ae6daa6",
+      "body_hash": "sha256:3cd511409d7af16fb69c48a60717eb7460218b945c72541fd54d5d6616355ca8",
       "semantic_attestation": null
     },
     "troubleshooting/failures": {

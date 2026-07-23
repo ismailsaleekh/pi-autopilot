@@ -19,6 +19,10 @@ happens automatically and the explicit recovery commands for ambiguous authority
   owned [sagas](../concepts/sagas.md) before dispatch.
 - **Interrupted worktree operations** resume idempotently under the per-worktree lock —
   every retry probes before acting, so a lost response never double-applies an effect.
+- **Failed unit authority** is reconciled from durable attempt/child/lease/worktree facts.
+  Current `autopilot.unit_failure.v1` evidence carries explicit producer provenance and
+  exact Git/worktree postconditions; BUG-177 historical reset/abort bytes are only a
+  regeneration cue and never release edit authority by themselves.
 - **Offline peers** lose no request or notification: at-least-once mailbox replay with
   contiguous acknowledgement cursors survives owner/requester shutdown, handoff, and
   coordinator restart.
@@ -38,7 +42,9 @@ Or from a Pi session: `/autopilot-coordination status|doctor`.
 
 The `recovery` subcommands are the only public mutation consumer for imported ambiguous
 authority. They attach a fenced recovery-only session, preserve authority by default, and
-publish immutable bounded evidence before any release:
+publish immutable bounded evidence before any release. The S2-D corpus rehearsal harness
+uses the same recovery-only APIs in private mutable clones for Phase36 release evidence;
+it does not authorize ordinary dispatch in a frozen live source:
 
 ```bash
 autopilot-coordinator recovery retain-authority --repo-root <path> --run <run> (--recovery-id <id>|--all)
