@@ -2,7 +2,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -63,6 +63,7 @@ interface RpcRunResult {
 
 const packageRoot = fileURLToPath(new URL('../../', import.meta.url));
 const extensionPath = join(packageRoot, 'extensions/autopilot.ts');
+const readyExtensionPath = join(packageRoot, 'tests/helpers/sdk-ready-extension.ts');
 const forbiddenLegacyCommand = ['hlo', 'v2'].join('-');
 
 function isJsonMap(value: unknown): value is JsonMap {
@@ -197,8 +198,9 @@ function offlineEnv(
 async function runRpc(
   commands: readonly JsonMap[],
   envOverrides: { readonly [key: string]: string | undefined } = {},
+  loadedExtensionPath = extensionPath,
 ): Promise<RpcRunResult> {
-  const root = await mkdtemp(join(tmpdir(), 'pi-autopilot-rpc-'));
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'pi-autopilot-rpc-')));
   const stateRoot = join(root, 'autopilot-state');
   try {
     const cwd = join(root, 'project');
@@ -211,7 +213,7 @@ async function runRpc(
     const result = spawnPiRpc(cwd, home, sessionDir, input, {
       ...envOverrides,
       [AUTOPILOT_STATE_ROOT_ENV]: stateRoot,
-    });
+    }, loadedExtensionPath);
     assert.equal(result.status, 0, result.stderr);
     assert.equal(result.signal, null, result.stderr);
     assert.equal(result.stderr, '');
@@ -222,8 +224,12 @@ async function runRpc(
   }
 }
 
-async function runRpcInteractive(command: JsonMap): Promise<RpcRunResult> {
-  const root = await mkdtemp(join(tmpdir(), 'pi-autopilot-rpc-interactive-'));
+async function runRpcInteractive(
+  command: JsonMap,
+  envOverrides: { readonly [key: string]: string | undefined } = {},
+  loadedExtensionPath = extensionPath,
+): Promise<RpcRunResult> {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'pi-autopilot-rpc-interactive-')));
   const stateRoot = join(root, 'autopilot-state');
   try {
     const cwd = join(root, 'project');
@@ -232,9 +238,9 @@ async function runRpcInteractive(command: JsonMap): Promise<RpcRunResult> {
     await initGitProject(cwd);
     await mkdir(home, { recursive: true });
     await mkdir(sessionDir, { recursive: true });
-    const child = spawn('pi', piRpcArgs(sessionDir), {
+    const child = spawn('pi', piRpcArgs(sessionDir, loadedExtensionPath), {
       cwd,
-      env: offlineEnv(home, { [AUTOPILOT_STATE_ROOT_ENV]: stateRoot }),
+      env: offlineEnv(home, { ...envOverrides, [AUTOPILOT_STATE_ROOT_ENV]: stateRoot }),
       stdio: ['pipe', 'pipe', 'pipe'],
       shell: false,
     });
@@ -313,7 +319,7 @@ function git(cwd: string, args: readonly string[]): void {
   assert.equal(result.status, 0, result.stderr);
 }
 
-function piRpcArgs(sessionDir: string): readonly string[] {
+function piRpcArgs(sessionDir: string, loadedExtensionPath = extensionPath): readonly string[] {
   return [
     '--mode',
     'rpc',
@@ -323,7 +329,7 @@ function piRpcArgs(sessionDir: string): readonly string[] {
     '--offline',
     '--no-extensions',
     '-e',
-    extensionPath,
+    loadedExtensionPath,
     '--no-skills',
     '--no-prompt-templates',
     '--no-context-files',
@@ -336,8 +342,9 @@ function spawnPiRpc(
   sessionDir: string,
   input: string,
   envOverrides: { readonly [key: string]: string | undefined },
+  loadedExtensionPath = extensionPath,
 ) {
-  return spawnSync('pi', piRpcArgs(sessionDir), {
+  return spawnSync('pi', piRpcArgs(sessionDir, loadedExtensionPath), {
     cwd,
     env: offlineEnv(home, envOverrides),
     encoding: 'utf8',
@@ -385,9 +392,10 @@ void describe('Pi RPC Autopilot command wiring', () => {
   });
 
   void it('rejects invalid AUTOPILOT_CONTEXT_HALT_PERCENT during /autopilot activation over RPC', async () => {
-    const { events } = await runRpc(
-      [{ id: 'autopilot', type: 'prompt', message: '/autopilot rpc-demo threshold check' }],
+    const { events } = await runRpcInteractive(
+      { id: 'autopilot', type: 'prompt', message: '/autopilot rpc-demo threshold check' },
       { AUTOPILOT_CONTEXT_HALT_PERCENT: 'not-a-number' },
+      readyExtensionPath,
     );
 
     const autopilot = requireResponse(events, 'autopilot');
