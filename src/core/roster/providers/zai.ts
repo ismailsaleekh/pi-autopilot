@@ -266,6 +266,10 @@ export interface ZaiProcessIdentityEvidence {
   readonly session_id: string;
   readonly process_id: string;
   readonly run_id: string;
+  readonly lease_id: string;
+  readonly tool_call_id: string;
+  readonly attempt_authority_id: string;
+  readonly authenticated: boolean;
 }
 
 export interface ZaiRoleQualificationEvidence {
@@ -340,6 +344,7 @@ export type ZaiQualificationIssueCode =
   | 'ZAI_ROLE_ORDER_INVALID'
   | 'ZAI_SELF_CERTIFICATION_FORBIDDEN'
   | 'ZAI_INDEPENDENT_CHILD_REQUIRED'
+  | 'ZAI_CHILD_AUTHENTICATION_REQUIRED'
   | 'ZAI_PROVIDER_ID_MISMATCH'
   | 'ZAI_RECIPE_MISMATCH'
   | 'ZAI_ROUTE_POLICY_MISMATCH'
@@ -382,8 +387,36 @@ function isRosterRole(value: string): value is RosterRole {
   return (ROSTER_ROLE_ORDER as readonly string[]).includes(value);
 }
 
+const ZAI_PROCESS_IDENTITY_FIELDS = [
+  'session_id',
+  'process_id',
+  'run_id',
+  'lease_id',
+  'tool_call_id',
+  'attempt_authority_id',
+] as const satisfies readonly (keyof ZaiProcessIdentityEvidence)[];
+
+function processIdentityFieldValue(
+  identity: ZaiProcessIdentityEvidence,
+  field: (typeof ZAI_PROCESS_IDENTITY_FIELDS)[number],
+): string | null {
+  const value = identity[field];
+  return typeof value === 'string' && value.length > 0 ? value : null;
+}
+
+function reusedIdentityFields(left: ZaiProcessIdentityEvidence, right: ZaiProcessIdentityEvidence): readonly (typeof ZAI_PROCESS_IDENTITY_FIELDS)[number][] {
+  return ZAI_PROCESS_IDENTITY_FIELDS.filter((field) => {
+    const leftValue = processIdentityFieldValue(left, field);
+    return leftValue !== null && leftValue === processIdentityFieldValue(right, field);
+  });
+}
+
 function sameIdentity(left: ZaiProcessIdentityEvidence, right: ZaiProcessIdentityEvidence): boolean {
-  return left.session_id === right.session_id || left.process_id === right.process_id || left.run_id === right.run_id;
+  return reusedIdentityFields(left, right).length > 0;
+}
+
+function missingIdentityFields(identity: ZaiProcessIdentityEvidence): readonly (typeof ZAI_PROCESS_IDENTITY_FIELDS)[number][] {
+  return ZAI_PROCESS_IDENTITY_FIELDS.filter((field) => processIdentityFieldValue(identity, field) === null);
 }
 
 function isForbiddenGateway(value: string | null): boolean {
@@ -439,17 +472,43 @@ function validateRoleIdentity(
   issues: ZaiQualificationIssue[],
 ): void {
   if (sameIdentity(roleEvidence.child, input.evaluator)) {
-    addIssue(issues, 'ZAI_SELF_CERTIFICATION_FORBIDDEN', role, 'role evidence was produced by the evaluator process/session/run');
+    addIssue(issues, 'ZAI_SELF_CERTIFICATION_FORBIDDEN', role, 'role evidence was produced by the evaluator process/session/lease/tool-call/run authority');
   }
   if (sameIdentity(roleEvidence.child, input.parent)) {
     addIssue(issues, 'ZAI_INDEPENDENT_CHILD_REQUIRED', role, 'role evidence must come from a child identity independent of the parent');
   }
-  if (
-    roleEvidence.child.session_id.length === 0 ||
-    roleEvidence.child.process_id.length === 0 ||
-    roleEvidence.child.run_id.length === 0
-  ) {
-    addIssue(issues, 'ZAI_INDEPENDENT_CHILD_REQUIRED', role, 'role evidence is missing child process identity');
+  if (roleEvidence.child.authenticated !== true) {
+    addIssue(issues, 'ZAI_CHILD_AUTHENTICATION_REQUIRED', role, 'role witness child identity must be authenticated by live child evidence');
+  }
+  const missingFields = missingIdentityFields(roleEvidence.child);
+  if (missingFields.length > 0) {
+    addIssue(issues, 'ZAI_INDEPENDENT_CHILD_REQUIRED', role, `role evidence is missing child identity fields: ${missingFields.join(', ')}`);
+  }
+}
+
+function validateRoleIndependenceAcrossRoles(
+  roles: readonly ZaiRoleQualificationEvidence[],
+  issues: ZaiQualificationIssue[],
+): void {
+  const seen = new Map<string, RosterRole>();
+  for (const roleEvidence of roles) {
+    if (!isRosterRole(roleEvidence.role)) continue;
+    for (const field of ZAI_PROCESS_IDENTITY_FIELDS) {
+      const value = processIdentityFieldValue(roleEvidence.child, field);
+      if (value === null) continue;
+      const key = `${field}\0${value}`;
+      const firstRole = seen.get(key);
+      if (firstRole !== undefined) {
+        addIssue(
+          issues,
+          'ZAI_INDEPENDENT_CHILD_REQUIRED',
+          roleEvidence.role,
+          `role witness child ${field} reuses ${firstRole} authority`,
+        );
+      } else {
+        seen.set(key, roleEvidence.role);
+      }
+    }
   }
 }
 
@@ -584,6 +643,8 @@ export function evaluateZaiQualificationEvidence(input: ZaiQualificationEvidence
   if (JSON.stringify(observedRoles) !== JSON.stringify(ROSTER_ROLE_ORDER)) {
     addIssue(issues, 'ZAI_ROLE_ORDER_INVALID', null, 'role evidence must be exactly ROLE_ORDER with no fallback role ordering');
   }
+
+  validateRoleIndependenceAcrossRoles([...byRole.values()], issues);
 
   for (const role of ROSTER_ROLE_ORDER) {
     const roleEvidence = byRole.get(role);

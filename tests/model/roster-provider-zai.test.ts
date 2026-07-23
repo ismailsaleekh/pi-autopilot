@@ -65,6 +65,10 @@ type MutableProcessIdentity = {
   session_id: string;
   process_id: string;
   run_id: string;
+  lease_id: string;
+  tool_call_id: string;
+  attempt_authority_id: string;
+  authenticated: boolean;
 };
 
 type MutableRoleEvidence = Omit<{
@@ -122,6 +126,30 @@ function evidenceForNegativeCase(caseId: string): ZaiQualificationEvidence {
       break;
     case 'missing-independent-child':
       implement.child = { ...evidence.parent };
+      break;
+    case 'duplicate-cross-role-child-identity':
+      implement.child = { ...roleEvidence(evidence, 'strategy').child };
+      break;
+    case 'duplicate-cross-role-session':
+      implement.child.session_id = roleEvidence(evidence, 'strategy').child.session_id;
+      break;
+    case 'duplicate-cross-role-lease':
+      implement.child.lease_id = roleEvidence(evidence, 'strategy').child.lease_id;
+      break;
+    case 'duplicate-cross-role-tool-call':
+      implement.child.tool_call_id = roleEvidence(evidence, 'strategy').child.tool_call_id;
+      break;
+    case 'duplicate-cross-role-attempt-authority':
+      implement.child.attempt_authority_id = roleEvidence(evidence, 'strategy').child.attempt_authority_id;
+      break;
+    case 'duplicate-evaluator-session':
+      implement.child.session_id = evidence.evaluator.session_id;
+      break;
+    case 'duplicate-parent-lease':
+      implement.child.lease_id = evidence.parent.lease_id;
+      break;
+    case 'missing-child-authentication':
+      delete (implement.child as Partial<MutableProcessIdentity>).authenticated;
       break;
     case 'wrong-endpoint':
       implement.base_url = 'https://openrouter.ai/api/v1';
@@ -318,6 +346,21 @@ void describe('D69 W4 ZAI/GLM provider pack', () => {
       true,
     );
 
+    const duplicateChildLiveEvidence = cloneEvidence();
+    duplicateChildLiveEvidence.evidence_kind = 'live-observed';
+    duplicateChildLiveEvidence.live_entitlement_observed = true;
+    duplicateChildLiveEvidence.live_billing_observed = true;
+    roleEvidence(duplicateChildLiveEvidence, 'implement').child = { ...roleEvidence(duplicateChildLiveEvidence, 'strategy').child };
+    const duplicateChildEvaluation = evaluateZaiQualificationEvidence(duplicateChildLiveEvidence);
+    assert.equal(duplicateChildEvaluation.ready, false);
+    assert.equal(duplicateChildEvaluation.qualification_state, 'qualification-required');
+    assert.equal(
+      duplicateChildEvaluation.issues.some(
+        (issue) => issue.code === 'ZAI_INDEPENDENT_CHILD_REQUIRED' && issue.role === 'implement',
+      ),
+      true,
+    );
+
     const manifest = buildZaiQualificationManifestCandidate(evidence);
     assert.equal(manifest.qualification_state, 'qualification-required');
     assert.equal(manifest.role_results.every((result) => result.state === 'fail'), true);
@@ -329,6 +372,14 @@ void describe('D69 W4 ZAI/GLM provider pack', () => {
     assert.deepEqual(fixture.negative_cases.map((entry) => entry.case_id), [
       'same-process-self-certification',
       'missing-independent-child',
+      'duplicate-cross-role-child-identity',
+      'duplicate-cross-role-session',
+      'duplicate-cross-role-lease',
+      'duplicate-cross-role-tool-call',
+      'duplicate-cross-role-attempt-authority',
+      'duplicate-evaluator-session',
+      'duplicate-parent-lease',
+      'missing-child-authentication',
       'wrong-endpoint',
       'wrong-model',
       'wrong-thinking',

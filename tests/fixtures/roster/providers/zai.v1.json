@@ -30,12 +30,20 @@
     "evaluator": {
       "session_id": "evaluator-session-zai-w4-offline",
       "process_id": "evaluator-process-zai-w4-offline",
-      "run_id": "evaluator-run-zai-w4-offline"
+      "run_id": "evaluator-run-zai-w4-offline",
+      "lease_id": "evaluator-zai-w4-offline-lease",
+      "tool_call_id": "evaluator-zai-w4-offline-tool-call",
+      "attempt_authority_id": "evaluator-zai-w4-offline-attempt-authority",
+      "authenticated": true
     },
     "parent": {
       "session_id": "parent-session-zai-w4-offline",
       "process_id": "parent-process-zai-w4-offline",
-      "run_id": "parent-run-zai-w4-offline"
+      "run_id": "parent-run-zai-w4-offline",
+      "lease_id": "parent-zai-w4-offline-lease",
+      "tool_call_id": "parent-zai-w4-offline-tool-call",
+      "attempt_authority_id": "parent-zai-w4-offline-attempt-authority",
+      "authenticated": true
     },
     "live_entitlement_observed": false,
     "live_billing_observed": false,
@@ -45,7 +53,11 @@
         "child": {
           "session_id": "child-session-zai-parent",
           "process_id": "child-process-zai-parent",
-          "run_id": "child-run-zai-parent"
+          "run_id": "child-run-zai-parent",
+          "lease_id": "child-zai-parent-lease",
+          "tool_call_id": "child-zai-parent-tool-call",
+          "attempt_authority_id": "child-zai-parent-attempt-authority",
+          "authenticated": true
         },
         "provider_id": "zai",
         "recipe_id": "zai-coding-plan",
@@ -100,7 +112,11 @@
         "child": {
           "session_id": "child-session-zai-strategy",
           "process_id": "child-process-zai-strategy",
-          "run_id": "child-run-zai-strategy"
+          "run_id": "child-run-zai-strategy",
+          "lease_id": "child-zai-strategy-lease",
+          "tool_call_id": "child-zai-strategy-tool-call",
+          "attempt_authority_id": "child-zai-strategy-attempt-authority",
+          "authenticated": true
         },
         "provider_id": "zai",
         "recipe_id": "zai-coding-plan",
@@ -155,7 +171,11 @@
         "child": {
           "session_id": "child-session-zai-implement",
           "process_id": "child-process-zai-implement",
-          "run_id": "child-run-zai-implement"
+          "run_id": "child-run-zai-implement",
+          "lease_id": "child-zai-implement-lease",
+          "tool_call_id": "child-zai-implement-tool-call",
+          "attempt_authority_id": "child-zai-implement-attempt-authority",
+          "authenticated": true
         },
         "provider_id": "zai",
         "recipe_id": "zai-coding-plan",
@@ -210,7 +230,11 @@
         "child": {
           "session_id": "child-session-zai-validate",
           "process_id": "child-process-zai-validate",
-          "run_id": "child-run-zai-validate"
+          "run_id": "child-run-zai-validate",
+          "lease_id": "child-zai-validate-lease",
+          "tool_call_id": "child-zai-validate-tool-call",
+          "attempt_authority_id": "child-zai-validate-attempt-authority",
+          "authenticated": true
         },
         "provider_id": "zai",
         "recipe_id": "zai-coding-plan",
@@ -265,7 +289,11 @@
         "child": {
           "session_id": "child-session-zai-fix",
           "process_id": "child-process-zai-fix",
-          "run_id": "child-run-zai-fix"
+          "run_id": "child-run-zai-fix",
+          "lease_id": "child-zai-fix-lease",
+          "tool_call_id": "child-zai-fix-tool-call",
+          "attempt_authority_id": "child-zai-fix-attempt-authority",
+          "authenticated": true
         },
         "provider_id": "zai",
         "recipe_id": "zai-coding-plan",
@@ -320,7 +348,11 @@
         "child": {
           "session_id": "child-session-zai-adjudicate",
           "process_id": "child-process-zai-adjudicate",
-          "run_id": "child-run-zai-adjudicate"
+          "run_id": "child-run-zai-adjudicate",
+          "lease_id": "child-zai-adjudicate-lease",
+          "tool_call_id": "child-zai-adjudicate-tool-call",
+          "attempt_authority_id": "child-zai-adjudicate-attempt-authority",
+          "authenticated": true
         },
         "provider_id": "zai",
         "recipe_id": "zai-coding-plan",
@@ -375,7 +407,11 @@
         "child": {
           "session_id": "child-session-zai-bughunt",
           "process_id": "child-process-zai-bughunt",
-          "run_id": "child-run-zai-bughunt"
+          "run_id": "child-run-zai-bughunt",
+          "lease_id": "child-zai-bughunt-lease",
+          "tool_call_id": "child-zai-bughunt-tool-call",
+          "attempt_authority_id": "child-zai-bughunt-attempt-authority",
+          "authenticated": true
         },
         "provider_id": "zai",
         "recipe_id": "zai-coding-plan",
@@ -430,7 +466,11 @@
         "child": {
           "session_id": "child-session-zai-extract",
           "process_id": "child-process-zai-extract",
-          "run_id": "child-run-zai-extract"
+          "run_id": "child-run-zai-extract",
+          "lease_id": "child-zai-extract-lease",
+          "tool_call_id": "child-zai-extract-tool-call",
+          "attempt_authority_id": "child-zai-extract-attempt-authority",
+          "authenticated": true
         },
         "provider_id": "zai",
         "recipe_id": "zai-coding-plan",
@@ -492,6 +532,46 @@
       "case_id": "missing-independent-child",
       "description": "Parent process is reused as child evidence for one role.",
       "expected_issue": "ZAI_INDEPENDENT_CHILD_REQUIRED"
+    },
+    {
+      "case_id": "duplicate-cross-role-child-identity",
+      "description": "One role reuses the complete authenticated child identity for another role.",
+      "expected_issue": "ZAI_INDEPENDENT_CHILD_REQUIRED"
+    },
+    {
+      "case_id": "duplicate-cross-role-session",
+      "description": "One role reuses another role witness child session authority.",
+      "expected_issue": "ZAI_INDEPENDENT_CHILD_REQUIRED"
+    },
+    {
+      "case_id": "duplicate-cross-role-lease",
+      "description": "One role reuses another role witness child lease authority.",
+      "expected_issue": "ZAI_INDEPENDENT_CHILD_REQUIRED"
+    },
+    {
+      "case_id": "duplicate-cross-role-tool-call",
+      "description": "One role reuses another role witness child tool-call authority.",
+      "expected_issue": "ZAI_INDEPENDENT_CHILD_REQUIRED"
+    },
+    {
+      "case_id": "duplicate-cross-role-attempt-authority",
+      "description": "One role reuses another role witness child attempt authority.",
+      "expected_issue": "ZAI_INDEPENDENT_CHILD_REQUIRED"
+    },
+    {
+      "case_id": "duplicate-evaluator-session",
+      "description": "One role witness child reuses evaluator session authority.",
+      "expected_issue": "ZAI_SELF_CERTIFICATION_FORBIDDEN"
+    },
+    {
+      "case_id": "duplicate-parent-lease",
+      "description": "One role witness child reuses parent lease authority.",
+      "expected_issue": "ZAI_INDEPENDENT_CHILD_REQUIRED"
+    },
+    {
+      "case_id": "missing-child-authentication",
+      "description": "One role witness child identity is not authenticated.",
+      "expected_issue": "ZAI_CHILD_AUTHENTICATION_REQUIRED"
     },
     {
       "case_id": "wrong-endpoint",
