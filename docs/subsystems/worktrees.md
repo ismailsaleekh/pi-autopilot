@@ -12,7 +12,7 @@ covers_sources:
   - src/core/git-guard.ts
   - src/core/git-process.ts
 signature_hash: 'sha256:82853603ad9b97c2a62ec6f2374efb085e1db7f7ae15d7af9a3d4cae2abde577'
-body_hash: 'sha256:34615d7f7346ada422a3b9c839065014eca3cee4ff7c8229acde5650afefe6f6'
+body_hash: 'sha256:2e92362af85b23cb5d955444effc2e51200b92a15d9942ce67473531c0164944'
 stability: stable
 ---
 
@@ -48,8 +48,10 @@ the main runtime root. See [`../runtime-state/paths.md`](../runtime-state/paths.
 
 New worktrees are sparse: `git worktree add --no-checkout`, package-owned non-cone
 sparse patterns, a disk gate before runtime/index mutation, and a
-`_checkout-profile.json` snapshot. The package refuses loudly instead of silently
-falling back to a full checkout.
+`_checkout-profile.json` snapshot. The disk gate records S2 per-run pressure for the
+offending run only; missing-worktree creation refuses that run while unrelated runs
+can continue or restart. The package refuses loudly instead of silently falling back
+to a full checkout.
 
 - Tracked-tree sizing streams and incrementally parses NUL-delimited `git ls-tree`
   records (independent of Node's fixed child-output buffer), pinned to the resolved

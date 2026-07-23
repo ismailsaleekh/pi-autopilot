@@ -16,6 +16,8 @@ import { assertD65OrdinaryBoundaryFromEnvironment, assertD65RecoveryBoundaryFrom
 import { publishD65CoordinatorOnlySuccessorFromEnvironment } from "./coordination/d65-graph-successor-runtime.js";
 import { DurableRunSupervisorClient, readCoordinatorSessionContext } from "./coordination/supervisor.js";
 import { recordCoordinatorReleaseEvidenceFromFile } from "./coordination/reconciliation.js";
+import { publishS2ColdTerminalProof, verifyS2HotTerminalProofSummary } from "./coordination/s2-retention-archive.js";
+import { defineS2RetentionPolicy } from "./coordination/s2-retention-policy.js";
 import { ReservationCoordinationClient, preparePendingReservationIntegrations, preparedRunTerminalIntent, reconcilePendingReservationResolutions, reservationCloseBlockers, resolvedReservationIntegrations } from "./coordination/reservations.js";
 import { ACTIVE_AUTOPILOTS_FILE, BRANCHES_FILE, CLAIM_EVENTS_FILE, FOREIGN_MERGE_ACKS_FILE, MERGE_LOG_FILE, PATH_CLAIMS_FILE, TASK_INFO_FILE, UNIT_INDEX_FILE, WORKTREE_INDEX_FILE, appendClaimEvent, appendJsonl, coordinationRootForRepo, gitHead, isAutopilotRuntimeRepoPath, mainMergeLockPathForRepo, matchesRepoPathPattern, pathOverlapsOrContains, readActiveAutopilots, readCoordinatorActiveAutopilots, readGitStatus, readPathClaims, readUnitIndex, readWorktreeIndex, resolveAutopilotStateRoot, resolveRepoIdentity, taskRootForActiveAutopilot, updateTaskInfoStatus, withAutopilotFileLock, worktreeRootForRepo, writeActiveAutopilots, writeJsonAtomic, writePathClaims, } from "./parallel-runtime.js";
 import { gitQueryNulStrings, gitQueryText, runGitMutation, runGitQuery } from "./git-process.js";
@@ -656,6 +658,8 @@ async function completeTerminalCleanup(recovery, observer) {
     const archivedRuntimePath = await archiveRuntimeArtifacts(context, manifest.archive_ref, new Date(manifest.prepared_at));
     if (archivedRuntimePath !== manifest.archive_runtime_path)
         fail('terminal-cleanup-path-mismatch', 'Runtime archive path disagrees with immutable terminal cleanup intent.', [archivedRuntimePath, manifest.archive_runtime_path]);
+    if (context.active.coordination_authority === 'coordinator-edit-leases-v1')
+        await verifyS2TerminalRetentionBinding(context.active, manifest);
     await observer?.('after-runtime-archive');
     const retainedClaims = context.active.coordination_authority === 'legacy-path-claims-v1'
         ? (await readPathClaims(context.coordinationRoot)).filter((claim) => claim.autopilot_id === context.active.autopilot_id && claim.workstream_run === context.active.workstream_run)
@@ -1545,7 +1549,93 @@ async function writeAndRecordRunTerminalEvidence(active, outcome, terminalSha, e
         cleanup_manifest_sha256: `sha256:${createHash('sha256').update(cleanupBytes).digest('hex')}`,
         accepted_at: now.toISOString(),
     });
-    await recordCoordinatorReleaseEvidenceFromFile({ active, source: outcome === 'closed' ? 'run-close' : 'run-abort', targetId: active.workstream_run, evidencePath, env });
+    const accepted = await recordCoordinatorReleaseEvidenceFromFile({ active, source: outcome === 'closed' ? 'run-close' : 'run-abort', targetId: active.workstream_run, evidencePath, env });
+    if (accepted !== null)
+        await publishAndVerifyS2TerminalRetention({ active, outcome, evidencePath, accepted, now });
+}
+function s2RetentionRootForActive(active) {
+    return join(active.worktree_root, '_retention');
+}
+function s2TerminalRetentionBindingPath(active) {
+    return join(active.runtime_root, 'close', '_s2-terminal-retention.json');
+}
+async function publishAndVerifyS2TerminalRetention(input) {
+    const policy = defineS2RetentionPolicy();
+    const retentionRoot = s2RetentionRootForActive(input.active);
+    const evidenceBytes = await readFile(input.evidencePath);
+    const evidenceDocument = requireRecord(JSON.parse(new TextDecoder().decode(evidenceBytes)), 'S2 terminal proof evidence');
+    const evidence = input.accepted.evidence.release_condition.evidence;
+    if (evidence === null)
+        fail('s2-retention-evidence-missing', 'S2 terminal retention requires accepted terminal evidence identity.', [input.active.workstream_run]);
+    const published = await publishS2ColdTerminalProof({
+        repoId: input.active.repo_key,
+        workstreamRun: input.active.workstream_run,
+        terminalEventSeq: input.accepted.evidence.accepted_event_seq,
+        terminalKind: input.outcome,
+        terminalProof: {
+            ...evidenceDocument,
+            reconciliation_evidence_id: input.accepted.evidence.reconciliation_evidence_id,
+            accepted_event_seq: input.accepted.evidence.accepted_event_seq,
+            evidence_ref: evidence.ref,
+            evidence_sha256: evidence.sha256,
+        },
+        archiveRoot: join(retentionRoot, 'cold'),
+        hotRoot: join(retentionRoot, 'hot'),
+        policy,
+        nowIso: input.now.toISOString(),
+    });
+    const summary = await verifyS2HotTerminalProofSummary({
+        summaryPath: published.hotSummaryPath,
+        archiveRoot: join(retentionRoot, 'cold'),
+        policy,
+        expected: { repoId: input.active.repo_key, workstreamRun: input.active.workstream_run, terminalEventSeq: input.accepted.evidence.accepted_event_seq, terminalKind: input.outcome },
+    });
+    if (!published.hotEligible || summary.cold_archive_sha256 !== published.coldArchiveSha256)
+        fail('s2-retention-hot-ineligible', 'S2 hot terminal summary is not backed by the verified cold archive.', [input.active.workstream_run]);
+    const binding = {
+        schema_version: 'autopilot.s2_retention.terminal_binding.v1',
+        repo_id: input.active.repo_key,
+        workstream_run: input.active.workstream_run,
+        terminal_kind: input.outcome,
+        terminal_event_seq: input.accepted.evidence.accepted_event_seq,
+        evidence_ref: evidence.ref,
+        evidence_sha256: evidence.sha256,
+        reconciliation_evidence_id: input.accepted.evidence.reconciliation_evidence_id,
+        cold_archive_sha256: published.coldArchiveSha256,
+        cold_archive_relpath: published.coldArchiveRelpath,
+        terminal_proof_sha256: published.terminalProofSha256,
+        hot_summary_ref: relative(input.active.worktree_root, published.hotSummaryPath).split(sep).join('/'),
+        hot_eligible: true,
+        policy_id: policy.policy_id,
+        published_at: input.now.toISOString(),
+    };
+    await writeJsonAtomic(s2TerminalRetentionBindingPath(input.active), binding);
+}
+async function verifyS2TerminalRetentionBinding(active, manifest) {
+    const activePath = s2TerminalRetentionBindingPath(active);
+    const archivePath = join(active.worktree_root, '_archive', active.workstream_run, 'runtime', 'close', '_s2-terminal-retention.json');
+    const path = existsSync(activePath) ? activePath : archivePath;
+    if (!existsSync(path))
+        fail('s2-retention-binding-missing', 'Coordinator terminal cleanup requires S2 cold retention binding before cleanup proceeds.', [active.workstream_run]);
+    const row = requireRecord(JSON.parse(await readFile(path, 'utf8')), 'S2 terminal retention binding');
+    const fields = ['cold_archive_relpath', 'cold_archive_sha256', 'evidence_ref', 'evidence_sha256', 'hot_eligible', 'hot_summary_ref', 'policy_id', 'published_at', 'reconciliation_evidence_id', 'repo_id', 'schema_version', 'terminal_event_seq', 'terminal_kind', 'terminal_proof_sha256', 'workstream_run'];
+    const unknown = Object.keys(row).filter((field) => !fields.includes(field));
+    if (unknown.length > 0 || fields.some((field) => !(field in row)))
+        fail('s2-retention-binding-invalid', 'S2 terminal retention binding has an incompatible closed shape.', unknown);
+    const terminalKind = manifest.outcome;
+    if (row['schema_version'] !== 'autopilot.s2_retention.terminal_binding.v1' || row['repo_id'] !== active.repo_key || row['workstream_run'] !== active.workstream_run || row['terminal_kind'] !== terminalKind || row['hot_eligible'] !== true)
+        fail('s2-retention-binding-mismatch', 'S2 terminal retention binding does not match exact run terminal identity.', [active.workstream_run]);
+    const eventSeq = row['terminal_event_seq'];
+    const hotSummaryRef = row['hot_summary_ref'];
+    if (typeof eventSeq !== 'number' || !Number.isSafeInteger(eventSeq) || eventSeq < 0 || typeof hotSummaryRef !== 'string')
+        fail('s2-retention-binding-invalid', 'S2 terminal retention binding lost event or summary identity.', [active.workstream_run]);
+    const summaryPath = join(active.worktree_root, ...hotSummaryRef.split('/'));
+    await verifyS2HotTerminalProofSummary({
+        summaryPath,
+        archiveRoot: join(s2RetentionRootForActive(active), 'cold'),
+        policy: defineS2RetentionPolicy(),
+        expected: { repoId: active.repo_key, workstreamRun: active.workstream_run, terminalEventSeq: eventSeq, terminalKind },
+    });
 }
 async function fsyncArchiveTree(root) {
     if (platform() === 'win32')

@@ -7,7 +7,7 @@ covers_surfaces:
 covers_sources:
   - src/cli/autopilot-agent-run.ts
 signature_hash: 'sha256:6a2b2a4d670b47bf0757d6cd542538122a0183d625023be72212d51161cfee73'
-body_hash: 'sha256:3c1559deb04c48210b6757dccea5b763bb55e8797999e472f95f87d2dc7f8de9'
+body_hash: 'sha256:247c9228a410e7156c9762ed3b6315024520cb445f813ffb83f331a712ca5606'
 stability: stable
 ---
 

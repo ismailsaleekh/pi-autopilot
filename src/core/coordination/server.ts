@@ -10,6 +10,7 @@ import { parseCoordinatorAdmissionTransportRequest, parseCoordinatorTransportReq
 import { CoordinationRuntimeError } from './failures.ts';
 import { buildS2CoordinationRuntimeErrorDiagnostic } from './s2-diagnostics.ts';
 import { isS2FailureResponseRetryable } from './s2-failure-taxonomy.ts';
+import { runCoordinatorOwnedS2RetentionGc } from './s2-owned-gc.ts';
 import { currentBootId, isProcessAlive, predecessorCompatibleBootId, processStartIdentity } from './process-identity.ts';
 import { COORDINATOR_GRANT_OFFER_SWEEP_MS, enforcePrivateAuthorityPath, ensureCoordinatorPrivateRoots, readOrCreateCoordinatorCapability, type CoordinatorRuntimePaths } from './runtime-paths.ts';
 import { acquireSerializedProcessGuard, discardLockTombstone, quarantineExactLock, readExactLockText, restoreLockTombstone } from './serialized-lock.ts';
@@ -631,8 +632,11 @@ export async function startCoordinatorServer(paths: CoordinatorRuntimePaths, clo
     acquiredLifecycleLock.activate();
     await startupObserver?.transition('after-activation-before-first-handshake', acquiredLifecycleLock.record);
     offerTimer = setInterval(() => {
-      void acquiredLifecycleLock.verifyOrRepairFence().then((outcome) => {
-        if (outcome === 'verified') openedStore.sweepExpiredGrantOffers();
+      void acquiredLifecycleLock.verifyOrRepairFence().then(async (outcome) => {
+        if (outcome === 'verified') {
+          openedStore.sweepExpiredGrantOffers();
+          await runCoordinatorOwnedS2RetentionGc({ stateRoot: paths.stateRoot, runs: openedStore.terminalRunsForS2RetentionGc(), nowIso: new Date().toISOString() });
+        }
         timerFailure = null;
       }).catch((error: unknown) => {
         timerFailure = error instanceof Error ? error : new Error(String(error));

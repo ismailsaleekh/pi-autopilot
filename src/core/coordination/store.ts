@@ -2656,6 +2656,11 @@ export class CoordinatorStore {
     this.#db.prepare('UPDATE coordination_migrations SET state=?, report_json=?, updated_at=?, version=version+1 WHERE repo_id=? AND migration_id=?').run(state, canonicalJson(report), this.#clock.now().toISOString(), repoId, migrationId);
   }
 
+  terminalRunsForS2RetentionGc(): readonly { readonly repoId: string; readonly workstreamRun: string }[] {
+    this.#writerGuard.assertHeld();
+    return Object.freeze(this.#db.prepare("SELECT repo_id, workstream_run FROM runs WHERE status IN ('closed','aborted') ORDER BY repo_id, workstream_run").all().map((row) => Object.freeze({ repoId: sqlString(row, 'repo_id'), workstreamRun: sqlString(row, 'workstream_run') })) );
+  }
+
   sweepExpiredGrantOffers(): number {
     this.#writerGuard.assertHeld();
     if (activeCoordinationMigrationFreeze(this.#stateRoot) !== null) return 0;

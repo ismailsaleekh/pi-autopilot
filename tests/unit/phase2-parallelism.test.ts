@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { describe, it } from 'node:test';
 
-import type { AutopilotExecutionAudit, AutopilotExecutionCommit, AutopilotReceipt, AutopilotState, AutopilotStatusEntry, AutopilotUnitSpec } from '../../src/core/contracts/index.ts';
+import type { AutopilotExecutionAudit, AutopilotExecutionCommit, AutopilotMasterPlan, AutopilotReceipt, AutopilotState, AutopilotStatusEntry, AutopilotUnitSpec } from '../../src/core/contracts/index.ts';
 import { runAutopilotAgentFromSpecPath } from '../../src/core/agent-runner.ts';
 import { runAutopilotClaimGc } from '../../src/core/claim-gc.ts';
 import { materializeAdditionalReadPathsForSpec, materializeAutopilotSpecPaths } from '../../src/core/materialization.ts';
@@ -248,6 +248,19 @@ void describe('Phase 2 scheduler config and deterministic scheduler', () => {
     assert.ok(skippedReasons.get('u01')?.includes('waiting-for-peer-release'));
     assert.ok(dispatch.skipped.find((unit) => unit.unit_id === 'u01')?.details.includes('claim request claim-request-peer-u01'));
     assert.ok(skippedReasons.get('u03')?.includes('dependency-not-satisfied'));
+  });
+
+  void it('honors durable S2 per-run disk pressure without blocking unrelated scheduler runs', async () => {
+    const runtimeRoot = '/tmp/autopilot-phase2-main/.pi/autopilot/phase2-smoke';
+    const baseSpec = unitSpec({ cwd: process.cwd(), runtimeRoot, unitId: 'u-pressure', ownedPaths: ['src/pressure.ts'] });
+    const state: AutopilotState = { schema_version: 'autopilot.state.v1', workstream: 'phase2-smoke', updated_at: '2026-07-08T00:00:00.000Z', status: 'running', context_gate: { gate: 'ok', percent: 10 }, last_event_id: 0, ready_queue: ['u-pressure'], running: [], blocked: [], completed: [], units: { 'u-pressure': { unit_id: 'u-pressure', role: 'implement', state: 'ready', attempt: 1, summary: 'ready' } }, operator_questions: [], next_actions: [] };
+    const masterPlan: AutopilotMasterPlan = { schema_version: 'autopilot.master_plan.v1', workstream: 'phase2-smoke', mission_ref: 'mission.md', goal_summary: 'phase2', non_goals: [], definition_of_done: [], risk_level: 'medium', lanes: [{ lane_id: 'lane-a', summary: 'lane', unit_ids: ['u-pressure'] }], units: { 'u-pressure': { unit_id: 'u-pressure', role: 'implement', state: 'ready', dependencies: [], summary: 'pressure' } }, ownership_matrix: { owned_paths: [], read_only_paths: [], untouchable_paths: [], held_paths: [] }, verification_matrix: emptyPlan(), closure_criteria: [], current_focus: 'dispatch', last_decision_id: 0, last_event_id: 0, updated_at: '2026-07-08T00:00:00.000Z' };
+    const common = { workstream: 'phase2-smoke', runtimeRoot, contextGate: 'ok' as const, state, masterPlan, config: { schema_version: 'autopilot.scheduler_config.v1' as const, workstream: 'phase2-smoke', parallel_cap: 1, updated_at: '2026-07-08T00:00:00.000Z', updated_by: 'runtime-test' as const }, candidates: [{ unit_id: 'u-pressure', attempt: 1, spec: baseSpec }], runningAttempts: [], activeClaims: [], reservationCoordination: null, now: new Date('2026-07-08T00:00:00.000Z') };
+    const paused = await planNextDispatch({ ...common, s2RetentionPressure: { workstreamRun: 'run-paused', pausedRuns: ['run-paused'] } });
+    assert.deepEqual(paused.selected.map((unit) => unit.unit_id), []);
+    assert.ok(paused.skipped[0]?.reasons.includes('worktree-unavailable'));
+    const unrelated = await planNextDispatch({ ...common, s2RetentionPressure: { workstreamRun: 'run-unrelated', pausedRuns: ['run-paused'] } });
+    assert.deepEqual(unrelated.selected.map((unit) => unit.unit_id), ['u-pressure']);
   });
 });
 

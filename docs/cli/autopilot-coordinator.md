@@ -8,7 +8,7 @@ covers_sources:
   - src/cli/autopilot-coordinator.ts
   - src/cli/autopilot-coordinator-bootstrap.ts
 signature_hash: 'sha256:29d0ffebe8ddb994b739dc1176426a97f475537d0436864b7bf7c28398424d33'
-body_hash: 'sha256:9809f7983db902d74b2203cb31ef525f45c2dc49b9a8aa076ccf609c506719a3'
+body_hash: 'sha256:12df80672690576ea221cb3c7fe04917f545192cc058b2556c2aafec1242eb48'
 stability: stable
 ---
 

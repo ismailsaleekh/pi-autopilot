@@ -2685,6 +2685,10 @@ export class CoordinatorStore {
             throw new CoordinationRuntimeError('invalid-state', 'migration import record is missing or mismatched');
         this.#db.prepare('UPDATE coordination_migrations SET state=?, report_json=?, updated_at=?, version=version+1 WHERE repo_id=? AND migration_id=?').run(state, canonicalJson(report), this.#clock.now().toISOString(), repoId, migrationId);
     }
+    terminalRunsForS2RetentionGc() {
+        this.#writerGuard.assertHeld();
+        return Object.freeze(this.#db.prepare("SELECT repo_id, workstream_run FROM runs WHERE status IN ('closed','aborted') ORDER BY repo_id, workstream_run").all().map((row) => Object.freeze({ repoId: sqlString(row, 'repo_id'), workstreamRun: sqlString(row, 'workstream_run') })));
+    }
     sweepExpiredGrantOffers() {
         this.#writerGuard.assertHeld();
         if (activeCoordinationMigrationFreeze(this.#stateRoot) !== null)

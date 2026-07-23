@@ -14,8 +14,8 @@ covers_sources:
   - src/core/execution-audit/index.ts
   - src/core/prompt-renderer/index.ts
   - src/core/model-roster.ts
-signature_hash: 'sha256:47fe11d6fcd66ed33f128f0590a3f0016f1653ef6ea3646d86eb1c655c7064a3'
-body_hash: 'sha256:fdd2c483b68ac174452b69431618cb515a725fb030530ce03d1b6f0b460a3d41'
+signature_hash: 'sha256:3c5ed87502e9c35a04031217852cd706873011bba1277cd9546e03ced7a603d6'
+body_hash: 'sha256:12cca05d67aab27398f47def55526f71038ed5ac79c2c537c3832317a59d7d19'
 stability: stable
 ---
 
@@ -42,9 +42,10 @@ the runtime behind it.
 ## Scheduler
 
 Within one workstream, file-disjoint dependency-cleared units run in parallel up to
-`parallel_cap` — only through per-unit worktrees. Shared-file or stale-validation risk
-reduces the batch rather than weakening quality. Skips use the explicit
-`waiting-for-peer-release` state and retain exact request refs. See the
+`parallel_cap` — only through per-unit worktrees. Shared-file, stale-validation risk,
+or a durable S2 pressure pause for this run reduces the batch rather than weakening
+quality; a pressure pause for another run is not a scheduler blocker. Skips use the
+explicit `waiting-for-peer-release` state and retain exact request refs. See the
 [defaults table](../INDEX.md#default-constants) for `parallel_cap`. A D65 run carries a
 signed launch policy whose cap fields are authenticated as exactly one; the runtime
 gates child-model spawn and other ordinary boundaries on the accepted complete-graph /

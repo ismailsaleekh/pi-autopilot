@@ -134,6 +134,18 @@
     "src/core/coordination/index.ts": [
       "subsystems/coordination"
     ],
+    "src/core/coordination/s2-owned-gc.ts": [
+      "subsystems/s2-retention"
+    ],
+    "src/core/coordination/s2-retention-archive.ts": [
+      "subsystems/s2-retention"
+    ],
+    "src/core/coordination/s2-retention-policy.ts": [
+      "subsystems/s2-retention"
+    ],
+    "src/core/coordination/s2-retention-state-machine.ts": [
+      "subsystems/s2-retention"
+    ],
     "src/core/disk-gate.ts": [
       "subsystems/worktrees"
     ],
@@ -227,7 +239,7 @@
         "src/cli/autopilot-agent-run.ts"
       ],
       "signature_hash": "sha256:6a2b2a4d670b47bf0757d6cd542538122a0183d625023be72212d51161cfee73",
-      "body_hash": "sha256:3c1559deb04c48210b6757dccea5b763bb55e8797999e472f95f87d2dc7f8de9",
+      "body_hash": "sha256:247c9228a410e7156c9762ed3b6315024520cb445f813ffb83f331a712ca5606",
       "semantic_attestation": null
     },
     "cli/autopilot-coordinator": {
@@ -242,7 +254,7 @@
         "src/cli/autopilot-coordinator.ts"
       ],
       "signature_hash": "sha256:29d0ffebe8ddb994b739dc1176426a97f475537d0436864b7bf7c28398424d33",
-      "body_hash": "sha256:9809f7983db902d74b2203cb31ef525f45c2dc49b9a8aa076ccf609c506719a3",
+      "body_hash": "sha256:12df80672690576ea221cb3c7fe04917f545192cc058b2556c2aafec1242eb48",
       "semantic_attestation": null
     },
     "commands/autopilot": {
@@ -527,7 +539,7 @@
         "src/core/worktree-cleanup.ts"
       ],
       "signature_hash": "sha256:008aa231a2414d2bcb29cc62696f7587634857ea043568428bd1f286fbc446b9",
-      "body_hash": "sha256:1c4821ee2baa48c290ddd6974e45fe6baea85d1177b8c82ba5c44a266b9543e3",
+      "body_hash": "sha256:37f3e2e8f4fe2ff9981b908520ba26054d6d5009a659e675d01837942d59b5af",
       "semantic_attestation": null
     },
     "subsystems/contracts-and-schemas": {
@@ -569,7 +581,7 @@
         "src/core/coordination/index.ts"
       ],
       "signature_hash": "sha256:7dcfdcc868f120781150ae32025fae87d3b683d3a8f20a6a4c29665c6fafa656",
-      "body_hash": "sha256:4c39eddae3f6182bf47cfb73b4472158c477ced0099020f4a742b6812c918466",
+      "body_hash": "sha256:d3765b85755ceb642c79c5101364c4d81bc2013fb881deb8a5ba6cee102be0cd",
       "semantic_attestation": null
     },
     "subsystems/docs-freshness-gate": {
@@ -616,8 +628,23 @@
         "src/core/scheduler.ts",
         "src/core/unit-failure.ts"
       ],
-      "signature_hash": "sha256:47fe11d6fcd66ed33f128f0590a3f0016f1653ef6ea3646d86eb1c655c7064a3",
-      "body_hash": "sha256:fdd2c483b68ac174452b69431618cb515a725fb030530ce03d1b6f0b460a3d41",
+      "signature_hash": "sha256:3c5ed87502e9c35a04031217852cd706873011bba1277cd9546e03ced7a603d6",
+      "body_hash": "sha256:12cca05d67aab27398f47def55526f71038ed5ac79c2c537c3832317a59d7d19",
+      "semantic_attestation": null
+    },
+    "subsystems/s2-retention": {
+      "mode": "authored",
+      "review_policy": "behavioral",
+      "stability": "evolving",
+      "covers_surfaces": [],
+      "covers_sources": [
+        "src/core/coordination/s2-owned-gc.ts",
+        "src/core/coordination/s2-retention-archive.ts",
+        "src/core/coordination/s2-retention-policy.ts",
+        "src/core/coordination/s2-retention-state-machine.ts"
+      ],
+      "signature_hash": "sha256:6da8b9ce219aecd3f9731d08178a7816a374c07eb594f700c5085df479d89b0b",
+      "body_hash": "sha256:eb54e61fe6d4546da08714f801d54e7a6e7ad87c1056f479d1bba761bdf76504",
       "semantic_attestation": null
     },
     "subsystems/worktrees": {
@@ -635,7 +662,7 @@
         "src/core/sparse-worktree.ts"
       ],
       "signature_hash": "sha256:82853603ad9b97c2a62ec6f2374efb085e1db7f7ae15d7af9a3d4cae2abde577",
-      "body_hash": "sha256:34615d7f7346ada422a3b9c839065014eca3cee4ff7c8229acde5650afefe6f6",
+      "body_hash": "sha256:2e92362af85b23cb5d955444effc2e51200b92a15d9942ce67473531c0164944",
       "semantic_attestation": null
     },
     "tools/autopilot_emit_status": {
