@@ -891,7 +891,7 @@ export function kimiRosterInventory(): RosterInventory {
   });
 }
 
-export function trustedKimiW4ManifestFixture(): { readonly manifest: QualificationManifest } {
+export function selfHashedKimiW4ManifestFixture(): { readonly manifest: QualificationManifest } {
   const recipe = mustRecipe('kimi-coding-plan');
   const route = liveW3EvidenceRef('kimi-coding-plan-entitlement-proof', 'route-proof', 'plan-entitlement');
   const billing = liveW3EvidenceRef('kimi-coding-billing-route-proof', 'billing-proof', 'billing-route');

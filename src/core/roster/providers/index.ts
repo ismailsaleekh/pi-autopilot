@@ -109,10 +109,6 @@ const EMPTY_REFS: readonly EvidenceRef[] = Object.freeze([]);
 const EMPTY_DIGESTS: readonly Digest[] = Object.freeze([]);
 const EMPTY_IDS: readonly string[] = Object.freeze([]);
 
-export const KIMI_CODING_W4_TRUSTED_MANIFEST_ID = 'kimi-coding-plan-w4-qualified-v1' as const;
-export const KIMI_CODING_W4_TRUSTED_MANIFEST_SHA256 = 'sha256:b9c47f94102c0fbb80c5a6d05210872892d911fcc37b5d56384d1cb4274d5d0a' as Digest;
-export const KIMI_CODING_W4_TRUSTED_CERTIFIED_ROSTER_SHA256 = 'sha256:f658072d595c53197b70a0e1e37dc41ef5cdca51aca2206f27676a82dc73992f' as Digest;
-
 export const W4_PROVIDER_PACK_REGISTRY: readonly W4ProviderPackRegistryEntry[] = Object.freeze([
   Object.freeze({
     provider_pack_id: String(ANTHROPIC_PROVIDER_PACK_ID),
@@ -153,9 +149,9 @@ export const W4_PROVIDER_PACK_REGISTRY: readonly W4ProviderPackRegistryEntry[] =
     route_policy_revision: KIMI_CODING_ROUTE_POLICY_REVISION,
     ready_profiles: Object.freeze(['precision']),
     required_evidence: KIMI_CODING_REQUIRED_EVIDENCE_REFS,
-    trusted_manifest_ids: Object.freeze([KIMI_CODING_W4_TRUSTED_MANIFEST_ID]),
-    trusted_manifest_sha256s: Object.freeze([KIMI_CODING_W4_TRUSTED_MANIFEST_SHA256]),
-    trusted_certified_roster_sha256s: Object.freeze([KIMI_CODING_W4_TRUSTED_CERTIFIED_ROSTER_SHA256]),
+    trusted_manifest_ids: EMPTY_IDS,
+    trusted_manifest_sha256s: EMPTY_DIGESTS,
+    trusted_certified_roster_sha256s: EMPTY_DIGESTS,
     live_w3_uri_prefix: 'w3-evidence://phase37/kimi-coding/',
     readiness: 'strict-w3-manifest' as const,
   }),

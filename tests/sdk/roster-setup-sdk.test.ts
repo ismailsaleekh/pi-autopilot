@@ -11,7 +11,7 @@ import {
   kimiRosterInventory,
   requireCandidateSet,
   rosterToolRequest,
-  trustedKimiW4ManifestFixture,
+  selfHashedKimiW4ManifestFixture,
   withRosterSetupHarness,
   type RosterToolRequestLike,
 } from '../helpers/roster-setup-harness.ts';
@@ -86,21 +86,14 @@ void describe('Phase 37 W2 roster setup Pi SDK proof lane', () => {
     });
   });
 
-  void it('rejects stale approvals, then saves only a registry-verified W4-ready subset and default tuple', async () => {
-    const trusted = trustedKimiW4ManifestFixture();
+  void it('keeps a shaped but untrusted Kimi manifest unlaunchable and blocks save without writes', async () => {
+    const fixture = selfHashedKimiW4ManifestFixture();
     await withRosterSetupHarness(async (harness) => {
       harness.activateSetup();
       const proposal = await harness.invoke('propose');
       const candidateSet = requireCandidateSet(proposal);
-      const ready = candidateSet.candidates.find((candidate) => candidate.launch_readiness === 'w4-certified-ready');
-      if (ready === undefined) throw new Error('expected trusted manifest to promote a ready Kimi candidate');
-      const approval = harness.hostApprove(proposal, {
-        approved_roster_sha256s: [ready.roster_sha256],
-        default_roster_id: ready.roster_id,
-        default_roster_revision: ready.roster_revision,
-        default_roster_sha256: ready.roster_sha256,
-      });
-      assert.deepEqual(approval.approved_roster_sha256s, [ready.roster_sha256]);
+      assert.equal(candidateSet.candidates.some((candidate) => candidate.launch_readiness === 'w4-certified-ready'), false);
+      const approval = harness.hostApprove(proposal);
 
       const stale = await harness.saveWithApproval(approval, { candidate_set_sha256: STALE_SHA });
       assert.equal(stale.ok, false);
@@ -112,51 +105,22 @@ void describe('Phase 37 W2 roster setup Pi SDK proof lane', () => {
       assert.equal(harness.counters.saveCapabilityCalls, 0, 'stale save must not reach storage');
       assert.deepEqual(await harness.stateFiles(), []);
 
-      const saved = await harness.saveWithApproval(approval);
-      assert.equal(saved.ok, true);
-      assert.equal(saved.status, 'saved');
-      assert.equal(saved.write_count, approval.approved_roster_sha256s.length + 1);
-      assert.equal(saved.lock_count, 1);
-      assert.equal(harness.counters.saveCapabilityCalls, 1);
-      assert.equal(saved.receipt?.fresh_session_required, true);
-      assert.equal(saved.receipt?.zero_secrets, true);
-      assert.equal(saved.receipt?.original_command, harness.originalCommand);
-      assert.deepEqual(saved.receipt?.approved_roster_sha256s, approval.approved_roster_sha256s);
-      assertSecretFree(saved, SECRET_MARKER);
-
-      const config = await harness.publishedConfig();
-      assert.deepEqual(config.rosters.map((roster) => roster.roster_sha256), approval.approved_roster_sha256s);
-      assert.equal(config.default_roster_id, approval.default_roster_id);
-      assert.equal(config.default_roster_revision, approval.default_roster_revision);
-      assert.equal(config.default_roster_sha256, approval.default_roster_sha256);
-      assert.equal(config.rosters.filter((roster) => (
-        roster.roster_id === approval.default_roster_id &&
-        roster.roster_revision === approval.default_roster_revision &&
-        roster.roster_sha256 === approval.default_roster_sha256
-      )).length, 1);
-      assert.deepEqual(
-        saved.files_touched.map((file) => file.endsWith('config.json') ? 'config' : 'roster').sort(),
-        [...approval.approved_roster_sha256s.map(() => 'roster'), 'config'].sort(),
-      );
-
-      const approvalSave = harness.lastApprovalSaveResult;
-      if (approvalSave === null) throw new Error('expected approval save result');
-      assert.equal(approvalSave.retry_command, harness.originalCommand);
-      assert.equal(approvalSave.restart_required, true);
-      assert.equal(approvalSave.auto_start_allowed, false);
-      assert.equal(approvalSave.same_session_save_allowed, false);
-      assert.equal(approvalSave.receipt_emitted_after_readback, true);
-
-      const replay = await harness.saveWithApproval(approval);
-      assert.equal(replay.ok, false);
-      assert.equal(replay.status, 'blocked');
-      assert.deepEqual(diagnosticCodes(replay), ['ROSTER_APPROVAL_STALE_CANDIDATE_SET']);
-      assert.equal(replay.write_count, 0);
-      assert.equal(harness.counters.saveCapabilityCalls, 1, 'approval-token replay must not reach storage');
+      const blocked = await harness.saveWithApproval(approval);
+      assert.equal(blocked.ok, false);
+      assert.equal(blocked.status, 'blocked');
+      assert.ok(diagnosticCodes(blocked).includes('ROSTER_QUALIFICATION_REQUIRED'));
+      assert.equal(blocked.write_count, 0);
+      assert.equal(blocked.lock_count, 0);
+      assert.deepEqual(blocked.files_touched, []);
+      assert.equal(blocked.receipt, null);
+      assert.equal(harness.lastApprovalSaveResult, null);
+      assert.equal(harness.counters.saveCapabilityCalls, 0, 'uncertified manifest save must not reach storage');
+      assert.deepEqual(await harness.stateFiles(), []);
+      assertSecretFree(blocked, SECRET_MARKER);
       assertNoRunWorktreeCoordinatorOrSpend(harness.sideEffectsSnapshot());
     }, {
       inventory: kimiRosterInventory(),
-      qualificationManifests: [trusted.manifest],
+      qualificationManifests: [fixture.manifest],
     });
   });
 
