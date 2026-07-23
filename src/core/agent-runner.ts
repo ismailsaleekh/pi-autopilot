@@ -23,7 +23,6 @@ import {
   buildAutopilotProviderIdentityFromRequestProfile,
   buildAutopilotStatusToolContext,
   deriveAutopilotArtifactRoot,
-  lowerAutopilotUnitSpecV2ToV1,
   parseAutopilotStatusToolContext,
   sha256Buffer,
   splitAutopilotModelId,
@@ -95,12 +94,12 @@ import {
   type AutopilotForcedOutputContract,
   type AutopilotRenderedPrompt,
 } from './prompt-renderer/index.ts';
-import { autopilotModelAssignmentForRole } from './model-roster.ts';
 import { recoverRuntimeRosterSelection, runtimeRosterSnapshotPath } from './roster/snapshot.ts';
 import { preRunSelectionPath, resolveRosterScopePaths, rosterRevisionPath, type RosterSha256 } from './roster/paths.ts';
 import { computeAutopilotRosterContractObjectHash, parseAutopilotHistoricalFixedRosterAdapterResult, parseAutopilotRoster } from './roster/contracts.ts';
 import { bytesEqual, parseCanonicalPreRunSelectionBytes, type RunSelectionDiagnostic } from './roster/run-selection.ts';
 import { assertUnitSpecMatchesPinnedFacts, resolvePinnedRoleRuntimeFacts } from './roster/runtime-spec.ts';
+import { unitSpecAuthorityProjection, type AutopilotRuntimeUnitSpec } from './roster/runtime-consumers.ts';
 
 type JsonRecord = Readonly<Record<string, unknown>>;
 type ProcessEnv = Readonly<Record<string, string | undefined>>;
@@ -147,7 +146,7 @@ export type AutopilotAgentRunStatus = 'dry-run' | 'success';
 
 export interface AutopilotAgentRunResult {
   readonly status: AutopilotAgentRunStatus;
-  readonly spec: AutopilotUnitSpec;
+  readonly spec: AutopilotRuntimeUnitSpec;
   readonly statusEntry: AutopilotStatusEntry | null;
   readonly statusOutput: string;
   readonly receiptOutput: string;
@@ -314,8 +313,11 @@ interface ChildAuthorityLifecycle {
 }
 
 interface AutopilotAgentRunSpecBundle {
-  readonly unitSpec: AutopilotUnitSpec;
-  readonly originalSpec: AutopilotUnitSpec | AutopilotUnitSpecV2;
+  /** Original runtime artifact identity: v2 stays v2 until a strict v2-aware consumer sees it. */
+  readonly unitSpec: AutopilotRuntimeUnitSpec;
+  /** Narrow v1-era mechanics view for legacy forced-output, authority, claims, and commit code only. */
+  readonly authoritySpec: AutopilotUnitSpec;
+  readonly originalSpec: AutopilotRuntimeUnitSpec;
   readonly rosterExecutionIdentity: AutopilotRosterExecutionIdentity | null;
 }
 
@@ -372,9 +374,9 @@ async function runAutopilotAgentFromSpecPathInternal(
 ): Promise<AutopilotAgentRunResult> {
   const env = { ...process.env, ...(options.env ?? {}) };
   let specBundle = await readAndValidateSpec(specPath, options, env);
-  const spec = specBundle.unitSpec;
+  const spec = specBundle.authoritySpec;
   if (options.dryRun !== true) await assertD65OrdinaryBoundaryFromEnvironment('runner-preflight', env);
-  const runtimePreflight = await preflightSpec(spec, specPath, {
+  const runtimePreflight = await preflightSpec(specBundle, specPath, {
     skipStaleOutputCheck: options.dryRun === true,
     skipClaimAcquire: options.dryRun === true,
     skipSagaRecovery: options.dryRun === true,
@@ -406,7 +408,7 @@ async function runAutopilotAgentFromSpecPathInternal(
   if (options.dryRun !== true) await assertD65OrdinaryBoundaryFromEnvironment('post-acquisition-output', env);
   const auditBaseline = await captureAutopilotExecutionBaseline(spec.cwd);
   lifecycle.auditBaseline = auditBaseline;
-  const auditOutput = deriveAutopilotExecutionAuditPath(spec);
+  const auditOutput = deriveAutopilotExecutionAuditPath(specBundle.unitSpec, { allowLegacyV1RuntimeSpec: isLegacyV1RuntimeSpecBundle(specBundle) });
   const contextPath = deriveAutopilotStatusContextPath(spec);
   await writeStatusContext(contextPath, context);
 
@@ -449,7 +451,7 @@ async function runAutopilotAgentFromSpecPathInternal(
   if (options.dryRun === true) {
     return ({
       status: 'dry-run',
-      spec,
+      spec: specBundle.unitSpec,
       statusEntry: null,
       statusOutput: spec.status_output,
       receiptOutput: spec.receipt_output,
@@ -501,7 +503,7 @@ async function runAutopilotAgentFromSpecPathInternal(
     piResult = await runPiPromptWithStatusCarrier(spawnSpec, rendered.text);
   } catch (error) {
     if (error instanceof AutopilotPiRunError) {
-      const audit = await writeAttemptAudit(spec, runtimePreflight.context, runtimePreflight.authority, auditBaseline, null, auditOutput, env);
+      const audit = await writeAttemptAudit(specBundle, runtimePreflight.context, runtimePreflight.authority, auditBaseline, null, auditOutput, env);
       throw new AutopilotAgentRunError('pi-spawn-failed', {
         reason: `Pi spawn failed before valid Autopilot status acceptance: ${error.code}: ${error.message}${formatPiRunErrorDiagnostics(error)}`,
         specPath,
@@ -523,7 +525,7 @@ async function runAutopilotAgentFromSpecPathInternal(
       piResult,
     });
   } catch (error) {
-    const audit = await writeAttemptAudit(spec, runtimePreflight.context, runtimePreflight.authority, auditBaseline, null, auditOutput, env);
+    const audit = await writeAttemptAudit(specBundle, runtimePreflight.context, runtimePreflight.authority, auditBaseline, null, auditOutput, env);
     throw new AutopilotAgentRunError('invalid-structured-output', {
       reason: `execution identity observer failed before terminal acceptance: ${redactSensitiveText(errorMessage(error))}`,
       specPath,
@@ -543,7 +545,7 @@ async function runAutopilotAgentFromSpecPathInternal(
       ...(specBundle.rosterExecutionIdentity === null ? {} : { rosterExecutionIdentity: specBundle.rosterExecutionIdentity, observedExecution }),
     });
   } catch (error) {
-    const audit = await writeAttemptAudit(spec, runtimePreflight.context, runtimePreflight.authority, auditBaseline, null, auditOutput, env);
+    const audit = await writeAttemptAudit(specBundle, runtimePreflight.context, runtimePreflight.authority, auditBaseline, null, auditOutput, env);
     if (piResult.isError) {
       throw new AutopilotAgentRunError('pi-spawn-failed', {
         reason: `Pi session returned an error result before valid Autopilot status acceptance: ${formatPiResultFailureDiagnostics(piResult)}`,
@@ -581,7 +583,7 @@ async function runAutopilotAgentFromSpecPathInternal(
     });
   }
 
-  const audit = await writeAttemptAudit(spec, runtimePreflight.context, runtimePreflight.authority, auditBaseline, evidence.status, auditOutput, env);
+  const audit = await writeAttemptAudit(specBundle, runtimePreflight.context, runtimePreflight.authority, auditBaseline, evidence.status, auditOutput, env);
 
   try {
     validateAutopilotEmitStatusCarrier(
@@ -724,7 +726,7 @@ async function runAutopilotAgentFromSpecPathInternal(
 
   return ({
     status: 'success',
-    spec,
+    spec: specBundle.unitSpec,
     statusEntry: evidence.status,
     statusOutput: spec.status_output,
     receiptOutput: spec.receipt_output,
@@ -796,14 +798,14 @@ async function readAndValidateSpec(
   try {
     if (isJsonRecord(parsed) && parsed['schema_version'] === 'autopilot.unit_spec.v2') {
       const originalSpec = parseAutopilotUnitSpecV2(parsed);
-      const unitSpec = lowerAutopilotUnitSpecV2ToV1(originalSpec);
-      assertV2LaunchQualityGate(unitSpec);
-      return { unitSpec, originalSpec, rosterExecutionIdentity: null };
+      assertV2LaunchQualityGate(originalSpec);
+      const authoritySpec = unitSpecAuthorityProjection(originalSpec);
+      return { unitSpec: originalSpec, authoritySpec, originalSpec, rosterExecutionIdentity: null };
     }
     const spec = parseAutopilotUnitSpec(parsed);
     assertV1SpecHasGrandfatherAuthority({ specPath, specBytes, options, env });
     assertAutopilotSpecQualityGate(spec);
-    return { unitSpec: spec, originalSpec: spec, rosterExecutionIdentity: null };
+    return { unitSpec: spec, authoritySpec: spec, originalSpec: spec, rosterExecutionIdentity: null };
   } catch (error) {
     throw new AutopilotAgentRunError('spec-invalid', {
       reason: errorMessage(error),
@@ -880,7 +882,7 @@ async function authenticateSpecBundleAfterPreflight(input: {
   if (!isUnitSpecV2(input.specBundle.originalSpec)) return input.specBundle;
   try {
     const originalSpec = input.specBundle.originalSpec;
-    const spec = input.specBundle.unitSpec;
+    const spec = input.specBundle.authoritySpec;
     const stateRoot = input.env[AUTOPILOT_STATE_ROOT_ENV];
     const selection = await recoverAuthenticatedV2Selection({
       stateRoot,
@@ -917,8 +919,8 @@ async function authenticateSpecBundleAfterPreflight(input: {
     throw new AutopilotAgentRunError('spec-invalid', {
       reason: `unit_spec.v2 failed external roster/selection authentication before model spend: ${errorMessage(error)}`,
       specPath: input.specPath,
-      statusOutput: input.specBundle.unitSpec.status_output,
-      receiptOutput: input.specBundle.unitSpec.receipt_output,
+      statusOutput: input.specBundle.authoritySpec.status_output,
+      receiptOutput: input.specBundle.authoritySpec.receipt_output,
     });
   }
 }
@@ -1051,16 +1053,25 @@ function formatRunSelectionDiagnostics(diagnostics: readonly { readonly code: st
   return diagnostics.map((diagnostic) => `${diagnostic.code}${diagnostic.severity === undefined ? '' : `:${diagnostic.severity}`}`).join(', ');
 }
 
-function isUnitSpecV2(value: AutopilotUnitSpec | AutopilotUnitSpecV2): value is AutopilotUnitSpecV2 {
+function isUnitSpecV2(value: AutopilotRuntimeUnitSpec): value is AutopilotUnitSpecV2 {
   return value.schema_version === 'autopilot.unit_spec.v2';
 }
 
-function assertV2LaunchQualityGate(spec: AutopilotUnitSpec): void {
+function isLegacyV1RuntimeSpecBundle(bundle: AutopilotAgentRunSpecBundle): boolean {
+  return bundle.unitSpec.schema_version === 'autopilot.unit_spec.v1';
+}
+
+function requireSpecBundleUnitSpecV2(bundle: AutopilotAgentRunSpecBundle): AutopilotUnitSpecV2 {
+  if (isUnitSpecV2(bundle.unitSpec)) return bundle.unitSpec;
+  throw new Error('unit_spec.v2 roster execution identity cannot be attached to historical unit_spec.v1');
+}
+
+function assertV2LaunchQualityGate(spec: AutopilotUnitSpec | AutopilotUnitSpecV2): void {
   const issues: string[] = [];
-  if (spec.quality_profile === undefined) issues.push('quality_profile is required before child launch');
-  if (spec.risk_level === undefined) issues.push('risk_level is required before child launch');
+  if (spec.quality_profile === undefined || spec.quality_profile === null) issues.push('quality_profile is required before child launch');
+  if (spec.risk_level === undefined || spec.risk_level === null) issues.push('risk_level is required before child launch');
   if (spec.acceptance_criteria === undefined || spec.acceptance_criteria.length === 0) issues.push('acceptance_criteria must contain at least one criterion before child launch');
-  if (spec.verification_plan === undefined) issues.push('verification_plan is required before child launch');
+  if (spec.verification_plan === undefined || spec.verification_plan === null) issues.push('verification_plan is required before child launch');
   if (spec.closure_criteria === undefined || spec.closure_criteria.length === 0) issues.push('closure_criteria must contain at least one criterion before child launch');
   if ((spec.role === 'implement' || spec.role === 'fix') && spec.owned_paths.length === 0) issues.push(`${spec.role} specs require at least one owned path`);
   if ((spec.role === 'validate' || spec.role === 'bughunt') && spec.validation_commands.length === 0) issues.push(`${spec.role} specs require at least one validation command`);
@@ -1076,18 +1087,13 @@ async function renderAndMaybeWritePromptForSpecBundle(input: {
   if (input.specBundle.rosterExecutionIdentity === null) {
     return await renderAndMaybeWriteAutopilotPromptSnapshot({
       spec: input.specBundle.unitSpec,
+      allowLegacyV1RuntimeSpec: isLegacyV1RuntimeSpecBundle(input.specBundle),
       ...(input.coordinationAppendix === undefined ? {} : { coordinationAppendix: input.coordinationAppendix }),
       ...(input.forceSnapshot === undefined ? {} : { forceSnapshot: input.forceSnapshot }),
     });
   }
 
-  const spec = input.specBundle.unitSpec;
-  const fixedAssignment = autopilotModelAssignmentForRole(spec.role);
-  const renderSpec: AutopilotUnitSpec = {
-    ...spec,
-    model: fixedAssignment.model,
-    thinking: fixedAssignment.thinking,
-  };
+  const spec = requireSpecBundleUnitSpecV2(input.specBundle);
   const forcedOutputContract: AutopilotForcedOutputContract = {
     tool_name: AUTOPILOT_STATUS_TOOL,
     schema_version: 'autopilot.status.v1',
@@ -1099,29 +1105,12 @@ async function renderAndMaybeWritePromptForSpecBundle(input: {
     receipt_output: spec.receipt_output,
     provider_identity: input.providerIdentity,
   };
-  const rendered = await renderAndMaybeWriteAutopilotPromptSnapshot({
-    spec: renderSpec,
-    forceSnapshot: false,
+  return await renderAndMaybeWriteAutopilotPromptSnapshot({
+    spec,
     forcedOutputContract,
     ...(input.coordinationAppendix === undefined ? {} : { coordinationAppendix: input.coordinationAppendix }),
+    ...(input.forceSnapshot === undefined ? {} : { forceSnapshot: input.forceSnapshot }),
   });
-  const text = rewriteRenderedPromptModelIdentity(rendered.text, renderSpec, spec);
-  const shouldWrite = input.forceSnapshot === true || spec.render_prompt_snapshot === true;
-  if (!shouldWrite) return { text, snapshotPath: null };
-  const snapshotPath = deriveAutopilotPromptSnapshotPath(spec);
-  await mkdir(dirname(snapshotPath), { recursive: true });
-  await writeFile(snapshotPath, `${text}\n`, 'utf8');
-  return { text, snapshotPath };
-}
-
-function rewriteRenderedPromptModelIdentity(
-  text: string,
-  renderSpec: AutopilotUnitSpec,
-  requestedSpec: AutopilotUnitSpec,
-): string {
-  return text
-    .replace(`- model: \`${renderSpec.model}\``, `- model: \`${requestedSpec.model}\``)
-    .replace(`- thinking: \`${renderSpec.thinking}\``, `- thinking: \`${requestedSpec.thinking}\``);
 }
 
 async function observeExecutionIdentityForRoster(input: {
@@ -1229,13 +1218,14 @@ interface RuntimePreflightOptions {
 }
 
 async function preflightSpec(
-  spec: AutopilotUnitSpec,
+  specBundle: AutopilotAgentRunSpecBundle,
   specPath: string,
   options: RuntimePreflightOptions = {},
 ): Promise<RuntimePreflightResult> {
+  const spec = specBundle.authoritySpec;
   const preparedWorktree = await prepareMissingSourceChangingUnitWorktree(spec, options.env ?? process.env, options.skipSagaRecovery === true);
   try {
-    return await preflightSpecAfterWorktreePreparation(spec, specPath, options);
+    return await preflightSpecAfterWorktreePreparation(specBundle, specPath, options);
   } catch (error) {
     if (preparedWorktree.created) {
       try {
@@ -1249,10 +1239,11 @@ async function preflightSpec(
 }
 
 async function preflightSpecAfterWorktreePreparation(
-  spec: AutopilotUnitSpec,
+  specBundle: AutopilotAgentRunSpecBundle,
   specPath: string,
   options: RuntimePreflightOptions = {},
 ): Promise<RuntimePreflightResult> {
+  const spec = specBundle.authoritySpec;
   try {
     await access(spec.cwd, fsConstants.R_OK);
   } catch (error) {
@@ -1304,7 +1295,12 @@ async function preflightSpecAfterWorktreePreparation(
   }
 
   if (options.skipClaimAcquire !== true) {
-    await assertAutopilotSpecMaterializationDiskGate({ context: runtimeContext, spec, authority }).catch((error: unknown) => {
+    await assertAutopilotSpecMaterializationDiskGate({
+      context: runtimeContext,
+      spec: specBundle.unitSpec,
+      authority,
+      allowLegacyV1RuntimeSpec: isLegacyV1RuntimeSpecBundle(specBundle),
+    }).catch((error: unknown) => {
       if (error instanceof Error) {
         throw new AutopilotAgentRunError('spec-invalid', {
           reason: error.message,
@@ -1367,10 +1363,11 @@ async function preflightSpecAfterWorktreePreparation(
     if (options.skipClaimAcquire !== true) {
       await assertD65OrdinaryBoundaryFromEnvironment('post-acquisition-output', options.env ?? process.env);
       await materializeAutopilotSpecPaths({
-      context: runtimeContext,
-      spec,
-      authority,
-      reason: 'autopilot-agent-run preflight materialization',
+        context: runtimeContext,
+        spec: specBundle.unitSpec,
+        authority,
+        reason: 'autopilot-agent-run preflight materialization',
+        allowLegacyV1RuntimeSpec: isLegacyV1RuntimeSpecBundle(specBundle),
         ...(options.env === undefined ? {} : { env: options.env }),
       });
     }
@@ -1553,7 +1550,7 @@ async function writeStatusContext(path: string, context: AutopilotStatusToolCont
 }
 
 async function writeAttemptAudit(
-  spec: AutopilotUnitSpec,
+  specBundle: AutopilotAgentRunSpecBundle,
   context: ActiveAutopilotContext,
   authority: AutopilotAuthorityArtifact,
   baseline: AutopilotExecutionBaseline,
@@ -1561,12 +1558,14 @@ async function writeAttemptAudit(
   auditPath: string,
   env: ProcessEnv,
 ): Promise<AutopilotExecutionAudit> {
-  const readOnlyPaths = await expandedReadOnlyPathsForAudit({ context, spec, authority, env });
+  const allowLegacyV1RuntimeSpec = isLegacyV1RuntimeSpecBundle(specBundle);
+  const readOnlyPaths = await expandedReadOnlyPathsForAudit({ context, spec: specBundle.unitSpec, authority, env, allowLegacyV1RuntimeSpec });
   return await writeAutopilotExecutionAudit({
-    unitSpec: { ...spec, read_only_paths: readOnlyPaths },
+    unitSpec: { ...specBundle.unitSpec, read_only_paths: readOnlyPaths },
     baseline,
     statusEntry,
     auditPath,
+    allowLegacyV1RuntimeSpec,
   });
 }
 

@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, normalize, relative, resolve, sep } from 'node:path';
 
-import { parseAutopilotExecutionAudit } from '../contracts/index.ts';
+import { parseAutopilotExecutionAudit, parseAutopilotUnitSpec } from '../contracts/index.ts';
 import {
   AUTOPILOT_EXECUTION_AUDIT_PATH_SET_VALUES,
   type AutopilotAuditClassification,
@@ -43,6 +43,22 @@ interface BoundedAuditPathSet {
 
 const EXECUTION_AUDIT_PATH_SET_LIMIT = 500;
 
+interface ExecutionAuditRuntimeSpecContext {
+  readonly unit_spec: AutopilotRuntimeUnitSpec;
+}
+
+function executionAuditRuntimeSpec(
+  spec: AutopilotRuntimeUnitSpec,
+  options: { readonly allowLegacyV1RuntimeSpec?: boolean } = {},
+): ExecutionAuditRuntimeSpecContext {
+  try {
+    return Object.freeze({ unit_spec: parseNewRunRuntimeUnitSpec(spec).unit_spec });
+  } catch (error) {
+    if (options.allowLegacyV1RuntimeSpec !== true || spec.schema_version !== 'autopilot.unit_spec.v1') throw error;
+    return Object.freeze({ unit_spec: parseAutopilotUnitSpec(spec) });
+  }
+}
+
 export async function captureAutopilotExecutionBaseline(
   cwd: string,
 ): Promise<AutopilotExecutionBaseline> {
@@ -56,8 +72,8 @@ export async function captureAutopilotExecutionBaseline(
   });
 }
 
-export function deriveAutopilotExecutionAuditPath(spec: AutopilotRuntimeUnitSpec): string {
-  const unitSpec = parseNewRunRuntimeUnitSpec(spec).unit_spec;
+export function deriveAutopilotExecutionAuditPath(spec: AutopilotRuntimeUnitSpec, options: { readonly allowLegacyV1RuntimeSpec?: boolean } = {}): string {
+  const unitSpec = executionAuditRuntimeSpec(spec, options).unit_spec;
   return resolve(
     deriveAutopilotArtifactRootFromStatus(unitSpec.status_output),
     'execution-audits',
@@ -70,18 +86,20 @@ export async function writeAutopilotExecutionAudit(input: {
   readonly baseline: AutopilotExecutionBaseline;
   readonly statusEntry: AutopilotStatusEntry | null;
   readonly auditPath?: string;
+  readonly allowLegacyV1RuntimeSpec?: boolean;
 }): Promise<AutopilotExecutionAudit> {
-  const unitSpec = parseNewRunRuntimeUnitSpec(input.unitSpec).unit_spec;
+  const unitSpec = executionAuditRuntimeSpec(input.unitSpec, input).unit_spec;
   const postRun = readGitStatusSnapshot(unitSpec.cwd);
   const audit = buildAutopilotExecutionAudit({
     unitSpec,
     baseline: input.baseline,
     postRun,
     statusEntry: input.statusEntry,
+    allowLegacyV1RuntimeSpec: input.allowLegacyV1RuntimeSpec === true,
   });
   const parsed = parseAutopilotExecutionAudit(audit);
-  await writeRosterRuntimeIdentityEvidence(unitSpec);
-  const auditPath = input.auditPath ?? deriveAutopilotExecutionAuditPath(unitSpec);
+  if (runtimeSpecRosterIdentity(unitSpec) !== null) await writeRosterRuntimeIdentityEvidence(unitSpec);
+  const auditPath = input.auditPath ?? deriveAutopilotExecutionAuditPath(unitSpec, input);
   await mkdir(dirname(auditPath), { recursive: true });
   await writeFile(auditPath, `${JSON.stringify(parsed, null, 2)}\n`, 'utf8');
   return parsed;
@@ -92,8 +110,9 @@ export function buildAutopilotExecutionAudit(input: {
   readonly baseline: AutopilotExecutionBaseline;
   readonly postRun: GitStatusSnapshot;
   readonly statusEntry: AutopilotStatusEntry | null;
+  readonly allowLegacyV1RuntimeSpec?: boolean;
 }): AutopilotExecutionAudit {
-  const unitSpec = parseNewRunRuntimeUnitSpec(input.unitSpec).unit_spec;
+  const unitSpec = executionAuditRuntimeSpec(input.unitSpec, input).unit_spec;
   const auditAvailable = input.baseline.available && input.postRun.available;
   const runtimeRoot = runtimeRootRelativePrefix(unitSpec);
   const baselineDirtyPathsFull = auditAvailable
@@ -191,7 +210,7 @@ export function buildAutopilotExecutionAudit(input: {
     status_reported_commands: statusReportedCommands,
     command_coverage_gaps: commandCoverageGaps,
     classification,
-    evidence_refs: [rosterRuntimeIdentityEvidenceRef(unitSpec)],
+    evidence_refs: runtimeSpecRosterIdentity(unitSpec) === null ? [] : [rosterRuntimeIdentityEvidenceRef(unitSpec)],
     summary: auditSummary({
       classification,
       auditAvailable,
@@ -416,22 +435,19 @@ function deriveAutopilotArtifactRootFromStatus(statusOutput: string): string {
   return root;
 }
 
-function runtimeRootRelativePrefix(spec: AutopilotRuntimeUnitSpec): string {
-  const unitSpec = parseNewRunRuntimeUnitSpec(spec).unit_spec;
+function runtimeRootRelativePrefix(unitSpec: AutopilotRuntimeUnitSpec): string {
   const runtimeRoot = deriveAutopilotArtifactRootFromStatus(unitSpec.status_output);
   const rel = relative(unitSpec.cwd, runtimeRoot).split(sep).join('/');
   return rel.length === 0 || rel.startsWith('..') ? `.pi/autopilot/${unitSpec.workstream}` : rel;
 }
 
-async function writeRosterRuntimeIdentityEvidence(spec: AutopilotRuntimeUnitSpec): Promise<void> {
-  const unitSpec = parseNewRunRuntimeUnitSpec(spec).unit_spec;
+async function writeRosterRuntimeIdentityEvidence(unitSpec: AutopilotRuntimeUnitSpec): Promise<void> {
   const path = rosterRuntimeIdentityEvidencePath(unitSpec);
   await mkdir(dirname(path), { recursive: true });
   await writeFile(path, rosterRuntimeIdentityEvidenceBytes(unitSpec), 'utf8');
 }
 
-function rosterRuntimeIdentityEvidenceRef(spec: AutopilotRuntimeUnitSpec): AutopilotEvidenceRef {
-  const unitSpec = parseNewRunRuntimeUnitSpec(spec).unit_spec;
+function rosterRuntimeIdentityEvidenceRef(unitSpec: AutopilotRuntimeUnitSpec): AutopilotEvidenceRef {
   const bytes = rosterRuntimeIdentityEvidenceBytes(unitSpec);
   const artifactRoot = deriveAutopilotArtifactRootFromStatus(unitSpec.status_output);
   const path = relative(artifactRoot, rosterRuntimeIdentityEvidencePath(unitSpec)).split(sep).join('/');
@@ -443,16 +459,14 @@ function rosterRuntimeIdentityEvidenceRef(spec: AutopilotRuntimeUnitSpec): Autop
   });
 }
 
-function rosterRuntimeIdentityEvidencePath(spec: AutopilotRuntimeUnitSpec): string {
-  const unitSpec = parseNewRunRuntimeUnitSpec(spec).unit_spec;
+function rosterRuntimeIdentityEvidencePath(unitSpec: AutopilotRuntimeUnitSpec): string {
   return join(
     unitSpec.evidence_dir,
     `${unitSpec.unit_id}.${unitSpec.role}.attempt-${String(unitSpec.attempt)}.roster-runtime-identity.json`,
   );
 }
 
-function rosterRuntimeIdentityEvidenceBytes(spec: AutopilotRuntimeUnitSpec): string {
-  const unitSpec = parseNewRunRuntimeUnitSpec(spec).unit_spec;
+function rosterRuntimeIdentityEvidenceBytes(unitSpec: AutopilotRuntimeUnitSpec): string {
   const identity = runtimeSpecRosterIdentity(unitSpec);
   if (identity === null) throw new Error('unit_spec.v2 roster identity is unavailable');
   return `${JSON.stringify({

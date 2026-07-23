@@ -51,6 +51,7 @@ void describe('agent runner roster v2 identity', () => {
 
       const result = await runAutopilotAgentFromSpecPath(specPath, { dryRun: true });
       assert.equal(result.status, 'dry-run');
+      assert.equal(result.spec.schema_version, 'autopilot.unit_spec.v2');
       assert.equal(result.spec.model, requestProfile.model);
       assert.equal(result.spec.thinking, requestProfile.thinking);
 
@@ -64,6 +65,7 @@ void describe('agent runner roster v2 identity', () => {
       const prompt = await readFile(result.promptSnapshotPath ?? '', 'utf8');
       assert.match(prompt, new RegExp(requestProfile.model.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'), 'u'));
       assert.match(prompt, /autopilot_emit_status/u);
+      assert.match(prompt, /roster_runtime_identity/u);
     });
   });
 });

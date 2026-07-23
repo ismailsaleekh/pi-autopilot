@@ -8,6 +8,9 @@ import {
   type D65GraphAuthorityReader,
   type D65GraphTreeLeaf,
 } from '../../src/core/coordination/d65-graph-authority.ts';
+import { computeAutopilotRosterContractObjectHash } from '../../src/core/roster/contracts.ts';
+import { SEED_ROSTERS } from '../../src/core/roster/provider-recipes.ts';
+import { materializeNewRunUnitSpecV2, requestProfileFromAssignment, type AutopilotRosterV1 } from '../../src/core/roster/runtime-spec.ts';
 
 const encoder = new TextEncoder();
 
@@ -35,6 +38,78 @@ function discover(readGitAtG: D65GraphAuthorityReader) {
     readGitAtG, acceptedArtifacts: [], repoId: 'repo-1', workstreamRun: 'run-1', workstream: 'demo',
     runtimePrefix: '.pi/autopilot/demo',
   });
+}
+
+function unitSpecV2(input: {
+  readonly mainWorktreePath: string;
+  readonly cwd: string;
+  readonly status_output: string;
+  readonly receipt_output: string;
+  readonly evidence_dir: string;
+  readonly upstream_refs?: readonly { readonly unit_id: string; readonly purpose: string; readonly status_ref?: string; readonly audit_ref?: string }[];
+}) {
+  const roster = seedRosterWithRole('implement');
+  const assignment = roster.assignments.find((entry) => entry.role === 'implement');
+  if (assignment === undefined) throw new Error('missing implement assignment');
+  const requestProfile = requestProfileFromAssignment(assignment);
+  const selection = preRunSelection(roster);
+  return materializeNewRunUnitSpecV2({
+    selection,
+    roster,
+    role: 'implement',
+    request_profile: requestProfile,
+    workstream: 'demo',
+    unit_id: 'u1',
+    attempt: 1,
+    objective: 'closure spec objective for testing purposes',
+    cwd: input.cwd,
+    owned_paths: ['src/'],
+    read_only_paths: [],
+    untouchable_paths: [],
+    context_refs: [],
+    validation_commands: [],
+    status_output: input.status_output,
+    receipt_output: input.receipt_output,
+    evidence_dir: input.evidence_dir,
+    stop_boundary: 'stop after the unit completes its objective',
+    quality_profile: 'source-change',
+    risk_level: 'low',
+    acceptance_criteria: ['graph authority closure is deterministic'],
+    verification_plan: { positive_witnesses: [], negative_witnesses: [], regression_witnesses: [], real_boundary_witnesses: [], blast_radius_checks: [], docs_schema_prompt_checks: [], dirty_tree_checks: [] },
+    closure_criteria: ['graph closure succeeds'],
+    upstream_refs: input.upstream_refs ?? [],
+    timeout_seconds: 3600,
+    render_prompt_snapshot: false,
+  });
+}
+
+function seedRosterWithRole(role: string): AutopilotRosterV1 {
+  const roster = SEED_ROSTERS.find((entry) => entry.assignments.some((assignment) => assignment.role === role));
+  if (roster === undefined) throw new Error(`missing seed roster for ${role}`);
+  return roster;
+}
+
+function preRunSelection(roster: AutopilotRosterV1) {
+  const withoutHash = {
+    schema_version: 'autopilot.pre_run_selection.v1' as const,
+    repo_id: 'repo-1',
+    workstream_run: 'run-1',
+    scope: roster.scope,
+    roster_id: roster.roster_id,
+    roster_revision: roster.roster_revision,
+    roster_sha256: roster.roster_sha256,
+    assignment_set_sha256: roster.assignment_set_sha256,
+    config_sha256: `sha256:${'7'.repeat(64)}`,
+    selected_at: '2026-07-22T00:00:00.000Z',
+    selection_sha256: `sha256:${'0'.repeat(64)}`,
+  };
+  return { ...withoutHash, selection_sha256: requiredHash('autopilot.pre_run_selection.v1', withoutHash) };
+}
+
+function requiredHash(schemaVersion: Parameters<typeof computeAutopilotRosterContractObjectHash>[0], value: unknown): string {
+  const hash = computeAutopilotRosterContractObjectHash(schemaVersion, value);
+  if (hash === null) throw new Error(`${schemaVersion} has no hash field`);
+  return hash;
 }
 
 describe('D65 graph authority registry and fixed-root discovery', () => {
@@ -102,8 +177,10 @@ describe('D65 graph authority registry and fixed-root discovery', () => {
       { root: 'authority/', schema: 'autopilot.authority.v1' },
       { root: 'authority/continuation/', schema: 'autopilot.continuation_event.v1' },
       { root: 'authority/continuation/', schema: 'autopilot.parent_loss.v1' },
+      { root: 'unit-specs/', schema: 'autopilot.unit_spec.v2' },
       { root: 'unit-specs/', schema: 'autopilot.unit_spec.v1' },
       { root: 'statuses/', schema: 'autopilot.status.v1' },
+      { root: 'receipts/', schema: 'autopilot.receipt.v2' },
       { root: 'receipts/', schema: 'autopilot.receipt.v1' },
       { root: 'execution-audits/', schema: 'autopilot.execution_audit.v1' },
       { root: 'execution-commits/', schema: 'autopilot.execution_commit.v1' },
@@ -208,14 +285,14 @@ describe('D65 transitive-ref extractor closure', () => {
   });
 
   it('resolves state unit refs through the runtime base and unit-spec declared outputs beneath the runtime root', () => {
-    const spec = {
-      schema_version: 'autopilot.unit_spec.v1', workstream: 'demo', unit_id: 'u1', role: 'implement', template: 'implement',
-      attempt: 1, objective: 'closure spec objective for testing purposes', cwd: '/repo/main', model: 'terra', thinking: 'high',
-      owned_paths: ['src/'], read_only_paths: [], untouchable_paths: [], context_refs: [], validation_commands: [],
-      status_output: `${mainWorktreePath}/${prefix}/statuses/u1.json`, receipt_output: `${mainWorktreePath}/${prefix}/receipts/u1.json`,
-      evidence_dir: `${mainWorktreePath}/${prefix}/evidence/u1`, stop_boundary: 'stop after the unit completes its objective',
+    const spec = unitSpecV2({
+      mainWorktreePath,
+      cwd: '/repo/main',
+      status_output: `${mainWorktreePath}/${prefix}/statuses/u1.json`,
+      receipt_output: `${mainWorktreePath}/${prefix}/receipts/u1.json`,
+      evidence_dir: `${mainWorktreePath}/${prefix}/evidence/u1`,
       upstream_refs: [{ unit_id: 'u0', purpose: 'context from the upstream implement unit', status_ref: 'statuses/u0.json' }],
-    };
+    });
     const upstreamStatus = { ...status, unit_id: 'u0' };
     const result = discoverWithSeeds(reader([
       { ref: `${prefix}/unit-specs/u1.json`, value: spec },
@@ -236,15 +313,40 @@ describe('D65 transitive-ref extractor closure', () => {
     // root), and graph discovery treats them as non-authority: never traversed,
     // never an error by themselves (accepted amendment §3).
     const unitCwd = '/repo/units/u1/worktree';
-    const spec = {
-      schema_version: 'autopilot.unit_spec.v1', workstream: 'demo', unit_id: 'u1', role: 'implement', template: 'implement',
-      attempt: 1, objective: 'closure spec objective for testing purposes', cwd: unitCwd, model: 'terra', thinking: 'high',
-      owned_paths: ['src/'], read_only_paths: [], untouchable_paths: [], context_refs: [], validation_commands: [],
-      status_output: `${unitCwd}/${prefix}/statuses/u1.json`, receipt_output: `${unitCwd}/${prefix}/receipts/u1.json`,
-      evidence_dir: `${unitCwd}/${prefix}/evidence/u1`, stop_boundary: 'stop after the unit completes its objective',
-    };
+    const spec = unitSpecV2({
+      mainWorktreePath,
+      cwd: unitCwd,
+      status_output: `${unitCwd}/${prefix}/statuses/u1.json`,
+      receipt_output: `${unitCwd}/${prefix}/receipts/u1.json`,
+      evidence_dir: `${unitCwd}/${prefix}/evidence/u1`,
+    });
     const result = discoverWithSeeds(reader([{ ref: `${prefix}/unit-specs/u1.json`, value: spec }]), coreSeeds({}));
     assert.equal(result.collections.specs.length, 1);
     assert.equal(result.collections.evidence.length, 0);
+  });
+
+  it('rejects generic v1 spec/receipt injection even when same-schema identities match', () => {
+    const spec = {
+      schema_version: 'autopilot.unit_spec.v1', workstream: 'demo', unit_id: 'u1', role: 'implement', template: 'implement',
+      attempt: 1, objective: 'generic v1 graph injection must be rejected before authority projection', cwd: '/repo/main', model: 'openai-codex/gpt-5.6-terra', thinking: 'high',
+      owned_paths: ['src/'], read_only_paths: [], untouchable_paths: [], context_refs: [], validation_commands: [],
+      status_output: `${mainWorktreePath}/${prefix}/statuses/u1.json`, receipt_output: `${mainWorktreePath}/${prefix}/receipts/u1.json`,
+      evidence_dir: `${mainWorktreePath}/${prefix}/evidence/u1`, stop_boundary: 'stop after the unit completes its objective',
+      quality_profile: 'source-change', risk_level: 'low', acceptance_criteria: ['reject generic v1'], verification_plan: { positive_witnesses: [], negative_witnesses: [], regression_witnesses: [], real_boundary_witnesses: [], blast_radius_checks: [], docs_schema_prompt_checks: [], dirty_tree_checks: [] }, closure_criteria: ['reject'], upstream_refs: [], timeout_seconds: 60, render_prompt_snapshot: false,
+    };
+    const receipt = {
+      schema_version: 'autopilot.receipt.v1', tool_name: 'autopilot_emit_status', workstream: 'demo', unit_id: 'u1', role: 'implement', attempt: 1,
+      emitted_at: '2026-07-22T00:00:00.000Z', status_output: spec.status_output, status_sha256: `sha256:${'1'.repeat(64)}`,
+      schema_sha256: `sha256:${'2'.repeat(64)}`, tool_call_id: 'call-generic-v1',
+      provider_identity: { provider_id: 'openai-codex', requested_model_id: 'openai-codex/gpt-5.6-terra', executed_model_id: 'openai-codex/gpt-5.6-terra', api: 'openai-codex-responses', thinking_level: 'high' },
+      expected_identity_hash: `sha256:${'3'.repeat(64)}`,
+    };
+    assert.throws(
+      () => discoverWithSeeds(reader([
+        { ref: `${prefix}/unit-specs/u1.json`, value: spec },
+        { ref: `${prefix}/receipts/u1.json`, value: receipt },
+      ]), coreSeeds({})),
+      /generic v1 runtime artifact lacks exact historical adapter proof/u,
+    );
   });
 });

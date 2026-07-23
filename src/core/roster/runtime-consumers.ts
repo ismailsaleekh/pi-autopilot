@@ -296,6 +296,7 @@ export function unitSpecAuthorityProjection(unitSpec: AutopilotRosterUnitSpecV2)
     receipt_output: unitSpec.receipt_output,
     evidence_dir: unitSpec.evidence_dir,
     stop_boundary: unitSpec.stop_boundary,
+    ...(unitSpec.quality_profile === null ? {} : { quality_profile: unitSpec.quality_profile as NonNullable<AutopilotUnitSpec['quality_profile']> }),
     ...(unitSpec.risk_level === null ? {} : { risk_level: unitSpec.risk_level }),
     ...(unitSpec.acceptance_criteria.length === 0 ? {} : { acceptance_criteria: unitSpec.acceptance_criteria }),
     ...(unitSpec.verification_plan === null ? {} : { verification_plan: unitSpec.verification_plan as AutopilotVerificationPlan }),

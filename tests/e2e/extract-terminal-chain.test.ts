@@ -115,7 +115,7 @@ void describe('D65-I2 extract terminal chain e2e', () => {
 
       // Spec → rendered prompt: the extract template renders with the extract
       // role and its read/coordinator changed_paths-empty mandate.
-      const prompt = renderAutopilotAgentPrompt(unitSpec);
+      const prompt = renderAutopilotAgentPrompt(unitSpec, { allowLegacyV1RuntimeSpec: true });
       assert.match(prompt, /role: `extract`/u);
       assert.match(prompt, /operator packet or transfer summary/u);
       assert.match(prompt, /changed_paths must be an empty array for this read\/coordinator role/u);

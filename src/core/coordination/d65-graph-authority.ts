@@ -4,6 +4,7 @@ import { parseAutopilotAuthority } from '../authority.ts';
 import {
   parseAutopilotExecutionAudit,
   parseAutopilotExecutionCommit,
+  parseAutopilotHistoricalFixedRosterAdapterResult,
   parseAutopilotReceipt,
   parseAutopilotReceiptV2,
   parseAutopilotStatusEntry,
@@ -326,6 +327,7 @@ export const D65_GRAPH_EXTERNAL_AUTHORITY_SCHEMAS: readonly D65GraphAuthoritySch
   schema(D65_LAUNCH_POLICY_SCHEMA, parseD65LaunchPolicy, [extractor('capacity_decision_ref','repository','authorities','capacity_decision_sha256')]),
   schema(D65_CAPACITY_DECISION_SCHEMA, parseD65CapacityDecision, [extractor('audit_ref','repository','evidence','audit_sha256')]),
   schema(D65_SUBSCRIPTION_PROBE_SCHEMA, parseD65SubscriptionProbe, [extractor('trigger_continuation_ref','repository','authorities','trigger_continuation_sha256'), extractor('evidence_refs[]','repository','evidence')]),
+  schema('autopilot.historical_fixed_roster_adapter_result.v1', parseAutopilotHistoricalFixedRosterAdapterResult),
   schema(D65_CONTINUATION_EVENT_SCHEMA, parseD65ContinuationEvent, CONTINUATION_REF_EXTRACTORS),
   schema(D65_PARENT_LOSS_SCHEMA, parseD65ParentLoss, PARENT_LOSS_REF_EXTRACTORS),
 ]);
@@ -422,7 +424,8 @@ function assertExternalPath(schemaVersion: string, ref: string, parsed: unknown)
   }
 }
 
-function assertRuntimeSpecReceiptCoherence(parsedByRef: ReadonlyMap<string, unknown>, runtimePrefix: string): void {
+function assertRuntimeSpecReceiptCoherence(parsedByRef: ReadonlyMap<string, unknown>, runtimePrefix: string, readBytes: (ref: string) => Uint8Array): void {
+  assertRuntimeV1ArtifactsHaveExactHistoricalProof(parsedByRef, runtimePrefix, readBytes);
   const specByUnit = new Map<string, JsonObject>();
   const receiptByUnit = new Map<string, JsonObject>();
   for (const [ref, parsed] of parsedByRef) {
@@ -451,6 +454,26 @@ function assertRuntimeSpecReceiptCoherence(parsedByRef: ReadonlyMap<string, unkn
       const specProfile = spec['request_profile']; const receiptProfile = receipt['request_profile'];
       if (JSON.stringify(specProfile) !== JSON.stringify(receiptProfile)) fail('unit_spec.v2 and receipt.v2 request_profile drift during graph discovery', [key]);
     }
+  }
+}
+
+function assertRuntimeV1ArtifactsHaveExactHistoricalProof(parsedByRef: ReadonlyMap<string, unknown>, runtimePrefix: string, readBytes: (ref: string) => Uint8Array): void {
+  const provenUnitSpecBytes = new Set<string>();
+  const provenReceiptBytes = new Set<string>();
+  for (const parsed of parsedByRef.values()) {
+    if (!isJsonObject(parsed) || parsed['schema_version'] !== 'autopilot.historical_fixed_roster_adapter_result.v1') continue;
+    const result = parseAutopilotHistoricalFixedRosterAdapterResult(parsed);
+    if (result.ok !== true || result.admission.admitted !== true || result.historical_bytes_mutated !== false || result.admission.historical_bytes_mutated !== false) continue;
+    provenUnitSpecBytes.add(result.historical_unit_spec_sha256);
+    provenReceiptBytes.add(result.historical_receipt_sha256);
+  }
+  for (const [ref, parsed] of parsedByRef) {
+    if (!ref.startsWith(`${runtimePrefix}/`) || !isJsonObject(parsed)) continue;
+    const schemaVersion = parsed['schema_version'];
+    if (schemaVersion !== 'autopilot.unit_spec.v1' && schemaVersion !== 'autopilot.receipt.v1') continue;
+    const digest = bytesSha256(readBytes(ref));
+    const proven = schemaVersion === 'autopilot.unit_spec.v1' ? provenUnitSpecBytes.has(digest) : provenReceiptBytes.has(digest);
+    if (!proven) fail('generic v1 runtime artifact lacks exact historical adapter proof', [ref, String(schemaVersion), digest]);
   }
 }
 
@@ -736,7 +759,7 @@ export function discoverD65GraphAuthority(input: {
     for (const extractorRow of schemaRow.ref_extractors) executeExtractor(parsed, extractorRow, ref);
   }
 
-  assertRuntimeSpecReceiptCoherence(parsedByRef, runtimePrefix);
+  assertRuntimeSpecReceiptCoherence(parsedByRef, runtimePrefix, (ref) => input.readGitAtG.readBlob(ref));
 
   const policies = [...acceptedByRef.values()].filter((artifact) => artifact.document_schema_version === D65_LAUNCH_POLICY_SCHEMA).map((artifact) => ({ artifact, policy: parseD65LaunchPolicy(parsedByRef.get(artifact.evidence.ref)) }));
   const decisions = [...acceptedByRef.values()].filter((artifact) => artifact.document_schema_version === D65_CAPACITY_DECISION_SCHEMA);

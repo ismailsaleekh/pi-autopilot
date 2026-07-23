@@ -3,6 +3,7 @@ import { mkdir, readFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 import type { AutopilotStatusToolContext } from './forced-output/identity.ts';
+import { parseAutopilotUnitSpec, type AutopilotUnitSpec } from './contracts/index.ts';
 import type { AutopilotToolCallContextLike, AutopilotToolCallEventLike, AutopilotGuardDecision } from './git-guard.ts';
 import { deriveAutopilotAuthority, materializationRowsForAuthority, type AutopilotAuthorityArtifact } from './authority.ts';
 import {
@@ -112,13 +113,30 @@ function fail(code: string, message: string, evidence: readonly string[] = []): 
   throw new AutopilotMaterializationError(code, message, evidence);
 }
 
+interface MaterializationRuntimeSpecContext {
+  readonly unit_spec: AutopilotRuntimeUnitSpec;
+  readonly authority_spec: AutopilotUnitSpec;
+}
+
+function materializationRuntimeSpecContext(spec: AutopilotRuntimeUnitSpec, allowLegacyV1RuntimeSpec: boolean): MaterializationRuntimeSpecContext {
+  try {
+    const runtime = parseNewRunRuntimeUnitSpec(spec);
+    return Object.freeze({ unit_spec: runtime.unit_spec, authority_spec: runtime.authority_spec });
+  } catch (error) {
+    if (!allowLegacyV1RuntimeSpec || spec.schema_version !== 'autopilot.unit_spec.v1') throw error;
+    const legacySpec = parseAutopilotUnitSpec(spec);
+    return Object.freeze({ unit_spec: legacySpec, authority_spec: legacySpec });
+  }
+}
+
 export async function assertAutopilotSpecMaterializationDiskGate(input: {
   readonly context: ActiveAutopilotContext;
   readonly spec: AutopilotRuntimeUnitSpec;
   readonly authority?: AutopilotAuthorityArtifact;
   readonly now?: Date;
+  readonly allowLegacyV1RuntimeSpec?: boolean;
 }): Promise<void> {
-  const runtime = parseNewRunRuntimeUnitSpec(input.spec);
+  const runtime = materializationRuntimeSpecContext(input.spec, input.allowLegacyV1RuntimeSpec === true);
   const taskRoot = taskRootForActiveAutopilot(input.context.active);
   const snapshot = await readCheckoutProfileSnapshot(join(taskRoot, AUTOPILOT_CHECKOUT_PROFILE_SNAPSHOT_FILE));
   if (snapshot === null || snapshot.profile.mode === 'full') return;
@@ -145,8 +163,9 @@ export async function materializeAutopilotSpecPaths(input: {
   readonly reason: string;
   readonly env?: ProcessEnvLike;
   readonly now?: Date;
+  readonly allowLegacyV1RuntimeSpec?: boolean;
 }): Promise<MaterializationResult> {
-  const runtime = parseNewRunRuntimeUnitSpec(input.spec);
+  const runtime = materializationRuntimeSpecContext(input.spec, input.allowLegacyV1RuntimeSpec === true);
   const authority = input.authority ?? await deriveAutopilotAuthority({ spec: runtime.authority_spec });
   const materializationPaths = materializationRowsForAuthority(authority);
   return await materializePathsForSpec({
@@ -155,6 +174,7 @@ export async function materializeAutopilotSpecPaths(input: {
     paths: materializationPaths,
     reason: input.reason,
     automatic: false,
+    allowLegacyV1RuntimeSpec: input.allowLegacyV1RuntimeSpec === true,
     ...(input.env === undefined ? {} : { env: input.env }),
     ...(input.now === undefined ? {} : { now: input.now }),
   });
@@ -167,8 +187,9 @@ export async function materializeAdditionalReadPathsForSpec(input: {
   readonly reason: string;
   readonly env?: ProcessEnvLike;
   readonly now?: Date;
+  readonly allowLegacyV1RuntimeSpec?: boolean;
 }): Promise<MaterializationResult> {
-  const runtime = parseNewRunRuntimeUnitSpec(input.spec);
+  const runtime = materializationRuntimeSpecContext(input.spec, input.allowLegacyV1RuntimeSpec === true);
   const spec = runtime.unit_spec;
   const now = input.now ?? new Date();
   const normalized = sortedUnique(input.paths.map((path) => normalizeMaterializationPath(path, 'auto READ path')).filter((path) => !isRuntimeRepoPath(path, spec.workstream)));
@@ -231,6 +252,7 @@ export async function materializeAdditionalReadPathsForSpec(input: {
       paths: rows,
       reason: input.reason,
       automatic: true,
+      allowLegacyV1RuntimeSpec: input.allowLegacyV1RuntimeSpec === true,
       ...(input.env === undefined ? {} : { env: input.env }),
       now,
     });
@@ -256,8 +278,9 @@ export async function expandedReadOnlyPathsForAudit(input: {
   readonly spec: AutopilotRuntimeUnitSpec;
   readonly authority: AutopilotAuthorityArtifact;
   readonly env?: ProcessEnvLike;
+  readonly allowLegacyV1RuntimeSpec?: boolean;
 }): Promise<readonly string[]> {
-  const spec = parseNewRunRuntimeUnitSpec(input.spec).unit_spec;
+  const spec = materializationRuntimeSpecContext(input.spec, input.allowLegacyV1RuntimeSpec === true).unit_spec;
   if (input.context.active.coordination_authority === 'coordinator-edit-leases-v1') return sortedUnique(input.authority.observations.map((observation) => observation.path));
   const claims = await readPathClaims(input.context.coordinationRoot);
   const expanded = claims.filter((claim) =>
@@ -279,7 +302,8 @@ export async function materializeSparseReadForToolCall(input: {
   if (input.event.toolName !== 'read' && input.event.toolName !== 'Read') return undefined;
   const rawPath = input.event.input?.['path'] ?? input.event.input?.['file_path'];
   if (typeof rawPath !== 'string' || rawPath.trim().length === 0) return undefined;
-  const spec = parseNewRunRuntimeUnitSpec(input.statusContext.unit_spec).unit_spec;
+  const allowStatusContextProjection = input.statusContext.receipt_schema_version === 'autopilot.receipt.v2' && input.statusContext.roster_execution_identity !== undefined;
+  const spec = materializationRuntimeSpecContext(input.statusContext.unit_spec, allowStatusContextProjection).unit_spec;
   const cwd = input.toolContext.cwd ?? spec.cwd;
   const absolute = isAbsolute(rawPath) ? resolve(rawPath) : resolve(cwd, rawPath);
   if (!isPathInsideRoot(spec.cwd, absolute)) return undefined;
@@ -295,6 +319,7 @@ export async function materializeSparseReadForToolCall(input: {
       spec,
       paths: [repoRelative],
       reason: 'child Read sparse miss auto-materialization',
+      allowLegacyV1RuntimeSpec: allowStatusContextProjection,
       ...(input.env === undefined ? {} : { env: input.env }),
     });
     return undefined;
@@ -310,7 +335,8 @@ export async function resolveActiveContextForStatusContext(
   statusContext: AutopilotStatusToolContext,
   env: ProcessEnvLike = process.env,
 ): Promise<ActiveAutopilotContext> {
-  const spec = parseNewRunRuntimeUnitSpec(statusContext.unit_spec).unit_spec;
+  const allowStatusContextProjection = statusContext.receipt_schema_version === 'autopilot.receipt.v2' && statusContext.roster_execution_identity !== undefined;
+  const spec = materializationRuntimeSpecContext(statusContext.unit_spec, allowStatusContextProjection).unit_spec;
   const taskRoot = taskRootFromArtifactRoot(statusContext.artifact_root, spec.workstream);
   if (taskRoot === null) fail('invalid-artifact-root', 'Autopilot status context artifact_root does not end with the workstream runtime root.', [statusContext.artifact_root]);
   const taskInfoPath = join(taskRoot, '_task-info.json');
@@ -361,8 +387,9 @@ async function materializePathsForSpec(input: {
   readonly automatic: boolean;
   readonly env?: ProcessEnvLike;
   readonly now?: Date;
+  readonly allowLegacyV1RuntimeSpec?: boolean;
 }): Promise<MaterializationResult> {
-  const spec = parseNewRunRuntimeUnitSpec(input.spec).unit_spec;
+  const spec = materializationRuntimeSpecContext(input.spec, input.allowLegacyV1RuntimeSpec === true).unit_spec;
   const now = input.now ?? new Date();
   const paths = dedupeMaterializationRows(input.paths);
   if (paths.length === 0) return { checkout_mode: 'legacy-full', materialized_paths: [], targets: [], byte_count: 0 };

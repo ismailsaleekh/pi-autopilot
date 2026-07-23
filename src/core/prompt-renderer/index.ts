@@ -8,6 +8,7 @@ import {
   AUTOPILOT_SCHEMA_NAMES,
   AUTOPILOT_STATUS_TOOL,
 } from '../names.ts';
+import { buildAutopilotProviderIdentity as buildForcedOutputAutopilotProviderIdentity } from '../forced-output/identity.ts';
 import { renderAutopilotPerfectQualityRules } from '../quality/contract.ts';
 import type { AutopilotRosterUnitSpecV2 } from '../roster/runtime-spec.ts';
 import {
@@ -16,6 +17,7 @@ import {
   type AutopilotRuntimeUnitSpec,
 } from '../roster/runtime-consumers.ts';
 import {
+  parseAutopilotUnitSpec,
   AUTOPILOT_ROLE_VALUES,
   AUTOPILOT_STATUS_CHANGED_PATHS_LIMIT,
   type AutopilotContextRef,
@@ -23,7 +25,7 @@ import {
   type AutopilotTemplate,
   type AutopilotThinking,
   type AutopilotUnitSpec,
-} from '../contracts/types.ts';
+} from '../contracts/index.ts';
 
 export { AUTOPILOT_ROLE_VALUES };
 export type {
@@ -64,6 +66,8 @@ export interface AutopilotRenderedPrompt {
 export interface AutopilotPromptRenderOptions {
   readonly templatesDir?: string;
   readonly forcedOutputContract?: AutopilotForcedOutputContract;
+  /** Explicit runner-only bridge for exact-authorized historical v1 executions; generic new-run rendering stays v2-only. */
+  readonly allowLegacyV1RuntimeSpec?: boolean;
 }
 
 export interface AutopilotPromptTemplateValidationResult {
@@ -183,9 +187,9 @@ export function renderAutopilotAgentPrompt(
   input: AutopilotRenderableUnitSpec,
   options: AutopilotPromptRenderOptions = {},
 ): string {
-  const runtime = parseNewRunRuntimeUnitSpec(input);
+  const runtime = promptRuntimeSpecContext(input, options);
   const unitSpec = runtime.unit_spec;
-  assertValidAutopilotUnitSpec(unitSpec);
+  assertValidAutopilotUnitSpec(unitSpec, options);
   const templatePath = autopilotTemplatePath(unitSpec.template, options.templatesDir);
   const source = readTemplateSource(templatePath);
   assertValidAutopilotTemplateSource(unitSpec.template, source, templatePath);
@@ -199,12 +203,14 @@ export async function renderAndMaybeWriteAutopilotPromptSnapshot(input: {
   readonly templatesDir?: string;
   readonly forcedOutputContract?: AutopilotForcedOutputContract;
   readonly coordinationAppendix?: string;
+  readonly allowLegacyV1RuntimeSpec?: boolean;
 }): Promise<AutopilotRenderedPrompt> {
   const options: AutopilotPromptRenderOptions = {
     ...(input.templatesDir === undefined ? {} : { templatesDir: input.templatesDir }),
     ...(input.forcedOutputContract === undefined
       ? {}
       : { forcedOutputContract: input.forcedOutputContract }),
+    ...(input.allowLegacyV1RuntimeSpec === undefined ? {} : { allowLegacyV1RuntimeSpec: input.allowLegacyV1RuntimeSpec }),
   };
   const baseText = renderAutopilotAgentPrompt(input.spec, options);
   const text = input.coordinationAppendix === undefined ? baseText : `${baseText}\n\n${input.coordinationAppendix}`;
@@ -292,8 +298,8 @@ export function assertValidAutopilotTemplateSource(
   }
 }
 
-export function assertValidAutopilotUnitSpec(spec: AutopilotRenderableUnitSpec): void {
-  const issues = autopilotUnitSpecIssues(spec);
+export function assertValidAutopilotUnitSpec(spec: AutopilotRenderableUnitSpec, options: AutopilotPromptRenderOptions = {}): void {
+  const issues = autopilotUnitSpecIssues(spec, options);
   if (issues.length > 0) throw new AutopilotUnitSpecError(issues);
 }
 
@@ -301,9 +307,9 @@ export function buildAutopilotPromptTemplateSlots(
   spec: AutopilotRenderableUnitSpec,
   options: AutopilotPromptRenderOptions = {},
 ): AutopilotPromptTemplateSlotValues {
-  const runtime = parseNewRunRuntimeUnitSpec(spec);
+  const runtime = promptRuntimeSpecContext(spec, options);
   const unitSpec = runtime.unit_spec;
-  const forcedOutputContract = forcedOutputContractForUnitSpec(unitSpec, options.forcedOutputContract);
+  const forcedOutputContract = forcedOutputContractForUnitSpec(unitSpec, options.forcedOutputContract, options);
 
   return Object.freeze({
     artifact_root: deriveAutopilotArtifactRoot(unitSpec),
@@ -332,9 +338,31 @@ export function buildAutopilotPromptTemplateSlots(
   });
 }
 
-function buildDefaultForcedOutputContract(spec: AutopilotRenderableUnitSpec): AutopilotForcedOutputContract {
-  const runtime = parseNewRunRuntimeUnitSpec(spec);
+interface PromptRuntimeSpecContext {
+  readonly unit_spec: AutopilotRenderableUnitSpec;
+  readonly roster_identity: AutopilotRosterRuntimeIdentity | null;
+}
+
+function promptRuntimeSpecContext(
+  spec: AutopilotRenderableUnitSpec,
+  options: Pick<AutopilotPromptRenderOptions, 'allowLegacyV1RuntimeSpec'> = {},
+): PromptRuntimeSpecContext {
+  try {
+    const runtime = parseNewRunRuntimeUnitSpec(spec);
+    return Object.freeze({ unit_spec: runtime.unit_spec, roster_identity: runtime.roster_identity });
+  } catch (error) {
+    if (options.allowLegacyV1RuntimeSpec !== true || spec.schema_version !== 'autopilot.unit_spec.v1') throw error;
+    return Object.freeze({ unit_spec: parseAutopilotUnitSpec(spec), roster_identity: null });
+  }
+}
+
+function buildDefaultForcedOutputContract(
+  spec: AutopilotRenderableUnitSpec,
+  options: Pick<AutopilotPromptRenderOptions, 'allowLegacyV1RuntimeSpec'> = {},
+): AutopilotForcedOutputContract {
+  const runtime = promptRuntimeSpecContext(spec, options);
   const unitSpec = runtime.unit_spec;
+  const v2 = unitSpec.schema_version === 'autopilot.unit_spec.v2' ? unitSpec : null;
   return Object.freeze({
     tool_name: AUTOPILOT_STATUS_TOOL,
     schema_version: 'autopilot.status.v1',
@@ -344,35 +372,39 @@ function buildDefaultForcedOutputContract(spec: AutopilotRenderableUnitSpec): Au
     attempt: unitSpec.attempt,
     status_output: unitSpec.status_output,
     receipt_output: unitSpec.receipt_output,
-    provider_identity: {
-      provider_id: unitSpec.request_profile.provider_id,
-      requested_model_id: unitSpec.request_profile.model_id,
-      executed_model_id: unitSpec.request_profile.model_id,
-      api: unitSpec.request_profile.api,
-      thinking_level: unitSpec.request_profile.thinking,
-    },
-    roster_runtime_identity: runtime.roster_identity,
-    request_profile: unitSpec.request_profile,
+    provider_identity: v2 === null
+      ? buildForcedOutputAutopilotProviderIdentity(unitSpec.model, unitSpec.thinking)
+      : {
+          provider_id: v2.request_profile.provider_id,
+          requested_model_id: v2.request_profile.model_id,
+          executed_model_id: v2.request_profile.model_id,
+          api: v2.request_profile.api,
+          thinking_level: v2.request_profile.thinking,
+        },
+    ...(runtime.roster_identity === null ? {} : { roster_runtime_identity: runtime.roster_identity }),
+    ...(v2 === null ? {} : { request_profile: v2.request_profile }),
   });
 }
 
 function forcedOutputContractForUnitSpec(
   spec: AutopilotRenderableUnitSpec,
   provided: AutopilotForcedOutputContract | undefined,
+  options: Pick<AutopilotPromptRenderOptions, 'allowLegacyV1RuntimeSpec'> = {},
 ): AutopilotForcedOutputContract {
-  const runtime = parseNewRunRuntimeUnitSpec(spec);
-  const expected = buildDefaultForcedOutputContract(runtime.unit_spec);
+  const expected = buildDefaultForcedOutputContract(spec, options);
   if (provided === undefined) return expected;
+  const v2 = expected.request_profile !== undefined;
   for (const field of ['tool_name', 'schema_version', 'workstream', 'unit_id', 'role', 'attempt', 'status_output', 'receipt_output'] as const) {
     if (provided[field] !== expected[field]) {
-      throw new AutopilotUnitSpecError([`forced_output_contract ${field} does not match unit_spec.v2`]);
+      throw new AutopilotUnitSpecError([`forced_output_contract ${field} does not match ${v2 ? 'unit_spec.v2' : 'historical unit_spec.v1'}`]);
     }
   }
   for (const field of ['provider_id', 'requested_model_id', 'executed_model_id', 'api', 'thinking_level'] as const) {
     if (provided.provider_identity[field] !== expected.provider_identity[field]) {
-      throw new AutopilotUnitSpecError([`forced_output_contract provider_identity.${field} does not match unit_spec.v2 request_profile`]);
+      throw new AutopilotUnitSpecError([`forced_output_contract provider_identity.${field} does not match ${v2 ? 'unit_spec.v2 request_profile' : 'historical unit_spec.v1 model/thinking'}`]);
     }
   }
+  if (!v2) return Object.freeze(provided);
   if (expected.roster_runtime_identity === undefined || expected.request_profile === undefined) {
     throw new AutopilotUnitSpecError(['unit_spec.v2 forced_output_contract roster identity is unavailable']);
   }
@@ -429,11 +461,11 @@ function isAutopilotPromptTemplateSlot(slot: string): slot is AutopilotPromptTem
   return AUTOPILOT_PROMPT_TEMPLATE_ALLOWED_SLOT_SET.has(slot);
 }
 
-function autopilotUnitSpecIssues(spec: AutopilotRenderableUnitSpec): readonly string[] {
+function autopilotUnitSpecIssues(spec: AutopilotRenderableUnitSpec, options: AutopilotPromptRenderOptions = {}): readonly string[] {
   const issues: string[] = [];
-  let unitSpec: AutopilotRosterUnitSpecV2;
+  let unitSpec: AutopilotRenderableUnitSpec;
   try {
-    unitSpec = parseNewRunRuntimeUnitSpec(spec).unit_spec;
+    unitSpec = promptRuntimeSpecContext(spec, options).unit_spec;
   } catch (error) {
     issues.push(error instanceof Error ? error.message : String(error));
     return Object.freeze(issues);
