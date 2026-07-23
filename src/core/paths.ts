@@ -3,6 +3,7 @@ import { AUTOPILOT_RUNTIME_ROOT_PREFIX } from './names.ts';
 export interface ParsedAutopilotArgs {
   readonly workstream: string;
   readonly remainder: string;
+  readonly rosterId: string | null;
 }
 
 export interface ParsedAutopilotCloseArgs {
@@ -53,12 +54,21 @@ export type ParseAutopilotCoordinationArgsResult =
   | { readonly ok: false; readonly message: string };
 
 const WORKSTREAM_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+const ROSTER_ID_PATTERN = /^[a-z][a-z0-9-]{0,95}$/u;
+
+export interface ParseAutopilotArgsOptions {
+  readonly parseRoster?: boolean;
+}
 
 export function isValidWorkstreamSlug(value: string): boolean {
   return WORKSTREAM_PATTERN.test(value);
 }
 
-export function parseAutopilotArgs(args: string): ParseAutopilotArgsResult {
+export function isValidRosterId(value: string): boolean {
+  return ROSTER_ID_PATTERN.test(value);
+}
+
+export function parseAutopilotArgs(args: string, options: ParseAutopilotArgsOptions = {}): ParseAutopilotArgsResult {
   const trimmed = args.trim();
   if (trimmed.length === 0) {
     return { ok: false, message: 'Usage: /autopilot <workstream> [task intro or current focus]' };
@@ -72,8 +82,21 @@ export function parseAutopilotArgs(args: string): ParseAutopilotArgsResult {
         'Workstream must start with a letter or digit and contain only letters, digits, dot, underscore, or dash.',
     };
   }
-  const remainder = firstSpace < 0 ? '' : trimmed.slice(firstSpace).trim();
-  return { ok: true, value: { workstream, remainder } };
+  let remainder = firstSpace < 0 ? '' : trimmed.slice(firstSpace).trim();
+  let rosterId: string | null = null;
+  if (options.parseRoster !== false && /^--roster(?:\s|=|$)/u.test(remainder)) {
+    const match = /^--roster\s+(\S+)(?:\s+([\s\S]*))?$/u.exec(remainder);
+    const candidateRosterId = match?.[1];
+    if (candidateRosterId === undefined) {
+      return { ok: false, message: 'Usage: /autopilot <workstream> [--roster <id>] [task intro or current focus]' };
+    }
+    if (!isValidRosterId(candidateRosterId)) {
+      return { ok: false, message: 'Roster id must start with a lowercase letter and contain only lowercase letters, digits, or dash.' };
+    }
+    rosterId = candidateRosterId;
+    remainder = (match?.[2] ?? '').trim();
+  }
+  return { ok: true, value: { workstream, remainder, rosterId } };
 }
 
 export function parseAutopilotInjectArgs(args: string): ParseAutopilotInjectArgsResult {
