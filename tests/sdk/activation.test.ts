@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmod, mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -177,6 +177,7 @@ interface SdkHarness {
 
 const packageRoot = fileURLToPath(new URL('../../', import.meta.url));
 const extensionPath = join(packageRoot, 'extensions/autopilot.ts');
+const readyRosterHelperPath = join(packageRoot, 'tests/helpers/sdk-ready-roster.ts');
 const globalSdkPath = '/usr/local/lib/node_modules/@earendil-works/pi-coding-agent/dist/index.js';
 const packageSdkSpecifier = '@earendil-works/pi-coding-agent';
 const forbiddenLegacyCommand = ['hlo', 'v2'].join('-');
@@ -319,7 +320,7 @@ function git(cwd: string, args: readonly string[]): void {
 
 async function createSdkHarness(setup?: (input: { readonly cwd: string; readonly stateRoot: string; readonly env: ProcessEnvLike }) => Promise<void>): Promise<SdkHarness> {
   setOfflineEnvironment();
-  const root = await mkdtemp(join(tmpdir(), 'pi-autopilot-sdk-'));
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'pi-autopilot-sdk-')));
   const cwd = join(root, 'project');
   const agentDir = join(root, 'agent');
   await initGitProject(cwd);
@@ -331,12 +332,14 @@ async function createSdkHarness(setup?: (input: { readonly cwd: string; readonly
   process.chdir(cwd);
   if (setup !== undefined) await setup({ cwd, stateRoot, env: { ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: stateRoot } });
   const coordinator = await startCoordinatorServer(coordinatorRuntimePaths(process.env));
+  const sdkExtensionPath = join(root, 'sdk-autopilot-extension.ts');
+  await writeFile(sdkExtensionPath, `import autopilotExtension from ${JSON.stringify(pathToFileURL(extensionPath).href)};\nimport { sdkReadyRosterActivationStore } from ${JSON.stringify(pathToFileURL(readyRosterHelperPath).href)};\nexport default function sdkAutopilot(pi: Parameters<typeof autopilotExtension>[0]): void { autopilotExtension(pi, { rosterActivationStore: sdkReadyRosterActivationStore() }); }\n`, 'utf8');
 
   const sdk = await loadPiSdk();
   const resourceLoader = new sdk.DefaultResourceLoader({
     cwd,
     agentDir,
-    additionalExtensionPaths: [extensionPath],
+    additionalExtensionPaths: [sdkExtensionPath],
     noExtensions: true,
     noSkills: true,
     noPromptTemplates: true,

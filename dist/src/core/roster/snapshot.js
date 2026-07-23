@@ -4,6 +4,7 @@ import { rosterCanonicalSha256OmittingOwnField } from "./canonical.js";
 import { resolveExistingRun, } from "./resolve.js";
 import { bytesEqual, parseCanonicalPreRunSelectionBytes, runSelectionDiagnostic, runSelectionDiagnosticsFrom, } from "./run-selection.js";
 import { assertValidRepoId, assertValidRosterId, assertValidRosterRevision, assertValidWorkstreamRun, preRunSelectionPath, resolveRosterScopePaths, } from "./paths.js";
+import { ensurePrivateAuthorityDirectory } from "../private-path.js";
 import { publishCreateOnlyAtomic, readAuthorityFileIfPresent, RosterStorageError, } from "./transaction.js";
 const ZERO_SHA = 'sha256:0000000000000000000000000000000000000000000000000000000000000000';
 export function runtimeRosterSnapshotPath(input) {
@@ -22,6 +23,7 @@ export async function publishRuntimeRosterSnapshot(input) {
         }
         await emitSnapshotStage(input.hooks, { stage: 'before-main-worktree-check', path: input.mainWorktreeRoot, selection_sha256: selection.selection_sha256 });
         normalizeAbsoluteWorktreeRoot(input.mainWorktreeRoot, { mustExist: true });
+        await ensurePrivateAuthorityDirectory(mirrorRoot);
         await emitSnapshotStage(input.hooks, { stage: 'after-main-worktree-check', path: input.mainWorktreeRoot, selection_sha256: selection.selection_sha256 });
         await emitSnapshotStage(input.hooks, { stage: 'before-mirror-publish', path: mirrorPath, selection_sha256: selection.selection_sha256 });
         const publish = await publishCreateOnlyAtomic({

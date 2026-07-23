@@ -24,6 +24,7 @@ import {
   resolveRosterScopePaths,
   type RosterSha256,
 } from './paths.ts';
+import { ensurePrivateAuthorityDirectory } from '../private-path.ts';
 import {
   publishCreateOnlyAtomic,
   readAuthorityFileIfPresent,
@@ -133,6 +134,7 @@ export async function publishRuntimeRosterSnapshot(
 
     await emitSnapshotStage(input.hooks, { stage: 'before-main-worktree-check', path: input.mainWorktreeRoot, selection_sha256: selection.selection_sha256 as RosterSha256 });
     normalizeAbsoluteWorktreeRoot(input.mainWorktreeRoot, { mustExist: true });
+    await ensurePrivateAuthorityDirectory(mirrorRoot);
     await emitSnapshotStage(input.hooks, { stage: 'after-main-worktree-check', path: input.mainWorktreeRoot, selection_sha256: selection.selection_sha256 as RosterSha256 });
 
     await emitSnapshotStage(input.hooks, { stage: 'before-mirror-publish', path: mirrorPath, selection_sha256: selection.selection_sha256 as RosterSha256 });

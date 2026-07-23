@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CoordinatorClient } from '../../src/core/coordination/client.ts';
@@ -32,6 +32,7 @@ import { AUTOPILOT_STATE_ROOT_ENV, coordinationRootForRepo, resolveRepoIdentity 
 import { coordinatorRuntimePaths } from '../../src/core/coordination/runtime-paths.ts';
 import { startCoordinatorServer } from '../../src/core/coordination/server.ts';
 import { startTaggedCoordinator, type TaggedCoordinatorProcess } from '../helpers/tagged-coordinator.ts';
+import { sdkReadyRosterActivationStore } from '../helpers/sdk-ready-roster.ts';
 
 interface CapturedMessage {
   readonly content: string;
@@ -113,7 +114,7 @@ function createHarness(
     isIdle: () => true,
     ...(cwd === undefined ? {} : { cwd }),
   };
-  autopilotExtension(host);
+  autopilotExtension(host, { rosterActivationStore: sdkReadyRosterActivationStore() });
   return { commands, toolNames, activeTools, messages, notifications, toolCallHandlers, shutdownHandlers, selectedModels, thinkingLevels, ctx };
 }
 
@@ -127,8 +128,12 @@ function publicCommands(harness: Harness): string[] {
   return [...harness.commands.keys()].sort();
 }
 
-async function withIsolatedHarness<T>(run: (harness: Harness) => Promise<T>, coordinatorBuild: 'current' | 'v1.0.1' = 'current'): Promise<T> {
-  const root = await mkdtemp(join(tmpdir(), 'pi-autopilot-command-'));
+async function withIsolatedHarness<T>(
+  run: (harness: Harness) => Promise<T>,
+  coordinatorBuild: 'current' | 'v1.0.1' = 'current',
+  harnessOptions: { readonly modelAvailable?: boolean; readonly authenticationAvailable?: boolean } = {},
+): Promise<T> {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'pi-autopilot-command-')));
   const project = join(root, 'project');
   const originalStateRoot = process.env[AUTOPILOT_STATE_ROOT_ENV];
   process.env[AUTOPILOT_STATE_ROOT_ENV] = join(root, 'state');
@@ -139,7 +144,7 @@ async function withIsolatedHarness<T>(run: (harness: Harness) => Promise<T>, coo
     await initGitProject(project);
     if (coordinatorBuild === 'current') coordinator = await startCoordinatorServer(coordinatorRuntimePaths(process.env));
     else taggedCoordinator = await startTaggedCoordinator({ stateRoot: process.env[AUTOPILOT_STATE_ROOT_ENV] ?? join(root, 'state'), extractionRoot: root });
-    harness = createHarness(project);
+    harness = createHarness(project, harnessOptions);
     return await run(harness);
   } finally {
     if (harness !== null) {
@@ -193,10 +198,9 @@ void describe('Autopilot command SDK surface', () => {
       assert.equal(message.deliverAs, 'followUp');
       assert.match(message.content, /call `context_budget` with no arguments/);
       assert.match(message.content, /autopilot_respond_claim_request/);
-      assert.match(message.content, /parent\/orchestrator: openai-codex\/gpt-5\.6-sol at xhigh/);
-      assert.match(message.content, /implement: openai-codex\/gpt-5\.6-terra at high/);
-      assert.match(message.content, /validate: openai-codex\/gpt-5\.6-sol at xhigh/);
-      assert.match(message.content, /extract: openai-codex\/gpt-5\.6-luna at high/);
+      assert.match(message.content, /Pinned runtime roster and unit_spec\.v2 authoring/);
+      assert.match(message.content, /roster-snapshot\.json/);
+      assert.match(message.content, /schema_version: "autopilot\.unit_spec\.v2"/);
       assert.match(message.content, /Runtime root: `.*\.pi\/autopilot\/demo`/);
       assert.match(message.content, /Registered Autopilot worktree/);
       assert.match(message.content, /autopilot\.execution_commit\.v1/);
@@ -267,23 +271,18 @@ void describe('Autopilot command SDK surface', () => {
     });
   });
 
-  void it('fails loudly before worktree preparation when the fixed parent model is unavailable', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'pi-autopilot-roster-command-'));
-    const project = join(root, 'project');
-    try {
-      await initGitProject(project);
-      const missingModel = createHarness(project, { modelAvailable: false });
+  void it('fails loudly before prompt delivery when the selected parent model is unavailable', async () => {
+    await withIsolatedHarness(async (missingModel) => {
       await requireCommand(missingModel, AUTOPILOT_COMMAND).handler('demo', missingModel.ctx);
       assert.equal(missingModel.messages.length, 0);
       assert.equal(missingModel.notifications.some((entry) => /gpt-5\.6-sol is not registered/u.test(entry.message)), true);
+    }, 'current', { modelAvailable: false });
 
-      const missingAuth = createHarness(project, { authenticationAvailable: false });
+    await withIsolatedHarness(async (missingAuth) => {
       await requireCommand(missingAuth, AUTOPILOT_COMMAND).handler('demo', missingAuth.ctx);
       assert.equal(missingAuth.messages.length, 0);
       assert.equal(missingAuth.notifications.some((entry) => /no usable subscription authentication/u.test(entry.message)), true);
-    } finally {
-      await rm(root, { recursive: true, force: true });
-    }
+    }, 'current', { authenticationAvailable: false });
   });
 
   void it('injects an active workstream without queueing the parent prompt and enables handoff', async () => {
@@ -320,7 +319,7 @@ void describe('Autopilot command SDK surface', () => {
       assert.deepEqual(after, before, 'inject must not replace an incompatible live historical coordinator');
       assert.equal(harness.notifications.some((entry) => /Autopilot injected for mixed-build-resume/u.test(entry.message)), false);
       assert.equal(harness.notifications.some((entry) => /protocol|schema|incompatible/u.test(entry.message)), true);
-      assert.deepEqual(harness.activeTools, [CONTEXT_BUDGET_TOOL_NAME]);
+      assert.deepEqual(harness.activeTools, []);
     }, 'v1.0.1');
   });
 
