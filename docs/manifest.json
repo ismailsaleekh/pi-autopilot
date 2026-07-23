@@ -149,6 +149,9 @@
     "src/core/coordination/s2-retention-state-machine.ts": [
       "subsystems/s2-retention"
     ],
+    "src/core/coordination/unit-failure-producer-provenance.ts": [
+      "subsystems/runner-and-forced-output"
+    ],
     "src/core/disk-gate.ts": [
       "subsystems/worktrees"
     ],
@@ -636,6 +639,7 @@
       "covers_sources": [
         "src/core/agent-runner.ts",
         "src/core/authority.ts",
+        "src/core/coordination/unit-failure-producer-provenance.ts",
         "src/core/execution-audit/index.ts",
         "src/core/forced-output/index.ts",
         "src/core/model-roster.ts",
@@ -643,8 +647,8 @@
         "src/core/scheduler.ts",
         "src/core/unit-failure.ts"
       ],
-      "signature_hash": "sha256:3c5ed87502e9c35a04031217852cd706873011bba1277cd9546e03ced7a603d6",
-      "body_hash": "sha256:12cca05d67aab27398f47def55526f71038ed5ac79c2c537c3832317a59d7d19",
+      "signature_hash": "sha256:8acfa22b78d0e3845a831af6c62744293cccc949d27fe4d836f1070d774dc3cf",
+      "body_hash": "sha256:45d4282adbfc80a75f2e065df39aee9f6b9f1ccd0d5cdc5653d9d45bc0dad611",
       "semantic_attestation": null
     },
     "subsystems/s2-retention": {

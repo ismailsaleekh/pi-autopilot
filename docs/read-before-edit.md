@@ -41,6 +41,7 @@ here are not yet governed by a doc; coverage ratchets up per PR (C8 floor).
 | `src/core/coordination/s2-retention-archive.ts` | [`subsystems/s2-retention`](subsystems/s2-retention.md) |
 | `src/core/coordination/s2-retention-policy.ts` | [`subsystems/s2-retention`](subsystems/s2-retention.md) |
 | `src/core/coordination/s2-retention-state-machine.ts` | [`subsystems/s2-retention`](subsystems/s2-retention.md) |
+| `src/core/coordination/unit-failure-producer-provenance.ts` | [`subsystems/runner-and-forced-output`](subsystems/runner-and-forced-output.md) |
 | `src/core/disk-gate.ts` | [`subsystems/worktrees`](subsystems/worktrees.md) |
 | `src/core/execution-audit/index.ts` | [`subsystems/runner-and-forced-output`](subsystems/runner-and-forced-output.md) |
 | `src/core/execution-commit.ts` | [`subsystems/close-lifecycle`](subsystems/close-lifecycle.md) |
