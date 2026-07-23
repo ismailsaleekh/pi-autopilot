@@ -174,7 +174,7 @@ void describe('package manifest and payload', () => {
   void it('declares the Autopilot package surfaces', async () => {
     const pkg = await packageJson();
     assert.equal(pkg.name, 'pi-autopilot');
-    assert.equal(pkg.version, '1.2.0');
+    assert.equal(pkg.version, '1.3.0');
     assert.equal(pkg.type, 'module');
     assert.equal(pkg.author, 'Ismail Salikhodjaev <ismailsalikhodjaev@gmail.com>');
     assert.deepEqual(pkg.repository, {

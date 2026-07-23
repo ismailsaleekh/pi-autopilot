@@ -40,6 +40,9 @@ import { AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV } from '../../src/core/names.
 import { AUTOPILOT_STATE_ROOT_ENV, coordinationRootForRepo, prepareAutopilotUnitWorktree, resolveRepoIdentity, writeActiveAutopilots, type ActiveAutopilotRow, type ProcessEnvLike } from '../../src/core/parallel-runtime.ts';
 import { resetFailedUnit } from '../../src/core/unit-failure.ts';
 import { recordCoordinatorReleaseEvidenceFromFile } from '../../src/core/coordination/reconciliation.ts';
+import { computeAutopilotRosterContractObjectHash } from '../../src/core/roster/contracts.ts';
+import { SEED_ROSTERS } from '../../src/core/roster/provider-recipes.ts';
+import { materializeNewRunUnitSpecV2, materializeObservedProfile, materializeReceiptV2, requestProfileFromAssignment, type AutopilotRosterV1 } from '../../src/core/roster/runtime-spec.ts';
 
 interface Harness {
   readonly root: string;
@@ -58,6 +61,40 @@ function git(cwd: string, args: readonly string[]): string {
 
 function sha256(text: string): `sha256:${string}` {
   return `sha256:${createHash('sha256').update(text, 'utf8').digest('hex')}`;
+}
+
+function requiredRosterHash(schemaVersion: Parameters<typeof computeAutopilotRosterContractObjectHash>[0], value: unknown): `sha256:${string}` {
+  const hash = computeAutopilotRosterContractObjectHash(schemaVersion, value);
+  if (hash === null) throw new Error(`${schemaVersion} has no hash field`);
+  return hash as `sha256:${string}`;
+}
+
+function seedRosterWithRole(role: string): AutopilotRosterV1 {
+  const roster = SEED_ROSTERS.find((entry) => entry.assignments.some((assignment) => assignment.role === role));
+  if (roster === undefined) throw new Error(`missing seed roster for ${role}`);
+  return roster;
+}
+
+function runtimeRosterFacts(input: { readonly repoId: string; readonly runId: string; readonly role: 'implement' }) {
+  const roster = seedRosterWithRole(input.role);
+  const assignment = roster.assignments.find((entry) => entry.role === input.role);
+  if (assignment === undefined) throw new Error(`missing ${input.role} assignment`);
+  const requestProfile = requestProfileFromAssignment(assignment);
+  const withoutHash = {
+    schema_version: 'autopilot.pre_run_selection.v1' as const,
+    repo_id: input.repoId,
+    workstream_run: input.runId,
+    scope: roster.scope,
+    roster_id: roster.roster_id,
+    roster_revision: roster.roster_revision,
+    roster_sha256: roster.roster_sha256,
+    assignment_set_sha256: roster.assignment_set_sha256,
+    config_sha256: `sha256:${'7'.repeat(64)}`,
+    selected_at: '2026-07-22T00:00:00.000Z',
+    selection_sha256: `sha256:${'0'.repeat(64)}`,
+  };
+  const selection = { ...withoutHash, selection_sha256: requiredRosterHash('autopilot.pre_run_selection.v1', withoutHash) };
+  return { roster, selection, requestProfile };
 }
 
 async function createHarness(): Promise<Harness> {
@@ -1412,12 +1449,34 @@ void describe('D65 attempt/probe transaction authority', () => {
       const runtimeRoot = join(mainRoot, runtimePrefix);
       const specRef1 = `${runtimePrefix}/unit-specs/unit-a.attempt-1.json`;
       const unitRootForAttempt = (attempt: number) => join(stateRoot, 'worktrees', repoId, 'active', runId, 'units', 'unit-a', `attempt-${String(attempt)}`, 'worktree');
-      const makeSpec = (attempt: number) => ({
-        schema_version: 'autopilot.unit_spec.v1', workstream, unit_id: 'unit-a', role: 'implement', template: 'implement', attempt,
-        objective: 'Exercise exact one-use subscription probe recovery.', cwd: unitRootForAttempt(attempt), model: 'openai-codex/gpt-5.6-terra', thinking: 'high',
-        owned_paths: ['probe-positive.ts'], read_only_paths: [], untouchable_paths: [], context_refs: [], validation_commands: [],
-        status_output: join(runtimeRoot, 'statuses', `unit-a.attempt-${String(attempt)}.json`), receipt_output: join(runtimeRoot, 'receipts', `unit-a.attempt-${String(attempt)}.json`), evidence_dir: join(runtimeRoot, 'evidence', `unit-a-${String(attempt)}`),
-        stop_boundary: 'stop after the exact probe witness', quality_profile: 'source-change', risk_level: 'low', acceptance_criteria: ['one exact retry is authorized'], verification_plan: { positive_witnesses: [], negative_witnesses: [], regression_witnesses: [], real_boundary_witnesses: [], blast_radius_checks: [], docs_schema_prompt_checks: [], dirty_tree_checks: [] }, closure_criteria: ['retry is registered'], upstream_refs: [], timeout_seconds: 60, render_prompt_snapshot: true,
+      const rosterFacts = runtimeRosterFacts({ repoId, runId, role: 'implement' });
+      const makeSpec = (attempt: number) => materializeNewRunUnitSpecV2({
+        selection: rosterFacts.selection,
+        roster: rosterFacts.roster,
+        role: 'implement',
+        request_profile: rosterFacts.requestProfile,
+        workstream,
+        unit_id: 'unit-a',
+        attempt,
+        objective: 'Exercise exact one-use subscription probe recovery.',
+        cwd: unitRootForAttempt(attempt),
+        owned_paths: ['probe-positive.ts'],
+        read_only_paths: [],
+        untouchable_paths: [],
+        context_refs: [],
+        validation_commands: [],
+        status_output: join(runtimeRoot, 'statuses', `unit-a.attempt-${String(attempt)}.json`),
+        receipt_output: join(runtimeRoot, 'receipts', `unit-a.attempt-${String(attempt)}.json`),
+        evidence_dir: join(runtimeRoot, 'evidence', `unit-a-${String(attempt)}`),
+        stop_boundary: 'stop after the exact probe witness',
+        quality_profile: 'source-change',
+        risk_level: 'low',
+        acceptance_criteria: ['one exact retry is authorized'],
+        verification_plan: { positive_witnesses: [], negative_witnesses: [], regression_witnesses: [], real_boundary_witnesses: [], blast_radius_checks: [], docs_schema_prompt_checks: [], dirty_tree_checks: [] },
+        closure_criteria: ['retry is registered'],
+        upstream_refs: [],
+        timeout_seconds: 60,
+        render_prompt_snapshot: true,
       });
       // The initial spec is inherited from content-result authority, so first G
       // still changes exactly the five frozen core paths.
@@ -1503,7 +1562,29 @@ void describe('D65 attempt/probe transaction authority', () => {
       assert.equal(priorAttempt?.['state'], 'reset');
 
       const receiptRef = `${runtimePrefix}/receipts/unit-a.attempt-1.failed.json`;
-      const receiptBytes = Buffer.from(`${canonicalJson({ schema_version: 'autopilot.receipt.v1', tool_name: 'autopilot_emit_status', workstream, unit_id: 'unit-a', role: 'implement', attempt: 1, emitted_at: new Date().toISOString(), status_output: makeSpec(1).status_output, status_sha256: sha256('failed status'), schema_sha256: sha256('receipt schema'), tool_call_id: 'probe-failed-receipt', provider_identity: { provider_id: 'openai-codex', requested_model_id: 'openai-codex/gpt-5.6-terra', executed_model_id: 'openai-codex/gpt-5.6-terra', api: 'openai-codex-responses', thinking_level: 'high' }, expected_identity_hash: sha256('probe identity') })}\n`, 'utf8');
+      const receiptSpec1 = makeSpec(1);
+      const observedProfile = materializeObservedProfile({
+        request_profile: rosterFacts.requestProfile,
+        provider_id: rosterFacts.requestProfile.provider_id,
+        requested_model_id: rosterFacts.requestProfile.model_id,
+        executed_model_id: rosterFacts.requestProfile.model_id,
+        api: rosterFacts.requestProfile.api,
+        thinking: rosterFacts.requestProfile.thinking,
+        service_tier: rosterFacts.requestProfile.service_tier,
+        cache_policy: rosterFacts.requestProfile.cache_policy,
+        system_prompt_profile: rosterFacts.requestProfile.system_prompt_profile,
+        system_prompt_sha256: sha256('probe system prompt'),
+        route_policy_id: rosterFacts.requestProfile.route_policy_id,
+        route_policy_revision: rosterFacts.requestProfile.route_policy_revision,
+      });
+      const providerIdentity = {
+        provider_id: rosterFacts.requestProfile.provider_id,
+        requested_model_id: rosterFacts.requestProfile.model_id,
+        executed_model_id: rosterFacts.requestProfile.model_id,
+        api: rosterFacts.requestProfile.api,
+        thinking_level: rosterFacts.requestProfile.thinking,
+      } as const;
+      const receiptBytes = Buffer.from(`${canonicalJson(materializeReceiptV2({ unit_spec: receiptSpec1, selection: rosterFacts.selection, roster: rosterFacts.roster, request_profile: rosterFacts.requestProfile, observed_profile: observedProfile, emitted_at: new Date().toISOString(), status_sha256: sha256('failed status'), schema_sha256: sha256('receipt schema'), tool_call_id: 'probe-failed-receipt', provider_identity: providerIdentity, expected_identity_hash: sha256('probe identity') }))}\n`, 'utf8');
       const specRef2 = `${runtimePrefix}/unit-specs/unit-a.attempt-2.json`;
       const spec2Bytes = Buffer.from(`${canonicalJson(makeSpec(2))}\n`, 'utf8');
       const stateRef = `${runtimePrefix}/state.json`;

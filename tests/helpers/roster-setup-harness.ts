@@ -68,36 +68,641 @@ const ZERO_SHA = 'sha256:0000000000000000000000000000000000000000000000000000000
 const FIXED_RECEIPT_TIME = '2026-07-22T12:00:05.000Z';
 
 export const EXPECTED_ROSTER_TOOL_PARAMETER_SCHEMA = Object.freeze({
-  type: 'object',
-  additionalProperties: false,
-  properties: {
-    schema_version: { type: 'string', enum: [ROSTER_TOOL_REQUEST_SCHEMA] },
-    action: { type: 'string', enum: ['inspect', 'propose', 'refine', 'save', 'reject', 'doctor'] },
-    activation_token: { type: 'string', minLength: 16, maxLength: 200, pattern: '^[A-Za-z0-9._:-]{16,200}$' },
-    approval_token: { anyOf: [{ type: 'string', minLength: 16, maxLength: 200, pattern: '^[A-Za-z0-9._:-]{16,200}$' }, { type: 'null' }] },
-    scope: { type: 'string', enum: ['user', 'trusted-project'] },
-    trusted_project_root: { anyOf: [{ type: 'string', minLength: 1, maxLength: 4096 }, { type: 'null' }] },
-    candidate_set_sha256: { anyOf: [{ type: 'string', minLength: 71, maxLength: 71, pattern: '^sha256:[a-f0-9]{64}$' }, { type: 'null' }] },
-    approved_roster_sha256s: { type: 'array', minItems: 0, maxItems: 16, uniqueItems: true, items: { type: 'string', minLength: 71, maxLength: 71, pattern: '^sha256:[a-f0-9]{64}$' } },
-    default_roster_id: { anyOf: [{ type: 'string', minLength: 1, maxLength: 96, pattern: '^[a-z][a-z0-9-]{0,95}$' }, { type: 'null' }] },
-    default_roster_revision: { anyOf: [{ type: 'integer', minimum: 1 }, { type: 'null' }] },
-    default_roster_sha256: { anyOf: [{ type: 'string', minLength: 71, maxLength: 71, pattern: '^sha256:[a-f0-9]{64}$' }, { type: 'null' }] },
-    original_command: { type: 'string', minLength: 1, maxLength: 4096 },
-  },
-  required: [
-    'schema_version',
-    'action',
-    'activation_token',
-    'approval_token',
-    'scope',
-    'trusted_project_root',
-    'candidate_set_sha256',
-    'approved_roster_sha256s',
-    'default_roster_id',
-    'default_roster_revision',
-    'default_roster_sha256',
-    'original_command',
-  ],
+  oneOf: [
+    {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        schema_version: {
+          type: "string",
+          enum: [
+            "autopilot.roster_tool_request.v1"
+          ]
+        },
+        action: {
+          type: "string",
+          enum: [
+            "inspect",
+            "propose",
+            "refine",
+            "save",
+            "reject",
+            "doctor"
+          ]
+        },
+        activation_token: {
+          type: "string",
+          minLength: 16,
+          maxLength: 200,
+          pattern: "^[A-Za-z0-9._:-]{16,200}$"
+        },
+        approval_token: {
+          anyOf: [
+            {
+              type: "string",
+              minLength: 16,
+              maxLength: 200,
+              pattern: "^[A-Za-z0-9._:-]{16,200}$"
+            },
+            {
+              type: "null"
+            }
+          ]
+        },
+        scope: {
+          type: "string",
+          enum: [
+            "user",
+            "trusted-project"
+          ]
+        },
+        trusted_project_root: {
+          anyOf: [
+            {
+              type: "string",
+              minLength: 1,
+              maxLength: 4096
+            },
+            {
+              type: "null"
+            }
+          ]
+        },
+        candidate_set_sha256: {
+          anyOf: [
+            {
+              type: "string",
+              minLength: 71,
+              maxLength: 71,
+              pattern: "^sha256:[a-f0-9]{64}$"
+            },
+            {
+              type: "null"
+            }
+          ]
+        },
+        approved_roster_sha256s: {
+          type: "array",
+          minItems: 0,
+          maxItems: 16,
+          uniqueItems: true,
+          items: {
+            type: "string",
+            minLength: 71,
+            maxLength: 71,
+            pattern: "^sha256:[a-f0-9]{64}$"
+          }
+        },
+        default_roster_id: {
+          anyOf: [
+            {
+              type: "string",
+              minLength: 1,
+              maxLength: 96,
+              pattern: "^[a-z][a-z0-9-]{0,95}$"
+            },
+            {
+              type: "null"
+            }
+          ]
+        },
+        default_roster_revision: {
+          anyOf: [
+            {
+              type: "integer",
+              minimum: 1
+            },
+            {
+              type: "null"
+            }
+          ]
+        },
+        default_roster_sha256: {
+          anyOf: [
+            {
+              type: "string",
+              minLength: 71,
+              maxLength: 71,
+              pattern: "^sha256:[a-f0-9]{64}$"
+            },
+            {
+              type: "null"
+            }
+          ]
+        },
+        original_command: {
+          type: "string",
+          minLength: 1,
+          maxLength: 4096
+        }
+      },
+      required: [
+        "schema_version",
+        "action",
+        "activation_token",
+        "approval_token",
+        "scope",
+        "trusted_project_root",
+        "candidate_set_sha256",
+        "approved_roster_sha256s",
+        "default_roster_id",
+        "default_roster_revision",
+        "default_roster_sha256",
+        "original_command"
+      ]
+    },
+    {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        schema_version: {
+          type: "string",
+          enum: [
+            "autopilot.roster_tool_request.v2"
+          ]
+        },
+        action: {
+          type: "string",
+          enum: [
+            "propose-custom"
+          ]
+        },
+        activation_token: {
+          type: "string",
+          minLength: 16,
+          maxLength: 200,
+          pattern: "^[A-Za-z0-9._:-]{16,200}$"
+        },
+        approval_token: {
+          type: "null"
+        },
+        scope: {
+          type: "string",
+          enum: [
+            "user",
+            "trusted-project"
+          ]
+        },
+        trusted_project_root: {
+          anyOf: [
+            {
+              type: "string",
+              minLength: 1,
+              maxLength: 4096
+            },
+            {
+              type: "null"
+            }
+          ]
+        },
+        candidate_set_sha256: {
+          type: "null"
+        },
+        approved_roster_sha256s: {
+          type: "array",
+          minItems: 0,
+          maxItems: 0,
+          uniqueItems: true,
+          items: {
+            type: "string",
+            minLength: 71,
+            maxLength: 71,
+            pattern: "^sha256:[a-f0-9]{64}$"
+          }
+        },
+        default_roster_id: {
+          type: "null"
+        },
+        default_roster_revision: {
+          type: "null"
+        },
+        default_roster_sha256: {
+          type: "null"
+        },
+        original_command: {
+          type: "string",
+          minLength: 1,
+          maxLength: 4096
+        },
+        custom_roster_request: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            schema_version: {
+              type: "string",
+              enum: [
+                "autopilot.custom_roster_request.v2"
+              ]
+            },
+            request_id: {
+              type: "string",
+              minLength: 1,
+              maxLength: 96,
+              pattern: "^[a-z][a-z0-9-]{0,95}$"
+            },
+            natural_language_request: {
+              type: "string",
+              minLength: 1,
+              maxLength: 16000
+            },
+            profile_id: {
+              type: "string",
+              enum: [
+                "precision",
+                "cruise",
+                "afterburner"
+              ]
+            },
+            role_assignment_intent: {
+              type: "array",
+              minItems: 8,
+              maxItems: 8,
+              items: {
+                type: "object",
+                additionalProperties: false,
+                properties: {
+                  role: {
+                    type: "string",
+                    enum: [
+                      "parent",
+                      "strategy",
+                      "implement",
+                      "validate",
+                      "fix",
+                      "adjudicate",
+                      "bughunt",
+                      "extract"
+                    ]
+                  },
+                  provider_id: {
+                    type: "string",
+                    minLength: 1,
+                    maxLength: 64,
+                    pattern: "^[a-z][a-z0-9-]{0,63}$"
+                  },
+                  model_id: {
+                    type: "string",
+                    minLength: 1,
+                    maxLength: 120,
+                    pattern: "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,119}$"
+                  },
+                  api: {
+                    type: "string",
+                    enum: [
+                      "openai-codex-responses",
+                      "anthropic-messages",
+                      "openai-completions"
+                    ]
+                  },
+                  thinking: {
+                    type: "string",
+                    enum: [
+                      "high",
+                      "xhigh"
+                    ]
+                  },
+                  service_tier: {
+                    anyOf: [
+                      {
+                        type: "string",
+                        enum: [
+                          "priority"
+                        ]
+                      },
+                      {
+                        type: "null"
+                      }
+                    ]
+                  },
+                  cache_policy: {
+                    type: "string",
+                    enum: [
+                      "provider-default",
+                      "none",
+                      "short",
+                      "long"
+                    ]
+                  },
+                  system_prompt_profile: {
+                    type: "string",
+                    enum: [
+                      "pi-default.v1",
+                      "anthropic-autopilot-sanitized.v1"
+                    ]
+                  }
+                },
+                required: [
+                  "role",
+                  "provider_id",
+                  "model_id",
+                  "api",
+                  "thinking"
+                ]
+              }
+            },
+            qualification_manifest: {
+              anyOf: [
+                {
+                  type: "null"
+                },
+                {
+                  type: "object"
+                }
+              ]
+            }
+          },
+          required: [
+            "schema_version",
+            "request_id",
+            "natural_language_request",
+            "profile_id",
+            "role_assignment_intent",
+            "qualification_manifest"
+          ]
+        },
+        custom_roster_approval: {
+          type: "null"
+        }
+      },
+      required: [
+        "schema_version",
+        "action",
+        "activation_token",
+        "approval_token",
+        "scope",
+        "trusted_project_root",
+        "candidate_set_sha256",
+        "approved_roster_sha256s",
+        "default_roster_id",
+        "default_roster_revision",
+        "default_roster_sha256",
+        "original_command",
+        "custom_roster_request",
+        "custom_roster_approval"
+      ]
+    },
+    {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        schema_version: {
+          type: "string",
+          enum: [
+            "autopilot.roster_tool_request.v2"
+          ]
+        },
+        action: {
+          type: "string",
+          enum: [
+            "save"
+          ]
+        },
+        activation_token: {
+          type: "string",
+          minLength: 16,
+          maxLength: 200,
+          pattern: "^[A-Za-z0-9._:-]{16,200}$"
+        },
+        approval_token: {
+          type: "string",
+          minLength: 16,
+          maxLength: 200,
+          pattern: "^[A-Za-z0-9._:-]{16,200}$"
+        },
+        scope: {
+          type: "string",
+          enum: [
+            "user",
+            "trusted-project"
+          ]
+        },
+        trusted_project_root: {
+          anyOf: [
+            {
+              type: "string",
+              minLength: 1,
+              maxLength: 4096
+            },
+            {
+              type: "null"
+            }
+          ]
+        },
+        candidate_set_sha256: {
+          type: "string",
+          minLength: 71,
+          maxLength: 71,
+          pattern: "^sha256:[a-f0-9]{64}$"
+        },
+        approved_roster_sha256s: {
+          type: "array",
+          minItems: 1,
+          maxItems: 16,
+          uniqueItems: true,
+          items: {
+            type: "string",
+            minLength: 71,
+            maxLength: 71,
+            pattern: "^sha256:[a-f0-9]{64}$"
+          }
+        },
+        default_roster_id: {
+          type: "string",
+          minLength: 1,
+          maxLength: 96,
+          pattern: "^[a-z][a-z0-9-]{0,95}$"
+        },
+        default_roster_revision: {
+          type: "integer",
+          minimum: 1
+        },
+        default_roster_sha256: {
+          type: "string",
+          minLength: 71,
+          maxLength: 71,
+          pattern: "^sha256:[a-f0-9]{64}$"
+        },
+        original_command: {
+          type: "string",
+          minLength: 1,
+          maxLength: 4096
+        },
+        custom_roster_request: {
+          type: "null"
+        },
+        custom_roster_approval: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            schema_version: {
+              type: "string",
+              enum: [
+                "autopilot.custom_roster_approval.v2"
+              ]
+            },
+            custom_proposal_sha256: {
+              type: "string",
+              minLength: 71,
+              maxLength: 71,
+              pattern: "^sha256:[a-f0-9]{64}$"
+            },
+            validation_result_sha256: {
+              type: "string",
+              minLength: 71,
+              maxLength: 71,
+              pattern: "^sha256:[a-f0-9]{64}$"
+            },
+            roster_sha256: {
+              type: "string",
+              minLength: 71,
+              maxLength: 71,
+              pattern: "^sha256:[a-f0-9]{64}$"
+            },
+            manifest_sha256: {
+              anyOf: [
+                {
+                  type: "string",
+                  minLength: 71,
+                  maxLength: 71,
+                  pattern: "^sha256:[a-f0-9]{64}$"
+                },
+                {
+                  type: "null"
+                }
+              ]
+            },
+            approval_sha256: {
+              type: "string",
+              minLength: 71,
+              maxLength: 71,
+              pattern: "^sha256:[a-f0-9]{64}$"
+            }
+          },
+          required: [
+            "schema_version",
+            "custom_proposal_sha256",
+            "validation_result_sha256",
+            "roster_sha256",
+            "manifest_sha256",
+            "approval_sha256"
+          ]
+        }
+      },
+      required: [
+        "schema_version",
+        "action",
+        "activation_token",
+        "approval_token",
+        "scope",
+        "trusted_project_root",
+        "candidate_set_sha256",
+        "approved_roster_sha256s",
+        "default_roster_id",
+        "default_roster_revision",
+        "default_roster_sha256",
+        "original_command",
+        "custom_roster_request",
+        "custom_roster_approval"
+      ]
+    },
+    {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        schema_version: {
+          type: "string",
+          enum: [
+            "autopilot.roster_tool_request.v2"
+          ]
+        },
+        action: {
+          type: "string",
+          enum: [
+            "reject"
+          ]
+        },
+        activation_token: {
+          type: "string",
+          minLength: 16,
+          maxLength: 200,
+          pattern: "^[A-Za-z0-9._:-]{16,200}$"
+        },
+        approval_token: {
+          type: "null"
+        },
+        scope: {
+          type: "string",
+          enum: [
+            "user",
+            "trusted-project"
+          ]
+        },
+        trusted_project_root: {
+          anyOf: [
+            {
+              type: "string",
+              minLength: 1,
+              maxLength: 4096
+            },
+            {
+              type: "null"
+            }
+          ]
+        },
+        candidate_set_sha256: {
+          type: "null"
+        },
+        approved_roster_sha256s: {
+          type: "array",
+          minItems: 0,
+          maxItems: 0,
+          uniqueItems: true,
+          items: {
+            type: "string",
+            minLength: 71,
+            maxLength: 71,
+            pattern: "^sha256:[a-f0-9]{64}$"
+          }
+        },
+        default_roster_id: {
+          type: "null"
+        },
+        default_roster_revision: {
+          type: "null"
+        },
+        default_roster_sha256: {
+          type: "null"
+        },
+        original_command: {
+          type: "string",
+          minLength: 1,
+          maxLength: 4096
+        },
+        custom_roster_request: {
+          type: "null"
+        },
+        custom_roster_approval: {
+          type: "null"
+        }
+      },
+      required: [
+        "schema_version",
+        "action",
+        "activation_token",
+        "approval_token",
+        "scope",
+        "trusted_project_root",
+        "candidate_set_sha256",
+        "approved_roster_sha256s",
+        "default_roster_id",
+        "default_roster_revision",
+        "default_roster_sha256",
+        "original_command",
+        "custom_roster_request",
+        "custom_roster_approval"
+      ]
+    }
+  ]
 } as const);
 
 export interface JsonMap {

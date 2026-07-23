@@ -2,7 +2,7 @@
   "schema_version": "autopilot.s2_release_skew_fixture.v1",
   "lane": "s2-c",
   "package": "pi-autopilot",
-  "current_package_version": "1.2.0",
+  "current_package_version": "1.3.0",
   "current_implementation_build": "1.2.0-s1",
   "current_wire_lineage": "protocol-1.6-api-schema-12",
   "current_api_schema_version": 12,

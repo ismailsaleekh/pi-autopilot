@@ -1637,11 +1637,11 @@ function validateSpawnExecutionProfile(spec) {
                 mismatches.push(`route_policy_revision expected ${String(request.route_policy_revision)}, Pi adapter derives ${String(route.route_policy_revision)}`);
         }
         if (request.service_tier !== null)
-            mismatches.push(`Pi 0.80.6 cannot set request_profile.service_tier=${JSON.stringify(request.service_tier)} exactly before model spend`);
+            mismatches.push(`current Pi ^0.81.1 adapter cannot set request_profile.service_tier=${JSON.stringify(request.service_tier)} exactly before model spend`);
         if (request.cache_policy !== 'provider-default')
-            mismatches.push(`Pi 0.80.6 cannot set request_profile.cache_policy=${JSON.stringify(request.cache_policy)} exactly before model spend`);
+            mismatches.push(`current Pi ^0.81.1 adapter cannot set request_profile.cache_policy=${JSON.stringify(request.cache_policy)} exactly before model spend`);
         if (request.system_prompt_profile !== 'pi-default.v1')
-            mismatches.push(`Pi 0.80.6 cannot set request_profile.system_prompt_profile=${JSON.stringify(request.system_prompt_profile)} exactly before model spend`);
+            mismatches.push(`current Pi ^0.81.1 adapter cannot set request_profile.system_prompt_profile=${JSON.stringify(request.system_prompt_profile)} exactly before model spend`);
         if (mismatches.length > 0)
             throw new Error(mismatches.join('; '));
     }

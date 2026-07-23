@@ -4,6 +4,7 @@ import { mkdir, unlink, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV } from "../names.js";
 import { parseAutopilotReceipt, parseAutopilotState, parseAutopilotUnitSpec } from "../contracts/index.js";
+import { parseAutopilotReceiptV2, parseAutopilotUnitSpecV2 } from "../roster/contracts.js";
 import { runGitMutation, runGitQuery } from "../git-process.js";
 import { canonicalJson } from "./canonical-json.js";
 import { CoordinatorClient } from "./client.js";
@@ -37,6 +38,63 @@ async function cleanupIsolatedIndex(path) {
         throw new CoordinationRuntimeError('invalid-state', 'D65 graph isolated index remained after cleanup', [path]);
 }
 const D65_FIRST_GRAPH_CORE_FILENAMES = Object.freeze(['mission.md', 'master-plan.json', 'state.json', 'decision-log.jsonl', 'events.jsonl']);
+function parseD65RuntimeJsonObjectBytes(bytes, label) {
+    let document;
+    try {
+        document = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+    }
+    catch (error) {
+        throw new CoordinationRuntimeError('invalid-request', `${label} is not strict UTF-8 JSON`, [error instanceof Error ? error.message : String(error)]);
+    }
+    if (document === null || typeof document !== 'object' || Array.isArray(document))
+        throw new CoordinationRuntimeError('invalid-request', `${label} must be one JSON object`);
+    return document;
+}
+function parseD65RuntimeUnitSpecBytes(bytes, label) {
+    const document = parseD65RuntimeJsonObjectBytes(bytes, label);
+    try {
+        if (document['schema_version'] === 'autopilot.unit_spec.v1')
+            return parseAutopilotUnitSpec(document);
+        if (document['schema_version'] === 'autopilot.unit_spec.v2')
+            return parseAutopilotUnitSpecV2(document);
+    }
+    catch (error) {
+        throw new CoordinationRuntimeError('invalid-request', `${label} is not a valid runtime unit spec`, [error instanceof Error ? error.message : String(error)]);
+    }
+    throw new CoordinationRuntimeError('invalid-request', `${label} schema_version is not an admitted runtime unit spec schema`, [String(document['schema_version'])]);
+}
+function parseD65RuntimeReceiptBytes(bytes, label) {
+    const document = parseD65RuntimeJsonObjectBytes(bytes, label);
+    try {
+        if (document['schema_version'] === 'autopilot.receipt.v1')
+            return parseAutopilotReceipt(document);
+        if (document['schema_version'] === 'autopilot.receipt.v2')
+            return parseAutopilotReceiptV2(document);
+    }
+    catch (error) {
+        throw new CoordinationRuntimeError('invalid-request', `${label} is not a valid runtime receipt`, [error instanceof Error ? error.message : String(error)]);
+    }
+    throw new CoordinationRuntimeError('invalid-request', `${label} schema_version is not an admitted runtime receipt schema`, [String(document['schema_version'])]);
+}
+function d65RuntimeSpecGeneration(spec) {
+    return spec.schema_version === 'autopilot.unit_spec.v2' ? 'v2' : 'v1';
+}
+function d65RuntimeReceiptGeneration(receipt) {
+    return receipt.schema_version === 'autopilot.receipt.v2' ? 'v2' : 'v1';
+}
+function d65RuntimeSpecProviderId(spec) {
+    return spec.schema_version === 'autopilot.unit_spec.v2' ? spec.request_profile.provider_id : null;
+}
+function d65RuntimeSpecProviderModelId(spec) {
+    return spec.schema_version === 'autopilot.unit_spec.v2' ? spec.request_profile.model_id : spec.model;
+}
+function d65RuntimeSpecsPreserveRetryAuthority(failed, successor) {
+    if (failed.schema_version === 'autopilot.unit_spec.v1' && successor.schema_version === 'autopilot.unit_spec.v1')
+        return successor.model === failed.model;
+    if (failed.schema_version === 'autopilot.unit_spec.v2' && successor.schema_version === 'autopilot.unit_spec.v2')
+        return successor.model === failed.model && successor.thinking === failed.thinking && canonicalJson(successor.request_profile) === canonicalJson(failed.request_profile);
+    return false;
+}
 function standardBase64(pathText) {
     return encodeUnpaddedBase64Url(new TextEncoder().encode(pathText)).replace(/-/gu, '+').replace(/_/gu, '/');
 }
@@ -582,7 +640,7 @@ export async function driveD65SubscriptionFailureRecoveryFromEnvironment(input) 
         throw new CoordinationRuntimeError('invalid-request', 'subscription continuation must supply exactly one updated runtime state authority', [stateRef]);
     const successorSpecs = resolvedFiles.map((entry) => {
         try {
-            return { entry, spec: parseAutopilotUnitSpec(JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(entry.bytes))) };
+            return { entry, spec: parseD65RuntimeUnitSpecBytes(entry.bytes, 'subscription successor spec') };
         }
         catch {
             return null;
@@ -594,12 +652,16 @@ export async function driveD65SubscriptionFailureRecoveryFromEnvironment(input) 
     const failedReceiptEntry = resolvedFiles.find((entry) => entry.ref === continuation.failed_receipt_ref?.ref);
     if (failedSpecEntry === undefined || failedReceiptEntry === undefined)
         throw new CoordinationRuntimeError('invalid-state', 'subscription continuation failed authority resolution is incomplete');
-    const failedSpec = parseAutopilotUnitSpec(JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(failedSpecEntry.bytes)));
-    const failedReceipt = parseAutopilotReceipt(JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(failedReceiptEntry.bytes)));
+    const failedSpec = parseD65RuntimeUnitSpecBytes(failedSpecEntry.bytes, 'subscription failed spec');
+    const failedReceipt = parseD65RuntimeReceiptBytes(failedReceiptEntry.bytes, 'subscription failed receipt');
     const successorSpec = successorSpecs[0].spec;
-    if (failedSpec.unit_id !== probe.unit_id || failedSpec.attempt !== probe.failed_attempt || failedReceipt.unit_id !== probe.unit_id || failedReceipt.attempt !== probe.failed_attempt || failedReceipt.provider_identity.provider_id !== probe.provider || failedReceipt.provider_identity.requested_model_id !== failedSpec.model || failedReceipt.provider_identity.executed_model_id !== failedSpec.model || successorSpec.model !== failedSpec.model)
+    const failedProviderModelId = d65RuntimeSpecProviderModelId(failedSpec);
+    const failedSpecProviderId = d65RuntimeSpecProviderId(failedSpec);
+    if (d65RuntimeSpecGeneration(failedSpec) !== d65RuntimeReceiptGeneration(failedReceipt) || d65RuntimeSpecGeneration(successorSpec) !== d65RuntimeSpecGeneration(failedSpec))
+        throw new CoordinationRuntimeError('invalid-request', 'subscription continuation cannot mix runtime unit_spec/receipt generations');
+    if (failedSpec.unit_id !== probe.unit_id || failedSpec.attempt !== probe.failed_attempt || failedReceipt.unit_id !== probe.unit_id || failedReceipt.attempt !== probe.failed_attempt || (failedSpecProviderId !== null && failedSpecProviderId !== probe.provider) || failedReceipt.provider_identity.provider_id !== probe.provider || failedReceipt.provider_identity.requested_model_id !== failedProviderModelId || failedReceipt.provider_identity.executed_model_id !== failedProviderModelId || !d65RuntimeSpecsPreserveRetryAuthority(failedSpec, successorSpec))
         throw new CoordinationRuntimeError('invalid-request', 'subscription continuation spec/receipt/provider/model authority is not exact');
-    const state = parseAutopilotState(JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(stateFiles[0].bytes)));
+    const state = parseAutopilotState(parseD65RuntimeJsonObjectBytes(stateFiles[0].bytes, 'subscription updated state'));
     const stateUnit = state.units[probe.unit_id];
     const successorStateRef = relative(resource.runtime_root, resolve(resource.main_worktree_path, ...successorSpecs[0].entry.ref.split('/'))).replace(/\\/gu, '/');
     const workItems = Object.values(state.work_items ?? {}).filter((item) => item.unit_ids.includes(probe.unit_id));

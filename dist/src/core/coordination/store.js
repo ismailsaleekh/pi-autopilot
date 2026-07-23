@@ -41,6 +41,7 @@ import { assertD65DiscoveredGraphBodyEqual, discoverD65GraphBody } from "./d65-g
 import { parseD65BootstrapCharter, reconstructD65BootstrapCharter } from "./d65-bootstrap-charter.js";
 import { validateD65FirstCompleteGraph } from "./d65-first-complete-graph.js";
 import { parseAutopilotReceipt, parseAutopilotState, parseAutopilotUnitSpec } from "../contracts/index.js";
+import { parseAutopilotReceiptV2, parseAutopilotUnitSpecV2 } from "../roster/contracts.js";
 import { assertAutopilotChildTerminalAcceptanceChain, AUTOPILOT_CHILD_TERMINAL_ACCEPTANCE_SCHEMA, parseAutopilotChildTerminalAcceptance } from "./terminal-acceptance.js";
 import { HISTORICAL_UNIT_FAILURE_GENERATIONS, classifyHistoricalUnitFailureEvidenceGeneration, parseRunTerminalSha, parseUnitAttemptTarget, parseUnitFailureEvidenceIngress, parseUnitMergeReservationFacts, validateReconciliationEvidenceDocument, validateReservationIntegrationEvidenceDocument, validateReservationValidationArtifactChain, validateReservationValidationEvidenceDocument } from "./terminal-evidence.js";
 import { BUG_177_HISTORICAL_UNIT_FAILURE_PRODUCERS } from "./unit-failure-producer-provenance.js";
@@ -66,11 +67,54 @@ const RUN_OWNED_IDEMPOTENCY_ACTIONS = new Set(['resolve-migration-recovery', 'ac
 const TERMINAL_SESSION_ACTIONS = new Set(['resolve-migration-recovery', 'detach-session', 'heartbeat', 'drain-mailbox', 'acknowledge-message', 'record-release-evidence', 'reconcile-run', 'reconciliation-details', 'result-details', 'prepare-operation', 'transition-operation']);
 const MIGRATION_RECOVERY_SESSION_ACTIONS = new Set(['resolve-migration-recovery', 'detach-session', 'heartbeat']);
 const STATUS_SECTIONS = ['repositories', 'runs', 'run_resources', 'session_leases', 'child_leases', 'unit_attempts', 'acquisition_groups', 'observations', 'edit_leases', 'change_reservations', 'reservation_obligations', 'run_terminal_intents', 'claim_requests', 'mailbox_cursors', 'reconciliation_evidence', 'reconciliation_receipts', 'mailbox_deliveries', 'result_receipts', 'worktrees', 'worktree_operations', 'wait_for_edges', 'deadlock_resolutions', 'authoritative_artifacts', 'adjudication_assignments', 'escalations', 'coordination_migrations', 'migration_recovery_work'];
+const D65_RUNTIME_UNIT_SPEC_SCHEMAS = new Set(['autopilot.unit_spec.v1', 'autopilot.unit_spec.v2']);
+const D65_RUNTIME_RECEIPT_SCHEMAS = new Set(['autopilot.receipt.v1', 'autopilot.receipt.v2']);
 const COORDINATOR_PROJECTION_SCAN_TTL_MS = 60_000;
 const COORDINATOR_MAX_ACTIVE_PROJECTION_SCANS = 8;
 const COORDINATOR_RUN_CATALOG_SCAN_TTL_MS = 60_000;
 const COORDINATOR_MAX_ACTIVE_RUN_CATALOG_SCANS = 64;
 const DOCTOR_SECTIONS = ['invariant_findings', 'migrations', 'expired_session_classifications', 'expired_child_classifications', 'incomplete_worktree_operations', 'pending_reservation_obligations', 'prepared_run_terminal_intents', 'active_wait_for_edges', 'open_deadlock_resolutions', 'pending_adjudication_assignments', 'retained_exclusive_operations', 'coordination_migrations', 'pending_migration_recovery_work'];
+function isD65RuntimeUnitSpecSchema(schemaVersion) {
+    return schemaVersion !== null && D65_RUNTIME_UNIT_SPEC_SCHEMAS.has(schemaVersion);
+}
+function isD65RuntimeReceiptSchema(schemaVersion) {
+    return schemaVersion !== null && D65_RUNTIME_RECEIPT_SCHEMAS.has(schemaVersion);
+}
+function parseD65RuntimeUnitSpecDocument(value, label) {
+    const document = parseJsonObject(value, label);
+    if (document['schema_version'] === 'autopilot.unit_spec.v1')
+        return parseAutopilotUnitSpec(document);
+    if (document['schema_version'] === 'autopilot.unit_spec.v2')
+        return parseAutopilotUnitSpecV2(document);
+    throw new CoordinationRuntimeError('invalid-state', `${label} schema_version is not an admitted runtime unit spec schema`, [String(document['schema_version'])]);
+}
+function parseD65RuntimeReceiptDocument(value, label) {
+    const document = parseJsonObject(value, label);
+    if (document['schema_version'] === 'autopilot.receipt.v1')
+        return parseAutopilotReceipt(document);
+    if (document['schema_version'] === 'autopilot.receipt.v2')
+        return parseAutopilotReceiptV2(document);
+    throw new CoordinationRuntimeError('invalid-state', `${label} schema_version is not an admitted runtime receipt schema`, [String(document['schema_version'])]);
+}
+function d65RuntimeSpecGeneration(spec) {
+    return spec.schema_version === 'autopilot.unit_spec.v2' ? 'v2' : 'v1';
+}
+function d65RuntimeReceiptGeneration(receipt) {
+    return receipt.schema_version === 'autopilot.receipt.v2' ? 'v2' : 'v1';
+}
+function d65RuntimeSpecProviderId(spec) {
+    return spec.schema_version === 'autopilot.unit_spec.v2' ? spec.request_profile.provider_id : null;
+}
+function d65RuntimeSpecProviderModelId(spec) {
+    return spec.schema_version === 'autopilot.unit_spec.v2' ? spec.request_profile.model_id : spec.model;
+}
+function d65RuntimeSpecsPreserveRetryAuthority(failed, successor) {
+    if (failed.schema_version === 'autopilot.unit_spec.v1' && successor.schema_version === 'autopilot.unit_spec.v1')
+        return successor.model === failed.model;
+    if (failed.schema_version === 'autopilot.unit_spec.v2' && successor.schema_version === 'autopilot.unit_spec.v2')
+        return successor.model === failed.model && successor.thinking === failed.thinking && canonicalJson(successor.request_profile) === canonicalJson(failed.request_profile);
+    return false;
+}
 function isJsonMap(value) {
     return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -4572,14 +4616,14 @@ export class CoordinatorStore {
         const resource = runResourceFromRow(asRow(this.#db.prepare('SELECT * FROM run_resources WHERE repo_id=? AND workstream_run=?').get(run.repo_id, run.workstream_run), 'ordinary attempt graph resource'));
         const graph = parseD65CompleteGraph(parseJsonObject(new TextDecoder('utf-8', { fatal: true }).decode(this.#loadEvidenceArtifact(run.repo_id, graphHead.artifact.evidence)), 'ordinary attempt accepted graph'));
         const loaded = loadD65CompleteGraph(graph, (ref) => this.#readD65GraphShardBlob(resource.main_worktree_path, graphHead.artifact.git_commit, ref));
-        const specs = loaded.authorities['specs']?.entries.filter((entry) => entry.ref === specRef && entry.sha256 === specSha256 && entry.document_schema_version === 'autopilot.unit_spec.v1') ?? [];
+        const specs = loaded.authorities['specs']?.entries.filter((entry) => entry.ref === specRef && entry.sha256 === specSha256 && isD65RuntimeUnitSpecSchema(entry.document_schema_version)) ?? [];
         if (specs.length !== 1)
             throw new CoordinationRuntimeError('invalid-state', 'ordinary attempt spec is not one exact accepted graph authority', [specRef, specSha256]);
         const specBytes = this.#readD65GraphShardBlob(resource.main_worktree_path, graph.covered_authority_commit, specRef);
         const actual = `sha256:${createHash('sha256').update(specBytes).digest('hex')}`;
         if (actual !== specSha256)
             throw new CoordinationRuntimeError('invalid-state', 'ordinary attempt spec bytes differ from accepted graph authority', [specRef, specSha256, actual]);
-        const spec = parseAutopilotUnitSpec(parseJsonObject(new TextDecoder('utf-8', { fatal: true }).decode(specBytes), 'ordinary attempt spec'));
+        const spec = parseD65RuntimeUnitSpecDocument(new TextDecoder('utf-8', { fatal: true }).decode(specBytes), 'ordinary attempt spec');
         const stateBytes = this.#readD65GraphShardBlob(resource.main_worktree_path, graph.covered_authority_commit, graph.core.state.ref);
         const state = parseAutopilotState(parseJsonObject(new TextDecoder('utf-8', { fatal: true }).decode(stateBytes), 'ordinary attempt graph state'));
         const unit = state.units[unitId];
@@ -4614,6 +4658,8 @@ export class CoordinatorStore {
         const loaded = loadD65CompleteGraph(graph, (ref) => this.#readD65GraphShardBlob(resource.main_worktree_path, graphHead.artifact.git_commit, ref));
         const authorityEntries = Object.values(loaded.authorities).flatMap((collection) => collection.entries);
         const exactAuthorityEntry = (ref, sha256, schema) => authorityEntries.filter((entry) => entry.ref === ref && entry.sha256 === sha256 && entry.document_schema_version === schema);
+        const exactRuntimeSpecEntry = (ref, sha256) => authorityEntries.filter((entry) => entry.ref === ref && entry.sha256 === sha256 && isD65RuntimeUnitSpecSchema(entry.document_schema_version));
+        const exactRuntimeReceiptEntry = (ref, sha256) => authorityEntries.filter((entry) => entry.ref === ref && entry.sha256 === sha256 && isD65RuntimeReceiptSchema(entry.document_schema_version));
         const readAuthority = (ref, expectedSha256, label) => {
             const bytes = this.#readD65GraphShardBlob(resource.main_worktree_path, graph.covered_authority_commit, ref);
             const actual = `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
@@ -4679,24 +4725,28 @@ export class CoordinatorStore {
         const trigger = parseD65ContinuationEvent(parseJsonObject(new TextDecoder('utf-8', { fatal: true }).decode(this.#loadEvidenceArtifact(run.repo_id, triggerArtifact.evidence)), 'probe trigger continuation'));
         if (trigger.trigger !== 'subscription-failure' || trigger.class !== 'provider-capacity-blocked' || trigger.repo_id !== run.repo_id || trigger.workstream_run !== run.workstream_run || trigger.unit_id !== unitId || trigger.attempt !== probe.failed_attempt || trigger.provider !== probe.provider || trigger.retry_ordinal !== probe.retry_ordinal || trigger.cooldown_until !== probe.cooldown_until || trigger.failed_spec_ref === null || trigger.failed_receipt_ref === null)
             throw new CoordinationRuntimeError('invalid-state', 'probe trigger continuation does not bind the exact first provider-failure tuple', [trigger.event_id]);
-        const failedSpecEntries = exactAuthorityEntry(trigger.failed_spec_ref.ref, trigger.failed_spec_ref.sha256, 'autopilot.unit_spec.v1');
-        const failedReceiptEntries = exactAuthorityEntry(trigger.failed_receipt_ref.ref, trigger.failed_receipt_ref.sha256, 'autopilot.receipt.v1');
+        const failedSpecEntries = exactRuntimeSpecEntry(trigger.failed_spec_ref.ref, trigger.failed_spec_ref.sha256);
+        const failedReceiptEntries = exactRuntimeReceiptEntry(trigger.failed_receipt_ref.ref, trigger.failed_receipt_ref.sha256);
         if (failedSpecEntries.length !== 1 || failedReceiptEntries.length !== 1)
             throw new CoordinationRuntimeError('invalid-state', 'probe failed spec/receipt are not exact accepted graph authorities');
         const failedSpecBytes = readAuthority(trigger.failed_spec_ref.ref, trigger.failed_spec_ref.sha256, 'probe failed spec');
         const failedReceiptBytes = readAuthority(trigger.failed_receipt_ref.ref, trigger.failed_receipt_ref.sha256, 'probe failed receipt');
         if (failedSpecBytes.byteLength !== trigger.failed_spec_ref.byte_count || failedReceiptBytes.byteLength !== trigger.failed_receipt_ref.byte_count)
             throw new CoordinationRuntimeError('invalid-state', 'probe failed spec/receipt byte counts differ from the trigger continuation');
-        const failedSpec = parseAutopilotUnitSpec(parseJsonObject(new TextDecoder('utf-8', { fatal: true }).decode(failedSpecBytes), 'probe failed spec'));
-        const failedReceipt = parseAutopilotReceipt(parseJsonObject(new TextDecoder('utf-8', { fatal: true }).decode(failedReceiptBytes), 'probe failed receipt'));
-        if (failedSpec.unit_id !== unitId || failedSpec.attempt !== probe.failed_attempt || failedReceipt.unit_id !== unitId || failedReceipt.attempt !== probe.failed_attempt || failedReceipt.provider_identity.provider_id !== probe.provider || failedReceipt.provider_identity.requested_model_id !== failedSpec.model || failedReceipt.provider_identity.executed_model_id !== failedSpec.model)
+        const failedSpec = parseD65RuntimeUnitSpecDocument(new TextDecoder('utf-8', { fatal: true }).decode(failedSpecBytes), 'probe failed spec');
+        const failedReceipt = parseD65RuntimeReceiptDocument(new TextDecoder('utf-8', { fatal: true }).decode(failedReceiptBytes), 'probe failed receipt');
+        const failedProviderModelId = d65RuntimeSpecProviderModelId(failedSpec);
+        const failedSpecProviderId = d65RuntimeSpecProviderId(failedSpec);
+        if (d65RuntimeSpecGeneration(failedSpec) !== d65RuntimeReceiptGeneration(failedReceipt))
+            throw new CoordinationRuntimeError('invalid-state', 'probe failed spec/receipt mix runtime generations', [unitId, String(probe.failed_attempt)]);
+        if (failedSpec.unit_id !== unitId || failedSpec.attempt !== probe.failed_attempt || failedReceipt.unit_id !== unitId || failedReceipt.attempt !== probe.failed_attempt || (failedSpecProviderId !== null && failedSpecProviderId !== probe.provider) || failedReceipt.provider_identity.provider_id !== probe.provider || failedReceipt.provider_identity.requested_model_id !== failedProviderModelId || failedReceipt.provider_identity.executed_model_id !== failedProviderModelId)
             throw new CoordinationRuntimeError('invalid-state', 'probe failed spec/receipt/provider/model identities do not match', [unitId, String(probe.failed_attempt), probe.provider]);
-        const successorEntries = exactAuthorityEntry(successorSpecRef, successorSpecSha256, 'autopilot.unit_spec.v1');
+        const successorEntries = exactRuntimeSpecEntry(successorSpecRef, successorSpecSha256);
         if (successorEntries.length !== 1)
             throw new CoordinationRuntimeError('invalid-state', 'probe successor spec is not one exact accepted graph authority', [successorSpecRef]);
-        const successorSpec = parseAutopilotUnitSpec(parseJsonObject(new TextDecoder('utf-8', { fatal: true }).decode(readAuthority(successorSpecRef, successorSpecSha256, 'probe successor spec')), 'probe successor spec'));
-        if (successorSpec.unit_id !== unitId || successorSpec.attempt !== attempt || successorSpec.model !== failedSpec.model)
-            throw new CoordinationRuntimeError('invalid-state', 'probe successor spec changes the authorized unit/attempt/model tuple', [successorSpec.unit_id, String(successorSpec.attempt), successorSpec.model]);
+        const successorSpec = parseD65RuntimeUnitSpecDocument(new TextDecoder('utf-8', { fatal: true }).decode(readAuthority(successorSpecRef, successorSpecSha256, 'probe successor spec')), 'probe successor spec');
+        if (d65RuntimeSpecGeneration(successorSpec) !== d65RuntimeSpecGeneration(failedSpec) || successorSpec.unit_id !== unitId || successorSpec.attempt !== attempt || !d65RuntimeSpecsPreserveRetryAuthority(failedSpec, successorSpec))
+            throw new CoordinationRuntimeError('invalid-state', 'probe successor spec changes the authorized unit/attempt/model tuple', [successorSpec.unit_id, String(successorSpec.attempt), d65RuntimeSpecProviderModelId(successorSpec)]);
         const graphState = parseAutopilotState(parseJsonObject(new TextDecoder('utf-8', { fatal: true }).decode(readAuthority(graph.core.state.ref, graph.core.state.sha256, 'probe graph state')), 'probe graph state'));
         const unit = graphState.units[unitId];
         const workItems = Object.values(graphState.work_items ?? {}).filter((item) => item.unit_ids.includes(unitId));
@@ -6708,7 +6758,7 @@ export class CoordinatorStore {
                 && subscriptionRecovery.retry_ordinal !== null
                 && after.attempt === before.attempt + 1
                 && successorSpecEntry !== undefined
-                && successorSpecEntry.document_schema_version === 'autopilot.unit_spec.v1'
+                && isD65RuntimeUnitSpecSchema(successorSpecEntry.document_schema_version)
                 && subscriptionRecovery.evidence_refs.some((evidence) => evidence.ref === current.graph.core.state.ref && evidence.sha256 === current.graph.core.state.sha256 && evidence.byte_count === current.graph.core.state.byte_count)
                 && subscriptionRecovery.evidence_refs.some((evidence) => evidence.ref === successorSpecEntry.ref && evidence.sha256 === successorSpecEntry.sha256 && evidence.byte_count === successorSpecEntry.byte_count);
             assertD65UnitTransition({ unitId, from: before.state, to: after.state, fromAttempt: before.attempt, toAttempt: after.attempt, hasRecoveryEvidence: semanticType === 'unit-attempt-registered' || semanticType === 'adjudication-accepted' || semanticType === 'run-scoped-fault-resolved' || exactSubscriptionRecovery });

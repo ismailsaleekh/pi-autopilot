@@ -134,11 +134,35 @@ function decodeJsonDocument(bytes: Uint8Array, label: string): JsonRecord {
   return asRecord(parsed, label);
 }
 
-function schemaConst(schema: CoordinationJsonSchema, label: string): string {
+function schemaVersionLiteral(schema: Readonly<Record<string, unknown>>, label: string): string {
   const properties = asRecord(schema['properties'], `${label}.properties`);
-  const schemaVersion = asRecord(properties['schema_version'], `${label}.properties.schema_version`)['const'];
-  if (typeof schemaVersion !== 'string' || schemaVersion.length === 0) throw new CoordinationRuntimeError('invalid-state', `${label} lacks an exact schema_version const`);
-  return schemaVersion;
+  const schemaVersion = asRecord(properties['schema_version'], `${label}.properties.schema_version`);
+  if (typeof schemaVersion['const'] === 'string' && schemaVersion['const'].length > 0) return schemaVersion['const'];
+  const enumValues = schemaVersion['enum'];
+  if (Array.isArray(enumValues) && enumValues.length === 1 && typeof enumValues[0] === 'string' && enumValues[0].length > 0) return enumValues[0];
+  throw new CoordinationRuntimeError('invalid-state', `${label} lacks an exact schema_version const or singleton enum`);
+}
+
+function assertSchemaVersionLiteralIfPresent(schema: Readonly<Record<string, unknown>>, expected: string, label: string): void {
+  const properties = asRecord(schema['properties'], `${label}.properties`);
+  if (!Object.hasOwn(properties, 'schema_version')) return;
+  const actual = schemaVersionLiteral(schema, label);
+  if (actual !== expected) throw new CoordinationRuntimeError('invalid-state', `${label} schema_version literal differs from its catalog family`, [expected, actual]);
+}
+
+function packageContractSchema(schemaVersion: string): Readonly<Record<string, unknown>> {
+  const directMatches = Object.entries(AUTOPILOT_JSON_SCHEMAS)
+    .filter(([name]) => name !== 'rosterContracts')
+    .filter(([, schema]) => schemaVersionLiteral(schema, `package schema ${schemaVersion}`) === schemaVersion)
+    .map(([, schema]) => schema);
+  if (directMatches.length > 1) throw new CoordinationRuntimeError('invalid-state', 'package contract schema has ambiguous direct registrations', [schemaVersion]);
+  const rosterContracts = asRecord(AUTOPILOT_JSON_SCHEMAS['rosterContracts'], 'package roster contract schema catalog');
+  const rosterSchema = rosterContracts[schemaVersion];
+  const rosterRecord = rosterSchema === undefined ? null : asRecord(rosterSchema, `package roster contract schema ${schemaVersion}`);
+  if (rosterRecord !== null) assertSchemaVersionLiteralIfPresent(rosterRecord, schemaVersion, `package roster contract schema ${schemaVersion}`);
+  if (directMatches.length === 1 && directMatches[0] !== undefined) return directMatches[0];
+  if (rosterRecord !== null) return rosterRecord;
+  throw new CoordinationRuntimeError('invalid-state', 'package contract schema is not source-anchored in AUTOPILOT_JSON_SCHEMAS', [schemaVersion]);
 }
 
 function fieldNamesFromJsonSchema(schema: Readonly<Record<string, unknown>>): readonly string[] {
@@ -177,10 +201,8 @@ function currentOnlyFamily(schemaVersion: string, persistence: VersionedIngressP
 }
 
 const packageContractFamilies = AUTOPILOT_SCHEMA_NAMES.map((schemaVersion) => {
-  const schema = Object.values(AUTOPILOT_JSON_SCHEMAS).find((candidate) => schemaConst(candidate, `package schema ${schemaVersion}`) === schemaVersion);
-  const fields = schema === undefined ? Object.freeze(['schema_version']) : fieldNamesFromJsonSchema(schema);
-  const required = schema === undefined ? Object.freeze(['schema_version']) : requiredFieldNamesFromJsonSchema(schema);
-  return currentOnlyFamily(schemaVersion, 'package-contract', fields, required, 'package contract artifact inventoried from AUTOPILOT_SCHEMA_NAMES');
+  const schema = packageContractSchema(schemaVersion);
+  return currentOnlyFamily(schemaVersion, 'package-contract', fieldNamesFromJsonSchema(schema), requiredFieldNamesFromJsonSchema(schema), 'package contract artifact inventoried from AUTOPILOT_SCHEMA_NAMES and its source-anchored schema catalog');
 });
 
 function coordinationSchemaVersion(name: string, schema: CoordinationJsonSchema): string {
@@ -511,10 +533,10 @@ export function parseVersionedPersistedArtifact(input: {
   }
   const selection = selectVersionedIngressProducer({ family: input.family, producer_build: input.producer_build, producer_generation: input.producer_generation, ...(input.registry === undefined ? {} : { registry: input.registry }) });
   const document = decodeJsonDocument(input.bytes, selection.family.family);
-  if (stringField(document, 'schema_version', selection.family.family, 192) !== selection.family.schema_version) throw new CoordinationRuntimeError('schema-mismatch', 'persisted artifact schema_version does not match its selected family', [selection.family.family]);
+  const fields = sortedUnique(Object.keys(document));
+  if (selection.range.exact_fields.includes('schema_version') && stringField(document, 'schema_version', selection.family.family, 192) !== selection.family.schema_version) throw new CoordinationRuntimeError('schema-mismatch', 'persisted artifact schema_version does not match its selected family', [selection.family.family]);
   if (Object.hasOwn(document, 'producer_build') && stringField(document, 'producer_build', selection.family.family, 192) !== input.producer_build) throw new CoordinationRuntimeError('protocol-mismatch', 'persisted artifact producer_build field differs from selected provenance', [selection.family.family]);
   if (Object.hasOwn(document, 'producer_generation') && integerField(document, 'producer_generation', selection.family.family) !== input.producer_generation) throw new CoordinationRuntimeError('protocol-mismatch', 'persisted artifact producer_generation field differs from selected provenance', [selection.family.family]);
-  const fields = sortedUnique(Object.keys(document));
   const unknownFields = fields.filter((field) => !selection.range.exact_fields.includes(field));
   if (selection.range.unknown_field_policy === 'reject' && unknownFields.length > 0) throw new CoordinationRuntimeError('schema-mismatch', 'persisted artifact has unknown fields for its exact producer generation', [selection.family.family, ...unknownFields]);
   for (const field of selection.range.required_fields) {
