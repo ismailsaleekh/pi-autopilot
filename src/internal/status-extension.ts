@@ -205,6 +205,13 @@ function buildToolResult(
       status_sha256: result.statusSha256,
       schema_sha256: result.schemaSha256,
       expected_identity_hash: result.expectedIdentityHash,
+      ...(result.receipt.schema_version === 'autopilot.receipt.v2'
+        ? {
+            receipt_schema_version: 'autopilot.receipt.v2',
+            request_profile_sha256: result.receipt.request_profile.request_profile_sha256,
+            observed_profile_sha256: result.receipt.observed_profile.observed_profile_sha256,
+          }
+        : {}),
     },
     terminate: true,
   };

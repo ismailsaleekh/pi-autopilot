@@ -14,17 +14,24 @@ import {
 } from './names.ts';
 import {
   buildAutopilotProviderIdentity,
+  buildAutopilotProviderIdentityFromRequestProfile,
+  buildAutopilotRosterExecutionIdentity,
   buildAutopilotStatusToolContext,
   deriveAutopilotArtifactRoot,
+  lowerAutopilotUnitSpecV2ToV1,
   parseAutopilotStatusToolContext,
+  splitAutopilotModelId,
   validateAutopilotStatusEvidence,
+  type AutopilotObservedExecutionEvidence,
   type AutopilotProviderIdentity,
+  type AutopilotRosterExecutionIdentity,
+  type AutopilotStatusReceipt,
   type AutopilotStatusToolContext,
 } from './forced-output/index.ts';
 import { AutopilotForcedOutputEvidenceError } from './forced-output/status-evidence.ts';
-import { parseAutopilotStatusEntry, parseAutopilotUnitSpec } from './contracts/index.ts';
+import { parseAutopilotStatusEntry, parseAutopilotUnitSpec, parseAutopilotUnitSpecV2 } from './contracts/index.ts';
 import { deriveAutopilotAuthority, persistAutopilotAuthority, type AutopilotAuthorityArtifact } from './authority.ts';
-import type { AutopilotExecutionAudit, AutopilotExecutionCommit, AutopilotStatusEntry, AutopilotUnitSpec } from './contracts/types.ts';
+import type { AutopilotExecutionAudit, AutopilotExecutionCommit, AutopilotReceipt, AutopilotStatusEntry, AutopilotUnitSpec, AutopilotUnitSpecV2 } from './contracts/types.ts';
 import {
   captureAutopilotExecutionBaseline,
   deriveAutopilotExecutionAuditPath,
@@ -77,8 +84,11 @@ import { assertAutopilotSpecQualityGate } from './quality/spec-gate.ts';
 import {
   AutopilotPromptTemplateError,
   renderAndMaybeWriteAutopilotPromptSnapshot,
+  deriveAutopilotPromptSnapshotPath,
+  type AutopilotForcedOutputContract,
   type AutopilotRenderedPrompt,
 } from './prompt-renderer/index.ts';
+import { autopilotModelAssignmentForRole } from './model-roster.ts';
 
 type JsonRecord = Readonly<Record<string, unknown>>;
 type ProcessEnv = Readonly<Record<string, string | undefined>>;
@@ -138,12 +148,35 @@ export interface AutopilotAgentRunResult {
   readonly summary: string;
 }
 
+export interface AutopilotPiExecutionResultEvidence {
+  readonly isError: boolean;
+  readonly stopReason: string | null;
+  readonly provider: string | null;
+  readonly model: string | null;
+  readonly api: string | null;
+  readonly thinkingLevel: string | null;
+  readonly numTurns: number;
+}
+
+export interface AutopilotExecutionObserverInput {
+  readonly unitSpec: AutopilotUnitSpec;
+  readonly rosterExecutionIdentity: AutopilotRosterExecutionIdentity;
+  readonly piResult: AutopilotPiExecutionResultEvidence;
+}
+
+export interface AutopilotExecutionObserver {
+  observeExecutionIdentity(
+    input: AutopilotExecutionObserverInput,
+  ): AutopilotObservedExecutionEvidence | null | Promise<AutopilotObservedExecutionEvidence | null>;
+}
+
 export interface AutopilotAgentRunOptions {
   readonly dryRun?: boolean;
   readonly piExecutable?: string;
   readonly env?: ProcessEnv;
   readonly timeoutMsOverride?: number;
   readonly forcePromptSnapshot?: boolean;
+  readonly executionObserver?: AutopilotExecutionObserver;
 }
 
 const AUTOPILOT_AGENT_PI_EXECUTABLE_ENV = 'AUTOPILOT_AGENT_PI_EXECUTABLE';
@@ -169,6 +202,7 @@ interface SpawnSpec {
   readonly executable: string;
   readonly model: string;
   readonly thinking: AutopilotProviderIdentity['thinking_level'];
+  readonly requestProfile?: AutopilotRosterExecutionIdentity['request_profile'];
   readonly cwd: string;
   readonly toolPolicy: ToolPolicy;
   readonly env: ProcessEnv;
@@ -266,6 +300,12 @@ interface ChildAuthorityLifecycle {
   auditBaseline: AutopilotExecutionBaseline | null;
 }
 
+interface AutopilotAgentRunSpecBundle {
+  readonly unitSpec: AutopilotUnitSpec;
+  readonly originalSpec: AutopilotUnitSpec | AutopilotUnitSpecV2;
+  readonly rosterExecutionIdentity: AutopilotRosterExecutionIdentity | null;
+}
+
 export async function runAutopilotAgentFromSpecPath(
   specPath: string,
   options: AutopilotAgentRunOptions = {},
@@ -317,12 +357,19 @@ async function runAutopilotAgentFromSpecPathInternal(
   options: AutopilotAgentRunOptions,
   lifecycle: ChildAuthorityLifecycle,
 ): Promise<AutopilotAgentRunResult> {
-  const spec = await readAndValidateSpec(specPath);
+  const specBundle = await readAndValidateSpec(specPath);
+  const spec = specBundle.unitSpec;
   let providerIdentity: AutopilotProviderIdentity;
   let context: AutopilotStatusToolContext;
   try {
-    providerIdentity = buildAutopilotProviderIdentity(spec.model, spec.thinking);
-    context = buildAutopilotStatusToolContext({ unitSpec: spec, providerIdentity });
+    providerIdentity = specBundle.rosterExecutionIdentity === null
+      ? buildAutopilotProviderIdentity(spec.model, spec.thinking)
+      : buildAutopilotProviderIdentityFromRequestProfile(specBundle.rosterExecutionIdentity.request_profile);
+    context = buildAutopilotStatusToolContext({
+      unitSpec: spec,
+      providerIdentity,
+      ...(specBundle.rosterExecutionIdentity === null ? {} : { rosterExecutionIdentity: specBundle.rosterExecutionIdentity }),
+    });
   } catch (error) {
     throw new AutopilotAgentRunError('spec-invalid', {
       reason: errorMessage(error),
@@ -368,8 +415,9 @@ async function runAutopilotAgentFromSpecPathInternal(
   ].join('\n');
   let rendered: AutopilotRenderedPrompt;
   try {
-    rendered = await renderAndMaybeWriteAutopilotPromptSnapshot({
-      spec,
+    rendered = await renderAndMaybeWritePromptForSpecBundle({
+      specBundle,
+      providerIdentity,
       ...(coordinationAppendix === undefined ? {} : { coordinationAppendix }),
       ...(options.forcePromptSnapshot === undefined ? {} : { forceSnapshot: options.forcePromptSnapshot }),
     });
@@ -421,8 +469,9 @@ async function runAutopilotAgentFromSpecPathInternal(
   };
   const spawnSpec: SpawnSpec = {
     executable: options.piExecutable ?? resolvePiExecutable(env),
-    model: providerIdentity.requested_model_id,
+    model: spec.model,
     thinking: providerIdentity.thinking_level,
+    ...(specBundle.rosterExecutionIdentity === null ? {} : { requestProfile: specBundle.rosterExecutionIdentity.request_profile }),
     cwd: spec.cwd,
     toolPolicy: toolPolicyForRole(spec.role),
     env: childProcessEnv,
@@ -453,9 +502,33 @@ async function runAutopilotAgentFromSpecPathInternal(
     throw error;
   }
 
+  let observedExecution: AutopilotObservedExecutionEvidence | null = null;
+  try {
+    observedExecution = await observeExecutionIdentityForRoster({
+      specBundle,
+      piResult,
+      ...(options.executionObserver === undefined ? {} : { observer: options.executionObserver }),
+    });
+  } catch (error) {
+    const audit = await writeAttemptAudit(spec, runtimePreflight.context, runtimePreflight.authority, auditBaseline, null, auditOutput, env);
+    throw new AutopilotAgentRunError('invalid-structured-output', {
+      reason: `execution identity observer failed before terminal acceptance: ${redactSensitiveText(errorMessage(error))}`,
+      specPath,
+      statusOutput: spec.status_output,
+      receiptOutput: spec.receipt_output,
+      promptSnapshotPath: rendered.snapshotPath,
+      auditOutput,
+      auditClassification: audit.classification,
+    });
+  }
+
   let evidence;
   try {
-    evidence = await validateAutopilotStatusEvidence({ unitSpec: spec, providerIdentity });
+    evidence = await validateAutopilotStatusEvidence({
+      unitSpec: spec,
+      providerIdentity,
+      ...(specBundle.rosterExecutionIdentity === null ? {} : { rosterExecutionIdentity: specBundle.rosterExecutionIdentity, observedExecution }),
+    });
   } catch (error) {
     const audit = await writeAttemptAudit(spec, runtimePreflight.context, runtimePreflight.authority, auditBaseline, null, auditOutput, env);
     if (piResult.isError) {
@@ -501,7 +574,7 @@ async function runAutopilotAgentFromSpecPathInternal(
     validateAutopilotEmitStatusCarrier(
       piResult,
       evidence.receipt.tool_call_id,
-      evidence.receipt.status_sha256,
+      evidence.receipt.status_sha256 as `sha256:${string}`,
     );
     parseAutopilotStatusEntry(evidence.status, {
       unitSpec: spec,
@@ -525,7 +598,7 @@ async function runAutopilotAgentFromSpecPathInternal(
     !isBenignTerminalStatusCompletion(
       piResult,
       evidence.receipt.tool_call_id,
-      evidence.receipt.status_sha256,
+      evidence.receipt.status_sha256 as `sha256:${string}`,
     )
   ) {
     throw new AutopilotAgentRunError('pi-spawn-failed', {
@@ -543,17 +616,22 @@ async function runAutopilotAgentFromSpecPathInternal(
   if (childAuthority === null) throw new AutopilotAgentRunError('runtime-commit-failed', { reason: 'durable child authority disappeared before terminal acceptance commit', specPath });
   let terminalAcceptance: Awaited<ReturnType<typeof writeAutopilotChildTerminalAcceptance>>;
   try {
+    const terminalInputs = await materializeTerminalAcceptanceInputs({
+      specBundle,
+      specPath,
+      receipt: evidence.receipt,
+    });
     terminalAcceptance = await writeAutopilotChildTerminalAcceptance({
       mainWorktreePath: runtimePreflight.context.active.main_worktree_path,
       runtimeRoot: runtimePreflight.context.active.runtime_root,
       workstream: spec.workstream,
       child: childAuthority.child,
-      specPath,
+      specPath: terminalInputs.specPath,
       statusPath: spec.status_output,
-      receiptPath: spec.receipt_output,
+      receiptPath: terminalInputs.receiptPath,
       auditPath: auditOutput,
       status: evidence.status,
-      receipt: evidence.receipt,
+      receipt: terminalInputs.receipt,
       audit,
     });
   } catch (error) {
@@ -685,7 +763,7 @@ async function preserveOrResetFailedSourceAttempt(input: {
   await quarantineFailedUnit({ context: input.context, unitId: input.spec.unit_id, attempt: input.spec.attempt, unitWorktreePath: input.spec.cwd, summary: input.summary, ...(input.baseline?.gitHead === null || input.baseline?.gitHead === undefined ? {} : { baselineHead: input.baseline.gitHead }), env: input.env });
 }
 
-async function readAndValidateSpec(specPath: string): Promise<AutopilotUnitSpec> {
+async function readAndValidateSpec(specPath: string): Promise<AutopilotAgentRunSpecBundle> {
   let parsed: unknown;
   try {
     parsed = JSON.parse(await readFile(specPath, 'utf8')) as unknown;
@@ -697,15 +775,160 @@ async function readAndValidateSpec(specPath: string): Promise<AutopilotUnitSpec>
   }
 
   try {
+    if (isJsonRecord(parsed) && parsed['schema_version'] === 'autopilot.unit_spec.v2') {
+      const originalSpec = parseAutopilotUnitSpecV2(parsed);
+      const unitSpec = lowerAutopilotUnitSpecV2ToV1(originalSpec);
+      const rosterExecutionIdentity = buildAutopilotRosterExecutionIdentity(originalSpec);
+      assertV2LaunchQualityGate(unitSpec);
+      return { unitSpec, originalSpec, rosterExecutionIdentity };
+    }
     const spec = parseAutopilotUnitSpec(parsed);
     assertAutopilotSpecQualityGate(spec);
-    return spec;
+    return { unitSpec: spec, originalSpec: spec, rosterExecutionIdentity: null };
   } catch (error) {
     throw new AutopilotAgentRunError('spec-invalid', {
       reason: errorMessage(error),
       specPath,
     });
   }
+}
+
+function assertV2LaunchQualityGate(spec: AutopilotUnitSpec): void {
+  const issues: string[] = [];
+  if (spec.quality_profile === undefined) issues.push('quality_profile is required before child launch');
+  if (spec.risk_level === undefined) issues.push('risk_level is required before child launch');
+  if (spec.acceptance_criteria === undefined || spec.acceptance_criteria.length === 0) issues.push('acceptance_criteria must contain at least one criterion before child launch');
+  if (spec.verification_plan === undefined) issues.push('verification_plan is required before child launch');
+  if (spec.closure_criteria === undefined || spec.closure_criteria.length === 0) issues.push('closure_criteria must contain at least one criterion before child launch');
+  if ((spec.role === 'implement' || spec.role === 'fix') && spec.owned_paths.length === 0) issues.push(`${spec.role} specs require at least one owned path`);
+  if ((spec.role === 'validate' || spec.role === 'bughunt') && spec.validation_commands.length === 0) issues.push(`${spec.role} specs require at least one validation command`);
+  if (issues.length > 0) throw new Error(`Autopilot unit_spec.v2 failed launch quality gate: ${issues.join('; ')}`);
+}
+
+async function renderAndMaybeWritePromptForSpecBundle(input: {
+  readonly specBundle: AutopilotAgentRunSpecBundle;
+  readonly providerIdentity: AutopilotProviderIdentity;
+  readonly forceSnapshot?: boolean;
+  readonly coordinationAppendix?: string;
+}): Promise<AutopilotRenderedPrompt> {
+  if (input.specBundle.rosterExecutionIdentity === null) {
+    return await renderAndMaybeWriteAutopilotPromptSnapshot({
+      spec: input.specBundle.unitSpec,
+      ...(input.coordinationAppendix === undefined ? {} : { coordinationAppendix: input.coordinationAppendix }),
+      ...(input.forceSnapshot === undefined ? {} : { forceSnapshot: input.forceSnapshot }),
+    });
+  }
+
+  const spec = input.specBundle.unitSpec;
+  const fixedAssignment = autopilotModelAssignmentForRole(spec.role);
+  const renderSpec: AutopilotUnitSpec = {
+    ...spec,
+    model: fixedAssignment.model,
+    thinking: fixedAssignment.thinking,
+  };
+  const forcedOutputContract: AutopilotForcedOutputContract = {
+    tool_name: AUTOPILOT_STATUS_TOOL,
+    schema_version: 'autopilot.status.v1',
+    workstream: spec.workstream,
+    unit_id: spec.unit_id,
+    role: spec.role,
+    attempt: spec.attempt,
+    status_output: spec.status_output,
+    receipt_output: spec.receipt_output,
+    provider_identity: input.providerIdentity,
+  };
+  const rendered = await renderAndMaybeWriteAutopilotPromptSnapshot({
+    spec: renderSpec,
+    forceSnapshot: false,
+    forcedOutputContract,
+    ...(input.coordinationAppendix === undefined ? {} : { coordinationAppendix: input.coordinationAppendix }),
+  });
+  const text = rewriteRenderedPromptModelIdentity(rendered.text, renderSpec, spec);
+  const shouldWrite = input.forceSnapshot === true || spec.render_prompt_snapshot === true;
+  if (!shouldWrite) return { text, snapshotPath: null };
+  const snapshotPath = deriveAutopilotPromptSnapshotPath(spec);
+  await mkdir(dirname(snapshotPath), { recursive: true });
+  await writeFile(snapshotPath, `${text}\n`, 'utf8');
+  return { text, snapshotPath };
+}
+
+function rewriteRenderedPromptModelIdentity(
+  text: string,
+  renderSpec: AutopilotUnitSpec,
+  requestedSpec: AutopilotUnitSpec,
+): string {
+  return text
+    .replace(`- model: \`${renderSpec.model}\``, `- model: \`${requestedSpec.model}\``)
+    .replace(`- thinking: \`${renderSpec.thinking}\``, `- thinking: \`${requestedSpec.thinking}\``);
+}
+
+async function observeExecutionIdentityForRoster(input: {
+  readonly specBundle: AutopilotAgentRunSpecBundle;
+  readonly piResult: PiResult;
+  readonly observer?: AutopilotExecutionObserver;
+}): Promise<AutopilotObservedExecutionEvidence | null> {
+  const rosterExecutionIdentity = input.specBundle.rosterExecutionIdentity;
+  if (rosterExecutionIdentity === null) return null;
+  if (input.observer === undefined) return null;
+  const observed = await input.observer.observeExecutionIdentity({
+    unitSpec: input.specBundle.unitSpec,
+    rosterExecutionIdentity,
+    piResult: projectPiResultEvidence(input.piResult),
+  });
+  return observed;
+}
+
+function projectPiResultEvidence(piResult: PiResult): AutopilotPiExecutionResultEvidence {
+  return {
+    isError: piResult.isError,
+    stopReason: piResult.stopReason,
+    provider: piResult.provider,
+    model: piResult.model,
+    api: piResult.api,
+    thinkingLevel: piResult.thinkingLevel,
+    numTurns: piResult.numTurns,
+  };
+}
+
+async function materializeTerminalAcceptanceInputs(input: {
+  readonly specBundle: AutopilotAgentRunSpecBundle;
+  readonly specPath: string;
+  readonly receipt: AutopilotStatusReceipt;
+}): Promise<{ readonly specPath: string; readonly receiptPath: string; readonly receipt: AutopilotReceipt }> {
+  if (input.specBundle.rosterExecutionIdentity === null) {
+    return { specPath: input.specPath, receiptPath: input.specBundle.unitSpec.receipt_output, receipt: input.receipt as AutopilotReceipt };
+  }
+  const spec = input.specBundle.unitSpec;
+  const compatRoot = resolve(deriveAutopilotArtifactRoot(spec), 'terminal-v1-compat');
+  const compatSpecPath = resolve(compatRoot, 'unit-specs', `${spec.unit_id}.${spec.role}.attempt-${String(spec.attempt)}.json`);
+  const compatReceiptPath = resolve(compatRoot, 'receipts', `${spec.unit_id}.${spec.role}.attempt-${String(spec.attempt)}.receipt.json`);
+  const receipt = input.receipt;
+  const compatReceipt: AutopilotReceipt = {
+    schema_version: 'autopilot.receipt.v1',
+    tool_name: 'autopilot_emit_status',
+    workstream: spec.workstream,
+    unit_id: spec.unit_id,
+    role: spec.role,
+    attempt: spec.attempt,
+    emitted_at: receipt.emitted_at,
+    status_output: spec.status_output,
+    status_sha256: receipt.status_sha256 as `sha256:${string}`,
+    schema_sha256: receipt.schema_sha256 as `sha256:${string}`,
+    tool_call_id: receipt.tool_call_id,
+    provider_identity: {
+      provider_id: receipt.provider_identity.provider_id,
+      requested_model_id: spec.model,
+      executed_model_id: spec.model,
+      api: receipt.provider_identity.api,
+      thinking_level: spec.thinking,
+    },
+    expected_identity_hash: receipt.expected_identity_hash as `sha256:${string}`,
+  };
+  await mkdir(dirname(compatSpecPath), { recursive: true });
+  await mkdir(dirname(compatReceiptPath), { recursive: true });
+  await writeFile(compatSpecPath, `${JSON.stringify(spec, null, 2)}\n`, 'utf8');
+  await writeFile(compatReceiptPath, `${JSON.stringify(compatReceipt, null, 2)}\n`, 'utf8');
+  return { specPath: compatSpecPath, receiptPath: compatReceiptPath, receipt: compatReceipt };
 }
 
 interface RuntimePreflightResult {
@@ -1100,8 +1323,29 @@ function validateModelIdentity(model: string): void {
   }
 }
 
+function validateSpawnExecutionProfile(spec: SpawnSpec): void {
+  if (spec.requestProfile === undefined) {
+    validateModelIdentity(spec.model);
+    return;
+  }
+  try {
+    const { provider, modelId } = splitAutopilotModelId(spec.model);
+    const request = spec.requestProfile;
+    const mismatches: string[] = [];
+    if (provider !== request.provider_id) mismatches.push(`provider_id expected ${request.provider_id}, got ${provider}`);
+    if (modelId !== request.model_id) mismatches.push(`model_id expected ${request.model_id}, got ${modelId}`);
+    if (spec.model !== request.model) mismatches.push(`model expected ${request.model}, got ${spec.model}`);
+    if (spec.thinking !== request.thinking) mismatches.push(`thinking expected ${request.thinking}, got ${spec.thinking}`);
+    if (mismatches.length > 0) throw new Error(mismatches.join('; '));
+  } catch (error) {
+    throw new AutopilotAgentRunError('spec-invalid', {
+      reason: `roster request profile does not match exact Pi spawn identity: ${errorMessage(error)}`,
+    });
+  }
+}
+
 async function runPiPromptWithStatusCarrier(spec: SpawnSpec, prompt: string): Promise<PiResult> {
-  validateModelIdentity(spec.model);
+  validateSpawnExecutionProfile(spec);
   const argv = [
     '--mode',
     'rpc',
@@ -1662,9 +1906,17 @@ function formatNullable(value: string | null): string {
 }
 
 function boundedDiagnosticText(value: string, limit: number): string {
-  const compact = value.replace(/[\u0000-\u001f\u007f]+/gu, ' ').trim();
+  const compact = redactSensitiveText(value).replace(/[\u0000-\u001f\u007f]+/gu, ' ').trim();
   if (compact.length <= limit) return compact;
   return `${compact.slice(0, limit)}…<truncated>`;
+}
+
+function redactSensitiveText(value: string): string {
+  return value
+    .replace(/(authorization\s*[:=]\s*bearer\s+)[A-Za-z0-9._~+\/-]+/giu, '$1<redacted>')
+    .replace(/((?:api[_-]?key|access[_-]?token|refresh[_-]?token|oauth[_-]?token|credential|secret)\s*[:=]\s*)[^\s,;"'}]+/giu, '$1<redacted>')
+    .replace(/\b(?:sk|pk|rk|ghp|github_pat)_[A-Za-z0-9_\-]{12,}\b/gu, '<redacted-token>')
+    .replace(/\b[A-Za-z0-9_-]*token[A-Za-z0-9_-]*\b\s*[:=]\s*[^\s,;"'}]+/giu, 'token=<redacted>');
 }
 
 function tailText(value: string): string {
