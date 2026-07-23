@@ -1,0 +1,970 @@
+{
+  "schema_version": "autopilot.opencode_go_provider_fixture.v1",
+  "provider_id": "opencode-go",
+  "recipe_id": "opencode-go-plan",
+  "route_policy_id": "opencode-go-plan-v1",
+  "evidence_source": "synthetic-fixture",
+  "notice": {
+    "synthetic_fixture": true,
+    "synthetic_fixtures_certifying": false,
+    "live_provider_certification_asserted": false,
+    "network_calls_permitted": false,
+    "qualification_state": "qualification-required",
+    "pending_live_post_w3_witnesses": [
+      "non-secret plan entitlement proof for opencode-go under opencode-go-plan-v1",
+      "non-secret billing-route proof for plan-api-token proving it is not OpenRouter or an arbitrary metered key",
+      "authenticated observed execution for parent with exact request_profile and observed_profile",
+      "authenticated observed execution for strategy with exact request_profile and observed_profile",
+      "authenticated observed execution for implement with exact request_profile and observed_profile",
+      "authenticated observed execution for validate with exact request_profile and observed_profile",
+      "authenticated observed execution for fix with exact request_profile and observed_profile",
+      "authenticated observed execution for adjudicate with exact request_profile and observed_profile",
+      "authenticated observed execution for bughunt with exact request_profile and observed_profile",
+      "authenticated observed execution for extract with exact request_profile and observed_profile",
+      "post-W3 receipt.v2 observed execution identity for every role with no fallback"
+    ]
+  },
+  "model_label_policy": {
+    "labels_are_display_only": true,
+    "labels_do_not_imply_ranking": true,
+    "labels_do_not_imply_provider": true,
+    "provider_authority": "opencode-go",
+    "route_policy_authority": "opencode-go-plan-v1",
+    "forbidden_inference": "model labels are never used to derive provider, route, entitlement, billing, ranking, or fallback authority"
+  },
+  "qualification_input": {
+    "schema_version": "autopilot.opencode_go_qualification_input.v1",
+    "evidence_source": "synthetic-fixture",
+    "provider_id": "opencode-go",
+    "route_policy_id": "opencode-go-plan-v1",
+    "route_policy_revision": 1,
+    "auth_class": "api-key-plan-token",
+    "auth_source": "stored",
+    "auth_material_shape": "api-key-shaped-plan-token",
+    "billing_class": "plan-token",
+    "billing_route_class": "plan-api-token",
+    "gateway_id": "opencode-go",
+    "entitlement_proof": {
+      "proof_id": "fixture-opencode-go-plan-entitlement-proof",
+      "proof_kind": "entitlement",
+      "provider_id": "opencode-go",
+      "route_policy_id": "opencode-go-plan-v1",
+      "route_policy_revision": 1,
+      "auth_class": "api-key-plan-token",
+      "auth_source": "stored",
+      "auth_material_shape": "api-key-shaped-plan-token",
+      "billing_class": "plan-token",
+      "billing_route_class": "plan-api-token",
+      "entitlement_state": "plan-entitled",
+      "secret_free": true,
+      "secret_fields_present": false,
+      "no_fallback": true,
+      "observed_at": "2026-07-23T00:00:00.000Z",
+      "evidence_ref": {
+        "evidence_id": "fixture-opencode-go-plan-entitlement-proof",
+        "kind": "route-proof",
+        "uri": "fixture://phase37/opencode-go/entitlement-route-proof",
+        "sha256": null,
+        "byte_count": null,
+        "secret_free": true
+      }
+    },
+    "billing_route_proof": {
+      "proof_id": "fixture-opencode-go-billing-route-proof",
+      "proof_kind": "billing-route",
+      "provider_id": "opencode-go",
+      "route_policy_id": "opencode-go-plan-v1",
+      "route_policy_revision": 1,
+      "auth_class": "api-key-plan-token",
+      "auth_source": "stored",
+      "auth_material_shape": "api-key-shaped-plan-token",
+      "billing_class": "plan-token",
+      "billing_route_class": "plan-api-token",
+      "entitlement_state": "plan-entitled",
+      "secret_free": true,
+      "secret_fields_present": false,
+      "no_fallback": true,
+      "observed_at": "2026-07-23T00:00:00.000Z",
+      "evidence_ref": {
+        "evidence_id": "fixture-opencode-go-billing-route-proof",
+        "kind": "billing-proof",
+        "uri": "fixture://phase37/opencode-go/billing-route-proof",
+        "sha256": null,
+        "byte_count": null,
+        "secret_free": true
+      }
+    },
+    "role_witnesses": [
+      {
+        "witness_id": "fixture-opencode-go-parent-execution",
+        "role": "parent",
+        "provider_id": "opencode-go",
+        "route_policy_id": "opencode-go-plan-v1",
+        "route_policy_revision": 1,
+        "authenticated": true,
+        "auth_class": "api-key-plan-token",
+        "auth_source": "stored",
+        "billing_route_class": "plan-api-token",
+        "request_profile": {
+          "provider_id": "opencode-go",
+          "model_id": "kimi-k3",
+          "model": "opencode-go/kimi-k3",
+          "api": "openai-completions",
+          "thinking": "xhigh",
+          "service_tier": null,
+          "cache_policy": "provider-default",
+          "system_prompt_profile": "pi-default.v1",
+          "context_window": 256000,
+          "max_output_tokens": 32768,
+          "input_modalities": [
+            "text"
+          ],
+          "output_modalities": [
+            "text"
+          ],
+          "reasoning_capability": "reasoning-supported",
+          "tool_capability": "tool-use-supported",
+          "route_policy_id": "opencode-go-plan-v1",
+          "route_policy_revision": 1,
+          "request_profile_sha256": "sha256:defec2102f0aee4a042b4270ab45f414d0aea2a08cd9eaaff9186e27a8bda9cb"
+        },
+        "observed_profile": {
+          "provider_id": "opencode-go",
+          "requested_model_id": "kimi-k3",
+          "executed_model_id": "kimi-k3",
+          "api": "openai-completions",
+          "thinking": "xhigh",
+          "service_tier": null,
+          "cache_policy": "provider-default",
+          "system_prompt_profile": "pi-default.v1",
+          "system_prompt_sha256": "sha256:dba839a0e30a2c924ad3bd2324dcc013bfcb2c2fee59275e39556ded57af17de",
+          "route_policy_id": "opencode-go-plan-v1",
+          "route_policy_revision": 1,
+          "request_profile_sha256": "sha256:defec2102f0aee4a042b4270ab45f414d0aea2a08cd9eaaff9186e27a8bda9cb",
+          "observed_profile_sha256": "sha256:33ff6c9096e476ef5abd1f1d00c487021321677167c9aa19dd7d927b9e31859e"
+        },
+        "evidence_refs": [
+          {
+            "evidence_id": "fixture-opencode-go-exec-parent-proof",
+            "kind": "execution-proof",
+            "uri": "fixture://phase37/opencode-go/execution/parent",
+            "sha256": null,
+            "byte_count": null,
+            "secret_free": true
+          }
+        ],
+        "no_fallback": true
+      },
+      {
+        "witness_id": "fixture-opencode-go-strategy-execution",
+        "role": "strategy",
+        "provider_id": "opencode-go",
+        "route_policy_id": "opencode-go-plan-v1",
+        "route_policy_revision": 1,
+        "authenticated": true,
+        "auth_class": "api-key-plan-token",
+        "auth_source": "stored",
+        "billing_route_class": "plan-api-token",
+        "request_profile": {
+          "provider_id": "opencode-go",
+          "model_id": "kimi-k3",
+          "model": "opencode-go/kimi-k3",
+          "api": "openai-completions",
+          "thinking": "xhigh",
+          "service_tier": null,
+          "cache_policy": "provider-default",
+          "system_prompt_profile": "pi-default.v1",
+          "context_window": 256000,
+          "max_output_tokens": 32768,
+          "input_modalities": [
+            "text"
+          ],
+          "output_modalities": [
+            "text"
+          ],
+          "reasoning_capability": "reasoning-supported",
+          "tool_capability": "tool-use-supported",
+          "route_policy_id": "opencode-go-plan-v1",
+          "route_policy_revision": 1,
+          "request_profile_sha256": "sha256:defec2102f0aee4a042b4270ab45f414d0aea2a08cd9eaaff9186e27a8bda9cb"
+        },
+        "observed_profile": {
+          "provider_id": "opencode-go",
+          "requested_model_id": "kimi-k3",
+          "executed_model_id": "kimi-k3",
+          "api": "openai-completions",
+          "thinking": "xhigh",
+          "service_tier": null,
+          "cache_policy": "provider-default",
+          "system_prompt_profile": "pi-default.v1",
+          "system_prompt_sha256": "sha256:9d523dda3e3b75f3553d5f445fe488beac2d885e047bdf7fe516704dad20c4c5",
+          "route_policy_id": "opencode-go-plan-v1",
+          "route_policy_revision": 1,
+          "request_profile_sha256": "sha256:defec2102f0aee4a042b4270ab45f414d0aea2a08cd9eaaff9186e27a8bda9cb",
+          "observed_profile_sha256": "sha256:858871d8ad5dfde6710e6b7aa97895d1005dc257c87f3f8c472c531c4cdabc6b"
+        },
+        "evidence_refs": [
+          {
+            "evidence_id": "fixture-opencode-go-exec-strategy-proof",
+            "kind": "execution-proof",
+            "uri": "fixture://phase37/opencode-go/execution/strategy",
+            "sha256": null,
+            "byte_count": null,
+            "secret_free": true
+          }
+        ],
+        "no_fallback": true
+      },
+      {
+        "witness_id": "fixture-opencode-go-implement-execution",
+        "role": "implement",
+        "provider_id": "opencode-go",
+        "route_policy_id": "opencode-go-plan-v1",
+        "route_policy_revision": 1,
+        "authenticated": true,
+        "auth_class": "api-key-plan-token",
+        "auth_source": "stored",
+        "billing_route_class": "plan-api-token",
+        "request_profile": {
+          "provider_id": "opencode-go",
+          "model_id": "kimi-k2.7-code",
+          "model": "opencode-go/kimi-k2.7-code",
+          "api": "openai-completions",
+          "thinking": "high",
+          "service_tier": null,
+          "cache_policy": "provider-default",
+          "system_prompt_profile": "pi-default.v1",
+          "context_window": 256000,
+          "max_output_tokens": 32768,
+          "input_modalities": [
+            "text"
+          ],
+          "output_modalities": [
+            "text"
+          ],
+          "reasoning_capability": "reasoning-supported",
+          "tool_capability": "tool-use-supported",
+          "route_policy_id": "opencode-go-plan-v1",
+          "route_policy_revision": 1,
+          "request_profile_sha256": "sha256:98278433d6abad30934bee3b0f4fdffa153e3f8a0e128b6944153a9478115284"
+        },
+        "observed_profile": {
+          "provider_id": "opencode-go",
+          "requested_model_id": "kimi-k2.7-code",
+          "executed_model_id": "kimi-k2.7-code",
+          "api": "openai-completions",
+          "thinking": "high",
+          "service_tier": null,
+          "cache_policy": "provider-default",
+          "system_prompt_profile": "pi-default.v1",
+          "system_prompt_sha256": "sha256:74ab5c08b874f03843ae8191188fa8bb4a376ecc8edd5ee457e29f390efce420",
+          "route_policy_id": "opencode-go-plan-v1",
+          "route_policy_revision": 1,
+          "request_profile_sha256": "sha256:98278433d6abad30934bee3b0f4fdffa153e3f8a0e128b6944153a9478115284",
+          "observed_profile_sha256": "sha256:ece2426d48646822984e1cc2eb50f879927a74546364feb308c45b1858aebca2"
+        },
+        "evidence_refs": [
+          {
+            "evidence_id": "fixture-opencode-go-exec-implement-proof",
+            "kind": "execution-proof",
+            "uri": "fixture://phase37/opencode-go/execution/implement",
+            "sha256": null,
+            "byte_count": null,
+            "secret_free": true
+          }
+        ],
+        "no_fallback": true
+      },
+      {
+        "witness_id": "fixture-opencode-go-validate-execution",
+        "role": "validate",
+        "provider_id": "opencode-go",
+        "route_policy_id": "opencode-go-plan-v1",
+        "route_policy_revision": 1,
+        "authenticated": true,
+        "auth_class": "api-key-plan-token",
+        "auth_source": "stored",
+        "billing_route_class": "plan-api-token",
+        "request_profile": {
+          "provider_id": "opencode-go",
+          "model_id": "kimi-k3",
+          "model": "opencode-go/kimi-k3",
+          "api": "openai-completions",
+          "thinking": "xhigh",
+          "service_tier": null,
+          "cache_policy": "provider-default",
+          "system_prompt_profile": "pi-default.v1",
+          "context_window": 256000,
+          "max_output_tokens": 32768,
+          "input_modalities": [
+            "text"
+          ],
+          "output_modalities": [
+            "text"
+          ],
+          "reasoning_capability": "reasoning-supported",
+          "tool_capability": "tool-use-supported",
+          "route_policy_id": "opencode-go-plan-v1",
+          "route_policy_revision": 1,
+          "request_profile_sha256": "sha256:defec2102f0aee4a042b4270ab45f414d0aea2a08cd9eaaff9186e27a8bda9cb"
+        },
+        "observed_profile": {
+          "provider_id": "opencode-go",
+          "requested_model_id": "kimi-k3",
+          "executed_model_id": "kimi-k3",
+          "api": "openai-completions",
+          "thinking": "xhigh",
+          "service_tier": null,
+          "cache_policy": "provider-default",
+          "system_prompt_profile": "pi-default.v1",
+          "system_prompt_sha256": "sha256:6cb5bd527f095dba56edb872c749687e4dd5194bfe252f25a93229c0a060d2f1",
+          "route_policy_id": "opencode-go-plan-v1",
+          "route_policy_revision": 1,
+          "request_profile_sha256": "sha256:defec2102f0aee4a042b4270ab45f414d0aea2a08cd9eaaff9186e27a8bda9cb",
+          "observed_profile_sha256": "sha256:b565f05270186333500076edd0e069b94cf79435c27985781f1add63780af27d"
+        },
+        "evidence_refs": [
+          {
+            "evidence_id": "fixture-opencode-go-exec-validate-proof",
+            "kind": "execution-proof",
+            "uri": "fixture://phase37/opencode-go/execution/validate",
+            "sha256": null,
+            "byte_count": null,
+            "secret_free": true
+          }
+        ],
+        "no_fallback": true
+      },
+      {
+        "witness_id": "fixture-opencode-go-fix-execution",
+        "role": "fix",
+        "provider_id": "opencode-go",
+        "route_policy_id": "opencode-go-plan-v1",
+        "route_policy_revision": 1,
+        "authenticated": true,
+        "auth_class": "api-key-plan-token",
+        "auth_source": "stored",
+        "billing_route_class": "plan-api-token",
+        "request_profile": {
+          "provider_id": "opencode-go",
+          "model_id": "kimi-k2.7-code",
+          "model": "opencode-go/kimi-k2.7-code",
+          "api": "openai-completions",
+          "thinking": "high",
+          "service_tier": null,
+          "cache_policy": "provider-default",
+          "system_prompt_profile": "pi-default.v1",
+          "context_window": 256000,
+          "max_output_tokens": 32768,
+          "input_modalities": [
+            "text"
+          ],
+          "output_modalities": [
+            "text"
+          ],
+          "reasoning_capability": "reasoning-supported",
+          "tool_capability": "tool-use-supported",
+          "route_policy_id": "opencode-go-plan-v1",
+          "route_policy_revision": 1,
+          "request_profile_sha256": "sha256:98278433d6abad30934bee3b0f4fdffa153e3f8a0e128b6944153a9478115284"
+        },
+        "observed_profile": {
+          "provider_id": "opencode-go",
+          "requested_model_id": "kimi-k2.7-code",
+          "executed_model_id": "kimi-k2.7-code",
+          "api": "openai-completions",
+          "thinking": "high",
+          "service_tier": null,
+          "cache_policy": "provider-default",
+          "system_prompt_profile": "pi-default.v1",
+          "system_prompt_sha256": "sha256:9bee071fefb6db88127d99bd3d6b5fac63caf36791be5332e53bb166ddb74a2a",
+          "route_policy_id": "opencode-go-plan-v1",
+          "route_policy_revision": 1,
+          "request_profile_sha256": "sha256:98278433d6abad30934bee3b0f4fdffa153e3f8a0e128b6944153a9478115284",
+          "observed_profile_sha256": "sha256:3f6aec6d4854d45d72a7493563731b6abe52328e5070cb981cedaa42ff43ae1a"
+        },
+        "evidence_refs": [
+          {
+            "evidence_id": "fixture-opencode-go-exec-fix-proof",
+            "kind": "execution-proof",
+            "uri": "fixture://phase37/opencode-go/execution/fix",
+            "sha256": null,
+            "byte_count": null,
+            "secret_free": true
+          }
+        ],
+        "no_fallback": true
+      },
+      {
+        "witness_id": "fixture-opencode-go-adjudicate-execution",
+        "role": "adjudicate",
+        "provider_id": "opencode-go",
+        "route_policy_id": "opencode-go-plan-v1",
+        "route_policy_revision": 1,
+        "authenticated": true,
+        "auth_class": "api-key-plan-token",
+        "auth_source": "stored",
+        "billing_route_class": "plan-api-token",
+        "request_profile": {
+          "provider_id": "opencode-go",
+          "model_id": "kimi-k3",
+          "model": "opencode-go/kimi-k3",
+          "api": "openai-completions",
+          "thinking": "xhigh",
+          "service_tier": null,
+          "cache_policy": "provider-default",
+          "system_prompt_profile": "pi-default.v1",
+          "context_window": 256000,
+          "max_output_tokens": 32768,
+          "input_modalities": [
+            "text"
+          ],
+          "output_modalities": [
+            "text"
+          ],
+          "reasoning_capability": "reasoning-supported",
+          "tool_capability": "tool-use-supported",
+          "route_policy_id": "opencode-go-plan-v1",
+          "route_policy_revision": 1,
+          "request_profile_sha256": "sha256:defec2102f0aee4a042b4270ab45f414d0aea2a08cd9eaaff9186e27a8bda9cb"
+        },
+        "observed_profile": {
+          "provider_id": "opencode-go",
+          "requested_model_id": "kimi-k3",
+          "executed_model_id": "kimi-k3",
+          "api": "openai-completions",
+          "thinking": "xhigh",
+          "service_tier": null,
+          "cache_policy": "provider-default",
+          "system_prompt_profile": "pi-default.v1",
+          "system_prompt_sha256": "sha256:a0215e460320415cd72580356c89029780e1d8f80ce40519026aa06239a6cb70",
+          "route_policy_id": "opencode-go-plan-v1",
+          "route_policy_revision": 1,
+          "request_profile_sha256": "sha256:defec2102f0aee4a042b4270ab45f414d0aea2a08cd9eaaff9186e27a8bda9cb",
+          "observed_profile_sha256": "sha256:b0546041fca7a100be115109ca6dc7ce4fdd53b9f2ab0adaf0fb0e21a8e7a186"
+        },
+        "evidence_refs": [
+          {
+            "evidence_id": "fixture-opencode-go-exec-adjudicate-proof",
+            "kind": "execution-proof",
+            "uri": "fixture://phase37/opencode-go/execution/adjudicate",
+            "sha256": null,
+            "byte_count": null,
+            "secret_free": true
+          }
+        ],
+        "no_fallback": true
+      },
+      {
+        "witness_id": "fixture-opencode-go-bughunt-execution",
+        "role": "bughunt",
+        "provider_id": "opencode-go",
+        "route_policy_id": "opencode-go-plan-v1",
+        "route_policy_revision": 1,
+        "authenticated": true,
+        "auth_class": "api-key-plan-token",
+        "auth_source": "stored",
+        "billing_route_class": "plan-api-token",
+        "request_profile": {
+          "provider_id": "opencode-go",
+          "model_id": "kimi-k3",
+          "model": "opencode-go/kimi-k3",
+          "api": "openai-completions",
+          "thinking": "xhigh",
+          "service_tier": null,
+          "cache_policy": "provider-default",
+          "system_prompt_profile": "pi-default.v1",
+          "context_window": 256000,
+          "max_output_tokens": 32768,
+          "input_modalities": [
+            "text"
+          ],
+          "output_modalities": [
+            "text"
+          ],
+          "reasoning_capability": "reasoning-supported",
+          "tool_capability": "tool-use-supported",
+          "route_policy_id": "opencode-go-plan-v1",
+          "route_policy_revision": 1,
+          "request_profile_sha256": "sha256:defec2102f0aee4a042b4270ab45f414d0aea2a08cd9eaaff9186e27a8bda9cb"
+        },
+        "observed_profile": {
+          "provider_id": "opencode-go",
+          "requested_model_id": "kimi-k3",
+          "executed_model_id": "kimi-k3",
+          "api": "openai-completions",
+          "thinking": "xhigh",
+          "service_tier": null,
+          "cache_policy": "provider-default",
+          "system_prompt_profile": "pi-default.v1",
+          "system_prompt_sha256": "sha256:4bd5561c9e9d3bf6485927cec50967e18c09cf237e798736e2485884146bf29e",
+          "route_policy_id": "opencode-go-plan-v1",
+          "route_policy_revision": 1,
+          "request_profile_sha256": "sha256:defec2102f0aee4a042b4270ab45f414d0aea2a08cd9eaaff9186e27a8bda9cb",
+          "observed_profile_sha256": "sha256:6f3546b3e1dff5bdb7f5fbd54afb8347b389e5236bff4b0f403e02e92990ebcc"
+        },
+        "evidence_refs": [
+          {
+            "evidence_id": "fixture-opencode-go-exec-bughunt-proof",
+            "kind": "execution-proof",
+            "uri": "fixture://phase37/opencode-go/execution/bughunt",
+            "sha256": null,
+            "byte_count": null,
+            "secret_free": true
+          }
+        ],
+        "no_fallback": true
+      },
+      {
+        "witness_id": "fixture-opencode-go-extract-execution",
+        "role": "extract",
+        "provider_id": "opencode-go",
+        "route_policy_id": "opencode-go-plan-v1",
+        "route_policy_revision": 1,
+        "authenticated": true,
+        "auth_class": "api-key-plan-token",
+        "auth_source": "stored",
+        "billing_route_class": "plan-api-token",
+        "request_profile": {
+          "provider_id": "opencode-go",
+          "model_id": "deepseek-v4-flash",
+          "model": "opencode-go/deepseek-v4-flash",
+          "api": "openai-completions",
+          "thinking": "high",
+          "service_tier": null,
+          "cache_policy": "provider-default",
+          "system_prompt_profile": "pi-default.v1",
+          "context_window": 128000,
+          "max_output_tokens": 16384,
+          "input_modalities": [
+            "text"
+          ],
+          "output_modalities": [
+            "text"
+          ],
+          "reasoning_capability": "reasoning-supported",
+          "tool_capability": "tool-use-supported",
+          "route_policy_id": "opencode-go-plan-v1",
+          "route_policy_revision": 1,
+          "request_profile_sha256": "sha256:213fa796520f7b6f8b316fc89b5c35cc76a14250d68f90c44ebb18edb5b81174"
+        },
+        "observed_profile": {
+          "provider_id": "opencode-go",
+          "requested_model_id": "deepseek-v4-flash",
+          "executed_model_id": "deepseek-v4-flash",
+          "api": "openai-completions",
+          "thinking": "high",
+          "service_tier": null,
+          "cache_policy": "provider-default",
+          "system_prompt_profile": "pi-default.v1",
+          "system_prompt_sha256": "sha256:2b68b34a7d94da574150119c359258fe2198dd731293d829794ba65ca32e9aa7",
+          "route_policy_id": "opencode-go-plan-v1",
+          "route_policy_revision": 1,
+          "request_profile_sha256": "sha256:213fa796520f7b6f8b316fc89b5c35cc76a14250d68f90c44ebb18edb5b81174",
+          "observed_profile_sha256": "sha256:dd25b151f4013ce1a812744810b1b4e353bbc0ca6712c1046782c48812e26394"
+        },
+        "evidence_refs": [
+          {
+            "evidence_id": "fixture-opencode-go-exec-extract-proof",
+            "kind": "execution-proof",
+            "uri": "fixture://phase37/opencode-go/execution/extract",
+            "sha256": null,
+            "byte_count": null,
+            "secret_free": true
+          }
+        ],
+        "no_fallback": true
+      }
+    ],
+    "no_fallback": true
+  },
+  "evaluation": {
+    "schema_version": "autopilot.opencode_go_qualification_evaluation.v1",
+    "provider_id": "opencode-go",
+    "route_policy_id": "opencode-go-plan-v1",
+    "route_policy_revision": 1,
+    "evidence_source": "synthetic-fixture",
+    "structural_pass": true,
+    "certification_ready": false,
+    "qualification_state": "qualification-required",
+    "non_certifying": true,
+    "synthetic_fixture_non_certifying": true,
+    "no_network": true,
+    "pending_live_post_w3_witnesses": [
+      "non-secret plan entitlement proof for opencode-go under opencode-go-plan-v1",
+      "non-secret billing-route proof for plan-api-token proving it is not OpenRouter or an arbitrary metered key",
+      "authenticated observed execution for parent with exact request_profile and observed_profile",
+      "authenticated observed execution for strategy with exact request_profile and observed_profile",
+      "authenticated observed execution for implement with exact request_profile and observed_profile",
+      "authenticated observed execution for validate with exact request_profile and observed_profile",
+      "authenticated observed execution for fix with exact request_profile and observed_profile",
+      "authenticated observed execution for adjudicate with exact request_profile and observed_profile",
+      "authenticated observed execution for bughunt with exact request_profile and observed_profile",
+      "authenticated observed execution for extract with exact request_profile and observed_profile",
+      "post-W3 receipt.v2 observed execution identity for every role with no fallback"
+    ],
+    "issues": [],
+    "evaluation_sha256": "sha256:6a507009de234d736a78e8b58ec0a7302cb1c389dafbe76acb674d60b0dc328e"
+  },
+  "manifest_candidate": {
+    "schema_version": "autopilot.opencode_go_qualification_manifest_candidate.v1",
+    "provider_id": "opencode-go",
+    "recipe_id": "opencode-go-plan",
+    "recipe_revision": 1,
+    "route_policy_id": "opencode-go-plan-v1",
+    "route_policy_revision": 1,
+    "qualification_state": "qualification-required",
+    "certification_ready": false,
+    "non_certifying": true,
+    "synthetic_fixture_non_certifying": true,
+    "no_network": true,
+    "pending_live_post_w3_witnesses": [
+      "non-secret plan entitlement proof for opencode-go under opencode-go-plan-v1",
+      "non-secret billing-route proof for plan-api-token proving it is not OpenRouter or an arbitrary metered key",
+      "authenticated observed execution for parent with exact request_profile and observed_profile",
+      "authenticated observed execution for strategy with exact request_profile and observed_profile",
+      "authenticated observed execution for implement with exact request_profile and observed_profile",
+      "authenticated observed execution for validate with exact request_profile and observed_profile",
+      "authenticated observed execution for fix with exact request_profile and observed_profile",
+      "authenticated observed execution for adjudicate with exact request_profile and observed_profile",
+      "authenticated observed execution for bughunt with exact request_profile and observed_profile",
+      "authenticated observed execution for extract with exact request_profile and observed_profile",
+      "post-W3 receipt.v2 observed execution identity for every role with no fallback"
+    ],
+    "evaluation": {
+      "schema_version": "autopilot.opencode_go_qualification_evaluation.v1",
+      "provider_id": "opencode-go",
+      "route_policy_id": "opencode-go-plan-v1",
+      "route_policy_revision": 1,
+      "evidence_source": "synthetic-fixture",
+      "structural_pass": true,
+      "certification_ready": false,
+      "qualification_state": "qualification-required",
+      "non_certifying": true,
+      "synthetic_fixture_non_certifying": true,
+      "no_network": true,
+      "pending_live_post_w3_witnesses": [
+        "non-secret plan entitlement proof for opencode-go under opencode-go-plan-v1",
+        "non-secret billing-route proof for plan-api-token proving it is not OpenRouter or an arbitrary metered key",
+        "authenticated observed execution for parent with exact request_profile and observed_profile",
+        "authenticated observed execution for strategy with exact request_profile and observed_profile",
+        "authenticated observed execution for implement with exact request_profile and observed_profile",
+        "authenticated observed execution for validate with exact request_profile and observed_profile",
+        "authenticated observed execution for fix with exact request_profile and observed_profile",
+        "authenticated observed execution for adjudicate with exact request_profile and observed_profile",
+        "authenticated observed execution for bughunt with exact request_profile and observed_profile",
+        "authenticated observed execution for extract with exact request_profile and observed_profile",
+        "post-W3 receipt.v2 observed execution identity for every role with no fallback"
+      ],
+      "issues": [],
+      "evaluation_sha256": "sha256:6a507009de234d736a78e8b58ec0a7302cb1c389dafbe76acb674d60b0dc328e"
+    },
+    "certification_manifest": {
+      "schema_version": "autopilot.certification_manifest.v1",
+      "manifest_id": "opencode-go-plan-qualification-required-v1",
+      "manifest_revision": 1,
+      "subject_kind": "provider_recipe",
+      "subject_id": "opencode-go-plan",
+      "subject_sha256": "sha256:40c8e2f8eef678f37ac6f2fd797cd4c823d809628571eba62ca5a115d330ecc1",
+      "package_version": "1.3.0",
+      "pi_version": "0.80.6",
+      "qualification_state": "qualification-required",
+      "role_results": [
+        {
+          "role": "parent",
+          "state": "synthetic-pass",
+          "evidence_refs": [
+            {
+              "evidence_id": "fixture-opencode-go-exec-parent-proof",
+              "kind": "execution-proof",
+              "uri": "fixture://phase37/opencode-go/execution/parent",
+              "sha256": null,
+              "byte_count": null,
+              "secret_free": true
+            }
+          ]
+        },
+        {
+          "role": "strategy",
+          "state": "synthetic-pass",
+          "evidence_refs": [
+            {
+              "evidence_id": "fixture-opencode-go-exec-strategy-proof",
+              "kind": "execution-proof",
+              "uri": "fixture://phase37/opencode-go/execution/strategy",
+              "sha256": null,
+              "byte_count": null,
+              "secret_free": true
+            }
+          ]
+        },
+        {
+          "role": "implement",
+          "state": "synthetic-pass",
+          "evidence_refs": [
+            {
+              "evidence_id": "fixture-opencode-go-exec-implement-proof",
+              "kind": "execution-proof",
+              "uri": "fixture://phase37/opencode-go/execution/implement",
+              "sha256": null,
+              "byte_count": null,
+              "secret_free": true
+            }
+          ]
+        },
+        {
+          "role": "validate",
+          "state": "synthetic-pass",
+          "evidence_refs": [
+            {
+              "evidence_id": "fixture-opencode-go-exec-validate-proof",
+              "kind": "execution-proof",
+              "uri": "fixture://phase37/opencode-go/execution/validate",
+              "sha256": null,
+              "byte_count": null,
+              "secret_free": true
+            }
+          ]
+        },
+        {
+          "role": "fix",
+          "state": "synthetic-pass",
+          "evidence_refs": [
+            {
+              "evidence_id": "fixture-opencode-go-exec-fix-proof",
+              "kind": "execution-proof",
+              "uri": "fixture://phase37/opencode-go/execution/fix",
+              "sha256": null,
+              "byte_count": null,
+              "secret_free": true
+            }
+          ]
+        },
+        {
+          "role": "adjudicate",
+          "state": "synthetic-pass",
+          "evidence_refs": [
+            {
+              "evidence_id": "fixture-opencode-go-exec-adjudicate-proof",
+              "kind": "execution-proof",
+              "uri": "fixture://phase37/opencode-go/execution/adjudicate",
+              "sha256": null,
+              "byte_count": null,
+              "secret_free": true
+            }
+          ]
+        },
+        {
+          "role": "bughunt",
+          "state": "synthetic-pass",
+          "evidence_refs": [
+            {
+              "evidence_id": "fixture-opencode-go-exec-bughunt-proof",
+              "kind": "execution-proof",
+              "uri": "fixture://phase37/opencode-go/execution/bughunt",
+              "sha256": null,
+              "byte_count": null,
+              "secret_free": true
+            }
+          ]
+        },
+        {
+          "role": "extract",
+          "state": "synthetic-pass",
+          "evidence_refs": [
+            {
+              "evidence_id": "fixture-opencode-go-exec-extract-proof",
+              "kind": "execution-proof",
+              "uri": "fixture://phase37/opencode-go/execution/extract",
+              "sha256": null,
+              "byte_count": null,
+              "secret_free": true
+            }
+          ]
+        }
+      ],
+      "required_evidence": [
+        {
+          "evidence_id": "opencode-go-billing-route-proof",
+          "kind": "billing-proof",
+          "uri": "witness-required://phase37/opencode-go/billing-route",
+          "sha256": null,
+          "byte_count": null,
+          "secret_free": true
+        },
+        {
+          "evidence_id": "opencode-go-exec-adjudicate-proof",
+          "kind": "execution-proof",
+          "uri": "witness-required://phase37/opencode-go/execution/adjudicate",
+          "sha256": null,
+          "byte_count": null,
+          "secret_free": true
+        },
+        {
+          "evidence_id": "opencode-go-exec-bughunt-proof",
+          "kind": "execution-proof",
+          "uri": "witness-required://phase37/opencode-go/execution/bughunt",
+          "sha256": null,
+          "byte_count": null,
+          "secret_free": true
+        },
+        {
+          "evidence_id": "opencode-go-exec-extract-proof",
+          "kind": "execution-proof",
+          "uri": "witness-required://phase37/opencode-go/execution/extract",
+          "sha256": null,
+          "byte_count": null,
+          "secret_free": true
+        },
+        {
+          "evidence_id": "opencode-go-exec-fix-proof",
+          "kind": "execution-proof",
+          "uri": "witness-required://phase37/opencode-go/execution/fix",
+          "sha256": null,
+          "byte_count": null,
+          "secret_free": true
+        },
+        {
+          "evidence_id": "opencode-go-exec-implement-proof",
+          "kind": "execution-proof",
+          "uri": "witness-required://phase37/opencode-go/execution/implement",
+          "sha256": null,
+          "byte_count": null,
+          "secret_free": true
+        },
+        {
+          "evidence_id": "opencode-go-exec-parent-proof",
+          "kind": "execution-proof",
+          "uri": "witness-required://phase37/opencode-go/execution/parent",
+          "sha256": null,
+          "byte_count": null,
+          "secret_free": true
+        },
+        {
+          "evidence_id": "opencode-go-exec-strategy-proof",
+          "kind": "execution-proof",
+          "uri": "witness-required://phase37/opencode-go/execution/strategy",
+          "sha256": null,
+          "byte_count": null,
+          "secret_free": true
+        },
+        {
+          "evidence_id": "opencode-go-exec-validate-proof",
+          "kind": "execution-proof",
+          "uri": "witness-required://phase37/opencode-go/execution/validate",
+          "sha256": null,
+          "byte_count": null,
+          "secret_free": true
+        },
+        {
+          "evidence_id": "opencode-go-plan-entitlement-proof",
+          "kind": "route-proof",
+          "uri": "witness-required://phase37/opencode-go/plan-entitlement",
+          "sha256": null,
+          "byte_count": null,
+          "secret_free": true
+        }
+      ],
+      "live_evidence": [],
+      "issued_at": "2026-07-23T00:00:00.000Z",
+      "expires_at": "2026-08-22T00:00:00.000Z",
+      "manifest_sha256": "sha256:f0e4b5be730ef88575e2d74dc4e6eb45d4a6cf7b0e3b15abbff2fb753cb9bd91"
+    },
+    "manifest_candidate_sha256": "sha256:6f9c34a8f54b1cfc7eeb1488dfe440e7bab9365fc122b97409731c748b393796"
+  },
+  "negative_cases": [
+    {
+      "case_id": "route-token-shape-generic-api-key",
+      "description": "An API-key-shaped plan token is not generic API-key permission.",
+      "mutations": [
+        "auth_class=api-key",
+        "entitlement_proof.auth_class=api-key",
+        "billing_route_proof.auth_class=api-key"
+      ],
+      "expected_issue_codes": [
+        "OPENCODE_GO_GENERIC_API_KEY_FORBIDDEN",
+        "OPENCODE_GO_PLAN_TOKEN_PROOF_REQUIRED",
+        "OPENCODE_GO_ROUTE_TOKEN_SHAPE_IS_NOT_API_KEY_PERMISSION"
+      ]
+    },
+    {
+      "case_id": "wrong-api",
+      "description": "OpenCode Go frozen role requests use openai-completions only.",
+      "role": "parent",
+      "mutations": [
+        "role.request_profile.api=anthropic-messages",
+        "role.observed_profile.api=anthropic-messages"
+      ],
+      "expected_issue_codes": [
+        "OPENCODE_GO_OBSERVED_PROFILE_MISMATCH",
+        "OPENCODE_GO_REQUEST_PROFILE_MISMATCH"
+      ]
+    },
+    {
+      "case_id": "wrong-model",
+      "description": "Frozen Kimi K2.7 Code implement role cannot execute a different model.",
+      "role": "implement",
+      "mutations": [
+        "role.request_profile.model_id=kimi-k3",
+        "role.observed_profile.executed_model_id=kimi-k3"
+      ],
+      "expected_issue_codes": [
+        "OPENCODE_GO_OBSERVED_PROFILE_MISMATCH",
+        "OPENCODE_GO_REQUEST_PROFILE_MISMATCH"
+      ]
+    },
+    {
+      "case_id": "wrong-thinking",
+      "description": "Frozen xhigh/high thinking values are exact and never clamped.",
+      "role": "parent",
+      "mutations": [
+        "role.request_profile.thinking=high",
+        "role.observed_profile.thinking=high"
+      ],
+      "expected_issue_codes": [
+        "OPENCODE_GO_OBSERVED_PROFILE_MISMATCH",
+        "OPENCODE_GO_REQUEST_PROFILE_MISMATCH"
+      ]
+    },
+    {
+      "case_id": "wrong-context",
+      "description": "Context window compatibility is exact for request profiles.",
+      "role": "extract",
+      "mutations": [
+        "role.request_profile.context_window=256000"
+      ],
+      "expected_issue_codes": [
+        "OPENCODE_GO_REQUEST_PROFILE_MISMATCH"
+      ]
+    },
+    {
+      "case_id": "wrong-tool",
+      "description": "Tool-use support is part of the exact request profile.",
+      "role": "fix",
+      "mutations": [
+        "role.request_profile.tool_capability=tool-use-unsupported"
+      ],
+      "expected_issue_codes": [
+        "OPENCODE_GO_REQUEST_PROFILE_MISMATCH"
+      ]
+    },
+    {
+      "case_id": "mixed-route",
+      "description": "No Kimi Coding/OpenRouter/arbitrary-key route can be mixed into OpenCode Go.",
+      "role": "bughunt",
+      "mutations": [
+        "role.provider_id=kimi-coding",
+        "role.route_policy_id=kimi-coding-plan-v1",
+        "role.request_profile.provider_id=kimi-coding",
+        "role.observed_profile.provider_id=kimi-coding"
+      ],
+      "expected_issue_codes": [
+        "OPENCODE_GO_MIXED_ROUTE_FORBIDDEN",
+        "OPENCODE_GO_OBSERVED_PROFILE_MISMATCH",
+        "OPENCODE_GO_PROVIDER_ID_MISMATCH",
+        "OPENCODE_GO_REQUEST_PROFILE_MISMATCH",
+        "OPENCODE_GO_ROUTE_POLICY_MISMATCH"
+      ]
+    }
+  ]
+}

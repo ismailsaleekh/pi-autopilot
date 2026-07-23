@@ -1,0 +1,294 @@
+{
+  "schema_version": "autopilot.opencode_go_w4_offline_qualification_report.v1",
+  "phase": "phase37-w4",
+  "provider_id": "opencode-go",
+  "recipe_id": "opencode-go-plan",
+  "route_policy_id": "opencode-go-plan-v1",
+  "offline": true,
+  "network_calls": 0,
+  "qualification_state": "qualification-required",
+  "live_provider_certification_asserted": false,
+  "synthetic_fixtures_certifying": false,
+  "openrouter_or_arbitrary_keys_allowed": false,
+  "generic_api_key_permission_allowed": false,
+  "pending_live_post_w3_witnesses": [
+    "non-secret plan entitlement proof for opencode-go under opencode-go-plan-v1",
+    "non-secret billing-route proof for plan-api-token proving it is not OpenRouter or an arbitrary metered key",
+    "authenticated observed execution for parent with exact request_profile and observed_profile",
+    "authenticated observed execution for strategy with exact request_profile and observed_profile",
+    "authenticated observed execution for implement with exact request_profile and observed_profile",
+    "authenticated observed execution for validate with exact request_profile and observed_profile",
+    "authenticated observed execution for fix with exact request_profile and observed_profile",
+    "authenticated observed execution for adjudicate with exact request_profile and observed_profile",
+    "authenticated observed execution for bughunt with exact request_profile and observed_profile",
+    "authenticated observed execution for extract with exact request_profile and observed_profile",
+    "post-W3 receipt.v2 observed execution identity for every role with no fallback"
+  ],
+  "manifest_candidate": {
+    "schema_version": "autopilot.opencode_go_qualification_manifest_candidate.v1",
+    "provider_id": "opencode-go",
+    "recipe_id": "opencode-go-plan",
+    "recipe_revision": 1,
+    "route_policy_id": "opencode-go-plan-v1",
+    "route_policy_revision": 1,
+    "qualification_state": "qualification-required",
+    "certification_ready": false,
+    "non_certifying": true,
+    "synthetic_fixture_non_certifying": true,
+    "no_network": true,
+    "pending_live_post_w3_witnesses": [
+      "non-secret plan entitlement proof for opencode-go under opencode-go-plan-v1",
+      "non-secret billing-route proof for plan-api-token proving it is not OpenRouter or an arbitrary metered key",
+      "authenticated observed execution for parent with exact request_profile and observed_profile",
+      "authenticated observed execution for strategy with exact request_profile and observed_profile",
+      "authenticated observed execution for implement with exact request_profile and observed_profile",
+      "authenticated observed execution for validate with exact request_profile and observed_profile",
+      "authenticated observed execution for fix with exact request_profile and observed_profile",
+      "authenticated observed execution for adjudicate with exact request_profile and observed_profile",
+      "authenticated observed execution for bughunt with exact request_profile and observed_profile",
+      "authenticated observed execution for extract with exact request_profile and observed_profile",
+      "post-W3 receipt.v2 observed execution identity for every role with no fallback"
+    ],
+    "evaluation": {
+      "schema_version": "autopilot.opencode_go_qualification_evaluation.v1",
+      "provider_id": "opencode-go",
+      "route_policy_id": "opencode-go-plan-v1",
+      "route_policy_revision": 1,
+      "evidence_source": "synthetic-fixture",
+      "structural_pass": true,
+      "certification_ready": false,
+      "qualification_state": "qualification-required",
+      "non_certifying": true,
+      "synthetic_fixture_non_certifying": true,
+      "no_network": true,
+      "pending_live_post_w3_witnesses": [
+        "non-secret plan entitlement proof for opencode-go under opencode-go-plan-v1",
+        "non-secret billing-route proof for plan-api-token proving it is not OpenRouter or an arbitrary metered key",
+        "authenticated observed execution for parent with exact request_profile and observed_profile",
+        "authenticated observed execution for strategy with exact request_profile and observed_profile",
+        "authenticated observed execution for implement with exact request_profile and observed_profile",
+        "authenticated observed execution for validate with exact request_profile and observed_profile",
+        "authenticated observed execution for fix with exact request_profile and observed_profile",
+        "authenticated observed execution for adjudicate with exact request_profile and observed_profile",
+        "authenticated observed execution for bughunt with exact request_profile and observed_profile",
+        "authenticated observed execution for extract with exact request_profile and observed_profile",
+        "post-W3 receipt.v2 observed execution identity for every role with no fallback"
+      ],
+      "issues": [],
+      "evaluation_sha256": "sha256:6a507009de234d736a78e8b58ec0a7302cb1c389dafbe76acb674d60b0dc328e"
+    },
+    "certification_manifest": {
+      "schema_version": "autopilot.certification_manifest.v1",
+      "manifest_id": "opencode-go-plan-qualification-required-v1",
+      "manifest_revision": 1,
+      "subject_kind": "provider_recipe",
+      "subject_id": "opencode-go-plan",
+      "subject_sha256": "sha256:40c8e2f8eef678f37ac6f2fd797cd4c823d809628571eba62ca5a115d330ecc1",
+      "package_version": "1.3.0",
+      "pi_version": "0.80.6",
+      "qualification_state": "qualification-required",
+      "role_results": [
+        {
+          "role": "parent",
+          "state": "synthetic-pass",
+          "evidence_refs": [
+            {
+              "evidence_id": "fixture-opencode-go-exec-parent-proof",
+              "kind": "execution-proof",
+              "uri": "fixture://phase37/opencode-go/execution/parent",
+              "sha256": null,
+              "byte_count": null,
+              "secret_free": true
+            }
+          ]
+        },
+        {
+          "role": "strategy",
+          "state": "synthetic-pass",
+          "evidence_refs": [
+            {
+              "evidence_id": "fixture-opencode-go-exec-strategy-proof",
+              "kind": "execution-proof",
+              "uri": "fixture://phase37/opencode-go/execution/strategy",
+              "sha256": null,
+              "byte_count": null,
+              "secret_free": true
+            }
+          ]
+        },
+        {
+          "role": "implement",
+          "state": "synthetic-pass",
+          "evidence_refs": [
+            {
+              "evidence_id": "fixture-opencode-go-exec-implement-proof",
+              "kind": "execution-proof",
+              "uri": "fixture://phase37/opencode-go/execution/implement",
+              "sha256": null,
+              "byte_count": null,
+              "secret_free": true
+            }
+          ]
+        },
+        {
+          "role": "validate",
+          "state": "synthetic-pass",
+          "evidence_refs": [
+            {
+              "evidence_id": "fixture-opencode-go-exec-validate-proof",
+              "kind": "execution-proof",
+              "uri": "fixture://phase37/opencode-go/execution/validate",
+              "sha256": null,
+              "byte_count": null,
+              "secret_free": true
+            }
+          ]
+        },
+        {
+          "role": "fix",
+          "state": "synthetic-pass",
+          "evidence_refs": [
+            {
+              "evidence_id": "fixture-opencode-go-exec-fix-proof",
+              "kind": "execution-proof",
+              "uri": "fixture://phase37/opencode-go/execution/fix",
+              "sha256": null,
+              "byte_count": null,
+              "secret_free": true
+            }
+          ]
+        },
+        {
+          "role": "adjudicate",
+          "state": "synthetic-pass",
+          "evidence_refs": [
+            {
+              "evidence_id": "fixture-opencode-go-exec-adjudicate-proof",
+              "kind": "execution-proof",
+              "uri": "fixture://phase37/opencode-go/execution/adjudicate",
+              "sha256": null,
+              "byte_count": null,
+              "secret_free": true
+            }
+          ]
+        },
+        {
+          "role": "bughunt",
+          "state": "synthetic-pass",
+          "evidence_refs": [
+            {
+              "evidence_id": "fixture-opencode-go-exec-bughunt-proof",
+              "kind": "execution-proof",
+              "uri": "fixture://phase37/opencode-go/execution/bughunt",
+              "sha256": null,
+              "byte_count": null,
+              "secret_free": true
+            }
+          ]
+        },
+        {
+          "role": "extract",
+          "state": "synthetic-pass",
+          "evidence_refs": [
+            {
+              "evidence_id": "fixture-opencode-go-exec-extract-proof",
+              "kind": "execution-proof",
+              "uri": "fixture://phase37/opencode-go/execution/extract",
+              "sha256": null,
+              "byte_count": null,
+              "secret_free": true
+            }
+          ]
+        }
+      ],
+      "required_evidence": [
+        {
+          "evidence_id": "opencode-go-billing-route-proof",
+          "kind": "billing-proof",
+          "uri": "witness-required://phase37/opencode-go/billing-route",
+          "sha256": null,
+          "byte_count": null,
+          "secret_free": true
+        },
+        {
+          "evidence_id": "opencode-go-exec-adjudicate-proof",
+          "kind": "execution-proof",
+          "uri": "witness-required://phase37/opencode-go/execution/adjudicate",
+          "sha256": null,
+          "byte_count": null,
+          "secret_free": true
+        },
+        {
+          "evidence_id": "opencode-go-exec-bughunt-proof",
+          "kind": "execution-proof",
+          "uri": "witness-required://phase37/opencode-go/execution/bughunt",
+          "sha256": null,
+          "byte_count": null,
+          "secret_free": true
+        },
+        {
+          "evidence_id": "opencode-go-exec-extract-proof",
+          "kind": "execution-proof",
+          "uri": "witness-required://phase37/opencode-go/execution/extract",
+          "sha256": null,
+          "byte_count": null,
+          "secret_free": true
+        },
+        {
+          "evidence_id": "opencode-go-exec-fix-proof",
+          "kind": "execution-proof",
+          "uri": "witness-required://phase37/opencode-go/execution/fix",
+          "sha256": null,
+          "byte_count": null,
+          "secret_free": true
+        },
+        {
+          "evidence_id": "opencode-go-exec-implement-proof",
+          "kind": "execution-proof",
+          "uri": "witness-required://phase37/opencode-go/execution/implement",
+          "sha256": null,
+          "byte_count": null,
+          "secret_free": true
+        },
+        {
+          "evidence_id": "opencode-go-exec-parent-proof",
+          "kind": "execution-proof",
+          "uri": "witness-required://phase37/opencode-go/execution/parent",
+          "sha256": null,
+          "byte_count": null,
+          "secret_free": true
+        },
+        {
+          "evidence_id": "opencode-go-exec-strategy-proof",
+          "kind": "execution-proof",
+          "uri": "witness-required://phase37/opencode-go/execution/strategy",
+          "sha256": null,
+          "byte_count": null,
+          "secret_free": true
+        },
+        {
+          "evidence_id": "opencode-go-exec-validate-proof",
+          "kind": "execution-proof",
+          "uri": "witness-required://phase37/opencode-go/execution/validate",
+          "sha256": null,
+          "byte_count": null,
+          "secret_free": true
+        },
+        {
+          "evidence_id": "opencode-go-plan-entitlement-proof",
+          "kind": "route-proof",
+          "uri": "witness-required://phase37/opencode-go/plan-entitlement",
+          "sha256": null,
+          "byte_count": null,
+          "secret_free": true
+        }
+      ],
+      "live_evidence": [],
+      "issued_at": "2026-07-23T00:00:00.000Z",
+      "expires_at": "2026-08-22T00:00:00.000Z",
+      "manifest_sha256": "sha256:f0e4b5be730ef88575e2d74dc4e6eb45d4a6cf7b0e3b15abbff2fb753cb9bd91"
+    },
+    "manifest_candidate_sha256": "sha256:6f9c34a8f54b1cfc7eeb1488dfe440e7bab9365fc122b97409731c748b393796"
+  },
+  "report_sha256": "sha256:49aba82681612e6b9107270d59391f62738cbb488bed46da597ebf3f3f05fca7"
+}
