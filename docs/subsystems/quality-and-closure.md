@@ -58,13 +58,22 @@ audits first.
 
 ## Closure gate
 
-The closure gate rejects:
+`evaluateAutopilotClosureGate` rejects closure while:
 
-- unresolved scope/protected-path exceptions,
-- missing per-work-item independent validation,
-- for high-risk/critical or multi-lane work, a missing final bughunt PASS **and** no
-  accepted `blocker_ruling` decision (an accepted blocker ruling is an allowed
-  alternative to the bughunt PASS),
+- any running unit remains (`state.running.length > 0`),
+- there are unresolved scope/protected-path exceptions,
+- any source-changing execution audit exists but there are no source-changing work items
+  to carry independent validation refs,
+- any **source-changing** work item is not yet `closed`, or fails
+  `sourceChangingWorkItemValidationBlockers` — which requires a `validation_unit_id` and
+  `validation_status_ref` and then rejects self-validation, a validation id outside the
+  work item, a missing state unit, a mismatched status ref, no matching validation
+  status, or a non-`PASS` validation verdict. The audit-adjudication check below runs
+  over **all** supplied audits first; only the independent-validation requirement is
+  scoped to source-changing work items,
+- for high-risk/critical or multi-lane work, there is no `bughunt` status with a `PASS`
+  verdict **and** no decision whose event is `blocker_ruling` (either one clears this
+  check),
 - an execution audit that is not `clean` and lacks its required adjudication: a
   `scope-review-required` audit that is not ratified, a
   `protected-path-review-required`/`critical-protected-path-violation` audit that is not

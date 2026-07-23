@@ -2,7 +2,7 @@
   "schema_version": "autopilot.docs_semantic_attestation.v2",
   "doc_id": "subsystems/quality-and-closure",
   "reviewed_body_hash": "sha256:1934cbfc1425b3718ced056044a3c8c7ae558b797120d69642681f05108d7290",
-  "reviewed_doc_sha256": "sha256:aaf6e4638758c989ce307c52e2f919711aa6778701d41173c5fe04b7adfabb19",
+  "reviewed_doc_sha256": "sha256:fc90a06085bb49c9eee2c4256984186762799844c506e5a23d528e3a99f2a37b",
   "covers_sources": [
     "src/core/adjudication/index.ts",
     "src/core/lifecycle/index.ts",
@@ -11,7 +11,7 @@
     "src/core/state-store/index.ts"
   ],
   "verdict": "PASS",
-  "reviewer": "openai-codex/gpt-5.5 Pi subscription merge adjudicator (offline semantic review)",
-  "reviewed_at": "2026-07-23T10:59:09.000Z",
-  "notes": "PASS P0=0 P1=0 P2=0. Reviewed docs/subsystems/quality-and-closure.md against quality contract/spec gate, adjudication, lifecycle, and state-store sources: perfect-quality prompts, source-changing validation-ready versus audit-review lifecycle, validation verdict transitions, scope/protected-path adjudication, blocker-ruling handling, and atomic state/events persistence match current code."
+  "reviewer": "independent Pi validate-role review (openai-codex/gpt-5.5), report /tmp/phase39-reviews/r8-quality.md",
+  "reviewed_at": "2026-07-23T10:26:56.000Z",
+  "notes": "PASS P0=0 P1=0 P2=0 (GPT-5.5, fresh-read). Verified against 5 covered sources: perfect-quality rules + render helpers (embedding attributed to prompt-renderer); spec-quality gate pre-launch fields; work-item transitions (transport closed/validation-ready/audit-review; validation PASS/NEEDS_FIX/audit-review with role guard); closure gate blockers incl running units, source-changing audits without work items, source-changing work-item not-closed + validation-ref blockers, bughunt PASS or blocker_ruling alternative, non-clean audit adjudication; adjudication + state-store atomic write/monotonic events/bounded resume."
 }

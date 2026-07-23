@@ -2,7 +2,7 @@
   "schema_version": "autopilot.docs_semantic_attestation.v2",
   "doc_id": "subsystems/coordination",
   "reviewed_body_hash": "sha256:2c4020b8a25089c33a3db862bc1fd1b93ed65a38b3e1530eae1f1843abe85101",
-  "reviewed_doc_sha256": "sha256:7793891cc6546d73a8573c24ea0804f98793bc84787f00b2c258c509f4aeba2e",
+  "reviewed_doc_sha256": "sha256:994a7460c90fea2bef2be539d1da82b4bd708a78842b6876e093abcee768c001",
   "covers_sources": [
     "src/core/coordination/admission.ts",
     "src/core/coordination/client.ts",
@@ -14,7 +14,7 @@
     "src/core/coordination/store.ts"
   ],
   "verdict": "PASS",
-  "reviewer": "openai-codex/gpt-5.5 Pi subscription merge adjudicator (offline semantic review)",
-  "reviewed_at": "2026-07-23T10:59:09.000Z",
-  "notes": "PASS P0=0 P1=0 P2=0. Reviewed docs/subsystems/coordination.md against index, admission, deadlock, runtime constants, peer classification, client, store, invariants, server, and supervisor context: protocol/API/store facade constants, HMAC admission, deadlock invariants, D65 graph/dispatch delegation, single-socket/endpoint authority, and coordinator-owned S2 retention GC scheduling match current code."
+  "reviewer": "independent Pi validate-role review (openai-codex/gpt-5.5), report /tmp/phase39-reviews/r7-coordination.md",
+  "reviewed_at": "2026-07-23T10:26:56.000Z",
+  "notes": "PASS P0=0 P1=0 P2=0 (GPT-5.5, fresh-read). Verified against 8 covered sources: runtime-constants wire lineage/facade; admission HMAC-SHA256 domain/32-byte key/negotiated-s1; peer-classification known-cf50-predecessor vs s1-admission-offered (legacy transport string attributed to negotiated-transport.ts, outside covered set); single accepted v1 launch policy (not highest); deadlock victim/starvation; invariant 2 release via git-terminal-evidence OR authenticated respondClaimRequest release-now (bounded-defer records release_condition, no immediate release); startup drops rows only via explicit reconciliation; invariants 1/3/4 attributed as system-level."
 }

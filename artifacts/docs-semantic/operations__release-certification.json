@@ -13,7 +13,7 @@
     "scripts/verify-packed-consumer.mjs"
   ],
   "verdict": "PASS",
-  "reviewer": "openai-codex/gpt-5.5 Pi subscription merge adjudicator (offline semantic review)",
-  "reviewed_at": "2026-07-23T10:59:09.000Z",
-  "notes": "PASS P0=0 P1=0 P2=0. Reviewed docs/operations/release-certification.md against the certified-command, production-git scan, security scan, SBOM, payload, packed-consumer, and packed-consumer release scripts: metered credential denial, sealed candidate identity, non-network lane canary, short TMPDIR cleanup, raw Git spawn scanning, packed source/dist parity, security/SBOM/payload evidence, and exact-candidate invalidation claims match current code."
+  "reviewer": "independent Pi validate-role review (openai-codex/gpt-5.5), report /tmp/phase39-reviews/r5-release-cert.md",
+  "reviewed_at": "2026-07-23T10:26:56.000Z",
+  "notes": "PASS P0=0 P1=0 P2=0 (GPT-5.5, fresh-read prompt). Verified against 7 covered scripts: certified-command wrapper args incl optional --artifact, credential refusal, candidate sealing, process-tree breaches, deny-network preload with registry-only lanes labelled (not host-enforced), short-TMPDIR unconditional cleanup, passed-verdict conditions, production-git scan, security-scan version+integrity allowlist, sbom, packed-consumer registration proof; Phase 38 historical facts and external blockers explicitly labelled as external record."
 }

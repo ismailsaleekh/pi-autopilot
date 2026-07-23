@@ -46,8 +46,9 @@ merge conflicts, deadlocks — is an autonomous runtime state.
 
 ## Key files
 
-The authoritative barrel is [`src/core/coordination/index.ts`](../read-before-edit.md),
-which re-exports the fabric's public modules (the `d65-*` modules are internal and are
+The authoritative barrel is `src/core/coordination/index.ts` (see the
+[read-before-edit map](../read-before-edit.md)), which re-exports the fabric's public
+modules (the `d65-*` modules are internal and are
 not re-exported through this barrel). For C8 boundary-coverage purposes this hub's
 covered barrel stands in for the tree. This hub's
 `covers_sources` names the specific invariant-bearing files whose exact facts it asserts
@@ -69,10 +70,14 @@ dedicated concept docs (linked below), not re-derived here.
 
 ## Admission (S1 / cf50)
 
-Every socket begins with the exact cf50 empty handshake. An unchanged cf50 peer
-stays `legacy-anonymous-protocol-1.6` and receives only cf50 actions. An S1 peer
-follows handshake → `negotiate-admission` → operation on one socket and becomes
-`negotiated-s1` only after verifying a domain-separated HMAC-SHA256 (algorithm
+Every socket begins with the exact cf50 empty handshake. The covered peer classifier
+returns `known-cf50-predecessor` for an unchanged cf50 peer (no `admission_upgrade`
+offer) and `s1-admission-offered` when an S1 offer is present
+(`peer-classification.ts`); the exact legacy transport mode string and its
+cf50-only action set are enforced in `negotiated-transport.ts` (outside this doc's
+covered sources). An S1 peer follows handshake → `negotiate-admission` → operation on one
+socket and becomes `negotiated-s1` only after verifying a domain-separated HMAC-SHA256
+(algorithm
 `hmac-sha256`, domain `pi-autopilot/admission/v1\0`) over canonical JSON, using the
 raw 32-byte capability key. When no offer is present, the S1 client accepts only the
 exact digest-pinned `known-cf50-predecessor` path; it never infers compatibility
@@ -122,7 +127,9 @@ and resolves strongly connected cycles to a same-transaction fixed point.
   victims.
 - **Starvation is bounded.** Victim ranking reads each live group's `bypass_count`
   (incremented by the scheduler's grant path), and `MAX_GRANT_BYPASSES` is 8: at that
-  bound a group takes priority over newer groups whenever its complete set is free.
+  bound a group's starved flag flips ahead of non-starved groups in the grant-priority
+  comparator (which then orders by `offer_count`, `created_event_seq`, then id, after the
+  store's dependency-priority ordering) — it is not an unconditional "always beats newer."
 - **No-safe-victim cycles stay explicit.** They remain `deferred-no-safe-victim` at
   the earliest declared release condition and never become operator questions.
 
@@ -150,8 +157,10 @@ contracts.
    unsolicited response frames fail loud.
 2. WRITE/EXCLUSIVE release is never authorized by age, PID, or timestamp. It is
    authorized either by stronger Git-backed terminal evidence, or by an authenticated
-   `release-now`/bounded-defer response from the current-generation owner
-   (`respondClaimRequest`), which is the deliberate live-owner release path.
+   `release-now` response from the current-generation owner (`respondClaimRequest`
+   deletes the blocking leases). A `bounded-defer` response does not release immediately:
+   it records a typed `release_condition` and returns `claim-request-deferred`. This
+   authenticated live-owner path is deliberate.
 3. Coordinator startup replays durable terminal facts to repair a transition
    interrupted by an older process; it never fabricates a row, and it drops rows only
    through its explicit reconciliation path (e.g. releasing an owned lease during

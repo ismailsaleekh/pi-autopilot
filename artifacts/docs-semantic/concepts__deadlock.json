@@ -7,7 +7,7 @@
     "src/core/coordination/deadlock.ts"
   ],
   "verdict": "PASS",
-  "reviewer": "openai-codex/gpt-5.5 Pi subscription merge adjudicator (offline semantic review)",
-  "reviewed_at": "2026-07-23T10:59:09.000Z",
-  "notes": "PASS P0=0 P1=0 P2=0. Reviewed docs/concepts/deadlock.md against src/core/coordination/deadlock.ts: wait-for edges are built from live conflicting requests and leases, cycles are detected from active edges, safe-victim selection excludes critical sections, Git critical operations including metadata-reconcile, dirty/preflight and non-preemptible running work, and MAX_GRANT_BYPASSES is 8 with bypass increments owned by the store grant path."
+  "reviewer": "independent Pi validate-role review (openai-codex/gpt-5.5), report /tmp/phase39-reviews/r5-deadlock.md",
+  "reviewed_at": "2026-07-23T10:26:56.000Z",
+  "notes": "PASS P0=0 P1=0 P2=0 (GPT-5.5, fresh-read prompt). Verified against src/core/coordination/deadlock.ts: builds/detects/selects module boundary with caller-owned persistence/increment noted as out-of-module context; exact 6 Git critical operations incl metadata-reconcile; critical_section exclusion; victim classes 1-3; MAX_GRANT_BYPASSES=8 comparator starvation key; null-victim no-escalation."
 }
