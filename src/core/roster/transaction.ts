@@ -10,7 +10,7 @@ import {
   writeSync,
   type Stats,
 } from 'node:fs';
-import { chmod, link, mkdir, rename, rm, unlink } from 'node:fs/promises';
+import { chmod, link, mkdir, readdir, rename, rm, unlink } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
@@ -269,6 +269,10 @@ export async function publishCreateOnlyAtomic(input: {
   const root = normalizeAbsolutePath(input.authorityRoot, 'authority root');
   assertInsideRoot(filePath, root);
 
+  if (await recoverCreateOnlyOrphanTempHardlinkIfPresent({ path: filePath, authorityRoot: root, bytes: input.bytes })) {
+    return Object.freeze({ status: 'idempotent', path: filePath });
+  }
+
   const existing = await readAuthorityFileIfPresent(filePath, root);
   if (existing !== null) {
     return bytesEqual(existing.bytes, input.bytes)
@@ -396,6 +400,88 @@ async function writeExclusiveTempFile(input: {
   return tempPath;
 }
 
+async function recoverCreateOnlyOrphanTempHardlinkIfPresent(input: {
+  readonly path: string;
+  readonly authorityRoot: string;
+  readonly bytes: Uint8Array;
+}): Promise<boolean> {
+  const filePath = normalizeAbsolutePath(input.path, 'authority file path');
+  const root = normalizeAbsolutePath(input.authorityRoot, 'authority root');
+  assertInsideRoot(filePath, root);
+  const parentState = await validateExistingAncestors(dirname(filePath), root);
+  if (parentState === 'missing') return false;
+
+  const before = lstatIfPresent(filePath);
+  if (before === null || before.nlink === 1) return false;
+  assertAuthorityFileBaseStats(filePath, before);
+  assertAuthorityHardlinkCount(filePath, before, 2);
+
+  const fd = openNoFollowFd(filePath, fsConstants.O_RDONLY);
+  let existingBytes: Uint8Array;
+  try {
+    const opened = fstatSync(fd);
+    assertAuthorityFileBaseStats(filePath, opened);
+    assertSameFileIdentity(filePath, before, opened);
+    assertAuthorityHardlinkCount(filePath, opened, 2);
+    existingBytes = readAllFromFd(fd, opened.size);
+    const afterRead = fstatSync(fd);
+    assertAuthorityFileBaseStats(filePath, afterRead);
+    assertSameFileIdentity(filePath, opened, afterRead);
+    assertAuthorityHardlinkCount(filePath, afterRead, 2);
+    if (opened.size !== afterRead.size) {
+      throw new RosterStorageError('ROSTER_STORAGE_AUTHORITY_UNSAFE', `authority file changed size while proving orphan temp hardlink: ${filePath}`);
+    }
+  } finally {
+    closeSync(fd);
+  }
+
+  if (!bytesEqual(existingBytes, input.bytes)) {
+    throw new RosterStorageError('ROSTER_STORAGE_AUTHORITY_UNSAFE', `create-only orphan hardlink bytes do not match replay bytes: ${filePath}`);
+  }
+
+  const tempPath = await findCreateOnlyOrphanTempHardlink(filePath, root, before);
+  await unlink(tempPath);
+  await fsyncDirectory(dirname(filePath), root);
+  assertAuthorityFileStats(filePath, lstatSync(filePath));
+  return true;
+}
+
+async function findCreateOnlyOrphanTempHardlink(filePath: string, authorityRoot: string, finalStats: Stats): Promise<string> {
+  const parent = dirname(filePath);
+  const names = await readdir(parent);
+  const matches: string[] = [];
+  for (const name of names) {
+    if (!isCreateOnlyTempName(name, basename(filePath))) continue;
+    const candidatePath = join(parent, name);
+    assertInsideRoot(candidatePath, authorityRoot);
+    const candidateStats = lstatIfPresent(candidatePath);
+    if (candidateStats === null) continue;
+    assertAuthorityFileBaseStats(candidatePath, candidateStats);
+    if (candidateStats.dev !== finalStats.dev || candidateStats.ino !== finalStats.ino) continue;
+    assertAuthorityHardlinkCount(candidatePath, candidateStats, 2);
+    matches.push(candidatePath);
+  }
+  if (matches.length !== 1) {
+    throw new RosterStorageError('ROSTER_STORAGE_AUTHORITY_UNSAFE', `create-only orphan temp hardlink is unproven for: ${filePath}`);
+  }
+  return matches[0] ?? unreachableTempPath(filePath);
+}
+
+function isCreateOnlyTempName(name: string, finalBase: string): boolean {
+  const prefix = `.${finalBase}.tmp-`;
+  if (!name.startsWith(prefix)) return false;
+  const rest = name.slice(prefix.length);
+  const separator = rest.indexOf('-');
+  if (separator <= 0) return false;
+  const pid = rest.slice(0, separator);
+  const uuid = rest.slice(separator + 1);
+  return /^[1-9][0-9]*$/u.test(pid) && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(uuid);
+}
+
+function unreachableTempPath(filePath: string): never {
+  throw new RosterStorageError('ROSTER_STORAGE_AUTHORITY_UNSAFE', `create-only orphan temp hardlink disappeared for: ${filePath}`);
+}
+
 async function cleanupOwnedTemp(tempPath: string, authorityRoot: string): Promise<void> {
   const root = normalizeAbsolutePath(authorityRoot, 'authority root');
   const normalized = normalizeAbsolutePath(tempPath, 'temp path');
@@ -507,6 +593,11 @@ function parseLockRecord(bytes: Uint8Array, path: string): RosterWriterLockRecor
 }
 
 function assertAuthorityFileStats(path: string, stats: Stats): void {
+  assertAuthorityFileBaseStats(path, stats);
+  assertAuthorityHardlinkCount(path, stats, 1);
+}
+
+function assertAuthorityFileBaseStats(path: string, stats: Stats): void {
   if (stats.isSymbolicLink()) {
     throw new RosterStorageError('ROSTER_STORAGE_AUTHORITY_UNSAFE', `authority file is a symlink: ${path}`);
   }
@@ -515,8 +606,17 @@ function assertAuthorityFileStats(path: string, stats: Stats): void {
   }
   assertOwned(path, stats);
   assertPrivateMode(path, stats, ROSTER_PRIVATE_FILE_MODE, 'file');
-  if (stats.nlink !== 1) {
-    throw new RosterStorageError('ROSTER_STORAGE_AUTHORITY_UNSAFE', `authority file has hardlink aliases: ${path}`);
+}
+
+function assertAuthorityHardlinkCount(path: string, stats: Stats, expected: number): void {
+  if (stats.nlink !== expected) {
+    throw new RosterStorageError('ROSTER_STORAGE_AUTHORITY_UNSAFE', `authority file hardlink count for ${path} must be ${String(expected)}, got ${String(stats.nlink)}`);
+  }
+}
+
+function assertSameFileIdentity(path: string, before: Stats, after: Stats): void {
+  if (before.dev !== after.dev || before.ino !== after.ino) {
+    throw new RosterStorageError('ROSTER_STORAGE_AUTHORITY_UNSAFE', `authority file identity changed while proving orphan temp hardlink: ${path}`);
   }
 }
 

@@ -10,10 +10,11 @@ import {
   realpath,
   rm,
   symlink,
+  unlink,
   writeFile,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { describe, it } from 'node:test';
 
 import {
@@ -24,6 +25,7 @@ import {
   resolveRosterScopePaths,
   rosterRevisionPath,
   RosterStorage,
+  RosterStorageError,
   sha256Bytes,
   type PreRunSelectionAuthorityProjection,
   type RosterAuthorityProjection,
@@ -35,6 +37,7 @@ import {
   type RosterStorageScope,
   type SavedRosterRef,
 } from '../../src/core/roster/storage.ts';
+import { publishCreateOnlyAtomic } from '../../src/core/roster/transaction.ts';
 
 const CANDIDATE_SET_SHA: RosterSha256 = 'sha256:4b6d1ae6e50461d6eef793291ab7af69edc7de79030bd1bc7f56bbe29379b708';
 const ASSIGNMENT_CRUISE: RosterSha256 = 'sha256:bdb4f15f0ff90aff9d1e46a3a56bfdfddabafcf3c7f5c293a7b558ff2f22a3c4';
@@ -275,6 +278,10 @@ function diagnosticCodes(result: { readonly diagnostics: readonly { readonly cod
   return result.diagnostics.map((item) => item.code);
 }
 
+async function assertRosterStorageRejects(run: () => Promise<unknown>, code: string): Promise<void> {
+  await assert.rejects(run, (error: unknown) => error instanceof RosterStorageError && error.code === code);
+}
+
 function firstRoster(rosters: readonly { readonly bytes: Uint8Array; readonly ref: SavedRosterRef }[]): { readonly bytes: Uint8Array; readonly ref: SavedRosterRef } {
   const first = rosters[0];
   if (first === undefined) throw new Error('expected at least one roster');
@@ -433,6 +440,61 @@ void describe('Phase 37 W1 roster storage', () => {
     });
   });
 
+  void it('rejects approval smuggling through extra/default refs and roster order drift before lock/write', async () => {
+    await withTempDir(async (dir) => {
+      const stateRoot = join(dir, 'smuggle-state');
+      const paths = resolveRosterScopePaths({ scope: 'user', stateRoot });
+      const cruise = makeRoster('user', 'cruise-codex-subscription-bdb4f15f0ff9', ASSIGNMENT_CRUISE);
+      const precision = makeRoster('user', 'precision-codex-subscription-bdb4f15f0ff9', ASSIGNMENT_CRUISE);
+      const smuggled = makeRoster('user', 'afterburner-codex-subscription-7814ccd19c58', ASSIGNMENT_AFTERBURNER);
+      const smuggledPath = rosterRevisionPath(paths, smuggled.ref);
+      const seeded = await publishCreateOnlyAtomic({ path: smuggledPath, authorityRoot: paths.authorityRoot, bytes: smuggled.bytes });
+      assert.equal(seeded.status, 'created');
+      const config = makeConfig({
+        stateRoot,
+        scope: 'user',
+        rosters: [cruise.ref, precision.ref, smuggled.ref],
+        defaultRef: smuggled.ref,
+        previous: null,
+      });
+      const result = await new RosterStorage({ codec, stateRoot }).saveApprovedDefault({
+        scope: 'user',
+        approved_candidate_set_sha256: CANDIDATE_SET_SHA,
+        current_candidate_set_sha256: CANDIDATE_SET_SHA,
+        approved_roster_sha256s: [cruise.ref.roster_sha256, precision.ref.roster_sha256],
+        roster_bytes: [cruise.bytes, precision.bytes],
+        config_bytes: config.bytes,
+        expected_previous_config_sha256: null,
+        default_roster_id: smuggled.ref.roster_id,
+        default_roster_revision: smuggled.ref.roster_revision,
+        default_roster_sha256: smuggled.ref.roster_sha256,
+        original_command: '/autopilot phase37',
+      });
+      assert.equal(result.ok, false);
+      assert.equal(result.write_count, 0);
+      assert.equal(result.lock_count, 0);
+      assert.deepEqual(diagnosticCodes(result), ['ROSTER_APPROVAL_STALE_CANDIDATE_SET']);
+      assert.equal(existsSync(paths.lockPath), false);
+      assert.equal(bytesEqual(await readFile(smuggledPath), smuggled.bytes), true);
+
+      const orderStateRoot = join(dir, 'order-state');
+      const order = await saveTwoRosters({
+        stateRoot: orderStateRoot,
+        mutateConfig: (_config, bytes) => {
+          const parsed = parseObject(bytes);
+          const rosters = parsed['rosters'];
+          assert.equal(Array.isArray(rosters), true);
+          return encodeWithHash({ ...parsed, rosters: [...(rosters as unknown[])].reverse(), config_sha256: ZERO_SHA });
+        },
+      });
+      assert.equal(order.ok, false);
+      assert.equal(order.write_count, 0);
+      assert.equal(order.lock_count, 0);
+      assert.deepEqual(diagnosticCodes(order), ['ROSTER_APPROVAL_STALE_CANDIDATE_SET']);
+      assert.equal(existsSync(orderStateRoot), false);
+    });
+  });
+
   void it('checks trusted-project trust before reads and again before save writes', async () => {
     await withTempDir(async (dir) => {
       const stateRoot = join(dir, 'state');
@@ -587,6 +649,95 @@ void describe('Phase 37 W1 roster storage', () => {
       const modeRead = await new RosterStorage({ codec, stateRoot: modeRoot }).readDefaultRoster({ scope: 'user' });
       assert.equal(modeRead.ok, false);
       assert.deepEqual(diagnosticCodes(modeRead), ['ROSTER_STORAGE_PERMISSION_DENIED']);
+    });
+  });
+
+  void it('redacts arbitrary exception text from secret-free storage diagnostics', async () => {
+    await withTempDir(async (dir) => {
+      const stateRoot = join(dir, 'secret-state');
+      const secret = 'phase37-secret-token-should-not-appear';
+      const roster = makeRoster('user', 'cruise-codex-subscription-bdb4f15f0ff9');
+      const config = makeConfig({ stateRoot, scope: 'user', rosters: [roster.ref], defaultRef: roster.ref, previous: null });
+      async function attempt(leakingCodec: RosterStorageCodec<Record<string, unknown>>): Promise<Awaited<ReturnType<RosterStorage<Record<string, unknown>>['saveApprovedDefault']>>> {
+        return await new RosterStorage({ codec: leakingCodec, stateRoot }).saveApprovedDefault({
+          scope: 'user',
+          approved_candidate_set_sha256: CANDIDATE_SET_SHA,
+          current_candidate_set_sha256: CANDIDATE_SET_SHA,
+          approved_roster_sha256s: [roster.ref.roster_sha256],
+          roster_bytes: [roster.bytes],
+          config_bytes: config.bytes,
+          expected_previous_config_sha256: null,
+          default_roster_id: roster.ref.roster_id,
+          default_roster_revision: roster.ref.roster_revision,
+          default_roster_sha256: roster.ref.roster_sha256,
+          original_command: '/autopilot phase37',
+        });
+      }
+
+      const generic = await attempt({
+        ...codec,
+        decodeRoster(): RosterAuthorityProjection {
+          throw new Error(`arbitrary parser failure leaked ${secret}`);
+        },
+      });
+      assert.equal(generic.ok, false);
+      assert.deepEqual(diagnosticCodes(generic), ['ROSTER_READBACK_MISMATCH']);
+
+      const internal = await attempt({
+        ...codec,
+        decodeRoster(): RosterAuthorityProjection {
+          throw new RosterStorageError('ROSTER_STORAGE_PATH_INVALID', `invalid path included ${secret}`);
+        },
+      });
+      assert.equal(internal.ok, false);
+      assert.deepEqual(diagnosticCodes(internal), ['ROSTER_STORAGE_PATH_INVALID']);
+
+      for (const result of [generic, internal]) {
+        for (const item of result.diagnostics) {
+          assert.equal(item.secret_free, true);
+          assert.equal(item.message.includes(secret), false);
+          assert.equal(item.message.includes('arbitrary parser failure'), false);
+          assert.equal(item.message.includes('invalid path included'), false);
+          assert.ok(item.message.length <= 160);
+        }
+      }
+    });
+  });
+
+  void it('recovers only byte-identical create-only orphan temp hardlinks and fails closed otherwise', async () => {
+    await withTempDir(async (dir) => {
+      const authorityRoot = join(dir, 'create-only-authority');
+      const path = join(authorityRoot, 'selection.json');
+      const bytes = Buffer.from('{"schema_version":"test","value":1}\n', 'utf8');
+      const created = await publishCreateOnlyAtomic({ path, authorityRoot, bytes });
+      assert.equal(created.status, 'created');
+      const orphanTemp = join(authorityRoot, `.${basename(path)}.tmp-123-123e4567-e89b-42d3-a456-426614174000`);
+      await link(path, orphanTemp);
+      assert.equal(lstatSync(path).nlink, 2);
+
+      await assertRosterStorageRejects(
+        () => publishCreateOnlyAtomic({ path, authorityRoot, bytes: Buffer.from('{"schema_version":"test","value":2}\n', 'utf8') }),
+        'ROSTER_STORAGE_AUTHORITY_UNSAFE',
+      );
+      assert.equal(existsSync(orphanTemp), true);
+      assert.equal(lstatSync(path).nlink, 2);
+
+      const replay = await publishCreateOnlyAtomic({ path, authorityRoot, bytes });
+      assert.equal(replay.status, 'idempotent');
+      assert.equal(existsSync(orphanTemp), false);
+      assert.equal(lstatSync(path).nlink, 1);
+      assert.equal(bytesEqual(await readFile(path), bytes), true);
+
+      const unprovenAlias = join(authorityRoot, 'selection-unproven-alias.json');
+      await link(path, unprovenAlias);
+      await assertRosterStorageRejects(
+        () => publishCreateOnlyAtomic({ path, authorityRoot, bytes }),
+        'ROSTER_STORAGE_AUTHORITY_UNSAFE',
+      );
+      assert.equal(existsSync(unprovenAlias), true);
+      assert.equal(lstatSync(path).nlink, 2);
+      await unlink(unprovenAlias);
+      assert.equal(lstatSync(path).nlink, 1);
     });
   });
 

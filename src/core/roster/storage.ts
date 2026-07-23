@@ -230,7 +230,11 @@ const STORAGE_CODES = new Set<string>([
   'ROSTER_QUALIFICATION_REQUIRED',
   'ROSTER_CREATE_ONLY_CONFLICT',
   'ROSTER_SELECTION_IDEMPOTENT_REPLAY',
+  'ROSTER_STORAGE_AUTHORITY_UNSAFE',
+  'ROSTER_STORAGE_PATH_INVALID',
+  'ROSTER_STORAGE_PERMISSION_DENIED',
   'ROSTER_STORAGE_TRUST_REQUIRED',
+  'ROSTER_STORAGE_UNSUPPORTED_PLATFORM',
   'ROSTER_CONFIG_CAS_MISMATCH',
   'ROSTER_READBACK_MISMATCH',
   'ROSTER_LOCK_STALE_PROCESS_UNPROVEN',
@@ -695,13 +699,30 @@ function validateSaveConfig(input: {
   ) {
     throw new RosterStorageError('ROSTER_TRANSITION_REQUIRED', 'save default tuple does not match complete-after-state config default tuple');
   }
+  validateConfigRosterOrder(input.config.rosters, input.rosters);
+  const defaultIsApproved = input.rosters.some(
+    (roster) =>
+      roster.authority.roster_id === input.input.default_roster_id &&
+      roster.authority.roster_revision === input.input.default_roster_revision &&
+      roster.authority.roster_sha256 === input.input.default_roster_sha256,
+  );
+  if (!defaultIsApproved) {
+    throw new RosterStorageError('ROSTER_APPROVAL_STALE_CANDIDATE_SET', 'default roster tuple must be one of the approved roster hashes');
+  }
   if (exactDefaultMatch(input.config) === null) {
     throw new RosterStorageError('ROSTER_TRANSITION_REQUIRED', 'default roster tuple must match exactly one config roster ref');
   }
-  for (const roster of input.rosters) {
-    const match = input.config.rosters.find((ref) => sameRosterRef(ref, roster.authority));
-    if (match === undefined) {
-      throw new RosterStorageError('ROSTER_TRANSITION_REQUIRED', `config does not include approved roster ${roster.authority.roster_id}`);
+}
+
+function validateConfigRosterOrder(configRosters: readonly SavedRosterRef[], rosters: readonly DecodedRosterPublication[]): void {
+  if (configRosters.length !== rosters.length) {
+    throw new RosterStorageError('ROSTER_APPROVAL_STALE_CANDIDATE_SET', 'config roster refs must exactly match the approved roster list');
+  }
+  for (let index = 0; index < rosters.length; index += 1) {
+    const configRef = configRosters[index];
+    const roster = rosters[index];
+    if (configRef === undefined || roster === undefined || !sameRosterRef(configRef, roster.authority)) {
+      throw new RosterStorageError('ROSTER_APPROVAL_STALE_CANDIDATE_SET', 'config roster order must exactly match the approved roster list');
     }
   }
 }
@@ -805,12 +826,12 @@ function selectionResult(
   });
 }
 
-function diagnostic(code: string, severity: RosterStorageDiagnostic['severity'] = severityForCode(code), message?: string): RosterStorageDiagnostic {
-  const normalizedCode = STORAGE_CODES.has(code) || code.startsWith('ROSTER_STORAGE_') ? code : 'ROSTER_READBACK_MISMATCH';
+function diagnostic(code: string, severity?: RosterStorageDiagnostic['severity'], _message?: string): RosterStorageDiagnostic {
+  const normalizedCode = normalizeDiagnosticCode(code);
   return Object.freeze({
     code: normalizedCode,
-    severity,
-    message: message ?? `${normalizedCode} roster storage diagnostic`,
+    severity: severity ?? severityForCode(normalizedCode),
+    message: diagnosticMessageForCode(normalizedCode),
     remediation: 'Follow the Phase 37 roster storage authority and repair the saved roster state before retrying.',
     secret_free: true,
   });
@@ -818,12 +839,51 @@ function diagnostic(code: string, severity: RosterStorageDiagnostic['severity'] 
 
 function diagnosticFromError(error: unknown): RosterStorageDiagnostic {
   if (error instanceof RosterStorageError) {
-    return diagnostic(error.code, severityForCode(error.code), error.message);
+    const code = normalizeDiagnosticCode(error.code);
+    return diagnostic(code, severityForCode(code));
   }
-  if (error instanceof Error) {
-    return diagnostic('ROSTER_READBACK_MISMATCH', 'fatal', error.message);
+  return diagnostic('ROSTER_READBACK_MISMATCH', 'fatal');
+}
+
+function normalizeDiagnosticCode(code: string): string {
+  return STORAGE_CODES.has(code) ? code : 'ROSTER_READBACK_MISMATCH';
+}
+
+function diagnosticMessageForCode(code: string): string {
+  switch (code) {
+    case 'ROSTER_APPROVAL_STALE_CANDIDATE_SET':
+      return 'Approved roster authority no longer matches the requested save input.';
+    case 'ROSTER_APPROVAL_STALE_CONFIG':
+    case 'ROSTER_CONFIG_CAS_MISMATCH':
+      return 'Saved roster config changed before publication could be proven.';
+    case 'ROSTER_CREATE_ONLY_CONFLICT':
+      return 'Immutable roster authority already exists with different bytes.';
+    case 'ROSTER_LOCK_STALE_PROCESS_UNPROVEN':
+      return 'Roster writer lock already exists and cannot be safely broken.';
+    case 'ROSTER_PROJECT_UNTRUSTED':
+    case 'ROSTER_STORAGE_TRUST_REQUIRED':
+      return 'Trusted project roster storage requires an explicit trusted project context.';
+    case 'ROSTER_PUBLICATION_INTERRUPTED_CONFIG_MISSING':
+      return 'Roster publication stopped after immutable roster files and before config publication.';
+    case 'ROSTER_READBACK_MISMATCH':
+      return 'Roster storage readback or codec validation failed closed.';
+    case 'ROSTER_RECEIPT_REPLAY_REQUIRED':
+      return 'Roster config is published and receipt emission must be replayed.';
+    case 'ROSTER_SELECTION_IDEMPOTENT_REPLAY':
+      return 'Pre-run selection bytes were already published exactly.';
+    case 'ROSTER_STORAGE_AUTHORITY_UNSAFE':
+      return 'Roster storage authority file safety checks failed.';
+    case 'ROSTER_STORAGE_PATH_INVALID':
+      return 'Roster storage rejected an invalid authority path.';
+    case 'ROSTER_STORAGE_PERMISSION_DENIED':
+      return 'Roster storage authority permissions are not private to the current user.';
+    case 'ROSTER_STORAGE_UNSUPPORTED_PLATFORM':
+      return 'Roster storage platform guarantees are unavailable.';
+    case 'ROSTER_TRANSITION_REQUIRED':
+      return 'Roster storage requires an explicit approved transition.';
+    default:
+      return `${code} roster storage diagnostic`;
   }
-  return diagnostic('ROSTER_READBACK_MISMATCH', 'fatal', String(error));
 }
 
 function severityForCode(code: string): RosterStorageDiagnostic['severity'] {
