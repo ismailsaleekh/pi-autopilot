@@ -26,7 +26,6 @@ import {
   fakeInventoryFromProviders,
   getProfileTemplate,
   getProviderRecipe,
-  isExactSyntheticQualificationManifest,
   proposeRosterCandidates,
   requestProfileFromAssignment,
   resolveRecipe,
@@ -205,7 +204,6 @@ void describe('Phase 37 W1 provider recipes and candidates', () => {
     const manifest = forgeSyntheticQualificationManifest(recipe, { priority_proof: true });
     const proposal = proposeRosterCandidates({ inventory, recipes: [recipe], qualification_manifests: [manifest] });
 
-    assert.equal(isExactSyntheticQualificationManifest(recipe, manifest), false);
     assert.equal(proposal.ok, false);
     assert.equal(proposal.status, 'blocked');
     assert.deepEqual(proposal.candidate_set.candidates, []);

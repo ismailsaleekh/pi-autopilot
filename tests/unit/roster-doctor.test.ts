@@ -3,7 +3,6 @@ import { describe, it } from 'node:test';
 
 import { type InventoryProvider } from '../../src/core/roster/route-policies.ts';
 import {
-  createSyntheticQualificationManifest,
   fakeInventoryFromProviders,
   getProviderRecipe,
   type ProviderRecipe,
@@ -66,19 +65,15 @@ function providerForRecipe(recipe: ProviderRecipe, overrides: Partial<InventoryP
 }
 
 void describe('Phase 37 W1 roster doctor', () => {
-  void it('produces unique sorted route and recipe results with locked diagnostics', () => {
+  void it('produces unique sorted route and recipe results while unqualified seeds remain blocked', () => {
     const recipe = mustRecipe('codex-subscription');
     const inventory = fakeInventoryFromProviders({
-      inventory_id: 'doctor-codex-ready',
+      inventory_id: 'doctor-codex-unqualified',
       providers: [providerForRecipe(recipe)],
     });
-    const result = doctorRosterInventory({
-      inventory,
-      recipes: [recipe],
-      qualification_manifests: [createSyntheticQualificationManifest(recipe, { priority_proof: true })],
-    });
+    const result = doctorRosterInventory({ inventory, recipes: [recipe] });
 
-    assert.equal(result.status, 'pass');
+    assert.equal(result.status, 'warn');
     assert.equal(result.route_results.length, 1);
     assert.equal(result.route_results[0]?.matched, true);
     assert.equal(result.recipe_results.length, 3);
@@ -92,7 +87,16 @@ void describe('Phase 37 W1 roster doctor', () => {
     );
     assert.equal(new Set(result.recipe_results.map((recipeResult) => recipeResult.result_sha256)).size, result.recipe_results.length);
     assert.equal(result.diagnostics.every((diagnostic) => diagnostic.secret_free), true);
-    assert.deepEqual(result.diagnostics.map((diagnostic) => diagnostic.code), ['ROSTER_CONVERGED_ASSIGNMENT_SET']);
+    assert.equal(
+      result.recipe_results.every(
+        (recipeResult) =>
+          recipeResult.candidate !== null &&
+          recipeResult.candidate.launch_readiness === 'not-ready-until-w4' &&
+          recipeResult.candidate.synthetic_fixture_ready_only === false,
+      ),
+      true,
+    );
+    assert.ok(result.diagnostics.some((diagnostic) => diagnostic.code === 'ROSTER_QUALIFICATION_REQUIRED'));
   });
 
   void it('blocks doctor on missing auth and never resolves credentials', () => {

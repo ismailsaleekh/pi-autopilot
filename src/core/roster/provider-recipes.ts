@@ -808,28 +808,6 @@ export function buildRosterFromRecipe(options: {
   return { ...withoutHash, roster_sha256: canonicalSha256(withoutHash) };
 }
 
-function exactQualificationManifestForRecipe(
-  recipe: ProviderRecipe,
-  manifest: QualificationManifest | null | undefined,
-): boolean {
-  void recipe;
-  void manifest;
-  return false;
-}
-
-export function isExactSyntheticQualificationManifest(recipe: ProviderRecipe, manifest: QualificationManifest | null | undefined): boolean {
-  return exactQualificationManifestForRecipe(recipe, manifest);
-}
-
-export function createSyntheticQualificationManifest(
-  recipe: ProviderRecipe,
-  options: { readonly issued_at?: string; readonly expires_at?: string; readonly priority_proof?: boolean } = {},
-): QualificationManifest {
-  void recipe;
-  void options;
-  throw new Error('synthetic qualification manifest fabrication is disabled in production roster authority');
-}
-
 function readinessForCandidate(
   recipe: ProviderRecipe,
   profile: ProfileTemplate,
