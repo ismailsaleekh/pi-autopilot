@@ -432,7 +432,7 @@ class CoordinatorRequestDrain {
   }
 }
 
-function handleSocket(socket: Socket, store: CoordinatorStore, capability: string, paths: CoordinatorRuntimePaths, lifecycle: CurrentCoordinatorLock, backgroundFailure: () => Error | null, firstExactHandshake: () => Promise<void>, requestDrain: CoordinatorRequestDrain, testHooks?: CoordinatorServerTestHooks): void {
+function handleSocket(socket: Socket, store: CoordinatorStore, capability: string, paths: CoordinatorRuntimePaths, lifecycle: CurrentCoordinatorLock, backgroundFailure: () => Error | null, startupRequestGate: Promise<void>, firstExactHandshake: () => Promise<void>, requestDrain: CoordinatorRequestDrain, testHooks?: CoordinatorServerTestHooks): void {
   if (!requestDrain.register(socket)) return;
   const decoder = new CoordinatorFrameDecoder();
   const peer = new CoordinatorSocketPeerState();
@@ -446,6 +446,7 @@ function handleSocket(socket: Socket, store: CoordinatorStore, capability: strin
   socket.on('data', (chunk: NodeBuffer) => {
     if (!requestDrain.acceptRequest(socket)) return;
     chain = chain.then(async () => {
+      await startupRequestGate;
       const frames = decoder.push(chunk);
       for (const frame of frames) {
         let requestId = `transport-error-${randomBytes(8).toString('hex')}`;
@@ -588,6 +589,7 @@ export async function startCoordinatorServer(paths: CoordinatorRuntimePaths, clo
   let server: Server | null = null;
   let offerTimer: ReturnType<typeof setInterval> | null = null;
   let serverListening = false;
+  let releaseStartupRequestGate: () => void = () => undefined;
   const requestDrain = new CoordinatorRequestDrain();
   try {
     lifecycleLock = await acquireCoordinatorLock(paths, adoption, async (plannedLifecycle) => {
@@ -614,12 +616,18 @@ export async function startCoordinatorServer(paths: CoordinatorRuntimePaths, clo
     const openedStore = requirePreparedStore(store);
     const openedCapability = requirePreparedCapability(capability);
     let timerFailure: Error | null = null;
+    // The listener is bound before lifecycle activation is reported, but no
+    // request may observe the endpoint until the post-activation observer
+    // transition has completed. This keeps startup phase observation ordered
+    // even when an already-waiting client connects immediately after listen().
+    releaseStartupRequestGate = () => undefined;
+    const startupRequestGate = startupObserver === undefined ? Promise.resolve() : new Promise<void>((resolveGate) => { releaseStartupRequestGate = resolveGate; });
     let firstHandshakeTransition: Promise<void> | null = null;
     const firstExactHandshake = async (): Promise<void> => {
       firstHandshakeTransition ??= startupObserver?.transition('first-exact-handshake-served', acquiredLifecycleLock.record) ?? Promise.resolve();
       await firstHandshakeTransition;
     };
-    server = createServer((socket) => handleSocket(socket, openedStore, openedCapability, paths, acquiredLifecycleLock.record, () => timerFailure, firstExactHandshake, requestDrain, testHooks));
+    server = createServer((socket) => handleSocket(socket, openedStore, openedCapability, paths, acquiredLifecycleLock.record, () => timerFailure, startupRequestGate, firstExactHandshake, requestDrain, testHooks));
     await startupObserver?.transition('before-socket-bind', acquiredLifecycleLock.record);
     await listen(server, paths.socketPath);
     serverListening = true;
@@ -630,7 +638,11 @@ export async function startCoordinatorServer(paths: CoordinatorRuntimePaths, clo
     // all complete under one lifecycle election. Only then may another startup or
     // restore operation enter the election.
     acquiredLifecycleLock.activate();
-    await startupObserver?.transition('after-activation-before-first-handshake', acquiredLifecycleLock.record);
+    try {
+      await startupObserver?.transition('after-activation-before-first-handshake', acquiredLifecycleLock.record);
+    } finally {
+      releaseStartupRequestGate();
+    }
     let offerSweepPromise: Promise<void> | null = null;
     const runSerializedOfferSweep = (): void => {
       if (offerSweepPromise !== null) return;
@@ -678,6 +690,7 @@ export async function startCoordinatorServer(paths: CoordinatorRuntimePaths, clo
     };
   } catch (error) {
     const cleanupFailures: string[] = [];
+    releaseStartupRequestGate();
     if (offerTimer !== null) clearInterval(offerTimer);
     offerTimer = null;
     if (server !== null && serverListening) {

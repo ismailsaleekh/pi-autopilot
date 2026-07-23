@@ -488,7 +488,7 @@ class CoordinatorRequestDrain {
         }
     }
 }
-function handleSocket(socket, store, capability, paths, lifecycle, backgroundFailure, firstExactHandshake, requestDrain, testHooks) {
+function handleSocket(socket, store, capability, paths, lifecycle, backgroundFailure, startupRequestGate, firstExactHandshake, requestDrain, testHooks) {
     if (!requestDrain.register(socket))
         return;
     const decoder = new CoordinatorFrameDecoder();
@@ -504,6 +504,7 @@ function handleSocket(socket, store, capability, paths, lifecycle, backgroundFai
         if (!requestDrain.acceptRequest(socket))
             return;
         chain = chain.then(async () => {
+            await startupRequestGate;
             const frames = decoder.push(chunk);
             for (const frame of frames) {
                 let requestId = `transport-error-${randomBytes(8).toString('hex')}`;
@@ -659,6 +660,7 @@ export async function startCoordinatorServer(paths, clock, adoption, testHooks, 
     let server = null;
     let offerTimer = null;
     let serverListening = false;
+    let releaseStartupRequestGate = () => undefined;
     const requestDrain = new CoordinatorRequestDrain();
     try {
         lifecycleLock = await acquireCoordinatorLock(paths, adoption, async (plannedLifecycle) => {
@@ -686,12 +688,18 @@ export async function startCoordinatorServer(paths, clock, adoption, testHooks, 
         const openedStore = requirePreparedStore(store);
         const openedCapability = requirePreparedCapability(capability);
         let timerFailure = null;
+        // The listener is bound before lifecycle activation is reported, but no
+        // request may observe the endpoint until the post-activation observer
+        // transition has completed. This keeps startup phase observation ordered
+        // even when an already-waiting client connects immediately after listen().
+        releaseStartupRequestGate = () => undefined;
+        const startupRequestGate = startupObserver === undefined ? Promise.resolve() : new Promise((resolveGate) => { releaseStartupRequestGate = resolveGate; });
         let firstHandshakeTransition = null;
         const firstExactHandshake = async () => {
             firstHandshakeTransition ??= startupObserver?.transition('first-exact-handshake-served', acquiredLifecycleLock.record) ?? Promise.resolve();
             await firstHandshakeTransition;
         };
-        server = createServer((socket) => handleSocket(socket, openedStore, openedCapability, paths, acquiredLifecycleLock.record, () => timerFailure, firstExactHandshake, requestDrain, testHooks));
+        server = createServer((socket) => handleSocket(socket, openedStore, openedCapability, paths, acquiredLifecycleLock.record, () => timerFailure, startupRequestGate, firstExactHandshake, requestDrain, testHooks));
         await startupObserver?.transition('before-socket-bind', acquiredLifecycleLock.record);
         await listen(server, paths.socketPath);
         serverListening = true;
@@ -703,7 +711,12 @@ export async function startCoordinatorServer(paths, clock, adoption, testHooks, 
         // all complete under one lifecycle election. Only then may another startup or
         // restore operation enter the election.
         acquiredLifecycleLock.activate();
-        await startupObserver?.transition('after-activation-before-first-handshake', acquiredLifecycleLock.record);
+        try {
+            await startupObserver?.transition('after-activation-before-first-handshake', acquiredLifecycleLock.record);
+        }
+        finally {
+            releaseStartupRequestGate();
+        }
         let offerSweepPromise = null;
         const runSerializedOfferSweep = () => {
             if (offerSweepPromise !== null)
@@ -756,6 +769,7 @@ export async function startCoordinatorServer(paths, clock, adoption, testHooks, 
     }
     catch (error) {
         const cleanupFailures = [];
+        releaseStartupRequestGate();
         if (offerTimer !== null)
             clearInterval(offerTimer);
         offerTimer = null;

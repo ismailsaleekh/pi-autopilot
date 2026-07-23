@@ -59,6 +59,7 @@ async function delayedWinnerFixture(root: string, readinessTimeoutMs: number): P
   const winnerBarrier = join(stateRoot, 'test-startup-barriers', 'winner');
   const commonEnv = { ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: stateRoot, PI_OFFLINE: '1', PI_SKIP_VERSION_CHECK: '1', PI_TELEMETRY: '0' };
   await armStartupBarrier(loserBarrier, 'before-lifecycle-election');
+  await armStartupBarrier(winnerBarrier, 'after-activation-before-first-handshake');
   await armStartupBarrier(winnerBarrier, 'first-exact-handshake-served');
   const client = new CoordinatorClient({ env: { ...commonEnv, [STARTUP_BARRIER_ENV]: loserBarrier }, readinessTimeoutMs });
   const pending = client.query('handshake');
@@ -70,10 +71,12 @@ async function delayedWinnerFixture(root: string, readinessTimeoutMs: number): P
   });
   winner.stderr?.on('data', (chunk) => { winnerStderr += chunk.toString('utf8'); });
   try {
+    await waitForStartupBarrier(winnerBarrier, 'after-activation-before-first-handshake', 30_000);
     await waitForReport(stateRoot, (report) => report.spawned_pid === winner.pid && report.phase === 'after-activation-before-first-handshake', 30_000);
     const winnerLock = JSON.parse(await readFile(coordinatorRuntimePaths(commonEnv).lockPath, 'utf8')) as Readonly<Record<string, unknown>>;
     await releaseStartupBarrier(loserBarrier, 'before-lifecycle-election');
     await waitForReport(stateRoot, (report) => report.outcome === 'election-loser', 30_000);
+    await releaseStartupBarrier(winnerBarrier, 'after-activation-before-first-handshake');
     await waitForStartupBarrier(winnerBarrier, 'first-exact-handshake-served', 30_000);
     return { stateRoot, env: commonEnv, winnerBarrier, winner, winnerLock, pending };
   } catch (error) {
