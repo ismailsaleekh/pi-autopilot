@@ -40,7 +40,8 @@ import { parseD65BootstrapCharter, reconstructD65BootstrapCharter } from "./d65-
 import { validateD65FirstCompleteGraph } from "./d65-first-complete-graph.js";
 import { parseAutopilotReceipt, parseAutopilotState, parseAutopilotUnitSpec } from "../contracts/index.js";
 import { assertAutopilotChildTerminalAcceptanceChain, AUTOPILOT_CHILD_TERMINAL_ACCEPTANCE_SCHEMA, parseAutopilotChildTerminalAcceptance } from "./terminal-acceptance.js";
-import { parseRunTerminalSha, parseUnitAttemptTarget, parseUnitFailureEvidenceIngress, parseUnitMergeReservationFacts, validateReconciliationEvidenceDocument, validateReservationIntegrationEvidenceDocument, validateReservationValidationArtifactChain, validateReservationValidationEvidenceDocument } from "./terminal-evidence.js";
+import { HISTORICAL_UNIT_FAILURE_GENERATIONS, classifyHistoricalUnitFailureEvidenceGeneration, parseRunTerminalSha, parseUnitAttemptTarget, parseUnitFailureEvidenceIngress, parseUnitMergeReservationFacts, validateReconciliationEvidenceDocument, validateReservationIntegrationEvidenceDocument, validateReservationValidationArtifactChain, validateReservationValidationEvidenceDocument } from "./terminal-evidence.js";
+import { BUG_177_HISTORICAL_UNIT_FAILURE_PRODUCERS } from "./unit-failure-producer-provenance.js";
 import { AUTOPILOT_COORDINATOR_PROTOCOL_VERSION, COORDINATION_WORKTREE_STATES } from "./types.js";
 import { COORDINATOR_MAX_FRAME_BYTES } from "./runtime-constants.js";
 import { assertPrivatePathNoAliases } from "../private-path.js";
@@ -8607,9 +8608,10 @@ export class CoordinatorStore {
             repoKey: repository.repo_key, autopilotId: run.autopilot_id, workstream: run.workstream, workstreamRun: run.workstream_run,
             source, targetId, unitId, attempt,
         };
-        validateReconciliationEvidenceDocument(bytes, expectedIdentity, this.#historicalUnitFailureProvenanceFor(run, source, evidence));
+        const historicalProvenance = this.#historicalUnitFailureProvenanceFor(run, source, evidence, bytes);
+        validateReconciliationEvidenceDocument(bytes, expectedIdentity, historicalProvenance);
         if (persistAtEventSeq !== undefined && (source === 'attempt-reset' || source === 'quarantine-capture')) {
-            const ingress = parseUnitFailureEvidenceIngress(bytes, expectedIdentity, this.#historicalUnitFailureProvenanceFor(run, source, evidence));
+            const ingress = parseUnitFailureEvidenceIngress(bytes, expectedIdentity, historicalProvenance);
             if (ingress.kind === 'historical')
                 throw new CoordinationRuntimeError('recovery-required', 'historical unit failure evidence cannot newly release authority; reset/quarantine worktree postconditions are not verifiable after schema-10', [evidence.ref, ingress.provenance.reconciliationEvidenceId]);
             this.#assertUnitFailureEvidenceFacts(run, source, targetId, ingress.facts, bytes);
@@ -8618,7 +8620,7 @@ export class CoordinatorStore {
             this.#persistEvidenceArtifact(run.repo_id, evidence, bytes, `${source} reconciliation evidence`, persistAtEventSeq);
         return bytes;
     }
-    #historicalUnitFailureProvenanceFor(run, source, evidence) {
+    #historicalUnitFailureProvenanceFor(run, source, evidence, bytes) {
         if (source !== 'attempt-reset' && source !== 'quarantine-capture')
             return null;
         const conditionType = source === 'attempt-reset' ? 'attempt-reset' : 'quarantine-captured';
@@ -8633,7 +8635,12 @@ export class CoordinatorStore {
         if (schema10Migration === undefined)
             return null;
         const schema10AppliedAt = sqlString(schema10Migration, 'applied_at');
-        return { kind: 'coordinator-accepted-before-schema10', evidenceRef: evidence.ref, evidenceSha256: evidence.sha256, reconciliationEvidenceId, acceptedEventSeq, acceptedAt, schema10AppliedAt };
+        const generation = classifyHistoricalUnitFailureEvidenceGeneration(bytes);
+        if (generation === null)
+            return null;
+        const producerBuild = generation === HISTORICAL_UNIT_FAILURE_GENERATIONS.phase2Initial ? BUG_177_HISTORICAL_UNIT_FAILURE_PRODUCERS.phase2Initial : BUG_177_HISTORICAL_UNIT_FAILURE_PRODUCERS.captureCommitOnly;
+        const producerGeneration = generation === HISTORICAL_UNIT_FAILURE_GENERATIONS.phase2Initial ? 1 : 2;
+        return { kind: 'coordinator-accepted-before-schema10', evidenceRef: evidence.ref, evidenceSha256: evidence.sha256, reconciliationEvidenceId, acceptedEventSeq, acceptedAt, schema10AppliedAt, producerBuild, producerGeneration };
     }
     #assertUnitFailureEvidenceFacts(run, source, targetId, facts, evidenceBytes) {
         const target = parseUnitAttemptTarget(targetId);

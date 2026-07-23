@@ -108,10 +108,10 @@ void describe('S2-A versioned ingress persisted-artifact registry', () => {
       'autopilot.schema9_read_recovery_retirement.v1', 'autopilot.schema9_read_retirement.v1', 'autopilot.schema11_retirement.v1',
     ];
     for (const family of requiredFamilies) assert.ok(VERSIONED_PERSISTED_ARTIFACT_FAMILY_IDS.includes(family), `missing persisted family ${family}`);
-    for (const family of ['autopilot.active_parent.v2', 'autopilot.cf50_fixed_path_barrier.v1', 'autopilot.schema9_read_recovery_retirement.v1', 'autopilot.schema9_read_retirement.v1'] as const) {
-      const current = persistedArtifactFamily(family).producer_ranges.find((range) => range.current);
-      assert.notEqual(current, undefined, `missing current range for ${family}`);
-      assert.ok((current?.exact_fields.length ?? 0) > 3, `${family} must use exact source-anchored fields, not schema_version provenance placeholders`);
+    for (const family of VERSIONED_PERSISTED_ARTIFACT_FAMILY_REGISTRY) {
+      const current = family.producer_ranges.find((range) => range.current);
+      assert.notEqual(current, undefined, `missing current range for ${family.family}`);
+      assert.ok((current?.exact_fields.length ?? 0) > 3, `${family.family} must use exact source-anchored fields, not schema_version provenance placeholders`);
     }
   });
 
@@ -149,10 +149,10 @@ void describe('S2-A versioned ingress persisted-artifact registry', () => {
     assert.throws(() => parseVersionedUnitFailureIngress({ bytes: captureOnly, producer_build: COORDINATOR_IMPLEMENTATION_BUILD, producer_generation: 3, identity: identity('unit-bug177') }), /missing a required field/u);
     assert.throws(() => parseVersionedUnitFailureIngress({ bytes: captureOnly, producer_build: BUG_177_HISTORICAL_UNIT_FAILURE_PRODUCERS.captureCommitOnly, producer_generation: Number.NaN, identity: identity('unit-bug177') }), /required explicitly/u);
     const quarantine = parseObject(captureOnly);
-    quarantine.action = 'quarantine';
+    quarantine['action'] = 'quarantine';
     assert.throws(() => parseVersionedUnitFailureIngress({ bytes: bytesFromObject(quarantine), producer_build: BUG_177_HISTORICAL_UNIT_FAILURE_PRODUCERS.captureCommitOnly, producer_generation: 2, identity: identity('unit-bug177') }), /historical quarantine\/preserve/u);
     const unknown = parseObject(captureOnly);
-    unknown.injected_field = 'forged';
+    unknown['injected_field'] = 'forged';
     assert.throws(() => parseVersionedUnitFailureIngress({ bytes: bytesFromObject(unknown), producer_build: BUG_177_HISTORICAL_UNIT_FAILURE_PRODUCERS.captureCommitOnly, producer_generation: 2, identity: identity('unit-bug177') }), /unknown fields/u);
   });
 
@@ -165,16 +165,16 @@ void describe('S2-A versioned ingress persisted-artifact registry', () => {
     validateReconciliationEvidenceDocument(current, reconciliationIdentity('unit-current'));
 
     const missingCaptureRef = parseObject(current);
-    delete missingCaptureRef.capture_ref;
+    delete missingCaptureRef['capture_ref'];
     assert.throws(() => parseVersionedUnitFailureIngress({ bytes: bytesFromObject(missingCaptureRef), producer_build: COORDINATOR_IMPLEMENTATION_BUILD, producer_generation: 3, identity: identity('unit-current') }), /missing a required field/u);
     const missingProducerBuild = parseObject(current);
-    delete missingProducerBuild.producer_build;
+    delete missingProducerBuild['producer_build'];
     assert.throws(() => parseVersionedUnitFailureIngress({ bytes: bytesFromObject(missingProducerBuild), producer_build: COORDINATOR_IMPLEMENTATION_BUILD, producer_generation: 3, identity: identity('unit-current') }), /missing a required field/u);
     const mismatchedProducerBuild = parseObject(current);
-    mismatchedProducerBuild.producer_build = '1.2.0-forged';
+    mismatchedProducerBuild['producer_build'] = '1.2.0-forged';
     assert.throws(() => parseVersionedUnitFailureIngress({ bytes: bytesFromObject(mismatchedProducerBuild), producer_build: COORDINATOR_IMPLEMENTATION_BUILD, producer_generation: 3, identity: identity('unit-current') }), /differs from selected provenance/u);
     const extra = parseObject(current);
-    extra.future_field = 'not accepted from current producers';
+    extra['future_field'] = 'not accepted from current producers';
     assert.throws(() => parseVersionedUnitFailureIngress({ bytes: bytesFromObject(extra), producer_build: COORDINATOR_IMPLEMENTATION_BUILD, producer_generation: 3, identity: identity('unit-current') }), /unknown fields/u);
   });
 
@@ -227,7 +227,7 @@ void describe('S2-A versioned ingress persisted-artifact registry', () => {
       const currentRanges = family.producer_ranges.filter((range) => range.current);
       assert.equal(currentRanges.length, 1, `family ${family.family} must have exactly one current range`);
       const current = currentRanges[0];
-      assert.notEqual(current, undefined);
+      if (current === undefined) throw new Error(`family ${family.family} has no current range`);
       assert.equal(current.producer_build, COORDINATOR_IMPLEMENTATION_BUILD);
       assert.equal(current.unknown_field_policy, 'reject');
       assert.throws(() => selectVersionedIngressProducer({ family: family.family, producer_build: COORDINATOR_IMPLEMENTATION_BUILD.replace('-s1', ''), producer_generation: current.first_generation }), /unsupported persisted artifact producer_build/u);

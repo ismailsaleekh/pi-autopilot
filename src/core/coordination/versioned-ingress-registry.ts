@@ -6,6 +6,7 @@ import { AUTOPILOT_COORDINATION_JSON_SCHEMAS, type CoordinationJsonSchema } from
 import { COORDINATOR_IMPLEMENTATION_BUILD } from './runtime-constants.ts';
 import { CoordinationRuntimeError } from './failures.ts';
 import { BUG_177_HISTORICAL_UNIT_FAILURE_PRODUCERS, UNIT_FAILURE_CURRENT_PRODUCER_GENERATION } from './unit-failure-producer-provenance.ts';
+import { parseCentralVersionedUnitFailureIngress } from './unit-failure-ingress.ts';
 export { BUG_177_HISTORICAL_UNIT_FAILURE_PRODUCERS, UNIT_FAILURE_CURRENT_PRODUCER_GENERATION } from './unit-failure-producer-provenance.ts';
 
 export type VersionedIngressUnknownFieldPolicy = 'reject' | 'preserve';
@@ -237,14 +238,115 @@ const EXTRA_PERSISTED_ARTIFACT_SCHEMAS = Object.freeze([
 const SOURCE_ANCHORED_EXTRA_PERSISTED_ARTIFACT_FIELDS = Object.freeze({
   'autopilot.active_parent.v1': ['active_epoch_started_at', 'active_run_epoch', 'active_run_receipt_id', 'autopilot_id', 'boot_id', 'branch', 'git_common_dir', 'main_worktree_path', 'origin_url', 'pid', 'repo_key', 'runtime_root', 'schema_version', 'source_repo', 'started_at', 'status', 'target_base_sha', 'target_branch', 'workstream', 'workstream_run', 'worktree_root'],
   'autopilot.active_parent.v2': ['active_epoch_started_at', 'active_run_epoch', 'active_run_receipt_id', 'autopilot_id', 'boot_id', 'branch', 'coordination_authority', 'git_common_dir', 'main_worktree_path', 'origin_url', 'pid', 'repo_key', 'runtime_root', 'schema_version', 'source_repo', 'started_at', 'status', 'target_base_sha', 'target_branch', 'workstream', 'workstream_run', 'worktree_root'],
+  'autopilot.archive_info.v1': ['archive_ref', 'archived_at', 'autopilot_id', 'branch', 'schema_version', 'workstream', 'workstream_run'],
+  'autopilot.attach_run_result.v2': ['bootstrap_artifact', 'bootstrap_graph', 'mailbox_cursor', 'repository', 'run', 'run_resource', 'schema_version', 'trust_anchor'],
+  'autopilot.authority.v1': ['attempt', 'base_commit', 'edit_intentions', 'exclusives', 'observations', 'role', 'schema_version', 'unit_id', 'workstream'],
+  'autopilot.branches.v1': ['active_branch', 'archive_ref', 'base_sha', 'current_sha', 'schema_version', 'unit_branches'],
+  'autopilot.capacity_decision.v1': ['audit_ref', 'audit_sha256', 'decision_id', 'from_version', 'issued_at', 'policy_id', 'prior_policy_sha256', 'program_id', 'reason', 'repo_id', 'requested_expected_checkout_units', 'requested_maximum_parallel_cap', 'requested_parallel_cap', 'schema_version', 'signature', 'signer_key_id', 'to_version', 'trust_anchor_ref', 'trust_anchor_sha256', 'workstream_run'],
+  'autopilot.checkout_profile.v1': ['always_include', 'auto_profile', 'disk_gate', 'exclude', 'materialization', 'mode', 'schema_version'],
+  'autopilot.checkout_profile_snapshot.v1': ['base_checkout_bytes', 'base_patterns', 'created_at', 'full_checkout_bytes', 'profile', 'profile_origin', 'profile_sha256', 'profile_source_path', 'schema_version', 'tracked_head_sha'],
+  'autopilot.claim_event.v1': ['active_run_epoch', 'attempt', 'autopilot_id', 'blockers', 'claim_type', 'event', 'path', 'reason', 'repo_key', 'schema_version', 'ts', 'unit_id', 'workstream', 'workstream_run'],
+  'autopilot.claim_gc.v1': ['candidates', 'created_at', 'evidence_path', 'mode', 'released_claims', 'repo_key', 'schema_version'],
+  'autopilot.claim_response_tool_result.v1': ['owner_reason', 'release_condition', 'request_id', 'schema_version', 'status', 'version'],
+  'autopilot.claim_snapshot.v1': ['claims', 'created_at', 'dispatch_id', 'schema_version', 'workstream'],
+  'autopilot.close_attempt.v1': ['autopilot_id', 'branch', 'created_at', 'repo_key', 'schema_version', 'source_repo', 'target_branch', 'workstream', 'workstream_run', 'worktree_path'],
+  'autopilot.close_result.v1': ['archive_ref', 'archived_runtime_path', 'autopilot_id', 'blockers', 'branch', 'changed_paths', 'close_result_path', 'created_at', 'integration_commit_sha', 'merge_id', 'outcome', 'released_claims', 'repo_key', 'schema_version', 'target_after', 'target_before', 'target_branch', 'workstream', 'workstream_after', 'workstream_before', 'workstream_run'],
+  'autopilot.continuation_event.v1': ['attempt', 'child_lease_id', 'class', 'cooldown_until', 'event_id', 'event_sequence', 'evidence_refs', 'failed_receipt_ref', 'failed_spec_ref', 'observed_at', 'operator_decision_ref', 'prior_graph_sha256', 'program_id', 'provider', 'repo_id', 'result_graph_sequence', 'retry_ordinal', 'schema_version', 'session_lease_id', 'successor_id', 'trigger', 'unit_id', 'workstream_run'],
+  'autopilot.coordination_freeze.v1': ['acknowledgement_deadline_at', 'dispatch', 'freeze_token', 'frozen_at', 'migration_id', 'repo_key', 'required_database_schema_version', 'required_package_build', 'required_protocol_version', 'schema_version', 'writer_policy'],
+  'autopilot.coordination_freeze_ack.v1': ['acknowledged_at', 'boot_id', 'client_kind', 'critical_section', 'database_schema_version', 'drain_state', 'freeze_token', 'migration_id', 'package_build', 'pid', 'protocol_version', 'repo_key', 'schema_version'],
+  'autopilot.coordination_legacy_archive_manifest.v1': ['entries', 'schema_version'],
+  'autopilot.coordination_migration_import_result.v1': ['replayed', 'report', 'schema_version'],
+  'autopilot.coordination_migration_journal.v1': ['backup_path', 'backup_sha256', 'completed_effects', 'created_at', 'database_existed_before', 'freeze_token', 'git_snapshot', 'migration_id', 'repo_key', 'report', 'repository_git_common_dir', 'repository_root', 'schema_version', 'snapshot_entries', 'snapshot_sha256', 'state', 'updated_at'],
+  'autopilot.coordination_migration_lock.v1': ['boot_id', 'created_at', 'pid', 'schema_version', 'token'],
+  'autopilot.coordination_migration_report.v1': ['active_run_count', 'backup_path', 'blockers', 'classified_claim_count', 'command', 'created_at', 'cutover_marker_path', 'dry_run', 'equivalent_lease_count', 'imported_attempt_count', 'imported_audit_count', 'imported_lease_count', 'imported_reservation_count', 'imported_run_count', 'imported_worktree_count', 'legacy_claim_count', 'migration_id', 'rebound_old_epoch_claim_count', 'recovery', 'recovery_work_count', 'repo_key', 'schema_version', 'snapshot_sha256', 'source_file_count', 'source_total_bytes', 'state', 'terminal_leak_count'],
+  'autopilot.coordination_preflight.v1': ['active_row_count', 'active_rows_sha256', 'claim_count', 'created_at', 'diagnostic_path', 'findings', 'mode', 'path_claims_sha256', 'repo_key', 'safe', 'schema_version', 'truncated_findings', 'workstream'],
+  'autopilot.coordination_recovery_operation.v1': ['boot_id', 'created_at', 'pid', 'schema_version', 'token'],
   'autopilot.cf50_fixed_path_barrier.v1': ['generation_id', 'publication_sha256', 'schema_version', 'source_database_sha256'],
+  'autopilot.coordinator_cursor.v1': ['kind', 'offset', 'revision_sha256', 'schema_version', 'scope_sha256', 'section', 'snapshot'],
+  'autopilot.coordinator_export.v1': ['database_schema_version', 'exported_at', 'package_build', 'protocol_version', 'schema_version', 'snapshot'],
+  'autopilot.coordinator_export_result.v1': ['output_path', 'schema_version', 'sha256'],
+  'autopilot.coordinator_handshake.v1': ['admission_upgrade', 'database_schema_version', 'lifecycle_boot_id', 'lifecycle_instance_id', 'lifecycle_lock_schema', 'lifecycle_pid', 'lifecycle_process_start_identity', 'lifecycle_started_at', 'package_build', 'protocol_version', 'schema_version'],
+  'autopilot.coordinator_lock.v1': ['boot_id', 'pid', 'schema_version', 'started_at', 'token'],
+  'autopilot.coordinator_lock.v2': ['boot_id', 'database_schema_version', 'instance_id', 'package_build', 'pid', 'process_start_identity', 'protocol_version', 'schema_version', 'started_at', 'token'],
+  'autopilot.coordinator_runtime_identity.v1': ['api_schema_version', 'current_store_pointer_sha256', 'implementation_build', 'legacy_facade_build', 'lifecycle_boot_id', 'lifecycle_instance_id', 'lifecycle_pid', 'lifecycle_process_start_identity', 'published_at', 'schema_version', 'store_generation_id', 'store_schema_version', 'wire_lineage'],
+  'autopilot.coordinator_semantic_replay.v1': ['database_schema_version', 'header_sha256', 'package_build', 'protocol_version', 'record_count', 'records_sha256', 'replay_id', 'schema_version'],
+  'autopilot.coordinator_semantic_replay_receipt.v1': ['applied_at', 'record_count', 'records_sha256', 'replay_id', 'schema_version'],
+  'autopilot.coordinator_session_context.v1': ['autopilot_id', 'boot_id', 'pid', 'repo_id', 'repo_key', 'run_version', 'schema_version', 'session_generation', 'session_id', 'session_lease_id', 'session_token', 'session_version', 'state_root', 'workstream', 'workstream_run'],
+  'autopilot.coordinator_startup_lock.v1': ['acquired_at', 'boot_id', 'pid', 'schema_version', 'token'],
+  'autopilot.coordinator_startup_report.v1': ['attempt_id', 'diagnostics_truncated', 'error', 'exact_competing_lifecycle_owner_observed', 'failure_class', 'failure_code', 'lifecycle', 'omitted_code_points', 'outcome', 'phase', 'schema_version', 'selected_compiled_entrypoint', 'spawned_pid', 'updated_at'],
+  'autopilot.coordinator_status.v1': ['accepted_program_heartbeat', 'acquisition_groups', 'adjudication_assignments', 'authoritative_artifacts', 'change_reservations', 'child_leases', 'claim_requests', 'coordination_migration_report_recovery_omitted', 'coordination_migrations', 'coordinator_time', 'database_schema_version', 'deadlock_resolutions', 'edit_leases', 'escalations', 'healthy', 'mailbox_cursors', 'mailbox_deliveries', 'migration_recovery_total_count', 'migration_recovery_work', 'migration_recovery_work_complete', 'negotiated_coordinator_identity', 'observations', 'package_build', 'pending_messages', 'pending_migration_recovery_count', 'protocol_version', 'reconciliation_evidence', 'reconciliation_receipts', 'repositories', 'reservation_obligations', 'result_receipts', 'run_resources', 'run_scoped_logical_faults', 'run_terminal_intents', 'runs', 'schema_version', 'semantic_snapshot_sha256', 'session_leases', 'unit_attempts', 'wait_for_edges', 'worktree_operations', 'worktrees'],
   'autopilot.coordinator_store_generation.v1': ['created_at', 'generation_id', 'migration_checksums', 'publication_database_sha256', 'schema_version', 'source_database_sha256', 'source_generation_id', 'source_kind', 'store_schema_version'],
   'autopilot.coordinator_store_pointer.v1': ['generation_id', 'previous_generation_id', 'publication_sha256', 'published_at', 'relative_generation_path', 'schema_version', 'store_schema_version'],
+  'autopilot.coordinator_transport.v1': ['capability_ref', 'endpoint', 'generation', 'schema_version', 'transport_kind'],
+  'autopilot.coordinator_upgrade_backup.v1': ['created_at', 'integrity', 'path', 'schema_version', 'sha256', 'source_database_schema_version'],
+  'autopilot.coordinator_upgrade_intent.v1': ['backup', 'blockers', 'created_at', 'failure', 'predecessor_fence', 'safe_checkpoints', 'schema_version', 'source', 'state', 'target', 'updated_at', 'upgrade_id'],
+  'autopilot.dispatch.v1': ['created_at', 'dispatch_id', 'parallel_cap', 'running_count', 'schema_version', 'selected', 'skipped', 'workstream'],
+  'autopilot.expected_status_identity.v1': ['attempt', 'provider_identity', 'receipt_output', 'role', 'schema_sha256', 'schema_version', 'status_output', 'tool_name', 'unit_id', 'workstream'],
+  'autopilot.foreign_merge_ack.v1': ['ack_id', 'acked_at', 'acknowledging_autopilot_id', 'acknowledging_workstream_run', 'action', 'foreign_autopilot_id', 'foreign_workstream_run', 'intersection_paths', 'merge_id', 'repo_key', 'schema_version'],
+  'autopilot.graph_publication.v1': ['artifact_id', 'authority_base_commit', 'authority_commit', 'authority_path_count', 'authority_path_manifest_sha256', 'authority_tree', 'autopilot_id', 'covered_event_seq', 'created_at', 'graph_byte_count', 'graph_ref', 'graph_sequence', 'graph_sha256', 'prior_authority_kind', 'prior_graph_sha256', 'prior_publication_commit', 'prior_registration_event_seq', 'program_id', 'publication_commit', 'publication_id', 'publication_tree', 'registration_event_seq', 'repo_id', 'schema_version', 'stage', 'updated_at', 'workstream_run'],
+  'autopilot.heartbeat_high_water.v1': ['heartbeat_sha256', 'issued_at', 'program_id', 'repo_id', 'schema_version', 'sequence', 'updated_at', 'valid_until', 'workstream_run'],
+  'autopilot.identity_fault_resolution_evidence.v1': ['canonical_entity_id', 'evidence', 'fault_id', 'resolved_at', 'resolved_by', 'schema_version'],
+  'autopilot.integration_analysis.v1': ['attempt', 'classification', 'created_at', 'integration_before', 'schema_version', 'unit_head', 'unit_id', 'workstream', 'workstream_run'],
+  'autopilot.launch_policy.v1': ['base_commit', 'base_tree', 'bootstrap_graph_sha256', 'bootstrap_receipt_event_seq', 'capacity_decision_ref', 'capacity_decision_sha256', 'expected_checkout_units', 'issued_at', 'maximum_parallel_cap', 'package_commit', 'package_tree', 'parallel_cap', 'policy_id', 'policy_version', 'prior_policy_sha256', 'program_evidence_root', 'program_id', 'repo_id', 'roster_sha256', 'schema_version', 'signature', 'signer_key_id', 'trust_anchor_ref', 'trust_anchor_sha256', 'workstream_run'],
+  'autopilot.lock.v1': ['acquired_at', 'boot_id', 'holder_id', 'pid', 'schema_version', 'token'],
+  'autopilot.mailbox_delivery_receipt.v1': ['completed', 'delivery_id', 'message_count', 'message_ids_sha256', 'repo_id', 'schema_version', 'session_lease_id', 'snapshot_through_event_seq', 'version', 'workstream_run'],
+  'autopilot.manual_worktree_reconcile.v1': ['approved_by', 'canonical_path', 'created_at', 'evidence', 'reason', 'schema_version', 'worktree_id'],
+  'autopilot.materialization_event.v1': ['attempt', 'automatic', 'byte_count', 'claim_type', 'event', 'paths', 'reason', 'schema_version', 'targets', 'ts', 'unit_id', 'workstream', 'workstream_run'],
+  'autopilot.materialized_paths.v1': ['attempt', 'paths', 'schema_version', 'unit_id', 'workstream', 'workstream_run'],
+  'autopilot.merge_conflict.v1': ['abort_status', 'attempt', 'classification', 'created_at', 'dirty_paths', 'error', 'integration_analysis_ref', 'integration_head', 'schema_version', 'unit_branch', 'unit_id', 'workstream', 'workstream_run'],
+  'autopilot.merge_event.v1': ['autopilot_id', 'branch', 'changed_paths', 'integration_commit_sha', 'merge_id', 'merged_at', 'repo_key', 'schema_version', 'target_after', 'target_before', 'target_branch', 'workstream', 'workstream_after', 'workstream_before', 'workstream_run'],
+  'autopilot.migration_authority_recovery.v1': ['attempt', 'autopilot_id', 'claim_mode', 'claim_path', 'edit_lease_id', 'recorded_event_seq', 'recovery_id', 'repo_id', 'resolution_type', 'schema_version', 'unit_id', 'workstream', 'workstream_run'],
+  'autopilot.migration_terminal_release.v1': ['attempt', 'autopilot_id', 'claim_type', 'evidence_ref', 'evidence_sha256', 'evidence_source', 'exact_git_objects', 'filesystem_postconditions', 'mechanical_proof', 'path', 'released_from_active_import', 'released_post_cutover', 'repo_key', 'schema_version', 'supporting_evidence', 'unit_id', 'workstream_run'],
+  'autopilot.mission.v1': ['artifact_or_invariant', 'authoritative_ref', 'clause_id', 'demanded_outcome', 'exact_requirement', 'schema_version', 'source_run', 'source_scope', 'source_type'],
+  'autopilot.operator_trust_anchor.v1': ['key_id', 'key_kind', 'public_key_spki_sha256', 'schema_version', 'subject', 'valid_from', 'valid_until'],
+  'autopilot.parent_loss.v1': ['doctor_ref', 'event_id', 'issued_at', 'last_graph', 'last_heartbeat', 'last_policy', 'lost_coordinator_session_identity', 'lost_physical_session_file_identity', 'observed_at', 'operator_decision_ref', 'program_id', 'repo_id', 'schema_version', 'signature', 'signer_key_id', 'status_ref', 'successor_boot_id', 'successor_budget', 'successor_generation', 'successor_physical_session_file_identity', 'successor_pid', 'successor_session_id', 'successor_session_lease_id', 'trust_anchor_ref', 'trust_anchor_sha256', 'workstream_run'],
+  'autopilot.path_claim.v1': ['acquired_at', 'active_run_epoch', 'attempt', 'autopilot_id', 'claim_type', 'path', 'reason', 'schema_version', 'unit_id', 'workstream', 'workstream_run'],
+  'autopilot.post_cutover_terminal_repair.v1': ['accepted_event_seq', 'attempt', 'audit_ref', 'audit_sha256', 'autopilot_id', 'child_lease_id', 'clean_zero_change_edit_release', 'mechanical_proof', 'receipt_ref', 'receipt_sha256', 'repo_id', 'schema_version', 'status_ref', 'status_sha256', 'transport_terminalized', 'unit_id', 'verdict', 'workstream_run'],
+  'autopilot.program_heartbeat.v1': ['base_commit', 'base_tree', 'dispatch_allowed', 'issued_at', 'package_commit', 'package_tree', 'prior_sha256', 'program_id', 'provider_health', 'rows', 'schema_version', 'sequence', 'signature', 'signer_key_id', 'stop_reasons', 'trust_anchor_ref', 'trust_anchor_sha256', 'valid_until'],
+  'autopilot.program_heartbeat_acceptance_result.v1': ['acceptance_kind', 'coordinator_time', 'heartbeat_ref', 'heartbeat_sha256', 'issued_at', 'prior_sha256', 'program_id', 'repo_id', 'schema_version', 'sequence', 'valid_until', 'workstream_run'],
   'autopilot.reconciliation_intent.v1': ['autopilot_id', 'evidence_path', 'evidence_ref', 'evidence_sha256', 'repo_id', 'schema_version', 'source', 'target_id', 'workstream_run'],
   'autopilot.reconciliation_intent_supersession.v1': ['autopilot_id', 'disposition', 'evidence_ref', 'evidence_sha256', 'historical_action', 'historical_generation', 'pending_intent_sha256', 'repo_id', 'schema_version', 'source', 'target_id', 'workstream_run'],
+  'autopilot.repo_key.v1': ['git_common_dir', 'repo_key', 'schema_version'],
+  'autopilot.reservation_integration.v1': ['autopilot_id', 'changed_paths', 'classification', 'covered_paths', 'integrated_at', 'integration_before', 'integration_head', 'obligation_id', 'predecessor_released_event_seq', 'predecessor_reservation_id', 'predecessor_terminal_sha', 'repo_id', 'reservation_id', 'schema_version', 'workstream', 'workstream_run'],
+  'autopilot.reservation_repair.v1': ['autopilot_id', 'classification', 'created_at', 'current_head', 'obligation_id', 'overlapping_paths', 'predecessor_reservation_id', 'predecessor_terminal_sha', 'repo_id', 'required_next_state', 'reservation_id', 'schema_version', 'state', 'workstream', 'workstream_run'],
+  'autopilot.run_scoped_fault.v1': ['created_event_seq', 'detail', 'entity_id', 'entity_type', 'fault_code', 'fault_id', 'invariant_id', 'repo_id', 'resolved_event_seq', 'schema_version', 'status', 'version', 'workstream_run'],
+  'autopilot.run_terminal.v1': ['accepted_at', 'autopilot_id', 'cleanup_manifest_ref', 'cleanup_manifest_sha256', 'outcome', 'repo_key', 'schema_version', 'terminal_sha', 'workstream', 'workstream_run'],
+  'autopilot.run_terminal_intent.v2': ['intent_attempt', 'outcome', 'prepared_event_seq', 'prior_terminal_intent_id', 'prior_terminal_intent_sha256', 'repo_id', 'reservation_ids', 'schema_version', 'state', 'terminal_effect_sets', 'terminal_event_seq', 'terminal_intent_id', 'version', 'workstream_run'],
+  'autopilot.saga_execution_lock.v1': ['boot_id', 'pid', 'schema_version', 'token'],
+  'autopilot.scheduler_config.v1': ['parallel_cap', 'schema_version', 'updated_at', 'updated_by', 'workstream'],
   'autopilot.schema9_read_recovery_retirement.v1': ['disposition', 'edit_lease_id', 'observation_id', 'repo_id', 'retired_event_seq', 'retired_recovery_work', 'schema_version', 'source_identity', 'workstream_run'],
   'autopilot.schema9_read_retirement.v1': ['acquisition_group_id', 'disposition', 'edit_lease_id', 'original_lease_payload', 'original_payload_sha256', 'owner', 'repo_id', 'requested_read', 'retired_event_seq', 'retired_recovery_work', 'revalidation_required', 'schema_version', 'workstream_run'],
+  'autopilot.schema11_retirement.v1': ['backup_path', 'backup_sha256', 'database_schema_version', 'outcome', 'retired_package_build', 'retired_pid', 'schema_version'],
+  'autopilot.semantic_graph.v1': ['autopilot_id', 'bootstrap_charter', 'bughunt', 'closure', 'collections', 'coordinator_projection', 'core', 'covered_authority_commit', 'covered_authority_tree', 'covered_event_seq', 'created_at', 'exceptions', 'graph_sequence', 'mode', 'prior_event_seq', 'prior_graph_sha256', 'program_id', 'queue_projection', 'repo_id', 'schema_version', 'work_items', 'workstream', 'workstream_run'],
+  'autopilot.semantic_graph_authority_shard.v1': ['collection', 'entries', 'entry_count', 'first_identity', 'graph_sequence', 'last_identity', 'program_id', 'repo_id', 'schema_version', 'total_bytes', 'workstream_run'],
+  'autopilot.semantic_graph_bootstrap.v1': ['allowed_bootstrap_operations', 'autopilot_id', 'byte_count', 'content_commit', 'content_tree', 'covered_event_seq', 'created_at', 'git_commit', 'graph_sequence', 'package_commit', 'package_tree', 'prior_graph_sha256', 'program_id', 'prospective_resource', 'prospective_run', 'ref', 'repo_id', 'run_nonce', 'run_timestamp', 'schema_version', 'sha256', 'trust_anchor_ref', 'trust_anchor_sha256', 'workstream', 'workstream_run'],
+  'autopilot.semantic_graph_projection_shard.v1': ['entries', 'entry_count', 'first_identity', 'graph_sequence', 'last_identity', 'program_id', 'projection_kind', 'repo_id', 'schema_version', 'total_bytes', 'workstream_run'],
+  'autopilot.status_tool_context.v1': ['artifact_root', 'expected_identity_hash', 'provider_identity', 'receipt_output', 'schema_sha256', 'schema_version', 'status_output', 'unit_spec'],
+  'autopilot.store_invariant_repair.v1': ['invariant_id', 'observed_counter', 'observed_maximum_event_seq', 'repair', 'repo_id', 'schema_version'],
+  'autopilot.subscription_probe.v1': ['cooldown_completed', 'cooldown_until', 'evidence_refs', 'expires_at', 'failed_attempt', 'healthy', 'issued_at', 'not_before', 'observed_at', 'prior_probe_sha256', 'probe_id', 'probe_sequence', 'program_id', 'provider', 'repo_id', 'retry_ordinal', 'schema_version', 'signature', 'signer_key_id', 'successor_attempt', 'trigger_continuation_ref', 'trigger_continuation_sha256', 'trust_anchor_ref', 'trust_anchor_sha256', 'unit_id', 'workstream_run'],
+  'autopilot.task_info.v1': ['autopilot_id', 'base_sha', 'branch', 'git_common_dir', 'repo_key', 'runtime_root', 'schema_version', 'source_repo', 'started_at', 'status', 'target_base_sha', 'target_branch', 'workstream', 'workstream_run', 'worktree_path'],
+  'autopilot.task_info.v2': ['autopilot_id', 'base_sha', 'branch', 'checkout_mode', 'checkout_profile_origin', 'checkout_profile_ref', 'checkout_profile_sha256', 'closed_at', 'coordination_authority', 'git_common_dir', 'repo_key', 'runtime_root', 'schema_version', 'source_repo', 'started_at', 'status', 'target_base_sha', 'target_branch', 'workstream', 'workstream_run', 'worktree_path'],
+  'autopilot.terminal_cleanup.v1': ['archive_ref', 'archive_runtime_path', 'autopilot_id', 'outcome', 'prepared_at', 'repo_key', 'result', 'result_path', 'schema_version', 'terminal_sha', 'workstream', 'workstream_run'],
   'autopilot.unit_failure.v1': CURRENT_UNIT_FAILURE_FIELDS,
+  'autopilot.unit_index.v1': ['schema_version', 'units'],
+  'autopilot.unit_index_adjudication.v1': ['action', 'attempt', 'branches_ref', 'created_at', 'reason', 'schema_version', 'transport_failure_ref', 'unit_id', 'unit_index_ref', 'unit_info_ref', 'workstream', 'workstream_run'],
+  'autopilot.unit_info.v1': ['archive_ref', 'attempt', 'autopilot_id', 'base_sha', 'branch', 'checkout_mode', 'checkout_profile_ref', 'created_at', 'current_sha', 'materialized_paths_ref', 'runtime_root', 'schema_version', 'status', 'unit_id', 'workstream', 'workstream_run', 'worktree_path'],
+  'autopilot.unit_merge.v1': ['active_run_epoch', 'attempt', 'audit_ref', 'autopilot_id', 'changed_paths', 'execution_commit_ref', 'integration_after', 'integration_before', 'main_branch', 'merge_commit_sha', 'merged_at', 'receipt_ref', 'role', 'schema_version', 'status_ref', 'unit_branch', 'unit_head', 'unit_id', 'workstream', 'workstream_run'],
+  'autopilot.unit_merge_intent.v1': ['attempt', 'autopilot_id', 'created_at', 'integration_before', 'role', 'schema_version', 'unit_head', 'unit_id', 'workstream', 'workstream_run'],
+  'autopilot.validation_evidence.v1': ['audit_ref', 'audit_sha256', 'covered_path_groups', 'covered_paths', 'integration_head', 'receipt_ref', 'receipt_sha256', 'schema_version', 'source_attempt', 'source_unit_id', 'status_ref', 'status_sha256', 'unit_merge_ref', 'validated_at', 'validation_attempt', 'validation_unit_id', 'verdict', 'witness_ids', 'workstream'],
+  'autopilot.validation_staleness.v1': ['created_at', 'invalidating_attempt', 'invalidating_unit_id', 'invalidating_unit_merge_ref', 'next_state', 'overlapping_paths', 'schema_version', 'source_attempt', 'source_unit_id', 'stale_validation_ref', 'workstream'],
+  'autopilot.validation_staleness.v2': ['created_at', 'invalidating_kind', 'invalidating_obligation_id', 'invalidating_ref', 'next_state', 'overlapping_paths', 'schema_version', 'source_attempt', 'source_unit_id', 'stale_validation_ref', 'workstream'],
+  'autopilot.worktree_alias.v1': ['alias_worktree_id', 'attempt', 'autopilot_id', 'canonical_worktree_id', 'created_event_seq', 'evidence_sha256', 'kind', 'reason', 'repo_id', 'resolution_state', 'schema_version', 'unit_id', 'workstream_run'],
+  'autopilot.worktree_alias_migration_evidence.v1': ['alias_worktree_id', 'candidate_ids', 'canonical_worktree_id', 'classification', 'external_git_registration_branch_ref_facts', 'operation_counts', 'schema_version', 'semantic_identity'],
+  'autopilot.worktree_bootstrap.v1': ['active', 'branches', 'profile_snapshot', 'schema_version', 'task_info'],
+  'autopilot.worktree_cleanup_result.v1': ['active_task_dir_removed', 'autopilot_id', 'created_at', 'ledger_path', 'mode', 'pruned_git_metadata', 'reconciled_missing_paths', 'removed_paths', 'repo_key', 'retired_branches', 'schema_version', 'workstream', 'workstream_run'],
+  'autopilot.worktree_index.v1': ['active', 'archive', 'schema_version'],
+  'autopilot.worktree_ledger.v1': ['attempt', 'autopilot_id', 'base_sha', 'branch', 'event', 'main_path', 'mode', 'reason', 'repo_key', 'schema_version', 'ts', 'unit_id', 'unit_path', 'workstream', 'workstream_run'],
+  'autopilot.worktree_metadata_reconcile_evidence.v1': ['approved_prunable_registration_paths', 'canonical_worktree_id', 'observed_after_registrations', 'observed_before_registrations', 'operation_key_sha256', 'preserved_refs_after', 'preserved_refs_before', 'schema_version'],
+  'autopilot.worktree_metadata_reconcile_intent.v1': ['approved_before_registrations', 'approved_prunable_registration_paths', 'canonical_worktree_id', 'expected_after_registrations', 'git_common_dir', 'preserved_refs', 'recovery_evidence_sha256', 'repo_id', 'schema_version', 'target_registration_path'],
+  'autopilot.worktree_operation_evidence.v1': ['capture_sha', 'completed_steps', 'error_code', 'intent_sha256', 'operation_id', 'operation_type', 'owner', 'proof', 'proof_source', 'schema_version', 'terminal_stage', 'worktree_id'],
+  'autopilot.worktree_operation_key.v2': ['canonical_worktree_id', 'immutable_intent_sha256', 'operation_key_sha256', 'operation_type', 'schema_version'],
+  'autopilot.worktree_rollback_supersession.v1': ['disposition', 'later_package_operations', 'owner', 'schema_version', 'superseded_operation', 'terminal_archive', 'worktree_id'],
 } as const satisfies Readonly<Record<string, readonly string[]>>);
 
 function sourceAnchoredExtraArtifactFields(schemaVersion: string): readonly string[] {
@@ -431,40 +533,5 @@ export function parseVersionedUnitFailureIngress(input: {
   readonly identity: UnitFailureIngressIdentity;
   readonly producer_generation: number;
 }): UnitFailureVersionedIngress {
-  const ingress = parseVersionedPersistedArtifact({ family: 'autopilot.unit_failure.v1', producer_build: input.producer_build, bytes: input.bytes, producer_generation: input.producer_generation });
-  const document = ingress.normalized_document;
-  if (stringField(document, 'workstream', 'unit failure evidence', 192) !== input.identity.workstream) throw new CoordinationRuntimeError('invalid-state', 'unit failure evidence workstream does not match durable ownership');
-  if (stringField(document, 'workstream_run', 'unit failure evidence', 192) !== input.identity.workstreamRun) throw new CoordinationRuntimeError('invalid-state', 'unit failure evidence workstream_run does not match durable ownership');
-  if (stringField(document, 'unit_id', 'unit failure evidence', 192) !== input.identity.unitId) throw new CoordinationRuntimeError('invalid-state', 'unit failure evidence unit_id does not match durable ownership');
-  if (integerField(document, 'attempt', 'unit failure evidence') !== input.identity.attempt) throw new CoordinationRuntimeError('invalid-state', 'unit failure evidence attempt does not match durable ownership');
-  stringArrayField(document, 'dirty_paths');
-  const action = parseUnitFailureAction(document);
-  const unitWorktreePath = stringField(document, 'unit_worktree_path', 'unit failure evidence', 1024);
-  const captureCommitSha = nullableText(document, 'capture_commit_sha');
-  const captureRef = nullableText(document, 'capture_ref');
-  if (ingress.current) {
-    if ((action === 'quarantine' || action === 'preserve') && (captureCommitSha === null || captureRef === null)) throw new CoordinationRuntimeError('invalid-state', 'current quarantine/preserve unit failure evidence requires an immutable capture commit and ref');
-    if ((action === 'reset' || action === 'abort') && (captureCommitSha !== null || captureRef !== null)) throw new CoordinationRuntimeError('invalid-state', 'current clean reset/abort unit failure evidence cannot claim quarantine capture fields');
-    if (document['postcondition_worktree_clean'] !== true) throw new CoordinationRuntimeError('invalid-state', 'current unit failure evidence must assert a clean postcondition');
-    stringField(document, 'git_head_before', 'unit failure evidence', 64);
-    stringField(document, 'git_head_after', 'unit failure evidence', 64);
-    stringField(document, 'git_common_dir', 'unit failure evidence', 1024);
-    stringField(document, 'branch', 'unit failure evidence', 512);
-  } else {
-    if (action === 'quarantine' || action === 'preserve') throw new CoordinationRuntimeError('recovery-required', 'historical quarantine/preserve unit failure evidence lacks an exact capture ref; edit authority remains retained');
-    if (captureCommitSha !== null || captureRef !== null) throw new CoordinationRuntimeError('invalid-state', 'historical reset/abort unit failure evidence cannot carry capture fields after generation defaults');
-  }
-  return Object.freeze({
-    kind: 'unit_failure',
-    ingress,
-    facts: Object.freeze({
-      action,
-      unitWorktreePath,
-      captureCommitSha,
-      captureRef,
-      originalSha256: ingress.original_sha256,
-      originalFields: ingress.original_fields,
-      appliedDefaults: ingress.applied_defaults,
-    }),
-  });
+  return parseCentralVersionedUnitFailureIngress(input) as UnitFailureVersionedIngress;
 }
