@@ -4,6 +4,7 @@ import { canonicalJson } from "./canonical-json.js";
 import { parseD65HeartbeatAcceptanceResult } from "./d65-launch-policy.js";
 import { parseRunScopedLogicalFault } from "./logical-faults.js";
 import { CoordinationRuntimeError } from "./failures.js";
+import { isS2CoordinatorStoreCorruptionFailure } from "./s2-failure-taxonomy.js";
 function fail(issue, evidence = []) {
     throw new CoordinationRuntimeError('store-corrupt', `D65 semantic-version history is incomplete or mismatched: ${issue}`, [...evidence]);
 }
@@ -20,6 +21,13 @@ function exactKeys(payload, expected) {
     const actual = Object.keys(payload).sort();
     const sorted = [...expected].sort();
     return actual.length === sorted.length && actual.every((key, index) => key === sorted[index]);
+}
+function assertGenericResultMetadata(row, payload) {
+    if (row.event_type === 'program-heartbeat-accepted')
+        return;
+    if (payload['event_type'] !== row.event_type || payload['entity_type'] !== row.entity_type || payload['entity_id'] !== row.entity_id) {
+        fail('immutable result generic metadata disagrees with its accepted event', [String(row.event_seq), row.event_type, row.entity_type, row.entity_id]);
+    }
 }
 function oneOwner(row, workstreamRun) {
     if (workstreamRun.length === 0)
@@ -58,6 +66,7 @@ function sortedUniqueStrings(value, row, label) {
  */
 export function d65SemanticEventWorkstreamRuns(row) {
     const payload = exactJoin(row);
+    assertGenericResultMetadata(row, payload);
     try {
         switch (row.event_type) {
             case 'run-attached':
@@ -242,7 +251,7 @@ export function d65SemanticEventWorkstreamRuns(row) {
         }
     }
     catch (error) {
-        if (error instanceof CoordinationRuntimeError && error.code === 'store-corrupt' && error.message.includes('D65 semantic-version history is incomplete or mismatched:'))
+        if (isS2CoordinatorStoreCorruptionFailure(error) && error.message.includes('D65 semantic-version history is incomplete or mismatched:'))
             throw error;
         fail('event primary owner record is malformed', [String(row.event_seq), row.event_type, error instanceof Error ? error.message : String(error)]);
     }

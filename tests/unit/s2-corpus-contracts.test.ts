@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { describe, it } from 'node:test';
 
@@ -132,6 +133,21 @@ void describe('S2-D corpus contracts', () => {
       assert.equal(retained.terminal_attempt_lease, 'retained-terminal-attempt-recovery-required');
       assert.equal(retained.phase36_evidence['terminal_retained_attempt_leases_covered_by_pending_recovery'], 1);
     } finally { database.close(); }
+  });
+
+  void it('keeps candidate doctor failures as release blockers, never passed action rows', () => {
+    const source = readFileSync(new URL('../../tools/s2-corpus-rehearsal/candidate-worker.ts', import.meta.url), 'utf8');
+    assert.match(source, /blockers\.push\(blocker\(input, 'doctor'/u);
+    assert.equal(/doctor_block[\s\S]{0,160}actionRow\(input, 'doctor'/u.test(source), false);
+    assert.match(source, /doctor\.payload\['healthy'\] !== true \|\| invariantErrorCount !== 0/u);
+  });
+
+  void it('routes retained terminal-attempt recovery through an actual subprocess and leak assertion', () => {
+    const source = readFileSync(new URL('../../tools/s2-corpus-rehearsal/candidate-worker.ts', import.meta.url), 'utf8');
+    assert.match(source, /terminal-recovery-worker\.ts/u);
+    assert.match(source, /runTerminalRecoverySubprocess\(input, before\)/u);
+    assert.match(source, /stopCloneCoordinator\(input\.state_root\)/u);
+    assert.match(readFileSync(new URL('../../tools/s2-corpus-rehearsal/release-gate.ts', import.meta.url), 'utf8'), /assertCloneCoordinatorReaped\(input\.copy_state_root\)/u);
   });
 
   void it('rejects fake-green rehearsal without subprocess observations and after-domain witnesses', () => {

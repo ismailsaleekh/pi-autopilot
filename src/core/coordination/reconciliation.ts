@@ -6,6 +6,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { CoordinatorClient } from './client.ts';
 import { parseCoordinationReconciliationEvidence, parseOptionalCoordinationReconciliationReceipt, parseCoordinationRun } from './contracts.ts';
 import { CoordinationRuntimeError } from './failures.ts';
+import { isS2StaleVersionFailure } from './s2-failure-taxonomy.ts';
 import { readCoordinatorSessionContext, type CoordinatorSessionContext } from './supervisor.ts';
 import { coordinatorRuntimePaths } from './runtime-paths.ts';
 import { classifyHistoricalUnitFailureEvidenceGeneration, parseHistoricalUnitFailureRegenerationCandidate, parseUnitAttemptTarget, validateReconciliationEvidenceDocument, type HistoricalUnitFailureGeneration, type ReconciliationEvidenceIdentity } from './terminal-evidence.ts';
@@ -145,7 +146,7 @@ export class RunReconciliationClient {
     try {
       response = await this.#client.mutate('record-release-evidence', this.#identity(idempotencyKey), payload);
     } catch (error) {
-      if (!(error instanceof CoordinationRuntimeError && error.code === 'stale-version')) throw error;
+      if (!isS2StaleVersionFailure(error)) throw error;
       const status = await this.#client.query('status', this.#session.repo_id, this.#session.workstream_run);
       const values = status.payload['runs'];
       if (!Array.isArray(values) || values.length !== 1 || values[0] === undefined) throw new CoordinationRuntimeError('invalid-state', 'stale reconciliation retry could not recover one exact durable run');

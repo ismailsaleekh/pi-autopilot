@@ -34,7 +34,12 @@ autopilot-coordinator replay --replay-id <stable-id> --input <absolute-request-j
 autopilot-coordinator upgrade-schema11 [--state-root <path>]
 autopilot-coordinator migrate --dry-run|--apply --repo-key <key>
 autopilot-coordinator verify|rollback|cutover --repo-key <key>
-autopilot-coordinator recovery list|show|doctor|drain-stale-sessions --repo-root <absolute-path>
+autopilot-coordinator recovery list --repo-root <absolute-path> [--run <run>] [--state-root <absolute-path>]
+autopilot-coordinator recovery show --repo-root <absolute-path> --recovery-id <id> [--run <run>] [--state-root <absolute-path>]
+autopilot-coordinator recovery doctor --repo-root <absolute-path> [--run <run>] [--state-root <absolute-path>]
+autopilot-coordinator recovery drain-stale-sessions --repo-root <absolute-path> [--run <run>] [--state-root <absolute-path>]
+autopilot-coordinator recovery retain-authority|retain --repo-root <absolute-path> --run <run> (--recovery-id <id>|--all) [--state-root <absolute-path>]
+autopilot-coordinator recovery release-with-evidence|release --repo-root <absolute-path> --run <run> --recovery-id <id> --source <unit-merge|attempt-reset|quarantine-capture|run-close|run-abort> --target-id <id> --evidence <absolute-json-path> [--state-root <absolute-path>]
 ```
 
 ## Exit classes

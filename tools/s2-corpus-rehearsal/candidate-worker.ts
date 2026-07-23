@@ -1,11 +1,17 @@
+import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { readFile, unlink } from 'node:fs/promises';
+import { existsSync, readFileSync } from 'node:fs';
+import { readFile, rm, unlink, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { canonicalJson } from '../../src/core/coordination/canonical-json.ts';
 import { CoordinatorClient } from '../../src/core/coordination/client.ts';
 import { parseCoordinationEditLease, parseCoordinationMigrationRecoveryWork, parseCoordinationUnitAttempt } from '../../src/core/coordination/contracts.ts';
 import { assertD65OrdinaryBoundaryFromEnvironment } from '../../src/core/coordination/d65-runtime-dispatch.ts';
 import { CoordinationRuntimeError } from '../../src/core/coordination/failures.ts';
+import { isExactProcessAlive, isProcessAlive, processStartIdentity } from '../../src/core/coordination/process-identity.ts';
+import { coordinatorRuntimePaths } from '../../src/core/coordination/runtime-paths.ts';
 import { DurableRunSupervisorClient, type RunSupervisorAttachment } from '../../src/core/coordination/supervisor.ts';
 import { recoverOwnedWorktreeSagas } from '../../src/core/coordination/worktree-saga.ts';
 import { AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV } from '../../src/core/names.ts';
@@ -170,6 +176,72 @@ function errorEvidence(error: unknown): Readonly<Record<string, unknown>> {
   return Object.freeze({ code: error instanceof CoordinationRuntimeError ? error.code : error instanceof Error && 'code' in error ? String(error.code) : 'unknown', message: error instanceof Error ? error.message : String(error), evidence: error instanceof CoordinationRuntimeError ? error.evidence.slice(0, 16) : [] });
 }
 
+function terminalRecoveryWorkerPath(): string {
+  return fileURLToPath(new URL('./terminal-recovery-worker.ts', import.meta.url));
+}
+
+function readLifecycleCandidate(stateRoot: string): { readonly pid: number; readonly process_start_identity: string } | null {
+  const path = coordinatorRuntimePaths({ ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: stateRoot }).lockPath;
+  if (!existsSync(path)) return null;
+  const parsed = JSON.parse(readFileSync(path, 'utf8')) as unknown;
+  const row = record(parsed, 'coordinator lifecycle lock');
+  const pid = integer(row['pid'], 'coordinator lifecycle pid', 1);
+  const processStart = text(row['process_start_identity'], 'coordinator lifecycle process identity');
+  return Object.freeze({ pid, process_start_identity: processStart });
+}
+
+async function wait(milliseconds: number): Promise<void> { await new Promise<void>((resolveWait) => setTimeout(resolveWait, milliseconds)); }
+
+async function stopCloneCoordinator(stateRoot: string): Promise<Readonly<Record<string, unknown>>> {
+  const paths = coordinatorRuntimePaths({ ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: stateRoot });
+  const lifecycle = readLifecycleCandidate(stateRoot);
+  if (lifecycle === null) return Object.freeze({ stopped: false, reason: 'no-lifecycle-lock' });
+  const started = processStartIdentity(lifecycle.pid);
+  if (started === null) {
+    await Promise.all([paths.lockPath, paths.socketPath, paths.startupLockPath, paths.predecessorLockPath, paths.predecessorSocketPath, paths.predecessorStartupLockPath].map(async (path) => { await rm(path, { force: true }); }));
+    return Object.freeze({ stopped: false, reason: 'lifecycle-owner-already-exited', pid: lifecycle.pid, process_start_identity: lifecycle.process_start_identity });
+  }
+  if (started !== lifecycle.process_start_identity) throw new Error('S2-D clone coordinator lifecycle identity changed before cleanup');
+  process.kill(lifecycle.pid, 'SIGTERM');
+  for (let index = 0; index < 200 && isExactProcessAlive(lifecycle.pid, lifecycle.process_start_identity); index += 1) await wait(25);
+  if (isExactProcessAlive(lifecycle.pid, lifecycle.process_start_identity)) {
+    process.kill(lifecycle.pid, 'SIGKILL');
+    for (let index = 0; index < 200 && isExactProcessAlive(lifecycle.pid, lifecycle.process_start_identity); index += 1) await wait(25);
+  }
+  if (isExactProcessAlive(lifecycle.pid, lifecycle.process_start_identity) || isProcessAlive(lifecycle.pid) && processStartIdentity(lifecycle.pid) === lifecycle.process_start_identity) throw new Error('S2-D clone coordinator process leaked after deterministic cleanup');
+  await Promise.all([paths.lockPath, paths.socketPath, paths.startupLockPath, paths.predecessorLockPath, paths.predecessorSocketPath, paths.predecessorStartupLockPath].map(async (path) => { await rm(path, { force: true }); }));
+  return Object.freeze({ stopped: true, pid: lifecycle.pid, process_start_identity: lifecycle.process_start_identity });
+}
+
+async function runTerminalRecoverySubprocess(input: WorkerInput, before: number): Promise<Readonly<Record<string, unknown>>> {
+  const inputPath = join(input.state_root, 'coordinator', `s2-d-terminal-recovery-${randomUUID()}.json`);
+  await writeFile(inputPath, `${canonicalJson(input)}\n`, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+  try {
+    const output = await new Promise<string>((resolveOutput, rejectOutput) => {
+      const child = spawn(process.execPath, ['--experimental-strip-types', terminalRecoveryWorkerPath(), inputPath], { cwd: fileURLToPath(new URL('../..', import.meta.url)), env: { ...process.env }, shell: false, stdio: ['ignore', 'pipe', 'pipe'] });
+      const stdout: Uint8Array[] = [];
+      const stderr: Uint8Array[] = [];
+      const timeout = setTimeout(() => {
+        child.kill('SIGTERM');
+        setTimeout(() => { if (child.exitCode === null) child.kill('SIGKILL'); }, 2_000);
+      }, 60_000);
+      child.stdout.on('data', (chunk: Uint8Array) => stdout.push(chunk));
+      child.stderr.on('data', (chunk: Uint8Array) => stderr.push(chunk));
+      child.once('error', (error) => { clearTimeout(timeout); rejectOutput(error); });
+      child.once('close', (code, signal) => {
+        clearTimeout(timeout);
+        const stderrText = Buffer.concat(stderr).toString('utf8');
+        if (code !== 0) rejectOutput(new Error(`terminal recovery subprocess failed code=${String(code)} signal=${String(signal)} stderr_sha256=${digestBytes(stderrText)}`));
+        else resolveOutput(Buffer.concat(stdout).toString('utf8'));
+      });
+    });
+    const parsed = record(JSON.parse(output) as unknown, 'terminal recovery worker output');
+    const after = integer(parsed['after_retained_terminal_attempt_leases'], 'terminal recovery after count');
+    if (parsed['before_retained_terminal_attempt_leases'] !== before || after !== 0) throw new Error('terminal recovery subprocess did not prove exact before/after retained lease counts');
+    return Object.freeze({ ...parsed, input_sha256: digestBytes(canonicalJson(input)) });
+  } finally { await unlink(inputPath).catch(() => undefined); }
+}
+
 function expectedAuthorityBlocked(input: WorkerInput): boolean {
   return input.contract.authority_version_mismatch === 'operation-authority-version-mismatch-blocked';
 }
@@ -198,14 +270,10 @@ async function proveTerminalAttemptRecovery(supervisor: DurableRunSupervisorClie
   if (input.contract.terminal_attempt_lease === 'no-retained-terminal-attempt-lease') return null;
   const before = await terminalAttemptLeaseCount(supervisor, input);
   if (before === 0) return Object.freeze({ recovery_kind: 'terminal-attempt-lease', before_retained_terminal_attempt_leases: 0, after_retained_terminal_attempt_leases: 0, recovery_attachment: 'already-clear' });
-  const recoveryAttachment = await supervisor.attachTerminalRecovery({ repo: input.repo, active: input.active, rawSessionId: `s2-d-terminal-recovery-${input.active.workstream_run}-${randomUUID()}` });
-  try {
-    const after = await terminalAttemptLeaseCount(supervisor, input);
-    if (after !== 0) throw new Error(`terminal recovery left ${String(after)} retained terminal-attempt edit leases`);
-    return Object.freeze({ recovery_kind: 'terminal-attempt-lease', before_retained_terminal_attempt_leases: before, after_retained_terminal_attempt_leases: after, recovery_attachment: recoveryAttachment.session.attachment_kind, recovery_generation: recoveryAttachment.session.session_generation });
-  } finally {
-    if (recoveryAttachment.session.status === 'attached') await detach(supervisor, recoveryAttachment);
-  }
+  const subprocess = await runTerminalRecoverySubprocess(input, before);
+  const after = await terminalAttemptLeaseCount(supervisor, input);
+  if (after !== 0) throw new Error(`terminal recovery subprocess left ${String(after)} retained terminal-attempt edit leases`);
+  return Object.freeze({ recovery_kind: 'terminal-attempt-lease', before_retained_terminal_attempt_leases: before, after_retained_terminal_attempt_leases: after, recovery_attachment: subprocess['recovery_attachment'], recovery_generation: subprocess['recovery_generation'], subprocess_pid: subprocess['pid'], subprocess_output_sha256: digestBytes(canonicalJson(subprocess)) });
 }
 
 async function resolvePendingMigrationRecovery(supervisor: DurableRunSupervisorClient, input: WorkerInput): Promise<{ readonly resolved: readonly string[]; readonly fallbackAttachment: RunSupervisorAttachment }> {
@@ -290,9 +358,16 @@ async function execute(input: WorkerInput): Promise<WorkerOutput> {
 
   try {
     const doctor = await supervisor.client.query('doctor', input.active.repo_key, input.active.workstream_run);
-    actionResults.push(actionRow(input, 'doctor', { healthy: doctor.payload['healthy'], invariant_error_count: doctor.payload['invariant_error_count'] ?? null, expected_authority_block: expectedAuthorityBlocked(input) }));
+    const findings = doctor.payload['invariant_findings'];
+    const invariantErrorCount = doctor.payload['invariant_error_count'];
+    if (doctor.payload['healthy'] !== true || invariantErrorCount !== 0 || !Array.isArray(findings) || findings.length !== 0) {
+      blockers.push(blocker(input, 'doctor', new Error(`doctor unhealthy or invariant errors present: healthy=${String(doctor.payload['healthy'])} invariant_error_count=${String(invariantErrorCount)} findings=${Array.isArray(findings) ? String(findings.length) : 'malformed'}`)));
+      return Object.freeze({ action_results: Object.freeze(actionResults), new_blockers: Object.freeze(blockers) });
+    }
+    actionResults.push(actionRow(input, 'doctor', { healthy: true, invariant_error_count: 0, expected_authority_block: expectedAuthorityBlocked(input) }));
   } catch (error) {
-    actionResults.push(actionRow(input, 'doctor', { expected_authority_block: expectedAuthorityBlocked(input), doctor_block: errorEvidence(error) }));
+    blockers.push(blocker(input, 'doctor', error));
+    return Object.freeze({ action_results: Object.freeze(actionResults), new_blockers: Object.freeze(blockers) });
   }
 
   try {
@@ -344,5 +419,12 @@ async function execute(input: WorkerInput): Promise<WorkerOutput> {
 
 const inputPath = process.argv[2];
 if (inputPath === undefined) throw new Error('usage: candidate-worker <input-json>');
-const output = await execute(inputFromJson(JSON.parse(await readFile(inputPath, 'utf8')) as unknown));
-process.stdout.write(`${canonicalJson(output)}\n`);
+const input = inputFromJson(JSON.parse(await readFile(inputPath, 'utf8')) as unknown);
+let failure: unknown = null;
+try {
+  const output = await execute(input);
+  process.stdout.write(`${canonicalJson(output)}\n`);
+} catch (error) { failure = error; }
+try { await stopCloneCoordinator(input.state_root); }
+catch (cleanupError) { failure = failure === null ? cleanupError : new AggregateError([failure, cleanupError], 'S2-D candidate worker failed and clone coordinator cleanup also failed'); }
+if (failure !== null) throw failure;

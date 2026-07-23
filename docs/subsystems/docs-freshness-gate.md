@@ -36,8 +36,11 @@ Every doc region is exactly one of two modes, each with the strongest possible c
    and asserted byte-equal to a fresh regeneration (C2). Factual drift is impossible.
 2. **Authored (prose).** Concepts, invariants, and rationale are hand-written and
    fenced: every symbol/path they mention must still exist (C3), a signature fence
-   fires on contract change (C4), and a body-hash change on a `behavioral` doc
-   triggers an independent semantic review whose currency is enforced (C11).
+   fires on contract change (C4), and a body-hash change or same-change prose edit on
+   a `behavioral` doc triggers an independent semantic review whose currency is
+   enforced (C11). Any semantic-attestation artifact that exists is validated against
+   the current doc id, covered-source hash, and source list so stale receipts fail
+   even when the doc is not otherwise triggered.
 
 ## Check catalog (C0–C11)
 
@@ -54,7 +57,7 @@ Every doc region is exactly one of two modes, each with the strongest possible c
 | C8 | The code-computed boundary set (surface exporters + `src/cli/*.ts` + `src/core/*/index.ts` barrels) is covered; the floor only ratchets up, and once full coverage is reached it latches (`full_coverage_required`) so any new boundary file is a hard failure until documented. |
 | C9 | No banned stale phrase appears in authored prose. |
 | C10 | `docs/` + gateway ship in the npm payload. |
-| C11 | Every triggered `behavioral` doc has a current PASS semantic attestation keyed to the current `body_hash`. |
+| C11 | Every triggered `behavioral` doc has a current PASS semantic attestation keyed to the current `body_hash`; any stale existing attestation is rejected. |
 
 ## Determinism boundary
 

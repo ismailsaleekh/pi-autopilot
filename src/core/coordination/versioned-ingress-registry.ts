@@ -158,8 +158,8 @@ function currentRange(exactFields: readonly string[], requiredFields: readonly s
     first_generation: 1,
     last_generation: 1,
     producer_build: COORDINATOR_IMPLEMENTATION_BUILD,
-    exact_fields: sortedUnique([...exactFields, ...CURRENT_PRODUCER_PROVENANCE_FIELDS]),
-    required_fields: sortedUnique([...requiredFields, ...CURRENT_PRODUCER_PROVENANCE_FIELDS]),
+    exact_fields: sortedUnique(exactFields),
+    required_fields: sortedUnique(requiredFields),
     absent_field_defaults: Object.freeze([]),
     unknown_field_policy: 'reject',
     current: true,
@@ -227,7 +227,12 @@ const EXTRA_PERSISTED_ARTIFACT_SCHEMAS = Object.freeze([
   'autopilot.schema11_retirement.v1', 'autopilot.semantic_graph.v1', 'autopilot.semantic_graph_authority_shard.v1',
   'autopilot.semantic_graph_bootstrap.v1', 'autopilot.semantic_graph_projection_shard.v1', 'autopilot.status_tool_context.v1',
   'autopilot.store_invariant_repair.v1', 'autopilot.subscription_probe.v1', 'autopilot.task_info.v1', 'autopilot.task_info.v2',
-  'autopilot.terminal_cleanup.v1', 'autopilot.unit_failure.v1', 'autopilot.unit_index.v1', 'autopilot.unit_index_adjudication.v1',
+  'autopilot.terminal_cleanup.v1', 'autopilot.s2_d_corpus_clone_manifest.v1', 'autopilot.s2_d_corpus_clone_request.v1',
+  'autopilot.s2_d_corpus_rehearsal_result.v1', 'autopilot.s2_d_path_rebase_ledger.v1', 'autopilot.s2_release_skew_fixture.v1',
+  'autopilot.s2_retention.cold_terminal_proof.v1',
+  'autopilot.s2_retention.disk_pressure_diagnostic.v1', 'autopilot.s2_retention.hot_terminal_summary.v1', 'autopilot.s2_retention.ledger.v1',
+  'autopilot.s2_retention.owner.v1', 'autopilot.s2_retention.progress_model.v1', 'autopilot.s2_retention.terminal_binding.v1',
+  'autopilot.s2_retention_policy.v1', 'autopilot.unit_failure.v1', 'autopilot.unit_index.v1', 'autopilot.unit_index_adjudication.v1',
   'autopilot.unit_info.v1', 'autopilot.unit_merge.v1', 'autopilot.unit_merge_intent.v1', 'autopilot.validation_evidence.v1',
   'autopilot.validation_staleness.v1', 'autopilot.validation_staleness.v2', 'autopilot.worktree_alias.v1', 'autopilot.worktree_alias_migration_evidence.v1',
   'autopilot.worktree_bootstrap.v1', 'autopilot.worktree_cleanup_result.v1', 'autopilot.worktree_index.v1', 'autopilot.worktree_ledger.v1',
@@ -327,6 +332,19 @@ const SOURCE_ANCHORED_EXTRA_PERSISTED_ARTIFACT_FIELDS = Object.freeze({
   'autopilot.task_info.v1': ['autopilot_id', 'base_sha', 'branch', 'git_common_dir', 'repo_key', 'runtime_root', 'schema_version', 'source_repo', 'started_at', 'status', 'target_base_sha', 'target_branch', 'workstream', 'workstream_run', 'worktree_path'],
   'autopilot.task_info.v2': ['autopilot_id', 'base_sha', 'branch', 'checkout_mode', 'checkout_profile_origin', 'checkout_profile_ref', 'checkout_profile_sha256', 'closed_at', 'coordination_authority', 'git_common_dir', 'repo_key', 'runtime_root', 'schema_version', 'source_repo', 'started_at', 'status', 'target_base_sha', 'target_branch', 'workstream', 'workstream_run', 'worktree_path'],
   'autopilot.terminal_cleanup.v1': ['archive_ref', 'archive_runtime_path', 'autopilot_id', 'outcome', 'prepared_at', 'repo_key', 'result', 'result_path', 'schema_version', 'terminal_sha', 'workstream', 'workstream_run'],
+  'autopilot.s2_d_corpus_clone_manifest.v1': ['candidate_build', 'clone_capability_sha256', 'created_at', 'database_witness_before', 'durable_runs', 'git_witness_before', 'isolation_proofs', 'path_rebase_ledger', 'rehearsal_id', 'schema_version', 'source_witness_before'],
+  'autopilot.s2_d_corpus_clone_request.v1': ['candidate_build', 'corpora', 'created_at', 'destination_root', 'rehearsal_id', 'result_path', 'schema_version'],
+  'autopilot.s2_d_corpus_rehearsal_result.v1': ['action_results', 'candidate_build', 'completed_at', 'isolation_proofs', 'live_unchanged', 'new_blockers', 'rehearsal_id', 'schema_version'],
+  'autopilot.s2_d_path_rebase_ledger.v1': ['entries', 'schema_version'],
+  'autopilot.s2_release_skew_fixture.v1': ['current_api_schema_version', 'current_implementation_build', 'current_legacy_facade_build', 'current_package_version', 'current_store_schema_version', 'current_wire_lineage', 'lane', 'package', 'previous_api_schema_version', 'previous_fixture_manifest', 'previous_implementation_build', 'previous_tarball', 'previous_tarball_sha256', 'previous_tarball_size_bytes', 'previous_version', 'previous_wire_protocol_version', 'required_journeys', 'schema_version'],
+  'autopilot.s2_retention.cold_terminal_proof.v1': ['policy_id', 'proof', 'published_at', 'repo_id', 'schema_version', 'terminal_event_seq', 'terminal_kind', 'terminal_proof_sha256', 'workstream_run'],
+  'autopilot.s2_retention.disk_pressure_diagnostic.v1': ['diagnostic', 'diagnostics_publication', 'event_seq', 'evidence_publication', 'lane_effect', 'recorded_at', 'schema_version', 'workstream_run'],
+  'autopilot.s2_retention.hot_terminal_summary.v1': ['cold_archive_relpath', 'cold_archive_sha256', 'policy_id', 'repo_id', 'schema_version', 'terminal_event_seq', 'terminal_kind', 'terminal_proof_sha256', 'verified_at', 'workstream_run'],
+  'autopilot.s2_retention.ledger.v1': ['at', 'candidate_id', 'candidate_path_sha256', 'event_id', 'event_kind', 'kind', 'operation_id', 'owner_run', 'policy_id', 'refusal_reason', 'repo_id', 'schema_version'],
+  'autopilot.s2_retention.owner.v1': ['active', 'candidate_id', 'cold_archive_relpath', 'cold_archive_sha256', 'cold_archive_verified', 'created_by', 'dirty', 'kind', 'owner_run', 'policy_id', 'quarantined', 'repo_id', 'schema_version', 'sole_copy_pin', 'terminal_event_seq', 'terminal_kind'],
+  'autopilot.s2_retention.progress_model.v1': ['lanes', 'schema_version'],
+  'autopilot.s2_retention.terminal_binding.v1': ['cold_archive_relpath', 'cold_archive_sha256', 'evidence_ref', 'evidence_sha256', 'hot_eligible', 'hot_summary_ref', 'policy_id', 'published_at', 'reconciliation_evidence_id', 'repo_id', 'schema_version', 'terminal_event_seq', 'terminal_kind', 'terminal_proof_sha256', 'workstream_run'],
+  'autopilot.s2_retention_policy.v1': ['allow_transition_backup_gc', 'cold_terminal_proof_max_bytes', 'gc_batch_limit', 'hot_terminal_summary_max_bytes', 'policy_id', 'schema_version'],
   'autopilot.unit_failure.v1': CURRENT_UNIT_FAILURE_FIELDS,
   'autopilot.unit_index.v1': ['schema_version', 'units'],
   'autopilot.unit_index_adjudication.v1': ['action', 'attempt', 'branches_ref', 'created_at', 'reason', 'schema_version', 'transport_failure_ref', 'unit_id', 'unit_index_ref', 'unit_info_ref', 'workstream', 'workstream_run'],
@@ -349,13 +367,21 @@ const SOURCE_ANCHORED_EXTRA_PERSISTED_ARTIFACT_FIELDS = Object.freeze({
   'autopilot.worktree_rollback_supersession.v1': ['disposition', 'later_package_operations', 'owner', 'schema_version', 'superseded_operation', 'terminal_archive', 'worktree_id'],
 } as const satisfies Readonly<Record<string, readonly string[]>>);
 
+const SOURCE_ANCHORED_EXTRA_PERSISTED_ARTIFACT_REQUIRED_FIELDS = Object.freeze({
+  'autopilot.s2_retention.ledger.v1': ['at', 'candidate_id', 'candidate_path_sha256', 'event_id', 'event_kind', 'kind', 'operation_id', 'owner_run', 'policy_id', 'repo_id', 'schema_version'],
+} as const satisfies Readonly<Record<string, readonly string[]>>);
+
 function sourceAnchoredExtraArtifactFields(schemaVersion: string): readonly string[] {
   return SOURCE_ANCHORED_EXTRA_PERSISTED_ARTIFACT_FIELDS[schemaVersion as keyof typeof SOURCE_ANCHORED_EXTRA_PERSISTED_ARTIFACT_FIELDS] ?? Object.freeze(['schema_version']);
 }
 
+function sourceAnchoredExtraArtifactRequiredFields(schemaVersion: string): readonly string[] {
+  return SOURCE_ANCHORED_EXTRA_PERSISTED_ARTIFACT_REQUIRED_FIELDS[schemaVersion as keyof typeof SOURCE_ANCHORED_EXTRA_PERSISTED_ARTIFACT_REQUIRED_FIELDS] ?? sourceAnchoredExtraArtifactFields(schemaVersion);
+}
+
 const extraFamilies = EXTRA_PERSISTED_ARTIFACT_SCHEMAS
   .filter((schemaVersion) => schemaVersion !== 'autopilot.unit_failure.v1')
-  .map((schemaVersion) => currentOnlyFamily(schemaVersion, schemaVersion.includes('coordinator_') ? 'transport-or-page' : 'runtime-evidence', sourceAnchoredExtraArtifactFields(schemaVersion), sourceAnchoredExtraArtifactFields(schemaVersion), 'schema-bearing persisted artifact inventoried from source-anchored producer/consumer definitions'));
+  .map((schemaVersion) => currentOnlyFamily(schemaVersion, schemaVersion.includes('coordinator_') ? 'transport-or-page' : 'runtime-evidence', sourceAnchoredExtraArtifactFields(schemaVersion), sourceAnchoredExtraArtifactRequiredFields(schemaVersion), 'schema-bearing persisted artifact inventoried from source-anchored producer/consumer definitions'));
 
 const UNIT_FAILURE_FAMILY: PersistedArtifactFamilyDefinition = Object.freeze({
   family: 'autopilot.unit_failure.v1',
@@ -469,6 +495,20 @@ export function parseVersionedPersistedArtifact(input: {
   readonly producer_generation: number;
   readonly registry?: readonly PersistedArtifactFamilyDefinition[];
 }): VersionedPersistedArtifactIngress {
+  if (input.family === 'autopilot.unit_failure.v1') {
+    const document = decodeJsonDocument(input.bytes, input.family);
+    return parseCentralVersionedUnitFailureIngress({
+      bytes: input.bytes,
+      producer_build: input.producer_build,
+      producer_generation: input.producer_generation,
+      identity: {
+        workstream: stringField(document, 'workstream', input.family, 192),
+        workstreamRun: stringField(document, 'workstream_run', input.family, 192),
+        unitId: stringField(document, 'unit_id', input.family, 192),
+        attempt: integerField(document, 'attempt', input.family),
+      },
+    }).ingress as VersionedPersistedArtifactIngress;
+  }
   const selection = selectVersionedIngressProducer({ family: input.family, producer_build: input.producer_build, producer_generation: input.producer_generation, ...(input.registry === undefined ? {} : { registry: input.registry }) });
   const document = decodeJsonDocument(input.bytes, selection.family.family);
   if (stringField(document, 'schema_version', selection.family.family, 192) !== selection.family.schema_version) throw new CoordinationRuntimeError('schema-mismatch', 'persisted artifact schema_version does not match its selected family', [selection.family.family]);

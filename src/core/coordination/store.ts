@@ -9100,6 +9100,10 @@ export class CoordinatorStore {
     return this.#db.prepare("SELECT fault_id,invariant_id,fault_code FROM run_scoped_faults WHERE repo_id=? AND workstream_run=? AND status='active' ORDER BY fault_id LIMIT 33").all(repoId, workstreamRun);
   }
 
+  #activePlanningContradictionReviews(repoId: string, workstreamRun: string): readonly SqlRow[] {
+    return this.#db.prepare("SELECT entity_id,COALESCE(json_extract(payload_json, '$.escalation_id'), entity_id) AS escalation_id FROM escalations WHERE repo_id=? AND EXISTS(SELECT 1 FROM json_each(json_extract(payload_json, '$.participating_runs')) WHERE value=?) ORDER BY entity_id LIMIT 33").all(repoId, workstreamRun);
+  }
+
   #assertAuthorityCriticalMutationAllowed(repoId: string, workstreamRun: string, action: string): void {
     const faults = this.#activeRunFaults(repoId, workstreamRun);
     if (faults.length === 0) return;
@@ -9108,6 +9112,9 @@ export class CoordinatorStore {
 
   #assertSourceChangingDispatchAllowed(repoId: string, workstreamRun: string, action: string): void {
     this.#assertAuthorityCriticalMutationAllowed(repoId, workstreamRun, `source-changing dispatch:${action}`);
+    const contradictions = this.#activePlanningContradictionReviews(repoId, workstreamRun);
+    if (contradictions.length === 0) return;
+    throw new CoordinationRuntimeError('planning-contradiction-review', `source-changing dispatch ${action} is fenced by accepted planning contradiction review for the participating planning authority set`, contradictions.slice(0, 32).map((row) => `${sqlString(row, 'entity_id')}:${sqlString(row, 'escalation_id')}`));
   }
 
   #requireCoordinatorEditAuthority(run: CoordinationRun, operation: string): void {

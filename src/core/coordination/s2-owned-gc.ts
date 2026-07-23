@@ -1,11 +1,11 @@
 import { createHash } from 'node:crypto';
 import { closeSync, constants as fsConstants, fstatSync, fsyncSync, lstatSync, openSync, writeFileSync } from 'node:fs';
-import { lstat, mkdir, readdir, rename, rm, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, open, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { basename, join, relative, resolve } from 'node:path';
 
 import { canonicalJson } from './canonical-json.ts';
 import { readImmutableFileBytes } from './immutable-file.ts';
-import { verifyS2ColdTerminalProof } from './s2-retention-archive.ts';
+import { assertS2RetentionNoSymlinkComponents, verifyS2ColdTerminalProof } from './s2-retention-archive.ts';
 import {
   isS2RetentionCandidateId,
   S2_RETENTION_ACTIVE_MARKER,
@@ -285,7 +285,7 @@ async function readLedgerEvents(ledgerPath: string): Promise<readonly S2OwnedGcL
 
 async function hasCommittedRemoval(ledgerPath: string, candidateId: string, repoId: string, ownerRun: string, kind: S2RetentionGcKind, policyId: string): Promise<boolean> {
   for (const event of await readLedgerEvents(ledgerPath)) {
-    if (event.event_kind === 'candidate-removed' && event.candidate_id === candidateId && event.repo_id === repoId && event.owner_run === ownerRun && event.kind === kind && event.policy_id === policyId) return true;
+    if ((event.event_kind === 'candidate-removed' || event.event_kind === 'inflight-replayed') && event.candidate_id === candidateId && event.repo_id === repoId && event.owner_run === ownerRun && event.kind === kind && event.policy_id === policyId) return true;
   }
   return false;
 }
@@ -302,6 +302,15 @@ async function observeS2RetentionBoundary(boundary: string): Promise<void> {
   const marker = process.env['AUTOPILOT_S2_RETENTION_TEST_MARKER'];
   if (marker !== undefined && marker.length > 0) await writeFile(marker, `${boundary}\n`, { flag: 'w', mode: 0o600 });
   await new Promise<never>(() => undefined);
+}
+
+async function fsyncDirectory(path: string): Promise<void> {
+  const handle = await open(path, 'r');
+  try {
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
 }
 
 async function appendLedgerEvent(retentionRoot: string, event: Omit<S2OwnedGcLedgerEvent, 'event_id'>): Promise<S2OwnedGcLedgerEvent> {
@@ -323,6 +332,7 @@ async function appendLedgerEvent(retentionRoot: string, event: Omit<S2OwnedGcLed
   } finally {
     closeSync(descriptor);
   }
+  await fsyncDirectory(retentionRoot);
   return complete;
 }
 
@@ -374,10 +384,11 @@ function assertCandidateMarkerMatches(input: S2ScheduledOwnedGcInput, marker: S2
   if (expectedKind === 'transition-backup' && !input.policy.allow_transition_backup_gc) throw new OwnedGcRefusal('policy-mismatch');
 }
 
-function verifyCandidateColdArchive(input: S2ScheduledOwnedGcInput, marker: S2OwnedGcMarker): void {
+async function verifyCandidateColdArchive(input: S2ScheduledOwnedGcInput, marker: S2OwnedGcMarker): Promise<void> {
   const archivePath = resolve(input.coldArchiveRoot, marker.cold_archive_relpath);
   assertContained(input.coldArchiveRoot, archivePath);
   try {
+    await assertS2RetentionNoSymlinkComponents(input.coldArchiveRoot, archivePath);
     verifyS2ColdTerminalProof({
       archivePath,
       expectedColdArchiveSha256: marker.cold_archive_sha256,
@@ -398,7 +409,7 @@ async function validateCandidate(input: S2ScheduledOwnedGcInput, candidatePath: 
   if (!st.isDirectory() || st.isSymbolicLink()) throw new OwnedGcRefusal('path-not-owned-directory');
   const marker = await readMarker(candidatePath);
   assertCandidateMarkerMatches(input, marker, expectedKind, candidateId);
-  verifyCandidateColdArchive(input, marker);
+  await verifyCandidateColdArchive(input, marker);
   if (await pathExists(join(candidatePath, S2_RETENTION_ACTIVE_MARKER))) throw new OwnedGcRefusal('active-run');
   if (await pathExists(join(candidatePath, S2_RETENTION_QUARANTINE_MARKER))) throw new OwnedGcRefusal('quarantined-path');
   if (await pathExists(join(candidatePath, S2_RETENTION_DIRTY_MARKER))) throw new OwnedGcRefusal('dirty-path');
@@ -414,7 +425,7 @@ async function validateInflightCandidate(input: S2ScheduledOwnedGcInput, infligh
   if (!st.isDirectory() || st.isSymbolicLink()) throw new OwnedGcRefusal('path-not-owned-directory');
   const marker = await readMarker(inflightPath);
   assertCandidateMarkerMatches(input, marker, expectedKind, candidateId);
-  verifyCandidateColdArchive(input, marker);
+  await verifyCandidateColdArchive(input, marker);
   const markerCount = await scanTreeForUnsafeLinks(inflightPath);
   if (markerCount !== 1) throw new OwnedGcRefusal('ambiguous-owner');
 }
@@ -446,17 +457,24 @@ async function removeCandidate(input: S2ScheduledOwnedGcInput, candidatePath: st
   assertContained(inflightRoot, inflightParent);
   assertContained(inflightRoot, inflightPath);
   await mkdir(inflightParent, { recursive: true });
+  await assertNoSymlinkComponents(input.retentionRoot, inflightParent);
+  await fsyncDirectory(inflightRoot).catch((error: unknown) => { if (!isErrorWithCode(error, 'ENOENT')) throw error; });
   await rename(candidatePath, inflightPath);
+  await fsyncDirectory(categoryRoot(input.retentionRoot, kind));
+  await fsyncDirectory(inflightParent);
   await observeS2RetentionBoundary('s2-gc-after-rename');
   await appendLedgerEvent(input.retentionRoot, {
     schema_version: 'autopilot.s2_retention.ledger.v1', event_kind: 'candidate-renamed', operation_id: input.operationId, repo_id: input.repoId, owner_run: input.ownerRun, candidate_id: candidateId,
     candidate_path_sha256: sha256HexUtf8(resolve(candidatePath)), kind, policy_id: input.policy.policy_id, at: input.nowIso,
   });
-  await rm(inflightPath, { recursive: true, force: false });
+  await validateInflightCandidate(input, inflightRoot, inflightPath, kind, candidateId);
   await appendLedgerEvent(input.retentionRoot, {
     schema_version: 'autopilot.s2_retention.ledger.v1', event_kind: 'candidate-removed', operation_id: input.operationId, repo_id: input.repoId, owner_run: input.ownerRun, candidate_id: candidateId,
     candidate_path_sha256: sha256HexUtf8(resolve(candidatePath)), kind, policy_id: input.policy.policy_id, at: input.nowIso,
   });
+  await observeS2RetentionBoundary('s2-gc-before-rm-after-authoritative-ledger');
+  await rm(inflightPath, { recursive: true, force: false });
+  await fsyncDirectory(inflightParent);
   await observeS2RetentionBoundary('s2-gc-after-rm');
   return { candidateId, kind, path: candidatePath, outcome: 'removed' };
 }
@@ -485,12 +503,14 @@ async function replayInflight(input: S2ScheduledOwnedGcInput): Promise<readonly 
       try {
         if (!await hasRenamedForReplay(ledgerPath, candidateId, input.repoId, input.ownerRun, kind, input.policy.policy_id)) throw new OwnedGcRefusal('missing-without-ledger');
         await validateInflightCandidate(input, inflightRoot, inflightPath, kind, candidateId);
-        await rm(inflightPath, { recursive: true, force: false });
-        await observeS2RetentionBoundary('s2-gc-after-replay-rm');
         await appendLedgerEvent(input.retentionRoot, {
           schema_version: 'autopilot.s2_retention.ledger.v1', event_kind: 'inflight-replayed', operation_id: input.operationId, repo_id: input.repoId, owner_run: input.ownerRun, candidate_id: candidateId,
           candidate_path_sha256: sha256HexUtf8(resolve(inflightPath)), kind, policy_id: input.policy.policy_id, at: input.nowIso,
         });
+        await observeS2RetentionBoundary('s2-gc-before-replay-rm-after-authoritative-ledger');
+        await rm(inflightPath, { recursive: true, force: false });
+        await fsyncDirectory(operationPath);
+        await observeS2RetentionBoundary('s2-gc-after-replay-rm');
         results.push({ candidateId, kind, path: inflightPath, outcome: 'replayed' });
       } catch (error) {
         if (error instanceof OwnedGcRefusal) results.push(await appendRefusal(input, candidateId, inflightPath, kind, error.reason));
@@ -506,6 +526,9 @@ async function listCandidateIds(input: S2ScheduledOwnedGcInput, kind: S2Retentio
   const root = categoryRoot(input.retentionRoot, kind);
   let entries: Awaited<ReturnType<typeof readdir>>;
   try {
+    await assertNoSymlinkComponents(input.retentionRoot, root);
+    const rootStat = await lstat(root);
+    if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) throw new OwnedGcRefusal('path-not-owned-directory');
     entries = await readdir(root, { withFileTypes: true });
   } catch (error) {
     if (isErrorWithCode(error, 'ENOENT')) return [];
@@ -522,14 +545,21 @@ export async function writeS2OwnedGcMarker(candidatePath: string, marker: S2Owne
 export async function runScheduledS2OwnedGc(input: S2ScheduledOwnedGcInput): Promise<S2ScheduledOwnedGcResult> {
   assertSafeOperationId(input.operationId);
   await mkdir(input.retentionRoot, { recursive: true });
+  const rootStat = await lstat(input.retentionRoot);
+  if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) throw new Error('retention root must be a non-symbolic directory');
+  await fsyncDirectory(input.retentionRoot);
   const results: S2OwnedGcCandidateResult[] = [...await replayInflight(input)];
   const kinds: readonly S2RetentionGcKind[] = input.policy.allow_transition_backup_gc ? ['trash', 'transition-backup'] : ['trash'];
   for (const kind of kinds) {
     const ids = await listCandidateIds(input, kind);
-    for (const candidateId of ids.slice(0, input.policy.gc_batch_limit)) {
+    let removedForKind = 0;
+    for (const candidateId of ids) {
+      if (removedForKind >= input.policy.gc_batch_limit) break;
       const candidatePath = join(categoryRoot(input.retentionRoot, kind), candidateId);
       try {
-        results.push(await removeCandidate(input, candidatePath, kind, candidateId));
+        const result = await removeCandidate(input, candidatePath, kind, candidateId);
+        results.push(result);
+        if (result.outcome === 'removed' || result.outcome === 'duplicate-committed') removedForKind += 1;
       } catch (error) {
         if (error instanceof OwnedGcRefusal) results.push(await appendRefusal(input, candidateId, candidatePath, kind, error.reason));
         else throw error;

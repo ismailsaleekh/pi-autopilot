@@ -8,7 +8,7 @@ import { parseCoordinationReconciliationDetail, parseCoordinationReconciliationR
 import { parseD65DispatchAuthorityEnvelope } from "./d65-dispatch-authority.js";
 import { COORDINATOR_COMPILED_ENTRYPOINT_ENV, resolveCoordinatorExecutable } from "./executable-resolution.js";
 import { CoordinationRuntimeError } from "./failures.js";
-import { s2CoordinationFailureClass } from "./s2-failure-taxonomy.js";
+import { isS2CoordinatorContentionFailure, s2CoordinationFailureClass } from "./s2-failure-taxonomy.js";
 import { activeCoordinationMigrationFreeze } from "./migration-paths.js";
 import { runCoordinatorNegotiatedTransport } from "./negotiated-transport.js";
 import { classifyCoordinatorInitialPeer, parseCoordinatorLegacyFacadeHandshake } from "./peer-classification.js";
@@ -467,7 +467,7 @@ export class CoordinatorClient {
                 break;
             }
             catch (error) {
-                if (!(error instanceof CoordinationRuntimeError) || error.code !== 'coordinator-contention' || Date.now() >= deadline)
+                if (!isS2CoordinatorContentionFailure(error) || Date.now() >= deadline)
                     throw error;
                 attempt += 1;
                 await sleep(Math.min(100, 10 * attempt));

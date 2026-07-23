@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { link, mkdir, mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
+import { link, mkdir, mkdtemp, readFile, rename, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -115,6 +115,20 @@ void describe('S2-E retention archive and owned GC core', () => {
     await assert.rejects(() => publishS2ColdTerminalProof({ ...input, terminalProof: { terminal: true, accepted_units: ['u1'], large_evidence: 'changed' } }), /already binds a different verified cold archive/u);
   });
 
+  void it('rejects cold and hot archive symlink ancestors instead of publishing outside retention roots', async () => {
+    const policy = defineS2RetentionPolicy();
+    for (const linkName of ['cold', 'hot'] as const) {
+      const root = await tempRoot(`s2-retention-archive-symlink-${linkName}`);
+      const outside = join(root, `outside-${linkName}`);
+      await mkdir(outside, { recursive: true });
+      await symlink(outside, join(root, linkName));
+      await assert.rejects(() => publishS2ColdTerminalProof({
+        repoId: 'repo-symlink-archive', workstreamRun: `run-${linkName}`, terminalEventSeq: 4, terminalKind: 'closed', terminalProof: { terminal: true, linkName },
+        archiveRoot: join(root, 'cold'), hotRoot: join(root, 'hot'), policy, nowIso: '2026-07-22T00:00:00.000Z',
+      }), /symbolic-link|non-symbolic/u);
+    }
+  });
+
   void it('removes only scheduled owned trash and records duplicate GC as ledger evidence instead of deleting again', async () => {
     const root = await tempRoot('s2-owned-gc');
     const policy = defineS2RetentionPolicy({ allow_transition_backup_gc: false });
@@ -194,6 +208,36 @@ void describe('S2-E retention archive and owned GC core', () => {
     await assert.rejects(async () => { verifyS2ColdTerminalProof({ archivePath: published.coldArchivePath, expectedColdArchiveSha256: published.coldArchiveSha256, policy, expected: { repoId: 'repo-bind', workstreamRun: 'run-other', terminalEventSeq: 15, terminalKind: 'failed' } }); }, /workstream_run mismatch/u);
   });
 
+  void it('does not starve valid owned candidates behind persistent refused candidates in a limited batch', async () => {
+    const root = await tempRoot('s2-owned-gc-starvation');
+    const policy = defineS2RetentionPolicy({ allow_transition_backup_gc: false, gc_batch_limit: 1 });
+    await mkdir(join(root, S2_RETENTION_TRASH_DIR, 'aaa-refused-one'), { recursive: true });
+    await mkdir(join(root, S2_RETENTION_TRASH_DIR, 'aab-refused-two'), { recursive: true });
+    const candidateId = 'zzz-valid-owned';
+    const candidatePath = join(root, S2_RETENTION_TRASH_DIR, candidateId);
+    await createOwnedCandidate({ root, candidatePath, repoId: 'repo-starve', ownerRun: 'run-starve', candidateId, kind: 'trash', policy, terminalEventSeq: 16 });
+
+    const cycle = await runScheduledS2OwnedGc(gcInput(root, 'repo-starve', 'run-starve', policy, '2026-07-22T00:00:03.250Z', 'gc-starve'));
+    assert.equal(cycle.refused, 2);
+    assert.equal(cycle.removed, 1);
+    await assert.rejects(() => stat(candidatePath));
+  });
+
+  void it('refuses cold archive verification through a symlinked cold root and preserves the candidate', async () => {
+    const root = await tempRoot('s2-owned-gc-cold-root-symlink');
+    const policy = defineS2RetentionPolicy({ allow_transition_backup_gc: false });
+    const candidateId = 'cold-root-symlink-owned';
+    const candidatePath = join(root, S2_RETENTION_TRASH_DIR, candidateId);
+    await createOwnedCandidate({ root, candidatePath, repoId: 'repo-cold-link', ownerRun: 'run-cold-link', candidateId, kind: 'trash', policy, terminalEventSeq: 17 });
+    const outside = join(root, 'outside-cold');
+    await rename(join(root, 'cold'), outside);
+    await symlink(outside, join(root, 'cold'));
+
+    const cycle = await runScheduledS2OwnedGc(gcInput(root, 'repo-cold-link', 'run-cold-link', policy, '2026-07-22T00:00:03.300Z', 'gc-cold-link', [candidateId]));
+    assert.equal(first(cycle.results).refusalReason, 'cold-archive-unverified');
+    assert.equal((await stat(candidatePath)).isDirectory(), true);
+  });
+
   void it('refuses forged cold archive marker state unless the actual descriptor-pinned archive verifies', async () => {
     const root = await tempRoot('s2-owned-gc-forged-archive');
     const policy = defineS2RetentionPolicy({ allow_transition_backup_gc: false });
@@ -260,6 +304,13 @@ void describe('S2-E retention archive and owned GC core', () => {
       assert.equal(first(cycle.results).refusalReason, markerFile.reason);
       assert.equal((await stat(candidatePath)).isDirectory(), true);
     }
+  });
+
+  void it('pins coordinator GC timer serialization/backpressure so sweeps cannot overlap', async () => {
+    const source = await readFile('src/core/coordination/server.ts', 'utf8');
+    assert.match(source, /let offerSweepPromise: Promise<void> \| null = null/u);
+    assert.match(source, /if \(offerSweepPromise !== null\) return/u);
+    assert.match(source, /await offerSweepPromise/u);
   });
 
   void it('refuses dirty active quarantined sole-copy and unverified candidates without removing their paths', async () => {

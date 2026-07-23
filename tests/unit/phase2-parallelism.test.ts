@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { existsSync, realpathSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { describe, it } from 'node:test';
@@ -11,13 +11,14 @@ import type { AutopilotExecutionAudit, AutopilotExecutionCommit, AutopilotMaster
 import { runAutopilotAgentFromSpecPath } from '../../src/core/agent-runner.ts';
 import { runAutopilotClaimGc } from '../../src/core/claim-gc.ts';
 import { materializeAdditionalReadPathsForSpec, materializeAutopilotSpecPaths } from '../../src/core/materialization.ts';
-import { parseAutopilotCheckoutProfile } from '../../src/core/checkout-profile.ts';
+import { parseAutopilotCheckoutProfile, readCheckoutProfileSnapshot } from '../../src/core/checkout-profile.ts';
 import { projectAutopilotDiskUse } from '../../src/core/disk-gate.ts';
 import { planNextDispatch } from '../../src/core/scheduler.ts';
 import { readSchedulerConfig, writeSchedulerConfig } from '../../src/core/scheduler-config.ts';
 import { mergeAutopilotUnit } from '../../src/core/unit-merge.ts';
 import { abortFailedUnit, quarantineFailedUnit, resetFailedUnit } from '../../src/core/unit-failure.ts';
 import { cleanupTerminalUnitWorktree, cleanupTerminalUnitWorktreesForRun } from '../../src/core/worktree-cleanup.ts';
+import { readS2RetentionProgressState, s2RetentionPressureStatePath, s2RetentionRunsPausedForWorktreeCreation } from '../../src/core/coordination/s2-retention-state-machine.ts';
 import { recordValidationStalenessForMerge, validationCanCloseSourceWork, type AutopilotValidationEvidence } from '../../src/core/validation-staleness.ts';
 import {
   AUTOPILOT_STATE_ROOT_ENV,
@@ -286,6 +287,34 @@ void describe('Phase 2 fail-closed runtime file locking', () => {
 });
 
 void describe('Phase 2 unit worktrees, claims, mergeback, staleness, and GC', () => {
+  void it('rechecks disk and clears recovered S2 pressure before retrying production unit worktree creation', async () => {
+    await withTempDir(async (root) => {
+      const source = join(root, 'source');
+      await initGitSource(source);
+      const prepared = await prepareAutopilotWorkstream({ workstream: 'phase2-smoke', sourceCwd: source });
+      const snapshotPath = join(prepared.taskRoot, '_checkout-profile.json');
+      const snapshot = await readCheckoutProfileSnapshot(snapshotPath);
+      if (snapshot === null) throw new Error('checkout profile snapshot missing');
+      const highPressure = {
+        ...snapshot,
+        profile: { ...snapshot.profile, disk_gate: { ...snapshot.profile.disk_gate, floor_free_bytes: 1_000_000_000_000_000 } },
+      };
+      await writeJson(snapshotPath, highPressure);
+      await assert.rejects(() => prepareAutopilotUnitWorktree({ active: prepared.active, unitId: 'pressure-unit', attempt: 1 }), /insufficient-space|disk/u);
+      const statePath = s2RetentionPressureStatePath(join(prepared.active.worktree_root, '_retention'));
+      assert.deepEqual(s2RetentionRunsPausedForWorktreeCreation(await readS2RetentionProgressState(statePath)), [prepared.active.workstream_run]);
+      const diagnosticRoot = join(prepared.active.worktree_root, '_retention', 'diagnostics', prepared.active.workstream_run);
+      const diagnosticNames = await readdir(diagnosticRoot);
+      const diagnostics = await readFile(join(diagnosticRoot, diagnosticNames[0] ?? ''), 'utf8');
+      assert.equal(diagnostics.includes('disk-failure'), true);
+
+      await writeJson(snapshotPath, snapshot);
+      const recovered = await prepareAutopilotUnitWorktree({ active: prepared.active, unitId: 'pressure-unit', attempt: 1 });
+      assert.equal(existsSync(recovered.unitInfo.worktree_path), true);
+      assert.deepEqual(s2RetentionRunsPausedForWorktreeCreation(await readS2RetentionProgressState(statePath)), []);
+    });
+  });
+
   void it('creates separate unit worktrees, enforces same-parent claims, and keeps authoritative runtime root in main', async () => {
     await withTempDir(async (root) => {
       const source = join(root, 'source');

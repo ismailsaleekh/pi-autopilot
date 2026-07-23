@@ -115,7 +115,7 @@ void describe('S2-E retention crash replay', () => {
 
   void it('hard-kills real GC at ledger append fsync rename and rm boundaries with restart-safe replay', async () => {
     const policy = defineS2RetentionPolicy({ allow_transition_backup_gc: false });
-    for (const boundary of ['s2-ledger-after-candidate-verified-write', 's2-ledger-after-candidate-verified-fsync', 's2-gc-after-rename', 's2-ledger-after-candidate-renamed-write', 's2-ledger-after-candidate-renamed-fsync', 's2-gc-after-rm', 's2-ledger-after-candidate-removed-write', 's2-ledger-after-candidate-removed-fsync'] as const) {
+    for (const boundary of ['s2-ledger-after-candidate-verified-write', 's2-ledger-after-candidate-verified-fsync', 's2-gc-after-rename', 's2-ledger-after-candidate-renamed-write', 's2-ledger-after-candidate-renamed-fsync', 's2-ledger-after-candidate-removed-write', 's2-ledger-after-candidate-removed-fsync', 's2-gc-before-rm-after-authoritative-ledger', 's2-gc-after-rm'] as const) {
       const root = await tempRoot(`s2-retention-hardkill-gc-${boundary}`);
       const candidateId = `trash-${boundary.replace(/[^a-z0-9]+/gu, '-')}`;
       const originalPath = join(root, S2_RETENTION_TRASH_DIR, candidateId);

@@ -21,6 +21,8 @@ The child runner CLI. The published bin launches compiled JavaScript under
 
 `autopilot-agent-run [--dry-run] [--json] [--pi-executable <path>] <unit-spec.json>`
 
+`autopilot-agent-run recover-d65-subscription --continuation <absolute-json> --probe <absolute-json> --continuation-sequence <n> --bound <repo-relative-ref> <absolute-file> [--bound <ref> <file> ...] [--json]`
+
 ## Behavior
 
 Reads and validates an Autopilot unit spec, applies the deterministic Quality vNext
@@ -36,6 +38,12 @@ complete semantic graph, highest signed launch policy, and governing program hea
 before runner preflight, after acquisition, and immediately before child-model spawn.
 A semantic coordinator event suspends re-entry until its exact successor graph is
 published and accepted.
+
+The `recover-d65-subscription` mode is the bounded D65 subscription-provider recovery
+entrypoint. It reads the accepted continuation, one-use subscription probe, and exact
+bound authority files from absolute paths, then drives successor generation from the
+current coordinator environment; on unresolved coordination failure it emits
+`recovery-pending` and exits `40` without substituting provider authority.
 
 ## Exit classes
 

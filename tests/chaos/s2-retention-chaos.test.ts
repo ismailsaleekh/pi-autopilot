@@ -40,6 +40,15 @@ void describe('S2-E owned GC chaos refusals', () => {
     await assert.rejects(() => stat(join(root, '..', 'outside-created')));
   });
 
+  void it('rejects a symlinked GC category ancestor before scanning outside the retention root', async () => {
+    const root = await tempRoot('s2-retention-chaos-category-symlink');
+    const outside = join(root, 'outside-trash');
+    await mkdir(outside, { recursive: true });
+    await symlink(outside, join(root, S2_RETENTION_TRASH_DIR));
+    const policy = defineS2RetentionPolicy({ allow_transition_backup_gc: false });
+    await assert.rejects(() => runScheduledS2OwnedGc(gcInput(root, policy, 'gc-category-symlink')), /symlink-detected/u);
+  });
+
   void it('refuses foreign owner ambiguous marker hardlink symlink and explicit path escape cases', async () => {
     const policy = defineS2RetentionPolicy({ allow_transition_backup_gc: false });
     const cases = [

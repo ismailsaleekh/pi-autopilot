@@ -10,6 +10,9 @@ import { parseCorpusCloneManifest, parseCorpusCloneRequest, parseCorpusRehearsal
 import { buildWritableGitMirror, gitRefs, gitWorktreeFacts, hashGitWitness, verifyGitMirror } from "./git-mirror.js";
 import { assertDisjointCanonicalRoots, assertNoSharedRegularFileIdentity, assertNoSymlinkSocketOrHardlinkRoute, compareCodeUnits, copyRegularFileNoFollow, copyTreeWithoutLinks, digestBytes, fileIdentity, hashRegularFile, inside, inventoryDigest, inventoryTree, readRegularFileNoFollow } from "./inventory.js";
 import { assertMetadataCloneContained, rebaseCorpusPaths } from "./path-rebase.js";
+import { isExactProcessAlive } from "../../src/core/coordination/process-identity.js";
+import { coordinatorRuntimePaths } from "../../src/core/coordination/runtime-paths.js";
+import { AUTOPILOT_STATE_ROOT_ENV } from "../../src/core/parallel-runtime.js";
 function physicalDirectory(path, label) {
     const canonical = realpathSync(path);
     const stat = lstatSync(canonical);
@@ -464,6 +467,25 @@ async function liveGitWitnesses(clone) {
 function candidateWorkerPath() {
     return fileURLToPath(new URL('./candidate-worker.ts', import.meta.url));
 }
+function assertCloneCoordinatorReaped(stateRoot) {
+    const lockPath = coordinatorRuntimePaths({ ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: stateRoot }).lockPath;
+    if (!existsSync(lockPath))
+        return;
+    let parsed;
+    try {
+        parsed = JSON.parse(Buffer.from(readRegularFileNoFollow(lockPath, 64 * 1024).bytes).toString('utf8'));
+    }
+    catch (error) {
+        throw new Error(`S2-D clone coordinator leak assertion could not parse lifecycle lock: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed))
+        throw new Error('S2-D clone coordinator leak assertion found malformed lifecycle lock');
+    const row = parsed;
+    const pid = row['pid'];
+    const start = row['process_start_identity'];
+    if (typeof pid === 'number' && Number.isSafeInteger(pid) && typeof start === 'string' && isExactProcessAlive(pid, start))
+        throw new Error(`S2-D candidate subprocess leaked clone coordinator pid=${String(pid)}`);
+}
 async function runCandidateSubprocess(input) {
     const inputPath = join(input.copy_state_root, 'coordinator', `s2-d-candidate-${randomUUID()}.json`);
     await writeFile(inputPath, `${canonicalJson({ state_root: input.copy_state_root, corpus_id: input.contract.corpus_id, run_id_sha256: input.contract.run_id_sha256, repo_id_sha256: input.contract.repo_id_sha256, repo: input.repo, active: input.active, contract: input.contract })}\n`, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
@@ -472,10 +494,16 @@ async function runCandidateSubprocess(input) {
             const child = spawn(process.execPath, ['--experimental-strip-types', candidateWorkerPath(), inputPath], { cwd: resolve(dirname(fileURLToPath(import.meta.url)), '..', '..'), env: { ...process.env }, shell: false, stdio: ['ignore', 'pipe', 'pipe'] });
             const stdout = [];
             const stderr = [];
+            const timeout = setTimeout(() => {
+                child.kill('SIGTERM');
+                setTimeout(() => { if (child.exitCode === null)
+                    child.kill('SIGKILL'); }, 2_000);
+            }, 120_000);
             child.stdout.on('data', (chunk) => stdout.push(chunk));
             child.stderr.on('data', (chunk) => stderr.push(chunk));
-            child.once('error', (error) => rejectOutput(error));
+            child.once('error', (error) => { clearTimeout(timeout); rejectOutput(error); });
             child.once('close', (code, signal) => {
+                clearTimeout(timeout);
                 const stderrText = Buffer.concat(stderr).toString('utf8');
                 if (code !== 0)
                     rejectOutput(new Error(`S2-D candidate subprocess failed code=${String(code)} signal=${String(signal)} stderr_sha256=${digestBytes(stderrText)}`));
@@ -488,12 +516,15 @@ async function runCandidateSubprocess(input) {
     }
     finally {
         await rm(inputPath, { force: true });
+        assertCloneCoordinatorReaped(input.copy_state_root);
     }
 }
 export async function writeRehearsalResult(clone) {
     if (existsSync(clone.request.result_path))
         throw new Error('S2-D result path must remain absent until the gate is complete');
-    const observedRows = await Promise.all(clone.corpora.flatMap((corpus) => corpus.durable_runs).map(async (run) => await runCandidateSubprocess(run)));
+    const observedRows = [];
+    for (const run of clone.corpora.flatMap((corpus) => corpus.durable_runs))
+        observedRows.push(await runCandidateSubprocess(run));
     const observed = Object.freeze({ action_results: Object.freeze(observedRows.flatMap((row) => row.action_results)), new_blockers: Object.freeze(observedRows.flatMap((row) => row.new_blockers)) });
     if (observed.new_blockers.length !== 0)
         throw new Error(`S2-D candidate subprocess returned blockers before release result: ${observed.new_blockers.map((blocker) => `${blocker.code}:${blocker.run_id_sha256 ?? 'global'}`).sort(compareCodeUnits).join(',')}`);

@@ -9,7 +9,7 @@ import { parseCoordinationReconciliationDetail, parseCoordinationReconciliationR
 import { parseD65DispatchAuthorityEnvelope, type D65DispatchAuthorityFrame, type D65DispatchAuthorityRequestContext } from './d65-dispatch-authority.ts';
 import { COORDINATOR_COMPILED_ENTRYPOINT_ENV, resolveCoordinatorExecutable } from './executable-resolution.ts';
 import { CoordinationRuntimeError } from './failures.ts';
-import { s2CoordinationFailureClass } from './s2-failure-taxonomy.ts';
+import { isS2CoordinatorContentionFailure, s2CoordinationFailureClass } from './s2-failure-taxonomy.ts';
 import { activeCoordinationMigrationFreeze } from './migration-paths.ts';
 import { runCoordinatorNegotiatedTransport, type CoordinatorNegotiatedTransportHooks, type CoordinatorNegotiatedTransportResult } from './negotiated-transport.ts';
 import { classifyCoordinatorInitialPeer, parseCoordinatorLegacyFacadeHandshake } from './peer-classification.ts';
@@ -484,7 +484,7 @@ export class CoordinatorClient {
         summary = await this.#queryWire(action, repoId, workstreamRun, {});
         break;
       } catch (error) {
-        if (!(error instanceof CoordinationRuntimeError) || error.code !== 'coordinator-contention' || Date.now() >= deadline) throw error;
+        if (!isS2CoordinatorContentionFailure(error) || Date.now() >= deadline) throw error;
         attempt += 1;
         await sleep(Math.min(100, 10 * attempt));
       }

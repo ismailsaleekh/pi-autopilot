@@ -49,10 +49,12 @@ const required = [
   'dist/tools/s2-corpus-rehearsal/cli.js',
   'dist/tools/s2-corpus-rehearsal/contracts.js',
   'dist/tools/s2-corpus-rehearsal/release-gate.js',
+  'dist/tools/s2-corpus-rehearsal/terminal-recovery-worker.js',
   'tools/s2-corpus-rehearsal/cli.ts',
   'tools/s2-corpus-rehearsal/contracts.ts',
   'tools/s2-corpus-rehearsal/release-gate.ts',
   'tools/s2-corpus-rehearsal/candidate-worker.ts',
+  'tools/s2-corpus-rehearsal/terminal-recovery-worker.ts',
   'tools/s2-corpus-rehearsal/git-mirror.ts',
   'tools/s2-corpus-rehearsal/inventory.ts',
   'tools/s2-corpus-rehearsal/path-rebase.ts',
@@ -61,19 +63,29 @@ const required = [
 ];
 const missing = required.filter((path) => !files.has(path));
 const isGenericS2Harness = (path) => path === 'bin/autopilot-s2-corpus-rehearsal.mjs' || path.startsWith('tools/s2-corpus-rehearsal/') || path.startsWith('dist/tools/s2-corpus-rehearsal/');
+const isRequiredGenericPublicCorpusDoc = (path) => path === 'docs/tools/s2-corpus-rehearsal.md';
 const forbidden = [...files].filter((path) => path.startsWith('tests/')
   || (path.startsWith('tools/') && !path.startsWith('tools/s2-corpus-rehearsal/'))
   || path === '.pi'
   || path.startsWith('.pi/')
   || path.includes('/.pi/')
-  || (!isGenericS2Harness(path) && /(?:s1-corpus|corpus-clone|corpus-rehearsal|rehearsal-result|live-witness|transition-backup|actual-cf50|cf50.*\.tgz)/iu.test(path))
-  || /(?:^|\/)(?:private|corpus|corpora|results?|logs?)(?:\/|$)/iu.test(path)
+  || (!isGenericS2Harness(path) && !isRequiredGenericPublicCorpusDoc(path) && /(?:s1-corpus|corpus-clone|corpus-rehearsal|rehearsal-result|live-witness|transition-backup|actual-cf50|cf50.*\.tgz)/iu.test(path))
+  || (!isRequiredGenericPublicCorpusDoc(path) && /(?:^|\/)(?:private|corpus|corpora|results?|logs?)(?:\/|$)/iu.test(path))
   || /\.(?:tgz|tar|tar\.gz|zip|log)$/iu.test(path)
   || /(?:^|\/)(?:capability(?:\.key)?|c5-sandbox\.sb)$/u.test(path)
   || path.endsWith('.sb')
   || path.endsWith('.s1-corpus-request.json')
   || path.endsWith('.s2-corpus-request.json')
   || path.endsWith('.s2-corpus-result.json'));
+const publishedScriptContentFindings = [...files].filter((path) => path.startsWith('scripts/') && /\.(?:mjs|js|ts)$/u.test(path) && path !== 'scripts/check-package-payload.mjs').flatMap((path) => {
+  const text = readFileSync(resolve(root, path), 'utf8');
+  const findings = [];
+  for (const [label, pattern] of [
+    ['closed-plan-private-path', /(?:^|[^A-Za-z0-9._-])plans\/active\//u],
+    ['private-corpus-artifact-byte', /(?:tests\/fixtures\/releases|actual-cf50|cf50[^\n]*\.tgz|s1-corpus-request\.json|s2-corpus-request\.json|s2-corpus-result\.json)/iu],
+  ]) if (pattern.test(text)) findings.push(`${path}:${label}`);
+  return findings;
+});
 let securityScanError = null;
 let lockfileSha256 = null;
 let securityScanLockfileSha256 = null;
@@ -86,6 +98,6 @@ try {
 } catch (error) {
   securityScanError = error instanceof Error ? error.message : String(error);
 }
-const result = { schema_version: 'autopilot.package_payload_check.v1', file_count: files.size, required, missing, forbidden, lockfile_sha256: lockfileSha256, security_scan_lockfile_sha256: securityScanLockfileSha256, security_scan_error: securityScanError, passed: missing.length === 0 && forbidden.length === 0 && securityScanError === null };
+const result = { schema_version: 'autopilot.package_payload_check.v1', file_count: files.size, required, missing, forbidden, published_script_content_findings: publishedScriptContentFindings, lockfile_sha256: lockfileSha256, security_scan_lockfile_sha256: securityScanLockfileSha256, security_scan_error: securityScanError, passed: missing.length === 0 && forbidden.length === 0 && publishedScriptContentFindings.length === 0 && securityScanError === null };
 console.log(JSON.stringify(result, null, 2));
 if (!result.passed) process.exitCode = 1;

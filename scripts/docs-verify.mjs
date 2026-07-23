@@ -16,8 +16,9 @@
 //   node scripts/docs-verify.mjs --json     machine-readable result
 //
 // C11's ENFORCEMENT (a current semantic attestation must exist for every triggered
-// doc) is deterministic here; the PRODUCTION of that attestation is a separate,
-// agentic, offline validate-role review recorded under artifacts/docs-semantic/.
+// behavioral doc, and any existing stale receipt is rejected) is deterministic here;
+// the PRODUCTION of that attestation is a separate, agentic, offline validate-role
+// review recorded under artifacts/docs-semantic/.
 
 import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
@@ -25,7 +26,6 @@ import { resolve } from 'node:path';
 
 import {
   ATTESTATION_DIR,
-  ATTESTATION_SCHEMA,
   GATEWAY_PATH,
   MANIFEST_PATH,
   PACKAGE_ROOT,
@@ -42,6 +42,7 @@ import { computeCoverHashes } from './docs/hashing.mjs';
 import { evaluateFactPins } from './docs/fact-pins.mjs';
 import { checkReferences, resolveLinks } from './docs/references.mjs';
 import { findMarkerAnomalies, findRegions, renderClis, renderCommands, renderDefaults, renderModelRoster, renderReadBeforeEdit, renderRuntimePaths, renderSchemas, renderTools, wrapRegion } from './docs/regions.mjs';
+import { semanticAttestationArtifactName, semanticAttestationRequirement, validateSemanticAttestation } from './docs/semantic-attestations.mjs';
 
 const REGION_RENDERERS = {
   commands: renderCommands,
@@ -288,19 +289,21 @@ async function run() {
 
   // ---- C11: semantic-attestation currency (FM3 enforcement / FM11) ---------
   for (const doc of model.docs) {
-    if (doc.coversSources.length === 0) continue;
+    if (doc.coversSources.length === 0 || doc.reviewPolicy !== 'behavioral') continue;
     let hashes;
     try {
       hashes = computeCoverHashes(doc.coversSources);
     } catch {
       continue; // already reported by C4
     }
-    const needsReview =
-      doc.reviewPolicy === 'behavioral' && doc.bodyHash !== null && doc.bodyHash !== hashes.bodyHash;
-    if (!needsReview) continue;
-    const attestationPath = resolve(PACKAGE_ROOT, ATTESTATION_DIR, `${doc.docId.replace(/\//gu, '__')}.json`);
-    if (!existsSync(attestationPath)) {
-      findings.add('C11', doc.location, `behavioral doc body changed but no semantic attestation exists at ${ATTESTATION_DIR}/${doc.docId.replace(/\//gu, '__')}.json`);
+    const artifactName = semanticAttestationArtifactName(doc.docId);
+    const attestationPath = resolve(PACKAGE_ROOT, ATTESTATION_DIR, artifactName);
+    const requirement = semanticAttestationRequirement(doc, hashes, git);
+    const hasAttestation = existsSync(attestationPath);
+    if (!hasAttestation) {
+      if (requirement.required) {
+        findings.add('C11', doc.location, `behavioral doc requires a current independent semantic attestation (${requirement.reason}) at ${ATTESTATION_DIR}/${artifactName}`);
+      }
       continue;
     }
     let attestation;
@@ -310,9 +313,7 @@ async function run() {
       findings.add('C11', doc.location, `semantic attestation is unparseable: ${error instanceof Error ? error.message : String(error)}`);
       continue;
     }
-    if (attestation.schema_version !== ATTESTATION_SCHEMA) findings.add('C11', doc.location, `semantic attestation has wrong schema_version (${String(attestation.schema_version)})`);
-    if (attestation.reviewed_body_hash !== hashes.bodyHash) findings.add('C11', doc.location, `semantic attestation reviewed_body_hash ${String(attestation.reviewed_body_hash)} != current ${hashes.bodyHash} (stale review)`);
-    if (attestation.verdict !== 'PASS') findings.add('C11', doc.location, `semantic attestation verdict is "${String(attestation.verdict)}", not PASS`);
+    for (const failure of validateSemanticAttestation(doc, hashes, attestation)) findings.add('C11', doc.location, failure);
   }
 
   return report(findings, json);

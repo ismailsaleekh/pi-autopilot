@@ -106,12 +106,17 @@ void describe('S2-A versioned ingress persisted-artifact registry', () => {
       'autopilot.subscription_probe.v1', 'autopilot.task_info.v2', 'autopilot.unit_failure.v1', 'autopilot.unit_info.v1',
       'autopilot.unit_merge.v1', 'autopilot.validation_evidence.v1', 'autopilot.validation_staleness.v2', 'autopilot.worktree_operation_evidence.v1',
       'autopilot.schema9_read_recovery_retirement.v1', 'autopilot.schema9_read_retirement.v1', 'autopilot.schema11_retirement.v1',
+      'autopilot.s2_retention.terminal_binding.v1', 'autopilot.s2_retention.owner.v1', 'autopilot.s2_retention.ledger.v1',
+      'autopilot.s2_retention.cold_terminal_proof.v1', 'autopilot.s2_retention.hot_terminal_summary.v1', 'autopilot.s2_retention.progress_model.v1',
+      'autopilot.s2_retention.disk_pressure_diagnostic.v1', 'autopilot.s2_retention_policy.v1', 'autopilot.s2_d_corpus_clone_request.v1',
+      'autopilot.s2_d_corpus_clone_manifest.v1', 'autopilot.s2_d_corpus_rehearsal_result.v1', 'autopilot.s2_d_path_rebase_ledger.v1',
+      'autopilot.s2_release_skew_fixture.v1',
     ];
     for (const family of requiredFamilies) assert.ok(VERSIONED_PERSISTED_ARTIFACT_FAMILY_IDS.includes(family), `missing persisted family ${family}`);
     for (const family of VERSIONED_PERSISTED_ARTIFACT_FAMILY_REGISTRY) {
       const current = family.producer_ranges.find((range) => range.current);
       assert.notEqual(current, undefined, `missing current range for ${family.family}`);
-      assert.ok((current?.exact_fields.length ?? 0) > 3, `${family.family} must use exact source-anchored fields, not schema_version provenance placeholders`);
+      assert.ok((current?.exact_fields.length ?? 0) > 1, `${family.family} must use exact source-anchored fields, not schema_version provenance placeholders`);
     }
   });
 
@@ -154,6 +159,41 @@ void describe('S2-A versioned ingress persisted-artifact registry', () => {
     const unknown = parseObject(captureOnly);
     unknown['injected_field'] = 'forged';
     assert.throws(() => parseVersionedUnitFailureIngress({ bytes: bytesFromObject(unknown), producer_build: BUG_177_HISTORICAL_UNIT_FAILURE_PRODUCERS.captureCommitOnly, producer_generation: 2, identity: identity('unit-bug177') }), /unknown fields/u);
+  });
+
+  void it('generic persisted-artifact ingress uses BUG-177 unit_failure semantic fences and cannot admit historical quarantine by shape alone', async () => {
+    const captureOnly = await fixture(bug177CaptureCommitFixture);
+    const quarantine = parseObject(captureOnly);
+    quarantine['action'] = 'quarantine';
+    assert.throws(() => parseVersionedPersistedArtifact({
+      family: 'autopilot.unit_failure.v1',
+      producer_build: BUG_177_HISTORICAL_UNIT_FAILURE_PRODUCERS.captureCommitOnly,
+      producer_generation: 2,
+      bytes: bytesFromObject(quarantine),
+    }), /historical quarantine\/preserve/u);
+
+    const reset = parseVersionedPersistedArtifact({
+      family: 'autopilot.unit_failure.v1',
+      producer_build: BUG_177_HISTORICAL_UNIT_FAILURE_PRODUCERS.captureCommitOnly,
+      producer_generation: 2,
+      bytes: captureOnly,
+    });
+    assert.deepEqual(reset.applied_defaults.map((entry) => entry.field), ['capture_ref']);
+  });
+
+  void it('current non-unit persisted families are exact without invented document provenance fields', () => {
+    const status = bytesFromObject({
+      schema_version: 'autopilot.status.v1', workstream: 'workstream-bug177', unit_id: 'unit-current', role: 'implement', attempt: 1,
+      verdict: 'DONE', severity: 'clean', summary: 'current status evidence remains package-schema exact', changed_paths: [], findings: [], commands: [], evidence_refs: [], report_ref: null, next_action: 'advance',
+    });
+    const parsed = parseVersionedPersistedArtifact({ family: 'autopilot.status.v1', producer_build: COORDINATOR_IMPLEMENTATION_BUILD, producer_generation: 1, bytes: status });
+    assert.equal(parsed.current, true);
+    assert.equal(Object.hasOwn(parsed.document, 'producer_build'), false);
+    assert.equal(Object.hasOwn(parsed.document, 'producer_generation'), false);
+    const withInventedProvenance = parseObject(status);
+    withInventedProvenance['producer_build'] = COORDINATOR_IMPLEMENTATION_BUILD;
+    withInventedProvenance['producer_generation'] = 1;
+    assert.throws(() => parseVersionedPersistedArtifact({ family: 'autopilot.status.v1', producer_build: COORDINATOR_IMPLEMENTATION_BUILD, producer_generation: 1, bytes: bytesFromObject(withInventedProvenance) }), /unknown fields/u);
   });
 
   void it('current unit_failure producer is strict and does not inherit historical absent-field defaults', async () => {

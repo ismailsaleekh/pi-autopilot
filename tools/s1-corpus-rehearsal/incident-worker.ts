@@ -177,13 +177,16 @@ async function wait(milliseconds: number): Promise<void> { await new Promise<voi
 
 async function stopChild(child: ChildProcessLite): Promise<void> {
   if (child.exitCode !== null) return;
+  let closed = false;
+  const closePromise = new Promise<void>((resolveClose) => child.once('close', () => { closed = true; resolveClose(); }));
   child.kill('SIGTERM');
-  const deadline = Date.now() + 30_000;
-  while (child.exitCode === null && Date.now() < deadline) await wait(25);
-  if (child.exitCode === null) {
-    child.kill('SIGKILL');
-    throw new Error('C5 coordinator did not honor bounded graceful shutdown');
-  }
+  const gracefulDeadline = Date.now() + 30_000;
+  while (!closed && child.exitCode === null && Date.now() < gracefulDeadline) await wait(25);
+  if (!closed && child.exitCode === null) child.kill('SIGKILL');
+  const reapedDeadline = Date.now() + 10_000;
+  while (!closed && child.exitCode === null && Date.now() < reapedDeadline) await Promise.race([closePromise, wait(25)]);
+  if (!closed && child.exitCode === null) throw new Error('C5 coordinator did not stop/reap within the bounded shutdown window');
+  await Promise.race([closePromise, wait(0)]);
 }
 
 async function stopAllCoordinators(): Promise<void> {

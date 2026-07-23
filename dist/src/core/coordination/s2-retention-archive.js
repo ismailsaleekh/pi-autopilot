@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { lstat, mkdir, open, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, open, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { basename, dirname, join, relative, resolve } from 'node:path';
 import { canonicalJson } from "./canonical-json.js";
 import { readImmutableFileBytes } from "./immutable-file.js";
@@ -74,11 +74,71 @@ async function observeS2RetentionBoundary(boundary) {
         await writeFile(marker, `${boundary}\n`, { flag: 'w', mode: 0o600 });
     await new Promise(() => undefined);
 }
-async function atomicWriteUtf8(path, contents, label) {
-    await mkdir(dirname(path), { recursive: true });
-    const parentStat = await lstat(dirname(path));
-    if (!parentStat.isDirectory() || parentStat.isSymbolicLink())
-        throw new Error('publication parent must be a non-symbolic directory');
+async function fsyncDirectory(path) {
+    const handle = await open(path, 'r');
+    try {
+        await handle.sync();
+    }
+    finally {
+        await handle.close();
+    }
+}
+async function ensureDirectoryNoSymlinkComponents(root, directory) {
+    const rootAbs = resolve(root);
+    const directoryAbs = resolve(directory);
+    containedRelpathOrSelf(rootAbs, directoryAbs);
+    let current = rootAbs;
+    try {
+        const rootStat = await lstat(current);
+        if (!rootStat.isDirectory() || rootStat.isSymbolicLink())
+            throw new Error('publication root must be a non-symbolic directory');
+    }
+    catch (error) {
+        if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT'))
+            throw error;
+        await mkdir(current, { recursive: true });
+        const created = await lstat(current);
+        if (!created.isDirectory() || created.isSymbolicLink())
+            throw new Error('publication root must be a non-symbolic directory');
+        await fsyncDirectory(dirname(current));
+    }
+    const rel = relative(rootAbs, directoryAbs);
+    for (const part of rel.split(/[\\/]/u).filter((value) => value.length > 0)) {
+        current = join(current, part);
+        try {
+            const st = await lstat(current);
+            if (!st.isDirectory() || st.isSymbolicLink())
+                throw new Error('publication path contains a symbolic-link ancestor');
+        }
+        catch (error) {
+            if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT'))
+                throw error;
+            await mkdir(current);
+            const created = await lstat(current);
+            if (!created.isDirectory() || created.isSymbolicLink())
+                throw new Error('publication path contains a symbolic-link ancestor');
+            await fsyncDirectory(dirname(current));
+        }
+    }
+}
+export async function assertS2RetentionNoSymlinkComponents(root, target) {
+    const rootAbs = resolve(root);
+    const targetAbs = resolve(target);
+    containedRelpath(rootAbs, targetAbs);
+    let current = rootAbs;
+    const rootStat = await lstat(current);
+    if (!rootStat.isDirectory() || rootStat.isSymbolicLink())
+        throw new Error('retention path contains a symbolic-link ancestor');
+    const rel = relative(rootAbs, targetAbs);
+    for (const part of rel.split(/[\\/]/u).filter((value) => value.length > 0)) {
+        current = join(current, part);
+        const st = await lstat(current);
+        if (st.isSymbolicLink())
+            throw new Error('retention path contains a symbolic-link ancestor');
+    }
+}
+async function atomicWriteUtf8(path, contents, label, root) {
+    await ensureDirectoryNoSymlinkComponents(root, dirname(path));
     const temporary = join(dirname(path), `.${basename(path)}.${sha256HexUtf8(`${path}:${contents}`).slice(0, 16)}.tmp`);
     await rm(temporary, { force: true });
     await writeFile(temporary, contents, { flag: 'wx', mode: 0o600 });
@@ -93,19 +153,19 @@ async function atomicWriteUtf8(path, contents, label) {
     await observeS2RetentionBoundary(`s2-${label}-after-fsync`);
     await rename(temporary, path);
     await observeS2RetentionBoundary(`s2-${label}-after-rename`);
-    const parent = await open(dirname(path), 'r');
-    try {
-        await parent.sync();
-    }
-    finally {
-        await parent.close();
-    }
+    await fsyncDirectory(dirname(path));
 }
-function containedRelpath(root, target) {
+function containedRelpathOrSelf(root, target) {
     const rootAbs = resolve(root);
     const targetAbs = resolve(target);
     const rel = relative(rootAbs, targetAbs);
-    if (rel.length === 0 || rel === '..' || rel.startsWith('../') || rel.startsWith('..\\') || rel.split(/[\\/]/u).includes('..'))
+    if (rel === '..' || rel.startsWith('../') || rel.startsWith('..\\') || rel.split(/[\\/]/u).includes('..'))
+        throw new Error('archive path escaped its root');
+    return rel;
+}
+function containedRelpath(root, target) {
+    const rel = containedRelpathOrSelf(root, target);
+    if (rel.length === 0)
         throw new Error('archive path escaped its root');
     return rel;
 }
@@ -168,16 +228,19 @@ export async function publishS2ColdTerminalProof(input) {
     if (Buffer.byteLength(archiveBytes, 'utf8') > input.policy.cold_terminal_proof_max_bytes)
         throw new Error('cold terminal proof exceeds policy byte limit');
     const archivePath = archivePathFor(input, archiveSha256);
-    await mkdir(dirname(archivePath), { recursive: true });
+    await ensureDirectoryNoSymlinkComponents(input.archiveRoot, dirname(archivePath));
     try {
-        await stat(archivePath);
+        const archiveStat = await lstat(archivePath);
+        if (archiveStat.isSymbolicLink())
+            throw new Error('cold archive path must not be a symbolic link');
     }
     catch (error) {
         if (error instanceof Error && 'code' in error && error.code === 'ENOENT')
-            await atomicWriteUtf8(archivePath, archiveBytes, 'cold-archive');
+            await atomicWriteUtf8(archivePath, archiveBytes, 'cold-archive', input.archiveRoot);
         else
             throw error;
     }
+    await assertS2RetentionNoSymlinkComponents(input.archiveRoot, archivePath);
     const verified = verifyS2ColdTerminalProof({ archivePath, expectedColdArchiveSha256: archiveSha256, policy: input.policy, expected: { repoId: input.repoId, workstreamRun: input.workstreamRun, terminalEventSeq: input.terminalEventSeq, terminalKind: input.terminalKind } });
     const summary = {
         schema_version: 'autopilot.s2_retention.hot_terminal_summary.v1',
@@ -197,8 +260,11 @@ export async function publishS2ColdTerminalProof(input) {
         throw new Error('hot terminal summary exceeds policy byte limit');
     const summaryPath = hotSummaryPathFor(input);
     let summaryExists = false;
+    await ensureDirectoryNoSymlinkComponents(input.hotRoot, dirname(summaryPath));
     try {
-        await stat(summaryPath);
+        const summaryStat = await lstat(summaryPath);
+        if (summaryStat.isSymbolicLink())
+            throw new Error('hot terminal summary path must not be a symbolic link');
         readImmutableFileBytes({ path: summaryPath, maximumBytes: input.policy.hot_terminal_summary_max_bytes, label: 's2 hot terminal summary' });
         summaryExists = true;
     }
@@ -214,7 +280,7 @@ export async function publishS2ColdTerminalProof(input) {
             throw new Error('hot terminal summary already binds a different verified cold archive');
     }
     else
-        await atomicWriteUtf8(summaryPath, summaryBytes, 'hot-summary');
+        await atomicWriteUtf8(summaryPath, summaryBytes, 'hot-summary', input.hotRoot);
     return { coldArchivePath: archivePath, hotSummaryPath: summaryPath, coldArchiveSha256: archiveSha256, coldArchiveRelpath: containedRelpath(input.archiveRoot, archivePath), terminalProofSha256: verified.terminalProofSha256, hotSummaryBytes: hotBytes, coldArchiveVerified: true, hotEligible: true };
 }
 export async function recoverS2ColdTerminalProofPublication(input) {
@@ -295,6 +361,7 @@ export async function verifyS2HotTerminalProofSummary(input) {
     const rel = containedRelpath(input.archiveRoot, archivePath);
     if (rel !== summary.cold_archive_relpath)
         throw new Error('hot summary cold archive relpath is not canonical');
+    await assertS2RetentionNoSymlinkComponents(input.archiveRoot, archivePath);
     const verified = verifyS2ColdTerminalProof({ archivePath, expectedColdArchiveSha256: summary.cold_archive_sha256, policy: input.policy, expected: input.expected });
     if (verified.terminalProofSha256 !== summary.terminal_proof_sha256)
         throw new Error('hot summary terminal proof sha256 mismatch');

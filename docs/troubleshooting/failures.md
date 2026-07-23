@@ -26,7 +26,7 @@ All Autopilot failures are loud and typed. Match the symptom, then follow the po
 | 2 | `spec-invalid` | Fix the unit spec against `autopilot.unit_spec.v1` + Quality vNext fields. |
 | 3 | `waiting-for-peer-release` | A peer holds a blocking EXCLUSIVE; wait for the durable release/offer — no operator action. |
 | 10 | `pi-spawn-failed` | Check `--pi-executable` / Pi availability. |
-| 20 / 21 | `missing`/`invalid-structured-output` | The child must emit exactly one valid `autopilot_emit_status` carrier; assistant text alone is rejected. |
+| 20 / 21 | `missing-structured-output`/`invalid-structured-output` | The child must emit exactly one valid `autopilot_emit_status` carrier; assistant text alone is rejected. |
 | 30 | `status-non-success` | The unit reported a non-success verdict; read the status + audit. |
 | 31 | `runtime-commit-failed` | Inspect the unit worktree / execution-commit evidence. |
 

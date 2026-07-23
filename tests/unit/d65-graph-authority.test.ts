@@ -8,6 +8,7 @@ import {
   type D65GraphAuthorityReader,
   type D65GraphTreeLeaf,
 } from '../../src/core/coordination/d65-graph-authority.ts';
+import { COORDINATOR_IMPLEMENTATION_BUILD } from '../../src/core/coordination/runtime-constants.ts';
 
 const encoder = new TextEncoder();
 
@@ -66,13 +67,22 @@ describe('D65 graph authority registry and fixed-root discovery', () => {
     );
   });
 
-  it('rejects historical unit-failure layouts at the D65 discovery boundary', () => {
+  it('uses BUG-177 unit-failure ingress at the D65 quarantine boundary', () => {
+    const current = {
+      schema_version: 'autopilot.unit_failure.v1', producer_build: COORDINATOR_IMPLEMENTATION_BUILD, producer_generation: 3,
+      action: 'reset', workstream: 'demo', workstream_run: 'run-1', unit_id: 'u1', attempt: 1, unit_worktree_path: '/tmp/u1', dirty_paths: [],
+      capture_commit_sha: null, capture_ref: null, git_head_before: 'a'.repeat(40), git_head_after: 'a'.repeat(40), git_common_dir: '/tmp/repo/.git',
+      branch: 'autopilot/unit/run-1/u1/attempt-1', postcondition_worktree_clean: true, summary: 'current reset', created_at: '2026-07-22T00:00:00.000Z',
+    };
+    const discovered = discover(reader([{ ref: '.pi/autopilot/demo/quarantine/u1.json', value: current }]));
+    assert.equal(discovered.collections.quarantine.length, 1);
+
     assert.throws(
       () => discover(reader([{ ref: '.pi/autopilot/demo/quarantine/u1.json', value: {
-        schema_version: 'autopilot.unit_failure.v1', action: 'reset', workstream: 'demo', workstream_run: 'run-1', unit_id: 'u1', attempt: 1,
-        unit_worktree_path: '/tmp/u1', dirty_paths: [], summary: 'historical', created_at: '2026-07-22T00:00:00.000Z',
+        schema_version: 'autopilot.unit_failure.v1', action: 'quarantine', workstream: 'demo', workstream_run: 'run-1', unit_id: 'u1', attempt: 1,
+        unit_worktree_path: '/tmp/u1', dirty_paths: [], capture_commit_sha: 'a'.repeat(40), summary: 'historical quarantine', created_at: '2026-07-22T00:00:00.000Z',
       } }])),
-      /missing required fields/u,
+      /historical quarantine\/preserve/u,
     );
   });
 

@@ -227,6 +227,7 @@ void describe('package manifest and payload', () => {
       'dist/tools/s2-corpus-rehearsal/cli.js',
       'dist/tools/s2-corpus-rehearsal/contracts.js',
       'dist/tools/s2-corpus-rehearsal/release-gate.js',
+      'dist/tools/s2-corpus-rehearsal/terminal-recovery-worker.js',
       'tools/s2-corpus-rehearsal/cli.ts',
       'tools/s2-corpus-rehearsal/contracts.ts',
       'tools/s2-corpus-rehearsal/release-gate.ts',
@@ -452,10 +453,12 @@ void describe('package manifest and payload', () => {
       'dist/tools/s2-corpus-rehearsal/cli.js',
       'dist/tools/s2-corpus-rehearsal/contracts.js',
       'dist/tools/s2-corpus-rehearsal/release-gate.js',
+      'dist/tools/s2-corpus-rehearsal/terminal-recovery-worker.js',
       'tools/s2-corpus-rehearsal/cli.ts',
       'tools/s2-corpus-rehearsal/contracts.ts',
       'tools/s2-corpus-rehearsal/release-gate.ts',
       'tools/s2-corpus-rehearsal/candidate-worker.ts',
+      'tools/s2-corpus-rehearsal/terminal-recovery-worker.ts',
       'tools/s2-corpus-rehearsal/git-mirror.ts',
       'tools/s2-corpus-rehearsal/inventory.ts',
       'tools/s2-corpus-rehearsal/path-rebase.ts',
@@ -469,7 +472,7 @@ void describe('package manifest and payload', () => {
     assert.equal(files.some((file) => file.startsWith('tests/')), false);
     assert.equal(files.includes('tests/fixtures/releases/cf50/pi-autopilot-1.1.8-cf50.tgz'), false, 'the actual cf50 skew fixture must never ship in the npm payload');
     assert.equal(files.includes('tests/fixtures/releases/s2/manifest.json'), false, 'S2-C release manifests stay test-only');
-    assert.equal(files.some((file) => /(?:^|\/)(?:private|corpus|corpora|results?|logs?)(?:\/|$)|\.(?:tgz|tar|tar\.gz|zip|log)$/iu.test(file)), false, 'package payload must deterministically exclude private S2 corpus inputs, outputs, logs, and tarballs');
+    assert.equal(files.some((file) => file !== 'docs/tools/s2-corpus-rehearsal.md' && /(?:^|\/)(?:private|corpus|corpora|results?|logs?)(?:\/|$)|\.(?:tgz|tar|tar\.gz|zip|log)$/iu.test(file)), false, 'package payload must deterministically exclude private S2 corpus inputs, outputs, logs, and tarballs while allowing the required generic public S2-D docs');
     assert.equal(files.some((file) => file.startsWith('tools/') && !file.startsWith('tools/s2-corpus-rehearsal/')), false, 'only generic S2-D corpus harness tools may ship');
     assert.equal(files.some((file) => file.includes('node_modules')), false);
   });

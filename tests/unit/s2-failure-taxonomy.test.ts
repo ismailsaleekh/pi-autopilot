@@ -5,7 +5,7 @@ import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { COORDINATION_FAILURE_CODES, coordinationFailureDefinition, CoordinationRuntimeError, type CoordinationFailureCode, type CoordinationRetryPolicy } from '../../src/core/coordination/failures.ts';
 import { buildS2CoordinationFailureDiagnostic, buildS2CoordinationRuntimeErrorDiagnostic, S2_DIAGNOSTIC_MAX_EVIDENCE_ENTRIES, S2_DIAGNOSTIC_MAX_MESSAGE_CODE_POINTS, S2_DIAGNOSTIC_MAX_TEXT_CODE_POINTS } from '../../src/core/coordination/s2-diagnostics.ts';
-import { assertS2FailureTaxonomyMatchesExistingRetryPolicy, decideS2CoordinationFailure, isS2AuthorityCriticalFailure, isS2CoordinationFailureCode, isS2FailureResponseRetryable, isS2OwnerRecoveryProgressFailure, isS2ProgressCriticalFailure, isS2SameOperationProgressRetry, listS2CoordinationFailureDecisions, s2CoordinationFailureClass, shouldS2AttemptEffectUnknownRecovery, shouldS2UseSystemFatalExit, type S2AuthorityScopeRule, type S2FailureCriticality, type S2FailureEvidencePublication, type S2FailureScopeKind, type S2ProgressScopeRule } from '../../src/core/coordination/s2-failure-taxonomy.ts';
+import { assertS2FailureTaxonomyMatchesExistingRetryPolicy, decideS2CoordinationFailure, isS2AuthorityCriticalFailure, isS2CoordinationFailureCode, isS2CoordinatorContentionFailure, isS2CoordinatorStoreCorruptionFailure, isS2CoordinatorTransportProgressFailure, isS2FailureResponseRetryable, isS2OwnerRecoveryProgressFailure, isS2OwnerRecoveryRequiredFailure, isS2ProgressCriticalFailure, isS2SameOperationProgressRetry, isS2StaleVersionFailure, listS2CoordinationFailureDecisions, s2CoordinationFailureClass, s2WorktreeSagaFailureCode, shouldS2AttemptEffectUnknownRecovery, shouldS2PreserveWorktreeSagaFailure, shouldS2UseSystemFatalExit, type S2AuthorityScopeRule, type S2FailureCriticality, type S2FailureEvidencePublication, type S2FailureScopeKind, type S2ProgressScopeRule } from '../../src/core/coordination/s2-failure-taxonomy.ts';
 
 const packageRoot = fileURLToPath(new URL('../../', import.meta.url));
 
@@ -353,6 +353,14 @@ void describe('S2 coordination failure taxonomy', () => {
       assert.equal(shouldS2AttemptEffectUnknownRecovery(code), expected.criticality === 'progress-critical', code);
       assert.equal(s2CoordinationFailureClass(code), coordinationFailureDefinition(code).failure_class, code);
       assert.equal(shouldS2UseSystemFatalExit(code), code === 'store-corrupt' || code === 'system-fatal', code);
+      const runtime = new CoordinationRuntimeError(code, `synthetic ${code}`);
+      assert.equal(isS2CoordinatorContentionFailure(runtime), code === 'coordinator-contention', code);
+      assert.equal(isS2StaleVersionFailure(runtime), expected.scope_kind === 'entity-version', code);
+      assert.equal(isS2CoordinatorTransportProgressFailure(runtime), expected.criticality === 'progress-critical' && expected.retry_policy === 'same-idempotency-key' && (expected.scope_kind === 'coordinator-endpoint' || expected.scope_kind === 'transaction-attempt'), code);
+      assert.equal(shouldS2PreserveWorktreeSagaFailure(runtime), ['session-generation', 'client-authority-proof', 'entity-version'].includes(expected.scope_kind), code);
+      assert.equal(isS2OwnerRecoveryRequiredFailure(runtime), expected.scope_kind === 'owner-run-recovery', code);
+      assert.equal(isS2CoordinatorStoreCorruptionFailure(runtime), expected.scope_kind === 'coordinator-store', code);
+      assert.equal(s2WorktreeSagaFailureCode(runtime, false), code, code);
     }
     assert.equal(isS2CoordinationFailureCode('not-a-coordination-code'), false);
   });
@@ -377,12 +385,15 @@ void describe('S2 coordination failure taxonomy', () => {
     const requiredConsumers: Readonly<Record<string, readonly string[]>> = Object.freeze({
       'src/cli/autopilot-agent-run.ts': ['buildS2CoordinationRuntimeErrorDiagnostic'],
       'src/cli/autopilot-coordinator.ts': ['shouldS2UseSystemFatalExit'],
-      'src/core/coordination/client.ts': ['s2CoordinationFailureClass'],
+      'src/core/coordination/client.ts': ['s2CoordinationFailureClass', 'isS2CoordinatorContentionFailure'],
       'src/core/coordination/d65-graph-publisher.ts': ['shouldS2AttemptEffectUnknownRecovery'],
-      'src/core/coordination/server.ts': ['isS2FailureResponseRetryable', 'buildS2CoordinationRuntimeErrorDiagnostic'],
+      'src/core/coordination/server.ts': ['isS2FailureResponseRetryable', 'buildS2CoordinationRuntimeErrorDiagnostic', 'isS2CoordinatorContentionFailure'],
       'src/core/coordination/startup-observation.ts': ['isS2CoordinationFailureCode', 's2CoordinationFailureClass'],
       'src/core/coordination/store.ts': ['isS2CoordinationFailureCode', 'isS2FailureResponseRetryable', 'buildS2CoordinationRuntimeErrorDiagnostic'],
+      'src/core/coordination/reconciliation.ts': ['isS2StaleVersionFailure'],
       'src/core/coordination/supervisor.ts': ['isS2SameOperationProgressRetry', 'isS2OwnerRecoveryProgressFailure'],
+      'src/core/coordination/worktree-saga.ts': ['isS2CoordinatorTransportProgressFailure', 's2WorktreeSagaFailureCode', 'shouldS2PreserveWorktreeSagaFailure'],
+      'src/core/coordination/d65-semantic-version.ts': ['isS2CoordinatorStoreCorruptionFailure'],
     });
 
     for (const [relativePath, requiredSymbols] of Object.entries(requiredConsumers)) {
@@ -401,6 +412,7 @@ void describe('S2 coordination failure taxonomy', () => {
       assert.equal(/coordinationFailureDefinition\(/u.test(source), false, displayPath);
       assert.equal(/\.retry_policy\s*(?:===|!==)\s*['"]|\.retry_policy\s*!==\s*['"]never['"]|\.failure_class\s*===\s*['"](?:owned-recovery|system-fatal|retryable-contention|client-invalid|fenced-client|contradiction-review)['"]/u.test(source), false, displayPath);
       assert.equal(/new\s+Set\s*\(\s*\[\s*['"](?:coordinator-unavailable|coordinator-contention|request-timeout)['"]/u.test(source), false, displayPath);
+      assert.equal(/instanceof\s+CoordinationRuntimeError[^\n;{}]*(?:&&|\|\|)[^\n;{}]*\.code\s*(?:===|!==)\s*['"][a-z0-9-]+['"]|\.code\s*(?:===|!==)\s*['"](?:invalid-request|invalid-state|protocol-mismatch|schema-mismatch|frame-too-large|unauthorized-client|coordinator-unavailable|coordinator-contention|fenced-session|stale-version|idempotency-conflict|request-timeout|recovery-required|git-partial-effect|disk-failure|permission-denied|planning-contradiction-review|store-corrupt|system-fatal)['"]/u.test(source), false, displayPath);
 
       if (isS2ConsumerSource(relativePath, source)) {
         assert.equal(/criticality:\s*['"](?:authority-critical|progress-critical)['"]|scope_rule:\s*['"](?:fail-closed-at-exact-scope|must-not-stop-unrelated-runs-or-coordinator)['"]/u.test(source), false, displayPath);

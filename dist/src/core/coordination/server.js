@@ -8,7 +8,7 @@ import { assertCoordinatorAdmissionAuthorityUnchanged, captureServingCoordinator
 import { parseCoordinatorAdmissionTransportRequest, parseCoordinatorTransportRequest, CoordinatorFrameDecoder, writeCoordinatorResponse } from "./ipc.js";
 import { CoordinationRuntimeError } from "./failures.js";
 import { buildS2CoordinationRuntimeErrorDiagnostic } from "./s2-diagnostics.js";
-import { isS2FailureResponseRetryable } from "./s2-failure-taxonomy.js";
+import { isS2CoordinatorContentionFailure, isS2FailureResponseRetryable } from "./s2-failure-taxonomy.js";
 import { runCoordinatorOwnedS2RetentionGc } from "./s2-owned-gc.js";
 import { currentBootId, isProcessAlive, predecessorCompatibleBootId, processStartIdentity } from "./process-identity.js";
 import { COORDINATOR_GRANT_OFFER_SWEEP_MS, enforcePrivateAuthorityPath, ensureCoordinatorPrivateRoots, readOrCreateCoordinatorCapability } from "./runtime-paths.js";
@@ -207,7 +207,7 @@ async function acquireCoordinatorLock(paths, adoption, beforeAuthorityPublicatio
                 guard = acquireSerializedProcessGuard(paths.lifecycleElectionPath, 25, 'predecessor fence maintenance');
             }
             catch (error) {
-                if (error instanceof CoordinationRuntimeError && error.code === 'coordinator-contention')
+                if (isS2CoordinatorContentionFailure(error))
                     return 'deferred';
                 throw error;
             }
@@ -704,8 +704,11 @@ export async function startCoordinatorServer(paths, clock, adoption, testHooks, 
         // restore operation enter the election.
         acquiredLifecycleLock.activate();
         await startupObserver?.transition('after-activation-before-first-handshake', acquiredLifecycleLock.record);
-        offerTimer = setInterval(() => {
-            void acquiredLifecycleLock.verifyOrRepairFence().then(async (outcome) => {
+        let offerSweepPromise = null;
+        const runSerializedOfferSweep = () => {
+            if (offerSweepPromise !== null)
+                return;
+            offerSweepPromise = acquiredLifecycleLock.verifyOrRepairFence().then(async (outcome) => {
                 if (outcome === 'verified') {
                     openedStore.sweepExpiredGrantOffers();
                     await runCoordinatorOwnedS2RetentionGc({ stateRoot: paths.stateRoot, runs: openedStore.terminalRunsForS2RetentionGc(), nowIso: new Date().toISOString() });
@@ -713,8 +716,11 @@ export async function startCoordinatorServer(paths, clock, adoption, testHooks, 
                 timerFailure = null;
             }).catch((error) => {
                 timerFailure = error instanceof Error ? error : new Error(String(error));
+            }).finally(() => {
+                offerSweepPromise = null;
             });
-        }, COORDINATOR_GRANT_OFFER_SWEEP_MS);
+        };
+        offerTimer = setInterval(runSerializedOfferSweep, COORDINATOR_GRANT_OFFER_SWEEP_MS);
         let closePromise = null;
         return {
             paths,
@@ -724,6 +730,7 @@ export async function startCoordinatorServer(paths, clock, adoption, testHooks, 
                     if (offerTimer !== null)
                         clearInterval(offerTimer);
                     offerTimer = null;
+                    await offerSweepPromise;
                     // Calling server.close synchronously retires listener acceptance. Only
                     // then may queued requests drain; idle/exhausted sockets are destroyed
                     // so the listener callback cannot outlive request authority.

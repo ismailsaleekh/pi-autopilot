@@ -28,6 +28,46 @@ function attachRun(store: CoordinatorStore, root: string, repoId: string, run: s
 }
 
 void describe('S1 run-scoped logical store faults', () => {
+  void it('fences exactly the participating planning contradiction authority set from new WRITE dispatch', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pi-autopilot-planning-contradiction-fence-'));
+    const paths = coordinatorRuntimePaths({ ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: root });
+    const repoId = 'repo-planning-fence';
+    const runA = 'run-contradiction-a';
+    const runB = 'run-contradiction-b';
+    const runC = 'run-unrelated';
+    let store = await CoordinatorStore.open(paths, { now: () => new Date('2026-07-16T00:00:00.000Z') });
+    attachRun(store, root, repoId, runA);
+    attachRun(store, root, repoId, runB);
+    attachRun(store, root, repoId, runC);
+    const generationPath = store.currentGeneration().database_path;
+    store.close();
+
+    const digest = `sha256:${'d'.repeat(64)}`;
+    const contradiction = {
+      schema_version: 'autopilot.planning_contradiction.v1', escalation_id: 'contradiction-exact-set', repo_id: repoId, participating_runs: [runA, runB],
+      authoritative_refs: [{ ref: 'mission-a.md', sha256: digest }, { ref: 'mission-b.md', sha256: digest }],
+      conflicting_clauses: [
+        { authoritative_ref: { ref: 'mission-a.md', sha256: digest }, source_type: 'mission', source_scope: 'repository', source_run: runA, schema_version: 'autopilot.mission.v1', clause_id: 'mission-a', exact_requirement: 'produce text', artifact_or_invariant: 'format', demanded_outcome: 'text' },
+        { authoritative_ref: { ref: 'mission-b.md', sha256: digest }, source_type: 'mission', source_scope: 'repository', source_run: runB, schema_version: 'autopilot.mission.v1', clause_id: 'mission-b', exact_requirement: 'produce binary', artifact_or_invariant: 'format', demanded_outcome: 'binary' },
+      ],
+      exhausted_alternatives: ['sequencing', 'partitioning', 'ownership-transfer', 'rebase-revalidation', 'replanning'], adjudication: { ref: 'adjudication.json', sha256: digest }, decision_options: ['retain text', 'adopt binary'], created_event_seq: 7, version: 1,
+    };
+    const tamper = new DatabaseSync(generationPath);
+    try { tamper.prepare('INSERT INTO escalations(entity_id,repo_id,payload_json,version) VALUES(?,?,?,?)').run('escalation-contradiction-exact-set', repoId, JSON.stringify(contradiction), 1); }
+    finally { tamper.close(); }
+
+    store = await CoordinatorStore.open(paths, { now: () => new Date('2026-07-16T00:01:00.000Z') });
+    try {
+      const blocked = store.handle(request({ request_id: 'dispatch-contradiction-a', action: 'acquire-group', idempotency_key: 'dispatch-contradiction-a', repo_id: repoId, workstream_run: runA, session_id: `session-${runA}`, fencing_generation: 1, expected_version: 2, payload: { acquisition_group_id: 'group-contradiction-a', acquisition_kind: 'initial', unit_id: 'unit-contradiction-a', attempt: 1, requested_leases: [{ path: 'src/blocked.ts', mode: 'WRITE', purpose: 'must wait for operator decision' }], reason: 'planning contradiction fence proof', normal_release_condition: { condition_type: 'unit-merged', target_id: 'unit-contradiction-a:1', evidence: null }, spec_ref: 'unit-contradiction-a.json', spec_sha256: `sha256:${'e'.repeat(64)}`, role: 'implement', preemptible: true, checkpoint_ordinal: 0, session_lease_id: `session-lease-${runA}`, session_token: token(`session-${runA}`) } }));
+      assert.equal(blocked.ok, false);
+      assert.equal(blocked.error_code, 'planning-contradiction-review');
+      assert.match(String(blocked.payload['message']), /participating planning authority set/u);
+
+      const unrelated = store.handle(request({ request_id: 'dispatch-unrelated', action: 'acquire-group', idempotency_key: 'dispatch-unrelated', repo_id: repoId, workstream_run: runC, session_id: `session-${runC}`, fencing_generation: 1, expected_version: 2, payload: { acquisition_group_id: 'group-unrelated', acquisition_kind: 'initial', unit_id: 'unit-unrelated', attempt: 1, requested_leases: [{ path: 'src/unrelated.ts', mode: 'WRITE', purpose: 'exact-scope unaffected dispatch' }], reason: 'planning contradiction exact-scope proof', normal_release_condition: { condition_type: 'unit-merged', target_id: 'unit-unrelated:1', evidence: null }, spec_ref: 'unit-unrelated.json', spec_sha256: `sha256:${'f'.repeat(64)}`, role: 'implement', preemptible: true, checkpoint_ordinal: 0, session_lease_id: `session-lease-${runC}`, session_token: token(`session-${runC}`) } }));
+      assert.equal(unrelated.ok, true, JSON.stringify(unrelated.payload));
+    } finally { store.close(); await rm(root, { recursive: true, force: true }); }
+  });
+
   void it('renews the faulted run heartbeat, blocks its dispatch, and leaves another run dispatchable', async () => {
     const root = await mkdtemp(join(tmpdir(), 'pi-autopilot-s1-scoped-fault-'));
     const paths = coordinatorRuntimePaths({ ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: root });

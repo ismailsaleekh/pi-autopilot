@@ -141,6 +141,22 @@ function extractCoordinatorSubcommands(coordinatorSource) {
   return [...commands, 'recovery'];
 }
 
+function extractAgentRunInvocations(agentRunSource) {
+  // The generated CLI synopsis must come from the runner's own usage() function,
+  // not a second hand-maintained string in the docs renderer. Keep the parser narrow
+  // and loud so a changed usage shape forces the generator to be updated.
+  const usageMatch = agentRunSource.match(/function usage\(\): string \{[\s\S]*?return \[\n([\s\S]*?)\n\s*\]\.join\('\\n'\);/u);
+  if (usageMatch === null) throw new Error('autopilot-agent-run.ts usage() return array not found');
+  const invocations = [];
+  for (const entry of usageMatch[1].matchAll(/^\s*'([^']*)',?$/gmu)) {
+    const line = entry[1];
+    if (line.startsWith('usage: ')) invocations.push(line.slice('usage: '.length));
+    else if (line.trim().startsWith('autopilot-agent-run ')) invocations.push(line.trim());
+  }
+  if (invocations.length === 0) throw new Error('autopilot-agent-run.ts usage() has no invocation lines');
+  return invocations;
+}
+
 /**
  * Build the full authoritative surface inventory used by the generator and checks.
  * @returns {Promise<import('./code-surfaces.mjs').CodeSurfaces>}
@@ -222,6 +238,8 @@ export async function loadCodeSurfaces() {
 
   const coordinatorSource = readSource(AST_SOURCES.coordinatorCli);
   const coordinatorSubcommands = extractCoordinatorSubcommands(coordinatorSource);
+  const agentRunSource = readSource(AST_SOURCES.agentRunCli);
+  const runnerInvocations = extractAgentRunInvocations(agentRunSource);
 
   return Object.freeze({
     packageName: names.AUTOPILOT_PACKAGE_NAME,
@@ -237,6 +255,7 @@ export async function loadCodeSurfaces() {
       roles.map((role) => Object.freeze({ role, ...roleRoster[role] })),
     ),
     runnerBin: names.AUTOPILOT_RUNNER_BIN,
+    runnerInvocations: Object.freeze(runnerInvocations),
     coordinatorBin: names.AUTOPILOT_COORDINATOR_BIN,
     coordinatorSubcommands: Object.freeze(coordinatorSubcommands),
     runtimeRootPrefix: names.AUTOPILOT_RUNTIME_ROOT_PREFIX,

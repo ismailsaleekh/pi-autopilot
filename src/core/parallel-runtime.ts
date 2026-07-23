@@ -20,7 +20,7 @@ import {
 } from './checkout-profile.ts';
 import { assertAutopilotDiskGate, AutopilotDiskGateError } from './disk-gate.ts';
 import { buildS2CoordinationFailureDiagnostic } from './coordination/s2-diagnostics.ts';
-import { readS2RetentionProgressState, recordS2RetentionDiskPressure, s2RetentionPressureStatePath, s2RetentionRunsPausedForWorktreeCreation } from './coordination/s2-retention-state-machine.ts';
+import { clearDurableS2RetentionDiskPressure, readS2RetentionProgressState, recordS2RetentionDiskPressure, s2RetentionPressureStatePath, s2RetentionRunsPausedForWorktreeCreation } from './coordination/s2-retention-state-machine.ts';
 import { applySparseCheckoutSet, createAutopilotGitWorktree } from './sparse-worktree.ts';
 import { cleanupTerminalUnitWorktreesForRun, recoverCommittedPreflightRollbackProjections } from './worktree-cleanup.ts';
 import { executeOwnedWorktreeSaga, OwnedWorktreeSagaClient, recoverOwnedWorktreeSagas } from './coordination/worktree-saga.ts';
@@ -63,12 +63,13 @@ function s2RetentionRootForWorktreeRoot(worktreeRoot: string): string {
   return join(worktreeRoot, '_retention');
 }
 
-async function assertS2WorktreeCreationNotPaused(worktreeRoot: string, workstreamRun: string): Promise<void> {
-  const statePath = s2RetentionPressureStatePath(s2RetentionRootForWorktreeRoot(worktreeRoot));
+async function clearRecoveredS2WorktreeDiskPressure(input: { readonly worktreeRoot: string; readonly workstreamRun: string }): Promise<void> {
+  const statePath = s2RetentionPressureStatePath(s2RetentionRootForWorktreeRoot(input.worktreeRoot));
   const state = await readS2RetentionProgressState(statePath);
-  if (!s2RetentionRunsPausedForWorktreeCreation(state).includes(workstreamRun)) return;
-  const lane = state.lanes.find((candidate) => candidate.workstream_run === workstreamRun);
-  fail('worktree-disk-pressure-paused', 'durable S2 retention pressure pauses only this run\'s new worktree creation; evidence and diagnostics remain publishable.', [workstreamRun, lane?.disk_pressure_reason ?? 'disk-pressure', String(lane?.disk_pressure_event_seq ?? -1)]);
+  if (!s2RetentionRunsPausedForWorktreeCreation(state).includes(input.workstreamRun)) return;
+  const lane = state.lanes.find((candidate) => candidate.workstream_run === input.workstreamRun);
+  if (lane?.disk_pressure_event_seq === null || lane?.disk_pressure_event_seq === undefined) return;
+  await clearDurableS2RetentionDiskPressure(statePath, input.workstreamRun, lane.disk_pressure_event_seq);
 }
 
 async function recordS2WorktreeDiskPressure(input: { readonly worktreeRoot: string; readonly workstreamRun: string; readonly error: AutopilotDiskGateError; readonly now: Date }): Promise<void> {
@@ -83,7 +84,7 @@ async function recordS2WorktreeDiskPressure(input: { readonly worktreeRoot: stri
     lane_effect: 'new-worktree-creation-paused-only',
     evidence_publication: 'open',
     diagnostics_publication: 'open',
-    diagnostic: buildS2CoordinationFailureDiagnostic({ code: 'coordinator-contention', message: input.error.message, evidence: input.error.evidence }),
+    diagnostic: buildS2CoordinationFailureDiagnostic({ code: 'disk-failure', message: input.error.message, evidence: input.error.evidence }),
     recorded_at: input.now.toISOString(),
   });
 }
@@ -91,6 +92,7 @@ async function recordS2WorktreeDiskPressure(input: { readonly worktreeRoot: stri
 async function assertDiskGateOrRecordS2Pressure(input: { readonly active?: ActiveAutopilotRow; readonly worktreeRoot: string; readonly workstreamRun: string; readonly now: Date; readonly path: string; readonly projection: Parameters<typeof assertAutopilotDiskGate>[0]['projection'] }): Promise<void> {
   try {
     assertAutopilotDiskGate({ path: input.path, projection: input.projection });
+    await clearRecoveredS2WorktreeDiskPressure({ worktreeRoot: input.worktreeRoot, workstreamRun: input.workstreamRun });
   } catch (error) {
     if (error instanceof AutopilotDiskGateError) await recordS2WorktreeDiskPressure({ worktreeRoot: input.worktreeRoot, workstreamRun: input.workstreamRun, error, now: input.now });
     throw error;
@@ -475,7 +477,6 @@ export async function prepareAutopilotUnitWorktree(input: {
       resumableUnitInfo = info;
     }
     await assertD65OrdinaryBoundaryFromEnvironment('unit-release', env);
-    await assertS2WorktreeCreationNotPaused(input.active.worktree_root, input.active.workstream_run);
     await cleanupTerminalUnitWorktreesForRun({ active: input.active, reason: 'prepare unit worktree pre-create cleanup', env, now });
     await assertD65OrdinaryBoundaryFromEnvironment('checkout-disk-estimate', env);
     const checkout = await checkoutMetadataForTaskRoot(taskRoot);
@@ -1205,7 +1206,21 @@ async function recoverCoordinatorBootstrapWorkstream(input: {
       intent: { repo_root: active.source_repo, worktree_path: active.main_worktree_path, git_common_dir: active.git_common_dir, branch: active.branch, reason: 'create isolated Autopilot main worktree', base_sha: active.target_base_sha, target_sha: null, archive_ref: null, checkout_mode: profileSnapshot.profile.mode, sparse_patterns: profileSnapshot.base_patterns, paths: [], metadata_refs: [AUTOPILOT_CHECKOUT_PROFILE_SNAPSHOT_FILE, TASK_INFO_FILE, BRANCHES_FILE, UNIT_INDEX_FILE] },
     }, {
       action: async () => {
-        await assertS2WorktreeCreationNotPaused(active.worktree_root, active.workstream_run);
+        const perWorktreeEstimateBytes = profileSnapshot.profile.mode === 'full'
+          ? profileSnapshot.full_checkout_bytes
+          : profileSnapshot.base_checkout_bytes;
+        await assertDiskGateOrRecordS2Pressure({
+          worktreeRoot: active.worktree_root,
+          workstreamRun: active.workstream_run,
+          now: input.now,
+          path: active.worktree_root,
+          projection: {
+            profileMode: profileSnapshot.profile.mode,
+            diskGate: profileSnapshot.profile.disk_gate,
+            perWorktreeEstimateBytes,
+            expectedParallelUnits: profileSnapshot.profile.disk_gate.expected_parallel_units,
+          },
+        });
         if (!existsSync(active.main_worktree_path)) await createAutopilotGitWorktree({ repoRoot: active.source_repo, worktreePath: active.main_worktree_path, branch: active.branch, startPoint: active.target_base_sha, mode: profileSnapshot.profile.mode, sparsePatterns: profileSnapshot.base_patterns, env: { ...input.env, [AUTOPILOT_RUNTIME_ENV]: AUTOPILOT_RUNTIME_VALUE } });
         if (profileSnapshot.profile.mode !== 'full') {
           await applySparseCheckoutSet(active.main_worktree_path, profileSnapshot.base_patterns, input.env);

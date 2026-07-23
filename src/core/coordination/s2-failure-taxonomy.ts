@@ -1,4 +1,4 @@
-import { COORDINATION_FAILURE_CODES, coordinationFailureDefinition, type CoordinationFailureClass, type CoordinationFailureCode, type CoordinationRetryPolicy } from './failures.ts';
+import { COORDINATION_FAILURE_CODES, CoordinationRuntimeError, coordinationFailureDefinition, type CoordinationFailureClass, type CoordinationFailureCode, type CoordinationRetryPolicy } from './failures.ts';
 
 export const S2_FAILURE_TAXONOMY_SCHEMA_VERSION = 'autopilot.s2.failure_taxonomy.v1';
 
@@ -275,6 +275,46 @@ export function shouldS2AttemptEffectUnknownRecovery(code: CoordinationFailureCo
 export function shouldS2UseSystemFatalExit(code: CoordinationFailureCode): boolean {
   const decision = decideS2CoordinationFailure(code);
   return decision.criticality === 'authority-critical' && decision.retry_policy === 'never' && (decision.scope_kind === 'coordinator-store' || decision.scope_kind === 'local-runtime');
+}
+
+export function isS2CoordinationRuntimeError(error: unknown): error is CoordinationRuntimeError {
+  return error instanceof CoordinationRuntimeError;
+}
+
+export function isS2RuntimeFailureWithScopeKind(error: unknown, scopeKinds: readonly S2FailureScopeKind[]): error is CoordinationRuntimeError {
+  return error instanceof CoordinationRuntimeError && scopeKinds.includes(decideS2CoordinationFailure(error.code).scope_kind);
+}
+
+export function isS2CoordinatorContentionFailure(error: unknown): error is CoordinationRuntimeError {
+  return error instanceof CoordinationRuntimeError && error.code === 'coordinator-contention';
+}
+
+export function isS2StaleVersionFailure(error: unknown): error is CoordinationRuntimeError {
+  return isS2RuntimeFailureWithScopeKind(error, ['entity-version']);
+}
+
+export function isS2CoordinatorTransportProgressFailure(error: unknown): error is CoordinationRuntimeError {
+  const decision = error instanceof CoordinationRuntimeError ? decideS2CoordinationFailure(error.code) : null;
+  return decision !== null && decision.criticality === 'progress-critical' && decision.retry_policy === 'same-idempotency-key' && (decision.scope_kind === 'coordinator-endpoint' || decision.scope_kind === 'transaction-attempt');
+}
+
+export function shouldS2PreserveWorktreeSagaFailure(error: unknown): error is CoordinationRuntimeError {
+  return isS2RuntimeFailureWithScopeKind(error, ['session-generation', 'client-authority-proof', 'entity-version']);
+}
+
+export function isS2OwnerRecoveryRequiredFailure(error: unknown): error is CoordinationRuntimeError {
+  return isS2RuntimeFailureWithScopeKind(error, ['owner-run-recovery']);
+}
+
+export function isS2CoordinatorStoreCorruptionFailure(error: unknown): error is CoordinationRuntimeError {
+  return isS2RuntimeFailureWithScopeKind(error, ['coordinator-store']);
+}
+
+export function s2WorktreeSagaFailureCode(error: unknown, transportInterrupted: boolean): CoordinationFailureCode {
+  if (isS2OwnerRecoveryRequiredFailure(error)) return error.code;
+  if (transportInterrupted) return 'coordinator-unavailable';
+  if (error instanceof CoordinationRuntimeError) return error.code;
+  return 'recovery-required';
 }
 
 export function assertS2FailureTaxonomyMatchesExistingRetryPolicy(): void {

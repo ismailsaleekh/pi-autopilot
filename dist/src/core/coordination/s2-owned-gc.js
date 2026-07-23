@@ -1,10 +1,10 @@
 import { createHash } from 'node:crypto';
 import { closeSync, constants as fsConstants, fstatSync, fsyncSync, lstatSync, openSync, writeFileSync } from 'node:fs';
-import { lstat, mkdir, readdir, rename, rm, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, open, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { basename, join, relative, resolve } from 'node:path';
 import { canonicalJson } from "./canonical-json.js";
 import { readImmutableFileBytes } from "./immutable-file.js";
-import { verifyS2ColdTerminalProof } from "./s2-retention-archive.js";
+import { assertS2RetentionNoSymlinkComponents, verifyS2ColdTerminalProof } from "./s2-retention-archive.js";
 import { isS2RetentionCandidateId, S2_RETENTION_ACTIVE_MARKER, S2_RETENTION_DIRTY_MARKER, S2_RETENTION_INFLIGHT_DIR, S2_RETENTION_LEDGER_FILE, S2_RETENTION_OWNER_MARKER, S2_RETENTION_QUARANTINE_MARKER, S2_RETENTION_SOLE_COPY_PIN, S2_RETENTION_TRANSITION_BACKUP_DIR, S2_RETENTION_TRASH_DIR, defineS2RetentionPolicy, } from "./s2-retention-policy.js";
 function sha256HexUtf8(value) {
     return createHash('sha256').update(value, 'utf8').digest('hex');
@@ -204,7 +204,7 @@ async function readLedgerEvents(ledgerPath) {
 }
 async function hasCommittedRemoval(ledgerPath, candidateId, repoId, ownerRun, kind, policyId) {
     for (const event of await readLedgerEvents(ledgerPath)) {
-        if (event.event_kind === 'candidate-removed' && event.candidate_id === candidateId && event.repo_id === repoId && event.owner_run === ownerRun && event.kind === kind && event.policy_id === policyId)
+        if ((event.event_kind === 'candidate-removed' || event.event_kind === 'inflight-replayed') && event.candidate_id === candidateId && event.repo_id === repoId && event.owner_run === ownerRun && event.kind === kind && event.policy_id === policyId)
             return true;
     }
     return false;
@@ -223,6 +223,15 @@ async function observeS2RetentionBoundary(boundary) {
     if (marker !== undefined && marker.length > 0)
         await writeFile(marker, `${boundary}\n`, { flag: 'w', mode: 0o600 });
     await new Promise(() => undefined);
+}
+async function fsyncDirectory(path) {
+    const handle = await open(path, 'r');
+    try {
+        await handle.sync();
+    }
+    finally {
+        await handle.close();
+    }
 }
 async function appendLedgerEvent(retentionRoot, event) {
     await mkdir(retentionRoot, { recursive: true });
@@ -247,6 +256,7 @@ async function appendLedgerEvent(retentionRoot, event) {
     finally {
         closeSync(descriptor);
     }
+    await fsyncDirectory(retentionRoot);
     return complete;
 }
 async function appendRefusal(input, candidateId, path, kind, reason) {
@@ -309,10 +319,11 @@ function assertCandidateMarkerMatches(input, marker, expectedKind, candidateId) 
     if (expectedKind === 'transition-backup' && !input.policy.allow_transition_backup_gc)
         throw new OwnedGcRefusal('policy-mismatch');
 }
-function verifyCandidateColdArchive(input, marker) {
+async function verifyCandidateColdArchive(input, marker) {
     const archivePath = resolve(input.coldArchiveRoot, marker.cold_archive_relpath);
     assertContained(input.coldArchiveRoot, archivePath);
     try {
+        await assertS2RetentionNoSymlinkComponents(input.coldArchiveRoot, archivePath);
         verifyS2ColdTerminalProof({
             archivePath,
             expectedColdArchiveSha256: marker.cold_archive_sha256,
@@ -336,7 +347,7 @@ async function validateCandidate(input, candidatePath, expectedKind, candidateId
         throw new OwnedGcRefusal('path-not-owned-directory');
     const marker = await readMarker(candidatePath);
     assertCandidateMarkerMatches(input, marker, expectedKind, candidateId);
-    verifyCandidateColdArchive(input, marker);
+    await verifyCandidateColdArchive(input, marker);
     if (await pathExists(join(candidatePath, S2_RETENTION_ACTIVE_MARKER)))
         throw new OwnedGcRefusal('active-run');
     if (await pathExists(join(candidatePath, S2_RETENTION_QUARANTINE_MARKER)))
@@ -357,7 +368,7 @@ async function validateInflightCandidate(input, inflightRoot, inflightPath, expe
         throw new OwnedGcRefusal('path-not-owned-directory');
     const marker = await readMarker(inflightPath);
     assertCandidateMarkerMatches(input, marker, expectedKind, candidateId);
-    verifyCandidateColdArchive(input, marker);
+    await verifyCandidateColdArchive(input, marker);
     const markerCount = await scanTreeForUnsafeLinks(inflightPath);
     if (markerCount !== 1)
         throw new OwnedGcRefusal('ambiguous-owner');
@@ -391,17 +402,25 @@ async function removeCandidate(input, candidatePath, kind, candidateId) {
     assertContained(inflightRoot, inflightParent);
     assertContained(inflightRoot, inflightPath);
     await mkdir(inflightParent, { recursive: true });
+    await assertNoSymlinkComponents(input.retentionRoot, inflightParent);
+    await fsyncDirectory(inflightRoot).catch((error) => { if (!isErrorWithCode(error, 'ENOENT'))
+        throw error; });
     await rename(candidatePath, inflightPath);
+    await fsyncDirectory(categoryRoot(input.retentionRoot, kind));
+    await fsyncDirectory(inflightParent);
     await observeS2RetentionBoundary('s2-gc-after-rename');
     await appendLedgerEvent(input.retentionRoot, {
         schema_version: 'autopilot.s2_retention.ledger.v1', event_kind: 'candidate-renamed', operation_id: input.operationId, repo_id: input.repoId, owner_run: input.ownerRun, candidate_id: candidateId,
         candidate_path_sha256: sha256HexUtf8(resolve(candidatePath)), kind, policy_id: input.policy.policy_id, at: input.nowIso,
     });
-    await rm(inflightPath, { recursive: true, force: false });
+    await validateInflightCandidate(input, inflightRoot, inflightPath, kind, candidateId);
     await appendLedgerEvent(input.retentionRoot, {
         schema_version: 'autopilot.s2_retention.ledger.v1', event_kind: 'candidate-removed', operation_id: input.operationId, repo_id: input.repoId, owner_run: input.ownerRun, candidate_id: candidateId,
         candidate_path_sha256: sha256HexUtf8(resolve(candidatePath)), kind, policy_id: input.policy.policy_id, at: input.nowIso,
     });
+    await observeS2RetentionBoundary('s2-gc-before-rm-after-authoritative-ledger');
+    await rm(inflightPath, { recursive: true, force: false });
+    await fsyncDirectory(inflightParent);
     await observeS2RetentionBoundary('s2-gc-after-rm');
     return { candidateId, kind, path: candidatePath, outcome: 'removed' };
 }
@@ -435,12 +454,14 @@ async function replayInflight(input) {
                 if (!await hasRenamedForReplay(ledgerPath, candidateId, input.repoId, input.ownerRun, kind, input.policy.policy_id))
                     throw new OwnedGcRefusal('missing-without-ledger');
                 await validateInflightCandidate(input, inflightRoot, inflightPath, kind, candidateId);
-                await rm(inflightPath, { recursive: true, force: false });
-                await observeS2RetentionBoundary('s2-gc-after-replay-rm');
                 await appendLedgerEvent(input.retentionRoot, {
                     schema_version: 'autopilot.s2_retention.ledger.v1', event_kind: 'inflight-replayed', operation_id: input.operationId, repo_id: input.repoId, owner_run: input.ownerRun, candidate_id: candidateId,
                     candidate_path_sha256: sha256HexUtf8(resolve(inflightPath)), kind, policy_id: input.policy.policy_id, at: input.nowIso,
                 });
+                await observeS2RetentionBoundary('s2-gc-before-replay-rm-after-authoritative-ledger');
+                await rm(inflightPath, { recursive: true, force: false });
+                await fsyncDirectory(operationPath);
+                await observeS2RetentionBoundary('s2-gc-after-replay-rm');
                 results.push({ candidateId, kind, path: inflightPath, outcome: 'replayed' });
             }
             catch (error) {
@@ -459,6 +480,10 @@ async function listCandidateIds(input, kind) {
     const root = categoryRoot(input.retentionRoot, kind);
     let entries;
     try {
+        await assertNoSymlinkComponents(input.retentionRoot, root);
+        const rootStat = await lstat(root);
+        if (!rootStat.isDirectory() || rootStat.isSymbolicLink())
+            throw new OwnedGcRefusal('path-not-owned-directory');
         entries = await readdir(root, { withFileTypes: true });
     }
     catch (error) {
@@ -475,14 +500,24 @@ export async function writeS2OwnedGcMarker(candidatePath, marker) {
 export async function runScheduledS2OwnedGc(input) {
     assertSafeOperationId(input.operationId);
     await mkdir(input.retentionRoot, { recursive: true });
+    const rootStat = await lstat(input.retentionRoot);
+    if (!rootStat.isDirectory() || rootStat.isSymbolicLink())
+        throw new Error('retention root must be a non-symbolic directory');
+    await fsyncDirectory(input.retentionRoot);
     const results = [...await replayInflight(input)];
     const kinds = input.policy.allow_transition_backup_gc ? ['trash', 'transition-backup'] : ['trash'];
     for (const kind of kinds) {
         const ids = await listCandidateIds(input, kind);
-        for (const candidateId of ids.slice(0, input.policy.gc_batch_limit)) {
+        let removedForKind = 0;
+        for (const candidateId of ids) {
+            if (removedForKind >= input.policy.gc_batch_limit)
+                break;
             const candidatePath = join(categoryRoot(input.retentionRoot, kind), candidateId);
             try {
-                results.push(await removeCandidate(input, candidatePath, kind, candidateId));
+                const result = await removeCandidate(input, candidatePath, kind, candidateId);
+                results.push(result);
+                if (result.outcome === 'removed' || result.outcome === 'duplicate-committed')
+                    removedForKind += 1;
             }
             catch (error) {
                 if (error instanceof OwnedGcRefusal)

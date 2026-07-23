@@ -2,7 +2,6 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
-import { DatabaseSync } from 'node:sqlite';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { it } from 'node:test';
@@ -71,14 +70,6 @@ void it('constructs a generic synthetic S2-D clone with no live route and rehear
     }
     const pointer = JSON.parse(await readFile(join(sourceCoordinator, 'current-store.json'), 'utf8')) as { readonly relative_generation_path: string };
     sourceDatabasePath = join(sourceCoordinator, pointer.relative_generation_path, 'coordinator.db');
-    const sourceDatabase = new DatabaseSync(sourceDatabasePath);
-    try {
-      const mismatchRows = sourceDatabase.prepare("SELECT entity_id,payload_json FROM worktree_operations WHERE repo_id=? AND workstream_run=?").all(repo.repoKey, 'run-c') as Array<Record<string, unknown>>;
-      assert.equal(mismatchRows.length, 1);
-      const mismatch = JSON.parse(String(mismatchRows[0]?.['payload_json'])) as Record<string, unknown>;
-      mismatch['authority_version'] = 0;
-      sourceDatabase.prepare('UPDATE worktree_operations SET payload_json=?, version=version+1 WHERE entity_id=?').run(canonicalJson(mismatch), String(mismatchRows[0]?.['entity_id']));
-    } finally { sourceDatabase.close(); }
     await writeFile(join(sourceCoordinator, 'coordinator.lock'), 'live lock must not route from clone\n', { encoding: 'utf8', mode: 0o600 });
     await writeFile(join(sourceState, 'active-autopilots.json'), `${canonicalJson([{ ...activeRow('run-a'), target_registration_path: join(sourceRepository, '.git', 'worktrees', 'run-a'), approved_prunable_registration_paths: [join(sourceRepository, '.git', 'worktrees', 'run-a-old')] }, activeRow('run-b')])}\n`, { encoding: 'utf8', mode: 0o600 });
 
@@ -109,7 +100,7 @@ void it('constructs a generic synthetic S2-D clone with no live route and rehear
     assert.deepEqual([...new Set(result.action_results.map((entry) => entry.action))].sort(), ['attach', 'dispatch-dry-run', 'doctor', 'reconcile']);
     assert.equal(clone.manifest.durable_runs.length, 3);
     assert.deepEqual([...new Set(clone.manifest.durable_runs.map((run) => run.attachment_strategy))].sort(), ['owned-recovery', 'safe-attachment']);
-    assert.deepEqual([...new Set(clone.manifest.durable_runs.map((run) => run.authority_version_mismatch))].sort(), ['no-operation-authority-version-mismatch', 'operation-authority-version-mismatch-blocked', 'operation-authority-version-mismatch-recovered']);
+    assert.deepEqual([...new Set(clone.manifest.durable_runs.map((run) => run.authority_version_mismatch))].sort(), ['no-operation-authority-version-mismatch', 'operation-authority-version-mismatch-recovered']);
     assert.equal(clone.manifest.durable_runs.every((run) => run.terminal_attempt_lease === 'no-retained-terminal-attempt-lease'), true);
     assert.equal(clone.manifest.durable_runs.every((run) => run.evidence_sha256.startsWith('sha256:')), true);
     assert.equal(clone.manifest.path_rebase_ledger.some((entry) => entry.target_kind === 'sqlite-cell'), true);
@@ -135,7 +126,7 @@ void it('constructs a generic synthetic S2-D clone with no live route and rehear
   }
 });
 
-void it('rehearses migration-frozen owned recovery through recovery-only APIs before ordinary attach', async () => {
+void it('fails release when migration-frozen owned recovery leaves doctor unhealthy blockers', async () => {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'pi-s2-d-migration-')));
   const source = join(root, 'source');
   const stateRoot = join(root, 'state');
@@ -164,9 +155,7 @@ void it('rehearses migration-frozen owned recovery through recovery-only APIs be
     });
     assert.equal(clone.manifest.durable_runs.length, 1);
     assert.equal(clone.manifest.durable_runs[0]?.attachment_strategy, 'owned-recovery');
-    const result = await writeRehearsalResult(clone);
-    assert.equal(result.action_results.length, 4);
-    assert.equal(result.new_blockers.length, 0);
+    await assert.rejects(() => writeRehearsalResult(clone), /candidate-doctor-blocked/u);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

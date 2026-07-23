@@ -12,6 +12,7 @@ import { assertD65BootstrapMainWorktreeEffectBoundaryFromEnvironment, assertD65O
 import { ensureD65WorktreeStageCadenceFromEnvironment } from "./d65-graph-successor-runtime.js";
 import { coordinatorRuntimePaths } from "./runtime-paths.js";
 import { currentBootId, isProcessAlive } from "./process-identity.js";
+import { isS2CoordinatorTransportProgressFailure, isS2OwnerRecoveryRequiredFailure, s2WorktreeSagaFailureCode, shouldS2PreserveWorktreeSagaFailure } from "./s2-failure-taxonomy.js";
 import { readCoordinatorSessionContext } from "./supervisor.js";
 import { deterministicWorktreeId, sameWorktreeAuthority, worktreeOwnerKindKey } from "./worktree-identity.js";
 import { deriveWorktreeOperationKeyV2, operationIdFromWorktreeOperationKey } from "./worktree-operation-identity.js";
@@ -47,10 +48,9 @@ function phaseCauseEvidence(prefix, error, maximumDetails) {
 }
 function phaseFailure(operation, phase, error, reconciliationError) {
     const original = error instanceof Error ? error.message : String(error);
-    const transport = [error, reconciliationError].some((candidate) => candidate instanceof CoordinationRuntimeError
-        ? candidate.code === 'coordinator-unavailable' || candidate.code === 'coordinator-contention'
-        : candidate instanceof Error && 'code' in candidate && ['ENOENT', 'ECONNREFUSED', 'ECONNRESET', 'EPIPE', 'ETIMEDOUT'].includes(String(candidate.code)));
-    const code = error instanceof CoordinationRuntimeError && error.code === 'recovery-required' ? 'recovery-required' : transport ? 'coordinator-unavailable' : error instanceof CoordinationRuntimeError ? error.code : 'recovery-required';
+    const transport = [error, reconciliationError].some((candidate) => isS2CoordinatorTransportProgressFailure(candidate)
+        || (candidate instanceof Error && 'code' in candidate && ['ENOENT', 'ECONNREFUSED', 'ECONNRESET', 'EPIPE', 'ETIMEDOUT'].includes(String(candidate.code))));
+    const code = s2WorktreeSagaFailureCode(error, transport);
     return new CoordinationRuntimeError(code, `owned worktree saga ${operation.operation_id} failed during ${phase}: ${original}${reconciliationError === undefined ? '' : '; durable reconciling report also failed'}`, [
         `operation_id=${operation.operation_id}`,
         `phase=${phase}`,
@@ -652,9 +652,9 @@ export async function executeOwnedWorktreeSaga(spec, callbacks, env = process.en
             // crash-resume pause, not a failed worktree effect. Appending a reconciling
             // event here would itself stale the just-published graph and make the
             // external heartbeat impossible to accept.
-            if (error instanceof CoordinationRuntimeError && error.code === 'recovery-required' && error.evidence.includes('d65-heartbeat-authority-pending'))
+            if (isS2OwnerRecoveryRequiredFailure(error) && error.evidence.includes('d65-heartbeat-authority-pending'))
                 throw error;
-            if (error instanceof CoordinationRuntimeError && (error.code === 'fenced-session' || error.code === 'unauthorized-client' || error.code === 'stale-version'))
+            if (shouldS2PreserveWorktreeSagaFailure(error))
                 throw error;
             if (error instanceof WorktreeSagaCompensatedError && !TERMINAL_STAGES.has(operation.stage) && operation.stage !== 'verified') {
                 const evidence = await client.writeEvidence(operation, 'compensated', null, error.proof, 'git-partial-effect');

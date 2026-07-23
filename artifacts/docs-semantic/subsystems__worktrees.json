@@ -1,0 +1,18 @@
+{
+  "schema_version": "autopilot.docs_semantic_attestation.v1",
+  "doc_id": "subsystems/worktrees",
+  "reviewed_body_hash": "sha256:0de6d188e0e64507e2aa95f2401cca2bb95801d4a6a5af96e83fc9e95f4cd70d",
+  "verdict": "PASS",
+  "reviewer": "Wave-4 independent validator (offline docs truth review)",
+  "reviewed_at": "2026-07-23T00:00:00.000Z",
+  "covers_sources": [
+    "src/core/parallel-runtime.ts",
+    "src/core/sparse-worktree.ts",
+    "src/core/checkout-profile.ts",
+    "src/core/disk-gate.ts",
+    "src/core/materialization.ts",
+    "src/core/git-guard.ts",
+    "src/core/git-process.ts"
+  ],
+  "notes": "Reviewed docs/subsystems/worktrees.md against the final worktree and disk-gate sources. The unchanged worktree prose remains true after S2 pressure recovery changes: worktree creation still goes through the package runtime, sparse/full checkout and git-guard constraints are unchanged, and the added per-run disk-pressure recheck/clear path preserves the documented isolation and production-owned materialization boundaries."
+}

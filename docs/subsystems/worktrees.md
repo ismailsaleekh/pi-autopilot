@@ -12,7 +12,7 @@ covers_sources:
   - src/core/git-guard.ts
   - src/core/git-process.ts
 signature_hash: 'sha256:82853603ad9b97c2a62ec6f2374efb085e1db7f7ae15d7af9a3d4cae2abde577'
-body_hash: 'sha256:2e92362af85b23cb5d955444effc2e51200b92a15d9942ce67473531c0164944'
+body_hash: 'sha256:0de6d188e0e64507e2aa95f2401cca2bb95801d4a6a5af96e83fc9e95f4cd70d'
 stability: stable
 ---
 

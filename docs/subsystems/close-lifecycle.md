@@ -12,7 +12,7 @@ covers_sources:
   - src/core/validation-staleness.ts
   - src/core/worktree-cleanup.ts
 signature_hash: 'sha256:008aa231a2414d2bcb29cc62696f7587634857ea043568428bd1f286fbc446b9'
-body_hash: 'sha256:37f3e2e8f4fe2ff9981b908520ba26054d6d5009a659e675d01837942d59b5af'
+body_hash: 'sha256:ffdff05ff0c9cafe113c644d7a9fcd604c5a11e49f10eae452bf1ee5196b62fa'
 stability: stable
 ---
 

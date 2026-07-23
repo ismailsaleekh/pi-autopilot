@@ -66,7 +66,7 @@ async function waitForCrash(child: ChildProcessLite): Promise<{ readonly code: n
   });
 }
 
-async function runBoundary(action: TerminalAction, boundary: AutopilotTerminalCleanupBoundary): Promise<void> {
+async function runBoundary(action: TerminalAction, boundary: AutopilotTerminalCleanupBoundary, options: { readonly deleteS2BindingBeforeRecovery?: boolean } = {}): Promise<void> {
   const root = await mkdtemp(join(tmpdir(), `pi-autopilot-terminal-${action}-${boundary}-`));
   const stateRoot = join(root, 'state');
   const repo = join(root, 'repo');
@@ -94,6 +94,7 @@ async function runBoundary(action: TerminalAction, boundary: AutopilotTerminalCl
     const crashed = await waitForCrash(child);
     assert.equal(crashed.code, 86, `${action}/${boundary} did not reach its crash boundary: ${crashed.stderr}`);
 
+    if (options.deleteS2BindingBeforeRecovery === true) await rm(join(prepared.active.runtime_root, 'close', '_s2-terminal-retention.json'), { force: true });
     const recover = action === 'close' ? closeAutopilotWorkstream : abortAutopilotWorkstream;
     const result = await recover({ workstream, sourceCwd: repo, workstreamRun: prepared.active.workstream_run, coordinationSessionId: `recovery-${action}-${boundary}`, env });
     assert.equal(result.outcome, action === 'close' ? 'closed' : 'aborted');
@@ -118,6 +119,10 @@ async function runBoundary(action: TerminalAction, boundary: AutopilotTerminalCl
 }
 
 void describe('post-terminal close/abort process-death recovery', () => {
+  void it('reconstructs missing S2 terminal retention binding after coordinator commit before cleanup recovery', async () => {
+    await runBoundary('close', 'after-terminal-commit', { deleteS2BindingBeforeRecovery: true });
+  });
+
   for (const action of ['close', 'abort'] as const) {
     for (const boundary of AUTOPILOT_TERMINAL_CLEANUP_BOUNDARIES) {
       void it(`${action} resumes after real process death at ${boundary}`, async () => {
