@@ -5,6 +5,7 @@ import { parseCoordinationEditLease, parseCoordinationUnitAttempt } from "../../
 import { CoordinationRuntimeError } from "../../src/core/coordination/failures.js";
 import { DurableRunSupervisorClient } from "../../src/core/coordination/supervisor.js";
 import { AUTOPILOT_STATE_ROOT_ENV } from "../../src/core/parallel-runtime.js";
+import { parseDurableRunContract } from "./contracts.js";
 function digestBytes(value) {
     return `sha256:${createHash('sha256').update(value).digest('hex')}`;
 }
@@ -50,7 +51,7 @@ function parseActive(value) {
 }
 function parseInput(value) {
     const row = record(value, 'terminal recovery worker input');
-    const contract = record(row['contract'], 'contract');
+    const contract = parseDurableRunContract(row['contract'], 'terminal recovery worker input.contract');
     return Object.freeze({ state_root: text(row['state_root'], 'state_root'), corpus_id: text(row['corpus_id'], 'corpus_id'), run_id_sha256: sha(row['run_id_sha256'], 'run_id_sha256'), repo_id_sha256: sha(row['repo_id_sha256'], 'repo_id_sha256'), repo: parseRepo(row['repo']), active: parseActive(row['active']), contract });
 }
 async function detach(supervisor, attachment) {

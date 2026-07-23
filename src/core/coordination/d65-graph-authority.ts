@@ -58,6 +58,7 @@ export interface D65GraphAuthorityParserContext {
 }
 
 export type D65GraphAuthorityParser = (value: unknown) => unknown;
+export type D65GraphAuthorityContextParser = (value: unknown, context: D65GraphAuthorityParserContext) => unknown;
 
 export interface D65GraphRefExtractor {
   readonly field_path: string;
@@ -85,6 +86,7 @@ export interface D65GraphRefExtractor {
 export interface D65GraphAuthoritySchemaRegistration {
   readonly schema_version: string;
   readonly parser: D65GraphAuthorityParser;
+  readonly parser_contextual: D65GraphAuthorityContextParser | null;
   readonly ref_extractors: readonly D65GraphRefExtractor[];
 }
 
@@ -203,13 +205,18 @@ function parseMergeConflict(value: unknown): unknown {
   return row;
 }
 
-function parseUnitFailure(value: unknown, context?: unknown): unknown {
+function parseD65GraphAuthorityParserContext(value: D65GraphAuthorityParserContext | undefined): D65GraphAuthorityParserContext | null {
+  if (value === undefined) return null;
+  if (!(value.bytes instanceof Uint8Array)) fail('parser context bytes must be a Uint8Array');
+  if (typeof value.ref !== 'string' || value.ref.length === 0) fail('parser context ref must be bounded text');
+  return Object.freeze({ bytes: value.bytes, ref: value.ref });
+}
+
+function parseUnitFailure(value: unknown, context?: D65GraphAuthorityParserContext): unknown {
   const label = 'autopilot.unit_failure.v1';
   if (!isJsonObject(value)) fail(`${label} must be an object`);
   if (value['schema_version'] !== label) fail(`${label}.schema_version is invalid`);
-  const parserContext = isJsonObject(context) && context['bytes'] instanceof Uint8Array && typeof context['ref'] === 'string'
-    ? context as unknown as D65GraphAuthorityParserContext
-    : null;
+  const parserContext = parseD65GraphAuthorityParserContext(context);
   const bytes = parserContext?.bytes ?? new TextEncoder().encode(`${JSON.stringify(value)}\n`);
   const provenance = (() => {
     if (Object.hasOwn(value, 'producer_build') || Object.hasOwn(value, 'producer_generation')) {
@@ -285,7 +292,8 @@ function parseClosedValidationStalenessV2(value: unknown): unknown {
 }
 
 const extractor = (field_path: string, base: 'repository' | 'runtime', target_collection: D65GraphAuthorityCollection | 'core', digest_field_path: string | null = null, byte_count_field_path: string | null = null, options: Partial<Pick<D65GraphRefExtractor, 'presence' | 'shape' | 'absolute_runtime_output'>> = {}): D65GraphRefExtractor => Object.freeze({ field_path, base, target_collection, digest_field_path, byte_count_field_path, traverse: true, presence: options.presence ?? 'required', shape: options.shape ?? 'ref', absolute_runtime_output: options.absolute_runtime_output ?? false });
-const schema = (schema_version: string, parser: D65GraphAuthorityParser, ref_extractors: readonly D65GraphRefExtractor[] = []): D65GraphAuthoritySchemaRegistration => Object.freeze({ schema_version, parser, ref_extractors: Object.freeze([...ref_extractors]) });
+const schema = (schema_version: string, parser: D65GraphAuthorityParser, ref_extractors: readonly D65GraphRefExtractor[] = []): D65GraphAuthoritySchemaRegistration => Object.freeze({ schema_version, parser, parser_contextual: null, ref_extractors: Object.freeze([...ref_extractors]) });
+const contextualSchema = (schema_version: string, parser: D65GraphAuthorityContextParser, ref_extractors: readonly D65GraphRefExtractor[] = []): D65GraphAuthoritySchemaRegistration => Object.freeze({ schema_version, parser: (value: unknown) => parser(value, { bytes: new TextEncoder().encode(`${JSON.stringify(value)}\n`), ref: '<context-required>' }), parser_contextual: parser, ref_extractors: Object.freeze([...ref_extractors]) });
 const row = (collection: D65GraphAuthorityCollection, roots: readonly string[], schemas: readonly D65GraphAuthoritySchemaRegistration[], direct_children_only = false, opaque = false): D65GraphAuthorityRegistryRow => Object.freeze({ collection, roots: Object.freeze([...roots]), direct_children_only, schemas: Object.freeze([...schemas]), opaque });
 
 export const D65_GRAPH_AUTHORITY_REGISTRY: readonly D65GraphAuthorityRegistryRow[] = Object.freeze([
@@ -314,7 +322,7 @@ export const D65_GRAPH_AUTHORITY_REGISTRY: readonly D65GraphAuthorityRegistryRow
   row('unit_merges', ['unit-merges/'], [schema('autopilot.unit_merge.v1', parseClosedUnitMerge, [extractor('status_ref','runtime','statuses'), extractor('receipt_ref','runtime','receipts'), extractor('audit_ref','runtime','audits'), extractor('execution_commit_ref','runtime','execution_commits')])]),
   row('integration_analyses', ['integration-analyses/'], [schema('autopilot.integration_analysis.v1', parseIntegrationAnalysis)]),
   row('integration_analyses', ['merge-conflicts/'], [schema('autopilot.merge_conflict.v1', parseMergeConflict, [extractor('integration_analysis_ref','runtime','integration_analyses')])]),
-  row('quarantine', ['quarantine/'], [schema('autopilot.unit_failure.v1', parseUnitFailure)]),
+  row('quarantine', ['quarantine/'], [contextualSchema('autopilot.unit_failure.v1', parseUnitFailure)]),
   row('reconciliation', ['coordination-reconciliation/'], [schema('autopilot.reconciliation_intent.v1', parseReconciliationIntent, [extractor('evidence_ref','repository','evidence','evidence_sha256')]), schema('autopilot.reconciliation_intent_supersession.v1', parseReconciliationSupersession, [extractor('evidence_ref','repository','evidence','evidence_sha256')])]),
   row('reconciliation', ['reservation-integration/'], [schema('autopilot.reservation_integration.v1', parseReservationIntegration)]),
   row('reconciliation', ['reservation-repairs/'], [schema('autopilot.reservation_repair.v1', parseReservationRepair)]),
@@ -422,8 +430,7 @@ function schemaRegistration(rowValue: D65GraphAuthorityRegistryRow, parsed: unkn
 }
 
 function runD65GraphAuthorityParser(registration: D65GraphAuthoritySchemaRegistration, parsed: unknown, bytes: Uint8Array, ref: string): unknown {
-  if (registration.schema_version === 'autopilot.unit_failure.v1') return (registration.parser as (value: unknown, context: D65GraphAuthorityParserContext) => unknown)(parsed, { bytes, ref });
-  return registration.parser(parsed);
+  return registration.parser_contextual === null ? registration.parser(parsed) : registration.parser_contextual(parsed, { bytes, ref });
 }
 
 function externalRegistration(schemaVersion: string): D65GraphAuthoritySchemaRegistration {

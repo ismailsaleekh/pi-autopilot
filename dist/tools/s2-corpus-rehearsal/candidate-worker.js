@@ -156,29 +156,39 @@ function errorEvidence(error) {
 function terminalRecoveryWorkerPath() {
     return fileURLToPath(new URL('./terminal-recovery-worker.ts', import.meta.url));
 }
+function lifecycleCapabilityDigest(path) {
+    return digestBytes(readFileSync(path));
+}
 function readLifecycleCandidate(stateRoot) {
-    const path = coordinatorRuntimePaths({ ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: stateRoot }).lockPath;
-    if (!existsSync(path))
+    const paths = coordinatorRuntimePaths({ ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: stateRoot });
+    if (paths.stateRoot !== stateRoot || !existsSync(paths.lockPath) || !existsSync(paths.capabilityPath))
         return null;
-    const parsed = JSON.parse(readFileSync(path, 'utf8'));
+    const parsed = JSON.parse(readFileSync(paths.lockPath, 'utf8'));
     const row = record(parsed, 'coordinator lifecycle lock');
     const pid = integer(row['pid'], 'coordinator lifecycle pid', 1);
     const processStart = text(row['process_start_identity'], 'coordinator lifecycle process identity');
-    return Object.freeze({ pid, process_start_identity: processStart });
+    return Object.freeze({ state_root: stateRoot, pid, process_start_identity: processStart, capability_sha256: lifecycleCapabilityDigest(paths.capabilityPath) });
 }
 async function wait(milliseconds) { await new Promise((resolveWait) => setTimeout(resolveWait, milliseconds)); }
-async function stopCloneCoordinator(stateRoot) {
+function sameLifecycleCandidate(left, right) {
+    return left !== null && right !== null && left.state_root === right.state_root && left.pid === right.pid && left.process_start_identity === right.process_start_identity && left.capability_sha256 === right.capability_sha256;
+}
+async function stopCloneCoordinator(stateRoot, preexisting) {
     const paths = coordinatorRuntimePaths({ ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: stateRoot });
+    if (paths.stateRoot !== stateRoot)
+        throw new Error('S2-D clone coordinator cleanup state-root resolution changed');
     const lifecycle = readLifecycleCandidate(stateRoot);
     if (lifecycle === null)
         return Object.freeze({ stopped: false, reason: 'no-lifecycle-lock' });
+    if (sameLifecycleCandidate(preexisting, lifecycle))
+        return Object.freeze({ stopped: false, reason: 'preexisting-foreign-coordinator-preserved', pid: lifecycle.pid, process_start_identity: lifecycle.process_start_identity });
     const started = processStartIdentity(lifecycle.pid);
     if (started === null) {
         await Promise.all([paths.lockPath, paths.socketPath, paths.startupLockPath, paths.predecessorLockPath, paths.predecessorSocketPath, paths.predecessorStartupLockPath].map(async (path) => { await rm(path, { force: true }); }));
         return Object.freeze({ stopped: false, reason: 'lifecycle-owner-already-exited', pid: lifecycle.pid, process_start_identity: lifecycle.process_start_identity });
     }
-    if (started !== lifecycle.process_start_identity)
-        throw new Error('S2-D clone coordinator lifecycle identity changed before cleanup');
+    if (started !== lifecycle.process_start_identity || lifecycle.capability_sha256 !== lifecycleCapabilityDigest(paths.capabilityPath))
+        throw new Error('S2-D clone coordinator lifecycle/capability identity changed before cleanup');
     process.kill(lifecycle.pid, 'SIGTERM');
     for (let index = 0; index < 200 && isExactProcessAlive(lifecycle.pid, lifecycle.process_start_identity); index += 1)
         await wait(25);
@@ -190,7 +200,10 @@ async function stopCloneCoordinator(stateRoot) {
     if (isExactProcessAlive(lifecycle.pid, lifecycle.process_start_identity) || isProcessAlive(lifecycle.pid) && processStartIdentity(lifecycle.pid) === lifecycle.process_start_identity)
         throw new Error('S2-D clone coordinator process leaked after deterministic cleanup');
     await Promise.all([paths.lockPath, paths.socketPath, paths.startupLockPath, paths.predecessorLockPath, paths.predecessorSocketPath, paths.predecessorStartupLockPath].map(async (path) => { await rm(path, { force: true }); }));
-    return Object.freeze({ stopped: true, pid: lifecycle.pid, process_start_identity: lifecycle.process_start_identity });
+    const after = readLifecycleCandidate(stateRoot);
+    if (after !== null && !sameLifecycleCandidate(preexisting, after))
+        throw new Error('S2-D cleanup left a new detached clone coordinator lifecycle owner');
+    return Object.freeze({ stopped: true, pid: lifecycle.pid, process_start_identity: lifecycle.process_start_identity, capability_sha256: lifecycle.capability_sha256 });
 }
 async function runTerminalRecoverySubprocess(input, before) {
     const inputPath = join(input.state_root, 'coordinator', `s2-d-terminal-recovery-${randomUUID()}.json`);
@@ -436,6 +449,7 @@ const inputPath = process.argv[2];
 if (inputPath === undefined)
     throw new Error('usage: candidate-worker <input-json>');
 const input = inputFromJson(JSON.parse(await readFile(inputPath, 'utf8')));
+const preexistingCloneCoordinator = readLifecycleCandidate(input.state_root);
 let failure = null;
 try {
     const output = await execute(input);
@@ -445,7 +459,7 @@ catch (error) {
     failure = error;
 }
 try {
-    await stopCloneCoordinator(input.state_root);
+    await stopCloneCoordinator(input.state_root, preexistingCloneCoordinator);
 }
 catch (cleanupError) {
     failure = failure === null ? cleanupError : new AggregateError([failure, cleanupError], 'S2-D candidate worker failed and clone coordinator cleanup also failed');

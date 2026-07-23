@@ -303,6 +303,10 @@ function parseRunContract(value: unknown, label: string): DurableRunContract {
   return Object.freeze({ corpus_id: identifier(row['corpus_id'], `${label}.corpus_id`), run_id_sha256: digest(row['run_id_sha256'], `${label}.run_id_sha256`), repo_id_sha256: digest(row['repo_id_sha256'], `${label}.repo_id_sha256`), required_actions: S2_D_DURABLE_RUN_ACTIONS, attachment_strategy: exactLiteral(row['attachment_strategy'], ['safe-attachment', 'owned-recovery'] as const, `${label}.attachment_strategy`), terminal_attempt_lease: exactLiteral(row['terminal_attempt_lease'], ['no-retained-terminal-attempt-lease', 'retained-terminal-attempt-recovery-required', 'retained-terminal-attempt-reconciled'] as const, `${label}.terminal_attempt_lease`), authority_version_mismatch: exactLiteral(row['authority_version_mismatch'], ['no-operation-authority-version-mismatch', 'operation-authority-version-mismatch-blocked', 'operation-authority-version-mismatch-recovered'] as const, `${label}.authority_version_mismatch`), evidence_sha256: digest(row['evidence_sha256'], `${label}.evidence_sha256`) });
 }
 
+export function parseDurableRunContract(value: unknown, label = 'S2-D durable run contract'): DurableRunContract {
+  return parseRunContract(value, label);
+}
+
 export function parseCorpusCloneManifest(value: unknown): CorpusCloneManifest {
   const row = jsonMap(value, ['schema_version', 'rehearsal_id', 'created_at', 'candidate_build', 'source_witness_before', 'database_witness_before', 'git_witness_before', 'path_rebase_ledger', 'clone_capability_sha256', 'isolation_proofs', 'durable_runs'], 'S2-D clone manifest');
   if (row['schema_version'] !== S2_CORPUS_CLONE_MANIFEST_SCHEMA) throw new S2CorpusContractError('S2-D clone manifest', ['schema_version mismatch']);

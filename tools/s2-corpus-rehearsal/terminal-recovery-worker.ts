@@ -6,7 +6,7 @@ import { parseCoordinationEditLease, parseCoordinationUnitAttempt } from '../../
 import { CoordinationRuntimeError } from '../../src/core/coordination/failures.ts';
 import { DurableRunSupervisorClient, type RunSupervisorAttachment } from '../../src/core/coordination/supervisor.ts';
 import { AUTOPILOT_STATE_ROOT_ENV, type ActiveAutopilotRow, type AutopilotRepoIdentity, type ProcessEnvLike } from '../../src/core/parallel-runtime.ts';
-import type { DurableRunContract, Sha256Digest } from './contracts.ts';
+import { parseDurableRunContract, type DurableRunContract, type Sha256Digest } from './contracts.ts';
 
 interface WorkerInput {
   readonly state_root: string;
@@ -66,7 +66,7 @@ function parseActive(value: unknown): ActiveAutopilotRow {
 
 function parseInput(value: unknown): WorkerInput {
   const row = record(value, 'terminal recovery worker input');
-  const contract = record(row['contract'], 'contract') as unknown as DurableRunContract;
+  const contract = parseDurableRunContract(row['contract'], 'terminal recovery worker input.contract');
   return Object.freeze({ state_root: text(row['state_root'], 'state_root'), corpus_id: text(row['corpus_id'], 'corpus_id'), run_id_sha256: sha(row['run_id_sha256'], 'run_id_sha256'), repo_id_sha256: sha(row['repo_id_sha256'], 'repo_id_sha256'), repo: parseRepo(row['repo']), active: parseActive(row['active']), contract });
 }
 

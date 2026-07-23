@@ -146,7 +146,7 @@ void describe('S2-D corpus contracts', () => {
     const source = readFileSync(new URL('../../tools/s2-corpus-rehearsal/candidate-worker.ts', import.meta.url), 'utf8');
     assert.match(source, /terminal-recovery-worker\.ts/u);
     assert.match(source, /runTerminalRecoverySubprocess\(input, before\)/u);
-    assert.match(source, /stopCloneCoordinator\(input\.state_root\)/u);
+    assert.match(source, /stopCloneCoordinator\(input\.state_root, preexistingCloneCoordinator\)/u);
     assert.match(readFileSync(new URL('../../tools/s2-corpus-rehearsal/release-gate.ts', import.meta.url), 'utf8'), /assertCloneCoordinatorReaped\(input\.copy_state_root\)/u);
   });
 

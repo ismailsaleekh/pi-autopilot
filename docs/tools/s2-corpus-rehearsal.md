@@ -9,8 +9,8 @@ covers_sources:
   - tools/s2-corpus-rehearsal/contracts.ts
   - tools/s2-corpus-rehearsal/release-gate.ts
   - tools/s2-corpus-rehearsal/candidate-worker.ts
-signature_hash: 'sha256:042171c49c2597678d3b079ac0a4341cf68ceb54c3f76ea9be7e266d4ae6daa6'
-body_hash: 'sha256:332d12814214b486ba1b2d5ff827ed7a47b7d7e3a158336f28e9762a576f7b5a'
+signature_hash: 'sha256:f7b6666a7b28d36bc08b51ced39179e15caef80980fbcc704453e436a50c843e'
+body_hash: 'sha256:08e9fcf3aae2dcf615efadf80096a623e14c1994035a9be392e75c482a05087b'
 stability: evolving
 ---
 
