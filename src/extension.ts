@@ -2089,7 +2089,10 @@ export default function autopilotExtension(pi: ExtensionHostLike, dependencies: 
           : `Autopilot coordinator status: schema=${schema} runs=${String(runCount)} sessions=${String(sessionCount)}.`;
         notify(ctx, summary, healthy === false ? 'error' : 'info');
       } catch (error) {
-        notify(ctx, `Autopilot coordination ${parsed.value.action} failed: ${error instanceof Error ? error.message : String(error)}`, 'error');
+        const diagnostic = error instanceof CoordinationRuntimeError
+          ? formatCoordinationRuntimeError(error)
+          : error instanceof Error ? error.message : String(error);
+        notify(ctx, `Autopilot coordination ${parsed.value.action} failed: ${diagnostic}`, 'error');
       }
     },
   });

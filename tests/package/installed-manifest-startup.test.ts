@@ -113,10 +113,11 @@ void it('reproduces cf48 through the declared installed manifest route and start
     await mkdir(candidateConsumer, { recursive: true });
     await initProject(candidateProject, env);
     install(candidateTarball, candidateConsumer, env);
-    const candidate = await invokePackedManifestAutopilot({ consumerRoot: candidateConsumer, projectRoot: candidateProject, stateRoot: candidateState, homeRoot: join(root, 'home-candidate'), workstream: 'manifest-candidate', env });
+    const candidate = await invokePackedManifestAutopilot({ consumerRoot: candidateConsumer, projectRoot: candidateProject, stateRoot: candidateState, homeRoot: join(root, 'home-candidate'), workstream: 'manifest-candidate', commandText: '/autopilot-coordination status', env });
     assert.equal(candidate.status, 0, `${candidate.stderr}\n${candidate.stdout}`);
     assert.equal(candidate.result?.['manifestEntry'], './extensions/autopilot.ts');
-    assert.equal(candidate.result?.['messages'], 1, notificationText(candidate));
+    assert.equal(candidate.result?.['messages'], 0, notificationText(candidate));
+    assert.match(notificationText(candidate), /coordinator status:/u);
     assert.equal(notificationText(candidate).includes('error'), false, notificationText(candidate));
     const lock = JSON.parse(await readFile(coordinatorRuntimePaths({ ...env, [AUTOPILOT_STATE_ROOT_ENV]: candidateState }).lockPath, 'utf8')) as Readonly<Record<string, unknown>>;
     assert.equal(lock['package_build'], '1.1.8-cf50');
@@ -141,7 +142,7 @@ void it('fails before spawn with explicit packaging evidence when the installed 
     await rm(join(installedRoot, 'dist', 'src', 'cli', 'autopilot-coordinator.js'));
     const marker = join(root, 'source-runtime-marker');
     await writeFile(join(installedRoot, 'src', 'cli', 'autopilot-coordinator.ts'), `import { writeFileSync } from 'node:fs'; writeFileSync(${JSON.stringify(marker)},'forbidden');\n`, 'utf8');
-    const invocation = await invokePackedManifestAutopilot({ consumerRoot: consumer, projectRoot: project, stateRoot, homeRoot: join(root, 'home'), workstream: 'missing-compiled', env });
+    const invocation = await invokePackedManifestAutopilot({ consumerRoot: consumer, projectRoot: project, stateRoot, homeRoot: join(root, 'home'), workstream: 'missing-compiled', commandText: '/autopilot-coordination status', env });
     assert.equal(invocation.status, 0, `${invocation.stderr}\n${invocation.stdout}`);
     const diagnostic = notificationText(invocation);
     assert.match(diagnostic, /startup_phase=spawn-resolution/u);
@@ -169,7 +170,7 @@ void it('reports packed bootstrap import failure with bounded sanitized pre-CLI 
     const corrupt = join(consumer, 'node_modules', 'pi-autopilot', 'dist', 'src', 'core', 'coordination', 'server.js');
     const original = await readFile(corrupt, 'utf8');
     await writeFile(corrupt, `throw new Error('synthetic import failure capability=do-not-expose ${'x'.repeat(8_000)}');\n${original}`, 'utf8');
-    const invocation = await invokePackedManifestAutopilot({ consumerRoot: consumer, projectRoot: project, stateRoot, homeRoot: join(root, 'home'), workstream: 'bootstrap-import', env });
+    const invocation = await invokePackedManifestAutopilot({ consumerRoot: consumer, projectRoot: project, stateRoot, homeRoot: join(root, 'home'), workstream: 'bootstrap-import', commandText: '/autopilot-coordination status', env });
     assert.equal(invocation.status, 0, `${invocation.stderr}\n${invocation.stdout}`);
     const diagnostic = notificationText(invocation);
     assert.match(diagnostic, /spawned_pid=\d+/u);

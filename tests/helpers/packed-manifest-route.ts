@@ -28,6 +28,7 @@ export async function invokePackedManifestAutopilot(input: {
   readonly stateRoot: string;
   readonly homeRoot: string;
   readonly workstream: string;
+  readonly commandText?: string;
   readonly env: Readonly<Record<string, string | undefined>>;
 }): Promise<PackedManifestInvocation> {
   const installedRoot = join(input.consumerRoot, 'node_modules', 'pi-autopilot');
@@ -96,8 +97,12 @@ session.extensionRunner.bindCore({
   getModel:()=>undefined,isIdle:()=>true,isProjectTrusted:()=>true,getSignal:()=>undefined,abort:()=>{},hasPendingMessages:()=>false,
   shutdown:()=>{},getContextUsage:()=>({tokens:1000,contextWindow:200000,percent:0.5}),compact:()=>{},getSystemPrompt:()=>'',
 });
-const command=session.extensionRunner.getCommand('autopilot');
-if(!command) throw new Error('real manifest-loaded extension did not register /autopilot');
+const commandText=${JSON.stringify(input.commandText ?? `/autopilot ${input.workstream} synthetic offline work`)};
+const separator=commandText.indexOf(' ');
+const commandName=(separator < 0 ? commandText : commandText.slice(0,separator)).replace(/^\\//,'');
+const commandArgs=separator < 0 ? '' : commandText.slice(separator+1);
+const command=session.extensionRunner.getCommand(commandName);
+if(!command) throw new Error('real manifest-loaded extension did not register /'+commandName);
 const context={
   cwd:projectRoot,
   ui:{notify:(message,kind)=>notifications.push({message,kind})},
@@ -106,7 +111,7 @@ const context={
   isIdle:()=>true,
 };
 let thrown=null;
-try { await command.handler(${JSON.stringify(`${input.workstream} synthetic offline work`)},context); }
+try { await command.handler(commandArgs,context); }
 catch(error){ thrown=error instanceof Error ? error.stack ?? error.message : String(error); }
 try { await session.extensionRunner.emit({type:'session_shutdown',reason:'quit'}); } catch {}
 session.dispose();

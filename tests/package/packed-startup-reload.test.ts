@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, rm, unlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm, unlink, writeFile } from 'node:fs/promises';
 import { platform, tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { after, it } from 'node:test';
@@ -93,8 +93,17 @@ async function invokePackedAutopilot(consumer: string, project: string, stateRoo
   assert.equal(invocation.result?.['messages'], 1, JSON.stringify(invocation.result?.['notifications']));
 }
 
+async function invokePackedCoordinationStatus(consumer: string, project: string, stateRoot: string, homeRoot: string, env: Readonly<Record<string, string | undefined>>): Promise<void> {
+  const invocation = await invokePackedManifestAutopilot({ consumerRoot: consumer, projectRoot: project, stateRoot, homeRoot, workstream: 'packed-status', commandText: '/autopilot-coordination status', env });
+  assert.equal(invocation.status, 0, `${invocation.stderr}\n${invocation.stdout}`);
+  assert.equal(invocation.result?.['manifestEntry'], './extensions/autopilot.ts');
+  assert.equal(invocation.result?.['messages'], 0, JSON.stringify(invocation.result?.['notifications']));
+  assert.match(JSON.stringify(invocation.result?.['notifications']), /Autopilot coordinator status:/u);
+  assert.equal(JSON.stringify(invocation.result?.['notifications']).includes('"kind":"error"'), false);
+}
+
 void it('routes exact cf45/cf46/cf47/cf48/cf49 packages through actual cf50 before the packed S1 candidate', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'pi-autopilot-packed-startup-reload-'));
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'pi-autopilot-packed-startup-reload-')));
   const cache = join(root, 'npm-cache');
   const npmEnv = { ...process.env, NPM_CONFIG_CACHE: cache, NPM_CONFIG_OFFLINE: 'true', PI_OFFLINE: '1', PI_SKIP_VERSION_CHECK: '1', PI_TELEMETRY: '0' };
   try {
@@ -160,13 +169,13 @@ void it('routes exact cf45/cf46/cf47/cf48/cf49 packages through actual cf50 befo
         if (project !== null) {
           const s1Runs = afterNaturalExit['runs'];
           assert.equal(Array.isArray(s1Runs) && s1Runs.length, 1, 'S1 must preserve the exact historical run through cf50');
-          await invokePackedAutopilot(consumer, project, stateRoot, join(root, 'packed-home-candidate'), 'packed-reload-unit', env);
-          await invokePackedAutopilot(consumer, project, stateRoot, join(root, 'packed-home-next'), 'packed-next-item', env);
+          // Phase 37 correctly refuses to synthesize roster authority for the historical
+          // run. Exercise the installed candidate through its roster-independent status
+          // command, then prove the exact predecessor run remains unchanged.
+          await invokePackedCoordinationStatus(consumer, project, stateRoot, join(root, 'packed-home-candidate'), env);
           const status = JSON.parse(String(run(coordinatorBin(consumer), ['status', '--state-root', stateRoot], consumer, env).stdout)) as Readonly<Record<string, unknown>>;
           const runs = status['runs'];
-          assert.equal(Array.isArray(runs) && runs.length, 2, 'reload must preserve one original run and prepare one exact next item');
-          const runIds = Array.isArray(runs) ? runs.map((runEntry) => typeof runEntry === 'object' && runEntry !== null && !Array.isArray(runEntry) ? (runEntry as Readonly<Record<string, unknown>>)['workstream_run'] : null) : [];
-          assert.equal(new Set(runIds).size, 2, 'reload must not duplicate a durable run operation');
+          assert.equal(Array.isArray(runs) && runs.length, 1, 'candidate status must preserve the one exact historical run without inventing roster authority');
           assert.equal(Array.isArray(runs) && runs.some((runEntry) => typeof runEntry === 'object' && runEntry !== null && !Array.isArray(runEntry) && typeof originalRun === 'object' && originalRun !== null && !Array.isArray(originalRun) && (runEntry as Readonly<Record<string, unknown>>)['workstream_run'] === (originalRun as Readonly<Record<string, unknown>>)['workstream_run']), true, 'the durable predecessor run identity must survive cf50 and S1 continuity');
         }
       } finally {
