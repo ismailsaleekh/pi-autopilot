@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
+import { mkdir, mkdtemp, realpath, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
 import { describe, it } from 'node:test';
 
 import autopilotExtension, {
+  trustedProjectForRequest,
   type AutopilotRosterActivationResolution,
   type ExtensionCommandContextLike,
   type ExtensionCommandDefinitionLike,
@@ -14,7 +18,16 @@ import autopilotExtension, {
 } from '../../src/extension.ts';
 import { AUTOPILOT_COMMAND, CONTEXT_BUDGET_TOOL_NAME } from '../../src/core/names.ts';
 import { parseAutopilotArgs } from '../../src/core/paths.ts';
-import { rosterDiagnostic } from '../../src/core/roster/route-policies.ts';
+import {
+  autopilotRosterContractCanonicalJson,
+  autopilotRosterContractSha256OmittingOwnField,
+  parseAutopilotRosterContract,
+} from '../../src/core/roster/contracts.ts';
+import { buildUserCustomRosterFromAssignments } from '../../src/core/roster/custom-certification.ts';
+import { SEED_ROSTERS, type Assignment, type Roster } from '../../src/core/roster/provider-recipes.ts';
+import { canonicalSha256, rosterDiagnostic } from '../../src/core/roster/route-policies.ts';
+import { formatAuthorityPath, resolveRosterScopePaths, rosterRevisionPath, type RosterSha256, type SavedRosterRef } from '../../src/core/roster/storage.ts';
+import { publishCreateOnlyAtomic, publishReplaceAtomic } from '../../src/core/roster/transaction.ts';
 import type { PreparedAutopilotWorkstream } from '../../src/core/parallel-runtime.ts';
 import type { VerifiedAutopilotRosterSetupSkillPackage } from '../../src/core/roster/skill-package.ts';
 
@@ -125,6 +138,89 @@ function makeContext(events: string[]): ExtensionCommandContextLike {
     isIdle: () => true,
     isProjectTrusted: () => true,
   };
+}
+
+async function withTempDir<T>(run: (dir: string) => Promise<T>): Promise<T> {
+  const dir = await mkdtemp(join(await realpath(tmpdir()), 'roster-activation-custom-'));
+  try {
+    return await run(dir);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+function readyCustomRoster(): Roster {
+  const seed = SEED_ROSTERS.find((entry) => entry.recipe_id === 'kimi-coding-plan');
+  if (seed === undefined) throw new Error('missing seed roster');
+  return buildUserCustomRosterFromAssignments({
+    slug: 'activation-block',
+    display_name: 'Activation custom block',
+    scope: 'user',
+    profile_id: 'precision',
+    assignments: seed.assignments.map((assignment) => rehashAssignment(assignment, { qualification_state: 'w4-certified-ready' })),
+    created_at: '2026-07-24T00:00:00.000Z',
+  });
+}
+
+function rehashAssignment(assignment: Assignment, patch: Partial<Omit<Assignment, 'assignment_sha256'>>): Assignment {
+  const withoutHash = {
+    role: patch.role ?? assignment.role,
+    provider_id: patch.provider_id ?? assignment.provider_id,
+    model_id: patch.model_id ?? assignment.model_id,
+    model: patch.model ?? assignment.model,
+    api: patch.api ?? assignment.api,
+    thinking: patch.thinking ?? assignment.thinking,
+    service_tier: patch.service_tier ?? assignment.service_tier,
+    cache_policy: patch.cache_policy ?? assignment.cache_policy,
+    system_prompt_profile: patch.system_prompt_profile ?? assignment.system_prompt_profile,
+    context_window: patch.context_window ?? assignment.context_window,
+    max_output_tokens: patch.max_output_tokens ?? assignment.max_output_tokens,
+    input_modalities: patch.input_modalities ?? assignment.input_modalities,
+    output_modalities: patch.output_modalities ?? assignment.output_modalities,
+    reasoning_capability: patch.reasoning_capability ?? assignment.reasoning_capability,
+    tool_capability: patch.tool_capability ?? assignment.tool_capability,
+    route_policy_id: patch.route_policy_id ?? assignment.route_policy_id,
+    route_policy_revision: patch.route_policy_revision ?? assignment.route_policy_revision,
+    billing_class: patch.billing_class ?? assignment.billing_class,
+    billing_route_class: patch.billing_route_class ?? assignment.billing_route_class,
+    auth_class: patch.auth_class ?? assignment.auth_class,
+    auth_source: patch.auth_source ?? assignment.auth_source,
+    qualification_state: patch.qualification_state ?? assignment.qualification_state,
+  } satisfies Omit<Assignment, 'assignment_sha256'>;
+  return { ...withoutHash, assignment_sha256: canonicalSha256(withoutHash) };
+}
+
+async function writeUserDefaultRoster(stateRoot: string, roster: Roster): Promise<void> {
+  const paths = resolveRosterScopePaths({ scope: 'user', stateRoot });
+  const parsedRoster = parseAutopilotRosterContract('autopilot.roster.v1', roster);
+  const rosterBytes = new TextEncoder().encode(autopilotRosterContractCanonicalJson(parsedRoster));
+  const ref: SavedRosterRef = {
+    roster_id: roster.roster_id,
+    roster_revision: roster.roster_revision,
+    roster_sha256: roster.roster_sha256 as RosterSha256,
+    assignment_set_sha256: roster.assignment_set_sha256 as RosterSha256,
+  };
+  const rosterPath = rosterRevisionPath(paths, ref);
+  await mkdir(dirname(rosterPath), { recursive: true, mode: 0o700 });
+  const rosterPublish = await publishCreateOnlyAtomic({ path: rosterPath, authorityRoot: paths.authorityRoot, bytes: rosterBytes });
+  assert.notEqual(rosterPublish.status, 'conflict');
+  const configWithoutHash = {
+    schema_version: 'autopilot.roster_config.v1' as const,
+    scope: 'user' as const,
+    default_roster_id: roster.roster_id,
+    default_roster_revision: roster.roster_revision,
+    default_roster_sha256: roster.roster_sha256,
+    rosters: [{ ...ref, path: formatAuthorityPath(rosterPath, paths.authorityRoot, paths.authorityDisplayRoot) }],
+    previous_config_sha256: null,
+    updated_at: '2026-07-24T00:00:00.000Z',
+    config_sha256: 'sha256:0000000000000000000000000000000000000000000000000000000000000000',
+  };
+  const config = {
+    ...configWithoutHash,
+    config_sha256: autopilotRosterContractSha256OmittingOwnField(configWithoutHash, 'config_sha256'),
+  };
+  const parsedConfig = parseAutopilotRosterContract('autopilot.roster_config.v1', config);
+  await publishReplaceAtomic({ path: paths.configPath, authorityRoot: paths.authorityRoot, bytes: new TextEncoder().encode(autopilotRosterContractCanonicalJson(parsedConfig)) });
 }
 
 function readyResolution(): AutopilotRosterActivationResolution {
@@ -311,6 +407,50 @@ void describe('D69 W2 roster activation', () => {
     assert.equal(pi.activeTools.length, 0);
     assert.equal(pi.messages.length, 0);
     assert.ok(events.some((event) => event.includes('ROSTER_READBACK_MISMATCH')));
+  });
+
+  void it('rejects caller-supplied trusted-project roots that do not match the current host context before storage', async () => {
+    await withTempDir(async (root) => {
+      const events: string[] = [];
+      const actualRoot = join(root, 'actual');
+      const attackerRoot = join(root, 'attacker');
+      await mkdir(actualRoot, { recursive: true });
+      await mkdir(attackerRoot, { recursive: true });
+      const ctx = { ...makeContext(events), cwd: actualRoot, isProjectTrusted: () => true };
+      const mismatch = await trustedProjectForRequest({ scope: 'trusted-project', trusted_project_root: attackerRoot }, ctx);
+      assert.equal(mismatch.ok, false);
+      if (mismatch.ok) throw new Error('trusted-project root mismatch unexpectedly accepted');
+      assert.deepEqual(mismatch.diagnostics.map((diagnostic) => diagnostic.code), ['ROSTER_STORAGE_TRUST_REQUIRED']);
+
+      const match = await trustedProjectForRequest({ scope: 'trusted-project', trusted_project_root: actualRoot }, ctx);
+      assert.equal(match.ok, true);
+      if (!match.ok) throw new Error('trusted-project root match unexpectedly rejected');
+      assert.equal(match.trustedProject?.root, await realpath(actualRoot));
+      assert.equal(await match.trustedProject?.isProjectTrusted(), true);
+    });
+  });
+
+  void it('blocks stored user-custom rosters even when assignments claim ready if exact custom registry authority is absent', async () => {
+    await withTempDir(async (stateRoot) => {
+      const events: string[] = [];
+      let prepareCalls = 0;
+      const pi = new FakePi(events);
+      await writeUserDefaultRoster(stateRoot, readyCustomRoster());
+      autopilotExtension(pi, {
+        rosterStateRoot: stateRoot,
+        resolveSetupSkillPackage: () => fakePackage(),
+        prepareAutopilotWorkstream: async () => { prepareCalls += 1; return fakePrepared(); },
+      });
+
+      await pi.commands.get(AUTOPILOT_COMMAND)?.handler('demo custom default must block', makeContext(events));
+
+      assert.equal(prepareCalls, 0);
+      assert.equal(events.some((event) => event.startsWith('find:')), false);
+      assert.equal(events.includes('setModel'), false);
+      assert.equal(pi.tools.some((tool) => tool.name === SETUP_TOOL_NAME), false);
+      assert.equal(pi.messages.length, 0);
+      assert.ok(events.some((event) => event.includes('ROSTER_QUALIFICATION_REQUIRED')));
+    });
   });
 
   void it('deactivates the setup tool on session boundary', async () => {

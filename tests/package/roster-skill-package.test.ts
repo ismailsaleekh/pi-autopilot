@@ -143,7 +143,8 @@ void it('resolves exact packaged roster setup resource bytes and hashes fail-clo
   assert.equal(await fileSha256(resource.payloadPath), AUTOPILOT_ROSTER_SETUP_PAYLOAD_SHA256);
   assert.equal(resource.payload.resources.skill_md.path, AUTOPILOT_ROSTER_SETUP_SKILL_MD_PATH);
   assert.equal(resource.payload.resources.skill_md.sha256, AUTOPILOT_ROSTER_SETUP_SKILL_SHA256);
-  assert.deepEqual(resource.payload.required_tool_contract.zero_write_actions, ['inspect', 'propose', 'reject', 'doctor']);
+  assert.deepEqual(resource.payload.required_tool_contract.zero_write_actions, ['inspect', 'propose', 'propose-custom', 'reject', 'doctor']);
+  assert.deepEqual(resource.payload.required_tool_contract.v2_actions, ['propose-custom', 'reject', 'save']);
   assert.deepEqual(resource.payload.conversation_contract.post_save, ['fresh_pi_session_required', 'retry_exact_original_autopilot_command', 'never_auto_start']);
   for (const marker of [
     'disable-model-invocation: true',
@@ -152,6 +153,8 @@ void it('resolves exact packaged roster setup resource bytes and hashes fail-clo
     'write_count=0',
     'candidate_set_sha256',
     'approved_roster_sha256s, in proposal order',
+    'role_assignment_intent',
+    'structurally valid custom roster is **not ready**',
     'Recommend Cruise only when',
     'fresh Pi session',
     'Do not auto-start Autopilot',

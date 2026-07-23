@@ -10,10 +10,10 @@ export const AUTOPILOT_ROSTER_SETUP_PAYLOAD_PATH = 'templates/skills/autopilot-r
 export const AUTOPILOT_ROSTER_SETUP_PACKAGE_SKILL_ENTRY = './templates/skills/autopilot-roster-setup';
 export const AUTOPILOT_ROSTER_SETUP_FREEZE_ID = 'phase37-roster-w0-2026-07-22';
 export const AUTOPILOT_ROSTER_SETUP_PI_MINIMUM_VERSION = '0.80.6';
-export const AUTOPILOT_ROSTER_SETUP_SKILL_SHA256 = 'sha256:f14f135f2ef7e101b95bdd6e7d3c787cb4efafd7a727b9f724d20d101857b352';
-export const AUTOPILOT_ROSTER_SETUP_SKILL_BYTE_COUNT = 6872;
-export const AUTOPILOT_ROSTER_SETUP_PAYLOAD_SHA256 = 'sha256:12fdd2ade39a21741e15dd97965049ec1272d8d3260c6b17f83f93988c58ed6b';
-export const AUTOPILOT_ROSTER_SETUP_PAYLOAD_BYTE_COUNT = 2825;
+export const AUTOPILOT_ROSTER_SETUP_SKILL_SHA256 = 'sha256:45a9f0df9b7b091d23297f2cc9c7e157b69518c94044f63114cede52470dccdd';
+export const AUTOPILOT_ROSTER_SETUP_SKILL_BYTE_COUNT = 8869;
+export const AUTOPILOT_ROSTER_SETUP_PAYLOAD_SHA256 = 'sha256:fdea917a5a810d5dc1f82ee780320424321df36f0f7e401c35332665713eb456';
+export const AUTOPILOT_ROSTER_SETUP_PAYLOAD_BYTE_COUNT = 3413;
 
 const PACKAGE_NAME = 'pi-autopilot';
 const SOURCE_MODULE_RELATIVE_PATH = join('src', 'core', 'roster', 'skill-package.ts');
@@ -66,9 +66,13 @@ export interface AutopilotRosterSetupSkillPayload {
     readonly operation: 'autopilot_manage_rosters';
     readonly request_schema: 'autopilot.roster_tool_request.v1';
     readonly result_schema: 'autopilot.roster_tool_result.v1';
+    readonly request_schemas: readonly ['autopilot.roster_tool_request.v1', 'autopilot.roster_tool_request.v2'];
+    readonly result_schemas: readonly ['autopilot.roster_tool_result.v1', 'autopilot.roster_tool_result.v2'];
     readonly actions: readonly ['inspect', 'propose', 'reject', 'doctor', 'save'];
-    readonly zero_write_actions: readonly ['inspect', 'propose', 'reject', 'doctor'];
+    readonly v2_actions: readonly ['propose-custom', 'reject', 'save'];
+    readonly zero_write_actions: readonly ['inspect', 'propose', 'propose-custom', 'reject', 'doctor'];
     readonly write_action: 'save';
+    readonly custom_structural_not_launch_ready: true;
     readonly w0_save_blocks_before_storage: true;
     readonly save_success_visible_write_count_certified: 3;
   };
@@ -90,6 +94,11 @@ export interface AutopilotRosterSetupSkillPayload {
       'default_roster_revision',
       'default_roster_sha256',
       'original_command',
+      'custom_proposal_sha256_for_custom_v2',
+      'validation_result_sha256_for_custom_v2',
+      'roster_sha256_for_custom_v2',
+      'manifest_sha256_for_custom_v2',
+      'approval_sha256_for_custom_v2',
     ];
     readonly post_save: readonly ['fresh_pi_session_required', 'retry_exact_original_autopilot_command', 'never_auto_start'];
   };
@@ -295,6 +304,12 @@ function assertSkillContentContract(skillText: string): void {
     'write_count=0',
     'candidate_set_sha256',
     'approved_roster_sha256s, in proposal order',
+    'autopilot.roster_tool_request.v2',
+    'role_assignment_intent',
+    'structurally valid custom roster is **not ready**',
+    'custom_proposal_sha256',
+    'validation_result_sha256',
+    'approval_sha256',
     'Recommend Cruise only when',
     'project trust',
     'secret-free',
@@ -352,13 +367,17 @@ function validatePayload(payload: JsonRecord, skillByteCount: number): Autopilot
   expectAuthorities(payload['authorities']);
 
   const tool = expectRecord(payload['required_tool_contract'], 'payload required_tool_contract');
-  expectKeys(tool, ['operation', 'request_schema', 'result_schema', 'actions', 'zero_write_actions', 'write_action', 'w0_save_blocks_before_storage', 'save_success_visible_write_count_certified'], 'payload required_tool_contract');
+  expectKeys(tool, ['operation', 'request_schema', 'result_schema', 'request_schemas', 'result_schemas', 'actions', 'v2_actions', 'zero_write_actions', 'write_action', 'custom_structural_not_launch_ready', 'w0_save_blocks_before_storage', 'save_success_visible_write_count_certified'], 'payload required_tool_contract');
   expectString(tool['operation'], 'autopilot_manage_rosters', 'payload tool operation');
   expectString(tool['request_schema'], 'autopilot.roster_tool_request.v1', 'payload tool request_schema');
   expectString(tool['result_schema'], 'autopilot.roster_tool_result.v1', 'payload tool result_schema');
+  expectStringArray(tool['request_schemas'], ['autopilot.roster_tool_request.v1', 'autopilot.roster_tool_request.v2'], 'payload tool request_schemas');
+  expectStringArray(tool['result_schemas'], ['autopilot.roster_tool_result.v1', 'autopilot.roster_tool_result.v2'], 'payload tool result_schemas');
   expectStringArray(tool['actions'], ['inspect', 'propose', 'reject', 'doctor', 'save'], 'payload tool actions');
-  expectStringArray(tool['zero_write_actions'], ['inspect', 'propose', 'reject', 'doctor'], 'payload zero_write_actions');
+  expectStringArray(tool['v2_actions'], ['propose-custom', 'reject', 'save'], 'payload v2 tool actions');
+  expectStringArray(tool['zero_write_actions'], ['inspect', 'propose', 'propose-custom', 'reject', 'doctor'], 'payload zero_write_actions');
   expectString(tool['write_action'], 'save', 'payload write_action');
+  expectBoolean(tool['custom_structural_not_launch_ready'], true, 'payload custom_structural_not_launch_ready');
   expectBoolean(tool['w0_save_blocks_before_storage'], true, 'payload w0_save_blocks_before_storage');
   expectNumber(tool['save_success_visible_write_count_certified'], 3, 'payload save_success_visible_write_count_certified');
 
@@ -385,7 +404,7 @@ function validatePayload(payload: JsonRecord, skillByteCount: number): Autopilot
   expectBoolean(conversation['blocked_and_converged_honesty_required'], true, 'payload blocked_and_converged_honesty_required');
   expectBoolean(conversation['approval_requires_exact_restatement'], false, 'payload approval_requires_exact_restatement');
   expectString(conversation['approval_authorization'], 'nonempty bounded user/rpc/interactive turn after current package-bound presentation; setup agent interprets approval semantics', 'payload approval_authorization');
-  expectStringArray(conversation['approval_fields'], ['scope', 'candidate_set_sha256', 'approved_roster_sha256s_in_order', 'default_roster_id', 'default_roster_revision', 'default_roster_sha256', 'original_command'], 'payload approval_fields');
+  expectStringArray(conversation['approval_fields'], ['scope', 'candidate_set_sha256', 'approved_roster_sha256s_in_order', 'default_roster_id', 'default_roster_revision', 'default_roster_sha256', 'original_command', 'custom_proposal_sha256_for_custom_v2', 'validation_result_sha256_for_custom_v2', 'roster_sha256_for_custom_v2', 'manifest_sha256_for_custom_v2', 'approval_sha256_for_custom_v2'], 'payload approval_fields');
   expectStringArray(conversation['post_save'], ['fresh_pi_session_required', 'retry_exact_original_autopilot_command', 'never_auto_start'], 'payload post_save');
 
   return payload as unknown as AutopilotRosterSetupSkillPayload;

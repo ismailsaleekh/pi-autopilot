@@ -39,6 +39,17 @@ Present candidates as a concise conversation, not a menu. Include:
 
 Recommend Cruise only when a Cruise candidate is actually ready in the returned contract. If recommended Cruise is blocked, do not choose another default implicitly; report `ROSTER_RECOMMENDED_PROFILE_BLOCKED` and ask for an explicit qualified choice (`ROSTER_EXPLICIT_CHOICE_REQUIRED`).
 
+### 2b. Custom/mixed proposal (zero-write, v2 only)
+
+If the user asks for custom or mixed roles, do **not** send a caller-built roster, precomputed roster hash, provider manifest, or anything parsed from `original_command`. Use `autopilot.roster_tool_request.v2` with `action: "propose-custom"` and a closed `custom_roster_request` whose `schema_version` is `autopilot.custom_roster_request.v2`. The payload must contain:
+
+- an ordinary-language `natural_language_request` describing the user's intent;
+- `profile_id` (`precision`, `cruise`, or `afterburner`);
+- exactly one `role_assignment_intent` item for every role (`parent`, `strategy`, `implement`, `validate`, `fix`, `adjudicate`, `bughunt`, `extract`), with explicit `role`, `provider_id`, `model_id`, `api`, and `thinking` plus optional `service_tier`, `cache_policy`, and `system_prompt_profile`;
+- `qualification_manifest` as `null` unless the package has supplied an exact custom_roster certification manifest for the exact roster.
+
+The package, not you, resolves the current model registry inventory and registered route policies, builds the canonical `generation_source: user-custom` roster, and returns `autopilot.roster_tool_result.v2` with a closed `custom_proposal`, `custom_validation`, `custom_roster`, `approval_binding`, and zero writes. Unknown fields are errors. A structurally valid custom roster is **not ready**: it remains blocked until `custom_validation.certification_status` is `autopilot-certified` for the exact `custom_proposal_sha256`, `validation_result_sha256`, `roster_sha256`, and `manifest_sha256`. With the current empty custom trust registry, custom save attempts must block with zero writes; report that honestly.
+
 ### 3. Approval gate before save
 
 Before any `save`, present the current proposal facts exactly and ask for an ordinary explicit user approval turn. The user does not need to echo the machine presentation; natural language such as "use your recommendation" can be enough when you, the setup agent, interpret it as approving the current proposal.
@@ -56,6 +67,8 @@ original_command: <exact original /autopilot command>
 ```
 
 Reject stale, partial, reordered, duplicate, hash-mismatched, ambiguous, rejecting, or refining user turns. Do not save from a thumbs-up, menu choice, or implied consent unless you can honestly interpret it as approval of the current presented proposal. Do not compute substitute hashes; the canonical hashes are the contract hashes returned by the roster operation.
+
+For custom v2 proposals, the approval presentation and `save` request must also bind the exact `custom_proposal_sha256`, `validation_result_sha256`, `roster_sha256`, `manifest_sha256`, and `approval_sha256` from `approval_binding`; structural validation alone is not approval to launch.
 
 ### 4. Save (the only write action)
 
