@@ -1,18 +1,32 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { ROUTE_POLICIES, findInventoryProvider, findRoutePolicy, type InventoryProvider } from '../../src/core/roster/route-policies.ts';
+import {
+  PHASE37_FIXTURE_CLOCK,
+  PHASE37_PACKAGE_VERSION,
+  PHASE37_PI_VERSION,
+  ROSTER_ROLE_ORDER,
+  ROUTE_POLICIES,
+  canonicalSha256,
+  findInventoryProvider,
+  findRoutePolicy,
+  type InventoryProvider,
+  type RoutePolicy,
+} from '../../src/core/roster/route-policies.ts';
 import {
   PROVIDER_RECIPES,
+  PROVIDER_RECIPE_REGISTRY,
   PROVIDER_RECIPE_REGISTRY_SHA256,
+  SEED_CANDIDATE_REGISTRY,
   SEED_CANDIDATE_REGISTRY_SHA256,
   SEED_CANDIDATES,
+  SEED_ROSTERS,
   assertCandidateDirectReferences,
   buildRosterFromRecipe,
-  createSyntheticQualificationManifest,
   fakeInventoryFromProviders,
   getProfileTemplate,
   getProviderRecipe,
+  isExactSyntheticQualificationManifest,
   proposeRosterCandidates,
   requestProfileFromAssignment,
   resolveRecipe,
@@ -20,7 +34,9 @@ import {
   validateRequestProfileForAssignment,
   verifyProviderRecipeSeeds,
   verifySeedCandidateRegistry,
+  type EvidenceRef,
   type ProviderRecipe,
+  type QualificationManifest,
   type RoleTemplate,
 } from '../../src/core/roster/provider-recipes.ts';
 
@@ -85,6 +101,47 @@ function codexInventory(overrides: Partial<InventoryProvider> = {}) {
   });
 }
 
+function forgeSyntheticQualificationManifest(
+  recipe: ProviderRecipe,
+  options: { readonly expires_at?: string; readonly priority_proof?: boolean } = {},
+): QualificationManifest {
+  const evidence: EvidenceRef = {
+    evidence_id: `synthetic-${recipe.recipe_id}-fixture`,
+    kind: 'synthetic-fixture',
+    uri: `fixture://phase37/${recipe.recipe_id}`,
+    sha256: null,
+    byte_count: null,
+    secret_free: true,
+  };
+  const priorityEvidence: EvidenceRef | null = options.priority_proof === true
+    ? {
+        evidence_id: `synthetic-${recipe.recipe_id}-priority-proof`,
+        kind: 'billing-proof',
+        uri: `fixture://phase37/${recipe.recipe_id}/priority-proof`,
+        sha256: null,
+        byte_count: null,
+        secret_free: true,
+      }
+    : null;
+  const withoutHash = {
+    schema_version: 'autopilot.certification_manifest.v1' as const,
+    manifest_id: `synthetic-${recipe.recipe_id}-qualification`,
+    manifest_revision: 1,
+    subject_kind: 'provider_recipe' as const,
+    subject_id: recipe.recipe_id,
+    subject_sha256: recipe.recipe_sha256,
+    package_version: PHASE37_PACKAGE_VERSION,
+    pi_version: PHASE37_PI_VERSION,
+    qualification_state: 'synthetic-test-ready' as const,
+    role_results: ROSTER_ROLE_ORDER.map((role) => ({ role, state: 'synthetic-pass' as const, evidence_refs: [evidence] })),
+    required_evidence: priorityEvidence === null ? [evidence] : [evidence, priorityEvidence],
+    live_evidence: [] as readonly EvidenceRef[],
+    issued_at: PHASE37_FIXTURE_CLOCK,
+    expires_at: options.expires_at ?? '2026-07-23T12:00:00.000Z',
+  } satisfies Omit<QualificationManifest, 'manifest_sha256'>;
+  return { ...withoutHash, manifest_sha256: canonicalSha256(withoutHash) };
+}
+
 void describe('Phase 37 W1 provider recipes and candidates', () => {
   void it('embeds exact W0 provider recipe and seed candidate registries', () => {
     assert.equal(PROVIDER_RECIPES.length, 5);
@@ -96,6 +153,29 @@ void describe('Phase 37 W1 provider recipes and candidates', () => {
       assertCandidateDirectReferences(candidate);
       assert.notEqual(candidate.launch_readiness, 'synthetic-fixture-only');
     }
+  });
+
+  void it('deep-freezes exported recipe, seed roster, and candidate authority', () => {
+    assert.throws(() => {
+      (PROVIDER_RECIPES[1]?.profile_templates as unknown as unknown[]).push({});
+    }, TypeError);
+    assert.throws(() => {
+      (PROVIDER_RECIPES[1]?.profile_templates[0]?.role_templates[0] as unknown as Record<string, unknown>)['model_id'] = 'forged-model';
+    }, TypeError);
+    assert.throws(() => {
+      (SEED_CANDIDATES[0]?.diagnostic_codes as unknown as string[]).push('ROSTER_ROUTE_FORBIDDEN');
+    }, TypeError);
+    assert.throws(() => {
+      (SEED_ROSTERS[0]?.assignments[0]?.input_modalities as unknown as string[]).push('audio');
+    }, TypeError);
+    assert.throws(() => {
+      (PROVIDER_RECIPE_REGISTRY.recipes as unknown as unknown[]).push({});
+    }, TypeError);
+    assert.throws(() => {
+      (SEED_CANDIDATE_REGISTRY.candidates as unknown as unknown[]).push({});
+    }, TypeError);
+    assert.deepEqual(verifyProviderRecipeSeeds(), []);
+    assert.deepEqual(verifySeedCandidateRegistry(), []);
   });
 
   void it('seed presence alone never becomes ready', () => {
@@ -119,33 +199,30 @@ void describe('Phase 37 W1 provider recipes and candidates', () => {
     assert.deepEqual(result.diagnostics.map((diagnostic) => diagnostic.code), ['ROSTER_QUALIFICATION_REQUIRED']);
   });
 
-  void it('only an exact synthetic qualification manifest produces ready candidates', () => {
+  void it('self-hashed synthetic qualification manifests never produce ready candidates', () => {
     const recipe = mustCodexRecipe();
     const inventory = codexInventory();
-    const manifest = createSyntheticQualificationManifest(recipe);
+    const manifest = forgeSyntheticQualificationManifest(recipe, { priority_proof: true });
     const proposal = proposeRosterCandidates({ inventory, recipes: [recipe], qualification_manifests: [manifest] });
 
-    assert.equal(proposal.ok, true);
-    assert.equal(proposal.status, 'proposed');
-    assert.deepEqual(proposal.candidate_set.candidates.map((candidate) => candidate.candidate_id), [
-      'codex-cruise-v1',
-      'codex-precision-v1',
-    ]);
-    assert.deepEqual(proposal.candidate_set.candidates.map((candidate) => candidate.candidate_sha256), [
-      'sha256:4e749047eb8c9ea0ba9e70f02d974b5eb4a1db4fe1933e6a7fc783866e5cc6f3',
-      'sha256:7418986444cb896932d7b4366c7815793dac0781aae83177f8d90d29a9651052',
-    ]);
-    assert.equal(proposal.candidate_set.candidates[0]?.converges_with, 'codex-precision-v1');
-    assert.deepEqual(proposal.diagnostics.map((diagnostic) => diagnostic.code), ['ROSTER_CONVERGED_ASSIGNMENT_SET']);
-
-    const corruptManifest = { ...manifest, subject_sha256: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' as const };
-    const corruptProposal = proposeRosterCandidates({ inventory, recipes: [recipe], qualification_manifests: [corruptManifest] });
-    assert.equal(corruptProposal.ok, false);
-    assert.equal(corruptProposal.candidate_set.candidates.length, 0);
-    assert.deepEqual(corruptProposal.diagnostics.map((diagnostic) => diagnostic.code), [
+    assert.equal(isExactSyntheticQualificationManifest(recipe, manifest), false);
+    assert.equal(proposal.ok, false);
+    assert.equal(proposal.status, 'blocked');
+    assert.deepEqual(proposal.candidate_set.candidates, []);
+    assert.deepEqual(proposal.diagnostics.map((diagnostic) => diagnostic.code), [
       'ROSTER_PRIORITY_PROOF_REQUIRED',
       'ROSTER_QUALIFICATION_REQUIRED',
     ]);
+
+    const includeUnready = proposeRosterCandidates({
+      inventory,
+      recipes: [recipe],
+      qualification_manifests: [manifest],
+      include_unready: true,
+    });
+    assert.equal(includeUnready.ok, false);
+    assert.equal(includeUnready.candidate_set.candidates.every((candidate) => candidate.launch_readiness !== 'synthetic-fixture-only'), true);
+    assert.equal(includeUnready.candidate_set.candidates.every((candidate) => candidate.synthetic_fixture_ready_only === false), true);
   });
 
   void it('reports stale candidate hashes before approval can be used', () => {
@@ -172,7 +249,7 @@ void describe('Phase 37 W1 provider recipes and candidates', () => {
     const proposal = proposeRosterCandidates({
       inventory,
       recipes: [recipe],
-      qualification_manifests: [createSyntheticQualificationManifest(recipe)],
+      include_unready: true,
     });
     assert.deepEqual(
       validateCandidateSetApproval(
@@ -275,6 +352,53 @@ void describe('Phase 37 W1 provider recipes and candidates', () => {
     ]);
   });
 
+  void it('uses injected route policy authority for inventory and assignment conformance without global fallback', () => {
+    const recipe = mustCodexRecipe();
+    const inventory = codexInventory();
+    const routePolicy = findRoutePolicy(recipe.route_policy_id, recipe.route_policy_revision, ROUTE_POLICIES);
+    if (routePolicy === null) {
+      throw new Error('missing codex route policy');
+    }
+
+    const authDivergentPolicy: RoutePolicy = { ...routePolicy, allowed_auth_classes: ['api-key'] };
+    const authResult = resolveRecipe(
+      {
+        schema_version: 'autopilot.recipe_resolution_request.v1',
+        profile_id: 'cruise',
+        recipe_id: recipe.recipe_id,
+        recipe_revision: recipe.recipe_revision,
+        inventory_sha256: inventory.inventory_sha256,
+      },
+      inventory,
+      { recipes: [recipe], routePolicies: [authDivergentPolicy] },
+    );
+    assert.equal(authResult.resolved, false);
+    assert.equal(authResult.candidate, null);
+    assert.deepEqual(authResult.diagnostics.map((diagnostic) => diagnostic.code), [
+      'ROSTER_AUTH_CHANNEL_FORBIDDEN',
+      'ROSTER_AUTH_REQUIRED',
+    ]);
+
+    const promptDivergentPolicy: RoutePolicy = {
+      ...routePolicy,
+      allowed_system_prompt_profiles: ['anthropic-autopilot-sanitized.v1'],
+    };
+    const conformanceResult = resolveRecipe(
+      {
+        schema_version: 'autopilot.recipe_resolution_request.v1',
+        profile_id: 'cruise',
+        recipe_id: recipe.recipe_id,
+        recipe_revision: recipe.recipe_revision,
+        inventory_sha256: inventory.inventory_sha256,
+      },
+      inventory,
+      { recipes: [recipe], routePolicies: [promptDivergentPolicy] },
+    );
+    assert.equal(conformanceResult.resolved, false);
+    assert.equal(conformanceResult.candidate, null);
+    assert.deepEqual(conformanceResult.diagnostics.map((diagnostic) => diagnostic.code), ['ROSTER_ROUTE_FORBIDDEN']);
+  });
+
   void it('validates request profiles exactly against role assignments', () => {
     const recipe = mustCodexRecipe();
     const profile = getProfileTemplate(recipe, 'cruise');
@@ -290,7 +414,7 @@ void describe('Phase 37 W1 provider recipes and candidates', () => {
     if (provider === null) {
       throw new Error('missing codex provider');
     }
-    const roster = buildRosterFromRecipe({ recipe, profile, routePolicy, provider, scope: 'user' });
+    const roster = buildRosterFromRecipe({ recipe, profile, routePolicy, routePolicies: ROUTE_POLICIES, provider, scope: 'user' });
     const implement = roster.assignments.find((assignment) => assignment.role === 'implement');
     if (implement === undefined) {
       throw new Error('missing implement assignment');

@@ -18,6 +18,26 @@ import {
   type RosterSha256Digest,
 } from './canonical.ts';
 
+function deepFreezeRosterAuthority<T>(value: T, seen = new WeakSet<object>()): T {
+  if ((typeof value !== 'object' && typeof value !== 'function') || value === null) {
+    return value;
+  }
+  const objectValue = value as object;
+  if (seen.has(objectValue)) {
+    return value;
+  }
+  seen.add(objectValue);
+  for (const key of Reflect.ownKeys(objectValue)) {
+    deepFreezeRosterAuthority((objectValue as Record<PropertyKey, unknown>)[key], seen);
+  }
+  return Object.freeze(objectValue) as T;
+}
+
+deepFreezeRosterAuthority(AUTOPILOT_ROSTER_CHILD_ROLE_ORDER);
+deepFreezeRosterAuthority(AUTOPILOT_ROSTER_PROFILE_VALUES);
+deepFreezeRosterAuthority(AUTOPILOT_ROSTER_ROLE_ORDER);
+deepFreezeRosterAuthority(AUTOPILOT_ROSTER_SCHEMA_VERSION_VALUES);
+
 export {
   AUTOPILOT_ROSTER_CHILD_ROLE_ORDER,
   AUTOPILOT_ROSTER_FREEZE_ID,
@@ -99,7 +119,7 @@ export class AutopilotRosterContractValidationError extends Error {
   }
 }
 
-export const AUTOPILOT_ROSTER_CONTRACT_SCHEMA_DEFINITIONS = {
+export const AUTOPILOT_ROSTER_CONTRACT_SCHEMA_DEFINITIONS = deepFreezeRosterAuthority({
   "autopilot.assignment.v1": {
     "closed": true,
     "field_order": [
@@ -6313,7 +6333,7 @@ export const AUTOPILOT_ROSTER_CONTRACT_SCHEMA_DEFINITIONS = {
       "model/thinking must equal the assignment request profile; no fallback"
     ]
   }
-} as const satisfies AutopilotRosterContractSchemaCatalog;
+} as const satisfies AutopilotRosterContractSchemaCatalog);
 
 const AUTOPILOT_ROSTER_CONTRACT_SCHEMA_CATALOG: AutopilotRosterContractSchemaCatalog =
   AUTOPILOT_ROSTER_CONTRACT_SCHEMA_DEFINITIONS;
@@ -6518,7 +6538,7 @@ function buildRosterJsonSchemas(): Readonly<Record<AutopilotRosterContractSchema
       const field = definition.fields[fieldName];
       if (field !== undefined) properties[fieldName] = fieldToJsonSchema(field);
     }
-    output[schemaVersion] = Object.freeze({
+    output[schemaVersion] = deepFreezeRosterAuthority({
       $id: `${AUTOPILOT_ROSTER_SCHEMA_ID_BASE}/${schemaVersion}.json`,
       type: 'object',
       additionalProperties: false,
@@ -6526,7 +6546,7 @@ function buildRosterJsonSchemas(): Readonly<Record<AutopilotRosterContractSchema
       required: [...definition.required],
     });
   }
-  return output as Readonly<Record<AutopilotRosterContractSchemaVersion, AutopilotRosterJsonSchema>>;
+  return deepFreezeRosterAuthority(output as Readonly<Record<AutopilotRosterContractSchemaVersion, AutopilotRosterJsonSchema>>);
 }
 
 function fieldToJsonSchema(field: AutopilotRosterContractFieldDefinition): AutopilotRosterJsonSchema {

@@ -2,7 +2,10 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import {
+  ROSTER_PROFILES,
+  ROSTER_ROLE_ORDER,
   ROUTE_POLICIES,
+  ROUTE_POLICY_REGISTRY,
   ROUTE_POLICY_REGISTRY_SHA256,
   hashRosterInventory,
   normalizeRosterInventory,
@@ -21,6 +24,22 @@ void describe('Phase 37 W1 route policies', () => {
     );
     assert.equal(ROUTE_POLICIES.every((policy) => policy.non_certifying_seed), true);
     assert.equal(ROUTE_POLICIES.every((policy) => policy.forbidden_gateways.includes('openrouter')), true);
+  });
+
+  void it('deep-freezes exported route policy authority', () => {
+    assert.throws(() => {
+      (ROSTER_ROLE_ORDER as unknown as string[]).push('forged');
+    }, TypeError);
+    assert.throws(() => {
+      (ROSTER_PROFILES[0] as unknown as Record<string, unknown>)['profile_id'] = 'forged';
+    }, TypeError);
+    assert.throws(() => {
+      (ROUTE_POLICIES[1]?.allowed_auth_classes as unknown as string[]).push('api-key');
+    }, TypeError);
+    assert.throws(() => {
+      (ROUTE_POLICY_REGISTRY.route_policies as unknown as unknown[]).push({});
+    }, TypeError);
+    assert.deepEqual(verifyRoutePolicySeeds(), []);
   });
 
   void it('matches routes only from explicit provider/api/auth facts', () => {

@@ -46,6 +46,37 @@ void describe('Phase 37 roster contract parsers', () => {
     assert.equal(objectAt(AUTOPILOT_JSON_SCHEMAS.receiptV2, 'properties')['schema_version'] !== undefined, true);
   });
 
+  void it('deep-freezes exported roster contract and JSON schema authority', () => {
+    const schemaVersion = 'autopilot.roster_candidate_set.v1';
+    const definition = AUTOPILOT_ROSTER_CONTRACT_SCHEMA_DEFINITIONS[schemaVersion];
+    const jsonSchema = objectAt(AUTOPILOT_JSON_SCHEMAS.rosterContracts, schemaVersion);
+    const jsonProperties = objectAt(jsonSchema, 'properties');
+    const jsonRequired = arrayAt(jsonSchema, 'required');
+
+    assert.equal(Object.isFrozen(AUTOPILOT_ROSTER_SCHEMA_VERSION_VALUES), true);
+    assert.equal(Object.isFrozen(definition.required), true);
+    assert.equal(Object.isFrozen(definition.fields), true);
+    assert.equal(Object.isFrozen(definition.fields['candidates']), true);
+    assert.equal(Object.isFrozen(jsonProperties), true);
+    assert.equal(Object.isFrozen(jsonRequired), true);
+
+    assert.throws(() => {
+      (AUTOPILOT_ROSTER_SCHEMA_VERSION_VALUES as unknown as string[]).push('autopilot.forged.v1');
+    }, TypeError);
+    assert.throws(() => {
+      (definition.required as unknown as string[]).push('forged');
+    }, TypeError);
+    assert.throws(() => {
+      (definition.fields as unknown as Record<string, unknown>)['forged'] = { type: 'string' };
+    }, TypeError);
+    assert.throws(() => {
+      (jsonProperties as Record<string, unknown>)['forged'] = { type: 'string' };
+    }, TypeError);
+    assert.throws(() => {
+      (jsonRequired as unknown as string[]).push('forged');
+    }, TypeError);
+  });
+
   void it('keeps v1 unit spec and receipt contracts stable while W1 roster contracts are additive', () => {
     const unitSpecProperties = objectAt(objectAt(AUTOPILOT_JSON_SCHEMAS.unitSpec, 'properties'), 'schema_version');
     assert.deepEqual(unitSpecProperties, { const: 'autopilot.unit_spec.v1' });

@@ -1,12 +1,27 @@
 import { createHash } from 'node:crypto';
 
+function deepFreezeRouteAuthority<T>(value: T, seen = new WeakSet<object>()): T {
+  if ((typeof value !== 'object' && typeof value !== 'function') || value === null) {
+    return value;
+  }
+  const objectValue = value as object;
+  if (seen.has(objectValue)) {
+    return value;
+  }
+  seen.add(objectValue);
+  for (const key of Reflect.ownKeys(objectValue)) {
+    deepFreezeRouteAuthority((objectValue as Record<PropertyKey, unknown>)[key], seen);
+  }
+  return Object.freeze(objectValue) as T;
+}
+
 export const PHASE37_FREEZE_ID = 'phase37-roster-w0-2026-07-22' as const;
 export const PHASE37_PACKAGE_VERSION = '1.3.0' as const;
 export const PHASE37_PI_VERSION = '0.80.6' as const;
 export const PHASE37_W0_SEED_CREATED_AT = '2026-07-22T00:00:00.000Z' as const;
 export const PHASE37_FIXTURE_CLOCK = '2026-07-22T12:00:00.000Z' as const;
 
-export const ROSTER_ROLE_ORDER = [
+export const ROSTER_ROLE_ORDER = deepFreezeRouteAuthority([
   'parent',
   'strategy',
   'implement',
@@ -15,9 +30,9 @@ export const ROSTER_ROLE_ORDER = [
   'adjudicate',
   'bughunt',
   'extract',
-] as const;
+] as const);
 
-export const ROSTER_CHILD_ROLE_ORDER = [
+export const ROSTER_CHILD_ROLE_ORDER = deepFreezeRouteAuthority([
   'strategy',
   'implement',
   'validate',
@@ -25,12 +40,12 @@ export const ROSTER_CHILD_ROLE_ORDER = [
   'adjudicate',
   'bughunt',
   'extract',
-] as const;
+] as const);
 
 export type RosterRole = (typeof ROSTER_ROLE_ORDER)[number];
 export type ChildRosterRole = (typeof ROSTER_CHILD_ROLE_ORDER)[number];
 
-export const ROSTER_PROFILES = [
+export const ROSTER_PROFILES = deepFreezeRouteAuthority([
   {
     profile_id: 'precision',
     display_name: 'Precision',
@@ -52,7 +67,7 @@ export const ROSTER_PROFILES = [
     recommended_by_default: false,
     quality_contract: 'perfect-quality',
   },
-] as const;
+] as const);
 
 export type RosterProfileId = (typeof ROSTER_PROFILES)[number]['profile_id'];
 export type RosterScope = 'user' | 'trusted-project';
@@ -175,7 +190,7 @@ export interface RosterDiagnostic {
 
 export type DiagnosticSeverity = 'info' | 'warning' | 'error' | 'fatal';
 
-export const ROSTER_DIAGNOSTIC_CODES = [
+export const ROSTER_DIAGNOSTIC_CODES = deepFreezeRouteAuthority([
   'ROSTER_AUTH_REQUIRED',
   'ROSTER_AUTH_CHANNEL_FORBIDDEN',
   'ROSTER_ROUTE_FORBIDDEN',
@@ -207,7 +222,7 @@ export const ROSTER_DIAGNOSTIC_CODES = [
   'ROSTER_HISTORICAL_VERSION_UNSUPPORTED',
   'ROSTER_HISTORICAL_FIXED_ROSTER_MISMATCH',
   'ROSTER_HISTORICAL_CONFLICTING_EVIDENCE',
-] as const;
+] as const);
 
 export type RosterDiagnosticCode = (typeof ROSTER_DIAGNOSTIC_CODES)[number];
 
@@ -230,7 +245,7 @@ function severityForDiagnosticCode(code: RosterDiagnosticCode): DiagnosticSeveri
 }
 
 export const ROSTER_DIAGNOSTICS: Readonly<Record<RosterDiagnosticCode, RosterDiagnostic>> =
-  Object.freeze(
+  deepFreezeRouteAuthority(
     Object.fromEntries(
       ROSTER_DIAGNOSTIC_CODES.map((code) => [
         code,
@@ -367,8 +382,8 @@ export function assertNoSecretFields(value: unknown, path = '$'): void {
 
 const ROUTE_POLICIES_JSON = '[{"schema_version":"autopilot.route_policy.v1","route_policy_id":"anthropic-sanitized-v1","revision":1,"provider_id":"anthropic","allowed_auth_classes":["api-key"],"allowed_auth_sources":["runtime","stored"],"billing_class":"metered-third-party-blocked","billing_route_class":"third-party-metered-blocked","allowed_apis":["anthropic-messages"],"allowed_service_tiers":[null],"allowed_cache_policies":["provider-default"],"allowed_system_prompt_profiles":["anthropic-autopilot-sanitized.v1"],"forbidden_gateways":["arbitrary-api-key","metered-frontier","openrouter"],"requires_live_billing_proof":true,"policy_state":"blocked-live-certification","qualification_state":"blocked-live-certification","non_certifying_seed":true,"route_policy_sha256":"sha256:dfe744bad274907e700d18357e70ec15a239c26e6b115a450aead641d195860b"},{"schema_version":"autopilot.route_policy.v1","route_policy_id":"codex-subscription-v1","revision":1,"provider_id":"openai-codex","allowed_auth_classes":["oauth"],"allowed_auth_sources":["runtime","stored"],"billing_class":"plan-backed-subscription","billing_route_class":"subscription-oauth","allowed_apis":["openai-codex-responses"],"allowed_service_tiers":[null,"priority"],"allowed_cache_policies":["provider-default"],"allowed_system_prompt_profiles":["pi-default.v1"],"forbidden_gateways":["arbitrary-api-key","metered-frontier","openrouter"],"requires_live_billing_proof":true,"policy_state":"unqualified-seed","qualification_state":"unqualified-non-certifying-seed","non_certifying_seed":true,"route_policy_sha256":"sha256:1a23f607a9fce47701ee5e7576205d29c7cb8451bc9186190ea4e9e550e60ccc"},{"schema_version":"autopilot.route_policy.v1","route_policy_id":"kimi-coding-plan-v1","revision":1,"provider_id":"kimi-coding","allowed_auth_classes":["api-key-plan-token"],"allowed_auth_sources":["runtime","stored"],"billing_class":"plan-token","billing_route_class":"plan-api-token","allowed_apis":["openai-completions"],"allowed_service_tiers":[null],"allowed_cache_policies":["provider-default"],"allowed_system_prompt_profiles":["pi-default.v1"],"forbidden_gateways":["arbitrary-api-key","metered-frontier","openrouter"],"requires_live_billing_proof":true,"policy_state":"unqualified-seed","qualification_state":"unqualified-non-certifying-seed","non_certifying_seed":true,"route_policy_sha256":"sha256:0925d0371e2f7f5ffae54e02ee9cf5c6d106dd5b47d7ec4698b68f754272d688"},{"schema_version":"autopilot.route_policy.v1","route_policy_id":"opencode-go-plan-v1","revision":1,"provider_id":"opencode-go","allowed_auth_classes":["api-key-plan-token"],"allowed_auth_sources":["runtime","stored"],"billing_class":"plan-token","billing_route_class":"plan-api-token","allowed_apis":["openai-completions"],"allowed_service_tiers":[null],"allowed_cache_policies":["provider-default"],"allowed_system_prompt_profiles":["pi-default.v1"],"forbidden_gateways":["arbitrary-api-key","metered-frontier","openrouter"],"requires_live_billing_proof":true,"policy_state":"unqualified-seed","qualification_state":"unqualified-non-certifying-seed","non_certifying_seed":true,"route_policy_sha256":"sha256:1fb2706f2e6c7192134f788a829fc199b3f5905cf45b77c7dbd511457d9350f5"},{"schema_version":"autopilot.route_policy.v1","route_policy_id":"zai-coding-plan-v1","revision":1,"provider_id":"zai","allowed_auth_classes":["api-key-plan-token"],"allowed_auth_sources":["runtime","stored"],"billing_class":"plan-token","billing_route_class":"plan-api-token","allowed_apis":["openai-completions"],"allowed_service_tiers":[null],"allowed_cache_policies":["provider-default"],"allowed_system_prompt_profiles":["pi-default.v1"],"forbidden_gateways":["arbitrary-api-key","metered-frontier","openrouter"],"requires_live_billing_proof":true,"policy_state":"unqualified-seed","qualification_state":"unqualified-non-certifying-seed","non_certifying_seed":true,"route_policy_sha256":"sha256:f59565fcef0baadf95010064cb8a4fde9423f2089a88076fe615859d15c6df54"}]';
 
-export const ROUTE_POLICIES: readonly RoutePolicy[] = Object.freeze(
-  (JSON.parse(ROUTE_POLICIES_JSON) as RoutePolicy[]).map((policy) => Object.freeze(policy)),
+export const ROUTE_POLICIES: readonly RoutePolicy[] = deepFreezeRouteAuthority(
+  JSON.parse(ROUTE_POLICIES_JSON) as RoutePolicy[],
 );
 
 export function routePolicySortKey(policy: Pick<RoutePolicy, 'route_policy_id' | 'revision'>): string {
@@ -396,7 +411,7 @@ export function computeRoutePolicyRegistry(policies: readonly RoutePolicy[] = RO
   };
 }
 
-export const ROUTE_POLICY_REGISTRY: RoutePolicyRegistry = Object.freeze(computeRoutePolicyRegistry());
+export const ROUTE_POLICY_REGISTRY: RoutePolicyRegistry = deepFreezeRouteAuthority(computeRoutePolicyRegistry());
 export const ROUTE_POLICY_REGISTRY_SHA256: Digest = ROUTE_POLICY_REGISTRY.route_policy_registry_sha256;
 
 export function findRoutePolicy(
@@ -569,7 +584,7 @@ export interface RouteConformanceRequest {
 
 export function validateRouteConformance(
   request: RouteConformanceRequest,
-  policies: readonly RoutePolicy[] = ROUTE_POLICIES,
+  policies: readonly RoutePolicy[],
 ): readonly RosterDiagnostic[] {
   const policy = findRoutePolicy(request.route_policy_id, request.route_policy_revision, policies);
   const diagnostics: RosterDiagnosticCode[] = [];
