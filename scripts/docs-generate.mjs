@@ -26,6 +26,7 @@ import {
   renderDefaults,
   renderModelRoster,
   renderReadBeforeEdit,
+  renderRosterReadiness,
   renderRuntimePaths,
   renderSchemas,
   renderTools,
@@ -40,6 +41,7 @@ const RENDERERS = {
   'model-roster': renderModelRoster,
   defaults: renderDefaults,
   'runtime-paths': renderRuntimePaths,
+  'roster-readiness': renderRosterReadiness,
 };
 
 function renderRegion(id, surfaces, sourceToDocs) {

@@ -14,8 +14,8 @@ covers_sources:
   - src/core/execution-audit/index.ts
   - src/core/prompt-renderer/index.ts
   - src/core/model-roster.ts
-signature_hash: 'sha256:47fe11d6fcd66ed33f128f0590a3f0016f1653ef6ea3646d86eb1c655c7064a3'
-body_hash: 'sha256:fdd2c483b68ac174452b69431618cb515a725fb030530ce03d1b6f0b460a3d41'
+signature_hash: 'sha256:1f9c82ae3d17b8da989f9a75961689fdc3b61d0e9de48c003bdd1ff3f30e62e6'
+body_hash: 'sha256:f6c5fa13f558cf9fb22ff9caa041723e151bc8d3eff2b69b324724de9894a99c'
 stability: stable
 ---
 
@@ -37,6 +37,7 @@ the runtime behind it.
 | Receipt/hash/status carrier validation | `src/core/forced-output/index.ts` |
 | Actual-change/audit helpers | `src/core/execution-audit/index.ts` |
 | Template loading/filling/validation | `src/core/prompt-renderer/index.ts` |
+| Roster request/observed identity checks | `src/core/forced-output/identity.ts`, `src/internal/execution-observer-extension.ts` |
 | D65 graph/policy/heartbeat dispatch gate | `src/core/coordination/d65-runtime-dispatch.ts` |
 
 ## Scheduler
@@ -65,7 +66,10 @@ needing a new edit path must emit a blocker.
 ## Forced output (the success contract)
 
 Success requires exactly one valid `autopilot_emit_status` carrier plus status and
-receipt evidence. On completion the runner:
+receipt evidence. For Phase 37 v2 specs, preflight first authenticates the pinned
+roster revision, pre-run selection, runtime mirror, assignment hash, and request
+profile; historical v1 evidence is admitted only by byte-faithful adapter authority.
+On completion the runner:
 
 1. accepts matching status + receipt + receipt-matching structured tool carrier,
 2. writes an `autopilot.execution_audit.v1` record under `execution-audits/`,
@@ -85,17 +89,21 @@ surfaces; unrelated dirty paths are recorded as audit caveats. D65 authority fai
 are fail-closed graph, launch-policy, heartbeat, or recovery-transition failures; they
 never fall through to model execution.
 
-## Model roster
+## Roster/request profile identity
 
-The forced-output identity layer recognizes subscription Pi routes under
-`openai-codex/*`, `anthropic/*`, `opencode-go/*`, `kimi-coding/*`, and `zai/*`, but the
-fixed launch roster is stricter: only the three documented `openai-codex/gpt-5.6-*`
-assignments. Any role/model/thinking mismatch is rejected before child launch;
-OpenRouter and other metered frontier routes remain forbidden. See the
-[model roster](../INDEX.md#model-roster).
+The legacy fixed OpenAI Codex assignments remain generated in the
+[model roster](../INDEX.md#model-roster) for fixed-role and historical compatibility
+surfaces. Phase 37 v2 execution is stricter than provider-name matching: the unit spec
+pins the roster, assignment, and request profile, the runner verifies Pi can set that
+profile before spend, and receipt acceptance compares requested vs observed provider,
+model, thinking, API route, service tier, cache policy, system-prompt profile/hash, and
+route policy. Current package provider packs are blocked or non-certifying, so these
+checks document the contract for certified rosters without implying current launch
+readiness. OpenRouter and other metered frontier routes remain forbidden.
 
 ## Related
 
 - CLI: [`../cli/autopilot-agent-run.md`](../cli/autopilot-agent-run.md)
 - Tool: [`../tools/autopilot_emit_status.md`](../tools/autopilot_emit_status.md)
+- Roster subsystem: [`roster-onboarding.md`](roster-onboarding.md)
 - Concept: [`../concepts/leases-and-observations.md`](../concepts/leases-and-observations.md)

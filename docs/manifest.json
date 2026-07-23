@@ -5,7 +5,8 @@
   "full_coverage_required": true,
   "surface_to_docs": {
     "/autopilot": [
-      "commands/autopilot"
+      "commands/autopilot",
+      "subsystems/roster-onboarding"
     ],
     "/autopilot-abort": [
       "commands/autopilot-abort",
@@ -36,11 +37,33 @@
     ],
     "autopilot-agent-run": [
       "cli/autopilot-agent-run",
+      "subsystems/roster-onboarding",
       "subsystems/runner-and-forced-output"
     ],
     "autopilot-coordinator": [
       "cli/autopilot-coordinator",
       "subsystems/coordination"
+    ],
+    "autopilot.assignment.v1": [
+      "subsystems/roster-onboarding"
+    ],
+    "autopilot.auth_summary.v1": [
+      "subsystems/roster-onboarding"
+    ],
+    "autopilot.billing_summary.v1": [
+      "subsystems/roster-onboarding"
+    ],
+    "autopilot.capability_summary.v1": [
+      "subsystems/roster-onboarding"
+    ],
+    "autopilot.certification_manifest.v1": [
+      "subsystems/roster-onboarding"
+    ],
+    "autopilot.certification_role_result.v1": [
+      "subsystems/roster-onboarding"
+    ],
+    "autopilot.context_ref.v2": [
+      "subsystems/roster-onboarding"
     ],
     "autopilot.decision.v1": [
       "subsystems/contracts-and-schemas"
@@ -48,20 +71,134 @@
     "autopilot.event.v1": [
       "subsystems/contracts-and-schemas"
     ],
+    "autopilot.evidence_ref.v1": [
+      "subsystems/roster-onboarding"
+    ],
     "autopilot.execution_audit.v1": [
       "subsystems/contracts-and-schemas"
     ],
     "autopilot.execution_commit.v1": [
       "subsystems/contracts-and-schemas"
     ],
+    "autopilot.existing_run_resolution_request.v1": [
+      "subsystems/roster-onboarding"
+    ],
+    "autopilot.existing_run_resolution_result.v1": [
+      "subsystems/roster-onboarding"
+    ],
     "autopilot.handoff.v1": [
       "subsystems/contracts-and-schemas"
+    ],
+    "autopilot.historical_fixed_roster_adapter_admission.v1": [
+      "subsystems/roster-onboarding"
+    ],
+    "autopilot.historical_fixed_roster_adapter_request.v1": [
+      "subsystems/roster-onboarding"
+    ],
+    "autopilot.historical_fixed_roster_adapter_result.v1": [
+      "subsystems/roster-onboarding"
+    ],
+    "autopilot.historical_fixed_roster_artifact.v1": [
+      "subsystems/roster-onboarding"
+    ],
+    "autopilot.historical_fixed_roster_role.v1": [
+      "subsystems/roster-onboarding"
+    ],
+    "autopilot.inventory_model.v1": [
+      "subsystems/roster-onboarding"
+    ],
+    "autopilot.inventory_provider.v1": [
+      "subsystems/roster-onboarding"
     ],
     "autopilot.master_plan.v1": [
       "subsystems/contracts-and-schemas"
     ],
+    "autopilot.observed_profile.v1": [
+      "subsystems/roster-onboarding"
+    ],
+    "autopilot.pre_run_selection.v1": [
+      "subsystems/roster-onboarding"
+    ],
+    "autopilot.pre_run_selection_publish_request.v1": [
+      "subsystems/roster-onboarding"
+    ],
+    "autopilot.pre_run_selection_publish_result.v1": [
+      "subsystems/roster-onboarding"
+    ],
+    "autopilot.profile_template.v1": [
+      "subsystems/roster-onboarding"
+    ],
+    "autopilot.provider_recipe.v1": [
+      "subsystems/roster-onboarding"
+    ],
     "autopilot.receipt.v1": [
       "subsystems/contracts-and-schemas"
+    ],
+    "autopilot.receipt.v2": [
+      "subsystems/roster-onboarding"
+    ],
+    "autopilot.receipt_validation_request.v1": [
+      "subsystems/roster-onboarding"
+    ],
+    "autopilot.receipt_validation_result.v1": [
+      "subsystems/roster-onboarding"
+    ],
+    "autopilot.recipe_resolution_request.v1": [
+      "subsystems/roster-onboarding"
+    ],
+    "autopilot.recipe_resolution_result.v1": [
+      "subsystems/roster-onboarding"
+    ],
+    "autopilot.request_profile.v1": [
+      "subsystems/roster-onboarding"
+    ],
+    "autopilot.role_template.v1": [
+      "subsystems/roster-onboarding"
+    ],
+    "autopilot.roster.v1": [
+      "subsystems/roster-onboarding"
+    ],
+    "autopilot.roster_candidate.v1": [
+      "subsystems/roster-onboarding"
+    ],
+    "autopilot.roster_candidate_set.v1": [
+      "subsystems/roster-onboarding"
+    ],
+    "autopilot.roster_config.v1": [
+      "subsystems/roster-onboarding"
+    ],
+    "autopilot.roster_diagnostic.v1": [
+      "subsystems/roster-onboarding"
+    ],
+    "autopilot.roster_doctor_result.v1": [
+      "subsystems/roster-onboarding"
+    ],
+    "autopilot.roster_inventory.v1": [
+      "subsystems/roster-onboarding"
+    ],
+    "autopilot.roster_setup_receipt.v1": [
+      "subsystems/roster-onboarding"
+    ],
+    "autopilot.roster_tool_request.v1": [
+      "subsystems/roster-onboarding"
+    ],
+    "autopilot.roster_tool_result.v1": [
+      "subsystems/roster-onboarding"
+    ],
+    "autopilot.roster_transition.v1": [
+      "subsystems/roster-onboarding"
+    ],
+    "autopilot.route_policy.v1": [
+      "subsystems/roster-onboarding"
+    ],
+    "autopilot.route_resolution_request.v1": [
+      "subsystems/roster-onboarding"
+    ],
+    "autopilot.route_resolution_result.v1": [
+      "subsystems/roster-onboarding"
+    ],
+    "autopilot.saved_roster_ref.v1": [
+      "subsystems/roster-onboarding"
     ],
     "autopilot.state.v1": [
       "subsystems/contracts-and-schemas"
@@ -71,6 +208,9 @@
     ],
     "autopilot.unit_spec.v1": [
       "subsystems/contracts-and-schemas"
+    ],
+    "autopilot.unit_spec.v2": [
+      "subsystems/roster-onboarding"
     ],
     "autopilot_emit_status": [
       "subsystems/runner-and-forced-output",
@@ -143,6 +283,9 @@
     "src/core/execution-commit.ts": [
       "subsystems/close-lifecycle"
     ],
+    "src/core/forced-output/identity.ts": [
+      "subsystems/roster-onboarding"
+    ],
     "src/core/forced-output/index.ts": [
       "subsystems/runner-and-forced-output"
     ],
@@ -177,6 +320,72 @@
     "src/core/quality/spec-gate.ts": [
       "subsystems/quality-and-closure"
     ],
+    "src/core/roster/activation-fence.ts": [
+      "subsystems/roster-onboarding"
+    ],
+    "src/core/roster/artifact-compatibility.ts": [
+      "subsystems/roster-onboarding"
+    ],
+    "src/core/roster/canonical.ts": [
+      "subsystems/roster-onboarding"
+    ],
+    "src/core/roster/contracts.ts": [
+      "subsystems/roster-onboarding"
+    ],
+    "src/core/roster/doctor.ts": [
+      "subsystems/roster-onboarding"
+    ],
+    "src/core/roster/historical-adapter.ts": [
+      "subsystems/roster-onboarding"
+    ],
+    "src/core/roster/paths.ts": [
+      "subsystems/roster-onboarding"
+    ],
+    "src/core/roster/provider-recipes.ts": [
+      "subsystems/roster-onboarding"
+    ],
+    "src/core/roster/providers/index.ts": [
+      "subsystems/roster-onboarding"
+    ],
+    "src/core/roster/resolve.ts": [
+      "subsystems/roster-onboarding"
+    ],
+    "src/core/roster/route-policies.ts": [
+      "subsystems/roster-onboarding"
+    ],
+    "src/core/roster/run-selection.ts": [
+      "subsystems/roster-onboarding"
+    ],
+    "src/core/roster/runtime-consumers.ts": [
+      "subsystems/roster-onboarding"
+    ],
+    "src/core/roster/runtime-spec.ts": [
+      "subsystems/roster-onboarding"
+    ],
+    "src/core/roster/setup-approval.ts": [
+      "subsystems/roster-onboarding"
+    ],
+    "src/core/roster/setup-context.ts": [
+      "subsystems/roster-onboarding"
+    ],
+    "src/core/roster/setup-receipt.ts": [
+      "subsystems/roster-onboarding"
+    ],
+    "src/core/roster/setup-tool.ts": [
+      "subsystems/roster-onboarding"
+    ],
+    "src/core/roster/skill-package.ts": [
+      "subsystems/roster-onboarding"
+    ],
+    "src/core/roster/snapshot.ts": [
+      "subsystems/roster-onboarding"
+    ],
+    "src/core/roster/storage.ts": [
+      "subsystems/roster-onboarding"
+    ],
+    "src/core/roster/transaction.ts": [
+      "subsystems/roster-onboarding"
+    ],
     "src/core/scheduler-config.ts": [
       "commands/autopilot-config"
     ],
@@ -201,8 +410,20 @@
     "src/core/worktree-cleanup.ts": [
       "subsystems/close-lifecycle"
     ],
+    "src/extension.ts": [
+      "subsystems/roster-onboarding"
+    ],
+    "src/internal/execution-observer-extension.ts": [
+      "subsystems/roster-onboarding"
+    ],
     "src/internal/status-extension.ts": [
       "tools/autopilot_emit_status"
+    ],
+    "templates/skills/autopilot-roster-setup/SKILL.md": [
+      "subsystems/roster-onboarding"
+    ],
+    "templates/skills/autopilot-roster-setup/payload.json": [
+      "subsystems/roster-onboarding"
     ]
   },
   "docs": {
@@ -551,7 +772,7 @@
         "src/core/names.ts"
       ],
       "signature_hash": "sha256:09d5b894b45a6ee909d86cc0f308ba3e12e25aad1bf7b6bb02c08611fa3eded0",
-      "body_hash": "sha256:4d9d32c4b79509ce30973a0bc16de7d1d7ecc51dd91b2a89a8f8d7e424fd228c",
+      "body_hash": "sha256:d0b47661598d9edfdfb1e69c53c73fbaf7899938f26da34f5355186802b830df",
       "semantic_attestation": null
     },
     "subsystems/coordination": {
@@ -594,8 +815,95 @@
         "src/core/quality/spec-gate.ts",
         "src/core/state-store/index.ts"
       ],
-      "signature_hash": "sha256:4364c2c6133369f29b7b1270545272492ed677c8048cb0eab4faf99a558a6408",
-      "body_hash": "sha256:1934cbfc1425b3718ced056044a3c8c7ae558b797120d69642681f05108d7290",
+      "signature_hash": "sha256:c602e7d05563ac3b9cbf795cc9f08a5b2ed38a9d9ad63d9444b66564187b361f",
+      "body_hash": "sha256:5cf80e60a9e7d0f7e150253e403513fe1692b7fb459aed7490302067686a0342",
+      "semantic_attestation": null
+    },
+    "subsystems/roster-onboarding": {
+      "mode": "mixed",
+      "review_policy": "contract",
+      "stability": "evolving",
+      "covers_surfaces": [
+        "/autopilot",
+        "autopilot-agent-run",
+        "autopilot.assignment.v1",
+        "autopilot.auth_summary.v1",
+        "autopilot.billing_summary.v1",
+        "autopilot.capability_summary.v1",
+        "autopilot.certification_manifest.v1",
+        "autopilot.certification_role_result.v1",
+        "autopilot.context_ref.v2",
+        "autopilot.evidence_ref.v1",
+        "autopilot.existing_run_resolution_request.v1",
+        "autopilot.existing_run_resolution_result.v1",
+        "autopilot.historical_fixed_roster_adapter_admission.v1",
+        "autopilot.historical_fixed_roster_adapter_request.v1",
+        "autopilot.historical_fixed_roster_adapter_result.v1",
+        "autopilot.historical_fixed_roster_artifact.v1",
+        "autopilot.historical_fixed_roster_role.v1",
+        "autopilot.inventory_model.v1",
+        "autopilot.inventory_provider.v1",
+        "autopilot.observed_profile.v1",
+        "autopilot.pre_run_selection.v1",
+        "autopilot.pre_run_selection_publish_request.v1",
+        "autopilot.pre_run_selection_publish_result.v1",
+        "autopilot.profile_template.v1",
+        "autopilot.provider_recipe.v1",
+        "autopilot.receipt.v2",
+        "autopilot.receipt_validation_request.v1",
+        "autopilot.receipt_validation_result.v1",
+        "autopilot.recipe_resolution_request.v1",
+        "autopilot.recipe_resolution_result.v1",
+        "autopilot.request_profile.v1",
+        "autopilot.role_template.v1",
+        "autopilot.roster.v1",
+        "autopilot.roster_candidate.v1",
+        "autopilot.roster_candidate_set.v1",
+        "autopilot.roster_config.v1",
+        "autopilot.roster_diagnostic.v1",
+        "autopilot.roster_doctor_result.v1",
+        "autopilot.roster_inventory.v1",
+        "autopilot.roster_setup_receipt.v1",
+        "autopilot.roster_tool_request.v1",
+        "autopilot.roster_tool_result.v1",
+        "autopilot.roster_transition.v1",
+        "autopilot.route_policy.v1",
+        "autopilot.route_resolution_request.v1",
+        "autopilot.route_resolution_result.v1",
+        "autopilot.saved_roster_ref.v1",
+        "autopilot.unit_spec.v2"
+      ],
+      "covers_sources": [
+        "src/core/forced-output/identity.ts",
+        "src/core/roster/activation-fence.ts",
+        "src/core/roster/artifact-compatibility.ts",
+        "src/core/roster/canonical.ts",
+        "src/core/roster/contracts.ts",
+        "src/core/roster/doctor.ts",
+        "src/core/roster/historical-adapter.ts",
+        "src/core/roster/paths.ts",
+        "src/core/roster/provider-recipes.ts",
+        "src/core/roster/providers/index.ts",
+        "src/core/roster/resolve.ts",
+        "src/core/roster/route-policies.ts",
+        "src/core/roster/run-selection.ts",
+        "src/core/roster/runtime-consumers.ts",
+        "src/core/roster/runtime-spec.ts",
+        "src/core/roster/setup-approval.ts",
+        "src/core/roster/setup-context.ts",
+        "src/core/roster/setup-receipt.ts",
+        "src/core/roster/setup-tool.ts",
+        "src/core/roster/skill-package.ts",
+        "src/core/roster/snapshot.ts",
+        "src/core/roster/storage.ts",
+        "src/core/roster/transaction.ts",
+        "src/extension.ts",
+        "src/internal/execution-observer-extension.ts",
+        "templates/skills/autopilot-roster-setup/SKILL.md",
+        "templates/skills/autopilot-roster-setup/payload.json"
+      ],
+      "signature_hash": "sha256:7f6d8bf57292542434db2fc0a38054f371f1888f0f8cfee86ea5cb91685837d6",
+      "body_hash": "sha256:108311b7bdc07a2833145595c02fc388fb0dba107c1ada3df604cf974b6c1b6c",
       "semantic_attestation": null
     },
     "subsystems/runner-and-forced-output": {
@@ -616,8 +924,8 @@
         "src/core/scheduler.ts",
         "src/core/unit-failure.ts"
       ],
-      "signature_hash": "sha256:47fe11d6fcd66ed33f128f0590a3f0016f1653ef6ea3646d86eb1c655c7064a3",
-      "body_hash": "sha256:fdd2c483b68ac174452b69431618cb515a725fb030530ce03d1b6f0b460a3d41",
+      "signature_hash": "sha256:1f9c82ae3d17b8da989f9a75961689fdc3b61d0e9de48c003bdd1ff3f30e62e6",
+      "body_hash": "sha256:f6c5fa13f558cf9fb22ff9caa041723e151bc8d3eff2b69b324724de9894a99c",
       "semantic_attestation": null
     },
     "subsystems/worktrees": {
@@ -634,8 +942,8 @@
         "src/core/parallel-runtime.ts",
         "src/core/sparse-worktree.ts"
       ],
-      "signature_hash": "sha256:82853603ad9b97c2a62ec6f2374efb085e1db7f7ae15d7af9a3d4cae2abde577",
-      "body_hash": "sha256:34615d7f7346ada422a3b9c839065014eca3cee4ff7c8229acde5650afefe6f6",
+      "signature_hash": "sha256:82aef4645150c182b4129dfdd1de171c9d6d4fd06efc7a4290518f823633fdff",
+      "body_hash": "sha256:874523b2e29c3d6e4c0a40d2d087e62c6a930ec4fdba5a106da23a177eae4b23",
       "semantic_attestation": null
     },
     "tools/autopilot_emit_status": {
@@ -649,7 +957,7 @@
         "src/internal/status-extension.ts"
       ],
       "signature_hash": "sha256:82786edeaa54051548f1e7a5b3d5257408d8f7b836481e5e5a227e774ffd5dba",
-      "body_hash": "sha256:c2754e6daa340656aed8c8ef5f45c7564cfec2eb48c985481ef43a63a77d0931",
+      "body_hash": "sha256:d1233d73030eeca1cd584ba56c80a4f939e59b37667cb98c1ed15706e16c100a",
       "semantic_attestation": null
     },
     "tools/autopilot_materialize_context": {
@@ -662,8 +970,8 @@
       "covers_sources": [
         "src/core/materialization.ts"
       ],
-      "signature_hash": "sha256:f0ca7e1372e2fec8cef56466fe19dab6f1451f4d218895b3fe697880e327557a",
-      "body_hash": "sha256:1bb128bbe01dd1dfd8a128579c875ecaeafac698574325693648eecb234603e7",
+      "signature_hash": "sha256:e33fc85d8afc9c407ce2a9327850fc25e7dacb98a479fe55ecd68e4f3bfbe448",
+      "body_hash": "sha256:2a244d14247dc7c58d86485ddb5f864889be89769a422a227f21df7096c72502",
       "semantic_attestation": null
     },
     "tools/autopilot_respond_claim_request": {

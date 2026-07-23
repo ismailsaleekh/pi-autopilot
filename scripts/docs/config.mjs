@@ -54,6 +54,9 @@ export const DIST_MODULES = Object.freeze({
   contextBudget: 'dist/src/core/context-budget.js',
   materialization: 'dist/src/core/materialization.js',
   contractsTypes: 'dist/src/core/contracts/types.js',
+  rosterProviderRecipes: 'dist/src/core/roster/provider-recipes.js',
+  rosterRoutePolicies: 'dist/src/core/roster/route-policies.js',
+  rosterProviderRegistry: 'dist/src/core/roster/providers/index.js',
 });
 
 // Source files parsed by the AST layer for structural facts (registration
@@ -76,6 +79,7 @@ export const GENERATED_REGIONS = Object.freeze({
   'model-roster': { source: 'src/core/model-roster.ts' },
   defaults: { source: 'src/core/scheduler-config.ts, src/core/context-budget.ts' },
   'runtime-paths': { source: 'src/core/names.ts, src/core/parallel-runtime.ts' },
+  'roster-readiness': { source: 'src/core/roster/provider-recipes.ts, src/core/roster/route-policies.ts, src/core/roster/providers/index.ts' },
   'read-before-edit': { source: 'docs/manifest.json' },
 });
 

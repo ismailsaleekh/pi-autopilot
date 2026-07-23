@@ -11,8 +11,8 @@ covers_sources:
   - src/core/materialization.ts
   - src/core/git-guard.ts
   - src/core/git-process.ts
-signature_hash: 'sha256:82853603ad9b97c2a62ec6f2374efb085e1db7f7ae15d7af9a3d4cae2abde577'
-body_hash: 'sha256:34615d7f7346ada422a3b9c839065014eca3cee4ff7c8229acde5650afefe6f6'
+signature_hash: 'sha256:82aef4645150c182b4129dfdd1de171c9d6d4fd06efc7a4290518f823633fdff'
+body_hash: 'sha256:874523b2e29c3d6e4c0a40d2d087e62c6a930ec4fdba5a106da23a177eae4b23'
 stability: stable
 ---
 

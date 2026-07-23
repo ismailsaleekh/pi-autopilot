@@ -6,8 +6,8 @@ covers_surfaces:
   - autopilot_materialize_context
 covers_sources:
   - src/core/materialization.ts
-signature_hash: 'sha256:f0ca7e1372e2fec8cef56466fe19dab6f1451f4d218895b3fe697880e327557a'
-body_hash: 'sha256:1bb128bbe01dd1dfd8a128579c875ecaeafac698574325693648eecb234603e7'
+signature_hash: 'sha256:e33fc85d8afc9c407ce2a9327850fc25e7dacb98a479fe55ecd68e4f3bfbe448'
+body_hash: 'sha256:2a244d14247dc7c58d86485ddb5f864889be89769a422a227f21df7096c72502'
 stability: stable
 ---
 

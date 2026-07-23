@@ -24,11 +24,13 @@ The child runner CLI. The published bin launches compiled JavaScript under
 ## Behavior
 
 Reads and validates an Autopilot unit spec, applies the deterministic Quality vNext
-spec gate before model spend, creates/resumes the deterministic per-unit worktree for
-source-changing implement/fix specs, verifies a clean source baseline, derives and
-persists the canonical repository-grounded authority artifact, acquires only its exact
-observations/edit-intentions/exclusives, renders the child prompt, and either dry-runs
-or launches Pi in RPC mode with the internal compiled status tool and worktree guard.
+spec gate before model spend, authenticates v2 roster/selection/mirror/request-profile
+identity (or byte-faithful historical v1 adapter authority), creates/resumes the
+deterministic per-unit worktree for source-changing implement/fix specs, verifies a
+clean source baseline, derives and persists the canonical repository-grounded authority
+artifact, acquires only its exact observations/edit-intentions/exclusives, renders the
+child prompt, and either dry-runs or launches Pi in RPC mode with the internal compiled
+status tool and worktree guard.
 
 Live runs require the current private coordinator session context and register a child
 lease before model spend. Current-build D65 runs additionally validate the accepted
@@ -53,10 +55,11 @@ published and accepted.
 ## State written
 
 `autopilot.execution_audit.v1` under `execution-audits/`, `autopilot.execution_commit.v1`
-evidence, status/receipt artifacts, and an optional rendered-prompt snapshot — all in
-the authoritative main runtime root.
+evidence, status/receipt artifacts, v2 request/observed-profile identity evidence, and
+an optional rendered-prompt snapshot — all in the authoritative main runtime root.
 
 ## Related
 
 - Tool: [`../tools/autopilot_emit_status.md`](../tools/autopilot_emit_status.md)
+- Roster subsystem: [`../subsystems/roster-onboarding.md`](../subsystems/roster-onboarding.md)
 - CLI: [`autopilot-coordinator.md`](autopilot-coordinator.md)

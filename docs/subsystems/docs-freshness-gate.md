@@ -32,8 +32,9 @@ re-attestation in the same change.
 Every doc region is exactly one of two modes, each with the strongest possible check:
 
 1. **Generated (facts).** Command/tool/CLI lists, model roster, schema names, runtime
-   paths, and default constants are emitted from code between `GENERATED:*` markers
-   and asserted byte-equal to a fresh regeneration (C2). Factual drift is impossible.
+   paths, default constants, and roster readiness/provider policy tables are emitted
+   from code between `GENERATED:*` markers and asserted byte-equal to a fresh
+   regeneration (C2). Factual drift is impossible.
 2. **Authored (prose).** Concepts, invariants, and rationale are hand-written and
    fenced: every symbol/path they mention must still exist (C3), a signature fence
    fires on contract change (C4), and a body-hash change on a `behavioral` doc

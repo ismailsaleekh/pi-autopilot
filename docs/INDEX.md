@@ -26,7 +26,7 @@ Before editing any source, consult [`read-before-edit.md`](read-before-edit.md).
 <!-- GENERATED:commands START (source: src/extension.ts, src/core/names.ts) -->
 | Command | Synopsis |
 | --- | --- |
-| [`/autopilot`](commands/autopilot.md) | `/autopilot <workstream> [task intro/current focus]` |
+| [`/autopilot`](commands/autopilot.md) | `/autopilot <workstream> [--roster <id>] [task intro/current focus]` |
 | [`/autopilot-inject`](commands/autopilot-inject.md) | `/autopilot-inject <workstream>` |
 | [`/autopilot-onboard`](commands/autopilot-onboard.md) | `/autopilot-onboard <workstream> [handoff refs/notes]` |
 | [`/autopilot-handoff`](commands/autopilot-handoff.md) | `/autopilot-handoff [comments]` |
@@ -70,6 +70,52 @@ Before editing any source, consult [`read-before-edit.md`](read-before-edit.md).
 - `autopilot.decision.v1`
 - `autopilot.execution_audit.v1`
 - `autopilot.execution_commit.v1`
+- `autopilot.assignment.v1`
+- `autopilot.auth_summary.v1`
+- `autopilot.billing_summary.v1`
+- `autopilot.capability_summary.v1`
+- `autopilot.certification_manifest.v1`
+- `autopilot.certification_role_result.v1`
+- `autopilot.context_ref.v2`
+- `autopilot.evidence_ref.v1`
+- `autopilot.existing_run_resolution_request.v1`
+- `autopilot.existing_run_resolution_result.v1`
+- `autopilot.historical_fixed_roster_adapter_admission.v1`
+- `autopilot.historical_fixed_roster_adapter_request.v1`
+- `autopilot.historical_fixed_roster_adapter_result.v1`
+- `autopilot.historical_fixed_roster_artifact.v1`
+- `autopilot.historical_fixed_roster_role.v1`
+- `autopilot.inventory_model.v1`
+- `autopilot.inventory_provider.v1`
+- `autopilot.observed_profile.v1`
+- `autopilot.pre_run_selection.v1`
+- `autopilot.pre_run_selection_publish_request.v1`
+- `autopilot.pre_run_selection_publish_result.v1`
+- `autopilot.profile_template.v1`
+- `autopilot.provider_recipe.v1`
+- `autopilot.receipt.v2`
+- `autopilot.receipt_validation_request.v1`
+- `autopilot.receipt_validation_result.v1`
+- `autopilot.recipe_resolution_request.v1`
+- `autopilot.recipe_resolution_result.v1`
+- `autopilot.request_profile.v1`
+- `autopilot.role_template.v1`
+- `autopilot.roster.v1`
+- `autopilot.roster_candidate.v1`
+- `autopilot.roster_candidate_set.v1`
+- `autopilot.roster_config.v1`
+- `autopilot.roster_diagnostic.v1`
+- `autopilot.roster_doctor_result.v1`
+- `autopilot.roster_inventory.v1`
+- `autopilot.roster_setup_receipt.v1`
+- `autopilot.roster_tool_request.v1`
+- `autopilot.roster_tool_result.v1`
+- `autopilot.roster_transition.v1`
+- `autopilot.route_policy.v1`
+- `autopilot.route_resolution_request.v1`
+- `autopilot.route_resolution_result.v1`
+- `autopilot.saved_roster_ref.v1`
+- `autopilot.unit_spec.v2`
 <!-- GENERATED:schemas END -->
 
 ## Model roster
@@ -117,6 +163,7 @@ Before editing any source, consult [`read-before-edit.md`](read-before-edit.md).
 | Close / merge / abort lifecycle | [`subsystems/close-lifecycle.md`](subsystems/close-lifecycle.md) |
 | Worktrees + sparse checkout + git guard | [`subsystems/worktrees.md`](subsystems/worktrees.md) |
 | Runner + forced output + execution audit | [`subsystems/runner-and-forced-output.md`](subsystems/runner-and-forced-output.md) |
+| Roster onboarding, selection, and provider qualification | [`subsystems/roster-onboarding.md`](subsystems/roster-onboarding.md) |
 | Quality vNext + terminal closure | [`subsystems/quality-and-closure.md`](subsystems/quality-and-closure.md) |
 | Contracts + schemas | [`subsystems/contracts-and-schemas.md`](subsystems/contracts-and-schemas.md) |
 | Docs freshness gate | [`subsystems/docs-freshness-gate.md`](subsystems/docs-freshness-gate.md) |

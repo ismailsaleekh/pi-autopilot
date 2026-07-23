@@ -25,6 +25,9 @@ override (used by tests).
 | `coordination/<repo-key>/` | Pre-cutover claim/worktree JSON — validated migration input, **not** a fallback for coordinator failure. |
 | `migrations/<repo-key>/` | Migration journals, freeze tokens, immutable snapshots, verified backup refs, read-only archives. |
 | `cutovers/<repo-key>.json` | One-way cutover markers. |
+| `config.json` | User-scope roster default authority, when published by setup. |
+| `rosters/<roster-id>/revision-<revision>.json` | Immutable user-scope roster revision bytes. |
+| `roster-selections/<repo-id>/<workstream-run>.json` | Create-only pre-run selection for a concrete run. |
 
 Unix modes are enforced. On Windows the package removes inherited broad ACLs, grants the
 current account full control on state/capability paths, uses a per-user
@@ -37,15 +40,16 @@ Lives inside the main worktree. Autopilot validates and writes package-owned art
 paths for:
 
 `mission.md`, `master-plan.json`, `decision-log.jsonl`, `unit-specs/`, `authority/`,
-`statuses/`, `receipts/`, `execution-audits/`, `execution-commits/`, `unit-merges/`,
+`roster-snapshot.json`, `statuses/`, `receipts/`, `execution-audits/`, `execution-commits/`, `unit-merges/`,
 `integration-analyses/`, `reservation-integration/`, `reservation-repairs/`,
 `validation-staleness/`, `rendered-prompts/`, `evidence/`, `state.json`, `events.jsonl`,
 `scheduler-config.json`, close evidence, and handoff files (`handoff.json`, `handoff.md`,
 `handoff-event-tail.jsonl`).
 
 Unit specs require status, receipt, and evidence outputs to stay inside the matching
-workstream runtime root; non-strategy child specs must reference durable
-mission/master-plan context before launch. Source-changing units run in per-unit
+workstream runtime root; v2 child specs also bind the pre-run selection hash, roster
+revision hash, assignment hash, and request profile before launch. Non-strategy child
+specs must reference durable mission/master-plan context before launch. Source-changing units run in per-unit
 worktrees, but their authoritative status/receipt/evidence/audit/merge/scheduler
 artifacts still live under this main runtime root.
 
@@ -58,4 +62,5 @@ creating parent directories for grounded future-owned files.
 ## Related
 
 - Subsystem: [`../subsystems/worktrees.md`](../subsystems/worktrees.md)
+- Roster subsystem: [`../subsystems/roster-onboarding.md`](../subsystems/roster-onboarding.md)
 - Concept: [`../concepts/migration-cutover.md`](../concepts/migration-cutover.md)

@@ -14,12 +14,16 @@ Start or resume an Autopilot parent orchestration session for a workstream.
 
 ## Synopsis
 
-`/autopilot <workstream> [task intro/current focus]`
+`/autopilot <workstream> [--roster <id>] [task intro/current focus]`
 
 ## Behavior
 
-- Selects the fixed parent roster model before preparing a worktree and fails loudly
-  if the model, subscription authentication, or exact thinking level is unavailable.
+- Resolves roster authority before preparing a worktree: explicit `--roster <id>`,
+  trusted-project default, user default, then agent-first setup when no selectable
+  authority exists. A corrupt or untrusted higher-precedence authority blocks the run;
+  lower precedence is not consulted.
+- If setup is required, stays pre-run, activates the packaged `autopilot-roster-setup`
+  lane for this session only, and writes no run/worktree state.
 - Activates the parent `context_budget` tool; the rendered parent prompt requires
   `context_budget` before reading project files, runtime state, or launching child
   work.
@@ -36,11 +40,13 @@ worktree; shared run/session authority under `~/.pi/agent/autopilot/`. See
 
 ## Failure classes
 
-Model/roster unavailable, worktree preparation failure, and durable-supervisor
-attachment failure each produce a loud notification and abort activation (no silent
-fallback).
+Roster resolution/setup requirement, roster model/profile mismatch, worktree
+preparation failure, and durable-supervisor attachment failure each produce a loud
+notification and abort activation (no silent fallback). Current W4 provider packs are
+blocked or non-certifying, so setup cannot save launch authority from offline evidence.
 
 ## Related
 
 - [`autopilot-inject.md`](autopilot-inject.md), [`autopilot-handoff.md`](autopilot-handoff.md)
+- Roster subsystem: [`../subsystems/roster-onboarding.md`](../subsystems/roster-onboarding.md)
 - Tool: [`../tools/context_budget.md`](../tools/context_budget.md)

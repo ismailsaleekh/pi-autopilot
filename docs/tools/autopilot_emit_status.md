@@ -7,7 +7,7 @@ covers_surfaces:
 covers_sources:
   - src/internal/status-extension.ts
 signature_hash: 'sha256:82786edeaa54051548f1e7a5b3d5257408d8f7b836481e5e5a227e774ffd5dba'
-body_hash: 'sha256:c2754e6daa340656aed8c8ef5f45c7564cfec2eb48c985481ef43a63a77d0931'
+body_hash: 'sha256:d1233d73030eeca1cd584ba56c80a4f939e59b37667cb98c1ed15706e16c100a'
 stability: stable
 ---
 

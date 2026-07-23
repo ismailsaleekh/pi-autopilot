@@ -153,6 +153,9 @@ export async function loadCodeSurfaces() {
   const contextBudget = await importDist(DIST_MODULES.contextBudget);
   const materialization = await importDist(DIST_MODULES.materialization);
   const contractsTypes = await importDist(DIST_MODULES.contractsTypes);
+  const rosterProviderRecipes = await importDist(DIST_MODULES.rosterProviderRecipes);
+  const rosterRoutePolicies = await importDist(DIST_MODULES.rosterRoutePolicies);
+  const rosterProviderRegistry = await importDist(DIST_MODULES.rosterProviderRegistry);
 
   const namesSource = readSource('src/core/names.ts');
   const materializationSource = readSource('src/core/materialization.ts');
@@ -251,6 +254,56 @@ export async function loadCodeSurfaces() {
       contextHaltPercent: contextBudget.AUTOPILOT_CONTEXT_HALT_PERCENT_ENV,
       statusContext: names.AUTOPILOT_STATUS_CONTEXT_ENV,
       coordinatorSessionContext: names.AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV,
+    }),
+    rosterReadiness: Object.freeze({
+      providerPacks: Object.freeze(rosterProviderRegistry.W4_PROVIDER_PACK_REGISTRY.map((entry) => Object.freeze({
+        provider_pack_id: entry.provider_pack_id,
+        provider_id: entry.provider_id,
+        recipe_id: entry.recipe_id,
+        recipe_revision: entry.recipe_revision,
+        route_policy_id: entry.route_policy_id,
+        route_policy_revision: entry.route_policy_revision,
+        ready_profiles: Object.freeze([...(entry.ready_profiles ?? [])]),
+        readiness: entry.readiness,
+        required_evidence_count: entry.required_evidence?.length ?? 0,
+        trusted_manifest_pin_count: entry.trusted_manifest_sha256s?.length ?? 0,
+        trusted_certified_roster_pin_count: entry.trusted_certified_roster_sha256s?.length ?? 0,
+      }))),
+      routePolicies: Object.freeze(rosterRoutePolicies.ROUTE_POLICIES.map((policy) => Object.freeze({
+        provider_id: policy.provider_id,
+        route_policy_id: policy.route_policy_id,
+        route_policy_revision: policy.revision,
+        policy_state: policy.policy_state,
+        qualification_state: policy.qualification_state,
+        billing_route_class: policy.billing_route_class,
+        allowed_apis: Object.freeze([...(policy.allowed_apis ?? [])]),
+        allowed_auth_classes: Object.freeze([...(policy.allowed_auth_classes ?? [])]),
+        allowed_auth_sources: Object.freeze([...(policy.allowed_auth_sources ?? [])]),
+        allowed_service_tiers: Object.freeze([...(policy.allowed_service_tiers ?? [])]),
+        allowed_cache_policies: Object.freeze([...(policy.allowed_cache_policies ?? [])]),
+        allowed_system_prompt_profiles: Object.freeze([...(policy.allowed_system_prompt_profiles ?? [])]),
+        forbidden_gateways: Object.freeze([...(policy.forbidden_gateways ?? [])]),
+        non_certifying_seed: policy.non_certifying_seed,
+        requires_live_billing_proof: policy.requires_live_billing_proof,
+      }))),
+      candidates: Object.freeze(rosterProviderRecipes.SEED_CANDIDATES.map((candidate) => Object.freeze({
+        candidate_id: candidate.candidate_id,
+        profile_id: candidate.profile_id,
+        recipe_id: candidate.recipe_id,
+        recipe_revision: candidate.recipe_revision,
+        route_policy_id: candidate.route_policy_id,
+        route_policy_revision: candidate.route_policy_revision,
+        roster_id: candidate.roster_id,
+        roster_revision: candidate.roster_revision,
+        roster_sha256: candidate.roster_sha256,
+        assignment_set_sha256: candidate.assignment_set_sha256,
+        candidate_state: candidate.candidate_state,
+        launch_readiness: candidate.launch_readiness,
+        qualification_state: candidate.qualification_state,
+        non_certifying_seed: candidate.non_certifying_seed,
+        synthetic_fixture_ready_only: candidate.synthetic_fixture_ready_only,
+        diagnostic_codes: Object.freeze([...(candidate.diagnostic_codes ?? [])]),
+      }))),
     }),
   });
 }

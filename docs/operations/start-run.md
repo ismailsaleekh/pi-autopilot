@@ -11,12 +11,16 @@ stability: stable
 
 ## Recipe
 
-1. In a Pi session, run `/autopilot <workstream> [task intro]`.
-2. Autopilot selects the parent roster model, activates `context_budget`, prepares an
-   isolated sparse main worktree, attaches the durable run supervisor at a new
-   generation, drains the mailbox, and queues the parent prompt.
-3. The parent calls `context_budget` first, then plans and launches dependency-cleared,
-   file-disjoint child units up to `parallel_cap`.
+1. In a Pi session, run `/autopilot <workstream> [--roster <id>] [task intro]`.
+2. Autopilot resolves roster authority before worktree mutation. If no selectable
+   authority exists, it activates the packaged setup lane and stops pre-run; current
+   W4 offline provider packs cannot be saved as launchable authority.
+3. With a resolved roster, Autopilot selects the pinned parent request profile,
+   activates `context_budget`, prepares an isolated sparse main worktree, attaches the
+   durable run supervisor at a new generation, drains the mailbox, and queues the
+   parent prompt.
+4. The parent calls `context_budget` first, then plans and launches dependency-cleared,
+   file-disjoint child units up to `parallel_cap` using v2 roster identity.
 
 ## Resuming after a Pi session restart
 
@@ -24,20 +28,26 @@ stability: stable
   `/autopilot-inject <workstream>`. Then `/autopilot-handoff` and `/autopilot-config`
   will target the restored workstream.
 - If you want a fresh parent turn, run `/autopilot <workstream>` again — it reconciles
-  owned durable state and replays pending evidence before dispatch.
+  owned durable state, authenticates the existing pinned roster selection/mirror, and
+  replays pending evidence before dispatch.
 
 ## Preconditions
 
-- The parent roster model + subscription auth + exact thinking level must be available;
-  otherwise activation fails loudly (no fallback).
+- Roster authority must resolve from explicit `--roster`, trusted-project default,
+  user default, or setup-required; corrupt/untrusted higher-precedence authority fails
+  loudly with no fallback.
+- The selected parent request profile must be exactly settable/observable; otherwise
+  activation fails loudly (no fallback).
 - Post-cutover activation requires a durable coordinator session before worktree mutation.
 
 ## Verify
 
 - `/autopilot-coordination status` shows the durable run and session leases.
-- Runtime files appear under `.pi/autopilot/<workstream>/`.
+- Runtime files appear under `.pi/autopilot/<workstream>/`, including
+  `roster-snapshot.json` after a resolved new run.
 
 ## Related
 
 - Commands: [`../commands/autopilot.md`](../commands/autopilot.md), [`../commands/autopilot-inject.md`](../commands/autopilot-inject.md)
+- Roster subsystem: [`../subsystems/roster-onboarding.md`](../subsystems/roster-onboarding.md)
 - Concept: [`../concepts/generations-and-fencing.md`](../concepts/generations-and-fencing.md)

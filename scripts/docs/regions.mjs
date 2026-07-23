@@ -53,7 +53,7 @@ export function wrapRegion(id, inner) {
 // ---- Region renderers (pure functions of code surfaces) ----------------------
 
 const COMMAND_SYNOPSIS = Object.freeze({
-  autopilot: '/autopilot <workstream> [task intro/current focus]',
+  autopilot: '/autopilot <workstream> [--roster <id>] [task intro/current focus]',
   'autopilot-inject': '/autopilot-inject <workstream>',
   'autopilot-onboard': '/autopilot-onboard <workstream> [handoff refs/notes]',
   'autopilot-handoff': '/autopilot-handoff [comments]',
@@ -146,6 +146,65 @@ export function renderRuntimePaths(surfaces) {
     ['Worktree root', `\`${STATE_ROOT_DISPLAY}/worktrees/<repo-key>/\``, 'per-run main + unit worktrees'],
   ];
   return table(['Path', 'Location', 'Notes'], rows);
+}
+
+export function renderRosterReadiness(surfaces) {
+  const packRows = surfaces.rosterReadiness.providerPacks.map((entry) => [
+    `\`${entry.provider_pack_id}\``,
+    `\`${entry.provider_id}\``,
+    `\`${entry.recipe_id}@${String(entry.recipe_revision)}\``,
+    `\`${entry.route_policy_id}@${String(entry.route_policy_revision)}\``,
+    entry.ready_profiles.length === 0 ? 'none' : entry.ready_profiles.map((profile) => `\`${profile}\``).join(', '),
+    `\`${entry.readiness}\``,
+    String(entry.required_evidence_count),
+    String(entry.trusted_manifest_pin_count),
+    String(entry.trusted_certified_roster_pin_count),
+  ]);
+  const routeRows = surfaces.rosterReadiness.routePolicies.map((policy) => [
+    `\`${policy.provider_id}\``,
+    `\`${policy.route_policy_id}@${String(policy.route_policy_revision)}\``,
+    `\`${policy.billing_route_class}\``,
+    policy.allowed_apis.map((api) => `\`${api}\``).join(', '),
+    policy.allowed_auth_classes.map((auth) => `\`${auth}\``).join(', '),
+    policy.allowed_auth_sources.map((source) => `\`${source}\``).join(', '),
+    policy.allowed_service_tiers.map((tier) => tier === null ? `\`null\`` : `\`${tier}\``).join(', '),
+    policy.allowed_cache_policies.map((cache) => `\`${cache}\``).join(', '),
+    policy.allowed_system_prompt_profiles.map((profile) => `\`${profile}\``).join(', '),
+    `\`${policy.policy_state}\``,
+    `\`${policy.qualification_state}\``,
+    policy.non_certifying_seed === true ? 'yes' : 'no',
+    policy.requires_live_billing_proof === true ? 'yes' : 'no',
+    policy.forbidden_gateways.map((gateway) => `\`${gateway}\``).join(', '),
+  ]);
+  const candidateRows = surfaces.rosterReadiness.candidates.map((candidate) => [
+    `\`${candidate.candidate_id}\``,
+    `\`${candidate.profile_id}\``,
+    `\`${candidate.recipe_id}@${String(candidate.recipe_revision)}\``,
+    `\`${candidate.route_policy_id}@${String(candidate.route_policy_revision)}\``,
+    `\`${candidate.roster_id}\``,
+    String(candidate.roster_revision),
+    `\`${candidate.roster_sha256}\``,
+    `\`${candidate.assignment_set_sha256}\``,
+    `\`${candidate.candidate_state}\``,
+    `\`${candidate.launch_readiness}\``,
+    `\`${candidate.qualification_state}\``,
+    candidate.non_certifying_seed === true ? 'yes' : 'no',
+    candidate.synthetic_fixture_ready_only === true ? 'yes' : 'no',
+    candidate.diagnostic_codes.map((code) => `\`${code}\``).join(', '),
+  ]);
+  return [
+    '### W4 provider registry (current package pins)',
+    '',
+    table(['Provider pack', 'Provider', 'Recipe', 'Route policy', 'Ready profiles', 'Registry readiness', 'Required evidence refs', 'Trusted manifest pins', 'Trusted certified roster pins'], packRows),
+    '',
+    '### Route policies',
+    '',
+    table(['Provider', 'Route policy', 'Billing route', 'APIs', 'Auth classes', 'Auth sources', 'Service tiers', 'Cache policies', 'System prompt profiles', 'Policy state', 'Qualification state', 'Non-certifying seed', 'Requires live billing proof', 'Forbidden gateways'], routeRows),
+    '',
+    '### Seed candidates',
+    '',
+    table(['Candidate', 'Profile', 'Recipe', 'Route policy', 'Roster ID', 'Revision', 'Roster SHA-256', 'Assignment-set SHA-256', 'Candidate state', 'Launch readiness', 'Qualification state', 'Non-certifying seed', 'Synthetic fixture ready only', 'Diagnostics'], candidateRows),
+  ].join('\n');
 }
 
 /** Render the source-path → owning-doc read-gate table (design §4). */

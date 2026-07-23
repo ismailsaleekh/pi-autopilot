@@ -41,7 +41,7 @@ import { FRONTMATTER_KEY_ORDER, buildManifest, loadDocsModel, serializeManifest,
 import { computeCoverHashes } from './docs/hashing.mjs';
 import { evaluateFactPins } from './docs/fact-pins.mjs';
 import { checkReferences, resolveLinks } from './docs/references.mjs';
-import { findMarkerAnomalies, findRegions, renderClis, renderCommands, renderDefaults, renderModelRoster, renderReadBeforeEdit, renderRuntimePaths, renderSchemas, renderTools, wrapRegion } from './docs/regions.mjs';
+import { findMarkerAnomalies, findRegions, renderClis, renderCommands, renderDefaults, renderModelRoster, renderReadBeforeEdit, renderRosterReadiness, renderRuntimePaths, renderSchemas, renderTools, wrapRegion } from './docs/regions.mjs';
 
 const REGION_RENDERERS = {
   commands: renderCommands,
@@ -51,6 +51,7 @@ const REGION_RENDERERS = {
   'model-roster': renderModelRoster,
   defaults: renderDefaults,
   'runtime-paths': renderRuntimePaths,
+  'roster-readiness': renderRosterReadiness,
 };
 
 class Findings {

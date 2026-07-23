@@ -17,7 +17,7 @@ covers_sources:
   - src/core/contracts/index.ts
   - src/core/names.ts
 signature_hash: 'sha256:09d5b894b45a6ee909d86cc0f308ba3e12e25aad1bf7b6bb02c08611fa3eded0'
-body_hash: 'sha256:4d9d32c4b79509ce30973a0bc16de7d1d7ecc51dd91b2a89a8f8d7e424fd228c'
+body_hash: 'sha256:d0b47661598d9edfdfb1e69c53c73fbaf7899938f26da34f5355186802b830df'
 stability: stable
 ---
 
@@ -29,7 +29,12 @@ authoritative schema-name list is generated from `src/core/names.ts`
 
 ## Schema surfaces
 
-The generated schema-name list lives in [`../INDEX.md`](../INDEX.md#schemas).
+The generated schema-name list lives in [`../INDEX.md`](../INDEX.md#schemas). Phase 37
+roster schema surfaces (`autopilot.roster*`, `autopilot.request_profile.v1`,
+`autopilot.observed_profile.v1`, `autopilot.unit_spec.v2`, `autopilot.receipt.v2`, and
+related setup/selection/history contracts) are governed by
+[`roster-onboarding.md`](roster-onboarding.md), whose roster readiness tables are also
+generated from production code.
 
 ## What each schema governs
 
@@ -45,14 +50,15 @@ The generated schema-name list lives in [`../INDEX.md`](../INDEX.md#schemas).
 | `autopilot.decision.v1` | Durable decision-log entries. |
 | `autopilot.execution_audit.v1` | Actual-change/audit record produced by the runner. |
 | `autopilot.execution_commit.v1` | Runtime/child/mixed commit-range evidence on the unit branch. |
+| Phase 37 roster schema family | Roster authority, setup, route policy, request/observed profile, pre-run selection, v2 spec/receipt, certification manifest, and historical adapter contracts; see [`roster-onboarding.md`](roster-onboarding.md). |
 
 ## Semantic validation
 
 Semantic validation covers role/verdict coherence, owned-path status changes,
 fake-green command rejection, declared-command and witness coverage, evidence
-metadata, receipt hashes, provider identity, output freshness, runtime-root placement,
-durable planning refs, purpose-state coherence, and execution-audit fact/classification
-coherence.
+metadata, receipt hashes, provider/request-profile identity, output freshness,
+runtime-root placement, durable planning refs, purpose-state coherence, roster v2
+identity compatibility, and execution-audit fact/classification coherence.
 
 ## Related
 

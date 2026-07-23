@@ -42,6 +42,7 @@ pi install .
 | Understand a tool | [`docs/tools/`](docs/tools/context_budget.md) |
 | Understand a CLI | [`docs/cli/`](docs/cli/autopilot-agent-run.md) |
 | Understand a subsystem | [`docs/subsystems/`](docs/subsystems/coordination.md) |
+| Understand roster onboarding/provider qualification | [`docs/subsystems/roster-onboarding.md`](docs/subsystems/roster-onboarding.md) |
 | Understand an invariant/concept | [`docs/concepts/`](docs/concepts/leases-and-observations.md) |
 | Run a task (start/handoff/close/abort/recover) | [`docs/operations/`](docs/operations/start-run.md) |
 | Diagnose a failure | [`docs/troubleshooting/failures.md`](docs/troubleshooting/failures.md) |
@@ -65,11 +66,26 @@ command: [`docs/commands/`](docs/commands/autopilot.md) (indexed in
 
 See [`docs/tools/`](docs/tools/context_budget.md) and [`docs/INDEX.md`](docs/INDEX.md#tools).
 
+## Roster-gated launch
+
+Autopilot resolves a launch roster before any worktree mutation or model spend. New-run
+precedence is explicit `--roster <id>`, trusted-project default, user default, then
+agent-first onboarding. If onboarding is required, `/autopilot` activates the normally
+inactive packaged `autopilot-roster-setup` skill/tool for the current session only; it
+stays pre-run, accepts natural-language approval only after exact hash-bound proposal
+presentation, never auto-starts, and requires a fresh Pi session after any successful
+save. See [`docs/subsystems/roster-onboarding.md`](docs/subsystems/roster-onboarding.md).
+
+Current package truth is generated in the roster readiness tables: the offline W4
+provider packs are blocked or non-certifying. Setup cannot save a launchable roster
+until package-reviewed live W3 trust pins and trusted certified roster hashes exist in
+the central W4 provider registry. No provider secrets are required or documented here.
+
 ## Fixed model roster
 
-Autopilot enforces one package-owned model/thinking assignment for every parent and
-child role. The authoritative table is generated from code in
-[`docs/INDEX.md`](docs/INDEX.md#model-roster):
+The fixed OpenAI Codex role roster remains documented for current package fixed-role
+surfaces and historical compatibility. The authoritative table is generated from code
+in [`docs/INDEX.md`](docs/INDEX.md#model-roster):
 
 | Role | Model | Thinking |
 |---|---|---|
@@ -101,8 +117,12 @@ source files live.
   `.autopilot/checkout-profile.json`, and the `autopilot_materialize_context` helper.
   → [`docs/subsystems/worktrees.md`](docs/subsystems/worktrees.md)
 - **Runner + forced-output/status** — `autopilot-agent-run`, the child status contract,
-  and execution audits.
+  execution audits, strict v2 roster identity, and observed-profile binding.
   → [`docs/subsystems/runner-and-forced-output.md`](docs/subsystems/runner-and-forced-output.md)
+- **Roster onboarding + provider qualification** — agent-first no-roster setup,
+  precedence, approval/hash binding, immutable pre-run selections, and current W4
+  provider-pack limitations.
+  → [`docs/subsystems/roster-onboarding.md`](docs/subsystems/roster-onboarding.md)
 - **Quality vNext** — perfect-quality doctrine, scope/protected-path adjudication,
   work-item lifecycle, terminal closure, and the `state-store`.
   → [`docs/subsystems/quality-and-closure.md`](docs/subsystems/quality-and-closure.md)
@@ -146,5 +166,7 @@ race remains (it fails closed when process birth identity is unavailable; macOS 
 the declared system `/usr/bin/python3` bridge to libproc). Autopilot does not include a
 compiled scheduler UI, PTY/TUI coverage, default automated live-provider execution, or
 network push/PR creation. Provider-backed child runs require explicit operator approval,
-subscription Pi channels, and the `autopilot-agent-run` path; the default package gate
-remains deterministic, offline, network-free, and isolated from user/global Pi state.
+subscription Pi channels, an exact v2 roster/request profile that Pi can set and observe,
+and the `autopilot-agent-run` path; the default package gate remains deterministic,
+offline, network-free, and isolated from user/global Pi state. Current offline provider
+packs are structural/non-certifying evidence only, not launch readiness.

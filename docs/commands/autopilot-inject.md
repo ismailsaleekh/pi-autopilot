@@ -20,7 +20,8 @@ workstream **without** queueing the parent prompt.
 ## Behavior
 
 Use it after resuming a Pi session when `/autopilot-handoff` needs the active
-workstream restored. It activates `context_budget`, attaches the durable run
+workstream restored. It resolves the existing run's pinned roster selection (without
+onboarding or defaults), activates `context_budget`, attaches the durable run
 supervisor, and records the active workstream/run — but does **not** launch children,
 mutate source files, run tests, call providers, or write handoff artifacts.
 
@@ -30,9 +31,10 @@ Same durable run/session attachment as `/autopilot`; no handoff artifacts.
 
 ## Failure classes
 
-Model/roster unavailable, worktree preparation failure, and supervisor attachment
-failure are loud and abort the inject.
+Pinned roster selection unavailable, model/profile mismatch, worktree preparation
+failure, and supervisor attachment failure are loud and abort the inject.
 
 ## Related
 
 - [`autopilot.md`](autopilot.md), [`autopilot-handoff.md`](autopilot-handoff.md)
+- Roster subsystem: [`../subsystems/roster-onboarding.md`](../subsystems/roster-onboarding.md)

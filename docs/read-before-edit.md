@@ -39,6 +39,7 @@ here are not yet governed by a doc; coverage ratchets up per PR (C8 floor).
 | `src/core/disk-gate.ts` | [`subsystems/worktrees`](subsystems/worktrees.md) |
 | `src/core/execution-audit/index.ts` | [`subsystems/runner-and-forced-output`](subsystems/runner-and-forced-output.md) |
 | `src/core/execution-commit.ts` | [`subsystems/close-lifecycle`](subsystems/close-lifecycle.md) |
+| `src/core/forced-output/identity.ts` | [`subsystems/roster-onboarding`](subsystems/roster-onboarding.md) |
 | `src/core/forced-output/index.ts` | [`subsystems/runner-and-forced-output`](subsystems/runner-and-forced-output.md) |
 | `src/core/git-guard.ts` | [`subsystems/worktrees`](subsystems/worktrees.md) |
 | `src/core/git-process.ts` | [`subsystems/worktrees`](subsystems/worktrees.md) |
@@ -50,6 +51,28 @@ here are not yet governed by a doc; coverage ratchets up per PR (C8 floor).
 | `src/core/prompt-renderer/index.ts` | [`subsystems/runner-and-forced-output`](subsystems/runner-and-forced-output.md) |
 | `src/core/quality/contract.ts` | [`subsystems/quality-and-closure`](subsystems/quality-and-closure.md) |
 | `src/core/quality/spec-gate.ts` | [`subsystems/quality-and-closure`](subsystems/quality-and-closure.md) |
+| `src/core/roster/activation-fence.ts` | [`subsystems/roster-onboarding`](subsystems/roster-onboarding.md) |
+| `src/core/roster/artifact-compatibility.ts` | [`subsystems/roster-onboarding`](subsystems/roster-onboarding.md) |
+| `src/core/roster/canonical.ts` | [`subsystems/roster-onboarding`](subsystems/roster-onboarding.md) |
+| `src/core/roster/contracts.ts` | [`subsystems/roster-onboarding`](subsystems/roster-onboarding.md) |
+| `src/core/roster/doctor.ts` | [`subsystems/roster-onboarding`](subsystems/roster-onboarding.md) |
+| `src/core/roster/historical-adapter.ts` | [`subsystems/roster-onboarding`](subsystems/roster-onboarding.md) |
+| `src/core/roster/paths.ts` | [`subsystems/roster-onboarding`](subsystems/roster-onboarding.md) |
+| `src/core/roster/provider-recipes.ts` | [`subsystems/roster-onboarding`](subsystems/roster-onboarding.md) |
+| `src/core/roster/providers/index.ts` | [`subsystems/roster-onboarding`](subsystems/roster-onboarding.md) |
+| `src/core/roster/resolve.ts` | [`subsystems/roster-onboarding`](subsystems/roster-onboarding.md) |
+| `src/core/roster/route-policies.ts` | [`subsystems/roster-onboarding`](subsystems/roster-onboarding.md) |
+| `src/core/roster/run-selection.ts` | [`subsystems/roster-onboarding`](subsystems/roster-onboarding.md) |
+| `src/core/roster/runtime-consumers.ts` | [`subsystems/roster-onboarding`](subsystems/roster-onboarding.md) |
+| `src/core/roster/runtime-spec.ts` | [`subsystems/roster-onboarding`](subsystems/roster-onboarding.md) |
+| `src/core/roster/setup-approval.ts` | [`subsystems/roster-onboarding`](subsystems/roster-onboarding.md) |
+| `src/core/roster/setup-context.ts` | [`subsystems/roster-onboarding`](subsystems/roster-onboarding.md) |
+| `src/core/roster/setup-receipt.ts` | [`subsystems/roster-onboarding`](subsystems/roster-onboarding.md) |
+| `src/core/roster/setup-tool.ts` | [`subsystems/roster-onboarding`](subsystems/roster-onboarding.md) |
+| `src/core/roster/skill-package.ts` | [`subsystems/roster-onboarding`](subsystems/roster-onboarding.md) |
+| `src/core/roster/snapshot.ts` | [`subsystems/roster-onboarding`](subsystems/roster-onboarding.md) |
+| `src/core/roster/storage.ts` | [`subsystems/roster-onboarding`](subsystems/roster-onboarding.md) |
+| `src/core/roster/transaction.ts` | [`subsystems/roster-onboarding`](subsystems/roster-onboarding.md) |
 | `src/core/scheduler-config.ts` | [`commands/autopilot-config`](commands/autopilot-config.md) |
 | `src/core/scheduler.ts` | [`subsystems/runner-and-forced-output`](subsystems/runner-and-forced-output.md) |
 | `src/core/sparse-worktree.ts` | [`subsystems/worktrees`](subsystems/worktrees.md) |
@@ -58,5 +81,9 @@ here are not yet governed by a doc; coverage ratchets up per PR (C8 floor).
 | `src/core/unit-merge.ts` | [`subsystems/close-lifecycle`](subsystems/close-lifecycle.md) |
 | `src/core/validation-staleness.ts` | [`subsystems/close-lifecycle`](subsystems/close-lifecycle.md) |
 | `src/core/worktree-cleanup.ts` | [`subsystems/close-lifecycle`](subsystems/close-lifecycle.md) |
+| `src/extension.ts` | [`subsystems/roster-onboarding`](subsystems/roster-onboarding.md) |
+| `src/internal/execution-observer-extension.ts` | [`subsystems/roster-onboarding`](subsystems/roster-onboarding.md) |
 | `src/internal/status-extension.ts` | [`tools/autopilot_emit_status`](tools/autopilot_emit_status.md) |
+| `templates/skills/autopilot-roster-setup/SKILL.md` | [`subsystems/roster-onboarding`](subsystems/roster-onboarding.md) |
+| `templates/skills/autopilot-roster-setup/payload.json` | [`subsystems/roster-onboarding`](subsystems/roster-onboarding.md) |
 <!-- GENERATED:read-before-edit END -->
