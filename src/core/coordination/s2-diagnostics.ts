@@ -34,21 +34,26 @@ interface SanitizedText {
   readonly omitted_code_points: number;
 }
 
-function secretPattern(): RegExp {
-  const labels = 'session_token|capability|handoff_token|child_token|lock_token|freeze_token|lease_capability|token|authorization|api_key|secret';
-  return new RegExp(`\\b(${labels})(\\s*[=:]\\s*)[^\\s,;]+`, 'giu');
-}
+const AUTHORITY_SECRET_KEY_PATTERN = [
+  'authorization',
+  'x[_-]?api[_-]?key',
+  '(?:[a-z0-9]+[_-])*api[_-]?key',
+  '(?:[a-z0-9]+[_-])*(?:access[_-]?token|refresh[_-]?token|session[_-]?token|handoff[_-]?token|child[_-]?token|lock[_-]?token|freeze[_-]?token)',
+  '(?:[a-z0-9]+[_-])*(?:lease[_-]?capability|capability|client[_-]?secret|secret[_-]?access[_-]?key|secret|private[_-]?key|password)',
+  'token',
+].join('|');
 
-function quotedSecretPattern(): RegExp {
-  const labels = 'session_token|capability|handoff_token|child_token|lock_token|freeze_token|lease_capability|token|authorization|api_key|secret';
-  return new RegExp(`("(?:${labels})"\\s*:\\s*")[^"]*(")`, 'giu');
-}
+const SECRET_VALUE_PATTERN = String.raw`"[^"]*"|'[^']*'|[^\s,;}]+`;
+const QUOTED_SECRET_PROPERTY_PATTERN = new RegExp(`("(?:${AUTHORITY_SECRET_KEY_PATTERN})"\\s*:\\s*)(?:${SECRET_VALUE_PATTERN})`, 'giu');
+const AUTHORIZATION_HEADER_PATTERN = new RegExp(`\\b(authorization)(\\s*(?:[=:]\\s*(?:(?:bearer|basic|token)\\s+)?|(?:bearer|basic|token)\\s+))(?:${SECRET_VALUE_PATTERN})`, 'giu');
+const ASSIGNED_SECRET_PATTERN = new RegExp(`\\b((?!(?:authorization)\\b)(?:${AUTHORITY_SECRET_KEY_PATTERN}))(\\s*[=:]\\s*)(?:${SECRET_VALUE_PATTERN})`, 'giu');
 
 function sanitizeS2DiagnosticText(value: string, maximumCodePoints: number): SanitizedText {
   const withoutControls = value.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/gu, '\uFFFD');
   const withoutLabeledSecrets = withoutControls
-    .replace(secretPattern(), '$1$2<redacted>')
-    .replace(quotedSecretPattern(), '$1<redacted>$2');
+    .replace(QUOTED_SECRET_PROPERTY_PATTERN, '$1"<redacted>"')
+    .replace(AUTHORIZATION_HEADER_PATTERN, '$1$2<redacted>')
+    .replace(ASSIGNED_SECRET_PATTERN, '$1$2<redacted>');
   const redacted = withoutLabeledSecrets !== value;
   const points = [...withoutLabeledSecrets];
   if (points.length <= maximumCodePoints) return { text: withoutLabeledSecrets, redacted, omitted_code_points: 0 };

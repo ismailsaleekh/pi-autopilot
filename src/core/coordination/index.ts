@@ -32,6 +32,8 @@ export * from './reconciliation.ts';
 export * from './reservations.ts';
 export * from './runtime-identity.ts';
 export * from './runtime-paths.ts';
+export * from './s2-diagnostics.ts';
+export * from './s2-failure-taxonomy.ts';
 export * from './schemas.ts';
 export * from './schema11-retirement.ts';
 export * from './server.ts';
