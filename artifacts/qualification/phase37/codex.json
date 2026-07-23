@@ -1,0 +1,660 @@
+{
+  "schema_version": "autopilot.codex_provider_pack_qualification_report.v1",
+  "report_id": "phase37-w4-codex-offline-report",
+  "provider_pack_id": "codex-subscription-w4-offline",
+  "provider_id": "openai-codex",
+  "recipe_id": "codex-subscription",
+  "recipe_revision": 1,
+  "route_policy_id": "codex-subscription-v1",
+  "route_policy_revision": 1,
+  "package_version": "1.3.0",
+  "pi_version": "0.80.6",
+  "qualification_state": "blocked-live-certification",
+  "ready": false,
+  "qualified": false,
+  "certifies_provider": false,
+  "blocked_reason": "blocked pending post-W3 live subscription witness",
+  "blocked_pending": "post-W3 live subscription witness",
+  "offline_fixture_id": "phase37-w4-codex-synthetic-v1",
+  "offline_fixture_synthetic": true,
+  "offline_fixture_certifying": false,
+  "network_calls_made": false,
+  "provider_calls_made": false,
+  "forbidden_routes": [
+    "api-key",
+    "openrouter",
+    "metered-frontier",
+    "arbitrary-api-key"
+  ],
+  "allowed_route": {
+    "provider_id": "openai-codex",
+    "route_policy_id": "codex-subscription-v1",
+    "route_policy_revision": 1,
+    "auth_class": "oauth",
+    "billing_route_class": "subscription-oauth",
+    "api": "openai-codex-responses",
+    "cache_policy": "provider-default",
+    "system_prompt_profile": "pi-default.v1"
+  },
+  "manifest_candidate": {
+    "schema_version": "autopilot.certification_manifest.v1",
+    "manifest_id": "codex-subscription-w4-offline-cruise",
+    "manifest_revision": 1,
+    "subject_kind": "provider_recipe",
+    "subject_id": "codex-subscription",
+    "subject_sha256": "sha256:483908a22ea31543b402666f16cb507d6af19d601f35e6d3c6155d6dd4c3d23c",
+    "package_version": "1.3.0",
+    "pi_version": "0.80.6",
+    "qualification_state": "blocked-live-certification",
+    "role_results": [
+      {
+        "role": "parent",
+        "state": "synthetic-pass",
+        "evidence_refs": [
+          {
+            "evidence_id": "codex-cruise-parent-cache",
+            "kind": "cache-proof",
+            "uri": "fixture://phase37/w4/codex/cruise/parent/cache-boundary",
+            "sha256": "sha256:7936de1835ab515b72e9ec7bc866882b9240198df1c5ab5300c12b838d6f5f87",
+            "byte_count": 87,
+            "secret_free": true
+          },
+          {
+            "evidence_id": "codex-cruise-parent-observed",
+            "kind": "execution-proof",
+            "uri": "fixture://phase37/w4/codex/cruise/parent/observed",
+            "sha256": "sha256:1ce5d275bca60a58d8c2b23a057e4f67bd85e69d3d12543761f866992ac42f4b",
+            "byte_count": 661,
+            "secret_free": true
+          },
+          {
+            "evidence_id": "codex-cruise-parent-prompt",
+            "kind": "prompt-proof",
+            "uri": "fixture://phase37/w4/codex/cruise/parent/prompt-boundary",
+            "sha256": "sha256:c595e3cc87aebab3b8fac81386b954e080f70bdd37a6d1fba115555c93ba251e",
+            "byte_count": 181,
+            "secret_free": true
+          },
+          {
+            "evidence_id": "codex-cruise-parent-request",
+            "kind": "execution-proof",
+            "uri": "fixture://phase37/w4/codex/cruise/parent/request",
+            "sha256": "sha256:3636416ff30d9da978cf6dfd52ea4315b57b48a93515b9e13a1ffddc6635117a",
+            "byte_count": 678,
+            "secret_free": true
+          }
+        ]
+      },
+      {
+        "role": "strategy",
+        "state": "synthetic-pass",
+        "evidence_refs": [
+          {
+            "evidence_id": "codex-cruise-strategy-cache",
+            "kind": "cache-proof",
+            "uri": "fixture://phase37/w4/codex/cruise/strategy/cache-boundary",
+            "sha256": "sha256:7936de1835ab515b72e9ec7bc866882b9240198df1c5ab5300c12b838d6f5f87",
+            "byte_count": 87,
+            "secret_free": true
+          },
+          {
+            "evidence_id": "codex-cruise-strategy-observed",
+            "kind": "execution-proof",
+            "uri": "fixture://phase37/w4/codex/cruise/strategy/observed",
+            "sha256": "sha256:02323027e9cd8d99011bc7944a6a6b4eb01f5ec7360984ecc08ac7b16fe001a0",
+            "byte_count": 2692,
+            "secret_free": true
+          },
+          {
+            "evidence_id": "codex-cruise-strategy-prompt",
+            "kind": "prompt-proof",
+            "uri": "fixture://phase37/w4/codex/cruise/strategy/prompt-boundary",
+            "sha256": "sha256:120a3fc01c6c46df5180a3c0ad8f3ca087d79fe6e1c52cbe8bde365a2b899fb0",
+            "byte_count": 181,
+            "secret_free": true
+          },
+          {
+            "evidence_id": "codex-cruise-strategy-request",
+            "kind": "execution-proof",
+            "uri": "fixture://phase37/w4/codex/cruise/strategy/request",
+            "sha256": "sha256:7d3338ce4c631125dc6724cff75febf6ba8c5f7049bcda4c729af40b0354f860",
+            "byte_count": 2896,
+            "secret_free": true
+          }
+        ]
+      },
+      {
+        "role": "implement",
+        "state": "synthetic-pass",
+        "evidence_refs": [
+          {
+            "evidence_id": "codex-cruise-implement-cache",
+            "kind": "cache-proof",
+            "uri": "fixture://phase37/w4/codex/cruise/implement/cache-boundary",
+            "sha256": "sha256:7936de1835ab515b72e9ec7bc866882b9240198df1c5ab5300c12b838d6f5f87",
+            "byte_count": 87,
+            "secret_free": true
+          },
+          {
+            "evidence_id": "codex-cruise-implement-observed",
+            "kind": "execution-proof",
+            "uri": "fixture://phase37/w4/codex/cruise/implement/observed",
+            "sha256": "sha256:8aefb2b78c44e8e31540ef01f6760deafeedeca59976aed0e6b88a97b6db9d91",
+            "byte_count": 2705,
+            "secret_free": true
+          },
+          {
+            "evidence_id": "codex-cruise-implement-prompt",
+            "kind": "prompt-proof",
+            "uri": "fixture://phase37/w4/codex/cruise/implement/prompt-boundary",
+            "sha256": "sha256:c346f51e82f97d79ae8904986976ee019752df076451508436def9c8b172fb8d",
+            "byte_count": 181,
+            "secret_free": true
+          },
+          {
+            "evidence_id": "codex-cruise-implement-request",
+            "kind": "execution-proof",
+            "uri": "fixture://phase37/w4/codex/cruise/implement/request",
+            "sha256": "sha256:ec48194504555b4a3b44c5bbb1b37ae2396a1d8192acc9448ae64050a87dc7de",
+            "byte_count": 2907,
+            "secret_free": true
+          }
+        ]
+      },
+      {
+        "role": "validate",
+        "state": "synthetic-pass",
+        "evidence_refs": [
+          {
+            "evidence_id": "codex-cruise-validate-cache",
+            "kind": "cache-proof",
+            "uri": "fixture://phase37/w4/codex/cruise/validate/cache-boundary",
+            "sha256": "sha256:7936de1835ab515b72e9ec7bc866882b9240198df1c5ab5300c12b838d6f5f87",
+            "byte_count": 87,
+            "secret_free": true
+          },
+          {
+            "evidence_id": "codex-cruise-validate-observed",
+            "kind": "execution-proof",
+            "uri": "fixture://phase37/w4/codex/cruise/validate/observed",
+            "sha256": "sha256:8c6ef19654d43c07b2046359581378d34fe008ceae36cea3e26275ac52b7e4a2",
+            "byte_count": 2692,
+            "secret_free": true
+          },
+          {
+            "evidence_id": "codex-cruise-validate-prompt",
+            "kind": "prompt-proof",
+            "uri": "fixture://phase37/w4/codex/cruise/validate/prompt-boundary",
+            "sha256": "sha256:e211adf3031fc72723cd2346ada3a1474ba84d5bfde81216731565ec6dc35c47",
+            "byte_count": 181,
+            "secret_free": true
+          },
+          {
+            "evidence_id": "codex-cruise-validate-request",
+            "kind": "execution-proof",
+            "uri": "fixture://phase37/w4/codex/cruise/validate/request",
+            "sha256": "sha256:aa078e348353eaf44d4f73777801b5be9dac2e9eca63b68bccd6a2a20f834c4c",
+            "byte_count": 2896,
+            "secret_free": true
+          }
+        ]
+      },
+      {
+        "role": "fix",
+        "state": "synthetic-pass",
+        "evidence_refs": [
+          {
+            "evidence_id": "codex-cruise-fix-cache",
+            "kind": "cache-proof",
+            "uri": "fixture://phase37/w4/codex/cruise/fix/cache-boundary",
+            "sha256": "sha256:7936de1835ab515b72e9ec7bc866882b9240198df1c5ab5300c12b838d6f5f87",
+            "byte_count": 87,
+            "secret_free": true
+          },
+          {
+            "evidence_id": "codex-cruise-fix-observed",
+            "kind": "execution-proof",
+            "uri": "fixture://phase37/w4/codex/cruise/fix/observed",
+            "sha256": "sha256:adaa42de31c55cfff531082239c1cf27d3db96fba6804858541f554566a64909",
+            "byte_count": 2681,
+            "secret_free": true
+          },
+          {
+            "evidence_id": "codex-cruise-fix-prompt",
+            "kind": "prompt-proof",
+            "uri": "fixture://phase37/w4/codex/cruise/fix/prompt-boundary",
+            "sha256": "sha256:39c85e24bb1dc0a70f4001f8b065690d2d85e4eed0004400d5583a6502549cf1",
+            "byte_count": 181,
+            "secret_free": true
+          },
+          {
+            "evidence_id": "codex-cruise-fix-request",
+            "kind": "execution-proof",
+            "uri": "fixture://phase37/w4/codex/cruise/fix/request",
+            "sha256": "sha256:9ba87f31784fe258f42d0f917ff392ebad33f3fe8ef42ab9df4d69dbec865375",
+            "byte_count": 2865,
+            "secret_free": true
+          }
+        ]
+      },
+      {
+        "role": "adjudicate",
+        "state": "synthetic-pass",
+        "evidence_refs": [
+          {
+            "evidence_id": "codex-cruise-adjudicate-cache",
+            "kind": "cache-proof",
+            "uri": "fixture://phase37/w4/codex/cruise/adjudicate/cache-boundary",
+            "sha256": "sha256:7936de1835ab515b72e9ec7bc866882b9240198df1c5ab5300c12b838d6f5f87",
+            "byte_count": 87,
+            "secret_free": true
+          },
+          {
+            "evidence_id": "codex-cruise-adjudicate-observed",
+            "kind": "execution-proof",
+            "uri": "fixture://phase37/w4/codex/cruise/adjudicate/observed",
+            "sha256": "sha256:be38175569671d510d2a91be65c0c6744629cefbd9af6d87d9a6c1acb8255754",
+            "byte_count": 2700,
+            "secret_free": true
+          },
+          {
+            "evidence_id": "codex-cruise-adjudicate-prompt",
+            "kind": "prompt-proof",
+            "uri": "fixture://phase37/w4/codex/cruise/adjudicate/prompt-boundary",
+            "sha256": "sha256:fc899bf9a8d9e5fa94b27896bf957b02db9c8f5d8efac7fc8aac541da85c0580",
+            "byte_count": 181,
+            "secret_free": true
+          },
+          {
+            "evidence_id": "codex-cruise-adjudicate-request",
+            "kind": "execution-proof",
+            "uri": "fixture://phase37/w4/codex/cruise/adjudicate/request",
+            "sha256": "sha256:f716393faa06fc24297b12375ca399b5f26517035e317fb908ab8edd52fa0d57",
+            "byte_count": 2910,
+            "secret_free": true
+          }
+        ]
+      },
+      {
+        "role": "bughunt",
+        "state": "synthetic-pass",
+        "evidence_refs": [
+          {
+            "evidence_id": "codex-cruise-bughunt-cache",
+            "kind": "cache-proof",
+            "uri": "fixture://phase37/w4/codex/cruise/bughunt/cache-boundary",
+            "sha256": "sha256:7936de1835ab515b72e9ec7bc866882b9240198df1c5ab5300c12b838d6f5f87",
+            "byte_count": 87,
+            "secret_free": true
+          },
+          {
+            "evidence_id": "codex-cruise-bughunt-observed",
+            "kind": "execution-proof",
+            "uri": "fixture://phase37/w4/codex/cruise/bughunt/observed",
+            "sha256": "sha256:4e5ee3dd79ee9716e297bcffebcbda3d79f6f0dbfedea31df31a2902113a1670",
+            "byte_count": 2688,
+            "secret_free": true
+          },
+          {
+            "evidence_id": "codex-cruise-bughunt-prompt",
+            "kind": "prompt-proof",
+            "uri": "fixture://phase37/w4/codex/cruise/bughunt/prompt-boundary",
+            "sha256": "sha256:6f50d809210eff210ef46e272c3211f8571dcc23e757b22b62d35e3686d53175",
+            "byte_count": 181,
+            "secret_free": true
+          },
+          {
+            "evidence_id": "codex-cruise-bughunt-request",
+            "kind": "execution-proof",
+            "uri": "fixture://phase37/w4/codex/cruise/bughunt/request",
+            "sha256": "sha256:7b4315237b32ae100f984b8e1e8d016fb56e54689faca8e740626be6ea5321ac",
+            "byte_count": 2889,
+            "secret_free": true
+          }
+        ]
+      },
+      {
+        "role": "extract",
+        "state": "synthetic-pass",
+        "evidence_refs": [
+          {
+            "evidence_id": "codex-cruise-extract-cache",
+            "kind": "cache-proof",
+            "uri": "fixture://phase37/w4/codex/cruise/extract/cache-boundary",
+            "sha256": "sha256:7936de1835ab515b72e9ec7bc866882b9240198df1c5ab5300c12b838d6f5f87",
+            "byte_count": 87,
+            "secret_free": true
+          },
+          {
+            "evidence_id": "codex-cruise-extract-observed",
+            "kind": "execution-proof",
+            "uri": "fixture://phase37/w4/codex/cruise/extract/observed",
+            "sha256": "sha256:1f96fad6d283664b3cf92566b81f9f34c6ead1ff5e0099d5e380788eb13379bf",
+            "byte_count": 2691,
+            "secret_free": true
+          },
+          {
+            "evidence_id": "codex-cruise-extract-prompt",
+            "kind": "prompt-proof",
+            "uri": "fixture://phase37/w4/codex/cruise/extract/prompt-boundary",
+            "sha256": "sha256:125fa30fbfd028f212d4faae263e00c1f80a95ba255e2a91843a99c2b8e24d2e",
+            "byte_count": 181,
+            "secret_free": true
+          },
+          {
+            "evidence_id": "codex-cruise-extract-request",
+            "kind": "execution-proof",
+            "uri": "fixture://phase37/w4/codex/cruise/extract/request",
+            "sha256": "sha256:5103eb9b742320f7c043da1850afaca23fb3dbbe67b46099c9ff6608b840dea0",
+            "byte_count": 2890,
+            "secret_free": true
+          }
+        ]
+      }
+    ],
+    "required_evidence": [
+      {
+        "evidence_id": "codex-cruise-adjudicate-cache",
+        "kind": "cache-proof",
+        "uri": "fixture://phase37/w4/codex/cruise/adjudicate/cache-boundary",
+        "sha256": "sha256:7936de1835ab515b72e9ec7bc866882b9240198df1c5ab5300c12b838d6f5f87",
+        "byte_count": 87,
+        "secret_free": true
+      },
+      {
+        "evidence_id": "codex-cruise-adjudicate-observed",
+        "kind": "execution-proof",
+        "uri": "fixture://phase37/w4/codex/cruise/adjudicate/observed",
+        "sha256": "sha256:be38175569671d510d2a91be65c0c6744629cefbd9af6d87d9a6c1acb8255754",
+        "byte_count": 2700,
+        "secret_free": true
+      },
+      {
+        "evidence_id": "codex-cruise-adjudicate-prompt",
+        "kind": "prompt-proof",
+        "uri": "fixture://phase37/w4/codex/cruise/adjudicate/prompt-boundary",
+        "sha256": "sha256:fc899bf9a8d9e5fa94b27896bf957b02db9c8f5d8efac7fc8aac541da85c0580",
+        "byte_count": 181,
+        "secret_free": true
+      },
+      {
+        "evidence_id": "codex-cruise-adjudicate-request",
+        "kind": "execution-proof",
+        "uri": "fixture://phase37/w4/codex/cruise/adjudicate/request",
+        "sha256": "sha256:f716393faa06fc24297b12375ca399b5f26517035e317fb908ab8edd52fa0d57",
+        "byte_count": 2910,
+        "secret_free": true
+      },
+      {
+        "evidence_id": "codex-cruise-billing-route",
+        "kind": "billing-proof",
+        "uri": "fixture://phase37/w4/codex/cruise/billing-route",
+        "sha256": "sha256:5077f8a578a2990c48c547b1e44d55c9bf42eb548fe68e95099e41cb8b3a7e94",
+        "byte_count": 114,
+        "secret_free": true
+      },
+      {
+        "evidence_id": "codex-cruise-bughunt-cache",
+        "kind": "cache-proof",
+        "uri": "fixture://phase37/w4/codex/cruise/bughunt/cache-boundary",
+        "sha256": "sha256:7936de1835ab515b72e9ec7bc866882b9240198df1c5ab5300c12b838d6f5f87",
+        "byte_count": 87,
+        "secret_free": true
+      },
+      {
+        "evidence_id": "codex-cruise-bughunt-observed",
+        "kind": "execution-proof",
+        "uri": "fixture://phase37/w4/codex/cruise/bughunt/observed",
+        "sha256": "sha256:4e5ee3dd79ee9716e297bcffebcbda3d79f6f0dbfedea31df31a2902113a1670",
+        "byte_count": 2688,
+        "secret_free": true
+      },
+      {
+        "evidence_id": "codex-cruise-bughunt-prompt",
+        "kind": "prompt-proof",
+        "uri": "fixture://phase37/w4/codex/cruise/bughunt/prompt-boundary",
+        "sha256": "sha256:6f50d809210eff210ef46e272c3211f8571dcc23e757b22b62d35e3686d53175",
+        "byte_count": 181,
+        "secret_free": true
+      },
+      {
+        "evidence_id": "codex-cruise-bughunt-request",
+        "kind": "execution-proof",
+        "uri": "fixture://phase37/w4/codex/cruise/bughunt/request",
+        "sha256": "sha256:7b4315237b32ae100f984b8e1e8d016fb56e54689faca8e740626be6ea5321ac",
+        "byte_count": 2889,
+        "secret_free": true
+      },
+      {
+        "evidence_id": "codex-cruise-extract-cache",
+        "kind": "cache-proof",
+        "uri": "fixture://phase37/w4/codex/cruise/extract/cache-boundary",
+        "sha256": "sha256:7936de1835ab515b72e9ec7bc866882b9240198df1c5ab5300c12b838d6f5f87",
+        "byte_count": 87,
+        "secret_free": true
+      },
+      {
+        "evidence_id": "codex-cruise-extract-observed",
+        "kind": "execution-proof",
+        "uri": "fixture://phase37/w4/codex/cruise/extract/observed",
+        "sha256": "sha256:1f96fad6d283664b3cf92566b81f9f34c6ead1ff5e0099d5e380788eb13379bf",
+        "byte_count": 2691,
+        "secret_free": true
+      },
+      {
+        "evidence_id": "codex-cruise-extract-prompt",
+        "kind": "prompt-proof",
+        "uri": "fixture://phase37/w4/codex/cruise/extract/prompt-boundary",
+        "sha256": "sha256:125fa30fbfd028f212d4faae263e00c1f80a95ba255e2a91843a99c2b8e24d2e",
+        "byte_count": 181,
+        "secret_free": true
+      },
+      {
+        "evidence_id": "codex-cruise-extract-request",
+        "kind": "execution-proof",
+        "uri": "fixture://phase37/w4/codex/cruise/extract/request",
+        "sha256": "sha256:5103eb9b742320f7c043da1850afaca23fb3dbbe67b46099c9ff6608b840dea0",
+        "byte_count": 2890,
+        "secret_free": true
+      },
+      {
+        "evidence_id": "codex-cruise-fix-cache",
+        "kind": "cache-proof",
+        "uri": "fixture://phase37/w4/codex/cruise/fix/cache-boundary",
+        "sha256": "sha256:7936de1835ab515b72e9ec7bc866882b9240198df1c5ab5300c12b838d6f5f87",
+        "byte_count": 87,
+        "secret_free": true
+      },
+      {
+        "evidence_id": "codex-cruise-fix-observed",
+        "kind": "execution-proof",
+        "uri": "fixture://phase37/w4/codex/cruise/fix/observed",
+        "sha256": "sha256:adaa42de31c55cfff531082239c1cf27d3db96fba6804858541f554566a64909",
+        "byte_count": 2681,
+        "secret_free": true
+      },
+      {
+        "evidence_id": "codex-cruise-fix-prompt",
+        "kind": "prompt-proof",
+        "uri": "fixture://phase37/w4/codex/cruise/fix/prompt-boundary",
+        "sha256": "sha256:39c85e24bb1dc0a70f4001f8b065690d2d85e4eed0004400d5583a6502549cf1",
+        "byte_count": 181,
+        "secret_free": true
+      },
+      {
+        "evidence_id": "codex-cruise-fix-request",
+        "kind": "execution-proof",
+        "uri": "fixture://phase37/w4/codex/cruise/fix/request",
+        "sha256": "sha256:9ba87f31784fe258f42d0f917ff392ebad33f3fe8ef42ab9df4d69dbec865375",
+        "byte_count": 2865,
+        "secret_free": true
+      },
+      {
+        "evidence_id": "codex-cruise-implement-cache",
+        "kind": "cache-proof",
+        "uri": "fixture://phase37/w4/codex/cruise/implement/cache-boundary",
+        "sha256": "sha256:7936de1835ab515b72e9ec7bc866882b9240198df1c5ab5300c12b838d6f5f87",
+        "byte_count": 87,
+        "secret_free": true
+      },
+      {
+        "evidence_id": "codex-cruise-implement-observed",
+        "kind": "execution-proof",
+        "uri": "fixture://phase37/w4/codex/cruise/implement/observed",
+        "sha256": "sha256:8aefb2b78c44e8e31540ef01f6760deafeedeca59976aed0e6b88a97b6db9d91",
+        "byte_count": 2705,
+        "secret_free": true
+      },
+      {
+        "evidence_id": "codex-cruise-implement-prompt",
+        "kind": "prompt-proof",
+        "uri": "fixture://phase37/w4/codex/cruise/implement/prompt-boundary",
+        "sha256": "sha256:c346f51e82f97d79ae8904986976ee019752df076451508436def9c8b172fb8d",
+        "byte_count": 181,
+        "secret_free": true
+      },
+      {
+        "evidence_id": "codex-cruise-implement-request",
+        "kind": "execution-proof",
+        "uri": "fixture://phase37/w4/codex/cruise/implement/request",
+        "sha256": "sha256:ec48194504555b4a3b44c5bbb1b37ae2396a1d8192acc9448ae64050a87dc7de",
+        "byte_count": 2907,
+        "secret_free": true
+      },
+      {
+        "evidence_id": "codex-cruise-parent-cache",
+        "kind": "cache-proof",
+        "uri": "fixture://phase37/w4/codex/cruise/parent/cache-boundary",
+        "sha256": "sha256:7936de1835ab515b72e9ec7bc866882b9240198df1c5ab5300c12b838d6f5f87",
+        "byte_count": 87,
+        "secret_free": true
+      },
+      {
+        "evidence_id": "codex-cruise-parent-observed",
+        "kind": "execution-proof",
+        "uri": "fixture://phase37/w4/codex/cruise/parent/observed",
+        "sha256": "sha256:1ce5d275bca60a58d8c2b23a057e4f67bd85e69d3d12543761f866992ac42f4b",
+        "byte_count": 661,
+        "secret_free": true
+      },
+      {
+        "evidence_id": "codex-cruise-parent-prompt",
+        "kind": "prompt-proof",
+        "uri": "fixture://phase37/w4/codex/cruise/parent/prompt-boundary",
+        "sha256": "sha256:c595e3cc87aebab3b8fac81386b954e080f70bdd37a6d1fba115555c93ba251e",
+        "byte_count": 181,
+        "secret_free": true
+      },
+      {
+        "evidence_id": "codex-cruise-parent-request",
+        "kind": "execution-proof",
+        "uri": "fixture://phase37/w4/codex/cruise/parent/request",
+        "sha256": "sha256:3636416ff30d9da978cf6dfd52ea4315b57b48a93515b9e13a1ffddc6635117a",
+        "byte_count": 678,
+        "secret_free": true
+      },
+      {
+        "evidence_id": "codex-cruise-route-policy",
+        "kind": "route-proof",
+        "uri": "fixture://phase37/w4/codex/cruise/route-policy",
+        "sha256": "sha256:7267b6aebb2caf690f4266a5615954bc92dab461031354c09863d8522993f013",
+        "byte_count": 147,
+        "secret_free": true
+      },
+      {
+        "evidence_id": "codex-cruise-strategy-cache",
+        "kind": "cache-proof",
+        "uri": "fixture://phase37/w4/codex/cruise/strategy/cache-boundary",
+        "sha256": "sha256:7936de1835ab515b72e9ec7bc866882b9240198df1c5ab5300c12b838d6f5f87",
+        "byte_count": 87,
+        "secret_free": true
+      },
+      {
+        "evidence_id": "codex-cruise-strategy-observed",
+        "kind": "execution-proof",
+        "uri": "fixture://phase37/w4/codex/cruise/strategy/observed",
+        "sha256": "sha256:02323027e9cd8d99011bc7944a6a6b4eb01f5ec7360984ecc08ac7b16fe001a0",
+        "byte_count": 2692,
+        "secret_free": true
+      },
+      {
+        "evidence_id": "codex-cruise-strategy-prompt",
+        "kind": "prompt-proof",
+        "uri": "fixture://phase37/w4/codex/cruise/strategy/prompt-boundary",
+        "sha256": "sha256:120a3fc01c6c46df5180a3c0ad8f3ca087d79fe6e1c52cbe8bde365a2b899fb0",
+        "byte_count": 181,
+        "secret_free": true
+      },
+      {
+        "evidence_id": "codex-cruise-strategy-request",
+        "kind": "execution-proof",
+        "uri": "fixture://phase37/w4/codex/cruise/strategy/request",
+        "sha256": "sha256:7d3338ce4c631125dc6724cff75febf6ba8c5f7049bcda4c729af40b0354f860",
+        "byte_count": 2896,
+        "secret_free": true
+      },
+      {
+        "evidence_id": "codex-cruise-validate-cache",
+        "kind": "cache-proof",
+        "uri": "fixture://phase37/w4/codex/cruise/validate/cache-boundary",
+        "sha256": "sha256:7936de1835ab515b72e9ec7bc866882b9240198df1c5ab5300c12b838d6f5f87",
+        "byte_count": 87,
+        "secret_free": true
+      },
+      {
+        "evidence_id": "codex-cruise-validate-observed",
+        "kind": "execution-proof",
+        "uri": "fixture://phase37/w4/codex/cruise/validate/observed",
+        "sha256": "sha256:8c6ef19654d43c07b2046359581378d34fe008ceae36cea3e26275ac52b7e4a2",
+        "byte_count": 2692,
+        "secret_free": true
+      },
+      {
+        "evidence_id": "codex-cruise-validate-prompt",
+        "kind": "prompt-proof",
+        "uri": "fixture://phase37/w4/codex/cruise/validate/prompt-boundary",
+        "sha256": "sha256:e211adf3031fc72723cd2346ada3a1474ba84d5bfde81216731565ec6dc35c47",
+        "byte_count": 181,
+        "secret_free": true
+      },
+      {
+        "evidence_id": "codex-cruise-validate-request",
+        "kind": "execution-proof",
+        "uri": "fixture://phase37/w4/codex/cruise/validate/request",
+        "sha256": "sha256:aa078e348353eaf44d4f73777801b5be9dac2e9eca63b68bccd6a2a20f834c4c",
+        "byte_count": 2896,
+        "secret_free": true
+      },
+      {
+        "evidence_id": "pending-codex-post-w3-live-billing",
+        "kind": "billing-proof",
+        "uri": "pending://phase37/w4/codex/post-w3-live-subscription-billing",
+        "sha256": null,
+        "byte_count": null,
+        "secret_free": true
+      },
+      {
+        "evidence_id": "pending-codex-post-w3-live-requests",
+        "kind": "execution-proof",
+        "uri": "pending://phase37/w4/codex/post-w3-live-role-requests",
+        "sha256": null,
+        "byte_count": null,
+        "secret_free": true
+      }
+    ],
+    "live_evidence": [],
+    "issued_at": "2026-07-23T12:00:00.000Z",
+    "expires_at": "2026-07-30T12:00:00.000Z",
+    "manifest_sha256": "sha256:c85e694cd63a08124dbb91029961604e8ea64aee47069abed64840de12d4f43a"
+  },
+  "required_post_w3_live_witnesses": [
+    "live Codex OAuth subscription billing witness",
+    "live request/observed execution witness for every frozen Codex role",
+    "live prompt/cache/context boundary witness with no prompt body or secrets"
+  ],
+  "notes": [
+    "This report is offline and non-certifying.",
+    "No network or provider calls were made.",
+    "The pack is blocked pending post-W3 live subscription witness and is not ready."
+  ]
+}

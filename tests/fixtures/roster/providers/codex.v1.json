@@ -1,0 +1,1950 @@
+{
+  "schema_version": "autopilot.codex_provider_pack_fixture.v1",
+  "fixture_id": "phase37-w4-codex-synthetic-v1",
+  "fixture_kind": "synthetic-offline-non-certifying",
+  "certifies_provider": false,
+  "network_calls_made": false,
+  "provider_calls_made": false,
+  "provider_pack_id": "codex-subscription-w4-offline",
+  "provider_id": "openai-codex",
+  "recipe_id": "codex-subscription",
+  "route_policy_id": "codex-subscription-v1",
+  "package_version": "1.3.0",
+  "pi_version": "0.80.6",
+  "frozen_profile_ids": [
+    "afterburner",
+    "cruise",
+    "precision"
+  ],
+  "frozen_roles": [
+    "parent",
+    "strategy",
+    "implement",
+    "validate",
+    "fix",
+    "adjudicate",
+    "bughunt",
+    "extract"
+  ],
+  "qualification_input": {
+    "schema_version": "autopilot.codex_qualification_evidence_bundle.v1",
+    "evidence_source": "synthetic-fixture",
+    "profile_id": "cruise",
+    "recipe_id": "codex-subscription",
+    "recipe_revision": 1,
+    "route_policy_id": "codex-subscription-v1",
+    "route_policy_revision": 1,
+    "package_version": "1.3.0",
+    "pi_version": "0.80.6",
+    "issued_at": "2026-07-23T12:00:00.000Z",
+    "expires_at": "2026-07-30T12:00:00.000Z",
+    "auth": {
+      "provider_id": "openai-codex",
+      "route_policy_id": "codex-subscription-v1",
+      "route_policy_revision": 1,
+      "auth_configured": true,
+      "auth_class": "oauth",
+      "auth_source": "stored",
+      "auth_status": "configured",
+      "is_using_oauth": true,
+      "billing_class": "plan-backed-subscription",
+      "billing_route_class": "subscription-oauth",
+      "gateway_provider_id": null
+    },
+    "route_evidence": {
+      "evidence_id": "codex-cruise-route-policy",
+      "kind": "route-proof",
+      "uri": "fixture://phase37/w4/codex/cruise/route-policy",
+      "sha256": "sha256:7267b6aebb2caf690f4266a5615954bc92dab461031354c09863d8522993f013",
+      "byte_count": 147,
+      "secret_free": true
+    },
+    "billing_evidence": {
+      "evidence_id": "codex-cruise-billing-route",
+      "kind": "billing-proof",
+      "uri": "fixture://phase37/w4/codex/cruise/billing-route",
+      "sha256": "sha256:5077f8a578a2990c48c547b1e44d55c9bf42eb548fe68e95099e41cb8b3a7e94",
+      "byte_count": 114,
+      "secret_free": true
+    },
+    "live_billing_witness": null,
+    "role_witnesses": [
+      {
+        "role": "parent",
+        "request_profile": {
+          "provider_id": "openai-codex",
+          "model_id": "gpt-5.6-sol",
+          "model": "openai-codex/gpt-5.6-sol",
+          "api": "openai-codex-responses",
+          "thinking": "xhigh",
+          "service_tier": null,
+          "cache_policy": "provider-default",
+          "system_prompt_profile": "pi-default.v1",
+          "context_window": 512000,
+          "max_output_tokens": 65536,
+          "input_modalities": [
+            "text"
+          ],
+          "output_modalities": [
+            "text"
+          ],
+          "reasoning_capability": "reasoning-supported",
+          "tool_capability": "tool-use-supported",
+          "route_policy_id": "codex-subscription-v1",
+          "route_policy_revision": 1,
+          "request_profile_sha256": "sha256:ef71931ecd5a72a4ee313525e889b0d9d25ca59bc4199047212f1004b9b3a756"
+        },
+        "observed_profile": {
+          "provider_id": "openai-codex",
+          "requested_model_id": "gpt-5.6-sol",
+          "executed_model_id": "gpt-5.6-sol",
+          "api": "openai-codex-responses",
+          "thinking": "xhigh",
+          "service_tier": null,
+          "cache_policy": "provider-default",
+          "system_prompt_profile": "pi-default.v1",
+          "system_prompt_sha256": "sha256:3ebfc4677eea33c48ccffbe4d3177f7e60aef7e58a559409ba8f540db99bf8e2",
+          "route_policy_id": "codex-subscription-v1",
+          "route_policy_revision": 1,
+          "request_profile_sha256": "sha256:ef71931ecd5a72a4ee313525e889b0d9d25ca59bc4199047212f1004b9b3a756",
+          "observed_profile_sha256": "sha256:5b539c7a922aac5b6b412d4cc71ba539c4f507d848db34013526a55a3b43413b"
+        },
+        "provider_identity": {
+          "provider_id": "openai-codex",
+          "requested_model_id": "gpt-5.6-sol",
+          "executed_model_id": "gpt-5.6-sol",
+          "api": "openai-codex-responses",
+          "thinking_level": "xhigh"
+        },
+        "unit_spec": null,
+        "receipt": null,
+        "request_evidence": {
+          "evidence_id": "codex-cruise-parent-request",
+          "kind": "execution-proof",
+          "uri": "fixture://phase37/w4/codex/cruise/parent/request",
+          "sha256": "sha256:3636416ff30d9da978cf6dfd52ea4315b57b48a93515b9e13a1ffddc6635117a",
+          "byte_count": 678,
+          "secret_free": true
+        },
+        "observed_evidence": {
+          "evidence_id": "codex-cruise-parent-observed",
+          "kind": "execution-proof",
+          "uri": "fixture://phase37/w4/codex/cruise/parent/observed",
+          "sha256": "sha256:1ce5d275bca60a58d8c2b23a057e4f67bd85e69d3d12543761f866992ac42f4b",
+          "byte_count": 661,
+          "secret_free": true
+        },
+        "prompt_evidence": {
+          "evidence_id": "codex-cruise-parent-prompt",
+          "kind": "prompt-proof",
+          "uri": "fixture://phase37/w4/codex/cruise/parent/prompt-boundary",
+          "sha256": "sha256:c595e3cc87aebab3b8fac81386b954e080f70bdd37a6d1fba115555c93ba251e",
+          "byte_count": 181,
+          "secret_free": true
+        },
+        "cache_evidence": {
+          "evidence_id": "codex-cruise-parent-cache",
+          "kind": "cache-proof",
+          "uri": "fixture://phase37/w4/codex/cruise/parent/cache-boundary",
+          "sha256": "sha256:7936de1835ab515b72e9ec7bc866882b9240198df1c5ab5300c12b838d6f5f87",
+          "byte_count": 87,
+          "secret_free": true
+        },
+        "live_request_witness": null,
+        "context_boundary": {
+          "context_window": 512000,
+          "max_output_tokens": 65536,
+          "input_modalities": [
+            "text"
+          ],
+          "output_modalities": [
+            "text"
+          ]
+        },
+        "prompt_boundary": {
+          "system_prompt_profile": "pi-default.v1",
+          "system_prompt_sha256": "sha256:3ebfc4677eea33c48ccffbe4d3177f7e60aef7e58a559409ba8f540db99bf8e2",
+          "prompt_body_included": false
+        },
+        "fallback_used": false,
+        "fallback_route_policy_id": null
+      },
+      {
+        "role": "strategy",
+        "request_profile": {
+          "provider_id": "openai-codex",
+          "model_id": "gpt-5.6-sol",
+          "model": "openai-codex/gpt-5.6-sol",
+          "api": "openai-codex-responses",
+          "thinking": "xhigh",
+          "service_tier": null,
+          "cache_policy": "provider-default",
+          "system_prompt_profile": "pi-default.v1",
+          "context_window": 512000,
+          "max_output_tokens": 65536,
+          "input_modalities": [
+            "text"
+          ],
+          "output_modalities": [
+            "text"
+          ],
+          "reasoning_capability": "reasoning-supported",
+          "tool_capability": "tool-use-supported",
+          "route_policy_id": "codex-subscription-v1",
+          "route_policy_revision": 1,
+          "request_profile_sha256": "sha256:ef71931ecd5a72a4ee313525e889b0d9d25ca59bc4199047212f1004b9b3a756"
+        },
+        "observed_profile": {
+          "provider_id": "openai-codex",
+          "requested_model_id": "gpt-5.6-sol",
+          "executed_model_id": "gpt-5.6-sol",
+          "api": "openai-codex-responses",
+          "thinking": "xhigh",
+          "service_tier": null,
+          "cache_policy": "provider-default",
+          "system_prompt_profile": "pi-default.v1",
+          "system_prompt_sha256": "sha256:39cec2da6a85666d4a80b391dd1640092d1d751762deda44ae57b97e04e03cd2",
+          "route_policy_id": "codex-subscription-v1",
+          "route_policy_revision": 1,
+          "request_profile_sha256": "sha256:ef71931ecd5a72a4ee313525e889b0d9d25ca59bc4199047212f1004b9b3a756",
+          "observed_profile_sha256": "sha256:560d1a346f76e93ac2d1ba7f7e9d486841f0a1b88fefad2a03eafcc5ce9d94ac"
+        },
+        "provider_identity": {
+          "provider_id": "openai-codex",
+          "requested_model_id": "gpt-5.6-sol",
+          "executed_model_id": "gpt-5.6-sol",
+          "api": "openai-codex-responses",
+          "thinking_level": "xhigh"
+        },
+        "unit_spec": {
+          "schema_version": "autopilot.unit_spec.v2",
+          "workstream": "phase37-w4-codex",
+          "unit_id": "codex-cruise-strategy",
+          "role": "strategy",
+          "template": "strategy",
+          "attempt": 1,
+          "objective": "Synthetic offline W4 Codex cruise strategy witness; non-certifying.",
+          "cwd": "/tmp/phase37-w4-codex/worktree",
+          "model": "openai-codex/gpt-5.6-sol",
+          "thinking": "xhigh",
+          "owned_paths": [
+            "src/core/roster/providers/codex.ts"
+          ],
+          "read_only_paths": [
+            "PHASE37_ROSTER_CONTRACT_FREEZE.md",
+            "src/core/roster/provider-recipes.ts",
+            "src/core/roster/route-policies.ts"
+          ],
+          "untouchable_paths": [
+            "**/.env",
+            "**/secrets/**"
+          ],
+          "context_refs": [
+            {
+              "path": "PHASE37_ROSTER_CONTRACT_FREEZE.md",
+              "purpose": "W0 prose",
+              "sha256": null,
+              "byte_count": null
+            },
+            {
+              "path": "src/core/roster/runtime-spec.ts",
+              "purpose": "W3 requested/observed evidence contract",
+              "sha256": null,
+              "byte_count": null
+            }
+          ],
+          "validation_commands": [
+            "node --experimental-strip-types --test tests/model/roster-provider-codex.test.ts"
+          ],
+          "status_output": "/tmp/phase37-w4-codex/cruise/strategy/status.json",
+          "receipt_output": "/tmp/phase37-w4-codex/cruise/strategy/receipt.json",
+          "evidence_dir": "/tmp/phase37-w4-codex/cruise/strategy/evidence",
+          "stop_boundary": "Stop after synthetic offline Codex provider-pack validation; do not call providers.",
+          "quality_profile": "source-change",
+          "risk_level": "medium",
+          "acceptance_criteria": [
+            "offline Codex provider pack remains non-certifying"
+          ],
+          "verification_plan": null,
+          "closure_criteria": [
+            "focused model test passes",
+            "typecheck passes"
+          ],
+          "upstream_refs": [],
+          "timeout_seconds": 600,
+          "render_prompt_snapshot": false,
+          "roster_id": "synthetic-cruise-codex-roster",
+          "roster_revision": 1,
+          "roster_sha256": "sha256:7e698f53cf3866fcb1451f768b6a0847f09650152a54db03c0f7bc9ddeae6d74",
+          "assignment_sha256": "sha256:8822bf81d147873c160c2f2bc6c8d9790c4a2763abe683feb9dbb7ecda651b91",
+          "pre_run_selection_sha256": "sha256:4558ef2766aceb2b5e69cb5016f88ebcb840caee759b5134c5e21f9bbd807727",
+          "request_profile": {
+            "provider_id": "openai-codex",
+            "model_id": "gpt-5.6-sol",
+            "model": "openai-codex/gpt-5.6-sol",
+            "api": "openai-codex-responses",
+            "thinking": "xhigh",
+            "service_tier": null,
+            "cache_policy": "provider-default",
+            "system_prompt_profile": "pi-default.v1",
+            "context_window": 512000,
+            "max_output_tokens": 65536,
+            "input_modalities": [
+              "text"
+            ],
+            "output_modalities": [
+              "text"
+            ],
+            "reasoning_capability": "reasoning-supported",
+            "tool_capability": "tool-use-supported",
+            "route_policy_id": "codex-subscription-v1",
+            "route_policy_revision": 1,
+            "request_profile_sha256": "sha256:ef71931ecd5a72a4ee313525e889b0d9d25ca59bc4199047212f1004b9b3a756"
+          }
+        },
+        "receipt": {
+          "schema_version": "autopilot.receipt.v2",
+          "tool_name": "autopilot_emit_status",
+          "workstream": "phase37-w4-codex",
+          "unit_id": "codex-cruise-strategy",
+          "role": "strategy",
+          "attempt": 1,
+          "emitted_at": "2026-07-23T12:00:01.000Z",
+          "status_output": "/tmp/phase37-w4-codex/cruise/strategy/status.json",
+          "status_sha256": "sha256:84c684f81f46151715702016666769b9b84e2c3512e6b5f71848dd1e279909ae",
+          "schema_sha256": "sha256:e27f6dfb32bd35f82f78badf40636459d8c6f4e9532b7e26714afa9cf2cf832b",
+          "tool_call_id": "call-codex-cruise-strategy",
+          "provider_identity": {
+            "provider_id": "openai-codex",
+            "requested_model_id": "gpt-5.6-sol",
+            "executed_model_id": "gpt-5.6-sol",
+            "api": "openai-codex-responses",
+            "thinking_level": "xhigh"
+          },
+          "expected_identity_hash": "sha256:55ddccb163559d5f2421f61d97e00109ab0854403e7d6ab054211514eac654f4",
+          "roster_id": "synthetic-cruise-codex-roster",
+          "roster_revision": 1,
+          "roster_sha256": "sha256:7e698f53cf3866fcb1451f768b6a0847f09650152a54db03c0f7bc9ddeae6d74",
+          "assignment_sha256": "sha256:8822bf81d147873c160c2f2bc6c8d9790c4a2763abe683feb9dbb7ecda651b91",
+          "pre_run_selection_sha256": "sha256:4558ef2766aceb2b5e69cb5016f88ebcb840caee759b5134c5e21f9bbd807727",
+          "request_profile": {
+            "provider_id": "openai-codex",
+            "model_id": "gpt-5.6-sol",
+            "model": "openai-codex/gpt-5.6-sol",
+            "api": "openai-codex-responses",
+            "thinking": "xhigh",
+            "service_tier": null,
+            "cache_policy": "provider-default",
+            "system_prompt_profile": "pi-default.v1",
+            "context_window": 512000,
+            "max_output_tokens": 65536,
+            "input_modalities": [
+              "text"
+            ],
+            "output_modalities": [
+              "text"
+            ],
+            "reasoning_capability": "reasoning-supported",
+            "tool_capability": "tool-use-supported",
+            "route_policy_id": "codex-subscription-v1",
+            "route_policy_revision": 1,
+            "request_profile_sha256": "sha256:ef71931ecd5a72a4ee313525e889b0d9d25ca59bc4199047212f1004b9b3a756"
+          },
+          "observed_profile": {
+            "provider_id": "openai-codex",
+            "requested_model_id": "gpt-5.6-sol",
+            "executed_model_id": "gpt-5.6-sol",
+            "api": "openai-codex-responses",
+            "thinking": "xhigh",
+            "service_tier": null,
+            "cache_policy": "provider-default",
+            "system_prompt_profile": "pi-default.v1",
+            "system_prompt_sha256": "sha256:39cec2da6a85666d4a80b391dd1640092d1d751762deda44ae57b97e04e03cd2",
+            "route_policy_id": "codex-subscription-v1",
+            "route_policy_revision": 1,
+            "request_profile_sha256": "sha256:ef71931ecd5a72a4ee313525e889b0d9d25ca59bc4199047212f1004b9b3a756",
+            "observed_profile_sha256": "sha256:560d1a346f76e93ac2d1ba7f7e9d486841f0a1b88fefad2a03eafcc5ce9d94ac"
+          }
+        },
+        "request_evidence": {
+          "evidence_id": "codex-cruise-strategy-request",
+          "kind": "execution-proof",
+          "uri": "fixture://phase37/w4/codex/cruise/strategy/request",
+          "sha256": "sha256:7d3338ce4c631125dc6724cff75febf6ba8c5f7049bcda4c729af40b0354f860",
+          "byte_count": 2896,
+          "secret_free": true
+        },
+        "observed_evidence": {
+          "evidence_id": "codex-cruise-strategy-observed",
+          "kind": "execution-proof",
+          "uri": "fixture://phase37/w4/codex/cruise/strategy/observed",
+          "sha256": "sha256:02323027e9cd8d99011bc7944a6a6b4eb01f5ec7360984ecc08ac7b16fe001a0",
+          "byte_count": 2692,
+          "secret_free": true
+        },
+        "prompt_evidence": {
+          "evidence_id": "codex-cruise-strategy-prompt",
+          "kind": "prompt-proof",
+          "uri": "fixture://phase37/w4/codex/cruise/strategy/prompt-boundary",
+          "sha256": "sha256:120a3fc01c6c46df5180a3c0ad8f3ca087d79fe6e1c52cbe8bde365a2b899fb0",
+          "byte_count": 181,
+          "secret_free": true
+        },
+        "cache_evidence": {
+          "evidence_id": "codex-cruise-strategy-cache",
+          "kind": "cache-proof",
+          "uri": "fixture://phase37/w4/codex/cruise/strategy/cache-boundary",
+          "sha256": "sha256:7936de1835ab515b72e9ec7bc866882b9240198df1c5ab5300c12b838d6f5f87",
+          "byte_count": 87,
+          "secret_free": true
+        },
+        "live_request_witness": null,
+        "context_boundary": {
+          "context_window": 512000,
+          "max_output_tokens": 65536,
+          "input_modalities": [
+            "text"
+          ],
+          "output_modalities": [
+            "text"
+          ]
+        },
+        "prompt_boundary": {
+          "system_prompt_profile": "pi-default.v1",
+          "system_prompt_sha256": "sha256:39cec2da6a85666d4a80b391dd1640092d1d751762deda44ae57b97e04e03cd2",
+          "prompt_body_included": false
+        },
+        "fallback_used": false,
+        "fallback_route_policy_id": null
+      },
+      {
+        "role": "implement",
+        "request_profile": {
+          "provider_id": "openai-codex",
+          "model_id": "gpt-5.6-terra",
+          "model": "openai-codex/gpt-5.6-terra",
+          "api": "openai-codex-responses",
+          "thinking": "high",
+          "service_tier": null,
+          "cache_policy": "provider-default",
+          "system_prompt_profile": "pi-default.v1",
+          "context_window": 512000,
+          "max_output_tokens": 65536,
+          "input_modalities": [
+            "text"
+          ],
+          "output_modalities": [
+            "text"
+          ],
+          "reasoning_capability": "reasoning-supported",
+          "tool_capability": "tool-use-supported",
+          "route_policy_id": "codex-subscription-v1",
+          "route_policy_revision": 1,
+          "request_profile_sha256": "sha256:93011a011fc250ae14c18304a0d9ea559e318f1c1ab07ce04af651200b8e72ee"
+        },
+        "observed_profile": {
+          "provider_id": "openai-codex",
+          "requested_model_id": "gpt-5.6-terra",
+          "executed_model_id": "gpt-5.6-terra",
+          "api": "openai-codex-responses",
+          "thinking": "high",
+          "service_tier": null,
+          "cache_policy": "provider-default",
+          "system_prompt_profile": "pi-default.v1",
+          "system_prompt_sha256": "sha256:131caed38693af455673cf07ddead3553612883c33c7ef7d46289ecf938af815",
+          "route_policy_id": "codex-subscription-v1",
+          "route_policy_revision": 1,
+          "request_profile_sha256": "sha256:93011a011fc250ae14c18304a0d9ea559e318f1c1ab07ce04af651200b8e72ee",
+          "observed_profile_sha256": "sha256:69f48153d725574bdc2d6080f0661bdbe015ba6a5e8ee9800a06206894b243a1"
+        },
+        "provider_identity": {
+          "provider_id": "openai-codex",
+          "requested_model_id": "gpt-5.6-terra",
+          "executed_model_id": "gpt-5.6-terra",
+          "api": "openai-codex-responses",
+          "thinking_level": "high"
+        },
+        "unit_spec": {
+          "schema_version": "autopilot.unit_spec.v2",
+          "workstream": "phase37-w4-codex",
+          "unit_id": "codex-cruise-implement",
+          "role": "implement",
+          "template": "implement",
+          "attempt": 1,
+          "objective": "Synthetic offline W4 Codex cruise implement witness; non-certifying.",
+          "cwd": "/tmp/phase37-w4-codex/worktree",
+          "model": "openai-codex/gpt-5.6-terra",
+          "thinking": "high",
+          "owned_paths": [
+            "src/core/roster/providers/codex.ts"
+          ],
+          "read_only_paths": [
+            "PHASE37_ROSTER_CONTRACT_FREEZE.md",
+            "src/core/roster/provider-recipes.ts",
+            "src/core/roster/route-policies.ts"
+          ],
+          "untouchable_paths": [
+            "**/.env",
+            "**/secrets/**"
+          ],
+          "context_refs": [
+            {
+              "path": "PHASE37_ROSTER_CONTRACT_FREEZE.md",
+              "purpose": "W0 prose",
+              "sha256": null,
+              "byte_count": null
+            },
+            {
+              "path": "src/core/roster/runtime-spec.ts",
+              "purpose": "W3 requested/observed evidence contract",
+              "sha256": null,
+              "byte_count": null
+            }
+          ],
+          "validation_commands": [
+            "node --experimental-strip-types --test tests/model/roster-provider-codex.test.ts"
+          ],
+          "status_output": "/tmp/phase37-w4-codex/cruise/implement/status.json",
+          "receipt_output": "/tmp/phase37-w4-codex/cruise/implement/receipt.json",
+          "evidence_dir": "/tmp/phase37-w4-codex/cruise/implement/evidence",
+          "stop_boundary": "Stop after synthetic offline Codex provider-pack validation; do not call providers.",
+          "quality_profile": "source-change",
+          "risk_level": "medium",
+          "acceptance_criteria": [
+            "offline Codex provider pack remains non-certifying"
+          ],
+          "verification_plan": null,
+          "closure_criteria": [
+            "focused model test passes",
+            "typecheck passes"
+          ],
+          "upstream_refs": [],
+          "timeout_seconds": 600,
+          "render_prompt_snapshot": false,
+          "roster_id": "synthetic-cruise-codex-roster",
+          "roster_revision": 1,
+          "roster_sha256": "sha256:7e698f53cf3866fcb1451f768b6a0847f09650152a54db03c0f7bc9ddeae6d74",
+          "assignment_sha256": "sha256:ea4cd4c1cafc11ab6753a6a6a534404a326c8657ee31807553e54df2058b8f47",
+          "pre_run_selection_sha256": "sha256:4558ef2766aceb2b5e69cb5016f88ebcb840caee759b5134c5e21f9bbd807727",
+          "request_profile": {
+            "provider_id": "openai-codex",
+            "model_id": "gpt-5.6-terra",
+            "model": "openai-codex/gpt-5.6-terra",
+            "api": "openai-codex-responses",
+            "thinking": "high",
+            "service_tier": null,
+            "cache_policy": "provider-default",
+            "system_prompt_profile": "pi-default.v1",
+            "context_window": 512000,
+            "max_output_tokens": 65536,
+            "input_modalities": [
+              "text"
+            ],
+            "output_modalities": [
+              "text"
+            ],
+            "reasoning_capability": "reasoning-supported",
+            "tool_capability": "tool-use-supported",
+            "route_policy_id": "codex-subscription-v1",
+            "route_policy_revision": 1,
+            "request_profile_sha256": "sha256:93011a011fc250ae14c18304a0d9ea559e318f1c1ab07ce04af651200b8e72ee"
+          }
+        },
+        "receipt": {
+          "schema_version": "autopilot.receipt.v2",
+          "tool_name": "autopilot_emit_status",
+          "workstream": "phase37-w4-codex",
+          "unit_id": "codex-cruise-implement",
+          "role": "implement",
+          "attempt": 1,
+          "emitted_at": "2026-07-23T12:00:01.000Z",
+          "status_output": "/tmp/phase37-w4-codex/cruise/implement/status.json",
+          "status_sha256": "sha256:76c416e759dad59d9eda885e61505ef53c29cd2ccf3ddc7754b5b40381b91e70",
+          "schema_sha256": "sha256:e27f6dfb32bd35f82f78badf40636459d8c6f4e9532b7e26714afa9cf2cf832b",
+          "tool_call_id": "call-codex-cruise-implement",
+          "provider_identity": {
+            "provider_id": "openai-codex",
+            "requested_model_id": "gpt-5.6-terra",
+            "executed_model_id": "gpt-5.6-terra",
+            "api": "openai-codex-responses",
+            "thinking_level": "high"
+          },
+          "expected_identity_hash": "sha256:6b99d08a5c31084ebcba5f0e3ebee588bc58f9598ab9e253e0aceec005ffab56",
+          "roster_id": "synthetic-cruise-codex-roster",
+          "roster_revision": 1,
+          "roster_sha256": "sha256:7e698f53cf3866fcb1451f768b6a0847f09650152a54db03c0f7bc9ddeae6d74",
+          "assignment_sha256": "sha256:ea4cd4c1cafc11ab6753a6a6a534404a326c8657ee31807553e54df2058b8f47",
+          "pre_run_selection_sha256": "sha256:4558ef2766aceb2b5e69cb5016f88ebcb840caee759b5134c5e21f9bbd807727",
+          "request_profile": {
+            "provider_id": "openai-codex",
+            "model_id": "gpt-5.6-terra",
+            "model": "openai-codex/gpt-5.6-terra",
+            "api": "openai-codex-responses",
+            "thinking": "high",
+            "service_tier": null,
+            "cache_policy": "provider-default",
+            "system_prompt_profile": "pi-default.v1",
+            "context_window": 512000,
+            "max_output_tokens": 65536,
+            "input_modalities": [
+              "text"
+            ],
+            "output_modalities": [
+              "text"
+            ],
+            "reasoning_capability": "reasoning-supported",
+            "tool_capability": "tool-use-supported",
+            "route_policy_id": "codex-subscription-v1",
+            "route_policy_revision": 1,
+            "request_profile_sha256": "sha256:93011a011fc250ae14c18304a0d9ea559e318f1c1ab07ce04af651200b8e72ee"
+          },
+          "observed_profile": {
+            "provider_id": "openai-codex",
+            "requested_model_id": "gpt-5.6-terra",
+            "executed_model_id": "gpt-5.6-terra",
+            "api": "openai-codex-responses",
+            "thinking": "high",
+            "service_tier": null,
+            "cache_policy": "provider-default",
+            "system_prompt_profile": "pi-default.v1",
+            "system_prompt_sha256": "sha256:131caed38693af455673cf07ddead3553612883c33c7ef7d46289ecf938af815",
+            "route_policy_id": "codex-subscription-v1",
+            "route_policy_revision": 1,
+            "request_profile_sha256": "sha256:93011a011fc250ae14c18304a0d9ea559e318f1c1ab07ce04af651200b8e72ee",
+            "observed_profile_sha256": "sha256:69f48153d725574bdc2d6080f0661bdbe015ba6a5e8ee9800a06206894b243a1"
+          }
+        },
+        "request_evidence": {
+          "evidence_id": "codex-cruise-implement-request",
+          "kind": "execution-proof",
+          "uri": "fixture://phase37/w4/codex/cruise/implement/request",
+          "sha256": "sha256:ec48194504555b4a3b44c5bbb1b37ae2396a1d8192acc9448ae64050a87dc7de",
+          "byte_count": 2907,
+          "secret_free": true
+        },
+        "observed_evidence": {
+          "evidence_id": "codex-cruise-implement-observed",
+          "kind": "execution-proof",
+          "uri": "fixture://phase37/w4/codex/cruise/implement/observed",
+          "sha256": "sha256:8aefb2b78c44e8e31540ef01f6760deafeedeca59976aed0e6b88a97b6db9d91",
+          "byte_count": 2705,
+          "secret_free": true
+        },
+        "prompt_evidence": {
+          "evidence_id": "codex-cruise-implement-prompt",
+          "kind": "prompt-proof",
+          "uri": "fixture://phase37/w4/codex/cruise/implement/prompt-boundary",
+          "sha256": "sha256:c346f51e82f97d79ae8904986976ee019752df076451508436def9c8b172fb8d",
+          "byte_count": 181,
+          "secret_free": true
+        },
+        "cache_evidence": {
+          "evidence_id": "codex-cruise-implement-cache",
+          "kind": "cache-proof",
+          "uri": "fixture://phase37/w4/codex/cruise/implement/cache-boundary",
+          "sha256": "sha256:7936de1835ab515b72e9ec7bc866882b9240198df1c5ab5300c12b838d6f5f87",
+          "byte_count": 87,
+          "secret_free": true
+        },
+        "live_request_witness": null,
+        "context_boundary": {
+          "context_window": 512000,
+          "max_output_tokens": 65536,
+          "input_modalities": [
+            "text"
+          ],
+          "output_modalities": [
+            "text"
+          ]
+        },
+        "prompt_boundary": {
+          "system_prompt_profile": "pi-default.v1",
+          "system_prompt_sha256": "sha256:131caed38693af455673cf07ddead3553612883c33c7ef7d46289ecf938af815",
+          "prompt_body_included": false
+        },
+        "fallback_used": false,
+        "fallback_route_policy_id": null
+      },
+      {
+        "role": "validate",
+        "request_profile": {
+          "provider_id": "openai-codex",
+          "model_id": "gpt-5.6-sol",
+          "model": "openai-codex/gpt-5.6-sol",
+          "api": "openai-codex-responses",
+          "thinking": "xhigh",
+          "service_tier": null,
+          "cache_policy": "provider-default",
+          "system_prompt_profile": "pi-default.v1",
+          "context_window": 512000,
+          "max_output_tokens": 65536,
+          "input_modalities": [
+            "text"
+          ],
+          "output_modalities": [
+            "text"
+          ],
+          "reasoning_capability": "reasoning-supported",
+          "tool_capability": "tool-use-supported",
+          "route_policy_id": "codex-subscription-v1",
+          "route_policy_revision": 1,
+          "request_profile_sha256": "sha256:ef71931ecd5a72a4ee313525e889b0d9d25ca59bc4199047212f1004b9b3a756"
+        },
+        "observed_profile": {
+          "provider_id": "openai-codex",
+          "requested_model_id": "gpt-5.6-sol",
+          "executed_model_id": "gpt-5.6-sol",
+          "api": "openai-codex-responses",
+          "thinking": "xhigh",
+          "service_tier": null,
+          "cache_policy": "provider-default",
+          "system_prompt_profile": "pi-default.v1",
+          "system_prompt_sha256": "sha256:605e726cbad6164a72602f75355e3452445006d2e1fe4200bf4cd0f6ce4182eb",
+          "route_policy_id": "codex-subscription-v1",
+          "route_policy_revision": 1,
+          "request_profile_sha256": "sha256:ef71931ecd5a72a4ee313525e889b0d9d25ca59bc4199047212f1004b9b3a756",
+          "observed_profile_sha256": "sha256:8c5d559ba98fb8c15683a5a915570a848466442a41e8af58d5520b411433f53b"
+        },
+        "provider_identity": {
+          "provider_id": "openai-codex",
+          "requested_model_id": "gpt-5.6-sol",
+          "executed_model_id": "gpt-5.6-sol",
+          "api": "openai-codex-responses",
+          "thinking_level": "xhigh"
+        },
+        "unit_spec": {
+          "schema_version": "autopilot.unit_spec.v2",
+          "workstream": "phase37-w4-codex",
+          "unit_id": "codex-cruise-validate",
+          "role": "validate",
+          "template": "validate",
+          "attempt": 1,
+          "objective": "Synthetic offline W4 Codex cruise validate witness; non-certifying.",
+          "cwd": "/tmp/phase37-w4-codex/worktree",
+          "model": "openai-codex/gpt-5.6-sol",
+          "thinking": "xhigh",
+          "owned_paths": [
+            "src/core/roster/providers/codex.ts"
+          ],
+          "read_only_paths": [
+            "PHASE37_ROSTER_CONTRACT_FREEZE.md",
+            "src/core/roster/provider-recipes.ts",
+            "src/core/roster/route-policies.ts"
+          ],
+          "untouchable_paths": [
+            "**/.env",
+            "**/secrets/**"
+          ],
+          "context_refs": [
+            {
+              "path": "PHASE37_ROSTER_CONTRACT_FREEZE.md",
+              "purpose": "W0 prose",
+              "sha256": null,
+              "byte_count": null
+            },
+            {
+              "path": "src/core/roster/runtime-spec.ts",
+              "purpose": "W3 requested/observed evidence contract",
+              "sha256": null,
+              "byte_count": null
+            }
+          ],
+          "validation_commands": [
+            "node --experimental-strip-types --test tests/model/roster-provider-codex.test.ts"
+          ],
+          "status_output": "/tmp/phase37-w4-codex/cruise/validate/status.json",
+          "receipt_output": "/tmp/phase37-w4-codex/cruise/validate/receipt.json",
+          "evidence_dir": "/tmp/phase37-w4-codex/cruise/validate/evidence",
+          "stop_boundary": "Stop after synthetic offline Codex provider-pack validation; do not call providers.",
+          "quality_profile": "source-change",
+          "risk_level": "medium",
+          "acceptance_criteria": [
+            "offline Codex provider pack remains non-certifying"
+          ],
+          "verification_plan": null,
+          "closure_criteria": [
+            "focused model test passes",
+            "typecheck passes"
+          ],
+          "upstream_refs": [],
+          "timeout_seconds": 600,
+          "render_prompt_snapshot": false,
+          "roster_id": "synthetic-cruise-codex-roster",
+          "roster_revision": 1,
+          "roster_sha256": "sha256:7e698f53cf3866fcb1451f768b6a0847f09650152a54db03c0f7bc9ddeae6d74",
+          "assignment_sha256": "sha256:aa7d1a58fc6a0a33b5cd62cf566590c4c67d13f81019f6aaa588d5ebf50cfb57",
+          "pre_run_selection_sha256": "sha256:4558ef2766aceb2b5e69cb5016f88ebcb840caee759b5134c5e21f9bbd807727",
+          "request_profile": {
+            "provider_id": "openai-codex",
+            "model_id": "gpt-5.6-sol",
+            "model": "openai-codex/gpt-5.6-sol",
+            "api": "openai-codex-responses",
+            "thinking": "xhigh",
+            "service_tier": null,
+            "cache_policy": "provider-default",
+            "system_prompt_profile": "pi-default.v1",
+            "context_window": 512000,
+            "max_output_tokens": 65536,
+            "input_modalities": [
+              "text"
+            ],
+            "output_modalities": [
+              "text"
+            ],
+            "reasoning_capability": "reasoning-supported",
+            "tool_capability": "tool-use-supported",
+            "route_policy_id": "codex-subscription-v1",
+            "route_policy_revision": 1,
+            "request_profile_sha256": "sha256:ef71931ecd5a72a4ee313525e889b0d9d25ca59bc4199047212f1004b9b3a756"
+          }
+        },
+        "receipt": {
+          "schema_version": "autopilot.receipt.v2",
+          "tool_name": "autopilot_emit_status",
+          "workstream": "phase37-w4-codex",
+          "unit_id": "codex-cruise-validate",
+          "role": "validate",
+          "attempt": 1,
+          "emitted_at": "2026-07-23T12:00:01.000Z",
+          "status_output": "/tmp/phase37-w4-codex/cruise/validate/status.json",
+          "status_sha256": "sha256:1510e8ea397b7a943f787842e3b709b8baec252c9f00cc6dc239c31caab88642",
+          "schema_sha256": "sha256:e27f6dfb32bd35f82f78badf40636459d8c6f4e9532b7e26714afa9cf2cf832b",
+          "tool_call_id": "call-codex-cruise-validate",
+          "provider_identity": {
+            "provider_id": "openai-codex",
+            "requested_model_id": "gpt-5.6-sol",
+            "executed_model_id": "gpt-5.6-sol",
+            "api": "openai-codex-responses",
+            "thinking_level": "xhigh"
+          },
+          "expected_identity_hash": "sha256:f68275ecd3c1fe2be873f0d65289bb6bfaedc1992bed6c17d88dca0736e62f38",
+          "roster_id": "synthetic-cruise-codex-roster",
+          "roster_revision": 1,
+          "roster_sha256": "sha256:7e698f53cf3866fcb1451f768b6a0847f09650152a54db03c0f7bc9ddeae6d74",
+          "assignment_sha256": "sha256:aa7d1a58fc6a0a33b5cd62cf566590c4c67d13f81019f6aaa588d5ebf50cfb57",
+          "pre_run_selection_sha256": "sha256:4558ef2766aceb2b5e69cb5016f88ebcb840caee759b5134c5e21f9bbd807727",
+          "request_profile": {
+            "provider_id": "openai-codex",
+            "model_id": "gpt-5.6-sol",
+            "model": "openai-codex/gpt-5.6-sol",
+            "api": "openai-codex-responses",
+            "thinking": "xhigh",
+            "service_tier": null,
+            "cache_policy": "provider-default",
+            "system_prompt_profile": "pi-default.v1",
+            "context_window": 512000,
+            "max_output_tokens": 65536,
+            "input_modalities": [
+              "text"
+            ],
+            "output_modalities": [
+              "text"
+            ],
+            "reasoning_capability": "reasoning-supported",
+            "tool_capability": "tool-use-supported",
+            "route_policy_id": "codex-subscription-v1",
+            "route_policy_revision": 1,
+            "request_profile_sha256": "sha256:ef71931ecd5a72a4ee313525e889b0d9d25ca59bc4199047212f1004b9b3a756"
+          },
+          "observed_profile": {
+            "provider_id": "openai-codex",
+            "requested_model_id": "gpt-5.6-sol",
+            "executed_model_id": "gpt-5.6-sol",
+            "api": "openai-codex-responses",
+            "thinking": "xhigh",
+            "service_tier": null,
+            "cache_policy": "provider-default",
+            "system_prompt_profile": "pi-default.v1",
+            "system_prompt_sha256": "sha256:605e726cbad6164a72602f75355e3452445006d2e1fe4200bf4cd0f6ce4182eb",
+            "route_policy_id": "codex-subscription-v1",
+            "route_policy_revision": 1,
+            "request_profile_sha256": "sha256:ef71931ecd5a72a4ee313525e889b0d9d25ca59bc4199047212f1004b9b3a756",
+            "observed_profile_sha256": "sha256:8c5d559ba98fb8c15683a5a915570a848466442a41e8af58d5520b411433f53b"
+          }
+        },
+        "request_evidence": {
+          "evidence_id": "codex-cruise-validate-request",
+          "kind": "execution-proof",
+          "uri": "fixture://phase37/w4/codex/cruise/validate/request",
+          "sha256": "sha256:aa078e348353eaf44d4f73777801b5be9dac2e9eca63b68bccd6a2a20f834c4c",
+          "byte_count": 2896,
+          "secret_free": true
+        },
+        "observed_evidence": {
+          "evidence_id": "codex-cruise-validate-observed",
+          "kind": "execution-proof",
+          "uri": "fixture://phase37/w4/codex/cruise/validate/observed",
+          "sha256": "sha256:8c6ef19654d43c07b2046359581378d34fe008ceae36cea3e26275ac52b7e4a2",
+          "byte_count": 2692,
+          "secret_free": true
+        },
+        "prompt_evidence": {
+          "evidence_id": "codex-cruise-validate-prompt",
+          "kind": "prompt-proof",
+          "uri": "fixture://phase37/w4/codex/cruise/validate/prompt-boundary",
+          "sha256": "sha256:e211adf3031fc72723cd2346ada3a1474ba84d5bfde81216731565ec6dc35c47",
+          "byte_count": 181,
+          "secret_free": true
+        },
+        "cache_evidence": {
+          "evidence_id": "codex-cruise-validate-cache",
+          "kind": "cache-proof",
+          "uri": "fixture://phase37/w4/codex/cruise/validate/cache-boundary",
+          "sha256": "sha256:7936de1835ab515b72e9ec7bc866882b9240198df1c5ab5300c12b838d6f5f87",
+          "byte_count": 87,
+          "secret_free": true
+        },
+        "live_request_witness": null,
+        "context_boundary": {
+          "context_window": 512000,
+          "max_output_tokens": 65536,
+          "input_modalities": [
+            "text"
+          ],
+          "output_modalities": [
+            "text"
+          ]
+        },
+        "prompt_boundary": {
+          "system_prompt_profile": "pi-default.v1",
+          "system_prompt_sha256": "sha256:605e726cbad6164a72602f75355e3452445006d2e1fe4200bf4cd0f6ce4182eb",
+          "prompt_body_included": false
+        },
+        "fallback_used": false,
+        "fallback_route_policy_id": null
+      },
+      {
+        "role": "fix",
+        "request_profile": {
+          "provider_id": "openai-codex",
+          "model_id": "gpt-5.6-terra",
+          "model": "openai-codex/gpt-5.6-terra",
+          "api": "openai-codex-responses",
+          "thinking": "high",
+          "service_tier": null,
+          "cache_policy": "provider-default",
+          "system_prompt_profile": "pi-default.v1",
+          "context_window": 512000,
+          "max_output_tokens": 65536,
+          "input_modalities": [
+            "text"
+          ],
+          "output_modalities": [
+            "text"
+          ],
+          "reasoning_capability": "reasoning-supported",
+          "tool_capability": "tool-use-supported",
+          "route_policy_id": "codex-subscription-v1",
+          "route_policy_revision": 1,
+          "request_profile_sha256": "sha256:93011a011fc250ae14c18304a0d9ea559e318f1c1ab07ce04af651200b8e72ee"
+        },
+        "observed_profile": {
+          "provider_id": "openai-codex",
+          "requested_model_id": "gpt-5.6-terra",
+          "executed_model_id": "gpt-5.6-terra",
+          "api": "openai-codex-responses",
+          "thinking": "high",
+          "service_tier": null,
+          "cache_policy": "provider-default",
+          "system_prompt_profile": "pi-default.v1",
+          "system_prompt_sha256": "sha256:01d07cb7059d3ac02240d35705d152e0a8c6cd7598ca6c244e7b9fc3ab2ac3de",
+          "route_policy_id": "codex-subscription-v1",
+          "route_policy_revision": 1,
+          "request_profile_sha256": "sha256:93011a011fc250ae14c18304a0d9ea559e318f1c1ab07ce04af651200b8e72ee",
+          "observed_profile_sha256": "sha256:b53c785dd11b9211ec0c6242506e5e0fd92346d5a5b5ca09199af0da915cab3a"
+        },
+        "provider_identity": {
+          "provider_id": "openai-codex",
+          "requested_model_id": "gpt-5.6-terra",
+          "executed_model_id": "gpt-5.6-terra",
+          "api": "openai-codex-responses",
+          "thinking_level": "high"
+        },
+        "unit_spec": {
+          "schema_version": "autopilot.unit_spec.v2",
+          "workstream": "phase37-w4-codex",
+          "unit_id": "codex-cruise-fix",
+          "role": "fix",
+          "template": "fix",
+          "attempt": 1,
+          "objective": "Synthetic offline W4 Codex cruise fix witness; non-certifying.",
+          "cwd": "/tmp/phase37-w4-codex/worktree",
+          "model": "openai-codex/gpt-5.6-terra",
+          "thinking": "high",
+          "owned_paths": [
+            "src/core/roster/providers/codex.ts"
+          ],
+          "read_only_paths": [
+            "PHASE37_ROSTER_CONTRACT_FREEZE.md",
+            "src/core/roster/provider-recipes.ts",
+            "src/core/roster/route-policies.ts"
+          ],
+          "untouchable_paths": [
+            "**/.env",
+            "**/secrets/**"
+          ],
+          "context_refs": [
+            {
+              "path": "PHASE37_ROSTER_CONTRACT_FREEZE.md",
+              "purpose": "W0 prose",
+              "sha256": null,
+              "byte_count": null
+            },
+            {
+              "path": "src/core/roster/runtime-spec.ts",
+              "purpose": "W3 requested/observed evidence contract",
+              "sha256": null,
+              "byte_count": null
+            }
+          ],
+          "validation_commands": [
+            "node --experimental-strip-types --test tests/model/roster-provider-codex.test.ts"
+          ],
+          "status_output": "/tmp/phase37-w4-codex/cruise/fix/status.json",
+          "receipt_output": "/tmp/phase37-w4-codex/cruise/fix/receipt.json",
+          "evidence_dir": "/tmp/phase37-w4-codex/cruise/fix/evidence",
+          "stop_boundary": "Stop after synthetic offline Codex provider-pack validation; do not call providers.",
+          "quality_profile": "source-change",
+          "risk_level": "medium",
+          "acceptance_criteria": [
+            "offline Codex provider pack remains non-certifying"
+          ],
+          "verification_plan": null,
+          "closure_criteria": [
+            "focused model test passes",
+            "typecheck passes"
+          ],
+          "upstream_refs": [],
+          "timeout_seconds": 600,
+          "render_prompt_snapshot": false,
+          "roster_id": "synthetic-cruise-codex-roster",
+          "roster_revision": 1,
+          "roster_sha256": "sha256:7e698f53cf3866fcb1451f768b6a0847f09650152a54db03c0f7bc9ddeae6d74",
+          "assignment_sha256": "sha256:470400e9b524df69d83afaee0d732de045940c9ae2b645a739b429af6ce1de0e",
+          "pre_run_selection_sha256": "sha256:4558ef2766aceb2b5e69cb5016f88ebcb840caee759b5134c5e21f9bbd807727",
+          "request_profile": {
+            "provider_id": "openai-codex",
+            "model_id": "gpt-5.6-terra",
+            "model": "openai-codex/gpt-5.6-terra",
+            "api": "openai-codex-responses",
+            "thinking": "high",
+            "service_tier": null,
+            "cache_policy": "provider-default",
+            "system_prompt_profile": "pi-default.v1",
+            "context_window": 512000,
+            "max_output_tokens": 65536,
+            "input_modalities": [
+              "text"
+            ],
+            "output_modalities": [
+              "text"
+            ],
+            "reasoning_capability": "reasoning-supported",
+            "tool_capability": "tool-use-supported",
+            "route_policy_id": "codex-subscription-v1",
+            "route_policy_revision": 1,
+            "request_profile_sha256": "sha256:93011a011fc250ae14c18304a0d9ea559e318f1c1ab07ce04af651200b8e72ee"
+          }
+        },
+        "receipt": {
+          "schema_version": "autopilot.receipt.v2",
+          "tool_name": "autopilot_emit_status",
+          "workstream": "phase37-w4-codex",
+          "unit_id": "codex-cruise-fix",
+          "role": "fix",
+          "attempt": 1,
+          "emitted_at": "2026-07-23T12:00:01.000Z",
+          "status_output": "/tmp/phase37-w4-codex/cruise/fix/status.json",
+          "status_sha256": "sha256:fb6c3825d155a091218891296cb8caa431d17492c8224b99d195243ee4347302",
+          "schema_sha256": "sha256:e27f6dfb32bd35f82f78badf40636459d8c6f4e9532b7e26714afa9cf2cf832b",
+          "tool_call_id": "call-codex-cruise-fix",
+          "provider_identity": {
+            "provider_id": "openai-codex",
+            "requested_model_id": "gpt-5.6-terra",
+            "executed_model_id": "gpt-5.6-terra",
+            "api": "openai-codex-responses",
+            "thinking_level": "high"
+          },
+          "expected_identity_hash": "sha256:ef858c5b5ae895f909e53f70d0476234aed9d18fc6abf085017416f84ac0bb02",
+          "roster_id": "synthetic-cruise-codex-roster",
+          "roster_revision": 1,
+          "roster_sha256": "sha256:7e698f53cf3866fcb1451f768b6a0847f09650152a54db03c0f7bc9ddeae6d74",
+          "assignment_sha256": "sha256:470400e9b524df69d83afaee0d732de045940c9ae2b645a739b429af6ce1de0e",
+          "pre_run_selection_sha256": "sha256:4558ef2766aceb2b5e69cb5016f88ebcb840caee759b5134c5e21f9bbd807727",
+          "request_profile": {
+            "provider_id": "openai-codex",
+            "model_id": "gpt-5.6-terra",
+            "model": "openai-codex/gpt-5.6-terra",
+            "api": "openai-codex-responses",
+            "thinking": "high",
+            "service_tier": null,
+            "cache_policy": "provider-default",
+            "system_prompt_profile": "pi-default.v1",
+            "context_window": 512000,
+            "max_output_tokens": 65536,
+            "input_modalities": [
+              "text"
+            ],
+            "output_modalities": [
+              "text"
+            ],
+            "reasoning_capability": "reasoning-supported",
+            "tool_capability": "tool-use-supported",
+            "route_policy_id": "codex-subscription-v1",
+            "route_policy_revision": 1,
+            "request_profile_sha256": "sha256:93011a011fc250ae14c18304a0d9ea559e318f1c1ab07ce04af651200b8e72ee"
+          },
+          "observed_profile": {
+            "provider_id": "openai-codex",
+            "requested_model_id": "gpt-5.6-terra",
+            "executed_model_id": "gpt-5.6-terra",
+            "api": "openai-codex-responses",
+            "thinking": "high",
+            "service_tier": null,
+            "cache_policy": "provider-default",
+            "system_prompt_profile": "pi-default.v1",
+            "system_prompt_sha256": "sha256:01d07cb7059d3ac02240d35705d152e0a8c6cd7598ca6c244e7b9fc3ab2ac3de",
+            "route_policy_id": "codex-subscription-v1",
+            "route_policy_revision": 1,
+            "request_profile_sha256": "sha256:93011a011fc250ae14c18304a0d9ea559e318f1c1ab07ce04af651200b8e72ee",
+            "observed_profile_sha256": "sha256:b53c785dd11b9211ec0c6242506e5e0fd92346d5a5b5ca09199af0da915cab3a"
+          }
+        },
+        "request_evidence": {
+          "evidence_id": "codex-cruise-fix-request",
+          "kind": "execution-proof",
+          "uri": "fixture://phase37/w4/codex/cruise/fix/request",
+          "sha256": "sha256:9ba87f31784fe258f42d0f917ff392ebad33f3fe8ef42ab9df4d69dbec865375",
+          "byte_count": 2865,
+          "secret_free": true
+        },
+        "observed_evidence": {
+          "evidence_id": "codex-cruise-fix-observed",
+          "kind": "execution-proof",
+          "uri": "fixture://phase37/w4/codex/cruise/fix/observed",
+          "sha256": "sha256:adaa42de31c55cfff531082239c1cf27d3db96fba6804858541f554566a64909",
+          "byte_count": 2681,
+          "secret_free": true
+        },
+        "prompt_evidence": {
+          "evidence_id": "codex-cruise-fix-prompt",
+          "kind": "prompt-proof",
+          "uri": "fixture://phase37/w4/codex/cruise/fix/prompt-boundary",
+          "sha256": "sha256:39c85e24bb1dc0a70f4001f8b065690d2d85e4eed0004400d5583a6502549cf1",
+          "byte_count": 181,
+          "secret_free": true
+        },
+        "cache_evidence": {
+          "evidence_id": "codex-cruise-fix-cache",
+          "kind": "cache-proof",
+          "uri": "fixture://phase37/w4/codex/cruise/fix/cache-boundary",
+          "sha256": "sha256:7936de1835ab515b72e9ec7bc866882b9240198df1c5ab5300c12b838d6f5f87",
+          "byte_count": 87,
+          "secret_free": true
+        },
+        "live_request_witness": null,
+        "context_boundary": {
+          "context_window": 512000,
+          "max_output_tokens": 65536,
+          "input_modalities": [
+            "text"
+          ],
+          "output_modalities": [
+            "text"
+          ]
+        },
+        "prompt_boundary": {
+          "system_prompt_profile": "pi-default.v1",
+          "system_prompt_sha256": "sha256:01d07cb7059d3ac02240d35705d152e0a8c6cd7598ca6c244e7b9fc3ab2ac3de",
+          "prompt_body_included": false
+        },
+        "fallback_used": false,
+        "fallback_route_policy_id": null
+      },
+      {
+        "role": "adjudicate",
+        "request_profile": {
+          "provider_id": "openai-codex",
+          "model_id": "gpt-5.6-sol",
+          "model": "openai-codex/gpt-5.6-sol",
+          "api": "openai-codex-responses",
+          "thinking": "xhigh",
+          "service_tier": null,
+          "cache_policy": "provider-default",
+          "system_prompt_profile": "pi-default.v1",
+          "context_window": 512000,
+          "max_output_tokens": 65536,
+          "input_modalities": [
+            "text"
+          ],
+          "output_modalities": [
+            "text"
+          ],
+          "reasoning_capability": "reasoning-supported",
+          "tool_capability": "tool-use-supported",
+          "route_policy_id": "codex-subscription-v1",
+          "route_policy_revision": 1,
+          "request_profile_sha256": "sha256:ef71931ecd5a72a4ee313525e889b0d9d25ca59bc4199047212f1004b9b3a756"
+        },
+        "observed_profile": {
+          "provider_id": "openai-codex",
+          "requested_model_id": "gpt-5.6-sol",
+          "executed_model_id": "gpt-5.6-sol",
+          "api": "openai-codex-responses",
+          "thinking": "xhigh",
+          "service_tier": null,
+          "cache_policy": "provider-default",
+          "system_prompt_profile": "pi-default.v1",
+          "system_prompt_sha256": "sha256:9af66307a5b2f7875851d4a4b784ef1d9db763d39f72378675f9d596e0e5d64a",
+          "route_policy_id": "codex-subscription-v1",
+          "route_policy_revision": 1,
+          "request_profile_sha256": "sha256:ef71931ecd5a72a4ee313525e889b0d9d25ca59bc4199047212f1004b9b3a756",
+          "observed_profile_sha256": "sha256:5e57e66b53462db29cddbc556a9c2b138da35926ab90e7dfc6d9d28217760450"
+        },
+        "provider_identity": {
+          "provider_id": "openai-codex",
+          "requested_model_id": "gpt-5.6-sol",
+          "executed_model_id": "gpt-5.6-sol",
+          "api": "openai-codex-responses",
+          "thinking_level": "xhigh"
+        },
+        "unit_spec": {
+          "schema_version": "autopilot.unit_spec.v2",
+          "workstream": "phase37-w4-codex",
+          "unit_id": "codex-cruise-adjudicate",
+          "role": "adjudicate",
+          "template": "adjudicate",
+          "attempt": 1,
+          "objective": "Synthetic offline W4 Codex cruise adjudicate witness; non-certifying.",
+          "cwd": "/tmp/phase37-w4-codex/worktree",
+          "model": "openai-codex/gpt-5.6-sol",
+          "thinking": "xhigh",
+          "owned_paths": [
+            "src/core/roster/providers/codex.ts"
+          ],
+          "read_only_paths": [
+            "PHASE37_ROSTER_CONTRACT_FREEZE.md",
+            "src/core/roster/provider-recipes.ts",
+            "src/core/roster/route-policies.ts"
+          ],
+          "untouchable_paths": [
+            "**/.env",
+            "**/secrets/**"
+          ],
+          "context_refs": [
+            {
+              "path": "PHASE37_ROSTER_CONTRACT_FREEZE.md",
+              "purpose": "W0 prose",
+              "sha256": null,
+              "byte_count": null
+            },
+            {
+              "path": "src/core/roster/runtime-spec.ts",
+              "purpose": "W3 requested/observed evidence contract",
+              "sha256": null,
+              "byte_count": null
+            }
+          ],
+          "validation_commands": [
+            "node --experimental-strip-types --test tests/model/roster-provider-codex.test.ts"
+          ],
+          "status_output": "/tmp/phase37-w4-codex/cruise/adjudicate/status.json",
+          "receipt_output": "/tmp/phase37-w4-codex/cruise/adjudicate/receipt.json",
+          "evidence_dir": "/tmp/phase37-w4-codex/cruise/adjudicate/evidence",
+          "stop_boundary": "Stop after synthetic offline Codex provider-pack validation; do not call providers.",
+          "quality_profile": "source-change",
+          "risk_level": "medium",
+          "acceptance_criteria": [
+            "offline Codex provider pack remains non-certifying"
+          ],
+          "verification_plan": null,
+          "closure_criteria": [
+            "focused model test passes",
+            "typecheck passes"
+          ],
+          "upstream_refs": [],
+          "timeout_seconds": 600,
+          "render_prompt_snapshot": false,
+          "roster_id": "synthetic-cruise-codex-roster",
+          "roster_revision": 1,
+          "roster_sha256": "sha256:7e698f53cf3866fcb1451f768b6a0847f09650152a54db03c0f7bc9ddeae6d74",
+          "assignment_sha256": "sha256:fb67c2ad9acc3f275032c07aa50eb7661c2b529d755320166da0180eeefa3097",
+          "pre_run_selection_sha256": "sha256:4558ef2766aceb2b5e69cb5016f88ebcb840caee759b5134c5e21f9bbd807727",
+          "request_profile": {
+            "provider_id": "openai-codex",
+            "model_id": "gpt-5.6-sol",
+            "model": "openai-codex/gpt-5.6-sol",
+            "api": "openai-codex-responses",
+            "thinking": "xhigh",
+            "service_tier": null,
+            "cache_policy": "provider-default",
+            "system_prompt_profile": "pi-default.v1",
+            "context_window": 512000,
+            "max_output_tokens": 65536,
+            "input_modalities": [
+              "text"
+            ],
+            "output_modalities": [
+              "text"
+            ],
+            "reasoning_capability": "reasoning-supported",
+            "tool_capability": "tool-use-supported",
+            "route_policy_id": "codex-subscription-v1",
+            "route_policy_revision": 1,
+            "request_profile_sha256": "sha256:ef71931ecd5a72a4ee313525e889b0d9d25ca59bc4199047212f1004b9b3a756"
+          }
+        },
+        "receipt": {
+          "schema_version": "autopilot.receipt.v2",
+          "tool_name": "autopilot_emit_status",
+          "workstream": "phase37-w4-codex",
+          "unit_id": "codex-cruise-adjudicate",
+          "role": "adjudicate",
+          "attempt": 1,
+          "emitted_at": "2026-07-23T12:00:01.000Z",
+          "status_output": "/tmp/phase37-w4-codex/cruise/adjudicate/status.json",
+          "status_sha256": "sha256:c38221173f896359dc61e6f1eae1a6e17962b008de33d807bdaa8531f5cca300",
+          "schema_sha256": "sha256:e27f6dfb32bd35f82f78badf40636459d8c6f4e9532b7e26714afa9cf2cf832b",
+          "tool_call_id": "call-codex-cruise-adjudicate",
+          "provider_identity": {
+            "provider_id": "openai-codex",
+            "requested_model_id": "gpt-5.6-sol",
+            "executed_model_id": "gpt-5.6-sol",
+            "api": "openai-codex-responses",
+            "thinking_level": "xhigh"
+          },
+          "expected_identity_hash": "sha256:c470bb9d075bc97e22e65c121ee1dbe60b35ba3d3ee5ef4f89f03f8da4ab488b",
+          "roster_id": "synthetic-cruise-codex-roster",
+          "roster_revision": 1,
+          "roster_sha256": "sha256:7e698f53cf3866fcb1451f768b6a0847f09650152a54db03c0f7bc9ddeae6d74",
+          "assignment_sha256": "sha256:fb67c2ad9acc3f275032c07aa50eb7661c2b529d755320166da0180eeefa3097",
+          "pre_run_selection_sha256": "sha256:4558ef2766aceb2b5e69cb5016f88ebcb840caee759b5134c5e21f9bbd807727",
+          "request_profile": {
+            "provider_id": "openai-codex",
+            "model_id": "gpt-5.6-sol",
+            "model": "openai-codex/gpt-5.6-sol",
+            "api": "openai-codex-responses",
+            "thinking": "xhigh",
+            "service_tier": null,
+            "cache_policy": "provider-default",
+            "system_prompt_profile": "pi-default.v1",
+            "context_window": 512000,
+            "max_output_tokens": 65536,
+            "input_modalities": [
+              "text"
+            ],
+            "output_modalities": [
+              "text"
+            ],
+            "reasoning_capability": "reasoning-supported",
+            "tool_capability": "tool-use-supported",
+            "route_policy_id": "codex-subscription-v1",
+            "route_policy_revision": 1,
+            "request_profile_sha256": "sha256:ef71931ecd5a72a4ee313525e889b0d9d25ca59bc4199047212f1004b9b3a756"
+          },
+          "observed_profile": {
+            "provider_id": "openai-codex",
+            "requested_model_id": "gpt-5.6-sol",
+            "executed_model_id": "gpt-5.6-sol",
+            "api": "openai-codex-responses",
+            "thinking": "xhigh",
+            "service_tier": null,
+            "cache_policy": "provider-default",
+            "system_prompt_profile": "pi-default.v1",
+            "system_prompt_sha256": "sha256:9af66307a5b2f7875851d4a4b784ef1d9db763d39f72378675f9d596e0e5d64a",
+            "route_policy_id": "codex-subscription-v1",
+            "route_policy_revision": 1,
+            "request_profile_sha256": "sha256:ef71931ecd5a72a4ee313525e889b0d9d25ca59bc4199047212f1004b9b3a756",
+            "observed_profile_sha256": "sha256:5e57e66b53462db29cddbc556a9c2b138da35926ab90e7dfc6d9d28217760450"
+          }
+        },
+        "request_evidence": {
+          "evidence_id": "codex-cruise-adjudicate-request",
+          "kind": "execution-proof",
+          "uri": "fixture://phase37/w4/codex/cruise/adjudicate/request",
+          "sha256": "sha256:f716393faa06fc24297b12375ca399b5f26517035e317fb908ab8edd52fa0d57",
+          "byte_count": 2910,
+          "secret_free": true
+        },
+        "observed_evidence": {
+          "evidence_id": "codex-cruise-adjudicate-observed",
+          "kind": "execution-proof",
+          "uri": "fixture://phase37/w4/codex/cruise/adjudicate/observed",
+          "sha256": "sha256:be38175569671d510d2a91be65c0c6744629cefbd9af6d87d9a6c1acb8255754",
+          "byte_count": 2700,
+          "secret_free": true
+        },
+        "prompt_evidence": {
+          "evidence_id": "codex-cruise-adjudicate-prompt",
+          "kind": "prompt-proof",
+          "uri": "fixture://phase37/w4/codex/cruise/adjudicate/prompt-boundary",
+          "sha256": "sha256:fc899bf9a8d9e5fa94b27896bf957b02db9c8f5d8efac7fc8aac541da85c0580",
+          "byte_count": 181,
+          "secret_free": true
+        },
+        "cache_evidence": {
+          "evidence_id": "codex-cruise-adjudicate-cache",
+          "kind": "cache-proof",
+          "uri": "fixture://phase37/w4/codex/cruise/adjudicate/cache-boundary",
+          "sha256": "sha256:7936de1835ab515b72e9ec7bc866882b9240198df1c5ab5300c12b838d6f5f87",
+          "byte_count": 87,
+          "secret_free": true
+        },
+        "live_request_witness": null,
+        "context_boundary": {
+          "context_window": 512000,
+          "max_output_tokens": 65536,
+          "input_modalities": [
+            "text"
+          ],
+          "output_modalities": [
+            "text"
+          ]
+        },
+        "prompt_boundary": {
+          "system_prompt_profile": "pi-default.v1",
+          "system_prompt_sha256": "sha256:9af66307a5b2f7875851d4a4b784ef1d9db763d39f72378675f9d596e0e5d64a",
+          "prompt_body_included": false
+        },
+        "fallback_used": false,
+        "fallback_route_policy_id": null
+      },
+      {
+        "role": "bughunt",
+        "request_profile": {
+          "provider_id": "openai-codex",
+          "model_id": "gpt-5.6-sol",
+          "model": "openai-codex/gpt-5.6-sol",
+          "api": "openai-codex-responses",
+          "thinking": "xhigh",
+          "service_tier": null,
+          "cache_policy": "provider-default",
+          "system_prompt_profile": "pi-default.v1",
+          "context_window": 512000,
+          "max_output_tokens": 65536,
+          "input_modalities": [
+            "text"
+          ],
+          "output_modalities": [
+            "text"
+          ],
+          "reasoning_capability": "reasoning-supported",
+          "tool_capability": "tool-use-supported",
+          "route_policy_id": "codex-subscription-v1",
+          "route_policy_revision": 1,
+          "request_profile_sha256": "sha256:ef71931ecd5a72a4ee313525e889b0d9d25ca59bc4199047212f1004b9b3a756"
+        },
+        "observed_profile": {
+          "provider_id": "openai-codex",
+          "requested_model_id": "gpt-5.6-sol",
+          "executed_model_id": "gpt-5.6-sol",
+          "api": "openai-codex-responses",
+          "thinking": "xhigh",
+          "service_tier": null,
+          "cache_policy": "provider-default",
+          "system_prompt_profile": "pi-default.v1",
+          "system_prompt_sha256": "sha256:0f873ac4e6815ff4502b57101c494439ae3cb391f24e15364a5ed7e16130d699",
+          "route_policy_id": "codex-subscription-v1",
+          "route_policy_revision": 1,
+          "request_profile_sha256": "sha256:ef71931ecd5a72a4ee313525e889b0d9d25ca59bc4199047212f1004b9b3a756",
+          "observed_profile_sha256": "sha256:db4375461381cdd56c4590f6169a9d57b7a7ca1ef128aedcef51dadb306e4472"
+        },
+        "provider_identity": {
+          "provider_id": "openai-codex",
+          "requested_model_id": "gpt-5.6-sol",
+          "executed_model_id": "gpt-5.6-sol",
+          "api": "openai-codex-responses",
+          "thinking_level": "xhigh"
+        },
+        "unit_spec": {
+          "schema_version": "autopilot.unit_spec.v2",
+          "workstream": "phase37-w4-codex",
+          "unit_id": "codex-cruise-bughunt",
+          "role": "bughunt",
+          "template": "bughunt",
+          "attempt": 1,
+          "objective": "Synthetic offline W4 Codex cruise bughunt witness; non-certifying.",
+          "cwd": "/tmp/phase37-w4-codex/worktree",
+          "model": "openai-codex/gpt-5.6-sol",
+          "thinking": "xhigh",
+          "owned_paths": [
+            "src/core/roster/providers/codex.ts"
+          ],
+          "read_only_paths": [
+            "PHASE37_ROSTER_CONTRACT_FREEZE.md",
+            "src/core/roster/provider-recipes.ts",
+            "src/core/roster/route-policies.ts"
+          ],
+          "untouchable_paths": [
+            "**/.env",
+            "**/secrets/**"
+          ],
+          "context_refs": [
+            {
+              "path": "PHASE37_ROSTER_CONTRACT_FREEZE.md",
+              "purpose": "W0 prose",
+              "sha256": null,
+              "byte_count": null
+            },
+            {
+              "path": "src/core/roster/runtime-spec.ts",
+              "purpose": "W3 requested/observed evidence contract",
+              "sha256": null,
+              "byte_count": null
+            }
+          ],
+          "validation_commands": [
+            "node --experimental-strip-types --test tests/model/roster-provider-codex.test.ts"
+          ],
+          "status_output": "/tmp/phase37-w4-codex/cruise/bughunt/status.json",
+          "receipt_output": "/tmp/phase37-w4-codex/cruise/bughunt/receipt.json",
+          "evidence_dir": "/tmp/phase37-w4-codex/cruise/bughunt/evidence",
+          "stop_boundary": "Stop after synthetic offline Codex provider-pack validation; do not call providers.",
+          "quality_profile": "source-change",
+          "risk_level": "medium",
+          "acceptance_criteria": [
+            "offline Codex provider pack remains non-certifying"
+          ],
+          "verification_plan": null,
+          "closure_criteria": [
+            "focused model test passes",
+            "typecheck passes"
+          ],
+          "upstream_refs": [],
+          "timeout_seconds": 600,
+          "render_prompt_snapshot": false,
+          "roster_id": "synthetic-cruise-codex-roster",
+          "roster_revision": 1,
+          "roster_sha256": "sha256:7e698f53cf3866fcb1451f768b6a0847f09650152a54db03c0f7bc9ddeae6d74",
+          "assignment_sha256": "sha256:6ad8a4ff35bb0f62949a9261ef2cff484659aa89eccf57bbd38973470f4d5354",
+          "pre_run_selection_sha256": "sha256:4558ef2766aceb2b5e69cb5016f88ebcb840caee759b5134c5e21f9bbd807727",
+          "request_profile": {
+            "provider_id": "openai-codex",
+            "model_id": "gpt-5.6-sol",
+            "model": "openai-codex/gpt-5.6-sol",
+            "api": "openai-codex-responses",
+            "thinking": "xhigh",
+            "service_tier": null,
+            "cache_policy": "provider-default",
+            "system_prompt_profile": "pi-default.v1",
+            "context_window": 512000,
+            "max_output_tokens": 65536,
+            "input_modalities": [
+              "text"
+            ],
+            "output_modalities": [
+              "text"
+            ],
+            "reasoning_capability": "reasoning-supported",
+            "tool_capability": "tool-use-supported",
+            "route_policy_id": "codex-subscription-v1",
+            "route_policy_revision": 1,
+            "request_profile_sha256": "sha256:ef71931ecd5a72a4ee313525e889b0d9d25ca59bc4199047212f1004b9b3a756"
+          }
+        },
+        "receipt": {
+          "schema_version": "autopilot.receipt.v2",
+          "tool_name": "autopilot_emit_status",
+          "workstream": "phase37-w4-codex",
+          "unit_id": "codex-cruise-bughunt",
+          "role": "bughunt",
+          "attempt": 1,
+          "emitted_at": "2026-07-23T12:00:01.000Z",
+          "status_output": "/tmp/phase37-w4-codex/cruise/bughunt/status.json",
+          "status_sha256": "sha256:4482a389776bccd7fc3823fb97aef108d594e63b7b1a2e42bad27db597699ec4",
+          "schema_sha256": "sha256:e27f6dfb32bd35f82f78badf40636459d8c6f4e9532b7e26714afa9cf2cf832b",
+          "tool_call_id": "call-codex-cruise-bughunt",
+          "provider_identity": {
+            "provider_id": "openai-codex",
+            "requested_model_id": "gpt-5.6-sol",
+            "executed_model_id": "gpt-5.6-sol",
+            "api": "openai-codex-responses",
+            "thinking_level": "xhigh"
+          },
+          "expected_identity_hash": "sha256:10fe80e3c1662b9e90e1fd2a954e5425239c0ca1b6c4db4521d39bddaa03d3e5",
+          "roster_id": "synthetic-cruise-codex-roster",
+          "roster_revision": 1,
+          "roster_sha256": "sha256:7e698f53cf3866fcb1451f768b6a0847f09650152a54db03c0f7bc9ddeae6d74",
+          "assignment_sha256": "sha256:6ad8a4ff35bb0f62949a9261ef2cff484659aa89eccf57bbd38973470f4d5354",
+          "pre_run_selection_sha256": "sha256:4558ef2766aceb2b5e69cb5016f88ebcb840caee759b5134c5e21f9bbd807727",
+          "request_profile": {
+            "provider_id": "openai-codex",
+            "model_id": "gpt-5.6-sol",
+            "model": "openai-codex/gpt-5.6-sol",
+            "api": "openai-codex-responses",
+            "thinking": "xhigh",
+            "service_tier": null,
+            "cache_policy": "provider-default",
+            "system_prompt_profile": "pi-default.v1",
+            "context_window": 512000,
+            "max_output_tokens": 65536,
+            "input_modalities": [
+              "text"
+            ],
+            "output_modalities": [
+              "text"
+            ],
+            "reasoning_capability": "reasoning-supported",
+            "tool_capability": "tool-use-supported",
+            "route_policy_id": "codex-subscription-v1",
+            "route_policy_revision": 1,
+            "request_profile_sha256": "sha256:ef71931ecd5a72a4ee313525e889b0d9d25ca59bc4199047212f1004b9b3a756"
+          },
+          "observed_profile": {
+            "provider_id": "openai-codex",
+            "requested_model_id": "gpt-5.6-sol",
+            "executed_model_id": "gpt-5.6-sol",
+            "api": "openai-codex-responses",
+            "thinking": "xhigh",
+            "service_tier": null,
+            "cache_policy": "provider-default",
+            "system_prompt_profile": "pi-default.v1",
+            "system_prompt_sha256": "sha256:0f873ac4e6815ff4502b57101c494439ae3cb391f24e15364a5ed7e16130d699",
+            "route_policy_id": "codex-subscription-v1",
+            "route_policy_revision": 1,
+            "request_profile_sha256": "sha256:ef71931ecd5a72a4ee313525e889b0d9d25ca59bc4199047212f1004b9b3a756",
+            "observed_profile_sha256": "sha256:db4375461381cdd56c4590f6169a9d57b7a7ca1ef128aedcef51dadb306e4472"
+          }
+        },
+        "request_evidence": {
+          "evidence_id": "codex-cruise-bughunt-request",
+          "kind": "execution-proof",
+          "uri": "fixture://phase37/w4/codex/cruise/bughunt/request",
+          "sha256": "sha256:7b4315237b32ae100f984b8e1e8d016fb56e54689faca8e740626be6ea5321ac",
+          "byte_count": 2889,
+          "secret_free": true
+        },
+        "observed_evidence": {
+          "evidence_id": "codex-cruise-bughunt-observed",
+          "kind": "execution-proof",
+          "uri": "fixture://phase37/w4/codex/cruise/bughunt/observed",
+          "sha256": "sha256:4e5ee3dd79ee9716e297bcffebcbda3d79f6f0dbfedea31df31a2902113a1670",
+          "byte_count": 2688,
+          "secret_free": true
+        },
+        "prompt_evidence": {
+          "evidence_id": "codex-cruise-bughunt-prompt",
+          "kind": "prompt-proof",
+          "uri": "fixture://phase37/w4/codex/cruise/bughunt/prompt-boundary",
+          "sha256": "sha256:6f50d809210eff210ef46e272c3211f8571dcc23e757b22b62d35e3686d53175",
+          "byte_count": 181,
+          "secret_free": true
+        },
+        "cache_evidence": {
+          "evidence_id": "codex-cruise-bughunt-cache",
+          "kind": "cache-proof",
+          "uri": "fixture://phase37/w4/codex/cruise/bughunt/cache-boundary",
+          "sha256": "sha256:7936de1835ab515b72e9ec7bc866882b9240198df1c5ab5300c12b838d6f5f87",
+          "byte_count": 87,
+          "secret_free": true
+        },
+        "live_request_witness": null,
+        "context_boundary": {
+          "context_window": 512000,
+          "max_output_tokens": 65536,
+          "input_modalities": [
+            "text"
+          ],
+          "output_modalities": [
+            "text"
+          ]
+        },
+        "prompt_boundary": {
+          "system_prompt_profile": "pi-default.v1",
+          "system_prompt_sha256": "sha256:0f873ac4e6815ff4502b57101c494439ae3cb391f24e15364a5ed7e16130d699",
+          "prompt_body_included": false
+        },
+        "fallback_used": false,
+        "fallback_route_policy_id": null
+      },
+      {
+        "role": "extract",
+        "request_profile": {
+          "provider_id": "openai-codex",
+          "model_id": "gpt-5.6-luna",
+          "model": "openai-codex/gpt-5.6-luna",
+          "api": "openai-codex-responses",
+          "thinking": "high",
+          "service_tier": null,
+          "cache_policy": "provider-default",
+          "system_prompt_profile": "pi-default.v1",
+          "context_window": 256000,
+          "max_output_tokens": 32768,
+          "input_modalities": [
+            "text"
+          ],
+          "output_modalities": [
+            "text"
+          ],
+          "reasoning_capability": "reasoning-supported",
+          "tool_capability": "tool-use-supported",
+          "route_policy_id": "codex-subscription-v1",
+          "route_policy_revision": 1,
+          "request_profile_sha256": "sha256:9432ba1ba571e8fa6200837f55676bd43928763643059a394ac5675e25bc20ea"
+        },
+        "observed_profile": {
+          "provider_id": "openai-codex",
+          "requested_model_id": "gpt-5.6-luna",
+          "executed_model_id": "gpt-5.6-luna",
+          "api": "openai-codex-responses",
+          "thinking": "high",
+          "service_tier": null,
+          "cache_policy": "provider-default",
+          "system_prompt_profile": "pi-default.v1",
+          "system_prompt_sha256": "sha256:6daffd169c3669c2b9159e5db3bae29d5e18419a4a4289189ed4d8e392983986",
+          "route_policy_id": "codex-subscription-v1",
+          "route_policy_revision": 1,
+          "request_profile_sha256": "sha256:9432ba1ba571e8fa6200837f55676bd43928763643059a394ac5675e25bc20ea",
+          "observed_profile_sha256": "sha256:eb1a179e2f2c83ab538b22a76f26aeddc9f9ab6cf9ae7a487a13927f096211e6"
+        },
+        "provider_identity": {
+          "provider_id": "openai-codex",
+          "requested_model_id": "gpt-5.6-luna",
+          "executed_model_id": "gpt-5.6-luna",
+          "api": "openai-codex-responses",
+          "thinking_level": "high"
+        },
+        "unit_spec": {
+          "schema_version": "autopilot.unit_spec.v2",
+          "workstream": "phase37-w4-codex",
+          "unit_id": "codex-cruise-extract",
+          "role": "extract",
+          "template": "extract",
+          "attempt": 1,
+          "objective": "Synthetic offline W4 Codex cruise extract witness; non-certifying.",
+          "cwd": "/tmp/phase37-w4-codex/worktree",
+          "model": "openai-codex/gpt-5.6-luna",
+          "thinking": "high",
+          "owned_paths": [
+            "src/core/roster/providers/codex.ts"
+          ],
+          "read_only_paths": [
+            "PHASE37_ROSTER_CONTRACT_FREEZE.md",
+            "src/core/roster/provider-recipes.ts",
+            "src/core/roster/route-policies.ts"
+          ],
+          "untouchable_paths": [
+            "**/.env",
+            "**/secrets/**"
+          ],
+          "context_refs": [
+            {
+              "path": "PHASE37_ROSTER_CONTRACT_FREEZE.md",
+              "purpose": "W0 prose",
+              "sha256": null,
+              "byte_count": null
+            },
+            {
+              "path": "src/core/roster/runtime-spec.ts",
+              "purpose": "W3 requested/observed evidence contract",
+              "sha256": null,
+              "byte_count": null
+            }
+          ],
+          "validation_commands": [
+            "node --experimental-strip-types --test tests/model/roster-provider-codex.test.ts"
+          ],
+          "status_output": "/tmp/phase37-w4-codex/cruise/extract/status.json",
+          "receipt_output": "/tmp/phase37-w4-codex/cruise/extract/receipt.json",
+          "evidence_dir": "/tmp/phase37-w4-codex/cruise/extract/evidence",
+          "stop_boundary": "Stop after synthetic offline Codex provider-pack validation; do not call providers.",
+          "quality_profile": "source-change",
+          "risk_level": "medium",
+          "acceptance_criteria": [
+            "offline Codex provider pack remains non-certifying"
+          ],
+          "verification_plan": null,
+          "closure_criteria": [
+            "focused model test passes",
+            "typecheck passes"
+          ],
+          "upstream_refs": [],
+          "timeout_seconds": 600,
+          "render_prompt_snapshot": false,
+          "roster_id": "synthetic-cruise-codex-roster",
+          "roster_revision": 1,
+          "roster_sha256": "sha256:7e698f53cf3866fcb1451f768b6a0847f09650152a54db03c0f7bc9ddeae6d74",
+          "assignment_sha256": "sha256:f1d8526c0f9dafed81cef5691c8cd57faa391d5f9a993ea5657a13a6cfd50b1a",
+          "pre_run_selection_sha256": "sha256:4558ef2766aceb2b5e69cb5016f88ebcb840caee759b5134c5e21f9bbd807727",
+          "request_profile": {
+            "provider_id": "openai-codex",
+            "model_id": "gpt-5.6-luna",
+            "model": "openai-codex/gpt-5.6-luna",
+            "api": "openai-codex-responses",
+            "thinking": "high",
+            "service_tier": null,
+            "cache_policy": "provider-default",
+            "system_prompt_profile": "pi-default.v1",
+            "context_window": 256000,
+            "max_output_tokens": 32768,
+            "input_modalities": [
+              "text"
+            ],
+            "output_modalities": [
+              "text"
+            ],
+            "reasoning_capability": "reasoning-supported",
+            "tool_capability": "tool-use-supported",
+            "route_policy_id": "codex-subscription-v1",
+            "route_policy_revision": 1,
+            "request_profile_sha256": "sha256:9432ba1ba571e8fa6200837f55676bd43928763643059a394ac5675e25bc20ea"
+          }
+        },
+        "receipt": {
+          "schema_version": "autopilot.receipt.v2",
+          "tool_name": "autopilot_emit_status",
+          "workstream": "phase37-w4-codex",
+          "unit_id": "codex-cruise-extract",
+          "role": "extract",
+          "attempt": 1,
+          "emitted_at": "2026-07-23T12:00:01.000Z",
+          "status_output": "/tmp/phase37-w4-codex/cruise/extract/status.json",
+          "status_sha256": "sha256:7f45eca8c5697602a20e0b4d30f9194c8951d24f688a7d1390c8c39fa669cc8c",
+          "schema_sha256": "sha256:e27f6dfb32bd35f82f78badf40636459d8c6f4e9532b7e26714afa9cf2cf832b",
+          "tool_call_id": "call-codex-cruise-extract",
+          "provider_identity": {
+            "provider_id": "openai-codex",
+            "requested_model_id": "gpt-5.6-luna",
+            "executed_model_id": "gpt-5.6-luna",
+            "api": "openai-codex-responses",
+            "thinking_level": "high"
+          },
+          "expected_identity_hash": "sha256:ff32060d5d6bba06e9f7d95e676ca4c804b11ee0309f4bf80f0e968bd971cab5",
+          "roster_id": "synthetic-cruise-codex-roster",
+          "roster_revision": 1,
+          "roster_sha256": "sha256:7e698f53cf3866fcb1451f768b6a0847f09650152a54db03c0f7bc9ddeae6d74",
+          "assignment_sha256": "sha256:f1d8526c0f9dafed81cef5691c8cd57faa391d5f9a993ea5657a13a6cfd50b1a",
+          "pre_run_selection_sha256": "sha256:4558ef2766aceb2b5e69cb5016f88ebcb840caee759b5134c5e21f9bbd807727",
+          "request_profile": {
+            "provider_id": "openai-codex",
+            "model_id": "gpt-5.6-luna",
+            "model": "openai-codex/gpt-5.6-luna",
+            "api": "openai-codex-responses",
+            "thinking": "high",
+            "service_tier": null,
+            "cache_policy": "provider-default",
+            "system_prompt_profile": "pi-default.v1",
+            "context_window": 256000,
+            "max_output_tokens": 32768,
+            "input_modalities": [
+              "text"
+            ],
+            "output_modalities": [
+              "text"
+            ],
+            "reasoning_capability": "reasoning-supported",
+            "tool_capability": "tool-use-supported",
+            "route_policy_id": "codex-subscription-v1",
+            "route_policy_revision": 1,
+            "request_profile_sha256": "sha256:9432ba1ba571e8fa6200837f55676bd43928763643059a394ac5675e25bc20ea"
+          },
+          "observed_profile": {
+            "provider_id": "openai-codex",
+            "requested_model_id": "gpt-5.6-luna",
+            "executed_model_id": "gpt-5.6-luna",
+            "api": "openai-codex-responses",
+            "thinking": "high",
+            "service_tier": null,
+            "cache_policy": "provider-default",
+            "system_prompt_profile": "pi-default.v1",
+            "system_prompt_sha256": "sha256:6daffd169c3669c2b9159e5db3bae29d5e18419a4a4289189ed4d8e392983986",
+            "route_policy_id": "codex-subscription-v1",
+            "route_policy_revision": 1,
+            "request_profile_sha256": "sha256:9432ba1ba571e8fa6200837f55676bd43928763643059a394ac5675e25bc20ea",
+            "observed_profile_sha256": "sha256:eb1a179e2f2c83ab538b22a76f26aeddc9f9ab6cf9ae7a487a13927f096211e6"
+          }
+        },
+        "request_evidence": {
+          "evidence_id": "codex-cruise-extract-request",
+          "kind": "execution-proof",
+          "uri": "fixture://phase37/w4/codex/cruise/extract/request",
+          "sha256": "sha256:5103eb9b742320f7c043da1850afaca23fb3dbbe67b46099c9ff6608b840dea0",
+          "byte_count": 2890,
+          "secret_free": true
+        },
+        "observed_evidence": {
+          "evidence_id": "codex-cruise-extract-observed",
+          "kind": "execution-proof",
+          "uri": "fixture://phase37/w4/codex/cruise/extract/observed",
+          "sha256": "sha256:1f96fad6d283664b3cf92566b81f9f34c6ead1ff5e0099d5e380788eb13379bf",
+          "byte_count": 2691,
+          "secret_free": true
+        },
+        "prompt_evidence": {
+          "evidence_id": "codex-cruise-extract-prompt",
+          "kind": "prompt-proof",
+          "uri": "fixture://phase37/w4/codex/cruise/extract/prompt-boundary",
+          "sha256": "sha256:125fa30fbfd028f212d4faae263e00c1f80a95ba255e2a91843a99c2b8e24d2e",
+          "byte_count": 181,
+          "secret_free": true
+        },
+        "cache_evidence": {
+          "evidence_id": "codex-cruise-extract-cache",
+          "kind": "cache-proof",
+          "uri": "fixture://phase37/w4/codex/cruise/extract/cache-boundary",
+          "sha256": "sha256:7936de1835ab515b72e9ec7bc866882b9240198df1c5ab5300c12b838d6f5f87",
+          "byte_count": 87,
+          "secret_free": true
+        },
+        "live_request_witness": null,
+        "context_boundary": {
+          "context_window": 256000,
+          "max_output_tokens": 32768,
+          "input_modalities": [
+            "text"
+          ],
+          "output_modalities": [
+            "text"
+          ]
+        },
+        "prompt_boundary": {
+          "system_prompt_profile": "pi-default.v1",
+          "system_prompt_sha256": "sha256:6daffd169c3669c2b9159e5db3bae29d5e18419a4a4289189ed4d8e392983986",
+          "prompt_body_included": false
+        },
+        "fallback_used": false,
+        "fallback_route_policy_id": null
+      }
+    ]
+  },
+  "expected": {
+    "compatible": true,
+    "qualified": false,
+    "ready": false,
+    "qualification_state": "blocked-live-certification",
+    "blocked_reason": "blocked pending post-W3 live subscription witness",
+    "manifest_sha256": "sha256:c85e694cd63a08124dbb91029961604e8ea64aee47069abed64840de12d4f43a",
+    "required_issue_codes": [
+      "CODEX_LIVE_BILLING_WITNESS_MISSING",
+      "CODEX_LIVE_REQUEST_WITNESS_MISSING",
+      "CODEX_OFFLINE_PACK_NEVER_READY",
+      "CODEX_SYNTHETIC_NON_CERTIFYING"
+    ]
+  },
+  "negative_cases": [
+    {
+      "case_id": "corrupt-observed-profile-hash",
+      "expected_issue": "CODEX_CORRUPT_W3_EVIDENCE"
+    },
+    {
+      "case_id": "wrong-auth-api-key-openrouter",
+      "expected_issue": "CODEX_FORBIDDEN_API_KEY_OR_GATEWAY"
+    },
+    {
+      "case_id": "wrong-service-tier",
+      "expected_issue": "CODEX_SERVICE_TIER_MISMATCH"
+    },
+    {
+      "case_id": "wrong-cache-policy",
+      "expected_issue": "CODEX_CACHE_POLICY_MISMATCH"
+    },
+    {
+      "case_id": "wrong-executed-model",
+      "expected_issue": "CODEX_EXECUTED_MODEL_MISMATCH"
+    },
+    {
+      "case_id": "missing-role",
+      "expected_issue": "CODEX_ROLE_MISSING"
+    }
+  ]
+}
