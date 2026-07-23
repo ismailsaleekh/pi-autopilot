@@ -16,6 +16,7 @@ const files = new Set(parsed[0]?.files?.map((entry) => entry.path) ?? []);
 const required = [
   'bin/autopilot-agent-run.mjs',
   'bin/autopilot-coordinator.mjs',
+  'bin/autopilot-s2-corpus-rehearsal.mjs',
   'dist/src/cli/autopilot-coordinator-bootstrap.js',
   'dist/src/cli/autopilot-coordinator.js',
   'dist/src/core/coordination/executable-resolution.js',
@@ -45,20 +46,34 @@ const required = [
   'scripts/security-scan.mjs',
   'scripts/test-packed-consumer-release.mjs',
   'scripts/verify-packed-consumer.mjs',
+  'dist/tools/s2-corpus-rehearsal/cli.js',
+  'dist/tools/s2-corpus-rehearsal/contracts.js',
+  'dist/tools/s2-corpus-rehearsal/release-gate.js',
+  'tools/s2-corpus-rehearsal/cli.ts',
+  'tools/s2-corpus-rehearsal/contracts.ts',
+  'tools/s2-corpus-rehearsal/release-gate.ts',
+  'tools/s2-corpus-rehearsal/candidate-worker.ts',
+  'tools/s2-corpus-rehearsal/git-mirror.ts',
+  'tools/s2-corpus-rehearsal/inventory.ts',
+  'tools/s2-corpus-rehearsal/path-rebase.ts',
   'artifacts/security/cyclonedx-sbom.json',
   'artifacts/security/offline-security-scan.json',
 ];
 const missing = required.filter((path) => !files.has(path));
+const isGenericS2Harness = (path) => path === 'bin/autopilot-s2-corpus-rehearsal.mjs' || path.startsWith('tools/s2-corpus-rehearsal/') || path.startsWith('dist/tools/s2-corpus-rehearsal/');
 const forbidden = [...files].filter((path) => path.startsWith('tests/')
-  || path.startsWith('tools/')
+  || (path.startsWith('tools/') && !path.startsWith('tools/s2-corpus-rehearsal/'))
   || path === '.pi'
   || path.startsWith('.pi/')
   || path.includes('/.pi/')
-  || /(?:s1-corpus|corpus-clone|corpus-rehearsal|rehearsal-result|live-witness|transition-backup|actual-cf50|cf50.*\.tgz)/iu.test(path)
-  || /(?:^|\/)private(?:\/|$)/u.test(path)
+  || (!isGenericS2Harness(path) && /(?:s1-corpus|corpus-clone|corpus-rehearsal|rehearsal-result|live-witness|transition-backup|actual-cf50|cf50.*\.tgz)/iu.test(path))
+  || /(?:^|\/)(?:private|corpus|corpora|results?|logs?)(?:\/|$)/iu.test(path)
+  || /\.(?:tgz|tar|tar\.gz|zip|log)$/iu.test(path)
   || /(?:^|\/)(?:capability(?:\.key)?|c5-sandbox\.sb)$/u.test(path)
   || path.endsWith('.sb')
-  || path.endsWith('.s1-corpus-request.json'));
+  || path.endsWith('.s1-corpus-request.json')
+  || path.endsWith('.s2-corpus-request.json')
+  || path.endsWith('.s2-corpus-result.json'));
 let securityScanError = null;
 let lockfileSha256 = null;
 let securityScanLockfileSha256 = null;

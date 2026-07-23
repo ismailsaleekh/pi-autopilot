@@ -1,7 +1,7 @@
 {
   "bomFormat": "CycloneDX",
   "specVersion": "1.5",
-  "serialNumber": "urn:uuid:6017b108-8718-58c3-8555-e7438dd183a6",
+  "serialNumber": "urn:uuid:92f2757b-1091-5b8a-8230-0b1d242d7615",
   "version": 1,
   "metadata": {
     "component": {
@@ -13,7 +13,7 @@
     "properties": [
       {
         "name": "pi-autopilot:lockfile-sha256",
-        "value": "sha256:6017b108871848c37555e7438dd183a6ebebd4c02b9ff449ff850f38708c114a"
+        "value": "sha256:92f2757b10917b8ae2300b1d242d7615726acb35650686e9d43044cdc9c91877"
       }
     ]
   },

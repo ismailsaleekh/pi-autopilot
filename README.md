@@ -120,6 +120,7 @@ npm run build
 npm run typecheck
 npm run test:package
 npm run test:version-skew
+npm run test:s2-corpus
 npm run test
 npm run docs:verify
 npm run pack:dry-run
