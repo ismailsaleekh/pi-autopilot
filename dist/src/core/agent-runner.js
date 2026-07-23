@@ -35,6 +35,7 @@ import { assertRequestProfileMatchesAssignment, assertUnitSpecMatchesPinnedFacts
 import { unitSpecAuthorityProjection } from "./roster/runtime-consumers.js";
 import { isCentrallyTrustedW4CertifiedRoster } from "./roster/providers/index.js";
 import { readAuthorityFileIfPresent } from "./roster/transaction.js";
+import { parseProviderRoster } from "./roster/provider-recipes.js";
 export class AutopilotAgentRunError extends Error {
     failureClass;
     details;
@@ -925,7 +926,7 @@ async function readAuthenticatedRosterForSelection(input) {
 async function assertCustomRosterCertificationForRunner(input) {
     if (input.roster.generation_source !== 'user-custom')
         return;
-    const customRoster = input.roster;
+    const customRoster = parseProviderRoster(input.roster);
     const authorityRead = await readCustomRosterCertificationAuthority({ paths: input.paths, roster: customRoster });
     if (!authorityRead.ok) {
         throw new Error(`custom roster certification authority ${authorityRead.reason} for ${input.roster.roster_id}@${String(input.roster.roster_revision)}`);

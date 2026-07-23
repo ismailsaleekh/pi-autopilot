@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { assertAutopilotRosterContract, parseAutopilotRosterContract, } from "./contracts.js";
 import { launchabilityBlockCodesForCandidates } from "./activation-fence.js";
 import { doctorRoleResults, doctorRosterInventory } from "./doctor.js";
-import { proposeRosterCandidates, validateCandidateSetApproval, } from "./provider-recipes.js";
+import { parseProviderRosterCandidateSet, proposeRosterCandidates, validateCandidateSetApproval, } from "./provider-recipes.js";
 import { applyW4ProviderRegistryReadinessToCandidateSet } from "./providers/index.js";
 import { CUSTOM_ROSTER_INTENT_REQUEST_SCHEMA, CUSTOM_ROSTER_TOOL_UNSUPPORTED_DIAGNOSTIC, isCustomRosterUnsupportedToolPayload, validateCustomRosterIntentSetupRequest, verifyCustomRosterManifestForRoster, } from "./custom-certification.js";
 export { CUSTOM_ROSTER_INTENT_REQUEST_SCHEMA, CUSTOM_ROSTER_REQUEST_SCHEMA, CUSTOM_ROSTER_VALIDATION_RESULT_SCHEMA, CUSTOM_ROSTER_TOOL_UNSUPPORTED_DIAGNOSTIC, buildUserCustomRosterFromAssignments, validateCustomRosterSetupRequest, validateCustomRosterIntentSetupRequest, verifyCustomRosterManifestForRoster, } from "./custom-certification.js";
@@ -838,7 +838,7 @@ function customCandidateSetForValidation(input) {
         candidate_set_id: `candidate-set-${candidateSetIdHash}`,
     };
     const candidateSet = { ...withoutHash, candidate_set_sha256: canonicalSha256(withoutHash) };
-    return parseAutopilotRosterContract('autopilot.roster_candidate_set.v1', candidateSet);
+    return parseProviderRosterCandidateSet(candidateSet);
 }
 function customV1CandidateForProposal(roster, proposal) {
     const routePolicyId = roster.route_policy_ids.length === 1 ? roster.route_policy_ids[0] ?? 'custom-roster-route-v1' : 'custom-roster-mixed-v1';
@@ -1119,11 +1119,40 @@ function normalizeSaveCapabilityResultV2(request, proposal, saved) {
 }
 function parseReceipt(value) {
     try {
-        return parseAutopilotRosterContract(RECEIPT_SCHEMA, value);
+        return rosterToolReceiptFromContract(parseAutopilotRosterContract(RECEIPT_SCHEMA, value));
     }
     catch {
         return null;
     }
+}
+function rosterToolReceiptFromContract(contract) {
+    return Object.freeze({
+        schema_version: contract.schema_version,
+        scope: contract.scope,
+        saved_rosters: Object.freeze(contract.saved_rosters.map((ref) => Object.freeze({
+            roster_id: ref.roster_id,
+            roster_revision: ref.roster_revision,
+            roster_sha256: digestFromContract(ref.roster_sha256, 'receipt.saved_rosters.roster_sha256'),
+            assignment_set_sha256: digestFromContract(ref.assignment_set_sha256, 'receipt.saved_rosters.assignment_set_sha256'),
+        }))),
+        default_roster_id: contract.default_roster_id,
+        default_roster_revision: contract.default_roster_revision,
+        default_roster_sha256: digestFromContract(contract.default_roster_sha256, 'receipt.default_roster_sha256'),
+        approved_candidate_set_sha256: digestFromContract(contract.approved_candidate_set_sha256, 'receipt.approved_candidate_set_sha256'),
+        approved_roster_sha256s: Object.freeze(contract.approved_roster_sha256s.map((sha) => digestFromContract(sha, 'receipt.approved_roster_sha256s'))),
+        config_sha256: digestFromContract(contract.config_sha256, 'receipt.config_sha256'),
+        original_command: contract.original_command,
+        fresh_session_required: contract.fresh_session_required,
+        zero_secrets: contract.zero_secrets,
+        issued_at: contract.issued_at,
+        receipt_sha256: digestFromContract(contract.receipt_sha256, 'receipt.receipt_sha256'),
+    });
+}
+function digestFromContract(value, label) {
+    const digest = digestField(value);
+    if (digest === null)
+        throw new Error(`${label} must be a sha256 digest`);
+    return digest;
 }
 function receiptMatchesSave(request, candidateSet, receipt) {
     if (request.candidate_set_sha256 === null || request.default_roster_id === null || request.default_roster_revision === null || request.default_roster_sha256 === null)

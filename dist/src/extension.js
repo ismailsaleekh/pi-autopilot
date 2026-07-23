@@ -26,7 +26,7 @@ import { isCentrallyTrustedW4CertifiedRoster } from "./core/roster/providers/ind
 import { createAutopilotRosterSetupTool } from "./core/roster/setup-tool.js";
 import { createRosterSetupReceiptFactory } from "./core/roster/setup-receipt.js";
 import { resolveAutopilotRosterSetupSkillPackage } from "./core/roster/skill-package.js";
-import { seedRosterByCandidate } from "./core/roster/provider-recipes.js";
+import { parseProviderRoster, seedRosterByCandidate } from "./core/roster/provider-recipes.js";
 import { resolveAndCommitPreRunSelection } from "./core/roster/run-selection.js";
 import { publishRuntimeRosterSnapshot, recoverRuntimeRosterSelection } from "./core/roster/snapshot.js";
 import { authorizeExistingRunRosterTransitionInput, buildExistingRunRosterTransitionProposal, commitApprovedExistingRunRosterTransition, consumeCommittedExistingRunRosterTransition, resolveCommittedExistingRunRosterTransitionChain, savedRosterRefForSelection } from "./core/roster/transition.js";
@@ -239,7 +239,7 @@ function resolveScopePathsForActivation(input) {
 async function customRosterLaunchDiagnostics(input) {
     if (input.roster.generation_source !== 'user-custom')
         return [];
-    const customRoster = input.roster;
+    const customRoster = parseProviderRoster(input.roster);
     const authority = await readCustomRosterCertificationAuthority({ paths: input.paths, roster: customRoster });
     if (!authority.ok)
         return dedupeRosterDiagnostics(['ROSTER_QUALIFICATION_REQUIRED']);
@@ -756,9 +756,9 @@ function provenSavedRosterSetupResult(value) {
 function provenSavedRosterSetupResultV1(record) {
     try {
         const parsed = parseAutopilotRosterContract('autopilot.roster_tool_result.v1', record);
-        if (parsed['action'] !== 'save' || parsed['ok'] !== true || parsed['status'] !== 'saved')
+        if (parsed.action !== 'save' || parsed.ok !== true || parsed.status !== 'saved')
             return null;
-        return provenSavedRosterSetupReceipt(parsed['receipt']);
+        return provenSavedRosterSetupReceipt(parsed.receipt);
     }
     catch {
         return null;
@@ -847,10 +847,10 @@ function provenCustomSavedReceiptV2(value, storageReceipt) {
 function provenSavedRosterSetupReceipt(value) {
     try {
         const receipt = parseAutopilotRosterContract('autopilot.roster_setup_receipt.v1', value);
-        if (receipt['fresh_session_required'] !== true || receipt['zero_secrets'] !== true)
+        if (receipt.fresh_session_required !== true || receipt.zero_secrets !== true)
             return null;
-        const originalCommand = receipt['original_command'];
-        if (typeof originalCommand !== 'string' || originalCommand.length === 0)
+        const originalCommand = receipt.original_command;
+        if (originalCommand.length === 0)
             return null;
         return { originalCommand };
     }
@@ -898,7 +898,8 @@ function materializeRosterPublicationForCandidate(input) {
         roster.assignment_set_sha256 !== input.candidate.assignment_set_sha256) {
         throw new Error('custom candidate roster bytes drifted');
     }
-    const verification = verifyCustomRosterManifestForRoster({ roster: roster, manifest });
+    const providerRoster = parseProviderRoster(roster);
+    const verification = verifyCustomRosterManifestForRoster({ roster: providerRoster, manifest });
     if (!verification.ok)
         throw new Error('custom roster registry verification failed closed');
     return { roster, bytes: Buffer.from(bytes), custom_manifest: manifest, custom_validation_result_sha256: validation.result_sha256 };
@@ -1123,7 +1124,7 @@ export default function autopilotExtension(pi, dependencies = {}) {
                                 : resolveRosterScopePaths({ scope: request.scope, stateRoot });
                         const published = await publishCustomRosterCertificationAuthority({
                             paths,
-                            roster: publication.roster,
+                            roster: parseProviderRoster(publication.roster),
                             validation_result_sha256: publication.custom_validation_result_sha256,
                             manifest: publication.custom_manifest,
                         });

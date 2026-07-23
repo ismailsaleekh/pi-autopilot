@@ -523,13 +523,13 @@ function at(object, key, path) {
         fail('closed-field-violation', `${path}.${key} is missing`);
     return value;
 }
-function asObject(value, path) {
+function requireJsonObjectValue(value, path) {
     if (!isJsonObject(value))
         fail('fixture-contract-violation', `${path} must be an object`);
     return value;
 }
 function objectAt(object, key, path) {
-    return asObject(at(object, key, path), `${path}.${key}`);
+    return requireJsonObjectValue(at(object, key, path), `${path}.${key}`);
 }
 function asArray(value, path) {
     if (!Array.isArray(value))
@@ -573,7 +573,7 @@ function stringsAt(object, key, path) {
     return arrayAt(object, key, path).map((entry, index) => asString(entry, `${path}.${key}[${String(index)}]`));
 }
 function objectsAt(object, key, path) {
-    return arrayAt(object, key, path).map((entry, index) => asObject(entry, `${path}.${key}[${String(index)}]`));
+    return arrayAt(object, key, path).map((entry, index) => requireJsonObjectValue(entry, `${path}.${key}[${String(index)}]`));
 }
 function exactKeys(object, expected, path) {
     const actual = Object.keys(object);
@@ -839,7 +839,7 @@ function validateExpectedNestedResult(expected, expectedDiagnosticCodes, diagnos
     const result = expected['result'];
     if (result === undefined)
         return;
-    const resultObject = asObject(result, `${path}.expected.result`);
+    const resultObject = requireJsonObjectValue(result, `${path}.expected.result`);
     const nestedWriteCount = integerAt(resultObject, 'write_count', `${path}.expected.result`);
     const nestedLockCount = integerAt(resultObject, 'lock_count', `${path}.expected.result`);
     const nestedFilesTouched = stringsAt(resultObject, 'files_touched', `${path}.expected.result`);
@@ -951,7 +951,7 @@ function validateHistoricalFixtureCases(cases) {
         assertCondition(booleanAt(expected, 'historical_bytes_mutated', `fixture ${fixtureCase.fixture_id}.expected`) === false, 'fixture-contract-violation', `fixture ${fixtureCase.fixture_id} must preserve historical bytes`);
         const resultValue = expected['result'];
         if (resultValue !== undefined)
-            assertCondition(booleanAt(asObject(resultValue, `fixture ${fixtureCase.fixture_id}.expected.result`), 'historical_bytes_mutated', `fixture ${fixtureCase.fixture_id}.expected.result`) === false, 'fixture-contract-violation', `fixture ${fixtureCase.fixture_id} result must preserve historical bytes`);
+            assertCondition(booleanAt(requireJsonObjectValue(resultValue, `fixture ${fixtureCase.fixture_id}.expected.result`), 'historical_bytes_mutated', `fixture ${fixtureCase.fixture_id}.expected.result`) === false, 'fixture-contract-violation', `fixture ${fixtureCase.fixture_id} result must preserve historical bytes`);
         for (const postcondition of objectsAt(fixtureCase, 'filesystem_postconditions', fixtureCase.fixture_id)) {
             const state = stringAt(postcondition, 'state', `fixture ${fixtureCase.fixture_id}.filesystem_postconditions`);
             if (state === 'byte-equal-preserved')

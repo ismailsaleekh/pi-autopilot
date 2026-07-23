@@ -202,9 +202,12 @@ export function sha256Digest(bytes) {
 export function canonicalSha256(value) {
     return sha256Digest(canonicalJsonWithLf(value));
 }
+function ownStringKeys(value) {
+    return Object.keys(value);
+}
 export function hashObjectOmitting(value, hashField) {
     const withoutHash = {};
-    for (const key of Object.keys(value)) {
+    for (const key of ownStringKeys(value)) {
         if (key !== hashField) {
             withoutHash[key] = value[key];
         }

@@ -1,6 +1,6 @@
 import { join } from 'node:path';
 import { autopilotRosterContractCanonicalJson, parseAutopilotRosterContract, } from "./contracts.js";
-import { assignmentSetSha256, requestProfileFromAssignment, validateRequestProfileForAssignment, } from "./provider-recipes.js";
+import { assignmentSetSha256, requestProfileFromAssignment, validateRequestProfileForAssignment, parseProviderQualificationManifest, parseProviderRoster, } from "./provider-recipes.js";
 import { PHASE37_FIXTURE_CLOCK, PHASE37_PACKAGE_VERSION, PHASE37_PI_VERSION, ROSTER_ROLE_ORDER, ROUTE_POLICIES, authClassForRoute, authSourceForRoute, canonicalSha256, findInventoryModel, findInventoryProvider, findRoutePolicy, findRoutePolicyForProviderApi, isRosterProfileId, isRosterRole, normalizeRosterInventory, validateRouteConformance, } from "./route-policies.js";
 import { formatAuthorityPath } from "./paths.js";
 import { publishCreateOnlyAtomic, readAuthorityFileIfPresent } from "./transaction.js";
@@ -204,7 +204,7 @@ function invalidCustomValidation(requestSha256, codes) {
     });
 }
 export function canonicalRosterBytes(roster) {
-    const parsed = parseAutopilotRosterContract('autopilot.roster.v1', roster);
+    const parsed = parseProviderRoster(roster);
     return new TextEncoder().encode(autopilotRosterContractCanonicalJson(parsed));
 }
 export function verifyCustomRosterManifestForRoster(input) {
@@ -547,7 +547,7 @@ function safeValueDigest(value) {
 }
 function parseCustomRoster(value) {
     try {
-        return { ok: true, roster: parseAutopilotRosterContract('autopilot.roster.v1', value) };
+        return { ok: true, roster: parseProviderRoster(value) };
     }
     catch {
         return { ok: false };
@@ -761,7 +761,7 @@ function validateCustomRosterStructure(input) {
 }
 function parseManifest(value) {
     try {
-        return parseAutopilotRosterContract('autopilot.certification_manifest.v1', value);
+        return parseProviderQualificationManifest(value);
     }
     catch {
         return null;

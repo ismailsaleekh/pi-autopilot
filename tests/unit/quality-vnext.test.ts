@@ -22,6 +22,8 @@ import {
   writeAutopilotExecutionAudit,
 } from '../../src/core/execution-audit/index.ts';
 import { assertAutopilotSpecQualityGate } from '../../src/core/quality/spec-gate.ts';
+import { unitSpecAuthorityProjection } from '../../src/core/roster/runtime-consumers.ts';
+import { w5UnitSpec } from '../helpers/w5-roster-fixtures.ts';
 import {
   appendAutopilotDecisionRow,
   readAutopilotPurposeSnapshot,
@@ -102,6 +104,35 @@ function sourceSpec(root: string, overrides: Partial<AutopilotUnitSpec> = {}): A
   };
 }
 
+function runtimeAuditSpec(root: string, overrides: Partial<AutopilotUnitSpec> = {}): ReturnType<typeof w5UnitSpec> {
+  const spec = sourceSpec(root, overrides);
+  return w5UnitSpec({
+    workstream: spec.workstream,
+    unit_id: spec.unit_id,
+    role: spec.role,
+    attempt: spec.attempt,
+    objective: spec.objective,
+    cwd: spec.cwd,
+    owned_paths: spec.owned_paths,
+    read_only_paths: spec.read_only_paths,
+    untouchable_paths: spec.untouchable_paths,
+    context_refs: spec.context_refs.map((ref) => ({ ...ref, sha256: null, byte_count: null })),
+    validation_commands: spec.validation_commands,
+    status_output: spec.status_output,
+    receipt_output: spec.receipt_output,
+    evidence_dir: spec.evidence_dir,
+    stop_boundary: spec.stop_boundary,
+    quality_profile: spec.quality_profile ?? null,
+    risk_level: spec.risk_level ?? null,
+    acceptance_criteria: spec.acceptance_criteria ?? [],
+    verification_plan: spec.verification_plan ?? null,
+    closure_criteria: spec.closure_criteria ?? [],
+    upstream_refs: spec.upstream_refs ?? [],
+    timeout_seconds: spec.timeout_seconds ?? null,
+    render_prompt_snapshot: spec.render_prompt_snapshot ?? null,
+  });
+}
+
 function validateSpec(root: string): AutopilotUnitSpec {
   const worktree = join(root, 'worktree');
   const runtimeRoot = join(worktree, '.pi', 'autopilot', 'quality-demo');
@@ -127,7 +158,7 @@ function validateSpec(root: string): AutopilotUnitSpec {
   };
 }
 
-function passingStatus(spec: AutopilotUnitSpec): AutopilotStatusEntry {
+function passingStatus(spec: Pick<AutopilotUnitSpec, 'workstream' | 'unit_id' | 'role' | 'attempt' | 'validation_commands'>): AutopilotStatusEntry {
   return {
     schema_version: 'autopilot.status.v1',
     workstream: spec.workstream,
@@ -389,7 +420,7 @@ void describe('Autopilot execution audits', () => {
     await withTempDir(async (root) => {
       const worktree = join(root, 'worktree');
       await initGitWorktree(worktree);
-      const spec = sourceSpec(root, { cwd: worktree });
+      const spec = runtimeAuditSpec(root, { cwd: worktree });
       const cleanBaseline = await captureAutopilotExecutionBaseline(worktree);
       await writeFile(join(worktree, 'src', 'owned.ts'), 'export const value = 2;\n', 'utf8');
       const cleanAudit = await writeAutopilotExecutionAudit({
@@ -502,7 +533,7 @@ void describe('Autopilot execution audits', () => {
   void it('accepts clean status/audit coherence at the 500 changed-path boundary', async () => {
     await withTempDir(async (root) => {
       const changedPaths = generatedChangedPaths(AUTOPILOT_STATUS_CHANGED_PATHS_LIMIT);
-      const spec = sourceSpec(root, { owned_paths: ['src/generated'] });
+      const spec = runtimeAuditSpec(root, { owned_paths: ['src/generated'] });
       const status: AutopilotStatusEntry = {
         ...passingStatus(spec),
         changed_paths: changedPaths,
@@ -532,14 +563,14 @@ void describe('Autopilot execution audits', () => {
       assert.equal(audit.path_counts.status_reported_changed_paths, AUTOPILOT_STATUS_CHANGED_PATHS_LIMIT);
       assert.deepEqual(audit.truncated_path_sets, []);
       assert.equal(
-        parseAutopilotStatusEntry(status, { unitSpec: spec, executionAudit: audit }).changed_paths.length,
+        parseAutopilotStatusEntry(status, { unitSpec: unitSpecAuthorityProjection(spec), executionAudit: audit }).changed_paths.length,
         AUTOPILOT_STATUS_CHANGED_PATHS_LIMIT,
       );
     });
   });
 
   void it('truncates oversized dirty baselines with counts and fail-closed classification', () => {
-    const spec = sourceSpec('/tmp/autopilot-large-dirty-baseline');
+    const spec = runtimeAuditSpec('/tmp/autopilot-large-dirty-baseline');
     const dirtyPaths = Array.from(
       { length: 946 },
       (_, index) => `docs/baseline-${String(index).padStart(4, '0')}.md`,
