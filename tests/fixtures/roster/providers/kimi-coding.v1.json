@@ -1,0 +1,831 @@
+{
+  "schema_version": "autopilot.kimi_coding_provider_fixture.v1",
+  "fixture_id": "phase37-w4-kimi-coding-offline-synthetic-v1",
+  "provider_id": "kimi-coding",
+  "status": "synthetic-non-certifying",
+  "evidence_notice": {
+    "provider_evidence_is_certifying": false,
+    "live_provider_calls_required": false,
+    "live_provider_calls_performed": false,
+    "secrets_included": false
+  },
+  "route_facts": {
+    "schema_version": "autopilot.kimi_coding_route.v1",
+    "provider_id": "kimi-coding",
+    "route_policy_id": "kimi-coding-plan-v1",
+    "route_policy_revision": 1,
+    "base_url": "https://api.kimi.com/coding",
+    "api": "anthropic-messages",
+    "auth_class": "api-key-plan-token",
+    "allowed_auth_classes": [
+      "api-key-plan-token"
+    ],
+    "allowed_auth_sources": [
+      "runtime",
+      "stored"
+    ],
+    "billing_class": "plan-token",
+    "billing_route_class": "plan-api-token",
+    "service_tier": null,
+    "cache_policy": "provider-default",
+    "system_prompt_profile": "anthropic-autopilot-sanitized.v1",
+    "request_headers": [
+      {
+        "name": "User-Agent",
+        "value": "KimiCLI/1.5"
+      }
+    ],
+    "forbidden_gateways": [
+      "openrouter",
+      "arbitrary-api-key",
+      "metered-frontier"
+    ],
+    "requires_live_entitlement_proof": true,
+    "requires_live_billing_proof": true,
+    "plan_token_grants_generic_api_key": false,
+    "labels_rank_candidates": false,
+    "network_calls_allowed_by_pack": false,
+    "qualification_state": "qualification-required"
+  },
+  "labels": {
+    "schema_version": "autopilot.kimi_coding_labels.v1",
+    "provider_label": "Kimi For Coding",
+    "model_labels": [
+      "K3",
+      "kimi-for-coding",
+      "highspeed"
+    ],
+    "labels_rank_candidates": false
+  },
+  "role_templates": [
+    {
+      "role": "parent",
+      "declared_model_id": "K3",
+      "request_model_id": "K3",
+      "highspeed_substitution": false,
+      "api": "anthropic-messages",
+      "thinking": "xhigh",
+      "service_tier": null,
+      "cache_policy": "provider-default",
+      "system_prompt_profile": "anthropic-autopilot-sanitized.v1",
+      "context_window": 262144,
+      "max_output_tokens": 32768,
+      "input_modalities": [
+        "image",
+        "text"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning_capability": "reasoning-supported",
+      "tool_capability": "tool-use-supported"
+    },
+    {
+      "role": "strategy",
+      "declared_model_id": "K3",
+      "request_model_id": "K3",
+      "highspeed_substitution": false,
+      "api": "anthropic-messages",
+      "thinking": "xhigh",
+      "service_tier": null,
+      "cache_policy": "provider-default",
+      "system_prompt_profile": "anthropic-autopilot-sanitized.v1",
+      "context_window": 262144,
+      "max_output_tokens": 32768,
+      "input_modalities": [
+        "image",
+        "text"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning_capability": "reasoning-supported",
+      "tool_capability": "tool-use-supported"
+    },
+    {
+      "role": "implement",
+      "declared_model_id": "kimi-for-coding",
+      "request_model_id": "kimi-for-coding",
+      "highspeed_substitution": false,
+      "api": "anthropic-messages",
+      "thinking": "high",
+      "service_tier": null,
+      "cache_policy": "provider-default",
+      "system_prompt_profile": "anthropic-autopilot-sanitized.v1",
+      "context_window": 262144,
+      "max_output_tokens": 32768,
+      "input_modalities": [
+        "image",
+        "text"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning_capability": "reasoning-supported",
+      "tool_capability": "tool-use-supported"
+    },
+    {
+      "role": "validate",
+      "declared_model_id": "K3",
+      "request_model_id": "K3",
+      "highspeed_substitution": false,
+      "api": "anthropic-messages",
+      "thinking": "xhigh",
+      "service_tier": null,
+      "cache_policy": "provider-default",
+      "system_prompt_profile": "anthropic-autopilot-sanitized.v1",
+      "context_window": 262144,
+      "max_output_tokens": 32768,
+      "input_modalities": [
+        "image",
+        "text"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning_capability": "reasoning-supported",
+      "tool_capability": "tool-use-supported"
+    },
+    {
+      "role": "fix",
+      "declared_model_id": "kimi-for-coding",
+      "request_model_id": "kimi-for-coding",
+      "highspeed_substitution": false,
+      "api": "anthropic-messages",
+      "thinking": "high",
+      "service_tier": null,
+      "cache_policy": "provider-default",
+      "system_prompt_profile": "anthropic-autopilot-sanitized.v1",
+      "context_window": 262144,
+      "max_output_tokens": 32768,
+      "input_modalities": [
+        "image",
+        "text"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning_capability": "reasoning-supported",
+      "tool_capability": "tool-use-supported"
+    },
+    {
+      "role": "adjudicate",
+      "declared_model_id": "K3",
+      "request_model_id": "K3",
+      "highspeed_substitution": false,
+      "api": "anthropic-messages",
+      "thinking": "xhigh",
+      "service_tier": null,
+      "cache_policy": "provider-default",
+      "system_prompt_profile": "anthropic-autopilot-sanitized.v1",
+      "context_window": 262144,
+      "max_output_tokens": 32768,
+      "input_modalities": [
+        "image",
+        "text"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning_capability": "reasoning-supported",
+      "tool_capability": "tool-use-supported"
+    },
+    {
+      "role": "bughunt",
+      "declared_model_id": "K3",
+      "request_model_id": "K3",
+      "highspeed_substitution": false,
+      "api": "anthropic-messages",
+      "thinking": "xhigh",
+      "service_tier": null,
+      "cache_policy": "provider-default",
+      "system_prompt_profile": "anthropic-autopilot-sanitized.v1",
+      "context_window": 262144,
+      "max_output_tokens": 32768,
+      "input_modalities": [
+        "image",
+        "text"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning_capability": "reasoning-supported",
+      "tool_capability": "tool-use-supported"
+    },
+    {
+      "role": "extract",
+      "declared_model_id": "highspeed",
+      "request_model_id": "kimi-for-coding",
+      "highspeed_substitution": true,
+      "api": "anthropic-messages",
+      "thinking": "high",
+      "service_tier": null,
+      "cache_policy": "provider-default",
+      "system_prompt_profile": "anthropic-autopilot-sanitized.v1",
+      "context_window": 262144,
+      "max_output_tokens": 32768,
+      "input_modalities": [
+        "image",
+        "text"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning_capability": "reasoning-supported",
+      "tool_capability": "tool-use-supported"
+    }
+  ],
+  "request_profiles": [
+    {
+      "schema_version": "autopilot.kimi_coding_request_profile.v1",
+      "role": "parent",
+      "provider_id": "kimi-coding",
+      "declared_model_id": "K3",
+      "model_id": "K3",
+      "model": "kimi-coding/K3",
+      "api": "anthropic-messages",
+      "thinking": "xhigh",
+      "service_tier": null,
+      "cache_policy": "provider-default",
+      "system_prompt_profile": "anthropic-autopilot-sanitized.v1",
+      "context_window": 262144,
+      "max_output_tokens": 32768,
+      "input_modalities": [
+        "image",
+        "text"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning_capability": "reasoning-supported",
+      "tool_capability": "tool-use-supported",
+      "route_policy_id": "kimi-coding-plan-v1",
+      "route_policy_revision": 1,
+      "highspeed_substitution": false,
+      "request_profile_sha256": "sha256:58459757ff9a5f2c6a0354d9cb5b435c38df6a36cca03b13174d4cc2e6cc4d75"
+    },
+    {
+      "schema_version": "autopilot.kimi_coding_request_profile.v1",
+      "role": "strategy",
+      "provider_id": "kimi-coding",
+      "declared_model_id": "K3",
+      "model_id": "K3",
+      "model": "kimi-coding/K3",
+      "api": "anthropic-messages",
+      "thinking": "xhigh",
+      "service_tier": null,
+      "cache_policy": "provider-default",
+      "system_prompt_profile": "anthropic-autopilot-sanitized.v1",
+      "context_window": 262144,
+      "max_output_tokens": 32768,
+      "input_modalities": [
+        "image",
+        "text"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning_capability": "reasoning-supported",
+      "tool_capability": "tool-use-supported",
+      "route_policy_id": "kimi-coding-plan-v1",
+      "route_policy_revision": 1,
+      "highspeed_substitution": false,
+      "request_profile_sha256": "sha256:1443dafb5f89484c61b3956db25506e614dcb8e1bcb0f902acece58439c0738b"
+    },
+    {
+      "schema_version": "autopilot.kimi_coding_request_profile.v1",
+      "role": "implement",
+      "provider_id": "kimi-coding",
+      "declared_model_id": "kimi-for-coding",
+      "model_id": "kimi-for-coding",
+      "model": "kimi-coding/kimi-for-coding",
+      "api": "anthropic-messages",
+      "thinking": "high",
+      "service_tier": null,
+      "cache_policy": "provider-default",
+      "system_prompt_profile": "anthropic-autopilot-sanitized.v1",
+      "context_window": 262144,
+      "max_output_tokens": 32768,
+      "input_modalities": [
+        "image",
+        "text"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning_capability": "reasoning-supported",
+      "tool_capability": "tool-use-supported",
+      "route_policy_id": "kimi-coding-plan-v1",
+      "route_policy_revision": 1,
+      "highspeed_substitution": false,
+      "request_profile_sha256": "sha256:0cf2f21eeab8cee3f96301b92d5b8e3f26aa7c0a91e7f7cd1e6d059734fab5b7"
+    },
+    {
+      "schema_version": "autopilot.kimi_coding_request_profile.v1",
+      "role": "validate",
+      "provider_id": "kimi-coding",
+      "declared_model_id": "K3",
+      "model_id": "K3",
+      "model": "kimi-coding/K3",
+      "api": "anthropic-messages",
+      "thinking": "xhigh",
+      "service_tier": null,
+      "cache_policy": "provider-default",
+      "system_prompt_profile": "anthropic-autopilot-sanitized.v1",
+      "context_window": 262144,
+      "max_output_tokens": 32768,
+      "input_modalities": [
+        "image",
+        "text"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning_capability": "reasoning-supported",
+      "tool_capability": "tool-use-supported",
+      "route_policy_id": "kimi-coding-plan-v1",
+      "route_policy_revision": 1,
+      "highspeed_substitution": false,
+      "request_profile_sha256": "sha256:b0972b57d6a8f1d9acb13ed975201976168af340c0391ac63b64543b21753dbc"
+    },
+    {
+      "schema_version": "autopilot.kimi_coding_request_profile.v1",
+      "role": "fix",
+      "provider_id": "kimi-coding",
+      "declared_model_id": "kimi-for-coding",
+      "model_id": "kimi-for-coding",
+      "model": "kimi-coding/kimi-for-coding",
+      "api": "anthropic-messages",
+      "thinking": "high",
+      "service_tier": null,
+      "cache_policy": "provider-default",
+      "system_prompt_profile": "anthropic-autopilot-sanitized.v1",
+      "context_window": 262144,
+      "max_output_tokens": 32768,
+      "input_modalities": [
+        "image",
+        "text"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning_capability": "reasoning-supported",
+      "tool_capability": "tool-use-supported",
+      "route_policy_id": "kimi-coding-plan-v1",
+      "route_policy_revision": 1,
+      "highspeed_substitution": false,
+      "request_profile_sha256": "sha256:1efc03af378474deeabc81af4efff8773b7e9e54c1018bf73358df4fd148353c"
+    },
+    {
+      "schema_version": "autopilot.kimi_coding_request_profile.v1",
+      "role": "adjudicate",
+      "provider_id": "kimi-coding",
+      "declared_model_id": "K3",
+      "model_id": "K3",
+      "model": "kimi-coding/K3",
+      "api": "anthropic-messages",
+      "thinking": "xhigh",
+      "service_tier": null,
+      "cache_policy": "provider-default",
+      "system_prompt_profile": "anthropic-autopilot-sanitized.v1",
+      "context_window": 262144,
+      "max_output_tokens": 32768,
+      "input_modalities": [
+        "image",
+        "text"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning_capability": "reasoning-supported",
+      "tool_capability": "tool-use-supported",
+      "route_policy_id": "kimi-coding-plan-v1",
+      "route_policy_revision": 1,
+      "highspeed_substitution": false,
+      "request_profile_sha256": "sha256:b41a4c3f3632a23fae6f0f223732826beec777f30d0f35b821d46c469989cdc3"
+    },
+    {
+      "schema_version": "autopilot.kimi_coding_request_profile.v1",
+      "role": "bughunt",
+      "provider_id": "kimi-coding",
+      "declared_model_id": "K3",
+      "model_id": "K3",
+      "model": "kimi-coding/K3",
+      "api": "anthropic-messages",
+      "thinking": "xhigh",
+      "service_tier": null,
+      "cache_policy": "provider-default",
+      "system_prompt_profile": "anthropic-autopilot-sanitized.v1",
+      "context_window": 262144,
+      "max_output_tokens": 32768,
+      "input_modalities": [
+        "image",
+        "text"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning_capability": "reasoning-supported",
+      "tool_capability": "tool-use-supported",
+      "route_policy_id": "kimi-coding-plan-v1",
+      "route_policy_revision": 1,
+      "highspeed_substitution": false,
+      "request_profile_sha256": "sha256:76bc211dafa78133db3ccfe5c9c2018f36123dbb04efff1a4b3489f3ae2d490c"
+    },
+    {
+      "schema_version": "autopilot.kimi_coding_request_profile.v1",
+      "role": "extract",
+      "provider_id": "kimi-coding",
+      "declared_model_id": "highspeed",
+      "model_id": "kimi-for-coding",
+      "model": "kimi-coding/kimi-for-coding",
+      "api": "anthropic-messages",
+      "thinking": "high",
+      "service_tier": null,
+      "cache_policy": "provider-default",
+      "system_prompt_profile": "anthropic-autopilot-sanitized.v1",
+      "context_window": 262144,
+      "max_output_tokens": 32768,
+      "input_modalities": [
+        "image",
+        "text"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning_capability": "reasoning-supported",
+      "tool_capability": "tool-use-supported",
+      "route_policy_id": "kimi-coding-plan-v1",
+      "route_policy_revision": 1,
+      "highspeed_substitution": true,
+      "request_profile_sha256": "sha256:8feb4a57f9802de6ae26394dd07a254264117e3b1e568a2beac7322f43b33971"
+    }
+  ],
+  "synthetic_observed_requests": [
+    {
+      "role": "parent",
+      "evidence_kind": "synthetic-fixture",
+      "provider_id": "kimi-coding",
+      "requested_model_id": "K3",
+      "executed_model_id": "K3",
+      "api": "anthropic-messages",
+      "thinking": "xhigh",
+      "service_tier": null,
+      "cache_policy": "provider-default",
+      "system_prompt_profile": "anthropic-autopilot-sanitized.v1",
+      "context_window": 262144,
+      "max_output_tokens": 32768,
+      "input_modalities": [
+        "image",
+        "text"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning_capability": "reasoning-supported",
+      "tool_capability": "tool-use-supported",
+      "route_policy_id": "kimi-coding-plan-v1",
+      "route_policy_revision": 1,
+      "system_prompt_sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "request_profile_sha256": "sha256:58459757ff9a5f2c6a0354d9cb5b435c38df6a36cca03b13174d4cc2e6cc4d75",
+      "observed_profile_sha256": "sha256:097087174bf3a124733a71db7ac6bc76b9d7cdf5eae1d0fa7cf3a0582f739b77"
+    },
+    {
+      "role": "strategy",
+      "evidence_kind": "synthetic-fixture",
+      "provider_id": "kimi-coding",
+      "requested_model_id": "K3",
+      "executed_model_id": "K3",
+      "api": "anthropic-messages",
+      "thinking": "xhigh",
+      "service_tier": null,
+      "cache_policy": "provider-default",
+      "system_prompt_profile": "anthropic-autopilot-sanitized.v1",
+      "context_window": 262144,
+      "max_output_tokens": 32768,
+      "input_modalities": [
+        "image",
+        "text"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning_capability": "reasoning-supported",
+      "tool_capability": "tool-use-supported",
+      "route_policy_id": "kimi-coding-plan-v1",
+      "route_policy_revision": 1,
+      "system_prompt_sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "request_profile_sha256": "sha256:1443dafb5f89484c61b3956db25506e614dcb8e1bcb0f902acece58439c0738b",
+      "observed_profile_sha256": "sha256:f5ee714bab4e4a1c5fe1108f2d8254f74cf33dde8d583afcaf709c0759f7e417"
+    },
+    {
+      "role": "implement",
+      "evidence_kind": "synthetic-fixture",
+      "provider_id": "kimi-coding",
+      "requested_model_id": "kimi-for-coding",
+      "executed_model_id": "kimi-for-coding",
+      "api": "anthropic-messages",
+      "thinking": "high",
+      "service_tier": null,
+      "cache_policy": "provider-default",
+      "system_prompt_profile": "anthropic-autopilot-sanitized.v1",
+      "context_window": 262144,
+      "max_output_tokens": 32768,
+      "input_modalities": [
+        "image",
+        "text"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning_capability": "reasoning-supported",
+      "tool_capability": "tool-use-supported",
+      "route_policy_id": "kimi-coding-plan-v1",
+      "route_policy_revision": 1,
+      "system_prompt_sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "request_profile_sha256": "sha256:0cf2f21eeab8cee3f96301b92d5b8e3f26aa7c0a91e7f7cd1e6d059734fab5b7",
+      "observed_profile_sha256": "sha256:dfe69ea33b386b540a100739a36126ada5db0e352cdf1988b84007b21a05ceb0"
+    },
+    {
+      "role": "validate",
+      "evidence_kind": "synthetic-fixture",
+      "provider_id": "kimi-coding",
+      "requested_model_id": "K3",
+      "executed_model_id": "K3",
+      "api": "anthropic-messages",
+      "thinking": "xhigh",
+      "service_tier": null,
+      "cache_policy": "provider-default",
+      "system_prompt_profile": "anthropic-autopilot-sanitized.v1",
+      "context_window": 262144,
+      "max_output_tokens": 32768,
+      "input_modalities": [
+        "image",
+        "text"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning_capability": "reasoning-supported",
+      "tool_capability": "tool-use-supported",
+      "route_policy_id": "kimi-coding-plan-v1",
+      "route_policy_revision": 1,
+      "system_prompt_sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "request_profile_sha256": "sha256:b0972b57d6a8f1d9acb13ed975201976168af340c0391ac63b64543b21753dbc",
+      "observed_profile_sha256": "sha256:a53e99bef8a5d3f253917f1094d4899ea13c104f5d38351ced8b2a0f6e0d1528"
+    },
+    {
+      "role": "fix",
+      "evidence_kind": "synthetic-fixture",
+      "provider_id": "kimi-coding",
+      "requested_model_id": "kimi-for-coding",
+      "executed_model_id": "kimi-for-coding",
+      "api": "anthropic-messages",
+      "thinking": "high",
+      "service_tier": null,
+      "cache_policy": "provider-default",
+      "system_prompt_profile": "anthropic-autopilot-sanitized.v1",
+      "context_window": 262144,
+      "max_output_tokens": 32768,
+      "input_modalities": [
+        "image",
+        "text"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning_capability": "reasoning-supported",
+      "tool_capability": "tool-use-supported",
+      "route_policy_id": "kimi-coding-plan-v1",
+      "route_policy_revision": 1,
+      "system_prompt_sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "request_profile_sha256": "sha256:1efc03af378474deeabc81af4efff8773b7e9e54c1018bf73358df4fd148353c",
+      "observed_profile_sha256": "sha256:622d3e6bd40dff3d563fbedc784f4b23a42e1949e6e676479235dbcf7d6e1975"
+    },
+    {
+      "role": "adjudicate",
+      "evidence_kind": "synthetic-fixture",
+      "provider_id": "kimi-coding",
+      "requested_model_id": "K3",
+      "executed_model_id": "K3",
+      "api": "anthropic-messages",
+      "thinking": "xhigh",
+      "service_tier": null,
+      "cache_policy": "provider-default",
+      "system_prompt_profile": "anthropic-autopilot-sanitized.v1",
+      "context_window": 262144,
+      "max_output_tokens": 32768,
+      "input_modalities": [
+        "image",
+        "text"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning_capability": "reasoning-supported",
+      "tool_capability": "tool-use-supported",
+      "route_policy_id": "kimi-coding-plan-v1",
+      "route_policy_revision": 1,
+      "system_prompt_sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "request_profile_sha256": "sha256:b41a4c3f3632a23fae6f0f223732826beec777f30d0f35b821d46c469989cdc3",
+      "observed_profile_sha256": "sha256:40c17a5ad1f22ad563a959653b53acfdf31c475bfce89cd9c788261c4654f292"
+    },
+    {
+      "role": "bughunt",
+      "evidence_kind": "synthetic-fixture",
+      "provider_id": "kimi-coding",
+      "requested_model_id": "K3",
+      "executed_model_id": "K3",
+      "api": "anthropic-messages",
+      "thinking": "xhigh",
+      "service_tier": null,
+      "cache_policy": "provider-default",
+      "system_prompt_profile": "anthropic-autopilot-sanitized.v1",
+      "context_window": 262144,
+      "max_output_tokens": 32768,
+      "input_modalities": [
+        "image",
+        "text"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning_capability": "reasoning-supported",
+      "tool_capability": "tool-use-supported",
+      "route_policy_id": "kimi-coding-plan-v1",
+      "route_policy_revision": 1,
+      "system_prompt_sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "request_profile_sha256": "sha256:76bc211dafa78133db3ccfe5c9c2018f36123dbb04efff1a4b3489f3ae2d490c",
+      "observed_profile_sha256": "sha256:8476a76241838fbce585ffa91abcd7e55a53964bdde3078153a61c348c5857ab"
+    },
+    {
+      "role": "extract",
+      "evidence_kind": "synthetic-fixture",
+      "provider_id": "kimi-coding",
+      "requested_model_id": "kimi-for-coding",
+      "executed_model_id": "kimi-for-coding",
+      "api": "anthropic-messages",
+      "thinking": "high",
+      "service_tier": null,
+      "cache_policy": "provider-default",
+      "system_prompt_profile": "anthropic-autopilot-sanitized.v1",
+      "context_window": 262144,
+      "max_output_tokens": 32768,
+      "input_modalities": [
+        "image",
+        "text"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning_capability": "reasoning-supported",
+      "tool_capability": "tool-use-supported",
+      "route_policy_id": "kimi-coding-plan-v1",
+      "route_policy_revision": 1,
+      "system_prompt_sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "request_profile_sha256": "sha256:8feb4a57f9802de6ae26394dd07a254264117e3b1e568a2beac7322f43b33971",
+      "observed_profile_sha256": "sha256:bfbc98b35f6ea8eb1d5bafa59f110477f39e3628e8d16a0658a0a0dd5e0ab37e"
+    }
+  ],
+  "synthetic_entitlements": [
+    {
+      "role": "parent",
+      "evidence_kind": "synthetic-fixture",
+      "entitlement_observed": true,
+      "billing_observed": true,
+      "route_policy_id": "kimi-coding-plan-v1",
+      "route_policy_revision": 1
+    },
+    {
+      "role": "strategy",
+      "evidence_kind": "synthetic-fixture",
+      "entitlement_observed": true,
+      "billing_observed": true,
+      "route_policy_id": "kimi-coding-plan-v1",
+      "route_policy_revision": 1
+    },
+    {
+      "role": "implement",
+      "evidence_kind": "synthetic-fixture",
+      "entitlement_observed": true,
+      "billing_observed": true,
+      "route_policy_id": "kimi-coding-plan-v1",
+      "route_policy_revision": 1
+    },
+    {
+      "role": "validate",
+      "evidence_kind": "synthetic-fixture",
+      "entitlement_observed": true,
+      "billing_observed": true,
+      "route_policy_id": "kimi-coding-plan-v1",
+      "route_policy_revision": 1
+    },
+    {
+      "role": "fix",
+      "evidence_kind": "synthetic-fixture",
+      "entitlement_observed": true,
+      "billing_observed": true,
+      "route_policy_id": "kimi-coding-plan-v1",
+      "route_policy_revision": 1
+    },
+    {
+      "role": "adjudicate",
+      "evidence_kind": "synthetic-fixture",
+      "entitlement_observed": true,
+      "billing_observed": true,
+      "route_policy_id": "kimi-coding-plan-v1",
+      "route_policy_revision": 1
+    },
+    {
+      "role": "bughunt",
+      "evidence_kind": "synthetic-fixture",
+      "entitlement_observed": true,
+      "billing_observed": true,
+      "route_policy_id": "kimi-coding-plan-v1",
+      "route_policy_revision": 1
+    },
+    {
+      "role": "extract",
+      "evidence_kind": "synthetic-fixture",
+      "entitlement_observed": true,
+      "billing_observed": true,
+      "route_policy_id": "kimi-coding-plan-v1",
+      "route_policy_revision": 1
+    }
+  ],
+  "synthetic_qualification_report": {
+    "schema_version": "autopilot.kimi_coding_qualification_report.v1",
+    "provider_id": "kimi-coding",
+    "route_policy_id": "kimi-coding-plan-v1",
+    "route_policy_revision": 1,
+    "qualification_state": "qualification-required",
+    "certifying": false,
+    "live_evidence_complete": false,
+    "synthetic_fixture": true,
+    "network_calls_performed": false,
+    "diagnostics": [
+      "KIMI_CODING_QUALIFICATION_REQUIRED",
+      "KIMI_CODING_SYNTHETIC_NON_CERTIFYING"
+    ],
+    "role_results": [
+      {
+        "role": "parent",
+        "state": "fail",
+        "diagnostics": [
+          "KIMI_CODING_SYNTHETIC_NON_CERTIFYING"
+        ]
+      },
+      {
+        "role": "strategy",
+        "state": "fail",
+        "diagnostics": [
+          "KIMI_CODING_SYNTHETIC_NON_CERTIFYING"
+        ]
+      },
+      {
+        "role": "implement",
+        "state": "fail",
+        "diagnostics": [
+          "KIMI_CODING_SYNTHETIC_NON_CERTIFYING"
+        ]
+      },
+      {
+        "role": "validate",
+        "state": "fail",
+        "diagnostics": [
+          "KIMI_CODING_SYNTHETIC_NON_CERTIFYING"
+        ]
+      },
+      {
+        "role": "fix",
+        "state": "fail",
+        "diagnostics": [
+          "KIMI_CODING_SYNTHETIC_NON_CERTIFYING"
+        ]
+      },
+      {
+        "role": "adjudicate",
+        "state": "fail",
+        "diagnostics": [
+          "KIMI_CODING_SYNTHETIC_NON_CERTIFYING"
+        ]
+      },
+      {
+        "role": "bughunt",
+        "state": "fail",
+        "diagnostics": [
+          "KIMI_CODING_SYNTHETIC_NON_CERTIFYING"
+        ]
+      },
+      {
+        "role": "extract",
+        "state": "fail",
+        "diagnostics": [
+          "KIMI_CODING_SYNTHETIC_NON_CERTIFYING"
+        ]
+      }
+    ],
+    "issued_at": "2026-07-23T00:00:00.000Z",
+    "report_sha256": "sha256:24cb610f77fa99d111092f736ef3f32f9adc30f662e6a391e50eac339dc59c47"
+  }
+}

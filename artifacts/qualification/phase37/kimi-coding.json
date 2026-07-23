@@ -1,0 +1,460 @@
+{
+  "schema_version": "autopilot.kimi_coding_qualification_artifact.v1",
+  "artifact_id": "phase37-w4-kimi-coding-qualification-required-v1",
+  "provider_id": "kimi-coding",
+  "route_policy_id": "kimi-coding-plan-v1",
+  "route_policy_revision": 1,
+  "qualification_state": "qualification-required",
+  "certifying": false,
+  "launch_ready": false,
+  "network_calls_performed": false,
+  "synthetic_fixture_non_certifying": true,
+  "report": "qualification-required: live role-complete Kimi Coding entitlement, billing, and observed request/executed-model evidence were not collected in this offline pack.",
+  "required_live_evidence": [
+    {
+      "evidence_id": "kimi-coding-parent-live-entitlement-billing",
+      "role": "parent",
+      "kind": "live-entitlement-billing",
+      "required": true,
+      "accepted_synthetic_substitute": false
+    },
+    {
+      "evidence_id": "kimi-coding-parent-live-observed-request",
+      "role": "parent",
+      "kind": "live-observed-request",
+      "required": true,
+      "accepted_synthetic_substitute": false,
+      "requested_model_id": "K3",
+      "executed_model_id_must_equal": "K3",
+      "request_profile_sha256": "sha256:58459757ff9a5f2c6a0354d9cb5b435c38df6a36cca03b13174d4cc2e6cc4d75"
+    },
+    {
+      "evidence_id": "kimi-coding-strategy-live-entitlement-billing",
+      "role": "strategy",
+      "kind": "live-entitlement-billing",
+      "required": true,
+      "accepted_synthetic_substitute": false
+    },
+    {
+      "evidence_id": "kimi-coding-strategy-live-observed-request",
+      "role": "strategy",
+      "kind": "live-observed-request",
+      "required": true,
+      "accepted_synthetic_substitute": false,
+      "requested_model_id": "K3",
+      "executed_model_id_must_equal": "K3",
+      "request_profile_sha256": "sha256:1443dafb5f89484c61b3956db25506e614dcb8e1bcb0f902acece58439c0738b"
+    },
+    {
+      "evidence_id": "kimi-coding-implement-live-entitlement-billing",
+      "role": "implement",
+      "kind": "live-entitlement-billing",
+      "required": true,
+      "accepted_synthetic_substitute": false
+    },
+    {
+      "evidence_id": "kimi-coding-implement-live-observed-request",
+      "role": "implement",
+      "kind": "live-observed-request",
+      "required": true,
+      "accepted_synthetic_substitute": false,
+      "requested_model_id": "kimi-for-coding",
+      "executed_model_id_must_equal": "kimi-for-coding",
+      "request_profile_sha256": "sha256:0cf2f21eeab8cee3f96301b92d5b8e3f26aa7c0a91e7f7cd1e6d059734fab5b7"
+    },
+    {
+      "evidence_id": "kimi-coding-validate-live-entitlement-billing",
+      "role": "validate",
+      "kind": "live-entitlement-billing",
+      "required": true,
+      "accepted_synthetic_substitute": false
+    },
+    {
+      "evidence_id": "kimi-coding-validate-live-observed-request",
+      "role": "validate",
+      "kind": "live-observed-request",
+      "required": true,
+      "accepted_synthetic_substitute": false,
+      "requested_model_id": "K3",
+      "executed_model_id_must_equal": "K3",
+      "request_profile_sha256": "sha256:b0972b57d6a8f1d9acb13ed975201976168af340c0391ac63b64543b21753dbc"
+    },
+    {
+      "evidence_id": "kimi-coding-fix-live-entitlement-billing",
+      "role": "fix",
+      "kind": "live-entitlement-billing",
+      "required": true,
+      "accepted_synthetic_substitute": false
+    },
+    {
+      "evidence_id": "kimi-coding-fix-live-observed-request",
+      "role": "fix",
+      "kind": "live-observed-request",
+      "required": true,
+      "accepted_synthetic_substitute": false,
+      "requested_model_id": "kimi-for-coding",
+      "executed_model_id_must_equal": "kimi-for-coding",
+      "request_profile_sha256": "sha256:1efc03af378474deeabc81af4efff8773b7e9e54c1018bf73358df4fd148353c"
+    },
+    {
+      "evidence_id": "kimi-coding-adjudicate-live-entitlement-billing",
+      "role": "adjudicate",
+      "kind": "live-entitlement-billing",
+      "required": true,
+      "accepted_synthetic_substitute": false
+    },
+    {
+      "evidence_id": "kimi-coding-adjudicate-live-observed-request",
+      "role": "adjudicate",
+      "kind": "live-observed-request",
+      "required": true,
+      "accepted_synthetic_substitute": false,
+      "requested_model_id": "K3",
+      "executed_model_id_must_equal": "K3",
+      "request_profile_sha256": "sha256:b41a4c3f3632a23fae6f0f223732826beec777f30d0f35b821d46c469989cdc3"
+    },
+    {
+      "evidence_id": "kimi-coding-bughunt-live-entitlement-billing",
+      "role": "bughunt",
+      "kind": "live-entitlement-billing",
+      "required": true,
+      "accepted_synthetic_substitute": false
+    },
+    {
+      "evidence_id": "kimi-coding-bughunt-live-observed-request",
+      "role": "bughunt",
+      "kind": "live-observed-request",
+      "required": true,
+      "accepted_synthetic_substitute": false,
+      "requested_model_id": "K3",
+      "executed_model_id_must_equal": "K3",
+      "request_profile_sha256": "sha256:76bc211dafa78133db3ccfe5c9c2018f36123dbb04efff1a4b3489f3ae2d490c"
+    },
+    {
+      "evidence_id": "kimi-coding-extract-live-entitlement-billing",
+      "role": "extract",
+      "kind": "live-entitlement-billing",
+      "required": true,
+      "accepted_synthetic_substitute": false
+    },
+    {
+      "evidence_id": "kimi-coding-extract-live-observed-request",
+      "role": "extract",
+      "kind": "live-observed-request",
+      "required": true,
+      "accepted_synthetic_substitute": false,
+      "requested_model_id": "kimi-for-coding",
+      "executed_model_id_must_equal": "kimi-for-coding",
+      "request_profile_sha256": "sha256:8feb4a57f9802de6ae26394dd07a254264117e3b1e568a2beac7322f43b33971"
+    }
+  ],
+  "route_facts": {
+    "schema_version": "autopilot.kimi_coding_route.v1",
+    "provider_id": "kimi-coding",
+    "route_policy_id": "kimi-coding-plan-v1",
+    "route_policy_revision": 1,
+    "base_url": "https://api.kimi.com/coding",
+    "api": "anthropic-messages",
+    "auth_class": "api-key-plan-token",
+    "allowed_auth_classes": [
+      "api-key-plan-token"
+    ],
+    "allowed_auth_sources": [
+      "runtime",
+      "stored"
+    ],
+    "billing_class": "plan-token",
+    "billing_route_class": "plan-api-token",
+    "service_tier": null,
+    "cache_policy": "provider-default",
+    "system_prompt_profile": "anthropic-autopilot-sanitized.v1",
+    "request_headers": [
+      {
+        "name": "User-Agent",
+        "value": "KimiCLI/1.5"
+      }
+    ],
+    "forbidden_gateways": [
+      "openrouter",
+      "arbitrary-api-key",
+      "metered-frontier"
+    ],
+    "requires_live_entitlement_proof": true,
+    "requires_live_billing_proof": true,
+    "plan_token_grants_generic_api_key": false,
+    "labels_rank_candidates": false,
+    "network_calls_allowed_by_pack": false,
+    "qualification_state": "qualification-required"
+  },
+  "role_templates": [
+    {
+      "role": "parent",
+      "declared_model_id": "K3",
+      "request_model_id": "K3",
+      "highspeed_substitution": false,
+      "api": "anthropic-messages",
+      "thinking": "xhigh",
+      "service_tier": null,
+      "cache_policy": "provider-default",
+      "system_prompt_profile": "anthropic-autopilot-sanitized.v1",
+      "context_window": 262144,
+      "max_output_tokens": 32768,
+      "input_modalities": [
+        "image",
+        "text"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning_capability": "reasoning-supported",
+      "tool_capability": "tool-use-supported"
+    },
+    {
+      "role": "strategy",
+      "declared_model_id": "K3",
+      "request_model_id": "K3",
+      "highspeed_substitution": false,
+      "api": "anthropic-messages",
+      "thinking": "xhigh",
+      "service_tier": null,
+      "cache_policy": "provider-default",
+      "system_prompt_profile": "anthropic-autopilot-sanitized.v1",
+      "context_window": 262144,
+      "max_output_tokens": 32768,
+      "input_modalities": [
+        "image",
+        "text"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning_capability": "reasoning-supported",
+      "tool_capability": "tool-use-supported"
+    },
+    {
+      "role": "implement",
+      "declared_model_id": "kimi-for-coding",
+      "request_model_id": "kimi-for-coding",
+      "highspeed_substitution": false,
+      "api": "anthropic-messages",
+      "thinking": "high",
+      "service_tier": null,
+      "cache_policy": "provider-default",
+      "system_prompt_profile": "anthropic-autopilot-sanitized.v1",
+      "context_window": 262144,
+      "max_output_tokens": 32768,
+      "input_modalities": [
+        "image",
+        "text"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning_capability": "reasoning-supported",
+      "tool_capability": "tool-use-supported"
+    },
+    {
+      "role": "validate",
+      "declared_model_id": "K3",
+      "request_model_id": "K3",
+      "highspeed_substitution": false,
+      "api": "anthropic-messages",
+      "thinking": "xhigh",
+      "service_tier": null,
+      "cache_policy": "provider-default",
+      "system_prompt_profile": "anthropic-autopilot-sanitized.v1",
+      "context_window": 262144,
+      "max_output_tokens": 32768,
+      "input_modalities": [
+        "image",
+        "text"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning_capability": "reasoning-supported",
+      "tool_capability": "tool-use-supported"
+    },
+    {
+      "role": "fix",
+      "declared_model_id": "kimi-for-coding",
+      "request_model_id": "kimi-for-coding",
+      "highspeed_substitution": false,
+      "api": "anthropic-messages",
+      "thinking": "high",
+      "service_tier": null,
+      "cache_policy": "provider-default",
+      "system_prompt_profile": "anthropic-autopilot-sanitized.v1",
+      "context_window": 262144,
+      "max_output_tokens": 32768,
+      "input_modalities": [
+        "image",
+        "text"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning_capability": "reasoning-supported",
+      "tool_capability": "tool-use-supported"
+    },
+    {
+      "role": "adjudicate",
+      "declared_model_id": "K3",
+      "request_model_id": "K3",
+      "highspeed_substitution": false,
+      "api": "anthropic-messages",
+      "thinking": "xhigh",
+      "service_tier": null,
+      "cache_policy": "provider-default",
+      "system_prompt_profile": "anthropic-autopilot-sanitized.v1",
+      "context_window": 262144,
+      "max_output_tokens": 32768,
+      "input_modalities": [
+        "image",
+        "text"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning_capability": "reasoning-supported",
+      "tool_capability": "tool-use-supported"
+    },
+    {
+      "role": "bughunt",
+      "declared_model_id": "K3",
+      "request_model_id": "K3",
+      "highspeed_substitution": false,
+      "api": "anthropic-messages",
+      "thinking": "xhigh",
+      "service_tier": null,
+      "cache_policy": "provider-default",
+      "system_prompt_profile": "anthropic-autopilot-sanitized.v1",
+      "context_window": 262144,
+      "max_output_tokens": 32768,
+      "input_modalities": [
+        "image",
+        "text"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning_capability": "reasoning-supported",
+      "tool_capability": "tool-use-supported"
+    },
+    {
+      "role": "extract",
+      "declared_model_id": "highspeed",
+      "request_model_id": "kimi-for-coding",
+      "highspeed_substitution": true,
+      "api": "anthropic-messages",
+      "thinking": "high",
+      "service_tier": null,
+      "cache_policy": "provider-default",
+      "system_prompt_profile": "anthropic-autopilot-sanitized.v1",
+      "context_window": 262144,
+      "max_output_tokens": 32768,
+      "input_modalities": [
+        "image",
+        "text"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning_capability": "reasoning-supported",
+      "tool_capability": "tool-use-supported"
+    }
+  ],
+  "offline_builder_report": {
+    "schema_version": "autopilot.kimi_coding_qualification_report.v1",
+    "provider_id": "kimi-coding",
+    "route_policy_id": "kimi-coding-plan-v1",
+    "route_policy_revision": 1,
+    "qualification_state": "qualification-required",
+    "certifying": false,
+    "live_evidence_complete": false,
+    "synthetic_fixture": false,
+    "network_calls_performed": false,
+    "diagnostics": [
+      "KIMI_CODING_BILLING_REQUIRED",
+      "KIMI_CODING_ENTITLEMENT_REQUIRED",
+      "KIMI_CODING_MISSING_ROLE",
+      "KIMI_CODING_QUALIFICATION_REQUIRED"
+    ],
+    "role_results": [
+      {
+        "role": "parent",
+        "state": "fail",
+        "diagnostics": [
+          "KIMI_CODING_BILLING_REQUIRED",
+          "KIMI_CODING_ENTITLEMENT_REQUIRED",
+          "KIMI_CODING_MISSING_ROLE"
+        ]
+      },
+      {
+        "role": "strategy",
+        "state": "fail",
+        "diagnostics": [
+          "KIMI_CODING_BILLING_REQUIRED",
+          "KIMI_CODING_ENTITLEMENT_REQUIRED",
+          "KIMI_CODING_MISSING_ROLE"
+        ]
+      },
+      {
+        "role": "implement",
+        "state": "fail",
+        "diagnostics": [
+          "KIMI_CODING_BILLING_REQUIRED",
+          "KIMI_CODING_ENTITLEMENT_REQUIRED",
+          "KIMI_CODING_MISSING_ROLE"
+        ]
+      },
+      {
+        "role": "validate",
+        "state": "fail",
+        "diagnostics": [
+          "KIMI_CODING_BILLING_REQUIRED",
+          "KIMI_CODING_ENTITLEMENT_REQUIRED",
+          "KIMI_CODING_MISSING_ROLE"
+        ]
+      },
+      {
+        "role": "fix",
+        "state": "fail",
+        "diagnostics": [
+          "KIMI_CODING_BILLING_REQUIRED",
+          "KIMI_CODING_ENTITLEMENT_REQUIRED",
+          "KIMI_CODING_MISSING_ROLE"
+        ]
+      },
+      {
+        "role": "adjudicate",
+        "state": "fail",
+        "diagnostics": [
+          "KIMI_CODING_BILLING_REQUIRED",
+          "KIMI_CODING_ENTITLEMENT_REQUIRED",
+          "KIMI_CODING_MISSING_ROLE"
+        ]
+      },
+      {
+        "role": "bughunt",
+        "state": "fail",
+        "diagnostics": [
+          "KIMI_CODING_BILLING_REQUIRED",
+          "KIMI_CODING_ENTITLEMENT_REQUIRED",
+          "KIMI_CODING_MISSING_ROLE"
+        ]
+      },
+      {
+        "role": "extract",
+        "state": "fail",
+        "diagnostics": [
+          "KIMI_CODING_BILLING_REQUIRED",
+          "KIMI_CODING_ENTITLEMENT_REQUIRED",
+          "KIMI_CODING_MISSING_ROLE"
+        ]
+      }
+    ],
+    "issued_at": "2026-07-23T00:00:00.000Z",
+    "report_sha256": "sha256:2ff39e2ba338de56c6af9cbf18072143eadb18352273f97363a3e044d649182f"
+  }
+}
