@@ -7,6 +7,8 @@ import { createCoordinatorAdmissionOffer, createCoordinatorAdmissionResponse, CO
 import { assertCoordinatorAdmissionAuthorityUnchanged, captureServingCoordinatorAdmissionAuthority, COORDINATOR_S1_ADMISSION_IDENTITY } from "./admission-runtime.js";
 import { parseCoordinatorAdmissionTransportRequest, parseCoordinatorTransportRequest, CoordinatorFrameDecoder, writeCoordinatorResponse } from "./ipc.js";
 import { CoordinationRuntimeError } from "./failures.js";
+import { buildS2CoordinationRuntimeErrorDiagnostic } from "./s2-diagnostics.js";
+import { isS2FailureResponseRetryable } from "./s2-failure-taxonomy.js";
 import { currentBootId, isProcessAlive, predecessorCompatibleBootId, processStartIdentity } from "./process-identity.js";
 import { COORDINATOR_GRANT_OFFER_SWEEP_MS, enforcePrivateAuthorityPath, ensureCoordinatorPrivateRoots, readOrCreateCoordinatorCapability } from "./runtime-paths.js";
 import { acquireSerializedProcessGuard, discardLockTombstone, quarantineExactLock, readExactLockText, restoreLockTombstone } from "./serialized-lock.js";
@@ -345,8 +347,8 @@ function errorResponse(requestId, error) {
         ok: false,
         committed_event_seq: null,
         error_code: runtime.code,
-        retryable: runtime.retry_policy !== 'never',
-        payload: { message: runtime.message, evidence: runtime.evidence },
+        retryable: isS2FailureResponseRetryable(runtime.code),
+        payload: { message: runtime.message, evidence: runtime.evidence, s2_diagnostic: buildS2CoordinationRuntimeErrorDiagnostic(runtime) },
     };
 }
 function jsonObject(value) {

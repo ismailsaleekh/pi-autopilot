@@ -1,4 +1,4 @@
-import { COORDINATION_FAILURE_CODES, coordinationFailureDefinition, type CoordinationFailureCode, type CoordinationRetryPolicy } from './failures.ts';
+import { COORDINATION_FAILURE_CODES, coordinationFailureDefinition, type CoordinationFailureClass, type CoordinationFailureCode, type CoordinationRetryPolicy } from './failures.ts';
 
 export const S2_FAILURE_TAXONOMY_SCHEMA_VERSION = 'autopilot.s2.failure_taxonomy.v1';
 
@@ -240,6 +240,41 @@ export function listS2CoordinationFailureDecisions(): readonly S2CoordinationFai
 
 export function isS2AuthorityCriticalFailure(code: CoordinationFailureCode): boolean {
   return decideS2CoordinationFailure(code).criticality === 'authority-critical';
+}
+
+export function isS2ProgressCriticalFailure(code: CoordinationFailureCode): boolean {
+  return decideS2CoordinationFailure(code).criticality === 'progress-critical';
+}
+
+export function isS2CoordinationFailureCode(value: unknown): value is CoordinationFailureCode {
+  return typeof value === 'string' && COORDINATION_FAILURE_CODES.includes(value as CoordinationFailureCode);
+}
+
+export function s2CoordinationFailureClass(code: CoordinationFailureCode): CoordinationFailureClass {
+  return coordinationFailureDefinition(code).failure_class;
+}
+
+export function isS2FailureResponseRetryable(code: CoordinationFailureCode): boolean {
+  return decideS2CoordinationFailure(code).retry_policy !== 'never';
+}
+
+export function isS2SameOperationProgressRetry(code: CoordinationFailureCode): boolean {
+  const decision = decideS2CoordinationFailure(code);
+  return decision.criticality === 'progress-critical' && decision.retry_policy === 'same-idempotency-key';
+}
+
+export function isS2OwnerRecoveryProgressFailure(code: CoordinationFailureCode): boolean {
+  const decision = decideS2CoordinationFailure(code);
+  return decision.criticality === 'progress-critical' && decision.retry_policy === 'after-reconciliation';
+}
+
+export function shouldS2AttemptEffectUnknownRecovery(code: CoordinationFailureCode): boolean {
+  return decideS2CoordinationFailure(code).criticality === 'progress-critical';
+}
+
+export function shouldS2UseSystemFatalExit(code: CoordinationFailureCode): boolean {
+  const decision = decideS2CoordinationFailure(code);
+  return decision.criticality === 'authority-critical' && decision.retry_policy === 'never' && (decision.scope_kind === 'coordinator-store' || decision.scope_kind === 'local-runtime');
 }
 
 export function assertS2FailureTaxonomyMatchesExistingRetryPolicy(): void {

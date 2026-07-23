@@ -32,6 +32,8 @@ export * from "./reconciliation.js";
 export * from "./reservations.js";
 export * from "./runtime-identity.js";
 export * from "./runtime-paths.js";
+export * from "./s2-diagnostics.js";
+export * from "./s2-failure-taxonomy.js";
 export * from "./schemas.js";
 export * from "./schema11-retirement.js";
 export * from "./server.js";

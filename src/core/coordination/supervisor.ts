@@ -8,6 +8,7 @@ import { platform } from 'node:os';
 import { CoordinatorClient, durableIdentifier } from './client.ts';
 import { parseCoordinationMailboxDeliveryReceipt, parseCoordinationMessage, parseCoordinationMigrationRecoveryWork, parseOptionalCoordinationReconciliationReceipt, parseCoordinationRun, parseCoordinationRunTerminalIntent, parseCoordinationSessionLease } from './contracts.ts';
 import { CoordinationRuntimeError, formatCoordinationRuntimeError } from './failures.ts';
+import { isS2OwnerRecoveryProgressFailure, isS2SameOperationProgressRetry } from './s2-failure-taxonomy.ts';
 import { acknowledgeCoordinationMigrationFreeze, activeCoordinationMigrationFreeze, assertMigrationPathSafe } from './migration-paths.ts';
 import { currentBootId } from './process-identity.ts';
 import { COORDINATOR_HEARTBEAT_MS, COORDINATOR_SESSION_LEASE_MS, enforcePrivateAuthorityPath, ensurePrivateAuthorityDirectory } from './runtime-paths.ts';
@@ -124,8 +125,6 @@ interface HeartbeatFailureClassification {
   readonly leaseExpiryMs: number;
 }
 
-const TRANSIENT_HEARTBEAT_CODES = new Set(['coordinator-unavailable', 'coordinator-contention', 'request-timeout']);
-
 /**
  * A heartbeat that fails because the coordinator socket is momentarily
  * unavailable (PID live, socket down) or briefly contended must not permanently
@@ -139,7 +138,7 @@ export function classifyHeartbeatFailure(error: unknown, session: CoordinationSe
   const leaseExpiryMs = Date.parse(session.lease_expires_at);
   const code = error instanceof CoordinationRuntimeError ? error.code : 'unknown';
   const detail = error instanceof Error ? error.message : String(error);
-  const kind = TRANSIENT_HEARTBEAT_CODES.has(code) ? 'transient' : 'terminal';
+  const kind = error instanceof CoordinationRuntimeError && isS2SameOperationProgressRetry(error.code) ? 'transient' : 'terminal';
   return { kind, code, detail, leaseExpiryMs };
 }
 
@@ -589,7 +588,7 @@ export class DurableRunSupervisorClient {
 }
 
 export function classifyHeartbeatOwnedRecoveryFailure(error: unknown): { readonly kind: 'dispatch-blocked'; readonly error: CoordinationRuntimeError } | { readonly kind: 'terminal'; readonly error: Error } {
-  if (error instanceof CoordinationRuntimeError && error.failure_class === 'owned-recovery') return { kind: 'dispatch-blocked', error };
+  if (error instanceof CoordinationRuntimeError && isS2OwnerRecoveryProgressFailure(error.code)) return { kind: 'dispatch-blocked', error };
   return { kind: 'terminal', error: error instanceof Error ? error : new Error(String(error)) };
 }
 

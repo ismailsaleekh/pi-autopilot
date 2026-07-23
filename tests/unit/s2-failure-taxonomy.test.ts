@@ -5,7 +5,7 @@ import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { COORDINATION_FAILURE_CODES, coordinationFailureDefinition, CoordinationRuntimeError, type CoordinationFailureCode, type CoordinationRetryPolicy } from '../../src/core/coordination/failures.ts';
 import { buildS2CoordinationFailureDiagnostic, buildS2CoordinationRuntimeErrorDiagnostic, S2_DIAGNOSTIC_MAX_EVIDENCE_ENTRIES, S2_DIAGNOSTIC_MAX_MESSAGE_CODE_POINTS, S2_DIAGNOSTIC_MAX_TEXT_CODE_POINTS } from '../../src/core/coordination/s2-diagnostics.ts';
-import { assertS2FailureTaxonomyMatchesExistingRetryPolicy, decideS2CoordinationFailure, isS2AuthorityCriticalFailure, listS2CoordinationFailureDecisions, type S2AuthorityScopeRule, type S2FailureCriticality, type S2FailureEvidencePublication, type S2FailureScopeKind, type S2ProgressScopeRule } from '../../src/core/coordination/s2-failure-taxonomy.ts';
+import { assertS2FailureTaxonomyMatchesExistingRetryPolicy, decideS2CoordinationFailure, isS2AuthorityCriticalFailure, isS2CoordinationFailureCode, isS2FailureResponseRetryable, isS2OwnerRecoveryProgressFailure, isS2ProgressCriticalFailure, isS2SameOperationProgressRetry, listS2CoordinationFailureDecisions, s2CoordinationFailureClass, shouldS2AttemptEffectUnknownRecovery, shouldS2UseSystemFatalExit, type S2AuthorityScopeRule, type S2FailureCriticality, type S2FailureEvidencePublication, type S2FailureScopeKind, type S2ProgressScopeRule } from '../../src/core/coordination/s2-failure-taxonomy.ts';
 
 const packageRoot = fileURLToPath(new URL('../../', import.meta.url));
 
@@ -213,10 +213,6 @@ const EXPECTED_DECISIONS: { readonly [Code in CoordinationFailureCode]: Expected
   },
 };
 
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
-}
-
 function decisionProjection(code: CoordinationFailureCode): ExpectedDecision {
   const decision = decideS2CoordinationFailure(code);
   return {
@@ -346,9 +342,27 @@ void describe('S2 coordination failure taxonomy', () => {
     assert.deepEqual(nonSecret.evidence, ['owner=synthetic-run result=ready']);
   });
 
-  void it('guards coordination S2 consumers from bypassing the centralized taxonomy decision API', async () => {
+  void it('centralizes all runtime seam judgments over every failure code', () => {
+    for (const code of COORDINATION_FAILURE_CODES) {
+      const expected = EXPECTED_DECISIONS[code];
+      assert.equal(isS2CoordinationFailureCode(code), true, code);
+      assert.equal(isS2ProgressCriticalFailure(code), expected.criticality === 'progress-critical', code);
+      assert.equal(isS2FailureResponseRetryable(code), expected.retry_policy !== 'never', code);
+      assert.equal(isS2SameOperationProgressRetry(code), expected.criticality === 'progress-critical' && expected.retry_policy === 'same-idempotency-key', code);
+      assert.equal(isS2OwnerRecoveryProgressFailure(code), expected.criticality === 'progress-critical' && expected.retry_policy === 'after-reconciliation', code);
+      assert.equal(shouldS2AttemptEffectUnknownRecovery(code), expected.criticality === 'progress-critical', code);
+      assert.equal(s2CoordinationFailureClass(code), coordinationFailureDefinition(code).failure_class, code);
+      assert.equal(shouldS2UseSystemFatalExit(code), code === 'store-corrupt' || code === 'system-fatal', code);
+    }
+    assert.equal(isS2CoordinationFailureCode('not-a-coordination-code'), false);
+  });
+
+  void it('guards real runtime consumers from bypassing the centralized taxonomy decision API', async () => {
     const sources = new Map<string, string>();
     for (const relativePath of await coordinationSourceFiles()) {
+      sources.set(relativePath, await readFile(join(packageRoot, relativePath), 'utf8'));
+    }
+    for (const relativePath of ['src/cli/autopilot-agent-run.ts', 'src/cli/autopilot-coordinator.ts']) {
       sources.set(relativePath, await readFile(join(packageRoot, relativePath), 'utf8'));
     }
 
@@ -360,20 +374,37 @@ void describe('S2 coordination failure taxonomy', () => {
     assert.notEqual(taxonomySource, undefined);
     assert.equal(/export\s+(?:const|let|var)\s+S2_[A-Z0-9_]*DECISION_BY_CODE|export\s*\{[^}]*S2_[A-Z0-9_]*DECISION_BY_CODE|export\s+default\s+S2_[A-Z0-9_]*DECISION_BY_CODE/u.test(taxonomySource ?? ''), false);
 
+    const requiredConsumers: Readonly<Record<string, readonly string[]>> = Object.freeze({
+      'src/cli/autopilot-agent-run.ts': ['buildS2CoordinationRuntimeErrorDiagnostic'],
+      'src/cli/autopilot-coordinator.ts': ['shouldS2UseSystemFatalExit'],
+      'src/core/coordination/client.ts': ['s2CoordinationFailureClass'],
+      'src/core/coordination/d65-graph-publisher.ts': ['shouldS2AttemptEffectUnknownRecovery'],
+      'src/core/coordination/server.ts': ['isS2FailureResponseRetryable', 'buildS2CoordinationRuntimeErrorDiagnostic'],
+      'src/core/coordination/startup-observation.ts': ['isS2CoordinationFailureCode', 's2CoordinationFailureClass'],
+      'src/core/coordination/store.ts': ['isS2CoordinationFailureCode', 'isS2FailureResponseRetryable', 'buildS2CoordinationRuntimeErrorDiagnostic'],
+      'src/core/coordination/supervisor.ts': ['isS2SameOperationProgressRetry', 'isS2OwnerRecoveryProgressFailure'],
+    });
+
+    for (const [relativePath, requiredSymbols] of Object.entries(requiredConsumers)) {
+      const source = sources.get(relativePath);
+      assert.notEqual(source, undefined, relativePath);
+      for (const symbol of requiredSymbols) assert.equal(source?.includes(symbol), true, `${relativePath} must use ${symbol}`);
+    }
+
     for (const [relativePath, source] of sources) {
       const displayPath = relative(packageRoot, join(packageRoot, relativePath));
       const isTaxonomy = relativePath === 'src/core/coordination/s2-failure-taxonomy.ts';
-      if (!isTaxonomy) {
-        assert.equal(/S2_DECISION_BY_CODE/u.test(source), false, displayPath);
-      }
+      const isLegacyDefinition = relativePath === 'src/core/coordination/failures.ts';
+      if (!isTaxonomy) assert.equal(/S2_DECISION_BY_CODE/u.test(source), false, displayPath);
+      if (isTaxonomy || isLegacyDefinition) continue;
+
+      assert.equal(/coordinationFailureDefinition\(/u.test(source), false, displayPath);
+      assert.equal(/\.retry_policy\s*(?:===|!==)\s*['"]|\.retry_policy\s*!==\s*['"]never['"]|\.failure_class\s*===\s*['"](?:owned-recovery|system-fatal|retryable-contention|client-invalid|fenced-client|contradiction-review)['"]/u.test(source), false, displayPath);
+      assert.equal(/new\s+Set\s*\(\s*\[\s*['"](?:coordinator-unavailable|coordinator-contention|request-timeout)['"]/u.test(source), false, displayPath);
 
       if (isS2ConsumerSource(relativePath, source)) {
         assert.equal(/criticality:\s*['"](?:authority-critical|progress-critical)['"]|scope_rule:\s*['"](?:fail-closed-at-exact-scope|must-not-stop-unrelated-runs-or-coordinator)['"]/u.test(source), false, displayPath);
-        assert.equal(/coordinationFailureDefinition|COORDINATION_FAILURE_TAXONOMY|COORDINATION_FAILURE_MATRIX|COORDINATION_FAILURE_CODES/u.test(source), false, displayPath);
-        for (const code of COORDINATION_FAILURE_CODES) {
-          const literalPattern = new RegExp(`['"]${escapeRegExp(code)}['"]`, 'u');
-          assert.equal(literalPattern.test(source), false, `${displayPath} ${code}`);
-        }
+        assert.equal(/COORDINATION_FAILURE_TAXONOMY|COORDINATION_FAILURE_MATRIX|COORDINATION_FAILURE_CODES/u.test(source), false, displayPath);
       }
     }
   });

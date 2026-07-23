@@ -7,7 +7,8 @@ import { assertCoordinatorAdmissionAuthorityUnchanged, captureCoordinatorAdmissi
 import { parseCoordinationReconciliationDetail, parseCoordinationReconciliationReceipt, parseCoordinationResultDetail, parseCoordinationResultReceipt, parseCoordinatorMailboxPage, parseCoordinatorMigrationRecoveryPage, parseCoordinatorProjectionPage, parseCoordinatorReconciliationDetailPage, parseCoordinatorRequestEnvelope, parseCoordinatorResultDetailPage, parseCoordinatorRunCatalogPage } from "./contracts.js";
 import { parseD65DispatchAuthorityEnvelope } from "./d65-dispatch-authority.js";
 import { COORDINATOR_COMPILED_ENTRYPOINT_ENV, resolveCoordinatorExecutable } from "./executable-resolution.js";
-import { coordinationFailureDefinition, CoordinationRuntimeError } from "./failures.js";
+import { CoordinationRuntimeError } from "./failures.js";
+import { s2CoordinationFailureClass } from "./s2-failure-taxonomy.js";
 import { activeCoordinationMigrationFreeze } from "./migration-paths.js";
 import { runCoordinatorNegotiatedTransport } from "./negotiated-transport.js";
 import { classifyCoordinatorInitialPeer, parseCoordinatorLegacyFacadeHandshake } from "./peer-classification.js";
@@ -899,14 +900,14 @@ export class CoordinatorClient {
         if (response.ok)
             return response;
         const code = coordinationErrorCode(response.error_code);
-        const definition = coordinationFailureDefinition(code);
+        const failureClass = s2CoordinationFailureClass(code);
         const message = typeof response.payload['message'] === 'string' ? response.payload['message'] : `coordinator request failed with ${code}`;
         const responseEvidence = response.payload['evidence'];
         if (responseEvidence !== undefined && (!Array.isArray(responseEvidence) || responseEvidence.some((entry) => typeof entry !== 'string')))
             throw new CoordinationRuntimeError('schema-mismatch', 'coordinator failure response evidence is not a string array');
         const serverEvidence = responseEvidence === undefined ? [] : responseEvidence;
         throw new CoordinationRuntimeError(code, message, [
-            `failure_class=${definition.failure_class}`,
+            `failure_class=${failureClass}`,
             ...serverEvidence.map((entry, index) => `server_evidence[${String(index)}]=${entry}`),
         ]);
     }

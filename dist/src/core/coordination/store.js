@@ -8,6 +8,8 @@ import { claimModesConflict, coordinationPathsOverlap, parseCoordinationAcquisit
 import { buildCoordinationWaitForEdges, compareCoordinationGrantPriority, coordinationOwnerKey, detectCoordinationWaitCycles, MAX_GRANT_BYPASSES, selectCoordinationDeadlockVictim } from "./deadlock.js";
 import { validateAuthoritativeCoordinationDocument, validatePlanningContradictionSubmission } from "./escalation.js";
 import { CoordinationRuntimeError } from "./failures.js";
+import { buildS2CoordinationRuntimeErrorDiagnostic } from "./s2-diagnostics.js";
+import { isS2CoordinationFailureCode, isS2FailureResponseRetryable } from "./s2-failure-taxonomy.js";
 import { assertCoordinationObservationSourceIdentity } from "./observations.js";
 import { parseIdentityFaultResolutionEvidence } from "./identity-fault-resolution-contract.js";
 import { checkCoordinationInvariants } from "./invariants.js";
@@ -2772,8 +2774,8 @@ export class CoordinatorStore {
                 ok: false,
                 committed_event_seq: null,
                 error_code: runtime.code,
-                retryable: runtime.retry_policy !== 'never',
-                payload: { message: runtime.message, evidence: runtime.evidence },
+                retryable: isS2FailureResponseRetryable(runtime.code),
+                payload: { message: runtime.message, evidence: runtime.evidence, s2_diagnostic: buildS2CoordinationRuntimeErrorDiagnostic(runtime) },
             };
         }
     }
@@ -10082,26 +10084,5 @@ export class CoordinatorStore {
     }
 }
 export function coordinationErrorCode(value) {
-    switch (value) {
-        case 'invalid-request':
-        case 'invalid-state':
-        case 'protocol-mismatch':
-        case 'schema-mismatch':
-        case 'frame-too-large':
-        case 'unauthorized-client':
-        case 'coordinator-unavailable':
-        case 'coordinator-contention':
-        case 'fenced-session':
-        case 'stale-version':
-        case 'idempotency-conflict':
-        case 'request-timeout':
-        case 'recovery-required':
-        case 'git-partial-effect':
-        case 'disk-failure':
-        case 'permission-denied':
-        case 'planning-contradiction-review':
-        case 'store-corrupt':
-        case 'system-fatal': return value;
-        default: return 'system-fatal';
-    }
+    return isS2CoordinationFailureCode(value) ? value : 'system-fatal';
 }

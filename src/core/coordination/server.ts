@@ -8,6 +8,8 @@ import { createCoordinatorAdmissionOffer, createCoordinatorAdmissionResponse, CO
 import { assertCoordinatorAdmissionAuthorityUnchanged, captureServingCoordinatorAdmissionAuthority, COORDINATOR_S1_ADMISSION_IDENTITY, type CoordinatorAdmissionAuthoritySnapshot } from './admission-runtime.ts';
 import { parseCoordinatorAdmissionTransportRequest, parseCoordinatorTransportRequest, CoordinatorFrameDecoder, writeCoordinatorResponse } from './ipc.ts';
 import { CoordinationRuntimeError } from './failures.ts';
+import { buildS2CoordinationRuntimeErrorDiagnostic } from './s2-diagnostics.ts';
+import { isS2FailureResponseRetryable } from './s2-failure-taxonomy.ts';
 import { currentBootId, isProcessAlive, predecessorCompatibleBootId, processStartIdentity } from './process-identity.ts';
 import { COORDINATOR_GRANT_OFFER_SWEEP_MS, enforcePrivateAuthorityPath, ensureCoordinatorPrivateRoots, readOrCreateCoordinatorCapability, type CoordinatorRuntimePaths } from './runtime-paths.ts';
 import { acquireSerializedProcessGuard, discardLockTombstone, quarantineExactLock, readExactLockText, restoreLockTombstone } from './serialized-lock.ts';
@@ -295,8 +297,8 @@ function errorResponse(requestId: string, error: unknown): CoordinatorResponseEn
     ok: false,
     committed_event_seq: null,
     error_code: runtime.code,
-    retryable: runtime.retry_policy !== 'never',
-    payload: { message: runtime.message, evidence: runtime.evidence },
+    retryable: isS2FailureResponseRetryable(runtime.code),
+    payload: { message: runtime.message, evidence: runtime.evidence, s2_diagnostic: buildS2CoordinationRuntimeErrorDiagnostic(runtime) },
   };
 }
 
