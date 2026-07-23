@@ -25,5 +25,6 @@
     "forceConsistentCasingInFileNames": true,
     "types": []
   },
-  "include": ["extensions/**/*.ts", "src/**/*.ts", "tests/**/*.ts", "tools/**/*.ts"]
+  "include": ["extensions/**/*.ts", "src/**/*.ts", "tests/**/*.ts", "tools/**/*.ts"],
+  "exclude": ["tests/fixtures/roster/w0-v1-source-pins/**/*.ts"]
 }

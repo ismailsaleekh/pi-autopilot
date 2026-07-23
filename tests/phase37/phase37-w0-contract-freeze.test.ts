@@ -41,6 +41,7 @@ const manifestSidecarPath = resolve(repoRoot, 'design', 'phase37', 'roster-contr
 const definitionsSidecarPath = resolve(repoRoot, 'design', 'phase37', 'roster-contract-definitions.v1.sha256');
 const fixturesSidecarPath = resolve(repoRoot, 'design', 'phase37', 'roster-acceptance-fixtures.v1.sha256');
 const freezeDocPath = resolve(repoRoot, 'PHASE37_ROSTER_CONTRACT_FREEZE.md');
+const w0V1SourcePinsDir = resolve(repoRoot, 'tests', 'fixtures', 'roster', 'w0-v1-source-pins');
 
 const FREEZE_ID = 'phase37-roster-w0-2026-07-22';
 const CANONICAL_ALGORITHM = 'autopilot.phase37.canonical-json.sha256.v1';
@@ -519,6 +520,10 @@ function sha256Bytes(text: string): string {
   return sha256Text(text);
 }
 
+function sha256RawBytes(bytes: Uint8Array): string {
+  return `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
+}
+
 function omitField(object: JsonObject, field: string): JsonObject {
   const result: { [key: string]: JsonValue } = {};
   for (const key of Object.keys(object)) {
@@ -869,12 +874,17 @@ function detectRefCycles(graph: ReadonlyMap<string, readonly string[]>, schemaNa
 function validateSourcePins(): void {
   const pins = objectAt(definitions, 'current_v1_source_pins', 'definitions');
   exactKeys(pins, ['types_ts', 'schemas_ts', 'validate_ts', 'v1_immutability'], 'definitions.current_v1_source_pins');
-  for (const key of ['types_ts', 'schemas_ts', 'validate_ts']) {
+  const fixtureNames = new Map([
+    ['types_ts', 'types.ts'],
+    ['schemas_ts', 'schemas.ts'],
+    ['validate_ts', 'validate.ts'],
+  ] as const);
+  for (const [key, fixtureName] of fixtureNames) {
     const pin = objectAt(pins, key, 'definitions.current_v1_source_pins');
     exactKeys(pin, ['path', 'sha256'], `definitions.current_v1_source_pins.${key}`);
     const relativePath = stringAt(pin, 'path', `definitions.current_v1_source_pins.${key}`);
-    assert.ok(relativePath.startsWith('src/core/contracts/'), `${key} must pin the current contracts source`);
-    const digest = sha256Text(readFileSync(resolve(repoRoot, relativePath), 'utf8'));
+    assert.equal(relativePath, `src/core/contracts/${fixtureName}`, `${key} must pin its freeze-time contracts source path`);
+    const digest = sha256RawBytes(readFileSync(resolve(w0V1SourcePinsDir, fixtureName)));
     assert.equal(digest, stringAt(pin, 'sha256', `definitions.current_v1_source_pins.${key}`));
   }
   const immutability = stringAt(pins, 'v1_immutability', 'definitions.current_v1_source_pins');

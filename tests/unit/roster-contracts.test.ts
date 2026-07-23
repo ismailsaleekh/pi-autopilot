@@ -10,6 +10,7 @@ import {
   AUTOPILOT_ROSTER_SCHEMA_VERSION_VALUES,
   AutopilotRosterContractValidationError,
   computeAutopilotRosterContractObjectHash,
+  parseAutopilotReceipt,
   parseAutopilotReceiptV2,
   parseAutopilotRoster,
   parseAutopilotRosterCandidateSet,
@@ -18,7 +19,9 @@ import {
   parseAutopilotRosterContractJson,
   parseAutopilotUnitSpec,
   parseAutopilotUnitSpecV2,
+  type AutopilotReceipt,
   type AutopilotRosterContractSchemaVersion,
+  type AutopilotUnitSpec,
 } from '../../src/core/contracts/index.ts';
 import { AUTOPILOT_SCHEMA_NAMES } from '../../src/core/names.ts';
 
@@ -41,6 +44,72 @@ void describe('Phase 37 roster contract parsers', () => {
     );
     assert.equal(objectAt(AUTOPILOT_JSON_SCHEMAS.unitSpecV2, 'properties')['schema_version'] !== undefined, true);
     assert.equal(objectAt(AUTOPILOT_JSON_SCHEMAS.receiptV2, 'properties')['schema_version'] !== undefined, true);
+  });
+
+  void it('keeps v1 unit spec and receipt contracts stable while W1 roster contracts are additive', () => {
+    const unitSpecProperties = objectAt(objectAt(AUTOPILOT_JSON_SCHEMAS.unitSpec, 'properties'), 'schema_version');
+    assert.deepEqual(unitSpecProperties, { const: 'autopilot.unit_spec.v1' });
+    assert.equal(AUTOPILOT_JSON_SCHEMAS.unitSpec['additionalProperties'], false);
+    assert.deepEqual(arrayAt(AUTOPILOT_JSON_SCHEMAS.unitSpec, 'required'), [
+      'schema_version',
+      'workstream',
+      'unit_id',
+      'role',
+      'template',
+      'attempt',
+      'objective',
+      'cwd',
+      'model',
+      'thinking',
+      'owned_paths',
+      'read_only_paths',
+      'untouchable_paths',
+      'context_refs',
+      'validation_commands',
+      'status_output',
+      'receipt_output',
+      'evidence_dir',
+      'stop_boundary',
+    ]);
+    assert.equal(objectAt(AUTOPILOT_JSON_SCHEMAS.unitSpec, 'properties')['request_profile'], undefined);
+    assert.equal(objectAt(AUTOPILOT_JSON_SCHEMAS.unitSpec, 'properties')['roster_id'], undefined);
+
+    const receiptSchemaVersion = objectAt(objectAt(AUTOPILOT_JSON_SCHEMAS.receipt, 'properties'), 'schema_version');
+    assert.deepEqual(receiptSchemaVersion, { const: 'autopilot.receipt.v1' });
+    assert.equal(AUTOPILOT_JSON_SCHEMAS.receipt['additionalProperties'], false);
+    assert.deepEqual(arrayAt(AUTOPILOT_JSON_SCHEMAS.receipt, 'required'), [
+      'schema_version',
+      'tool_name',
+      'workstream',
+      'unit_id',
+      'role',
+      'attempt',
+      'emitted_at',
+      'status_output',
+      'status_sha256',
+      'schema_sha256',
+      'tool_call_id',
+      'provider_identity',
+      'expected_identity_hash',
+    ]);
+    assert.equal(objectAt(AUTOPILOT_JSON_SCHEMAS.receipt, 'properties')['request_profile'], undefined);
+    assert.equal(objectAt(AUTOPILOT_JSON_SCHEMAS.receipt, 'properties')['observed_profile'], undefined);
+    assert.equal(objectAt(AUTOPILOT_JSON_SCHEMAS.receipt, 'properties')['roster_id'], undefined);
+
+    const unitV1 = legacyUnitSpecV1();
+    assert.equal(parseAutopilotUnitSpec(unitV1).schema_version, 'autopilot.unit_spec.v1');
+    assert.throws(() => parseAutopilotUnitSpec({ ...unitV1, request_profile: {} }), /unexpected property "request_profile"/u);
+    assert.throws(() => parseAutopilotUnitSpec({ ...unitV1, roster_id: 'roster-1' }), /unexpected property "roster_id"/u);
+
+    const receiptV1 = legacyReceiptV1();
+    assert.equal(parseAutopilotReceipt(receiptV1).schema_version, 'autopilot.receipt.v1');
+    assert.throws(() => parseAutopilotReceipt({ ...receiptV1, request_profile: {} }), /unexpected property "request_profile"/u);
+    assert.throws(() => parseAutopilotReceipt({ ...receiptV1, observed_profile: {} }), /unexpected property "observed_profile"/u);
+
+    assert.ok(AUTOPILOT_ROSTER_SCHEMA_VERSION_VALUES.includes('autopilot.unit_spec.v2'));
+    assert.ok(AUTOPILOT_ROSTER_SCHEMA_VERSION_VALUES.includes('autopilot.receipt.v2'));
+    assert.equal(objectAt(AUTOPILOT_JSON_SCHEMAS.unitSpecV2, 'properties')['request_profile'] !== undefined, true);
+    assert.equal(objectAt(AUTOPILOT_JSON_SCHEMAS.receiptV2, 'properties')['observed_profile'] !== undefined, true);
   });
 
   void it('accepts sealed positive objects across route, recipe, roster, setup, config, selection, and candidate contracts', () => {
@@ -131,6 +200,54 @@ void describe('Phase 37 roster contract parsers', () => {
     );
   });
 });
+
+function legacyUnitSpecV1(): AutopilotUnitSpec {
+  return {
+    schema_version: 'autopilot.unit_spec.v1',
+    workstream: 'phase37-w1',
+    unit_id: 'legacy-v1-validate',
+    role: 'validate',
+    template: 'validate',
+    attempt: 1,
+    objective: 'Validate that v1 unit specs remain frozen.',
+    cwd: '/tmp/phase37-w1-worktree',
+    model: 'openai-codex/gpt-5.6-sol',
+    thinking: 'xhigh',
+    owned_paths: [],
+    read_only_paths: ['src/core/contracts/types.ts'],
+    untouchable_paths: [],
+    context_refs: [],
+    validation_commands: ['npm run typecheck'],
+    status_output: '/tmp/phase37-w1-worktree/.pi/autopilot/phase37-w1/statuses/legacy-v1-validate.json',
+    receipt_output: '/tmp/phase37-w1-worktree/.pi/autopilot/phase37-w1/receipts/legacy-v1-validate.json',
+    evidence_dir: '/tmp/phase37-w1-worktree/.pi/autopilot/phase37-w1/evidence/legacy-v1-validate',
+    stop_boundary: 'Stop after focused validation.',
+  };
+}
+
+function legacyReceiptV1(): AutopilotReceipt {
+  return {
+    schema_version: 'autopilot.receipt.v1',
+    tool_name: 'autopilot_emit_status',
+    workstream: 'phase37-w1',
+    unit_id: 'legacy-v1-validate',
+    role: 'validate',
+    attempt: 1,
+    emitted_at: '2026-07-22T12:00:00.000Z',
+    status_output: '/tmp/phase37-w1-worktree/.pi/autopilot/phase37-w1/statuses/legacy-v1-validate.json',
+    status_sha256: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    schema_sha256: 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+    tool_call_id: 'call-legacy-v1-validate',
+    provider_identity: {
+      provider_id: 'openai-codex',
+      requested_model_id: 'gpt-5.6-sol',
+      executed_model_id: 'gpt-5.6-sol',
+      api: 'openai-codex-responses',
+      thinking_level: 'xhigh',
+    },
+    expected_identity_hash: 'sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
+  };
+}
 
 function buildProfilePair(): {
   readonly requestProfile: Record<string, unknown>;
