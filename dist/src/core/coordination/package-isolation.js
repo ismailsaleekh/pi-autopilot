@@ -49,6 +49,7 @@ export async function scanStandalonePackageBoundary(packageRoot, options = {}) {
         'extensions',
         'bin',
         'templates',
+        'tools/s2-corpus-rehearsal',
         ...(options.includeTests === true ? ['tests'] : []),
         'package.json',
         'README.md',

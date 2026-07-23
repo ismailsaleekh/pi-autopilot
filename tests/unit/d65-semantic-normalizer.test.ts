@@ -12,6 +12,7 @@ import {
   type D65AcceptedEventResultJoin,
 } from '../../src/core/coordination/d65-semantic-version.ts';
 
+const RUN = { schema_version: 'autopilot.coordination_run.v2', repo_id: 'repo-1', workstream_run: 'run-1', autopilot_id: 'auto-1', workstream: 'workstream-1', status: 'running', active_session_generation: 1, coordination_authority: 'coordinator-edit-leases-v1', created_event_seq: 1, version: 2 } as const;
 const SESSION = { schema_version: 'autopilot.session_lease.v2', session_lease_id: 'session-1', repo_id: 'repo-1', workstream_run: 'run-1', session_id: 'physical-1', session_generation: 1, pid: 101, boot_id: 'boot-1', lease_expires_at: '2026-07-21T00:15:00.000Z', attachment_kind: 'dispatch', status: 'attached', attached_event_seq: 2, version: 2 } as const;
 const CHILD = { schema_version: 'autopilot.child_lease.v1', child_lease_id: 'child-1', owner: { repo_id: 'repo-1', autopilot_id: 'auto-1', workstream_run: 'run-1', unit_id: 'unit-1', attempt: 1 }, pid: 102, boot_id: 'boot-2', lease_expires_at: '2026-07-21T00:15:00.000Z', status: 'running', terminal_evidence: null, version: 2 } as const;
 
@@ -48,6 +49,11 @@ void describe('D65 semantic-version event/result normalization', () => {
     const result = joined().result;
     if (result === null) throw new Error('semantic event fixture omitted result');
     assert.throws(() => computeD65SemanticVersionCounts([joined({ result: { ...result, request_sha256: `sha256:${'f'.repeat(64)}` } })], 3), /does not match repo, sequence, idempotency key, and request SHA-256 exactly/u);
+  });
+
+  void it('rejects generic result metadata contradictions before primary owner normalization', () => {
+    const event = joined({ event_type: 'run-attached', entity_type: 'run', entity_id: 'run-1', result: { repo_id: 'repo-1', idempotency_key: 'heartbeat-1', request_sha256: `sha256:${'a'.repeat(64)}`, committed_event_seq: 3, payload: { run: RUN, event_type: 'session-detached', entity_type: 'session-lease', entity_id: 'forged-session' } } });
+    assert.throws(() => d65SemanticEventWorkstreamRuns(event), /generic metadata disagrees/u);
   });
 
   void it('resolves the production primary owner instead of borrowing a related foreign run identity', () => {

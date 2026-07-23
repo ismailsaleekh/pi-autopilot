@@ -228,6 +228,30 @@
     ]
   },
   "source_to_docs": {
+    "bin/autopilot-s2-corpus-rehearsal.mjs": [
+      "tools/s2-corpus-rehearsal"
+    ],
+    "scripts/check-package-payload.mjs": [
+      "operations/release-certification"
+    ],
+    "scripts/check-production-git-spawns.mjs": [
+      "operations/release-certification"
+    ],
+    "scripts/generate-sbom.mjs": [
+      "operations/release-certification"
+    ],
+    "scripts/run-certified-command.mjs": [
+      "operations/release-certification"
+    ],
+    "scripts/security-scan.mjs": [
+      "operations/release-certification"
+    ],
+    "scripts/test-packed-consumer-release.mjs": [
+      "operations/release-certification"
+    ],
+    "scripts/verify-packed-consumer.mjs": [
+      "operations/release-certification"
+    ],
     "src/cli/autopilot-agent-run.ts": [
       "cli/autopilot-agent-run"
     ],
@@ -267,12 +291,99 @@
     "src/core/coordination/admission.ts": [
       "subsystems/coordination"
     ],
+    "src/core/coordination/client.ts": [
+      "subsystems/coordination"
+    ],
+    "src/core/coordination/d65-dispatch-authority.ts": [
+      "concepts/dispatch-and-recovery-authority"
+    ],
+    "src/core/coordination/d65-dispatch-gate.ts": [
+      "concepts/d65-terminal-tail",
+      "concepts/dispatch-and-recovery-authority"
+    ],
+    "src/core/coordination/d65-dispatch-predicates.ts": [
+      "concepts/dispatch-and-recovery-authority"
+    ],
+    "src/core/coordination/d65-first-complete-graph.ts": [
+      "concepts/semantic-graph-authority"
+    ],
+    "src/core/coordination/d65-graph-authority.ts": [
+      "concepts/semantic-graph-authority"
+    ],
+    "src/core/coordination/d65-graph-producer.ts": [
+      "concepts/semantic-graph-authority"
+    ],
+    "src/core/coordination/d65-graph-publication-residue.ts": [
+      "concepts/semantic-graph-authority"
+    ],
+    "src/core/coordination/d65-graph-publisher.ts": [
+      "concepts/semantic-graph-authority"
+    ],
+    "src/core/coordination/d65-graph-successor-runtime.ts": [
+      "concepts/d65-terminal-tail"
+    ],
+    "src/core/coordination/d65-graph-successor.ts": [
+      "concepts/d65-terminal-tail",
+      "concepts/semantic-graph-authority"
+    ],
+    "src/core/coordination/d65-heartbeat-gate.ts": [
+      "concepts/dispatch-and-recovery-authority"
+    ],
+    "src/core/coordination/d65-heartbeat-high-water.ts": [
+      "concepts/dispatch-and-recovery-authority"
+    ],
+    "src/core/coordination/d65-launch-policy.ts": [
+      "concepts/dispatch-and-recovery-authority"
+    ],
+    "src/core/coordination/d65-runtime-dispatch.ts": [
+      "concepts/dispatch-and-recovery-authority"
+    ],
+    "src/core/coordination/d65-semantic-graph.ts": [
+      "concepts/d65-terminal-tail",
+      "concepts/semantic-graph-authority"
+    ],
+    "src/core/coordination/d65-terminal-intent.ts": [
+      "concepts/d65-terminal-tail"
+    ],
     "src/core/coordination/deadlock.ts": [
       "concepts/deadlock",
       "subsystems/coordination"
     ],
     "src/core/coordination/index.ts": [
       "subsystems/coordination"
+    ],
+    "src/core/coordination/invariants.ts": [
+      "subsystems/coordination"
+    ],
+    "src/core/coordination/peer-classification.ts": [
+      "subsystems/coordination"
+    ],
+    "src/core/coordination/runtime-constants.ts": [
+      "subsystems/coordination"
+    ],
+    "src/core/coordination/s2-owned-gc.ts": [
+      "subsystems/s2-retention"
+    ],
+    "src/core/coordination/s2-retention-archive.ts": [
+      "subsystems/s2-retention"
+    ],
+    "src/core/coordination/s2-retention-policy.ts": [
+      "subsystems/s2-retention"
+    ],
+    "src/core/coordination/s2-retention-state-machine.ts": [
+      "subsystems/s2-retention"
+    ],
+    "src/core/coordination/store.ts": [
+      "subsystems/coordination"
+    ],
+    "src/core/coordination/terminal-attempt-proof.ts": [
+      "concepts/d65-terminal-tail"
+    ],
+    "src/core/coordination/unavailable-recovery.ts": [
+      "concepts/dispatch-and-recovery-authority"
+    ],
+    "src/core/coordination/unit-failure-producer-provenance.ts": [
+      "subsystems/runner-and-forced-output"
     ],
     "src/core/disk-gate.ts": [
       "subsystems/worktrees"
@@ -433,6 +544,18 @@
     ],
     "templates/skills/autopilot-roster-setup/payload.json": [
       "subsystems/roster-onboarding"
+    ],
+    "tools/s2-corpus-rehearsal/candidate-worker.ts": [
+      "tools/s2-corpus-rehearsal"
+    ],
+    "tools/s2-corpus-rehearsal/cli.ts": [
+      "tools/s2-corpus-rehearsal"
+    ],
+    "tools/s2-corpus-rehearsal/contracts.ts": [
+      "tools/s2-corpus-rehearsal"
+    ],
+    "tools/s2-corpus-rehearsal/release-gate.ts": [
+      "tools/s2-corpus-rehearsal"
     ]
   },
   "docs": {
@@ -457,7 +580,7 @@
         "src/cli/autopilot-agent-run.ts"
       ],
       "signature_hash": "sha256:6a2b2a4d670b47bf0757d6cd542538122a0183d625023be72212d51161cfee73",
-      "body_hash": "sha256:3c1559deb04c48210b6757dccea5b763bb55e8797999e472f95f87d2dc7f8de9",
+      "body_hash": "sha256:247c9228a410e7156c9762ed3b6315024520cb445f813ffb83f331a712ca5606",
       "semantic_attestation": null
     },
     "cli/autopilot-coordinator": {
@@ -472,7 +595,7 @@
         "src/cli/autopilot-coordinator.ts"
       ],
       "signature_hash": "sha256:29d0ffebe8ddb994b739dc1176426a97f475537d0436864b7bf7c28398424d33",
-      "body_hash": "sha256:9809f7983db902d74b2203cb31ef525f45c2dc49b9a8aa076ccf609c506719a3",
+      "body_hash": "sha256:12df80672690576ea221cb3c7fe04917f545192cc058b2556c2aafec1242eb48",
       "semantic_attestation": null
     },
     "commands/autopilot": {
@@ -597,6 +720,23 @@
       "body_hash": null,
       "semantic_attestation": null
     },
+    "concepts/d65-terminal-tail": {
+      "mode": "authored",
+      "review_policy": "behavioral",
+      "stability": "evolving",
+      "covers_surfaces": [],
+      "covers_sources": [
+        "src/core/coordination/d65-dispatch-gate.ts",
+        "src/core/coordination/d65-graph-successor-runtime.ts",
+        "src/core/coordination/d65-graph-successor.ts",
+        "src/core/coordination/d65-semantic-graph.ts",
+        "src/core/coordination/d65-terminal-intent.ts",
+        "src/core/coordination/terminal-attempt-proof.ts"
+      ],
+      "signature_hash": "sha256:e739fe96e4adda1e466f01c9c993d956ab1fdb90536654a4b6297a59d967942a",
+      "body_hash": "sha256:b19dfa6600e367b80341e523d8a71038e22fd610d2fbac1f871209d51c7bfc28",
+      "semantic_attestation": "sha256:b19dfa6600e367b80341e523d8a71038e22fd610d2fbac1f871209d51c7bfc28"
+    },
     "concepts/deadlock": {
       "mode": "mixed",
       "review_policy": "behavioral",
@@ -607,7 +747,26 @@
       ],
       "signature_hash": "sha256:9766db34befae19994853481579db521d05a6e2155c560cecdbedef60e654c3c",
       "body_hash": "sha256:e2d9297fef650edd3aa669a5cb9968faa882e2e1678b7c504873c9ef3d05b5a9",
-      "semantic_attestation": null
+      "semantic_attestation": "sha256:e2d9297fef650edd3aa669a5cb9968faa882e2e1678b7c504873c9ef3d05b5a9"
+    },
+    "concepts/dispatch-and-recovery-authority": {
+      "mode": "authored",
+      "review_policy": "behavioral",
+      "stability": "evolving",
+      "covers_surfaces": [],
+      "covers_sources": [
+        "src/core/coordination/d65-dispatch-authority.ts",
+        "src/core/coordination/d65-dispatch-gate.ts",
+        "src/core/coordination/d65-dispatch-predicates.ts",
+        "src/core/coordination/d65-heartbeat-gate.ts",
+        "src/core/coordination/d65-heartbeat-high-water.ts",
+        "src/core/coordination/d65-launch-policy.ts",
+        "src/core/coordination/d65-runtime-dispatch.ts",
+        "src/core/coordination/unavailable-recovery.ts"
+      ],
+      "signature_hash": "sha256:a6fdd31a6ee98c213ebaf99a0ccb460670df6c4437997d511a53d1d685653310",
+      "body_hash": "sha256:703afd05353f9136675573856bfd173990450fd62790ae582af4616afc2b8101",
+      "semantic_attestation": "sha256:703afd05353f9136675573856bfd173990450fd62790ae582af4616afc2b8101"
     },
     "concepts/generations-and-fencing": {
       "mode": "authored",
@@ -661,6 +820,24 @@
       "body_hash": null,
       "semantic_attestation": null
     },
+    "concepts/semantic-graph-authority": {
+      "mode": "authored",
+      "review_policy": "behavioral",
+      "stability": "evolving",
+      "covers_surfaces": [],
+      "covers_sources": [
+        "src/core/coordination/d65-first-complete-graph.ts",
+        "src/core/coordination/d65-graph-authority.ts",
+        "src/core/coordination/d65-graph-producer.ts",
+        "src/core/coordination/d65-graph-publication-residue.ts",
+        "src/core/coordination/d65-graph-publisher.ts",
+        "src/core/coordination/d65-graph-successor.ts",
+        "src/core/coordination/d65-semantic-graph.ts"
+      ],
+      "signature_hash": "sha256:bc115b1298592020a7c25422a3de843eedb58469735b7df203f9f7471be6acdf",
+      "body_hash": "sha256:945f3beee556fcb0b225e2cfb0a7601acf8e70c8fda301020f6ef8a222cb0a4a",
+      "semantic_attestation": "sha256:945f3beee556fcb0b225e2cfb0a7601acf8e70c8fda301020f6ef8a222cb0a4a"
+    },
     "concepts/terminal-evidence": {
       "mode": "authored",
       "review_policy": "contract",
@@ -711,6 +888,24 @@
       "body_hash": null,
       "semantic_attestation": null
     },
+    "operations/release-certification": {
+      "mode": "authored",
+      "review_policy": "behavioral",
+      "stability": "evolving",
+      "covers_surfaces": [],
+      "covers_sources": [
+        "scripts/check-package-payload.mjs",
+        "scripts/check-production-git-spawns.mjs",
+        "scripts/generate-sbom.mjs",
+        "scripts/run-certified-command.mjs",
+        "scripts/security-scan.mjs",
+        "scripts/test-packed-consumer-release.mjs",
+        "scripts/verify-packed-consumer.mjs"
+      ],
+      "signature_hash": "sha256:ff6dc0cb79ae5ce4eda7c19477ad3f1c9bbbf94c832f5b43564814ef7401be2b",
+      "body_hash": "sha256:ff6dc0cb79ae5ce4eda7c19477ad3f1c9bbbf94c832f5b43564814ef7401be2b",
+      "semantic_attestation": "sha256:ff6dc0cb79ae5ce4eda7c19477ad3f1c9bbbf94c832f5b43564814ef7401be2b"
+    },
     "operations/start-run": {
       "mode": "authored",
       "review_policy": "contract",
@@ -756,9 +951,9 @@
         "src/core/validation-staleness.ts",
         "src/core/worktree-cleanup.ts"
       ],
-      "signature_hash": "sha256:99bf9934a571ea880c691bc98db9a98cc7932f034eb0fd27fe3eb6bb1267461c",
-      "body_hash": "sha256:490a93f489ad3b7703acfff46387ca126c8fa0786f054e7f502d84c9a1721d61",
-      "semantic_attestation": null
+      "signature_hash": "sha256:008aa231a2414d2bcb29cc62696f7587634857ea043568428bd1f286fbc446b9",
+      "body_hash": "sha256:ffdff05ff0c9cafe113c644d7a9fcd604c5a11e49f10eae452bf1ee5196b62fa",
+      "semantic_attestation": "sha256:ffdff05ff0c9cafe113c644d7a9fcd604c5a11e49f10eae452bf1ee5196b62fa"
     },
     "subsystems/contracts-and-schemas": {
       "mode": "mixed",
@@ -795,12 +990,17 @@
       ],
       "covers_sources": [
         "src/core/coordination/admission.ts",
+        "src/core/coordination/client.ts",
         "src/core/coordination/deadlock.ts",
-        "src/core/coordination/index.ts"
+        "src/core/coordination/index.ts",
+        "src/core/coordination/invariants.ts",
+        "src/core/coordination/peer-classification.ts",
+        "src/core/coordination/runtime-constants.ts",
+        "src/core/coordination/store.ts"
       ],
-      "signature_hash": "sha256:7dcfdcc868f120781150ae32025fae87d3b683d3a8f20a6a4c29665c6fafa656",
-      "body_hash": "sha256:4c39eddae3f6182bf47cfb73b4472158c477ced0099020f4a742b6812c918466",
-      "semantic_attestation": null
+      "signature_hash": "sha256:f2ccef5dd32315d6976da8c480b9f584d06e945cf776852a923f7811810c59ac",
+      "body_hash": "sha256:2c4020b8a25089c33a3db862bc1fd1b93ed65a38b3e1530eae1f1843abe85101",
+      "semantic_attestation": "sha256:2c4020b8a25089c33a3db862bc1fd1b93ed65a38b3e1530eae1f1843abe85101"
     },
     "subsystems/docs-freshness-gate": {
       "mode": "authored",
@@ -824,9 +1024,9 @@
         "src/core/quality/spec-gate.ts",
         "src/core/state-store/index.ts"
       ],
-      "signature_hash": "sha256:c602e7d05563ac3b9cbf795cc9f08a5b2ed38a9d9ad63d9444b66564187b361f",
-      "body_hash": "sha256:5cf80e60a9e7d0f7e150253e403513fe1692b7fb459aed7490302067686a0342",
-      "semantic_attestation": null
+      "signature_hash": "sha256:4364c2c6133369f29b7b1270545272492ed677c8048cb0eab4faf99a558a6408",
+      "body_hash": "sha256:1934cbfc1425b3718ced056044a3c8c7ae558b797120d69642681f05108d7290",
+      "semantic_attestation": "sha256:1934cbfc1425b3718ced056044a3c8c7ae558b797120d69642681f05108d7290"
     },
     "subsystems/roster-onboarding": {
       "mode": "mixed",
@@ -928,6 +1128,7 @@
       "covers_sources": [
         "src/core/agent-runner.ts",
         "src/core/authority.ts",
+        "src/core/coordination/unit-failure-producer-provenance.ts",
         "src/core/execution-audit/index.ts",
         "src/core/forced-output/index.ts",
         "src/core/model-roster.ts",
@@ -938,9 +1139,24 @@
         "src/core/scheduler.ts",
         "src/core/unit-failure.ts"
       ],
-      "signature_hash": "sha256:20a3ac4c9e11b91def694d023369ecd987443df7b535c420da70540ccd26c260",
-      "body_hash": "sha256:a3230fd9b5260de448a845d69f16ac87f62e99b5d9d685f11c507599b1ac18e0",
-      "semantic_attestation": null
+      "signature_hash": "sha256:8acfa22b78d0e3845a831af6c62744293cccc949d27fe4d836f1070d774dc3cf",
+      "body_hash": "sha256:45d4282adbfc80a75f2e065df39aee9f6b9f1ccd0d5cdc5653d9d45bc0dad611",
+      "semantic_attestation": "sha256:45d4282adbfc80a75f2e065df39aee9f6b9f1ccd0d5cdc5653d9d45bc0dad611"
+    },
+    "subsystems/s2-retention": {
+      "mode": "authored",
+      "review_policy": "behavioral",
+      "stability": "evolving",
+      "covers_surfaces": [],
+      "covers_sources": [
+        "src/core/coordination/s2-owned-gc.ts",
+        "src/core/coordination/s2-retention-archive.ts",
+        "src/core/coordination/s2-retention-policy.ts",
+        "src/core/coordination/s2-retention-state-machine.ts"
+      ],
+      "signature_hash": "sha256:856a8e5895cdd36461466ebd5512461b075bd756ab7e4bf76c9915236c1be5a4",
+      "body_hash": "sha256:08e81f1d945966d6a994f3fc8736fb86a8a71fe6a1365b26b6a709c61256f969",
+      "semantic_attestation": "sha256:08e81f1d945966d6a994f3fc8736fb86a8a71fe6a1365b26b6a709c61256f969"
     },
     "subsystems/worktrees": {
       "mode": "authored",
@@ -956,9 +1172,9 @@
         "src/core/parallel-runtime.ts",
         "src/core/sparse-worktree.ts"
       ],
-      "signature_hash": "sha256:82aef4645150c182b4129dfdd1de171c9d6d4fd06efc7a4290518f823633fdff",
-      "body_hash": "sha256:874523b2e29c3d6e4c0a40d2d087e62c6a930ec4fdba5a106da23a177eae4b23",
-      "semantic_attestation": null
+      "signature_hash": "sha256:82853603ad9b97c2a62ec6f2374efb085e1db7f7ae15d7af9a3d4cae2abde577",
+      "body_hash": "sha256:0de6d188e0e64507e2aa95f2401cca2bb95801d4a6a5af96e83fc9e95f4cd70d",
+      "semantic_attestation": "sha256:0de6d188e0e64507e2aa95f2401cca2bb95801d4a6a5af96e83fc9e95f4cd70d"
     },
     "tools/autopilot_emit_status": {
       "mode": "authored",
@@ -1012,6 +1228,22 @@
       ],
       "signature_hash": "sha256:4e147d6b32a3a88923a3b886d262a4384fb0dcd17c2d53412f2cf73e047c54f4",
       "body_hash": "sha256:a2d8cd38e853fafe2788e23acfa84ce775d2100fe66c38c7de4940cb7316b38d",
+      "semantic_attestation": "sha256:a2d8cd38e853fafe2788e23acfa84ce775d2100fe66c38c7de4940cb7316b38d"
+    },
+    "tools/s2-corpus-rehearsal": {
+      "mode": "authored",
+      "review_policy": "contract",
+      "stability": "evolving",
+      "covers_surfaces": [],
+      "covers_sources": [
+        "bin/autopilot-s2-corpus-rehearsal.mjs",
+        "tools/s2-corpus-rehearsal/candidate-worker.ts",
+        "tools/s2-corpus-rehearsal/cli.ts",
+        "tools/s2-corpus-rehearsal/contracts.ts",
+        "tools/s2-corpus-rehearsal/release-gate.ts"
+      ],
+      "signature_hash": "sha256:f7b6666a7b28d36bc08b51ced39179e15caef80980fbcc704453e436a50c843e",
+      "body_hash": "sha256:08e9fcf3aae2dcf615efadf80096a623e14c1994035a9be392e75c482a05087b",
       "semantic_attestation": null
     },
     "troubleshooting/failures": {

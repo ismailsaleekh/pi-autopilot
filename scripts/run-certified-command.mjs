@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { closeSync, constants, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync, writeSync } from 'node:fs';
-import { EOL, platform, release, type as osType } from 'node:os';
+import { chmodSync, closeSync, constants, existsSync, fsyncSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync, writeSync } from 'node:fs';
+import { EOL, platform, release, tmpdir, type as osType } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -209,9 +209,19 @@ async function run() {
   const reportPath = join(evidenceRoot, `${args.id}.json`);
   if (existsSync(reportPath)) fail(`evidence report already exists: ${reportPath}`);
   const credentialProof = assertNoMeteredCredentials();
-  const runtimeRoot = join(evidenceRoot, `.runtime-${args.id}-${String(process.pid)}-${randomUUID()}`);
-  mkdirSync(runtimeRoot, { mode: 0o700 });
-  mkdirSync(join(runtimeRoot, 'home'), { mode: 0o700 });
+  // Darwin limits AF_UNIX paths to 103 bytes. Certification evidence roots are
+  // intentionally operator-selected absolute paths and may be long, so nesting
+  // TMPDIR below evidence can make production coordinator sockets unbindable.
+  // Keep the private ephemeral runtime in a short system-temporary root while
+  // all durable reports/logs remain in the externally sealed evidence root.
+  const runtimeParent = platform() === 'darwin' ? '/tmp' : tmpdir();
+  const runtimePath = mkdtempSync(join(runtimeParent, `apc-${args.id.slice(0, 12)}-`));
+  try {
+    const runtimeRoot = realpathSync(runtimePath);
+    chmodSync(runtimeRoot, 0o700);
+    exactMode(runtimeRoot, 0o700);
+    if (under(packageRoot, runtimeRoot) || under(runtimeRoot, packageRoot)) fail('ephemeral runtime root must stay outside the candidate clone');
+    mkdirSync(join(runtimeRoot, 'home'), { mode: 0o700 });
   mkdirSync(join(runtimeRoot, 'tmp'), { mode: 0o700 });
   mkdirSync(join(runtimeRoot, 'npm-cache'), { mode: 0o700 });
   const candidateBefore = candidateSeal(join(runtimeRoot, 'home'));
@@ -359,8 +369,11 @@ async function run() {
   const dirFd = openSync(evidenceRoot, constants.O_RDONLY);
   fsyncSync(dirFd);
   closeSync(dirFd);
-  process.stdout.write(`${JSON.stringify({ id: args.id, report: reportPath, passed: report.passed })}\n`);
-  if (!report.passed) process.exitCode = 1;
+    process.stdout.write(`${JSON.stringify({ id: args.id, report: reportPath, passed: report.passed })}\n`);
+    if (!report.passed) process.exitCode = 1;
+  } finally {
+    if (existsSync(runtimePath)) rmSync(runtimePath, { recursive: true, force: false });
+  }
 }
 
 run().catch((error) => {

@@ -69,16 +69,15 @@ const loader=new sdk.DefaultResourceLoader({
 });
 await loader.reload();
 const loaded=loader.getExtensions();
-const auth=sdk.AuthStorage.create(join(agentDir,'auth.json'));
-const registry=sdk.ModelRegistry.inMemory(auth);
+const modelRuntime=await sdk.ModelRuntime.create({authPath:join(agentDir,'auth.json'),modelsPath:join(agentDir,'models.json')});
+const registry=new sdk.ModelRegistry(modelRuntime);
 const created=await sdk.createAgentSession({
   cwd:projectRoot,
   agentDir,
   resourceLoader:loader,
   sessionManager:sdk.SessionManager.inMemory(projectRoot),
   settingsManager:sdk.SettingsManager.inMemory(),
-  authStorage:auth,
-  modelRegistry:registry,
+  modelRuntime,
   noTools:'builtin',
 });
 const session=created.session;

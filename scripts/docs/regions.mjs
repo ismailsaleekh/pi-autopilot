@@ -108,7 +108,7 @@ export function renderTools(surfaces) {
 }
 
 export function renderClis(surfaces) {
-  const runner = `\`${surfaces.runnerBin} [--dry-run] [--json] [--pi-executable <path>] <unit-spec.json>\``;
+  const runner = surfaces.runnerInvocations.map((invocation) => `\`${invocation}\``).join('<br>');
   const coordinator = `\`${surfaces.coordinatorBin} ${surfaces.coordinatorSubcommands.join('|')}\``;
   return table(['CLI', 'Invocation'], [
     [`\`${surfaces.runnerBin}\``, runner],

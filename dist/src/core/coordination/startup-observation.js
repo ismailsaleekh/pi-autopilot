@@ -4,7 +4,8 @@ import { mkdir, open, readdir, rename, rm, stat, writeFile } from 'node:fs/promi
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { assertPrivatePathNoAliases } from "../private-path.js";
 import { COORDINATOR_COMPILED_ENTRYPOINT_ENV } from "./executable-resolution.js";
-import { COORDINATION_FAILURE_CODES, CoordinationRuntimeError, coordinationFailureDefinition, formatCoordinationRuntimeError, sanitizeCoordinationDiagnosticText } from "./failures.js";
+import { CoordinationRuntimeError, formatCoordinationRuntimeError, sanitizeCoordinationDiagnosticText } from "./failures.js";
+import { isS2CoordinationFailureCode, s2CoordinationFailureClass } from "./s2-failure-taxonomy.js";
 import { isExactProcessAlive } from "./process-identity.js";
 import { enforcePrivateAuthorityPath, ensureCoordinatorPrivateRoots } from "./runtime-paths.js";
 import { readExactLockText } from "./serialized-lock.js";
@@ -14,7 +15,6 @@ export const COORDINATOR_STARTUP_ATTEMPT_ID_ENV = 'AUTOPILOT_COORDINATOR_STARTUP
 export const COORDINATOR_STARTUP_REPORT_SCHEMA = 'autopilot.coordinator_startup_report.v1';
 const STARTUP_REPORT_MAX_BYTES = 32 * 1024;
 const STARTUP_REPORT_RETENTION = 64;
-const STARTUP_FAILURE_CLASSES = ['client-invalid', 'retryable-contention', 'fenced-client', 'owned-recovery', 'contradiction-review', 'system-fatal'];
 export const COORDINATOR_STARTUP_PHASES = [
     'bootstrap/import',
     'before-lifecycle-election',
@@ -204,7 +204,7 @@ export async function createCoordinatorStartupObserver(paths, attemptId, env = p
             lifecycle: lifecycle === null ? null : safeLifecycle(lifecycle),
             error: bounded?.text ?? null,
             failure_code: error instanceof CoordinationRuntimeError ? error.code : null,
-            failure_class: error instanceof CoordinationRuntimeError ? error.failure_class : null,
+            failure_class: error instanceof CoordinationRuntimeError ? s2CoordinationFailureClass(error.code) : null,
             diagnostics_truncated: bounded?.truncated ?? false,
             omitted_code_points: bounded?.omitted ?? 0,
             updated_at: new Date().toISOString(),
@@ -261,11 +261,11 @@ export function readCoordinatorStartupReport(path, expectedAttemptId) {
         const phase = report['phase'];
         const outcome = report['outcome'];
         const selectedCompiledEntrypoint = report['selected_compiled_entrypoint'];
-        if (report['schema_version'] !== COORDINATOR_STARTUP_REPORT_SCHEMA || report['attempt_id'] !== expectedAttemptId || typeof report['spawned_pid'] !== 'number' || !Number.isSafeInteger(report['spawned_pid']) || report['spawned_pid'] < 1 || typeof phase !== 'string' || !COORDINATOR_STARTUP_PHASES.includes(phase) || (outcome !== 'running' && outcome !== 'ready' && outcome !== 'election-loser' && outcome !== 'failed') || (selectedCompiledEntrypoint !== null && (typeof selectedCompiledEntrypoint !== 'string' || !isAbsolute(selectedCompiledEntrypoint))) || typeof report['exact_competing_lifecycle_owner_observed'] !== 'boolean' || (report['error'] !== null && typeof report['error'] !== 'string') || (report['failure_code'] !== null && (typeof report['failure_code'] !== 'string' || !COORDINATION_FAILURE_CODES.includes(report['failure_code']))) || (report['failure_class'] !== null && (typeof report['failure_class'] !== 'string' || !STARTUP_FAILURE_CLASSES.includes(report['failure_class']))) || typeof report['diagnostics_truncated'] !== 'boolean' || typeof report['omitted_code_points'] !== 'number' || !Number.isSafeInteger(report['omitted_code_points']) || report['omitted_code_points'] < 0 || typeof report['updated_at'] !== 'string')
+        if (report['schema_version'] !== COORDINATOR_STARTUP_REPORT_SCHEMA || report['attempt_id'] !== expectedAttemptId || typeof report['spawned_pid'] !== 'number' || !Number.isSafeInteger(report['spawned_pid']) || report['spawned_pid'] < 1 || typeof phase !== 'string' || !COORDINATOR_STARTUP_PHASES.includes(phase) || (outcome !== 'running' && outcome !== 'ready' && outcome !== 'election-loser' && outcome !== 'failed') || (selectedCompiledEntrypoint !== null && (typeof selectedCompiledEntrypoint !== 'string' || !isAbsolute(selectedCompiledEntrypoint))) || typeof report['exact_competing_lifecycle_owner_observed'] !== 'boolean' || (report['error'] !== null && typeof report['error'] !== 'string') || (report['failure_code'] !== null && !isS2CoordinationFailureCode(report['failure_code'])) || (report['failure_class'] !== null && typeof report['failure_class'] !== 'string') || typeof report['diagnostics_truncated'] !== 'boolean' || typeof report['omitted_code_points'] !== 'number' || !Number.isSafeInteger(report['omitted_code_points']) || report['omitted_code_points'] < 0 || typeof report['updated_at'] !== 'string')
             return null;
         const failureCode = report['failure_code'];
         const failureClass = report['failure_class'];
-        if ((failureCode === null) !== (failureClass === null) || (failureCode !== null && coordinationFailureDefinition(failureCode).failure_class !== failureClass))
+        if ((failureCode === null) !== (failureClass === null) || (failureCode !== null && s2CoordinationFailureClass(failureCode) !== failureClass))
             return null;
         const lifecycleValue = report['lifecycle'];
         let lifecycleIdentity = null;

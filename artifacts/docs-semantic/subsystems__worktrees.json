@@ -1,0 +1,19 @@
+{
+  "schema_version": "autopilot.docs_semantic_attestation.v2",
+  "doc_id": "subsystems/worktrees",
+  "reviewed_body_hash": "sha256:0de6d188e0e64507e2aa95f2401cca2bb95801d4a6a5af96e83fc9e95f4cd70d",
+  "reviewed_doc_sha256": "sha256:aa46919672204826789ea268e8af7692e4339bc70f262895622f94f73217f4fc",
+  "covers_sources": [
+    "src/core/checkout-profile.ts",
+    "src/core/disk-gate.ts",
+    "src/core/git-guard.ts",
+    "src/core/git-process.ts",
+    "src/core/materialization.ts",
+    "src/core/parallel-runtime.ts",
+    "src/core/sparse-worktree.ts"
+  ],
+  "verdict": "PASS",
+  "reviewer": "openai-codex/gpt-5.5 Pi subscription merge adjudicator (offline semantic review)",
+  "reviewed_at": "2026-07-23T10:59:09.000Z",
+  "notes": "PASS P0=0 P1=0 P2=0. Reviewed docs/subsystems/worktrees.md against parallel-runtime, sparse-worktree, checkout-profile, disk-gate, materialization, git-guard, and git-process sources after S2 merge: sparse --no-checkout plus sparse-checkout set --no-cone, streaming NUL ls-tree sizing, per-run S2 pressure pause/recheck, D65 ordinary/recovery boundaries, guarded Git process, and exact run-owned worktree cleanup contracts match current code."
+}

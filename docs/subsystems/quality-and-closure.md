@@ -9,8 +9,9 @@ covers_sources:
   - src/core/adjudication/index.ts
   - src/core/lifecycle/index.ts
   - src/core/state-store/index.ts
-signature_hash: 'sha256:c602e7d05563ac3b9cbf795cc9f08a5b2ed38a9d9ad63d9444b66564187b361f'
-body_hash: 'sha256:5cf80e60a9e7d0f7e150253e403513fe1692b7fb459aed7490302067686a0342'
+signature_hash: 'sha256:4364c2c6133369f29b7b1270545272492ed677c8048cb0eab4faf99a558a6408'
+body_hash: 'sha256:1934cbfc1425b3718ced056044a3c8c7ae558b797120d69642681f05108d7290'
+semantic_attestation: 'sha256:1934cbfc1425b3718ced056044a3c8c7ae558b797120d69642681f05108d7290'
 stability: stable
 ---
 
@@ -25,7 +26,7 @@ durable state store.
 
 | Concern | Source |
 |---|---|
-| Perfect-quality contract rendered into prompts | `src/core/quality/contract.ts` |
+| Perfect-quality contract rules + render helpers | `src/core/quality/contract.ts` |
 | Deterministic pre-spend spec-quality gate | `src/core/quality/spec-gate.ts` |
 | Scope + protected-path adjudication | `src/core/adjudication/index.ts` |
 | Work-item lifecycle + closure gate | `src/core/lifecycle/index.ts` |
@@ -33,26 +34,51 @@ durable state store.
 
 ## Perfect-quality doctrine
 
-Parent and child prompts embed the package-owned contract: no band-aids, hacks, silent
+`src/core/quality/contract.ts` defines the package-owned contract and its render helpers
+(`renderAutopilotPerfectQualityRules`, `renderAutopilotPerfectQualityParagraph`); the
+prompt renderer (documented in
+[runner-and-forced-output.md](runner-and-forced-output.md)) embeds them into parent and
+child prompts: no band-aids, hacks, silent
 fallbacks, fake-green tests, fixture tampering, deferred consumers, or source-changing
 self-certification. If correct work needs more scope, Autopilot records and routes the
 exception instead of hiding it behind a green status.
 
 ## Work-item lifecycle
 
-Source-changing work stays in `transport-complete`, `audit-review`, or
-`validation-ready` until execution audits are clean/adjudicated and each source-changing
-work item has its own referenced independent validation PASS. Transport success (a valid
-`DONE`/`PASS` carrier) is deliberately separated from semantic closure.
+After transport, `nextAutopilotWorkItemStateAfterTransport` moves source-changing work to
+`validation-ready` (when its execution audit is `clean`) or `audit-review` (otherwise);
+only non-source-changing work goes straight to `closed`.
+`nextAutopilotWorkItemStateAfterValidation` then advances a `validate`/`bughunt` status
+to `closed` on a `PASS` verdict, `needs-fix` on `NEEDS_FIX`, and `audit-review` for any
+other verdict; a status whose role is neither `validate` nor `bughunt` leaves the work
+item's state unchanged. Transport success is therefore deliberately
+separated from semantic closure: a source-changing item is never `closed` by transport
+alone — it must pass its own referenced independent validation with clean/adjudicated
+audits first.
 
 ## Closure gate
 
-The closure gate rejects:
+`evaluateAutopilotClosureGate` rejects closure while:
 
-- unresolved scope/protected-path exceptions,
-- missing per-work-item independent validation,
-- missing final bughunt proof for high-risk or multi-lane work,
-- an unclean or unadjudicated execution audit.
+- any running unit remains (`state.running.length > 0`),
+- there are unresolved scope/protected-path exceptions,
+- any source-changing execution audit exists but there are no source-changing work items
+  to carry independent validation refs,
+- any **source-changing** work item is not yet `closed`, or fails
+  `sourceChangingWorkItemValidationBlockers` — which requires a `validation_unit_id` and
+  `validation_status_ref` and then rejects self-validation, a validation id outside the
+  work item, a missing state unit, a mismatched status ref, no matching validation
+  status, or a non-`PASS` validation verdict. The audit-adjudication check below runs
+  over **all** supplied audits first; only the independent-validation requirement is
+  scoped to source-changing work items,
+- for high-risk/critical or multi-lane work, there is no `bughunt` status with a `PASS`
+  verdict **and** no decision whose event is `blocker_ruling` (either one clears this
+  check),
+- an execution audit that is not `clean` and lacks its required adjudication: a
+  `scope-review-required` audit that is not ratified, a
+  `protected-path-review-required`/`critical-protected-path-violation` audit that is not
+  resolved, or any audit with an unknown classification (rejected as "audit
+  unavailable"). A `clean` audit passes and needs no adjudication.
 
 ## Adjudication
 

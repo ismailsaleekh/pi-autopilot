@@ -8,6 +8,7 @@ covers_sources:
   - src/core/context-budget.ts
 signature_hash: 'sha256:4e147d6b32a3a88923a3b886d262a4384fb0dcd17c2d53412f2cf73e047c54f4'
 body_hash: 'sha256:a2d8cd38e853fafe2788e23acfa84ce775d2100fe66c38c7de4940cb7316b38d'
+semantic_attestation: 'sha256:a2d8cd38e853fafe2788e23acfa84ce775d2100fe66c38c7de4940cb7316b38d'
 fact_pins:
   - text: default 85% halt threshold
     symbol: 'src/core/context-budget.ts#DEFAULT_CONTEXT_HALT_PERCENT'

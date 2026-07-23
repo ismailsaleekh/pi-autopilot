@@ -1,0 +1,20 @@
+{
+  "schema_version": "autopilot.docs_semantic_attestation.v2",
+  "doc_id": "concepts/dispatch-and-recovery-authority",
+  "reviewed_body_hash": "sha256:703afd05353f9136675573856bfd173990450fd62790ae582af4616afc2b8101",
+  "reviewed_doc_sha256": "sha256:27e725b1574284f09e1230a10fcbf359a265c9706274509200a90abb4cc45504",
+  "covers_sources": [
+    "src/core/coordination/d65-dispatch-authority.ts",
+    "src/core/coordination/d65-dispatch-gate.ts",
+    "src/core/coordination/d65-dispatch-predicates.ts",
+    "src/core/coordination/d65-heartbeat-gate.ts",
+    "src/core/coordination/d65-heartbeat-high-water.ts",
+    "src/core/coordination/d65-launch-policy.ts",
+    "src/core/coordination/d65-runtime-dispatch.ts",
+    "src/core/coordination/unavailable-recovery.ts"
+  ],
+  "verdict": "PASS",
+  "reviewer": "independent Pi validate-role review (anthropic/claude-sonnet-4-5, thinking high), report /tmp/phase39-reviews/r-dispatch-recovery.md",
+  "reviewed_at": "2026-07-23T10:26:56.000Z",
+  "notes": "PASS P0=0 P1=0 P2=0. Verified cap-one launch policy (parallel_cap/expected_checkout_units/maximum_parallel_cap all 1 for v1), capacity-decision as sole raise path, total side-effect-free ordinaryDispatchAllowed/recoveryTransitionAllowed predicates, default-deny recovery cells authorizing no model/product/new-work, signed parent-loss and one-use subscription-probe recovery, and unavailable-recovery outcomes, against the 8 covered sources. Production consumes signed authority, never self-signs."
+}

@@ -46,6 +46,7 @@ pi install .
 | Understand an invariant/concept | [`docs/concepts/`](docs/concepts/leases-and-observations.md) |
 | Run a task (start/handoff/close/abort/recover) | [`docs/operations/`](docs/operations/start-run.md) |
 | Diagnose a failure | [`docs/troubleshooting/failures.md`](docs/troubleshooting/failures.md) |
+| Run private S2-D corpus rehearsal | [`docs/tools/s2-corpus-rehearsal.md`](docs/tools/s2-corpus-rehearsal.md) |
 | See runtime state layout | [`docs/runtime-state/paths.md`](docs/runtime-state/paths.md) |
 
 ## Commands
@@ -114,6 +115,13 @@ source files live.
   publication.
   → [`docs/subsystems/coordination.md`](docs/subsystems/coordination.md),
   [`docs/concepts/`](docs/concepts/admission.md)
+- **D65 semantic authority (graph / dispatch / terminal tail)** — bootstrap-signed,
+  size-bounded semantic graphs; the cap-one launch policy and default-deny recovery
+  cells; and the append-only terminal tail. Production consumes externally signed
+  authority and never signs it.
+  → [`docs/concepts/semantic-graph-authority.md`](docs/concepts/semantic-graph-authority.md),
+  [`docs/concepts/dispatch-and-recovery-authority.md`](docs/concepts/dispatch-and-recovery-authority.md),
+  [`docs/concepts/d65-terminal-tail.md`](docs/concepts/d65-terminal-tail.md)
 - **Runtime close/merge/abort** — deterministic, local-only close/abort with per-unit
   worktrees, `autopilot.unit_merge.v1` union proof, and validation staleness.
   → [`docs/subsystems/close-lifecycle.md`](docs/subsystems/close-lifecycle.md)
@@ -136,6 +144,14 @@ source files live.
 - **Verified migration + recovery** — durable, resumable, one-way migration and cutover,
   the read-only canonical preflight, and standalone production surfaces.
   → [`docs/concepts/migration-cutover.md`](docs/concepts/migration-cutover.md)
+- **S2 release hardening** — explicit versioned persisted-artifact ingress (including
+  BUG-177 `unit_failure` producer provenance), permanent bidirectional cf50/current skew
+  certification, S2 retention/owned GC/pressure lanes, and the private mutable S2-D
+  corpus rehearsal harness.
+  → [`docs/subsystems/contracts-and-schemas.md`](docs/subsystems/contracts-and-schemas.md),
+  [`docs/concepts/admission.md`](docs/concepts/admission.md),
+  [`docs/subsystems/s2-retention.md`](docs/subsystems/s2-retention.md),
+  [`docs/tools/s2-corpus-rehearsal.md`](docs/tools/s2-corpus-rehearsal.md)
 
 ## Development gate
 
@@ -143,8 +159,16 @@ source files live.
 npm run build
 npm run typecheck
 npm run test:package
+npm run test:packed-migration
+npm run test:upgrade
 npm run test:version-skew
+npm run test:s2-corpus
+npm run test:d65
 npm run test
+npm run test:certification
+npm run test:packed-consumer
+npm run docs:generate
+npm run docs:attest
 npm run docs:verify
 npm run pack:dry-run
 ```
@@ -160,7 +184,9 @@ scale/SDK/RPC/package lanes with fake-Pi witnesses; offline SDK/RPC/package gate
 full test plan is [`TEST_PLAN.md`](TEST_PLAN.md); how to run it is [`TESTING.md`](TESTING.md).
 Release QA also runs cross-platform packed installs, docs and closed-repository scans,
 `security:scan`, registry `security:audit`, deterministic CycloneDX `sbom`, and
-`payload:check`.
+`payload:check`. The exact certified-command driver, evidence-root requirements, and the
+exact-candidate certification rule are documented in
+[`docs/operations/release-certification.md`](docs/operations/release-certification.md).
 
 ## Known limitations
 

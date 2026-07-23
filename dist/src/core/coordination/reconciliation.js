@@ -5,6 +5,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { CoordinatorClient } from "./client.js";
 import { parseCoordinationReconciliationEvidence, parseOptionalCoordinationReconciliationReceipt, parseCoordinationRun } from "./contracts.js";
 import { CoordinationRuntimeError } from "./failures.js";
+import { isS2StaleVersionFailure } from "./s2-failure-taxonomy.js";
 import { readCoordinatorSessionContext } from "./supervisor.js";
 import { coordinatorRuntimePaths } from "./runtime-paths.js";
 import { classifyHistoricalUnitFailureEvidenceGeneration, parseHistoricalUnitFailureRegenerationCandidate, parseUnitAttemptTarget, validateReconciliationEvidenceDocument } from "./terminal-evidence.js";
@@ -93,7 +94,7 @@ export class RunReconciliationClient {
             response = await this.#client.mutate('record-release-evidence', this.#identity(idempotencyKey), payload);
         }
         catch (error) {
-            if (!(error instanceof CoordinationRuntimeError && error.code === 'stale-version'))
+            if (!isS2StaleVersionFailure(error))
                 throw error;
             const status = await this.#client.query('status', this.#session.repo_id, this.#session.workstream_run);
             const values = status.payload['runs'];

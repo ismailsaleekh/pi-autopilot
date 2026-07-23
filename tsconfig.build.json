@@ -9,5 +9,5 @@
     "declaration": false,
     "sourceMap": false
   },
-  "include": ["extensions/**/*.ts", "src/**/*.ts"]
+  "include": ["extensions/**/*.ts", "src/**/*.ts", "tools/s2-corpus-rehearsal/**/*.ts"]
 }

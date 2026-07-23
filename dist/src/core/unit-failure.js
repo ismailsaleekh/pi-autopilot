@@ -3,6 +3,7 @@ import { existsSync, lstatSync, readdirSync, realpathSync } from 'node:fs';
 import { link, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { readStableRegularFile, recordCoordinatorReleaseEvidenceFromFile } from "./coordination/reconciliation.js";
+import { currentUnitFailureProducerProvenance } from "./coordination/unit-failure-producer-provenance.js";
 import { ensureD65WorktreeStageCadenceFromEnvironment } from "./coordination/d65-graph-successor-runtime.js";
 import { CoordinatorClient } from "./coordination/client.js";
 import { parseCoordinationAuthoritativeArtifact, parseCoordinationChildLease, parseCoordinationEditLease, parseCoordinationReconciliationEvidence, parseCoordinationRunResource, parseCoordinationUnitAttempt, parseCoordinationWorktree, parseCoordinationWorktreeOperation } from "./coordination/contracts.js";
@@ -18,6 +19,7 @@ import { executeOwnedWorktreeSaga } from "./coordination/worktree-saga.js";
 import { inspectWorktreePostcondition } from "./coordination/worktree-postconditions.js";
 import { deterministicWorktreeId } from "./coordination/worktree-identity.js";
 const MAX_UNIT_FAILURE_EVIDENCE_BYTES = 1024 * 1024;
+const CURRENT_UNIT_FAILURE_PRODUCER_PROVENANCE = currentUnitFailureProducerProvenance();
 export function latestCommittedQuarantineOperationForWorktree(worktree, operations) {
     const canonicalWorktreeId = deterministicWorktreeId(worktree.owner, worktree.kind);
     if (worktree.worktree_id !== canonicalWorktreeId)
@@ -215,14 +217,14 @@ async function finishCommittedQuarantine(input, operation) {
         if (typeof value !== 'object' || value === null || Array.isArray(value))
             throw new CoordinationRuntimeError('invalid-state', 'committed quarantine evidence is not an object', [evidencePath]);
         const candidate = value;
-        const exactFields = ['schema_version', 'action', 'workstream', 'workstream_run', 'unit_id', 'attempt', 'unit_worktree_path', 'dirty_paths', 'capture_commit_sha', 'capture_ref', 'git_head_before', 'git_head_after', 'git_common_dir', 'branch', 'postcondition_worktree_clean', 'summary', 'created_at'].sort();
+        const exactFields = ['schema_version', 'producer_build', 'producer_generation', 'action', 'workstream', 'workstream_run', 'unit_id', 'attempt', 'unit_worktree_path', 'dirty_paths', 'capture_commit_sha', 'capture_ref', 'git_head_before', 'git_head_after', 'git_common_dir', 'branch', 'postcondition_worktree_clean', 'summary', 'created_at'].sort();
         const actualFields = Object.keys(candidate).sort();
         const exact = actualFields.length === exactFields.length && actualFields.every((field, index) => field === exactFields[index]);
         const dirtyPaths = candidate['dirty_paths'];
-        if (!exact || candidate['schema_version'] !== 'autopilot.unit_failure.v1' || candidate['action'] !== action || candidate['workstream'] !== input.context.active.workstream || candidate['workstream_run'] !== input.context.active.workstream_run || candidate['unit_id'] !== input.unitId || candidate['attempt'] !== input.attempt || resolve(String(candidate['unit_worktree_path'])) !== resolve(input.unitWorktreePath) || !Array.isArray(dirtyPaths) || dirtyPaths.some((path) => typeof path !== 'string') || candidate['capture_commit_sha'] !== facts.head || candidate['capture_ref'] !== captureRef || candidate['git_head_before'] !== preCaptureHead || candidate['git_head_after'] !== facts.head || resolve(String(candidate['git_common_dir'])) !== resolve(facts.gitCommonDir) || candidate['branch'] !== facts.branch || candidate['postcondition_worktree_clean'] !== true || typeof candidate['summary'] !== 'string' || typeof candidate['created_at'] !== 'string' || !Number.isFinite(Date.parse(candidate['created_at'])))
+        if (!exact || candidate['schema_version'] !== 'autopilot.unit_failure.v1' || candidate['producer_build'] !== CURRENT_UNIT_FAILURE_PRODUCER_PROVENANCE.producer_build || candidate['producer_generation'] !== CURRENT_UNIT_FAILURE_PRODUCER_PROVENANCE.producer_generation || candidate['action'] !== action || candidate['workstream'] !== input.context.active.workstream || candidate['workstream_run'] !== input.context.active.workstream_run || candidate['unit_id'] !== input.unitId || candidate['attempt'] !== input.attempt || resolve(String(candidate['unit_worktree_path'])) !== resolve(input.unitWorktreePath) || !Array.isArray(dirtyPaths) || dirtyPaths.some((path) => typeof path !== 'string') || candidate['capture_commit_sha'] !== facts.head || candidate['capture_ref'] !== captureRef || candidate['git_head_before'] !== preCaptureHead || candidate['git_head_after'] !== facts.head || resolve(String(candidate['git_common_dir'])) !== resolve(facts.gitCommonDir) || candidate['branch'] !== facts.branch || candidate['postcondition_worktree_clean'] !== true || typeof candidate['summary'] !== 'string' || typeof candidate['created_at'] !== 'string' || !Number.isFinite(Date.parse(candidate['created_at'])))
             throw new CoordinationRuntimeError('invalid-state', 'committed quarantine evidence differs from exact capture operation and worktree facts', [evidencePath]);
         record = {
-            schema_version: 'autopilot.unit_failure.v1', action, workstream: input.context.active.workstream, workstream_run: input.context.active.workstream_run,
+            schema_version: 'autopilot.unit_failure.v1', ...CURRENT_UNIT_FAILURE_PRODUCER_PROVENANCE, action, workstream: input.context.active.workstream, workstream_run: input.context.active.workstream_run,
             unit_id: input.unitId, attempt: input.attempt, unit_worktree_path: input.unitWorktreePath, dirty_paths: dirtyPaths.map((path) => String(path)),
             capture_commit_sha: facts.head, capture_ref: captureRef, git_head_before: preCaptureHead, git_head_after: facts.head, git_common_dir: facts.gitCommonDir,
             branch: facts.branch, postcondition_worktree_clean: true, summary: String(candidate['summary']), created_at: String(candidate['created_at']),
@@ -230,7 +232,7 @@ async function finishCommittedQuarantine(input, operation) {
     }
     else {
         record = {
-            schema_version: 'autopilot.unit_failure.v1', action, workstream: input.context.active.workstream, workstream_run: input.context.active.workstream_run,
+            schema_version: 'autopilot.unit_failure.v1', ...CURRENT_UNIT_FAILURE_PRODUCER_PROVENANCE, action, workstream: input.context.active.workstream, workstream_run: input.context.active.workstream_run,
             unit_id: input.unitId, attempt: input.attempt, unit_worktree_path: input.unitWorktreePath, dirty_paths: operation.intent.paths,
             capture_commit_sha: facts.head, capture_ref: captureRef, git_head_before: preCaptureHead, git_head_after: facts.head, git_common_dir: facts.gitCommonDir,
             branch: facts.branch, postcondition_worktree_clean: true, summary: input.summary, created_at: (input.now ?? new Date()).toISOString(),
@@ -302,7 +304,7 @@ async function resumeRemovedResetFailure(input) {
     if (accepted.length !== 1)
         throw new CoordinationRuntimeError('invalid-state', 'removed unit reset recovery lacks one exact accepted release-evidence row', [evidenceRef, evidenceSha256]);
     const record = {
-        schema_version: 'autopilot.unit_failure.v1', action: 'reset', workstream: input.context.active.workstream, workstream_run: input.context.active.workstream_run,
+        schema_version: 'autopilot.unit_failure.v1', ...CURRENT_UNIT_FAILURE_PRODUCER_PROVENANCE, action: 'reset', workstream: input.context.active.workstream, workstream_run: input.context.active.workstream_run,
         unit_id: input.unitId, attempt: input.attempt, unit_worktree_path: facts.unitWorktreePath, dirty_paths: Object.freeze([]), capture_commit_sha: null, capture_ref: null,
         git_head_before: facts.gitHeadBefore, git_head_after: facts.gitHeadAfter, git_common_dir: facts.gitCommonDir, branch: facts.branch, postcondition_worktree_clean: true,
         summary, created_at: createdAt,
@@ -630,7 +632,7 @@ async function writeFailureRecord(input) {
     if (captureRef !== null && captureCommitSha !== null)
         await archiveFailureBranch(input, captureCommitSha, captureRef, `${input.action} immutable failure capture`, 'quarantined');
     const derived = {
-        schema_version: 'autopilot.unit_failure.v1', action: input.action, workstream: input.context.active.workstream, workstream_run: input.context.active.workstream_run,
+        schema_version: 'autopilot.unit_failure.v1', ...CURRENT_UNIT_FAILURE_PRODUCER_PROVENANCE, action: input.action, workstream: input.context.active.workstream, workstream_run: input.context.active.workstream_run,
         unit_id: input.unitId, attempt: input.attempt, unit_worktree_path: input.unitWorktreePath, dirty_paths: dirtyPaths,
         capture_commit_sha: captureCommitSha, capture_ref: captureRef, git_head_before: before.head, git_head_after: after.head,
         git_common_dir: after.gitCommonDir, branch: after.branch, postcondition_worktree_clean: true, summary: input.summary, created_at: now.toISOString(),

@@ -1,0 +1,26 @@
+{
+  "schema_version": "autopilot.s2_release_skew_fixture.v1",
+  "lane": "s2-c",
+  "package": "pi-autopilot",
+  "current_package_version": "1.2.0",
+  "current_implementation_build": "1.2.0-s1",
+  "current_wire_lineage": "protocol-1.6-api-schema-12",
+  "current_api_schema_version": 12,
+  "current_store_schema_version": 13,
+  "current_legacy_facade_build": "1.1.8-cf50",
+  "previous_version": "1.1.8",
+  "previous_implementation_build": "1.1.8-cf50",
+  "previous_wire_protocol_version": "1.6",
+  "previous_api_schema_version": 12,
+  "previous_fixture_manifest": "../cf50/manifest.json",
+  "previous_tarball": "../cf50/pi-autopilot-1.1.8-cf50.tgz",
+  "previous_tarball_size_bytes": 1090668,
+  "previous_tarball_sha256": "sha256:e98ccee99e95d5ba9c958c91c354eef40326fa21cf89a8ba37bd10e6650485a7",
+  "required_journeys": [
+    "previous-client-to-current-coordinator",
+    "current-client-to-previous-coordinator",
+    "attach-heartbeat-idempotent-replay",
+    "natural-restart-both-directions",
+    "mixed-build-election"
+  ]
+}

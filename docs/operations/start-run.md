@@ -55,4 +55,5 @@ stability: stable
 
 - Commands: [`../commands/autopilot.md`](../commands/autopilot.md), [`../commands/autopilot-inject.md`](../commands/autopilot-inject.md)
 - Roster subsystem: [`../subsystems/roster-onboarding.md`](../subsystems/roster-onboarding.md)
-- Concept: [`../concepts/generations-and-fencing.md`](../concepts/generations-and-fencing.md)
+- Concept: [`../concepts/generations-and-fencing.md`](../concepts/generations-and-fencing.md), [`../concepts/semantic-graph-authority.md`](../concepts/semantic-graph-authority.md)
+- Operations: [`release-certification.md`](release-certification.md)

@@ -14,6 +14,7 @@ import { RunReconciliationClient } from '../../src/core/coordination/reconciliat
 import { parseCoordinationRun, parseCoordinationSessionLease, parseCoordinationWorktreeOperation } from '../../src/core/coordination/contracts.ts';
 import { CoordinationRuntimeError, formatCoordinationRuntimeError } from '../../src/core/coordination/failures.ts';
 import { coordinatorRuntimePaths } from '../../src/core/coordination/runtime-paths.ts';
+import { currentUnitFailureProducerProvenance } from '../../src/core/coordination/unit-failure-producer-provenance.ts';
 import { readCurrentStoreGeneration } from '../../src/core/coordination/store-generation.ts';
 import { startCoordinatorServer } from '../../src/core/coordination/server.ts';
 import { DurableRunSupervisorClient, writeCoordinatorSessionContext, type CoordinatorSessionContext } from '../../src/core/coordination/supervisor.ts';
@@ -934,7 +935,7 @@ void describe('owner-scoped worktree and Git saga recovery', () => {
       git(value.repo, ['update-ref', `refs/heads/${captureRef}`, capture, '0'.repeat(40)]);
       const evidenceRef = '.pi/autopilot/work-i2/quarantine/FOUND-APP-IMPL.attempt-1.quarantine.json';
       const failureDocument = {
-        schema_version: 'autopilot.unit_failure.v1', action: 'quarantine', workstream: value.active.workstream, workstream_run: value.active.workstream_run,
+        schema_version: 'autopilot.unit_failure.v1', ...currentUnitFailureProducerProvenance(), action: 'quarantine', workstream: value.active.workstream, workstream_run: value.active.workstream_run,
         unit_id: 'FOUND-APP-IMPL', attempt: 1, unit_worktree_path: create.intent.worktree_path, dirty_paths: capturedPaths,
         capture_commit_sha: capture, capture_ref: captureRef, git_head_before: value.active.target_base_sha, git_head_after: capture,
         git_common_dir: value.active.git_common_dir, branch: create.intent.branch, postcondition_worktree_clean: true,

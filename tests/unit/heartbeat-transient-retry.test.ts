@@ -47,6 +47,8 @@ void it('keeps heartbeat authority alive while a typed owned operation blocks so
     assert.equal(result.kind, 'dispatch-blocked');
     assert.equal(result.error, error);
   }
+  const invalidState = classifyHeartbeatOwnedRecoveryFailure(new CoordinationRuntimeError('invalid-state', 'invariant broke exact scope'));
+  assert.equal(invalidState.kind, 'terminal');
   const fenced = classifyHeartbeatOwnedRecoveryFailure(new CoordinationRuntimeError('fenced-session', 'generation replaced'));
   assert.equal(fenced.kind, 'terminal');
 });

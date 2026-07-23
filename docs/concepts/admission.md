@@ -45,6 +45,14 @@ coordinator remains authoritative and serves both cf50 and S1 clients until it e
 naturally; elected S1 startup may publish only after that exact predecessor retires and
 the writer/migration authority checks succeed.
 
+The bidirectional skew gate is permanent release coverage, not a one-time migration
+fixture. `npm run test:version-skew` first verifies the vendored actual cf50 tarball by
+size, SHA-256, package/build/protocol/schema identity, and compiled entrypoints, then
+runs previous-client → current-coordinator and current-client → previous-coordinator
+journeys through attach, heartbeat, idempotent replay, natural restart, and mixed-build
+election. The same lane retains the same-socket S1 admission/HMAC negatives and proves
+no negotiation, drain, signal, or replacement occurs against a healthy actual cf50.
+
 ## Enforced in
 
 - `src/core/coordination/admission.ts`,

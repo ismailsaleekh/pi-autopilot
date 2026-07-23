@@ -8,6 +8,8 @@ import { claimModesConflict, coordinationPathsOverlap, parseCoordinationAcquisit
 import { buildCoordinationWaitForEdges, compareCoordinationGrantPriority, coordinationOwnerKey, detectCoordinationWaitCycles, MAX_GRANT_BYPASSES, selectCoordinationDeadlockVictim } from "./deadlock.js";
 import { validateAuthoritativeCoordinationDocument, validatePlanningContradictionSubmission } from "./escalation.js";
 import { CoordinationRuntimeError } from "./failures.js";
+import { buildS2CoordinationRuntimeErrorDiagnostic } from "./s2-diagnostics.js";
+import { isS2CoordinationFailureCode, isS2FailureResponseRetryable } from "./s2-failure-taxonomy.js";
 import { assertCoordinationObservationSourceIdentity } from "./observations.js";
 import { parseIdentityFaultResolutionEvidence } from "./identity-fault-resolution-contract.js";
 import { checkCoordinationInvariants } from "./invariants.js";
@@ -17,7 +19,7 @@ import { AUTOPILOT_RUN_SCOPED_FAULT_SCHEMA, parseRunScopedLogicalFault } from ".
 import { assertMetadataReconcileEvidence, parseMetadataReconcileEvidence } from "./metadata-reconcile.js";
 import { COORDINATOR_BUSY_TIMEOUT_MS, COORDINATOR_DATABASE_SCHEMA_VERSION, COORDINATOR_GRANT_OFFER_TTL_MS, COORDINATOR_IMPLEMENTATION_BUILD, COORDINATOR_LEGACY_FACADE_BUILD, COORDINATOR_PACKAGE_BUILD, COORDINATOR_STORE_SCHEMA_VERSION, COORDINATOR_WIRE_LINEAGE, enforcePrivateAuthorityPath, enforceWindowsPrivateAcl, ensureCoordinatorPrivateRoots } from "./runtime-paths.js";
 import { byteBudgetPage, COORDINATOR_MAX_PAGE_ENTITY_BYTES, COORDINATOR_PAGE_TARGET_BYTES, encodePaginationCursor, encodedJsonBytes, paginationCursorState, paginationRevision, paginationScope, parsePaginationCursor } from "./pagination.js";
-import { activeCoordinationMigrationFreeze, assertCoordinationDispatchAllowed, assertCoordinationFrozenMutationAllowed, assertCoordinationMigrationRecoveryOperationAuthorized, coordinationCutoverCommitted } from "./migration-paths.js";
+import { activeCoordinationMigrationFreeze, assertCoordinationFrozenMutationAllowed, assertCoordinationMigrationRecoveryOperationAuthorized, assertCoordinationRepositoryDispatchAllowed, coordinationCutoverCommitted } from "./migration-paths.js";
 import { proveStructuredAttemptTerminal } from "./terminal-attempt-proof.js";
 import { classifyCoordinationIntegrationConflict } from "./integration-conflicts.js";
 import { deriveD65BootstrapTransaction } from "./d65-bootstrap-transaction.js";
@@ -40,7 +42,8 @@ import { parseD65BootstrapCharter, reconstructD65BootstrapCharter } from "./d65-
 import { validateD65FirstCompleteGraph } from "./d65-first-complete-graph.js";
 import { parseAutopilotReceipt, parseAutopilotState, parseAutopilotUnitSpec } from "../contracts/index.js";
 import { assertAutopilotChildTerminalAcceptanceChain, AUTOPILOT_CHILD_TERMINAL_ACCEPTANCE_SCHEMA, parseAutopilotChildTerminalAcceptance } from "./terminal-acceptance.js";
-import { parseRunTerminalSha, parseUnitAttemptTarget, parseUnitFailureEvidenceIngress, parseUnitMergeReservationFacts, validateReconciliationEvidenceDocument, validateReservationIntegrationEvidenceDocument, validateReservationValidationArtifactChain, validateReservationValidationEvidenceDocument } from "./terminal-evidence.js";
+import { HISTORICAL_UNIT_FAILURE_GENERATIONS, classifyHistoricalUnitFailureEvidenceGeneration, parseRunTerminalSha, parseUnitAttemptTarget, parseUnitFailureEvidenceIngress, parseUnitMergeReservationFacts, validateReconciliationEvidenceDocument, validateReservationIntegrationEvidenceDocument, validateReservationValidationArtifactChain, validateReservationValidationEvidenceDocument } from "./terminal-evidence.js";
+import { BUG_177_HISTORICAL_UNIT_FAILURE_PRODUCERS } from "./unit-failure-producer-provenance.js";
 import { AUTOPILOT_COORDINATOR_PROTOCOL_VERSION, COORDINATION_WORKTREE_STATES } from "./types.js";
 import { COORDINATOR_MAX_FRAME_BYTES } from "./runtime-constants.js";
 import { assertPrivatePathNoAliases } from "../private-path.js";
@@ -2682,6 +2685,10 @@ export class CoordinatorStore {
             throw new CoordinationRuntimeError('invalid-state', 'migration import record is missing or mismatched');
         this.#db.prepare('UPDATE coordination_migrations SET state=?, report_json=?, updated_at=?, version=version+1 WHERE repo_id=? AND migration_id=?').run(state, canonicalJson(report), this.#clock.now().toISOString(), repoId, migrationId);
     }
+    terminalRunsForS2RetentionGc() {
+        this.#writerGuard.assertHeld();
+        return Object.freeze(this.#db.prepare("SELECT repo_id, workstream_run FROM runs WHERE status IN ('closed','aborted') ORDER BY repo_id, workstream_run").all().map((row) => Object.freeze({ repoId: sqlString(row, 'repo_id'), workstreamRun: sqlString(row, 'workstream_run') })));
+    }
     sweepExpiredGrantOffers() {
         this.#writerGuard.assertHeld();
         if (activeCoordinationMigrationFreeze(this.#stateRoot) !== null)
@@ -2771,8 +2778,8 @@ export class CoordinatorStore {
                 ok: false,
                 committed_event_seq: null,
                 error_code: runtime.code,
-                retryable: runtime.retry_policy !== 'never',
-                payload: { message: runtime.message, evidence: runtime.evidence },
+                retryable: isS2FailureResponseRetryable(runtime.code),
+                payload: { message: runtime.message, evidence: runtime.evidence, s2_diagnostic: buildS2CoordinationRuntimeErrorDiagnostic(runtime) },
             };
         }
     }
@@ -2816,7 +2823,7 @@ export class CoordinatorStore {
             if (activeCoordinationMigrationFreeze(this.#stateRoot) !== null)
                 assertCoordinationFrozenMutationAllowed(this.#stateRoot, request.repo_id, request.action, request.payload['migration_operation_token']);
             else
-                assertCoordinationDispatchAllowed(this.#stateRoot, request.repo_id, `coordinator mutation ${request.action}`);
+                assertCoordinationRepositoryDispatchAllowed(this.#stateRoot, request.repo_id, `coordinator mutation ${request.action}`);
         }
         switch (request.action) {
             case 'handshake': return this.handshake();
@@ -8607,9 +8614,10 @@ export class CoordinatorStore {
             repoKey: repository.repo_key, autopilotId: run.autopilot_id, workstream: run.workstream, workstreamRun: run.workstream_run,
             source, targetId, unitId, attempt,
         };
-        validateReconciliationEvidenceDocument(bytes, expectedIdentity, this.#historicalUnitFailureProvenanceFor(run, source, evidence));
+        const historicalProvenance = this.#historicalUnitFailureProvenanceFor(run, source, evidence, bytes);
+        validateReconciliationEvidenceDocument(bytes, expectedIdentity, historicalProvenance);
         if (persistAtEventSeq !== undefined && (source === 'attempt-reset' || source === 'quarantine-capture')) {
-            const ingress = parseUnitFailureEvidenceIngress(bytes, expectedIdentity, this.#historicalUnitFailureProvenanceFor(run, source, evidence));
+            const ingress = parseUnitFailureEvidenceIngress(bytes, expectedIdentity, historicalProvenance);
             if (ingress.kind === 'historical')
                 throw new CoordinationRuntimeError('recovery-required', 'historical unit failure evidence cannot newly release authority; reset/quarantine worktree postconditions are not verifiable after schema-10', [evidence.ref, ingress.provenance.reconciliationEvidenceId]);
             this.#assertUnitFailureEvidenceFacts(run, source, targetId, ingress.facts, bytes);
@@ -8618,7 +8626,7 @@ export class CoordinatorStore {
             this.#persistEvidenceArtifact(run.repo_id, evidence, bytes, `${source} reconciliation evidence`, persistAtEventSeq);
         return bytes;
     }
-    #historicalUnitFailureProvenanceFor(run, source, evidence) {
+    #historicalUnitFailureProvenanceFor(run, source, evidence, bytes) {
         if (source !== 'attempt-reset' && source !== 'quarantine-capture')
             return null;
         const conditionType = source === 'attempt-reset' ? 'attempt-reset' : 'quarantine-captured';
@@ -8633,7 +8641,12 @@ export class CoordinatorStore {
         if (schema10Migration === undefined)
             return null;
         const schema10AppliedAt = sqlString(schema10Migration, 'applied_at');
-        return { kind: 'coordinator-accepted-before-schema10', evidenceRef: evidence.ref, evidenceSha256: evidence.sha256, reconciliationEvidenceId, acceptedEventSeq, acceptedAt, schema10AppliedAt };
+        const generation = classifyHistoricalUnitFailureEvidenceGeneration(bytes);
+        if (generation === null)
+            return null;
+        const producerBuild = generation === HISTORICAL_UNIT_FAILURE_GENERATIONS.phase2Initial ? BUG_177_HISTORICAL_UNIT_FAILURE_PRODUCERS.phase2Initial : BUG_177_HISTORICAL_UNIT_FAILURE_PRODUCERS.captureCommitOnly;
+        const producerGeneration = generation === HISTORICAL_UNIT_FAILURE_GENERATIONS.phase2Initial ? 1 : 2;
+        return { kind: 'coordinator-accepted-before-schema10', evidenceRef: evidence.ref, evidenceSha256: evidence.sha256, reconciliationEvidenceId, acceptedEventSeq, acceptedAt, schema10AppliedAt, producerBuild, producerGeneration };
     }
     #assertUnitFailureEvidenceFacts(run, source, targetId, facts, evidenceBytes) {
         const target = parseUnitAttemptTarget(targetId);
@@ -9977,6 +9990,9 @@ export class CoordinatorStore {
     #activeRunFaults(repoId, workstreamRun) {
         return this.#db.prepare("SELECT fault_id,invariant_id,fault_code FROM run_scoped_faults WHERE repo_id=? AND workstream_run=? AND status='active' ORDER BY fault_id LIMIT 33").all(repoId, workstreamRun);
     }
+    #activePlanningContradictionReviews(repoId, workstreamRun) {
+        return this.#db.prepare("SELECT entity_id,COALESCE(json_extract(payload_json, '$.escalation_id'), entity_id) AS escalation_id FROM escalations WHERE repo_id=? AND EXISTS(SELECT 1 FROM json_each(json_extract(payload_json, '$.participating_runs')) WHERE value=?) ORDER BY entity_id LIMIT 33").all(repoId, workstreamRun);
+    }
     #assertAuthorityCriticalMutationAllowed(repoId, workstreamRun, action) {
         const faults = this.#activeRunFaults(repoId, workstreamRun);
         if (faults.length === 0)
@@ -9985,6 +10001,10 @@ export class CoordinatorStore {
     }
     #assertSourceChangingDispatchAllowed(repoId, workstreamRun, action) {
         this.#assertAuthorityCriticalMutationAllowed(repoId, workstreamRun, `source-changing dispatch:${action}`);
+        const contradictions = this.#activePlanningContradictionReviews(repoId, workstreamRun);
+        if (contradictions.length === 0)
+            return;
+        throw new CoordinationRuntimeError('planning-contradiction-review', `source-changing dispatch ${action} is fenced by accepted planning contradiction review for the participating planning authority set`, contradictions.slice(0, 32).map((row) => `${sqlString(row, 'entity_id')}:${sqlString(row, 'escalation_id')}`));
     }
     #requireCoordinatorEditAuthority(run, operation) {
         if (run.coordination_authority !== 'coordinator-edit-leases-v1')
@@ -10075,26 +10095,5 @@ export class CoordinatorStore {
     }
 }
 export function coordinationErrorCode(value) {
-    switch (value) {
-        case 'invalid-request':
-        case 'invalid-state':
-        case 'protocol-mismatch':
-        case 'schema-mismatch':
-        case 'frame-too-large':
-        case 'unauthorized-client':
-        case 'coordinator-unavailable':
-        case 'coordinator-contention':
-        case 'fenced-session':
-        case 'stale-version':
-        case 'idempotency-conflict':
-        case 'request-timeout':
-        case 'recovery-required':
-        case 'git-partial-effect':
-        case 'disk-failure':
-        case 'permission-denied':
-        case 'planning-contradiction-review':
-        case 'store-corrupt':
-        case 'system-fatal': return value;
-        default: return 'system-fatal';
-    }
+    return isS2CoordinationFailureCode(value) ? value : 'system-fatal';
 }

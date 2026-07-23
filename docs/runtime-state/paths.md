@@ -59,8 +59,16 @@ Autopilot materializes the `autopilot.authority.v1` artifact into the unit and m
 worktrees and writes `_materialization-ledger.jsonl` and `_materialized-paths.json`,
 creating parent directories for grounded future-owned files.
 
+## D65 graph-publication residue
+
+A D65 run's crash-resumable graph-publication saga is backed by `_graph-publication.json`
+(with a `_graph-publication.lock`) beside the run's main worktree directory — outside
+the Git worktree and runtime discovery corpus, mode 0600, at most 1 MiB. It is
+package-owned recovery state: never hand-edit or delete it. See
+[`../concepts/semantic-graph-authority.md`](../concepts/semantic-graph-authority.md).
+
 ## Related
 
 - Subsystem: [`../subsystems/worktrees.md`](../subsystems/worktrees.md)
 - Roster subsystem: [`../subsystems/roster-onboarding.md`](../subsystems/roster-onboarding.md)
-- Concept: [`../concepts/migration-cutover.md`](../concepts/migration-cutover.md)
+- Concept: [`../concepts/migration-cutover.md`](../concepts/migration-cutover.md), [`../concepts/semantic-graph-authority.md`](../concepts/semantic-graph-authority.md)

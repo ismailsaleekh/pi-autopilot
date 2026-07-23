@@ -4,10 +4,11 @@ These artifacts are the **agentic** half of the docs freshness gate's
 detection / judgment / enforcement boundary (design D67, check **C11**).
 
 - **Detection + enforcement are deterministic** and live in
-  `scripts/docs-verify.mjs`: for every `review_policy: behavioral` doc whose
-  covered-source `body_hash` has changed since its recorded review, C11 asserts an
+  `scripts/docs-verify.mjs`: for every triggered `review_policy: behavioral` doc
+  (same-change prose edit or covered-source `body_hash` drift), C11 asserts an
   attestation here whose `reviewed_body_hash` equals the *current* body hash and
-  whose `verdict` is `PASS`. A missing or stale attestation fails the gate loudly.
+  whose `verdict` is `PASS`. Any existing attestation is validated too, so a stale
+  receipt fails the gate loudly even when the doc is not otherwise triggered.
 - **Judgment is agentic**: the *content* of the review (does the prose still describe
   the code correctly?) is produced by an independent Pi validate-role review. It is
   offline and never in the deterministic CI path; it only decides whether a current
@@ -18,7 +19,7 @@ detection / judgment / enforcement boundary (design D67, check **C11**).
 ```jsonc
 {
   "schema_version": "autopilot.docs_semantic_attestation.v1",
-  "doc_id": "subsystems/coordination",          // == the doc's frontmatter doc_id
+  "doc_id": "subsystems/s2-retention",         // == the doc's frontmatter doc_id
   "reviewed_body_hash": "sha256:…",              // must equal the current covers_sources body_hash
   "verdict": "PASS",                              // only PASS clears C11
   "reviewer": "validate-role (offline agentic review)",
@@ -29,7 +30,7 @@ detection / judgment / enforcement boundary (design D67, check **C11**).
 ```
 
 The file name is the `doc_id` with `/` replaced by `__`, e.g.
-`subsystems/coordination` → `subsystems__coordination.json`.
+`subsystems/s2-retention` → `subsystems__s2-retention.json`.
 
 ## Producing a fresh attestation
 

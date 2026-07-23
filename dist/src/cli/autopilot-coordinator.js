@@ -2,6 +2,7 @@
 import { isAbsolute, join, resolve } from 'node:path';
 import { CoordinatorClient } from "../core/coordination/client.js";
 import { CoordinationRuntimeError } from "../core/coordination/failures.js";
+import { shouldS2UseSystemFatalExit } from "../core/coordination/s2-failure-taxonomy.js";
 import { migrationRecoveryUsage, runMigrationRecoveryCli } from "./migration-recovery.js";
 import { coordinationMigrationUsage, runCoordinationMigration } from "../core/coordination/migration.js";
 import { CoordinatorAlreadyRunningError, runCoordinatorUntilSignal } from "../core/coordination/server.js";
@@ -111,7 +112,7 @@ async function main(argv) {
         catch (error) {
             if (error instanceof CoordinationRuntimeError) {
                 console.error(error.message);
-                return error.failure_class === 'system-fatal' ? 70 : 1;
+                return shouldS2UseSystemFatalExit(error.code) ? 70 : 1;
             }
             console.error(error instanceof Error ? error.message : String(error));
             return 2;
@@ -171,7 +172,7 @@ async function main(argv) {
         await startupObserver?.failed(error);
         if (error instanceof CoordinationRuntimeError) {
             console.error(error.message);
-            return error.failure_class === 'system-fatal' ? 70 : 1;
+            return shouldS2UseSystemFatalExit(error.code) ? 70 : 1;
         }
         console.error(error instanceof Error ? error.stack ?? error.message : String(error));
         return 1;

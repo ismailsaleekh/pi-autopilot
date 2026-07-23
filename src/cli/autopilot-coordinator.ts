@@ -3,6 +3,7 @@ import { isAbsolute, join, resolve } from 'node:path';
 
 import { CoordinatorClient } from '../core/coordination/client.ts';
 import { CoordinationRuntimeError } from '../core/coordination/failures.ts';
+import { shouldS2UseSystemFatalExit } from '../core/coordination/s2-failure-taxonomy.ts';
 import { migrationRecoveryUsage, runMigrationRecoveryCli } from './migration-recovery.ts';
 import { coordinationMigrationUsage, runCoordinationMigration, type CoordinationMigrationCommand } from '../core/coordination/migration.ts';
 import { CoordinatorAlreadyRunningError, runCoordinatorUntilSignal } from '../core/coordination/server.ts';
@@ -103,7 +104,7 @@ async function main(argv: readonly string[]): Promise<number> {
     } catch (error) {
       if (error instanceof CoordinationRuntimeError) {
         console.error(error.message);
-        return error.failure_class === 'system-fatal' ? 70 : 1;
+        return shouldS2UseSystemFatalExit(error.code) ? 70 : 1;
       }
       console.error(error instanceof Error ? error.message : String(error));
       return 2;
@@ -160,7 +161,7 @@ async function main(argv: readonly string[]): Promise<number> {
     await startupObserver?.failed(error);
     if (error instanceof CoordinationRuntimeError) {
       console.error(error.message);
-      return error.failure_class === 'system-fatal' ? 70 : 1;
+      return shouldS2UseSystemFatalExit(error.code) ? 70 : 1;
     }
     console.error(error instanceof Error ? error.stack ?? error.message : String(error));
     return 1;

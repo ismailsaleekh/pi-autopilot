@@ -10,8 +10,14 @@ covers_sources:
   - src/core/coordination/index.ts
   - src/core/coordination/admission.ts
   - src/core/coordination/deadlock.ts
-signature_hash: 'sha256:7dcfdcc868f120781150ae32025fae87d3b683d3a8f20a6a4c29665c6fafa656'
-body_hash: 'sha256:4c39eddae3f6182bf47cfb73b4472158c477ced0099020f4a742b6812c918466'
+  - src/core/coordination/runtime-constants.ts
+  - src/core/coordination/peer-classification.ts
+  - src/core/coordination/client.ts
+  - src/core/coordination/store.ts
+  - src/core/coordination/invariants.ts
+signature_hash: 'sha256:f2ccef5dd32315d6976da8c480b9f584d06e945cf776852a923f7811810c59ac'
+body_hash: 'sha256:2c4020b8a25089c33a3db862bc1fd1b93ed65a38b3e1530eae1f1843abe85101'
+semantic_attestation: 'sha256:2c4020b8a25089c33a3db862bc1fd1b93ed65a38b3e1530eae1f1843abe85101'
 fact_pins:
   - text: `MAX_GRANT_BYPASSES` is 8
     symbol: 'src/core/coordination/deadlock.ts#MAX_GRANT_BYPASSES'
@@ -24,8 +30,11 @@ stability: stable
 The Coordination Fabric is the local, transactional substrate that lets independent
 Autopilot runs coordinate without an operator. It is exposed to agents through the
 `/autopilot-coordination` command, the `autopilot_respond_claim_request` parent
-tool, and the `autopilot-coordinator` CLI. Wire lineage is protocol 1.6 / API schema
-12 / private store schema 13, behind the `1.1.8-cf50` façade.
+tool, and the `autopilot-coordinator` CLI. `runtime-constants.ts` fixes the identities:
+`COORDINATOR_WIRE_LINEAGE = 'protocol-1.6-api-schema-12'` (with
+`COORDINATOR_API_SCHEMA_VERSION = 12`) and the separately tracked
+`COORDINATOR_STORE_SCHEMA_VERSION = 13`, behind the
+`COORDINATOR_LEGACY_FACADE_BUILD = '1.1.8-cf50'` façade.
 
 ## Purpose
 
@@ -37,10 +46,15 @@ merge conflicts, deadlocks — is an autonomous runtime state.
 
 ## Key files
 
-The authoritative barrel is [`src/core/coordination/index.ts`](../read-before-edit.md),
-which re-exports every fabric module. This doc's `covers_sources` transitively covers
-the whole `src/core/coordination/**` tree for coverage purposes (C8); the two
-invariant-bearing files below are called out because their behavior is load-bearing.
+The authoritative barrel is `src/core/coordination/index.ts` (see the
+[read-before-edit map](../read-before-edit.md)), which re-exports the fabric's public
+modules (the `d65-*` modules are internal and are
+not re-exported through this barrel). For C8 boundary-coverage purposes this hub's
+covered barrel stands in for the tree. This hub's
+`covers_sources` names the specific invariant-bearing files whose exact facts it asserts
+(admission, deadlock, wire-lineage constants, peer classification, client, store,
+invariants); the D65 authority files are documented and independently reviewed in their
+dedicated concept docs (linked below), not re-derived here.
 
 | Concern | Source |
 |---|---|
@@ -56,10 +70,14 @@ invariant-bearing files below are called out because their behavior is load-bear
 
 ## Admission (S1 / cf50)
 
-Every socket begins with the exact cf50 empty handshake. An unchanged cf50 peer
-stays `legacy-anonymous-protocol-1.6` and receives only cf50 actions. An S1 peer
-follows handshake → `negotiate-admission` → operation on one socket and becomes
-`negotiated-s1` only after verifying a domain-separated HMAC-SHA256 (algorithm
+Every socket begins with the exact cf50 empty handshake. The covered peer classifier
+returns `known-cf50-predecessor` for an unchanged cf50 peer (no `admission_upgrade`
+offer) and `s1-admission-offered` when an S1 offer is present
+(`peer-classification.ts`); the exact legacy transport mode string and its
+cf50-only action set are enforced in `negotiated-transport.ts` (outside this doc's
+covered sources). An S1 peer follows handshake → `negotiate-admission` → operation on one
+socket and becomes `negotiated-s1` only after verifying a domain-separated HMAC-SHA256
+(algorithm
 `hmac-sha256`, domain `pi-autopilot/admission/v1\0`) over canonical JSON, using the
 raw 32-byte capability key. When no offer is present, the S1 client accepts only the
 exact digest-pinned `known-cf50-predecessor` path; it never infers compatibility
@@ -77,15 +95,21 @@ commits before the filesystem residue advances from `publication-committed` to
 `registered`, and response-loss recovery accepts only the byte-identical registered
 result.
 
-The coordinator verifies the highest purpose-signed launch policy and a
-session-authenticated, monotonic program heartbeat at the wired runtime boundaries
+The coordinator verifies the single accepted signed launch policy (D65 authorizes only
+absent→v1 and requires exactly one accepted `autopilot.launch_policy.v1`; an existing
+accepted policy is a CAS conflict) and a session-authenticated, monotonic program
+heartbeat at the wired runtime boundaries
 (child/model spawn and other consumed ordinary boundaries). The policy binds
 package/run/graph/roster identity and cap-one limits. Provider failure recovery
 uses an accepted continuation, externally signed one-use subscription probe, exact
 failed spec/receipt identity, successor graph, and governing retry-authorized
 heartbeat; no component self-signs operator authority or substitutes a provider.
 Every semantic mutation requires its successor graph before ordinary re-entry, except
-the closed prepared-terminal tail.
+the closed prepared-terminal tail. The exact graph/dispatch/terminal contracts are
+documented and independently reviewed in
+[`../concepts/semantic-graph-authority.md`](../concepts/semantic-graph-authority.md),
+[`../concepts/dispatch-and-recovery-authority.md`](../concepts/dispatch-and-recovery-authority.md),
+and [`../concepts/d65-terminal-tail.md`](../concepts/d65-terminal-tail.md).
 
 ## Deadlock resolution (invariants)
 
@@ -97,11 +121,15 @@ and resolves strongly connected cycles to a same-transaction fixed point.
   WRITE/EXCLUSIVE authority.
 - **Safe victims are selected mechanically** by victim class, durable child
   checkpoint, starvation protection, live-cycle grant order, and stable identity.
-  Merge/reset/quarantine/archive/remove critical sections, dirty preflight
-  worktrees, and non-preemptible running work are never cancelled as clean victims.
-- **Starvation is bounded.** A group's `bypass_count` increments exactly once per
-  otherwise-eligible losing decision, and `MAX_GRANT_BYPASSES` is 8: at that bound a
-  group takes priority over newer groups whenever its complete set is free.
+  Any attempt holding an active `critical_section` or Git critical operation
+  (`merge`, `reset`, `quarantine`, `archive`, `remove`, `metadata-reconcile`), dirty
+  preflight worktrees, and non-preemptible running work are never cancelled as clean
+  victims.
+- **Starvation is bounded.** Victim ranking reads each live group's `bypass_count`
+  (incremented by the scheduler's grant path), and `MAX_GRANT_BYPASSES` is 8: at that
+  bound a group's starved flag flips ahead of non-starved groups in the grant-priority
+  comparator (which then orders by `offer_count`, `created_event_seq`, then id, after the
+  store's dependency-priority ordering) — it is not an unconditional "always beats newer."
 - **No-safe-victim cycles stay explicit.** They remain `deferred-no-safe-victim` at
   the earliest declared release condition and never become operator questions.
 
@@ -118,11 +146,26 @@ and resolves strongly connected cycles to a same-transaction fixed point.
 
 ## Invariants that must not regress
 
+Invariant 2 is verifiable from this doc's covered sources (`store.ts`
+`respondClaimRequest`, plus `deadlock.ts`/`invariants.ts`); invariants 1, 3, and 4 are
+system-level contracts enforced across the broader coordinator implementation
+(`negotiated-transport.ts`, `server.ts`, `supervisor.ts`, `store.ts` startup, and the
+`s2-*` retention/GC modules) beyond the covered set and are stated here as top-level
+contracts.
+
 1. Every operation handshakes and executes on **one** socket; multiple or
    unsolicited response frames fail loud.
-2. WRITE/EXCLUSIVE release is authorized only by stronger Git-backed terminal
-   evidence, never by age, PID, or timestamp.
+2. WRITE/EXCLUSIVE release is never authorized by age, PID, or timestamp. It is
+   authorized either by stronger Git-backed terminal evidence, or by an authenticated
+   `release-now` response from the current-generation owner (`respondClaimRequest`
+   deletes the blocking leases). A `bounded-defer` response does not release immediately:
+   it records a typed `release_condition` and returns `claim-request-deferred`. This
+   authenticated live-owner path is deliberate.
 3. Coordinator startup replays durable terminal facts to repair a transition
-   interrupted by an older process; it never fabricates or drops a row.
+   interrupted by an older process; it never fabricates a row, and it drops rows only
+   through its explicit reconciliation path (e.g. releasing an owned lease during
+   startup recovery), never silently. Its owned
+   timer also schedules S2 retention GC for terminal runs against only package-owned
+   `_trash/` and `transition-backups/` candidates.
 4. The single-writer election is endpoint-attested: identity drift fails closed;
    endpoint recovery always wins over replacement.

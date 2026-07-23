@@ -37,7 +37,9 @@ limited to stronger Git-backed terminal evidence; ambiguous authority is importe
 queued as typed supervisor recovery work. The recovery CLI constructs a typed release
 resolution only after source, target identity, and evidence bytes are all present, then
 reuses that immutable input for each fenced recovery mutation; partial release authority
-fails before the supervisor operation.
+fails before the supervisor operation. An explicit recovery client may start the frozen
+candidate store for recovery queries/mutations; ordinary dispatch remains fenced by the
+migration freeze until the package-owned cutover removes it.
 
 ## verify / rollback / cutover
 

@@ -227,8 +227,25 @@ export function readCoordinationCutoverMarker(path, expectedRepoKey, stateRoot) 
         throw new CoordinationRuntimeError('invalid-state', 'coordination cutover marker repository identity is mismatched', [path, repoKey, expectedRepoKey]);
     return { schema_version: COORDINATION_CUTOVER_MARKER_SCHEMA, repo_key: repoKey, snapshot_sha256: snapshot, database_sha256: database, committed_at: committedAt, migration_id: migrationId };
 }
+function assertExistingStateRootIsRealDirectory(stateRoot, label) {
+    const root = resolve(stateRoot);
+    if (!existsSync(root))
+        return false;
+    const rootInfo = lstatSync(root);
+    if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink())
+        throw new CoordinationRuntimeError('invalid-state', `${label} state root must be a real non-symbolic directory`, [root]);
+    return true;
+}
 export function activeCoordinationMigrationFreeze(stateRoot) {
     const migrationsRoot = join(stateRoot, 'migrations');
+    // Production dispatch checks this gate for every mutation. In the ordinary
+    // no-migration state the migrations directory is absent, so prove only the
+    // existing state-root anchor before returning instead of walking every
+    // non-existent descendant on each request. If the migrations directory exists
+    // we fall back to the full no-alias physical containment proof before reading
+    // repository freeze markers.
+    if (platform() !== 'win32' && assertExistingStateRootIsRealDirectory(stateRoot, 'coordination migrations root') && !existsSync(migrationsRoot))
+        return null;
     assertMigrationPathSafe(stateRoot, migrationsRoot, 'coordination migrations root');
     if (!existsSync(migrationsRoot))
         return null;
@@ -294,13 +311,23 @@ export function assertCoordinationFrozenMutationAllowed(stateRoot, repoKey, acti
     }
     throw new CoordinationRuntimeError('coordinator-contention', `coordinator mutation ${action} refused after global migration writer authority was acquired`, [freezePath, String(freeze['repo_key'])]);
 }
+export function assertCoordinationRepositoryDispatchAllowed(stateRoot, repoKey, operation) {
+    if (!/^[A-Za-z0-9][A-Za-z0-9._:@-]{0,191}$/u.test(repoKey))
+        throw new CoordinationRuntimeError('invalid-request', 'migration repo key is invalid');
+    const root = resolve(stateRoot);
+    const migrationsRoot = join(root, 'migrations');
+    const freezePath = join(migrationsRoot, repoKey, 'freeze.json');
+    if (platform() !== 'win32' && assertExistingStateRootIsRealDirectory(stateRoot, 'coordination migration freeze') && !existsSync(migrationsRoot))
+        return;
+    assertMigrationPathSafe(stateRoot, freezePath, 'coordination migration freeze');
+    if (existsSync(freezePath))
+        throw new CoordinationRuntimeError('coordinator-contention', `${operation} refused: coordination migration freeze is active`, [freezePath]);
+}
 export function assertCoordinationDispatchAllowed(stateRoot, repoKey, operation) {
-    const paths = migrationPathsForStateRoot(stateRoot, repoKey);
     const globalFreeze = activeCoordinationMigrationFreeze(stateRoot);
     if (globalFreeze !== null)
         throw new CoordinationRuntimeError('coordinator-contention', `${operation} refused: a global coordination migration freeze is active`, [globalFreeze]);
-    if (existsSync(paths.freezePath))
-        throw new CoordinationRuntimeError('coordinator-contention', `${operation} refused: coordination migration freeze is active`, [paths.freezePath]);
+    assertCoordinationRepositoryDispatchAllowed(stateRoot, repoKey, operation);
 }
 export function assertLegacyCoordinationWritable(stateRoot, repoKey, operation) {
     const paths = migrationPathsForStateRoot(stateRoot, repoKey);
