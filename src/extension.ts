@@ -63,7 +63,7 @@ import { isCentrallyTrustedW4CertifiedRoster } from './core/roster/providers/ind
 import { createAutopilotRosterSetupTool } from './core/roster/setup-tool.ts';
 import { createRosterSetupReceiptFactory, type AutopilotRosterSetupReceipt } from './core/roster/setup-receipt.ts';
 import { resolveAutopilotRosterSetupSkillPackage, type VerifiedAutopilotRosterSetupSkillPackage } from './core/roster/skill-package.ts';
-import { seedRosterByCandidate, type QualificationManifest, type Roster, type RosterCandidate } from './core/roster/provider-recipes.ts';
+import { parseProviderRoster, seedRosterByCandidate, type QualificationManifest, type RosterCandidate } from './core/roster/provider-recipes.ts';
 import { resolveAndCommitPreRunSelection, type RunSelectionAuthority } from './core/roster/run-selection.ts';
 import { publishRuntimeRosterSnapshot, recoverRuntimeRosterSelection } from './core/roster/snapshot.ts';
 import { authorizeExistingRunRosterTransitionInput, buildExistingRunRosterTransitionProposal, commitApprovedExistingRunRosterTransition, consumeCommittedExistingRunRosterTransition, resolveCommittedExistingRunRosterTransitionChain, savedRosterRefForSelection, type ExistingRunRosterSuccessorAttemptAuthority, type ExistingRunRosterTransitionProposal, type ExistingRunRosterTransitionRunRef } from './core/roster/transition.ts';
@@ -447,7 +447,7 @@ async function customRosterLaunchDiagnostics(input: {
   readonly paths: ReturnType<typeof resolveScopePathsForActivation>;
 }): Promise<readonly RosterDiagnostic[]> {
   if (input.roster.generation_source !== 'user-custom') return [];
-  const customRoster = input.roster as unknown as Roster;
+  const customRoster = parseProviderRoster(input.roster);
   const authority = await readCustomRosterCertificationAuthority({ paths: input.paths, roster: customRoster });
   if (!authority.ok) return dedupeRosterDiagnostics(['ROSTER_QUALIFICATION_REQUIRED']);
   if (authority.authority.roster_sha256 !== input.roster.roster_sha256) return dedupeRosterDiagnostics(['ROSTER_READBACK_MISMATCH']);
@@ -986,9 +986,9 @@ function provenSavedRosterSetupResult(value: unknown): { readonly originalComman
 
 function provenSavedRosterSetupResultV1(record: Readonly<Record<string, unknown>>): { readonly originalCommand: string } | null {
   try {
-    const parsed = parseAutopilotRosterContract('autopilot.roster_tool_result.v1', record) as unknown as Readonly<Record<string, unknown>>;
-    if (parsed['action'] !== 'save' || parsed['ok'] !== true || parsed['status'] !== 'saved') return null;
-    return provenSavedRosterSetupReceipt(parsed['receipt']);
+    const parsed = parseAutopilotRosterContract('autopilot.roster_tool_result.v1', record);
+    if (parsed.action !== 'save' || parsed.ok !== true || parsed.status !== 'saved') return null;
+    return provenSavedRosterSetupReceipt(parsed.receipt);
   } catch {
     return null;
   }
@@ -1065,10 +1065,10 @@ function provenCustomSavedReceiptV2(value: unknown, storageReceipt: unknown): bo
 
 function provenSavedRosterSetupReceipt(value: unknown): { readonly originalCommand: string } | null {
   try {
-    const receipt = parseAutopilotRosterContract('autopilot.roster_setup_receipt.v1', value) as unknown as Readonly<Record<string, unknown>>;
-    if (receipt['fresh_session_required'] !== true || receipt['zero_secrets'] !== true) return null;
-    const originalCommand = receipt['original_command'];
-    if (typeof originalCommand !== 'string' || originalCommand.length === 0) return null;
+    const receipt = parseAutopilotRosterContract('autopilot.roster_setup_receipt.v1', value);
+    if (receipt.fresh_session_required !== true || receipt.zero_secrets !== true) return null;
+    const originalCommand = receipt.original_command;
+    if (originalCommand.length === 0) return null;
     return { originalCommand };
   } catch {
     return null;
@@ -1123,7 +1123,8 @@ function materializeRosterPublicationForCandidate(input: {
   ) {
     throw new Error('custom candidate roster bytes drifted');
   }
-  const verification = verifyCustomRosterManifestForRoster({ roster: roster as unknown as Roster, manifest });
+  const providerRoster = parseProviderRoster(roster);
+  const verification = verifyCustomRosterManifestForRoster({ roster: providerRoster, manifest });
   if (!verification.ok) throw new Error('custom roster registry verification failed closed');
   return { roster, bytes: Buffer.from(bytes), custom_manifest: manifest, custom_validation_result_sha256: validation.result_sha256 };
 }
@@ -1370,7 +1371,7 @@ export default function autopilotExtension(pi: ExtensionHostLike, dependencies: 
                 : resolveRosterScopePaths({ scope: request.scope, stateRoot });
             const published = await publishCustomRosterCertificationAuthority({
               paths,
-              roster: publication.roster as unknown as Roster,
+              roster: parseProviderRoster(publication.roster),
               validation_result_sha256: publication.custom_validation_result_sha256,
               manifest: publication.custom_manifest,
             });

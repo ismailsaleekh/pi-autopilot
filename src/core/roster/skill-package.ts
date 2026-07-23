@@ -123,6 +123,7 @@ export interface VerifiedAutopilotRosterSetupSkillPackage {
 }
 
 type JsonRecord = Readonly<Record<string, unknown>>;
+type PayloadAuthority = AutopilotRosterSetupSkillPayload['authorities'][number];
 
 function fail(reason: AutopilotRosterSetupSkillPackageFailureReason, message: string, diagnostics: readonly string[] = []): never {
   throw new AutopilotRosterSetupSkillPackageError(reason, message, diagnostics);
@@ -324,16 +325,26 @@ function assertSkillContentContract(skillText: string): void {
   }
 }
 
-function expectAuthorities(value: unknown): void {
+function expectAuthorities(value: unknown): readonly PayloadAuthority[] {
   if (!Array.isArray(value)) fail('payload-contract', 'payload authorities must be an array');
   if (value.length !== 4) fail('payload-contract', 'payload authorities changed', [`actual_count=${value.length}`]);
+  const authorities: PayloadAuthority[] = [];
   for (const entry of value) {
     const record = expectRecord(entry, 'payload authority entry');
     const keys = Object.keys(record);
     if (!keys.includes('path') || !keys.includes('role')) fail('payload-contract', 'payload authority entry is missing path or role');
-    if (typeof record['path'] !== 'string' || typeof record['role'] !== 'string') fail('payload-contract', 'payload authority path and role must be strings');
-    if (Object.prototype.hasOwnProperty.call(record, 'sha256') && typeof record['sha256'] !== 'string') fail('payload-contract', 'payload authority sha256 must be a string when present');
+    const path = record['path'];
+    const role = record['role'];
+    const sha256 = record['sha256'];
+    if (typeof path !== 'string' || typeof role !== 'string') fail('payload-contract', 'payload authority path and role must be strings');
+    if (Object.prototype.hasOwnProperty.call(record, 'sha256')) {
+      if (typeof sha256 !== 'string') fail('payload-contract', 'payload authority sha256 must be a string when present');
+      authorities.push(Object.freeze({ path, role, sha256 }));
+    } else {
+      authorities.push(Object.freeze({ path, role }));
+    }
   }
+  return Object.freeze(authorities);
 }
 
 function validatePayload(payload: JsonRecord, skillByteCount: number): AutopilotRosterSetupSkillPayload {
@@ -364,7 +375,7 @@ function validatePayload(payload: JsonRecord, skillByteCount: number): Autopilot
   expectString(skillMd['sha256'], AUTOPILOT_ROSTER_SETUP_SKILL_SHA256, 'payload skill sha256');
   expectNumber(skillMd['byte_count'], skillByteCount, 'payload skill byte_count');
 
-  expectAuthorities(payload['authorities']);
+  const authorities = expectAuthorities(payload['authorities']);
 
   const tool = expectRecord(payload['required_tool_contract'], 'payload required_tool_contract');
   expectKeys(tool, ['operation', 'request_schema', 'result_schema', 'request_schemas', 'result_schemas', 'actions', 'v2_actions', 'zero_write_actions', 'write_action', 'custom_structural_not_launch_ready', 'w0_save_blocks_before_storage', 'save_success_visible_write_count_certified'], 'payload required_tool_contract');
@@ -407,7 +418,49 @@ function validatePayload(payload: JsonRecord, skillByteCount: number): Autopilot
   expectStringArray(conversation['approval_fields'], ['scope', 'candidate_set_sha256', 'approved_roster_sha256s_in_order', 'default_roster_id', 'default_roster_revision', 'default_roster_sha256', 'original_command', 'custom_proposal_sha256_for_custom_v2', 'validation_result_sha256_for_custom_v2', 'roster_sha256_for_custom_v2', 'manifest_sha256_for_custom_v2', 'approval_sha256_for_custom_v2'], 'payload approval_fields');
   expectStringArray(conversation['post_save'], ['fresh_pi_session_required', 'retry_exact_original_autopilot_command', 'never_auto_start'], 'payload post_save');
 
-  return payload as unknown as AutopilotRosterSetupSkillPayload;
+  return Object.freeze({
+    schema_version: 'autopilot.roster_setup_skill_payload.v1' as const,
+    skill_name: AUTOPILOT_ROSTER_SETUP_SKILL_NAME,
+    resource_kind: 'pi-skill' as const,
+    freeze_id: AUTOPILOT_ROSTER_SETUP_FREEZE_ID,
+    pi_minimum_version: AUTOPILOT_ROSTER_SETUP_PI_MINIMUM_VERSION,
+    normal_activation: 'inactive-skill-command-only' as const,
+    resources: Object.freeze({
+      skill_md: Object.freeze({
+        path: AUTOPILOT_ROSTER_SETUP_SKILL_MD_PATH,
+        sha256: AUTOPILOT_ROSTER_SETUP_SKILL_SHA256,
+        byte_count: AUTOPILOT_ROSTER_SETUP_SKILL_BYTE_COUNT,
+      }),
+    }),
+    authorities,
+    required_tool_contract: Object.freeze({
+      operation: 'autopilot_manage_rosters' as const,
+      request_schema: 'autopilot.roster_tool_request.v1' as const,
+      result_schema: 'autopilot.roster_tool_result.v1' as const,
+      request_schemas: ['autopilot.roster_tool_request.v1', 'autopilot.roster_tool_request.v2'] as const,
+      result_schemas: ['autopilot.roster_tool_result.v1', 'autopilot.roster_tool_result.v2'] as const,
+      actions: ['inspect', 'propose', 'reject', 'doctor', 'save'] as const,
+      v2_actions: ['propose-custom', 'reject', 'save'] as const,
+      zero_write_actions: ['inspect', 'propose', 'propose-custom', 'reject', 'doctor'] as const,
+      write_action: 'save' as const,
+      custom_structural_not_launch_ready: true as const,
+      w0_save_blocks_before_storage: true as const,
+      save_success_visible_write_count_certified: 3 as const,
+    }),
+    conversation_contract: Object.freeze({
+      mode: 'agent-first ordinary multi-turn conversation; no wizard, menu, or questionnaire' as const,
+      inactive_by_default: true as const,
+      no_run_worktree_or_spend_before_saved_retry: true as const,
+      secret_free_outputs: true as const,
+      project_trust_required_for_trusted_project_scope: true as const,
+      cruise_recommendation_only_when_ready: true as const,
+      blocked_and_converged_honesty_required: true as const,
+      approval_requires_exact_restatement: false as const,
+      approval_authorization: 'nonempty bounded user/rpc/interactive turn after current package-bound presentation; setup agent interprets approval semantics' as const,
+      approval_fields: ['scope', 'candidate_set_sha256', 'approved_roster_sha256s_in_order', 'default_roster_id', 'default_roster_revision', 'default_roster_sha256', 'original_command', 'custom_proposal_sha256_for_custom_v2', 'validation_result_sha256_for_custom_v2', 'roster_sha256_for_custom_v2', 'manifest_sha256_for_custom_v2', 'approval_sha256_for_custom_v2'] as const,
+      post_save: ['fresh_pi_session_required', 'retry_exact_original_autopilot_command', 'never_auto_start'] as const,
+    }),
+  });
 }
 
 function packageRootForModulePath(modulePath: string): string {

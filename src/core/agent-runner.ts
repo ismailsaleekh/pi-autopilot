@@ -105,7 +105,7 @@ import { assertRequestProfileMatchesAssignment, assertUnitSpecMatchesPinnedFacts
 import { unitSpecAuthorityProjection, type AutopilotRuntimeUnitSpec } from './roster/runtime-consumers.ts';
 import { isCentrallyTrustedW4CertifiedRoster } from './roster/providers/index.ts';
 import { readAuthorityFileIfPresent } from './roster/transaction.ts';
-import type { Roster } from './roster/provider-recipes.ts';
+import { parseProviderRoster } from './roster/provider-recipes.ts';
 
 type JsonRecord = Readonly<Record<string, unknown>>;
 type ProcessEnv = Readonly<Record<string, string | undefined>>;
@@ -1246,7 +1246,7 @@ async function assertCustomRosterCertificationForRunner(input: {
   readonly selection?: AuthenticatedPreRunSelection | undefined;
 }): Promise<void> {
   if (input.roster.generation_source !== 'user-custom') return;
-  const customRoster = input.roster as unknown as Roster;
+  const customRoster = parseProviderRoster(input.roster);
   const authorityRead = await readCustomRosterCertificationAuthority({ paths: input.paths, roster: customRoster });
   if (!authorityRead.ok) {
     throw new Error(`custom roster certification authority ${authorityRead.reason} for ${input.roster.roster_id}@${String(input.roster.roster_revision)}`);

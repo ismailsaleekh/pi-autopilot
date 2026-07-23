@@ -3,6 +3,7 @@ import { randomBytes } from 'node:crypto';
 import {
   assertAutopilotRosterContract,
   parseAutopilotRosterContract,
+  type AutopilotRosterContractBySchemaVersion,
 } from './contracts.ts';
 import { launchabilityBlockCodesForCandidates } from './activation-fence.ts';
 import { doctorRoleResults, doctorRosterInventory } from './doctor.ts';
@@ -12,6 +13,7 @@ import {
   type Roster,
   type RosterCandidate,
   type RosterCandidateSet,
+  parseProviderRosterCandidateSet,
   proposeRosterCandidates,
   validateCandidateSetApproval,
 } from './provider-recipes.ts';
@@ -102,6 +104,8 @@ type RosterToolReceipt = Record<string, unknown> & {
   readonly zero_secrets: boolean;
   readonly receipt_sha256: Digest;
 };
+
+type RosterToolReceiptContract = AutopilotRosterContractBySchemaVersion[typeof RECEIPT_SCHEMA];
 
 interface RosterToolResultPreimage {
   readonly schema_version: typeof RESULT_SCHEMA;
@@ -1282,7 +1286,7 @@ function customCandidateSetForValidation(input: {
     candidate_set_id: `candidate-set-${candidateSetIdHash}`,
   };
   const candidateSet = { ...withoutHash, candidate_set_sha256: canonicalSha256(withoutHash) };
-  return parseAutopilotRosterContract('autopilot.roster_candidate_set.v1', candidateSet) as unknown as RosterCandidateSet;
+  return parseProviderRosterCandidateSet(candidateSet);
 }
 
 function customV1CandidateForProposal(roster: Roster, proposal: CustomRosterProposalV2): RosterCandidate {
@@ -1600,10 +1604,40 @@ function normalizeSaveCapabilityResultV2(
 
 function parseReceipt(value: unknown): RosterToolReceipt | null {
   try {
-    return parseAutopilotRosterContract(RECEIPT_SCHEMA, value) as unknown as RosterToolReceipt;
+    return rosterToolReceiptFromContract(parseAutopilotRosterContract(RECEIPT_SCHEMA, value));
   } catch {
     return null;
   }
+}
+
+function rosterToolReceiptFromContract(contract: RosterToolReceiptContract): RosterToolReceipt {
+  return Object.freeze({
+    schema_version: contract.schema_version,
+    scope: contract.scope,
+    saved_rosters: Object.freeze(contract.saved_rosters.map((ref) => Object.freeze({
+      roster_id: ref.roster_id,
+      roster_revision: ref.roster_revision,
+      roster_sha256: digestFromContract(ref.roster_sha256, 'receipt.saved_rosters.roster_sha256'),
+      assignment_set_sha256: digestFromContract(ref.assignment_set_sha256, 'receipt.saved_rosters.assignment_set_sha256'),
+    }))),
+    default_roster_id: contract.default_roster_id,
+    default_roster_revision: contract.default_roster_revision,
+    default_roster_sha256: digestFromContract(contract.default_roster_sha256, 'receipt.default_roster_sha256'),
+    approved_candidate_set_sha256: digestFromContract(contract.approved_candidate_set_sha256, 'receipt.approved_candidate_set_sha256'),
+    approved_roster_sha256s: Object.freeze(contract.approved_roster_sha256s.map((sha) => digestFromContract(sha, 'receipt.approved_roster_sha256s'))),
+    config_sha256: digestFromContract(contract.config_sha256, 'receipt.config_sha256'),
+    original_command: contract.original_command,
+    fresh_session_required: contract.fresh_session_required,
+    zero_secrets: contract.zero_secrets,
+    issued_at: contract.issued_at,
+    receipt_sha256: digestFromContract(contract.receipt_sha256, 'receipt.receipt_sha256'),
+  });
+}
+
+function digestFromContract(value: string, label: string): Digest {
+  const digest = digestField(value);
+  if (digest === null) throw new Error(`${label} must be a sha256 digest`);
+  return digest;
 }
 
 function receiptMatchesSave(request: RosterToolRequest | RosterToolSaveCustomRequestV2, candidateSet: RosterCandidateSet, receipt: RosterToolReceipt): boolean {

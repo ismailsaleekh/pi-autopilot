@@ -600,13 +600,13 @@ function at(object: JsonObject, key: string, path: string): JsonValue {
   return value;
 }
 
-function asObject(value: JsonValue, path: string): JsonObject {
+function requireJsonObjectValue(value: JsonValue, path: string): JsonObject {
   if (!isJsonObject(value)) fail('fixture-contract-violation', `${path} must be an object`);
   return value;
 }
 
 function objectAt(object: JsonObject, key: string, path: string): JsonObject {
-  return asObject(at(object, key, path), `${path}.${key}`);
+  return requireJsonObjectValue(at(object, key, path), `${path}.${key}`);
 }
 
 function asArray(value: JsonValue, path: string): readonly JsonValue[] {
@@ -656,7 +656,7 @@ function stringsAt(object: JsonObject, key: string, path: string): readonly stri
 }
 
 function objectsAt(object: JsonObject, key: string, path: string): readonly JsonObject[] {
-  return arrayAt(object, key, path).map((entry, index) => asObject(entry, `${path}.${key}[${String(index)}]`));
+  return arrayAt(object, key, path).map((entry, index) => requireJsonObjectValue(entry, `${path}.${key}[${String(index)}]`));
 }
 
 function exactKeys(object: JsonObject, expected: readonly string[], path: string): void {
@@ -925,7 +925,7 @@ function validateAccounting(fixtureId: string, action: string, ok: boolean, stat
 function validateExpectedNestedResult(expected: JsonObject, expectedDiagnosticCodes: readonly string[], diagnosticRegistry: readonly string[], path: string): void {
   const result = expected['result'];
   if (result === undefined) return;
-  const resultObject = asObject(result, `${path}.expected.result`);
+  const resultObject = requireJsonObjectValue(result, `${path}.expected.result`);
   const nestedWriteCount = integerAt(resultObject, 'write_count', `${path}.expected.result`);
   const nestedLockCount = integerAt(resultObject, 'lock_count', `${path}.expected.result`);
   const nestedFilesTouched = stringsAt(resultObject, 'files_touched', `${path}.expected.result`);
@@ -1049,7 +1049,7 @@ function validateHistoricalFixtureCases(cases: ReadonlyMap<string, Phase37Fixtur
     const expected = objectAt(fixtureCase, 'expected', fixtureCase.fixture_id);
     assertCondition(booleanAt(expected, 'historical_bytes_mutated', `fixture ${fixtureCase.fixture_id}.expected`) === false, 'fixture-contract-violation', `fixture ${fixtureCase.fixture_id} must preserve historical bytes`);
     const resultValue = expected['result'];
-    if (resultValue !== undefined) assertCondition(booleanAt(asObject(resultValue, `fixture ${fixtureCase.fixture_id}.expected.result`), 'historical_bytes_mutated', `fixture ${fixtureCase.fixture_id}.expected.result`) === false, 'fixture-contract-violation', `fixture ${fixtureCase.fixture_id} result must preserve historical bytes`);
+    if (resultValue !== undefined) assertCondition(booleanAt(requireJsonObjectValue(resultValue, `fixture ${fixtureCase.fixture_id}.expected.result`), 'historical_bytes_mutated', `fixture ${fixtureCase.fixture_id}.expected.result`) === false, 'fixture-contract-violation', `fixture ${fixtureCase.fixture_id} result must preserve historical bytes`);
     for (const postcondition of objectsAt(fixtureCase, 'filesystem_postconditions', fixtureCase.fixture_id)) {
       const state = stringAt(postcondition, 'state', `fixture ${fixtureCase.fixture_id}.filesystem_postconditions`);
       if (state === 'byte-equal-preserved') assertDigest(stringAt(postcondition, 'sha256', `fixture ${fixtureCase.fixture_id}.filesystem_postconditions`), `fixture ${fixtureCase.fixture_id}.filesystem_postconditions.sha256`);

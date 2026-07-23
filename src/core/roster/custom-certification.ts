@@ -8,6 +8,8 @@ import {
   assignmentSetSha256,
   requestProfileFromAssignment,
   validateRequestProfileForAssignment,
+  parseProviderQualificationManifest,
+  parseProviderRoster,
   type Assignment,
   type AuthSummary,
   type BillingSummary,
@@ -417,7 +419,7 @@ function invalidCustomValidation(requestSha256: Digest | null, codes: readonly s
 }
 
 export function canonicalRosterBytes(roster: Roster): Uint8Array {
-  const parsed = parseAutopilotRosterContract('autopilot.roster.v1', roster) as unknown as Roster;
+  const parsed = parseProviderRoster(roster);
   return new TextEncoder().encode(autopilotRosterContractCanonicalJson(parsed));
 }
 
@@ -560,7 +562,7 @@ export function parseCustomRosterCertificationAuthority(value: unknown): CustomR
   const validationResultSha256 = value['validation_result_sha256'] as Digest;
   const manifestSha256 = value['manifest_sha256'] as Digest;
   const authoritySha256 = value['authority_sha256'] as Digest;
-  const manifest = parseManifest(value['qualification_manifest'] as QualificationManifest);
+  const manifest = parseManifest(value['qualification_manifest']);
   if (manifest === null || manifest.manifest_id !== value['manifest_id'] || manifest.manifest_sha256 !== manifestSha256) return null;
   const withoutHash = {
     schema_version: CUSTOM_ROSTER_CERTIFICATION_AUTHORITY_SCHEMA,
@@ -800,7 +802,7 @@ function safeValueDigest(value: unknown): Digest {
 
 function parseCustomRoster(value: unknown): { readonly ok: true; readonly roster: Roster } | { readonly ok: false } {
   try {
-    return { ok: true, roster: parseAutopilotRosterContract('autopilot.roster.v1', value) as unknown as Roster };
+    return { ok: true, roster: parseProviderRoster(value) };
   } catch {
     return { ok: false };
   }
@@ -1001,9 +1003,9 @@ function validateCustomRosterStructure(input: {
   return [...codes].sort((left, right) => left.localeCompare(right));
 }
 
-function parseManifest(value: QualificationManifest): QualificationManifest | null {
+function parseManifest(value: unknown): QualificationManifest | null {
   try {
-    return parseAutopilotRosterContract('autopilot.certification_manifest.v1', value) as unknown as QualificationManifest;
+    return parseProviderQualificationManifest(value);
   } catch {
     return null;
   }

@@ -354,9 +354,15 @@ export function canonicalSha256(value: unknown): Digest {
   return sha256Digest(canonicalJsonWithLf(value));
 }
 
-export function hashObjectOmitting<T extends Record<string, unknown>>(value: T, hashField: keyof T): Digest {
+type OwnStringKey<T extends object> = Extract<keyof T, string>;
+
+function ownStringKeys<T extends object>(value: T): readonly OwnStringKey<T>[] {
+  return Object.keys(value) as OwnStringKey<T>[];
+}
+
+export function hashObjectOmitting<T extends object, K extends OwnStringKey<T>>(value: T, hashField: K): Digest {
   const withoutHash: Record<string, unknown> = {};
-  for (const key of Object.keys(value)) {
+  for (const key of ownStringKeys(value)) {
     if (key !== hashField) {
       withoutHash[key] = value[key];
     }
@@ -443,7 +449,7 @@ export function verifyRoutePolicySeeds(policies: readonly RoutePolicy[] = ROUTE_
       issues.push(`duplicate route policy ${identity}`);
     }
     seen.add(identity);
-    const expected = hashObjectOmitting(policy as unknown as Record<string, unknown>, 'route_policy_sha256');
+    const expected = hashObjectOmitting(policy, 'route_policy_sha256');
     if (expected !== policy.route_policy_sha256) {
       issues.push(`${identity} hash mismatch: expected ${expected}, found ${policy.route_policy_sha256}`);
     }

@@ -6491,18 +6491,21 @@ export function assertAutopilotRosterContract(
   if (issues.length > 0) throw new AutopilotRosterContractValidationError(schemaVersion, issues);
 }
 
-export function parseAutopilotRosterContract<T extends AutopilotRosterContractSchemaVersion>(
+export type AutopilotRosterContractForSchema<T extends AutopilotRosterContractSchemaVersion> =
+  AutopilotRosterContractBySchemaVersion[T];
+
+export function parseAutopilotRosterContract<const T extends AutopilotRosterContractSchemaVersion>(
   schemaVersion: T,
   value: unknown,
-): AutopilotRosterContractBySchemaVersion[T] {
+): AutopilotRosterContractForSchema<T> {
   assertAutopilotRosterContract(schemaVersion, value);
-  return value as AutopilotRosterContractBySchemaVersion[T];
+  return value as AutopilotRosterContractForSchema<T>;
 }
 
-export function parseAutopilotRosterContractJson<T extends AutopilotRosterContractSchemaVersion>(
+export function parseAutopilotRosterContractJson<const T extends AutopilotRosterContractSchemaVersion>(
   schemaVersion: T,
   text: string,
-): AutopilotRosterContractBySchemaVersion[T] {
+): AutopilotRosterContractForSchema<T> {
   return parseAutopilotRosterContract(schemaVersion, parseRosterJsonWithDuplicateKeyRejection(text));
 }
 
