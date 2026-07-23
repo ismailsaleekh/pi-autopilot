@@ -1,5 +1,7 @@
 {
   "schema_version": "autopilot.unit_failure.v1",
+  "producer_build": "1.2.0-s1",
+  "producer_generation": 3,
   "action": "reset",
   "workstream": "workstream-bug177",
   "workstream_run": "workstream-run-bug177",

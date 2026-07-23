@@ -1,89 +1,89 @@
 import { createHash } from 'node:crypto';
 
-import { AUTOPILOT_JSON_SCHEMAS } from '../contracts/schemas.ts';
-import { AUTOPILOT_SCHEMA_NAMES } from '../names.ts';
-import { AUTOPILOT_COORDINATION_JSON_SCHEMAS, type CoordinationJsonSchema } from './schemas.ts';
-import { COORDINATOR_IMPLEMENTATION_BUILD } from './runtime-constants.ts';
-import { CoordinationRuntimeError } from './failures.ts';
-import { BUG_177_HISTORICAL_UNIT_FAILURE_PRODUCERS, UNIT_FAILURE_CURRENT_PRODUCER_GENERATION } from './unit-failure-producer-provenance.ts';
-export { BUG_177_HISTORICAL_UNIT_FAILURE_PRODUCERS, UNIT_FAILURE_CURRENT_PRODUCER_GENERATION } from './unit-failure-producer-provenance.ts';
+import { AUTOPILOT_JSON_SCHEMAS } from '../contracts/schemas.js';
+import { AUTOPILOT_SCHEMA_NAMES } from '../names.js';
+import { AUTOPILOT_COORDINATION_JSON_SCHEMAS,                             } from './schemas.js';
+import { COORDINATOR_IMPLEMENTATION_BUILD } from './runtime-constants.js';
+import { CoordinationRuntimeError } from './failures.js';
+import { BUG_177_HISTORICAL_UNIT_FAILURE_PRODUCERS, UNIT_FAILURE_CURRENT_PRODUCER_GENERATION } from './unit-failure-producer-provenance.js';
+export { BUG_177_HISTORICAL_UNIT_FAILURE_PRODUCERS, UNIT_FAILURE_CURRENT_PRODUCER_GENERATION } from './unit-failure-producer-provenance.js';
 
-export type VersionedIngressUnknownFieldPolicy = 'reject' | 'preserve';
-export type VersionedIngressPersistenceKind = 'package-contract' | 'coordination-store' | 'runtime-evidence' | 'runtime-state' | 'migration-artifact' | 'transport-or-page';
+                                                                       
+                                                                                                                                                                            
 
-export interface VersionedIngressAbsentFieldDefault {
-  readonly field: string;
-  readonly value: string | number | boolean | null;
-}
+                                                     
+                         
+                                                   
+ 
 
-export interface VersionedIngressProducerRange {
-  readonly first_generation: number;
-  readonly last_generation: number;
-  readonly producer_build: string;
-  readonly exact_fields: readonly string[];
-  readonly required_fields: readonly string[];
-  readonly absent_field_defaults: readonly VersionedIngressAbsentFieldDefault[];
-  readonly unknown_field_policy: VersionedIngressUnknownFieldPolicy;
-  readonly current: boolean;
-}
+                                                
+                                    
+                                   
+                                  
+                                           
+                                              
+                                                                                
+                                                                    
+                            
+ 
 
-export interface PersistedArtifactFamilyDefinition {
-  readonly family: string;
-  readonly schema_version: string;
-  readonly persistence: VersionedIngressPersistenceKind;
-  readonly notes: string;
-  readonly producer_ranges: readonly VersionedIngressProducerRange[];
-}
+                                                    
+                          
+                                  
+                                                        
+                         
+                                                                     
+ 
 
-export interface VersionedIngressSelection {
-  readonly family: PersistedArtifactFamilyDefinition;
-  readonly range: VersionedIngressProducerRange;
-  readonly producer_generation: number;
-}
+                                            
+                                                     
+                                                
+                                       
+ 
 
-interface JsonRecord {
-  readonly [key: string]: unknown;
-}
+                      
+                                  
+ 
 
-export interface VersionedPersistedArtifactIngress {
-  readonly family: string;
-  readonly schema_version: string;
-  readonly producer_build: string;
-  readonly producer_generation: number;
-  readonly current: boolean;
-  readonly original_sha256: `sha256:${string}`;
-  readonly original_bytes: Uint8Array;
-  readonly document: JsonRecord;
-  readonly normalized_document: JsonRecord;
-  readonly original_fields: readonly string[];
-  readonly unknown_fields: readonly string[];
-  readonly applied_defaults: readonly VersionedIngressAbsentFieldDefault[];
-}
+                                                    
+                          
+                                  
+                                  
+                                       
+                            
+                                               
+                                      
+                                
+                                           
+                                              
+                                             
+                                                                           
+ 
 
-export interface UnitFailureIngressIdentity {
-  readonly workstream: string;
-  readonly workstreamRun: string;
-  readonly unitId: string;
-  readonly attempt: number;
-}
+                                             
+                              
+                                 
+                          
+                           
+ 
 
-export interface UnitFailureVersionedIngressFacts {
-  readonly action: 'quarantine' | 'reset' | 'preserve' | 'abort';
-  readonly unitWorktreePath: string;
-  readonly captureCommitSha: string | null;
-  readonly captureRef: string | null;
-  readonly originalSha256: `sha256:${string}`;
-  readonly originalFields: readonly string[];
-  readonly appliedDefaults: readonly VersionedIngressAbsentFieldDefault[];
-}
+                                                   
+                                                                 
+                                    
+                                           
+                                     
+                                              
+                                             
+                                                                          
+ 
 
-export interface UnitFailureVersionedIngress {
-  readonly kind: 'unit_failure';
-  readonly ingress: VersionedPersistedArtifactIngress;
-  readonly facts: UnitFailureVersionedIngressFacts;
-}
+                                              
+                                
+                                                      
+                                                   
+ 
 
-const CURRENT_PRODUCER_PROVENANCE_FIELDS = Object.freeze(['producer_build', 'producer_generation'] as const);
+const CURRENT_PRODUCER_PROVENANCE_FIELDS = Object.freeze(['producer_build', 'producer_generation']         );
 
 const CURRENT_UNIT_FAILURE_FIELDS = Object.freeze([
   'action', 'attempt', 'branch', 'capture_commit_sha', 'capture_ref', 'created_at', 'dirty_paths', 'git_common_dir', 'git_head_after', 'git_head_before',
@@ -94,65 +94,65 @@ const HISTORICAL_INITIAL_UNIT_FAILURE_FIELDS = Object.freeze([
 ].sort());
 const HISTORICAL_CAPTURE_COMMIT_UNIT_FAILURE_FIELDS = Object.freeze([...HISTORICAL_INITIAL_UNIT_FAILURE_FIELDS, 'capture_commit_sha'].sort());
 
-function sortedUnique(values: readonly string[]): readonly string[] {
+function sortedUnique(values                   )                    {
   return Object.freeze([...new Set(values)].sort());
 }
 
-function isRecord(value: unknown): value is JsonRecord {
+function isRecord(value         )                      {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function asRecord(value: unknown, label: string): JsonRecord {
+function asRecord(value         , label        )             {
   if (!isRecord(value)) throw new CoordinationRuntimeError('invalid-state', `${label} must be a JSON object`);
   return value;
 }
 
-function stringField(record: JsonRecord, field: string, label: string, maxLength: number): string {
+function stringField(record            , field        , label        , maxLength        )         {
   const value = record[field];
   if (typeof value !== 'string' || value.length === 0 || value.length > maxLength) throw new CoordinationRuntimeError('invalid-state', `${label}.${field} must be bounded non-empty text`);
   return value;
 }
 
-function integerField(record: JsonRecord, field: string, label: string): number {
+function integerField(record            , field        , label        )         {
   const value = record[field];
   if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 1) throw new CoordinationRuntimeError('invalid-state', `${label}.${field} must be a positive integer`);
   return value;
 }
 
-function digest(bytes: Uint8Array): `sha256:${string}` {
+function digest(bytes            )                     {
   return `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
 }
 
-function decodeJsonDocument(bytes: Uint8Array, label: string): JsonRecord {
-  let parsed: unknown;
+function decodeJsonDocument(bytes            , label        )             {
+  let parsed         ;
   try {
-    parsed = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)) as unknown;
+    parsed = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes))           ;
   } catch (error) {
     throw new CoordinationRuntimeError('invalid-state', `${label} is not valid UTF-8 JSON`, [error instanceof Error ? error.message : String(error)]);
   }
   return asRecord(parsed, label);
 }
 
-function schemaConst(schema: CoordinationJsonSchema, label: string): string {
+function schemaConst(schema                        , label        )         {
   const properties = asRecord(schema['properties'], `${label}.properties`);
   const schemaVersion = asRecord(properties['schema_version'], `${label}.properties.schema_version`)['const'];
   if (typeof schemaVersion !== 'string' || schemaVersion.length === 0) throw new CoordinationRuntimeError('invalid-state', `${label} lacks an exact schema_version const`);
   return schemaVersion;
 }
 
-function fieldNamesFromJsonSchema(schema: Readonly<Record<string, unknown>>): readonly string[] {
+function fieldNamesFromJsonSchema(schema                                   )                    {
   const properties = schema['properties'];
   if (!isRecord(properties)) return Object.freeze(['schema_version']);
   return sortedUnique(Object.keys(properties));
 }
 
-function requiredFieldNamesFromJsonSchema(schema: Readonly<Record<string, unknown>>): readonly string[] {
+function requiredFieldNamesFromJsonSchema(schema                                   )                    {
   const required = schema['required'];
   if (!Array.isArray(required)) return Object.freeze(['schema_version']);
-  return sortedUnique(required.filter((field): field is string => typeof field === 'string'));
+  return sortedUnique(required.filter((field)                  => typeof field === 'string'));
 }
 
-function currentRange(exactFields: readonly string[], requiredFields: readonly string[] = exactFields): VersionedIngressProducerRange {
+function currentRange(exactFields                   , requiredFields                    = exactFields)                                {
   return Object.freeze({
     first_generation: 1,
     last_generation: 1,
@@ -165,7 +165,7 @@ function currentRange(exactFields: readonly string[], requiredFields: readonly s
   });
 }
 
-function currentOnlyFamily(schemaVersion: string, persistence: VersionedIngressPersistenceKind, fields: readonly string[], required: readonly string[], notes: string): PersistedArtifactFamilyDefinition {
+function currentOnlyFamily(schemaVersion        , persistence                                 , fields                   , required                   , notes        )                                    {
   return Object.freeze({
     family: schemaVersion,
     schema_version: schemaVersion,
@@ -182,7 +182,7 @@ const packageContractFamilies = AUTOPILOT_SCHEMA_NAMES.map((schemaVersion) => {
   return currentOnlyFamily(schemaVersion, 'package-contract', fields, required, 'package contract artifact inventoried from AUTOPILOT_SCHEMA_NAMES');
 });
 
-function coordinationSchemaVersion(name: string, schema: CoordinationJsonSchema): string {
+function coordinationSchemaVersion(name        , schema                        )         {
   const properties = schema['properties'];
   if (isRecord(properties)) {
     const schemaVersion = properties['schema_version'];
@@ -232,7 +232,7 @@ const EXTRA_PERSISTED_ARTIFACT_SCHEMAS = Object.freeze([
   'autopilot.worktree_bootstrap.v1', 'autopilot.worktree_cleanup_result.v1', 'autopilot.worktree_index.v1', 'autopilot.worktree_ledger.v1',
   'autopilot.worktree_metadata_reconcile_evidence.v1', 'autopilot.worktree_metadata_reconcile_intent.v1', 'autopilot.worktree_operation_evidence.v1',
   'autopilot.worktree_operation_key.v2', 'autopilot.worktree_rollback_supersession.v1',
-] as const);
+]         );
 
 const SOURCE_ANCHORED_EXTRA_PERSISTED_ARTIFACT_FIELDS = Object.freeze({
   'autopilot.active_parent.v1': ['active_epoch_started_at', 'active_run_epoch', 'active_run_receipt_id', 'autopilot_id', 'boot_id', 'branch', 'git_common_dir', 'main_worktree_path', 'origin_url', 'pid', 'repo_key', 'runtime_root', 'schema_version', 'source_repo', 'started_at', 'status', 'target_base_sha', 'target_branch', 'workstream', 'workstream_run', 'worktree_root'],
@@ -245,17 +245,17 @@ const SOURCE_ANCHORED_EXTRA_PERSISTED_ARTIFACT_FIELDS = Object.freeze({
   'autopilot.schema9_read_recovery_retirement.v1': ['disposition', 'edit_lease_id', 'observation_id', 'repo_id', 'retired_event_seq', 'retired_recovery_work', 'schema_version', 'source_identity', 'workstream_run'],
   'autopilot.schema9_read_retirement.v1': ['acquisition_group_id', 'disposition', 'edit_lease_id', 'original_lease_payload', 'original_payload_sha256', 'owner', 'repo_id', 'requested_read', 'retired_event_seq', 'retired_recovery_work', 'revalidation_required', 'schema_version', 'workstream_run'],
   'autopilot.unit_failure.v1': CURRENT_UNIT_FAILURE_FIELDS,
-} as const satisfies Readonly<Record<string, readonly string[]>>);
+}                                                               );
 
-function sourceAnchoredExtraArtifactFields(schemaVersion: string): readonly string[] {
-  return SOURCE_ANCHORED_EXTRA_PERSISTED_ARTIFACT_FIELDS[schemaVersion as keyof typeof SOURCE_ANCHORED_EXTRA_PERSISTED_ARTIFACT_FIELDS] ?? Object.freeze(['schema_version']);
+function sourceAnchoredExtraArtifactFields(schemaVersion        )                    {
+  return SOURCE_ANCHORED_EXTRA_PERSISTED_ARTIFACT_FIELDS[schemaVersion                                                                ] ?? Object.freeze(['schema_version']);
 }
 
 const extraFamilies = EXTRA_PERSISTED_ARTIFACT_SCHEMAS
   .filter((schemaVersion) => schemaVersion !== 'autopilot.unit_failure.v1')
   .map((schemaVersion) => currentOnlyFamily(schemaVersion, schemaVersion.includes('coordinator_') ? 'transport-or-page' : 'runtime-evidence', sourceAnchoredExtraArtifactFields(schemaVersion), sourceAnchoredExtraArtifactFields(schemaVersion), 'schema-bearing persisted artifact inventoried from source-anchored producer/consumer definitions'));
 
-const UNIT_FAILURE_FAMILY: PersistedArtifactFamilyDefinition = Object.freeze({
+const UNIT_FAILURE_FAMILY                                    = Object.freeze({
   family: 'autopilot.unit_failure.v1',
   schema_version: 'autopilot.unit_failure.v1',
   persistence: 'runtime-evidence',
@@ -294,8 +294,8 @@ const UNIT_FAILURE_FAMILY: PersistedArtifactFamilyDefinition = Object.freeze({
   ]),
 });
 
-function dedupeFamilies(families: readonly PersistedArtifactFamilyDefinition[]): readonly PersistedArtifactFamilyDefinition[] {
-  const byFamily = new Map<string, PersistedArtifactFamilyDefinition>();
+function dedupeFamilies(families                                              )                                               {
+  const byFamily = new Map                                           ();
   for (const family of families) {
     if (!byFamily.has(family.family)) byFamily.set(family.family, family);
   }
@@ -311,15 +311,15 @@ export const VERSIONED_PERSISTED_ARTIFACT_FAMILY_REGISTRY = dedupeFamilies([
 
 export const VERSIONED_PERSISTED_ARTIFACT_FAMILY_IDS = Object.freeze(VERSIONED_PERSISTED_ARTIFACT_FAMILY_REGISTRY.map((family) => family.family));
 
-export function assertPersistedArtifactFamilyRegistryWellFormed(registry: readonly PersistedArtifactFamilyDefinition[] = VERSIONED_PERSISTED_ARTIFACT_FAMILY_REGISTRY): void {
-  const familyIds = new Set<string>();
+export function assertPersistedArtifactFamilyRegistryWellFormed(registry                                               = VERSIONED_PERSISTED_ARTIFACT_FAMILY_REGISTRY)       {
+  const familyIds = new Set        ();
   for (const family of registry) {
     if (familyIds.has(family.family)) throw new CoordinationRuntimeError('invalid-state', 'versioned ingress registry has a duplicate family', [family.family]);
     familyIds.add(family.family);
     if (family.schema_version.length === 0 || family.producer_ranges.length === 0) throw new CoordinationRuntimeError('invalid-state', 'versioned ingress registry family is incomplete', [family.family]);
     const ranges = [...family.producer_ranges].sort((left, right) => left.first_generation - right.first_generation || left.last_generation - right.last_generation);
     let expectedFirst = 1;
-    const producerBuilds = new Set<string>();
+    const producerBuilds = new Set        ();
     for (const range of ranges) {
       if (!Number.isSafeInteger(range.first_generation) || !Number.isSafeInteger(range.last_generation) || range.first_generation < 1 || range.last_generation < range.first_generation) throw new CoordinationRuntimeError('invalid-state', 'versioned ingress registry has an invalid producer generation range', [family.family, JSON.stringify(range)]);
       if (range.first_generation !== expectedFirst) throw new CoordinationRuntimeError('invalid-state', 'versioned ingress registry has a producer generation gap or overlap', [family.family, `expected=${String(expectedFirst)}`, `actual=${String(range.first_generation)}-${String(range.last_generation)}`]);
@@ -336,18 +336,18 @@ export function assertPersistedArtifactFamilyRegistryWellFormed(registry: readon
   }
 }
 
-export function persistedArtifactFamily(family: string, registry: readonly PersistedArtifactFamilyDefinition[] = VERSIONED_PERSISTED_ARTIFACT_FAMILY_REGISTRY): PersistedArtifactFamilyDefinition {
+export function persistedArtifactFamily(family        , registry                                               = VERSIONED_PERSISTED_ARTIFACT_FAMILY_REGISTRY)                                    {
   const matches = registry.filter((candidate) => candidate.family === family);
   if (matches.length !== 1 || matches[0] === undefined) throw new CoordinationRuntimeError('invalid-request', 'unsupported persisted artifact family', [family]);
   return matches[0];
 }
 
-export function selectVersionedIngressProducer(input: {
-  readonly family: string;
-  readonly producer_build: string;
-  readonly producer_generation: number;
-  readonly registry?: readonly PersistedArtifactFamilyDefinition[];
-}): VersionedIngressSelection {
+export function selectVersionedIngressProducer(input   
+                          
+                                  
+                                       
+                                                                   
+ )                            {
   const family = persistedArtifactFamily(input.family, input.registry ?? VERSIONED_PERSISTED_ARTIFACT_FAMILY_REGISTRY);
   const buildMatches = family.producer_ranges.filter((range) => range.producer_build === input.producer_build);
   if (buildMatches.length === 0) throw new CoordinationRuntimeError('protocol-mismatch', 'unsupported persisted artifact producer_build; compatibility is not inferred from semver or shape', [family.family, input.producer_build]);
@@ -360,13 +360,13 @@ export function selectVersionedIngressProducer(input: {
   return { family, range, producer_generation: generation };
 }
 
-export function parseVersionedPersistedArtifact(input: {
-  readonly family: string;
-  readonly producer_build: string;
-  readonly bytes: Uint8Array;
-  readonly producer_generation: number;
-  readonly registry?: readonly PersistedArtifactFamilyDefinition[];
-}): VersionedPersistedArtifactIngress {
+export function parseVersionedPersistedArtifact(input   
+                          
+                                  
+                             
+                                       
+                                                                   
+ )                                    {
   const selection = selectVersionedIngressProducer({ family: input.family, producer_build: input.producer_build, producer_generation: input.producer_generation, ...(input.registry === undefined ? {} : { registry: input.registry }) });
   const document = decodeJsonDocument(input.bytes, selection.family.family);
   if (stringField(document, 'schema_version', selection.family.family, 192) !== selection.family.schema_version) throw new CoordinationRuntimeError('schema-mismatch', 'persisted artifact schema_version does not match its selected family', [selection.family.family]);
@@ -378,8 +378,8 @@ export function parseVersionedPersistedArtifact(input: {
   for (const field of selection.range.required_fields) {
     if (!fields.includes(field)) throw new CoordinationRuntimeError('schema-mismatch', 'persisted artifact is missing a required field for its exact producer generation', [selection.family.family, field]);
   }
-  const normalized: Record<string, unknown> = { ...document };
-  const applied: VersionedIngressAbsentFieldDefault[] = [];
+  const normalized                          = { ...document };
+  const applied                                       = [];
   for (const defaultField of selection.range.absent_field_defaults) {
     if (!fields.includes(defaultField.field)) {
       normalized[defaultField.field] = defaultField.value;
@@ -402,35 +402,35 @@ export function parseVersionedPersistedArtifact(input: {
   });
 }
 
-export function roundTripPersistedArtifactIngress(ingress: VersionedPersistedArtifactIngress): Uint8Array {
+export function roundTripPersistedArtifactIngress(ingress                                   )             {
   return new Uint8Array(ingress.original_bytes);
 }
 
-function parseUnitFailureAction(document: JsonRecord): 'quarantine' | 'reset' | 'preserve' | 'abort' {
+function parseUnitFailureAction(document            )                                                {
   const action = stringField(document, 'action', 'unit failure evidence', 32);
   if (action !== 'quarantine' && action !== 'reset' && action !== 'preserve' && action !== 'abort') throw new CoordinationRuntimeError('invalid-state', 'unit failure evidence action is invalid');
   return action;
 }
 
-function stringArrayField(document: JsonRecord, field: string): readonly string[] {
+function stringArrayField(document            , field        )                    {
   const value = document[field];
   if (!Array.isArray(value) || value.length > 4096 || value.some((entry) => typeof entry !== 'string' || entry.length === 0 || entry.length > 1024)) throw new CoordinationRuntimeError('invalid-state', `unit failure evidence ${field} must be a bounded string array`);
   return Object.freeze(value.map((entry) => String(entry)));
 }
 
-function nullableText(document: JsonRecord, field: string): string | null {
+function nullableText(document            , field        )                {
   const value = document[field];
   if (value === null) return null;
   if (typeof value !== 'string' || value.length === 0 || value.length > 1024) throw new CoordinationRuntimeError('invalid-state', `unit failure evidence ${field} must be bounded text or null`);
   return value;
 }
 
-export function parseVersionedUnitFailureIngress(input: {
-  readonly bytes: Uint8Array;
-  readonly producer_build: string;
-  readonly identity: UnitFailureIngressIdentity;
-  readonly producer_generation: number;
-}): UnitFailureVersionedIngress {
+export function parseVersionedUnitFailureIngress(input   
+                             
+                                  
+                                                
+                                       
+ )                              {
   const ingress = parseVersionedPersistedArtifact({ family: 'autopilot.unit_failure.v1', producer_build: input.producer_build, bytes: input.bytes, producer_generation: input.producer_generation });
   const document = ingress.normalized_document;
   if (stringField(document, 'workstream', 'unit failure evidence', 192) !== input.identity.workstream) throw new CoordinationRuntimeError('invalid-state', 'unit failure evidence workstream does not match durable ownership');

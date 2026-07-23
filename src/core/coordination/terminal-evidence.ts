@@ -2,7 +2,9 @@ import { createHash } from 'node:crypto';
 
 import { parseAutopilotExecutionAudit, parseAutopilotReceipt, parseAutopilotStatusEntry } from '../contracts/index.ts';
 import { CoordinationRuntimeError } from './failures.ts';
+import { COORDINATOR_IMPLEMENTATION_BUILD } from './runtime-constants.ts';
 import { AUTOPILOT_CHILD_TERMINAL_ACCEPTANCE_SCHEMA, parseAutopilotChildTerminalAcceptance } from './terminal-acceptance.ts';
+import { BUG_177_HISTORICAL_UNIT_FAILURE_PRODUCERS, UNIT_FAILURE_CURRENT_PRODUCER_GENERATION } from './unit-failure-producer-provenance.ts';
 import type { CoordinationReconciliationSource } from './types.ts';
 
 interface JsonMap {
@@ -81,6 +83,8 @@ export interface HistoricalUnitFailureEvidenceProvenance {
   readonly acceptedEventSeq: number;
   readonly acceptedAt: string;
   readonly schema10AppliedAt: string;
+  readonly producerBuild: string;
+  readonly producerGeneration: number;
 }
 
 export interface HistoricalUnitFailureRegenerationCandidate {
@@ -108,7 +112,7 @@ export type UnitFailureEvidenceIngress =
 
 const CURRENT_UNIT_FAILURE_FIELDS = Object.freeze([
   'action', 'attempt', 'branch', 'capture_commit_sha', 'capture_ref', 'created_at', 'dirty_paths', 'git_common_dir', 'git_head_after', 'git_head_before',
-  'postcondition_worktree_clean', 'schema_version', 'summary', 'unit_id', 'unit_worktree_path', 'workstream', 'workstream_run',
+  'postcondition_worktree_clean', 'producer_build', 'producer_generation', 'schema_version', 'summary', 'unit_id', 'unit_worktree_path', 'workstream', 'workstream_run',
 ].sort());
 const HISTORICAL_INITIAL_UNIT_FAILURE_FIELDS = Object.freeze([
   'action', 'attempt', 'created_at', 'dirty_paths', 'schema_version', 'summary', 'unit_id', 'unit_worktree_path', 'workstream', 'workstream_run',
@@ -234,6 +238,9 @@ export function parseHistoricalUnitFailureEvidenceFacts(bytes: Uint8Array, expec
   if (provenance.kind !== 'coordinator-accepted-before-schema10' || !Number.isSafeInteger(provenance.acceptedEventSeq) || provenance.acceptedEventSeq < 1 || !Number.isFinite(Date.parse(provenance.acceptedAt)) || !Number.isFinite(Date.parse(provenance.schema10AppliedAt)) || Date.parse(provenance.acceptedAt) >= Date.parse(provenance.schema10AppliedAt)) throw new CoordinationRuntimeError('invalid-state', 'historical unit failure evidence lacks a trusted pre-schema10 coordinator acceptance fence');
   const candidate = parseHistoricalUnitFailureRegenerationCandidate(bytes, expected);
   if (candidate.originalSha256 !== provenance.evidenceSha256) throw new CoordinationRuntimeError('invalid-state', 'historical unit failure evidence digest differs from its accepted coordinator provenance');
+  const expectedGeneration = candidate.generation === HISTORICAL_UNIT_FAILURE_GENERATIONS.phase2Initial ? 1 : 2;
+  const expectedBuild = candidate.generation === HISTORICAL_UNIT_FAILURE_GENERATIONS.phase2Initial ? BUG_177_HISTORICAL_UNIT_FAILURE_PRODUCERS.phase2Initial : BUG_177_HISTORICAL_UNIT_FAILURE_PRODUCERS.captureCommitOnly;
+  if (provenance.producerBuild !== expectedBuild || provenance.producerGeneration !== expectedGeneration) throw new CoordinationRuntimeError('protocol-mismatch', 'historical unit failure producer provenance does not match the exact source-anchored generation', [provenance.producerBuild, String(provenance.producerGeneration), candidate.generation]);
   return {
     generation: candidate.generation,
     action: candidate.action,
@@ -258,6 +265,7 @@ export function parseUnitFailureEvidenceFacts(bytes: Uint8Array, expected: Recon
   const document = jsonDocument(bytes, 'unit failure evidence');
   assertExactFields(document, CURRENT_UNIT_FAILURE_FIELDS, 'unit failure evidence');
   if (text(document, 'schema_version', 'unit failure evidence') !== 'autopilot.unit_failure.v1') throw new CoordinationRuntimeError('invalid-state', 'unit failure evidence schema is incompatible');
+  if (text(document, 'producer_build', 'unit failure evidence') !== COORDINATOR_IMPLEMENTATION_BUILD || integer(document, 'producer_generation', 'unit failure evidence') !== UNIT_FAILURE_CURRENT_PRODUCER_GENERATION) throw new CoordinationRuntimeError('protocol-mismatch', 'current unit failure evidence lacks the exact persisted producer provenance');
   assertIdentity(document, expected, false);
   if (text(document, 'workstream', 'unit failure evidence') !== expected.workstream) throw new CoordinationRuntimeError('invalid-state', 'unit failure evidence workstream does not match durable ownership');
   const action = parseFailureAction(document);

@@ -43,6 +43,7 @@ export * from './terminal-attempt-proof.ts';
 export * from './terminal-evidence.ts';
 export * from './transition-model.ts';
 export * from './types.ts';
+export * from './versioned-ingress-registry.ts';
 export * from './upgrade-contracts.ts';
 export * from './upgrade.ts';
 export * from './unavailable-recovery.ts';

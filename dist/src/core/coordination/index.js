@@ -43,6 +43,7 @@ export * from "./terminal-attempt-proof.js";
 export * from "./terminal-evidence.js";
 export * from "./transition-model.js";
 export * from "./types.js";
+export * from "./versioned-ingress-registry.js";
 export * from "./upgrade-contracts.js";
 export * from "./upgrade.js";
 export * from "./unavailable-recovery.js";
