@@ -1,0 +1,80 @@
+{
+  "schema_version": "autopilot.roster_setup_skill_payload.v1",
+  "skill_name": "autopilot-roster-setup",
+  "resource_kind": "pi-skill",
+  "freeze_id": "phase37-roster-w0-2026-07-22",
+  "pi_minimum_version": "0.80.6",
+  "normal_activation": "inactive-skill-command-only",
+  "resources": {
+    "skill_md": {
+      "path": "templates/skills/autopilot-roster-setup/SKILL.md",
+      "sha256": "sha256:9c3ff5775ed6e651f50878d5d7c022e92b976d6ee53842f4ec65c3ba35234dba",
+      "byte_count": 6167
+    }
+  },
+  "authorities": [
+    {
+      "path": "PHASE37_ROSTER_CONTRACT_FREEZE.md",
+      "role": "human-readable Phase 37 roster contract summary"
+    },
+    {
+      "path": "design/phase37/roster-contract-freeze.v1.json",
+      "sha256": "sha256:52d3853a9965ec337d2d64a25bc5fa45f2a117218201cb7f55a3453834857943",
+      "role": "manifest/seeds/ownership authority"
+    },
+    {
+      "path": "design/phase37/roster-contract-definitions.v1.json",
+      "sha256": "sha256:306568b3d76980fd0b2881caf9d0f90cdd374e1311d9e79d724b6c3ba5e5e171",
+      "role": "schema/protocol/hash DSL authority"
+    },
+    {
+      "path": "design/phase37/roster-acceptance-fixtures.v1.json",
+      "sha256": "sha256:7cec874aaeb4b8bec699e0b0f0a9968b39ef925e859a99ad6b9f0f357fba1b73",
+      "role": "acceptance fixture authority"
+    }
+  ],
+  "required_tool_contract": {
+    "operation": "autopilot_manage_rosters",
+    "request_schema": "autopilot.roster_tool_request.v1",
+    "result_schema": "autopilot.roster_tool_result.v1",
+    "actions": [
+      "inspect",
+      "propose",
+      "reject",
+      "doctor",
+      "save"
+    ],
+    "zero_write_actions": [
+      "inspect",
+      "propose",
+      "reject",
+      "doctor"
+    ],
+    "write_action": "save",
+    "save_success_visible_write_count_w0": 3
+  },
+  "conversation_contract": {
+    "mode": "agent-first ordinary multi-turn conversation; no wizard, menu, or questionnaire",
+    "inactive_by_default": true,
+    "no_run_worktree_or_spend_before_saved_retry": true,
+    "secret_free_outputs": true,
+    "project_trust_required_for_trusted_project_scope": true,
+    "cruise_recommendation_only_when_ready": true,
+    "blocked_and_converged_honesty_required": true,
+    "approval_requires_exact_restatement": true,
+    "approval_fields": [
+      "scope",
+      "candidate_set_sha256",
+      "approved_roster_sha256s_in_order",
+      "default_roster_id",
+      "default_roster_revision",
+      "default_roster_sha256",
+      "original_command"
+    ],
+    "post_save": [
+      "fresh_pi_session_required",
+      "retry_exact_original_autopilot_command",
+      "never_auto_start"
+    ]
+  }
+}

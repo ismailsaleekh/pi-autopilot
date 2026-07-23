@@ -85,6 +85,9 @@
     "extensions": [
       "./extensions/autopilot.ts"
     ],
+    "skills": [
+      "./templates/skills/autopilot-roster-setup"
+    ],
     "image": "https://raw.githubusercontent.com/ismailsaleekh/pi-autopilot/main/logo.png"
   },
   "peerDependencies": {
