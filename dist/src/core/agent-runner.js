@@ -1,17 +1,18 @@
-import { constants as fsConstants, existsSync } from 'node:fs';
+import { constants as fsConstants, existsSync, readFileSync, realpathSync } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { access, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { access, mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
-import { dirname, relative, resolve } from 'node:path';
+import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { AUTOPILOT_COORDINATION_AUTHORITY_ENV, AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV, AUTOPILOT_PREFLIGHT_ROLLBACK_REASON_PREFIX, AUTOPILOT_STATUS_CONTEXT_ENV, AUTOPILOT_STATUS_TOOL, } from "./names.js";
-import { buildAutopilotProviderIdentity, buildAutopilotStatusToolContext, deriveAutopilotArtifactRoot, parseAutopilotStatusToolContext, validateAutopilotStatusEvidence, } from "./forced-output/index.js";
+import { AUTOPILOT_EXECUTION_OBSERVATION_ENV, deriveRoutePolicyFromObservedProviderApi, parseAutopilotExecutionObservation, } from "../internal/execution-observer-extension.js";
+import { buildAutopilotProviderIdentity, buildAutopilotProviderIdentityFromRequestProfile, buildAutopilotStatusToolContext, deriveAutopilotArtifactRoot, parseAutopilotStatusToolContext, sha256Buffer, splitAutopilotModelId, validateAutopilotStatusEvidence, } from "./forced-output/index.js";
 import { AutopilotForcedOutputEvidenceError } from "./forced-output/status-evidence.js";
-import { parseAutopilotStatusEntry, parseAutopilotUnitSpec } from "./contracts/index.js";
+import { parseAutopilotStatusEntry, parseAutopilotUnitSpec, parseAutopilotUnitSpecV2 } from "./contracts/index.js";
 import { deriveAutopilotAuthority, persistAutopilotAuthority } from "./authority.js";
 import { captureAutopilotExecutionBaseline, deriveAutopilotExecutionAuditPath, writeAutopilotExecutionAudit, } from "./execution-audit/index.js";
 import { AutopilotExecutionCommitError, commitAutopilotExecution, deriveAutopilotExecutionCommitPath, } from "./execution-commit.js";
-import { AutopilotParallelRuntimeError, acquireClaimsForUnit, coordinationRootForRepo, ensureWorktreeCleanForLaunch, prepareAutopilotUnitWorktree, readActiveAutopilots, readCoordinatorActiveAutopilots, readPathClaims, recoverAutopilotWorktreeSagas, releaseClaimsForUnit, readGitStatus, gitHead, resolveAutopilotStateRoot, resolveRepoIdentity, unitWorktreePathForActiveAutopilot, worktreeRootForRepo, resolveActiveAutopilotForSpec, } from "./parallel-runtime.js";
+import { AutopilotParallelRuntimeError, acquireClaimsForUnit, coordinationRootForRepo, ensureWorktreeCleanForLaunch, prepareAutopilotUnitWorktree, readActiveAutopilots, readCoordinatorActiveAutopilots, readPathClaims, recoverAutopilotWorktreeSagas, releaseClaimsForUnit, readGitStatus, gitHead, resolveAutopilotStateRoot, AUTOPILOT_STATE_ROOT_ENV, resolveRepoIdentity, unitWorktreePathForActiveAutopilot, worktreeRootForRepo, resolveActiveAutopilotForSpec, isPathWithinRoot, } from "./parallel-runtime.js";
 import { coordinationCutoverCommitted } from "./coordination/migration-paths.js";
 import { ClaimNegotiationClient } from "./coordination/negotiation.js";
 import { ReservationCoordinationClient, reservationSchedulingBlockers } from "./coordination/reservations.js";
@@ -24,6 +25,16 @@ import { autopilotAuditProvesZeroSourceChange, writeAutopilotChildTerminalAccept
 import { assertAutopilotSpecMaterializationDiskGate, expandedReadOnlyPathsForAudit, materializeAutopilotSpecPaths, } from "./materialization.js";
 import { assertAutopilotSpecQualityGate } from "./quality/spec-gate.js";
 import { AutopilotPromptTemplateError, renderAndMaybeWriteAutopilotPromptSnapshot, } from "./prompt-renderer/index.js";
+import { recoverRuntimeRosterSelection, runtimeRosterSnapshotPath } from "./roster/snapshot.js";
+import { resolveCommittedExistingRunRosterTransitionChain, savedRosterRefForSelection } from "./roster/transition.js";
+import { preRunSelectionPath, resolveRosterScopePaths, rosterRevisionPath } from "./roster/paths.js";
+import { readCustomRosterCertificationAuthority, verifyCustomRosterManifestForRoster } from "./roster/custom-certification.js";
+import { autopilotRosterContractCanonicalJson, computeAutopilotRosterContractObjectHash, parseAutopilotHistoricalFixedRosterAdapterResult, parseAutopilotRoster } from "./roster/contracts.js";
+import { bytesEqual, parseCanonicalPreRunSelectionBytes } from "./roster/run-selection.js";
+import { assertRequestProfileMatchesAssignment, assertUnitSpecMatchesPinnedFacts, resolvePinnedRoleRuntimeFacts } from "./roster/runtime-spec.js";
+import { unitSpecAuthorityProjection } from "./roster/runtime-consumers.js";
+import { isCentrallyTrustedW4CertifiedRoster } from "./roster/providers/index.js";
+import { readAuthorityFileIfPresent } from "./roster/transaction.js";
 export class AutopilotAgentRunError extends Error {
     failureClass;
     details;
@@ -35,16 +46,18 @@ export class AutopilotAgentRunError extends Error {
     }
 }
 const AUTOPILOT_AGENT_PI_EXECUTABLE_ENV = 'AUTOPILOT_AGENT_PI_EXECUTABLE';
+const AUTOPILOT_V1_GRANDFATHER_AUTHORITY_ENV = 'AUTOPILOT_V1_GRANDFATHER_AUTHORITY';
 const DEFAULT_AGENT_WALL_MS = 3_600_000;
 const RPC_COMMAND_TIMEOUT_MS = 10_000;
 const DIAGNOSTIC_TEXT_LIMIT = 600;
 const FAILURE_REASON_LIMIT = 2_400;
-const AUTOPILOT_AGENT_STATUS_EXTENSION_PATH = resolveAutopilotStatusExtensionPath(import.meta.url);
-function resolveAutopilotStatusExtensionPath(moduleUrl) {
-    const sourcePath = fileURLToPath(new URL('../internal/status-extension.ts', moduleUrl));
+const AUTOPILOT_AGENT_STATUS_EXTENSION_PATH = resolveAutopilotInternalExtensionPath(import.meta.url, 'status-extension');
+const AUTOPILOT_AGENT_EXECUTION_OBSERVER_EXTENSION_PATH = resolveAutopilotInternalExtensionPath(import.meta.url, 'execution-observer-extension');
+function resolveAutopilotInternalExtensionPath(moduleUrl, basename) {
+    const sourcePath = fileURLToPath(new URL(`../internal/${basename}.ts`, moduleUrl));
     if (existsSync(sourcePath))
         return sourcePath;
-    return fileURLToPath(new URL('../internal/status-extension.js', moduleUrl));
+    return fileURLToPath(new URL(`../internal/${basename}.js`, moduleUrl));
 }
 class AutopilotPiRunError extends Error {
     code;
@@ -105,12 +118,32 @@ export async function runAutopilotAgentFromSpecPath(specPath, options = {}) {
     }
 }
 async function runAutopilotAgentFromSpecPathInternal(specPath, options, lifecycle) {
-    const spec = await readAndValidateSpec(specPath);
+    const env = { ...process.env, ...(options.env ?? {}) };
+    let specBundle = await readAndValidateSpec(specPath, options, env);
+    specBundle = await authenticateSpecBundleBeforePreflight({ specBundle, specPath, env });
+    const spec = requireAuthenticatedAuthoritySpec(specBundle, specPath);
+    if (options.dryRun !== true)
+        await assertD65OrdinaryBoundaryFromEnvironment('runner-preflight', env);
+    const runtimePreflight = await preflightSpec(specBundle, specPath, {
+        skipStaleOutputCheck: options.dryRun === true,
+        skipClaimAcquire: options.dryRun === true,
+        skipSagaRecovery: options.dryRun === true,
+        env,
+    });
+    lifecycle.preflight = runtimePreflight;
+    lifecycle.env = env;
+    lifecycle.spec = spec;
     let providerIdentity;
     let context;
     try {
-        providerIdentity = buildAutopilotProviderIdentity(spec.model, spec.thinking);
-        context = buildAutopilotStatusToolContext({ unitSpec: spec, providerIdentity });
+        providerIdentity = specBundle.rosterExecutionIdentity === null
+            ? buildAutopilotProviderIdentity(spec.model, spec.thinking)
+            : buildAutopilotProviderIdentityFromRequestProfile(specBundle.rosterExecutionIdentity.request_profile);
+        context = buildAutopilotStatusToolContext({
+            unitSpec: spec,
+            providerIdentity,
+            ...(specBundle.rosterExecutionIdentity === null ? {} : { rosterExecutionIdentity: specBundle.rosterExecutionIdentity }),
+        });
     }
     catch (error) {
         throw new AutopilotAgentRunError('spec-invalid', {
@@ -120,23 +153,11 @@ async function runAutopilotAgentFromSpecPathInternal(specPath, options, lifecycl
             receiptOutput: spec.receipt_output,
         });
     }
-    const env = { ...process.env, ...(options.env ?? {}) };
-    if (options.dryRun !== true)
-        await assertD65OrdinaryBoundaryFromEnvironment('runner-preflight', env);
-    const runtimePreflight = await preflightSpec(spec, specPath, {
-        skipStaleOutputCheck: options.dryRun === true,
-        skipClaimAcquire: options.dryRun === true,
-        skipSagaRecovery: options.dryRun === true,
-        env,
-    });
-    lifecycle.preflight = runtimePreflight;
-    lifecycle.env = env;
-    lifecycle.spec = spec;
     if (options.dryRun !== true)
         await assertD65OrdinaryBoundaryFromEnvironment('post-acquisition-output', env);
     const auditBaseline = await captureAutopilotExecutionBaseline(spec.cwd);
     lifecycle.auditBaseline = auditBaseline;
-    const auditOutput = deriveAutopilotExecutionAuditPath(spec);
+    const auditOutput = deriveAutopilotExecutionAuditPath(specBundle.unitSpec, { allowLegacyV1RuntimeSpec: isLegacyV1RuntimeSpecBundle(specBundle) });
     const contextPath = deriveAutopilotStatusContextPath(spec);
     await writeStatusContext(contextPath, context);
     const adjudicationBundle = options.dryRun !== true && spec.role === 'adjudicate' ? await (await PlanningContradictionClient.fromEnvironment(env)).assignmentBundleFor(spec.unit_id, spec.attempt) : null;
@@ -157,8 +178,9 @@ async function runAutopilotAgentFromSpecPathInternal(specPath, options, lifecycl
     ].join('\n');
     let rendered;
     try {
-        rendered = await renderAndMaybeWriteAutopilotPromptSnapshot({
-            spec,
+        rendered = await renderAndMaybeWritePromptForSpecBundle({
+            specBundle,
+            providerIdentity,
             ...(coordinationAppendix === undefined ? {} : { coordinationAppendix }),
             ...(options.forcePromptSnapshot === undefined ? {} : { forceSnapshot: options.forcePromptSnapshot }),
         });
@@ -177,7 +199,7 @@ async function runAutopilotAgentFromSpecPathInternal(specPath, options, lifecycl
     if (options.dryRun === true) {
         return ({
             status: 'dry-run',
-            spec,
+            spec: specBundle.unitSpec,
             statusEntry: null,
             statusOutput: spec.status_output,
             receiptOutput: spec.receipt_output,
@@ -209,12 +231,14 @@ async function runAutopilotAgentFromSpecPathInternal(specPath, options, lifecycl
     };
     const spawnSpec = {
         executable: options.piExecutable ?? resolvePiExecutable(env),
-        model: providerIdentity.requested_model_id,
+        model: spec.model,
         thinking: providerIdentity.thinking_level,
+        ...(specBundle.rosterExecutionIdentity === null ? {} : { requestProfile: specBundle.rosterExecutionIdentity.request_profile }),
         cwd: spec.cwd,
         toolPolicy: toolPolicyForRole(spec.role),
         env: childProcessEnv,
         contextPath,
+        executionObservationPath: deriveAutopilotExecutionObservationPath(spec),
         wallMs: options.timeoutMsOverride ?? timeoutMsForSpec(spec),
         name: `autopilot-${spec.unit_id}-${spec.role}-attempt-${String(spec.attempt)}`,
         preemptionSignal: lifecycle.handle.preemptionSignal,
@@ -226,7 +250,7 @@ async function runAutopilotAgentFromSpecPathInternal(specPath, options, lifecycl
     }
     catch (error) {
         if (error instanceof AutopilotPiRunError) {
-            const audit = await writeAttemptAudit(spec, runtimePreflight.context, runtimePreflight.authority, auditBaseline, null, auditOutput, env);
+            const audit = await writeAttemptAudit(specBundle, runtimePreflight.context, runtimePreflight.authority, auditBaseline, null, auditOutput, env);
             throw new AutopilotAgentRunError('pi-spawn-failed', {
                 reason: `Pi spawn failed before valid Autopilot status acceptance: ${error.code}: ${error.message}${formatPiRunErrorDiagnostics(error)}`,
                 specPath,
@@ -240,12 +264,35 @@ async function runAutopilotAgentFromSpecPathInternal(specPath, options, lifecycl
         }
         throw error;
     }
-    let evidence;
+    let observedExecution = null;
     try {
-        evidence = await validateAutopilotStatusEvidence({ unitSpec: spec, providerIdentity });
+        observedExecution = await observeExecutionIdentityForRoster({
+            specBundle,
+            piResult,
+        });
     }
     catch (error) {
-        const audit = await writeAttemptAudit(spec, runtimePreflight.context, runtimePreflight.authority, auditBaseline, null, auditOutput, env);
+        const audit = await writeAttemptAudit(specBundle, runtimePreflight.context, runtimePreflight.authority, auditBaseline, null, auditOutput, env);
+        throw new AutopilotAgentRunError('invalid-structured-output', {
+            reason: `execution identity observer failed before terminal acceptance: ${redactSensitiveText(errorMessage(error))}`,
+            specPath,
+            statusOutput: spec.status_output,
+            receiptOutput: spec.receipt_output,
+            promptSnapshotPath: rendered.snapshotPath,
+            auditOutput,
+            auditClassification: audit.classification,
+        });
+    }
+    let evidence;
+    try {
+        evidence = await validateAutopilotStatusEvidence({
+            unitSpec: spec,
+            providerIdentity,
+            ...(specBundle.rosterExecutionIdentity === null ? {} : { rosterExecutionIdentity: specBundle.rosterExecutionIdentity, observedExecution }),
+        });
+    }
+    catch (error) {
+        const audit = await writeAttemptAudit(specBundle, runtimePreflight.context, runtimePreflight.authority, auditBaseline, null, auditOutput, env);
         if (piResult.isError) {
             throw new AutopilotAgentRunError('pi-spawn-failed', {
                 reason: `Pi session returned an error result before valid Autopilot status acceptance: ${formatPiResultFailureDiagnostics(piResult)}`,
@@ -281,7 +328,7 @@ async function runAutopilotAgentFromSpecPathInternal(specPath, options, lifecycl
             auditClassification: audit.classification,
         });
     }
-    const audit = await writeAttemptAudit(spec, runtimePreflight.context, runtimePreflight.authority, auditBaseline, evidence.status, auditOutput, env);
+    const audit = await writeAttemptAudit(specBundle, runtimePreflight.context, runtimePreflight.authority, auditBaseline, evidence.status, auditOutput, env);
     try {
         validateAutopilotEmitStatusCarrier(piResult, evidence.receipt.tool_call_id, evidence.receipt.status_sha256);
         parseAutopilotStatusEntry(evidence.status, {
@@ -318,17 +365,22 @@ async function runAutopilotAgentFromSpecPathInternal(specPath, options, lifecycl
         throw new AutopilotAgentRunError('runtime-commit-failed', { reason: 'durable child authority disappeared before terminal acceptance commit', specPath });
     let terminalAcceptance;
     try {
+        const terminalInputs = await materializeTerminalAcceptanceInputs({
+            specBundle,
+            specPath,
+            receipt: evidence.receipt,
+        });
         terminalAcceptance = await writeAutopilotChildTerminalAcceptance({
             mainWorktreePath: runtimePreflight.context.active.main_worktree_path,
             runtimeRoot: runtimePreflight.context.active.runtime_root,
             workstream: spec.workstream,
             child: childAuthority.child,
-            specPath,
+            specPath: terminalInputs.specPath,
             statusPath: spec.status_output,
-            receiptPath: spec.receipt_output,
+            receiptPath: terminalInputs.receiptPath,
             auditPath: auditOutput,
             status: evidence.status,
-            receipt: evidence.receipt,
+            receipt: terminalInputs.receipt,
             audit,
         });
     }
@@ -407,7 +459,7 @@ async function runAutopilotAgentFromSpecPathInternal(specPath, options, lifecycl
     lifecycle.completed = true;
     return ({
         status: 'success',
-        spec,
+        spec: specBundle.unitSpec,
         statusEntry: evidence.status,
         statusOutput: spec.status_output,
         receiptOutput: spec.receipt_output,
@@ -443,10 +495,12 @@ async function preserveOrResetFailedSourceAttempt(input) {
     }
     await quarantineFailedUnit({ context: input.context, unitId: input.spec.unit_id, attempt: input.spec.attempt, unitWorktreePath: input.spec.cwd, summary: input.summary, ...(input.baseline?.gitHead === null || input.baseline?.gitHead === undefined ? {} : { baselineHead: input.baseline.gitHead }), env: input.env });
 }
-async function readAndValidateSpec(specPath) {
+async function readAndValidateSpec(specPath, options, env) {
     let parsed;
+    let specBytes;
     try {
-        parsed = JSON.parse(await readFile(specPath, 'utf8'));
+        specBytes = await readFile(specPath);
+        parsed = JSON.parse(Buffer.from(specBytes).toString('utf8'));
     }
     catch (error) {
         throw new AutopilotAgentRunError('spec-invalid', {
@@ -455,9 +509,15 @@ async function readAndValidateSpec(specPath) {
         });
     }
     try {
+        if (isJsonRecord(parsed) && parsed['schema_version'] === 'autopilot.unit_spec.v2') {
+            const originalSpec = parseAutopilotUnitSpecV2(parsed);
+            assertV2LaunchQualityGate(originalSpec);
+            return { unitSpec: originalSpec, authoritySpec: null, originalSpec, rosterExecutionIdentity: null };
+        }
         const spec = parseAutopilotUnitSpec(parsed);
+        assertV1SpecHasGrandfatherAuthority({ specPath, specBytes, options, env });
         assertAutopilotSpecQualityGate(spec);
-        return spec;
+        return { unitSpec: spec, authoritySpec: spec, originalSpec: spec, rosterExecutionIdentity: null };
     }
     catch (error) {
         throw new AutopilotAgentRunError('spec-invalid', {
@@ -466,10 +526,721 @@ async function readAndValidateSpec(specPath) {
         });
     }
 }
-async function preflightSpec(spec, specPath, options = {}) {
+function assertV1SpecHasGrandfatherAuthority(input) {
+    const authorityValue = input.options.v1GrandfatherAuthority ?? readV1GrandfatherAuthorityFromCaller(input.specPath, input.env);
+    if (authorityValue === null) {
+        throw new Error('new unit_spec.v1 execution is forbidden; v1 bytes are historical evidence only and require exact historical adapter or grandfather authority');
+    }
+    const specSha256 = sha256Buffer(input.specBytes);
+    if (isJsonRecord(authorityValue) && authorityValue['schema_version'] === 'autopilot.historical_fixed_roster_adapter_result.v1') {
+        const result = parseAutopilotHistoricalFixedRosterAdapterResult(authorityValue);
+        if (result.ok !== true || result.admission.admitted !== true || result.historical_bytes_mutated !== false || result.admission.historical_bytes_mutated !== false) {
+            throw new Error('historical unit_spec.v1 adapter authority did not admit preserved bytes');
+        }
+        if (result.historical_unit_spec_sha256 !== specSha256) {
+            throw new Error('historical unit_spec.v1 adapter authority hash does not match exact spec bytes');
+        }
+        return;
+    }
+    const authority = parseV1GrandfatherAuthority(authorityValue);
+    if (authority.unit_spec_sha256 !== specSha256) {
+        throw new Error('unit_spec.v1 grandfather authority hash does not match exact spec bytes');
+    }
+}
+function readV1GrandfatherAuthorityFromCaller(specPath, env) {
+    const authorityPath = env[AUTOPILOT_V1_GRANDFATHER_AUTHORITY_ENV] ?? `${specPath}.grandfather-authority.json`;
+    if (!existsSync(authorityPath))
+        return null;
+    try {
+        return JSON.parse(readFileSync(authorityPath, 'utf8'));
+    }
+    catch (error) {
+        throw new Error(`unit_spec.v1 grandfather authority is not readable JSON: ${errorMessage(error)}`);
+    }
+}
+function parseV1GrandfatherAuthority(value) {
+    if (!isJsonRecord(value))
+        throw new Error('unit_spec.v1 grandfather authority must be a JSON object');
+    const fields = ['schema_version', 'authority', 'unit_spec_sha256', 'historical_bytes_mutated', 'reason'];
+    const keys = Object.keys(value).sort();
+    const expected = [...fields].sort();
+    if (keys.length !== expected.length || keys.some((key, index) => key !== expected[index]))
+        throw new Error('unit_spec.v1 grandfather authority fields are not exact');
+    if (value['schema_version'] !== 'autopilot.v1_grandfather_authority.v1')
+        throw new Error('unit_spec.v1 grandfather authority schema_version is invalid');
+    if (value['authority'] !== 'grandfathered-existing-v1')
+        throw new Error('unit_spec.v1 grandfather authority kind is invalid');
+    if (value['historical_bytes_mutated'] !== false)
+        throw new Error('unit_spec.v1 grandfather authority must prove historical_bytes_mutated=false');
+    const unitSpecSha256 = value['unit_spec_sha256'];
+    if (typeof unitSpecSha256 !== 'string' || !/^sha256:[a-f0-9]{64}$/u.test(unitSpecSha256))
+        throw new Error('unit_spec.v1 grandfather authority unit_spec_sha256 is invalid');
+    const reason = value['reason'];
+    if (typeof reason !== 'string' || reason.trim().length === 0 || reason.length > 500)
+        throw new Error('unit_spec.v1 grandfather authority reason is required');
+    return Object.freeze({
+        schema_version: 'autopilot.v1_grandfather_authority.v1',
+        authority: 'grandfathered-existing-v1',
+        unit_spec_sha256: unitSpecSha256,
+        historical_bytes_mutated: false,
+        reason,
+    });
+}
+function requireAuthenticatedAuthoritySpec(bundle, specPath) {
+    if (bundle.authoritySpec !== null)
+        return bundle.authoritySpec;
+    throw new AutopilotAgentRunError('spec-invalid', {
+        reason: 'unit_spec.v2 reached legacy authority mechanics before external roster/selection authentication',
+        specPath,
+        statusOutput: bundle.unitSpec.status_output,
+        receiptOutput: bundle.unitSpec.receipt_output,
+    });
+}
+async function authenticateSpecBundleBeforePreflight(input) {
+    if (!isUnitSpecV2(input.specBundle.originalSpec))
+        return input.specBundle;
+    try {
+        const originalSpec = input.specBundle.originalSpec;
+        const runtimeContext = await resolveReadOnlyV2RuntimeAuthenticationContext({
+            originalSpec,
+            specPath: input.specPath,
+            env: input.env,
+        });
+        const stateRoot = input.env[AUTOPILOT_STATE_ROOT_ENV];
+        const authenticated = await authenticateV2SpecAgainstSelectionOrTransition({
+            stateRoot,
+            runtimeContext,
+            originalSpec,
+            specPath: input.specPath,
+        });
+        return { ...input.specBundle, authoritySpec: unitSpecAuthorityProjection(originalSpec), rosterExecutionIdentity: authenticated.identity };
+    }
+    catch (error) {
+        throw new AutopilotAgentRunError('spec-invalid', {
+            reason: `unit_spec.v2 failed external roster/selection authentication before preflight authority derivation: ${errorMessage(error)}`,
+            specPath: input.specPath,
+            statusOutput: input.specBundle.originalSpec.status_output,
+            receiptOutput: input.specBundle.originalSpec.receipt_output,
+        });
+    }
+}
+async function resolveReadOnlyV2RuntimeAuthenticationContext(input) {
+    const runtimeRoot = deriveStrictV2ArtifactRoot(input.originalSpec);
+    const mainWorktreePath = mainWorktreePathFromV2RuntimeRoot(runtimeRoot, input.originalSpec.workstream);
+    let repo;
+    try {
+        repo = resolveRepoIdentity(mainWorktreePath);
+    }
+    catch (error) {
+        throw new Error(`unit_spec.v2 runtime main worktree is not an authenticated readable git worktree before preflight: ${mainWorktreePath}; ${errorMessage(error)}`);
+    }
+    const stateRoot = resolveAutopilotStateRoot(input.env);
+    const coordinationRoot = coordinationRootForRepo(repo.repoKey, input.env);
+    const activeRows = coordinationCutoverCommitted(stateRoot, repo.repoKey)
+        ? await readCoordinatorActiveAutopilots(repo, worktreeRootForRepo(repo.repoKey, input.env), input.env)
+        : await readActiveAutopilots(coordinationRoot);
+    const matchingRows = activeRows.filter((row) => {
+        if (row.repo_key !== repo.repoKey || row.workstream !== input.originalSpec.workstream || row.status !== 'active')
+            return false;
+        if (!sameExistingPath(row.main_worktree_path, mainWorktreePath))
+            return false;
+        return normalizeFsPath(row.runtime_root) === normalizeFsPath(runtimeRoot);
+    });
+    if (matchingRows.length === 0) {
+        throw new Error(`no active run/resource authenticates unit_spec.v2 runtime root before preflight: repo=${repo.repoKey} workstream=${input.originalSpec.workstream} main=${mainWorktreePath}`);
+    }
+    if (matchingRows.length > 1) {
+        throw new Error(`multiple active run/resources authenticate unit_spec.v2 runtime root before preflight: ${matchingRows.map((row) => row.workstream_run).join(', ')}`);
+    }
+    const active = matchingRows[0];
+    if (active === undefined)
+        throw new Error('matched active run/resource disappeared before v2 authentication');
+    const issues = [];
+    if (!isPathWithinRoot(active.runtime_root, input.originalSpec.status_output))
+        issues.push('status_output outside active runtime root');
+    if (!isPathWithinRoot(active.runtime_root, input.originalSpec.receipt_output))
+        issues.push('receipt_output outside active runtime root');
+    if (!isPathWithinRoot(active.runtime_root, input.originalSpec.evidence_dir))
+        issues.push('evidence_dir outside active runtime root');
+    if (!isPathWithinRoot(active.main_worktree_path, input.specPath))
+        issues.push('unit spec path outside active main worktree');
+    if (normalizeFsPath(active.source_repo) === normalizeFsPath(active.main_worktree_path))
+        issues.push('active row source_repo equals main worktree path');
+    if (issues.length > 0)
+        throw new Error(`active run/resource does not authenticate unit_spec.v2 launch context: ${issues.join('; ')}`);
+    return Object.freeze({
+        repo,
+        active,
+        coordinationRoot,
+        claimsPath: join(coordinationRoot, 'path-claims.json'),
+        claimEventsPath: join(coordinationRoot, 'claim-events.jsonl'),
+    });
+}
+function deriveStrictV2ArtifactRoot(spec) {
+    const candidates = [
+        rootBeforeV2ArtifactSegment(spec.status_output, 'statuses'),
+        rootBeforeV2ArtifactSegment(spec.receipt_output, 'receipts'),
+        rootBeforeV2ArtifactSegment(spec.evidence_dir, 'evidence'),
+    ].filter((candidate) => candidate !== null);
+    const unique = [...new Set(candidates.map(normalizeFsPath))];
+    if (unique.length !== 1) {
+        const diagnostic = unique.length === 0 ? 'no canonical statuses/receipts/evidence runtime root' : unique.join(', ');
+        throw new Error(`unit_spec.v2 artifact paths do not identify one runtime root before preflight: ${diagnostic}`);
+    }
+    const [runtimeRoot] = unique;
+    if (runtimeRoot === undefined)
+        throw new Error('internal error: missing v2 runtime root');
+    return runtimeRoot;
+}
+function rootBeforeV2ArtifactSegment(path, segment) {
+    const normalized = normalizeFsPath(path).replace(/\\/gu, '/');
+    const parts = normalized.split('/');
+    const index = parts.lastIndexOf(segment);
+    if (index <= 0)
+        return null;
+    const root = parts.slice(0, index).join('/');
+    return root.length === 0 ? '/' : root;
+}
+function mainWorktreePathFromV2RuntimeRoot(runtimeRoot, workstream) {
+    const normalized = normalizeFsPath(runtimeRoot).replace(/\\/gu, '/');
+    const suffix = `/.pi/autopilot/${workstream}`;
+    if (!normalized.endsWith(suffix))
+        throw new Error(`unit_spec.v2 runtime root does not end with ${suffix}`);
+    const main = normalized.slice(0, normalized.length - suffix.length);
+    if (main.length === 0)
+        throw new Error('unit_spec.v2 runtime root does not contain a main worktree path');
+    return main;
+}
+function sameExistingPath(left, right) {
+    try {
+        return realpathSync(left) === realpathSync(right);
+    }
+    catch {
+        return false;
+    }
+}
+function normalizeFsPath(path) {
+    return resolve(path);
+}
+async function authenticateV2SpecAgainstSelectionOrTransition(input) {
+    const active = input.runtimeContext.active;
+    const selection = await recoverImmutableV2Selection({
+        stateRoot: input.stateRoot,
+        mainWorktreeRoot: active.main_worktree_path,
+        workstream: input.originalSpec.workstream,
+        repoId: active.repo_key,
+        workstreamRun: active.workstream_run,
+    });
+    const fromRef = savedRosterRefForSelection({ selection, stateRoot: input.stateRoot, trustedProjectRoot: active.source_repo });
+    const chain = await resolveCommittedExistingRunRosterTransitionChain({
+        ...(input.stateRoot === undefined ? {} : { stateRoot: input.stateRoot }),
+        run: {
+            repo_id: active.repo_key,
+            workstream: active.workstream,
+            workstream_run: active.workstream_run,
+            main_worktree_path: active.main_worktree_path,
+            runtime_root: active.runtime_root,
+            source_repo: active.source_repo,
+        },
+        initial_from_roster: fromRef,
+    });
+    if (!chain.ok)
+        throw new Error(`committed roster transition chain failed authentication: ${chain.diagnostics.map((diagnostic) => diagnostic.code).join(', ')}`);
+    if (v2SpecMatchesImmutableSelection(input.originalSpec, selection)) {
+        if (chain.terminal_successor_attempt_authority !== null)
+            throw new Error('old FROM-roster unit_spec.v2 launches are rejected after a committed roster transition');
+        const authenticatedRoster = await readAuthenticatedRosterForSelection({
+            selection,
+            trustedProjectRoot: active.source_repo,
+            stateRoot: input.stateRoot,
+        });
+        await assertCustomRosterCertificationForRunner({
+            roster: authenticatedRoster.roster,
+            paths: authenticatedRoster.paths,
+            selection,
+        });
+        const facts = resolvePinnedRoleRuntimeFacts({
+            selection,
+            roster: authenticatedRoster.roster,
+            role: input.originalSpec.role,
+            request_profile: input.originalSpec.request_profile,
+        });
+        assertUnitSpecMatchesPinnedFacts(input.originalSpec, facts);
+        return { identity: rosterIdentityFromSpecAndRequestProfile(input.originalSpec) };
+    }
+    const authority = chain.terminal_successor_attempt_authority;
+    if (authority === null)
+        throw new Error('unit_spec.v2 roster identity differs from immutable pre-run selection without a committed transition');
+    if (input.originalSpec.pre_run_selection_sha256 !== selection.selection_sha256)
+        throw new Error('transitioned unit_spec.v2 must keep pre_run_selection_sha256 bound to the immutable FROM selection');
+    await assertTransitionContextRefMatchesSpec({ spec: input.originalSpec, runtimeRoot: active.runtime_root, authority });
+    const target = await readAuthenticatedRosterForSavedRef({ ref: authority.to_roster, stateRoot: input.stateRoot, trustedProjectRoot: active.source_repo });
+    assertTransitionedUnitSpecMatchesTargetRoster({ spec: input.originalSpec, selection, targetRoster: target.roster, toRef: authority.to_roster });
+    const maxFromAttempt = await maxFromRosterAttemptForUnit({ runtimeRoot: active.runtime_root, unitId: input.originalSpec.unit_id, fromSelection: selection });
+    if (input.originalSpec.attempt <= maxFromAttempt)
+        throw new Error(`transition successor attempt must be newer than max FROM-roster attempt ${String(maxFromAttempt)} for unit ${input.originalSpec.unit_id}`);
+    await assertTransitionTargetRosterLaunchAuthority({ roster: target.roster, paths: target.paths });
+    return { identity: rosterIdentityFromSpecAndRequestProfile(input.originalSpec) };
+}
+async function recoverImmutableV2Selection(input) {
+    const recovery = await recoverRuntimeRosterSelection({
+        ...(input.stateRoot === undefined ? {} : { stateRoot: input.stateRoot }),
+        mainWorktreeRoot: input.mainWorktreeRoot,
+        workstream: input.workstream,
+        repo_id: input.repoId,
+        workstream_run: input.workstreamRun,
+        spec_identity: null,
+        require_spec_identity: false,
+        roster_file_state: 'present',
+    });
+    if (recovery.ok && recovery.selection !== null)
+        return recovery.selection;
+    const mirrorPath = runtimeRosterSnapshotPath({ mainWorktreeRoot: input.mainWorktreeRoot, workstream: input.workstream });
+    let mirrorBytes;
+    try {
+        mirrorBytes = await readFile(mirrorPath);
+    }
+    catch (error) {
+        throw new Error(`runtime roster mirror unavailable at ${mirrorPath}: ${errorMessage(error)}; ${formatRunSelectionDiagnostics(recovery.diagnostics)}`);
+    }
+    const mirrorSelection = parseCanonicalPreRunSelectionBytes(mirrorBytes);
+    if (mirrorSelection.repo_id !== input.repoId || mirrorSelection.workstream_run !== input.workstreamRun)
+        throw new Error('runtime roster mirror belongs to a foreign run');
+    const externalMatches = await findExternalSelectionByteMatches({ stateRoot: input.stateRoot, selection: mirrorSelection, mirrorBytes });
+    if (externalMatches.length !== 1)
+        throw new Error(`external pre-run selection recovery found ${String(externalMatches.length)} exact mirror byte match(es); ${formatRunSelectionDiagnostics(recovery.diagnostics)}`);
+    return mirrorSelection;
+}
+async function recoverAuthenticatedV2Selection(input) {
+    const specIdentity = {
+        schema_version: input.originalSpec.schema_version,
+        workstream: input.originalSpec.workstream,
+        roster_id: input.originalSpec.roster_id,
+        roster_revision: input.originalSpec.roster_revision,
+        roster_sha256: input.originalSpec.roster_sha256,
+        pre_run_selection_sha256: input.originalSpec.pre_run_selection_sha256,
+    };
+    const recovery = await recoverRuntimeRosterSelection({
+        ...(input.stateRoot === undefined ? {} : { stateRoot: input.stateRoot }),
+        mainWorktreeRoot: input.mainWorktreeRoot,
+        workstream: input.workstream,
+        repo_id: input.repoId,
+        workstream_run: input.workstreamRun,
+        spec_identity: specIdentity,
+        roster_file_state: 'present',
+    });
+    if (recovery.ok && recovery.selection !== null)
+        return recovery.selection;
+    return await recoverSelectionFromExactMirrorAndExternalBytes({
+        ...input,
+        priorDiagnostics: recovery.diagnostics,
+    });
+}
+async function recoverSelectionFromExactMirrorAndExternalBytes(input) {
+    const mirrorPath = runtimeRosterSnapshotPath({ mainWorktreeRoot: input.mainWorktreeRoot, workstream: input.workstream });
+    let mirrorBytes;
+    try {
+        mirrorBytes = await readFile(mirrorPath);
+    }
+    catch (error) {
+        throw new Error(`runtime roster mirror unavailable at ${mirrorPath}: ${errorMessage(error)}; ${formatRunSelectionDiagnostics(input.priorDiagnostics)}`);
+    }
+    const mirrorSelection = parseCanonicalPreRunSelectionBytes(mirrorBytes);
+    const specIssues = v2SpecSelectionIssues(input.originalSpec, mirrorSelection, input.repoId, input.workstream);
+    if (specIssues.length > 0)
+        throw new Error(`runtime roster mirror does not authenticate unit_spec.v2: ${specIssues.join('; ')}`);
+    const externalMatches = await findExternalSelectionByteMatches({ stateRoot: input.stateRoot, selection: mirrorSelection, mirrorBytes });
+    if (externalMatches.length !== 1) {
+        throw new Error(`external pre-run selection recovery found ${String(externalMatches.length)} exact mirror byte match(es); ${formatRunSelectionDiagnostics(input.priorDiagnostics)}`);
+    }
+    return mirrorSelection;
+}
+async function findExternalSelectionByteMatches(input) {
+    const paths = resolveRosterScopePaths({ scope: 'user', ...(input.stateRoot === undefined ? {} : { stateRoot: input.stateRoot }) });
+    const candidates = new Set();
+    try {
+        candidates.add(preRunSelectionPath(paths, input.selection));
+    }
+    catch { /* generated workstream ids can be outside the roster path grammar; directory scan remains exact-byte authoritative. */ }
+    const repoSelectionsRoot = join(paths.selectionsRoot, input.selection.repo_id);
+    try {
+        for (const entry of await readdir(repoSelectionsRoot, { withFileTypes: true })) {
+            if (entry.isFile() && entry.name.endsWith('.json'))
+                candidates.add(join(repoSelectionsRoot, entry.name));
+        }
+    }
+    catch {
+        // Missing external directory is reported as zero matches below.
+    }
+    const matches = [];
+    for (const candidate of candidates) {
+        try {
+            const read = await readAuthorityFileIfPresent(candidate, paths.userStateRoot);
+            if (read !== null && bytesEqual(read.bytes, input.mirrorBytes))
+                matches.push(candidate);
+        }
+        catch {
+            // Ignore disappearing or unsafe candidates; exact safe-read match count remains fail-closed.
+        }
+    }
+    return Object.freeze(matches.sort());
+}
+function v2SpecSelectionIssues(spec, selection, repoId, workstream) {
+    const issues = [];
+    if (selection.repo_id !== repoId)
+        issues.push('selection.repo_id does not match active runtime repo');
+    if (spec.workstream !== workstream)
+        issues.push('unit_spec.v2 workstream does not match active runtime workstream');
+    if (spec.pre_run_selection_sha256 !== selection.selection_sha256)
+        issues.push('pre_run_selection_sha256 mismatch');
+    if (spec.roster_id !== selection.roster_id)
+        issues.push('roster_id mismatch');
+    if (spec.roster_revision !== selection.roster_revision)
+        issues.push('roster_revision mismatch');
+    if (spec.roster_sha256 !== selection.roster_sha256)
+        issues.push('roster_sha256 mismatch');
+    return Object.freeze(issues);
+}
+async function readAuthenticatedRosterForSelection(input) {
+    const paths = input.selection.scope === 'trusted-project'
+        ? resolveRosterScopePaths({ scope: 'trusted-project', ...(input.stateRoot === undefined ? {} : { stateRoot: input.stateRoot }), trustedProjectRoot: input.trustedProjectRoot })
+        : resolveRosterScopePaths({ scope: 'user', ...(input.stateRoot === undefined ? {} : { stateRoot: input.stateRoot }) });
+    const rosterPath = rosterRevisionPath(paths, input.selection);
+    const read = await readAuthorityFileIfPresent(rosterPath, paths.authorityRoot);
+    if (read === null)
+        throw new Error(`roster authority is missing or unsafe at ${rosterPath}`);
+    const roster = parseAutopilotRoster(JSON.parse(Buffer.from(read.bytes).toString('utf8')));
+    const computedRosterHash = computeAutopilotRosterContractObjectHash('autopilot.roster.v1', roster);
+    const issues = [];
+    if (computedRosterHash !== roster.roster_sha256)
+        issues.push('roster object hash does not match roster.roster_sha256');
+    if (roster.roster_sha256 !== input.selection.roster_sha256)
+        issues.push('roster_sha256 does not match recovered pre-run selection');
+    if (roster.assignment_set_sha256 !== input.selection.assignment_set_sha256)
+        issues.push('assignment_set_sha256 does not match recovered pre-run selection');
+    if (issues.length > 0)
+        throw new Error(issues.join('; '));
+    return Object.freeze({ roster, paths });
+}
+async function assertCustomRosterCertificationForRunner(input) {
+    if (input.roster.generation_source !== 'user-custom')
+        return;
+    const customRoster = input.roster;
+    const authorityRead = await readCustomRosterCertificationAuthority({ paths: input.paths, roster: customRoster });
+    if (!authorityRead.ok) {
+        throw new Error(`custom roster certification authority ${authorityRead.reason} for ${input.roster.roster_id}@${String(input.roster.roster_revision)}`);
+    }
+    const authority = authorityRead.authority;
+    if (authority.roster_id !== input.roster.roster_id ||
+        authority.roster_revision !== input.roster.roster_revision ||
+        authority.roster_sha256 !== input.roster.roster_sha256 ||
+        (input.selection !== undefined && authority.roster_sha256 !== input.selection.roster_sha256) ||
+        authority.manifest_sha256 !== authority.qualification_manifest.manifest_sha256) {
+        throw new Error('custom roster certification authority binding does not match authenticated roster selection');
+    }
+    const verification = verifyCustomRosterManifestForRoster({ roster: customRoster, manifest: authority.qualification_manifest });
+    if (!verification.ok) {
+        throw new Error(`custom roster certification authority is not trusted/current for launch: ${verification.issues.map((issue) => issue.code).join(', ')}`);
+    }
+}
+function v2SpecMatchesImmutableSelection(spec, selection) {
+    return spec.pre_run_selection_sha256 === selection.selection_sha256 &&
+        spec.roster_id === selection.roster_id &&
+        spec.roster_revision === selection.roster_revision &&
+        spec.roster_sha256 === selection.roster_sha256;
+}
+function rosterIdentityFromSpecAndRequestProfile(spec) {
+    return Object.freeze({
+        schema_version: 'autopilot.roster_execution_identity.v1',
+        roster_id: spec.roster_id,
+        roster_revision: spec.roster_revision,
+        roster_sha256: spec.roster_sha256,
+        assignment_sha256: spec.assignment_sha256,
+        pre_run_selection_sha256: spec.pre_run_selection_sha256,
+        request_profile: spec.request_profile,
+        request_profile_sha256: spec.request_profile.request_profile_sha256,
+    });
+}
+async function assertTransitionContextRefMatchesSpec(input) {
+    const ref = input.spec.context_refs.find((candidate) => candidate.path === input.authority.runtime_transition_ref) ?? null;
+    if (ref === null)
+        throw new Error('transitioned unit_spec.v2 lacks exact roster-transition context_ref');
+    const transitionPath = join(input.runtimeRoot, input.authority.runtime_transition_ref);
+    const read = await readAuthorityFileIfPresent(transitionPath, dirname(transitionPath));
+    if (read === null)
+        throw new Error('transition context_ref runtime authority is missing or unsafe');
+    const bytes = read.bytes;
+    const sha = `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
+    if (ref.sha256 !== input.authority.transition_artifact_sha256 || ref.sha256 !== sha)
+        throw new Error('transition context_ref sha256 does not match exact runtime transition artifact bytes');
+    if (ref.byte_count !== bytes.byteLength)
+        throw new Error('transition context_ref byte_count does not match exact runtime transition artifact bytes');
+    if (!ref.purpose.includes(input.authority.transition_id))
+        throw new Error('transition context_ref purpose is not bound to the transition id');
+    const parsed = JSON.parse(Buffer.from(bytes).toString('utf8'));
+    if (autopilotRosterContractCanonicalJson(parsed) !== Buffer.from(bytes).toString('utf8'))
+        throw new Error('transition context_ref artifact is not canonical bytes');
+}
+async function readAuthenticatedRosterForSavedRef(input) {
+    const candidates = [
+        resolveRosterScopePaths({ scope: 'user', ...(input.stateRoot === undefined ? {} : { stateRoot: input.stateRoot }) }),
+        resolveRosterScopePaths({ scope: 'trusted-project', ...(input.stateRoot === undefined ? {} : { stateRoot: input.stateRoot }), trustedProjectRoot: input.trustedProjectRoot }),
+    ];
+    const matches = [];
+    for (const paths of candidates) {
+        try {
+            const rosterPath = rosterRevisionPath(paths, input.ref);
+            const read = await readAuthorityFileIfPresent(rosterPath, paths.authorityRoot);
+            if (read === null)
+                continue;
+            const roster = parseAutopilotRoster(JSON.parse(Buffer.from(read.bytes).toString('utf8')));
+            const computedRosterHash = computeAutopilotRosterContractObjectHash('autopilot.roster.v1', roster);
+            if (computedRosterHash === roster.roster_sha256 &&
+                roster.roster_id === input.ref.roster_id &&
+                roster.roster_revision === input.ref.roster_revision &&
+                roster.roster_sha256 === input.ref.roster_sha256 &&
+                roster.assignment_set_sha256 === input.ref.assignment_set_sha256)
+                matches.push(Object.freeze({ roster, paths }));
+        }
+        catch {
+            // Try the other immutable authority scope; exact match count below is authoritative.
+        }
+    }
+    if (matches.length !== 1)
+        throw new Error(`saved target roster ref resolved to ${String(matches.length)} authenticated roster file(s)`);
+    const match = matches[0];
+    if (match === undefined)
+        throw new Error('saved target roster match disappeared');
+    return match;
+}
+async function assertTransitionTargetRosterLaunchAuthority(input) {
+    if (input.roster.generation_source === 'user-custom') {
+        await assertCustomRosterCertificationForRunner({ roster: input.roster, paths: input.paths });
+        return;
+    }
+    if (!isCentrallyTrustedW4CertifiedRoster(input.roster)) {
+        throw new Error('transition target roster is not centrally trusted W4-certified launch authority');
+    }
+}
+function assertTransitionedUnitSpecMatchesTargetRoster(input) {
+    const { spec, targetRoster } = input;
+    if (targetRoster.roster_id !== input.toRef.roster_id || targetRoster.roster_revision !== input.toRef.roster_revision || targetRoster.roster_sha256 !== input.toRef.roster_sha256 || targetRoster.assignment_set_sha256 !== input.toRef.assignment_set_sha256)
+        throw new Error('transition target roster file does not match transition to_roster ref');
+    if (spec.pre_run_selection_sha256 !== input.selection.selection_sha256)
+        throw new Error('transitioned unit_spec.v2 pre_run_selection_sha256 must match immutable FROM selection');
+    if (spec.roster_id !== targetRoster.roster_id || spec.roster_revision !== targetRoster.roster_revision || spec.roster_sha256 !== targetRoster.roster_sha256)
+        throw new Error('transitioned unit_spec.v2 roster tuple does not match terminal TO roster');
+    const assignment = targetRoster.assignments.find((entry) => entry.role === spec.role);
+    if (assignment === undefined)
+        throw new Error(`terminal TO roster lacks role assignment ${spec.role}`);
+    if (spec.assignment_sha256 !== assignment.assignment_sha256)
+        throw new Error('transitioned unit_spec.v2 assignment_sha256 does not match terminal TO roster role');
+    assertRequestProfileMatchesAssignment(spec.request_profile, assignment);
+    if (spec.model !== spec.request_profile.model || spec.thinking !== spec.request_profile.thinking)
+        throw new Error('transitioned unit_spec.v2 model/thinking does not match target request_profile');
+}
+async function maxFromRosterAttemptForUnit(input) {
+    let max = 0;
+    for (const root of ['unit-specs', 'receipts']) {
+        const dir = join(input.runtimeRoot, root);
+        let files;
+        try {
+            files = await listJsonFiles(dir);
+        }
+        catch {
+            continue;
+        }
+        for (const path of files) {
+            try {
+                const parsed = JSON.parse(await readFile(path, 'utf8'));
+                if (!isJsonRecord(parsed) || parsed['schema_version'] !== (root === 'unit-specs' ? 'autopilot.unit_spec.v2' : 'autopilot.receipt.v2'))
+                    continue;
+                const unitId = typeof parsed['unit_id'] === 'string' ? parsed['unit_id'] : null;
+                const attempt = typeof parsed['attempt'] === 'number' ? parsed['attempt'] : 0;
+                if (unitId !== input.unitId || !Number.isSafeInteger(attempt))
+                    continue;
+                if (parsed['pre_run_selection_sha256'] === input.fromSelection.selection_sha256 &&
+                    parsed['roster_id'] === input.fromSelection.roster_id &&
+                    parsed['roster_revision'] === input.fromSelection.roster_revision &&
+                    parsed['roster_sha256'] === input.fromSelection.roster_sha256)
+                    max = Math.max(max, attempt);
+            }
+            catch {
+                throw new Error(`invalid runtime ${root} artifact blocks transition attempt freshness: ${path}`);
+            }
+        }
+    }
+    return max;
+}
+async function listJsonFiles(root) {
+    const out = [];
+    async function visit(dir) {
+        for (const entry of await readdir(dir, { withFileTypes: true })) {
+            const path = join(dir, entry.name);
+            if (entry.isDirectory())
+                await visit(path);
+            else if (entry.isFile() && path.endsWith('.json'))
+                out.push(path);
+        }
+    }
+    await visit(root);
+    return Object.freeze(out.sort((left, right) => left.localeCompare(right)));
+}
+function formatRunSelectionDiagnostics(diagnostics) {
+    if (diagnostics.length === 0)
+        return 'no diagnostics';
+    return diagnostics.map((diagnostic) => `${diagnostic.code}${diagnostic.severity === undefined ? '' : `:${diagnostic.severity}`}`).join(', ');
+}
+function isUnitSpecV2(value) {
+    return value.schema_version === 'autopilot.unit_spec.v2';
+}
+function isLegacyV1RuntimeSpecBundle(bundle) {
+    return bundle.unitSpec.schema_version === 'autopilot.unit_spec.v1';
+}
+function requireSpecBundleUnitSpecV2(bundle) {
+    if (isUnitSpecV2(bundle.unitSpec))
+        return bundle.unitSpec;
+    throw new Error('unit_spec.v2 roster execution identity cannot be attached to historical unit_spec.v1');
+}
+function assertV2LaunchQualityGate(spec) {
+    const issues = [];
+    if (spec.quality_profile === undefined || spec.quality_profile === null)
+        issues.push('quality_profile is required before child launch');
+    if (spec.risk_level === undefined || spec.risk_level === null)
+        issues.push('risk_level is required before child launch');
+    if (spec.acceptance_criteria === undefined || spec.acceptance_criteria.length === 0)
+        issues.push('acceptance_criteria must contain at least one criterion before child launch');
+    if (spec.verification_plan === undefined || spec.verification_plan === null)
+        issues.push('verification_plan is required before child launch');
+    if (spec.closure_criteria === undefined || spec.closure_criteria.length === 0)
+        issues.push('closure_criteria must contain at least one criterion before child launch');
+    if ((spec.role === 'implement' || spec.role === 'fix') && spec.owned_paths.length === 0)
+        issues.push(`${spec.role} specs require at least one owned path`);
+    if ((spec.role === 'validate' || spec.role === 'bughunt') && spec.validation_commands.length === 0)
+        issues.push(`${spec.role} specs require at least one validation command`);
+    if (issues.length > 0)
+        throw new Error(`Autopilot unit_spec.v2 failed launch quality gate: ${issues.join('; ')}`);
+}
+async function renderAndMaybeWritePromptForSpecBundle(input) {
+    if (input.specBundle.rosterExecutionIdentity === null) {
+        return await renderAndMaybeWriteAutopilotPromptSnapshot({
+            spec: input.specBundle.unitSpec,
+            allowLegacyV1RuntimeSpec: isLegacyV1RuntimeSpecBundle(input.specBundle),
+            ...(input.coordinationAppendix === undefined ? {} : { coordinationAppendix: input.coordinationAppendix }),
+            ...(input.forceSnapshot === undefined ? {} : { forceSnapshot: input.forceSnapshot }),
+        });
+    }
+    const spec = requireSpecBundleUnitSpecV2(input.specBundle);
+    const forcedOutputContract = {
+        tool_name: AUTOPILOT_STATUS_TOOL,
+        schema_version: 'autopilot.status.v1',
+        workstream: spec.workstream,
+        unit_id: spec.unit_id,
+        role: spec.role,
+        attempt: spec.attempt,
+        status_output: spec.status_output,
+        receipt_output: spec.receipt_output,
+        provider_identity: input.providerIdentity,
+    };
+    return await renderAndMaybeWriteAutopilotPromptSnapshot({
+        spec,
+        forcedOutputContract,
+        ...(input.coordinationAppendix === undefined ? {} : { coordinationAppendix: input.coordinationAppendix }),
+        ...(input.forceSnapshot === undefined ? {} : { forceSnapshot: input.forceSnapshot }),
+    });
+}
+async function observeExecutionIdentityForRoster(input) {
+    const rosterExecutionIdentity = input.specBundle.rosterExecutionIdentity;
+    if (rosterExecutionIdentity === null)
+        return null;
+    const observation = await readExecutionObservationEvidence(input.piResult.artifacts.executionObservationPath);
+    return observedExecutionEvidenceFromPiAndObservation({
+        requestProfile: rosterExecutionIdentity.request_profile,
+        piResult: input.piResult,
+        observation,
+    });
+}
+async function readExecutionObservationEvidence(path) {
+    let parsed;
+    try {
+        parsed = JSON.parse(await readFile(path, 'utf8'));
+    }
+    catch (error) {
+        throw new Error(`missing or unreadable child execution observation evidence at ${path}: ${errorMessage(error)}`);
+    }
+    const observation = parseAutopilotExecutionObservation(parsed);
+    if (observation.diagnostics.length > 0) {
+        throw new Error(`child execution observation was incomplete: ${observation.diagnostics.join('; ')}`);
+    }
+    if (observation.final_assistant_message === null) {
+        throw new Error('child execution observation did not record a final assistant message');
+    }
+    return observation;
+}
+function observedExecutionEvidenceFromPiAndObservation(input) {
+    const final = input.piResult.finalAssistantMessage;
+    if (final === null || final.provider === null || final.model === null || final.api === null) {
+        throw new Error('Pi RPC stream did not expose final assistant provider/model/api metadata');
+    }
+    const observedFinal = input.observation.final_assistant_message;
+    if (observedFinal === null)
+        throw new Error('execution observation lacks final assistant metadata');
+    const finalMismatches = [];
+    if (observedFinal.provider !== final.provider)
+        finalMismatches.push(`provider ${observedFinal.provider} != ${final.provider}`);
+    if (observedFinal.model !== final.model)
+        finalMismatches.push(`model ${observedFinal.model} != ${final.model}`);
+    if (observedFinal.api !== final.api)
+        finalMismatches.push(`api ${observedFinal.api} != ${final.api}`);
+    if (finalMismatches.length > 0)
+        throw new Error(`execution observation final assistant metadata differs from Pi RPC stream: ${finalMismatches.join('; ')}`);
+    const route = deriveRoutePolicyFromObservedProviderApi(final.provider, final.api);
+    if (route === null)
+        throw new Error(`no provider-qualified route policy for observed provider/api ${final.provider}/${final.api}`);
+    const routeMismatches = [];
+    if (route.route_policy_id !== input.observation.execution_profile.route_policy_id)
+        routeMismatches.push('route_policy_id');
+    if (route.route_policy_revision !== input.observation.execution_profile.route_policy_revision)
+        routeMismatches.push('route_policy_revision');
+    if (routeMismatches.length > 0)
+        throw new Error(`execution observation route policy was not derived from final provider/api at ${routeMismatches.join(', ')}`);
+    const thinking = input.piResult.thinkingLevel;
+    if (thinking !== 'high' && thinking !== 'xhigh')
+        throw new Error(`Pi RPC state did not expose a supported final thinking level: ${formatNullable(thinking)}`);
+    const activeModel = input.observation.active_model;
+    const requestedModelId = activeModel?.id ?? input.piResult.initialStateModel?.model ?? final.model;
+    if (requestedModelId === null || requestedModelId.length === 0)
+        throw new Error('execution observation did not expose requested model id');
+    return Object.freeze({
+        provider_id: final.provider,
+        requested_model_id: requestedModelId,
+        executed_model_id: final.model,
+        api: final.api,
+        thinking,
+        service_tier: input.observation.execution_profile.service_tier,
+        cache_policy: input.observation.execution_profile.cache_policy,
+        system_prompt_profile: input.observation.execution_profile.system_prompt_profile,
+        system_prompt_sha256: input.observation.execution_profile.system_prompt_sha256,
+        route_policy_id: input.observation.execution_profile.route_policy_id,
+        route_policy_revision: input.observation.execution_profile.route_policy_revision,
+        request_profile_sha256: input.requestProfile.request_profile_sha256,
+        final_model_metadata: Object.freeze({
+            provider: final.provider,
+            model: final.model,
+            api: final.api,
+            stopReason: final.stopReason,
+            observation_source: input.observation.source,
+        }),
+    });
+}
+async function materializeTerminalAcceptanceInputs(input) {
+    return { specPath: input.specPath, receiptPath: input.specBundle.unitSpec.receipt_output, receipt: input.receipt };
+}
+async function preflightSpec(specBundle, specPath, options = {}) {
+    const spec = requireAuthenticatedAuthoritySpec(specBundle, specPath);
     const preparedWorktree = await prepareMissingSourceChangingUnitWorktree(spec, options.env ?? process.env, options.skipSagaRecovery === true);
     try {
-        return await preflightSpecAfterWorktreePreparation(spec, specPath, options);
+        return await preflightSpecAfterWorktreePreparation(specBundle, specPath, options);
     }
     catch (error) {
         if (preparedWorktree.created) {
@@ -483,7 +1254,8 @@ async function preflightSpec(spec, specPath, options = {}) {
         throw error;
     }
 }
-async function preflightSpecAfterWorktreePreparation(spec, specPath, options = {}) {
+async function preflightSpecAfterWorktreePreparation(specBundle, specPath, options = {}) {
+    const spec = requireAuthenticatedAuthoritySpec(specBundle, specPath);
     try {
         await access(spec.cwd, fsConstants.R_OK);
     }
@@ -536,7 +1308,12 @@ async function preflightSpecAfterWorktreePreparation(spec, specPath, options = {
         }
     }
     if (options.skipClaimAcquire !== true) {
-        await assertAutopilotSpecMaterializationDiskGate({ context: runtimeContext, spec, authority }).catch((error) => {
+        await assertAutopilotSpecMaterializationDiskGate({
+            context: runtimeContext,
+            spec: specBundle.unitSpec,
+            authority,
+            allowLegacyV1RuntimeSpec: isLegacyV1RuntimeSpecBundle(specBundle),
+        }).catch((error) => {
             if (error instanceof Error) {
                 throw new AutopilotAgentRunError('spec-invalid', {
                     reason: error.message,
@@ -601,9 +1378,10 @@ async function preflightSpecAfterWorktreePreparation(spec, specPath, options = {
             await assertD65OrdinaryBoundaryFromEnvironment('post-acquisition-output', options.env ?? process.env);
             await materializeAutopilotSpecPaths({
                 context: runtimeContext,
-                spec,
+                spec: specBundle.unitSpec,
                 authority,
                 reason: 'autopilot-agent-run preflight materialization',
+                allowLegacyV1RuntimeSpec: isLegacyV1RuntimeSpecBundle(specBundle),
                 ...(options.env === undefined ? {} : { env: options.env }),
             });
         }
@@ -774,18 +1552,23 @@ function timeoutMsForSpec(spec) {
 function deriveAutopilotStatusContextPath(spec) {
     return resolve(dirname(spec.receipt_output), `${spec.unit_id}.${spec.role}.attempt-${String(spec.attempt)}.context.json`);
 }
+function deriveAutopilotExecutionObservationPath(spec) {
+    return resolve(spec.evidence_dir, `${spec.unit_id}.${spec.role}.attempt-${String(spec.attempt)}.execution-observation.json`);
+}
 async function writeStatusContext(path, context) {
     const parsed = parseAutopilotStatusToolContext(JSON.parse(JSON.stringify(context)));
     await mkdir(dirname(path), { recursive: true });
     await writeFile(path, `${JSON.stringify(parsed, null, 2)}\n`, 'utf8');
 }
-async function writeAttemptAudit(spec, context, authority, baseline, statusEntry, auditPath, env) {
-    const readOnlyPaths = await expandedReadOnlyPathsForAudit({ context, spec, authority, env });
+async function writeAttemptAudit(specBundle, context, authority, baseline, statusEntry, auditPath, env) {
+    const allowLegacyV1RuntimeSpec = isLegacyV1RuntimeSpecBundle(specBundle);
+    const readOnlyPaths = await expandedReadOnlyPathsForAudit({ context, spec: specBundle.unitSpec, authority, env, allowLegacyV1RuntimeSpec });
     return await writeAutopilotExecutionAudit({
-        unitSpec: { ...spec, read_only_paths: readOnlyPaths },
+        unitSpec: { ...specBundle.unitSpec, read_only_paths: readOnlyPaths },
         baseline,
         statusEntry,
         auditPath,
+        allowLegacyV1RuntimeSpec,
     });
 }
 function resolvePiExecutable(env) {
@@ -827,8 +1610,49 @@ function validateModelIdentity(model) {
         });
     }
 }
+function validateSpawnExecutionProfile(spec) {
+    if (spec.requestProfile === undefined) {
+        validateModelIdentity(spec.model);
+        return;
+    }
+    try {
+        const { provider, modelId } = splitAutopilotModelId(spec.model);
+        const request = spec.requestProfile;
+        const mismatches = [];
+        if (provider !== request.provider_id)
+            mismatches.push(`provider_id expected ${request.provider_id}, got ${provider}`);
+        if (modelId !== request.model_id)
+            mismatches.push(`model_id expected ${request.model_id}, got ${modelId}`);
+        if (spec.model !== request.model)
+            mismatches.push(`model expected ${request.model}, got ${spec.model}`);
+        if (spec.thinking !== request.thinking)
+            mismatches.push(`thinking expected ${request.thinking}, got ${spec.thinking}`);
+        const route = deriveRoutePolicyFromObservedProviderApi(request.provider_id, request.api);
+        if (route === null)
+            mismatches.push(`route_policy ${request.route_policy_id}@${String(request.route_policy_revision)} has no provider-qualified Pi adapter for ${request.provider_id}/${request.api}`);
+        else {
+            if (route.route_policy_id !== request.route_policy_id)
+                mismatches.push(`route_policy_id expected ${request.route_policy_id}, Pi adapter derives ${route.route_policy_id}`);
+            if (route.route_policy_revision !== request.route_policy_revision)
+                mismatches.push(`route_policy_revision expected ${String(request.route_policy_revision)}, Pi adapter derives ${String(route.route_policy_revision)}`);
+        }
+        if (request.service_tier !== null)
+            mismatches.push(`Pi 0.80.6 cannot set request_profile.service_tier=${JSON.stringify(request.service_tier)} exactly before model spend`);
+        if (request.cache_policy !== 'provider-default')
+            mismatches.push(`Pi 0.80.6 cannot set request_profile.cache_policy=${JSON.stringify(request.cache_policy)} exactly before model spend`);
+        if (request.system_prompt_profile !== 'pi-default.v1')
+            mismatches.push(`Pi 0.80.6 cannot set request_profile.system_prompt_profile=${JSON.stringify(request.system_prompt_profile)} exactly before model spend`);
+        if (mismatches.length > 0)
+            throw new Error(mismatches.join('; '));
+    }
+    catch (error) {
+        throw new AutopilotAgentRunError('spec-invalid', {
+            reason: `roster request profile does not match an exactly applicable provider-qualified Pi execution adapter: ${errorMessage(error)}`,
+        });
+    }
+}
 async function runPiPromptWithStatusCarrier(spec, prompt) {
-    validateModelIdentity(spec.model);
+    validateSpawnExecutionProfile(spec);
     const argv = [
         '--mode',
         'rpc',
@@ -849,8 +1673,10 @@ async function runPiPromptWithStatusCarrier(spec, prompt) {
         buildPiToolArgument(spec.toolPolicy),
         '--extension',
         AUTOPILOT_AGENT_STATUS_EXTENSION_PATH,
+        '--extension',
+        AUTOPILOT_AGENT_EXECUTION_OBSERVER_EXTENSION_PATH,
     ];
-    const env = sanitizeAgentEnv(spec.env, spec.contextPath);
+    const env = sanitizeAgentEnv(spec.env, spec.contextPath, spec.executionObservationPath);
     let child;
     try {
         child = spawn(spec.executable, argv, {
@@ -865,8 +1691,12 @@ async function runPiPromptWithStatusCarrier(spec, prompt) {
     }
     return await supervisePiRpcChild(child, spec, prompt);
 }
-function sanitizeAgentEnv(env, contextPath) {
-    const out = { ...env, [AUTOPILOT_STATUS_CONTEXT_ENV]: contextPath };
+function sanitizeAgentEnv(env, contextPath, executionObservationPath) {
+    const out = {
+        ...env,
+        [AUTOPILOT_STATUS_CONTEXT_ENV]: contextPath,
+        [AUTOPILOT_EXECUTION_OBSERVATION_ENV]: executionObservationPath,
+    };
     delete out[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV];
     delete out['PIPELINE_CODEX_CLI_EXECUTABLE'];
     delete out['PIPELINE_CODEX_CLI_MODEL'];
@@ -879,6 +1709,7 @@ function supervisePiRpcChild(child, spec, prompt) {
         let stderrText = '';
         let lastState;
         let lastMessage;
+        let lastAssistantMessage;
         let turnCount = 0;
         let sawErrorEvent = false;
         const pendingCommands = new Map();
@@ -1030,8 +1861,11 @@ function supervisePiRpcChild(child, spec, prompt) {
             }
             if (type === 'message_end' || type === 'turn_end') {
                 const message = record['message'];
-                if (isJsonRecord(message))
+                if (isJsonRecord(message)) {
                     lastMessage = message;
+                    if (message['role'] === 'assistant')
+                        lastAssistantMessage = message;
+                }
                 if (type === 'turn_end')
                     turnCount += 1;
             }
@@ -1103,10 +1937,13 @@ function supervisePiRpcChild(child, spec, prompt) {
                 const stateResponse = await sendCommand('get_state');
                 if (isJsonRecord(stateResponse.data))
                     lastState = stateResponse.data;
+                validatePreSpendPiState(spec, lastState);
                 await sendCommand('prompt', { message: prompt });
                 await waitForEvent('agent_end', spec.wallMs);
                 await sendCommand('get_session_stats').catch(() => undefined);
                 const facts = deriveResultFacts(lastState, lastMessage);
+                const finalAssistant = deriveFinalAssistantFacts(lastAssistantMessage);
+                const initialStateModel = deriveInitialStateModelFacts(lastState);
                 settleResolve(({
                     isError: sawErrorEvent || facts.stopReason === 'error',
                     stopReason: facts.stopReason,
@@ -1115,11 +1952,14 @@ function supervisePiRpcChild(child, spec, prompt) {
                     api: facts.api,
                     thinkingLevel: facts.thinkingLevel,
                     numTurns: turnCount,
+                    finalAssistantMessage: finalAssistant,
+                    initialStateModel,
                     artifacts: ({
                         structuredOutput: ({
                             toolResultCandidates: ([...toolResultCandidates]),
                         }),
                         diagnostics: diagnostics(),
+                        executionObservationPath: spec.executionObservationPath,
                     }),
                 }));
             }
@@ -1180,6 +2020,28 @@ function toolResultCandidateFromRecord(eventRecord, resultRecord) {
         ...(detailsConflict === undefined ? {} : { detailsConflict }),
     });
 }
+function validatePreSpendPiState(spec, state) {
+    if (spec.requestProfile === undefined)
+        return;
+    const stateModel = isJsonRecord(state?.['model']) ? state?.['model'] : undefined;
+    const request = spec.requestProfile;
+    const mismatches = [];
+    const provider = stringField(stateModel, 'provider');
+    const model = stringField(stateModel, 'id');
+    const api = stringField(stateModel, 'api');
+    const thinking = stringField(state, 'thinkingLevel');
+    if (provider !== request.provider_id)
+        mismatches.push(`provider_id expected ${request.provider_id}, Pi state observed ${formatNullable(provider ?? null)}`);
+    if (model !== request.model_id)
+        mismatches.push(`model_id expected ${request.model_id}, Pi state observed ${formatNullable(model ?? null)}`);
+    if (api !== request.api)
+        mismatches.push(`api expected ${request.api}, Pi state observed ${formatNullable(api ?? null)}`);
+    if (thinking !== request.thinking)
+        mismatches.push(`thinking expected ${request.thinking}, Pi state observed ${formatNullable(thinking ?? null)}`);
+    if (mismatches.length > 0) {
+        throw new AutopilotPiRunError('pre-spend-profile-mismatch', `Pi state does not match roster request profile before model spend: ${mismatches.join('; ')}`);
+    }
+}
 function deriveResultFacts(state, message) {
     const stateModel = isJsonRecord(state?.['model']) ? state?.['model'] : undefined;
     const provider = stringField(message, 'provider') ?? stringField(stateModel, 'provider');
@@ -1194,6 +2056,26 @@ function deriveResultFacts(state, message) {
         api: api ?? null,
         thinkingLevel: thinkingLevel ?? null,
     });
+}
+function deriveFinalAssistantFacts(message) {
+    if (message === undefined)
+        return null;
+    return {
+        provider: stringField(message, 'provider') ?? null,
+        model: stringField(message, 'model') ?? null,
+        api: stringField(message, 'api') ?? null,
+        stopReason: stringField(message, 'stopReason') ?? null,
+    };
+}
+function deriveInitialStateModelFacts(state) {
+    const stateModel = isJsonRecord(state?.['model']) ? state?.['model'] : undefined;
+    if (stateModel === undefined)
+        return null;
+    return {
+        provider: stringField(stateModel, 'provider') ?? null,
+        model: stringField(stateModel, 'id') ?? null,
+        api: stringField(stateModel, 'api') ?? null,
+    };
 }
 function normalizeStatusToolResultDetails(rawDetails, eventIdentity) {
     if (!isJsonRecord(rawDetails))
@@ -1335,10 +2217,17 @@ function formatNullable(value) {
     return value === null ? 'null' : JSON.stringify(boundedDiagnosticText(value, DIAGNOSTIC_TEXT_LIMIT));
 }
 function boundedDiagnosticText(value, limit) {
-    const compact = value.replace(/[\u0000-\u001f\u007f]+/gu, ' ').trim();
+    const compact = redactSensitiveText(value).replace(/[\u0000-\u001f\u007f]+/gu, ' ').trim();
     if (compact.length <= limit)
         return compact;
     return `${compact.slice(0, limit)}…<truncated>`;
+}
+function redactSensitiveText(value) {
+    return value
+        .replace(/(authorization\s*[:=]\s*bearer\s+)[A-Za-z0-9._~+\/-]+/giu, '$1<redacted>')
+        .replace(/((?:api[_-]?key|access[_-]?token|refresh[_-]?token|oauth[_-]?token|credential|secret)\s*[:=]\s*)[^\s,;"'}]+/giu, '$1<redacted>')
+        .replace(/\b(?:sk|pk|rk|ghp|github_pat)_[A-Za-z0-9_\-]{12,}\b/gu, '<redacted-token>')
+        .replace(/\b[A-Za-z0-9_-]*token[A-Za-z0-9_-]*\b\s*[:=]\s*[^\s,;"'}]+/giu, 'token=<redacted>');
 }
 function tailText(value) {
     if (value.length <= DIAGNOSTIC_TEXT_LIMIT)

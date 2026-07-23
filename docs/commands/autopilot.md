@@ -19,11 +19,13 @@ Start or resume an Autopilot parent orchestration session for a workstream.
 ## Behavior
 
 - Resolves roster authority before preparing a worktree: explicit `--roster <id>`,
-  trusted-project default, user default, then agent-first setup when no selectable
-  authority exists. A corrupt or untrusted higher-precedence authority blocks the run;
-  lower precedence is not consulted.
+  existing-run terminal transition authority, trusted-project default, user default,
+  then agent-first setup when no selectable authority exists. A corrupt, untrusted, or
+  stale higher-precedence authority blocks the run; lower precedence is not consulted.
 - If setup is required, stays pre-run, activates the packaged `autopilot-roster-setup`
-  lane for this session only, and writes no run/worktree state.
+  lane for this session only, and writes no run/worktree state. If an existing run needs
+  a roster change, presents exact transition approval and waits for a retry rather than
+  replacing the pinned selection.
 - Activates the parent `context_budget` tool; the rendered parent prompt requires
   `context_budget` before reading project files, runtime state, or launching child
   work.
@@ -42,8 +44,9 @@ worktree; shared run/session authority under `~/.pi/agent/autopilot/`. See
 
 Roster resolution/setup requirement, roster model/profile mismatch, worktree
 preparation failure, and durable-supervisor attachment failure each produce a loud
-notification and abort activation (no silent fallback). Current W4 provider packs are
-blocked or non-certifying, so setup cannot save launch authority from offline evidence.
+notification and abort activation (no silent fallback). Current W4 provider packs and
+custom trust pins are blocked, so setup cannot save launch authority from offline or
+uncertified custom evidence.
 
 ## Related
 

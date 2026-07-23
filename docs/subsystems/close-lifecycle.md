@@ -11,8 +11,8 @@ covers_sources:
   - src/core/execution-commit.ts
   - src/core/validation-staleness.ts
   - src/core/worktree-cleanup.ts
-signature_hash: 'sha256:008aa231a2414d2bcb29cc62696f7587634857ea043568428bd1f286fbc446b9'
-body_hash: 'sha256:1c4821ee2baa48c290ddd6974e45fe6baea85d1177b8c82ba5c44a266b9543e3'
+signature_hash: 'sha256:99bf9934a571ea880c691bc98db9a98cc7932f034eb0fd27fe3eb6bb1267461c'
+body_hash: 'sha256:490a93f489ad3b7703acfff46387ca126c8fa0786f054e7f502d84c9a1721d61'
 stability: stable
 ---
 
@@ -44,7 +44,10 @@ checkout or remotes.
 5. No remaining validation-staleness artifacts, unresolved reservation repair,
    foreign/manual target-path intersections, or dirty/running/quarantined unit
    worktrees.
-6. A D65 run has an accepted complete graph, launch policy, governing heartbeat, and
+6. If an existing-run roster transition committed, at least one independent validation
+   PASS must be fresher than the terminal transition; validation from the FROM roster is
+   stale by construction.
+7. A D65 run has an accepted complete graph, launch policy, governing heartbeat, and
    no pending graph publication before entering its prepared terminal boundary.
 
 ## Close effects (in order)
@@ -80,6 +83,9 @@ merging**, refuses dirty source paths, and retires the branch to
   touched.
 - Mergeback selects the immutable `execution_commit.commit_sha`; clean branch drift
   blocks before integration mutation or any terminal side effect.
+- A committed roster transition is terminal-run authority, not closure evidence; close
+  keeps the transition behavior but still requires fresh validation under the terminal
+  roster before landing.
 
 ## Related
 

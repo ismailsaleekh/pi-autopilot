@@ -332,6 +332,10 @@
     "src/core/roster/contracts.ts": [
       "subsystems/roster-onboarding"
     ],
+    "src/core/roster/custom-certification.ts": [
+      "subsystems/roster-onboarding",
+      "subsystems/runner-and-forced-output"
+    ],
     "src/core/roster/doctor.ts": [
       "subsystems/roster-onboarding"
     ],
@@ -357,7 +361,8 @@
       "subsystems/roster-onboarding"
     ],
     "src/core/roster/runtime-consumers.ts": [
-      "subsystems/roster-onboarding"
+      "subsystems/roster-onboarding",
+      "subsystems/runner-and-forced-output"
     ],
     "src/core/roster/runtime-spec.ts": [
       "subsystems/roster-onboarding"
@@ -385,6 +390,10 @@
     ],
     "src/core/roster/transaction.ts": [
       "subsystems/roster-onboarding"
+    ],
+    "src/core/roster/transition.ts": [
+      "subsystems/roster-onboarding",
+      "subsystems/runner-and-forced-output"
     ],
     "src/core/scheduler-config.ts": [
       "commands/autopilot-config"
@@ -747,8 +756,8 @@
         "src/core/validation-staleness.ts",
         "src/core/worktree-cleanup.ts"
       ],
-      "signature_hash": "sha256:008aa231a2414d2bcb29cc62696f7587634857ea043568428bd1f286fbc446b9",
-      "body_hash": "sha256:1c4821ee2baa48c290ddd6974e45fe6baea85d1177b8c82ba5c44a266b9543e3",
+      "signature_hash": "sha256:99bf9934a571ea880c691bc98db9a98cc7932f034eb0fd27fe3eb6bb1267461c",
+      "body_hash": "sha256:490a93f489ad3b7703acfff46387ca126c8fa0786f054e7f502d84c9a1721d61",
       "semantic_attestation": null
     },
     "subsystems/contracts-and-schemas": {
@@ -879,6 +888,7 @@
         "src/core/roster/artifact-compatibility.ts",
         "src/core/roster/canonical.ts",
         "src/core/roster/contracts.ts",
+        "src/core/roster/custom-certification.ts",
         "src/core/roster/doctor.ts",
         "src/core/roster/historical-adapter.ts",
         "src/core/roster/paths.ts",
@@ -897,13 +907,14 @@
         "src/core/roster/snapshot.ts",
         "src/core/roster/storage.ts",
         "src/core/roster/transaction.ts",
+        "src/core/roster/transition.ts",
         "src/extension.ts",
         "src/internal/execution-observer-extension.ts",
         "templates/skills/autopilot-roster-setup/SKILL.md",
         "templates/skills/autopilot-roster-setup/payload.json"
       ],
-      "signature_hash": "sha256:7f6d8bf57292542434db2fc0a38054f371f1888f0f8cfee86ea5cb91685837d6",
-      "body_hash": "sha256:108311b7bdc07a2833145595c02fc388fb0dba107c1ada3df604cf974b6c1b6c",
+      "signature_hash": "sha256:d46aa43fe4e3f719f06711948472b74c8014073e643e7d1e579233ea219cabed",
+      "body_hash": "sha256:11e615ca9a246907917953eaaf745d74609b44300cc847ee7e87141f87efd727",
       "semantic_attestation": null
     },
     "subsystems/runner-and-forced-output": {
@@ -921,11 +932,14 @@
         "src/core/forced-output/index.ts",
         "src/core/model-roster.ts",
         "src/core/prompt-renderer/index.ts",
+        "src/core/roster/custom-certification.ts",
+        "src/core/roster/runtime-consumers.ts",
+        "src/core/roster/transition.ts",
         "src/core/scheduler.ts",
         "src/core/unit-failure.ts"
       ],
-      "signature_hash": "sha256:1f9c82ae3d17b8da989f9a75961689fdc3b61d0e9de48c003bdd1ff3f30e62e6",
-      "body_hash": "sha256:f6c5fa13f558cf9fb22ff9caa041723e151bc8d3eff2b69b324724de9894a99c",
+      "signature_hash": "sha256:20a3ac4c9e11b91def694d023369ecd987443df7b535c420da70540ccd26c260",
+      "body_hash": "sha256:a3230fd9b5260de448a845d69f16ac87f62e99b5d9d685f11c507599b1ac18e0",
       "semantic_attestation": null
     },
     "subsystems/worktrees": {

@@ -1,9 +1,21 @@
+import { createHash } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
-import { dirname, isAbsolute, normalize, relative, resolve, sep } from 'node:path';
-import { parseAutopilotExecutionAudit } from "../contracts/index.js";
+import { dirname, isAbsolute, join, normalize, relative, resolve, sep } from 'node:path';
+import { parseAutopilotExecutionAudit, parseAutopilotUnitSpec } from "../contracts/index.js";
 import { AUTOPILOT_EXECUTION_AUDIT_PATH_SET_VALUES, } from "../contracts/types.js";
+import { parseNewRunRuntimeUnitSpec, runtimeSpecRosterIdentity, } from "../roster/runtime-consumers.js";
 import { GitQueryError, gitQueryNulStrings, runGitQuery } from "../git-process.js";
 const EXECUTION_AUDIT_PATH_SET_LIMIT = 500;
+function executionAuditRuntimeSpec(spec, options = {}) {
+    try {
+        return Object.freeze({ unit_spec: parseNewRunRuntimeUnitSpec(spec).unit_spec });
+    }
+    catch (error) {
+        if (options.allowLegacyV1RuntimeSpec !== true || spec.schema_version !== 'autopilot.unit_spec.v1')
+            throw error;
+        return Object.freeze({ unit_spec: parseAutopilotUnitSpec(spec) });
+    }
+}
 export async function captureAutopilotExecutionBaseline(cwd) {
     const snapshot = readGitStatusSnapshot(cwd);
     return Object.freeze({
@@ -14,34 +26,40 @@ export async function captureAutopilotExecutionBaseline(cwd) {
         summary: snapshot.summary,
     });
 }
-export function deriveAutopilotExecutionAuditPath(spec) {
-    return resolve(deriveAutopilotArtifactRootFromStatus(spec.status_output), 'execution-audits', `${spec.unit_id}.${spec.role}.attempt-${String(spec.attempt)}.json`);
+export function deriveAutopilotExecutionAuditPath(spec, options = {}) {
+    const unitSpec = executionAuditRuntimeSpec(spec, options).unit_spec;
+    return resolve(deriveAutopilotArtifactRootFromStatus(unitSpec.status_output), 'execution-audits', `${unitSpec.unit_id}.${unitSpec.role}.attempt-${String(unitSpec.attempt)}.json`);
 }
 export async function writeAutopilotExecutionAudit(input) {
-    const postRun = readGitStatusSnapshot(input.unitSpec.cwd);
+    const unitSpec = executionAuditRuntimeSpec(input.unitSpec, input).unit_spec;
+    const postRun = readGitStatusSnapshot(unitSpec.cwd);
     const audit = buildAutopilotExecutionAudit({
-        unitSpec: input.unitSpec,
+        unitSpec,
         baseline: input.baseline,
         postRun,
         statusEntry: input.statusEntry,
+        allowLegacyV1RuntimeSpec: input.allowLegacyV1RuntimeSpec === true,
     });
     const parsed = parseAutopilotExecutionAudit(audit);
-    const auditPath = input.auditPath ?? deriveAutopilotExecutionAuditPath(input.unitSpec);
+    if (runtimeSpecRosterIdentity(unitSpec) !== null)
+        await writeRosterRuntimeIdentityEvidence(unitSpec);
+    const auditPath = input.auditPath ?? deriveAutopilotExecutionAuditPath(unitSpec, input);
     await mkdir(dirname(auditPath), { recursive: true });
     await writeFile(auditPath, `${JSON.stringify(parsed, null, 2)}\n`, 'utf8');
     return parsed;
 }
 export function buildAutopilotExecutionAudit(input) {
+    const unitSpec = executionAuditRuntimeSpec(input.unitSpec, input).unit_spec;
     const auditAvailable = input.baseline.available && input.postRun.available;
-    const runtimeRoot = runtimeRootRelativePrefix(input.unitSpec);
+    const runtimeRoot = runtimeRootRelativePrefix(unitSpec);
     const baselineDirtyPathsFull = auditAvailable
         ? input.baseline.dirtyPaths.filter((path) => !matchesPathPattern(path, runtimeRoot))
         : [];
     const baselineDirty = baselineDirtyPathsFull.length > 0;
-    const dirtyRelevantPathsFull = baselineDirtyPathsFull.filter((path) => matchesPathPatterns(path, relevantDirtyPathPatterns(input.unitSpec)));
-    const headChangeKind = classifyHeadChange(input.unitSpec.cwd, input.baseline.gitHead, input.postRun.gitHead, auditAvailable);
+    const dirtyRelevantPathsFull = baselineDirtyPathsFull.filter((path) => matchesPathPatterns(path, relevantDirtyPathPatterns(unitSpec)));
+    const headChangeKind = classifyHeadChange(unitSpec.cwd, input.baseline.gitHead, input.postRun.gitHead, auditAvailable);
     const committedChangedPathsFull = auditAvailable
-        ? committedChangedPaths(input.unitSpec.cwd, input.baseline.gitHead, input.postRun.gitHead).filter((path) => !matchesPathPattern(path, runtimeRoot))
+        ? committedChangedPaths(unitSpec.cwd, input.baseline.gitHead, input.postRun.gitHead).filter((path) => !matchesPathPattern(path, runtimeRoot))
         : [];
     const dirtyChangedPathsFull = auditAvailable
         ? sortedDifference(input.postRun.changedPaths, baselineDirtyPathsFull).filter((path) => !matchesPathPattern(path, runtimeRoot))
@@ -54,9 +72,9 @@ export function buildAutopilotExecutionAudit(input) {
     const reportedButNotActualChangesFull = auditAvailable
         ? sortedDifference(statusReportedChangedPathsFull, actualChangedPathsFull)
         : [];
-    const outsideOwnedPathsFull = actualChangedPathsFull.filter((path) => !matchesPathPatterns(path, input.unitSpec.owned_paths));
-    const readOnlyTouchedPathsFull = actualChangedPathsFull.filter((path) => matchesPathPatterns(path, input.unitSpec.read_only_paths));
-    const untouchableTouchedPathsFull = actualChangedPathsFull.filter((path) => matchesPathPatterns(path, input.unitSpec.untouchable_paths));
+    const outsideOwnedPathsFull = actualChangedPathsFull.filter((path) => !matchesPathPatterns(path, unitSpec.owned_paths));
+    const readOnlyTouchedPathsFull = actualChangedPathsFull.filter((path) => matchesPathPatterns(path, unitSpec.read_only_paths));
+    const untouchableTouchedPathsFull = actualChangedPathsFull.filter((path) => matchesPathPatterns(path, unitSpec.untouchable_paths));
     const dirtyRelevantPaths = boundedAuditPathSet(dirtyRelevantPathsFull);
     const boundedPathSets = Object.freeze({
         dirty_baseline_paths: boundedAuditPathSet(baselineDirtyPathsFull, dirtyRelevantPaths.paths),
@@ -72,7 +90,7 @@ export function buildAutopilotExecutionAudit(input) {
     const pathCounts = executionAuditPathCounts(boundedPathSets);
     const truncatedPathSets = truncatedAuditPathSets(boundedPathSets);
     const statusReportedCommands = sortedUnique((input.statusEntry?.commands ?? []).map((command) => command.command));
-    const declaredValidationCommands = sortedUnique(input.unitSpec.validation_commands);
+    const declaredValidationCommands = sortedUnique(unitSpec.validation_commands);
     const commandCoverageGaps = sortedDifference(declaredValidationCommands, statusReportedCommands);
     const classification = classifyAudit({
         auditAvailable,
@@ -88,12 +106,12 @@ export function buildAutopilotExecutionAudit(input) {
     });
     return Object.freeze({
         schema_version: 'autopilot.execution_audit.v1',
-        workstream: input.unitSpec.workstream,
-        unit_id: input.unitSpec.unit_id,
-        role: input.unitSpec.role,
-        attempt: input.unitSpec.attempt,
+        workstream: unitSpec.workstream,
+        unit_id: unitSpec.unit_id,
+        role: unitSpec.role,
+        attempt: unitSpec.attempt,
         audited_at: new Date().toISOString(),
-        cwd: input.unitSpec.cwd,
+        cwd: unitSpec.cwd,
         git_head: input.baseline.gitHead ?? input.postRun.gitHead,
         baseline_head: input.baseline.gitHead,
         post_run_head: input.postRun.gitHead,
@@ -115,7 +133,7 @@ export function buildAutopilotExecutionAudit(input) {
         status_reported_commands: statusReportedCommands,
         command_coverage_gaps: commandCoverageGaps,
         classification,
-        evidence_refs: [],
+        evidence_refs: runtimeSpecRosterIdentity(unitSpec) === null ? [] : [rosterRuntimeIdentityEvidenceRef(unitSpec)],
         summary: auditSummary({
             classification,
             auditAvailable,
@@ -302,10 +320,45 @@ function deriveAutopilotArtifactRootFromStatus(statusOutput) {
         return dirname(statusDir);
     return root;
 }
-function runtimeRootRelativePrefix(spec) {
-    const runtimeRoot = deriveAutopilotArtifactRootFromStatus(spec.status_output);
-    const rel = relative(spec.cwd, runtimeRoot).split(sep).join('/');
-    return rel.length === 0 || rel.startsWith('..') ? `.pi/autopilot/${spec.workstream}` : rel;
+function runtimeRootRelativePrefix(unitSpec) {
+    const runtimeRoot = deriveAutopilotArtifactRootFromStatus(unitSpec.status_output);
+    const rel = relative(unitSpec.cwd, runtimeRoot).split(sep).join('/');
+    return rel.length === 0 || rel.startsWith('..') ? `.pi/autopilot/${unitSpec.workstream}` : rel;
+}
+async function writeRosterRuntimeIdentityEvidence(unitSpec) {
+    const path = rosterRuntimeIdentityEvidencePath(unitSpec);
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(path, rosterRuntimeIdentityEvidenceBytes(unitSpec), 'utf8');
+}
+function rosterRuntimeIdentityEvidenceRef(unitSpec) {
+    const bytes = rosterRuntimeIdentityEvidenceBytes(unitSpec);
+    const artifactRoot = deriveAutopilotArtifactRootFromStatus(unitSpec.status_output);
+    const path = relative(artifactRoot, rosterRuntimeIdentityEvidencePath(unitSpec)).split(sep).join('/');
+    return Object.freeze({
+        path,
+        sha256: sha256Text(bytes),
+        byte_count: utf8ByteLength(bytes),
+        description: 'Phase37 roster/assignment/request-profile identity retained by execution audit',
+    });
+}
+function rosterRuntimeIdentityEvidencePath(unitSpec) {
+    return join(unitSpec.evidence_dir, `${unitSpec.unit_id}.${unitSpec.role}.attempt-${String(unitSpec.attempt)}.roster-runtime-identity.json`);
+}
+function rosterRuntimeIdentityEvidenceBytes(unitSpec) {
+    const identity = runtimeSpecRosterIdentity(unitSpec);
+    if (identity === null)
+        throw new Error('unit_spec.v2 roster identity is unavailable');
+    return `${JSON.stringify({
+        ...identity,
+        evidence_schema_version: 'autopilot.execution_audit_roster_runtime_identity.v1',
+        evidence_for_schema_version: 'autopilot.execution_audit.v1',
+    }, null, 2)}\n`;
+}
+function sha256Text(value) {
+    return `sha256:${createHash('sha256').update(value, 'utf8').digest('hex')}`;
+}
+function utf8ByteLength(value) {
+    return new TextEncoder().encode(value).length;
 }
 function boundedText(value) {
     const trimmed = value.trim();

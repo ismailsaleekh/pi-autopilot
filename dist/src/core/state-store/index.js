@@ -1,7 +1,8 @@
 import { constants as fsConstants, existsSync } from 'node:fs';
 import { access, appendFile, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { parseAutopilotEventRow, parseAutopilotReceipt, parseAutopilotState, parseAutopilotStatusEntry, parseAutopilotUnitSpec, } from "../contracts/index.js";
+import { parseAutopilotEventRow, parseAutopilotState, parseAutopilotStatusEntry, } from "../contracts/index.js";
+import { assertRuntimeReceiptMatchesUnitSpec, parseNewRunRuntimeReceipt, parseNewRunRuntimeUnitSpec, } from "../roster/runtime-consumers.js";
 import { readAutopilotPurposeSnapshot, } from "./purpose.js";
 export * from "./purpose.js";
 const parseJsonValue = globalThis.JSON.parse;
@@ -99,9 +100,9 @@ export async function readAutopilotResumeSnapshot(input) {
 }
 /**
  * Validate every reference inside an AutopilotState:
- * - spec_ref  → valid AutopilotUnitSpec with matching identity
+ * - spec_ref  → valid Phase37 new-run unit_spec.v2 with matching identity
  * - status_ref → valid AutopilotStatusEntry with matching identity
- * - receipt_ref → valid AutopilotReceipt with matching identity
+ * - receipt_ref → valid Phase37 new-run receipt.v2 with matching identity
  *
  * All resolved paths are verified to stay within `artifactRoot`. Absolute paths
  * or traversal segments are rejected.
@@ -114,10 +115,17 @@ export async function validateAutopilotStateReferences(input) {
     const specs = {};
     validateQueueStateCoherence(state);
     for (const unit of Object.values(state.units)) {
-        let spec;
+        let specContext;
         if (unit.spec_ref !== undefined) {
             const specPath = resolveRef(input.artifactRoot, unit.spec_ref, 'spec_ref');
-            spec = parseAutopilotUnitSpec(await readJsonObject(specPath, unit.spec_ref));
+            const specArtifact = await readJsonArtifact(specPath, unit.spec_ref);
+            try {
+                specContext = parseNewRunRuntimeUnitSpec(specArtifact.value);
+            }
+            catch (error) {
+                throw new AutopilotStateStoreError('spec-ref-mismatch', errorMessage(error));
+            }
+            const spec = specContext.unit_spec;
             if (spec.workstream !== state.workstream) {
                 throw new AutopilotStateStoreError('spec-ref-mismatch', `${unit.spec_ref} workstream does not match state workstream`);
             }
@@ -129,8 +137,8 @@ export async function validateAutopilotStateReferences(input) {
         let statusPath;
         if (unit.status_ref !== undefined) {
             statusPath = resolveRef(input.artifactRoot, unit.status_ref, 'status_ref');
-            const status = parseAutopilotStatusEntry(await readJsonObject(statusPath, unit.status_ref), {
-                ...(spec === undefined ? {} : { unitSpec: spec }),
+            const status = parseAutopilotStatusEntry((await readJsonArtifact(statusPath, unit.status_ref)).value, {
+                ...(specContext === undefined ? {} : { unitSpec: specContext.authority_spec }),
                 artifactRoot: input.artifactRoot,
             });
             if (status.workstream !== state.workstream ||
@@ -143,15 +151,27 @@ export async function validateAutopilotStateReferences(input) {
         }
         if (unit.receipt_ref !== undefined) {
             const receiptPath = resolveRef(input.artifactRoot, unit.receipt_ref, 'receipt_ref');
-            const receipt = parseAutopilotReceipt(await readJsonObject(receiptPath, unit.receipt_ref), {
-                ...(spec === undefined ? {} : { unitSpec: spec }),
-                ...(statusPath === undefined ? {} : { statusOutputPath: statusPath }),
-            });
+            const receiptArtifact = await readJsonArtifact(receiptPath, unit.receipt_ref);
+            let receiptContext;
+            try {
+                receiptContext = parseNewRunRuntimeReceipt(receiptArtifact.value, {
+                    ...(specContext === undefined || specContext.kind !== 'phase37-new-run-v2' ? {} : { unitSpec: specContext }),
+                });
+                if (specContext !== undefined)
+                    assertRuntimeReceiptMatchesUnitSpec({ unitSpec: specContext, receipt: receiptContext });
+            }
+            catch (error) {
+                throw new AutopilotStateStoreError('receipt-ref-mismatch', errorMessage(error));
+            }
+            const receipt = receiptContext.receipt;
             if (receipt.workstream !== state.workstream ||
                 receipt.unit_id !== unit.unit_id ||
                 receipt.role !== unit.role ||
                 receipt.attempt !== unit.attempt) {
                 throw new AutopilotStateStoreError('receipt-ref-mismatch', `${unit.receipt_ref} identity does not match state unit ${unit.unit_id}`);
+            }
+            if (statusPath !== undefined && specContext !== undefined && receipt.status_output !== specContext.unit_spec.status_output) {
+                throw new AutopilotStateStoreError('receipt-ref-mismatch', `${unit.receipt_ref} status_output does not match unit spec`);
             }
             receipts[unit.receipt_ref] = receipt;
         }
@@ -218,6 +238,9 @@ async function writeJsonAtomic(path, value) {
     }
 }
 async function readJsonObject(path, label) {
+    return (await readJsonArtifact(path, label)).value;
+}
+async function readJsonArtifact(path, label) {
     try {
         await access(path, fsConstants.R_OK);
     }
@@ -228,9 +251,11 @@ async function readJsonObject(path, label) {
     if (!stats.isFile()) {
         throw new AutopilotStateStoreError('missing-reference', `${label} is not a file at ${path}`);
     }
+    let bytes;
     let parsed;
     try {
-        parsed = parseJsonValue(await readFile(path, 'utf8'));
+        bytes = await readFile(path, 'utf8');
+        parsed = parseJsonValue(bytes);
     }
     catch (error) {
         throw new AutopilotStateStoreError('corrupt-json-reference', `${label} is not valid JSON at ${path}: ${errorMessage(error)}`);
@@ -238,7 +263,7 @@ async function readJsonObject(path, label) {
     if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
         throw new AutopilotStateStoreError('corrupt-json-reference', `${label} must be a JSON object`);
     }
-    return parsed;
+    return Object.freeze({ value: parsed, bytes });
 }
 function lastEvent(events) {
     return events.length === 0 ? undefined : events[events.length - 1];

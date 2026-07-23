@@ -23,6 +23,15 @@ import { assertCoordinationDispatchAllowed, coordinationCutoverCommitted } from 
 import { coordinatorRuntimePaths } from "./coordination/runtime-paths.js";
 import { currentBootId } from "./coordination/process-identity.js";
 import { enforcePrivateAuthorityPath, ensurePrivateAuthorityDirectory } from "./private-path.js";
+import { parseValidationEvidence, validationCanCloseSourceWork } from "./validation-staleness.js";
+import { computeAutopilotRosterContractObjectHash, parseAutopilotReceiptV2, parseAutopilotUnitSpecV2 } from "./roster/contracts.js";
+import { consumeCommittedExistingRunRosterTransition, listCommittedExistingRunRosterTransitions, resolveCommittedExistingRunRosterTransitionChain, savedRosterRefForSelection } from "./roster/transition.js";
+import { recoverRuntimeRosterSelection } from "./roster/snapshot.js";
+import { resolveRosterScopePaths, rosterRevisionPath } from "./roster/paths.js";
+import { readAuthorityFileIfPresent } from "./roster/transaction.js";
+import { assertRuntimeReceiptMatchesUnitSpec, parseNewRunRuntimeReceipt, parseNewRunRuntimeUnitSpec } from "./roster/runtime-consumers.js";
+import { isCentrallyTrustedW4CertifiedRoster } from "./roster/providers/index.js";
+import { parseAutopilotRoster } from "./roster/contracts.js";
 export const AUTOPILOT_CLOSE_RACE_BOUNDARIES = ['after-durable-launch-fence-before-validation', 'after-private-archive-staging-before-terminal-commit'];
 export const AUTOPILOT_TERMINAL_CLEANUP_BOUNDARIES = ['after-terminal-manifest', 'after-terminal-commit', 'after-terminal-projections', 'after-runtime-archive', 'after-result-projection', 'after-archive-ref', 'after-unit-cleanup', 'after-main-cleanup'];
 export class AutopilotCloseError extends Error {
@@ -883,6 +892,7 @@ async function validateCloseReadiness(context, now, env, resumingPreparedTermina
         blockers.push(...executionCommitBlockers(active, executionCommits, artifacts.audits, retainedWriteClaims, preIntegrationChangedPaths));
     }
     blockers.push(...phaseTwoCloseBlockers(active, unitMerges, artifacts.validationStalenessRefs, preIntegrationChangedPaths));
+    blockers.push(...await transitionFreshValidationBlockers(context, artifacts, unitMerges, preIntegrationChangedPaths, env));
     blockers.push(...await unitWorktreeResidueBlockers(active));
     if (!d65)
         blockers.push(...branchCommitBlockers(active, executionCommits, unitMerges));
@@ -1142,6 +1152,273 @@ function phaseTwoCloseBlockers(active, unitMerges, validationStalenessRefs, fina
         blockers.push(`Phase 2 close: stale validation artifacts remain: ${validationStalenessRefs.join(', ')}`);
     return sortedUnique(blockers);
 }
+async function transitionFreshValidationBlockers(context, artifacts, unitMerges, finalChangedPaths, env) {
+    const blockers = [];
+    const stateRoot = resolveAutopilotStateRoot(env);
+    const run = { repo_id: context.active.repo_key, workstream: context.active.workstream, workstream_run: context.active.workstream_run, main_worktree_path: context.active.main_worktree_path, runtime_root: context.active.runtime_root, source_repo: context.active.source_repo };
+    const runtimeRefs = sortedUnique(artifacts.runtimeTransitionRefs);
+    let externalRows;
+    try {
+        externalRows = await listCommittedExistingRunRosterTransitions({ stateRoot, repo_id: context.active.repo_key, workstream_run: context.active.workstream_run });
+    }
+    catch (error) {
+        return [`roster transition external authority cannot be listed for active run: ${errorMessage(error)}`];
+    }
+    const externalRefs = sortedUnique(externalRows.map((row) => `roster-transitions/${row.transition.transition_id}.json`));
+    if (runtimeRefs.length === 0 && externalRefs.length === 0)
+        return [];
+    for (const ref of externalRefs) {
+        if (!runtimeRefs.includes(ref))
+            blockers.push(`roster transition runtime mirror is missing for authenticated external ref: ${ref}`);
+    }
+    for (const ref of runtimeRefs) {
+        if (!externalRefs.includes(ref))
+            blockers.push(`roster transition runtime ref has no authenticated external counterpart: ${ref}`);
+    }
+    const recovery = await recoverRuntimeRosterSelection({ stateRoot, mainWorktreeRoot: context.active.main_worktree_path, workstream: context.active.workstream, repo_id: context.active.repo_key, workstream_run: context.active.workstream_run, require_spec_identity: false });
+    if (!recovery.ok || recovery.selection === null) {
+        blockers.push(`roster transition chain cannot authenticate immutable pre-run selection for active run: ${recovery.diagnostics.map((diagnostic) => diagnostic.code).join(', ')}`);
+        return sortedUnique(blockers);
+    }
+    const fromRef = savedRosterRefForSelection({ selection: recovery.selection, stateRoot, trustedProjectRoot: context.active.source_repo });
+    const chain = await resolveCommittedExistingRunRosterTransitionChain({ stateRoot, run, initial_from_roster: fromRef });
+    if (!chain.ok) {
+        blockers.push(`roster transition external/runtime authority is not one authenticated byte-equal linear chain: ${chain.diagnostics.map((diagnostic) => diagnostic.code).join(', ')}`);
+        return sortedUnique(blockers);
+    }
+    if (chain.transitions.length === 0)
+        return sortedUnique(blockers);
+    const transitions = [];
+    for (const transition of chain.transitions) {
+        const consumed = await consumeCommittedExistingRunRosterTransition({ stateRoot, run, from_roster: transition.from_roster, to_roster: transition.to_roster });
+        const artifactSha256 = consumed.transition_artifact_sha256;
+        if (!consumed.ok || consumed.transition === null || consumed.runtime_transition_ref === null || artifactSha256 === null) {
+            blockers.push(`roster transition ${transition.transition_id} failed authenticated byte-equal consumption: ${consumed.diagnostics.map((diagnostic) => diagnostic.code).join(', ')}`);
+            continue;
+        }
+        if (consumed.transition.transition_id !== transition.transition_id || consumed.transition.approved_at !== transition.approved_at) {
+            blockers.push(`roster transition ${transition.transition_id} drifted during authenticated consumption`);
+            continue;
+        }
+        transitions.push({ ref: consumed.runtime_transition_ref, id: transition.transition_id, approvedAt: transition.approved_at, toRoster: transition.to_roster, artifactSha256 });
+    }
+    const authenticatedRefs = sortedUnique(transitions.map((transition) => transition.ref));
+    for (const ref of authenticatedRefs)
+        if (!runtimeRefs.includes(ref))
+            blockers.push(`roster transition authenticated external chain ref is absent from runtime roster-transitions: ${ref}`);
+    for (const ref of runtimeRefs)
+        if (!authenticatedRefs.includes(ref))
+            blockers.push(`roster transition runtime ref is absent from authenticated external chain: ${ref}`);
+    if (transitions.length !== chain.transitions.length)
+        return sortedUnique(blockers);
+    const terminal = transitions[transitions.length - 1];
+    if (terminal === undefined)
+        return sortedUnique(blockers);
+    const approvedAtMs = parseCanonicalUtcMs(terminal.approvedAt);
+    if (approvedAtMs === null) {
+        blockers.push(`roster transition ${terminal.id} approved_at is not a finite canonical UTC timestamp`);
+        return sortedUnique(blockers);
+    }
+    for (const ref of await validationEvidenceInvalidTimestampRefs(context.active.runtime_root, artifacts.validationEvidenceRefs)) {
+        blockers.push(`validation evidence ${ref} validated_at is not a finite canonical UTC timestamp`);
+    }
+    let targetRoster = null;
+    try {
+        targetRoster = await readCloseTargetRosterRef({ ref: terminal.toRoster, stateRoot, trustedProjectRoot: context.active.source_repo });
+        if (!isCentrallyTrustedW4CertifiedRoster(targetRoster))
+            blockers.push(`roster transition ${terminal.id} target roster is not centrally trusted W4-certified`);
+    }
+    catch (error) {
+        blockers.push(`roster transition ${terminal.id} target roster cannot be authenticated: ${errorMessage(error)}`);
+    }
+    const hasFreshTargetValidation = await transitionHasFreshTargetValidation({ context, validationRefs: artifacts.validationEvidenceRefs, terminal, approvedAtMs, targetRoster, fromSelection: recovery.selection });
+    if (!hasFreshTargetValidation)
+        blockers.push(`roster transition ${terminal.id} requires post-transition independent target-roster validate/bughunt evidence before close`);
+    const relevantMerges = relevantUnitMerges(context.active, unitMerges);
+    if (relevantMerges.length === 0 && finalChangedPaths.length > 0)
+        blockers.push(`roster transition ${terminal.id} requires post-transition independent validation evidence before source-changing close`);
+    for (const merge of relevantMerges) {
+        const accepted = await transitionValidationEvidenceForMerge({ context, validationRefs: artifacts.validationEvidenceRefs, merge, terminal, approvedAtMs, targetRoster, fromSelection: recovery.selection });
+        if (!accepted)
+            blockers.push(`roster transition ${terminal.id} lacks fresh target-roster independent validation for ${merge.unit_id} attempt ${String(merge.attempt)}`);
+    }
+    return sortedUnique(blockers);
+}
+const CANONICAL_UTC_MS_Z_PATTERN = /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$/u;
+function parseCanonicalUtcMs(value) {
+    if (!CANONICAL_UTC_MS_Z_PATTERN.test(value))
+        return null;
+    const ms = Date.parse(value);
+    if (!Number.isFinite(ms))
+        return null;
+    return new Date(ms).toISOString() === value ? ms : null;
+}
+async function validationEvidenceInvalidTimestampRefs(runtimeRoot, validationRefs) {
+    const invalid = [];
+    for (const ref of validationRefs) {
+        try {
+            const evidence = parseValidationEvidence(JSON.parse(await readFile(join(runtimeRoot, ref), 'utf8')));
+            if (parseCanonicalUtcMs(evidence.validated_at) === null)
+                invalid.push(ref);
+        }
+        catch {
+            continue;
+        }
+    }
+    return sortedUnique(invalid);
+}
+async function transitionHasFreshTargetValidation(input) {
+    for (const ref of input.validationRefs) {
+        try {
+            const evidence = parseValidationEvidence(JSON.parse(await readFile(join(input.context.active.runtime_root, ref), 'utf8')));
+            const validatedAtMs = parseCanonicalUtcMs(evidence.validated_at);
+            if (validatedAtMs === null || validatedAtMs <= input.approvedAtMs)
+                continue;
+            if (await validationEvidenceAuthenticatesTransitionTarget({ context: input.context, evidence, terminal: input.terminal, targetRoster: input.targetRoster, fromSelection: input.fromSelection }))
+                return true;
+        }
+        catch {
+            continue;
+        }
+    }
+    return false;
+}
+async function transitionValidationEvidenceForMerge(input) {
+    for (const ref of input.validationRefs) {
+        try {
+            const evidence = parseValidationEvidence(JSON.parse(await readFile(join(input.context.active.runtime_root, ref), 'utf8')));
+            const validatedAtMs = parseCanonicalUtcMs(evidence.validated_at);
+            if (validatedAtMs === null || validatedAtMs <= input.approvedAtMs)
+                continue;
+            if (!validationCanCloseSourceWork({ validation: evidence, unitMerge: input.merge }))
+                continue;
+            if (await validationEvidenceAuthenticatesTransitionTarget({ context: input.context, evidence, terminal: input.terminal, targetRoster: input.targetRoster, fromSelection: input.fromSelection }))
+                return true;
+        }
+        catch {
+            continue;
+        }
+    }
+    return false;
+}
+export const closeRuntimeTestInternals = Object.freeze({
+    parseCanonicalUtcMs,
+    transitionHasFreshTargetValidation,
+    transitionValidationEvidenceForMerge,
+});
+async function validationEvidenceAuthenticatesTransitionTarget(input) {
+    if (input.targetRoster === null)
+        return false;
+    const statusPath = join(input.context.active.runtime_root, input.evidence.status_ref);
+    const receiptPath = join(input.context.active.runtime_root, input.evidence.receipt_ref);
+    const auditPath = join(input.context.active.runtime_root, input.evidence.audit_ref);
+    const [statusBytes, receiptBytes, auditBytes] = await Promise.all([readFile(statusPath), readFile(receiptPath), readFile(auditPath)]);
+    if (sha256BytesForClose(statusBytes) !== input.evidence.status_sha256 || sha256BytesForClose(receiptBytes) !== input.evidence.receipt_sha256 || sha256BytesForClose(auditBytes) !== input.evidence.audit_sha256)
+        return false;
+    const receipt = parseAutopilotReceiptV2(JSON.parse(Buffer.from(receiptBytes).toString('utf8')));
+    if (receipt.role !== 'validate' && receipt.role !== 'bughunt')
+        return false;
+    if (receipt.workstream !== input.context.active.workstream || receipt.unit_id !== input.evidence.validation_unit_id || receipt.attempt !== input.evidence.validation_attempt)
+        return false;
+    const spec = await findRuntimeUnitSpecForReceipt(input.context.active.runtime_root, receipt, statusPath, receiptPath);
+    if (spec === null)
+        return false;
+    const transitionBytes = await readFile(join(input.context.active.runtime_root, `roster-transitions/${input.terminal.id}.json`));
+    if (!spec.context_refs.some((ref) => ref.path === `roster-transitions/${input.terminal.id}.json` && ref.sha256 === input.terminal.artifactSha256 && ref.byte_count === transitionBytes.byteLength))
+        return false;
+    if (spec.pre_run_selection_sha256 !== input.fromSelection.selection_sha256)
+        return false;
+    if (spec.roster_id !== input.targetRoster.roster_id || spec.roster_revision !== input.targetRoster.roster_revision || spec.roster_sha256 !== input.targetRoster.roster_sha256)
+        return false;
+    const assignment = input.targetRoster.assignments.find((entry) => entry.role === spec.role);
+    if (assignment === undefined || spec.assignment_sha256 !== assignment.assignment_sha256)
+        return false;
+    if (spec.attempt <= await maxFromRosterAttemptForUnitForClose({ runtimeRoot: input.context.active.runtime_root, unitId: spec.unit_id, fromSelection: input.fromSelection }))
+        return false;
+    const specContext = parseNewRunRuntimeUnitSpec(spec);
+    const receiptContext = parseNewRunRuntimeReceipt(receipt, { unitSpec: specContext });
+    assertRuntimeReceiptMatchesUnitSpec({ unitSpec: specContext, receipt: receiptContext });
+    const status = parseAutopilotStatusEntry(JSON.parse(Buffer.from(statusBytes).toString('utf8')), { unitSpec: specContext.authority_spec, artifactRoot: input.context.active.runtime_root });
+    const audit = parseAutopilotExecutionAudit(JSON.parse(Buffer.from(auditBytes).toString('utf8')));
+    return status.verdict === 'PASS' && status.role === spec.role && audit.classification === 'clean' && audit.role === spec.role && audit.unit_id === spec.unit_id && audit.attempt === spec.attempt;
+}
+async function findRuntimeUnitSpecForReceipt(runtimeRoot, receipt, statusPath, receiptPath) {
+    const root = join(runtimeRoot, 'unit-specs');
+    if (!existsSync(root))
+        return null;
+    for (const path of await listFilesRecursive(root)) {
+        if (!path.endsWith('.json'))
+            continue;
+        try {
+            const spec = parseAutopilotUnitSpecV2(JSON.parse(await readFile(path, 'utf8')));
+            if (spec.workstream === receipt.workstream &&
+                spec.unit_id === receipt.unit_id &&
+                spec.role === receipt.role &&
+                spec.attempt === receipt.attempt &&
+                spec.status_output === statusPath &&
+                spec.receipt_output === receiptPath)
+                return spec;
+        }
+        catch {
+            continue;
+        }
+    }
+    return null;
+}
+async function maxFromRosterAttemptForUnitForClose(input) {
+    let max = 0;
+    for (const rootName of ['unit-specs', 'receipts']) {
+        const root = join(input.runtimeRoot, rootName);
+        if (!existsSync(root))
+            continue;
+        for (const path of await listFilesRecursive(root)) {
+            if (!path.endsWith('.json'))
+                continue;
+            const parsed = JSON.parse(await readFile(path, 'utf8'));
+            if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed))
+                continue;
+            const record = parsed;
+            if (record['schema_version'] !== (rootName === 'unit-specs' ? 'autopilot.unit_spec.v2' : 'autopilot.receipt.v2'))
+                continue;
+            const attempt = record['attempt'];
+            if (record['unit_id'] !== input.unitId || typeof attempt !== 'number' || !Number.isSafeInteger(attempt))
+                continue;
+            if (record['pre_run_selection_sha256'] === input.fromSelection.selection_sha256 &&
+                record['roster_id'] === input.fromSelection.roster_id &&
+                record['roster_revision'] === input.fromSelection.roster_revision &&
+                record['roster_sha256'] === input.fromSelection.roster_sha256)
+                max = Math.max(max, attempt);
+        }
+    }
+    return max;
+}
+async function readCloseTargetRosterRef(input) {
+    const scopes = [
+        resolveRosterScopePaths({ scope: 'user', stateRoot: input.stateRoot }),
+        resolveRosterScopePaths({ scope: 'trusted-project', stateRoot: input.stateRoot, trustedProjectRoot: input.trustedProjectRoot }),
+    ];
+    const matches = [];
+    for (const paths of scopes) {
+        try {
+            const rosterPath = rosterRevisionPath(paths, input.ref);
+            const read = await readAuthorityFileIfPresent(rosterPath, paths.authorityRoot);
+            if (read === null)
+                continue;
+            const roster = parseAutopilotRoster(JSON.parse(Buffer.from(read.bytes).toString('utf8')));
+            if (computeAutopilotRosterContractObjectHash('autopilot.roster.v1', roster) === roster.roster_sha256 && roster.roster_id === input.ref.roster_id && roster.roster_revision === input.ref.roster_revision && roster.roster_sha256 === input.ref.roster_sha256 && roster.assignment_set_sha256 === input.ref.assignment_set_sha256)
+                matches.push(roster);
+        }
+        catch {
+            continue;
+        }
+    }
+    if (matches.length !== 1 || matches[0] === undefined)
+        throw new Error(`target roster ref matched ${String(matches.length)} roster authority files`);
+    return matches[0];
+}
+function sha256BytesForClose(bytes) {
+    return `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
+}
 function branchCommitBlockers(active, executionCommits, unitMerges) {
     if (!commitExists(active.main_worktree_path, active.target_base_sha))
         return [`target_base_sha ${active.target_base_sha} is not reachable in workstream repo`];
@@ -1176,7 +1453,9 @@ async function readRuntimeArtifacts(runtimeRoot) {
         decisions: await readDecisionRows(join(runtimeRoot, 'decision-log.jsonl')),
         executionCommits: await readJsonObjectsFromDir(join(runtimeRoot, 'execution-commits'), parseAutopilotExecutionCommit),
         unitMerges: await readJsonObjectsFromDir(join(runtimeRoot, 'unit-merges'), parseAutopilotUnitMerge),
+        validationEvidenceRefs: await listRuntimeJsonRefs(join(runtimeRoot, 'validation'), runtimeRoot),
         validationStalenessRefs: await listRuntimeJsonRefs(join(runtimeRoot, 'validation-staleness'), runtimeRoot),
+        runtimeTransitionRefs: await listRuntimeJsonRefs(join(runtimeRoot, 'roster-transitions'), runtimeRoot),
     };
 }
 async function readOptionalJson(root, file, parse) {

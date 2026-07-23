@@ -1,7 +1,9 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { link, readFile, unlink } from 'node:fs/promises';
 import { join, relative, resolve } from 'node:path';
-import { AUTOPILOT_ROLE_VALUES, parseAutopilotExecutionAudit, parseAutopilotReceipt, parseAutopilotStatusEntry, parseAutopilotUnitSpec } from "../contracts/index.js";
+import { AUTOPILOT_ROLE_VALUES, parseAutopilotExecutionAudit, parseAutopilotReceipt, parseAutopilotReceiptV2, parseAutopilotStatusEntry, parseAutopilotUnitSpec, parseAutopilotUnitSpecV2 } from "../contracts/index.js";
+import { lowerAutopilotUnitSpecV2ToV1 } from "../forced-output/identity.js";
+import { validateReceiptV2TerminalCompatibility } from "../roster/artifact-compatibility.js";
 import { writeJsonAtomic } from "../parallel-runtime.js";
 import { CoordinationRuntimeError } from "./failures.js";
 import { opaqueToolCallIdIssue } from "../tool-call-id.js";
@@ -184,6 +186,36 @@ export async function writeAutopilotChildTerminalAcceptance(input) {
         });
     }
 }
+function parseTerminalUnitSpec(bytes) {
+    const parsed = parseJson(bytes, 'terminal acceptance spec');
+    if (isJsonRecord(parsed) && parsed['schema_version'] === 'autopilot.unit_spec.v2') {
+        const original = parseAutopilotUnitSpecV2(parsed);
+        return { original, lowered: lowerAutopilotUnitSpecV2ToV1(original) };
+    }
+    const spec = parseAutopilotUnitSpec(parsed);
+    return { original: spec, lowered: spec };
+}
+function parseTerminalReceipt(bytes, spec) {
+    const parsed = parseJson(bytes, 'terminal acceptance receipt');
+    if (isJsonRecord(parsed) && parsed['schema_version'] === 'autopilot.receipt.v2') {
+        if (spec.schema_version !== 'autopilot.unit_spec.v2')
+            throw new CoordinationRuntimeError('invalid-state', 'receipt.v2 terminal evidence requires unit_spec.v2 bytes');
+        return parseAutopilotReceiptV2(parsed);
+    }
+    if (spec.schema_version === 'autopilot.unit_spec.v2')
+        throw new CoordinationRuntimeError('invalid-state', 'unit_spec.v2 terminal evidence requires native receipt.v2 bytes');
+    return parseAutopilotReceipt(parsed);
+}
+function assertTerminalReceiptV2Compatibility(input) {
+    const validation = validateReceiptV2TerminalCompatibility({
+        unit_spec_bytes_utf8: new TextDecoder('utf-8', { fatal: true }).decode(input.specBytes),
+        receipt_bytes_utf8: new TextDecoder('utf-8', { fatal: true }).decode(input.receiptBytes),
+        terminal_acceptance: input.acceptance,
+    });
+    if (!validation.ok) {
+        throw new CoordinationRuntimeError('invalid-state', `receipt.v2 terminal acceptance compatibility failed: ${validation.diagnostics.map((diagnostic) => diagnostic.code).join(', ')}`);
+    }
+}
 function parseJson(bytes, label) {
     try {
         return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
@@ -191,6 +223,9 @@ function parseJson(bytes, label) {
     catch (error) {
         throw new CoordinationRuntimeError('invalid-state', `${label} is not valid UTF-8 JSON`, [error instanceof Error ? error.message : String(error)]);
     }
+}
+function isJsonRecord(value) {
+    return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 export function autopilotAuditProvesZeroSourceChange(audit) {
     return audit.classification !== 'audit-unavailable'
@@ -219,16 +254,19 @@ export function assertAutopilotChildTerminalAcceptanceChain(input) {
     ])
         if (sha256(bytes) !== expected)
             throw new CoordinationRuntimeError('invalid-state', `terminal acceptance ${label} hash differs from its artifact bytes`);
-    const spec = parseAutopilotUnitSpec(parseJson(input.specBytes, 'terminal acceptance spec'));
+    const parsedSpec = parseTerminalUnitSpec(input.specBytes);
+    const spec = parsedSpec.lowered;
     const audit = parseAutopilotExecutionAudit(parseJson(input.auditBytes, 'terminal acceptance audit'));
     const status = parseAutopilotStatusEntry(parseJson(input.statusBytes, 'terminal acceptance status'), { unitSpec: spec, executionAudit: audit });
-    const receipt = parseAutopilotReceipt(parseJson(input.receiptBytes, 'terminal acceptance receipt'));
-    if (spec.workstream !== acceptance.workstream || spec.unit_id !== acceptance.unit_id || spec.role !== acceptance.role || spec.attempt !== acceptance.attempt || status.workstream !== acceptance.workstream || status.unit_id !== acceptance.unit_id || status.role !== acceptance.role || status.attempt !== acceptance.attempt || status.verdict !== acceptance.verdict || receipt.workstream !== acceptance.workstream || receipt.unit_id !== acceptance.unit_id || receipt.role !== acceptance.role || receipt.attempt !== acceptance.attempt || audit.workstream !== acceptance.workstream || audit.unit_id !== acceptance.unit_id || audit.role !== acceptance.role || audit.attempt !== acceptance.attempt)
+    const receipt = parseTerminalReceipt(input.receiptBytes, parsedSpec.original);
+    if (parsedSpec.original.workstream !== acceptance.workstream || parsedSpec.original.unit_id !== acceptance.unit_id || parsedSpec.original.role !== acceptance.role || parsedSpec.original.attempt !== acceptance.attempt || status.workstream !== acceptance.workstream || status.unit_id !== acceptance.unit_id || status.role !== acceptance.role || status.attempt !== acceptance.attempt || status.verdict !== acceptance.verdict || receipt.workstream !== acceptance.workstream || receipt.unit_id !== acceptance.unit_id || receipt.role !== acceptance.role || receipt.attempt !== acceptance.attempt || audit.workstream !== acceptance.workstream || audit.unit_id !== acceptance.unit_id || audit.role !== acceptance.role || audit.attempt !== acceptance.attempt)
         throw new CoordinationRuntimeError('invalid-state', 'terminal acceptance spec/status/receipt/audit identities disagree');
     if (receipt.tool_name !== 'autopilot_emit_status' || receipt.tool_call_id !== acceptance.tool_call_id || receipt.status_sha256 !== acceptance.status.sha256 || receipt.status_sha256 !== acceptance.carrier_status_sha256)
         throw new CoordinationRuntimeError('invalid-state', 'terminal acceptance does not bind the exact accepted forced-output carrier');
+    if (receipt.schema_version === 'autopilot.receipt.v2')
+        assertTerminalReceiptV2Compatibility({ specBytes: input.specBytes, receiptBytes: input.receiptBytes, acceptance });
     const disposition = autopilotAuditProvesZeroSourceChange(audit) ? 'zero-change' : 'accounted-changes';
     if (acceptance.audit_disposition !== disposition)
         throw new CoordinationRuntimeError('invalid-state', 'terminal acceptance audit disposition differs from the exact execution audit');
-    return { spec, status, receipt, audit };
+    return { spec, originalSpec: parsedSpec.original, status, receipt, audit };
 }

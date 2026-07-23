@@ -14,12 +14,17 @@ stability: stable
 1. In a Pi session, run `/autopilot <workstream> [--roster <id>] [task intro]`.
 2. Autopilot resolves roster authority before worktree mutation. If no selectable
    authority exists, it activates the packaged setup lane and stops pre-run; current
-   W4 offline provider packs cannot be saved as launchable authority.
-3. With a resolved roster, Autopilot selects the pinned parent request profile,
-   activates `context_budget`, prepares an isolated sparse main worktree, attaches the
-   durable run supervisor at a new generation, drains the mailbox, and queues the
-   parent prompt.
-4. The parent calls `context_budget` first, then plans and launches dependency-cleared,
+   W4 offline provider packs and custom roster trust pins cannot be saved as launchable
+   authority.
+3. If this is an existing run and `--roster <id>` differs from the pinned terminal
+   roster, Autopilot presents an exact existing-run transition approval instead of
+   mutating the run; approve only the exact phrase if you intend the roster change, then
+   retry the original command.
+4. With a resolved roster, Autopilot selects the pinned parent request profile,
+   activates `context_budget`, prepares or resumes the isolated sparse main worktree,
+   attaches the durable run supervisor at the current generation, drains the mailbox,
+   and queues the parent prompt.
+5. The parent calls `context_budget` first, then plans and launches dependency-cleared,
    file-disjoint child units up to `parallel_cap` using v2 roster identity.
 
 ## Resuming after a Pi session restart
@@ -28,14 +33,14 @@ stability: stable
   `/autopilot-inject <workstream>`. Then `/autopilot-handoff` and `/autopilot-config`
   will target the restored workstream.
 - If you want a fresh parent turn, run `/autopilot <workstream>` again — it reconciles
-  owned durable state, authenticates the existing pinned roster selection/mirror, and
-  replays pending evidence before dispatch.
+  owned durable state, authenticates the existing pinned roster selection/mirror plus
+  any committed transition chain, and replays pending evidence before dispatch.
 
 ## Preconditions
 
 - Roster authority must resolve from explicit `--roster`, trusted-project default,
-  user default, or setup-required; corrupt/untrusted higher-precedence authority fails
-  loudly with no fallback.
+  user default, setup-required, or an existing-run transition chain; corrupt/untrusted
+  higher-precedence authority fails loudly with no fallback.
 - The selected parent request profile must be exactly settable/observable; otherwise
   activation fails loudly (no fallback).
 - Post-cutover activation requires a durable coordinator session before worktree mutation.

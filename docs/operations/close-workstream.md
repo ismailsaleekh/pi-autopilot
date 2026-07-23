@@ -14,13 +14,15 @@ stability: stable
 1. Ensure the operator source checkout is clean and on the captured target branch.
 2. Confirm every source-changing work item has an independent validation PASS and clean
    execution audit (the closure gate will otherwise block).
+3. If the run used an existing-run roster transition, confirm validation was rerun after
+   the terminal transition; pre-transition validation is intentionally stale.
 
 ## Recipe
 
 1. Dry-run first: `/autopilot-close <workstream> --dry-run` (or add `--run <workstream_run>`
    to disambiguate). Read the reported blockers.
-2. Resolve blockers (validation staleness, reservation repair, dirty/running/quarantined
-   units, foreign target intersections).
+2. Resolve blockers (validation staleness, post-transition validation requirements,
+   reservation repair, dirty/running/quarantined units, foreign target intersections).
 3. Run `/autopilot-close <workstream>` to land: it locally fast-forwards the target
    branch, records terminal/reservation evidence, archives runtime evidence, removes only
    run-owned worktrees + the active task directory, and retires the branch to
@@ -31,6 +33,8 @@ stability: stable
 - Local-only: no fetch, push, network, or PR creation.
 - The final integrated diff equals the union of accepted `autopilot.unit_merge.v1`
   changed paths for Phase 2 work.
+- A committed roster transition invalidates earlier validation; close requires fresh
+  independent validation under the terminal roster.
 - Never performs a global `git worktree` prune; a parallel run in the same repo key is
   untouched.
 

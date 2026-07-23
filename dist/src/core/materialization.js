@@ -1,7 +1,9 @@
 import { existsSync } from 'node:fs';
 import { mkdir, readFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { parseAutopilotUnitSpec } from "./contracts/index.js";
 import { deriveAutopilotAuthority, materializationRowsForAuthority } from "./authority.js";
+import { parseNewRunRuntimeUnitSpec, } from "./roster/runtime-consumers.js";
 import { AUTOPILOT_CHECKOUT_PROFILE_SNAPSHOT_FILE, estimateBytesForMaterializationPaths, normalizeMaterializationPath, pathMatchesMaterializationPattern, readCheckoutProfileSnapshot, scanTrackedTree, sparseIncludePatternsForPaths, submodulePathsForMaterialization, trackedPathExists, } from "./checkout-profile.js";
 import { assertAutopilotDiskGate } from "./disk-gate.js";
 import { addSparseCheckoutPatterns, assertSparseCheckoutEnabled, isSparseCheckoutEnabled, isSparseMissingPath } from "./sparse-worktree.js";
@@ -26,12 +28,25 @@ export class AutopilotMaterializationError extends Error {
 function fail(code, message, evidence = []) {
     throw new AutopilotMaterializationError(code, message, evidence);
 }
+function materializationRuntimeSpecContext(spec, allowLegacyV1RuntimeSpec) {
+    try {
+        const runtime = parseNewRunRuntimeUnitSpec(spec);
+        return Object.freeze({ unit_spec: runtime.unit_spec, authority_spec: runtime.authority_spec });
+    }
+    catch (error) {
+        if (!allowLegacyV1RuntimeSpec || spec.schema_version !== 'autopilot.unit_spec.v1')
+            throw error;
+        const legacySpec = parseAutopilotUnitSpec(spec);
+        return Object.freeze({ unit_spec: legacySpec, authority_spec: legacySpec });
+    }
+}
 export async function assertAutopilotSpecMaterializationDiskGate(input) {
+    const runtime = materializationRuntimeSpecContext(input.spec, input.allowLegacyV1RuntimeSpec === true);
     const taskRoot = taskRootForActiveAutopilot(input.context.active);
     const snapshot = await readCheckoutProfileSnapshot(join(taskRoot, AUTOPILOT_CHECKOUT_PROFILE_SNAPSHOT_FILE));
     if (snapshot === null || snapshot.profile.mode === 'full')
         return;
-    const authority = input.authority ?? await deriveAutopilotAuthority({ spec: input.spec });
+    const authority = input.authority ?? await deriveAutopilotAuthority({ spec: runtime.authority_spec });
     const paths = materializationRowsForAuthority(authority).map((path) => path.path);
     const scan = await scanTrackedTree(input.context.active.main_worktree_path, input.now ?? new Date());
     const byteCount = estimateBytesForMaterializationPaths(scan, paths);
@@ -47,21 +62,25 @@ export async function assertAutopilotSpecMaterializationDiskGate(input) {
     });
 }
 export async function materializeAutopilotSpecPaths(input) {
-    const authority = input.authority ?? await deriveAutopilotAuthority({ spec: input.spec });
+    const runtime = materializationRuntimeSpecContext(input.spec, input.allowLegacyV1RuntimeSpec === true);
+    const authority = input.authority ?? await deriveAutopilotAuthority({ spec: runtime.authority_spec });
     const materializationPaths = materializationRowsForAuthority(authority);
     return await materializePathsForSpec({
         context: input.context,
-        spec: input.spec,
+        spec: runtime.unit_spec,
         paths: materializationPaths,
         reason: input.reason,
         automatic: false,
+        allowLegacyV1RuntimeSpec: input.allowLegacyV1RuntimeSpec === true,
         ...(input.env === undefined ? {} : { env: input.env }),
         ...(input.now === undefined ? {} : { now: input.now }),
     });
 }
 export async function materializeAdditionalReadPathsForSpec(input) {
+    const runtime = materializationRuntimeSpecContext(input.spec, input.allowLegacyV1RuntimeSpec === true);
+    const spec = runtime.unit_spec;
     const now = input.now ?? new Date();
-    const normalized = sortedUnique(input.paths.map((path) => normalizeMaterializationPath(path, 'auto READ path')).filter((path) => !isRuntimeRepoPath(path, input.spec.workstream)));
+    const normalized = sortedUnique(input.paths.map((path) => normalizeMaterializationPath(path, 'auto READ path')).filter((path) => !isRuntimeRepoPath(path, spec.workstream)));
     if (normalized.length === 0)
         return { checkout_mode: 'legacy-full', materialized_paths: [], targets: [], byte_count: 0 };
     const taskRoot = taskRootForActiveAutopilot(input.context.active);
@@ -75,7 +94,7 @@ export async function materializeAdditionalReadPathsForSpec(input) {
     if (!snapshot.profile.materialization.auto_read_claims) {
         fail('auto-read-disabled', 'Autopilot sparse materialization refused: automatic READ materialization is disabled by checkout profile.', normalized);
     }
-    const materialized = await readMaterializedPaths(input.context.active, input.spec);
+    const materialized = await readMaterializedPaths(input.context.active, spec);
     const existingAutoReadRows = materialized.paths.filter((row) => row.automatic && row.claim_type === 'READ');
     const existingAutoReadBytes = existingAutoReadRows.reduce((sum, row) => sum + row.byte_count, 0);
     const scan = await scanTrackedTree(input.context.active.main_worktree_path, now);
@@ -108,8 +127,8 @@ export async function materializeAdditionalReadPathsForSpec(input) {
     }
     await acquireReadClaimsForUnitPaths({
         context: input.context,
-        unitId: input.spec.unit_id,
-        attempt: input.spec.attempt,
+        unitId: spec.unit_id,
+        attempt: spec.attempt,
         paths: normalized,
         reason: input.reason,
         now,
@@ -118,10 +137,11 @@ export async function materializeAdditionalReadPathsForSpec(input) {
     try {
         return await materializePathsForSpec({
             context: input.context,
-            spec: input.spec,
+            spec,
             paths: rows,
             reason: input.reason,
             automatic: true,
+            allowLegacyV1RuntimeSpec: input.allowLegacyV1RuntimeSpec === true,
             ...(input.env === undefined ? {} : { env: input.env }),
             now,
         });
@@ -130,8 +150,8 @@ export async function materializeAdditionalReadPathsForSpec(input) {
         try {
             await releaseReadClaimsForUnitPaths({
                 context: input.context,
-                unitId: input.spec.unit_id,
-                attempt: input.spec.attempt,
+                unitId: spec.unit_id,
+                attempt: spec.attempt,
                 paths: normalized,
                 reason: 'auto READ materialization failure claim rollback',
                 now,
@@ -144,13 +164,14 @@ export async function materializeAdditionalReadPathsForSpec(input) {
     }
 }
 export async function expandedReadOnlyPathsForAudit(input) {
+    const spec = materializationRuntimeSpecContext(input.spec, input.allowLegacyV1RuntimeSpec === true).unit_spec;
     if (input.context.active.coordination_authority === 'coordinator-edit-leases-v1')
         return sortedUnique(input.authority.observations.map((observation) => observation.path));
     const claims = await readPathClaims(input.context.coordinationRoot);
     const expanded = claims.filter((claim) => claim.autopilot_id === input.context.active.autopilot_id &&
         claim.workstream_run === input.context.active.workstream_run &&
-        claim.unit_id === input.spec.unit_id &&
-        claim.attempt === input.spec.attempt &&
+        claim.unit_id === spec.unit_id &&
+        claim.attempt === spec.attempt &&
         claim.claim_type === 'READ').map((claim) => claim.path);
     return sortedUnique([...input.authority.observations.map((observation) => observation.path), ...expanded]);
 }
@@ -160,7 +181,8 @@ export async function materializeSparseReadForToolCall(input) {
     const rawPath = input.event.input?.['path'] ?? input.event.input?.['file_path'];
     if (typeof rawPath !== 'string' || rawPath.trim().length === 0)
         return undefined;
-    const spec = input.statusContext.unit_spec;
+    const allowStatusContextProjection = input.statusContext.receipt_schema_version === 'autopilot.receipt.v2' && input.statusContext.roster_execution_identity !== undefined;
+    const spec = materializationRuntimeSpecContext(input.statusContext.unit_spec, allowStatusContextProjection).unit_spec;
     const cwd = input.toolContext.cwd ?? spec.cwd;
     const absolute = isAbsolute(rawPath) ? resolve(rawPath) : resolve(cwd, rawPath);
     if (!isPathInsideRoot(spec.cwd, absolute))
@@ -181,6 +203,7 @@ export async function materializeSparseReadForToolCall(input) {
             spec,
             paths: [repoRelative],
             reason: 'child Read sparse miss auto-materialization',
+            allowLegacyV1RuntimeSpec: allowStatusContextProjection,
             ...(input.env === undefined ? {} : { env: input.env }),
         });
         return undefined;
@@ -193,7 +216,8 @@ export async function materializeSparseReadForToolCall(input) {
     }
 }
 export async function resolveActiveContextForStatusContext(statusContext, env = process.env) {
-    const spec = statusContext.unit_spec;
+    const allowStatusContextProjection = statusContext.receipt_schema_version === 'autopilot.receipt.v2' && statusContext.roster_execution_identity !== undefined;
+    const spec = materializationRuntimeSpecContext(statusContext.unit_spec, allowStatusContextProjection).unit_spec;
     const taskRoot = taskRootFromArtifactRoot(statusContext.artifact_root, spec.workstream);
     if (taskRoot === null)
         fail('invalid-artifact-root', 'Autopilot status context artifact_root does not end with the workstream runtime root.', [statusContext.artifact_root]);
@@ -243,6 +267,7 @@ export async function resolveActiveContextForStatusContext(statusContext, env = 
     });
 }
 async function materializePathsForSpec(input) {
+    const spec = materializationRuntimeSpecContext(input.spec, input.allowLegacyV1RuntimeSpec === true).unit_spec;
     const now = input.now ?? new Date();
     const paths = dedupeMaterializationRows(input.paths);
     if (paths.length === 0)
@@ -251,11 +276,11 @@ async function materializePathsForSpec(input) {
     const snapshotPath = join(taskRoot, AUTOPILOT_CHECKOUT_PROFILE_SNAPSHOT_FILE);
     const snapshot = await readCheckoutProfileSnapshot(snapshotPath);
     if (snapshot === null) {
-        await ensureFutureOwnedParents(input.spec.cwd, paths.filter((path) => path.claim_type === 'WRITE').map((path) => path.path));
+        await ensureFutureOwnedParents(spec.cwd, paths.filter((path) => path.claim_type === 'WRITE').map((path) => path.path));
         return { checkout_mode: 'legacy-full', materialized_paths: paths, targets: [], byte_count: 0 };
     }
     if (snapshot.profile.mode === 'full') {
-        await ensureFutureOwnedParents(input.spec.cwd, paths.filter((path) => path.claim_type === 'WRITE').map((path) => path.path));
+        await ensureFutureOwnedParents(spec.cwd, paths.filter((path) => path.claim_type === 'WRITE').map((path) => path.path));
         return { checkout_mode: 'full', materialized_paths: paths, targets: [], byte_count: 0 };
     }
     const scan = await scanTrackedTree(input.context.active.main_worktree_path, now);
@@ -271,12 +296,12 @@ async function materializePathsForSpec(input) {
             worktreeCount: 1,
         },
     });
-    const targets = materializationTargets(input.context.active, input.spec);
+    const targets = materializationTargets(input.context.active, spec);
     const patterns = sparseIncludePatternsForPaths(paths.map((path) => path.path));
     for (const target of targets) {
-        const worktreePath = target === 'main' ? input.context.active.main_worktree_path : input.spec.cwd;
-        const unitId = target === 'main' ? 'main' : input.spec.unit_id;
-        const attempt = target === 'main' ? 1 : input.spec.attempt;
+        const worktreePath = target === 'main' ? input.context.active.main_worktree_path : spec.cwd;
+        const unitId = target === 'main' ? 'main' : spec.unit_id;
+        const attempt = target === 'main' ? 1 : spec.attempt;
         const branch = target === 'main'
             ? input.context.active.branch
             : runBranch(worktreePath, input.env);
@@ -312,8 +337,8 @@ async function materializePathsForSpec(input) {
             },
         }, input.env ?? process.env);
     }
-    await appendMaterializationLedger(input.context.active, input.spec, paths, targets, byteCount, input.reason, input.automatic, now);
-    await upsertMaterializedPaths(input.context.active, input.spec, paths, scan, input.reason, input.automatic, now);
+    await appendMaterializationLedger(input.context.active, spec, paths, targets, byteCount, input.reason, input.automatic, now);
+    await upsertMaterializedPaths(input.context.active, spec, paths, scan, input.reason, input.automatic, now);
     return { checkout_mode: 'sparse', materialized_paths: paths, targets, byte_count: byteCount };
 }
 function materializationTargets(active, spec) {

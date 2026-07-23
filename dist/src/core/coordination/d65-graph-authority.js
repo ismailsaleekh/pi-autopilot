@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { parseAutopilotAuthority } from "../authority.js";
-import { parseAutopilotExecutionAudit, parseAutopilotExecutionCommit, parseAutopilotReceipt, parseAutopilotStatusEntry, parseAutopilotUnitSpec, } from "../contracts/index.js";
+import { parseAutopilotExecutionAudit, parseAutopilotExecutionCommit, parseAutopilotHistoricalFixedRosterAdapterResult, parseAutopilotReceipt, parseAutopilotReceiptV2, parseAutopilotStatusEntry, parseAutopilotUnitSpec, parseAutopilotUnitSpecV2, } from "../contracts/index.js";
 import { parseAutopilotUnitMerge } from "../unit-merge.js";
 import { parseValidationEvidence, parseReservationValidationStaleness } from "../validation-staleness.js";
 import { parseCoordinationIntegrationConflict } from "./contracts.js";
@@ -204,23 +204,27 @@ function parseClosedValidationStalenessV2(value) {
 const extractor = (field_path, base, target_collection, digest_field_path = null, byte_count_field_path = null, options = {}) => Object.freeze({ field_path, base, target_collection, digest_field_path, byte_count_field_path, traverse: true, presence: options.presence ?? 'required', shape: options.shape ?? 'ref', absolute_runtime_output: options.absolute_runtime_output ?? false });
 const schema = (schema_version, parser, ref_extractors = []) => Object.freeze({ schema_version, parser, ref_extractors: Object.freeze([...ref_extractors]) });
 const row = (collection, roots, schemas, direct_children_only = false, opaque = false) => Object.freeze({ collection, roots: Object.freeze([...roots]), direct_children_only, schemas: Object.freeze([...schemas]), opaque });
+const unitSpecRefExtractors = () => Object.freeze([
+    extractor('upstream_refs[].status_ref', 'runtime', 'statuses'),
+    extractor('upstream_refs[].audit_ref', 'runtime', 'audits'),
+    extractor('status_output', 'runtime', 'statuses', null, null, { presence: 'declared-output', absolute_runtime_output: true }),
+    extractor('receipt_output', 'runtime', 'receipts', null, null, { presence: 'declared-output', absolute_runtime_output: true }),
+    extractor('evidence_dir', 'runtime', 'evidence', null, null, { presence: 'declared-output', shape: 'directory', absolute_runtime_output: true }),
+]);
 export const D65_GRAPH_AUTHORITY_REGISTRY = Object.freeze([
     row('authorities', ['authority/'], [schema('autopilot.authority.v1', parseAutopilotAuthority)], true),
     row('authorities', ['authority/continuation/'], [schema(D65_CONTINUATION_EVENT_SCHEMA, parseD65ContinuationEvent), schema(D65_PARENT_LOSS_SCHEMA, parseD65ParentLoss)]),
-    row('specs', ['unit-specs/'], [schema('autopilot.unit_spec.v1', parseAutopilotUnitSpec, [
-            extractor('upstream_refs[].status_ref', 'runtime', 'statuses'),
-            extractor('upstream_refs[].audit_ref', 'runtime', 'audits'),
-            extractor('status_output', 'runtime', 'statuses', null, null, { presence: 'declared-output', absolute_runtime_output: true }),
-            extractor('receipt_output', 'runtime', 'receipts', null, null, { presence: 'declared-output', absolute_runtime_output: true }),
-            extractor('evidence_dir', 'runtime', 'evidence', null, null, { presence: 'declared-output', shape: 'directory', absolute_runtime_output: true }),
-        ])]),
+    row('specs', ['unit-specs/'], [
+        schema('autopilot.unit_spec.v2', parseAutopilotUnitSpecV2, unitSpecRefExtractors()),
+        schema('autopilot.unit_spec.v1', parseAutopilotUnitSpec, unitSpecRefExtractors()),
+    ]),
     row('statuses', ['statuses/'], [schema('autopilot.status.v1', parseAutopilotStatusEntry, [
             extractor('findings[].evidence_refs[].path', 'runtime', 'evidence', 'findings[].evidence_refs[].sha256', 'findings[].evidence_refs[].byte_count'),
             extractor('evidence_refs[].path', 'runtime', 'evidence', 'evidence_refs[].sha256', 'evidence_refs[].byte_count'),
             extractor('report_ref.path', 'runtime', 'evidence', 'report_ref.sha256', 'report_ref.byte_count'),
             extractor('commands[].evidence_ref', 'runtime', 'evidence'),
         ])]),
-    row('receipts', ['receipts/'], [schema('autopilot.receipt.v1', parseAutopilotReceipt)]),
+    row('receipts', ['receipts/'], [schema('autopilot.receipt.v2', parseAutopilotReceiptV2), schema('autopilot.receipt.v1', parseAutopilotReceipt)]),
     row('audits', ['execution-audits/'], [schema('autopilot.execution_audit.v1', parseAutopilotExecutionAudit, [
             extractor('evidence_refs[].path', 'runtime', 'evidence', 'evidence_refs[].sha256', 'evidence_refs[].byte_count'),
         ])]),
@@ -255,6 +259,7 @@ export const D65_GRAPH_EXTERNAL_AUTHORITY_SCHEMAS = Object.freeze([
     schema(D65_LAUNCH_POLICY_SCHEMA, parseD65LaunchPolicy, [extractor('capacity_decision_ref', 'repository', 'authorities', 'capacity_decision_sha256')]),
     schema(D65_CAPACITY_DECISION_SCHEMA, parseD65CapacityDecision, [extractor('audit_ref', 'repository', 'evidence', 'audit_sha256')]),
     schema(D65_SUBSCRIPTION_PROBE_SCHEMA, parseD65SubscriptionProbe, [extractor('trigger_continuation_ref', 'repository', 'authorities', 'trigger_continuation_sha256'), extractor('evidence_refs[]', 'repository', 'evidence')]),
+    schema('autopilot.historical_fixed_roster_adapter_result.v1', parseAutopilotHistoricalFixedRosterAdapterResult),
     schema(D65_CONTINUATION_EVENT_SCHEMA, parseD65ContinuationEvent, CONTINUATION_REF_EXTRACTORS),
     schema(D65_PARENT_LOSS_SCHEMA, parseD65ParentLoss, PARENT_LOSS_REF_EXTRACTORS),
 ]);
@@ -364,6 +369,74 @@ function assertExternalPath(schemaVersion, ref, parsed) {
         const id = parsed['probe_id'];
         if (typeof sequence !== 'number' || !Number.isSafeInteger(sequence) || sequence < 1 || typeof id !== 'string' || ref !== `authority/subscription-probes/${String(sequence).padStart(20, '0')}-${id}.json`)
             fail('subscription probe ref does not bind sequence and probe_id', [ref]);
+    }
+}
+function assertRuntimeSpecReceiptCoherence(parsedByRef, runtimePrefix, readBytes) {
+    assertRuntimeV1ArtifactsHaveExactHistoricalProof(parsedByRef, runtimePrefix, readBytes);
+    const specByUnit = new Map();
+    const receiptByUnit = new Map();
+    for (const [ref, parsed] of parsedByRef) {
+        if (!ref.startsWith(`${runtimePrefix}/`) || !isJsonObject(parsed))
+            continue;
+        const schemaVersion = parsed['schema_version'];
+        if (schemaVersion !== 'autopilot.unit_spec.v1' && schemaVersion !== 'autopilot.unit_spec.v2' && schemaVersion !== 'autopilot.receipt.v1' && schemaVersion !== 'autopilot.receipt.v2')
+            continue;
+        const unitId = parsed['unit_id'];
+        const role = parsed['role'];
+        const attempt = parsed['attempt'];
+        if (typeof unitId !== 'string' || typeof role !== 'string' || typeof attempt !== 'number')
+            fail('runtime artifact identity is incomplete during graph discovery', [ref]);
+        const key = `${unitId}\u0000${role}\u0000${String(attempt)}`;
+        const target = schemaVersion === 'autopilot.unit_spec.v1' || schemaVersion === 'autopilot.unit_spec.v2' ? specByUnit : receiptByUnit;
+        const prior = target.get(key);
+        if (prior !== undefined && prior !== parsed)
+            fail('two runtime artifacts share the same unit identity and collection', [ref, key]);
+        target.set(key, parsed);
+    }
+    for (const [key, spec] of specByUnit) {
+        const receipt = receiptByUnit.get(key);
+        if (receipt === undefined)
+            continue;
+        const specSchema = spec['schema_version'];
+        const receiptSchema = receipt['schema_version'];
+        if (specSchema === 'autopilot.unit_spec.v2' && receiptSchema !== 'autopilot.receipt.v2')
+            fail('mixed v2 unit spec with non-v2 receipt is forbidden', [key]);
+        if (specSchema === 'autopilot.unit_spec.v1' && receiptSchema !== 'autopilot.receipt.v1')
+            fail('mixed historical v1 unit spec with non-v1 receipt is forbidden', [key]);
+        if (specSchema === 'autopilot.unit_spec.v2' && receiptSchema === 'autopilot.receipt.v2') {
+            for (const field of ['workstream', 'unit_id', 'role', 'attempt', 'status_output', 'roster_id', 'roster_revision', 'roster_sha256', 'assignment_sha256', 'pre_run_selection_sha256']) {
+                if (spec[field] !== receipt[field])
+                    fail('unit_spec.v2 and receipt.v2 identity drift during graph discovery', [key, field]);
+            }
+            const specProfile = spec['request_profile'];
+            const receiptProfile = receipt['request_profile'];
+            if (JSON.stringify(specProfile) !== JSON.stringify(receiptProfile))
+                fail('unit_spec.v2 and receipt.v2 request_profile drift during graph discovery', [key]);
+        }
+    }
+}
+function assertRuntimeV1ArtifactsHaveExactHistoricalProof(parsedByRef, runtimePrefix, readBytes) {
+    const provenUnitSpecBytes = new Set();
+    const provenReceiptBytes = new Set();
+    for (const parsed of parsedByRef.values()) {
+        if (!isJsonObject(parsed) || parsed['schema_version'] !== 'autopilot.historical_fixed_roster_adapter_result.v1')
+            continue;
+        const result = parseAutopilotHistoricalFixedRosterAdapterResult(parsed);
+        if (result.ok !== true || result.admission.admitted !== true || result.historical_bytes_mutated !== false || result.admission.historical_bytes_mutated !== false)
+            continue;
+        provenUnitSpecBytes.add(result.historical_unit_spec_sha256);
+        provenReceiptBytes.add(result.historical_receipt_sha256);
+    }
+    for (const [ref, parsed] of parsedByRef) {
+        if (!ref.startsWith(`${runtimePrefix}/`) || !isJsonObject(parsed))
+            continue;
+        const schemaVersion = parsed['schema_version'];
+        if (schemaVersion !== 'autopilot.unit_spec.v1' && schemaVersion !== 'autopilot.receipt.v1')
+            continue;
+        const digest = bytesSha256(readBytes(ref));
+        const proven = schemaVersion === 'autopilot.unit_spec.v1' ? provenUnitSpecBytes.has(digest) : provenReceiptBytes.has(digest);
+        if (!proven)
+            fail('generic v1 runtime artifact lacks exact historical adapter proof', [ref, String(schemaVersion), digest]);
     }
 }
 function pathSegments(fieldPath) {
@@ -698,6 +771,7 @@ export function discoverD65GraphAuthority(input) {
         for (const extractorRow of schemaRow.ref_extractors)
             executeExtractor(parsed, extractorRow, ref);
     }
+    assertRuntimeSpecReceiptCoherence(parsedByRef, runtimePrefix, (ref) => input.readGitAtG.readBlob(ref));
     const policies = [...acceptedByRef.values()].filter((artifact) => artifact.document_schema_version === D65_LAUNCH_POLICY_SCHEMA).map((artifact) => ({ artifact, policy: parseD65LaunchPolicy(parsedByRef.get(artifact.evidence.ref)) }));
     const decisions = [...acceptedByRef.values()].filter((artifact) => artifact.document_schema_version === D65_CAPACITY_DECISION_SCHEMA);
     for (const decision of decisions) {

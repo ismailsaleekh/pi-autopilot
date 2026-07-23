@@ -55,6 +55,7 @@ here are not yet governed by a doc; coverage ratchets up per PR (C8 floor).
 | `src/core/roster/artifact-compatibility.ts` | [`subsystems/roster-onboarding`](subsystems/roster-onboarding.md) |
 | `src/core/roster/canonical.ts` | [`subsystems/roster-onboarding`](subsystems/roster-onboarding.md) |
 | `src/core/roster/contracts.ts` | [`subsystems/roster-onboarding`](subsystems/roster-onboarding.md) |
+| `src/core/roster/custom-certification.ts` | [`subsystems/roster-onboarding`](subsystems/roster-onboarding.md), [`subsystems/runner-and-forced-output`](subsystems/runner-and-forced-output.md) |
 | `src/core/roster/doctor.ts` | [`subsystems/roster-onboarding`](subsystems/roster-onboarding.md) |
 | `src/core/roster/historical-adapter.ts` | [`subsystems/roster-onboarding`](subsystems/roster-onboarding.md) |
 | `src/core/roster/paths.ts` | [`subsystems/roster-onboarding`](subsystems/roster-onboarding.md) |
@@ -63,7 +64,7 @@ here are not yet governed by a doc; coverage ratchets up per PR (C8 floor).
 | `src/core/roster/resolve.ts` | [`subsystems/roster-onboarding`](subsystems/roster-onboarding.md) |
 | `src/core/roster/route-policies.ts` | [`subsystems/roster-onboarding`](subsystems/roster-onboarding.md) |
 | `src/core/roster/run-selection.ts` | [`subsystems/roster-onboarding`](subsystems/roster-onboarding.md) |
-| `src/core/roster/runtime-consumers.ts` | [`subsystems/roster-onboarding`](subsystems/roster-onboarding.md) |
+| `src/core/roster/runtime-consumers.ts` | [`subsystems/roster-onboarding`](subsystems/roster-onboarding.md), [`subsystems/runner-and-forced-output`](subsystems/runner-and-forced-output.md) |
 | `src/core/roster/runtime-spec.ts` | [`subsystems/roster-onboarding`](subsystems/roster-onboarding.md) |
 | `src/core/roster/setup-approval.ts` | [`subsystems/roster-onboarding`](subsystems/roster-onboarding.md) |
 | `src/core/roster/setup-context.ts` | [`subsystems/roster-onboarding`](subsystems/roster-onboarding.md) |
@@ -73,6 +74,7 @@ here are not yet governed by a doc; coverage ratchets up per PR (C8 floor).
 | `src/core/roster/snapshot.ts` | [`subsystems/roster-onboarding`](subsystems/roster-onboarding.md) |
 | `src/core/roster/storage.ts` | [`subsystems/roster-onboarding`](subsystems/roster-onboarding.md) |
 | `src/core/roster/transaction.ts` | [`subsystems/roster-onboarding`](subsystems/roster-onboarding.md) |
+| `src/core/roster/transition.ts` | [`subsystems/roster-onboarding`](subsystems/roster-onboarding.md), [`subsystems/runner-and-forced-output`](subsystems/runner-and-forced-output.md) |
 | `src/core/scheduler-config.ts` | [`commands/autopilot-config`](commands/autopilot-config.md) |
 | `src/core/scheduler.ts` | [`subsystems/runner-and-forced-output`](subsystems/runner-and-forced-output.md) |
 | `src/core/sparse-worktree.ts` | [`subsystems/worktrees`](subsystems/worktrees.md) |

@@ -1,7 +1,7 @@
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { deriveAutopilotAuthority, persistAutopilotAuthority } from "./authority.js";
-import { parseAutopilotUnitSpec } from "./contracts/validate.js";
+import { parseNewRunRuntimeUnitSpec, } from "./roster/runtime-consumers.js";
 import { matchesRepoPathPattern, pathOverlapsOrContains, writeJsonAtomic } from "./parallel-runtime.js";
 import { assertD65OrdinaryBoundaryFromEnvironment } from "./coordination/d65-runtime-dispatch.js";
 import { reservationSchedulingBlockers } from "./coordination/reservations.js";
@@ -86,8 +86,9 @@ export async function planNextDispatch(input) {
         }
         else {
             try {
-                spec = parseAutopilotUnitSpec(candidate.spec);
-                authority = await deriveAutopilotAuthority({ spec });
+                const runtimeSpec = parseNewRunRuntimeUnitSpec(candidate.spec);
+                spec = runtimeSpec.unit_spec;
+                authority = await deriveAutopilotAuthority({ spec: runtimeSpec.authority_spec });
             }
             catch (error) {
                 reasons.push('invalid-spec');

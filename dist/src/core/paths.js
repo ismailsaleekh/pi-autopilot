@@ -1,9 +1,43 @@
+import { randomBytes } from 'node:crypto';
 import { AUTOPILOT_RUNTIME_ROOT_PREFIX } from "./names.js";
 const WORKSTREAM_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+const WORKSTREAM_RUN_PATTERN = /^[a-z][a-z0-9-]{0,119}$/u;
+const ROSTER_ID_PATTERN = /^[a-z][a-z0-9-]{0,95}$/u;
+const WORKSTREAM_RUN_MAX_LENGTH = 120;
 export function isValidWorkstreamSlug(value) {
     return WORKSTREAM_PATTERN.test(value);
 }
-export function parseAutopilotArgs(args) {
+export function isValidRosterId(value) {
+    return ROSTER_ID_PATTERN.test(value);
+}
+export function isValidWorkstreamRun(value) {
+    return WORKSTREAM_RUN_PATTERN.test(value);
+}
+export function buildAutopilotWorkstreamRun(workstream, now = new Date(), entropy = randomBytes(3).toString('hex')) {
+    if (!isValidWorkstreamSlug(workstream)) {
+        throw new Error(`Invalid Autopilot workstream slug: ${workstream}`);
+    }
+    if (!/^[a-f0-9]{6,24}$/u.test(entropy)) {
+        throw new Error('Autopilot workstream_run entropy must be 6..24 lowercase hex characters.');
+    }
+    const normalizedWorkstream = workstream
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/gu, '-')
+        .replace(/^-+|-+$/gu, '') || 'run';
+    const timestamp = now.toISOString()
+        .replace(/[-:]/gu, '')
+        .replace(/\.\d{3}Z$/u, 'z')
+        .replace('T', 't');
+    const suffix = `${timestamp}-${entropy}`;
+    const maxPrefixLength = WORKSTREAM_RUN_MAX_LENGTH - suffix.length - 1;
+    const prefix = normalizedWorkstream.slice(0, Math.max(1, maxPrefixLength)).replace(/-+$/u, '') || 'run';
+    const workstreamRun = `${prefix}-${suffix}`;
+    if (!isValidWorkstreamRun(workstreamRun)) {
+        throw new Error(`Generated invalid Autopilot workstream_run: ${workstreamRun}`);
+    }
+    return workstreamRun;
+}
+export function parseAutopilotArgs(args, options = {}) {
     const trimmed = args.trim();
     if (trimmed.length === 0) {
         return { ok: false, message: 'Usage: /autopilot <workstream> [task intro or current focus]' };
@@ -16,8 +50,21 @@ export function parseAutopilotArgs(args) {
             message: 'Workstream must start with a letter or digit and contain only letters, digits, dot, underscore, or dash.',
         };
     }
-    const remainder = firstSpace < 0 ? '' : trimmed.slice(firstSpace).trim();
-    return { ok: true, value: { workstream, remainder } };
+    let remainder = firstSpace < 0 ? '' : trimmed.slice(firstSpace).trim();
+    let rosterId = null;
+    if (options.parseRoster !== false && /^--roster(?:\s|=|$)/u.test(remainder)) {
+        const match = /^--roster\s+(\S+)(?:\s+([\s\S]*))?$/u.exec(remainder);
+        const candidateRosterId = match?.[1];
+        if (candidateRosterId === undefined) {
+            return { ok: false, message: 'Usage: /autopilot <workstream> [--roster <id>] [task intro or current focus]' };
+        }
+        if (!isValidRosterId(candidateRosterId)) {
+            return { ok: false, message: 'Roster id must start with a lowercase letter and contain only lowercase letters, digits, or dash.' };
+        }
+        rosterId = candidateRosterId;
+        remainder = (match?.[2] ?? '').trim();
+    }
+    return { ok: true, value: { workstream, remainder, rosterId } };
 }
 export function parseAutopilotInjectArgs(args) {
     const tokens = args.trim().split(/\s+/u).filter((token) => token.length > 0);

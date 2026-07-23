@@ -15,8 +15,8 @@ All Autopilot failures are loud and typed. Match the symptom, then follow the po
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| "Autopilot roster setup is required" | No explicit/trusted-project/user roster authority is selectable | Use the activated setup lane only for inspection/proposal. Current W4 offline packs are blocked or non-certifying, so do not treat a seed candidate as launch authority. |
-| "roster resolution failed closed" | Higher-precedence roster authority is corrupt, untrusted, unavailable, or non-launchable | Repair the exact authority named in the diagnostic; lower-precedence defaults are intentionally not consulted. |
+| "Autopilot roster setup is required" | No explicit/trusted-project/user roster authority is selectable | Use the activated setup lane only for inspection/proposal. Current W4 offline packs and custom trust pins are blocked, so do not treat a seed or custom draft as launch authority. |
+| "roster resolution failed closed" | Higher-precedence roster authority is corrupt, untrusted, unavailable, non-launchable, or transition-stale | Repair the exact authority named in the diagnostic; lower-precedence defaults are intentionally not consulted. |
 | "cannot enforce parent model roster" | Selected parent request profile is unavailable or not exactly settable/observable | Ensure the selected provider/model/thinking/API route is supported; see [roster onboarding](../subsystems/roster-onboarding.md). |
 | "post-cutover activation requires a durable coordinator session" | Activating post-cutover without a session | Start via `/autopilot`/`/autopilot-inject` so the durable supervisor attaches first. |
 | "migration-recovery-required" fence on activation | Ambiguous imported authority pending | Use the explicit `recovery` commands ([crash-recovery](../operations/crash-recovery.md)); ordinary activation stays disabled until resolved. |
@@ -36,7 +36,7 @@ All Autopilot failures are loud and typed. Match the symptom, then follow the po
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| Close reports blockers and does not land | Unmet precondition (validation staleness, reservation repair, dirty/running/quarantined units, foreign target intersection) | Resolve each named blocker; re-run `--dry-run`. See [close-lifecycle](../subsystems/close-lifecycle.md). |
+| Close reports blockers and does not land | Unmet precondition (validation staleness, post-transition validation requirement, reservation repair, dirty/running/quarantined units, foreign target intersection) | Resolve each named blocker; re-run `--dry-run`. See [close-lifecycle](../subsystems/close-lifecycle.md). |
 | Abort refuses | Dirty source paths | Clean or capture the dirty paths first. |
 
 ## Coordinator
@@ -45,8 +45,9 @@ All Autopilot failures are loud and typed. Match the symptom, then follow the po
 |---|---|---|
 | Coordination command errors loudly | Coordinator unavailable / IPC error | Inspect with `autopilot-coordinator doctor`; the heartbeat retries transient outages while the lease is valid. |
 | Docs gate fails (C0–C11) | Docs drifted from code | Run `npm run docs:generate` then `npm run docs:attest`; see [docs-freshness-gate](../subsystems/docs-freshness-gate.md). |
-| `ROSTER_QUALIFICATION_REQUIRED` | Current candidate is structural/non-certifying evidence only | Wait for package-reviewed live W3 evidence pins and trusted certified roster hashes in the W4 provider registry. |
+| `ROSTER_QUALIFICATION_REQUIRED` | Current candidate or custom draft is structural/non-certifying evidence only | Wait for package-reviewed live W3 evidence pins and trusted certified roster hashes in the provider or custom trust registry. |
 | `ROSTER_PINNED_SELECTION_UNAVAILABLE` | Existing-run selection, mirror, or pinned roster bytes cannot be authenticated | Recover the exact pinned artifacts; do not onboard a replacement for an existing run. |
+| `ROSTER_TRANSITION_REQUIRED` | Existing-run roster change requires explicit transition authority | Review/approve only the exact transition presentation, then retry the original `/autopilot` command. |
 
 ## Golden rule
 

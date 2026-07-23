@@ -13,9 +13,12 @@ covers_sources:
   - src/core/forced-output/index.ts
   - src/core/execution-audit/index.ts
   - src/core/prompt-renderer/index.ts
+  - src/core/roster/custom-certification.ts
+  - src/core/roster/runtime-consumers.ts
+  - src/core/roster/transition.ts
   - src/core/model-roster.ts
-signature_hash: 'sha256:1f9c82ae3d17b8da989f9a75961689fdc3b61d0e9de48c003bdd1ff3f30e62e6'
-body_hash: 'sha256:f6c5fa13f558cf9fb22ff9caa041723e151bc8d3eff2b69b324724de9894a99c'
+signature_hash: 'sha256:20a3ac4c9e11b91def694d023369ecd987443df7b535c420da70540ccd26c260'
+body_hash: 'sha256:a3230fd9b5260de448a845d69f16ac87f62e99b5d9d685f11c507599b1ac18e0'
 stability: stable
 ---
 
@@ -66,9 +69,11 @@ needing a new edit path must emit a blocker.
 ## Forced output (the success contract)
 
 Success requires exactly one valid `autopilot_emit_status` carrier plus status and
-receipt evidence. For Phase 37 v2 specs, preflight first authenticates the pinned
-roster revision, pre-run selection, runtime mirror, assignment hash, and request
-profile; historical v1 evidence is admitted only by byte-faithful adapter authority.
+receipt evidence. For Phase 37 v2 specs, preflight first authenticates the pinned roster revision,
+pre-run selection, runtime mirror, any committed existing-run transition chain and
+successor target, required user-custom certification authority, assignment hash, and
+request profile; historical v1 evidence is admitted only by byte-faithful adapter
+authority.
 On completion the runner:
 
 1. accepts matching status + receipt + receipt-matching structured tool carrier,
@@ -97,9 +102,10 @@ surfaces. Phase 37 v2 execution is stricter than provider-name matching: the uni
 pins the roster, assignment, and request profile, the runner verifies Pi can set that
 profile before spend, and receipt acceptance compares requested vs observed provider,
 model, thinking, API route, service tier, cache policy, system-prompt profile/hash, and
-route policy. Current package provider packs are blocked or non-certifying, so these
-checks document the contract for certified rosters without implying current launch
-readiness. OpenRouter and other metered frontier routes remain forbidden.
+route policy. Current package provider packs and the custom trust registry have empty trusted pins,
+so these checks document the contract for future certified provider/custom rosters
+without implying current launch readiness. OpenRouter and other metered frontier routes
+remain forbidden.
 
 ## Related
 

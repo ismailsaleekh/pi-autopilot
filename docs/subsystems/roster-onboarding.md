@@ -57,6 +57,7 @@ covers_sources:
   - src/core/roster/artifact-compatibility.ts
   - src/core/roster/canonical.ts
   - src/core/roster/contracts.ts
+  - src/core/roster/custom-certification.ts
   - src/core/roster/doctor.ts
   - src/core/roster/historical-adapter.ts
   - src/core/roster/paths.ts
@@ -75,32 +76,36 @@ covers_sources:
   - src/core/roster/snapshot.ts
   - src/core/roster/storage.ts
   - src/core/roster/transaction.ts
+  - src/core/roster/transition.ts
   - src/core/forced-output/identity.ts
   - src/internal/execution-observer-extension.ts
   - templates/skills/autopilot-roster-setup/SKILL.md
   - templates/skills/autopilot-roster-setup/payload.json
-signature_hash: 'sha256:7f6d8bf57292542434db2fc0a38054f371f1888f0f8cfee86ea5cb91685837d6'
-body_hash: 'sha256:108311b7bdc07a2833145595c02fc388fb0dba107c1ada3df604cf974b6c1b6c'
+signature_hash: 'sha256:d46aa43fe4e3f719f06711948472b74c8014073e643e7d1e579233ea219cabed'
+body_hash: 'sha256:11e615ca9a246907917953eaaf745d74609b44300cc847ee7e87141f87efd727'
 stability: evolving
 ---
 
 # Roster Onboarding, Selection, and Provider Qualification
 
-Phase 37 W0-W4 roster work is shipped in this package: agent-first setup contracts,
-provider seed packs, v2 runtime identity, W3/W4 registry gates, and historical v1
-adapters are source-backed at `bacbd85`. Its purpose is to bind every new run to an
-immutable roster, pre-run selection, and request profile before worktree mutation or
-model spend. It is fail-closed: missing, corrupt, untrusted, unqualified, or mismatched
-authority blocks activation rather than falling through to a lower-precedence default
-or a provider guess.
+Phase 37 roster work now ships agent-first setup contracts, provider seed packs,
+custom roster v2 proposal/save/certification plumbing, existing-run transition
+history, v2 runtime identity, W3/W4 registry gates, and historical v1 adapters. Its
+purpose is to bind every new run or successor attempt to immutable roster authority,
+pre-run selection evidence, and request-profile facts before worktree mutation or
+model spend. It is fail-closed: missing, corrupt, untrusted, unqualified, stale, or
+mismatched authority blocks activation rather than falling through to a lower-precedence
+default or a provider guess.
 
 ## Current readiness truth
 
-**Current package truth:** every offline W4 provider pack in this package is blocked
-or non-certifying for launch authority. The generated table below lists the current
-packs and pin counts; setup cannot save a launchable roster until package-reviewed
-live W3 trust pins and trusted certified roster hashes exist in the central W4 provider
-registry.
+**Current package truth:** every offline W4 provider pack and every custom roster
+trust path in this package is blocked for launch authority because the provider and
+custom trust registries carry zero trusted manifest/roster pins. The generated table
+below lists the current provider packs and pin counts; setup can inspect and propose
+seed or custom v2 rosters, but it cannot save a launchable provider or custom roster
+until package-reviewed live W3 trust pins and trusted certified roster hashes exist in
+the relevant registry.
 
 <!-- GENERATED:roster-readiness START (source: src/core/roster/provider-recipes.ts, src/core/roster/route-policies.ts, src/core/roster/providers/index.ts) -->
 ### W4 provider registry (current package pins)
@@ -147,8 +152,11 @@ Interpretation of the tables:
   `non_certifying_seed=false`, `synthetic_fixture_ready_only=false`, registry readiness
   authority, a provider-pack binding, a certification manifest binding, a recipe hash,
   a route-policy hash, and an exact roster hash.
-- Synthetic fixture success, offline structural compatibility, or a self-hashed
-  manifest is not production certification.
+- Synthetic fixture success, offline structural compatibility, custom structural
+  validity, or a self-hashed manifest is not production certification.
+- `src/core/roster/custom-certification.ts` intentionally ships an empty custom trust
+  registry in this package; a custom roster is launchable only after an exact
+  certification authority binds a trusted manifest and trusted roster hash.
 
 ## New-run precedence
 
@@ -178,8 +186,12 @@ When no selectable roster exists, `/autopilot` stays pre-run. `src/extension.ts`
   provider calls, tests, builds, or source mutation.
 
 The tool is normally inactive. It rejects calls with a missing or stale activation token,
-and `session_start`/`session_shutdown` deactivate it. `inspect`, `propose`/`refine`,
-`doctor`, and `reject` are zero-write and zero-lock operations.
+and `session_start`/`session_shutdown` deactivate it. `inspect`, provider
+`propose`/`refine`, custom v2 `propose-custom`, `doctor`, and `reject` are zero-write
+and zero-lock operations. Custom v2 proposals validate the exact natural-language
+intent, inventory route facts, role coverage, request profile fields, and optional
+qualification manifest; a structurally valid custom draft remains blocked unless the
+manifest is package-trusted.
 
 ## Approval and save binding
 
@@ -187,9 +199,11 @@ The setup lane is an ordinary agent conversation, not a wizard. Natural language
 as an approval of the current recommendation can authorize a save only after the
 package has presented the current exact approval facts. The host accepts only a
 nonempty bounded `user`, `interactive`, or `rpc` input turn after that presentation; the
-setup agent still owns the semantic interpretation.
+setup agent still owns the semantic interpretation. This setup approval controller is
+separate from the existing-run transition approval controller; one ordinary input turn
+is consumed by at most one active controller.
 
-The save request must bind the exact current values:
+The provider-candidate save request must bind the exact current values:
 
 - `scope`;
 - `candidate_set_sha256`;
@@ -197,14 +211,22 @@ The save request must bind the exact current values:
 - `default_roster_id`, `default_roster_revision`, `default_roster_sha256`;
 - `original_command`.
 
-Stale candidate sets, stale config, reordered or missing roster hashes, stale approval
-tokens, non-user input sources, duplicate authorization, and unlaunchable candidates all
-block before storage. Current offline W4 candidates are unlaunchable, so save blocks
-with zero writes and zero locks unless a future package-reviewed live trust pin promotes
-a candidate through the central registry.
+The custom v2 save request additionally binds the exact custom proposal, validation
+result, roster hash, manifest hash, and package presentation through the
+`custom_roster_approval` object. The save path rebuilds the custom proposal from the
+remembered intent before writing; drift in inventory, manifest, validation, approval,
+config, or roster bytes blocks before storage.
 
-A successful save, when possible, writes immutable roster revision files first, writes
-`config.json` last, reads back every byte/hash, emits a secret-free receipt, sets
+Stale candidate sets, stale config, reordered or missing roster hashes, stale approval
+tokens, non-user input sources, duplicate authorization, unlaunchable provider
+candidates, and uncertified custom rosters all block before storage. Current offline W4
+candidates and current custom rosters are unlaunchable because all provider/custom trust
+pins are empty; save blocks with zero writes and zero locks unless a future
+package-reviewed live trust pin promotes the exact provider or custom roster.
+
+A successful save, when possible, writes immutable roster revision files first, publishes
+any bound custom certification authority before config, writes `config.json` last,
+reads back every byte/hash, emits a secret-free receipt, sets
 `fresh_session_required=true`, and forbids same-session auto-start. The user must open a
 fresh Pi session and retry the receipt's original command byte-for-byte.
 
@@ -235,8 +257,17 @@ or spend, `autopilot-agent-run` authenticates all of these against:
 - the active run/resource and runtime root;
 - the runtime roster mirror under `.pi/autopilot/<workstream>/roster-snapshot.json`;
 - the external create-only pre-run selection bytes;
-- the pinned roster revision file;
+- the committed existing-run transition chain, when a successor target differs from the
+  immutable FROM selection;
+- the pinned FROM or transition-target roster revision file;
+- any required user-custom certification authority for the selected or transitioned
+  custom roster;
 - the role assignment and request-profile hash.
+
+After a committed existing-run transition, old FROM-roster v2 specs are rejected. A
+successor spec must preserve the FROM `pre_run_selection_sha256`, bind the terminal TO
+roster tuple and assignment, include the exact runtime transition context ref, and use
+an attempt number newer than the maximum FROM-roster unit/receipt attempt.
 
 Historical `autopilot.unit_spec.v1` and `autopilot.receipt.v1` bytes remain historical
 evidence only. They require exact grandfather or historical-adapter authority and are
@@ -262,28 +293,40 @@ service tiers, cache policies, system-prompt profiles, billing route classes, an
 forbidden gateways.
 
 OpenRouter, arbitrary API keys, and metered-frontier gateways are forbidden for these
-roster routes. The contract schemas reserve `custom_roster`, `user-custom`, and
-`autopilot.roster_transition.v1` terms, but at `bacbd85` production launch authority is
-limited to centrally certified W4 provider-registry candidates plus byte-faithful
-historical v1 adapter handling. Mixed billing routes are rejected by production seed
-roster construction. Structural compatibility is not certified readiness.
+roster routes. The contract schemas and setup tool now ship `custom_roster`,
+`user-custom`, and `autopilot.roster_transition.v1` behavior, but production launch
+authority still requires exact package trust: central W4 provider-registry pins for
+provider recipes or custom trust-registry pins plus a published custom certification
+authority for user-custom rosters. Both registries are empty in this package, so all
+provider/custom trust remains blocked. Mixed billing routes are rejected by production
+seed roster construction, and custom/mixed structural compatibility is not certified
+readiness.
 
 ## Transitions and history
 
-Allowed transition semantics are explicit; only the bullets tied to existing source
-paths are documented as shipped behavior:
+Allowed transition semantics are explicit and source-backed:
 
 - `setup-required` activates the setup lane and writes no run state.
 - A certified save path publishes roster/config authority and requires a fresh session;
-  current package candidates are not certified, so this path cannot produce launch
-  authority from offline W4 seeds.
+  current provider and custom trust pins are empty, so this path cannot produce launch
+  authority from offline seeds or uncertified custom drafts.
 - A new run commits one immutable pre-run selection before worktree mutation or spend.
 - The main worktree mirrors that selection for runtime recovery.
+- Existing-run recovery consumes the immutable selection and any committed transition
+  chain. An explicit `--roster <id>` that differs from the existing terminal roster
+  proposes a transition rather than overwriting the original selection.
+- A transition proposal presents exact FROM/TO roster refs, run identity, transition
+  hash, and approval phrase. Only a later exact user/interactive/rpc approval commits
+  the create-only transition artifact into user state and the runtime root; retrying the
+  original command then launches successor attempts under the terminal TO roster.
 - Child materialization consumes v2 spec/receipt identity only after strict external,
-  mirror, and roster authentication.
-- Existing-run recovery requires external selection, mirror, spec identity, and pinned
-  roster availability; otherwise it reports `ROSTER_PINNED_SELECTION_UNAVAILABLE` and
+  mirror, transition-chain, target-roster, custom-certification, and request-profile
+  authentication.
+- Existing-run recovery requires external selection, mirror, and pinned roster
+  availability; otherwise it reports `ROSTER_PINNED_SELECTION_UNAVAILABLE` and
   `ROSTER_TRANSITION_REQUIRED`.
+- Transition successors invalidate prior validation. `/autopilot-close` requires fresh
+  independent validation after the terminal transition before closure can succeed.
 - Historical v1 evidence can pass only through the byte-faithful historical adapter and
   never mutates historical bytes.
 
@@ -291,7 +334,7 @@ paths are documented as shipped behavior:
 
 | Symptom / diagnostic | Meaning | Next safe action |
 | --- | --- | --- |
-| `ROSTER_QUALIFICATION_REQUIRED` | The candidate is structural or seed evidence only. | Wait for package-reviewed live W3 pins and a trusted certified roster hash; do not save it for launch. |
+| `ROSTER_QUALIFICATION_REQUIRED` | The candidate/custom draft is structural, seed, or untrusted evidence only. | Wait for package-reviewed live W3 pins and a trusted certified roster hash; do not save it for launch. |
 | `ROSTER_ROUTE_FORBIDDEN` | The route is blocked by policy, such as the current Anthropic metered route. | Choose no workaround; the route needs approved live certification. |
 | `ROSTER_RECOMMENDED_PROFILE_BLOCKED` / `ROSTER_EXPLICIT_CHOICE_REQUIRED` | Cruise or the recommended profile is unavailable for launch. | Ask for an explicit qualified choice only when one exists. Current package has none. |
 | `ROSTER_APPROVAL_STALE_CANDIDATE_SET` | Approval or save bindings no longer match the current proposal. | Re-present the current facts and request a new explicit approval turn. |
@@ -299,11 +342,13 @@ paths are documented as shipped behavior:
 | `ROSTER_PROJECT_UNTRUSTED` / `ROSTER_STORAGE_TRUST_REQUIRED` | Trusted-project scope lacks project trust. | Use user scope or restore project trust; do not write project authority. |
 | `ROSTER_CREATE_ONLY_CONFLICT` | A selection or roster path already has different bytes. | Preserve existing bytes and investigate; do not overwrite. |
 | `ROSTER_PINNED_SELECTION_UNAVAILABLE` | Existing-run selection/mirror/roster authentication failed. | Repair or recover the exact pinned artifacts; do not onboard as a replacement. |
+| `ROSTER_TRANSITION_REQUIRED` | An existing run cannot use a different roster without explicit transition authority. | Review the presented FROM/TO transition, approve only the exact phrase if intended, then retry the original command. |
 | `pre-spend-profile-mismatch` | Pi cannot set the requested profile exactly before spend. | Use only a request profile supported by the current Pi adapter. |
 
 ## Related tests
 
-Focused W0-W4 coverage lives in `tests/phase37/phase37-w0-contract-freeze.test.ts`,
-`tests/unit/roster-*.test.ts`, `tests/e2e/roster-*.test.ts`,
-`tests/model/roster-provider-*.test.ts`, `tests/sdk/roster-setup-sdk.test.ts`,
-`tests/rpc/roster-setup-rpc.test.ts`, and `tests/package/roster-*.test.ts`.
+Focused roster coverage lives in `tests/phase37/phase37-w0-contract-freeze.test.ts`,
+`tests/unit/roster-*.test.ts`, `tests/unit/agent-runner-roster.test.ts`,
+`tests/e2e/roster-*.test.ts`, `tests/model/roster-provider-*.test.ts`,
+`tests/sdk/roster-setup-sdk.test.ts`, `tests/rpc/roster-setup-rpc.test.ts`, and
+`tests/package/roster-*.test.ts`.

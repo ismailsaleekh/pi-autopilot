@@ -69,17 +69,21 @@ See [`docs/tools/`](docs/tools/context_budget.md) and [`docs/INDEX.md`](docs/IND
 ## Roster-gated launch
 
 Autopilot resolves a launch roster before any worktree mutation or model spend. New-run
-precedence is explicit `--roster <id>`, trusted-project default, user default, then
-agent-first onboarding. If onboarding is required, `/autopilot` activates the normally
-inactive packaged `autopilot-roster-setup` skill/tool for the current session only; it
-stays pre-run, accepts natural-language approval only after exact hash-bound proposal
-presentation, never auto-starts, and requires a fresh Pi session after any successful
-save. See [`docs/subsystems/roster-onboarding.md`](docs/subsystems/roster-onboarding.md).
+precedence is explicit `--roster <id>`, existing-run terminal transition authority,
+trusted-project default, user default, then agent-first onboarding. If onboarding is
+required, `/autopilot` activates the normally inactive packaged `autopilot-roster-setup`
+skill/tool for the current session only; it stays pre-run, accepts natural-language
+approval only after exact hash-bound proposal presentation, never auto-starts, and
+requires a fresh Pi session after any successful save. Existing-run roster changes use
+an explicit transition approval and retry. See
+[`docs/subsystems/roster-onboarding.md`](docs/subsystems/roster-onboarding.md).
 
 Current package truth is generated in the roster readiness tables: the offline W4
-provider packs are blocked or non-certifying. Setup cannot save a launchable roster
+provider packs and custom roster trust registry are blocked/non-certifying with empty
+trusted pins. Setup can propose custom v2 rosters, but cannot save a launchable roster
 until package-reviewed live W3 trust pins and trusted certified roster hashes exist in
-the central W4 provider registry. No provider secrets are required or documented here.
+the relevant provider/custom registry. No provider secrets are required or documented
+here.
 
 ## Fixed model roster
 

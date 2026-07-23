@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { parseAutopilotReceipt, parseAutopilotStatusEntry, } from "../contracts/index.js";
+import { buildAutopilotReceiptV2, buildProvisionalAutopilotObservedProfile, } from "./identity.js";
 export class AutopilotForcedOutputWriteError extends Error {
     constructor(message) {
         super(message);
@@ -18,25 +19,7 @@ export function emitAutopilotStatus(context, statusValue, toolCallId) {
     ensureWithinRoot(context.artifact_root, context.receipt_output, 'receipt_output');
     const statusBytes = `${JSON.stringify(status, null, 2)}\n`;
     const statusSha256 = sha256Text(statusBytes);
-    const receipt = {
-        schema_version: 'autopilot.receipt.v1',
-        tool_name: 'autopilot_emit_status',
-        workstream: context.unit_spec.workstream,
-        unit_id: context.unit_spec.unit_id,
-        role: context.unit_spec.role,
-        attempt: context.unit_spec.attempt,
-        emitted_at: new Date().toISOString(),
-        status_output: context.status_output,
-        status_sha256: statusSha256,
-        schema_sha256: context.schema_sha256,
-        tool_call_id: toolCallId,
-        provider_identity: context.provider_identity,
-        expected_identity_hash: context.expected_identity_hash,
-    };
-    parseAutopilotReceipt(receipt, {
-        unitSpec: context.unit_spec,
-        statusOutputPath: context.status_output,
-    });
+    const receipt = buildReceiptForContext(context, statusSha256, toolCallId);
     const receiptBytes = `${JSON.stringify(receipt, null, 2)}\n`;
     let statusTemp;
     try {
@@ -115,6 +98,42 @@ function writeTempFileSync(targetPath, text) {
     const tempPath = `${targetPath}.tmp-${Date.now()}-${Math.random().toString(16).slice(2)}-${Math.random().toString(16).slice(2)}`;
     writeFileSync(tempPath, text, { encoding: 'utf8', flag: 'wx' });
     return tempPath;
+}
+function buildReceiptForContext(context, statusSha256, toolCallId) {
+    const emittedAt = new Date().toISOString();
+    if (context.roster_execution_identity !== undefined) {
+        return buildAutopilotReceiptV2({
+            unitSpec: context.unit_spec,
+            emittedAt,
+            statusSha256,
+            schemaSha256: context.schema_sha256,
+            toolCallId,
+            providerIdentity: context.provider_identity,
+            expectedIdentityHash: context.expected_identity_hash,
+            rosterExecutionIdentity: context.roster_execution_identity,
+            observedProfile: buildProvisionalAutopilotObservedProfile(context.roster_execution_identity.request_profile),
+        });
+    }
+    const receipt = {
+        schema_version: 'autopilot.receipt.v1',
+        tool_name: 'autopilot_emit_status',
+        workstream: context.unit_spec.workstream,
+        unit_id: context.unit_spec.unit_id,
+        role: context.unit_spec.role,
+        attempt: context.unit_spec.attempt,
+        emitted_at: emittedAt,
+        status_output: context.status_output,
+        status_sha256: statusSha256,
+        schema_sha256: context.schema_sha256,
+        tool_call_id: toolCallId,
+        provider_identity: context.provider_identity,
+        expected_identity_hash: context.expected_identity_hash,
+    };
+    parseAutopilotReceipt(receipt, {
+        unitSpec: context.unit_spec,
+        statusOutputPath: context.status_output,
+    });
+    return receipt;
 }
 function sha256Text(text) {
     return `sha256:${createHash('sha256').update(text, 'utf8').digest('hex')}`;

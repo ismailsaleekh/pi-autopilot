@@ -11,7 +11,7 @@ import { applySparseCheckoutSet, createAutopilotGitWorktree } from "./sparse-wor
 import { cleanupTerminalUnitWorktreesForRun, recoverCommittedPreflightRollbackProjections } from "./worktree-cleanup.js";
 import { executeOwnedWorktreeSaga, OwnedWorktreeSagaClient, recoverOwnedWorktreeSagas } from "./coordination/worktree-saga.js";
 import { AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV, AUTOPILOT_RUNTIME_ROOT_PREFIX } from "./names.js";
-import { isValidWorkstreamSlug } from "./paths.js";
+import { buildAutopilotWorkstreamRun, isValidWorkstreamRun, isValidWorkstreamSlug } from "./paths.js";
 import { parseLegacyActiveAutopilots, parseLegacyPathClaims, runLegacyCoordinationPreflight } from "./coordination/legacy-preflight.js";
 import { DurableRunSupervisorClient } from "./coordination/supervisor.js";
 import { CoordinatorClient } from "./coordination/client.js";
@@ -21,6 +21,7 @@ import { parseCoordinationChildLease, parseCoordinationRun, parseCoordinationRun
 import { assertCoordinationDispatchAllowed, assertLegacyCoordinationWritable, coordinationCutoverCommitted } from "./coordination/migration-paths.js";
 import { enforcePrivateAuthorityPath, ensurePrivateAuthorityDirectory } from "./private-path.js";
 import { gitQueryText, runGitMutation, runGitQuery } from "./git-process.js";
+import { bytesEqual, parseCanonicalPreRunSelectionBytes } from "./roster/run-selection.js";
 export const AUTOPILOT_STATE_ROOT_ENV = 'AUTOPILOT_STATE_ROOT';
 export const AUTOPILOT_RUNTIME_ENV = 'AUTOPILOT_RUNTIME';
 export const AUTOPILOT_RUNTIME_VALUE = '1';
@@ -52,6 +53,61 @@ export class AutopilotParallelRuntimeError extends Error {
 }
 function fail(code, message, evidence = []) {
     throw new AutopilotParallelRuntimeError(code, message, evidence);
+}
+async function verifyPhase37RosterPrepareSelection(input) {
+    if (input.requestedWorkstreamRun !== undefined && !isValidWorkstreamRun(input.requestedWorkstreamRun)) {
+        fail('invalid-workstream-run', `Invalid Autopilot workstream_run: ${input.requestedWorkstreamRun}`);
+    }
+    if (input.selection === undefined) {
+        if (input.required)
+            fail('phase37-roster-launch-fence-required', 'Phase 37 activation requires a readback-authenticated roster selection before runtime mutation.');
+        return null;
+    }
+    const selection = input.selection.selection;
+    if (selection.repo_id !== input.repoKey) {
+        fail('phase37-selection-repo-mismatch', 'Phase 37 roster selection repo_id does not match the activation repository.', [selection.repo_id, input.repoKey]);
+    }
+    if (input.requestedWorkstreamRun !== undefined && selection.workstream_run !== input.requestedWorkstreamRun) {
+        fail('phase37-selection-workstream-run-mismatch', 'Phase 37 roster selection does not match the requested workstream_run.', [selection.workstream_run, input.requestedWorkstreamRun]);
+    }
+    if (input.selection.mode === 'new-run') {
+        const readback = parseCanonicalPreRunSelectionBytes(input.selection.selectionBytes);
+        if (!phase37SelectionsEqual(readback, selection)) {
+            fail('phase37-selection-readback-mismatch', 'Phase 37 roster selection bytes do not match the supplied selection.', [selection.selection_sha256]);
+        }
+        const fence = input.selection.launchFence;
+        let readbackBytes;
+        try {
+            readbackBytes = await readFile(fence.selection_path);
+        }
+        catch {
+            fail('phase37-selection-readback-mismatch', 'Phase 37 roster launch fence selection path is unavailable.', [fence.selection_path]);
+        }
+        if (!bytesEqual(readbackBytes, input.selection.selectionBytes)) {
+            fail('phase37-selection-readback-mismatch', 'Phase 37 roster launch fence selection path no longer matches the supplied bytes.', [fence.selection_path]);
+        }
+        if (fence.schema_version !== 'autopilot.run_selection_launch_fence.v1' ||
+            fence.repo_id !== selection.repo_id ||
+            fence.workstream_run !== selection.workstream_run ||
+            fence.selection_sha256 !== selection.selection_sha256 ||
+            fence.readback_verified !== true) {
+            fail('phase37-roster-launch-fence-invalid', 'Phase 37 roster launch fence does not authenticate the supplied selection.', [selection.selection_sha256]);
+        }
+    }
+    return selection;
+}
+function phase37SelectionsEqual(left, right) {
+    return left.schema_version === right.schema_version &&
+        left.repo_id === right.repo_id &&
+        left.workstream_run === right.workstream_run &&
+        left.scope === right.scope &&
+        left.roster_id === right.roster_id &&
+        left.roster_revision === right.roster_revision &&
+        left.roster_sha256 === right.roster_sha256 &&
+        left.assignment_set_sha256 === right.assignment_set_sha256 &&
+        left.config_sha256 === right.config_sha256 &&
+        left.selected_at === right.selected_at &&
+        left.selection_sha256 === right.selection_sha256;
 }
 export function resolveAutopilotStateRoot(env = process.env) {
     const override = env[AUTOPILOT_STATE_ROOT_ENV];
@@ -89,6 +145,13 @@ export async function prepareAutopilotWorkstream(input) {
     const env = input.env ?? process.env;
     const now = input.now ?? new Date();
     const repo = resolveRepoIdentity(input.sourceCwd);
+    const phase37Selection = await verifyPhase37RosterPrepareSelection({
+        selection: input.phase37RosterSelection,
+        required: input.phase37RosterRequired === true,
+        requestedWorkstreamRun: input.workstreamRun,
+        repoKey: repo.repoKey,
+    });
+    const requestedWorkstreamRun = input.workstreamRun ?? phase37Selection?.workstream_run ?? null;
     const coordinationRoot = coordinationRootForRepo(repo.repoKey, env);
     const worktreeRoot = worktreeRootForRepo(repo.repoKey, env);
     const cutover = coordinationCutoverCommitted(resolveAutopilotStateRoot(env), repo.repoKey);
@@ -131,6 +194,9 @@ export async function prepareAutopilotWorkstream(input) {
             const row = matching[0];
             if (row === undefined)
                 fail('internal-missing-active-row', 'matched active row disappeared.');
+            if (requestedWorkstreamRun !== null && row.workstream_run !== requestedWorkstreamRun) {
+                fail('phase37-selection-workstream-run-mismatch', 'Phase 37 roster selection does not match the active workstream_run.', [requestedWorkstreamRun, row.workstream_run]);
+            }
             const resumed = reactivateActiveRow(row, repo, now);
             const nextRows = activeRows.map((candidate) => candidate.autopilot_id === row.autopilot_id ? resumed : candidate);
             if (!cutover)
@@ -143,8 +209,11 @@ export async function prepareAutopilotWorkstream(input) {
                 if (missing.length > 0) {
                     if (cutover && input.coordinationSessionId !== undefined) {
                         const recovered = await recoverCoordinatorBootstrapWorkstream({ workstream: input.workstream, repo, coordinationRoot, worktreeRoot, activeRows: activeRows.filter((candidate) => candidate.workstream_run !== row.workstream_run), now, env, coordinationSessionId: input.coordinationSessionId });
-                        if (recovered !== null)
+                        if (recovered !== null) {
+                            if (requestedWorkstreamRun !== null && recovered.active.workstream_run !== requestedWorkstreamRun)
+                                fail('phase37-selection-workstream-run-mismatch', 'Recovered Phase 37 bootstrap run does not match roster selection.', [requestedWorkstreamRun, recovered.active.workstream_run]);
                             return recovered;
+                        }
                     }
                     fail('bootstrap-finalization-incomplete', 'bootstrap residue cannot be cleared until every main worktree metadata postcondition exists.', missing);
                 }
@@ -166,8 +235,11 @@ export async function prepareAutopilotWorkstream(input) {
                 workstream: input.workstream, repo, coordinationRoot, worktreeRoot, activeRows, now, env,
                 coordinationSessionId: input.coordinationSessionId,
             });
-            if (recovered !== null)
+            if (recovered !== null) {
+                if (requestedWorkstreamRun !== null && recovered.active.workstream_run !== requestedWorkstreamRun)
+                    fail('phase37-selection-workstream-run-mismatch', 'Recovered Phase 37 bootstrap run does not match roster selection.', [requestedWorkstreamRun, recovered.active.workstream_run]);
                 return recovered;
+            }
         }
         const created = await createNewWorkstream({
             workstream: input.workstream,
@@ -177,6 +249,7 @@ export async function prepareAutopilotWorkstream(input) {
             activeRows,
             now,
             env,
+            ...(requestedWorkstreamRun === null ? {} : { workstreamRun: requestedWorkstreamRun }),
             ...(input.coordinationSessionId === undefined ? {} : { coordinationSessionId: input.coordinationSessionId }),
         });
         return created;
@@ -940,7 +1013,9 @@ async function recoverCoordinatorBootstrapWorkstream(input) {
 }
 async function createNewWorkstream(input) {
     const startedAt = input.now.toISOString();
-    const workstreamRun = buildWorkstreamRun(input.workstream, input.now);
+    const workstreamRun = input.workstreamRun ?? buildAutopilotWorkstreamRun(input.workstream, input.now);
+    if (!isValidWorkstreamRun(workstreamRun))
+        fail('invalid-workstream-run', `Invalid Autopilot workstream_run: ${workstreamRun}`);
     const autopilotId = `ap-${workstreamRun}`;
     const branch = `autopilot/${workstreamRun}`;
     const taskRoot = join(input.worktreeRoot, 'active', workstreamRun);
@@ -1703,10 +1778,6 @@ export async function appendJsonl(path, value) {
     }
     await enforcePrivateAuthorityPath(path, false);
     await fsyncRuntimeDirectory(dirname(path));
-}
-function buildWorkstreamRun(workstream, now) {
-    const timestamp = now.toISOString().replace(/[-:]/gu, '').replace(/\.\d{3}Z$/u, 'Z');
-    return `${workstream}-${timestamp}-${randomBytes(3).toString('hex')}`;
 }
 function buildReceiptId(kind) {
     return `${kind}-${new Date().toISOString().replace(/[-:.]/gu, '')}-${randomBytes(4).toString('hex')}`;
