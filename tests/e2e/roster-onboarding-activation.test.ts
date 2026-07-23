@@ -11,6 +11,7 @@ import autopilotExtension, { type AutopilotRosterActivationResolution, type Auto
 import { AUTOPILOT_COMMAND, AUTOPILOT_INJECT_COMMAND } from '../../src/core/names.ts';
 import { AUTOPILOT_STATE_ROOT_ENV, type PreparedAutopilotWorkstream } from '../../src/core/parallel-runtime.ts';
 import { parseAutopilotRosterContract } from '../../src/core/roster/contracts.ts';
+import { createAutopilotRosterSetupTool } from '../../src/core/roster/setup-tool.ts';
 import { canonicalSha256, rosterDiagnostic } from '../../src/core/roster/route-policies.ts';
 
 const SETUP_TOOL_NAME = 'autopilot_manage_rosters';
@@ -21,6 +22,33 @@ const CONFIG_SHA = 'sha256:1d8a144806f7bd3df23724eb702223c7180b4d160cb09fc8cff5c
 const SELECTION_SHA = 'sha256:96c3625fddc6d43145ca5c6dece482e97fba78ad01c333e6aa3382fbe40d1878' as const;
 
 type RegisteredHandler = ExtensionToolCallHandler | ExtensionLifecycleHandler | ExtensionResourcesDiscoverHandler | ExtensionInputHandler;
+type SetupToolDetails = Awaited<ReturnType<AutopilotRosterSetupToolBundle['tool']['execute']>>['details'];
+
+function checkedSetupToolDetails(value: unknown): SetupToolDetails {
+  if (!isSetupToolDetails(value)) throw new Error('setup tool details failed the runtime result boundary');
+  return value;
+}
+
+function isSetupToolDetails(value: unknown): value is SetupToolDetails {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const record = value as Readonly<Record<string, unknown>>;
+  const receipt = record['receipt'];
+  return record['schema_version'] === 'autopilot.roster_tool_result.v1' && record['candidate_set'] === null &&
+    typeof record['action'] === 'string' && typeof record['ok'] === 'boolean' && typeof record['status'] === 'string' &&
+    Array.isArray(record['diagnostics']) && Number.isInteger(record['write_count']) && Number.isInteger(record['lock_count']) &&
+    Array.isArray(record['files_touched']) && isSha256(record['result_sha256']) &&
+    (receipt === null || isSetupReceipt(receipt));
+}
+
+function isSetupReceipt(value: unknown): boolean {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const receipt = value as Readonly<Record<string, unknown>>;
+  return receipt['schema_version'] === 'autopilot.roster_setup_receipt.v1' && isSha256(receipt['receipt_sha256']);
+}
+
+function isSha256(value: unknown): value is `sha256:${string}` {
+  return typeof value === 'string' && /^sha256:[0-9a-f]{64}$/u.test(value);
+}
 
 class FakePi implements ExtensionHostLike {
   readonly commands = new Map<string, ExtensionCommandDefinitionLike>();
@@ -116,7 +144,7 @@ function makeContext(pi: FakePi, cwd: string): ExtensionCommandContextLike {
   };
 }
 
-function setupSaveResult(originalCommand: string, replay: boolean): Record<string, unknown> {
+function setupSaveResult(originalCommand: string, replay: boolean): SetupToolDetails {
   const savedRef = { roster_id: ROSTER_ID, roster_revision: 1, roster_sha256: ROSTER_SHA, assignment_set_sha256: ASSIGNMENT_SHA, path: `~/.pi/agent/autopilot/rosters/${ROSTER_ID}/revision-1.json` };
   const receiptPreimage = {
     schema_version: 'autopilot.roster_setup_receipt.v1' as const,
@@ -136,46 +164,47 @@ function setupSaveResult(originalCommand: string, replay: boolean): Record<strin
   };
   const receipt = parseAutopilotRosterContract('autopilot.roster_setup_receipt.v1', { ...receiptPreimage, receipt_sha256: canonicalSha256(receiptPreimage) });
   const preimage = { schema_version: 'autopilot.roster_tool_result.v1' as const, action: 'save' as const, ok: true, status: 'saved' as const, candidate_set: null, receipt, diagnostics: [], write_count: replay ? 0 : 2, lock_count: 1, files_touched: replay ? [] : ['/state/config.json'] };
-  return parseAutopilotRosterContract('autopilot.roster_tool_result.v1', { ...preimage, result_sha256: canonicalSha256(preimage) }) as unknown as Record<string, unknown>;
+  return checkedSetupToolDetails(parseAutopilotRosterContract('autopilot.roster_tool_result.v1', { ...preimage, result_sha256: canonicalSha256(preimage) }));
 }
 
-function blockedSaveResult(): Record<string, unknown> {
+function blockedSaveResult(): SetupToolDetails {
   const preimage = { schema_version: 'autopilot.roster_tool_result.v1' as const, action: 'save' as const, ok: false, status: 'blocked' as const, candidate_set: null, receipt: null, diagnostics: [rosterDiagnostic('ROSTER_STORAGE_TRUST_REQUIRED')], write_count: 0, lock_count: 0, files_touched: [] };
-  return parseAutopilotRosterContract('autopilot.roster_tool_result.v1', { ...preimage, result_sha256: canonicalSha256(preimage) }) as unknown as Record<string, unknown>;
+  return checkedSetupToolDetails(parseAutopilotRosterContract('autopilot.roster_tool_result.v1', { ...preimage, result_sha256: canonicalSha256(preimage) }));
 }
 
 function fakeSetupBundle(mode: 'saved' | 'replay' | 'blocked'): AutopilotRosterSetupToolBundle {
   const token = 'setup:e2e-restart-fence-0000000000000000000000';
   let active = false;
   let approved = false;
-  return {
-    controller: {
-      activate: () => { active = true; approved = false; return { ok: true, active: true, activation_token: token, session_id: 'e2e-session', reason: 'activated' }; },
-      deactivate: (inputToken: string) => { if (!active || inputToken !== token) return false; active = false; approved = false; return true; },
-      isActive: () => active,
-      currentActivationToken: () => active ? token : null,
+  const base = createAutopilotRosterSetupTool();
+  const controller: AutopilotRosterSetupToolBundle['controller'] = {
+    activate: () => { active = true; approved = false; return { ok: true, active: true, activation_token: token, session_id: 'e2e-session', reason: 'activated' }; },
+    deactivate: (inputToken: string) => { if (!active || inputToken !== token) return false; active = false; approved = false; return true; },
+    isActive: () => active,
+    currentActivationToken: () => active ? token : null,
+  };
+  const hostAuthorization: AutopilotRosterSetupToolBundle['hostAuthorization'] = {
+    currentApprovalPresentation: () => active && !approved ? ({ schema_version: 'autopilot.roster_tool_request.v1', activation_token: token, scope: 'user', candidate_set_sha256: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', approved_roster_sha256s: [ROSTER_SHA], default_roster_id: ROSTER_ID, default_roster_revision: 1, default_roster_sha256: ROSTER_SHA, original_command: '/autopilot demo e2e saved', presentation_sha256: 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', presentation_text: 'approve' }) : null,
+    authorizeInput: (input) => {
+      if (!active) return { ok: false, approval_token: null, reason: 'inactive' };
+      if (input.activation_token !== token) return { ok: false, approval_token: null, reason: 'bad-activation-token' };
+      if (input.source !== 'user' || input.text.length === 0) return { ok: false, approval_token: null, reason: 'source-not-user' };
+      approved = true;
+      return { ok: true, approval_token: 'approval:e2e-restart-fence-000000000000000000', reason: 'approved' };
     },
-    hostAuthorization: {
-      currentApprovalPresentation: () => active && !approved ? ({ schema_version: 'autopilot.roster_tool_request.v1', activation_token: token, scope: 'user', candidate_set_sha256: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', approved_roster_sha256s: [ROSTER_SHA], default_roster_id: ROSTER_ID, default_roster_revision: 1, default_roster_sha256: ROSTER_SHA, original_command: '/autopilot demo e2e saved', presentation_sha256: 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', presentation_text: 'approve' }) : null,
-      authorizeInput: (input: { readonly activation_token: string; readonly source?: string; readonly text?: string }) => { if (!active || input.activation_token !== token || input.source !== 'user' || (input.text ?? '').length === 0) return { ok: false, approval_token: null, reason: 'blocked' }; approved = true; return { ok: true, approval_token: 'approval:e2e-restart-fence-000000000000000000', reason: 'approved' }; },
+  };
+  const tool: AutopilotRosterSetupToolBundle['tool'] = {
+    ...base.tool,
+    async execute(_id, params) {
+      const request = typeof params === 'object' && params !== null ? params as Record<string, unknown> : Object.create(null);
+      const originalCommand = typeof request['original_command'] === 'string' ? request['original_command'] : '/autopilot demo e2e saved';
+      const details = active && approved && request['action'] === 'save'
+        ? mode === 'blocked' ? blockedSaveResult() : setupSaveResult(originalCommand, mode === 'replay')
+        : blockedSaveResult();
+      return { content: [{ type: 'text' as const, text: JSON.stringify(details) }], details };
     },
-    tool: {
-      name: SETUP_TOOL_NAME,
-      label: 'Autopilot Roster Setup',
-      description: 'e2e setup seam',
-      promptSnippet: 'e2e',
-      promptGuidelines: [],
-      parameters: {},
-      async execute(_id: string, params: unknown) {
-        const request = typeof params === 'object' && params !== null ? params as Record<string, unknown> : {};
-        const originalCommand = typeof request['original_command'] === 'string' ? request['original_command'] : '/autopilot demo e2e saved';
-        const details = active && approved && request['action'] === 'save'
-          ? mode === 'blocked' ? blockedSaveResult() : setupSaveResult(originalCommand, mode === 'replay')
-          : blockedSaveResult();
-        return { content: [{ type: 'text' as const, text: JSON.stringify(details) }], details };
-      },
-    },
-  } as unknown as AutopilotRosterSetupToolBundle;
+  };
+  return { controller, hostAuthorization, tool };
 }
 
 function setupSaveRequest(): Record<string, unknown> {

@@ -155,23 +155,28 @@ void describe('Phase 37 W1 provider recipes and candidates', () => {
   });
 
   void it('deep-freezes exported recipe, seed roster, and candidate authority', () => {
+    const recipe = PROVIDER_RECIPES[1];
+    const role = recipe?.profile_templates[0]?.role_templates[0];
+    const candidate = SEED_CANDIDATES[0];
+    const assignment = SEED_ROSTERS[0]?.assignments[0];
+    if (recipe === undefined || role === undefined || candidate === undefined || assignment === undefined) throw new Error('missing frozen roster seed fixture');
     assert.throws(() => {
-      (PROVIDER_RECIPES[1]?.profile_templates as unknown as unknown[]).push({});
+      Reflect.apply(Array.prototype.push, recipe.profile_templates, [{}]);
     }, TypeError);
     assert.throws(() => {
-      (PROVIDER_RECIPES[1]?.profile_templates[0]?.role_templates[0] as unknown as Record<string, unknown>)['model_id'] = 'forged-model';
+      Object.defineProperty(role, 'model_id', { value: 'forged-model' });
     }, TypeError);
     assert.throws(() => {
-      (SEED_CANDIDATES[0]?.diagnostic_codes as unknown as string[]).push('ROSTER_ROUTE_FORBIDDEN');
+      Reflect.apply(Array.prototype.push, candidate.diagnostic_codes, ['ROSTER_ROUTE_FORBIDDEN']);
     }, TypeError);
     assert.throws(() => {
-      (SEED_ROSTERS[0]?.assignments[0]?.input_modalities as unknown as string[]).push('audio');
+      Reflect.apply(Array.prototype.push, assignment.input_modalities, ['audio']);
     }, TypeError);
     assert.throws(() => {
-      (PROVIDER_RECIPE_REGISTRY.recipes as unknown as unknown[]).push({});
+      Reflect.apply(Array.prototype.push, PROVIDER_RECIPE_REGISTRY.recipes, [{}]);
     }, TypeError);
     assert.throws(() => {
-      (SEED_CANDIDATE_REGISTRY.candidates as unknown as unknown[]).push({});
+      Reflect.apply(Array.prototype.push, SEED_CANDIDATE_REGISTRY.candidates, [{}]);
     }, TypeError);
     assert.deepEqual(verifyProviderRecipeSeeds(), []);
     assert.deepEqual(verifySeedCandidateRegistry(), []);

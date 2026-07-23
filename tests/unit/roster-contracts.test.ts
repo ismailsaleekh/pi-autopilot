@@ -61,19 +61,19 @@ void describe('Phase 37 roster contract parsers', () => {
     assert.equal(Object.isFrozen(jsonRequired), true);
 
     assert.throws(() => {
-      (AUTOPILOT_ROSTER_SCHEMA_VERSION_VALUES as unknown as string[]).push('autopilot.forged.v1');
+      Reflect.apply(Array.prototype.push, AUTOPILOT_ROSTER_SCHEMA_VERSION_VALUES, ['autopilot.forged.v1']);
     }, TypeError);
     assert.throws(() => {
-      (definition.required as unknown as string[]).push('forged');
+      Reflect.apply(Array.prototype.push, definition.required, ['forged']);
     }, TypeError);
     assert.throws(() => {
-      (definition.fields as unknown as Record<string, unknown>)['forged'] = { type: 'string' };
+      Object.defineProperty(definition.fields, 'forged', { value: { type: 'string' } });
     }, TypeError);
     assert.throws(() => {
-      (jsonProperties as Record<string, unknown>)['forged'] = { type: 'string' };
+      Object.defineProperty(jsonProperties, 'forged', { value: { type: 'string' } });
     }, TypeError);
     assert.throws(() => {
-      (jsonRequired as unknown as string[]).push('forged');
+      Reflect.apply(Array.prototype.push, jsonRequired, ['forged']);
     }, TypeError);
   });
 

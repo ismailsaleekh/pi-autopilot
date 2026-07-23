@@ -100,7 +100,7 @@ void describe('agent runner roster v2 identity', () => {
         repoId: prepared.active.repo_key,
         workstreamRun: prepared.active.workstream_run,
         role: 'validate',
-        roster: customRoster as unknown as Readonly<Record<string, unknown>>,
+        roster: { ...customRoster },
       });
       const unitSpec = parseAutopilotUnitSpecV2(makeUnitSpecV2(prepared.mainWorktreePath, prepared.runtimeRoot, requestProfile, selection, assignment));
       const specPath = join(prepared.runtimeRoot, 'unit-specs', 'u01validate.validate.attempt-1.json');
@@ -307,7 +307,7 @@ async function installRosterAuthority(input: {
   await writeFile(rosterPath, `${canonicalRosterJson(roster)}\n`, { encoding: 'utf8', mode: 0o600 });
   await chmod(rosterPath, 0o600);
   return {
-    selection: canonicalSelection.selection as unknown as Readonly<Record<string, unknown>>,
+    selection: { ...canonicalSelection.selection },
     roster,
     assignment,
     requestProfile: requestProfileFromAssignment(assignment),
@@ -335,7 +335,7 @@ async function installUntrustedW4TargetRoster(input: { readonly stateRoot: strin
   await chmod(rosterPath, 0o600);
   const assignment = roster.assignments.find((entry) => entry.role === 'validate');
   if (assignment === undefined) throw new Error('missing target validate assignment');
-  return { roster, ref, assignment: assignment as unknown as Readonly<Record<string, unknown>> & { readonly assignment_sha256: string }, requestProfile: requestProfileFromAssignment(assignment) };
+  return { roster, ref, assignment: { ...assignment }, requestProfile: requestProfileFromAssignment(assignment) };
 }
 
 async function initGitSource(source: string): Promise<void> {

@@ -244,7 +244,7 @@ void describe('Phase 37 W1 roster resolution', () => {
     for (const { field, expectedCode, nullMeansMissing } of factCases) {
       const omitted = { ...validReceiptRequest() } as Record<string, unknown>;
       delete omitted[field];
-      const omittedResult = validateReceipt(omitted as unknown as ReceiptValidationRequest);
+      const omittedResult: ReturnType<typeof validateReceipt> = Reflect.apply(validateReceipt, undefined, [omitted]);
       assert.equal(omittedResult.ok, false, `${String(field)} omitted must fail`);
       assert.equal(omittedResult.status, 'failed', `${String(field)} omitted must fail`);
       assert.ok(
@@ -255,7 +255,7 @@ void describe('Phase 37 W1 roster resolution', () => {
       if (!nullMeansMissing) {
         continue;
       }
-      const nullResult = validateReceipt({ ...validReceiptRequest(), [field]: null } as unknown as ReceiptValidationRequest);
+      const nullResult: ReturnType<typeof validateReceipt> = Reflect.apply(validateReceipt, undefined, [{ ...validReceiptRequest(), [field]: null }]);
       assert.equal(nullResult.ok, false, `${String(field)} null must fail`);
       assert.equal(nullResult.status, 'failed', `${String(field)} null must fail`);
       assert.ok(

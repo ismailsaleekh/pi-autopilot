@@ -27,6 +27,7 @@ import {
   buildCodexQualificationManifestCandidate,
   codexRoleRequirementsForProfile,
   type CodexQualificationEvidenceBundle,
+  type CodexRoleWitness,
 } from '../../src/core/roster/providers/codex.ts';
 import {
   computeAutopilotRosterContractObjectHash,
@@ -159,8 +160,23 @@ void describe('D69 W4 offline Codex provider pack', () => {
   });
 });
 
+function isCodexQualificationEvidenceBundle(value: unknown): value is CodexQualificationEvidenceBundle {
+  if (!isJsonRecord(value) || !isJsonRecord(value['auth']) || !Array.isArray(value['role_witnesses'])) return false;
+  return typeof value['evidence_source'] === 'string' && typeof value['profile_id'] === 'string' &&
+    typeof value['recipe_id'] === 'string' && Number.isInteger(value['recipe_revision']) &&
+    typeof value['route_policy_id'] === 'string' && Number.isInteger(value['route_policy_revision']) &&
+    typeof value['package_version'] === 'string' && typeof value['pi_version'] === 'string' &&
+    typeof value['issued_at'] === 'string' && typeof value['expires_at'] === 'string';
+}
+
+function isJsonRecord(value: unknown): value is Readonly<Record<string, unknown>> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
 function fixtureBundle(): CodexQualificationEvidenceBundle {
-  return cloneJson(objectAt(FIXTURE, 'qualification_input')) as unknown as CodexQualificationEvidenceBundle;
+  const value = cloneJson(objectAt(FIXTURE, 'qualification_input'));
+  if (!isCodexQualificationEvidenceBundle(value)) throw new Error('Codex qualification fixture has an invalid top-level shape');
+  return value;
 }
 
 function assertNegative(caseId: string, input: CodexQualificationEvidenceBundle, expectedIssue: string): void {
@@ -174,24 +190,23 @@ function assertNegative(caseId: string, input: CodexQualificationEvidenceBundle,
 
 function corruptObservedHash(input: CodexQualificationEvidenceBundle): CodexQualificationEvidenceBundle {
   const witness = mutableRoleWitness(input, 'implement');
-  const observed = mutableRecord(witness['observed_profile']);
+  const observed = mutableRecord(witness.observed_profile);
   observed['observed_profile_sha256'] = 'sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff';
-  witness['observed_profile'] = observed;
-  if (witness['receipt'] !== null) {
-    const receipt = mutableRecord(witness['receipt']);
+  Reflect.set(witness, 'observed_profile', observed);
+  if (witness.receipt !== null) {
+    const receipt = mutableRecord(witness.receipt);
     receipt['observed_profile'] = observed;
-    witness['receipt'] = receipt;
+    Reflect.set(witness, 'receipt', receipt);
   }
   return input;
 }
 
 function wrongAuth(input: CodexQualificationEvidenceBundle): CodexQualificationEvidenceBundle {
-  const mutable = input as unknown as { auth: Record<string, unknown> };
-  mutable.auth['provider_id'] = 'openrouter';
-  mutable.auth['auth_class'] = 'api-key';
-  mutable.auth['auth_source'] = 'environment';
-  mutable.auth['billing_route_class'] = 'gateway-forbidden';
-  mutable.auth['gateway_provider_id'] = 'openrouter';
+  Reflect.set(input.auth, 'provider_id', 'openrouter');
+  Reflect.set(input.auth, 'auth_class', 'api-key');
+  Reflect.set(input.auth, 'auth_source', 'environment');
+  Reflect.set(input.auth, 'billing_route_class', 'gateway-forbidden');
+  Reflect.set(input.auth, 'gateway_provider_id', 'openrouter');
   return input;
 }
 
@@ -205,25 +220,24 @@ function wrongCachePolicy(input: CodexQualificationEvidenceBundle): CodexQualifi
 
 function wrongExecutedModel(input: CodexQualificationEvidenceBundle): CodexQualificationEvidenceBundle {
   const witness = mutableRoleWitness(input, 'implement');
-  const observed = mutableRecord(witness['observed_profile']);
+  const observed = mutableRecord(witness.observed_profile);
   observed['executed_model_id'] = 'gpt-5.6-sol';
   observed['observed_profile_sha256'] = hashWithPlaceholder('autopilot.observed_profile.v1', observed, 'observed_profile_sha256');
-  witness['observed_profile'] = parseAutopilotRosterContract('autopilot.observed_profile.v1', observed);
-  const providerIdentity = mutableRecord(witness['provider_identity']);
+  Reflect.set(witness, 'observed_profile', parseAutopilotRosterContract('autopilot.observed_profile.v1', observed));
+  const providerIdentity = mutableRecord(witness.provider_identity);
   providerIdentity['executed_model_id'] = 'gpt-5.6-sol';
-  witness['provider_identity'] = providerIdentity;
-  if (witness['receipt'] !== null) {
-    const receipt = mutableRecord(witness['receipt']);
-    receipt['observed_profile'] = witness['observed_profile'];
+  Reflect.set(witness, 'provider_identity', providerIdentity);
+  if (witness.receipt !== null) {
+    const receipt = mutableRecord(witness.receipt);
+    receipt['observed_profile'] = witness.observed_profile;
     receipt['provider_identity'] = providerIdentity;
-    witness['receipt'] = receipt;
+    Reflect.set(witness, 'receipt', receipt);
   }
   return input;
 }
 
 function missingRole(input: CodexQualificationEvidenceBundle): CodexQualificationEvidenceBundle {
-  const mutable = input as unknown as { role_witnesses: unknown[] };
-  mutable.role_witnesses = mutable.role_witnesses.filter((entry) => objectAtValue(entry)['role'] !== 'validate');
+  Reflect.set(input, 'role_witnesses', input.role_witnesses.filter((entry) => entry.role !== 'validate'));
   return input;
 }
 
@@ -233,44 +247,43 @@ function mutateCoherentRequestObserved(
   patch: Record<string, unknown>,
 ): CodexQualificationEvidenceBundle {
   const witness = mutableRoleWitness(input, role);
-  const request = rehashRequestProfile({ ...mutableRecord(witness['request_profile']), ...patch });
+  const request = rehashRequestProfile({ ...mutableRecord(witness.request_profile), ...patch });
   const observedPatch: Record<string, unknown> = {};
   if (patch['service_tier'] !== undefined) observedPatch['service_tier'] = patch['service_tier'];
   if (patch['cache_policy'] !== undefined) observedPatch['cache_policy'] = patch['cache_policy'];
   const observed = rehashObservedProfile({
-    ...mutableRecord(witness['observed_profile']),
+    ...mutableRecord(witness.observed_profile),
     ...observedPatch,
     request_profile_sha256: request.request_profile_sha256,
   });
-  witness['request_profile'] = request;
-  witness['observed_profile'] = observed;
-  if (witness['unit_spec'] !== null) {
-    const unit = mutableRecord(witness['unit_spec']);
+  Reflect.set(witness, 'request_profile', request);
+  Reflect.set(witness, 'observed_profile', observed);
+  if (witness.unit_spec !== null) {
+    const unit = mutableRecord(witness.unit_spec);
     unit['request_profile'] = request;
     unit['model'] = request.model;
     unit['thinking'] = request.thinking;
-    witness['unit_spec'] = parseAutopilotUnitSpecV2(unit);
+    Reflect.set(witness, 'unit_spec', parseAutopilotUnitSpecV2(unit));
   }
-  if (witness['receipt'] !== null) {
-    const receipt = mutableRecord(witness['receipt']);
+  if (witness.receipt !== null) {
+    const receipt = mutableRecord(witness.receipt);
     receipt['request_profile'] = request;
     receipt['observed_profile'] = observed;
-    witness['receipt'] = parseAutopilotReceiptV2(receipt);
+    Reflect.set(witness, 'receipt', parseAutopilotReceiptV2(receipt));
   }
-  const context = mutableRecord(witness['context_boundary']);
+  const context = mutableRecord(witness.context_boundary);
   context['context_window'] = request.context_window;
   context['max_output_tokens'] = request.max_output_tokens;
-  witness['context_boundary'] = context;
-  const prompt = mutableRecord(witness['prompt_boundary']);
+  Reflect.set(witness, 'context_boundary', context);
+  const prompt = mutableRecord(witness.prompt_boundary);
   prompt['system_prompt_profile'] = request.system_prompt_profile;
   prompt['system_prompt_sha256'] = observed.system_prompt_sha256;
-  witness['prompt_boundary'] = prompt;
+  Reflect.set(witness, 'prompt_boundary', prompt);
   return input;
 }
 
-function mutableRoleWitness(input: CodexQualificationEvidenceBundle, role: RosterRole): Record<string, unknown> {
-  const witnesses = (input as unknown as { role_witnesses: Record<string, unknown>[] }).role_witnesses;
-  const witness = witnesses.find((entry) => entry['role'] === role);
+function mutableRoleWitness(input: CodexQualificationEvidenceBundle, role: RosterRole): CodexRoleWitness {
+  const witness = input.role_witnesses.find((entry) => entry.role === role);
   if (witness === undefined) throw new Error(`missing fixture witness ${role}`);
   return witness;
 }

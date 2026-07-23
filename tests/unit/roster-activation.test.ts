@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, it } from 'node:test';
 
 import autopilotExtension, {
@@ -30,7 +31,8 @@ import { canonicalSha256, rosterDiagnostic } from '../../src/core/roster/route-p
 import { formatAuthorityPath, resolveRosterScopePaths, rosterRevisionPath, type RosterSha256, type SavedRosterRef } from '../../src/core/roster/storage.ts';
 import { publishCreateOnlyAtomic, publishReplaceAtomic } from '../../src/core/roster/transaction.ts';
 import type { PreparedAutopilotWorkstream } from '../../src/core/parallel-runtime.ts';
-import type { VerifiedAutopilotRosterSetupSkillPackage } from '../../src/core/roster/skill-package.ts';
+import { verifyAutopilotRosterSetupSkillPackageRoot, type VerifiedAutopilotRosterSetupSkillPackage } from '../../src/core/roster/skill-package.ts';
+import { createAutopilotRosterSetupTool } from '../../src/core/roster/setup-tool.ts';
 
 const SETUP_TOOL_NAME = 'autopilot_manage_rosters';
 const ROSTER_ID = 'cruise-codex-subscription-bdb4f15f0ff9';
@@ -40,6 +42,33 @@ const CONFIG_SHA = 'sha256:1d8a144806f7bd3df23724eb702223c7180b4d160cb09fc8cff5c
 const SELECTION_SHA = 'sha256:96c3625fddc6d43145ca5c6dece482e97fba78ad01c333e6aa3382fbe40d1878' as const;
 
 type RegisteredHandler = ExtensionToolCallHandler | ExtensionLifecycleHandler | ExtensionResourcesDiscoverHandler | ExtensionInputHandler;
+type SetupToolDetails = Awaited<ReturnType<AutopilotRosterSetupToolBundle['tool']['execute']>>['details'];
+
+function checkedSetupToolDetails(value: unknown): SetupToolDetails {
+  if (!isSetupToolDetails(value)) throw new Error('setup tool details failed the runtime result boundary');
+  return value;
+}
+
+function isSetupToolDetails(value: unknown): value is SetupToolDetails {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const record = value as Readonly<Record<string, unknown>>;
+  const receipt = record['receipt'];
+  return record['schema_version'] === 'autopilot.roster_tool_result.v1' && record['candidate_set'] === null &&
+    typeof record['action'] === 'string' && typeof record['ok'] === 'boolean' && typeof record['status'] === 'string' &&
+    Array.isArray(record['diagnostics']) && Number.isInteger(record['write_count']) && Number.isInteger(record['lock_count']) &&
+    Array.isArray(record['files_touched']) && isSha256(record['result_sha256']) &&
+    (receipt === null || isSetupReceipt(receipt));
+}
+
+function isSetupReceipt(value: unknown): boolean {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const receipt = value as Readonly<Record<string, unknown>>;
+  return receipt['schema_version'] === 'autopilot.roster_setup_receipt.v1' && isSha256(receipt['receipt_sha256']);
+}
+
+function isSha256(value: unknown): value is `sha256:${string}` {
+  return typeof value === 'string' && /^sha256:[0-9a-f]{64}$/u.test(value);
+}
 
 class FakePi implements ExtensionHostLike {
   readonly commands = new Map<string, ExtensionCommandDefinitionLike>();
@@ -115,23 +144,7 @@ class FakePi implements ExtensionHostLike {
 }
 
 function fakePackage(): VerifiedAutopilotRosterSetupSkillPackage {
-  return {
-    packageRoot: '/pkg',
-    name: 'autopilot-roster-setup',
-    skillDirRelativePath: 'templates/skills/autopilot-roster-setup',
-    skillPath: '/pkg/templates/skills/autopilot-roster-setup/SKILL.md',
-    skillRelativePath: 'templates/skills/autopilot-roster-setup/SKILL.md',
-    skillSha256: 'sha256:1111111111111111111111111111111111111111111111111111111111111111',
-    skillByteCount: 10,
-    skillText: 'name: autopilot-roster-setup\nfresh Pi session\nRetry exactly the original command\nDo not auto-start Autopilot',
-    payloadPath: '/pkg/templates/skills/autopilot-roster-setup/payload.json',
-    payloadRelativePath: 'templates/skills/autopilot-roster-setup/payload.json',
-    payloadSha256: 'sha256:2222222222222222222222222222222222222222222222222222222222222222',
-    payloadByteCount: 10,
-    payloadText: '{}',
-    payload: {} as VerifiedAutopilotRosterSetupSkillPackage['payload'],
-    packageSkillEntry: './templates/skills/autopilot-roster-setup',
-  } as unknown as VerifiedAutopilotRosterSetupSkillPackage;
+  return verifyAutopilotRosterSetupSkillPackageRoot(fileURLToPath(new URL('../../', import.meta.url)));
 }
 
 function makeContext(events: string[]): ExtensionCommandContextLike {
@@ -323,7 +336,7 @@ function fakePrepared(): PreparedAutopilotWorkstream {
   } as PreparedAutopilotWorkstream;
 }
 
-function setupToolResult(originalCommand: string, status: 'saved' | 'replay' | 'blocked'): Record<string, unknown> {
+function setupToolResult(originalCommand: string, status: 'saved' | 'replay' | 'blocked'): SetupToolDetails {
   if (status === 'blocked') {
     const preimage = {
       schema_version: 'autopilot.roster_tool_result.v1' as const,
@@ -337,7 +350,7 @@ function setupToolResult(originalCommand: string, status: 'saved' | 'replay' | '
       lock_count: 0,
       files_touched: [],
     };
-    return { ...preimage, result_sha256: canonicalSha256(preimage) };
+    return checkedSetupToolDetails(parseAutopilotRosterContract('autopilot.roster_tool_result.v1', { ...preimage, result_sha256: canonicalSha256(preimage) }));
   }
   const savedRef = {
     roster_id: ROSTER_ID,
@@ -375,7 +388,7 @@ function setupToolResult(originalCommand: string, status: 'saved' | 'replay' | '
     lock_count: 1,
     files_touched: status === 'replay' ? [] : ['/state/rosters/default.json'],
   };
-  return parseAutopilotRosterContract('autopilot.roster_tool_result.v1', { ...preimage, result_sha256: canonicalSha256(preimage) }) as unknown as Record<string, unknown>;
+  return checkedSetupToolDetails(parseAutopilotRosterContract('autopilot.roster_tool_result.v1', { ...preimage, result_sha256: canonicalSha256(preimage) }));
 }
 
 function fakeSetupBundle(saveStatus: 'saved' | 'replay' | 'blocked'): AutopilotRosterSetupToolBundle {
@@ -383,7 +396,8 @@ function fakeSetupBundle(saveStatus: 'saved' | 'replay' | 'blocked'): AutopilotR
   const approvalToken = 'approval:restart-fence-00000000000000000000';
   let active = false;
   let approved = false;
-  const controller = {
+  const base = createAutopilotRosterSetupTool();
+  const controller: AutopilotRosterSetupToolBundle['controller'] = {
     activate: () => {
       active = true;
       approved = false;
@@ -398,7 +412,7 @@ function fakeSetupBundle(saveStatus: 'saved' | 'replay' | 'blocked'): AutopilotR
     isActive: () => active,
     currentActivationToken: () => active ? token : null,
   };
-  const hostAuthorization = {
+  const hostAuthorization: AutopilotRosterSetupToolBundle['hostAuthorization'] = {
     currentApprovalPresentation: () => active && !approved ? ({
       schema_version: 'autopilot.roster_tool_request.v1',
       activation_token: token,
@@ -412,22 +426,18 @@ function fakeSetupBundle(saveStatus: 'saved' | 'replay' | 'blocked'): AutopilotR
       presentation_sha256: 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
       presentation_text: 'approve restart fence save',
     }) : null,
-    authorizeInput: (input: { readonly activation_token: string; readonly source?: string; readonly text: string }) => {
-      if (!active || input.activation_token !== token) return { ok: false, approval_token: null, reason: 'inactive' };
+    authorizeInput: (input) => {
+      if (!active) return { ok: false, approval_token: null, reason: 'inactive' };
+      if (input.activation_token !== token) return { ok: false, approval_token: null, reason: 'bad-activation-token' };
       if (input.source !== 'user' || input.text.length === 0) return { ok: false, approval_token: null, reason: 'source-not-user' };
       approved = true;
       return { ok: true, approval_token: approvalToken, reason: 'approved' };
     },
   };
-  const tool = {
-    name: SETUP_TOOL_NAME,
-    label: 'Autopilot Roster Setup',
-    description: 'test setup tool',
-    promptSnippet: 'test',
-    promptGuidelines: [],
-    parameters: {},
-    async execute(_toolCallId: string, params: unknown) {
-      const request = typeof params === 'object' && params !== null ? params as Record<string, unknown> : {};
+  const tool: AutopilotRosterSetupToolBundle['tool'] = {
+    ...base.tool,
+    async execute(_toolCallId, params) {
+      const request = typeof params === 'object' && params !== null ? params as Record<string, unknown> : Object.create(null);
       const originalCommand = typeof request['original_command'] === 'string' ? request['original_command'] : '/autopilot demo first task';
       const details = active && approved && request['action'] === 'save'
         ? setupToolResult(originalCommand, saveStatus)
@@ -435,7 +445,7 @@ function fakeSetupBundle(saveStatus: 'saved' | 'replay' | 'blocked'): AutopilotR
       return { content: [{ type: 'text' as const, text: JSON.stringify(details) }], details };
     },
   };
-  return { tool, controller, hostAuthorization } as unknown as AutopilotRosterSetupToolBundle;
+  return { tool, controller, hostAuthorization };
 }
 
 function setupSaveRequest(): Record<string, unknown> {
@@ -478,9 +488,10 @@ void describe('D69 W2 roster activation', () => {
     const events: string[] = [];
     let prepareCalls = 0;
     const pi = new FakePi(events);
+    const skillPackage = fakePackage();
     autopilotExtension(pi, {
       rosterActivationStore: { resolve: async () => { events.push('resolve'); return setupRequiredResolution(); } },
-      resolveSetupSkillPackage: () => fakePackage(),
+      resolveSetupSkillPackage: () => skillPackage,
       prepareAutopilotWorkstream: async () => { prepareCalls += 1; return fakePrepared(); },
     });
 
@@ -497,7 +508,7 @@ void describe('D69 W2 roster activation', () => {
     assert.equal(pi.messages.length, 2);
     assert.match(pi.messages[0] ?? '', /\/skill:autopilot-roster-setup/);
     assert.match(pi.messages[0] ?? '', /Original command: \/autopilot demo first task/);
-    assert.match(pi.messages[0] ?? '', /sha256:1111111111111111111111111111111111111111111111111111111111111111/);
+    assert.equal((pi.messages[0] ?? '').includes(skillPackage.skillSha256), true);
     assert.match(pi.messages[0] ?? '', /fresh Pi session/);
   });
 

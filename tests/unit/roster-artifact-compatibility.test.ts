@@ -77,7 +77,7 @@ void describe('D69 W3 roster artifact compatibility lane', () => {
     const missing = cloneRecord(unitInput()) as Record<string, unknown>;
     delete missing['quality_profile'];
     assert.throws(
-      () => materializeNewRunUnitSpecV2(missing as unknown as AutopilotUnitSpecV2MaterializationInput),
+      () => Reflect.apply(materializeNewRunUnitSpecV2, undefined, [missing]),
       /quality_profile/u,
     );
   });
@@ -88,7 +88,7 @@ void describe('D69 W3 roster artifact compatibility lane', () => {
     profile['request_profile_sha256'] = 'sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff';
     badHash['request_profile'] = profile;
     assert.throws(
-      () => materializeNewRunUnitSpecV2(badHash as unknown as AutopilotUnitSpecV2MaterializationInput),
+      () => Reflect.apply(materializeNewRunUnitSpecV2, undefined, [badHash]),
       /request_profile_sha256 hash mismatch/u,
     );
 
@@ -98,7 +98,7 @@ void describe('D69 W3 roster artifact compatibility lane', () => {
     driftProfile['request_profile_sha256'] = requiredHash('autopilot.request_profile.v1', driftProfile);
     drift['request_profile'] = driftProfile;
     assert.throws(
-      () => materializeNewRunUnitSpecV2(drift as unknown as AutopilotUnitSpecV2MaterializationInput),
+      () => Reflect.apply(materializeNewRunUnitSpecV2, undefined, [drift]),
       /request_profile\.cache_policy/u,
     );
   });

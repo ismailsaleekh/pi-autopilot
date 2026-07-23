@@ -247,7 +247,7 @@ function parseJsonObject(text: string, path: string): JsonObject {
   assertNoDuplicateObjectKeys(text, path);
   const parsed: unknown = JSON.parse(text);
   if (!isJsonValue(parsed)) fail(`${path} is not a JSON value`);
-  return asObject(parsed, path);
+  return requireJsonObject(parsed, path);
 }
 
 function skipWhitespace(text: string, index: number): number {
@@ -412,13 +412,13 @@ function at(object: JsonObject, key: string, path: string): JsonValue {
   return value;
 }
 
-function asObject(value: JsonValue, path: string): JsonObject {
+function requireJsonObject(value: JsonValue, path: string): JsonObject {
   if (!isJsonObject(value)) fail(`${path} must be an object`);
   return value;
 }
 
 function objectAt(object: JsonObject, key: string, path: string): JsonObject {
-  return asObject(at(object, key, path), `${path}.${key}`);
+  return requireJsonObject(at(object, key, path), `${path}.${key}`);
 }
 
 function asArray(value: JsonValue, path: string): readonly JsonValue[] {
@@ -462,7 +462,7 @@ function stringsAt(object: JsonObject, key: string, path: string): readonly stri
 }
 
 function objectsAt(object: JsonObject, key: string, path: string): readonly JsonObject[] {
-  return asArray(at(object, key, path), `${path}.${key}`).map((value, index) => asObject(value, `${path}.${key}[${index}]`));
+  return asArray(at(object, key, path), `${path}.${key}`).map((value, index) => requireJsonObject(value, `${path}.${key}[${index}]`));
 }
 
 function exactKeys(object: JsonObject, expected: readonly string[], path: string): void {
@@ -501,7 +501,7 @@ function canonicalJson(value: JsonValue): string {
     return JSON.stringify(value);
   }
   if (Array.isArray(value)) return `[${value.map((entry) => canonicalJson(entry)).join(',')}]`;
-  const object = asObject(value, 'canonical JSON object');
+  const object = requireJsonObject(value, 'canonical JSON object');
   const keys = Object.keys(object).sort(compareStrings);
   return `{${keys
     .map((key) => {
@@ -614,7 +614,7 @@ function childRoleIndex(role: string): number {
 }
 
 function arrayItemIdentity(value: JsonValue, uniqueBy: string, path: string): string {
-  const object = asObject(value, path);
+  const object = requireJsonObject(value, path);
   if (uniqueBy === 'role') return stringAt(object, 'role', path);
   if (uniqueBy === 'profile_id') return stringAt(object, 'profile_id', path);
   if (uniqueBy === 'provider_id') return stringAt(object, 'provider_id', path);
@@ -633,7 +633,7 @@ function orderedArrayKey(value: JsonValue, orderedBy: string, path: string): str
     if (value === null) return '\0';
     return asString(value, path);
   }
-  const object = asObject(value, path);
+  const object = requireJsonObject(value, path);
   if (orderedBy === 'role_order') {
     const index = roleIndex(stringAt(object, 'role', path));
     if (index < 0) fail(`${path} has unknown role`);
@@ -674,7 +674,7 @@ function validateItemSpec(spec: JsonObject, value: JsonValue, path: string, refS
   if (type === 'object') {
     exactAllowedKeys(spec, ['type', 'required', 'nullable', 'ref', 'note'], path);
     if (spec['ref'] !== undefined) validateSchemaObject(value, stringAt(spec, 'ref', path), path, refStack);
-    else asObject(value, path);
+    else requireJsonObject(value, path);
     return;
   }
   fail(`${path} unsupported array item type ${type}`);
@@ -762,7 +762,7 @@ function validateFieldValue(spec: JsonObject, value: JsonValue, path: string, re
   if (type === 'object') {
     exactAllowedKeys(spec, ['type', 'required', 'nullable', 'ref', 'note'], path);
     if (spec['ref'] !== undefined) validateSchemaObject(value, stringAt(spec, 'ref', path), path, refStack);
-    else asObject(value, path);
+    else requireJsonObject(value, path);
     return;
   }
   fail(`${path} unsupported field type ${type}`);
@@ -771,7 +771,7 @@ function validateFieldValue(spec: JsonObject, value: JsonValue, path: string, re
 function validateSchemaObject(value: JsonValue, schemaName: string, path: string, refStack: readonly string[] = []): void {
   if (refStack.includes(schemaName)) fail(`${path} schema reference cycle: ${[...refStack, schemaName].join(' -> ')}`);
   const schema = objectAt(schemas, schemaName, 'definitions.schemas');
-  const object = asObject(value, path);
+  const object = requireJsonObject(value, path);
   const fieldOrder = stringsAt(schema, 'field_order', `definitions.schemas.${schemaName}`);
   const required = stringsAt(schema, 'required', `definitions.schemas.${schemaName}`);
   const optional = stringsAt(schema, 'optional', `definitions.schemas.${schemaName}`);
@@ -1437,7 +1437,7 @@ function assertSchemaHashIfPresent(object: JsonObject, schemaName: string, path:
 function diagnosticCodesAt(object: JsonObject, key: string, path: string): readonly string[] {
   return arrayAt(object, key, path).map((entry, index) => {
     if (typeof entry === 'string') return entry;
-    return stringAt(asObject(entry, `${path}.${key}[${index}]`), 'code', `${path}.${key}[${index}]`);
+    return stringAt(requireJsonObject(entry, `${path}.${key}[${index}]`), 'code', `${path}.${key}[${index}]`);
   });
 }
 

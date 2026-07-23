@@ -2,12 +2,12 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { existsSync, realpathSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { describe, it } from 'node:test';
 
-import type { AutopilotExecutionAudit, AutopilotExecutionCommit, AutopilotMasterPlan, AutopilotReceipt, AutopilotState, AutopilotStatusEntry } from '../../src/core/contracts/index.ts';
+import type { AutopilotExecutionAudit, AutopilotExecutionCommit, AutopilotMasterPlan, AutopilotReceipt, AutopilotState, AutopilotStatusEntry, AutopilotUnitSpec } from '../../src/core/contracts/index.ts';
 import { runAutopilotAgentFromSpecPath } from '../../src/core/agent-runner.ts';
 import { runAutopilotClaimGc } from '../../src/core/claim-gc.ts';
 import { materializeAdditionalReadPathsForSpec, materializeAutopilotSpecPaths } from '../../src/core/materialization.ts';
@@ -21,7 +21,13 @@ import { cleanupTerminalUnitWorktree, cleanupTerminalUnitWorktreesForRun } from 
 import { readS2RetentionProgressState, s2RetentionPressureStatePath, s2RetentionRunsPausedForWorktreeCreation } from '../../src/core/coordination/s2-retention-state-machine.ts';
 import { recordValidationStalenessForMerge, validationCanCloseSourceWork, type AutopilotValidationEvidence } from '../../src/core/validation-staleness.ts';
 import { computeAutopilotRosterContractObjectHash } from '../../src/core/roster/contracts.ts';
+import { canonicalRosterJson } from '../../src/core/roster/canonical.ts';
+import { buildCanonicalPreRunSelection, bytesEqual } from '../../src/core/roster/run-selection.ts';
+import { runtimeRosterSnapshotPath } from '../../src/core/roster/snapshot.ts';
+import { unitSpecAuthorityProjection } from '../../src/core/roster/runtime-consumers.ts';
 import { SEED_ROSTERS } from '../../src/core/roster/provider-recipes.ts';
+import { resolveRosterScopePaths, rosterRevisionPath } from '../../src/core/roster/storage.ts';
+import { readAuthorityFileIfPresent } from '../../src/core/roster/transaction.ts';
 import {
   materializeNewRunUnitSpecV2,
   requestProfileFromAssignment,
@@ -44,12 +50,12 @@ import {
   taskRootForActiveAutopilot,
   updateUnitBranchStatus,
   withAutopilotFileLock,
+  type PreparedAutopilotWorkstream,
 } from '../../src/core/parallel-runtime.ts';
 
-type LegacyRuntimeConsumerSpec = Parameters<typeof resolveActiveAutopilotForSpec>[0];
 
 async function withTempDir<T>(run: (root: string) => Promise<T>): Promise<T> {
-  const root = await mkdtemp(join(tmpdir(), 'autopilot-phase2-test-'));
+  const root = realpathSync(await mkdtemp(join(tmpdir(), 'autopilot-phase2-test-')));
   const originalStateRoot = process.env[AUTOPILOT_STATE_ROOT_ENV];
   process.env[AUTOPILOT_STATE_ROOT_ENV] = join(root, 'autopilot-state');
   try {
@@ -73,14 +79,20 @@ function emptyPlan(): NonNullable<AutopilotRosterUnitSpecV2['verification_plan']
   };
 }
 
-function unitSpec(input: {
+interface Phase2UnitSpecInput {
   readonly cwd: string;
   readonly runtimeRoot: string;
   readonly unitId: string;
   readonly attempt?: number;
   readonly ownedPaths?: readonly string[];
   readonly readOnlyPaths?: readonly string[];
-}): LegacyRuntimeConsumerSpec {
+}
+
+function unitSpec(input: Phase2UnitSpecInput): AutopilotUnitSpec {
+  return unitSpecAuthorityProjection(runtimeUnitSpec(input));
+}
+
+function runtimeUnitSpec(input: Phase2UnitSpecInput): AutopilotRosterUnitSpecV2 {
   const attempt = input.attempt ?? 1;
   return makeRuntimeUnitSpec({
     workstream: 'phase2-smoke',
@@ -108,11 +120,14 @@ function unitSpec(input: {
     upstream_refs: [],
     timeout_seconds: 600,
     render_prompt_snapshot: false,
-  }) as unknown as LegacyRuntimeConsumerSpec;
+  });
 }
 
-function makeRuntimeUnitSpec(overrides: Omit<AutopilotUnitSpecV2MaterializationInput, 'selection' | 'roster' | 'role' | 'request_profile'>): AutopilotRosterUnitSpecV2 {
-  const { selection, roster, requestProfile } = pinnedRuntimeFacts();
+function makeRuntimeUnitSpec(
+  overrides: Omit<AutopilotUnitSpecV2MaterializationInput, 'selection' | 'roster' | 'role' | 'request_profile'>,
+  facts: ReturnType<typeof pinnedRuntimeFacts> = pinnedRuntimeFacts(),
+): AutopilotRosterUnitSpecV2 {
+  const { selection, roster, requestProfile } = facts;
   return materializeNewRunUnitSpecV2({
     selection,
     roster,
@@ -149,6 +164,54 @@ function pinnedRuntimeFacts(): {
     selection_sha256: requiredRosterHash('autopilot.pre_run_selection.v1', selectionWithoutHash),
   };
   return { selection, roster, requestProfile: requestProfileFromAssignment(assignment) };
+}
+
+async function installPhase37RosterAuthority(prepared: PreparedAutopilotWorkstream): Promise<ReturnType<typeof pinnedRuntimeFacts>> {
+  const base = pinnedRuntimeFacts();
+  const stateRoot = process.env[AUTOPILOT_STATE_ROOT_ENV];
+  if (stateRoot === undefined) throw new Error('phase2 test state root is unavailable');
+  const publication = buildCanonicalPreRunSelection({
+    repo_id: prepared.repo.repoKey,
+    workstream_run: prepared.active.workstream_run,
+    selected: {
+      scope: base.selection.scope,
+      roster_id: base.selection.roster_id,
+      roster_revision: base.selection.roster_revision,
+      roster_sha256: requireSha256Digest(base.selection.roster_sha256),
+      assignment_set_sha256: requireSha256Digest(base.selection.assignment_set_sha256),
+      config_sha256: requireSha256Digest(base.selection.config_sha256),
+    },
+    stateRoot,
+    selected_at: base.selection.selected_at,
+  });
+  const selection: AutopilotRosterSelectionV1 = publication.selection;
+  const selectionBytes = publication.selection_bytes;
+  const scopePaths = resolveRosterScopePaths({ scope: 'user', stateRoot });
+  const externalPath = publication.selection_path;
+  const mirrorPath = runtimeRosterSnapshotPath({ mainWorktreeRoot: prepared.mainWorktreePath, workstream: prepared.active.workstream });
+  const savedRosterPath = rosterRevisionPath(scopePaths, base.roster);
+  for (const directory of [stateRoot, scopePaths.rostersRoot, dirname(savedRosterPath), scopePaths.selectionsRoot, dirname(externalPath), prepared.runtimeRoot]) {
+    await mkdir(directory, { recursive: true, mode: 0o700 });
+    await chmod(directory, 0o700);
+  }
+  await writeFile(externalPath, selectionBytes, { mode: 0o600 });
+  await writeFile(mirrorPath, selectionBytes, { mode: 0o600 });
+  await writeFile(savedRosterPath, `${canonicalRosterJson(base.roster)}\n`, { encoding: 'utf8', mode: 0o600 });
+  const externalRead = await readAuthorityFileIfPresent(externalPath, scopePaths.userStateRoot);
+  const mirrorRead = await readAuthorityFileIfPresent(mirrorPath, dirname(mirrorPath));
+  if (externalRead === null || mirrorRead === null || !bytesEqual(externalRead.bytes, mirrorRead.bytes)) {
+    throw new Error('phase2 roster authority fixture failed safe exact-byte readback');
+  }
+  return { ...base, selection };
+}
+
+function requireSha256Digest(value: string): `sha256:${string}` {
+  if (!isSha256Digest(value)) throw new Error(`invalid phase2 fixture digest: ${value}`);
+  return value;
+}
+
+function isSha256Digest(value: string): value is `sha256:${string}` {
+  return /^sha256:[0-9a-f]{64}$/u.test(value);
 }
 
 function requiredRosterHash(schemaVersion: Parameters<typeof computeAutopilotRosterContractObjectHash>[0], value: unknown): string {
@@ -237,7 +300,7 @@ void describe('Phase 2 scheduler config and deterministic scheduler', () => {
 
   void it('selects dependency-clear conflict-free units in lane order and records cap/skip reasons', async () => {
     const runtimeRoot = '/tmp/autopilot-phase2-main/.pi/autopilot/phase2-smoke';
-    const baseSpec = unitSpec({ cwd: process.cwd(), runtimeRoot, unitId: 'u01', ownedPaths: ['src/scheduler.ts'] });
+    const baseSpec = runtimeUnitSpec({ cwd: process.cwd(), runtimeRoot, unitId: 'u01', ownedPaths: ['src/scheduler.ts'] });
     const state: AutopilotState = {
       schema_version: 'autopilot.state.v1',
       workstream: 'phase2-smoke',
@@ -290,8 +353,8 @@ void describe('Phase 2 scheduler config and deterministic scheduler', () => {
       config: { schema_version: 'autopilot.scheduler_config.v1', workstream: 'phase2-smoke', parallel_cap: 1, updated_at: '2026-07-08T00:00:00.000Z', updated_by: 'runtime-test' },
       candidates: [
         { unit_id: 'u01', attempt: 1, spec: baseSpec, peer_claim_request_refs: ['claim-request-peer-u01'] },
-        { unit_id: 'u02', attempt: 1, spec: unitSpec({ cwd: process.cwd(), runtimeRoot, unitId: 'u02', ownedPaths: ['src/u02.ts'] }) },
-        { unit_id: 'u03', attempt: 1, spec: unitSpec({ cwd: process.cwd(), runtimeRoot, unitId: 'u03', ownedPaths: ['src/u03.ts'] }) },
+        { unit_id: 'u02', attempt: 1, spec: runtimeUnitSpec({ cwd: process.cwd(), runtimeRoot, unitId: 'u02', ownedPaths: ['src/u02.ts'] }) },
+        { unit_id: 'u03', attempt: 1, spec: runtimeUnitSpec({ cwd: process.cwd(), runtimeRoot, unitId: 'u03', ownedPaths: ['src/u03.ts'] }) },
       ],
       runningAttempts: [],
       activeClaims: [],
@@ -308,7 +371,7 @@ void describe('Phase 2 scheduler config and deterministic scheduler', () => {
 
   void it('honors durable S2 per-run disk pressure without blocking unrelated scheduler runs', async () => {
     const runtimeRoot = '/tmp/autopilot-phase2-main/.pi/autopilot/phase2-smoke';
-    const baseSpec = unitSpec({ cwd: process.cwd(), runtimeRoot, unitId: 'u-pressure', ownedPaths: ['src/pressure.ts'] });
+    const baseSpec = runtimeUnitSpec({ cwd: process.cwd(), runtimeRoot, unitId: 'u-pressure', ownedPaths: ['src/pressure.ts'] });
     const state: AutopilotState = { schema_version: 'autopilot.state.v1', workstream: 'phase2-smoke', updated_at: '2026-07-08T00:00:00.000Z', status: 'running', context_gate: { gate: 'ok', percent: 10 }, last_event_id: 0, ready_queue: ['u-pressure'], running: [], blocked: [], completed: [], units: { 'u-pressure': { unit_id: 'u-pressure', role: 'implement', state: 'ready', attempt: 1, summary: 'ready' } }, operator_questions: [], next_actions: [] };
     const masterPlan: AutopilotMasterPlan = { schema_version: 'autopilot.master_plan.v1', workstream: 'phase2-smoke', mission_ref: 'mission.md', goal_summary: 'phase2', non_goals: [], definition_of_done: [], risk_level: 'medium', lanes: [{ lane_id: 'lane-a', summary: 'lane', unit_ids: ['u-pressure'] }], units: { 'u-pressure': { unit_id: 'u-pressure', role: 'implement', state: 'ready', dependencies: [], summary: 'pressure' } }, ownership_matrix: { owned_paths: [], read_only_paths: [], untouchable_paths: [], held_paths: [] }, verification_matrix: emptyPlan(), closure_criteria: [], current_focus: 'dispatch', last_decision_id: 0, last_event_id: 0, updated_at: '2026-07-08T00:00:00.000Z' };
     const common = { workstream: 'phase2-smoke', runtimeRoot, contextGate: 'ok' as const, state, masterPlan, config: { schema_version: 'autopilot.scheduler_config.v1' as const, workstream: 'phase2-smoke', parallel_cap: 1, updated_at: '2026-07-08T00:00:00.000Z', updated_by: 'runtime-test' as const }, candidates: [{ unit_id: 'u-pressure', attempt: 1, spec: baseSpec }], runningAttempts: [], activeClaims: [], reservationCoordination: null, now: new Date('2026-07-08T00:00:00.000Z') };
@@ -415,12 +478,13 @@ void describe('Phase 2 unit worktrees, claims, mergeback, staleness, and GC', ()
       assert.equal(existsSync(join(prepared.taskRoot, '_checkout-profile.json')), true);
 
       const unitCwd = join(prepared.taskRoot, 'units', 'u-sparse', 'attempt-1', 'worktree');
-      const sparseSpec = unitSpec({ cwd: unitCwd, runtimeRoot: prepared.runtimeRoot, unitId: 'u-sparse', ownedPaths: ['src/new-file.ts'], readOnlyPaths: ['src/baseline.ts'] });
-      const specWithContext = { ...sparseSpec, context_refs: [{ path: 'docs/context.md', purpose: 'source context', sha256: null, byte_count: null }] } as unknown as LegacyRuntimeConsumerSpec;
-      const unit = await prepareAutopilotUnitWorktree({ active: prepared.active, unitId: 'u-sparse', attempt: 1, unitSpec: specWithContext });
-      const context = await resolveActiveAutopilotForSpec(specWithContext);
-      await acquireClaimsForUnit({ context, spec: specWithContext, reason: 'sparse materialization test' });
-      await materializeAutopilotSpecPaths({ context, spec: specWithContext, reason: 'sparse materialization test' });
+      const runtimeSpec = runtimeUnitSpec({ cwd: unitCwd, runtimeRoot: prepared.runtimeRoot, unitId: 'u-sparse', ownedPaths: ['src/new-file.ts'], readOnlyPaths: ['src/baseline.ts'] });
+      const runtimeSpecWithContext: AutopilotRosterUnitSpecV2 = { ...runtimeSpec, context_refs: [{ path: 'docs/context.md', purpose: 'source context', sha256: null, byte_count: null }] };
+      const authoritySpec = unitSpecAuthorityProjection(runtimeSpecWithContext);
+      const unit = await prepareAutopilotUnitWorktree({ active: prepared.active, unitId: 'u-sparse', attempt: 1, unitSpec: authoritySpec });
+      const context = await resolveActiveAutopilotForSpec(authoritySpec);
+      await acquireClaimsForUnit({ context, spec: authoritySpec, reason: 'sparse materialization test' });
+      await materializeAutopilotSpecPaths({ context, spec: runtimeSpecWithContext, reason: 'sparse materialization test' });
       assert.equal(existsSync(join(unit.unitInfo.worktree_path, 'src', 'baseline.ts')), true);
       assert.equal(existsSync(join(unit.unitInfo.worktree_path, 'docs', 'context.md')), true);
       assert.equal(existsSync(join(unit.unitInfo.worktree_path, 'heavy', 'blob.bin')), false);
@@ -441,7 +505,7 @@ void describe('Phase 2 unit worktrees, claims, mergeback, staleness, and GC', ()
       assert.equal(gitOut(partial.unitInfo.worktree_path, ['config', '--bool', 'core.sparseCheckout']), 'true');
       assert.equal(gitOut(partial.unitInfo.worktree_path, ['rev-parse', '--abbrev-ref', 'HEAD']), partialBranch);
 
-      const expanded = await materializeAdditionalReadPathsForSpec({ context, spec: specWithContext, paths: ['heavy/blob.bin'], reason: 'safe auto read expansion test' });
+      const expanded = await materializeAdditionalReadPathsForSpec({ context, spec: runtimeSpecWithContext, paths: ['heavy/blob.bin'], reason: 'safe auto read expansion test' });
       assert.equal(expanded.checkout_mode, 'sparse');
       assert.equal(existsSync(join(unit.unitInfo.worktree_path, 'heavy', 'blob.bin')), true);
     });
@@ -634,8 +698,15 @@ void describe('Phase 2 unit worktrees, claims, mergeback, staleness, and GC', ()
       const source = join(root, 'source');
       await initGitSource(source);
       const prepared = await prepareAutopilotWorkstream({ workstream: 'phase2-smoke', sourceCwd: source });
+      const facts = await installPhase37RosterAuthority(prepared);
       const unitCwd = join(prepared.taskRoot, 'units', 'u-rollback', 'attempt-1', 'worktree');
-      const baseSpec = unitSpec({ cwd: unitCwd, runtimeRoot: prepared.runtimeRoot, unitId: 'u-rollback', ownedPaths: ['src/rollback.ts'] });
+      const baseSpec = makeRuntimeUnitSpec({
+        workstream: 'phase2-smoke', unit_id: 'u-rollback', attempt: 1, objective: 'Exercise preflight rollback.', cwd: unitCwd,
+        owned_paths: ['src/rollback.ts'], read_only_paths: [], untouchable_paths: ['private/**'], context_refs: [], validation_commands: [],
+        status_output: join(prepared.runtimeRoot, 'statuses', 'u-rollback.implement.attempt-1.json'), receipt_output: join(prepared.runtimeRoot, 'receipts', 'u-rollback.implement.attempt-1.receipt.json'),
+        evidence_dir: join(prepared.runtimeRoot, 'evidence', 'u-rollback'), stop_boundary: 'Fail before launch.', quality_profile: 'source-change', risk_level: 'medium',
+        acceptance_criteria: ['rollback is complete'], verification_plan: emptyPlan(), closure_criteria: ['no worktree remains'], upstream_refs: [], timeout_seconds: 600, render_prompt_snapshot: false,
+      }, facts);
       const spec = {
         ...baseSpec,
         verification_plan: {

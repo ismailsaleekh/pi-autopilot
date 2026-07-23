@@ -78,7 +78,7 @@ void describe('W5 custom roster certification', () => {
     assert.deepEqual(codes(unknownRequestField), ['ROSTER_CUSTOM_REQUEST_SCHEMA_INVALID']);
 
     const unknownRosterField = validateCustomRosterSetupRequest({
-      request: customRequest({ ...(roster as unknown as Record<string, unknown>), surprise: true }),
+      request: customRequest(Object.assign({}, roster, { surprise: true })),
       inventory,
       now: CUSTOM_NOW,
     });

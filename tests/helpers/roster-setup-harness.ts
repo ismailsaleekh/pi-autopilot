@@ -732,7 +732,6 @@ export type RosterSetupReceipt = AutopilotRosterSetupReceipt;
 
 type ReceiptEmission = ReturnType<ReturnType<typeof createRosterSetupReceiptFactory>>;
 
-type RosterContractObject = Readonly<Record<string, unknown>>;
 
 export interface ApprovalFields {
   readonly scope: RosterStorageScope;
@@ -1408,8 +1407,26 @@ export function isRpcSuccess(response: FakeJsonRpcResponse): response is FakeJso
 export function rpcToolResult(response: FakeJsonRpcResponse): RosterToolResult {
   if (!isRpcSuccess(response) || !isJsonMap(response.result)) throw new Error(`expected successful tool response: ${JSON.stringify(response)}`);
   const details = response.result['details'];
-  if (!isJsonMap(details)) throw new Error('successful tool response is missing details');
-  return details as unknown as RosterToolResult;
+  if (!isJsonMap(details)) throw new Error('successful tool response is missing roster result details');
+  const schemaVersion = details['schema_version'];
+  const validated = schemaVersion === 'autopilot.roster_tool_result.v1'
+    ? parseAutopilotRosterContract(schemaVersion, details)
+    : details;
+  if (!isRosterToolResult(validated)) throw new Error(`successful tool response has invalid roster result schema: ${String(schemaVersion)}`);
+  return validated;
+}
+
+function isRosterToolResult(value: unknown): value is RosterToolResult {
+  if (!isJsonMap(value)) return false;
+  const schema = value['schema_version'];
+  return (schema === 'autopilot.roster_tool_result.v1' || schema === 'autopilot.roster_tool_result.v2') &&
+    typeof value['action'] === 'string' && typeof value['ok'] === 'boolean' && typeof value['status'] === 'string' &&
+    typeof value['write_count'] === 'number' && typeof value['lock_count'] === 'number' &&
+    Array.isArray(value['diagnostics']) && Array.isArray(value['files_touched']) && isDigest(value['result_sha256']);
+}
+
+function isDigest(value: unknown): value is `sha256:${string}` {
+  return typeof value === 'string' && /^sha256:[0-9a-f]{64}$/u.test(value);
 }
 
 export function rpcListedTools(response: FakeJsonRpcResponse): readonly JsonMap[] {
@@ -1562,7 +1579,7 @@ function rosterBytesForCandidate(candidate: RosterCandidate): Uint8Array {
   const roster = seedRosterByCandidate(candidate);
   if (roster === null) throw new Error(`missing seed roster for candidate ${candidate.candidate_id}`);
   if (roster.roster_sha256 !== candidate.roster_sha256) throw new Error(`candidate ${candidate.candidate_id} roster hash drifted`);
-  return encodeContract(roster as unknown as RosterContractObject);
+  return encodeContract(parseAutopilotRosterContract('autopilot.roster.v1', roster));
 }
 
 function configBytesForSave(input: {

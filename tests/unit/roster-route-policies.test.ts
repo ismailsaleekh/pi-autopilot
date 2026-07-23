@@ -27,17 +27,20 @@ void describe('Phase 37 W1 route policies', () => {
   });
 
   void it('deep-freezes exported route policy authority', () => {
+    const profile = ROSTER_PROFILES[0];
+    const policy = ROUTE_POLICIES[1];
+    if (profile === undefined || policy === undefined) throw new Error('missing frozen route policy fixture');
     assert.throws(() => {
-      (ROSTER_ROLE_ORDER as unknown as string[]).push('forged');
+      Reflect.apply(Array.prototype.push, ROSTER_ROLE_ORDER, ['forged']);
     }, TypeError);
     assert.throws(() => {
-      (ROSTER_PROFILES[0] as unknown as Record<string, unknown>)['profile_id'] = 'forged';
+      Object.defineProperty(profile, 'profile_id', { value: 'forged' });
     }, TypeError);
     assert.throws(() => {
-      (ROUTE_POLICIES[1]?.allowed_auth_classes as unknown as string[]).push('api-key');
+      Reflect.apply(Array.prototype.push, policy.allowed_auth_classes, ['api-key']);
     }, TypeError);
     assert.throws(() => {
-      (ROUTE_POLICY_REGISTRY.route_policies as unknown as unknown[]).push({});
+      Reflect.apply(Array.prototype.push, ROUTE_POLICY_REGISTRY.route_policies, [{}]);
     }, TypeError);
     assert.deepEqual(verifyRoutePolicySeeds(), []);
   });

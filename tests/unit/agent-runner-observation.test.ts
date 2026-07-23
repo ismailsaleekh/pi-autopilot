@@ -281,7 +281,7 @@ async function installRosterAuthority(input: { readonly stateRoot: string; reado
   await chmod(dirname(rosterPath), 0o700);
   await writeFile(rosterPath, `${canonicalRosterJson(roster)}\n`, { encoding: 'utf8', mode: 0o600 });
   await chmod(rosterPath, 0o600);
-  return { selection: selection.selection as unknown as Readonly<Record<string, unknown>>, roster, assignment, requestProfile: requestProfileFromAssignment(assignment) };
+  return { selection: { ...selection.selection }, roster, assignment, requestProfile: requestProfileFromAssignment(assignment) };
 }
 
 function makeUnitSpecV2(
