@@ -9,6 +9,7 @@ import {
   validateReceipt,
   type ExistingRunResolutionRequest,
   type PreRunSelection,
+  type ReceiptValidationRequest,
   type SavedRosterAuthority,
 } from '../../src/core/roster/resolve.ts';
 
@@ -65,6 +66,30 @@ function existingRequest(overrides: Partial<ExistingRunResolutionRequest> = {}):
     current_default_roster_sha256: 'sha256:9999999999999999999999999999999999999999999999999999999999999999',
     roster_file_state: 'present',
     request_sha256: 'sha256:5546d49d4a7792321d21ad38739e42bde0343dd05450cce0286a538e6e94e3b9',
+    ...overrides,
+  };
+}
+
+function validReceiptRequest(overrides: Partial<ReceiptValidationRequest> = {}): ReceiptValidationRequest {
+  return {
+    schema_version: 'autopilot.receipt_validation_request.v1',
+    action: 'validate-receipt',
+    requested_profile_sha256: 'sha256:3333333333333333333333333333333333333333333333333333333333333333',
+    observed_request_profile_sha256: 'sha256:3333333333333333333333333333333333333333333333333333333333333333',
+    requested_model_id: 'gpt-5.6-terra',
+    observed_requested_model_id: 'gpt-5.6-terra',
+    executed_model_id: 'gpt-5.6-terra',
+    requested_thinking: 'high',
+    observed_thinking: 'high',
+    requested_api: 'openai-codex-responses',
+    observed_api: 'openai-codex-responses',
+    requested_service_tier: null,
+    observed_service_tier: null,
+    requested_cache_policy: 'provider-default',
+    observed_cache_policy: 'provider-default',
+    requested_system_prompt_profile: 'pi-default.v1',
+    observed_system_prompt_profile: 'pi-default.v1',
+    request_sha256: 'sha256:1bdec2bd0989b8108c7c166355776558ac7005b3640701aa22414f96519d36b4',
     ...overrides,
   };
 }
@@ -130,6 +155,18 @@ void describe('Phase 37 W1 roster resolution', () => {
     ]);
   });
 
+  void it('existing runs fail closed when immutable selection authority is omitted', () => {
+    const result = Reflect.apply(resolveExistingRun, undefined, [existingRequest()]) as ReturnType<typeof resolveExistingRun>;
+
+    assert.equal(result.ok, false);
+    assert.equal(result.status, 'blocked');
+    assert.equal(result.selected_roster_id, null);
+    assert.deepEqual(result.diagnostics.map((diagnostic) => diagnostic.code), [
+      'ROSTER_PINNED_SELECTION_UNAVAILABLE',
+      'ROSTER_TRANSITION_REQUIRED',
+    ]);
+  });
+
   void it('existing runs fail closed on runtime mirror hash drift', () => {
     const result = resolveExistingRun(
       existingRequest({ runtime_mirror_sha256: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' }),
@@ -144,34 +181,88 @@ void describe('Phase 37 W1 roster resolution', () => {
   });
 
   void it('validates receipt request profile/model/thinking facts exactly', () => {
+    const valid = validateReceipt(validReceiptRequest());
+    assert.equal(valid.ok, true);
+    assert.equal(valid.status, 'inspected');
+
     assert.equal(
-      validateReceipt({
-        schema_version: 'autopilot.receipt_validation_request.v1',
-        action: 'validate-receipt',
-        requested_profile_sha256: 'sha256:3333333333333333333333333333333333333333333333333333333333333333',
-        observed_request_profile_sha256: 'sha256:4444444444444444444444444444444444444444444444444444444444444444',
-        requested_model_id: null,
-        executed_model_id: null,
-        requested_thinking: null,
-        observed_thinking: null,
-        request_sha256: 'sha256:1bdec2bd0989b8108c7c166355776558ac7005b3640701aa22414f96519d36b4',
-      }).diagnostics[0]?.code,
+      validateReceipt(
+        validReceiptRequest({
+          observed_request_profile_sha256: 'sha256:4444444444444444444444444444444444444444444444444444444444444444',
+        }),
+      ).diagnostics[0]?.code,
       'ROSTER_REQUEST_PROFILE_DRIFT',
     );
     assert.deepEqual(
-      validateReceipt({
-        schema_version: 'autopilot.receipt_validation_request.v1',
-        action: 'validate-receipt',
-        requested_profile_sha256: null,
-        observed_request_profile_sha256: null,
-        requested_model_id: 'gpt-5.6-terra',
-        executed_model_id: 'gpt-5.6-sol',
-        requested_thinking: 'xhigh',
-        observed_thinking: 'high',
-        request_sha256: 'sha256:0cd99754f500ead2f44278e7c6270d0663199132918565a7b5831a6fb4a20a1a',
-      }).diagnostics.map((diagnostic) => diagnostic.code),
+      validateReceipt(
+        validReceiptRequest({
+          observed_requested_model_id: 'gpt-5.6-sol',
+          executed_model_id: 'gpt-5.6-sol',
+          requested_thinking: 'xhigh',
+          observed_thinking: 'high',
+        }),
+      ).diagnostics.map((diagnostic) => diagnostic.code),
       ['ROSTER_OBSERVED_MODEL_MISMATCH', 'ROSTER_OBSERVED_THINKING_MISMATCH'],
     );
+    assert.deepEqual(
+      validateReceipt(
+        validReceiptRequest({
+          observed_api: 'openai-completions',
+          requested_service_tier: 'priority',
+          observed_service_tier: null,
+          observed_cache_policy: 'none',
+          observed_system_prompt_profile: 'anthropic-autopilot-sanitized.v1',
+        }),
+      ).diagnostics.map((diagnostic) => diagnostic.code),
+      ['ROSTER_REQUEST_PROFILE_DRIFT'],
+    );
+  });
+
+  void it('receipt validation fails closed when any mandated comparison fact is omitted or null-missing', () => {
+    const factCases: readonly {
+      readonly field: keyof ReceiptValidationRequest;
+      readonly expectedCode: string;
+      readonly nullMeansMissing: boolean;
+    }[] = [
+      { field: 'requested_profile_sha256', expectedCode: 'ROSTER_REQUEST_PROFILE_DRIFT', nullMeansMissing: true },
+      { field: 'observed_request_profile_sha256', expectedCode: 'ROSTER_REQUEST_PROFILE_DRIFT', nullMeansMissing: true },
+      { field: 'requested_model_id', expectedCode: 'ROSTER_OBSERVED_MODEL_MISMATCH', nullMeansMissing: true },
+      { field: 'observed_requested_model_id', expectedCode: 'ROSTER_OBSERVED_MODEL_MISMATCH', nullMeansMissing: true },
+      { field: 'executed_model_id', expectedCode: 'ROSTER_OBSERVED_MODEL_MISMATCH', nullMeansMissing: true },
+      { field: 'requested_thinking', expectedCode: 'ROSTER_OBSERVED_THINKING_MISMATCH', nullMeansMissing: true },
+      { field: 'observed_thinking', expectedCode: 'ROSTER_OBSERVED_THINKING_MISMATCH', nullMeansMissing: true },
+      { field: 'requested_api', expectedCode: 'ROSTER_REQUEST_PROFILE_DRIFT', nullMeansMissing: true },
+      { field: 'observed_api', expectedCode: 'ROSTER_REQUEST_PROFILE_DRIFT', nullMeansMissing: true },
+      { field: 'requested_service_tier', expectedCode: 'ROSTER_REQUEST_PROFILE_DRIFT', nullMeansMissing: false },
+      { field: 'observed_service_tier', expectedCode: 'ROSTER_REQUEST_PROFILE_DRIFT', nullMeansMissing: false },
+      { field: 'requested_cache_policy', expectedCode: 'ROSTER_REQUEST_PROFILE_DRIFT', nullMeansMissing: true },
+      { field: 'observed_cache_policy', expectedCode: 'ROSTER_REQUEST_PROFILE_DRIFT', nullMeansMissing: true },
+      { field: 'requested_system_prompt_profile', expectedCode: 'ROSTER_REQUEST_PROFILE_DRIFT', nullMeansMissing: true },
+      { field: 'observed_system_prompt_profile', expectedCode: 'ROSTER_REQUEST_PROFILE_DRIFT', nullMeansMissing: true },
+    ];
+
+    for (const { field, expectedCode, nullMeansMissing } of factCases) {
+      const omitted = { ...validReceiptRequest() } as Record<string, unknown>;
+      delete omitted[field];
+      const omittedResult = validateReceipt(omitted as unknown as ReceiptValidationRequest);
+      assert.equal(omittedResult.ok, false, `${String(field)} omitted must fail`);
+      assert.equal(omittedResult.status, 'failed', `${String(field)} omitted must fail`);
+      assert.ok(
+        omittedResult.diagnostics.some((diagnostic) => diagnostic.code === expectedCode),
+        `${String(field)} omitted should emit ${expectedCode}`,
+      );
+
+      if (!nullMeansMissing) {
+        continue;
+      }
+      const nullResult = validateReceipt({ ...validReceiptRequest(), [field]: null } as unknown as ReceiptValidationRequest);
+      assert.equal(nullResult.ok, false, `${String(field)} null must fail`);
+      assert.equal(nullResult.status, 'failed', `${String(field)} null must fail`);
+      assert.ok(
+        nullResult.diagnostics.some((diagnostic) => diagnostic.code === expectedCode),
+        `${String(field)} null should emit ${expectedCode}`,
+      );
+    }
   });
 
   void it('models create-only selection conflict and idempotent replay without writes', () => {

@@ -1,12 +1,16 @@
 import {
+  type ApiId,
+  type CachePolicy,
   type Digest,
   type RosterDiagnostic,
   type RosterDiagnosticCode,
   type RosterScope,
+  type ServiceTier,
+  type SystemPromptProfile,
+  type ThinkingValue,
   canonicalSha256,
   dedupeDiagnostics,
 } from './route-policies.ts';
-import { SEED_CANDIDATES, type RosterCandidate } from './provider-recipes.ts';
 
 export type NewRunResolutionSource = 'explicit-roster' | 'trusted-project-default' | 'user-default' | 'agent-first-onboarding';
 export type AuthorityState = 'absent' | 'present' | 'missing' | 'hash-mismatch' | 'corrupt';
@@ -98,9 +102,18 @@ export interface ReceiptValidationRequest {
   readonly requested_profile_sha256: Digest | null;
   readonly observed_request_profile_sha256: Digest | null;
   readonly requested_model_id: string | null;
+  readonly observed_requested_model_id: string | null;
   readonly executed_model_id: string | null;
-  readonly requested_thinking: 'high' | 'xhigh' | null;
-  readonly observed_thinking: 'high' | 'xhigh' | null;
+  readonly requested_thinking: ThinkingValue | null;
+  readonly observed_thinking: ThinkingValue | null;
+  readonly requested_api: ApiId | null;
+  readonly observed_api: ApiId | null;
+  readonly requested_service_tier: ServiceTier;
+  readonly observed_service_tier: ServiceTier;
+  readonly requested_cache_policy: CachePolicy | null;
+  readonly observed_cache_policy: CachePolicy | null;
+  readonly requested_system_prompt_profile: SystemPromptProfile | null;
+  readonly observed_system_prompt_profile: SystemPromptProfile | null;
   readonly request_sha256: Digest;
 }
 
@@ -137,36 +150,6 @@ export interface PreRunSelectionPublishResult {
   readonly lock_count: 0;
   readonly files_touched: readonly string[];
   readonly result_sha256: Digest;
-}
-
-const SYNTHETIC_SELECTION_SHA256 = 'sha256:96c3625fddc6d43145ca5c6dece482e97fba78ad01c333e6aa3382fbe40d1878' as Digest;
-
-function cruiseSeedCandidate(): RosterCandidate {
-  const candidate = SEED_CANDIDATES.find((entry) => entry.candidate_id === 'codex-cruise-v1');
-  if (candidate === undefined) {
-    throw new Error('sealed codex cruise seed candidate is missing');
-  }
-  return candidate;
-}
-
-function knownSelectionForSha(selectionSha256: Digest): PreRunSelection | null {
-  if (selectionSha256 !== SYNTHETIC_SELECTION_SHA256) {
-    return null;
-  }
-  const candidate = cruiseSeedCandidate();
-  return {
-    schema_version: 'autopilot.pre_run_selection.v1',
-    repo_id: 'repo-phase37-w0-fixtures',
-    workstream_run: 'phase37-w0-run-001',
-    scope: 'user',
-    roster_id: candidate.roster_id,
-    roster_revision: candidate.roster_revision,
-    roster_sha256: candidate.roster_sha256,
-    assignment_set_sha256: candidate.assignment_set_sha256,
-    config_sha256: 'sha256:1d8a144806f7bd3df23724eb702223c7180b4d160cb09fc8cff5cbc77a1e3a38',
-    selected_at: '2026-07-22T12:01:00.000Z',
-    selection_sha256: selectionSha256,
-  };
 }
 
 function materializeNewRunResult(
@@ -274,8 +257,9 @@ function materializeExistingRunResult(
 
 export function resolveExistingRun(
   request: ExistingRunResolutionRequest,
-  selection: PreRunSelection | null = knownSelectionForSha(request.selection_sha256),
+  selection: PreRunSelection | null,
 ): ExistingRunResolutionResult {
+  const explicitSelection = selection as PreRunSelection | null | undefined;
   const diagnostics: RosterDiagnosticCode[] = [];
   if (request.runtime_mirror_sha256 !== request.selection_sha256) {
     diagnostics.push('ROSTER_PINNED_SELECTION_UNAVAILABLE', 'ROSTER_TRANSITION_REQUIRED');
@@ -283,11 +267,11 @@ export function resolveExistingRun(
   if (request.roster_file_state === 'missing' || request.roster_file_state === 'hash-mismatch') {
     diagnostics.push('ROSTER_PINNED_SELECTION_UNAVAILABLE', 'ROSTER_TRANSITION_REQUIRED');
   }
-  if (selection === null || selection.selection_sha256 !== request.selection_sha256) {
+  if (explicitSelection === null || explicitSelection === undefined || explicitSelection.selection_sha256 !== request.selection_sha256) {
     diagnostics.push('ROSTER_PINNED_SELECTION_UNAVAILABLE', 'ROSTER_TRANSITION_REQUIRED');
   }
   const materializedDiagnostics = dedupeDiagnostics(diagnostics);
-  if (materializedDiagnostics.length > 0 || selection === null) {
+  if (materializedDiagnostics.length > 0 || explicitSelection === null || explicitSelection === undefined) {
     return materializeExistingRunResult({
       ok: false,
       status: 'blocked',
@@ -303,11 +287,11 @@ export function resolveExistingRun(
   return materializeExistingRunResult({
     ok: true,
     status: 'inspected',
-    selected_scope: selection.scope,
-    selected_roster_id: selection.roster_id,
-    selected_roster_revision: selection.roster_revision,
-    selected_roster_sha256: selection.roster_sha256,
-    assignment_set_sha256: selection.assignment_set_sha256,
+    selected_scope: explicitSelection.scope,
+    selected_roster_id: explicitSelection.roster_id,
+    selected_roster_revision: explicitSelection.roster_revision,
+    selected_roster_sha256: explicitSelection.roster_sha256,
+    assignment_set_sha256: explicitSelection.assignment_set_sha256,
     selection_sha256: request.selection_sha256,
     diagnostics: [],
   });
@@ -331,28 +315,39 @@ function materializeReceiptValidationResult(
   return { ...preimage, result_sha256: canonicalSha256(preimage) };
 }
 
+function factsMatch<T>(requested: T | null | undefined, observed: T | null | undefined): boolean {
+  return requested !== null && requested !== undefined && observed !== null && observed !== undefined && requested === observed;
+}
+
+function nullableFactsMatch<T>(requested: T | null | undefined, observed: T | null | undefined): boolean {
+  return requested !== undefined && observed !== undefined && requested === observed;
+}
+
 export function validateReceipt(request: ReceiptValidationRequest): ReceiptValidationResult {
   const codes: RosterDiagnosticCode[] = [];
-  if (
-    request.requested_profile_sha256 !== null &&
-    request.observed_request_profile_sha256 !== null &&
-    request.requested_profile_sha256 !== request.observed_request_profile_sha256
-  ) {
+  if (!factsMatch(request.requested_profile_sha256, request.observed_request_profile_sha256)) {
     codes.push('ROSTER_REQUEST_PROFILE_DRIFT');
   }
-  if (
-    request.requested_model_id !== null &&
-    request.executed_model_id !== null &&
-    request.requested_model_id !== request.executed_model_id
-  ) {
+  if (!factsMatch(request.requested_model_id, request.observed_requested_model_id)) {
     codes.push('ROSTER_OBSERVED_MODEL_MISMATCH');
   }
-  if (
-    request.requested_thinking !== null &&
-    request.observed_thinking !== null &&
-    request.requested_thinking !== request.observed_thinking
-  ) {
+  if (!factsMatch(request.requested_model_id, request.executed_model_id)) {
+    codes.push('ROSTER_OBSERVED_MODEL_MISMATCH');
+  }
+  if (!factsMatch(request.requested_thinking, request.observed_thinking)) {
     codes.push('ROSTER_OBSERVED_THINKING_MISMATCH');
+  }
+  if (!factsMatch(request.requested_api, request.observed_api)) {
+    codes.push('ROSTER_REQUEST_PROFILE_DRIFT');
+  }
+  if (!nullableFactsMatch(request.requested_service_tier, request.observed_service_tier)) {
+    codes.push('ROSTER_REQUEST_PROFILE_DRIFT');
+  }
+  if (!factsMatch(request.requested_cache_policy, request.observed_cache_policy)) {
+    codes.push('ROSTER_REQUEST_PROFILE_DRIFT');
+  }
+  if (!factsMatch(request.requested_system_prompt_profile, request.observed_system_prompt_profile)) {
+    codes.push('ROSTER_REQUEST_PROFILE_DRIFT');
   }
   const diagnostics = dedupeDiagnostics(codes);
   return materializeReceiptValidationResult(diagnostics.length === 0, diagnostics.length === 0 ? 'inspected' : 'failed', diagnostics);
