@@ -8,14 +8,17 @@ import { launchabilityBlockCodesForCandidates } from './activation-fence.ts';
 import { doctorRoleResults, doctorRosterInventory } from './doctor.ts';
 import {
   type ProposalResult,
+  type QualificationManifest,
   type RosterCandidateSet,
   proposeRosterCandidates,
   validateCandidateSetApproval,
 } from './provider-recipes.ts';
+import { applyW4ProviderRegistryReadinessToCandidateSet } from './providers/index.ts';
 import {
   ROSTER_DIAGNOSTIC_CODES,
   type Digest,
   type RosterDiagnostic,
+  type RosterDiagnosticCode,
   type RosterInventory,
   type RosterScope,
   canonicalSha256,
@@ -101,9 +104,6 @@ interface ApprovalSnapshot {
   readonly scope: RosterScope;
   readonly candidate_set_sha256: Digest;
   readonly approved_roster_sha256s: readonly Digest[];
-  readonly default_roster_id: string;
-  readonly default_roster_revision: number;
-  readonly default_roster_sha256: Digest;
   readonly original_command: string;
   readonly presentation_sha256: Digest;
   consumed: boolean;
@@ -175,6 +175,7 @@ interface SaveCapabilityResult {
 
 interface CreateRosterSetupToolOptions {
   readonly inventory?: RosterInventory | ((input: { readonly request: RosterToolRequest; readonly ctx: unknown }) => RosterInventory | Promise<RosterInventory>) | undefined;
+  readonly qualificationManifests?: readonly QualificationManifest[] | ((input: { readonly request: RosterToolRequest; readonly ctx: unknown }) => readonly QualificationManifest[] | Promise<readonly QualificationManifest[]>) | undefined;
   readonly saveApproved?: ((input: SaveCapabilityInput) => SaveCapabilityResult | Promise<SaveCapabilityResult>) | undefined;
 }
 
@@ -237,12 +238,12 @@ export function createAutopilotRosterSetupTool(options: CreateRosterSetupToolOpt
     name: TOOL_NAME,
     label: 'Autopilot Roster Setup',
     description:
-      'Manage Phase 37 Autopilot roster setup pre-run. Inactive until the package activates one setup session; inspect, propose/refine, reject, and doctor are zero-write, save requires exact approval.',
+      'Manage Phase 37 Autopilot roster setup pre-run. Inactive until the package activates one setup session; inspect, propose/refine, reject, and doctor are zero-write, save requires host authorization plus exact save bindings.',
     promptSnippet: 'Inspect, propose/refine, reject, doctor, or save Autopilot roster setup with exact hashes and no secrets.',
     promptGuidelines: [
       'Use autopilot_manage_rosters only inside the activated autopilot-roster-setup session and pass its activation_token exactly.',
       'Use autopilot_manage_rosters inspect, propose, refine, doctor, and reject only as zero-write pre-run operations.',
-      'Use autopilot_manage_rosters save only after exact approval of candidate_set_sha256, approved_roster_sha256s, default tuple, scope, and original_command.',
+      'Use autopilot_manage_rosters save only after host authorization and semantic user approval; bind candidate_set_sha256, approved_roster_sha256s, default tuple, scope, and original_command exactly.',
       'Do not ask autopilot_manage_rosters to resolve credentials or secrets; treat blocked and converged diagnostics honestly.',
     ],
     parameters: PARAMETER_SCHEMA,
@@ -303,7 +304,7 @@ function createController(): RosterSetupController & {
       if (!isHostUserInputSource(input.source)) return { ok: false, approval_token: null, reason: 'source-not-user' };
       if (latestCandidateSet === null || latestPresentation === null) return { ok: false, approval_token: null, reason: 'no-current-presentation' };
       if (presentationAlreadyAuthorized) return { ok: false, approval_token: null, reason: 'duplicate-authorization' };
-      if (input.text !== latestPresentation.presentation_text || !approvalMatchesCandidateSet(latestPresentation, latestCandidateSet)) {
+      if (!isBoundedNonEmptyHostInput(input.text) || !approvalMatchesCandidateSet(latestPresentation, latestCandidateSet)) {
         return { ok: false, approval_token: null, reason: 'stale-or-mismatched-approval' };
       }
       const approvalToken = `approval:${randomBytes(24).toString('hex')}`;
@@ -354,7 +355,7 @@ function createController(): RosterSetupController & {
       const approval = approvals.get(request.approval_token);
       if (approval === undefined || approval.consumed) return false;
       if (!approvalMatchesRequest(approval, request)) return false;
-      if (!approvalMatchesCandidateSet(approval, candidateSet)) return false;
+      if (!approvalSnapshotMatchesCandidateSet(approval, candidateSet)) return false;
       approval.consumed = true;
       approvals.delete(request.approval_token);
       return true;
@@ -482,7 +483,8 @@ async function saveAction(
   if (approvalDiagnostics.length > 0) return saveBlocked(approvalDiagnostics.map((diagnostic) => diagnostic.code));
   if (!defaultTupleMatches(request, candidateSet)) return saveBlocked(['ROSTER_APPROVAL_STALE_CANDIDATE_SET']);
   if (!controller.consumeApproval(request, candidateSet)) return saveBlocked(['ROSTER_APPROVAL_STALE_CANDIDATE_SET']);
-  const launchabilityCodes = launchabilityBlockCodesForCandidates(candidateSet.candidates);
+  const approvedCandidates = candidateSet.candidates.filter((candidate) => request.approved_roster_sha256s.includes(candidate.roster_sha256));
+  const launchabilityCodes = launchabilityBlockCodesForCandidates(approvedCandidates);
   if (launchabilityCodes.length > 0) return saveBlocked(launchabilityCodes);
   if (options.saveApproved === undefined) return saveFailed(['ROSTER_READBACK_MISMATCH']);
   try {
@@ -518,7 +520,55 @@ async function currentProposal(
   options: CreateRosterSetupToolOptions,
 ): Promise<ProposalResult> {
   const inventory = await currentInventory(request, ctx, options);
-  return proposeRosterCandidates({ inventory, scope: request.scope, include_unready: true });
+  const proposal = proposeRosterCandidates({ inventory, scope: request.scope, include_unready: true });
+  const manifests = await currentQualificationManifests(request, ctx, options);
+  if (manifests.length === 0) return proposal;
+  const candidateSet = applyW4ProviderRegistryReadinessToCandidateSet({
+    candidateSet: proposal.candidate_set,
+    manifests,
+  });
+  return proposalWithCandidateSet(proposal, candidateSet);
+}
+
+function proposalWithCandidateSet(proposal: ProposalResult, candidateSet: RosterCandidateSet): ProposalResult {
+  const diagnostics = diagnosticsForCandidateSet(candidateSet);
+  const hasLaunchableReady = candidateSet.candidates.some((candidate) => candidate.launch_readiness === 'w4-certified-ready');
+  const hasBlockingRouteOrAuth = diagnostics.some((diagnostic) =>
+    diagnostic.code === 'ROSTER_AUTH_REQUIRED' ||
+    diagnostic.code === 'ROSTER_AUTH_CHANNEL_FORBIDDEN' ||
+    diagnostic.code === 'ROSTER_ROUTE_FORBIDDEN' ||
+    diagnostic.code === 'ROSTER_PROJECT_UNTRUSTED' ||
+    diagnostic.code === 'ROSTER_RECOMMENDED_PROFILE_BLOCKED' ||
+    diagnostic.code === 'ROSTER_EXPLICIT_CHOICE_REQUIRED',
+  );
+  const ok = hasLaunchableReady && !hasBlockingRouteOrAuth;
+  return {
+    ...proposal,
+    ok,
+    status: ok ? 'proposed' : 'blocked',
+    candidate_set: candidateSet,
+    diagnostics,
+  };
+}
+
+function diagnosticsForCandidateSet(candidateSet: RosterCandidateSet): readonly RosterDiagnostic[] {
+  const codes = uniqueRosterDiagnosticCodes(candidateSet.candidates.flatMap((candidate) => candidate.diagnostic_codes));
+  return codes.map((code) => rosterDiagnostic(code));
+}
+
+function uniqueRosterDiagnosticCodes(codes: readonly RosterDiagnosticCode[]): readonly RosterDiagnosticCode[] {
+  return [...new Set(codes)].sort((left, right) => left.localeCompare(right));
+}
+
+async function currentQualificationManifests(
+  request: RosterToolRequest,
+  ctx: unknown,
+  options: CreateRosterSetupToolOptions,
+): Promise<readonly QualificationManifest[]> {
+  if (typeof options.qualificationManifests === 'function') {
+    return await options.qualificationManifests({ request, ctx });
+  }
+  return options.qualificationManifests ?? [];
 }
 
 function buildApprovalPresentation(request: RosterToolRequest, candidateSet: RosterCandidateSet): ApprovalPresentation | null {
@@ -551,10 +601,10 @@ function buildApprovalPresentation(request: RosterToolRequest, candidateSet: Ros
 
 export function renderRosterSetupApprovalPresentation(input: RosterSetupApprovalPresentationInput): string {
   return [
-    'I approve saving the Autopilot roster setup with:',
+    'Autopilot roster setup current package-bound approval presentation:',
     `scope: ${input.scope}`,
     `candidate_set_sha256: ${input.candidate_set_sha256}`,
-    `approved_roster_sha256s, in order: [${input.approved_roster_sha256s.join(', ')}]`,
+    `approved_roster_sha256s, in proposal order: [${input.approved_roster_sha256s.join(', ')}]`,
     `default_roster_id: ${input.default_roster_id}`,
     `default_roster_revision: ${String(input.default_roster_revision)}`,
     `default_roster_sha256: ${input.default_roster_sha256}`,
@@ -563,7 +613,12 @@ export function renderRosterSetupApprovalPresentation(input: RosterSetupApproval
 }
 
 function isHostUserInputSource(source: string | undefined): boolean {
-  return source === 'user' || source === 'interactive';
+  return source === 'user' || source === 'interactive' || source === 'rpc';
+}
+
+function isBoundedNonEmptyHostInput(text: string): boolean {
+  const byteLength = Buffer.byteLength(text, 'utf8');
+  return byteLength > 0 && byteLength <= MAX_CONTENT_BYTES;
 }
 
 function proposalToResult(action: ResultAction, proposal: ProposalResult): RosterToolResult {
@@ -682,8 +737,7 @@ function receiptMatchesSave(request: RosterToolRequest, candidateSet: RosterCand
   if (receipt.fresh_session_required !== true || receipt.zero_secrets !== true) return false;
   const matches = receipt.saved_rosters.filter((ref) => ref.roster_id === receipt.default_roster_id && ref.roster_revision === receipt.default_roster_revision && ref.roster_sha256 === receipt.default_roster_sha256);
   if (matches.length !== 1) return false;
-  const candidateHashes = candidateSet.candidates.map((candidate) => candidate.roster_sha256);
-  return sameStrings(candidateHashes, request.approved_roster_sha256s);
+  return approvedRosterSha256sMatchCandidateSubset(candidateSet, request.approved_roster_sha256s);
 }
 
 function defaultTupleMatches(request: RosterToolRequest, candidateSet: RosterCandidateSet): boolean {
@@ -710,11 +764,16 @@ function approvalMatchesCandidateSet(input: ControllerApprovalInput, candidateSe
 function approvalMatchesRequest(approval: ApprovalSnapshot, request: RosterToolRequest): boolean {
   return request.candidate_set_sha256 === approval.candidate_set_sha256 &&
     request.scope === approval.scope &&
-    request.default_roster_id === approval.default_roster_id &&
-    request.default_roster_revision === approval.default_roster_revision &&
-    request.default_roster_sha256 === approval.default_roster_sha256 &&
     request.original_command === approval.original_command &&
-    sameStrings(request.approved_roster_sha256s, approval.approved_roster_sha256s);
+    approvedRosterSha256sPreservePresentedOrder(approval.approved_roster_sha256s, request.approved_roster_sha256s);
+}
+
+function approvalSnapshotMatchesCandidateSet(approval: ApprovalSnapshot, candidateSet: RosterCandidateSet): boolean {
+  return candidateSet.candidate_set_sha256 === approval.candidate_set_sha256 &&
+    approvedRosterSha256sPreservePresentedOrder(
+      candidateSet.candidates.map((candidate) => candidate.roster_sha256),
+      approval.approved_roster_sha256s,
+    );
 }
 
 function resultForFailure(action: ResultAction, status: Extract<ResultStatus, 'blocked' | 'failed'>, codes: readonly string[]): RosterToolResult {
@@ -948,6 +1007,24 @@ function nonNegativeInteger(value: number): number {
 
 function sameStrings(left: readonly string[], right: readonly string[]): boolean {
   return left.length === right.length && left.every((entry, index) => right[index] === entry);
+}
+
+function approvedRosterSha256sPreservePresentedOrder(presentedRosterSha256s: readonly Digest[], approvedRosterSha256s: readonly Digest[]): boolean {
+  if (approvedRosterSha256s.length === 0 || new Set(approvedRosterSha256s).size !== approvedRosterSha256s.length) return false;
+  let cursor = 0;
+  for (const approved of approvedRosterSha256s) {
+    const index = presentedRosterSha256s.indexOf(approved, cursor);
+    if (index < 0) return false;
+    cursor = index + 1;
+  }
+  return true;
+}
+
+function approvedRosterSha256sMatchCandidateSubset(candidateSet: RosterCandidateSet, approvedRosterSha256s: readonly Digest[]): boolean {
+  return approvedRosterSha256sPreservePresentedOrder(
+    candidateSet.candidates.map((candidate) => candidate.roster_sha256),
+    approvedRosterSha256s,
+  );
 }
 
 function uniqueSortedStrings(values: readonly string[]): readonly string[] {

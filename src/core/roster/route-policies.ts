@@ -105,8 +105,8 @@ export type QualificationState =
   | 'w4-certified-ready'
   | 'blocked-live-certification';
 export type RoutePolicyState = 'unqualified-seed' | 'blocked-live-certification';
-export type CandidateState = 'qualification-required' | 'blocked-live-certification' | 'synthetic-fixture-ready';
-export type LaunchReadiness = 'not-ready-until-w4' | 'blocked' | 'synthetic-fixture-only';
+export type CandidateState = 'qualification-required' | 'blocked-live-certification' | 'synthetic-fixture-ready' | 'w4-certified-ready';
+export type LaunchReadiness = 'not-ready-until-w4' | 'blocked' | 'synthetic-fixture-only' | 'w4-certified-ready';
 
 export const ROSTER_RECOMMENDED_PROFILE_ID: RosterProfileId = 'cruise';
 

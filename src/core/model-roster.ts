@@ -14,12 +14,12 @@ function fixedAssignment(model: string, thinking: AutopilotThinking): AutopilotM
   return Object.freeze({ model, thinking });
 }
 
-export const AUTOPILOT_PARENT_MODEL_ASSIGNMENT = fixedAssignment(
+export const HISTORICAL_AUTOPILOT_PARENT_MODEL_ASSIGNMENT = fixedAssignment(
   'openai-codex/gpt-5.6-sol',
   'xhigh',
 );
 
-export const AUTOPILOT_ROLE_MODEL_ROSTER: Readonly<Record<AutopilotRole, AutopilotModelAssignment>> =
+export const HISTORICAL_AUTOPILOT_ROLE_MODEL_ROSTER: Readonly<Record<AutopilotRole, AutopilotModelAssignment>> =
   Object.freeze({
     strategy: fixedAssignment('openai-codex/gpt-5.6-sol', 'xhigh'),
     implement: fixedAssignment('openai-codex/gpt-5.6-terra', 'high'),
@@ -30,8 +30,14 @@ export const AUTOPILOT_ROLE_MODEL_ROSTER: Readonly<Record<AutopilotRole, Autopil
     extract: fixedAssignment('openai-codex/gpt-5.6-luna', 'high'),
   });
 
+/** Historical Phase 0-2 fixed parent assignment. New Phase37 v2 runtime uses pinned roster assignments instead. */
+export const AUTOPILOT_PARENT_MODEL_ASSIGNMENT = HISTORICAL_AUTOPILOT_PARENT_MODEL_ASSIGNMENT;
+
+/** Historical Phase 0-2 fixed child roster. New Phase37 v2 runtime uses pinned roster assignments instead. */
+export const AUTOPILOT_ROLE_MODEL_ROSTER = HISTORICAL_AUTOPILOT_ROLE_MODEL_ROSTER;
+
 export function autopilotModelAssignmentForRole(role: AutopilotRole): AutopilotModelAssignment {
-  return AUTOPILOT_ROLE_MODEL_ROSTER[role];
+  return HISTORICAL_AUTOPILOT_ROLE_MODEL_ROSTER[role];
 }
 
 export function autopilotModelRosterIssues(

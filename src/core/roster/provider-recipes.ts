@@ -217,6 +217,12 @@ export interface RosterCandidate {
   readonly synthetic_fixture_ready_only: boolean;
   readonly converges_with: string | null;
   readonly diagnostic_codes: readonly RosterDiagnosticCode[];
+  readonly readiness_authority?: 'w4-provider-registry.v1' | 'synthetic-fixture.v1' | null;
+  readonly provider_pack_id?: string | null;
+  readonly certification_manifest_id?: string | null;
+  readonly certification_manifest_sha256?: Digest | null;
+  readonly recipe_sha256?: Digest | null;
+  readonly route_policy_sha256?: Digest | null;
   readonly candidate_sha256: Digest;
 }
 
@@ -907,6 +913,12 @@ function withCandidateDiagnostics(
     synthetic_fixture_ready_only: candidate.synthetic_fixture_ready_only,
     converges_with: convergesWith,
     diagnostic_codes,
+    ...(candidate.readiness_authority === undefined ? {} : { readiness_authority: candidate.readiness_authority }),
+    ...(candidate.provider_pack_id === undefined ? {} : { provider_pack_id: candidate.provider_pack_id }),
+    ...(candidate.certification_manifest_id === undefined ? {} : { certification_manifest_id: candidate.certification_manifest_id }),
+    ...(candidate.certification_manifest_sha256 === undefined ? {} : { certification_manifest_sha256: candidate.certification_manifest_sha256 }),
+    ...(candidate.recipe_sha256 === undefined ? {} : { recipe_sha256: candidate.recipe_sha256 }),
+    ...(candidate.route_policy_sha256 === undefined ? {} : { route_policy_sha256: candidate.route_policy_sha256 }),
   };
   return { ...withoutHash, candidate_sha256: canonicalSha256(withoutHash) };
 }
@@ -1152,14 +1164,18 @@ export function validateCandidateSetApproval(
     diagnostics.push('ROSTER_APPROVAL_STALE_CANDIDATE_SET');
   }
   const currentRosterSha256s = currentCandidateSet.candidates.map((candidate) => candidate.roster_sha256);
-  if (
-    approvedRosterSha256s.length !== currentRosterSha256s.length ||
-    approvedRosterSha256s.some((sha, index) => sha !== currentRosterSha256s[index])
-  ) {
+  if (approvedRosterSha256s.length === 0 || new Set(approvedRosterSha256s).size !== approvedRosterSha256s.length) {
     diagnostics.push('ROSTER_APPROVAL_STALE_CANDIDATE_SET');
-  }
-  if (new Set(approvedRosterSha256s).size !== approvedRosterSha256s.length) {
-    diagnostics.push('ROSTER_APPROVAL_STALE_CANDIDATE_SET');
+  } else {
+    let cursor = 0;
+    for (const sha of approvedRosterSha256s) {
+      const index = currentRosterSha256s.indexOf(sha, cursor);
+      if (index < 0) {
+        diagnostics.push('ROSTER_APPROVAL_STALE_CANDIDATE_SET');
+        break;
+      }
+      cursor = index + 1;
+    }
   }
   return dedupeDiagnostics(diagnostics);
 }
@@ -1253,8 +1269,105 @@ export function fakeInventoryFromProviders(options: {
   });
 }
 
+export function buildW4CertifiedRosterForCandidate(input: {
+  readonly candidate: Pick<RosterCandidate, 'recipe_id' | 'recipe_revision' | 'profile_id'>;
+  readonly certification_manifest_id: string;
+  readonly certification_manifest_sha256: Digest;
+}): Roster | null {
+  const seedCandidate = seedCandidateForRecipeProfile(input.candidate.recipe_id, input.candidate.recipe_revision, input.candidate.profile_id);
+  if (seedCandidate === null) return null;
+  const seedRoster = SEED_ROSTERS.find((roster) => roster.roster_id === seedCandidate.roster_id && roster.roster_revision === seedCandidate.roster_revision) ?? null;
+  if (seedRoster === null) return null;
+  const assignments = sortAssignmentsByRole(seedRoster.assignments.map((assignment) => assignmentWithQualificationState(assignment, 'w4-certified-ready')));
+  const assignment_set_sha256 = assignmentSetSha256(assignments);
+  const roster_id = `${seedRoster.profile_id}-${seedRoster.recipe_id}-${assignment_set_sha256.slice('sha256:'.length, 'sha256:'.length + 12)}`;
+  const withoutHash = {
+    schema_version: seedRoster.schema_version,
+    roster_id,
+    roster_revision: seedRoster.roster_revision,
+    display_name: seedRoster.display_name,
+    scope: seedRoster.scope,
+    selected_scope: seedRoster.selected_scope,
+    profile_id: seedRoster.profile_id,
+    recipe_id: seedRoster.recipe_id,
+    recipe_revision: seedRoster.recipe_revision,
+    generation_source: 'w4-certified-recipe' as const,
+    package_version: seedRoster.package_version,
+    pi_version: seedRoster.pi_version,
+    route_policy_ids: seedRoster.route_policy_ids,
+    assignment_set_sha256,
+    assignments,
+    capability_summary: seedRoster.capability_summary,
+    billing_summary: seedRoster.billing_summary,
+    auth_summary: seedRoster.auth_summary,
+    certification_manifest_id: input.certification_manifest_id,
+    certification_manifest_sha256: input.certification_manifest_sha256,
+    created_at: seedRoster.created_at,
+  } satisfies Omit<Roster, 'roster_sha256'>;
+  return { ...withoutHash, roster_sha256: canonicalSha256(withoutHash) };
+}
+
 export function seedRosterByCandidate(candidate: RosterCandidate): Roster | null {
-  return SEED_ROSTERS.find((roster) => roster.roster_id === candidate.roster_id && roster.roster_revision === candidate.roster_revision) ?? null;
+  const seed = SEED_ROSTERS.find((roster) => roster.roster_id === candidate.roster_id && roster.roster_revision === candidate.roster_revision) ?? null;
+  if (seed !== null) return seed;
+  if (
+    candidate.qualification_state === 'w4-certified-ready' &&
+    candidate.launch_readiness === 'w4-certified-ready' &&
+    candidate.candidate_state === 'w4-certified-ready' &&
+    candidate.readiness_authority === 'w4-provider-registry.v1' &&
+    candidate.provider_pack_id !== undefined &&
+    candidate.provider_pack_id !== null &&
+    candidate.recipe_sha256 !== undefined &&
+    candidate.recipe_sha256 !== null &&
+    candidate.route_policy_sha256 !== undefined &&
+    candidate.route_policy_sha256 !== null &&
+    candidate.certification_manifest_id !== undefined &&
+    candidate.certification_manifest_id !== null &&
+    candidate.certification_manifest_sha256 !== undefined &&
+    candidate.certification_manifest_sha256 !== null
+  ) {
+    const certified = buildW4CertifiedRosterForCandidate({
+      candidate,
+      certification_manifest_id: candidate.certification_manifest_id,
+      certification_manifest_sha256: candidate.certification_manifest_sha256,
+    });
+    if (certified !== null && certified.roster_id === candidate.roster_id && certified.roster_revision === candidate.roster_revision && certified.roster_sha256 === candidate.roster_sha256) {
+      return certified;
+    }
+  }
+  return null;
+}
+
+function seedCandidateForRecipeProfile(recipeId: string, recipeRevision: number, profileId: string): RosterCandidate | null {
+  return SEED_CANDIDATE_BY_RECIPE_PROFILE.get(`${recipeId}:${recipeRevision}:${profileId}`) ?? null;
+}
+
+function assignmentWithQualificationState(assignment: Assignment, qualification_state: QualificationState): Assignment {
+  const withoutHash = {
+    role: assignment.role,
+    provider_id: assignment.provider_id,
+    model_id: assignment.model_id,
+    model: assignment.model,
+    api: assignment.api,
+    thinking: assignment.thinking,
+    service_tier: assignment.service_tier,
+    cache_policy: assignment.cache_policy,
+    system_prompt_profile: assignment.system_prompt_profile,
+    context_window: assignment.context_window,
+    max_output_tokens: assignment.max_output_tokens,
+    input_modalities: assignment.input_modalities,
+    output_modalities: assignment.output_modalities,
+    reasoning_capability: assignment.reasoning_capability,
+    tool_capability: assignment.tool_capability,
+    route_policy_id: assignment.route_policy_id,
+    route_policy_revision: assignment.route_policy_revision,
+    billing_class: assignment.billing_class,
+    billing_route_class: assignment.billing_route_class,
+    auth_class: assignment.auth_class,
+    auth_source: assignment.auth_source,
+    qualification_state,
+  } satisfies Omit<Assignment, 'assignment_sha256'>;
+  return { ...withoutHash, assignment_sha256: canonicalSha256(withoutHash) };
 }
 
 export function diagnosticsForCandidate(candidate: RosterCandidate): readonly RosterDiagnostic[] {

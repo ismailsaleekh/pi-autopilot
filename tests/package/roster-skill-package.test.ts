@@ -151,7 +151,7 @@ void it('resolves exact packaged roster setup resource bytes and hashes fail-clo
     'Do not open a wizard, menu',
     'write_count=0',
     'candidate_set_sha256',
-    'approved_roster_sha256s, in order',
+    'approved_roster_sha256s, in proposal order',
     'Recommend Cruise only when',
     'fresh Pi session',
     'Do not auto-start Autopilot',

@@ -41,24 +41,25 @@ Recommend Cruise only when a Cruise candidate is actually ready in the returned 
 
 ### 3. Approval gate before save
 
-Before any `save`, require an explicit user approval message that exactly restates the current proposal facts. The approval must include all of these fields without alteration:
+Before any `save`, present the current proposal facts exactly and ask for an ordinary explicit user approval turn. The user does not need to echo the machine presentation; natural language such as "use your recommendation" can be enough when you, the setup agent, interpret it as approving the current proposal.
+
+The host package only authorizes that a nonempty bounded user/rpc/interactive turn occurred after the current package-bound presentation. It does not parse approval semantics. You must interpret the user's meaning, and you must still bind the `save` request to exact contract fields from the current proposal:
 
 ```text
-I approve saving the Autopilot roster setup with:
 scope: <user|trusted-project>
 candidate_set_sha256: sha256:<64 lowercase hex>
-approved_roster_sha256s, in order: [sha256:..., sha256:...]
+approved_roster_sha256s, in proposal order: [sha256:..., sha256:...]
 default_roster_id: <exact roster id>
 default_roster_revision: <integer>
 default_roster_sha256: sha256:<64 lowercase hex>
 original_command: <exact original /autopilot command>
 ```
 
-Reject stale, partial, reordered, extra, duplicate, paraphrased, or hash-mismatched approval. Do not save from a thumbs-up, menu choice, or implied consent. Do not compute substitute hashes; the canonical hashes are the contract hashes returned by the roster operation.
+Reject stale, partial, reordered, duplicate, hash-mismatched, ambiguous, rejecting, or refining user turns. Do not save from a thumbs-up, menu choice, or implied consent unless you can honestly interpret it as approval of the current presented proposal. Do not compute substitute hashes; the canonical hashes are the contract hashes returned by the roster operation.
 
 ### 4. Save (the only write action)
 
-Call `save` only after exact approval. Bind the exact `candidate_set_sha256`, ordered `approved_roster_sha256s`, default roster tuple (`roster_id + roster_revision + roster_sha256`), scope, trust state, and `original_command`.
+Call `save` only after host authorization and your semantic interpretation of explicit user approval. Bind the exact `candidate_set_sha256`, approved roster subset in proposal order, default roster tuple (`roster_id + roster_revision + roster_sha256`), scope, trust state, and `original_command`. Current W0/offline candidates are not production launchable; save can succeed only for a registry-verified W4-ready approved subset.
 
 A successful save must publish immutable roster revision files first, publish `config.json` last, read back every byte/hash, and return a secret-free `autopilot.roster_setup_receipt.v1`. Accept success only when:
 

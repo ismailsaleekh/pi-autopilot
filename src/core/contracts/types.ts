@@ -1097,13 +1097,19 @@ export interface AutopilotRosterRosterCandidateV1 {
   readonly roster_revision: number;
   readonly assignment_set_sha256: string;
   readonly roster_sha256: string;
-  readonly candidate_state: "qualification-required" | "blocked-live-certification" | "synthetic-fixture-ready";
-  readonly launch_readiness: "not-ready-until-w4" | "blocked" | "synthetic-fixture-only";
+  readonly candidate_state: "qualification-required" | "blocked-live-certification" | "synthetic-fixture-ready" | "w4-certified-ready";
+  readonly launch_readiness: "not-ready-until-w4" | "blocked" | "synthetic-fixture-only" | "w4-certified-ready";
   readonly qualification_state: "unqualified-non-certifying-seed" | "qualification-required" | "synthetic-test-ready" | "w4-certified-ready" | "blocked-live-certification";
   readonly non_certifying_seed: boolean;
   readonly synthetic_fixture_ready_only: boolean;
   readonly converges_with: string | null;
   readonly diagnostic_codes: readonly (string)[];
+  readonly readiness_authority?: "w4-provider-registry.v1" | "synthetic-fixture.v1" | null;
+  readonly provider_pack_id?: string | null;
+  readonly certification_manifest_id?: string | null;
+  readonly certification_manifest_sha256?: string | null;
+  readonly recipe_sha256?: string | null;
+  readonly route_policy_sha256?: string | null;
   readonly candidate_sha256: string;
 }
 
@@ -1181,7 +1187,6 @@ export interface AutopilotRosterRosterToolRequestV1 {
   readonly schema_version: "autopilot.roster_tool_request.v1";
   readonly action: "inspect" | "propose" | "save" | "reject" | "doctor";
   readonly scope: "user" | "trusted-project";
-  readonly state_root_override: string | null;
   readonly trusted_project_root: string | null;
   readonly candidate_set_sha256: string | null;
   readonly approved_roster_sha256s: readonly (string)[];

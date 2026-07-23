@@ -8,8 +8,8 @@
   "resources": {
     "skill_md": {
       "path": "templates/skills/autopilot-roster-setup/SKILL.md",
-      "sha256": "sha256:9c3ff5775ed6e651f50878d5d7c022e92b976d6ee53842f4ec65c3ba35234dba",
-      "byte_count": 6167
+      "sha256": "sha256:f14f135f2ef7e101b95bdd6e7d3c787cb4efafd7a727b9f724d20d101857b352",
+      "byte_count": 6872
     }
   },
   "authorities": [
@@ -51,7 +51,8 @@
       "doctor"
     ],
     "write_action": "save",
-    "save_success_visible_write_count_w0": 3
+    "w0_save_blocks_before_storage": true,
+    "save_success_visible_write_count_certified": 3
   },
   "conversation_contract": {
     "mode": "agent-first ordinary multi-turn conversation; no wizard, menu, or questionnaire",
@@ -61,7 +62,8 @@
     "project_trust_required_for_trusted_project_scope": true,
     "cruise_recommendation_only_when_ready": true,
     "blocked_and_converged_honesty_required": true,
-    "approval_requires_exact_restatement": true,
+    "approval_requires_exact_restatement": false,
+    "approval_authorization": "nonempty bounded user/rpc/interactive turn after current package-bound presentation; setup agent interprets approval semantics",
     "approval_fields": [
       "scope",
       "candidate_set_sha256",

@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { describe, it } from 'node:test';
 
-import type { AutopilotExecutionAudit, AutopilotExecutionCommit, AutopilotReceipt, AutopilotState, AutopilotStatusEntry, AutopilotUnitSpec } from '../../src/core/contracts/index.ts';
+import type { AutopilotExecutionAudit, AutopilotExecutionCommit, AutopilotReceipt, AutopilotState, AutopilotStatusEntry } from '../../src/core/contracts/index.ts';
 import { runAutopilotAgentFromSpecPath } from '../../src/core/agent-runner.ts';
 import { runAutopilotClaimGc } from '../../src/core/claim-gc.ts';
 import { materializeAdditionalReadPathsForSpec, materializeAutopilotSpecPaths } from '../../src/core/materialization.ts';
@@ -19,6 +19,16 @@ import { mergeAutopilotUnit } from '../../src/core/unit-merge.ts';
 import { abortFailedUnit, quarantineFailedUnit, resetFailedUnit } from '../../src/core/unit-failure.ts';
 import { cleanupTerminalUnitWorktree, cleanupTerminalUnitWorktreesForRun } from '../../src/core/worktree-cleanup.ts';
 import { recordValidationStalenessForMerge, validationCanCloseSourceWork, type AutopilotValidationEvidence } from '../../src/core/validation-staleness.ts';
+import { computeAutopilotRosterContractObjectHash } from '../../src/core/roster/contracts.ts';
+import { SEED_ROSTERS } from '../../src/core/roster/provider-recipes.ts';
+import {
+  materializeNewRunUnitSpecV2,
+  requestProfileFromAssignment,
+  type AutopilotRosterSelectionV1,
+  type AutopilotRosterUnitSpecV2,
+  type AutopilotRosterV1,
+  type AutopilotUnitSpecV2MaterializationInput,
+} from '../../src/core/roster/runtime-spec.ts';
 import {
   AUTOPILOT_STATE_ROOT_ENV,
   acquireClaimsForUnit,
@@ -35,6 +45,8 @@ import {
   withAutopilotFileLock,
 } from '../../src/core/parallel-runtime.ts';
 
+type LegacyRuntimeConsumerSpec = Parameters<typeof resolveActiveAutopilotForSpec>[0];
+
 async function withTempDir<T>(run: (root: string) => Promise<T>): Promise<T> {
   const root = await mkdtemp(join(tmpdir(), 'autopilot-phase2-test-'));
   const originalStateRoot = process.env[AUTOPILOT_STATE_ROOT_ENV];
@@ -48,7 +60,7 @@ async function withTempDir<T>(run: (root: string) => Promise<T>): Promise<T> {
   }
 }
 
-function emptyPlan(): NonNullable<AutopilotUnitSpec['verification_plan']> {
+function emptyPlan(): NonNullable<AutopilotRosterUnitSpecV2['verification_plan']> {
   return {
     positive_witnesses: [],
     negative_witnesses: [],
@@ -67,25 +79,20 @@ function unitSpec(input: {
   readonly attempt?: number;
   readonly ownedPaths?: readonly string[];
   readonly readOnlyPaths?: readonly string[];
-}): AutopilotUnitSpec {
+}): LegacyRuntimeConsumerSpec {
   const attempt = input.attempt ?? 1;
-  return {
-    schema_version: 'autopilot.unit_spec.v1',
+  return makeRuntimeUnitSpec({
     workstream: 'phase2-smoke',
     unit_id: input.unitId,
-    role: 'implement',
-    template: 'implement',
     attempt,
     objective: `Implement ${input.unitId}.`,
     cwd: input.cwd,
-    model: 'openai-codex/gpt-5.6-terra',
-    thinking: 'high',
     owned_paths: input.ownedPaths ?? [`src/${input.unitId}.ts`],
     read_only_paths: input.readOnlyPaths ?? [],
     untouchable_paths: ['private/**'],
     context_refs: [
-      { path: '.pi/autopilot/phase2-smoke/mission.md', purpose: 'mission' },
-      { path: '.pi/autopilot/phase2-smoke/master-plan.json', purpose: 'plan' },
+      { path: '.pi/autopilot/phase2-smoke/mission.md', purpose: 'mission', sha256: null, byte_count: null },
+      { path: '.pi/autopilot/phase2-smoke/master-plan.json', purpose: 'plan', sha256: null, byte_count: null },
     ],
     validation_commands: [],
     status_output: join(input.runtimeRoot, 'statuses', `${input.unitId}.implement.attempt-${String(attempt)}.json`),
@@ -98,7 +105,55 @@ function unitSpec(input: {
     verification_plan: emptyPlan(),
     closure_criteria: ['validated after merge'],
     upstream_refs: [],
+    timeout_seconds: 600,
+    render_prompt_snapshot: false,
+  }) as unknown as LegacyRuntimeConsumerSpec;
+}
+
+function makeRuntimeUnitSpec(overrides: Omit<AutopilotUnitSpecV2MaterializationInput, 'selection' | 'roster' | 'role' | 'request_profile'>): AutopilotRosterUnitSpecV2 {
+  const { selection, roster, requestProfile } = pinnedRuntimeFacts();
+  return materializeNewRunUnitSpecV2({
+    selection,
+    roster,
+    role: 'implement',
+    request_profile: requestProfile,
+    ...overrides,
+  });
+}
+
+function pinnedRuntimeFacts(): {
+  readonly selection: AutopilotRosterSelectionV1;
+  readonly roster: AutopilotRosterV1;
+  readonly requestProfile: ReturnType<typeof requestProfileFromAssignment>;
+} {
+  const roster = SEED_ROSTERS.find((entry) => entry.assignments.some((assignment) => assignment.role === 'implement'));
+  if (roster === undefined) throw new Error('missing seed roster for phase2 runtime compatibility');
+  const assignment = roster.assignments.find((entry) => entry.role === 'implement');
+  if (assignment === undefined) throw new Error('missing implement assignment for phase2 runtime compatibility');
+  const selectionWithoutHash = {
+    schema_version: 'autopilot.pre_run_selection.v1' as const,
+    repo_id: 'phase2-parallelism-test-repo',
+    workstream_run: 'phase2-parallelism-test-run',
+    scope: roster.scope,
+    roster_id: roster.roster_id,
+    roster_revision: roster.roster_revision,
+    roster_sha256: roster.roster_sha256,
+    assignment_set_sha256: roster.assignment_set_sha256,
+    config_sha256: 'sha256:6666666666666666666666666666666666666666666666666666666666666666',
+    selected_at: '2026-07-23T12:00:00.000Z',
+    selection_sha256: 'sha256:0000000000000000000000000000000000000000000000000000000000000000',
   };
+  const selection = {
+    ...selectionWithoutHash,
+    selection_sha256: requiredRosterHash('autopilot.pre_run_selection.v1', selectionWithoutHash),
+  };
+  return { selection, roster, requestProfile: requestProfileFromAssignment(assignment) };
+}
+
+function requiredRosterHash(schemaVersion: Parameters<typeof computeAutopilotRosterContractObjectHash>[0], value: unknown): string {
+  const hash = computeAutopilotRosterContractObjectHash(schemaVersion, value);
+  if (hash === null) throw new Error(`${schemaVersion} has no hash field`);
+  return hash;
 }
 
 async function initGitSource(source: string): Promise<void> {
@@ -234,8 +289,8 @@ void describe('Phase 2 scheduler config and deterministic scheduler', () => {
       config: { schema_version: 'autopilot.scheduler_config.v1', workstream: 'phase2-smoke', parallel_cap: 1, updated_at: '2026-07-08T00:00:00.000Z', updated_by: 'runtime-test' },
       candidates: [
         { unit_id: 'u01', attempt: 1, spec: baseSpec, peer_claim_request_refs: ['claim-request-peer-u01'] },
-        { unit_id: 'u02', attempt: 1, spec: { ...baseSpec, unit_id: 'u02', owned_paths: ['src/u02.ts'] } },
-        { unit_id: 'u03', attempt: 1, spec: { ...baseSpec, unit_id: 'u03', owned_paths: ['src/u03.ts'] } },
+        { unit_id: 'u02', attempt: 1, spec: unitSpec({ cwd: process.cwd(), runtimeRoot, unitId: 'u02', ownedPaths: ['src/u02.ts'] }) },
+        { unit_id: 'u03', attempt: 1, spec: unitSpec({ cwd: process.cwd(), runtimeRoot, unitId: 'u03', ownedPaths: ['src/u03.ts'] }) },
       ],
       runningAttempts: [],
       activeClaims: [],
@@ -319,7 +374,7 @@ void describe('Phase 2 unit worktrees, claims, mergeback, staleness, and GC', ()
 
       const unitCwd = join(prepared.taskRoot, 'units', 'u-sparse', 'attempt-1', 'worktree');
       const sparseSpec = unitSpec({ cwd: unitCwd, runtimeRoot: prepared.runtimeRoot, unitId: 'u-sparse', ownedPaths: ['src/new-file.ts'], readOnlyPaths: ['src/baseline.ts'] });
-      const specWithContext = { ...sparseSpec, context_refs: [{ path: 'docs/context.md', purpose: 'source context' }] };
+      const specWithContext = { ...sparseSpec, context_refs: [{ path: 'docs/context.md', purpose: 'source context', sha256: null, byte_count: null }] } as unknown as LegacyRuntimeConsumerSpec;
       const unit = await prepareAutopilotUnitWorktree({ active: prepared.active, unitId: 'u-sparse', attempt: 1, unitSpec: specWithContext });
       const context = await resolveActiveAutopilotForSpec(specWithContext);
       await acquireClaimsForUnit({ context, spec: specWithContext, reason: 'sparse materialization test' });
@@ -539,7 +594,7 @@ void describe('Phase 2 unit worktrees, claims, mergeback, staleness, and GC', ()
       const prepared = await prepareAutopilotWorkstream({ workstream: 'phase2-smoke', sourceCwd: source });
       const unitCwd = join(prepared.taskRoot, 'units', 'u-rollback', 'attempt-1', 'worktree');
       const baseSpec = unitSpec({ cwd: unitCwd, runtimeRoot: prepared.runtimeRoot, unitId: 'u-rollback', ownedPaths: ['src/rollback.ts'] });
-      const spec: AutopilotUnitSpec = {
+      const spec = {
         ...baseSpec,
         verification_plan: {
           ...emptyPlan(),

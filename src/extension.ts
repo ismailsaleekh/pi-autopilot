@@ -1232,7 +1232,7 @@ export default function autopilotExtension(pi: ExtensionHostLike, dependencies: 
     pi.on('input', (event, ctx) => {
       if (rosterSetupBundle === null || rosterSetupActivationToken === null || typeof event.text !== 'string') return undefined;
       const presentation = rosterSetupBundle.hostAuthorization.currentApprovalPresentation();
-      if (presentation === null || event.text !== presentation.presentation_text) return undefined;
+      if (presentation === null) return undefined;
       const approved = rosterSetupBundle.hostAuthorization.authorizeInput({
         activation_token: rosterSetupActivationToken,
         source: event.source,
@@ -1244,7 +1244,7 @@ export default function autopilotExtension(pi: ExtensionHostLike, dependencies: 
       }
       return {
         action: 'transform',
-        text: `${event.text}\n\nAutopilot roster setup host authorization accepted for this exact presentation. approval_token: ${approved.approval_token}`,
+        text: `${event.text}\n\nAutopilot roster setup host authorization accepted for the current package-bound presentation. approval_token: ${approved.approval_token}`,
       };
     });
     pi.on('session_shutdown', async (event, ctx) => {

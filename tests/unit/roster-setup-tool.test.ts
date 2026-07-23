@@ -273,7 +273,7 @@ void describe('Phase 37 W2 roster setup tool core', () => {
         assert.deepEqual(result.files_touched, [], action);
         assert.equal(existsSync(stateRoot), false, action);
       }
-      const arbitraryRoot = await invoke(bundle, request(token, 'inspect', { state_root_override: stateRoot }));
+      const arbitraryRoot = await invoke(bundle, request(token, 'inspect', { storage_root_probe: stateRoot }));
       assert.equal(arbitraryRoot.ok, false);
       assert.equal(arbitraryRoot.status, 'failed');
       assert.equal(existsSync(stateRoot), false);
@@ -373,7 +373,7 @@ void describe('Phase 37 W2 roster setup tool core', () => {
     assert.equal(saveCalls, 0);
   });
 
-  void it('requires exact host authorization but still blocks unlaunchable W0 candidates before delegated save', async () => {
+  void it('accepts natural host-turn authorization but still blocks unlaunchable W0 candidates before delegated save', async () => {
     let saveCalls = 0;
     const bundle = createAutopilotRosterSetupTool({
       inventory: codexInventory(),
@@ -395,11 +395,18 @@ void describe('Phase 37 W2 roster setup tool core', () => {
     const extensionSource = bundle.hostAuthorization.authorizeInput({ activation_token: token, source: 'extension', text: presentationText });
     assert.equal(extensionSource.ok, false);
     assert.equal(extensionSource.reason, 'source-not-user');
+    const toolSource = bundle.hostAuthorization.authorizeInput({ activation_token: token, source: 'tool', text: presentationText });
+    assert.equal(toolSource.ok, false);
+    assert.equal(toolSource.reason, 'source-not-user');
 
-    const approved = bundle.hostAuthorization.authorizeInput({ activation_token: token, source: 'user', text: presentationText });
+    const empty = bundle.hostAuthorization.authorizeInput({ activation_token: token, source: 'user', text: '' });
+    assert.equal(empty.ok, false);
+    assert.equal(empty.reason, 'stale-or-mismatched-approval');
+
+    const approved = bundle.hostAuthorization.authorizeInput({ activation_token: token, source: 'rpc', text: 'use your recommendation' });
     assert.equal(approved.ok, true);
     assert.equal(typeof approved.approval_token, 'string');
-    const duplicate = bundle.hostAuthorization.authorizeInput({ activation_token: token, source: 'user', text: presentationText });
+    const duplicate = bundle.hostAuthorization.authorizeInput({ activation_token: token, source: 'user', text: 'use your recommendation' });
     assert.equal(duplicate.ok, false);
     assert.equal(duplicate.reason, 'duplicate-authorization');
 
@@ -436,8 +443,7 @@ void describe('Phase 37 W2 roster setup tool core', () => {
     const saveToken = activate(saveFailure);
     const proposal = await invoke(saveFailure, request(saveToken, 'propose'));
     const approval = approvalFields(proposal);
-    const presentationText = renderRosterSetupApprovalPresentation({ scope: 'user', original_command: '/autopilot phase37', ...approval });
-    const approved = saveFailure.hostAuthorization.authorizeInput({ activation_token: saveToken, source: 'user', text: presentationText });
+    const approved = saveFailure.hostAuthorization.authorizeInput({ activation_token: saveToken, source: 'interactive', text: 'use your recommendation' });
     assert.equal(approved.ok, true);
     const saveResult = await invoke(saveFailure, request(saveToken, 'save', { ...approval, approval_token: approved.approval_token }));
     assert.equal(saveResult.ok, false);

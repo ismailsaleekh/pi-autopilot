@@ -4257,6 +4257,12 @@ export const AUTOPILOT_ROSTER_CONTRACT_SCHEMA_DEFINITIONS = deepFreezeRosterAuth
       "synthetic_fixture_ready_only",
       "converges_with",
       "diagnostic_codes",
+      "readiness_authority",
+      "provider_pack_id",
+      "certification_manifest_id",
+      "certification_manifest_sha256",
+      "recipe_sha256",
+      "route_policy_sha256",
       "candidate_sha256"
     ],
     "required": [
@@ -4282,7 +4288,14 @@ export const AUTOPILOT_ROSTER_CONTRACT_SCHEMA_DEFINITIONS = deepFreezeRosterAuth
       "diagnostic_codes",
       "candidate_sha256"
     ],
-    "optional": [],
+    "optional": [
+      "readiness_authority",
+      "provider_pack_id",
+      "certification_manifest_id",
+      "certification_manifest_sha256",
+      "recipe_sha256",
+      "route_policy_sha256"
+    ],
     "fields": {
       "schema_version": {
         "type": "enum",
@@ -4387,7 +4400,8 @@ export const AUTOPILOT_ROSTER_CONTRACT_SCHEMA_DEFINITIONS = deepFreezeRosterAuth
         "values": [
           "qualification-required",
           "blocked-live-certification",
-          "synthetic-fixture-ready"
+          "synthetic-fixture-ready",
+          "w4-certified-ready"
         ]
       },
       "launch_readiness": {
@@ -4397,7 +4411,8 @@ export const AUTOPILOT_ROSTER_CONTRACT_SCHEMA_DEFINITIONS = deepFreezeRosterAuth
         "values": [
           "not-ready-until-w4",
           "blocked",
-          "synthetic-fixture-only"
+          "synthetic-fixture-only",
+          "w4-certified-ready"
         ]
       },
       "qualification_state": {
@@ -4443,6 +4458,54 @@ export const AUTOPILOT_ROSTER_CONTRACT_SCHEMA_DEFINITIONS = deepFreezeRosterAuth
         "uniqueItems": true,
         "orderedBy": "lexicographic"
       },
+      "readiness_authority": {
+        "type": "enum",
+        "required": false,
+        "nullable": true,
+        "values": [
+          "w4-provider-registry.v1",
+          "synthetic-fixture.v1"
+        ]
+      },
+      "provider_pack_id": {
+        "type": "string",
+        "required": false,
+        "nullable": true,
+        "minLength": 1,
+        "maxLength": 120
+      },
+      "certification_manifest_id": {
+        "type": "string",
+        "required": false,
+        "nullable": true,
+        "pattern": "^[a-z][a-z0-9-]{0,119}$",
+        "minLength": 1,
+        "maxLength": 120
+      },
+      "certification_manifest_sha256": {
+        "type": "string",
+        "required": false,
+        "nullable": true,
+        "pattern": "^sha256:[a-f0-9]{64}$",
+        "minLength": 71,
+        "maxLength": 71
+      },
+      "recipe_sha256": {
+        "type": "string",
+        "required": false,
+        "nullable": true,
+        "pattern": "^sha256:[a-f0-9]{64}$",
+        "minLength": 71,
+        "maxLength": 71
+      },
+      "route_policy_sha256": {
+        "type": "string",
+        "required": false,
+        "nullable": true,
+        "pattern": "^sha256:[a-f0-9]{64}$",
+        "minLength": 71,
+        "maxLength": 71
+      },
       "candidate_sha256": {
         "type": "string",
         "required": true,
@@ -4455,7 +4518,8 @@ export const AUTOPILOT_ROSTER_CONTRACT_SCHEMA_DEFINITIONS = deepFreezeRosterAuth
     "hash_field": "candidate_sha256",
     "semantic_rules": [
       "candidate links directly to recipe_id/revision and route_policy_id/revision",
-      "manifest candidates must have launch_readiness not-ready-until-w4 or blocked; ready is allowed only when synthetic_fixture_ready_only is true in fixtures",
+      "w4-certified-ready launch_readiness is valid only with readiness_authority w4-provider-registry.v1 plus exact provider_pack_id, certification_manifest_sha256, recipe_sha256, route_policy_sha256, and roster_sha256 bindings",
+      "synthetic fixture readiness is historical fixture data only and is not production launch authority",
       "candidate_sort_key orders candidate lists; duplicate keys reject"
     ]
   },
@@ -5117,7 +5181,6 @@ export const AUTOPILOT_ROSTER_CONTRACT_SCHEMA_DEFINITIONS = deepFreezeRosterAuth
       "schema_version",
       "action",
       "scope",
-      "state_root_override",
       "trusted_project_root",
       "candidate_set_sha256",
       "approved_roster_sha256s",
@@ -5130,7 +5193,6 @@ export const AUTOPILOT_ROSTER_CONTRACT_SCHEMA_DEFINITIONS = deepFreezeRosterAuth
       "schema_version",
       "action",
       "scope",
-      "state_root_override",
       "trusted_project_root",
       "candidate_set_sha256",
       "approved_roster_sha256s",
@@ -5169,13 +5231,6 @@ export const AUTOPILOT_ROSTER_CONTRACT_SCHEMA_DEFINITIONS = deepFreezeRosterAuth
           "user",
           "trusted-project"
         ]
-      },
-      "state_root_override": {
-        "type": "string",
-        "required": true,
-        "nullable": true,
-        "minLength": 1,
-        "maxLength": 4096
       },
       "trusted_project_root": {
         "type": "string",
@@ -5238,7 +5293,7 @@ export const AUTOPILOT_ROSTER_CONTRACT_SCHEMA_DEFINITIONS = deepFreezeRosterAuth
       }
     },
     "semantic_rules": [
-      "state_root_override is accepted only by constructor-injected tests; default user root is ~/.pi/agent/autopilot/",
+      "state roots are package-selected by constructor injection only; public setup requests cannot override storage roots",
       "inspect/propose/reject/doctor are zero persistent writes and zero locks",
       "save requests must bind default_roster_id+default_roster_revision+default_roster_sha256 to one approved roster; non-save requests carry null default tuple fields"
     ]

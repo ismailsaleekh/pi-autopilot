@@ -16,20 +16,27 @@ import {
   fakeInventoryFromProviders,
   getProviderRecipe,
   seedRosterByCandidate,
+  type EvidenceRef,
   type ProviderRecipe,
+  type QualificationManifest,
   type RoleTemplate,
   type RosterCandidate,
   type RosterCandidateSet,
 } from '../../src/core/roster/provider-recipes.ts';
 import {
   PHASE37_FIXTURE_CLOCK,
+  PHASE37_PACKAGE_VERSION,
+  PHASE37_PI_VERSION,
+  ROSTER_ROLE_ORDER,
+  canonicalSha256,
   type Digest,
   type InventoryProvider,
   type RosterInventory,
+  type RosterRole,
 } from '../../src/core/roster/route-policies.ts';
 import { createRosterSetupApprovalSession, type RosterSetupApprovalSaveResult, type RosterSetupApprovalSession } from '../../src/core/roster/setup-approval.ts';
 import { createRosterSetupReceiptFactory, type AutopilotRosterSetupReceipt } from '../../src/core/roster/setup-receipt.ts';
-import { createAutopilotRosterSetupTool, renderRosterSetupApprovalPresentation } from '../../src/core/roster/setup-tool.ts';
+import { createAutopilotRosterSetupTool } from '../../src/core/roster/setup-tool.ts';
 import {
   formatAuthorityPath,
   resolveRosterScopePaths,
@@ -49,6 +56,7 @@ import {
   AUTOPILOT_ROSTER_SETUP_SKILL_MD_PATH,
   AUTOPILOT_ROSTER_SETUP_SKILL_NAME,
 } from '../../src/core/roster/skill-package.ts';
+import { KIMI_CODING_REQUIRED_EVIDENCE_REFS } from '../../src/core/roster/providers/kimi-coding.ts';
 
 export const ROSTER_SETUP_TOOL_NAME = 'autopilot_manage_rosters' as const;
 export const ROSTER_TOOL_REQUEST_SCHEMA = 'autopilot.roster_tool_request.v1' as const;
@@ -304,6 +312,8 @@ export class FakePiSdkSession {
 export interface RosterSetupHarnessOptions {
   readonly projectTrusted?: boolean | undefined;
   readonly originalCommand?: string | undefined;
+  readonly inventory?: RosterInventory | undefined;
+  readonly qualificationManifests?: readonly QualificationManifest[] | undefined;
 }
 
 export class RosterSetupHarness {
@@ -316,6 +326,8 @@ export class RosterSetupHarness {
   public readonly trust: FakeProjectTrust;
   public readonly pi: FakePiSdkSession;
   public readonly storage: RosterStorage<AutopilotRosterSetupReceipt>;
+  public readonly inventoryOverride: RosterInventory | undefined;
+  public readonly qualificationManifests: readonly QualificationManifest[];
   public readonly bundle: SetupBundle;
 
   #activationToken: string | null = null;
@@ -328,6 +340,8 @@ export class RosterSetupHarness {
     readonly stateRoot: string;
     readonly originalCommand: string;
     readonly projectTrusted: boolean;
+    readonly inventory?: RosterInventory | undefined;
+    readonly qualificationManifests?: readonly QualificationManifest[] | undefined;
   }) {
     this.root = input.root;
     this.projectRoot = input.projectRoot;
@@ -349,7 +363,11 @@ export class RosterSetupHarness {
     this.trust = new FakeProjectTrust(input.projectTrusted);
     this.pi = new FakePiSdkSession(this.counters);
     this.storage = new RosterStorage({ codec: rosterSetupCodec, stateRoot: input.stateRoot });
+    this.inventoryOverride = input.inventory;
+    this.qualificationManifests = Object.freeze([...(input.qualificationManifests ?? [])]);
     this.bundle = createAutopilotRosterSetupTool({
+      ...(this.inventoryOverride === undefined ? {} : { inventory: this.inventoryOverride }),
+      qualificationManifests: this.qualificationManifests,
       saveApproved: async (saveInput) => await this.#saveApproved(saveInput),
     });
   }
@@ -366,6 +384,8 @@ export class RosterSetupHarness {
       stateRoot,
       originalCommand: options.originalCommand ?? SAFE_ORIGINAL_COMMAND,
       projectTrusted: options.projectTrusted ?? true,
+      inventory: options.inventory,
+      qualificationManifests: options.qualificationManifests,
     });
   }
 
@@ -441,11 +461,10 @@ export class RosterSetupHarness {
     });
     if (!authorized.ok) throw new Error(`host authorization failed: ${JSON.stringify(authorized)}`);
     if (this.#activationToken === null) throw new Error('setup must be active before controller approval');
-    const presentationText = renderRosterSetupApprovalPresentation(fields);
     const controllerApproval = this.bundle.hostAuthorization.authorizeInput({
       activation_token: this.#activationToken,
       source: 'user',
-      text: presentationText,
+      text: 'use your recommendation',
     });
     if (!controllerApproval.ok || controllerApproval.approval_token === null) {
       throw new Error(`controller approval failed: ${controllerApproval.reason}`);
@@ -510,7 +529,7 @@ export class RosterSetupHarness {
         files_touched: [],
       };
     }
-    const rosterBytes = rosterBytesForCandidateSet(input.candidate_set);
+    const rosterBytes = rosterBytesForApprovedCandidates(input.candidate_set, input.approved_roster_sha256s);
     const configBytes = configBytesForSave({
       stateRoot: this.stateRoot,
       scope: input.request.scope,
@@ -865,8 +884,73 @@ export function codexRosterInventory(): RosterInventory {
   });
 }
 
+export function kimiRosterInventory(): RosterInventory {
+  return fakeInventoryFromProviders({
+    inventory_id: 'inventory-roster-setup-w4-kimi',
+    providers: [providerForRecipe(mustRecipe('kimi-coding-plan'))],
+  });
+}
+
+export function trustedKimiW4ManifestFixture(): { readonly manifest: QualificationManifest } {
+  const recipe = mustRecipe('kimi-coding-plan');
+  const route = liveW3EvidenceRef('kimi-coding-plan-entitlement-proof', 'route-proof', 'plan-entitlement');
+  const billing = liveW3EvidenceRef('kimi-coding-billing-route-proof', 'billing-proof', 'billing-route');
+  const roleRefs = new Map<RosterRole, EvidenceRef>(ROSTER_ROLE_ORDER.map((role) => [
+    role,
+    liveW3EvidenceRef(`kimi-coding-exec-${role}-proof`, 'execution-proof', `execution/${role}`),
+  ]));
+  const live_evidence = [route, billing, ...ROSTER_ROLE_ORDER.map((role) => {
+    const ref = roleRefs.get(role);
+    if (ref === undefined) throw new Error(`missing role ref ${role}`);
+    return ref;
+  })].sort((left, right) => left.evidence_id.localeCompare(right.evidence_id));
+  const withoutHash = {
+    schema_version: 'autopilot.certification_manifest.v1' as const,
+    manifest_id: 'kimi-coding-plan-w4-qualified-v1' as const,
+    manifest_revision: 1,
+    subject_kind: 'provider_recipe' as const,
+    subject_id: 'kimi-coding-plan',
+    subject_sha256: recipe.recipe_sha256,
+    package_version: PHASE37_PACKAGE_VERSION,
+    pi_version: PHASE37_PI_VERSION,
+    qualification_state: 'w4-certified-ready' as const,
+    role_results: ROSTER_ROLE_ORDER.map((role) => {
+      const ref = roleRefs.get(role);
+      if (ref === undefined) throw new Error(`missing role ref ${role}`);
+      return { role, state: 'pass' as const, evidence_refs: [ref] };
+    }),
+    required_evidence: KIMI_CODING_REQUIRED_EVIDENCE_REFS,
+    live_evidence,
+    issued_at: '2026-07-23T00:00:00.000Z',
+    expires_at: '2026-08-22T00:00:00.000Z',
+  };
+  const manifest = Object.freeze({ ...withoutHash, manifest_sha256: canonicalSha256(withoutHash) }) satisfies QualificationManifest;
+  return { manifest };
+}
+
+function liveW3EvidenceRef(evidence_id: string, kind: EvidenceRef['kind'], scope: string): EvidenceRef {
+  const uri = `w3-evidence://phase37/kimi-coding/authenticated/no-fallback/${scope}`;
+  return Object.freeze({
+    evidence_id,
+    kind,
+    uri,
+    sha256: canonicalSha256({ schema_version: 'autopilot.w3_evidence_ref_digest.v1', evidence_id, kind, uri, authenticated: true, no_fallback: true, package_version: PHASE37_PACKAGE_VERSION, pi_version: PHASE37_PI_VERSION }),
+    byte_count: 128,
+    secret_free: true,
+  });
+}
+
 function rosterBytesForCandidateSet(candidateSet: RosterCandidateSet): readonly Uint8Array[] {
   return Object.freeze(candidateSet.candidates.map((candidate) => rosterBytesForCandidate(candidate)));
+}
+
+function rosterBytesForApprovedCandidates(candidateSet: RosterCandidateSet, approvedRosterSha256s: readonly Digest[]): readonly Uint8Array[] {
+  const byHash = new Map(candidateSet.candidates.map((candidate) => [candidate.roster_sha256, candidate]));
+  return Object.freeze(approvedRosterSha256s.map((sha) => {
+    const candidate = byHash.get(sha);
+    if (candidate === undefined) throw new Error(`approved candidate ${sha} missing from candidate set`);
+    return rosterBytesForCandidate(candidate);
+  }));
 }
 
 function rosterBytesForCandidate(candidate: RosterCandidate): Uint8Array {

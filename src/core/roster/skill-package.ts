@@ -10,10 +10,10 @@ export const AUTOPILOT_ROSTER_SETUP_PAYLOAD_PATH = 'templates/skills/autopilot-r
 export const AUTOPILOT_ROSTER_SETUP_PACKAGE_SKILL_ENTRY = './templates/skills/autopilot-roster-setup';
 export const AUTOPILOT_ROSTER_SETUP_FREEZE_ID = 'phase37-roster-w0-2026-07-22';
 export const AUTOPILOT_ROSTER_SETUP_PI_MINIMUM_VERSION = '0.80.6';
-export const AUTOPILOT_ROSTER_SETUP_SKILL_SHA256 = 'sha256:9c3ff5775ed6e651f50878d5d7c022e92b976d6ee53842f4ec65c3ba35234dba';
-export const AUTOPILOT_ROSTER_SETUP_SKILL_BYTE_COUNT = 6167;
-export const AUTOPILOT_ROSTER_SETUP_PAYLOAD_SHA256 = 'sha256:644a1256e84281669426191587cae5fb8e7384ca4fb0f2ea211804db1d4780ec';
-export const AUTOPILOT_ROSTER_SETUP_PAYLOAD_BYTE_COUNT = 2614;
+export const AUTOPILOT_ROSTER_SETUP_SKILL_SHA256 = 'sha256:f14f135f2ef7e101b95bdd6e7d3c787cb4efafd7a727b9f724d20d101857b352';
+export const AUTOPILOT_ROSTER_SETUP_SKILL_BYTE_COUNT = 6872;
+export const AUTOPILOT_ROSTER_SETUP_PAYLOAD_SHA256 = 'sha256:12fdd2ade39a21741e15dd97965049ec1272d8d3260c6b17f83f93988c58ed6b';
+export const AUTOPILOT_ROSTER_SETUP_PAYLOAD_BYTE_COUNT = 2825;
 
 const PACKAGE_NAME = 'pi-autopilot';
 const SOURCE_MODULE_RELATIVE_PATH = join('src', 'core', 'roster', 'skill-package.ts');
@@ -69,7 +69,8 @@ export interface AutopilotRosterSetupSkillPayload {
     readonly actions: readonly ['inspect', 'propose', 'reject', 'doctor', 'save'];
     readonly zero_write_actions: readonly ['inspect', 'propose', 'reject', 'doctor'];
     readonly write_action: 'save';
-    readonly save_success_visible_write_count_w0: 3;
+    readonly w0_save_blocks_before_storage: true;
+    readonly save_success_visible_write_count_certified: 3;
   };
   readonly conversation_contract: {
     readonly mode: 'agent-first ordinary multi-turn conversation; no wizard, menu, or questionnaire';
@@ -79,7 +80,8 @@ export interface AutopilotRosterSetupSkillPayload {
     readonly project_trust_required_for_trusted_project_scope: true;
     readonly cruise_recommendation_only_when_ready: true;
     readonly blocked_and_converged_honesty_required: true;
-    readonly approval_requires_exact_restatement: true;
+    readonly approval_requires_exact_restatement: false;
+    readonly approval_authorization: 'nonempty bounded user/rpc/interactive turn after current package-bound presentation; setup agent interprets approval semantics';
     readonly approval_fields: readonly [
       'scope',
       'candidate_set_sha256',
@@ -292,7 +294,7 @@ function assertSkillContentContract(skillText: string): void {
     'Do not open a wizard, menu',
     'write_count=0',
     'candidate_set_sha256',
-    'approved_roster_sha256s, in order',
+    'approved_roster_sha256s, in proposal order',
     'Recommend Cruise only when',
     'project trust',
     'secret-free',
@@ -350,14 +352,15 @@ function validatePayload(payload: JsonRecord, skillByteCount: number): Autopilot
   expectAuthorities(payload['authorities']);
 
   const tool = expectRecord(payload['required_tool_contract'], 'payload required_tool_contract');
-  expectKeys(tool, ['operation', 'request_schema', 'result_schema', 'actions', 'zero_write_actions', 'write_action', 'save_success_visible_write_count_w0'], 'payload required_tool_contract');
+  expectKeys(tool, ['operation', 'request_schema', 'result_schema', 'actions', 'zero_write_actions', 'write_action', 'w0_save_blocks_before_storage', 'save_success_visible_write_count_certified'], 'payload required_tool_contract');
   expectString(tool['operation'], 'autopilot_manage_rosters', 'payload tool operation');
   expectString(tool['request_schema'], 'autopilot.roster_tool_request.v1', 'payload tool request_schema');
   expectString(tool['result_schema'], 'autopilot.roster_tool_result.v1', 'payload tool result_schema');
   expectStringArray(tool['actions'], ['inspect', 'propose', 'reject', 'doctor', 'save'], 'payload tool actions');
   expectStringArray(tool['zero_write_actions'], ['inspect', 'propose', 'reject', 'doctor'], 'payload zero_write_actions');
   expectString(tool['write_action'], 'save', 'payload write_action');
-  expectNumber(tool['save_success_visible_write_count_w0'], 3, 'payload save_success_visible_write_count_w0');
+  expectBoolean(tool['w0_save_blocks_before_storage'], true, 'payload w0_save_blocks_before_storage');
+  expectNumber(tool['save_success_visible_write_count_certified'], 3, 'payload save_success_visible_write_count_certified');
 
   const conversation = expectRecord(payload['conversation_contract'], 'payload conversation_contract');
   expectKeys(conversation, [
@@ -369,6 +372,7 @@ function validatePayload(payload: JsonRecord, skillByteCount: number): Autopilot
     'cruise_recommendation_only_when_ready',
     'blocked_and_converged_honesty_required',
     'approval_requires_exact_restatement',
+    'approval_authorization',
     'approval_fields',
     'post_save',
   ], 'payload conversation_contract');
@@ -379,7 +383,8 @@ function validatePayload(payload: JsonRecord, skillByteCount: number): Autopilot
   expectBoolean(conversation['project_trust_required_for_trusted_project_scope'], true, 'payload project_trust_required_for_trusted_project_scope');
   expectBoolean(conversation['cruise_recommendation_only_when_ready'], true, 'payload cruise_recommendation_only_when_ready');
   expectBoolean(conversation['blocked_and_converged_honesty_required'], true, 'payload blocked_and_converged_honesty_required');
-  expectBoolean(conversation['approval_requires_exact_restatement'], true, 'payload approval_requires_exact_restatement');
+  expectBoolean(conversation['approval_requires_exact_restatement'], false, 'payload approval_requires_exact_restatement');
+  expectString(conversation['approval_authorization'], 'nonempty bounded user/rpc/interactive turn after current package-bound presentation; setup agent interprets approval semantics', 'payload approval_authorization');
   expectStringArray(conversation['approval_fields'], ['scope', 'candidate_set_sha256', 'approved_roster_sha256s_in_order', 'default_roster_id', 'default_roster_revision', 'default_roster_sha256', 'original_command'], 'payload approval_fields');
   expectStringArray(conversation['post_save'], ['fresh_pi_session_required', 'retry_exact_original_autopilot_command', 'never_auto_start'], 'payload post_save');
 

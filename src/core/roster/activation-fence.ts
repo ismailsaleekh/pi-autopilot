@@ -1,24 +1,47 @@
 import type { RosterCandidate } from './provider-recipes.ts';
 import type { RosterDiagnosticCode } from './route-policies.ts';
 
+const DIGEST_PATTERN = /^sha256:[a-f0-9]{64}$/u;
+
 /**
- * Phase 37 W0 contains only non-certifying seeds. A candidate is materializable
- * only when the candidate itself carries the exact synthetic fixture launch
- * authority tuple. W4 live certification will need an explicit schema authority
- * update before production launch can accept certified-live candidates.
+ * Production launch accepts only candidates that were promoted by the central
+ * W4 provider registry. Synthetic fixture readiness remains historical fixture
+ * data and is never launch authority for setup/materialization.
  */
 export function isLaunchableRosterCandidate(candidate: Pick<RosterCandidate,
   'candidate_state' |
   'launch_readiness' |
   'qualification_state' |
   'non_certifying_seed' |
-  'synthetic_fixture_ready_only'
+  'synthetic_fixture_ready_only' |
+  'readiness_authority' |
+  'provider_pack_id' |
+  'certification_manifest_id' |
+  'certification_manifest_sha256' |
+  'recipe_sha256' |
+  'route_policy_sha256' |
+  'roster_sha256'
 >): boolean {
-  return candidate.candidate_state === 'synthetic-fixture-ready' &&
-    candidate.launch_readiness === 'synthetic-fixture-only' &&
-    candidate.qualification_state === 'synthetic-test-ready' &&
-    candidate.non_certifying_seed === true &&
-    candidate.synthetic_fixture_ready_only === true;
+  return candidate.candidate_state === 'w4-certified-ready' &&
+    candidate.launch_readiness === 'w4-certified-ready' &&
+    candidate.qualification_state === 'w4-certified-ready' &&
+    candidate.non_certifying_seed === false &&
+    candidate.synthetic_fixture_ready_only === false &&
+    candidate.readiness_authority === 'w4-provider-registry.v1' &&
+    isNonEmptyBinding(candidate.provider_pack_id) &&
+    isNonEmptyBinding(candidate.certification_manifest_id) &&
+    isDigestBinding(candidate.certification_manifest_sha256) &&
+    isDigestBinding(candidate.recipe_sha256) &&
+    isDigestBinding(candidate.route_policy_sha256) &&
+    isDigestBinding(candidate.roster_sha256);
+}
+
+function isNonEmptyBinding(value: string | null | undefined): value is string {
+  return typeof value === 'string' && value.length > 0;
+}
+
+function isDigestBinding(value: string | null | undefined): value is `sha256:${string}` {
+  return typeof value === 'string' && DIGEST_PATTERN.test(value);
 }
 
 export function launchabilityBlockCodesForCandidates(
@@ -28,6 +51,13 @@ export function launchabilityBlockCodesForCandidates(
     'qualification_state' |
     'non_certifying_seed' |
     'synthetic_fixture_ready_only' |
+    'readiness_authority' |
+    'provider_pack_id' |
+    'certification_manifest_id' |
+    'certification_manifest_sha256' |
+    'recipe_sha256' |
+    'route_policy_sha256' |
+    'roster_sha256' |
     'diagnostic_codes'
   >[],
 ): readonly RosterDiagnosticCode[] {

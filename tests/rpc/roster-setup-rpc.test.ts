@@ -12,9 +12,11 @@ import {
   isRpcSuccess,
   jsonRpcListTools,
   jsonRpcToolCall,
+  kimiRosterInventory,
   requireCandidateSet,
   rpcListedTools,
   rpcToolResult,
+  trustedKimiW4ManifestFixture,
   withRosterSetupHarness,
 } from '../helpers/roster-setup-harness.ts';
 
@@ -92,7 +94,31 @@ void describe('Phase 37 W2 roster setup JSON-RPC proof lane', () => {
     });
   });
 
-  void it('saves only through exact approval and rejects duplicate-id and approval-token replays', async () => {
+  void it('blocks unqualified W0 saves without writes, then saves only through a trusted W4 provider manifest', async () => {
+    await withRosterSetupHarness(async (harness) => {
+      harness.activateSetup();
+      const rpc = new FakeRosterJsonRpcHarness(harness);
+      const proposalResponse = await rpc.handleCommand(jsonRpcToolCall('w0-propose', harness.directRequest('propose')));
+      const proposal = rpcToolResult(proposalResponse);
+      const approval = harness.hostApprove(proposal);
+      const blockedResponse = await rpc.handleCommand(jsonRpcToolCall('w0-save', harness.directRequest('save', {
+        approval_token: approval.approval_token,
+        candidate_set_sha256: approval.candidate_set_sha256,
+        approved_roster_sha256s: approval.approved_roster_sha256s,
+        default_roster_id: approval.default_roster_id,
+        default_roster_revision: approval.default_roster_revision,
+        default_roster_sha256: approval.default_roster_sha256,
+        original_command: approval.original_command,
+      })));
+      const blocked = rpcToolResult(blockedResponse);
+      assert.equal(blocked.ok, false);
+      assert.equal(blocked.status, 'blocked');
+      assert.ok(diagnosticCodes(blocked).includes('ROSTER_QUALIFICATION_REQUIRED'));
+      assert.equal(blocked.write_count, 0);
+      assert.equal(harness.counters.saveCapabilityCalls, 0);
+    });
+
+    const trusted = trustedKimiW4ManifestFixture();
     await withRosterSetupHarness(async (harness) => {
       harness.activateSetup();
       const rpc = new FakeRosterJsonRpcHarness(harness);
@@ -100,9 +126,15 @@ void describe('Phase 37 W2 roster setup JSON-RPC proof lane', () => {
       const proposalResponse = await rpc.handleCommand(jsonRpcToolCall('propose', harness.directRequest('propose')));
       const proposal = rpcToolResult(proposalResponse);
       const candidateSet = requireCandidateSet(proposal);
-      assert.equal(candidateSet.candidates.length > 0, true);
+      const ready = candidateSet.candidates.find((candidate) => candidate.launch_readiness === 'w4-certified-ready');
+      if (ready === undefined) throw new Error('expected trusted manifest to promote a ready Kimi candidate');
       assert.equal(proposal.write_count, 0);
-      const approval = harness.hostApprove(proposal);
+      const approval = harness.hostApprove(proposal, {
+        approved_roster_sha256s: [ready.roster_sha256],
+        default_roster_id: ready.roster_id,
+        default_roster_revision: ready.roster_revision,
+        default_roster_sha256: ready.roster_sha256,
+      });
 
       const saveArgs = harness.directRequest('save', {
         approval_token: approval.approval_token,
@@ -135,6 +167,9 @@ void describe('Phase 37 W2 roster setup JSON-RPC proof lane', () => {
       assert.equal(replay.write_count, 0);
       assert.equal(harness.counters.saveCapabilityCalls, 1);
       assertNoRunWorktreeCoordinatorOrSpend(harness.sideEffectsSnapshot());
+    }, {
+      inventory: kimiRosterInventory(),
+      qualificationManifests: [trusted.manifest],
     });
   });
 });
