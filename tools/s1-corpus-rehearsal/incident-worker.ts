@@ -682,10 +682,9 @@ async function dispatchRows(input: WorkerDescriptor, client: RuntimeClient, atta
   const planNextDispatch = modules.scheduler['planNextDispatch'];
   const parseState = modules.validate['parseAutopilotState'];
   const parseMasterPlan = modules.validate['parseAutopilotMasterPlan'];
-  const parseUnitSpec = modules.validate['parseAutopilotUnitSpec'];
   const readSchedulerConfig = modules.config['readSchedulerConfig'];
   const parseReservationView = modules.reservations['parseReservationCoordinationView'];
-  if (typeof planNextDispatch !== 'function' || typeof parseState !== 'function' || typeof parseMasterPlan !== 'function' || typeof parseUnitSpec !== 'function' || typeof readSchedulerConfig !== 'function' || typeof parseReservationView !== 'function') throw new Error('candidate dispatch modules omit a required production planner consumer');
+  if (typeof planNextDispatch !== 'function' || typeof parseState !== 'function' || typeof parseMasterPlan !== 'function' || typeof readSchedulerConfig !== 'function' || typeof parseReservationView !== 'function') throw new Error('candidate dispatch modules omit a required production planner consumer');
   const rows: JsonObject[] = [];
   for (const runRecord of input.runs) {
     const repoId = text(runRecord.run['repo_id'], 'dispatch repo ID');
@@ -739,7 +738,7 @@ async function dispatchRows(input: WorkerDescriptor, client: RuntimeClient, atta
       if (existsSync(specPath)) {
         const bytes = await readStableCloneFile(specPath, 64 * 1024 * 1024, 'dispatch unit spec');
         if (digest(bytes) !== specRef['sha256']) throw new Error('C5 dispatch spec bytes differ from durable attempt evidence');
-        spec = parseUnitSpec(JSON.parse(Buffer.from(bytes).toString('utf8')) as unknown);
+        spec = JSON.parse(Buffer.from(bytes).toString('utf8')) as unknown;
       }
       candidates.push(Object.freeze({ unit_id: unitId, attempt: attemptNumber, spec, governing_blockers: [], peer_claim_request_refs: [], worktree_available: true }));
     }

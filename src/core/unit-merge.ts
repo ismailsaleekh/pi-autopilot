@@ -2,7 +2,7 @@ import { existsSync } from 'node:fs';
 import { readFile, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 
-import { parseAutopilotExecutionAudit, parseAutopilotExecutionCommit, parseAutopilotReceipt, parseAutopilotStatusEntry, type AutopilotExecutionAudit, type AutopilotExecutionCommit, type AutopilotReceipt, type AutopilotStatusEntry } from './contracts/index.ts';
+import { parseAutopilotExecutionAudit, parseAutopilotExecutionCommit, parseAutopilotReceipt, parseAutopilotStatusEntry, type AutopilotExecutionAudit, type AutopilotExecutionCommit, type AutopilotStatusEntry } from './contracts/index.ts';
 import { gitHead, readGitStatus, releaseClaimsForUnit, updateUnitBranchStatus, withAutopilotFileLock, writeJsonAtomic, type ActiveAutopilotContext, type ActiveAutopilotRow, type ProcessEnvLike } from './parallel-runtime.ts';
 import { gitQueryNulStrings, runGitMutation } from './git-process.ts';
 import { cleanupTerminalUnitWorktree } from './worktree-cleanup.ts';
@@ -17,6 +17,7 @@ import { recordValidationStalenessForMerge } from './validation-staleness.ts';
 import { classifyCoordinationIntegrationConflict } from './coordination/integration-conflicts.ts';
 import type { CoordinationObservation, CoordinationUnitAttempt } from './coordination/types.ts';
 import { assertD65OrdinaryBoundaryFromEnvironment } from './coordination/d65-runtime-dispatch.ts';
+import { parseNewRunRuntimeReceipt, type AutopilotRuntimeReceipt } from './roster/runtime-consumers.ts';
 
 export interface AutopilotUnitMerge {
   readonly schema_version: 'autopilot.unit_merge.v1';
@@ -80,7 +81,7 @@ export async function mergeAutopilotUnit(input: {
   const active = input.context.active;
   return await withAutopilotFileLock(join(active.runtime_root, '.locks', 'unit-merge.lock'), `unit-merge:${active.autopilot_id}:${input.unitId}:${String(input.attempt)}`, async () => {
     const status = parseAutopilotStatusEntry(await readJsonFile(input.statusPath));
-    const receipt = parseAutopilotReceipt(await readJsonFile(input.receiptPath));
+    const receipt = parseMergeReceipt(await readJsonFile(input.receiptPath));
     const audit = parseAutopilotExecutionAudit(await readJsonFile(input.auditPath));
     const executionCommit = parseAutopilotExecutionCommit(await readJsonFile(input.executionCommitPath));
     const blockers = mergePreflightBlockers(active, input.unitId, input.attempt, status, receipt, audit, executionCommit);
@@ -293,7 +294,12 @@ export function parseAutopilotUnitMerge(value: unknown): AutopilotUnitMerge {
   };
 }
 
-function mergePreflightBlockers(active: ActiveAutopilotRow, unitId: string, attempt: number, status: AutopilotStatusEntry, receipt: AutopilotReceipt, audit: AutopilotExecutionAudit, executionCommit: AutopilotExecutionCommit): readonly string[] {
+function parseMergeReceipt(value: unknown): AutopilotRuntimeReceipt {
+  if (isRecord(value) && value['schema_version'] === 'autopilot.receipt.v2') return parseNewRunRuntimeReceipt(value).receipt;
+  return parseAutopilotReceipt(value);
+}
+
+function mergePreflightBlockers(active: ActiveAutopilotRow, unitId: string, attempt: number, status: AutopilotStatusEntry, receipt: AutopilotRuntimeReceipt, audit: AutopilotExecutionAudit, executionCommit: AutopilotExecutionCommit): readonly string[] {
   const blockers: string[] = [];
   if (status.workstream !== active.workstream || receipt.workstream !== active.workstream || audit.workstream !== active.workstream || executionCommit.workstream !== active.workstream) blockers.push('workstream identity mismatch across unit evidence');
   if (status.unit_id !== unitId || receipt.unit_id !== unitId || audit.unit_id !== unitId || executionCommit.unit_id !== unitId) blockers.push('unit identity mismatch across unit evidence');

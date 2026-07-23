@@ -15,6 +15,7 @@ import { executeOwnedWorktreeSaga, inspectOwnedWorktreeSpecPostcondition, Worktr
 import { recordValidationStalenessForMerge } from "./validation-staleness.js";
 import { classifyCoordinationIntegrationConflict } from "./coordination/integration-conflicts.js";
 import { assertD65OrdinaryBoundaryFromEnvironment } from "./coordination/d65-runtime-dispatch.js";
+import { parseNewRunRuntimeReceipt } from "./roster/runtime-consumers.js";
 export class AutopilotUnitMergeError extends Error {
     name = 'AutopilotUnitMergeError';
     code;
@@ -33,7 +34,7 @@ export async function mergeAutopilotUnit(input) {
     const active = input.context.active;
     return await withAutopilotFileLock(join(active.runtime_root, '.locks', 'unit-merge.lock'), `unit-merge:${active.autopilot_id}:${input.unitId}:${String(input.attempt)}`, async () => {
         const status = parseAutopilotStatusEntry(await readJsonFile(input.statusPath));
-        const receipt = parseAutopilotReceipt(await readJsonFile(input.receiptPath));
+        const receipt = parseMergeReceipt(await readJsonFile(input.receiptPath));
         const audit = parseAutopilotExecutionAudit(await readJsonFile(input.auditPath));
         const executionCommit = parseAutopilotExecutionCommit(await readJsonFile(input.executionCommitPath));
         const blockers = mergePreflightBlockers(active, input.unitId, input.attempt, status, receipt, audit, executionCommit);
@@ -261,6 +262,11 @@ export function parseAutopilotUnitMerge(value) {
         execution_commit_ref: expectString(value, 'execution_commit_ref'),
         merged_at: expectString(value, 'merged_at'),
     };
+}
+function parseMergeReceipt(value) {
+    if (isRecord(value) && value['schema_version'] === 'autopilot.receipt.v2')
+        return parseNewRunRuntimeReceipt(value).receipt;
+    return parseAutopilotReceipt(value);
 }
 function mergePreflightBlockers(active, unitId, attempt, status, receipt, audit, executionCommit) {
     const blockers = [];

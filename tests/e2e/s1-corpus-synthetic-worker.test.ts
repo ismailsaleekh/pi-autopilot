@@ -9,7 +9,7 @@ import { it } from 'node:test';
 
 import { canonicalJson } from '../../src/core/coordination/canonical-json.ts';
 import { coordinatorRuntimePaths } from '../../src/core/coordination/runtime-paths.ts';
-import { parseAutopilotMasterPlan, parseAutopilotState, parseAutopilotUnitSpec } from '../../src/core/contracts/validate.ts';
+import { parseAutopilotMasterPlan, parseAutopilotState } from '../../src/core/contracts/validate.ts';
 import { AUTOPILOT_STATE_ROOT_ENV } from '../../src/core/parallel-runtime.ts';
 import {
   installActualCf50Package,
@@ -24,6 +24,7 @@ import { buildCloneEnvironment } from '../../tools/s1-corpus-rehearsal/environme
 import { buildIsolatedGitMirror } from '../../tools/s1-corpus-rehearsal/git-mirror.ts';
 import { corpusRunIdentityDigest, runScenarioWorker, type ScenarioWorkerCloneAuthority, type ScenarioWorkerScenarioAuthority } from '../../tools/s1-corpus-rehearsal/incident-runner.ts';
 import { copyRegularFileNoFollow } from '../../tools/s1-corpus-rehearsal/inventory.ts';
+import { w5UnitSpec } from '../helpers/w5-roster-fixtures.ts';
 
 interface JsonMap { readonly [key: string]: unknown }
 
@@ -180,9 +181,9 @@ void it('executes one packed-candidate scenario worker over synthetic durable au
     const specPath = join(launchRuntime, 'unit-specs', `${unitId}.implement.attempt-1.json`);
     await mkdir(join(launchRuntime, 'unit-specs'), { recursive: true });
     const verificationPlan = { positive_witnesses: [], negative_witnesses: [], regression_witnesses: [], real_boundary_witnesses: [], blast_radius_checks: [], docs_schema_prompt_checks: [], dirty_tree_checks: [] };
-    const spec = parseAutopilotUnitSpec({
-      schema_version: 'autopilot.unit_spec.v1', workstream: launchWorkstream, unit_id: unitId, role: 'implement', template: 'implement', attempt: 1,
-      objective: 'Exercise the production scheduler without launching an agent.', cwd: copyMain, model: 'openai-codex/gpt-5.6-terra', thinking: 'high',
+    const spec = w5UnitSpec({
+      workstream: launchWorkstream, unit_id: unitId, role: 'implement', attempt: 1,
+      objective: 'Exercise the production scheduler without launching an agent.', cwd: copyMain,
       owned_paths: ['src/new.ts'], read_only_paths: [], untouchable_paths: ['private/**'], context_refs: [], validation_commands: [],
       status_output: join(launchRuntime, 'statuses', `${unitId}.implement.attempt-1.json`), receipt_output: join(launchRuntime, 'receipts', `${unitId}.implement.attempt-1.receipt.json`), evidence_dir: join(launchRuntime, 'evidence', unitId),
       stop_boundary: 'No agent is launched by this structural rehearsal.', quality_profile: 'source-change', risk_level: 'medium', acceptance_criteria: ['planner result is measured'], verification_plan: verificationPlan, closure_criteria: ['no external effect starts'], upstream_refs: [],

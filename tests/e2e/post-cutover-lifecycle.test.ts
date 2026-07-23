@@ -12,12 +12,10 @@ import {
   parseAutopilotExecutionAudit,
   parseAutopilotExecutionCommit,
   parseAutopilotMasterPlan,
-  parseAutopilotReceipt,
   parseAutopilotState,
   parseAutopilotStatusEntry,
   type AutopilotMasterPlan,
   type AutopilotState,
-  type AutopilotUnitSpec,
   type AutopilotVerificationPlan,
 } from '../../src/core/contracts/index.ts';
 import { CoordinatorClient } from '../../src/core/coordination/client.ts';
@@ -41,6 +39,9 @@ import {
   type AutopilotValidationEvidence,
 } from '../../src/core/validation-staleness.ts';
 import { writeAutopilotStateAtomic } from '../../src/core/state-store/index.ts';
+import { parseAutopilotReceiptV2 } from '../../src/core/roster/contracts.ts';
+import { unitSpecAuthorityProjection } from '../../src/core/roster/runtime-consumers.ts';
+import { installRuntimeRosterAuthority, runtimeRosterUnitSpec, type RuntimeRosterAuthorityFixture } from '../helpers/runtime-roster-authority.ts';
 import { withMigrationTestFixture, type MigrationTestFixture } from '../helpers/migration-fixture.ts';
 
 const coordinatorCli = new URL('../../src/cli/autopilot-coordinator.ts', import.meta.url);
@@ -119,8 +120,9 @@ void describe('post-cutover coordinator-authoritative lifecycle', () => {
         };
 
         await writeInitialPlanningArtifacts(prepared.runtimeRoot, prepared.active.workstream);
+        const authority = await installRuntimeRosterAuthority({ stateRoot: fixture.stateRoot, mainWorktreePath: prepared.mainWorktreePath, workstream: prepared.active.workstream, repoId: prepared.active.repo_key, workstreamRun: prepared.active.workstream_run });
         const fakePi = await writeFakePi(fixture.root);
-        const implementSpec = implementationSpec(prepared.runtimeRoot, prepared.active);
+        const implementSpec = implementationSpec(prepared.runtimeRoot, prepared.active, authority);
         const implementSpecPath = join(prepared.runtimeRoot, 'unit-specs', 'u01-implement.implement.attempt-1.json');
         await writeJson(implementSpecPath, implementSpec);
         const implementResult = await runAutopilotAgentFromSpecPath(implementSpecPath, {
@@ -143,8 +145,8 @@ void describe('post-cutover coordinator-authoritative lifecycle', () => {
         assert.equal(existsSync(join(prepared.taskRoot, '_materialization-ledger.jsonl')), true);
 
         const evidence = evidencePaths(implementSpec, implementResult.auditOutput, implementResult.executionCommitOutput);
-        const implementStatus = parseAutopilotStatusEntry(await readJson(evidence.status), { unitSpec: implementSpec });
-        const implementReceipt = parseAutopilotReceipt(await readJson(evidence.receipt));
+        const implementStatus = parseAutopilotStatusEntry(await readJson(evidence.status), { unitSpec: unitSpecAuthorityProjection(implementSpec) });
+        const implementReceipt = parseAutopilotReceiptV2(await readJson(evidence.receipt));
         const implementAudit = parseAutopilotExecutionAudit(await readJson(evidence.audit));
         const executionCommit = parseAutopilotExecutionCommit(await readJson(evidence.executionCommit));
         assert.equal(implementReceipt.status_sha256, await sha256File(evidence.status));
@@ -197,7 +199,7 @@ void describe('post-cutover coordinator-authoritative lifecycle', () => {
         assert.equal(reservations[0]?.['path'], 'src/feature.js');
         assert.equal(typeof record(reservations[0]?.['merge_evidence'])['sha256'], 'string');
 
-        const validationSpec = validatorSpec(prepared.runtimeRoot, prepared.mainWorktreePath);
+        const validationSpec = validatorSpec(prepared.runtimeRoot, prepared.mainWorktreePath, authority);
         const validationSpecPath = join(prepared.runtimeRoot, 'unit-specs', 'v01-validate.validate.attempt-1.json');
         await writeJson(validationSpecPath, validationSpec);
         const validationResult = await runAutopilotAgentFromSpecPath(validationSpecPath, {
@@ -211,8 +213,8 @@ void describe('post-cutover coordinator-authoritative lifecycle', () => {
         assert.equal(validationResult.executionCommitOutput, null);
 
         const validationEvidencePaths = evidencePaths(validationSpec, validationResult.auditOutput, validationResult.executionCommitOutput);
-        const validationStatus = parseAutopilotStatusEntry(await readJson(validationEvidencePaths.status), { unitSpec: validationSpec });
-        const validationReceipt = parseAutopilotReceipt(await readJson(validationEvidencePaths.receipt));
+        const validationStatus = parseAutopilotStatusEntry(await readJson(validationEvidencePaths.status), { unitSpec: unitSpecAuthorityProjection(validationSpec) });
+        const validationReceipt = parseAutopilotReceiptV2(await readJson(validationEvidencePaths.receipt));
         const validationAudit = parseAutopilotExecutionAudit(await readJson(validationEvidencePaths.audit));
         assert.deepEqual(validationStatus.covered_witness_ids, ['feature-syntax-and-content']);
         assert.equal(validationReceipt.status_sha256, await sha256File(validationEvidencePaths.status));
@@ -333,24 +335,20 @@ function runMigrationCommand(fixture: MigrationTestFixture, args: readonly strin
   return report;
 }
 
-function implementationSpec(runtimeRoot: string, active: Parameters<typeof unitWorktreePathForActiveAutopilot>[0]): AutopilotUnitSpec {
-  return {
-    schema_version: 'autopilot.unit_spec.v1',
+function implementationSpec(runtimeRoot: string, active: Parameters<typeof unitWorktreePathForActiveAutopilot>[0], authority: RuntimeRosterAuthorityFixture): ReturnType<typeof runtimeRosterUnitSpec> {
+  return runtimeRosterUnitSpec(authority, {
     workstream: 'post-cutover-e2e',
     unit_id: 'u01-implement',
     role: 'implement',
-    template: 'implement',
     attempt: 1,
     objective: 'Change the generic fixture feature through a coordinator-authoritative child run.',
     cwd: unitWorktreePathForActiveAutopilot(active, 'u01-implement', 1),
-    model: 'openai-codex/gpt-5.6-terra',
-    thinking: 'high',
     owned_paths: ['src/feature.js'],
     read_only_paths: ['README.md'],
     untouchable_paths: ['docs/**'],
     context_refs: [
-      { path: '.pi/autopilot/post-cutover-e2e/mission.md', purpose: 'durable mission authority' },
-      { path: '.pi/autopilot/post-cutover-e2e/master-plan.json', purpose: 'durable plan authority' },
+      { path: '.pi/autopilot/post-cutover-e2e/mission.md', purpose: 'durable mission authority', sha256: null, byte_count: null },
+      { path: '.pi/autopilot/post-cutover-e2e/master-plan.json', purpose: 'durable plan authority', sha256: null, byte_count: null },
     ],
     validation_commands: [],
     status_output: join(runtimeRoot, 'statuses', 'u01-implement.implement.attempt-1.json'),
@@ -368,33 +366,29 @@ function implementationSpec(runtimeRoot: string, active: Parameters<typeof unitW
     upstream_refs: [],
     timeout_seconds: 60,
     render_prompt_snapshot: true,
-  };
+  });
 }
 
-function validatorSpec(runtimeRoot: string, mainWorktree: string): AutopilotUnitSpec {
+function validatorSpec(runtimeRoot: string, mainWorktree: string, authority: RuntimeRosterAuthorityFixture): ReturnType<typeof runtimeRosterUnitSpec> {
   const witness = {
     id: 'feature-syntax-and-content',
     command: 'node --check src/feature.js',
     expected_signal: 'syntax exits zero and deterministic content is present',
     required: true,
   };
-  return {
-    schema_version: 'autopilot.unit_spec.v1',
+  return runtimeRosterUnitSpec(authority, {
     workstream: 'post-cutover-e2e',
     unit_id: 'v01-validate',
     role: 'validate',
-    template: 'validate',
     attempt: 1,
     objective: 'Independently validate the accepted feature merge.',
     cwd: mainWorktree,
-    model: 'openai-codex/gpt-5.6-sol',
-    thinking: 'xhigh',
     owned_paths: [],
     read_only_paths: ['src/feature.js'],
     untouchable_paths: ['docs/**'],
     context_refs: [
-      { path: '.pi/autopilot/post-cutover-e2e/mission.md', purpose: 'durable mission authority' },
-      { path: '.pi/autopilot/post-cutover-e2e/master-plan.json', purpose: 'durable plan authority' },
+      { path: '.pi/autopilot/post-cutover-e2e/mission.md', purpose: 'durable mission authority', sha256: null, byte_count: null },
+      { path: '.pi/autopilot/post-cutover-e2e/master-plan.json', purpose: 'durable plan authority', sha256: null, byte_count: null },
     ],
     validation_commands: [witness.command],
     status_output: join(runtimeRoot, 'statuses', 'v01-validate.validate.attempt-1.json'),
@@ -409,7 +403,12 @@ function validatorSpec(runtimeRoot: string, mainWorktree: string): AutopilotUnit
     upstream_refs: [{ unit_id: 'u01-implement', purpose: 'independently validate accepted merge', status_ref: 'statuses/u01-implement.implement.attempt-1.json', audit_ref: 'execution-audits/u01-implement.implement.attempt-1.json' }],
     timeout_seconds: 60,
     render_prompt_snapshot: true,
-  };
+  });
+}
+
+function validationVerificationPlan(): AutopilotVerificationPlan {
+  const witness = { id: 'feature-syntax-and-content', command: 'node --check src/feature.js', expected_signal: 'syntax exits zero and deterministic content is present', required: true };
+  return { ...emptyVerificationPlan(), positive_witnesses: [witness] };
 }
 
 function emptyVerificationPlan(): AutopilotVerificationPlan {
@@ -511,7 +510,7 @@ async function writeClosureArtifacts(input: {
       'v01-validate': { unit_id: 'v01-validate', role: 'validate', state: 'completed', dependencies: ['u01-implement'], summary: 'validated' },
     },
     ownership_matrix: { owned_paths: ['src/feature.js'], read_only_paths: ['README.md'], untouchable_paths: ['docs/**'], held_paths: ['src/feature.js'] },
-    verification_matrix: validatorSpec(input.runtimeRoot, dirname(dirname(dirname(input.runtimeRoot)))).verification_plan ?? emptyVerificationPlan(),
+    verification_matrix: validationVerificationPlan(),
     closure_criteria: ['independent validation PASS is durable'],
     current_focus: 'close',
     last_decision_id: 0,
@@ -534,7 +533,7 @@ async function writeClosureArtifacts(input: {
   await writeFile(join(input.runtimeRoot, 'mission.md'), '# Mission\n\nComplete the post-cutover lifecycle.\n', 'utf8');
 }
 
-function evidencePaths(spec: AutopilotUnitSpec, auditPath: string | null, executionCommitPath: string | null): EvidencePaths {
+function evidencePaths(spec: ReturnType<typeof runtimeRosterUnitSpec>, auditPath: string | null, executionCommitPath: string | null): EvidencePaths {
   if (auditPath === null) throw new Error(`${spec.unit_id} omitted execution audit`);
   return {
     status: spec.status_output,
@@ -637,8 +636,12 @@ import { createInterface } from 'node:readline';
 if (process.env.PI_OFFLINE !== '1') throw new Error('provider-free fixture requires PI_OFFLINE=1');
 if (process.env.AUTOPILOT_COORDINATOR_SESSION_CONTEXT !== undefined) throw new Error('parent coordinator capability leaked into child');
 const contextPath = process.env.AUTOPILOT_AGENT_STATUS_CONTEXT;
+const observationPath = process.env.AUTOPILOT_EXECUTION_OBSERVATION_PATH;
 function send(value) { process.stdout.write(JSON.stringify(value) + '\\n'); }
 function respond(command, success = true, extra = {}) { send({ id: command.id, type: 'response', command: command.type, success, ...extra }); }
+function sha256(text) { return 'sha256:' + createHash('sha256').update(text, 'utf8').digest('hex'); }
+function canonical(value) { if (value === null || typeof value !== 'object') return JSON.stringify(value); if (Array.isArray(value)) return '[' + value.map(canonical).join(',') + ']'; return '{' + Object.keys(value).filter((key) => value[key] !== undefined).sort().map((key) => JSON.stringify(key) + ':' + canonical(value[key])).join(',') + '}'; }
+function hashOmitting(value, field) { const clone = JSON.parse(JSON.stringify(value)); delete clone[field]; return sha256(canonical(clone)); }
 function context() {
   if (!contextPath) throw new Error('missing forced-output context');
   return JSON.parse(readFileSync(contextPath, 'utf8'));
@@ -673,28 +676,36 @@ function emitStatus() {
   const statusBytes = JSON.stringify(status, null, 2) + '\\n';
   writeFileSync(carrier.status_output, statusBytes, 'utf8');
   const statusSha256 = 'sha256:' + createHash('sha256').update(statusBytes, 'utf8').digest('hex');
+  const p = carrier.roster_execution_identity.request_profile;
+  const observed = { provider_id: p.provider_id, requested_model_id: p.model_id, executed_model_id: p.model_id, api: p.api, thinking: p.thinking, service_tier: p.service_tier, cache_policy: p.cache_policy, system_prompt_profile: p.system_prompt_profile, system_prompt_sha256: sha256('fake-system-prompt'), route_policy_id: p.route_policy_id, route_policy_revision: p.route_policy_revision, request_profile_sha256: p.request_profile_sha256, observed_profile_sha256: 'sha256:0000000000000000000000000000000000000000000000000000000000000000' };
+  observed.observed_profile_sha256 = hashOmitting(observed, 'observed_profile_sha256');
   const receipt = {
-    schema_version: 'autopilot.receipt.v1', tool_name: 'autopilot_emit_status', workstream: unit.workstream, unit_id: unit.unit_id,
-    role: unit.role, attempt: unit.attempt, emitted_at: '2026-07-13T10:00:30.000Z', status_output: carrier.status_output,
+    schema_version: 'autopilot.receipt.v2', tool_name: 'autopilot_emit_status', workstream: unit.workstream, unit_id: unit.unit_id,
+    role: unit.role, attempt: unit.attempt, emitted_at: '2026-07-23T10:00:30.000Z', status_output: carrier.status_output,
     status_sha256: statusSha256, schema_sha256: carrier.schema_sha256, tool_call_id: 'call-' + unit.unit_id,
-    provider_identity: carrier.provider_identity, expected_identity_hash: carrier.expected_identity_hash
+    provider_identity: carrier.provider_identity, expected_identity_hash: carrier.expected_identity_hash,
+    roster_id: carrier.roster_execution_identity.roster_id, roster_revision: carrier.roster_execution_identity.roster_revision,
+    roster_sha256: carrier.roster_execution_identity.roster_sha256, assignment_sha256: carrier.roster_execution_identity.assignment_sha256,
+    pre_run_selection_sha256: carrier.roster_execution_identity.pre_run_selection_sha256, request_profile: p, observed_profile: observed
   };
   writeFileSync(carrier.receipt_output, JSON.stringify(receipt, null, 2) + '\\n', 'utf8');
   const evidenceRef = relative(carrier.artifact_root, carrier.receipt_output).replaceAll('\\\\', '/');
   if (evidenceRef.startsWith('../')) throw new Error('receipt escaped artifact root');
   send({ type: 'tool_result', toolName: 'autopilot_emit_status', toolCallId: receipt.tool_call_id, isError: false, details: {
-    tool_name: 'autopilot_emit_status', tool_call_id: receipt.tool_call_id, terminating: true, status_sha256: statusSha256
+    schema_version: 'autopilot.status_tool_result.v1', tool_name: 'autopilot_emit_status', tool_call_id: receipt.tool_call_id, terminating: true, status_sha256: statusSha256, schema_sha256: carrier.schema_sha256, expected_identity_hash: carrier.expected_identity_hash
   }});
 }
+function emitObservation(message) { const carrier = context(); const p = carrier.roster_execution_identity.request_profile; const observation = { schema_version: 'autopilot.execution_observation.v1', source: 'fake-rpc-subprocess.v1', observed_at: '2026-07-23T10:00:30.000Z', mode: 'rpc', active_model: { provider: p.provider_id, id: p.model_id, api: p.api }, final_assistant_message: { provider: message.provider, model: message.model, api: message.api, stopReason: message.stopReason }, execution_profile: { service_tier: p.service_tier, cache_policy: p.cache_policy, system_prompt_profile: p.system_prompt_profile, system_prompt_sha256: sha256('fake-system-prompt'), route_policy_id: p.route_policy_id, route_policy_revision: p.route_policy_revision }, diagnostics: [] }; mkdirSync(dirname(observationPath), { recursive: true }); writeFileSync(observationPath, JSON.stringify(observation, null, 2) + '\\n', 'utf8'); }
 const input = createInterface({ input: process.stdin, crlfDelay: Infinity });
 input.on('line', (line) => {
   const command = JSON.parse(line);
-  if (command.type === 'get_state') { const unit = context().unit_spec; respond(command, true, { data: { model: { id: unit.model.split('/')[1], provider: 'openai-codex', api: 'openai-codex-responses' }, thinkingLevel: unit.thinking } }); return; }
+  if (command.type === 'get_state') { const p = context().roster_execution_identity.request_profile; respond(command, true, { data: { model: { id: p.model_id, provider: p.provider_id, api: p.api }, thinkingLevel: p.thinking } }); return; }
   if (command.type === 'get_session_stats') { respond(command, true, { data: { sessionId: 'provider-free-post-cutover' } }); return; }
   if (command.type === 'prompt') {
     respond(command); send({ type: 'agent_start' }); send({ type: 'turn_start' }); emitStatus();
-    const unit = context().unit_spec;
-    const message = { role: 'assistant', content: [{ type: 'text', text: 'deterministic ' + unit.role + ' complete' }], api: 'openai-codex-responses', provider: 'openai-codex', model: unit.model.split('/')[1], stopReason: 'stop' };
+    const carrier = context(); const unit = carrier.unit_spec; const p = carrier.roster_execution_identity.request_profile;
+    const message = { role: 'assistant', content: [{ type: 'text', text: 'deterministic ' + unit.role + ' complete' }], api: p.api, provider: p.provider_id, model: p.model_id, stopReason: 'stop' };
+    emitObservation(message);
     send({ type: 'message_end', message }); send({ type: 'turn_end', message, toolResults: [] }); send({ type: 'agent_end', messages: [message] }); return;
   }
   respond(command, false, { error: 'unsupported command' });

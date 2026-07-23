@@ -68,12 +68,12 @@ export async function installPackedRelease(input: {
   if (topEntries.length !== 1 || topEntries[0] !== 'package') throw new Error('C5 packed release extracted files outside the package root');
   await assertInstalledTree(packageRoot);
   const manifest = jsonObject(JSON.parse(await readFile(join(packageRoot, 'package.json'), 'utf8')) as unknown, 'C5 installed package manifest');
-  const expectedVersion = input.release_kind === 'candidate' ? '1.2.0' : '1.1.8';
+  const expectedVersion = input.release_kind === 'candidate' ? '1.3.0' : '1.1.8';
   if (manifest['name'] !== 'pi-autopilot' || manifest['version'] !== expectedVersion) throw new Error('C5 installed package identity differs from its expected release');
   const constants = await readFile(join(packageRoot, 'dist', 'src', 'core', 'coordination', 'runtime-constants.js'), 'utf8');
   const expectedBuild = input.release_kind === 'candidate' ? '1.2.0-s1' : '1.1.8-cf50';
   const identityLiterals = input.release_kind === 'candidate'
-    ? ["COORDINATOR_IMPLEMENTATION_BUILD = '1.2.0-s1'", "COORDINATOR_PACKAGE_VERSION = '1.2.0'", 'COORDINATOR_STORE_SCHEMA_VERSION = 13', 'COORDINATOR_API_SCHEMA_VERSION = 12', 'COORDINATOR_DATABASE_SCHEMA_VERSION = 12']
+    ? ["COORDINATOR_IMPLEMENTATION_BUILD = '1.2.0-s1'", "COORDINATOR_PACKAGE_VERSION = '1.3.0'", 'COORDINATOR_STORE_SCHEMA_VERSION = 13', 'COORDINATOR_API_SCHEMA_VERSION = 12', 'COORDINATOR_DATABASE_SCHEMA_VERSION = 12']
     : ["COORDINATOR_PACKAGE_BUILD = '1.1.8-cf50'", 'COORDINATOR_DATABASE_SCHEMA_VERSION = 12'];
   if (identityLiterals.some((literal) => !constants.includes(literal))) throw new Error('C5 installed release runtime identity differs from the frozen implementation/API/store contract');
   const coordinatorCli = join(packageRoot, 'dist', 'src', 'cli', 'autopilot-coordinator.js');

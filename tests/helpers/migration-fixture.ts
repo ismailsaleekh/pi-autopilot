@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { chmod, copyFile, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
+import { chmod, copyFile, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -133,7 +133,7 @@ async function finishMigrationTestFixture(root: string, stateRoot: string, fixtu
 }
 
 export async function withEmptyMigrationTestFixture(run: (fixture: MigrationTestFixture) => Promise<void>): Promise<readonly number[]> {
-  const root = await mkdtemp(join(tmpdir(), 'autopilot-empty-migration-proof-'));
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'autopilot-empty-migration-proof-')));
   const source = join(root, 'source');
   const stateRoot = join(root, 'state');
   const env: ProcessEnvLike = { ...process.env, AUTOPILOT_STATE_ROOT: stateRoot };
@@ -152,7 +152,7 @@ export async function withEmptyMigrationTestFixture(run: (fixture: MigrationTest
 }
 
 export async function withMigrationTestFixture(run: (fixture: MigrationTestFixture) => Promise<void>): Promise<readonly number[]> {
-  const root = await mkdtemp(join(tmpdir(), 'autopilot-migration-proof-'));
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'autopilot-migration-proof-')));
   const source = join(root, 'source');
   const stateRoot = join(root, 'state');
   const env: ProcessEnvLike = { ...process.env, AUTOPILOT_STATE_ROOT: stateRoot };
