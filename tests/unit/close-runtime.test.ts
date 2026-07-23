@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { existsSync, realpathSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { describe, it } from 'node:test';
@@ -15,7 +15,8 @@ import { ensureMainWorktreeSagaRegistered } from '../../src/core/coordination/wo
 import { AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV } from '../../src/core/names.ts';
 import { materializeAutopilotSpecPaths } from '../../src/core/materialization.ts';
 import type { AutopilotExecutionAudit, AutopilotExecutionCommit, AutopilotMasterPlan, AutopilotState, AutopilotStatusEntry, AutopilotUnitSpec } from '../../src/core/contracts/index.ts';
-import { authorizeExistingRunRosterTransitionInput, buildExistingRunRosterTransitionProposal, commitApprovedExistingRunRosterTransition, type AutopilotSavedRosterRefV1 } from '../../src/core/roster/transition.ts';
+import { buildCanonicalPreRunSelection } from '../../src/core/roster/run-selection.ts';
+import { authorizeExistingRunRosterTransitionInput, buildExistingRunRosterTransitionProposal, commitApprovedExistingRunRosterTransition, savedRosterRefForSelection, type AutopilotSavedRosterRefV1 } from '../../src/core/roster/transition.ts';
 import {
   AUTOPILOT_STATE_ROOT_ENV,
   acquireClaimsForUnit,
@@ -45,14 +46,50 @@ async function withTempDir<T>(run: (root: string) => Promise<T>): Promise<T> {
   }
 }
 
-function closeTransitionRef(label: 'from' | 'to'): AutopilotSavedRosterRefV1 {
+function closeTransitionRef(label: 'from' | 'to' | 'fork'): AutopilotSavedRosterRefV1 {
   return {
     roster_id: `${label}-close-roster`,
     roster_revision: 1,
-    roster_sha256: `sha256:${(label === 'from' ? 'a' : 'b').repeat(64)}`,
-    assignment_set_sha256: `sha256:${(label === 'from' ? 'c' : 'd').repeat(64)}`,
+    roster_sha256: `sha256:${(label === 'from' ? 'a' : label === 'to' ? 'b' : 'e').repeat(64)}`,
+    assignment_set_sha256: `sha256:${(label === 'from' ? 'c' : label === 'to' ? 'd' : 'f').repeat(64)}`,
     path: `/authority/${label}-close-roster.json`,
   };
+}
+
+async function installCloseRosterSelection(input: {
+  readonly stateRoot: string;
+  readonly mainWorktreePath: string;
+  readonly workstream: string;
+  readonly repoId: string;
+  readonly workstreamRun: string;
+}): Promise<Parameters<typeof savedRosterRefForSelection>[0]['selection']> {
+  const canonical = buildCanonicalPreRunSelection({
+    stateRoot: input.stateRoot,
+    repo_id: input.repoId,
+    workstream_run: input.workstreamRun,
+    selected: {
+      scope: 'user',
+      roster_id: closeTransitionRef('from').roster_id,
+      roster_revision: closeTransitionRef('from').roster_revision,
+      roster_sha256: closeTransitionRef('from').roster_sha256,
+      assignment_set_sha256: closeTransitionRef('from').assignment_set_sha256,
+      config_sha256: `sha256:${'9'.repeat(64)}`,
+    },
+  });
+  await mkdir(dirname(canonical.selection_path), { recursive: true, mode: 0o700 });
+  await chmod(input.stateRoot, 0o700).catch(() => undefined);
+  await chmod(join(input.stateRoot, 'roster-selections'), 0o700).catch(() => undefined);
+  await chmod(dirname(canonical.selection_path), 0o700);
+  await writeFile(canonical.selection_path, canonical.selection_bytes, { mode: 0o600 });
+  await chmod(canonical.selection_path, 0o600);
+  const mirror = join(input.mainWorktreePath, '.pi', 'autopilot', input.workstream, 'roster-snapshot.json');
+  await mkdir(dirname(mirror), { recursive: true, mode: 0o700 });
+  await chmod(join(input.mainWorktreePath, '.pi'), 0o700).catch(() => undefined);
+  await chmod(join(input.mainWorktreePath, '.pi', 'autopilot'), 0o700).catch(() => undefined);
+  await chmod(dirname(mirror), 0o700);
+  await writeFile(mirror, canonical.selection_bytes, { mode: 0o600 });
+  await chmod(mirror, 0o600);
+  return canonical.selection;
 }
 
 interface PreparedCloseFixture {
@@ -368,6 +405,45 @@ async function writeRuntimeClosureArtifacts(input: {
   await writeFile(join(input.runtimeRoot, 'mission.md'), '# Mission\n\nClose smoke.\n', 'utf8');
 }
 
+async function commitCloseRosterTransition(root: string, fixture: PreparedCloseFixture, toRoster: AutopilotSavedRosterRefV1 = closeTransitionRef('to')): Promise<Awaited<ReturnType<typeof commitApprovedExistingRunRosterTransition>>> {
+  const stateRoot = process.env[AUTOPILOT_STATE_ROOT_ENV] ?? join(root, 'autopilot-state');
+  const active = (await readActiveAutopilots(coordinationRootForRepo(fixture.repoKey))).find((row) => row.workstream_run === fixture.workstreamRun);
+  if (active === undefined) throw new Error('active row missing');
+  const selection = await installCloseRosterSelection({ stateRoot, mainWorktreePath: active.main_worktree_path, workstream: active.workstream, repoId: active.repo_key, workstreamRun: active.workstream_run });
+  const run = { repo_id: active.repo_key, workstream: active.workstream, workstream_run: active.workstream_run, main_worktree_path: active.main_worktree_path, runtime_root: active.runtime_root, source_repo: active.source_repo };
+  const fromRoster = savedRosterRefForSelection({ selection, stateRoot, trustedProjectRoot: active.source_repo });
+  const proposal = buildExistingRunRosterTransitionProposal({ stateRoot, run, from_roster: fromRoster, to_roster: toRoster, reason: 'close fresh validation test', approved_at: '2026-07-23T00:00:00.000Z' });
+  const approval = authorizeExistingRunRosterTransitionInput({ proposal, source: 'user', text: proposal.approval_phrase }).approval;
+  if (approval === null) throw new Error('missing transition approval');
+  const committed = await commitApprovedExistingRunRosterTransition({ stateRoot, run, proposal, approval, expected_active_run: run });
+  assert.equal(committed.ok, true, committed.diagnostics.map((diagnostic) => diagnostic.code).join(', '));
+  return committed;
+}
+
+async function writeValidationEvidence(runtimeRoot: string, name: string, validatedAt: string): Promise<void> {
+  await writeJson(join(runtimeRoot, 'validation', name), {
+    schema_version: 'autopilot.validation_evidence.v1',
+    workstream: 'close-smoke',
+    source_unit_id: 'u01-implement',
+    source_attempt: 1,
+    validation_unit_id: `v-${name.replace(/[^a-z0-9]+/giu, '-')}`,
+    validation_attempt: 2,
+    unit_merge_ref: 'unit-merges/missing.json',
+    integration_head: `sha256:${'0'.repeat(64)}`,
+    covered_paths: ['src/smoke.ts'],
+    covered_path_groups: [],
+    witness_ids: ['negative-transition-freshness-test'],
+    status_ref: 'statuses/missing-transition-validation.json',
+    status_sha256: `sha256:${'1'.repeat(64)}`,
+    receipt_ref: 'receipts/missing-transition-validation.json',
+    receipt_sha256: `sha256:${'2'.repeat(64)}`,
+    audit_ref: 'execution-audits/missing-transition-validation.json',
+    audit_sha256: `sha256:${'3'.repeat(64)}`,
+    verdict: 'PASS',
+    validated_at: validatedAt,
+  });
+}
+
 async function writeJson(path: string, value: unknown): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
   await writeFile(path, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
@@ -620,18 +696,79 @@ void describe('Autopilot close runtime', () => {
   void it('blocks close after a roster transition until fresh target-roster validation exists', async () => {
     await withTempDir(async (root) => {
       const fixture = await prepareCloseFixture(root);
-      const stateRoot = process.env[AUTOPILOT_STATE_ROOT_ENV] ?? join(root, 'autopilot-state');
-      const active = (await readActiveAutopilots(coordinationRootForRepo(fixture.repoKey))).find((row) => row.workstream_run === fixture.workstreamRun);
-      if (active === undefined) throw new Error('active row missing');
-      const run = { repo_id: active.repo_key, workstream: active.workstream, workstream_run: active.workstream_run, main_worktree_path: active.main_worktree_path, runtime_root: active.runtime_root, source_repo: active.source_repo };
-      const proposal = buildExistingRunRosterTransitionProposal({ stateRoot, run, from_roster: closeTransitionRef('from'), to_roster: closeTransitionRef('to'), reason: 'close fresh validation test', approved_at: '2026-07-23T00:00:00.000Z' });
-      const approval = authorizeExistingRunRosterTransitionInput({ proposal, source: 'user', text: proposal.approval_phrase }).approval;
-      if (approval === null) throw new Error('missing transition approval');
-      const committed = await commitApprovedExistingRunRosterTransition({ stateRoot, run, proposal, approval, expected_active_run: run });
-      assert.equal(committed.ok, true, committed.diagnostics.map((diagnostic) => diagnostic.code).join(', '));
+      await commitCloseRosterTransition(root, fixture);
       const result = await closeAutopilotWorkstream({ workstream: 'close-smoke', sourceCwd: fixture.source, workstreamRun: fixture.workstreamRun, dryRun: true });
       assert.equal(result.outcome, 'dry-run');
-      assert.equal(result.blockers.some((blocker) => /requires post-transition independent target-roster validate\/bughunt evidence|target roster cannot be authenticated/u.test(blocker)), true);
+      assert.equal(result.blockers.some((blocker) => /requires post-transition independent target-roster validate\/bughunt evidence|target roster cannot be authenticated/u.test(blocker)), true, result.blockers.join('\n'));
+    });
+  });
+
+  void it('blocks close when a committed roster transition runtime mirror is missing or deleted', async () => {
+    await withTempDir(async (root) => {
+      const fixture = await prepareCloseFixture(root);
+      const committed = await commitCloseRosterTransition(root, fixture);
+      await rm(committed.runtime_transition_path, { force: true });
+      const result = await closeAutopilotWorkstream({ workstream: 'close-smoke', sourceCwd: fixture.source, workstreamRun: fixture.workstreamRun, dryRun: true });
+      assert.equal(result.outcome, 'dry-run');
+      assert.equal(result.blockers.some((blocker) => /runtime mirror is missing|byte-equal linear chain/u.test(blocker)), true);
+    });
+  });
+
+  void it('blocks close when a roster transition exists only in runtime', async () => {
+    await withTempDir(async (root) => {
+      const fixture = await prepareCloseFixture(root);
+      const committed = await commitCloseRosterTransition(root, fixture);
+      await rm(committed.transition_path, { force: true });
+      const result = await closeAutopilotWorkstream({ workstream: 'close-smoke', sourceCwd: fixture.source, workstreamRun: fixture.workstreamRun, dryRun: true });
+      assert.equal(result.outcome, 'dry-run');
+      assert.equal(result.blockers.some((blocker) => /no authenticated external counterpart|absent from authenticated external chain/u.test(blocker)), true);
+    });
+  });
+
+  void it('blocks close when roster transition runtime bytes drift from external authority', async () => {
+    await withTempDir(async (root) => {
+      const fixture = await prepareCloseFixture(root);
+      const committed = await commitCloseRosterTransition(root, fixture);
+      const drift = Buffer.from(await readFile(committed.runtime_transition_path, 'utf8').then((text) => text.replace('close fresh validation test', 'close drift validation test')), 'utf8');
+      await writeFile(committed.runtime_transition_path, drift);
+      const result = await closeAutopilotWorkstream({ workstream: 'close-smoke', sourceCwd: fixture.source, workstreamRun: fixture.workstreamRun, dryRun: true });
+      assert.equal(result.outcome, 'dry-run');
+      assert.equal(result.blockers.some((blocker) => /byte-equal linear chain|READBACK_MISMATCH/u.test(blocker)), true);
+    });
+  });
+
+  void it('blocks close when authenticated roster transition history forks', async () => {
+    await withTempDir(async (root) => {
+      const fixture = await prepareCloseFixture(root);
+      await commitCloseRosterTransition(root, fixture);
+      await commitCloseRosterTransition(root, fixture, closeTransitionRef('fork'));
+      const result = await closeAutopilotWorkstream({ workstream: 'close-smoke', sourceCwd: fixture.source, workstreamRun: fixture.workstreamRun, dryRun: true });
+      assert.equal(result.outcome, 'dry-run');
+      assert.equal(result.blockers.some((blocker) => /byte-equal linear chain|TRANSITION_REQUIRED/u.test(blocker)), true);
+    });
+  });
+
+  void it('blocks close on invalid or pre-transition post-transition validation timestamps', async () => {
+    await withTempDir(async (root) => {
+      const fixture = await prepareCloseFixture(root);
+      await commitCloseRosterTransition(root, fixture);
+      await writeValidationEvidence(fixture.runtimeRoot, 'invalid-date.json', 'not-a-date');
+      await writeValidationEvidence(fixture.runtimeRoot, 'pre-transition-date.json', '2026-07-22T23:59:59.999Z');
+      const result = await closeAutopilotWorkstream({ workstream: 'close-smoke', sourceCwd: fixture.source, workstreamRun: fixture.workstreamRun, dryRun: true });
+      assert.equal(result.outcome, 'dry-run');
+      assert.equal(result.blockers.some((blocker) => /invalid-date\.json.*validated_at is not a finite canonical UTC timestamp/u.test(blocker)), true);
+      assert.equal(result.blockers.some((blocker) => /requires post-transition independent target-roster validate\/bughunt evidence/u.test(blocker)), true);
+    });
+  });
+
+  void it('blocks close when copied stale validation evidence is not bound to the transition context', async () => {
+    await withTempDir(async (root) => {
+      const fixture = await prepareCloseFixture(root);
+      await commitCloseRosterTransition(root, fixture);
+      await writeValidationEvidence(fixture.runtimeRoot, 'copied-stale.json', '2026-07-23T00:00:01.000Z');
+      const result = await closeAutopilotWorkstream({ workstream: 'close-smoke', sourceCwd: fixture.source, workstreamRun: fixture.workstreamRun, dryRun: true });
+      assert.equal(result.outcome, 'dry-run');
+      assert.equal(result.blockers.some((blocker) => /requires post-transition independent target-roster validate\/bughunt evidence/u.test(blocker)), true);
     });
   });
 

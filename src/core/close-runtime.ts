@@ -76,8 +76,9 @@ import { coordinatorRuntimePaths } from './coordination/runtime-paths.ts';
 import { currentBootId } from './coordination/process-identity.ts';
 import { enforcePrivateAuthorityPath, ensurePrivateAuthorityDirectory } from './private-path.ts';
 import { parseValidationEvidence, validationCanCloseSourceWork, type AutopilotValidationEvidence } from './validation-staleness.ts';
-import { autopilotRosterContractCanonicalJson, computeAutopilotRosterContractObjectHash, parseAutopilotReceiptV2, parseAutopilotRosterContractJson, parseAutopilotUnitSpecV2 } from './roster/contracts.ts';
-import { consumeCommittedExistingRunRosterTransition, type AutopilotSavedRosterRefV1 } from './roster/transition.ts';
+import { computeAutopilotRosterContractObjectHash, parseAutopilotReceiptV2, parseAutopilotUnitSpecV2 } from './roster/contracts.ts';
+import { consumeCommittedExistingRunRosterTransition, listCommittedExistingRunRosterTransitions, resolveCommittedExistingRunRosterTransitionChain, savedRosterRefForSelection, type AutopilotSavedRosterRefV1 } from './roster/transition.ts';
+import { recoverRuntimeRosterSelection } from './roster/snapshot.ts';
 import { resolveRosterScopePaths, rosterRevisionPath } from './roster/paths.ts';
 import { readAuthorityFileIfPresent } from './roster/transaction.ts';
 import { assertRuntimeReceiptMatchesUnitSpec, parseNewRunRuntimeReceipt, parseNewRunRuntimeUnitSpec } from './roster/runtime-consumers.ts';
@@ -1277,93 +1278,122 @@ async function transitionFreshValidationBlockers(
   finalChangedPaths: readonly string[],
   env: ProcessEnvLike,
 ): Promise<readonly string[]> {
-  if (artifacts.runtimeTransitionRefs.length === 0) return [];
   const blockers: string[] = [];
-  const transitions = [] as { readonly ref: string; readonly id: string; readonly approvedAt: string; readonly fromRoster: AutopilotSavedRosterRefV1; readonly toRoster: AutopilotSavedRosterRefV1; readonly artifactSha256: `sha256:${string}` }[];
-  for (const ref of artifacts.runtimeTransitionRefs) {
-    try {
-      const path = join(context.active.runtime_root, ref);
-      const runtimeRead = await readAuthorityFileIfPresent(path, dirname(path));
-      if (runtimeRead === null) throw new Error('runtime transition authority is missing or unsafe');
-      const bytes = runtimeRead.bytes;
-      const text = Buffer.from(bytes).toString('utf8');
-      const parsed = JSON.parse(text) as unknown;
-      const transition = parseAutopilotRosterContractJson('autopilot.roster_transition.v1', text);
-      if (autopilotRosterContractCanonicalJson(parsed) !== text) throw new Error('runtime transition bytes are not canonical');
-      const consumed = await consumeCommittedExistingRunRosterTransition({
-        stateRoot: resolveAutopilotStateRoot(env),
-        run: { repo_id: context.active.repo_key, workstream: context.active.workstream, workstream_run: context.active.workstream_run, main_worktree_path: context.active.main_worktree_path, runtime_root: context.active.runtime_root, source_repo: context.active.source_repo },
-        from_roster: transition.from_roster,
-        to_roster: transition.to_roster,
-      });
-      const artifactSha256 = consumed.transition_artifact_sha256;
-      if (!consumed.ok || consumed.transition === null || consumed.runtime_transition_ref !== ref || artifactSha256 === null || artifactSha256 !== sha256BytesForClose(bytes)) throw new Error(`transition consume failed: ${consumed.diagnostics.map((diagnostic) => diagnostic.code).join(', ')}`);
-      transitions.push({ ref, id: transition.transition_id, approvedAt: transition.approved_at, fromRoster: transition.from_roster, toRoster: transition.to_roster, artifactSha256 });
-    } catch (error) {
-      blockers.push(`roster transition runtime authority is invalid: ${ref}: ${errorMessage(error)}`);
-    }
+  const stateRoot = resolveAutopilotStateRoot(env);
+  const run = { repo_id: context.active.repo_key, workstream: context.active.workstream, workstream_run: context.active.workstream_run, main_worktree_path: context.active.main_worktree_path, runtime_root: context.active.runtime_root, source_repo: context.active.source_repo };
+  const runtimeRefs = sortedUnique(artifacts.runtimeTransitionRefs);
+  let externalRows: Awaited<ReturnType<typeof listCommittedExistingRunRosterTransitions>>;
+  try {
+    externalRows = await listCommittedExistingRunRosterTransitions({ stateRoot, repo_id: context.active.repo_key, workstream_run: context.active.workstream_run });
+  } catch (error) {
+    return [`roster transition external authority cannot be listed for active run: ${errorMessage(error)}`];
   }
-  if (transitions.length === 0) return sortedUnique(blockers);
-  const orderedTransitions = linearCloseTransitionChain(transitions);
-  if (orderedTransitions === null) {
-    blockers.push('roster transition runtime authority is not one unique linear chain');
+  const externalRefs = sortedUnique(externalRows.map((row) => `roster-transitions/${row.transition.transition_id}.json`));
+  if (runtimeRefs.length === 0 && externalRefs.length === 0) return [];
+  for (const ref of externalRefs) {
+    if (!runtimeRefs.includes(ref)) blockers.push(`roster transition runtime mirror is missing for authenticated external ref: ${ref}`);
+  }
+  for (const ref of runtimeRefs) {
+    if (!externalRefs.includes(ref)) blockers.push(`roster transition runtime ref has no authenticated external counterpart: ${ref}`);
+  }
+
+  const recovery = await recoverRuntimeRosterSelection({ stateRoot, mainWorktreeRoot: context.active.main_worktree_path, workstream: context.active.workstream, repo_id: context.active.repo_key, workstream_run: context.active.workstream_run, require_spec_identity: false });
+  if (!recovery.ok || recovery.selection === null) {
+    blockers.push(`roster transition chain cannot authenticate immutable pre-run selection for active run: ${recovery.diagnostics.map((diagnostic) => diagnostic.code).join(', ')}`);
     return sortedUnique(blockers);
   }
-  const terminal = orderedTransitions[orderedTransitions.length - 1];
+  const fromRef = savedRosterRefForSelection({ selection: recovery.selection, stateRoot, trustedProjectRoot: context.active.source_repo });
+  const chain = await resolveCommittedExistingRunRosterTransitionChain({ stateRoot, run, initial_from_roster: fromRef });
+  if (!chain.ok) {
+    blockers.push(`roster transition external/runtime authority is not one authenticated byte-equal linear chain: ${chain.diagnostics.map((diagnostic) => diagnostic.code).join(', ')}`);
+    return sortedUnique(blockers);
+  }
+  if (chain.transitions.length === 0) return sortedUnique(blockers);
+
+  const transitions = [] as { readonly ref: string; readonly id: string; readonly approvedAt: string; readonly toRoster: AutopilotSavedRosterRefV1; readonly artifactSha256: `sha256:${string}` }[];
+  for (const transition of chain.transitions) {
+    const consumed = await consumeCommittedExistingRunRosterTransition({ stateRoot, run, from_roster: transition.from_roster, to_roster: transition.to_roster });
+    const artifactSha256 = consumed.transition_artifact_sha256;
+    if (!consumed.ok || consumed.transition === null || consumed.runtime_transition_ref === null || artifactSha256 === null) {
+      blockers.push(`roster transition ${transition.transition_id} failed authenticated byte-equal consumption: ${consumed.diagnostics.map((diagnostic) => diagnostic.code).join(', ')}`);
+      continue;
+    }
+    if (consumed.transition.transition_id !== transition.transition_id || consumed.transition.approved_at !== transition.approved_at) {
+      blockers.push(`roster transition ${transition.transition_id} drifted during authenticated consumption`);
+      continue;
+    }
+    transitions.push({ ref: consumed.runtime_transition_ref, id: transition.transition_id, approvedAt: transition.approved_at, toRoster: transition.to_roster, artifactSha256 });
+  }
+  const authenticatedRefs = sortedUnique(transitions.map((transition) => transition.ref));
+  for (const ref of authenticatedRefs) if (!runtimeRefs.includes(ref)) blockers.push(`roster transition authenticated external chain ref is absent from runtime roster-transitions: ${ref}`);
+  for (const ref of runtimeRefs) if (!authenticatedRefs.includes(ref)) blockers.push(`roster transition runtime ref is absent from authenticated external chain: ${ref}`);
+  if (transitions.length !== chain.transitions.length) return sortedUnique(blockers);
+
+  const terminal = transitions[transitions.length - 1];
   if (terminal === undefined) return sortedUnique(blockers);
+  const approvedAtMs = parseCanonicalUtcMs(terminal.approvedAt);
+  if (approvedAtMs === null) {
+    blockers.push(`roster transition ${terminal.id} approved_at is not a finite canonical UTC timestamp`);
+    return sortedUnique(blockers);
+  }
+  for (const ref of await validationEvidenceInvalidTimestampRefs(context.active.runtime_root, artifacts.validationEvidenceRefs)) {
+    blockers.push(`validation evidence ${ref} validated_at is not a finite canonical UTC timestamp`);
+  }
+
   let targetRoster: ReturnType<typeof parseAutopilotRoster> | null = null;
   try {
-    targetRoster = await readCloseTargetRosterRef({ ref: terminal.toRoster, stateRoot: resolveAutopilotStateRoot(env), trustedProjectRoot: context.active.source_repo });
+    targetRoster = await readCloseTargetRosterRef({ ref: terminal.toRoster, stateRoot, trustedProjectRoot: context.active.source_repo });
     if (!isCentrallyTrustedW4CertifiedRoster(targetRoster)) blockers.push(`roster transition ${terminal.id} target roster is not centrally trusted W4-certified`);
   } catch (error) {
     blockers.push(`roster transition ${terminal.id} target roster cannot be authenticated: ${errorMessage(error)}`);
   }
-  const hasFreshTargetValidation = await transitionHasFreshTargetValidation({ context, validationRefs: artifacts.validationEvidenceRefs, terminal, targetRoster });
+  const hasFreshTargetValidation = await transitionHasFreshTargetValidation({ context, validationRefs: artifacts.validationEvidenceRefs, terminal, approvedAtMs, targetRoster, fromSelection: recovery.selection });
   if (!hasFreshTargetValidation) blockers.push(`roster transition ${terminal.id} requires post-transition independent target-roster validate/bughunt evidence before close`);
   const relevantMerges = relevantUnitMerges(context.active, unitMerges);
   if (relevantMerges.length === 0 && finalChangedPaths.length > 0) blockers.push(`roster transition ${terminal.id} requires post-transition independent validation evidence before source-changing close`);
   for (const merge of relevantMerges) {
-    const accepted = await transitionValidationEvidenceForMerge({ context, validationRefs: artifacts.validationEvidenceRefs, merge, terminal, targetRoster });
+    const accepted = await transitionValidationEvidenceForMerge({ context, validationRefs: artifacts.validationEvidenceRefs, merge, terminal, approvedAtMs, targetRoster, fromSelection: recovery.selection });
     if (!accepted) blockers.push(`roster transition ${terminal.id} lacks fresh target-roster independent validation for ${merge.unit_id} attempt ${String(merge.attempt)}`);
   }
   return sortedUnique(blockers);
 }
 
-function linearCloseTransitionChain<T extends { readonly id: string; readonly fromRoster: AutopilotSavedRosterRefV1; readonly toRoster: AutopilotSavedRosterRefV1 }>(transitions: readonly T[]): readonly T[] | null {
-  const fromKeys = new Map<string, T[]>();
-  const toKeys = new Set<string>();
-  for (const transition of transitions) {
-    const from = autopilotRosterContractCanonicalJson(transition.fromRoster);
-    fromKeys.set(from, [...(fromKeys.get(from) ?? []), transition]);
-    toKeys.add(autopilotRosterContractCanonicalJson(transition.toRoster));
+const CANONICAL_UTC_MS_Z_PATTERN = /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$/u;
+
+function parseCanonicalUtcMs(value: string): number | null {
+  if (!CANONICAL_UTC_MS_Z_PATTERN.test(value)) return null;
+  const ms = Date.parse(value);
+  if (!Number.isFinite(ms)) return null;
+  return new Date(ms).toISOString() === value ? ms : null;
+}
+
+async function validationEvidenceInvalidTimestampRefs(runtimeRoot: string, validationRefs: readonly string[]): Promise<readonly string[]> {
+  const invalid: string[] = [];
+  for (const ref of validationRefs) {
+    try {
+      const evidence = parseValidationEvidence(JSON.parse(await readFile(join(runtimeRoot, ref), 'utf8')) as unknown);
+      if (parseCanonicalUtcMs(evidence.validated_at) === null) invalid.push(ref);
+    } catch {
+      continue;
+    }
   }
-  const starts = transitions.filter((transition) => !toKeys.has(autopilotRosterContractCanonicalJson(transition.fromRoster)));
-  if (starts.length !== 1) return null;
-  const ordered: T[] = [];
-  const visited = new Set<string>();
-  let current = starts[0];
-  while (current !== undefined) {
-    if (visited.has(current.id)) return null;
-    visited.add(current.id);
-    ordered.push(current);
-    const outgoing = fromKeys.get(autopilotRosterContractCanonicalJson(current.toRoster)) ?? [];
-    if (outgoing.length > 1) return null;
-    current = outgoing[0];
-  }
-  return visited.size === transitions.length ? Object.freeze(ordered) : null;
+  return sortedUnique(invalid);
 }
 
 async function transitionHasFreshTargetValidation(input: {
   readonly context: PreparedCloseContext;
   readonly validationRefs: readonly string[];
-  readonly terminal: { readonly id: string; readonly approvedAt: string; readonly toRoster: AutopilotSavedRosterRefV1; readonly artifactSha256: `sha256:${string}` };
+  readonly terminal: { readonly id: string; readonly toRoster: AutopilotSavedRosterRefV1; readonly artifactSha256: `sha256:${string}` };
+  readonly approvedAtMs: number;
   readonly targetRoster: ReturnType<typeof parseAutopilotRoster> | null;
+  readonly fromSelection: Parameters<typeof savedRosterRefForSelection>[0]['selection'];
 }): Promise<boolean> {
   for (const ref of input.validationRefs) {
     try {
       const evidence = parseValidationEvidence(JSON.parse(await readFile(join(input.context.active.runtime_root, ref), 'utf8')) as unknown);
-      if (Date.parse(evidence.validated_at) < Date.parse(input.terminal.approvedAt)) continue;
-      if (await validationEvidenceAuthenticatesTransitionTarget({ context: input.context, evidence, terminal: input.terminal, targetRoster: input.targetRoster })) return true;
+      const validatedAtMs = parseCanonicalUtcMs(evidence.validated_at);
+      if (validatedAtMs === null || validatedAtMs < input.approvedAtMs) continue;
+      if (await validationEvidenceAuthenticatesTransitionTarget({ context: input.context, evidence, terminal: input.terminal, targetRoster: input.targetRoster, fromSelection: input.fromSelection })) return true;
     } catch {
       continue;
     }
@@ -1375,15 +1405,18 @@ async function transitionValidationEvidenceForMerge(input: {
   readonly context: PreparedCloseContext;
   readonly validationRefs: readonly string[];
   readonly merge: AutopilotUnitMerge;
-  readonly terminal: { readonly id: string; readonly approvedAt: string; readonly toRoster: AutopilotSavedRosterRefV1; readonly artifactSha256: `sha256:${string}` };
+  readonly terminal: { readonly id: string; readonly toRoster: AutopilotSavedRosterRefV1; readonly artifactSha256: `sha256:${string}` };
+  readonly approvedAtMs: number;
   readonly targetRoster: ReturnType<typeof parseAutopilotRoster> | null;
+  readonly fromSelection: Parameters<typeof savedRosterRefForSelection>[0]['selection'];
 }): Promise<boolean> {
   for (const ref of input.validationRefs) {
     try {
       const evidence = parseValidationEvidence(JSON.parse(await readFile(join(input.context.active.runtime_root, ref), 'utf8')) as unknown);
+      const validatedAtMs = parseCanonicalUtcMs(evidence.validated_at);
+      if (validatedAtMs === null || validatedAtMs < input.approvedAtMs) continue;
       if (!validationCanCloseSourceWork({ validation: evidence, unitMerge: input.merge })) continue;
-      if (Date.parse(evidence.validated_at) < Date.parse(input.terminal.approvedAt)) continue;
-      if (await validationEvidenceAuthenticatesTransitionTarget({ context: input.context, evidence, terminal: input.terminal, targetRoster: input.targetRoster })) return true;
+      if (await validationEvidenceAuthenticatesTransitionTarget({ context: input.context, evidence, terminal: input.terminal, targetRoster: input.targetRoster, fromSelection: input.fromSelection })) return true;
     } catch {
       continue;
     }
@@ -1396,6 +1429,7 @@ async function validationEvidenceAuthenticatesTransitionTarget(input: {
   readonly evidence: AutopilotValidationEvidence;
   readonly terminal: { readonly id: string; readonly toRoster: AutopilotSavedRosterRefV1; readonly artifactSha256: `sha256:${string}` };
   readonly targetRoster: ReturnType<typeof parseAutopilotRoster> | null;
+  readonly fromSelection: Parameters<typeof savedRosterRefForSelection>[0]['selection'];
 }): Promise<boolean> {
   if (input.targetRoster === null) return false;
   const statusPath = join(input.context.active.runtime_root, input.evidence.status_ref);
@@ -1410,9 +1444,11 @@ async function validationEvidenceAuthenticatesTransitionTarget(input: {
   if (spec === null) return false;
   const transitionBytes = await readFile(join(input.context.active.runtime_root, `roster-transitions/${input.terminal.id}.json`));
   if (!spec.context_refs.some((ref) => ref.path === `roster-transitions/${input.terminal.id}.json` && ref.sha256 === input.terminal.artifactSha256 && ref.byte_count === transitionBytes.byteLength)) return false;
+  if (spec.pre_run_selection_sha256 !== input.fromSelection.selection_sha256) return false;
   if (spec.roster_id !== input.targetRoster.roster_id || spec.roster_revision !== input.targetRoster.roster_revision || spec.roster_sha256 !== input.targetRoster.roster_sha256) return false;
   const assignment = input.targetRoster.assignments.find((entry) => entry.role === spec.role);
   if (assignment === undefined || spec.assignment_sha256 !== assignment.assignment_sha256) return false;
+  if (spec.attempt <= await maxFromRosterAttemptForUnitForClose({ runtimeRoot: input.context.active.runtime_root, unitId: spec.unit_id, fromSelection: input.fromSelection })) return false;
   const specContext = parseNewRunRuntimeUnitSpec(spec);
   const receiptContext = parseNewRunRuntimeReceipt(receipt, { unitSpec: specContext });
   assertRuntimeReceiptMatchesUnitSpec({ unitSpec: specContext, receipt: receiptContext });
@@ -1441,6 +1477,34 @@ async function findRuntimeUnitSpecForReceipt(runtimeRoot: string, receipt: Retur
     }
   }
   return null;
+}
+
+async function maxFromRosterAttemptForUnitForClose(input: {
+  readonly runtimeRoot: string;
+  readonly unitId: string;
+  readonly fromSelection: Parameters<typeof savedRosterRefForSelection>[0]['selection'];
+}): Promise<number> {
+  let max = 0;
+  for (const rootName of ['unit-specs', 'receipts']) {
+    const root = join(input.runtimeRoot, rootName);
+    if (!existsSync(root)) continue;
+    for (const path of await listFilesRecursive(root)) {
+      if (!path.endsWith('.json')) continue;
+      const parsed = JSON.parse(await readFile(path, 'utf8')) as unknown;
+      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) continue;
+      const record = parsed as Readonly<Record<string, unknown>>;
+      if (record['schema_version'] !== (rootName === 'unit-specs' ? 'autopilot.unit_spec.v2' : 'autopilot.receipt.v2')) continue;
+      const attempt = record['attempt'];
+      if (record['unit_id'] !== input.unitId || typeof attempt !== 'number' || !Number.isSafeInteger(attempt)) continue;
+      if (
+        record['pre_run_selection_sha256'] === input.fromSelection.selection_sha256 &&
+        record['roster_id'] === input.fromSelection.roster_id &&
+        record['roster_revision'] === input.fromSelection.roster_revision &&
+        record['roster_sha256'] === input.fromSelection.roster_sha256
+      ) max = Math.max(max, attempt);
+    }
+  }
+  return max;
 }
 
 async function readCloseTargetRosterRef(input: { readonly ref: AutopilotSavedRosterRefV1; readonly stateRoot: string; readonly trustedProjectRoot: string }): Promise<ReturnType<typeof parseAutopilotRoster>> {
