@@ -54,17 +54,36 @@ void describe('Autopilot parent prompt', () => {
     assert.equal(legacyRuntimePattern().test(prompt), false);
   });
 
-  void it('injects the complete fixed parent and child model roster', () => {
+  void it('requires child models to come from the authenticated runtime roster', () => {
     const prompt = parentPrompt();
-    assert.match(prompt, /parent\/orchestrator: openai-codex\/gpt-5\.6-sol at xhigh/u);
-    assert.match(prompt, /strategy: openai-codex\/gpt-5\.6-sol at xhigh/u);
-    assert.match(prompt, /implement: openai-codex\/gpt-5\.6-terra at high/u);
-    assert.match(prompt, /validate: openai-codex\/gpt-5\.6-sol at xhigh/u);
-    assert.match(prompt, /fix: openai-codex\/gpt-5\.6-terra at high/u);
-    assert.match(prompt, /adjudicate: openai-codex\/gpt-5\.6-sol at xhigh/u);
-    assert.match(prompt, /bughunt: openai-codex\/gpt-5\.6-sol at xhigh/u);
-    assert.match(prompt, /extract: openai-codex\/gpt-5\.6-luna at high/u);
-    assert.match(prompt, /Never substitute another model or thinking level/u);
+    assert.match(prompt, /Pinned runtime roster and unit_spec\.v2 authoring/u);
+    assert.match(prompt, /exact immutable pre-run selection/u);
+    assert.match(prompt, /exact role assignment\/request profile/u);
+    assert.match(prompt, /Do not infer, clamp, enrich, or substitute provider\/model\/API\/thinking/u);
+  });
+
+  void it('binds successor attempts to the exact roster-transition context ref', () => {
+    const prompt = renderAutopilotPrompt({
+      workstream: 'demo',
+      runtimeRoot: '.pi/autopilot/demo',
+      runnerInvocation: '/runner',
+      taskIntro: '',
+      rosterTransition: {
+        transition_id: `transition-${'a'.repeat(64)}`,
+        transition_sha256: `sha256:${'b'.repeat(64)}`,
+        transition_artifact_sha256: `sha256:${'c'.repeat(64)}`,
+        runtime_transition_ref: `roster-transitions/transition-${'a'.repeat(64)}.json`,
+        from_roster_id: 'from-roster',
+        to_roster_id: 'to-roster',
+        to_roster_revision: 2,
+        to_roster_sha256: `sha256:${'d'.repeat(64)}`,
+      },
+    });
+    assert.match(prompt, /Committed roster transition authority/);
+    assert.match(prompt, /keep `pre_run_selection_sha256` equal to the immutable FROM pre-run selection/);
+    assert.match(prompt, /set `roster_id\/roster_revision\/roster_sha256\/assignment_sha256\/request_profile` from the terminal TO roster assignment/);
+    assert.match(prompt, /"path": "roster-transitions\/transition-/);
+    assert.match(prompt, /"byte_count": <exact bytes>/);
   });
 
   void it('contains package-owned perfect-quality rules', () => {

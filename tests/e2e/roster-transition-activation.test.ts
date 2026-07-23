@@ -21,6 +21,7 @@ import {
 import { autopilotRosterContractCanonicalJson, autopilotRosterContractSha256OmittingOwnField, parseAutopilotRosterContract } from '../../src/core/roster/contracts.ts';
 import { SEED_CANDIDATES, seedRosterByCandidate } from '../../src/core/roster/provider-recipes.ts';
 import { buildCanonicalPreRunSelection } from '../../src/core/roster/run-selection.ts';
+import { buildExistingRunRosterTransitionProposal, type AutopilotSavedRosterRefV1 } from '../../src/core/roster/transition.ts';
 import { publishRuntimeRosterSnapshot } from '../../src/core/roster/snapshot.ts';
 import { formatAuthorityPath, resolveRosterScopePaths, rosterRevisionPath, type RosterSha256, type SavedRosterRef } from '../../src/core/roster/storage.ts';
 
@@ -160,6 +161,16 @@ async function writeExplicitReadyRosterConfig(stateRoot: string, candidateId: st
   return { ref, config_sha256: config.config_sha256 as RosterSha256 };
 }
 
+function transitionRef(label: 'from' | 'to'): AutopilotSavedRosterRefV1 {
+  return {
+    roster_id: `${label}-roster`,
+    roster_revision: 1,
+    roster_sha256: `sha256:${(label === 'from' ? 'a' : 'b').repeat(64)}`,
+    assignment_set_sha256: `sha256:${(label === 'from' ? 'c' : 'd').repeat(64)}`,
+    path: `/authority/${label}-roster.json`,
+  };
+}
+
 function fakePrepared(input: { readonly project: string; readonly repoKey: string; readonly workstreamRun: string }): PreparedAutopilotWorkstream {
   const main = join(input.project, '..', 'existing-main');
   return {
@@ -185,7 +196,7 @@ async function withRuntimeEnv<T>(runtimeStateRoot: string, run: () => Promise<T>
 }
 
 void describe('W5 existing-run roster transition activation e2e', () => {
-  void it('pauses an unavailable pinned run, requires exact user approval, records transition, then retries via successor authority without rewriting the old pin', async () => {
+  void it('pauses a mismatched existing run but blocks a non-certified transition target in production', async () => {
     await withTempDir(async (dir) => {
       const project = join(dir, 'project');
       const rosterStateRoot = join(dir, 'roster-state');
@@ -243,27 +254,56 @@ void describe('W5 existing-run roster transition activation e2e', () => {
 
         await pi.commands.get(AUTOPILOT_COMMAND)?.handler(`demo --roster ${to.ref.roster_id} continue`, ctx);
         assert.equal(prepareCalls, 0);
-        assert.ok(pi.messages[0]?.includes('existing-run roster transition approval required'));
+        assert.equal(pi.messages.length, 0);
+        assert.ok(pi.notifications.some((message) => message.includes('Autopilot roster resolution failed closed')));
         const pausedRows = JSON.parse(await readFile(activePath, 'utf8')) as readonly { readonly status: string }[];
         assert.equal(pausedRows[0]?.status, 'paused');
-        const phrase = /APPROVE AUTOPILOT ROSTER TRANSITION [a-z0-9-]+ sha256:[a-f0-9]{64}/u.exec(pi.messages[0] ?? '')?.[0];
-        assert.equal(typeof phrase, 'string');
-        if (typeof phrase !== 'string') throw new Error('missing approval phrase');
-
-        const forged = await pi.emitInput(phrase, 'extension', ctx) as { readonly action?: string } | undefined;
-        assert.equal(forged?.action, 'continue');
-        assert.equal(prepareCalls, 0);
-
-        const accepted = await pi.emitInput(phrase, 'user', ctx) as { readonly action?: string } | undefined;
-        assert.equal(accepted?.action, 'handled');
-        assert.ok(pi.messages.some((message) => message.includes('roster transition recorded')));
         assert.equal(existsSync(oldSelection.selection_path), true);
         assert.equal(Buffer.from(await readFile(oldSelection.selection_path)).toString('utf8'), Buffer.from(oldSelection.selection_bytes).toString('utf8'));
 
         await pi.commands.get(AUTOPILOT_COMMAND)?.handler(`demo --roster ${to.ref.roster_id} continue`, ctx);
-        assert.equal(prepareCalls, 1);
-        assert.ok(pi.events.includes('setModel'));
-        assert.ok(pi.notifications.some((message) => message.includes('Autopilot activated')));
+        assert.equal(prepareCalls, 0);
+        assert.equal(pi.events.includes('setModel'), false);
+      });
+    });
+  });
+
+  void it('rejects approval when the active row drifts after presentation', async () => {
+    await withTempDir(async (dir) => {
+      const project = join(dir, 'project');
+      const rosterStateRoot = join(dir, 'roster-state');
+      const runtimeStateRoot = join(dir, 'runtime-state');
+      await initGitProject(project);
+      await withRuntimeEnv(runtimeStateRoot, async () => {
+        const repo = resolveRepoIdentity(project);
+        const env: ProcessEnvLike = { ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: runtimeStateRoot };
+        const workstreamRun = 'demo-20260723t000000z-def456';
+        const mainWorktree = join(dir, 'existing-main-stale');
+        await mkdir(mainWorktree, { recursive: true, mode: 0o700 });
+        const active: ActiveAutopilotRow = {
+          schema_version: 'autopilot.active_parent.v2', coordination_authority: 'legacy-path-claims-v1', autopilot_id: `ap-${workstreamRun}`, workstream: 'demo', workstream_run: workstreamRun,
+          repo_key: repo.repoKey, source_repo: repo.repoRoot, git_common_dir: repo.gitCommonDir, worktree_root: worktreeRootForRepo(repo.repoKey, env), main_worktree_path: mainWorktree,
+          branch: `autopilot/${workstreamRun}`, runtime_root: join(mainWorktree, '.pi', 'autopilot', 'demo'), target_branch: repo.targetBranch, target_base_sha: repo.headSha, origin_url: repo.originUrl,
+          pid: 1, boot_id: 'boot', status: 'paused', started_at: FIXED_NOW.toISOString(), active_run_epoch: 1, active_epoch_started_at: FIXED_NOW.toISOString(), active_run_receipt_id: 'receipt',
+        };
+        const activePath = join(coordinationRootForRepo(repo.repoKey, env), ACTIVE_AUTOPILOTS_FILE);
+        await mkdir(dirname(activePath), { recursive: true, mode: 0o700 });
+        await writeFile(activePath, JSON.stringify([active], null, 2), { mode: 0o600 });
+        const run = { repo_id: active.repo_key, workstream: active.workstream, workstream_run: active.workstream_run, main_worktree_path: active.main_worktree_path, runtime_root: active.runtime_root, source_repo: active.source_repo };
+        const proposal = buildExistingRunRosterTransitionProposal({ stateRoot: rosterStateRoot, run, from_roster: transitionRef('from'), to_roster: transitionRef('to'), reason: 'stale active test', approved_at: FIXED_NOW.toISOString() });
+        const pi = new FakePi();
+        autopilotExtension(pi, {
+          rosterStateRoot,
+          rosterActivationStore: { resolve: async () => ({ status: 'transition-approval-required' as const, source: 'existing-run-selection' as const, proposal, run, active, originalCommand: '/autopilot demo --roster to-roster', diagnostics: [] }) },
+        });
+        const ctx = makeContext(pi, project);
+        await pi.commands.get(AUTOPILOT_COMMAND)?.handler('demo --roster to-roster', ctx);
+        assert.ok(pi.messages[0]?.includes('existing-run roster transition approval required'));
+        await writeFile(activePath, JSON.stringify([{ ...active, status: 'active' }], null, 2), { mode: 0o600 });
+        const result = await pi.emitInput(proposal.approval_phrase, 'user', ctx) as { readonly action?: string } | undefined;
+        assert.equal(result?.action, 'handled');
+        assert.ok(pi.notifications.some((message) => message.includes('active run identity/status drifted')));
+        assert.equal(existsSync(proposal.transition_path), false);
       });
     });
   });

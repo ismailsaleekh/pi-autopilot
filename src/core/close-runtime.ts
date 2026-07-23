@@ -75,6 +75,14 @@ import { assertCoordinationDispatchAllowed, coordinationCutoverCommitted } from 
 import { coordinatorRuntimePaths } from './coordination/runtime-paths.ts';
 import { currentBootId } from './coordination/process-identity.ts';
 import { enforcePrivateAuthorityPath, ensurePrivateAuthorityDirectory } from './private-path.ts';
+import { parseValidationEvidence, validationCanCloseSourceWork, type AutopilotValidationEvidence } from './validation-staleness.ts';
+import { autopilotRosterContractCanonicalJson, computeAutopilotRosterContractObjectHash, parseAutopilotReceiptV2, parseAutopilotRosterContractJson, parseAutopilotUnitSpecV2 } from './roster/contracts.ts';
+import { consumeCommittedExistingRunRosterTransition, type AutopilotSavedRosterRefV1 } from './roster/transition.ts';
+import { resolveRosterScopePaths, rosterRevisionPath } from './roster/paths.ts';
+import { readAuthorityFileIfPresent } from './roster/transaction.ts';
+import { assertRuntimeReceiptMatchesUnitSpec, parseNewRunRuntimeReceipt, parseNewRunRuntimeUnitSpec } from './roster/runtime-consumers.ts';
+import { isCentrallyTrustedW4CertifiedRoster } from './roster/providers/index.ts';
+import { parseAutopilotRoster } from './roster/contracts.ts';
 
 export interface AutopilotCloseOptions {
   readonly workstream: string;
@@ -161,7 +169,9 @@ interface RuntimeArtifacts {
   readonly decisions: readonly AutopilotDecisionRow[];
   readonly executionCommits: readonly AutopilotExecutionCommit[];
   readonly unitMerges: readonly AutopilotUnitMerge[];
+  readonly validationEvidenceRefs: readonly string[];
   readonly validationStalenessRefs: readonly string[];
+  readonly runtimeTransitionRefs: readonly string[];
 }
 
 interface PreparedCloseContext {
@@ -997,6 +1007,7 @@ async function validateCloseReadiness(context: PreparedCloseContext, now: Date, 
     blockers.push(...executionCommitBlockers(active, executionCommits, artifacts.audits, retainedWriteClaims, preIntegrationChangedPaths));
   }
   blockers.push(...phaseTwoCloseBlockers(active, unitMerges, artifacts.validationStalenessRefs, preIntegrationChangedPaths));
+  blockers.push(...await transitionFreshValidationBlockers(context, artifacts, unitMerges, preIntegrationChangedPaths, env));
   blockers.push(...await unitWorktreeResidueBlockers(active));
   if (!d65) blockers.push(...branchCommitBlockers(active, executionCommits, unitMerges));
   blockers.push(...await incompleteSagaBlockers(active, env));
@@ -1259,6 +1270,204 @@ function phaseTwoCloseBlockers(
   return sortedUnique(blockers);
 }
 
+async function transitionFreshValidationBlockers(
+  context: PreparedCloseContext,
+  artifacts: RuntimeArtifacts,
+  unitMerges: readonly AutopilotUnitMerge[],
+  finalChangedPaths: readonly string[],
+  env: ProcessEnvLike,
+): Promise<readonly string[]> {
+  if (artifacts.runtimeTransitionRefs.length === 0) return [];
+  const blockers: string[] = [];
+  const transitions = [] as { readonly ref: string; readonly id: string; readonly approvedAt: string; readonly fromRoster: AutopilotSavedRosterRefV1; readonly toRoster: AutopilotSavedRosterRefV1; readonly artifactSha256: `sha256:${string}` }[];
+  for (const ref of artifacts.runtimeTransitionRefs) {
+    try {
+      const path = join(context.active.runtime_root, ref);
+      const runtimeRead = await readAuthorityFileIfPresent(path, dirname(path));
+      if (runtimeRead === null) throw new Error('runtime transition authority is missing or unsafe');
+      const bytes = runtimeRead.bytes;
+      const text = Buffer.from(bytes).toString('utf8');
+      const parsed = JSON.parse(text) as unknown;
+      const transition = parseAutopilotRosterContractJson('autopilot.roster_transition.v1', text);
+      if (autopilotRosterContractCanonicalJson(parsed) !== text) throw new Error('runtime transition bytes are not canonical');
+      const consumed = await consumeCommittedExistingRunRosterTransition({
+        stateRoot: resolveAutopilotStateRoot(env),
+        run: { repo_id: context.active.repo_key, workstream: context.active.workstream, workstream_run: context.active.workstream_run, main_worktree_path: context.active.main_worktree_path, runtime_root: context.active.runtime_root, source_repo: context.active.source_repo },
+        from_roster: transition.from_roster,
+        to_roster: transition.to_roster,
+      });
+      const artifactSha256 = consumed.transition_artifact_sha256;
+      if (!consumed.ok || consumed.transition === null || consumed.runtime_transition_ref !== ref || artifactSha256 === null || artifactSha256 !== sha256BytesForClose(bytes)) throw new Error(`transition consume failed: ${consumed.diagnostics.map((diagnostic) => diagnostic.code).join(', ')}`);
+      transitions.push({ ref, id: transition.transition_id, approvedAt: transition.approved_at, fromRoster: transition.from_roster, toRoster: transition.to_roster, artifactSha256 });
+    } catch (error) {
+      blockers.push(`roster transition runtime authority is invalid: ${ref}: ${errorMessage(error)}`);
+    }
+  }
+  if (transitions.length === 0) return sortedUnique(blockers);
+  const orderedTransitions = linearCloseTransitionChain(transitions);
+  if (orderedTransitions === null) {
+    blockers.push('roster transition runtime authority is not one unique linear chain');
+    return sortedUnique(blockers);
+  }
+  const terminal = orderedTransitions[orderedTransitions.length - 1];
+  if (terminal === undefined) return sortedUnique(blockers);
+  let targetRoster: ReturnType<typeof parseAutopilotRoster> | null = null;
+  try {
+    targetRoster = await readCloseTargetRosterRef({ ref: terminal.toRoster, stateRoot: resolveAutopilotStateRoot(env), trustedProjectRoot: context.active.source_repo });
+    if (!isCentrallyTrustedW4CertifiedRoster(targetRoster)) blockers.push(`roster transition ${terminal.id} target roster is not centrally trusted W4-certified`);
+  } catch (error) {
+    blockers.push(`roster transition ${terminal.id} target roster cannot be authenticated: ${errorMessage(error)}`);
+  }
+  const hasFreshTargetValidation = await transitionHasFreshTargetValidation({ context, validationRefs: artifacts.validationEvidenceRefs, terminal, targetRoster });
+  if (!hasFreshTargetValidation) blockers.push(`roster transition ${terminal.id} requires post-transition independent target-roster validate/bughunt evidence before close`);
+  const relevantMerges = relevantUnitMerges(context.active, unitMerges);
+  if (relevantMerges.length === 0 && finalChangedPaths.length > 0) blockers.push(`roster transition ${terminal.id} requires post-transition independent validation evidence before source-changing close`);
+  for (const merge of relevantMerges) {
+    const accepted = await transitionValidationEvidenceForMerge({ context, validationRefs: artifacts.validationEvidenceRefs, merge, terminal, targetRoster });
+    if (!accepted) blockers.push(`roster transition ${terminal.id} lacks fresh target-roster independent validation for ${merge.unit_id} attempt ${String(merge.attempt)}`);
+  }
+  return sortedUnique(blockers);
+}
+
+function linearCloseTransitionChain<T extends { readonly id: string; readonly fromRoster: AutopilotSavedRosterRefV1; readonly toRoster: AutopilotSavedRosterRefV1 }>(transitions: readonly T[]): readonly T[] | null {
+  const fromKeys = new Map<string, T[]>();
+  const toKeys = new Set<string>();
+  for (const transition of transitions) {
+    const from = autopilotRosterContractCanonicalJson(transition.fromRoster);
+    fromKeys.set(from, [...(fromKeys.get(from) ?? []), transition]);
+    toKeys.add(autopilotRosterContractCanonicalJson(transition.toRoster));
+  }
+  const starts = transitions.filter((transition) => !toKeys.has(autopilotRosterContractCanonicalJson(transition.fromRoster)));
+  if (starts.length !== 1) return null;
+  const ordered: T[] = [];
+  const visited = new Set<string>();
+  let current = starts[0];
+  while (current !== undefined) {
+    if (visited.has(current.id)) return null;
+    visited.add(current.id);
+    ordered.push(current);
+    const outgoing = fromKeys.get(autopilotRosterContractCanonicalJson(current.toRoster)) ?? [];
+    if (outgoing.length > 1) return null;
+    current = outgoing[0];
+  }
+  return visited.size === transitions.length ? Object.freeze(ordered) : null;
+}
+
+async function transitionHasFreshTargetValidation(input: {
+  readonly context: PreparedCloseContext;
+  readonly validationRefs: readonly string[];
+  readonly terminal: { readonly id: string; readonly approvedAt: string; readonly toRoster: AutopilotSavedRosterRefV1; readonly artifactSha256: `sha256:${string}` };
+  readonly targetRoster: ReturnType<typeof parseAutopilotRoster> | null;
+}): Promise<boolean> {
+  for (const ref of input.validationRefs) {
+    try {
+      const evidence = parseValidationEvidence(JSON.parse(await readFile(join(input.context.active.runtime_root, ref), 'utf8')) as unknown);
+      if (Date.parse(evidence.validated_at) < Date.parse(input.terminal.approvedAt)) continue;
+      if (await validationEvidenceAuthenticatesTransitionTarget({ context: input.context, evidence, terminal: input.terminal, targetRoster: input.targetRoster })) return true;
+    } catch {
+      continue;
+    }
+  }
+  return false;
+}
+
+async function transitionValidationEvidenceForMerge(input: {
+  readonly context: PreparedCloseContext;
+  readonly validationRefs: readonly string[];
+  readonly merge: AutopilotUnitMerge;
+  readonly terminal: { readonly id: string; readonly approvedAt: string; readonly toRoster: AutopilotSavedRosterRefV1; readonly artifactSha256: `sha256:${string}` };
+  readonly targetRoster: ReturnType<typeof parseAutopilotRoster> | null;
+}): Promise<boolean> {
+  for (const ref of input.validationRefs) {
+    try {
+      const evidence = parseValidationEvidence(JSON.parse(await readFile(join(input.context.active.runtime_root, ref), 'utf8')) as unknown);
+      if (!validationCanCloseSourceWork({ validation: evidence, unitMerge: input.merge })) continue;
+      if (Date.parse(evidence.validated_at) < Date.parse(input.terminal.approvedAt)) continue;
+      if (await validationEvidenceAuthenticatesTransitionTarget({ context: input.context, evidence, terminal: input.terminal, targetRoster: input.targetRoster })) return true;
+    } catch {
+      continue;
+    }
+  }
+  return false;
+}
+
+async function validationEvidenceAuthenticatesTransitionTarget(input: {
+  readonly context: PreparedCloseContext;
+  readonly evidence: AutopilotValidationEvidence;
+  readonly terminal: { readonly id: string; readonly toRoster: AutopilotSavedRosterRefV1; readonly artifactSha256: `sha256:${string}` };
+  readonly targetRoster: ReturnType<typeof parseAutopilotRoster> | null;
+}): Promise<boolean> {
+  if (input.targetRoster === null) return false;
+  const statusPath = join(input.context.active.runtime_root, input.evidence.status_ref);
+  const receiptPath = join(input.context.active.runtime_root, input.evidence.receipt_ref);
+  const auditPath = join(input.context.active.runtime_root, input.evidence.audit_ref);
+  const [statusBytes, receiptBytes, auditBytes] = await Promise.all([readFile(statusPath), readFile(receiptPath), readFile(auditPath)]);
+  if (sha256BytesForClose(statusBytes) !== input.evidence.status_sha256 || sha256BytesForClose(receiptBytes) !== input.evidence.receipt_sha256 || sha256BytesForClose(auditBytes) !== input.evidence.audit_sha256) return false;
+  const receipt = parseAutopilotReceiptV2(JSON.parse(Buffer.from(receiptBytes).toString('utf8')) as unknown);
+  if (receipt.role !== 'validate' && receipt.role !== 'bughunt') return false;
+  if (receipt.workstream !== input.context.active.workstream || receipt.unit_id !== input.evidence.validation_unit_id || receipt.attempt !== input.evidence.validation_attempt) return false;
+  const spec = await findRuntimeUnitSpecForReceipt(input.context.active.runtime_root, receipt, statusPath, receiptPath);
+  if (spec === null) return false;
+  const transitionBytes = await readFile(join(input.context.active.runtime_root, `roster-transitions/${input.terminal.id}.json`));
+  if (!spec.context_refs.some((ref) => ref.path === `roster-transitions/${input.terminal.id}.json` && ref.sha256 === input.terminal.artifactSha256 && ref.byte_count === transitionBytes.byteLength)) return false;
+  if (spec.roster_id !== input.targetRoster.roster_id || spec.roster_revision !== input.targetRoster.roster_revision || spec.roster_sha256 !== input.targetRoster.roster_sha256) return false;
+  const assignment = input.targetRoster.assignments.find((entry) => entry.role === spec.role);
+  if (assignment === undefined || spec.assignment_sha256 !== assignment.assignment_sha256) return false;
+  const specContext = parseNewRunRuntimeUnitSpec(spec);
+  const receiptContext = parseNewRunRuntimeReceipt(receipt, { unitSpec: specContext });
+  assertRuntimeReceiptMatchesUnitSpec({ unitSpec: specContext, receipt: receiptContext });
+  const status = parseAutopilotStatusEntry(JSON.parse(Buffer.from(statusBytes).toString('utf8')) as unknown, { unitSpec: specContext.authority_spec, artifactRoot: input.context.active.runtime_root });
+  const audit = parseAutopilotExecutionAudit(JSON.parse(Buffer.from(auditBytes).toString('utf8')) as unknown);
+  return status.verdict === 'PASS' && status.role === spec.role && audit.classification === 'clean' && audit.role === spec.role && audit.unit_id === spec.unit_id && audit.attempt === spec.attempt;
+}
+
+async function findRuntimeUnitSpecForReceipt(runtimeRoot: string, receipt: ReturnType<typeof parseAutopilotReceiptV2>, statusPath: string, receiptPath: string): Promise<ReturnType<typeof parseAutopilotUnitSpecV2> | null> {
+  const root = join(runtimeRoot, 'unit-specs');
+  if (!existsSync(root)) return null;
+  for (const path of await listFilesRecursive(root)) {
+    if (!path.endsWith('.json')) continue;
+    try {
+      const spec = parseAutopilotUnitSpecV2(JSON.parse(await readFile(path, 'utf8')) as unknown);
+      if (
+        spec.workstream === receipt.workstream &&
+        spec.unit_id === receipt.unit_id &&
+        spec.role === receipt.role &&
+        spec.attempt === receipt.attempt &&
+        spec.status_output === statusPath &&
+        spec.receipt_output === receiptPath
+      ) return spec;
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
+async function readCloseTargetRosterRef(input: { readonly ref: AutopilotSavedRosterRefV1; readonly stateRoot: string; readonly trustedProjectRoot: string }): Promise<ReturnType<typeof parseAutopilotRoster>> {
+  const scopes = [
+    resolveRosterScopePaths({ scope: 'user', stateRoot: input.stateRoot }),
+    resolveRosterScopePaths({ scope: 'trusted-project', stateRoot: input.stateRoot, trustedProjectRoot: input.trustedProjectRoot }),
+  ];
+  const matches: ReturnType<typeof parseAutopilotRoster>[] = [];
+  for (const paths of scopes) {
+    try {
+      const rosterPath = rosterRevisionPath(paths, input.ref);
+      const read = await readAuthorityFileIfPresent(rosterPath, paths.authorityRoot);
+      if (read === null) continue;
+      const roster = parseAutopilotRoster(JSON.parse(Buffer.from(read.bytes).toString('utf8')) as unknown);
+      if (computeAutopilotRosterContractObjectHash('autopilot.roster.v1', roster) === roster.roster_sha256 && roster.roster_id === input.ref.roster_id && roster.roster_revision === input.ref.roster_revision && roster.roster_sha256 === input.ref.roster_sha256 && roster.assignment_set_sha256 === input.ref.assignment_set_sha256) matches.push(roster);
+    } catch {
+      continue;
+    }
+  }
+  if (matches.length !== 1 || matches[0] === undefined) throw new Error(`target roster ref matched ${String(matches.length)} roster authority files`);
+  return matches[0];
+}
+
+function sha256BytesForClose(bytes: Uint8Array): `sha256:${string}` {
+  return `sha256:${createHash('sha256').update(bytes).digest('hex')}` as const;
+}
+
 function branchCommitBlockers(active: ActiveAutopilotRow, executionCommits: readonly AutopilotExecutionCommit[], unitMerges: readonly AutopilotUnitMerge[]): readonly string[] {
   if (!commitExists(active.main_worktree_path, active.target_base_sha)) return [`target_base_sha ${active.target_base_sha} is not reachable in workstream repo`];
   const commits = revList(active.main_worktree_path, active.target_base_sha, gitHead(active.main_worktree_path));
@@ -1295,7 +1504,9 @@ async function readRuntimeArtifacts(runtimeRoot: string): Promise<RuntimeArtifac
     decisions: await readDecisionRows(join(runtimeRoot, 'decision-log.jsonl')),
     executionCommits: await readJsonObjectsFromDir(join(runtimeRoot, 'execution-commits'), parseAutopilotExecutionCommit),
     unitMerges: await readJsonObjectsFromDir(join(runtimeRoot, 'unit-merges'), parseAutopilotUnitMerge),
+    validationEvidenceRefs: await listRuntimeJsonRefs(join(runtimeRoot, 'validation'), runtimeRoot),
     validationStalenessRefs: await listRuntimeJsonRefs(join(runtimeRoot, 'validation-staleness'), runtimeRoot),
+    runtimeTransitionRefs: await listRuntimeJsonRefs(join(runtimeRoot, 'roster-transitions'), runtimeRoot),
   };
 }
 

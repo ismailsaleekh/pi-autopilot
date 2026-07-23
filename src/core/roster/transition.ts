@@ -107,6 +107,9 @@ export interface ExistingRunRosterTransitionCommitResult {
   readonly transition: AutopilotRosterTransitionV1 | null;
   readonly transition_path: string;
   readonly transition_display_path: string;
+  readonly runtime_transition_path: string;
+  readonly runtime_transition_ref: string;
+  readonly transition_artifact_sha256: RosterSha256 | null;
   readonly idempotent_replay: boolean;
   readonly successor_attempt_authority: ExistingRunRosterSuccessorAttemptAuthority | null;
   readonly diagnostics: readonly RosterTransitionDiagnostic[];
@@ -129,11 +132,24 @@ export interface ExistingRunRosterTransitionConsumptionResult {
   readonly transition: AutopilotRosterTransitionV1 | null;
   readonly transition_path: string | null;
   readonly transition_display_path: string | null;
+  readonly runtime_transition_path: string | null;
+  readonly runtime_transition_ref: string | null;
+  readonly transition_artifact_sha256: RosterSha256 | null;
   readonly successor_attempt_authority: ExistingRunRosterSuccessorAttemptAuthority | null;
   readonly diagnostics: readonly RosterTransitionDiagnostic[];
   readonly write_count: 0;
   readonly lock_count: 0;
   readonly files_touched: readonly [];
+}
+
+export interface ExistingRunRosterTransitionChainResult {
+  readonly schema_version: 'autopilot.existing_run_roster_transition_chain_result.v1';
+  readonly ok: boolean;
+  readonly status: 'inspected' | 'blocked' | 'failed';
+  readonly transitions: readonly AutopilotRosterTransitionV1[];
+  readonly terminal_roster: AutopilotSavedRosterRefV1;
+  readonly terminal_successor_attempt_authority: ExistingRunRosterSuccessorAttemptAuthority | null;
+  readonly diagnostics: readonly RosterTransitionDiagnostic[];
 }
 
 export interface ExistingRunRosterSuccessorAttemptAuthority {
@@ -143,6 +159,11 @@ export interface ExistingRunRosterSuccessorAttemptAuthority {
   readonly workstream_run: string;
   readonly transition_id: string;
   readonly transition_sha256: RosterSha256;
+  readonly transition_artifact_sha256: RosterSha256;
+  readonly transition_path: string;
+  readonly transition_display_path: string;
+  readonly runtime_transition_path: string;
+  readonly runtime_transition_ref: string;
   readonly from_roster: AutopilotSavedRosterRefV1;
   readonly to_roster: AutopilotSavedRosterRefV1;
   readonly creates_new_attempts: true;
@@ -156,6 +177,8 @@ export interface ExistingRunRosterTransitionPaths {
   readonly transitionsRoot: string;
   readonly transitionPath: string;
   readonly transitionDisplayPath: string;
+  readonly runtimeTransitionPath: string;
+  readonly runtimeTransitionRef: string;
   readonly authorityRoot: string;
   readonly authorityDisplayRoot: string;
 }
@@ -207,6 +230,7 @@ export function transitionPathForExistingRun(input: {
   readonly repo_id: string;
   readonly workstream_run: string;
   readonly transition_id: string;
+  readonly runtime_root?: string | undefined;
 }): ExistingRunRosterTransitionPaths {
   assertValidRepoId(input.repo_id);
   assertValidWorkstreamRun(input.workstream_run);
@@ -214,10 +238,15 @@ export function transitionPathForExistingRun(input: {
   const user = resolveRosterScopePaths({ scope: 'user', ...(input.stateRoot === undefined ? {} : { stateRoot: input.stateRoot }) });
   const transitionsRoot = join(user.userStateRoot, 'roster-transitions', input.repo_id, input.workstream_run);
   const transitionPath = join(transitionsRoot, `${input.transition_id}.json`);
+  const runtimeRoot = input.runtime_root ?? '<unresolved-runtime-root>';
+  const runtimeTransitionRef = join('roster-transitions', `${input.transition_id}.json`).replace(/\\/gu, '/');
+  const runtimeTransitionPath = join(runtimeRoot, runtimeTransitionRef);
   return Object.freeze({
     transitionsRoot,
     transitionPath,
     transitionDisplayPath: formatAuthorityPath(transitionPath, user.userStateRoot, user.userStateDisplayRoot),
+    runtimeTransitionPath,
+    runtimeTransitionRef,
     authorityRoot: user.userStateRoot,
     authorityDisplayRoot: user.userStateDisplayRoot,
   });
@@ -234,10 +263,10 @@ export function buildExistingRunRosterTransitionProposal(
     throw new RosterStorageError('ROSTER_TRANSITION_REQUIRED', 'from_roster and to_roster must be different saved roster refs');
   }
   const reason = sanitizeReason(input.reason);
-  const transitionId = transitionIdForExactRefs({ repo_id: input.run.repo_id, workstream_run: input.run.workstream_run, from_roster: fromRoster, to_roster: toRoster });
+  const transitionId = transitionIdForExactRefs({ repo_id: input.run.repo_id, workstream: input.run.workstream, workstream_run: input.run.workstream_run, from_roster: fromRoster, to_roster: toRoster });
   const transition = buildCanonicalRosterTransition({ transition_id: transitionId, from_roster: fromRoster, to_roster: toRoster, reason, approved_at: input.approved_at });
   const bytes = Buffer.from(autopilotRosterContractCanonicalJson(transition), 'utf8');
-  const paths = transitionPathForExistingRun({ stateRoot: input.stateRoot, repo_id: input.run.repo_id, workstream_run: input.run.workstream_run, transition_id: transition.transition_id });
+  const paths = transitionPathForExistingRun({ stateRoot: input.stateRoot, repo_id: input.run.repo_id, workstream_run: input.run.workstream_run, transition_id: transition.transition_id, runtime_root: input.run.runtime_root });
   const approvalPhrase = `APPROVE AUTOPILOT ROSTER TRANSITION ${transition.transition_id} ${transition.transition_sha256}`;
   const presentation = rosterTransitionApprovalPresentation({ run: input.run, transition, transition_display_path: paths.transitionDisplayPath, approval_phrase: approvalPhrase });
   return Object.freeze({
@@ -261,8 +290,8 @@ export function authorizeExistingRunRosterTransitionInput(input: {
   readonly text: string;
 }): ExistingRunRosterTransitionAuthorizationResult {
   if (input.source !== 'user') return Object.freeze({ ok: false, approval: null, reason: 'approval must come directly from user input' });
-  if (input.text.trim() !== input.proposal.approval_phrase) {
-    return Object.freeze({ ok: false, approval: null, reason: 'approval phrase did not exactly match the current transition presentation' });
+  if (input.text !== input.proposal.approval_phrase) {
+    return Object.freeze({ ok: false, approval: null, reason: 'approval phrase did not exactly match the current transition presentation bytes' });
   }
   const approval: ExistingRunRosterTransitionApproval = Object.freeze({
     schema_version: 'autopilot.existing_run_roster_transition_approval.v1' as const,
@@ -281,12 +310,18 @@ export function authorizeExistingRunRosterTransitionInput(input: {
 export async function commitApprovedExistingRunRosterTransition(
   input: ExistingRunRosterTransitionCommitInput,
 ): Promise<ExistingRunRosterTransitionCommitResult> {
-  const paths = transitionPathForExistingRun({ stateRoot: input.stateRoot, repo_id: input.run.repo_id, workstream_run: input.run.workstream_run, transition_id: input.proposal.transition.transition_id });
+  const paths = transitionPathForExistingRun({ stateRoot: input.stateRoot, repo_id: input.run.repo_id, workstream_run: input.run.workstream_run, transition_id: input.proposal.transition.transition_id, runtime_root: input.run.runtime_root });
+  let externalLinked = false;
+  let runtimeLinked = false;
   try {
     assertRunRef(input.run);
     assertProposalMatchesRun(input.proposal, input.run);
     assertApprovalMatchesProposal(input.approval, input.proposal);
     if (input.expected_active_run !== undefined) assertExpectedActiveRun(input.expected_active_run, input.run);
+    const expectedTransitionId = transitionIdForExactRefs({ repo_id: input.run.repo_id, workstream: input.run.workstream, workstream_run: input.run.workstream_run, from_roster: input.proposal.transition.from_roster, to_roster: input.proposal.transition.to_roster });
+    if (input.proposal.transition.transition_id !== expectedTransitionId) {
+      return transitionCommitResult(false, 'blocked', null, paths, false, [diagnostic('ROSTER_READBACK_MISMATCH', 'fatal')], 0, []);
+    }
     if (paths.transitionPath !== input.proposal.transition_path || paths.transitionDisplayPath !== input.proposal.transition_display_path) {
       return transitionCommitResult(false, 'blocked', null, paths, false, [diagnostic('ROSTER_STORAGE_PATH_INVALID', 'fatal')], 0, []);
     }
@@ -294,28 +329,55 @@ export async function commitApprovedExistingRunRosterTransition(
     if (!sameTransition(reparsed, input.proposal.transition)) {
       return transitionCommitResult(false, 'blocked', null, paths, false, [diagnostic('ROSTER_READBACK_MISMATCH', 'fatal')], 0, []);
     }
-    const publish = await publishCreateOnlyAtomic({
+    const external = await publishCreateOnlyAtomic({
       path: paths.transitionPath,
       authorityRoot: paths.authorityRoot,
       bytes: input.proposal.transition_bytes,
-      hooks: transactionHooks(input.hooks),
+      hooks: transactionHooks(input.hooks, (event) => { if (event.stage === 'after-link') externalLinked = true; }),
     });
-    if (publish.status === 'conflict') {
+    if (external.status === 'conflict') {
       return transitionCommitResult(false, 'blocked', null, paths, false, [diagnostic('ROSTER_CREATE_ONLY_CONFLICT')], 0, []);
     }
-    const writeCount: 0 | 1 = publish.status === 'created' ? 1 : 0;
-    const filesTouched = publish.status === 'created' ? [paths.transitionDisplayPath] : [];
-    const readback = await readAuthorityFileIfPresent(paths.transitionPath, paths.authorityRoot);
-    if (readback === null || !bytesEqual(readback.bytes, input.proposal.transition_bytes)) {
-      return transitionCommitResult(false, 'failed', null, paths, publish.status === 'idempotent', [diagnostic('ROSTER_READBACK_MISMATCH', 'fatal')], writeCount, filesTouched);
+    const externalFilesTouched = external.status === 'created' || externalLinked ? [paths.transitionDisplayPath] : [];
+
+    let runtime: Awaited<ReturnType<typeof publishCreateOnlyAtomic>>;
+    try {
+      runtime = await publishCreateOnlyAtomic({
+        path: paths.runtimeTransitionPath,
+        authorityRoot: dirname(paths.runtimeTransitionPath),
+        bytes: input.proposal.transition_bytes,
+        hooks: transactionHooks(input.hooks, (event) => { if (event.stage === 'after-link') runtimeLinked = true; }),
+      });
+    } catch (error) {
+      const touched = [...externalFilesTouched, ...(runtimeLinked ? [paths.runtimeTransitionPath] : [])];
+      return transitionCommitResult(false, 'failed', null, paths, false, [diagnosticFromError(error)], touched.length > 0 ? 1 : 0, touched);
     }
-    const transition = parseAutopilotRosterContractJson('autopilot.roster_transition.v1', Buffer.from(readback.bytes).toString('utf8'));
-    if (!sameTransition(transition, input.proposal.transition)) {
-      return transitionCommitResult(false, 'failed', null, paths, publish.status === 'idempotent', [diagnostic('ROSTER_READBACK_MISMATCH', 'fatal')], writeCount, filesTouched);
+    if (runtime.status === 'conflict') {
+      return transitionCommitResult(false, 'blocked', null, paths, false, [diagnostic('ROSTER_CREATE_ONLY_CONFLICT')], external.status === 'created' ? 1 : 0, externalFilesTouched);
     }
-    return transitionCommitResult(true, publish.status === 'idempotent' ? 'inspected' : 'committed', transition, paths, publish.status === 'idempotent', [], writeCount, filesTouched, successorAuthority(input.run, transition));
+
+    const writeCount: 0 | 1 = external.status === 'created' || runtime.status === 'created' ? 1 : 0;
+    const filesTouched = [
+      ...externalFilesTouched,
+      ...(runtime.status === 'created' ? [paths.runtimeTransitionPath] : []),
+    ];
+    let authenticated: Awaited<ReturnType<typeof authenticateTransitionCopies>>;
+    try {
+      authenticated = await authenticateTransitionCopies(paths, input.proposal.transition_bytes, input.proposal.transition);
+    } catch {
+      authenticated = null;
+    }
+    if (authenticated === null) {
+      return transitionCommitResult(false, 'failed', null, paths, external.status === 'idempotent' && runtime.status === 'idempotent', [diagnostic('ROSTER_READBACK_MISMATCH', 'fatal')], writeCount, filesTouched);
+    }
+    const idempotent = external.status === 'idempotent' && runtime.status === 'idempotent';
+    return transitionCommitResult(true, idempotent ? 'inspected' : 'committed', authenticated.transition, paths, idempotent, [], writeCount, filesTouched, successorAuthority(input.run, authenticated.transition, paths, authenticated.artifactSha256));
   } catch (error) {
-    return transitionCommitResult(false, 'failed', null, paths, false, [diagnosticFromError(error)], 0, []);
+    const touched = [
+      ...(externalLinked ? [paths.transitionDisplayPath] : []),
+      ...(runtimeLinked ? [paths.runtimeTransitionPath] : []),
+    ];
+    return transitionCommitResult(false, 'failed', null, paths, false, [diagnosticFromError(error)], touched.length > 0 ? 1 : 0, touched);
   }
 }
 
@@ -324,20 +386,74 @@ export async function consumeCommittedExistingRunRosterTransition(
 ): Promise<ExistingRunRosterTransitionConsumptionResult> {
   try {
     assertRunRef(input.run);
-    const expectedId = transitionIdForExactRefs({ repo_id: input.run.repo_id, workstream_run: input.run.workstream_run, from_roster: input.from_roster, to_roster: input.to_roster });
-    const paths = transitionPathForExistingRun({ stateRoot: input.stateRoot, repo_id: input.run.repo_id, workstream_run: input.run.workstream_run, transition_id: expectedId });
-    const readback = await readAuthorityFileIfPresent(paths.transitionPath, paths.authorityRoot);
-    if (readback === null) return transitionConsumptionResult(false, 'blocked', null, null, null, [diagnostic('ROSTER_TRANSITION_REQUIRED')]);
-    const transition = parseAutopilotRosterContractJson('autopilot.roster_transition.v1', Buffer.from(readback.bytes).toString('utf8'));
-    if (transition.transition_id !== expectedId || basename(paths.transitionPath) !== `${transition.transition_id}.json`) {
-      return transitionConsumptionResult(false, 'failed', null, paths.transitionPath, paths.transitionDisplayPath, [diagnostic('ROSTER_READBACK_MISMATCH', 'fatal')]);
+    const expectedId = transitionIdForExactRefs({ repo_id: input.run.repo_id, workstream: input.run.workstream, workstream_run: input.run.workstream_run, from_roster: input.from_roster, to_roster: input.to_roster });
+    const paths = transitionPathForExistingRun({ stateRoot: input.stateRoot, repo_id: input.run.repo_id, workstream_run: input.run.workstream_run, transition_id: expectedId, runtime_root: input.run.runtime_root });
+    const externalRead = await readAuthorityFileIfPresent(paths.transitionPath, paths.authorityRoot);
+    if (externalRead === null) return transitionConsumptionResult(false, 'blocked', null, null, null, null, null, null, [diagnostic('ROSTER_TRANSITION_REQUIRED')]);
+    let transition: AutopilotRosterTransitionV1;
+    try {
+      transition = parseAutopilotRosterContractJson('autopilot.roster_transition.v1', Buffer.from(externalRead.bytes).toString('utf8'));
+    } catch {
+      return transitionConsumptionResult(false, 'failed', null, paths.transitionPath, paths.transitionDisplayPath, paths.runtimeTransitionPath, paths.runtimeTransitionRef, null, [diagnostic('ROSTER_READBACK_MISMATCH', 'fatal')]);
+    }
+    const authenticated = await authenticateTransitionCopies(paths, externalRead.bytes, transition);
+    if (authenticated === null || transition.transition_id !== expectedId || basename(paths.transitionPath) !== `${transition.transition_id}.json`) {
+      return transitionConsumptionResult(false, 'failed', null, paths.transitionPath, paths.transitionDisplayPath, paths.runtimeTransitionPath, paths.runtimeTransitionRef, null, [diagnostic('ROSTER_READBACK_MISMATCH', 'fatal')]);
     }
     if (!sameSavedRosterRef(transition.from_roster, input.from_roster) || !sameSavedRosterRef(transition.to_roster, input.to_roster) || transition.requires_explicit_user_approval !== true) {
-      return transitionConsumptionResult(false, 'blocked', null, paths.transitionPath, paths.transitionDisplayPath, [diagnostic('ROSTER_TRANSITION_REQUIRED')]);
+      return transitionConsumptionResult(false, 'blocked', null, paths.transitionPath, paths.transitionDisplayPath, paths.runtimeTransitionPath, paths.runtimeTransitionRef, authenticated.artifactSha256, [diagnostic('ROSTER_TRANSITION_REQUIRED')]);
     }
-    return transitionConsumptionResult(true, 'inspected', transition, paths.transitionPath, paths.transitionDisplayPath, [], successorAuthority(input.run, transition));
+    return transitionConsumptionResult(true, 'inspected', transition, paths.transitionPath, paths.transitionDisplayPath, paths.runtimeTransitionPath, paths.runtimeTransitionRef, authenticated.artifactSha256, [], successorAuthority(input.run, transition, paths, authenticated.artifactSha256));
   } catch (error) {
-    return transitionConsumptionResult(false, 'failed', null, null, null, [diagnosticFromError(error)]);
+    return transitionConsumptionResult(false, 'failed', null, null, null, null, null, null, [diagnosticFromError(error)]);
+  }
+}
+
+export async function resolveCommittedExistingRunRosterTransitionChain(input: {
+  readonly stateRoot?: string | undefined;
+  readonly run: ExistingRunRosterTransitionRunRef;
+  readonly initial_from_roster: AutopilotSavedRosterRefV1;
+}): Promise<ExistingRunRosterTransitionChainResult> {
+  try {
+    assertRunRef(input.run);
+    const initial = parseAutopilotRosterContract('autopilot.saved_roster_ref.v1', input.initial_from_roster);
+    const listed = await listCommittedExistingRunRosterTransitions({ stateRoot: input.stateRoot, repo_id: input.run.repo_id, workstream_run: input.run.workstream_run });
+    const authenticated: { readonly transition: AutopilotRosterTransitionV1; readonly authority: ExistingRunRosterSuccessorAttemptAuthority }[] = [];
+    for (const row of listed) {
+      const expectedId = transitionIdForExactRefs({ repo_id: input.run.repo_id, workstream: input.run.workstream, workstream_run: input.run.workstream_run, from_roster: row.transition.from_roster, to_roster: row.transition.to_roster });
+      const paths = transitionPathForExistingRun({ stateRoot: input.stateRoot, repo_id: input.run.repo_id, workstream_run: input.run.workstream_run, transition_id: row.transition.transition_id, runtime_root: input.run.runtime_root });
+      const bytes = Buffer.from(autopilotRosterContractCanonicalJson(row.transition), 'utf8');
+      const copy = await authenticateTransitionCopies(paths, bytes, row.transition);
+      if (copy === null || row.transition.transition_id !== expectedId || row.transition.transition_id !== copy.transition.transition_id) {
+        return transitionChainResult(false, 'failed', [], initial, null, [diagnostic('ROSTER_READBACK_MISMATCH', 'fatal')]);
+      }
+      authenticated.push({ transition: copy.transition, authority: successorAuthority(input.run, copy.transition, paths, copy.artifactSha256) });
+    }
+    const byFrom = new Map<string, typeof authenticated>();
+    for (const row of authenticated) {
+      const key = savedRosterKey(row.transition.from_roster);
+      byFrom.set(key, [...(byFrom.get(key) ?? []), row]);
+    }
+    const chain: AutopilotRosterTransitionV1[] = [];
+    const visited = new Set<string>();
+    let current = initial;
+    let terminalAuthority: ExistingRunRosterSuccessorAttemptAuthority | null = null;
+    for (;;) {
+      const outgoing = byFrom.get(savedRosterKey(current)) ?? [];
+      if (outgoing.length === 0) break;
+      if (outgoing.length !== 1) return transitionChainResult(false, 'blocked', chain, current, null, [diagnostic('ROSTER_TRANSITION_REQUIRED')]);
+      const next = outgoing[0];
+      if (next === undefined) return transitionChainResult(false, 'failed', chain, current, null, [diagnostic('ROSTER_READBACK_MISMATCH', 'fatal')]);
+      if (visited.has(next.transition.transition_id)) return transitionChainResult(false, 'blocked', chain, current, null, [diagnostic('ROSTER_TRANSITION_REQUIRED')]);
+      visited.add(next.transition.transition_id);
+      chain.push(next.transition);
+      current = next.transition.to_roster;
+      terminalAuthority = next.authority;
+    }
+    if (visited.size !== authenticated.length) return transitionChainResult(false, 'blocked', chain, current, null, [diagnostic('ROSTER_TRANSITION_REQUIRED')]);
+    return transitionChainResult(true, 'inspected', chain, current, terminalAuthority, []);
+  } catch (error) {
+    return transitionChainResult(false, 'failed', [], input.initial_from_roster, null, [diagnosticFromError(error)]);
   }
 }
 
@@ -373,6 +489,7 @@ export async function listCommittedExistingRunRosterTransitions(input: {
 
 function transitionIdForExactRefs(input: {
   readonly repo_id: string;
+  readonly workstream: string;
   readonly workstream_run: string;
   readonly from_roster: AutopilotSavedRosterRefV1;
   readonly to_roster: AutopilotSavedRosterRefV1;
@@ -380,11 +497,12 @@ function transitionIdForExactRefs(input: {
   const hash = createHash('sha256').update(autopilotRosterContractCanonicalJson({
     schema_version: 'autopilot.roster_transition_identity.v1',
     repo_id: input.repo_id,
+    workstream: input.workstream,
     workstream_run: input.workstream_run,
     from_roster: input.from_roster,
     to_roster: input.to_roster,
   }), 'utf8').digest('hex');
-  return `transition-${hash.slice(0, 32)}`;
+  return `transition-${hash}`;
 }
 
 function buildCanonicalRosterTransition(input: {
@@ -448,6 +566,25 @@ function rosterTransitionApprovalPresentation(input: {
   ].join('\n');
 }
 
+async function authenticateTransitionCopies(
+  paths: Pick<ExistingRunRosterTransitionPaths, 'transitionPath' | 'runtimeTransitionPath' | 'authorityRoot'>,
+  expectedBytes: Uint8Array,
+  expectedTransition: AutopilotRosterTransitionV1,
+): Promise<{ readonly transition: AutopilotRosterTransitionV1; readonly artifactSha256: RosterSha256 } | null> {
+  const external = await readAuthorityFileIfPresent(paths.transitionPath, paths.authorityRoot);
+  const runtime = await readAuthorityFileIfPresent(paths.runtimeTransitionPath, dirname(paths.runtimeTransitionPath));
+  if (external === null || runtime === null) return null;
+  if (!bytesEqual(external.bytes, expectedBytes) || !bytesEqual(runtime.bytes, expectedBytes) || !bytesEqual(external.bytes, runtime.bytes)) return null;
+  const externalTransition = parseAutopilotRosterContractJson('autopilot.roster_transition.v1', Buffer.from(external.bytes).toString('utf8'));
+  const runtimeTransition = parseAutopilotRosterContractJson('autopilot.roster_transition.v1', Buffer.from(runtime.bytes).toString('utf8'));
+  if (!sameTransition(externalTransition, expectedTransition) || !sameTransition(runtimeTransition, expectedTransition)) return null;
+  return Object.freeze({ transition: externalTransition, artifactSha256: sha256Bytes(external.bytes) });
+}
+
+function savedRosterKey(ref: AutopilotSavedRosterRefV1): string {
+  return autopilotRosterContractCanonicalJson(ref);
+}
+
 function approvalToken(proposal: ExistingRunRosterTransitionProposal): string {
   const digest = createHash('sha256').update(autopilotRosterContractCanonicalJson({
     schema_version: 'autopilot.existing_run_roster_transition_approval_preimage.v1',
@@ -460,7 +597,12 @@ function approvalToken(proposal: ExistingRunRosterTransitionProposal): string {
   return `transition-approval-${digest}`;
 }
 
-function successorAuthority(run: ExistingRunRosterTransitionRunRef, transition: AutopilotRosterTransitionV1): ExistingRunRosterSuccessorAttemptAuthority {
+function successorAuthority(
+  run: ExistingRunRosterTransitionRunRef,
+  transition: AutopilotRosterTransitionV1,
+  paths: ExistingRunRosterTransitionPaths,
+  artifactSha256: RosterSha256,
+): ExistingRunRosterSuccessorAttemptAuthority {
   return Object.freeze({
     schema_version: 'autopilot.existing_run_roster_successor_attempt_authority.v1' as const,
     repo_id: run.repo_id,
@@ -468,6 +610,11 @@ function successorAuthority(run: ExistingRunRosterTransitionRunRef, transition: 
     workstream_run: run.workstream_run,
     transition_id: transition.transition_id,
     transition_sha256: transition.transition_sha256 as RosterSha256,
+    transition_artifact_sha256: artifactSha256,
+    transition_path: paths.transitionPath,
+    transition_display_path: paths.transitionDisplayPath,
+    runtime_transition_path: paths.runtimeTransitionPath,
+    runtime_transition_ref: paths.runtimeTransitionRef,
     from_roster: transition.from_roster,
     to_roster: transition.to_roster,
     creates_new_attempts: true as const,
@@ -482,7 +629,7 @@ function transitionCommitResult(
   ok: boolean,
   status: ExistingRunRosterTransitionCommitResult['status'],
   transition: AutopilotRosterTransitionV1 | null,
-  paths: Pick<ExistingRunRosterTransitionPaths, 'transitionPath' | 'transitionDisplayPath'>,
+  paths: Pick<ExistingRunRosterTransitionPaths, 'transitionPath' | 'transitionDisplayPath' | 'runtimeTransitionPath' | 'runtimeTransitionRef'>,
   idempotentReplay: boolean,
   diagnostics: readonly RosterTransitionDiagnostic[],
   writeCount: 0 | 1,
@@ -496,6 +643,9 @@ function transitionCommitResult(
     transition,
     transition_path: paths.transitionPath,
     transition_display_path: paths.transitionDisplayPath,
+    runtime_transition_path: paths.runtimeTransitionPath,
+    runtime_transition_ref: paths.runtimeTransitionRef,
+    transition_artifact_sha256: successor?.transition_artifact_sha256 ?? null,
     idempotent_replay: idempotentReplay,
     successor_attempt_authority: successor,
     diagnostics: sortDiagnostics(diagnostics),
@@ -505,12 +655,34 @@ function transitionCommitResult(
   });
 }
 
+function transitionChainResult(
+  ok: boolean,
+  status: ExistingRunRosterTransitionChainResult['status'],
+  transitions: readonly AutopilotRosterTransitionV1[],
+  terminalRoster: AutopilotSavedRosterRefV1,
+  authority: ExistingRunRosterSuccessorAttemptAuthority | null,
+  diagnostics: readonly RosterTransitionDiagnostic[],
+): ExistingRunRosterTransitionChainResult {
+  return Object.freeze({
+    schema_version: 'autopilot.existing_run_roster_transition_chain_result.v1' as const,
+    ok,
+    status,
+    transitions: Object.freeze([...transitions]),
+    terminal_roster: terminalRoster,
+    terminal_successor_attempt_authority: authority,
+    diagnostics: sortDiagnostics(diagnostics),
+  });
+}
+
 function transitionConsumptionResult(
   ok: boolean,
   status: ExistingRunRosterTransitionConsumptionResult['status'],
   transition: AutopilotRosterTransitionV1 | null,
   path: string | null,
   displayPath: string | null,
+  runtimePath: string | null,
+  runtimeRef: string | null,
+  artifactSha256: RosterSha256 | null,
   diagnostics: readonly RosterTransitionDiagnostic[],
   successor: ExistingRunRosterSuccessorAttemptAuthority | null = null,
 ): ExistingRunRosterTransitionConsumptionResult {
@@ -521,6 +693,9 @@ function transitionConsumptionResult(
     transition,
     transition_path: path,
     transition_display_path: displayPath,
+    runtime_transition_path: runtimePath,
+    runtime_transition_ref: runtimeRef,
+    transition_artifact_sha256: artifactSha256,
     successor_attempt_authority: successor,
     diagnostics: sortDiagnostics(diagnostics),
     write_count: 0 as const,
@@ -531,8 +706,9 @@ function transitionConsumptionResult(
 
 function assertRunRef(run: ExistingRunRosterTransitionRunRef): void {
   assertValidRepoId(run.repo_id);
+  assertValidWorkstreamRun(run.workstream, 'workstream');
   assertValidWorkstreamRun(run.workstream_run);
-  if (run.workstream.length === 0 || run.main_worktree_path.length === 0 || run.runtime_root.length === 0 || run.source_repo.length === 0) {
+  if (run.main_worktree_path.length === 0 || run.runtime_root.length === 0 || run.source_repo.length === 0) {
     throw new RosterStorageError('ROSTER_STORAGE_PATH_INVALID', 'run transition identity is incomplete');
   }
 }
@@ -664,9 +840,12 @@ function sortDiagnostics(diagnostics: readonly RosterTransitionDiagnostic[]): re
   return Object.freeze([...byCode.values()].sort((a, b) => a.code.localeCompare(b.code)));
 }
 
-function transactionHooks(hooks: ExistingRunRosterTransitionCommitInput['hooks']): { readonly onStage?: (event: RosterTransactionStageEvent) => void | Promise<void> } | undefined {
-  if (hooks?.onTransactionStage === undefined) return undefined;
-  return { onStage: hooks.onTransactionStage };
+function transactionHooks(
+  hooks: ExistingRunRosterTransitionCommitInput['hooks'],
+  observe?: ((event: RosterTransactionStageEvent) => void) | undefined,
+): { readonly onStage?: (event: RosterTransactionStageEvent) => void | Promise<void> } | undefined {
+  if (hooks?.onTransactionStage === undefined && observe === undefined) return undefined;
+  return { onStage: async (event) => { observe?.(event); await hooks?.onTransactionStage?.(event); } };
 }
 
 function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
@@ -678,4 +857,8 @@ function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
 
 function sha256Text(text: string): RosterSha256 {
   return `sha256:${createHash('sha256').update(text, 'utf8').digest('hex')}`;
+}
+
+function sha256Bytes(bytes: Uint8Array): RosterSha256 {
+  return `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
 }

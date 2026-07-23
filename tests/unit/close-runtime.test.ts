@@ -15,6 +15,7 @@ import { ensureMainWorktreeSagaRegistered } from '../../src/core/coordination/wo
 import { AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV } from '../../src/core/names.ts';
 import { materializeAutopilotSpecPaths } from '../../src/core/materialization.ts';
 import type { AutopilotExecutionAudit, AutopilotExecutionCommit, AutopilotMasterPlan, AutopilotState, AutopilotStatusEntry, AutopilotUnitSpec } from '../../src/core/contracts/index.ts';
+import { authorizeExistingRunRosterTransitionInput, buildExistingRunRosterTransitionProposal, commitApprovedExistingRunRosterTransition, type AutopilotSavedRosterRefV1 } from '../../src/core/roster/transition.ts';
 import {
   AUTOPILOT_STATE_ROOT_ENV,
   acquireClaimsForUnit,
@@ -29,7 +30,7 @@ import {
 } from '../../src/core/parallel-runtime.ts';
 
 async function withTempDir<T>(run: (root: string) => Promise<T>): Promise<T> {
-  const root = await mkdtemp(join(tmpdir(), 'autopilot-close-test-'));
+  const root = await mkdtemp(join(realpathSync(tmpdir()), 'autopilot-close-test-'));
   const originalStateRoot = process.env[AUTOPILOT_STATE_ROOT_ENV];
   const originalSessionContext = process.env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV];
   process.env[AUTOPILOT_STATE_ROOT_ENV] = join(root, 'autopilot-state');
@@ -42,6 +43,16 @@ async function withTempDir<T>(run: (root: string) => Promise<T>): Promise<T> {
     else process.env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV] = originalSessionContext;
     await rm(root, { recursive: true, force: true });
   }
+}
+
+function closeTransitionRef(label: 'from' | 'to'): AutopilotSavedRosterRefV1 {
+  return {
+    roster_id: `${label}-close-roster`,
+    roster_revision: 1,
+    roster_sha256: `sha256:${(label === 'from' ? 'a' : 'b').repeat(64)}`,
+    assignment_set_sha256: `sha256:${(label === 'from' ? 'c' : 'd').repeat(64)}`,
+    path: `/authority/${label}-close-roster.json`,
+  };
 }
 
 interface PreparedCloseFixture {
@@ -62,7 +73,7 @@ async function prepareCloseFixture(root: string): Promise<PreparedCloseFixture> 
   const spec = unitSpec(unitWorktree.unitInfo.worktree_path, prepared.runtimeRoot);
   const activeContext = await resolveActiveAutopilotForSpec(spec);
   await acquireClaimsForUnit({ context: activeContext, spec, reason: 'close-runtime test setup' });
-  await materializeAutopilotSpecPaths({ context: activeContext, spec, reason: 'close-runtime test setup materialization' });
+  await materializeAutopilotSpecPaths({ context: activeContext, spec, reason: 'close-runtime test setup materialization', allowLegacyV1RuntimeSpec: true });
   await updateUnitBranchStatus({
     active: prepared.active,
     unitId: 'u01-implement',
@@ -603,6 +614,24 @@ void describe('Autopilot close runtime', () => {
       } finally {
         await coordinator.close();
       }
+    });
+  });
+
+  void it('blocks close after a roster transition until fresh target-roster validation exists', async () => {
+    await withTempDir(async (root) => {
+      const fixture = await prepareCloseFixture(root);
+      const stateRoot = process.env[AUTOPILOT_STATE_ROOT_ENV] ?? join(root, 'autopilot-state');
+      const active = (await readActiveAutopilots(coordinationRootForRepo(fixture.repoKey))).find((row) => row.workstream_run === fixture.workstreamRun);
+      if (active === undefined) throw new Error('active row missing');
+      const run = { repo_id: active.repo_key, workstream: active.workstream, workstream_run: active.workstream_run, main_worktree_path: active.main_worktree_path, runtime_root: active.runtime_root, source_repo: active.source_repo };
+      const proposal = buildExistingRunRosterTransitionProposal({ stateRoot, run, from_roster: closeTransitionRef('from'), to_roster: closeTransitionRef('to'), reason: 'close fresh validation test', approved_at: '2026-07-23T00:00:00.000Z' });
+      const approval = authorizeExistingRunRosterTransitionInput({ proposal, source: 'user', text: proposal.approval_phrase }).approval;
+      if (approval === null) throw new Error('missing transition approval');
+      const committed = await commitApprovedExistingRunRosterTransition({ stateRoot, run, proposal, approval, expected_active_run: run });
+      assert.equal(committed.ok, true, committed.diagnostics.map((diagnostic) => diagnostic.code).join(', '));
+      const result = await closeAutopilotWorkstream({ workstream: 'close-smoke', sourceCwd: fixture.source, workstreamRun: fixture.workstreamRun, dryRun: true });
+      assert.equal(result.outcome, 'dry-run');
+      assert.equal(result.blockers.some((blocker) => /requires post-transition independent target-roster validate\/bughunt evidence|target roster cannot be authenticated/u.test(blocker)), true);
     });
   });
 

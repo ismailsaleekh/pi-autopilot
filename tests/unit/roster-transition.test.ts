@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
-import { chmod, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, symlink, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { describe, it } from 'node:test';
@@ -11,6 +11,7 @@ import {
   commitApprovedExistingRunRosterTransition,
   consumeCommittedExistingRunRosterTransition,
   listCommittedExistingRunRosterTransitions,
+  resolveCommittedExistingRunRosterTransitionChain,
   type AutopilotSavedRosterRefV1,
   type ExistingRunRosterTransitionRunRef,
 } from '../../src/core/roster/transition.ts';
@@ -163,6 +164,78 @@ void describe('W5 existing-run roster transition service', () => {
     });
   });
 
+  void it('uses exact approval bytes and full-strength transition ids', async () => {
+    await withTempDir(async (dir) => {
+      const prepared = proposal(dir, join(dir, 'state'));
+      assert.match(prepared.transition.transition_id, /^transition-[a-f0-9]{64}$/u);
+      assert.equal(authorizeExistingRunRosterTransitionInput({ proposal: prepared, source: 'user', text: ` ${prepared.approval_phrase}` }).ok, false);
+      assert.equal(authorizeExistingRunRosterTransitionInput({ proposal: prepared, source: 'user', text: `${prepared.approval_phrase}\n` }).ok, false);
+      assert.equal(authorizeExistingRunRosterTransitionInput({ proposal: prepared, source: 'extension', text: prepared.approval_phrase }).ok, false);
+      assert.equal(authorizeExistingRunRosterTransitionInput({ proposal: prepared, source: 'user', text: prepared.approval_phrase }).ok, true);
+    });
+  });
+
+  void it('fails consumption when the byte-identical runtime transition mirror is missing', async () => {
+    await withTempDir(async (dir) => {
+      const stateRoot = join(dir, 'state');
+      const prepared = proposal(dir, stateRoot);
+      const approval = authorizeExistingRunRosterTransitionInput({ proposal: prepared, source: 'user', text: prepared.approval_phrase }).approval;
+      if (approval === null) throw new Error('missing approval');
+      const committed = await commitApprovedExistingRunRosterTransition({ stateRoot, run: runRef(dir), proposal: prepared, approval, expected_active_run: runRef(dir) });
+      assert.equal(committed.ok, true);
+      await unlink(committed.runtime_transition_path);
+      const consumed = await consumeCommittedExistingRunRosterTransition({ stateRoot, run: runRef(dir), from_roster: ref('from'), to_roster: ref('to') });
+      assert.equal(consumed.ok, false);
+      assert.equal(consumed.status, 'failed');
+      assert.ok(consumed.diagnostics.some((diagnostic) => diagnostic.code === 'ROSTER_READBACK_MISMATCH'));
+    });
+  });
+
+  void it('reports the external authority write when runtime mirror publication fails', async () => {
+    await withTempDir(async (dir) => {
+      const stateRoot = join(dir, 'state');
+      const prepared = proposal(dir, stateRoot);
+      const approval = authorizeExistingRunRosterTransitionInput({ proposal: prepared, source: 'user', text: prepared.approval_phrase }).approval;
+      if (approval === null) throw new Error('missing approval');
+      let externalPublished = false;
+      const failed = await commitApprovedExistingRunRosterTransition({
+        stateRoot,
+        run: runRef(dir),
+        proposal: prepared,
+        approval,
+        expected_active_run: runRef(dir),
+        hooks: { onTransactionStage: (event) => {
+          if (event.path === prepared.transition_path && event.stage === 'after-temp-unlink') externalPublished = true;
+          if (externalPublished && event.path !== prepared.transition_path && event.stage === 'before-link') throw new Error('simulated runtime mirror persistence failure');
+        } },
+      });
+      assert.equal(failed.ok, false);
+      assert.equal(failed.status, 'failed');
+      assert.equal(failed.write_count, 1);
+      assert.deepEqual(failed.files_touched, [prepared.transition_display_path]);
+      assert.equal(existsSync(prepared.transition_path), true);
+      assert.equal(existsSync(failed.runtime_transition_path), false);
+    });
+  });
+
+  void it('rejects forked transition history instead of picking latest by mtime', async () => {
+    await withTempDir(async (dir) => {
+      const stateRoot = join(dir, 'state');
+      const first = proposal(dir, stateRoot);
+      const approval = authorizeExistingRunRosterTransitionInput({ proposal: first, source: 'user', text: first.approval_phrase }).approval;
+      if (approval === null) throw new Error('missing approval');
+      assert.equal((await commitApprovedExistingRunRosterTransition({ stateRoot, run: runRef(dir), proposal: first, approval, expected_active_run: runRef(dir) })).ok, true);
+      const forkTarget: AutopilotSavedRosterRefV1 = { ...ref('to'), roster_id: 'fork-roster', roster_sha256: `sha256:${'e'.repeat(64)}`, assignment_set_sha256: `sha256:${'f'.repeat(64)}`, path: '/authority/rosters/fork-roster/revision-1.json' };
+      const fork = buildExistingRunRosterTransitionProposal({ stateRoot, run: runRef(dir), from_roster: ref('from'), to_roster: forkTarget, reason: 'fork attempt', approved_at: NOW });
+      const forkApproval = authorizeExistingRunRosterTransitionInput({ proposal: fork, source: 'user', text: fork.approval_phrase }).approval;
+      if (forkApproval === null) throw new Error('missing fork approval');
+      assert.equal((await commitApprovedExistingRunRosterTransition({ stateRoot, run: runRef(dir), proposal: fork, approval: forkApproval, expected_active_run: runRef(dir) })).ok, true);
+      const chain = await resolveCommittedExistingRunRosterTransitionChain({ stateRoot, run: runRef(dir), initial_from_roster: ref('from') });
+      assert.equal(chain.ok, false);
+      assert.equal(chain.status, 'blocked');
+    });
+  });
+
   void it('recovers a post-link partial publication only by exact replay', async () => {
     await withTempDir(async (dir) => {
       const stateRoot = join(dir, 'state');
@@ -183,9 +256,10 @@ void describe('W5 existing-run roster transition service', () => {
 
       const replay = await commitApprovedExistingRunRosterTransition({ stateRoot, run: runRef(dir), proposal: prepared, approval, expected_active_run: runRef(dir) });
       assert.equal(replay.ok, true);
-      assert.equal(replay.status, 'inspected');
-      assert.equal(replay.idempotent_replay, true);
-      assert.equal(replay.write_count, 0);
+      assert.equal(replay.status, 'committed');
+      assert.equal(replay.idempotent_replay, false);
+      assert.equal(replay.write_count, 1);
+      assert.equal(existsSync(replay.runtime_transition_path), true);
     });
   });
 });

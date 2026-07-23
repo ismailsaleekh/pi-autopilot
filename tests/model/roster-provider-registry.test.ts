@@ -4,10 +4,12 @@ import { describe, it } from 'node:test';
 
 import {
   applyW4ProviderRegistryReadinessToCandidateSet,
+  isCentrallyTrustedW4CertifiedRoster,
   verifyW4ProviderManifestForCandidate,
   W4_PROVIDER_PACK_REGISTRY,
 } from '../../src/core/roster/providers/index.ts';
 import {
+  buildW4CertifiedRosterForCandidate,
   proposeRosterCandidates,
   type QualificationManifest,
 } from '../../src/core/roster/provider-recipes.ts';
@@ -56,6 +58,11 @@ void describe('Phase37 central W4 provider registry', () => {
     const fixture = selfHashedKimiW4ManifestFixture();
     const { manifest_sha256: _manifestSha, ...manifestPreimage } = fixture.manifest;
     assert.equal(fixture.manifest.manifest_sha256, canonicalSha256(manifestPreimage));
+
+    const selfCertifiedRoster = buildW4CertifiedRosterForCandidate({ candidate, certification_manifest_id: fixture.manifest.manifest_id, certification_manifest_sha256: fixture.manifest.manifest_sha256 });
+    assert.notEqual(selfCertifiedRoster, null);
+    if (selfCertifiedRoster === null) throw new Error('missing self-certified roster');
+    assert.equal(isCentrallyTrustedW4CertifiedRoster(selfCertifiedRoster), false);
 
     const verified = verifyW4ProviderManifestForCandidate({
       candidate,

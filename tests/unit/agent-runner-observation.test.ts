@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { describe, it } from 'node:test';
@@ -210,7 +210,7 @@ async function withPreparedV2<T>(run: (context: {
   readonly specPath: string;
   readonly unitSpec: AutopilotUnitSpecV2;
 }) => Promise<T>, options: { readonly rosterIndex?: number; readonly role?: AutopilotUnitSpecV2['role']; readonly unitId?: string } = {}): Promise<T> {
-  const root = await mkdtemp(join(tmpdir(), 'autopilot-w3-observation-'));
+  const root = await mkdtemp(join(await realpath(tmpdir()), 'autopilot-w3-observation-'));
   const originalStateRoot = process.env[AUTOPILOT_STATE_ROOT_ENV];
   const originalSessionContext = process.env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV];
   process.env[AUTOPILOT_STATE_ROOT_ENV] = join(root, 'autopilot-state');
@@ -254,7 +254,7 @@ async function installRosterAuthority(input: { readonly stateRoot: string; reado
   const selection = buildCanonicalPreRunSelection({
     stateRoot: input.stateRoot,
     repo_id: input.repoId,
-    workstream_run: rosterCompatibleWorkstreamRun(input.workstreamRun),
+    workstream_run: input.workstreamRun,
     selected: {
       scope: 'user',
       roster_id: stringAt(roster, 'roster_id'),
@@ -264,15 +264,23 @@ async function installRosterAuthority(input: { readonly stateRoot: string; reado
       config_sha256: stringAt(fixtureSelection, 'config_sha256') as `sha256:${string}`,
     },
   });
-  await mkdir(dirname(selection.selection_path), { recursive: true });
-  await writeFile(selection.selection_path, selection.selection_bytes);
+  await mkdir(dirname(selection.selection_path), { recursive: true, mode: 0o700 });
+  await chmod(join(input.stateRoot, 'roster-selections'), 0o700).catch(() => undefined);
+  await chmod(dirname(selection.selection_path), 0o700);
+  await writeFile(selection.selection_path, selection.selection_bytes, { mode: 0o600 });
+  await chmod(selection.selection_path, 0o600);
   const mirrorPath = resolve(input.mainWorktreePath, '.pi', 'autopilot', input.workstream, 'roster-snapshot.json');
-  await mkdir(dirname(mirrorPath), { recursive: true });
-  await writeFile(mirrorPath, selection.selection_bytes);
+  await mkdir(dirname(mirrorPath), { recursive: true, mode: 0o700 });
+  await chmod(dirname(mirrorPath), 0o700);
+  await writeFile(mirrorPath, selection.selection_bytes, { mode: 0o600 });
+  await chmod(mirrorPath, 0o600);
   const paths = resolveRosterScopePaths({ scope: 'user', stateRoot: input.stateRoot });
   const rosterPath = rosterRevisionPath(paths, { roster_id: stringAt(roster, 'roster_id'), roster_revision: numberAt(roster, 'roster_revision') });
-  await mkdir(dirname(rosterPath), { recursive: true });
-  await writeFile(rosterPath, `${canonicalRosterJson(roster)}\n`, 'utf8');
+  await mkdir(dirname(rosterPath), { recursive: true, mode: 0o700 });
+  await chmod(paths.rostersRoot, 0o700).catch(() => undefined);
+  await chmod(dirname(rosterPath), 0o700);
+  await writeFile(rosterPath, `${canonicalRosterJson(roster)}\n`, { encoding: 'utf8', mode: 0o600 });
+  await chmod(rosterPath, 0o600);
   return { selection: selection.selection as unknown as Readonly<Record<string, unknown>>, roster, assignment, requestProfile: requestProfileFromAssignment(assignment) };
 }
 
@@ -399,10 +407,6 @@ function arrayLength(value: unknown): number {
 function git(cwd: string, args: readonly string[]): void {
   const result = spawnSync('git', args, { cwd, encoding: 'utf8' });
   assert.equal(result.status, 0, result.stderr);
-}
-
-function rosterCompatibleWorkstreamRun(value: string): string {
-  return value.toLowerCase().replace(/[^a-z0-9]+/gu, '').slice(0, 100) || 'w3obsrun';
 }
 
 function generatedRoster(index: number): Readonly<Record<string, unknown>> { return objectAt(arrayAt(MANIFEST, 'generated_rosters'), String(index)); }

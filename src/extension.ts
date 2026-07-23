@@ -26,7 +26,7 @@ import {
   type AutopilotToolCallContextLike,
   type AutopilotToolCallEventLike,
 } from './core/git-guard.ts';
-import { AutopilotParallelRuntimeError, coordinationRootForRepo, prepareAutopilotWorkstream, readActiveAutopilots, readCoordinatorActiveAutopilots, recoverAutopilotWorktreeSagas, resolveAutopilotStateRoot, resolveRepoIdentity, worktreeRootForRepo, writeActiveAutopilots, type ActiveAutopilotRow, type PreparedAutopilotWorkstream, type ProcessEnvLike } from './core/parallel-runtime.ts';
+import { AutopilotParallelRuntimeError, coordinationRootForRepo, prepareAutopilotWorkstream, readActiveAutopilots, readCoordinatorActiveAutopilots, recoverAutopilotWorktreeSagas, resolveAutopilotStateRoot, resolveRepoIdentity, withAutopilotFileLock, worktreeRootForRepo, writeActiveAutopilots, type ActiveAutopilotRow, type PreparedAutopilotWorkstream, type ProcessEnvLike } from './core/parallel-runtime.ts';
 import { CoordinatorClient } from './core/coordination/client.ts';
 import { CoordinationRuntimeError, formatCoordinationRuntimeError } from './core/coordination/failures.ts';
 import { createClaimResponseTool, type ClaimResponseToolDefinition } from './core/coordination/claim-response-tool.ts';
@@ -53,13 +53,14 @@ import {
   type AutopilotRosterContractBySchemaVersion,
 } from './core/roster/contracts.ts';
 import { isLaunchableRosterCandidate } from './core/roster/activation-fence.ts';
+import { isCentrallyTrustedW4CertifiedRoster } from './core/roster/providers/index.ts';
 import { createAutopilotRosterSetupTool } from './core/roster/setup-tool.ts';
 import { createRosterSetupReceiptFactory, type AutopilotRosterSetupReceipt } from './core/roster/setup-receipt.ts';
 import { resolveAutopilotRosterSetupSkillPackage, type VerifiedAutopilotRosterSetupSkillPackage } from './core/roster/skill-package.ts';
 import { seedRosterByCandidate, type RosterCandidate } from './core/roster/provider-recipes.ts';
 import { resolveAndCommitPreRunSelection, type RunSelectionAuthority } from './core/roster/run-selection.ts';
 import { publishRuntimeRosterSnapshot, recoverRuntimeRosterSelection } from './core/roster/snapshot.ts';
-import { authorizeExistingRunRosterTransitionInput, buildExistingRunRosterTransitionProposal, commitApprovedExistingRunRosterTransition, consumeCommittedExistingRunRosterTransition, savedRosterRefForSelection, type ExistingRunRosterSuccessorAttemptAuthority, type ExistingRunRosterTransitionProposal, type ExistingRunRosterTransitionRunRef } from './core/roster/transition.ts';
+import { authorizeExistingRunRosterTransitionInput, buildExistingRunRosterTransitionProposal, commitApprovedExistingRunRosterTransition, consumeCommittedExistingRunRosterTransition, resolveCommittedExistingRunRosterTransitionChain, savedRosterRefForSelection, type ExistingRunRosterSuccessorAttemptAuthority, type ExistingRunRosterTransitionProposal, type ExistingRunRosterTransitionRunRef } from './core/roster/transition.ts';
 import { ROSTER_DIAGNOSTIC_CODES, rosterDiagnostic, type Digest, type RosterDiagnostic, type RosterDiagnosticCode } from './core/roster/route-policies.ts';
 import { resolveNewRun, type NewRunResolutionSource, type PreRunSelection, type SavedRosterAuthority } from './core/roster/resolve.ts';
 import { RosterStorage, formatAuthorityPath, resolveRosterScopePaths, rosterRevisionPath, type RosterDefaultReadResult, type RosterSha256, type RosterStorageCodec, type RosterStorageDiagnostic, type RosterStorageScope, type SavedRosterRef } from './core/roster/storage.ts';
@@ -169,7 +170,7 @@ export interface ResolvedAutopilotRosterSelection {
 export type AutopilotRosterActivationResolution =
   | { readonly status: 'resolved'; readonly selection: ResolvedAutopilotRosterSelection; readonly diagnostics: readonly RosterDiagnostic[] }
   | { readonly status: 'setup-required'; readonly source: 'agent-first-onboarding'; readonly diagnostics: readonly RosterDiagnostic[] }
-  | { readonly status: 'transition-approval-required'; readonly source: 'existing-run-selection'; readonly proposal: ExistingRunRosterTransitionProposal; readonly run: ExistingRunRosterTransitionRunRef; readonly originalCommand: string; readonly diagnostics: readonly RosterDiagnostic[] }
+  | { readonly status: 'transition-approval-required'; readonly source: 'existing-run-selection'; readonly proposal: ExistingRunRosterTransitionProposal; readonly run: ExistingRunRosterTransitionRunRef; readonly active: ActiveAutopilotRow; readonly originalCommand: string; readonly diagnostics: readonly RosterDiagnostic[] }
   | { readonly status: 'blocked'; readonly source: NewRunResolutionSource | 'existing-run-selection'; readonly diagnostics: readonly RosterDiagnostic[] };
 
 export interface AutopilotRosterActivationResolveInput {
@@ -210,7 +211,6 @@ type PinnedExistingRunSelectionRead =
 
 const ZERO_ROSTER_SHA = 'sha256:0000000000000000000000000000000000000000000000000000000000000000' as const;
 const SETUP_TOOL_NAME = 'autopilot_manage_rosters' as const;
-const READY_QUALIFICATION_STATES = new Set<string>(['synthetic-test-ready', 'w4-certified-ready']);
 const LIVE_PARENT_STATUSES = new Set<string>(['active', 'paused', 'merging', 'blocked']);
 
 const productionRosterStorageCodec: RosterStorageCodec<AutopilotRosterSetupReceipt> = Object.freeze({
@@ -377,6 +377,45 @@ function transitionRunRef(active: ActiveAutopilotRow): ExistingRunRosterTransiti
   };
 }
 
+async function readFreshActiveRunForTransition(input: {
+  readonly expected: ActiveAutopilotRow;
+  readonly ctx: ExtensionCommandContextLike;
+  readonly env: ProcessEnvLike;
+}): Promise<ActiveAutopilotRow | null> {
+  const repo = resolveRepoIdentity(input.ctx.cwd ?? process.cwd());
+  if (repo.repoKey !== input.expected.repo_key) return null;
+  const stateRoot = resolveAutopilotStateRoot(input.env);
+  const rows = coordinationCutoverCommitted(stateRoot, repo.repoKey)
+    ? await readCoordinatorActiveAutopilots(repo, worktreeRootForRepo(repo.repoKey, input.env), input.env)
+    : await readActiveAutopilots(coordinationRootForRepo(repo.repoKey, input.env));
+  const matches = rows.filter((row) => row.autopilot_id === input.expected.autopilot_id && row.workstream_run === input.expected.workstream_run);
+  if (matches.length !== 1) return null;
+  const fresh = matches[0];
+  if (fresh === undefined || !sameActiveRunForTransition(fresh, input.expected) || fresh.status !== input.expected.status) return null;
+  return fresh;
+}
+
+function sameActiveRunForTransition(left: ActiveAutopilotRow, right: ActiveAutopilotRow): boolean {
+  return left.schema_version === right.schema_version &&
+    left.coordination_authority === right.coordination_authority &&
+    left.autopilot_id === right.autopilot_id &&
+    left.workstream === right.workstream &&
+    left.workstream_run === right.workstream_run &&
+    left.repo_key === right.repo_key &&
+    left.source_repo === right.source_repo &&
+    left.git_common_dir === right.git_common_dir &&
+    left.worktree_root === right.worktree_root &&
+    left.main_worktree_path === right.main_worktree_path &&
+    left.branch === right.branch &&
+    left.runtime_root === right.runtime_root &&
+    left.target_branch === right.target_branch &&
+    left.target_base_sha === right.target_base_sha &&
+    left.origin_url === right.origin_url &&
+    left.active_run_epoch === right.active_run_epoch &&
+    left.active_epoch_started_at === right.active_epoch_started_at &&
+    left.active_run_receipt_id === right.active_run_receipt_id;
+}
+
 function resolveScopePathsForActivation(input: {
   readonly scope: RosterStorageScope;
   readonly ctx: ExtensionCommandContextLike;
@@ -448,8 +487,25 @@ async function loadRosterSelectionFromRef(input: {
   }
 }
 
+async function loadRosterSelectionFromRefAnyScope(input: {
+  readonly source: ResolvedAutopilotRosterSelection['source'];
+  readonly existingRun: boolean;
+  readonly ref: Pick<SavedRosterRef, 'roster_id' | 'roster_revision'> & { readonly roster_sha256: string; readonly assignment_set_sha256: string };
+  readonly configSha256: Digest;
+  readonly ctx: ExtensionCommandContextLike;
+  readonly stateRoot?: string | undefined;
+  readonly trustedProjectRootOverride?: string | undefined;
+}): Promise<{ readonly ok: true; readonly selection: ResolvedAutopilotRosterSelection } | { readonly ok: false; readonly diagnostics: readonly RosterDiagnostic[]; readonly fileState: 'missing' | 'hash-mismatch' }> {
+  const ref: SavedRosterRef = { roster_id: input.ref.roster_id, roster_revision: input.ref.roster_revision, roster_sha256: input.ref.roster_sha256 as RosterSha256, assignment_set_sha256: input.ref.assignment_set_sha256 as RosterSha256 };
+  const user = await loadRosterSelectionFromRef({ ...input, ref, scope: 'user' });
+  if (user.ok) return user;
+  const trusted = await loadRosterSelectionFromRef({ ...input, ref, scope: 'trusted-project' });
+  if (trusted.ok) return trusted;
+  return user.fileState === 'missing' ? trusted : user;
+}
+
 function rosterIsReady(roster: RosterContract): boolean {
-  return roster.assignments.every((assignment) => READY_QUALIFICATION_STATES.has(assignment.qualification_state));
+  return isCentrallyTrustedW4CertifiedRoster(roster);
 }
 
 class ProductionRosterActivationStore implements AutopilotRosterActivationStore {
@@ -625,15 +681,57 @@ class ProductionRosterActivationStore implements AutopilotRosterActivationStore 
     if (active === 'ambiguous') return blockedResolution('existing-run-selection', ['ROSTER_TRANSITION_REQUIRED']);
     const pinned = await this.#readPinnedSelection(active, input.ctx);
     if (!pinned.ok) {
-      await this.#pauseLegacyActiveRunForRosterTransition(active, input.env);
+      const paused = await this.#pauseLegacyActiveRunForRosterTransition(active, input.env);
+      if (!paused.ok) return blockedResolution('existing-run-selection', ['ROSTER_PINNED_SELECTION_UNAVAILABLE', 'ROSTER_TRANSITION_REQUIRED']);
       if (input.parsed.rosterId !== null && pinned.recovered_selection !== null) {
-        return await this.#resolveOrProposeExistingRunTransition(input, active, pinned.recovered_selection, pinned.external_selection_path, pinned.runtime_mirror_path, pinned.diagnostics);
+        return await this.#resolveOrProposeExistingRunTransition(input, paused.active, pinned.recovered_selection, pinned.external_selection_path, pinned.runtime_mirror_path, pinned.diagnostics);
       }
       return blockedResolution('existing-run-selection', ['ROSTER_PINNED_SELECTION_UNAVAILABLE', 'ROSTER_TRANSITION_REQUIRED']);
     }
+    const fromRef = savedRosterRefForSelection({ selection: pinned.recovered_selection, stateRoot: this.#stateRoot, trustedProjectRoot: active.source_repo });
+    const chain = await resolveCommittedExistingRunRosterTransitionChain({
+      ...(this.#stateRoot === undefined ? {} : { stateRoot: this.#stateRoot }),
+      run: transitionRunRef(active),
+      initial_from_roster: fromRef,
+    });
+    if (!chain.ok) return { status: 'blocked', source: 'existing-run-selection', diagnostics: dedupeRosterDiagnostics(chain.diagnostics.map((diagnostic) => diagnostic.code)) };
+    if (chain.terminal_successor_attempt_authority !== null) {
+      if (input.parsed.rosterId !== null && chain.terminal_roster.roster_id !== input.parsed.rosterId) {
+        const paused = await this.#pauseLegacyActiveRunForRosterTransition(active, input.env);
+        if (!paused.ok) return blockedResolution('existing-run-selection', ['ROSTER_TRANSITION_REQUIRED']);
+        return await this.#resolveOrProposeExistingRunTransition(input, paused.active, pinned.recovered_selection, pinned.external_selection_path, pinned.runtime_mirror_path, [rosterDiagnostic('ROSTER_TRANSITION_REQUIRED')], chain.terminal_roster);
+      }
+      const terminalLoaded = await loadRosterSelectionFromRefAnyScope({
+        source: 'existing-run-selection',
+        existingRun: true,
+        ref: chain.terminal_roster,
+        configSha256: pinned.recovered_selection.config_sha256,
+        ctx: input.ctx,
+        stateRoot: this.#stateRoot,
+        trustedProjectRootOverride: active.source_repo,
+      });
+      if (!terminalLoaded.ok) return { status: 'blocked', source: 'existing-run-selection', diagnostics: terminalLoaded.diagnostics };
+      return {
+        status: 'resolved',
+        diagnostics: [],
+        selection: {
+          ...terminalLoaded.selection,
+          source: 'existing-run-selection',
+          existingRun: true,
+          workstream_run: pinned.recovered_selection.workstream_run,
+          pre_run_selection: pinned.recovered_selection,
+          pre_run_selection_path: pinned.external_selection_path,
+          selection_bytes: null,
+          launch_fence: null,
+          runtime_mirror_path: pinned.runtime_mirror_path,
+          successor_attempt_authority: chain.terminal_successor_attempt_authority,
+        },
+      };
+    }
     if (input.parsed.rosterId !== null && pinned.selection.roster_id !== input.parsed.rosterId) {
-      await this.#pauseLegacyActiveRunForRosterTransition(active, input.env);
-      return await this.#resolveOrProposeExistingRunTransition(input, active, pinned.recovered_selection, pinned.external_selection_path, pinned.runtime_mirror_path, [rosterDiagnostic('ROSTER_TRANSITION_REQUIRED')]);
+      const paused = await this.#pauseLegacyActiveRunForRosterTransition(active, input.env);
+      if (!paused.ok) return blockedResolution('existing-run-selection', ['ROSTER_TRANSITION_REQUIRED']);
+      return await this.#resolveOrProposeExistingRunTransition(input, paused.active, pinned.recovered_selection, pinned.external_selection_path, pinned.runtime_mirror_path, [rosterDiagnostic('ROSTER_TRANSITION_REQUIRED')]);
     }
     return { status: 'resolved', selection: pinned.selection, diagnostics: [] };
   }
@@ -728,6 +826,7 @@ class ProductionRosterActivationStore implements AutopilotRosterActivationStore 
     externalSelectionPath: string | null,
     runtimeMirrorPath: string | null,
     priorDiagnostics: readonly RosterDiagnostic[],
+    fromRosterOverride?: ReturnType<typeof savedRosterRefForSelection> | undefined,
   ): Promise<AutopilotRosterActivationResolution> {
     if (input.parsed.rosterId === null) return { status: 'blocked', source: 'existing-run-selection', diagnostics: priorDiagnostics };
     const explicit = await this.#readExplicitRoster(input.parsed.rosterId, input.ctx);
@@ -735,7 +834,7 @@ class ProductionRosterActivationStore implements AutopilotRosterActivationStore 
       return { status: 'blocked', source: 'existing-run-selection', diagnostics: dedupeRosterDiagnostics([...priorDiagnostics.map((diagnostic) => diagnostic.code), 'ROSTER_TRANSITION_REQUIRED']) };
     }
     const run = transitionRunRef(active);
-    const fromRef = savedRosterRefForSelection({ selection: fromSelection, stateRoot: this.#stateRoot, trustedProjectRoot: active.source_repo });
+    const fromRef = fromRosterOverride ?? savedRosterRefForSelection({ selection: fromSelection, stateRoot: this.#stateRoot, trustedProjectRoot: active.source_repo });
     const toRef = savedRosterRefForSelection({ selection: explicit.selection, stateRoot: this.#stateRoot, trustedProjectRoot: active.source_repo });
     const consumed = await consumeCommittedExistingRunRosterTransition({
       ...(this.#stateRoot === undefined ? {} : { stateRoot: this.#stateRoot }),
@@ -777,20 +876,33 @@ class ProductionRosterActivationStore implements AutopilotRosterActivationStore 
       source: 'existing-run-selection',
       proposal,
       run,
+      active,
       originalCommand: input.originalCommand,
       diagnostics: dedupeRosterDiagnostics([...priorDiagnostics.map((diagnostic) => diagnostic.code), 'ROSTER_TRANSITION_REQUIRED']),
     };
   }
 
-  async #pauseLegacyActiveRunForRosterTransition(active: ActiveAutopilotRow, env: ProcessEnvLike): Promise<void> {
-    if (active.coordination_authority !== 'legacy-path-claims-v1') return;
+  async #pauseLegacyActiveRunForRosterTransition(active: ActiveAutopilotRow, env: ProcessEnvLike): Promise<{ readonly ok: true; readonly active: ActiveAutopilotRow } | { readonly ok: false }> {
+    if (active.coordination_authority !== 'legacy-path-claims-v1') return { ok: false };
+    const coordinationRoot = coordinationRootForRepo(active.repo_key, env);
+    const lockPath = `${coordinationRoot}/.locks/activation.lock`;
     try {
-      const coordinationRoot = coordinationRootForRepo(active.repo_key, env);
-      const rows = await readActiveAutopilots(coordinationRoot);
-      const next = rows.map((row) => row.autopilot_id === active.autopilot_id && row.workstream_run === active.workstream_run ? { ...row, status: 'paused' as const } : row);
-      await writeActiveAutopilots(coordinationRoot, next);
+      return await withAutopilotFileLock(lockPath, `roster-transition-pause:${active.autopilot_id}:${active.workstream_run}`, async () => {
+        const rows = await readActiveAutopilots(coordinationRoot);
+        const index = rows.findIndex((row) => row.autopilot_id === active.autopilot_id && row.workstream_run === active.workstream_run);
+        if (index < 0) return { ok: false };
+        const current = rows[index];
+        if (current === undefined || !sameActiveRunForTransition(current, active)) return { ok: false };
+        const paused: ActiveAutopilotRow = { ...current, status: 'paused' as const };
+        const next = rows.map((row, rowIndex) => rowIndex === index ? paused : row);
+        await writeActiveAutopilots(coordinationRoot, next);
+        const readback = await readActiveAutopilots(coordinationRoot);
+        const confirmed = readback.find((row) => row.autopilot_id === active.autopilot_id && row.workstream_run === active.workstream_run);
+        if (confirmed === undefined || confirmed.status !== 'paused' || !sameActiveRunForTransition(confirmed, paused)) return { ok: false };
+        return { ok: true as const, active: confirmed };
+      });
     } catch {
-      return;
+      return { ok: false };
     }
   }
 }
@@ -924,7 +1036,7 @@ export default function autopilotExtension(pi: ExtensionHostLike, dependencies: 
   let rosterSetupBundle: AutopilotRosterSetupToolBundle | null = null;
   let rosterSetupActivationToken: string | null = null;
   let rosterSetupSkillPath: string | null = null;
-  let pendingRosterTransition: { readonly proposal: ExistingRunRosterTransitionProposal; readonly run: ExistingRunRosterTransitionRunRef; readonly originalCommand: string } | null = null;
+  let pendingRosterTransition: { readonly proposal: ExistingRunRosterTransitionProposal; readonly run: ExistingRunRosterTransitionRunRef; readonly active: ActiveAutopilotRow; readonly originalCommand: string } | null = null;
 
   function activateContextBudget(): void {
     if (!contextBudgetRegistered) {
@@ -1103,7 +1215,7 @@ export default function autopilotExtension(pi: ExtensionHostLike, dependencies: 
       notify(ctx, 'Autopilot existing-run roster transition requires user-input approval authority, but this Pi host exposes no input event boundary. No transition was recorded.', 'error');
       return;
     }
-    pendingRosterTransition = { proposal: resolution.proposal, run: resolution.run, originalCommand: resolution.originalCommand };
+    pendingRosterTransition = { proposal: resolution.proposal, run: resolution.run, active: resolution.active, originalCommand: resolution.originalCommand };
     pi.sendUserMessage(resolution.proposal.presentation, { deliverAs: 'followUp' });
     notify(ctx, `Autopilot existing-run roster transition requires exact user approval before retry. Diagnostics: ${formatDiagnostics(resolution.diagnostics)}.`, 'warning');
   }
@@ -1382,23 +1494,41 @@ export default function autopilotExtension(pi: ExtensionHostLike, dependencies: 
         }
       }
       if (pendingRosterTransition === null) return undefined;
-      const authorized = authorizeExistingRunRosterTransitionInput({ proposal: pendingRosterTransition.proposal, source: event.source, text: event.text });
-      if (!authorized.ok || authorized.approval === null) {
+      const pending = pendingRosterTransition;
+      const authorized = authorizeExistingRunRosterTransitionInput({ proposal: pending.proposal, source: event.source, text: event.text });
+      const approval = authorized.approval;
+      if (!authorized.ok || approval === null) {
         notify(ctx, `Autopilot roster transition approval was not accepted: ${authorized.reason}.`, 'warning');
         return { action: 'continue' };
       }
-      const committed = await commitApprovedExistingRunRosterTransition({
-        ...(dependencies.rosterStateRoot === undefined ? {} : { stateRoot: dependencies.rosterStateRoot }),
-        run: pendingRosterTransition.run,
-        proposal: pendingRosterTransition.proposal,
-        approval: authorized.approval,
-        expected_active_run: pendingRosterTransition.run,
-      });
+      const commitAfterFreshRead = async (): Promise<Awaited<ReturnType<typeof commitApprovedExistingRunRosterTransition>> | null> => {
+        let freshActive: ActiveAutopilotRow | null = null;
+        try {
+          freshActive = await readFreshActiveRunForTransition({ expected: pending.active, ctx, env: process.env });
+        } catch {
+          freshActive = null;
+        }
+        if (freshActive === null) return null;
+        return await commitApprovedExistingRunRosterTransition({
+          ...(dependencies.rosterStateRoot === undefined ? {} : { stateRoot: dependencies.rosterStateRoot }),
+          run: transitionRunRef(freshActive),
+          proposal: pending.proposal,
+          approval,
+          expected_active_run: transitionRunRef(freshActive),
+        });
+      };
+      const committed = pending.active.coordination_authority === 'legacy-path-claims-v1'
+        ? await withAutopilotFileLock(`${coordinationRootForRepo(pending.active.repo_key, process.env)}/.locks/activation.lock`, `roster-transition-commit:${pending.active.autopilot_id}:${pending.active.workstream_run}`, commitAfterFreshRead)
+        : await commitAfterFreshRead();
+      if (committed === null) {
+        notify(ctx, 'Autopilot roster transition failed closed: active run identity/status drifted before approval commit.', 'error');
+        return { action: 'handled' };
+      }
       if (!committed.ok) {
         notify(ctx, `Autopilot roster transition failed closed: ${formatDiagnostics(dedupeRosterDiagnostics(committed.diagnostics.map((diagnostic) => diagnostic.code)))}.`, 'error');
         return { action: 'handled' };
       }
-      const retryCommand = pendingRosterTransition.originalCommand;
+      const retryCommand = pending.originalCommand;
       pendingRosterTransition = null;
       pi.sendUserMessage(`Autopilot roster transition recorded at ${committed.transition_display_path}. Start a fresh retry with exactly: ${retryCommand}\nSuccessor attempts must be freshly validated before close.`, { deliverAs: 'followUp' });
       notify(ctx, `Autopilot roster transition ${committed.transition?.transition_id ?? 'recorded'} committed; retry the original command.`, 'info');
@@ -1470,6 +1600,16 @@ export default function autopilotExtension(pi: ExtensionHostLike, dependencies: 
         branch: prepared.active.branch,
         repoKey: prepared.active.repo_key,
         targetBranch: prepared.active.target_branch,
+        rosterTransition: rosterResolution.selection.successor_attempt_authority === undefined ? null : {
+          transition_id: rosterResolution.selection.successor_attempt_authority.transition_id,
+          transition_sha256: rosterResolution.selection.successor_attempt_authority.transition_sha256,
+          transition_artifact_sha256: rosterResolution.selection.successor_attempt_authority.transition_artifact_sha256,
+          runtime_transition_ref: rosterResolution.selection.successor_attempt_authority.runtime_transition_ref,
+          from_roster_id: rosterResolution.selection.successor_attempt_authority.from_roster.roster_id,
+          to_roster_id: rosterResolution.selection.successor_attempt_authority.to_roster.roster_id,
+          to_roster_revision: rosterResolution.selection.successor_attempt_authority.to_roster.roster_revision,
+          to_roster_sha256: rosterResolution.selection.successor_attempt_authority.to_roster.roster_sha256,
+        },
       });
       try {
         pi.sendUserMessage(prompt, { deliverAs: 'followUp' });

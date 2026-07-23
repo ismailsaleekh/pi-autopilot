@@ -96,11 +96,14 @@ import {
   type AutopilotRenderedPrompt,
 } from './prompt-renderer/index.ts';
 import { recoverRuntimeRosterSelection, runtimeRosterSnapshotPath } from './roster/snapshot.ts';
+import { resolveCommittedExistingRunRosterTransitionChain, savedRosterRefForSelection, type AutopilotSavedRosterRefV1, type AutopilotRosterTransitionV1, type ExistingRunRosterSuccessorAttemptAuthority } from './roster/transition.ts';
 import { preRunSelectionPath, resolveRosterScopePaths, rosterRevisionPath, type RosterSha256 } from './roster/paths.ts';
-import { computeAutopilotRosterContractObjectHash, parseAutopilotHistoricalFixedRosterAdapterResult, parseAutopilotRoster } from './roster/contracts.ts';
+import { autopilotRosterContractCanonicalJson, computeAutopilotRosterContractObjectHash, parseAutopilotHistoricalFixedRosterAdapterResult, parseAutopilotRoster } from './roster/contracts.ts';
 import { bytesEqual, parseCanonicalPreRunSelectionBytes, type RunSelectionDiagnostic } from './roster/run-selection.ts';
-import { assertUnitSpecMatchesPinnedFacts, resolvePinnedRoleRuntimeFacts } from './roster/runtime-spec.ts';
+import { assertRequestProfileMatchesAssignment, assertUnitSpecMatchesPinnedFacts, resolvePinnedRoleRuntimeFacts } from './roster/runtime-spec.ts';
 import { unitSpecAuthorityProjection, type AutopilotRuntimeUnitSpec } from './roster/runtime-consumers.ts';
+import { isCentrallyTrustedW4CertifiedRoster } from './roster/providers/index.ts';
+import { readAuthorityFileIfPresent } from './roster/transaction.ts';
 
 type JsonRecord = Readonly<Record<string, unknown>>;
 type ProcessEnv = Readonly<Record<string, string | undefined>>;
@@ -897,37 +900,13 @@ async function authenticateSpecBundleBeforePreflight(input: {
       env: input.env,
     });
     const stateRoot = input.env[AUTOPILOT_STATE_ROOT_ENV];
-    const selection = await recoverAuthenticatedV2Selection({
+    const authenticated = await authenticateV2SpecAgainstSelectionOrTransition({
       stateRoot,
-      mainWorktreeRoot: runtimeContext.active.main_worktree_path,
-      workstream: originalSpec.workstream,
-      repoId: runtimeContext.active.repo_key,
-      workstreamRun: runtimeContext.active.workstream_run,
+      runtimeContext,
       originalSpec,
+      specPath: input.specPath,
     });
-    const roster = await readAuthenticatedRosterForSelection({
-      selection,
-      mainWorktreePath: runtimeContext.active.main_worktree_path,
-      stateRoot,
-    });
-    const facts = resolvePinnedRoleRuntimeFacts({
-      selection,
-      roster,
-      role: originalSpec.role,
-      request_profile: originalSpec.request_profile,
-    });
-    assertUnitSpecMatchesPinnedFacts(originalSpec, facts);
-    const identity: AutopilotRosterExecutionIdentity = Object.freeze({
-      schema_version: 'autopilot.roster_execution_identity.v1',
-      roster_id: facts.selection.roster_id,
-      roster_revision: facts.selection.roster_revision,
-      roster_sha256: facts.selection.roster_sha256 as `sha256:${string}`,
-      assignment_sha256: facts.assignment.assignment_sha256 as `sha256:${string}`,
-      pre_run_selection_sha256: facts.selection.selection_sha256 as `sha256:${string}`,
-      request_profile: facts.request_profile,
-      request_profile_sha256: facts.request_profile.request_profile_sha256 as `sha256:${string}`,
-    });
-    return { ...input.specBundle, authoritySpec: unitSpecAuthorityProjection(originalSpec), rosterExecutionIdentity: identity };
+    return { ...input.specBundle, authoritySpec: unitSpecAuthorityProjection(originalSpec), rosterExecutionIdentity: authenticated.identity };
   } catch (error) {
     throw new AutopilotAgentRunError('spec-invalid', {
       reason: `unit_spec.v2 failed external roster/selection authentication before preflight authority derivation: ${errorMessage(error)}`,
@@ -1033,6 +1012,100 @@ function normalizeFsPath(path: string): string {
 
 type AuthenticatedPreRunSelection = NonNullable<Awaited<ReturnType<typeof recoverRuntimeRosterSelection>>['selection']>;
 
+type AuthenticatedV2SpecRosterBinding = {
+  readonly identity: AutopilotRosterExecutionIdentity;
+};
+
+async function authenticateV2SpecAgainstSelectionOrTransition(input: {
+  readonly stateRoot: string | undefined;
+  readonly runtimeContext: ActiveAutopilotContext;
+  readonly originalSpec: AutopilotUnitSpecV2;
+  readonly specPath: string;
+}): Promise<AuthenticatedV2SpecRosterBinding> {
+  const active = input.runtimeContext.active;
+  const selection = await recoverImmutableV2Selection({
+    stateRoot: input.stateRoot,
+    mainWorktreeRoot: active.main_worktree_path,
+    workstream: input.originalSpec.workstream,
+    repoId: active.repo_key,
+    workstreamRun: active.workstream_run,
+  });
+  const fromRef = savedRosterRefForSelection({ selection, stateRoot: input.stateRoot, trustedProjectRoot: active.source_repo });
+  const chain = await resolveCommittedExistingRunRosterTransitionChain({
+    ...(input.stateRoot === undefined ? {} : { stateRoot: input.stateRoot }),
+    run: {
+      repo_id: active.repo_key,
+      workstream: active.workstream,
+      workstream_run: active.workstream_run,
+      main_worktree_path: active.main_worktree_path,
+      runtime_root: active.runtime_root,
+      source_repo: active.source_repo,
+    },
+    initial_from_roster: fromRef,
+  });
+  if (!chain.ok) throw new Error(`committed roster transition chain failed authentication: ${chain.diagnostics.map((diagnostic) => diagnostic.code).join(', ')}`);
+
+  if (v2SpecMatchesImmutableSelection(input.originalSpec, selection)) {
+    if (chain.terminal_successor_attempt_authority !== null) throw new Error('old FROM-roster unit_spec.v2 launches are rejected after a committed roster transition');
+    const roster = await readAuthenticatedRosterForSelection({
+      selection,
+      trustedProjectRoot: active.source_repo,
+      stateRoot: input.stateRoot,
+    });
+    const facts = resolvePinnedRoleRuntimeFacts({
+      selection,
+      roster,
+      role: input.originalSpec.role,
+      request_profile: input.originalSpec.request_profile,
+    });
+    assertUnitSpecMatchesPinnedFacts(input.originalSpec, facts);
+    return { identity: rosterIdentityFromSpecAndRequestProfile(input.originalSpec) };
+  }
+
+  const authority = chain.terminal_successor_attempt_authority;
+  if (authority === null) throw new Error('unit_spec.v2 roster identity differs from immutable pre-run selection without a committed transition');
+  if (input.originalSpec.pre_run_selection_sha256 !== selection.selection_sha256) throw new Error('transitioned unit_spec.v2 must keep pre_run_selection_sha256 bound to the immutable FROM selection');
+  await assertTransitionContextRefMatchesSpec({ spec: input.originalSpec, runtimeRoot: active.runtime_root, authority });
+  const targetRoster = await readAuthenticatedRosterForSavedRef({ ref: authority.to_roster, stateRoot: input.stateRoot, trustedProjectRoot: active.source_repo });
+  assertTransitionedUnitSpecMatchesTargetRoster({ spec: input.originalSpec, selection, targetRoster, toRef: authority.to_roster });
+  const maxFromAttempt = await maxFromRosterAttemptForUnit({ runtimeRoot: active.runtime_root, unitId: input.originalSpec.unit_id, fromSelection: selection });
+  if (input.originalSpec.attempt <= maxFromAttempt) throw new Error(`transition successor attempt must be newer than max FROM-roster attempt ${String(maxFromAttempt)} for unit ${input.originalSpec.unit_id}`);
+  if (!isCentrallyTrustedW4CertifiedRoster(targetRoster)) throw new Error('transition target roster is not centrally trusted W4-certified launch authority');
+  return { identity: rosterIdentityFromSpecAndRequestProfile(input.originalSpec) };
+}
+
+async function recoverImmutableV2Selection(input: {
+  readonly stateRoot: string | undefined;
+  readonly mainWorktreeRoot: string;
+  readonly workstream: string;
+  readonly repoId: string;
+  readonly workstreamRun: string;
+}): Promise<AuthenticatedPreRunSelection> {
+  const recovery = await recoverRuntimeRosterSelection({
+    ...(input.stateRoot === undefined ? {} : { stateRoot: input.stateRoot }),
+    mainWorktreeRoot: input.mainWorktreeRoot,
+    workstream: input.workstream,
+    repo_id: input.repoId,
+    workstream_run: input.workstreamRun,
+    spec_identity: null,
+    require_spec_identity: false,
+    roster_file_state: 'present',
+  });
+  if (recovery.ok && recovery.selection !== null) return recovery.selection;
+  const mirrorPath = runtimeRosterSnapshotPath({ mainWorktreeRoot: input.mainWorktreeRoot, workstream: input.workstream });
+  let mirrorBytes: Uint8Array;
+  try {
+    mirrorBytes = await readFile(mirrorPath);
+  } catch (error) {
+    throw new Error(`runtime roster mirror unavailable at ${mirrorPath}: ${errorMessage(error)}; ${formatRunSelectionDiagnostics(recovery.diagnostics)}`);
+  }
+  const mirrorSelection = parseCanonicalPreRunSelectionBytes(mirrorBytes);
+  if (mirrorSelection.repo_id !== input.repoId || mirrorSelection.workstream_run !== input.workstreamRun) throw new Error('runtime roster mirror belongs to a foreign run');
+  const externalMatches = await findExternalSelectionByteMatches({ stateRoot: input.stateRoot, selection: mirrorSelection, mirrorBytes });
+  if (externalMatches.length !== 1) throw new Error(`external pre-run selection recovery found ${String(externalMatches.length)} exact mirror byte match(es); ${formatRunSelectionDiagnostics(recovery.diagnostics)}`);
+  return mirrorSelection;
+}
+
 async function recoverAuthenticatedV2Selection(input: {
   readonly stateRoot: string | undefined;
   readonly mainWorktreeRoot: string;
@@ -1109,10 +1182,10 @@ async function findExternalSelectionByteMatches(input: {
   const matches: string[] = [];
   for (const candidate of candidates) {
     try {
-      const bytes = await readFile(candidate);
-      if (bytesEqual(bytes, input.mirrorBytes)) matches.push(candidate);
+      const read = await readAuthorityFileIfPresent(candidate, paths.userStateRoot);
+      if (read !== null && bytesEqual(read.bytes, input.mirrorBytes)) matches.push(candidate);
     } catch {
-      // Ignore disappearing candidates; exact readback absence remains fail-closed through match count.
+      // Ignore disappearing or unsafe candidates; exact safe-read match count remains fail-closed.
     }
   }
   return Object.freeze(matches.sort());
@@ -1136,15 +1209,16 @@ function v2SpecSelectionIssues(
 
 async function readAuthenticatedRosterForSelection(input: {
   readonly selection: AuthenticatedPreRunSelection;
-  readonly mainWorktreePath: string;
+  readonly trustedProjectRoot: string;
   readonly stateRoot: string | undefined;
 }): Promise<ReturnType<typeof parseAutopilotRoster>> {
   const paths = input.selection.scope === 'trusted-project'
-    ? resolveRosterScopePaths({ scope: 'trusted-project', ...(input.stateRoot === undefined ? {} : { stateRoot: input.stateRoot }), trustedProjectRoot: input.mainWorktreePath })
+    ? resolveRosterScopePaths({ scope: 'trusted-project', ...(input.stateRoot === undefined ? {} : { stateRoot: input.stateRoot }), trustedProjectRoot: input.trustedProjectRoot })
     : resolveRosterScopePaths({ scope: 'user', ...(input.stateRoot === undefined ? {} : { stateRoot: input.stateRoot }) });
   const rosterPath = rosterRevisionPath(paths, input.selection);
-  const rosterBytes = await readFile(rosterPath);
-  const roster = parseAutopilotRoster(JSON.parse(Buffer.from(rosterBytes).toString('utf8')) as unknown);
+  const read = await readAuthorityFileIfPresent(rosterPath, paths.authorityRoot);
+  if (read === null) throw new Error(`roster authority is missing or unsafe at ${rosterPath}`);
+  const roster = parseAutopilotRoster(JSON.parse(Buffer.from(read.bytes).toString('utf8')) as unknown);
   const computedRosterHash = computeAutopilotRosterContractObjectHash('autopilot.roster.v1', roster);
   const issues: string[] = [];
   if (computedRosterHash !== roster.roster_sha256) issues.push('roster object hash does not match roster.roster_sha256');
@@ -1152,6 +1226,141 @@ async function readAuthenticatedRosterForSelection(input: {
   if (roster.assignment_set_sha256 !== input.selection.assignment_set_sha256) issues.push('assignment_set_sha256 does not match recovered pre-run selection');
   if (issues.length > 0) throw new Error(issues.join('; '));
   return roster;
+}
+
+function v2SpecMatchesImmutableSelection(spec: AutopilotUnitSpecV2, selection: AuthenticatedPreRunSelection): boolean {
+  return spec.pre_run_selection_sha256 === selection.selection_sha256 &&
+    spec.roster_id === selection.roster_id &&
+    spec.roster_revision === selection.roster_revision &&
+    spec.roster_sha256 === selection.roster_sha256;
+}
+
+function rosterIdentityFromSpecAndRequestProfile(spec: AutopilotUnitSpecV2): AutopilotRosterExecutionIdentity {
+  return Object.freeze({
+    schema_version: 'autopilot.roster_execution_identity.v1' as const,
+    roster_id: spec.roster_id,
+    roster_revision: spec.roster_revision,
+    roster_sha256: spec.roster_sha256 as `sha256:${string}`,
+    assignment_sha256: spec.assignment_sha256 as `sha256:${string}`,
+    pre_run_selection_sha256: spec.pre_run_selection_sha256 as `sha256:${string}`,
+    request_profile: spec.request_profile,
+    request_profile_sha256: spec.request_profile.request_profile_sha256 as `sha256:${string}`,
+  });
+}
+
+async function assertTransitionContextRefMatchesSpec(input: {
+  readonly spec: AutopilotUnitSpecV2;
+  readonly runtimeRoot: string;
+  readonly authority: ExistingRunRosterSuccessorAttemptAuthority;
+}): Promise<void> {
+  const ref = input.spec.context_refs.find((candidate) => candidate.path === input.authority.runtime_transition_ref) ?? null;
+  if (ref === null) throw new Error('transitioned unit_spec.v2 lacks exact roster-transition context_ref');
+  const transitionPath = join(input.runtimeRoot, input.authority.runtime_transition_ref);
+  const read = await readAuthorityFileIfPresent(transitionPath, dirname(transitionPath));
+  if (read === null) throw new Error('transition context_ref runtime authority is missing or unsafe');
+  const bytes = read.bytes;
+  const sha = `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
+  if (ref.sha256 !== input.authority.transition_artifact_sha256 || ref.sha256 !== sha) throw new Error('transition context_ref sha256 does not match exact runtime transition artifact bytes');
+  if (ref.byte_count !== bytes.byteLength) throw new Error('transition context_ref byte_count does not match exact runtime transition artifact bytes');
+  if (!ref.purpose.includes(input.authority.transition_id)) throw new Error('transition context_ref purpose is not bound to the transition id');
+  const parsed = JSON.parse(Buffer.from(bytes).toString('utf8')) as unknown;
+  if (autopilotRosterContractCanonicalJson(parsed) !== Buffer.from(bytes).toString('utf8')) throw new Error('transition context_ref artifact is not canonical bytes');
+}
+
+async function readAuthenticatedRosterForSavedRef(input: {
+  readonly ref: AutopilotSavedRosterRefV1;
+  readonly stateRoot: string | undefined;
+  readonly trustedProjectRoot: string;
+}): Promise<ReturnType<typeof parseAutopilotRoster>> {
+  const candidates = [
+    resolveRosterScopePaths({ scope: 'user', ...(input.stateRoot === undefined ? {} : { stateRoot: input.stateRoot }) }),
+    resolveRosterScopePaths({ scope: 'trusted-project', ...(input.stateRoot === undefined ? {} : { stateRoot: input.stateRoot }), trustedProjectRoot: input.trustedProjectRoot }),
+  ];
+  const matches: ReturnType<typeof parseAutopilotRoster>[] = [];
+  for (const paths of candidates) {
+    try {
+      const rosterPath = rosterRevisionPath(paths, input.ref);
+      const read = await readAuthorityFileIfPresent(rosterPath, paths.authorityRoot);
+      if (read === null) continue;
+      const roster = parseAutopilotRoster(JSON.parse(Buffer.from(read.bytes).toString('utf8')) as unknown);
+      const computedRosterHash = computeAutopilotRosterContractObjectHash('autopilot.roster.v1', roster);
+      if (
+        computedRosterHash === roster.roster_sha256 &&
+        roster.roster_id === input.ref.roster_id &&
+        roster.roster_revision === input.ref.roster_revision &&
+        roster.roster_sha256 === input.ref.roster_sha256 &&
+        roster.assignment_set_sha256 === input.ref.assignment_set_sha256
+      ) matches.push(roster);
+    } catch {
+      // Try the other immutable authority scope; exact match count below is authoritative.
+    }
+  }
+  if (matches.length !== 1) throw new Error(`saved target roster ref resolved to ${String(matches.length)} authenticated roster file(s)`);
+  const roster = matches[0];
+  if (roster === undefined) throw new Error('saved target roster match disappeared');
+  return roster;
+}
+
+function assertTransitionedUnitSpecMatchesTargetRoster(input: {
+  readonly spec: AutopilotUnitSpecV2;
+  readonly selection: AuthenticatedPreRunSelection;
+  readonly targetRoster: ReturnType<typeof parseAutopilotRoster>;
+  readonly toRef: AutopilotSavedRosterRefV1;
+}): void {
+  const { spec, targetRoster } = input;
+  if (targetRoster.roster_id !== input.toRef.roster_id || targetRoster.roster_revision !== input.toRef.roster_revision || targetRoster.roster_sha256 !== input.toRef.roster_sha256 || targetRoster.assignment_set_sha256 !== input.toRef.assignment_set_sha256) throw new Error('transition target roster file does not match transition to_roster ref');
+  if (spec.pre_run_selection_sha256 !== input.selection.selection_sha256) throw new Error('transitioned unit_spec.v2 pre_run_selection_sha256 must match immutable FROM selection');
+  if (spec.roster_id !== targetRoster.roster_id || spec.roster_revision !== targetRoster.roster_revision || spec.roster_sha256 !== targetRoster.roster_sha256) throw new Error('transitioned unit_spec.v2 roster tuple does not match terminal TO roster');
+  const assignment = targetRoster.assignments.find((entry) => entry.role === spec.role);
+  if (assignment === undefined) throw new Error(`terminal TO roster lacks role assignment ${spec.role}`);
+  if (spec.assignment_sha256 !== assignment.assignment_sha256) throw new Error('transitioned unit_spec.v2 assignment_sha256 does not match terminal TO roster role');
+  assertRequestProfileMatchesAssignment(spec.request_profile, assignment);
+  if (spec.model !== spec.request_profile.model || spec.thinking !== spec.request_profile.thinking) throw new Error('transitioned unit_spec.v2 model/thinking does not match target request_profile');
+}
+
+async function maxFromRosterAttemptForUnit(input: {
+  readonly runtimeRoot: string;
+  readonly unitId: string;
+  readonly fromSelection: AuthenticatedPreRunSelection;
+}): Promise<number> {
+  let max = 0;
+  for (const root of ['unit-specs', 'receipts']) {
+    const dir = join(input.runtimeRoot, root);
+    let files: readonly string[];
+    try { files = await listJsonFiles(dir); }
+    catch { continue; }
+    for (const path of files) {
+      try {
+        const parsed = JSON.parse(await readFile(path, 'utf8')) as unknown;
+        if (!isJsonRecord(parsed) || parsed['schema_version'] !== (root === 'unit-specs' ? 'autopilot.unit_spec.v2' : 'autopilot.receipt.v2')) continue;
+        const unitId = typeof parsed['unit_id'] === 'string' ? parsed['unit_id'] : null;
+        const attempt = typeof parsed['attempt'] === 'number' ? parsed['attempt'] : 0;
+        if (unitId !== input.unitId || !Number.isSafeInteger(attempt)) continue;
+        if (
+          parsed['pre_run_selection_sha256'] === input.fromSelection.selection_sha256 &&
+          parsed['roster_id'] === input.fromSelection.roster_id &&
+          parsed['roster_revision'] === input.fromSelection.roster_revision &&
+          parsed['roster_sha256'] === input.fromSelection.roster_sha256
+        ) max = Math.max(max, attempt);
+      } catch {
+        throw new Error(`invalid runtime ${root} artifact blocks transition attempt freshness: ${path}`);
+      }
+    }
+  }
+  return max;
+}
+
+async function listJsonFiles(root: string): Promise<readonly string[]> {
+  const out: string[] = [];
+  async function visit(dir: string): Promise<void> {
+    for (const entry of await readdir(dir, { withFileTypes: true })) {
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) await visit(path);
+      else if (entry.isFile() && path.endsWith('.json')) out.push(path);
+    }
+  }
+  await visit(root);
+  return Object.freeze(out.sort((left, right) => left.localeCompare(right)));
 }
 
 function formatRunSelectionDiagnostics(diagnostics: readonly { readonly code: string; readonly severity?: string }[]): string {
