@@ -8,14 +8,22 @@ import { dirname, join, resolve } from 'node:path';
 import { describe, it } from 'node:test';
 
 import { AutopilotAgentRunError, runAutopilotAgentFromSpecPath } from '../../src/core/agent-runner.ts';
+import { authorityArtifactPath } from '../../src/core/authority.ts';
 import { parseAutopilotReceiptV2, parseAutopilotUnitSpecV2, type AutopilotRosterRequestProfileV1, type AutopilotUnitSpecV2 } from '../../src/core/contracts/index.ts';
 import { parseAutopilotChildTerminalAcceptance } from '../../src/core/coordination/terminal-acceptance.ts';
 import { proveStructuredAttemptTerminal } from '../../src/core/coordination/terminal-attempt-proof.ts';
 import { coordinatorRuntimePaths } from '../../src/core/coordination/runtime-paths.ts';
 import { startCoordinatorServer } from '../../src/core/coordination/server.ts';
+import { CoordinatorClient } from '../../src/core/coordination/client.ts';
 import { DurableRunSupervisorClient, readCoordinatorSessionContext } from '../../src/core/coordination/supervisor.ts';
 import { AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV } from '../../src/core/names.ts';
-import { AUTOPILOT_STATE_ROOT_ENV, prepareAutopilotWorkstream } from '../../src/core/parallel-runtime.ts';
+import {
+  AUTOPILOT_STATE_ROOT_ENV,
+  coordinationRootForRepo,
+  prepareAutopilotWorkstream,
+  readPathClaims,
+  unitWorktreePathForActiveAutopilot,
+} from '../../src/core/parallel-runtime.ts';
 import { canonicalRosterJson } from '../../src/core/roster/canonical.ts';
 import { resolveRosterScopePaths, rosterRevisionPath } from '../../src/core/roster/paths.ts';
 import { buildCanonicalPreRunSelection } from '../../src/core/roster/run-selection.ts';
@@ -128,6 +136,42 @@ void describe('W3 v2 runner observation and authentication', () => {
     });
   });
 
+  void it('blocks forged, missing, and drifted source-changing v2 auth before preflight side effects', async () => {
+    for (const [index, fault] of (['forged-spec', 'missing-mirror', 'mirror-drift'] as const).entries()) {
+      await withPreparedV2(async ({ root, prepared, specPath, unitSpec }) => {
+        const { fakePi, sentinelPath } = await writeSpawnSentinelPi(root, fault);
+        const beforeCoordinator = await coordinatorEffectCounts(prepared);
+        let runSpecPath = specPath;
+        if (fault === 'forged-spec') {
+          const forged = { ...unitSpec, pre_run_selection_sha256: sha(`preauth-forged-${String(index)}`) };
+          runSpecPath = join(dirname(specPath), `forged-${String(index)}.${unitSpec.role}.attempt-${String(unitSpec.attempt)}.json`);
+          await writeFile(runSpecPath, `${JSON.stringify(forged, null, 2)}\n`, 'utf8');
+        } else {
+          const mirrorPath = resolve(prepared.mainWorktreePath, '.pi', 'autopilot', unitSpec.workstream, 'roster-snapshot.json');
+          if (fault === 'missing-mirror') await rm(mirrorPath, { force: true });
+          else await writeFile(mirrorPath, '{"schema_version":"autopilot.pre_run_selection.v1","drifted":true}\n', 'utf8');
+        }
+
+        await expectAgentRejects(
+          () => runAutopilotAgentFromSpecPath(runSpecPath, { piExecutable: fakePi, env: { ...process.env }, timeoutMsOverride: FAKE_TIMEOUT_MS }),
+          'spec-invalid',
+          /external roster\/selection authentication|preflight authority derivation|runtime roster mirror|pre-run selection|ROSTER_/u,
+        );
+        await assertNoPreflightSideEffects({ prepared, unitSpec, sentinelPath, beforeCoordinator });
+      }, { role: 'implement', unitId: `w3preauth${String(index)}` });
+    }
+  });
+
+  void it('allows the first source-changing preflight mutation only after valid v2 authentication', async () => {
+    await withPreparedV2(async ({ specPath, unitSpec }) => {
+      assert.equal(await pathExists(unitSpec.cwd), false, 'fixture starts before unit worktree creation');
+      const result = await runAutopilotAgentFromSpecPath(specPath, { dryRun: true });
+      assert.equal(result.status, 'dry-run');
+      assert.equal(await pathExists(unitSpec.cwd), true, 'valid v2 auth gates the first worktree mutation');
+      assert.equal(result.spec.schema_version, 'autopilot.unit_spec.v2');
+    }, { role: 'implement', unitId: 'w3validpreauth' });
+  });
+
   void it('rejects unsupported request profile fields pre-spend and rejects ordinary v1 without grandfather authority', async () => {
     await withPreparedV2(async ({ root, specPath }) => {
       const fakePi = await writeFakePi(root);
@@ -165,7 +209,7 @@ async function withPreparedV2<T>(run: (context: {
   readonly prepared: Awaited<ReturnType<typeof prepareAutopilotWorkstream>>;
   readonly specPath: string;
   readonly unitSpec: AutopilotUnitSpecV2;
-}) => Promise<T>, options: { readonly rosterIndex?: number } = {}): Promise<T> {
+}) => Promise<T>, options: { readonly rosterIndex?: number; readonly role?: AutopilotUnitSpecV2['role']; readonly unitId?: string } = {}): Promise<T> {
   const root = await mkdtemp(join(tmpdir(), 'autopilot-w3-observation-'));
   const originalStateRoot = process.env[AUTOPILOT_STATE_ROOT_ENV];
   const originalSessionContext = process.env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV];
@@ -178,11 +222,16 @@ async function withPreparedV2<T>(run: (context: {
     const supervisor = new DurableRunSupervisorClient(process.env);
     const attachment = await supervisor.attach({ repo: prepared.repo, active: prepared.active, rawSessionId: `w3-observation-${Date.now()}` });
     process.env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV] = attachment.contextPath;
+    const role = options.role ?? 'validate';
+    const unitId = options.unitId ?? (role === 'implement' || role === 'fix' ? 'w3implement' : 'w3validate');
     const authority = await installRosterAuthority({
       stateRoot: process.env[AUTOPILOT_STATE_ROOT_ENV], mainWorktreePath: prepared.mainWorktreePath, workstream: prepared.active.workstream,
-      repoId: prepared.active.repo_key, workstreamRun: prepared.active.workstream_run, role: 'validate', rosterIndex: options.rosterIndex ?? 1,
+      repoId: prepared.active.repo_key, workstreamRun: prepared.active.workstream_run, role, rosterIndex: options.rosterIndex ?? 1,
     });
-    const unitSpec = parseAutopilotUnitSpecV2(makeUnitSpecV2(prepared.mainWorktreePath, prepared.runtimeRoot, authority.requestProfile, authority.selection, authority.assignment));
+    const cwd = role === 'implement' || role === 'fix'
+      ? unitWorktreePathForActiveAutopilot(prepared.active, unitId, 1)
+      : prepared.mainWorktreePath;
+    const unitSpec = parseAutopilotUnitSpecV2(makeUnitSpecV2(prepared.mainWorktreePath, prepared.runtimeRoot, authority.requestProfile, authority.selection, authority.assignment, { role, unitId, cwd }));
     const specPath = join(prepared.runtimeRoot, 'unit-specs', `${unitSpec.unit_id}.${unitSpec.role}.attempt-${String(unitSpec.attempt)}.json`);
     await mkdir(dirname(specPath), { recursive: true });
     await writeFile(specPath, `${JSON.stringify(unitSpec, null, 2)}\n`, 'utf8');
@@ -227,13 +276,24 @@ async function installRosterAuthority(input: { readonly stateRoot: string; reado
   return { selection: selection.selection as unknown as Readonly<Record<string, unknown>>, roster, assignment, requestProfile: requestProfileFromAssignment(assignment) };
 }
 
-function makeUnitSpecV2(mainWorktreePath: string, runtimeRoot: string, requestProfile: AutopilotRosterRequestProfileV1, selection: Readonly<Record<string, unknown>>, assignment: Readonly<Record<string, unknown>>): AutopilotUnitSpecV2 {
+function makeUnitSpecV2(
+  mainWorktreePath: string,
+  runtimeRoot: string,
+  requestProfile: AutopilotRosterRequestProfileV1,
+  selection: Readonly<Record<string, unknown>>,
+  assignment: Readonly<Record<string, unknown>>,
+  options: { readonly role?: AutopilotUnitSpecV2['role']; readonly unitId?: string; readonly cwd?: string } = {},
+): AutopilotUnitSpecV2 {
+  const role = options.role ?? 'validate';
+  const unitId = options.unitId ?? (role === 'implement' || role === 'fix' ? 'w3implement' : 'w3validate');
+  const sourceChanging = role === 'implement' || role === 'fix';
+  const validationRole = role === 'validate' || role === 'bughunt';
   return {
-    schema_version: 'autopilot.unit_spec.v2', workstream: 'w3obs', unit_id: 'w3validate', role: 'validate', template: 'validate', attempt: 1,
-    objective: 'Validate W3 child execution observation.', cwd: mainWorktreePath, model: requestProfile.model, thinking: requestProfile.thinking,
-    owned_paths: [], read_only_paths: ['src/index.ts'], untouchable_paths: [], context_refs: [{ path: '.pi/autopilot/w3obs/mission.md', purpose: 'Mission', sha256: null, byte_count: null }], validation_commands: ['true'],
-    status_output: join(runtimeRoot, 'statuses', 'w3validate.validate.attempt-1.json'), receipt_output: join(runtimeRoot, 'receipts', 'w3validate.validate.attempt-1.receipt.json'), evidence_dir: join(runtimeRoot, 'evidence', 'w3validate'), stop_boundary: 'Validate only.',
-    quality_profile: 'validation-only', risk_level: 'low', acceptance_criteria: ['observation accepted'], verification_plan: verificationPlan(), closure_criteria: ['receipt.v2 accepted'], upstream_refs: [], timeout_seconds: 60, render_prompt_snapshot: false,
+    schema_version: 'autopilot.unit_spec.v2', workstream: 'w3obs', unit_id: unitId, role, template: role, attempt: 1,
+    objective: sourceChanging ? 'Implement W3 preflight-auth side-effect fixture.' : 'Validate W3 child execution observation.', cwd: options.cwd ?? mainWorktreePath, model: requestProfile.model, thinking: requestProfile.thinking,
+    owned_paths: sourceChanging ? [`src/${unitId}.ts`] : [], read_only_paths: ['src/index.ts'], untouchable_paths: [], context_refs: [{ path: '.pi/autopilot/w3obs/mission.md', purpose: 'Mission', sha256: null, byte_count: null }], validation_commands: validationRole ? ['true'] : [],
+    status_output: join(runtimeRoot, 'statuses', `${unitId}.${role}.attempt-1.json`), receipt_output: join(runtimeRoot, 'receipts', `${unitId}.${role}.attempt-1.receipt.json`), evidence_dir: join(runtimeRoot, 'evidence', unitId), stop_boundary: sourceChanging ? 'Edit only the owned preflight-auth fixture.' : 'Validate only.',
+    quality_profile: sourceChanging ? 'source-change' : 'validation-only', risk_level: sourceChanging ? 'medium' : 'low', acceptance_criteria: [sourceChanging ? 'owned fixture can be changed' : 'observation accepted'], verification_plan: verificationPlan(), closure_criteria: [sourceChanging ? 'preflight mutation is gated by v2 auth' : 'receipt.v2 accepted'], upstream_refs: [], timeout_seconds: 60, render_prompt_snapshot: false,
     roster_id: stringAt(selection, 'roster_id'), roster_revision: numberAt(selection, 'roster_revision'), roster_sha256: stringAt(selection, 'roster_sha256'), assignment_sha256: stringAt(assignment, 'assignment_sha256'), pre_run_selection_sha256: stringAt(selection, 'selection_sha256'), request_profile: requestProfile,
   };
 }
@@ -260,6 +320,61 @@ async function writeFakePi(root: string): Promise<string> {
   return fakePath;
 }
 
+async function writeSpawnSentinelPi(root: string, label: string): Promise<{ readonly fakePi: string; readonly sentinelPath: string }> {
+  const fakePath = join(root, `sentinel-pi-${label}.mjs`);
+  const sentinelPath = join(root, `sentinel-pi-${label}.spawned`);
+  await writeFile(fakePath, `#!/usr/bin/env node\nimport { writeFileSync } from 'node:fs';\nwriteFileSync(${JSON.stringify(sentinelPath)}, 'spawned\\n', 'utf8');\nprocess.exit(97);\n`, 'utf8');
+  await chmod(fakePath, 0o755);
+  return { fakePi: fakePath, sentinelPath };
+}
+
+interface CoordinatorEffectCounts {
+  readonly childLeases: number;
+  readonly unitAttempts: number;
+  readonly observations: number;
+  readonly editLeases: number;
+}
+
+async function coordinatorEffectCounts(prepared: Awaited<ReturnType<typeof prepareAutopilotWorkstream>>): Promise<CoordinatorEffectCounts | null> {
+  try {
+    const status = await new CoordinatorClient({ env: process.env, autoStart: false }).query('status', prepared.active.repo_key, prepared.active.workstream_run);
+    return {
+      childLeases: arrayLength(status.payload['child_leases']),
+      unitAttempts: arrayLength(status.payload['unit_attempts']),
+      observations: arrayLength(status.payload['observations']),
+      editLeases: arrayLength(status.payload['edit_leases']),
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function assertNoPreflightSideEffects(input: {
+  readonly prepared: Awaited<ReturnType<typeof prepareAutopilotWorkstream>>;
+  readonly unitSpec: AutopilotUnitSpecV2;
+  readonly sentinelPath: string;
+  readonly beforeCoordinator: CoordinatorEffectCounts | null;
+}): Promise<void> {
+  assert.equal(await pathExists(input.sentinelPath), false, 'forged v2 must not spawn or enter Pi RPC');
+  assert.equal(await pathExists(input.unitSpec.cwd), false, 'forged v2 must not create the source-changing unit worktree');
+  assert.equal(await pathExists(dirname(input.unitSpec.cwd)), false, 'forged v2 must not create the source-changing unit attempt root');
+  assert.equal(await pathExists(dirname(input.unitSpec.status_output)), false, 'forged v2 must not mkdir status output');
+  assert.equal(await pathExists(dirname(input.unitSpec.receipt_output)), false, 'forged v2 must not mkdir receipt output');
+  assert.equal(await pathExists(input.unitSpec.evidence_dir), false, 'forged v2 must not mkdir evidence output');
+  assert.equal(await pathExists(resolve(input.prepared.runtimeRoot, 'rendered-prompts')), false, 'forged v2 must not render a prompt snapshot');
+  assert.equal(await pathExists(authorityArtifactPath(input.prepared.runtimeRoot, { unit_id: input.unitSpec.unit_id, role: input.unitSpec.role, attempt: input.unitSpec.attempt })), false, 'forged v2 must not persist lowered authority');
+  assert.equal(await pathExists(join(dirname(input.unitSpec.cwd), '_materialized-paths.json')), false, 'forged v2 must not materialize source paths');
+  const claims = await readPathClaims(coordinationRootForRepo(input.prepared.active.repo_key, process.env)).catch(() => []);
+  assert.equal(claims.some((claim) => claim.unit_id === input.unitSpec.unit_id && claim.attempt === input.unitSpec.attempt), false, 'forged v2 must not retain path claims');
+  const claimEventsPath = join(coordinationRootForRepo(input.prepared.active.repo_key, process.env), 'claim-events.jsonl');
+  if (await pathExists(claimEventsPath)) {
+    const claimEvents = await readFile(claimEventsPath, 'utf8');
+    assert.equal(claimEvents.includes(`"unit_id":"${input.unitSpec.unit_id}"`), false, 'forged v2 must not acquire or roll back claims');
+  }
+  const afterCoordinator = await coordinatorEffectCounts(input.prepared);
+  if (input.beforeCoordinator !== null && afterCoordinator !== null) assert.deepEqual(afterCoordinator, input.beforeCoordinator, 'forged v2 must not mutate coordinator projections');
+}
+
 async function expectAgentRejects(run: () => Promise<unknown>, failureClass: AutopilotAgentRunError['failureClass'], reasonPattern: RegExp): Promise<void> {
   try { await run(); }
   catch (error) {
@@ -275,6 +390,10 @@ async function expectAgentRejects(run: () => Promise<unknown>, failureClass: Aut
 async function pathExists(path: string): Promise<boolean> {
   try { await stat(path); return true; }
   catch { return false; }
+}
+
+function arrayLength(value: unknown): number {
+  return Array.isArray(value) ? value.length : 0;
 }
 
 function git(cwd: string, args: readonly string[]): void {

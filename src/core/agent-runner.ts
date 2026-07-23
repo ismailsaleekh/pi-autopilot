@@ -1,4 +1,4 @@
-import { constants as fsConstants, existsSync, readFileSync } from 'node:fs';
+import { constants as fsConstants, existsSync, readFileSync, realpathSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { access, mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { spawn, type ChildProcessDataChunk, type ChildProcessLite } from 'node:child_process';
@@ -67,6 +67,7 @@ import {
   unitWorktreePathForActiveAutopilot,
   worktreeRootForRepo,
   resolveActiveAutopilotForSpec,
+  isPathWithinRoot,
   type ActiveAutopilotContext,
   type ActiveAutopilotRow,
   type AutopilotPathClaim,
@@ -313,10 +314,10 @@ interface ChildAuthorityLifecycle {
 }
 
 interface AutopilotAgentRunSpecBundle {
-  /** Original runtime artifact identity: v2 stays v2 until a strict v2-aware consumer sees it. */
+  /** Original runtime artifact identity: v2 stays v2 until strict external+mirror+roster authentication succeeds. */
   readonly unitSpec: AutopilotRuntimeUnitSpec;
-  /** Narrow v1-era mechanics view for legacy forced-output, authority, claims, and commit code only. */
-  readonly authoritySpec: AutopilotUnitSpec;
+  /** Adapter input for legacy v1-era mechanics after v2 authentication; never an authentication authority. */
+  readonly authoritySpec: AutopilotUnitSpec | null;
   readonly originalSpec: AutopilotRuntimeUnitSpec;
   readonly rosterExecutionIdentity: AutopilotRosterExecutionIdentity | null;
 }
@@ -374,7 +375,8 @@ async function runAutopilotAgentFromSpecPathInternal(
 ): Promise<AutopilotAgentRunResult> {
   const env = { ...process.env, ...(options.env ?? {}) };
   let specBundle = await readAndValidateSpec(specPath, options, env);
-  const spec = specBundle.authoritySpec;
+  specBundle = await authenticateSpecBundleBeforePreflight({ specBundle, specPath, env });
+  const spec = requireAuthenticatedAuthoritySpec(specBundle, specPath);
   if (options.dryRun !== true) await assertD65OrdinaryBoundaryFromEnvironment('runner-preflight', env);
   const runtimePreflight = await preflightSpec(specBundle, specPath, {
     skipStaleOutputCheck: options.dryRun === true,
@@ -385,7 +387,6 @@ async function runAutopilotAgentFromSpecPathInternal(
   lifecycle.preflight = runtimePreflight;
   lifecycle.env = env;
   lifecycle.spec = spec;
-  specBundle = await authenticateSpecBundleAfterPreflight({ specBundle, specPath, runtimePreflight, env });
   let providerIdentity: AutopilotProviderIdentity;
   let context: AutopilotStatusToolContext;
   try {
@@ -799,8 +800,7 @@ async function readAndValidateSpec(
     if (isJsonRecord(parsed) && parsed['schema_version'] === 'autopilot.unit_spec.v2') {
       const originalSpec = parseAutopilotUnitSpecV2(parsed);
       assertV2LaunchQualityGate(originalSpec);
-      const authoritySpec = unitSpecAuthorityProjection(originalSpec);
-      return { unitSpec: originalSpec, authoritySpec, originalSpec, rosterExecutionIdentity: null };
+      return { unitSpec: originalSpec, authoritySpec: null, originalSpec, rosterExecutionIdentity: null };
     }
     const spec = parseAutopilotUnitSpec(parsed);
     assertV1SpecHasGrandfatherAuthority({ specPath, specBytes, options, env });
@@ -873,28 +873,41 @@ function parseV1GrandfatherAuthority(value: unknown): AutopilotV1GrandfatherAuth
   });
 }
 
-async function authenticateSpecBundleAfterPreflight(input: {
+function requireAuthenticatedAuthoritySpec(bundle: AutopilotAgentRunSpecBundle, specPath: string): AutopilotUnitSpec {
+  if (bundle.authoritySpec !== null) return bundle.authoritySpec;
+  throw new AutopilotAgentRunError('spec-invalid', {
+    reason: 'unit_spec.v2 reached legacy authority mechanics before external roster/selection authentication',
+    specPath,
+    statusOutput: bundle.unitSpec.status_output,
+    receiptOutput: bundle.unitSpec.receipt_output,
+  });
+}
+
+async function authenticateSpecBundleBeforePreflight(input: {
   readonly specBundle: AutopilotAgentRunSpecBundle;
   readonly specPath: string;
-  readonly runtimePreflight: RuntimePreflightResult;
   readonly env: ProcessEnv;
 }): Promise<AutopilotAgentRunSpecBundle> {
   if (!isUnitSpecV2(input.specBundle.originalSpec)) return input.specBundle;
   try {
     const originalSpec = input.specBundle.originalSpec;
-    const spec = input.specBundle.authoritySpec;
+    const runtimeContext = await resolveReadOnlyV2RuntimeAuthenticationContext({
+      originalSpec,
+      specPath: input.specPath,
+      env: input.env,
+    });
     const stateRoot = input.env[AUTOPILOT_STATE_ROOT_ENV];
     const selection = await recoverAuthenticatedV2Selection({
       stateRoot,
-      mainWorktreeRoot: input.runtimePreflight.context.active.main_worktree_path,
-      workstream: spec.workstream,
-      repoId: input.runtimePreflight.context.active.repo_key,
-      workstreamRun: input.runtimePreflight.context.active.workstream_run,
+      mainWorktreeRoot: runtimeContext.active.main_worktree_path,
+      workstream: originalSpec.workstream,
+      repoId: runtimeContext.active.repo_key,
+      workstreamRun: runtimeContext.active.workstream_run,
       originalSpec,
     });
     const roster = await readAuthenticatedRosterForSelection({
       selection,
-      mainWorktreePath: input.runtimePreflight.context.active.main_worktree_path,
+      mainWorktreePath: runtimeContext.active.main_worktree_path,
       stateRoot,
     });
     const facts = resolvePinnedRoleRuntimeFacts({
@@ -914,15 +927,108 @@ async function authenticateSpecBundleAfterPreflight(input: {
       request_profile: facts.request_profile,
       request_profile_sha256: facts.request_profile.request_profile_sha256 as `sha256:${string}`,
     });
-    return { ...input.specBundle, rosterExecutionIdentity: identity };
+    return { ...input.specBundle, authoritySpec: unitSpecAuthorityProjection(originalSpec), rosterExecutionIdentity: identity };
   } catch (error) {
     throw new AutopilotAgentRunError('spec-invalid', {
-      reason: `unit_spec.v2 failed external roster/selection authentication before model spend: ${errorMessage(error)}`,
+      reason: `unit_spec.v2 failed external roster/selection authentication before preflight authority derivation: ${errorMessage(error)}`,
       specPath: input.specPath,
-      statusOutput: input.specBundle.authoritySpec.status_output,
-      receiptOutput: input.specBundle.authoritySpec.receipt_output,
+      statusOutput: input.specBundle.originalSpec.status_output,
+      receiptOutput: input.specBundle.originalSpec.receipt_output,
     });
   }
+}
+
+async function resolveReadOnlyV2RuntimeAuthenticationContext(input: {
+  readonly originalSpec: AutopilotUnitSpecV2;
+  readonly specPath: string;
+  readonly env: ProcessEnv;
+}): Promise<ActiveAutopilotContext> {
+  const runtimeRoot = deriveStrictV2ArtifactRoot(input.originalSpec);
+  const mainWorktreePath = mainWorktreePathFromV2RuntimeRoot(runtimeRoot, input.originalSpec.workstream);
+  let repo: ActiveAutopilotContext['repo'];
+  try {
+    repo = resolveRepoIdentity(mainWorktreePath);
+  } catch (error) {
+    throw new Error(`unit_spec.v2 runtime main worktree is not an authenticated readable git worktree before preflight: ${mainWorktreePath}; ${errorMessage(error)}`);
+  }
+  const stateRoot = resolveAutopilotStateRoot(input.env);
+  const coordinationRoot = coordinationRootForRepo(repo.repoKey, input.env);
+  const activeRows = coordinationCutoverCommitted(stateRoot, repo.repoKey)
+    ? await readCoordinatorActiveAutopilots(repo, worktreeRootForRepo(repo.repoKey, input.env), input.env)
+    : await readActiveAutopilots(coordinationRoot);
+  const matchingRows = activeRows.filter((row) => {
+    if (row.repo_key !== repo.repoKey || row.workstream !== input.originalSpec.workstream || row.status !== 'active') return false;
+    if (!sameExistingPath(row.main_worktree_path, mainWorktreePath)) return false;
+    return normalizeFsPath(row.runtime_root) === normalizeFsPath(runtimeRoot);
+  });
+  if (matchingRows.length === 0) {
+    throw new Error(`no active run/resource authenticates unit_spec.v2 runtime root before preflight: repo=${repo.repoKey} workstream=${input.originalSpec.workstream} main=${mainWorktreePath}`);
+  }
+  if (matchingRows.length > 1) {
+    throw new Error(`multiple active run/resources authenticate unit_spec.v2 runtime root before preflight: ${matchingRows.map((row) => row.workstream_run).join(', ')}`);
+  }
+  const active = matchingRows[0];
+  if (active === undefined) throw new Error('matched active run/resource disappeared before v2 authentication');
+  const issues: string[] = [];
+  if (!isPathWithinRoot(active.runtime_root, input.originalSpec.status_output)) issues.push('status_output outside active runtime root');
+  if (!isPathWithinRoot(active.runtime_root, input.originalSpec.receipt_output)) issues.push('receipt_output outside active runtime root');
+  if (!isPathWithinRoot(active.runtime_root, input.originalSpec.evidence_dir)) issues.push('evidence_dir outside active runtime root');
+  if (!isPathWithinRoot(active.main_worktree_path, input.specPath)) issues.push('unit spec path outside active main worktree');
+  if (normalizeFsPath(active.source_repo) === normalizeFsPath(active.main_worktree_path)) issues.push('active row source_repo equals main worktree path');
+  if (issues.length > 0) throw new Error(`active run/resource does not authenticate unit_spec.v2 launch context: ${issues.join('; ')}`);
+  return Object.freeze({
+    repo,
+    active,
+    coordinationRoot,
+    claimsPath: join(coordinationRoot, 'path-claims.json'),
+    claimEventsPath: join(coordinationRoot, 'claim-events.jsonl'),
+  });
+}
+
+function deriveStrictV2ArtifactRoot(spec: AutopilotUnitSpecV2): string {
+  const candidates = [
+    rootBeforeV2ArtifactSegment(spec.status_output, 'statuses'),
+    rootBeforeV2ArtifactSegment(spec.receipt_output, 'receipts'),
+    rootBeforeV2ArtifactSegment(spec.evidence_dir, 'evidence'),
+  ].filter((candidate): candidate is string => candidate !== null);
+  const unique = [...new Set(candidates.map(normalizeFsPath))];
+  if (unique.length !== 1) {
+    const diagnostic = unique.length === 0 ? 'no canonical statuses/receipts/evidence runtime root' : unique.join(', ');
+    throw new Error(`unit_spec.v2 artifact paths do not identify one runtime root before preflight: ${diagnostic}`);
+  }
+  const [runtimeRoot] = unique;
+  if (runtimeRoot === undefined) throw new Error('internal error: missing v2 runtime root');
+  return runtimeRoot;
+}
+
+function rootBeforeV2ArtifactSegment(path: string, segment: 'statuses' | 'receipts' | 'evidence'): string | null {
+  const normalized = normalizeFsPath(path).replace(/\\/gu, '/');
+  const parts = normalized.split('/');
+  const index = parts.lastIndexOf(segment);
+  if (index <= 0) return null;
+  const root = parts.slice(0, index).join('/');
+  return root.length === 0 ? '/' : root;
+}
+
+function mainWorktreePathFromV2RuntimeRoot(runtimeRoot: string, workstream: string): string {
+  const normalized = normalizeFsPath(runtimeRoot).replace(/\\/gu, '/');
+  const suffix = `/.pi/autopilot/${workstream}`;
+  if (!normalized.endsWith(suffix)) throw new Error(`unit_spec.v2 runtime root does not end with ${suffix}`);
+  const main = normalized.slice(0, normalized.length - suffix.length);
+  if (main.length === 0) throw new Error('unit_spec.v2 runtime root does not contain a main worktree path');
+  return main;
+}
+
+function sameExistingPath(left: string, right: string): boolean {
+  try {
+    return realpathSync(left) === realpathSync(right);
+  } catch {
+    return false;
+  }
+}
+
+function normalizeFsPath(path: string): string {
+  return resolve(path);
 }
 
 type AuthenticatedPreRunSelection = NonNullable<Awaited<ReturnType<typeof recoverRuntimeRosterSelection>>['selection']>;
@@ -1222,7 +1328,7 @@ async function preflightSpec(
   specPath: string,
   options: RuntimePreflightOptions = {},
 ): Promise<RuntimePreflightResult> {
-  const spec = specBundle.authoritySpec;
+  const spec = requireAuthenticatedAuthoritySpec(specBundle, specPath);
   const preparedWorktree = await prepareMissingSourceChangingUnitWorktree(spec, options.env ?? process.env, options.skipSagaRecovery === true);
   try {
     return await preflightSpecAfterWorktreePreparation(specBundle, specPath, options);
@@ -1243,7 +1349,7 @@ async function preflightSpecAfterWorktreePreparation(
   specPath: string,
   options: RuntimePreflightOptions = {},
 ): Promise<RuntimePreflightResult> {
-  const spec = specBundle.authoritySpec;
+  const spec = requireAuthenticatedAuthoritySpec(specBundle, specPath);
   try {
     await access(spec.cwd, fsConstants.R_OK);
   } catch (error) {
