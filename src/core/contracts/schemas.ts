@@ -23,6 +23,7 @@ import {
   AUTOPILOT_WORKSTREAM_STATUS_VALUES,
 } from './types.ts';
 import { opaqueToolCallIdJsonSchema } from '../tool-call-id.ts';
+import { AUTOPILOT_ROSTER_CONTRACT_JSON_SCHEMAS } from '../roster/contracts.ts';
 
 export type JsonMap = Readonly<Record<string, unknown>>;
 
@@ -839,6 +840,10 @@ export const AUTOPILOT_EXECUTION_COMMIT_JSON_SCHEMA = {
   ],
 } as const satisfies JsonMap;
 
+export const AUTOPILOT_ROSTER_CONTRACTS_JSON_SCHEMAS = AUTOPILOT_ROSTER_CONTRACT_JSON_SCHEMAS;
+export const AUTOPILOT_UNIT_SPEC_V2_JSON_SCHEMA = AUTOPILOT_ROSTER_CONTRACT_JSON_SCHEMAS['autopilot.unit_spec.v2'];
+export const AUTOPILOT_RECEIPT_V2_JSON_SCHEMA = AUTOPILOT_ROSTER_CONTRACT_JSON_SCHEMAS['autopilot.receipt.v2'];
+
 export const AUTOPILOT_JSON_SCHEMAS = Object.freeze({
   unitSpec: AUTOPILOT_UNIT_SPEC_JSON_SCHEMA,
   statusEntry: AUTOPILOT_STATUS_ENTRY_JSON_SCHEMA,
@@ -850,4 +855,7 @@ export const AUTOPILOT_JSON_SCHEMAS = Object.freeze({
   decisionRow: AUTOPILOT_DECISION_ROW_JSON_SCHEMA,
   executionAudit: AUTOPILOT_EXECUTION_AUDIT_JSON_SCHEMA,
   executionCommit: AUTOPILOT_EXECUTION_COMMIT_JSON_SCHEMA,
+  unitSpecV2: AUTOPILOT_UNIT_SPEC_V2_JSON_SCHEMA,
+  receiptV2: AUTOPILOT_RECEIPT_V2_JSON_SCHEMA,
+  rosterContracts: AUTOPILOT_ROSTER_CONTRACTS_JSON_SCHEMAS,
 });

@@ -49,6 +49,41 @@ import {
 } from './types.ts';
 import { opaqueToolCallIdIssue } from '../tool-call-id.ts';
 
+export {
+  AUTOPILOT_ROSTER_CONTRACT_JSON_SCHEMAS,
+  AUTOPILOT_ROSTER_CONTRACT_SCHEMA_DEFINITIONS,
+  AUTOPILOT_ROSTER_DEFAULT_USER_STATE_ROOT,
+  AUTOPILOT_ROSTER_PACKAGE_VERSION_TARGET,
+  AUTOPILOT_ROSTER_PI_CONTRACT_BASELINE,
+  AUTOPILOT_ROSTER_SCHEMA_ID_BASE,
+  AutopilotRosterContractValidationError,
+  assertAutopilotRosterContract,
+  autopilotRosterContractCanonicalJson,
+  autopilotRosterContractHashField,
+  autopilotRosterContractIssues,
+  autopilotRosterContractJsonSchemaSha256,
+  autopilotRosterContractSha256,
+  autopilotRosterContractSha256OmittingOwnField,
+  computeAutopilotAssignmentSetSha256,
+  computeAutopilotRosterCandidateSetId,
+  computeAutopilotRosterContractObjectHash,
+  getAutopilotRosterContractSchemaDefinition,
+  getAutopilotRosterJsonSchema,
+  isAutopilotRosterContractSchemaVersion,
+  makeAutopilotRosterDiagnostic,
+  parseAutopilotHistoricalFixedRosterAdapterAdmission,
+  parseAutopilotHistoricalFixedRosterAdapterRequest,
+  parseAutopilotHistoricalFixedRosterAdapterResult,
+  parseAutopilotPreRunSelection,
+  parseAutopilotReceiptV2,
+  parseAutopilotRoster,
+  parseAutopilotRosterCandidateSet,
+  parseAutopilotRosterConfig,
+  parseAutopilotRosterContract,
+  parseAutopilotRosterContractJson,
+  parseAutopilotUnitSpecV2,
+} from '../roster/contracts.ts';
+
 const ISO_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;
 const SHA256 = /^sha256:[a-f0-9]{64}$/u;
 const WORKSTREAM = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
