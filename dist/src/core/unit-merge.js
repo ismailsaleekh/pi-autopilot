@@ -1,7 +1,7 @@
 import { existsSync } from 'node:fs';
 import { readFile, readdir } from 'node:fs/promises';
-import { join } from 'node:path';
-import { parseAutopilotExecutionAudit, parseAutopilotExecutionCommit, parseAutopilotReceipt, parseAutopilotStatusEntry } from "./contracts/index.js";
+import { join, resolve } from 'node:path';
+import { parseAutopilotExecutionCommit } from "./contracts/index.js";
 import { gitHead, readGitStatus, releaseClaimsForUnit, updateUnitBranchStatus, withAutopilotFileLock, writeJsonAtomic } from "./parallel-runtime.js";
 import { gitQueryNulStrings, runGitMutation } from "./git-process.js";
 import { cleanupTerminalUnitWorktree } from "./worktree-cleanup.js";
@@ -15,6 +15,8 @@ import { executeOwnedWorktreeSaga, inspectOwnedWorktreeSpecPostcondition, Worktr
 import { recordValidationStalenessForMerge } from "./validation-staleness.js";
 import { classifyCoordinationIntegrationConflict } from "./coordination/integration-conflicts.js";
 import { assertD65OrdinaryBoundaryFromEnvironment } from "./coordination/d65-runtime-dispatch.js";
+import { parseAutopilotChildTerminalAcceptance } from "./coordination/terminal-acceptance.js";
+import { proveStructuredAttemptTerminal } from "./coordination/terminal-attempt-proof.js";
 import { parseNewRunRuntimeReceipt } from "./roster/runtime-consumers.js";
 export class AutopilotUnitMergeError extends Error {
     name = 'AutopilotUnitMergeError';
@@ -33,11 +35,17 @@ export async function mergeAutopilotUnit(input) {
     const now = input.now ?? new Date();
     const active = input.context.active;
     return await withAutopilotFileLock(join(active.runtime_root, '.locks', 'unit-merge.lock'), `unit-merge:${active.autopilot_id}:${input.unitId}:${String(input.attempt)}`, async () => {
-        const status = parseAutopilotStatusEntry(await readJsonFile(input.statusPath));
-        const receipt = parseMergeReceipt(await readJsonFile(input.receiptPath));
-        const audit = parseAutopilotExecutionAudit(await readJsonFile(input.auditPath));
         const executionCommit = parseAutopilotExecutionCommit(await readJsonFile(input.executionCommitPath));
-        const blockers = mergePreflightBlockers(active, input.unitId, input.attempt, status, receipt, audit, executionCommit);
+        const { status, receipt, audit } = await authenticateMergeAttemptEvidence({
+            active,
+            unitId: input.unitId,
+            attempt: input.attempt,
+            role: executionCommit.role,
+            statusPath: input.statusPath,
+            receiptPath: input.receiptPath,
+            auditPath: input.auditPath,
+        });
+        const blockers = mergePreflightBlockers(active, input.unitId, input.attempt, status, receipt, audit, executionCommit, input.statusPath, input.receiptPath, input.auditPath);
         if (blockers.length > 0)
             return { outcome: 'blocked', merge: null, blockers, conflict_path: null, integration_analysis_path: null };
         if (active.coordination_authority === 'coordinator-edit-leases-v1') {
@@ -263,12 +271,42 @@ export function parseAutopilotUnitMerge(value) {
         merged_at: expectString(value, 'merged_at'),
     };
 }
-function parseMergeReceipt(value) {
-    if (isRecord(value) && value['schema_version'] === 'autopilot.receipt.v2')
-        return parseNewRunRuntimeReceipt(value).receipt;
-    return parseAutopilotReceipt(value);
+async function authenticateMergeAttemptEvidence(input) {
+    const receiptBytes = await readFile(input.receiptPath);
+    const receiptValue = JSON.parse(Buffer.from(receiptBytes).toString('utf8'));
+    const receipt = parseNewRunRuntimeReceipt(receiptValue).receipt;
+    const acceptancePath = join(input.active.runtime_root, 'terminal-acceptances', `${input.unitId}.${input.role}.attempt-${String(input.attempt)}.json`);
+    const acceptance = parseAutopilotChildTerminalAcceptance(await readJsonFile(acceptancePath));
+    const proof = proveStructuredAttemptTerminal({
+        mainWorktreePath: input.active.main_worktree_path,
+        runtimeRoot: input.active.runtime_root,
+        repoId: input.active.repo_key,
+        autopilotId: input.active.autopilot_id,
+        workstream: input.active.workstream,
+        workstreamRun: input.active.workstream_run,
+        unitId: input.unitId,
+        attempt: input.attempt,
+        childLeaseId: acceptance.child_lease_id,
+        spec: acceptance.spec,
+    });
+    if (!proof.proven)
+        fail('merge-terminal-proof-invalid', proof.reason, proof.inspectedPaths);
+    const expectedAuditPath = join(input.active.runtime_root, 'execution-audits', `${input.unitId}.${input.role}.attempt-${String(input.attempt)}.json`);
+    for (const [label, supplied, expected] of [
+        ['status', input.statusPath, proof.proof.spec.status_output],
+        ['receipt', input.receiptPath, proof.proof.spec.receipt_output],
+        ['audit', input.auditPath, expectedAuditPath],
+    ]) {
+        if (resolve(supplied) !== resolve(expected))
+            fail('merge-evidence-path-mismatch', `${label} path differs from authenticated terminal-attempt authority.`, [supplied, expected]);
+    }
+    if (proof.proof.receipt.sha256 !== acceptance.receipt.sha256)
+        fail('merge-receipt-authority-mismatch', 'authenticated terminal proof receipt differs from terminal acceptance.', [proof.proof.receipt.sha256, acceptance.receipt.sha256]);
+    if (!proof.proof.sourceChanging || proof.proof.spec.role !== input.role)
+        fail('merge-terminal-proof-role-mismatch', 'unit merge requires an authenticated implement/fix terminal attempt.', [proof.proof.spec.role, input.role]);
+    return { status: proof.proof.status, receipt, audit: proof.proof.audit };
 }
-function mergePreflightBlockers(active, unitId, attempt, status, receipt, audit, executionCommit) {
+function mergePreflightBlockers(active, unitId, attempt, status, receipt, audit, executionCommit, statusPath, receiptPath, auditPath) {
     const blockers = [];
     if (status.workstream !== active.workstream || receipt.workstream !== active.workstream || audit.workstream !== active.workstream || executionCommit.workstream !== active.workstream)
         blockers.push('workstream identity mismatch across unit evidence');
@@ -276,6 +314,10 @@ function mergePreflightBlockers(active, unitId, attempt, status, receipt, audit,
         blockers.push('unit identity mismatch across unit evidence');
     if (status.attempt !== attempt || receipt.attempt !== attempt || audit.attempt !== attempt || executionCommit.attempt !== attempt)
         blockers.push('attempt mismatch across unit evidence');
+    if (status.role !== executionCommit.role || receipt.role !== executionCommit.role || audit.role !== executionCommit.role)
+        blockers.push('role mismatch across authenticated unit evidence');
+    if (executionCommit.status_ref !== relativeRuntimeRef(active.runtime_root, statusPath) || executionCommit.receipt_ref !== relativeRuntimeRef(active.runtime_root, receiptPath) || executionCommit.audit_ref !== relativeRuntimeRef(active.runtime_root, auditPath))
+        blockers.push('execution commit artifact refs do not match authenticated merge evidence');
     if (status.verdict !== 'DONE')
         blockers.push(`source-changing unit status verdict must be DONE, got ${status.verdict}`);
     if (audit.classification !== 'clean')

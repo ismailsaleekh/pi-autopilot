@@ -19,8 +19,8 @@ covers_sources:
   - src/core/roster/transition.ts
   - src/core/model-roster.ts
 signature_hash: 'sha256:a5ee2fb831b97d6f0e5450759d68bfb1bf43017a4d5c8f10df68c05755315709'
-body_hash: 'sha256:777be38802e4fbc403a7644b7daec7c543c82dfe59d425b65e8c6798dcd27f1e'
-semantic_attestation: 'sha256:777be38802e4fbc403a7644b7daec7c543c82dfe59d425b65e8c6798dcd27f1e'
+body_hash: 'sha256:a1b2d9c0690b025fbfaabaac53614c5148fb7fb07817456c6d58794d56fdd08b'
+semantic_attestation: 'sha256:a1b2d9c0690b025fbfaabaac53614c5148fb7fb07817456c6d58794d56fdd08b'
 stability: stable
 ---
 
@@ -81,7 +81,10 @@ receipt evidence. For Phase 37 v2 specs, preflight first authenticates the pinne
 pre-run selection, runtime mirror, any committed existing-run transition chain and
 successor target, required user-custom certification authority, assignment hash, and
 request profile; historical v1 evidence is admitted only by byte-faithful adapter
-authority.
+authority. Contract parsing now returns the closed schema-specific type only after full
+shape and semantic validation, and custom/provider fixture builders validate unknown
+input before hashing or certification decisions; type-boundary repair grants no trust,
+readiness, fallback, or request-to-observed identity authority.
 On completion the runner:
 
 1. accepts matching status + receipt + receipt-matching structured tool carrier,

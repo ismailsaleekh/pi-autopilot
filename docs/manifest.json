@@ -595,7 +595,7 @@
         "src/cli/autopilot-coordinator.ts"
       ],
       "signature_hash": "sha256:29d0ffebe8ddb994b739dc1176426a97f475537d0436864b7bf7c28398424d33",
-      "body_hash": "sha256:12df80672690576ea221cb3c7fe04917f545192cc058b2556c2aafec1242eb48",
+      "body_hash": "sha256:a2fba4b956ea0dc74d425cf5daa4461c4b95429e4b50ae893345cefa41c5d13a",
       "semantic_attestation": null
     },
     "commands/autopilot": {
@@ -952,8 +952,8 @@
         "src/core/worktree-cleanup.ts"
       ],
       "signature_hash": "sha256:99bf9934a571ea880c691bc98db9a98cc7932f034eb0fd27fe3eb6bb1267461c",
-      "body_hash": "sha256:31a9c24d76cf423dc03437cf82204ea2fa37b909ec6511b2ba3c7ee745f688cb",
-      "semantic_attestation": "sha256:31a9c24d76cf423dc03437cf82204ea2fa37b909ec6511b2ba3c7ee745f688cb"
+      "body_hash": "sha256:19018a5bce37ec356a130434d323953bf26a4cbbd20e29dfcb7f3f4910677a70",
+      "semantic_attestation": "sha256:19018a5bce37ec356a130434d323953bf26a4cbbd20e29dfcb7f3f4910677a70"
     },
     "subsystems/contracts-and-schemas": {
       "mode": "mixed",
@@ -1113,8 +1113,8 @@
         "templates/skills/autopilot-roster-setup/SKILL.md",
         "templates/skills/autopilot-roster-setup/payload.json"
       ],
-      "signature_hash": "sha256:bd1da59e0a6671dc413bf2f0b6d8109d3efa5fa5a87f716a73aba4c32c7a9603",
-      "body_hash": "sha256:d88a3103cdbee1d993952fdeebfc0b270d2c9df16fb460395c3312cf5d2da4b4",
+      "signature_hash": "sha256:803bb3fc2e2f4dfe6f4dda4b1588f9fc4c63b06a4c30ffb0d20cfe1f8ff38683",
+      "body_hash": "sha256:37938b39c381ce872fafc5b45fca2ef94ab18dd36c6a8303820225b052034218",
       "semantic_attestation": null
     },
     "subsystems/runner-and-forced-output": {
@@ -1140,8 +1140,8 @@
         "src/core/unit-failure.ts"
       ],
       "signature_hash": "sha256:a5ee2fb831b97d6f0e5450759d68bfb1bf43017a4d5c8f10df68c05755315709",
-      "body_hash": "sha256:777be38802e4fbc403a7644b7daec7c543c82dfe59d425b65e8c6798dcd27f1e",
-      "semantic_attestation": "sha256:777be38802e4fbc403a7644b7daec7c543c82dfe59d425b65e8c6798dcd27f1e"
+      "body_hash": "sha256:a1b2d9c0690b025fbfaabaac53614c5148fb7fb07817456c6d58794d56fdd08b",
+      "semantic_attestation": "sha256:a1b2d9c0690b025fbfaabaac53614c5148fb7fb07817456c6d58794d56fdd08b"
     },
     "subsystems/s2-retention": {
       "mode": "authored",

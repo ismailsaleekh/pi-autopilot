@@ -1,8 +1,8 @@
 {
   "schema_version": "autopilot.docs_semantic_attestation.v2",
   "doc_id": "subsystems/close-lifecycle",
-  "reviewed_body_hash": "sha256:31a9c24d76cf423dc03437cf82204ea2fa37b909ec6511b2ba3c7ee745f688cb",
-  "reviewed_doc_sha256": "sha256:d3c49481c20f6ac3c86d753e8df26b9c260f3eb7117bf7520e8fada875d568b5",
+  "reviewed_body_hash": "sha256:19018a5bce37ec356a130434d323953bf26a4cbbd20e29dfcb7f3f4910677a70",
+  "reviewed_doc_sha256": "sha256:e35ad7bde530c371abdfd346de3e0c555c919343bc61ec760a40461de01f1817",
   "covers_sources": [
     "src/core/close-runtime.ts",
     "src/core/execution-commit.ts",
@@ -11,7 +11,7 @@
     "src/core/worktree-cleanup.ts"
   ],
   "verdict": "PASS",
-  "reviewer": "pi W6 merge operator (offline semantic review)",
-  "reviewed_at": "2026-07-23T12:35:54.000Z",
-  "notes": "W6 offline semantic review: verified close lifecycle prose against current close-runtime, unit-merge, execution-commit, validation-staleness, and cleanup sources; transition external-chain/fresh validation, D65 prepared-terminal gates, S2 retention binding, and run-owned cleanup compose in the combined code."
+  "reviewer": "OpenAI coding assistant, independent semantic reviewer task b5574a501",
+  "reviewed_at": "2026-07-23T20:00:54.585Z",
+  "notes": "Independent re-review after remediation found no P0/P1/P2 or prose overclaim. Active mergeback rejects receipt.v1 pre-mutation; authenticates receipt.v2 through exact terminal-acceptance-bound spec/status/receipt/audit bytes and strict roster, assignment, selection, request-profile, role, output, and status-hash compatibility; checks execution-commit refs and role; preserves historical evidence under original schema bytes; and accurately documents validation as separate post-merge integration-head evidence."
 }

@@ -1,8 +1,8 @@
 {
   "schema_version": "autopilot.docs_semantic_attestation.v2",
   "doc_id": "subsystems/runner-and-forced-output",
-  "reviewed_body_hash": "sha256:777be38802e4fbc403a7644b7daec7c543c82dfe59d425b65e8c6798dcd27f1e",
-  "reviewed_doc_sha256": "sha256:8f6e20e68f80fea0a7cb4160494a94140728533cb02ad38c9c8f5d13138eae8b",
+  "reviewed_body_hash": "sha256:a1b2d9c0690b025fbfaabaac53614c5148fb7fb07817456c6d58794d56fdd08b",
+  "reviewed_doc_sha256": "sha256:fb1048e9ebb0f19880f824466491f0d0ae045eaa98641e6b3c134caa85d858c3",
   "covers_sources": [
     "src/core/agent-runner.ts",
     "src/core/authority.ts",
@@ -18,7 +18,7 @@
     "src/core/unit-failure.ts"
   ],
   "verdict": "PASS",
-  "reviewer": "pi W6 merge operator (offline semantic review)",
-  "reviewed_at": "2026-07-23T12:35:54.000Z",
-  "notes": "W6 offline semantic review: verified runner prose against current agent runner, authority, scheduler, unit failure, provenance, forced-output, audit, prompt renderer, roster runtime/custom/transition, and model roster sources; v2 identity, D65 dispatch, S2 pressure pause, and structured-output failure classes match the combined code."
+  "reviewer": "OpenAI coding assistant, independent semantic reviewer task be5e05564",
+  "reviewed_at": "2026-07-23T19:33:34.665Z",
+  "notes": "Independent review against baseline 65f80eb and every covered current source found no findings. Closed provider-domain parsers validate unknown roster/manifest input before serialization or certification decisions; strict v2 launch, exact-byte historical v1 authority, observed identity, empty trust registries, and fail-closed readiness semantics remain intact, and the current prose matches those behaviors."
 }

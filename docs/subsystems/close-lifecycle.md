@@ -12,8 +12,8 @@ covers_sources:
   - src/core/validation-staleness.ts
   - src/core/worktree-cleanup.ts
 signature_hash: 'sha256:99bf9934a571ea880c691bc98db9a98cc7932f034eb0fd27fe3eb6bb1267461c'
-body_hash: 'sha256:31a9c24d76cf423dc03437cf82204ea2fa37b909ec6511b2ba3c7ee745f688cb'
-semantic_attestation: 'sha256:31a9c24d76cf423dc03437cf82204ea2fa37b909ec6511b2ba3c7ee745f688cb'
+body_hash: 'sha256:19018a5bce37ec356a130434d323953bf26a4cbbd20e29dfcb7f3f4910677a70'
+semantic_attestation: 'sha256:19018a5bce37ec356a130434d323953bf26a4cbbd20e29dfcb7f3f4910677a70'
 stability: stable
 ---
 
@@ -41,9 +41,11 @@ checkout or remotes.
 3. The semantic closure gate passes: schema-valid state/master-plan/status/audit
    evidence and `evaluateAutopilotClosureGate` blockers are all cleared
    (`semanticClosureBlockers`). For Phase 2 work, `phaseTwoCloseBlockers` additionally
-   requires each unit's `autopilot.unit_merge.v1` evidence (which carries its
-   independent validation); the universal closure gate itself enforces the audit /
-   plan / status / decision blockers rather than a separate per-item validation check.
+   requires accepted `autopilot.unit_merge.v1` evidence for the integrated paths. The
+   merge record does not carry independent validation: validation is separate,
+   post-merge evidence bound to the resulting integration head, while the universal
+   closure gate enforces the audit / plan / status / decision blockers and close refuses
+   any validation-staleness records.
 4. The final integrated diff equals the union of accepted `autopilot.unit_merge.v1`
    changed paths for Phase 2 work.
 5. No remaining validation-staleness artifacts, unresolved reservation repair,
@@ -88,13 +90,20 @@ merging**, refuses dirty source paths, and retires the branch to
 ## Invariants that must not regress
 
 - Worktree-local git freedom does not bypass close: final changed paths still require
-  unit-merge and execution-commit/execution-audit evidence, and each Phase 2 unit
-  merge carries its own independent validation before mergeback.
+  unit-merge and execution-commit/execution-audit evidence. Independent validation is
+  performed against the post-merge integration head and remains separate from the unit
+  merge record; later overlapping merges mark older validation stale and block close.
 - Cleanup refuses dirty, unregistered, common-dir-mismatched, branch-moved,
   recreated, or foreign-run paths; a parallel Autopilot in the same repo key is never
   touched.
 - Mergeback selects the immutable `execution_commit.commit_sha`; clean branch drift
-  blocks before integration mutation or any terminal side effect.
+  blocks before integration mutation or any terminal side effect. Active mergeback
+  accepts only `autopilot.receipt.v2`, authenticated through the parent-issued terminal
+  acceptance that binds exact unit-spec, status, receipt, and audit bytes; strict v2
+  compatibility then binds roster, assignment, pre-run selection, request profile,
+  role, output path, and status hash. Receipt v1 is rejected at this mutation boundary.
+  Already-recorded historical merge evidence remains parseable as its original contract
+  without relabeling, enrichment, or rewriting of historical bytes.
 - A committed roster transition is terminal-run authority, not closure evidence; close
   keeps the transition behavior but still requires fresh validation under the terminal
   roster before landing.

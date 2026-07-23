@@ -81,8 +81,8 @@ covers_sources:
   - src/internal/execution-observer-extension.ts
   - templates/skills/autopilot-roster-setup/SKILL.md
   - templates/skills/autopilot-roster-setup/payload.json
-signature_hash: 'sha256:bd1da59e0a6671dc413bf2f0b6d8109d3efa5fa5a87f716a73aba4c32c7a9603'
-body_hash: 'sha256:d88a3103cdbee1d993952fdeebfc0b270d2c9df16fb460395c3312cf5d2da4b4'
+signature_hash: 'sha256:803bb3fc2e2f4dfe6f4dda4b1588f9fc4c63b06a4c30ffb0d20cfe1f8ff38683'
+body_hash: 'sha256:37938b39c381ce872fafc5b45fca2ef94ab18dd36c6a8303820225b052034218'
 stability: evolving
 ---
 
@@ -250,7 +250,10 @@ test injects an absolute state root. Roster authority paths are:
 
 Trusted-project reads and writes require project trust. Pre-run selection files are
 create-only: byte-identical replay is idempotent, different existing bytes are a
-conflict.
+conflict. Before publishing the run-local selection mirror, the runtime creates or
+hardens `.pi/autopilot/<workstream>/` as a physical private authority directory; mirror
+publication and exact-byte readback therefore cannot fail merely because the newly
+prepared runtime directory inherited a permissive mode.
 
 ## Strict v2 launch and observed identity
 

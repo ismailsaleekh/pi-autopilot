@@ -4,10 +4,10 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, realpathSync } from 'node:fs';
 import { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { basename, dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, relative, resolve } from 'node:path';
 import { describe, it } from 'node:test';
 
-import type { AutopilotExecutionAudit, AutopilotExecutionCommit, AutopilotMasterPlan, AutopilotReceipt, AutopilotState, AutopilotStatusEntry, AutopilotUnitSpec } from '../../src/core/contracts/index.ts';
+import type { AutopilotExecutionAudit, AutopilotExecutionCommit, AutopilotMasterPlan, AutopilotState, AutopilotStatusEntry, AutopilotUnitSpec } from '../../src/core/contracts/index.ts';
 import { runAutopilotAgentFromSpecPath } from '../../src/core/agent-runner.ts';
 import { runAutopilotClaimGc } from '../../src/core/claim-gc.ts';
 import { materializeAdditionalReadPathsForSpec, materializeAutopilotSpecPaths } from '../../src/core/materialization.ts';
@@ -30,6 +30,8 @@ import { resolveRosterScopePaths, rosterRevisionPath } from '../../src/core/rost
 import { readAuthorityFileIfPresent } from '../../src/core/roster/transaction.ts';
 import {
   materializeNewRunUnitSpecV2,
+  materializeObservedProfile,
+  materializeReceiptV2,
   requestProfileFromAssignment,
   type AutopilotRosterSelectionV1,
   type AutopilotRosterUnitSpecV2,
@@ -517,7 +519,8 @@ void describe('Phase 2 unit worktrees, claims, mergeback, staleness, and GC', ()
       await initGitSource(source);
       const prepared = await prepareAutopilotWorkstream({ workstream: 'phase2-smoke', sourceCwd: source });
       const expectedUnitCwd = join(prepared.taskRoot, 'units', 'u01', 'attempt-1', 'worktree');
-      const spec = unitSpec({ cwd: expectedUnitCwd, runtimeRoot: prepared.runtimeRoot, unitId: 'u01', ownedPaths: ['src/u01.ts'] });
+      const runtimeSpec = runtimeUnitSpec({ cwd: expectedUnitCwd, runtimeRoot: prepared.runtimeRoot, unitId: 'u01', ownedPaths: ['src/u01.ts'] });
+      const spec = unitSpecAuthorityProjection(runtimeSpec);
       const unit = await prepareAutopilotUnitWorktree({ active: prepared.active, unitId: 'u01', attempt: 1, unitSpec: spec });
       const context = await resolveActiveAutopilotForSpec(spec);
       await acquireClaimsForUnit({ context, spec, reason: 'phase2 merge test' });
@@ -526,7 +529,41 @@ void describe('Phase 2 unit worktrees, claims, mergeback, staleness, and GC', ()
       git(unit.unitInfo.worktree_path, ['add', 'src/u01.ts']);
       git(unit.unitInfo.worktree_path, ['commit', '-m', 'autopilot unit u01 attempt 1']);
       const afterHead = gitOut(unit.unitInfo.worktree_path, ['rev-parse', 'HEAD']);
-      const refs = await writeUnitEvidence({ runtimeRoot: prepared.runtimeRoot, unitCwd: unit.unitInfo.worktree_path, branch: unit.unitInfo.branch, workstreamRun: prepared.active.workstream_run, autopilotId: prepared.active.autopilot_id, beforeHead, afterHead });
+      const refs = await writeUnitEvidence({ active: prepared.active, runtimeSpec, unitCwd: unit.unitInfo.worktree_path, branch: unit.unitInfo.branch, beforeHead, afterHead });
+      const receiptV2Bytes = await readFile(refs.receiptPath);
+      const acceptancePath = join(prepared.runtimeRoot, 'terminal-acceptances', 'u01.implement.attempt-1.json');
+      const acceptanceBytes = await readFile(acceptancePath);
+      const forgedReceipt: unknown = JSON.parse(Buffer.from(receiptV2Bytes).toString('utf8')) as unknown;
+      if (typeof forgedReceipt !== 'object' || forgedReceipt === null || Array.isArray(forgedReceipt)) throw new Error('strict-v2 fixture receipt is malformed');
+      Reflect.set(forgedReceipt, 'roster_sha256', `sha256:${'d'.repeat(64)}`);
+      const forgedReceiptText = `${JSON.stringify(forgedReceipt, null, 2)}\n`;
+      const forgedAcceptance: unknown = JSON.parse(Buffer.from(acceptanceBytes).toString('utf8')) as unknown;
+      if (typeof forgedAcceptance !== 'object' || forgedAcceptance === null || Array.isArray(forgedAcceptance)) throw new Error('strict-v2 fixture acceptance is malformed');
+      const forgedAcceptanceReceipt: unknown = Reflect.get(forgedAcceptance, 'receipt');
+      if (typeof forgedAcceptanceReceipt !== 'object' || forgedAcceptanceReceipt === null || Array.isArray(forgedAcceptanceReceipt)) throw new Error('strict-v2 fixture acceptance receipt ref is malformed');
+      Reflect.set(forgedAcceptanceReceipt, 'sha256', sha256Text(forgedReceiptText));
+      await writeFile(refs.receiptPath, forgedReceiptText, 'utf8');
+      await writeJson(acceptancePath, forgedAcceptance);
+      await assert.rejects(
+        async () => await mergeAutopilotUnit({ context, unitId: 'u01', attempt: 1, statusPath: refs.statusPath, receiptPath: refs.receiptPath, auditPath: refs.auditPath, executionCommitPath: refs.executionCommitPath, now: new Date('2026-07-08T00:00:00.000Z') }),
+        /receipt\.v2 terminal acceptance compatibility failed/u,
+      );
+      assert.equal(gitOut(prepared.mainWorktreePath, ['rev-parse', 'HEAD']), prepared.active.target_base_sha, 'authority-drifted receipt.v2 rejection must occur before integration mutation');
+      await writeFile(refs.receiptPath, receiptV2Bytes);
+      await writeFile(acceptancePath, acceptanceBytes);
+      await writeJson(refs.receiptPath, {
+        schema_version: 'autopilot.receipt.v1', tool_name: 'autopilot_emit_status', workstream: 'phase2-smoke', unit_id: 'u01', role: 'implement', attempt: 1,
+        emitted_at: '2026-07-08T00:00:00.000Z', status_output: refs.statusPath, status_sha256: sha256Text(await readFile(refs.statusPath, 'utf8')),
+        schema_sha256: `sha256:${'b'.repeat(64)}`, tool_call_id: 'fresh-v1-must-fail',
+        provider_identity: { provider_id: 'openai-codex', requested_model_id: 'gpt-5.6-terra', executed_model_id: 'gpt-5.6-terra', api: 'openai-codex-responses', thinking_level: 'high' },
+        expected_identity_hash: `sha256:${'c'.repeat(64)}`,
+      });
+      await assert.rejects(
+        async () => await mergeAutopilotUnit({ context, unitId: 'u01', attempt: 1, statusPath: refs.statusPath, receiptPath: refs.receiptPath, auditPath: refs.auditPath, executionCommitPath: refs.executionCommitPath, now: new Date('2026-07-08T00:00:00.000Z') }),
+        /new-run execution requires autopilot\.receipt\.v2/u,
+      );
+      assert.equal(gitOut(prepared.mainWorktreePath, ['rev-parse', 'HEAD']), prepared.active.target_base_sha, 'fresh receipt.v1 rejection must occur before integration mutation');
+      await writeFile(refs.receiptPath, receiptV2Bytes);
       const result = await mergeAutopilotUnit({ context, unitId: 'u01', attempt: 1, statusPath: refs.statusPath, receiptPath: refs.receiptPath, auditPath: refs.auditPath, executionCommitPath: refs.executionCommitPath, now: new Date('2026-07-08T00:00:00.000Z') });
       assert.equal(result.outcome, 'merged');
       const merge = result.merge;
@@ -765,11 +802,10 @@ async function writeJson(path: string, value: unknown): Promise<void> {
 }
 
 async function writeUnitEvidence(input: {
-  readonly runtimeRoot: string;
+  readonly active: PreparedAutopilotWorkstream['active'];
+  readonly runtimeSpec: AutopilotRosterUnitSpecV2;
   readonly unitCwd: string;
   readonly branch: string;
-  readonly workstreamRun: string;
-  readonly autopilotId: string;
   readonly beforeHead: string;
   readonly afterHead: string;
 }): Promise<{ readonly statusPath: string; readonly receiptPath: string; readonly auditPath: string; readonly executionCommitPath: string }> {
@@ -830,8 +866,8 @@ async function writeUnitEvidence(input: {
   const executionCommit: AutopilotExecutionCommit = {
     schema_version: 'autopilot.execution_commit.v1',
     workstream: 'phase2-smoke',
-    workstream_run: input.workstreamRun,
-    autopilot_id: input.autopilotId,
+    workstream_run: input.active.workstream_run,
+    autopilot_id: input.active.autopilot_id,
     active_run_epoch: 1,
     unit_id: 'u01',
     role: 'implement',
@@ -849,30 +885,74 @@ async function writeUnitEvidence(input: {
     audit_ref: 'execution-audits/u01.implement.attempt-1.json',
     created_at: '2026-07-08T00:00:00.000Z',
   };
+  const statusPath = join(input.active.runtime_root, 'statuses', 'u01.implement.attempt-1.json');
+  const receiptPath = join(input.active.runtime_root, 'receipts', 'u01.implement.attempt-1.receipt.json');
+  const auditPath = join(input.active.runtime_root, 'execution-audits', 'u01.implement.attempt-1.json');
+  const executionCommitPath = join(input.active.runtime_root, 'execution-commits', 'u01.implement.attempt-1.json');
+  const specPath = join(input.active.runtime_root, 'unit-specs', 'u01.implement.attempt-1.json');
+  const acceptancePath = join(input.active.runtime_root, 'terminal-acceptances', 'u01.implement.attempt-1.json');
   const statusText = `${JSON.stringify(status, null, 2)}\n`;
-  const receipt: AutopilotReceipt = {
-    schema_version: 'autopilot.receipt.v1',
-    tool_name: 'autopilot_emit_status',
-    workstream: 'phase2-smoke',
-    unit_id: 'u01',
-    role: 'implement',
-    attempt: 1,
+  const facts = pinnedRuntimeFacts();
+  const assignment = facts.roster.assignments.find((entry) => entry.role === input.runtimeSpec.role);
+  if (assignment === undefined) throw new Error('missing runtime assignment for strict-v2 merge fixture');
+  const observedProfile = materializeObservedProfile({
+    request_profile: input.runtimeSpec.request_profile,
+    provider_id: assignment.provider_id,
+    requested_model_id: assignment.model_id,
+    executed_model_id: assignment.model_id,
+    api: assignment.api,
+    thinking: assignment.thinking,
+    service_tier: assignment.service_tier,
+    cache_policy: assignment.cache_policy,
+    system_prompt_profile: assignment.system_prompt_profile,
+    system_prompt_sha256: `sha256:${'1'.repeat(64)}`,
+    route_policy_id: assignment.route_policy_id,
+    route_policy_revision: assignment.route_policy_revision,
+  });
+  const receipt = materializeReceiptV2({
+    unit_spec: input.runtimeSpec,
+    selection: facts.selection,
+    roster: facts.roster,
+    request_profile: input.runtimeSpec.request_profile,
+    observed_profile: observedProfile,
     emitted_at: '2026-07-08T00:00:00.000Z',
-    status_output: join(input.runtimeRoot, 'statuses', 'u01.implement.attempt-1.json'),
     status_sha256: sha256Text(statusText),
     schema_sha256: `sha256:${'b'.repeat(64)}`,
     tool_call_id: 'call-u01',
-    provider_identity: { provider_id: 'openai-codex', requested_model_id: 'openai-codex/gpt-5.6-terra', executed_model_id: 'openai-codex/gpt-5.6-terra', api: 'openai-codex-responses', thinking_level: 'high' },
+    provider_identity: { provider_id: assignment.provider_id, requested_model_id: assignment.model_id, executed_model_id: assignment.model_id, api: assignment.api, thinking_level: assignment.thinking },
     expected_identity_hash: `sha256:${'c'.repeat(64)}`,
+  });
+  const specText = `${JSON.stringify(input.runtimeSpec, null, 2)}\n`;
+  const receiptText = `${JSON.stringify(receipt, null, 2)}\n`;
+  const auditText = `${JSON.stringify(audit, null, 2)}\n`;
+  const ref = (path: string): string => relative(input.active.main_worktree_path, path).replaceAll('\\', '/');
+  const acceptance = {
+    schema_version: 'autopilot.child_terminal_acceptance.v1' as const,
+    repo_id: input.active.repo_key,
+    autopilot_id: input.active.autopilot_id,
+    workstream: input.active.workstream,
+    workstream_run: input.active.workstream_run,
+    unit_id: 'u01',
+    role: 'implement' as const,
+    attempt: 1,
+    child_lease_id: 'phase2-merge-child',
+    verdict: 'DONE' as const,
+    transport_result: 'accepted' as const,
+    spec: { ref: ref(specPath), sha256: sha256Text(specText) },
+    status: { ref: ref(statusPath), sha256: sha256Text(statusText) },
+    receipt: { ref: ref(receiptPath), sha256: sha256Text(receiptText) },
+    audit: { ref: ref(auditPath), sha256: sha256Text(auditText) },
+    tool_call_id: receipt.tool_call_id,
+    carrier_status_sha256: receipt.status_sha256,
+    audit_disposition: 'accounted-changes' as const,
+    created_at: '2026-07-08T00:00:01.000Z',
   };
-  const statusPath = join(input.runtimeRoot, 'statuses', 'u01.implement.attempt-1.json');
-  const receiptPath = join(input.runtimeRoot, 'receipts', 'u01.implement.attempt-1.receipt.json');
-  const auditPath = join(input.runtimeRoot, 'execution-audits', 'u01.implement.attempt-1.json');
-  const executionCommitPath = join(input.runtimeRoot, 'execution-commits', 'u01.implement.attempt-1.json');
-  await mkdir(dirname(statusPath), { recursive: true });
+  for (const path of [specPath, statusPath, receiptPath, auditPath, executionCommitPath, acceptancePath]) await mkdir(dirname(path), { recursive: true });
+  await writeFile(specPath, specText, 'utf8');
   await writeFile(statusPath, statusText, 'utf8');
-  await writeJson(receiptPath, receipt);
-  await writeJson(auditPath, audit);
+  await writeFile(receiptPath, receiptText, 'utf8');
+  await writeFile(auditPath, auditText, 'utf8');
   await writeJson(executionCommitPath, executionCommit);
+  await writeJson(acceptancePath, acceptance);
   return { statusPath, receiptPath, auditPath, executionCommitPath };
 }

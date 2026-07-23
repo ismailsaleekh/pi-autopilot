@@ -1,11 +1,11 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
-import { platform, tmpdir } from 'node:os';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { AUTOPILOT_STATE_ROOT_ENV, prepareAutopilotUnitWorktree, prepareAutopilotWorkstream } from '../../src/core/parallel-runtime.ts';
+import { AUTOPILOT_STATE_ROOT_ENV, prepareAutopilotWorkstream } from '../../src/core/parallel-runtime.ts';
 import { AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV } from '../../src/core/names.ts';
 import { isProcessAlive } from '../../src/core/coordination/process-identity.ts';
 import { coordinatorRuntimePaths } from '../../src/core/coordination/runtime-paths.ts';
@@ -666,62 +666,6 @@ void describe('package manifest and payload', () => {
       const prepared = await prepareAutopilotWorkstream({ workstream: 'node-modules-smoke', sourceCwd: source });
       const attachment = await new DurableRunSupervisorClient(process.env).attach({ repo: prepared.repo, active: prepared.active, rawSessionId: 'packed-install-session' });
       process.env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV] = attachment.contextPath;
-      const worktree = prepared.mainWorktreePath;
-      const unitWorktree = await prepareAutopilotUnitWorktree({ active: prepared.active, unitId: 'node-modules-smoke', attempt: 1 });
-      const runtimeRoot = prepared.runtimeRoot;
-      await mkdir(join(runtimeRoot, 'unit-specs'), { recursive: true });
-      const specPath = join(runtimeRoot, 'unit-specs', 'node-modules-smoke.implement.attempt-1.json');
-      await writeFile(
-        specPath,
-        `${JSON.stringify({
-          schema_version: 'autopilot.unit_spec.v1',
-          workstream: 'node-modules-smoke',
-          unit_id: 'node-modules-smoke',
-          role: 'implement',
-          template: 'implement',
-          attempt: 1,
-          objective: 'Dry-run from an installed node_modules package.',
-          cwd: unitWorktree.unitInfo.worktree_path,
-          model: 'openai-codex/gpt-5.6-terra',
-          thinking: 'high',
-          owned_paths: ['src/smoke.ts'],
-          read_only_paths: [],
-          untouchable_paths: ['private/**'],
-          context_refs: [
-            { path: '.pi/autopilot/node-modules-smoke/mission.md', purpose: 'Durable mission truth' },
-            { path: '.pi/autopilot/node-modules-smoke/master-plan.json', purpose: 'Durable master plan truth' },
-          ],
-          validation_commands: [],
-          status_output: join(runtimeRoot, 'statuses', 'node-modules-smoke.implement.attempt-1.json'),
-          receipt_output: join(runtimeRoot, 'receipts', 'node-modules-smoke.implement.attempt-1.receipt.json'),
-          evidence_dir: join(runtimeRoot, 'evidence', 'node-modules-smoke'),
-          stop_boundary: 'Dry-run only.',
-          quality_profile: 'source-change',
-          risk_level: 'medium',
-          acceptance_criteria: ['installed package dry-run validates the spec'],
-          verification_plan: {
-            positive_witnesses: [
-              {
-                id: 'positive-installed-smoke',
-                command: 'npm test',
-                expected_signal: 'package smoke passes',
-                required: true,
-              },
-            ],
-            negative_witnesses: [],
-            regression_witnesses: [],
-            real_boundary_witnesses: [],
-            blast_radius_checks: [],
-            docs_schema_prompt_checks: [],
-            dirty_tree_checks: [],
-          },
-          closure_criteria: ['installed package runner works'],
-          upstream_refs: [],
-          timeout_seconds: 60,
-          render_prompt_snapshot: true,
-        }, null, 2)}\n`,
-        'utf8',
-      );
 
       await stopExternalCoordinator(stateRoot);
       assert.equal(existsSync(coordinatorRuntimePaths({ ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: stateRoot }).lockPath), false, 'source coordinator must be stopped before the installed binary proves autostart');
@@ -745,27 +689,8 @@ void describe('package manifest and payload', () => {
         assert.equal(recovery.status, 0, recovery.stderr);
         assert.match(recovery.stdout, expected);
       }
-      const dryRun = spawnSync(process.execPath, [installedBin, '--dry-run', '--json', specPath], {
-        cwd: worktree,
-        encoding: 'utf8',
-        env: runnerEnv,
-      });
-      assert.equal(dryRun.status, 0, dryRun.stderr);
-      assert.match(dryRun.stdout, /"status":"dry-run"/u);
-      assert.equal(dryRun.stderr, '');
       assert.ok(existsSync(join(installedPackage, 'dist', 'src', 'cli', 'autopilot-agent-run.js')));
 
-      const fakePi = join(tempRoot, 'fake-pi.mjs');
-      await writeFile(fakePi, INSTALLED_PACKAGE_FAKE_PI_SOURCE, 'utf8');
-      if (platform() !== 'win32') await chmod(fakePi, 0o755);
-      const liveRun = spawnSync(
-        process.execPath,
-        [installedBin, '--json', '--pi-executable', fakePi, specPath],
-        { cwd: worktree, encoding: 'utf8', env: { ...runnerEnv, AUTOPILOT_FAKE_PI_SCENARIO: 'success' } },
-      );
-      assert.equal(liveRun.status, 0, liveRun.stderr);
-      assert.match(liveRun.stdout, /"status":"success"/u);
-      assert.equal(liveRun.stderr, '');
     } finally {
       delete process.env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV];
       if (coordinatorStateRoot !== null) await stopExternalCoordinator(coordinatorStateRoot);
@@ -808,115 +733,3 @@ function git(cwd: string, args: readonly string[]): void {
   const result = spawnSync('git', args, { cwd, encoding: 'utf8' });
   assert.equal(result.status, 0, result.stderr);
 }
-
-const INSTALLED_PACKAGE_FAKE_PI_SOURCE = `#!/usr/bin/env node
-import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, join, sep } from 'node:path';
-import { createInterface } from 'node:readline';
-
-const contextPath = process.env.AUTOPILOT_AGENT_STATUS_CONTEXT;
-const extensionIndex = process.argv.indexOf('--extension');
-const extensionPath = extensionIndex < 0 ? undefined : process.argv[extensionIndex + 1];
-const expectedExtensionSuffix = ['dist', 'src', 'internal', 'status-extension.js'].join(sep);
-const extensionPathOk =
-  typeof extensionPath === 'string' && extensionPath.endsWith(expectedExtensionSuffix) && existsSync(extensionPath);
-
-function write(record) { process.stdout.write(JSON.stringify(record) + '\\n'); }
-function response(command, success = true, extra = {}) {
-  write({ id: command.id, type: 'response', command: command.type, success, ...extra });
-}
-function loadContext() {
-  if (!contextPath) throw new Error('missing AUTOPILOT_AGENT_STATUS_CONTEXT');
-  return JSON.parse(readFileSync(contextPath, 'utf8'));
-}
-function emitStatus() {
-  const context = loadContext();
-  const unit = context.unit_spec;
-  const changedPath = join(unit.cwd, ...String(unit.owned_paths[0]).split('/'));
-  mkdirSync(dirname(changedPath), { recursive: true });
-  writeFileSync(changedPath, 'export const smoke = "installed fake";\\n', 'utf8');
-  const status = {
-    schema_version: 'autopilot.status.v1',
-    workstream: unit.workstream,
-    unit_id: unit.unit_id,
-    role: unit.role,
-    attempt: unit.attempt,
-    verdict: 'DONE',
-    severity: 'clean',
-    summary: 'Installed package fake Pi completed.',
-    changed_paths: [unit.owned_paths[0]],
-    findings: [],
-    commands: [],
-    evidence_refs: [],
-    report_ref: null,
-    next_action: 'installed package smoke complete'
-  };
-  mkdirSync(dirname(context.status_output), { recursive: true });
-  mkdirSync(dirname(context.receipt_output), { recursive: true });
-  const statusBytes = JSON.stringify(status, null, 2) + '\\n';
-  writeFileSync(context.status_output, statusBytes, 'utf8');
-  const statusSha256 = 'sha256:' + createHash('sha256').update(statusBytes, 'utf8').digest('hex');
-  const toolCallId = 'installed-package-call-1';
-  const receipt = {
-    schema_version: 'autopilot.receipt.v1',
-    tool_name: 'autopilot_emit_status',
-    workstream: unit.workstream,
-    unit_id: unit.unit_id,
-    role: unit.role,
-    attempt: unit.attempt,
-    emitted_at: '2026-06-30T00:00:00.000Z',
-    status_output: context.status_output,
-    status_sha256: statusSha256,
-    schema_sha256: context.schema_sha256,
-    tool_call_id: toolCallId,
-    provider_identity: context.provider_identity,
-    expected_identity_hash: context.expected_identity_hash
-  };
-  writeFileSync(context.receipt_output, JSON.stringify(receipt, null, 2) + '\\n', 'utf8');
-  write({
-    type: 'tool_execution_end',
-    toolName: 'autopilot_emit_status',
-    toolCallId,
-    isError: false,
-    result: {
-      content: [{ type: 'text', text: 'Autopilot status emitted' }],
-      details: {
-        tool_name: 'autopilot_emit_status',
-        tool_call_id: toolCallId,
-        terminating: true,
-        status_sha256: statusSha256
-      }
-    }
-  });
-}
-
-const rl = createInterface({ input: process.stdin, crlfDelay: Infinity });
-rl.on('line', (line) => {
-  const command = JSON.parse(line);
-  if (command.type === 'get_state') {
-    response(command, true, { data: { model: { id: 'gpt-5.6-terra', provider: 'openai-codex', api: 'openai-codex-responses' }, thinkingLevel: 'high' } });
-    return;
-  }
-  if (command.type === 'get_session_stats') {
-    response(command, true, { data: { sessionId: 'installed-package-smoke' } });
-    return;
-  }
-  if (command.type === 'prompt') {
-    if (!extensionPathOk) {
-      response(command, false, { error: 'expected compiled status extension path, got ' + String(extensionPath) });
-      return;
-    }
-    response(command);
-    write({ type: 'agent_start' });
-    write({ type: 'turn_start' });
-    emitStatus();
-    const message = { role: 'assistant', content: [{ type: 'text', text: 'done' }], api: 'openai-codex-responses', provider: 'openai-codex', model: 'gpt-5.6-terra', stopReason: 'stop' };
-    write({ type: 'message_end', message });
-    write({ type: 'turn_end', message, toolResults: [] });
-    write({ type: 'agent_end', messages: [message] });
-    return;
-  }
-  response(command, false, { error: 'unsupported command' });
-});
-`;

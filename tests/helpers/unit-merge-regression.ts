@@ -4,10 +4,13 @@ import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, relative } from 'node:path';
 
-import type { AutopilotExecutionAudit, AutopilotExecutionCommit, AutopilotReceipt, AutopilotStatusEntry, AutopilotUnitSpec } from '../../src/core/contracts/index.ts';
+import type { AutopilotExecutionAudit, AutopilotExecutionCommit, AutopilotStatusEntry } from '../../src/core/contracts/index.ts';
 import type { mergeAutopilotUnit } from '../../src/core/unit-merge.ts';
+import { unitSpecAuthorityProjection } from '../../src/core/roster/runtime-consumers.ts';
+import type { AutopilotRosterUnitSpecV2 } from '../../src/core/roster/runtime-spec.ts';
+import { w5JsonBytes, w5Receipt, w5Sha256Utf8, w5TerminalAcceptance, w5UnitSpec } from './w5-roster-fixtures.ts';
 import {
   AUTOPILOT_STATE_ROOT_ENV,
   acquireClaimsForUnit,
@@ -126,7 +129,8 @@ async function prepareUnitFixture(root: string): Promise<UnitFixture> {
   await initGitSource(source);
   const prepared = await prepareAutopilotWorkstream({ workstream: 'unit-merge-regression', sourceCwd: source });
   const expectedUnitCwd = join(prepared.taskRoot, 'units', 'u01', 'attempt-1', 'worktree');
-  const spec = unitSpec(expectedUnitCwd, prepared.runtimeRoot);
+  const runtimeSpec = unitSpec(expectedUnitCwd, prepared.runtimeRoot);
+  const spec = unitSpecAuthorityProjection(runtimeSpec);
   const unit = await prepareAutopilotUnitWorktree({ active: prepared.active, unitId: 'u01', attempt: 1, unitSpec: spec });
   const context = await resolveActiveAutopilotForSpec(spec);
   await acquireClaimsForUnit({ context, spec, reason: 'unit merge regression fixture' });
@@ -136,7 +140,8 @@ async function prepareUnitFixture(root: string): Promise<UnitFixture> {
   git(unit.unitInfo.worktree_path, ['commit', '-m', 'validated unit commit']);
   const validatedHead = gitOut(unit.unitInfo.worktree_path, ['rev-parse', 'HEAD']);
   const evidence = await writeUnitEvidence({
-    runtimeRoot: prepared.runtimeRoot,
+    active: prepared.active,
+    runtimeSpec,
     unitCwd: unit.unitInfo.worktree_path,
     branch: unit.unitInfo.branch,
     workstreamRun: prepared.active.workstream_run,
@@ -155,24 +160,20 @@ async function prepareUnitFixture(root: string): Promise<UnitFixture> {
   };
 }
 
-function unitSpec(cwd: string, runtimeRoot: string): AutopilotUnitSpec {
-  return {
-    schema_version: 'autopilot.unit_spec.v1',
+function unitSpec(cwd: string, runtimeRoot: string): AutopilotRosterUnitSpecV2 {
+  return w5UnitSpec({
     workstream: 'unit-merge-regression',
     unit_id: 'u01',
     role: 'implement',
-    template: 'implement',
     attempt: 1,
     objective: 'Exercise exact execution-commit mergeback.',
     cwd,
-    model: 'openai-codex/gpt-5.6-terra',
-    thinking: 'high',
     owned_paths: ['src/u01.ts'],
     read_only_paths: [],
     untouchable_paths: ['private/**'],
     context_refs: [
-      { path: '.pi/autopilot/unit-merge-regression/mission.md', purpose: 'mission' },
-      { path: '.pi/autopilot/unit-merge-regression/master-plan.json', purpose: 'plan' },
+      { path: '.pi/autopilot/unit-merge-regression/mission.md', purpose: 'mission', sha256: null, byte_count: null },
+      { path: '.pi/autopilot/unit-merge-regression/master-plan.json', purpose: 'plan', sha256: null, byte_count: null },
     ],
     validation_commands: [],
     status_output: join(runtimeRoot, 'statuses', 'u01.implement.attempt-1.json'),
@@ -193,11 +194,14 @@ function unitSpec(cwd: string, runtimeRoot: string): AutopilotUnitSpec {
     },
     closure_criteria: ['branch drift blocks without integration mutation'],
     upstream_refs: [],
-  };
+    timeout_seconds: 600,
+    render_prompt_snapshot: false,
+  });
 }
 
 async function writeUnitEvidence(input: {
-  readonly runtimeRoot: string;
+  readonly active: PreparedAutopilotWorkstream['active'];
+  readonly runtimeSpec: AutopilotRosterUnitSpecV2;
   readonly unitCwd: string;
   readonly branch: string;
   readonly workstreamRun: string;
@@ -284,36 +288,39 @@ async function writeUnitEvidence(input: {
     audit_ref: 'execution-audits/u01.implement.attempt-1.json',
     created_at: '2026-07-11T00:00:00.000Z',
   };
+  const statusPath = join(input.active.runtime_root, 'statuses', 'u01.implement.attempt-1.json');
+  const receiptPath = join(input.active.runtime_root, 'receipts', 'u01.implement.attempt-1.receipt.json');
+  const auditPath = join(input.active.runtime_root, 'execution-audits', 'u01.implement.attempt-1.json');
+  const executionCommitPath = join(input.active.runtime_root, 'execution-commits', 'u01.implement.attempt-1.json');
+  const specPath = join(input.active.runtime_root, 'unit-specs', 'u01.implement.attempt-1.json');
+  const acceptancePath = join(input.active.runtime_root, 'terminal-acceptances', 'u01.implement.attempt-1.json');
   const statusText = `${JSON.stringify(status, null, 2)}\n`;
-  const receipt: AutopilotReceipt = {
-    schema_version: 'autopilot.receipt.v1',
-    tool_name: 'autopilot_emit_status',
-    workstream: 'unit-merge-regression',
-    unit_id: 'u01',
-    role: 'implement',
-    attempt: 1,
-    emitted_at: '2026-07-11T00:00:00.000Z',
-    status_output: join(input.runtimeRoot, 'statuses', 'u01.implement.attempt-1.json'),
-    status_sha256: sha256Text(statusText),
-    schema_sha256: `sha256:${'b'.repeat(64)}`,
-    tool_call_id: 'call-unit-merge-regression',
-    provider_identity: {
-      provider_id: 'openai-codex',
-      requested_model_id: 'openai-codex/gpt-5.6-terra',
-      executed_model_id: 'openai-codex/gpt-5.6-terra',
-      api: 'openai-codex-responses',
-      thinking_level: 'high',
-    },
-    expected_identity_hash: `sha256:${'c'.repeat(64)}`,
-  };
-  const statusPath = join(input.runtimeRoot, 'statuses', 'u01.implement.attempt-1.json');
-  const receiptPath = join(input.runtimeRoot, 'receipts', 'u01.implement.attempt-1.receipt.json');
-  const auditPath = join(input.runtimeRoot, 'execution-audits', 'u01.implement.attempt-1.json');
-  const executionCommitPath = join(input.runtimeRoot, 'execution-commits', 'u01.implement.attempt-1.json');
-  await writeJson(statusPath, status);
-  await writeJson(receiptPath, receipt);
-  await writeJson(auditPath, audit);
+  const specText = w5JsonBytes(input.runtimeSpec);
+  const receipt = w5Receipt(input.runtimeSpec, { status_sha256: sha256Text(statusText), tool_call_id: 'call-unit-merge-regression', emitted_at: '2026-07-11T00:00:00.000Z' });
+  const receiptText = w5JsonBytes(receipt);
+  const auditText = `${JSON.stringify(audit, null, 2)}\n`;
+  const ref = (path: string): string => relative(input.active.main_worktree_path, path).replaceAll('\\', '/');
+  const acceptance = w5TerminalAcceptance(input.runtimeSpec, specText, receipt, receiptText, {
+    repo_id: input.active.repo_key,
+    autopilot_id: input.active.autopilot_id,
+    workstream: input.active.workstream,
+    workstream_run: input.active.workstream_run,
+    child_lease_id: 'unit-merge-regression-child',
+    verdict: 'DONE',
+    spec: { ref: ref(specPath), sha256: w5Sha256Utf8(specText) },
+    status: { ref: ref(statusPath), sha256: sha256Text(statusText) },
+    receipt: { ref: ref(receiptPath), sha256: w5Sha256Utf8(receiptText) },
+    audit: { ref: ref(auditPath), sha256: sha256Text(auditText) },
+    audit_disposition: 'accounted-changes',
+    created_at: '2026-07-11T00:00:01.000Z',
+  });
+  for (const path of [specPath, statusPath, receiptPath, auditPath, executionCommitPath, acceptancePath]) await mkdir(dirname(path), { recursive: true });
+  await writeFile(specPath, specText, 'utf8');
+  await writeFile(statusPath, statusText, 'utf8');
+  await writeFile(receiptPath, receiptText, 'utf8');
+  await writeFile(auditPath, auditText, 'utf8');
   await writeJson(executionCommitPath, executionCommit);
+  await writeJson(acceptancePath, acceptance);
   return { statusPath, receiptPath, auditPath, executionCommitPath };
 }
 
