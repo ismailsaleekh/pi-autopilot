@@ -217,7 +217,7 @@ export interface RosterCandidate {
   readonly synthetic_fixture_ready_only: boolean;
   readonly converges_with: string | null;
   readonly diagnostic_codes: readonly RosterDiagnosticCode[];
-  readonly readiness_authority?: 'w4-provider-registry.v1' | 'synthetic-fixture.v1' | null;
+  readonly readiness_authority?: 'w4-provider-registry.v1' | 'custom-roster-registry.v1' | 'synthetic-fixture.v1' | null;
   readonly provider_pack_id?: string | null;
   readonly certification_manifest_id?: string | null;
   readonly certification_manifest_sha256?: Digest | null;

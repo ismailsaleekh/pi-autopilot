@@ -36,6 +36,36 @@ export function isLaunchableRosterCandidate(candidate: Pick<RosterCandidate,
     isDigestBinding(candidate.roster_sha256);
 }
 
+/**
+ * Custom roster candidates have a distinct structural readiness authority. This
+ * predicate is not sufficient launch authority by itself: activation/save must
+ * independently re-read the exact persisted custom_roster manifest and verify it
+ * against the package custom trust registry before launch.
+ */
+export function isStructurallyCustomReadyRosterCandidate(candidate: Pick<RosterCandidate,
+  'candidate_state' |
+  'launch_readiness' |
+  'qualification_state' |
+  'non_certifying_seed' |
+  'synthetic_fixture_ready_only' |
+  'readiness_authority' |
+  'certification_manifest_sha256' |
+  'recipe_sha256' |
+  'route_policy_sha256' |
+  'roster_sha256'
+>): boolean {
+  return candidate.candidate_state === 'w4-certified-ready' &&
+    candidate.launch_readiness === 'w4-certified-ready' &&
+    candidate.qualification_state === 'w4-certified-ready' &&
+    candidate.non_certifying_seed === false &&
+    candidate.synthetic_fixture_ready_only === false &&
+    candidate.readiness_authority === 'custom-roster-registry.v1' &&
+    isDigestBinding(candidate.certification_manifest_sha256) &&
+    isDigestBinding(candidate.recipe_sha256) &&
+    isDigestBinding(candidate.route_policy_sha256) &&
+    isDigestBinding(candidate.roster_sha256);
+}
+
 function isNonEmptyBinding(value: string | null | undefined): value is string {
   return typeof value === 'string' && value.length > 0;
 }

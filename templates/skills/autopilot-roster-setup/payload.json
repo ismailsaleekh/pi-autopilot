@@ -8,8 +8,8 @@
   "resources": {
     "skill_md": {
       "path": "templates/skills/autopilot-roster-setup/SKILL.md",
-      "sha256": "sha256:f14f135f2ef7e101b95bdd6e7d3c787cb4efafd7a727b9f724d20d101857b352",
-      "byte_count": 6872
+      "sha256": "sha256:6b81233b9f94c4e842e39beb4a9eb2f048da74b52b474df40beeec5a7c6f632f",
+      "byte_count": 8770
     }
   },
   "authorities": [
@@ -37,6 +37,14 @@
     "operation": "autopilot_manage_rosters",
     "request_schema": "autopilot.roster_tool_request.v1",
     "result_schema": "autopilot.roster_tool_result.v1",
+    "request_schemas": [
+      "autopilot.roster_tool_request.v1",
+      "autopilot.roster_tool_request.v2"
+    ],
+    "result_schemas": [
+      "autopilot.roster_tool_result.v1",
+      "autopilot.roster_tool_result.v2"
+    ],
     "actions": [
       "inspect",
       "propose",
@@ -44,13 +52,20 @@
       "doctor",
       "save"
     ],
+    "v2_actions": [
+      "propose-custom",
+      "reject",
+      "save"
+    ],
     "zero_write_actions": [
       "inspect",
       "propose",
+      "propose-custom",
       "reject",
       "doctor"
     ],
     "write_action": "save",
+    "custom_structural_not_launch_ready": true,
     "w0_save_blocks_before_storage": true,
     "save_success_visible_write_count_certified": 3
   },
@@ -71,7 +86,10 @@
       "default_roster_id",
       "default_roster_revision",
       "default_roster_sha256",
-      "original_command"
+      "original_command",
+      "validation_result_sha256_for_custom_v2",
+      "roster_sha256_for_custom_v2",
+      "manifest_sha256_for_custom_v2"
     ],
     "post_save": [
       "fresh_pi_session_required",

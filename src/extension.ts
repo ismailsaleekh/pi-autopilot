@@ -53,10 +53,15 @@ import {
   type AutopilotRosterContractBySchemaVersion,
 } from './core/roster/contracts.ts';
 import { isLaunchableRosterCandidate } from './core/roster/activation-fence.ts';
+import {
+  publishCustomRosterCertificationAuthority,
+  readCustomRosterCertificationAuthority,
+  verifyCustomRosterManifestForRoster,
+} from './core/roster/custom-certification.ts';
 import { createAutopilotRosterSetupTool } from './core/roster/setup-tool.ts';
 import { createRosterSetupReceiptFactory, type AutopilotRosterSetupReceipt } from './core/roster/setup-receipt.ts';
 import { resolveAutopilotRosterSetupSkillPackage, type VerifiedAutopilotRosterSetupSkillPackage } from './core/roster/skill-package.ts';
-import { seedRosterByCandidate, type RosterCandidate } from './core/roster/provider-recipes.ts';
+import { seedRosterByCandidate, type QualificationManifest, type Roster, type RosterCandidate } from './core/roster/provider-recipes.ts';
 import { resolveAndCommitPreRunSelection, type RunSelectionAuthority } from './core/roster/run-selection.ts';
 import { publishRuntimeRosterSnapshot, recoverRuntimeRosterSelection } from './core/roster/snapshot.ts';
 import { ROSTER_DIAGNOSTIC_CODES, rosterDiagnostic, type Digest, type RosterDiagnostic, type RosterDiagnosticCode } from './core/roster/route-policies.ts';
@@ -158,6 +163,7 @@ export interface ResolvedAutopilotRosterSelection {
   readonly selection_bytes?: Uint8Array | null | undefined;
   readonly launch_fence?: Awaited<ReturnType<typeof resolveAndCommitPreRunSelection>>['launch_fence'] | undefined;
   readonly runtime_mirror_path?: string | null | undefined;
+  readonly custom_launch_diagnostics?: readonly RosterDiagnostic[] | undefined;
   readonly parent: {
     readonly model: string;
     readonly thinking: 'high' | 'xhigh';
@@ -338,6 +344,7 @@ function runSelectionAuthority(read: AuthorityRead | null | undefined): RunSelec
 }
 
 function rosterSelectionReadiness(selection: ResolvedAutopilotRosterSelection): readonly RosterDiagnostic[] {
+  if (selection.custom_launch_diagnostics !== undefined && selection.custom_launch_diagnostics.length > 0) return selection.custom_launch_diagnostics;
   if (selection.parent.model.length === 0) return dedupeRosterDiagnostics(['ROSTER_READBACK_MISMATCH']);
   return [];
 }
@@ -376,6 +383,20 @@ function resolveScopePathsForActivation(input: {
     : resolveRosterScopePaths({ scope: input.scope, stateRoot: input.stateRoot });
 }
 
+async function customRosterLaunchDiagnostics(input: {
+  readonly roster: RosterContract;
+  readonly paths: ReturnType<typeof resolveScopePathsForActivation>;
+}): Promise<readonly RosterDiagnostic[]> {
+  if (input.roster.generation_source !== 'user-custom') return [];
+  const customRoster = input.roster as unknown as Roster;
+  const authority = await readCustomRosterCertificationAuthority({ paths: input.paths, roster: customRoster });
+  if (!authority.ok) return dedupeRosterDiagnostics(['ROSTER_QUALIFICATION_REQUIRED']);
+  if (authority.authority.roster_sha256 !== input.roster.roster_sha256) return dedupeRosterDiagnostics(['ROSTER_READBACK_MISMATCH']);
+  const verification = verifyCustomRosterManifestForRoster({ roster: customRoster, manifest: authority.authority.qualification_manifest });
+  if (!verification.ok) return dedupeRosterDiagnostics(['ROSTER_QUALIFICATION_REQUIRED']);
+  return [];
+}
+
 async function loadRosterSelectionFromRef(input: {
   readonly source: ResolvedAutopilotRosterSelection['source'];
   readonly existingRun: boolean;
@@ -408,7 +429,8 @@ async function loadRosterSelectionFromRef(input: {
     if (parent === undefined || (parent.thinking !== 'high' && parent.thinking !== 'xhigh')) {
       return { ok: false, diagnostics: dedupeRosterDiagnostics(['ROSTER_READBACK_MISMATCH']), fileState: 'hash-mismatch' };
     }
-    if (!rosterIsReady(roster)) {
+    const customLaunchDiagnostics = await customRosterLaunchDiagnostics({ roster, paths });
+    if (customLaunchDiagnostics.length === 0 && !rosterIsReady(roster)) {
       return { ok: false, diagnostics: dedupeRosterDiagnostics(['ROSTER_QUALIFICATION_REQUIRED']), fileState: 'hash-mismatch' };
     }
     return {
@@ -422,6 +444,7 @@ async function loadRosterSelectionFromRef(input: {
         roster_sha256: roster.roster_sha256 as Digest,
         assignment_set_sha256: roster.assignment_set_sha256 as Digest,
         config_sha256: input.configSha256,
+        ...(customLaunchDiagnostics.length === 0 ? {} : { custom_launch_diagnostics: customLaunchDiagnostics }),
         parent: { model: parent.model, thinking: parent.thinking },
       },
     };
@@ -610,6 +633,8 @@ class ProductionRosterActivationStore implements AutopilotRosterActivationStore 
     if (input.parsed.rosterId !== null && pinned.selection.roster_id !== input.parsed.rosterId) {
       return blockedResolution('existing-run-selection', ['ROSTER_TRANSITION_REQUIRED']);
     }
+    const readiness = rosterSelectionReadiness(pinned.selection);
+    if (readiness.length > 0) return { status: 'blocked', source: 'existing-run-selection', diagnostics: readiness };
     return { status: 'resolved', selection: pinned.selection, diagnostics: [] };
   }
 
@@ -719,6 +744,41 @@ function materializeRosterForCandidate(candidate: RosterCandidate, scope: Roster
   const parsed = parseAutopilotRosterContract('autopilot.roster.v1', roster);
   if (parsed.roster_sha256 !== candidate.roster_sha256) throw new Error('candidate roster hash drift');
   return parsed;
+}
+
+function materializeRosterPublicationForCandidate(input: {
+  readonly candidate: RosterCandidate;
+  readonly scope: RosterStorageScope;
+  readonly customRosters?: ReadonlyMap<Digest, RosterContract> | ReadonlyMap<Digest, unknown> | undefined;
+  readonly customRosterBytes?: ReadonlyMap<Digest, Uint8Array> | undefined;
+  readonly customManifests?: ReadonlyMap<Digest, QualificationManifest> | undefined;
+  readonly customValidations?: ReadonlyMap<Digest, { readonly ok: boolean; readonly status: string; readonly result_sha256: Digest }> | undefined;
+}): { readonly roster: RosterContract; readonly bytes: Uint8Array; readonly custom_manifest: QualificationManifest | null; readonly custom_validation_result_sha256: Digest | null } {
+  if (input.candidate.readiness_authority !== 'custom-roster-registry.v1') {
+    const roster = materializeRosterForCandidate(input.candidate, input.scope);
+    return { roster, bytes: rosterBytes(roster), custom_manifest: null, custom_validation_result_sha256: null };
+  }
+  const bytes = input.customRosterBytes?.get(input.candidate.roster_sha256);
+  const manifest = input.customManifests?.get(input.candidate.roster_sha256);
+  const validation = input.customValidations?.get(input.candidate.roster_sha256);
+  if (bytes === undefined || manifest === undefined || validation === undefined || validation.ok !== true || validation.status !== 'certified') {
+    throw new Error('custom candidate exact validation evidence is unavailable');
+  }
+  const roster = parseAutopilotRosterContractJson('autopilot.roster.v1', Buffer.from(bytes).toString('utf8'));
+  if (
+    roster.generation_source !== 'user-custom' ||
+    roster.scope !== input.scope ||
+    roster.selected_scope !== input.scope ||
+    roster.roster_id !== input.candidate.roster_id ||
+    roster.roster_revision !== input.candidate.roster_revision ||
+    roster.roster_sha256 !== input.candidate.roster_sha256 ||
+    roster.assignment_set_sha256 !== input.candidate.assignment_set_sha256
+  ) {
+    throw new Error('custom candidate roster bytes drifted');
+  }
+  const verification = verifyCustomRosterManifestForRoster({ roster: roster as unknown as Roster, manifest });
+  if (!verification.ok) throw new Error('custom roster registry verification failed closed');
+  return { roster, bytes: Buffer.from(bytes), custom_manifest: manifest, custom_validation_result_sha256: validation.result_sha256 };
 }
 
 function rosterBytes(roster: RosterContract): Uint8Array {
@@ -892,11 +952,53 @@ export default function autopilotExtension(pi: ExtensionHostLike, dependencies: 
             };
           }
           const candidatesByHash = new Map(input.candidate_set.candidates.map((candidate) => [candidate.roster_sha256, candidate]));
-          const rosters = input.approved_roster_sha256s.map((sha) => {
+          const publications = input.approved_roster_sha256s.map((sha) => {
             const candidate = candidatesByHash.get(sha);
             if (candidate === undefined) throw new Error('approved roster hash absent from candidate set');
-            return materializeRosterForCandidate(candidate, request.scope);
+            return materializeRosterPublicationForCandidate({
+              candidate,
+              scope: request.scope,
+              customRosterBytes: input.custom_roster_bytes_by_sha256,
+              customManifests: input.custom_manifests_by_roster_sha256,
+              customValidations: input.custom_validation_results_by_roster_sha256,
+            });
           });
+          const rosters = publications.map((publication) => publication.roster);
+          const customAuthorityFiles: string[] = [];
+          let customAuthorityPath: string | null = null;
+          let customAuthoritySha256: Digest | null = null;
+          let customAuthorityWrites = 0;
+          for (const publication of publications) {
+            if (publication.custom_manifest === null || publication.custom_validation_result_sha256 === null) continue;
+            const paths = request.scope === 'trusted-project'
+              ? stateRoot === undefined
+                ? resolveRosterScopePaths({ scope: request.scope, trustedProjectRoot: request.trusted_project_root ?? undefined })
+                : resolveRosterScopePaths({ scope: request.scope, stateRoot, trustedProjectRoot: request.trusted_project_root ?? undefined })
+              : stateRoot === undefined
+                ? resolveRosterScopePaths({ scope: request.scope })
+                : resolveRosterScopePaths({ scope: request.scope, stateRoot });
+            const published = await publishCustomRosterCertificationAuthority({
+              paths,
+              roster: publication.roster as unknown as Roster,
+              validation_result_sha256: publication.custom_validation_result_sha256,
+              manifest: publication.custom_manifest,
+            });
+            if (!published.ok) {
+              return {
+                ok: false,
+                status: published.status === 'blocked' ? 'blocked' as const : 'failed' as const,
+                receipt: null,
+                diagnostics: published.diagnostics,
+                write_count: published.write_count,
+                lock_count: published.lock_count,
+                files_touched: published.files_touched,
+              };
+            }
+            customAuthorityWrites += published.write_count;
+            if (published.display_path !== null) customAuthorityFiles.push(...published.files_touched);
+            customAuthorityPath = published.display_path;
+            customAuthoritySha256 = published.authority?.authority_sha256 ?? null;
+          }
           const config = buildRosterConfig({
             scope: request.scope,
             rosters,
@@ -914,7 +1016,7 @@ export default function autopilotExtension(pi: ExtensionHostLike, dependencies: 
             approved_candidate_set_sha256: request.candidate_set_sha256 ?? input.candidate_set.candidate_set_sha256,
             current_candidate_set_sha256: input.candidate_set.candidate_set_sha256,
             approved_roster_sha256s: input.approved_roster_sha256s,
-            roster_bytes: rosters.map((roster) => rosterBytes(roster)),
+            roster_bytes: publications.map((publication) => publication.bytes),
             config_bytes: config.bytes,
             expected_previous_config_sha256: read.config_sha256,
             default_roster_id: input.default_roster_id,
@@ -927,9 +1029,11 @@ export default function autopilotExtension(pi: ExtensionHostLike, dependencies: 
             status: saved.status === 'saved' ? 'saved' as const : saved.status === 'blocked' ? 'blocked' as const : 'failed' as const,
             receipt: saved.receipt?.receipt ?? null,
             diagnostics: storageDiagnosticsAsRosterDiagnostics(saved.diagnostics),
-            write_count: saved.write_count,
+            write_count: saved.write_count + customAuthorityWrites,
             lock_count: saved.lock_count,
-            files_touched: saved.files_touched,
+            files_touched: [...customAuthorityFiles, ...saved.files_touched],
+            custom_authority_path: customAuthorityPath,
+            custom_authority_sha256: customAuthoritySha256,
           };
         } catch {
           return {

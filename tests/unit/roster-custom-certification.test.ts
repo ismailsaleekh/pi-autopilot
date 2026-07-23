@@ -1,10 +1,15 @@
 import assert from 'node:assert/strict';
+import { mkdtemp, realpath, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, it } from 'node:test';
 
 import {
   CURRENT_CUSTOM_ROSTER_TRUST_REGISTRY,
   CUSTOM_ROSTER_REQUEST_SCHEMA,
   buildUserCustomRosterFromAssignments,
+  publishCustomRosterCertificationAuthority,
+  readCustomRosterCertificationAuthority,
   requiredCustomRosterEvidenceRefs,
   validateCustomRosterSetupRequest,
   verifyCustomRosterManifestForRoster,
@@ -30,6 +35,7 @@ import {
   type RosterInventory,
   type RosterRole,
 } from '../../src/core/roster/route-policies.ts';
+import { resolveRosterScopePaths } from '../../src/core/roster/storage.ts';
 
 const CUSTOM_NOW = new Date('2026-07-24T00:00:00.000Z');
 const CUSTOM_CREATED_AT = '2026-07-24T00:00:00.000Z';
@@ -120,6 +126,78 @@ void describe('W5 custom roster certification', () => {
     assert.deepEqual(result.files_touched, []);
   });
 
+  void it('rejects expired and missing-role custom evidence without certifying shaped manifests', () => {
+    const inventory = mixedPlanInventory();
+    const roster = mixedCustomRoster(inventory);
+    const manifest = selfHashedCustomRosterManifest(roster);
+
+    const expired = rehashManifest({
+      ...manifest,
+      issued_at: '2026-07-20T00:00:00.000Z',
+      expires_at: '2026-07-21T00:00:00.000Z',
+    });
+    const expiredVerification = verifyCustomRosterManifestForRoster({ roster, manifest: expired, now: CUSTOM_NOW });
+    assert.equal(expiredVerification.ok, false);
+    assert.ok(expiredVerification.issues.some((issue) => issue.code === 'W5_CUSTOM_MANIFEST_TIME_INVALID'));
+    assert.ok(expiredVerification.issues.some((issue) => issue.code === 'W5_CUSTOM_MANIFEST_HASH_UNTRUSTED'));
+
+    const wrongRoleEvidence = manifest.role_results.find((entry) => entry.role === 'fix')?.evidence_refs[0];
+    if (wrongRoleEvidence === undefined) throw new Error('missing wrong-role evidence');
+    const missingRole = rehashManifest({
+      ...manifest,
+      role_results: manifest.role_results.map((entry) => entry.role === 'implement' ? { ...entry, evidence_refs: [wrongRoleEvidence] } : entry),
+    });
+    const missingRoleVerification = verifyCustomRosterManifestForRoster({ roster, manifest: missingRole, now: CUSTOM_NOW });
+    assert.equal(missingRoleVerification.ok, false);
+    assert.ok(missingRoleVerification.issues.some((issue) => issue.code === 'W5_CUSTOM_MANIFEST_ROLE_COVERAGE_MISMATCH'));
+    assert.ok(missingRoleVerification.issues.some((issue) => issue.code === 'W5_CUSTOM_MANIFEST_HASH_UNTRUSTED'));
+  });
+
+  void it('persists future custom certification authority only at the lower create-only boundary without adding trust', async () => {
+    await withTempDir(async (dir) => {
+      const inventory = mixedPlanInventory();
+      const roster = mixedCustomRoster(inventory);
+      const manifest = selfHashedCustomRosterManifest(roster);
+      const validation = validateCustomRosterSetupRequest({ request: customRequest(roster, manifest), inventory, now: CUSTOM_NOW });
+      assert.equal(validation.certification_status, 'untrusted');
+
+      const paths = resolveRosterScopePaths({ scope: 'user', stateRoot: dir });
+      const published = await publishCustomRosterCertificationAuthority({
+        paths,
+        roster,
+        validation_result_sha256: validation.result_sha256,
+        manifest,
+      });
+      assert.equal(published.ok, true);
+      assert.equal(published.status, 'published');
+      assert.equal(published.write_count, 1);
+      assert.equal(published.lock_count, 0);
+      assert.equal(published.files_touched.length, 1);
+
+      const read = await readCustomRosterCertificationAuthority({ paths, roster });
+      assert.equal(read.ok, true);
+      if (!read.ok) throw new Error('authority missing');
+      assert.equal(read.authority.roster_sha256, roster.roster_sha256);
+      assert.equal(read.authority.validation_result_sha256, validation.result_sha256);
+      assert.equal(read.authority.manifest_sha256, manifest.manifest_sha256);
+
+      const replay = await publishCustomRosterCertificationAuthority({ paths, roster, validation_result_sha256: validation.result_sha256, manifest });
+      assert.equal(replay.ok, true);
+      assert.equal(replay.status, 'inspected');
+      assert.equal(replay.write_count, 0);
+
+      const conflicting = await publishCustomRosterCertificationAuthority({
+        paths,
+        roster,
+        validation_result_sha256: validation.result_sha256,
+        manifest: rehashManifest({ ...manifest, manifest_id: 'custom-conflict-v1' }),
+      });
+      assert.equal(conflicting.ok, false);
+      assert.equal(conflicting.status, 'blocked');
+      assert.equal(conflicting.write_count, 0);
+    });
+  });
+
   void it('gives mixed providers zero inherited trust from provider_recipe-shaped manifests', () => {
     const inventory = mixedPlanInventory();
     const roster = mixedCustomRoster(inventory);
@@ -142,6 +220,15 @@ void describe('W5 custom roster certification', () => {
     assert.equal(result.write_count, 0);
   });
 });
+
+async function withTempDir<T>(run: (dir: string) => Promise<T>): Promise<T> {
+  const dir = await mkdtemp(join(await realpath(tmpdir()), 'custom-roster-authority-'));
+  try {
+    return await run(dir);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
 
 function codes(result: CustomResult): readonly string[] {
   return result.diagnostics.map((diagnostic) => diagnostic.code);

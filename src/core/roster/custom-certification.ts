@@ -1,4 +1,7 @@
+import { join } from 'node:path';
+
 import {
+  autopilotRosterContractCanonicalJson,
   parseAutopilotRosterContract,
 } from './contracts.ts';
 import {
@@ -14,6 +17,7 @@ import {
   type Roster,
 } from './provider-recipes.ts';
 import {
+  PHASE37_FIXTURE_CLOCK,
   PHASE37_PACKAGE_VERSION,
   PHASE37_PI_VERSION,
   ROSTER_ROLE_ORDER,
@@ -24,18 +28,31 @@ import {
   findInventoryModel,
   findInventoryProvider,
   findRoutePolicy,
+  findRoutePolicyForProviderApi,
+  isRosterProfileId,
+  isRosterRole,
   normalizeRosterInventory,
   validateRouteConformance,
+  type ApiId,
+  type CachePolicy,
   type Digest,
+  type InventoryModel,
   type Modality,
   type RosterInventory,
+  type RosterProfileId,
   type RosterRole,
   type RosterScope,
   type ServiceTier,
+  type SystemPromptProfile,
+  type ThinkingValue,
 } from './route-policies.ts';
+import { formatAuthorityPath, type RosterScopePaths } from './paths.ts';
+import { publishCreateOnlyAtomic, readAuthorityFileIfPresent } from './transaction.ts';
 
 export const CUSTOM_ROSTER_REQUEST_SCHEMA = 'autopilot.custom_roster_request.v1' as const;
+export const CUSTOM_ROSTER_INTENT_REQUEST_SCHEMA = 'autopilot.custom_roster_request.v2' as const;
 export const CUSTOM_ROSTER_VALIDATION_RESULT_SCHEMA = 'autopilot.custom_roster_validation_result.v1' as const;
+export const CUSTOM_ROSTER_CERTIFICATION_AUTHORITY_SCHEMA = 'autopilot.custom_roster_certification_authority.v1' as const;
 export const CUSTOM_ROSTER_RECIPE_ID = 'custom-roster' as const;
 export const CUSTOM_ROSTER_RECIPE_REVISION = 1 as const;
 export const CUSTOM_ROSTER_TOOL_UNSUPPORTED_DIAGNOSTIC = 'ROSTER_CUSTOM_ROSTER_UNSUPPORTED' as const;
@@ -45,6 +62,7 @@ const CUSTOM_REQUEST_ID_PATTERN = /^[a-z][a-z0-9-]{0,95}$/u;
 const CUSTOM_ROSTER_ID_PATTERN = /^custom-[a-z0-9][a-z0-9-]{0,83}-[a-f0-9]{12}$/u;
 const DIGEST_PATTERN = /^sha256:[a-f0-9]{64}$/u;
 const MAX_CUSTOM_NATURAL_LANGUAGE_BYTES = 16_000;
+const CUSTOM_ROSTER_CERTIFICATION_AUTHORITY_DIR = 'custom-roster-certifications' as const;
 
 export interface CustomRosterTrustRegistry {
   readonly schema_version: 'autopilot.custom_roster_trust_registry.v1';
@@ -68,6 +86,26 @@ export interface CustomRosterSetupRequest {
   readonly scope: RosterScope;
   readonly natural_language_request: string;
   readonly roster: unknown;
+  readonly qualification_manifest: QualificationManifest | null;
+}
+
+export interface CustomRosterRoleAssignmentIntent {
+  readonly role: RosterRole;
+  readonly provider_id: string;
+  readonly model_id: string;
+  readonly api: ApiId;
+  readonly thinking: ThinkingValue;
+  readonly service_tier?: ServiceTier | undefined;
+  readonly cache_policy?: CachePolicy | undefined;
+  readonly system_prompt_profile?: SystemPromptProfile | undefined;
+}
+
+export interface CustomRosterIntentSetupRequest {
+  readonly schema_version: typeof CUSTOM_ROSTER_INTENT_REQUEST_SCHEMA;
+  readonly request_id: string;
+  readonly natural_language_request: string;
+  readonly profile_id: RosterProfileId;
+  readonly role_assignment_intent: readonly CustomRosterRoleAssignmentIntent[];
   readonly qualification_manifest: QualificationManifest | null;
 }
 
@@ -104,6 +142,40 @@ export interface CustomRosterSetupValidationResult {
   readonly result_sha256: Digest;
 }
 
+export interface CustomRosterIntentValidationResult {
+  readonly request: CustomRosterIntentSetupRequest | null;
+  readonly roster: Roster | null;
+  readonly roster_bytes: Uint8Array | null;
+  readonly qualification_manifest: QualificationManifest | null;
+  readonly qualification_manifest_sha256: Digest | null;
+  readonly validation: CustomRosterSetupValidationResult;
+}
+
+export interface CustomRosterCertificationAuthority {
+  readonly schema_version: typeof CUSTOM_ROSTER_CERTIFICATION_AUTHORITY_SCHEMA;
+  readonly roster_id: string;
+  readonly roster_revision: number;
+  readonly roster_sha256: Digest;
+  readonly validation_result_sha256: Digest;
+  readonly manifest_id: string;
+  readonly manifest_sha256: Digest;
+  readonly qualification_manifest: QualificationManifest;
+  readonly secret_free: true;
+  readonly authority_sha256: Digest;
+}
+
+export interface CustomRosterCertificationAuthorityPublicationResult {
+  readonly ok: boolean;
+  readonly status: 'published' | 'inspected' | 'blocked' | 'failed';
+  readonly authority: CustomRosterCertificationAuthority | null;
+  readonly path: string | null;
+  readonly display_path: string | null;
+  readonly diagnostics: readonly CustomRosterDiagnostic[];
+  readonly write_count: 0 | 1;
+  readonly lock_count: 0;
+  readonly files_touched: readonly string[];
+}
+
 export type W5CustomRosterIssueCode =
   | 'W5_CUSTOM_MANIFEST_ABSENT'
   | 'W5_CUSTOM_MANIFEST_SCHEMA_INVALID'
@@ -132,6 +204,14 @@ export interface ValidateCustomRosterSetupRequestInput {
   readonly request: unknown;
   readonly inventory: RosterInventory;
   readonly now?: Date | undefined;
+}
+
+export interface ValidateCustomRosterIntentSetupRequestInput {
+  readonly request: unknown;
+  readonly inventory: RosterInventory;
+  readonly scope: RosterScope;
+  readonly now?: Date | undefined;
+  readonly created_at?: string | undefined;
 }
 
 export interface BuildUserCustomRosterInput {
@@ -204,63 +284,88 @@ export function buildUserCustomRosterFromAssignments(input: BuildUserCustomRoste
 
 export function validateCustomRosterSetupRequest(input: ValidateCustomRosterSetupRequestInput): CustomRosterSetupValidationResult {
   const parsed = parseCustomRosterRequest(input.request);
+  if (!parsed.ok) return invalidCustomValidation(null, ['ROSTER_CUSTOM_REQUEST_SCHEMA_INVALID']);
+
+  const request = parsed.request;
+  const rosterParsed = parseCustomRoster(request.roster);
+  if (!rosterParsed.ok) return invalidCustomValidation(parsed.request_sha256, ['ROSTER_CUSTOM_DRAFT_SCHEMA_INVALID']);
+
+  return validateCustomRosterObject({
+    request_sha256: parsed.request_sha256,
+    roster: rosterParsed.roster,
+    qualification_manifest: request.qualification_manifest,
+    inventory: input.inventory,
+    scope: request.scope,
+    now: input.now,
+  });
+}
+
+export function validateCustomRosterIntentSetupRequest(input: ValidateCustomRosterIntentSetupRequestInput): CustomRosterIntentValidationResult {
+  const parsed = parseCustomRosterIntentRequest(input.request);
   if (!parsed.ok) {
-    return materializeValidationResult({
-      schema_version: CUSTOM_ROSTER_VALIDATION_RESULT_SCHEMA,
-      ok: false,
-      status: 'failed',
-      structural_status: 'invalid',
-      certification_status: 'invalid',
-      request_sha256: null,
-      roster_id: null,
-      roster_revision: null,
-      roster_sha256: null,
-      assignment_set_sha256: null,
-      provider_ids: [],
-      route_policy_ids: [],
-      mixed_provider_roster: false,
-      diagnostics: diagnosticsFromCodes(['ROSTER_CUSTOM_REQUEST_SCHEMA_INVALID']),
-      write_count: 0,
-      lock_count: 0,
-      files_touched: [],
+    return Object.freeze({
+      request: null,
+      roster: null,
+      roster_bytes: null,
+      qualification_manifest: null,
+      qualification_manifest_sha256: null,
+      validation: invalidCustomValidation(null, ['ROSTER_CUSTOM_REQUEST_SCHEMA_INVALID']),
     });
   }
 
   const request = parsed.request;
-  const request_sha256 = parsed.request_sha256;
-  const rosterParsed = parseCustomRoster(request.roster);
-  if (!rosterParsed.ok) {
-    return materializeValidationResult({
-      schema_version: CUSTOM_ROSTER_VALIDATION_RESULT_SCHEMA,
-      ok: false,
-      status: 'failed',
-      structural_status: 'invalid',
-      certification_status: 'invalid',
-      request_sha256,
-      roster_id: null,
-      roster_revision: null,
-      roster_sha256: null,
-      assignment_set_sha256: null,
-      provider_ids: [],
-      route_policy_ids: [],
-      mixed_provider_roster: false,
-      diagnostics: diagnosticsFromCodes(['ROSTER_CUSTOM_DRAFT_SCHEMA_INVALID']),
-      write_count: 0,
-      lock_count: 0,
-      files_touched: [],
+  const built = buildCustomRosterFromIntent({
+    request,
+    inventory: input.inventory,
+    scope: input.scope,
+    created_at: input.created_at ?? PHASE37_FIXTURE_CLOCK,
+  });
+  if (!built.ok) {
+    return Object.freeze({
+      request,
+      roster: null,
+      roster_bytes: null,
+      qualification_manifest: request.qualification_manifest,
+      qualification_manifest_sha256: request.qualification_manifest === null ? null : safeValueDigest(request.qualification_manifest),
+      validation: invalidCustomValidation(parsed.request_sha256, built.codes),
     });
   }
 
-  const roster = rosterParsed.roster;
-  const structuralCodes = validateCustomRosterStructure({ roster, inventory: input.inventory, scope: request.scope });
+  const validation = validateCustomRosterObject({
+    request_sha256: parsed.request_sha256,
+    roster: built.roster,
+    qualification_manifest: request.qualification_manifest,
+    inventory: input.inventory,
+    scope: input.scope,
+    now: input.now,
+  });
+  return Object.freeze({
+    request,
+    roster: built.roster,
+    roster_bytes: canonicalRosterBytes(built.roster),
+    qualification_manifest: request.qualification_manifest,
+    qualification_manifest_sha256: request.qualification_manifest === null ? null : safeValueDigest(request.qualification_manifest),
+    validation,
+  });
+}
+
+function validateCustomRosterObject(input: {
+  readonly request_sha256: Digest;
+  readonly roster: Roster;
+  readonly qualification_manifest: QualificationManifest | null;
+  readonly inventory: RosterInventory;
+  readonly scope: RosterScope;
+  readonly now?: Date | undefined;
+}): CustomRosterSetupValidationResult {
+  const structuralCodes = validateCustomRosterStructure({ roster: input.roster, inventory: input.inventory, scope: input.scope });
   const structuralValid = structuralCodes.length === 0;
   const manifestVerification = structuralValid
-    ? verifyCustomRosterManifestForRoster({ roster, manifest: request.qualification_manifest, now: input.now })
+    ? verifyCustomRosterManifestForRoster({ roster: input.roster, manifest: input.qualification_manifest, now: input.now })
     : null;
   const certificationStatus = manifestVerification?.certification_status ?? (structuralValid ? 'absent' : 'invalid');
   const certificationOk = manifestVerification?.ok === true;
-  const providerIds = uniqueSortedStrings(roster.assignments.map((assignment) => assignment.provider_id));
-  const routePolicyIds = uniqueSortedStrings(roster.assignments.map((assignment) => assignment.route_policy_id));
+  const providerIds = uniqueSortedStrings(input.roster.assignments.map((assignment) => assignment.provider_id));
+  const routePolicyIds = uniqueSortedStrings(input.roster.assignments.map((assignment) => assignment.route_policy_id));
   const manifestCodes = manifestVerification === null ? [] : rosterDiagnosticsForManifestIssues(manifestVerification.issues);
   const diagnostics = diagnosticsFromCodes([
     ...structuralCodes,
@@ -274,11 +379,11 @@ export function validateCustomRosterSetupRequest(input: ValidateCustomRosterSetu
     status: certificationOk ? 'certified' : structuralValid ? 'blocked' : 'failed',
     structural_status: structuralValid ? 'structurally-valid-draft' : 'invalid',
     certification_status: certificationStatus,
-    request_sha256,
-    roster_id: roster.roster_id,
-    roster_revision: roster.roster_revision,
-    roster_sha256: roster.roster_sha256,
-    assignment_set_sha256: roster.assignment_set_sha256,
+    request_sha256: input.request_sha256,
+    roster_id: input.roster.roster_id,
+    roster_revision: input.roster.roster_revision,
+    roster_sha256: input.roster.roster_sha256,
+    assignment_set_sha256: input.roster.assignment_set_sha256,
     provider_ids: providerIds,
     route_policy_ids: routePolicyIds,
     mixed_provider_roster: providerIds.length > 1,
@@ -287,6 +392,33 @@ export function validateCustomRosterSetupRequest(input: ValidateCustomRosterSetu
     lock_count: 0,
     files_touched: [],
   });
+}
+
+function invalidCustomValidation(requestSha256: Digest | null, codes: readonly string[]): CustomRosterSetupValidationResult {
+  return materializeValidationResult({
+    schema_version: CUSTOM_ROSTER_VALIDATION_RESULT_SCHEMA,
+    ok: false,
+    status: 'failed',
+    structural_status: 'invalid',
+    certification_status: 'invalid',
+    request_sha256: requestSha256,
+    roster_id: null,
+    roster_revision: null,
+    roster_sha256: null,
+    assignment_set_sha256: null,
+    provider_ids: [],
+    route_policy_ids: [],
+    mixed_provider_roster: false,
+    diagnostics: diagnosticsFromCodes(codes.length === 0 ? ['ROSTER_CUSTOM_DRAFT_STRUCTURE_INVALID'] : codes),
+    write_count: 0,
+    lock_count: 0,
+    files_touched: [],
+  });
+}
+
+export function canonicalRosterBytes(roster: Roster): Uint8Array {
+  const parsed = parseAutopilotRosterContract('autopilot.roster.v1', roster) as unknown as Roster;
+  return new TextEncoder().encode(autopilotRosterContractCanonicalJson(parsed));
 }
 
 export function verifyCustomRosterManifestForRoster(input: {
@@ -378,6 +510,148 @@ export function requiredCustomRosterEvidenceRefs(roster: Pick<Roster, 'roster_id
   ]));
 }
 
+export function customRosterCertificationAuthorityPath(
+  paths: Pick<RosterScopePaths, 'authorityRoot'>,
+  roster: Pick<Roster, 'roster_id' | 'roster_sha256'>,
+): string {
+  return join(paths.authorityRoot, CUSTOM_ROSTER_CERTIFICATION_AUTHORITY_DIR, roster.roster_id, `${roster.roster_sha256.slice('sha256:'.length)}.json`);
+}
+
+export function buildCustomRosterCertificationAuthority(input: {
+  readonly roster: Pick<Roster, 'roster_id' | 'roster_revision' | 'roster_sha256'>;
+  readonly validation_result_sha256: Digest;
+  readonly manifest: QualificationManifest;
+}): CustomRosterCertificationAuthority {
+  const manifest = parseManifest(input.manifest);
+  if (manifest === null) throw new Error('custom roster certification authority requires a closed certification manifest');
+  const withoutHash = {
+    schema_version: CUSTOM_ROSTER_CERTIFICATION_AUTHORITY_SCHEMA,
+    roster_id: input.roster.roster_id,
+    roster_revision: input.roster.roster_revision,
+    roster_sha256: input.roster.roster_sha256,
+    validation_result_sha256: input.validation_result_sha256,
+    manifest_id: manifest.manifest_id,
+    manifest_sha256: manifest.manifest_sha256,
+    qualification_manifest: manifest,
+    secret_free: true as const,
+  } satisfies Omit<CustomRosterCertificationAuthority, 'authority_sha256'>;
+  return Object.freeze({ ...withoutHash, authority_sha256: canonicalSha256(withoutHash) });
+}
+
+export function parseCustomRosterCertificationAuthority(value: unknown): CustomRosterCertificationAuthority | null {
+  if (!isRecord(value)) return null;
+  const expected = new Set(['schema_version', 'roster_id', 'roster_revision', 'roster_sha256', 'validation_result_sha256', 'manifest_id', 'manifest_sha256', 'qualification_manifest', 'secret_free', 'authority_sha256']);
+  const keys = Object.keys(value);
+  if (keys.length !== expected.size || !keys.every((key) => expected.has(key))) return null;
+  if (
+    value['schema_version'] !== CUSTOM_ROSTER_CERTIFICATION_AUTHORITY_SCHEMA ||
+    typeof value['roster_id'] !== 'string' || !CUSTOM_ROSTER_ID_PATTERN.test(value['roster_id']) ||
+    typeof value['roster_revision'] !== 'number' || !Number.isSafeInteger(value['roster_revision']) || value['roster_revision'] < 1 ||
+    typeof value['roster_sha256'] !== 'string' || !DIGEST_PATTERN.test(value['roster_sha256']) ||
+    typeof value['validation_result_sha256'] !== 'string' || !DIGEST_PATTERN.test(value['validation_result_sha256']) ||
+    typeof value['manifest_id'] !== 'string' || value['manifest_id'].length === 0 || value['manifest_id'].length > 120 ||
+    typeof value['manifest_sha256'] !== 'string' || !DIGEST_PATTERN.test(value['manifest_sha256']) ||
+    value['secret_free'] !== true ||
+    typeof value['authority_sha256'] !== 'string' || !DIGEST_PATTERN.test(value['authority_sha256'])
+  ) {
+    return null;
+  }
+  const rosterSha256 = value['roster_sha256'] as Digest;
+  const validationResultSha256 = value['validation_result_sha256'] as Digest;
+  const manifestSha256 = value['manifest_sha256'] as Digest;
+  const authoritySha256 = value['authority_sha256'] as Digest;
+  const manifest = parseManifest(value['qualification_manifest'] as QualificationManifest);
+  if (manifest === null || manifest.manifest_id !== value['manifest_id'] || manifest.manifest_sha256 !== manifestSha256) return null;
+  const withoutHash = {
+    schema_version: CUSTOM_ROSTER_CERTIFICATION_AUTHORITY_SCHEMA,
+    roster_id: value['roster_id'],
+    roster_revision: value['roster_revision'],
+    roster_sha256: rosterSha256,
+    validation_result_sha256: validationResultSha256,
+    manifest_id: value['manifest_id'],
+    manifest_sha256: manifestSha256,
+    qualification_manifest: manifest,
+    secret_free: true as const,
+  } satisfies Omit<CustomRosterCertificationAuthority, 'authority_sha256'>;
+  if (canonicalSha256(withoutHash) !== authoritySha256) return null;
+  return Object.freeze({ ...withoutHash, authority_sha256: authoritySha256 });
+}
+
+export async function publishCustomRosterCertificationAuthority(input: {
+  readonly paths: Pick<RosterScopePaths, 'authorityRoot' | 'authorityDisplayRoot'>;
+  readonly roster: Pick<Roster, 'roster_id' | 'roster_revision' | 'roster_sha256'>;
+  readonly validation_result_sha256: Digest;
+  readonly manifest: QualificationManifest;
+}): Promise<CustomRosterCertificationAuthorityPublicationResult> {
+  try {
+    const authority = buildCustomRosterCertificationAuthority(input);
+    const path = customRosterCertificationAuthorityPath(input.paths, input.roster);
+    const bytes = new TextEncoder().encode(autopilotRosterContractCanonicalJson(authority));
+    const publish = await publishCreateOnlyAtomic({ path, authorityRoot: input.paths.authorityRoot, bytes });
+    const displayPath = formatAuthorityPath(path, input.paths.authorityRoot, input.paths.authorityDisplayRoot);
+    if (publish.status === 'conflict') {
+      return Object.freeze({
+        ok: false,
+        status: 'blocked',
+        authority: null,
+        path,
+        display_path: displayPath,
+        diagnostics: diagnosticsFromCodes(['ROSTER_CREATE_ONLY_CONFLICT']),
+        write_count: 0 as const,
+        lock_count: 0 as const,
+        files_touched: [],
+      });
+    }
+    return Object.freeze({
+      ok: true,
+      status: publish.status === 'created' ? 'published' : 'inspected',
+      authority,
+      path,
+      display_path: displayPath,
+      diagnostics: [],
+      write_count: publish.status === 'created' ? 1 as const : 0 as const,
+      lock_count: 0 as const,
+      files_touched: publish.status === 'created' ? [displayPath] : [],
+    });
+  } catch {
+    return Object.freeze({
+      ok: false,
+      status: 'failed',
+      authority: null,
+      path: null,
+      display_path: null,
+      diagnostics: diagnosticsFromCodes(['ROSTER_READBACK_MISMATCH']),
+      write_count: 0 as const,
+      lock_count: 0 as const,
+      files_touched: [],
+    });
+  }
+}
+
+export async function readCustomRosterCertificationAuthority(input: {
+  readonly paths: Pick<RosterScopePaths, 'authorityRoot'>;
+  readonly roster: Pick<Roster, 'roster_id' | 'roster_revision' | 'roster_sha256'>;
+}): Promise<{ readonly ok: true; readonly authority: CustomRosterCertificationAuthority } | { readonly ok: false; readonly reason: 'absent' | 'invalid' }> {
+  const path = customRosterCertificationAuthorityPath(input.paths, input.roster);
+  const read = await readAuthorityFileIfPresent(path, input.paths.authorityRoot);
+  if (read === null) return { ok: false, reason: 'absent' };
+  try {
+    const parsed = JSON.parse(Buffer.from(read.bytes).toString('utf8')) as unknown;
+    const authority = parseCustomRosterCertificationAuthority(parsed);
+    if (
+      authority === null ||
+      authority.roster_id !== input.roster.roster_id ||
+      authority.roster_revision !== input.roster.roster_revision ||
+      authority.roster_sha256 !== input.roster.roster_sha256
+    ) {
+      return { ok: false, reason: 'invalid' };
+    }
+    return { ok: true, authority };
+  } catch {
+    return { ok: false, reason: 'invalid' };
+  }
+}
+
 function parseCustomRosterRequest(value: unknown):
   | { readonly ok: true; readonly request: CustomRosterSetupRequest; readonly request_sha256: Digest }
   | { readonly ok: false } {
@@ -422,6 +696,100 @@ function customRequestSha256(request: CustomRosterSetupRequest): Digest {
   });
 }
 
+function parseCustomRosterIntentRequest(value: unknown):
+  | { readonly ok: true; readonly request: CustomRosterIntentSetupRequest; readonly request_sha256: Digest }
+  | { readonly ok: false } {
+  if (!isRecord(value)) return { ok: false };
+  const expected = new Set(['schema_version', 'request_id', 'natural_language_request', 'profile_id', 'role_assignment_intent', 'qualification_manifest']);
+  const keys = Object.keys(value);
+  if (keys.length !== expected.size || !keys.every((key) => expected.has(key))) return { ok: false };
+  const schemaVersion = value['schema_version'];
+  const requestId = value['request_id'];
+  const natural = value['natural_language_request'];
+  const profileId = value['profile_id'];
+  const manifest = value['qualification_manifest'];
+  const intents = parseRoleAssignmentIntent(value['role_assignment_intent']);
+  if (
+    schemaVersion !== CUSTOM_ROSTER_INTENT_REQUEST_SCHEMA ||
+    typeof requestId !== 'string' || !CUSTOM_REQUEST_ID_PATTERN.test(requestId) ||
+    typeof natural !== 'string' || natural.length === 0 || natural.includes('\u0000') ||
+    Buffer.byteLength(natural, 'utf8') > MAX_CUSTOM_NATURAL_LANGUAGE_BYTES ||
+    typeof profileId !== 'string' || !isRosterProfileId(profileId) ||
+    intents === null ||
+    (manifest !== null && !isRecord(manifest))
+  ) {
+    return { ok: false };
+  }
+  const request: CustomRosterIntentSetupRequest = Object.freeze({
+    schema_version: CUSTOM_ROSTER_INTENT_REQUEST_SCHEMA,
+    request_id: requestId,
+    natural_language_request: natural,
+    profile_id: profileId,
+    role_assignment_intent: Object.freeze(intents),
+    qualification_manifest: manifest as QualificationManifest | null,
+  });
+  return { ok: true, request, request_sha256: customIntentRequestSha256(request) };
+}
+
+function parseRoleAssignmentIntent(value: unknown): readonly CustomRosterRoleAssignmentIntent[] | null {
+  if (!Array.isArray(value) || value.length !== ROSTER_ROLE_ORDER.length) return null;
+  const output: CustomRosterRoleAssignmentIntent[] = [];
+  const seen = new Set<RosterRole>();
+  for (const entry of value) {
+    if (!isRecord(entry)) return null;
+    const allowed = new Set(['role', 'provider_id', 'model_id', 'api', 'thinking', 'service_tier', 'cache_policy', 'system_prompt_profile']);
+    const keys = Object.keys(entry);
+    if (!keys.every((key) => allowed.has(key))) return null;
+    for (const key of ['role', 'provider_id', 'model_id', 'api', 'thinking'] as const) {
+      if (!Object.prototype.hasOwnProperty.call(entry, key)) return null;
+    }
+    const role = entry['role'];
+    const providerId = entry['provider_id'];
+    const modelId = entry['model_id'];
+    const api = entry['api'];
+    const thinking = entry['thinking'];
+    const serviceTier = Object.prototype.hasOwnProperty.call(entry, 'service_tier') ? entry['service_tier'] : undefined;
+    const cachePolicy = Object.prototype.hasOwnProperty.call(entry, 'cache_policy') ? entry['cache_policy'] : undefined;
+    const systemPromptProfile = Object.prototype.hasOwnProperty.call(entry, 'system_prompt_profile') ? entry['system_prompt_profile'] : undefined;
+    if (
+      typeof role !== 'string' || !isRosterRole(role) || seen.has(role) ||
+      typeof providerId !== 'string' || !/^[a-z][a-z0-9-]{0,63}$/u.test(providerId) ||
+      typeof modelId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,119}$/u.test(modelId) ||
+      !isApiId(api) ||
+      !isThinkingValue(thinking) ||
+      (serviceTier !== undefined && !isServiceTier(serviceTier)) ||
+      (cachePolicy !== undefined && !isCachePolicy(cachePolicy)) ||
+      (systemPromptProfile !== undefined && !isSystemPromptProfile(systemPromptProfile))
+    ) {
+      return null;
+    }
+    seen.add(role);
+    output.push(Object.freeze({
+      role,
+      provider_id: providerId,
+      model_id: modelId,
+      api,
+      thinking,
+      ...(serviceTier === undefined ? {} : { service_tier: serviceTier }),
+      ...(cachePolicy === undefined ? {} : { cache_policy: cachePolicy }),
+      ...(systemPromptProfile === undefined ? {} : { system_prompt_profile: systemPromptProfile }),
+    }));
+  }
+  const roles = output.map((entry) => entry.role).sort((left, right) => ROSTER_ROLE_ORDER.indexOf(left) - ROSTER_ROLE_ORDER.indexOf(right));
+  return sameStrings(roles, ROSTER_ROLE_ORDER) ? output : null;
+}
+
+function customIntentRequestSha256(request: CustomRosterIntentSetupRequest): Digest {
+  return canonicalSha256({
+    schema_version: request.schema_version,
+    request_id: request.request_id,
+    natural_language_request_sha256: canonicalSha256({ natural_language_request: request.natural_language_request }),
+    profile_id: request.profile_id,
+    role_assignment_intent: request.role_assignment_intent,
+    qualification_manifest_sha256: request.qualification_manifest === null ? null : safeValueDigest(request.qualification_manifest),
+  });
+}
+
 function safeValueDigest(value: unknown): Digest {
   try {
     return canonicalSha256(value);
@@ -436,6 +804,128 @@ function parseCustomRoster(value: unknown): { readonly ok: true; readonly roster
   } catch {
     return { ok: false };
   }
+}
+
+function buildCustomRosterFromIntent(input: {
+  readonly request: CustomRosterIntentSetupRequest;
+  readonly inventory: RosterInventory;
+  readonly scope: RosterScope;
+  readonly created_at: string;
+}): { readonly ok: true; readonly roster: Roster } | { readonly ok: false; readonly codes: readonly string[] } {
+  const inventory = normalizeRosterInventory(input.inventory);
+  const codes = new Set<string>();
+  if (input.scope === 'trusted-project' && !inventory.project_trusted) codes.add('ROSTER_PROJECT_UNTRUSTED');
+  const assignments: Assignment[] = [];
+  const qualificationState = input.request.qualification_manifest === null ? 'qualification-required' as const : 'w4-certified-ready' as const;
+  for (const intent of sortIntentByRole(input.request.role_assignment_intent)) {
+    const built = assignmentFromIntent({ intent, inventory, qualification_state: qualificationState });
+    for (const code of built.codes) codes.add(code);
+    if (built.assignment !== null) assignments.push(built.assignment);
+  }
+  if (assignments.length !== ROSTER_ROLE_ORDER.length || !sameStrings(assignments.map((assignment) => assignment.role), ROSTER_ROLE_ORDER)) {
+    codes.add('ROSTER_CUSTOM_DRAFT_STRUCTURE_INVALID');
+  }
+  if (codes.size > 0 && assignments.length !== ROSTER_ROLE_ORDER.length) return { ok: false, codes: [...codes].sort((left, right) => left.localeCompare(right)) };
+  try {
+    const roster = buildUserCustomRosterFromAssignments({
+      slug: input.request.request_id,
+      display_name: `User custom roster (${input.request.profile_id})`,
+      scope: input.scope,
+      profile_id: input.request.profile_id,
+      assignments,
+      created_at: input.created_at,
+    });
+    return { ok: true, roster };
+  } catch {
+    codes.add('ROSTER_CUSTOM_DRAFT_STRUCTURE_INVALID');
+    return { ok: false, codes: [...codes].sort((left, right) => left.localeCompare(right)) };
+  }
+}
+
+function assignmentFromIntent(input: {
+  readonly intent: CustomRosterRoleAssignmentIntent;
+  readonly inventory: RosterInventory;
+  readonly qualification_state: Assignment['qualification_state'];
+}): { readonly assignment: Assignment | null; readonly codes: readonly string[] } {
+  const codes = new Set<string>();
+  const provider = findInventoryProvider(input.inventory, input.intent.provider_id);
+  if (provider === null) return { assignment: null, codes: ['ROSTER_CUSTOM_MODEL_UNREGISTERED'] };
+  const model = findInventoryModel(provider, input.intent.model_id, input.intent.api);
+  if (model === null) return { assignment: null, codes: ['ROSTER_CUSTOM_MODEL_UNREGISTERED'] };
+  const routePolicy = findRoutePolicyForProviderApi(provider.provider_id, input.intent.api, ROUTE_POLICIES);
+  if (routePolicy === null) codes.add('ROSTER_CUSTOM_ROUTE_FORBIDDEN');
+  const serviceTier = input.intent.service_tier ?? preferredServiceTier(model);
+  const cachePolicy = input.intent.cache_policy ?? preferredCachePolicy(model);
+  const systemPromptProfile = input.intent.system_prompt_profile ?? preferredSystemPromptProfile(model);
+  if (!model.thinking_values.includes(input.intent.thinking)) codes.add('ROSTER_CUSTOM_THINKING_UNREGISTERED');
+  if (!model.service_tiers.some((tier) => tier === serviceTier)) codes.add('ROSTER_CUSTOM_ROUTE_FORBIDDEN');
+  if (!model.cache_policies.includes(cachePolicy)) codes.add('ROSTER_CUSTOM_ROUTE_FORBIDDEN');
+  if (!model.system_prompt_profiles.includes(systemPromptProfile)) codes.add('ROSTER_CUSTOM_ROUTE_FORBIDDEN');
+  if (routePolicy === null) return { assignment: null, codes: [...codes].sort((left, right) => left.localeCompare(right)) };
+  const withoutHash = {
+    role: input.intent.role,
+    provider_id: provider.provider_id,
+    model_id: model.model_id,
+    model: `${provider.provider_id}/${model.model_id}`,
+    api: model.api,
+    thinking: input.intent.thinking,
+    service_tier: serviceTier,
+    cache_policy: cachePolicy,
+    system_prompt_profile: systemPromptProfile,
+    context_window: model.context_window,
+    max_output_tokens: model.max_output_tokens,
+    input_modalities: model.input_modalities,
+    output_modalities: model.output_modalities,
+    reasoning_capability: model.reasoning_capability,
+    tool_capability: model.tool_capability,
+    route_policy_id: routePolicy.route_policy_id,
+    route_policy_revision: routePolicy.revision,
+    billing_class: routePolicy.billing_class,
+    billing_route_class: routePolicy.billing_route_class,
+    auth_class: authClassForRoute(provider),
+    auth_source: authSourceForRoute(provider),
+    qualification_state: input.qualification_state,
+  } satisfies Omit<Assignment, 'assignment_sha256'>;
+  return {
+    assignment: { ...withoutHash, assignment_sha256: canonicalSha256(withoutHash) },
+    codes: [...codes].sort((left, right) => left.localeCompare(right)),
+  };
+}
+
+function preferredServiceTier(model: InventoryModel): ServiceTier {
+  return model.service_tiers.find((tier) => tier === null) ?? model.service_tiers[0] ?? null;
+}
+
+function preferredCachePolicy(model: InventoryModel): CachePolicy {
+  return model.cache_policies.includes('provider-default') ? 'provider-default' : model.cache_policies[0] ?? 'provider-default';
+}
+
+function preferredSystemPromptProfile(model: InventoryModel): SystemPromptProfile {
+  return model.system_prompt_profiles.includes('pi-default.v1') ? 'pi-default.v1' : model.system_prompt_profiles[0] ?? 'pi-default.v1';
+}
+
+function sortIntentByRole(intents: readonly CustomRosterRoleAssignmentIntent[]): readonly CustomRosterRoleAssignmentIntent[] {
+  return [...intents].sort((left, right) => ROSTER_ROLE_ORDER.indexOf(left.role) - ROSTER_ROLE_ORDER.indexOf(right.role));
+}
+
+function isApiId(value: unknown): value is ApiId {
+  return value === 'openai-codex-responses' || value === 'anthropic-messages' || value === 'openai-completions';
+}
+
+function isThinkingValue(value: unknown): value is ThinkingValue {
+  return value === 'high' || value === 'xhigh';
+}
+
+function isServiceTier(value: unknown): value is ServiceTier {
+  return value === null || value === 'priority';
+}
+
+function isCachePolicy(value: unknown): value is CachePolicy {
+  return value === 'provider-default' || value === 'none' || value === 'short' || value === 'long';
+}
+
+function isSystemPromptProfile(value: unknown): value is SystemPromptProfile {
+  return value === 'pi-default.v1' || value === 'anthropic-autopilot-sanitized.v1';
 }
 
 function validateCustomRosterStructure(input: {
