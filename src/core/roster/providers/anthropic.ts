@@ -7,6 +7,7 @@ import {
   PHASE37_PI_VERSION,
   ROSTER_ROLE_ORDER,
   canonicalSha256,
+  findRoutePolicy,
   type ApiId,
   type AuthClass,
   type AuthSource,
@@ -57,6 +58,12 @@ export type AnthropicDiagnosticSeverity = 'error' | 'fatal';
 
 export type AnthropicProviderPackDiagnosticCode =
   | 'ANTHROPIC_CACHE_BEHAVIOR_MISMATCH'
+  | 'ANTHROPIC_EVIDENCE_BINDING_MISMATCH'
+  | 'ANTHROPIC_EVIDENCE_DISTINCT_REQUIRED'
+  | 'ANTHROPIC_EVIDENCE_EXPIRED'
+  | 'ANTHROPIC_EVIDENCE_PROVENANCE_UNTRUSTED'
+  | 'ANTHROPIC_EVIDENCE_REF_FORBIDDEN'
+  | 'ANTHROPIC_EVIDENCE_SELF_HASH_FORBIDDEN'
   | 'ANTHROPIC_FALLBACK_FORBIDDEN'
   | 'ANTHROPIC_INPUT_EMPTY'
   | 'ANTHROPIC_INPUT_TOO_LARGE'
@@ -72,6 +79,7 @@ export type AnthropicProviderPackDiagnosticCode =
   | 'ANTHROPIC_ROUTE_BILLING_CONSENT_REQUIRED'
   | 'ANTHROPIC_ROUTE_METERED_EXTRA_USAGE_FORBIDDEN'
   | 'ANTHROPIC_ROUTE_NON_METERED_ENTITLEMENT_REQUIRED'
+  | 'ANTHROPIC_ROUTE_POLICY_DRIFT'
   | 'ANTHROPIC_ROUTE_PROVIDER_FORBIDDEN'
   | 'ANTHROPIC_TRANSFORM_DRIFT';
 
@@ -88,6 +96,36 @@ const ANTHROPIC_DIAGNOSTIC_TEXT = deepFreezeAnthropicAuthority({
     severity: 'error',
     message: 'Anthropic qualification requires the observed cache behavior to match the frozen provider-default request.',
     remediation: 'Capture explicit cache request and response metadata for the same provider-default policy; do not substitute a fallback cache policy.',
+  },
+  ANTHROPIC_EVIDENCE_BINDING_MISMATCH: {
+    severity: 'fatal',
+    message: 'Anthropic live evidence must bind to the frozen package, Pi version, freeze, subject id, and subject hash.',
+    remediation: 'Attach W3-authenticated evidence refs whose package/Pi/freeze/subject fields exactly match the frozen Anthropic authority.',
+  },
+  ANTHROPIC_EVIDENCE_DISTINCT_REQUIRED: {
+    severity: 'fatal',
+    message: 'Anthropic live route, billing, prompt, request, response, cache, and role execution evidence refs must be distinct.',
+    remediation: 'Provide separate W3-authenticated refs; do not reuse one caller-supplied digest or URI across evidence classes.',
+  },
+  ANTHROPIC_EVIDENCE_EXPIRED: {
+    severity: 'fatal',
+    message: 'Anthropic live evidence must have valid issued-at and expires-at bounds covering the qualification issue time.',
+    remediation: 'Recollect fresh W3-authenticated evidence with explicit time and expiry binding before any compatibility claim.',
+  },
+  ANTHROPIC_EVIDENCE_PROVENANCE_UNTRUSTED: {
+    severity: 'fatal',
+    message: 'Anthropic live evidence must carry trusted W3 receipt and execution identity provenance.',
+    remediation: 'Use only authenticated W3 receipt/execution identity refs from the trusted provenance class; caller booleans are insufficient.',
+  },
+  ANTHROPIC_EVIDENCE_REF_FORBIDDEN: {
+    severity: 'fatal',
+    message: 'Anthropic live evidence rejects fixture, synthetic, data, file, temp, pending, and other non-live caller refs.',
+    remediation: 'Replace offline/self-referential refs with trusted W3-authenticated live evidence refs.',
+  },
+  ANTHROPIC_EVIDENCE_SELF_HASH_FORBIDDEN: {
+    severity: 'fatal',
+    message: 'Anthropic live evidence rejects caller self-hashed refs and hashes that merely restate the bound subject.',
+    remediation: 'Use W3-authenticated receipt content hashes rather than caller-created proof-shape hashes.',
   },
   ANTHROPIC_FALLBACK_FORBIDDEN: {
     severity: 'fatal',
@@ -106,8 +144,8 @@ const ANTHROPIC_DIAGNOSTIC_TEXT = deepFreezeAnthropicAuthority({
   },
   ANTHROPIC_LIVE_PROVIDER_PROOF_REQUIRED: {
     severity: 'error',
-    message: 'Anthropic qualification requires explicit live route and billing proof references; offline shape checks are not certification.',
-    remediation: 'Attach route and billing proof references collected with user consent and non-metered entitlement before any readiness claim.',
+    message: 'Anthropic qualification requires explicit W3-authenticated live route, billing, prompt, request, response, cache, and execution proof references; offline shape checks are not certification.',
+    remediation: 'Attach trusted W3 receipt/execution identity refs with package, Pi, subject, time, and expiry binding before any compatibility claim.',
   },
   ANTHROPIC_MODEL_MISMATCH: {
     severity: 'fatal',
@@ -146,28 +184,33 @@ const ANTHROPIC_DIAGNOSTIC_TEXT = deepFreezeAnthropicAuthority({
   },
   ANTHROPIC_ROUTE_AUTH_FORBIDDEN: {
     severity: 'fatal',
-    message: 'Anthropic qualification requires the package-owned OAuth plan route and forbids arbitrary API keys.',
-    remediation: 'Use only the Pi-owned Anthropic OAuth channel with stored or runtime non-secret auth facts.',
+    message: 'Anthropic qualification must match the frozen central anthropic-sanitized-v1@1 API-key auth authority and forbids OAuth/subscription substitution under that identity.',
+    remediation: 'Use the exact W0 frozen Anthropic route auth class/source facts; do not replace them with OAuth, gateways, or arbitrary-key fallback facts.',
   },
   ANTHROPIC_ROUTE_BILLING_CONSENT_REQUIRED: {
     severity: 'error',
-    message: 'Anthropic qualification requires explicit user billing-route consent.',
-    remediation: 'Record secret-free user consent evidence for the Anthropic OAuth plan route before qualification.',
+    message: 'Anthropic qualification requires explicit billing-route consent evidence; caller booleans are not proof.',
+    remediation: 'Attach a distinct trusted W3 billing proof ref before any compatibility claim.',
   },
   ANTHROPIC_ROUTE_METERED_EXTRA_USAGE_FORBIDDEN: {
     severity: 'fatal',
     message: 'Anthropic qualification forbids metered extra usage and metered gateway fallback.',
-    remediation: 'Use only non-metered plan entitlement evidence; do not qualify metered Anthropic API or gateway usage.',
+    remediation: 'Keep the frozen central route blocked unless trusted W3 billing evidence proves no extra metered gateway use.',
   },
   ANTHROPIC_ROUTE_NON_METERED_ENTITLEMENT_REQUIRED: {
     severity: 'error',
-    message: 'Anthropic qualification requires a non-metered Anthropic plan entitlement.',
-    remediation: 'Attach secret-free proof that the route is covered by a non-metered plan entitlement.',
+    message: 'Anthropic qualification requires explicit billing-state entitlement evidence; caller booleans are not proof.',
+    remediation: 'Attach distinct trusted W3 billing-state evidence before any compatibility claim.',
+  },
+  ANTHROPIC_ROUTE_POLICY_DRIFT: {
+    severity: 'fatal',
+    message: 'Anthropic route id, revision, state, auth, billing, or hash drifted from frozen central anthropic-sanitized-v1@1 authority.',
+    remediation: 'Bind every Anthropic route fact to the W0 central anthropic-sanitized-v1@1 route policy exactly.',
   },
   ANTHROPIC_ROUTE_PROVIDER_FORBIDDEN: {
     severity: 'fatal',
     message: 'Anthropic qualification forbids OpenRouter, arbitrary-key, metered-frontier, and provider-label-inferred routes.',
-    remediation: 'Use only direct Anthropic provider facts from the package-owned OAuth plan route policy.',
+    remediation: 'Use only direct Anthropic provider facts bound to the frozen central route policy.',
   },
   ANTHROPIC_TRANSFORM_DRIFT: {
     severity: 'fatal',
@@ -217,30 +260,15 @@ function safeJsonString(value: string): string {
   });
 }
 
-const ANTHROPIC_OAUTH_PLAN_ROUTE_POLICY_PREIMAGE = {
-  schema_version: 'autopilot.route_policy.v1',
-  route_policy_id: ANTHROPIC_ROUTE_POLICY_ID,
-  revision: ANTHROPIC_ROUTE_POLICY_REVISION,
-  provider_id: ANTHROPIC_PROVIDER_ID,
-  allowed_auth_classes: ['oauth'],
-  allowed_auth_sources: ['runtime', 'stored'],
-  billing_class: 'plan-backed-subscription',
-  billing_route_class: 'subscription-oauth',
-  allowed_apis: ['anthropic-messages'],
-  allowed_service_tiers: [null],
-  allowed_cache_policies: ['provider-default'],
-  allowed_system_prompt_profiles: [ANTHROPIC_SYSTEM_PROMPT_PROFILE],
-  forbidden_gateways: ['arbitrary-api-key', 'metered-frontier', 'openrouter'],
-  requires_live_billing_proof: true,
-  policy_state: 'unqualified-seed',
-  qualification_state: 'unqualified-non-certifying-seed',
-  non_certifying_seed: true,
-} as const satisfies Omit<RoutePolicy, 'route_policy_sha256'>;
+function getFrozenCentralAnthropicRoutePolicy(): RoutePolicy {
+  const policy = findRoutePolicy(ANTHROPIC_ROUTE_POLICY_ID, ANTHROPIC_ROUTE_POLICY_REVISION);
+  if (policy === null) {
+    throw new Error('missing frozen central anthropic-sanitized-v1@1 route policy');
+  }
+  return policy;
+}
 
-export const ANTHROPIC_OAUTH_PLAN_ROUTE_POLICY: RoutePolicy = deepFreezeAnthropicAuthority({
-  ...ANTHROPIC_OAUTH_PLAN_ROUTE_POLICY_PREIMAGE,
-  route_policy_sha256: canonicalSha256(ANTHROPIC_OAUTH_PLAN_ROUTE_POLICY_PREIMAGE),
-});
+export const ANTHROPIC_FROZEN_ROUTE_POLICY: RoutePolicy = getFrozenCentralAnthropicRoutePolicy();
 
 export interface AnthropicRoleSeed {
   readonly schema_version: 'autopilot.anthropic_role_seed.v1';
@@ -296,11 +324,11 @@ const OPUS_ROLE_SEED_BASE = {
   tool_capability: 'tool-use-supported',
   route_policy_id: ANTHROPIC_ROUTE_POLICY_ID,
   route_policy_revision: ANTHROPIC_ROUTE_POLICY_REVISION,
-  billing_class: ANTHROPIC_OAUTH_PLAN_ROUTE_POLICY.billing_class,
-  billing_route_class: ANTHROPIC_OAUTH_PLAN_ROUTE_POLICY.billing_route_class,
-  auth_class: 'oauth',
+  billing_class: ANTHROPIC_FROZEN_ROUTE_POLICY.billing_class,
+  billing_route_class: ANTHROPIC_FROZEN_ROUTE_POLICY.billing_route_class,
+  auth_class: 'api-key',
   auth_source: 'stored',
-  qualification_state: 'unqualified-non-certifying-seed',
+  qualification_state: 'blocked-live-certification',
   non_certifying_seed: true,
 } as const;
 
@@ -492,16 +520,44 @@ export function validateAnthropicSystemPromptSemanticInvariants(
   return dedupeAnthropicDiagnostics(diagnostics);
 }
 
+export type AnthropicQualificationEvidenceKind =
+  | 'route-proof'
+  | 'billing-proof'
+  | 'prompt-proof'
+  | 'request-proof'
+  | 'response-proof'
+  | 'cache-proof'
+  | 'execution-proof';
+
+export const ANTHROPIC_TRUSTED_LIVE_PROVENANCE_CLASS = 'w3-authenticated-receipt-execution.v1' as const;
+export const ANTHROPIC_TRUSTED_HASH_PROVENANCE = 'w3-receipt-content-sha256.v1' as const;
+
 export interface AnthropicQualificationEvidenceRef {
   readonly evidence_id: string;
-  readonly kind: 'route-proof' | 'billing-proof' | 'prompt-proof' | 'cache-proof' | 'execution-proof';
+  readonly kind: AnthropicQualificationEvidenceKind;
   readonly uri: string;
   readonly sha256: string;
   readonly byte_count: number;
   readonly secret_free: true;
+  readonly provenance_class: string;
+  readonly hash_provenance: string;
+  readonly w3_receipt_identity_ref: string;
+  readonly w3_execution_identity_ref: string;
+  readonly freeze_id: string;
+  readonly package_version: string;
+  readonly pi_version: string;
+  readonly subject_id: string;
+  readonly subject_sha256: string;
+  readonly issued_at: string;
+  readonly expires_at: string;
 }
 
 export interface AnthropicRouteEvidence {
+  readonly route_policy_id: string;
+  readonly route_policy_revision: number;
+  readonly route_policy_sha256: string;
+  readonly policy_state: string;
+  readonly qualification_state: string;
   readonly provider_id: string;
   readonly api: string;
   readonly auth_class: string;
@@ -525,10 +581,15 @@ export interface AnthropicRouteEvidence {
 export interface AnthropicPromptEvidence {
   readonly transform_id: string;
   readonly transform_header_sha256: string;
+  readonly raw_prompt_byte_length: number;
   readonly raw_prompt_sha256: string;
+  readonly transformed_prompt_byte_length: number;
   readonly transformed_prompt_sha256: string;
   readonly request_prompt_sha256: string;
   readonly response_prompt_sha256: string;
+  readonly prompt_transform_evidence: AnthropicQualificationEvidenceRef | null;
+  readonly request_evidence: AnthropicQualificationEvidenceRef | null;
+  readonly response_evidence: AnthropicQualificationEvidenceRef | null;
 }
 
 export interface AnthropicCacheEvidence {
@@ -536,6 +597,7 @@ export interface AnthropicCacheEvidence {
   readonly observed_cache_policy: string;
   readonly provider_cache_behavior: string;
   readonly cache_fallback_used: boolean;
+  readonly cache_evidence_ref: AnthropicQualificationEvidenceRef | null;
 }
 
 export interface AnthropicRoleExecutionEvidence {
@@ -552,6 +614,7 @@ export interface AnthropicRoleExecutionEvidence {
   readonly request_prompt_sha256: string;
   readonly response_prompt_sha256: string;
   readonly fallback_used: boolean;
+  readonly execution_evidence: AnthropicQualificationEvidenceRef | null;
 }
 
 export interface AnthropicQualificationBuilderInput {
@@ -573,6 +636,7 @@ export interface AnthropicQualificationEvidenceSummary {
 export interface AnthropicSystemPromptTransformSummary {
   readonly transform_id: typeof ANTHROPIC_SYSTEM_PROMPT_PROFILE;
   readonly transform_header_sha256: Digest;
+  readonly transform_header_byte_length: number;
   readonly max_input_bytes: number;
   readonly semantic_invariants: typeof ANTHROPIC_SANITIZER_SEMANTIC_INVARIANTS;
   readonly proves_billing_or_readiness: false;
@@ -608,31 +672,138 @@ export interface AnthropicQualificationArtifact {
 }
 
 export const ANTHROPIC_REQUIRED_LIVE_EVIDENCE = deepFreezeAnthropicAuthority([
-  'direct Anthropic provider route through Pi OAuth, not OpenRouter or arbitrary keys',
-  'explicit user billing-route consent',
-  'non-metered Anthropic plan entitlement with no metered extra usage',
-  'request prompt SHA-256 and response prompt SHA-256 for the exact transformed prompt',
-  'provider-default cache request and observed cache behavior',
-  'actual executed model for every frozen role',
+  'frozen central anthropic-sanitized-v1@1 route id, revision, state, auth, billing, and hash binding',
+  'trusted W3-authenticated live route evidence ref, not fixture/synthetic/data/file/temp/self-hashed refs',
+  'distinct trusted W3 billing evidence refs with no metered extra usage or gateway fallback',
+  'distinct prompt transform, request, and response evidence refs for the exact transformed prompt digest',
+  'provider-default cache request and observed cache behavior with trusted W3 evidence',
+  'actual executed model for every frozen role with W3 receipt/execution identity refs',
   'no provider, route, model, prompt, or cache fallback',
 ] as const);
 
-function isSecretFreeEvidenceRef(
-  ref: AnthropicQualificationEvidenceRef | null,
-  kind: AnthropicQualificationEvidenceRef['kind'],
-): ref is AnthropicQualificationEvidenceRef {
-  return ref !== null &&
-    ref.kind === kind &&
-    ref.secret_free === true &&
-    isDigest(ref.sha256) &&
-    Number.isSafeInteger(ref.byte_count) &&
-    ref.byte_count > 0 &&
-    ref.evidence_id.length > 0 &&
-    ref.uri.length > 0;
+interface AnthropicEvidenceRequirement {
+  readonly kind: AnthropicQualificationEvidenceKind;
+  readonly subject_id: string;
+  readonly subject_sha256: string;
 }
 
-function validateAnthropicRouteEvidence(route: AnthropicRouteEvidence): readonly AnthropicProviderPackDiagnosticCode[] {
+const ANTHROPIC_FORBIDDEN_EVIDENCE_URI_PREFIXES = [
+  'fixture://',
+  'synthetic://',
+  'data:',
+  'file://',
+  'temp://',
+  'tmp://',
+  'pending://',
+  'self-hash://',
+  'caller-self-hash://',
+  'self://',
+] as const;
+
+function frozenRouteSubjectId(): string {
+  return `${ANTHROPIC_FROZEN_ROUTE_POLICY.route_policy_id}@${ANTHROPIC_FROZEN_ROUTE_POLICY.revision}`;
+}
+
+function derivedSubjectId(suffix: string): string {
+  return `${frozenRouteSubjectId()}/${suffix}`;
+}
+
+function evidenceTimeMs(value: string): number | null {
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u.test(value)) return null;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function isForbiddenEvidenceUri(uri: string): boolean {
+  const normalized = uri.toLowerCase();
+  return ANTHROPIC_FORBIDDEN_EVIDENCE_URI_PREFIXES.some((prefix) => normalized.startsWith(prefix)) || normalized.startsWith('/tmp/') || normalized.includes('/tmp/');
+}
+
+function isTrustedW3IdentityRef(value: string, kind: 'receipt' | 'execution'): boolean {
+  return value.startsWith(`w3:${kind}:`) && value.length > `w3:${kind}:`.length && !isForbiddenEvidenceUri(value);
+}
+
+function isSelfHashedEvidenceRef(ref: AnthropicQualificationEvidenceRef, requirement: AnthropicEvidenceRequirement): boolean {
+  const probe = `${ref.evidence_id}\n${ref.uri}\n${ref.provenance_class}\n${ref.hash_provenance}`.toLowerCase();
+  return probe.includes('self-hash') || probe.includes('self_hash') || probe.includes('caller-self') || ref.sha256 === requirement.subject_sha256;
+}
+
+function validateAnthropicEvidenceRef(
+  ref: AnthropicQualificationEvidenceRef | null,
+  requirement: AnthropicEvidenceRequirement,
+  qualificationIssuedAt: string,
+): readonly AnthropicProviderPackDiagnosticCode[] {
   const diagnostics: AnthropicProviderPackDiagnosticCode[] = [];
+  if (ref === null) {
+    diagnostics.push('ANTHROPIC_LIVE_PROVIDER_PROOF_REQUIRED');
+    return diagnostics;
+  }
+  if (
+    ref.kind !== requirement.kind ||
+    ref.secret_free !== true ||
+    !isDigest(ref.sha256) ||
+    !Number.isSafeInteger(ref.byte_count) ||
+    ref.byte_count <= 0 ||
+    ref.evidence_id.length === 0 ||
+    ref.uri.length === 0
+  ) {
+    diagnostics.push('ANTHROPIC_LIVE_PROVIDER_PROOF_REQUIRED');
+  }
+  if (isForbiddenEvidenceUri(ref.uri)) {
+    diagnostics.push('ANTHROPIC_EVIDENCE_REF_FORBIDDEN', 'ANTHROPIC_LIVE_PROVIDER_PROOF_REQUIRED');
+  }
+  if (isSelfHashedEvidenceRef(ref, requirement)) {
+    diagnostics.push('ANTHROPIC_EVIDENCE_SELF_HASH_FORBIDDEN', 'ANTHROPIC_LIVE_PROVIDER_PROOF_REQUIRED');
+  }
+  if (
+    ref.provenance_class !== ANTHROPIC_TRUSTED_LIVE_PROVENANCE_CLASS ||
+    ref.hash_provenance !== ANTHROPIC_TRUSTED_HASH_PROVENANCE ||
+    !isTrustedW3IdentityRef(ref.w3_receipt_identity_ref, 'receipt') ||
+    !isTrustedW3IdentityRef(ref.w3_execution_identity_ref, 'execution')
+  ) {
+    diagnostics.push('ANTHROPIC_EVIDENCE_PROVENANCE_UNTRUSTED', 'ANTHROPIC_LIVE_PROVIDER_PROOF_REQUIRED');
+  }
+  if (
+    ref.freeze_id !== PHASE37_FREEZE_ID ||
+    ref.package_version !== PHASE37_PACKAGE_VERSION ||
+    ref.pi_version !== PHASE37_PI_VERSION ||
+    ref.subject_id !== requirement.subject_id ||
+    ref.subject_sha256 !== requirement.subject_sha256 ||
+    !isDigest(ref.subject_sha256)
+  ) {
+    diagnostics.push('ANTHROPIC_EVIDENCE_BINDING_MISMATCH', 'ANTHROPIC_LIVE_PROVIDER_PROOF_REQUIRED');
+  }
+  const evidenceIssuedAt = evidenceTimeMs(ref.issued_at);
+  const evidenceExpiresAt = evidenceTimeMs(ref.expires_at);
+  const qualificationTime = evidenceTimeMs(qualificationIssuedAt);
+  if (
+    evidenceIssuedAt === null ||
+    evidenceExpiresAt === null ||
+    qualificationTime === null ||
+    evidenceExpiresAt <= evidenceIssuedAt ||
+    qualificationTime < evidenceIssuedAt ||
+    qualificationTime >= evidenceExpiresAt
+  ) {
+    diagnostics.push('ANTHROPIC_EVIDENCE_EXPIRED', 'ANTHROPIC_LIVE_PROVIDER_PROOF_REQUIRED');
+  }
+  return diagnostics;
+}
+
+function validateAnthropicRouteEvidence(route: AnthropicRouteEvidence, qualificationIssuedAt: string): readonly AnthropicProviderPackDiagnosticCode[] {
+  const diagnostics: AnthropicProviderPackDiagnosticCode[] = [];
+  if (
+    route.route_policy_id !== ANTHROPIC_FROZEN_ROUTE_POLICY.route_policy_id ||
+    route.route_policy_revision !== ANTHROPIC_FROZEN_ROUTE_POLICY.revision ||
+    route.route_policy_sha256 !== ANTHROPIC_FROZEN_ROUTE_POLICY.route_policy_sha256 ||
+    route.policy_state !== ANTHROPIC_FROZEN_ROUTE_POLICY.policy_state ||
+    route.qualification_state !== ANTHROPIC_FROZEN_ROUTE_POLICY.qualification_state ||
+    route.auth_class !== ANTHROPIC_FROZEN_ROUTE_POLICY.allowed_auth_classes[0] ||
+    !ANTHROPIC_FROZEN_ROUTE_POLICY.allowed_auth_sources.includes(route.auth_source as AuthSource) ||
+    route.billing_class !== ANTHROPIC_FROZEN_ROUTE_POLICY.billing_class ||
+    route.billing_route_class !== ANTHROPIC_FROZEN_ROUTE_POLICY.billing_route_class
+  ) {
+    diagnostics.push('ANTHROPIC_ROUTE_POLICY_DRIFT');
+  }
   if (
     route.provider_id !== ANTHROPIC_PROVIDER_ID ||
     route.api !== 'anthropic-messages' ||
@@ -645,13 +816,13 @@ function validateAnthropicRouteEvidence(route: AnthropicRouteEvidence): readonly
     diagnostics.push('ANTHROPIC_ROUTE_PROVIDER_FORBIDDEN');
   }
   if (
-    route.auth_class !== 'oauth' ||
+    route.auth_class !== 'api-key' ||
     (route.auth_source !== 'stored' && route.auth_source !== 'runtime') ||
     route.arbitrary_api_key_used
   ) {
     diagnostics.push('ANTHROPIC_ROUTE_AUTH_FORBIDDEN');
   }
-  if (route.billing_class !== 'plan-backed-subscription' || route.billing_route_class !== 'subscription-oauth') {
+  if (route.billing_class !== 'metered-third-party-blocked' || route.billing_route_class !== 'third-party-metered-blocked') {
     diagnostics.push('ANTHROPIC_ROUTE_METERED_EXTRA_USAGE_FORBIDDEN');
   }
   if (!route.user_billing_consent) {
@@ -663,19 +834,30 @@ function validateAnthropicRouteEvidence(route: AnthropicRouteEvidence): readonly
   if (route.metered_extra_usage_observed) {
     diagnostics.push('ANTHROPIC_ROUTE_METERED_EXTRA_USAGE_FORBIDDEN');
   }
-  if (
-    !route.live_route_verified ||
-    !route.live_billing_verified ||
-    !isSecretFreeEvidenceRef(route.live_route_evidence, 'route-proof') ||
-    !isSecretFreeEvidenceRef(route.billing_consent_evidence, 'billing-proof') ||
-    !isSecretFreeEvidenceRef(route.non_metered_entitlement_evidence, 'billing-proof')
-  ) {
+  if (!route.live_route_verified || !route.live_billing_verified) {
     diagnostics.push('ANTHROPIC_LIVE_PROVIDER_PROOF_REQUIRED');
   }
+  diagnostics.push(
+    ...validateAnthropicEvidenceRef(route.live_route_evidence, {
+      kind: 'route-proof',
+      subject_id: frozenRouteSubjectId(),
+      subject_sha256: ANTHROPIC_FROZEN_ROUTE_POLICY.route_policy_sha256,
+    }, qualificationIssuedAt),
+    ...validateAnthropicEvidenceRef(route.billing_consent_evidence, {
+      kind: 'billing-proof',
+      subject_id: derivedSubjectId('billing-consent'),
+      subject_sha256: ANTHROPIC_FROZEN_ROUTE_POLICY.route_policy_sha256,
+    }, qualificationIssuedAt),
+    ...validateAnthropicEvidenceRef(route.non_metered_entitlement_evidence, {
+      kind: 'billing-proof',
+      subject_id: derivedSubjectId('billing-state'),
+      subject_sha256: ANTHROPIC_FROZEN_ROUTE_POLICY.route_policy_sha256,
+    }, qualificationIssuedAt),
+  );
   return diagnostics;
 }
 
-function validateAnthropicPromptEvidence(prompt: AnthropicPromptEvidence): readonly AnthropicProviderPackDiagnosticCode[] {
+function validateAnthropicPromptEvidence(prompt: AnthropicPromptEvidence, qualificationIssuedAt: string): readonly AnthropicProviderPackDiagnosticCode[] {
   const diagnostics: AnthropicProviderPackDiagnosticCode[] = [];
   const promptDigests = [
     prompt.raw_prompt_sha256,
@@ -683,7 +865,13 @@ function validateAnthropicPromptEvidence(prompt: AnthropicPromptEvidence): reado
     prompt.request_prompt_sha256,
     prompt.response_prompt_sha256,
   ] as const;
-  if (!promptDigests.every(isDigest)) {
+  if (
+    !promptDigests.every(isDigest) ||
+    !Number.isSafeInteger(prompt.raw_prompt_byte_length) ||
+    prompt.raw_prompt_byte_length <= 0 ||
+    !Number.isSafeInteger(prompt.transformed_prompt_byte_length) ||
+    prompt.transformed_prompt_byte_length <= 0
+  ) {
     diagnostics.push('ANTHROPIC_PROMPT_HASH_REQUIRED');
   }
   if (prompt.transform_id !== ANTHROPIC_SYSTEM_PROMPT_PROFILE || prompt.transform_header_sha256 !== ANTHROPIC_SANITIZER_HEADER_SHA256) {
@@ -695,10 +883,27 @@ function validateAnthropicPromptEvidence(prompt: AnthropicPromptEvidence): reado
   ) {
     diagnostics.push('ANTHROPIC_PROMPT_HASH_MISMATCH');
   }
+  diagnostics.push(
+    ...validateAnthropicEvidenceRef(prompt.prompt_transform_evidence, {
+      kind: 'prompt-proof',
+      subject_id: `${ANTHROPIC_SYSTEM_PROMPT_PROFILE}/transform`,
+      subject_sha256: prompt.transformed_prompt_sha256,
+    }, qualificationIssuedAt),
+    ...validateAnthropicEvidenceRef(prompt.request_evidence, {
+      kind: 'request-proof',
+      subject_id: `${ANTHROPIC_SYSTEM_PROMPT_PROFILE}/request`,
+      subject_sha256: prompt.request_prompt_sha256,
+    }, qualificationIssuedAt),
+    ...validateAnthropicEvidenceRef(prompt.response_evidence, {
+      kind: 'response-proof',
+      subject_id: `${ANTHROPIC_SYSTEM_PROMPT_PROFILE}/response`,
+      subject_sha256: prompt.response_prompt_sha256,
+    }, qualificationIssuedAt),
+  );
   return diagnostics;
 }
 
-function validateAnthropicCacheEvidence(cache: AnthropicCacheEvidence): readonly AnthropicProviderPackDiagnosticCode[] {
+function validateAnthropicCacheEvidence(cache: AnthropicCacheEvidence, qualificationIssuedAt: string): readonly AnthropicProviderPackDiagnosticCode[] {
   const diagnostics: AnthropicProviderPackDiagnosticCode[] = [];
   if (
     cache.requested_cache_policy !== 'provider-default' ||
@@ -708,6 +913,11 @@ function validateAnthropicCacheEvidence(cache: AnthropicCacheEvidence): readonly
   ) {
     diagnostics.push('ANTHROPIC_CACHE_BEHAVIOR_MISMATCH');
   }
+  diagnostics.push(...validateAnthropicEvidenceRef(cache.cache_evidence_ref, {
+    kind: 'cache-proof',
+    subject_id: derivedSubjectId('cache'),
+    subject_sha256: ANTHROPIC_FROZEN_ROUTE_POLICY.route_policy_sha256,
+  }, qualificationIssuedAt));
   return diagnostics;
 }
 
@@ -722,6 +932,7 @@ function roleSeedForRole(role: RosterRole): AnthropicRoleSeed {
 function validateAnthropicRoleExecutionEvidence(
   roleEvidence: readonly AnthropicRoleExecutionEvidence[],
   promptEvidence: AnthropicPromptEvidence,
+  qualificationIssuedAt: string,
 ): readonly AnthropicProviderPackDiagnosticCode[] {
   const diagnostics: AnthropicProviderPackDiagnosticCode[] = [];
   const byRole = new Map<string, AnthropicRoleExecutionEvidence[]>();
@@ -770,6 +981,11 @@ function validateAnthropicRoleExecutionEvidence(
     ) {
       diagnostics.push('ANTHROPIC_PROMPT_HASH_MISMATCH');
     }
+    diagnostics.push(...validateAnthropicEvidenceRef(record.execution_evidence, {
+      kind: 'execution-proof',
+      subject_id: derivedSubjectId(`execution/${role}`),
+      subject_sha256: seed.role_seed_sha256,
+    }, qualificationIssuedAt));
   }
   for (const role of byRole.keys()) {
     if (!(ROSTER_ROLE_ORDER as readonly string[]).includes(role)) {
@@ -777,6 +993,30 @@ function validateAnthropicRoleExecutionEvidence(
     }
   }
   return diagnostics;
+}
+
+function collectAnthropicEvidenceRefs(input: AnthropicQualificationBuilderInput): readonly AnthropicQualificationEvidenceRef[] {
+  return [
+    input.route_evidence.live_route_evidence,
+    input.route_evidence.billing_consent_evidence,
+    input.route_evidence.non_metered_entitlement_evidence,
+    input.prompt_evidence.prompt_transform_evidence,
+    input.prompt_evidence.request_evidence,
+    input.prompt_evidence.response_evidence,
+    input.cache_evidence.cache_evidence_ref,
+    ...input.role_execution_evidence.map((role) => role.execution_evidence),
+  ].filter((ref): ref is AnthropicQualificationEvidenceRef => ref !== null);
+}
+
+function validateAnthropicEvidenceDistinctness(input: AnthropicQualificationBuilderInput): readonly AnthropicProviderPackDiagnosticCode[] {
+  const refs = collectAnthropicEvidenceRefs(input);
+  const uniqueEvidenceIds = new Set(refs.map((ref) => ref.evidence_id));
+  const uniqueUris = new Set(refs.map((ref) => ref.uri));
+  const uniqueContentDigests = new Set(refs.map((ref) => ref.sha256));
+  if (uniqueEvidenceIds.size !== refs.length || uniqueUris.size !== refs.length || uniqueContentDigests.size !== refs.length) {
+    return ['ANTHROPIC_EVIDENCE_DISTINCT_REQUIRED', 'ANTHROPIC_LIVE_PROVIDER_PROOF_REQUIRED'];
+  }
+  return [];
 }
 
 function summarizeQualificationInput(input: AnthropicQualificationBuilderInput): AnthropicQualificationEvidenceSummary {
@@ -790,10 +1030,11 @@ function summarizeQualificationInput(input: AnthropicQualificationBuilderInput):
 
 export function buildAnthropicQualificationArtifact(input: AnthropicQualificationBuilderInput): AnthropicQualificationArtifact {
   const diagnosticCodes: AnthropicProviderPackDiagnosticCode[] = [
-    ...validateAnthropicRouteEvidence(input.route_evidence),
-    ...validateAnthropicPromptEvidence(input.prompt_evidence),
-    ...validateAnthropicCacheEvidence(input.cache_evidence),
-    ...validateAnthropicRoleExecutionEvidence(input.role_execution_evidence, input.prompt_evidence),
+    ...validateAnthropicRouteEvidence(input.route_evidence, input.issued_at),
+    ...validateAnthropicPromptEvidence(input.prompt_evidence, input.issued_at),
+    ...validateAnthropicCacheEvidence(input.cache_evidence, input.issued_at),
+    ...validateAnthropicRoleExecutionEvidence(input.role_execution_evidence, input.prompt_evidence, input.issued_at),
+    ...validateAnthropicEvidenceDistinctness(input),
   ];
   const diagnostics = dedupeAnthropicDiagnostics(diagnosticCodes);
   const preimage = {
@@ -806,12 +1047,13 @@ export function buildAnthropicQualificationArtifact(input: AnthropicQualificatio
     provider_pack_id: ANTHROPIC_PROVIDER_PACK_ID,
     provider_pack_revision: ANTHROPIC_PROVIDER_PACK_REVISION,
     provider_id: ANTHROPIC_PROVIDER_ID,
-    route_policy: ANTHROPIC_OAUTH_PLAN_ROUTE_POLICY,
+    route_policy: ANTHROPIC_FROZEN_ROUTE_POLICY,
     role_seed_set_sha256: ANTHROPIC_ROLE_SEED_SET_SHA256,
     role_seeds: ANTHROPIC_ROLE_SEEDS,
     system_prompt_transform: {
       transform_id: ANTHROPIC_SYSTEM_PROMPT_PROFILE,
       transform_header_sha256: ANTHROPIC_SANITIZER_HEADER_SHA256,
+      transform_header_byte_length: utf8ByteLength(ANTHROPIC_SANITIZER_HEADER_BYTES),
       max_input_bytes: ANTHROPIC_SANITIZER_MAX_INPUT_BYTES,
       semantic_invariants: ANTHROPIC_SANITIZER_SEMANTIC_INVARIANTS,
       proves_billing_or_readiness: false as const,
@@ -842,54 +1084,43 @@ export function createAnthropicStrictCompatibilityInput(
   const promptEvidence: AnthropicPromptEvidence = {
     transform_id: transformResult.transform_id,
     transform_header_sha256: transformResult.transform_header_sha256,
+    raw_prompt_byte_length: transformResult.raw_prompt_byte_length,
     raw_prompt_sha256: transformResult.raw_prompt_sha256,
+    transformed_prompt_byte_length: utf8ByteLength(transformResult.transformed_prompt_bytes_utf8),
     transformed_prompt_sha256: transformResult.transformed_prompt_sha256,
     request_prompt_sha256: transformResult.transformed_prompt_sha256,
     response_prompt_sha256: transformResult.transformed_prompt_sha256,
+    prompt_transform_evidence: null,
+    request_evidence: null,
+    response_evidence: null,
   };
   return deepFreezeAnthropicAuthority({
     schema_version: ANTHROPIC_QUALIFICATION_INPUT_SCHEMA_VERSION,
     issued_at: issuedAt,
     route_evidence: {
+      route_policy_id: ANTHROPIC_FROZEN_ROUTE_POLICY.route_policy_id,
+      route_policy_revision: ANTHROPIC_FROZEN_ROUTE_POLICY.revision,
+      route_policy_sha256: ANTHROPIC_FROZEN_ROUTE_POLICY.route_policy_sha256,
+      policy_state: ANTHROPIC_FROZEN_ROUTE_POLICY.policy_state,
+      qualification_state: ANTHROPIC_FROZEN_ROUTE_POLICY.qualification_state,
       provider_id: ANTHROPIC_PROVIDER_ID,
       api: 'anthropic-messages',
-      auth_class: 'oauth',
+      auth_class: 'api-key',
       auth_source: 'stored',
-      billing_class: 'plan-backed-subscription',
-      billing_route_class: 'subscription-oauth',
+      billing_class: ANTHROPIC_FROZEN_ROUTE_POLICY.billing_class,
+      billing_route_class: ANTHROPIC_FROZEN_ROUTE_POLICY.billing_route_class,
       gateway_id: null,
       arbitrary_api_key_used: false,
       openrouter_used: false,
       metered_gateway_used: false,
-      user_billing_consent: true,
-      non_metered_entitlement: true,
+      user_billing_consent: false,
+      non_metered_entitlement: false,
       metered_extra_usage_observed: false,
-      live_route_verified: true,
-      live_billing_verified: true,
-      live_route_evidence: {
-        evidence_id: 'anthropic-live-route-proof-shape',
-        kind: 'route-proof',
-        uri: 'fixture://phase37/anthropic/live-route-proof-shape',
-        sha256: sha256Utf8('anthropic live route proof shape'),
-        byte_count: utf8ByteLength('anthropic live route proof shape'),
-        secret_free: true,
-      },
-      billing_consent_evidence: {
-        evidence_id: 'anthropic-billing-consent-proof-shape',
-        kind: 'billing-proof',
-        uri: 'fixture://phase37/anthropic/billing-consent-proof-shape',
-        sha256: sha256Utf8('anthropic billing consent proof shape'),
-        byte_count: utf8ByteLength('anthropic billing consent proof shape'),
-        secret_free: true,
-      },
-      non_metered_entitlement_evidence: {
-        evidence_id: 'anthropic-non-metered-entitlement-proof-shape',
-        kind: 'billing-proof',
-        uri: 'fixture://phase37/anthropic/non-metered-entitlement-proof-shape',
-        sha256: sha256Utf8('anthropic non-metered entitlement proof shape'),
-        byte_count: utf8ByteLength('anthropic non-metered entitlement proof shape'),
-        secret_free: true,
-      },
+      live_route_verified: false,
+      live_billing_verified: false,
+      live_route_evidence: null,
+      billing_consent_evidence: null,
+      non_metered_entitlement_evidence: null,
     },
     prompt_evidence: promptEvidence,
     cache_evidence: {
@@ -897,6 +1128,7 @@ export function createAnthropicStrictCompatibilityInput(
       observed_cache_policy: 'provider-default',
       provider_cache_behavior: 'provider-default',
       cache_fallback_used: false,
+      cache_evidence_ref: null,
     },
     role_execution_evidence: ANTHROPIC_ROLE_SEEDS.map((seed) => ({
       role: seed.role,
@@ -912,22 +1144,33 @@ export function createAnthropicStrictCompatibilityInput(
       request_prompt_sha256: transformResult.transformed_prompt_sha256,
       response_prompt_sha256: transformResult.transformed_prompt_sha256,
       fallback_used: false,
+      execution_evidence: null,
     })),
   });
 }
 
 export function verifyAnthropicProviderPackAuthority(): readonly string[] {
   const issues: string[] = [];
-  if (ANTHROPIC_OAUTH_PLAN_ROUTE_POLICY.route_policy_sha256 !== canonicalSha256(ANTHROPIC_OAUTH_PLAN_ROUTE_POLICY_PREIMAGE)) {
-    issues.push('anthropic OAuth plan route policy hash drift');
+  const centralPolicy = findRoutePolicy(ANTHROPIC_ROUTE_POLICY_ID, ANTHROPIC_ROUTE_POLICY_REVISION);
+  if (centralPolicy === null) {
+    issues.push('anthropic frozen central route policy missing');
+  } else if (centralPolicy !== ANTHROPIC_FROZEN_ROUTE_POLICY) {
+    issues.push('anthropic route policy must reference frozen central authority exactly');
   }
-  if (ANTHROPIC_OAUTH_PLAN_ROUTE_POLICY.allowed_auth_classes.join(',') !== 'oauth') {
-    issues.push('anthropic route policy must use OAuth only');
+  const { route_policy_sha256: _routePolicySha256, ...routePreimage } = ANTHROPIC_FROZEN_ROUTE_POLICY;
+  if (ANTHROPIC_FROZEN_ROUTE_POLICY.route_policy_sha256 !== canonicalSha256(routePreimage)) {
+    issues.push('anthropic frozen central route policy hash drift');
   }
-  if (ANTHROPIC_OAUTH_PLAN_ROUTE_POLICY.billing_class !== 'plan-backed-subscription' || ANTHROPIC_OAUTH_PLAN_ROUTE_POLICY.billing_route_class !== 'subscription-oauth') {
-    issues.push('anthropic route policy must remain plan-backed subscription OAuth');
+  if (ANTHROPIC_FROZEN_ROUTE_POLICY.allowed_auth_classes.join(',') !== 'api-key') {
+    issues.push('anthropic route policy must remain frozen API-key blocked authority');
   }
-  if (!ANTHROPIC_OAUTH_PLAN_ROUTE_POLICY.forbidden_gateways.includes('openrouter') || !ANTHROPIC_OAUTH_PLAN_ROUTE_POLICY.forbidden_gateways.includes('arbitrary-api-key')) {
+  if (ANTHROPIC_FROZEN_ROUTE_POLICY.billing_class !== 'metered-third-party-blocked' || ANTHROPIC_FROZEN_ROUTE_POLICY.billing_route_class !== 'third-party-metered-blocked') {
+    issues.push('anthropic route policy must remain frozen metered third-party blocked authority');
+  }
+  if (ANTHROPIC_FROZEN_ROUTE_POLICY.policy_state !== 'blocked-live-certification' || ANTHROPIC_FROZEN_ROUTE_POLICY.qualification_state !== 'blocked-live-certification') {
+    issues.push('anthropic route policy must remain blocked-live-certification');
+  }
+  if (!ANTHROPIC_FROZEN_ROUTE_POLICY.forbidden_gateways.includes('openrouter') || !ANTHROPIC_FROZEN_ROUTE_POLICY.forbidden_gateways.includes('arbitrary-api-key')) {
     issues.push('anthropic route policy must forbid OpenRouter and arbitrary API keys');
   }
   if (ANTHROPIC_ROLE_SEEDS.length !== ROSTER_ROLE_ORDER.length) {
@@ -943,8 +1186,11 @@ export function verifyAnthropicProviderPackAuthority(): readonly string[] {
     if (seed.role_seed_sha256 !== canonicalSha256(preimage)) {
       issues.push(`anthropic ${role} role seed hash drift`);
     }
-    if (seed.qualification_state !== 'unqualified-non-certifying-seed' || seed.non_certifying_seed !== true) {
-      issues.push(`anthropic ${role} role seed must remain unqualified non-certifying`);
+    if (seed.auth_class !== 'api-key' || seed.billing_class !== ANTHROPIC_FROZEN_ROUTE_POLICY.billing_class || seed.billing_route_class !== ANTHROPIC_FROZEN_ROUTE_POLICY.billing_route_class) {
+      issues.push(`anthropic ${role} role seed must remain bound to frozen central auth/billing`);
+    }
+    if (seed.qualification_state !== 'blocked-live-certification' || seed.non_certifying_seed !== true) {
+      issues.push(`anthropic ${role} role seed must remain blocked non-certifying`);
     }
   }
   if (ANTHROPIC_SANITIZER_HEADER_SHA256 !== sha256Utf8(ANTHROPIC_SANITIZER_HEADER_BYTES)) {
