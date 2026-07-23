@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { appendFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -150,7 +151,15 @@ async function writeSpec(root: string, unitSpec: AutopilotUnitSpec): Promise<str
   mutable.evidence_dir = join(prepared.runtimeRoot, 'evidence', unitSpec.unit_id);
   const specPath = join(prepared.runtimeRoot, 'unit-specs', `${unitSpec.unit_id}.${unitSpec.role}.attempt-${String(unitSpec.attempt)}.json`);
   await mkdir(dirname(specPath), { recursive: true });
-  await writeFile(specPath, `${JSON.stringify(unitSpec, null, 2)}\n`, 'utf8');
+  const specBytes = `${JSON.stringify(unitSpec, null, 2)}\n`;
+  await writeFile(specPath, specBytes, 'utf8');
+  await writeFile(`${specPath}.grandfather-authority.json`, `${JSON.stringify({
+    schema_version: 'autopilot.v1_grandfather_authority.v1',
+    authority: 'grandfathered-existing-v1',
+    unit_spec_sha256: sha256Utf8(specBytes),
+    historical_bytes_mutated: false,
+    reason: 'agent-runner regression fixture preserves exact historical v1 bytes',
+  }, null, 2)}\n`, 'utf8');
   return specPath;
 }
 
@@ -215,6 +224,10 @@ async function expectRejects(
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function sha256Utf8(value: string): `sha256:${string}` {
+  return `sha256:${createHash('sha256').update(value, 'utf8').digest('hex')}`;
 }
 
 function git(root: string, args: readonly string[]): void {

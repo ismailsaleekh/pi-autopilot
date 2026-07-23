@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -121,7 +122,15 @@ void describe('D65-I2 extract terminal chain e2e', () => {
 
       const specPath = join(runtimeRoot, 'unit-specs', 'x01-extract.extract.attempt-1.json');
       await mkdir(dirname(specPath), { recursive: true });
-      await writeFile(specPath, `${JSON.stringify(unitSpec, null, 2)}\n`, 'utf8');
+      const specBytes = `${JSON.stringify(unitSpec, null, 2)}\n`;
+      await writeFile(specPath, specBytes, 'utf8');
+      await writeFile(`${specPath}.grandfather-authority.json`, `${JSON.stringify({
+        schema_version: 'autopilot.v1_grandfather_authority.v1',
+        authority: 'grandfathered-existing-v1',
+        unit_spec_sha256: sha256Utf8(specBytes),
+        historical_bytes_mutated: false,
+        reason: 'extract terminal chain fixture preserves exact historical v1 bytes',
+      }, null, 2)}\n`, 'utf8');
       const fakePi = await writeFakePi(root);
 
       const result = await runAutopilotAgentFromSpecPath(specPath, {
@@ -191,6 +200,10 @@ async function initGitSource(source: string): Promise<void> {
 function git(cwd: string, args: readonly string[]): void {
   const result = spawnSync('git', args, { cwd, encoding: 'utf8' });
   assert.equal(result.status, 0, result.stderr);
+}
+
+function sha256Utf8(value: string): `sha256:${string}` {
+  return `sha256:${createHash('sha256').update(value, 'utf8').digest('hex')}`;
 }
 
 const FAKE_PI_SOURCE = `#!/usr/bin/env node

@@ -1,8 +1,8 @@
-import { constants as fsConstants, existsSync } from 'node:fs';
+import { constants as fsConstants, existsSync, readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { access, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { access, mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { spawn, type ChildProcessDataChunk, type ChildProcessLite } from 'node:child_process';
-import { dirname, relative, resolve } from 'node:path';
+import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
@@ -13,13 +13,19 @@ import {
   AUTOPILOT_STATUS_TOOL,
 } from './names.ts';
 import {
+  AUTOPILOT_EXECUTION_OBSERVATION_ENV,
+  deriveRoutePolicyFromObservedProviderApi,
+  parseAutopilotExecutionObservation,
+  type AutopilotExecutionObservationV1,
+} from '../internal/execution-observer-extension.ts';
+import {
   buildAutopilotProviderIdentity,
   buildAutopilotProviderIdentityFromRequestProfile,
-  buildAutopilotRosterExecutionIdentity,
   buildAutopilotStatusToolContext,
   deriveAutopilotArtifactRoot,
   lowerAutopilotUnitSpecV2ToV1,
   parseAutopilotStatusToolContext,
+  sha256Buffer,
   splitAutopilotModelId,
   validateAutopilotStatusEvidence,
   type AutopilotObservedExecutionEvidence,
@@ -31,7 +37,7 @@ import {
 import { AutopilotForcedOutputEvidenceError } from './forced-output/status-evidence.ts';
 import { parseAutopilotStatusEntry, parseAutopilotUnitSpec, parseAutopilotUnitSpecV2 } from './contracts/index.ts';
 import { deriveAutopilotAuthority, persistAutopilotAuthority, type AutopilotAuthorityArtifact } from './authority.ts';
-import type { AutopilotExecutionAudit, AutopilotExecutionCommit, AutopilotReceipt, AutopilotStatusEntry, AutopilotUnitSpec, AutopilotUnitSpecV2 } from './contracts/types.ts';
+import type { AutopilotExecutionAudit, AutopilotExecutionCommit, AutopilotStatusEntry, AutopilotUnitSpec, AutopilotUnitSpecV2 } from './contracts/types.ts';
 import {
   captureAutopilotExecutionBaseline,
   deriveAutopilotExecutionAuditPath,
@@ -57,6 +63,7 @@ import {
   readGitStatus,
   gitHead,
   resolveAutopilotStateRoot,
+  AUTOPILOT_STATE_ROOT_ENV,
   resolveRepoIdentity,
   unitWorktreePathForActiveAutopilot,
   worktreeRootForRepo,
@@ -89,6 +96,11 @@ import {
   type AutopilotRenderedPrompt,
 } from './prompt-renderer/index.ts';
 import { autopilotModelAssignmentForRole } from './model-roster.ts';
+import { recoverRuntimeRosterSelection, runtimeRosterSnapshotPath } from './roster/snapshot.ts';
+import { preRunSelectionPath, resolveRosterScopePaths, rosterRevisionPath, type RosterSha256 } from './roster/paths.ts';
+import { computeAutopilotRosterContractObjectHash, parseAutopilotHistoricalFixedRosterAdapterResult, parseAutopilotRoster } from './roster/contracts.ts';
+import { bytesEqual, parseCanonicalPreRunSelectionBytes, type RunSelectionDiagnostic } from './roster/run-selection.ts';
+import { assertUnitSpecMatchesPinnedFacts, resolvePinnedRoleRuntimeFacts } from './roster/runtime-spec.ts';
 
 type JsonRecord = Readonly<Record<string, unknown>>;
 type ProcessEnv = Readonly<Record<string, string | undefined>>;
@@ -148,26 +160,12 @@ export interface AutopilotAgentRunResult {
   readonly summary: string;
 }
 
-export interface AutopilotPiExecutionResultEvidence {
-  readonly isError: boolean;
-  readonly stopReason: string | null;
-  readonly provider: string | null;
-  readonly model: string | null;
-  readonly api: string | null;
-  readonly thinkingLevel: string | null;
-  readonly numTurns: number;
-}
-
-export interface AutopilotExecutionObserverInput {
-  readonly unitSpec: AutopilotUnitSpec;
-  readonly rosterExecutionIdentity: AutopilotRosterExecutionIdentity;
-  readonly piResult: AutopilotPiExecutionResultEvidence;
-}
-
-export interface AutopilotExecutionObserver {
-  observeExecutionIdentity(
-    input: AutopilotExecutionObserverInput,
-  ): AutopilotObservedExecutionEvidence | null | Promise<AutopilotObservedExecutionEvidence | null>;
+export interface AutopilotV1GrandfatherAuthority {
+  readonly schema_version: 'autopilot.v1_grandfather_authority.v1';
+  readonly authority: 'grandfathered-existing-v1';
+  readonly unit_spec_sha256: `sha256:${string}`;
+  readonly historical_bytes_mutated: false;
+  readonly reason: string;
 }
 
 export interface AutopilotAgentRunOptions {
@@ -176,20 +174,22 @@ export interface AutopilotAgentRunOptions {
   readonly env?: ProcessEnv;
   readonly timeoutMsOverride?: number;
   readonly forcePromptSnapshot?: boolean;
-  readonly executionObserver?: AutopilotExecutionObserver;
+  readonly v1GrandfatherAuthority?: unknown;
 }
 
 const AUTOPILOT_AGENT_PI_EXECUTABLE_ENV = 'AUTOPILOT_AGENT_PI_EXECUTABLE';
+const AUTOPILOT_V1_GRANDFATHER_AUTHORITY_ENV = 'AUTOPILOT_V1_GRANDFATHER_AUTHORITY';
 const DEFAULT_AGENT_WALL_MS = 3_600_000;
 const RPC_COMMAND_TIMEOUT_MS = 10_000;
 const DIAGNOSTIC_TEXT_LIMIT = 600;
 const FAILURE_REASON_LIMIT = 2_400;
-const AUTOPILOT_AGENT_STATUS_EXTENSION_PATH = resolveAutopilotStatusExtensionPath(import.meta.url);
+const AUTOPILOT_AGENT_STATUS_EXTENSION_PATH = resolveAutopilotInternalExtensionPath(import.meta.url, 'status-extension');
+const AUTOPILOT_AGENT_EXECUTION_OBSERVER_EXTENSION_PATH = resolveAutopilotInternalExtensionPath(import.meta.url, 'execution-observer-extension');
 
-function resolveAutopilotStatusExtensionPath(moduleUrl: string): string {
-  const sourcePath = fileURLToPath(new URL('../internal/status-extension.ts', moduleUrl));
+function resolveAutopilotInternalExtensionPath(moduleUrl: string, basename: string): string {
+  const sourcePath = fileURLToPath(new URL(`../internal/${basename}.ts`, moduleUrl));
   if (existsSync(sourcePath)) return sourcePath;
-  return fileURLToPath(new URL('../internal/status-extension.js', moduleUrl));
+  return fileURLToPath(new URL(`../internal/${basename}.js`, moduleUrl));
 }
 
 interface ToolPolicy {
@@ -207,6 +207,7 @@ interface SpawnSpec {
   readonly toolPolicy: ToolPolicy;
   readonly env: ProcessEnv;
   readonly contextPath: string;
+  readonly executionObservationPath: string;
   readonly wallMs: number;
   readonly name: string;
   readonly preemptionSignal: AbortSignal;
@@ -252,11 +253,23 @@ interface PiResult {
   readonly api: string | null;
   readonly thinkingLevel: string | null;
   readonly numTurns: number;
+  readonly finalAssistantMessage: {
+    readonly provider: string | null;
+    readonly model: string | null;
+    readonly api: string | null;
+    readonly stopReason: string | null;
+  } | null;
+  readonly initialStateModel: {
+    readonly provider: string | null;
+    readonly model: string | null;
+    readonly api: string | null;
+  } | null;
   readonly artifacts: {
     readonly structuredOutput?: {
       readonly toolResultCandidates: readonly ToolResultCandidate[];
     };
     readonly diagnostics: PiRunDiagnostics;
+    readonly executionObservationPath: string;
   };
 }
 
@@ -357,8 +370,20 @@ async function runAutopilotAgentFromSpecPathInternal(
   options: AutopilotAgentRunOptions,
   lifecycle: ChildAuthorityLifecycle,
 ): Promise<AutopilotAgentRunResult> {
-  const specBundle = await readAndValidateSpec(specPath);
+  const env = { ...process.env, ...(options.env ?? {}) };
+  let specBundle = await readAndValidateSpec(specPath, options, env);
   const spec = specBundle.unitSpec;
+  if (options.dryRun !== true) await assertD65OrdinaryBoundaryFromEnvironment('runner-preflight', env);
+  const runtimePreflight = await preflightSpec(spec, specPath, {
+    skipStaleOutputCheck: options.dryRun === true,
+    skipClaimAcquire: options.dryRun === true,
+    skipSagaRecovery: options.dryRun === true,
+    env,
+  });
+  lifecycle.preflight = runtimePreflight;
+  lifecycle.env = env;
+  lifecycle.spec = spec;
+  specBundle = await authenticateSpecBundleAfterPreflight({ specBundle, specPath, runtimePreflight, env });
   let providerIdentity: AutopilotProviderIdentity;
   let context: AutopilotStatusToolContext;
   try {
@@ -378,18 +403,6 @@ async function runAutopilotAgentFromSpecPathInternal(
       receiptOutput: spec.receipt_output,
     });
   }
-
-  const env = { ...process.env, ...(options.env ?? {}) };
-  if (options.dryRun !== true) await assertD65OrdinaryBoundaryFromEnvironment('runner-preflight', env);
-  const runtimePreflight = await preflightSpec(spec, specPath, {
-    skipStaleOutputCheck: options.dryRun === true,
-    skipClaimAcquire: options.dryRun === true,
-    skipSagaRecovery: options.dryRun === true,
-    env,
-  });
-  lifecycle.preflight = runtimePreflight;
-  lifecycle.env = env;
-  lifecycle.spec = spec;
   if (options.dryRun !== true) await assertD65OrdinaryBoundaryFromEnvironment('post-acquisition-output', env);
   const auditBaseline = await captureAutopilotExecutionBaseline(spec.cwd);
   lifecycle.auditBaseline = auditBaseline;
@@ -476,6 +489,7 @@ async function runAutopilotAgentFromSpecPathInternal(
     toolPolicy: toolPolicyForRole(spec.role),
     env: childProcessEnv,
     contextPath,
+    executionObservationPath: deriveAutopilotExecutionObservationPath(spec),
     wallMs: options.timeoutMsOverride ?? timeoutMsForSpec(spec),
     name: `autopilot-${spec.unit_id}-${spec.role}-attempt-${String(spec.attempt)}`,
     preemptionSignal: lifecycle.handle.preemptionSignal,
@@ -507,7 +521,6 @@ async function runAutopilotAgentFromSpecPathInternal(
     observedExecution = await observeExecutionIdentityForRoster({
       specBundle,
       piResult,
-      ...(options.executionObserver === undefined ? {} : { observer: options.executionObserver }),
     });
   } catch (error) {
     const audit = await writeAttemptAudit(spec, runtimePreflight.context, runtimePreflight.authority, auditBaseline, null, auditOutput, env);
@@ -763,10 +776,16 @@ async function preserveOrResetFailedSourceAttempt(input: {
   await quarantineFailedUnit({ context: input.context, unitId: input.spec.unit_id, attempt: input.spec.attempt, unitWorktreePath: input.spec.cwd, summary: input.summary, ...(input.baseline?.gitHead === null || input.baseline?.gitHead === undefined ? {} : { baselineHead: input.baseline.gitHead }), env: input.env });
 }
 
-async function readAndValidateSpec(specPath: string): Promise<AutopilotAgentRunSpecBundle> {
+async function readAndValidateSpec(
+  specPath: string,
+  options: AutopilotAgentRunOptions,
+  env: ProcessEnv,
+): Promise<AutopilotAgentRunSpecBundle> {
   let parsed: unknown;
+  let specBytes: Uint8Array;
   try {
-    parsed = JSON.parse(await readFile(specPath, 'utf8')) as unknown;
+    specBytes = await readFile(specPath);
+    parsed = JSON.parse(Buffer.from(specBytes).toString('utf8')) as unknown;
   } catch (error) {
     throw new AutopilotAgentRunError('spec-invalid', {
       reason: `unit spec is not readable JSON: ${errorMessage(error)}`,
@@ -778,11 +797,11 @@ async function readAndValidateSpec(specPath: string): Promise<AutopilotAgentRunS
     if (isJsonRecord(parsed) && parsed['schema_version'] === 'autopilot.unit_spec.v2') {
       const originalSpec = parseAutopilotUnitSpecV2(parsed);
       const unitSpec = lowerAutopilotUnitSpecV2ToV1(originalSpec);
-      const rosterExecutionIdentity = buildAutopilotRosterExecutionIdentity(originalSpec);
       assertV2LaunchQualityGate(unitSpec);
-      return { unitSpec, originalSpec, rosterExecutionIdentity };
+      return { unitSpec, originalSpec, rosterExecutionIdentity: null };
     }
     const spec = parseAutopilotUnitSpec(parsed);
+    assertV1SpecHasGrandfatherAuthority({ specPath, specBytes, options, env });
     assertAutopilotSpecQualityGate(spec);
     return { unitSpec: spec, originalSpec: spec, rosterExecutionIdentity: null };
   } catch (error) {
@@ -791,6 +810,249 @@ async function readAndValidateSpec(specPath: string): Promise<AutopilotAgentRunS
       specPath,
     });
   }
+}
+
+function assertV1SpecHasGrandfatherAuthority(input: {
+  readonly specPath: string;
+  readonly specBytes: Uint8Array;
+  readonly options: AutopilotAgentRunOptions;
+  readonly env: ProcessEnv;
+}): void {
+  const authorityValue = input.options.v1GrandfatherAuthority ?? readV1GrandfatherAuthorityFromCaller(input.specPath, input.env);
+  if (authorityValue === null) {
+    throw new Error('new unit_spec.v1 execution is forbidden; v1 bytes are historical evidence only and require exact historical adapter or grandfather authority');
+  }
+  const specSha256 = sha256Buffer(input.specBytes);
+  if (isJsonRecord(authorityValue) && authorityValue['schema_version'] === 'autopilot.historical_fixed_roster_adapter_result.v1') {
+    const result = parseAutopilotHistoricalFixedRosterAdapterResult(authorityValue);
+    if (result.ok !== true || result.admission.admitted !== true || result.historical_bytes_mutated !== false || result.admission.historical_bytes_mutated !== false) {
+      throw new Error('historical unit_spec.v1 adapter authority did not admit preserved bytes');
+    }
+    if (result.historical_unit_spec_sha256 !== specSha256) {
+      throw new Error('historical unit_spec.v1 adapter authority hash does not match exact spec bytes');
+    }
+    return;
+  }
+  const authority = parseV1GrandfatherAuthority(authorityValue);
+  if (authority.unit_spec_sha256 !== specSha256) {
+    throw new Error('unit_spec.v1 grandfather authority hash does not match exact spec bytes');
+  }
+}
+
+function readV1GrandfatherAuthorityFromCaller(specPath: string, env: ProcessEnv): unknown | null {
+  const authorityPath = env[AUTOPILOT_V1_GRANDFATHER_AUTHORITY_ENV] ?? `${specPath}.grandfather-authority.json`;
+  if (!existsSync(authorityPath)) return null;
+  try {
+    return JSON.parse(readFileSync(authorityPath, 'utf8')) as unknown;
+  } catch (error) {
+    throw new Error(`unit_spec.v1 grandfather authority is not readable JSON: ${errorMessage(error)}`);
+  }
+}
+
+function parseV1GrandfatherAuthority(value: unknown): AutopilotV1GrandfatherAuthority {
+  if (!isJsonRecord(value)) throw new Error('unit_spec.v1 grandfather authority must be a JSON object');
+  const fields = ['schema_version', 'authority', 'unit_spec_sha256', 'historical_bytes_mutated', 'reason'];
+  const keys = Object.keys(value).sort();
+  const expected = [...fields].sort();
+  if (keys.length !== expected.length || keys.some((key, index) => key !== expected[index])) throw new Error('unit_spec.v1 grandfather authority fields are not exact');
+  if (value['schema_version'] !== 'autopilot.v1_grandfather_authority.v1') throw new Error('unit_spec.v1 grandfather authority schema_version is invalid');
+  if (value['authority'] !== 'grandfathered-existing-v1') throw new Error('unit_spec.v1 grandfather authority kind is invalid');
+  if (value['historical_bytes_mutated'] !== false) throw new Error('unit_spec.v1 grandfather authority must prove historical_bytes_mutated=false');
+  const unitSpecSha256 = value['unit_spec_sha256'];
+  if (typeof unitSpecSha256 !== 'string' || !/^sha256:[a-f0-9]{64}$/u.test(unitSpecSha256)) throw new Error('unit_spec.v1 grandfather authority unit_spec_sha256 is invalid');
+  const reason = value['reason'];
+  if (typeof reason !== 'string' || reason.trim().length === 0 || reason.length > 500) throw new Error('unit_spec.v1 grandfather authority reason is required');
+  return Object.freeze({
+    schema_version: 'autopilot.v1_grandfather_authority.v1',
+    authority: 'grandfathered-existing-v1',
+    unit_spec_sha256: unitSpecSha256 as `sha256:${string}`,
+    historical_bytes_mutated: false,
+    reason,
+  });
+}
+
+async function authenticateSpecBundleAfterPreflight(input: {
+  readonly specBundle: AutopilotAgentRunSpecBundle;
+  readonly specPath: string;
+  readonly runtimePreflight: RuntimePreflightResult;
+  readonly env: ProcessEnv;
+}): Promise<AutopilotAgentRunSpecBundle> {
+  if (!isUnitSpecV2(input.specBundle.originalSpec)) return input.specBundle;
+  try {
+    const originalSpec = input.specBundle.originalSpec;
+    const spec = input.specBundle.unitSpec;
+    const stateRoot = input.env[AUTOPILOT_STATE_ROOT_ENV];
+    const selection = await recoverAuthenticatedV2Selection({
+      stateRoot,
+      mainWorktreeRoot: input.runtimePreflight.context.active.main_worktree_path,
+      workstream: spec.workstream,
+      repoId: input.runtimePreflight.context.active.repo_key,
+      workstreamRun: input.runtimePreflight.context.active.workstream_run,
+      originalSpec,
+    });
+    const roster = await readAuthenticatedRosterForSelection({
+      selection,
+      mainWorktreePath: input.runtimePreflight.context.active.main_worktree_path,
+      stateRoot,
+    });
+    const facts = resolvePinnedRoleRuntimeFacts({
+      selection,
+      roster,
+      role: originalSpec.role,
+      request_profile: originalSpec.request_profile,
+    });
+    assertUnitSpecMatchesPinnedFacts(originalSpec, facts);
+    const identity: AutopilotRosterExecutionIdentity = Object.freeze({
+      schema_version: 'autopilot.roster_execution_identity.v1',
+      roster_id: facts.selection.roster_id,
+      roster_revision: facts.selection.roster_revision,
+      roster_sha256: facts.selection.roster_sha256 as `sha256:${string}`,
+      assignment_sha256: facts.assignment.assignment_sha256 as `sha256:${string}`,
+      pre_run_selection_sha256: facts.selection.selection_sha256 as `sha256:${string}`,
+      request_profile: facts.request_profile,
+      request_profile_sha256: facts.request_profile.request_profile_sha256 as `sha256:${string}`,
+    });
+    return { ...input.specBundle, rosterExecutionIdentity: identity };
+  } catch (error) {
+    throw new AutopilotAgentRunError('spec-invalid', {
+      reason: `unit_spec.v2 failed external roster/selection authentication before model spend: ${errorMessage(error)}`,
+      specPath: input.specPath,
+      statusOutput: input.specBundle.unitSpec.status_output,
+      receiptOutput: input.specBundle.unitSpec.receipt_output,
+    });
+  }
+}
+
+type AuthenticatedPreRunSelection = NonNullable<Awaited<ReturnType<typeof recoverRuntimeRosterSelection>>['selection']>;
+
+async function recoverAuthenticatedV2Selection(input: {
+  readonly stateRoot: string | undefined;
+  readonly mainWorktreeRoot: string;
+  readonly workstream: string;
+  readonly repoId: string;
+  readonly workstreamRun: string;
+  readonly originalSpec: AutopilotUnitSpecV2;
+}): Promise<AuthenticatedPreRunSelection> {
+  const specIdentity = {
+    schema_version: input.originalSpec.schema_version,
+    workstream: input.originalSpec.workstream,
+    roster_id: input.originalSpec.roster_id,
+    roster_revision: input.originalSpec.roster_revision,
+    roster_sha256: input.originalSpec.roster_sha256 as RosterSha256,
+    pre_run_selection_sha256: input.originalSpec.pre_run_selection_sha256 as RosterSha256,
+  } as const;
+  const recovery = await recoverRuntimeRosterSelection({
+    ...(input.stateRoot === undefined ? {} : { stateRoot: input.stateRoot }),
+    mainWorktreeRoot: input.mainWorktreeRoot,
+    workstream: input.workstream,
+    repo_id: input.repoId,
+    workstream_run: input.workstreamRun,
+    spec_identity: specIdentity,
+    roster_file_state: 'present',
+  });
+  if (recovery.ok && recovery.selection !== null) return recovery.selection;
+  return await recoverSelectionFromExactMirrorAndExternalBytes({
+    ...input,
+    priorDiagnostics: recovery.diagnostics,
+  });
+}
+
+async function recoverSelectionFromExactMirrorAndExternalBytes(input: {
+  readonly stateRoot: string | undefined;
+  readonly mainWorktreeRoot: string;
+  readonly workstream: string;
+  readonly repoId: string;
+  readonly originalSpec: AutopilotUnitSpecV2;
+  readonly priorDiagnostics: readonly RunSelectionDiagnostic[];
+}): Promise<AuthenticatedPreRunSelection> {
+  const mirrorPath = runtimeRosterSnapshotPath({ mainWorktreeRoot: input.mainWorktreeRoot, workstream: input.workstream });
+  let mirrorBytes: Uint8Array;
+  try {
+    mirrorBytes = await readFile(mirrorPath);
+  } catch (error) {
+    throw new Error(`runtime roster mirror unavailable at ${mirrorPath}: ${errorMessage(error)}; ${formatRunSelectionDiagnostics(input.priorDiagnostics)}`);
+  }
+  const mirrorSelection = parseCanonicalPreRunSelectionBytes(mirrorBytes);
+  const specIssues = v2SpecSelectionIssues(input.originalSpec, mirrorSelection, input.repoId, input.workstream);
+  if (specIssues.length > 0) throw new Error(`runtime roster mirror does not authenticate unit_spec.v2: ${specIssues.join('; ')}`);
+  const externalMatches = await findExternalSelectionByteMatches({ stateRoot: input.stateRoot, selection: mirrorSelection, mirrorBytes });
+  if (externalMatches.length !== 1) {
+    throw new Error(`external pre-run selection recovery found ${String(externalMatches.length)} exact mirror byte match(es); ${formatRunSelectionDiagnostics(input.priorDiagnostics)}`);
+  }
+  return mirrorSelection;
+}
+
+async function findExternalSelectionByteMatches(input: {
+  readonly stateRoot: string | undefined;
+  readonly selection: AuthenticatedPreRunSelection;
+  readonly mirrorBytes: Uint8Array;
+}): Promise<readonly string[]> {
+  const paths = resolveRosterScopePaths({ scope: 'user', ...(input.stateRoot === undefined ? {} : { stateRoot: input.stateRoot }) });
+  const candidates = new Set<string>();
+  try { candidates.add(preRunSelectionPath(paths, input.selection)); } catch { /* generated workstream ids can be outside the roster path grammar; directory scan remains exact-byte authoritative. */ }
+  const repoSelectionsRoot = join(paths.selectionsRoot, input.selection.repo_id);
+  try {
+    for (const entry of await readdir(repoSelectionsRoot, { withFileTypes: true })) {
+      if (entry.isFile() && entry.name.endsWith('.json')) candidates.add(join(repoSelectionsRoot, entry.name));
+    }
+  } catch {
+    // Missing external directory is reported as zero matches below.
+  }
+  const matches: string[] = [];
+  for (const candidate of candidates) {
+    try {
+      const bytes = await readFile(candidate);
+      if (bytesEqual(bytes, input.mirrorBytes)) matches.push(candidate);
+    } catch {
+      // Ignore disappearing candidates; exact readback absence remains fail-closed through match count.
+    }
+  }
+  return Object.freeze(matches.sort());
+}
+
+function v2SpecSelectionIssues(
+  spec: AutopilotUnitSpecV2,
+  selection: AuthenticatedPreRunSelection,
+  repoId: string,
+  workstream: string,
+): readonly string[] {
+  const issues: string[] = [];
+  if (selection.repo_id !== repoId) issues.push('selection.repo_id does not match active runtime repo');
+  if (spec.workstream !== workstream) issues.push('unit_spec.v2 workstream does not match active runtime workstream');
+  if (spec.pre_run_selection_sha256 !== selection.selection_sha256) issues.push('pre_run_selection_sha256 mismatch');
+  if (spec.roster_id !== selection.roster_id) issues.push('roster_id mismatch');
+  if (spec.roster_revision !== selection.roster_revision) issues.push('roster_revision mismatch');
+  if (spec.roster_sha256 !== selection.roster_sha256) issues.push('roster_sha256 mismatch');
+  return Object.freeze(issues);
+}
+
+async function readAuthenticatedRosterForSelection(input: {
+  readonly selection: AuthenticatedPreRunSelection;
+  readonly mainWorktreePath: string;
+  readonly stateRoot: string | undefined;
+}): Promise<ReturnType<typeof parseAutopilotRoster>> {
+  const paths = input.selection.scope === 'trusted-project'
+    ? resolveRosterScopePaths({ scope: 'trusted-project', ...(input.stateRoot === undefined ? {} : { stateRoot: input.stateRoot }), trustedProjectRoot: input.mainWorktreePath })
+    : resolveRosterScopePaths({ scope: 'user', ...(input.stateRoot === undefined ? {} : { stateRoot: input.stateRoot }) });
+  const rosterPath = rosterRevisionPath(paths, input.selection);
+  const rosterBytes = await readFile(rosterPath);
+  const roster = parseAutopilotRoster(JSON.parse(Buffer.from(rosterBytes).toString('utf8')) as unknown);
+  const computedRosterHash = computeAutopilotRosterContractObjectHash('autopilot.roster.v1', roster);
+  const issues: string[] = [];
+  if (computedRosterHash !== roster.roster_sha256) issues.push('roster object hash does not match roster.roster_sha256');
+  if (roster.roster_sha256 !== input.selection.roster_sha256) issues.push('roster_sha256 does not match recovered pre-run selection');
+  if (roster.assignment_set_sha256 !== input.selection.assignment_set_sha256) issues.push('assignment_set_sha256 does not match recovered pre-run selection');
+  if (issues.length > 0) throw new Error(issues.join('; '));
+  return roster;
+}
+
+function formatRunSelectionDiagnostics(diagnostics: readonly { readonly code: string; readonly severity?: string }[]): string {
+  if (diagnostics.length === 0) return 'no diagnostics';
+  return diagnostics.map((diagnostic) => `${diagnostic.code}${diagnostic.severity === undefined ? '' : `:${diagnostic.severity}`}`).join(', ');
+}
+
+function isUnitSpecV2(value: AutopilotUnitSpec | AutopilotUnitSpecV2): value is AutopilotUnitSpecV2 {
+  return value.schema_version === 'autopilot.unit_spec.v2';
 }
 
 function assertV2LaunchQualityGate(spec: AutopilotUnitSpec): void {
@@ -865,70 +1127,90 @@ function rewriteRenderedPromptModelIdentity(
 async function observeExecutionIdentityForRoster(input: {
   readonly specBundle: AutopilotAgentRunSpecBundle;
   readonly piResult: PiResult;
-  readonly observer?: AutopilotExecutionObserver;
 }): Promise<AutopilotObservedExecutionEvidence | null> {
   const rosterExecutionIdentity = input.specBundle.rosterExecutionIdentity;
   if (rosterExecutionIdentity === null) return null;
-  if (input.observer === undefined) return null;
-  const observed = await input.observer.observeExecutionIdentity({
-    unitSpec: input.specBundle.unitSpec,
-    rosterExecutionIdentity,
-    piResult: projectPiResultEvidence(input.piResult),
+  const observation = await readExecutionObservationEvidence(input.piResult.artifacts.executionObservationPath);
+  return observedExecutionEvidenceFromPiAndObservation({
+    requestProfile: rosterExecutionIdentity.request_profile,
+    piResult: input.piResult,
+    observation,
   });
-  return observed;
 }
 
-function projectPiResultEvidence(piResult: PiResult): AutopilotPiExecutionResultEvidence {
-  return {
-    isError: piResult.isError,
-    stopReason: piResult.stopReason,
-    provider: piResult.provider,
-    model: piResult.model,
-    api: piResult.api,
-    thinkingLevel: piResult.thinkingLevel,
-    numTurns: piResult.numTurns,
-  };
+async function readExecutionObservationEvidence(path: string): Promise<AutopilotExecutionObservationV1> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(await readFile(path, 'utf8')) as unknown;
+  } catch (error) {
+    throw new Error(`missing or unreadable child execution observation evidence at ${path}: ${errorMessage(error)}`);
+  }
+  const observation = parseAutopilotExecutionObservation(parsed);
+  if (observation.diagnostics.length > 0) {
+    throw new Error(`child execution observation was incomplete: ${observation.diagnostics.join('; ')}`);
+  }
+  if (observation.final_assistant_message === null) {
+    throw new Error('child execution observation did not record a final assistant message');
+  }
+  return observation;
+}
+
+function observedExecutionEvidenceFromPiAndObservation(input: {
+  readonly requestProfile: AutopilotRosterExecutionIdentity['request_profile'];
+  readonly piResult: PiResult;
+  readonly observation: AutopilotExecutionObservationV1;
+}): AutopilotObservedExecutionEvidence {
+  const final = input.piResult.finalAssistantMessage;
+  if (final === null || final.provider === null || final.model === null || final.api === null) {
+    throw new Error('Pi RPC stream did not expose final assistant provider/model/api metadata');
+  }
+  const observedFinal = input.observation.final_assistant_message;
+  if (observedFinal === null) throw new Error('execution observation lacks final assistant metadata');
+  const finalMismatches: string[] = [];
+  if (observedFinal.provider !== final.provider) finalMismatches.push(`provider ${observedFinal.provider} != ${final.provider}`);
+  if (observedFinal.model !== final.model) finalMismatches.push(`model ${observedFinal.model} != ${final.model}`);
+  if (observedFinal.api !== final.api) finalMismatches.push(`api ${observedFinal.api} != ${final.api}`);
+  if (finalMismatches.length > 0) throw new Error(`execution observation final assistant metadata differs from Pi RPC stream: ${finalMismatches.join('; ')}`);
+  const route = deriveRoutePolicyFromObservedProviderApi(final.provider, final.api);
+  if (route === null) throw new Error(`no provider-qualified route policy for observed provider/api ${final.provider}/${final.api}`);
+  const routeMismatches: string[] = [];
+  if (route.route_policy_id !== input.observation.execution_profile.route_policy_id) routeMismatches.push('route_policy_id');
+  if (route.route_policy_revision !== input.observation.execution_profile.route_policy_revision) routeMismatches.push('route_policy_revision');
+  if (routeMismatches.length > 0) throw new Error(`execution observation route policy was not derived from final provider/api at ${routeMismatches.join(', ')}`);
+  const thinking = input.piResult.thinkingLevel;
+  if (thinking !== 'high' && thinking !== 'xhigh') throw new Error(`Pi RPC state did not expose a supported final thinking level: ${formatNullable(thinking)}`);
+  const activeModel = input.observation.active_model;
+  const requestedModelId = activeModel?.id ?? input.piResult.initialStateModel?.model ?? final.model;
+  if (requestedModelId === null || requestedModelId.length === 0) throw new Error('execution observation did not expose requested model id');
+  return Object.freeze({
+    provider_id: final.provider,
+    requested_model_id: requestedModelId,
+    executed_model_id: final.model,
+    api: final.api as AutopilotObservedExecutionEvidence['api'],
+    thinking,
+    service_tier: input.observation.execution_profile.service_tier,
+    cache_policy: input.observation.execution_profile.cache_policy,
+    system_prompt_profile: input.observation.execution_profile.system_prompt_profile,
+    system_prompt_sha256: input.observation.execution_profile.system_prompt_sha256,
+    route_policy_id: input.observation.execution_profile.route_policy_id,
+    route_policy_revision: input.observation.execution_profile.route_policy_revision,
+    request_profile_sha256: input.requestProfile.request_profile_sha256 as `sha256:${string}`,
+    final_model_metadata: Object.freeze({
+      provider: final.provider,
+      model: final.model,
+      api: final.api,
+      stopReason: final.stopReason,
+      observation_source: input.observation.source,
+    }),
+  });
 }
 
 async function materializeTerminalAcceptanceInputs(input: {
   readonly specBundle: AutopilotAgentRunSpecBundle;
   readonly specPath: string;
   readonly receipt: AutopilotStatusReceipt;
-}): Promise<{ readonly specPath: string; readonly receiptPath: string; readonly receipt: AutopilotReceipt }> {
-  if (input.specBundle.rosterExecutionIdentity === null) {
-    return { specPath: input.specPath, receiptPath: input.specBundle.unitSpec.receipt_output, receipt: input.receipt as AutopilotReceipt };
-  }
-  const spec = input.specBundle.unitSpec;
-  const compatRoot = resolve(deriveAutopilotArtifactRoot(spec), 'terminal-v1-compat');
-  const compatSpecPath = resolve(compatRoot, 'unit-specs', `${spec.unit_id}.${spec.role}.attempt-${String(spec.attempt)}.json`);
-  const compatReceiptPath = resolve(compatRoot, 'receipts', `${spec.unit_id}.${spec.role}.attempt-${String(spec.attempt)}.receipt.json`);
-  const receipt = input.receipt;
-  const compatReceipt: AutopilotReceipt = {
-    schema_version: 'autopilot.receipt.v1',
-    tool_name: 'autopilot_emit_status',
-    workstream: spec.workstream,
-    unit_id: spec.unit_id,
-    role: spec.role,
-    attempt: spec.attempt,
-    emitted_at: receipt.emitted_at,
-    status_output: spec.status_output,
-    status_sha256: receipt.status_sha256 as `sha256:${string}`,
-    schema_sha256: receipt.schema_sha256 as `sha256:${string}`,
-    tool_call_id: receipt.tool_call_id,
-    provider_identity: {
-      provider_id: receipt.provider_identity.provider_id,
-      requested_model_id: spec.model,
-      executed_model_id: spec.model,
-      api: receipt.provider_identity.api,
-      thinking_level: spec.thinking,
-    },
-    expected_identity_hash: receipt.expected_identity_hash as `sha256:${string}`,
-  };
-  await mkdir(dirname(compatSpecPath), { recursive: true });
-  await mkdir(dirname(compatReceiptPath), { recursive: true });
-  await writeFile(compatSpecPath, `${JSON.stringify(spec, null, 2)}\n`, 'utf8');
-  await writeFile(compatReceiptPath, `${JSON.stringify(compatReceipt, null, 2)}\n`, 'utf8');
-  return { specPath: compatSpecPath, receiptPath: compatReceiptPath, receipt: compatReceipt };
+}): Promise<{ readonly specPath: string; readonly receiptPath: string; readonly receipt: AutopilotStatusReceipt }> {
+  return { specPath: input.specPath, receiptPath: input.specBundle.unitSpec.receipt_output, receipt: input.receipt };
 }
 
 interface RuntimePreflightResult {
@@ -1257,6 +1539,13 @@ function deriveAutopilotStatusContextPath(spec: AutopilotUnitSpec): string {
   );
 }
 
+function deriveAutopilotExecutionObservationPath(spec: AutopilotUnitSpec): string {
+  return resolve(
+    spec.evidence_dir,
+    `${spec.unit_id}.${spec.role}.attempt-${String(spec.attempt)}.execution-observation.json`,
+  );
+}
+
 async function writeStatusContext(path: string, context: AutopilotStatusToolContext): Promise<void> {
   const parsed = parseAutopilotStatusToolContext(JSON.parse(JSON.stringify(context)) as unknown);
   await mkdir(dirname(path), { recursive: true });
@@ -1336,10 +1625,19 @@ function validateSpawnExecutionProfile(spec: SpawnSpec): void {
     if (modelId !== request.model_id) mismatches.push(`model_id expected ${request.model_id}, got ${modelId}`);
     if (spec.model !== request.model) mismatches.push(`model expected ${request.model}, got ${spec.model}`);
     if (spec.thinking !== request.thinking) mismatches.push(`thinking expected ${request.thinking}, got ${spec.thinking}`);
+    const route = deriveRoutePolicyFromObservedProviderApi(request.provider_id, request.api);
+    if (route === null) mismatches.push(`route_policy ${request.route_policy_id}@${String(request.route_policy_revision)} has no provider-qualified Pi adapter for ${request.provider_id}/${request.api}`);
+    else {
+      if (route.route_policy_id !== request.route_policy_id) mismatches.push(`route_policy_id expected ${request.route_policy_id}, Pi adapter derives ${route.route_policy_id}`);
+      if (route.route_policy_revision !== request.route_policy_revision) mismatches.push(`route_policy_revision expected ${String(request.route_policy_revision)}, Pi adapter derives ${String(route.route_policy_revision)}`);
+    }
+    if (request.service_tier !== null) mismatches.push(`Pi 0.80.6 cannot set request_profile.service_tier=${JSON.stringify(request.service_tier)} exactly before model spend`);
+    if (request.cache_policy !== 'provider-default') mismatches.push(`Pi 0.80.6 cannot set request_profile.cache_policy=${JSON.stringify(request.cache_policy)} exactly before model spend`);
+    if (request.system_prompt_profile !== 'pi-default.v1') mismatches.push(`Pi 0.80.6 cannot set request_profile.system_prompt_profile=${JSON.stringify(request.system_prompt_profile)} exactly before model spend`);
     if (mismatches.length > 0) throw new Error(mismatches.join('; '));
   } catch (error) {
     throw new AutopilotAgentRunError('spec-invalid', {
-      reason: `roster request profile does not match exact Pi spawn identity: ${errorMessage(error)}`,
+      reason: `roster request profile does not match an exactly applicable provider-qualified Pi execution adapter: ${errorMessage(error)}`,
     });
   }
 }
@@ -1366,9 +1664,11 @@ async function runPiPromptWithStatusCarrier(spec: SpawnSpec, prompt: string): Pr
     buildPiToolArgument(spec.toolPolicy),
     '--extension',
     AUTOPILOT_AGENT_STATUS_EXTENSION_PATH,
+    '--extension',
+    AUTOPILOT_AGENT_EXECUTION_OBSERVER_EXTENSION_PATH,
   ];
 
-  const env = sanitizeAgentEnv(spec.env, spec.contextPath);
+  const env = sanitizeAgentEnv(spec.env, spec.contextPath, spec.executionObservationPath);
   let child: ChildProcessLite;
   try {
     child = spawn(spec.executable, argv, {
@@ -1387,8 +1687,12 @@ async function runPiPromptWithStatusCarrier(spec: SpawnSpec, prompt: string): Pr
   return await supervisePiRpcChild(child, spec, prompt);
 }
 
-function sanitizeAgentEnv(env: ProcessEnv, contextPath: string): ProcessEnv {
-  const out: Record<string, string | undefined> = { ...env, [AUTOPILOT_STATUS_CONTEXT_ENV]: contextPath };
+function sanitizeAgentEnv(env: ProcessEnv, contextPath: string, executionObservationPath: string): ProcessEnv {
+  const out: Record<string, string | undefined> = {
+    ...env,
+    [AUTOPILOT_STATUS_CONTEXT_ENV]: contextPath,
+    [AUTOPILOT_EXECUTION_OBSERVATION_ENV]: executionObservationPath,
+  };
   delete out[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV];
   delete out['PIPELINE_CODEX_CLI_EXECUTABLE'];
   delete out['PIPELINE_CODEX_CLI_MODEL'];
@@ -1406,6 +1710,7 @@ function supervisePiRpcChild(
     let stderrText = '';
     let lastState: JsonRecord | undefined;
     let lastMessage: JsonRecord | undefined;
+    let lastAssistantMessage: JsonRecord | undefined;
     let turnCount = 0;
     let sawErrorEvent = false;
     const pendingCommands = new Map<string, PendingCommand>();
@@ -1552,7 +1857,10 @@ function supervisePiRpcChild(
       }
       if (type === 'message_end' || type === 'turn_end') {
         const message = record['message'];
-        if (isJsonRecord(message)) lastMessage = message;
+        if (isJsonRecord(message)) {
+          lastMessage = message;
+          if (message['role'] === 'assistant') lastAssistantMessage = message;
+        }
         if (type === 'turn_end') turnCount += 1;
       }
       const statusToolCandidate = toStatusToolResultCandidate(record);
@@ -1619,10 +1927,13 @@ function supervisePiRpcChild(
       try {
         const stateResponse = await sendCommand('get_state');
         if (isJsonRecord(stateResponse.data)) lastState = stateResponse.data;
+        validatePreSpendPiState(spec, lastState);
         await sendCommand('prompt', { message: prompt });
         await waitForEvent('agent_end', spec.wallMs);
         await sendCommand('get_session_stats').catch(() => undefined);
         const facts = deriveResultFacts(lastState, lastMessage);
+        const finalAssistant = deriveFinalAssistantFacts(lastAssistantMessage);
+        const initialStateModel = deriveInitialStateModelFacts(lastState);
         settleResolve(({
           isError: sawErrorEvent || facts.stopReason === 'error',
           stopReason: facts.stopReason,
@@ -1631,11 +1942,14 @@ function supervisePiRpcChild(
           api: facts.api,
           thinkingLevel: facts.thinkingLevel,
           numTurns: turnCount,
+          finalAssistantMessage: finalAssistant,
+          initialStateModel,
           artifacts: ({
             structuredOutput: ({
               toolResultCandidates: ([...toolResultCandidates]),
             }),
             diagnostics: diagnostics(),
+            executionObservationPath: spec.executionObservationPath,
           }),
         }));
       } catch (error) {
@@ -1713,6 +2027,24 @@ interface ResultFacts {
   readonly thinkingLevel: string | null;
 }
 
+function validatePreSpendPiState(spec: SpawnSpec, state: JsonRecord | undefined): void {
+  if (spec.requestProfile === undefined) return;
+  const stateModel = isJsonRecord(state?.['model']) ? state?.['model'] : undefined;
+  const request = spec.requestProfile;
+  const mismatches: string[] = [];
+  const provider = stringField(stateModel, 'provider');
+  const model = stringField(stateModel, 'id');
+  const api = stringField(stateModel, 'api');
+  const thinking = stringField(state, 'thinkingLevel');
+  if (provider !== request.provider_id) mismatches.push(`provider_id expected ${request.provider_id}, Pi state observed ${formatNullable(provider ?? null)}`);
+  if (model !== request.model_id) mismatches.push(`model_id expected ${request.model_id}, Pi state observed ${formatNullable(model ?? null)}`);
+  if (api !== request.api) mismatches.push(`api expected ${request.api}, Pi state observed ${formatNullable(api ?? null)}`);
+  if (thinking !== request.thinking) mismatches.push(`thinking expected ${request.thinking}, Pi state observed ${formatNullable(thinking ?? null)}`);
+  if (mismatches.length > 0) {
+    throw new AutopilotPiRunError('pre-spend-profile-mismatch', `Pi state does not match roster request profile before model spend: ${mismatches.join('; ')}`);
+  }
+}
+
 function deriveResultFacts(state: JsonRecord | undefined, message: JsonRecord | undefined): ResultFacts {
   const stateModel = isJsonRecord(state?.['model']) ? state?.['model'] : undefined;
   const provider = stringField(message, 'provider') ?? stringField(stateModel, 'provider');
@@ -1727,6 +2059,26 @@ function deriveResultFacts(state: JsonRecord | undefined, message: JsonRecord | 
     api: api ?? null,
     thinkingLevel: thinkingLevel ?? null,
   });
+}
+
+function deriveFinalAssistantFacts(message: JsonRecord | undefined): PiResult['finalAssistantMessage'] {
+  if (message === undefined) return null;
+  return {
+    provider: stringField(message, 'provider') ?? null,
+    model: stringField(message, 'model') ?? null,
+    api: stringField(message, 'api') ?? null,
+    stopReason: stringField(message, 'stopReason') ?? null,
+  };
+}
+
+function deriveInitialStateModelFacts(state: JsonRecord | undefined): PiResult['initialStateModel'] {
+  const stateModel = isJsonRecord(state?.['model']) ? state?.['model'] : undefined;
+  if (stateModel === undefined) return null;
+  return {
+    provider: stringField(stateModel, 'provider') ?? null,
+    model: stringField(stateModel, 'id') ?? null,
+    api: stringField(stateModel, 'api') ?? null,
+  };
 }
 
 function normalizeStatusToolResultDetails(

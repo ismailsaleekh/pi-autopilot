@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { describe, it } from 'node:test';
 
 import { runAutopilotAgentFromSpecPath } from '../../src/core/agent-runner.ts';
@@ -12,11 +13,18 @@ import { coordinatorRuntimePaths } from '../../src/core/coordination/runtime-pat
 import { startCoordinatorServer } from '../../src/core/coordination/server.ts';
 import { DurableRunSupervisorClient } from '../../src/core/coordination/supervisor.ts';
 import {
-  computeAutopilotRosterContractObjectHash,
   parseAutopilotUnitSpecV2,
   type AutopilotRosterRequestProfileV1,
   type AutopilotUnitSpecV2,
 } from '../../src/core/contracts/index.ts';
+import { buildCanonicalPreRunSelection } from '../../src/core/roster/run-selection.ts';
+import { canonicalRosterJson } from '../../src/core/roster/canonical.ts';
+import { resolveRosterScopePaths, rosterRevisionPath } from '../../src/core/roster/paths.ts';
+import { requestProfileFromAssignment } from '../../src/core/roster/runtime-spec.ts';
+
+const MANIFEST = readJsonObject(resolve('design/phase37/roster-contract-freeze.v1.json'));
+const FIXTURES = readJsonObject(resolve('design/phase37/roster-acceptance-fixtures.v1.json'));
+const REGISTRY = objectAt(FIXTURES, 'object_registry');
 
 void describe('agent runner roster v2 identity', () => {
   void it('dry-runs v2 without fixed-roster clamping and writes v2-aware status context', async () => {
@@ -28,8 +36,15 @@ void describe('agent runner roster v2 identity', () => {
       const attachment = await supervisor.attach({ repo: prepared.repo, active: prepared.active, rawSessionId: 'roster-runner-parent' });
       process.env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV] = attachment.contextPath;
 
-      const requestProfile = makeRequestProfile();
-      const unitSpec = parseAutopilotUnitSpecV2(makeUnitSpecV2(prepared.mainWorktreePath, prepared.runtimeRoot, requestProfile));
+      const { selection, assignment, requestProfile } = await installRosterAuthority({
+        stateRoot: process.env[AUTOPILOT_STATE_ROOT_ENV] ?? '',
+        mainWorktreePath: prepared.mainWorktreePath,
+        workstream: prepared.active.workstream,
+        repoId: prepared.active.repo_key,
+        workstreamRun: prepared.active.workstream_run,
+        role: 'validate',
+      });
+      const unitSpec = parseAutopilotUnitSpecV2(makeUnitSpecV2(prepared.mainWorktreePath, prepared.runtimeRoot, requestProfile, selection, assignment));
       const specPath = join(prepared.runtimeRoot, 'unit-specs', 'u01validate.validate.attempt-1.json');
       await mkdir(dirname(specPath), { recursive: true });
       await writeFile(specPath, `${JSON.stringify(unitSpec, null, 2)}\n`, 'utf8');
@@ -47,8 +62,8 @@ void describe('agent runner roster v2 identity', () => {
 
       assert.equal(typeof result.promptSnapshotPath, 'string');
       const prompt = await readFile(result.promptSnapshotPath ?? '', 'utf8');
-      assert.match(prompt, /anthropic\/claude-sonnet-4-5/u);
-      assert.equal(/openai-codex\/gpt-5\.6-sol/u.test(prompt), false);
+      assert.match(prompt, new RegExp(requestProfile.model.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'), 'u'));
+      assert.match(prompt, /autopilot_emit_status/u);
     });
   });
 });
@@ -71,7 +86,13 @@ async function withTempDir<T>(run: (root: string) => Promise<T>): Promise<T> {
   }
 }
 
-function makeUnitSpecV2(mainWorktreePath: string, runtimeRoot: string, requestProfile: AutopilotRosterRequestProfileV1): AutopilotUnitSpecV2 {
+function makeUnitSpecV2(
+  mainWorktreePath: string,
+  runtimeRoot: string,
+  requestProfile: AutopilotRosterRequestProfileV1,
+  selection: Readonly<Record<string, unknown>>,
+  assignment: Readonly<Record<string, unknown>>,
+): AutopilotUnitSpecV2 {
   return {
     schema_version: 'autopilot.unit_spec.v2',
     workstream: 'rosterw3',
@@ -103,11 +124,11 @@ function makeUnitSpecV2(mainWorktreePath: string, runtimeRoot: string, requestPr
     upstream_refs: [],
     timeout_seconds: 60,
     render_prompt_snapshot: true,
-    roster_id: 'anthropicroster',
-    roster_revision: 1,
-    roster_sha256: sha('roster'),
-    assignment_sha256: sha('assignment'),
-    pre_run_selection_sha256: sha('selection'),
+    roster_id: stringAt(selection, 'roster_id'),
+    roster_revision: numberAt(selection, 'roster_revision'),
+    roster_sha256: stringAt(selection, 'roster_sha256'),
+    assignment_sha256: stringAt(assignment, 'assignment_sha256'),
+    pre_run_selection_sha256: stringAt(selection, 'selection_sha256'),
     request_profile: requestProfile,
   };
 }
@@ -124,26 +145,51 @@ function verificationPlan(): AutopilotUnitSpecV2['verification_plan'] {
   };
 }
 
-function makeRequestProfile(): AutopilotRosterRequestProfileV1 {
-  const preimage = {
-    provider_id: 'anthropic',
-    model_id: 'claude-sonnet-4-5',
-    model: 'anthropic/claude-sonnet-4-5',
-    api: 'anthropic-messages' as const,
-    thinking: 'xhigh' as const,
-    service_tier: null,
-    cache_policy: 'provider-default' as const,
-    system_prompt_profile: 'anthropic-autopilot-sanitized.v1' as const,
-    context_window: 200000,
-    max_output_tokens: 64000,
-    input_modalities: ['text'] as const,
-    output_modalities: ['text'] as const,
-    reasoning_capability: 'reasoning-supported' as const,
-    tool_capability: 'tool-use-supported' as const,
-    route_policy_id: 'anthropic-subscription-v1',
-    route_policy_revision: 1,
+async function installRosterAuthority(input: {
+  readonly stateRoot: string;
+  readonly mainWorktreePath: string;
+  readonly workstream: string;
+  readonly repoId: string;
+  readonly workstreamRun: string;
+  readonly role: AutopilotUnitSpecV2['role'];
+}): Promise<{
+  readonly selection: Readonly<Record<string, unknown>>;
+  readonly roster: Readonly<Record<string, unknown>>;
+  readonly assignment: Readonly<Record<string, unknown>>;
+  readonly requestProfile: AutopilotRosterRequestProfileV1;
+}> {
+  const roster = cloneRecord(generatedRoster(1));
+  const assignment = arrayAt(roster, 'assignments').map(objectAtValue).find((entry) => entry['role'] === input.role);
+  if (assignment === undefined) throw new Error(`missing ${input.role} assignment`);
+  const fixtureSelection = objectAt(REGISTRY, 'synthetic_pre_run_selection');
+  const canonicalSelection = buildCanonicalPreRunSelection({
+    stateRoot: input.stateRoot,
+    repo_id: input.repoId,
+    workstream_run: rosterCompatibleWorkstreamRun(input.workstreamRun),
+    selected: {
+      scope: 'user',
+      roster_id: stringAt(roster, 'roster_id'),
+      roster_revision: numberAt(roster, 'roster_revision'),
+      roster_sha256: stringAt(roster, 'roster_sha256') as `sha256:${string}`,
+      assignment_set_sha256: stringAt(roster, 'assignment_set_sha256') as `sha256:${string}`,
+      config_sha256: stringAt(fixtureSelection, 'config_sha256') as `sha256:${string}`,
+    },
+  });
+  await mkdir(dirname(canonicalSelection.selection_path), { recursive: true });
+  await writeFile(canonicalSelection.selection_path, canonicalSelection.selection_bytes);
+  const mirrorPath = resolve(input.mainWorktreePath, '.pi', 'autopilot', input.workstream, 'roster-snapshot.json');
+  await mkdir(dirname(mirrorPath), { recursive: true });
+  await writeFile(mirrorPath, canonicalSelection.selection_bytes);
+  const paths = resolveRosterScopePaths({ scope: 'user', stateRoot: input.stateRoot });
+  const rosterPath = rosterRevisionPath(paths, { roster_id: stringAt(roster, 'roster_id'), roster_revision: numberAt(roster, 'roster_revision') });
+  await mkdir(dirname(rosterPath), { recursive: true });
+  await writeFile(rosterPath, `${canonicalRosterJson(roster)}\n`, 'utf8');
+  return {
+    selection: canonicalSelection.selection as unknown as Readonly<Record<string, unknown>>,
+    roster,
+    assignment,
+    requestProfile: requestProfileFromAssignment(assignment),
   };
-  return { ...preimage, request_profile_sha256: requiredHash('autopilot.request_profile.v1', preimage) };
 }
 
 async function initGitSource(source: string): Promise<void> {
@@ -162,12 +208,46 @@ function git(cwd: string, args: readonly string[]): void {
   assert.equal(result.status, 0, result.stderr);
 }
 
-function requiredHash(schemaVersion: Parameters<typeof computeAutopilotRosterContractObjectHash>[0], value: unknown): `sha256:${string}` {
-  const hash = computeAutopilotRosterContractObjectHash(schemaVersion, value);
-  if (hash === null) throw new Error(`${schemaVersion} has no hash field`);
-  return hash as `sha256:${string}`;
+function rosterCompatibleWorkstreamRun(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]+/gu, '').slice(0, 100) || 'rosterw3run';
 }
 
-function sha(label: string): `sha256:${string}` {
-  return `sha256:${Buffer.from(label).toString('hex').padEnd(64, '0').slice(0, 64)}` as `sha256:${string}`;
+function generatedRoster(index: number): Readonly<Record<string, unknown>> {
+  return objectAt(arrayAt(MANIFEST, 'generated_rosters'), String(index));
+}
+
+function readJsonObject(path: string): Readonly<Record<string, unknown>> {
+  return objectAtValue(JSON.parse(readFileSync(path, 'utf8')) as unknown);
+}
+
+function cloneRecord(value: unknown): Record<string, unknown> {
+  return JSON.parse(JSON.stringify(value)) as Record<string, unknown>;
+}
+
+function objectAt(record: unknown, key: string): Readonly<Record<string, unknown>> {
+  if (Array.isArray(record)) return objectAtValue(record[Number(key)]);
+  return objectAtValue(objectAtValue(record)[key]);
+}
+
+function objectAtValue(value: unknown): Readonly<Record<string, unknown>> {
+  if (typeof value === 'object' && value !== null && !Array.isArray(value)) return value as Readonly<Record<string, unknown>>;
+  throw new Error('expected object fixture value');
+}
+
+function arrayAt(record: Readonly<Record<string, unknown>>, key: string): readonly unknown[] {
+  const value = record[key];
+  if (Array.isArray(value)) return value;
+  throw new Error(`expected array fixture value at ${key}`);
+}
+
+function stringAt(record: unknown, key: string): string {
+  const value = objectAtValue(record)[key];
+  if (typeof value === 'string') return value;
+  throw new Error(`expected string value at ${key}`);
+}
+
+function numberAt(record: unknown, key: string): number {
+  const value = objectAtValue(record)[key];
+  if (typeof value === 'number') return value;
+  throw new Error(`expected number value at ${key}`);
 }

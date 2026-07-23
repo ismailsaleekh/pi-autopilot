@@ -2,8 +2,10 @@ import { createHash } from 'node:crypto';
 import { closeSync, constants as fsConstants, existsSync, fstatSync, lstatSync, openSync, readFileSync, realpathSync } from 'node:fs';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 
-import { parseAutopilotEventRow, parseAutopilotExecutionAudit, parseAutopilotReceipt, parseAutopilotStatusEntry, parseAutopilotUnitSpec } from '../contracts/index.ts';
-import type { AutopilotExecutionAudit, AutopilotStatusEntry, AutopilotUnitSpec } from '../contracts/types.ts';
+import { parseAutopilotEventRow, parseAutopilotExecutionAudit, parseAutopilotReceipt, parseAutopilotReceiptV2, parseAutopilotStatusEntry, parseAutopilotUnitSpec, parseAutopilotUnitSpecV2 } from '../contracts/index.ts';
+import type { AutopilotExecutionAudit, AutopilotReceipt, AutopilotReceiptV2, AutopilotStatusEntry, AutopilotUnitSpec, AutopilotUnitSpecV2 } from '../contracts/types.ts';
+import { lowerAutopilotUnitSpecV2ToV1 } from '../forced-output/identity.ts';
+import { validateReceiptV2TerminalCompatibility } from '../roster/artifact-compatibility.ts';
 import { assertAutopilotChildTerminalAcceptanceChain, autopilotAuditProvesZeroSourceChange, parseAutopilotChildTerminalAcceptance } from './terminal-acceptance.ts';
 import type { CoordinationChildLease, CoordinationEvidenceRef } from './types.ts';
 
@@ -38,6 +40,30 @@ function digest(bytes: Uint8Array): `sha256:${string}` {
 
 function json(bytes: Uint8Array, label: string): unknown {
   return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)) as unknown;
+}
+
+function parseTerminalProofUnitSpec(bytes: Uint8Array): { readonly original: AutopilotUnitSpec | AutopilotUnitSpecV2; readonly lowered: AutopilotUnitSpec } {
+  const parsed = json(bytes, 'unit spec');
+  if (isJsonRecord(parsed) && parsed['schema_version'] === 'autopilot.unit_spec.v2') {
+    const original = parseAutopilotUnitSpecV2(parsed);
+    return { original, lowered: lowerAutopilotUnitSpecV2ToV1(original) };
+  }
+  const spec = parseAutopilotUnitSpec(parsed);
+  return { original: spec, lowered: spec };
+}
+
+function parseTerminalProofReceipt(bytes: Uint8Array, spec: AutopilotUnitSpec | AutopilotUnitSpecV2, statusPath: string): AutopilotReceipt | AutopilotReceiptV2 {
+  const parsed = json(bytes, 'receipt output');
+  if (isJsonRecord(parsed) && parsed['schema_version'] === 'autopilot.receipt.v2') {
+    if (spec.schema_version !== 'autopilot.unit_spec.v2') throw new Error('receipt.v2 requires unit_spec.v2 terminal proof bytes');
+    return parseAutopilotReceiptV2(parsed);
+  }
+  if (spec.schema_version === 'autopilot.unit_spec.v2') throw new Error('unit_spec.v2 terminal proof requires native receipt.v2 bytes');
+  return parseAutopilotReceipt(parsed, { statusOutputPath: statusPath });
+}
+
+function isJsonRecord(value: unknown): value is Readonly<Record<string, unknown>> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function artifact(authorityRoot: string, path: string, label: string): TrustedTerminalArtifact {
@@ -92,8 +118,9 @@ export function proveStructuredAttemptTerminal(input: {
     inspectedPaths.push(specPath);
     const specArtifact = artifact(input.mainWorktreePath, specPath, 'unit spec');
     if (specArtifact.sha256 !== input.spec.sha256) return unproven('unit spec hash differs from the coordinator attempt identity', inspectedPaths);
-    const spec = parseAutopilotUnitSpec(json(specArtifact.bytes, 'unit spec'));
-    if (spec.workstream !== input.workstream || spec.unit_id !== input.unitId || spec.attempt !== input.attempt) return unproven('unit spec identity differs from the durable attempt', inspectedPaths);
+    const parsedSpec = parseTerminalProofUnitSpec(specArtifact.bytes);
+    const spec = parsedSpec.lowered;
+    if (parsedSpec.original.workstream !== input.workstream || parsedSpec.original.unit_id !== input.unitId || parsedSpec.original.attempt !== input.attempt) return unproven('unit spec identity differs from the durable attempt', inspectedPaths);
     const statusPath = underRoot(input.mainWorktreePath, spec.status_output, 'status output');
     const receiptPath = underRoot(input.mainWorktreePath, spec.receipt_output, 'receipt output');
     const auditPath = underRoot(input.mainWorktreePath, resolve(input.runtimeRoot, 'execution-audits', `${spec.unit_id}.${spec.role}.attempt-${String(spec.attempt)}.json`), 'execution audit');
@@ -103,7 +130,7 @@ export function proveStructuredAttemptTerminal(input: {
     const statusArtifact = artifact(input.mainWorktreePath, statusPath, 'status output');
     const status = parseAutopilotStatusEntry(json(statusArtifact.bytes, 'status output'), { unitSpec: spec, artifactRoot: input.runtimeRoot, executionAudit: audit });
     const receiptArtifact = artifact(input.mainWorktreePath, receiptPath, 'receipt output');
-    const receipt = parseAutopilotReceipt(json(receiptArtifact.bytes, 'receipt output'), { statusOutputPath: statusPath });
+    const receipt = parseTerminalProofReceipt(receiptArtifact.bytes, parsedSpec.original, statusPath);
     if (status.workstream !== input.workstream || status.unit_id !== input.unitId || status.role !== spec.role || status.attempt !== input.attempt || audit.workstream !== input.workstream || audit.unit_id !== input.unitId || audit.role !== spec.role || audit.attempt !== input.attempt || receipt.workstream !== input.workstream || receipt.unit_id !== input.unitId || receipt.role !== spec.role || receipt.attempt !== input.attempt) return unproven('status, receipt, audit, and spec identities disagree', inspectedPaths);
     const sourceChanging = spec.role === 'implement' || spec.role === 'fix';
     if (audit.truncated_path_sets.length > 0 || audit.baseline_head === null || audit.post_run_head === null || audit.head_change_kind === 'rewrite' || audit.head_change_kind === 'unavailable' || audit.dirty_baseline !== false) return unproven('execution audit does not completely account for a stable clean-baseline Git transition', inspectedPaths);
@@ -123,9 +150,19 @@ export function proveStructuredAttemptTerminal(input: {
         pid: 1, boot_id: 'terminal-repair-proof', lease_expires_at: acceptance.created_at, status: 'recovery-required', terminal_evidence: null, version: 1,
       };
       assertAutopilotChildTerminalAcceptanceChain({ acceptance, child, specBytes: specArtifact.bytes, statusBytes: statusArtifact.bytes, receiptBytes: receiptArtifact.bytes, auditBytes: auditArtifact.bytes });
+      if (receipt.schema_version === 'autopilot.receipt.v2') {
+        const validation = validateReceiptV2TerminalCompatibility({
+          unit_spec_bytes_utf8: new TextDecoder('utf-8', { fatal: true }).decode(specArtifact.bytes),
+          receipt_bytes_utf8: new TextDecoder('utf-8', { fatal: true }).decode(receiptArtifact.bytes),
+          terminal_acceptance: acceptance,
+        });
+        if (!validation.ok) return unproven(`receipt.v2 terminal compatibility failed: ${validation.diagnostics.map((diagnostic) => diagnostic.code).join(', ')}`, inspectedPaths);
+      }
       if (acceptance.spec.ref !== specArtifact.ref || acceptance.status.ref !== statusArtifact.ref || acceptance.receipt.ref !== receiptArtifact.ref || acceptance.audit.ref !== auditArtifact.ref) return unproven('terminal acceptance artifact refs differ from the durable attempt artifact paths', inspectedPaths);
       terminalEvidence = acceptanceArtifact;
       transportProof = `parent-terminal-acceptance:${acceptanceArtifact.sha256}`;
+    } else if (parsedSpec.original.schema_version === 'autopilot.unit_spec.v2' || receipt.schema_version === 'autopilot.receipt.v2') {
+      return unproven('receipt.v2 terminal repair requires native child terminal acceptance evidence', inspectedPaths);
     } else {
       const eventsPath = underRoot(input.mainWorktreePath, resolve(input.runtimeRoot, 'events.jsonl'), 'parent event ledger');
       inspectedPaths.push(eventsPath);
