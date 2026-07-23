@@ -327,7 +327,9 @@ export function runDisposition(input) {
         if (authorityVersion === null || worktreeVersion === null || authorityVersion !== worktreeVersion)
             authorityMismatchCount += 1;
     }
-    const terminalIntentCount = sqlInteger(sqliteRows(input.database, 'SELECT COUNT(*) AS count FROM run_terminal_intents WHERE repo_id=? AND workstream_run=?', [repoId, workstreamRun])[0] ?? {}, 'count', 'run_terminal_intents');
+    const terminalIntentCount = sqlInteger(sqliteRows(input.database, "SELECT COUNT(*) AS count FROM run_terminal_intents WHERE repo_id=? AND workstream_run=? AND json_extract(payload_json, '$.state')='committed'", [repoId, workstreamRun])[0] ?? {}, 'count', 'run_terminal_intents');
+    const runStatus = sqlText(input.run, 'status', 'runs');
+    const terminalRecoverySupported = (runStatus === 'closed' || runStatus === 'aborted') && terminalIntentCount > 0;
     const staleLeaseCount = sqlInteger(sqliteRows(input.database, "SELECT COUNT(*) AS count FROM session_leases WHERE repo_id=? AND workstream_run=? AND status!='detached'", [repoId, workstreamRun])[0] ?? {}, 'count', 'session_leases');
     const terminalRetainedLeases = sqlInteger(sqliteRows(input.database, "SELECT COUNT(*) AS count FROM edit_leases leases JOIN unit_attempts attempts ON attempts.repo_id=leases.repo_id AND attempts.workstream_run=leases.workstream_run AND json_extract(attempts.payload_json, '$.owner.unit_id')=json_extract(leases.payload_json, '$.owner.unit_id') AND json_extract(attempts.payload_json, '$.owner.attempt')=json_extract(leases.payload_json, '$.owner.attempt') WHERE leases.repo_id=? AND leases.workstream_run=? AND json_extract(attempts.payload_json, '$.state') IN ('merged','failed','reset','quarantined','superseded')", [repoId, workstreamRun])[0] ?? {}, 'count', 'terminal retained edit leases');
     const terminalCoveredByPendingRecovery = sqlInteger(sqliteRows(input.database, "SELECT COUNT(*) AS count FROM edit_leases leases JOIN unit_attempts attempts ON attempts.repo_id=leases.repo_id AND attempts.workstream_run=leases.workstream_run AND json_extract(attempts.payload_json, '$.owner.unit_id')=json_extract(leases.payload_json, '$.owner.unit_id') AND json_extract(attempts.payload_json, '$.owner.attempt')=json_extract(leases.payload_json, '$.owner.attempt') WHERE leases.repo_id=? AND leases.workstream_run=? AND json_extract(attempts.payload_json, '$.state') IN ('merged','failed','reset','quarantined','superseded') AND EXISTS(SELECT 1 FROM migration_recovery_work work WHERE work.repo_id=leases.repo_id AND work.workstream_run=leases.workstream_run AND work.status='pending' AND json_extract(work.payload_json, '$.edit_lease_id')=leases.entity_id)", [repoId, workstreamRun])[0] ?? {}, 'count', 'terminal retained edit leases covered by pending recovery');
@@ -336,13 +338,13 @@ export function runDisposition(input) {
         : incompleteOperations > 0
             ? 'operation-authority-version-mismatch-recovered'
             : 'no-operation-authority-version-mismatch';
-    const attachmentStrategy = pendingMigration > 0 || incompleteOperations > 0 ? 'owned-recovery' : 'safe-attachment';
-    const terminalLease = terminalRetainedLeases > 0 ? 'retained-terminal-attempt-reconciled' : 'no-retained-terminal-attempt-lease';
+    const terminalLease = terminalRetainedLeases > 0 ? 'retained-terminal-attempt-recovery-required' : 'no-retained-terminal-attempt-lease';
+    const attachmentStrategy = pendingMigration > 0 || incompleteOperations > 0 || terminalRetainedLeases > 0 ? 'owned-recovery' : 'safe-attachment';
     return Object.freeze({
         attachment_strategy: attachmentStrategy,
         terminal_attempt_lease: terminalLease,
         authority_version_mismatch: mismatch,
-        phase36_evidence: Object.freeze({ pending_migration_recovery: pendingMigration, incomplete_owned_operations: incompleteOperations, authority_version_mismatch_count: authorityMismatchCount, terminal_intents: terminalIntentCount, retained_non_detached_leases: staleLeaseCount, terminal_retained_attempt_edit_leases: terminalRetainedLeases, terminal_retained_attempt_leases_covered_by_pending_recovery: terminalCoveredByPendingRecovery, attachment_strategy: attachmentStrategy, terminal_attempt_lease: terminalLease, authority_version_mismatch: mismatch }),
+        phase36_evidence: Object.freeze({ pending_migration_recovery: pendingMigration, incomplete_owned_operations: incompleteOperations, authority_version_mismatch_count: authorityMismatchCount, terminal_intents: terminalIntentCount, terminal_recovery_supported: terminalRecoverySupported ? 1 : 0, retained_non_detached_leases: staleLeaseCount, terminal_retained_attempt_edit_leases: terminalRetainedLeases, terminal_retained_attempt_leases_covered_by_pending_recovery: terminalCoveredByPendingRecovery, attachment_strategy: attachmentStrategy, terminal_attempt_lease: terminalLease, authority_version_mismatch: mismatch }),
     });
 }
 async function discoverDurableRuns(input) {
@@ -493,6 +495,8 @@ export async function writeRehearsalResult(clone) {
         throw new Error('S2-D result path must remain absent until the gate is complete');
     const observedRows = await Promise.all(clone.corpora.flatMap((corpus) => corpus.durable_runs).map(async (run) => await runCandidateSubprocess(run)));
     const observed = Object.freeze({ action_results: Object.freeze(observedRows.flatMap((row) => row.action_results)), new_blockers: Object.freeze(observedRows.flatMap((row) => row.new_blockers)) });
+    if (observed.new_blockers.length !== 0)
+        throw new Error(`S2-D candidate subprocess returned blockers before release result: ${observed.new_blockers.map((blocker) => `${blocker.code}:${blocker.run_id_sha256 ?? 'global'}`).sort(compareCodeUnits).join(',')}`);
     const live = { source_after: await liveSourceWitnesses(clone), database_after: await liveDatabaseWitnesses(clone), git_after: await liveGitWitnesses(clone) };
     const result = rehearseManifest(clone.manifest, observed, live);
     await mkdir(dirname(clone.request.result_path), { recursive: true, mode: 0o700 });

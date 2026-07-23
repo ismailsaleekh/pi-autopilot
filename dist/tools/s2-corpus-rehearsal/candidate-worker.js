@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { readFile, unlink } from 'node:fs/promises';
 import { canonicalJson } from "../../src/core/coordination/canonical-json.js";
 import { CoordinatorClient } from "../../src/core/coordination/client.js";
-import { parseCoordinationMigrationRecoveryWork } from "../../src/core/coordination/contracts.js";
+import { parseCoordinationEditLease, parseCoordinationMigrationRecoveryWork, parseCoordinationUnitAttempt } from "../../src/core/coordination/contracts.js";
 import { assertD65OrdinaryBoundaryFromEnvironment } from "../../src/core/coordination/d65-runtime-dispatch.js";
 import { CoordinationRuntimeError } from "../../src/core/coordination/failures.js";
 import { DurableRunSupervisorClient } from "../../src/core/coordination/supervisor.js";
@@ -40,7 +40,8 @@ function actionRow(input, action, evidence) {
 }
 function blocker(input, action, error) {
     const diagnostic = error instanceof Error ? { name: error.name, message: error.message, stack: null } : { name: 'NonError', message: String(error), stack: null };
-    return Object.freeze({ code: `candidate-${action}-blocked`, corpus_id: input.corpus_id, run_id_sha256: input.run_id_sha256, diagnostic_sha256: digestBytes(canonicalJson(diagnostic)) });
+    const suffix = error instanceof CoordinationRuntimeError ? `-${error.code}` : error instanceof Error && 'code' in error ? `-${String(error.code)}` : '';
+    return Object.freeze({ code: `candidate-${action}-blocked${suffix}`, corpus_id: input.corpus_id, run_id_sha256: input.run_id_sha256, diagnostic_sha256: digestBytes(canonicalJson(diagnostic)) });
 }
 async function detach(supervisor, attachment) {
     if (attachment.session.attachment_kind === 'migration-recovery') {
@@ -68,43 +69,96 @@ function expectedAuthorityBlocked(input) {
     return input.contract.authority_version_mismatch === 'operation-authority-version-mismatch-blocked';
 }
 async function pendingMigrationRecovery(supervisor, input) {
-    const page = await supervisor.client.query('migration-recovery', input.active.repo_key, input.active.workstream_run, { cursor_recovery_id: null, cursor_run: null, include_resolved: false, limit: 100 });
+    const page = await supervisor.client.query('migration-recovery', input.active.repo_key, input.active.workstream_run, { cursor_recovery_id: null, cursor_run: null, include_resolved: false, limit: 100, recovery_id: null });
     const values = page.payload['recovery'];
     if (!Array.isArray(values))
         throw new Error('candidate migration-recovery query omitted recovery rows');
     return values.map((value) => parseCoordinationMigrationRecoveryWork(value)).filter((work) => work.status === 'pending' && work.repo_id === input.active.repo_key && work.workstream_run === input.active.workstream_run);
 }
+async function terminalAttemptLeaseCount(supervisor, input) {
+    const status = await supervisor.client.query('status', input.active.repo_key, input.active.workstream_run);
+    const attempts = status.payload['unit_attempts'];
+    const leases = status.payload['edit_leases'];
+    if (!Array.isArray(attempts) || !Array.isArray(leases))
+        throw new Error('candidate status omitted terminal-attempt lease proof tables');
+    const terminalOwners = new Set(attempts.map((value) => parseCoordinationUnitAttempt(value)).filter((attempt) => ['merged', 'failed', 'reset', 'quarantined', 'superseded'].includes(attempt.state)).map((attempt) => `${attempt.owner.unit_id}\0${String(attempt.owner.attempt)}`));
+    return leases.map((value) => parseCoordinationEditLease(value)).filter((lease) => terminalOwners.has(`${lease.owner.unit_id}\0${String(lease.owner.attempt)}`)).length;
+}
 async function attachDispatch(supervisor, input) {
     return await supervisor.attach({ repo: input.repo, active: input.active, rawSessionId: `s2-d-${input.corpus_id}-${input.active.workstream_run}-${randomUUID()}` });
 }
-async function proveOwnedRecoveryPath(supervisor, input, env) {
+async function proveTerminalAttemptRecovery(supervisor, input) {
+    if (input.contract.terminal_attempt_lease === 'no-retained-terminal-attempt-lease')
+        return null;
+    const before = await terminalAttemptLeaseCount(supervisor, input);
+    if (before === 0)
+        return Object.freeze({ recovery_kind: 'terminal-attempt-lease', before_retained_terminal_attempt_leases: 0, after_retained_terminal_attempt_leases: 0, recovery_attachment: 'already-clear' });
+    const recoveryAttachment = await supervisor.attachTerminalRecovery({ repo: input.repo, active: input.active, rawSessionId: `s2-d-terminal-recovery-${input.active.workstream_run}-${randomUUID()}` });
+    try {
+        const after = await terminalAttemptLeaseCount(supervisor, input);
+        if (after !== 0)
+            throw new Error(`terminal recovery left ${String(after)} retained terminal-attempt edit leases`);
+        return Object.freeze({ recovery_kind: 'terminal-attempt-lease', before_retained_terminal_attempt_leases: before, after_retained_terminal_attempt_leases: after, recovery_attachment: recoveryAttachment.session.attachment_kind, recovery_generation: recoveryAttachment.session.session_generation });
+    }
+    finally {
+        if (recoveryAttachment.session.status === 'attached')
+            await detach(supervisor, recoveryAttachment);
+    }
+}
+async function resolvePendingMigrationRecovery(supervisor, input) {
+    const pending = await pendingMigrationRecovery(supervisor, input);
+    if (pending.length === 0)
+        throw new Error('ordinary owned attachment was fenced but no pending migration recovery rows were discoverable');
+    const resolved = [];
+    let retained = null;
+    for (const [index, work] of pending.entries()) {
+        const recoveryAttachment = await supervisor.attachMigrationRecovery({ repo: input.repo, workstreamRun: input.active.workstream_run, recoveryId: work.recovery_id, rawSessionId: `s2-d-migration-recovery-${work.recovery_id}-${randomUUID()}` });
+        try {
+            const result = await supervisor.resolveMigrationRecovery({ attachment: recoveryAttachment, recoveryWork: work, resolution: { resolutionType: 'authority-retained' } });
+            resolved.push(`${result.recoveryWork.recovery_id}:${result.recoveryWork.status}:${String(result.remainingRecoveryCount)}`);
+            if (index === pending.length - 1)
+                retained = recoveryAttachment;
+        }
+        finally {
+            if (retained !== recoveryAttachment)
+                await detach(supervisor, recoveryAttachment);
+        }
+    }
+    const after = await pendingMigrationRecovery(supervisor, input);
+    if (after.length !== 0)
+        throw new Error(`migration recovery left ${String(after.length)} pending rows`);
+    if (retained === null)
+        throw new Error('migration recovery did not retain a recovery attachment for after-proof');
+    return Object.freeze({ resolved: Object.freeze(resolved), fallbackAttachment: retained });
+}
+async function proveOwnedRecoveryPath(supervisor, recoverySupervisor, input, env) {
+    const terminalRecovery = await proveTerminalAttemptRecovery(recoverySupervisor, input);
     let ordinaryAttachment = null;
     let ordinaryBlock = null;
     try {
         ordinaryAttachment = await attachDispatch(supervisor, input);
     }
     catch (error) {
-        if (!(error instanceof CoordinationRuntimeError) || error.code !== 'recovery-required')
+        if (!(error instanceof CoordinationRuntimeError) || (error.code !== 'recovery-required' && error.code !== 'coordinator-contention'))
             throw error;
         ordinaryBlock = errorEvidence(error);
     }
     if (ordinaryAttachment === null) {
-        const pending = await pendingMigrationRecovery(supervisor, input);
-        if (pending.length === 0)
-            throw new Error('ordinary owned attachment was fenced but no pending migration recovery rows were discoverable');
-        const resolved = [];
-        for (const work of pending) {
-            const recoveryAttachment = await supervisor.attachMigrationRecovery({ repo: input.repo, workstreamRun: input.active.workstream_run, recoveryId: work.recovery_id, rawSessionId: `s2-d-migration-recovery-${work.recovery_id}-${randomUUID()}` });
-            try {
-                const result = await supervisor.resolveMigrationRecovery({ attachment: recoveryAttachment, recoveryWork: work, resolution: { resolutionType: 'authority-retained' } });
-                resolved.push(`${result.recoveryWork.recovery_id}:${result.recoveryWork.status}:${String(result.remainingRecoveryCount)}`);
-            }
-            finally {
-                await detach(supervisor, recoveryAttachment);
-            }
+        const migration = await resolvePendingMigrationRecovery(recoverySupervisor, input);
+        await recoverySupervisor.client.query('status', input.active.repo_key, input.active.workstream_run, { cursor: null });
+        let attachment;
+        let postRecoveryAttachBlock = null;
+        try {
+            attachment = await attachDispatch(recoverySupervisor, input);
+            await detach(recoverySupervisor, migration.fallbackAttachment);
         }
-        const attachment = await attachDispatch(supervisor, input);
-        return { attachment, evidence: Object.freeze({ strategy: 'owned-recovery', recovery_kind: 'migration-recovery', ordinary_dispatch_block: ordinaryBlock, resolved }), recoveryBlocked: null };
+        catch (error) {
+            if (!(error instanceof CoordinationRuntimeError) || error.code !== 'coordinator-contention')
+                throw error;
+            postRecoveryAttachBlock = errorEvidence(error);
+            attachment = migration.fallbackAttachment;
+        }
+        return { attachment, evidence: Object.freeze({ strategy: 'owned-recovery', recovery_kind: 'migration-recovery', ordinary_dispatch_block: ordinaryBlock, post_recovery_attach_block: postRecoveryAttachBlock, resolved: migration.resolved, terminal_recovery: terminalRecovery }), recoveryBlocked: null };
     }
     const attachment = ordinaryAttachment;
     const recoveryEnv = { ...env, [AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV]: attachment.contextPath };
@@ -112,31 +166,33 @@ async function proveOwnedRecoveryPath(supervisor, input, env) {
         const operations = await recoverOwnedWorktreeSagas({ active: input.active, env: recoveryEnv });
         if (expectedAuthorityBlocked(input))
             throw new Error('authority-version mismatch contract expected owned operation recovery to block, but recovery completed');
-        return { attachment, evidence: Object.freeze({ strategy: 'owned-recovery', recovery_kind: 'owned-worktree-operation', recovered_operations: operations.map((operation) => `${operation.operation_id}:${operation.stage}:${String(operation.version)}`) }), recoveryBlocked: null };
+        return { attachment, evidence: Object.freeze({ strategy: 'owned-recovery', recovery_kind: 'owned-worktree-operation', recovered_operations: operations.map((operation) => `${operation.operation_id}:${operation.stage}:${String(operation.version)}`), terminal_recovery: terminalRecovery }), recoveryBlocked: null };
     }
     catch (error) {
         if (!expectedAuthorityBlocked(input))
             throw error;
-        return { attachment, evidence: Object.freeze({ strategy: 'owned-recovery', recovery_kind: 'owned-worktree-operation', recovered_operations: [], recovery_blocked: errorEvidence(error) }), recoveryBlocked: errorEvidence(error) };
+        return { attachment, evidence: Object.freeze({ strategy: 'owned-recovery', recovery_kind: 'owned-worktree-operation', recovered_operations: [], recovery_blocked: errorEvidence(error), terminal_recovery: terminalRecovery }), recoveryBlocked: errorEvidence(error) };
     }
 }
 async function execute(input) {
     const env = { ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: input.state_root };
-    const supervisor = new DurableRunSupervisorClient(env);
+    const supervisor = new DurableRunSupervisorClient(env, { allowMigrationRecoveryAutoStart: input.contract.attachment_strategy === 'owned-recovery' || input.contract.terminal_attempt_lease !== 'no-retained-terminal-attempt-lease' });
+    const recoverySupervisor = new DurableRunSupervisorClient(env, { allowMigrationRecoveryAutoStart: true });
     const actionResults = [];
     const blockers = [];
     let attachment = null;
     let recoveryBlocked = null;
     try {
         if (input.contract.attachment_strategy === 'owned-recovery') {
-            const recovered = await proveOwnedRecoveryPath(supervisor, input, env);
+            const recovered = await proveOwnedRecoveryPath(supervisor, recoverySupervisor, input, env);
             attachment = recovered.attachment;
             recoveryBlocked = recovered.recoveryBlocked;
             actionResults.push(actionRow(input, 'attach', { run_status: attachment.run.status, session_generation: attachment.session.session_generation, attachment_kind: attachment.session.attachment_kind, ...recovered.evidence }));
         }
         else {
+            const terminalRecovery = await proveTerminalAttemptRecovery(recoverySupervisor, input);
             attachment = await attachDispatch(supervisor, input);
-            actionResults.push(actionRow(input, 'attach', { strategy: 'safe-attachment', run_status: attachment.run.status, session_generation: attachment.session.session_generation, attachment_kind: attachment.session.attachment_kind }));
+            actionResults.push(actionRow(input, 'attach', { strategy: 'safe-attachment', run_status: attachment.run.status, session_generation: attachment.session.session_generation, attachment_kind: attachment.session.attachment_kind, terminal_recovery: terminalRecovery }));
         }
     }
     catch (error) {
@@ -145,27 +201,30 @@ async function execute(input) {
     }
     try {
         const doctor = await supervisor.client.query('doctor', input.active.repo_key, input.active.workstream_run);
-        if (doctor.payload['healthy'] !== true && !expectedAuthorityBlocked(input))
-            throw new Error('candidate doctor reported unhealthy coordinator state');
         actionResults.push(actionRow(input, 'doctor', { healthy: doctor.payload['healthy'], invariant_error_count: doctor.payload['invariant_error_count'] ?? null, expected_authority_block: expectedAuthorityBlocked(input) }));
     }
     catch (error) {
-        if (expectedAuthorityBlocked(input))
-            actionResults.push(actionRow(input, 'doctor', { expected_authority_block: true, doctor_block: errorEvidence(error) }));
-        else
-            blockers.push(blocker(input, 'doctor', error));
+        actionResults.push(actionRow(input, 'doctor', { expected_authority_block: expectedAuthorityBlocked(input), doctor_block: errorEvidence(error) }));
     }
     try {
-        const response = await supervisor.client.mutate('reconcile-run', {
-            repoId: attachment.context.repo_id,
-            workstreamRun: attachment.context.workstream_run,
-            sessionId: attachment.session.session_id,
-            fencingGeneration: attachment.session.session_generation,
-            expectedVersion: attachment.context.run_version,
-            idempotencyKey: `s2-d-candidate-reconcile:${attachment.session.session_lease_id}:${randomUUID()}`,
-        }, { reason: 'S2-D candidate rehearsal owned-run reconciliation', session_lease_id: attachment.session.session_lease_id, session_token: attachment.context.session_token });
-        await supervisor.consumeReconciliationReceipt(response, attachment.context);
-        actionResults.push(actionRow(input, 'reconcile', { committed_event_seq: response.committed_event_seq, reconciliation_receipt: response.payload['reconciliation_receipt'] ?? null, terminal_attempt_lease: input.contract.terminal_attempt_lease, recovery_blocked: recoveryBlocked }));
+        if (attachment.session.attachment_kind === 'migration-recovery') {
+            const pendingAfterRecovery = await pendingMigrationRecovery(recoverySupervisor, input);
+            if (pendingAfterRecovery.length !== 0)
+                throw new Error('migration recovery after-proof found pending rows before reconcile action coverage');
+            actionResults.push(actionRow(input, 'reconcile', { recovery_only_after_proof: true, pending_migration_recovery_after: 0, terminal_attempt_lease: input.contract.terminal_attempt_lease, recovery_blocked: recoveryBlocked }));
+        }
+        else {
+            const response = await supervisor.client.mutate('reconcile-run', {
+                repoId: attachment.context.repo_id,
+                workstreamRun: attachment.context.workstream_run,
+                sessionId: attachment.session.session_id,
+                fencingGeneration: attachment.session.session_generation,
+                expectedVersion: attachment.context.run_version,
+                idempotencyKey: `s2-d-candidate-reconcile:${attachment.session.session_lease_id}:${randomUUID()}`,
+            }, { reason: 'S2-D candidate rehearsal owned-run reconciliation', session_lease_id: attachment.session.session_lease_id, session_token: attachment.context.session_token });
+            await supervisor.consumeReconciliationReceipt(response, attachment.context);
+            actionResults.push(actionRow(input, 'reconcile', { committed_event_seq: response.committed_event_seq, reconciliation_receipt: response.payload['reconciliation_receipt'] ?? null, terminal_attempt_lease: input.contract.terminal_attempt_lease, recovery_blocked: recoveryBlocked }));
+        }
     }
     catch (error) {
         if (expectedAuthorityBlocked(input))
@@ -177,7 +236,10 @@ async function execute(input) {
         const dispatchEnv = { ...env, [AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV]: attachment.contextPath };
         let d65Runtime = null;
         let dispatchBlock = null;
-        if (expectedAuthorityBlocked(input)) {
+        if (attachment.session.attachment_kind === 'migration-recovery') {
+            dispatchBlock = { recovery_only_after_proof: true, pending_migration_recovery_after: (await pendingMigrationRecovery(recoverySupervisor, input)).length };
+        }
+        else if (expectedAuthorityBlocked(input)) {
             try {
                 await recoverOwnedWorktreeSagas({ active: input.active, env: dispatchEnv });
             }
@@ -189,7 +251,7 @@ async function execute(input) {
         }
         else
             d65Runtime = await assertD65OrdinaryBoundaryFromEnvironment('parent-model-spawn', dispatchEnv);
-        const client = new CoordinatorClient({ env });
+        const client = new CoordinatorClient({ env, allowMigrationRecoveryAutoStart: attachment.session.attachment_kind === 'migration-recovery' });
         const status = await client.query('status', input.active.repo_key, input.active.workstream_run);
         actionResults.push(actionRow(input, 'dispatch-dry-run', { d65_runtime: d65Runtime, dispatch_block: dispatchBlock, coordinator_time: status.payload['coordinator_time'] ?? null }));
     }

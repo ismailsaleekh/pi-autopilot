@@ -64,7 +64,7 @@ function manifestFixture(): Record<string, unknown> {
     isolation_proofs: proofs(),
     durable_runs: [
       { corpus_id: 'corpus', run_id_sha256: sha(30), repo_id_sha256: sha(31), required_actions: ['attach', 'doctor', 'reconcile', 'dispatch-dry-run'], attachment_strategy: 'safe-attachment', terminal_attempt_lease: 'no-retained-terminal-attempt-lease', authority_version_mismatch: 'no-operation-authority-version-mismatch', evidence_sha256: sha(32) },
-      { corpus_id: 'corpus', run_id_sha256: sha(33), repo_id_sha256: sha(31), required_actions: ['attach', 'doctor', 'reconcile', 'dispatch-dry-run'], attachment_strategy: 'owned-recovery', terminal_attempt_lease: 'retained-terminal-attempt-reconciled', authority_version_mismatch: 'operation-authority-version-mismatch-recovered', evidence_sha256: sha(34) },
+      { corpus_id: 'corpus', run_id_sha256: sha(33), repo_id_sha256: sha(31), required_actions: ['attach', 'doctor', 'reconcile', 'dispatch-dry-run'], attachment_strategy: 'owned-recovery', terminal_attempt_lease: 'retained-terminal-attempt-recovery-required', authority_version_mismatch: 'operation-authority-version-mismatch-recovered', evidence_sha256: sha(34) },
     ],
   };
 }
@@ -109,15 +109,15 @@ void describe('S2-D corpus contracts', () => {
         CREATE TABLE migration_recovery_work(repo_id TEXT, workstream_run TEXT, status TEXT, payload_json TEXT);
         CREATE TABLE worktree_operations(entity_id TEXT, repo_id TEXT, workstream_run TEXT, payload_json TEXT);
         CREATE TABLE worktrees(entity_id TEXT, repo_id TEXT, workstream_run TEXT, payload_json TEXT, version INTEGER);
-        CREATE TABLE run_terminal_intents(repo_id TEXT, workstream_run TEXT);
+        CREATE TABLE run_terminal_intents(repo_id TEXT, workstream_run TEXT, payload_json TEXT);
         CREATE TABLE session_leases(repo_id TEXT, workstream_run TEXT, status TEXT);
         CREATE TABLE edit_leases(entity_id TEXT, repo_id TEXT, workstream_run TEXT, payload_json TEXT);
         CREATE TABLE unit_attempts(repo_id TEXT, workstream_run TEXT, payload_json TEXT);
       `);
-      const run = { repo_id: 'repo', workstream_run: 'run' };
+      const run = { repo_id: 'repo', workstream_run: 'run', status: 'active' };
       assert.deepEqual(runDisposition({ database, run, resource: {} }), {
         attachment_strategy: 'safe-attachment', terminal_attempt_lease: 'no-retained-terminal-attempt-lease', authority_version_mismatch: 'no-operation-authority-version-mismatch',
-        phase36_evidence: { pending_migration_recovery: 0, incomplete_owned_operations: 0, authority_version_mismatch_count: 0, terminal_intents: 0, retained_non_detached_leases: 0, terminal_retained_attempt_edit_leases: 0, terminal_retained_attempt_leases_covered_by_pending_recovery: 0, attachment_strategy: 'safe-attachment', terminal_attempt_lease: 'no-retained-terminal-attempt-lease', authority_version_mismatch: 'no-operation-authority-version-mismatch' },
+        phase36_evidence: { pending_migration_recovery: 0, incomplete_owned_operations: 0, authority_version_mismatch_count: 0, terminal_intents: 0, terminal_recovery_supported: 0, retained_non_detached_leases: 0, terminal_retained_attempt_edit_leases: 0, terminal_retained_attempt_leases_covered_by_pending_recovery: 0, attachment_strategy: 'safe-attachment', terminal_attempt_lease: 'no-retained-terminal-attempt-lease', authority_version_mismatch: 'no-operation-authority-version-mismatch' },
       });
       database.prepare('INSERT INTO worktrees VALUES(?,?,?,?,?)').run('worktree', 'repo', 'run', JSON.stringify({ version: 3 }), 3);
       database.prepare('INSERT INTO worktree_operations VALUES(?,?,?,?)').run('op-ok', 'repo', 'run', JSON.stringify({ worktree_id: 'worktree', stage: 'prepared', authority_version: 3 }));
@@ -129,7 +129,7 @@ void describe('S2-D corpus contracts', () => {
       database.prepare('INSERT INTO migration_recovery_work VALUES(?,?,?,?)').run('repo', 'run', 'pending', JSON.stringify({ edit_lease_id: 'lease' }));
       const retained = runDisposition({ database, run, resource: {} });
       assert.equal(retained.attachment_strategy, 'owned-recovery');
-      assert.equal(retained.terminal_attempt_lease, 'retained-terminal-attempt-reconciled');
+      assert.equal(retained.terminal_attempt_lease, 'retained-terminal-attempt-recovery-required');
       assert.equal(retained.phase36_evidence['terminal_retained_attempt_leases_covered_by_pending_recovery'], 1);
     } finally { database.close(); }
   });
