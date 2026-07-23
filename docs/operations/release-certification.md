@@ -130,7 +130,7 @@ complete at these exact facts:
   frozen under a 60-second bound.
 - Two tarballs byte-identical; packed consumer passed nine exact commands with
   source/dist parity, zero network calls, an untouched discovery canary, zero raw
-  production Git spawns, and Pi peer `0.81.1`.
+  production Git spawns, and Pi peer/dev baseline `^0.81.1`.
 - Offline security scan passed with no findings; the high-threshold audit passed with
   one visible moderate `protobufjs@7.6.4` advisory; a CycloneDX 1.5 SBOM was generated;
   no metered credentials were present; only the npm install/audit lanes used

@@ -11,9 +11,9 @@ covers_sources:
   - src/core/execution-commit.ts
   - src/core/validation-staleness.ts
   - src/core/worktree-cleanup.ts
-signature_hash: 'sha256:008aa231a2414d2bcb29cc62696f7587634857ea043568428bd1f286fbc446b9'
-body_hash: 'sha256:ffdff05ff0c9cafe113c644d7a9fcd604c5a11e49f10eae452bf1ee5196b62fa'
-semantic_attestation: 'sha256:ffdff05ff0c9cafe113c644d7a9fcd604c5a11e49f10eae452bf1ee5196b62fa'
+signature_hash: 'sha256:99bf9934a571ea880c691bc98db9a98cc7932f034eb0fd27fe3eb6bb1267461c'
+body_hash: 'sha256:31a9c24d76cf423dc03437cf82204ea2fa37b909ec6511b2ba3c7ee745f688cb'
+semantic_attestation: 'sha256:31a9c24d76cf423dc03437cf82204ea2fa37b909ec6511b2ba3c7ee745f688cb'
 stability: stable
 ---
 

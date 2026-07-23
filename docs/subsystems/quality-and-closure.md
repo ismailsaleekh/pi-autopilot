@@ -9,9 +9,9 @@ covers_sources:
   - src/core/adjudication/index.ts
   - src/core/lifecycle/index.ts
   - src/core/state-store/index.ts
-signature_hash: 'sha256:4364c2c6133369f29b7b1270545272492ed677c8048cb0eab4faf99a558a6408'
-body_hash: 'sha256:1934cbfc1425b3718ced056044a3c8c7ae558b797120d69642681f05108d7290'
-semantic_attestation: 'sha256:1934cbfc1425b3718ced056044a3c8c7ae558b797120d69642681f05108d7290'
+signature_hash: 'sha256:c602e7d05563ac3b9cbf795cc9f08a5b2ed38a9d9ad63d9444b66564187b361f'
+body_hash: 'sha256:5cf80e60a9e7d0f7e150253e403513fe1692b7fb459aed7490302067686a0342'
+semantic_attestation: 'sha256:5cf80e60a9e7d0f7e150253e403513fe1692b7fb459aed7490302067686a0342'
 stability: stable
 ---
 

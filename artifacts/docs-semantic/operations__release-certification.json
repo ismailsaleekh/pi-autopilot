@@ -2,7 +2,7 @@
   "schema_version": "autopilot.docs_semantic_attestation.v2",
   "doc_id": "operations/release-certification",
   "reviewed_body_hash": "sha256:ff6dc0cb79ae5ce4eda7c19477ad3f1c9bbbf94c832f5b43564814ef7401be2b",
-  "reviewed_doc_sha256": "sha256:d9bf54c948b7f3e42e60ff8b5274d3d4dac437132680e6d0991555a674d4fce6",
+  "reviewed_doc_sha256": "sha256:1c3b93c82a9c526c3eaf92142176cf696d9760c05193e70ca505668a99fc2a4a",
   "covers_sources": [
     "scripts/check-package-payload.mjs",
     "scripts/check-production-git-spawns.mjs",
@@ -13,7 +13,7 @@
     "scripts/verify-packed-consumer.mjs"
   ],
   "verdict": "PASS",
-  "reviewer": "independent Pi validate-role review (openai-codex/gpt-5.5), report /tmp/phase39-reviews/r5-release-cert.md",
-  "reviewed_at": "2026-07-23T10:26:56.000Z",
-  "notes": "PASS P0=0 P1=0 P2=0 (GPT-5.5, fresh-read prompt). Verified against 7 covered scripts: certified-command wrapper args incl optional --artifact, credential refusal, candidate sealing, process-tree breaches, deny-network preload with registry-only lanes labelled (not host-enforced), short-TMPDIR unconditional cleanup, passed-verdict conditions, production-git scan, security-scan version+integrity allowlist, sbom, packed-consumer registration proof; Phase 38 historical facts and external blockers explicitly labelled as external record."
+  "reviewer": "pi W6 merge operator (offline semantic review)",
+  "reviewed_at": "2026-07-23T12:35:54.000Z",
+  "notes": "W6 offline semantic review: verified release certification prose against current certified command, package payload, security scan, docs verification, semantic attestation, and package manifest scripts; the combined package baseline is ^0.81.1 and old evidence is not relabeled."
 }

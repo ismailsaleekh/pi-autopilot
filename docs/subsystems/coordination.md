@@ -16,8 +16,8 @@ covers_sources:
   - src/core/coordination/store.ts
   - src/core/coordination/invariants.ts
 signature_hash: 'sha256:f2ccef5dd32315d6976da8c480b9f584d06e945cf776852a923f7811810c59ac'
-body_hash: 'sha256:2c4020b8a25089c33a3db862bc1fd1b93ed65a38b3e1530eae1f1843abe85101'
-semantic_attestation: 'sha256:2c4020b8a25089c33a3db862bc1fd1b93ed65a38b3e1530eae1f1843abe85101'
+body_hash: 'sha256:fd0d7634407c03dae0010371228b570e546ff2fbe5b502ff56532909067b1bfb'
+semantic_attestation: 'sha256:fd0d7634407c03dae0010371228b570e546ff2fbe5b502ff56532909067b1bfb'
 fact_pins:
   - text: `MAX_GRANT_BYPASSES` is 8
     symbol: 'src/core/coordination/deadlock.ts#MAX_GRANT_BYPASSES'

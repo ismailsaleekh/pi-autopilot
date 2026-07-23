@@ -1,7 +1,7 @@
 {
   "schema_version": "autopilot.docs_semantic_attestation.v2",
   "doc_id": "subsystems/coordination",
-  "reviewed_body_hash": "sha256:2c4020b8a25089c33a3db862bc1fd1b93ed65a38b3e1530eae1f1843abe85101",
+  "reviewed_body_hash": "sha256:fd0d7634407c03dae0010371228b570e546ff2fbe5b502ff56532909067b1bfb",
   "reviewed_doc_sha256": "sha256:994a7460c90fea2bef2be539d1da82b4bd708a78842b6876e093abcee768c001",
   "covers_sources": [
     "src/core/coordination/admission.ts",
@@ -14,7 +14,7 @@
     "src/core/coordination/store.ts"
   ],
   "verdict": "PASS",
-  "reviewer": "independent Pi validate-role review (openai-codex/gpt-5.5), report /tmp/phase39-reviews/r7-coordination.md",
-  "reviewed_at": "2026-07-23T10:26:56.000Z",
-  "notes": "PASS P0=0 P1=0 P2=0 (GPT-5.5, fresh-read). Verified against 8 covered sources: runtime-constants wire lineage/facade; admission HMAC-SHA256 domain/32-byte key/negotiated-s1; peer-classification known-cf50-predecessor vs s1-admission-offered (legacy transport string attributed to negotiated-transport.ts, outside covered set); single accepted v1 launch policy (not highest); deadlock victim/starvation; invariant 2 release via git-terminal-evidence OR authenticated respondClaimRequest release-now (bounded-defer records release_condition, no immediate release); startup drops rows only via explicit reconciliation; invariants 1/3/4 attributed as system-level."
+  "reviewer": "pi W6 merge operator (offline semantic review)",
+  "reviewed_at": "2026-07-23T13:55:00.000Z",
+  "notes": "W6 offline semantic review: rechecked coordination prose against current runtime constants, admission, client, store, deadlock, invariants, reconciliation, and terminal evidence sources after graph-authorized unit_spec.v2/receipt.v2 recovery support; coordinator authority and S2 fail-closed behavior remain accurate."
 }

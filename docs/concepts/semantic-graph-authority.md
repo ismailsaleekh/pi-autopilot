@@ -12,8 +12,8 @@ covers_sources:
   - src/core/coordination/d65-graph-successor.ts
   - src/core/coordination/d65-graph-publication-residue.ts
 signature_hash: 'sha256:bc115b1298592020a7c25422a3de843eedb58469735b7df203f9f7471be6acdf'
-body_hash: 'sha256:945f3beee556fcb0b225e2cfb0a7601acf8e70c8fda301020f6ef8a222cb0a4a'
-semantic_attestation: 'sha256:945f3beee556fcb0b225e2cfb0a7601acf8e70c8fda301020f6ef8a222cb0a4a'
+body_hash: 'sha256:83633006d8d20bda400c57c9b97afaabaffb1ce9fc9c90a465631edaca8f98f6'
+semantic_attestation: 'sha256:83633006d8d20bda400c57c9b97afaabaffb1ce9fc9c90a465631edaca8f98f6'
 stability: evolving
 ---
 

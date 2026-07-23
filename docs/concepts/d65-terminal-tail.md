@@ -11,8 +11,8 @@ covers_sources:
   - src/core/coordination/d65-semantic-graph.ts
   - src/core/coordination/d65-dispatch-gate.ts
 signature_hash: 'sha256:e739fe96e4adda1e466f01c9c993d956ab1fdb90536654a4b6297a59d967942a'
-body_hash: 'sha256:b19dfa6600e367b80341e523d8a71038e22fd610d2fbac1f871209d51c7bfc28'
-semantic_attestation: 'sha256:b19dfa6600e367b80341e523d8a71038e22fd610d2fbac1f871209d51c7bfc28'
+body_hash: 'sha256:29f88722280b9359f51c6fb07750416f6eebd55cd01e97b3adffee3eb6a7edd0'
+semantic_attestation: 'sha256:29f88722280b9359f51c6fb07750416f6eebd55cd01e97b3adffee3eb6a7edd0'
 stability: evolving
 ---
 

@@ -1,8 +1,8 @@
 {
   "schema_version": "autopilot.docs_semantic_attestation.v2",
   "doc_id": "subsystems/close-lifecycle",
-  "reviewed_body_hash": "sha256:ffdff05ff0c9cafe113c644d7a9fcd604c5a11e49f10eae452bf1ee5196b62fa",
-  "reviewed_doc_sha256": "sha256:cb03a5dd120d3afb8ffcf49209584ffd9ea2a49dc2f9fc4f1acf39712ca43b83",
+  "reviewed_body_hash": "sha256:31a9c24d76cf423dc03437cf82204ea2fa37b909ec6511b2ba3c7ee745f688cb",
+  "reviewed_doc_sha256": "sha256:d3c49481c20f6ac3c86d753e8df26b9c260f3eb7117bf7520e8fada875d568b5",
   "covers_sources": [
     "src/core/close-runtime.ts",
     "src/core/execution-commit.ts",
@@ -11,7 +11,7 @@
     "src/core/worktree-cleanup.ts"
   ],
   "verdict": "PASS",
-  "reviewer": "openai-codex/gpt-5.5 Pi subscription merge adjudicator (offline semantic review)",
-  "reviewed_at": "2026-07-23T10:59:09.000Z",
-  "notes": "PASS P0=0 P1=0 P2=0. Reviewed docs/subsystems/close-lifecycle.md against close-runtime, unit-merge, execution-commit, validation-staleness, and worktree-cleanup sources after S2 merge: semantic close blockers, Phase 2 unit-merge validation evidence, validation-staleness mergeback, S2 terminal retention binding before cleanup, D65 terminal successor/tail, and exact run-owned cleanup/ref retirement match current code."
+  "reviewer": "pi W6 merge operator (offline semantic review)",
+  "reviewed_at": "2026-07-23T12:35:54.000Z",
+  "notes": "W6 offline semantic review: verified close lifecycle prose against current close-runtime, unit-merge, execution-commit, validation-staleness, and cleanup sources; transition external-chain/fresh validation, D65 prepared-terminal gates, S2 retention binding, and run-owned cleanup compose in the combined code."
 }

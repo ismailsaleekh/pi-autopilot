@@ -18,9 +18,9 @@ covers_sources:
   - src/core/roster/runtime-consumers.ts
   - src/core/roster/transition.ts
   - src/core/model-roster.ts
-signature_hash: 'sha256:8acfa22b78d0e3845a831af6c62744293cccc949d27fe4d836f1070d774dc3cf'
-body_hash: 'sha256:45d4282adbfc80a75f2e065df39aee9f6b9f1ccd0d5cdc5653d9d45bc0dad611'
-semantic_attestation: 'sha256:45d4282adbfc80a75f2e065df39aee9f6b9f1ccd0d5cdc5653d9d45bc0dad611'
+signature_hash: 'sha256:a5ee2fb831b97d6f0e5450759d68bfb1bf43017a4d5c8f10df68c05755315709'
+body_hash: 'sha256:777be38802e4fbc403a7644b7daec7c543c82dfe59d425b65e8c6798dcd27f1e'
+semantic_attestation: 'sha256:777be38802e4fbc403a7644b7daec7c543c82dfe59d425b65e8c6798dcd27f1e'
 stability: stable
 ---
 

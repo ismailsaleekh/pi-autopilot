@@ -274,11 +274,15 @@ evidence only. They require exact grandfather or historical-adapter authority an
 never relabeled or enriched as v2.
 
 At execution, the runner validates that the Pi request profile is exactly supportable
-before model spend. With Pi `0.80.6`, supported pre-spend request-profile facts are the
-provider/model/thinking/API route that Pi can set plus `service_tier=null`,
-`cache_policy=provider-default`, and `system_prompt_profile=pi-default.v1`. Non-null
-service tiers, non-default cache policies, and non-default prompt profiles are rejected
-by the current adapter.
+before model spend. The combined runtime package now requires Pi `^0.81.1` at the
+package boundary; the frozen Phase 37 W0 qualification artifacts and setup skill still
+truthfully record their Pi `0.80.6` design baseline and are not relabeled as current
+certification. Until requalified on the `^0.81.1` baseline, old offline qualification
+packs and provider/custom trust remain blocked. The currently supportable pre-spend
+request-profile facts are the provider/model/thinking/API route that Pi can set plus
+`service_tier=null`, `cache_policy=provider-default`, and
+`system_prompt_profile=pi-default.v1`. Non-null service tiers, non-default cache
+policies, and non-default prompt profiles are rejected by the current adapter.
 
 After the child finishes, `src/internal/execution-observer-extension.ts` records the
 observed provider/model/API, system-prompt hash/profile, service tier, cache policy, and
