@@ -24,6 +24,16 @@ export interface AutopilotPromptInput {
   readonly branch?: string;
   readonly repoKey?: string;
   readonly targetBranch?: string | null;
+  readonly rosterTransition?: {
+    readonly transition_id: string;
+    readonly transition_sha256: string;
+    readonly transition_artifact_sha256: string;
+    readonly runtime_transition_ref: string;
+    readonly from_roster_id: string;
+    readonly to_roster_id: string;
+    readonly to_roster_revision: number;
+    readonly to_roster_sha256: string;
+  } | null;
 }
 
 export interface OnboardPromptInput {
@@ -58,6 +68,9 @@ export function renderAutopilotPrompt(input: AutopilotPromptInput): string {
     : `\n- For every implement/fix unit, set \`cwd\` to the deterministic per-unit worktree path \`${input.worktreePath.replace(/\/$/u, '')}/../units/<unit-id>/attempt-<n>/worktree\`; keep \`status_output\`, \`receipt_output\`, and \`evidence_dir\` under the authoritative runtime root \`${input.runtimeRoot}\`. Validate/strategy/adjudication units that do not change source may use the main worktree. Never set child \`cwd\` to the operator source checkout.`;
   const closeInvocation = `/${AUTOPILOT_CLOSE_COMMAND} ${input.workstream}${input.workstreamRun === undefined ? '' : ` --run ${input.workstreamRun}`}`;
   const abortInvocation = `/${AUTOPILOT_ABORT_COMMAND} ${input.workstream}${input.workstreamRun === undefined ? '' : ` --run ${input.workstreamRun}`}`;
+  const transitionBlock = input.rosterTransition === undefined || input.rosterTransition === null
+    ? ''
+    : `\n## Committed roster transition authority\n\nThis existing run has a committed roster transition. The immutable external pre-run selection and runtime mirror remain the FROM authority, but every new child attempt must use the terminal TO roster below and include the exact transition artifact in \`context_refs\`:\n\n- Transition id: \`${input.rosterTransition.transition_id}\`.\n- Transition contract hash: \`${input.rosterTransition.transition_sha256}\`.\n- Transition artifact ref: \`${input.rosterTransition.runtime_transition_ref}\` with sha256 \`${input.rosterTransition.transition_artifact_sha256}\`.\n- FROM roster_id: \`${input.rosterTransition.from_roster_id}\`.\n- Terminal TO roster: \`${input.rosterTransition.to_roster_id}\` revision ${String(input.rosterTransition.to_roster_revision)} sha256 \`${input.rosterTransition.to_roster_sha256}\`.\n\nFor successor \`unit_spec.v2\` bytes, keep \`pre_run_selection_sha256\` equal to the immutable FROM pre-run selection, set \`roster_id/roster_revision/roster_sha256/assignment_sha256/request_profile\` from the terminal TO roster assignment, and include a context ref exactly like \`{ "path": "${input.rosterTransition.runtime_transition_ref}", "purpose": "committed existing-run roster transition ${input.rosterTransition.transition_id}", "sha256": "${input.rosterTransition.transition_artifact_sha256}", "byte_count": <exact bytes> }\`. Reusing an old FROM-roster attempt, omitting the transition context ref, or using validation from before the transition will be rejected by the runner/close gates.\n`;
   return `# Role: Autopilot parent orchestrator
 
 You are Autopilot for workstream \`${input.workstream}\`. Schedule and supervise child agents through typed Autopilot unit specs, package-owned runtime state, and forced structured status artifacts.
@@ -93,7 +106,7 @@ ${runtimeMetadata.length === 0 ? '' : `${runtimeMetadata}\n`}- Injected child la
 Phase37 new-run planning, first attempts, and retries must author only \`schema_version: "autopilot.unit_spec.v2"\`. The v2 spec must be materialized from the exact immutable pre-run selection and its exact role assignment/request profile: \`roster_id\`, \`roster_revision\`, \`roster_sha256\`, \`assignment_sha256\`, \`pre_run_selection_sha256\`, and the full \`request_profile\` must match the pinned runtime roster. Do not infer, clamp, enrich, or substitute provider/model/API/thinking/service/cache/system-prompt/route facts.
 
 Before writing any child spec, read \`${input.runtimeRoot}/roster-snapshot.json\` and the exact saved roster bytes matching that selection tuple. If either authority is missing, corrupt, hash-drifted, mixed with another roster, or does not contain the target role assignment, launch no new child work and record the blocker. Historical \`autopilot.unit_spec.v1\` / \`autopilot.receipt.v1\` bytes are immutable evidence only for proven grandfathered runs; never create, retry, relabel, or enrich v1 artifacts for new work.
-
+${transitionBlock}
 ## Child launch rules
 
 - Write unit specs under \`${input.runtimeRoot}/unit-specs/\`.${worktreeCwdRule}

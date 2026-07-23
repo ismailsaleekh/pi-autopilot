@@ -285,7 +285,7 @@ export function unitSpecAuthorityProjection(unitSpec: AutopilotRosterUnitSpecV2)
     owned_paths: unitSpec.owned_paths,
     read_only_paths: unitSpec.read_only_paths,
     untouchable_paths: unitSpec.untouchable_paths,
-    context_refs: unitSpec.context_refs.map((ref) => ({
+    context_refs: unitSpec.context_refs.filter((ref) => !isRuntimeTransitionContextRef(ref.path)).map((ref) => ({
       path: ref.path,
       purpose: ref.purpose,
       ...(ref.sha256 === null ? {} : { sha256: ref.sha256 as `sha256:${string}` }),
@@ -357,6 +357,10 @@ export function rosterRuntimeIdentityFromReceipt(receipt: AutopilotRosterReceipt
     route_policy_id: receipt.request_profile.route_policy_id,
     route_policy_revision: receipt.request_profile.route_policy_revision,
   });
+}
+
+function isRuntimeTransitionContextRef(path: string): boolean {
+  return /^roster-transitions\/transition-[a-f0-9]{64}\.json$/u.test(path);
 }
 
 function schemaVersionOf(value: unknown, label: string): string {

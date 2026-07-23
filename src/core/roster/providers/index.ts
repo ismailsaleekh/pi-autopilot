@@ -228,6 +228,44 @@ function registryEntryForCandidate(candidate: Pick<RosterCandidate, 'recipe_id' 
   ) ?? null;
 }
 
+export function isCentrallyTrustedW4CertifiedRoster(
+  roster: {
+    readonly generation_source: string;
+    readonly profile_id: string;
+    readonly recipe_id: string;
+    readonly recipe_revision: number;
+    readonly route_policy_ids: readonly string[];
+    readonly assignments: readonly { readonly provider_id: string; readonly route_policy_id: string; readonly route_policy_revision: number; readonly qualification_state: string }[];
+    readonly certification_manifest_id: string | null;
+    readonly certification_manifest_sha256: string | null;
+    readonly roster_sha256: string;
+  },
+): boolean {
+  const trustedRegistry = W4_PROVIDER_PACK_REGISTRY;
+  if (roster.generation_source !== 'w4-certified-recipe') return false;
+  if (roster.certification_manifest_id === null || roster.certification_manifest_sha256 === null) return false;
+  if (!DIGEST_PATTERN.test(roster.certification_manifest_sha256)) return false;
+  if (!roster.assignments.every((assignment) => assignment.qualification_state === 'w4-certified-ready')) return false;
+  const entries = trustedRegistry.filter((entry) =>
+    entry.readiness === 'strict-w3-manifest' &&
+    entry.recipe_id === roster.recipe_id &&
+    entry.recipe_revision === roster.recipe_revision &&
+    entry.ready_profiles.includes(roster.profile_id) &&
+    roster.route_policy_ids.includes(entry.route_policy_id) &&
+    entry.trusted_manifest_ids.includes(roster.certification_manifest_id ?? '') &&
+    entry.trusted_manifest_sha256s.includes(roster.certification_manifest_sha256 as Digest) &&
+    entry.trusted_certified_roster_sha256s.includes(roster.roster_sha256 as Digest),
+  );
+  if (entries.length !== 1) return false;
+  const entry = entries[0];
+  if (entry === undefined) return false;
+  return roster.assignments.every((assignment) =>
+    assignment.provider_id === entry.provider_id &&
+    assignment.route_policy_id === entry.route_policy_id &&
+    assignment.route_policy_revision === entry.route_policy_revision,
+  );
+}
+
 function sameEvidenceRefs(left: readonly EvidenceRef[], right: readonly EvidenceRef[]): boolean {
   return JSON.stringify(sortEvidenceRefs(left)) === JSON.stringify(sortEvidenceRefs(right));
 }

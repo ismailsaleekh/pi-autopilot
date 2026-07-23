@@ -215,7 +215,7 @@ async function withRuntimeEnv<T>(runtimeStateRoot: string, run: () => Promise<T>
 }
 
 void describe('Phase 37 roster selection activation e2e', () => {
-  void it('commits selection and publishes runtime snapshot before parent model selection or prompt', async () => {
+  void it('blocks a saved synthetic-ready default before workstream preparation or parent model selection', async () => {
     await withTempDir(async (dir) => {
       const project = join(dir, 'project');
       const rosterStateRoot = join(dir, 'roster-state');
@@ -224,37 +224,20 @@ void describe('Phase 37 roster selection activation e2e', () => {
       await writeReadyDefaultRoster(rosterStateRoot);
       await withRuntimeEnv(runtimeStateRoot, async () => {
         const pi = new FakePi();
-        const repo = resolveRepoIdentity(project);
         autopilotExtension(pi, {
           rosterStateRoot,
           now: () => FIXED_NOW,
-          prepareAutopilotWorkstream: async (input) => {
-            pi.events.push('prepare');
-            assert.equal(input.phase37RosterRequired, true);
-            const phase37 = input.phase37RosterSelection;
-            assert.equal(phase37?.mode, 'new-run');
-            if (phase37?.mode !== 'new-run') throw new Error('expected new-run roster selection');
-            assert.equal(phase37.selection.repo_id, repo.repoKey);
-            assert.equal(phase37.selection.workstream_run, input.workstreamRun);
-            assert.equal(existsSync(phase37.launchFence.selection_path), true);
-            assert.equal(pi.events.includes('setModel'), false);
-            return fakePrepared({ project, repoKey: repo.repoKey, workstreamRun: input.workstreamRun ?? 'missing-run' });
-          },
-          publishRuntimeRosterSnapshot: async (input) => {
-            pi.events.push('publish-snapshot');
-            assert.equal(pi.events.includes('prepare'), true);
-            assert.equal(pi.events.includes('setModel'), false);
-            const parsedSelection = JSON.parse(Buffer.from(input.selection_bytes).toString('utf8')) as { readonly selection_sha256?: string };
-            assert.equal(input.expected_selection_sha256, parsedSelection.selection_sha256);
-            return { schema_version: 'autopilot.runtime_roster_snapshot_publication_result.v1', ok: true, status: 'published', selection_sha256: input.expected_selection_sha256 ?? null, mirror_path: join(input.mainWorktreeRoot, '.pi/autopilot/demo/roster-snapshot.json'), idempotent_replay: false, diagnostics: [], write_count: 1, lock_count: 0, files_touched: [] };
-          },
+          prepareAutopilotWorkstream: async () => { pi.events.push('prepare'); throw new Error('prepare must not run for untrusted roster authority'); },
+          publishRuntimeRosterSnapshot: async () => { pi.events.push('publish-snapshot'); throw new Error('snapshot must not publish for untrusted roster authority'); },
           attachSessionBridge: async () => { pi.events.push('attach'); return true; },
         });
 
         await pi.commands.get(AUTOPILOT_COMMAND)?.handler('demo ship selection', makeContext(pi, project));
 
         const ordered = pi.events.filter((event) => ['prepare', 'publish-snapshot', 'setModel', 'attach', 'sendUserMessage'].includes(event) || event.startsWith('find:'));
-        assert.deepEqual(ordered, ['prepare', 'publish-snapshot', 'find:openai-codex/gpt-5.6-sol', 'setModel', 'attach', 'sendUserMessage']);
+        assert.deepEqual(ordered, []);
+        assert.equal(pi.messages.length, 0);
+        assert.ok(pi.notifications.some((message) => /Autopilot roster resolution failed closed/u.test(message)));
       });
     });
   });

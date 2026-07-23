@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { describe, it } from 'node:test';
@@ -22,6 +22,8 @@ import { canonicalRosterJson } from '../../src/core/roster/canonical.ts';
 import { resolveRosterScopePaths, rosterRevisionPath } from '../../src/core/roster/paths.ts';
 import { buildUserCustomRosterFromAssignments } from '../../src/core/roster/custom-certification.ts';
 import { requestProfileFromAssignment } from '../../src/core/roster/runtime-spec.ts';
+import { buildW4CertifiedRosterForCandidate, SEED_CANDIDATES } from '../../src/core/roster/provider-recipes.ts';
+import { authorizeExistingRunRosterTransitionInput, buildExistingRunRosterTransitionProposal, commitApprovedExistingRunRosterTransition, savedRosterRefForSelection, savedRosterRefFromSavedRef } from '../../src/core/roster/transition.ts';
 
 const MANIFEST = readJsonObject(resolve('design/phase37/roster-contract-freeze.v1.json'));
 const FIXTURES = readJsonObject(resolve('design/phase37/roster-acceptance-fixtures.v1.json'));
@@ -78,6 +80,9 @@ void describe('agent runner roster v2 identity', () => {
       const supervisor = new DurableRunSupervisorClient(process.env);
       const attachment = await supervisor.attach({ repo: prepared.repo, active: prepared.active, rawSessionId: 'roster-runner-parent-custom' });
       process.env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV] = attachment.contextPath;
+      const stateRoot = process.env[AUTOPILOT_STATE_ROOT_ENV] ?? '';
+      await mkdir(stateRoot, { recursive: true, mode: 0o700 });
+      await chmod(stateRoot, 0o700);
 
       const seed = generatedRoster(1);
       const customRoster = buildUserCustomRosterFromAssignments({
@@ -89,7 +94,7 @@ void describe('agent runner roster v2 identity', () => {
         created_at: '2026-07-24T00:00:00.000Z',
       });
       const { selection, assignment, requestProfile } = await installRosterAuthority({
-        stateRoot: process.env[AUTOPILOT_STATE_ROOT_ENV] ?? '',
+        stateRoot,
         mainWorktreePath: prepared.mainWorktreePath,
         workstream: prepared.active.workstream,
         repoId: prepared.active.repo_key,
@@ -100,12 +105,78 @@ void describe('agent runner roster v2 identity', () => {
       const unitSpec = parseAutopilotUnitSpecV2(makeUnitSpecV2(prepared.mainWorktreePath, prepared.runtimeRoot, requestProfile, selection, assignment));
       const specPath = join(prepared.runtimeRoot, 'unit-specs', 'u01validate.validate.attempt-1.json');
       await mkdir(dirname(specPath), { recursive: true });
-      await writeFile(specPath, `${JSON.stringify(unitSpec, null, 2)}\n`, 'utf8');
+      await writeFile(specPath, `${JSON.stringify(unitSpec, null, 2)}
+`, 'utf8');
 
       await assert.rejects(
         async () => await runAutopilotAgentFromSpecPath(specPath, { dryRun: true }),
         /unit_spec\.v2 failed external roster\/selection authentication before preflight authority derivation: custom roster certification authority absent/u,
       );
+    });
+  });
+
+  void it('rejects old-roster specs after a transition, enforces new attempts, and refuses untrusted target roster', async () => {
+    await withTempDir(async (root) => {
+      const source = join(root, 'source');
+      await initGitSource(source);
+      const prepared = await prepareAutopilotWorkstream({ workstream: 'rosterw3', sourceCwd: source });
+      const supervisor = new DurableRunSupervisorClient(process.env);
+      const attachment = await supervisor.attach({ repo: prepared.repo, active: prepared.active, rawSessionId: 'roster-transition-runner-parent' });
+      process.env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV] = attachment.contextPath;
+      const stateRoot = process.env[AUTOPILOT_STATE_ROOT_ENV] ?? '';
+      await chmod(stateRoot, 0o700);
+
+      const old = await installRosterAuthority({ stateRoot, mainWorktreePath: prepared.mainWorktreePath, workstream: prepared.active.workstream, repoId: prepared.active.repo_key, workstreamRun: prepared.active.workstream_run, role: 'validate' });
+      const oldSpec = parseAutopilotUnitSpecV2(makeUnitSpecV2(prepared.mainWorktreePath, prepared.runtimeRoot, old.requestProfile, old.selection, old.assignment));
+      const oldSpecPath = join(prepared.runtimeRoot, 'unit-specs', 'u01validate.validate.attempt-1.json');
+      await mkdir(dirname(oldSpecPath), { recursive: true });
+      await writeFile(oldSpecPath, JSON.stringify(oldSpec), 'utf8');
+
+      await chmod(prepared.mainWorktreePath, 0o700);
+      await chmod(join(prepared.mainWorktreePath, '.pi'), 0o700).catch(() => undefined);
+      await chmod(join(prepared.mainWorktreePath, '.pi', 'autopilot'), 0o700).catch(() => undefined);
+      await chmod(prepared.runtimeRoot, 0o700);
+      const target = await installUntrustedW4TargetRoster({ stateRoot });
+      const run = { repo_id: prepared.active.repo_key, workstream: prepared.active.workstream, workstream_run: prepared.active.workstream_run, main_worktree_path: prepared.active.main_worktree_path, runtime_root: prepared.active.runtime_root, source_repo: prepared.active.source_repo };
+      const proposal = buildExistingRunRosterTransitionProposal({
+        stateRoot,
+        run,
+        from_roster: savedRosterRefForSelection({ selection: old.selection as Parameters<typeof savedRosterRefForSelection>[0]['selection'], stateRoot, trustedProjectRoot: prepared.active.source_repo }),
+        to_roster: savedRosterRefFromSavedRef({ scope: 'user', ref: target.ref, stateRoot }),
+        reason: 'runner transition test',
+        approved_at: '2026-07-23T00:00:00.000Z',
+      });
+      const approval = authorizeExistingRunRosterTransitionInput({ proposal, source: 'user', text: proposal.approval_phrase }).approval;
+      if (approval === null) throw new Error('missing approval');
+      const committed = await commitApprovedExistingRunRosterTransition({ stateRoot, run, proposal, approval, expected_active_run: run });
+      assert.equal(committed.ok, true, committed.diagnostics.map((diagnostic) => diagnostic.code).join(', '));
+      const transitionArtifactSha256 = committed.transition_artifact_sha256;
+      if (transitionArtifactSha256 === null) throw new Error('transition artifact sha missing');
+      await assert.rejects(() => runAutopilotAgentFromSpecPath(oldSpecPath, { dryRun: true }), /old FROM-roster/u);
+
+      const transitionBytes = await readFile(committed.runtime_transition_path);
+      const makeTargetSpec = (attempt: number): AutopilotUnitSpecV2 => parseAutopilotUnitSpecV2({
+        ...makeUnitSpecV2(prepared.mainWorktreePath, prepared.runtimeRoot, target.requestProfile, old.selection, target.assignment),
+        attempt,
+        model: target.requestProfile.model,
+        thinking: target.requestProfile.thinking,
+        status_output: join(prepared.runtimeRoot, 'statuses', `u01validate.validate.attempt-${String(attempt)}.json`),
+        receipt_output: join(prepared.runtimeRoot, 'receipts', `u01validate.validate.attempt-${String(attempt)}.receipt.json`),
+        roster_id: target.roster.roster_id,
+        roster_revision: target.roster.roster_revision,
+        roster_sha256: target.roster.roster_sha256,
+        assignment_sha256: target.assignment.assignment_sha256,
+        context_refs: [{ path: committed.runtime_transition_ref, purpose: `committed existing-run roster transition ${proposal.transition.transition_id}`, sha256: transitionArtifactSha256, byte_count: transitionBytes.byteLength }],
+        request_profile: target.requestProfile,
+      });
+
+      const staleTargetSpecPath = join(prepared.runtimeRoot, 'unit-specs', 'u01validate.validate.target-attempt-1.json');
+      await writeFile(staleTargetSpecPath, JSON.stringify(makeTargetSpec(1)), 'utf8');
+      await assert.rejects(() => runAutopilotAgentFromSpecPath(staleTargetSpecPath, { dryRun: true }), /must be newer than max FROM-roster attempt 1/u);
+
+      const targetSpecPath = join(prepared.runtimeRoot, 'unit-specs', 'u01validate.validate.attempt-2.json');
+      await writeFile(targetSpecPath, JSON.stringify(makeTargetSpec(2)), 'utf8');
+      await assert.rejects(() => runAutopilotAgentFromSpecPath(targetSpecPath, { dryRun: true }), /not centrally trusted W4-certified/u);
     });
   });
 });
@@ -208,7 +279,7 @@ async function installRosterAuthority(input: {
   const canonicalSelection = buildCanonicalPreRunSelection({
     stateRoot: input.stateRoot,
     repo_id: input.repoId,
-    workstream_run: rosterCompatibleWorkstreamRun(input.workstreamRun),
+    workstream_run: input.workstreamRun,
     selected: {
       scope: 'user',
       roster_id: stringAt(roster, 'roster_id'),
@@ -218,21 +289,53 @@ async function installRosterAuthority(input: {
       config_sha256: stringAt(fixtureSelection, 'config_sha256') as `sha256:${string}`,
     },
   });
-  await mkdir(dirname(canonicalSelection.selection_path), { recursive: true });
-  await writeFile(canonicalSelection.selection_path, canonicalSelection.selection_bytes);
+  await mkdir(dirname(canonicalSelection.selection_path), { recursive: true, mode: 0o700 });
+  await chmod(join(input.stateRoot, 'roster-selections'), 0o700).catch(() => undefined);
+  await chmod(dirname(canonicalSelection.selection_path), 0o700);
+  await writeFile(canonicalSelection.selection_path, canonicalSelection.selection_bytes, { mode: 0o600 });
+  await chmod(canonicalSelection.selection_path, 0o600);
   const mirrorPath = resolve(input.mainWorktreePath, '.pi', 'autopilot', input.workstream, 'roster-snapshot.json');
-  await mkdir(dirname(mirrorPath), { recursive: true });
-  await writeFile(mirrorPath, canonicalSelection.selection_bytes);
+  await mkdir(dirname(mirrorPath), { recursive: true, mode: 0o700 });
+  await chmod(dirname(mirrorPath), 0o700);
+  await writeFile(mirrorPath, canonicalSelection.selection_bytes, { mode: 0o600 });
+  await chmod(mirrorPath, 0o600);
   const paths = resolveRosterScopePaths({ scope: 'user', stateRoot: input.stateRoot });
   const rosterPath = rosterRevisionPath(paths, { roster_id: stringAt(roster, 'roster_id'), roster_revision: numberAt(roster, 'roster_revision') });
-  await mkdir(dirname(rosterPath), { recursive: true });
-  await writeFile(rosterPath, `${canonicalRosterJson(roster)}\n`, 'utf8');
+  await mkdir(dirname(rosterPath), { recursive: true, mode: 0o700 });
+  await chmod(paths.rostersRoot, 0o700).catch(() => undefined);
+  await chmod(dirname(rosterPath), 0o700);
+  await writeFile(rosterPath, `${canonicalRosterJson(roster)}\n`, { encoding: 'utf8', mode: 0o600 });
+  await chmod(rosterPath, 0o600);
   return {
     selection: canonicalSelection.selection as unknown as Readonly<Record<string, unknown>>,
     roster,
     assignment,
     requestProfile: requestProfileFromAssignment(assignment),
   };
+}
+
+async function installUntrustedW4TargetRoster(input: { readonly stateRoot: string }): Promise<{
+  readonly roster: ReturnType<typeof buildW4CertifiedRosterForCandidate> extends infer T ? NonNullable<T> : never;
+  readonly ref: { readonly roster_id: string; readonly roster_revision: number; readonly roster_sha256: `sha256:${string}`; readonly assignment_set_sha256: `sha256:${string}` };
+  readonly assignment: Readonly<Record<string, unknown>> & { readonly assignment_sha256: string };
+  readonly requestProfile: AutopilotRosterRequestProfileV1;
+}> {
+  const candidate = SEED_CANDIDATES.find((entry) => entry.candidate_id === 'kimi-coding-precision-v1');
+  if (candidate === undefined) throw new Error('missing target candidate');
+  const manifestSha = `sha256:${'9'.repeat(64)}` as const;
+  const roster = buildW4CertifiedRosterForCandidate({ candidate, certification_manifest_id: 'test-kimi-live-manifest', certification_manifest_sha256: manifestSha });
+  if (roster === null) throw new Error('target roster unavailable');
+  const paths = resolveRosterScopePaths({ scope: 'user', stateRoot: input.stateRoot });
+  const ref = { roster_id: roster.roster_id, roster_revision: roster.roster_revision, roster_sha256: roster.roster_sha256, assignment_set_sha256: roster.assignment_set_sha256 };
+  const rosterPath = rosterRevisionPath(paths, ref);
+  await mkdir(dirname(rosterPath), { recursive: true, mode: 0o700 });
+  await chmod(paths.rostersRoot, 0o700).catch(() => undefined);
+  await chmod(dirname(rosterPath), 0o700);
+  await writeFile(rosterPath, canonicalRosterJson(roster), { encoding: 'utf8', mode: 0o600 });
+  await chmod(rosterPath, 0o600);
+  const assignment = roster.assignments.find((entry) => entry.role === 'validate');
+  if (assignment === undefined) throw new Error('missing target validate assignment');
+  return { roster, ref, assignment: assignment as unknown as Readonly<Record<string, unknown>> & { readonly assignment_sha256: string }, requestProfile: requestProfileFromAssignment(assignment) };
 }
 
 async function initGitSource(source: string): Promise<void> {
@@ -249,10 +352,6 @@ async function initGitSource(source: string): Promise<void> {
 function git(cwd: string, args: readonly string[]): void {
   const result = spawnSync('git', args, { cwd, encoding: 'utf8' });
   assert.equal(result.status, 0, result.stderr);
-}
-
-function rosterCompatibleWorkstreamRun(value: string): string {
-  return value.toLowerCase().replace(/[^a-z0-9]+/gu, '').slice(0, 100) || 'rosterw3run';
 }
 
 function generatedRoster(index: number): Readonly<Record<string, unknown>> {
