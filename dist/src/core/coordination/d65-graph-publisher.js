@@ -1,4 +1,5 @@
 import { CoordinationRuntimeError } from "./failures.js";
+import { shouldS2AttemptEffectUnknownRecovery } from "./s2-failure-taxonomy.js";
 import { advanceD65GraphPublicationResidue, createD65GraphPublicationResidue, cleanupD65GraphPublicationResidue, readD65GraphPublicationResidue, } from "./d65-graph-publication-residue.js";
 import { d65SemanticGraphArtifactId } from "./d65-graph-publication.js";
 import { bytesSha256, canonicalSha256 } from "./d65-semantic-graph.js";
@@ -347,7 +348,7 @@ async function registerWithResponseLossRecovery(store, input) {
     catch (firstError) {
         // A typed definitive coordinator rejection cannot have committed and is
         // terminal. Transport/effect-unknown failures require immutable lookup.
-        if (firstError instanceof CoordinationRuntimeError && firstError.retry_policy === 'never')
+        if (firstError instanceof CoordinationRuntimeError && !shouldS2AttemptEffectUnknownRecovery(firstError.code))
             throw firstError;
         const lookup = { artifactId: input.artifactId, publicationCommit: input.publicationCommit, graphRef: input.graphRef, graphSha256: input.graphSha256, coveredEventSeq: input.coveredEventSeq };
         const recovered = await store.lookupCommittedRegistration(lookup);

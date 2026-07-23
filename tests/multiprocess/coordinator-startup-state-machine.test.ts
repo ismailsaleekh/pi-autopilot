@@ -59,6 +59,7 @@ async function delayedWinnerFixture(root: string, readinessTimeoutMs: number): P
   const winnerBarrier = join(stateRoot, 'test-startup-barriers', 'winner');
   const commonEnv = { ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: stateRoot, PI_OFFLINE: '1', PI_SKIP_VERSION_CHECK: '1', PI_TELEMETRY: '0' };
   await armStartupBarrier(loserBarrier, 'before-lifecycle-election');
+  await armStartupBarrier(winnerBarrier, 'after-activation-before-first-handshake');
   await armStartupBarrier(winnerBarrier, 'first-exact-handshake-served');
   const client = new CoordinatorClient({ env: { ...commonEnv, [STARTUP_BARRIER_ENV]: loserBarrier }, readinessTimeoutMs });
   const pending = client.query('handshake');
@@ -70,17 +71,16 @@ async function delayedWinnerFixture(root: string, readinessTimeoutMs: number): P
   });
   winner.stderr?.on('data', (chunk) => { winnerStderr += chunk.toString('utf8'); });
   try {
-    // The client parent can discover the direct winner and complete its first
-    // handshake while its own auto-start child is still paused before election.
-    // Startup reports are current-state files, not append-only phase history, so
-    // polling must admit the immediately-successor phase rather than requiring
-    // observation of a transient predecessor byte state.
-    await waitForReport(stateRoot, (report) => report.spawned_pid === winner.pid && (
-      report.phase === 'after-activation-before-first-handshake' || report.phase === 'first-exact-handshake-served'
-    ), 30_000);
+    // Hold the direct winner at the activation boundary before releasing the
+    // loser. Startup reports are current-state files rather than append-only
+    // phase history, so the explicit barrier makes the lock snapshot
+    // deterministic without admitting replacement or endpoint use.
+    await waitForStartupBarrier(winnerBarrier, 'after-activation-before-first-handshake', 30_000);
+    await waitForReport(stateRoot, (report) => report.spawned_pid === winner.pid && report.phase === 'after-activation-before-first-handshake', 30_000);
     const winnerLock = JSON.parse(await readFile(coordinatorRuntimePaths(commonEnv).lockPath, 'utf8')) as Readonly<Record<string, unknown>>;
     await releaseStartupBarrier(loserBarrier, 'before-lifecycle-election');
     await waitForReport(stateRoot, (report) => report.outcome === 'election-loser', 30_000);
+    await releaseStartupBarrier(winnerBarrier, 'after-activation-before-first-handshake');
     await waitForStartupBarrier(winnerBarrier, 'first-exact-handshake-served', 30_000);
     return { stateRoot, env: commonEnv, winnerBarrier, winner, winnerLock, pending };
   } catch (error) {

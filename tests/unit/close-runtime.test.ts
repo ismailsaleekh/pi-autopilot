@@ -425,6 +425,14 @@ void describe('Autopilot close runtime', () => {
         assert.deepEqual(claims, []);
         if (result.archived_runtime_path === null) throw new Error('missing archive path');
         assert.equal(existsSync(result.archived_runtime_path), true);
+        const s2Binding = JSON.parse(await readFile(join(result.archived_runtime_path, 'close', '_s2-terminal-retention.json'), 'utf8')) as Readonly<Record<string, unknown>>;
+        assert.equal(s2Binding['schema_version'], 'autopilot.s2_retention.terminal_binding.v1');
+        assert.equal(s2Binding['repo_id'], fixture.repoKey);
+        assert.equal(s2Binding['workstream_run'], fixture.workstreamRun);
+        assert.equal(s2Binding['terminal_kind'], 'closed');
+        assert.equal(s2Binding['hot_eligible'], true);
+        assert.equal(existsSync(join(root, 'autopilot-state', 'worktrees', fixture.repoKey, '_retention', 'cold')), true);
+        assert.equal(existsSync(join(root, 'autopilot-state', 'worktrees', fixture.repoKey, '_retention', 'hot')), true);
         if (result.close_result_path === null) throw new Error('missing close result path');
         assert.equal(existsSync(result.close_result_path), true);
         const rows = await readActiveAutopilots(coordinationRootForRepo(fixture.repoKey));

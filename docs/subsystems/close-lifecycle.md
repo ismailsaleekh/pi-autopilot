@@ -12,7 +12,7 @@ covers_sources:
   - src/core/validation-staleness.ts
   - src/core/worktree-cleanup.ts
 signature_hash: 'sha256:008aa231a2414d2bcb29cc62696f7587634857ea043568428bd1f286fbc446b9'
-body_hash: 'sha256:1c4821ee2baa48c290ddd6974e45fe6baea85d1177b8c82ba5c44a266b9543e3'
+body_hash: 'sha256:ffdff05ff0c9cafe113c644d7a9fcd604c5a11e49f10eae452bf1ee5196b62fa'
 stability: stable
 ---
 
@@ -51,7 +51,7 @@ checkout or remotes.
 
 Integrate landed clean/disjoint reservation predecessors → record validation
 staleness → merge the target branch into the workstream branch → fast-forward the
-target branch → record coordinator terminal/reservation evidence → release retained
+target branch → record coordinator terminal/reservation evidence → publish and verify S2 cold terminal retention/hot summary binding for coordinator-backed runs → release retained
 authority → archive runtime evidence under
 `~/.pi/agent/autopilot/worktrees/<repo-key>/_archive/<workstream-run>/` → remove only
 run-owned paths (`active/<workstream-run>/main/` + terminal unit `worktree/`) → remove

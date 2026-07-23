@@ -6,7 +6,9 @@ import { homedir, hostname, platform, uptime } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { authorityCandidatesForSpec, deriveAutopilotAuthority } from "./authority.js";
 import { AUTOPILOT_CHECKOUT_PROFILE_SNAPSHOT_FILE, checkoutProfileSnapshotFromResolved, parseCheckoutProfileSnapshot, readCheckoutProfileSnapshot, resolveAutopilotCheckoutProfile, sparseIncludePatternsForPaths, } from "./checkout-profile.js";
-import { assertAutopilotDiskGate } from "./disk-gate.js";
+import { assertAutopilotDiskGate, AutopilotDiskGateError } from "./disk-gate.js";
+import { buildS2CoordinationFailureDiagnostic } from "./coordination/s2-diagnostics.js";
+import { clearDurableS2RetentionDiskPressure, readS2RetentionProgressState, recordS2RetentionDiskPressure, s2RetentionPressureStatePath, s2RetentionRunsPausedForWorktreeCreation } from "./coordination/s2-retention-state-machine.js";
 import { applySparseCheckoutSet, createAutopilotGitWorktree } from "./sparse-worktree.js";
 import { cleanupTerminalUnitWorktreesForRun, recoverCommittedPreflightRollbackProjections } from "./worktree-cleanup.js";
 import { executeOwnedWorktreeSaga, OwnedWorktreeSagaClient, recoverOwnedWorktreeSagas } from "./coordination/worktree-saga.js";
@@ -40,6 +42,47 @@ const DEFAULT_LOCK_TIMEOUT_MS = 60_000;
 const LOCK_BACKOFF_START_MS = 100;
 const LOCK_BACKOFF_STEP_MS = 100;
 const LOCK_BACKOFF_CAP_MS = 2_000;
+function s2RetentionRootForWorktreeRoot(worktreeRoot) {
+    return join(worktreeRoot, '_retention');
+}
+async function clearRecoveredS2WorktreeDiskPressure(input) {
+    const statePath = s2RetentionPressureStatePath(s2RetentionRootForWorktreeRoot(input.worktreeRoot));
+    const state = await readS2RetentionProgressState(statePath);
+    if (!s2RetentionRunsPausedForWorktreeCreation(state).includes(input.workstreamRun))
+        return;
+    const lane = state.lanes.find((candidate) => candidate.workstream_run === input.workstreamRun);
+    if (lane?.disk_pressure_event_seq === null || lane?.disk_pressure_event_seq === undefined)
+        return;
+    await clearDurableS2RetentionDiskPressure(statePath, input.workstreamRun, lane.disk_pressure_event_seq);
+}
+async function recordS2WorktreeDiskPressure(input) {
+    if (input.error.code !== 'insufficient-space')
+        return;
+    const retentionRoot = s2RetentionRootForWorktreeRoot(input.worktreeRoot);
+    const eventSeq = input.now.getTime();
+    await recordS2RetentionDiskPressure(s2RetentionPressureStatePath(retentionRoot), { offendingRun: input.workstreamRun, reason: input.error.code, eventSeq });
+    await writeJsonAtomic(join(retentionRoot, 'diagnostics', input.workstreamRun, `disk-pressure-${String(eventSeq)}.json`), {
+        schema_version: 'autopilot.s2_retention.disk_pressure_diagnostic.v1',
+        workstream_run: input.workstreamRun,
+        event_seq: eventSeq,
+        lane_effect: 'new-worktree-creation-paused-only',
+        evidence_publication: 'open',
+        diagnostics_publication: 'open',
+        diagnostic: buildS2CoordinationFailureDiagnostic({ code: 'disk-failure', message: input.error.message, evidence: input.error.evidence }),
+        recorded_at: input.now.toISOString(),
+    });
+}
+async function assertDiskGateOrRecordS2Pressure(input) {
+    try {
+        assertAutopilotDiskGate({ path: input.path, projection: input.projection });
+        await clearRecoveredS2WorktreeDiskPressure({ worktreeRoot: input.worktreeRoot, workstreamRun: input.workstreamRun });
+    }
+    catch (error) {
+        if (error instanceof AutopilotDiskGateError)
+            await recordS2WorktreeDiskPressure({ worktreeRoot: input.worktreeRoot, workstreamRun: input.workstreamRun, error, now: input.now });
+        throw error;
+    }
+}
 export class AutopilotParallelRuntimeError extends Error {
     name = 'AutopilotParallelRuntimeError';
     code;
@@ -218,7 +261,10 @@ export async function prepareAutopilotUnitWorktree(input) {
             ? []
             : sortedUnique([...checkout.basePatterns, ...sparseIncludePatternsForPaths(unitClaimPaths)]);
         await assertD65OrdinaryBoundaryFromEnvironment('checkout-disk-estimate', env);
-        assertAutopilotDiskGate({
+        await assertDiskGateOrRecordS2Pressure({
+            worktreeRoot: input.active.worktree_root,
+            workstreamRun: input.active.workstream_run,
+            now,
             path: input.active.worktree_root,
             projection: {
                 profileMode: checkout.mode === 'legacy-full' ? 'full' : checkout.mode,
@@ -897,6 +943,21 @@ async function recoverCoordinatorBootstrapWorkstream(input) {
             intent: { repo_root: active.source_repo, worktree_path: active.main_worktree_path, git_common_dir: active.git_common_dir, branch: active.branch, reason: 'create isolated Autopilot main worktree', base_sha: active.target_base_sha, target_sha: null, archive_ref: null, checkout_mode: profileSnapshot.profile.mode, sparse_patterns: profileSnapshot.base_patterns, paths: [], metadata_refs: [AUTOPILOT_CHECKOUT_PROFILE_SNAPSHOT_FILE, TASK_INFO_FILE, BRANCHES_FILE, UNIT_INDEX_FILE] },
         }, {
             action: async () => {
+                const perWorktreeEstimateBytes = profileSnapshot.profile.mode === 'full'
+                    ? profileSnapshot.full_checkout_bytes
+                    : profileSnapshot.base_checkout_bytes;
+                await assertDiskGateOrRecordS2Pressure({
+                    worktreeRoot: active.worktree_root,
+                    workstreamRun: active.workstream_run,
+                    now: input.now,
+                    path: active.worktree_root,
+                    projection: {
+                        profileMode: profileSnapshot.profile.mode,
+                        diskGate: profileSnapshot.profile.disk_gate,
+                        perWorktreeEstimateBytes,
+                        expectedParallelUnits: profileSnapshot.profile.disk_gate.expected_parallel_units,
+                    },
+                });
                 if (!existsSync(active.main_worktree_path))
                     await createAutopilotGitWorktree({ repoRoot: active.source_repo, worktreePath: active.main_worktree_path, branch: active.branch, startPoint: active.target_base_sha, mode: profileSnapshot.profile.mode, sparsePatterns: profileSnapshot.base_patterns, env: { ...input.env, [AUTOPILOT_RUNTIME_ENV]: AUTOPILOT_RUNTIME_VALUE } });
                 if (profileSnapshot.profile.mode !== 'full') {
@@ -955,7 +1016,10 @@ async function createNewWorkstream(input) {
     const perWorktreeEstimateBytes = checkoutProfile.profile.mode === 'full'
         ? checkoutProfile.full_checkout_bytes
         : checkoutProfile.base_checkout_bytes;
-    assertAutopilotDiskGate({
+    await assertDiskGateOrRecordS2Pressure({
+        worktreeRoot: input.worktreeRoot,
+        workstreamRun,
+        now: input.now,
         path: input.worktreeRoot,
         projection: {
             profileMode: checkoutProfile.profile.mode,

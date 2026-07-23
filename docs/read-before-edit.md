@@ -21,6 +21,7 @@ here are not yet governed by a doc; coverage ratchets up per PR (C8 floor).
 <!-- GENERATED:read-before-edit START (source: docs/manifest.json) -->
 | Source path | Owning doc(s) |
 | --- | --- |
+| `bin/autopilot-s2-corpus-rehearsal.mjs` | [`tools/s2-corpus-rehearsal`](tools/s2-corpus-rehearsal.md) |
 | `src/cli/autopilot-agent-run.ts` | [`cli/autopilot-agent-run`](cli/autopilot-agent-run.md) |
 | `src/cli/autopilot-coordinator-bootstrap.ts` | [`cli/autopilot-coordinator`](cli/autopilot-coordinator.md) |
 | `src/cli/autopilot-coordinator.ts` | [`cli/autopilot-coordinator`](cli/autopilot-coordinator.md) |
@@ -36,6 +37,11 @@ here are not yet governed by a doc; coverage ratchets up per PR (C8 floor).
 | `src/core/coordination/admission.ts` | [`subsystems/coordination`](subsystems/coordination.md) |
 | `src/core/coordination/deadlock.ts` | [`concepts/deadlock`](concepts/deadlock.md), [`subsystems/coordination`](subsystems/coordination.md) |
 | `src/core/coordination/index.ts` | [`subsystems/coordination`](subsystems/coordination.md) |
+| `src/core/coordination/s2-owned-gc.ts` | [`subsystems/s2-retention`](subsystems/s2-retention.md) |
+| `src/core/coordination/s2-retention-archive.ts` | [`subsystems/s2-retention`](subsystems/s2-retention.md) |
+| `src/core/coordination/s2-retention-policy.ts` | [`subsystems/s2-retention`](subsystems/s2-retention.md) |
+| `src/core/coordination/s2-retention-state-machine.ts` | [`subsystems/s2-retention`](subsystems/s2-retention.md) |
+| `src/core/coordination/unit-failure-producer-provenance.ts` | [`subsystems/runner-and-forced-output`](subsystems/runner-and-forced-output.md) |
 | `src/core/disk-gate.ts` | [`subsystems/worktrees`](subsystems/worktrees.md) |
 | `src/core/execution-audit/index.ts` | [`subsystems/runner-and-forced-output`](subsystems/runner-and-forced-output.md) |
 | `src/core/execution-commit.ts` | [`subsystems/close-lifecycle`](subsystems/close-lifecycle.md) |
@@ -59,4 +65,8 @@ here are not yet governed by a doc; coverage ratchets up per PR (C8 floor).
 | `src/core/validation-staleness.ts` | [`subsystems/close-lifecycle`](subsystems/close-lifecycle.md) |
 | `src/core/worktree-cleanup.ts` | [`subsystems/close-lifecycle`](subsystems/close-lifecycle.md) |
 | `src/internal/status-extension.ts` | [`tools/autopilot_emit_status`](tools/autopilot_emit_status.md) |
+| `tools/s2-corpus-rehearsal/candidate-worker.ts` | [`tools/s2-corpus-rehearsal`](tools/s2-corpus-rehearsal.md) |
+| `tools/s2-corpus-rehearsal/cli.ts` | [`tools/s2-corpus-rehearsal`](tools/s2-corpus-rehearsal.md) |
+| `tools/s2-corpus-rehearsal/contracts.ts` | [`tools/s2-corpus-rehearsal`](tools/s2-corpus-rehearsal.md) |
+| `tools/s2-corpus-rehearsal/release-gate.ts` | [`tools/s2-corpus-rehearsal`](tools/s2-corpus-rehearsal.md) |
 <!-- GENERATED:read-before-edit END -->

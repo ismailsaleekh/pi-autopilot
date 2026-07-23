@@ -17,6 +17,8 @@ import {
   type HistoricalUnitFailureEvidenceProvenance,
   type ReconciliationEvidenceIdentity,
 } from '../../src/core/coordination/terminal-evidence.ts';
+import { BUG_177_HISTORICAL_UNIT_FAILURE_PRODUCERS } from '../../src/core/coordination/versioned-ingress-registry.ts';
+import { COORDINATOR_IMPLEMENTATION_BUILD } from '../../src/core/coordination/runtime-constants.ts';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const fixtureCaptureCommit = join(here, '..', 'fixtures', 'bug-177', 'historical-reset-unit-failure.bug177.json');
@@ -43,6 +45,8 @@ const identity = (unitId: string): ReconciliationEvidenceIdentity => ({
 });
 
 function provenance(bytes: Uint8Array, ref: string, unitId: string): HistoricalUnitFailureEvidenceProvenance {
+  const generation = classifyHistoricalUnitFailureEvidenceGeneration(bytes);
+  if (generation === null) throw new Error('fixture does not classify as historical');
   return {
     kind: 'coordinator-accepted-before-schema10',
     evidenceRef: ref,
@@ -51,6 +55,8 @@ function provenance(bytes: Uint8Array, ref: string, unitId: string): HistoricalU
     acceptedEventSeq: 40_259,
     acceptedAt: '2026-07-14T14:00:58.597Z',
     schema10AppliedAt: '2026-07-14T22:13:51.203Z',
+    producerBuild: generation === HISTORICAL_UNIT_FAILURE_GENERATIONS.phase2Initial ? BUG_177_HISTORICAL_UNIT_FAILURE_PRODUCERS.phase2Initial : BUG_177_HISTORICAL_UNIT_FAILURE_PRODUCERS.captureCommitOnly,
+    producerGeneration: generation === HISTORICAL_UNIT_FAILURE_GENERATIONS.phase2Initial ? 1 : 2,
   };
 }
 
@@ -69,7 +75,7 @@ void it('BUG-177 classifies the exact historical reset generations and rejects u
   assert.equal(classifyHistoricalUnitFailureEvidenceGeneration(captureCommit), HISTORICAL_UNIT_FAILURE_GENERATIONS.captureCommitOnly);
   assert.equal(classifyHistoricalUnitFailureEvidenceGeneration(phase2Initial), HISTORICAL_UNIT_FAILURE_GENERATIONS.phase2Initial);
   const current = new TextEncoder().encode(`${JSON.stringify({
-    schema_version: 'autopilot.unit_failure.v1', action: 'reset', workstream: 'w', workstream_run: 'r', unit_id: 'u', attempt: 1, unit_worktree_path: '/tmp/u', dirty_paths: [],
+    schema_version: 'autopilot.unit_failure.v1', producer_build: COORDINATOR_IMPLEMENTATION_BUILD, producer_generation: 3, action: 'reset', workstream: 'w', workstream_run: 'r', unit_id: 'u', attempt: 1, unit_worktree_path: '/tmp/u', dirty_paths: [],
     capture_commit_sha: null, capture_ref: null, git_head_before: 'a'.repeat(40), git_head_after: 'a'.repeat(40), git_common_dir: '/tmp/.git', branch: 'b', postcondition_worktree_clean: true, summary: 's', created_at: '2026-07-14T00:00:00.000Z',
   }, null, 2)}\n`);
   assert.equal(classifyHistoricalUnitFailureEvidenceGeneration(current), null, 'current-generation evidence must not classify as historical');
@@ -77,7 +83,7 @@ void it('BUG-177 classifies the exact historical reset generations and rejects u
 
 void it('BUG-177 pre-fix strict parser rejects the historical reset fixture at capture_ref', async () => {
   const bytes = await readFixture(fixtureCaptureCommit);
-  assert.throws(() => parseUnitFailureEvidenceFacts(bytes, identity('unit-bug177')), /capture_ref must be bounded text or null|fields are incompatible/u, 'the strict current parser must fail closed on the historical shape');
+  assert.throws(() => parseUnitFailureEvidenceFacts(bytes, identity('unit-bug177')), /missing a required field|capture_ref must be bounded text or null|fields are incompatible/u, 'the strict current parser must fail closed on the historical shape');
 });
 
 void it('BUG-177 historical adapter admits the exact reset generation with trusted provenance and preserves original bytes', async () => {
@@ -109,13 +115,15 @@ void it('BUG-177 rejects historical quarantine/preserve, forged digest, and unpr
   assert.throws(() => parseHistoricalUnitFailureEvidenceFacts(bytes, identity('unit-bug177'), forgedProvenance), /differs from its accepted coordinator provenance/u);
   const lateProvenance: HistoricalUnitFailureEvidenceProvenance = { ...provenance(bytes, ref, 'unit-bug177'), acceptedAt: '2026-07-15T00:00:00.000Z', schema10AppliedAt: '2026-07-14T22:13:51.203Z' };
   assert.throws(() => parseHistoricalUnitFailureEvidenceFacts(bytes, identity('unit-bug177'), lateProvenance), /trusted pre-schema10 coordinator acceptance fence/u);
-  assert.throws(() => parseUnitFailureEvidenceIngress(bytes, identity('unit-bug177'), null), /capture_ref must be bounded text or null|fields are incompatible/u);
+  assert.throws(() => parseUnitFailureEvidenceIngress(bytes, identity('unit-bug177'), null), /missing a required field|capture_ref must be bounded text or null|fields are incompatible/u);
+  const mismatchedProvenance: HistoricalUnitFailureEvidenceProvenance = { ...provenance(bytes, ref, 'unit-bug177'), producerBuild: BUG_177_HISTORICAL_UNIT_FAILURE_PRODUCERS.phase2Initial, producerGeneration: 1 };
+  assert.throws(() => validateReconciliationEvidenceDocument(bytes, identity('unit-bug177'), mismatchedProvenance), /unknown fields|outside its exact producer_build fence|does not match the exact/u);
 });
 
 void it('BUG-177 current missing-capture_ref reset and quarantine-without-capture evidence still fail closed', () => {
-  const base = { schema_version: 'autopilot.unit_failure.v1', workstream: 'workstream-bug177', workstream_run: 'workstream-run-bug177', unit_id: 'unit-current', attempt: 1, unit_worktree_path: '/tmp/u', dirty_paths: [], capture_commit_sha: null, git_head_before: 'a'.repeat(40), git_head_after: 'a'.repeat(40), git_common_dir: '/tmp/.git', branch: 'b', postcondition_worktree_clean: true, summary: 's', created_at: '2026-07-14T00:00:00.000Z' } as const;
+  const base = { schema_version: 'autopilot.unit_failure.v1', producer_build: COORDINATOR_IMPLEMENTATION_BUILD, producer_generation: 3, workstream: 'workstream-bug177', workstream_run: 'workstream-run-bug177', unit_id: 'unit-current', attempt: 1, unit_worktree_path: '/tmp/u', dirty_paths: [], capture_commit_sha: null, git_head_before: 'a'.repeat(40), git_head_after: 'a'.repeat(40), git_common_dir: '/tmp/.git', branch: 'b', postcondition_worktree_clean: true, summary: 's', created_at: '2026-07-14T00:00:00.000Z' } as const;
   const missingRefReset = new TextEncoder().encode(`${JSON.stringify({ ...base, capture_ref: undefined, action: 'reset' }, null, 2)}\n`);
-  assert.throws(() => parseUnitFailureEvidenceFacts(missingRefReset, identity('unit-current')), /fields are incompatible|capture_ref/u);
+  assert.throws(() => parseUnitFailureEvidenceFacts(missingRefReset, identity('unit-current')), /missing a required field|fields are incompatible|capture_ref/u);
   const quarantineNoCapture = new TextEncoder().encode(`${JSON.stringify({ ...base, action: 'quarantine', capture_commit_sha: null, capture_ref: null }, null, 2)}\n`);
   assert.throws(() => parseUnitFailureEvidenceFacts(quarantineNoCapture, identity('unit-current')), /quarantine.*requires an immutable capture commit and ref/u);
   const resetWithCapture = new TextEncoder().encode(`${JSON.stringify({ ...base, action: 'reset', capture_commit_sha: 'a'.repeat(40), capture_ref: 'autopilot/archive/workstream-run-bug177/unit/unit-current/attempt-1/reset-capture' }, null, 2)}\n`);
@@ -126,7 +134,7 @@ void it('BUG-177 rejects oversized, non-string, and extra-field historical evide
   const bytes = await readFixture(fixtureCaptureCommit);
   const ref = '.pi/autopilot/workstream-bug177/quarantine/unit-bug177.attempt-1.reset.json';
   const extraField = new TextEncoder().encode(`${JSON.stringify({ ...JSON.parse(new TextDecoder().decode(bytes)), injected_field: 'forged' }, null, 2)}\n`);
-  assert.throws(() => parseHistoricalUnitFailureEvidenceFacts(extraField, identity('unit-bug177'), provenance(extraField, ref, 'unit-bug177')), /not an enumerated historical producer generation/u);
+  assert.throws(() => parseHistoricalUnitFailureEvidenceFacts(extraField, identity('unit-bug177'), provenance(bytes, ref, 'unit-bug177')), /not an enumerated historical producer generation/u);
   const wrongUnit = new TextEncoder().encode(`${JSON.stringify({ ...JSON.parse(new TextDecoder().decode(bytes)), unit_id: 'unit-other' }, null, 2)}\n`);
-  assert.throws(() => parseHistoricalUnitFailureEvidenceFacts(wrongUnit, identity('unit-bug177'), provenance(wrongUnit, ref, 'unit-bug177')), /unit_id does not match|differs from its accepted coordinator provenance/u);
+  assert.throws(() => parseHistoricalUnitFailureEvidenceFacts(wrongUnit, identity('unit-bug177'), provenance(wrongUnit, ref, 'unit-bug177')), /identity does not match|unit_id does not match|differs from its accepted coordinator provenance/u);
 });

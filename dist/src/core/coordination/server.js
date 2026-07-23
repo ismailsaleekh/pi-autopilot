@@ -7,6 +7,9 @@ import { createCoordinatorAdmissionOffer, createCoordinatorAdmissionResponse, CO
 import { assertCoordinatorAdmissionAuthorityUnchanged, captureServingCoordinatorAdmissionAuthority, COORDINATOR_S1_ADMISSION_IDENTITY } from "./admission-runtime.js";
 import { parseCoordinatorAdmissionTransportRequest, parseCoordinatorTransportRequest, CoordinatorFrameDecoder, writeCoordinatorResponse } from "./ipc.js";
 import { CoordinationRuntimeError } from "./failures.js";
+import { buildS2CoordinationRuntimeErrorDiagnostic } from "./s2-diagnostics.js";
+import { isS2CoordinatorContentionFailure, isS2FailureResponseRetryable } from "./s2-failure-taxonomy.js";
+import { runCoordinatorOwnedS2RetentionGc } from "./s2-owned-gc.js";
 import { currentBootId, isProcessAlive, predecessorCompatibleBootId, processStartIdentity } from "./process-identity.js";
 import { COORDINATOR_GRANT_OFFER_SWEEP_MS, enforcePrivateAuthorityPath, ensureCoordinatorPrivateRoots, readOrCreateCoordinatorCapability } from "./runtime-paths.js";
 import { acquireSerializedProcessGuard, discardLockTombstone, quarantineExactLock, readExactLockText, restoreLockTombstone } from "./serialized-lock.js";
@@ -204,7 +207,7 @@ async function acquireCoordinatorLock(paths, adoption, beforeAuthorityPublicatio
                 guard = acquireSerializedProcessGuard(paths.lifecycleElectionPath, 25, 'predecessor fence maintenance');
             }
             catch (error) {
-                if (error instanceof CoordinationRuntimeError && error.code === 'coordinator-contention')
+                if (isS2CoordinatorContentionFailure(error))
                     return 'deferred';
                 throw error;
             }
@@ -345,8 +348,8 @@ function errorResponse(requestId, error) {
         ok: false,
         committed_event_seq: null,
         error_code: runtime.code,
-        retryable: runtime.retry_policy !== 'never',
-        payload: { message: runtime.message, evidence: runtime.evidence },
+        retryable: isS2FailureResponseRetryable(runtime.code),
+        payload: { message: runtime.message, evidence: runtime.evidence, s2_diagnostic: buildS2CoordinationRuntimeErrorDiagnostic(runtime) },
     };
 }
 function jsonObject(value) {
@@ -485,7 +488,7 @@ class CoordinatorRequestDrain {
         }
     }
 }
-function handleSocket(socket, store, capability, paths, lifecycle, backgroundFailure, firstExactHandshake, requestDrain, testHooks) {
+function handleSocket(socket, store, capability, paths, lifecycle, backgroundFailure, startupRequestGate, firstExactHandshake, requestDrain, testHooks) {
     if (!requestDrain.register(socket))
         return;
     const decoder = new CoordinatorFrameDecoder();
@@ -501,6 +504,7 @@ function handleSocket(socket, store, capability, paths, lifecycle, backgroundFai
         if (!requestDrain.acceptRequest(socket))
             return;
         chain = chain.then(async () => {
+            await startupRequestGate;
             const frames = decoder.push(chunk);
             for (const frame of frames) {
                 let requestId = `transport-error-${randomBytes(8).toString('hex')}`;
@@ -656,6 +660,7 @@ export async function startCoordinatorServer(paths, clock, adoption, testHooks, 
     let server = null;
     let offerTimer = null;
     let serverListening = false;
+    let releaseStartupRequestGate = () => undefined;
     const requestDrain = new CoordinatorRequestDrain();
     try {
         lifecycleLock = await acquireCoordinatorLock(paths, adoption, async (plannedLifecycle) => {
@@ -683,12 +688,18 @@ export async function startCoordinatorServer(paths, clock, adoption, testHooks, 
         const openedStore = requirePreparedStore(store);
         const openedCapability = requirePreparedCapability(capability);
         let timerFailure = null;
+        // The listener is bound before lifecycle activation is reported, but no
+        // request may observe the endpoint until the post-activation observer
+        // transition has completed. This keeps startup phase observation ordered
+        // even when an already-waiting client connects immediately after listen().
+        releaseStartupRequestGate = () => undefined;
+        const startupRequestGate = startupObserver === undefined ? Promise.resolve() : new Promise((resolveGate) => { releaseStartupRequestGate = resolveGate; });
         let firstHandshakeTransition = null;
         const firstExactHandshake = async () => {
             firstHandshakeTransition ??= startupObserver?.transition('first-exact-handshake-served', acquiredLifecycleLock.record) ?? Promise.resolve();
             await firstHandshakeTransition;
         };
-        server = createServer((socket) => handleSocket(socket, openedStore, openedCapability, paths, acquiredLifecycleLock.record, () => timerFailure, firstExactHandshake, requestDrain, testHooks));
+        server = createServer((socket) => handleSocket(socket, openedStore, openedCapability, paths, acquiredLifecycleLock.record, () => timerFailure, startupRequestGate, firstExactHandshake, requestDrain, testHooks));
         await startupObserver?.transition('before-socket-bind', acquiredLifecycleLock.record);
         await listen(server, paths.socketPath);
         serverListening = true;
@@ -700,16 +711,29 @@ export async function startCoordinatorServer(paths, clock, adoption, testHooks, 
         // all complete under one lifecycle election. Only then may another startup or
         // restore operation enter the election.
         acquiredLifecycleLock.activate();
-        await startupObserver?.transition('after-activation-before-first-handshake', acquiredLifecycleLock.record);
-        offerTimer = setInterval(() => {
-            void acquiredLifecycleLock.verifyOrRepairFence().then((outcome) => {
-                if (outcome === 'verified')
+        try {
+            await startupObserver?.transition('after-activation-before-first-handshake', acquiredLifecycleLock.record);
+        }
+        finally {
+            releaseStartupRequestGate();
+        }
+        let offerSweepPromise = null;
+        const runSerializedOfferSweep = () => {
+            if (offerSweepPromise !== null)
+                return;
+            offerSweepPromise = acquiredLifecycleLock.verifyOrRepairFence().then(async (outcome) => {
+                if (outcome === 'verified') {
                     openedStore.sweepExpiredGrantOffers();
+                    await runCoordinatorOwnedS2RetentionGc({ stateRoot: paths.stateRoot, runs: openedStore.terminalRunsForS2RetentionGc(), nowIso: new Date().toISOString() });
+                }
                 timerFailure = null;
             }).catch((error) => {
                 timerFailure = error instanceof Error ? error : new Error(String(error));
+            }).finally(() => {
+                offerSweepPromise = null;
             });
-        }, COORDINATOR_GRANT_OFFER_SWEEP_MS);
+        };
+        offerTimer = setInterval(runSerializedOfferSweep, COORDINATOR_GRANT_OFFER_SWEEP_MS);
         let closePromise = null;
         return {
             paths,
@@ -719,6 +743,7 @@ export async function startCoordinatorServer(paths, clock, adoption, testHooks, 
                     if (offerTimer !== null)
                         clearInterval(offerTimer);
                     offerTimer = null;
+                    await offerSweepPromise;
                     // Calling server.close synchronously retires listener acceptance. Only
                     // then may queued requests drain; idle/exhausted sockets are destroyed
                     // so the listener callback cannot outlive request authority.
@@ -744,6 +769,7 @@ export async function startCoordinatorServer(paths, clock, adoption, testHooks, 
     }
     catch (error) {
         const cleanupFailures = [];
+        releaseStartupRequestGate();
         if (offerTimer !== null)
             clearInterval(offerTimer);
         offerTimer = null;

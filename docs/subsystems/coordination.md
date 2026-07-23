@@ -11,7 +11,7 @@ covers_sources:
   - src/core/coordination/admission.ts
   - src/core/coordination/deadlock.ts
 signature_hash: 'sha256:7dcfdcc868f120781150ae32025fae87d3b683d3a8f20a6a4c29665c6fafa656'
-body_hash: 'sha256:4c39eddae3f6182bf47cfb73b4472158c477ced0099020f4a742b6812c918466'
+body_hash: 'sha256:d3765b85755ceb642c79c5101364c4d81bc2013fb881deb8a5ba6cee102be0cd'
 fact_pins:
   - text: `MAX_GRANT_BYPASSES` is 8
     symbol: 'src/core/coordination/deadlock.ts#MAX_GRANT_BYPASSES'
@@ -123,6 +123,8 @@ and resolves strongly connected cycles to a same-transaction fixed point.
 2. WRITE/EXCLUSIVE release is authorized only by stronger Git-backed terminal
    evidence, never by age, PID, or timestamp.
 3. Coordinator startup replays durable terminal facts to repair a transition
-   interrupted by an older process; it never fabricates or drops a row.
+   interrupted by an older process; it never fabricates or drops a row. Its owned
+   timer also schedules S2 retention GC for terminal runs against only package-owned
+   `_trash/` and `transition-backups/` candidates.
 4. The single-writer election is endpoint-attested: identity drift fails closed;
    endpoint recovery always wins over replacement.

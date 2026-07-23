@@ -22,6 +22,7 @@ import { canonicalJson } from './canonical-json.ts';
 import { parseD65HeartbeatAcceptanceResult } from './d65-launch-policy.ts';
 import { parseRunScopedLogicalFault } from './logical-faults.ts';
 import { CoordinationRuntimeError } from './failures.ts';
+import { isS2CoordinatorStoreCorruptionFailure } from './s2-failure-taxonomy.ts';
 import type { CoordinationChildLease, CoordinationSessionLease } from './types.ts';
 
 // D65 semantic-version history normalizer. Purity is proven from an accepted
@@ -65,6 +66,13 @@ function exactKeys(payload: Readonly<Record<string, unknown>>, expected: readonl
   return actual.length === sorted.length && actual.every((key, index) => key === sorted[index]);
 }
 
+function assertGenericResultMetadata(row: D65AcceptedEventResultJoin, payload: Readonly<Record<string, unknown>>): void {
+  if (row.event_type === 'program-heartbeat-accepted') return;
+  if (payload['event_type'] !== row.event_type || payload['entity_type'] !== row.entity_type || payload['entity_id'] !== row.entity_id) {
+    fail('immutable result generic metadata disagrees with its accepted event', [String(row.event_seq), row.event_type, row.entity_type, row.entity_id]);
+  }
+}
+
 function oneOwner(row: D65AcceptedEventResultJoin, workstreamRun: string): readonly string[] {
   if (workstreamRun.length === 0) fail('event result has an empty workstream owner', [String(row.event_seq), row.event_type]);
   return Object.freeze([workstreamRun]);
@@ -102,6 +110,7 @@ function sortedUniqueStrings(value: unknown, row: D65AcceptedEventResultJoin, la
  */
 export function d65SemanticEventWorkstreamRuns(row: D65AcceptedEventResultJoin): readonly string[] {
   const payload = exactJoin(row);
+  assertGenericResultMetadata(row, payload);
   try {
     switch (row.event_type) {
       case 'run-attached':
@@ -259,7 +268,7 @@ export function d65SemanticEventWorkstreamRuns(row: D65AcceptedEventResultJoin):
         fail('event type has no exact D65 run-owner resolver', [String(row.event_seq), row.event_type]);
     }
   } catch (error) {
-    if (error instanceof CoordinationRuntimeError && error.code === 'store-corrupt' && error.message.includes('D65 semantic-version history is incomplete or mismatched:')) throw error;
+    if (isS2CoordinatorStoreCorruptionFailure(error) && error.message.includes('D65 semantic-version history is incomplete or mismatched:')) throw error;
     fail('event primary owner record is malformed', [String(row.event_seq), row.event_type, error instanceof Error ? error.message : String(error)]);
   }
 }

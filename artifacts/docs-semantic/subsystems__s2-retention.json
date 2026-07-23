@@ -1,0 +1,15 @@
+{
+  "schema_version": "autopilot.docs_semantic_attestation.v1",
+  "doc_id": "subsystems/s2-retention",
+  "reviewed_body_hash": "sha256:08e81f1d945966d6a994f3fc8736fb86a8a71fe6a1365b26b6a709c61256f969",
+  "verdict": "PASS",
+  "reviewer": "Wave-4 independent validator (offline docs truth review)",
+  "reviewed_at": "2026-07-23T00:00:00.000Z",
+  "covers_sources": [
+    "src/core/coordination/s2-retention-policy.ts",
+    "src/core/coordination/s2-retention-archive.ts",
+    "src/core/coordination/s2-owned-gc.ts",
+    "src/core/coordination/s2-retention-state-machine.ts"
+  ],
+  "notes": "Reviewed docs/subsystems/s2-retention.md against the final S2 retention sources. The prose matches crash-safe terminal binding reconstruction after accepted coordinator evidence, serialized coordinator-owned GC sweeps, symlink-ancestor rejection for cold/hot publication and GC verification paths, durable ledger/directory fsync ordering before destructive removal/replay, non-starving batch accounting for refused candidates, and per-run disk-pressure recheck/clear semantics with disk-failure diagnostics."
+}

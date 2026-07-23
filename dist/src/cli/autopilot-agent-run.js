@@ -4,6 +4,7 @@ import { pathToFileURL } from 'node:url';
 import { AutopilotAgentRunError, runAutopilotAgentFromSpecPath } from "../core/agent-runner.js";
 import { driveD65SubscriptionFailureRecoveryFromEnvironment } from "../core/coordination/d65-graph-successor-runtime.js";
 import { CoordinationRuntimeError, formatCoordinationRuntimeError } from "../core/coordination/failures.js";
+import { buildS2CoordinationRuntimeErrorDiagnostic } from "../core/coordination/s2-diagnostics.js";
 import { readStableRegularFile } from "../core/coordination/reconciliation.js";
 const MAX_RECOVERY_AUTHORITY_BYTES = 1024 * 1024;
 const EXIT_BY_FAILURE_CLASS = Object.freeze({
@@ -70,7 +71,7 @@ export async function runAutopilotAgentCli(argv, env = process.env) {
     }
     catch (error) {
         if (args.mode === 'recover-d65-subscription' && error instanceof CoordinationRuntimeError) {
-            const payload = { status: 'recovery-pending', mode: args.mode, failure_code: error.code, failure_class: error.failure_class, retry_policy: error.retry_policy, reason: formatCoordinationRuntimeError(error) };
+            const payload = { status: 'recovery-pending', mode: args.mode, failure_code: error.code, failure_class: error.failure_class, retry_policy: error.retry_policy, reason: formatCoordinationRuntimeError(error), s2_diagnostic: buildS2CoordinationRuntimeErrorDiagnostic(error) };
             console.error(args.json ? JSON.stringify(payload) : `autopilot-agent-run D65 subscription recovery paused: ${payload.reason}`);
             return 40;
         }

@@ -45,6 +45,7 @@ pi install .
 | Understand an invariant/concept | [`docs/concepts/`](docs/concepts/leases-and-observations.md) |
 | Run a task (start/handoff/close/abort/recover) | [`docs/operations/`](docs/operations/start-run.md) |
 | Diagnose a failure | [`docs/troubleshooting/failures.md`](docs/troubleshooting/failures.md) |
+| Run private S2-D corpus rehearsal | [`docs/tools/s2-corpus-rehearsal.md`](docs/tools/s2-corpus-rehearsal.md) |
 | See runtime state layout | [`docs/runtime-state/paths.md`](docs/runtime-state/paths.md) |
 
 ## Commands
@@ -112,6 +113,14 @@ source files live.
 - **Verified migration + recovery** — durable, resumable, one-way migration and cutover,
   the read-only canonical preflight, and standalone production surfaces.
   → [`docs/concepts/migration-cutover.md`](docs/concepts/migration-cutover.md)
+- **S2 release hardening** — explicit versioned persisted-artifact ingress (including
+  BUG-177 `unit_failure` producer provenance), permanent bidirectional cf50/current skew
+  certification, S2 retention/owned GC/pressure lanes, and the private mutable S2-D
+  corpus rehearsal harness.
+  → [`docs/subsystems/contracts-and-schemas.md`](docs/subsystems/contracts-and-schemas.md),
+  [`docs/concepts/admission.md`](docs/concepts/admission.md),
+  [`docs/subsystems/s2-retention.md`](docs/subsystems/s2-retention.md),
+  [`docs/tools/s2-corpus-rehearsal.md`](docs/tools/s2-corpus-rehearsal.md)
 
 ## Development gate
 
@@ -119,8 +128,16 @@ source files live.
 npm run build
 npm run typecheck
 npm run test:package
+npm run test:packed-migration
+npm run test:upgrade
 npm run test:version-skew
+npm run test:s2-corpus
+npm run test:d65
 npm run test
+npm run test:certification
+npm run test:packed-consumer
+npm run docs:generate
+npm run docs:attest
 npm run docs:verify
 npm run pack:dry-run
 ```

@@ -35,6 +35,10 @@ jobs:
       - run: npm ci --ignore-scripts
       - name: Complete deterministic offline gate
         run: npm test
+      - name: Digest-pinned S2 release-skew certification
+        run: npm run test:version-skew
+      - name: Synthetic S2-D mutable-corpus rehearsal certification
+        run: npm run test:s2-corpus
       - name: Deterministic docs-freshness gate (C0–C11)
         run: node scripts/docs-verify.mjs
       - name: Packed generic-repository migration rehearsals
@@ -70,6 +74,8 @@ jobs:
       - run: npm ci --ignore-scripts
       - run: npm run test:model
       - run: npm run test:scale
+      - run: npm run test:version-skew
+      - run: npm run test:s2-corpus
       - run: npm run security:scan
       - run: npm run security:audit
       - run: npm run sbom

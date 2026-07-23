@@ -2,7 +2,10 @@ import { createHash } from 'node:crypto';
 
 import { parseAutopilotExecutionAudit, parseAutopilotReceipt, parseAutopilotStatusEntry } from '../contracts/index.ts';
 import { CoordinationRuntimeError } from './failures.ts';
+import { COORDINATOR_IMPLEMENTATION_BUILD } from './runtime-constants.ts';
 import { AUTOPILOT_CHILD_TERMINAL_ACCEPTANCE_SCHEMA, parseAutopilotChildTerminalAcceptance } from './terminal-acceptance.ts';
+import { BUG_177_HISTORICAL_UNIT_FAILURE_PRODUCERS, UNIT_FAILURE_CURRENT_PRODUCER_GENERATION } from './unit-failure-producer-provenance.ts';
+import { parseCentralVersionedUnitFailureIngress, unitFailureProducerForHistoricalFieldSet } from './unit-failure-ingress.ts';
 import type { CoordinationReconciliationSource } from './types.ts';
 
 interface JsonMap {
@@ -81,6 +84,8 @@ export interface HistoricalUnitFailureEvidenceProvenance {
   readonly acceptedEventSeq: number;
   readonly acceptedAt: string;
   readonly schema10AppliedAt: string;
+  readonly producerBuild: string;
+  readonly producerGeneration: number;
 }
 
 export interface HistoricalUnitFailureRegenerationCandidate {
@@ -108,7 +113,7 @@ export type UnitFailureEvidenceIngress =
 
 const CURRENT_UNIT_FAILURE_FIELDS = Object.freeze([
   'action', 'attempt', 'branch', 'capture_commit_sha', 'capture_ref', 'created_at', 'dirty_paths', 'git_common_dir', 'git_head_after', 'git_head_before',
-  'postcondition_worktree_clean', 'schema_version', 'summary', 'unit_id', 'unit_worktree_path', 'workstream', 'workstream_run',
+  'postcondition_worktree_clean', 'producer_build', 'producer_generation', 'schema_version', 'summary', 'unit_id', 'unit_worktree_path', 'workstream', 'workstream_run',
 ].sort());
 const HISTORICAL_INITIAL_UNIT_FAILURE_FIELDS = Object.freeze([
   'action', 'attempt', 'created_at', 'dirty_paths', 'schema_version', 'summary', 'unit_id', 'unit_worktree_path', 'workstream', 'workstream_run',
@@ -200,10 +205,9 @@ function assertHistoricalCommonFields(document: JsonMap, expected: Reconciliatio
 }
 
 export function classifyHistoricalUnitFailureEvidenceGeneration(bytes: Uint8Array): HistoricalUnitFailureGeneration | null {
-  const document = jsonDocument(bytes, 'historical unit failure evidence');
-  const fields = Object.keys(document).sort();
-  if (fields.length === HISTORICAL_INITIAL_UNIT_FAILURE_FIELDS.length && fields.every((field, index) => field === HISTORICAL_INITIAL_UNIT_FAILURE_FIELDS[index])) return HISTORICAL_UNIT_FAILURE_GENERATIONS.phase2Initial;
-  if (fields.length === HISTORICAL_CAPTURE_COMMIT_UNIT_FAILURE_FIELDS.length && fields.every((field, index) => field === HISTORICAL_CAPTURE_COMMIT_UNIT_FAILURE_FIELDS[index])) return HISTORICAL_UNIT_FAILURE_GENERATIONS.captureCommitOnly;
+  const producer = unitFailureProducerForHistoricalFieldSet(bytes);
+  if (producer?.generationName === 'phase2Initial') return HISTORICAL_UNIT_FAILURE_GENERATIONS.phase2Initial;
+  if (producer?.generationName === 'captureCommitOnly') return HISTORICAL_UNIT_FAILURE_GENERATIONS.captureCommitOnly;
   return null;
 }
 
@@ -213,20 +217,29 @@ export function classifyHistoricalUnitFailureEvidenceGeneration(bytes: Uint8Arra
  * normalized capture facts and must never be consumed as release evidence.
  */
 export function parseHistoricalUnitFailureRegenerationCandidate(bytes: Uint8Array, expected: ReconciliationEvidenceIdentity): HistoricalUnitFailureRegenerationCandidate {
-  const document = jsonDocument(bytes, 'historical unit failure evidence');
   const generation = classifyHistoricalUnitFailureEvidenceGeneration(bytes);
   if (generation === null) throw new CoordinationRuntimeError('invalid-state', 'unit failure evidence is not an enumerated historical producer generation');
+  const producerBuild = generation === HISTORICAL_UNIT_FAILURE_GENERATIONS.phase2Initial ? BUG_177_HISTORICAL_UNIT_FAILURE_PRODUCERS.phase2Initial : BUG_177_HISTORICAL_UNIT_FAILURE_PRODUCERS.captureCommitOnly;
+  const producerGeneration = generation === HISTORICAL_UNIT_FAILURE_GENERATIONS.phase2Initial ? 1 : 2;
+  if (expected.unitId === null || expected.attempt === null) throw new CoordinationRuntimeError('invalid-state', 'historical unit failure evidence requires an exact unit attempt identity');
+  const ingress = parseCentralVersionedUnitFailureIngress({
+    bytes,
+    producer_build: producerBuild,
+    producer_generation: producerGeneration,
+    identity: { workstream: expected.workstream, workstreamRun: expected.workstreamRun, unitId: expected.unitId, attempt: expected.attempt },
+  });
+  const document = ingress.ingress.normalized_document;
   assertHistoricalCommonFields(document, expected);
-  const action = parseFailureAction(document);
+  const action = ingress.facts.action;
   if (action === 'quarantine' || action === 'preserve') throw new CoordinationRuntimeError('recovery-required', 'historical quarantine/preserve evidence lacks an exact capture ref; edit authority remains retained');
   if (generation === HISTORICAL_UNIT_FAILURE_GENERATIONS.captureCommitOnly && document['capture_commit_sha'] !== null) throw new CoordinationRuntimeError('invalid-state', 'historical reset/abort evidence must carry a null capture commit');
   return {
     disposition: 'current-evidence-regeneration-required',
     generation,
     action,
-    unitWorktreePath: text(document, 'unit_worktree_path', 'historical unit failure evidence', 1024),
-    originalSha256: `sha256:${createHash('sha256').update(bytes).digest('hex')}`,
-    originalFields: Object.freeze(Object.keys(document).sort()),
+    unitWorktreePath: ingress.facts.unitWorktreePath,
+    originalSha256: ingress.facts.originalSha256,
+    originalFields: ingress.facts.originalFields,
   };
 }
 
@@ -234,6 +247,9 @@ export function parseHistoricalUnitFailureEvidenceFacts(bytes: Uint8Array, expec
   if (provenance.kind !== 'coordinator-accepted-before-schema10' || !Number.isSafeInteger(provenance.acceptedEventSeq) || provenance.acceptedEventSeq < 1 || !Number.isFinite(Date.parse(provenance.acceptedAt)) || !Number.isFinite(Date.parse(provenance.schema10AppliedAt)) || Date.parse(provenance.acceptedAt) >= Date.parse(provenance.schema10AppliedAt)) throw new CoordinationRuntimeError('invalid-state', 'historical unit failure evidence lacks a trusted pre-schema10 coordinator acceptance fence');
   const candidate = parseHistoricalUnitFailureRegenerationCandidate(bytes, expected);
   if (candidate.originalSha256 !== provenance.evidenceSha256) throw new CoordinationRuntimeError('invalid-state', 'historical unit failure evidence digest differs from its accepted coordinator provenance');
+  const expectedGeneration = candidate.generation === HISTORICAL_UNIT_FAILURE_GENERATIONS.phase2Initial ? 1 : 2;
+  const expectedBuild = candidate.generation === HISTORICAL_UNIT_FAILURE_GENERATIONS.phase2Initial ? BUG_177_HISTORICAL_UNIT_FAILURE_PRODUCERS.phase2Initial : BUG_177_HISTORICAL_UNIT_FAILURE_PRODUCERS.captureCommitOnly;
+  if (provenance.producerBuild !== expectedBuild || provenance.producerGeneration !== expectedGeneration) throw new CoordinationRuntimeError('protocol-mismatch', 'historical unit failure producer provenance does not match the exact source-anchored generation', [provenance.producerBuild, String(provenance.producerGeneration), candidate.generation]);
   return {
     generation: candidate.generation,
     action: candidate.action,
@@ -255,12 +271,18 @@ export function parseUnitFailureEvidenceIngress(bytes: Uint8Array, expected: Rec
 }
 
 export function parseUnitFailureEvidenceFacts(bytes: Uint8Array, expected: ReconciliationEvidenceIdentity): UnitFailureEvidenceFacts {
-  const document = jsonDocument(bytes, 'unit failure evidence');
+  if (expected.unitId === null || expected.attempt === null) throw new CoordinationRuntimeError('invalid-state', 'unit failure evidence requires an exact unit attempt identity');
+  const ingress = parseCentralVersionedUnitFailureIngress({
+    bytes,
+    producer_build: COORDINATOR_IMPLEMENTATION_BUILD,
+    producer_generation: UNIT_FAILURE_CURRENT_PRODUCER_GENERATION,
+    identity: { workstream: expected.workstream, workstreamRun: expected.workstreamRun, unitId: expected.unitId, attempt: expected.attempt },
+  });
+  const document = ingress.ingress.normalized_document;
   assertExactFields(document, CURRENT_UNIT_FAILURE_FIELDS, 'unit failure evidence');
-  if (text(document, 'schema_version', 'unit failure evidence') !== 'autopilot.unit_failure.v1') throw new CoordinationRuntimeError('invalid-state', 'unit failure evidence schema is incompatible');
   assertIdentity(document, expected, false);
   if (text(document, 'workstream', 'unit failure evidence') !== expected.workstream) throw new CoordinationRuntimeError('invalid-state', 'unit failure evidence workstream does not match durable ownership');
-  const action = parseFailureAction(document);
+  const action = ingress.facts.action;
   const nullableText = (field: string): string | null => {
     const value = document[field];
     if (value === null) return null;

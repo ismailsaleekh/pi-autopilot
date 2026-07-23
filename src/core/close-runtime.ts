@@ -30,8 +30,10 @@ import { assertD65OrdinaryBoundaryFromEnvironment, assertD65RecoveryBoundaryFrom
 import { publishD65CoordinatorOnlySuccessorFromEnvironment } from './coordination/d65-graph-successor-runtime.ts';
 import { DurableRunSupervisorClient, readCoordinatorSessionContext } from './coordination/supervisor.ts';
 import { recordCoordinatorReleaseEvidenceFromFile } from './coordination/reconciliation.ts';
+import { publishS2ColdTerminalProof, verifyS2HotTerminalProofSummary } from './coordination/s2-retention-archive.ts';
+import { defineS2RetentionPolicy } from './coordination/s2-retention-policy.ts';
 import { ReservationCoordinationClient, preparePendingReservationIntegrations, preparedRunTerminalIntent, reconcilePendingReservationResolutions, reservationCloseBlockers, resolvedReservationIntegrations } from './coordination/reservations.ts';
-import type { CoordinationRunTerminalIntent } from './coordination/types.ts';
+import type { CoordinationReconciliationEvidence, CoordinationRunTerminalIntent } from './coordination/types.ts';
 import {
   ACTIVE_AUTOPILOTS_FILE,
   BRANCHES_FILE,
@@ -198,6 +200,24 @@ interface TerminalCleanupRecovery {
   readonly env: ProcessEnvLike;
 }
 
+interface S2TerminalRetentionBinding {
+  readonly schema_version: 'autopilot.s2_retention.terminal_binding.v1';
+  readonly repo_id: string;
+  readonly workstream_run: string;
+  readonly terminal_kind: 'closed' | 'aborted';
+  readonly terminal_event_seq: number;
+  readonly evidence_ref: string;
+  readonly evidence_sha256: `sha256:${string}`;
+  readonly reconciliation_evidence_id: string;
+  readonly cold_archive_sha256: string;
+  readonly cold_archive_relpath: string;
+  readonly terminal_proof_sha256: string;
+  readonly hot_summary_ref: string;
+  readonly hot_eligible: boolean;
+  readonly policy_id: string;
+  readonly published_at: string;
+}
+
 interface CloseValidationResult {
   readonly retainedClaims: readonly AutopilotPathClaim[];
   readonly retainedWriteClaims: readonly AutopilotPathClaim[];
@@ -316,8 +336,7 @@ export async function closeAutopilotWorkstream(options: AutopilotCloseOptions): 
           }
           if (targetAfter !== manifest.terminal_sha) fail('terminal-successor-context-mismatch', 'D65 close terminal Git effect did not land the immutable prepared authority.', [targetAfter, manifest.terminal_sha]);
           targetLanded = true;
-          await writeAndRecordRunTerminalEvidence(active, 'closed', targetAfter, env, new Date(manifest.prepared_at));
-          coordinatorTerminalCommitted = true;
+          await writeAndRecordRunTerminalEvidence(active, 'closed', targetAfter, env, new Date(manifest.prepared_at), () => { coordinatorTerminalCommitted = true; });
           active = await setActiveStatus(context.coordinationRoot, active, 'closed', new Date(manifest.prepared_at), manifest.prepared_at);
           const terminalResult = await completeTerminalCleanup({ context: { ...context, active }, manifest, env }, options.observeTerminalCleanupBoundary);
           await detachExistingTerminalSession(sessionBinding, active, 'close-terminal-cleanup-finished');
@@ -449,8 +468,7 @@ export async function closeAutopilotWorkstream(options: AutopilotCloseOptions): 
           await appendJsonl(join(context.coordinationRoot, MERGE_LOG_FILE), parseMergeEvent(mergeEvent));
           await appendForeignMergeAcks(context, validation.nonIntersectingForeignMerges, now);
         }
-        await writeAndRecordRunTerminalEvidence(active, 'closed', targetAfter, env, now);
-        coordinatorTerminalCommitted = true;
+        await writeAndRecordRunTerminalEvidence(active, 'closed', targetAfter, env, now, () => { coordinatorTerminalCommitted = true; });
         active = await setActiveStatus(context.coordinationRoot, active, 'closed', now, now.toISOString());
         const closedContext: PreparedCloseContext = { ...context, active };
         await observeTerminalBoundary(options, 'after-terminal-commit');
@@ -543,8 +561,7 @@ export async function abortAutopilotWorkstream(options: AutopilotCloseOptions): 
           if (terminalIntent.outcome !== 'aborted') fail('terminal-intent-outcome-mismatch', 'prepared coordinator terminal intent is for close, not abort.', [terminalIntent.terminal_intent_id]);
           await publishAndAuthenticateD65PreparedTerminalSuccessor(env, manifest.prepared_at);
           await assertD65RecoveryBoundaryFromEnvironment('terminal-tail', TERMINAL_RECOVERY_BINDINGS, env);
-          await writeAndRecordRunTerminalEvidence(active, 'aborted', terminalSha, env, new Date(manifest.prepared_at));
-          coordinatorTerminalCommitted = true;
+          await writeAndRecordRunTerminalEvidence(active, 'aborted', terminalSha, env, new Date(manifest.prepared_at), () => { coordinatorTerminalCommitted = true; });
           active = await setActiveStatus(context.coordinationRoot, active, 'closed', new Date(manifest.prepared_at), manifest.prepared_at);
           const terminalResult = await completeTerminalCleanup({ context: { ...context, active }, manifest, env }, options.observeTerminalCleanupBoundary);
           await detachExistingTerminalSession(sessionBinding, active, 'abort-terminal-cleanup-finished');
@@ -609,8 +626,7 @@ export async function abortAutopilotWorkstream(options: AutopilotCloseOptions): 
           await publishAndAuthenticateD65PreparedTerminalSuccessor(env, now.toISOString());
           await assertD65RecoveryBoundaryFromEnvironment('terminal-tail', TERMINAL_RECOVERY_BINDINGS, env);
         }
-        await writeAndRecordRunTerminalEvidence(active, 'aborted', workstreamHead, env, now);
-        coordinatorTerminalCommitted = true;
+        await writeAndRecordRunTerminalEvidence(active, 'aborted', workstreamHead, env, now, () => { coordinatorTerminalCommitted = true; });
         active = await setActiveStatus(context.coordinationRoot, active, 'closed', now, now.toISOString());
         const closedContext: PreparedCloseContext = { ...context, active };
         await observeTerminalBoundary(options, 'after-terminal-commit');
@@ -787,6 +803,7 @@ async function completeTerminalCleanup(recovery: TerminalCleanupRecovery, observ
   await assertD65TerminalCleanupBoundary(context.active, env);
   const archivedRuntimePath = await archiveRuntimeArtifacts(context, manifest.archive_ref, new Date(manifest.prepared_at));
   if (archivedRuntimePath !== manifest.archive_runtime_path) fail('terminal-cleanup-path-mismatch', 'Runtime archive path disagrees with immutable terminal cleanup intent.', [archivedRuntimePath, manifest.archive_runtime_path]);
+  if (context.active.coordination_authority === 'coordinator-edit-leases-v1') await ensureS2TerminalRetentionBinding(context.active, manifest, env);
   await observer?.('after-runtime-archive');
   const retainedClaims = context.active.coordination_authority === 'legacy-path-claims-v1'
     ? (await readPathClaims(context.coordinationRoot)).filter((claim) => claim.autopilot_id === context.active.autopilot_id && claim.workstream_run === context.active.workstream_run)
@@ -812,7 +829,7 @@ async function verifyTerminalResultProjection(manifest: TerminalCleanupManifest)
   if (canonicalDigest(projected) !== canonicalDigest(manifest.result)) fail('terminal-cleanup-projection-mismatch', 'Final terminal cleanup projection differs from its hash-bound cleanup intent.', [manifest.result_path]);
 }
 
-async function verifyCoordinatorBoundTerminalCleanup(payload: Readonly<Record<string, unknown>>, active: ActiveAutopilotRow, manifest: TerminalCleanupManifest): Promise<void> {
+async function verifyCoordinatorBoundTerminalCleanup(payload: Readonly<Record<string, unknown>>, active: ActiveAutopilotRow, manifest: TerminalCleanupManifest): Promise<{ readonly evidence: CoordinationReconciliationEvidence; readonly evidencePath: string }> {
   const expectedSource = manifest.outcome === 'closed' ? 'run-close' : 'run-abort';
   const accepted = arrayField(payload['reconciliation_evidence'], 'terminal reconciliation evidence').map((value) => parseCoordinationReconciliationEvidence(value)).filter((entry) => entry.source === expectedSource && entry.workstream_run === active.workstream_run);
   const evidence = accepted[0]?.release_condition.evidence;
@@ -832,6 +849,7 @@ async function verifyCoordinatorBoundTerminalCleanup(payload: Readonly<Record<st
   const manifestBytes = await readFile(manifestPath);
   const manifestSha = `sha256:${createHash('sha256').update(manifestBytes).digest('hex')}`;
   if (document['schema_version'] !== 'autopilot.run_terminal.v1' || document['repo_key'] !== active.repo_key || document['autopilot_id'] !== active.autopilot_id || document['workstream_run'] !== active.workstream_run || document['outcome'] !== manifest.outcome || document['terminal_sha'] !== manifest.terminal_sha || document['cleanup_manifest_ref'] !== expectedManifestRef || document['cleanup_manifest_sha256'] !== manifestSha) fail('terminal-cleanup-evidence-mismatch', 'Terminal cleanup manifest is not hash-bound to accepted terminal evidence.', [active.workstream_run]);
+  return { evidence: accepted[0] as CoordinationReconciliationEvidence, evidencePath };
 }
 
 async function readTerminalCleanupManifest(active: ActiveAutopilotRow): Promise<TerminalCleanupManifest> {
@@ -1628,7 +1646,7 @@ function buildCloseResult(input: {
   });
 }
 
-async function writeAndRecordRunTerminalEvidence(active: ActiveAutopilotRow, outcome: 'closed' | 'aborted', terminalSha: string, env: ProcessEnvLike, now: Date): Promise<void> {
+async function writeAndRecordRunTerminalEvidence(active: ActiveAutopilotRow, outcome: 'closed' | 'aborted', terminalSha: string, env: ProcessEnvLike, now: Date, onCoordinatorTerminalCommitted?: () => void): Promise<void> {
   const evidencePath = join(active.runtime_root, 'close', `_run-terminal.${outcome}.json`);
   const cleanupPath = terminalCleanupManifestPath(active);
   if (!existsSync(cleanupPath)) fail('terminal-cleanup-intent-missing', 'Terminal evidence cannot commit before its cleanup intent is durable.', [cleanupPath]);
@@ -1645,7 +1663,121 @@ async function writeAndRecordRunTerminalEvidence(active: ActiveAutopilotRow, out
     cleanup_manifest_sha256: `sha256:${createHash('sha256').update(cleanupBytes).digest('hex')}`,
     accepted_at: now.toISOString(),
   });
-  await recordCoordinatorReleaseEvidenceFromFile({ active, source: outcome === 'closed' ? 'run-close' : 'run-abort', targetId: active.workstream_run, evidencePath, env });
+  const accepted = await recordCoordinatorReleaseEvidenceFromFile({ active, source: outcome === 'closed' ? 'run-close' : 'run-abort', targetId: active.workstream_run, evidencePath, env });
+  if (accepted !== null) {
+    onCoordinatorTerminalCommitted?.();
+    await publishAndVerifyS2TerminalRetention({ active, outcome, evidencePath, acceptedEvidence: accepted.evidence, now });
+  }
+}
+
+function s2RetentionRootForActive(active: ActiveAutopilotRow): string {
+  return join(active.worktree_root, '_retention');
+}
+
+function s2TerminalRetentionBindingPath(active: ActiveAutopilotRow): string {
+  return join(active.runtime_root, 'close', '_s2-terminal-retention.json');
+}
+
+async function publishAndVerifyS2TerminalRetention(input: {
+  readonly active: ActiveAutopilotRow;
+  readonly outcome: 'closed' | 'aborted';
+  readonly evidencePath: string;
+  readonly acceptedEvidence: CoordinationReconciliationEvidence;
+  readonly now: Date;
+}): Promise<void> {
+  const policy = defineS2RetentionPolicy();
+  const retentionRoot = s2RetentionRootForActive(input.active);
+  const evidenceBytes = await readFile(input.evidencePath);
+  const evidenceDocument = requireRecord(JSON.parse(new TextDecoder().decode(evidenceBytes)) as unknown, 'S2 terminal proof evidence');
+  const evidence = input.acceptedEvidence.release_condition.evidence;
+  if (evidence === null) fail('s2-retention-evidence-missing', 'S2 terminal retention requires accepted terminal evidence identity.', [input.active.workstream_run]);
+  const published = await publishS2ColdTerminalProof({
+    repoId: input.active.repo_key,
+    workstreamRun: input.active.workstream_run,
+    terminalEventSeq: input.acceptedEvidence.accepted_event_seq,
+    terminalKind: input.outcome,
+    terminalProof: {
+      ...evidenceDocument,
+      reconciliation_evidence_id: input.acceptedEvidence.reconciliation_evidence_id,
+      accepted_event_seq: input.acceptedEvidence.accepted_event_seq,
+      evidence_ref: evidence.ref,
+      evidence_sha256: evidence.sha256,
+    },
+    archiveRoot: join(retentionRoot, 'cold'),
+    hotRoot: join(retentionRoot, 'hot'),
+    policy,
+    nowIso: input.now.toISOString(),
+  });
+  const summary = await verifyS2HotTerminalProofSummary({
+    summaryPath: published.hotSummaryPath,
+    archiveRoot: join(retentionRoot, 'cold'),
+    policy,
+    expected: { repoId: input.active.repo_key, workstreamRun: input.active.workstream_run, terminalEventSeq: input.acceptedEvidence.accepted_event_seq, terminalKind: input.outcome },
+  });
+  if (!published.hotEligible || summary.cold_archive_sha256 !== published.coldArchiveSha256) fail('s2-retention-hot-ineligible', 'S2 hot terminal summary is not backed by the verified cold archive.', [input.active.workstream_run]);
+  const binding: S2TerminalRetentionBinding = {
+    schema_version: 'autopilot.s2_retention.terminal_binding.v1',
+    repo_id: input.active.repo_key,
+    workstream_run: input.active.workstream_run,
+    terminal_kind: input.outcome,
+    terminal_event_seq: input.acceptedEvidence.accepted_event_seq,
+    evidence_ref: evidence.ref,
+    evidence_sha256: evidence.sha256,
+    reconciliation_evidence_id: input.acceptedEvidence.reconciliation_evidence_id,
+    cold_archive_sha256: published.coldArchiveSha256,
+    cold_archive_relpath: published.coldArchiveRelpath,
+    terminal_proof_sha256: published.terminalProofSha256,
+    hot_summary_ref: relative(input.active.worktree_root, published.hotSummaryPath).split(sep).join('/'),
+    hot_eligible: true,
+    policy_id: policy.policy_id,
+    published_at: input.now.toISOString(),
+  };
+  await writeJsonAtomic(s2TerminalRetentionBindingPath(input.active), binding);
+}
+
+async function ensureS2TerminalRetentionBinding(active: ActiveAutopilotRow, manifest: TerminalCleanupManifest, env: ProcessEnvLike): Promise<void> {
+  const activePath = s2TerminalRetentionBindingPath(active);
+  const archivePath = join(active.worktree_root, '_archive', active.workstream_run, 'runtime', 'close', '_s2-terminal-retention.json');
+  if (!existsSync(activePath) && !existsSync(archivePath)) {
+    const status = await new CoordinatorClient({ env }).query('status', active.repo_key, active.workstream_run);
+    const terminal = await verifyCoordinatorBoundTerminalCleanup(status.payload, active, manifest);
+    await publishAndVerifyS2TerminalRetention({
+      active,
+      outcome: manifest.outcome,
+      evidencePath: terminal.evidencePath,
+      acceptedEvidence: terminal.evidence,
+      now: new Date(manifest.prepared_at),
+    });
+    const archiveCloseRoot = dirname(archivePath);
+    if (!existsSync(archivePath) && existsSync(archiveCloseRoot)) {
+      const reconstructed = requireRecord(JSON.parse(await readFile(activePath, 'utf8')) as unknown, 'reconstructed S2 terminal retention binding');
+      await writeJsonAtomic(archivePath, reconstructed);
+    }
+  }
+  await verifyS2TerminalRetentionBinding(active, manifest);
+}
+
+async function verifyS2TerminalRetentionBinding(active: ActiveAutopilotRow, manifest: TerminalCleanupManifest): Promise<void> {
+  const activePath = s2TerminalRetentionBindingPath(active);
+  const archivePath = join(active.worktree_root, '_archive', active.workstream_run, 'runtime', 'close', '_s2-terminal-retention.json');
+  const path = existsSync(activePath) ? activePath : archivePath;
+  if (!existsSync(path)) fail('s2-retention-binding-missing', 'Coordinator terminal cleanup requires S2 cold retention binding before cleanup proceeds.', [active.workstream_run]);
+  const row = requireRecord(JSON.parse(await readFile(path, 'utf8')) as unknown, 'S2 terminal retention binding');
+  const fields = ['cold_archive_relpath', 'cold_archive_sha256', 'evidence_ref', 'evidence_sha256', 'hot_eligible', 'hot_summary_ref', 'policy_id', 'published_at', 'reconciliation_evidence_id', 'repo_id', 'schema_version', 'terminal_event_seq', 'terminal_kind', 'terminal_proof_sha256', 'workstream_run'];
+  const unknown = Object.keys(row).filter((field) => !fields.includes(field));
+  if (unknown.length > 0 || fields.some((field) => !(field in row))) fail('s2-retention-binding-invalid', 'S2 terminal retention binding has an incompatible closed shape.', unknown);
+  const terminalKind = manifest.outcome;
+  if (row['schema_version'] !== 'autopilot.s2_retention.terminal_binding.v1' || row['repo_id'] !== active.repo_key || row['workstream_run'] !== active.workstream_run || row['terminal_kind'] !== terminalKind || row['hot_eligible'] !== true) fail('s2-retention-binding-mismatch', 'S2 terminal retention binding does not match exact run terminal identity.', [active.workstream_run]);
+  const eventSeq = row['terminal_event_seq'];
+  const hotSummaryRef = row['hot_summary_ref'];
+  if (typeof eventSeq !== 'number' || !Number.isSafeInteger(eventSeq) || eventSeq < 0 || typeof hotSummaryRef !== 'string') fail('s2-retention-binding-invalid', 'S2 terminal retention binding lost event or summary identity.', [active.workstream_run]);
+  const summaryPath = join(active.worktree_root, ...hotSummaryRef.split('/'));
+  await verifyS2HotTerminalProofSummary({
+    summaryPath,
+    archiveRoot: join(s2RetentionRootForActive(active), 'cold'),
+    policy: defineS2RetentionPolicy(),
+    expected: { repoId: active.repo_key, workstreamRun: active.workstream_run, terminalEventSeq: eventSeq, terminalKind },
+  });
 }
 
 async function fsyncArchiveTree(root: string): Promise<void> {

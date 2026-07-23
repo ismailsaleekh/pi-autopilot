@@ -53,7 +53,7 @@ Before editing any source, consult [`read-before-edit.md`](read-before-edit.md).
 <!-- GENERATED:clis START (source: src/cli/autopilot-coordinator.ts, src/cli/autopilot-agent-run.ts) -->
 | CLI | Invocation |
 | --- | --- |
-| `autopilot-agent-run` | `autopilot-agent-run [--dry-run] [--json] [--pi-executable <path>] <unit-spec.json>` |
+| `autopilot-agent-run` | `autopilot-agent-run [--dry-run] [--json] [--pi-executable <path>] <unit-spec.json>`<br>`autopilot-agent-run recover-d65-subscription --continuation <absolute-json> --probe <absolute-json> --continuation-sequence <n> --bound <repo-relative-ref> <absolute-file> [--bound <ref> <file> ...] [--json]` |
 | `autopilot-coordinator` | `autopilot-coordinator serve\|status\|doctor\|export\|replay\|upgrade-schema11\|migrate\|verify\|rollback\|cutover\|recovery` |
 <!-- GENERATED:clis END -->
 

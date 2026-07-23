@@ -88,6 +88,9 @@
     ]
   },
   "source_to_docs": {
+    "bin/autopilot-s2-corpus-rehearsal.mjs": [
+      "tools/s2-corpus-rehearsal"
+    ],
     "src/cli/autopilot-agent-run.ts": [
       "cli/autopilot-agent-run"
     ],
@@ -133,6 +136,21 @@
     ],
     "src/core/coordination/index.ts": [
       "subsystems/coordination"
+    ],
+    "src/core/coordination/s2-owned-gc.ts": [
+      "subsystems/s2-retention"
+    ],
+    "src/core/coordination/s2-retention-archive.ts": [
+      "subsystems/s2-retention"
+    ],
+    "src/core/coordination/s2-retention-policy.ts": [
+      "subsystems/s2-retention"
+    ],
+    "src/core/coordination/s2-retention-state-machine.ts": [
+      "subsystems/s2-retention"
+    ],
+    "src/core/coordination/unit-failure-producer-provenance.ts": [
+      "subsystems/runner-and-forced-output"
     ],
     "src/core/disk-gate.ts": [
       "subsystems/worktrees"
@@ -203,6 +221,18 @@
     ],
     "src/internal/status-extension.ts": [
       "tools/autopilot_emit_status"
+    ],
+    "tools/s2-corpus-rehearsal/candidate-worker.ts": [
+      "tools/s2-corpus-rehearsal"
+    ],
+    "tools/s2-corpus-rehearsal/cli.ts": [
+      "tools/s2-corpus-rehearsal"
+    ],
+    "tools/s2-corpus-rehearsal/contracts.ts": [
+      "tools/s2-corpus-rehearsal"
+    ],
+    "tools/s2-corpus-rehearsal/release-gate.ts": [
+      "tools/s2-corpus-rehearsal"
     ]
   },
   "docs": {
@@ -227,7 +257,7 @@
         "src/cli/autopilot-agent-run.ts"
       ],
       "signature_hash": "sha256:6a2b2a4d670b47bf0757d6cd542538122a0183d625023be72212d51161cfee73",
-      "body_hash": "sha256:3c1559deb04c48210b6757dccea5b763bb55e8797999e472f95f87d2dc7f8de9",
+      "body_hash": "sha256:247c9228a410e7156c9762ed3b6315024520cb445f813ffb83f331a712ca5606",
       "semantic_attestation": null
     },
     "cli/autopilot-coordinator": {
@@ -242,7 +272,7 @@
         "src/cli/autopilot-coordinator.ts"
       ],
       "signature_hash": "sha256:29d0ffebe8ddb994b739dc1176426a97f475537d0436864b7bf7c28398424d33",
-      "body_hash": "sha256:9809f7983db902d74b2203cb31ef525f45c2dc49b9a8aa076ccf609c506719a3",
+      "body_hash": "sha256:12df80672690576ea221cb3c7fe04917f545192cc058b2556c2aafec1242eb48",
       "semantic_attestation": null
     },
     "commands/autopilot": {
@@ -527,7 +557,7 @@
         "src/core/worktree-cleanup.ts"
       ],
       "signature_hash": "sha256:008aa231a2414d2bcb29cc62696f7587634857ea043568428bd1f286fbc446b9",
-      "body_hash": "sha256:1c4821ee2baa48c290ddd6974e45fe6baea85d1177b8c82ba5c44a266b9543e3",
+      "body_hash": "sha256:ffdff05ff0c9cafe113c644d7a9fcd604c5a11e49f10eae452bf1ee5196b62fa",
       "semantic_attestation": null
     },
     "subsystems/contracts-and-schemas": {
@@ -569,7 +599,7 @@
         "src/core/coordination/index.ts"
       ],
       "signature_hash": "sha256:7dcfdcc868f120781150ae32025fae87d3b683d3a8f20a6a4c29665c6fafa656",
-      "body_hash": "sha256:4c39eddae3f6182bf47cfb73b4472158c477ced0099020f4a742b6812c918466",
+      "body_hash": "sha256:d3765b85755ceb642c79c5101364c4d81bc2013fb881deb8a5ba6cee102be0cd",
       "semantic_attestation": null
     },
     "subsystems/docs-freshness-gate": {
@@ -609,6 +639,7 @@
       "covers_sources": [
         "src/core/agent-runner.ts",
         "src/core/authority.ts",
+        "src/core/coordination/unit-failure-producer-provenance.ts",
         "src/core/execution-audit/index.ts",
         "src/core/forced-output/index.ts",
         "src/core/model-roster.ts",
@@ -616,8 +647,23 @@
         "src/core/scheduler.ts",
         "src/core/unit-failure.ts"
       ],
-      "signature_hash": "sha256:47fe11d6fcd66ed33f128f0590a3f0016f1653ef6ea3646d86eb1c655c7064a3",
-      "body_hash": "sha256:fdd2c483b68ac174452b69431618cb515a725fb030530ce03d1b6f0b460a3d41",
+      "signature_hash": "sha256:8acfa22b78d0e3845a831af6c62744293cccc949d27fe4d836f1070d774dc3cf",
+      "body_hash": "sha256:45d4282adbfc80a75f2e065df39aee9f6b9f1ccd0d5cdc5653d9d45bc0dad611",
+      "semantic_attestation": null
+    },
+    "subsystems/s2-retention": {
+      "mode": "authored",
+      "review_policy": "behavioral",
+      "stability": "evolving",
+      "covers_surfaces": [],
+      "covers_sources": [
+        "src/core/coordination/s2-owned-gc.ts",
+        "src/core/coordination/s2-retention-archive.ts",
+        "src/core/coordination/s2-retention-policy.ts",
+        "src/core/coordination/s2-retention-state-machine.ts"
+      ],
+      "signature_hash": "sha256:856a8e5895cdd36461466ebd5512461b075bd756ab7e4bf76c9915236c1be5a4",
+      "body_hash": "sha256:08e81f1d945966d6a994f3fc8736fb86a8a71fe6a1365b26b6a709c61256f969",
       "semantic_attestation": null
     },
     "subsystems/worktrees": {
@@ -635,7 +681,7 @@
         "src/core/sparse-worktree.ts"
       ],
       "signature_hash": "sha256:82853603ad9b97c2a62ec6f2374efb085e1db7f7ae15d7af9a3d4cae2abde577",
-      "body_hash": "sha256:34615d7f7346ada422a3b9c839065014eca3cee4ff7c8229acde5650afefe6f6",
+      "body_hash": "sha256:0de6d188e0e64507e2aa95f2401cca2bb95801d4a6a5af96e83fc9e95f4cd70d",
       "semantic_attestation": null
     },
     "tools/autopilot_emit_status": {
@@ -690,6 +736,22 @@
       ],
       "signature_hash": "sha256:4e147d6b32a3a88923a3b886d262a4384fb0dcd17c2d53412f2cf73e047c54f4",
       "body_hash": "sha256:a2d8cd38e853fafe2788e23acfa84ce775d2100fe66c38c7de4940cb7316b38d",
+      "semantic_attestation": null
+    },
+    "tools/s2-corpus-rehearsal": {
+      "mode": "authored",
+      "review_policy": "contract",
+      "stability": "evolving",
+      "covers_surfaces": [],
+      "covers_sources": [
+        "bin/autopilot-s2-corpus-rehearsal.mjs",
+        "tools/s2-corpus-rehearsal/candidate-worker.ts",
+        "tools/s2-corpus-rehearsal/cli.ts",
+        "tools/s2-corpus-rehearsal/contracts.ts",
+        "tools/s2-corpus-rehearsal/release-gate.ts"
+      ],
+      "signature_hash": "sha256:f7b6666a7b28d36bc08b51ced39179e15caef80980fbcc704453e436a50c843e",
+      "body_hash": "sha256:08e9fcf3aae2dcf615efadf80096a623e14c1994035a9be392e75c482a05087b",
       "semantic_attestation": null
     },
     "troubleshooting/failures": {

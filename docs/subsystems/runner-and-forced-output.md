@@ -10,12 +10,13 @@ covers_sources:
   - src/core/authority.ts
   - src/core/scheduler.ts
   - src/core/unit-failure.ts
+  - src/core/coordination/unit-failure-producer-provenance.ts
   - src/core/forced-output/index.ts
   - src/core/execution-audit/index.ts
   - src/core/prompt-renderer/index.ts
   - src/core/model-roster.ts
-signature_hash: 'sha256:47fe11d6fcd66ed33f128f0590a3f0016f1653ef6ea3646d86eb1c655c7064a3'
-body_hash: 'sha256:fdd2c483b68ac174452b69431618cb515a725fb030530ce03d1b6f0b460a3d41'
+signature_hash: 'sha256:8acfa22b78d0e3845a831af6c62744293cccc949d27fe4d836f1070d774dc3cf'
+body_hash: 'sha256:45d4282adbfc80a75f2e065df39aee9f6b9f1ccd0d5cdc5653d9d45bc0dad611'
 stability: stable
 ---
 
@@ -34,6 +35,7 @@ the runtime behind it.
 | Repository-grounded authority derivation | `src/core/authority.ts` |
 | Deterministic dispatch planning + cap | `src/core/scheduler.ts` |
 | Failed-unit quarantine/reset reconciliation | `src/core/unit-failure.ts` |
+| Current unit-failure producer provenance | `src/core/coordination/unit-failure-producer-provenance.ts` |
 | Receipt/hash/status carrier validation | `src/core/forced-output/index.ts` |
 | Actual-change/audit helpers | `src/core/execution-audit/index.ts` |
 | Template loading/filling/validation | `src/core/prompt-renderer/index.ts` |
@@ -42,9 +44,10 @@ the runtime behind it.
 ## Scheduler
 
 Within one workstream, file-disjoint dependency-cleared units run in parallel up to
-`parallel_cap` — only through per-unit worktrees. Shared-file or stale-validation risk
-reduces the batch rather than weakening quality. Skips use the explicit
-`waiting-for-peer-release` state and retain exact request refs. See the
+`parallel_cap` — only through per-unit worktrees. Shared-file, stale-validation risk,
+or a durable S2 pressure pause for this run reduces the batch rather than weakening
+quality; a pressure pause for another run is not a scheduler blocker. Skips use the
+explicit `waiting-for-peer-release` state and retain exact request refs. See the
 [defaults table](../INDEX.md#default-constants) for `parallel_cap`. A D65 run carries a
 signed launch policy whose cap fields are authenticated as exactly one; the runtime
 gates child-model spawn and other ordinary boundaries on the accepted complete-graph /
@@ -81,9 +84,21 @@ ranges on the unit branch.
 `spec-invalid`, `waiting-for-peer-release`, `pi-spawn-failed`, `missing-structured-output`,
 `invalid-structured-output`, `status-non-success`, `runtime-commit-failed`. Dirty
 baselines are attribution blockers only when they overlap unit-owned or protected
-surfaces; unrelated dirty paths are recorded as audit caveats. D65 authority failures
-are fail-closed graph, launch-policy, heartbeat, or recovery-transition failures; they
-never fall through to model execution.
+surfaces; unrelated dirty paths are recorded as audit caveats.
+
+Source-changing failed attempts are resolved through current `autopilot.unit_failure.v1`
+evidence before edit authority is released. Current records carry centralized producer
+provenance from `currentUnitFailureProducerProvenance()` — the coordinator
+implementation build plus unit-failure producer generation `3` — and the same fields
+are required when an existing current record is replayed idempotently. Quarantine and
+preserve actions require an immutable capture commit/ref; reset and abort actions must
+leave both capture fields null, bind the owned branch/common-dir/head facts, and assert
+a clean postcondition. If publication discovers a recognized historical BUG-177
+reset/abort evidence shape, the historical bytes are left untouched and replacement
+current evidence is written at a deterministic `regenerated-from-<sha256>` path;
+historical quarantine/preserve shapes do not authorize release because they lack an
+exact capture ref. D65 authority failures are fail-closed graph, launch-policy,
+heartbeat, or recovery-transition failures; they never fall through to model execution.
 
 ## Model roster
 

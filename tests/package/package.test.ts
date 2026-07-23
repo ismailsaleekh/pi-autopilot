@@ -18,6 +18,7 @@ interface PackageScripts {
 interface PackageBin {
   readonly 'autopilot-agent-run'?: string;
   readonly 'autopilot-coordinator'?: string;
+  readonly 'autopilot-s2-corpus-rehearsal'?: string;
 }
 
 interface PackageJson {
@@ -111,6 +112,7 @@ function parsePackageJson(value: unknown): PackageJson {
     bin: {
       'autopilot-agent-run': requireString(field(bin, 'autopilot-agent-run'), 'bin.autopilot-agent-run'),
       'autopilot-coordinator': requireString(field(bin, 'autopilot-coordinator'), 'bin.autopilot-coordinator'),
+      'autopilot-s2-corpus-rehearsal': requireString(field(bin, 'autopilot-s2-corpus-rehearsal'), 'bin.autopilot-s2-corpus-rehearsal'),
     },
     pi: { extensions: requireStringArray(field(pi, 'extensions'), 'pi.extensions') },
     scripts: requireStringMap(field(value, 'scripts'), 'scripts'),
@@ -188,14 +190,15 @@ void describe('package manifest and payload', () => {
     assert.deepEqual(pkg.pi.extensions, ['./extensions/autopilot.ts']);
     assert.equal(pkg.bin['autopilot-agent-run'], 'bin/autopilot-agent-run.mjs');
     assert.equal(pkg.bin['autopilot-coordinator'], 'bin/autopilot-coordinator.mjs');
+    assert.equal(pkg.bin['autopilot-s2-corpus-rehearsal'], 'bin/autopilot-s2-corpus-rehearsal.mjs');
     assert.ok(pkg.files.includes('dist/'));
     assert.ok(pkg.peerDependencies['@earendil-works/pi-coding-agent']);
-    for (const script of ['build', 'typecheck', 'test:type-safety', 'test:unit', 'test:e2e', 'test:model', 'test:multiprocess', 'test:upgrade', 'test:crash', 'test:chaos', 'test:scale', 'test:sdk', 'test:rpc', 'test:package', 'test:packed-migration', 'security:scan', 'security:audit', 'sbom', 'payload:check', 'test', 'test:release', 'pack:dry-run']) {
+    for (const script of ['build', 'typecheck', 'test:type-safety', 'test:unit', 'test:e2e', 'test:model', 'test:multiprocess', 'test:version-skew', 'test:upgrade', 'test:crash', 'test:chaos', 'test:scale', 'test:sdk', 'test:rpc', 'test:package', 'test:packed-migration', 'test:s2-corpus', 's2:corpus', 'security:scan', 'security:audit', 'sbom', 'payload:check', 'test', 'test:release', 'pack:dry-run']) {
       assert.equal(typeof pkg.scripts[script], 'string', script);
     }
     assert.match(pkg.scripts['prepack'] ?? '', /security:scan -- --quiet && npm run sbom/u, 'prepack must regenerate security evidence before SBOM');
     assert.match(pkg.scripts['test:multiprocess'] ?? '', /--test-concurrency=1/u, 'resource-heavy real-process files must be serialized so fixed startup deadlines are not invalidated by cross-file load');
-    for (const dir of ['bin/', 'dist/', 'extensions/', 'src/', 'templates/', 'artifacts/security/']) assert.ok(pkg.files.includes(dir), dir);
+    for (const dir of ['bin/', 'dist/', 'extensions/', 'src/', 'tools/s2-corpus-rehearsal/', 'templates/', 'artifacts/security/']) assert.ok(pkg.files.includes(dir), dir);
   });
 
   void it('pins shrinkwrapped Pi integrity and Linux native libc selectors without exceptions', async () => {
@@ -252,6 +255,14 @@ void describe('package manifest and payload', () => {
       'scripts/security-scan.mjs',
       'scripts/test-packed-consumer-release.mjs',
       'scripts/verify-packed-consumer.mjs',
+      'dist/tools/s2-corpus-rehearsal/cli.js',
+      'dist/tools/s2-corpus-rehearsal/contracts.js',
+      'dist/tools/s2-corpus-rehearsal/release-gate.js',
+      'dist/tools/s2-corpus-rehearsal/terminal-recovery-worker.js',
+      'tools/s2-corpus-rehearsal/cli.ts',
+      'tools/s2-corpus-rehearsal/contracts.ts',
+      'tools/s2-corpus-rehearsal/release-gate.ts',
+      'bin/autopilot-s2-corpus-rehearsal.mjs',
       'README.md',
       'TESTING.md',
       'TEST_PLAN.md',
@@ -342,7 +353,7 @@ void describe('package manifest and payload', () => {
     for (const exactScaleClaim of ['exactly **100,000**', 'exactly **10,000**', 'exactly **32**', '**<60s**', '**<512 MiB**', '**<256 MiB**', '**<1s**', '**=100,000**', '**=10,000**']) {
       assert.match(await docText('TEST_PLAN.md'), literalPattern(exactScaleClaim), `TEST_PLAN missing exact scale assertion ${exactScaleClaim}`);
     }
-    for (const script of ['typecheck', 'test:package', 'test:packed-migration', 'test', 'pack:dry-run', 'payload:check', 'security:scan', 'sbom']) {
+    for (const script of ['typecheck', 'test:package', 'test:packed-migration', 'test:version-skew', 'test:s2-corpus', 'test', 'pack:dry-run', 'payload:check', 'security:scan', 'sbom']) {
       assert.equal(typeof pkg.scripts[script], 'string', script);
       const command = `npm run ${script}`;
       assert.match(testing, literalPattern(command), `TESTING missing ${command}`);
@@ -470,14 +481,30 @@ void describe('package manifest and payload', () => {
       'src/core/paths.ts',
       'src/core/prompts.ts',
       'src/testing/fake-extension-host.ts',
+      'dist/tools/s2-corpus-rehearsal/cli.js',
+      'dist/tools/s2-corpus-rehearsal/contracts.js',
+      'dist/tools/s2-corpus-rehearsal/release-gate.js',
+      'dist/tools/s2-corpus-rehearsal/terminal-recovery-worker.js',
+      'tools/s2-corpus-rehearsal/cli.ts',
+      'tools/s2-corpus-rehearsal/contracts.ts',
+      'tools/s2-corpus-rehearsal/release-gate.ts',
+      'tools/s2-corpus-rehearsal/candidate-worker.ts',
+      'tools/s2-corpus-rehearsal/terminal-recovery-worker.ts',
+      'tools/s2-corpus-rehearsal/git-mirror.ts',
+      'tools/s2-corpus-rehearsal/inventory.ts',
+      'tools/s2-corpus-rehearsal/path-rebase.ts',
       'bin/autopilot-agent-run.mjs',
       'bin/autopilot-coordinator.mjs',
+      'bin/autopilot-s2-corpus-rehearsal.mjs',
       'templates/README.md',
     ]) {
       assert.ok(files.includes(file), file);
     }
     assert.equal(files.some((file) => file.startsWith('tests/')), false);
     assert.equal(files.includes('tests/fixtures/releases/cf50/pi-autopilot-1.1.8-cf50.tgz'), false, 'the actual cf50 skew fixture must never ship in the npm payload');
+    assert.equal(files.includes('tests/fixtures/releases/s2/manifest.json'), false, 'S2-C release manifests stay test-only');
+    assert.equal(files.some((file) => file !== 'docs/tools/s2-corpus-rehearsal.md' && /(?:^|\/)(?:private|corpus|corpora|results?|logs?)(?:\/|$)|\.(?:tgz|tar|tar\.gz|zip|log)$/iu.test(file)), false, 'package payload must deterministically exclude private S2 corpus inputs, outputs, logs, and tarballs while allowing the required generic public S2-D docs');
+    assert.equal(files.some((file) => file.startsWith('tools/') && !file.startsWith('tools/s2-corpus-rehearsal/')), false, 'only generic S2-D corpus harness tools may ship');
     assert.equal(files.some((file) => file.includes('node_modules')), false);
   });
 

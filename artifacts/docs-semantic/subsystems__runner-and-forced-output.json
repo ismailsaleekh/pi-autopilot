@@ -1,0 +1,20 @@
+{
+  "schema_version": "autopilot.docs_semantic_attestation.v1",
+  "doc_id": "subsystems/runner-and-forced-output",
+  "reviewed_body_hash": "sha256:45d4282adbfc80a75f2e065df39aee9f6b9f1ccd0d5cdc5653d9d45bc0dad611",
+  "verdict": "PASS",
+  "reviewer": "openai-codex/gpt-5.5 Pi subscription independent validator (offline semantic docs review)",
+  "reviewed_at": "2026-07-23T10:33:06.000Z",
+  "covers_sources": [
+    "src/core/agent-runner.ts",
+    "src/core/authority.ts",
+    "src/core/scheduler.ts",
+    "src/core/unit-failure.ts",
+    "src/core/coordination/unit-failure-producer-provenance.ts",
+    "src/core/forced-output/index.ts",
+    "src/core/execution-audit/index.ts",
+    "src/core/prompt-renderer/index.ts",
+    "src/core/model-roster.ts"
+  ],
+  "notes": "Reviewed docs/subsystems/runner-and-forced-output.md against the current runner, scheduler, authority, unit-failure, forced-output/export surface, execution-audit, prompt-renderer, model-roster sources plus the unit-failure ingress/terminal/store consumers for the producer-provenance claims. The prose matches current behavior: final unit_failure records use currentUnitFailureProducerProvenance() with implementation build 1.2.0-s1 and producer generation 3; idempotent replay requires the same exact current fields; reset/abort evidence is clean/null-capture and quarantine/preserve evidence is capture-ref-bound; recognized BUG-177 reset/abort bytes are preserved while regenerated current evidence is written under regenerated-from-<sha256>; historical quarantine/preserve does not release authority. Runner forced-output, audit revalidation, D65 fail-closed dispatch gates, and the fixed openai-codex/gpt-5.6 role roster are accurately described."
+}

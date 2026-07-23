@@ -1,0 +1,16 @@
+{
+  "schema_version": "autopilot.docs_semantic_attestation.v1",
+  "doc_id": "subsystems/close-lifecycle",
+  "reviewed_body_hash": "sha256:ffdff05ff0c9cafe113c644d7a9fcd604c5a11e49f10eae452bf1ee5196b62fa",
+  "verdict": "PASS",
+  "reviewer": "Wave-4 independent validator (offline docs truth review)",
+  "reviewed_at": "2026-07-23T00:00:00.000Z",
+  "covers_sources": [
+    "src/core/close-runtime.ts",
+    "src/core/unit-merge.ts",
+    "src/core/execution-commit.ts",
+    "src/core/validation-staleness.ts",
+    "src/core/worktree-cleanup.ts"
+  ],
+  "notes": "Reviewed docs/subsystems/close-lifecycle.md against the final close/runtime sources. The existing lifecycle prose remains accurate after the S2 terminal-retention crash-safety changes: terminal evidence is still coordinator-recorded before close/abort completion, cleanup remains recovery-owned and hash-bound, and post-terminal retention publication/binding recovery does not weaken validation, merge, abort, or cleanup ordering described by the document."
+}

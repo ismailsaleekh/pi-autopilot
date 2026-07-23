@@ -8,6 +8,9 @@ import { createCoordinatorAdmissionOffer, createCoordinatorAdmissionResponse, CO
 import { assertCoordinatorAdmissionAuthorityUnchanged, captureServingCoordinatorAdmissionAuthority, COORDINATOR_S1_ADMISSION_IDENTITY, type CoordinatorAdmissionAuthoritySnapshot } from './admission-runtime.ts';
 import { parseCoordinatorAdmissionTransportRequest, parseCoordinatorTransportRequest, CoordinatorFrameDecoder, writeCoordinatorResponse } from './ipc.ts';
 import { CoordinationRuntimeError } from './failures.ts';
+import { buildS2CoordinationRuntimeErrorDiagnostic } from './s2-diagnostics.ts';
+import { isS2CoordinatorContentionFailure, isS2FailureResponseRetryable } from './s2-failure-taxonomy.ts';
+import { runCoordinatorOwnedS2RetentionGc } from './s2-owned-gc.ts';
 import { currentBootId, isProcessAlive, predecessorCompatibleBootId, processStartIdentity } from './process-identity.ts';
 import { COORDINATOR_GRANT_OFFER_SWEEP_MS, enforcePrivateAuthorityPath, ensureCoordinatorPrivateRoots, readOrCreateCoordinatorCapability, type CoordinatorRuntimePaths } from './runtime-paths.ts';
 import { acquireSerializedProcessGuard, discardLockTombstone, quarantineExactLock, readExactLockText, restoreLockTombstone } from './serialized-lock.ts';
@@ -185,7 +188,7 @@ async function acquireCoordinatorLock(paths: CoordinatorRuntimePaths, adoption?:
       let guard: ReturnType<typeof acquireSerializedProcessGuard>;
       try { guard = acquireSerializedProcessGuard(paths.lifecycleElectionPath, 25, 'predecessor fence maintenance'); }
       catch (error) {
-        if (error instanceof CoordinationRuntimeError && error.code === 'coordinator-contention') return 'deferred';
+        if (isS2CoordinatorContentionFailure(error)) return 'deferred';
         throw error;
       }
       try {
@@ -295,8 +298,8 @@ function errorResponse(requestId: string, error: unknown): CoordinatorResponseEn
     ok: false,
     committed_event_seq: null,
     error_code: runtime.code,
-    retryable: runtime.retry_policy !== 'never',
-    payload: { message: runtime.message, evidence: runtime.evidence },
+    retryable: isS2FailureResponseRetryable(runtime.code),
+    payload: { message: runtime.message, evidence: runtime.evidence, s2_diagnostic: buildS2CoordinationRuntimeErrorDiagnostic(runtime) },
   };
 }
 
@@ -429,7 +432,7 @@ class CoordinatorRequestDrain {
   }
 }
 
-function handleSocket(socket: Socket, store: CoordinatorStore, capability: string, paths: CoordinatorRuntimePaths, lifecycle: CurrentCoordinatorLock, backgroundFailure: () => Error | null, firstExactHandshake: () => Promise<void>, requestDrain: CoordinatorRequestDrain, testHooks?: CoordinatorServerTestHooks): void {
+function handleSocket(socket: Socket, store: CoordinatorStore, capability: string, paths: CoordinatorRuntimePaths, lifecycle: CurrentCoordinatorLock, backgroundFailure: () => Error | null, startupRequestGate: Promise<void>, firstExactHandshake: () => Promise<void>, requestDrain: CoordinatorRequestDrain, testHooks?: CoordinatorServerTestHooks): void {
   if (!requestDrain.register(socket)) return;
   const decoder = new CoordinatorFrameDecoder();
   const peer = new CoordinatorSocketPeerState();
@@ -443,6 +446,7 @@ function handleSocket(socket: Socket, store: CoordinatorStore, capability: strin
   socket.on('data', (chunk: NodeBuffer) => {
     if (!requestDrain.acceptRequest(socket)) return;
     chain = chain.then(async () => {
+      await startupRequestGate;
       const frames = decoder.push(chunk);
       for (const frame of frames) {
         let requestId = `transport-error-${randomBytes(8).toString('hex')}`;
@@ -585,6 +589,7 @@ export async function startCoordinatorServer(paths: CoordinatorRuntimePaths, clo
   let server: Server | null = null;
   let offerTimer: ReturnType<typeof setInterval> | null = null;
   let serverListening = false;
+  let releaseStartupRequestGate: () => void = () => undefined;
   const requestDrain = new CoordinatorRequestDrain();
   try {
     lifecycleLock = await acquireCoordinatorLock(paths, adoption, async (plannedLifecycle) => {
@@ -611,12 +616,18 @@ export async function startCoordinatorServer(paths: CoordinatorRuntimePaths, clo
     const openedStore = requirePreparedStore(store);
     const openedCapability = requirePreparedCapability(capability);
     let timerFailure: Error | null = null;
+    // The listener is bound before lifecycle activation is reported, but no
+    // request may observe the endpoint until the post-activation observer
+    // transition has completed. This keeps startup phase observation ordered
+    // even when an already-waiting client connects immediately after listen().
+    releaseStartupRequestGate = () => undefined;
+    const startupRequestGate = startupObserver === undefined ? Promise.resolve() : new Promise<void>((resolveGate) => { releaseStartupRequestGate = resolveGate; });
     let firstHandshakeTransition: Promise<void> | null = null;
     const firstExactHandshake = async (): Promise<void> => {
       firstHandshakeTransition ??= startupObserver?.transition('first-exact-handshake-served', acquiredLifecycleLock.record) ?? Promise.resolve();
       await firstHandshakeTransition;
     };
-    server = createServer((socket) => handleSocket(socket, openedStore, openedCapability, paths, acquiredLifecycleLock.record, () => timerFailure, firstExactHandshake, requestDrain, testHooks));
+    server = createServer((socket) => handleSocket(socket, openedStore, openedCapability, paths, acquiredLifecycleLock.record, () => timerFailure, startupRequestGate, firstExactHandshake, requestDrain, testHooks));
     await startupObserver?.transition('before-socket-bind', acquiredLifecycleLock.record);
     await listen(server, paths.socketPath);
     serverListening = true;
@@ -627,15 +638,27 @@ export async function startCoordinatorServer(paths: CoordinatorRuntimePaths, clo
     // all complete under one lifecycle election. Only then may another startup or
     // restore operation enter the election.
     acquiredLifecycleLock.activate();
-    await startupObserver?.transition('after-activation-before-first-handshake', acquiredLifecycleLock.record);
-    offerTimer = setInterval(() => {
-      void acquiredLifecycleLock.verifyOrRepairFence().then((outcome) => {
-        if (outcome === 'verified') openedStore.sweepExpiredGrantOffers();
+    try {
+      await startupObserver?.transition('after-activation-before-first-handshake', acquiredLifecycleLock.record);
+    } finally {
+      releaseStartupRequestGate();
+    }
+    let offerSweepPromise: Promise<void> | null = null;
+    const runSerializedOfferSweep = (): void => {
+      if (offerSweepPromise !== null) return;
+      offerSweepPromise = acquiredLifecycleLock.verifyOrRepairFence().then(async (outcome) => {
+        if (outcome === 'verified') {
+          openedStore.sweepExpiredGrantOffers();
+          await runCoordinatorOwnedS2RetentionGc({ stateRoot: paths.stateRoot, runs: openedStore.terminalRunsForS2RetentionGc(), nowIso: new Date().toISOString() });
+        }
         timerFailure = null;
       }).catch((error: unknown) => {
         timerFailure = error instanceof Error ? error : new Error(String(error));
+      }).finally(() => {
+        offerSweepPromise = null;
       });
-    }, COORDINATOR_GRANT_OFFER_SWEEP_MS);
+    };
+    offerTimer = setInterval(runSerializedOfferSweep, COORDINATOR_GRANT_OFFER_SWEEP_MS);
     let closePromise: Promise<void> | null = null;
     return {
       paths,
@@ -644,6 +667,7 @@ export async function startCoordinatorServer(paths: CoordinatorRuntimePaths, clo
         closePromise ??= (async () => {
           if (offerTimer !== null) clearInterval(offerTimer);
           offerTimer = null;
+          await offerSweepPromise;
           // Calling server.close synchronously retires listener acceptance. Only
           // then may queued requests drain; idle/exhausted sockets are destroyed
           // so the listener callback cannot outlive request authority.
@@ -666,6 +690,7 @@ export async function startCoordinatorServer(paths: CoordinatorRuntimePaths, clo
     };
   } catch (error) {
     const cleanupFailures: string[] = [];
+    releaseStartupRequestGate();
     if (offerTimer !== null) clearInterval(offerTimer);
     offerTimer = null;
     if (server !== null && serverListening) {

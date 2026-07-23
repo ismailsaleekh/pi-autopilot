@@ -54,6 +54,27 @@ metadata, receipt hashes, provider identity, output freshness, runtime-root plac
 durable planning refs, purpose-state coherence, and execution-audit fact/classification
 coherence.
 
+## Versioned persisted-artifact ingress
+
+`src/core/coordination/versioned-ingress-registry.ts` inventories persisted artifact
+families from package schemas, coordination schemas, and source-anchored runtime
+evidence. Ingress never infers compatibility from semver or JSON shape: callers must
+provide an explicit `producer_build` and `producer_generation`, the selected generation
+must be contiguous and non-overlapping for that family, required/exact fields are checked,
+unknown fields are rejected unless a family explicitly preserves them, and original bytes
+are retained with `original_sha256` for round-trip provenance.
+
+BUG-177 is the special `autopilot.unit_failure.v1` compatibility lane. Current evidence
+is produced by `1.2.0-s1` generation `3` and must carry `producer_build`,
+`producer_generation`, `capture_ref`, `git_head_before`, `git_head_after`,
+`git_common_dir`, `branch`, and `postcondition_worktree_clean`. Historical reset/abort
+bytes are admitted only for the source-anchored producers `653f660e` (generation `1`, no
+capture fields) and `9bbfa0d2` (generation `2`, `capture_commit_sha` only). Their absent
+`capture_commit_sha`/`capture_ref` fields are normalized to `null` for analysis without
+rewriting original bytes. Historical quarantine/preserve evidence, forged digests,
+unknown fields, mismatched durable identity, or missing explicit provenance fail closed
+and do not release edit authority.
+
 ## Related
 
 - Index: [`../INDEX.md`](../INDEX.md#schemas)

@@ -8,7 +8,7 @@ covers_sources:
   - src/cli/autopilot-coordinator.ts
   - src/cli/autopilot-coordinator-bootstrap.ts
 signature_hash: 'sha256:29d0ffebe8ddb994b739dc1176426a97f475537d0436864b7bf7c28398424d33'
-body_hash: 'sha256:9809f7983db902d74b2203cb31ef525f45c2dc49b9a8aa076ccf609c506719a3'
+body_hash: 'sha256:12df80672690576ea221cb3c7fe04917f545192cc058b2556c2aafec1242eb48'
 stability: stable
 ---
 
@@ -34,7 +34,12 @@ autopilot-coordinator replay --replay-id <stable-id> --input <absolute-request-j
 autopilot-coordinator upgrade-schema11 [--state-root <path>]
 autopilot-coordinator migrate --dry-run|--apply --repo-key <key>
 autopilot-coordinator verify|rollback|cutover --repo-key <key>
-autopilot-coordinator recovery list|show|doctor|drain-stale-sessions --repo-root <absolute-path>
+autopilot-coordinator recovery list --repo-root <absolute-path> [--run <run>] [--state-root <absolute-path>]
+autopilot-coordinator recovery show --repo-root <absolute-path> --recovery-id <id> [--run <run>] [--state-root <absolute-path>]
+autopilot-coordinator recovery doctor --repo-root <absolute-path> [--run <run>] [--state-root <absolute-path>]
+autopilot-coordinator recovery drain-stale-sessions --repo-root <absolute-path> [--run <run>] [--state-root <absolute-path>]
+autopilot-coordinator recovery retain-authority|retain --repo-root <absolute-path> --run <run> (--recovery-id <id>|--all) [--state-root <absolute-path>]
+autopilot-coordinator recovery release-with-evidence|release --repo-root <absolute-path> --run <run> --recovery-id <id> --source <unit-merge|attempt-reset|quarantine-capture|run-close|run-abort> --target-id <id> --evidence <absolute-json-path> [--state-root <absolute-path>]
 ```
 
 ## Exit classes

@@ -13,6 +13,8 @@ import {
 import { parseAutopilotUnitMerge } from '../unit-merge.ts';
 import { parseValidationEvidence, parseReservationValidationStaleness } from '../validation-staleness.ts';
 import { parseCoordinationIntegrationConflict } from './contracts.ts';
+import { COORDINATOR_IMPLEMENTATION_BUILD } from './runtime-constants.ts';
+import { parseCentralVersionedUnitFailureIngress, unitFailureProducerForHistoricalFieldSet } from './unit-failure-ingress.ts';
 import {
   D65_CAPACITY_DECISION_SCHEMA,
   D65_LAUNCH_POLICY_SCHEMA,
@@ -40,6 +42,7 @@ import {
 } from './d65-semantic-graph.ts';
 import { parseAutopilotChildTerminalAcceptance } from './terminal-acceptance.ts';
 import { CoordinationRuntimeError } from './failures.ts';
+import { UNIT_FAILURE_CURRENT_PRODUCER_GENERATION } from './unit-failure-producer-provenance.ts';
 import type { CoordinationAuthoritativeArtifact } from './types.ts';
 import type { D65AuthorityInput } from './d65-graph-producer.ts';
 
@@ -49,7 +52,13 @@ import type { D65AuthorityInput } from './d65-graph-producer.ts';
 // over independently obtained Git observations.
 
 export type D65GraphAuthorityCollection = (typeof D65_COLLECTION_KEYS)[number];
+export interface D65GraphAuthorityParserContext {
+  readonly bytes: Uint8Array;
+  readonly ref: string;
+}
+
 export type D65GraphAuthorityParser = (value: unknown) => unknown;
+export type D65GraphAuthorityContextParser = (value: unknown, context: D65GraphAuthorityParserContext) => unknown;
 
 export interface D65GraphRefExtractor {
   readonly field_path: string;
@@ -77,6 +86,7 @@ export interface D65GraphRefExtractor {
 export interface D65GraphAuthoritySchemaRegistration {
   readonly schema_version: string;
   readonly parser: D65GraphAuthorityParser;
+  readonly parser_contextual: D65GraphAuthorityContextParser | null;
   readonly ref_extractors: readonly D65GraphRefExtractor[];
 }
 
@@ -195,22 +205,40 @@ function parseMergeConflict(value: unknown): unknown {
   return row;
 }
 
-function parseUnitFailure(value: unknown): unknown {
+function parseD65GraphAuthorityParserContext(value: D65GraphAuthorityParserContext | undefined): D65GraphAuthorityParserContext | null {
+  if (value === undefined) return null;
+  if (!(value.bytes instanceof Uint8Array)) fail('parser context bytes must be a Uint8Array');
+  if (typeof value.ref !== 'string' || value.ref.length === 0) fail('parser context ref must be bounded text');
+  return Object.freeze({ bytes: value.bytes, ref: value.ref });
+}
+
+function parseUnitFailure(value: unknown, context?: D65GraphAuthorityParserContext): unknown {
   const label = 'autopilot.unit_failure.v1';
-  const row = exact(value, label, ['schema_version','action','workstream','workstream_run','unit_id','attempt','unit_worktree_path','dirty_paths','capture_commit_sha','capture_ref','git_head_before','git_head_after','git_common_dir','branch','postcondition_worktree_clean','summary','created_at']);
-  if (row['schema_version'] !== label) fail(`${label}.schema_version is invalid`);
-  const action = text(row, 'action', label);
-  if (action !== 'quarantine' && action !== 'reset' && action !== 'preserve' && action !== 'abort') fail(`${label}.action is invalid`);
-  for (const field of ['workstream','workstream_run','unit_id','unit_worktree_path','git_common_dir','branch','summary'] as const) text(row, field, label);
-  integer(row, 'attempt', label, 1); strings(row['dirty_paths'], `${label}.dirty_paths`);
-  const captureCommit = nullableText(row, 'capture_commit_sha', label); const captureRef = nullableText(row, 'capture_ref', label);
-  for (const field of ['git_head_before','git_head_after'] as const) if (!/^[a-f0-9]{40,64}$/u.test(text(row, field, label, 64))) fail(`${label}.${field} is invalid`);
-  if (captureCommit !== null && !/^[a-f0-9]{40,64}$/u.test(captureCommit)) fail(`${label}.capture_commit_sha is invalid`);
-  const captures = action === 'quarantine' || action === 'preserve';
-  if (captures !== (captureCommit !== null && captureRef !== null)) fail(`${label} capture fields disagree with action`);
-  if (boolean(row, 'postcondition_worktree_clean', label) !== true) fail(`${label}.postcondition_worktree_clean must be true`);
-  timestamp(row, 'created_at', label);
-  return row;
+  if (!isJsonObject(value)) fail(`${label} must be an object`);
+  if (value['schema_version'] !== label) fail(`${label}.schema_version is invalid`);
+  const parserContext = parseD65GraphAuthorityParserContext(context);
+  const bytes = parserContext?.bytes ?? new TextEncoder().encode(`${JSON.stringify(value)}\n`);
+  const provenance = (() => {
+    if (Object.hasOwn(value, 'producer_build') || Object.hasOwn(value, 'producer_generation')) {
+      return Object.freeze({ producer_build: text(value, 'producer_build', label, 192), producer_generation: integer(value, 'producer_generation', label, 1) });
+    }
+    const historical = unitFailureProducerForHistoricalFieldSet(bytes);
+    if (historical === null) fail(`${label} lacks exact BUG-177 producer provenance`);
+    return historical;
+  })();
+  const parsed = parseCentralVersionedUnitFailureIngress({
+    bytes,
+    producer_build: provenance.producer_build,
+    producer_generation: provenance.producer_generation,
+    identity: {
+      workstream: text(value, 'workstream', label, 192),
+      workstreamRun: text(value, 'workstream_run', label, 192),
+      unitId: text(value, 'unit_id', label, 192),
+      attempt: integer(value, 'attempt', label, 1),
+    },
+  });
+  timestamp(parsed.ingress.normalized_document, 'created_at', label);
+  return parsed.ingress.normalized_document;
 }
 
 function parseReconciliationIntent(value: unknown): unknown {
@@ -264,7 +292,8 @@ function parseClosedValidationStalenessV2(value: unknown): unknown {
 }
 
 const extractor = (field_path: string, base: 'repository' | 'runtime', target_collection: D65GraphAuthorityCollection | 'core', digest_field_path: string | null = null, byte_count_field_path: string | null = null, options: Partial<Pick<D65GraphRefExtractor, 'presence' | 'shape' | 'absolute_runtime_output'>> = {}): D65GraphRefExtractor => Object.freeze({ field_path, base, target_collection, digest_field_path, byte_count_field_path, traverse: true, presence: options.presence ?? 'required', shape: options.shape ?? 'ref', absolute_runtime_output: options.absolute_runtime_output ?? false });
-const schema = (schema_version: string, parser: D65GraphAuthorityParser, ref_extractors: readonly D65GraphRefExtractor[] = []): D65GraphAuthoritySchemaRegistration => Object.freeze({ schema_version, parser, ref_extractors: Object.freeze([...ref_extractors]) });
+const schema = (schema_version: string, parser: D65GraphAuthorityParser, ref_extractors: readonly D65GraphRefExtractor[] = []): D65GraphAuthoritySchemaRegistration => Object.freeze({ schema_version, parser, parser_contextual: null, ref_extractors: Object.freeze([...ref_extractors]) });
+const contextualSchema = (schema_version: string, parser: D65GraphAuthorityContextParser, ref_extractors: readonly D65GraphRefExtractor[] = []): D65GraphAuthoritySchemaRegistration => Object.freeze({ schema_version, parser: (value: unknown) => parser(value, { bytes: new TextEncoder().encode(`${JSON.stringify(value)}\n`), ref: '<context-required>' }), parser_contextual: parser, ref_extractors: Object.freeze([...ref_extractors]) });
 const row = (collection: D65GraphAuthorityCollection, roots: readonly string[], schemas: readonly D65GraphAuthoritySchemaRegistration[], direct_children_only = false, opaque = false): D65GraphAuthorityRegistryRow => Object.freeze({ collection, roots: Object.freeze([...roots]), direct_children_only, schemas: Object.freeze([...schemas]), opaque });
 
 export const D65_GRAPH_AUTHORITY_REGISTRY: readonly D65GraphAuthorityRegistryRow[] = Object.freeze([
@@ -293,7 +322,7 @@ export const D65_GRAPH_AUTHORITY_REGISTRY: readonly D65GraphAuthorityRegistryRow
   row('unit_merges', ['unit-merges/'], [schema('autopilot.unit_merge.v1', parseClosedUnitMerge, [extractor('status_ref','runtime','statuses'), extractor('receipt_ref','runtime','receipts'), extractor('audit_ref','runtime','audits'), extractor('execution_commit_ref','runtime','execution_commits')])]),
   row('integration_analyses', ['integration-analyses/'], [schema('autopilot.integration_analysis.v1', parseIntegrationAnalysis)]),
   row('integration_analyses', ['merge-conflicts/'], [schema('autopilot.merge_conflict.v1', parseMergeConflict, [extractor('integration_analysis_ref','runtime','integration_analyses')])]),
-  row('quarantine', ['quarantine/'], [schema('autopilot.unit_failure.v1', parseUnitFailure)]),
+  row('quarantine', ['quarantine/'], [contextualSchema('autopilot.unit_failure.v1', parseUnitFailure)]),
   row('reconciliation', ['coordination-reconciliation/'], [schema('autopilot.reconciliation_intent.v1', parseReconciliationIntent, [extractor('evidence_ref','repository','evidence','evidence_sha256')]), schema('autopilot.reconciliation_intent_supersession.v1', parseReconciliationSupersession, [extractor('evidence_ref','repository','evidence','evidence_sha256')])]),
   row('reconciliation', ['reservation-integration/'], [schema('autopilot.reservation_integration.v1', parseReservationIntegration)]),
   row('reconciliation', ['reservation-repairs/'], [schema('autopilot.reservation_repair.v1', parseReservationRepair)]),
@@ -398,6 +427,10 @@ function schemaRegistration(rowValue: D65GraphAuthorityRegistryRow, parsed: unkn
   const matching = rowValue.schemas.filter((entry) => entry.schema_version === parsed['schema_version']);
   if (matching.length !== 1 || matching[0] === undefined) fail('authority schema is not admitted at its fixed registry root', [ref, String(parsed['schema_version'])]);
   return matching[0];
+}
+
+function runD65GraphAuthorityParser(registration: D65GraphAuthoritySchemaRegistration, parsed: unknown, bytes: Uint8Array, ref: string): unknown {
+  return registration.parser_contextual === null ? registration.parser(parsed) : registration.parser_contextual(parsed, { bytes, ref });
 }
 
 function externalRegistration(schemaVersion: string): D65GraphAuthoritySchemaRegistration {
@@ -570,7 +603,7 @@ export function discoverD65GraphAuthority(input: {
       parsed = parseJson(bytes, leaf.ref);
       const admitted = schemaRegistration(registration, parsed, leaf.ref);
       if (admitted === null) fail('non-opaque registry row lost its parser', [leaf.ref]);
-      admitted.parser(parsed);
+      runD65GraphAuthorityParser(admitted, parsed, bytes, leaf.ref);
       schemaVersion = admitted.schema_version;
       if ((schemaVersion === D65_CONTINUATION_EVENT_SCHEMA || schemaVersion === D65_PARENT_LOSS_SCHEMA) && acceptedByRef.get(leaf.ref)?.document_schema_version !== schemaVersion) fail('continuation authority lacks exactly one matching accepted artifact row', [leaf.ref, schemaVersion]);
     }
@@ -592,7 +625,7 @@ export function discoverD65GraphAuthority(input: {
     const bytes = input.readGitAtG.readBlob(leaf.ref);
     if (d65GitBlobOid(bytes) !== leaf.oid) fail('external authority bytes do not equal the named Git blob object', [leaf.ref, leaf.oid]);
     if (bytesSha256(bytes) !== artifact.evidence.sha256) fail('accepted external authority digest disagrees with G bytes', [artifact.artifact_id, artifact.evidence.ref]);
-    const parsed = parseJson(bytes, leaf.ref); admitted.parser(parsed); assertExternalPath(admitted.schema_version, leaf.ref, parsed);
+    const parsed = parseJson(bytes, leaf.ref); runD65GraphAuthorityParser(admitted, parsed, bytes, leaf.ref); assertExternalPath(admitted.schema_version, leaf.ref, parsed);
     parsedByRef.set(leaf.ref, parsed);
     collections.authorities.push(Object.freeze({ identity: d65GraphAuthorityIdentity('authorities', leaf.ref), ref: leaf.ref, git_mode: '100644', git_blob_oid: leaf.oid, sha256: artifact.evidence.sha256, byte_count: bytes.byteLength, document_schema_version: admitted.schema_version }));
   }

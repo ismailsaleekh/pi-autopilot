@@ -4,8 +4,7 @@
 // enumerates the fixed structural catalog (generated regions, doc-type shapes,
 // boundary policy). It intentionally holds no code facts — every fact is read
 // from compiled code by code-surfaces.mjs. See docs/subsystems/coordination.md
-// and the design at
-// plans/active/autopilot-extension/docs-agent-first-restructure-and-freshness-qa-2026-07-20.md.
+// for the public design surface.
 
 import { fileURLToPath } from 'node:url';
 

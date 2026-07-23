@@ -57,6 +57,7 @@ export interface AutopilotSchedulerInput {
   readonly runningAttempts: readonly AutopilotSchedulerRunningAttempt[];
   readonly activeClaims: readonly AutopilotSchedulerClaimView[];
   readonly reservationCoordination: { readonly workstreamRun: string; readonly view: ReservationCoordinationView } | null;
+  readonly s2RetentionPressure?: { readonly workstreamRun: string; readonly pausedRuns: readonly string[] } | null;
   readonly now?: Date;
 }
 
@@ -137,6 +138,10 @@ export async function planNextDispatch(input: AutopilotSchedulerInput): Promise<
     if (input.state.status !== 'running') {
       reasons.push('workstream-not-launchable');
       details.push(`state.status is ${input.state.status}`);
+    }
+    if (input.s2RetentionPressure !== null && input.s2RetentionPressure !== undefined && input.s2RetentionPressure.pausedRuns.includes(input.s2RetentionPressure.workstreamRun)) {
+      reasons.push('worktree-unavailable');
+      details.push(`S2 retention disk pressure pauses new worktree creation only for ${input.s2RetentionPressure.workstreamRun}`);
     }
     const planUnit = input.masterPlan.units[candidate.unit_id];
     if (planUnit === undefined) {

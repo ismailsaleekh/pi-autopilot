@@ -2,22 +2,23 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { existsSync, realpathSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { describe, it } from 'node:test';
 
-import type { AutopilotExecutionAudit, AutopilotExecutionCommit, AutopilotReceipt, AutopilotState, AutopilotStatusEntry, AutopilotUnitSpec } from '../../src/core/contracts/index.ts';
+import type { AutopilotExecutionAudit, AutopilotExecutionCommit, AutopilotMasterPlan, AutopilotReceipt, AutopilotState, AutopilotStatusEntry, AutopilotUnitSpec } from '../../src/core/contracts/index.ts';
 import { runAutopilotAgentFromSpecPath } from '../../src/core/agent-runner.ts';
 import { runAutopilotClaimGc } from '../../src/core/claim-gc.ts';
 import { materializeAdditionalReadPathsForSpec, materializeAutopilotSpecPaths } from '../../src/core/materialization.ts';
-import { parseAutopilotCheckoutProfile } from '../../src/core/checkout-profile.ts';
+import { parseAutopilotCheckoutProfile, readCheckoutProfileSnapshot } from '../../src/core/checkout-profile.ts';
 import { projectAutopilotDiskUse } from '../../src/core/disk-gate.ts';
 import { planNextDispatch } from '../../src/core/scheduler.ts';
 import { readSchedulerConfig, writeSchedulerConfig } from '../../src/core/scheduler-config.ts';
 import { mergeAutopilotUnit } from '../../src/core/unit-merge.ts';
 import { abortFailedUnit, quarantineFailedUnit, resetFailedUnit } from '../../src/core/unit-failure.ts';
 import { cleanupTerminalUnitWorktree, cleanupTerminalUnitWorktreesForRun } from '../../src/core/worktree-cleanup.ts';
+import { readS2RetentionProgressState, s2RetentionPressureStatePath, s2RetentionRunsPausedForWorktreeCreation } from '../../src/core/coordination/s2-retention-state-machine.ts';
 import { recordValidationStalenessForMerge, validationCanCloseSourceWork, type AutopilotValidationEvidence } from '../../src/core/validation-staleness.ts';
 import {
   AUTOPILOT_STATE_ROOT_ENV,
@@ -249,6 +250,19 @@ void describe('Phase 2 scheduler config and deterministic scheduler', () => {
     assert.ok(dispatch.skipped.find((unit) => unit.unit_id === 'u01')?.details.includes('claim request claim-request-peer-u01'));
     assert.ok(skippedReasons.get('u03')?.includes('dependency-not-satisfied'));
   });
+
+  void it('honors durable S2 per-run disk pressure without blocking unrelated scheduler runs', async () => {
+    const runtimeRoot = '/tmp/autopilot-phase2-main/.pi/autopilot/phase2-smoke';
+    const baseSpec = unitSpec({ cwd: process.cwd(), runtimeRoot, unitId: 'u-pressure', ownedPaths: ['src/pressure.ts'] });
+    const state: AutopilotState = { schema_version: 'autopilot.state.v1', workstream: 'phase2-smoke', updated_at: '2026-07-08T00:00:00.000Z', status: 'running', context_gate: { gate: 'ok', percent: 10 }, last_event_id: 0, ready_queue: ['u-pressure'], running: [], blocked: [], completed: [], units: { 'u-pressure': { unit_id: 'u-pressure', role: 'implement', state: 'ready', attempt: 1, summary: 'ready' } }, operator_questions: [], next_actions: [] };
+    const masterPlan: AutopilotMasterPlan = { schema_version: 'autopilot.master_plan.v1', workstream: 'phase2-smoke', mission_ref: 'mission.md', goal_summary: 'phase2', non_goals: [], definition_of_done: [], risk_level: 'medium', lanes: [{ lane_id: 'lane-a', summary: 'lane', unit_ids: ['u-pressure'] }], units: { 'u-pressure': { unit_id: 'u-pressure', role: 'implement', state: 'ready', dependencies: [], summary: 'pressure' } }, ownership_matrix: { owned_paths: [], read_only_paths: [], untouchable_paths: [], held_paths: [] }, verification_matrix: emptyPlan(), closure_criteria: [], current_focus: 'dispatch', last_decision_id: 0, last_event_id: 0, updated_at: '2026-07-08T00:00:00.000Z' };
+    const common = { workstream: 'phase2-smoke', runtimeRoot, contextGate: 'ok' as const, state, masterPlan, config: { schema_version: 'autopilot.scheduler_config.v1' as const, workstream: 'phase2-smoke', parallel_cap: 1, updated_at: '2026-07-08T00:00:00.000Z', updated_by: 'runtime-test' as const }, candidates: [{ unit_id: 'u-pressure', attempt: 1, spec: baseSpec }], runningAttempts: [], activeClaims: [], reservationCoordination: null, now: new Date('2026-07-08T00:00:00.000Z') };
+    const paused = await planNextDispatch({ ...common, s2RetentionPressure: { workstreamRun: 'run-paused', pausedRuns: ['run-paused'] } });
+    assert.deepEqual(paused.selected.map((unit) => unit.unit_id), []);
+    assert.ok(paused.skipped[0]?.reasons.includes('worktree-unavailable'));
+    const unrelated = await planNextDispatch({ ...common, s2RetentionPressure: { workstreamRun: 'run-unrelated', pausedRuns: ['run-paused'] } });
+    assert.deepEqual(unrelated.selected.map((unit) => unit.unit_id), ['u-pressure']);
+  });
 });
 
 void describe('Phase 2 fail-closed runtime file locking', () => {
@@ -273,6 +287,34 @@ void describe('Phase 2 fail-closed runtime file locking', () => {
 });
 
 void describe('Phase 2 unit worktrees, claims, mergeback, staleness, and GC', () => {
+  void it('rechecks disk and clears recovered S2 pressure before retrying production unit worktree creation', async () => {
+    await withTempDir(async (root) => {
+      const source = join(root, 'source');
+      await initGitSource(source);
+      const prepared = await prepareAutopilotWorkstream({ workstream: 'phase2-smoke', sourceCwd: source });
+      const snapshotPath = join(prepared.taskRoot, '_checkout-profile.json');
+      const snapshot = await readCheckoutProfileSnapshot(snapshotPath);
+      if (snapshot === null) throw new Error('checkout profile snapshot missing');
+      const highPressure = {
+        ...snapshot,
+        profile: { ...snapshot.profile, disk_gate: { ...snapshot.profile.disk_gate, floor_free_bytes: 1_000_000_000_000_000 } },
+      };
+      await writeJson(snapshotPath, highPressure);
+      await assert.rejects(() => prepareAutopilotUnitWorktree({ active: prepared.active, unitId: 'pressure-unit', attempt: 1 }), /insufficient-space|disk/u);
+      const statePath = s2RetentionPressureStatePath(join(prepared.active.worktree_root, '_retention'));
+      assert.deepEqual(s2RetentionRunsPausedForWorktreeCreation(await readS2RetentionProgressState(statePath)), [prepared.active.workstream_run]);
+      const diagnosticRoot = join(prepared.active.worktree_root, '_retention', 'diagnostics', prepared.active.workstream_run);
+      const diagnosticNames = await readdir(diagnosticRoot);
+      const diagnostics = await readFile(join(diagnosticRoot, diagnosticNames[0] ?? ''), 'utf8');
+      assert.equal(diagnostics.includes('disk-failure'), true);
+
+      await writeJson(snapshotPath, snapshot);
+      const recovered = await prepareAutopilotUnitWorktree({ active: prepared.active, unitId: 'pressure-unit', attempt: 1 });
+      assert.equal(existsSync(recovered.unitInfo.worktree_path), true);
+      assert.deepEqual(s2RetentionRunsPausedForWorktreeCreation(await readS2RetentionProgressState(statePath)), []);
+    });
+  });
+
   void it('creates separate unit worktrees, enforces same-parent claims, and keeps authoritative runtime root in main', async () => {
     await withTempDir(async (root) => {
       const source = join(root, 'source');

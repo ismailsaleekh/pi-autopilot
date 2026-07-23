@@ -7,6 +7,7 @@ import { platform } from 'node:os';
 import { CoordinatorClient, durableIdentifier } from "./client.js";
 import { parseCoordinationMailboxDeliveryReceipt, parseCoordinationMessage, parseCoordinationMigrationRecoveryWork, parseOptionalCoordinationReconciliationReceipt, parseCoordinationRun, parseCoordinationRunTerminalIntent, parseCoordinationSessionLease } from "./contracts.js";
 import { CoordinationRuntimeError, formatCoordinationRuntimeError } from "./failures.js";
+import { isS2OwnerRecoveryProgressFailure, isS2SameOperationProgressRetry } from "./s2-failure-taxonomy.js";
 import { acknowledgeCoordinationMigrationFreeze, activeCoordinationMigrationFreeze, assertMigrationPathSafe } from "./migration-paths.js";
 import { currentBootId } from "./process-identity.js";
 import { COORDINATOR_HEARTBEAT_MS, COORDINATOR_SESSION_LEASE_MS, enforcePrivateAuthorityPath, ensurePrivateAuthorityDirectory } from "./runtime-paths.js";
@@ -54,7 +55,6 @@ function payloadArray(response, field) {
 function leaseExpiry() {
     return new Date(Date.now() + COORDINATOR_SESSION_LEASE_MS).toISOString();
 }
-const TRANSIENT_HEARTBEAT_CODES = new Set(['coordinator-unavailable', 'coordinator-contention', 'request-timeout']);
 /**
  * A heartbeat that fails because the coordinator socket is momentarily
  * unavailable (PID live, socket down) or briefly contended must not permanently
@@ -68,7 +68,7 @@ export function classifyHeartbeatFailure(error, session) {
     const leaseExpiryMs = Date.parse(session.lease_expires_at);
     const code = error instanceof CoordinationRuntimeError ? error.code : 'unknown';
     const detail = error instanceof Error ? error.message : String(error);
-    const kind = TRANSIENT_HEARTBEAT_CODES.has(code) ? 'transient' : 'terminal';
+    const kind = error instanceof CoordinationRuntimeError && isS2SameOperationProgressRetry(error.code) ? 'transient' : 'terminal';
     return { kind, code, detail, leaseExpiryMs };
 }
 function messageContent(message) {
@@ -560,7 +560,7 @@ export class DurableRunSupervisorClient {
     }
 }
 export function classifyHeartbeatOwnedRecoveryFailure(error) {
-    if (error instanceof CoordinationRuntimeError && error.failure_class === 'owned-recovery')
+    if (error instanceof CoordinationRuntimeError && isS2OwnerRecoveryProgressFailure(error.code))
         return { kind: 'dispatch-blocked', error };
     return { kind: 'terminal', error: error instanceof Error ? error : new Error(String(error)) };
 }
