@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
 
-import { createAutopilotRosterSetupTool } from '../../src/core/roster/setup-tool.ts';
+import { createAutopilotRosterSetupTool, renderRosterSetupApprovalPresentation } from '../../src/core/roster/setup-tool.ts';
 import {
   PHASE37_FIXTURE_CLOCK,
   canonicalSha256,
@@ -143,7 +143,6 @@ function request(token: string, action: string, overrides: Partial<Record<string
     activation_token: token,
     approval_token: null,
     scope: 'user',
-    state_root_override: null,
     trusted_project_root: null,
     candidate_set_sha256: null,
     approved_roster_sha256s: [],
@@ -268,12 +267,16 @@ void describe('Phase 37 W2 roster setup tool core', () => {
       const bundle = createAutopilotRosterSetupTool({ inventory: codexInventory() });
       const token = activate(bundle);
       for (const action of ['inspect', 'propose', 'refine', 'doctor', 'reject']) {
-        const result = await invoke(bundle, request(token, action, { state_root_override: stateRoot }));
+        const result = await invoke(bundle, request(token, action));
         assert.equal(result.write_count, 0, action);
         assert.equal(result.lock_count, 0, action);
         assert.deepEqual(result.files_touched, [], action);
         assert.equal(existsSync(stateRoot), false, action);
       }
+      const arbitraryRoot = await invoke(bundle, request(token, 'inspect', { state_root_override: stateRoot }));
+      assert.equal(arbitraryRoot.ok, false);
+      assert.equal(arbitraryRoot.status, 'failed');
+      assert.equal(existsSync(stateRoot), false);
     });
   });
 
@@ -370,23 +373,13 @@ void describe('Phase 37 W2 roster setup tool core', () => {
     assert.equal(saveCalls, 0);
   });
 
-  void it('does not delegate save without exact controller approval, then accepts the exact approved tuple once', async () => {
+  void it('requires exact host authorization but still blocks unlaunchable W0 candidates before delegated save', async () => {
     let saveCalls = 0;
-    let lastInputCandidateSha: Digest | null = null;
     const bundle = createAutopilotRosterSetupTool({
       inventory: codexInventory(),
-      saveApproved: (input) => {
+      saveApproved: () => {
         saveCalls += 1;
-        lastInputCandidateSha = input.candidate_set.candidate_set_sha256;
-        return {
-          ok: true,
-          status: 'saved',
-          receipt: receiptFor({ proposal, approval, original_command: '/autopilot phase37' }),
-          diagnostics: [],
-          write_count: input.approved_roster_sha256s.length + 1,
-          lock_count: 1,
-          files_touched: ['~/.pi/agent/autopilot/config.json'],
-        };
+        throw new Error('unlaunchable candidates must not reach materialization');
       },
     });
     const token = activate(bundle);
@@ -398,23 +391,28 @@ void describe('Phase 37 W2 roster setup tool core', () => {
     assert.deepEqual(codes(bypass), ['ROSTER_APPROVAL_STALE_CANDIDATE_SET']);
     assert.equal(saveCalls, 0);
 
-    const approved = bundle.controller.approveSave({ activation_token: token, scope: 'user', original_command: '/autopilot phase37', ...approval });
+    const presentationText = renderRosterSetupApprovalPresentation({ scope: 'user', original_command: '/autopilot phase37', ...approval });
+    const extensionSource = bundle.hostAuthorization.authorizeInput({ activation_token: token, source: 'extension', text: presentationText });
+    assert.equal(extensionSource.ok, false);
+    assert.equal(extensionSource.reason, 'source-not-user');
+
+    const approved = bundle.hostAuthorization.authorizeInput({ activation_token: token, source: 'user', text: presentationText });
     assert.equal(approved.ok, true);
     assert.equal(typeof approved.approval_token, 'string');
-    const saved = await invoke(bundle, request(token, 'save', { ...approval, approval_token: approved.approval_token }));
-    assert.equal(saved.ok, true);
-    assert.equal(saved.status, 'saved');
-    assert.equal(saved.receipt?.fresh_session_required, true);
-    assert.equal(saved.receipt?.zero_secrets, true);
-    assert.equal(saveCalls, 1);
-    assert.equal(lastInputCandidateSha, approval.candidate_set_sha256);
+    const duplicate = bundle.hostAuthorization.authorizeInput({ activation_token: token, source: 'user', text: presentationText });
+    assert.equal(duplicate.ok, false);
+    assert.equal(duplicate.reason, 'duplicate-authorization');
 
-    const replay = await invoke(bundle, request(token, 'save', { ...approval, approval_token: approved.approval_token }));
-    assert.equal(replay.ok, false);
-    assert.equal(saveCalls, 1);
+    const saved = await invoke(bundle, request(token, 'save', { ...approval, approval_token: approved.approval_token }));
+    assert.equal(saved.ok, false);
+    assert.equal(saved.status, 'blocked');
+    assert.ok(codes(saved).includes('ROSTER_QUALIFICATION_REQUIRED'));
+    assert.equal(saved.write_count, 0);
+    assert.equal(saved.lock_count, 0);
+    assert.equal(saveCalls, 0);
   });
 
-  void it('redacts inventory and save exceptions from secret-free failed results', async () => {
+  void it('redacts inventory failures and unlaunchable save blocks from secret-free results', async () => {
     const secret = 'phase37-secret-token-should-not-appear';
     const inventoryFailure = createAutopilotRosterSetupTool({
       inventory: () => {
@@ -438,11 +436,12 @@ void describe('Phase 37 W2 roster setup tool core', () => {
     const saveToken = activate(saveFailure);
     const proposal = await invoke(saveFailure, request(saveToken, 'propose'));
     const approval = approvalFields(proposal);
-    const approved = saveFailure.controller.approveSave({ activation_token: saveToken, scope: 'user', original_command: '/autopilot phase37', ...approval });
+    const presentationText = renderRosterSetupApprovalPresentation({ scope: 'user', original_command: '/autopilot phase37', ...approval });
+    const approved = saveFailure.hostAuthorization.authorizeInput({ activation_token: saveToken, source: 'user', text: presentationText });
     assert.equal(approved.ok, true);
     const saveResult = await invoke(saveFailure, request(saveToken, 'save', { ...approval, approval_token: approved.approval_token }));
     assert.equal(saveResult.ok, false);
-    assert.deepEqual(codes(saveResult), ['ROSTER_READBACK_MISMATCH']);
+    assert.ok(codes(saveResult).includes('ROSTER_QUALIFICATION_REQUIRED'));
     assert.equal(JSON.stringify(saveResult).includes(secret), false);
   });
 

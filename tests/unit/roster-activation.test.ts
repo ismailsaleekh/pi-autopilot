@@ -20,8 +20,10 @@ import type { VerifiedAutopilotRosterSetupSkillPackage } from '../../src/core/ro
 
 const SETUP_TOOL_NAME = 'autopilot_manage_rosters';
 const ROSTER_ID = 'cruise-codex-subscription-bdb4f15f0ff9';
-const ROSTER_SHA = 'sha256:f3ac0895d9abedfbe3616a79af0c1c3691962d24d5f17d195a78e6ab24d2b4a0';
-const ASSIGNMENT_SHA = 'sha256:bdb4f15f0ff90aff9d1e46a3a56bfdfddabafcf3c7f5c293a7b558ff2f22a3c4';
+const ROSTER_SHA = 'sha256:f3ac0895d9abedfbe3616a79af0c1c3691962d24d5f17d195a78e6ab24d2b4a0' as const;
+const ASSIGNMENT_SHA = 'sha256:bdb4f15f0ff90aff9d1e46a3a56bfdfddabafcf3c7f5c293a7b558ff2f22a3c4' as const;
+const CONFIG_SHA = 'sha256:1d8a144806f7bd3df23724eb702223c7180b4d160cb09fc8cff5cbc77a1e3a38' as const;
+const SELECTION_SHA = 'sha256:96c3625fddc6d43145ca5c6dece482e97fba78ad01c333e6aa3382fbe40d1878' as const;
 
 type RegisteredHandler = ExtensionToolCallHandler | ExtensionLifecycleHandler | ExtensionResourcesDiscoverHandler | ExtensionInputHandler;
 
@@ -126,6 +128,19 @@ function makeContext(events: string[]): ExtensionCommandContextLike {
 }
 
 function readyResolution(): AutopilotRosterActivationResolution {
+  const preRunSelection = {
+    schema_version: 'autopilot.pre_run_selection.v1' as const,
+    repo_id: 'repo-unit',
+    workstream_run: 'demo-20260723t000000z-abcdef',
+    scope: 'user' as const,
+    roster_id: ROSTER_ID,
+    roster_revision: 1,
+    roster_sha256: ROSTER_SHA,
+    assignment_set_sha256: ASSIGNMENT_SHA,
+    config_sha256: CONFIG_SHA,
+    selected_at: '2026-07-23T00:00:00.000Z',
+    selection_sha256: SELECTION_SHA,
+  };
   return {
     status: 'resolved',
     diagnostics: [],
@@ -137,6 +152,22 @@ function readyResolution(): AutopilotRosterActivationResolution {
       roster_revision: 1,
       roster_sha256: ROSTER_SHA,
       assignment_set_sha256: ASSIGNMENT_SHA,
+      config_sha256: CONFIG_SHA,
+      workstream_run: preRunSelection.workstream_run,
+      pre_run_selection: preRunSelection,
+      pre_run_selection_path: '/tmp/pre-run-selection.json',
+      selection_bytes: new TextEncoder().encode('{"schema_version":"autopilot.pre_run_selection.v1"}\n'),
+      launch_fence: {
+        schema_version: 'autopilot.run_selection_launch_fence.v1',
+        token_id: 'launch-fence-unit',
+        repo_id: preRunSelection.repo_id,
+        workstream_run: preRunSelection.workstream_run,
+        selection_sha256: preRunSelection.selection_sha256,
+        selection_path: '/tmp/pre-run-selection.json',
+        issued_at: '2026-07-23T00:00:00.000Z',
+        readback_verified: true,
+      },
+      runtime_mirror_path: null,
       parent: { model: 'openai-codex/gpt-5.6-sol', thinking: 'xhigh' },
     },
   };
@@ -238,16 +269,21 @@ void describe('D69 W2 roster activation', () => {
     autopilotExtension(pi, {
       rosterActivationStore: { resolve: async () => { events.push('resolve'); return readyResolution(); } },
       prepareAutopilotWorkstream: async () => { events.push('prepare'); return fakePrepared(); },
+      publishRuntimeRosterSnapshot: async () => {
+        events.push('publish-snapshot');
+        return { schema_version: 'autopilot.runtime_roster_snapshot_publication_result.v1', ok: true, status: 'published', selection_sha256: SELECTION_SHA, mirror_path: '/tmp/mirror.json', idempotent_replay: false, diagnostics: [], write_count: 1, lock_count: 0, files_touched: ['/tmp/mirror.json'] };
+      },
       attachSessionBridge: async () => { events.push('attach'); return true; },
     });
 
     await pi.commands.get(AUTOPILOT_COMMAND)?.handler(`demo --roster ${ROSTER_ID} ship it`, makeContext(events));
 
-    assert.deepEqual(events.filter((event) => ['resolve', 'setModel', 'prepare', 'attach', 'sendUserMessage'].includes(event) || event.startsWith('find:')), [
+    assert.deepEqual(events.filter((event) => ['resolve', 'setModel', 'prepare', 'publish-snapshot', 'attach', 'sendUserMessage'].includes(event) || event.startsWith('find:')), [
       'resolve',
+      'prepare',
+      'publish-snapshot',
       'find:openai-codex/gpt-5.6-sol',
       'setModel',
-      'prepare',
       'attach',
       'sendUserMessage',
     ]);

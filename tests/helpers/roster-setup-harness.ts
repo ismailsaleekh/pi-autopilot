@@ -29,7 +29,7 @@ import {
 } from '../../src/core/roster/route-policies.ts';
 import { createRosterSetupApprovalSession, type RosterSetupApprovalSaveResult, type RosterSetupApprovalSession } from '../../src/core/roster/setup-approval.ts';
 import { createRosterSetupReceiptFactory, type AutopilotRosterSetupReceipt } from '../../src/core/roster/setup-receipt.ts';
-import { createAutopilotRosterSetupTool } from '../../src/core/roster/setup-tool.ts';
+import { createAutopilotRosterSetupTool, renderRosterSetupApprovalPresentation } from '../../src/core/roster/setup-tool.ts';
 import {
   formatAuthorityPath,
   resolveRosterScopePaths,
@@ -68,7 +68,6 @@ export const EXPECTED_ROSTER_TOOL_PARAMETER_SCHEMA = Object.freeze({
     activation_token: { type: 'string', minLength: 16, maxLength: 200, pattern: '^[A-Za-z0-9._:-]{16,200}$' },
     approval_token: { anyOf: [{ type: 'string', minLength: 16, maxLength: 200, pattern: '^[A-Za-z0-9._:-]{16,200}$' }, { type: 'null' }] },
     scope: { type: 'string', enum: ['user', 'trusted-project'] },
-    state_root_override: { anyOf: [{ type: 'string', minLength: 1, maxLength: 4096 }, { type: 'null' }] },
     trusted_project_root: { anyOf: [{ type: 'string', minLength: 1, maxLength: 4096 }, { type: 'null' }] },
     candidate_set_sha256: { anyOf: [{ type: 'string', minLength: 71, maxLength: 71, pattern: '^sha256:[a-f0-9]{64}$' }, { type: 'null' }] },
     approved_roster_sha256s: { type: 'array', minItems: 0, maxItems: 16, uniqueItems: true, items: { type: 'string', minLength: 71, maxLength: 71, pattern: '^sha256:[a-f0-9]{64}$' } },
@@ -83,7 +82,6 @@ export const EXPECTED_ROSTER_TOOL_PARAMETER_SCHEMA = Object.freeze({
     'activation_token',
     'approval_token',
     'scope',
-    'state_root_override',
     'trusted_project_root',
     'candidate_set_sha256',
     'approved_roster_sha256s',
@@ -104,7 +102,6 @@ export interface RosterToolRequestLike extends JsonMap {
   readonly activation_token: string;
   readonly approval_token: string | null;
   readonly scope: RosterStorageScope;
-  readonly state_root_override: string | null;
   readonly trusted_project_root: string | null;
   readonly candidate_set_sha256: Digest | null;
   readonly approved_roster_sha256s: readonly Digest[];
@@ -444,15 +441,11 @@ export class RosterSetupHarness {
     });
     if (!authorized.ok) throw new Error(`host authorization failed: ${JSON.stringify(authorized)}`);
     if (this.#activationToken === null) throw new Error('setup must be active before controller approval');
-    const controllerApproval = this.bundle.controller.approveSave({
+    const presentationText = renderRosterSetupApprovalPresentation(fields);
+    const controllerApproval = this.bundle.hostAuthorization.authorizeInput({
       activation_token: this.#activationToken,
-      scope: fields.scope,
-      candidate_set_sha256: fields.candidate_set_sha256,
-      approved_roster_sha256s: fields.approved_roster_sha256s,
-      default_roster_id: fields.default_roster_id,
-      default_roster_revision: fields.default_roster_revision,
-      default_roster_sha256: fields.default_roster_sha256,
-      original_command: fields.original_command,
+      source: 'user',
+      text: presentationText,
     });
     if (!controllerApproval.ok || controllerApproval.approval_token === null) {
       throw new Error(`controller approval failed: ${controllerApproval.reason}`);
@@ -735,7 +728,6 @@ export function rosterToolRequest(token: string, action: string, overrides: Part
     activation_token: token,
     approval_token: null,
     scope: 'user',
-    state_root_override: null,
     trusted_project_root: null,
     candidate_set_sha256: null,
     approved_roster_sha256s: Object.freeze([]),

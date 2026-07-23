@@ -24,7 +24,7 @@ import { cleanupTerminalUnitWorktreesForRun, recoverCommittedPreflightRollbackPr
 import { executeOwnedWorktreeSaga, OwnedWorktreeSagaClient, recoverOwnedWorktreeSagas } from './coordination/worktree-saga.ts';
 import type { CoordinationRun, CoordinationRunResource, CoordinationWorktreeOperation } from './coordination/types.ts';
 import { AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV, AUTOPILOT_RUNTIME_ROOT_PREFIX } from './names.ts';
-import { isValidWorkstreamSlug } from './paths.ts';
+import { buildAutopilotWorkstreamRun, isValidWorkstreamRun, isValidWorkstreamSlug } from './paths.ts';
 import { parseLegacyActiveAutopilots, parseLegacyPathClaims, runLegacyCoordinationPreflight } from './coordination/legacy-preflight.ts';
 import { DurableRunSupervisorClient } from './coordination/supervisor.ts';
 import { CoordinatorClient } from './coordination/client.ts';
@@ -34,6 +34,8 @@ import { parseCoordinationChildLease, parseCoordinationRun, parseCoordinationRun
 import { assertCoordinationDispatchAllowed, assertLegacyCoordinationWritable, coordinationCutoverCommitted } from './coordination/migration-paths.ts';
 import { enforcePrivateAuthorityPath, ensurePrivateAuthorityDirectory } from './private-path.ts';
 import { gitQueryText, runGitMutation, runGitQuery } from './git-process.ts';
+import { bytesEqual, parseCanonicalPreRunSelectionBytes, type RunSelectionLaunchFenceToken } from './roster/run-selection.ts';
+import type { PreRunSelection } from './roster/resolve.ts';
 
 export const AUTOPILOT_STATE_ROOT_ENV = 'AUTOPILOT_STATE_ROOT';
 export const AUTOPILOT_RUNTIME_ENV = 'AUTOPILOT_RUNTIME';
@@ -235,6 +237,18 @@ export interface PreparedAutopilotWorkstream {
   readonly resumed: boolean;
 }
 
+export type Phase37RosterPrepareSelection =
+  | {
+      readonly mode: 'new-run';
+      readonly selection: PreRunSelection;
+      readonly selectionBytes: Uint8Array;
+      readonly launchFence: RunSelectionLaunchFenceToken;
+    }
+  | {
+      readonly mode: 'existing-run';
+      readonly selection: PreRunSelection;
+    };
+
 export interface ActiveAutopilotContext {
   readonly repo: AutopilotRepoIdentity;
   readonly active: ActiveAutopilotRow;
@@ -257,6 +271,68 @@ export class AutopilotParallelRuntimeError extends Error {
 
 function fail(code: string, message: string, evidence: readonly string[] = []): never {
   throw new AutopilotParallelRuntimeError(code, message, evidence);
+}
+
+async function verifyPhase37RosterPrepareSelection(input: {
+  readonly selection: Phase37RosterPrepareSelection | undefined;
+  readonly required: boolean;
+  readonly requestedWorkstreamRun: string | undefined;
+  readonly repoKey: string;
+}): Promise<PreRunSelection | null> {
+  if (input.requestedWorkstreamRun !== undefined && !isValidWorkstreamRun(input.requestedWorkstreamRun)) {
+    fail('invalid-workstream-run', `Invalid Autopilot workstream_run: ${input.requestedWorkstreamRun}`);
+  }
+  if (input.selection === undefined) {
+    if (input.required) fail('phase37-roster-launch-fence-required', 'Phase 37 activation requires a readback-authenticated roster selection before runtime mutation.');
+    return null;
+  }
+  const selection = input.selection.selection;
+  if (selection.repo_id !== input.repoKey) {
+    fail('phase37-selection-repo-mismatch', 'Phase 37 roster selection repo_id does not match the activation repository.', [selection.repo_id, input.repoKey]);
+  }
+  if (input.requestedWorkstreamRun !== undefined && selection.workstream_run !== input.requestedWorkstreamRun) {
+    fail('phase37-selection-workstream-run-mismatch', 'Phase 37 roster selection does not match the requested workstream_run.', [selection.workstream_run, input.requestedWorkstreamRun]);
+  }
+  if (input.selection.mode === 'new-run') {
+    const readback = parseCanonicalPreRunSelectionBytes(input.selection.selectionBytes);
+    if (!phase37SelectionsEqual(readback, selection)) {
+      fail('phase37-selection-readback-mismatch', 'Phase 37 roster selection bytes do not match the supplied selection.', [selection.selection_sha256]);
+    }
+    const fence = input.selection.launchFence;
+    let readbackBytes: Uint8Array;
+    try {
+      readbackBytes = await readFile(fence.selection_path);
+    } catch {
+      fail('phase37-selection-readback-mismatch', 'Phase 37 roster launch fence selection path is unavailable.', [fence.selection_path]);
+    }
+    if (!bytesEqual(readbackBytes, input.selection.selectionBytes)) {
+      fail('phase37-selection-readback-mismatch', 'Phase 37 roster launch fence selection path no longer matches the supplied bytes.', [fence.selection_path]);
+    }
+    if (
+      fence.schema_version !== 'autopilot.run_selection_launch_fence.v1' ||
+      fence.repo_id !== selection.repo_id ||
+      fence.workstream_run !== selection.workstream_run ||
+      fence.selection_sha256 !== selection.selection_sha256 ||
+      fence.readback_verified !== true
+    ) {
+      fail('phase37-roster-launch-fence-invalid', 'Phase 37 roster launch fence does not authenticate the supplied selection.', [selection.selection_sha256]);
+    }
+  }
+  return selection;
+}
+
+function phase37SelectionsEqual(left: PreRunSelection, right: PreRunSelection): boolean {
+  return left.schema_version === right.schema_version &&
+    left.repo_id === right.repo_id &&
+    left.workstream_run === right.workstream_run &&
+    left.scope === right.scope &&
+    left.roster_id === right.roster_id &&
+    left.roster_revision === right.roster_revision &&
+    left.roster_sha256 === right.roster_sha256 &&
+    left.assignment_set_sha256 === right.assignment_set_sha256 &&
+    left.config_sha256 === right.config_sha256 &&
+    left.selected_at === right.selected_at &&
+    left.selection_sha256 === right.selection_sha256;
 }
 
 export function resolveAutopilotStateRoot(env: ProcessEnvLike = process.env): string {
@@ -297,9 +373,12 @@ export function unitWorktreePathForActiveAutopilot(row: ActiveAutopilotRow, unit
 export async function prepareAutopilotWorkstream(input: {
   readonly workstream: string;
   readonly sourceCwd: string;
+  readonly workstreamRun?: string | undefined;
   readonly coordinationSessionId?: string;
   readonly env?: ProcessEnvLike;
   readonly now?: Date;
+  readonly phase37RosterRequired?: boolean | undefined;
+  readonly phase37RosterSelection?: Phase37RosterPrepareSelection | undefined;
 }): Promise<PreparedAutopilotWorkstream> {
   if (!isValidWorkstreamSlug(input.workstream)) {
     fail('invalid-workstream', `Invalid Autopilot workstream slug: ${input.workstream}`);
@@ -307,6 +386,13 @@ export async function prepareAutopilotWorkstream(input: {
   const env = input.env ?? process.env;
   const now = input.now ?? new Date();
   const repo = resolveRepoIdentity(input.sourceCwd);
+  const phase37Selection = await verifyPhase37RosterPrepareSelection({
+    selection: input.phase37RosterSelection,
+    required: input.phase37RosterRequired === true,
+    requestedWorkstreamRun: input.workstreamRun,
+    repoKey: repo.repoKey,
+  });
+  const requestedWorkstreamRun = input.workstreamRun ?? phase37Selection?.workstream_run ?? null;
   const coordinationRoot = coordinationRootForRepo(repo.repoKey, env);
   const worktreeRoot = worktreeRootForRepo(repo.repoKey, env);
   const cutover = coordinationCutoverCommitted(resolveAutopilotStateRoot(env), repo.repoKey);
@@ -353,6 +439,9 @@ export async function prepareAutopilotWorkstream(input: {
     if (matching.length === 1) {
       const row = matching[0];
       if (row === undefined) fail('internal-missing-active-row', 'matched active row disappeared.');
+      if (requestedWorkstreamRun !== null && row.workstream_run !== requestedWorkstreamRun) {
+        fail('phase37-selection-workstream-run-mismatch', 'Phase 37 roster selection does not match the active workstream_run.', [requestedWorkstreamRun, row.workstream_run]);
+      }
       const resumed = reactivateActiveRow(row, repo, now);
       const nextRows = activeRows.map((candidate) => candidate.autopilot_id === row.autopilot_id ? resumed : candidate);
       if (!cutover) await writeActiveAutopilots(coordinationRoot, nextRows);
@@ -364,7 +453,10 @@ export async function prepareAutopilotWorkstream(input: {
         if (missing.length > 0) {
           if (cutover && input.coordinationSessionId !== undefined) {
             const recovered = await recoverCoordinatorBootstrapWorkstream({ workstream: input.workstream, repo, coordinationRoot, worktreeRoot, activeRows: activeRows.filter((candidate) => candidate.workstream_run !== row.workstream_run), now, env, coordinationSessionId: input.coordinationSessionId });
-            if (recovered !== null) return recovered;
+            if (recovered !== null) {
+              if (requestedWorkstreamRun !== null && recovered.active.workstream_run !== requestedWorkstreamRun) fail('phase37-selection-workstream-run-mismatch', 'Recovered Phase 37 bootstrap run does not match roster selection.', [requestedWorkstreamRun, recovered.active.workstream_run]);
+              return recovered;
+            }
           }
           fail('bootstrap-finalization-incomplete', 'bootstrap residue cannot be cleared until every main worktree metadata postcondition exists.', missing);
         }
@@ -387,7 +479,10 @@ export async function prepareAutopilotWorkstream(input: {
         workstream: input.workstream, repo, coordinationRoot, worktreeRoot, activeRows, now, env,
         coordinationSessionId: input.coordinationSessionId,
       });
-      if (recovered !== null) return recovered;
+      if (recovered !== null) {
+        if (requestedWorkstreamRun !== null && recovered.active.workstream_run !== requestedWorkstreamRun) fail('phase37-selection-workstream-run-mismatch', 'Recovered Phase 37 bootstrap run does not match roster selection.', [requestedWorkstreamRun, recovered.active.workstream_run]);
+        return recovered;
+      }
     }
 
     const created = await createNewWorkstream({
@@ -398,6 +493,7 @@ export async function prepareAutopilotWorkstream(input: {
       activeRows,
       now,
       env,
+      ...(requestedWorkstreamRun === null ? {} : { workstreamRun: requestedWorkstreamRun }),
       ...(input.coordinationSessionId === undefined ? {} : { coordinationSessionId: input.coordinationSessionId }),
     });
     return created;
@@ -1203,6 +1299,7 @@ async function recoverCoordinatorBootstrapWorkstream(input: {
 
 async function createNewWorkstream(input: {
   readonly workstream: string;
+  readonly workstreamRun?: string | undefined;
   readonly repo: AutopilotRepoIdentity;
   readonly coordinationRoot: string;
   readonly worktreeRoot: string;
@@ -1212,7 +1309,8 @@ async function createNewWorkstream(input: {
   readonly coordinationSessionId?: string;
 }): Promise<PreparedAutopilotWorkstream> {
   const startedAt = input.now.toISOString();
-  const workstreamRun = buildWorkstreamRun(input.workstream, input.now);
+  const workstreamRun = input.workstreamRun ?? buildAutopilotWorkstreamRun(input.workstream, input.now);
+  if (!isValidWorkstreamRun(workstreamRun)) fail('invalid-workstream-run', `Invalid Autopilot workstream_run: ${workstreamRun}`);
   const autopilotId = `ap-${workstreamRun}`;
   const branch = `autopilot/${workstreamRun}`;
   const taskRoot = join(input.worktreeRoot, 'active', workstreamRun);
@@ -1950,11 +2048,6 @@ export async function appendJsonl(path: string, value: unknown): Promise<void> {
   finally { await handle.close(); }
   await enforcePrivateAuthorityPath(path, false);
   await fsyncRuntimeDirectory(dirname(path));
-}
-
-function buildWorkstreamRun(workstream: string, now: Date): string {
-  const timestamp = now.toISOString().replace(/[-:]/gu, '').replace(/\.\d{3}Z$/u, 'Z');
-  return `${workstream}-${timestamp}-${randomBytes(3).toString('hex')}`;
 }
 
 function buildReceiptId(kind: string): string {

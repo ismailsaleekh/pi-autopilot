@@ -16,7 +16,7 @@ import {
   CONTEXT_BUDGET_TOOL_NAME,
   AUTOPILOT_RESPOND_CLAIM_REQUEST_TOOL_NAME,
 } from './core/names.ts';
-import { parseAutopilotAbortArgs, parseAutopilotArgs, parseAutopilotClaimGcArgs, parseAutopilotCloseArgs, parseAutopilotConfigArgs, parseAutopilotCoordinationArgs, parseAutopilotInjectArgs, runnerInvocationFromModuleUrl, runtimeRootForWorkstream, type ParsedAutopilotArgs } from './core/paths.ts';
+import { buildAutopilotWorkstreamRun, parseAutopilotAbortArgs, parseAutopilotArgs, parseAutopilotClaimGcArgs, parseAutopilotCloseArgs, parseAutopilotConfigArgs, parseAutopilotCoordinationArgs, parseAutopilotInjectArgs, runnerInvocationFromModuleUrl, runtimeRootForWorkstream, type ParsedAutopilotArgs } from './core/paths.ts';
 import { AutopilotCloseError, abortAutopilotWorkstream, closeAutopilotWorkstream } from './core/close-runtime.ts';
 import { runAutopilotClaimGc } from './core/claim-gc.ts';
 import { readSchedulerConfig, writeSchedulerConfig } from './core/scheduler-config.ts';
@@ -52,13 +52,16 @@ import {
   parseAutopilotRosterContractJson,
   type AutopilotRosterContractBySchemaVersion,
 } from './core/roster/contracts.ts';
+import { isLaunchableRosterCandidate } from './core/roster/activation-fence.ts';
 import { createAutopilotRosterSetupTool } from './core/roster/setup-tool.ts';
 import { createRosterSetupReceiptFactory, type AutopilotRosterSetupReceipt } from './core/roster/setup-receipt.ts';
 import { resolveAutopilotRosterSetupSkillPackage, type VerifiedAutopilotRosterSetupSkillPackage } from './core/roster/skill-package.ts';
 import { seedRosterByCandidate, type RosterCandidate } from './core/roster/provider-recipes.ts';
+import { resolveAndCommitPreRunSelection, type RunSelectionAuthority } from './core/roster/run-selection.ts';
+import { publishRuntimeRosterSnapshot, recoverRuntimeRosterSelection } from './core/roster/snapshot.ts';
 import { ROSTER_DIAGNOSTIC_CODES, rosterDiagnostic, type Digest, type RosterDiagnostic, type RosterDiagnosticCode } from './core/roster/route-policies.ts';
-import { resolveExistingRun, resolveNewRun, type NewRunResolutionSource, type PreRunSelection, type SavedRosterAuthority } from './core/roster/resolve.ts';
-import { RosterStorage, formatAuthorityPath, preRunSelectionPath, resolveRosterScopePaths, rosterRevisionPath, type RosterDefaultReadResult, type RosterSha256, type RosterStorageCodec, type RosterStorageDiagnostic, type RosterStorageScope, type SavedRosterRef } from './core/roster/storage.ts';
+import { resolveNewRun, type NewRunResolutionSource, type PreRunSelection, type SavedRosterAuthority } from './core/roster/resolve.ts';
+import { RosterStorage, formatAuthorityPath, resolveRosterScopePaths, rosterRevisionPath, type RosterDefaultReadResult, type RosterSha256, type RosterStorageCodec, type RosterStorageDiagnostic, type RosterStorageScope, type SavedRosterRef } from './core/roster/storage.ts';
 import { readAuthorityFileIfPresent } from './core/roster/transaction.ts';
 
 export type NotificationKind = 'info' | 'warning' | 'error';
@@ -148,6 +151,13 @@ export interface ResolvedAutopilotRosterSelection {
   readonly roster_revision: number;
   readonly roster_sha256: Digest;
   readonly assignment_set_sha256: Digest;
+  readonly config_sha256: Digest;
+  readonly workstream_run?: string | undefined;
+  readonly pre_run_selection?: PreRunSelection | undefined;
+  readonly pre_run_selection_path?: string | undefined;
+  readonly selection_bytes?: Uint8Array | null | undefined;
+  readonly launch_fence?: Awaited<ReturnType<typeof resolveAndCommitPreRunSelection>>['launch_fence'] | undefined;
+  readonly runtime_mirror_path?: string | null | undefined;
   readonly parent: {
     readonly model: string;
     readonly thinking: 'high' | 'xhigh';
@@ -164,6 +174,8 @@ export interface AutopilotRosterActivationResolveInput {
   readonly ctx: ExtensionCommandContextLike;
   readonly originalCommand: string;
   readonly env: ProcessEnvLike;
+  readonly plannedWorkstreamRun: string;
+  readonly now: Date;
 }
 
 export interface AutopilotRosterActivationStore {
@@ -174,6 +186,7 @@ export interface AutopilotExtensionDependencies {
   readonly rosterActivationStore?: AutopilotRosterActivationStore | undefined;
   readonly rosterStateRoot?: string | undefined;
   readonly prepareAutopilotWorkstream?: ((input: Parameters<typeof prepareAutopilotWorkstream>[0]) => ReturnType<typeof prepareAutopilotWorkstream>) | undefined;
+  readonly publishRuntimeRosterSnapshot?: ((input: Parameters<typeof publishRuntimeRosterSnapshot>[0]) => ReturnType<typeof publishRuntimeRosterSnapshot>) | undefined;
   readonly attachSessionBridge?: ((prepared: PreparedAutopilotWorkstream, ctx: ExtensionCommandContextLike) => Promise<boolean>) | undefined;
   readonly resolveSetupSkillPackage?: ((moduleUrl?: string) => VerifiedAutopilotRosterSetupSkillPackage) | undefined;
   readonly now?: (() => Date) | undefined;
@@ -182,8 +195,6 @@ export interface AutopilotExtensionDependencies {
 type RosterContract = AutopilotRosterContractBySchemaVersion['autopilot.roster.v1'];
 
 type RosterConfigContract = AutopilotRosterContractBySchemaVersion['autopilot.roster_config.v1'];
-
-type RosterPreRunSelectionContract = AutopilotRosterContractBySchemaVersion['autopilot.pre_run_selection.v1'];
 
 type AuthorityRead = {
   readonly authority: SavedRosterAuthority;
@@ -311,17 +322,19 @@ function blockedResolution(source: NewRunResolutionSource | 'existing-run-select
   return { status: 'blocked', source, diagnostics: dedupeRosterDiagnostics(codes) };
 }
 
-function activationResolutionFromNewRunResult(
-  result: ReturnType<typeof resolveNewRun>,
-  selections: ReadonlyMap<NewRunResolutionSource, ResolvedAutopilotRosterSelection>,
-): AutopilotRosterActivationResolution {
-  if (result.status === 'onboarding-required') return setupRequiredResolution();
-  if (!result.ok) return { status: 'blocked', source: result.source, diagnostics: result.diagnostics };
-  const selection = selections.get(result.source);
-  if (selection === undefined) return blockedResolution(result.source, ['ROSTER_READBACK_MISMATCH']);
-  const readiness = rosterSelectionReadiness(selection);
-  if (readiness.length > 0) return { status: 'blocked', source: result.source, diagnostics: readiness };
-  return { status: 'resolved', selection, diagnostics: result.diagnostics };
+function runSelectionAuthority(read: AuthorityRead | null | undefined): RunSelectionAuthority | null {
+  if (read === null || read === undefined) return null;
+  return {
+    source: read.authority.source,
+    state: read.authority.state,
+    scope: read.authority.scope,
+    roster_id: read.authority.roster_id,
+    roster_revision: read.authority.roster_revision,
+    roster_sha256: read.authority.roster_sha256 as RosterSha256 | null,
+    assignment_set_sha256: read.authority.assignment_set_sha256 as RosterSha256 | null,
+    config_sha256: (read.selection?.config_sha256 as RosterSha256 | undefined) ?? null,
+    ...(read.authority.trusted === undefined ? {} : { trusted: read.authority.trusted }),
+  };
 }
 
 function rosterSelectionReadiness(selection: ResolvedAutopilotRosterSelection): readonly RosterDiagnostic[] {
@@ -368,6 +381,7 @@ async function loadRosterSelectionFromRef(input: {
   readonly existingRun: boolean;
   readonly scope: RosterStorageScope;
   readonly ref: SavedRosterRef;
+  readonly configSha256: Digest;
   readonly ctx: ExtensionCommandContextLike;
   readonly stateRoot?: string | undefined;
   readonly trustedProjectRootOverride?: string | undefined;
@@ -407,6 +421,7 @@ async function loadRosterSelectionFromRef(input: {
         roster_revision: roster.roster_revision,
         roster_sha256: roster.roster_sha256 as Digest,
         assignment_set_sha256: roster.assignment_set_sha256 as Digest,
+        config_sha256: input.configSha256,
         parent: { model: parent.model, thinking: parent.thinking },
       },
     };
@@ -430,22 +445,83 @@ class ProductionRosterActivationStore implements AutopilotRosterActivationStore 
     const existing = await this.#resolveExistingRunIfPresent(input);
     if (existing !== null) return existing;
 
+    let explicit: AuthorityRead | null = null;
     if (input.parsed.rosterId !== null) {
-      const explicit = await this.#readExplicitRoster(input.parsed.rosterId, input.ctx);
-      const selections = new Map<NewRunResolutionSource, ResolvedAutopilotRosterSelection>();
-      if (explicit.selection !== null) selections.set('explicit-roster', explicit.selection);
-      return activationResolutionFromNewRunResult(resolveNewRun({ explicit_roster: explicit.authority }), selections);
+      explicit = await this.#readExplicitRoster(input.parsed.rosterId, input.ctx);
+      return await this.#resolveAndCommitNewRun(input, { explicit });
     }
 
     const trusted = await this.#readDefaultRoster('trusted-project', input.ctx, 'trusted-project-default');
     const user = await this.#readDefaultRoster('user', input.ctx, 'user-default');
+    return await this.#resolveAndCommitNewRun(input, { trusted, user });
+  }
+
+  async #resolveAndCommitNewRun(
+    input: AutopilotRosterActivationResolveInput,
+    authorities: { readonly explicit?: AuthorityRead | null | undefined; readonly trusted?: AuthorityRead | null | undefined; readonly user?: AuthorityRead | null | undefined },
+  ): Promise<AutopilotRosterActivationResolution> {
     const selections = new Map<NewRunResolutionSource, ResolvedAutopilotRosterSelection>();
-    if (trusted.selection !== null) selections.set('trusted-project-default', trusted.selection);
-    if (user.selection !== null) selections.set('user-default', user.selection);
-    return activationResolutionFromNewRunResult(
-      resolveNewRun({ trusted_project_default: trusted.authority, user_default: user.authority }),
-      selections,
-    );
+    if (authorities.explicit?.selection !== null && authorities.explicit?.selection !== undefined) selections.set('explicit-roster', authorities.explicit.selection);
+    if (authorities.trusted?.selection !== null && authorities.trusted?.selection !== undefined) selections.set('trusted-project-default', authorities.trusted.selection);
+    if (authorities.user?.selection !== null && authorities.user?.selection !== undefined) selections.set('user-default', authorities.user.selection);
+
+    const resolution = resolveNewRun({
+      ...(authorities.explicit === undefined ? {} : { explicit_roster: authorities.explicit?.authority ?? null }),
+      ...(authorities.trusted === undefined ? {} : { trusted_project_default: authorities.trusted?.authority ?? null }),
+      ...(authorities.user === undefined ? {} : { user_default: authorities.user?.authority ?? null }),
+    });
+    if (resolution.status === 'onboarding-required') return setupRequiredResolution();
+    if (!resolution.ok) return { status: 'blocked', source: resolution.source, diagnostics: resolution.diagnostics };
+
+    const selected = selections.get(resolution.source);
+    if (selected === undefined) return blockedResolution(resolution.source, ['ROSTER_READBACK_MISMATCH']);
+    const readiness = rosterSelectionReadiness(selected);
+    if (readiness.length > 0) return { status: 'blocked', source: resolution.source, diagnostics: readiness };
+
+    let repoKey: string;
+    try {
+      repoKey = resolveRepoIdentity(input.ctx.cwd ?? process.cwd()).repoKey;
+    } catch {
+      return blockedResolution(resolution.source, ['ROSTER_TRANSITION_REQUIRED']);
+    }
+
+    const commit = await resolveAndCommitPreRunSelection({
+      repo_id: repoKey,
+      workstream_run: input.plannedWorkstreamRun,
+      explicit_roster: runSelectionAuthority(authorities.explicit),
+      trusted_project_default: runSelectionAuthority(authorities.trusted),
+      user_default: runSelectionAuthority(authorities.user),
+      ...(this.#stateRoot === undefined ? {} : { stateRoot: this.#stateRoot }),
+      selected_at: input.now.toISOString(),
+      issued_at: input.now.toISOString(),
+    });
+    if (commit.status === 'setup-required') return setupRequiredResolution();
+    if (!commit.ok || commit.selection === null || commit.selection_bytes === null || commit.selection_path === null || commit.launch_fence === null) {
+      return { status: 'blocked', source: commit.source, diagnostics: dedupeRosterDiagnostics(commit.diagnostics.map((diagnostic) => diagnostic.code)) };
+    }
+    if (
+      commit.selection.roster_id !== selected.roster_id ||
+      commit.selection.roster_revision !== selected.roster_revision ||
+      commit.selection.roster_sha256 !== selected.roster_sha256 ||
+      commit.selection.assignment_set_sha256 !== selected.assignment_set_sha256 ||
+      commit.selection.config_sha256 !== selected.config_sha256
+    ) {
+      return blockedResolution(resolution.source, ['ROSTER_READBACK_MISMATCH']);
+    }
+    return {
+      status: 'resolved',
+      diagnostics: dedupeRosterDiagnostics(commit.diagnostics.map((diagnostic) => diagnostic.code)),
+      selection: {
+        ...selected,
+        existingRun: false,
+        workstream_run: commit.selection.workstream_run,
+        pre_run_selection: commit.selection,
+        pre_run_selection_path: commit.selection_path,
+        selection_bytes: commit.selection_bytes,
+        launch_fence: commit.launch_fence,
+        runtime_mirror_path: null,
+      },
+    };
   }
 
   async #readDefaultRoster(
@@ -468,11 +544,15 @@ class ProductionRosterActivationStore implements AutopilotRosterActivationStore 
     if (result.default_roster === null) {
       return { authority: authorityFor({ source, state: 'absent', scope, trusted: scope === 'trusted-project' ? true : undefined }), selection: null };
     }
+    if (result.config_sha256 === null) {
+      return { authority: authorityFor({ source, state: 'corrupt', scope, ref: result.default_roster, trusted: scope === 'trusted-project' ? true : undefined }), selection: null };
+    }
     const loaded = await loadRosterSelectionFromRef({
       source,
       existingRun: false,
       scope,
       ref: result.default_roster,
+      configSha256: result.config_sha256 as Digest,
       ctx,
       stateRoot: this.#stateRoot,
     });
@@ -512,7 +592,8 @@ class ProductionRosterActivationStore implements AutopilotRosterActivationStore 
     }
     const ref = matches[0];
     if (ref === undefined) return { authority: authorityFor({ source: 'explicit-roster', state: 'corrupt', scope, trusted: scope === 'trusted-project' ? true : undefined }), selection: null };
-    const loaded = await loadRosterSelectionFromRef({ source: 'explicit-roster', existingRun: false, scope, ref, ctx, stateRoot: this.#stateRoot });
+    if (result.config_sha256 === null) return { authority: authorityFor({ source: 'explicit-roster', state: 'corrupt', scope, ref, trusted: scope === 'trusted-project' ? true : undefined }), selection: null };
+    const loaded = await loadRosterSelectionFromRef({ source: 'explicit-roster', existingRun: false, scope, ref, configSha256: result.config_sha256 as Digest, ctx, stateRoot: this.#stateRoot });
     if (!loaded.ok) {
       return { authority: authorityFor({ source: 'explicit-roster', state: loaded.fileState === 'missing' ? 'missing' : 'corrupt', scope, ref, trusted: scope === 'trusted-project' ? true : undefined }), selection: null };
     }
@@ -522,6 +603,7 @@ class ProductionRosterActivationStore implements AutopilotRosterActivationStore 
   async #resolveExistingRunIfPresent(input: AutopilotRosterActivationResolveInput): Promise<AutopilotRosterActivationResolution | null> {
     const active = await this.#findMatchingActiveRun(input.parsed.workstream, input.ctx, input.env);
     if (active === null) return null;
+    if (active === 'failed') return blockedResolution('existing-run-selection', ['ROSTER_TRANSITION_REQUIRED']);
     if (active === 'ambiguous') return blockedResolution('existing-run-selection', ['ROSTER_TRANSITION_REQUIRED']);
     const pinned = await this.#readPinnedSelection(active, input.ctx);
     if (!pinned.ok) return blockedResolution('existing-run-selection', ['ROSTER_PINNED_SELECTION_UNAVAILABLE', 'ROSTER_TRANSITION_REQUIRED']);
@@ -531,7 +613,7 @@ class ProductionRosterActivationStore implements AutopilotRosterActivationStore 
     return { status: 'resolved', selection: pinned.selection, diagnostics: [] };
   }
 
-  async #findMatchingActiveRun(workstream: string, ctx: ExtensionCommandContextLike, env: ProcessEnvLike): Promise<ActiveAutopilotRow | 'ambiguous' | null> {
+  async #findMatchingActiveRun(workstream: string, ctx: ExtensionCommandContextLike, env: ProcessEnvLike): Promise<ActiveAutopilotRow | 'ambiguous' | 'failed' | null> {
     try {
       const repo = resolveRepoIdentity(ctx.cwd ?? process.cwd());
       const stateRoot = resolveAutopilotStateRoot(env);
@@ -543,22 +625,23 @@ class ProductionRosterActivationStore implements AutopilotRosterActivationStore 
       if (matching.length > 1) return 'ambiguous';
       return matching[0] ?? null;
     } catch {
-      return null;
+      return 'failed';
     }
   }
 
   async #readPinnedSelection(active: ActiveAutopilotRow, ctx: ExtensionCommandContextLike): Promise<{ readonly ok: true; readonly selection: ResolvedAutopilotRosterSelection } | { readonly ok: false }> {
     try {
-      const userPaths = this.#stateRoot === undefined
-        ? resolveRosterScopePaths({ scope: 'user' })
-        : resolveRosterScopePaths({ scope: 'user', stateRoot: this.#stateRoot });
-      const selectionPath = preRunSelectionPath(userPaths, { repo_id: active.repo_key, workstream_run: active.workstream_run });
-      const read = await readAuthorityFileIfPresent(selectionPath, userPaths.userStateRoot);
-      if (read === null) return { ok: false };
-      const observedHash = await productionRosterStorageCodec.hashBytes(read.bytes);
-      const parsed = parseAutopilotRosterContractJson('autopilot.pre_run_selection.v1', Buffer.from(read.bytes).toString('utf8'));
-      if (observedHash !== parsed.selection_sha256 || parsed.repo_id !== active.repo_key || parsed.workstream_run !== active.workstream_run) return { ok: false };
-      const selection = selectionFromContract(parsed);
+      const recovery = await recoverRuntimeRosterSelection({
+        ...(this.#stateRoot === undefined ? {} : { stateRoot: this.#stateRoot }),
+        mainWorktreeRoot: active.main_worktree_path,
+        workstream: active.workstream,
+        repo_id: active.repo_key,
+        workstream_run: active.workstream_run,
+        spec_identity: null,
+        require_spec_identity: false,
+      });
+      if (!recovery.ok || recovery.selection === null) return { ok: false };
+      const selection = recovery.selection;
       const loaded = await loadRosterSelectionFromRef({
         source: 'existing-run-selection',
         existingRun: true,
@@ -569,47 +652,28 @@ class ProductionRosterActivationStore implements AutopilotRosterActivationStore 
           roster_sha256: selection.roster_sha256 as RosterSha256,
           assignment_set_sha256: selection.assignment_set_sha256 as RosterSha256,
         },
+        configSha256: selection.config_sha256,
         ctx,
         stateRoot: this.#stateRoot,
         trustedProjectRootOverride: active.source_repo,
       });
-      const existingRequest = {
-        schema_version: 'autopilot.existing_run_resolution_request.v1' as const,
-        action: 'resolve-existing-run' as const,
-        repo_id: active.repo_key,
-        workstream_run: active.workstream_run,
-        scope: selection.scope,
-        selection_sha256: selection.selection_sha256,
-        runtime_mirror_sha256: selection.selection_sha256,
-        current_default_roster_id: null,
-        current_default_roster_revision: null,
-        current_default_roster_sha256: null,
-        roster_file_state: loaded.ok ? 'present' as const : loaded.fileState,
-        request_sha256: ZERO_ROSTER_SHA as Digest,
+      if (!loaded.ok) return { ok: false };
+      return {
+        ok: true,
+        selection: {
+          ...loaded.selection,
+          workstream_run: selection.workstream_run,
+          pre_run_selection: selection,
+          pre_run_selection_path: recovery.external_selection_path,
+          selection_bytes: null,
+          launch_fence: null,
+          runtime_mirror_path: recovery.runtime_mirror_path,
+        },
       };
-      const resolved = resolveExistingRun(existingRequest, loaded.ok ? selection : null);
-      if (!resolved.ok || !loaded.ok) return { ok: false };
-      return { ok: true, selection: loaded.selection };
     } catch {
       return { ok: false };
     }
   }
-}
-
-function selectionFromContract(selection: RosterPreRunSelectionContract): PreRunSelection {
-  return {
-    schema_version: 'autopilot.pre_run_selection.v1',
-    repo_id: selection.repo_id,
-    workstream_run: selection.workstream_run,
-    scope: selection.scope,
-    roster_id: selection.roster_id,
-    roster_revision: selection.roster_revision,
-    roster_sha256: selection.roster_sha256 as Digest,
-    assignment_set_sha256: selection.assignment_set_sha256 as Digest,
-    config_sha256: selection.config_sha256 as Digest,
-    selected_at: selection.selected_at,
-    selection_sha256: selection.selection_sha256 as Digest,
-  };
 }
 
 function setupGuidancePrompt(input: {
@@ -644,6 +708,7 @@ function formatDiagnostics(diagnostics: readonly RosterDiagnostic[]): string {
 }
 
 function materializeRosterForCandidate(candidate: RosterCandidate, scope: RosterStorageScope): RosterContract {
+  if (!isLaunchableRosterCandidate(candidate)) throw new Error('candidate roster is not launchable');
   const seed = seedRosterByCandidate(candidate);
   if (seed === null) throw new Error('candidate roster is unavailable');
   const withoutHash = { ...seed, scope, selected_scope: scope, roster_sha256: ZERO_ROSTER_SHA };
@@ -715,55 +780,6 @@ function trustedProjectForRequest(request: { readonly scope: RosterStorageScope;
   return { root: request.trusted_project_root, isProjectTrusted: () => true };
 }
 
-function parseRosterApprovalInput(text: string): {
-  readonly scope: RosterStorageScope;
-  readonly candidate_set_sha256: Digest;
-  readonly approved_roster_sha256s: readonly Digest[];
-  readonly default_roster_id: string;
-  readonly default_roster_revision: number;
-  readonly default_roster_sha256: Digest;
-  readonly original_command: string;
-} | null {
-  const lines = text.trim().split(/\r?\n/u).map((line) => line.trim()).filter((line) => line.length > 0);
-  if (lines[0] !== 'I approve saving the Autopilot roster setup with:') return null;
-  const values = new Map<string, string>();
-  for (const line of lines.slice(1)) {
-    const separator = line.indexOf(':');
-    if (separator <= 0) return null;
-    values.set(line.slice(0, separator), line.slice(separator + 1).trim());
-  }
-  const scope = values.get('scope');
-  const candidateSet = values.get('candidate_set_sha256');
-  const approvedRaw = values.get('approved_roster_sha256s, in order');
-  const defaultRosterId = values.get('default_roster_id');
-  const defaultRosterRevision = values.get('default_roster_revision');
-  const defaultRosterSha = values.get('default_roster_sha256');
-  const originalCommand = values.get('original_command');
-  if (scope !== 'user' && scope !== 'trusted-project') return null;
-  if (!isDigest(candidateSet) || !isDigest(defaultRosterSha)) return null;
-  if (defaultRosterId === undefined || !/^[a-z][a-z0-9-]{0,95}$/u.test(defaultRosterId)) return null;
-  if (defaultRosterRevision === undefined || !/^\d+$/u.test(defaultRosterRevision)) return null;
-  const revision = Number.parseInt(defaultRosterRevision, 10);
-  if (!Number.isSafeInteger(revision) || revision < 1) return null;
-  if (approvedRaw === undefined || !approvedRaw.startsWith('[') || !approvedRaw.endsWith(']')) return null;
-  const approved = approvedRaw.slice(1, -1).split(',').map((entry) => entry.trim()).filter((entry) => entry.length > 0);
-  if (approved.length === 0 || approved.some((entry) => !isDigest(entry)) || new Set(approved).size !== approved.length) return null;
-  if (originalCommand === undefined || !/^\/autopilot(?:\s|$)/u.test(originalCommand)) return null;
-  return {
-    scope,
-    candidate_set_sha256: candidateSet,
-    approved_roster_sha256s: approved as readonly Digest[],
-    default_roster_id: defaultRosterId,
-    default_roster_revision: revision,
-    default_roster_sha256: defaultRosterSha,
-    original_command: originalCommand,
-  };
-}
-
-function isDigest(value: string | undefined): value is Digest {
-  return typeof value === 'string' && /^sha256:[a-f0-9]{64}$/u.test(value);
-}
-
 function notify(ctx: ExtensionCommandContextLike, message: string, kind: NotificationKind): void {
   ctx.ui.notify(message, kind);
 }
@@ -771,6 +787,7 @@ function notify(ctx: ExtensionCommandContextLike, message: string, kind: Notific
 export default function autopilotExtension(pi: ExtensionHostLike, dependencies: AutopilotExtensionDependencies = {}): void {
   const rosterActivationStore = dependencies.rosterActivationStore ?? new ProductionRosterActivationStore(dependencies.rosterStateRoot);
   const prepareWorkstream = dependencies.prepareAutopilotWorkstream ?? prepareAutopilotWorkstream;
+  const publishRosterSnapshot = dependencies.publishRuntimeRosterSnapshot ?? publishRuntimeRosterSnapshot;
   const resolveSetupSkillPackage = dependencies.resolveSetupSkillPackage ?? resolveAutopilotRosterSetupSkillPackage;
   const clock = dependencies.now ?? (() => new Date());
 
@@ -781,6 +798,7 @@ export default function autopilotExtension(pi: ExtensionHostLike, dependencies: 
   let activeAutopilotRuntimeRoot: string | null = null;
   let activeAutopilotWorktreePath: string | null = null;
   let activeAutopilotWorkstreamRun: string | null = null;
+  let activeAutopilotRosterSelection: ResolvedAutopilotRosterSelection | null = null;
   let sessionBridge: AutopilotSessionBridge | null = null;
   let lifecycleSessionId = `pi-session-${randomUUID()}`;
   let handoffRequested = false;
@@ -846,7 +864,7 @@ export default function autopilotExtension(pi: ExtensionHostLike, dependencies: 
     const bundle = createAutopilotRosterSetupTool({
       saveApproved: async (input) => {
         const request = input.request;
-        const stateRoot = request.state_root_override ?? dependencies.rosterStateRoot;
+        const stateRoot = dependencies.rosterStateRoot;
         const trustedProject = trustedProjectForRequest(request);
         if (request.scope === 'trusted-project' && trustedProject === undefined) {
           return {
@@ -1015,6 +1033,7 @@ export default function autopilotExtension(pi: ExtensionHostLike, dependencies: 
     activeAutopilotRuntimeRoot = null;
     activeAutopilotWorktreePath = null;
     activeAutopilotWorkstreamRun = null;
+    activeAutopilotRosterSelection = null;
   }
 
   function rawSessionId(ctx: ExtensionCommandContextLike): string {
@@ -1095,6 +1114,18 @@ export default function autopilotExtension(pi: ExtensionHostLike, dependencies: 
     }
   }
 
+  function phase37PrepareSelection(selection: ResolvedAutopilotRosterSelection): Parameters<typeof prepareAutopilotWorkstream>[0]['phase37RosterSelection'] | null {
+    if (selection.pre_run_selection === undefined) return null;
+    if (selection.existingRun) return { mode: 'existing-run', selection: selection.pre_run_selection };
+    if (selection.selection_bytes === null || selection.selection_bytes === undefined || selection.launch_fence === null || selection.launch_fence === undefined) return null;
+    return {
+      mode: 'new-run',
+      selection: selection.pre_run_selection,
+      selectionBytes: selection.selection_bytes,
+      launchFence: selection.launch_fence,
+    };
+  }
+
   async function retireTerminalSessionBridge(workstreamRun: string, ctx: ExtensionCommandContextLike): Promise<void> {
     if (sessionBridge !== null && sessionBridge.attachment.context.workstream_run === workstreamRun) {
       const bridge = sessionBridge;
@@ -1112,28 +1143,26 @@ export default function autopilotExtension(pi: ExtensionHostLike, dependencies: 
     readonly workstream: string;
     readonly ctx: ExtensionCommandContextLike;
     readonly rosterSelection: ResolvedAutopilotRosterSelection;
+    readonly now: Date;
     readonly contextBudgetErrorPrefix: string;
     readonly prepareErrorPrefix: string;
   }): Promise<PreparedAutopilotWorkstream | null> {
-    try {
-      activateContextBudget();
-    } catch (error) {
-      notify(
-        input.ctx,
-        `${input.contextBudgetErrorPrefix}: ${error instanceof Error ? error.message : String(error)}`,
-        'error',
-      );
+    const phase37Selection = phase37PrepareSelection(input.rosterSelection);
+    if (phase37Selection === null || input.rosterSelection.workstream_run === undefined) {
+      notify(input.ctx, 'Autopilot roster selection is missing readback-authenticated Phase 37 launch evidence. No run state was created.', 'error');
       return null;
     }
-
-    if (!(await activateParentModelRoster(input.ctx, input.rosterSelection.parent))) return null;
 
     let prepared: PreparedAutopilotWorkstream;
     try {
       prepared = await prepareWorkstream({
         workstream: input.workstream,
+        workstreamRun: input.rosterSelection.workstream_run,
         sourceCwd: input.ctx.cwd ?? process.cwd(),
         coordinationSessionId: rawSessionId(input.ctx),
+        now: input.now,
+        phase37RosterRequired: true,
+        phase37RosterSelection: phase37Selection,
       });
     } catch (error) {
       const message = error instanceof CoordinationRuntimeError
@@ -1148,12 +1177,44 @@ export default function autopilotExtension(pi: ExtensionHostLike, dependencies: 
       return null;
     }
 
+    if (!input.rosterSelection.existingRun) {
+      const selectionBytes = input.rosterSelection.selection_bytes;
+      const selection = input.rosterSelection.pre_run_selection;
+      if (selectionBytes === null || selectionBytes === undefined || selection === undefined) {
+        notify(input.ctx, 'Autopilot roster selection bytes are unavailable for runtime snapshot publication. Parent activation was not started.', 'error');
+        return null;
+      }
+      const snapshot = await publishRosterSnapshot({
+        mainWorktreeRoot: prepared.mainWorktreePath,
+        workstream: input.workstream,
+        selection_bytes: selectionBytes,
+        expected_selection_sha256: selection.selection_sha256 as RosterSha256,
+      });
+      if (!snapshot.ok) {
+        notify(input.ctx, `Autopilot runtime roster snapshot failed closed: ${formatDiagnostics(dedupeRosterDiagnostics(snapshot.diagnostics.map((diagnostic) => diagnostic.code)))}. Parent activation was not started.`, 'error');
+        return null;
+      }
+    }
+
+    try {
+      activateContextBudget();
+    } catch (error) {
+      notify(
+        input.ctx,
+        `${input.contextBudgetErrorPrefix}: ${error instanceof Error ? error.message : String(error)}`,
+        'error',
+      );
+      return null;
+    }
+
+    if (!(await activateParentModelRoster(input.ctx, input.rosterSelection.parent))) return null;
     if (!(await (dependencies.attachSessionBridge ?? attachSessionBridge)(prepared, input.ctx))) return null;
 
     activeAutopilotWorkstream = prepared.active.workstream;
     activeAutopilotRuntimeRoot = prepared.runtimeRoot;
     activeAutopilotWorktreePath = prepared.mainWorktreePath;
     activeAutopilotWorkstreamRun = prepared.active.workstream_run;
+    activeAutopilotRosterSelection = input.rosterSelection;
     registerWorktreeGuardIfSupported();
     return prepared;
   }
@@ -1170,17 +1231,12 @@ export default function autopilotExtension(pi: ExtensionHostLike, dependencies: 
     });
     pi.on('input', (event, ctx) => {
       if (rosterSetupBundle === null || rosterSetupActivationToken === null || typeof event.text !== 'string') return undefined;
-      const approval = parseRosterApprovalInput(event.text);
-      if (approval === null) return undefined;
-      const approved = rosterSetupBundle.controller.approveSave({
+      const presentation = rosterSetupBundle.hostAuthorization.currentApprovalPresentation();
+      if (presentation === null || event.text !== presentation.presentation_text) return undefined;
+      const approved = rosterSetupBundle.hostAuthorization.authorizeInput({
         activation_token: rosterSetupActivationToken,
-        scope: approval.scope,
-        candidate_set_sha256: approval.candidate_set_sha256,
-        approved_roster_sha256s: approval.approved_roster_sha256s,
-        default_roster_id: approval.default_roster_id,
-        default_roster_revision: approval.default_roster_revision,
-        default_roster_sha256: approval.default_roster_sha256,
-        original_command: approval.original_command,
+        source: event.source,
+        text: event.text,
       });
       if (!approved.ok || approved.approval_token === null) {
         notify(ctx, `Autopilot roster setup approval was not accepted: ${approved.reason}.`, 'warning');
@@ -1188,7 +1244,7 @@ export default function autopilotExtension(pi: ExtensionHostLike, dependencies: 
       }
       return {
         action: 'transform',
-        text: `${event.text}\n\nAutopilot roster setup host authorization accepted for this exact restatement. approval_token: ${approved.approval_token}`,
+        text: `${event.text}\n\nAutopilot roster setup host authorization accepted for this exact presentation. approval_token: ${approved.approval_token}`,
       };
     });
     pi.on('session_shutdown', async (event, ctx) => {
@@ -1219,7 +1275,9 @@ export default function autopilotExtension(pi: ExtensionHostLike, dependencies: 
       }
 
       const originalCommand = originalAutopilotCommand(args);
-      const rosterResolution = await rosterActivationStore.resolve({ parsed: parsed.value, ctx, originalCommand, env: process.env });
+      const activationNow = clock();
+      const plannedWorkstreamRun = buildAutopilotWorkstreamRun(parsed.value.workstream, activationNow);
+      const rosterResolution = await rosterActivationStore.resolve({ parsed: parsed.value, ctx, originalCommand, env: process.env, plannedWorkstreamRun, now: activationNow });
       if (rosterResolution.status === 'setup-required') {
         await activateRosterSetup(ctx, originalCommand, rosterResolution.diagnostics);
         return;
@@ -1233,6 +1291,7 @@ export default function autopilotExtension(pi: ExtensionHostLike, dependencies: 
         workstream: parsed.value.workstream,
         ctx,
         rosterSelection: rosterResolution.selection,
+        now: activationNow,
         contextBudgetErrorPrefix: 'Autopilot could not activate context_budget',
         prepareErrorPrefix: 'Autopilot could not prepare isolated worktree',
       });
@@ -1276,7 +1335,9 @@ export default function autopilotExtension(pi: ExtensionHostLike, dependencies: 
 
       const autopilotEquivalent: ParsedAutopilotArgs = { workstream: parsed.value.workstream, remainder: '', rosterId: null };
       const originalCommand = `/${AUTOPILOT_COMMAND} ${parsed.value.workstream}`;
-      const rosterResolution = await rosterActivationStore.resolve({ parsed: autopilotEquivalent, ctx, originalCommand, env: process.env });
+      const activationNow = clock();
+      const plannedWorkstreamRun = buildAutopilotWorkstreamRun(parsed.value.workstream, activationNow);
+      const rosterResolution = await rosterActivationStore.resolve({ parsed: autopilotEquivalent, ctx, originalCommand, env: process.env, plannedWorkstreamRun, now: activationNow });
       if (rosterResolution.status === 'setup-required') {
         await activateRosterSetup(ctx, originalCommand, rosterResolution.diagnostics);
         return;
@@ -1290,6 +1351,7 @@ export default function autopilotExtension(pi: ExtensionHostLike, dependencies: 
         workstream: parsed.value.workstream,
         ctx,
         rosterSelection: rosterResolution.selection,
+        now: activationNow,
         contextBudgetErrorPrefix: 'Autopilot inject could not activate context_budget',
         prepareErrorPrefix: 'Autopilot inject could not prepare isolated worktree',
       });

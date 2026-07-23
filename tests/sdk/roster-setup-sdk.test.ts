@@ -148,7 +148,6 @@ void describe('Phase 37 W2 roster setup Pi SDK proof lane', () => {
         activation_token: harness.activationToken ?? 'missing-token',
         approval_token: null,
         scope: 'user',
-        state_root_override: null,
         trusted_project_root: null,
         candidate_set_sha256: null,
         approved_roster_sha256s: [],

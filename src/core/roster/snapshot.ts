@@ -88,6 +88,7 @@ export interface RecoverRuntimeRosterSelectionInput {
   readonly repo_id: string;
   readonly workstream_run: string;
   readonly spec_identity?: RuntimeSelectionSpecIdentity | null | undefined;
+  readonly require_spec_identity?: boolean | undefined;
   readonly current_default?: {
     readonly roster_id: string | null;
     readonly roster_revision: number | null;
@@ -214,13 +215,14 @@ export async function recoverRuntimeRosterSelection(
       return recoveryResult(false, 'failed', externalSelection, externalSelectionPath, runtimeMirrorPath, null, readbackTransitionDiagnostics());
     }
 
-    const specDiagnostics = authenticateSpecIdentity(input.spec_identity, input.workstream, externalSelection);
+    const specDiagnostics = authenticateSpecIdentity(input.spec_identity, input.workstream, externalSelection, input.require_spec_identity !== false);
     if (specDiagnostics.length > 0) {
       return recoveryResult(false, 'blocked', externalSelection, externalSelectionPath, runtimeMirrorPath, null, specDiagnostics);
     }
 
     const request = existingRunRequestFromSelection({
       selection: externalSelection,
+      runtimeMirrorSha256: mirrorSelection.selection_sha256 as RosterSha256,
       currentDefault: input.current_default ?? null,
       rosterFileState: input.roster_file_state ?? 'present',
     });
@@ -243,6 +245,7 @@ export async function recoverRuntimeRosterSelection(
 
 function existingRunRequestFromSelection(input: {
   readonly selection: PreRunSelection;
+  readonly runtimeMirrorSha256: RosterSha256;
   readonly currentDefault: RecoverRuntimeRosterSelectionInput['current_default'] | null;
   readonly rosterFileState: ExistingRunResolutionRequest['roster_file_state'];
 }): ExistingRunResolutionRequest {
@@ -253,7 +256,7 @@ function existingRunRequestFromSelection(input: {
     workstream_run: input.selection.workstream_run,
     scope: input.selection.scope,
     selection_sha256: input.selection.selection_sha256,
-    runtime_mirror_sha256: input.selection.selection_sha256,
+    runtime_mirror_sha256: input.runtimeMirrorSha256,
     current_default_roster_id: input.currentDefault?.roster_id ?? null,
     current_default_roster_revision: input.currentDefault?.roster_revision ?? null,
     current_default_roster_sha256: input.currentDefault?.roster_sha256 ?? null,
@@ -270,8 +273,9 @@ function authenticateSpecIdentity(
   spec: RuntimeSelectionSpecIdentity | null | undefined,
   workstream: string,
   selection: PreRunSelection,
+  required: boolean,
 ): readonly RunSelectionDiagnostic[] {
-  if (spec === null || spec === undefined) return transitionDiagnostics();
+  if (spec === null || spec === undefined) return required ? transitionDiagnostics() : [];
   assertValidRosterId(spec.roster_id, 'spec.roster_id');
   assertValidRosterRevision(spec.roster_revision, 'spec.roster_revision');
   if (spec.workstream !== undefined && spec.workstream !== workstream) return readbackTransitionDiagnostics();

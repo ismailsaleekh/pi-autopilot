@@ -4,11 +4,11 @@ import {
   assertAutopilotRosterContract,
   parseAutopilotRosterContract,
 } from './contracts.ts';
+import { launchabilityBlockCodesForCandidates } from './activation-fence.ts';
 import { doctorRoleResults, doctorRosterInventory } from './doctor.ts';
 import {
   type ProposalResult,
   type RosterCandidateSet,
-  diagnosticsForCandidate,
   proposeRosterCandidates,
   validateCandidateSetApproval,
 } from './provider-recipes.ts';
@@ -19,7 +19,6 @@ import {
   type RosterInventory,
   type RosterScope,
   canonicalSha256,
-  dedupeDiagnostics,
   normalizeRosterInventory,
   rosterDiagnostic,
 } from './route-policies.ts';
@@ -87,7 +86,6 @@ interface RosterToolRequest {
   readonly activation_token: string;
   readonly approval_token: string | null;
   readonly scope: RosterScope;
-  readonly state_root_override: string | null;
   readonly trusted_project_root: string | null;
   readonly candidate_set_sha256: Digest | null;
   readonly approved_roster_sha256s: readonly Digest[];
@@ -107,7 +105,13 @@ interface ApprovalSnapshot {
   readonly default_roster_revision: number;
   readonly default_roster_sha256: Digest;
   readonly original_command: string;
+  readonly presentation_sha256: Digest;
   consumed: boolean;
+}
+
+interface ApprovalPresentation extends ControllerApprovalInput {
+  readonly presentation_text: string;
+  readonly presentation_sha256: Digest;
 }
 
 interface ControllerActivationResult {
@@ -118,8 +122,7 @@ interface ControllerActivationResult {
   readonly reason: 'activated' | 'already-active' | 'already-used';
 }
 
-interface ControllerApprovalInput {
-  readonly activation_token: string;
+export interface RosterSetupApprovalPresentationInput {
   readonly scope: RosterScope;
   readonly candidate_set_sha256: Digest;
   readonly approved_roster_sha256s: readonly Digest[];
@@ -129,10 +132,14 @@ interface ControllerApprovalInput {
   readonly original_command: string;
 }
 
+interface ControllerApprovalInput extends RosterSetupApprovalPresentationInput {
+  readonly activation_token: string;
+}
+
 interface ControllerApprovalResult {
   readonly ok: boolean;
   readonly approval_token: string | null;
-  readonly reason: 'approved' | 'inactive' | 'bad-activation-token' | 'no-current-proposal' | 'stale-or-mismatched-approval';
+  readonly reason: 'approved' | 'inactive' | 'bad-activation-token' | 'source-not-user' | 'no-current-presentation' | 'duplicate-authorization' | 'stale-or-mismatched-approval';
 }
 
 interface RosterSetupController {
@@ -140,7 +147,11 @@ interface RosterSetupController {
   deactivate(activationToken: string): boolean;
   isActive(): boolean;
   currentActivationToken(): string | null;
-  approveSave(input: ControllerApprovalInput): ControllerApprovalResult;
+}
+
+interface RosterSetupHostAuthorization {
+  currentApprovalPresentation(): ApprovalPresentation | null;
+  authorizeInput(input: { readonly activation_token: string; readonly source?: string | undefined; readonly text: string }): ControllerApprovalResult;
 }
 
 interface SaveCapabilityInput {
@@ -192,7 +203,6 @@ const PARAMETER_SCHEMA = Object.freeze({
     activation_token: { type: 'string', minLength: 16, maxLength: 200, pattern: TOKEN_PATTERN.source },
     approval_token: { anyOf: [{ type: 'string', minLength: 16, maxLength: 200, pattern: TOKEN_PATTERN.source }, { type: 'null' }] },
     scope: { type: 'string', enum: ['user', 'trusted-project'] },
-    state_root_override: { anyOf: [{ type: 'string', minLength: 1, maxLength: 4096 }, { type: 'null' }] },
     trusted_project_root: { anyOf: [{ type: 'string', minLength: 1, maxLength: 4096 }, { type: 'null' }] },
     candidate_set_sha256: { anyOf: [{ type: 'string', minLength: 71, maxLength: 71, pattern: DIGEST_PATTERN.source }, { type: 'null' }] },
     approved_roster_sha256s: { type: 'array', minItems: 0, maxItems: 16, uniqueItems: true, items: { type: 'string', minLength: 71, maxLength: 71, pattern: DIGEST_PATTERN.source } },
@@ -207,7 +217,6 @@ const PARAMETER_SCHEMA = Object.freeze({
     'activation_token',
     'approval_token',
     'scope',
-    'state_root_override',
     'trusted_project_root',
     'candidate_set_sha256',
     'approved_roster_sha256s',
@@ -221,6 +230,7 @@ const PARAMETER_SCHEMA = Object.freeze({
 export function createAutopilotRosterSetupTool(options: CreateRosterSetupToolOptions = {}): {
   readonly tool: RosterSetupToolDefinition;
   readonly controller: RosterSetupController;
+  readonly hostAuthorization: RosterSetupHostAuthorization;
 } {
   const controller = createController();
   const tool: RosterSetupToolDefinition = {
@@ -256,12 +266,14 @@ export function createAutopilotRosterSetupTool(options: CreateRosterSetupToolOpt
       }
     },
   };
-  return { tool, controller };
+  return { tool, controller, hostAuthorization: controller.hostAuthorization };
 }
 
 function createController(): RosterSetupController & {
+  readonly hostAuthorization: RosterSetupHostAuthorization;
   accepts(token: string): boolean;
-  rememberProposal(token: string, candidateSet: RosterCandidateSet): void;
+  rememberProposal(token: string, request: RosterToolRequest, candidateSet: RosterCandidateSet): void;
+  invalidateProposal(token: string): void;
   consumeApproval(request: RosterToolRequest, candidateSet: RosterCandidateSet): boolean;
 } {
   let activationToken: string | null = null;
@@ -269,9 +281,40 @@ function createController(): RosterSetupController & {
   let everActivated = false;
   let active = false;
   let latestCandidateSet: RosterCandidateSet | null = null;
+  let latestPresentation: ApprovalPresentation | null = null;
+  let presentationAlreadyAuthorized = false;
   const approvals = new Map<string, ApprovalSnapshot>();
 
+  const accepts = (token: string): boolean => active && activationToken !== null && token === activationToken;
+  const clearProposal = (): void => {
+    latestCandidateSet = null;
+    latestPresentation = null;
+    presentationAlreadyAuthorized = false;
+    approvals.clear();
+  };
+
+  const hostAuthorization: RosterSetupHostAuthorization = {
+    currentApprovalPresentation(): ApprovalPresentation | null {
+      return latestPresentation === null ? null : { ...latestPresentation, approved_roster_sha256s: [...latestPresentation.approved_roster_sha256s] };
+    },
+    authorizeInput(input): ControllerApprovalResult {
+      if (!active || activationToken === null) return { ok: false, approval_token: null, reason: 'inactive' };
+      if (input.activation_token !== activationToken) return { ok: false, approval_token: null, reason: 'bad-activation-token' };
+      if (!isHostUserInputSource(input.source)) return { ok: false, approval_token: null, reason: 'source-not-user' };
+      if (latestCandidateSet === null || latestPresentation === null) return { ok: false, approval_token: null, reason: 'no-current-presentation' };
+      if (presentationAlreadyAuthorized) return { ok: false, approval_token: null, reason: 'duplicate-authorization' };
+      if (input.text !== latestPresentation.presentation_text || !approvalMatchesCandidateSet(latestPresentation, latestCandidateSet)) {
+        return { ok: false, approval_token: null, reason: 'stale-or-mismatched-approval' };
+      }
+      const approvalToken = `approval:${randomBytes(24).toString('hex')}`;
+      approvals.set(approvalToken, { ...latestPresentation, approval_token: approvalToken, consumed: false });
+      presentationAlreadyAuthorized = true;
+      return { ok: true, approval_token: approvalToken, reason: 'approved' };
+    },
+  };
+
   return {
+    hostAuthorization,
     activate(inputSessionId?: string): ControllerActivationResult {
       if (active) return { ok: false, active: true, activation_token: null, session_id: sessionId, reason: 'already-active' };
       if (everActivated) return { ok: false, active: false, activation_token: null, session_id: sessionId, reason: 'already-used' };
@@ -279,15 +322,13 @@ function createController(): RosterSetupController & {
       sessionId = inputSessionId ?? `roster-setup-${randomBytes(12).toString('hex')}`;
       everActivated = true;
       active = true;
-      latestCandidateSet = null;
-      approvals.clear();
+      clearProposal();
       return { ok: true, active: true, activation_token: activationToken, session_id: sessionId, reason: 'activated' };
     },
     deactivate(token: string): boolean {
       if (!active || token !== activationToken) return false;
       active = false;
-      latestCandidateSet = null;
-      approvals.clear();
+      clearProposal();
       return true;
     },
     isActive(): boolean {
@@ -296,27 +337,20 @@ function createController(): RosterSetupController & {
     currentActivationToken(): string | null {
       return active ? activationToken : null;
     },
-    accepts(token: string): boolean {
-      return active && activationToken !== null && token === activationToken;
-    },
-    rememberProposal(token: string, candidateSet: RosterCandidateSet): void {
-      if (!this.accepts(token)) return;
+    accepts,
+    rememberProposal(token: string, request: RosterToolRequest, candidateSet: RosterCandidateSet): void {
+      if (!accepts(token)) return;
       latestCandidateSet = candidateSet;
+      latestPresentation = buildApprovalPresentation(request, candidateSet);
+      presentationAlreadyAuthorized = false;
       approvals.clear();
     },
-    approveSave(input: ControllerApprovalInput): ControllerApprovalResult {
-      if (!active || activationToken === null) return { ok: false, approval_token: null, reason: 'inactive' };
-      if (input.activation_token !== activationToken) return { ok: false, approval_token: null, reason: 'bad-activation-token' };
-      if (latestCandidateSet === null) return { ok: false, approval_token: null, reason: 'no-current-proposal' };
-      if (!approvalMatchesCandidateSet(input, latestCandidateSet)) {
-        return { ok: false, approval_token: null, reason: 'stale-or-mismatched-approval' };
-      }
-      const approvalToken = `approval:${randomBytes(24).toString('hex')}`;
-      approvals.set(approvalToken, { ...input, approval_token: approvalToken, consumed: false });
-      return { ok: true, approval_token: approvalToken, reason: 'approved' };
+    invalidateProposal(token: string): void {
+      if (!accepts(token)) return;
+      clearProposal();
     },
     consumeApproval(request: RosterToolRequest, candidateSet: RosterCandidateSet): boolean {
-      if (request.approval_token === null || !this.accepts(request.activation_token)) return false;
+      if (request.approval_token === null || !accepts(request.activation_token)) return false;
       const approval = approvals.get(request.approval_token);
       if (approval === undefined || approval.consumed) return false;
       if (!approvalMatchesRequest(approval, request)) return false;
@@ -359,7 +393,7 @@ async function dispatchRosterToolAction(input: {
     case 'refine':
       return proposeAction(request, ctx, options, controller);
     case 'reject':
-      return rejectAction(request);
+      return rejectAction(request, controller);
     case 'save':
       return saveAction(request, ctx, options, controller);
   }
@@ -411,11 +445,12 @@ async function proposeAction(
   controller: ReturnType<typeof createController>,
 ): Promise<RosterToolResult> {
   const proposal = await currentProposal(request, ctx, options);
-  controller.rememberProposal(request.activation_token, proposal.candidate_set);
+  controller.rememberProposal(request.activation_token, request, proposal.candidate_set);
   return proposalToResult('propose', proposal);
 }
 
-function rejectAction(_request: RosterToolRequest): RosterToolResult {
+function rejectAction(request: RosterToolRequest, controller: ReturnType<typeof createController>): RosterToolResult {
+  controller.invalidateProposal(request.activation_token);
   return materializeResult({
     schema_version: RESULT_SCHEMA,
     action: 'reject',
@@ -447,6 +482,8 @@ async function saveAction(
   if (approvalDiagnostics.length > 0) return saveBlocked(approvalDiagnostics.map((diagnostic) => diagnostic.code));
   if (!defaultTupleMatches(request, candidateSet)) return saveBlocked(['ROSTER_APPROVAL_STALE_CANDIDATE_SET']);
   if (!controller.consumeApproval(request, candidateSet)) return saveBlocked(['ROSTER_APPROVAL_STALE_CANDIDATE_SET']);
+  const launchabilityCodes = launchabilityBlockCodesForCandidates(candidateSet.candidates);
+  if (launchabilityCodes.length > 0) return saveBlocked(launchabilityCodes);
   if (options.saveApproved === undefined) return saveFailed(['ROSTER_READBACK_MISMATCH']);
   try {
     const saved = await options.saveApproved({
@@ -482,6 +519,51 @@ async function currentProposal(
 ): Promise<ProposalResult> {
   const inventory = await currentInventory(request, ctx, options);
   return proposeRosterCandidates({ inventory, scope: request.scope, include_unready: true });
+}
+
+function buildApprovalPresentation(request: RosterToolRequest, candidateSet: RosterCandidateSet): ApprovalPresentation | null {
+  const defaultCandidate = candidateSet.candidates.find((candidate) => candidate.profile_id === candidateSet.recommended_profile_id) ?? candidateSet.candidates[0];
+  if (defaultCandidate === undefined) return null;
+  const input: ControllerApprovalInput = {
+    activation_token: request.activation_token,
+    scope: request.scope,
+    candidate_set_sha256: candidateSet.candidate_set_sha256,
+    approved_roster_sha256s: candidateSet.candidates.map((candidate) => candidate.roster_sha256),
+    default_roster_id: defaultCandidate.roster_id,
+    default_roster_revision: defaultCandidate.roster_revision,
+    default_roster_sha256: defaultCandidate.roster_sha256,
+    original_command: request.original_command,
+  };
+  const presentationText = renderRosterSetupApprovalPresentation(input);
+  const preimage = {
+    schema_version: 'autopilot.roster_approval_presentation.v1' as const,
+    scope: input.scope,
+    candidate_set_sha256: input.candidate_set_sha256,
+    approved_roster_sha256s: input.approved_roster_sha256s,
+    default_roster_id: input.default_roster_id,
+    default_roster_revision: input.default_roster_revision,
+    default_roster_sha256: input.default_roster_sha256,
+    original_command: input.original_command,
+    presentation_text: presentationText,
+  };
+  return Object.freeze({ ...input, presentation_text: presentationText, presentation_sha256: canonicalSha256(preimage) });
+}
+
+export function renderRosterSetupApprovalPresentation(input: RosterSetupApprovalPresentationInput): string {
+  return [
+    'I approve saving the Autopilot roster setup with:',
+    `scope: ${input.scope}`,
+    `candidate_set_sha256: ${input.candidate_set_sha256}`,
+    `approved_roster_sha256s, in order: [${input.approved_roster_sha256s.join(', ')}]`,
+    `default_roster_id: ${input.default_roster_id}`,
+    `default_roster_revision: ${String(input.default_roster_revision)}`,
+    `default_roster_sha256: ${input.default_roster_sha256}`,
+    `original_command: ${input.original_command}`,
+  ].join('\n');
+}
+
+function isHostUserInputSource(source: string | undefined): boolean {
+  return source === 'user' || source === 'interactive';
 }
 
 function proposalToResult(action: ResultAction, proposal: ProposalResult): RosterToolResult {
@@ -740,7 +822,6 @@ function parseRequest(value: unknown): { readonly ok: true; readonly request: Ro
   const activationToken = stringField(record, 'activation_token');
   const approvalToken = nullableStringField(record, 'approval_token');
   const scope = scopeField(record['scope']);
-  const stateRootOverride = nullableStringField(record, 'state_root_override');
   const trustedProjectRoot = nullableStringField(record, 'trusted_project_root');
   const candidateSetSha = nullableDigestField(record, 'candidate_set_sha256');
   const approved = digestArrayField(record['approved_roster_sha256s']);
@@ -751,7 +832,7 @@ function parseRequest(value: unknown): { readonly ok: true; readonly request: Ro
   if (
     activationToken === null || !TOKEN_PATTERN.test(activationToken) ||
     approvalToken === undefined || (approvalToken !== null && !TOKEN_PATTERN.test(approvalToken)) ||
-    scope === null || stateRootOverride === undefined || trustedProjectRoot === undefined || candidateSetSha === undefined ||
+    scope === null || trustedProjectRoot === undefined || candidateSetSha === undefined ||
     approved === null || defaultRosterId === undefined || defaultRosterRevision === undefined || defaultRosterSha === undefined ||
     originalCommand === null || originalCommand.length === 0 || originalCommand.length > 4096
   ) {
@@ -765,7 +846,6 @@ function parseRequest(value: unknown): { readonly ok: true; readonly request: Ro
       activation_token: activationToken,
       approval_token: approvalToken,
       scope,
-      state_root_override: stateRootOverride,
       trusted_project_root: trustedProjectRoot,
       candidate_set_sha256: candidateSetSha,
       approved_roster_sha256s: approved,
@@ -784,7 +864,6 @@ function hasExactRequestKeys(record: Readonly<Record<string, unknown>>): boolean
     'activation_token',
     'approval_token',
     'scope',
-    'state_root_override',
     'trusted_project_root',
     'candidate_set_sha256',
     'approved_roster_sha256s',

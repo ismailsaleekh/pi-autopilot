@@ -1,3 +1,5 @@
+import { randomBytes } from 'node:crypto';
+
 import { AUTOPILOT_RUNTIME_ROOT_PREFIX } from './names.ts';
 
 export interface ParsedAutopilotArgs {
@@ -54,7 +56,9 @@ export type ParseAutopilotCoordinationArgsResult =
   | { readonly ok: false; readonly message: string };
 
 const WORKSTREAM_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+const WORKSTREAM_RUN_PATTERN = /^[a-z][a-z0-9-]{0,119}$/u;
 const ROSTER_ID_PATTERN = /^[a-z][a-z0-9-]{0,95}$/u;
+const WORKSTREAM_RUN_MAX_LENGTH = 120;
 
 export interface ParseAutopilotArgsOptions {
   readonly parseRoster?: boolean;
@@ -66,6 +70,35 @@ export function isValidWorkstreamSlug(value: string): boolean {
 
 export function isValidRosterId(value: string): boolean {
   return ROSTER_ID_PATTERN.test(value);
+}
+
+export function isValidWorkstreamRun(value: string): boolean {
+  return WORKSTREAM_RUN_PATTERN.test(value);
+}
+
+export function buildAutopilotWorkstreamRun(workstream: string, now: Date = new Date(), entropy = randomBytes(3).toString('hex')): string {
+  if (!isValidWorkstreamSlug(workstream)) {
+    throw new Error(`Invalid Autopilot workstream slug: ${workstream}`);
+  }
+  if (!/^[a-f0-9]{6,24}$/u.test(entropy)) {
+    throw new Error('Autopilot workstream_run entropy must be 6..24 lowercase hex characters.');
+  }
+  const normalizedWorkstream = workstream
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/gu, '-')
+    .replace(/^-+|-+$/gu, '') || 'run';
+  const timestamp = now.toISOString()
+    .replace(/[-:]/gu, '')
+    .replace(/\.\d{3}Z$/u, 'z')
+    .replace('T', 't');
+  const suffix = `${timestamp}-${entropy}`;
+  const maxPrefixLength = WORKSTREAM_RUN_MAX_LENGTH - suffix.length - 1;
+  const prefix = normalizedWorkstream.slice(0, Math.max(1, maxPrefixLength)).replace(/-+$/u, '') || 'run';
+  const workstreamRun = `${prefix}-${suffix}`;
+  if (!isValidWorkstreamRun(workstreamRun)) {
+    throw new Error(`Generated invalid Autopilot workstream_run: ${workstreamRun}`);
+  }
+  return workstreamRun;
 }
 
 export function parseAutopilotArgs(args: string, options: ParseAutopilotArgsOptions = {}): ParseAutopilotArgsResult {
