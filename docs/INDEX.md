@@ -133,6 +133,9 @@ Before editing any source, consult [`read-before-edit.md`](read-before-edit.md).
 | Wait-for graph + deadlock | [`concepts/deadlock.md`](concepts/deadlock.md) |
 | Terminal evidence + reconciliation | [`concepts/terminal-evidence.md`](concepts/terminal-evidence.md) |
 | One-way migration + cutover | [`concepts/migration-cutover.md`](concepts/migration-cutover.md) |
+| D65 semantic graph authority | [`concepts/semantic-graph-authority.md`](concepts/semantic-graph-authority.md) |
+| D65 dispatch + recovery authority | [`concepts/dispatch-and-recovery-authority.md`](concepts/dispatch-and-recovery-authority.md) |
+| D65 terminal tail | [`concepts/d65-terminal-tail.md`](concepts/d65-terminal-tail.md) |
 
 ## Runtime state
 
@@ -149,6 +152,7 @@ Before editing any source, consult [`read-before-edit.md`](read-before-edit.md).
 | Close (land) a workstream | [`operations/close-workstream.md`](operations/close-workstream.md) |
 | Abort a workstream | [`operations/abort-workstream.md`](operations/abort-workstream.md) |
 | Crash / interrupted-operation recovery | [`operations/crash-recovery.md`](operations/crash-recovery.md) |
+| Release certification | [`operations/release-certification.md`](operations/release-certification.md) |
 
 ## Troubleshooting
 

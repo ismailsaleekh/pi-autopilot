@@ -1,0 +1,13 @@
+{
+  "schema_version": "autopilot.docs_semantic_attestation.v2",
+  "doc_id": "concepts/deadlock",
+  "reviewed_body_hash": "sha256:e2d9297fef650edd3aa669a5cb9968faa882e2e1678b7c504873c9ef3d05b5a9",
+  "reviewed_doc_sha256": "sha256:ad38d513836c9103bcd5ed7e23b9f994dd1e810c3aabe6f4ce9a8085552dbe8c",
+  "covers_sources": [
+    "src/core/coordination/deadlock.ts"
+  ],
+  "verdict": "PASS",
+  "reviewer": "openai-codex/gpt-5.5 Pi subscription merge adjudicator (offline semantic review)",
+  "reviewed_at": "2026-07-23T10:59:09.000Z",
+  "notes": "PASS P0=0 P1=0 P2=0. Reviewed docs/concepts/deadlock.md against src/core/coordination/deadlock.ts: wait-for edges are built from live conflicting requests and leases, cycles are detected from active edges, safe-victim selection excludes critical sections, Git critical operations including metadata-reconcile, dirty/preflight and non-preemptible running work, and MAX_GRANT_BYPASSES is 8 with bypass increments owned by the store grant path."
+}

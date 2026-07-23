@@ -17,6 +17,7 @@ covers_sources:
   - src/core/model-roster.ts
 signature_hash: 'sha256:8acfa22b78d0e3845a831af6c62744293cccc949d27fe4d836f1070d774dc3cf'
 body_hash: 'sha256:45d4282adbfc80a75f2e065df39aee9f6b9f1ccd0d5cdc5653d9d45bc0dad611'
+semantic_attestation: 'sha256:45d4282adbfc80a75f2e065df39aee9f6b9f1ccd0d5cdc5653d9d45bc0dad611'
 stability: stable
 ---
 
@@ -52,9 +53,13 @@ explicit `waiting-for-peer-release` state and retain exact request refs. See the
 signed launch policy whose cap fields are authenticated as exactly one; the runtime
 gates child-model spawn and other ordinary boundaries on the accepted complete-graph /
 policy / heartbeat tuple, and any semantic event fences ordinary dispatch until the
-mandatory successor graph is accepted. Note: the signed cap fields are enforced as an
-authenticated tuple; the scheduler dispatch planner and prospective child-registration
-transition are not yet independently capped to one by the merged consumers.
+mandatory successor graph is accepted. The merged dispatch gate now enforces the cap:
+`scheduler-dispatch` and `child-model-spawn` are ordinary boundaries that fence with
+`cap-not-current` whenever the committed `cap_current` authority dimension is not
+current (`ordinaryDispatchAllowed` in `d65-dispatch-predicates.ts`, exercised across
+every ordinary boundary by `tests/unit/d65-dispatch-gate.test.ts`), and
+`register-attempt` is a default-deny recovery cell. See
+[dispatch-and-recovery-authority.md](../concepts/dispatch-and-recovery-authority.md).
 
 ## Authority derivation
 

@@ -63,5 +63,5 @@ release always targets one exact recovery row.
 
 ## Related
 
-- Concepts: [`../concepts/sagas.md`](../concepts/sagas.md), [`../concepts/terminal-evidence.md`](../concepts/terminal-evidence.md), [`../concepts/migration-cutover.md`](../concepts/migration-cutover.md)
+- Concepts: [`../concepts/sagas.md`](../concepts/sagas.md), [`../concepts/terminal-evidence.md`](../concepts/terminal-evidence.md), [`../concepts/migration-cutover.md`](../concepts/migration-cutover.md), [`../concepts/dispatch-and-recovery-authority.md`](../concepts/dispatch-and-recovery-authority.md), [`../concepts/semantic-graph-authority.md`](../concepts/semantic-graph-authority.md)
 - CLI: [`../cli/autopilot-coordinator.md`](../cli/autopilot-coordinator.md)

@@ -1,12 +1,13 @@
 {
-  "schema_version": "autopilot.docs_semantic_attestation.v1",
+  "schema_version": "autopilot.docs_semantic_attestation.v2",
   "doc_id": "tools/context_budget",
   "reviewed_body_hash": "sha256:a2d8cd38e853fafe2788e23acfa84ce775d2100fe66c38c7de4940cb7316b38d",
-  "verdict": "PASS",
-  "reviewer": "validate-role (offline agentic review, PR-1 baseline)",
-  "reviewed_at": "2026-07-21T00:00:00.000Z",
+  "reviewed_doc_sha256": "sha256:9a5e58a9c5be4cbd1ee0200e44ac5ddf45b5b1d245af6fdfa41888a77e3e7a0e",
   "covers_sources": [
     "src/core/context-budget.ts"
   ],
-  "notes": "Prose accurately describes the ok/halt/unknown gate, the default 85% threshold, the AUTOPILOT_CONTEXT_HALT_PERCENT override, and parent-only availability. Verified against src/core/context-budget.ts."
+  "verdict": "PASS",
+  "reviewer": "independent Pi validate-role review (anthropic/claude-sonnet-4-5, thinking high), report /tmp/phase39-reviews/r-context-budget.md",
+  "reviewed_at": "2026-07-23T10:26:56.000Z",
+  "notes": "PASS P0=0 P1=0 P2=0. Verified against src/core/context-budget.ts: ok/halt/unknown gate, default 85% halt threshold, AUTOPILOT_CONTEXT_HALT_PERCENT override, and parent-session-only availability all match the source exactly."
 }

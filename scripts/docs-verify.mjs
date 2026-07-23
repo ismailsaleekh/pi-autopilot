@@ -38,11 +38,12 @@ import {
 import { DocFrontmatterError, composeDoc, serializeFrontmatter, splitFrontmatter } from './docs/frontmatter.mjs';
 import { enumerateSurfaces, loadCodeSurfaces } from './docs/code-surfaces.mjs';
 import { FRONTMATTER_KEY_ORDER, buildManifest, loadDocsModel, serializeManifest, sourceToDocsMap } from './docs/model.mjs';
-import { computeCoverHashes } from './docs/hashing.mjs';
+import { computeCoverHashes, computeDocProseHash } from './docs/hashing.mjs';
+import { evaluateSemanticAttestation } from './docs/attestation.mjs';
 import { evaluateFactPins } from './docs/fact-pins.mjs';
 import { checkReferences, resolveLinks } from './docs/references.mjs';
 import { findMarkerAnomalies, findRegions, renderClis, renderCommands, renderDefaults, renderModelRoster, renderReadBeforeEdit, renderRuntimePaths, renderSchemas, renderTools, wrapRegion } from './docs/regions.mjs';
-import { semanticAttestationArtifactName, semanticAttestationRequirement, validateSemanticAttestation } from './docs/semantic-attestations.mjs';
+import { semanticAttestationArtifactName, semanticAttestationRequirement } from './docs/semantic-attestations.mjs';
 
 const REGION_RENDERERS = {
   commands: renderCommands,
@@ -287,33 +288,57 @@ async function run() {
   // ---- C10: payload parity -------------------------------------------------
   for (const failure of checkPayloadParity()) findings.add('C10', 'package.json', failure);
 
-  // ---- C11: semantic-attestation currency (FM3 enforcement / FM11) ---------
+  // ---- C11: semantic-attestation currency + prose binding (FM3/FM11) --------
+  //
+  // FAIL-CLOSED CONTRACT (design D67, hardened Phase 39):
+  //   Every triggered `review_policy: behavioral` doc with covered sources, plus any
+  //   doc that already carries a receipt/frontmatter semantic_attestation, must carry a
+  //   CURRENT, independently produced review receipt. "Current" is bound to BOTH:
+  //     (a) the covered-source body hash  -> a behavior edit invalidates the receipt, and
+  //     (b) the authored document-prose hash (generated regions stripped)
+  //         -> a prose-only edit ALSO invalidates the receipt.
+  //   The frontmatter `semantic_attestation` is the review-owned copy of the current
+  //   covered-source body hash: `docs:attest` (restamp) updates the MECHANICAL body_hash
+  //   but NEVER writes `semantic_attestation`, so a restamp alone cannot clear this gate.
+  //   The machine proves receipt currency + shape ONLY; reviewer independence remains a
+  //   procedural requirement (it cannot and does not claim to prove independence).
   for (const doc of model.docs) {
-    if (doc.coversSources.length === 0 || doc.reviewPolicy !== 'behavioral') continue;
+    if (doc.reviewPolicy !== 'behavioral' || doc.coversSources.length === 0) continue;
     let hashes;
     try {
       hashes = computeCoverHashes(doc.coversSources);
     } catch {
-      continue; // already reported by C4
+      continue; // covered-source read failure already reported by C4
     }
     const artifactName = semanticAttestationArtifactName(doc.docId);
-    const attestationPath = resolve(PACKAGE_ROOT, ATTESTATION_DIR, artifactName);
+    const attestationRel = `${ATTESTATION_DIR}/${artifactName}`;
+    const attestationPath = resolve(PACKAGE_ROOT, attestationRel);
     const requirement = semanticAttestationRequirement(doc, hashes, git);
-    const hasAttestation = existsSync(attestationPath);
-    if (!hasAttestation) {
-      if (requirement.required) {
-        findings.add('C11', doc.location, `behavioral doc requires a current independent semantic attestation (${requirement.reason}) at ${ATTESTATION_DIR}/${artifactName}`);
+    const attestationExists = existsSync(attestationPath);
+    if (!requirement.required && !attestationExists && doc.semanticAttestation === null) continue;
+    if (requirement.required && !attestationExists) {
+      findings.add('C11', doc.location, `behavioral doc requires a current independent semantic attestation (${requirement.reason}) at ${attestationRel}`);
+    }
+    let attestation = null;
+    let parseError = null;
+    if (attestationExists) {
+      try {
+        attestation = JSON.parse(readFileSync(attestationPath, 'utf8'));
+      } catch (error) {
+        parseError = error instanceof Error ? error.message : String(error);
       }
-      continue;
     }
-    let attestation;
-    try {
-      attestation = JSON.parse(readFileSync(attestationPath, 'utf8'));
-    } catch (error) {
-      findings.add('C11', doc.location, `semantic attestation is unparseable: ${error instanceof Error ? error.message : String(error)}`);
-      continue;
+    for (const message of evaluateSemanticAttestation({
+      doc: { docId: doc.docId, coversSources: doc.coversSources, reviewPolicy: doc.reviewPolicy, bodyHash: doc.bodyHash, semanticAttestation: doc.semanticAttestation },
+      currentBodyHash: hashes.bodyHash,
+      currentProseHash: computeDocProseHash(doc.body),
+      attestationExists,
+      attestation,
+      parseError,
+      attestationRel,
+    })) {
+      findings.add('C11', doc.location, message);
     }
-    for (const failure of validateSemanticAttestation(doc, hashes, attestation)) findings.add('C11', doc.location, failure);
   }
 
   return report(findings, json);
@@ -373,6 +398,10 @@ async function restamp(model, surfaces) {
   for (const doc of model.docs) {
     if (doc.coversSources.length === 0) continue;
     const hashes = computeCoverHashes(doc.coversSources);
+    // MECHANICAL restamp only: signature_hash + body_hash. It deliberately NEVER
+    // writes `semantic_attestation` (the review-owned currency proof), so a source
+    // author cannot clear C11 by restamping — a fresh independent review must record
+    // semantic_attestation separately. (Design D67 anti-self-certification contract.)
     const nextFrontmatter = { ...doc.frontmatter, signature_hash: hashes.signatureHash, body_hash: hashes.bodyHash };
     if (doc.frontmatter.signature_hash === hashes.signatureHash && doc.frontmatter.body_hash === hashes.bodyHash) continue;
     const frontmatterText = serializeFrontmatter(nextFrontmatter, FRONTMATTER_KEY_ORDER);

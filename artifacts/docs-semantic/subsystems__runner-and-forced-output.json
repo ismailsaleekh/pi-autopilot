@@ -1,20 +1,21 @@
 {
-  "schema_version": "autopilot.docs_semantic_attestation.v1",
+  "schema_version": "autopilot.docs_semantic_attestation.v2",
   "doc_id": "subsystems/runner-and-forced-output",
   "reviewed_body_hash": "sha256:45d4282adbfc80a75f2e065df39aee9f6b9f1ccd0d5cdc5653d9d45bc0dad611",
-  "verdict": "PASS",
-  "reviewer": "openai-codex/gpt-5.5 Pi subscription independent validator (offline semantic docs review)",
-  "reviewed_at": "2026-07-23T10:33:06.000Z",
+  "reviewed_doc_sha256": "sha256:32b2b4d607bd9d4c0c1991d9530eba6ad05b4e4cd0e00613d41778de88dfdd68",
   "covers_sources": [
     "src/core/agent-runner.ts",
     "src/core/authority.ts",
-    "src/core/scheduler.ts",
-    "src/core/unit-failure.ts",
     "src/core/coordination/unit-failure-producer-provenance.ts",
-    "src/core/forced-output/index.ts",
     "src/core/execution-audit/index.ts",
+    "src/core/forced-output/index.ts",
+    "src/core/model-roster.ts",
     "src/core/prompt-renderer/index.ts",
-    "src/core/model-roster.ts"
+    "src/core/scheduler.ts",
+    "src/core/unit-failure.ts"
   ],
-  "notes": "Reviewed docs/subsystems/runner-and-forced-output.md against the current runner, scheduler, authority, unit-failure, forced-output/export surface, execution-audit, prompt-renderer, model-roster sources plus the unit-failure ingress/terminal/store consumers for the producer-provenance claims. The prose matches current behavior: final unit_failure records use currentUnitFailureProducerProvenance() with implementation build 1.2.0-s1 and producer generation 3; idempotent replay requires the same exact current fields; reset/abort evidence is clean/null-capture and quarantine/preserve evidence is capture-ref-bound; recognized BUG-177 reset/abort bytes are preserved while regenerated current evidence is written under regenerated-from-<sha256>; historical quarantine/preserve does not release authority. Runner forced-output, audit revalidation, D65 fail-closed dispatch gates, and the fixed openai-codex/gpt-5.6 role roster are accurately described."
+  "verdict": "PASS",
+  "reviewer": "openai-codex/gpt-5.5 Pi subscription merge adjudicator (offline semantic review)",
+  "reviewed_at": "2026-07-23T10:59:09.000Z",
+  "notes": "PASS P0=0 P1=0 P2=0. Reviewed docs/subsystems/runner-and-forced-output.md against runner, authority, scheduler, unit-failure/provenance, forced-output, execution-audit, prompt-renderer, model-roster, and D65 dispatch predicates: S2 unit-failure producer provenance and BUG-177 regeneration, forced-output carrier checks, audit validation, pressure-aware scheduling, cap-not-current ordinary dispatch, register-attempt recovery denial, and fixed openai-codex roster match current code."
 }

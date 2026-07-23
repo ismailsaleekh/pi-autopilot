@@ -13,6 +13,7 @@ covers_sources:
   - src/core/git-process.ts
 signature_hash: 'sha256:82853603ad9b97c2a62ec6f2374efb085e1db7f7ae15d7af9a3d4cae2abde577'
 body_hash: 'sha256:0de6d188e0e64507e2aa95f2401cca2bb95801d4a6a5af96e83fc9e95f4cd70d'
+semantic_attestation: 'sha256:0de6d188e0e64507e2aa95f2401cca2bb95801d4a6a5af96e83fc9e95f4cd70d'
 stability: stable
 ---
 
@@ -32,7 +33,7 @@ This subsystem prepares, sizes, materializes, and guards those worktrees.
 | Authority materialization into worktrees | `src/core/materialization.ts` |
 | Worktree-scoped parent/child git guard | `src/core/git-guard.ts` |
 | Bounded, NUL-safe git process boundary | `src/core/git-process.ts` |
-| D65 graph publication + worktree cadence | `src/core/coordination/d65-graph-publisher.ts`, `src/core/coordination/worktree-saga.ts` |
+| D65 graph publication + worktree cadence (related; reviewed in the D65 concept docs, not covered here) | `src/core/coordination/d65-graph-publisher.ts`, `src/core/coordination/worktree-saga.ts` |
 
 ## Worktree layout
 
@@ -46,8 +47,9 @@ the main runtime root. See [`../runtime-state/paths.md`](../runtime-state/paths.
 
 ## Sparse by default
 
-New worktrees are sparse: `git worktree add --no-checkout`, package-owned non-cone
-sparse patterns, a disk gate before runtime/index mutation, and a
+New worktrees are sparse: `git worktree add --no-checkout`, then a package-owned
+`sparse-checkout set --no-cone` (later `sparse-checkout add` operations inherit the
+non-cone mode), a disk gate before runtime/index mutation, and a
 `_checkout-profile.json` snapshot. The disk gate records S2 per-run pressure for the
 offending run only; missing-worktree creation refuses that run while unrelated runs
 can continue or restart. The package refuses loudly instead of silently falling back
@@ -62,15 +64,19 @@ to a full checkout.
   `AUTOPILOT_CHECKOUT_PROFILE=/absolute/path`; explicit `full` mode is opt-in only and
   still passes the disk gate.
 
-For D65 runs, the signed launch policy also binds `expected_checkout_units=1` and
-`maximum_parallel_cap=1`. In complete mode, ordinary create/materialize,
-missing-worktree creation, and disk boundaries validate the current complete semantic
-graph, policy, and heartbeat. The bootstrap main-worktree create and unit-removal
-(terminal-tail) effects instead use closed charter/recovery paths (the bootstrap
-charter for main create before policy/heartbeat exist; the `unit-recovery` and terminal
-tail cells for reset/quarantine/remove), which bind row/session conditions but do not
-re-require the full graph/policy/heartbeat tuple. Semantic worktree transitions in the
-ordinary path require a successor graph before ordinary dispatch can resume.
+For D65 runs, the signed launch policy always binds `parallel_cap=1` and
+`expected_checkout_units=1`; `maximum_parallel_cap` is required to be `1` for the
+initial policy version 1 (a later signed capacity decision may raise the maximum in a
+superseding policy). `parallel-runtime.ts` guards its worktree effects through the
+D65 dispatch gate: ordinary create/materialize, missing-worktree creation, and disk
+boundaries call `assertD65OrdinaryBoundaryFromEnvironment` (e.g.
+`checkout-disk-estimate`, `ordinary-state-advance`), while unit reset/quarantine/remove
+call `assertD65RecoveryBoundaryFromEnvironment('unit-recovery', …)`. The exact predicate
+semantics — which committed graph/policy/heartbeat tuple each boundary requires, and why
+recovery cells do not re-require the full tuple — are documented and independently
+reviewed in
+[`../concepts/dispatch-and-recovery-authority.md`](../concepts/dispatch-and-recovery-authority.md)
+and [`../concepts/semantic-graph-authority.md`](../concepts/semantic-graph-authority.md).
 
 ## The git guard
 
@@ -87,6 +93,6 @@ cumulative-path-byte, per-record, and total lifecycle bounds; it never raises th
 
 ## Related
 
-- Concept: [`../concepts/leases-and-observations.md`](../concepts/leases-and-observations.md)
+- Concept: [`../concepts/leases-and-observations.md`](../concepts/leases-and-observations.md), [`../concepts/semantic-graph-authority.md`](../concepts/semantic-graph-authority.md)
 - Tool: [`../tools/autopilot_materialize_context.md`](../tools/autopilot_materialize_context.md)
 - Subsystem: [`close-lifecycle.md`](close-lifecycle.md)

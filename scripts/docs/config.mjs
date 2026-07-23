@@ -31,8 +31,12 @@ export const MANIFEST_SCHEMA = 'autopilot.docs_manifest.v1';
 /** Semantic-attestation artifact directory (agentic review receipts, hash-checked by C11). */
 export const ATTESTATION_DIR = 'artifacts/docs-semantic';
 
-/** Attestation artifact schema tag. */
-export const ATTESTATION_SCHEMA = 'autopilot.docs_semantic_attestation.v1';
+/**
+ * Attestation artifact schema tag. v2 binds BOTH the covered-source body hash and
+ * the authored document-prose hash (reviewed_doc_sha256), so a prose-only edit or a
+ * mechanical `docs:attest` restamp can never clear C11 without a fresh review.
+ */
+export const ATTESTATION_SCHEMA = 'autopilot.docs_semantic_attestation.v2';
 
 /** Allowed per-doc modes. */
 export const DOC_MODES = Object.freeze(['generated', 'authored', 'mixed']);

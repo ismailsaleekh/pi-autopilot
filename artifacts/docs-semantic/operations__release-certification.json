@@ -1,0 +1,19 @@
+{
+  "schema_version": "autopilot.docs_semantic_attestation.v2",
+  "doc_id": "operations/release-certification",
+  "reviewed_body_hash": "sha256:ff6dc0cb79ae5ce4eda7c19477ad3f1c9bbbf94c832f5b43564814ef7401be2b",
+  "reviewed_doc_sha256": "sha256:d9bf54c948b7f3e42e60ff8b5274d3d4dac437132680e6d0991555a674d4fce6",
+  "covers_sources": [
+    "scripts/check-package-payload.mjs",
+    "scripts/check-production-git-spawns.mjs",
+    "scripts/generate-sbom.mjs",
+    "scripts/run-certified-command.mjs",
+    "scripts/security-scan.mjs",
+    "scripts/test-packed-consumer-release.mjs",
+    "scripts/verify-packed-consumer.mjs"
+  ],
+  "verdict": "PASS",
+  "reviewer": "openai-codex/gpt-5.5 Pi subscription merge adjudicator (offline semantic review)",
+  "reviewed_at": "2026-07-23T10:59:09.000Z",
+  "notes": "PASS P0=0 P1=0 P2=0. Reviewed docs/operations/release-certification.md against the certified-command, production-git scan, security scan, SBOM, payload, packed-consumer, and packed-consumer release scripts: metered credential denial, sealed candidate identity, non-network lane canary, short TMPDIR cleanup, raw Git spawn scanning, packed source/dist parity, security/SBOM/payload evidence, and exact-candidate invalidation claims match current code."
+}

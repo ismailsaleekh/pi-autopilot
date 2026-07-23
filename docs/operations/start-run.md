@@ -40,4 +40,5 @@ stability: stable
 ## Related
 
 - Commands: [`../commands/autopilot.md`](../commands/autopilot.md), [`../commands/autopilot-inject.md`](../commands/autopilot-inject.md)
-- Concept: [`../concepts/generations-and-fencing.md`](../concepts/generations-and-fencing.md)
+- Concept: [`../concepts/generations-and-fencing.md`](../concepts/generations-and-fencing.md), [`../concepts/semantic-graph-authority.md`](../concepts/semantic-graph-authority.md)
+- Operations: [`release-certification.md`](release-certification.md)

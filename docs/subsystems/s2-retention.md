@@ -10,6 +10,7 @@ covers_sources:
   - src/core/coordination/s2-retention-state-machine.ts
 signature_hash: 'sha256:856a8e5895cdd36461466ebd5512461b075bd756ab7e4bf76c9915236c1be5a4'
 body_hash: 'sha256:08e81f1d945966d6a994f3fc8736fb86a8a71fe6a1365b26b6a709c61256f969'
+semantic_attestation: 'sha256:08e81f1d945966d6a994f3fc8736fb86a8a71fe6a1365b26b6a709c61256f969'
 stability: evolving
 ---
 

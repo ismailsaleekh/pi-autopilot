@@ -22,6 +22,13 @@ here are not yet governed by a doc; coverage ratchets up per PR (C8 floor).
 | Source path | Owning doc(s) |
 | --- | --- |
 | `bin/autopilot-s2-corpus-rehearsal.mjs` | [`tools/s2-corpus-rehearsal`](tools/s2-corpus-rehearsal.md) |
+| `scripts/check-package-payload.mjs` | [`operations/release-certification`](operations/release-certification.md) |
+| `scripts/check-production-git-spawns.mjs` | [`operations/release-certification`](operations/release-certification.md) |
+| `scripts/generate-sbom.mjs` | [`operations/release-certification`](operations/release-certification.md) |
+| `scripts/run-certified-command.mjs` | [`operations/release-certification`](operations/release-certification.md) |
+| `scripts/security-scan.mjs` | [`operations/release-certification`](operations/release-certification.md) |
+| `scripts/test-packed-consumer-release.mjs` | [`operations/release-certification`](operations/release-certification.md) |
+| `scripts/verify-packed-consumer.mjs` | [`operations/release-certification`](operations/release-certification.md) |
 | `src/cli/autopilot-agent-run.ts` | [`cli/autopilot-agent-run`](cli/autopilot-agent-run.md) |
 | `src/cli/autopilot-coordinator-bootstrap.ts` | [`cli/autopilot-coordinator`](cli/autopilot-coordinator.md) |
 | `src/cli/autopilot-coordinator.ts` | [`cli/autopilot-coordinator`](cli/autopilot-coordinator.md) |
@@ -35,12 +42,35 @@ here are not yet governed by a doc; coverage ratchets up per PR (C8 floor).
 | `src/core/context-budget.ts` | [`tools/context_budget`](tools/context_budget.md) |
 | `src/core/contracts/index.ts` | [`subsystems/contracts-and-schemas`](subsystems/contracts-and-schemas.md) |
 | `src/core/coordination/admission.ts` | [`subsystems/coordination`](subsystems/coordination.md) |
+| `src/core/coordination/client.ts` | [`subsystems/coordination`](subsystems/coordination.md) |
+| `src/core/coordination/d65-dispatch-authority.ts` | [`concepts/dispatch-and-recovery-authority`](concepts/dispatch-and-recovery-authority.md) |
+| `src/core/coordination/d65-dispatch-gate.ts` | [`concepts/d65-terminal-tail`](concepts/d65-terminal-tail.md), [`concepts/dispatch-and-recovery-authority`](concepts/dispatch-and-recovery-authority.md) |
+| `src/core/coordination/d65-dispatch-predicates.ts` | [`concepts/dispatch-and-recovery-authority`](concepts/dispatch-and-recovery-authority.md) |
+| `src/core/coordination/d65-first-complete-graph.ts` | [`concepts/semantic-graph-authority`](concepts/semantic-graph-authority.md) |
+| `src/core/coordination/d65-graph-authority.ts` | [`concepts/semantic-graph-authority`](concepts/semantic-graph-authority.md) |
+| `src/core/coordination/d65-graph-producer.ts` | [`concepts/semantic-graph-authority`](concepts/semantic-graph-authority.md) |
+| `src/core/coordination/d65-graph-publication-residue.ts` | [`concepts/semantic-graph-authority`](concepts/semantic-graph-authority.md) |
+| `src/core/coordination/d65-graph-publisher.ts` | [`concepts/semantic-graph-authority`](concepts/semantic-graph-authority.md) |
+| `src/core/coordination/d65-graph-successor-runtime.ts` | [`concepts/d65-terminal-tail`](concepts/d65-terminal-tail.md) |
+| `src/core/coordination/d65-graph-successor.ts` | [`concepts/d65-terminal-tail`](concepts/d65-terminal-tail.md), [`concepts/semantic-graph-authority`](concepts/semantic-graph-authority.md) |
+| `src/core/coordination/d65-heartbeat-gate.ts` | [`concepts/dispatch-and-recovery-authority`](concepts/dispatch-and-recovery-authority.md) |
+| `src/core/coordination/d65-heartbeat-high-water.ts` | [`concepts/dispatch-and-recovery-authority`](concepts/dispatch-and-recovery-authority.md) |
+| `src/core/coordination/d65-launch-policy.ts` | [`concepts/dispatch-and-recovery-authority`](concepts/dispatch-and-recovery-authority.md) |
+| `src/core/coordination/d65-runtime-dispatch.ts` | [`concepts/dispatch-and-recovery-authority`](concepts/dispatch-and-recovery-authority.md) |
+| `src/core/coordination/d65-semantic-graph.ts` | [`concepts/d65-terminal-tail`](concepts/d65-terminal-tail.md), [`concepts/semantic-graph-authority`](concepts/semantic-graph-authority.md) |
+| `src/core/coordination/d65-terminal-intent.ts` | [`concepts/d65-terminal-tail`](concepts/d65-terminal-tail.md) |
 | `src/core/coordination/deadlock.ts` | [`concepts/deadlock`](concepts/deadlock.md), [`subsystems/coordination`](subsystems/coordination.md) |
 | `src/core/coordination/index.ts` | [`subsystems/coordination`](subsystems/coordination.md) |
+| `src/core/coordination/invariants.ts` | [`subsystems/coordination`](subsystems/coordination.md) |
+| `src/core/coordination/peer-classification.ts` | [`subsystems/coordination`](subsystems/coordination.md) |
+| `src/core/coordination/runtime-constants.ts` | [`subsystems/coordination`](subsystems/coordination.md) |
 | `src/core/coordination/s2-owned-gc.ts` | [`subsystems/s2-retention`](subsystems/s2-retention.md) |
 | `src/core/coordination/s2-retention-archive.ts` | [`subsystems/s2-retention`](subsystems/s2-retention.md) |
 | `src/core/coordination/s2-retention-policy.ts` | [`subsystems/s2-retention`](subsystems/s2-retention.md) |
 | `src/core/coordination/s2-retention-state-machine.ts` | [`subsystems/s2-retention`](subsystems/s2-retention.md) |
+| `src/core/coordination/store.ts` | [`subsystems/coordination`](subsystems/coordination.md) |
+| `src/core/coordination/terminal-attempt-proof.ts` | [`concepts/d65-terminal-tail`](concepts/d65-terminal-tail.md) |
+| `src/core/coordination/unavailable-recovery.ts` | [`concepts/dispatch-and-recovery-authority`](concepts/dispatch-and-recovery-authority.md) |
 | `src/core/coordination/unit-failure-producer-provenance.ts` | [`subsystems/runner-and-forced-output`](subsystems/runner-and-forced-output.md) |
 | `src/core/disk-gate.ts` | [`subsystems/worktrees`](subsystems/worktrees.md) |
 | `src/core/execution-audit/index.ts` | [`subsystems/runner-and-forced-output`](subsystems/runner-and-forced-output.md) |

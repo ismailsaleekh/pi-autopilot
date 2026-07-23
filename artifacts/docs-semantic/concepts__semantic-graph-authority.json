@@ -1,0 +1,19 @@
+{
+  "schema_version": "autopilot.docs_semantic_attestation.v2",
+  "doc_id": "concepts/semantic-graph-authority",
+  "reviewed_body_hash": "sha256:945f3beee556fcb0b225e2cfb0a7601acf8e70c8fda301020f6ef8a222cb0a4a",
+  "reviewed_doc_sha256": "sha256:4fe79847d329056ffb396bd0972f64b39e0a637bc8382dfaec2766035f97a770",
+  "covers_sources": [
+    "src/core/coordination/d65-first-complete-graph.ts",
+    "src/core/coordination/d65-graph-authority.ts",
+    "src/core/coordination/d65-graph-producer.ts",
+    "src/core/coordination/d65-graph-publication-residue.ts",
+    "src/core/coordination/d65-graph-publisher.ts",
+    "src/core/coordination/d65-graph-successor.ts",
+    "src/core/coordination/d65-semantic-graph.ts"
+  ],
+  "verdict": "PASS",
+  "reviewer": "openai-codex/gpt-5.5 Pi subscription merge adjudicator (offline semantic review)",
+  "reviewed_at": "2026-07-23T10:59:09.000Z",
+  "notes": "PASS P0=0 P1=0 P2=0. Reviewed docs/concepts/semantic-graph-authority.md against the D65 semantic graph, first-complete-graph, authority, producer, publisher, successor, and residue sources after S2 merge: closed bootstrap parsing, graph size bounds, exact B-through-E/idempotency joins, no-event successor refusal, foreign-event transparency, G/H/R non-self-referential publication, and descriptor-pinned residue semantics match the current code."
+}

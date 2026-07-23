@@ -54,5 +54,5 @@ condition or release ambiguous WRITE/EXCLUSIVE authority. **Age never authorizes
 
 ## Related
 
-- [generations-and-fencing.md](generations-and-fencing.md), [reservations.md](reservations.md)
+- [generations-and-fencing.md](generations-and-fencing.md), [reservations.md](reservations.md), [d65-terminal-tail.md](d65-terminal-tail.md)
 - Subsystem: [`../subsystems/coordination.md`](../subsystems/coordination.md)

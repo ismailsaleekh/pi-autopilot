@@ -95,6 +95,13 @@ source files live.
   publication.
   → [`docs/subsystems/coordination.md`](docs/subsystems/coordination.md),
   [`docs/concepts/`](docs/concepts/admission.md)
+- **D65 semantic authority (graph / dispatch / terminal tail)** — bootstrap-signed,
+  size-bounded semantic graphs; the cap-one launch policy and default-deny recovery
+  cells; and the append-only terminal tail. Production consumes externally signed
+  authority and never signs it.
+  → [`docs/concepts/semantic-graph-authority.md`](docs/concepts/semantic-graph-authority.md),
+  [`docs/concepts/dispatch-and-recovery-authority.md`](docs/concepts/dispatch-and-recovery-authority.md),
+  [`docs/concepts/d65-terminal-tail.md`](docs/concepts/d65-terminal-tail.md)
 - **Runtime close/merge/abort** — deterministic, local-only close/abort with per-unit
   worktrees, `autopilot.unit_merge.v1` union proof, and validation staleness.
   → [`docs/subsystems/close-lifecycle.md`](docs/subsystems/close-lifecycle.md)
@@ -153,7 +160,9 @@ scale/SDK/RPC/package lanes with fake-Pi witnesses; offline SDK/RPC/package gate
 full test plan is [`TEST_PLAN.md`](TEST_PLAN.md); how to run it is [`TESTING.md`](TESTING.md).
 Release QA also runs cross-platform packed installs, docs and closed-repository scans,
 `security:scan`, registry `security:audit`, deterministic CycloneDX `sbom`, and
-`payload:check`.
+`payload:check`. The exact certified-command driver, evidence-root requirements, and the
+exact-candidate certification rule are documented in
+[`docs/operations/release-certification.md`](docs/operations/release-certification.md).
 
 ## Known limitations
 

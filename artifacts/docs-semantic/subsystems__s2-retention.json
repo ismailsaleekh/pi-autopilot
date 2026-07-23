@@ -1,15 +1,16 @@
 {
-  "schema_version": "autopilot.docs_semantic_attestation.v1",
+  "schema_version": "autopilot.docs_semantic_attestation.v2",
   "doc_id": "subsystems/s2-retention",
   "reviewed_body_hash": "sha256:08e81f1d945966d6a994f3fc8736fb86a8a71fe6a1365b26b6a709c61256f969",
-  "verdict": "PASS",
-  "reviewer": "Wave-4 independent validator (offline docs truth review)",
-  "reviewed_at": "2026-07-23T00:00:00.000Z",
+  "reviewed_doc_sha256": "sha256:1b4c5d95780a1bd2992c5674788f667fe5f25354487ac148dc27a9fdc94c6982",
   "covers_sources": [
-    "src/core/coordination/s2-retention-policy.ts",
-    "src/core/coordination/s2-retention-archive.ts",
     "src/core/coordination/s2-owned-gc.ts",
+    "src/core/coordination/s2-retention-archive.ts",
+    "src/core/coordination/s2-retention-policy.ts",
     "src/core/coordination/s2-retention-state-machine.ts"
   ],
-  "notes": "Reviewed docs/subsystems/s2-retention.md against the final S2 retention sources. The prose matches crash-safe terminal binding reconstruction after accepted coordinator evidence, serialized coordinator-owned GC sweeps, symlink-ancestor rejection for cold/hot publication and GC verification paths, durable ledger/directory fsync ordering before destructive removal/replay, non-starving batch accounting for refused candidates, and per-run disk-pressure recheck/clear semantics with disk-failure diagnostics."
+  "verdict": "PASS",
+  "reviewer": "openai-codex/gpt-5.5 Pi subscription merge adjudicator (offline semantic review)",
+  "reviewed_at": "2026-07-23T10:59:09.000Z",
+  "notes": "PASS P0=0 P1=0 P2=0. Reviewed docs/subsystems/s2-retention.md against S2 retention policy, archive, owned GC, and pressure-state sources plus close-runtime integration: deterministic cold/hot proof identity, symlink-ancestor refusal, descriptor verification, append-only fsynced ledger, forward-only _gc-inflight removal/replay, batch accounting, coordinator-owned GC, and per-run pressure clear/recheck semantics match current code."
 }

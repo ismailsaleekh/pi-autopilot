@@ -13,6 +13,7 @@ covers_sources:
   - src/core/worktree-cleanup.ts
 signature_hash: 'sha256:008aa231a2414d2bcb29cc62696f7587634857ea043568428bd1f286fbc446b9'
 body_hash: 'sha256:ffdff05ff0c9cafe113c644d7a9fcd604c5a11e49f10eae452bf1ee5196b62fa'
+semantic_attestation: 'sha256:ffdff05ff0c9cafe113c644d7a9fcd604c5a11e49f10eae452bf1ee5196b62fa'
 stability: stable
 ---
 
@@ -37,21 +38,31 @@ checkout or remotes.
 
 1. Operator source checkout is clean and on the captured target branch.
 2. Child launches are blocked (run moves to `merging`).
-3. Every source-changing work item has schema-valid state/master-plan/status/audit
-   evidence **plus** an independent validation PASS.
+3. The semantic closure gate passes: schema-valid state/master-plan/status/audit
+   evidence and `evaluateAutopilotClosureGate` blockers are all cleared
+   (`semanticClosureBlockers`). For Phase 2 work, `phaseTwoCloseBlockers` additionally
+   requires each unit's `autopilot.unit_merge.v1` evidence (which carries its
+   independent validation); the universal closure gate itself enforces the audit /
+   plan / status / decision blockers rather than a separate per-item validation check.
 4. The final integrated diff equals the union of accepted `autopilot.unit_merge.v1`
    changed paths for Phase 2 work.
 5. No remaining validation-staleness artifacts, unresolved reservation repair,
    foreign/manual target-path intersections, or dirty/running/quarantined unit
    worktrees.
-6. A D65 run has an accepted complete graph, launch policy, governing heartbeat, and
-   no pending graph publication before entering its prepared terminal boundary.
+
+D65 runs additionally guard the prepared-terminal boundary at runtime through the D65
+dispatch gate and `publishAndAuthenticateD65PreparedTerminalSuccessor` (an accepted
+complete graph, launch policy, governing heartbeat, and no pending graph publication);
+that is a runtime dispatch requirement enforced at the boundary, not a
+`validateCloseReadiness` blocker.
 
 ## Close effects (in order)
 
-Integrate landed clean/disjoint reservation predecessors → record validation
-staleness → merge the target branch into the workstream branch → fast-forward the
-target branch → record coordinator terminal/reservation evidence → publish and verify S2 cold terminal retention/hot summary binding for coordinator-backed runs → release retained
+Integrate landed clean/disjoint reservation predecessors → merge each unit (mergeback
+records validation staleness in its finalize step) → merge the target branch into the
+workstream branch → fast-forward the target branch → record coordinator
+terminal/reservation evidence → publish and verify S2 cold terminal retention/hot
+summary binding for coordinator-backed runs → release retained
 authority → archive runtime evidence under
 `~/.pi/agent/autopilot/worktrees/<repo-key>/_archive/<workstream-run>/` → remove only
 run-owned paths (`active/<workstream-run>/main/` + terminal unit `worktree/`) → remove
@@ -74,7 +85,8 @@ merging**, refuses dirty source paths, and retires the branch to
 ## Invariants that must not regress
 
 - Worktree-local git freedom does not bypass close: final changed paths still require
-  unit-merge, execution-audit, execution-commit evidence, and independent validation.
+  unit-merge and execution-commit/execution-audit evidence, and each Phase 2 unit
+  merge carries its own independent validation before mergeback.
 - Cleanup refuses dirty, unregistered, common-dir-mismatched, branch-moved,
   recreated, or foreign-run paths; a parallel Autopilot in the same repo key is never
   touched.
@@ -84,5 +96,5 @@ merging**, refuses dirty source paths, and retires the branch to
 ## Related
 
 - Commands: [`../commands/autopilot-close.md`](../commands/autopilot-close.md), [`../commands/autopilot-abort.md`](../commands/autopilot-abort.md)
-- Concepts: [`../concepts/reservations.md`](../concepts/reservations.md), [`../concepts/terminal-evidence.md`](../concepts/terminal-evidence.md)
+- Concepts: [`../concepts/reservations.md`](../concepts/reservations.md), [`../concepts/terminal-evidence.md`](../concepts/terminal-evidence.md), [`../concepts/d65-terminal-tail.md`](../concepts/d65-terminal-tail.md)
 - Operations: [`../operations/close-workstream.md`](../operations/close-workstream.md)

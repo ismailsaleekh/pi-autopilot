@@ -16,12 +16,17 @@ function evaluate(expression: string): unknown {
       reviewPolicy: 'behavioral',
       coversSources: Object.freeze(['src/core/example.ts']),
       bodyHash: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      semanticAttestation: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
     });
-    const hashes = Object.freeze({ bodyHash: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' });
+    const hashes = Object.freeze({
+      bodyHash: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      docProseHash: 'sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd',
+    });
     const attestation = Object.freeze({
-      schema_version: 'autopilot.docs_semantic_attestation.v1',
+      schema_version: 'autopilot.docs_semantic_attestation.v2',
       doc_id: doc.docId,
       reviewed_body_hash: hashes.bodyHash,
+      reviewed_doc_sha256: hashes.docProseHash,
       verdict: 'PASS',
       reviewer: 'independent validate-role',
       reviewed_at: '2026-07-23T00:00:00.000Z',

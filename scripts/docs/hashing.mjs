@@ -35,6 +35,24 @@ function normalizeBody(text) {
   return text.replace(/\r\n/gu, '\n').replace(/[ \t]+$/gmu, '').replace(/\n+$/u, '\n');
 }
 
+// Matches a full GENERATED:<id> region (START marker … END marker). Kept in one
+// place so the prose hash, C9 stale-phrase scan, and any future consumer strip the
+// exact same mechanically-owned bytes.
+const GENERATED_REGION_RE = /<!-- GENERATED:[a-z-]+ START[\s\S]*?<!-- GENERATED:[a-z-]+ END -->/gu;
+
+/**
+ * SHA-256 over the AUTHORED prose of a doc body: generated regions (which are a pure
+ * projection of code and already byte-verified by C2) are removed, then the remainder
+ * is normalized exactly like a source body. This is what a semantic review actually
+ * reads, so binding the receipt to it means a prose-only edit invalidates the receipt
+ * (C11 req 3) while a code-only regeneration of a generated region does not.
+ * @param {string} body
+ * @returns {string}
+ */
+export function computeDocProseHash(body) {
+  return sha256(normalizeBody(body.replace(GENERATED_REGION_RE, '')));
+}
+
 function readSourceOrThrow(relPath) {
   const absolute = resolve(PACKAGE_ROOT, relPath);
   try {

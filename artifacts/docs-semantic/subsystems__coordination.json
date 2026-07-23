@@ -1,0 +1,20 @@
+{
+  "schema_version": "autopilot.docs_semantic_attestation.v2",
+  "doc_id": "subsystems/coordination",
+  "reviewed_body_hash": "sha256:2c4020b8a25089c33a3db862bc1fd1b93ed65a38b3e1530eae1f1843abe85101",
+  "reviewed_doc_sha256": "sha256:7793891cc6546d73a8573c24ea0804f98793bc84787f00b2c258c509f4aeba2e",
+  "covers_sources": [
+    "src/core/coordination/admission.ts",
+    "src/core/coordination/client.ts",
+    "src/core/coordination/deadlock.ts",
+    "src/core/coordination/index.ts",
+    "src/core/coordination/invariants.ts",
+    "src/core/coordination/peer-classification.ts",
+    "src/core/coordination/runtime-constants.ts",
+    "src/core/coordination/store.ts"
+  ],
+  "verdict": "PASS",
+  "reviewer": "openai-codex/gpt-5.5 Pi subscription merge adjudicator (offline semantic review)",
+  "reviewed_at": "2026-07-23T10:59:09.000Z",
+  "notes": "PASS P0=0 P1=0 P2=0. Reviewed docs/subsystems/coordination.md against index, admission, deadlock, runtime constants, peer classification, client, store, invariants, server, and supervisor context: protocol/API/store facade constants, HMAC admission, deadlock invariants, D65 graph/dispatch delegation, single-socket/endpoint authority, and coordinator-owned S2 retention GC scheduling match current code."
+}
