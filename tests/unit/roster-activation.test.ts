@@ -15,8 +15,9 @@ import autopilotExtension, {
   type ExtensionLifecycleHandler,
   type ExtensionResourcesDiscoverHandler,
   type ExtensionInputHandler,
+  type AutopilotRosterSetupToolBundle,
 } from '../../src/extension.ts';
-import { AUTOPILOT_COMMAND, CONTEXT_BUDGET_TOOL_NAME } from '../../src/core/names.ts';
+import { AUTOPILOT_COMMAND, AUTOPILOT_INJECT_COMMAND, CONTEXT_BUDGET_TOOL_NAME } from '../../src/core/names.ts';
 import { parseAutopilotArgs } from '../../src/core/paths.ts';
 import {
   autopilotRosterContractCanonicalJson,
@@ -42,7 +43,7 @@ type RegisteredHandler = ExtensionToolCallHandler | ExtensionLifecycleHandler | 
 
 class FakePi implements ExtensionHostLike {
   readonly commands = new Map<string, ExtensionCommandDefinitionLike>();
-  readonly tools: { readonly name: string }[] = [];
+  readonly tools: ({ readonly name: string; execute?: (...args: unknown[]) => unknown })[] = [];
   readonly activeTools: string[] = [];
   readonly messages: string[] = [];
   readonly events: string[];
@@ -101,6 +102,15 @@ class FakePi implements ExtensionHostLike {
     for (const handler of this.handlers.get(eventName) ?? []) {
       await (handler as ExtensionLifecycleHandler)({}, ctx);
     }
+  }
+
+  async emitInput(text: string, source = 'user'): Promise<Awaited<ReturnType<ExtensionInputHandler>> | undefined> {
+    const ctx = makeContext(this.events);
+    let latest: Awaited<ReturnType<ExtensionInputHandler>> | undefined;
+    for (const handler of this.handlers.get('input') ?? []) {
+      latest = await (handler as ExtensionInputHandler)({ text, source }, ctx);
+    }
+    return latest;
   }
 }
 
@@ -313,6 +323,138 @@ function fakePrepared(): PreparedAutopilotWorkstream {
   } as PreparedAutopilotWorkstream;
 }
 
+function setupToolResult(originalCommand: string, status: 'saved' | 'replay' | 'blocked'): Record<string, unknown> {
+  if (status === 'blocked') {
+    const preimage = {
+      schema_version: 'autopilot.roster_tool_result.v1' as const,
+      action: 'save' as const,
+      ok: false,
+      status: 'blocked' as const,
+      candidate_set: null,
+      receipt: null,
+      diagnostics: [rosterDiagnostic('ROSTER_STORAGE_TRUST_REQUIRED')],
+      write_count: 0,
+      lock_count: 0,
+      files_touched: [],
+    };
+    return { ...preimage, result_sha256: canonicalSha256(preimage) };
+  }
+  const savedRef = {
+    roster_id: ROSTER_ID,
+    roster_revision: 1,
+    roster_sha256: ROSTER_SHA,
+    assignment_set_sha256: ASSIGNMENT_SHA,
+    path: `~/.pi/agent/autopilot/rosters/${ROSTER_ID}/revision-1.json`,
+  };
+  const receiptPreimage = {
+    schema_version: 'autopilot.roster_setup_receipt.v1' as const,
+    receipt_id: status === 'replay' ? 'receipt-restart-fence-replay' : 'receipt-restart-fence-saved',
+    scope: 'user' as const,
+    saved_rosters: [savedRef],
+    default_roster_id: ROSTER_ID,
+    default_roster_revision: 1,
+    default_roster_sha256: ROSTER_SHA,
+    approved_candidate_set_sha256: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    approved_roster_sha256s: [ROSTER_SHA],
+    config_sha256: CONFIG_SHA,
+    original_command: originalCommand,
+    fresh_session_required: true,
+    zero_secrets: true,
+    issued_at: '2026-07-23T00:00:00.000Z',
+  };
+  const receipt = parseAutopilotRosterContract('autopilot.roster_setup_receipt.v1', { ...receiptPreimage, receipt_sha256: canonicalSha256(receiptPreimage) });
+  const preimage = {
+    schema_version: 'autopilot.roster_tool_result.v1' as const,
+    action: 'save' as const,
+    ok: true,
+    status: 'saved' as const,
+    candidate_set: null,
+    receipt,
+    diagnostics: [],
+    write_count: status === 'replay' ? 0 : 3,
+    lock_count: 1,
+    files_touched: status === 'replay' ? [] : ['/state/rosters/default.json'],
+  };
+  return parseAutopilotRosterContract('autopilot.roster_tool_result.v1', { ...preimage, result_sha256: canonicalSha256(preimage) }) as unknown as Record<string, unknown>;
+}
+
+function fakeSetupBundle(saveStatus: 'saved' | 'replay' | 'blocked'): AutopilotRosterSetupToolBundle {
+  const token = 'setup:restart-fence-000000000000000000000000';
+  const approvalToken = 'approval:restart-fence-00000000000000000000';
+  let active = false;
+  let approved = false;
+  const controller = {
+    activate: () => {
+      active = true;
+      approved = false;
+      return { ok: true, active: true, activation_token: token, session_id: 'session-unit', reason: 'activated' };
+    },
+    deactivate: (inputToken: string) => {
+      if (!active || inputToken !== token) return false;
+      active = false;
+      approved = false;
+      return true;
+    },
+    isActive: () => active,
+    currentActivationToken: () => active ? token : null,
+  };
+  const hostAuthorization = {
+    currentApprovalPresentation: () => active && !approved ? ({
+      schema_version: 'autopilot.roster_tool_request.v1',
+      activation_token: token,
+      scope: 'user',
+      candidate_set_sha256: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      approved_roster_sha256s: [ROSTER_SHA],
+      default_roster_id: ROSTER_ID,
+      default_roster_revision: 1,
+      default_roster_sha256: ROSTER_SHA,
+      original_command: '/autopilot demo first task',
+      presentation_sha256: 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+      presentation_text: 'approve restart fence save',
+    }) : null,
+    authorizeInput: (input: { readonly activation_token: string; readonly source?: string; readonly text: string }) => {
+      if (!active || input.activation_token !== token) return { ok: false, approval_token: null, reason: 'inactive' };
+      if (input.source !== 'user' || input.text.length === 0) return { ok: false, approval_token: null, reason: 'source-not-user' };
+      approved = true;
+      return { ok: true, approval_token: approvalToken, reason: 'approved' };
+    },
+  };
+  const tool = {
+    name: SETUP_TOOL_NAME,
+    label: 'Autopilot Roster Setup',
+    description: 'test setup tool',
+    promptSnippet: 'test',
+    promptGuidelines: [],
+    parameters: {},
+    async execute(_toolCallId: string, params: unknown) {
+      const request = typeof params === 'object' && params !== null ? params as Record<string, unknown> : {};
+      const originalCommand = typeof request['original_command'] === 'string' ? request['original_command'] : '/autopilot demo first task';
+      const details = active && approved && request['action'] === 'save'
+        ? setupToolResult(originalCommand, saveStatus)
+        : setupToolResult(originalCommand, 'blocked');
+      return { content: [{ type: 'text' as const, text: JSON.stringify(details) }], details };
+    },
+  };
+  return { tool, controller, hostAuthorization } as unknown as AutopilotRosterSetupToolBundle;
+}
+
+function setupSaveRequest(): Record<string, unknown> {
+  return {
+    schema_version: 'autopilot.roster_tool_request.v1',
+    action: 'save',
+    activation_token: 'setup:restart-fence-000000000000000000000000',
+    approval_token: 'approval:restart-fence-00000000000000000000',
+    scope: 'user',
+    trusted_project_root: null,
+    candidate_set_sha256: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    approved_roster_sha256s: [ROSTER_SHA],
+    default_roster_id: ROSTER_ID,
+    default_roster_revision: 1,
+    default_roster_sha256: ROSTER_SHA,
+    original_command: '/autopilot demo first task',
+  };
+}
+
 void describe('D69 W2 roster activation', () => {
   void it('parses strict leading --roster without changing legacy remainder behavior', () => {
     const parsed = parseAutopilotArgs(`demo --roster ${ROSTER_ID} build the feature`);
@@ -451,6 +593,90 @@ void describe('D69 W2 roster activation', () => {
       assert.equal(pi.messages.length, 0);
       assert.ok(events.some((event) => event.includes('ROSTER_QUALIFICATION_REQUIRED')));
     });
+  });
+
+  void it('fences same-session autopilot and inject after a proven setup save until session_start resets', async () => {
+    const events: string[] = [];
+    const pi = new FakePi(events);
+    let resolution: AutopilotRosterActivationResolution = setupRequiredResolution();
+    let resolveCalls = 0;
+    let prepareCalls = 0;
+    autopilotExtension(pi, {
+      rosterActivationStore: { resolve: async () => { resolveCalls += 1; events.push('resolve'); return resolution; } },
+      resolveSetupSkillPackage: () => fakePackage(),
+      createRosterSetupTool: () => fakeSetupBundle('saved'),
+      prepareAutopilotWorkstream: async () => { prepareCalls += 1; events.push('prepare'); return fakePrepared(); },
+      publishRuntimeRosterSnapshot: async () => ({ schema_version: 'autopilot.runtime_roster_snapshot_publication_result.v1', ok: true, status: 'published', selection_sha256: SELECTION_SHA, mirror_path: '/tmp/mirror.json', idempotent_replay: false, diagnostics: [], write_count: 1, lock_count: 0, files_touched: ['/tmp/mirror.json'] }),
+      attachSessionBridge: async () => { events.push('attach'); return true; },
+    });
+
+    await pi.commands.get(AUTOPILOT_COMMAND)?.handler('demo first task', makeContext(events));
+    assert.equal(resolveCalls, 1);
+    assert.equal(pi.activeTools.includes(SETUP_TOOL_NAME), true);
+    const approved = await pi.emitInput('I approve this exact setup save.', 'user');
+    assert.equal(approved?.action, 'transform');
+    const setupTool = pi.tools.find((tool) => tool.name === SETUP_TOOL_NAME);
+    assert.notEqual(setupTool?.execute, undefined);
+    await setupTool?.execute?.('tool-call', setupSaveRequest(), undefined, undefined, makeContext(events));
+    assert.equal(pi.activeTools.includes(SETUP_TOOL_NAME), false);
+
+    resolution = readyResolution();
+    const baselineMessages = pi.messages.length;
+    await pi.commands.get(AUTOPILOT_COMMAND)?.handler('demo first task', makeContext(events));
+    await pi.commands.get(AUTOPILOT_INJECT_COMMAND)?.handler('demo', makeContext(events));
+
+    assert.equal(resolveCalls, 1);
+    assert.equal(prepareCalls, 0);
+    assert.equal(events.some((event) => event.startsWith('find:')), false);
+    assert.equal(events.includes('setModel'), false);
+    assert.equal(pi.messages.length, baselineMessages);
+    assert.ok(events.some((event) => event === 'notify:Autopilot roster setup was saved in this Pi session. Start a fresh Pi session, then retry exactly the original command: /autopilot demo first task'));
+
+    await pi.emitLifecycle('session_start');
+    await pi.commands.get(AUTOPILOT_COMMAND)?.handler('demo first task', makeContext(events));
+    assert.equal(resolveCalls, 2);
+    assert.equal(prepareCalls, 1);
+    assert.equal(events.includes('setModel'), true);
+    assert.equal(events.some((event) => event === 'sendUserMessage'), true);
+  });
+
+  void it('fences idempotent saved receipt replay but not blocked setup saves', async () => {
+    const replayEvents: string[] = [];
+    const replayPi = new FakePi(replayEvents);
+    let replayResolveCalls = 0;
+    autopilotExtension(replayPi, {
+      rosterActivationStore: { resolve: async () => { replayResolveCalls += 1; return setupRequiredResolution(); } },
+      resolveSetupSkillPackage: () => fakePackage(),
+      createRosterSetupTool: () => fakeSetupBundle('replay'),
+    });
+    await replayPi.commands.get(AUTOPILOT_COMMAND)?.handler('demo first task', makeContext(replayEvents));
+    await replayPi.emitInput('I approve replay save.', 'user');
+    await replayPi.tools.find((tool) => tool.name === SETUP_TOOL_NAME)?.execute?.('tool-call', setupSaveRequest(), undefined, undefined, makeContext(replayEvents));
+    await replayPi.commands.get(AUTOPILOT_COMMAND)?.handler('demo first task', makeContext(replayEvents));
+    assert.equal(replayResolveCalls, 1);
+    assert.equal(replayEvents.some((event) => event.includes('Start a fresh Pi session, then retry exactly the original command: /autopilot demo first task')), true);
+
+    const blockedEvents: string[] = [];
+    const blockedPi = new FakePi(blockedEvents);
+    let blockedResolveCalls = 0;
+    let blockedPrepareCalls = 0;
+    let blockedResolution: AutopilotRosterActivationResolution = setupRequiredResolution();
+    autopilotExtension(blockedPi, {
+      rosterActivationStore: { resolve: async () => { blockedResolveCalls += 1; return blockedResolution; } },
+      resolveSetupSkillPackage: () => fakePackage(),
+      createRosterSetupTool: () => fakeSetupBundle('blocked'),
+      prepareAutopilotWorkstream: async () => { blockedPrepareCalls += 1; return fakePrepared(); },
+      publishRuntimeRosterSnapshot: async () => ({ schema_version: 'autopilot.runtime_roster_snapshot_publication_result.v1', ok: true, status: 'published', selection_sha256: SELECTION_SHA, mirror_path: '/tmp/mirror.json', idempotent_replay: false, diagnostics: [], write_count: 1, lock_count: 0, files_touched: ['/tmp/mirror.json'] }),
+      attachSessionBridge: async () => true,
+    });
+    await blockedPi.commands.get(AUTOPILOT_COMMAND)?.handler('demo first task', makeContext(blockedEvents));
+    await blockedPi.emitInput('I approve blocked save.', 'user');
+    await blockedPi.tools.find((tool) => tool.name === SETUP_TOOL_NAME)?.execute?.('tool-call', setupSaveRequest(), undefined, undefined, makeContext(blockedEvents));
+    blockedResolution = readyResolution();
+    await blockedPi.commands.get(AUTOPILOT_COMMAND)?.handler('demo first task', makeContext(blockedEvents));
+    assert.equal(blockedResolveCalls, 2);
+    assert.equal(blockedPrepareCalls, 1);
+    assert.equal(blockedEvents.some((event) => event.includes('Start a fresh Pi session')), false);
   });
 
   void it('deactivates the setup tool on session boundary', async () => {

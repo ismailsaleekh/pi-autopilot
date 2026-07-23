@@ -67,7 +67,7 @@ import { seedRosterByCandidate, type QualificationManifest, type Roster, type Ro
 import { resolveAndCommitPreRunSelection, type RunSelectionAuthority } from './core/roster/run-selection.ts';
 import { publishRuntimeRosterSnapshot, recoverRuntimeRosterSelection } from './core/roster/snapshot.ts';
 import { authorizeExistingRunRosterTransitionInput, buildExistingRunRosterTransitionProposal, commitApprovedExistingRunRosterTransition, consumeCommittedExistingRunRosterTransition, resolveCommittedExistingRunRosterTransitionChain, savedRosterRefForSelection, type ExistingRunRosterSuccessorAttemptAuthority, type ExistingRunRosterTransitionProposal, type ExistingRunRosterTransitionRunRef } from './core/roster/transition.ts';
-import { ROSTER_DIAGNOSTIC_CODES, rosterDiagnostic, type Digest, type RosterDiagnostic, type RosterDiagnosticCode } from './core/roster/route-policies.ts';
+import { ROSTER_DIAGNOSTIC_CODES, canonicalSha256, rosterDiagnostic, type Digest, type RosterDiagnostic, type RosterDiagnosticCode } from './core/roster/route-policies.ts';
 import { resolveNewRun, type NewRunResolutionSource, type PreRunSelection, type SavedRosterAuthority } from './core/roster/resolve.ts';
 import { RosterStorage, formatAuthorityPath, resolveRosterScopePaths, rosterRevisionPath, type RosterDefaultReadResult, type RosterSha256, type RosterStorageCodec, type RosterStorageDiagnostic, type RosterStorageScope, type SavedRosterRef } from './core/roster/storage.ts';
 import { readAuthorityFileIfPresent } from './core/roster/transaction.ts';
@@ -200,6 +200,7 @@ export interface AutopilotExtensionDependencies {
   readonly publishRuntimeRosterSnapshot?: ((input: Parameters<typeof publishRuntimeRosterSnapshot>[0]) => ReturnType<typeof publishRuntimeRosterSnapshot>) | undefined;
   readonly attachSessionBridge?: ((prepared: PreparedAutopilotWorkstream, ctx: ExtensionCommandContextLike) => Promise<boolean>) | undefined;
   readonly resolveSetupSkillPackage?: ((moduleUrl?: string) => VerifiedAutopilotRosterSetupSkillPackage) | undefined;
+  readonly createRosterSetupTool?: ((options: Parameters<typeof createAutopilotRosterSetupTool>[0]) => AutopilotRosterSetupToolBundle) | undefined;
   readonly now?: (() => Date) | undefined;
 }
 
@@ -966,6 +967,114 @@ function setupRequiredMessage(codes: readonly RosterDiagnostic[]): string {
   return `Autopilot roster setup is required before this run can start.${suffix} I activated the setup tool for this session only; save requires a fresh Pi session before retrying.`;
 }
 
+function setupRestartRequiredMessage(originalCommand: string): string {
+  return `Autopilot roster setup was saved in this Pi session. Start a fresh Pi session, then retry exactly the original command: ${originalCommand}`;
+}
+
+function plainRecord(value: unknown): Readonly<Record<string, unknown>> | null {
+  if (typeof value !== 'object' || value === null || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype) return null;
+  return value as Readonly<Record<string, unknown>>;
+}
+
+function provenSavedRosterSetupResult(value: unknown): { readonly originalCommand: string } | null {
+  const record = plainRecord(value);
+  if (record === null) return null;
+  if (record['schema_version'] === 'autopilot.roster_tool_result.v1') return provenSavedRosterSetupResultV1(record);
+  if (record['schema_version'] === 'autopilot.roster_tool_result.v2') return provenSavedRosterSetupResultV2(record);
+  return null;
+}
+
+function provenSavedRosterSetupResultV1(record: Readonly<Record<string, unknown>>): { readonly originalCommand: string } | null {
+  try {
+    const parsed = parseAutopilotRosterContract('autopilot.roster_tool_result.v1', record) as unknown as Readonly<Record<string, unknown>>;
+    if (parsed['action'] !== 'save' || parsed['ok'] !== true || parsed['status'] !== 'saved') return null;
+    return provenSavedRosterSetupReceipt(parsed['receipt']);
+  } catch {
+    return null;
+  }
+}
+
+function provenSavedRosterSetupResultV2(record: Readonly<Record<string, unknown>>): { readonly originalCommand: string } | null {
+  try {
+    const expectedKeys = new Set([
+      'schema_version',
+      'action',
+      'ok',
+      'status',
+      'candidate_set',
+      'custom_proposal',
+      'custom_validation',
+      'custom_roster',
+      'approval_binding',
+      'receipt',
+      'custom_receipt',
+      'diagnostics',
+      'write_count',
+      'lock_count',
+      'files_touched',
+      'result_sha256',
+    ]);
+    const keys = Object.keys(record);
+    if (keys.length !== expectedKeys.size || !keys.every((key) => expectedKeys.has(key))) return null;
+    if (record['action'] !== 'save' || record['ok'] !== true || record['status'] !== 'saved') return null;
+    const resultSha = typeof record['result_sha256'] === 'string' ? record['result_sha256'] : null;
+    if (resultSha === null) return null;
+    const preimage = { ...record } as Record<string, unknown>;
+    delete preimage['result_sha256'];
+    if (canonicalSha256(preimage) !== resultSha) return null;
+    const receipt = provenSavedRosterSetupReceipt(record['receipt']);
+    if (receipt === null) return null;
+    const customReceipt = record['custom_receipt'];
+    if (customReceipt !== null && !provenCustomSavedReceiptV2(customReceipt, record['receipt'])) return null;
+    return receipt;
+  } catch {
+    return null;
+  }
+}
+
+function provenCustomSavedReceiptV2(value: unknown, storageReceipt: unknown): boolean {
+  const custom = plainRecord(value);
+  const receipt = plainRecord(storageReceipt);
+  if (custom === null || receipt === null) return false;
+  const expectedKeys = new Set([
+    'schema_version',
+    'custom_proposal_sha256',
+    'validation_result_sha256',
+    'roster_sha256',
+    'manifest_sha256',
+    'approval_sha256',
+    'storage_receipt_sha256',
+    'config_sha256',
+    'custom_authority_path',
+    'custom_authority_sha256',
+    'zero_secrets',
+    'fresh_session_required',
+    'receipt_sha256',
+  ]);
+  const keys = Object.keys(custom);
+  if (keys.length !== expectedKeys.size || !keys.every((key) => expectedKeys.has(key))) return false;
+  if (custom['schema_version'] !== 'autopilot.custom_roster_setup_receipt.v2') return false;
+  if (custom['fresh_session_required'] !== true || custom['zero_secrets'] !== true) return false;
+  if (custom['storage_receipt_sha256'] !== receipt['receipt_sha256'] || custom['config_sha256'] !== receipt['config_sha256']) return false;
+  const receiptSha = typeof custom['receipt_sha256'] === 'string' ? custom['receipt_sha256'] : null;
+  if (receiptSha === null) return false;
+  const preimage = { ...custom } as Record<string, unknown>;
+  delete preimage['receipt_sha256'];
+  return canonicalSha256(preimage) === receiptSha;
+}
+
+function provenSavedRosterSetupReceipt(value: unknown): { readonly originalCommand: string } | null {
+  try {
+    const receipt = parseAutopilotRosterContract('autopilot.roster_setup_receipt.v1', value) as unknown as Readonly<Record<string, unknown>>;
+    if (receipt['fresh_session_required'] !== true || receipt['zero_secrets'] !== true) return null;
+    const originalCommand = receipt['original_command'];
+    if (typeof originalCommand !== 'string' || originalCommand.length === 0) return null;
+    return { originalCommand };
+  } catch {
+    return null;
+  }
+}
+
 function formatDiagnostics(diagnostics: readonly RosterDiagnostic[]): string {
   return diagnostics.length === 0 ? 'none' : diagnostics.map((diagnostic) => diagnostic.code).join(', ');
 }
@@ -1124,6 +1233,7 @@ export default function autopilotExtension(pi: ExtensionHostLike, dependencies: 
   const prepareWorkstream = dependencies.prepareAutopilotWorkstream ?? prepareAutopilotWorkstream;
   const publishRosterSnapshot = dependencies.publishRuntimeRosterSnapshot ?? publishRuntimeRosterSnapshot;
   const resolveSetupSkillPackage = dependencies.resolveSetupSkillPackage ?? resolveAutopilotRosterSetupSkillPackage;
+  const createRosterSetupTool = dependencies.createRosterSetupTool ?? createAutopilotRosterSetupTool;
   const clock = dependencies.now ?? (() => new Date());
 
   let contextBudgetRegistered = false;
@@ -1140,6 +1250,7 @@ export default function autopilotExtension(pi: ExtensionHostLike, dependencies: 
   let rosterSetupBundle: AutopilotRosterSetupToolBundle | null = null;
   let rosterSetupActivationToken: string | null = null;
   let rosterSetupSkillPath: string | null = null;
+  let rosterSetupFreshSessionFence: { readonly originalCommand: string } | false = false;
   let pendingRosterTransition: { readonly proposal: ExistingRunRosterTransitionProposal; readonly run: ExistingRunRosterTransitionRunRef; readonly active: ActiveAutopilotRow; readonly originalCommand: string } | null = null;
 
   function activateContextBudget(): void {
@@ -1193,12 +1304,13 @@ export default function autopilotExtension(pi: ExtensionHostLike, dependencies: 
   function resetRosterSetupForSession(): void {
     deactivateRosterSetupTool();
     rosterSetupBundle = null;
+    rosterSetupFreshSessionFence = false;
     pendingRosterTransition = null;
   }
 
   function ensureRosterSetupBundle(): AutopilotRosterSetupToolBundle {
     if (rosterSetupBundle !== null) return rosterSetupBundle;
-    const bundle = createAutopilotRosterSetupTool({
+    const bundle = createRosterSetupTool({
       saveApproved: async (input) => {
         const request = input.request;
         const stateRoot = dependencies.rosterStateRoot;
@@ -1327,9 +1439,23 @@ export default function autopilotExtension(pi: ExtensionHostLike, dependencies: 
         }
       },
     });
-    pi.registerTool(bundle.tool);
-    rosterSetupBundle = bundle;
-    return bundle;
+    const baseTool = bundle.tool;
+    const wrappedTool: AutopilotRosterSetupToolBundle['tool'] = {
+      ...baseTool,
+      async execute(toolCallId, params, signal, onUpdate, ctx) {
+        const output = await baseTool.execute(toolCallId, params, signal, onUpdate, ctx);
+        const saved = provenSavedRosterSetupResult(output.details);
+        if (saved !== null) {
+          rosterSetupFreshSessionFence = { originalCommand: saved.originalCommand };
+          deactivateRosterSetupTool();
+        }
+        return output;
+      },
+    };
+    const wrappedBundle: AutopilotRosterSetupToolBundle = { ...bundle, tool: wrappedTool };
+    pi.registerTool(wrappedBundle.tool);
+    rosterSetupBundle = wrappedBundle;
+    return wrappedBundle;
   }
 
   async function activateRosterSetup(ctx: ExtensionCommandContextLike, originalCommand: string, diagnostics: readonly RosterDiagnostic[]): Promise<void> {
@@ -1433,6 +1559,12 @@ export default function autopilotExtension(pi: ExtensionHostLike, dependencies: 
   function rawSessionId(ctx: ExtensionCommandContextLike): string {
     const sessionId = ctx.sessionManager?.getSessionId();
     return sessionId === undefined || sessionId.length === 0 ? lifecycleSessionId : sessionId;
+  }
+
+  function failIfRosterSetupRestartRequired(ctx: ExtensionCommandContextLike): boolean {
+    if (rosterSetupFreshSessionFence === false) return false;
+    notify(ctx, setupRestartRequiredMessage(rosterSetupFreshSessionFence.originalCommand), 'error');
+    return true;
   }
 
   async function attachSessionBridge(prepared: PreparedAutopilotWorkstream, ctx: ExtensionCommandContextLike): Promise<boolean> {
@@ -1712,6 +1844,7 @@ export default function autopilotExtension(pi: ExtensionHostLike, dependencies: 
       }
 
       const originalCommand = originalAutopilotCommand(args);
+      if (failIfRosterSetupRestartRequired(ctx)) return;
       const activationNow = clock();
       const plannedWorkstreamRun = buildAutopilotWorkstreamRun(parsed.value.workstream, activationNow);
       const rosterResolution = await rosterActivationStore.resolve({ parsed: parsed.value, ctx, originalCommand, env: process.env, plannedWorkstreamRun, now: activationNow });
@@ -1786,6 +1919,7 @@ export default function autopilotExtension(pi: ExtensionHostLike, dependencies: 
 
       const autopilotEquivalent: ParsedAutopilotArgs = { workstream: parsed.value.workstream, remainder: '', rosterId: null };
       const originalCommand = `/${AUTOPILOT_COMMAND} ${parsed.value.workstream}`;
+      if (failIfRosterSetupRestartRequired(ctx)) return;
       const activationNow = clock();
       const plannedWorkstreamRun = buildAutopilotWorkstreamRun(parsed.value.workstream, activationNow);
       const rosterResolution = await rosterActivationStore.resolve({ parsed: autopilotEquivalent, ctx, originalCommand, env: process.env, plannedWorkstreamRun, now: activationNow });

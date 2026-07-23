@@ -30,7 +30,7 @@ import { seedRosterByCandidate } from "./core/roster/provider-recipes.js";
 import { resolveAndCommitPreRunSelection } from "./core/roster/run-selection.js";
 import { publishRuntimeRosterSnapshot, recoverRuntimeRosterSelection } from "./core/roster/snapshot.js";
 import { authorizeExistingRunRosterTransitionInput, buildExistingRunRosterTransitionProposal, commitApprovedExistingRunRosterTransition, consumeCommittedExistingRunRosterTransition, resolveCommittedExistingRunRosterTransitionChain, savedRosterRefForSelection } from "./core/roster/transition.js";
-import { ROSTER_DIAGNOSTIC_CODES, rosterDiagnostic } from "./core/roster/route-policies.js";
+import { ROSTER_DIAGNOSTIC_CODES, canonicalSha256, rosterDiagnostic } from "./core/roster/route-policies.js";
 import { resolveNewRun } from "./core/roster/resolve.js";
 import { RosterStorage, formatAuthorityPath, resolveRosterScopePaths, rosterRevisionPath } from "./core/roster/storage.js";
 import { readAuthorityFileIfPresent } from "./core/roster/transaction.js";
@@ -735,6 +735,129 @@ function setupRequiredMessage(codes) {
     const suffix = codes.length === 0 ? '' : ` Diagnostics: ${codes.map((diagnostic) => diagnostic.code).join(', ')}.`;
     return `Autopilot roster setup is required before this run can start.${suffix} I activated the setup tool for this session only; save requires a fresh Pi session before retrying.`;
 }
+function setupRestartRequiredMessage(originalCommand) {
+    return `Autopilot roster setup was saved in this Pi session. Start a fresh Pi session, then retry exactly the original command: ${originalCommand}`;
+}
+function plainRecord(value) {
+    if (typeof value !== 'object' || value === null || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype)
+        return null;
+    return value;
+}
+function provenSavedRosterSetupResult(value) {
+    const record = plainRecord(value);
+    if (record === null)
+        return null;
+    if (record['schema_version'] === 'autopilot.roster_tool_result.v1')
+        return provenSavedRosterSetupResultV1(record);
+    if (record['schema_version'] === 'autopilot.roster_tool_result.v2')
+        return provenSavedRosterSetupResultV2(record);
+    return null;
+}
+function provenSavedRosterSetupResultV1(record) {
+    try {
+        const parsed = parseAutopilotRosterContract('autopilot.roster_tool_result.v1', record);
+        if (parsed['action'] !== 'save' || parsed['ok'] !== true || parsed['status'] !== 'saved')
+            return null;
+        return provenSavedRosterSetupReceipt(parsed['receipt']);
+    }
+    catch {
+        return null;
+    }
+}
+function provenSavedRosterSetupResultV2(record) {
+    try {
+        const expectedKeys = new Set([
+            'schema_version',
+            'action',
+            'ok',
+            'status',
+            'candidate_set',
+            'custom_proposal',
+            'custom_validation',
+            'custom_roster',
+            'approval_binding',
+            'receipt',
+            'custom_receipt',
+            'diagnostics',
+            'write_count',
+            'lock_count',
+            'files_touched',
+            'result_sha256',
+        ]);
+        const keys = Object.keys(record);
+        if (keys.length !== expectedKeys.size || !keys.every((key) => expectedKeys.has(key)))
+            return null;
+        if (record['action'] !== 'save' || record['ok'] !== true || record['status'] !== 'saved')
+            return null;
+        const resultSha = typeof record['result_sha256'] === 'string' ? record['result_sha256'] : null;
+        if (resultSha === null)
+            return null;
+        const preimage = { ...record };
+        delete preimage['result_sha256'];
+        if (canonicalSha256(preimage) !== resultSha)
+            return null;
+        const receipt = provenSavedRosterSetupReceipt(record['receipt']);
+        if (receipt === null)
+            return null;
+        const customReceipt = record['custom_receipt'];
+        if (customReceipt !== null && !provenCustomSavedReceiptV2(customReceipt, record['receipt']))
+            return null;
+        return receipt;
+    }
+    catch {
+        return null;
+    }
+}
+function provenCustomSavedReceiptV2(value, storageReceipt) {
+    const custom = plainRecord(value);
+    const receipt = plainRecord(storageReceipt);
+    if (custom === null || receipt === null)
+        return false;
+    const expectedKeys = new Set([
+        'schema_version',
+        'custom_proposal_sha256',
+        'validation_result_sha256',
+        'roster_sha256',
+        'manifest_sha256',
+        'approval_sha256',
+        'storage_receipt_sha256',
+        'config_sha256',
+        'custom_authority_path',
+        'custom_authority_sha256',
+        'zero_secrets',
+        'fresh_session_required',
+        'receipt_sha256',
+    ]);
+    const keys = Object.keys(custom);
+    if (keys.length !== expectedKeys.size || !keys.every((key) => expectedKeys.has(key)))
+        return false;
+    if (custom['schema_version'] !== 'autopilot.custom_roster_setup_receipt.v2')
+        return false;
+    if (custom['fresh_session_required'] !== true || custom['zero_secrets'] !== true)
+        return false;
+    if (custom['storage_receipt_sha256'] !== receipt['receipt_sha256'] || custom['config_sha256'] !== receipt['config_sha256'])
+        return false;
+    const receiptSha = typeof custom['receipt_sha256'] === 'string' ? custom['receipt_sha256'] : null;
+    if (receiptSha === null)
+        return false;
+    const preimage = { ...custom };
+    delete preimage['receipt_sha256'];
+    return canonicalSha256(preimage) === receiptSha;
+}
+function provenSavedRosterSetupReceipt(value) {
+    try {
+        const receipt = parseAutopilotRosterContract('autopilot.roster_setup_receipt.v1', value);
+        if (receipt['fresh_session_required'] !== true || receipt['zero_secrets'] !== true)
+            return null;
+        const originalCommand = receipt['original_command'];
+        if (typeof originalCommand !== 'string' || originalCommand.length === 0)
+            return null;
+        return { originalCommand };
+    }
+    catch {
+        return null;
+    }
+}
 function formatDiagnostics(diagnostics) {
     return diagnostics.length === 0 ? 'none' : diagnostics.map((diagnostic) => diagnostic.code).join(', ');
 }
@@ -863,6 +986,7 @@ export default function autopilotExtension(pi, dependencies = {}) {
     const prepareWorkstream = dependencies.prepareAutopilotWorkstream ?? prepareAutopilotWorkstream;
     const publishRosterSnapshot = dependencies.publishRuntimeRosterSnapshot ?? publishRuntimeRosterSnapshot;
     const resolveSetupSkillPackage = dependencies.resolveSetupSkillPackage ?? resolveAutopilotRosterSetupSkillPackage;
+    const createRosterSetupTool = dependencies.createRosterSetupTool ?? createAutopilotRosterSetupTool;
     const clock = dependencies.now ?? (() => new Date());
     let contextBudgetRegistered = false;
     let claimResponseToolRegistered = false;
@@ -878,6 +1002,7 @@ export default function autopilotExtension(pi, dependencies = {}) {
     let rosterSetupBundle = null;
     let rosterSetupActivationToken = null;
     let rosterSetupSkillPath = null;
+    let rosterSetupFreshSessionFence = false;
     let pendingRosterTransition = null;
     function activateContextBudget() {
         if (!contextBudgetRegistered) {
@@ -930,12 +1055,13 @@ export default function autopilotExtension(pi, dependencies = {}) {
     function resetRosterSetupForSession() {
         deactivateRosterSetupTool();
         rosterSetupBundle = null;
+        rosterSetupFreshSessionFence = false;
         pendingRosterTransition = null;
     }
     function ensureRosterSetupBundle() {
         if (rosterSetupBundle !== null)
             return rosterSetupBundle;
-        const bundle = createAutopilotRosterSetupTool({
+        const bundle = createRosterSetupTool({
             saveApproved: async (input) => {
                 const request = input.request;
                 const stateRoot = dependencies.rosterStateRoot;
@@ -1068,9 +1194,23 @@ export default function autopilotExtension(pi, dependencies = {}) {
                 }
             },
         });
-        pi.registerTool(bundle.tool);
-        rosterSetupBundle = bundle;
-        return bundle;
+        const baseTool = bundle.tool;
+        const wrappedTool = {
+            ...baseTool,
+            async execute(toolCallId, params, signal, onUpdate, ctx) {
+                const output = await baseTool.execute(toolCallId, params, signal, onUpdate, ctx);
+                const saved = provenSavedRosterSetupResult(output.details);
+                if (saved !== null) {
+                    rosterSetupFreshSessionFence = { originalCommand: saved.originalCommand };
+                    deactivateRosterSetupTool();
+                }
+                return output;
+            },
+        };
+        const wrappedBundle = { ...bundle, tool: wrappedTool };
+        pi.registerTool(wrappedBundle.tool);
+        rosterSetupBundle = wrappedBundle;
+        return wrappedBundle;
     }
     async function activateRosterSetup(ctx, originalCommand, diagnostics) {
         if (pi.getActiveTools === undefined || pi.setActiveTools === undefined) {
@@ -1171,6 +1311,12 @@ export default function autopilotExtension(pi, dependencies = {}) {
     function rawSessionId(ctx) {
         const sessionId = ctx.sessionManager?.getSessionId();
         return sessionId === undefined || sessionId.length === 0 ? lifecycleSessionId : sessionId;
+    }
+    function failIfRosterSetupRestartRequired(ctx) {
+        if (rosterSetupFreshSessionFence === false)
+            return false;
+        notify(ctx, setupRestartRequiredMessage(rosterSetupFreshSessionFence.originalCommand), 'error');
+        return true;
     }
     async function attachSessionBridge(prepared, ctx) {
         if (sessionBridge !== null && sessionBridge.attachment.context.workstream_run === prepared.active.workstream_run) {
@@ -1454,6 +1600,8 @@ export default function autopilotExtension(pi, dependencies = {}) {
                 return;
             }
             const originalCommand = originalAutopilotCommand(args);
+            if (failIfRosterSetupRestartRequired(ctx))
+                return;
             const activationNow = clock();
             const plannedWorkstreamRun = buildAutopilotWorkstreamRun(parsed.value.workstream, activationNow);
             const rosterResolution = await rosterActivationStore.resolve({ parsed: parsed.value, ctx, originalCommand, env: process.env, plannedWorkstreamRun, now: activationNow });
@@ -1522,6 +1670,8 @@ export default function autopilotExtension(pi, dependencies = {}) {
             }
             const autopilotEquivalent = { workstream: parsed.value.workstream, remainder: '', rosterId: null };
             const originalCommand = `/${AUTOPILOT_COMMAND} ${parsed.value.workstream}`;
+            if (failIfRosterSetupRestartRequired(ctx))
+                return;
             const activationNow = clock();
             const plannedWorkstreamRun = buildAutopilotWorkstreamRun(parsed.value.workstream, activationNow);
             const rosterResolution = await rosterActivationStore.resolve({ parsed: autopilotEquivalent, ctx, originalCommand, env: process.env, plannedWorkstreamRun, now: activationNow });

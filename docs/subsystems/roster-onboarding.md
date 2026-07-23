@@ -81,8 +81,8 @@ covers_sources:
   - src/internal/execution-observer-extension.ts
   - templates/skills/autopilot-roster-setup/SKILL.md
   - templates/skills/autopilot-roster-setup/payload.json
-signature_hash: 'sha256:d46aa43fe4e3f719f06711948472b74c8014073e643e7d1e579233ea219cabed'
-body_hash: 'sha256:11e615ca9a246907917953eaaf745d74609b44300cc847ee7e87141f87efd727'
+signature_hash: 'sha256:bd1da59e0a6671dc413bf2f0b6d8109d3efa5fa5a87f716a73aba4c32c7a9603'
+body_hash: 'sha256:d88a3103cdbee1d993952fdeebfc0b270d2c9df16fb460395c3312cf5d2da4b4'
 stability: evolving
 ---
 
@@ -186,7 +186,8 @@ When no selectable roster exists, `/autopilot` stays pre-run. `src/extension.ts`
   provider calls, tests, builds, or source mutation.
 
 The tool is normally inactive. It rejects calls with a missing or stale activation token,
-and `session_start`/`session_shutdown` deactivate it. `inspect`, provider
+`session_start`/`session_shutdown` deactivate it, and a proven saved setup result
+immediately consumes the same-session activation. `inspect`, provider
 `propose`/`refine`, custom v2 `propose-custom`, `doctor`, and `reject` are zero-write
 and zero-lock operations. Custom v2 proposals validate the exact natural-language
 intent, inventory route facts, role coverage, request profile fields, and optional
@@ -227,8 +228,12 @@ package-reviewed live trust pin promotes the exact provider or custom roster.
 A successful save, when possible, writes immutable roster revision files first, publishes
 any bound custom certification authority before config, writes `config.json` last,
 reads back every byte/hash, emits a secret-free receipt, sets
-`fresh_session_required=true`, and forbids same-session auto-start. The user must open a
-fresh Pi session and retry the receipt's original command byte-for-byte.
+`fresh_session_required=true`, and installs an in-memory same-session restart fence.
+While that fence is set, `/autopilot` and `/autopilot-inject` fail before roster
+resolution, model selection, worktree/coordinator/session/snapshot creation, prompt
+delivery, or spend. The fence is not persisted and resets only on a genuine
+`session_start`; the user must open a fresh Pi session and retry the receipt's original
+command byte-for-byte.
 
 ## Paths and authority roots
 
