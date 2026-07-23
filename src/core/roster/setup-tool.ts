@@ -15,6 +15,23 @@ import {
 } from './provider-recipes.ts';
 import { applyW4ProviderRegistryReadinessToCandidateSet } from './providers/index.ts';
 import {
+  CUSTOM_ROSTER_TOOL_UNSUPPORTED_DIAGNOSTIC,
+  isCustomRosterUnsupportedToolPayload,
+} from './custom-certification.ts';
+export {
+  CUSTOM_ROSTER_REQUEST_SCHEMA,
+  CUSTOM_ROSTER_VALIDATION_RESULT_SCHEMA,
+  CUSTOM_ROSTER_TOOL_UNSUPPORTED_DIAGNOSTIC,
+  buildUserCustomRosterFromAssignments,
+  validateCustomRosterSetupRequest,
+  verifyCustomRosterManifestForRoster,
+} from './custom-certification.ts';
+export type {
+  CustomRosterSetupRequest,
+  CustomRosterSetupValidationResult,
+  CustomRosterManifestVerificationResult,
+} from './custom-certification.ts';
+import {
   ROSTER_DIAGNOSTIC_CODES,
   type Digest,
   type RosterDiagnostic,
@@ -253,7 +270,7 @@ export function createAutopilotRosterSetupTool(options: CreateRosterSetupToolOpt
       }
       const parsed = parseRequest(params);
       if (!parsed.ok) {
-        return textResult(resultForFailure(parsed.action, 'failed', ['ROSTER_READBACK_MISMATCH']));
+        return textResult(resultForFailure(parsed.action, parsed.status, parsed.codes));
       }
       const request = parsed.request;
       if (!controller.accepts(request.activation_token)) {
@@ -869,15 +886,16 @@ function sortDiagnostics(diagnostics: readonly ToolDiagnostic[]): readonly ToolD
   return [...byCode.values()].sort((left, right) => left.code.localeCompare(right.code));
 }
 
-function parseRequest(value: unknown): { readonly ok: true; readonly request: RosterToolRequest } | { readonly ok: false; readonly action: ResultAction } {
+function parseRequest(value: unknown): { readonly ok: true; readonly request: RosterToolRequest } | { readonly ok: false; readonly action: ResultAction; readonly status: Extract<ResultStatus, 'blocked' | 'failed'>; readonly codes: readonly string[] } {
+  const unsupportedCustomPath = isCustomRosterUnsupportedToolPayload(value);
   if (typeof value !== 'object' || value === null || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype) {
-    return { ok: false, action: 'inspect' };
+    return parseFailure('inspect', unsupportedCustomPath);
   }
   const record = value as Readonly<Record<string, unknown>>;
   const rawAction = record['action'];
   const action = typeof rawAction === 'string' && isInputAction(rawAction) ? rawAction : null;
-  if (!hasExactRequestKeys(record) || action === null) return { ok: false, action: action === null ? 'inspect' : resultActionForInput(action) };
-  if (record['schema_version'] !== REQUEST_SCHEMA) return { ok: false, action: resultActionForInput(action) };
+  if (!hasExactRequestKeys(record) || action === null) return parseFailure(action === null ? 'inspect' : resultActionForInput(action), unsupportedCustomPath);
+  if (record['schema_version'] !== REQUEST_SCHEMA) return parseFailure(resultActionForInput(action), unsupportedCustomPath);
   const activationToken = stringField(record, 'activation_token');
   const approvalToken = nullableStringField(record, 'approval_token');
   const scope = scopeField(record['scope']);
@@ -895,7 +913,7 @@ function parseRequest(value: unknown): { readonly ok: true; readonly request: Ro
     approved === null || defaultRosterId === undefined || defaultRosterRevision === undefined || defaultRosterSha === undefined ||
     originalCommand === null || originalCommand.length === 0 || originalCommand.length > 4096
   ) {
-    return { ok: false, action: resultActionForInput(action) };
+    return parseFailure(resultActionForInput(action), unsupportedCustomPath);
   }
   return {
     ok: true,
@@ -914,6 +932,15 @@ function parseRequest(value: unknown): { readonly ok: true; readonly request: Ro
       original_command: originalCommand,
     },
   };
+}
+
+function parseFailure(
+  action: ResultAction,
+  unsupportedCustomPath: boolean,
+): { readonly ok: false; readonly action: ResultAction; readonly status: Extract<ResultStatus, 'blocked' | 'failed'>; readonly codes: readonly string[] } {
+  return unsupportedCustomPath
+    ? { ok: false, action, status: 'blocked', codes: [CUSTOM_ROSTER_TOOL_UNSUPPORTED_DIAGNOSTIC] }
+    : { ok: false, action, status: 'failed', codes: ['ROSTER_READBACK_MISMATCH'] };
 }
 
 function hasExactRequestKeys(record: Readonly<Record<string, unknown>>): boolean {

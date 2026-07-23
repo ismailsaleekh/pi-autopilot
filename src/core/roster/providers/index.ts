@@ -1,6 +1,22 @@
 import {
   parseAutopilotRosterContract,
 } from '../contracts.ts';
+export {
+  CURRENT_CUSTOM_ROSTER_TRUST_REGISTRY,
+  CUSTOM_ROSTER_REQUEST_SCHEMA,
+  CUSTOM_ROSTER_VALIDATION_RESULT_SCHEMA,
+  CUSTOM_ROSTER_TOOL_UNSUPPORTED_DIAGNOSTIC,
+  buildUserCustomRosterFromAssignments,
+  requiredCustomRosterEvidenceRefs,
+  validateCustomRosterSetupRequest,
+  verifyCustomRosterManifestForRoster,
+} from '../custom-certification.ts';
+export type {
+  CustomRosterManifestVerificationResult,
+  CustomRosterSetupRequest,
+  CustomRosterSetupValidationResult,
+  W5CustomRosterIssue,
+} from '../custom-certification.ts';
 import {
   buildW4CertifiedRosterForCandidate,
   getProviderRecipe,
