@@ -78,7 +78,8 @@
     "test:d65-extract": "node --experimental-strip-types --test --test-concurrency=1 tests/unit/terminal-acceptance-role-registry.test.ts tests/e2e/extract-terminal-chain.test.ts",
     "test:d65-graph": "node --experimental-strip-types --test --test-concurrency=1 tests/unit/semantic-graph-contract.test.ts tests/multiprocess/semantic-graph-authority.test.ts tests/crash/semantic-graph-publication.test.ts",
     "test:d65-cap": "node --experimental-strip-types --test --test-concurrency=1 tests/unit/launch-policy-contract.test.ts tests/multiprocess/launch-policy-enforcement.test.ts tests/crash/launch-policy-replay.test.ts",
-    "test:d65": "npm run test:d65-stream && npm run test:d65-extract && npm run test:d65-graph && npm run test:d65-cap"
+    "test:d65": "npm run test:d65-stream && npm run test:d65-extract && npm run test:d65-graph && npm run test:d65-cap",
+    "test:phase37-w0": "node --experimental-strip-types --test tests/phase37/phase37-w0-contract-freeze.test.ts"
   },
   "pi": {
     "extensions": [
