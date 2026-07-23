@@ -20,7 +20,7 @@ import { AUTOPILOT_RUN_SCOPED_FAULT_SCHEMA, parseRunScopedLogicalFault, type Run
 import { assertMetadataReconcileEvidence, parseMetadataReconcileEvidence } from './metadata-reconcile.ts';
 import { COORDINATOR_BUSY_TIMEOUT_MS, COORDINATOR_DATABASE_SCHEMA_VERSION, COORDINATOR_GRANT_OFFER_TTL_MS, COORDINATOR_IMPLEMENTATION_BUILD, COORDINATOR_LEGACY_FACADE_BUILD, COORDINATOR_PACKAGE_BUILD, COORDINATOR_STORE_SCHEMA_VERSION, COORDINATOR_WIRE_LINEAGE, enforcePrivateAuthorityPath, enforceWindowsPrivateAcl, ensureCoordinatorPrivateRoots, type CoordinatorRuntimePaths } from './runtime-paths.ts';
 import { byteBudgetPage, COORDINATOR_MAX_PAGE_ENTITY_BYTES, COORDINATOR_PAGE_TARGET_BYTES, encodePaginationCursor, encodedJsonBytes, paginationCursorState, paginationRevision, paginationScope, parsePaginationCursor } from './pagination.ts';
-import { activeCoordinationMigrationFreeze, assertCoordinationDispatchAllowed, assertCoordinationFrozenMutationAllowed, assertCoordinationMigrationRecoveryOperationAuthorized, coordinationCutoverCommitted } from './migration-paths.ts';
+import { activeCoordinationMigrationFreeze, assertCoordinationFrozenMutationAllowed, assertCoordinationMigrationRecoveryOperationAuthorized, assertCoordinationRepositoryDispatchAllowed, coordinationCutoverCommitted } from './migration-paths.ts';
 import { proveStructuredAttemptTerminal, type TrustedTerminalAttemptProof } from './terminal-attempt-proof.ts';
 import { classifyCoordinationIntegrationConflict } from './integration-conflicts.ts';
 import { deriveD65BootstrapTransaction, type D65GitBlobObserver } from './d65-bootstrap-transaction.ts';
@@ -2789,7 +2789,7 @@ export class CoordinatorStore {
     if (!queryActions.has(request.action)) {
       if (request.action === 'attach-migration-recovery') assertCoordinationMigrationRecoveryOperationAuthorized(this.#stateRoot, request.payload['migration_operation_token']);
       if (activeCoordinationMigrationFreeze(this.#stateRoot) !== null) assertCoordinationFrozenMutationAllowed(this.#stateRoot, request.repo_id, request.action, request.payload['migration_operation_token']);
-      else assertCoordinationDispatchAllowed(this.#stateRoot, request.repo_id, `coordinator mutation ${request.action}`);
+      else assertCoordinationRepositoryDispatchAllowed(this.#stateRoot, request.repo_id, `coordinator mutation ${request.action}`);
     }
     switch (request.action) {
       case 'handshake': return this.handshake();
