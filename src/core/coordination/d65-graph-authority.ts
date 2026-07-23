@@ -5,8 +5,10 @@ import {
   parseAutopilotExecutionAudit,
   parseAutopilotExecutionCommit,
   parseAutopilotReceipt,
+  parseAutopilotReceiptV2,
   parseAutopilotStatusEntry,
   parseAutopilotUnitSpec,
+  parseAutopilotUnitSpecV2,
   type AutopilotMasterPlan,
   type AutopilotState,
 } from '../contracts/index.ts';
@@ -266,24 +268,28 @@ function parseClosedValidationStalenessV2(value: unknown): unknown {
 const extractor = (field_path: string, base: 'repository' | 'runtime', target_collection: D65GraphAuthorityCollection | 'core', digest_field_path: string | null = null, byte_count_field_path: string | null = null, options: Partial<Pick<D65GraphRefExtractor, 'presence' | 'shape' | 'absolute_runtime_output'>> = {}): D65GraphRefExtractor => Object.freeze({ field_path, base, target_collection, digest_field_path, byte_count_field_path, traverse: true, presence: options.presence ?? 'required', shape: options.shape ?? 'ref', absolute_runtime_output: options.absolute_runtime_output ?? false });
 const schema = (schema_version: string, parser: D65GraphAuthorityParser, ref_extractors: readonly D65GraphRefExtractor[] = []): D65GraphAuthoritySchemaRegistration => Object.freeze({ schema_version, parser, ref_extractors: Object.freeze([...ref_extractors]) });
 const row = (collection: D65GraphAuthorityCollection, roots: readonly string[], schemas: readonly D65GraphAuthoritySchemaRegistration[], direct_children_only = false, opaque = false): D65GraphAuthorityRegistryRow => Object.freeze({ collection, roots: Object.freeze([...roots]), direct_children_only, schemas: Object.freeze([...schemas]), opaque });
+const unitSpecRefExtractors = (): readonly D65GraphRefExtractor[] => Object.freeze([
+  extractor('upstream_refs[].status_ref', 'runtime', 'statuses'),
+  extractor('upstream_refs[].audit_ref', 'runtime', 'audits'),
+  extractor('status_output', 'runtime', 'statuses', null, null, { presence: 'declared-output', absolute_runtime_output: true }),
+  extractor('receipt_output', 'runtime', 'receipts', null, null, { presence: 'declared-output', absolute_runtime_output: true }),
+  extractor('evidence_dir', 'runtime', 'evidence', null, null, { presence: 'declared-output', shape: 'directory', absolute_runtime_output: true }),
+]);
 
 export const D65_GRAPH_AUTHORITY_REGISTRY: readonly D65GraphAuthorityRegistryRow[] = Object.freeze([
   row('authorities', ['authority/'], [schema('autopilot.authority.v1', parseAutopilotAuthority)], true),
   row('authorities', ['authority/continuation/'], [schema(D65_CONTINUATION_EVENT_SCHEMA, parseD65ContinuationEvent), schema(D65_PARENT_LOSS_SCHEMA, parseD65ParentLoss)]),
-  row('specs', ['unit-specs/'], [schema('autopilot.unit_spec.v1', parseAutopilotUnitSpec, [
-    extractor('upstream_refs[].status_ref', 'runtime', 'statuses'),
-    extractor('upstream_refs[].audit_ref', 'runtime', 'audits'),
-    extractor('status_output', 'runtime', 'statuses', null, null, { presence: 'declared-output', absolute_runtime_output: true }),
-    extractor('receipt_output', 'runtime', 'receipts', null, null, { presence: 'declared-output', absolute_runtime_output: true }),
-    extractor('evidence_dir', 'runtime', 'evidence', null, null, { presence: 'declared-output', shape: 'directory', absolute_runtime_output: true }),
-  ])]),
+  row('specs', ['unit-specs/'], [
+    schema('autopilot.unit_spec.v2', parseAutopilotUnitSpecV2, unitSpecRefExtractors()),
+    schema('autopilot.unit_spec.v1', parseAutopilotUnitSpec, unitSpecRefExtractors()),
+  ]),
   row('statuses', ['statuses/'], [schema('autopilot.status.v1', parseAutopilotStatusEntry, [
     extractor('findings[].evidence_refs[].path', 'runtime', 'evidence', 'findings[].evidence_refs[].sha256', 'findings[].evidence_refs[].byte_count'),
     extractor('evidence_refs[].path', 'runtime', 'evidence', 'evidence_refs[].sha256', 'evidence_refs[].byte_count'),
     extractor('report_ref.path', 'runtime', 'evidence', 'report_ref.sha256', 'report_ref.byte_count'),
     extractor('commands[].evidence_ref', 'runtime', 'evidence'),
   ])]),
-  row('receipts', ['receipts/'], [schema('autopilot.receipt.v1', parseAutopilotReceipt)]),
+  row('receipts', ['receipts/'], [schema('autopilot.receipt.v2', parseAutopilotReceiptV2), schema('autopilot.receipt.v1', parseAutopilotReceipt)]),
   row('audits', ['execution-audits/'], [schema('autopilot.execution_audit.v1', parseAutopilotExecutionAudit, [
     extractor('evidence_refs[].path', 'runtime', 'evidence', 'evidence_refs[].sha256', 'evidence_refs[].byte_count'),
   ])]),
@@ -413,6 +419,38 @@ function assertExternalPath(schemaVersion: string, ref: string, parsed: unknown)
   } else if (schemaVersion === D65_SUBSCRIPTION_PROBE_SCHEMA) {
     const sequence = parsed['probe_sequence']; const id = parsed['probe_id'];
     if (typeof sequence !== 'number' || !Number.isSafeInteger(sequence) || sequence < 1 || typeof id !== 'string' || ref !== `authority/subscription-probes/${String(sequence).padStart(20, '0')}-${id}.json`) fail('subscription probe ref does not bind sequence and probe_id', [ref]);
+  }
+}
+
+function assertRuntimeSpecReceiptCoherence(parsedByRef: ReadonlyMap<string, unknown>, runtimePrefix: string): void {
+  const specByUnit = new Map<string, JsonObject>();
+  const receiptByUnit = new Map<string, JsonObject>();
+  for (const [ref, parsed] of parsedByRef) {
+    if (!ref.startsWith(`${runtimePrefix}/`) || !isJsonObject(parsed)) continue;
+    const schemaVersion = parsed['schema_version'];
+    if (schemaVersion !== 'autopilot.unit_spec.v1' && schemaVersion !== 'autopilot.unit_spec.v2' && schemaVersion !== 'autopilot.receipt.v1' && schemaVersion !== 'autopilot.receipt.v2') continue;
+    const unitId = parsed['unit_id']; const role = parsed['role']; const attempt = parsed['attempt'];
+    if (typeof unitId !== 'string' || typeof role !== 'string' || typeof attempt !== 'number') fail('runtime artifact identity is incomplete during graph discovery', [ref]);
+    const key = `${unitId}\u0000${role}\u0000${String(attempt)}`;
+    const target = schemaVersion === 'autopilot.unit_spec.v1' || schemaVersion === 'autopilot.unit_spec.v2' ? specByUnit : receiptByUnit;
+    const prior = target.get(key);
+    if (prior !== undefined && prior !== parsed) fail('two runtime artifacts share the same unit identity and collection', [ref, key]);
+    target.set(key, parsed);
+  }
+  for (const [key, spec] of specByUnit) {
+    const receipt = receiptByUnit.get(key);
+    if (receipt === undefined) continue;
+    const specSchema = spec['schema_version'];
+    const receiptSchema = receipt['schema_version'];
+    if (specSchema === 'autopilot.unit_spec.v2' && receiptSchema !== 'autopilot.receipt.v2') fail('mixed v2 unit spec with non-v2 receipt is forbidden', [key]);
+    if (specSchema === 'autopilot.unit_spec.v1' && receiptSchema !== 'autopilot.receipt.v1') fail('mixed historical v1 unit spec with non-v1 receipt is forbidden', [key]);
+    if (specSchema === 'autopilot.unit_spec.v2' && receiptSchema === 'autopilot.receipt.v2') {
+      for (const field of ['workstream','unit_id','role','attempt','status_output','roster_id','roster_revision','roster_sha256','assignment_sha256','pre_run_selection_sha256'] as const) {
+        if (spec[field] !== receipt[field]) fail('unit_spec.v2 and receipt.v2 identity drift during graph discovery', [key, field]);
+      }
+      const specProfile = spec['request_profile']; const receiptProfile = receipt['request_profile'];
+      if (JSON.stringify(specProfile) !== JSON.stringify(receiptProfile)) fail('unit_spec.v2 and receipt.v2 request_profile drift during graph discovery', [key]);
+    }
   }
 }
 
@@ -697,6 +735,8 @@ export function discoverD65GraphAuthority(input: {
     if (schemaRow === undefined) fail('parsed authority source lost its registry schema during closure', [ref, schemaVersion]);
     for (const extractorRow of schemaRow.ref_extractors) executeExtractor(parsed, extractorRow, ref);
   }
+
+  assertRuntimeSpecReceiptCoherence(parsedByRef, runtimePrefix);
 
   const policies = [...acceptedByRef.values()].filter((artifact) => artifact.document_schema_version === D65_LAUNCH_POLICY_SCHEMA).map((artifact) => ({ artifact, policy: parseD65LaunchPolicy(parsedByRef.get(artifact.evidence.ref)) }));
   const decisions = [...acceptedByRef.values()].filter((artifact) => artifact.document_schema_version === D65_CAPACITY_DECISION_SCHEMA);

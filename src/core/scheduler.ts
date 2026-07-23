@@ -1,9 +1,12 @@
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 
-import type { AutopilotMasterPlan, AutopilotState, AutopilotUnitSpec } from './contracts/types.ts';
+import type { AutopilotMasterPlan, AutopilotState } from './contracts/types.ts';
 import { deriveAutopilotAuthority, persistAutopilotAuthority, type AutopilotAuthorityArtifact } from './authority.ts';
-import { parseAutopilotUnitSpec } from './contracts/validate.ts';
+import {
+  parseNewRunRuntimeUnitSpec,
+  type AutopilotRuntimeUnitSpec,
+} from './roster/runtime-consumers.ts';
 import { matchesRepoPathPattern, pathOverlapsOrContains, writeJsonAtomic, type AutopilotClaimType, type ProcessEnvLike } from './parallel-runtime.ts';
 import { assertD65OrdinaryBoundaryFromEnvironment } from './coordination/d65-runtime-dispatch.ts';
 import type { AutopilotSchedulerConfig } from './scheduler-config.ts';
@@ -63,7 +66,7 @@ export interface AutopilotSchedulerInput {
 export interface AutopilotSchedulerSelectedUnit {
   readonly unit_id: string;
   readonly attempt: number;
-  readonly spec: AutopilotUnitSpec;
+  readonly spec: AutopilotRuntimeUnitSpec;
   readonly authority: AutopilotAuthorityArtifact;
   readonly order_key: string;
 }
@@ -172,15 +175,16 @@ export async function planNextDispatch(input: AutopilotSchedulerInput): Promise<
       reasons.push('worktree-unavailable');
       details.push('unit worktree cannot be created or resumed');
     }
-    let spec: AutopilotUnitSpec | null = null;
+    let spec: AutopilotRuntimeUnitSpec | null = null;
     let authority: AutopilotAuthorityArtifact | null = null;
     if (candidate.spec === null) {
       reasons.push('missing-spec');
       details.push('candidate attempt has no schema-valid spec artifact');
     } else {
       try {
-        spec = parseAutopilotUnitSpec(candidate.spec);
-        authority = await deriveAutopilotAuthority({ spec });
+        const runtimeSpec = parseNewRunRuntimeUnitSpec(candidate.spec);
+        spec = runtimeSpec.unit_spec;
+        authority = await deriveAutopilotAuthority({ spec: runtimeSpec.authority_spec });
       } catch (error) {
         reasons.push('invalid-spec');
         details.push(error instanceof Error ? error.message : String(error));
@@ -242,7 +246,7 @@ function orderKey(masterPlan: AutopilotMasterPlan, unitId: string): string {
   return `999999:999999:${unitId}`;
 }
 
-function schedulerClaimsForAuthority(spec: AutopilotUnitSpec, authority: AutopilotAuthorityArtifact): readonly AutopilotSchedulerClaimView[] {
+function schedulerClaimsForAuthority(spec: Pick<AutopilotRuntimeUnitSpec, 'unit_id' | 'attempt'>, authority: AutopilotAuthorityArtifact): readonly AutopilotSchedulerClaimView[] {
   return Object.freeze([
     ...authority.observations.map((entry) => ({ path: entry.path, claim_type: 'READ' as const, unit_id: spec.unit_id, attempt: spec.attempt })),
     ...authority.edit_intentions.map((entry) => ({ path: entry.path, claim_type: 'WRITE' as const, unit_id: spec.unit_id, attempt: spec.attempt })),

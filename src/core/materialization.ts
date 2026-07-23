@@ -4,8 +4,11 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 import type { AutopilotStatusToolContext } from './forced-output/identity.ts';
 import type { AutopilotToolCallContextLike, AutopilotToolCallEventLike, AutopilotGuardDecision } from './git-guard.ts';
-import type { AutopilotUnitSpec } from './contracts/types.ts';
 import { deriveAutopilotAuthority, materializationRowsForAuthority, type AutopilotAuthorityArtifact } from './authority.ts';
+import {
+  parseNewRunRuntimeUnitSpec,
+  type AutopilotRuntimeUnitSpec,
+} from './roster/runtime-consumers.ts';
 import {
   AUTOPILOT_CHECKOUT_PROFILE_SNAPSHOT_FILE,
   estimateBytesForMaterializationPaths,
@@ -111,14 +114,15 @@ function fail(code: string, message: string, evidence: readonly string[] = []): 
 
 export async function assertAutopilotSpecMaterializationDiskGate(input: {
   readonly context: ActiveAutopilotContext;
-  readonly spec: AutopilotUnitSpec;
+  readonly spec: AutopilotRuntimeUnitSpec;
   readonly authority?: AutopilotAuthorityArtifact;
   readonly now?: Date;
 }): Promise<void> {
+  const runtime = parseNewRunRuntimeUnitSpec(input.spec);
   const taskRoot = taskRootForActiveAutopilot(input.context.active);
   const snapshot = await readCheckoutProfileSnapshot(join(taskRoot, AUTOPILOT_CHECKOUT_PROFILE_SNAPSHOT_FILE));
   if (snapshot === null || snapshot.profile.mode === 'full') return;
-  const authority = input.authority ?? await deriveAutopilotAuthority({ spec: input.spec });
+  const authority = input.authority ?? await deriveAutopilotAuthority({ spec: runtime.authority_spec });
   const paths = materializationRowsForAuthority(authority).map((path) => path.path);
   const scan = await scanTrackedTree(input.context.active.main_worktree_path, input.now ?? new Date());
   const byteCount = estimateBytesForMaterializationPaths(scan, paths);
@@ -136,17 +140,18 @@ export async function assertAutopilotSpecMaterializationDiskGate(input: {
 
 export async function materializeAutopilotSpecPaths(input: {
   readonly context: ActiveAutopilotContext;
-  readonly spec: AutopilotUnitSpec;
+  readonly spec: AutopilotRuntimeUnitSpec;
   readonly authority?: AutopilotAuthorityArtifact;
   readonly reason: string;
   readonly env?: ProcessEnvLike;
   readonly now?: Date;
 }): Promise<MaterializationResult> {
-  const authority = input.authority ?? await deriveAutopilotAuthority({ spec: input.spec });
+  const runtime = parseNewRunRuntimeUnitSpec(input.spec);
+  const authority = input.authority ?? await deriveAutopilotAuthority({ spec: runtime.authority_spec });
   const materializationPaths = materializationRowsForAuthority(authority);
   return await materializePathsForSpec({
     context: input.context,
-    spec: input.spec,
+    spec: runtime.unit_spec,
     paths: materializationPaths,
     reason: input.reason,
     automatic: false,
@@ -157,14 +162,16 @@ export async function materializeAutopilotSpecPaths(input: {
 
 export async function materializeAdditionalReadPathsForSpec(input: {
   readonly context: ActiveAutopilotContext;
-  readonly spec: AutopilotUnitSpec;
+  readonly spec: AutopilotRuntimeUnitSpec;
   readonly paths: readonly string[];
   readonly reason: string;
   readonly env?: ProcessEnvLike;
   readonly now?: Date;
 }): Promise<MaterializationResult> {
+  const runtime = parseNewRunRuntimeUnitSpec(input.spec);
+  const spec = runtime.unit_spec;
   const now = input.now ?? new Date();
-  const normalized = sortedUnique(input.paths.map((path) => normalizeMaterializationPath(path, 'auto READ path')).filter((path) => !isRuntimeRepoPath(path, input.spec.workstream)));
+  const normalized = sortedUnique(input.paths.map((path) => normalizeMaterializationPath(path, 'auto READ path')).filter((path) => !isRuntimeRepoPath(path, spec.workstream)));
   if (normalized.length === 0) return { checkout_mode: 'legacy-full', materialized_paths: [], targets: [], byte_count: 0 };
   const taskRoot = taskRootForActiveAutopilot(input.context.active);
   const snapshot = await readCheckoutProfileSnapshot(join(taskRoot, AUTOPILOT_CHECKOUT_PROFILE_SNAPSHOT_FILE));
@@ -177,7 +184,7 @@ export async function materializeAdditionalReadPathsForSpec(input: {
   if (!snapshot.profile.materialization.auto_read_claims) {
     fail('auto-read-disabled', 'Autopilot sparse materialization refused: automatic READ materialization is disabled by checkout profile.', normalized);
   }
-  const materialized = await readMaterializedPaths(input.context.active, input.spec);
+  const materialized = await readMaterializedPaths(input.context.active, spec);
   const existingAutoReadRows = materialized.paths.filter((row) => row.automatic && row.claim_type === 'READ');
   const existingAutoReadBytes = existingAutoReadRows.reduce((sum, row) => sum + row.byte_count, 0);
   const scan = await scanTrackedTree(input.context.active.main_worktree_path, now);
@@ -210,8 +217,8 @@ export async function materializeAdditionalReadPathsForSpec(input: {
   }
   await acquireReadClaimsForUnitPaths({
     context: input.context,
-    unitId: input.spec.unit_id,
-    attempt: input.spec.attempt,
+    unitId: spec.unit_id,
+    attempt: spec.attempt,
     paths: normalized,
     reason: input.reason,
     now,
@@ -220,7 +227,7 @@ export async function materializeAdditionalReadPathsForSpec(input: {
   try {
     return await materializePathsForSpec({
       context: input.context,
-      spec: input.spec,
+      spec,
       paths: rows,
       reason: input.reason,
       automatic: true,
@@ -231,8 +238,8 @@ export async function materializeAdditionalReadPathsForSpec(input: {
     try {
       await releaseReadClaimsForUnitPaths({
         context: input.context,
-        unitId: input.spec.unit_id,
-        attempt: input.spec.attempt,
+        unitId: spec.unit_id,
+        attempt: spec.attempt,
         paths: normalized,
         reason: 'auto READ materialization failure claim rollback',
         now,
@@ -246,17 +253,18 @@ export async function materializeAdditionalReadPathsForSpec(input: {
 
 export async function expandedReadOnlyPathsForAudit(input: {
   readonly context: ActiveAutopilotContext;
-  readonly spec: AutopilotUnitSpec;
+  readonly spec: AutopilotRuntimeUnitSpec;
   readonly authority: AutopilotAuthorityArtifact;
   readonly env?: ProcessEnvLike;
 }): Promise<readonly string[]> {
+  const spec = parseNewRunRuntimeUnitSpec(input.spec).unit_spec;
   if (input.context.active.coordination_authority === 'coordinator-edit-leases-v1') return sortedUnique(input.authority.observations.map((observation) => observation.path));
   const claims = await readPathClaims(input.context.coordinationRoot);
   const expanded = claims.filter((claim) =>
     claim.autopilot_id === input.context.active.autopilot_id &&
     claim.workstream_run === input.context.active.workstream_run &&
-    claim.unit_id === input.spec.unit_id &&
-    claim.attempt === input.spec.attempt &&
+    claim.unit_id === spec.unit_id &&
+    claim.attempt === spec.attempt &&
     claim.claim_type === 'READ',
   ).map((claim) => claim.path);
   return sortedUnique([...input.authority.observations.map((observation) => observation.path), ...expanded]);
@@ -271,7 +279,7 @@ export async function materializeSparseReadForToolCall(input: {
   if (input.event.toolName !== 'read' && input.event.toolName !== 'Read') return undefined;
   const rawPath = input.event.input?.['path'] ?? input.event.input?.['file_path'];
   if (typeof rawPath !== 'string' || rawPath.trim().length === 0) return undefined;
-  const spec = input.statusContext.unit_spec;
+  const spec = parseNewRunRuntimeUnitSpec(input.statusContext.unit_spec).unit_spec;
   const cwd = input.toolContext.cwd ?? spec.cwd;
   const absolute = isAbsolute(rawPath) ? resolve(rawPath) : resolve(cwd, rawPath);
   if (!isPathInsideRoot(spec.cwd, absolute)) return undefined;
@@ -302,7 +310,7 @@ export async function resolveActiveContextForStatusContext(
   statusContext: AutopilotStatusToolContext,
   env: ProcessEnvLike = process.env,
 ): Promise<ActiveAutopilotContext> {
-  const spec = statusContext.unit_spec;
+  const spec = parseNewRunRuntimeUnitSpec(statusContext.unit_spec).unit_spec;
   const taskRoot = taskRootFromArtifactRoot(statusContext.artifact_root, spec.workstream);
   if (taskRoot === null) fail('invalid-artifact-root', 'Autopilot status context artifact_root does not end with the workstream runtime root.', [statusContext.artifact_root]);
   const taskInfoPath = join(taskRoot, '_task-info.json');
@@ -347,13 +355,14 @@ export async function resolveActiveContextForStatusContext(
 
 async function materializePathsForSpec(input: {
   readonly context: ActiveAutopilotContext;
-  readonly spec: AutopilotUnitSpec;
+  readonly spec: AutopilotRuntimeUnitSpec;
   readonly paths: readonly SourceMaterializationPath[];
   readonly reason: string;
   readonly automatic: boolean;
   readonly env?: ProcessEnvLike;
   readonly now?: Date;
 }): Promise<MaterializationResult> {
+  const spec = parseNewRunRuntimeUnitSpec(input.spec).unit_spec;
   const now = input.now ?? new Date();
   const paths = dedupeMaterializationRows(input.paths);
   if (paths.length === 0) return { checkout_mode: 'legacy-full', materialized_paths: [], targets: [], byte_count: 0 };
@@ -361,11 +370,11 @@ async function materializePathsForSpec(input: {
   const snapshotPath = join(taskRoot, AUTOPILOT_CHECKOUT_PROFILE_SNAPSHOT_FILE);
   const snapshot = await readCheckoutProfileSnapshot(snapshotPath);
   if (snapshot === null) {
-    await ensureFutureOwnedParents(input.spec.cwd, paths.filter((path) => path.claim_type === 'WRITE').map((path) => path.path));
+    await ensureFutureOwnedParents(spec.cwd, paths.filter((path) => path.claim_type === 'WRITE').map((path) => path.path));
     return { checkout_mode: 'legacy-full', materialized_paths: paths, targets: [], byte_count: 0 };
   }
   if (snapshot.profile.mode === 'full') {
-    await ensureFutureOwnedParents(input.spec.cwd, paths.filter((path) => path.claim_type === 'WRITE').map((path) => path.path));
+    await ensureFutureOwnedParents(spec.cwd, paths.filter((path) => path.claim_type === 'WRITE').map((path) => path.path));
     return { checkout_mode: 'full', materialized_paths: paths, targets: [], byte_count: 0 };
   }
   const scan = await scanTrackedTree(input.context.active.main_worktree_path, now);
@@ -381,12 +390,12 @@ async function materializePathsForSpec(input: {
       worktreeCount: 1,
     },
   });
-  const targets = materializationTargets(input.context.active, input.spec);
+  const targets = materializationTargets(input.context.active, spec);
   const patterns = sparseIncludePatternsForPaths(paths.map((path) => path.path));
   for (const target of targets) {
-    const worktreePath = target === 'main' ? input.context.active.main_worktree_path : input.spec.cwd;
-    const unitId = target === 'main' ? 'main' : input.spec.unit_id;
-    const attempt = target === 'main' ? 1 : input.spec.attempt;
+    const worktreePath = target === 'main' ? input.context.active.main_worktree_path : spec.cwd;
+    const unitId = target === 'main' ? 'main' : spec.unit_id;
+    const attempt = target === 'main' ? 1 : spec.attempt;
     const branch = target === 'main'
       ? input.context.active.branch
       : runBranch(worktreePath, input.env);
@@ -421,19 +430,19 @@ async function materializePathsForSpec(input: {
       },
     }, input.env ?? process.env);
   }
-  await appendMaterializationLedger(input.context.active, input.spec, paths, targets, byteCount, input.reason, input.automatic, now);
-  await upsertMaterializedPaths(input.context.active, input.spec, paths, scan, input.reason, input.automatic, now);
+  await appendMaterializationLedger(input.context.active, spec, paths, targets, byteCount, input.reason, input.automatic, now);
+  await upsertMaterializedPaths(input.context.active, spec, paths, scan, input.reason, input.automatic, now);
   return { checkout_mode: 'sparse', materialized_paths: paths, targets, byte_count: byteCount };
 }
 
-function materializationTargets(active: ActiveAutopilotRow, spec: AutopilotUnitSpec): readonly ('main' | 'unit')[] {
+function materializationTargets(active: ActiveAutopilotRow, spec: AutopilotRuntimeUnitSpec): readonly ('main' | 'unit')[] {
   if ((spec.role === 'implement' || spec.role === 'fix') && resolve(spec.cwd) !== resolve(active.main_worktree_path)) return Object.freeze(['main', 'unit'] as const);
   return Object.freeze(['main'] as const);
 }
 
 async function appendMaterializationLedger(
   active: ActiveAutopilotRow,
-  spec: AutopilotUnitSpec,
+  spec: AutopilotRuntimeUnitSpec,
   paths: readonly SourceMaterializationPath[],
   targets: readonly ('main' | 'unit')[],
   byteCount: number,
@@ -465,7 +474,7 @@ async function appendMaterializationLedger(
 
 async function upsertMaterializedPaths(
   active: ActiveAutopilotRow,
-  spec: AutopilotUnitSpec,
+  spec: AutopilotRuntimeUnitSpec,
   paths: readonly SourceMaterializationPath[],
   scan: AutopilotTrackedTreeScan,
   reason: string,
@@ -496,7 +505,7 @@ async function upsertMaterializedPaths(
   await writeJsonAtomic(path, next);
 }
 
-async function readMaterializedPaths(active: ActiveAutopilotRow, spec: AutopilotUnitSpec): Promise<AutopilotMaterializedPathsFile> {
+async function readMaterializedPaths(active: ActiveAutopilotRow, spec: AutopilotRuntimeUnitSpec): Promise<AutopilotMaterializedPathsFile> {
   const path = join(dirname(spec.cwd), AUTOPILOT_MATERIALIZED_PATHS_FILE);
   if (!existsSync(path)) {
     return { schema_version: 'autopilot.materialized_paths.v1', workstream: active.workstream, workstream_run: active.workstream_run, unit_id: spec.unit_id, attempt: spec.attempt, paths: [] };

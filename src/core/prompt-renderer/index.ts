@@ -8,9 +8,13 @@ import {
   AUTOPILOT_SCHEMA_NAMES,
   AUTOPILOT_STATUS_TOOL,
 } from '../names.ts';
-import { buildAutopilotProviderIdentity as buildForcedOutputAutopilotProviderIdentity } from '../forced-output/identity.ts';
 import { renderAutopilotPerfectQualityRules } from '../quality/contract.ts';
-import { autopilotModelRosterIssues } from '../model-roster.ts';
+import type { AutopilotRosterUnitSpecV2 } from '../roster/runtime-spec.ts';
+import {
+  parseNewRunRuntimeUnitSpec,
+  type AutopilotRosterRuntimeIdentity,
+  type AutopilotRuntimeUnitSpec,
+} from '../roster/runtime-consumers.ts';
 import {
   AUTOPILOT_ROLE_VALUES,
   AUTOPILOT_STATUS_CHANGED_PATHS_LIMIT,
@@ -48,6 +52,8 @@ export interface AutopilotForcedOutputContract {
   readonly status_output: string;
   readonly receipt_output: string;
   readonly provider_identity: AutopilotProviderIdentity;
+  readonly roster_runtime_identity?: AutopilotRosterRuntimeIdentity;
+  readonly request_profile?: AutopilotRosterUnitSpecV2['request_profile'];
 }
 
 export interface AutopilotRenderedPrompt {
@@ -171,20 +177,24 @@ const AUTOPILOT_FORBIDDEN_TEMPLATE_FRAGMENTS = [
 
 const AUTOPILOT_TEMPLATE_MAX_BYTES = 14_000;
 
+export type AutopilotRenderableUnitSpec = AutopilotRuntimeUnitSpec;
+
 export function renderAutopilotAgentPrompt(
-  input: AutopilotUnitSpec,
+  input: AutopilotRenderableUnitSpec,
   options: AutopilotPromptRenderOptions = {},
 ): string {
-  assertValidAutopilotUnitSpec(input);
-  const templatePath = autopilotTemplatePath(input.template, options.templatesDir);
+  const runtime = parseNewRunRuntimeUnitSpec(input);
+  const unitSpec = runtime.unit_spec;
+  assertValidAutopilotUnitSpec(unitSpec);
+  const templatePath = autopilotTemplatePath(unitSpec.template, options.templatesDir);
   const source = readTemplateSource(templatePath);
-  assertValidAutopilotTemplateSource(input.template, source, templatePath);
-  const slots = buildAutopilotPromptTemplateSlots(input, options);
+  assertValidAutopilotTemplateSource(unitSpec.template, source, templatePath);
+  const slots = buildAutopilotPromptTemplateSlots(unitSpec, options);
   return renderTemplateSource(source, slots, templatePath);
 }
 
 export async function renderAndMaybeWriteAutopilotPromptSnapshot(input: {
-  readonly spec: AutopilotUnitSpec;
+  readonly spec: AutopilotRenderableUnitSpec;
   readonly forceSnapshot?: boolean;
   readonly templatesDir?: string;
   readonly forcedOutputContract?: AutopilotForcedOutputContract;
@@ -206,12 +216,12 @@ export async function renderAndMaybeWriteAutopilotPromptSnapshot(input: {
   return { text, snapshotPath };
 }
 
-export function deriveAutopilotPromptSnapshotPath(spec: AutopilotUnitSpec): string {
+export function deriveAutopilotPromptSnapshotPath(spec: AutopilotRenderableUnitSpec): string {
   const file = `${spec.unit_id}.${spec.role}.attempt-${String(spec.attempt)}.md`;
   return join(deriveAutopilotArtifactRoot(spec), 'rendered-prompts', file);
 }
 
-export function deriveAutopilotArtifactRoot(spec: AutopilotUnitSpec): string {
+export function deriveAutopilotArtifactRoot(spec: AutopilotRenderableUnitSpec): string {
   const statusDir = dirname(spec.status_output);
   return basename(statusDir) === 'statuses' ? dirname(statusDir) : statusDir;
 }
@@ -282,56 +292,94 @@ export function assertValidAutopilotTemplateSource(
   }
 }
 
-export function assertValidAutopilotUnitSpec(spec: AutopilotUnitSpec): void {
+export function assertValidAutopilotUnitSpec(spec: AutopilotRenderableUnitSpec): void {
   const issues = autopilotUnitSpecIssues(spec);
   if (issues.length > 0) throw new AutopilotUnitSpecError(issues);
 }
 
 export function buildAutopilotPromptTemplateSlots(
-  spec: AutopilotUnitSpec,
+  spec: AutopilotRenderableUnitSpec,
   options: AutopilotPromptRenderOptions = {},
 ): AutopilotPromptTemplateSlotValues {
-  const forcedOutputContract =
-    options.forcedOutputContract ?? buildDefaultForcedOutputContract(spec);
+  const runtime = parseNewRunRuntimeUnitSpec(spec);
+  const unitSpec = runtime.unit_spec;
+  const forcedOutputContract = forcedOutputContractForUnitSpec(unitSpec, options.forcedOutputContract);
 
   return Object.freeze({
-    artifact_root: deriveAutopilotArtifactRoot(spec),
-    attempt: String(spec.attempt),
-    context_refs: contextRefs(spec),
-    cwd: spec.cwd,
-    evidence_dir: spec.evidence_dir,
+    artifact_root: deriveAutopilotArtifactRoot(unitSpec),
+    attempt: String(unitSpec.attempt),
+    context_refs: contextRefs(unitSpec),
+    cwd: unitSpec.cwd,
+    evidence_dir: unitSpec.evidence_dir,
     forced_output_contract_json: JSON.stringify(forcedOutputContract, null, 2),
-    model: spec.model,
-    objective: spec.objective,
-    owned_paths: bulletList(spec.owned_paths),
+    model: unitSpec.model,
+    objective: unitSpec.objective,
+    owned_paths: bulletList(unitSpec.owned_paths),
     quality_rules: qualityRules(),
-    read_only_paths: bulletList(spec.read_only_paths),
-    receipt_output: spec.receipt_output,
-    role: spec.role,
-    role_specific_instructions: roleSpecificInstructions(spec.role),
-    status_output: spec.status_output,
-    status_payload_contract: statusPayloadContract(spec.role),
-    stop_boundary: spec.stop_boundary,
-    thinking: spec.thinking,
-    unit_id: spec.unit_id,
-    untouchable_paths: bulletList(spec.untouchable_paths),
-    validation_commands: validationCommands(spec.validation_commands),
-    verdict_guidance: verdictGuidance(spec.role),
-    workstream: spec.workstream,
+    read_only_paths: bulletList(unitSpec.read_only_paths),
+    receipt_output: unitSpec.receipt_output,
+    role: unitSpec.role,
+    role_specific_instructions: roleSpecificInstructions(unitSpec.role),
+    status_output: unitSpec.status_output,
+    status_payload_contract: statusPayloadContract(unitSpec.role),
+    stop_boundary: unitSpec.stop_boundary,
+    thinking: unitSpec.thinking,
+    unit_id: unitSpec.unit_id,
+    untouchable_paths: bulletList(unitSpec.untouchable_paths),
+    validation_commands: validationCommands(unitSpec.validation_commands),
+    verdict_guidance: verdictGuidance(unitSpec.role),
+    workstream: unitSpec.workstream,
   });
 }
 
-function buildDefaultForcedOutputContract(spec: AutopilotUnitSpec): AutopilotForcedOutputContract {
+function buildDefaultForcedOutputContract(spec: AutopilotRenderableUnitSpec): AutopilotForcedOutputContract {
+  const runtime = parseNewRunRuntimeUnitSpec(spec);
+  const unitSpec = runtime.unit_spec;
   return Object.freeze({
     tool_name: AUTOPILOT_STATUS_TOOL,
     schema_version: 'autopilot.status.v1',
-    workstream: spec.workstream,
-    unit_id: spec.unit_id,
-    role: spec.role,
-    attempt: spec.attempt,
-    status_output: spec.status_output,
-    receipt_output: spec.receipt_output,
-    provider_identity: buildForcedOutputAutopilotProviderIdentity(spec.model, spec.thinking),
+    workstream: unitSpec.workstream,
+    unit_id: unitSpec.unit_id,
+    role: unitSpec.role,
+    attempt: unitSpec.attempt,
+    status_output: unitSpec.status_output,
+    receipt_output: unitSpec.receipt_output,
+    provider_identity: {
+      provider_id: unitSpec.request_profile.provider_id,
+      requested_model_id: unitSpec.request_profile.model_id,
+      executed_model_id: unitSpec.request_profile.model_id,
+      api: unitSpec.request_profile.api,
+      thinking_level: unitSpec.request_profile.thinking,
+    },
+    roster_runtime_identity: runtime.roster_identity,
+    request_profile: unitSpec.request_profile,
+  });
+}
+
+function forcedOutputContractForUnitSpec(
+  spec: AutopilotRenderableUnitSpec,
+  provided: AutopilotForcedOutputContract | undefined,
+): AutopilotForcedOutputContract {
+  const runtime = parseNewRunRuntimeUnitSpec(spec);
+  const expected = buildDefaultForcedOutputContract(runtime.unit_spec);
+  if (provided === undefined) return expected;
+  for (const field of ['tool_name', 'schema_version', 'workstream', 'unit_id', 'role', 'attempt', 'status_output', 'receipt_output'] as const) {
+    if (provided[field] !== expected[field]) {
+      throw new AutopilotUnitSpecError([`forced_output_contract ${field} does not match unit_spec.v2`]);
+    }
+  }
+  for (const field of ['provider_id', 'requested_model_id', 'executed_model_id', 'api', 'thinking_level'] as const) {
+    if (provided.provider_identity[field] !== expected.provider_identity[field]) {
+      throw new AutopilotUnitSpecError([`forced_output_contract provider_identity.${field} does not match unit_spec.v2 request_profile`]);
+    }
+  }
+  if (expected.roster_runtime_identity === undefined || expected.request_profile === undefined) {
+    throw new AutopilotUnitSpecError(['unit_spec.v2 forced_output_contract roster identity is unavailable']);
+  }
+  return Object.freeze({
+    ...provided,
+    roster_runtime_identity: expected.roster_runtime_identity,
+    request_profile: expected.request_profile,
   });
 }
 
@@ -381,32 +429,35 @@ function isAutopilotPromptTemplateSlot(slot: string): slot is AutopilotPromptTem
   return AUTOPILOT_PROMPT_TEMPLATE_ALLOWED_SLOT_SET.has(slot);
 }
 
-function autopilotUnitSpecIssues(spec: AutopilotUnitSpec): readonly string[] {
+function autopilotUnitSpecIssues(spec: AutopilotRenderableUnitSpec): readonly string[] {
   const issues: string[] = [];
-  if (spec.schema_version !== 'autopilot.unit_spec.v1') {
-    issues.push('schema_version must be autopilot.unit_spec.v1');
+  let unitSpec: AutopilotRosterUnitSpecV2;
+  try {
+    unitSpec = parseNewRunRuntimeUnitSpec(spec).unit_spec;
+  } catch (error) {
+    issues.push(error instanceof Error ? error.message : String(error));
+    return Object.freeze(issues);
   }
-  if (!AUTOPILOT_ROLE_VALUES.includes(spec.role)) issues.push(`unknown role ${spec.role}`);
-  if (spec.template !== spec.role) issues.push('template must match role');
-  issues.push(...autopilotModelRosterIssues(spec));
-  if (!Number.isInteger(spec.attempt) || spec.attempt < 1) issues.push('attempt must be a positive integer');
-  if ((spec.role === 'implement' || spec.role === 'fix') && spec.owned_paths.length === 0) {
-    issues.push(`${spec.role} specs require at least one owned path`);
+  if (!AUTOPILOT_ROLE_VALUES.includes(unitSpec.role)) issues.push(`unknown role ${unitSpec.role}`);
+  if (unitSpec.template !== unitSpec.role) issues.push('template must match role');
+  if (!Number.isInteger(unitSpec.attempt) || unitSpec.attempt < 1) issues.push('attempt must be a positive integer');
+  if ((unitSpec.role === 'implement' || unitSpec.role === 'fix') && unitSpec.owned_paths.length === 0) {
+    issues.push(`${unitSpec.role} specs require at least one owned path`);
   }
   if (
-    (spec.role === 'validate' || spec.role === 'bughunt') &&
-    spec.validation_commands.length === 0
+    (unitSpec.role === 'validate' || unitSpec.role === 'bughunt') &&
+    unitSpec.validation_commands.length === 0
   ) {
-    issues.push(`${spec.role} specs require at least one validation command`);
+    issues.push(`${unitSpec.role} specs require at least one validation command`);
   }
-  if (spec.status_output === spec.receipt_output) {
+  if (unitSpec.status_output === unitSpec.receipt_output) {
     issues.push('status_output and receipt_output must be distinct');
   }
   for (const [label, path] of [
-    ['cwd', spec.cwd],
-    ['status_output', spec.status_output],
-    ['receipt_output', spec.receipt_output],
-    ['evidence_dir', spec.evidence_dir],
+    ['cwd', unitSpec.cwd],
+    ['status_output', unitSpec.status_output],
+    ['receipt_output', unitSpec.receipt_output],
+    ['evidence_dir', unitSpec.evidence_dir],
   ] as const) {
     if (!isAbsolutePath(path)) issues.push(`${label} must be absolute`);
   }
@@ -422,12 +473,12 @@ function bulletList(values: readonly string[]): string {
   return values.map((value) => `- ${value}`).join('\n');
 }
 
-function contextRefs(spec: AutopilotUnitSpec): string {
+function contextRefs(spec: AutopilotRenderableUnitSpec): string {
   if (spec.context_refs.length === 0) return '- none';
   return spec.context_refs
     .map((ref) => {
-      const hash = ref.sha256 === undefined ? '' : ` sha256=${ref.sha256}`;
-      const bytes = ref.byte_count === undefined ? '' : ` bytes=${String(ref.byte_count)}`;
+      const hash = ref.sha256 === undefined || ref.sha256 === null ? '' : ` sha256=${ref.sha256}`;
+      const bytes = ref.byte_count === undefined || ref.byte_count === null ? '' : ` bytes=${String(ref.byte_count)}`;
       return `- ${ref.path}: ${ref.purpose}${hash}${bytes}`;
     })
     .join('\n');

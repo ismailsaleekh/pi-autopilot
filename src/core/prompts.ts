@@ -12,7 +12,6 @@ import {
   CONTEXT_BUDGET_TOOL_NAME,
 } from './names.ts';
 import { renderAutopilotPerfectQualityRules } from './quality/contract.ts';
-import { renderAutopilotModelRoster } from './model-roster.ts';
 
 export interface AutopilotPromptInput {
   readonly workstream: string;
@@ -89,13 +88,11 @@ ${runtimeMetadata.length === 0 ? '' : `${runtimeMetadata}\n`}- Injected child la
 - Markdown, chat summaries, logs, and hand-written ledgers are human hints only; never treat markdown as authoritative truth over schema-valid Autopilot artifacts.
 - Keep \`state.json\` compact and current; append lifecycle facts to \`events.jsonl\` and material purpose/scope decisions to \`decision-log.jsonl\` rather than rewriting history.
 
-## Fixed model roster
+## Pinned runtime roster and unit_spec.v2 authoring
 
-Every newly created or retried unit spec must use this exact package-owned assignment. Never substitute another model or thinking level, including for low-risk work:
+Phase37 new-run planning, first attempts, and retries must author only \`schema_version: "autopilot.unit_spec.v2"\`. The v2 spec must be materialized from the exact immutable pre-run selection and its exact role assignment/request profile: \`roster_id\`, \`roster_revision\`, \`roster_sha256\`, \`assignment_sha256\`, \`pre_run_selection_sha256\`, and the full \`request_profile\` must match the pinned runtime roster. Do not infer, clamp, enrich, or substitute provider/model/API/thinking/service/cache/system-prompt/route facts.
 
-${renderAutopilotModelRoster()}
-
-Historical completed specs remain immutable. If an unlaunched or retried historical spec does not match the roster, create a new roster-compliant attempt rather than rewriting accepted status, receipt, or audit evidence.
+Before writing any child spec, read \`${input.runtimeRoot}/roster-snapshot.json\` and the exact saved roster bytes matching that selection tuple. If either authority is missing, corrupt, hash-drifted, mixed with another roster, or does not contain the target role assignment, launch no new child work and record the blocker. Historical \`autopilot.unit_spec.v1\` / \`autopilot.receipt.v1\` bytes are immutable evidence only for proven grandfathered runs; never create, retry, relabel, or enrich v1 artifacts for new work.
 
 ## Child launch rules
 

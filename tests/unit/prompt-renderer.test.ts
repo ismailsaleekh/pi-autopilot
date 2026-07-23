@@ -5,7 +5,15 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { AUTOPILOT_RUNNER_BIN, AUTOPILOT_STATUS_TOOL } from '../../src/core/names.ts';
-import { autopilotModelAssignmentForRole } from '../../src/core/model-roster.ts';
+import { computeAutopilotRosterContractObjectHash } from '../../src/core/roster/contracts.ts';
+import { SEED_ROSTERS } from '../../src/core/roster/provider-recipes.ts';
+import {
+  materializeNewRunUnitSpecV2,
+  requestProfileFromAssignment,
+  type AutopilotRosterSelectionV1,
+  type AutopilotRosterUnitSpecV2,
+  type AutopilotRosterV1,
+} from '../../src/core/roster/runtime-spec.ts';
 import {
   AUTOPILOT_ROLE_VALUES,
   AutopilotPromptTemplateError,
@@ -16,7 +24,6 @@ import {
   renderAutopilotAgentPrompt,
   validateAutopilotPromptTemplateSource,
   type AutopilotRole,
-  type AutopilotUnitSpec,
 } from '../../src/core/prompt-renderer/index.ts';
 
 async function withTempDir<T>(run: (dir: string) => Promise<T>): Promise<T> {
@@ -28,23 +35,22 @@ async function withTempDir<T>(run: (dir: string) => Promise<T>): Promise<T> {
   }
 }
 
-function spec(root: string, role: AutopilotRole): AutopilotUnitSpec {
+function spec(root: string, role: AutopilotRole): AutopilotRosterUnitSpecV2 {
   const sourceRole = role === 'implement' || role === 'fix';
   const validationRole = role === 'validate' || role === 'bughunt';
   const worktree = join(root, 'worktree');
   const runtimeRoot = join(worktree, '.pi', 'autopilot', 'demo');
-  const assignment = autopilotModelAssignmentForRole(role);
-  return {
-    schema_version: 'autopilot.unit_spec.v1',
+  const { selection, roster, requestProfile } = pinnedFacts(role);
+  return materializeNewRunUnitSpecV2({
+    selection,
+    roster,
+    role,
+    request_profile: requestProfile,
     workstream: 'demo',
     unit_id: `u01-${role}`,
-    role,
-    template: role,
     attempt: 1,
-    objective: `Exercise the ${role} fixed template.`,
+    objective: `Exercise the ${role} v2 template.`,
     cwd: worktree,
-    model: assignment.model,
-    thinking: assignment.thinking,
     owned_paths: sourceRole ? [`src/${role}.ts`] : [],
     read_only_paths: ['src/core/names.ts'],
     untouchable_paths: ['private/**', 'node_modules/**'],
@@ -52,6 +58,8 @@ function spec(root: string, role: AutopilotRole): AutopilotUnitSpec {
       {
         path: 'docs/autopilot-architecture.md',
         purpose: 'Autopilot target architecture',
+        sha256: null,
+        byte_count: null,
       },
     ],
     validation_commands: validationRole ? ['npm run typecheck'] : [],
@@ -59,9 +67,15 @@ function spec(root: string, role: AutopilotRole): AutopilotUnitSpec {
     receipt_output: join(runtimeRoot, 'receipts', `u01-${role}.${role}.attempt-1.receipt.json`),
     evidence_dir: join(runtimeRoot, 'evidence', `u01-${role}`),
     stop_boundary: 'Stop instead of editing outside the declared ownership boundary.',
+    quality_profile: null,
+    risk_level: null,
+    acceptance_criteria: [],
+    verification_plan: null,
+    closure_criteria: [],
+    upstream_refs: [],
     timeout_seconds: 3600,
     render_prompt_snapshot: true,
-  };
+  });
 }
 
 function requiredSlotFixture(extra: string): string {
@@ -76,7 +90,7 @@ function requiredSlotFixture(extra: string): string {
   ].join('\n');
 }
 
-void describe('Autopilot fixed prompt templates', () => {
+void describe('Autopilot v2 prompt templates', () => {
   void it('resolves default templates from the package directory', () => {
     assert.equal(DEFAULT_AUTOPILOT_TEMPLATE_DIR.endsWith('/templates/'), true);
     assert.equal(autopilotTemplatePath('implement').endsWith('/templates/implement.md'), true);
@@ -136,7 +150,7 @@ void describe('Autopilot fixed prompt templates', () => {
     });
   });
 
-  void it('fails before model spend when a role deviates from the fixed model roster', async () => {
+  void it('fails before model spend when v2 model or thinking drift from request_profile', async () => {
     await withTempDir(async (root) => {
       assert.throws(
         () =>
@@ -144,15 +158,16 @@ void describe('Autopilot fixed prompt templates', () => {
             ...spec(root, 'implement'),
             model: 'openai-codex/gpt-5.6-sol',
           }),
-        /implement role requires fixed roster model openai-codex\/gpt-5\.6-terra/u,
+        /unit_spec\.v2 model must equal request_profile\.model/u,
       );
+      const validateSpec = spec(root, 'validate');
       assert.throws(
         () =>
           renderAutopilotAgentPrompt({
-            ...spec(root, 'validate'),
-            thinking: 'high',
+            ...validateSpec,
+            thinking: validateSpec.thinking === 'high' ? 'xhigh' : 'high',
           }),
-        /validate role requires fixed roster thinking xhigh/u,
+        /unit_spec\.v2 thinking must equal request_profile\.thinking/u,
       );
     });
   });
@@ -196,3 +211,38 @@ void describe('Autopilot fixed prompt templates', () => {
     assert.ok(validation.issues.some((issue) => issue.includes('fixed Autopilot prompts must stay compact')));
   });
 });
+
+function pinnedFacts(role: AutopilotRole): {
+  readonly selection: AutopilotRosterSelectionV1;
+  readonly roster: AutopilotRosterV1;
+  readonly requestProfile: ReturnType<typeof requestProfileFromAssignment>;
+} {
+  const roster = SEED_ROSTERS.find((entry) => entry.assignments.some((assignment) => assignment.role === role));
+  if (roster === undefined) throw new Error(`missing seed roster for ${role}`);
+  const assignment = roster.assignments.find((entry) => entry.role === role);
+  if (assignment === undefined) throw new Error(`missing assignment for ${role}`);
+  const selectionWithoutHash = {
+    schema_version: 'autopilot.pre_run_selection.v1' as const,
+    repo_id: 'repo-prompt-renderer',
+    workstream_run: 'run-prompt-renderer',
+    scope: roster.scope,
+    roster_id: roster.roster_id,
+    roster_revision: roster.roster_revision,
+    roster_sha256: roster.roster_sha256,
+    assignment_set_sha256: roster.assignment_set_sha256,
+    config_sha256: 'sha256:7777777777777777777777777777777777777777777777777777777777777777',
+    selected_at: '2026-07-23T12:00:00.000Z',
+    selection_sha256: 'sha256:0000000000000000000000000000000000000000000000000000000000000000',
+  };
+  const selection = {
+    ...selectionWithoutHash,
+    selection_sha256: requiredHash('autopilot.pre_run_selection.v1', selectionWithoutHash),
+  };
+  return { selection, roster, requestProfile: requestProfileFromAssignment(assignment) };
+}
+
+function requiredHash(schemaVersion: Parameters<typeof computeAutopilotRosterContractObjectHash>[0], value: unknown): string {
+  const hash = computeAutopilotRosterContractObjectHash(schemaVersion, value);
+  if (hash === null) throw new Error(`${schemaVersion} has no hash field`);
+  return hash;
+}

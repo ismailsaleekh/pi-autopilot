@@ -4,18 +4,23 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 import {
   parseAutopilotEventRow,
-  parseAutopilotReceipt,
   parseAutopilotState,
   parseAutopilotStatusEntry,
-  parseAutopilotUnitSpec,
 } from '../contracts/index.ts';
 import type {
   AutopilotEventRow,
-  AutopilotReceipt,
   AutopilotState,
   AutopilotStatusEntry,
-  AutopilotUnitSpec,
 } from '../contracts/types.ts';
+import {
+  assertRuntimeReceiptMatchesUnitSpec,
+  parseNewRunRuntimeReceipt,
+  parseNewRunRuntimeUnitSpec,
+  type AutopilotRuntimeReceipt,
+  type AutopilotRuntimeReceiptContext,
+  type AutopilotRuntimeUnitSpec,
+  type AutopilotRuntimeUnitSpecContext,
+} from '../roster/runtime-consumers.ts';
 import {
   readAutopilotPurposeSnapshot,
   type AutopilotPurposeSnapshot,
@@ -40,13 +45,13 @@ export interface AutopilotResumeSnapshot {
   readonly state: AutopilotState;
   readonly eventsTail: readonly AutopilotEventRow[];
   readonly statuses: Readonly<Record<string, AutopilotStatusEntry>>;
-  readonly receipts: Readonly<Record<string, AutopilotReceipt>>;
+  readonly receipts: Readonly<Record<string, AutopilotRuntimeReceipt>>;
 }
 
 export interface AutopilotStateReferenceValidationResult {
   readonly statuses: Readonly<Record<string, AutopilotStatusEntry>>;
-  readonly receipts: Readonly<Record<string, AutopilotReceipt>>;
-  readonly specs: Readonly<Record<string, AutopilotUnitSpec>>;
+  readonly receipts: Readonly<Record<string, AutopilotRuntimeReceipt>>;
+  readonly specs: Readonly<Record<string, AutopilotRuntimeUnitSpec>>;
 }
 
 /**
@@ -150,8 +155,8 @@ export async function readAutopilotResumeSnapshot(input: {
   }
 
   const emptyStatuses: Record<string, AutopilotStatusEntry> = {};
-  const emptyReceipts: Record<string, AutopilotReceipt> = {};
-  const emptySpecs: Record<string, AutopilotUnitSpec> = {};
+  const emptyReceipts: Record<string, AutopilotRuntimeReceipt> = {};
+  const emptySpecs: Record<string, AutopilotRuntimeUnitSpec> = {};
   const refs =
     input.validateReferences === false
       ? { statuses: emptyStatuses, receipts: emptyReceipts, specs: emptySpecs }
@@ -169,9 +174,9 @@ export async function readAutopilotResumeSnapshot(input: {
 
 /**
  * Validate every reference inside an AutopilotState:
- * - spec_ref  → valid AutopilotUnitSpec with matching identity
+ * - spec_ref  → valid Phase37 new-run unit_spec.v2 with matching identity
  * - status_ref → valid AutopilotStatusEntry with matching identity
- * - receipt_ref → valid AutopilotReceipt with matching identity
+ * - receipt_ref → valid Phase37 new-run receipt.v2 with matching identity
  *
  * All resolved paths are verified to stay within `artifactRoot`. Absolute paths
  * or traversal segments are rejected.
@@ -183,15 +188,21 @@ export async function validateAutopilotStateReferences(input: {
   const state = parseAutopilotState(input.state);
   assertAbsoluteRoot(input.artifactRoot);
   const statuses: Record<string, AutopilotStatusEntry> = {};
-  const receipts: Record<string, AutopilotReceipt> = {};
-  const specs: Record<string, AutopilotUnitSpec> = {};
+  const receipts: Record<string, AutopilotRuntimeReceipt> = {};
+  const specs: Record<string, AutopilotRuntimeUnitSpec> = {};
   validateQueueStateCoherence(state);
 
   for (const unit of Object.values(state.units)) {
-    let spec: AutopilotUnitSpec | undefined;
+    let specContext: AutopilotRuntimeUnitSpecContext | undefined;
     if (unit.spec_ref !== undefined) {
       const specPath = resolveRef(input.artifactRoot, unit.spec_ref, 'spec_ref');
-      spec = parseAutopilotUnitSpec(await readJsonObject(specPath, unit.spec_ref));
+      const specArtifact = await readJsonArtifact(specPath, unit.spec_ref);
+      try {
+        specContext = parseNewRunRuntimeUnitSpec(specArtifact.value);
+      } catch (error) {
+        throw new AutopilotStateStoreError('spec-ref-mismatch', errorMessage(error));
+      }
+      const spec = specContext.unit_spec;
       if (spec.workstream !== state.workstream) {
         throw new AutopilotStateStoreError(
           'spec-ref-mismatch',
@@ -210,8 +221,8 @@ export async function validateAutopilotStateReferences(input: {
     let statusPath: string | undefined;
     if (unit.status_ref !== undefined) {
       statusPath = resolveRef(input.artifactRoot, unit.status_ref, 'status_ref');
-      const status = parseAutopilotStatusEntry(await readJsonObject(statusPath, unit.status_ref), {
-        ...(spec === undefined ? {} : { unitSpec: spec }),
+      const status = parseAutopilotStatusEntry((await readJsonArtifact(statusPath, unit.status_ref)).value, {
+        ...(specContext === undefined ? {} : { unitSpec: specContext.authority_spec }),
         artifactRoot: input.artifactRoot,
       });
       if (
@@ -230,10 +241,17 @@ export async function validateAutopilotStateReferences(input: {
 
     if (unit.receipt_ref !== undefined) {
       const receiptPath = resolveRef(input.artifactRoot, unit.receipt_ref, 'receipt_ref');
-      const receipt = parseAutopilotReceipt(await readJsonObject(receiptPath, unit.receipt_ref), {
-        ...(spec === undefined ? {} : { unitSpec: spec }),
-        ...(statusPath === undefined ? {} : { statusOutputPath: statusPath }),
-      });
+      const receiptArtifact = await readJsonArtifact(receiptPath, unit.receipt_ref);
+      let receiptContext: AutopilotRuntimeReceiptContext;
+      try {
+        receiptContext = parseNewRunRuntimeReceipt(receiptArtifact.value, {
+          ...(specContext === undefined || specContext.kind !== 'phase37-new-run-v2' ? {} : { unitSpec: specContext }),
+        });
+        if (specContext !== undefined) assertRuntimeReceiptMatchesUnitSpec({ unitSpec: specContext, receipt: receiptContext });
+      } catch (error) {
+        throw new AutopilotStateStoreError('receipt-ref-mismatch', errorMessage(error));
+      }
+      const receipt = receiptContext.receipt;
       if (
         receipt.workstream !== state.workstream ||
         receipt.unit_id !== unit.unit_id ||
@@ -244,6 +262,9 @@ export async function validateAutopilotStateReferences(input: {
           'receipt-ref-mismatch',
           `${unit.receipt_ref} identity does not match state unit ${unit.unit_id}`,
         );
+      }
+      if (statusPath !== undefined && specContext !== undefined && receipt.status_output !== specContext.unit_spec.status_output) {
+        throw new AutopilotStateStoreError('receipt-ref-mismatch', `${unit.receipt_ref} status_output does not match unit spec`);
       }
       receipts[unit.receipt_ref] = receipt;
     }
@@ -321,6 +342,10 @@ async function writeJsonAtomic(path: string, value: unknown): Promise<void> {
 }
 
 async function readJsonObject(path: string, label: string): Promise<Record<string, unknown>> {
+  return (await readJsonArtifact(path, label)).value;
+}
+
+async function readJsonArtifact(path: string, label: string): Promise<{ readonly value: Record<string, unknown>; readonly bytes: string }> {
   try {
     await access(path, fsConstants.R_OK);
   } catch (error) {
@@ -333,9 +358,11 @@ async function readJsonObject(path: string, label: string): Promise<Record<strin
   if (!stats.isFile()) {
     throw new AutopilotStateStoreError('missing-reference', `${label} is not a file at ${path}`);
   }
+  let bytes: string;
   let parsed: unknown;
   try {
-    parsed = parseJsonValue(await readFile(path, 'utf8'));
+    bytes = await readFile(path, 'utf8');
+    parsed = parseJsonValue(bytes);
   } catch (error) {
     throw new AutopilotStateStoreError(
       'corrupt-json-reference',
@@ -345,7 +372,7 @@ async function readJsonObject(path: string, label: string): Promise<Record<strin
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
     throw new AutopilotStateStoreError('corrupt-json-reference', `${label} must be a JSON object`);
   }
-  return parsed as Record<string, unknown>;
+  return Object.freeze({ value: parsed as Record<string, unknown>, bytes });
 }
 
 function lastEvent(events: readonly AutopilotEventRow[]): AutopilotEventRow | undefined {

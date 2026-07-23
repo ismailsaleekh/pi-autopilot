@@ -1,5 +1,6 @@
+import { createHash } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
-import { dirname, isAbsolute, normalize, relative, resolve, sep } from 'node:path';
+import { dirname, isAbsolute, join, normalize, relative, resolve, sep } from 'node:path';
 
 import { parseAutopilotExecutionAudit } from '../contracts/index.ts';
 import {
@@ -7,11 +8,16 @@ import {
   type AutopilotAuditClassification,
   type AutopilotExecutionAudit,
   type AutopilotExecutionAuditPathCounts,
+  type AutopilotEvidenceRef,
   type AutopilotExecutionAuditPathSet,
   type AutopilotHeadChangeKind,
   type AutopilotStatusEntry,
-  type AutopilotUnitSpec,
 } from '../contracts/types.ts';
+import {
+  parseNewRunRuntimeUnitSpec,
+  runtimeSpecRosterIdentity,
+  type AutopilotRuntimeUnitSpec,
+} from '../roster/runtime-consumers.ts';
 import { GitQueryError, gitQueryNulStrings, runGitQuery } from '../git-process.ts';
 
 export interface AutopilotExecutionBaseline {
@@ -50,52 +56,56 @@ export async function captureAutopilotExecutionBaseline(
   });
 }
 
-export function deriveAutopilotExecutionAuditPath(spec: AutopilotUnitSpec): string {
+export function deriveAutopilotExecutionAuditPath(spec: AutopilotRuntimeUnitSpec): string {
+  const unitSpec = parseNewRunRuntimeUnitSpec(spec).unit_spec;
   return resolve(
-    deriveAutopilotArtifactRootFromStatus(spec.status_output),
+    deriveAutopilotArtifactRootFromStatus(unitSpec.status_output),
     'execution-audits',
-    `${spec.unit_id}.${spec.role}.attempt-${String(spec.attempt)}.json`,
+    `${unitSpec.unit_id}.${unitSpec.role}.attempt-${String(unitSpec.attempt)}.json`,
   );
 }
 
 export async function writeAutopilotExecutionAudit(input: {
-  readonly unitSpec: AutopilotUnitSpec;
+  readonly unitSpec: AutopilotRuntimeUnitSpec;
   readonly baseline: AutopilotExecutionBaseline;
   readonly statusEntry: AutopilotStatusEntry | null;
   readonly auditPath?: string;
 }): Promise<AutopilotExecutionAudit> {
-  const postRun = readGitStatusSnapshot(input.unitSpec.cwd);
+  const unitSpec = parseNewRunRuntimeUnitSpec(input.unitSpec).unit_spec;
+  const postRun = readGitStatusSnapshot(unitSpec.cwd);
   const audit = buildAutopilotExecutionAudit({
-    unitSpec: input.unitSpec,
+    unitSpec,
     baseline: input.baseline,
     postRun,
     statusEntry: input.statusEntry,
   });
   const parsed = parseAutopilotExecutionAudit(audit);
-  const auditPath = input.auditPath ?? deriveAutopilotExecutionAuditPath(input.unitSpec);
+  await writeRosterRuntimeIdentityEvidence(unitSpec);
+  const auditPath = input.auditPath ?? deriveAutopilotExecutionAuditPath(unitSpec);
   await mkdir(dirname(auditPath), { recursive: true });
   await writeFile(auditPath, `${JSON.stringify(parsed, null, 2)}\n`, 'utf8');
   return parsed;
 }
 
 export function buildAutopilotExecutionAudit(input: {
-  readonly unitSpec: AutopilotUnitSpec;
+  readonly unitSpec: AutopilotRuntimeUnitSpec;
   readonly baseline: AutopilotExecutionBaseline;
   readonly postRun: GitStatusSnapshot;
   readonly statusEntry: AutopilotStatusEntry | null;
 }): AutopilotExecutionAudit {
+  const unitSpec = parseNewRunRuntimeUnitSpec(input.unitSpec).unit_spec;
   const auditAvailable = input.baseline.available && input.postRun.available;
-  const runtimeRoot = runtimeRootRelativePrefix(input.unitSpec);
+  const runtimeRoot = runtimeRootRelativePrefix(unitSpec);
   const baselineDirtyPathsFull = auditAvailable
     ? input.baseline.dirtyPaths.filter((path) => !matchesPathPattern(path, runtimeRoot))
     : [];
   const baselineDirty = baselineDirtyPathsFull.length > 0;
   const dirtyRelevantPathsFull = baselineDirtyPathsFull.filter((path) =>
-    matchesPathPatterns(path, relevantDirtyPathPatterns(input.unitSpec)),
+    matchesPathPatterns(path, relevantDirtyPathPatterns(unitSpec)),
   );
-  const headChangeKind = classifyHeadChange(input.unitSpec.cwd, input.baseline.gitHead, input.postRun.gitHead, auditAvailable);
+  const headChangeKind = classifyHeadChange(unitSpec.cwd, input.baseline.gitHead, input.postRun.gitHead, auditAvailable);
   const committedChangedPathsFull = auditAvailable
-    ? committedChangedPaths(input.unitSpec.cwd, input.baseline.gitHead, input.postRun.gitHead).filter(
+    ? committedChangedPaths(unitSpec.cwd, input.baseline.gitHead, input.postRun.gitHead).filter(
         (path) => !matchesPathPattern(path, runtimeRoot),
       )
     : [];
@@ -113,13 +123,13 @@ export function buildAutopilotExecutionAudit(input: {
     ? sortedDifference(statusReportedChangedPathsFull, actualChangedPathsFull)
     : [];
   const outsideOwnedPathsFull = actualChangedPathsFull.filter(
-    (path) => !matchesPathPatterns(path, input.unitSpec.owned_paths),
+    (path) => !matchesPathPatterns(path, unitSpec.owned_paths),
   );
   const readOnlyTouchedPathsFull = actualChangedPathsFull.filter((path) =>
-    matchesPathPatterns(path, input.unitSpec.read_only_paths),
+    matchesPathPatterns(path, unitSpec.read_only_paths),
   );
   const untouchableTouchedPathsFull = actualChangedPathsFull.filter((path) =>
-    matchesPathPatterns(path, input.unitSpec.untouchable_paths),
+    matchesPathPatterns(path, unitSpec.untouchable_paths),
   );
   const dirtyRelevantPaths = boundedAuditPathSet(dirtyRelevantPathsFull);
   const boundedPathSets = Object.freeze({
@@ -138,7 +148,7 @@ export function buildAutopilotExecutionAudit(input: {
   const statusReportedCommands = sortedUnique(
     (input.statusEntry?.commands ?? []).map((command) => command.command),
   );
-  const declaredValidationCommands = sortedUnique(input.unitSpec.validation_commands);
+  const declaredValidationCommands = sortedUnique(unitSpec.validation_commands);
   const commandCoverageGaps = sortedDifference(declaredValidationCommands, statusReportedCommands);
   const classification = classifyAudit({
     auditAvailable,
@@ -154,12 +164,12 @@ export function buildAutopilotExecutionAudit(input: {
   });
   return Object.freeze({
     schema_version: 'autopilot.execution_audit.v1',
-    workstream: input.unitSpec.workstream,
-    unit_id: input.unitSpec.unit_id,
-    role: input.unitSpec.role,
-    attempt: input.unitSpec.attempt,
+    workstream: unitSpec.workstream,
+    unit_id: unitSpec.unit_id,
+    role: unitSpec.role,
+    attempt: unitSpec.attempt,
     audited_at: new Date().toISOString(),
-    cwd: input.unitSpec.cwd,
+    cwd: unitSpec.cwd,
     git_head: input.baseline.gitHead ?? input.postRun.gitHead,
     baseline_head: input.baseline.gitHead,
     post_run_head: input.postRun.gitHead,
@@ -181,7 +191,7 @@ export function buildAutopilotExecutionAudit(input: {
     status_reported_commands: statusReportedCommands,
     command_coverage_gaps: commandCoverageGaps,
     classification,
-    evidence_refs: [],
+    evidence_refs: [rosterRuntimeIdentityEvidenceRef(unitSpec)],
     summary: auditSummary({
       classification,
       auditAvailable,
@@ -371,7 +381,7 @@ function matchesPathPatterns(path: string, patterns: readonly string[]): boolean
   return patterns.some((pattern) => matchesPathPattern(path, pattern));
 }
 
-function relevantDirtyPathPatterns(spec: AutopilotUnitSpec): readonly string[] {
+function relevantDirtyPathPatterns(spec: AutopilotRuntimeUnitSpec): readonly string[] {
   return Object.freeze([...spec.owned_paths, ...spec.read_only_paths, ...spec.untouchable_paths]);
 }
 
@@ -406,10 +416,58 @@ function deriveAutopilotArtifactRootFromStatus(statusOutput: string): string {
   return root;
 }
 
-function runtimeRootRelativePrefix(spec: AutopilotUnitSpec): string {
-  const runtimeRoot = deriveAutopilotArtifactRootFromStatus(spec.status_output);
-  const rel = relative(spec.cwd, runtimeRoot).split(sep).join('/');
-  return rel.length === 0 || rel.startsWith('..') ? `.pi/autopilot/${spec.workstream}` : rel;
+function runtimeRootRelativePrefix(spec: AutopilotRuntimeUnitSpec): string {
+  const unitSpec = parseNewRunRuntimeUnitSpec(spec).unit_spec;
+  const runtimeRoot = deriveAutopilotArtifactRootFromStatus(unitSpec.status_output);
+  const rel = relative(unitSpec.cwd, runtimeRoot).split(sep).join('/');
+  return rel.length === 0 || rel.startsWith('..') ? `.pi/autopilot/${unitSpec.workstream}` : rel;
+}
+
+async function writeRosterRuntimeIdentityEvidence(spec: AutopilotRuntimeUnitSpec): Promise<void> {
+  const unitSpec = parseNewRunRuntimeUnitSpec(spec).unit_spec;
+  const path = rosterRuntimeIdentityEvidencePath(unitSpec);
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(path, rosterRuntimeIdentityEvidenceBytes(unitSpec), 'utf8');
+}
+
+function rosterRuntimeIdentityEvidenceRef(spec: AutopilotRuntimeUnitSpec): AutopilotEvidenceRef {
+  const unitSpec = parseNewRunRuntimeUnitSpec(spec).unit_spec;
+  const bytes = rosterRuntimeIdentityEvidenceBytes(unitSpec);
+  const artifactRoot = deriveAutopilotArtifactRootFromStatus(unitSpec.status_output);
+  const path = relative(artifactRoot, rosterRuntimeIdentityEvidencePath(unitSpec)).split(sep).join('/');
+  return Object.freeze({
+    path,
+    sha256: sha256Text(bytes),
+    byte_count: utf8ByteLength(bytes),
+    description: 'Phase37 roster/assignment/request-profile identity retained by execution audit',
+  });
+}
+
+function rosterRuntimeIdentityEvidencePath(spec: AutopilotRuntimeUnitSpec): string {
+  const unitSpec = parseNewRunRuntimeUnitSpec(spec).unit_spec;
+  return join(
+    unitSpec.evidence_dir,
+    `${unitSpec.unit_id}.${unitSpec.role}.attempt-${String(unitSpec.attempt)}.roster-runtime-identity.json`,
+  );
+}
+
+function rosterRuntimeIdentityEvidenceBytes(spec: AutopilotRuntimeUnitSpec): string {
+  const unitSpec = parseNewRunRuntimeUnitSpec(spec).unit_spec;
+  const identity = runtimeSpecRosterIdentity(unitSpec);
+  if (identity === null) throw new Error('unit_spec.v2 roster identity is unavailable');
+  return `${JSON.stringify({
+    ...identity,
+    evidence_schema_version: 'autopilot.execution_audit_roster_runtime_identity.v1',
+    evidence_for_schema_version: 'autopilot.execution_audit.v1',
+  }, null, 2)}\n`;
+}
+
+function sha256Text(value: string): `sha256:${string}` {
+  return `sha256:${createHash('sha256').update(value, 'utf8').digest('hex')}`;
+}
+
+function utf8ByteLength(value: string): number {
+  return new TextEncoder().encode(value).length;
 }
 
 function boundedText(value: string): string {
