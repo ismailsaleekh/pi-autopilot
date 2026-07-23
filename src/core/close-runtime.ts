@@ -1392,7 +1392,7 @@ async function transitionHasFreshTargetValidation(input: {
     try {
       const evidence = parseValidationEvidence(JSON.parse(await readFile(join(input.context.active.runtime_root, ref), 'utf8')) as unknown);
       const validatedAtMs = parseCanonicalUtcMs(evidence.validated_at);
-      if (validatedAtMs === null || validatedAtMs < input.approvedAtMs) continue;
+      if (validatedAtMs === null || validatedAtMs <= input.approvedAtMs) continue;
       if (await validationEvidenceAuthenticatesTransitionTarget({ context: input.context, evidence, terminal: input.terminal, targetRoster: input.targetRoster, fromSelection: input.fromSelection })) return true;
     } catch {
       continue;
@@ -1414,7 +1414,7 @@ async function transitionValidationEvidenceForMerge(input: {
     try {
       const evidence = parseValidationEvidence(JSON.parse(await readFile(join(input.context.active.runtime_root, ref), 'utf8')) as unknown);
       const validatedAtMs = parseCanonicalUtcMs(evidence.validated_at);
-      if (validatedAtMs === null || validatedAtMs < input.approvedAtMs) continue;
+      if (validatedAtMs === null || validatedAtMs <= input.approvedAtMs) continue;
       if (!validationCanCloseSourceWork({ validation: evidence, unitMerge: input.merge })) continue;
       if (await validationEvidenceAuthenticatesTransitionTarget({ context: input.context, evidence, terminal: input.terminal, targetRoster: input.targetRoster, fromSelection: input.fromSelection })) return true;
     } catch {
@@ -1423,6 +1423,12 @@ async function transitionValidationEvidenceForMerge(input: {
   }
   return false;
 }
+
+export const closeRuntimeTestInternals = Object.freeze({
+  parseCanonicalUtcMs,
+  transitionHasFreshTargetValidation,
+  transitionValidationEvidenceForMerge,
+});
 
 async function validationEvidenceAuthenticatesTransitionTarget(input: {
   readonly context: PreparedCloseContext;

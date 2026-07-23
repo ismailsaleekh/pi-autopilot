@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { existsSync, realpathSync } from 'node:fs';
 import { chmod, mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises';
@@ -6,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { describe, it } from 'node:test';
 
-import { AUTOPILOT_TERMINAL_CLEANUP_BOUNDARIES, AutopilotCloseError, abortAutopilotWorkstream, closeAutopilotWorkstream } from '../../src/core/close-runtime.ts';
+import { AUTOPILOT_TERMINAL_CLEANUP_BOUNDARIES, AutopilotCloseError, abortAutopilotWorkstream, closeAutopilotWorkstream, closeRuntimeTestInternals } from '../../src/core/close-runtime.ts';
 import { CoordinatorClient } from '../../src/core/coordination/client.ts';
 import { DurableRunSupervisorClient, readCoordinatorSessionContext } from '../../src/core/coordination/supervisor.ts';
 import { coordinatorRuntimePaths } from '../../src/core/coordination/runtime-paths.ts';
@@ -16,6 +17,11 @@ import { AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV } from '../../src/core/names.
 import { materializeAutopilotSpecPaths } from '../../src/core/materialization.ts';
 import type { AutopilotExecutionAudit, AutopilotExecutionCommit, AutopilotMasterPlan, AutopilotState, AutopilotStatusEntry, AutopilotUnitSpec } from '../../src/core/contracts/index.ts';
 import { buildCanonicalPreRunSelection } from '../../src/core/roster/run-selection.ts';
+import { canonicalRosterJson } from '../../src/core/roster/canonical.ts';
+import { computeAutopilotRosterContractObjectHash, parseAutopilotRoster } from '../../src/core/roster/contracts.ts';
+import { resolveRosterScopePaths, rosterRevisionPath } from '../../src/core/roster/paths.ts';
+import { buildW4CertifiedRosterForCandidate, SEED_CANDIDATES } from '../../src/core/roster/provider-recipes.ts';
+import { requestProfileFromAssignment } from '../../src/core/roster/runtime-spec.ts';
 import { authorizeExistingRunRosterTransitionInput, buildExistingRunRosterTransitionProposal, commitApprovedExistingRunRosterTransition, savedRosterRefForSelection, type AutopilotSavedRosterRefV1 } from '../../src/core/roster/transition.ts';
 import {
   AUTOPILOT_STATE_ROOT_ENV,
@@ -72,7 +78,7 @@ async function installCloseRosterSelection(input: {
   readonly workstream: string;
   readonly repoId: string;
   readonly workstreamRun: string;
-}): Promise<Parameters<typeof savedRosterRefForSelection>[0]['selection']> {
+}): Promise<ReturnType<typeof buildCanonicalPreRunSelection>['selection']> {
   const canonical = buildCanonicalPreRunSelection({
     stateRoot: input.stateRoot,
     repo_id: input.repoId,
@@ -454,6 +460,218 @@ async function writeValidationEvidence(runtimeRoot: string, name: string, valida
   });
 }
 
+function closeSha256(bytes: string | Uint8Array): `sha256:${string}` {
+  return `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
+}
+
+function requireRosterHash(value: string | null): `sha256:${string}` {
+  if (value === null) throw new Error('missing roster hash');
+  assert.match(value, /^sha256:[a-f0-9]{64}$/u);
+  return value as `sha256:${string}`;
+}
+
+async function installCloseTargetRoster(stateRoot: string): Promise<{ readonly roster: ReturnType<typeof parseAutopilotRoster>; readonly ref: AutopilotSavedRosterRefV1; readonly assignmentSha256: `sha256:${string}`; readonly requestProfile: ReturnType<typeof requestProfileFromAssignment> }> {
+  const candidate = SEED_CANDIDATES.find((entry) => entry.candidate_id === 'kimi-coding-precision-v1');
+  if (candidate === undefined) throw new Error('missing W4 target roster candidate');
+  const roster = buildW4CertifiedRosterForCandidate({ candidate, certification_manifest_id: 'close-boundary-cert', certification_manifest_sha256: `sha256:${'c'.repeat(64)}` });
+  if (roster === null) throw new Error('target roster unavailable');
+  const assignment = roster.assignments.find((entry) => entry.role === 'validate');
+  if (assignment === undefined) throw new Error('target roster missing validate assignment');
+  const paths = resolveRosterScopePaths({ scope: 'user', stateRoot });
+  const rosterPath = rosterRevisionPath(paths, roster);
+  await mkdir(dirname(rosterPath), { recursive: true, mode: 0o700 });
+  await writeFile(rosterPath, `${canonicalRosterJson(roster)}\n`, 'utf8');
+  return {
+    roster: parseAutopilotRoster(roster),
+    ref: { roster_id: roster.roster_id, roster_revision: roster.roster_revision, roster_sha256: roster.roster_sha256, assignment_set_sha256: roster.assignment_set_sha256, path: rosterPath },
+    assignmentSha256: requireRosterHash(assignment.assignment_sha256),
+    requestProfile: requestProfileFromAssignment(assignment),
+  };
+}
+
+async function writeBoundTransitionValidationEvidence(input: {
+  readonly runtimeRoot: string;
+  readonly committed: Awaited<ReturnType<typeof commitApprovedExistingRunRosterTransition>>;
+  readonly target: Awaited<ReturnType<typeof installCloseTargetRoster>>;
+  readonly preRunSelectionSha256: string;
+  readonly validatedAt: string;
+  readonly name: string;
+  readonly integrationHead: string;
+}): Promise<string> {
+  const unitId = 'v-transition-boundary';
+  const attempt = 2;
+  const statusRef = `statuses/${input.name}.validate.attempt-2.json`;
+  const receiptRef = `receipts/${input.name}.validate.attempt-2.receipt.json`;
+  const auditRef = `execution-audits/${input.name}.validate.attempt-2.json`;
+  const statusPath = join(input.runtimeRoot, statusRef);
+  const receiptPath = join(input.runtimeRoot, receiptRef);
+  const auditPath = join(input.runtimeRoot, auditRef);
+  await Promise.all([mkdir(dirname(statusPath), { recursive: true }), mkdir(dirname(receiptPath), { recursive: true }), mkdir(dirname(auditPath), { recursive: true })]);
+  const transition = input.committed.transition;
+  const transitionArtifactSha256 = input.committed.transition_artifact_sha256;
+  if (transition === null || transitionArtifactSha256 === null) throw new Error('committed transition missing authenticated artifact');
+  const transitionBytes = await readFile(input.committed.runtime_transition_path);
+  const spec = {
+    schema_version: 'autopilot.unit_spec.v2',
+    workstream: 'close-smoke',
+    unit_id: unitId,
+    role: 'validate',
+    template: 'validate',
+    attempt,
+    objective: 'Validate the transition target roster after approval.',
+    cwd: dirname(input.runtimeRoot),
+    model: input.target.requestProfile['model'],
+    thinking: input.target.requestProfile['thinking'],
+    owned_paths: [],
+    read_only_paths: ['src/smoke.ts'],
+    untouchable_paths: [],
+    context_refs: [{ path: input.committed.runtime_transition_ref, purpose: `committed existing-run roster transition ${transition.transition_id}`, sha256: transitionArtifactSha256, byte_count: transitionBytes.byteLength }],
+    validation_commands: ['npm test -- close transition boundary'],
+    status_output: statusPath,
+    receipt_output: receiptPath,
+    evidence_dir: join(input.runtimeRoot, 'evidence', unitId),
+    stop_boundary: 'Validate only.',
+    quality_profile: 'source-change-validation',
+    risk_level: 'medium',
+    acceptance_criteria: ['transition-bound validation passes'],
+    verification_plan: emptyVerificationPlan(),
+    closure_criteria: ['fresh transition validation passes'],
+    upstream_refs: [{ unit_id: 'u01-implement', purpose: 'source under validation', status_ref: 'statuses/u01-implement.implement.attempt-1.json', audit_ref: 'execution-audits/u01-implement.implement.attempt-1.json' }],
+    timeout_seconds: 3600,
+    render_prompt_snapshot: true,
+    roster_id: input.target.roster.roster_id,
+    roster_revision: input.target.roster.roster_revision,
+    roster_sha256: input.target.roster.roster_sha256,
+    assignment_sha256: input.target.assignmentSha256,
+    pre_run_selection_sha256: input.preRunSelectionSha256,
+    request_profile: input.target.requestProfile,
+  };
+  await writeJson(join(input.runtimeRoot, 'unit-specs', `${unitId}.validate.attempt-2.json`), spec);
+  const reportRef = `evidence/${unitId}/${input.name}.md`;
+  const reportBytes = Buffer.from('transition-bound validation report\n', 'utf8');
+  const reportEvidenceRef = { path: reportRef, sha256: closeSha256(reportBytes), byte_count: reportBytes.byteLength };
+  await mkdir(dirname(join(input.runtimeRoot, reportRef)), { recursive: true });
+  await writeFile(join(input.runtimeRoot, reportRef), reportBytes);
+  const status = {
+    schema_version: 'autopilot.status.v1',
+    workstream: 'close-smoke',
+    unit_id: unitId,
+    role: 'validate',
+    attempt,
+    verdict: 'PASS',
+    severity: 'clean',
+    summary: 'Transition-bound validation passed.',
+    changed_paths: [],
+    findings: [],
+    commands: [{ command: 'npm test -- close transition boundary', status: 'passed', exit_code: 0, summary: 'passed' }],
+    evidence_refs: [reportEvidenceRef],
+    report_ref: reportEvidenceRef,
+    next_action: 'close',
+  };
+  const statusBytes = Buffer.from(`${JSON.stringify(status, null, 2)}\n`, 'utf8');
+  const statusSha256 = closeSha256(statusBytes);
+  await writeFile(statusPath, statusBytes);
+  const observedProfileBase = {
+    provider_id: input.target.requestProfile['provider_id'],
+    requested_model_id: input.target.requestProfile['model_id'],
+    executed_model_id: input.target.requestProfile['model_id'],
+    api: input.target.requestProfile['api'],
+    thinking: input.target.requestProfile['thinking'],
+    service_tier: input.target.requestProfile['service_tier'],
+    cache_policy: input.target.requestProfile['cache_policy'],
+    system_prompt_profile: input.target.requestProfile['system_prompt_profile'],
+    system_prompt_sha256: `sha256:${'a'.repeat(64)}`,
+    route_policy_id: input.target.requestProfile['route_policy_id'],
+    route_policy_revision: input.target.requestProfile['route_policy_revision'],
+    request_profile_sha256: input.target.requestProfile['request_profile_sha256'],
+    observed_profile_sha256: `sha256:${'0'.repeat(64)}`,
+  };
+  const observedProfile = { ...observedProfileBase, observed_profile_sha256: requireRosterHash(computeAutopilotRosterContractObjectHash('autopilot.observed_profile.v1', observedProfileBase)) };
+  const receipt = {
+    schema_version: 'autopilot.receipt.v2',
+    tool_name: 'autopilot_emit_status',
+    workstream: 'close-smoke',
+    unit_id: unitId,
+    role: 'validate',
+    attempt,
+    emitted_at: input.validatedAt,
+    status_output: statusPath,
+    status_sha256: statusSha256,
+    schema_sha256: `sha256:${'b'.repeat(64)}`,
+    tool_call_id: `call-${input.name}`,
+    provider_identity: {
+      provider_id: input.target.requestProfile['provider_id'],
+      requested_model_id: input.target.requestProfile['model_id'],
+      executed_model_id: input.target.requestProfile['model_id'],
+      api: input.target.requestProfile['api'],
+      thinking_level: input.target.requestProfile['thinking'],
+    },
+    expected_identity_hash: `sha256:${'d'.repeat(64)}`,
+    roster_id: input.target.roster.roster_id,
+    roster_revision: input.target.roster.roster_revision,
+    roster_sha256: input.target.roster.roster_sha256,
+    assignment_sha256: input.target.assignmentSha256,
+    pre_run_selection_sha256: input.preRunSelectionSha256,
+    request_profile: input.target.requestProfile,
+    observed_profile: observedProfile,
+  };
+  const receiptBytes = Buffer.from(`${JSON.stringify(receipt, null, 2)}\n`, 'utf8');
+  await writeFile(receiptPath, receiptBytes);
+  const audit = {
+    schema_version: 'autopilot.execution_audit.v1',
+    workstream: 'close-smoke',
+    unit_id: unitId,
+    role: 'validate',
+    attempt,
+    audited_at: input.validatedAt,
+    cwd: dirname(input.runtimeRoot),
+    git_head: input.integrationHead,
+    dirty_baseline: false,
+    dirty_baseline_paths: [],
+    dirty_relevant_paths: [],
+    actual_changed_paths: [],
+    status_reported_changed_paths: [],
+    omitted_status_changes: [],
+    reported_but_not_actual_changes: [],
+    outside_owned_paths: [],
+    read_only_touched_paths: [],
+    untouchable_touched_paths: [],
+    path_counts: { dirty_baseline_paths: 0, dirty_relevant_paths: 0, actual_changed_paths: 0, status_reported_changed_paths: 0, omitted_status_changes: 0, reported_but_not_actual_changes: 0, outside_owned_paths: 0, read_only_touched_paths: 0, untouchable_touched_paths: 0 },
+    truncated_path_sets: [],
+    declared_validation_commands: ['npm test -- close transition boundary'],
+    status_reported_commands: ['npm test -- close transition boundary'],
+    command_coverage_gaps: [],
+    classification: 'clean',
+    evidence_refs: [],
+    summary: 'Clean transition-bound validation audit.',
+  };
+  const auditBytes = Buffer.from(`${JSON.stringify(audit, null, 2)}\n`, 'utf8');
+  await writeFile(auditPath, auditBytes);
+  const validationRef = `validation/${input.name}.json`;
+  await writeJson(join(input.runtimeRoot, validationRef), {
+    schema_version: 'autopilot.validation_evidence.v1',
+    workstream: 'close-smoke',
+    source_unit_id: 'u01-implement',
+    source_attempt: 1,
+    validation_unit_id: unitId,
+    validation_attempt: attempt,
+    unit_merge_ref: 'unit-merges/u01-implement.implement.attempt-1.json',
+    integration_head: input.integrationHead,
+    covered_paths: ['src/smoke.ts'],
+    covered_path_groups: [],
+    witness_ids: ['strict-post-transition-boundary'],
+    status_ref: statusRef,
+    status_sha256: statusSha256,
+    receipt_ref: receiptRef,
+    receipt_sha256: closeSha256(receiptBytes),
+    audit_ref: auditRef,
+    audit_sha256: closeSha256(auditBytes),
+    verdict: 'PASS',
+    validated_at: input.validatedAt,
+  });
+  return validationRef;
+}
+
 async function writeJson(path: string, value: unknown): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
   await writeFile(path, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
@@ -768,6 +986,54 @@ void describe('Autopilot close runtime', () => {
       assert.equal(result.outcome, 'dry-run');
       assert.equal(result.blockers.some((blocker) => /invalid-date\.json.*validated_at is not a finite canonical UTC timestamp/u.test(blocker)), true);
       assert.equal(result.blockers.some((blocker) => /requires post-transition independent target-roster validate\/bughunt evidence/u.test(blocker)), true);
+    });
+  });
+
+  void it('rejects exactly-at-approval transition-bound validation but accepts the +1ms boundary at freshness helpers', async () => {
+    await withTempDir(async (root) => {
+      const fixture = await prepareCloseFixture(root);
+      const stateRoot = process.env[AUTOPILOT_STATE_ROOT_ENV] ?? join(root, 'autopilot-state');
+      const active = (await readActiveAutopilots(coordinationRootForRepo(fixture.repoKey))).find((row) => row.workstream_run === fixture.workstreamRun);
+      if (active === undefined) throw new Error('active row missing');
+      const target = await installCloseTargetRoster(stateRoot);
+      const committed = await commitCloseRosterTransition(root, fixture, target.ref);
+      const transition = committed.transition;
+      const transitionArtifactSha256 = committed.transition_artifact_sha256;
+      if (transition === null || transitionArtifactSha256 === null) throw new Error('committed transition missing authenticated artifact');
+      const fromSelection = await installCloseRosterSelection({ stateRoot, mainWorktreePath: active.main_worktree_path, workstream: active.workstream, repoId: active.repo_key, workstreamRun: active.workstream_run });
+      const approvedAtMs = closeRuntimeTestInternals.parseCanonicalUtcMs(transition.approved_at);
+      if (approvedAtMs === null) throw new Error('approved_at did not parse');
+      const integrationHead = gitOutput(active.main_worktree_path, ['rev-parse', 'HEAD']);
+      const equalRef = await writeBoundTransitionValidationEvidence({ runtimeRoot: fixture.runtimeRoot, committed, target, preRunSelectionSha256: fromSelection.selection_sha256, validatedAt: transition.approved_at, name: 'bound-equal-approval', integrationHead });
+      const plusRef = await writeBoundTransitionValidationEvidence({ runtimeRoot: fixture.runtimeRoot, committed, target, preRunSelectionSha256: fromSelection.selection_sha256, validatedAt: '2026-07-23T00:00:00.001Z', name: 'bound-plus-one-ms', integrationHead });
+      const terminal = { id: transition.transition_id, toRoster: transition.to_roster, artifactSha256: transitionArtifactSha256 };
+      const context = { active } as never;
+      const merge = {
+        schema_version: 'autopilot.unit_merge.v1',
+        workstream: active.workstream,
+        workstream_run: active.workstream_run,
+        autopilot_id: active.autopilot_id,
+        active_run_epoch: active.active_run_epoch,
+        unit_id: 'u01-implement',
+        role: 'implement',
+        attempt: 1,
+        unit_branch: active.branch,
+        main_branch: active.branch,
+        unit_head: integrationHead,
+        integration_before: integrationHead,
+        integration_after: integrationHead,
+        merge_commit_sha: integrationHead,
+        changed_paths: ['src/smoke.ts'],
+        status_ref: 'statuses/u01-implement.implement.attempt-1.json',
+        receipt_ref: 'receipts/u01-implement.implement.attempt-1.receipt.json',
+        audit_ref: 'execution-audits/u01-implement.implement.attempt-1.json',
+        execution_commit_ref: 'execution-commits/u01-implement.implement.attempt-1.json',
+        merged_at: '2026-07-23T00:00:00.001Z',
+      } as const;
+      assert.equal(await closeRuntimeTestInternals.transitionHasFreshTargetValidation({ context, validationRefs: [equalRef], terminal, approvedAtMs, targetRoster: target.roster, fromSelection }), false);
+      assert.equal(await closeRuntimeTestInternals.transitionValidationEvidenceForMerge({ context, validationRefs: [equalRef], merge, terminal, approvedAtMs, targetRoster: target.roster, fromSelection }), false);
+      assert.equal(await closeRuntimeTestInternals.transitionHasFreshTargetValidation({ context, validationRefs: [plusRef], terminal, approvedAtMs, targetRoster: target.roster, fromSelection }), true);
+      assert.equal(await closeRuntimeTestInternals.transitionValidationEvidenceForMerge({ context, validationRefs: [plusRef], merge, terminal, approvedAtMs, targetRoster: target.roster, fromSelection }), true);
     });
   });
 
