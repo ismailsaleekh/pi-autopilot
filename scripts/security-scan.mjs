@@ -15,11 +15,7 @@ const reviewedInstallScripts = {
   'node_modules/esbuild': ['0.28.1', 'sha512-HrJrvZv5ayxBzPfwphOoNzkzOIIlifzk0KJrGK2c8R4+LKpMtpYLQeUdjnwjWv/LZlkH2laZk+4w78pi99D4Vw=='],
   'node_modules/fsevents': ['2.3.3', 'sha512-5xoDfX+fL7faATnagmWPpbFtwh/R77WmMMqqHGS65C3vvB0YHrgF+B1YmZ3441tMj5n63k0212XNoJwzlhffQw=='],
 };
-const reviewedIntegrityExceptions = new Set([
-  'node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-agent-core@0.80.6',
-  'node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai@0.80.6',
-  'node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-tui@0.80.6',
-]);
+const reviewedIntegrityExceptions = new Set();
 const reviewed = [];
 const packages = lock.packages && typeof lock.packages === 'object' ? Object.entries(lock.packages) : [];
 for (const [path, value] of packages) {

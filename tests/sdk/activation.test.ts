@@ -45,10 +45,6 @@ interface ResourceLoaderOptionsLike {
   readonly noContextFiles: true;
 }
 
-interface AuthStorageLike {
-  readonly marker?: unknown;
-}
-
 interface SessionManagerLike {
   readonly marker?: unknown;
 }
@@ -57,7 +53,7 @@ interface SettingsManagerLike {
   readonly marker?: unknown;
 }
 
-interface ModelRegistryLike {
+interface ModelRuntimeLike {
   readonly marker?: unknown;
 }
 
@@ -156,15 +152,14 @@ interface CreateAgentSessionOptionsLike {
   readonly resourceLoader: ResourceLoaderLike;
   readonly sessionManager: SessionManagerLike;
   readonly settingsManager: SettingsManagerLike;
-  readonly authStorage: AuthStorageLike;
-  readonly modelRegistry: ModelRegistryLike;
+  readonly modelRuntime: ModelRuntimeLike;
   readonly noTools: 'builtin';
 }
 
 interface PiSdkModuleLike {
   readonly DefaultResourceLoader: new (options: ResourceLoaderOptionsLike) => ResourceLoaderLike;
-  readonly AuthStorage: { create(path: string): AuthStorageLike };
-  readonly ModelRegistry: { inMemory(authStorage: AuthStorageLike): ModelRegistryLike };
+  readonly ModelRuntime: { create(options: { readonly authPath: string; readonly modelsPath: string }): Promise<ModelRuntimeLike> };
+  readonly ModelRegistry: new (modelRuntime: ModelRuntimeLike) => unknown;
   readonly SessionManager: { inMemory(cwd: string): SessionManagerLike };
   readonly SettingsManager: { inMemory(): SettingsManagerLike };
   createAgentSession(options: CreateAgentSessionOptionsLike): Promise<CreateAgentSessionResultLike>;
@@ -193,16 +188,14 @@ function isIndexable(value: unknown): value is IndexableValue {
 
 function hasPiSdkShape(value: unknown): value is PiSdkModuleLike {
   if (!isIndexable(value)) return false;
-  const authStorage = value['AuthStorage'];
-  const modelRegistry = value['ModelRegistry'];
+  const modelRuntime = value['ModelRuntime'];
   const sessionManager = value['SessionManager'];
   const settingsManager = value['SettingsManager'];
   return (
     typeof value['DefaultResourceLoader'] === 'function' &&
-    isIndexable(authStorage) &&
-    typeof authStorage['create'] === 'function' &&
-    isIndexable(modelRegistry) &&
-    typeof modelRegistry['inMemory'] === 'function' &&
+    isIndexable(modelRuntime) &&
+    typeof modelRuntime['create'] === 'function' &&
+    typeof value['ModelRegistry'] === 'function' &&
     isIndexable(sessionManager) &&
     typeof sessionManager['inMemory'] === 'function' &&
     isIndexable(settingsManager) &&
@@ -351,16 +344,14 @@ async function createSdkHarness(setup?: (input: { readonly cwd: string; readonly
   });
   await resourceLoader.reload();
 
-  const authStorage = sdk.AuthStorage.create(join(agentDir, 'auth.json'));
-  const modelRegistry = sdk.ModelRegistry.inMemory(authStorage);
+  const modelRuntime = await sdk.ModelRuntime.create({ authPath: join(agentDir, 'auth.json'), modelsPath: join(agentDir, 'models.json') });
   const { session } = await sdk.createAgentSession({
     cwd,
     agentDir,
     resourceLoader,
     sessionManager: sdk.SessionManager.inMemory(cwd),
     settingsManager: sdk.SettingsManager.inMemory(),
-    authStorage,
-    modelRegistry,
+    modelRuntime,
     noTools: 'builtin',
   });
   const sentMessages: MessageCapture[] = [];

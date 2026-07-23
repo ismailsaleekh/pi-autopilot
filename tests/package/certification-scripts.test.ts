@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -54,6 +54,38 @@ void describe('literal certification scripts', () => {
     } finally {
       await rm(evidence, { recursive: true, force: true });
     }
+  });
+
+  void it('keeps ephemeral TMPDIR short enough for production Unix socket paths under a long evidence root', async () => {
+    if (process.platform === 'win32') return;
+    const parent = await mkdtemp(join(tmpdir(), 'autopilot-certified-long-evidence-'));
+    const evidence = join(parent, 'e'.repeat(90));
+    await mkdir(evidence);
+    await chmod(evidence, 0o700);
+    try {
+      const program = `const net=require('node:net');const path=require('node:path');const socket=path.join(process.env.TMPDIR,'pi-autopilot-${'a'.repeat(32)}.sock');const server=net.createServer();server.on('error',(error)=>{throw error});server.listen(socket,()=>server.close(()=>process.stdout.write('socket-bound\\n')))`;
+      const invocation = run(process.execPath, [wrapper, '--evidence-dir', evidence, '--id', 'package-long-socket', '--timeout-ms', '5000', '--max-rss-bytes', '536870912', '--', process.execPath, '-e', program]);
+      assert.equal(invocation.status, 0, invocation.stderr);
+      const report = jsonObject(await readFile(join(evidence, 'package-long-socket.json'), 'utf8'), 'long-socket report');
+      assert.equal(report['passed'], true);
+      assert.equal(await readFile(join(evidence, 'package-long-socket.stdout.log'), 'utf8'), 'socket-bound\n');
+    } finally { await rm(parent, { recursive: true, force: true }); }
+  });
+
+  void it('cleans the short ephemeral runtime when evidence setup fails before child spawn', async () => {
+    const evidence = await mkdtemp(join(tmpdir(), 'autopilot-certified-early-cleanup-'));
+    await chmod(evidence, 0o700);
+    const runtimeParent = process.platform === 'darwin' ? '/tmp' : tmpdir();
+    const runtimePrefix = 'apc-package-earl-';
+    const matchingRuntimes = async (): Promise<string[]> => (await readdir(runtimeParent)).filter((name) => name.startsWith(runtimePrefix)).sort();
+    const before = await matchingRuntimes();
+    try {
+      await writeFile(join(evidence, 'package-early-cleanup.stdout.log'), 'collision\n', { mode: 0o600 });
+      const invocation = run(process.execPath, [wrapper, '--evidence-dir', evidence, '--id', 'package-early-cleanup', '--timeout-ms', '5000', '--max-rss-bytes', '536870912', '--', process.execPath, '-e', '']);
+      assert.notEqual(invocation.status, 0);
+      assert.match(invocation.stderr, /EEXIST/u);
+      assert.deepEqual(await matchingRuntimes(), before);
+    } finally { await rm(evidence, { recursive: true, force: true }); }
   });
 
   void it('retains every observed descendant identity after a child exits', async () => {

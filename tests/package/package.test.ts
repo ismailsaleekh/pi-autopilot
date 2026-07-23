@@ -198,6 +198,37 @@ void describe('package manifest and payload', () => {
     for (const dir of ['bin/', 'dist/', 'extensions/', 'src/', 'templates/', 'artifacts/security/']) assert.ok(pkg.files.includes(dir), dir);
   });
 
+  void it('pins shrinkwrapped Pi integrity and Linux native libc selectors without exceptions', async () => {
+    const lockValue = parseJson(await readFile(new URL('package-lock.json', root), 'utf8'));
+    if (!isJsonMap(lockValue)) throw new TypeError('package-lock.json must be an object');
+    const packagesValue = field(lockValue, 'packages');
+    if (!isJsonMap(packagesValue)) throw new TypeError('package-lock packages must be an object');
+    const requireLockPackage = (path: string): JsonMap => {
+      const value = field(packagesValue, path);
+      if (!isJsonMap(value)) throw new TypeError(`package-lock entry missing: ${path}`);
+      return value;
+    };
+    const piRoot = 'node_modules/@earendil-works/pi-coding-agent/node_modules/';
+    const integrityByPackage = new Map<string, string>([
+      ['@earendil-works/pi-agent-core', 'sha512-yqbh68CyhqxMov/jUogFJfMqlu2Gd37GAki+tr59YCmAPHfomiCA5ESzusXtpGzABeiZFC/OrRdQ4GwCCOMIHA=='],
+      ['@earendil-works/pi-ai', 'sha512-hzHE7Z8l5mgJk+ke67Lge0rwS2+wbKJrFKl9o5M1R1rh33+cCT7D1AHz1OAtX5wFs90E1/BTGhyJRTUHaMxGvQ=='],
+      ['@earendil-works/pi-tui', 'sha512-OMEe+Zt8oQYi/rCq3upxsTlIScWL0FPhXwQus34TbQb3EmTx88S7Uzx32JxvQiEeWOw8eDCdJf2PBUBE9r6wIg=='],
+    ]);
+    for (const [name, integrity] of integrityByPackage) {
+      const entry = requireLockPackage(`${piRoot}${name}`);
+      assert.equal(field(entry, 'version'), '0.81.1');
+      assert.equal(field(entry, 'integrity'), integrity);
+    }
+    const libcByPackage = new Map<string, string>([
+      ['@mariozechner/clipboard-linux-arm64-gnu', 'glibc'],
+      ['@mariozechner/clipboard-linux-arm64-musl', 'musl'],
+      ['@mariozechner/clipboard-linux-riscv64-gnu', 'glibc'],
+      ['@mariozechner/clipboard-linux-x64-gnu', 'glibc'],
+      ['@mariozechner/clipboard-linux-x64-musl', 'musl'],
+    ]);
+    for (const [name, libc] of libcByPackage) assert.deepEqual(field(requireLockPackage(`${piRoot}${name}`), 'libc'), [libc]);
+  });
+
   void it('has required docs and runtime files', async () => {
     for (const file of [
       'src/core/coordination/migration.ts',
