@@ -1,0 +1,707 @@
+{
+  "schema_version": "autopilot.certification_manifest.v1",
+  "manifest_id": "zai-coding-plan-w4-qualification",
+  "manifest_revision": 1,
+  "subject_kind": "provider_recipe",
+  "subject_id": "zai-coding-plan",
+  "subject_sha256": "sha256:65fcf2b93d11ddf57472aba636183a6a5ab13f5b4ab47b1e4a88215fd47f3f7a",
+  "package_version": "1.3.0",
+  "pi_version": "0.80.6",
+  "qualification_state": "qualification-required",
+  "role_results": [
+    {
+      "role": "parent",
+      "state": "fail",
+      "evidence_refs": [
+        {
+          "evidence_id": "zai-parent-billing-proof",
+          "kind": "billing-proof",
+          "uri": "qualification-required://phase37/zai/parent/billing-proof",
+          "sha256": null,
+          "byte_count": null,
+          "secret_free": true
+        },
+        {
+          "evidence_id": "zai-parent-cache-proof",
+          "kind": "cache-proof",
+          "uri": "qualification-required://phase37/zai/parent/cache-proof",
+          "sha256": null,
+          "byte_count": null,
+          "secret_free": true
+        },
+        {
+          "evidence_id": "zai-parent-execution-proof",
+          "kind": "execution-proof",
+          "uri": "qualification-required://phase37/zai/parent/execution-proof",
+          "sha256": null,
+          "byte_count": null,
+          "secret_free": true
+        },
+        {
+          "evidence_id": "zai-parent-prompt-proof",
+          "kind": "prompt-proof",
+          "uri": "qualification-required://phase37/zai/parent/prompt-proof",
+          "sha256": null,
+          "byte_count": null,
+          "secret_free": true
+        },
+        {
+          "evidence_id": "zai-parent-route-proof",
+          "kind": "route-proof",
+          "uri": "qualification-required://phase37/zai/parent/route-proof",
+          "sha256": null,
+          "byte_count": null,
+          "secret_free": true
+        }
+      ]
+    },
+    {
+      "role": "strategy",
+      "state": "fail",
+      "evidence_refs": [
+        {
+          "evidence_id": "zai-strategy-billing-proof",
+          "kind": "billing-proof",
+          "uri": "qualification-required://phase37/zai/strategy/billing-proof",
+          "sha256": null,
+          "byte_count": null,
+          "secret_free": true
+        },
+        {
+          "evidence_id": "zai-strategy-cache-proof",
+          "kind": "cache-proof",
+          "uri": "qualification-required://phase37/zai/strategy/cache-proof",
+          "sha256": null,
+          "byte_count": null,
+          "secret_free": true
+        },
+        {
+          "evidence_id": "zai-strategy-execution-proof",
+          "kind": "execution-proof",
+          "uri": "qualification-required://phase37/zai/strategy/execution-proof",
+          "sha256": null,
+          "byte_count": null,
+          "secret_free": true
+        },
+        {
+          "evidence_id": "zai-strategy-prompt-proof",
+          "kind": "prompt-proof",
+          "uri": "qualification-required://phase37/zai/strategy/prompt-proof",
+          "sha256": null,
+          "byte_count": null,
+          "secret_free": true
+        },
+        {
+          "evidence_id": "zai-strategy-route-proof",
+          "kind": "route-proof",
+          "uri": "qualification-required://phase37/zai/strategy/route-proof",
+          "sha256": null,
+          "byte_count": null,
+          "secret_free": true
+        }
+      ]
+    },
+    {
+      "role": "implement",
+      "state": "fail",
+      "evidence_refs": [
+        {
+          "evidence_id": "zai-implement-billing-proof",
+          "kind": "billing-proof",
+          "uri": "qualification-required://phase37/zai/implement/billing-proof",
+          "sha256": null,
+          "byte_count": null,
+          "secret_free": true
+        },
+        {
+          "evidence_id": "zai-implement-cache-proof",
+          "kind": "cache-proof",
+          "uri": "qualification-required://phase37/zai/implement/cache-proof",
+          "sha256": null,
+          "byte_count": null,
+          "secret_free": true
+        },
+        {
+          "evidence_id": "zai-implement-execution-proof",
+          "kind": "execution-proof",
+          "uri": "qualification-required://phase37/zai/implement/execution-proof",
+          "sha256": null,
+          "byte_count": null,
+          "secret_free": true
+        },
+        {
+          "evidence_id": "zai-implement-prompt-proof",
+          "kind": "prompt-proof",
+          "uri": "qualification-required://phase37/zai/implement/prompt-proof",
+          "sha256": null,
+          "byte_count": null,
+          "secret_free": true
+        },
+        {
+          "evidence_id": "zai-implement-route-proof",
+          "kind": "route-proof",
+          "uri": "qualification-required://phase37/zai/implement/route-proof",
+          "sha256": null,
+          "byte_count": null,
+          "secret_free": true
+        }
+      ]
+    },
+    {
+      "role": "validate",
+      "state": "fail",
+      "evidence_refs": [
+        {
+          "evidence_id": "zai-validate-billing-proof",
+          "kind": "billing-proof",
+          "uri": "qualification-required://phase37/zai/validate/billing-proof",
+          "sha256": null,
+          "byte_count": null,
+          "secret_free": true
+        },
+        {
+          "evidence_id": "zai-validate-cache-proof",
+          "kind": "cache-proof",
+          "uri": "qualification-required://phase37/zai/validate/cache-proof",
+          "sha256": null,
+          "byte_count": null,
+          "secret_free": true
+        },
+        {
+          "evidence_id": "zai-validate-execution-proof",
+          "kind": "execution-proof",
+          "uri": "qualification-required://phase37/zai/validate/execution-proof",
+          "sha256": null,
+          "byte_count": null,
+          "secret_free": true
+        },
+        {
+          "evidence_id": "zai-validate-prompt-proof",
+          "kind": "prompt-proof",
+          "uri": "qualification-required://phase37/zai/validate/prompt-proof",
+          "sha256": null,
+          "byte_count": null,
+          "secret_free": true
+        },
+        {
+          "evidence_id": "zai-validate-route-proof",
+          "kind": "route-proof",
+          "uri": "qualification-required://phase37/zai/validate/route-proof",
+          "sha256": null,
+          "byte_count": null,
+          "secret_free": true
+        }
+      ]
+    },
+    {
+      "role": "fix",
+      "state": "fail",
+      "evidence_refs": [
+        {
+          "evidence_id": "zai-fix-billing-proof",
+          "kind": "billing-proof",
+          "uri": "qualification-required://phase37/zai/fix/billing-proof",
+          "sha256": null,
+          "byte_count": null,
+          "secret_free": true
+        },
+        {
+          "evidence_id": "zai-fix-cache-proof",
+          "kind": "cache-proof",
+          "uri": "qualification-required://phase37/zai/fix/cache-proof",
+          "sha256": null,
+          "byte_count": null,
+          "secret_free": true
+        },
+        {
+          "evidence_id": "zai-fix-execution-proof",
+          "kind": "execution-proof",
+          "uri": "qualification-required://phase37/zai/fix/execution-proof",
+          "sha256": null,
+          "byte_count": null,
+          "secret_free": true
+        },
+        {
+          "evidence_id": "zai-fix-prompt-proof",
+          "kind": "prompt-proof",
+          "uri": "qualification-required://phase37/zai/fix/prompt-proof",
+          "sha256": null,
+          "byte_count": null,
+          "secret_free": true
+        },
+        {
+          "evidence_id": "zai-fix-route-proof",
+          "kind": "route-proof",
+          "uri": "qualification-required://phase37/zai/fix/route-proof",
+          "sha256": null,
+          "byte_count": null,
+          "secret_free": true
+        }
+      ]
+    },
+    {
+      "role": "adjudicate",
+      "state": "fail",
+      "evidence_refs": [
+        {
+          "evidence_id": "zai-adjudicate-billing-proof",
+          "kind": "billing-proof",
+          "uri": "qualification-required://phase37/zai/adjudicate/billing-proof",
+          "sha256": null,
+          "byte_count": null,
+          "secret_free": true
+        },
+        {
+          "evidence_id": "zai-adjudicate-cache-proof",
+          "kind": "cache-proof",
+          "uri": "qualification-required://phase37/zai/adjudicate/cache-proof",
+          "sha256": null,
+          "byte_count": null,
+          "secret_free": true
+        },
+        {
+          "evidence_id": "zai-adjudicate-execution-proof",
+          "kind": "execution-proof",
+          "uri": "qualification-required://phase37/zai/adjudicate/execution-proof",
+          "sha256": null,
+          "byte_count": null,
+          "secret_free": true
+        },
+        {
+          "evidence_id": "zai-adjudicate-prompt-proof",
+          "kind": "prompt-proof",
+          "uri": "qualification-required://phase37/zai/adjudicate/prompt-proof",
+          "sha256": null,
+          "byte_count": null,
+          "secret_free": true
+        },
+        {
+          "evidence_id": "zai-adjudicate-route-proof",
+          "kind": "route-proof",
+          "uri": "qualification-required://phase37/zai/adjudicate/route-proof",
+          "sha256": null,
+          "byte_count": null,
+          "secret_free": true
+        }
+      ]
+    },
+    {
+      "role": "bughunt",
+      "state": "fail",
+      "evidence_refs": [
+        {
+          "evidence_id": "zai-bughunt-billing-proof",
+          "kind": "billing-proof",
+          "uri": "qualification-required://phase37/zai/bughunt/billing-proof",
+          "sha256": null,
+          "byte_count": null,
+          "secret_free": true
+        },
+        {
+          "evidence_id": "zai-bughunt-cache-proof",
+          "kind": "cache-proof",
+          "uri": "qualification-required://phase37/zai/bughunt/cache-proof",
+          "sha256": null,
+          "byte_count": null,
+          "secret_free": true
+        },
+        {
+          "evidence_id": "zai-bughunt-execution-proof",
+          "kind": "execution-proof",
+          "uri": "qualification-required://phase37/zai/bughunt/execution-proof",
+          "sha256": null,
+          "byte_count": null,
+          "secret_free": true
+        },
+        {
+          "evidence_id": "zai-bughunt-prompt-proof",
+          "kind": "prompt-proof",
+          "uri": "qualification-required://phase37/zai/bughunt/prompt-proof",
+          "sha256": null,
+          "byte_count": null,
+          "secret_free": true
+        },
+        {
+          "evidence_id": "zai-bughunt-route-proof",
+          "kind": "route-proof",
+          "uri": "qualification-required://phase37/zai/bughunt/route-proof",
+          "sha256": null,
+          "byte_count": null,
+          "secret_free": true
+        }
+      ]
+    },
+    {
+      "role": "extract",
+      "state": "fail",
+      "evidence_refs": [
+        {
+          "evidence_id": "zai-extract-billing-proof",
+          "kind": "billing-proof",
+          "uri": "qualification-required://phase37/zai/extract/billing-proof",
+          "sha256": null,
+          "byte_count": null,
+          "secret_free": true
+        },
+        {
+          "evidence_id": "zai-extract-cache-proof",
+          "kind": "cache-proof",
+          "uri": "qualification-required://phase37/zai/extract/cache-proof",
+          "sha256": null,
+          "byte_count": null,
+          "secret_free": true
+        },
+        {
+          "evidence_id": "zai-extract-execution-proof",
+          "kind": "execution-proof",
+          "uri": "qualification-required://phase37/zai/extract/execution-proof",
+          "sha256": null,
+          "byte_count": null,
+          "secret_free": true
+        },
+        {
+          "evidence_id": "zai-extract-prompt-proof",
+          "kind": "prompt-proof",
+          "uri": "qualification-required://phase37/zai/extract/prompt-proof",
+          "sha256": null,
+          "byte_count": null,
+          "secret_free": true
+        },
+        {
+          "evidence_id": "zai-extract-route-proof",
+          "kind": "route-proof",
+          "uri": "qualification-required://phase37/zai/extract/route-proof",
+          "sha256": null,
+          "byte_count": null,
+          "secret_free": true
+        }
+      ]
+    }
+  ],
+  "required_evidence": [
+    {
+      "evidence_id": "zai-adjudicate-billing-proof",
+      "kind": "billing-proof",
+      "uri": "qualification-required://phase37/zai/adjudicate/billing-proof",
+      "sha256": null,
+      "byte_count": null,
+      "secret_free": true
+    },
+    {
+      "evidence_id": "zai-adjudicate-cache-proof",
+      "kind": "cache-proof",
+      "uri": "qualification-required://phase37/zai/adjudicate/cache-proof",
+      "sha256": null,
+      "byte_count": null,
+      "secret_free": true
+    },
+    {
+      "evidence_id": "zai-adjudicate-execution-proof",
+      "kind": "execution-proof",
+      "uri": "qualification-required://phase37/zai/adjudicate/execution-proof",
+      "sha256": null,
+      "byte_count": null,
+      "secret_free": true
+    },
+    {
+      "evidence_id": "zai-adjudicate-prompt-proof",
+      "kind": "prompt-proof",
+      "uri": "qualification-required://phase37/zai/adjudicate/prompt-proof",
+      "sha256": null,
+      "byte_count": null,
+      "secret_free": true
+    },
+    {
+      "evidence_id": "zai-adjudicate-route-proof",
+      "kind": "route-proof",
+      "uri": "qualification-required://phase37/zai/adjudicate/route-proof",
+      "sha256": null,
+      "byte_count": null,
+      "secret_free": true
+    },
+    {
+      "evidence_id": "zai-bughunt-billing-proof",
+      "kind": "billing-proof",
+      "uri": "qualification-required://phase37/zai/bughunt/billing-proof",
+      "sha256": null,
+      "byte_count": null,
+      "secret_free": true
+    },
+    {
+      "evidence_id": "zai-bughunt-cache-proof",
+      "kind": "cache-proof",
+      "uri": "qualification-required://phase37/zai/bughunt/cache-proof",
+      "sha256": null,
+      "byte_count": null,
+      "secret_free": true
+    },
+    {
+      "evidence_id": "zai-bughunt-execution-proof",
+      "kind": "execution-proof",
+      "uri": "qualification-required://phase37/zai/bughunt/execution-proof",
+      "sha256": null,
+      "byte_count": null,
+      "secret_free": true
+    },
+    {
+      "evidence_id": "zai-bughunt-prompt-proof",
+      "kind": "prompt-proof",
+      "uri": "qualification-required://phase37/zai/bughunt/prompt-proof",
+      "sha256": null,
+      "byte_count": null,
+      "secret_free": true
+    },
+    {
+      "evidence_id": "zai-bughunt-route-proof",
+      "kind": "route-proof",
+      "uri": "qualification-required://phase37/zai/bughunt/route-proof",
+      "sha256": null,
+      "byte_count": null,
+      "secret_free": true
+    },
+    {
+      "evidence_id": "zai-extract-billing-proof",
+      "kind": "billing-proof",
+      "uri": "qualification-required://phase37/zai/extract/billing-proof",
+      "sha256": null,
+      "byte_count": null,
+      "secret_free": true
+    },
+    {
+      "evidence_id": "zai-extract-cache-proof",
+      "kind": "cache-proof",
+      "uri": "qualification-required://phase37/zai/extract/cache-proof",
+      "sha256": null,
+      "byte_count": null,
+      "secret_free": true
+    },
+    {
+      "evidence_id": "zai-extract-execution-proof",
+      "kind": "execution-proof",
+      "uri": "qualification-required://phase37/zai/extract/execution-proof",
+      "sha256": null,
+      "byte_count": null,
+      "secret_free": true
+    },
+    {
+      "evidence_id": "zai-extract-prompt-proof",
+      "kind": "prompt-proof",
+      "uri": "qualification-required://phase37/zai/extract/prompt-proof",
+      "sha256": null,
+      "byte_count": null,
+      "secret_free": true
+    },
+    {
+      "evidence_id": "zai-extract-route-proof",
+      "kind": "route-proof",
+      "uri": "qualification-required://phase37/zai/extract/route-proof",
+      "sha256": null,
+      "byte_count": null,
+      "secret_free": true
+    },
+    {
+      "evidence_id": "zai-fix-billing-proof",
+      "kind": "billing-proof",
+      "uri": "qualification-required://phase37/zai/fix/billing-proof",
+      "sha256": null,
+      "byte_count": null,
+      "secret_free": true
+    },
+    {
+      "evidence_id": "zai-fix-cache-proof",
+      "kind": "cache-proof",
+      "uri": "qualification-required://phase37/zai/fix/cache-proof",
+      "sha256": null,
+      "byte_count": null,
+      "secret_free": true
+    },
+    {
+      "evidence_id": "zai-fix-execution-proof",
+      "kind": "execution-proof",
+      "uri": "qualification-required://phase37/zai/fix/execution-proof",
+      "sha256": null,
+      "byte_count": null,
+      "secret_free": true
+    },
+    {
+      "evidence_id": "zai-fix-prompt-proof",
+      "kind": "prompt-proof",
+      "uri": "qualification-required://phase37/zai/fix/prompt-proof",
+      "sha256": null,
+      "byte_count": null,
+      "secret_free": true
+    },
+    {
+      "evidence_id": "zai-fix-route-proof",
+      "kind": "route-proof",
+      "uri": "qualification-required://phase37/zai/fix/route-proof",
+      "sha256": null,
+      "byte_count": null,
+      "secret_free": true
+    },
+    {
+      "evidence_id": "zai-implement-billing-proof",
+      "kind": "billing-proof",
+      "uri": "qualification-required://phase37/zai/implement/billing-proof",
+      "sha256": null,
+      "byte_count": null,
+      "secret_free": true
+    },
+    {
+      "evidence_id": "zai-implement-cache-proof",
+      "kind": "cache-proof",
+      "uri": "qualification-required://phase37/zai/implement/cache-proof",
+      "sha256": null,
+      "byte_count": null,
+      "secret_free": true
+    },
+    {
+      "evidence_id": "zai-implement-execution-proof",
+      "kind": "execution-proof",
+      "uri": "qualification-required://phase37/zai/implement/execution-proof",
+      "sha256": null,
+      "byte_count": null,
+      "secret_free": true
+    },
+    {
+      "evidence_id": "zai-implement-prompt-proof",
+      "kind": "prompt-proof",
+      "uri": "qualification-required://phase37/zai/implement/prompt-proof",
+      "sha256": null,
+      "byte_count": null,
+      "secret_free": true
+    },
+    {
+      "evidence_id": "zai-implement-route-proof",
+      "kind": "route-proof",
+      "uri": "qualification-required://phase37/zai/implement/route-proof",
+      "sha256": null,
+      "byte_count": null,
+      "secret_free": true
+    },
+    {
+      "evidence_id": "zai-parent-billing-proof",
+      "kind": "billing-proof",
+      "uri": "qualification-required://phase37/zai/parent/billing-proof",
+      "sha256": null,
+      "byte_count": null,
+      "secret_free": true
+    },
+    {
+      "evidence_id": "zai-parent-cache-proof",
+      "kind": "cache-proof",
+      "uri": "qualification-required://phase37/zai/parent/cache-proof",
+      "sha256": null,
+      "byte_count": null,
+      "secret_free": true
+    },
+    {
+      "evidence_id": "zai-parent-execution-proof",
+      "kind": "execution-proof",
+      "uri": "qualification-required://phase37/zai/parent/execution-proof",
+      "sha256": null,
+      "byte_count": null,
+      "secret_free": true
+    },
+    {
+      "evidence_id": "zai-parent-prompt-proof",
+      "kind": "prompt-proof",
+      "uri": "qualification-required://phase37/zai/parent/prompt-proof",
+      "sha256": null,
+      "byte_count": null,
+      "secret_free": true
+    },
+    {
+      "evidence_id": "zai-parent-route-proof",
+      "kind": "route-proof",
+      "uri": "qualification-required://phase37/zai/parent/route-proof",
+      "sha256": null,
+      "byte_count": null,
+      "secret_free": true
+    },
+    {
+      "evidence_id": "zai-strategy-billing-proof",
+      "kind": "billing-proof",
+      "uri": "qualification-required://phase37/zai/strategy/billing-proof",
+      "sha256": null,
+      "byte_count": null,
+      "secret_free": true
+    },
+    {
+      "evidence_id": "zai-strategy-cache-proof",
+      "kind": "cache-proof",
+      "uri": "qualification-required://phase37/zai/strategy/cache-proof",
+      "sha256": null,
+      "byte_count": null,
+      "secret_free": true
+    },
+    {
+      "evidence_id": "zai-strategy-execution-proof",
+      "kind": "execution-proof",
+      "uri": "qualification-required://phase37/zai/strategy/execution-proof",
+      "sha256": null,
+      "byte_count": null,
+      "secret_free": true
+    },
+    {
+      "evidence_id": "zai-strategy-prompt-proof",
+      "kind": "prompt-proof",
+      "uri": "qualification-required://phase37/zai/strategy/prompt-proof",
+      "sha256": null,
+      "byte_count": null,
+      "secret_free": true
+    },
+    {
+      "evidence_id": "zai-strategy-route-proof",
+      "kind": "route-proof",
+      "uri": "qualification-required://phase37/zai/strategy/route-proof",
+      "sha256": null,
+      "byte_count": null,
+      "secret_free": true
+    },
+    {
+      "evidence_id": "zai-validate-billing-proof",
+      "kind": "billing-proof",
+      "uri": "qualification-required://phase37/zai/validate/billing-proof",
+      "sha256": null,
+      "byte_count": null,
+      "secret_free": true
+    },
+    {
+      "evidence_id": "zai-validate-cache-proof",
+      "kind": "cache-proof",
+      "uri": "qualification-required://phase37/zai/validate/cache-proof",
+      "sha256": null,
+      "byte_count": null,
+      "secret_free": true
+    },
+    {
+      "evidence_id": "zai-validate-execution-proof",
+      "kind": "execution-proof",
+      "uri": "qualification-required://phase37/zai/validate/execution-proof",
+      "sha256": null,
+      "byte_count": null,
+      "secret_free": true
+    },
+    {
+      "evidence_id": "zai-validate-prompt-proof",
+      "kind": "prompt-proof",
+      "uri": "qualification-required://phase37/zai/validate/prompt-proof",
+      "sha256": null,
+      "byte_count": null,
+      "secret_free": true
+    },
+    {
+      "evidence_id": "zai-validate-route-proof",
+      "kind": "route-proof",
+      "uri": "qualification-required://phase37/zai/validate/route-proof",
+      "sha256": null,
+      "byte_count": null,
+      "secret_free": true
+    }
+  ],
+  "live_evidence": [],
+  "issued_at": "2026-07-22T12:00:00.000Z",
+  "expires_at": "2026-07-23T12:00:00.000Z",
+  "manifest_sha256": "sha256:636f783e6dcc7bc7ddfc5d01f8619936821b0d896e1fd20dd1ed3e9476afabcb"
+}
