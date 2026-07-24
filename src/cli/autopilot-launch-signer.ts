@@ -1,9 +1,8 @@
 #!/usr/bin/env node
 import { createHash } from 'node:crypto';
 import { closeSync, constants as fsConstants, fstatSync, lstatSync, openSync, readFileSync, realpathSync } from 'node:fs';
-import { mkdir, writeFile } from 'node:fs/promises';
-import { chmodSync } from 'node:fs';
-import { dirname, isAbsolute, join } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 import { sign, createPrivateKey } from 'node:crypto';
 
@@ -14,6 +13,7 @@ import { CoordinationRuntimeError } from '../core/coordination/failures.ts';
 import { parseD65LaunchPolicy } from '../core/coordination/d65-launch-policy.ts';
 import { encodeUnpaddedBase64Url } from '../core/coordination/d65-trust.ts';
 import { runGitQuery } from '../core/git-process.ts';
+import { ensurePrivateDirectory, publishCreateOnlyAtomic } from '../core/roster/transaction.ts';
 import { AUTOPILOT_STATE_ROOT_ENV, type ProcessEnvLike } from '../core/parallel-runtime.ts';
 
 // The external operator launch signer (freeze §9.3; fresh plan §2.2/§3.2).
@@ -37,6 +37,10 @@ interface SignerConfig {
   readonly workstream: string;
   readonly workstream_run: string;
   readonly private_key_path: string;
+  /** The isolated coordinator state root the operator key must live outside of. */
+  readonly state_root: string;
+  /** The isolated Pi session root the operator key must live outside of. */
+  readonly session_root: string;
   readonly trust_anchor_ref: string;
   readonly trust_anchor_sha256: `sha256:${string}`;
   readonly signer_key_id: `sha256:${string}`;
@@ -53,16 +57,30 @@ interface SignerConfig {
   readonly policy_issued_at: string;
   /**
    * The complete set of declared program rows (identity-sorted by workstream).
-   * The signer emits one heartbeat row per declared program row: THIS run's row
-   * is bound to live coordinator authority; the other declared rows are emitted
-   * as `planned`/unlaunched (`row-not-launched`). Cap-one program with only this
-   * workstream is a one-row set; a six-row program declares all six.
+   * The signer emits one heartbeat row per declared program row. THIS run's row
+   * is bound to live coordinator authority. Each OTHER row carries its own
+   * isolated coordinator `state_root`: when that coordinator has a launched run,
+   * the signer reads THAT row's own live status/doctor/session/policy/graph
+   * authority (so launching a later row can never regress an earlier launched
+   * row to planned); when the row is unlaunched (null state root or absent run),
+   * it is emitted as `planned`/`row-not-launched`. Cap-one with only this
+   * workstream is a one-row set; the full program declares all six.
    */
-  readonly program_rows: readonly { readonly workstream: string; readonly workstream_run: string }[];
+  readonly program_rows: readonly D65SignerProgramRow[];
+}
+
+interface D65SignerProgramRow {
+  readonly workstream: string;
+  readonly workstream_run: string;
+  /** The row's own isolated coordinator state root (null for a not-yet-sealed row). */
+  readonly state_root: string | null;
+  /** The row's own coordinator repo id (null for a not-yet-sealed row). */
+  readonly repo_id: string | null;
 }
 
 const CONFIG_FIELDS = [
   'schema_version', 'program_id', 'repo_id', 'workstream', 'workstream_run', 'private_key_path',
+  'state_root', 'session_root',
   'trust_anchor_ref', 'trust_anchor_sha256', 'signer_key_id', 'program_evidence_root', 'policy_id',
   'policy_ref', 'package_commit', 'package_tree', 'b0_commit', 'b0_tree', 'roster_sha256', 'roster_provider',
   'policy_issued_at', 'program_rows',
@@ -127,6 +145,8 @@ function parseConfig(bytes: Uint8Array): SignerConfig {
     workstream: requireString(record, 'workstream', 'config'),
     workstream_run: requireString(record, 'workstream_run', 'config'),
     private_key_path: requireString(record, 'private_key_path', 'config'),
+    state_root: requireString(record, 'state_root', 'config'),
+    session_root: requireString(record, 'session_root', 'config'),
     trust_anchor_ref: requireString(record, 'trust_anchor_ref', 'config'),
     trust_anchor_sha256: requireSha256(record, 'trust_anchor_sha256', 'config'),
     signer_key_id: requireSha256(record, 'signer_key_id', 'config'),
@@ -144,13 +164,19 @@ function parseConfig(bytes: Uint8Array): SignerConfig {
   });
 }
 
-function parseProgramRows(value: unknown): readonly { readonly workstream: string; readonly workstream_run: string }[] {
+function parseProgramRows(value: unknown): readonly D65SignerProgramRow[] {
   if (!Array.isArray(value) || value.length === 0 || value.length > 64) fail('config.program_rows must be a non-empty bounded array');
   const rows = value.map((entry, index) => {
     const record = requireObject(entry, `config.program_rows[${String(index)}]`);
     const keys = Object.keys(record).sort();
-    if (keys.length !== 2 || keys[0] !== 'workstream' || keys[1] !== 'workstream_run') fail(`config.program_rows[${String(index)}] must have exactly workstream and workstream_run`);
-    return Object.freeze({ workstream: requireString(record, 'workstream', 'config.program_rows'), workstream_run: requireString(record, 'workstream_run', 'config.program_rows') });
+    if (keys.length !== 4 || keys[0] !== 'repo_id' || keys[1] !== 'state_root' || keys[2] !== 'workstream' || keys[3] !== 'workstream_run') fail(`config.program_rows[${String(index)}] must have exactly workstream, workstream_run, state_root, and repo_id`);
+    const stateRootRaw = record['state_root'];
+    const stateRoot = stateRootRaw === null ? null : requireString(record, 'state_root', `config.program_rows[${String(index)}]`);
+    if (stateRoot !== null && !isAbsolute(stateRoot)) fail(`config.program_rows[${String(index)}].state_root must be an absolute path or null`);
+    const repoIdRaw = record['repo_id'];
+    const repoId = repoIdRaw === null ? null : requireString(record, 'repo_id', `config.program_rows[${String(index)}]`);
+    if ((stateRoot === null) !== (repoId === null)) fail(`config.program_rows[${String(index)}] state_root and repo_id must be both null or both present`);
+    return Object.freeze({ workstream: requireString(record, 'workstream', 'config.program_rows'), workstream_run: requireString(record, 'workstream_run', 'config.program_rows'), state_root: stateRoot, repo_id: repoId });
   });
   const sorted = [...rows].sort((left, right) => (left.workstream < right.workstream ? -1 : left.workstream > right.workstream ? 1 : 0));
   for (let index = 1; index < sorted.length; index += 1) if ((sorted[index - 1]?.workstream ?? '') === (sorted[index]?.workstream ?? '')) fail('config.program_rows workstream identities must be unique');
@@ -161,12 +187,23 @@ interface PolicyRequest { readonly kind: 'launch-policy'; readonly state_root: s
 interface HeartbeatRequest { readonly kind: 'program-heartbeat'; readonly state_root: string; readonly repo_id: string; readonly workstream_run: string; readonly graph_sequence: number; readonly graph_sha256: `sha256:${string}`; readonly heartbeat_sequence: number }
 type SignerRequest = PolicyRequest | HeartbeatRequest;
 
+const POLICY_REQUEST_FIELDS = ['kind', 'state_root', 'repo_id', 'workstream_run', 'policy_id', 'policy_ref', 'expected_policy_sha256'] as const;
+const HEARTBEAT_REQUEST_FIELDS = ['kind', 'state_root', 'repo_id', 'workstream_run', 'graph_sequence', 'graph_sha256', 'heartbeat_sequence'] as const;
+
+/** Enforce an exact closed field set (no unknown/missing request fields). */
+function requireExactFields(record: Readonly<Record<string, unknown>>, fields: readonly string[], label: string): void {
+  const actual = Object.keys(record).sort();
+  const expected = [...fields].sort();
+  if (actual.length !== expected.length || expected.some((field, index) => actual[index] !== field)) fail(`${label} has unexpected/missing fields`, actual);
+}
+
 function parseRequest(raw: string): SignerRequest {
   let value: unknown;
   try { value = JSON.parse(raw) as unknown; }
   catch (error) { fail('request is not JSON', [error instanceof Error ? error.message : String(error)]); }
   const record = requireObject(value, 'request');
   if (record['kind'] === 'launch-policy') {
+    requireExactFields(record, POLICY_REQUEST_FIELDS, 'launch-policy request');
     return Object.freeze({
       kind: 'launch-policy', state_root: requireString(record, 'state_root', 'request'), repo_id: requireString(record, 'repo_id', 'request'),
       workstream_run: requireString(record, 'workstream_run', 'request'), policy_id: requireString(record, 'policy_id', 'request'),
@@ -174,6 +211,7 @@ function parseRequest(raw: string): SignerRequest {
     });
   }
   if (record['kind'] === 'program-heartbeat') {
+    requireExactFields(record, HEARTBEAT_REQUEST_FIELDS, 'program-heartbeat request');
     return Object.freeze({
       kind: 'program-heartbeat', state_root: requireString(record, 'state_root', 'request'), repo_id: requireString(record, 'repo_id', 'request'),
       workstream_run: requireString(record, 'workstream_run', 'request'), graph_sequence: requireInteger(record, 'graph_sequence', 'request'),
@@ -195,11 +233,17 @@ function gitBlob(repoRoot: string, commit: string, ref: string): Uint8Array {
  */
 /** The complete set of protected roots the operator key must live outside of. */
 function protectedRootsFromResource(config: SignerConfig, resource: ReturnType<typeof parseCoordinationRunResource>): readonly string[] {
-  return [resource.source_repo, resource.git_common_dir, resource.worktree_root, resource.main_worktree_path, resource.runtime_root, config.program_evidence_root];
+  return [resource.source_repo, resource.git_common_dir, resource.worktree_root, resource.main_worktree_path, resource.runtime_root, config.program_evidence_root, config.state_root, config.session_root];
 }
 
-function readOperatorPrivateKey(config: SignerConfig, protectedRoots: readonly string[]): string {
-  const keyReal = realpathSync(config.private_key_path);
+/**
+ * Prove the operator private key's canonical realpath is OUTSIDE every protected
+ * root. Exported for direct regression coverage of the external-key boundary
+ * (audit item F): a key inside any clone/state/session/worktree/runtime/evidence
+ * root rejects loudly.
+ */
+export function assertPrivateKeyOutsideProtectedRoots(privateKeyPath: string, protectedRoots: readonly string[]): void {
+  const keyReal = realpathSync(privateKeyPath);
   for (const root of protectedRoots) {
     let rootReal: string;
     try { rootReal = realpathSync(root); }
@@ -207,6 +251,10 @@ function readOperatorPrivateKey(config: SignerConfig, protectedRoots: readonly s
     const withSep = rootReal.endsWith('/') ? rootReal : `${rootReal}/`;
     if (keyReal === rootReal || keyReal.startsWith(withSep)) fail('operator private key must live outside every clone/state/session/worktree/runtime/evidence root', [keyReal, rootReal]);
   }
+}
+
+function readOperatorPrivateKey(config: SignerConfig, protectedRoots: readonly string[]): string {
+  assertPrivateKeyOutsideProtectedRoots(config.private_key_path, protectedRoots);
   return new TextDecoder('utf-8').decode(readMode0600(config.private_key_path, 'operator private key'));
 }
 
@@ -215,10 +263,18 @@ function requireOne<T>(values: readonly T[], label: string): T {
   return values[0];
 }
 
-async function persistSignedCandidate(absolutePath: string, bytes: Uint8Array): Promise<void> {
-  await mkdir(dirname(absolutePath), { recursive: true, mode: 0o700 });
-  await writeFile(absolutePath, bytes, { mode: 0o600 });
-  chmodSync(absolutePath, 0o600);
+/**
+ * Publish a signed candidate through a canonical-root-contained, no-alias,
+ * temp+fsync+link/rename create-only atomic protocol (audit item F). If the
+ * exact bytes already exist, only byte-identical content is accepted; a
+ * conflicting/partial-residue/symlinked/hardlinked/wrong-mode candidate rejects
+ * loudly. Reuses the proven Phase 37 atomic publication primitive rather than a
+ * weaker copy.
+ */
+async function persistSignedCandidate(absolutePath: string, bytes: Uint8Array, authorityRoot: string): Promise<void> {
+  await ensurePrivateDirectory(dirname(absolutePath), authorityRoot);
+  const result = await publishCreateOnlyAtomic({ path: absolutePath, authorityRoot, bytes });
+  if (result.status === 'conflict') fail('signed candidate publication found conflicting existing bytes at the sealed sequence path', [absolutePath]);
 }
 
 /** Build and sign the launch policy from live coordinator + config authority. */
@@ -244,7 +300,7 @@ async function signPolicy(config: SignerConfig, request: PolicyRequest, env: Pro
   parseD65LaunchPolicy(JSON.parse(new TextDecoder().decode(bytes)) as unknown);
   if (bytesSha256(bytes) !== request.expected_policy_sha256) fail('signed policy digest differs from the sealed expected policy digest', [bytesSha256(bytes), request.expected_policy_sha256]);
   const absolutePath = join(config.program_evidence_root, 'signed-launch-policies', `${request.policy_id}.json`);
-  await persistSignedCandidate(absolutePath, bytes);
+  await persistSignedCandidate(absolutePath, bytes, realpathSync(config.program_evidence_root));
   return { ref: request.policy_ref, absolutePath, bytes };
 }
 
@@ -271,7 +327,7 @@ async function signHeartbeat(config: SignerConfig, request: HeartbeatRequest, en
     schema_version: 'autopilot.program_heartbeat.v1', program_id: config.program_id, sequence: request.heartbeat_sequence, prior_sha256: priorSha,
     issued_at: issued.toISOString(), valid_until: new Date(issued.getTime() + 15 * 60 * 1000).toISOString(),
     package_commit: config.package_commit, package_tree: config.package_tree, base_commit: config.b0_commit, base_tree: config.b0_tree,
-    rows: heartbeatRows(config, request, attached, policyArtifact, status, doctor, dispatchRow),
+    rows: await heartbeatRows(config, request, attached, policyArtifact, status, doctor, dispatchRow, env),
     provider_health: [{ provider: config.roster_provider, state: 'healthy', observation_ref: policyArtifact.evidence.ref, observation_sha256: policyArtifact.evidence.sha256, cooldown_until: null, probe_workstream_run: null, probe_ref: null, probe_sha256: null, consumption_event_seq: null }],
     dispatch_allowed: true, stop_reasons: [], trust_anchor_ref: config.trust_anchor_ref, trust_anchor_sha256: config.trust_anchor_sha256, signer_key_id: config.signer_key_id,
   };
@@ -280,36 +336,78 @@ async function signHeartbeat(config: SignerConfig, request: HeartbeatRequest, en
   const bytes = new TextEncoder().encode(`${canonicalJson({ ...fields, signature })}\n`);
   const ref = `program-heartbeats/${String(request.heartbeat_sequence).padStart(20, '0')}.json`;
   const absolutePath = join(config.program_evidence_root, ref);
-  await persistSignedCandidate(absolutePath, bytes);
+  await persistSignedCandidate(absolutePath, bytes, realpathSync(config.program_evidence_root));
   return { ref, absolutePath, bytes };
 }
 
-function heartbeatRows(config: SignerConfig, request: HeartbeatRequest, attached: ReturnType<typeof parseCoordinationSessionLease>, policyArtifact: ReturnType<typeof parseCoordinationAuthoritativeArtifact>, status: { payload: Record<string, unknown> }, doctor: { payload: Record<string, unknown> }, dispatchRow: boolean): readonly Record<string, unknown>[] {
-  const stopReasons = dispatchRow ? [] : ['graph-publication-pending'];
-  // Emit one identity-sorted row per declared program row (§3.2): THIS run's row
-  // is bound to live coordinator authority; every other declared row is emitted
-  // as planned/unlaunched. The parser requires the exact per-row dispatch/reason
-  // coherence, so a planned row carries `row-not-launched` and dispatch false.
-  return config.program_rows.map((row) => {
+async function heartbeatRows(config: SignerConfig, request: HeartbeatRequest, attached: ReturnType<typeof parseCoordinationSessionLease>, policyArtifact: ReturnType<typeof parseCoordinationAuthoritativeArtifact>, status: { payload: Record<string, unknown> }, doctor: { payload: Record<string, unknown> }, dispatchRow: boolean, env: ProcessEnvLike): Promise<readonly Record<string, unknown>[]> {
+  const thisRowStopReasons = dispatchRow ? [] : ['graph-publication-pending'];
+  // Emit one identity-sorted row per declared program row (§3.2). THIS run's row
+  // is bound to live coordinator authority. Every OTHER declared row is read from
+  // its own live coordinator authority when launched (never regressed to
+  // planned), or emitted as planned/unlaunched when its coordinator has no run.
+  const rows: Record<string, unknown>[] = [];
+  for (const row of config.program_rows) {
     if (row.workstream === config.workstream) {
-      return {
+      rows.push({
         workstream: row.workstream, workstream_run: row.workstream_run, parent_session_file_sha256: null,
         coordinator_session_lease_id: attached.session_lease_id, accepted_graph_sequence: request.graph_sequence, accepted_graph_sha256: request.graph_sha256,
         status_sha256: status.payload['semantic_snapshot_sha256'], doctor_sha256: doctor.payload['semantic_snapshot_sha256'], session_lease_state: 'attached',
         child_lease_ids: [], launch_policy_sha256: policyArtifact.evidence.sha256, last_progress_event_seq: attached.attached_event_seq,
-        last_handoff_sha256: null, row_state: 'active', dispatch_allowed: stopReasons.length === 0, stop_reasons: stopReasons,
-      };
+        last_handoff_sha256: null, row_state: 'active', dispatch_allowed: thisRowStopReasons.length === 0, stop_reasons: thisRowStopReasons,
+      });
+      continue;
     }
-    // A declared-but-unlaunched program row: exactly row-local `row-not-launched`,
-    // all launch/session/graph facts null.
-    return {
-      workstream: row.workstream, workstream_run: row.workstream_run, parent_session_file_sha256: null,
-      coordinator_session_lease_id: null, accepted_graph_sequence: null, accepted_graph_sha256: null,
-      status_sha256: null, doctor_sha256: null, session_lease_state: null,
-      child_lease_ids: [], launch_policy_sha256: null, last_progress_event_seq: null,
-      last_handoff_sha256: null, row_state: 'planned', dispatch_allowed: false, stop_reasons: ['row-not-launched'],
-    };
-  });
+    rows.push(await foreignRowFromLiveAuthority(row, env));
+  }
+  return rows;
+}
+
+/**
+ * Read an already-launched foreign program row's own live status/doctor/session/
+ * policy/graph authority from ITS isolated coordinator, or emit a planned/
+ * unlaunched row when its coordinator has no launched run. A launched foreign
+ * row is never regressed to planned merely because a different row is signing.
+ */
+async function foreignRowFromLiveAuthority(row: D65SignerProgramRow, env: ProcessEnvLike): Promise<Record<string, unknown>> {
+  const plannedRow: Record<string, unknown> = {
+    workstream: row.workstream, workstream_run: row.workstream_run, parent_session_file_sha256: null,
+    coordinator_session_lease_id: null, accepted_graph_sequence: null, accepted_graph_sha256: null,
+    status_sha256: null, doctor_sha256: null, session_lease_state: null,
+    child_lease_ids: [], launch_policy_sha256: null, last_progress_event_seq: null,
+    last_handoff_sha256: null, row_state: 'planned', dispatch_allowed: false, stop_reasons: ['row-not-launched'],
+  };
+  if (row.state_root === null || row.repo_id === null) return plannedRow;
+  const client = new CoordinatorClient({ env: { ...env, [AUTOPILOT_STATE_ROOT_ENV]: row.state_root } });
+  let status: { payload: Record<string, unknown> };
+  try {
+    status = await client.query('status', row.repo_id, row.workstream_run);
+  } catch {
+    // The foreign coordinator is unreachable or has no run for this identity:
+    // the row is not launched from this authority's perspective.
+    return plannedRow;
+  }
+  const runs = (status.payload['runs'] as unknown[] | undefined) ?? [];
+  if (!Array.isArray(runs) || runs.length !== 1) return plannedRow;
+  const artifacts = (status.payload['authoritative_artifacts'] as unknown[] | undefined) ?? [];
+  const parsedArtifacts = Array.isArray(artifacts) ? artifacts.map(parseCoordinationAuthoritativeArtifact) : [];
+  const foreignPolicy = parsedArtifacts.find((a) => a.document_schema_version === 'autopilot.launch_policy.v1');
+  const foreignGraphs = parsedArtifacts.filter((a) => a.document_schema_version === 'autopilot.semantic_graph.v1');
+  if (foreignPolicy === undefined || foreignGraphs.length === 0) return plannedRow;
+  const run = parseCoordinationRun(runs[0]);
+  const sessions = ((status.payload['session_leases'] as unknown[] | undefined) ?? []).map(parseCoordinationSessionLease);
+  const attached = sessions.find((s) => (s.status === 'attached' || s.status === 'handoff-pending') && s.attachment_kind === 'dispatch' && s.session_generation === run.active_session_generation);
+  const doctor = await client.query('doctor', row.repo_id, row.workstream_run);
+  const head = status.payload['accepted_program_heartbeat'];
+  const acceptedGraphSequence = head === null || typeof head !== 'object' ? foreignGraphs.length + 1 : Number((head as Record<string, unknown>)['sequence']);
+  const highestGraph = foreignGraphs.reduce((max, g) => (g.registered_event_seq > max.registered_event_seq ? g : max), foreignGraphs[0]!);
+  return {
+    workstream: row.workstream, workstream_run: row.workstream_run, parent_session_file_sha256: null,
+    coordinator_session_lease_id: attached?.session_lease_id ?? null, accepted_graph_sequence: acceptedGraphSequence, accepted_graph_sha256: highestGraph.evidence.sha256,
+    status_sha256: status.payload['semantic_snapshot_sha256'] ?? null, doctor_sha256: doctor.payload['semantic_snapshot_sha256'] ?? null, session_lease_state: attached === undefined ? null : 'attached',
+    child_lease_ids: [], launch_policy_sha256: foreignPolicy.evidence.sha256, last_progress_event_seq: attached?.attached_event_seq ?? null,
+    last_handoff_sha256: null, row_state: 'active', dispatch_allowed: true, stop_reasons: [],
+  };
 }
 
 function concatDomain(domain: string, message: string): Uint8Array {
@@ -353,5 +451,16 @@ async function main(): Promise<void> {
   }
 }
 
-const isDirectRun = process.argv[1] !== undefined && (import.meta.url === `file://${process.argv[1]}` || import.meta.url.endsWith('/autopilot-launch-signer.ts') || import.meta.url.endsWith('/autopilot-launch-signer.js'));
+// Run `main()` only when this module is the invoked entrypoint: either it is
+// argv[1] itself (`node .../autopilot-launch-signer.{js,ts}`) or it is loaded by
+// the packaged bin wrapper (`node .../bin/autopilot-launch-signer.mjs`, which
+// dynamic-imports the compiled entrypoint). Keying off `import.meta.url` alone
+// is wrong: the module URL always ends with the entrypoint suffix, so a plain
+// suffix check fires on every ordinary import (including tests) and poisons the
+// importer's exit code. Detection must therefore be driven by `process.argv[1]`.
+const invokedPath = process.argv[1];
+const isDirectRun = invokedPath !== undefined && (
+  pathToFileURL(resolve(invokedPath)).href === import.meta.url ||
+  /[\\/]bin[\\/]autopilot-launch-signer\.mjs$/u.test(invokedPath)
+);
 if (isDirectRun) void main();

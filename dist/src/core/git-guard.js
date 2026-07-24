@@ -42,6 +42,18 @@ export function evaluateAutopilotWorktreeToolCall(event, ctx, policy) {
         }
         const cwd = canonicalCandidatePath(ctx.cwd ?? root, root);
         const absolutePath = canonicalCandidatePath(isAbsolute(rawPath) ? rawPath : resolve(cwd, rawPath), root);
+        // D65 bootstrap-only effect fence: exactly the five charter paths plus the
+        // package-owned auxiliary roots — never the entire runtime root.
+        if (policy.bootstrapCharterPaths !== undefined) {
+            const charterPaths = canonicalAllowedWriteRoots(policy.bootstrapCharterPaths, root);
+            const auxRoots = canonicalAllowedWriteRoots(policy.bootstrapAllowedAuxiliaryRoots ?? [], root);
+            const isCharterFile = charterPaths.includes(absolutePath);
+            const isUnderAux = auxRoots.some((auxRoot) => isPathInsideRoot(absolutePath, auxRoot));
+            if (!isCharterFile && !isUnderAux) {
+                return block(`${policy.label}: bootstrap-mode ${event.toolName} target ${absolutePath} is outside the exactly-five charter paths and package-owned auxiliary roots.`);
+            }
+            return undefined;
+        }
         if (!isPathInsideRoot(absolutePath, root) && !allowedWriteRoots.some((allowedRoot) => isPathInsideRoot(absolutePath, allowedRoot))) {
             return block(`${policy.label}: ${event.toolName} target ${absolutePath} is outside the registered Autopilot worktree ${root} and allowed Autopilot artifact roots.`);
         }

@@ -44,10 +44,12 @@ function manifestFixture(overrides: Record<string, unknown> = {}): Record<string
     trust_anchor: { trust_anchor_ref: '.pi/autopilot-trust/d65/program-kbg/operator-ed25519.spki', trust_anchor_sha256: DIGEST('8'), trust_anchor_blob_oid: OID('7'), byte_count: 44 },
     prospective_run: prospectiveRun(), prospective_resource: prospectiveResource(),
     coordination_authority: 'coordinator-edit-leases-v1',
-    roster_authority: 'user-default', roster_selection_ref: 'roster-selections/repo-kbg/kbg-run.json', roster_sha256: DIGEST('6'), parent_model: 'openai-codex/gpt-5.6-sol', parent_thinking: 'xhigh',
+    roster_authority: 'user-default', roster_selection_ref: 'roster-selections/repo-kbg/kbg-run.json', roster_sha256: DIGEST('6'),
+    roster_selection: { roster_ref: '/private/tmp/kbg-evidence/roster/kbg-run.roster.json', roster_bytes_sha256: DIGEST('a'), selection_ref: '/private/tmp/kbg-evidence/roster/kbg-run.selection.json', selection_bytes_sha256: DIGEST('b'), selection_sha256: DIGEST('c'), provider: 'openai-codex' },
+    parent_model: 'openai-codex/gpt-5.6-sol', parent_thinking: 'xhigh',
     policy_candidate: { policy_id: 'policy-1', policy_ref: 'authority/launch-policies/policy-1.json', policy_sha256: DIGEST('5'), registration_idempotency_key: 'register-launch-policy:kbg-run:policy-1', heartbeat_acceptance_idempotency_key: 'accept-program-heartbeat:kbg-run:1' },
     program_evidence_root: EVIDENCE,
-    launch_seal: { launch_commit: OID('1'), launch_tree: OID('2'), launch_audit_ref: '/private/tmp/kbg-evidence/launch-audit/kbg-run.json', launch_audit_sha256: DIGEST('4'), launch_seal_sha256: DIGEST('3'), bootstrap_projection_ref: '/private/tmp/kbg-evidence/bootstrap-projections/kbg-run/00000000000000000001.json', bootstrap_projection_sha256: DIGEST('0') },
+    launch_seal: { launch_commit: OID('1'), launch_tree: OID('2'), launch_audit_ref: '/private/tmp/kbg-evidence/launch-audit/kbg-run.json', launch_audit_sha256: DIGEST('4'), launch_seal_ref: '/private/tmp/kbg-evidence/launch-seal.json', launch_seal_sha256: DIGEST('3'), bootstrap_projection_ref: '/private/tmp/kbg-evidence/bootstrap-projections/kbg-run/00000000000000000001.json', bootstrap_projection_sha256: DIGEST('0') },
     attach_run_idempotency_key: 'attach-run:repo-kbg:kbg-run', attach_session_idempotency_key: 'attach-session:repo-kbg:kbg-run',
     created_at: '2026-07-22T22:00:33.000Z', ...overrides,
   };
@@ -82,7 +84,7 @@ void describe('autopilot.launch_manifest.v1 closed parser', () => {
   });
 
   void it('rejects an overlay commit equal to B0 or the content result', () => {
-    assert.throws(() => parseD65LaunchManifest(manifestFixture({ bootstrap_overlay: { overlay_commit: OID('b'), overlay_tree: OID('2'), overlay_ref: 'refs/heads/autopilot/bootstrap/kbg-run', bootstrap_ref: '.pi/autopilot-bootstrap/kbg-run/bootstrap.json', bootstrap_sha256: DIGEST('9'), bootstrap_byte_count: 812 }, launch_seal: { launch_commit: OID('b'), launch_tree: OID('2'), launch_audit_ref: '/private/tmp/kbg-evidence/launch-audit/kbg-run.json', launch_audit_sha256: DIGEST('4'), launch_seal_sha256: DIGEST('3'), bootstrap_projection_ref: '/private/tmp/kbg-evidence/bootstrap-projections/kbg-run/00000000000000000001.json', bootstrap_projection_sha256: DIGEST('0') } })), /sibling/u);
+    assert.throws(() => parseD65LaunchManifest(manifestFixture({ bootstrap_overlay: { overlay_commit: OID('b'), overlay_tree: OID('2'), overlay_ref: 'refs/heads/autopilot/bootstrap/kbg-run', bootstrap_ref: '.pi/autopilot-bootstrap/kbg-run/bootstrap.json', bootstrap_sha256: DIGEST('9'), bootstrap_byte_count: 812 }, launch_seal: { launch_commit: OID('b'), launch_tree: OID('2'), launch_audit_ref: '/private/tmp/kbg-evidence/launch-audit/kbg-run.json', launch_audit_sha256: DIGEST('4'), launch_seal_ref: '/private/tmp/kbg-evidence/launch-seal.json', launch_seal_sha256: DIGEST('3'), bootstrap_projection_ref: '/private/tmp/kbg-evidence/bootstrap-projections/kbg-run/00000000000000000001.json', bootstrap_projection_sha256: DIGEST('0') } })), /sibling/u);
   });
 
   void it('rejects a program evidence root inside the source clone', () => {
@@ -102,7 +104,11 @@ void describe('autopilot.launch_manifest.v1 closed parser', () => {
   });
 
   void it('rejects a launch_commit that is not the bootstrap overlay commit', () => {
-    assert.throws(() => parseD65LaunchManifest(manifestFixture({ launch_seal: { launch_commit: OID('3'), launch_tree: OID('2'), launch_audit_ref: '/private/tmp/kbg-evidence/launch-audit/kbg-run.json', launch_audit_sha256: DIGEST('4'), launch_seal_sha256: DIGEST('3'), bootstrap_projection_ref: '/private/tmp/kbg-evidence/bootstrap-projections/kbg-run/00000000000000000001.json', bootstrap_projection_sha256: DIGEST('0') } })), /launch_commit/u);
+    assert.throws(() => parseD65LaunchManifest(manifestFixture({ launch_seal: { launch_commit: OID('3'), launch_tree: OID('2'), launch_audit_ref: '/private/tmp/kbg-evidence/launch-audit/kbg-run.json', launch_audit_sha256: DIGEST('4'), launch_seal_ref: '/private/tmp/kbg-evidence/launch-seal.json', launch_seal_sha256: DIGEST('3'), bootstrap_projection_ref: '/private/tmp/kbg-evidence/bootstrap-projections/kbg-run/00000000000000000001.json', bootstrap_projection_sha256: DIGEST('0') } })), /launch_commit/u);
+  });
+
+  void it('rejects a parent_model whose provider diverges from the sealed roster provider', () => {
+    assert.throws(() => parseD65LaunchManifest(manifestFixture({ parent_model: 'anthropic/opus-4.8' })), /provider must equal the sealed roster subscription provider/u);
   });
 
   void it('rejects a non-D65 coordination authority', () => {

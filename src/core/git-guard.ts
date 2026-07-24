@@ -14,6 +14,21 @@ export interface AutopilotGitGuardPolicy {
   readonly worktreeRoot: string;
   readonly label: string;
   readonly allowedWriteRoots?: readonly string[];
+  /**
+   * D65 bootstrap-only effect fence (fresh plan §2.3/§9.5; audit item G). When
+   * present, write-capable tool calls may affect EXACTLY these absolute paths
+   * (the five previously-absent charter roots) and the package-owned auxiliary
+   * roots in `bootstrapAllowedAuxiliaryRoots` — and NOTHING else, not the entire
+   * runtime root. Any other write/edit target, or any git mutation, is a
+   * permanent scope violation.
+   */
+  readonly bootstrapCharterPaths?: readonly string[] | undefined;
+  /**
+   * The package-owned auxiliary roots the bootstrap parent may write under
+   * (e.g. the runtime roster-snapshot mirror + graph publication files) that are
+   * NOT product/source paths. Only consulted when `bootstrapCharterPaths` is set.
+   */
+  readonly bootstrapAllowedAuxiliaryRoots?: readonly string[] | undefined;
 }
 
 export interface AutopilotGuardBlockDecision {
@@ -89,6 +104,20 @@ export function evaluateAutopilotWorktreeToolCall(
     }
     const cwd = canonicalCandidatePath(ctx.cwd ?? root, root);
     const absolutePath = canonicalCandidatePath(isAbsolute(rawPath) ? rawPath : resolve(cwd, rawPath), root);
+    // D65 bootstrap-only effect fence: exactly the five charter paths plus the
+    // package-owned auxiliary roots — never the entire runtime root.
+    if (policy.bootstrapCharterPaths !== undefined) {
+      const charterPaths = canonicalAllowedWriteRoots(policy.bootstrapCharterPaths, root);
+      const auxRoots = canonicalAllowedWriteRoots(policy.bootstrapAllowedAuxiliaryRoots ?? [], root);
+      const isCharterFile = charterPaths.includes(absolutePath);
+      const isUnderAux = auxRoots.some((auxRoot) => isPathInsideRoot(absolutePath, auxRoot));
+      if (!isCharterFile && !isUnderAux) {
+        return block(
+          `${policy.label}: bootstrap-mode ${event.toolName} target ${absolutePath} is outside the exactly-five charter paths and package-owned auxiliary roots.`,
+        );
+      }
+      return undefined;
+    }
     if (!isPathInsideRoot(absolutePath, root) && !allowedWriteRoots.some((allowedRoot) => isPathInsideRoot(absolutePath, allowedRoot))) {
       return block(
         `${policy.label}: ${event.toolName} target ${absolutePath} is outside the registered Autopilot worktree ${root} and allowed Autopilot artifact roots.`,

@@ -37,7 +37,52 @@ export function buildAutopilotWorkstreamRun(workstream, now = new Date(), entrop
     }
     return workstreamRun;
 }
+/**
+ * The exact legacy `/autopilot` argument parser. Its result contract is exactly
+ * `{ workstream, remainder, rosterId }` — byte-unchanged from the pre-D65
+ * baseline. It has no knowledge of `--launch-manifest`; the closed D65 launch
+ * mode is parsed separately by {@link parseAutopilotLaunchArgs} so the public
+ * legacy result never grows an enumerable `launchManifestPath` field.
+ */
 export function parseAutopilotArgs(args, options = {}) {
+    const trimmed = args.trim();
+    if (trimmed.length === 0) {
+        return { ok: false, message: 'Usage: /autopilot <workstream> [task intro or current focus]' };
+    }
+    const firstSpace = trimmed.search(/\s/);
+    const workstream = firstSpace < 0 ? trimmed : trimmed.slice(0, firstSpace);
+    if (!isValidWorkstreamSlug(workstream)) {
+        return {
+            ok: false,
+            message: 'Workstream must start with a letter or digit and contain only letters, digits, dot, underscore, or dash.',
+        };
+    }
+    let remainder = firstSpace < 0 ? '' : trimmed.slice(firstSpace).trim();
+    let rosterId = null;
+    if (options.parseRoster !== false && /^--roster(?:\s|=|$)/u.test(remainder)) {
+        const match = /^--roster\s+(\S+)(?:\s+([\s\S]*))?$/u.exec(remainder);
+        const candidateRosterId = match?.[1];
+        if (candidateRosterId === undefined) {
+            return { ok: false, message: 'Usage: /autopilot <workstream> [--roster <id>] [task intro or current focus]' };
+        }
+        if (!isValidRosterId(candidateRosterId)) {
+            return { ok: false, message: 'Roster id must start with a lowercase letter and contain only lowercase letters, digits, or dash.' };
+        }
+        rosterId = candidateRosterId;
+        remainder = (match?.[2] ?? '').trim();
+    }
+    return { ok: true, value: { workstream, remainder, rosterId } };
+}
+/**
+ * The launch-aware `/autopilot` argument parser. It accepts the closed D65
+ * launch option `--launch-manifest <absolute-path>` (before or after
+ * `--roster`) and returns the superset {@link ParsedAutopilotLaunchArgs}. When
+ * no manifest is supplied, `launchManifestPath` is null and the remaining
+ * `workstream`/`remainder`/`rosterId` are exactly what the legacy parser would
+ * produce for the same input. This is the SOLE consumer of the launch option;
+ * the legacy public result contract is never altered.
+ */
+export function parseAutopilotLaunchArgs(args, options = {}) {
     const trimmed = args.trim();
     if (trimmed.length === 0) {
         return { ok: false, message: 'Usage: /autopilot <workstream> [task intro or current focus]' };

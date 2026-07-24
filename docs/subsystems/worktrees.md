@@ -11,9 +11,9 @@ covers_sources:
   - src/core/materialization.ts
   - src/core/git-guard.ts
   - src/core/git-process.ts
-signature_hash: 'sha256:223a09588646ba046a93d6894b46d2921d6193ab80bce4f8f2f82959e38c064f'
-body_hash: 'sha256:f19ae5ccd8be614f5ee4367ebf2d78147c38393513e3fdd03b3155e10382461c'
-semantic_attestation: 'sha256:f19ae5ccd8be614f5ee4367ebf2d78147c38393513e3fdd03b3155e10382461c'
+signature_hash: 'sha256:9e7f50dd59b9434e8d5c5809cb34e3bd53e01e2291356b0483f111fa71aece2e'
+body_hash: 'sha256:6c59b169304538271bcb188c4147f9bc730f6b391024295e58b9b7d1fe9ddf4c'
+semantic_attestation: 'sha256:6c59b169304538271bcb188c4147f9bc730f6b391024295e58b9b7d1fe9ddf4c'
 stability: stable
 ---
 
@@ -94,6 +94,21 @@ diagnostics — no raw production Git exceptions escape. Recursive tracked-tree 
 uses the streaming `ls-tree-recursive-stream` descriptor with separate entry-count,
 cumulative-path-byte, per-record, and total lifecycle bounds; it never raises the
 64 MiB retained-output ceiling or truncates authority into a false success.
+
+### D65 bootstrap-only effect fence
+
+During the D65 launch bootstrap-plan turn the guard runs in a stricter mode set by
+`AutopilotGitGuardPolicy.bootstrapCharterPaths`. When those paths are present a
+write/edit tool call may affect **exactly** the five previously-absent charter
+roots (`mission.md`, `master-plan.json`, `state.json`, `decision-log.jsonl`,
+`events.jsonl`) plus any explicit package-owned auxiliary roots in
+`bootstrapAllowedAuxiliaryRoots` (e.g. the runtime roster-snapshot mirror and
+graph-publication files) — and **nothing else**, not even another file inside the
+runtime directory and never an out-of-worktree absolute path. The fence is
+exact-path, not runtime-wide. This is enforced independently of, and in addition
+to, the charter-completeness detector in `d65-launch-integration.ts`, which
+inspects the full `git status --ignored` porcelain so that even an *ignored*
+out-of-scope effect fences first-graph publication rather than passing silently.
 
 ## Related
 

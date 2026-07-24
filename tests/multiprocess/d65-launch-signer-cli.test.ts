@@ -13,6 +13,10 @@ import { sign } from 'node:crypto';
 import { canonicalJson } from '../../src/core/coordination/canonical-json.ts';
 import { CoordinatorClient } from '../../src/core/coordination/client.ts';
 import { coordinatorRuntimePaths } from '../../src/core/coordination/runtime-paths.ts';
+import { SEED_ROSTERS } from '../../src/core/roster/provider-recipes.ts';
+import { canonicalRosterJson } from '../../src/core/roster/canonical.ts';
+import { buildCanonicalPreRunSelection } from '../../src/core/roster/run-selection.ts';
+import type { RosterSha256 } from '../../src/core/roster/paths.ts';
 import { startCoordinatorServer } from '../../src/core/coordination/server.ts';
 import { parseD65LaunchPolicy, parseD65ProgramHeartbeat } from '../../src/core/coordination/d65-launch-policy.ts';
 import { encodeUnpaddedBase64Url } from '../../src/core/coordination/d65-trust.ts';
@@ -52,12 +56,14 @@ async function buildFixture(suffix: string): Promise<Fixture> {
   const trustSha256 = sha256(spki);
   const bootstrapRef = `.pi/autopilot-bootstrap/${workstreamRun}/bootstrap.json`;
   const stateRoot = join(root, 'state');
-  const sessionRoot = coordinatorRuntimePaths({ ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: stateRoot }).sessionsRoot;
+  const sessionRoot = join(root, 'sessions');
   const worktreeRoot = join(stateRoot, 'worktrees', repoId);
   const mainWorktreePath = join(worktreeRoot, 'active', workstreamRun, 'main');
   const runtimeRoot = join(mainWorktreePath, '.pi', 'autopilot', workstream);
   const packageCommit = 'a'.repeat(40); const packageTree = 'b'.repeat(40);
-  const rosterSha256 = sha256('roster'); const rosterProvider = 'openai-codex';
+  const seedRoster = SEED_ROSTERS.find((entry) => entry.roster_id === 'cruise-codex-subscription-bdb4f15f0ff9');
+  if (seedRoster === undefined) throw new Error('fixed subscription seed roster not found');
+  const rosterSha256 = seedRoster.roster_sha256 as `sha256:${string}`; const rosterProvider = 'openai-codex';
   const prospectiveRun = { schema_version: 'autopilot.coordination_run.v1', repo_id: repoId, autopilot_id: autopilotId, workstream, workstream_run: workstreamRun, coordination_authority: 'coordinator-edit-leases-v1', status: 'active', active_session_generation: 0, created_event_seq: 1, version: 1 };
   const prospectiveResource = { schema_version: 'autopilot.coordination_run_resource.v1', repo_id: repoId, workstream_run: workstreamRun, source_repo: clone, git_common_dir: join(clone, '.git'), worktree_root: worktreeRoot, main_worktree_path: mainWorktreePath, runtime_root: runtimeRoot, branch: `autopilot/${workstreamRun}`, target_branch: 'main', target_base_sha: contentCommit, origin_url: null, started_at: '2026-07-22T22:00:32.000Z', version: 1 };
   const bootstrap = { schema_version: 'autopilot.semantic_graph_bootstrap.v1', program_id: programId, graph_sequence: 1, prior_graph_sha256: null, repo_id: repoId, autopilot_id: autopilotId, workstream, workstream_run: workstreamRun, run_timestamp: '2026-07-22T22:00:32.000Z', run_nonce: 'abc123', content_commit: contentCommit, content_tree: contentTree, package_commit: packageCommit, package_tree: packageTree, prospective_run: prospectiveRun, prospective_resource: prospectiveResource, covered_event_seq: 0, trust_anchor_ref: trustRef, trust_anchor_sha256: trustSha256, allowed_bootstrap_operations: ['attach-run', 'attach-session', 'prepare-main-worktree', 'transition-main-worktree', 'register-launch-policy', 'accept-program-heartbeat', 'parent-planning', 'publish-complete-graph'], created_at: '2026-07-22T22:00:33.000Z' };
@@ -79,7 +85,7 @@ async function buildFixture(suffix: string): Promise<Fixture> {
   await writeFile(keyPath, privateKey.export({ format: 'pem', type: 'pkcs8' }).toString(), { mode: 0o600 }); chmodSync(keyPath, 0o600);
 
   const policyIssuedAt = '2026-07-22T22:00:34.000Z';
-  const signerConfig = { schema_version: 'autopilot.launch_signer_config.v1', program_id: programId, repo_id: repoId, workstream, workstream_run: workstreamRun, private_key_path: keyPath, trust_anchor_ref: trustRef, trust_anchor_sha256: trustSha256, signer_key_id: trustSha256, program_evidence_root: programEvidenceRoot, policy_id: 'policy-1', policy_ref: 'authority/launch-policies/policy-1.json', package_commit: packageCommit, package_tree: packageTree, b0_commit: b0Commit, b0_tree: b0Tree, roster_sha256: rosterSha256, roster_provider: rosterProvider, policy_issued_at: policyIssuedAt, program_rows: [{ workstream, workstream_run: workstreamRun }] };
+  const signerConfig = { schema_version: 'autopilot.launch_signer_config.v1', program_id: programId, repo_id: repoId, workstream, workstream_run: workstreamRun, private_key_path: keyPath, state_root: stateRoot, session_root: sessionRoot, trust_anchor_ref: trustRef, trust_anchor_sha256: trustSha256, signer_key_id: trustSha256, program_evidence_root: programEvidenceRoot, policy_id: 'policy-1', policy_ref: 'authority/launch-policies/policy-1.json', package_commit: packageCommit, package_tree: packageTree, b0_commit: b0Commit, b0_tree: b0Tree, roster_sha256: rosterSha256, roster_provider: rosterProvider, policy_issued_at: policyIssuedAt, program_rows: [{ workstream, workstream_run: workstreamRun, state_root: stateRoot, repo_id: repoId }] };
   const configPath = join(keyDir, 'signer-config.json');
   await writeFile(configPath, `${JSON.stringify(signerConfig, null, 2)}\n`, { mode: 0o600 }); chmodSync(configPath, 0o600);
 
@@ -96,10 +102,25 @@ async function buildFixture(suffix: string): Promise<Fixture> {
   const projectionRef = join(programEvidenceRoot, 'bootstrap-projections', workstreamRun, '00000000000000000001.json');
   const projectionBytes = Buffer.from(`${JSON.stringify({ schema_version: 'autopilot.bootstrap_projection.v1', workstream_run: workstreamRun })}\n`, 'utf8');
   await mkdir(dirname(projectionRef), { recursive: true, mode: 0o700 }); await writeFile(projectionRef, projectionBytes, { mode: 0o600 }); chmodSync(projectionRef, 0o600);
+  const launchSealRef = join(programEvidenceRoot, 'launch-seal.json');
+  const launchSealBytes = Buffer.from(`${JSON.stringify({ schema_version: 'autopilot.kbg_launch_seal.v1', workstream_run: workstreamRun })}\n`, 'utf8');
+  await writeFile(launchSealRef, launchSealBytes, { mode: 0o600 }); chmodSync(launchSealRef, 0o600);
+  // The fixed subscription roster + pre-run selection authority bytes (sealed).
+  const rosterBytes = Buffer.from(`${canonicalRosterJson(seedRoster)}\n`, 'utf8');
+  const selectionPublication = buildCanonicalPreRunSelection({
+    stateRoot, repo_id: repoId, workstream_run: workstreamRun,
+    selected: { scope: seedRoster.scope, roster_id: seedRoster.roster_id, roster_revision: seedRoster.roster_revision, roster_sha256: rosterSha256 as RosterSha256, assignment_set_sha256: seedRoster.assignment_set_sha256 as RosterSha256, config_sha256: 'sha256:7777777777777777777777777777777777777777777777777777777777777777' as RosterSha256 },
+    selected_at: '2026-07-22T22:00:33.000Z',
+  });
+  const selectionBytes = Buffer.from(selectionPublication.selection_bytes);
+  const rosterRef = join(programEvidenceRoot, 'roster', `${workstreamRun}.roster.json`);
+  const selectionRef = join(programEvidenceRoot, 'roster', `${workstreamRun}.selection.json`);
+  await mkdir(dirname(rosterRef), { recursive: true, mode: 0o700 });
+  await writeFile(rosterRef, rosterBytes, { mode: 0o600 }); chmodSync(rosterRef, 0o600);
+  await writeFile(selectionRef, selectionBytes, { mode: 0o600 }); chmodSync(selectionRef, 0o600);
 
   // Pre-sign the policy candidate digest via the CLI so the manifest can seal it.
   const env: ProcessEnvLike = { ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: stateRoot };
-  const server = await startCoordinatorServer(coordinatorRuntimePaths(env));
   const signerCommand = NODE;
   const signerArgs = ['--experimental-strip-types', CLI, '--config', configPath];
   // Attach the bootstrap first so the signer can read the live bootstrap digest.
@@ -111,16 +132,21 @@ async function buildFixture(suffix: string): Promise<Fixture> {
     bootstrap_overlay: { overlay_commit: overlayCommit, overlay_tree: overlayTree, overlay_ref: `refs/heads/autopilot/bootstrap/${workstreamRun}`, bootstrap_ref: bootstrapRef, bootstrap_sha256: sha256(bootstrapBytes), bootstrap_byte_count: Buffer.byteLength(bootstrapBytes, 'utf8') },
     trust_anchor: { trust_anchor_ref: trustRef, trust_anchor_sha256: trustSha256, trust_anchor_blob_oid: trustBlobOid, byte_count: 44 },
     prospective_run: prospectiveRun, prospective_resource: prospectiveResource, coordination_authority: 'coordinator-edit-leases-v1',
-    roster_authority: 'user-default', roster_selection_ref: `roster-selections/${repoId}/${workstreamRun}.json`, roster_sha256: rosterSha256, parent_model: 'openai-codex/gpt-5.6-sol', parent_thinking: 'xhigh',
+    roster_authority: 'user-default', roster_selection_ref: `roster-selections/${repoId}/${workstreamRun}.json`, roster_sha256: rosterSha256,
+    roster_selection: { roster_ref: rosterRef, roster_bytes_sha256: sha256(rosterBytes), selection_ref: selectionRef, selection_bytes_sha256: sha256(selectionBytes), selection_sha256: selectionPublication.selection.selection_sha256 as `sha256:${string}`, provider: 'openai-codex' },
+    parent_model: 'openai-codex/gpt-5.6-sol', parent_thinking: 'xhigh',
     policy_candidate: { policy_id: 'policy-1', policy_ref: 'authority/launch-policies/policy-1.json', policy_sha256: sealedPolicySha256, registration_idempotency_key: `register-launch-policy:${workstreamRun}:policy-1`, heartbeat_acceptance_idempotency_key: `accept-program-heartbeat:${workstreamRun}:1` },
     program_evidence_root: programEvidenceRoot,
-    launch_seal: { launch_commit: overlayCommit, launch_tree: overlayTree, launch_audit_ref: launchAuditRef, launch_audit_sha256: sha256(launchAuditBytes), launch_seal_sha256: sha256('seal'), bootstrap_projection_ref: projectionRef, bootstrap_projection_sha256: sha256(projectionBytes) },
+    launch_seal: { launch_commit: overlayCommit, launch_tree: overlayTree, launch_audit_ref: launchAuditRef, launch_audit_sha256: sha256(launchAuditBytes), launch_seal_ref: launchSealRef, launch_seal_sha256: sha256(launchSealBytes), bootstrap_projection_ref: projectionRef, bootstrap_projection_sha256: sha256(projectionBytes) },
     attach_run_idempotency_key: `attach-run:${repoId}:${workstreamRun}`, attach_session_idempotency_key: `attach-session:${repoId}:${workstreamRun}`, created_at: '2026-07-22T22:00:33.000Z',
   };
   // We cannot fully seal policy_sha256 until the run is bootstrap-attached and
   // the CLI signs a policy (it binds the live bootstrap digest). This fixture
   // returns the draft; the test seals the policy digest after bootstrap attach.
+  // Parse BEFORE starting the coordinator so a manifest rejection cannot leave a
+  // live server holding the event loop open (fail fast, never hang).
   const manifest = parseD65LaunchManifest(manifestDraft);
+  const server = await startCoordinatorServer(coordinatorRuntimePaths(env));
   return { root, manifest, signerCommand, signerArgs, env, configPath, keyPath, close: async () => { await server.close(); await rm(root, { recursive: true, force: true }); } };
 }
 

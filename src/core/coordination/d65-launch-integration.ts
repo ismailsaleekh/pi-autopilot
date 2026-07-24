@@ -1,7 +1,7 @@
-import { createHash } from 'node:crypto';
-import { existsSync, lstatSync } from 'node:fs';
+import { createHash, randomBytes } from 'node:crypto';
+import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { dirname, isAbsolute, join } from 'node:path';
 
 import { AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV } from '../names.ts';
 import { AUTOPILOT_CHECKOUT_PROFILE_SNAPSHOT_FILE, checkoutProfileSnapshotFromResolved, resolveAutopilotFullCheckoutProfile } from '../checkout-profile.ts';
@@ -22,7 +22,8 @@ import {
   type ProcessEnvLike,
 } from '../parallel-runtime.ts';
 import { CoordinatorClient } from './client.ts';
-import { parseCoordinationAuthoritativeArtifact, parseCoordinationRun } from './contracts.ts';
+import { coordinatorRuntimePaths } from './runtime-paths.ts';
+import { parseCoordinationAuthoritativeArtifact, parseCoordinationRun, parseCoordinationSessionLease } from './contracts.ts';
 import { CoordinationRuntimeError } from './failures.ts';
 import { readImmutableFileBytes } from './immutable-file.ts';
 import {
@@ -37,6 +38,13 @@ import { publishD65FirstCompleteGraphFromEnvironment } from './d65-graph-success
 import { ensureD65ProgramHeartbeatForGraphFromEnvironment } from './d65-runtime-dispatch.ts';
 import type { D65LaunchManifest } from './d65-launch-manifest.ts';
 import type { D65LaunchSigner } from './d65-launch-signer.ts';
+import { authenticateD65LaunchRoster } from './d65-launch-roster.ts';
+import { publishRuntimeRosterSnapshot } from '../roster/snapshot.ts';
+import { preRunSelectionPath, resolveRosterScopePaths, rosterRevisionPath, type RosterSha256 } from '../roster/paths.ts';
+import { ensurePrivateDirectory, publishCreateOnlyAtomic } from '../roster/transaction.ts';
+import { parseAutopilotRoster } from '../roster/contracts.ts';
+import { parseRosterJsonWithDuplicateKeyRejection } from '../roster/canonical.ts';
+import { parseCanonicalPreRunSelectionBytes } from '../roster/run-selection.ts';
 
 // D65 production launch integration (freeze §9.5; fresh plan §§2.3/2.4/3.1/3.2).
 //
@@ -150,7 +158,7 @@ export interface D65LaunchBootstrapResult {
  * Prove the physical clone/overlay bytes agree with the sealed manifest before
  * any coordinator mutation (fail-closed load-time binding).
  */
-export function verifyLaunchManifestAgainstClone(manifest: D65LaunchManifest): void {
+export function verifyLaunchManifestAgainstClone(manifest: D65LaunchManifest, options: { readonly loadedManifestSha256?: `sha256:${string}` | undefined; readonly env?: ProcessEnvLike | undefined } = {}): void {
   const repoRoot = manifest.canonical_root;
   // The B0 -> content-result ancestry must be exactly one-parent B0.
   const resolvedContent = gitText(repoRoot, { kind: 'resolve-commit', revision: manifest.content_result_commit }, 'content-result commit');
@@ -200,13 +208,77 @@ export function verifyLaunchManifestAgainstClone(manifest: D65LaunchManifest): v
   if (manifest.attach_session_idempotency_key !== `attach-session:${manifest.repo_id}:${manifest.workstream_run}`) throw new CoordinationRuntimeError('invalid-state', 'sealed attach-session idempotency key is not the exact frozen form');
   if (manifest.policy_candidate.registration_idempotency_key !== `register-launch-policy:${manifest.workstream_run}:${manifest.policy_candidate.policy_id}`) throw new CoordinationRuntimeError('invalid-state', 'sealed policy registration idempotency key is not the exact frozen form');
   if (manifest.policy_candidate.heartbeat_acceptance_idempotency_key !== `accept-program-heartbeat:${manifest.workstream_run}:1`) throw new CoordinationRuntimeError('invalid-state', 'sealed heartbeat acceptance idempotency key is not the exact frozen form');
-  // The sealed launch-audit and bootstrap-projection evidence must exist with the
-  // exact sealed digests (immutable external launch-audit authority).
+  // The sealed launch-audit, launch-seal, and bootstrap-projection evidence must
+  // exist with the exact sealed digests (immutable external launch-audit
+  // authority). The launch seal is consumed/verified against its real immutable
+  // bytes rather than left decorative.
   requireSealedEvidence(manifest.launch_seal.launch_audit_ref, manifest.launch_seal.launch_audit_sha256, 'launch audit');
+  requireSealedEvidence(manifest.launch_seal.launch_seal_ref, manifest.launch_seal.launch_seal_sha256, 'launch seal');
   requireSealedEvidence(manifest.launch_seal.bootstrap_projection_ref, manifest.launch_seal.bootstrap_projection_sha256, 'bootstrap projection');
-  // The program evidence root must be a real mode-0700 directory.
+  // The program evidence root must be a real mode-0700 directory whose canonical
+  // realpath equals the sealed path (no alias/symlink authority substitution).
   const evidenceStat = lstatSync(manifest.program_evidence_root);
   if (!evidenceStat.isDirectory() || (evidenceStat.mode & 0o777) !== 0o700) throw new CoordinationRuntimeError('invalid-state', 'sealed program_evidence_root must be a mode-0700 directory', [manifest.program_evidence_root]);
+  if (realpathSync(manifest.program_evidence_root) !== manifest.program_evidence_root) throw new CoordinationRuntimeError('invalid-state', 'sealed program_evidence_root is not its own canonical real path', [manifest.program_evidence_root]);
+  // Bind the declared state/session/runtime roots to the ACTUAL coordinator/Pi
+  // paths: the coordinator that this launch env reaches must resolve to the
+  // sealed state root, its sessions root must live under it, and the session
+  // root, state root, and main-worktree runtime root must be alias-distinct.
+  requireCoordinatorPathBinding(manifest, options.env ?? process.env);
+  // Bind the exact loaded manifest bytes digest into private launch evidence so
+  // a restart proves the same manifest (never a decorative discarded digest).
+  if (options.loadedManifestSha256 !== undefined) persistD65LaunchManifestReceipt(manifest, options.loadedManifestSha256);
+}
+
+/**
+ * Prove the sealed state/session/runtime paths equal the ACTUAL coordinator/Pi
+ * runtime paths this launch env reaches, and that the roots are alias-distinct.
+ * A launch whose declared state root does not equal the coordinator's resolved
+ * state root could mutate a different coordinator than the sealed one.
+ */
+function requireCoordinatorPathBinding(manifest: D65LaunchManifest, env: ProcessEnvLike): void {
+  const paths = coordinatorRuntimePaths({ ...env, [AUTOPILOT_STATE_ROOT_ENV]: manifest.state_root });
+  if (paths.stateRoot !== manifest.state_root) throw new CoordinationRuntimeError('invalid-state', 'coordinator state root does not equal the sealed manifest state_root', [paths.stateRoot, manifest.state_root]);
+  const withSep = (root: string): string => (root.endsWith('/') ? root : `${root}/`);
+  const isInside = (child: string, parent: string): boolean => child === parent || child.startsWith(withSep(parent));
+  // The coordinator sessions root lives under the sealed state root (the state
+  // root owns coordinator/session authority; the runtime root is the main
+  // worktree's `.pi/autopilot/<workstream>` which is also under the state root by
+  // design). The SEPARATE Pi session root, however, must be authority-distinct
+  // from the coordinator state root (per the plan's authority-distinct roots).
+  if (!isInside(paths.sessionsRoot, manifest.state_root)) throw new CoordinationRuntimeError('invalid-state', 'coordinator sessions root is not inside the sealed state root', [paths.sessionsRoot, manifest.state_root]);
+  if (isInside(manifest.state_root, manifest.session_root) || isInside(manifest.session_root, manifest.state_root)) throw new CoordinationRuntimeError('invalid-state', 'sealed Pi session root must be authority-distinct from the coordinator state root', [manifest.state_root, manifest.session_root]);
+}
+
+const D65_LAUNCH_MANIFEST_RECEIPT_SCHEMA = 'autopilot.d65_launch_manifest_receipt.v1' as const;
+
+/**
+ * Persist (create-only, idempotent) the exact loaded manifest bytes digest into
+ * private launch evidence so a restart proves it consumed the SAME manifest. A
+ * divergent digest for the same run rejects loudly — a launch cannot silently
+ * swap the sealed manifest between attempts.
+ */
+function persistD65LaunchManifestReceipt(manifest: D65LaunchManifest, loadedManifestSha256: `sha256:${string}`): void {
+  const receiptPath = join(manifest.program_evidence_root, 'launch-manifest-receipts', `${manifest.workstream_run}.json`);
+  const record = {
+    schema_version: D65_LAUNCH_MANIFEST_RECEIPT_SCHEMA,
+    program_id: manifest.program_id,
+    workstream_run: manifest.workstream_run,
+    manifest_id: manifest.manifest_id,
+    manifest_sha256: loadedManifestSha256,
+    launch_seal_sha256: manifest.launch_seal.launch_seal_sha256,
+    roster_sha256: manifest.roster_sha256,
+  };
+  const bytes = new TextEncoder().encode(`${canonicalJson(record)}\n`);
+  if (existsSync(receiptPath)) {
+    const existing = readImmutableFileBytes({ path: receiptPath, maximumBytes: 65_536, label: 'D65 launch manifest receipt', errorCode: 'invalid-state' });
+    if (bytesSha256(existing) !== bytesSha256(bytes)) throw new CoordinationRuntimeError('invalid-state', 'a divergent launch-manifest receipt already exists for this run; the sealed manifest cannot be swapped between attempts', [receiptPath]);
+    return;
+  }
+  mkdirSync(dirname(receiptPath), { recursive: true, mode: 0o700 });
+  const temporary = `${receiptPath}.tmp-${String(process.pid)}-${randomBytes(6).toString('hex')}`;
+  writeFileSync(temporary, bytes, { mode: 0o600 });
+  renameSync(temporary, receiptPath);
 }
 
 /** Verify a sealed external evidence file exists as a bounded regular file with the exact digest. */
@@ -233,9 +305,10 @@ export async function beginD65LaunchBootstrap(input: {
   readonly manifest: D65LaunchManifest;
   readonly rawSessionId: string;
   readonly env: ProcessEnvLike;
+  readonly loadedManifestSha256?: `sha256:${string}` | undefined;
 }): Promise<D65LaunchBootstrapResult> {
   const { manifest } = input;
-  verifyLaunchManifestAgainstClone(manifest);
+  verifyLaunchManifestAgainstClone(manifest, { loadedManifestSha256: input.loadedManifestSha256, env: input.env });
   const env = launchEnv(manifest, input.env);
   const repo = repoIdentityFromLaunchManifest(manifest);
   const active = activeRowFromLaunchManifest(manifest);
@@ -276,6 +349,63 @@ function prospectiveSessionLeaseId(manifest: D65LaunchManifest): string {
  */
 export function launchEnv(manifest: D65LaunchManifest, env: ProcessEnvLike): ProcessEnvLike {
   return { ...env, [AUTOPILOT_STATE_ROOT_ENV]: manifest.state_root };
+}
+
+/**
+ * Authenticate the sealed roster/selection bytes and derive the EXACT parent
+ * model/thinking from those authenticated bytes (fresh plan §2.4). This is the
+ * single authority for the parent model: the launcher must select this exact
+ * model before any parent-model call so the bootstrap-plan turn cannot run on an
+ * ambient (possibly paid) model. Fails closed on any divergence.
+ */
+export function activateD65RuntimeRosterFromManifest(input: {
+  readonly manifest: D65LaunchManifest;
+  readonly env: ProcessEnvLike;
+}): { readonly model: string; readonly thinking: 'high' | 'xhigh' } {
+  const authenticated = authenticateD65LaunchRoster(input.manifest);
+  return authenticated.parent;
+}
+
+/**
+ * Publish the authenticated runtime roster authority before graph 2 so the
+ * ordinary unit-spec-v2 child path can author authenticated specs from it. Two
+ * publications, both create-only atomic and idempotent:
+ *   1. the external `autopilot.pre_run_selection.v1` bytes into the isolated
+ *      state root at `roster-selections/<repo_id>/<workstream_run>.json`, plus
+ *      the `autopilot.roster.v1` authority at `rosters/<id>/revision-N.json`;
+ *   2. the runtime mirror snapshot at
+ *      `<main_worktree>/.pi/autopilot/<workstream>/roster-snapshot.json`.
+ * The runtime mirror is inside the runtime prefix but is NOT one of the five
+ * charter files and is not staged by the policy or first-graph commits, so it
+ * cannot dirty either commit. Proven by a real first-child preflight recovery.
+ */
+export async function publishD65RuntimeRosterSnapshot(input: {
+  readonly manifest: D65LaunchManifest;
+  readonly env: ProcessEnvLike;
+}): Promise<void> {
+  const { manifest } = input;
+  const authenticated = authenticateD65LaunchRoster(manifest);
+  // 1a. Publish the external pre-run selection into the isolated state root.
+  const paths = resolveRosterScopePaths({ scope: 'user', stateRoot: manifest.state_root });
+  const selection = parseCanonicalPreRunSelectionBytes(authenticated.selectionBytes);
+  const selectionPath = preRunSelectionPath(paths, { repo_id: manifest.repo_id, workstream_run: manifest.workstream_run });
+  await ensurePrivateDirectory(dirname(selectionPath), paths.userStateRoot);
+  const selectionPublish = await publishCreateOnlyAtomic({ path: selectionPath, authorityRoot: paths.userStateRoot, bytes: authenticated.selectionBytes });
+  if (selectionPublish.status === 'conflict') throw new CoordinationRuntimeError('invalid-state', 'a divergent external pre-run selection already exists for the sealed run', [selectionPath]);
+  // 1b. Publish the roster authority revision bytes.
+  const roster = parseAutopilotRoster(parseRosterJsonWithDuplicateKeyRejection(new TextDecoder('utf-8', { fatal: true }).decode(authenticated.rosterBytes)));
+  const rosterPath = rosterRevisionPath(paths, { roster_id: roster.roster_id, roster_revision: roster.roster_revision });
+  await ensurePrivateDirectory(dirname(rosterPath), paths.authorityRoot);
+  const rosterPublish = await publishCreateOnlyAtomic({ path: rosterPath, authorityRoot: paths.authorityRoot, bytes: authenticated.rosterBytes });
+  if (rosterPublish.status === 'conflict') throw new CoordinationRuntimeError('invalid-state', 'a divergent roster authority revision already exists for the sealed run', [rosterPath]);
+  // 2. Publish the runtime mirror snapshot (from the exact selection bytes).
+  const snapshot = await publishRuntimeRosterSnapshot({
+    mainWorktreeRoot: manifest.main_worktree_path,
+    workstream: manifest.workstream,
+    selection_bytes: authenticated.selectionBytes,
+    expected_selection_sha256: selection.selection_sha256 as RosterSha256,
+  });
+  if (!snapshot.ok) throw new CoordinationRuntimeError('invalid-state', 'D65 runtime roster snapshot publication failed closed', snapshot.diagnostics.map((diagnostic) => diagnostic.code));
 }
 
 /**
@@ -330,9 +460,37 @@ async function createD65MainWorktree(input: { readonly manifest: D65LaunchManife
       await writeJsonAtomic(join(taskRoot, TASK_INFO_FILE), taskInfo);
       await writeJsonAtomic(join(taskRoot, BRANCHES_FILE), branches);
       await writeJsonAtomic(join(taskRoot, UNIT_INDEX_FILE), { schema_version: 'autopilot.unit_index.v1', units: [] });
+      // Mark the untracked-neutral runtime roster-snapshot mirror as excluded so
+      // it never dirties the policy or first-graph commits (design §4): the
+      // roster snapshot is a mirror of the sealed selection, not committed
+      // authority, and the first-graph validator requires an exactly-clean
+      // worktree postimage. The five charter roots remain tracked/committed.
+      excludeD65RuntimeRosterSnapshot(manifest, input.env);
     },
   }, input.env);
   await mkdir(runtimeRoot, { recursive: true });
+}
+
+/**
+ * Add the untracked-neutral runtime roster-snapshot mirror to the worktree's
+ * worktree-local `info/exclude` so it never appears as an untracked change. This
+ * is a per-worktree, non-committed exclusion (never a tracked `.gitignore`), so
+ * it cannot alter the committed tree. Idempotent: the exact line is added once.
+ */
+function excludeD65RuntimeRosterSnapshot(manifest: D65LaunchManifest, env: ProcessEnvLike): void {
+  const mainRoot = manifest.main_worktree_path;
+  const runtimePrefix = manifest.runtime_root.startsWith(`${mainRoot}/`) ? manifest.runtime_root.slice(mainRoot.length + 1) : null;
+  if (runtimePrefix === null) throw new CoordinationRuntimeError('invalid-state', 'runtime root is not a descendant of the main worktree');
+  const excludePattern = `/${runtimePrefix}/roster-snapshot.json`;
+  const excludeRelative = new TextDecoder('utf-8', { fatal: true }).decode(runGitQuery({ cwd: mainRoot, descriptor: { kind: 'git-path', name: 'info/exclude' } }).stdout).trim();
+  if (excludeRelative.length === 0) throw new CoordinationRuntimeError('invalid-state', 'could not resolve the worktree-local git exclude path');
+  const excludePath = isAbsolute(excludeRelative) ? excludeRelative : join(mainRoot, excludeRelative);
+  const existing = existsSync(excludePath) ? new TextDecoder('utf-8', { fatal: true }).decode(readFileSync(excludePath)) : '';
+  const lines = existing.split('\n');
+  if (lines.includes(excludePattern)) return;
+  mkdirSync(dirname(excludePath), { recursive: true });
+  const next = existing.length === 0 || existing.endsWith('\n') ? `${existing}${excludePattern}\n` : `${existing}\n${excludePattern}\n`;
+  writeFileSync(excludePath, next);
 }
 
 /**
@@ -353,29 +511,42 @@ export async function registerD65LaunchPolicyAndInitialHeartbeat(input: {
   const client = new CoordinatorClient({ env });
   const session = await readCoordinatorSessionContext(attachment.contextPath);
 
-  // Idempotency: if a launch policy is already accepted, skip signing/register.
+  const policyArtifactId = `launch-policy:${manifest.workstream_run}:${manifest.policy_candidate.policy_id}`;
   const status = await client.query('status', session.repo_id, session.workstream_run);
   const artifacts = requireArtifacts(status.payload);
   const acceptedPolicy = artifacts.find((artifact) => artifact.document_schema_version === 'autopilot.launch_policy.v1');
-  if (acceptedPolicy === undefined) {
-    // Ask the external signer to produce the exact signed policy candidate.
-    const signed = await input.signer.signLaunchPolicy({
-      kind: 'launch-policy', state_root: manifest.state_root, repo_id: manifest.repo_id, workstream_run: manifest.workstream_run,
-      policy_id: manifest.policy_candidate.policy_id, policy_ref: manifest.policy_candidate.policy_ref, expected_policy_sha256: manifest.policy_candidate.policy_sha256,
-    });
-    if (signed.sha256 !== manifest.policy_candidate.policy_sha256) throw new CoordinationRuntimeError('invalid-state', 'signed launch policy digest differs from the sealed manifest policy digest', [signed.sha256, manifest.policy_candidate.policy_sha256]);
-    // Commit the signed policy at the exact previously-absent policy path with a
-    // sole parent = content_result_commit (run-main HEAD is content result at
-    // this stage). Then register it through the existing frozen store surface.
-    await commitD65PolicyBlob({ manifest, signedAbsolutePath: signed.absolute_path, env });
-    const head = gitText(manifest.main_worktree_path, { kind: 'head' }, 'policy commit HEAD');
+  if (acceptedPolicy !== undefined) {
+    // Idempotent replay: an already-accepted policy MUST be the exact sealed
+    // identity/ref/digest — a divergent accepted policy is never silently adopted.
+    if (acceptedPolicy.artifact_id !== policyArtifactId || acceptedPolicy.evidence.ref !== manifest.policy_candidate.policy_ref || acceptedPolicy.evidence.sha256 !== manifest.policy_candidate.policy_sha256) throw new CoordinationRuntimeError('invalid-state', 'accepted launch policy differs from the sealed manifest policy identity/ref/digest', [acceptedPolicy.artifact_id, acceptedPolicy.evidence.ref, acceptedPolicy.evidence.sha256]);
+  } else {
+    // Discover the durable stage: the policy may already be COMMITTED at run-main
+    // HEAD (crash after commit, before registration). Reuse that exact one-parent
+    // commit byte-for-byte instead of re-committing (which would be a no-change
+    // `git commit` failure). Otherwise sign + commit the sealed policy.
+    const head = gitText(manifest.main_worktree_path, { kind: 'head' }, 'policy stage HEAD');
+    const committed = runGitQuery({ cwd: manifest.main_worktree_path, descriptor: { kind: 'show-file', revision: head, path: manifest.policy_candidate.policy_ref, allowAbsent: true } });
+    const alreadyCommitted = !committed.negative && bytesSha256(committed.stdout) === manifest.policy_candidate.policy_sha256;
+    if (!alreadyCommitted) {
+      // Ask the external signer to produce the exact signed policy candidate.
+      const signed = await input.signer.signLaunchPolicy({
+        kind: 'launch-policy', state_root: manifest.state_root, repo_id: manifest.repo_id, workstream_run: manifest.workstream_run,
+        policy_id: manifest.policy_candidate.policy_id, policy_ref: manifest.policy_candidate.policy_ref, expected_policy_sha256: manifest.policy_candidate.policy_sha256,
+      });
+      if (signed.sha256 !== manifest.policy_candidate.policy_sha256) throw new CoordinationRuntimeError('invalid-state', 'signed launch policy digest differs from the sealed manifest policy digest', [signed.sha256, manifest.policy_candidate.policy_sha256]);
+      // Commit the signed policy at the exact previously-absent policy path with a
+      // sole parent = content_result_commit (run-main HEAD is content result at
+      // this stage). The store re-verifies sole-parent/one-path at registration.
+      await commitD65PolicyBlob({ manifest, signedAbsolutePath: signed.absolute_path, env });
+    }
+    const policyHead = gitText(manifest.main_worktree_path, { kind: 'head' }, 'policy commit HEAD');
     const run = requireOneRun(status.payload);
     const response = await client.mutate('register-authoritative-artifact', {
       repoId: session.repo_id, workstreamRun: session.workstream_run, sessionId: session.session_id,
       fencingGeneration: session.session_generation, expectedVersion: run.version, idempotencyKey: manifest.policy_candidate.registration_idempotency_key,
     }, {
-      artifact_id: `launch-policy:${manifest.workstream_run}:${manifest.policy_candidate.policy_id}`, source_type: 'task', source_scope: 'run-main',
-      document_schema_version: 'autopilot.launch_policy.v1', git_commit: head, ref: manifest.policy_candidate.policy_ref, sha256: manifest.policy_candidate.policy_sha256,
+      artifact_id: policyArtifactId, source_type: 'task', source_scope: 'run-main',
+      document_schema_version: 'autopilot.launch_policy.v1', git_commit: policyHead, ref: manifest.policy_candidate.policy_ref, sha256: manifest.policy_candidate.policy_sha256,
       session_lease_id: session.session_lease_id, session_token: session.session_token,
     });
     const registered = parseCoordinationAuthoritativeArtifact(response.payload['authoritative_artifact']);
@@ -430,14 +601,19 @@ async function acceptSignedGraphHeartbeat(input: {
   readonly env: ProcessEnvLike;
 }): Promise<void> {
   const env: ProcessEnvLike = { ...launchEnv(input.manifest, input.env), [AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV]: input.attachment.contextPath };
-  // Idempotency: if the governing heartbeat for this sequence is already the
-  // accepted head, skip producing a new candidate.
+  // Idempotency: the heartbeat chain is strictly monotonic. If the accepted head
+  // sequence is already >= the requested sequence, that sequence was already
+  // accepted — skip producing/accepting a new candidate. This is the exact fix
+  // for "an accepted later heartbeat must never cause a request for sequence 1":
+  // a restart after graph+heartbeat 2 (head sequence 2) must NOT re-request the
+  // sealed sequence-1 candidate, which the signer would correctly reject.
   const client = new CoordinatorClient({ env });
   const session = await readCoordinatorSessionContext(input.attachment.contextPath);
   const status = await client.query('status', session.repo_id, session.workstream_run);
   const head = status.payload['accepted_program_heartbeat'];
-  const acceptedSequence = typeof head === 'object' && head !== null ? (head as Record<string, unknown>)['sequence'] : null;
-  const alreadyAccepted = acceptedSequence === input.heartbeatSequence;
+  const acceptedSequenceRaw = typeof head === 'object' && head !== null ? (head as Record<string, unknown>)['sequence'] : null;
+  const acceptedSequence = typeof acceptedSequenceRaw === 'number' && Number.isSafeInteger(acceptedSequenceRaw) ? acceptedSequenceRaw : null;
+  const alreadyAccepted = acceptedSequence !== null && acceptedSequence >= input.heartbeatSequence;
   if (!alreadyAccepted) {
     await input.signer.signProgramHeartbeat({
       kind: 'program-heartbeat', state_root: input.manifest.state_root, repo_id: input.manifest.repo_id, workstream_run: input.manifest.workstream_run,
@@ -513,6 +689,9 @@ export async function publishD65FirstGraphAndSuccessorHeartbeat(input: {
   const status = await client.query('status', session.repo_id, session.workstream_run);
   const artifacts = requireArtifacts(status.payload);
   const existingGraph = artifacts.find((artifact) => artifact.document_schema_version === 'autopilot.semantic_graph.v1');
+  // Bind the successful context_budget call receipt into graph authority: a
+  // bootstrap turn that never called context_budget cannot advance to graph 2.
+  if (existingGraph === undefined) requireD65ContextBudgetReceipt(input.manifest);
   let graphSha256: `sha256:${string}`;
   if (existingGraph === undefined) {
     const published = await publishD65FirstCompleteGraphFromEnvironment({ env, ...(input.createdAt === undefined ? {} : { createdAt: input.createdAt }) });
@@ -525,8 +704,200 @@ export async function publishD65FirstGraphAndSuccessorHeartbeat(input: {
   return Object.freeze({ graphSequence: 2, graphSha256 });
 }
 
+/**
+ * The exact durable launch phase, derived from coordinator + Git authority
+ * BEFORE any signature request or parent-model call. This is the single
+ * authority that decides what the launcher must do next after a crash/response-
+ * loss at any boundary. Every value is computed from exact durable state, never
+ * from in-memory `pendingD65Launch` (which is cleared on shutdown).
+ *
+ *   - `attach-required`        : no run yet; attach-run(bootstrap_graph) + one
+ *                                session + full-tree main worktree.
+ *   - `policy-required`        : run+session+worktree exist, but the launch
+ *                                policy is not yet accepted (may be committed).
+ *   - `initial-heartbeat-required`: policy accepted, initial governing heartbeat
+ *                                (sequence 1) not yet accepted.
+ *   - `bootstrap-plan-required`: policy + initial heartbeat accepted, charter
+ *                                roots not yet written — deliver the bootstrap-
+ *                                plan-only turn (no graph exists yet).
+ *   - `first-graph-required`   : charter roots complete, first complete graph
+ *                                (sequence 2) not yet published/registered.
+ *   - `successor-heartbeat-required`: graph 2 registered, governing heartbeat 2
+ *                                not yet accepted — accept only the missing
+ *                                heartbeat.
+ *   - `ordinary`               : graph 2 + heartbeat 2 accepted — adopt the one
+ *                                session and dispatch only ordinary work.
+ */
+export type D65LaunchPhaseKind =
+  | 'attach-required'
+  | 'policy-required'
+  | 'initial-heartbeat-required'
+  | 'bootstrap-plan-required'
+  | 'first-graph-required'
+  | 'successor-heartbeat-required'
+  | 'ordinary';
+
+export interface D65LaunchPhase {
+  readonly kind: D65LaunchPhaseKind;
+  /** The accepted first-complete-graph (sequence 2) digest, when it exists. */
+  readonly graphSha256: `sha256:${string}` | null;
+  /** The accepted governing heartbeat head sequence (null when none). */
+  readonly acceptedHeartbeatSequence: number | null;
+}
+
+/**
+ * Resolve the exact durable launch phase from coordinator + Git authority. It
+ * validates that the observed authority is internally coherent (exactly one
+ * run/session/worktree/bootstrap artifact, exact graph identity/schema/sequence/
+ * digest), and fails closed on any divergent or ambiguous authority. It NEVER
+ * mutates and NEVER calls a model/signer; the caller uses the returned phase to
+ * drive exactly the next missing boundary.
+ */
+export async function resolveD65LaunchPhase(input: {
+  readonly manifest: D65LaunchManifest;
+  readonly env: ProcessEnvLike;
+}): Promise<D65LaunchPhase> {
+  const { manifest } = input;
+  const env = launchEnv(manifest, input.env);
+  const client = new CoordinatorClient({ env });
+  // Before any run exists, the coordinator repository is absent — attach.
+  const catalog = await client.query('run-catalog', manifest.repo_id, manifest.workstream_run);
+  const catalogRuns = catalog.payload['runs'];
+  if (!Array.isArray(catalogRuns) || catalogRuns.length === 0) {
+    return Object.freeze({ kind: 'attach-required', graphSha256: null, acceptedHeartbeatSequence: null });
+  }
+  if (catalogRuns.length !== 1) throw new CoordinationRuntimeError('invalid-state', 'D65 launch phase resolution found more than one durable run for the sealed identity');
+  const status = await client.query('status', manifest.repo_id, manifest.workstream_run);
+  const run = requireOneRun(status.payload);
+  if (run.autopilot_id !== manifest.autopilot_id || run.workstream !== manifest.workstream || run.workstream_run !== manifest.workstream_run || run.coordination_authority !== manifest.coordination_authority) {
+    throw new CoordinationRuntimeError('invalid-state', 'durable run identity diverges from the sealed manifest', [run.autopilot_id, run.workstream_run]);
+  }
+  const artifacts = requireArtifacts(status.payload);
+  // The deterministic bootstrap artifact must exist and be unambiguous.
+  const bootstrapId = `semantic-graph-bootstrap:${manifest.workstream_run}`;
+  const bootstraps = artifacts.filter((artifact) => artifact.artifact_id === bootstrapId && artifact.document_schema_version === 'autopilot.semantic_graph_bootstrap.v1');
+  if (bootstraps.length !== 1) throw new CoordinationRuntimeError('invalid-state', 'D65 launch phase requires exactly one accepted bootstrap artifact', [String(bootstraps.length)]);
+
+  // Exactly one attached generation-1 dispatch session must exist (the single
+  // bootstrap session). Zero/many is ambiguous authority — fail closed.
+  const sessions = requireSessionLeases(status.payload);
+  const attached = sessions.filter((session) => session.status === 'attached' && session.attachment_kind === 'dispatch' && session.session_generation === run.active_session_generation);
+  if (run.active_session_generation !== 1 || attached.length !== 1) {
+    // The attach-run receipt exists but the single generation-1 session is not
+    // yet present/coherent — the attach stage must (idempotently) complete it.
+    return Object.freeze({ kind: 'attach-required', graphSha256: null, acceptedHeartbeatSequence: null });
+  }
+
+  // The policy artifact: an accepted policy must be the EXACT sealed identity.
+  const policyArtifactId = `launch-policy:${manifest.workstream_run}:${manifest.policy_candidate.policy_id}`;
+  const policies = artifacts.filter((artifact) => artifact.document_schema_version === 'autopilot.launch_policy.v1');
+  if (policies.length > 1) throw new CoordinationRuntimeError('invalid-state', 'D65 launch phase found more than one accepted launch policy');
+  const policy = policies[0];
+  if (policy !== undefined && (policy.artifact_id !== policyArtifactId || policy.evidence.ref !== manifest.policy_candidate.policy_ref || policy.evidence.sha256 !== manifest.policy_candidate.policy_sha256)) {
+    throw new CoordinationRuntimeError('invalid-state', 'accepted launch policy diverges from the sealed manifest identity/ref/digest', [policy.artifact_id, policy.evidence.ref, policy.evidence.sha256]);
+  }
+
+  // The first complete graph (sequence 2): validate exact artifact identity,
+  // schema, sequence, and digest — not merely "some semantic graph exists".
+  const graphs = artifacts.filter((artifact) => artifact.document_schema_version === 'autopilot.semantic_graph.v1');
+  if (graphs.length > 1) throw new CoordinationRuntimeError('invalid-state', 'D65 launch phase found more than one accepted complete graph before ordinary dispatch');
+  const graph = graphs[0];
+  let graphSha256: `sha256:${string}` | null = null;
+  if (graph !== undefined) {
+    if (graph.artifact_id !== `semantic-graph:${String(2).padStart(20, '0')}`) throw new CoordinationRuntimeError('invalid-state', 'the first accepted complete graph is not exact sequence-2 artifact identity', [graph.artifact_id]);
+    graphSha256 = graph.evidence.sha256;
+  }
+
+  // The accepted governing heartbeat head sequence.
+  const acceptedHeartbeatSequence = acceptedHeartbeatSequenceOf(status.payload);
+
+  if (policy === undefined) {
+    return Object.freeze({ kind: 'policy-required', graphSha256: null, acceptedHeartbeatSequence });
+  }
+  if (acceptedHeartbeatSequence === null || acceptedHeartbeatSequence < 1) {
+    return Object.freeze({ kind: 'initial-heartbeat-required', graphSha256, acceptedHeartbeatSequence });
+  }
+  // Charter completeness is a Git fact (the five previously-absent roots). It is
+  // consulted only after the initial heartbeat exists: a restart after charter
+  // creation must mechanically continue to first-graph without another planning
+  // call.
+  if (graph === undefined) {
+    const charterComplete = detectD65CharterCompleteQuiet(manifest);
+    if (!charterComplete) return Object.freeze({ kind: 'bootstrap-plan-required', graphSha256: null, acceptedHeartbeatSequence });
+    return Object.freeze({ kind: 'first-graph-required', graphSha256: null, acceptedHeartbeatSequence });
+  }
+  if (acceptedHeartbeatSequence < 2) {
+    return Object.freeze({ kind: 'successor-heartbeat-required', graphSha256, acceptedHeartbeatSequence });
+  }
+  return Object.freeze({ kind: 'ordinary', graphSha256, acceptedHeartbeatSequence });
+}
+
+/** The accepted governing heartbeat head sequence, or null when none exists. */
+function acceptedHeartbeatSequenceOf(statusPayload: Readonly<Record<string, unknown>>): number | null {
+  const head = statusPayload['accepted_program_heartbeat'];
+  if (typeof head !== 'object' || head === null) return null;
+  const sequence = (head as Record<string, unknown>)['sequence'];
+  return typeof sequence === 'number' && Number.isSafeInteger(sequence) && sequence >= 1 ? sequence : null;
+}
+
+function requireSessionLeases(statusPayload: Readonly<Record<string, unknown>>): ReturnType<typeof parseCoordinationSessionLease>[] {
+  const value = statusPayload['session_leases'];
+  if (!Array.isArray(value)) throw new CoordinationRuntimeError('invalid-state', 'D65 launch status lacks the session-lease projection');
+  return value.map(parseCoordinationSessionLease);
+}
+
+/**
+ * Charter-completeness probe that does NOT throw a scope violation: it returns
+ * false when the five roots are absent and re-uses the exact scope-fence
+ * detector once they are present (which DOES throw on an out-of-scope effect).
+ * Used by the phase resolver, where a not-yet-written charter is a normal
+ * intermediate state rather than an error.
+ */
+function detectD65CharterCompleteQuiet(manifest: D65LaunchManifest): boolean {
+  for (const root of D65_CHARTER_ROOTS) {
+    if (!existsSync(join(manifest.runtime_root, root))) return false;
+  }
+  return detectD65CharterComplete(manifest);
+}
+
 /** The exact five previously-absent charter roots the bootstrap turn writes. */
 export const D65_CHARTER_ROOTS = Object.freeze(['mission.md', 'master-plan.json', 'state.json', 'decision-log.jsonl', 'events.jsonl'] as const);
+
+const D65_CONTEXT_BUDGET_RECEIPT_SCHEMA = 'autopilot.d65_context_budget_receipt.v1' as const;
+
+/** The durable path of the bootstrap-turn context_budget call receipt. */
+export function d65ContextBudgetReceiptPath(manifest: D65LaunchManifest): string {
+  return join(manifest.program_evidence_root, 'context-budget-receipts', `${manifest.workstream_run}.json`);
+}
+
+/**
+ * Persist a durable receipt proving the bootstrap parent successfully CALLED
+ * `context_budget` (audit item G). Create-only idempotent: the first successful
+ * call seals it; a later call leaves the sealed bytes unchanged. Merely
+ * registering/activating the tool is not proof — only a real call writes this.
+ */
+export function writeD65ContextBudgetReceipt(manifest: D65LaunchManifest, report: { readonly gate: string; readonly percent: number | null }): void {
+  const receiptPath = d65ContextBudgetReceiptPath(manifest);
+  if (existsSync(receiptPath)) return;
+  const record = { schema_version: D65_CONTEXT_BUDGET_RECEIPT_SCHEMA, program_id: manifest.program_id, workstream_run: manifest.workstream_run, gate: report.gate };
+  const bytes = new TextEncoder().encode(`${canonicalJson(record)}\n`);
+  mkdirSync(dirname(receiptPath), { recursive: true, mode: 0o700 });
+  const temporary = `${receiptPath}.tmp-${String(process.pid)}-${randomBytes(6).toString('hex')}`;
+  writeFileSync(temporary, bytes, { mode: 0o600 });
+  renameSync(temporary, receiptPath);
+}
+
+/**
+ * Require the durable context_budget call receipt bound into launch authority
+ * before the first complete graph may be published. Fails closed when absent.
+ */
+export function requireD65ContextBudgetReceipt(manifest: D65LaunchManifest): void {
+  const receiptPath = d65ContextBudgetReceiptPath(manifest);
+  if (!existsSync(receiptPath)) throw new CoordinationRuntimeError('invalid-state', 'D65 bootstrap turn did not produce a durable context_budget call receipt; first-graph publication is fenced', [receiptPath]);
+  const bytes = readImmutableFileBytes({ path: receiptPath, maximumBytes: 65_536, label: 'D65 context_budget receipt', errorCode: 'invalid-state' });
+  const parsed = json(bytes, 'D65 context_budget receipt');
+  if (typeof parsed !== 'object' || parsed === null || (parsed as Record<string, unknown>)['schema_version'] !== D65_CONTEXT_BUDGET_RECEIPT_SCHEMA || (parsed as Record<string, unknown>)['workstream_run'] !== manifest.workstream_run) throw new CoordinationRuntimeError('invalid-state', 'D65 context_budget receipt is malformed or belongs to another run', [receiptPath]);
+}
 
 /**
  * Detect whether the bootstrap parent-planning turn has produced exactly the

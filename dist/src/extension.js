@@ -1,10 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { realpathSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createContextBudgetTool, resolveContextHaltPercent } from "./core/context-budget.js";
 import { AUTOPILOT_ABORT_COMMAND, AUTOPILOT_CLAIM_GC_COMMAND, AUTOPILOT_CLOSE_COMMAND, AUTOPILOT_COMMAND, AUTOPILOT_CONFIG_COMMAND, AUTOPILOT_COORDINATION_COMMAND, AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV, AUTOPILOT_HANDOFF_COMMAND, AUTOPILOT_INJECT_COMMAND, AUTOPILOT_ONBOARD_COMMAND, CONTEXT_BUDGET_TOOL_NAME, AUTOPILOT_RESPOND_CLAIM_REQUEST_TOOL_NAME, } from "./core/names.js";
-import { buildAutopilotWorkstreamRun, parseAutopilotAbortArgs, parseAutopilotArgs, parseAutopilotClaimGcArgs, parseAutopilotCloseArgs, parseAutopilotConfigArgs, parseAutopilotCoordinationArgs, parseAutopilotInjectArgs, runnerInvocationFromModuleUrl, runtimeRootForWorkstream } from "./core/paths.js";
+import { buildAutopilotWorkstreamRun, parseAutopilotAbortArgs, parseAutopilotArgs, parseAutopilotLaunchArgs, parseAutopilotClaimGcArgs, parseAutopilotCloseArgs, parseAutopilotConfigArgs, parseAutopilotCoordinationArgs, parseAutopilotInjectArgs, runnerInvocationFromModuleUrl, runtimeRootForWorkstream } from "./core/paths.js";
 import { AutopilotCloseError, abortAutopilotWorkstream, closeAutopilotWorkstream } from "./core/close-runtime.js";
 import { runAutopilotClaimGc } from "./core/claim-gc.js";
 import { readSchedulerConfig, writeSchedulerConfig } from "./core/scheduler-config.js";
@@ -21,7 +21,7 @@ import { ensureMainWorktreeSagaRegistered } from "./core/coordination/worktree-s
 import { handoffUsage, onboardUsage, renderAutopilotBootstrapPlanPrompt, renderAutopilotPrompt, renderHandoffPrompt, renderOnboardPrompt, } from "./core/prompts.js";
 import { parseD65LaunchManifest, launchManifestBytesSha256, D65_LAUNCH_MANIFEST_MAX_BYTES } from "./core/coordination/d65-launch-manifest.js";
 import { SpawnedD65LaunchSigner } from "./core/coordination/d65-launch-signer.js";
-import { beginD65LaunchBootstrap, detectD65CharterComplete, launchEnv, publishD65FirstGraphAndSuccessorHeartbeat, registerD65LaunchPolicyAndInitialHeartbeat, } from "./core/coordination/d65-launch-integration.js";
+import { beginD65LaunchBootstrap, detectD65CharterComplete, D65_CHARTER_ROOTS, launchEnv, publishD65FirstGraphAndSuccessorHeartbeat, registerD65LaunchPolicyAndInitialHeartbeat, resolveD65LaunchPhase, activateD65RuntimeRosterFromManifest, publishD65RuntimeRosterSnapshot, writeD65ContextBudgetReceipt, } from "./core/coordination/d65-launch-integration.js";
 import { readImmutableFileBytes } from "./core/coordination/immutable-file.js";
 import { coordinationCutoverCommitted } from "./core/coordination/migration-paths.js";
 import { autopilotRosterContractCanonicalJson, autopilotRosterContractHashField, autopilotRosterContractSha256OmittingOwnField, isAutopilotRosterContractSchemaVersion, parseAutopilotRosterContract, parseAutopilotRosterContractJson, } from "./core/roster/contracts.js";
@@ -1049,6 +1049,11 @@ export default function autopilotExtension(pi, dependencies = {}) {
     // delivers the ordinary continuation turn. It is cleared on completion,
     // failure, or session shutdown.
     let pendingD65Launch = null;
+    // The D65 bootstrap-only effect fence: while set, the worktree guard restricts
+    // write-capable tool calls to EXACTLY the five charter paths plus the
+    // package-owned auxiliary roots. Set before the bootstrap-plan turn and cleared
+    // only after graph 2 (ordinary dispatch).
+    let d65BootstrapFence = null;
     let rosterSetupBundle = null;
     let rosterSetupActivationToken = null;
     let rosterSetupSkillPath = null;
@@ -1058,6 +1063,37 @@ export default function autopilotExtension(pi, dependencies = {}) {
         if (!contextBudgetRegistered) {
             const threshold = resolveContextHaltPercent(process.env);
             pi.registerTool(createContextBudgetTool(threshold));
+            contextBudgetRegistered = true;
+        }
+        if (pi.getActiveTools !== undefined && pi.setActiveTools !== undefined) {
+            const activeTools = pi.getActiveTools();
+            if (!activeTools.includes(CONTEXT_BUDGET_TOOL_NAME)) {
+                pi.setActiveTools([...activeTools, CONTEXT_BUDGET_TOOL_NAME]);
+            }
+        }
+    }
+    /**
+     * Activate a context_budget tool for the D65 bootstrap turn that, on a
+     * successful call, writes a durable receipt into launch authority (audit item
+     * G). The first-graph publication requires this receipt to exist, so a
+     * bootstrap turn that never called context_budget cannot advance to graph 2.
+     */
+    function activateD65ContextBudget(manifest) {
+        if (!contextBudgetRegistered) {
+            const threshold = resolveContextHaltPercent(process.env);
+            const base = createContextBudgetTool(threshold);
+            const wrapped = {
+                ...base,
+                execute: async (toolCallId, params, signal, onUpdate, toolCtx) => {
+                    const result = await base.execute(toolCallId, params, signal, onUpdate, toolCtx);
+                    try {
+                        writeD65ContextBudgetReceipt(manifest, result.details);
+                    }
+                    catch { /* receipt best-effort; publication re-checks it */ }
+                    return result;
+                },
+            };
+            pi.registerTool(wrapped);
             contextBudgetRegistered = true;
         }
         if (pi.getActiveTools !== undefined && pi.setActiveTools !== undefined) {
@@ -1343,6 +1379,18 @@ export default function autopilotExtension(pi, dependencies = {}) {
         pi.on('tool_call', (event, toolCtx) => {
             if (activeAutopilotWorktreePath === null)
                 return undefined;
+            // D65 bootstrap-only effect fence (audit item G): while the bootstrap-plan
+            // turn is pending, write-capable tool calls may affect EXACTLY the five
+            // charter paths plus package-owned auxiliary roots — never the whole
+            // runtime root. After graph 2, ordinary scope resumes.
+            if (d65BootstrapFence !== null) {
+                return evaluateAutopilotWorktreeToolCall(event, toolCtx, {
+                    worktreeRoot: activeAutopilotWorktreePath,
+                    label: 'Autopilot D65 bootstrap fence',
+                    bootstrapCharterPaths: d65BootstrapFence.charterPaths,
+                    bootstrapAllowedAuxiliaryRoots: d65BootstrapFence.auxiliaryRoots,
+                });
+            }
             return evaluateAutopilotWorktreeToolCall(event, toolCtx, {
                 worktreeRoot: activeAutopilotWorktreePath,
                 label: 'Autopilot worktree guard',
@@ -1357,6 +1405,7 @@ export default function autopilotExtension(pi, dependencies = {}) {
         activeAutopilotWorktreePath = null;
         activeAutopilotWorkstreamRun = null;
         activeAutopilotRosterSelection = null;
+        d65BootstrapFence = null;
     }
     function rawSessionId(ctx) {
         const sessionId = ctx.sessionManager?.getSessionId();
@@ -1553,10 +1602,11 @@ export default function autopilotExtension(pi, dependencies = {}) {
         // cannot substitute the bytes the launcher admits.
         const bytes = readImmutableFileBytes({ path: absolutePath, maximumBytes: D65_LAUNCH_MANIFEST_MAX_BYTES, label: 'launch manifest', errorCode: 'invalid-request' });
         const manifest = parseD65LaunchManifest(JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)));
-        // Record the exact loaded manifest digest for evidence (not self-referenced
-        // inside the manifest; the launch seal is the external launch-audit seal).
-        void launchManifestBytesSha256(bytes);
-        return manifest;
+        // Preserve and persist the exact loaded manifest bytes digest so a restart
+        // proves it consumed the SAME manifest (it is bound into private launch
+        // evidence at attach time and rejected if it diverges).
+        const loadedManifestSha256 = launchManifestBytesSha256(bytes);
+        return { manifest, loadedManifestSha256 };
     }
     /**
      * Drive stages 1-6 of the D65 launch from a sealed manifest: attach-run with
@@ -1582,9 +1632,26 @@ export default function autopilotExtension(pi, dependencies = {}) {
             notify(ctx, `Autopilot could not resolve the external launch signer: ${error instanceof Error ? error.message : String(error)}. No run state was created.`, 'error');
             return false;
         }
-        // Enforce the pinned parent request profile before any mutation.
+        // DERIVE THE EXACT DURABLE PHASE FIRST, before any signature request or
+        // parent-model call. The phase is computed only from durable coordinator +
+        // Git authority (never from in-memory state) so a crash/response loss at any
+        // boundary replays the exact next effect. A divergent/ambiguous authority
+        // fails closed here with no mutation.
+        let phase;
         try {
-            activateContextBudget();
+            phase = await resolveD65LaunchPhase({ manifest, env });
+        }
+        catch (error) {
+            const message = error instanceof CoordinationRuntimeError ? formatCoordinationRuntimeError(error) : error instanceof Error ? error.message : String(error);
+            notify(ctx, `Autopilot D65 launch phase resolution failed closed: ${message}. No run state was mutated.`, 'error');
+            return false;
+        }
+        // Enforce the pinned parent request profile before any mutation. In D65
+        // bootstrap mode the context_budget tool is wrapped so a successful call
+        // writes a durable receipt bound into launch authority (audit item G):
+        // merely registering/activating the tool is not proof it was called.
+        try {
+            activateD65ContextBudget(manifest);
         }
         catch (error) {
             notify(ctx, `Autopilot could not activate context_budget for the D65 launch: ${error instanceof Error ? error.message : String(error)}`, 'error');
@@ -1592,12 +1659,29 @@ export default function autopilotExtension(pi, dependencies = {}) {
         }
         // Select the EXACT sealed parent model/thinking before any parent model call,
         // so the bootstrap-plan turn cannot run on an ambient (possibly paid) model.
-        if (!(await activateParentModelRoster(ctx, { model: manifest.parent_model, thinking: manifest.parent_thinking })))
+        // Its exact identity is derived from the authenticated sealed roster bytes.
+        let parentAssignment;
+        try {
+            parentAssignment = activateD65RuntimeRosterFromManifest({ manifest, env });
+        }
+        catch (error) {
+            const message = error instanceof CoordinationRuntimeError ? formatCoordinationRuntimeError(error) : error instanceof Error ? error.message : String(error);
+            notify(ctx, `Autopilot D65 launch roster authority failed closed: ${message}. No parent model call was made.`, 'error');
             return false;
+        }
+        if (!(await activateParentModelRoster(ctx, parentAssignment)))
+            return false;
+        // Drive stages 1-5 (attach + main worktree + policy + initial heartbeat) to
+        // completion. Every one of these is idempotent, so re-running after a crash
+        // replays the exact effect and never creates a second session/generation.
         let bootstrap;
         try {
-            bootstrap = await beginD65LaunchBootstrap({ manifest, rawSessionId: rawSessionId(ctx), env });
+            bootstrap = await beginD65LaunchBootstrap({ manifest, rawSessionId: rawSessionId(ctx), env, loadedManifestSha256: input.loadedManifestSha256 });
             await registerD65LaunchPolicyAndInitialHeartbeat({ manifest, attachment: bootstrap.attachment, signer, env });
+            // Publish the exact runtime roster snapshot (from the authenticated sealed
+            // roster bytes) before graph 2 so the ordinary v2 child path can author
+            // authenticated specs from it. Idempotent create-only publication.
+            await publishD65RuntimeRosterSnapshot({ manifest, env });
         }
         catch (error) {
             const message = error instanceof CoordinationRuntimeError ? formatCoordinationRuntimeError(error) : error instanceof Error ? error.message : String(error);
@@ -1608,8 +1692,39 @@ export default function autopilotExtension(pi, dependencies = {}) {
         activeAutopilotRuntimeRoot = manifest.runtime_root;
         activeAutopilotWorktreePath = manifest.main_worktree_path;
         activeAutopilotWorkstreamRun = manifest.workstream_run;
+        // Install the bootstrap-only effect fence (audit item G): write-capable model
+        // tool calls may affect EXACTLY the five charter paths and NOTHING else — not
+        // the whole runtime root. The roster snapshot and graph publication are
+        // package-written (not model tool calls), so no auxiliary model-write root is
+        // granted. Any other write/edit target permanently fences the launch.
+        d65BootstrapFence = {
+            charterPaths: D65_CHARTER_ROOTS.map((root) => join(manifest.runtime_root, root)),
+            auxiliaryRoots: [],
+        };
         registerWorktreeGuardIfSupported();
         pendingD65Launch = { manifest, bootstrap, signer, taskIntro: input.taskIntro, inFlight: false };
+        // Re-resolve the phase from durable authority now that stages 1-5 are
+        // committed. If the first complete graph (sequence 2) already exists (restart
+        // after graph publication), the bootstrap-plan turn is OVER: mechanically
+        // complete the launch and deliver the ORDINARY continuation turn instead of a
+        // second planning call. If the charter roots already exist but graph 2 does
+        // not (restart after charter creation), also complete mechanically without
+        // another planning call. Otherwise deliver the bootstrap-plan-only turn.
+        let postPhase;
+        try {
+            postPhase = await resolveD65LaunchPhase({ manifest, env });
+        }
+        catch (error) {
+            pendingD65Launch = null;
+            const message = error instanceof CoordinationRuntimeError ? formatCoordinationRuntimeError(error) : error instanceof Error ? error.message : String(error);
+            notify(ctx, `Autopilot D65 launch phase re-resolution failed closed: ${message}.`, 'error');
+            return false;
+        }
+        void phase;
+        if (postPhase.kind === 'first-graph-required' || postPhase.kind === 'successor-heartbeat-required' || postPhase.kind === 'ordinary') {
+            await completeD65LaunchIfReady(ctx);
+            return true;
+        }
         const prompt = renderAutopilotBootstrapPlanPrompt({
             workstream: manifest.workstream,
             runtimeRoot: manifest.runtime_root,
@@ -1660,6 +1775,9 @@ export default function autopilotExtension(pi, dependencies = {}) {
             notify(ctx, `Autopilot D65 first-graph publication failed closed: ${message}. The run stays bootstrap-only; no child work is possible.`, 'error');
             return;
         }
+        // Graph 2 is accepted: the bootstrap-only effect fence is lifted and ordinary
+        // scope resumes (the ordinary runtime child guard applies from here).
+        d65BootstrapFence = null;
         // Adopt the exact single session; the periodic heartbeat starts only now.
         const sendMessage = pi.sendMessage;
         if (sendMessage === undefined) {
@@ -1827,7 +1945,7 @@ export default function autopilotExtension(pi, dependencies = {}) {
     pi.registerCommand(AUTOPILOT_COMMAND, {
         description: 'Start or resume Autopilot orchestration: /autopilot <workstream> [--roster <id>] [task intro]',
         handler: async (args, ctx) => {
-            const parsed = parseAutopilotArgs(args);
+            const parsed = parseAutopilotLaunchArgs(args);
             if (!parsed.ok) {
                 notify(ctx, parsed.message, 'warning');
                 return;
@@ -1839,24 +1957,26 @@ export default function autopilotExtension(pi, dependencies = {}) {
             // present, `/autopilot` consumes the sealed prelaunch package rather than
             // regenerating a run. The legacy path below is unchanged when it is absent.
             if (parsed.value.launchManifestPath !== null) {
-                let manifest;
+                let loaded;
                 try {
-                    manifest = loadLaunchManifest(parsed.value.launchManifestPath);
+                    loaded = loadLaunchManifest(parsed.value.launchManifestPath);
                 }
                 catch (error) {
                     notify(ctx, `Autopilot launch manifest is invalid: ${error instanceof Error ? error.message : String(error)}. No run state was created.`, 'error');
                     return;
                 }
-                if (manifest.workstream !== parsed.value.workstream) {
-                    notify(ctx, `Autopilot launch manifest workstream ${manifest.workstream} does not match the command workstream ${parsed.value.workstream}. No run state was created.`, 'error');
+                if (loaded.manifest.workstream !== parsed.value.workstream) {
+                    notify(ctx, `Autopilot launch manifest workstream ${loaded.manifest.workstream} does not match the command workstream ${parsed.value.workstream}. No run state was created.`, 'error');
                     return;
                 }
-                await activateD65Launch({ manifest, ctx, taskIntro: parsed.value.remainder });
+                await activateD65Launch({ manifest: loaded.manifest, loadedManifestSha256: loaded.loadedManifestSha256, ctx, taskIntro: parsed.value.remainder });
                 return;
             }
+            // Legacy path: reduce to the exact byte-unchanged legacy result shape.
+            const legacyParsed = { workstream: parsed.value.workstream, remainder: parsed.value.remainder, rosterId: parsed.value.rosterId };
             const activationNow = clock();
-            const plannedWorkstreamRun = buildAutopilotWorkstreamRun(parsed.value.workstream, activationNow);
-            const rosterResolution = await rosterActivationStore.resolve({ parsed: parsed.value, ctx, originalCommand, env: process.env, plannedWorkstreamRun, now: activationNow });
+            const plannedWorkstreamRun = buildAutopilotWorkstreamRun(legacyParsed.workstream, activationNow);
+            const rosterResolution = await rosterActivationStore.resolve({ parsed: legacyParsed, ctx, originalCommand, env: process.env, plannedWorkstreamRun, now: activationNow });
             if (rosterResolution.status === 'setup-required') {
                 await activateRosterSetup(ctx, originalCommand, rosterResolution.diagnostics);
                 return;
@@ -1870,7 +1990,7 @@ export default function autopilotExtension(pi, dependencies = {}) {
                 return;
             }
             const prepared = await prepareAndActivateWorkstream({
-                workstream: parsed.value.workstream,
+                workstream: legacyParsed.workstream,
                 ctx,
                 rosterSelection: rosterResolution.selection,
                 now: activationNow,
@@ -1881,10 +2001,10 @@ export default function autopilotExtension(pi, dependencies = {}) {
                 return;
             const runtimeRoot = prepared.runtimeRoot;
             const prompt = renderAutopilotPrompt({
-                workstream: parsed.value.workstream,
+                workstream: legacyParsed.workstream,
                 runtimeRoot,
                 runnerInvocation: runnerInvocationFromModuleUrl(import.meta.url),
-                taskIntro: parsed.value.remainder,
+                taskIntro: legacyParsed.remainder,
                 workstreamRun: prepared.active.workstream_run,
                 sourceRepo: prepared.active.source_repo,
                 worktreePath: prepared.mainWorktreePath,
@@ -1909,7 +2029,7 @@ export default function autopilotExtension(pi, dependencies = {}) {
                 notify(ctx, `Autopilot prepared ${prepared.active.workstream_run} but could not deliver the parent prompt: ${error instanceof Error ? error.message : String(error)}`, 'error');
                 return;
             }
-            notify(ctx, `Autopilot activated for ${parsed.value.workstream} (${prepared.active.workstream_run}).`, 'info');
+            notify(ctx, `Autopilot activated for ${legacyParsed.workstream} (${prepared.active.workstream_run}).`, 'info');
         },
     });
     pi.registerCommand(AUTOPILOT_INJECT_COMMAND, {
@@ -1920,7 +2040,7 @@ export default function autopilotExtension(pi, dependencies = {}) {
                 notify(ctx, parsed.message, 'warning');
                 return;
             }
-            const autopilotEquivalent = { workstream: parsed.value.workstream, remainder: '', rosterId: null, launchManifestPath: null };
+            const autopilotEquivalent = { workstream: parsed.value.workstream, remainder: '', rosterId: null };
             const originalCommand = `/${AUTOPILOT_COMMAND} ${parsed.value.workstream}`;
             if (failIfRosterSetupRestartRequired(ctx))
                 return;

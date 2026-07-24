@@ -200,6 +200,60 @@ export async function writeCoordinatorSessionContext(path, context) {
     await rename(temporary, path);
     await enforcePrivateAuthorityPath(path, false);
 }
+/** The deterministic durable context path for a D65 bootstrap session lease. */
+function d65BootstrapContextPath(sessionsRoot, repoId, workstreamRun, sessionLeaseId) {
+    return join(sessionsRoot, `${createHash('sha256').update(`${repoId}\0${workstreamRun}\0${sessionLeaseId}`, 'utf8').digest('hex')}.json`);
+}
+const D65_STAGED_SESSION_TOKEN_SCHEMA = 'autopilot.d65_staged_session_token.v1';
+/**
+ * Durably stage the exact secret session token BEFORE the attach-session
+ * mutation (crash-safe staged-context protocol; audit item B). The staged file
+ * is a mode-0600 private-authority file created atomically (temp+fsync+rename)
+ * so a crash after the coordinator commits the session but before the final
+ * context is published leaves the exact token recoverable. The token never
+ * leaves mode-0600 private authority.
+ */
+async function writeD65StagedSessionToken(stagedPath, input) {
+    await ensurePrivateAuthorityDirectory(dirname(stagedPath));
+    const record = { schema_version: D65_STAGED_SESSION_TOKEN_SCHEMA, session_lease_id: input.session_lease_id, session_token: input.session_token };
+    const temporary = `${stagedPath}.tmp-${String(process.pid)}-${randomBytes(6).toString('hex')}`;
+    await writeFile(temporary, `${JSON.stringify(record, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
+    await enforcePrivateAuthorityPath(temporary, false);
+    await rename(temporary, stagedPath);
+    await enforcePrivateAuthorityPath(stagedPath, false);
+}
+/**
+ * Read the durably staged session token, returning its exact token bytes when
+ * present and bound to the expected lease id, or null when absent. A staged file
+ * whose lease id does not match the expected lease rejects loudly (conflicting
+ * staged bytes are never silently adopted).
+ */
+async function readD65StagedSessionToken(stagedPath, expectedLeaseId) {
+    if (!existsSync(stagedPath))
+        return null;
+    let value;
+    try {
+        value = JSON.parse(await readFile(stagedPath, 'utf8'));
+    }
+    catch (error) {
+        throw new CoordinationRuntimeError('invalid-state', 'D65 staged session token is unreadable', [stagedPath, error instanceof Error ? error.message : String(error)]);
+    }
+    const record = requireRecord(value, 'D65 staged session token');
+    if (record['schema_version'] !== D65_STAGED_SESSION_TOKEN_SCHEMA)
+        throw new CoordinationRuntimeError('invalid-state', 'D65 staged session token schema is incompatible', [stagedPath]);
+    const leaseId = requireString(record, 'session_lease_id');
+    const token = requireAuthorityToken(record, 'session_token');
+    if (leaseId !== expectedLeaseId)
+        throw new CoordinationRuntimeError('invalid-state', 'D65 staged session token names a different session lease', [leaseId, expectedLeaseId]);
+    return token;
+}
+/** Descriptor-safe removal of the staged token residue (deterministic, crash-safe). */
+async function removeD65StagedSessionToken(stagedPath) {
+    if (!existsSync(stagedPath))
+        return;
+    await unlink(stagedPath);
+    fsyncParentDirectory(stagedPath);
+}
 export async function readCoordinatorSessionContext(path) {
     if (!isAbsolute(path))
         throw new CoordinationRuntimeError('invalid-request', 'coordinator session context path must be absolute');
@@ -467,7 +521,20 @@ export class DurableRunSupervisorClient {
             throw new CoordinationRuntimeError('invalid-state', 'D65 bootstrap run already advanced its generation without a recoverable single session', [String(run.active_session_generation)]);
         }
         const sessionLeaseId = input.sessionLeaseId;
-        const sessionToken = randomBytes(32).toString('hex');
+        const contextPath = d65BootstrapContextPath(this.#client.paths.sessionsRoot, repoId, run.workstream_run, sessionLeaseId);
+        const stagedPath = `${contextPath}.staged`;
+        // CRASH-SAFE STAGED-CONTEXT PROTOCOL (freeze §9.5; audit item B):
+        // The secret session token is durably STAGED before the attach-session
+        // mutation, so a crash/response loss after the coordinator commits but before
+        // the final context is published leaves the exact token recoverable. The
+        // token never leaves mode-0600 private authority. Because `attach-session` is
+        // a run-owned idempotent action whose idempotency digest EXCLUDES the token/
+        // lease id, replaying it with the exact staged token returns the committed
+        // session row and never creates a second session/generation.
+        const staged = await readD65StagedSessionToken(stagedPath, sessionLeaseId);
+        const sessionToken = staged !== null ? staged : randomBytes(32).toString('hex');
+        if (staged === null)
+            await writeD65StagedSessionToken(stagedPath, { session_lease_id: sessionLeaseId, session_token: sessionToken });
         const attachSession = await this.#client.mutate('attach-session', {
             repoId,
             workstreamRun: run.workstream_run,
@@ -504,8 +571,10 @@ export class DurableRunSupervisorClient {
             pid: session.pid,
             boot_id: session.boot_id,
         };
-        const contextPath = join(this.#client.paths.sessionsRoot, `${createHash('sha256').update(`${repoId}\0${run.workstream_run}\0${session.session_lease_id}`, 'utf8').digest('hex')}.json`);
+        // Atomically publish the final context, then descriptor-safely remove the
+        // staged residue (its absence is proven on the next line's re-lstat).
         await writeCoordinatorSessionContext(contextPath, context);
+        await removeD65StagedSessionToken(stagedPath);
         return { run: attachedRun, session, contextPath, context };
     }
     /**
@@ -524,12 +593,47 @@ export class DurableRunSupervisorClient {
         const session = attached[0];
         if (session === undefined || session.session_lease_id !== input.sessionLeaseId)
             return null;
-        const contextPath = join(this.#client.paths.sessionsRoot, `${createHash('sha256').update(`${repoId}\0${run.workstream_run}\0${session.session_lease_id}`, 'utf8').digest('hex')}.json`);
-        if (!existsSync(contextPath))
+        const contextPath = d65BootstrapContextPath(this.#client.paths.sessionsRoot, repoId, run.workstream_run, session.session_lease_id);
+        const stagedPath = `${contextPath}.staged`;
+        if (existsSync(contextPath)) {
+            const context = await readCoordinatorSessionContext(contextPath);
+            if (context.session_lease_id !== session.session_lease_id || context.session_generation !== session.session_generation)
+                return null;
+            // A conflicting staged residue whose token differs from the published final
+            // context rejects loudly rather than being silently discarded.
+            const staged = await readD65StagedSessionToken(stagedPath, session.session_lease_id);
+            if (staged !== null && staged !== context.session_token)
+                throw new CoordinationRuntimeError('invalid-state', 'D65 staged session token conflicts with the published final context', [session.session_lease_id]);
+            if (staged !== null)
+                await removeD65StagedSessionToken(stagedPath);
+            return { run, session, contextPath, context };
+        }
+        // The coordinator committed the single session (crash after commit, before
+        // final context publication). Recover the exact token from the durable
+        // staged file and atomically finalize the one context. No second session is
+        // created; the recovered token's hash was committed at attach time.
+        const staged = await readD65StagedSessionToken(stagedPath, session.session_lease_id);
+        if (staged === null)
             return null;
-        const context = await readCoordinatorSessionContext(contextPath);
-        if (context.session_lease_id !== session.session_lease_id || context.session_generation !== session.session_generation)
-            return null;
+        const context = {
+            schema_version: AUTOPILOT_COORDINATOR_SESSION_CONTEXT_SCHEMA,
+            state_root: this.#client.paths.stateRoot,
+            repo_id: repoId,
+            repo_key: input.repo.repoKey,
+            autopilot_id: input.active.autopilot_id,
+            workstream: input.active.workstream,
+            workstream_run: input.active.workstream_run,
+            session_id: session.session_id,
+            session_generation: session.session_generation,
+            run_version: run.version,
+            session_lease_id: session.session_lease_id,
+            session_token: staged,
+            session_version: session.version,
+            pid: session.pid,
+            boot_id: session.boot_id,
+        };
+        await writeCoordinatorSessionContext(contextPath, context);
+        await removeD65StagedSessionToken(stagedPath);
         return { run, session, contextPath, context };
     }
     async consumeReconciliationReceipt(response, context) {

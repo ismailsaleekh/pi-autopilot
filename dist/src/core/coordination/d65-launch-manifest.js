@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { isAbsolute, normalize } from 'node:path';
 import { fail, gitOid, identifier, integer, isJsonObject, literal, object, repoRelativePath, sha256Field, str, timestamp, } from "./d65-semantic-graph.js";
+import { parseCoordinationRun, parseCoordinationRunResource } from "./contracts.js";
 // D65 sealed prelaunch package (freeze §9; fresh plan §§2.3/3.2/2.4). This is
 // the ONE closed, versioned, size-bounded manifest the human `/autopilot`
 // startup path consumes to bind a fixed prelaunch identity rather than
@@ -36,12 +37,6 @@ function absolutePathField(record, field, label, maxLength = 4096) {
         fail(label, `${field} must be a normalized absolute path`);
     return value;
 }
-function unpaddedBase64Url(record, field, label) {
-    const value = str(record, field, label, 128);
-    if (!/^[A-Za-z0-9_-]+$/u.test(value))
-        fail(label, `${field} must be unpadded base64url`);
-    return value;
-}
 function parentModel(record, label) {
     const value = str(record, 'parent_model', label, 256);
     const slash = value.indexOf('/');
@@ -55,13 +50,36 @@ function parentThinking(record, label) {
         fail(label, 'parent_thinking must be high or xhigh');
     return value;
 }
-/** A bounded closed prospective canonical object image (run or resource row). */
-function prospectiveObject(value, label) {
+/**
+ * A bounded closed prospective canonical run image. It must be exactly the
+ * frozen `autopilot.coordination_run.v1` row (no unknown/nested drift). The
+ * closed store contract parser is the single source of truth for its shape.
+ */
+function prospectiveRunObject(value, label) {
     if (!isJsonObject(value))
         fail(label, 'must be an object');
-    const keys = Object.keys(value);
-    if (keys.length === 0 || keys.length > 64)
-        fail(label, 'prospective object field count is out of range');
+    try {
+        parseCoordinationRun(value);
+    }
+    catch (error) {
+        fail(label, `prospective run must be an exact autopilot.coordination_run.v1 row: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    return value;
+}
+/**
+ * A bounded closed prospective canonical resource image. It must be exactly the
+ * frozen `autopilot.coordination_run_resource.v1` row (no unknown/nested
+ * drift). The closed store contract parser is the single source of truth.
+ */
+function prospectiveResourceObject(value, label) {
+    if (!isJsonObject(value))
+        fail(label, 'must be an object');
+    try {
+        parseCoordinationRunResource(value);
+    }
+    catch (error) {
+        fail(label, `prospective resource must be an exact autopilot.coordination_run_resource.v1 row: ${error instanceof Error ? error.message : String(error)}`);
+    }
     return value;
 }
 function bootstrapOverlay(value, label) {
@@ -88,6 +106,19 @@ function trustAnchor(value, label) {
         byte_count: 44,
     };
 }
+function rosterSelection(value, label) {
+    const record = object(value, label, [
+        'roster_ref', 'roster_bytes_sha256', 'selection_ref', 'selection_bytes_sha256', 'selection_sha256', 'provider',
+    ]);
+    return {
+        roster_ref: absolutePathField(record, 'roster_ref', label),
+        roster_bytes_sha256: sha256Field(record, 'roster_bytes_sha256', label),
+        selection_ref: absolutePathField(record, 'selection_ref', label),
+        selection_bytes_sha256: sha256Field(record, 'selection_bytes_sha256', label),
+        selection_sha256: sha256Field(record, 'selection_sha256', label),
+        provider: identifier(record, 'provider', label),
+    };
+}
 function policyCandidate(value, label) {
     const record = object(value, label, [
         'policy_id', 'policy_ref', 'policy_sha256', 'registration_idempotency_key', 'heartbeat_acceptance_idempotency_key',
@@ -102,7 +133,7 @@ function policyCandidate(value, label) {
 }
 function launchSeal(value, label) {
     const record = object(value, label, [
-        'launch_commit', 'launch_tree', 'launch_audit_ref', 'launch_audit_sha256', 'launch_seal_sha256',
+        'launch_commit', 'launch_tree', 'launch_audit_ref', 'launch_audit_sha256', 'launch_seal_ref', 'launch_seal_sha256',
         'bootstrap_projection_ref', 'bootstrap_projection_sha256',
     ]);
     return {
@@ -110,6 +141,7 @@ function launchSeal(value, label) {
         launch_tree: gitOid(record, 'launch_tree', label),
         launch_audit_ref: absolutePathField(record, 'launch_audit_ref', label),
         launch_audit_sha256: sha256Field(record, 'launch_audit_sha256', label),
+        launch_seal_ref: absolutePathField(record, 'launch_seal_ref', label),
         launch_seal_sha256: sha256Field(record, 'launch_seal_sha256', label),
         bootstrap_projection_ref: absolutePathField(record, 'bootstrap_projection_ref', label),
         bootstrap_projection_sha256: sha256Field(record, 'bootstrap_projection_sha256', label),
@@ -122,7 +154,7 @@ const MANIFEST_FIELDS = Object.freeze([
     'b0_commit', 'b0_tree', 'content_result_commit', 'content_result_tree', 'package_commit', 'package_tree',
     'run_branch', 'target_branch', 'state_root', 'session_root', 'worktree_root', 'main_worktree_path',
     'runtime_root', 'bootstrap_overlay', 'trust_anchor', 'prospective_run', 'prospective_resource',
-    'coordination_authority', 'roster_authority', 'roster_selection_ref', 'roster_sha256', 'parent_model', 'parent_thinking', 'policy_candidate',
+    'coordination_authority', 'roster_authority', 'roster_selection_ref', 'roster_sha256', 'roster_selection', 'parent_model', 'parent_thinking', 'policy_candidate',
     'program_evidence_root', 'launch_seal', 'attach_run_idempotency_key', 'attach_session_idempotency_key',
     'created_at',
 ]);
@@ -172,12 +204,13 @@ export function parseD65LaunchManifest(value) {
         runtime_root: absolutePathField(record, 'runtime_root', label),
         bootstrap_overlay: bootstrapOverlay(record['bootstrap_overlay'], `${label}.bootstrap_overlay`),
         trust_anchor: trustAnchor(record['trust_anchor'], `${label}.trust_anchor`),
-        prospective_run: prospectiveObject(record['prospective_run'], `${label}.prospective_run`),
-        prospective_resource: prospectiveObject(record['prospective_resource'], `${label}.prospective_resource`),
+        prospective_run: prospectiveRunObject(record['prospective_run'], `${label}.prospective_run`),
+        prospective_resource: prospectiveResourceObject(record['prospective_resource'], `${label}.prospective_resource`),
         coordination_authority: 'coordinator-edit-leases-v1',
         roster_authority: str(record, 'roster_authority', label, 256),
         roster_selection_ref: repoRelativePath(record, 'roster_selection_ref', label, 256),
         roster_sha256: sha256Field(record, 'roster_sha256', label),
+        roster_selection: rosterSelection(record['roster_selection'], `${label}.roster_selection`),
         parent_model: parentModel(record, label),
         parent_thinking: parentThinking(record, label),
         policy_candidate: policyCandidate(record['policy_candidate'], `${label}.policy_candidate`),
@@ -212,6 +245,13 @@ export function parseD65LaunchManifest(value) {
     // Roots must be authority-distinct: state/session roots outside the clone,
     // program evidence root outside every clone/state/session/worktree root.
     requireAuthorityDistinctRoots(manifest);
+    // Roster cross-binding: the pinned parent model provider must equal the sealed
+    // subscription provider so the manifest cannot name a parent on a provider the
+    // authenticated roster does not authorize. The authenticated roster bytes are
+    // separately proven (digest, authority, assignments, channel) at launch time.
+    const parentProvider = manifest.parent_model.slice(0, manifest.parent_model.indexOf('/'));
+    if (parentProvider !== manifest.roster_selection.provider)
+        fail(label, 'parent_model provider must equal the sealed roster subscription provider');
     return Object.freeze(manifest);
 }
 function stringField(row, field, label) {

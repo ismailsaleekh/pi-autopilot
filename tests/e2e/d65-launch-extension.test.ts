@@ -25,7 +25,12 @@ import { encodeUnpaddedBase64Url } from '../../src/core/coordination/d65-trust.t
 import { parseD65LaunchPolicy } from '../../src/core/coordination/d65-launch-policy.ts';
 import { parseD65LaunchManifest, type D65LaunchManifest } from '../../src/core/coordination/d65-launch-manifest.ts';
 import type { D65LaunchSigner, D65LaunchSignerHeartbeatRequest, D65LaunchSignerPolicyRequest, D65LaunchSignerResult } from '../../src/core/coordination/d65-launch-signer.ts';
+import { writeD65ContextBudgetReceipt } from '../../src/core/coordination/d65-launch-integration.ts';
 import { AUTOPILOT_STATE_ROOT_ENV, type ProcessEnvLike } from '../../src/core/parallel-runtime.ts';
+import { SEED_ROSTERS } from '../../src/core/roster/provider-recipes.ts';
+import { canonicalRosterJson } from '../../src/core/roster/canonical.ts';
+import { buildCanonicalPreRunSelection } from '../../src/core/roster/run-selection.ts';
+import type { RosterSha256 } from '../../src/core/roster/paths.ts';
 import { sdkReadyRosterActivationStore } from '../helpers/sdk-ready-roster.ts';
 
 function git(cwd: string, args: readonly string[]): string {
@@ -127,7 +132,11 @@ function createLaunchHarness(signer: D65LaunchSigner): HarnessLike {
 interface Fixture { readonly root: string; readonly manifest: D65LaunchManifest; readonly manifestPath: string; readonly signer: D65LaunchSigner; readonly env: ProcessEnvLike; readonly close: () => Promise<void> }
 
 async function buildFixture(suffix: string): Promise<Fixture> {
-  const root = await mkdtemp(join(tmpdir(), `d65-ext-${suffix}-`));
+  // Canonicalize the temp root so every derived authority path is symlink-free
+  // (matching production, where roots are already canonical real paths). The
+  // roster private-authority publisher rejects any symlinked ancestor (e.g. the
+  // macOS `/var -> /private/var` alias under the system tmpdir).
+  const root = realpathSync(await mkdtemp(join(tmpdir(), `d65-ext-${suffix}-`)));
   const clone = join(root, 'clone'); await mkdir(clone, { recursive: true });
   git(clone, ['init', '-b', 'main']);
   await writeFile(join(clone, 'README.md'), 'B0\n'); git(clone, ['add', '.']); git(clone, ['commit', '-m', 'B0']);
@@ -140,11 +149,14 @@ async function buildFixture(suffix: string): Promise<Fixture> {
   const trustRef = `.pi/autopilot-trust/d65/${programId}/operator-ed25519.spki`; const trustSha256 = sha256(spki);
   const bootstrapRef = `.pi/autopilot-bootstrap/${workstreamRun}/bootstrap.json`;
   const stateRoot = join(root, 'state');
-  const sessionRoot = coordinatorRuntimePaths({ ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: stateRoot }).sessionsRoot;
+  const sessionRoot = join(root, 'sessions');
   const worktreeRoot = join(stateRoot, 'worktrees', repoId);
   const mainWorktreePath = join(worktreeRoot, 'active', workstreamRun, 'main');
   const runtimeRoot = join(mainWorktreePath, '.pi', 'autopilot', workstream);
-  const packageCommit = 'a'.repeat(40); const packageTree = 'b'.repeat(40); const rosterSha256 = sha256('roster'); const rosterProvider = 'openai-codex';
+  const packageCommit = 'a'.repeat(40); const packageTree = 'b'.repeat(40);
+  const seedRoster = SEED_ROSTERS.find((entry) => entry.roster_id === 'cruise-codex-subscription-bdb4f15f0ff9');
+  if (seedRoster === undefined) throw new Error('fixed subscription seed roster not found');
+  const rosterSha256 = seedRoster.roster_sha256 as `sha256:${string}`; const rosterProvider = 'openai-codex';
   const prospectiveRun = { schema_version: 'autopilot.coordination_run.v1', repo_id: repoId, autopilot_id: autopilotId, workstream, workstream_run: workstreamRun, coordination_authority: 'coordinator-edit-leases-v1', status: 'active', active_session_generation: 0, created_event_seq: 1, version: 1 };
   const prospectiveResource = { schema_version: 'autopilot.coordination_run_resource.v1', repo_id: repoId, workstream_run: workstreamRun, source_repo: clone, git_common_dir: join(clone, '.git'), worktree_root: worktreeRoot, main_worktree_path: mainWorktreePath, runtime_root: runtimeRoot, branch: `autopilot/${workstreamRun}`, target_branch: 'main', target_base_sha: contentCommit, origin_url: null, started_at: '2026-07-22T22:00:32.000Z', version: 1 };
   const bootstrap = { schema_version: 'autopilot.semantic_graph_bootstrap.v1', program_id: programId, graph_sequence: 1, prior_graph_sha256: null, repo_id: repoId, autopilot_id: autopilotId, workstream, workstream_run: workstreamRun, run_timestamp: '2026-07-22T22:00:32.000Z', run_nonce: 'abc123', content_commit: contentCommit, content_tree: contentTree, package_commit: packageCommit, package_tree: packageTree, prospective_run: prospectiveRun, prospective_resource: prospectiveResource, covered_event_seq: 0, trust_anchor_ref: trustRef, trust_anchor_sha256: trustSha256, allowed_bootstrap_operations: ['attach-run', 'attach-session', 'prepare-main-worktree', 'transition-main-worktree', 'register-launch-policy', 'accept-program-heartbeat', 'parent-planning', 'publish-complete-graph'], created_at: '2026-07-22T22:00:33.000Z' };
@@ -158,15 +170,30 @@ async function buildFixture(suffix: string): Promise<Fixture> {
   git(clone, ['checkout', 'main']);
   const rawEvidence = join(root, 'evidence'); await mkdir(rawEvidence, { recursive: true, mode: 0o700 }); chmodSync(rawEvidence, 0o700);
   const programEvidenceRoot = realpathSync(rawEvidence);
-  const policyFields = { schema_version: 'autopilot.launch_policy.v1', program_id: programId, policy_id: 'policy-1', policy_version: 1, repo_id: repoId, workstream_run: workstreamRun, package_commit: packageCommit, package_tree: packageTree, base_commit: b0Commit, base_tree: b0Tree, bootstrap_graph_sha256: sha256(bootstrapBytes), bootstrap_receipt_event_seq: 1, roster_sha256: rosterSha256, parallel_cap: 1, maximum_parallel_cap: 1, expected_checkout_units: 1, program_evidence_root: programEvidenceRoot, trust_anchor_ref: trustRef, trust_anchor_sha256: trustSha256, prior_policy_sha256: null, capacity_decision_ref: null, capacity_decision_sha256: null, issued_at: '2026-07-22T22:00:34.000Z', signer_key_id: trustSha256 };
-  const policySignature = encodeUnpaddedBase64Url(new Uint8Array(sign(null, concatDomain('AUTOPILOT-D65-LAUNCH-POLICY\u0000', canonicalJson(policyFields)), privateKey)));
-  const policySha256 = sha256(`${canonicalJson({ ...policyFields, signature: policySignature })}\n`);
+  const policyFieldsSeed = { schema_version: 'autopilot.launch_policy.v1', program_id: programId, policy_id: 'policy-1', policy_version: 1, repo_id: repoId, workstream_run: workstreamRun, package_commit: packageCommit, package_tree: packageTree, base_commit: b0Commit, base_tree: b0Tree, bootstrap_graph_sha256: sha256(bootstrapBytes), bootstrap_receipt_event_seq: 1, roster_sha256: rosterSha256, parallel_cap: 1, maximum_parallel_cap: 1, expected_checkout_units: 1, program_evidence_root: programEvidenceRoot, trust_anchor_ref: trustRef, trust_anchor_sha256: trustSha256, prior_policy_sha256: null, capacity_decision_ref: null, capacity_decision_sha256: null, issued_at: '2026-07-22T22:00:34.000Z', signer_key_id: trustSha256 };
+  const policySignature = encodeUnpaddedBase64Url(new Uint8Array(sign(null, concatDomain('AUTOPILOT-D65-LAUNCH-POLICY\u0000', canonicalJson(policyFieldsSeed)), privateKey)));
+  const policySha256 = sha256(`${canonicalJson({ ...policyFieldsSeed, signature: policySignature })}\n`);
   const launchAuditRef = join(programEvidenceRoot, 'launch-audit', `${workstreamRun}.json`);
   const launchAuditBytes = Buffer.from(`${JSON.stringify({ schema_version: 'autopilot.launch_audit.v1', workstream_run: workstreamRun, overlay_commit: overlayCommit })}\n`, 'utf8');
   await mkdir(dirname(launchAuditRef), { recursive: true, mode: 0o700 }); await writeFile(launchAuditRef, launchAuditBytes, { mode: 0o600 }); chmodSync(launchAuditRef, 0o600);
   const projectionRef = join(programEvidenceRoot, 'bootstrap-projections', workstreamRun, '00000000000000000001.json');
   const projectionBytes = Buffer.from(`${JSON.stringify({ schema_version: 'autopilot.bootstrap_projection.v1', workstream_run: workstreamRun })}\n`, 'utf8');
   await mkdir(dirname(projectionRef), { recursive: true, mode: 0o700 }); await writeFile(projectionRef, projectionBytes, { mode: 0o600 }); chmodSync(projectionRef, 0o600);
+  const launchSealRef = join(programEvidenceRoot, 'launch-seal.json');
+  const launchSealBytes = Buffer.from(`${JSON.stringify({ schema_version: 'autopilot.kbg_launch_seal.v1', workstream_run: workstreamRun })}\n`, 'utf8');
+  await writeFile(launchSealRef, launchSealBytes, { mode: 0o600 }); chmodSync(launchSealRef, 0o600);
+  const rosterBytes = Buffer.from(`${canonicalRosterJson(seedRoster)}\n`, 'utf8');
+  const selectionPublication = buildCanonicalPreRunSelection({
+    stateRoot, repo_id: repoId, workstream_run: workstreamRun,
+    selected: { scope: seedRoster.scope, roster_id: seedRoster.roster_id, roster_revision: seedRoster.roster_revision, roster_sha256: rosterSha256 as RosterSha256, assignment_set_sha256: seedRoster.assignment_set_sha256 as RosterSha256, config_sha256: 'sha256:7777777777777777777777777777777777777777777777777777777777777777' as RosterSha256 },
+    selected_at: '2026-07-22T22:00:33.000Z',
+  });
+  const selectionBytes = Buffer.from(selectionPublication.selection_bytes);
+  const rosterRef = join(programEvidenceRoot, 'roster', `${workstreamRun}.roster.json`);
+  const selectionRef = join(programEvidenceRoot, 'roster', `${workstreamRun}.selection.json`);
+  await mkdir(dirname(rosterRef), { recursive: true, mode: 0o700 });
+  await writeFile(rosterRef, rosterBytes, { mode: 0o600 }); chmodSync(rosterRef, 0o600);
+  await writeFile(selectionRef, selectionBytes, { mode: 0o600 }); chmodSync(selectionRef, 0o600);
   const manifestDoc = {
     schema_version: 'autopilot.launch_manifest.v1', manifest_id: `launch-${suffix}`, program_id: programId, workstream, workstream_run: workstreamRun, autopilot_id: autopilotId,
     run_timestamp: '2026-07-22T22:00:32.000Z', run_nonce: 'abc123', source_clone: clone, canonical_root: clone, git_common_dir: join(clone, '.git'), repo_id: repoId, repo_key: repoId,
@@ -175,10 +202,12 @@ async function buildFixture(suffix: string): Promise<Fixture> {
     bootstrap_overlay: { overlay_commit: overlayCommit, overlay_tree: overlayTree, overlay_ref: `refs/heads/autopilot/bootstrap/${workstreamRun}`, bootstrap_ref: bootstrapRef, bootstrap_sha256: sha256(bootstrapBytes), bootstrap_byte_count: Buffer.byteLength(bootstrapBytes, 'utf8') },
     trust_anchor: { trust_anchor_ref: trustRef, trust_anchor_sha256: trustSha256, trust_anchor_blob_oid: trustBlobOid, byte_count: 44 },
     prospective_run: prospectiveRun, prospective_resource: prospectiveResource, coordination_authority: 'coordinator-edit-leases-v1',
-    roster_authority: 'user-default', roster_selection_ref: `roster-selections/${repoId}/${workstreamRun}.json`, roster_sha256: rosterSha256, parent_model: 'openai-codex/gpt-5.6-sol', parent_thinking: 'xhigh',
+    roster_authority: 'user-default', roster_selection_ref: `roster-selections/${repoId}/${workstreamRun}.json`, roster_sha256: rosterSha256,
+    roster_selection: { roster_ref: rosterRef, roster_bytes_sha256: sha256(rosterBytes), selection_ref: selectionRef, selection_bytes_sha256: sha256(selectionBytes), selection_sha256: selectionPublication.selection.selection_sha256 as `sha256:${string}`, provider: 'openai-codex' },
+    parent_model: 'openai-codex/gpt-5.6-sol', parent_thinking: 'xhigh',
     policy_candidate: { policy_id: 'policy-1', policy_ref: 'authority/launch-policies/policy-1.json', policy_sha256: policySha256, registration_idempotency_key: `register-launch-policy:${workstreamRun}:policy-1`, heartbeat_acceptance_idempotency_key: `accept-program-heartbeat:${workstreamRun}:1` },
     program_evidence_root: programEvidenceRoot,
-    launch_seal: { launch_commit: overlayCommit, launch_tree: overlayTree, launch_audit_ref: launchAuditRef, launch_audit_sha256: sha256(launchAuditBytes), launch_seal_sha256: sha256('seal'), bootstrap_projection_ref: projectionRef, bootstrap_projection_sha256: sha256(projectionBytes) },
+    launch_seal: { launch_commit: overlayCommit, launch_tree: overlayTree, launch_audit_ref: launchAuditRef, launch_audit_sha256: sha256(launchAuditBytes), launch_seal_ref: launchSealRef, launch_seal_sha256: sha256(launchSealBytes), bootstrap_projection_ref: projectionRef, bootstrap_projection_sha256: sha256(projectionBytes) },
     attach_run_idempotency_key: `attach-run:${repoId}:${workstreamRun}`, attach_session_idempotency_key: `attach-session:${repoId}:${workstreamRun}`, created_at: '2026-07-22T22:00:33.000Z',
   };
   const manifest = parseD65LaunchManifest(manifestDoc);
@@ -186,6 +215,8 @@ async function buildFixture(suffix: string): Promise<Fixture> {
   const manifestPath = join(root, 'launch-manifest.json');
   await writeFile(manifestPath, `${JSON.stringify(manifestDoc)}\n`, { mode: 0o600 }); chmodSync(manifestPath, 0o600);
   const env: ProcessEnvLike = { ...process.env, [AUTOPILOT_STATE_ROOT_ENV]: stateRoot };
+  // Start the coordinator only after the manifest parses (never leave a live
+  // server holding the event loop open on a fixture rejection).
   const server = await startCoordinatorServer(coordinatorRuntimePaths(env));
   const signer = new TestSigner({ privateKeyPem: privateKey.export({ format: 'pem', type: 'pkcs8' }).toString(), programId, workstream, trustRef, trustSha256, programEvidenceRoot, packageCommit, packageTree, b0Commit, b0Tree, rosterSha256, rosterProvider });
   return { root, manifest, manifestPath, signer, env, close: async () => { await server.close(); await rm(root, { recursive: true, force: true }); } };
@@ -205,6 +236,9 @@ async function writeCharterRoots(manifest: D65LaunchManifest): Promise<void> {
   await writeFile(join(runtimeRoot, 'state.json'), `${JSON.stringify(state)}\n`);
   await writeFile(join(runtimeRoot, 'decision-log.jsonl'), `${JSON.stringify(decision)}\n`);
   await writeFile(join(runtimeRoot, 'events.jsonl'), `${JSON.stringify(event)}\n`);
+  // The bootstrap-plan turn calls context_budget first: seal its durable receipt
+  // (in production the wrapped tool writes this on a real call).
+  writeD65ContextBudgetReceipt(manifest, { gate: 'ok', percent: 10 });
 }
 
 void describe('D65 launch via /autopilot --launch-manifest (extension)', () => {

@@ -6,8 +6,8 @@ covers_surfaces:
   - autopilot-launch-signer
 covers_sources:
   - src/cli/autopilot-launch-signer.ts
-signature_hash: 'sha256:8dd8f0c31fd32f1ea7122401f9820d2c23c2ec20bfc6c45264185616dc389d7b'
-body_hash: 'sha256:495a4d23390356968deb83c251a67679a4071f6df605b9c563209bad3216b281'
+signature_hash: 'sha256:8fa2351c5545cbce0b3b4f6d1dd81a7c72ddf3a038dedf5ae51737592c88f3bc'
+body_hash: 'sha256:524539b5d0fe2708fa37be90a5ced1ae0e9229a2d2d0f972cfdff1bba5f48630'
 stability: evolving
 ---
 

@@ -1,8 +1,8 @@
 {
     "schema_version": "autopilot.docs_semantic_attestation.v2",
     "doc_id": "subsystems/worktrees",
-    "reviewed_body_hash": "sha256:f19ae5ccd8be614f5ee4367ebf2d78147c38393513e3fdd03b3155e10382461c",
-    "reviewed_doc_sha256": "sha256:5a232612116392cac46244c780411c7a90e33d3eab05888f6a7fc83055747ddb",
+    "reviewed_body_hash": "sha256:6c59b169304538271bcb188c4147f9bc730f6b391024295e58b9b7d1fe9ddf4c",
+    "reviewed_doc_sha256": "sha256:771439928372c217ad11cd0519362a188e02285bcdf5569d1335834e9ebcfc35",
     "covers_sources": [
         "src/core/checkout-profile.ts",
         "src/core/disk-gate.ts",
@@ -14,6 +14,6 @@
     ],
     "verdict": "PASS",
     "reviewer": "D65 launch-integration implementation owner (offline semantic review)",
-    "reviewed_at": "2026-07-24T00:00:00.000Z",
-    "notes": "D65 launch-integration semantic review: added resolveAutopilotFullCheckoutProfile (resolves the profile forced to a full checkout with a correctly recomputed profile_sha256) so the D65 sealed-launch main worktree uses the frozen checkout-profile/task-info contracts and the ordinary child materialization/disk-gate paths stay viable; no existing checkout limit changed."
+    "reviewed_at": "2026-07-24T12:00:00.000Z",
+    "notes": "D65 launch-integration semantic review (round 2): reviewed the git-guard.ts D65 bootstrap-only effect fence (AutopilotGitGuardPolicy.bootstrapCharterPaths / bootstrapAllowedAuxiliaryRoots) which permits write/edit tool calls to affect EXACTLY the five charter roots plus explicit package-owned auxiliary roots and nothing else (exact-path, not runtime-wide), and confirmed the prose now documents it alongside the earlier resolveAutopilotFullCheckoutProfile full-checkout review. The charter-completeness detector in d65-launch-integration.ts independently inspects git status --ignored so ignored out-of-scope effects fence first-graph publication. No existing checkout limit changed; no other covered-source behavior changed."
 }

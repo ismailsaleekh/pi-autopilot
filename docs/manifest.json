@@ -614,8 +614,8 @@
       "covers_sources": [
         "src/cli/autopilot-launch-signer.ts"
       ],
-      "signature_hash": "sha256:8dd8f0c31fd32f1ea7122401f9820d2c23c2ec20bfc6c45264185616dc389d7b",
-      "body_hash": "sha256:495a4d23390356968deb83c251a67679a4071f6df605b9c563209bad3216b281",
+      "signature_hash": "sha256:8fa2351c5545cbce0b3b4f6d1dd81a7c72ddf3a038dedf5ae51737592c88f3bc",
+      "body_hash": "sha256:524539b5d0fe2708fa37be90a5ced1ae0e9229a2d2d0f972cfdff1bba5f48630",
       "semantic_attestation": null
     },
     "commands/autopilot": {
@@ -1134,7 +1134,7 @@
         "templates/skills/autopilot-roster-setup/payload.json"
       ],
       "signature_hash": "sha256:65e0ff2b8897b03cb04396f41d85620adfe929a558d45b0553399f5141dca92b",
-      "body_hash": "sha256:91a4f996c0fe2e248b8a04b2adc7fa5b47e3fbb72af290c310375cc0b4ecbf57",
+      "body_hash": "sha256:dfb2149462a1aa9736ddd966884be9cc912b5418a47c142d0b727f8fbb1175fa",
       "semantic_attestation": null
     },
     "subsystems/runner-and-forced-output": {
@@ -1192,9 +1192,9 @@
         "src/core/parallel-runtime.ts",
         "src/core/sparse-worktree.ts"
       ],
-      "signature_hash": "sha256:223a09588646ba046a93d6894b46d2921d6193ab80bce4f8f2f82959e38c064f",
-      "body_hash": "sha256:f19ae5ccd8be614f5ee4367ebf2d78147c38393513e3fdd03b3155e10382461c",
-      "semantic_attestation": "sha256:f19ae5ccd8be614f5ee4367ebf2d78147c38393513e3fdd03b3155e10382461c"
+      "signature_hash": "sha256:9e7f50dd59b9434e8d5c5809cb34e3bd53e01e2291356b0483f111fa71aece2e",
+      "body_hash": "sha256:6c59b169304538271bcb188c4147f9bc730f6b391024295e58b9b7d1fe9ddf4c",
+      "semantic_attestation": "sha256:6c59b169304538271bcb188c4147f9bc730f6b391024295e58b9b7d1fe9ddf4c"
     },
     "tools/autopilot_emit_status": {
       "mode": "authored",
