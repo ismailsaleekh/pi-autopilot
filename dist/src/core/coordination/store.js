@@ -3136,6 +3136,85 @@ export class CoordinatorStore {
         }
         return { committedEventSeq: null, payload: payloadForPage(page.items, page.nextCursor) };
     }
+    /**
+     * Collect the per-run detail sections for one or more runs. For an exact-run
+     * status query this is called with a single `{repoId, workstreamRun}`; for a
+     * repo/global observability query it is called with every non-faulted run so
+     * the returned union equals the exact concatenation of each run's per-run
+     * projection (Phase 40 / D70 change C3). The per-run SQL and cross-entity
+     * joins (reservation-obligation → change-reservation, wait-for-edge → deadlock
+     * resolution) are byte-identical to the original single-run logic; the union
+     * is a plain ordered concatenation, so a single-element input reproduces the
+     * previous exact-run behaviour verbatim.
+     */
+    #collectRunScopedStatusDetails(detailRuns) {
+        const unitAttempts = [];
+        const acquisitionGroups = [];
+        const observations = [];
+        const editLeases = [];
+        const reservationObligations = [];
+        const changeReservations = [];
+        const runTerminalIntents = [];
+        const claimRequests = [];
+        const reconciliationEvidence = [];
+        const reconciliationReceipts = [];
+        const mailboxDeliveries = [];
+        const resultReceipts = [];
+        const worktrees = [];
+        const worktreeOperations = [];
+        const waitForEdges = [];
+        const deadlockResolutions = [];
+        const authoritativeArtifacts = [];
+        const adjudicationAssignments = [];
+        const escalations = [];
+        for (const { repoId, workstreamRun } of detailRuns) {
+            for (const row of this.#db.prepare('SELECT * FROM unit_attempts WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(repoId, workstreamRun))
+                unitAttempts.push(unitAttemptFromRow(row));
+            for (const row of this.#db.prepare('SELECT * FROM acquisition_groups WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(repoId, workstreamRun))
+                acquisitionGroups.push(acquisitionGroupFromRow(row));
+            for (const row of this.#db.prepare('SELECT * FROM observations WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(repoId, workstreamRun))
+                observations.push(observationFromRow(row));
+            for (const row of this.#db.prepare('SELECT * FROM edit_leases WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(repoId, workstreamRun))
+                editLeases.push(editLeaseFromRow(row));
+            const runReservationObligations = this.#db.prepare('SELECT * FROM reservation_obligations WHERE repo_id=? AND (workstream_run=? OR predecessor_reservation_id IN (SELECT entity_id FROM change_reservations WHERE repo_id=? AND workstream_run=?)) ORDER BY entity_id').all(repoId, workstreamRun, repoId, workstreamRun).map(reservationObligationFromRow);
+            reservationObligations.push(...runReservationObligations);
+            const relevantReservationIds = new Set(runReservationObligations.flatMap((obligation) => [obligation.reservation_id, obligation.predecessor_reservation_id]));
+            for (const reservation of this.#db.prepare('SELECT * FROM change_reservations WHERE repo_id=? ORDER BY entity_id').all(repoId).map(changeReservationFromRow))
+                if (reservation.workstream_run === workstreamRun || relevantReservationIds.has(reservation.reservation_id))
+                    changeReservations.push(reservation);
+            for (const row of this.#db.prepare('SELECT * FROM run_terminal_intents WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(repoId, workstreamRun))
+                runTerminalIntents.push(runTerminalIntentFromRow(row));
+            for (const row of this.#db.prepare('SELECT * FROM claim_requests WHERE repo_id=? AND (requester_workstream_run=? OR owner_workstream_run=?) ORDER BY entity_id').all(repoId, workstreamRun, workstreamRun))
+                claimRequests.push(claimRequestFromRow(row));
+            for (const row of this.#db.prepare('SELECT * FROM reconciliation_evidence WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(repoId, workstreamRun))
+                reconciliationEvidence.push(reconciliationEvidenceFromRow(row));
+            for (const row of this.#db.prepare('SELECT * FROM reconciliation_receipts WHERE repo_id=? AND workstream_run=? ORDER BY committed_event_seq, entity_id').all(repoId, workstreamRun))
+                reconciliationReceipts.push(reconciliationReceiptFromRow(row));
+            for (const row of this.#db.prepare('SELECT * FROM mailbox_deliveries WHERE repo_id=? AND workstream_run=? ORDER BY delivery_id').all(repoId, workstreamRun))
+                mailboxDeliveries.push(mailboxDeliveryFromRow(row));
+            for (const row of this.#db.prepare('SELECT * FROM result_receipts WHERE repo_id=? AND workstream_run=? ORDER BY committed_event_seq, entity_id').all(repoId, workstreamRun))
+                resultReceipts.push(resultReceiptFromRow(row));
+            for (const row of this.#db.prepare('SELECT * FROM worktrees WHERE repo_id=? AND workstream_run=? AND is_current_canonical=1 ORDER BY canonical_worktree_id').all(repoId, workstreamRun))
+                worktrees.push(canonicalWorktreeFromRow(row));
+            for (const row of this.#db.prepare('SELECT * FROM worktree_operations WHERE repo_id=? AND workstream_run=? AND canonical_worktree_id IS NOT NULL ORDER BY canonical_worktree_id,entity_id').all(repoId, workstreamRun))
+                worktreeOperations.push(canonicalWorktreeOperationFromRow(row));
+            const runWaitForEdges = this.#db.prepare("SELECT * FROM wait_for_edges WHERE repo_id=? AND (json_extract(payload_json, '$.requester.workstream_run')=? OR json_extract(payload_json, '$.blocker.workstream_run')=?) ORDER BY entity_id").all(repoId, workstreamRun, workstreamRun).map(waitForEdgeFromRow);
+            waitForEdges.push(...runWaitForEdges);
+            const relevantEdgeIds = new Set(runWaitForEdges.map((edge) => edge.edge_id));
+            for (const resolution of this.#db.prepare('SELECT * FROM deadlock_resolutions WHERE repo_id=? ORDER BY entity_id').all(repoId).map(deadlockResolutionFromRow))
+                if (resolution.cycle_edge_ids.some((edgeId) => relevantEdgeIds.has(edgeId)))
+                    deadlockResolutions.push(resolution);
+            for (const row of this.#db.prepare('SELECT * FROM authoritative_artifacts WHERE repo_id=? AND source_run=? ORDER BY entity_id').all(repoId, workstreamRun))
+                authoritativeArtifacts.push(authoritativeArtifactFromRow(row));
+            for (const assignment of this.#db.prepare('SELECT * FROM adjudication_assignments WHERE repo_id=? ORDER BY entity_id').all(repoId).map(adjudicationAssignmentFromRow))
+                if (assignment.requesting_run === workstreamRun || assignment.participating_runs.includes(workstreamRun) || assignment.adjudicator.workstream_run === workstreamRun)
+                    adjudicationAssignments.push(assignment);
+            for (const escalation of this.#db.prepare('SELECT * FROM escalations WHERE repo_id=? ORDER BY entity_id').all(repoId).map(escalationFromRow))
+                if (escalation.participating_runs.includes(workstreamRun))
+                    escalations.push(escalation);
+        }
+        return { unitAttempts, acquisitionGroups, observations, editLeases, reservationObligations, changeReservations, runTerminalIntents, claimRequests, reconciliationEvidence, reconciliationReceipts, mailboxDeliveries, resultReceipts, worktrees, worktreeOperations, waitForEdges, deadlockResolutions, authoritativeArtifacts, adjudicationAssignments, escalations };
+    }
     status(repoId, workstreamRun) {
         const repositories = repoId === 'global'
             ? this.#db.prepare('SELECT * FROM repositories ORDER BY repo_id').all().map(repositoryFromRow)
@@ -3159,30 +3238,40 @@ export class CoordinatorStore {
             ? (repoId === 'global' ? this.#db.prepare('SELECT * FROM child_leases ORDER BY repo_id, workstream_run, unit_id, attempt').all() : this.#db.prepare('SELECT * FROM child_leases WHERE repo_id=? ORDER BY workstream_run, unit_id, attempt').all(repoId)).map(childFromRow)
             : this.#db.prepare('SELECT * FROM child_leases WHERE repo_id=? AND workstream_run=? ORDER BY unit_id, attempt').all(repoId, workstreamRun).map(childFromRow);
         const pendingMessages = workstreamRun === null ? 0 : sqlInteger(asRow(this.#db.prepare("SELECT COUNT(*) AS count FROM messages WHERE repo_id=? AND recipient_workstream_run=? AND status!='acknowledged'").get(repoId, workstreamRun), 'message count'), 'count');
-        const unitAttempts = !statusDetailRun ? [] : this.#db.prepare('SELECT * FROM unit_attempts WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(repoId, workstreamRun).map(unitAttemptFromRow);
-        const acquisitionGroups = !statusDetailRun ? [] : this.#db.prepare('SELECT * FROM acquisition_groups WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(repoId, workstreamRun).map(acquisitionGroupFromRow);
-        const observations = !statusDetailRun ? [] : this.#db.prepare('SELECT * FROM observations WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(repoId, workstreamRun).map(observationFromRow);
-        const editLeases = !statusDetailRun ? [] : this.#db.prepare('SELECT * FROM edit_leases WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(repoId, workstreamRun).map(editLeaseFromRow);
-        const reservationObligations = !statusDetailRun ? [] : this.#db.prepare('SELECT * FROM reservation_obligations WHERE repo_id=? AND (workstream_run=? OR predecessor_reservation_id IN (SELECT entity_id FROM change_reservations WHERE repo_id=? AND workstream_run=?)) ORDER BY entity_id').all(repoId, workstreamRun, repoId, workstreamRun).map(reservationObligationFromRow);
-        const relevantReservationIds = new Set(reservationObligations.flatMap((obligation) => [obligation.reservation_id, obligation.predecessor_reservation_id]));
-        const changeReservations = !statusDetailRun ? [] : this.#db.prepare('SELECT * FROM change_reservations WHERE repo_id=? ORDER BY entity_id').all(repoId).map(changeReservationFromRow).filter((reservation) => reservation.workstream_run === workstreamRun || relevantReservationIds.has(reservation.reservation_id));
-        const runTerminalIntents = !statusDetailRun ? [] : this.#db.prepare('SELECT * FROM run_terminal_intents WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(repoId, workstreamRun).map(runTerminalIntentFromRow);
-        const claimRequests = !statusDetailRun ? [] : this.#db.prepare('SELECT * FROM claim_requests WHERE repo_id=? AND (requester_workstream_run=? OR owner_workstream_run=?) ORDER BY entity_id').all(repoId, workstreamRun, workstreamRun).map(claimRequestFromRow);
+        // Per-run detail sections. For an exact run query these are the run's rows;
+        // for a repo/global observability query (workstreamRun === null) they are the
+        // exact UNION of every non-faulted run's per-run projection, computed run by
+        // run through the identical scoped logic so the global projection equals the
+        // union of per-run projections by construction (Phase 40 / D70 change C3).
+        // This is a read-only observability enrichment: it adds no wire section, no
+        // schema field, and no authority; the previously empty detail arrays in a
+        // null-run query are now populated. No exact-run query behaviour changes.
+        const detailRuns = workstreamRun === null
+            ? runs.filter((run) => !runScopedFaults.some((fault) => fault.repo_id === run.repo_id && fault.workstream_run === run.workstream_run && fault.invariant_id === 'F4-PAYLOAD-INDEX-AMBIGUITY')).map((run) => ({ repoId: run.repo_id, workstreamRun: run.workstream_run }))
+            : statusDetailRun ? [{ repoId, workstreamRun }] : [];
+        const detail = this.#collectRunScopedStatusDetails(detailRuns);
+        const unitAttempts = detail.unitAttempts;
+        const acquisitionGroups = detail.acquisitionGroups;
+        const observations = detail.observations;
+        const editLeases = detail.editLeases;
+        const reservationObligations = detail.reservationObligations;
+        const changeReservations = detail.changeReservations;
+        const runTerminalIntents = detail.runTerminalIntents;
+        const claimRequests = detail.claimRequests;
         const mailboxCursors = workstreamRun === null
             ? (repoId === 'global' ? this.#db.prepare('SELECT * FROM mailbox_cursors ORDER BY repo_id, workstream_run').all() : this.#db.prepare('SELECT * FROM mailbox_cursors WHERE repo_id=? ORDER BY workstream_run').all(repoId)).map(mailboxCursorFromRow)
             : this.#db.prepare('SELECT * FROM mailbox_cursors WHERE repo_id=? AND workstream_run=?').all(repoId, workstreamRun).map(mailboxCursorFromRow);
-        const reconciliationEvidence = !statusDetailRun ? [] : this.#db.prepare('SELECT * FROM reconciliation_evidence WHERE repo_id=? AND workstream_run=? ORDER BY entity_id').all(repoId, workstreamRun).map(reconciliationEvidenceFromRow);
-        const reconciliationReceipts = !statusDetailRun ? [] : this.#db.prepare('SELECT * FROM reconciliation_receipts WHERE repo_id=? AND workstream_run=? ORDER BY committed_event_seq, entity_id').all(repoId, workstreamRun).map(reconciliationReceiptFromRow);
-        const mailboxDeliveries = !statusDetailRun ? [] : this.#db.prepare('SELECT * FROM mailbox_deliveries WHERE repo_id=? AND workstream_run=? ORDER BY delivery_id').all(repoId, workstreamRun).map(mailboxDeliveryFromRow);
-        const resultReceipts = !statusDetailRun ? [] : this.#db.prepare('SELECT * FROM result_receipts WHERE repo_id=? AND workstream_run=? ORDER BY committed_event_seq, entity_id').all(repoId, workstreamRun).map(resultReceiptFromRow);
-        const worktrees = !statusDetailRun ? [] : this.#db.prepare('SELECT * FROM worktrees WHERE repo_id=? AND workstream_run=? AND is_current_canonical=1 ORDER BY canonical_worktree_id').all(repoId, workstreamRun).map(canonicalWorktreeFromRow);
-        const worktreeOperations = !statusDetailRun ? [] : this.#db.prepare('SELECT * FROM worktree_operations WHERE repo_id=? AND workstream_run=? AND canonical_worktree_id IS NOT NULL ORDER BY canonical_worktree_id,entity_id').all(repoId, workstreamRun).map(canonicalWorktreeOperationFromRow);
-        const waitForEdges = !statusDetailRun ? [] : this.#db.prepare("SELECT * FROM wait_for_edges WHERE repo_id=? AND (json_extract(payload_json, '$.requester.workstream_run')=? OR json_extract(payload_json, '$.blocker.workstream_run')=?) ORDER BY entity_id").all(repoId, workstreamRun, workstreamRun).map(waitForEdgeFromRow);
-        const relevantEdgeIds = new Set(waitForEdges.map((edge) => edge.edge_id));
-        const deadlockResolutions = !statusDetailRun ? [] : this.#db.prepare('SELECT * FROM deadlock_resolutions WHERE repo_id=? ORDER BY entity_id').all(repoId).map(deadlockResolutionFromRow).filter((resolution) => resolution.cycle_edge_ids.some((edgeId) => relevantEdgeIds.has(edgeId)));
-        const authoritativeArtifacts = !statusDetailRun ? [] : this.#db.prepare('SELECT * FROM authoritative_artifacts WHERE repo_id=? AND source_run=? ORDER BY entity_id').all(repoId, workstreamRun).map(authoritativeArtifactFromRow);
-        const adjudicationAssignments = !statusDetailRun ? [] : this.#db.prepare('SELECT * FROM adjudication_assignments WHERE repo_id=? ORDER BY entity_id').all(repoId).map(adjudicationAssignmentFromRow).filter((assignment) => assignment.requesting_run === workstreamRun || assignment.participating_runs.includes(workstreamRun) || assignment.adjudicator.workstream_run === workstreamRun);
-        const escalations = !statusDetailRun ? [] : this.#db.prepare('SELECT * FROM escalations WHERE repo_id=? ORDER BY entity_id').all(repoId).map(escalationFromRow).filter((escalation) => escalation.participating_runs.includes(workstreamRun));
+        const reconciliationEvidence = detail.reconciliationEvidence;
+        const reconciliationReceipts = detail.reconciliationReceipts;
+        const mailboxDeliveries = detail.mailboxDeliveries;
+        const resultReceipts = detail.resultReceipts;
+        const worktrees = detail.worktrees;
+        const worktreeOperations = detail.worktreeOperations;
+        const waitForEdges = detail.waitForEdges;
+        const deadlockResolutions = detail.deadlockResolutions;
+        const authoritativeArtifacts = detail.authoritativeArtifacts;
+        const adjudicationAssignments = detail.adjudicationAssignments;
+        const escalations = detail.escalations;
         const migrations = (repoId === 'global'
             ? this.#db.prepare('SELECT repo_id, migration_id, snapshot_sha256, journal_path, state, report_json, imported_at, updated_at, version FROM coordination_migrations ORDER BY repo_id').all().map(migrationRecordFromRow)
             : this.#db.prepare('SELECT repo_id, migration_id, snapshot_sha256, journal_path, state, report_json, imported_at, updated_at, version FROM coordination_migrations WHERE repo_id=?').all(repoId).map(migrationRecordFromRow))

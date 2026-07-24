@@ -16,8 +16,8 @@ covers_sources:
   - src/core/coordination/store.ts
   - src/core/coordination/invariants.ts
 signature_hash: 'sha256:f2ccef5dd32315d6976da8c480b9f584d06e945cf776852a923f7811810c59ac'
-body_hash: 'sha256:fd0d7634407c03dae0010371228b570e546ff2fbe5b502ff56532909067b1bfb'
-semantic_attestation: 'sha256:fd0d7634407c03dae0010371228b570e546ff2fbe5b502ff56532909067b1bfb'
+body_hash: 'sha256:7387ff1c3e758bb4c4312953ef02737a50df71ec33287d59c7d62ae1688fcc42'
+semantic_attestation: 'sha256:7387ff1c3e758bb4c4312953ef02737a50df71ec33287d59c7d62ae1688fcc42'
 fact_pins:
   - text: `MAX_GRANT_BYPASSES` is 8
     symbol: 'src/core/coordination/deadlock.ts#MAX_GRANT_BYPASSES'
@@ -138,6 +138,23 @@ and resolves strongly connected cycles to a same-transaction fixed point.
 - `/autopilot-coordination status|doctor` — read-only inspection of durable runs,
   leases, observations, reservations, wait edges, and pending recovery work. See
   [`../commands/autopilot-coordination.md`](../commands/autopilot-coordination.md).
+  A run-scoped `status` (`repo_id` + `workstream_run`) returns that run's exact
+  projection. A repo/global `status` (`workstream_run = null`, optionally
+  `repo_id = global`) additionally returns, for each included run, that run's
+  per-run detail sections (acquisition groups, edit leases, claim requests, unit
+  attempts, observations, reservations, worktrees/operations, wait edges, and the
+  rest) computed through the identical scoped logic, then appended run by run in
+  run order. This is an **ordered concatenation (multiset)**, not a deduplicated
+  set: a durable entity that a scoped query legitimately selects for more than one
+  run — a claim request for both its requester and owner, a wait edge for both its
+  requester and blocker, an adjudication assignment for its requesting,
+  participating, and adjudicator runs — can therefore appear more than once, so a
+  consumer that counts or de-dupes must key on the entity's durable identity. This
+  is a read-only observability projection: it adds no wire section, no schema
+  field, and no authority, and it never authorizes a release. A run carrying an
+  active `F4-PAYLOAD-INDEX-AMBIGUITY` fault is excluded from the detail
+  concatenation exactly as it is suppressed from its own run-scoped detail view;
+  other run-scoped fault classes do not remove a run from this projection.
 - `autopilot_respond_claim_request` — parent tool to `release-now` or bounded-defer
   a peer's claim request; only a live current-generation owner may respond.
 - `autopilot-coordinator` — the compiled local broker CLI (serve/status/doctor/

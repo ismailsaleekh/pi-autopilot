@@ -1,8 +1,8 @@
 {
   "schema_version": "autopilot.docs_semantic_attestation.v2",
   "doc_id": "subsystems/coordination",
-  "reviewed_body_hash": "sha256:fd0d7634407c03dae0010371228b570e546ff2fbe5b502ff56532909067b1bfb",
-  "reviewed_doc_sha256": "sha256:994a7460c90fea2bef2be539d1da82b4bd708a78842b6876e093abcee768c001",
+  "reviewed_body_hash": "sha256:7387ff1c3e758bb4c4312953ef02737a50df71ec33287d59c7d62ae1688fcc42",
+  "reviewed_doc_sha256": "sha256:bcf28665c794a184b315e13174d343d4586bd95c4f1bbb1192ceeeb4d23de093",
   "covers_sources": [
     "src/core/coordination/admission.ts",
     "src/core/coordination/client.ts",
@@ -14,7 +14,7 @@
     "src/core/coordination/store.ts"
   ],
   "verdict": "PASS",
-  "reviewer": "pi W6 merge operator (offline semantic review)",
-  "reviewed_at": "2026-07-23T13:55:00.000Z",
-  "notes": "W6 offline semantic review: rechecked coordination prose against current runtime constants, admission, client, store, deadlock, invariants, reconciliation, and terminal evidence sources after graph-authorized unit_spec.v2/receipt.v2 recovery support; coordinator authority and S2 fail-closed behavior remain accurate."
+  "reviewer": "openai-codex/gpt-5.6-sol independent semantic reviewer, Pi subscription (cross-provider; round 2 after P1/P2 remediation), task ba70a1e3e",
+  "reviewed_at": "2026-07-24T19:41:53.000Z",
+  "notes": "Independent cross-provider review (Codex GPT-5.6-sol) of the D70/C3 additive global-projection change to store.ts. Round 1 found P1 (union overclaimed uniqueness) + P2 (over-broad non-faulted claim); both remediated in prose. Round 2 PASS 0/0/0: confirmed the null-run status projection is an ordered concatenation (multiset) of each included run's per-run detail sections computed through identical scoped logic with shared identities able to repeat; exact-run behavior unchanged; F4-PAYLOAD-INDEX-AMBIGUITY-only exclusion; read-only, no wire section/schema field/authority/release path added; autopilot.coordinator_status.v1 unchanged; durability journal_mode=WAL + synchronous=FULL byte-unchanged."
 }
