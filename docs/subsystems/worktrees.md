@@ -11,9 +11,9 @@ covers_sources:
   - src/core/materialization.ts
   - src/core/git-guard.ts
   - src/core/git-process.ts
-signature_hash: 'sha256:82aef4645150c182b4129dfdd1de171c9d6d4fd06efc7a4290518f823633fdff'
-body_hash: 'sha256:6874467d83a8f7156c13c934661a4054143cb27c53e41e441009b8a5eff5ed63'
-semantic_attestation: 'sha256:6874467d83a8f7156c13c934661a4054143cb27c53e41e441009b8a5eff5ed63'
+signature_hash: 'sha256:223a09588646ba046a93d6894b46d2921d6193ab80bce4f8f2f82959e38c064f'
+body_hash: 'sha256:f19ae5ccd8be614f5ee4367ebf2d78147c38393513e3fdd03b3155e10382461c'
+semantic_attestation: 'sha256:f19ae5ccd8be614f5ee4367ebf2d78147c38393513e3fdd03b3155e10382461c'
 stability: stable
 ---
 
@@ -63,6 +63,10 @@ to a full checkout.
 - Projects may opt into `.autopilot/checkout-profile.json` or
   `AUTOPILOT_CHECKOUT_PROFILE=/absolute/path`; explicit `full` mode is opt-in only and
   still passes the disk gate.
+- `resolveAutopilotFullCheckoutProfile` resolves the same profile forced to a full
+  checkout with a correctly recomputed `profile_sha256`; the D65 sealed-launch main
+  worktree uses it so the frozen checkout-profile/task-info contracts accept the exact
+  bytes and the ordinary child materialization/disk-gate paths stay viable.
 
 For D65 runs, the signed launch policy always binds `parallel_cap=1` and
 `expected_checkout_units=1`; `maximum_parallel_cap` is required to be `1` for the

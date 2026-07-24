@@ -615,7 +615,7 @@
         "src/cli/autopilot-launch-signer.ts"
       ],
       "signature_hash": "sha256:8dd8f0c31fd32f1ea7122401f9820d2c23c2ec20bfc6c45264185616dc389d7b",
-      "body_hash": "sha256:d6f19b7ae7e97434ecbf843f8a30d25c4b9b6ba00af074756217dcbe4612db58",
+      "body_hash": "sha256:495a4d23390356968deb83c251a67679a4071f6df605b9c563209bad3216b281",
       "semantic_attestation": null
     },
     "commands/autopilot": {
@@ -1018,9 +1018,9 @@
         "src/core/coordination/runtime-constants.ts",
         "src/core/coordination/store.ts"
       ],
-      "signature_hash": "sha256:f2ccef5dd32315d6976da8c480b9f584d06e945cf776852a923f7811810c59ac",
-      "body_hash": "sha256:fd0d7634407c03dae0010371228b570e546ff2fbe5b502ff56532909067b1bfb",
-      "semantic_attestation": "sha256:fd0d7634407c03dae0010371228b570e546ff2fbe5b502ff56532909067b1bfb"
+      "signature_hash": "sha256:d91b76a527e89d599b8525a63ac3552c64dfa2e6b927cae2632efb86aa2646a1",
+      "body_hash": "sha256:e1c58ddf8d2fcbc0ae6f175b3585c2b69efa32053d6a712782090def2e9dcd4b",
+      "semantic_attestation": "sha256:e1c58ddf8d2fcbc0ae6f175b3585c2b69efa32053d6a712782090def2e9dcd4b"
     },
     "subsystems/docs-freshness-gate": {
       "mode": "authored",
@@ -1134,7 +1134,7 @@
         "templates/skills/autopilot-roster-setup/payload.json"
       ],
       "signature_hash": "sha256:65e0ff2b8897b03cb04396f41d85620adfe929a558d45b0553399f5141dca92b",
-      "body_hash": "sha256:8ef758a17cc1948bec67f88de2109f7775e2274e61bc8b19316d0c6cf91d1c99",
+      "body_hash": "sha256:91a4f996c0fe2e248b8a04b2adc7fa5b47e3fbb72af290c310375cc0b4ecbf57",
       "semantic_attestation": null
     },
     "subsystems/runner-and-forced-output": {
@@ -1192,9 +1192,9 @@
         "src/core/parallel-runtime.ts",
         "src/core/sparse-worktree.ts"
       ],
-      "signature_hash": "sha256:82aef4645150c182b4129dfdd1de171c9d6d4fd06efc7a4290518f823633fdff",
-      "body_hash": "sha256:6874467d83a8f7156c13c934661a4054143cb27c53e41e441009b8a5eff5ed63",
-      "semantic_attestation": "sha256:6874467d83a8f7156c13c934661a4054143cb27c53e41e441009b8a5eff5ed63"
+      "signature_hash": "sha256:223a09588646ba046a93d6894b46d2921d6193ab80bce4f8f2f82959e38c064f",
+      "body_hash": "sha256:f19ae5ccd8be614f5ee4367ebf2d78147c38393513e3fdd03b3155e10382461c",
+      "semantic_attestation": "sha256:f19ae5ccd8be614f5ee4367ebf2d78147c38393513e3fdd03b3155e10382461c"
     },
     "tools/autopilot_emit_status": {
       "mode": "authored",

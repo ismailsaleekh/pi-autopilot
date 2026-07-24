@@ -11,7 +11,7 @@ import { CoordinationRuntimeError, formatCoordinationRuntimeError } from './fail
 import { isS2OwnerRecoveryProgressFailure, isS2SameOperationProgressRetry } from './s2-failure-taxonomy.ts';
 import { acknowledgeCoordinationMigrationFreeze, activeCoordinationMigrationFreeze, assertMigrationPathSafe } from './migration-paths.ts';
 import { currentBootId } from './process-identity.ts';
-import { COORDINATOR_HEARTBEAT_MS, COORDINATOR_SESSION_LEASE_MS, enforcePrivateAuthorityPath, ensurePrivateAuthorityDirectory } from './runtime-paths.ts';
+import { COORDINATOR_BOOTSTRAP_SESSION_LEASE_MS, COORDINATOR_HEARTBEAT_MS, COORDINATOR_SESSION_LEASE_MS, enforcePrivateAuthorityPath, ensurePrivateAuthorityDirectory } from './runtime-paths.ts';
 import type { CoordinationMailboxDeliveryReceipt, CoordinationMessage, CoordinationMigrationRecoveryWork, CoordinationReconciliationSource, CoordinationRun, CoordinationSessionLease, CoordinatorResponseEnvelope } from './types.ts';
 import type { ActiveAutopilotRow, AutopilotRepoIdentity, ProcessEnvLike } from '../parallel-runtime.ts';
 
@@ -116,6 +116,11 @@ function payloadArray(response: CoordinatorResponseEnvelope, field: string): rea
 
 function leaseExpiry(): string {
   return new Date(Date.now() + COORDINATOR_SESSION_LEASE_MS).toISOString();
+}
+
+/** The bootstrap-safe lease expiry spanning the D65 launch bootstrap window. */
+function bootstrapLeaseExpiry(): string {
+  return new Date(Date.now() + COORDINATOR_BOOTSTRAP_SESSION_LEASE_MS).toISOString();
 }
 
 interface HeartbeatFailureClassification {
@@ -520,7 +525,9 @@ export class DurableRunSupervisorClient {
       session_token: sessionToken,
       pid: process.pid,
       boot_id: currentBootId(),
-      lease_expires_at: leaseExpiry(),
+      // The single bootstrap session runs no periodic heartbeat until graph 2 is
+      // accepted, so it takes a bootstrap-safe lease spanning the planning turn.
+      lease_expires_at: bootstrapLeaseExpiry(),
       handoff_token: null,
     });
     const attachedRun = parseCoordinationRun(payloadRecord(attachSession, 'run'));

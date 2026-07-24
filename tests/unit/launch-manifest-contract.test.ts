@@ -44,7 +44,7 @@ function manifestFixture(overrides: Record<string, unknown> = {}): Record<string
     trust_anchor: { trust_anchor_ref: '.pi/autopilot-trust/d65/program-kbg/operator-ed25519.spki', trust_anchor_sha256: DIGEST('8'), trust_anchor_blob_oid: OID('7'), byte_count: 44 },
     prospective_run: prospectiveRun(), prospective_resource: prospectiveResource(),
     coordination_authority: 'coordinator-edit-leases-v1',
-    roster_authority: 'user-default', roster_selection_ref: 'roster-selections/repo-kbg/kbg-run.json', roster_sha256: DIGEST('6'),
+    roster_authority: 'user-default', roster_selection_ref: 'roster-selections/repo-kbg/kbg-run.json', roster_sha256: DIGEST('6'), parent_model: 'openai-codex/gpt-5.6-sol', parent_thinking: 'xhigh',
     policy_candidate: { policy_id: 'policy-1', policy_ref: 'authority/launch-policies/policy-1.json', policy_sha256: DIGEST('5'), registration_idempotency_key: 'register-launch-policy:kbg-run:policy-1', heartbeat_acceptance_idempotency_key: 'accept-program-heartbeat:kbg-run:1' },
     program_evidence_root: EVIDENCE,
     launch_seal: { launch_commit: OID('1'), launch_tree: OID('2'), launch_audit_ref: '/private/tmp/kbg-evidence/launch-audit/kbg-run.json', launch_audit_sha256: DIGEST('4'), launch_seal_sha256: DIGEST('3'), bootstrap_projection_ref: '/private/tmp/kbg-evidence/bootstrap-projections/kbg-run/00000000000000000001.json', bootstrap_projection_sha256: DIGEST('0') },

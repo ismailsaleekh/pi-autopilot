@@ -59,6 +59,19 @@ function unpaddedBase64Url(record: JsonObject, field: string, label: string): st
   return value;
 }
 
+function parentModel(record: JsonObject, label: string): string {
+  const value = str(record, 'parent_model', label, 256);
+  const slash = value.indexOf('/');
+  if (slash <= 0 || slash === value.length - 1 || value.includes(' ')) fail(label, 'parent_model must be a provider/model identifier');
+  return value;
+}
+
+function parentThinking(record: JsonObject, label: string): 'high' | 'xhigh' {
+  const value = record['parent_thinking'];
+  if (value !== 'high' && value !== 'xhigh') fail(label, 'parent_thinking must be high or xhigh');
+  return value;
+}
+
 /** A bounded closed prospective canonical object image (run or resource row). */
 function prospectiveObject(value: unknown, label: string): JsonObject {
   if (!isJsonObject(value)) fail(label, 'must be an object');
@@ -200,6 +213,9 @@ export interface D65LaunchManifest {
   readonly roster_authority: string;
   readonly roster_selection_ref: string;
   readonly roster_sha256: `sha256:${string}`;
+  /** The exact pinned parent model (`provider/model`) and thinking level. */
+  readonly parent_model: string;
+  readonly parent_thinking: 'high' | 'xhigh';
   readonly policy_candidate: D65LaunchManifestPolicyCandidate;
   readonly program_evidence_root: string;
   readonly launch_seal: D65LaunchManifestLaunchSeal;
@@ -215,7 +231,7 @@ const MANIFEST_FIELDS = Object.freeze([
   'b0_commit', 'b0_tree', 'content_result_commit', 'content_result_tree', 'package_commit', 'package_tree',
   'run_branch', 'target_branch', 'state_root', 'session_root', 'worktree_root', 'main_worktree_path',
   'runtime_root', 'bootstrap_overlay', 'trust_anchor', 'prospective_run', 'prospective_resource',
-  'coordination_authority', 'roster_authority', 'roster_selection_ref', 'roster_sha256', 'policy_candidate',
+  'coordination_authority', 'roster_authority', 'roster_selection_ref', 'roster_sha256', 'parent_model', 'parent_thinking', 'policy_candidate',
   'program_evidence_root', 'launch_seal', 'attach_run_idempotency_key', 'attach_session_idempotency_key',
   'created_at',
 ] as const);
@@ -272,6 +288,8 @@ export function parseD65LaunchManifest(value: unknown): D65LaunchManifest {
     roster_authority: str(record, 'roster_authority', label, 256),
     roster_selection_ref: repoRelativePath(record, 'roster_selection_ref', label, 256),
     roster_sha256: sha256Field(record, 'roster_sha256', label),
+    parent_model: parentModel(record, label),
+    parent_thinking: parentThinking(record, label),
     policy_candidate: policyCandidate(record['policy_candidate'], `${label}.policy_candidate`),
     program_evidence_root: absolutePathField(record, 'program_evidence_root', label),
     launch_seal: launchSeal(record['launch_seal'], `${label}.launch_seal`),

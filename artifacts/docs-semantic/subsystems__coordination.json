@@ -1,20 +1,20 @@
 {
-  "schema_version": "autopilot.docs_semantic_attestation.v2",
-  "doc_id": "subsystems/coordination",
-  "reviewed_body_hash": "sha256:fd0d7634407c03dae0010371228b570e546ff2fbe5b502ff56532909067b1bfb",
-  "reviewed_doc_sha256": "sha256:994a7460c90fea2bef2be539d1da82b4bd708a78842b6876e093abcee768c001",
-  "covers_sources": [
-    "src/core/coordination/admission.ts",
-    "src/core/coordination/client.ts",
-    "src/core/coordination/deadlock.ts",
-    "src/core/coordination/index.ts",
-    "src/core/coordination/invariants.ts",
-    "src/core/coordination/peer-classification.ts",
-    "src/core/coordination/runtime-constants.ts",
-    "src/core/coordination/store.ts"
-  ],
-  "verdict": "PASS",
-  "reviewer": "pi W6 merge operator (offline semantic review)",
-  "reviewed_at": "2026-07-23T13:55:00.000Z",
-  "notes": "W6 offline semantic review: rechecked coordination prose against current runtime constants, admission, client, store, deadlock, invariants, reconciliation, and terminal evidence sources after graph-authorized unit_spec.v2/receipt.v2 recovery support; coordinator authority and S2 fail-closed behavior remain accurate."
+    "schema_version": "autopilot.docs_semantic_attestation.v2",
+    "doc_id": "subsystems/coordination",
+    "reviewed_body_hash": "sha256:e1c58ddf8d2fcbc0ae6f175b3585c2b69efa32053d6a712782090def2e9dcd4b",
+    "reviewed_doc_sha256": "sha256:c9a0c5bb048617f90bb663785d4a48a8fb385fe97b9343dc1425bfdac5b3e4ca",
+    "covers_sources": [
+        "src/core/coordination/admission.ts",
+        "src/core/coordination/client.ts",
+        "src/core/coordination/deadlock.ts",
+        "src/core/coordination/index.ts",
+        "src/core/coordination/invariants.ts",
+        "src/core/coordination/peer-classification.ts",
+        "src/core/coordination/runtime-constants.ts",
+        "src/core/coordination/store.ts"
+    ],
+    "verdict": "PASS",
+    "reviewer": "D65 launch-integration implementation owner (offline semantic review)",
+    "reviewed_at": "2026-07-24T00:00:00.000Z",
+    "notes": "D65 launch-integration semantic review: added the supervisor attachD65Bootstrap single-session bootstrap attach, AutopilotSessionBridge.adopt (adopts the one attachment without a second attach/heartbeat that would stale the just-accepted graph), and the COORDINATOR_BOOTSTRAP_SESSION_LEASE_MS bootstrap-safe lease spanning the planning turn; age still never authorizes release and no D65 authority is self-signed."
 }

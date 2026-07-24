@@ -6,7 +6,7 @@ import { AUTOPILOT_STATE_ROOT_ENV, resolveAutopilotStateRoot } from "../parallel
 import { CoordinationRuntimeError } from "./failures.js";
 import { assertPrivatePathNoAliases, enforcePrivateAuthorityPath, enforceWindowsPrivateTree, ensurePrivateAuthorityDirectory, isWindowsPrivateTreeHardened, markWindowsPrivateTreeHardened } from "../private-path.js";
 export { enforcePrivateAuthorityPath, enforceWindowsPrivateAcl, enforceWindowsPrivateTree, ensurePrivateAuthorityDirectory, windowsPrivateAclCommand, windowsPrivateTreeAclCommand } from "../private-path.js";
-export { COORDINATOR_API_SCHEMA_VERSION, COORDINATOR_BUSY_TIMEOUT_MS, COORDINATOR_DATABASE_SCHEMA_VERSION, COORDINATOR_GRANT_OFFER_SWEEP_MS, COORDINATOR_GRANT_OFFER_TTL_MS, COORDINATOR_HEARTBEAT_MS, COORDINATOR_IMPLEMENTATION_BUILD, COORDINATOR_LEGACY_FACADE_BUILD, COORDINATOR_MAX_FRAME_BYTES, COORDINATOR_PACKAGE_BUILD, COORDINATOR_PACKAGE_VERSION, COORDINATOR_SESSION_LEASE_MS, COORDINATOR_STORE_SCHEMA_VERSION, COORDINATOR_WIRE_LINEAGE } from "./runtime-constants.js";
+export { COORDINATOR_API_SCHEMA_VERSION, COORDINATOR_BOOTSTRAP_SESSION_LEASE_MS, COORDINATOR_BUSY_TIMEOUT_MS, COORDINATOR_DATABASE_SCHEMA_VERSION, COORDINATOR_GRANT_OFFER_SWEEP_MS, COORDINATOR_GRANT_OFFER_TTL_MS, COORDINATOR_HEARTBEAT_MS, COORDINATOR_IMPLEMENTATION_BUILD, COORDINATOR_LEGACY_FACADE_BUILD, COORDINATOR_MAX_FRAME_BYTES, COORDINATOR_PACKAGE_BUILD, COORDINATOR_PACKAGE_VERSION, COORDINATOR_SESSION_LEASE_MS, COORDINATOR_STORE_SCHEMA_VERSION, COORDINATOR_WIRE_LINEAGE } from "./runtime-constants.js";
 function coordinatorTemporaryRoot(env) {
     const configured = env['TMPDIR'] ?? env['TEMP'] ?? env['TMP'];
     if (configured === undefined || configured.length === 0)

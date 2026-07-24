@@ -13,5 +13,17 @@ export const COORDINATOR_MAX_FRAME_BYTES = 1_048_576;
 export const COORDINATOR_BUSY_TIMEOUT_MS = 5_000;
 export const COORDINATOR_SESSION_LEASE_MS = 30_000;
 export const COORDINATOR_HEARTBEAT_MS = 10_000;
+/**
+ * The bootstrap-safe session lease for the D65 launch window. The single
+ * bootstrap session drives attach → policy → heartbeat → the multi-minute
+ * bootstrap-plan model turn → first complete graph, and it deliberately runs NO
+ * periodic session heartbeat until graph sequence 2 is accepted (a `session-
+ * heartbeat` event would break the frozen 9-event B→E charter and the R=E+1
+ * publication rule). A longer bootstrap lease therefore keeps `lease_current`
+ * true across the planning turn so first-graph registration's session gate holds;
+ * the lease is only classification evidence (age never authorizes release), and
+ * the ordinary 30s heartbeat cadence resumes after the bridge adopts the session.
+ */
+export const COORDINATOR_BOOTSTRAP_SESSION_LEASE_MS = 45 * 60_000;
 export const COORDINATOR_GRANT_OFFER_TTL_MS = 30_000;
 export const COORDINATOR_GRANT_OFFER_SWEEP_MS = 1_000;

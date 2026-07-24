@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { createHash } from 'node:crypto';
-import { closeSync, constants as fsConstants, fstatSync, lstatSync, openSync, readFileSync } from 'node:fs';
+import { closeSync, constants as fsConstants, fstatSync, lstatSync, openSync, readFileSync, realpathSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { chmodSync } from 'node:fs';
 import { dirname, isAbsolute, join } from 'node:path';
@@ -51,13 +51,21 @@ interface SignerConfig {
   readonly roster_provider: string;
   /** The exact sealed policy issue timestamp (the policy has no validity window). */
   readonly policy_issued_at: string;
+  /**
+   * The complete set of declared program rows (identity-sorted by workstream).
+   * The signer emits one heartbeat row per declared program row: THIS run's row
+   * is bound to live coordinator authority; the other declared rows are emitted
+   * as `planned`/unlaunched (`row-not-launched`). Cap-one program with only this
+   * workstream is a one-row set; a six-row program declares all six.
+   */
+  readonly program_rows: readonly { readonly workstream: string; readonly workstream_run: string }[];
 }
 
 const CONFIG_FIELDS = [
   'schema_version', 'program_id', 'repo_id', 'workstream', 'workstream_run', 'private_key_path',
   'trust_anchor_ref', 'trust_anchor_sha256', 'signer_key_id', 'program_evidence_root', 'policy_id',
   'policy_ref', 'package_commit', 'package_tree', 'b0_commit', 'b0_tree', 'roster_sha256', 'roster_provider',
-  'policy_issued_at',
+  'policy_issued_at', 'program_rows',
 ] as const;
 
 function fail(message: string, detail: readonly string[] = []): never {
@@ -132,7 +140,21 @@ function parseConfig(bytes: Uint8Array): SignerConfig {
     roster_sha256: requireSha256(record, 'roster_sha256', 'config'),
     roster_provider: requireString(record, 'roster_provider', 'config'),
     policy_issued_at: requireString(record, 'policy_issued_at', 'config'),
+    program_rows: parseProgramRows(record['program_rows']),
   });
+}
+
+function parseProgramRows(value: unknown): readonly { readonly workstream: string; readonly workstream_run: string }[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 64) fail('config.program_rows must be a non-empty bounded array');
+  const rows = value.map((entry, index) => {
+    const record = requireObject(entry, `config.program_rows[${String(index)}]`);
+    const keys = Object.keys(record).sort();
+    if (keys.length !== 2 || keys[0] !== 'workstream' || keys[1] !== 'workstream_run') fail(`config.program_rows[${String(index)}] must have exactly workstream and workstream_run`);
+    return Object.freeze({ workstream: requireString(record, 'workstream', 'config.program_rows'), workstream_run: requireString(record, 'workstream_run', 'config.program_rows') });
+  });
+  const sorted = [...rows].sort((left, right) => (left.workstream < right.workstream ? -1 : left.workstream > right.workstream ? 1 : 0));
+  for (let index = 1; index < sorted.length; index += 1) if ((sorted[index - 1]?.workstream ?? '') === (sorted[index]?.workstream ?? '')) fail('config.program_rows workstream identities must be unique');
+  return Object.freeze(sorted);
 }
 
 interface PolicyRequest { readonly kind: 'launch-policy'; readonly state_root: string; readonly repo_id: string; readonly workstream_run: string; readonly policy_id: string; readonly policy_ref: string; readonly expected_policy_sha256: `sha256:${string}` }
@@ -165,6 +187,29 @@ function gitBlob(repoRoot: string, commit: string, ref: string): Uint8Array {
   return runGitQuery({ cwd: repoRoot, descriptor: { kind: 'show-file', revision: commit, path: ref } }).stdout;
 }
 
+/**
+ * Read the operator private key, proving its realpath is OUTSIDE every protected
+ * root (source clone, Git common dir, state root, session root, worktree/runtime
+ * roots, and the program evidence root). The external-key boundary is meaningless
+ * if the key can live inside runtime-controlled or packaged authority.
+ */
+/** The complete set of protected roots the operator key must live outside of. */
+function protectedRootsFromResource(config: SignerConfig, resource: ReturnType<typeof parseCoordinationRunResource>): readonly string[] {
+  return [resource.source_repo, resource.git_common_dir, resource.worktree_root, resource.main_worktree_path, resource.runtime_root, config.program_evidence_root];
+}
+
+function readOperatorPrivateKey(config: SignerConfig, protectedRoots: readonly string[]): string {
+  const keyReal = realpathSync(config.private_key_path);
+  for (const root of protectedRoots) {
+    let rootReal: string;
+    try { rootReal = realpathSync(root); }
+    catch { continue; }
+    const withSep = rootReal.endsWith('/') ? rootReal : `${rootReal}/`;
+    if (keyReal === rootReal || keyReal.startsWith(withSep)) fail('operator private key must live outside every clone/state/session/worktree/runtime/evidence root', [keyReal, rootReal]);
+  }
+  return new TextDecoder('utf-8').decode(readMode0600(config.private_key_path, 'operator private key'));
+}
+
 function requireOne<T>(values: readonly T[], label: string): T {
   if (values.length !== 1 || values[0] === undefined) fail(`${label} cardinality is not exactly one`, [`count=${String(values.length)}`]);
   return values[0];
@@ -192,13 +237,12 @@ async function signPolicy(config: SignerConfig, request: PolicyRequest, env: Pro
     program_evidence_root: config.program_evidence_root, trust_anchor_ref: config.trust_anchor_ref, trust_anchor_sha256: config.trust_anchor_sha256,
     prior_policy_sha256: null, capacity_decision_ref: null, capacity_decision_sha256: null, issued_at: config.policy_issued_at, signer_key_id: config.signer_key_id,
   };
-  const privateKeyPem = new TextDecoder('utf-8').decode(readMode0600(config.private_key_path, 'operator private key'));
+  const privateKeyPem = readOperatorPrivateKey(config, protectedRootsFromResource(config, resource));
   const signature = encodeUnpaddedBase64Url(new Uint8Array(sign(null, concatDomain('AUTOPILOT-D65-LAUNCH-POLICY\u0000', canonicalJson(fields)), createPrivateKey(privateKeyPem))));
   const bytes = new TextEncoder().encode(`${canonicalJson({ ...fields, signature })}\n`);
   // Parse-validate our own output before writing (fail closed).
   parseD65LaunchPolicy(JSON.parse(new TextDecoder().decode(bytes)) as unknown);
   if (bytesSha256(bytes) !== request.expected_policy_sha256) fail('signed policy digest differs from the sealed expected policy digest', [bytesSha256(bytes), request.expected_policy_sha256]);
-  void resource;
   const absolutePath = join(config.program_evidence_root, 'signed-launch-policies', `${request.policy_id}.json`);
   await persistSignedCandidate(absolutePath, bytes);
   return { ref: request.policy_ref, absolutePath, bytes };
@@ -231,7 +275,7 @@ async function signHeartbeat(config: SignerConfig, request: HeartbeatRequest, en
     provider_health: [{ provider: config.roster_provider, state: 'healthy', observation_ref: policyArtifact.evidence.ref, observation_sha256: policyArtifact.evidence.sha256, cooldown_until: null, probe_workstream_run: null, probe_ref: null, probe_sha256: null, consumption_event_seq: null }],
     dispatch_allowed: true, stop_reasons: [], trust_anchor_ref: config.trust_anchor_ref, trust_anchor_sha256: config.trust_anchor_sha256, signer_key_id: config.signer_key_id,
   };
-  const privateKeyPem = new TextDecoder('utf-8').decode(readMode0600(config.private_key_path, 'operator private key'));
+  const privateKeyPem = readOperatorPrivateKey(config, protectedRootsFromResource(config, resource));
   const signature = encodeUnpaddedBase64Url(new Uint8Array(sign(null, concatDomain('AUTOPILOT-D65-PROGRAM-HEARTBEAT\u0000', canonicalJson(fields)), createPrivateKey(privateKeyPem))));
   const bytes = new TextEncoder().encode(`${canonicalJson({ ...fields, signature })}\n`);
   const ref = `program-heartbeats/${String(request.heartbeat_sequence).padStart(20, '0')}.json`;
@@ -242,13 +286,30 @@ async function signHeartbeat(config: SignerConfig, request: HeartbeatRequest, en
 
 function heartbeatRows(config: SignerConfig, request: HeartbeatRequest, attached: ReturnType<typeof parseCoordinationSessionLease>, policyArtifact: ReturnType<typeof parseCoordinationAuthoritativeArtifact>, status: { payload: Record<string, unknown> }, doctor: { payload: Record<string, unknown> }, dispatchRow: boolean): readonly Record<string, unknown>[] {
   const stopReasons = dispatchRow ? [] : ['graph-publication-pending'];
-  return [{
-    workstream: config.workstream, workstream_run: request.workstream_run, parent_session_file_sha256: null,
-    coordinator_session_lease_id: attached.session_lease_id, accepted_graph_sequence: request.graph_sequence, accepted_graph_sha256: request.graph_sha256,
-    status_sha256: status.payload['semantic_snapshot_sha256'], doctor_sha256: doctor.payload['semantic_snapshot_sha256'], session_lease_state: 'attached',
-    child_lease_ids: [], launch_policy_sha256: policyArtifact.evidence.sha256, last_progress_event_seq: attached.attached_event_seq,
-    last_handoff_sha256: null, row_state: 'active', dispatch_allowed: stopReasons.length === 0, stop_reasons: stopReasons,
-  }];
+  // Emit one identity-sorted row per declared program row (§3.2): THIS run's row
+  // is bound to live coordinator authority; every other declared row is emitted
+  // as planned/unlaunched. The parser requires the exact per-row dispatch/reason
+  // coherence, so a planned row carries `row-not-launched` and dispatch false.
+  return config.program_rows.map((row) => {
+    if (row.workstream === config.workstream) {
+      return {
+        workstream: row.workstream, workstream_run: row.workstream_run, parent_session_file_sha256: null,
+        coordinator_session_lease_id: attached.session_lease_id, accepted_graph_sequence: request.graph_sequence, accepted_graph_sha256: request.graph_sha256,
+        status_sha256: status.payload['semantic_snapshot_sha256'], doctor_sha256: doctor.payload['semantic_snapshot_sha256'], session_lease_state: 'attached',
+        child_lease_ids: [], launch_policy_sha256: policyArtifact.evidence.sha256, last_progress_event_seq: attached.attached_event_seq,
+        last_handoff_sha256: null, row_state: 'active', dispatch_allowed: stopReasons.length === 0, stop_reasons: stopReasons,
+      };
+    }
+    // A declared-but-unlaunched program row: exactly row-local `row-not-launched`,
+    // all launch/session/graph facts null.
+    return {
+      workstream: row.workstream, workstream_run: row.workstream_run, parent_session_file_sha256: null,
+      coordinator_session_lease_id: null, accepted_graph_sequence: null, accepted_graph_sha256: null,
+      status_sha256: null, doctor_sha256: null, session_lease_state: null,
+      child_lease_ids: [], launch_policy_sha256: null, last_progress_event_seq: null,
+      last_handoff_sha256: null, row_state: 'planned', dispatch_allowed: false, stop_reasons: ['row-not-launched'],
+    };
+  });
 }
 
 function concatDomain(domain: string, message: string): Uint8Array {

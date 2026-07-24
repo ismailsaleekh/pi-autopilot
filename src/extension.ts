@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { realpathSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { createContextBudgetTool, resolveContextHaltPercent } from './core/context-budget.ts';
 import {
@@ -54,7 +55,7 @@ import {
   registerD65LaunchPolicyAndInitialHeartbeat,
   type D65LaunchBootstrapResult,
 } from './core/coordination/d65-launch-integration.ts';
-import { readFileSync, lstatSync } from 'node:fs';
+import { readImmutableFileBytes } from './core/coordination/immutable-file.ts';
 import { coordinationCutoverCommitted } from './core/coordination/migration-paths.ts';
 import {
   autopilotRosterContractCanonicalJson,
@@ -1261,22 +1262,27 @@ function notify(ctx: ExtensionCommandContextLike, message: string, kind: Notific
  */
 function defaultLaunchSignerResolver(manifest: D65LaunchManifest, env: ProcessEnvLike): D65LaunchSigner {
   const invocationPath = resolve(manifest.program_evidence_root, 'signer-invocation.json');
-  const before = lstatSync(invocationPath);
-  if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1 || (before.mode & 0o777) !== 0o600 || before.size > 65_536) {
-    throw new Error(`launch signer invocation ${invocationPath} must be a one-link no-follow regular mode-0600 file <=64 KiB`);
-  }
-  const parsed = JSON.parse(readFileSync(invocationPath, 'utf8')) as unknown;
+  const invocationBytes = readImmutableFileBytes({ path: invocationPath, maximumBytes: 65_536, label: 'launch signer invocation', errorCode: 'invalid-request' });
+  const parsed = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(invocationBytes)) as unknown;
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) throw new Error('launch signer invocation must be an object');
   const record = parsed as Record<string, unknown>;
+  const keys = Object.keys(record).sort();
+  const expected = ['config_path', 'node', 'schema_version', 'signer_bin'];
+  if (keys.length !== expected.length || expected.some((field, index) => keys[index] !== field)) throw new Error('launch signer invocation must have exactly schema_version, node, signer_bin, config_path');
   if (record['schema_version'] !== 'autopilot.launch_signer_invocation.v1') throw new Error('launch signer invocation schema is wrong');
-  const command = record['command'];
-  if (typeof command !== 'string' || !command.startsWith('/')) throw new Error('launch signer invocation command must be an absolute path');
-  const rawArgs = record['args'];
-  const baseArgs = Array.isArray(rawArgs) ? rawArgs.map((entry) => { if (typeof entry !== 'string') throw new Error('launch signer invocation args must be strings'); return entry; }) : [];
+  const node = record['node'];
+  const signerBin = record['signer_bin'];
   const configPath = record['config_path'];
-  if (configPath !== undefined && typeof configPath !== 'string') throw new Error('launch signer invocation config_path must be a string');
-  const args = configPath === undefined ? baseArgs : [...baseArgs, '--config', configPath];
-  return new SpawnedD65LaunchSigner({ command, baseArgs: args, env });
+  // The command is pinned to the current Node executable launching the PACKAGED
+  // signer bin (autopilot-launch-signer.mjs) — never an arbitrary executable —
+  // and the only permitted argument is `--config <absolute-path>`.
+  if (typeof node !== 'string' || node !== process.execPath) throw new Error('launch signer invocation node must equal the current Node executable');
+  if (typeof signerBin !== 'string' || !signerBin.startsWith('/') || !/[\\/]bin[\\/]autopilot-launch-signer\.mjs$/u.test(signerBin)) throw new Error('launch signer invocation signer_bin must be the packaged autopilot-launch-signer.mjs bin');
+  const signerBinReal = realpathSync(signerBin);
+  const expectedSignerBin = realpathSync(fileURLToPath(new URL('../bin/autopilot-launch-signer.mjs', import.meta.url)));
+  if (signerBinReal !== expectedSignerBin) throw new Error('launch signer invocation signer_bin is not this package\'s autopilot-launch-signer.mjs');
+  if (typeof configPath !== 'string' || !configPath.startsWith('/')) throw new Error('launch signer invocation config_path must be an absolute path');
+  return new SpawnedD65LaunchSigner({ command: node, baseArgs: [signerBin, '--config', configPath], env });
 }
 
 export default function autopilotExtension(pi: ExtensionHostLike, dependencies: AutopilotExtensionDependencies = {}): void {
@@ -1814,15 +1820,13 @@ export default function autopilotExtension(pi: ExtensionHostLike, dependencies: 
    * path, oversized file, symlink, or unknown field rejects. No fallback.
    */
   function loadLaunchManifest(absolutePath: string): D65LaunchManifest {
-    const before = lstatSync(absolutePath);
-    if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1 || before.size > D65_LAUNCH_MANIFEST_MAX_BYTES) {
-      throw new Error(`launch manifest ${absolutePath} must be a one-link no-follow regular file <= ${String(D65_LAUNCH_MANIFEST_MAX_BYTES)} bytes`);
-    }
-    const bytes = readFileSync(absolutePath);
+    // Descriptor-safe no-follow read with before/open/after inode-size-link
+    // identity checks, so a rename/swap between the mode check and the read
+    // cannot substitute the bytes the launcher admits.
+    const bytes = readImmutableFileBytes({ path: absolutePath, maximumBytes: D65_LAUNCH_MANIFEST_MAX_BYTES, label: 'launch manifest', errorCode: 'invalid-request' });
     const manifest = parseD65LaunchManifest(JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)) as unknown);
-    // Bind the manifest's own launch_seal digest to the exact loaded bytes when
-    // the seal names itself is forbidden; here we only record the loaded digest
-    // for evidence. The seal digest is the launch-audit seal, not a self-hash.
+    // Record the exact loaded manifest digest for evidence (not self-referenced
+    // inside the manifest; the launch seal is the external launch-audit seal).
     void launchManifestBytesSha256(bytes);
     return manifest;
   }
@@ -1857,6 +1861,9 @@ export default function autopilotExtension(pi: ExtensionHostLike, dependencies: 
       notify(ctx, `Autopilot could not activate context_budget for the D65 launch: ${error instanceof Error ? error.message : String(error)}`, 'error');
       return false;
     }
+    // Select the EXACT sealed parent model/thinking before any parent model call,
+    // so the bootstrap-plan turn cannot run on an ambient (possibly paid) model.
+    if (!(await activateParentModelRoster(ctx, { model: manifest.parent_model, thinking: manifest.parent_thinking }))) return false;
     let bootstrap: D65LaunchBootstrapResult;
     try {
       bootstrap = await beginD65LaunchBootstrap({ manifest, rawSessionId: rawSessionId(ctx), env });

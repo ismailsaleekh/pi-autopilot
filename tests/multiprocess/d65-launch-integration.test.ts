@@ -190,6 +190,14 @@ async function buildLaunchFixture(suffix: string): Promise<LaunchFixture> {
   const policyBytes = `${canonicalJson({ ...policyFields, signature: policySignature })}\n`;
   const policySha256 = sha256(policyBytes);
 
+  // Seal the external launch-audit + bootstrap-projection evidence files.
+  const launchAuditRef = join(programEvidenceRoot, 'launch-audit', `${workstreamRun}.json`);
+  const launchAuditBytes = Buffer.from(`${JSON.stringify({ schema_version: 'autopilot.launch_audit.v1', workstream_run: workstreamRun, overlay_commit: overlayCommit })}\n`, 'utf8');
+  await mkdir(dirname(launchAuditRef), { recursive: true, mode: 0o700 }); await writeFile(launchAuditRef, launchAuditBytes, { mode: 0o600 }); chmodSync(launchAuditRef, 0o600);
+  const projectionRef = join(programEvidenceRoot, 'bootstrap-projections', workstreamRun, '00000000000000000001.json');
+  const projectionBytes = Buffer.from(`${JSON.stringify({ schema_version: 'autopilot.bootstrap_projection.v1', workstream_run: workstreamRun })}\n`, 'utf8');
+  await mkdir(dirname(projectionRef), { recursive: true, mode: 0o700 }); await writeFile(projectionRef, projectionBytes, { mode: 0o600 }); chmodSync(projectionRef, 0o600);
+
   const manifest = parseD65LaunchManifest({
     schema_version: 'autopilot.launch_manifest.v1', manifest_id: `launch-${suffix}`, program_id: programId, workstream, workstream_run: workstreamRun, autopilot_id: autopilotId,
     run_timestamp: '2026-07-22T22:00:32.000Z', run_nonce: 'abc123', source_clone: clone, canonical_root: clone, git_common_dir: join(clone, '.git'), repo_id: repoId, repo_key: repoId,
@@ -198,10 +206,10 @@ async function buildLaunchFixture(suffix: string): Promise<LaunchFixture> {
     bootstrap_overlay: { overlay_commit: overlayCommit, overlay_tree: overlayTree, overlay_ref: `refs/heads/autopilot/bootstrap/${workstreamRun}`, bootstrap_ref: bootstrapRef, bootstrap_sha256: sha256(bootstrapBytes), bootstrap_byte_count: Buffer.byteLength(bootstrapBytes, 'utf8') },
     trust_anchor: { trust_anchor_ref: trustRef, trust_anchor_sha256: trustSha256, trust_anchor_blob_oid: trustBlobOid, byte_count: 44 },
     prospective_run: prospectiveRun, prospective_resource: prospectiveResource, coordination_authority: 'coordinator-edit-leases-v1',
-    roster_authority: 'user-default', roster_selection_ref: `roster-selections/${repoId}/${workstreamRun}.json`, roster_sha256: rosterSha256,
+    roster_authority: 'user-default', roster_selection_ref: `roster-selections/${repoId}/${workstreamRun}.json`, roster_sha256: rosterSha256, parent_model: 'openai-codex/gpt-5.6-sol', parent_thinking: 'xhigh',
     policy_candidate: { policy_id: 'policy-1', policy_ref: 'authority/launch-policies/policy-1.json', policy_sha256: policySha256, registration_idempotency_key: `register-launch-policy:${workstreamRun}:policy-1`, heartbeat_acceptance_idempotency_key: `accept-program-heartbeat:${workstreamRun}:1` },
     program_evidence_root: programEvidenceRoot,
-    launch_seal: { launch_commit: overlayCommit, launch_tree: overlayTree, launch_audit_ref: join(programEvidenceRoot, 'launch-audit', `${workstreamRun}.json`), launch_audit_sha256: sha256('launch-audit'), launch_seal_sha256: sha256('launch-seal'), bootstrap_projection_ref: join(programEvidenceRoot, 'bootstrap-projections', workstreamRun, '00000000000000000001.json'), bootstrap_projection_sha256: sha256('projection') },
+    launch_seal: { launch_commit: overlayCommit, launch_tree: overlayTree, launch_audit_ref: launchAuditRef, launch_audit_sha256: sha256(launchAuditBytes), launch_seal_sha256: sha256('launch-seal'), bootstrap_projection_ref: projectionRef, bootstrap_projection_sha256: sha256(projectionBytes) },
     attach_run_idempotency_key: `attach-run:${repoId}:${workstreamRun}`, attach_session_idempotency_key: `attach-session:${repoId}:${workstreamRun}`,
     created_at: '2026-07-22T22:00:33.000Z',
   });
@@ -327,7 +335,7 @@ void describe('D65 launch integration (production path)', () => {
       await writeCharterRoots(manifest);
       // Parent also touches a product path — must fail closed before first graph.
       await writeFile(join(manifest.main_worktree_path, 'PRODUCT.md'), 'unauthorized\n', 'utf8');
-      assert.throws(() => detectD65CharterComplete(manifest), /outside the exact five charter roots/u);
+      assert.throws(() => detectD65CharterComplete(manifest), /outside the package-owned runtime charter scope/u);
     } finally {
       await fixture.close();
     }

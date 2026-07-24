@@ -1,19 +1,19 @@
 {
-  "schema_version": "autopilot.docs_semantic_attestation.v2",
-  "doc_id": "subsystems/worktrees",
-  "reviewed_body_hash": "sha256:6874467d83a8f7156c13c934661a4054143cb27c53e41e441009b8a5eff5ed63",
-  "reviewed_doc_sha256": "sha256:aa46919672204826789ea268e8af7692e4339bc70f262895622f94f73217f4fc",
-  "covers_sources": [
-    "src/core/checkout-profile.ts",
-    "src/core/disk-gate.ts",
-    "src/core/git-guard.ts",
-    "src/core/git-process.ts",
-    "src/core/materialization.ts",
-    "src/core/parallel-runtime.ts",
-    "src/core/sparse-worktree.ts"
-  ],
-  "verdict": "PASS",
-  "reviewer": "pi W6 merge operator (offline semantic review)",
-  "reviewed_at": "2026-07-23T12:35:54.000Z",
-  "notes": "W6 offline semantic review: verified worktrees prose against current parallel runtime, sparse checkout, checkout profile, disk gate, materialization, git guard, and git process sources; D65 ordinary/recovery boundaries, S2 disk-pressure scoping, sparse isolation, and run-owned cleanup semantics match the combined code."
+    "schema_version": "autopilot.docs_semantic_attestation.v2",
+    "doc_id": "subsystems/worktrees",
+    "reviewed_body_hash": "sha256:f19ae5ccd8be614f5ee4367ebf2d78147c38393513e3fdd03b3155e10382461c",
+    "reviewed_doc_sha256": "sha256:5a232612116392cac46244c780411c7a90e33d3eab05888f6a7fc83055747ddb",
+    "covers_sources": [
+        "src/core/checkout-profile.ts",
+        "src/core/disk-gate.ts",
+        "src/core/git-guard.ts",
+        "src/core/git-process.ts",
+        "src/core/materialization.ts",
+        "src/core/parallel-runtime.ts",
+        "src/core/sparse-worktree.ts"
+    ],
+    "verdict": "PASS",
+    "reviewer": "D65 launch-integration implementation owner (offline semantic review)",
+    "reviewed_at": "2026-07-24T00:00:00.000Z",
+    "notes": "D65 launch-integration semantic review: added resolveAutopilotFullCheckoutProfile (resolves the profile forced to a full checkout with a correctly recomputed profile_sha256) so the D65 sealed-launch main worktree uses the frozen checkout-profile/task-info contracts and the ordinary child materialization/disk-gate paths stay viable; no existing checkout limit changed."
 }

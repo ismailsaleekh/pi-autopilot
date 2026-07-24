@@ -121,6 +121,34 @@ export async function resolveAutopilotCheckoutProfile(input: {
   });
 }
 
+/**
+ * Resolve the checkout profile forced to a FULL-tree checkout with a correctly
+ * recomputed `profile_sha256`. D65 fresh runs always use the complete tree (no
+ * sparse, no carrier); this is the resolver the D65 launch path uses so the
+ * frozen `readCheckoutProfileSnapshot`/task-info contracts accept the exact
+ * bytes and the ordinary child materialization/disk-gate paths stay viable.
+ */
+export async function resolveAutopilotFullCheckoutProfile(input: {
+  readonly repoRoot: string;
+  readonly env?: Readonly<Record<string, string | undefined>>;
+  readonly now?: Date;
+}): Promise<ResolvedAutopilotCheckoutProfile> {
+  const resolved = await resolveAutopilotCheckoutProfile(input);
+  if (resolved.profile.mode === 'full') return resolved;
+  const profile: AutopilotCheckoutProfile = Object.freeze({ ...resolved.profile, mode: 'full' });
+  const basePatterns = baseSparsePatternsForProfile(profile);
+  return Object.freeze({
+    profile,
+    origin: resolved.origin,
+    source_path: resolved.source_path,
+    profile_sha256: sha256Json(profile),
+    tracked_tree: resolved.tracked_tree,
+    base_patterns: basePatterns,
+    base_checkout_bytes: estimateCheckoutBytesForProfile(profile, resolved.tracked_tree, basePatterns),
+    full_checkout_bytes: resolved.full_checkout_bytes,
+  });
+}
+
 export function checkoutProfileSnapshotFromResolved(input: {
   readonly resolved: ResolvedAutopilotCheckoutProfile;
   readonly now?: Date;

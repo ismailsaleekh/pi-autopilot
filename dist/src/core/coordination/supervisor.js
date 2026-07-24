@@ -10,7 +10,7 @@ import { CoordinationRuntimeError, formatCoordinationRuntimeError } from "./fail
 import { isS2OwnerRecoveryProgressFailure, isS2SameOperationProgressRetry } from "./s2-failure-taxonomy.js";
 import { acknowledgeCoordinationMigrationFreeze, activeCoordinationMigrationFreeze, assertMigrationPathSafe } from "./migration-paths.js";
 import { currentBootId } from "./process-identity.js";
-import { COORDINATOR_HEARTBEAT_MS, COORDINATOR_SESSION_LEASE_MS, enforcePrivateAuthorityPath, ensurePrivateAuthorityDirectory } from "./runtime-paths.js";
+import { COORDINATOR_BOOTSTRAP_SESSION_LEASE_MS, COORDINATOR_HEARTBEAT_MS, COORDINATOR_SESSION_LEASE_MS, enforcePrivateAuthorityPath, ensurePrivateAuthorityDirectory } from "./runtime-paths.js";
 export const AUTOPILOT_COORDINATOR_SESSION_CONTEXT_SCHEMA = 'autopilot.coordinator_session_context.v1';
 function isSha256Digest(value) {
     return /^sha256:[a-f0-9]{64}$/u.test(value);
@@ -54,6 +54,10 @@ function payloadArray(response, field) {
 }
 function leaseExpiry() {
     return new Date(Date.now() + COORDINATOR_SESSION_LEASE_MS).toISOString();
+}
+/** The bootstrap-safe lease expiry spanning the D65 launch bootstrap window. */
+function bootstrapLeaseExpiry() {
+    return new Date(Date.now() + COORDINATOR_BOOTSTRAP_SESSION_LEASE_MS).toISOString();
 }
 /**
  * A heartbeat that fails because the coordinator socket is momentarily
@@ -476,7 +480,9 @@ export class DurableRunSupervisorClient {
             session_token: sessionToken,
             pid: process.pid,
             boot_id: currentBootId(),
-            lease_expires_at: leaseExpiry(),
+            // The single bootstrap session runs no periodic heartbeat until graph 2 is
+            // accepted, so it takes a bootstrap-safe lease spanning the planning turn.
+            lease_expires_at: bootstrapLeaseExpiry(),
             handoff_token: null,
         });
         const attachedRun = parseCoordinationRun(payloadRecord(attachSession, 'run'));

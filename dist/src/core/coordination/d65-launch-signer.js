@@ -31,6 +31,23 @@ export const D65_LAUNCH_SIGNER_KIND_HEARTBEAT = 'program-heartbeat';
 function bytesSha256(bytes) {
     return `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
 }
+/**
+ * A minimal, credential-free environment for the external signer subprocess. It
+ * carries only the process-launch essentials (PATH/HOME/TMP) and the AUTOPILOT
+ * state root the signer needs to reach the local coordinator; every provider
+ * API key, OAuth token, and unrelated variable is stripped so the signer cannot
+ * inherit paid/provider credentials or network authority.
+ */
+function minimalSignerEnv(env) {
+    const allow = ['PATH', 'HOME', 'TMPDIR', 'TMP', 'TEMP', 'LANG', 'LC_ALL', 'AUTOPILOT_STATE_ROOT'];
+    const out = {};
+    for (const key of allow) {
+        const value = env[key];
+        if (typeof value === 'string' && value.length > 0)
+            out[key] = value;
+    }
+    return out;
+}
 /** Read a signer result file safely (no-follow, one-link, bounded, mode-checked). */
 function readSignerCandidate(absolutePath, label) {
     if (!isAbsolute(absolutePath))
@@ -82,8 +99,11 @@ export class SpawnedD65LaunchSigner {
     async #invoke(request) {
         const requestJson = JSON.stringify(request);
         const result = await new Promise((resolveInvoke, rejectInvoke) => {
-            // The signer must never inherit model/provider/network credentials.
-            const child = spawn(this.#command, [...this.#baseArgs, '--request', requestJson], { env: { ...this.#env }, stdio: ['ignore', 'pipe', 'pipe'] });
+            // The signer must never inherit model/provider/network credentials. It is
+            // spawned with a MINIMAL, credential-free environment: only PATH/HOME/TMP
+            // and the AUTOPILOT state root it needs to reach the local coordinator. No
+            // provider API keys, tokens, or arbitrary environment leak into it.
+            const child = spawn(this.#command, [...this.#baseArgs, '--request', requestJson], { env: minimalSignerEnv(this.#env), stdio: ['ignore', 'pipe', 'pipe'] });
             const stdoutChunks = [];
             const stderrChunks = [];
             let stdoutBytes = 0;
