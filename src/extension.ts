@@ -27,7 +27,7 @@ import {
   type AutopilotToolCallContextLike,
   type AutopilotToolCallEventLike,
 } from './core/git-guard.ts';
-import { AutopilotParallelRuntimeError, coordinationRootForRepo, prepareAutopilotWorkstream, readActiveAutopilots, readCoordinatorActiveAutopilots, recoverAutopilotWorktreeSagas, resolveAutopilotStateRoot, resolveRepoIdentity, withAutopilotFileLock, worktreeRootForRepo, writeActiveAutopilots, type ActiveAutopilotRow, type PreparedAutopilotWorkstream, type ProcessEnvLike } from './core/parallel-runtime.ts';
+import { AUTOPILOT_STATE_ROOT_ENV, AutopilotParallelRuntimeError, coordinationRootForRepo, prepareAutopilotWorkstream, readActiveAutopilots, readCoordinatorActiveAutopilots, recoverAutopilotWorktreeSagas, resolveAutopilotStateRoot, resolveRepoIdentity, withAutopilotFileLock, worktreeRootForRepo, writeActiveAutopilots, type ActiveAutopilotRow, type PreparedAutopilotWorkstream, type ProcessEnvLike } from './core/parallel-runtime.ts';
 import { CoordinatorClient } from './core/coordination/client.ts';
 import { CoordinationRuntimeError, formatCoordinationRuntimeError } from './core/coordination/failures.ts';
 import { createClaimResponseTool, type ClaimResponseToolDefinition } from './core/coordination/claim-response-tool.ts';
@@ -49,6 +49,7 @@ import { SpawnedD65LaunchSigner, type D65LaunchSigner } from './core/coordinatio
 import {
   beginD65LaunchBootstrap,
   detectD65CharterComplete,
+  launchEnv,
   publishD65FirstGraphAndSuccessorHeartbeat,
   registerD65LaunchPolicyAndInitialHeartbeat,
   type D65LaunchBootstrapResult,
@@ -1837,6 +1838,10 @@ export default function autopilotExtension(pi: ExtensionHostLike, dependencies: 
    */
   async function activateD65Launch(input: { readonly manifest: D65LaunchManifest; readonly ctx: ExtensionCommandContextLike; readonly taskIntro: string }): Promise<boolean> {
     const { manifest, ctx } = input;
+    // Bind the sealed isolated state root into the Pi session process env so
+    // every subsequent coordinator interaction and child dispatch targets the
+    // manifest's exact private state root, not an ambient AUTOPILOT_STATE_ROOT.
+    process.env[AUTOPILOT_STATE_ROOT_ENV] = manifest.state_root;
     const env = process.env;
     let signer: D65LaunchSigner;
     try {
@@ -1923,8 +1928,9 @@ export default function autopilotExtension(pi: ExtensionHostLike, dependencies: 
     try {
       const adopted = await AutopilotSessionBridge.adopt({
         attachment: pending.bootstrap.attachment,
+        env: launchEnv(pending.manifest, process.env),
         recoverOwnedOperations: async (contextPath) => {
-          const env = { ...process.env, [AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV]: contextPath };
+          const env = { ...launchEnv(pending.manifest, process.env), [AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV]: contextPath };
           await recoverAutopilotWorktreeSagas({ active: pending.bootstrap.active, env });
           await ensureMainWorktreeSagaRegistered({ active: pending.bootstrap.active, env });
         },

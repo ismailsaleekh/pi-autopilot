@@ -5,6 +5,7 @@ import { dirname, join } from 'node:path';
 
 import { AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV } from '../names.ts';
 import { AUTOPILOT_CHECKOUT_PROFILE_SNAPSHOT_FILE } from '../checkout-profile.ts';
+import { AUTOPILOT_STATE_ROOT_ENV } from '../parallel-runtime.ts';
 import { runGitQuery } from '../git-process.ts';
 import { createAutopilotGitWorktree } from '../sparse-worktree.ts';
 import {
@@ -189,9 +190,10 @@ export async function beginD65LaunchBootstrap(input: {
 }): Promise<D65LaunchBootstrapResult> {
   const { manifest } = input;
   verifyLaunchManifestAgainstClone(manifest);
+  const env = launchEnv(manifest, input.env);
   const repo = repoIdentityFromLaunchManifest(manifest);
   const active = activeRowFromLaunchManifest(manifest);
-  const supervisor = new DurableRunSupervisorClient(input.env);
+  const supervisor = new DurableRunSupervisorClient(env);
   const attachment = await supervisor.attachD65Bootstrap({
     repo,
     active,
@@ -203,7 +205,7 @@ export async function beginD65LaunchBootstrap(input: {
     attachSessionIdempotencyKey: manifest.attach_session_idempotency_key,
     sessionLeaseId: prospectiveSessionLeaseId(manifest),
   });
-  const sagaEnv: ProcessEnvLike = { ...input.env, [AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV]: attachment.contextPath };
+  const sagaEnv: ProcessEnvLike = { ...env, [AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV]: attachment.contextPath };
   await createD65MainWorktree({ manifest, active, repo, env: sagaEnv });
   return {
     attachment,
@@ -218,6 +220,16 @@ export async function beginD65LaunchBootstrap(input: {
 /** The deterministic session lease id sealed for the initial bootstrap session. */
 function prospectiveSessionLeaseId(manifest: D65LaunchManifest): string {
   return `session-lease-${manifest.workstream_run}`;
+}
+
+/**
+ * Bind the sealed isolated state root into the environment so every coordinator
+ * interaction targets the manifest's exact private state root, never an ambient
+ * `AUTOPILOT_STATE_ROOT`. This makes the launch reproducible regardless of the
+ * operator's shell environment.
+ */
+export function launchEnv(manifest: D65LaunchManifest, env: ProcessEnvLike): ProcessEnvLike {
+  return { ...env, [AUTOPILOT_STATE_ROOT_ENV]: manifest.state_root };
 }
 
 /** Stage 3: the full-tree main worktree created from content_result_commit. */
@@ -287,7 +299,7 @@ export async function registerD65LaunchPolicyAndInitialHeartbeat(input: {
   readonly env: ProcessEnvLike;
 }): Promise<void> {
   const { manifest, attachment } = input;
-  const env: ProcessEnvLike = { ...input.env, [AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV]: attachment.contextPath };
+  const env: ProcessEnvLike = { ...launchEnv(manifest, input.env), [AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV]: attachment.contextPath };
   const client = new CoordinatorClient({ env });
   const session = await readCoordinatorSessionContext(attachment.contextPath);
 
@@ -367,7 +379,7 @@ async function acceptSignedGraphHeartbeat(input: {
   readonly heartbeatSequence: number;
   readonly env: ProcessEnvLike;
 }): Promise<void> {
-  const env: ProcessEnvLike = { ...input.env, [AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV]: input.attachment.contextPath };
+  const env: ProcessEnvLike = { ...launchEnv(input.manifest, input.env), [AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV]: input.attachment.contextPath };
   // Idempotency: if the governing heartbeat for this sequence is already the
   // accepted head, skip producing a new candidate.
   const client = new CoordinatorClient({ env });
@@ -444,7 +456,7 @@ export async function publishD65FirstGraphAndSuccessorHeartbeat(input: {
   readonly env: ProcessEnvLike;
   readonly createdAt?: string;
 }): Promise<Readonly<{ graphSequence: number; graphSha256: `sha256:${string}` }>> {
-  const env: ProcessEnvLike = { ...input.env, [AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV]: input.attachment.contextPath };
+  const env: ProcessEnvLike = { ...launchEnv(input.manifest, input.env), [AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV]: input.attachment.contextPath };
   const client = new CoordinatorClient({ env });
   const session = await readCoordinatorSessionContext(input.attachment.contextPath);
   const status = await client.query('status', session.repo_id, session.workstream_run);

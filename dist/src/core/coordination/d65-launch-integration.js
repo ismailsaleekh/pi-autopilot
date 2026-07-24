@@ -4,6 +4,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV } from "../names.js";
 import { AUTOPILOT_CHECKOUT_PROFILE_SNAPSHOT_FILE } from "../checkout-profile.js";
+import { AUTOPILOT_STATE_ROOT_ENV } from "../parallel-runtime.js";
 import { runGitQuery } from "../git-process.js";
 import { createAutopilotGitWorktree } from "../sparse-worktree.js";
 import { AUTOPILOT_RUNTIME_ENV, AUTOPILOT_RUNTIME_VALUE, BRANCHES_FILE, TASK_INFO_FILE, UNIT_INDEX_FILE, } from "../parallel-runtime.js";
@@ -164,9 +165,10 @@ function readD65OverlayBlob(repoRoot, commit, path) {
 export async function beginD65LaunchBootstrap(input) {
     const { manifest } = input;
     verifyLaunchManifestAgainstClone(manifest);
+    const env = launchEnv(manifest, input.env);
     const repo = repoIdentityFromLaunchManifest(manifest);
     const active = activeRowFromLaunchManifest(manifest);
-    const supervisor = new DurableRunSupervisorClient(input.env);
+    const supervisor = new DurableRunSupervisorClient(env);
     const attachment = await supervisor.attachD65Bootstrap({
         repo,
         active,
@@ -178,7 +180,7 @@ export async function beginD65LaunchBootstrap(input) {
         attachSessionIdempotencyKey: manifest.attach_session_idempotency_key,
         sessionLeaseId: prospectiveSessionLeaseId(manifest),
     });
-    const sagaEnv = { ...input.env, [AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV]: attachment.contextPath };
+    const sagaEnv = { ...env, [AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV]: attachment.contextPath };
     await createD65MainWorktree({ manifest, active, repo, env: sagaEnv });
     return {
         attachment,
@@ -192,6 +194,15 @@ export async function beginD65LaunchBootstrap(input) {
 /** The deterministic session lease id sealed for the initial bootstrap session. */
 function prospectiveSessionLeaseId(manifest) {
     return `session-lease-${manifest.workstream_run}`;
+}
+/**
+ * Bind the sealed isolated state root into the environment so every coordinator
+ * interaction targets the manifest's exact private state root, never an ambient
+ * `AUTOPILOT_STATE_ROOT`. This makes the launch reproducible regardless of the
+ * operator's shell environment.
+ */
+export function launchEnv(manifest, env) {
+    return { ...env, [AUTOPILOT_STATE_ROOT_ENV]: manifest.state_root };
 }
 /** Stage 3: the full-tree main worktree created from content_result_commit. */
 async function createD65MainWorktree(input) {
@@ -253,7 +264,7 @@ async function writeJson(path, value) {
  */
 export async function registerD65LaunchPolicyAndInitialHeartbeat(input) {
     const { manifest, attachment } = input;
-    const env = { ...input.env, [AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV]: attachment.contextPath };
+    const env = { ...launchEnv(manifest, input.env), [AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV]: attachment.contextPath };
     const client = new CoordinatorClient({ env });
     const session = await readCoordinatorSessionContext(attachment.contextPath);
     // Idempotency: if a launch policy is already accepted, skip signing/register.
@@ -326,7 +337,7 @@ async function commitD65PolicyBlob(input) {
  * `ensureD65ProgramHeartbeatForGraphFromEnvironment` gate.
  */
 async function acceptSignedGraphHeartbeat(input) {
-    const env = { ...input.env, [AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV]: input.attachment.contextPath };
+    const env = { ...launchEnv(input.manifest, input.env), [AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV]: input.attachment.contextPath };
     // Idempotency: if the governing heartbeat for this sequence is already the
     // accepted head, skip producing a new candidate.
     const client = new CoordinatorClient({ env });
@@ -398,7 +409,7 @@ function readEvidenceHeartbeat(programEvidenceRoot, ref) {
  * dispatch proceed. Idempotent: an already-accepted graph 2 is recognized.
  */
 export async function publishD65FirstGraphAndSuccessorHeartbeat(input) {
-    const env = { ...input.env, [AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV]: input.attachment.contextPath };
+    const env = { ...launchEnv(input.manifest, input.env), [AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV]: input.attachment.contextPath };
     const client = new CoordinatorClient({ env });
     const session = await readCoordinatorSessionContext(input.attachment.contextPath);
     const status = await client.query('status', session.repo_id, session.workstream_run);

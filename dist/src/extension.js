@@ -8,7 +8,7 @@ import { AutopilotCloseError, abortAutopilotWorkstream, closeAutopilotWorkstream
 import { runAutopilotClaimGc } from "./core/claim-gc.js";
 import { readSchedulerConfig, writeSchedulerConfig } from "./core/scheduler-config.js";
 import { evaluateAutopilotWorktreeToolCall, } from "./core/git-guard.js";
-import { AutopilotParallelRuntimeError, coordinationRootForRepo, prepareAutopilotWorkstream, readActiveAutopilots, readCoordinatorActiveAutopilots, recoverAutopilotWorktreeSagas, resolveAutopilotStateRoot, resolveRepoIdentity, withAutopilotFileLock, worktreeRootForRepo, writeActiveAutopilots } from "./core/parallel-runtime.js";
+import { AUTOPILOT_STATE_ROOT_ENV, AutopilotParallelRuntimeError, coordinationRootForRepo, prepareAutopilotWorkstream, readActiveAutopilots, readCoordinatorActiveAutopilots, recoverAutopilotWorktreeSagas, resolveAutopilotStateRoot, resolveRepoIdentity, withAutopilotFileLock, worktreeRootForRepo, writeActiveAutopilots } from "./core/parallel-runtime.js";
 import { CoordinatorClient } from "./core/coordination/client.js";
 import { CoordinationRuntimeError, formatCoordinationRuntimeError } from "./core/coordination/failures.js";
 import { createClaimResponseTool } from "./core/coordination/claim-response-tool.js";
@@ -20,7 +20,7 @@ import { ensureMainWorktreeSagaRegistered } from "./core/coordination/worktree-s
 import { handoffUsage, onboardUsage, renderAutopilotBootstrapPlanPrompt, renderAutopilotPrompt, renderHandoffPrompt, renderOnboardPrompt, } from "./core/prompts.js";
 import { parseD65LaunchManifest, launchManifestBytesSha256, D65_LAUNCH_MANIFEST_MAX_BYTES } from "./core/coordination/d65-launch-manifest.js";
 import { SpawnedD65LaunchSigner } from "./core/coordination/d65-launch-signer.js";
-import { beginD65LaunchBootstrap, detectD65CharterComplete, publishD65FirstGraphAndSuccessorHeartbeat, registerD65LaunchPolicyAndInitialHeartbeat, } from "./core/coordination/d65-launch-integration.js";
+import { beginD65LaunchBootstrap, detectD65CharterComplete, launchEnv, publishD65FirstGraphAndSuccessorHeartbeat, registerD65LaunchPolicyAndInitialHeartbeat, } from "./core/coordination/d65-launch-integration.js";
 import { readFileSync, lstatSync } from 'node:fs';
 import { coordinationCutoverCommitted } from "./core/coordination/migration-paths.js";
 import { autopilotRosterContractCanonicalJson, autopilotRosterContractHashField, autopilotRosterContractSha256OmittingOwnField, isAutopilotRosterContractSchemaVersion, parseAutopilotRosterContract, parseAutopilotRosterContractJson, } from "./core/roster/contracts.js";
@@ -1563,6 +1563,10 @@ export default function autopilotExtension(pi, dependencies = {}) {
      */
     async function activateD65Launch(input) {
         const { manifest, ctx } = input;
+        // Bind the sealed isolated state root into the Pi session process env so
+        // every subsequent coordinator interaction and child dispatch targets the
+        // manifest's exact private state root, not an ambient AUTOPILOT_STATE_ROOT.
+        process.env[AUTOPILOT_STATE_ROOT_ENV] = manifest.state_root;
         const env = process.env;
         let signer;
         try {
@@ -1656,8 +1660,9 @@ export default function autopilotExtension(pi, dependencies = {}) {
         try {
             const adopted = await AutopilotSessionBridge.adopt({
                 attachment: pending.bootstrap.attachment,
+                env: launchEnv(pending.manifest, process.env),
                 recoverOwnedOperations: async (contextPath) => {
-                    const env = { ...process.env, [AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV]: contextPath };
+                    const env = { ...launchEnv(pending.manifest, process.env), [AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV]: contextPath };
                     await recoverAutopilotWorktreeSagas({ active: pending.bootstrap.active, env });
                     await ensureMainWorktreeSagaRegistered({ active: pending.bootstrap.active, env });
                 },
