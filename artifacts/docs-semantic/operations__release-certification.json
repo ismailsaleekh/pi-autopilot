@@ -1,8 +1,8 @@
 {
   "schema_version": "autopilot.docs_semantic_attestation.v2",
   "doc_id": "operations/release-certification",
-  "reviewed_body_hash": "sha256:ff6dc0cb79ae5ce4eda7c19477ad3f1c9bbbf94c832f5b43564814ef7401be2b",
-  "reviewed_doc_sha256": "sha256:1c3b93c82a9c526c3eaf92142176cf696d9760c05193e70ca505668a99fc2a4a",
+  "reviewed_body_hash": "sha256:41f0c69e48aba6554fb97fdb905d69791268281b40cb673328ca2a6fba657cf9",
+  "reviewed_doc_sha256": "sha256:76670a5e4e74f6037725dd5b828a75d50974bc07d1de6ba36627a8883d5ce877",
   "covers_sources": [
     "scripts/check-package-payload.mjs",
     "scripts/check-production-git-spawns.mjs",
@@ -13,7 +13,7 @@
     "scripts/verify-packed-consumer.mjs"
   ],
   "verdict": "PASS",
-  "reviewer": "pi W6 merge operator (offline semantic review)",
-  "reviewed_at": "2026-07-23T12:35:54.000Z",
-  "notes": "W6 offline semantic review: verified release certification prose against current certified command, package payload, security scan, docs verification, semantic attestation, and package manifest scripts; the combined package baseline is ^0.81.1 and old evidence is not relabeled."
+  "reviewer": "openai-codex/gpt-5.6-sol independent semantic reviewer, Pi subscription (cross-provider; round 3 after P1+P2 remediation), tasks b697e635b/ba94e16e0/be89a26bc",
+  "reviewed_at": "2026-07-24T20:05:07.000Z",
+  "notes": "Independent cross-provider review (Codex GPT-5.6-sol) of the D70 addition of scripts/test-fast.mjs + scripts/test-ram-root.mjs to check-production-git-spawns.mjs approvedProcessOwners. Round 1 P1 (over-broad 'every scanned file' git-token claim) + round 2 P2 (mischaracterizing all git-literal owners as git spawners) both remediated. Round 3 PASS 0/0/0: prose correctly distinguishes approvedProcessOwners (child_process-import exemption) from allowedGitLiteralOwners (exact-'git'-token exemption); the two D70 scripts are process-owners only (not git-literal owners) so an exact 'git' token in either still fails; git-process.ts/docs-verify.mjs spawn git, git-guard.ts parses tokens without child_process, the scanner self-references the token; production runtime zero-raw-Git-spawn guarantee intact; scanner passes with zero violations."
 }

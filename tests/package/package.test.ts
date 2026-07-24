@@ -363,7 +363,12 @@ void describe('package manifest and payload', () => {
 
   void it('locks CF-9 multiprocess and scale certification implementation claims', async () => {
     const scale = await sourceText('tests/scale/coordination-scale.test.ts');
-    const multiprocess = await sourceText('tests/multiprocess/coordinator-process.test.ts');
+    // The persistent release-trace harness (PersistentTraceClient, the randomized
+    // topological scheduler, the concurrent-client overlap wave, and the seeded
+    // cohort actions) was extracted to a shared helper so the 5/10/32 cohorts can
+    // run as concurrent sibling files (Phase 40 / D70 C3+C4). The CF-9 literals are
+    // asserted against the harness that actually implements them.
+    const multiprocess = await sourceText('tests/helpers/coordinator-process-harness.ts');
     const processClient = await sourceText('tests/helpers/release-trace-process-client.ts');
     assert.match(scale, /stageCoordinatorSemanticReplay/u);
     assert.match(await sourceText('src/core/coordination/store.ts'), /parseSemanticReplayLine\(line/u);

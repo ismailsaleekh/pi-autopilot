@@ -902,9 +902,9 @@
         "scripts/test-packed-consumer-release.mjs",
         "scripts/verify-packed-consumer.mjs"
       ],
-      "signature_hash": "sha256:ff6dc0cb79ae5ce4eda7c19477ad3f1c9bbbf94c832f5b43564814ef7401be2b",
-      "body_hash": "sha256:ff6dc0cb79ae5ce4eda7c19477ad3f1c9bbbf94c832f5b43564814ef7401be2b",
-      "semantic_attestation": "sha256:ff6dc0cb79ae5ce4eda7c19477ad3f1c9bbbf94c832f5b43564814ef7401be2b"
+      "signature_hash": "sha256:41f0c69e48aba6554fb97fdb905d69791268281b40cb673328ca2a6fba657cf9",
+      "body_hash": "sha256:41f0c69e48aba6554fb97fdb905d69791268281b40cb673328ca2a6fba657cf9",
+      "semantic_attestation": "sha256:41f0c69e48aba6554fb97fdb905d69791268281b40cb673328ca2a6fba657cf9"
     },
     "operations/start-run": {
       "mode": "authored",
@@ -999,8 +999,8 @@
         "src/core/coordination/store.ts"
       ],
       "signature_hash": "sha256:f2ccef5dd32315d6976da8c480b9f584d06e945cf776852a923f7811810c59ac",
-      "body_hash": "sha256:fd0d7634407c03dae0010371228b570e546ff2fbe5b502ff56532909067b1bfb",
-      "semantic_attestation": "sha256:fd0d7634407c03dae0010371228b570e546ff2fbe5b502ff56532909067b1bfb"
+      "body_hash": "sha256:7387ff1c3e758bb4c4312953ef02737a50df71ec33287d59c7d62ae1688fcc42",
+      "semantic_attestation": "sha256:7387ff1c3e758bb4c4312953ef02737a50df71ec33287d59c7d62ae1688fcc42"
     },
     "subsystems/docs-freshness-gate": {
       "mode": "authored",

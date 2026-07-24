@@ -11,9 +11,9 @@ covers_sources:
   - scripts/check-package-payload.mjs
   - scripts/verify-packed-consumer.mjs
   - scripts/test-packed-consumer-release.mjs
-signature_hash: 'sha256:ff6dc0cb79ae5ce4eda7c19477ad3f1c9bbbf94c832f5b43564814ef7401be2b'
-body_hash: 'sha256:ff6dc0cb79ae5ce4eda7c19477ad3f1c9bbbf94c832f5b43564814ef7401be2b'
-semantic_attestation: 'sha256:ff6dc0cb79ae5ce4eda7c19477ad3f1c9bbbf94c832f5b43564814ef7401be2b'
+signature_hash: 'sha256:41f0c69e48aba6554fb97fdb905d69791268281b40cb673328ca2a6fba657cf9'
+body_hash: 'sha256:41f0c69e48aba6554fb97fdb905d69791268281b40cb673328ca2a6fba657cf9'
+semantic_attestation: 'sha256:41f0c69e48aba6554fb97fdb905d69791268281b40cb673328ca2a6fba657cf9'
 stability: evolving
 ---
 
@@ -72,8 +72,19 @@ process exit 0 without a report is not a verdict.
 `npm run production-git:check` (`scripts/check-production-git-spawns.mjs`) proves the
 shipped runtime performs **zero raw production Git spawns**: all Git goes through the
 package's guarded Git process layer. The scanner has narrow, explicit owner allowances
-for the docs and certification scripts and emits the final scanner scope (scanned roots
-and approved process owners) in its report.
+for the docs, certification, and offline test-tooling scripts (including the fast-test
+orchestrator `scripts/test-fast.mjs` and the RAM-root manager `scripts/test-ram-root.mjs`,
+which spawn node:test lanes / the build and drive the RAM disk but never spawn Git) and
+emits the final scanner scope (scanned roots and approved process owners) in its report.
+The scanner keeps two separate allowlists: `approvedProcessOwners` exempts only the
+`child_process` import, while a distinct, smaller `allowedGitLiteralOwners` set exempts
+the exact `'git'`-executable-token check for the few files that legitimately spawn or
+otherwise inspect/reference the Git token: `git-process.ts` (which actually spawns Git)
+and `docs-verify.mjs` (which runs `execFileSync('git', ...)`), plus `git-guard.ts` (which
+parses/guards Git command tokens without importing `child_process`) and this scanner
+itself (whose inspection source necessarily contains the literal token). The two D70
+test-tooling additions are on the process-owner list only, never the Git-literal list, so
+an exact `'git'` token in either of them would still fail the scan.
 
 ## Deterministic packs and packed-consumer proof
 

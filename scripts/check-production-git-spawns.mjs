@@ -68,7 +68,13 @@ try {
     allowedGitLiteralOwners.add(resolve(sourceRoot, `core/git-guard${extension}`));
   }
   approvedProcessOwners.add(resolve(root, 'bin', 'autopilot-agent-run.mjs'));
-  for (const script of ['check-package-payload.mjs', 'docs-verify.mjs', 'run-certified-command.mjs', 'test-packed-consumer-release.mjs', 'verify-packed-consumer.mjs']) approvedProcessOwners.add(resolve(root, 'scripts', script));
+  // Offline test-tooling scripts (Phase 40 / D70) own their process spawns: the
+  // fast-test orchestrator launches per-lane node:test children and the build,
+  // and the RAM-root manager drives hdiutil/diskutil (macOS) or manages a tmpfs
+  // root (Linux). None spawns git (the exact-`git`-literal check below still
+  // applies to them and passes), so they are approved process owners exactly like
+  // the existing certification/verification scripts.
+  for (const script of ['check-package-payload.mjs', 'docs-verify.mjs', 'run-certified-command.mjs', 'test-packed-consumer-release.mjs', 'verify-packed-consumer.mjs', 'test-fast.mjs', 'test-ram-root.mjs']) approvedProcessOwners.add(resolve(root, 'scripts', script));
   allowedGitLiteralOwners.add(resolve(root, 'scripts', 'check-production-git-spawns.mjs'));
   allowedGitLiteralOwners.add(resolve(root, 'scripts', 'docs-verify.mjs'));
 
