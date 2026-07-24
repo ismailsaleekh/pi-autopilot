@@ -1,7 +1,7 @@
 {
   "schema_version": "autopilot.docs_manifest.v1",
   "generator": "scripts/docs-generate.mjs",
-  "coverage_floor": 17,
+  "coverage_floor": 18,
   "full_coverage_required": true,
   "surface_to_docs": {
     "/autopilot": [
@@ -43,6 +43,9 @@
     "autopilot-coordinator": [
       "cli/autopilot-coordinator",
       "subsystems/coordination"
+    ],
+    "autopilot-launch-signer": [
+      "cli/autopilot-launch-signer"
     ],
     "autopilot.assignment.v1": [
       "subsystems/roster-onboarding"
@@ -260,6 +263,9 @@
     ],
     "src/cli/autopilot-coordinator.ts": [
       "cli/autopilot-coordinator"
+    ],
+    "src/cli/autopilot-launch-signer.ts": [
+      "cli/autopilot-launch-signer"
     ],
     "src/cli/migration-recovery.ts": [
       "concepts/migration-cutover"
@@ -598,6 +604,20 @@
       "body_hash": "sha256:a2fba4b956ea0dc74d425cf5daa4461c4b95429e4b50ae893345cefa41c5d13a",
       "semantic_attestation": null
     },
+    "cli/autopilot-launch-signer": {
+      "mode": "authored",
+      "review_policy": "contract",
+      "stability": "evolving",
+      "covers_surfaces": [
+        "autopilot-launch-signer"
+      ],
+      "covers_sources": [
+        "src/cli/autopilot-launch-signer.ts"
+      ],
+      "signature_hash": "sha256:279a789983604ed3d9b43040cc4bed1bbad75983311ed32e183d2ca5bbc38c65",
+      "body_hash": "sha256:ed85d85ce3be406ae8b718faaa1269a7bfeda98da43cd12546abf3a8819c3c29",
+      "semantic_attestation": null
+    },
     "commands/autopilot": {
       "mode": "authored",
       "review_policy": "contract",
@@ -733,9 +753,9 @@
         "src/core/coordination/d65-terminal-intent.ts",
         "src/core/coordination/terminal-attempt-proof.ts"
       ],
-      "signature_hash": "sha256:e739fe96e4adda1e466f01c9c993d956ab1fdb90536654a4b6297a59d967942a",
-      "body_hash": "sha256:29f88722280b9359f51c6fb07750416f6eebd55cd01e97b3adffee3eb6a7edd0",
-      "semantic_attestation": "sha256:29f88722280b9359f51c6fb07750416f6eebd55cd01e97b3adffee3eb6a7edd0"
+      "signature_hash": "sha256:06405c9702acc763c5a0da285e9ebc2b81817116df945f1e2e6933d9925882d4",
+      "body_hash": "sha256:c28c649cdf388c31a73f689f888835778eb5fa686be25637b988e5b13be5a84a",
+      "semantic_attestation": "sha256:c28c649cdf388c31a73f689f888835778eb5fa686be25637b988e5b13be5a84a"
     },
     "concepts/deadlock": {
       "mode": "mixed",
@@ -765,8 +785,8 @@
         "src/core/coordination/unavailable-recovery.ts"
       ],
       "signature_hash": "sha256:a6fdd31a6ee98c213ebaf99a0ccb460670df6c4437997d511a53d1d685653310",
-      "body_hash": "sha256:703afd05353f9136675573856bfd173990450fd62790ae582af4616afc2b8101",
-      "semantic_attestation": "sha256:703afd05353f9136675573856bfd173990450fd62790ae582af4616afc2b8101"
+      "body_hash": "sha256:4dc4e263dceb34f37aa422369377a044ef76ac88e3d06d79dcaf30a87ee00a95",
+      "semantic_attestation": "sha256:4dc4e263dceb34f37aa422369377a044ef76ac88e3d06d79dcaf30a87ee00a95"
     },
     "concepts/generations-and-fencing": {
       "mode": "authored",
@@ -834,9 +854,9 @@
         "src/core/coordination/d65-graph-successor.ts",
         "src/core/coordination/d65-semantic-graph.ts"
       ],
-      "signature_hash": "sha256:bc115b1298592020a7c25422a3de843eedb58469735b7df203f9f7471be6acdf",
-      "body_hash": "sha256:83633006d8d20bda400c57c9b97afaabaffb1ce9fc9c90a465631edaca8f98f6",
-      "semantic_attestation": "sha256:83633006d8d20bda400c57c9b97afaabaffb1ce9fc9c90a465631edaca8f98f6"
+      "signature_hash": "sha256:9a5e60a3ba8f59128b16556cc1fe4af77d4d23a810f53e081e0bd219d0e33e42",
+      "body_hash": "sha256:9015e1a8a1d88ca10e68671acebbe23c88fd4397837331b58f135f49aa2c568e",
+      "semantic_attestation": "sha256:9015e1a8a1d88ca10e68671acebbe23c88fd4397837331b58f135f49aa2c568e"
     },
     "concepts/terminal-evidence": {
       "mode": "authored",
@@ -902,9 +922,9 @@
         "scripts/test-packed-consumer-release.mjs",
         "scripts/verify-packed-consumer.mjs"
       ],
-      "signature_hash": "sha256:41f0c69e48aba6554fb97fdb905d69791268281b40cb673328ca2a6fba657cf9",
-      "body_hash": "sha256:41f0c69e48aba6554fb97fdb905d69791268281b40cb673328ca2a6fba657cf9",
-      "semantic_attestation": "sha256:41f0c69e48aba6554fb97fdb905d69791268281b40cb673328ca2a6fba657cf9"
+      "signature_hash": "sha256:dcb1913be4b88e727e4d3720f1bdd49efea05fa2376e75e0d72ee279576a1ebf",
+      "body_hash": "sha256:dcb1913be4b88e727e4d3720f1bdd49efea05fa2376e75e0d72ee279576a1ebf",
+      "semantic_attestation": "sha256:dcb1913be4b88e727e4d3720f1bdd49efea05fa2376e75e0d72ee279576a1ebf"
     },
     "operations/start-run": {
       "mode": "authored",
@@ -975,8 +995,8 @@
         "src/core/contracts/index.ts",
         "src/core/names.ts"
       ],
-      "signature_hash": "sha256:09d5b894b45a6ee909d86cc0f308ba3e12e25aad1bf7b6bb02c08611fa3eded0",
-      "body_hash": "sha256:d0b47661598d9edfdfb1e69c53c73fbaf7899938f26da34f5355186802b830df",
+      "signature_hash": "sha256:6ee03c7fb6ad764d8fac92d0ed9ed092d712b0054a8abcbdddb6b9c7b798c527",
+      "body_hash": "sha256:32eac81d894fa08c0563d7633e91c35b829f0b43c2815b142663fda076937a0d",
       "semantic_attestation": null
     },
     "subsystems/coordination": {
@@ -998,9 +1018,9 @@
         "src/core/coordination/runtime-constants.ts",
         "src/core/coordination/store.ts"
       ],
-      "signature_hash": "sha256:f2ccef5dd32315d6976da8c480b9f584d06e945cf776852a923f7811810c59ac",
-      "body_hash": "sha256:7387ff1c3e758bb4c4312953ef02737a50df71ec33287d59c7d62ae1688fcc42",
-      "semantic_attestation": "sha256:7387ff1c3e758bb4c4312953ef02737a50df71ec33287d59c7d62ae1688fcc42"
+      "signature_hash": "sha256:d91b76a527e89d599b8525a63ac3552c64dfa2e6b927cae2632efb86aa2646a1",
+      "body_hash": "sha256:5797e11384f76a3d03ec38adb9f6def5b817dcc38a6f45da1eae4e6202b0ab55",
+      "semantic_attestation": "sha256:5797e11384f76a3d03ec38adb9f6def5b817dcc38a6f45da1eae4e6202b0ab55"
     },
     "subsystems/docs-freshness-gate": {
       "mode": "authored",
@@ -1113,8 +1133,8 @@
         "templates/skills/autopilot-roster-setup/SKILL.md",
         "templates/skills/autopilot-roster-setup/payload.json"
       ],
-      "signature_hash": "sha256:803bb3fc2e2f4dfe6f4dda4b1588f9fc4c63b06a4c30ffb0d20cfe1f8ff38683",
-      "body_hash": "sha256:37938b39c381ce872fafc5b45fca2ef94ab18dd36c6a8303820225b052034218",
+      "signature_hash": "sha256:65e0ff2b8897b03cb04396f41d85620adfe929a558d45b0553399f5141dca92b",
+      "body_hash": "sha256:44aa73af0c26ea939ca327688e4f28ffcc0f35cd4296a96bc85352f7233fc675",
       "semantic_attestation": null
     },
     "subsystems/runner-and-forced-output": {
@@ -1172,9 +1192,9 @@
         "src/core/parallel-runtime.ts",
         "src/core/sparse-worktree.ts"
       ],
-      "signature_hash": "sha256:82aef4645150c182b4129dfdd1de171c9d6d4fd06efc7a4290518f823633fdff",
-      "body_hash": "sha256:6874467d83a8f7156c13c934661a4054143cb27c53e41e441009b8a5eff5ed63",
-      "semantic_attestation": "sha256:6874467d83a8f7156c13c934661a4054143cb27c53e41e441009b8a5eff5ed63"
+      "signature_hash": "sha256:9e7f50dd59b9434e8d5c5809cb34e3bd53e01e2291356b0483f111fa71aece2e",
+      "body_hash": "sha256:da4a2afdfcb3fd0de2162311dca2a45409aeee5b781837124eac5e8b37282f8c",
+      "semantic_attestation": "sha256:da4a2afdfcb3fd0de2162311dca2a45409aeee5b781837124eac5e8b37282f8c"
     },
     "tools/autopilot_emit_status": {
       "mode": "authored",

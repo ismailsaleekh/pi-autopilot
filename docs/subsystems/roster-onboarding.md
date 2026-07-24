@@ -81,8 +81,8 @@ covers_sources:
   - src/internal/execution-observer-extension.ts
   - templates/skills/autopilot-roster-setup/SKILL.md
   - templates/skills/autopilot-roster-setup/payload.json
-signature_hash: 'sha256:803bb3fc2e2f4dfe6f4dda4b1588f9fc4c63b06a4c30ffb0d20cfe1f8ff38683'
-body_hash: 'sha256:37938b39c381ce872fafc5b45fca2ef94ab18dd36c6a8303820225b052034218'
+signature_hash: 'sha256:65e0ff2b8897b03cb04396f41d85620adfe929a558d45b0553399f5141dca92b'
+body_hash: 'sha256:44aa73af0c26ea939ca327688e4f28ffcc0f35cd4296a96bc85352f7233fc675'
 stability: evolving
 ---
 
@@ -248,9 +248,13 @@ test injects an absolute state root. Roster authority paths are:
 | Trusted-project config | `<trusted-project>/.autopilot/config.json` |
 | Trusted-project roster revision | `<trusted-project>/.autopilot/rosters/<roster-id>/revision-<revision>.json` |
 
-Trusted-project reads and writes require project trust. Pre-run selection files are
-create-only: byte-identical replay is idempotent, different existing bytes are a
-conflict. Before publishing the run-local selection mirror, the runtime creates or
+Trusted-project reads and writes require project trust. The closed
+`<workstream-run>` storage and activation grammar accepts sealed production/D65
+identity bytes, including canonical uppercase UTC `T`/`Z`. The ordinary local
+`buildAutopilotWorkstreamRun` generator retains lowercase `t`/`z` for compatibility.
+Both forms remain bounded to 120 ASCII alphanumeric-or-hyphen bytes; separators such
+as `_`, `/`, and `..` reject before publication or activation. Pre-run selection files are create-only:
+byte-identical replay is idempotent, different existing bytes are a conflict. Before publishing the run-local selection mirror, the runtime creates or
 hardens `.pi/autopilot/<workstream>/` as a physical private authority directory; mirror
 publication and exact-byte readback therefore cannot fail merely because the newly
 prepared runtime directory inherited a permissive mode.

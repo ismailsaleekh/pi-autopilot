@@ -1,8 +1,8 @@
 {
   "schema_version": "autopilot.docs_semantic_attestation.v2",
   "doc_id": "concepts/dispatch-and-recovery-authority",
-  "reviewed_body_hash": "sha256:703afd05353f9136675573856bfd173990450fd62790ae582af4616afc2b8101",
-  "reviewed_doc_sha256": "sha256:27e725b1574284f09e1230a10fcbf359a265c9706274509200a90abb4cc45504",
+  "reviewed_body_hash": "sha256:4dc4e263dceb34f37aa422369377a044ef76ac88e3d06d79dcaf30a87ee00a95",
+  "reviewed_doc_sha256": "sha256:1a2c7d6dd90a488771996cf111fe7638eb3bf8f0754410a107a0feb36b1cb807",
   "covers_sources": [
     "src/core/coordination/d65-dispatch-authority.ts",
     "src/core/coordination/d65-dispatch-gate.ts",
@@ -14,7 +14,7 @@
     "src/core/coordination/unavailable-recovery.ts"
   ],
   "verdict": "PASS",
-  "reviewer": "independent Pi validate-role review (anthropic/claude-sonnet-4-5, thinking high), report /tmp/phase39-reviews/r-dispatch-recovery.md",
-  "reviewed_at": "2026-07-23T10:26:56.000Z",
-  "notes": "PASS P0=0 P1=0 P2=0. Verified cap-one launch policy (parallel_cap/expected_checkout_units/maximum_parallel_cap all 1 for v1), capacity-decision as sole raise path, total side-effect-free ordinaryDispatchAllowed/recoveryTransitionAllowed predicates, default-deny recovery cells authorizing no model/product/new-work, signed parent-loss and one-use subscription-probe recovery, and unavailable-recovery outcomes, against the 8 covered sources. Production consumes signed authority, never self-signs."
+  "reviewer": "openai-codex/gpt-5.5 independent C11 reviewer (r5b)",
+  "reviewed_at": "2026-07-24T16:21:18.000Z",
+  "notes": "Full doc and all covered sources reviewed; policy/heartbeat signature claims and capacity/probe/parent-loss/register-attempt scopes are accurate and non-overclaiming."
 }

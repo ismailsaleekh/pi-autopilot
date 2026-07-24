@@ -1,9 +1,8 @@
 import { homedir } from 'node:os';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { isValidAutopilotRepoId, isValidWorkstreamRun } from "../paths.js";
 export const DEFAULT_USER_STATE_ROOT_DISPLAY = '~/.pi/agent/autopilot/';
 const ROSTER_ID_PATTERN = /^[a-z][a-z0-9-]{0,95}$/u;
-const REPO_ID_PATTERN = /^[a-z][a-z0-9-]{0,119}$/u;
-const WORKSTREAM_RUN_PATTERN = /^[a-z][a-z0-9-]{0,119}$/u;
 const SHA256_PATTERN = /^sha256:[a-f0-9]{64}$/u;
 export function defaultUserStateRoot(home = homedir()) {
     return normalizeAbsoluteRoot(join(home, '.pi', 'agent', 'autopilot'), 'home-derived state root');
@@ -20,10 +19,10 @@ export function assertValidRosterId(value, label = 'roster_id') {
     assertPathSegment(value, label, ROSTER_ID_PATTERN);
 }
 export function assertValidRepoId(value, label = 'repo_id') {
-    assertPathSegment(value, label, REPO_ID_PATTERN);
+    assertClosedPathSegment(value, label, isValidAutopilotRepoId);
 }
 export function assertValidWorkstreamRun(value, label = 'workstream_run') {
-    assertPathSegment(value, label, WORKSTREAM_RUN_PATTERN);
+    assertClosedPathSegment(value, label, isValidWorkstreamRun);
 }
 export function assertValidRosterRevision(value, label = 'roster_revision') {
     if (!Number.isInteger(value) || value < 1) {
@@ -104,8 +103,11 @@ function requireTrustedProjectRoot(value) {
     return normalizeAbsoluteRoot(value, 'trustedProjectRoot');
 }
 function assertPathSegment(value, label, pattern) {
+    assertClosedPathSegment(value, label, (candidate) => pattern.test(candidate));
+}
+function assertClosedPathSegment(value, label, valid) {
     assertNoNul(value, label);
-    if (!pattern.test(value) || value.includes('/') || value.includes('\\') || value === '.' || value === '..') {
+    if (!valid(value) || value.includes('/') || value.includes('\\') || value === '.' || value === '..') {
         throw new Error(`${label} is not a valid roster storage path segment: ${value}`);
     }
 }

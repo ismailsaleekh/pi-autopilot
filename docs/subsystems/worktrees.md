@@ -11,9 +11,9 @@ covers_sources:
   - src/core/materialization.ts
   - src/core/git-guard.ts
   - src/core/git-process.ts
-signature_hash: 'sha256:82aef4645150c182b4129dfdd1de171c9d6d4fd06efc7a4290518f823633fdff'
-body_hash: 'sha256:6874467d83a8f7156c13c934661a4054143cb27c53e41e441009b8a5eff5ed63'
-semantic_attestation: 'sha256:6874467d83a8f7156c13c934661a4054143cb27c53e41e441009b8a5eff5ed63'
+signature_hash: 'sha256:9e7f50dd59b9434e8d5c5809cb34e3bd53e01e2291356b0483f111fa71aece2e'
+body_hash: 'sha256:da4a2afdfcb3fd0de2162311dca2a45409aeee5b781837124eac5e8b37282f8c'
+semantic_attestation: 'sha256:da4a2afdfcb3fd0de2162311dca2a45409aeee5b781837124eac5e8b37282f8c'
 stability: stable
 ---
 
@@ -63,18 +63,24 @@ to a full checkout.
 - Projects may opt into `.autopilot/checkout-profile.json` or
   `AUTOPILOT_CHECKOUT_PROFILE=/absolute/path`; explicit `full` mode is opt-in only and
   still passes the disk gate.
+- `resolveAutopilotFullCheckoutProfile` resolves the same profile forced to a full
+  checkout with a correctly recomputed `profile_sha256`; the D65 sealed-launch main
+  worktree uses it so the frozen checkout-profile/task-info contracts accept the exact
+  bytes and the ordinary child materialization/disk-gate paths stay viable.
 
 For D65 runs, the signed launch policy always binds `parallel_cap=1` and
 `expected_checkout_units=1`; `maximum_parallel_cap` is required to be `1` for the
 initial policy version 1 (a later signed capacity decision may raise the maximum in a
-superseding policy). `parallel-runtime.ts` guards its worktree effects through the
-D65 dispatch gate: ordinary create/materialize, missing-worktree creation, and disk
-boundaries call `assertD65OrdinaryBoundaryFromEnvironment` (e.g.
-`checkout-disk-estimate`, `ordinary-state-advance`), while unit reset/quarantine/remove
-call `assertD65RecoveryBoundaryFromEnvironment('unit-recovery', …)`. The exact predicate
-semantics — which committed graph/policy/heartbeat tuple each boundary requires, and why
-recovery cells do not re-require the full tuple — are documented and independently
-reviewed in
+superseding policy). `parallel-runtime.ts` gates the D65 **unit-worktree** preparation path before
+`unit-release`, before each `checkout-disk-estimate` surrounding its disk-gate call,
+and before `missing-worktree-creation`. `updateUnitBranchStatus` gates its normal
+branch projection as `ordinary-state-advance`, or uses the explicit
+`unit-recovery` boundary when invoked in recovery mode. The generic main-worktree
+creation, `disk-gate.ts`, and `materialization.ts` do not themselves claim those D65
+boundary calls; sealed-launch main-worktree cadence is owned by the related D65
+worktree-saga/graph-publication layer. The exact predicate semantics — which committed
+graph/policy/heartbeat tuple each declared boundary requires, and why recovery cells
+do not re-require the full tuple — are documented and independently reviewed in
 [`../concepts/dispatch-and-recovery-authority.md`](../concepts/dispatch-and-recovery-authority.md)
 and [`../concepts/semantic-graph-authority.md`](../concepts/semantic-graph-authority.md).
 
@@ -90,6 +96,30 @@ diagnostics — no raw production Git exceptions escape. Recursive tracked-tree 
 uses the streaming `ls-tree-recursive-stream` descriptor with separate entry-count,
 cumulative-path-byte, per-record, and total lifecycle bounds; it never raises the
 64 MiB retained-output ceiling or truncates authority into a false success.
+
+### D65 bootstrap-only effect fence
+
+During the D65 launch bootstrap-plan turn the guard runs in a stricter mode set by
+`AutopilotGitGuardPolicy.bootstrapCharterPaths`. The launch integration supplies the
+five previously-absent runtime charter roots; the guard independently requires an
+in-worktree, one-parent, duplicate-free set with the exact basenames `mission.md`,
+`master-plan.json`, `state.json`, `decision-log.jsonl`, and `events.jsonl`. Every
+explicit `bootstrapAllowedAuxiliaryRoots` entry must also remain inside the worktree.
+A malformed policy blocks every tool call. With that capability installed, a
+write/edit call may affect **exactly** a named charter path or a declared auxiliary
+subtree — and nothing else, not even another file inside the runtime directory or an
+out-of-worktree absolute path. The launch phase resolver owns absence/presence and
+restart-state meaning; the per-call guard owns capability shape, containment, and
+target membership. Tool admission is a
+positive allowlist: dedicated read-only `read`, `grep`, `find`, and `ls`; exact-path
+`write`/`edit`; and the manifest/session-bound `context_budget`. General `bash`, every
+command/process/background alias, unnamed calls, and unknown tools are disabled: they
+could mutate product, runtime-extra, Git, or external paths or spawn child/coordinator
+processes outside any statically provable exact-path capability. The fence is
+exact-path, not runtime-wide. This is enforced independently of, and in addition
+to, the charter-completeness detector in `d65-launch-integration.ts`, which
+inspects the full `git status --ignored` porcelain so that even an *ignored*
+out-of-scope effect fences first-graph publication rather than passing silently.
 
 ## Related
 

@@ -10,7 +10,7 @@ import { CoordinationRuntimeError, formatCoordinationRuntimeError } from "./fail
 import { isS2OwnerRecoveryProgressFailure, isS2SameOperationProgressRetry } from "./s2-failure-taxonomy.js";
 import { acknowledgeCoordinationMigrationFreeze, activeCoordinationMigrationFreeze, assertMigrationPathSafe } from "./migration-paths.js";
 import { currentBootId } from "./process-identity.js";
-import { COORDINATOR_HEARTBEAT_MS, COORDINATOR_SESSION_LEASE_MS, enforcePrivateAuthorityPath, ensurePrivateAuthorityDirectory } from "./runtime-paths.js";
+import { COORDINATOR_BOOTSTRAP_SESSION_LEASE_MS, COORDINATOR_HEARTBEAT_MS, COORDINATOR_SESSION_LEASE_MS, enforcePrivateAuthorityPath, ensurePrivateAuthorityDirectory } from "./runtime-paths.js";
 export const AUTOPILOT_COORDINATOR_SESSION_CONTEXT_SCHEMA = 'autopilot.coordinator_session_context.v1';
 function isSha256Digest(value) {
     return /^sha256:[a-f0-9]{64}$/u.test(value);
@@ -54,6 +54,10 @@ function payloadArray(response, field) {
 }
 function leaseExpiry() {
     return new Date(Date.now() + COORDINATOR_SESSION_LEASE_MS).toISOString();
+}
+/** The bootstrap-safe lease expiry spanning the D65 launch bootstrap window. */
+function bootstrapLeaseExpiry() {
+    return new Date(Date.now() + COORDINATOR_BOOTSTRAP_SESSION_LEASE_MS).toISOString();
 }
 /**
  * A heartbeat that fails because the coordinator socket is momentarily
@@ -195,6 +199,60 @@ export async function writeCoordinatorSessionContext(path, context) {
     await enforcePrivateAuthorityPath(temporary, false);
     await rename(temporary, path);
     await enforcePrivateAuthorityPath(path, false);
+}
+/** The deterministic durable context path for a D65 bootstrap session lease. */
+function d65BootstrapContextPath(sessionsRoot, repoId, workstreamRun, sessionLeaseId) {
+    return join(sessionsRoot, `${createHash('sha256').update(`${repoId}\0${workstreamRun}\0${sessionLeaseId}`, 'utf8').digest('hex')}.json`);
+}
+const D65_STAGED_SESSION_TOKEN_SCHEMA = 'autopilot.d65_staged_session_token.v1';
+/**
+ * Durably stage the exact secret session token BEFORE the attach-session
+ * mutation (crash-safe staged-context protocol; audit item B). The staged file
+ * is a mode-0600 private-authority file created atomically (temp+fsync+rename)
+ * so a crash after the coordinator commits the session but before the final
+ * context is published leaves the exact token recoverable. The token never
+ * leaves mode-0600 private authority.
+ */
+async function writeD65StagedSessionToken(stagedPath, input) {
+    await ensurePrivateAuthorityDirectory(dirname(stagedPath));
+    const record = { schema_version: D65_STAGED_SESSION_TOKEN_SCHEMA, session_lease_id: input.session_lease_id, session_token: input.session_token };
+    const temporary = `${stagedPath}.tmp-${String(process.pid)}-${randomBytes(6).toString('hex')}`;
+    await writeFile(temporary, `${JSON.stringify(record, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
+    await enforcePrivateAuthorityPath(temporary, false);
+    await rename(temporary, stagedPath);
+    await enforcePrivateAuthorityPath(stagedPath, false);
+}
+/**
+ * Read the durably staged session token, returning its exact token bytes when
+ * present and bound to the expected lease id, or null when absent. A staged file
+ * whose lease id does not match the expected lease rejects loudly (conflicting
+ * staged bytes are never silently adopted).
+ */
+async function readD65StagedSessionToken(stagedPath, expectedLeaseId) {
+    if (!existsSync(stagedPath))
+        return null;
+    let value;
+    try {
+        value = JSON.parse(await readFile(stagedPath, 'utf8'));
+    }
+    catch (error) {
+        throw new CoordinationRuntimeError('invalid-state', 'D65 staged session token is unreadable', [stagedPath, error instanceof Error ? error.message : String(error)]);
+    }
+    const record = requireRecord(value, 'D65 staged session token');
+    if (record['schema_version'] !== D65_STAGED_SESSION_TOKEN_SCHEMA)
+        throw new CoordinationRuntimeError('invalid-state', 'D65 staged session token schema is incompatible', [stagedPath]);
+    const leaseId = requireString(record, 'session_lease_id');
+    const token = requireAuthorityToken(record, 'session_token');
+    if (leaseId !== expectedLeaseId)
+        throw new CoordinationRuntimeError('invalid-state', 'D65 staged session token names a different session lease', [leaseId, expectedLeaseId]);
+    return token;
+}
+/** Descriptor-safe removal of the staged token residue (deterministic, crash-safe). */
+async function removeD65StagedSessionToken(stagedPath) {
+    if (!existsSync(stagedPath))
+        return;
+    await unlink(stagedPath);
+    fsyncParentDirectory(stagedPath);
 }
 export async function readCoordinatorSessionContext(path) {
     if (!isAbsolute(path))
@@ -398,6 +456,186 @@ export class DurableRunSupervisorClient {
         }
         return { run: attachedRun, session, contextPath, context };
     }
+    /**
+     * The D65 bootstrap attach (freeze §9.5; fresh plan §2.3/§3). Unlike the
+     * ordinary `attach()`, this sends `attach-run` carrying the exact sealed
+     * `bootstrap_graph` so the store atomically creates the deterministic
+     * bootstrap-artifact/trust rows and the closed `autopilot.attach_run_result.v2`
+     * effect (receipt B=1 over a fresh empty repository). It then attaches EXACTLY
+     * ONE initial dispatch session (generation 1) using the sealed idempotency
+     * keys, and returns that single attachment. Every identity — run/resource
+     * rows, attach-run/attach-session idempotency keys, session lease — comes from
+     * the sealed launch manifest and is consumed, never regenerated. The caller
+     * (the launcher) owns the remaining charter saga on this same one session.
+     */
+    async attachD65Bootstrap(input) {
+        const repoId = input.repo.repoKey;
+        const sessionId = durableIdentifier('session', input.rawSessionId);
+        const status = await this.#client.query('run-catalog', repoId, input.active.workstream_run);
+        const runValues = payloadArray(status, 'runs');
+        const pendingRecoveryCount = requireInteger(status.payload, 'pending_migration_recovery_count');
+        if (pendingRecoveryCount > 0)
+            throw new CoordinationRuntimeError('recovery-required', 'D65 bootstrap attach is fenced while migration recovery work is pending', [`pending_count=${String(pendingRecoveryCount)}`]);
+        let run;
+        if (runValues.length === 0) {
+            const attachedRun = await this.#client.mutate('attach-run', {
+                repoId,
+                workstreamRun: input.active.workstream_run,
+                sessionId: null,
+                fencingGeneration: null,
+                expectedVersion: 0,
+                idempotencyKey: input.attachRunIdempotencyKey,
+            }, {
+                repo_key: input.repo.repoKey,
+                canonical_root: input.repo.repoRoot,
+                git_common_dir: input.repo.gitCommonDir,
+                autopilot_id: input.active.autopilot_id,
+                workstream: input.active.workstream,
+                coordination_authority: input.active.coordination_authority,
+                run_resource: input.prospectiveResource,
+                bootstrap_graph: input.bootstrapGraph,
+            });
+            run = parseCoordinationRun(payloadRecord(attachedRun, 'run'));
+        }
+        else if (runValues.length === 1) {
+            // Idempotent replay after a response-loss crash before session attach.
+            run = parseCoordinationRun(runValues[0]);
+            if (run.autopilot_id !== input.active.autopilot_id || run.workstream !== input.active.workstream || run.coordination_authority !== input.active.coordination_authority)
+                throw new CoordinationRuntimeError('invalid-state', 'durable D65 bootstrap run identity disagrees with the sealed active row');
+            const artifacts = status.payload['authoritative_artifacts'];
+            const hasBootstrap = Array.isArray(artifacts) && artifacts.some((value) => typeof value === 'object' && value !== null && value['artifact_id'] === `semantic-graph-bootstrap:${run.workstream_run}`);
+            if (!hasBootstrap && run.active_session_generation === 0)
+                throw new CoordinationRuntimeError('invalid-state', 'existing run for this D65 identity is not a bootstrap run; refusing to attach a second session');
+        }
+        else {
+            throw new CoordinationRuntimeError('invalid-state', 'coordinator returned duplicate durable run supervisors for the D65 bootstrap identity');
+        }
+        const generation = run.active_session_generation + 1;
+        if (generation !== 1) {
+            // A session already exists (crash-after-session-attach replay). Adopt the
+            // existing exactly-one attached generation-1 dispatch session by reading
+            // its durable context; the launcher then resumes the charter idempotently.
+            const existing = await this.#adoptExistingD65BootstrapSession(input, run);
+            if (existing !== null)
+                return existing;
+            throw new CoordinationRuntimeError('invalid-state', 'D65 bootstrap run already advanced its generation without a recoverable single session', [String(run.active_session_generation)]);
+        }
+        const sessionLeaseId = input.sessionLeaseId;
+        const contextPath = d65BootstrapContextPath(this.#client.paths.sessionsRoot, repoId, run.workstream_run, sessionLeaseId);
+        const stagedPath = `${contextPath}.staged`;
+        // CRASH-SAFE STAGED-CONTEXT PROTOCOL (freeze §9.5; audit item B):
+        // The secret session token is durably STAGED before the attach-session
+        // mutation, so a crash/response loss after the coordinator commits but before
+        // the final context is published leaves the exact token recoverable. The
+        // token never leaves mode-0600 private authority. Because `attach-session` is
+        // a run-owned idempotent action whose idempotency digest EXCLUDES the token/
+        // lease id, replaying it with the exact staged token returns the committed
+        // session row and never creates a second session/generation.
+        const staged = await readD65StagedSessionToken(stagedPath, sessionLeaseId);
+        const sessionToken = staged !== null ? staged : randomBytes(32).toString('hex');
+        if (staged === null)
+            await writeD65StagedSessionToken(stagedPath, { session_lease_id: sessionLeaseId, session_token: sessionToken });
+        const attachSession = await this.#client.mutate('attach-session', {
+            repoId,
+            workstreamRun: run.workstream_run,
+            sessionId,
+            fencingGeneration: generation,
+            expectedVersion: run.version,
+            idempotencyKey: input.attachSessionIdempotencyKey,
+        }, {
+            session_lease_id: sessionLeaseId,
+            session_token: sessionToken,
+            pid: process.pid,
+            boot_id: currentBootId(),
+            // The single bootstrap session runs no periodic heartbeat until graph 2 is
+            // accepted, so it takes a bootstrap-safe lease spanning the planning turn.
+            lease_expires_at: bootstrapLeaseExpiry(),
+            handoff_token: null,
+        });
+        const attachedRun = parseCoordinationRun(payloadRecord(attachSession, 'run'));
+        const session = parseCoordinationSessionLease(payloadRecord(attachSession, 'session'));
+        const context = {
+            schema_version: AUTOPILOT_COORDINATOR_SESSION_CONTEXT_SCHEMA,
+            state_root: this.#client.paths.stateRoot,
+            repo_id: repoId,
+            repo_key: input.repo.repoKey,
+            autopilot_id: input.active.autopilot_id,
+            workstream: input.active.workstream,
+            workstream_run: input.active.workstream_run,
+            session_id: session.session_id,
+            session_generation: session.session_generation,
+            run_version: attachedRun.version,
+            session_lease_id: session.session_lease_id,
+            session_token: sessionToken,
+            session_version: session.version,
+            pid: session.pid,
+            boot_id: session.boot_id,
+        };
+        // Atomically publish the final context, then descriptor-safely remove the
+        // staged residue (its absence is proven on the next line's re-lstat).
+        await writeCoordinatorSessionContext(contextPath, context);
+        await removeD65StagedSessionToken(stagedPath);
+        return { run: attachedRun, session, contextPath, context };
+    }
+    /**
+     * Recover the durable context for an already-attached D65 bootstrap session
+     * (crash after the single attach-session, before/after later charter stages).
+     * Only the exact one attached generation-1 dispatch session is adopted; a
+     * missing durable context file fails loud rather than creating a second one.
+     */
+    async #adoptExistingD65BootstrapSession(input, run) {
+        const repoId = input.repo.repoKey;
+        const status = await this.#client.query('status', repoId, run.workstream_run);
+        const sessions = payloadArray(status, 'session_leases').map((value) => parseCoordinationSessionLease(value));
+        const attached = sessions.filter((session) => session.status === 'attached' && session.attachment_kind === 'dispatch' && session.session_generation === run.active_session_generation);
+        if (attached.length !== 1)
+            return null;
+        const session = attached[0];
+        if (session === undefined || session.session_lease_id !== input.sessionLeaseId)
+            return null;
+        const contextPath = d65BootstrapContextPath(this.#client.paths.sessionsRoot, repoId, run.workstream_run, session.session_lease_id);
+        const stagedPath = `${contextPath}.staged`;
+        if (existsSync(contextPath)) {
+            const context = await readCoordinatorSessionContext(contextPath);
+            if (context.session_lease_id !== session.session_lease_id || context.session_generation !== session.session_generation)
+                return null;
+            // A conflicting staged residue whose token differs from the published final
+            // context rejects loudly rather than being silently discarded.
+            const staged = await readD65StagedSessionToken(stagedPath, session.session_lease_id);
+            if (staged !== null && staged !== context.session_token)
+                throw new CoordinationRuntimeError('invalid-state', 'D65 staged session token conflicts with the published final context', [session.session_lease_id]);
+            if (staged !== null)
+                await removeD65StagedSessionToken(stagedPath);
+            return { run, session, contextPath, context };
+        }
+        // The coordinator committed the single session (crash after commit, before
+        // final context publication). Recover the exact token from the durable
+        // staged file and atomically finalize the one context. No second session is
+        // created; the recovered token's hash was committed at attach time.
+        const staged = await readD65StagedSessionToken(stagedPath, session.session_lease_id);
+        if (staged === null)
+            return null;
+        const context = {
+            schema_version: AUTOPILOT_COORDINATOR_SESSION_CONTEXT_SCHEMA,
+            state_root: this.#client.paths.stateRoot,
+            repo_id: repoId,
+            repo_key: input.repo.repoKey,
+            autopilot_id: input.active.autopilot_id,
+            workstream: input.active.workstream,
+            workstream_run: input.active.workstream_run,
+            session_id: session.session_id,
+            session_generation: session.session_generation,
+            run_version: run.version,
+            session_lease_id: session.session_lease_id,
+            session_token: staged,
+            session_version: session.version,
+            pid: session.pid,
+            boot_id: session.boot_id,
+        };
+        await writeCoordinatorSessionContext(contextPath, context);
+        await removeD65StagedSessionToken(stagedPath);
+        return { run, session, contextPath, context };
+    }
     async consumeReconciliationReceipt(response, context) {
         const receipt = parseOptionalCoordinationReconciliationReceipt(response.payload['reconciliation_receipt']);
         if (receipt !== null)
@@ -591,6 +829,32 @@ export class AutopilotSessionBridge {
         if (bridge.#recoverOwnedOperations !== null)
             await bridge.#recoverOwnedOperations(bridge.#attachment.contextPath);
         await bridge.drainMailbox();
+        bridge.#startHeartbeat();
+        return bridge;
+    }
+    /**
+     * ADOPT an already-established durable attachment (D65 single-session launch;
+     * fresh plan §3 "exactly one initial bootstrap session"). The launcher already
+     * attached exactly one session, drove the full bootstrap charter, and accepted
+     * the first complete graph + successor heartbeat on THAT session. The session
+     * bridge must therefore adopt that exact attachment/context — reusing its
+     * lease, token, generation, and durable context file — rather than create a
+     * second no-handoff attachment. No new attach-run/attach-session/lease/token/
+     * context is created; the periodic session heartbeat starts only now, after
+     * graph sequence 2 is accepted, so the bootstrap event window stays exactly the
+     * frozen 9-event B→E prefix.
+     */
+    static async adopt(input) {
+        const supervisor = new DurableRunSupervisorClient(input.env ?? process.env);
+        const bridge = new AutopilotSessionBridge(supervisor, input.attachment, input.sink, input.recoverOwnedOperations ?? null);
+        // The D65 launcher already established clean, freshly-bootstrapped state on
+        // this exact session: the main-worktree saga is committed, the mailbox is
+        // empty, and no owned operation needs recovery. Running a pre-dispatch
+        // `reconcile-run` here would emit a maintenance event that advances the
+        // coordinator sequence past the just-accepted complete graph and stale it,
+        // fencing the immediately-following mailbox drain. Adoption therefore starts
+        // the periodic heartbeat directly; ongoing reconciliation/recovery/drain run
+        // through that heartbeat's owned cadence exactly as for a started bridge.
         bridge.#startHeartbeat();
         return bridge;
     }

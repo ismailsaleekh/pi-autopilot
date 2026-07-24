@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { canonicalJson } from "./canonical-json.js";
 import { CoordinationRuntimeError } from "./failures.js";
+import { isValidAutopilotRepoId, isValidWorkstreamRun } from "../paths.js";
 const SHA256 = /^sha256:[a-f0-9]{64}$/u;
 const GIT_OID = /^[a-f0-9]{40}$/u;
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,191}$/u;
@@ -44,6 +45,19 @@ export function identifier(record, field, label) {
     const value = str(record, field, label, 192);
     if (!IDENTIFIER.test(value))
         fail(label, `${field} is not a bounded identifier`);
+    return value;
+}
+/** Closed identity fields shared by every D65 authority parser. */
+export function repoIdField(record, field, label) {
+    const value = str(record, field, label, 120);
+    if (!isValidAutopilotRepoId(value))
+        fail(label, `${field} must match the closed lowercase 120-byte ASCII alphanumeric-or-hyphen repo-id grammar`);
+    return value;
+}
+export function workstreamRunField(record, field, label) {
+    const value = str(record, field, label, 120);
+    if (!isValidWorkstreamRun(value))
+        fail(label, `${field} must match the closed 120-byte ASCII alphanumeric-or-hyphen workstream-run grammar`);
     return value;
 }
 export function integer(record, field, label, minimum = 0) {
@@ -176,10 +190,10 @@ export function parseD65SemanticGraphBootstrap(value) {
         program_id: identifier(record, 'program_id', label),
         graph_sequence: 1,
         prior_graph_sha256: null,
-        repo_id: identifier(record, 'repo_id', label),
+        repo_id: repoIdField(record, 'repo_id', label),
         autopilot_id: identifier(record, 'autopilot_id', label),
         workstream: identifier(record, 'workstream', label),
-        workstream_run: identifier(record, 'workstream_run', label),
+        workstream_run: workstreamRunField(record, 'workstream_run', label),
         run_timestamp: timestamp(record, 'run_timestamp', label),
         run_nonce: runNonce,
         content_commit: gitOid(record, 'content_commit', label),
@@ -270,6 +284,8 @@ export function parseD65RunTerminalIntentV2(value) {
         fail(label, 'reservation_ids must be unique');
     const terminalEventSeq = nullableInteger(record, 'terminal_event_seq', label, 1);
     const state = oneOf(record, 'state', ['prepared', 'committed', 'cancelled'], label);
+    if (intentAttempt === TERMINAL_INTENT_CANCELLATION_MAX + 1 && state === 'cancelled')
+        fail(label, 'the mandatory fourth abort intent is noncancellable');
     if (state === 'prepared' && terminalEventSeq !== null)
         fail(label, 'prepared intent has no terminal_event_seq');
     if ((state === 'committed' || state === 'cancelled') && terminalEventSeq === null)
@@ -277,8 +293,8 @@ export function parseD65RunTerminalIntentV2(value) {
     return {
         schema_version: D65_TERMINAL_INTENT_V2_SCHEMA,
         terminal_intent_id: identifier(record, 'terminal_intent_id', label),
-        repo_id: identifier(record, 'repo_id', label),
-        workstream_run: identifier(record, 'workstream_run', label),
+        repo_id: repoIdField(record, 'repo_id', label),
+        workstream_run: workstreamRunField(record, 'workstream_run', label),
         intent_attempt: intentAttempt,
         prior_terminal_intent_id: priorId,
         prior_terminal_intent_sha256: priorSha,
@@ -343,9 +359,9 @@ export function parseD65GraphPublication(value) {
         schema_version: D65_GRAPH_PUBLICATION_SCHEMA,
         publication_id: identifier(record, 'publication_id', label),
         program_id: identifier(record, 'program_id', label),
-        repo_id: identifier(record, 'repo_id', label),
+        repo_id: repoIdField(record, 'repo_id', label),
         autopilot_id: identifier(record, 'autopilot_id', label),
-        workstream_run: identifier(record, 'workstream_run', label),
+        workstream_run: workstreamRunField(record, 'workstream_run', label),
         graph_sequence: integer(record, 'graph_sequence', label, 1),
         artifact_id: identifier(record, 'artifact_id', label),
         stage,
@@ -414,8 +430,8 @@ export function parseD65AuthorityShard(value) {
     return {
         schema_version: D65_AUTHORITY_SHARD_SCHEMA,
         program_id: identifier(record, 'program_id', label),
-        repo_id: identifier(record, 'repo_id', label),
-        workstream_run: identifier(record, 'workstream_run', label),
+        repo_id: repoIdField(record, 'repo_id', label),
+        workstream_run: workstreamRunField(record, 'workstream_run', label),
         graph_sequence: integer(record, 'graph_sequence', label, 1),
         collection: identifier(record, 'collection', label),
         entry_count: entryCount,
@@ -469,8 +485,8 @@ export function parseD65ProjectionShard(value) {
     return {
         schema_version: D65_PROJECTION_SHARD_SCHEMA,
         program_id: identifier(record, 'program_id', label),
-        repo_id: identifier(record, 'repo_id', label),
-        workstream_run: identifier(record, 'workstream_run', label),
+        repo_id: repoIdField(record, 'repo_id', label),
+        workstream_run: workstreamRunField(record, 'workstream_run', label),
         graph_sequence: integer(record, 'graph_sequence', label, 1),
         projection_kind: identifier(record, 'projection_kind', label),
         entry_count: entryCount,
@@ -641,10 +657,10 @@ export function parseD65CompleteGraph(value) {
         graph_sequence: graphSequence,
         prior_graph_sha256: sha256Field(record, 'prior_graph_sha256', label),
         prior_event_seq: integer(record, 'prior_event_seq', label, 1),
-        repo_id: identifier(record, 'repo_id', label),
+        repo_id: repoIdField(record, 'repo_id', label),
         autopilot_id: identifier(record, 'autopilot_id', label),
         workstream: identifier(record, 'workstream', label),
-        workstream_run: identifier(record, 'workstream_run', label),
+        workstream_run: workstreamRunField(record, 'workstream_run', label),
         covered_authority_commit: gitOid(record, 'covered_authority_commit', label),
         covered_authority_tree: gitOid(record, 'covered_authority_tree', label),
         covered_event_seq: integer(record, 'covered_event_seq', label, 1),

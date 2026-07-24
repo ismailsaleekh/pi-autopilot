@@ -11,9 +11,9 @@ covers_sources:
   - scripts/check-package-payload.mjs
   - scripts/verify-packed-consumer.mjs
   - scripts/test-packed-consumer-release.mjs
-signature_hash: 'sha256:41f0c69e48aba6554fb97fdb905d69791268281b40cb673328ca2a6fba657cf9'
-body_hash: 'sha256:41f0c69e48aba6554fb97fdb905d69791268281b40cb673328ca2a6fba657cf9'
-semantic_attestation: 'sha256:41f0c69e48aba6554fb97fdb905d69791268281b40cb673328ca2a6fba657cf9'
+signature_hash: 'sha256:dcb1913be4b88e727e4d3720f1bdd49efea05fa2376e75e0d72ee279576a1ebf'
+body_hash: 'sha256:dcb1913be4b88e727e4d3720f1bdd49efea05fa2376e75e0d72ee279576a1ebf'
+semantic_attestation: 'sha256:dcb1913be4b88e727e4d3720f1bdd49efea05fa2376e75e0d72ee279576a1ebf'
 stability: evolving
 ---
 
@@ -76,15 +76,18 @@ for the docs, certification, and offline test-tooling scripts (including the fas
 orchestrator `scripts/test-fast.mjs` and the RAM-root manager `scripts/test-ram-root.mjs`,
 which spawn node:test lanes / the build and drive the RAM disk but never spawn Git) and
 emits the final scanner scope (scanned roots and approved process owners) in its report.
-The scanner keeps two separate allowlists: `approvedProcessOwners` exempts only the
-`child_process` import, while a distinct, smaller `allowedGitLiteralOwners` set exempts
-the exact `'git'`-executable-token check for the few files that legitimately spawn or
-otherwise inspect/reference the Git token: `git-process.ts` (which actually spawns Git)
-and `docs-verify.mjs` (which runs `execFileSync('git', ...)`), plus `git-guard.ts` (which
+The approved process-owner allowlist also includes the D65 launch-signer spawner
+(`core/coordination/d65-launch-signer`), which spawns only the external
+`autopilot-launch-signer` CLI (never Git, never a model). The scanner keeps two separate
+allowlists: `approvedProcessOwners` exempts only the `child_process` import, while a
+distinct, smaller `allowedGitLiteralOwners` set exempts the exact
+`'git'`-executable-token check for the few files that legitimately spawn or otherwise
+inspect/reference the Git token: `git-process.ts` (which actually spawns Git) and
+`docs-verify.mjs` (which runs `execFileSync('git', ...)`), plus `git-guard.ts` (which
 parses/guards Git command tokens without importing `child_process`) and this scanner
-itself (whose inspection source necessarily contains the literal token). The two D70
-test-tooling additions are on the process-owner list only, never the Git-literal list, so
-an exact `'git'` token in either of them would still fail the scan.
+itself (whose inspection source necessarily contains the literal token). The D65 signer
+spawner and both D70 test-tooling additions are process owners only, never Git-literal
+owners, so an exact `'git'` token in any of them remains a hard violation.
 
 ## Deterministic packs and packed-consumer proof
 

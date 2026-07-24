@@ -151,6 +151,8 @@ void describe('D65 run terminal intent v2 contract', () => {
     assert.throws(() => parseD65RunTerminalIntentV2(intentFixture({ intent_attempt: TERMINAL_INTENT_CANCELLATION_MAX + 1, outcome: 'closed', prior_terminal_intent_id: 'terminal-intent:run-1:00000000000000000003', prior_terminal_intent_sha256: DIGEST('a') })), /mandatory fourth attempt must be a noncancellable abort/u);
     // Attempt 5 rejects.
     assert.throws(() => parseD65RunTerminalIntentV2(intentFixture({ intent_attempt: 5, outcome: 'aborted', prior_terminal_intent_id: 'x', prior_terminal_intent_sha256: DIGEST('a') })), /intent_attempt must be <= 4/u);
+    // Attempt 4 cannot itself be cancelled.
+    assert.throws(() => parseD65RunTerminalIntentV2(intentFixture({ intent_attempt: 4, outcome: 'aborted', state: 'cancelled', terminal_event_seq: 14, prior_terminal_intent_id: 'terminal-intent:run-1:00000000000000000003', prior_terminal_intent_sha256: DIGEST('a') })), /mandatory fourth abort intent is noncancellable/u);
     // Attempt 4 abort parses.
     const abort4 = parseD65RunTerminalIntentV2(intentFixture({ intent_attempt: 4, outcome: 'aborted', prior_terminal_intent_id: 'terminal-intent:run-1:00000000000000000003', prior_terminal_intent_sha256: DIGEST('a') }));
     assert.equal(abort4.outcome, 'aborted');

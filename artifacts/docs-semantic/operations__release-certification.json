@@ -1,8 +1,8 @@
 {
   "schema_version": "autopilot.docs_semantic_attestation.v2",
   "doc_id": "operations/release-certification",
-  "reviewed_body_hash": "sha256:41f0c69e48aba6554fb97fdb905d69791268281b40cb673328ca2a6fba657cf9",
-  "reviewed_doc_sha256": "sha256:76670a5e4e74f6037725dd5b828a75d50974bc07d1de6ba36627a8883d5ce877",
+  "reviewed_body_hash": "sha256:dcb1913be4b88e727e4d3720f1bdd49efea05fa2376e75e0d72ee279576a1ebf",
+  "reviewed_doc_sha256": "sha256:e255cb41e992c8e99d979cef976e39a3aeeddb808e74a06f3f9d579a68266fa1",
   "covers_sources": [
     "scripts/check-package-payload.mjs",
     "scripts/check-production-git-spawns.mjs",
@@ -13,7 +13,7 @@
     "scripts/verify-packed-consumer.mjs"
   ],
   "verdict": "PASS",
-  "reviewer": "openai-codex/gpt-5.6-sol independent semantic reviewer, Pi subscription (cross-provider; round 3 after P1+P2 remediation), tasks b697e635b/ba94e16e0/be89a26bc",
-  "reviewed_at": "2026-07-24T20:05:07.000Z",
-  "notes": "Independent cross-provider review (Codex GPT-5.6-sol) of the D70 addition of scripts/test-fast.mjs + scripts/test-ram-root.mjs to check-production-git-spawns.mjs approvedProcessOwners. Round 1 P1 (over-broad 'every scanned file' git-token claim) + round 2 P2 (mischaracterizing all git-literal owners as git spawners) both remediated. Round 3 PASS 0/0/0: prose correctly distinguishes approvedProcessOwners (child_process-import exemption) from allowedGitLiteralOwners (exact-'git'-token exemption); the two D70 scripts are process-owners only (not git-literal owners) so an exact 'git' token in either still fails; git-process.ts/docs-verify.mjs spawn git, git-guard.ts parses tokens without child_process, the scanner self-references the token; production runtime zero-raw-Git-spawn guarantee intact; scanner passes with zero violations."
+  "reviewer": "openai-codex/gpt-5.6-sol independent validate-role reviewer, Pi subscription, session 019f9639-f492-72a4-a878-e09038202102",
+  "reviewed_at": "2026-07-24T22:28:29.000Z",
+  "notes": "PASS: all seven covered scripts and the merged D65/D70 scanner semantics were reviewed. D65 external signer and D70 fast-test/RAM-root files receive child_process ownership only, not Git-literal authority; exact git literals remain violations. Exact-candidate and historical-certificate limits remain explicit."
 }

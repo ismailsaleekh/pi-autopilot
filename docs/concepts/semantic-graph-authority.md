@@ -11,9 +11,9 @@ covers_sources:
   - src/core/coordination/d65-graph-publisher.ts
   - src/core/coordination/d65-graph-successor.ts
   - src/core/coordination/d65-graph-publication-residue.ts
-signature_hash: 'sha256:bc115b1298592020a7c25422a3de843eedb58469735b7df203f9f7471be6acdf'
-body_hash: 'sha256:83633006d8d20bda400c57c9b97afaabaffb1ce9fc9c90a465631edaca8f98f6'
-semantic_attestation: 'sha256:83633006d8d20bda400c57c9b97afaabaffb1ce9fc9c90a465631edaca8f98f6'
+signature_hash: 'sha256:9a5e60a3ba8f59128b16556cc1fe4af77d4d23a810f53e081e0bd219d0e33e42'
+body_hash: 'sha256:9015e1a8a1d88ca10e68671acebbe23c88fd4397837331b58f135f49aa2c568e'
+semantic_attestation: 'sha256:9015e1a8a1d88ca10e68671acebbe23c88fd4397837331b58f135f49aa2c568e'
 stability: evolving
 ---
 
@@ -37,9 +37,10 @@ creates or self-signs it.
 ## The first complete graph
 
 Before ordinary dispatch, the coordinator must reach a **first complete graph** by
-replaying the exact bootstrap event chain — run/session attach, worktree operation
-prepare → in-progress → verified → committed, authoritative-artifact registration, and
-program-heartbeat acceptance — each joined to its exact committed idempotency result.
+replaying the exact bootstrap event chain — run/session attach, worktree-operation
+stages `prepared → in-progress → in-progress → verified → committed`,
+authoritative-artifact registration, and program-heartbeat acceptance — each joined to
+its exact committed idempotency result.
 A bootstrap transition whose event lacks its sealed idempotency result is rejected as
 `semantic-graph-bootstrap-transition-invalid`.
 
@@ -50,7 +51,8 @@ contract is size-bounded: the root is at most `D65_GRAPH_ROOT_MAX_BYTES`
 (1,048,576 bytes), the aggregate is at most `D65_GRAPH_AGGREGATE_MAX_BYTES`
 (536,870,912 bytes) across at most `D65_GRAPH_AGGREGATE_MAX_ENTRIES` (200,000)
 entries. Identifiers, git OIDs, `sha256:` digests, ISO timestamps, and run nonces are
-each matched against exact frozen patterns. The graph aggregates the run's
+each matched against exact frozen patterns; repo ids and workstream-run ids use the
+shared closed lowercase-repo / ASCII alphanumeric-or-hyphen run grammars. The graph aggregates the run's
 authoritative artifacts, leases, worktrees, reservations, and terminal state as a
 single closed projection.
 
@@ -77,17 +79,19 @@ consumer:
 
 ## Successor cadence
 
-After the first complete graph, authority advances by **successor graphs** produced at
-a bounded cadence from committed coordinator state. Each successor is validated against
-its predecessor baseline before it can become the current authority. A successor is
-produced from real committed events only — there is **no fabricated no-event
-successor** and no successor invented to paper over a missing event.
+After the first complete graph, authority advances by **successor graphs** from
+committed coordinator state. A generic successor requires a contiguous repository
+event suffix containing exactly one non-pure semantic event for this run (with only
+normalized liveness around it), and is validated against its predecessor baseline
+before it can become current authority. There is **no fabricated no-event successor**
+and no successor invented to paper over a missing event.
 
-## Foreign-event transparency
+## Shared-sequence foreign events
 
-Events the current build did not originate (foreign events) are surfaced transparently
-in the projection rather than being dropped or silently absorbed. The graph records
-them so a later authority holder sees the complete, honest event history.
+The repository event sequence remains contiguous across runs. While selecting the one
+semantic successor event for this run, `d65-graph-successor.ts` explicitly skips events
+whose semantic workstream identity belongs only to another run; it neither treats them
+as this run's authority nor claims to project their content into this graph.
 
 ## Crash-resumable publication residue
 
