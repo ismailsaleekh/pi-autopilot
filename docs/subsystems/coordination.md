@@ -15,9 +15,9 @@ covers_sources:
   - src/core/coordination/client.ts
   - src/core/coordination/store.ts
   - src/core/coordination/invariants.ts
-signature_hash: 'sha256:f2ccef5dd32315d6976da8c480b9f584d06e945cf776852a923f7811810c59ac'
-body_hash: 'sha256:7387ff1c3e758bb4c4312953ef02737a50df71ec33287d59c7d62ae1688fcc42'
-semantic_attestation: 'sha256:7387ff1c3e758bb4c4312953ef02737a50df71ec33287d59c7d62ae1688fcc42'
+signature_hash: 'sha256:d91b76a527e89d599b8525a63ac3552c64dfa2e6b927cae2632efb86aa2646a1'
+body_hash: 'sha256:5797e11384f76a3d03ec38adb9f6def5b817dcc38a6f45da1eae4e6202b0ab55'
+semantic_attestation: 'sha256:5797e11384f76a3d03ec38adb9f6def5b817dcc38a6f45da1eae4e6202b0ab55'
 fact_pins:
   - text: `MAX_GRANT_BYPASSES` is 8
     symbol: 'src/core/coordination/deadlock.ts#MAX_GRANT_BYPASSES'
@@ -94,6 +94,17 @@ crash-resumable Git G/H plus coordinator registration saga: database registratio
 commits before the filesystem residue advances from `publication-committed` to
 `registered`, and response-loss recovery accepts only the byte-identical registered
 result.
+
+A D65 sealed launch attaches EXACTLY ONE initial dispatch session (via the supervisor's
+`attachD65Bootstrap`) that drives the whole bootstrap charter, and the session bridge
+later ADOPTS that exact attachment (`AutopilotSessionBridge.adopt`) rather than creating
+a second attachment. Because that single session runs no periodic heartbeat until graph
+sequence 2 is accepted (a `session-heartbeat` event would break the frozen nine-event
+B→E charter and the R=E+1 publication rule), it takes a bootstrap-safe lease
+(`COORDINATOR_BOOTSTRAP_SESSION_LEASE_MS`) spanning the multi-minute planning turn so
+first-graph registration's session gate holds; the lease is only classification
+evidence (age never authorizes release) and the ordinary heartbeat cadence resumes
+after adoption.
 
 The coordinator verifies the single accepted signed launch policy (D65 authorizes only
 absent→v1 and requires exactly one accepted `autopilot.launch_policy.v1`; an existing

@@ -11,6 +11,7 @@ export const AUTOPILOT_CLAIM_GC_COMMAND = 'autopilot-claim-gc';
 export const AUTOPILOT_COORDINATION_COMMAND = 'autopilot-coordination';
 export const AUTOPILOT_RUNNER_BIN = 'autopilot-agent-run';
 export const AUTOPILOT_COORDINATOR_BIN = 'autopilot-coordinator';
+export const AUTOPILOT_LAUNCH_SIGNER_BIN = 'autopilot-launch-signer';
 export const AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV = 'AUTOPILOT_COORDINATOR_SESSION_CONTEXT';
 export const AUTOPILOT_PREFLIGHT_ROLLBACK_REASON_PREFIX = 'autopilot-agent-run preflight rollback after failure:';
 export const AUTOPILOT_COORDINATION_AUTHORITY_ENV = 'AUTOPILOT_COORDINATION_AUTHORITY';

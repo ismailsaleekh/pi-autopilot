@@ -1,8 +1,8 @@
 {
   "schema_version": "autopilot.docs_semantic_attestation.v2",
   "doc_id": "concepts/d65-terminal-tail",
-  "reviewed_body_hash": "sha256:29f88722280b9359f51c6fb07750416f6eebd55cd01e97b3adffee3eb6a7edd0",
-  "reviewed_doc_sha256": "sha256:4794566145459acef7a2549f02c85ac66e1f6e738edc09445ae81ccba582c70b",
+  "reviewed_body_hash": "sha256:c28c649cdf388c31a73f689f888835778eb5fa686be25637b988e5b13be5a84a",
+  "reviewed_doc_sha256": "sha256:f85b43a9bdae97822732ab851fe54d22f3cf6f6a47c3358623b5fa10d4e4afaa",
   "covers_sources": [
     "src/core/coordination/d65-dispatch-gate.ts",
     "src/core/coordination/d65-graph-successor-runtime.ts",
@@ -12,7 +12,7 @@
     "src/core/coordination/terminal-attempt-proof.ts"
   ],
   "verdict": "PASS",
-  "reviewer": "pi W6 merge operator (offline semantic review)",
-  "reviewed_at": "2026-07-23T13:55:00.000Z",
-  "notes": "W6 offline semantic review: rechecked the D65 terminal-tail prose against current d65 successor recovery, dispatch, semantic graph, terminal acceptance, terminal proof, and terminal intent sources after strict unit_spec.v1/v2 and receipt.v1/v2 parsing landed; the documented terminal-tail and no-reentry recovery semantics remain accurate."
+  "reviewer": "openai-codex/gpt-5.5 independent C11 reviewer (r5b)",
+  "reviewed_at": "2026-07-24T16:21:18.000Z",
+  "notes": "Full doc and all covered sources reviewed; fourth abort is parser-level noncancellable, effect/recovery claims are accurately scoped, structured attempt proof is distinct, and shared identities match."
 }

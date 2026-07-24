@@ -243,6 +243,13 @@ async function main() {
     const coordinatorHelp = checkedRun(process.execPath, [join(installedRoot, 'bin', 'autopilot-coordinator.mjs'), '--help'], project, env);
     if (!/^usage: autopilot-agent-run/mu.test(agentHelp)) fail('installed autopilot-agent-run --help output is missing');
     if (!/^usage: autopilot-coordinator/mu.test(coordinatorHelp)) fail('installed autopilot-coordinator --help output is missing');
+    const signerLink = join(project, 'node_modules', '.bin', 'autopilot-launch-signer');
+    if (!existsSync(signerLink)) fail('installed autopilot-launch-signer npm bin link is missing');
+    const signerWithoutConfig = spawnSync(signerLink, [], { cwd: project, env, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+    if (signerWithoutConfig.error !== undefined || signerWithoutConfig.status !== 2 || signerWithoutConfig.signal !== null || signerWithoutConfig.stderr !== '') fail('installed autopilot-launch-signer did not fail closed before key access when config was absent');
+    let signerFailure;
+    try { signerFailure = JSON.parse(signerWithoutConfig.stdout); } catch { fail('installed autopilot-launch-signer emitted malformed fail-closed output'); }
+    if (signerFailure?.error !== 'launch-signer requires --config <absolute-path> or AUTOPILOT_LAUNCH_SIGNER_CONFIG') fail('installed autopilot-launch-signer emitted the wrong missing-config failure');
     const gitSpawnCheck = JSON.parse(checkedRun(process.execPath, [join(installedRoot, 'scripts', 'check-production-git-spawns.mjs'), installedRoot], project, env));
     if (gitSpawnCheck.passed !== true || !Array.isArray(gitSpawnCheck.violations) || gitSpawnCheck.violations.length !== 0) fail('installed raw production Git spawn check failed');
     if (existsSync(discoveryMarker)) fail('installed CLI help performed forbidden discovery');

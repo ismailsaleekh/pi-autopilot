@@ -260,6 +260,7 @@ export async function loadCodeSurfaces() {
     runnerBin: names.AUTOPILOT_RUNNER_BIN,
     runnerInvocations: Object.freeze(runnerInvocations),
     coordinatorBin: names.AUTOPILOT_COORDINATOR_BIN,
+    launchSignerBin: names.AUTOPILOT_LAUNCH_SIGNER_BIN,
     coordinatorSubcommands: Object.freeze(coordinatorSubcommands),
     runtimeRootPrefix: names.AUTOPILOT_RUNTIME_ROOT_PREFIX,
     defaults: Object.freeze({
@@ -337,6 +338,7 @@ export function enumerateSurfaces(surfaces) {
   for (const tool of surfaces.tools) result.add(tool.name);
   result.add(surfaces.runnerBin);
   result.add(surfaces.coordinatorBin);
+  result.add(surfaces.launchSignerBin);
   for (const schema of surfaces.schemaNames) result.add(schema);
   return result;
 }

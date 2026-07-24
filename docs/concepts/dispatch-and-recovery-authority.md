@@ -13,8 +13,8 @@ covers_sources:
   - src/core/coordination/d65-heartbeat-high-water.ts
   - src/core/coordination/unavailable-recovery.ts
 signature_hash: 'sha256:a6fdd31a6ee98c213ebaf99a0ccb460670df6c4437997d511a53d1d685653310'
-body_hash: 'sha256:703afd05353f9136675573856bfd173990450fd62790ae582af4616afc2b8101'
-semantic_attestation: 'sha256:703afd05353f9136675573856bfd173990450fd62790ae582af4616afc2b8101'
+body_hash: 'sha256:4dc4e263dceb34f37aa422369377a044ef76ac88e3d06d79dcaf30a87ee00a95'
+semantic_attestation: 'sha256:4dc4e263dceb34f37aa422369377a044ef76ac88e3d06d79dcaf30a87ee00a95'
 stability: evolving
 ---
 
@@ -31,15 +31,18 @@ return a closed verdict.
 The launch policy is an immutable, versioned, size-bounded contract owned by the
 **cap-one consumer**. Under version 1 the limits are exactly one: `parallel_cap` is
 `1`, `expected_checkout_units` is `1`, and `maximum_parallel_cap` is `1`. The **only**
-path to raise the maximum is a signed `autopilot.capacity_decision.v1`. The policy,
-capacity decision, one-use subscription probe, and signed program heartbeat are all
-verified against the frozen operator trust anchor with mandatory domain separation.
-Production **consumes** these signed authorities and never self-signs one.
+path to raise the maximum in these contracts is a superseding signed policy, which
+must cite an `autopilot.capacity_decision.v1` ref and digest. The covered runtime
+signature checks authenticate launch policy and program heartbeat against the frozen
+operator trust anchor with mandatory domain separation. Capacity-decision and
+subscription-probe parsers enforce closed shape and the shared repo/run identities;
+this covered source set does not claim to authenticate their signatures.
 
 ## Cap-one authority
 
 The cap-one authority means at most one accepted program may run at a time unless a
-signed capacity decision raises the maximum. The signed **program heartbeat** proves an
+superseding signed policy raises the maximum while citing capacity-decision evidence.
+The signed **program heartbeat** proves an
 accepted program is live; its durable acceptance result and a reconstructable
 high-water cache record the accepted sequence so a stale or replayed heartbeat cannot
 resurrect authority.
@@ -78,18 +81,19 @@ process or rewriting coordinator rows. It moves authority without launching new 
 
 ## Signed parent-loss recovery
 
-When the parent is lost, recovery is driven by a signed `parent-loss` continuation
-authority whose embedded `{ref, sha256, byte_count}` evidence bindings are checked
-against exactly one matching accepted artifact row inside the exact runtime authority
-root. Parent-loss recovery re-establishes graph / policy / heartbeat / status authority
-in the run-main repository; it does not start product work.
+The dispatch gate exposes one default-deny `parent-loss` recovery cell. It accepts only
+the closed parent-loss reason shape and never authorizes model, product, or new-work
+effects. Evidence/ref/artifact-root validation and any authority reconstruction belong
+to producers/consumers outside this covered predicate set and are not claimed here.
 
 ## Subscription-failure / probe recovery
 
-A one-use signed subscription probe drives subscription-failure recovery: it binds its
-triggering continuation and evidence references by sequence and probe id, and is
-consumed exactly once. It recovers dispatch eligibility after a provider subscription
-lapse without substituting or forging provider authority.
+The subscription-probe parser closes retry ordinal, successor attempt, timestamps,
+repo/run identity, and evidence-reference shape; heartbeat provider-health rows close
+the probe tuple by provider state. The `register-attempt` recovery cell permits only
+its exact retry-authorized reason shape and no ordinary effects. Exact-once probe
+registration/consumption and signature authentication are outside this covered source
+set and are not claimed here.
 
 ## Unavailable-coordinator recovery
 
@@ -108,8 +112,9 @@ resolved; there is no recovery path that silently erases it.
 ## Invariants
 
 - Recovery has **no** model, product, or new-work effects — only the exact frozen cells.
-- Production code never self-signs launch policy, capacity, heartbeat, continuation, or
-  probe authority; it only consumes externally signed authority.
+- The covered runtime never self-signs launch policy or heartbeat authority; it verifies
+  those externally signed inputs. Closed capacity/probe parsing alone is not signature
+  authentication.
 - Never forge a heartbeat, hand-edit coordinator rows, or substitute provider authority
   to force dispatch. The dispatch gate is frozen; bypassing it is a contract violation.
 

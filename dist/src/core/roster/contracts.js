@@ -998,7 +998,7 @@ export const AUTOPILOT_ROSTER_CONTRACT_SCHEMA_DEFINITIONS = deepFreezeRosterAuth
                 "type": "string",
                 "required": true,
                 "nullable": false,
-                "pattern": "^[a-z][a-z0-9-]{0,119}$",
+                "pattern": "^[A-Za-z][A-Za-z0-9-]{0,119}$",
                 "minLength": 1,
                 "maxLength": 120
             },
@@ -1465,7 +1465,7 @@ export const AUTOPILOT_ROSTER_CONTRACT_SCHEMA_DEFINITIONS = deepFreezeRosterAuth
                 "type": "string",
                 "required": true,
                 "nullable": false,
-                "pattern": "^[a-z][a-z0-9-]{0,119}$",
+                "pattern": "^[A-Za-z][A-Za-z0-9-]{0,119}$",
                 "minLength": 1,
                 "maxLength": 120
             },
@@ -2465,7 +2465,7 @@ export const AUTOPILOT_ROSTER_CONTRACT_SCHEMA_DEFINITIONS = deepFreezeRosterAuth
                 "type": "string",
                 "required": true,
                 "nullable": false,
-                "pattern": "^[a-z][a-z0-9-]{0,119}$",
+                "pattern": "^[A-Za-z][A-Za-z0-9-]{0,119}$",
                 "minLength": 1,
                 "maxLength": 120
             },

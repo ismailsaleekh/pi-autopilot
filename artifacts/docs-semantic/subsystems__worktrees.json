@@ -1,8 +1,8 @@
 {
   "schema_version": "autopilot.docs_semantic_attestation.v2",
   "doc_id": "subsystems/worktrees",
-  "reviewed_body_hash": "sha256:6874467d83a8f7156c13c934661a4054143cb27c53e41e441009b8a5eff5ed63",
-  "reviewed_doc_sha256": "sha256:aa46919672204826789ea268e8af7692e4339bc70f262895622f94f73217f4fc",
+  "reviewed_body_hash": "sha256:da4a2afdfcb3fd0de2162311dca2a45409aeee5b781837124eac5e8b37282f8c",
+  "reviewed_doc_sha256": "sha256:783cb868bbc0d9b7c5435ce253359097ae7a7a16e3e6832e55046480f62ec622",
   "covers_sources": [
     "src/core/checkout-profile.ts",
     "src/core/disk-gate.ts",
@@ -13,7 +13,7 @@
     "src/core/sparse-worktree.ts"
   ],
   "verdict": "PASS",
-  "reviewer": "pi W6 merge operator (offline semantic review)",
-  "reviewed_at": "2026-07-23T12:35:54.000Z",
-  "notes": "W6 offline semantic review: verified worktrees prose against current parallel runtime, sparse checkout, checkout profile, disk gate, materialization, git guard, and git process sources; D65 ordinary/recovery boundaries, S2 disk-pressure scoping, sparse isolation, and run-owned cleanup semantics match the combined code."
+  "reviewer": "openai-codex/gpt-5.5 independent C11 reviewer (r5b)",
+  "reviewed_at": "2026-07-24T16:09:15.000Z",
+  "notes": "Full doc and every covers_sources file reviewed; D65 unit-worktree boundaries are accurately scoped, bootstrap capability validation and positive allowlist match git-guard, and no findings remain."
 }

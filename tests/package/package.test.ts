@@ -18,6 +18,7 @@ interface PackageScripts {
 interface PackageBin {
   readonly 'autopilot-agent-run'?: string;
   readonly 'autopilot-coordinator'?: string;
+  readonly 'autopilot-launch-signer'?: string;
   readonly 'autopilot-s2-corpus-rehearsal'?: string;
 }
 
@@ -112,6 +113,7 @@ function parsePackageJson(value: unknown): PackageJson {
     bin: {
       'autopilot-agent-run': requireString(field(bin, 'autopilot-agent-run'), 'bin.autopilot-agent-run'),
       'autopilot-coordinator': requireString(field(bin, 'autopilot-coordinator'), 'bin.autopilot-coordinator'),
+      'autopilot-launch-signer': requireString(field(bin, 'autopilot-launch-signer'), 'bin.autopilot-launch-signer'),
       'autopilot-s2-corpus-rehearsal': requireString(field(bin, 'autopilot-s2-corpus-rehearsal'), 'bin.autopilot-s2-corpus-rehearsal'),
     },
     pi: { extensions: requireStringArray(field(pi, 'extensions'), 'pi.extensions') },
@@ -190,6 +192,7 @@ void describe('package manifest and payload', () => {
     assert.deepEqual(pkg.pi.extensions, ['./extensions/autopilot.ts']);
     assert.equal(pkg.bin['autopilot-agent-run'], 'bin/autopilot-agent-run.mjs');
     assert.equal(pkg.bin['autopilot-coordinator'], 'bin/autopilot-coordinator.mjs');
+    assert.equal(pkg.bin['autopilot-launch-signer'], 'bin/autopilot-launch-signer.mjs');
     assert.equal(pkg.bin['autopilot-s2-corpus-rehearsal'], 'bin/autopilot-s2-corpus-rehearsal.mjs');
     assert.ok(pkg.files.includes('dist/'));
     assert.ok(pkg.peerDependencies['@earendil-works/pi-coding-agent']);
@@ -273,6 +276,7 @@ void describe('package manifest and payload', () => {
       'dist/src/cli/autopilot-agent-run.js',
       'dist/src/cli/autopilot-coordinator-bootstrap.js',
       'dist/src/cli/autopilot-coordinator.js',
+      'dist/src/cli/autopilot-launch-signer.js',
       'dist/src/cli/migration-recovery.js',
       'dist/src/core/agent-runner.js',
       'dist/src/core/close-runtime.js',
@@ -292,6 +296,7 @@ void describe('package manifest and payload', () => {
       'dist/src/core/coordination/transition-model.js',
       'dist/src/core/coordination/worktree-saga.js',
       'dist/src/internal/status-extension.js',
+      'src/cli/autopilot-launch-signer.ts',
       'src/core/context-budget.ts',
       'src/core/coordination/index.ts',
       'src/core/coordination/admission.ts',
@@ -322,6 +327,8 @@ void describe('package manifest and payload', () => {
       'src/core/prompts.ts',
       'bin/autopilot-agent-run.mjs',
       'bin/autopilot-coordinator.mjs',
+      'bin/autopilot-launch-signer.mjs',
+      'docs/cli/autopilot-launch-signer.md',
       'templates/README.md',
     ]) {
       assert.ok(existsSync(new URL(file, root)), file);
@@ -439,6 +446,7 @@ void describe('package manifest and payload', () => {
       'dist/src/cli/autopilot-agent-run.js',
       'dist/src/cli/autopilot-coordinator-bootstrap.js',
       'dist/src/cli/autopilot-coordinator.js',
+      'dist/src/cli/autopilot-launch-signer.js',
       'dist/src/cli/migration-recovery.js',
       'dist/src/core/agent-runner.js',
       'dist/src/core/close-runtime.js',
@@ -458,6 +466,7 @@ void describe('package manifest and payload', () => {
       'dist/src/core/coordination/transition-model.js',
       'dist/src/core/coordination/worktree-saga.js',
       'dist/src/internal/status-extension.js',
+      'src/cli/autopilot-launch-signer.ts',
       'src/core/context-budget.ts',
       'src/core/coordination/admission.ts',
       'src/core/coordination/client.ts',
@@ -500,7 +509,9 @@ void describe('package manifest and payload', () => {
       'tools/s2-corpus-rehearsal/path-rebase.ts',
       'bin/autopilot-agent-run.mjs',
       'bin/autopilot-coordinator.mjs',
+      'bin/autopilot-launch-signer.mjs',
       'bin/autopilot-s2-corpus-rehearsal.mjs',
+      'docs/cli/autopilot-launch-signer.md',
       'templates/README.md',
     ]) {
       assert.ok(files.includes(file), file);
@@ -628,7 +639,7 @@ void describe('package manifest and payload', () => {
     assert.match(invalid.stderr, /requires a mode/u);
   });
 
-  void it('BUG-172 runs both packed npm bins from node_modules without TypeScript stripping', async () => {
+  void it('BUG-172 runs every production packed npm bin from node_modules without TypeScript stripping', async () => {
     const tempRoot = await mkdtemp(join(tmpdir(), 'pi-autopilot-installed-bin-'));
     const previousStateRoot = process.env[AUTOPILOT_STATE_ROOT_ENV];
     let coordinatorStateRoot: string | null = null;
@@ -657,12 +668,18 @@ void describe('package manifest and payload', () => {
       const installedCoordinator = join(installedPackage, 'bin', 'autopilot-coordinator.mjs');
       const installedBinLink = join(installRoot, 'node_modules', '.bin', 'autopilot-agent-run');
       const installedCoordinatorLink = join(installRoot, 'node_modules', '.bin', 'autopilot-coordinator');
+      const installedSignerLink = join(installRoot, 'node_modules', '.bin', 'autopilot-launch-signer');
       for (const [command, path] of [['autopilot-agent-run', installedBinLink], ['autopilot-coordinator', installedCoordinatorLink]] as const) {
         assert.equal(existsSync(path), true, `${command} must be linked through the packed npm installation`);
         const help = spawnSync(path, ['--help'], { cwd: installRoot, encoding: 'utf8' });
         assert.equal(help.status, 0, `${command}: ${help.stderr}`);
         assert.match(help.stdout, new RegExp(command, 'u'));
       }
+      assert.equal(existsSync(installedSignerLink), true, 'autopilot-launch-signer must be linked through the packed npm installation');
+      const signerWithoutConfig = spawnSync(installedSignerLink, [], { cwd: installRoot, encoding: 'utf8' });
+      assert.equal(signerWithoutConfig.status, 2, signerWithoutConfig.stderr);
+      assert.deepEqual(parseJson(signerWithoutConfig.stdout), { error: 'launch-signer requires --config <absolute-path> or AUTOPILOT_LAUNCH_SIGNER_CONFIG' });
+      assert.equal(signerWithoutConfig.stderr, '');
       const source = join(tempRoot, 'source');
       await initInstalledBinSource(source);
       const stateRoot = join(tempRoot, 'autopilot-state');
@@ -695,6 +712,7 @@ void describe('package manifest and payload', () => {
         assert.match(recovery.stdout, expected);
       }
       assert.ok(existsSync(join(installedPackage, 'dist', 'src', 'cli', 'autopilot-agent-run.js')));
+      assert.ok(existsSync(join(installedPackage, 'dist', 'src', 'cli', 'autopilot-launch-signer.js')));
 
     } finally {
       delete process.env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV];

@@ -52,6 +52,11 @@ try {
   const ownerRelativePaths = [
     'core/agent-runner',
     'core/coordination/client',
+    // The D65 launch signer spawner is a reviewed process owner: it spawns ONLY
+    // the external operator `autopilot-launch-signer` CLI (never Git, never a
+    // model). It is intentionally not in `allowedGitLiteralOwners`, so a stray
+    // `'git'` executable token in it is still a hard violation.
+    'core/coordination/d65-launch-signer',
     'core/coordination/migration',
     'core/coordination/process-identity',
     'core/disk-gate',

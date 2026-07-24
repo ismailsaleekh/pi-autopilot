@@ -11,9 +11,9 @@ covers_sources:
   - scripts/check-package-payload.mjs
   - scripts/verify-packed-consumer.mjs
   - scripts/test-packed-consumer-release.mjs
-signature_hash: 'sha256:41f0c69e48aba6554fb97fdb905d69791268281b40cb673328ca2a6fba657cf9'
-body_hash: 'sha256:41f0c69e48aba6554fb97fdb905d69791268281b40cb673328ca2a6fba657cf9'
-semantic_attestation: 'sha256:41f0c69e48aba6554fb97fdb905d69791268281b40cb673328ca2a6fba657cf9'
+signature_hash: 'sha256:17987c94a79011cfcb9fcf835367977709b749a88fce76034013332fbf327569'
+body_hash: 'sha256:17987c94a79011cfcb9fcf835367977709b749a88fce76034013332fbf327569'
+semantic_attestation: 'sha256:17987c94a79011cfcb9fcf835367977709b749a88fce76034013332fbf327569'
 stability: evolving
 ---
 
@@ -76,15 +76,18 @@ for the docs, certification, and offline test-tooling scripts (including the fas
 orchestrator `scripts/test-fast.mjs` and the RAM-root manager `scripts/test-ram-root.mjs`,
 which spawn node:test lanes / the build and drive the RAM disk but never spawn Git) and
 emits the final scanner scope (scanned roots and approved process owners) in its report.
-The scanner keeps two separate allowlists: `approvedProcessOwners` exempts only the
-`child_process` import, while a distinct, smaller `allowedGitLiteralOwners` set exempts
-the exact `'git'`-executable-token check for the few files that legitimately spawn or
-otherwise inspect/reference the Git token: `git-process.ts` (which actually spawns Git)
-and `docs-verify.mjs` (which runs `execFileSync('git', ...)`), plus `git-guard.ts` (which
+The approved process-owner allowlist also includes the D65 launch-signer spawner
+(`core/coordination/d65-launch-signer`), which spawns only the external
+`autopilot-launch-signer` CLI (never Git, never a model). The scanner keeps two separate
+allowlists: `approvedProcessOwners` exempts only the `child_process` import, while a
+distinct, smaller `allowedGitLiteralOwners` set exempts the exact
+`'git'`-executable-token check for the few files that legitimately spawn or otherwise
+inspect/reference the Git token: `git-process.ts` (which actually spawns Git) and
+`docs-verify.mjs` (which runs `execFileSync('git', ...)`), plus `git-guard.ts` (which
 parses/guards Git command tokens without importing `child_process`) and this scanner
-itself (whose inspection source necessarily contains the literal token). The two D70
-test-tooling additions are on the process-owner list only, never the Git-literal list, so
-an exact `'git'` token in either of them would still fail the scan.
+itself (whose inspection source necessarily contains the literal token). The D65 signer
+spawner and both D70 test-tooling additions are process owners only, never Git-literal
+owners, so an exact `'git'` token in any of them remains a hard violation.
 
 ## Deterministic packs and packed-consumer proof
 
@@ -94,7 +97,11 @@ The packed-consumer scripts build one npm pack, install it into a throwaway cons
 extension **registers** the exact public Autopilot command set (via the host
 `registerCommand` callbacks, not command execution), zero network/provider calls
 (network + provider canaries trip loudly), an untouched discovery canary, zero raw
-production Git spawns, and the exact Pi peer. The byte-identical two-pack determinism
+production Git spawns, and the exact Pi peer. It also executes the installed runner and
+coordinator help paths and requires the packed `autopilot-launch-signer` npm-bin link to
+fail closed before key access when no signer config is supplied. The payload gate pins
+the signer's bin wrapper, source, compiled CLI, and operator documentation as required
+files. The byte-identical two-pack determinism
 check is part of the surrounding release-certification **procedure** (build two packs in
 separate external directories and compare bytes), not of these scripts. The docs payload
 changes the tarball, so

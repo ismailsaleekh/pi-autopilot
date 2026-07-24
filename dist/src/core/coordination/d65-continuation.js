@@ -1,4 +1,4 @@
-import { array, boolean, fail, identifier, integer, literal, nullableInteger, nullableSha256Field, nullableStr, object, oneOf, repoRelativePath, sha256Field, str, timestamp, parseD65EvidenceRefWithCount, parseD65NullableEvidenceRefWithCount, } from "./d65-semantic-graph.js";
+import { array, boolean, fail, identifier, integer, literal, nullableInteger, nullableSha256Field, nullableStr, object, oneOf, repoRelativePath, repoIdField, sha256Field, str, timestamp, parseD65EvidenceRefWithCount, parseD65NullableEvidenceRefWithCount, workstreamRunField, } from "./d65-semantic-graph.js";
 // D65-A3 graph/failure-hook evidence documents (fresh plan §3.1). These are
 // immutable task evidence included by the next complete graph, not a fifth
 // package consumer. They register through the existing register-authoritative-
@@ -52,8 +52,8 @@ export function parseD65ContinuationEvent(value) {
         program_id: identifier(record, 'program_id', label),
         event_id: identifier(record, 'event_id', label),
         event_sequence: integer(record, 'event_sequence', label, 1),
-        repo_id: identifier(record, 'repo_id', label),
-        workstream_run: identifier(record, 'workstream_run', label),
+        repo_id: repoIdField(record, 'repo_id', label),
+        workstream_run: workstreamRunField(record, 'workstream_run', label),
         trigger,
         class: klass,
         provider,
@@ -121,8 +121,8 @@ export function parseD65ParentLoss(value) {
         schema_version: D65_PARENT_LOSS_SCHEMA,
         program_id: identifier(record, 'program_id', label),
         event_id: identifier(record, 'event_id', label),
-        repo_id: identifier(record, 'repo_id', label),
-        workstream_run: identifier(record, 'workstream_run', label),
+        repo_id: repoIdField(record, 'repo_id', label),
+        workstream_run: workstreamRunField(record, 'workstream_run', label),
         lost_physical_session_file_identity: boundedIdentityObject(record['lost_physical_session_file_identity'], `${label}.lost_physical_session_file_identity`),
         lost_coordinator_session_identity: boundedIdentityObject(record['lost_coordinator_session_identity'], `${label}.lost_coordinator_session_identity`),
         successor_physical_session_file_identity: boundedIdentityObject(record['successor_physical_session_file_identity'], `${label}.successor_physical_session_file_identity`),

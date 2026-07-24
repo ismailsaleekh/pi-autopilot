@@ -1,5 +1,5 @@
 import { existsSync, realpathSync } from 'node:fs';
-import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 const REMOTE_OR_EXTERNAL_GIT_SUBCOMMANDS = new Set([
     'clone',
     'fetch',
@@ -15,6 +15,8 @@ const REMOTE_OR_EXTERNAL_GIT_SUBCOMMANDS = new Set([
     'worktree',
 ]);
 const SHELL_WRAPPERS = new Set(['bash', 'sh', 'zsh']);
+const D65_BOOTSTRAP_ALLOWED_TOOL_NAMES = new Set(['read', 'grep', 'find', 'ls', 'write', 'edit', 'context_budget']);
+const D65_BOOTSTRAP_CHARTER_BASENAMES = Object.freeze(['decision-log.jsonl', 'events.jsonl', 'master-plan.json', 'mission.md', 'state.json']);
 const GIT_DIR_ENV_KEYS = new Set([
     'GIT_DIR',
     'GIT_WORK_TREE',
@@ -26,6 +28,24 @@ const GIT_DIR_ENV_KEYS = new Set([
 export function evaluateAutopilotWorktreeToolCall(event, ctx, policy) {
     const root = canonicalExistingPath(policy.worktreeRoot);
     const allowedWriteRoots = canonicalAllowedWriteRoots(policy.allowedWriteRoots ?? [], root);
+    let bootstrapCharterPaths = null;
+    let bootstrapAuxiliaryRoots = [];
+    if (policy.bootstrapCharterPaths !== undefined) {
+        bootstrapCharterPaths = canonicalAllowedWriteRoots(policy.bootstrapCharterPaths, root);
+        bootstrapAuxiliaryRoots = canonicalAllowedWriteRoots(policy.bootstrapAllowedAuxiliaryRoots ?? [], root);
+        const basenames = bootstrapCharterPaths.map((path) => basename(path)).sort();
+        const parents = new Set(bootstrapCharterPaths.map((path) => dirname(path)));
+        const exactNames = basenames.length === D65_BOOTSTRAP_CHARTER_BASENAMES.length && basenames.every((name, index) => name === D65_BOOTSTRAP_CHARTER_BASENAMES[index]);
+        const pathsAreClosed = new Set(bootstrapCharterPaths).size === D65_BOOTSTRAP_CHARTER_BASENAMES.length && parents.size === 1 && bootstrapCharterPaths.every((path) => isPathInsideRoot(path, root));
+        const auxiliaryRootsAreClosed = bootstrapAuxiliaryRoots.every((path) => isPathInsideRoot(path, root));
+        if (!exactNames || !pathsAreClosed || !auxiliaryRootsAreClosed)
+            return block(`${policy.label}: D65 bootstrap charter/auxiliary policy is not the exact in-worktree five-file capability.`);
+        if (event.toolName === 'bash')
+            return block(`${policy.label}: bash is disabled during the D65 bootstrap-only exact-charter effect fence.`);
+        if (event.toolName === undefined || !D65_BOOTSTRAP_ALLOWED_TOOL_NAMES.has(event.toolName)) {
+            return block(`${policy.label}: tool ${event.toolName ?? '<unnamed>'} is not in the D65 bootstrap-only positive allowlist.`);
+        }
+    }
     if (event.toolName === 'bash') {
         const command = event.input?.['command'];
         if (typeof command !== 'string' || command.trim().length === 0) {
@@ -42,6 +62,16 @@ export function evaluateAutopilotWorktreeToolCall(event, ctx, policy) {
         }
         const cwd = canonicalCandidatePath(ctx.cwd ?? root, root);
         const absolutePath = canonicalCandidatePath(isAbsolute(rawPath) ? rawPath : resolve(cwd, rawPath), root);
+        // D65 bootstrap-only effect fence: exactly the five charter paths plus the
+        // package-owned auxiliary roots — never the entire runtime root.
+        if (bootstrapCharterPaths !== null) {
+            const isCharterFile = bootstrapCharterPaths.includes(absolutePath);
+            const isUnderAux = bootstrapAuxiliaryRoots.some((auxRoot) => isPathInsideRoot(absolutePath, auxRoot));
+            if (!isCharterFile && !isUnderAux) {
+                return block(`${policy.label}: bootstrap-mode ${event.toolName} target ${absolutePath} is outside the exactly-five charter paths and package-owned auxiliary roots.`);
+            }
+            return undefined;
+        }
         if (!isPathInsideRoot(absolutePath, root) && !allowedWriteRoots.some((allowedRoot) => isPathInsideRoot(absolutePath, allowedRoot))) {
             return block(`${policy.label}: ${event.toolName} target ${absolutePath} is outside the registered Autopilot worktree ${root} and allowed Autopilot artifact roots.`);
         }

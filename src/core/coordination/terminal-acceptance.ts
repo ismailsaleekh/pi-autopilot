@@ -6,6 +6,7 @@ import { AUTOPILOT_ROLE_VALUES, parseAutopilotExecutionAudit, parseAutopilotRece
 import type { AutopilotExecutionAudit, AutopilotReceipt, AutopilotReceiptV2, AutopilotRole, AutopilotStatusEntry, AutopilotUnitSpec, AutopilotUnitSpecV2, AutopilotVerdict } from '../contracts/types.ts';
 import { lowerAutopilotUnitSpecV2ToV1 } from '../forced-output/identity.ts';
 import { validateReceiptV2TerminalCompatibility } from '../roster/artifact-compatibility.ts';
+import { isValidAutopilotRepoId, isValidWorkstreamRun } from '../paths.ts';
 import { writeJsonAtomic } from '../parallel-runtime.ts';
 import { CoordinationRuntimeError } from './failures.ts';
 import { opaqueToolCallIdIssue } from '../tool-call-id.ts';
@@ -63,6 +64,18 @@ function identifier(value: JsonRecord, field: string, label: string): string {
   return entry;
 }
 
+function repoId(value: JsonRecord, field: string, label: string): string {
+  const entry = text(value, field, label, 120);
+  if (!isValidAutopilotRepoId(entry)) throw new CoordinationRuntimeError('invalid-state', `${label}.${field} must match the shared closed repo-id grammar`);
+  return entry;
+}
+
+function workstreamRun(value: JsonRecord, field: string, label: string): string {
+  const entry = text(value, field, label, 120);
+  if (!isValidWorkstreamRun(entry)) throw new CoordinationRuntimeError('invalid-state', `${label}.${field} must match the shared closed workstream-run grammar`);
+  return entry;
+}
+
 function opaqueToken(value: JsonRecord, field: string, label: string): string {
   const entry = value[field];
   const issue = opaqueToolCallIdIssue(entry);
@@ -103,10 +116,10 @@ export function parseAutopilotChildTerminalAcceptance(value: unknown): Autopilot
   if (!Number.isFinite(Date.parse(createdAt))) throw new CoordinationRuntimeError('invalid-state', 'terminal acceptance created_at is invalid');
   return {
     schema_version: AUTOPILOT_CHILD_TERMINAL_ACCEPTANCE_SCHEMA,
-    repo_id: identifier(entry, 'repo_id', label),
+    repo_id: repoId(entry, 'repo_id', label),
     autopilot_id: identifier(entry, 'autopilot_id', label),
     workstream: identifier(entry, 'workstream', label),
-    workstream_run: identifier(entry, 'workstream_run', label),
+    workstream_run: workstreamRun(entry, 'workstream_run', label),
     unit_id: identifier(entry, 'unit_id', label),
     role,
     attempt,
