@@ -234,7 +234,9 @@ void describe('D65 launch item-I: bootstrap lease spans beyond the ordinary 30s 
       // The lease is still current at coordinator time (> now, not expired).
       const sessions = (payload['session_leases'] as unknown[]).map(parseCoordinationSessionLease);
       assert.equal(sessions.length, 1);
-      assert.ok(Date.parse(sessions[0]!.lease_expires_at) > clock.nowMs(), 'the single bootstrap lease must still be current after planning');
+      const onlySession = sessions[0];
+      if (onlySession === undefined) throw new Error('expected exactly one bootstrap session');
+      assert.ok(Date.parse(onlySession.lease_expires_at) > clock.nowMs(), 'the single bootstrap lease must still be current after planning');
     } finally {
       await fixture.close();
     }

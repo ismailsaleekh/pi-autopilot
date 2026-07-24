@@ -419,7 +419,9 @@ async function foreignRowFromLiveAuthority(row: D65SignerProgramRow, env: Proces
   const headRecord = head as Record<string, unknown>;
   const acceptedGraphSequence = headRecord['sequence'];
   if (typeof acceptedGraphSequence !== 'number' || !Number.isSafeInteger(acceptedGraphSequence) || acceptedGraphSequence < 2) fail('foreign program row accepted heartbeat head has an invalid graph sequence', [row.workstream_run, String(acceptedGraphSequence)]);
-  const highestGraph = foreignGraphs.reduce((max, g) => (g.registered_event_seq > max.registered_event_seq ? g : max), foreignGraphs[0]!);
+  const firstGraph = foreignGraphs[0];
+  if (firstGraph === undefined) fail('foreign program row graph projection became empty after validation', [row.workstream_run]);
+  const highestGraph = foreignGraphs.reduce((max, g) => (g.registered_event_seq > max.registered_event_seq ? g : max), firstGraph);
   return {
     workstream: row.workstream, workstream_run: row.workstream_run, parent_session_file_sha256: null,
     coordinator_session_lease_id: attached?.session_lease_id ?? null, accepted_graph_sequence: acceptedGraphSequence, accepted_graph_sha256: highestGraph.evidence.sha256,

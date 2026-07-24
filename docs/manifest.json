@@ -615,7 +615,7 @@
         "src/cli/autopilot-launch-signer.ts"
       ],
       "signature_hash": "sha256:8fa2351c5545cbce0b3b4f6d1dd81a7c72ddf3a038dedf5ae51737592c88f3bc",
-      "body_hash": "sha256:524539b5d0fe2708fa37be90a5ced1ae0e9229a2d2d0f972cfdff1bba5f48630",
+      "body_hash": "sha256:1334cc13cb3d0a91ad6d3fd6a0c42c00414514580eca0f09527f537a1b44823d",
       "semantic_attestation": null
     },
     "commands/autopilot": {
@@ -1134,7 +1134,7 @@
         "templates/skills/autopilot-roster-setup/payload.json"
       ],
       "signature_hash": "sha256:65e0ff2b8897b03cb04396f41d85620adfe929a558d45b0553399f5141dca92b",
-      "body_hash": "sha256:dfb2149462a1aa9736ddd966884be9cc912b5418a47c142d0b727f8fbb1175fa",
+      "body_hash": "sha256:ec499593625573884ff0b40cf6a019b910c24cbb82448b9903bc3e3a727e328e",
       "semantic_attestation": null
     },
     "subsystems/runner-and-forced-output": {

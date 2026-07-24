@@ -106,6 +106,28 @@ function specIdentity(result: Awaited<ReturnType<typeof commitSelection>>, works
 }
 
 void describe('D69 W3 immutable pre-run selection/runtime snapshot lane', () => {
+  void it('accepts the exact production timestamped KBG workstream-run identity and keeps the path grammar closed', async () => {
+    await withTempDir(async (dir) => {
+      const exactRun = 'kbg-finalize-fresh-20260722T220032Z-181913';
+      const publication = buildCanonicalPreRunSelection({
+        stateRoot: join(dir, 'state'),
+        repo_id: 'sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        workstream_run: exactRun,
+        selected: authority('user-default'),
+        selected_at: SELECTED_AT,
+      });
+      assert.equal(publication.selection.workstream_run, exactRun);
+      assert.match(publication.selection_path, /kbg-finalize-fresh-20260722T220032Z-181913\.json$/u);
+      assert.throws(() => buildCanonicalPreRunSelection({
+        stateRoot: join(dir, 'bad-state'),
+        repo_id: 'repo-valid',
+        workstream_run: 'bad_run',
+        selected: authority('user-default'),
+        selected_at: SELECTED_AT,
+      }), /workstream_run is not a valid roster storage path segment/u);
+    });
+  });
+
   void it('resolves, publishes canonical selection, verifies readback, then opens mutation/spend gates', async () => {
     await withTempDir(async (dir) => {
       const stateRoot = join(dir, 'state');
