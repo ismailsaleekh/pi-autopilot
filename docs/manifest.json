@@ -615,7 +615,7 @@
         "src/cli/autopilot-launch-signer.ts"
       ],
       "signature_hash": "sha256:8dd8f0c31fd32f1ea7122401f9820d2c23c2ec20bfc6c45264185616dc389d7b",
-      "body_hash": "sha256:84e564ccb0fcb43c075f09742197de4f94a344706d988ed4c427a3024caeb1bb",
+      "body_hash": "sha256:d6f19b7ae7e97434ecbf843f8a30d25c4b9b6ba00af074756217dcbe4612db58",
       "semantic_attestation": null
     },
     "commands/autopilot": {
@@ -922,9 +922,9 @@
         "scripts/test-packed-consumer-release.mjs",
         "scripts/verify-packed-consumer.mjs"
       ],
-      "signature_hash": "sha256:ff6dc0cb79ae5ce4eda7c19477ad3f1c9bbbf94c832f5b43564814ef7401be2b",
-      "body_hash": "sha256:ff6dc0cb79ae5ce4eda7c19477ad3f1c9bbbf94c832f5b43564814ef7401be2b",
-      "semantic_attestation": "sha256:ff6dc0cb79ae5ce4eda7c19477ad3f1c9bbbf94c832f5b43564814ef7401be2b"
+      "signature_hash": "sha256:900d1f3d4de483e152a5ade9f755085a184a0de9c0005b4eea8991c61e6c582a",
+      "body_hash": "sha256:900d1f3d4de483e152a5ade9f755085a184a0de9c0005b4eea8991c61e6c582a",
+      "semantic_attestation": "sha256:900d1f3d4de483e152a5ade9f755085a184a0de9c0005b4eea8991c61e6c582a"
     },
     "operations/start-run": {
       "mode": "authored",

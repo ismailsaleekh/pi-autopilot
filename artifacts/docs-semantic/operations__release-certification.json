@@ -1,19 +1,19 @@
 {
-  "schema_version": "autopilot.docs_semantic_attestation.v2",
-  "doc_id": "operations/release-certification",
-  "reviewed_body_hash": "sha256:ff6dc0cb79ae5ce4eda7c19477ad3f1c9bbbf94c832f5b43564814ef7401be2b",
-  "reviewed_doc_sha256": "sha256:1c3b93c82a9c526c3eaf92142176cf696d9760c05193e70ca505668a99fc2a4a",
-  "covers_sources": [
-    "scripts/check-package-payload.mjs",
-    "scripts/check-production-git-spawns.mjs",
-    "scripts/generate-sbom.mjs",
-    "scripts/run-certified-command.mjs",
-    "scripts/security-scan.mjs",
-    "scripts/test-packed-consumer-release.mjs",
-    "scripts/verify-packed-consumer.mjs"
-  ],
-  "verdict": "PASS",
-  "reviewer": "pi W6 merge operator (offline semantic review)",
-  "reviewed_at": "2026-07-23T12:35:54.000Z",
-  "notes": "W6 offline semantic review: verified release certification prose against current certified command, package payload, security scan, docs verification, semantic attestation, and package manifest scripts; the combined package baseline is ^0.81.1 and old evidence is not relabeled."
+    "schema_version": "autopilot.docs_semantic_attestation.v2",
+    "doc_id": "operations/release-certification",
+    "reviewed_body_hash": "sha256:900d1f3d4de483e152a5ade9f755085a184a0de9c0005b4eea8991c61e6c582a",
+    "reviewed_doc_sha256": "sha256:29c69d8b4c19bed117d5ede1bf5ab0234ae44bcc63991a7b08a99813b4353366",
+    "covers_sources": [
+        "scripts/check-package-payload.mjs",
+        "scripts/check-production-git-spawns.mjs",
+        "scripts/generate-sbom.mjs",
+        "scripts/run-certified-command.mjs",
+        "scripts/security-scan.mjs",
+        "scripts/test-packed-consumer-release.mjs",
+        "scripts/verify-packed-consumer.mjs"
+    ],
+    "verdict": "PASS",
+    "reviewer": "D65 launch-integration implementation owner (offline semantic review)",
+    "reviewed_at": "2026-07-24T00:00:00.000Z",
+    "notes": "D65 launch-integration semantic review: the only production-git-spawn allowlist change adds core/coordination/d65-launch-signer as a reviewed process owner that spawns exclusively the external autopilot-launch-signer CLI (never Git, never a model) and is deliberately excluded from the Git-executable-token allowlist so a stray git literal remains a hard violation; all other certification scripts (payload, security scan, sbom, certified command, packed consumer, docs verification) are unchanged; the ^0.81.1 baseline and old evidence are not relabeled."
 }

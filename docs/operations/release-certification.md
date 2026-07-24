@@ -11,9 +11,9 @@ covers_sources:
   - scripts/check-package-payload.mjs
   - scripts/verify-packed-consumer.mjs
   - scripts/test-packed-consumer-release.mjs
-signature_hash: 'sha256:ff6dc0cb79ae5ce4eda7c19477ad3f1c9bbbf94c832f5b43564814ef7401be2b'
-body_hash: 'sha256:ff6dc0cb79ae5ce4eda7c19477ad3f1c9bbbf94c832f5b43564814ef7401be2b'
-semantic_attestation: 'sha256:ff6dc0cb79ae5ce4eda7c19477ad3f1c9bbbf94c832f5b43564814ef7401be2b'
+signature_hash: 'sha256:900d1f3d4de483e152a5ade9f755085a184a0de9c0005b4eea8991c61e6c582a'
+body_hash: 'sha256:900d1f3d4de483e152a5ade9f755085a184a0de9c0005b4eea8991c61e6c582a'
+semantic_attestation: 'sha256:900d1f3d4de483e152a5ade9f755085a184a0de9c0005b4eea8991c61e6c582a'
 stability: evolving
 ---
 
@@ -73,7 +73,11 @@ process exit 0 without a report is not a verdict.
 shipped runtime performs **zero raw production Git spawns**: all Git goes through the
 package's guarded Git process layer. The scanner has narrow, explicit owner allowances
 for the docs and certification scripts and emits the final scanner scope (scanned roots
-and approved process owners) in its report.
+and approved process owners) in its report. The approved process-owner allowlist
+includes the D65 launch-signer spawner (`core/coordination/d65-launch-signer`), which
+spawns only the external `autopilot-launch-signer` CLI (never Git, never a model); it is
+deliberately excluded from the Git-executable-token allowlist, so any stray `git`
+literal in it remains a hard violation.
 
 ## Deterministic packs and packed-consumer proof
 
