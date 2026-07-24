@@ -10,9 +10,9 @@ covers_sources:
   - src/core/coordination/terminal-attempt-proof.ts
   - src/core/coordination/d65-semantic-graph.ts
   - src/core/coordination/d65-dispatch-gate.ts
-signature_hash: 'sha256:e739fe96e4adda1e466f01c9c993d956ab1fdb90536654a4b6297a59d967942a'
-body_hash: 'sha256:29f88722280b9359f51c6fb07750416f6eebd55cd01e97b3adffee3eb6a7edd0'
-semantic_attestation: 'sha256:29f88722280b9359f51c6fb07750416f6eebd55cd01e97b3adffee3eb6a7edd0'
+signature_hash: 'sha256:06405c9702acc763c5a0da285e9ebc2b81817116df945f1e2e6933d9925882d4'
+body_hash: 'sha256:c28c649cdf388c31a73f689f888835778eb5fa686be25637b988e5b13be5a84a'
+semantic_attestation: 'sha256:c28c649cdf388c31a73f689f888835778eb5fa686be25637b988e5b13be5a84a'
 stability: evolving
 ---
 
@@ -30,7 +30,8 @@ contiguous `+1` of the latest attempt. A non-first attempt must name the exact p
 attempt's id and bind the exact prior row bytes by `sha256:` digest
 (`prior_terminal_intent_sha256`); a first attempt must carry null prior fields. A new
 attempt may only follow a **cancelled** latest attempt — nothing may follow a
-`prepared` or `committed` attempt.
+`prepared` or `committed` attempt. Every terminal-intent row also uses the shared
+closed lowercase repo-id and ASCII alphanumeric-or-hyphen workstream-run grammars.
 
 ## Cancellation attempts 1–3 and the mandatory abort
 
@@ -75,25 +76,22 @@ new-work effect (see
 
 ## Close / abort foreign obligation effects
 
-On close, foreign-dependent obligations remain as honest `waiting-for-predecessor`
-records handed to their successors — closing a run does not silently discharge another
-run's dependency. On abort, abort-owned obligations are released as part of the sealed
-abort set. Both outcomes are byte-checked against the recomputed partition.
+The pure terminal-intent contract preserves foreign-dependent rows as exact
+`waiting-for-predecessor` entries and classifies run-owned abort obligations into the
+sealed abort set. It byte-checks both outcomes against the recomputed partition; the
+covered pure sources do not themselves claim to apply successor handoff or obligation
+release side effects.
 
-## Post-main-removal terminal recovery
+## Separate terminal attempt evidence
 
-If the run-main worktree is removed while a terminal intent is outstanding, terminal
-recovery resumes from the committed append-only chain and the sealed effect sets — not
-from a rescan of the (now absent) worktree. The recovery drivers in
-`d65-graph-successor-runtime.ts` load exclusively from committed artifacts and sealed
-candidates (never a worktree scan), so authority comes from the committed chain and a
-missing worktree is a recovery input, never a reason to invent successor state — there
-is **no fabricated graph after worktree removal**.
+`terminal-attempt-proof.ts` validates the structured terminal attempt package — spec,
+status, receipt, audit, and terminal-acceptance evidence — before it can serve as
+terminal proof. That evidence proof is separate from the append-only intent-chain and
+obligation-partition computations above.
 
 ## Invariants
 
 - No attempt follows the third cancellation except the mandatory fourth abort.
-- No fabricated graph or successor is produced after worktree removal.
 - The tail is contiguous and non-reentrant; the terminal-tail cell has no ordinary
   dispatch effects.
 - Never hand-edit the terminal-intent chain, forge a prior digest, or rewrite
@@ -104,7 +102,7 @@ is **no fabricated graph after worktree removal**.
 - `src/core/coordination/d65-terminal-intent.ts`,
   `src/core/coordination/d65-graph-successor.ts`,
   `src/core/coordination/d65-graph-successor-runtime.ts`,
-  `src/core/coordination/terminal-attempt-proof.ts`.
+  `src/core/coordination/terminal-attempt-proof.ts` (structured attempt evidence).
 
 ## Related
 

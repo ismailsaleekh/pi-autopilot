@@ -35,8 +35,9 @@ export const D65_LAUNCH_SIGNER_KIND_HEARTBEAT = 'program-heartbeat' as const;
 
 export interface D65LaunchSignerPolicyRequest {
   readonly kind: typeof D65_LAUNCH_SIGNER_KIND_POLICY;
-  /** Absolute state root of the run's isolated coordinator. */
+  /** Absolute canonical roots of the isolated coordinator and Pi session. */
   readonly state_root: string;
+  readonly session_root: string;
   readonly repo_id: string;
   readonly workstream_run: string;
   /** The sealed policy id/path the launcher will register. */
@@ -49,6 +50,7 @@ export interface D65LaunchSignerPolicyRequest {
 export interface D65LaunchSignerHeartbeatRequest {
   readonly kind: typeof D65_LAUNCH_SIGNER_KIND_HEARTBEAT;
   readonly state_root: string;
+  readonly session_root: string;
   readonly repo_id: string;
   readonly workstream_run: string;
   /** The graph sequence/digest this heartbeat must govern. */

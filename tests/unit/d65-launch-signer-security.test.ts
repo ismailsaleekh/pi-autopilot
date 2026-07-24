@@ -108,6 +108,51 @@ void describe('D65 signer key protected-root boundary (item F)', () => {
     assert.doesNotThrow(() => assertPrivateKeyOutsideProtectedRoots(keyPath, [stateRoot, sessionRoot]));
   });
 
+  void it('rejects substituted request roots before key access for keys inside actual request state/session authority', async () => {
+    for (const keyLocation of ['state', 'session'] as const) {
+      const root = realpathSync(mkdtempSync(join(tmpdir(), `d65-signer-rootbind-${keyLocation}-`)));
+      const configState = join(root, 'config-state'); mkdirSync(configState, { recursive: true, mode: 0o700 });
+      const configSession = join(root, 'config-session'); mkdirSync(configSession, { recursive: true, mode: 0o700 });
+      const requestState = join(root, 'request-state'); mkdirSync(requestState, { recursive: true, mode: 0o700 });
+      const requestSession = join(root, 'request-session'); mkdirSync(requestSession, { recursive: true, mode: 0o700 });
+      const evidenceRoot = join(root, 'evidence'); mkdirSync(evidenceRoot, { recursive: true, mode: 0o700 });
+      const keyRoot = keyLocation === 'state' ? requestState : requestSession;
+      const { privateKey } = generateKeyPairSync('ed25519');
+      const keyPath = join(keyRoot, 'operator.pem'); writeMode0600(keyPath, privateKey.export({ format: 'pem', type: 'pkcs8' }).toString());
+      const config = { schema_version: 'autopilot.launch_signer_config.v1', program_id: 'program-x', repo_id: 'repo-x', workstream: 'wkx', workstream_run: 'run-x', private_key_path: keyPath, state_root: configState, session_root: configSession, trust_anchor_ref: '.pi/x.spki', trust_anchor_sha256: DIGEST('8'), signer_key_id: DIGEST('8'), program_evidence_root: evidenceRoot, policy_id: 'policy-1', policy_ref: 'authority/launch-policies/policy-1.json', package_commit: OID('a'), package_tree: OID('f'), b0_commit: OID('b'), b0_tree: OID('e'), roster_sha256: DIGEST('6'), roster_provider: 'openai-codex', policy_issued_at: '2026-07-22T22:00:34.000Z', program_rows: [{ workstream: 'wkx', workstream_run: 'run-x', state_root: configState, repo_id: 'repo-x' }] };
+      const configPath = join(root, 'signer-config.json'); writeMode0600(configPath, `${JSON.stringify(config)}\n`);
+      const request = JSON.stringify({ kind: 'launch-policy', state_root: requestState, session_root: requestSession, repo_id: 'repo-x', workstream_run: 'run-x', policy_id: 'policy-1', policy_ref: 'authority/launch-policies/policy-1.json', expected_policy_sha256: DIGEST('5') });
+      await assert.rejects(() => runLaunchSignerCli(['--config', configPath, '--request', request], { ...process.env }, () => undefined), /request state\/session roots do not exactly match/u);
+      const heartbeat = JSON.stringify({ kind: 'program-heartbeat', state_root: requestState, session_root: requestSession, repo_id: 'repo-x', workstream_run: 'run-x', graph_sequence: 1, graph_sha256: DIGEST('4'), heartbeat_sequence: 1 });
+      await assert.rejects(() => runLaunchSignerCli(['--config', configPath, '--request', heartbeat], { ...process.env }, () => undefined), /request state\/session roots do not exactly match/u);
+      const stateAlias = join(root, 'request-state-alias'); await symlinkAsync(requestState, stateAlias);
+      const aliased = JSON.stringify({ kind: 'launch-policy', state_root: stateAlias, session_root: requestSession, repo_id: 'repo-x', workstream_run: 'run-x', policy_id: 'policy-1', policy_ref: 'authority/launch-policies/policy-1.json', expected_policy_sha256: DIGEST('5') });
+      await assert.rejects(() => runLaunchSignerCli(['--config', configPath, '--request', aliased], { ...process.env }, () => undefined), /must be an existing canonical directory/u);
+    }
+  });
+
+  void it('rejects signer config repo/run identities outside the shared closed grammar', async () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'd65-signer-identities-')));
+    const stateRoot = join(root, 'state'); mkdirSync(stateRoot, { recursive: true, mode: 0o700 });
+    const sessionRoot = join(root, 'sessions'); mkdirSync(sessionRoot, { recursive: true, mode: 0o700 });
+    const evidenceRoot = join(root, 'evidence'); mkdirSync(evidenceRoot, { recursive: true, mode: 0o700 });
+    const configPath = join(root, 'signer-config.json');
+    const base = { schema_version: 'autopilot.launch_signer_config.v1', program_id: 'program-x', repo_id: 'repo-x', workstream: 'wkx', workstream_run: 'run-x', private_key_path: join(root, 'operator.pem'), state_root: stateRoot, session_root: sessionRoot, trust_anchor_ref: '.pi/x.spki', trust_anchor_sha256: DIGEST('8'), signer_key_id: DIGEST('8'), program_evidence_root: evidenceRoot, policy_id: 'policy-1', policy_ref: 'authority/launch-policies/policy-1.json', package_commit: OID('a'), package_tree: OID('f'), b0_commit: OID('b'), b0_tree: OID('e'), roster_sha256: DIGEST('6'), roster_provider: 'openai-codex', policy_issued_at: '2026-07-22T22:00:34.000Z', program_rows: [{ workstream: 'wkx', workstream_run: 'run-x', state_root: stateRoot, repo_id: 'repo-x' }] };
+    const request = JSON.stringify({ kind: 'launch-policy', state_root: stateRoot, session_root: sessionRoot, repo_id: 'repo-x', workstream_run: 'run-x', policy_id: 'policy-1', policy_ref: 'authority/launch-policies/policy-1.json', expected_policy_sha256: DIGEST('5') });
+    for (const repo_id of ['Repo-upper', 'bad_repo', 'bad.repo', 'bad:repo', '../repo', 'répo', `r${'a'.repeat(120)}`]) {
+      writeMode0600(configPath, `${JSON.stringify({ ...base, repo_id })}\n`);
+      await assert.rejects(() => runLaunchSignerCli(['--config', configPath, '--request', request], { ...process.env }, () => undefined), /shared closed repo-id grammar/u);
+    }
+    for (const workstream_run of ['bad_run', 'bad.run', 'bad:run', '../run', 'rún', `r${'a'.repeat(120)}`]) {
+      writeMode0600(configPath, `${JSON.stringify({ ...base, workstream_run })}\n`);
+      await assert.rejects(() => runLaunchSignerCli(['--config', configPath, '--request', request], { ...process.env }, () => undefined), /shared closed workstream-run grammar/u);
+    }
+    const ownRow = base.program_rows[0];
+    assert.ok(ownRow !== undefined);
+    writeMode0600(configPath, `${JSON.stringify({ ...base, program_rows: [{ workstream: 'zz-peer', workstream_run: 'run-peer', state_root: null, repo_id: null }, ownRow] })}\n`);
+    await assert.rejects(() => runLaunchSignerCli(['--config', configPath, '--request', request], { ...process.env }, () => undefined), /workstream-byte-sorted/u);
+  });
+
   void it('rejects a signer config with unexpected/missing fields', async () => {
     const root = realpathSync(mkdtempSync(join(tmpdir(), 'd65-signercfg-')));
     const configPath = join(root, 'bad-config.json');
@@ -116,7 +161,7 @@ void describe('D65 signer key protected-root boundary (item F)', () => {
     await assert.rejects(() => runLaunchSignerCli(['--config', configPath, '--request', request], { ...process.env }, () => undefined), /unexpected\/missing fields/u);
   });
 
-  void it('rejects a launch-policy request carrying an unknown field (exact closed request set)', async () => {
+  void it('rejects unknown request fields and repo/run identities outside the shared closed grammar', async () => {
     const root = realpathSync(mkdtempSync(join(tmpdir(), 'd65-signerreq-')));
     const stateRoot = join(root, 'state'); mkdirSync(stateRoot, { recursive: true, mode: 0o700 });
     const sessionRoot = join(root, 'sessions'); mkdirSync(sessionRoot, { recursive: true, mode: 0o700 });
@@ -126,8 +171,10 @@ void describe('D65 signer key protected-root boundary (item F)', () => {
     const keyPath = join(keyDir, 'k.pem'); writeMode0600(keyPath, privateKey.export({ format: 'pem', type: 'pkcs8' }).toString());
     const config = { schema_version: 'autopilot.launch_signer_config.v1', program_id: 'program-x', repo_id: 'repo-x', workstream: 'wkx', workstream_run: 'run-x', private_key_path: keyPath, state_root: stateRoot, session_root: sessionRoot, trust_anchor_ref: '.pi/x.spki', trust_anchor_sha256: DIGEST('8'), signer_key_id: DIGEST('8'), program_evidence_root: evidenceRoot, policy_id: 'policy-1', policy_ref: 'authority/launch-policies/policy-1.json', package_commit: OID('a'), package_tree: OID('f'), b0_commit: OID('b'), b0_tree: OID('e'), roster_sha256: DIGEST('6'), roster_provider: 'openai-codex', policy_issued_at: '2026-07-22T22:00:34.000Z', program_rows: [{ workstream: 'wkx', workstream_run: 'run-x', state_root: stateRoot, repo_id: 'repo-x' }] };
     const configPath = join(root, 'signer-config.json'); writeMode0600(configPath, `${JSON.stringify(config, null, 2)}\n`);
-    const request = JSON.stringify({ kind: 'launch-policy', state_root: stateRoot, repo_id: 'repo-x', workstream_run: 'run-x', policy_id: 'policy-1', policy_ref: 'authority/launch-policies/policy-1.json', expected_policy_sha256: DIGEST('5'), sneaky: 'x' });
-    await assert.rejects(() => runLaunchSignerCli(['--config', configPath, '--request', request], { ...process.env }, () => undefined), /has unexpected\/missing fields/u);
+    const baseRequest = { kind: 'launch-policy', state_root: stateRoot, session_root: sessionRoot, repo_id: 'repo-x', workstream_run: 'run-x', policy_id: 'policy-1', policy_ref: 'authority/launch-policies/policy-1.json', expected_policy_sha256: DIGEST('5') };
+    await assert.rejects(() => runLaunchSignerCli(['--config', configPath, '--request', JSON.stringify({ ...baseRequest, sneaky: 'x' })], { ...process.env }, () => undefined), /has unexpected\/missing fields/u);
+    for (const repo_id of ['Repo-upper', 'bad_repo', 'bad.repo', 'bad:repo', '../repo', 'répo', `r${'a'.repeat(120)}`]) await assert.rejects(() => runLaunchSignerCli(['--config', configPath, '--request', JSON.stringify({ ...baseRequest, repo_id })], { ...process.env }, () => undefined), /shared closed repo-id grammar/u);
+    for (const workstream_run of ['bad_run', 'bad.run', 'bad:run', '../run', 'rún', `r${'a'.repeat(120)}`]) await assert.rejects(() => runLaunchSignerCli(['--config', configPath, '--request', JSON.stringify({ ...baseRequest, workstream_run })], { ...process.env }, () => undefined), /shared closed workstream-run grammar/u);
   });
 
   void it('keeps a foreign graph tuple on one accepted heartbeat authority and fences a newer-graph drift', () => {
@@ -150,9 +197,12 @@ void describe('D65 signer key protected-root boundary (item F)', () => {
   void it('rejects a signer config program row missing state_root/repo_id', async () => {
     const root = realpathSync(mkdtempSync(join(tmpdir(), 'd65-signerrow-')));
     const configPath = join(root, 'bad-config.json');
-    const config = { schema_version: 'autopilot.launch_signer_config.v1', program_id: 'program-x', repo_id: 'repo-x', workstream: 'wkx', workstream_run: 'run-x', private_key_path: '/abs/k.pem', state_root: '/abs/state', session_root: '/abs/sessions', trust_anchor_ref: '.pi/x.spki', trust_anchor_sha256: DIGEST('8'), signer_key_id: DIGEST('8'), program_evidence_root: '/abs/evidence', policy_id: 'policy-1', policy_ref: 'authority/launch-policies/policy-1.json', package_commit: OID('a'), package_tree: OID('f'), b0_commit: OID('b'), b0_tree: OID('e'), roster_sha256: DIGEST('6'), roster_provider: 'openai-codex', policy_issued_at: '2026-07-22T22:00:34.000Z', program_rows: [{ workstream: 'wkx', workstream_run: 'run-x' }] };
+    const stateRoot = join(root, 'state'); mkdirSync(stateRoot, { recursive: true, mode: 0o700 });
+    const sessionRoot = join(root, 'sessions'); mkdirSync(sessionRoot, { recursive: true, mode: 0o700 });
+    const evidenceRoot = join(root, 'evidence'); mkdirSync(evidenceRoot, { recursive: true, mode: 0o700 });
+    const config = { schema_version: 'autopilot.launch_signer_config.v1', program_id: 'program-x', repo_id: 'repo-x', workstream: 'wkx', workstream_run: 'run-x', private_key_path: join(root, 'k.pem'), state_root: stateRoot, session_root: sessionRoot, trust_anchor_ref: '.pi/x.spki', trust_anchor_sha256: DIGEST('8'), signer_key_id: DIGEST('8'), program_evidence_root: evidenceRoot, policy_id: 'policy-1', policy_ref: 'authority/launch-policies/policy-1.json', package_commit: OID('a'), package_tree: OID('f'), b0_commit: OID('b'), b0_tree: OID('e'), roster_sha256: DIGEST('6'), roster_provider: 'openai-codex', policy_issued_at: '2026-07-22T22:00:34.000Z', program_rows: [{ workstream: 'wkx', workstream_run: 'run-x' }] };
     writeMode0600(configPath, `${JSON.stringify(config, null, 2)}\n`);
-    const request = JSON.stringify({ kind: 'launch-policy', state_root: '/abs/state', repo_id: 'repo-x', workstream_run: 'run-x', policy_id: 'policy-1', policy_ref: 'authority/launch-policies/policy-1.json', expected_policy_sha256: DIGEST('5') });
+    const request = JSON.stringify({ kind: 'launch-policy', state_root: stateRoot, session_root: sessionRoot, repo_id: 'repo-x', workstream_run: 'run-x', policy_id: 'policy-1', policy_ref: 'authority/launch-policies/policy-1.json', expected_policy_sha256: DIGEST('5') });
     await assert.rejects(() => runLaunchSignerCli(['--config', configPath, '--request', request], { ...process.env }, () => undefined), /must have exactly workstream, workstream_run, state_root, and repo_id/u);
   });
 

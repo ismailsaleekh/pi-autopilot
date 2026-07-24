@@ -42,6 +42,11 @@ void describe('D65 launch policy contract', () => {
     assert.throws(() => parseD65LaunchPolicy(policyFixture({ extra: 1 })), /unknown fields/u);
   });
 
+  void it('rejects repo/run identities outside the shared closed grammar', () => {
+    for (const run of ['bad_run', 'bad.run', 'bad:run', '../bad', 'é-run', `r${'a'.repeat(120)}`]) assert.throws(() => parseD65LaunchPolicy(policyFixture({ workstream_run: run })), /closed 120-byte ASCII|bounded non-empty/u);
+    for (const repo of ['Repo-upper', 'bad_repo', 'bad.repo', 'bad:repo', '../repo', `r${'a'.repeat(120)}`]) assert.throws(() => parseD65LaunchPolicy(policyFixture({ repo_id: repo })), /closed lowercase 120-byte ASCII|bounded non-empty/u);
+  });
+
   void it('requires initial version 1 to carry null prior/decision fields', () => {
     assert.throws(() => parseD65LaunchPolicy(policyFixture({ prior_policy_sha256: DIGEST('2') })), /initial policy version 1 must have null prior\/decision fields/u);
     // A superseding version needs prior + decision refs.
@@ -114,6 +119,10 @@ void describe('D65 program heartbeat contract', () => {
     assert.equal(heartbeat.rows.length, 1);
     assert.equal(heartbeat.provider_health[0]?.state, 'healthy');
   });
+  void it('rejects heartbeat row identities outside the shared closed run grammar', () => {
+    for (const run of ['bad_run', 'bad.run', 'bad:run', '../bad', 'é-run', `r${'a'.repeat(120)}`]) assert.throws(() => parseD65ProgramHeartbeat(heartbeatFixture({ rows: [row({ workstream_run: run })] })), /closed 120-byte ASCII|bounded non-empty/u);
+  });
+
   void it('enforces valid_until = issued_at + 15m and dispatch/reason coherence', () => {
     assert.throws(() => parseD65ProgramHeartbeat(heartbeatFixture({ valid_until: '2026-07-19T00:10:00.000Z' })), /valid_until must be exactly issued_at \+ 15 minutes/u);
     assert.throws(() => parseD65ProgramHeartbeat(heartbeatFixture({ dispatch_allowed: true })), /global dispatch_allowed requires empty global stop_reasons/u);
@@ -123,6 +132,7 @@ void describe('D65 program heartbeat contract', () => {
     const base = { provider: 'openai-codex', observation_ref: 'authority/provider.json', observation_sha256: DIGEST('a') };
     const retry = { ...base, state: 'retry-authorized', cooldown_until: '2026-07-19T00:00:00.000Z', probe_workstream_run: 'run-1', probe_ref: 'authority/subscription-probes/00000000000000000001-probe-1.json', probe_sha256: DIGEST('b'), consumption_event_seq: null };
     assert.equal(parseD65ProgramHeartbeat(heartbeatFixture({ provider_health: [retry] })).provider_health[0]?.state, 'retry-authorized');
+    assert.throws(() => parseD65ProgramHeartbeat(heartbeatFixture({ provider_health: [{ ...retry, probe_workstream_run: 'bad_run' }] })), /closed 120-byte ASCII/u);
     const consumed = { ...retry, state: 'healthy', cooldown_until: null, consumption_event_seq: 9 };
     assert.equal(parseD65ProgramHeartbeat(heartbeatFixture({ provider_health: [consumed] })).provider_health[0]?.consumption_event_seq, 9);
     assert.throws(() => parseD65ProgramHeartbeat(heartbeatFixture({ provider_health: [{ ...base, state: 'healthy', observation_ref: null, observation_sha256: null, cooldown_until: null, probe_workstream_run: null, probe_ref: null, probe_sha256: null, consumption_event_seq: null }] })), /must cite one exact/u);

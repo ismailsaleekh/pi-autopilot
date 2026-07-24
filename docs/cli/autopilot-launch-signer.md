@@ -7,7 +7,7 @@ covers_surfaces:
 covers_sources:
   - src/cli/autopilot-launch-signer.ts
 signature_hash: 'sha256:279a789983604ed3d9b43040cc4bed1bbad75983311ed32e183d2ca5bbc38c65'
-body_hash: 'sha256:fb43a3df5df44ff063910889a9aceb80b27946602a4192f39df214c280c53166'
+body_hash: 'sha256:ed85d85ce3be406ae8b718faaa1269a7bfeda98da43cd12546abf3a8819c3c29'
 stability: evolving
 ---
 
@@ -38,17 +38,23 @@ runtime only **verifies** and **consumes** the signed bytes through the frozen
 - `--config` (or `AUTOPILOT_LAUNCH_SIGNER_CONFIG`) names a mode-0600, one-link,
   no-follow `autopilot.launch_signer_config.v1` file that binds the private key
   path, program/roster/package/B0 identity, trust anchor ref/digest, evidence
-  root, policy id/path, and the sealed policy issue timestamp.
+  root, policy id/path, and the sealed policy issue timestamp. Its state, session,
+  and evidence roots must be existing canonical absolute directories; program
+  rows must be workstream-byte-sorted without duplicates, and the own row must
+  exactly match the config's workstream/run/state/repo authority.
 - `--request` is a closed JSON request: either a `launch-policy` request (naming
-  the run state root, repo/run, policy id/ref, and expected sealed policy
-  digest) or a `program-heartbeat` request (naming the run state root, repo/run,
-  the graph sequence/digest to govern, and the exact next heartbeat sequence).
+  the canonical run state and session roots, repo/run, policy id/ref, and expected
+  sealed policy digest) or a `program-heartbeat` request (naming those same roots
+  and repo/run, the graph sequence/digest to govern, and the exact next heartbeat
+  sequence). Repo ids and run ids use the shared closed launch grammar.
 
 ## Behavior
 
 - Reads the config and key through mode-checked, no-follow, one-link,
   descriptor-identity-checked reads; a symlink, wrong mode, or oversized file
-  fails closed.
+  fails closed. Before any coordinator query or key read, the request state and
+  session roots must exactly equal the canonical config roots, and a policy
+  request's id/ref must exactly equal the sealed config id/ref.
 - For a `launch-policy` request, it reads the live accepted bootstrap artifact,
   builds the exact cap-one policy (`parallel_cap`, `maximum_parallel_cap`, and
   `expected_checkout_units` all `1`), signs it with domain
@@ -68,7 +74,9 @@ runtime only **verifies** and **consumes** the signed bytes through the frozen
 ## Isolation invariants
 
 - The runtime never learns the key path; it passes only the signing request and
-  reads the signed candidate the signer wrote.
+  reads the signed candidate the signer wrote. The key's canonical path must be
+  outside source/Git/worktree/runtime/evidence authority and both the config and
+  request state/session roots.
 - The signer never mutates coordinator authority: it only reads status/doctor
   and writes signed evidence files. Acceptance is the runtime's frozen job.
 - The signer never invokes a model or paid API and inherits no metered

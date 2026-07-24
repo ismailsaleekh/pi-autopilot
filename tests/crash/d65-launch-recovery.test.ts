@@ -94,7 +94,7 @@ void describe('D65 durable launch phase recovery (crash boundaries)', () => {
       // Simulate crash after policy commit, before registration: commit the exact
       // signed policy blob at the run-main HEAD, then re-run the (idempotent)
       // registration path which must reuse that commit rather than re-committing.
-      const signed = await signer.signLaunchPolicy({ kind: 'launch-policy', state_root: manifest.state_root, repo_id: manifest.repo_id, workstream_run: manifest.workstream_run, policy_id: manifest.policy_candidate.policy_id, policy_ref: manifest.policy_candidate.policy_ref, expected_policy_sha256: manifest.policy_candidate.policy_sha256 });
+      const signed = await signer.signLaunchPolicy({ kind: 'launch-policy', state_root: manifest.state_root, session_root: manifest.session_root, repo_id: manifest.repo_id, workstream_run: manifest.workstream_run, policy_id: manifest.policy_candidate.policy_id, policy_ref: manifest.policy_candidate.policy_ref, expected_policy_sha256: manifest.policy_candidate.policy_sha256 });
       const policyPath = join(manifest.main_worktree_path, ...manifest.policy_candidate.policy_ref.split('/'));
       const { mkdirSync } = await import('node:fs');
       mkdirSync(join(policyPath, '..'), { recursive: true });

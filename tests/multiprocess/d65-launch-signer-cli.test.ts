@@ -39,7 +39,7 @@ function sha256(v: string | Uint8Array): `sha256:${string}` { return `sha256:${c
 interface Fixture { readonly root: string; readonly manifest: D65LaunchManifest; readonly signerCommand: string; readonly signerArgs: readonly string[]; readonly env: ProcessEnvLike; readonly configPath: string; readonly keyPath: string; readonly close: () => Promise<void> }
 
 async function buildFixture(suffix: string): Promise<Fixture> {
-  const root = await mkdtemp(join(tmpdir(), `d65-signer-${suffix}-`));
+  const root = realpathSync(await mkdtemp(join(tmpdir(), `d65-signer-${suffix}-`)));
   const clone = join(root, 'clone');
   await mkdir(clone, { recursive: true });
   git(clone, ['init', '-b', 'main']);
@@ -57,6 +57,8 @@ async function buildFixture(suffix: string): Promise<Fixture> {
   const bootstrapRef = `.pi/autopilot-bootstrap/${workstreamRun}/bootstrap.json`;
   const stateRoot = join(root, 'state');
   const sessionRoot = join(root, 'sessions');
+  await mkdir(stateRoot, { recursive: true, mode: 0o700 }); chmodSync(stateRoot, 0o700);
+  await mkdir(sessionRoot, { recursive: true, mode: 0o700 }); chmodSync(sessionRoot, 0o700);
   const worktreeRoot = join(stateRoot, 'worktrees', repoId);
   const mainWorktreePath = join(worktreeRoot, 'active', workstreamRun, 'main');
   const runtimeRoot = join(mainWorktreePath, '.pi', 'autopilot', workstream);
@@ -159,7 +161,7 @@ void describe('D65 external launch signer CLI (out-of-process operator boundary)
       const bootstrap = await beginD65LaunchBootstrap({ manifest, rawSessionId: 'signer-a', env });
       const signer = new SpawnedD65LaunchSigner({ command: fixture.signerCommand, baseArgs: fixture.signerArgs, env });
 
-      const policyResult = await signer.signLaunchPolicy({ kind: 'launch-policy', state_root: manifest.state_root, repo_id: manifest.repo_id, workstream_run: manifest.workstream_run, policy_id: 'policy-1', policy_ref: manifest.policy_candidate.policy_ref, expected_policy_sha256: manifest.policy_candidate.policy_sha256 });
+      const policyResult = await signer.signLaunchPolicy({ kind: 'launch-policy', state_root: manifest.state_root, session_root: manifest.session_root, repo_id: manifest.repo_id, workstream_run: manifest.workstream_run, policy_id: 'policy-1', policy_ref: manifest.policy_candidate.policy_ref, expected_policy_sha256: manifest.policy_candidate.policy_sha256 });
       // The signer wrote genuinely operator-signed policy bytes.
       const policyBytes = readFileSync(policyResult.absolute_path);
       const policy = parseD65LaunchPolicy(JSON.parse(new TextDecoder().decode(policyBytes)));

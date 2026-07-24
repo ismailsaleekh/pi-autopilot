@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { createHash } from 'node:crypto';
-import { closeSync, constants as fsConstants, fstatSync, lstatSync, openSync, readFileSync, realpathSync } from 'node:fs';
+import { closeSync, constants as fsConstants, fstatSync, lstatSync, openSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -15,6 +15,7 @@ import { encodeUnpaddedBase64Url } from '../core/coordination/d65-trust.ts';
 import { runGitQuery } from '../core/git-process.ts';
 import { ensurePrivateDirectory, publishCreateOnlyAtomic } from '../core/roster/transaction.ts';
 import { AUTOPILOT_STATE_ROOT_ENV, type ProcessEnvLike } from '../core/parallel-runtime.ts';
+import { isValidAutopilotRepoId, isValidWorkstreamRun } from '../core/paths.ts';
 
 // The external operator launch signer (freeze §9.3; fresh plan §2.2/§3.2).
 //
@@ -136,6 +137,28 @@ function requireString(record: Readonly<Record<string, unknown>>, field: string,
   return value;
 }
 
+function requireRepoId(record: Readonly<Record<string, unknown>>, field: string, label: string): string {
+  const value = requireString(record, field, label);
+  if (!isValidAutopilotRepoId(value)) fail(`${label}.${field} must match the shared closed repo-id grammar`);
+  return value;
+}
+
+function requireWorkstreamRun(record: Readonly<Record<string, unknown>>, field: string, label: string): string {
+  const value = requireString(record, field, label);
+  if (!isValidWorkstreamRun(value)) fail(`${label}.${field} must match the shared closed workstream-run grammar`);
+  return value;
+}
+
+function requireCanonicalDirectory(record: Readonly<Record<string, unknown>>, field: string, label: string): string {
+  const value = requireString(record, field, label);
+  if (!isAbsolute(value)) fail(`${label}.${field} must be an absolute canonical directory`);
+  let canonical: string;
+  try { canonical = realpathSync(value); }
+  catch (error) { fail(`${label}.${field} must exist as a canonical directory`, [error instanceof Error ? error.message : String(error)]); }
+  if (canonical !== value || !statSync(canonical).isDirectory()) fail(`${label}.${field} must be an existing canonical directory`, [value, canonical]);
+  return canonical;
+}
+
 function requireSha256(record: Readonly<Record<string, unknown>>, field: string, label: string): `sha256:${string}` {
   const value = requireString(record, field, label);
   if (!/^sha256:[a-f0-9]{64}$/u.test(value)) fail(`${label}.${field} must be sha256:<64 lowercase hex>`);
@@ -157,19 +180,19 @@ function parseConfig(bytes: Uint8Array): SignerConfig {
   const expected = [...CONFIG_FIELDS].sort();
   if (keys.length !== expected.length || expected.some((field, index) => keys[index] !== field)) fail('config has unexpected/missing fields', keys);
   if (record['schema_version'] !== 'autopilot.launch_signer_config.v1') fail('config schema is wrong');
-  return Object.freeze({
+  const config: SignerConfig = {
     schema_version: 'autopilot.launch_signer_config.v1',
     program_id: requireString(record, 'program_id', 'config'),
-    repo_id: requireString(record, 'repo_id', 'config'),
+    repo_id: requireRepoId(record, 'repo_id', 'config'),
     workstream: requireString(record, 'workstream', 'config'),
-    workstream_run: requireString(record, 'workstream_run', 'config'),
+    workstream_run: requireWorkstreamRun(record, 'workstream_run', 'config'),
     private_key_path: requireString(record, 'private_key_path', 'config'),
-    state_root: requireString(record, 'state_root', 'config'),
-    session_root: requireString(record, 'session_root', 'config'),
+    state_root: requireCanonicalDirectory(record, 'state_root', 'config'),
+    session_root: requireCanonicalDirectory(record, 'session_root', 'config'),
     trust_anchor_ref: requireString(record, 'trust_anchor_ref', 'config'),
     trust_anchor_sha256: requireSha256(record, 'trust_anchor_sha256', 'config'),
     signer_key_id: requireSha256(record, 'signer_key_id', 'config'),
-    program_evidence_root: requireString(record, 'program_evidence_root', 'config'),
+    program_evidence_root: requireCanonicalDirectory(record, 'program_evidence_root', 'config'),
     policy_id: requireString(record, 'policy_id', 'config'),
     policy_ref: requireString(record, 'policy_ref', 'config'),
     package_commit: requireString(record, 'package_commit', 'config'),
@@ -180,7 +203,11 @@ function parseConfig(bytes: Uint8Array): SignerConfig {
     roster_provider: requireString(record, 'roster_provider', 'config'),
     policy_issued_at: requireString(record, 'policy_issued_at', 'config'),
     program_rows: parseProgramRows(record['program_rows']),
-  });
+  };
+  const ownRows = config.program_rows.filter((row) => row.workstream === config.workstream);
+  const own = ownRows[0];
+  if (ownRows.length !== 1 || own === undefined || own.workstream_run !== config.workstream_run || own.state_root !== config.state_root || own.repo_id !== config.repo_id) fail('config must contain exactly one own program row matching its workstream/run/state/repo authority');
+  return Object.freeze(config);
 }
 
 function parseProgramRows(value: unknown): readonly D65SignerProgramRow[] {
@@ -189,25 +216,24 @@ function parseProgramRows(value: unknown): readonly D65SignerProgramRow[] {
     const record = requireObject(entry, `config.program_rows[${String(index)}]`);
     const keys = Object.keys(record).sort();
     if (keys.length !== 4 || keys[0] !== 'repo_id' || keys[1] !== 'state_root' || keys[2] !== 'workstream' || keys[3] !== 'workstream_run') fail(`config.program_rows[${String(index)}] must have exactly workstream, workstream_run, state_root, and repo_id`);
+    const rowLabel = `config.program_rows[${String(index)}]`;
     const stateRootRaw = record['state_root'];
-    const stateRoot = stateRootRaw === null ? null : requireString(record, 'state_root', `config.program_rows[${String(index)}]`);
-    if (stateRoot !== null && !isAbsolute(stateRoot)) fail(`config.program_rows[${String(index)}].state_root must be an absolute path or null`);
+    const stateRoot = stateRootRaw === null ? null : requireCanonicalDirectory(record, 'state_root', rowLabel);
     const repoIdRaw = record['repo_id'];
-    const repoId = repoIdRaw === null ? null : requireString(record, 'repo_id', `config.program_rows[${String(index)}]`);
+    const repoId = repoIdRaw === null ? null : requireRepoId(record, 'repo_id', rowLabel);
     if ((stateRoot === null) !== (repoId === null)) fail(`config.program_rows[${String(index)}] state_root and repo_id must be both null or both present`);
-    return Object.freeze({ workstream: requireString(record, 'workstream', 'config.program_rows'), workstream_run: requireString(record, 'workstream_run', 'config.program_rows'), state_root: stateRoot, repo_id: repoId });
+    return Object.freeze({ workstream: requireString(record, 'workstream', rowLabel), workstream_run: requireWorkstreamRun(record, 'workstream_run', rowLabel), state_root: stateRoot, repo_id: repoId });
   });
-  const sorted = [...rows].sort((left, right) => (left.workstream < right.workstream ? -1 : left.workstream > right.workstream ? 1 : 0));
-  for (let index = 1; index < sorted.length; index += 1) if ((sorted[index - 1]?.workstream ?? '') === (sorted[index]?.workstream ?? '')) fail('config.program_rows workstream identities must be unique');
-  return Object.freeze(sorted);
+  for (let index = 1; index < rows.length; index += 1) if (!((rows[index - 1]?.workstream ?? '') < (rows[index]?.workstream ?? ''))) fail('config.program_rows must be workstream-byte-sorted with no duplicates');
+  return Object.freeze(rows);
 }
 
-interface PolicyRequest { readonly kind: 'launch-policy'; readonly state_root: string; readonly repo_id: string; readonly workstream_run: string; readonly policy_id: string; readonly policy_ref: string; readonly expected_policy_sha256: `sha256:${string}` }
-interface HeartbeatRequest { readonly kind: 'program-heartbeat'; readonly state_root: string; readonly repo_id: string; readonly workstream_run: string; readonly graph_sequence: number; readonly graph_sha256: `sha256:${string}`; readonly heartbeat_sequence: number }
+interface PolicyRequest { readonly kind: 'launch-policy'; readonly state_root: string; readonly session_root: string; readonly repo_id: string; readonly workstream_run: string; readonly policy_id: string; readonly policy_ref: string; readonly expected_policy_sha256: `sha256:${string}` }
+interface HeartbeatRequest { readonly kind: 'program-heartbeat'; readonly state_root: string; readonly session_root: string; readonly repo_id: string; readonly workstream_run: string; readonly graph_sequence: number; readonly graph_sha256: `sha256:${string}`; readonly heartbeat_sequence: number }
 type SignerRequest = PolicyRequest | HeartbeatRequest;
 
-const POLICY_REQUEST_FIELDS = ['kind', 'state_root', 'repo_id', 'workstream_run', 'policy_id', 'policy_ref', 'expected_policy_sha256'] as const;
-const HEARTBEAT_REQUEST_FIELDS = ['kind', 'state_root', 'repo_id', 'workstream_run', 'graph_sequence', 'graph_sha256', 'heartbeat_sequence'] as const;
+const POLICY_REQUEST_FIELDS = ['kind', 'state_root', 'session_root', 'repo_id', 'workstream_run', 'policy_id', 'policy_ref', 'expected_policy_sha256'] as const;
+const HEARTBEAT_REQUEST_FIELDS = ['kind', 'state_root', 'session_root', 'repo_id', 'workstream_run', 'graph_sequence', 'graph_sha256', 'heartbeat_sequence'] as const;
 
 /** Enforce an exact closed field set (no unknown/missing request fields). */
 function requireExactFields(record: Readonly<Record<string, unknown>>, fields: readonly string[], label: string): void {
@@ -224,16 +250,16 @@ function parseRequest(raw: string): SignerRequest {
   if (record['kind'] === 'launch-policy') {
     requireExactFields(record, POLICY_REQUEST_FIELDS, 'launch-policy request');
     return Object.freeze({
-      kind: 'launch-policy', state_root: requireString(record, 'state_root', 'request'), repo_id: requireString(record, 'repo_id', 'request'),
-      workstream_run: requireString(record, 'workstream_run', 'request'), policy_id: requireString(record, 'policy_id', 'request'),
+      kind: 'launch-policy', state_root: requireCanonicalDirectory(record, 'state_root', 'request'), session_root: requireCanonicalDirectory(record, 'session_root', 'request'), repo_id: requireRepoId(record, 'repo_id', 'request'),
+      workstream_run: requireWorkstreamRun(record, 'workstream_run', 'request'), policy_id: requireString(record, 'policy_id', 'request'),
       policy_ref: requireString(record, 'policy_ref', 'request'), expected_policy_sha256: requireSha256(record, 'expected_policy_sha256', 'request'),
     });
   }
   if (record['kind'] === 'program-heartbeat') {
     requireExactFields(record, HEARTBEAT_REQUEST_FIELDS, 'program-heartbeat request');
     return Object.freeze({
-      kind: 'program-heartbeat', state_root: requireString(record, 'state_root', 'request'), repo_id: requireString(record, 'repo_id', 'request'),
-      workstream_run: requireString(record, 'workstream_run', 'request'), graph_sequence: requireInteger(record, 'graph_sequence', 'request'),
+      kind: 'program-heartbeat', state_root: requireCanonicalDirectory(record, 'state_root', 'request'), session_root: requireCanonicalDirectory(record, 'session_root', 'request'), repo_id: requireRepoId(record, 'repo_id', 'request'),
+      workstream_run: requireWorkstreamRun(record, 'workstream_run', 'request'), graph_sequence: requireInteger(record, 'graph_sequence', 'request'),
       graph_sha256: requireSha256(record, 'graph_sha256', 'request'), heartbeat_sequence: requireInteger(record, 'heartbeat_sequence', 'request'),
     });
   }
@@ -251,8 +277,8 @@ function gitBlob(repoRoot: string, commit: string, ref: string): Uint8Array {
  * if the key can live inside runtime-controlled or packaged authority.
  */
 /** The complete set of protected roots the operator key must live outside of. */
-function protectedRootsFromResource(config: SignerConfig, resource: ReturnType<typeof parseCoordinationRunResource>): readonly string[] {
-  return [resource.source_repo, resource.git_common_dir, resource.worktree_root, resource.main_worktree_path, resource.runtime_root, config.program_evidence_root, config.state_root, config.session_root];
+function protectedRootsFromResource(config: SignerConfig, request: SignerRequest, resource: ReturnType<typeof parseCoordinationRunResource>): readonly string[] {
+  return [resource.source_repo, resource.git_common_dir, resource.worktree_root, resource.main_worktree_path, resource.runtime_root, config.program_evidence_root, config.state_root, config.session_root, request.state_root, request.session_root];
 }
 
 /**
@@ -312,7 +338,7 @@ async function signPolicy(config: SignerConfig, request: PolicyRequest, env: Pro
     program_evidence_root: config.program_evidence_root, trust_anchor_ref: config.trust_anchor_ref, trust_anchor_sha256: config.trust_anchor_sha256,
     prior_policy_sha256: null, capacity_decision_ref: null, capacity_decision_sha256: null, issued_at: config.policy_issued_at, signer_key_id: config.signer_key_id,
   };
-  const privateKeyPem = readOperatorPrivateKey(config, protectedRootsFromResource(config, resource));
+  const privateKeyPem = readOperatorPrivateKey(config, protectedRootsFromResource(config, request, resource));
   const signature = encodeUnpaddedBase64Url(new Uint8Array(sign(null, concatDomain('AUTOPILOT-D65-LAUNCH-POLICY\u0000', canonicalJson(fields)), createPrivateKey(privateKeyPem))));
   const bytes = new TextEncoder().encode(`${canonicalJson({ ...fields, signature })}\n`);
   // Parse-validate our own output before writing (fail closed).
@@ -350,7 +376,7 @@ async function signHeartbeat(config: SignerConfig, request: HeartbeatRequest, en
     provider_health: [{ provider: config.roster_provider, state: 'healthy', observation_ref: policyArtifact.evidence.ref, observation_sha256: policyArtifact.evidence.sha256, cooldown_until: null, probe_workstream_run: null, probe_ref: null, probe_sha256: null, consumption_event_seq: null }],
     dispatch_allowed: true, stop_reasons: [], trust_anchor_ref: config.trust_anchor_ref, trust_anchor_sha256: config.trust_anchor_sha256, signer_key_id: config.signer_key_id,
   };
-  const privateKeyPem = readOperatorPrivateKey(config, protectedRootsFromResource(config, resource));
+  const privateKeyPem = readOperatorPrivateKey(config, protectedRootsFromResource(config, request, resource));
   const signature = encodeUnpaddedBase64Url(new Uint8Array(sign(null, concatDomain('AUTOPILOT-D65-PROGRAM-HEARTBEAT\u0000', canonicalJson(fields)), createPrivateKey(privateKeyPem))));
   const bytes = new TextEncoder().encode(`${canonicalJson({ ...fields, signature })}\n`);
   const ref = `program-heartbeats/${String(request.heartbeat_sequence).padStart(20, '0')}.json`;
@@ -514,6 +540,8 @@ export async function runLaunchSignerCli(argv: readonly string[], env: ProcessEn
   const config = parseConfig(readMode0600(configPath, 'launch signer config'));
   const request = parseRequest(requestRaw);
   if (request.repo_id !== config.repo_id || request.workstream_run !== config.workstream_run) fail('request identity does not match the signer config');
+  if (request.state_root !== config.state_root || request.session_root !== config.session_root) fail('request state/session roots do not exactly match the canonical signer config roots', [request.state_root, config.state_root, request.session_root, config.session_root]);
+  if (request.kind === 'launch-policy' && (request.policy_id !== config.policy_id || request.policy_ref !== config.policy_ref)) fail('launch-policy request id/ref do not match the signer config');
   const produced = request.kind === 'launch-policy'
     ? await signPolicy(config, request, env)
     : await signHeartbeat(config, request, env);

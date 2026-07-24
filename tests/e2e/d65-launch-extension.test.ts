@@ -277,6 +277,23 @@ void describe('D65 launch via /autopilot --launch-manifest (extension)', () => {
         { cwd: fixture.manifest.main_worktree_path },
       )));
       assert.ok(bashDecisions.some((decision) => decision !== undefined && decision.block === true && /bash is disabled during the D65 bootstrap-only/u.test(decision.reason)), 'extension bootstrap guard must block bash');
+      const aliasEffects = [
+        'printf pwn > PRODUCT.md',
+        'printf pwn > .pi/autopilot/kbg-finalize-fresh/runtime-extra.txt',
+        `printf pwn > ${join(fixture.root, 'external.txt')}`,
+        'pi -p child',
+        'autopilot-coordinator start',
+        'git status',
+      ];
+      for (const toolName of ['bg_run', 'shell', 'exec', 'unknown_writer']) {
+        for (const command of aliasEffects) {
+          const decisions = await Promise.all(harness.toolCallHandlers.map(async (handler) => await handler(
+            { toolName, input: { command } },
+            { cwd: fixture.manifest.main_worktree_path },
+          )));
+          assert.ok(decisions.some((decision) => decision !== undefined && decision.block === true && /positive allowlist/u.test(decision.reason)), `extension bootstrap guard must block ${toolName}: ${command}`);
+        }
+      }
       const d65ContextTool = harness.tools.get('context_budget') as ReturnType<typeof createContextBudgetTool> | undefined;
       if (d65ContextTool === undefined) throw new Error('manifest-bound context_budget missing');
       assert.notEqual(d65ContextTool, preexistingContextTool, 'D65 must replace an already-registered base tool');

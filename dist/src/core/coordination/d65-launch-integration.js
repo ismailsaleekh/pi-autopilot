@@ -511,7 +511,7 @@ export async function registerD65LaunchPolicyAndInitialHeartbeat(input) {
         if (!alreadyCommitted) {
             // Ask the external signer to produce the exact signed policy candidate.
             const signed = await input.signer.signLaunchPolicy({
-                kind: 'launch-policy', state_root: manifest.state_root, repo_id: manifest.repo_id, workstream_run: manifest.workstream_run,
+                kind: 'launch-policy', state_root: manifest.state_root, session_root: manifest.session_root, repo_id: manifest.repo_id, workstream_run: manifest.workstream_run,
                 policy_id: manifest.policy_candidate.policy_id, policy_ref: manifest.policy_candidate.policy_ref, expected_policy_sha256: manifest.policy_candidate.policy_sha256,
             });
             if (signed.sha256 !== manifest.policy_candidate.policy_sha256)
@@ -591,7 +591,7 @@ async function acceptSignedGraphHeartbeat(input) {
     const alreadyAccepted = acceptedSequence !== null && acceptedSequence >= input.heartbeatSequence;
     if (!alreadyAccepted) {
         await input.signer.signProgramHeartbeat({
-            kind: 'program-heartbeat', state_root: input.manifest.state_root, repo_id: input.manifest.repo_id, workstream_run: input.manifest.workstream_run,
+            kind: 'program-heartbeat', state_root: input.manifest.state_root, session_root: input.manifest.session_root, repo_id: input.manifest.repo_id, workstream_run: input.manifest.workstream_run,
             graph_sequence: input.graphSequence, graph_sha256: input.graphSha256, heartbeat_sequence: input.heartbeatSequence,
         });
     }

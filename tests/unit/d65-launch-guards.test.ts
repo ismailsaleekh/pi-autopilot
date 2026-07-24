@@ -45,7 +45,7 @@ void describe('D65 bootstrap-only effect fence (git guard)', () => {
 
   void it('blocks an external (absolute out-of-worktree) write target', () => {
     const { root, runtimeDir } = tempWorktree();
-    const charterPaths = ['mission.md'].map((n) => join(runtimeDir, n));
+    const charterPaths = ['mission.md', 'master-plan.json', 'state.json', 'decision-log.jsonl', 'events.jsonl'].map((n) => join(runtimeDir, n));
     const external = join(realpathSync(tmpdir()), 'elsewhere-d65.txt');
     const decision = evaluateAutopilotWorktreeToolCall({ toolName: 'write', input: { path: external } }, { cwd: root }, { worktreeRoot: root, label: 'fence', bootstrapCharterPaths: charterPaths, bootstrapAllowedAuxiliaryRoots: [] });
     assert.ok(decision !== undefined && decision.block === true);
@@ -67,15 +67,43 @@ void describe('D65 bootstrap-only effect fence (git guard)', () => {
       if (decision === undefined || decision.block !== true) throw new Error(`bootstrap bash must be blocked: ${command}`);
       assert.match(decision.reason, /bash is disabled during the D65 bootstrap-only/u);
     }
+    for (const toolName of ['bg_run', 'shell', 'exec', 'multi_tool_use.parallel', 'unknown_writer', undefined]) {
+      for (const command of commands) {
+        const event = toolName === undefined ? { input: { command } } : { toolName, input: { command } };
+        const decision = evaluateAutopilotWorktreeToolCall(event, { cwd: root }, { worktreeRoot: root, label: 'fence', bootstrapCharterPaths: charterPaths, bootstrapAllowedAuxiliaryRoots: [] });
+        if (decision === undefined || decision.block !== true) throw new Error(`bootstrap alias must be blocked: ${toolName ?? '<unnamed>'}: ${command}`);
+        assert.match(decision.reason, /positive allowlist/u);
+      }
+    }
+    for (const toolName of ['read', 'grep', 'find', 'ls', 'context_budget']) {
+      assert.equal(evaluateAutopilotWorktreeToolCall({ toolName, input: {} }, { cwd: root }, { worktreeRoot: root, label: 'fence', bootstrapCharterPaths: charterPaths, bootstrapAllowedAuxiliaryRoots: [] }), undefined, toolName);
+    }
   });
 
-  void it('allows a write under an explicit package-owned auxiliary root', () => {
+  void it('allows a write under an explicit in-worktree package-owned auxiliary root', () => {
     const { root, runtimeDir } = tempWorktree();
-    const charterPaths = ['mission.md'].map((n) => join(runtimeDir, n));
+    const charterPaths = ['mission.md', 'master-plan.json', 'state.json', 'decision-log.jsonl', 'events.jsonl'].map((n) => join(runtimeDir, n));
     const auxRoot = join(root, '.pi', 'autopilot', 'wk', 'aux');
     mkdirSync(auxRoot, { recursive: true });
     const decision = evaluateAutopilotWorktreeToolCall({ toolName: 'write', input: { path: join(auxRoot, 'roster-snapshot.json') } }, { cwd: root }, { worktreeRoot: root, label: 'fence', bootstrapCharterPaths: charterPaths, bootstrapAllowedAuxiliaryRoots: [auxRoot] });
     assert.equal(decision, undefined);
+  });
+
+  void it('rejects malformed, duplicate, external charter and external auxiliary capabilities', () => {
+    const { root, runtimeDir } = tempWorktree();
+    const valid = ['mission.md', 'master-plan.json', 'state.json', 'decision-log.jsonl', 'events.jsonl'].map((n) => join(runtimeDir, n));
+    const externalRoot = realpathSync(tmpdir());
+    const policies = [
+      { charter: valid.slice(0, 4), auxiliary: [] },
+      { charter: [...valid.slice(0, 4), valid[0] ?? ''], auxiliary: [] },
+      { charter: [...valid.slice(0, 4), join(externalRoot, 'state.json')], auxiliary: [] },
+      { charter: valid, auxiliary: [join(externalRoot, 'd65-external-aux')] },
+    ];
+    for (const policy of policies) {
+      const decision = evaluateAutopilotWorktreeToolCall({ toolName: 'read', input: {} }, { cwd: root }, { worktreeRoot: root, label: 'fence', bootstrapCharterPaths: policy.charter, bootstrapAllowedAuxiliaryRoots: policy.auxiliary });
+      if (decision === undefined || decision.block !== true) throw new Error('malformed bootstrap capability must be blocked');
+      assert.match(decision.reason, /not the exact in-worktree five-file capability/u);
+    }
   });
 });
 

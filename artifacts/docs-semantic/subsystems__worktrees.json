@@ -1,8 +1,8 @@
 {
   "schema_version": "autopilot.docs_semantic_attestation.v2",
   "doc_id": "subsystems/worktrees",
-  "reviewed_body_hash": "sha256:ebaa18b0a4a1eead39436a6db50fbf20cb655b044d00b4c81afbe92fcd259a53",
-  "reviewed_doc_sha256": "sha256:c4960af9ab5b28794bfaa60e51936f8f168dc9cb303b2e36f680c5c3cb236330",
+  "reviewed_body_hash": "sha256:da4a2afdfcb3fd0de2162311dca2a45409aeee5b781837124eac5e8b37282f8c",
+  "reviewed_doc_sha256": "sha256:783cb868bbc0d9b7c5435ce253359097ae7a7a16e3e6832e55046480f62ec622",
   "covers_sources": [
     "src/core/checkout-profile.ts",
     "src/core/disk-gate.ts",
@@ -13,7 +13,7 @@
     "src/core/sparse-worktree.ts"
   ],
   "verdict": "PASS",
-  "reviewer": "D65 launch-integration implementation owner (offline semantic review after independent GPT-5.5 finding)",
-  "reviewed_at": "2026-07-24T20:10:00.000Z",
-  "notes": "Reviewed git-guard.ts after the independent round-3 P1 finding: when bootstrapCharterPaths is active, bash now rejects before the ordinary git-only evaluator, while write/edit remain exact-path limited to the five charter files plus explicit package-owned auxiliary roots. Reviewed direct unit and extension regressions covering product, runtime-extra, external, child, coordinator, and git shell commands. Prose accurately distinguishes the D65 shell ban from ordinary worktree-local git behavior; other covered-source behavior is unchanged."
+  "reviewer": "openai-codex/gpt-5.5 independent C11 reviewer (r5b)",
+  "reviewed_at": "2026-07-24T16:09:15.000Z",
+  "notes": "Full doc and every covers_sources file reviewed; D65 unit-worktree boundaries are accurately scoped, bootstrap capability validation and positive allowlist match git-guard, and no findings remain."
 }

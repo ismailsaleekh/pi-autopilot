@@ -1,4 +1,4 @@
-import { array, boolean, fail, gitOid, identifier, integer, literal, nullableGitOid, nullableSha256Field, nullableStr, object, oneOf, repoRelativePath, sha256Field, str, timestamp, } from "./d65-semantic-graph.js";
+import { array, boolean, fail, gitOid, identifier, integer, literal, nullableGitOid, nullableSha256Field, nullableStr, object, oneOf, repoRelativePath, repoIdField, sha256Field, str, timestamp, workstreamRunField, } from "./d65-semantic-graph.js";
 // D65-A4 cap-one launch policy and monitor consumer (freeze §9.2/§9.4, fresh
 // plan §2.3/§3.2). These are the closed, versioned, size-bounded, lowest-layer
 // parsers owned by the cap-one consumer: the immutable launch policy, the
@@ -60,8 +60,8 @@ export function parseD65LaunchPolicy(value) {
         program_id: identifier(record, 'program_id', label),
         policy_id: identifier(record, 'policy_id', label),
         policy_version: policyVersion,
-        repo_id: identifier(record, 'repo_id', label),
-        workstream_run: identifier(record, 'workstream_run', label),
+        repo_id: repoIdField(record, 'repo_id', label),
+        workstream_run: workstreamRunField(record, 'workstream_run', label),
         package_commit: gitOid(record, 'package_commit', label),
         package_tree: gitOid(record, 'package_tree', label),
         base_commit: gitOid(record, 'base_commit', label),
@@ -106,8 +106,8 @@ export function parseD65CapacityDecision(value) {
         policy_id: identifier(record, 'policy_id', label),
         from_version: fromVersion,
         to_version: toVersion,
-        repo_id: identifier(record, 'repo_id', label),
-        workstream_run: identifier(record, 'workstream_run', label),
+        repo_id: repoIdField(record, 'repo_id', label),
+        workstream_run: workstreamRunField(record, 'workstream_run', label),
         prior_policy_sha256: sha256Field(record, 'prior_policy_sha256', label),
         requested_parallel_cap: integer(record, 'requested_parallel_cap', label, 1),
         requested_maximum_parallel_cap: integer(record, 'requested_maximum_parallel_cap', label, 1),
@@ -183,8 +183,8 @@ export function parseD65SubscriptionProbe(value) {
         provider: identifier(record, 'provider', label),
         trigger_continuation_ref: repoRelativePath(record, 'trigger_continuation_ref', label),
         trigger_continuation_sha256: sha256Field(record, 'trigger_continuation_sha256', label),
-        repo_id: identifier(record, 'repo_id', label),
-        workstream_run: identifier(record, 'workstream_run', label),
+        repo_id: repoIdField(record, 'repo_id', label),
+        workstream_run: workstreamRunField(record, 'workstream_run', label),
         unit_id: identifier(record, 'unit_id', label),
         failed_attempt: failedAttempt,
         retry_ordinal: 1,
@@ -215,8 +215,8 @@ export function parseD65HeartbeatHighWater(value) {
     return {
         schema_version: D65_HEARTBEAT_HIGH_WATER_SCHEMA,
         program_id: identifier(record, 'program_id', label),
-        repo_id: identifier(record, 'repo_id', label),
-        workstream_run: identifier(record, 'workstream_run', label),
+        repo_id: repoIdField(record, 'repo_id', label),
+        workstream_run: workstreamRunField(record, 'workstream_run', label),
         sequence: integer(record, 'sequence', label, 1),
         heartbeat_sha256: sha256Field(record, 'heartbeat_sha256', label),
         issued_at: timestamp(record, 'issued_at', label),
@@ -244,8 +244,8 @@ export function parseD65HeartbeatAcceptanceResult(value) {
     return {
         schema_version: D65_HEARTBEAT_ACCEPTANCE_RESULT_SCHEMA,
         program_id: identifier(record, 'program_id', label),
-        repo_id: identifier(record, 'repo_id', label),
-        workstream_run: identifier(record, 'workstream_run', label),
+        repo_id: repoIdField(record, 'repo_id', label),
+        workstream_run: workstreamRunField(record, 'workstream_run', label),
         sequence,
         heartbeat_ref: repoRelativePath(record, 'heartbeat_ref', label),
         heartbeat_sha256: sha256Field(record, 'heartbeat_sha256', label),
@@ -309,7 +309,7 @@ function heartbeatRow(value, label) {
     const lastProgress = record['last_progress_event_seq'] === null ? null : integer(record, 'last_progress_event_seq', label, 1);
     return {
         workstream: identifier(record, 'workstream', label),
-        workstream_run: identifier(record, 'workstream_run', label),
+        workstream_run: workstreamRunField(record, 'workstream_run', label),
         parent_session_file_sha256: nullableSha256Field(record, 'parent_session_file_sha256', label),
         coordinator_session_lease_id: nullableStr(record, 'coordinator_session_lease_id', label, 192),
         accepted_graph_sequence: accSeq,
@@ -333,7 +333,7 @@ function providerHealth(value, label) {
     ]);
     const state = oneOf(record, 'state', D65_PROVIDER_STATES, label);
     const cooldownUntil = record['cooldown_until'] === null ? null : timestamp(record, 'cooldown_until', label);
-    const probeRun = nullableStr(record, 'probe_workstream_run', label, 192);
+    const probeRun = record['probe_workstream_run'] === null ? null : workstreamRunField(record, 'probe_workstream_run', label);
     const probeRef = record['probe_ref'] === null ? null : repoRelativePath(record, 'probe_ref', label);
     const probeSha = nullableSha256Field(record, 'probe_sha256', label);
     const consumption = record['consumption_event_seq'] === null ? null : integer(record, 'consumption_event_seq', label, 1);

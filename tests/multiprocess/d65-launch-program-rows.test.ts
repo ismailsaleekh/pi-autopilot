@@ -88,6 +88,8 @@ async function buildCliFixture(suffix: string, programRows?: readonly SignerProg
   const trustSha256 = sha256(spki);
   const bootstrapRef = `.pi/autopilot-bootstrap/${workstreamRun}/bootstrap.json`;
   const stateRoot = join(root, 'state'); const sessionRoot = join(root, 'sessions');
+  await mkdir(stateRoot, { recursive: true, mode: 0o700 }); chmodSync(stateRoot, 0o700);
+  await mkdir(sessionRoot, { recursive: true, mode: 0o700 }); chmodSync(sessionRoot, 0o700);
   const worktreeRoot = join(stateRoot, 'worktrees', repoId);
   const mainWorktreePath = join(worktreeRoot, 'active', workstreamRun, 'main');
   const runtimeRoot = join(mainWorktreePath, '.pi', 'autopilot', workstream);
@@ -193,7 +195,7 @@ void describe('D65 launch item-I: shared six-row governing heartbeat (external C
     // launched, so its five peers are emitted planned/row-not-launched.
     const suffix = 'six';
     const workstream = `wk${suffix}`; const workstreamRun = `run-${suffix}`; const repoId = `repo-${suffix}`;
-    const planned: SignerProgramRow[] = ['pcg', 'fun', 'ref', 'harness', 'ui'].map((w) => ({ workstream: `zz-${w}`, workstream_run: `run-${w}`, state_root: null, repo_id: null }));
+    const planned: SignerProgramRow[] = ['fun', 'harness', 'pcg', 'ref', 'ui'].map((w) => ({ workstream: `zz-${w}`, workstream_run: `run-${w}`, state_root: null, repo_id: null }));
     const rows: SignerProgramRow[] = [{ workstream, workstream_run: workstreamRun, state_root: `__THIS__`, repo_id: repoId }, ...planned];
     // buildCliFixture computes the real state_root; patch the placeholder in.
     const fixture = await buildCliFixture(suffix, rows.map((r) => (r.state_root === '__THIS__' ? { ...r, state_root: null } : r)));
@@ -292,14 +294,15 @@ void describe('D65 launch item-I: a foreign-row authority failure fails closed (
     // closed: the signer must NOT silently regress the launched row to planned.
     const fixture = await buildCliFixture('failclosed');
     try {
-      // Point a non-null foreign row at a state root that is a REGULAR FILE, so
-      // the coordinator cannot be created there and `client.query('status', ...)`
-      // throws a non-connection error (ENOTDIR) rather than autostarting an empty
-      // coordinator. This deterministically models an authority query failure that
-      // must NOT be silently converted into a planned row.
-      const deadStateRoot = join(fixture.root, 'dead-foreign-state-file');
-      const { writeFileSync } = await import('node:fs');
-      writeFileSync(deadStateRoot, 'not a directory\n');
+      // Point a non-null foreign row at a canonical state directory whose
+      // coordinator child is a regular file. Config root validation succeeds,
+      // but capability/runtime creation fails deterministically before autostart
+      // can manufacture an empty coordinator. That live-authority failure must
+      // NOT be silently converted into a planned row.
+      const deadStateRoot = join(fixture.root, 'dead-foreign-state');
+      await mkdir(deadStateRoot, { recursive: true, mode: 0o700 });
+      chmodSync(deadStateRoot, 0o700);
+      await writeFile(join(deadStateRoot, 'coordinator'), 'not a directory\n', { mode: 0o600 });
       const unreachableForeign: SignerProgramRow = { workstream: 'zz-unreachable', workstream_run: 'run-unreachable', state_root: deadStateRoot, repo_id: 'repo-unreachable' };
       const thisRow: SignerProgramRow = { workstream: fixture.workstream, workstream_run: fixture.workstreamRun, state_root: fixture.stateRoot, repo_id: fixture.repoId };
       await resealSignerConfig(fixture, [thisRow, unreachableForeign]);

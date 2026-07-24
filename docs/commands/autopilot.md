@@ -44,10 +44,12 @@ In launch mode `/autopilot`:
 4. replaces any previously registered `context_budget` definition with a wrapper bound
    to this manifest and durable session, then delivers a **bootstrap-plan-only** parent
    turn that may write only the five charter roots (`mission.md`, `master-plan.json`,
-   `state.json`, `decision-log.jsonl`, `events.jsonl`) through exact-path `write`/`edit`;
-   general `bash` is disabled for the entire bootstrap turn because shell effects
-   cannot be path-closed. Graph publication requires an exact tool-call/session receipt
-   with `gate:"ok"` and bounded percentage;
+   `state.json`, `decision-log.jsonl`, `events.jsonl`) through exact-path `write`/`edit`.
+   The bootstrap tool boundary is a positive allowlist: `read`, `grep`, `find`, `ls`,
+   exact-path `write`/`edit`, and the manifest/session-bound `context_budget`; `bash`,
+   command/process/background aliases, and every unknown tool are denied. Graph
+   publication requires an exact tool-call/session receipt with `gate:"ok"` and bounded
+   percentage;
 5. on `agent_settled`, mechanically publishes the first complete graph (sequence 2),
    accepts the successor governing heartbeat, adopts that exact single session (starting
    its periodic heartbeat only now), and delivers the ordinary continuation turn.

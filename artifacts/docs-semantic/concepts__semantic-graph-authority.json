@@ -1,8 +1,8 @@
 {
   "schema_version": "autopilot.docs_semantic_attestation.v2",
   "doc_id": "concepts/semantic-graph-authority",
-  "reviewed_body_hash": "sha256:83633006d8d20bda400c57c9b97afaabaffb1ce9fc9c90a465631edaca8f98f6",
-  "reviewed_doc_sha256": "sha256:4fe79847d329056ffb396bd0972f64b39e0a637bc8382dfaec2766035f97a770",
+  "reviewed_body_hash": "sha256:9015e1a8a1d88ca10e68671acebbe23c88fd4397837331b58f135f49aa2c568e",
+  "reviewed_doc_sha256": "sha256:9fbb682aa381828f7124778748be09300c07349b4d92e4aaa50820101fff68a7",
   "covers_sources": [
     "src/core/coordination/d65-first-complete-graph.ts",
     "src/core/coordination/d65-graph-authority.ts",
@@ -13,7 +13,7 @@
     "src/core/coordination/d65-semantic-graph.ts"
   ],
   "verdict": "PASS",
-  "reviewer": "pi W6 merge operator (offline semantic review)",
-  "reviewed_at": "2026-07-23T12:35:54.000Z",
-  "notes": "W6 offline semantic review: verified semantic graph authority prose against current D65 graph authority, publisher, semantic version, package isolation, migration paths, reconciliation, terminal evidence, startup observation, store, supervisor, and worktree saga sources; fixed-root discovery, package isolation, successor publication, and recovery semantics match the combined code."
+  "reviewer": "openai-codex/gpt-5.5 independent C11 reviewer (r5b)",
+  "reviewed_at": "2026-07-24T16:21:18.000Z",
+  "notes": "Full doc and all covered sources reviewed; exact bootstrap chain, event-driven successor rule, foreign shared-sequence handling, and closed identities all match implementation."
 }
