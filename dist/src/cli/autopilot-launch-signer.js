@@ -529,7 +529,7 @@ export async function runLaunchSignerCli(argv, env, emit) {
     emit(JSON.stringify({ schema_version: 'autopilot.launch_signer_result.v1', ref: produced.ref, absolute_path: produced.absolutePath, sha256: bytesSha256(produced.bytes), byte_count: produced.bytes.byteLength }));
     return 0;
 }
-async function main() {
+export async function runLaunchSignerProcess() {
     try {
         const code = await runLaunchSignerCli(process.argv.slice(2), process.env, (line) => process.stdout.write(`${line}\n`));
         process.exitCode = code;
@@ -539,15 +539,12 @@ async function main() {
         process.exitCode = 1;
     }
 }
-// Run `main()` only when this module is the invoked entrypoint: either it is
-// argv[1] itself (`node .../autopilot-launch-signer.{js,ts}`) or it is loaded by
-// the packaged bin wrapper (`node .../bin/autopilot-launch-signer.mjs`, which
-// dynamic-imports the compiled entrypoint). Keying off `import.meta.url` alone
-// is wrong: the module URL always ends with the entrypoint suffix, so a plain
-// suffix check fires on every ordinary import (including tests) and poisons the
-// importer's exit code. Detection must therefore be driven by `process.argv[1]`.
+// A direct source/compiled invocation runs itself. The package bin wrapper calls
+// runLaunchSignerProcess() explicitly after importing this module; it must not
+// infer wrapper execution from process.argv[1], because npm invokes bin links
+// through node_modules/.bin and that symlink path is not the packaged wrapper's
+// canonical path. Ordinary imports remain side-effect free.
 const invokedPath = process.argv[1];
-const isDirectRun = invokedPath !== undefined && (pathToFileURL(resolve(invokedPath)).href === import.meta.url ||
-    /[\\/]bin[\\/]autopilot-launch-signer\.mjs$/u.test(invokedPath));
+const isDirectRun = invokedPath !== undefined && pathToFileURL(resolve(invokedPath)).href === import.meta.url;
 if (isDirectRun)
-    void main();
+    void runLaunchSignerProcess();

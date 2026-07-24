@@ -6,8 +6,8 @@ covers_surfaces:
   - autopilot-launch-signer
 covers_sources:
   - src/cli/autopilot-launch-signer.ts
-signature_hash: 'sha256:279a789983604ed3d9b43040cc4bed1bbad75983311ed32e183d2ca5bbc38c65'
-body_hash: 'sha256:ed85d85ce3be406ae8b718faaa1269a7bfeda98da43cd12546abf3a8819c3c29'
+signature_hash: 'sha256:fab950aac06305b5a97b1ac26d3207887db72a3e9f2950344c276138ac238b16'
+body_hash: 'sha256:53dc45201909c2867312b1a623bc140e101f5c841c1cff79fe5dc6488f337889'
 stability: evolving
 ---
 
@@ -68,6 +68,10 @@ runtime only **verifies** and **consumes** the signed bytes through the frozen
   the row is fenced with `graph-drift` instead of combining mismatched facts.
 - Emits exactly one `autopilot.launch_signer_result.v1` JSON line naming the
   ref, absolute path, digest, and byte count of the written signed candidate.
+  The packaged wrapper invokes the compiled process entry explicitly, so direct
+  package paths and npm-created `node_modules/.bin` symlinks have identical
+  behavior; absent config fails before key access with exit status `2` and one
+  closed JSON error line.
 - Supports heartbeat renewal during the run: each renewal request names the next
   contiguous heartbeat sequence and the current governing graph tuple.
 

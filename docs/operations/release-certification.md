@@ -11,9 +11,9 @@ covers_sources:
   - scripts/check-package-payload.mjs
   - scripts/verify-packed-consumer.mjs
   - scripts/test-packed-consumer-release.mjs
-signature_hash: 'sha256:dcb1913be4b88e727e4d3720f1bdd49efea05fa2376e75e0d72ee279576a1ebf'
-body_hash: 'sha256:dcb1913be4b88e727e4d3720f1bdd49efea05fa2376e75e0d72ee279576a1ebf'
-semantic_attestation: 'sha256:dcb1913be4b88e727e4d3720f1bdd49efea05fa2376e75e0d72ee279576a1ebf'
+signature_hash: 'sha256:17987c94a79011cfcb9fcf835367977709b749a88fce76034013332fbf327569'
+body_hash: 'sha256:17987c94a79011cfcb9fcf835367977709b749a88fce76034013332fbf327569'
+semantic_attestation: 'sha256:17987c94a79011cfcb9fcf835367977709b749a88fce76034013332fbf327569'
 stability: evolving
 ---
 
@@ -97,7 +97,11 @@ The packed-consumer scripts build one npm pack, install it into a throwaway cons
 extension **registers** the exact public Autopilot command set (via the host
 `registerCommand` callbacks, not command execution), zero network/provider calls
 (network + provider canaries trip loudly), an untouched discovery canary, zero raw
-production Git spawns, and the exact Pi peer. The byte-identical two-pack determinism
+production Git spawns, and the exact Pi peer. It also executes the installed runner and
+coordinator help paths and requires the packed `autopilot-launch-signer` npm-bin link to
+fail closed before key access when no signer config is supplied. The payload gate pins
+the signer's bin wrapper, source, compiled CLI, and operator documentation as required
+files. The byte-identical two-pack determinism
 check is part of the surrounding release-certification **procedure** (build two packs in
 separate external directories and compare bytes), not of these scripts. The docs payload
 changes the tarball, so

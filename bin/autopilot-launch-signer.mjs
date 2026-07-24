@@ -14,7 +14,9 @@ if (!existsSync(cli)) {
   process.exitCode = 1;
 } else {
   try {
-    await import(pathToFileURL(cli).href);
+    const loaded = await import(pathToFileURL(cli).href);
+    if (typeof loaded.runLaunchSignerProcess !== 'function') throw new TypeError('compiled entrypoint does not export runLaunchSignerProcess');
+    await loaded.runLaunchSignerProcess();
   } catch (error) {
     process.stderr.write(`autopilot-launch-signer failed to load compiled entrypoint: ${error instanceof Error ? error.stack ?? error.message : String(error)}\n`);
     process.exitCode = 1;
