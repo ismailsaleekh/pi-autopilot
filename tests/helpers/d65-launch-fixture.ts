@@ -224,7 +224,7 @@ export async function buildD65LaunchFixture(suffix: string, options: { readonly 
     roster_authority: 'user-default', roster_selection_ref: `roster-selections/${repoId}/${workstreamRun}.json`, roster_sha256: rosterAuthoritySha256,
     roster_selection: { roster_ref: rosterRef, roster_bytes_sha256: d65Sha256(rosterBytes), selection_ref: selectionRef, selection_bytes_sha256: d65Sha256(selectionBytes), selection_sha256: selectionPublication.selection.selection_sha256 as `sha256:${string}`, provider: 'openai-codex' },
     parent_model: 'openai-codex/gpt-5.6-sol', parent_thinking: 'xhigh',
-    policy_candidate: { policy_id: 'policy-1', policy_ref: 'authority/launch-policies/policy-1.json', policy_sha256: policySha256, registration_idempotency_key: `register-launch-policy:${workstreamRun}:policy-1`, heartbeat_acceptance_idempotency_key: `accept-program-heartbeat:${workstreamRun}:1` },
+    policy_candidate: { policy_id: 'policy-1', policy_ref: 'authority/launch-policies/policy-1.json', policy_sha256: policySha256, registration_idempotency_key: `register-launch-policy:${workstreamRun}:policy-1` },
     program_evidence_root: programEvidenceRoot,
     launch_seal: { launch_commit: overlayCommit, launch_tree: overlayTree, launch_audit_ref: launchAuditRef, launch_audit_sha256: d65Sha256(launchAuditBytes), launch_seal_ref: launchSealRef, launch_seal_sha256: d65Sha256(launchSealBytes), bootstrap_projection_ref: projectionRef, bootstrap_projection_sha256: d65Sha256(projectionBytes) },
     attach_run_idempotency_key: `attach-run:${repoId}:${workstreamRun}`, attach_session_idempotency_key: `attach-session:${repoId}:${workstreamRun}`,

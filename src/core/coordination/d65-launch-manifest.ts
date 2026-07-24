@@ -180,19 +180,25 @@ export interface D65LaunchManifestPolicyCandidate {
   readonly policy_ref: string;
   readonly policy_sha256: `sha256:${string}`;
   readonly registration_idempotency_key: string;
-  readonly heartbeat_acceptance_idempotency_key: string;
 }
 
+// The initial-heartbeat acceptance carries NO sealed idempotency key: the store's
+// `accept-program-heartbeat` action is a run-owned idempotent mutation whose key
+// is a content-bound RFC-8785 identity digest (repo/run/sequence/heartbeat-digest/
+// kind), derived by the runtime from the exact signed heartbeat bytes and
+// re-checked by the store. A sealed logical key could never equal that wire key,
+// so it is intentionally absent rather than a decorative field. Only the three
+// genuinely-consumed keys (attach-run, attach-session, policy registration) are
+// sealed.
 function policyCandidate(value: unknown, label: string): D65LaunchManifestPolicyCandidate {
   const record = object(value, label, [
-    'policy_id', 'policy_ref', 'policy_sha256', 'registration_idempotency_key', 'heartbeat_acceptance_idempotency_key',
+    'policy_id', 'policy_ref', 'policy_sha256', 'registration_idempotency_key',
   ]);
   return {
     policy_id: identifier(record, 'policy_id', label),
     policy_ref: repoRelativePath(record, 'policy_ref', label, 256),
     policy_sha256: sha256Field(record, 'policy_sha256', label),
     registration_idempotency_key: str(record, 'registration_idempotency_key', label, 256),
-    heartbeat_acceptance_idempotency_key: str(record, 'heartbeat_acceptance_idempotency_key', label, 256),
   };
 }
 

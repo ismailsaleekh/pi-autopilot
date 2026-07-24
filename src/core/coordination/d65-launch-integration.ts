@@ -207,7 +207,10 @@ export function verifyLaunchManifestAgainstClone(manifest: D65LaunchManifest, op
   if (manifest.attach_run_idempotency_key !== `attach-run:${manifest.repo_id}:${manifest.workstream_run}`) throw new CoordinationRuntimeError('invalid-state', 'sealed attach-run idempotency key is not the exact frozen form');
   if (manifest.attach_session_idempotency_key !== `attach-session:${manifest.repo_id}:${manifest.workstream_run}`) throw new CoordinationRuntimeError('invalid-state', 'sealed attach-session idempotency key is not the exact frozen form');
   if (manifest.policy_candidate.registration_idempotency_key !== `register-launch-policy:${manifest.workstream_run}:${manifest.policy_candidate.policy_id}`) throw new CoordinationRuntimeError('invalid-state', 'sealed policy registration idempotency key is not the exact frozen form');
-  if (manifest.policy_candidate.heartbeat_acceptance_idempotency_key !== `accept-program-heartbeat:${manifest.workstream_run}:1`) throw new CoordinationRuntimeError('invalid-state', 'sealed heartbeat acceptance idempotency key is not the exact frozen form');
+  // Note: there is deliberately NO sealed heartbeat-acceptance idempotency key.
+  // The store's accept-program-heartbeat key is a content-bound RFC-8785 identity
+  // digest derived from the exact signed heartbeat bytes (see
+  // acceptInitialGoverningHeartbeat); a sealed logical key could never equal it.
   // The sealed launch-audit, launch-seal, and bootstrap-projection evidence must
   // exist with the exact sealed digests (immutable external launch-audit
   // authority). The launch seal is consumed/verified against its real immutable
@@ -648,6 +651,12 @@ async function acceptInitialGoverningHeartbeat(input: { readonly client: Coordin
   const heartbeatRef = 'program-heartbeats/00000000000000000001.json';
   const heartbeatBytes = readEvidenceHeartbeat(manifest.program_evidence_root, heartbeatRef);
   const heartbeatSha256 = bytesSha256(heartbeatBytes);
+  // The store's accept-program-heartbeat idempotency key is a CONTENT-BOUND
+  // RFC-8785 identity digest over (repo/run/sequence/heartbeat-digest/kind) — NOT
+  // a sealed logical key (a sealed key could never equal it because the heartbeat
+  // digest is only known after signing). The store re-derives and re-checks this
+  // exact key inside the mutation, so a replay with the same signed bytes is
+  // idempotent and a different attempt/digest is rejected.
   const identity = { repo_id: session.repo_id, workstream_run: session.workstream_run, sequence: 1, heartbeat_sha256: heartbeatSha256, acceptance_kind: 'governing' };
   const idempotencyKey = `accept-program-heartbeat:${bytesSha256(new TextEncoder().encode(`${canonicalJson(identity)}\n`))}`;
   const response = await client.mutate('accept-program-heartbeat', {

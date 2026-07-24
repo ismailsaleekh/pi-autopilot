@@ -40,7 +40,7 @@ function manifestFixture(overrides: Record<string, unknown> = {}): Record<string
     roster_authority: 'user-default', roster_selection_ref: 'roster-selections/repo-kbg/kbg-run.json', roster_sha256: DIGEST('6'),
     roster_selection: { roster_ref: '/private/tmp/kbg2-evidence/roster/kbg-run.roster.json', roster_bytes_sha256: DIGEST('a'), selection_ref: '/private/tmp/kbg2-evidence/roster/kbg-run.selection.json', selection_bytes_sha256: DIGEST('b'), selection_sha256: DIGEST('c'), provider: 'openai-codex' },
     parent_model: 'openai-codex/gpt-5.6-sol', parent_thinking: 'xhigh',
-    policy_candidate: { policy_id: 'policy-1', policy_ref: 'authority/launch-policies/policy-1.json', policy_sha256: DIGEST('5'), registration_idempotency_key: 'register-launch-policy:kbg-run:policy-1', heartbeat_acceptance_idempotency_key: 'accept-program-heartbeat:kbg-run:1' },
+    policy_candidate: { policy_id: 'policy-1', policy_ref: 'authority/launch-policies/policy-1.json', policy_sha256: DIGEST('5'), registration_idempotency_key: 'register-launch-policy:kbg-run:policy-1' },
     program_evidence_root: EVIDENCE,
     launch_seal: { launch_commit: OID('1'), launch_tree: OID('2'), launch_audit_ref: '/private/tmp/kbg2-evidence/launch-audit/kbg-run.json', launch_audit_sha256: DIGEST('4'), launch_seal_ref: '/private/tmp/kbg2-evidence/launch-seal.json', launch_seal_sha256: DIGEST('3'), bootstrap_projection_ref: '/private/tmp/kbg2-evidence/bootstrap-projections/kbg-run/00000000000000000001.json', bootstrap_projection_sha256: DIGEST('0') },
     attach_run_idempotency_key: 'attach-run:repo-kbg:kbg-run', attach_session_idempotency_key: 'attach-session:repo-kbg:kbg-run', created_at: '2026-07-22T22:00:33.000Z', ...overrides,

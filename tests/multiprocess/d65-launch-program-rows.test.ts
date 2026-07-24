@@ -154,7 +154,7 @@ async function buildCliFixture(suffix: string, programRows?: readonly SignerProg
     roster_authority: 'user-default', roster_selection_ref: `roster-selections/${repoId}/${workstreamRun}.json`, roster_sha256: rosterSha256,
     roster_selection: { roster_ref: rosterRef, roster_bytes_sha256: sha256(rosterBytes), selection_ref: selectionRef, selection_bytes_sha256: sha256(selectionBytes), selection_sha256: selectionPublication.selection.selection_sha256 as `sha256:${string}`, provider: 'openai-codex' },
     parent_model: 'openai-codex/gpt-5.6-sol', parent_thinking: 'xhigh',
-    policy_candidate: { policy_id: 'policy-1', policy_ref: 'authority/launch-policies/policy-1.json', policy_sha256: policySha256, registration_idempotency_key: `register-launch-policy:${workstreamRun}:policy-1`, heartbeat_acceptance_idempotency_key: `accept-program-heartbeat:${workstreamRun}:1` },
+    policy_candidate: { policy_id: 'policy-1', policy_ref: 'authority/launch-policies/policy-1.json', policy_sha256: policySha256, registration_idempotency_key: `register-launch-policy:${workstreamRun}:policy-1` },
     program_evidence_root: programEvidenceRoot,
     launch_seal: { launch_commit: overlayCommit, launch_tree: overlayTree, launch_audit_ref: launchAuditRef, launch_audit_sha256: sha256(launchAuditBytes), launch_seal_ref: launchSealRef, launch_seal_sha256: sha256(launchSealBytes), bootstrap_projection_ref: projectionRef, bootstrap_projection_sha256: sha256(projectionBytes) },
     attach_run_idempotency_key: `attach-run:${repoId}:${workstreamRun}`, attach_session_idempotency_key: `attach-session:${repoId}:${workstreamRun}`, created_at: '2026-07-22T22:00:33.000Z',
@@ -279,6 +279,44 @@ void describe('D65 launch item-I: a second launched row preserves the first row 
       }
     } finally {
       await fixtureA.close();
+    }
+  });
+});
+
+void describe('D65 launch item-I: a foreign-row authority failure fails closed (no fail-open planned row)', () => {
+  void it('a launched foreign row whose coordinator is unreachable makes the signer fail, never silently emit planned', async () => {
+    // Declare a foreign program row that is NOT null (it names a launched state
+    // root + repo id) but whose coordinator is unreachable at signing time (its
+    // state root points at a coordinator that was shut down / never served this
+    // identity's socket). A transient/unreachable authority query MUST fail
+    // closed: the signer must NOT silently regress the launched row to planned.
+    const fixture = await buildCliFixture('failclosed');
+    try {
+      // Point a non-null foreign row at a state root that is a REGULAR FILE, so
+      // the coordinator cannot be created there and `client.query('status', ...)`
+      // throws a non-connection error (ENOTDIR) rather than autostarting an empty
+      // coordinator. This deterministically models an authority query failure that
+      // must NOT be silently converted into a planned row.
+      const deadStateRoot = join(fixture.root, 'dead-foreign-state-file');
+      const { writeFileSync } = await import('node:fs');
+      writeFileSync(deadStateRoot, 'not a directory\n');
+      const unreachableForeign: SignerProgramRow = { workstream: 'zz-unreachable', workstream_run: 'run-unreachable', state_root: deadStateRoot, repo_id: 'repo-unreachable' };
+      const thisRow: SignerProgramRow = { workstream: fixture.workstream, workstream_run: fixture.workstreamRun, state_root: fixture.stateRoot, repo_id: fixture.repoId };
+      await resealSignerConfig(fixture, [thisRow, unreachableForeign]);
+      const bootstrap = await beginD65LaunchBootstrap({ manifest: fixture.manifest, rawSessionId: fixture.workstream, env: fixture.env });
+      // registerD65LaunchPolicyAndInitialHeartbeat drives the signer's heartbeat
+      // production, which reads every non-null foreign row's live authority. The
+      // unreachable foreign row must throw inside the spawned CLI, failing the
+      // whole heartbeat signing loudly rather than producing a false planned row.
+      await assert.rejects(
+        () => registerD65LaunchPolicyAndInitialHeartbeat({ manifest: fixture.manifest, attachment: bootstrap.attachment, signer: fixture.signer, env: fixture.env }),
+        /external launch signer failed|foreign program row/u,
+      );
+      // No heartbeat sequence-1 candidate was produced (the signer failed closed).
+      const { existsSync } = await import('node:fs');
+      assert.equal(existsSync(join(fixture.programEvidenceRoot, 'program-heartbeats', '00000000000000000001.json')), false);
+    } finally {
+      await fixture.close();
     }
   });
 });

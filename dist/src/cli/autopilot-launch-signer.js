@@ -326,22 +326,34 @@ async function foreignRowFromLiveAuthority(row, env) {
     if (row.state_root === null || row.repo_id === null)
         return plannedRow;
     const client = new CoordinatorClient({ env: { ...env, [AUTOPILOT_STATE_ROOT_ENV]: row.state_root } });
-    let status;
-    try {
-        status = await client.query('status', row.repo_id, row.workstream_run);
-    }
-    catch {
-        // The foreign coordinator is unreachable or has no run for this identity:
-        // the row is not launched from this authority's perspective.
+    // Query the foreign coordinator's own live authority. A THROWN error (socket
+    // down, contention, timeout, protocol/schema drift) is NOT "not launched": it
+    // is a signing-time authority failure and MUST fail closed. Silently emitting
+    // a `planned` row here would let a transient error regress a genuinely launched
+    // foreign row to planned in the operator-signed governing heartbeat — the exact
+    // fail-open the contract forbids. Producing no heartbeat is strictly safer than
+    // producing one that misstates live program launch state.
+    const status = await client.query('status', row.repo_id, row.workstream_run);
+    const runs = status.payload['runs'];
+    if (!Array.isArray(runs))
+        fail('foreign program row status is missing the runs projection', [row.workstream_run]);
+    // Zero runs = the coordinator is reachable and genuinely has no run for this
+    // identity (an unlaunched peer). This is distinguished from a query failure
+    // (which threw above) purely by a SUCCESSFUL query returning an empty set.
+    if (runs.length === 0)
         return plannedRow;
-    }
-    const runs = status.payload['runs'] ?? [];
-    if (!Array.isArray(runs) || runs.length !== 1)
-        return plannedRow;
-    const artifacts = status.payload['authoritative_artifacts'] ?? [];
-    const parsedArtifacts = Array.isArray(artifacts) ? artifacts.map(parseCoordinationAuthoritativeArtifact) : [];
+    if (runs.length !== 1)
+        fail('foreign program row coordinator returned more than one run for the sealed identity', [row.workstream_run, String(runs.length)]);
+    const artifacts = status.payload['authoritative_artifacts'];
+    if (!Array.isArray(artifacts))
+        fail('foreign program row status is missing the authoritative-artifacts projection', [row.workstream_run]);
+    const parsedArtifacts = artifacts.map(parseCoordinationAuthoritativeArtifact);
     const foreignPolicy = parsedArtifacts.find((a) => a.document_schema_version === 'autopilot.launch_policy.v1');
     const foreignGraphs = parsedArtifacts.filter((a) => a.document_schema_version === 'autopilot.semantic_graph.v1');
+    // A run with neither an accepted policy nor a complete graph is still in its
+    // bootstrap window: a peer that has attached but not yet reached ordinary
+    // dispatch. It is emitted as planned/unlaunched from THIS authority's steady-
+    // state perspective (it carries no dispatch-relevant graph tuple yet).
     if (foreignPolicy === undefined || foreignGraphs.length === 0)
         return plannedRow;
     const run = parseCoordinationRun(runs[0]);
@@ -349,7 +361,18 @@ async function foreignRowFromLiveAuthority(row, env) {
     const attached = sessions.find((s) => (s.status === 'attached' || s.status === 'handoff-pending') && s.attachment_kind === 'dispatch' && s.session_generation === run.active_session_generation);
     const doctor = await client.query('doctor', row.repo_id, row.workstream_run);
     const head = status.payload['accepted_program_heartbeat'];
-    const acceptedGraphSequence = head === null || typeof head !== 'object' ? foreignGraphs.length + 1 : Number(head['sequence']);
+    // A launched foreign row past its first complete graph ALWAYS has an accepted
+    // governing heartbeat naming the current graph tuple. Its accepted graph
+    // sequence/digest are read from THAT durable authority — never guessed from
+    // `foreignGraphs.length`. If a foreign row has complete graphs but no accepted
+    // heartbeat head, it is mid-publication (transiently inconsistent); the signer
+    // fails closed rather than fabricating a sequence.
+    if (head === null || typeof head !== 'object')
+        fail('foreign program row has a complete graph but no accepted governing heartbeat head; refusing to fabricate its graph sequence', [row.workstream_run]);
+    const headRecord = head;
+    const acceptedGraphSequence = headRecord['sequence'];
+    if (typeof acceptedGraphSequence !== 'number' || !Number.isSafeInteger(acceptedGraphSequence) || acceptedGraphSequence < 2)
+        fail('foreign program row accepted heartbeat head has an invalid graph sequence', [row.workstream_run, String(acceptedGraphSequence)]);
     const highestGraph = foreignGraphs.reduce((max, g) => (g.registered_event_seq > max.registered_event_seq ? g : max), foreignGraphs[0]);
     return {
         workstream: row.workstream, workstream_run: row.workstream_run, parent_session_file_sha256: null,

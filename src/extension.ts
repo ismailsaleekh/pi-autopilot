@@ -1361,7 +1361,13 @@ export default function autopilotExtension(pi: ExtensionHostLike, dependencies: 
         ...base,
         execute: async (toolCallId, params, signal, onUpdate, toolCtx) => {
           const result = await base.execute(toolCallId, params, signal, onUpdate, toolCtx);
-          try { writeD65ContextBudgetReceipt(manifest, result.details); } catch { /* receipt best-effort; publication re-checks it */ }
+          // Persist the durable context_budget call receipt. This write is
+          // create-only and idempotent (a second call leaves the sealed bytes
+          // unchanged), so a genuine write failure (permission/mkdir/disk) is a
+          // real durable-authority fault and MUST surface loudly here rather
+          // than be swallowed and resurface later as a confusing "receipt
+          // absent" fence at first-graph publication. Fail closed, do not hide.
+          writeD65ContextBudgetReceipt(manifest, result.details);
           return result;
         },
       };
