@@ -27,6 +27,14 @@ export function evaluateAutopilotWorktreeToolCall(event, ctx, policy) {
     const root = canonicalExistingPath(policy.worktreeRoot);
     const allowedWriteRoots = canonicalAllowedWriteRoots(policy.allowedWriteRoots ?? [], root);
     if (event.toolName === 'bash') {
+        // D65 bootstrap is an exact five-file write capability. A general shell can
+        // mutate product/runtime/external paths, spawn children, or contact a
+        // coordinator outside any statically provable path fence. Block it entirely
+        // instead of relying on the ordinary git-only shell evaluator; read-only
+        // inspection remains available through dedicated non-shell tools.
+        if (policy.bootstrapCharterPaths !== undefined) {
+            return block(`${policy.label}: bash is disabled during the D65 bootstrap-only exact-charter effect fence.`);
+        }
         const command = event.input?.['command'];
         if (typeof command !== 'string' || command.trim().length === 0) {
             return block(`${policy.label}: bash tool input.command must be a non-empty string.`);

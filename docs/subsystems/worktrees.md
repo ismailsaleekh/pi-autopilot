@@ -12,8 +12,8 @@ covers_sources:
   - src/core/git-guard.ts
   - src/core/git-process.ts
 signature_hash: 'sha256:9e7f50dd59b9434e8d5c5809cb34e3bd53e01e2291356b0483f111fa71aece2e'
-body_hash: 'sha256:6c59b169304538271bcb188c4147f9bc730f6b391024295e58b9b7d1fe9ddf4c'
-semantic_attestation: 'sha256:6c59b169304538271bcb188c4147f9bc730f6b391024295e58b9b7d1fe9ddf4c'
+body_hash: 'sha256:ebaa18b0a4a1eead39436a6db50fbf20cb655b044d00b4c81afbe92fcd259a53'
+semantic_attestation: 'sha256:ebaa18b0a4a1eead39436a6db50fbf20cb655b044d00b4c81afbe92fcd259a53'
 stability: stable
 ---
 
@@ -104,8 +104,12 @@ roots (`mission.md`, `master-plan.json`, `state.json`, `decision-log.jsonl`,
 `events.jsonl`) plus any explicit package-owned auxiliary roots in
 `bootstrapAllowedAuxiliaryRoots` (e.g. the runtime roster-snapshot mirror and
 graph-publication files) — and **nothing else**, not even another file inside the
-runtime directory and never an out-of-worktree absolute path. The fence is
-exact-path, not runtime-wide. This is enforced independently of, and in addition
+runtime directory and never an out-of-worktree absolute path. General `bash` is
+disabled while this fence is active: a shell can mutate product, runtime, or external
+paths and spawn child/coordinator processes outside any statically provable exact-path
+capability. Bootstrap inspection therefore uses dedicated non-shell tools, while only
+path-declared `write`/`edit` calls can create the charter. The fence is exact-path, not
+runtime-wide. This is enforced independently of, and in addition
 to, the charter-completeness detector in `d65-launch-integration.ts`, which
 inspects the full `git status --ignored` porcelain so that even an *ignored*
 out-of-scope effect fences first-graph publication rather than passing silently.

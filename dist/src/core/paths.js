@@ -145,7 +145,21 @@ export function parseAutopilotLaunchArgs(args, options = {}) {
         launchManifestPath = candidate;
         remainder = (match?.[2] ?? '').trim();
     }
+    // A manifest flag anywhere in unescaped task text is never ordinary prose: it
+    // would otherwise silently fall through to the legacy generated-run path. All
+    // launch options must precede task text. A standalone `--` explicitly starts
+    // literal task text and is the only way to mention the flag without selecting
+    // launch mode; the separator/remainder bytes stay legacy-compatible.
+    if (containsUnescapedLaunchManifestOption(remainder)) {
+        return { ok: false, message: '--launch-manifest must appear before task text, may appear at most once, and must precede an optional standalone -- task separator.' };
+    }
     return { ok: true, value: { workstream, remainder, rosterId, launchManifestPath } };
+}
+function containsUnescapedLaunchManifestOption(value) {
+    const tokens = value.split(/\s+/u).filter((token) => token.length > 0);
+    const separator = tokens.indexOf('--');
+    const optionTokens = separator < 0 ? tokens : tokens.slice(0, separator);
+    return optionTokens.some((token) => token === '--launch-manifest' || token.startsWith('--launch-manifest='));
 }
 export function parseAutopilotInjectArgs(args) {
     const tokens = args.trim().split(/\s+/u).filter((token) => token.length > 0);

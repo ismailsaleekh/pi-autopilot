@@ -51,6 +51,24 @@ void describe('D65 bootstrap-only effect fence (git guard)', () => {
     assert.ok(decision !== undefined && decision.block === true);
   });
 
+  void it('blocks every bash command during bootstrap, including product/external/runtime/child/coordinator effects', () => {
+    const { root, runtimeDir } = tempWorktree();
+    const charterPaths = ['mission.md', 'master-plan.json', 'state.json', 'decision-log.jsonl', 'events.jsonl'].map((name) => join(runtimeDir, name));
+    const commands = [
+      'printf pwn > PRODUCT.md',
+      `printf pwn > ${join(runtimeDir, 'scratch.txt')}`,
+      `printf pwn > ${join(realpathSync(tmpdir()), 'd65-outside.txt')}`,
+      'node child-worker.mjs',
+      'autopilot-coordinator start',
+      'git status --short',
+    ];
+    for (const command of commands) {
+      const decision = evaluateAutopilotWorktreeToolCall({ toolName: 'bash', input: { command } }, { cwd: root }, { worktreeRoot: root, label: 'fence', bootstrapCharterPaths: charterPaths, bootstrapAllowedAuxiliaryRoots: [] });
+      if (decision === undefined || decision.block !== true) throw new Error(`bootstrap bash must be blocked: ${command}`);
+      assert.match(decision.reason, /bash is disabled during the D65 bootstrap-only/u);
+    }
+  });
+
   void it('allows a write under an explicit package-owned auxiliary root', () => {
     const { root, runtimeDir } = tempWorktree();
     const charterPaths = ['mission.md'].map((n) => join(runtimeDir, n));
@@ -101,6 +119,24 @@ void describe('legacy /autopilot arg parser byte-shape stability (item H)', () =
     assert.equal(before.value.rosterId, 'codex');
     assert.equal(after.value.rosterId, 'codex');
     assert.equal(before.value.remainder, 'intro');
+  });
+
+  void it('rejects misplaced or duplicate manifest flags instead of silently entering legacy mode', () => {
+    for (const input of [
+      'demo task --launch-manifest /abs/manifest.json',
+      'demo --foo --launch-manifest=/abs/manifest.json',
+      'demo --launch-manifest /abs/one.json task --launch-manifest /abs/two.json',
+    ]) {
+      const parsed = parseAutopilotLaunchArgs(input);
+      assert.equal(parsed.ok, false, input);
+      if (!parsed.ok) assert.match(parsed.message, /must appear before task text/u);
+    }
+    const escaped = parseAutopilotLaunchArgs('demo -- --launch-manifest /literal/task/text');
+    assert.equal(escaped.ok, true);
+    if (escaped.ok) {
+      assert.equal(escaped.value.launchManifestPath, null);
+      assert.equal(escaped.value.remainder, '-- --launch-manifest /literal/task/text');
+    }
   });
 
   void it('rejects a relative --launch-manifest path in the launch parser only', () => {

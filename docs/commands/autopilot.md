@@ -14,12 +14,12 @@ Start or resume an Autopilot parent orchestration session for a workstream.
 
 ## Synopsis
 
-`/autopilot <workstream> [--launch-manifest <absolute-path>] [--roster <id>] [task intro/current focus]`
+`/autopilot <workstream> [--launch-manifest <absolute-path>] [--roster <id>] [--] [task intro/current focus]`
 
 ## D65 sealed launch mode
 
-When `--launch-manifest <absolute-path>` is present, `/autopilot` enters the closed
-D65 launch mode and consumes a sealed `autopilot.launch_manifest.v1` prelaunch package
+When `--launch-manifest <absolute-path>` is present before task text, `/autopilot`
+enters the closed D65 launch mode and consumes a sealed `autopilot.launch_manifest.v1` prelaunch package
 rather than regenerating a run. The manifest binds the fixed prelaunch identity
 (program/workstream/workstream-run, run timestamp/nonce, clone/roots/repo identity, B0,
 content-result, package, branch, roots, bootstrap overlay, trust anchor, prospective
@@ -27,7 +27,9 @@ run/resource, roster hash, signed policy candidate, program evidence root, and l
 audit/seal). Every sealed value is consumed exactly, never regenerated. The manifest,
 roster storage, and activation layers share the same bounded ASCII alphanumeric-or-
 hyphen run/repo identity grammar; a relative path, oversized/symlinked file, unknown
-field, unsafe identity, or internal mismatch fails closed with no run state.
+field, unsafe identity, duplicate/misplaced launch flag, or internal mismatch fails closed with no
+run state. Launch options must precede task text; a standalone `--` explicitly starts
+literal task text when the words `--launch-manifest` are part of the task itself.
 
 In launch mode `/autopilot`:
 
@@ -42,8 +44,10 @@ In launch mode `/autopilot`:
 4. replaces any previously registered `context_budget` definition with a wrapper bound
    to this manifest and durable session, then delivers a **bootstrap-plan-only** parent
    turn that may write only the five charter roots (`mission.md`, `master-plan.json`,
-   `state.json`, `decision-log.jsonl`, `events.jsonl`); graph publication requires an
-   exact tool-call/session receipt with `gate:"ok"` and bounded percentage;
+   `state.json`, `decision-log.jsonl`, `events.jsonl`) through exact-path `write`/`edit`;
+   general `bash` is disabled for the entire bootstrap turn because shell effects
+   cannot be path-closed. Graph publication requires an exact tool-call/session receipt
+   with `gate:"ok"` and bounded percentage;
 5. on `agent_settled`, mechanically publishes the first complete graph (sequence 2),
    accepts the successor governing heartbeat, adopts that exact single session (starting
    its periodic heartbeat only now), and delivers the ordinary continuation turn.

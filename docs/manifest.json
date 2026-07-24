@@ -1193,8 +1193,8 @@
         "src/core/sparse-worktree.ts"
       ],
       "signature_hash": "sha256:9e7f50dd59b9434e8d5c5809cb34e3bd53e01e2291356b0483f111fa71aece2e",
-      "body_hash": "sha256:6c59b169304538271bcb188c4147f9bc730f6b391024295e58b9b7d1fe9ddf4c",
-      "semantic_attestation": "sha256:6c59b169304538271bcb188c4147f9bc730f6b391024295e58b9b7d1fe9ddf4c"
+      "body_hash": "sha256:ebaa18b0a4a1eead39436a6db50fbf20cb655b044d00b4c81afbe92fcd259a53",
+      "semantic_attestation": "sha256:ebaa18b0a4a1eead39436a6db50fbf20cb655b044d00b4c81afbe92fcd259a53"
     },
     "tools/autopilot_emit_status": {
       "mode": "authored",

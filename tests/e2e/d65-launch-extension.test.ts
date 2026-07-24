@@ -13,6 +13,7 @@ import autopilotExtension, {
   type ExtensionHostLike,
   type ExtensionLifecycleHandler,
   type ExtensionModelLike,
+  type ExtensionToolCallHandler,
   type NotificationKind,
   type AutopilotParentToolDefinition,
   type AutopilotRosterActivationStore,
@@ -55,6 +56,7 @@ interface HarnessLike {
   readonly notifications: { message: string; kind: NotificationKind | undefined }[];
   readonly settledHandlers: ExtensionLifecycleHandler[];
   readonly shutdownHandlers: ExtensionLifecycleHandler[];
+  readonly toolCallHandlers: ExtensionToolCallHandler[];
   readonly ctx: ExtensionCommandContextLike;
 }
 
@@ -113,6 +115,7 @@ function createLaunchHarness(signer: D65LaunchSigner, options: { readonly preReg
   const notifications: { message: string; kind: NotificationKind | undefined }[] = [];
   const settledHandlers: ExtensionLifecycleHandler[] = [];
   const shutdownHandlers: ExtensionLifecycleHandler[] = [];
+  const toolCallHandlers: ExtensionToolCallHandler[] = [];
   const selectedModels: ExtensionModelLike[] = [];
   let thinking = 'high';
   let remainingSendFailures = options.sendUserMessageFailures ?? 0;
@@ -129,6 +132,7 @@ function createLaunchHarness(signer: D65LaunchSigner, options: { readonly preReg
     on: (eventName, handler) => {
       if (eventName === 'agent_settled') settledHandlers.push(handler as ExtensionLifecycleHandler);
       else if (eventName === 'session_shutdown') shutdownHandlers.push(handler as ExtensionLifecycleHandler);
+      else if (eventName === 'tool_call') toolCallHandlers.push(handler as ExtensionToolCallHandler);
     },
   };
   const ctx: ExtensionCommandContextLike = {
@@ -138,7 +142,7 @@ function createLaunchHarness(signer: D65LaunchSigner, options: { readonly preReg
     isIdle: () => true,
   };
   autopilotExtension(host, { rosterActivationStore: options.rosterActivationStore ?? sdkReadyRosterActivationStore(), resolveLaunchSigner: options.resolveLaunchSigner ?? (() => signer) });
-  return { commands, messages, tools, toolRegistrations, notifications, settledHandlers, shutdownHandlers, ctx };
+  return { commands, messages, tools, toolRegistrations, notifications, settledHandlers, shutdownHandlers, toolCallHandlers, ctx };
 }
 
 interface Fixture { readonly root: string; readonly manifest: D65LaunchManifest; readonly manifestPath: string; readonly signer: D65LaunchSigner; readonly env: ProcessEnvLike; readonly close: () => Promise<void> }
@@ -268,6 +272,11 @@ void describe('D65 launch via /autopilot --launch-manifest (extension)', () => {
       assert.match(bootstrapPrompt, /bootstrap-plan-only/u);
       assert.match(bootstrapPrompt, /five previously-absent charter roots/u);
       assert.ok(existsSync(fixture.manifest.main_worktree_path), 'main worktree created');
+      const bashDecisions = await Promise.all(harness.toolCallHandlers.map(async (handler) => await handler(
+        { toolName: 'bash', input: { command: 'printf pwn > PRODUCT.md' } },
+        { cwd: fixture.manifest.main_worktree_path },
+      )));
+      assert.ok(bashDecisions.some((decision) => decision !== undefined && decision.block === true && /bash is disabled during the D65 bootstrap-only/u.test(decision.reason)), 'extension bootstrap guard must block bash');
       const d65ContextTool = harness.tools.get('context_budget') as ReturnType<typeof createContextBudgetTool> | undefined;
       if (d65ContextTool === undefined) throw new Error('manifest-bound context_budget missing');
       assert.notEqual(d65ContextTool, preexistingContextTool, 'D65 must replace an already-registered base tool');
@@ -371,6 +380,28 @@ void describe('D65 launch via /autopilot --launch-manifest (extension)', () => {
       await second.close();
       if (originalStateRoot === undefined) delete process.env[AUTOPILOT_STATE_ROOT_ENV];
       else process.env[AUTOPILOT_STATE_ROOT_ENV] = originalStateRoot;
+    }
+  });
+
+  void it('rejects a misplaced manifest flag before roster resolution or legacy activation', async () => {
+    const fixture = await buildFixture('misplaced');
+    let rosterCalls = 0;
+    let signerCalls = 0;
+    const rosterActivationStore: AutopilotRosterActivationStore = {
+      resolve: async () => { rosterCalls += 1; return { status: 'blocked', source: 'user-default', diagnostics: [] }; },
+    };
+    const harness = createLaunchHarness(fixture.signer, { rosterActivationStore, resolveLaunchSigner: () => { signerCalls += 1; return fixture.signer; } });
+    try {
+      const command = harness.commands.get(AUTOPILOT_COMMAND);
+      if (command === undefined) throw new Error('missing command');
+      await command.handler(`${fixture.manifest.workstream} task --launch-manifest ${fixture.manifestPath}`, harness.ctx);
+      assert.equal(rosterCalls, 0);
+      assert.equal(signerCalls, 0);
+      assert.equal(harness.messages.length, 0);
+      assert.ok(harness.notifications.some((notification) => /must appear before task text/u.test(notification.message)));
+    } finally {
+      for (const handler of harness.shutdownHandlers) await handler({ reason: 'test-complete' }, harness.ctx);
+      await fixture.close();
     }
   });
 

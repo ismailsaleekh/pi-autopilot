@@ -1,19 +1,19 @@
 {
-    "schema_version": "autopilot.docs_semantic_attestation.v2",
-    "doc_id": "subsystems/worktrees",
-    "reviewed_body_hash": "sha256:6c59b169304538271bcb188c4147f9bc730f6b391024295e58b9b7d1fe9ddf4c",
-    "reviewed_doc_sha256": "sha256:771439928372c217ad11cd0519362a188e02285bcdf5569d1335834e9ebcfc35",
-    "covers_sources": [
-        "src/core/checkout-profile.ts",
-        "src/core/disk-gate.ts",
-        "src/core/git-guard.ts",
-        "src/core/git-process.ts",
-        "src/core/materialization.ts",
-        "src/core/parallel-runtime.ts",
-        "src/core/sparse-worktree.ts"
-    ],
-    "verdict": "PASS",
-    "reviewer": "D65 launch-integration implementation owner (offline semantic review)",
-    "reviewed_at": "2026-07-24T12:00:00.000Z",
-    "notes": "D65 launch-integration semantic review (round 2): reviewed the git-guard.ts D65 bootstrap-only effect fence (AutopilotGitGuardPolicy.bootstrapCharterPaths / bootstrapAllowedAuxiliaryRoots) which permits write/edit tool calls to affect EXACTLY the five charter roots plus explicit package-owned auxiliary roots and nothing else (exact-path, not runtime-wide), and confirmed the prose now documents it alongside the earlier resolveAutopilotFullCheckoutProfile full-checkout review. The charter-completeness detector in d65-launch-integration.ts independently inspects git status --ignored so ignored out-of-scope effects fence first-graph publication. No existing checkout limit changed; no other covered-source behavior changed."
+  "schema_version": "autopilot.docs_semantic_attestation.v2",
+  "doc_id": "subsystems/worktrees",
+  "reviewed_body_hash": "sha256:ebaa18b0a4a1eead39436a6db50fbf20cb655b044d00b4c81afbe92fcd259a53",
+  "reviewed_doc_sha256": "sha256:c4960af9ab5b28794bfaa60e51936f8f168dc9cb303b2e36f680c5c3cb236330",
+  "covers_sources": [
+    "src/core/checkout-profile.ts",
+    "src/core/disk-gate.ts",
+    "src/core/git-guard.ts",
+    "src/core/git-process.ts",
+    "src/core/materialization.ts",
+    "src/core/parallel-runtime.ts",
+    "src/core/sparse-worktree.ts"
+  ],
+  "verdict": "PASS",
+  "reviewer": "D65 launch-integration implementation owner (offline semantic review after independent GPT-5.5 finding)",
+  "reviewed_at": "2026-07-24T20:10:00.000Z",
+  "notes": "Reviewed git-guard.ts after the independent round-3 P1 finding: when bootstrapCharterPaths is active, bash now rejects before the ordinary git-only evaluator, while write/edit remain exact-path limited to the five charter files plus explicit package-owned auxiliary roots. Reviewed direct unit and extension regressions covering product, runtime-extra, external, child, coordinator, and git shell commands. Prose accurately distinguishes the D65 shell ban from ordinary worktree-local git behavior; other covered-source behavior is unchanged."
 }
