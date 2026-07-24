@@ -14,6 +14,8 @@ import autopilotExtension, {
   type ExtensionLifecycleHandler,
   type ExtensionModelLike,
   type NotificationKind,
+  type AutopilotParentToolDefinition,
+  type AutopilotRosterActivationStore,
 } from '../../src/extension.ts';
 import { AUTOPILOT_COMMAND } from '../../src/core/names.ts';
 import { canonicalJson } from '../../src/core/coordination/canonical-json.ts';
@@ -25,7 +27,8 @@ import { encodeUnpaddedBase64Url } from '../../src/core/coordination/d65-trust.t
 import { parseD65LaunchPolicy } from '../../src/core/coordination/d65-launch-policy.ts';
 import { parseD65LaunchManifest, type D65LaunchManifest } from '../../src/core/coordination/d65-launch-manifest.ts';
 import type { D65LaunchSigner, D65LaunchSignerHeartbeatRequest, D65LaunchSignerPolicyRequest, D65LaunchSignerResult } from '../../src/core/coordination/d65-launch-signer.ts';
-import { writeD65ContextBudgetReceipt } from '../../src/core/coordination/d65-launch-integration.ts';
+import { d65ContextBudgetReceiptPath } from '../../src/core/coordination/d65-launch-integration.ts';
+import { createContextBudgetTool } from '../../src/core/context-budget.ts';
 import { AUTOPILOT_STATE_ROOT_ENV, type ProcessEnvLike } from '../../src/core/parallel-runtime.ts';
 import { SEED_ROSTERS } from '../../src/core/roster/provider-recipes.ts';
 import { canonicalRosterJson } from '../../src/core/roster/canonical.ts';
@@ -47,6 +50,8 @@ function concatDomain(domain: string, message: string): Uint8Array {
 interface HarnessLike {
   readonly commands: Map<string, ExtensionCommandDefinitionLike>;
   readonly messages: string[];
+  readonly tools: Map<string, AutopilotParentToolDefinition>;
+  readonly toolRegistrations: AutopilotParentToolDefinition[];
   readonly notifications: { message: string; kind: NotificationKind | undefined }[];
   readonly settledHandlers: ExtensionLifecycleHandler[];
   readonly shutdownHandlers: ExtensionLifecycleHandler[];
@@ -96,23 +101,30 @@ class TestSigner implements D65LaunchSigner {
   }
 }
 
-function createLaunchHarness(signer: D65LaunchSigner): HarnessLike {
+function createLaunchHarness(signer: D65LaunchSigner, options: { readonly preRegisteredContextBudget?: boolean; readonly rosterActivationStore?: AutopilotRosterActivationStore; readonly resolveLaunchSigner?: (manifest: D65LaunchManifest) => D65LaunchSigner; readonly sendUserMessageFailures?: number } = {}): HarnessLike {
   const commands = new Map<string, ExtensionCommandDefinitionLike>();
   const messages: string[] = [];
+  const tools = new Map<string, AutopilotParentToolDefinition>();
+  const toolRegistrations: AutopilotParentToolDefinition[] = [];
+  if (options.preRegisteredContextBudget === true) {
+    const base = createContextBudgetTool(85);
+    tools.set(base.name, base);
+  }
   const notifications: { message: string; kind: NotificationKind | undefined }[] = [];
   const settledHandlers: ExtensionLifecycleHandler[] = [];
   const shutdownHandlers: ExtensionLifecycleHandler[] = [];
   const selectedModels: ExtensionModelLike[] = [];
   let thinking = 'high';
+  let remainingSendFailures = options.sendUserMessageFailures ?? 0;
   const host: ExtensionHostLike = {
     registerCommand: (name, definition) => { commands.set(name, definition); },
-    registerTool: () => undefined,
+    registerTool: (tool) => { tools.set(tool.name, tool); toolRegistrations.push(tool); },
     getActiveTools: () => [],
     setActiveTools: () => undefined,
     setModel: (model) => { selectedModels.push(model); return Promise.resolve(true); },
     getThinkingLevel: () => thinking,
     setThinkingLevel: (level) => { thinking = level; },
-    sendUserMessage: (content) => { messages.push(content); },
+    sendUserMessage: (content) => { if (remainingSendFailures > 0) { remainingSendFailures -= 1; throw new Error('injected send failure'); } messages.push(content); },
     sendMessage: () => undefined,
     on: (eventName, handler) => {
       if (eventName === 'agent_settled') settledHandlers.push(handler as ExtensionLifecycleHandler);
@@ -125,8 +137,8 @@ function createLaunchHarness(signer: D65LaunchSigner): HarnessLike {
     sessionManager: { getSessionId: () => 'launch-extension-session' },
     isIdle: () => true,
   };
-  autopilotExtension(host, { rosterActivationStore: sdkReadyRosterActivationStore(), resolveLaunchSigner: () => signer });
-  return { commands, messages, notifications, settledHandlers, shutdownHandlers, ctx };
+  autopilotExtension(host, { rosterActivationStore: options.rosterActivationStore ?? sdkReadyRosterActivationStore(), resolveLaunchSigner: options.resolveLaunchSigner ?? (() => signer) });
+  return { commands, messages, tools, toolRegistrations, notifications, settledHandlers, shutdownHandlers, ctx };
 }
 
 interface Fixture { readonly root: string; readonly manifest: D65LaunchManifest; readonly manifestPath: string; readonly signer: D65LaunchSigner; readonly env: ProcessEnvLike; readonly close: () => Promise<void> }
@@ -236,9 +248,6 @@ async function writeCharterRoots(manifest: D65LaunchManifest): Promise<void> {
   await writeFile(join(runtimeRoot, 'state.json'), `${JSON.stringify(state)}\n`);
   await writeFile(join(runtimeRoot, 'decision-log.jsonl'), `${JSON.stringify(decision)}\n`);
   await writeFile(join(runtimeRoot, 'events.jsonl'), `${JSON.stringify(event)}\n`);
-  // The bootstrap-plan turn calls context_budget first: seal its durable receipt
-  // (in production the wrapped tool writes this on a real call).
-  writeD65ContextBudgetReceipt(manifest, { gate: 'ok', percent: 10 });
 }
 
 void describe('D65 launch via /autopilot --launch-manifest (extension)', () => {
@@ -246,8 +255,10 @@ void describe('D65 launch via /autopilot --launch-manifest (extension)', () => {
     const fixture = await buildFixture('a');
     const originalStateRoot = process.env[AUTOPILOT_STATE_ROOT_ENV];
     process.env[AUTOPILOT_STATE_ROOT_ENV] = String(fixture.env[AUTOPILOT_STATE_ROOT_ENV]);
-    const harness = createLaunchHarness(fixture.signer);
+    const harness = createLaunchHarness(fixture.signer, { preRegisteredContextBudget: true });
     try {
+      const preexistingContextTool = harness.tools.get('context_budget');
+      if (preexistingContextTool === undefined) throw new Error('pre-registered context_budget missing');
       const command = harness.commands.get(AUTOPILOT_COMMAND);
       if (command === undefined) throw new Error('missing /autopilot command');
       // Stage 1-6: the command dispatches the bootstrap-plan-only prompt.
@@ -257,6 +268,11 @@ void describe('D65 launch via /autopilot --launch-manifest (extension)', () => {
       assert.match(bootstrapPrompt, /bootstrap-plan-only/u);
       assert.match(bootstrapPrompt, /five previously-absent charter roots/u);
       assert.ok(existsSync(fixture.manifest.main_worktree_path), 'main worktree created');
+      const d65ContextTool = harness.tools.get('context_budget') as ReturnType<typeof createContextBudgetTool> | undefined;
+      if (d65ContextTool === undefined) throw new Error('manifest-bound context_budget missing');
+      assert.notEqual(d65ContextTool, preexistingContextTool, 'D65 must replace an already-registered base tool');
+      await d65ContextTool.execute('call-d65-context', {}, undefined, undefined, { getContextUsage: () => ({ tokens: 20_000, contextWindow: 200_000, percent: 10 }) });
+      assert.equal(existsSync(d65ContextBudgetReceiptPath(fixture.manifest)), true);
 
       // Exactly one session and an accepted policy + initial heartbeat exist.
       const client = new CoordinatorClient({ env: fixture.env });
@@ -268,6 +284,7 @@ void describe('D65 launch via /autopilot --launch-manifest (extension)', () => {
       // The bootstrap-plan turn writes the five charter roots, then settles.
       await writeCharterRoots(fixture.manifest);
       for (const handler of harness.settledHandlers) await handler({}, harness.ctx);
+      assert.notEqual(harness.tools.get('context_budget'), d65ContextTool, 'ordinary dispatch must restore the unwrapped base context_budget tool');
 
       // Stage 7-9: graph 2 accepted, successor heartbeat accepted, continuation delivered.
       status = await client.query('status', fixture.manifest.repo_id, fixture.manifest.workstream_run);
@@ -286,6 +303,72 @@ void describe('D65 launch via /autopilot --launch-manifest (extension)', () => {
     } finally {
       for (const handler of harness.shutdownHandlers) await handler({ reason: 'test-complete' }, harness.ctx);
       await fixture.close();
+      if (originalStateRoot === undefined) delete process.env[AUTOPILOT_STATE_ROOT_ENV];
+      else process.env[AUTOPILOT_STATE_ROOT_ENV] = originalStateRoot;
+    }
+  });
+
+  void it('keeps a failed D65 attempt from contaminating the following legacy command state authority', async () => {
+    const fixture = await buildFixture('env');
+    const originalStateRoot = process.env[AUTOPILOT_STATE_ROOT_ENV];
+    const ambientStateRoot = join(fixture.root, 'ambient-legacy-state');
+    process.env[AUTOPILOT_STATE_ROOT_ENV] = ambientStateRoot;
+    let legacyObservedStateRoot: string | undefined;
+    const rosterActivationStore: AutopilotRosterActivationStore = {
+      resolve: async (input) => {
+        legacyObservedStateRoot = input.env[AUTOPILOT_STATE_ROOT_ENV];
+        return { status: 'blocked', source: 'user-default', diagnostics: [] };
+      },
+    };
+    const harness = createLaunchHarness(fixture.signer, { rosterActivationStore, resolveLaunchSigner: () => { throw new Error('injected signer resolution failure'); } });
+    try {
+      const command = harness.commands.get(AUTOPILOT_COMMAND);
+      if (command === undefined) throw new Error('missing command');
+      await command.handler(`${fixture.manifest.workstream} --launch-manifest ${fixture.manifestPath}`, harness.ctx);
+      assert.equal(process.env[AUTOPILOT_STATE_ROOT_ENV], ambientStateRoot);
+      await command.handler('legacy-after-failed-launch', harness.ctx);
+      assert.equal(legacyObservedStateRoot, ambientStateRoot);
+      assert.notEqual(legacyObservedStateRoot, fixture.manifest.state_root);
+    } finally {
+      for (const handler of harness.shutdownHandlers) await handler({ reason: 'test-complete' }, harness.ctx);
+      await fixture.close();
+      if (originalStateRoot === undefined) delete process.env[AUTOPILOT_STATE_ROOT_ENV];
+      else process.env[AUTOPILOT_STATE_ROOT_ENV] = originalStateRoot;
+    }
+  });
+
+  void it('restores after a failed bootstrap delivery and binds a later manifest to its own context receipt', async () => {
+    const first = await buildFixture('first');
+    const second = await buildFixture('second');
+    const originalStateRoot = process.env[AUTOPILOT_STATE_ROOT_ENV];
+    const ambientStateRoot = join(first.root, 'ambient-state');
+    process.env[AUTOPILOT_STATE_ROOT_ENV] = ambientStateRoot;
+    const harness = createLaunchHarness(first.signer, {
+      preRegisteredContextBudget: true,
+      sendUserMessageFailures: 1,
+      resolveLaunchSigner: (manifest) => manifest.workstream_run === first.manifest.workstream_run ? first.signer : second.signer,
+    });
+    try {
+      const command = harness.commands.get(AUTOPILOT_COMMAND);
+      if (command === undefined) throw new Error('missing command');
+      await command.handler(`${first.manifest.workstream} --launch-manifest ${first.manifestPath}`, harness.ctx);
+      const baseAfterFailure = harness.tools.get('context_budget');
+      if (baseAfterFailure === undefined) throw new Error('base context tool was not restored');
+      assert.equal(existsSync(d65ContextBudgetReceiptPath(first.manifest)), false);
+      assert.equal(process.env[AUTOPILOT_STATE_ROOT_ENV], ambientStateRoot);
+
+      await command.handler(`${second.manifest.workstream} --launch-manifest ${second.manifestPath}`, harness.ctx);
+      const secondWrapper = harness.tools.get('context_budget') as ReturnType<typeof createContextBudgetTool> | undefined;
+      if (secondWrapper === undefined) throw new Error('second manifest wrapper missing');
+      assert.notEqual(secondWrapper, baseAfterFailure);
+      await secondWrapper.execute('call-second-manifest', {}, undefined, undefined, { getContextUsage: () => ({ tokens: 20_000, contextWindow: 200_000, percent: 10 }) });
+      assert.equal(existsSync(d65ContextBudgetReceiptPath(first.manifest)), false);
+      assert.equal(existsSync(d65ContextBudgetReceiptPath(second.manifest)), true);
+      assert.ok(harness.toolRegistrations.filter((tool) => tool.name === 'context_budget').length >= 3, 'wrapper/base/wrapper registrations must all occur');
+    } finally {
+      for (const handler of harness.shutdownHandlers) await handler({ reason: 'test-complete' }, harness.ctx);
+      await first.close();
+      await second.close();
       if (originalStateRoot === undefined) delete process.env[AUTOPILOT_STATE_ROOT_ENV];
       else process.env[AUTOPILOT_STATE_ROOT_ENV] = originalStateRoot;
     }

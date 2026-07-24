@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { isAbsolute, normalize } from 'node:path';
 import { fail, gitOid, identifier, integer, isJsonObject, literal, object, repoRelativePath, sha256Field, str, timestamp, } from "./d65-semantic-graph.js";
 import { parseCoordinationRun, parseCoordinationRunResource } from "./contracts.js";
+import { isValidAutopilotRepoId, isValidWorkstreamRun } from "../paths.js";
 // D65 sealed prelaunch package (freeze §9; fresh plan §§2.3/3.2/2.4). This is
 // the ONE closed, versioned, size-bounded manifest the human `/autopilot`
 // startup path consumes to bind a fixed prelaunch identity rather than
@@ -187,15 +188,15 @@ export function parseD65LaunchManifest(value) {
         manifest_id: identifier(record, 'manifest_id', label),
         program_id: identifier(record, 'program_id', label),
         workstream: identifier(record, 'workstream', label),
-        workstream_run: identifier(record, 'workstream_run', label),
+        workstream_run: closedRunIdentity(record, 'workstream_run', label),
         autopilot_id: identifier(record, 'autopilot_id', label),
         run_timestamp: timestamp(record, 'run_timestamp', label),
         run_nonce: runNonce,
         source_clone: absolutePathField(record, 'source_clone', label),
         canonical_root: absolutePathField(record, 'canonical_root', label),
         git_common_dir: absolutePathField(record, 'git_common_dir', label),
-        repo_id: identifier(record, 'repo_id', label),
-        repo_key: identifier(record, 'repo_key', label),
+        repo_id: closedRepoIdentity(record, 'repo_id', label),
+        repo_key: closedRepoIdentity(record, 'repo_key', label),
         b0_commit: gitOid(record, 'b0_commit', label),
         b0_tree: gitOid(record, 'b0_tree', label),
         content_result_commit: gitOid(record, 'content_result_commit', label),
@@ -260,6 +261,18 @@ export function parseD65LaunchManifest(value) {
     if (parentProvider !== manifest.roster_selection.provider)
         fail(label, 'parent_model provider must equal the sealed roster subscription provider');
     return Object.freeze(manifest);
+}
+function closedRunIdentity(record, field, label) {
+    const value = str(record, field, label, 120);
+    if (!isValidWorkstreamRun(value))
+        fail(label, `${field} must match the closed 120-byte ASCII alphanumeric-or-hyphen workstream-run grammar`);
+    return value;
+}
+function closedRepoIdentity(record, field, label) {
+    const value = str(record, field, label, 120);
+    if (!isValidAutopilotRepoId(value))
+        fail(label, `${field} must match the closed lowercase 120-byte ASCII alphanumeric-or-hyphen repo-id grammar`);
+    return value;
 }
 function stringField(row, field, label) {
     const value = row[field];

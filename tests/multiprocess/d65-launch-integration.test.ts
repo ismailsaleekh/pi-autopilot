@@ -249,7 +249,7 @@ async function buildLaunchFixture(suffix: string): Promise<LaunchFixture> {
 /** Write exactly the five charter roots into the runtime root (the model turn). */
 function emptyMap(): Record<string, unknown> { return {}; }
 
-async function writeCharterRoots(manifest: D65LaunchManifest): Promise<void> {
+async function writeCharterRoots(manifest: D65LaunchManifest, sessionId: string): Promise<void> {
   const runtimeRoot = manifest.runtime_root;
   const state = { schema_version: 'autopilot.state.v1', workstream: manifest.workstream, updated_at: '2026-07-22T22:00:36.000Z', status: 'running', context_gate: { gate: 'ok', percent: 10 }, last_event_id: 1, ready_queue: [], running: [], blocked: [], completed: [], units: emptyMap(), operator_questions: [], next_actions: ['plan'] };
   const masterPlan = { schema_version: 'autopilot.master_plan.v1', workstream: manifest.workstream, mission_ref: 'mission.md', goal_summary: 'launch integration mission', non_goals: [], definition_of_done: ['charter accepted'], risk_level: 'low', lanes: [{ lane_id: 'main', summary: 'main', unit_ids: [] }], units: emptyMap(), ownership_matrix: { owned_paths: [], read_only_paths: [], untouchable_paths: [], held_paths: [] }, verification_matrix: { positive_witnesses: [], negative_witnesses: [], regression_witnesses: [], real_boundary_witnesses: [], blast_radius_checks: [], docs_schema_prompt_checks: [], dirty_tree_checks: [] }, closure_criteria: ['charter accepted'], current_focus: 'plan', last_decision_id: 1, last_event_id: 1, updated_at: '2026-07-22T22:00:36.000Z' };
@@ -267,7 +267,7 @@ async function writeCharterRoots(manifest: D65LaunchManifest): Promise<void> {
     await writeFile(join(runtimeRoot, name), body, 'utf8');
   }
   // The bootstrap-plan turn calls context_budget first: seal its durable receipt.
-  writeD65ContextBudgetReceipt(manifest, { gate: 'ok', percent: 10 });
+  writeD65ContextBudgetReceipt(manifest, { gate: 'ok', percent: 10, tool_call_id: 'test-context-budget', session_id: sessionId });
 }
 
 void describe('D65 launch integration (production path)', () => {
@@ -297,7 +297,7 @@ void describe('D65 launch integration (production path)', () => {
       assert.ok(status.payload['accepted_program_heartbeat'] !== null);
 
       // Stage 6: the bootstrap parent-planning turn writes exactly five roots.
-      await writeCharterRoots(manifest);
+      await writeCharterRoots(manifest, bootstrap.attachment.context.session_id);
       assert.equal(detectD65CharterComplete(manifest), true);
 
       // Stage 7-8: first complete graph + successor heartbeat.
@@ -340,7 +340,7 @@ void describe('D65 launch integration (production path)', () => {
       assert.equal(artifacts.filter((a) => a.document_schema_version === 'autopilot.launch_policy.v1').length, 1);
       assert.equal((status.payload['session_leases'] as unknown[]).length, 1);
 
-      await writeCharterRoots(manifest);
+      await writeCharterRoots(manifest, bootstrap2.attachment.context.session_id);
       const graph1 = await publishD65FirstGraphAndSuccessorHeartbeat({ manifest, attachment: bootstrap2.attachment, signer, env, createdAt: '2026-07-22T22:00:37.000Z' });
       // Re-publish is idempotent (recognizes the already-accepted graph 2).
       const graph2 = await publishD65FirstGraphAndSuccessorHeartbeat({ manifest, attachment: bootstrap2.attachment, signer, env, createdAt: '2026-07-22T22:00:37.000Z' });
@@ -359,7 +359,7 @@ void describe('D65 launch integration (production path)', () => {
       const { manifest, signer, env } = fixture;
       const bootstrap = await beginD65LaunchBootstrap({ manifest, rawSessionId: 'launch-c', env });
       await registerD65LaunchPolicyAndInitialHeartbeat({ manifest, attachment: bootstrap.attachment, signer, env });
-      await writeCharterRoots(manifest);
+      await writeCharterRoots(manifest, bootstrap.attachment.context.session_id);
       // Parent also touches a product path — must fail closed before first graph.
       await writeFile(join(manifest.main_worktree_path, 'PRODUCT.md'), 'unauthorized\n', 'utf8');
       assert.throws(() => detectD65CharterComplete(manifest), /outside the package-owned runtime charter scope/u);

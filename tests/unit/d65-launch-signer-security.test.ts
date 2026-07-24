@@ -67,7 +67,7 @@ void describe('D65 manifest closed prospective contract (item H)', () => {
 // exercise the signer CLI's protected-root boundary via a direct spawn with an
 // intentionally-misplaced key.
 
-import { runLaunchSignerCli, assertPrivateKeyOutsideProtectedRoots } from '../../src/cli/autopilot-launch-signer.ts';
+import { runLaunchSignerCli, assertPrivateKeyOutsideProtectedRoots, foreignAcceptedGraphAuthority } from '../../src/cli/autopilot-launch-signer.ts';
 
 function writeMode0600(path: string, bytes: string | Uint8Array): void {
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
@@ -128,6 +128,23 @@ void describe('D65 signer key protected-root boundary (item F)', () => {
     const configPath = join(root, 'signer-config.json'); writeMode0600(configPath, `${JSON.stringify(config, null, 2)}\n`);
     const request = JSON.stringify({ kind: 'launch-policy', state_root: stateRoot, repo_id: 'repo-x', workstream_run: 'run-x', policy_id: 'policy-1', policy_ref: 'authority/launch-policies/policy-1.json', expected_policy_sha256: DIGEST('5'), sneaky: 'x' });
     await assert.rejects(() => runLaunchSignerCli(['--config', configPath, '--request', request], { ...process.env }, () => undefined), /has unexpected\/missing fields/u);
+  });
+
+  void it('keeps a foreign graph tuple on one accepted heartbeat authority and fences a newer-graph drift', () => {
+    const acceptedRow = {
+      workstream: 'foreign', workstream_run: 'foreign-run', parent_session_file_sha256: null,
+      coordinator_session_lease_id: 'lease-1', accepted_graph_sequence: 2, accepted_graph_sha256: DIGEST('a'),
+      status_sha256: DIGEST('b'), doctor_sha256: DIGEST('c'), session_lease_state: 'attached' as const,
+      child_lease_ids: [], launch_policy_sha256: DIGEST('d'), last_progress_event_seq: 10,
+      last_handoff_sha256: null, row_state: 'active' as const, dispatch_allowed: true, stop_reasons: [],
+    };
+    const current = foreignAcceptedGraphAuthority(acceptedRow, DIGEST('a'));
+    assert.deepEqual(current, { acceptedGraphSequence: 2, acceptedGraphSha256: DIGEST('a'), dispatchAllowed: true, stopReasons: [] });
+    const drifted = foreignAcceptedGraphAuthority(acceptedRow, DIGEST('e'));
+    assert.equal(drifted.acceptedGraphSequence, 2);
+    assert.equal(drifted.acceptedGraphSha256, DIGEST('a'));
+    assert.equal(drifted.dispatchAllowed, false);
+    assert.deepEqual([...drifted.stopReasons], ['graph-drift']);
   });
 
   void it('rejects a signer config program row missing state_root/repo_id', async () => {

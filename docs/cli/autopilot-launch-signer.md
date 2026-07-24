@@ -6,8 +6,8 @@ covers_surfaces:
   - autopilot-launch-signer
 covers_sources:
   - src/cli/autopilot-launch-signer.ts
-signature_hash: 'sha256:8fa2351c5545cbce0b3b4f6d1dd81a7c72ddf3a038dedf5ae51737592c88f3bc'
-body_hash: 'sha256:1334cc13cb3d0a91ad6d3fd6a0c42c00414514580eca0f09527f537a1b44823d'
+signature_hash: 'sha256:279a789983604ed3d9b43040cc4bed1bbad75983311ed32e183d2ca5bbc38c65'
+body_hash: 'sha256:fb43a3df5df44ff063910889a9aceb80b27946602a4192f39df214c280c53166'
 stability: evolving
 ---
 
@@ -56,7 +56,10 @@ runtime only **verifies** and **consumes** the signed bytes through the frozen
 - For a `program-heartbeat` request, it reads the live accepted policy, run,
   attached dispatch session, and current status/doctor semantic digests, builds
   the signed heartbeat with domain `AUTOPILOT-D65-PROGRAM-HEARTBEAT\0`, and
-  binds the exact graph sequence/digest the runtime is accepting.
+  binds the exact graph sequence/digest the runtime is accepting. Every launched
+  foreign row re-reads its own accepted signed heartbeat bytes and takes both
+  graph fields from that one row authority; if a newer graph artifact exists,
+  the row is fenced with `graph-drift` instead of combining mismatched facts.
 - Emits exactly one `autopilot.launch_signer_result.v1` JSON line naming the
   ref, absolute path, digest, and byte count of the written signed candidate.
 - Supports heartbeat renewal during the run: each renewal request names the next

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { createHash } from 'node:crypto';
 import { closeSync, constants as fsConstants, fstatSync, lstatSync, openSync, readFileSync, realpathSync } from 'node:fs';
-import { dirname, isAbsolute, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import { sign, createPrivateKey } from 'node:crypto';
@@ -10,7 +10,7 @@ import { canonicalJson } from '../core/coordination/canonical-json.ts';
 import { CoordinatorClient } from '../core/coordination/client.ts';
 import { parseCoordinationAuthoritativeArtifact, parseCoordinationRun, parseCoordinationRunResource, parseCoordinationSessionLease } from '../core/coordination/contracts.ts';
 import { CoordinationRuntimeError } from '../core/coordination/failures.ts';
-import { parseD65LaunchPolicy } from '../core/coordination/d65-launch-policy.ts';
+import { parseD65HeartbeatAcceptanceResult, parseD65LaunchPolicy, parseD65ProgramHeartbeat, type D65HeartbeatRow, type D65StopReason } from '../core/coordination/d65-launch-policy.ts';
 import { encodeUnpaddedBase64Url } from '../core/coordination/d65-trust.ts';
 import { runGitQuery } from '../core/git-process.ts';
 import { ensurePrivateDirectory, publishCreateOnlyAtomic } from '../core/roster/transaction.ts';
@@ -94,16 +94,35 @@ function bytesSha256(bytes: Uint8Array): `sha256:${string}` {
   return `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
 }
 
-function readMode0600(path: string, label: string): Uint8Array {
+function readOneLinkRegular(path: string, label: string, requiredMode: number | null): Uint8Array {
   if (!isAbsolute(path)) fail(`${label} path must be absolute`, [path]);
   const before = lstatSync(path);
-  if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1 || (before.mode & 0o777) !== 0o600 || before.size > 1_048_576) fail(`${label} must be a one-link no-follow regular mode-0600 file <=1 MiB`, [path]);
+  const modeInvalid = requiredMode !== null && (before.mode & 0o777) !== requiredMode;
+  if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1 || modeInvalid || before.size > 1_048_576) fail(`${label} must be a one-link no-follow regular${requiredMode === null ? '' : ` mode-${requiredMode.toString(8)}`} file <=1 MiB`, [path]);
   const descriptor = openSync(path, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
   try {
     const opened = fstatSync(descriptor);
     if (opened.dev !== before.dev || opened.ino !== before.ino || opened.size !== before.size) fail(`${label} descriptor identity changed while opening`, [path]);
     return readFileSync(descriptor);
   } finally { closeSync(descriptor); }
+}
+
+function readMode0600(path: string, label: string): Uint8Array {
+  return readOneLinkRegular(path, label, 0o600);
+}
+
+function parseJsonBytes(bytes: Uint8Array, label: string): unknown {
+  try { return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)) as unknown; }
+  catch (error) { fail(`${label} is not valid UTF-8 JSON`, [error instanceof Error ? error.message : String(error)]); }
+}
+
+function authorityPath(root: string, ref: string, label: string): string {
+  const canonicalRoot = realpathSync(root);
+  if (canonicalRoot !== root) fail(`${label} root must be a canonical real path`, [root, canonicalRoot]);
+  const target = resolve(canonicalRoot, ref);
+  const rel = relative(canonicalRoot, target);
+  if (rel.length === 0 || rel === '..' || rel.startsWith('../') || isAbsolute(rel)) fail(`${label} ref escapes its authority root`, [root, ref]);
+  return target;
 }
 
 function requireObject(value: unknown, label: string): Readonly<Record<string, unknown>> {
@@ -364,6 +383,20 @@ async function heartbeatRows(config: SignerConfig, request: HeartbeatRequest, at
 }
 
 /**
+ * Bind a foreign row's graph sequence and digest to one accepted signed
+ * heartbeat row. If the coordinator has registered a newer graph artifact, the
+ * accepted tuple remains intact but dispatch is fenced with graph-drift; sequence
+ * from one authority is never paired with a digest guessed from another.
+ */
+export function foreignAcceptedGraphAuthority(row: D65HeartbeatRow, highestGraphSha256: `sha256:${string}`): Readonly<{ acceptedGraphSequence: number; acceptedGraphSha256: `sha256:${string}`; dispatchAllowed: boolean; stopReasons: readonly D65StopReason[] }> {
+  if (row.accepted_graph_sequence === null || row.accepted_graph_sha256 === null) fail('foreign accepted heartbeat row lacks a complete graph tuple', [row.workstream_run]);
+  const stopReasons = new Set<D65StopReason>(row.stop_reasons);
+  if (row.accepted_graph_sha256 !== highestGraphSha256) stopReasons.add('graph-drift');
+  const ordered = [...stopReasons].sort();
+  return Object.freeze({ acceptedGraphSequence: row.accepted_graph_sequence, acceptedGraphSha256: row.accepted_graph_sha256, dispatchAllowed: row.dispatch_allowed && ordered.length === 0, stopReasons: Object.freeze(ordered) });
+}
+
+/**
  * Read an already-launched foreign program row's own live status/doctor/session/
  * policy/graph authority from ITS isolated coordinator, or emit a planned/
  * unlaunched row when its coordinator has no launched run. A launched foreign
@@ -405,29 +438,55 @@ async function foreignRowFromLiveAuthority(row: D65SignerProgramRow, env: Proces
   // state perspective (it carries no dispatch-relevant graph tuple yet).
   if (foreignPolicy === undefined || foreignGraphs.length === 0) return plannedRow;
   const run = parseCoordinationRun(runs[0]);
-  const sessions = ((status.payload['session_leases'] as unknown[] | undefined) ?? []).map(parseCoordinationSessionLease);
-  const attached = sessions.find((s) => (s.status === 'attached' || s.status === 'handoff-pending') && s.attachment_kind === 'dispatch' && s.session_generation === run.active_session_generation);
+  const resourcesValue = status.payload['run_resources'];
+  if (!Array.isArray(resourcesValue)) fail('foreign program row status is missing the run-resources projection', [row.workstream_run]);
+  const matchingResources = resourcesValue.map(parseCoordinationRunResource).filter((resource) => resource.repo_id === row.repo_id && resource.workstream_run === row.workstream_run);
+  const resource = matchingResources[0];
+  if (matchingResources.length !== 1 || resource === undefined) fail('foreign program row must have exactly one live run resource', [row.workstream_run, String(matchingResources.length)]);
+  // The accepted policy is Git-tracked run-main evidence, so its checkout mode
+  // follows Git/umask (normally 0644), unlike external private heartbeat bytes.
+  // No-follow/one-link/descriptor identity + the coordinator-sealed digest are
+  // the authority checks here; requiring mode 0600 would reject every real clone.
+  const policyBytes = readOneLinkRegular(authorityPath(resource.main_worktree_path, foreignPolicy.evidence.ref, 'foreign launch policy'), 'foreign launch policy', null);
+  if (bytesSha256(policyBytes) !== foreignPolicy.evidence.sha256) fail('foreign launch policy bytes do not match coordinator artifact authority', [row.workstream_run]);
+  const policy = parseD65LaunchPolicy(parseJsonBytes(policyBytes, 'foreign launch policy'));
+  if (policy.repo_id !== row.repo_id || policy.workstream_run !== row.workstream_run) fail('foreign launch policy identity does not match its configured row', [row.workstream_run]);
+
+  const sessionsValue = status.payload['session_leases'];
+  if (!Array.isArray(sessionsValue)) fail('foreign program row status is missing the session-leases projection', [row.workstream_run]);
+  const sessions = sessionsValue.map(parseCoordinationSessionLease);
+  const attached = sessions.find((session) => (session.status === 'attached' || session.status === 'handoff-pending') && session.attachment_kind === 'dispatch' && session.session_generation === run.active_session_generation);
   const doctor = await client.query('doctor', row.repo_id, row.workstream_run);
-  const head = status.payload['accepted_program_heartbeat'];
-  // A launched foreign row past its first complete graph ALWAYS has an accepted
-  // governing heartbeat naming the current graph tuple. Its accepted graph
-  // sequence/digest are read from THAT durable authority — never guessed from
-  // `foreignGraphs.length`. If a foreign row has complete graphs but no accepted
-  // heartbeat head, it is mid-publication (transiently inconsistent); the signer
-  // fails closed rather than fabricating a sequence.
-  if (head === null || typeof head !== 'object') fail('foreign program row has a complete graph but no accepted governing heartbeat head; refusing to fabricate its graph sequence', [row.workstream_run]);
-  const headRecord = head as Record<string, unknown>;
-  const acceptedGraphSequence = headRecord['sequence'];
-  if (typeof acceptedGraphSequence !== 'number' || !Number.isSafeInteger(acceptedGraphSequence) || acceptedGraphSequence < 2) fail('foreign program row accepted heartbeat head has an invalid graph sequence', [row.workstream_run, String(acceptedGraphSequence)]);
+  const headValue = status.payload['accepted_program_heartbeat'];
+  if (headValue === null) fail('foreign program row has a complete graph but no accepted governing heartbeat head; refusing to fabricate its graph tuple', [row.workstream_run]);
+  const head = parseD65HeartbeatAcceptanceResult(headValue);
+  if (head.repo_id !== row.repo_id || head.workstream_run !== row.workstream_run || head.program_id !== policy.program_id) fail('foreign accepted heartbeat head identity does not match its configured row/policy', [row.workstream_run]);
+  const heartbeatBytes = readMode0600(authorityPath(policy.program_evidence_root, head.heartbeat_ref, 'foreign accepted heartbeat'), 'foreign accepted heartbeat');
+  if (bytesSha256(heartbeatBytes) !== head.heartbeat_sha256) fail('foreign accepted heartbeat bytes do not match the durable coordinator head', [row.workstream_run]);
+  const heartbeat = parseD65ProgramHeartbeat(parseJsonBytes(heartbeatBytes, 'foreign accepted heartbeat'));
+  if (heartbeat.program_id !== head.program_id || heartbeat.sequence !== head.sequence || heartbeat.prior_sha256 !== head.prior_sha256 || heartbeat.issued_at !== head.issued_at || heartbeat.valid_until !== head.valid_until) fail('foreign accepted heartbeat bytes do not bind the durable coordinator head', [row.workstream_run]);
+  const acceptedRows = heartbeat.rows.filter((candidate) => candidate.workstream === row.workstream && candidate.workstream_run === row.workstream_run);
+  const acceptedRow = acceptedRows[0];
+  if (acceptedRows.length !== 1 || acceptedRow === undefined) fail('foreign accepted heartbeat does not contain exactly one configured row', [row.workstream_run]);
   const firstGraph = foreignGraphs[0];
   if (firstGraph === undefined) fail('foreign program row graph projection became empty after validation', [row.workstream_run]);
-  const highestGraph = foreignGraphs.reduce((max, g) => (g.registered_event_seq > max.registered_event_seq ? g : max), firstGraph);
+  const highestGraph = foreignGraphs.reduce((max, graph) => (graph.registered_event_seq > max.registered_event_seq ? graph : max), firstGraph);
+  const graph = foreignAcceptedGraphAuthority(acceptedRow, highestGraph.evidence.sha256);
+  const stopReasons = new Set<D65StopReason>(graph.stopReasons);
+  if (acceptedRow.launch_policy_sha256 !== foreignPolicy.evidence.sha256) stopReasons.add('policy-invalid');
+  if (attached === undefined || acceptedRow.coordinator_session_lease_id !== attached.session_lease_id) stopReasons.add('lease-invalid');
+  const coordinatorTime = status.payload['coordinator_time'];
+  const coordinatorMs = typeof coordinatorTime === 'string' ? Date.parse(coordinatorTime) : Number.NaN;
+  const issuedMs = Date.parse(head.issued_at);
+  const validUntilMs = Date.parse(head.valid_until);
+  if (!Number.isFinite(coordinatorMs) || !Number.isFinite(issuedMs) || !Number.isFinite(validUntilMs) || head.acceptance_kind !== 'governing' || issuedMs > coordinatorMs || coordinatorMs >= validUntilMs) stopReasons.add('heartbeat-stale');
+  const orderedStopReasons = [...stopReasons].sort();
   return {
-    workstream: row.workstream, workstream_run: row.workstream_run, parent_session_file_sha256: null,
-    coordinator_session_lease_id: attached?.session_lease_id ?? null, accepted_graph_sequence: acceptedGraphSequence, accepted_graph_sha256: highestGraph.evidence.sha256,
-    status_sha256: status.payload['semantic_snapshot_sha256'] ?? null, doctor_sha256: doctor.payload['semantic_snapshot_sha256'] ?? null, session_lease_state: attached === undefined ? null : 'attached',
-    child_lease_ids: [], launch_policy_sha256: foreignPolicy.evidence.sha256, last_progress_event_seq: attached?.attached_event_seq ?? null,
-    last_handoff_sha256: null, row_state: 'active', dispatch_allowed: true, stop_reasons: [],
+    workstream: row.workstream, workstream_run: row.workstream_run, parent_session_file_sha256: acceptedRow.parent_session_file_sha256,
+    coordinator_session_lease_id: acceptedRow.coordinator_session_lease_id, accepted_graph_sequence: graph.acceptedGraphSequence, accepted_graph_sha256: graph.acceptedGraphSha256,
+    status_sha256: status.payload['semantic_snapshot_sha256'] ?? null, doctor_sha256: doctor.payload['semantic_snapshot_sha256'] ?? null, session_lease_state: acceptedRow.session_lease_state,
+    child_lease_ids: acceptedRow.child_lease_ids, launch_policy_sha256: acceptedRow.launch_policy_sha256, last_progress_event_seq: acceptedRow.last_progress_event_seq,
+    last_handoff_sha256: acceptedRow.last_handoff_sha256, row_state: acceptedRow.row_state, dispatch_allowed: graph.dispatchAllowed && orderedStopReasons.length === 0, stop_reasons: orderedStopReasons,
   };
 }
 

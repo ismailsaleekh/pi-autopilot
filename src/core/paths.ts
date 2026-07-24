@@ -83,6 +83,7 @@ const WORKSTREAM_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 // activation grammar aligned with the closed roster schemas without admitting
 // separators, traversal, Unicode, or more than 120 ASCII bytes.
 const WORKSTREAM_RUN_PATTERN = /^[A-Za-z][A-Za-z0-9-]{0,119}$/u;
+const AUTOPILOT_REPO_ID_PATTERN = /^[a-z][a-z0-9-]{0,119}$/u;
 const ROSTER_ID_PATTERN = /^[a-z][a-z0-9-]{0,95}$/u;
 const WORKSTREAM_RUN_MAX_LENGTH = 120;
 
@@ -100,6 +101,11 @@ export function isValidRosterId(value: string): boolean {
 
 export function isValidWorkstreamRun(value: string): boolean {
   return WORKSTREAM_RUN_PATTERN.test(value);
+}
+
+/** Closed repo-id grammar shared by roster storage and sealed launch authority. */
+export function isValidAutopilotRepoId(value: string): boolean {
+  return AUTOPILOT_REPO_ID_PATTERN.test(value);
 }
 
 export function buildAutopilotWorkstreamRun(workstream: string, now: Date = new Date(), entropy = randomBytes(3).toString('hex')): string {

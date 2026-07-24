@@ -668,7 +668,7 @@ export async function publishD65FirstGraphAndSuccessorHeartbeat(input) {
     // Bind the successful context_budget call receipt into graph authority: a
     // bootstrap turn that never called context_budget cannot advance to graph 2.
     if (existingGraph === undefined)
-        requireD65ContextBudgetReceipt(input.manifest);
+        requireD65ContextBudgetReceipt(input.manifest, session.session_id);
     let graphSha256;
     if (existingGraph === undefined) {
         const published = await publishD65FirstCompleteGraphFromEnvironment({ env, ...(input.createdAt === undefined ? {} : { createdAt: input.createdAt }) });
@@ -801,17 +801,30 @@ const D65_CONTEXT_BUDGET_RECEIPT_SCHEMA = 'autopilot.d65_context_budget_receipt.
 export function d65ContextBudgetReceiptPath(manifest) {
     return join(manifest.program_evidence_root, 'context-budget-receipts', `${manifest.workstream_run}.json`);
 }
+const D65_CONTEXT_BUDGET_RECEIPT_FIELDS = Object.freeze([
+    'schema_version', 'program_id', 'workstream_run', 'gate', 'percent', 'tool_call_id', 'session_id',
+]);
+const D65_CONTEXT_BUDGET_CALL_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u;
+const D65_CONTEXT_BUDGET_SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u;
 /**
  * Persist a durable receipt proving the bootstrap parent successfully CALLED
- * `context_budget` (audit item G). Create-only idempotent: the first successful
- * call seals it; a later call leaves the sealed bytes unchanged. Merely
- * registering/activating the tool is not proof — only a real call writes this.
+ * `context_budget` and received `gate:"ok"` in the exact durable D65 session.
+ * Halt/unknown/unbounded reports reject before any create-only replay check, so
+ * they can never be converted into positive launch authority by a stale file.
  */
 export function writeD65ContextBudgetReceipt(manifest, report) {
+    if (report.gate !== 'ok')
+        throw new CoordinationRuntimeError('invalid-state', 'D65 bootstrap context_budget gate is not ok; first-graph publication remains fenced', [report.gate]);
+    if (report.percent === null || !Number.isFinite(report.percent) || report.percent < 0 || report.percent > 100)
+        throw new CoordinationRuntimeError('invalid-state', 'D65 bootstrap context_budget percent must be a finite number in [0,100]');
+    if (!D65_CONTEXT_BUDGET_CALL_ID.test(report.tool_call_id))
+        throw new CoordinationRuntimeError('invalid-state', 'D65 bootstrap context_budget tool_call_id is not a bounded closed identifier');
+    if (!D65_CONTEXT_BUDGET_SESSION_ID.test(report.session_id))
+        throw new CoordinationRuntimeError('invalid-state', 'D65 bootstrap context_budget session_id is not a bounded closed identifier');
     const receiptPath = d65ContextBudgetReceiptPath(manifest);
     if (existsSync(receiptPath))
         return;
-    const record = { schema_version: D65_CONTEXT_BUDGET_RECEIPT_SCHEMA, program_id: manifest.program_id, workstream_run: manifest.workstream_run, gate: report.gate };
+    const record = { schema_version: D65_CONTEXT_BUDGET_RECEIPT_SCHEMA, program_id: manifest.program_id, workstream_run: manifest.workstream_run, gate: 'ok', percent: report.percent, tool_call_id: report.tool_call_id, session_id: report.session_id };
     const bytes = new TextEncoder().encode(`${canonicalJson(record)}\n`);
     mkdirSync(dirname(receiptPath), { recursive: true, mode: 0o700 });
     const temporary = `${receiptPath}.tmp-${String(process.pid)}-${randomBytes(6).toString('hex')}`;
@@ -819,17 +832,25 @@ export function writeD65ContextBudgetReceipt(manifest, report) {
     renameSync(temporary, receiptPath);
 }
 /**
- * Require the durable context_budget call receipt bound into launch authority
- * before the first complete graph may be published. Fails closed when absent.
+ * Require the exact successful context_budget receipt for the attached D65
+ * session before the first complete graph may be published. Closed-field parsing
+ * prevents a malformed or cross-session receipt from becoming launch authority.
  */
-export function requireD65ContextBudgetReceipt(manifest) {
+export function requireD65ContextBudgetReceipt(manifest, expectedSessionId) {
     const receiptPath = d65ContextBudgetReceiptPath(manifest);
     if (!existsSync(receiptPath))
         throw new CoordinationRuntimeError('invalid-state', 'D65 bootstrap turn did not produce a durable context_budget call receipt; first-graph publication is fenced', [receiptPath]);
     const bytes = readImmutableFileBytes({ path: receiptPath, maximumBytes: 65_536, label: 'D65 context_budget receipt', errorCode: 'invalid-state' });
     const parsed = json(bytes, 'D65 context_budget receipt');
-    if (typeof parsed !== 'object' || parsed === null || parsed['schema_version'] !== D65_CONTEXT_BUDGET_RECEIPT_SCHEMA || parsed['workstream_run'] !== manifest.workstream_run)
-        throw new CoordinationRuntimeError('invalid-state', 'D65 context_budget receipt is malformed or belongs to another run', [receiptPath]);
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed))
+        throw new CoordinationRuntimeError('invalid-state', 'D65 context_budget receipt is malformed or belongs to another run/session', [receiptPath]);
+    const record = parsed;
+    const keys = Object.keys(record).sort();
+    const expectedKeys = [...D65_CONTEXT_BUDGET_RECEIPT_FIELDS].sort();
+    const exactFields = keys.length === expectedKeys.length && keys.every((key, index) => key === expectedKeys[index]);
+    const percent = record['percent'];
+    if (!exactFields || record['schema_version'] !== D65_CONTEXT_BUDGET_RECEIPT_SCHEMA || record['program_id'] !== manifest.program_id || record['workstream_run'] !== manifest.workstream_run || record['gate'] !== 'ok' || typeof percent !== 'number' || !Number.isFinite(percent) || percent < 0 || percent > 100 || typeof record['tool_call_id'] !== 'string' || !D65_CONTEXT_BUDGET_CALL_ID.test(record['tool_call_id']) || record['session_id'] !== expectedSessionId || !D65_CONTEXT_BUDGET_SESSION_ID.test(expectedSessionId))
+        throw new CoordinationRuntimeError('invalid-state', 'D65 context_budget receipt is malformed or belongs to another run/session', [receiptPath]);
 }
 /**
  * Detect whether the bootstrap parent-planning turn has produced exactly the

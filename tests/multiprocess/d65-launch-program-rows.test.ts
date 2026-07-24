@@ -166,7 +166,7 @@ async function buildCliFixture(suffix: string, programRows?: readonly SignerProg
 
 function emptyMap(): Record<string, unknown> { return {}; }
 
-async function writeCharterRoots(manifest: D65LaunchManifest): Promise<void> {
+async function writeCharterRoots(manifest: D65LaunchManifest, sessionId: string): Promise<void> {
   const runtimeRoot = manifest.runtime_root;
   const state = { schema_version: 'autopilot.state.v1', workstream: manifest.workstream, updated_at: '2026-07-22T22:00:36.000Z', status: 'running', context_gate: { gate: 'ok', percent: 10 }, last_event_id: 1, ready_queue: [], running: [], blocked: [], completed: [], units: emptyMap(), operator_questions: [], next_actions: ['plan'] };
   const masterPlan = { schema_version: 'autopilot.master_plan.v1', workstream: manifest.workstream, mission_ref: 'mission.md', goal_summary: 'launch integration mission', non_goals: [], definition_of_done: ['charter accepted'], risk_level: 'low', lanes: [{ lane_id: 'main', summary: 'main', unit_ids: [] }], units: emptyMap(), ownership_matrix: { owned_paths: [], read_only_paths: [], untouchable_paths: [], held_paths: [] }, verification_matrix: { positive_witnesses: [], negative_witnesses: [], regression_witnesses: [], real_boundary_witnesses: [], blast_radius_checks: [], docs_schema_prompt_checks: [], dirty_tree_checks: [] }, closure_criteria: ['charter accepted'], current_focus: 'plan', last_decision_id: 1, last_event_id: 1, updated_at: '2026-07-22T22:00:36.000Z' };
@@ -175,14 +175,14 @@ async function writeCharterRoots(manifest: D65LaunchManifest): Promise<void> {
   const files: readonly [string, string][] = [['mission.md', '# Mission\n'], ['master-plan.json', `${JSON.stringify(masterPlan)}\n`], ['state.json', `${JSON.stringify(state)}\n`], ['decision-log.jsonl', `${JSON.stringify(decision)}\n`], ['events.jsonl', `${JSON.stringify(event)}\n`]];
   const { mkdir: mkdirp, writeFile: writeFilep } = await import('node:fs/promises');
   for (const [name, body] of files) { await mkdirp(runtimeRoot, { recursive: true }); await writeFilep(join(runtimeRoot, name), body, 'utf8'); }
-  writeD65ContextBudgetReceipt(manifest, { gate: 'ok', percent: 10 });
+  writeD65ContextBudgetReceipt(manifest, { gate: 'ok', percent: 10, tool_call_id: 'test-context-budget', session_id: sessionId });
 }
 
 /** Drive one CLI fixture fully to ordinary dispatch (graph 2 + heartbeat 2). */
 async function driveToOrdinary(fixture: CliFixture): Promise<void> {
   const bootstrap = await beginD65LaunchBootstrap({ manifest: fixture.manifest, rawSessionId: fixture.workstream, env: fixture.env });
   await registerD65LaunchPolicyAndInitialHeartbeat({ manifest: fixture.manifest, attachment: bootstrap.attachment, signer: fixture.signer, env: fixture.env });
-  await writeCharterRoots(fixture.manifest);
+  await writeCharterRoots(fixture.manifest, bootstrap.attachment.context.session_id);
   assert.equal(detectD65CharterComplete(fixture.manifest), true);
   await publishD65FirstGraphAndSuccessorHeartbeat({ manifest: fixture.manifest, attachment: bootstrap.attachment, signer: fixture.signer, env: fixture.env, createdAt: '2026-07-22T22:00:37.000Z' });
 }

@@ -75,7 +75,7 @@ void describe('D65 durable launch phase recovery (crash boundaries)', () => {
       await publishD65RuntimeRosterSnapshot({ manifest, env });
       // Policy + initial heartbeat accepted, charter not yet written.
       assert.equal((await resolveD65LaunchPhase({ manifest, env })).kind, 'bootstrap-plan-required');
-      await writeD65CharterRoots(manifest);
+      await writeD65CharterRoots(manifest, bootstrap.attachment.context.session_id);
       // Charter complete, graph 2 not yet published.
       assert.equal((await resolveD65LaunchPhase({ manifest, env })).kind, 'first-graph-required');
       await publishD65FirstGraphAndSuccessorHeartbeat({ manifest, attachment: bootstrap.attachment, signer, env, createdAt: '2026-07-22T22:00:37.000Z' });
@@ -118,7 +118,7 @@ void describe('D65 durable launch phase recovery (crash boundaries)', () => {
       const { manifest, signer, env } = fixture;
       const bootstrap = await beginD65LaunchBootstrap({ manifest, rawSessionId: 's', env });
       await registerD65LaunchPolicyAndInitialHeartbeat({ manifest, attachment: bootstrap.attachment, signer, env });
-      await writeD65CharterRoots(manifest);
+      await writeD65CharterRoots(manifest, bootstrap.attachment.context.session_id);
       // Publish graph 2 + heartbeat 2 fully, then remove heartbeat 2's evidence to
       // model a crash where the heartbeat candidate exists but was never accepted.
       await publishD65FirstGraphAndSuccessorHeartbeat({ manifest, attachment: bootstrap.attachment, signer, env, createdAt: '2026-07-22T22:00:37.000Z' });
@@ -143,7 +143,7 @@ void describe('D65 durable launch phase recovery (crash boundaries)', () => {
       const bootstrap = await beginD65LaunchBootstrap({ manifest, rawSessionId: 's', env });
       await registerD65LaunchPolicyAndInitialHeartbeat({ manifest, attachment: bootstrap.attachment, signer, env });
       await publishD65RuntimeRosterSnapshot({ manifest, env });
-      await writeD65CharterRoots(manifest);
+      await writeD65CharterRoots(manifest, bootstrap.attachment.context.session_id);
       // The phase resolver derives first-graph-required from the durable Git
       // charter state alone (no in-memory planning flag).
       const phase = await resolveD65LaunchPhase({ manifest, env });
@@ -223,7 +223,7 @@ void describe('D65 launch item-I: bootstrap lease spans beyond the ordinary 30s 
       assert.ok(planningElapsedMs > COORDINATOR_SESSION_LEASE_MS, 'test must exceed the ordinary lease');
       assert.ok(planningElapsedMs < COORDINATOR_BOOTSTRAP_SESSION_LEASE_MS, 'test must stay within the bootstrap lease');
       clock.advance(planningElapsedMs);
-      await writeD65CharterRoots(manifest);
+      await writeD65CharterRoots(manifest, bootstrap.attachment.context.session_id);
       // First-graph registration's current-lease session gate must still hold:
       // publication + successor heartbeat 2 succeed despite planning > 30s.
       const graph = await publishD65FirstGraphAndSuccessorHeartbeat({ manifest, attachment: bootstrap.attachment, signer, env, createdAt: new Date(clock.nowMs()).toISOString() });
@@ -364,7 +364,7 @@ void describe('D65 launch item-I: bootstrap charter effect fence (ignored + exte
       const { manifest, signer, env } = fixture;
       const bootstrap = await beginD65LaunchBootstrap({ manifest, rawSessionId: 's', env });
       await registerD65LaunchPolicyAndInitialHeartbeat({ manifest, attachment: bootstrap.attachment, signer, env });
-      await writeD65CharterRoots(manifest);
+      await writeD65CharterRoots(manifest, bootstrap.attachment.context.session_id);
       // Add a worktree-local ignore rule (NOT a tracked .gitignore) for a product
       // path OUTSIDE the runtime charter scope, then create that ignored file.
       // A charter detector that only inspected tracked/untracked changes would
@@ -410,28 +410,33 @@ void describe('D65 launch item-I: bootstrap charter effect fence (ignored + exte
 });
 
 void describe('D65 context_budget receipt (bootstrap effect fence)', () => {
-  void it('absence of a context_budget receipt fences first-graph publication', async () => {
+  void it('accepts only an exact OK tool-call receipt bound to the durable session', async () => {
     const fixture = await buildD65LaunchFixture('nobudget');
     try {
       const { manifest } = fixture;
-      assert.throws(() => requireD65ContextBudgetReceipt(manifest), /did not produce a durable context_budget call receipt/u);
-      writeD65ContextBudgetReceipt(manifest, { gate: 'ok', percent: 12 });
-      requireD65ContextBudgetReceipt(manifest); // now present
+      const sessionId = 'session-test-budget';
+      assert.throws(() => requireD65ContextBudgetReceipt(manifest, sessionId), /did not produce a durable context_budget call receipt/u);
+      assert.throws(() => writeD65ContextBudgetReceipt(manifest, { gate: 'halt', percent: 90, tool_call_id: 'call-halt', session_id: sessionId }), /gate is not ok/u);
+      assert.throws(() => writeD65ContextBudgetReceipt(manifest, { gate: 'unknown', percent: null, tool_call_id: 'call-unknown', session_id: sessionId }), /gate is not ok/u);
+      assert.equal(existsSync(d65ContextBudgetReceiptPath(manifest)), false);
+      writeD65ContextBudgetReceipt(manifest, { gate: 'ok', percent: 12, tool_call_id: 'call-ok', session_id: sessionId });
+      requireD65ContextBudgetReceipt(manifest, sessionId);
+      assert.throws(() => requireD65ContextBudgetReceipt(manifest, 'session-other'), /another run\/session/u);
       assert.ok(existsSync(d65ContextBudgetReceiptPath(manifest)));
     } finally {
       await fixture.close();
     }
   });
 
-  void it('rejects a context_budget receipt that belongs to another run', async () => {
+  void it('rejects a malformed, cross-run, or extra-field context_budget receipt', async () => {
     const fixture = await buildD65LaunchFixture('foreignbudget');
     try {
       const { manifest } = fixture;
       const { mkdirSync } = await import('node:fs');
       const receiptPath = d65ContextBudgetReceiptPath(manifest);
       mkdirSync(join(receiptPath, '..'), { recursive: true });
-      writeFileSync(receiptPath, `${JSON.stringify({ schema_version: 'autopilot.d65_context_budget_receipt.v1', program_id: manifest.program_id, workstream_run: 'foreign-run', gate: 'ok' })}\n`);
-      assert.throws(() => requireD65ContextBudgetReceipt(manifest), /belongs to another run/u);
+      writeFileSync(receiptPath, `${JSON.stringify({ schema_version: 'autopilot.d65_context_budget_receipt.v1', program_id: manifest.program_id, workstream_run: 'foreign-run', gate: 'ok', percent: 10, tool_call_id: 'call-ok', session_id: 'session-test', extra: true })}\n`);
+      assert.throws(() => requireD65ContextBudgetReceipt(manifest, 'session-test'), /another run\/session/u);
     } finally {
       await fixture.close();
     }

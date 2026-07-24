@@ -74,6 +74,15 @@ void describe('autopilot.launch_manifest.v1 closed parser', () => {
     assert.throws(() => parseD65LaunchManifest(fixture), /missing required fields/u);
   });
 
+  void it('rejects workstream-run and repo identities outside the shared closed activation/storage grammar', () => {
+    for (const workstreamRun of ['bad_run', 'bad.run', 'bad:run', '../bad', 'é-run', `a${'a'.repeat(120)}`]) {
+      assert.throws(() => parseD65LaunchManifest(manifestFixture({ workstream_run: workstreamRun })), /closed 120-byte ASCII|bounded non-empty/u);
+    }
+    for (const repoId of ['Repo-upper', 'bad_repo', 'bad/repo', `r${'a'.repeat(120)}`]) {
+      assert.throws(() => parseD65LaunchManifest(manifestFixture({ repo_id: repoId })), /closed lowercase 120-byte ASCII|bounded non-empty/u);
+    }
+  });
+
   void it('rejects a run_nonce that is not exactly six lowercase hex characters', () => {
     assert.throws(() => parseD65LaunchManifest(manifestFixture({ run_nonce: 'ABC123' })), /run_nonce/u);
     assert.throws(() => parseD65LaunchManifest(manifestFixture({ run_nonce: 'abc12' })), /run_nonce/u);

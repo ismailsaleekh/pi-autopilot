@@ -82,7 +82,7 @@ covers_sources:
   - templates/skills/autopilot-roster-setup/SKILL.md
   - templates/skills/autopilot-roster-setup/payload.json
 signature_hash: 'sha256:65e0ff2b8897b03cb04396f41d85620adfe929a558d45b0553399f5141dca92b'
-body_hash: 'sha256:ec499593625573884ff0b40cf6a019b910c24cbb82448b9903bc3e3a727e328e'
+body_hash: 'sha256:44aa73af0c26ea939ca327688e4f28ffcc0f35cd4296a96bc85352f7233fc675'
 stability: evolving
 ---
 

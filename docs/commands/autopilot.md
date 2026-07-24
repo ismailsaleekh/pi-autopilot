@@ -24,9 +24,10 @@ rather than regenerating a run. The manifest binds the fixed prelaunch identity
 (program/workstream/workstream-run, run timestamp/nonce, clone/roots/repo identity, B0,
 content-result, package, branch, roots, bootstrap overlay, trust anchor, prospective
 run/resource, roster hash, signed policy candidate, program evidence root, and launch
-audit/seal). Every sealed value is consumed exactly, never regenerated; a relative
-path, oversized/symlinked file, unknown field, or internal mismatch fails closed with
-no run state.
+audit/seal). Every sealed value is consumed exactly, never regenerated. The manifest,
+roster storage, and activation layers share the same bounded ASCII alphanumeric-or-
+hyphen run/repo identity grammar; a relative path, oversized/symlinked file, unknown
+field, unsafe identity, or internal mismatch fails closed with no run state.
 
 In launch mode `/autopilot`:
 
@@ -38,17 +39,22 @@ In launch mode `/autopilot`:
    sole parent = content-result commit) and accepts the operator-signed initial
    governing program heartbeat — both produced by the external
    [`autopilot-launch-signer`](../cli/autopilot-launch-signer.md); runtime never signs;
-4. delivers a **bootstrap-plan-only** parent turn that may write only the five charter
-   roots (`mission.md`, `master-plan.json`, `state.json`, `decision-log.jsonl`,
-   `events.jsonl`);
+4. replaces any previously registered `context_budget` definition with a wrapper bound
+   to this manifest and durable session, then delivers a **bootstrap-plan-only** parent
+   turn that may write only the five charter roots (`mission.md`, `master-plan.json`,
+   `state.json`, `decision-log.jsonl`, `events.jsonl`); graph publication requires an
+   exact tool-call/session receipt with `gate:"ok"` and bounded percentage;
 5. on `agent_settled`, mechanically publishes the first complete graph (sequence 2),
    accepts the successor governing heartbeat, adopts that exact single session (starting
    its periodic heartbeat only now), and delivers the ordinary continuation turn.
 
 Ordinary child dispatch is impossible until graph sequence 2 and its successor
-heartbeat are accepted. Any parent write outside the five charter roots, any signature/
-identity/cap mismatch, or any stale/forked/expired heartbeat fences the launch before a
-model or child boundary. Omitting `--launch-manifest` preserves the exact legacy
+heartbeat are accepted. Bootstrap coordinator operations use a manifest-local state
+root; ambient `AUTOPILOT_STATE_ROOT` changes only after successful ordinary session
+adoption and is restored at shutdown. The base `context_budget` tool is restored after
+bootstrap or any failed launch exit. Any parent write outside the five charter roots,
+any non-OK/foreign receipt, signature/identity/cap mismatch, or stale/forked/expired
+heartbeat fences the launch before a model or child boundary. Omitting `--launch-manifest` preserves the exact legacy
 behavior below byte-for-byte.
 
 ## Behavior

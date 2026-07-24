@@ -1298,7 +1298,7 @@ export default function autopilotExtension(pi: ExtensionHostLike, dependencies: 
   const createRosterSetupTool = dependencies.createRosterSetupTool ?? createAutopilotRosterSetupTool;
   const clock = dependencies.now ?? (() => new Date());
 
-  let contextBudgetRegistered = false;
+  let contextBudgetRegistration: { readonly kind: 'base' } | { readonly kind: 'd65'; readonly workstream_run: string; readonly session_id: string; readonly program_evidence_root: string } | null = null;
   let claimResponseToolRegistered = false;
   let worktreeGuardRegistered = false;
   let activeAutopilotWorkstream: string | null = null;
@@ -1314,6 +1314,7 @@ export default function autopilotExtension(pi: ExtensionHostLike, dependencies: 
   // `agent_settled` publishes the first complete graph + successor heartbeat and
   // delivers the ordinary continuation turn. It is cleared on completion,
   // failure, or session shutdown.
+  let adoptedD65StateRoot: { readonly value: string; readonly previous: string | undefined } | null = null;
   let pendingD65Launch: {
     readonly manifest: D65LaunchManifest;
     readonly bootstrap: D65LaunchBootstrapResult;
@@ -1332,53 +1333,60 @@ export default function autopilotExtension(pi: ExtensionHostLike, dependencies: 
   let rosterSetupFreshSessionFence: { readonly originalCommand: string } | false = false;
   let pendingRosterTransition: { readonly proposal: ExistingRunRosterTransitionProposal; readonly run: ExistingRunRosterTransitionRunRef; readonly active: ActiveAutopilotRow; readonly originalCommand: string } | null = null;
 
-  function activateContextBudget(): void {
-    if (!contextBudgetRegistered) {
-      const threshold = resolveContextHaltPercent(process.env);
-      pi.registerTool(createContextBudgetTool(threshold));
-      contextBudgetRegistered = true;
-    }
-
+  function ensureContextBudgetActive(): void {
     if (pi.getActiveTools !== undefined && pi.setActiveTools !== undefined) {
       const activeTools = pi.getActiveTools();
-      if (!activeTools.includes(CONTEXT_BUDGET_TOOL_NAME)) {
-        pi.setActiveTools([...activeTools, CONTEXT_BUDGET_TOOL_NAME]);
-      }
+      if (!activeTools.includes(CONTEXT_BUDGET_TOOL_NAME)) pi.setActiveTools([...activeTools, CONTEXT_BUDGET_TOOL_NAME]);
     }
   }
 
+  function activateContextBudget(): void {
+    if (contextBudgetRegistration?.kind !== 'base') {
+      const threshold = resolveContextHaltPercent(process.env);
+      pi.registerTool(createContextBudgetTool(threshold));
+      contextBudgetRegistration = { kind: 'base' };
+    }
+    ensureContextBudgetActive();
+  }
+
   /**
-   * Activate a context_budget tool for the D65 bootstrap turn that, on a
-   * successful call, writes a durable receipt into launch authority (audit item
-   * G). The first-graph publication requires this receipt to exist, so a
-   * bootstrap turn that never called context_budget cannot advance to graph 2.
+   * Replace any previously registered base/other-run context_budget definition
+   * with the wrapper bound to THIS manifest and durable D65 session. Pi refreshes
+   * same-name dynamic registrations immediately; after bootstrap the base tool is
+   * restored so a later manifest can never inherit this run's receipt closure.
    */
-  function activateD65ContextBudget(manifest: D65LaunchManifest): void {
-    if (!contextBudgetRegistered) {
+  function activateD65ContextBudget(manifest: D65LaunchManifest, sessionId: string): void {
+    if (contextBudgetRegistration?.kind !== 'd65' || contextBudgetRegistration.workstream_run !== manifest.workstream_run || contextBudgetRegistration.session_id !== sessionId || contextBudgetRegistration.program_evidence_root !== manifest.program_evidence_root) {
       const threshold = resolveContextHaltPercent(process.env);
       const base = createContextBudgetTool(threshold);
       const wrapped: typeof base = {
         ...base,
         execute: async (toolCallId, params, signal, onUpdate, toolCtx) => {
           const result = await base.execute(toolCallId, params, signal, onUpdate, toolCtx);
-          // Persist the durable context_budget call receipt. This write is
-          // create-only and idempotent (a second call leaves the sealed bytes
-          // unchanged), so a genuine write failure (permission/mkdir/disk) is a
-          // real durable-authority fault and MUST surface loudly here rather
-          // than be swallowed and resurface later as a confusing "receipt
-          // absent" fence at first-graph publication. Fail closed, do not hide.
-          writeD65ContextBudgetReceipt(manifest, result.details);
+          writeD65ContextBudgetReceipt(manifest, { ...result.details, tool_call_id: toolCallId, session_id: sessionId });
           return result;
         },
       };
       pi.registerTool(wrapped);
-      contextBudgetRegistered = true;
+      contextBudgetRegistration = { kind: 'd65', workstream_run: manifest.workstream_run, session_id: sessionId, program_evidence_root: manifest.program_evidence_root };
     }
-    if (pi.getActiveTools !== undefined && pi.setActiveTools !== undefined) {
-      const activeTools = pi.getActiveTools();
-      if (!activeTools.includes(CONTEXT_BUDGET_TOOL_NAME)) {
-        pi.setActiveTools([...activeTools, CONTEXT_BUDGET_TOOL_NAME]);
-      }
+    ensureContextBudgetActive();
+  }
+
+  function restoreBaseContextBudget(manifest: D65LaunchManifest): void {
+    if (contextBudgetRegistration?.kind !== 'd65' || contextBudgetRegistration.workstream_run !== manifest.workstream_run || contextBudgetRegistration.program_evidence_root !== manifest.program_evidence_root) return;
+    const threshold = resolveContextHaltPercent(process.env);
+    pi.registerTool(createContextBudgetTool(threshold));
+    contextBudgetRegistration = { kind: 'base' };
+    ensureContextBudgetActive();
+  }
+
+  function restoreD65ContextBudgetForExit(manifest: D65LaunchManifest): string {
+    try {
+      restoreBaseContextBudget(manifest);
+      return '';
+    } catch (error) {
+      return ` Context-budget wrapper restoration also failed: ${error instanceof Error ? error.message : String(error)}.`;
     }
   }
 
@@ -1901,11 +1909,10 @@ export default function autopilotExtension(pi: ExtensionHostLike, dependencies: 
    */
   async function activateD65Launch(input: { readonly manifest: D65LaunchManifest; readonly loadedManifestSha256: `sha256:${string}`; readonly ctx: ExtensionCommandContextLike; readonly taskIntro: string }): Promise<boolean> {
     const { manifest, ctx } = input;
-    // Bind the sealed isolated state root into the Pi session process env so
-    // every subsequent coordinator interaction and child dispatch targets the
-    // manifest's exact private state root, not an ambient AUTOPILOT_STATE_ROOT.
-    process.env[AUTOPILOT_STATE_ROOT_ENV] = manifest.state_root;
-    const env = process.env;
+    // Bootstrap uses a local sealed environment. Do NOT contaminate ambient
+    // process.env before ordinary session adoption succeeds: every early failure
+    // must leave later legacy commands on their original state authority.
+    const env = launchEnv(manifest, process.env);
     let signer: D65LaunchSigner;
     try {
       signer = resolveLaunchSigner(manifest, env);
@@ -1924,16 +1931,6 @@ export default function autopilotExtension(pi: ExtensionHostLike, dependencies: 
     } catch (error) {
       const message = error instanceof CoordinationRuntimeError ? formatCoordinationRuntimeError(error) : error instanceof Error ? error.message : String(error);
       notify(ctx, `Autopilot D65 launch phase resolution failed closed: ${message}. No run state was mutated.`, 'error');
-      return false;
-    }
-    // Enforce the pinned parent request profile before any mutation. In D65
-    // bootstrap mode the context_budget tool is wrapped so a successful call
-    // writes a durable receipt bound into launch authority (audit item G):
-    // merely registering/activating the tool is not proof it was called.
-    try {
-      activateD65ContextBudget(manifest);
-    } catch (error) {
-      notify(ctx, `Autopilot could not activate context_budget for the D65 launch: ${error instanceof Error ? error.message : String(error)}`, 'error');
       return false;
     }
     // Select the EXACT sealed parent model/thinking before any parent model call,
@@ -1959,9 +1956,14 @@ export default function autopilotExtension(pi: ExtensionHostLike, dependencies: 
       // roster bytes) before graph 2 so the ordinary v2 child path can author
       // authenticated specs from it. Idempotent create-only publication.
       await publishD65RuntimeRosterSnapshot({ manifest, env });
+      // The durable session now exists, but no parent model call has occurred.
+      // Replace any pre-existing base/other-run tool with THIS session-bound
+      // wrapper before dispatching the bootstrap-plan turn.
+      activateD65ContextBudget(manifest, bootstrap.attachment.context.session_id);
     } catch (error) {
       const message = error instanceof CoordinationRuntimeError ? formatCoordinationRuntimeError(error) : error instanceof Error ? error.message : String(error);
-      notify(ctx, `Autopilot D65 launch bootstrap failed closed: ${message}. No parent model call was made.`, 'error');
+      const cleanup = restoreD65ContextBudgetForExit(manifest);
+      notify(ctx, `Autopilot D65 launch bootstrap failed closed: ${message}. No parent model call was made.${cleanup}`, 'error');
       return false;
     }
     activeAutopilotWorkstream = manifest.workstream;
@@ -1992,7 +1994,8 @@ export default function autopilotExtension(pi: ExtensionHostLike, dependencies: 
     } catch (error) {
       pendingD65Launch = null;
       const message = error instanceof CoordinationRuntimeError ? formatCoordinationRuntimeError(error) : error instanceof Error ? error.message : String(error);
-      notify(ctx, `Autopilot D65 launch phase re-resolution failed closed: ${message}.`, 'error');
+      const cleanup = restoreD65ContextBudgetForExit(manifest);
+      notify(ctx, `Autopilot D65 launch phase re-resolution failed closed: ${message}.${cleanup}`, 'error');
       return false;
     }
     void phase;
@@ -2011,7 +2014,8 @@ export default function autopilotExtension(pi: ExtensionHostLike, dependencies: 
       pi.sendUserMessage(prompt, { deliverAs: 'followUp' });
     } catch (error) {
       pendingD65Launch = null;
-      notify(ctx, `Autopilot D65 launch prepared ${manifest.workstream_run} but could not deliver the bootstrap-plan prompt: ${error instanceof Error ? error.message : String(error)}`, 'error');
+      const cleanup = restoreD65ContextBudgetForExit(manifest);
+      notify(ctx, `Autopilot D65 launch prepared ${manifest.workstream_run} but could not deliver the bootstrap-plan prompt: ${error instanceof Error ? error.message : String(error)}.${cleanup}`, 'error');
       return false;
     }
     notify(ctx, `Autopilot D65 launch bootstrap active for ${manifest.workstream} (${manifest.workstream_run}); awaiting the bootstrap-plan turn.`, 'info');
@@ -2033,22 +2037,31 @@ export default function autopilotExtension(pi: ExtensionHostLike, dependencies: 
       charterComplete = detectD65CharterComplete(pending.manifest);
     } catch (error) {
       pendingD65Launch = null;
-      notify(ctx, `Autopilot D65 bootstrap parent violated the charter scope: ${error instanceof Error ? error.message : String(error)}. The launch is fenced; no child work occurred.`, 'error');
+      const cleanup = restoreD65ContextBudgetForExit(pending.manifest);
+      notify(ctx, `Autopilot D65 bootstrap parent violated the charter scope: ${error instanceof Error ? error.message : String(error)}. The launch is fenced; no child work occurred.${cleanup}`, 'error');
       return;
     }
     if (!charterComplete) return; // parent has not yet written the five charter roots; wait for the next settle.
     pending.inFlight = true;
     try {
-      await publishD65FirstGraphAndSuccessorHeartbeat({ manifest: pending.manifest, attachment: pending.bootstrap.attachment, signer: pending.signer, env: process.env });
+      await publishD65FirstGraphAndSuccessorHeartbeat({ manifest: pending.manifest, attachment: pending.bootstrap.attachment, signer: pending.signer, env: launchEnv(pending.manifest, process.env) });
     } catch (error) {
       pending.inFlight = false;
       const message = error instanceof CoordinationRuntimeError ? formatCoordinationRuntimeError(error) : error instanceof Error ? error.message : String(error);
       notify(ctx, `Autopilot D65 first-graph publication failed closed: ${message}. The run stays bootstrap-only; no child work is possible.`, 'error');
       return;
     }
-    // Graph 2 is accepted: the bootstrap-only effect fence is lifted and ordinary
-    // scope resumes (the ordinary runtime child guard applies from here).
-    d65BootstrapFence = null;
+    // Graph 2 is accepted: no later model turn may write another bootstrap
+    // receipt. Restore the ordinary base tool before lifting the effect fence.
+    try {
+      restoreBaseContextBudget(pending.manifest);
+    } catch (error) {
+      pending.inFlight = false;
+      notify(ctx, `Autopilot D65 graph 2 was accepted but context_budget wrapper restoration failed closed: ${error instanceof Error ? error.message : String(error)}. Ordinary dispatch remains fenced.`, 'error');
+      return;
+    }
+    // Keep the bootstrap-only effect fence until exact session adoption succeeds;
+    // graph 2 alone must not open ordinary model-write scope.
     // Adopt the exact single session; the periodic heartbeat starts only now.
     const sendMessage = pi.sendMessage;
     if (sendMessage === undefined) {
@@ -2056,8 +2069,9 @@ export default function autopilotExtension(pi: ExtensionHostLike, dependencies: 
       notify(ctx, 'Autopilot cannot adopt its durable run supervisor because Pi sendMessage is unavailable.', 'error');
       return;
     }
+    let adopted: AutopilotSessionBridge | null = null;
     try {
-      const adopted = await AutopilotSessionBridge.adopt({
+      adopted = await AutopilotSessionBridge.adopt({
         attachment: pending.bootstrap.attachment,
         env: launchEnv(pending.manifest, process.env),
         recoverOwnedOperations: async (contextPath) => {
@@ -2070,13 +2084,23 @@ export default function autopilotExtension(pi: ExtensionHostLike, dependencies: 
           isIdle: () => ctx.isIdle?.() ?? true,
         },
       });
-      sessionBridge = adopted;
       activateClaimResponseTool();
+      sessionBridge = adopted;
+      // Only successful ordinary adoption changes ambient process authority and
+      // opens the ordinary runtime guard.
+      adoptedD65StateRoot = { value: pending.manifest.state_root, previous: process.env[AUTOPILOT_STATE_ROOT_ENV] };
+      process.env[AUTOPILOT_STATE_ROOT_ENV] = pending.manifest.state_root;
       process.env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV] = adopted.attachment.contextPath;
+      d65BootstrapFence = null;
     } catch (error) {
       pending.inFlight = false;
+      let cleanup = '';
+      if (adopted !== null) {
+        try { await adopted.close('d65-adoption-failed'); }
+        catch (cleanupError) { cleanup = ` Adopted bridge cleanup also failed: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}.`; }
+      }
       const message = error instanceof CoordinationRuntimeError ? formatCoordinationRuntimeError(error) : error instanceof Error ? error.message : String(error);
-      notify(ctx, `Autopilot D65 launch session adoption failed closed: ${message}.`, 'error');
+      notify(ctx, `Autopilot D65 launch session adoption failed closed: ${message}.${cleanup}`, 'error');
       return;
     }
     const runtimeRoot = pending.manifest.runtime_root;
@@ -2184,9 +2208,18 @@ export default function autopilotExtension(pi: ExtensionHostLike, dependencies: 
       deactivateRosterSetupTool();
       // A D65 launch interrupted before graph sequence 2 leaves its durable
       // bootstrap authority intact; a fresh `/autopilot ... --launch-manifest`
-      // in a new session recovers it idempotently. Clear only in-memory state.
+      // in a new session recovers it idempotently. Restore the ordinary tool and
+      // clear only in-memory launch state.
+      const interruptedD65 = pendingD65Launch;
       pendingD65Launch = null;
-      if (sessionBridge === null) return;
+      if (interruptedD65 !== null) {
+        const cleanup = restoreD65ContextBudgetForExit(interruptedD65.manifest);
+        if (cleanup.length > 0) notify(ctx, cleanup.trim(), 'error');
+      }
+      if (sessionBridge === null) {
+        clearActiveAutopilotState();
+        return;
+      }
       try {
         if (handoffRequested) await sessionBridge.prepareHandoff();
         else await sessionBridge.close(typeof event['reason'] === 'string' ? event['reason'] : 'session-shutdown');
@@ -2195,6 +2228,11 @@ export default function autopilotExtension(pi: ExtensionHostLike, dependencies: 
       } finally {
         const contextPath = sessionBridge.attachment.contextPath;
         if (process.env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV] === contextPath) delete process.env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV];
+        if (adoptedD65StateRoot !== null && process.env[AUTOPILOT_STATE_ROOT_ENV] === adoptedD65StateRoot.value) {
+          if (adoptedD65StateRoot.previous === undefined) delete process.env[AUTOPILOT_STATE_ROOT_ENV];
+          else process.env[AUTOPILOT_STATE_ROOT_ENV] = adoptedD65StateRoot.previous;
+        }
+        adoptedD65StateRoot = null;
         sessionBridge = null;
         deactivateClaimResponseTool();
         clearActiveAutopilotState();

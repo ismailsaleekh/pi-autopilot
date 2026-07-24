@@ -245,7 +245,7 @@ export async function buildD65LaunchFixture(suffix: string, options: { readonly 
 function emptyMap(): Record<string, unknown> { return {}; }
 
 /** Write exactly the five charter roots and seal the context_budget receipt. */
-export async function writeD65CharterRoots(manifest: D65LaunchManifest): Promise<void> {
+export async function writeD65CharterRoots(manifest: D65LaunchManifest, sessionId: string): Promise<void> {
   const runtimeRoot = manifest.runtime_root;
   const state = { schema_version: 'autopilot.state.v1', workstream: manifest.workstream, updated_at: '2026-07-22T22:00:36.000Z', status: 'running', context_gate: { gate: 'ok', percent: 10 }, last_event_id: 1, ready_queue: [], running: [], blocked: [], completed: [], units: emptyMap(), operator_questions: [], next_actions: ['plan'] };
   const masterPlan = { schema_version: 'autopilot.master_plan.v1', workstream: manifest.workstream, mission_ref: 'mission.md', goal_summary: 'launch integration mission', non_goals: [], definition_of_done: ['charter accepted'], risk_level: 'low', lanes: [{ lane_id: 'main', summary: 'main', unit_ids: [] }], units: emptyMap(), ownership_matrix: { owned_paths: [], read_only_paths: [], untouchable_paths: [], held_paths: [] }, verification_matrix: { positive_witnesses: [], negative_witnesses: [], regression_witnesses: [], real_boundary_witnesses: [], blast_radius_checks: [], docs_schema_prompt_checks: [], dirty_tree_checks: [] }, closure_criteria: ['charter accepted'], current_focus: 'plan', last_decision_id: 1, last_event_id: 1, updated_at: '2026-07-22T22:00:36.000Z' };
@@ -262,7 +262,7 @@ export async function writeD65CharterRoots(manifest: D65LaunchManifest): Promise
     await mkdir(runtimeRoot, { recursive: true });
     await writeFile(join(runtimeRoot, name), body, 'utf8');
   }
-  writeD65ContextBudgetReceipt(manifest, { gate: 'ok', percent: 10 });
+  writeD65ContextBudgetReceipt(manifest, { gate: 'ok', percent: 10, tool_call_id: 'test-context-budget', session_id: sessionId });
 }
 
 export { existsSync };

@@ -1,6 +1,8 @@
 import { homedir } from 'node:os';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 
+import { isValidAutopilotRepoId, isValidWorkstreamRun } from '../paths.ts';
+
 export type RosterStorageScope = 'user' | 'trusted-project';
 export type RosterSha256 = `sha256:${string}`;
 
@@ -36,14 +38,6 @@ export interface RosterScopePaths {
 export const DEFAULT_USER_STATE_ROOT_DISPLAY = '~/.pi/agent/autopilot/';
 
 const ROSTER_ID_PATTERN = /^[a-z][a-z0-9-]{0,95}$/u;
-const REPO_ID_PATTERN = /^[a-z][a-z0-9-]{0,119}$/u;
-// Sealed production/D65 workstream-run identities may include a canonical UTC
-// launch timestamp suffix (e.g. `...-20260722T220032Z-...`), even though the
-// ordinary local generator retains lowercase `t`/`z` for compatibility. Unlike
-// roster/repo storage ids, this segment may therefore contain uppercase ASCII.
-// Keep the grammar closed to ASCII alnum + hyphen and the existing 120-byte
-// ceiling instead of rejecting valid sealed launch authority.
-const WORKSTREAM_RUN_PATTERN = /^[A-Za-z][A-Za-z0-9-]{0,119}$/u;
 const SHA256_PATTERN = /^sha256:[a-f0-9]{64}$/u;
 
 export function defaultUserStateRoot(home = homedir()): string {
@@ -65,11 +59,11 @@ export function assertValidRosterId(value: string, label = 'roster_id'): void {
 }
 
 export function assertValidRepoId(value: string, label = 'repo_id'): void {
-  assertPathSegment(value, label, REPO_ID_PATTERN);
+  assertClosedPathSegment(value, label, isValidAutopilotRepoId);
 }
 
 export function assertValidWorkstreamRun(value: string, label = 'workstream_run'): void {
-  assertPathSegment(value, label, WORKSTREAM_RUN_PATTERN);
+  assertClosedPathSegment(value, label, isValidWorkstreamRun);
 }
 
 export function assertValidRosterRevision(value: number, label = 'roster_revision'): void {
@@ -164,8 +158,12 @@ function requireTrustedProjectRoot(value: string | undefined): string {
 }
 
 function assertPathSegment(value: string, label: string, pattern: RegExp): void {
+  assertClosedPathSegment(value, label, (candidate) => pattern.test(candidate));
+}
+
+function assertClosedPathSegment(value: string, label: string, valid: (candidate: string) => boolean): void {
   assertNoNul(value, label);
-  if (!pattern.test(value) || value.includes('/') || value.includes('\\') || value === '.' || value === '..') {
+  if (!valid(value) || value.includes('/') || value.includes('\\') || value === '.' || value === '..') {
     throw new Error(`${label} is not a valid roster storage path segment: ${value}`);
   }
 }
