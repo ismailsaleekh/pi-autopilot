@@ -28,6 +28,10 @@ export type {
   W5CustomRosterIssue,
 } from '../custom-certification.ts';
 import {
+  ANTHROPIC_OPUS5_SONNET5_RECIPE_ID,
+  ANTHROPIC_OPUS5_SONNET5_RECIPE_REVISION,
+  CODEX_GPT55_HEAVY_RECIPE_ID,
+  CODEX_GPT55_HEAVY_RECIPE_REVISION,
   buildW4CertifiedRosterForCandidate,
   getProviderRecipe,
   sortRosterCandidates,
@@ -134,8 +138,50 @@ export interface W4ProviderRegistryVerificationOptions {
 const EMPTY_REFS: readonly EvidenceRef[] = Object.freeze([]);
 const EMPTY_DIGESTS: readonly Digest[] = Object.freeze([]);
 const EMPTY_IDS: readonly string[] = Object.freeze([]);
+const ANTHROPIC_OPUS5_SONNET5_PROVIDER_PACK_ID = 'anthropic-opus5-sonnet5-subscription-w4' as const;
+const ANTHROPIC_OPUS5_SONNET5_ROUTE_POLICY_ID = 'anthropic-opus5-sonnet5-subscription-v1' as const;
+const ANTHROPIC_OPUS5_SONNET5_REQUIRED_EVIDENCE_REFS: readonly EvidenceRef[] = Object.freeze([
+  Object.freeze({ evidence_id: 'anthropic-opus5-sonnet5-route-proof', kind: 'route-proof' as const, uri: 'qualification-required://anthropic-opus5-sonnet5/route', sha256: null, byte_count: null, secret_free: true as const }),
+  Object.freeze({ evidence_id: 'anthropic-opus5-sonnet5-billing-proof', kind: 'billing-proof' as const, uri: 'qualification-required://anthropic-opus5-sonnet5/billing', sha256: null, byte_count: null, secret_free: true as const }),
+  ...ROSTER_ROLE_ORDER.map((role) => Object.freeze({
+    evidence_id: `anthropic-opus5-sonnet5-${role}-proof`,
+    kind: 'execution-proof' as const,
+    uri: `qualification-required://anthropic-opus5-sonnet5/execution/${role}`,
+    sha256: null,
+    byte_count: null,
+    secret_free: true as const,
+  })),
+]);
+const CODEX_GPT55_HEAVY_PROVIDER_PACK_ID = 'codex-gpt55-heavy-sol-terra-w4' as const;
+const CODEX_GPT55_HEAVY_REQUIRED_EVIDENCE_REFS: readonly EvidenceRef[] = Object.freeze([
+  Object.freeze({ evidence_id: 'codex-gpt55-heavy-route-proof', kind: 'route-proof' as const, uri: 'qualification-required://codex-gpt55-heavy/route', sha256: null, byte_count: null, secret_free: true as const }),
+  Object.freeze({ evidence_id: 'codex-gpt55-heavy-billing-proof', kind: 'billing-proof' as const, uri: 'qualification-required://codex-gpt55-heavy/billing', sha256: null, byte_count: null, secret_free: true as const }),
+  ...ROSTER_ROLE_ORDER.map((role) => Object.freeze({
+    evidence_id: `codex-gpt55-heavy-${role}-proof`,
+    kind: 'execution-proof' as const,
+    uri: `qualification-required://codex-gpt55-heavy/execution/${role}`,
+    sha256: null,
+    byte_count: null,
+    secret_free: true as const,
+  })),
+]);
 
 export const W4_PROVIDER_PACK_REGISTRY: readonly W4ProviderPackRegistryEntry[] = Object.freeze([
+  Object.freeze({
+    provider_pack_id: ANTHROPIC_OPUS5_SONNET5_PROVIDER_PACK_ID,
+    provider_id: ANTHROPIC_PROVIDER_ID,
+    recipe_id: ANTHROPIC_OPUS5_SONNET5_RECIPE_ID,
+    recipe_revision: ANTHROPIC_OPUS5_SONNET5_RECIPE_REVISION,
+    route_policy_id: ANTHROPIC_OPUS5_SONNET5_ROUTE_POLICY_ID,
+    route_policy_revision: 1,
+    ready_profiles: Object.freeze(['precision']),
+    required_evidence: ANTHROPIC_OPUS5_SONNET5_REQUIRED_EVIDENCE_REFS,
+    trusted_manifest_ids: EMPTY_IDS,
+    trusted_manifest_sha256s: EMPTY_DIGESTS,
+    trusted_certified_roster_sha256s: EMPTY_DIGESTS,
+    live_w3_uri_prefix: 'w3-evidence://anthropic-opus5-sonnet5/',
+    readiness: 'strict-w3-manifest' as const,
+  }),
   Object.freeze({
     provider_pack_id: String(ANTHROPIC_PROVIDER_PACK_ID),
     provider_id: ANTHROPIC_PROVIDER_ID,
@@ -150,6 +196,21 @@ export const W4_PROVIDER_PACK_REGISTRY: readonly W4ProviderPackRegistryEntry[] =
     trusted_certified_roster_sha256s: EMPTY_DIGESTS,
     live_w3_uri_prefix: 'w3-evidence://phase37/anthropic/',
     readiness: 'blocked-current-pack' as const,
+  }),
+  Object.freeze({
+    provider_pack_id: CODEX_GPT55_HEAVY_PROVIDER_PACK_ID,
+    provider_id: CODEX_PROVIDER_ID,
+    recipe_id: CODEX_GPT55_HEAVY_RECIPE_ID,
+    recipe_revision: CODEX_GPT55_HEAVY_RECIPE_REVISION,
+    route_policy_id: CODEX_ROUTE_POLICY_ID,
+    route_policy_revision: CODEX_ROUTE_POLICY_REVISION,
+    ready_profiles: Object.freeze(['cruise']),
+    required_evidence: CODEX_GPT55_HEAVY_REQUIRED_EVIDENCE_REFS,
+    trusted_manifest_ids: EMPTY_IDS,
+    trusted_manifest_sha256s: EMPTY_DIGESTS,
+    trusted_certified_roster_sha256s: EMPTY_DIGESTS,
+    live_w3_uri_prefix: 'w3-evidence://codex-gpt55-heavy/',
+    readiness: 'strict-w3-manifest' as const,
   }),
   Object.freeze({
     provider_pack_id: CODEX_PROVIDER_PACK_ID,

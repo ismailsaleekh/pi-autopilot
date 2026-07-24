@@ -14,6 +14,9 @@ import {
   type RoutePolicy,
 } from '../../src/core/roster/route-policies.ts';
 import {
+  ANTHROPIC_OPUS5_SONNET5_CANDIDATE,
+  ANTHROPIC_OPUS5_SONNET5_RECIPE,
+  ANTHROPIC_OPUS5_SONNET5_ROSTER,
   PROVIDER_RECIPES,
   PROVIDER_RECIPE_REGISTRY,
   PROVIDER_RECIPE_REGISTRY_SHA256,
@@ -143,15 +146,46 @@ function forgeSyntheticQualificationManifest(
 
 void describe('Phase 37 W1 provider recipes and candidates', () => {
   void it('embeds exact W0 provider recipe and seed candidate registries', () => {
-    assert.equal(PROVIDER_RECIPES.length, 5);
+    assert.equal(PROVIDER_RECIPES.length, 7);
     assert.deepEqual(verifyProviderRecipeSeeds(), []);
     assert.deepEqual(verifySeedCandidateRegistry(), []);
-    assert.equal(PROVIDER_RECIPE_REGISTRY_SHA256, 'sha256:0aaa55110a1e808895d0ed7e73b6bc3dac75ae815c3439783c0ce1b112a4434f');
-    assert.equal(SEED_CANDIDATE_REGISTRY_SHA256, 'sha256:b033d74a3fdcebe9ec5a3e996a2835da7d04eb61c4e98567edb079425198ac6f');
+    assert.deepEqual(
+      PROVIDER_RECIPES.map((recipe) => `${recipe.recipe_id}:${recipe.recipe_revision}`),
+      PROVIDER_RECIPES.map((recipe) => `${recipe.recipe_id}:${recipe.recipe_revision}`).sort((left, right) => left.localeCompare(right)),
+    );
+    assert.deepEqual(
+      SEED_CANDIDATES.map((candidate) => candidate.candidate_sort_key),
+      SEED_CANDIDATES.map((candidate) => candidate.candidate_sort_key).sort((left, right) => left.localeCompare(right)),
+    );
+    assert.equal(PROVIDER_RECIPE_REGISTRY_SHA256, 'sha256:80ae7c8ef05505fa3381aa383041ef374061d01cb4991163838db7cf9a55fcba');
+    assert.equal(SEED_CANDIDATE_REGISTRY_SHA256, 'sha256:fd3d9f3856991c51128428c58a46c2f00d08c8fd6e4885f7ea53296046b3ee71');
     for (const candidate of SEED_CANDIDATES) {
       assertCandidateDirectReferences(candidate);
       assert.notEqual(candidate.launch_readiness, 'synthetic-fixture-only');
     }
+  });
+
+  void it('registers the approved Anthropic Opus 5 / Sonnet 5 Precision chain as non-certifying authority', () => {
+    assert.equal(ANTHROPIC_OPUS5_SONNET5_RECIPE.recipe_id, 'anthropic-opus5-sonnet5-subscription');
+    assert.equal(ANTHROPIC_OPUS5_SONNET5_ROSTER.roster_id, 'anthropic-precision-opus5-sonnet5-v1');
+    assert.equal(ANTHROPIC_OPUS5_SONNET5_ROSTER.pi_version, '0.81.1');
+    assert.equal(ANTHROPIC_OPUS5_SONNET5_CANDIDATE.candidate_id, 'anthropic-precision-opus5-sonnet5-v1');
+    assert.equal(ANTHROPIC_OPUS5_SONNET5_CANDIDATE.launch_readiness, 'not-ready-until-w4');
+    assert.deepEqual(ANTHROPIC_OPUS5_SONNET5_ROSTER.assignments.map((assignment) => [assignment.role, assignment.model_id, assignment.thinking]), [
+      ['parent', 'claude-opus-5', 'xhigh'],
+      ['strategy', 'claude-opus-5', 'xhigh'],
+      ['implement', 'claude-sonnet-5', 'xhigh'],
+      ['validate', 'claude-opus-5', 'xhigh'],
+      ['fix', 'claude-sonnet-5', 'xhigh'],
+      ['adjudicate', 'claude-opus-5', 'xhigh'],
+      ['bughunt', 'claude-opus-5', 'xhigh'],
+      ['extract', 'claude-sonnet-5', 'high'],
+    ]);
+    assert.equal(ANTHROPIC_OPUS5_SONNET5_ROSTER.assignments.every((assignment) => assignment.provider_id === 'anthropic'), true);
+    assert.equal(ANTHROPIC_OPUS5_SONNET5_ROSTER.assignments.every((assignment) => assignment.auth_class === 'oauth'), true);
+    assert.equal(ANTHROPIC_OPUS5_SONNET5_ROSTER.assignments.every((assignment) => assignment.billing_route_class === 'subscription-oauth'), true);
+    assert.equal(ANTHROPIC_OPUS5_SONNET5_ROSTER.assignments.every((assignment) => assignment.system_prompt_profile === 'anthropic-autopilot-sanitized.v1'), true);
+    assert.deepEqual(new Set(ANTHROPIC_OPUS5_SONNET5_ROSTER.assignments.map((assignment) => assignment.model_id)), new Set(['claude-opus-5', 'claude-sonnet-5']));
   });
 
   void it('deep-freezes exported recipe, seed roster, and candidate authority', () => {

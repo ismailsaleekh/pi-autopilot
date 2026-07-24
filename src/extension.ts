@@ -88,6 +88,7 @@ export interface ExtensionModelRegistryLike {
   getAll?(): readonly unknown[];
   getError?(): string | undefined;
   getProviderAuthStatus?(provider: string): { readonly configured: boolean; readonly source?: string | undefined };
+  isUsingOAuth?(model: ExtensionModelLike): boolean;
 }
 
 export interface ExtensionSessionManagerLike {

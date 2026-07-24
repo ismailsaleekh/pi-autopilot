@@ -230,7 +230,33 @@ export function assertNoSecretFields(value, path = '$') {
     }
 }
 const ROUTE_POLICIES_JSON = '[{"schema_version":"autopilot.route_policy.v1","route_policy_id":"anthropic-sanitized-v1","revision":1,"provider_id":"anthropic","allowed_auth_classes":["api-key"],"allowed_auth_sources":["runtime","stored"],"billing_class":"metered-third-party-blocked","billing_route_class":"third-party-metered-blocked","allowed_apis":["anthropic-messages"],"allowed_service_tiers":[null],"allowed_cache_policies":["provider-default"],"allowed_system_prompt_profiles":["anthropic-autopilot-sanitized.v1"],"forbidden_gateways":["arbitrary-api-key","metered-frontier","openrouter"],"requires_live_billing_proof":true,"policy_state":"blocked-live-certification","qualification_state":"blocked-live-certification","non_certifying_seed":true,"route_policy_sha256":"sha256:dfe744bad274907e700d18357e70ec15a239c26e6b115a450aead641d195860b"},{"schema_version":"autopilot.route_policy.v1","route_policy_id":"codex-subscription-v1","revision":1,"provider_id":"openai-codex","allowed_auth_classes":["oauth"],"allowed_auth_sources":["runtime","stored"],"billing_class":"plan-backed-subscription","billing_route_class":"subscription-oauth","allowed_apis":["openai-codex-responses"],"allowed_service_tiers":[null,"priority"],"allowed_cache_policies":["provider-default"],"allowed_system_prompt_profiles":["pi-default.v1"],"forbidden_gateways":["arbitrary-api-key","metered-frontier","openrouter"],"requires_live_billing_proof":true,"policy_state":"unqualified-seed","qualification_state":"unqualified-non-certifying-seed","non_certifying_seed":true,"route_policy_sha256":"sha256:1a23f607a9fce47701ee5e7576205d29c7cb8451bc9186190ea4e9e550e60ccc"},{"schema_version":"autopilot.route_policy.v1","route_policy_id":"kimi-coding-plan-v1","revision":1,"provider_id":"kimi-coding","allowed_auth_classes":["api-key-plan-token"],"allowed_auth_sources":["runtime","stored"],"billing_class":"plan-token","billing_route_class":"plan-api-token","allowed_apis":["openai-completions"],"allowed_service_tiers":[null],"allowed_cache_policies":["provider-default"],"allowed_system_prompt_profiles":["pi-default.v1"],"forbidden_gateways":["arbitrary-api-key","metered-frontier","openrouter"],"requires_live_billing_proof":true,"policy_state":"unqualified-seed","qualification_state":"unqualified-non-certifying-seed","non_certifying_seed":true,"route_policy_sha256":"sha256:0925d0371e2f7f5ffae54e02ee9cf5c6d106dd5b47d7ec4698b68f754272d688"},{"schema_version":"autopilot.route_policy.v1","route_policy_id":"opencode-go-plan-v1","revision":1,"provider_id":"opencode-go","allowed_auth_classes":["api-key-plan-token"],"allowed_auth_sources":["runtime","stored"],"billing_class":"plan-token","billing_route_class":"plan-api-token","allowed_apis":["openai-completions"],"allowed_service_tiers":[null],"allowed_cache_policies":["provider-default"],"allowed_system_prompt_profiles":["pi-default.v1"],"forbidden_gateways":["arbitrary-api-key","metered-frontier","openrouter"],"requires_live_billing_proof":true,"policy_state":"unqualified-seed","qualification_state":"unqualified-non-certifying-seed","non_certifying_seed":true,"route_policy_sha256":"sha256:1fb2706f2e6c7192134f788a829fc199b3f5905cf45b77c7dbd511457d9350f5"},{"schema_version":"autopilot.route_policy.v1","route_policy_id":"zai-coding-plan-v1","revision":1,"provider_id":"zai","allowed_auth_classes":["api-key-plan-token"],"allowed_auth_sources":["runtime","stored"],"billing_class":"plan-token","billing_route_class":"plan-api-token","allowed_apis":["openai-completions"],"allowed_service_tiers":[null],"allowed_cache_policies":["provider-default"],"allowed_system_prompt_profiles":["pi-default.v1"],"forbidden_gateways":["arbitrary-api-key","metered-frontier","openrouter"],"requires_live_billing_proof":true,"policy_state":"unqualified-seed","qualification_state":"unqualified-non-certifying-seed","non_certifying_seed":true,"route_policy_sha256":"sha256:f59565fcef0baadf95010064cb8a4fde9423f2089a88076fe615859d15c6df54"}]';
-export const ROUTE_POLICIES = deepFreezeRouteAuthority(JSON.parse(ROUTE_POLICIES_JSON));
+const ANTHROPIC_OPUS5_SONNET5_SUBSCRIPTION_ROUTE_POLICY_PREIMAGE = {
+    schema_version: 'autopilot.route_policy.v1',
+    route_policy_id: 'anthropic-opus5-sonnet5-subscription-v1',
+    revision: 1,
+    provider_id: 'anthropic',
+    allowed_auth_classes: ['oauth'],
+    allowed_auth_sources: ['runtime', 'stored'],
+    billing_class: 'plan-backed-subscription',
+    billing_route_class: 'subscription-oauth',
+    allowed_apis: ['anthropic-messages'],
+    allowed_service_tiers: [null],
+    allowed_cache_policies: ['provider-default'],
+    allowed_system_prompt_profiles: ['anthropic-autopilot-sanitized.v1'],
+    forbidden_gateways: ['arbitrary-api-key', 'metered-frontier', 'openrouter'],
+    requires_live_billing_proof: true,
+    policy_state: 'unqualified-seed',
+    qualification_state: 'unqualified-non-certifying-seed',
+    non_certifying_seed: true,
+};
+export const ANTHROPIC_OPUS5_SONNET5_SUBSCRIPTION_ROUTE_POLICY = deepFreezeRouteAuthority({
+    ...ANTHROPIC_OPUS5_SONNET5_SUBSCRIPTION_ROUTE_POLICY_PREIMAGE,
+    route_policy_sha256: canonicalSha256(ANTHROPIC_OPUS5_SONNET5_SUBSCRIPTION_ROUTE_POLICY_PREIMAGE),
+});
+export const ROUTE_POLICIES = deepFreezeRouteAuthority(sortRoutePolicies([
+    ...JSON.parse(ROUTE_POLICIES_JSON),
+    ANTHROPIC_OPUS5_SONNET5_SUBSCRIPTION_ROUTE_POLICY,
+]));
 export function routePolicySortKey(policy) {
     return `${policy.route_policy_id}:${String(policy.revision).padStart(10, '0')}`;
 }
@@ -258,12 +284,18 @@ export const ROUTE_POLICY_REGISTRY_SHA256 = ROUTE_POLICY_REGISTRY.route_policy_r
 export function findRoutePolicy(routePolicyId, revision, policies = ROUTE_POLICIES) {
     return policies.find((policy) => policy.route_policy_id === routePolicyId && policy.revision === revision) ?? null;
 }
-export function findRoutePolicyForProviderApi(providerId, api, policies = ROUTE_POLICIES) {
+export function findRoutePolicyForProviderApi(providerId, api, policies = ROUTE_POLICIES, authClass, authSource) {
     const matches = policies.filter((policy) => policy.provider_id === providerId && policy.allowed_apis.includes(api));
     if (matches.length === 0) {
         return null;
     }
-    return sortRoutePolicies(matches)[0] ?? null;
+    const authMatches = authClass === undefined
+        ? matches
+        : matches.filter((policy) => policy.allowed_auth_classes.includes(authClass) &&
+            (authSource === undefined || policy.allowed_auth_sources.includes(authSource)));
+    const eligible = authMatches.length > 0 ? authMatches : matches;
+    const current = eligible.filter((policy) => policy.policy_state !== 'blocked-live-certification');
+    return sortRoutePolicies(current.length > 0 ? current : eligible)[0] ?? null;
 }
 export function verifyRoutePolicySeeds(policies = ROUTE_POLICIES) {
     const issues = [];
@@ -319,7 +351,7 @@ export function resolveRoute(request, policies = ROUTE_POLICIES) {
         diagnostics.push('ROSTER_AUTH_CHANNEL_FORBIDDEN', 'ROSTER_ROUTE_FORBIDDEN');
     }
     else {
-        matchedPolicy = findRoutePolicyForProviderApi(request.provider_id, request.api, policies);
+        matchedPolicy = findRoutePolicyForProviderApi(request.provider_id, request.api, policies, request.auth_class, request.auth_source);
         if (matchedPolicy === null) {
             diagnostics.push('ROSTER_ROUTE_FORBIDDEN');
         }

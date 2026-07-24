@@ -81,8 +81,8 @@ covers_sources:
   - src/internal/execution-observer-extension.ts
   - templates/skills/autopilot-roster-setup/SKILL.md
   - templates/skills/autopilot-roster-setup/payload.json
-signature_hash: 'sha256:803bb3fc2e2f4dfe6f4dda4b1588f9fc4c63b06a4c30ffb0d20cfe1f8ff38683'
-body_hash: 'sha256:37938b39c381ce872fafc5b45fca2ef94ab18dd36c6a8303820225b052034218'
+signature_hash: 'sha256:adbbbc4f95949fb8e0f64272013f3c13445c1ef7cfa609be58132d9781f60073'
+body_hash: 'sha256:29d6937bc96023b4b1d2e8f13e41583297f8a024c68a352bc8b0bde472fcd435'
 stability: evolving
 ---
 
@@ -107,12 +107,35 @@ seed or custom v2 rosters, but it cannot save a launchable provider or custom ro
 until package-reviewed live W3 trust pins and trusted certified roster hashes exist in
 the relevant registry.
 
+The Anthropic subscription seed `anthropic-precision-opus5-sonnet5-v1` is an
+explicit Precision roster over Pi's direct Anthropic OAuth route. It assigns Opus 5
+at `xhigh` to parent, strategy, validate, adjudicate, and bughunt; Sonnet 5 at
+`xhigh` to implement and fix; and Sonnet 5 at `high` to extract. Every assignment
+uses `anthropic-messages`, provider-default caching, no service tier, and
+`anthropic-autopilot-sanitized.v1`. Its registered identity is retained during
+inventory resolution only when the resolved assignment-set hash exactly matches the
+registered seed; altered assignment facts receive a content-derived roster ID. The
+seed remains non-certifying and unlaunchable until its live subscription evidence and
+certified roster hash are reviewed and pinned.
+
+The Codex subscription seed `codex-gpt55-heavy-sol-terra-v1` is the current
+recommended Cruise default candidate. Sol at `xhigh` owns parent, strategy, and
+bughunt; GPT-5.5 at `high` owns the complete implement/validate/fix loop plus extract;
+and Terra at `high` owns adjudication. Every assignment uses the direct
+`openai-codex-responses` OAuth subscription route, a null service tier,
+provider-default caching, and `pi-default.v1`. Setup recommends this candidate as the
+user default when the exact inventory resolves, but the storage gate cannot persist it
+as launch authority until reviewed live W3 evidence and its certified roster hash are
+pinned.
+
 <!-- GENERATED:roster-readiness START (source: src/core/roster/provider-recipes.ts, src/core/roster/route-policies.ts, src/core/roster/providers/index.ts) -->
 ### W4 provider registry (current package pins)
 
 | Provider pack | Provider | Recipe | Route policy | Ready profiles | Registry readiness | Required evidence refs | Trusted manifest pins | Trusted certified roster pins |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `anthropic-opus5-sonnet5-subscription-w4` | `anthropic` | `anthropic-opus5-sonnet5-subscription@1` | `anthropic-opus5-sonnet5-subscription-v1@1` | `precision` | `strict-w3-manifest` | 10 | 0 | 0 |
 | `anthropic-sanitized` | `anthropic` | `anthropic-sanitized@1` | `anthropic-sanitized-v1@1` | none | `blocked-current-pack` | 0 | 0 | 0 |
+| `codex-gpt55-heavy-sol-terra-w4` | `openai-codex` | `codex-gpt55-heavy-subscription@1` | `codex-subscription-v1@1` | `cruise` | `strict-w3-manifest` | 10 | 0 | 0 |
 | `codex-subscription-w4-offline` | `openai-codex` | `codex-subscription@1` | `codex-subscription-v1@1` | none | `blocked-current-pack` | 0 | 0 | 0 |
 | `kimi-coding-plan-w4-provider-pack` | `kimi-coding` | `kimi-coding-plan@1` | `kimi-coding-plan-v1@1` | `precision` | `strict-w3-manifest` | 10 | 0 | 0 |
 | `opencode-go-plan-w4-provider-pack` | `opencode-go` | `opencode-go-plan@1` | `opencode-go-plan-v1@1` | `precision` | `strict-w3-manifest` | 10 | 0 | 0 |
@@ -122,6 +145,7 @@ the relevant registry.
 
 | Provider | Route policy | Billing route | APIs | Auth classes | Auth sources | Service tiers | Cache policies | System prompt profiles | Policy state | Qualification state | Non-certifying seed | Requires live billing proof | Forbidden gateways |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `anthropic` | `anthropic-opus5-sonnet5-subscription-v1@1` | `subscription-oauth` | `anthropic-messages` | `oauth` | `runtime`, `stored` | `null` | `provider-default` | `anthropic-autopilot-sanitized.v1` | `unqualified-seed` | `unqualified-non-certifying-seed` | yes | yes | `arbitrary-api-key`, `metered-frontier`, `openrouter` |
 | `anthropic` | `anthropic-sanitized-v1@1` | `third-party-metered-blocked` | `anthropic-messages` | `api-key` | `runtime`, `stored` | `null` | `provider-default` | `anthropic-autopilot-sanitized.v1` | `blocked-live-certification` | `blocked-live-certification` | yes | yes | `arbitrary-api-key`, `metered-frontier`, `openrouter` |
 | `openai-codex` | `codex-subscription-v1@1` | `subscription-oauth` | `openai-codex-responses` | `oauth` | `runtime`, `stored` | `null`, `priority` | `provider-default` | `pi-default.v1` | `unqualified-seed` | `unqualified-non-certifying-seed` | yes | yes | `arbitrary-api-key`, `metered-frontier`, `openrouter` |
 | `kimi-coding` | `kimi-coding-plan-v1@1` | `plan-api-token` | `openai-completions` | `api-key-plan-token` | `runtime`, `stored` | `null` | `provider-default` | `pi-default.v1` | `unqualified-seed` | `unqualified-non-certifying-seed` | yes | yes | `arbitrary-api-key`, `metered-frontier`, `openrouter` |
@@ -133,7 +157,9 @@ the relevant registry.
 | Candidate | Profile | Recipe | Route policy | Roster ID | Revision | Roster SHA-256 | Assignment-set SHA-256 | Candidate state | Launch readiness | Qualification state | Non-certifying seed | Synthetic fixture ready only | Diagnostics |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | `codex-afterburner-v1` | `afterburner` | `codex-subscription@1` | `codex-subscription-v1@1` | `afterburner-codex-subscription-7814ccd19c58` | 1 | `sha256:ba7d0cdd955589f24fb9afbb403057c8b5461fe9d62c8265b347ec7827578a85` | `sha256:7814ccd19c5807b001764c9a6a40f6d1e7e669c6fda29220c1f4e0e96c309e5d` | `qualification-required` | `not-ready-until-w4` | `unqualified-non-certifying-seed` | yes | no | `ROSTER_PRIORITY_PROOF_REQUIRED`, `ROSTER_QUALIFICATION_REQUIRED` |
+| `codex-gpt55-heavy-sol-terra-v1` | `cruise` | `codex-gpt55-heavy-subscription@1` | `codex-subscription-v1@1` | `codex-gpt55-heavy-sol-terra-v1` | 1 | `sha256:4a0d4f35223b9cf10ab705929b83e83996cf1d487a232967b98f8dcb53fbdec6` | `sha256:dd3f3161e993e4e5039307d01b31790874258b8ebbd7de7ee8a2f623f2bc2a72` | `qualification-required` | `not-ready-until-w4` | `unqualified-non-certifying-seed` | yes | no | `ROSTER_QUALIFICATION_REQUIRED` |
 | `codex-cruise-v1` | `cruise` | `codex-subscription@1` | `codex-subscription-v1@1` | `cruise-codex-subscription-bdb4f15f0ff9` | 1 | `sha256:f3ac0895d9abedfbe3616a79af0c1c3691962d24d5f17d195a78e6ab24d2b4a0` | `sha256:bdb4f15f0ff90aff9d1e46a3a56bfdfddabafcf3c7f5c293a7b558ff2f22a3c4` | `qualification-required` | `not-ready-until-w4` | `unqualified-non-certifying-seed` | yes | no | `ROSTER_CONVERGED_ASSIGNMENT_SET`, `ROSTER_QUALIFICATION_REQUIRED` |
+| `anthropic-precision-opus5-sonnet5-v1` | `precision` | `anthropic-opus5-sonnet5-subscription@1` | `anthropic-opus5-sonnet5-subscription-v1@1` | `anthropic-precision-opus5-sonnet5-v1` | 1 | `sha256:4ec6d315bcf23067e0544237c665c1612b6fae37389f8eaf738fa68eca988c69` | `sha256:ad709aa7f4ea2f5049eea536926529989cddb475308962dbc3334849b309354c` | `qualification-required` | `not-ready-until-w4` | `unqualified-non-certifying-seed` | yes | no | `ROSTER_QUALIFICATION_REQUIRED` |
 | `anthropic-precision-v1` | `precision` | `anthropic-sanitized@1` | `anthropic-sanitized-v1@1` | `precision-anthropic-sanitized-b7321cad3237` | 1 | `sha256:15592a2eb13b6a89b89bbdb56193baed9cd14617457dcd510f45064802038a1e` | `sha256:b7321cad32374c9299499d1edbb6f0f2038f4bc5fdee82b9af892cea47bdc724` | `blocked-live-certification` | `blocked` | `blocked-live-certification` | yes | no | `ROSTER_QUALIFICATION_REQUIRED`, `ROSTER_ROUTE_FORBIDDEN` |
 | `codex-precision-v1` | `precision` | `codex-subscription@1` | `codex-subscription-v1@1` | `precision-codex-subscription-bdb4f15f0ff9` | 1 | `sha256:3cb35e9f63613f85e8d586a3de6fe7e418d3bb935f088651ec3300d63f82b7f9` | `sha256:bdb4f15f0ff90aff9d1e46a3a56bfdfddabafcf3c7f5c293a7b558ff2f22a3c4` | `qualification-required` | `not-ready-until-w4` | `unqualified-non-certifying-seed` | yes | no | `ROSTER_QUALIFICATION_REQUIRED` |
 | `kimi-coding-precision-v1` | `precision` | `kimi-coding-plan@1` | `kimi-coding-plan-v1@1` | `precision-kimi-coding-plan-af83b830e2e6` | 1 | `sha256:669061f5e1a419552c9b43f03e4ca4ca28f238b60283113d54f52000ef164a77` | `sha256:af83b830e2e6f39fa4558c88f0e4260ee1253e64bd0f8602745fe86d394d96c4` | `qualification-required` | `not-ready-until-w4` | `unqualified-non-certifying-seed` | yes | no | `ROSTER_QUALIFICATION_REQUIRED` |

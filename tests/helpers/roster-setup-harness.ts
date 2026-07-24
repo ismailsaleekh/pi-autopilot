@@ -810,6 +810,10 @@ export class FakeRosterModelRegistry {
     return { configured: false, source: 'stored' };
   }
 
+  public isUsingOAuth(model: FakePiModel): boolean {
+    return model.provider === 'openai-codex';
+  }
+
   public getApiKeyAndHeaders(provider: string): never {
     this.#recordCredentialResolution(`getApiKeyAndHeaders:${provider}`);
   }

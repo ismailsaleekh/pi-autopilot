@@ -30,10 +30,12 @@ export async function resolveRosterSetupInventoryFromContext(options) {
             continue;
         if (providers.size >= MAX_PROVIDER_COUNT && !providers.has(providerId))
             continue;
-        const routePolicy = findRoutePolicyForProviderApi(providerId, api, ROUTE_POLICIES);
         const authStatus = providerAuthStatus(registry, providerId);
-        const authClass = inventoryAuthClass(providerId, api, authStatus, routePolicy);
         const authSource = inventoryAuthSource(authStatus);
+        const isUsingOAuth = providerIsUsingOAuth(registry, model, authStatus);
+        const routeAuthClass = authStatus.configured ? (isUsingOAuth ? 'oauth' : 'api-key') : undefined;
+        const routePolicy = findRoutePolicyForProviderApi(providerId, api, ROUTE_POLICIES, routeAuthClass, authSource ?? undefined);
+        const authClass = inventoryAuthClass(providerId, api, authStatus, routePolicy, isUsingOAuth);
         const inventoryModel = inventoryModelFromPiModel(model, modelId, api, routePolicy);
         if (inventoryModel === null)
             continue;
@@ -87,6 +89,9 @@ function providerAuthStatus(registry, providerId) {
     }
     return status;
 }
+function providerIsUsingOAuth(registry, model, status) {
+    return status.configured && typeof registry.isUsingOAuth === 'function' && registry.isUsingOAuth(model) === true;
+}
 function boundedIdentifier(value, _label) {
     if (typeof value !== 'string' || !/^[a-z][a-z0-9-]{0,63}$/u.test(value))
         return null;
@@ -125,11 +130,13 @@ function inventoryAuthSource(status) {
             return null;
     }
 }
-function inventoryAuthClass(providerId, api, status, routePolicy) {
+function inventoryAuthClass(providerId, api, status, routePolicy, isUsingOAuth) {
     if (!status.configured)
         return null;
+    if (isUsingOAuth)
+        return 'oauth';
     const policy = routePolicy ?? findRoutePolicyForProviderApi(providerId, api, ROUTE_POLICIES);
-    const concreteAllowed = policy?.allowed_auth_classes.filter((entry) => entry !== 'none' && entry !== 'unknown') ?? [];
+    const concreteAllowed = policy?.allowed_auth_classes.filter((entry) => entry !== 'none' && entry !== 'unknown' && entry !== 'oauth') ?? [];
     if (concreteAllowed.length === 1)
         return concreteAllowed[0];
     return 'api-key';

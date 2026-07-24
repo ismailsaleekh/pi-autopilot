@@ -16,11 +16,15 @@ import {
 
 void describe('Phase 37 W1 route policies', () => {
   void it('embeds exact W0 non-certifying route policy seeds and registry hash', () => {
-    assert.equal(ROUTE_POLICIES.length, 5);
+    assert.equal(ROUTE_POLICIES.length, 6);
     assert.deepEqual(verifyRoutePolicySeeds(), []);
     assert.equal(
       ROUTE_POLICY_REGISTRY_SHA256,
-      'sha256:1ab6cb1d816aeba66caaeb0bff4fc5c1faf643a8ce1bb55a1a3c3d28076bb751',
+      'sha256:66d807ca546daaf16ff114f9961ffe4aef9ff4d692545f9f3411319d09d34848',
+    );
+    assert.deepEqual(
+      ROUTE_POLICIES.map((policy) => `${policy.route_policy_id}:${policy.revision}`),
+      ROUTE_POLICIES.map((policy) => `${policy.route_policy_id}:${policy.revision}`).sort((left, right) => left.localeCompare(right)),
     );
     assert.equal(ROUTE_POLICIES.every((policy) => policy.non_certifying_seed), true);
     assert.equal(ROUTE_POLICIES.every((policy) => policy.forbidden_gateways.includes('openrouter')), true);
@@ -57,6 +61,22 @@ void describe('Phase 37 W1 route policies', () => {
 
     assert.equal(result.matched, true);
     assert.equal(result.route_policy_id, 'codex-subscription-v1');
+    assert.equal(result.route_policy_revision, 1);
+    assert.deepEqual(result.diagnostics, []);
+  });
+
+  void it('selects the direct Anthropic subscription route from OAuth facts', () => {
+    const result = resolveRoute({
+      schema_version: 'autopilot.route_resolution_request.v1',
+      provider_id: 'anthropic',
+      api: 'anthropic-messages',
+      auth_class: 'oauth',
+      auth_source: 'stored',
+      project_trusted: true,
+    });
+
+    assert.equal(result.matched, true);
+    assert.equal(result.route_policy_id, 'anthropic-opus5-sonnet5-subscription-v1');
     assert.equal(result.route_policy_revision, 1);
     assert.deepEqual(result.diagnostics, []);
   });

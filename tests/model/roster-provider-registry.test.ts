@@ -31,9 +31,21 @@ void describe('Phase37 central W4 provider registry', () => {
   void it('integrates all provider packs without treating pack presence as readiness', () => {
     assert.deepEqual(
       W4_PROVIDER_PACK_REGISTRY.map((entry) => entry.provider_id).sort(),
-      ['anthropic', 'kimi-coding', 'openai-codex', 'opencode-go', 'zai'].sort(),
+      ['anthropic', 'anthropic', 'kimi-coding', 'openai-codex', 'openai-codex', 'opencode-go', 'zai'].sort(),
+    );
+    assert.deepEqual(
+      W4_PROVIDER_PACK_REGISTRY.map((entry) => entry.provider_pack_id),
+      W4_PROVIDER_PACK_REGISTRY.map((entry) => entry.provider_pack_id).sort((left, right) => left.localeCompare(right)),
     );
     assert.equal(W4_PROVIDER_PACK_REGISTRY.some((entry) => entry.readiness === 'blocked-current-pack'), true);
+    const opus5Sonnet5 = W4_PROVIDER_PACK_REGISTRY.find((entry) => entry.provider_pack_id === 'anthropic-opus5-sonnet5-subscription-w4');
+    assert.notEqual(opus5Sonnet5, undefined);
+    assert.deepEqual(opus5Sonnet5?.ready_profiles, ['precision']);
+    assert.equal(opus5Sonnet5?.required_evidence.length, 10);
+    const gpt55Heavy = W4_PROVIDER_PACK_REGISTRY.find((entry) => entry.provider_pack_id === 'codex-gpt55-heavy-sol-terra-w4');
+    assert.notEqual(gpt55Heavy, undefined);
+    assert.deepEqual(gpt55Heavy?.ready_profiles, ['cruise']);
+    assert.equal(gpt55Heavy?.required_evidence.length, 10);
     assert.equal(W4_PROVIDER_PACK_REGISTRY.every((entry) => entry.trusted_manifest_ids.length === 0), true);
     assert.equal(W4_PROVIDER_PACK_REGISTRY.every((entry) => entry.trusted_manifest_sha256s.length === 0), true);
     assert.equal(W4_PROVIDER_PACK_REGISTRY.every((entry) => entry.trusted_certified_roster_sha256s.length === 0), true);

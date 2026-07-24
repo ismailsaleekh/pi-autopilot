@@ -110,6 +110,7 @@ function makeContext(pi: FakePi, cwd: string, trusted = true): ExtensionCommandC
         assert.equal(provider, 'openai-codex');
         return { configured: true, source: 'stored' };
       },
+      isUsingOAuth: () => true,
     },
     sessionManager: { getSessionId: () => 'e2e-session' },
     isIdle: () => true,
