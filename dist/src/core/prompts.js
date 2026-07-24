@@ -106,6 +106,58 @@ Use these schema names:\n${schemas}
 After the context gate and resume reads, answer concisely with workstream, runtime root, gate/percent, mission/master-plan status, latest decision id, current queues, audit/scope/protected review queues, whether a strategy exists, next dependency-cleared units, validation plan, held work, and accepted coordinator planning-contradiction packets (normally none).
 ${optionalBlock('Operator-provided task intro', input.taskIntro)}`;
 }
+/**
+ * The D65 bootstrap-plan-only parent prompt (freeze §9.5; fresh plan §2.3
+ * `parent-planning`). This is the SOLE model action allowed in bootstrap mode.
+ * It is write-scoped to EXACTLY the five previously-absent charter roots under
+ * the runtime root; it must create no child, unit worktree, claim, attempt,
+ * model dispatch, product edit, handoff, terminal action, or extra runtime
+ * authority. Child work is impossible until the coordinator accepts graph
+ * sequence 2, which the runtime publishes mechanically after this turn.
+ */
+export function renderAutopilotBootstrapPlanPrompt(input) {
+    const roots = ['mission.md', 'master-plan.json', 'state.json', 'decision-log.jsonl', 'events.jsonl']
+        .map((name) => `  - \`${input.runtimeRoot}/${name}\``)
+        .join('\n');
+    return `# Role: Autopilot bootstrap parent (planning only)
+
+You are Autopilot for workstream \`${input.workstream}\` (run \`${input.workstreamRun}\`), operating in the D65 **bootstrap-plan-only** turn. The run has an accepted bootstrap graph, an operator-signed launch policy, and an accepted initial governing program heartbeat. No complete semantic graph exists yet, so **no child work of any kind is possible** until the runtime publishes and the coordinator accepts the first complete graph (sequence 2).
+
+## Hard startup gate — do this first
+
+1. Before reading files, inspecting runtime state, or planning, call \`${CONTEXT_BUDGET_TOOL_NAME}\` with no arguments.
+2. If the tool is unavailable, errors, returns \`gate: "halt"\`, or returns \`gate: "unknown"\`, write nothing and stop.
+3. Continue only when \`gate: "ok"\`. Record the returned percent in \`${input.runtimeRoot}/state.json\`.
+
+## The only permitted action this turn
+
+Create EXACTLY these five previously-absent charter roots and nothing else:
+
+${roots}
+
+- \`mission.md\` — the mission statement (Markdown).
+- \`master-plan.json\` — a valid \`autopilot.master_plan.v1\` document.
+- \`state.json\` — a valid \`autopilot.state.v1\` document.
+- \`decision-log.jsonl\` — one-per-line \`autopilot.decision.v1\` records (start with the plan-created decision).
+- \`events.jsonl\` — one-per-line \`autopilot.event.v1\` records (start with the state-created event).
+
+## Absolute prohibitions for this turn
+
+- Do NOT launch any child, create any unit worktree, acquire any claim, register any attempt, or dispatch any model. It is mechanically impossible and will fence the run.
+- Do NOT edit any product/source path, any path outside the exact five charter roots, or any other runtime authority file. Any write outside the five roots is terminal scope evidence and aborts the launch.
+- Do NOT request \`/autopilot-close\` or \`/autopilot-abort\`, prepare a handoff, or take any terminal action.
+- Do NOT run source gates, builds, tests, provider calls, or shell pipelines.
+- Git is worktree-scoped to \`${input.worktreePath}\`; do not touch the operator source checkout or any remote.
+
+## What happens next (automatic)
+
+After you write exactly the five charter roots, the Autopilot runtime mechanically validates them, publishes the first complete semantic graph (sequence 2), and accepts the successor governing program heartbeat. Only THEN will Autopilot deliver the ordinary continuation turn in which child work becomes possible. Do not attempt to trigger that yourself.
+
+## First response shape
+
+Report concisely: the context gate percent, the mission summary, the master-plan units/lanes you planned, and confirmation that you wrote exactly the five charter roots and nothing else.
+${optionalBlock('Operator-provided task intro', input.taskIntro)}`;
+}
 export function renderOnboardPrompt(input) {
     return `# Role: Autopilot onboard-brief generator
 

@@ -14,7 +14,42 @@ Start or resume an Autopilot parent orchestration session for a workstream.
 
 ## Synopsis
 
-`/autopilot <workstream> [--roster <id>] [task intro/current focus]`
+`/autopilot <workstream> [--launch-manifest <absolute-path>] [--roster <id>] [task intro/current focus]`
+
+## D65 sealed launch mode
+
+When `--launch-manifest <absolute-path>` is present, `/autopilot` enters the closed
+D65 launch mode and consumes a sealed `autopilot.launch_manifest.v1` prelaunch package
+rather than regenerating a run. The manifest binds the fixed prelaunch identity
+(program/workstream/workstream-run, run timestamp/nonce, clone/roots/repo identity, B0,
+content-result, package, branch, roots, bootstrap overlay, trust anchor, prospective
+run/resource, roster hash, signed policy candidate, program evidence root, and launch
+audit/seal). Every sealed value is consumed exactly, never regenerated; a relative
+path, oversized/symlinked file, unknown field, or internal mismatch fails closed with
+no run state.
+
+In launch mode `/autopilot`:
+
+1. attaches the run with the sealed `attach-run.bootstrap_graph` through **exactly one**
+   initial dispatch session;
+2. creates the full-tree main worktree from `content_result_commit` through the frozen
+   bootstrap saga;
+3. registers the operator-signed launch policy (one previously-absent policy path,
+   sole parent = content-result commit) and accepts the operator-signed initial
+   governing program heartbeat — both produced by the external
+   [`autopilot-launch-signer`](../cli/autopilot-launch-signer.md); runtime never signs;
+4. delivers a **bootstrap-plan-only** parent turn that may write only the five charter
+   roots (`mission.md`, `master-plan.json`, `state.json`, `decision-log.jsonl`,
+   `events.jsonl`);
+5. on `agent_settled`, mechanically publishes the first complete graph (sequence 2),
+   accepts the successor governing heartbeat, adopts that exact single session (starting
+   its periodic heartbeat only now), and delivers the ordinary continuation turn.
+
+Ordinary child dispatch is impossible until graph sequence 2 and its successor
+heartbeat are accepted. Any parent write outside the five charter roots, any signature/
+identity/cap mismatch, or any stale/forked/expired heartbeat fences the launch before a
+model or child boundary. Omitting `--launch-manifest` preserves the exact legacy
+behavior below byte-for-byte.
 
 ## Behavior
 
@@ -52,4 +87,7 @@ uncertified custom evidence.
 
 - [`autopilot-inject.md`](autopilot-inject.md), [`autopilot-handoff.md`](autopilot-handoff.md)
 - Roster subsystem: [`../subsystems/roster-onboarding.md`](../subsystems/roster-onboarding.md)
+- D65 launch signer: [`../cli/autopilot-launch-signer.md`](../cli/autopilot-launch-signer.md)
+- Concepts: [`../concepts/semantic-graph-authority.md`](../concepts/semantic-graph-authority.md),
+  [`../concepts/dispatch-and-recovery-authority.md`](../concepts/dispatch-and-recovery-authority.md)
 - Tool: [`../tools/context_budget.md`](../tools/context_budget.md)

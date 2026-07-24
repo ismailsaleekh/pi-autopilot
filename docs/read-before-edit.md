@@ -32,6 +32,7 @@ here are not yet governed by a doc; coverage ratchets up per PR (C8 floor).
 | `src/cli/autopilot-agent-run.ts` | [`cli/autopilot-agent-run`](cli/autopilot-agent-run.md) |
 | `src/cli/autopilot-coordinator-bootstrap.ts` | [`cli/autopilot-coordinator`](cli/autopilot-coordinator.md) |
 | `src/cli/autopilot-coordinator.ts` | [`cli/autopilot-coordinator`](cli/autopilot-coordinator.md) |
+| `src/cli/autopilot-launch-signer.ts` | [`cli/autopilot-launch-signer`](cli/autopilot-launch-signer.md) |
 | `src/cli/migration-recovery.ts` | [`concepts/migration-cutover`](concepts/migration-cutover.md) |
 | `src/core/adjudication/index.ts` | [`subsystems/quality-and-closure`](subsystems/quality-and-closure.md) |
 | `src/core/agent-runner.ts` | [`subsystems/runner-and-forced-output`](subsystems/runner-and-forced-output.md) |

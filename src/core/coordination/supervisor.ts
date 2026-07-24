@@ -438,6 +438,136 @@ export class DurableRunSupervisorClient {
     return { run: attachedRun, session, contextPath, context };
   }
 
+  /**
+   * The D65 bootstrap attach (freeze §9.5; fresh plan §2.3/§3). Unlike the
+   * ordinary `attach()`, this sends `attach-run` carrying the exact sealed
+   * `bootstrap_graph` so the store atomically creates the deterministic
+   * bootstrap-artifact/trust rows and the closed `autopilot.attach_run_result.v2`
+   * effect (receipt B=1 over a fresh empty repository). It then attaches EXACTLY
+   * ONE initial dispatch session (generation 1) using the sealed idempotency
+   * keys, and returns that single attachment. Every identity — run/resource
+   * rows, attach-run/attach-session idempotency keys, session lease — comes from
+   * the sealed launch manifest and is consumed, never regenerated. The caller
+   * (the launcher) owns the remaining charter saga on this same one session.
+   */
+  async attachD65Bootstrap(input: {
+    readonly repo: AutopilotRepoIdentity;
+    readonly active: ActiveAutopilotRow;
+    readonly rawSessionId: string;
+    readonly bootstrapGraph: Readonly<Record<string, unknown>>;
+    readonly prospectiveRun: Readonly<Record<string, unknown>>;
+    readonly prospectiveResource: Readonly<Record<string, unknown>>;
+    readonly attachRunIdempotencyKey: string;
+    readonly attachSessionIdempotencyKey: string;
+    readonly sessionLeaseId: string;
+  }): Promise<RunSupervisorAttachment> {
+    const repoId = input.repo.repoKey;
+    const sessionId = durableIdentifier('session', input.rawSessionId);
+    const status = await this.#client.query('run-catalog', repoId, input.active.workstream_run);
+    const runValues = payloadArray(status, 'runs');
+    const pendingRecoveryCount = requireInteger(status.payload, 'pending_migration_recovery_count');
+    if (pendingRecoveryCount > 0) throw new CoordinationRuntimeError('recovery-required', 'D65 bootstrap attach is fenced while migration recovery work is pending', [`pending_count=${String(pendingRecoveryCount)}`]);
+    let run: CoordinationRun;
+    if (runValues.length === 0) {
+      const attachedRun = await this.#client.mutate('attach-run', {
+        repoId,
+        workstreamRun: input.active.workstream_run,
+        sessionId: null,
+        fencingGeneration: null,
+        expectedVersion: 0,
+        idempotencyKey: input.attachRunIdempotencyKey,
+      }, {
+        repo_key: input.repo.repoKey,
+        canonical_root: input.repo.repoRoot,
+        git_common_dir: input.repo.gitCommonDir,
+        autopilot_id: input.active.autopilot_id,
+        workstream: input.active.workstream,
+        coordination_authority: input.active.coordination_authority,
+        run_resource: input.prospectiveResource,
+        bootstrap_graph: input.bootstrapGraph,
+      });
+      run = parseCoordinationRun(payloadRecord(attachedRun, 'run'));
+    } else if (runValues.length === 1) {
+      // Idempotent replay after a response-loss crash before session attach.
+      run = parseCoordinationRun(runValues[0]);
+      if (run.autopilot_id !== input.active.autopilot_id || run.workstream !== input.active.workstream || run.coordination_authority !== input.active.coordination_authority) throw new CoordinationRuntimeError('invalid-state', 'durable D65 bootstrap run identity disagrees with the sealed active row');
+      const artifacts = status.payload['authoritative_artifacts'];
+      const hasBootstrap = Array.isArray(artifacts) && artifacts.some((value) => typeof value === 'object' && value !== null && (value as Record<string, unknown>)['artifact_id'] === `semantic-graph-bootstrap:${run.workstream_run}`);
+      if (!hasBootstrap && run.active_session_generation === 0) throw new CoordinationRuntimeError('invalid-state', 'existing run for this D65 identity is not a bootstrap run; refusing to attach a second session');
+    } else {
+      throw new CoordinationRuntimeError('invalid-state', 'coordinator returned duplicate durable run supervisors for the D65 bootstrap identity');
+    }
+    const generation = run.active_session_generation + 1;
+    if (generation !== 1) {
+      // A session already exists (crash-after-session-attach replay). Adopt the
+      // existing exactly-one attached generation-1 dispatch session by reading
+      // its durable context; the launcher then resumes the charter idempotently.
+      const existing = await this.#adoptExistingD65BootstrapSession(input, run);
+      if (existing !== null) return existing;
+      throw new CoordinationRuntimeError('invalid-state', 'D65 bootstrap run already advanced its generation without a recoverable single session', [String(run.active_session_generation)]);
+    }
+    const sessionLeaseId = input.sessionLeaseId;
+    const sessionToken = randomBytes(32).toString('hex');
+    const attachSession = await this.#client.mutate('attach-session', {
+      repoId,
+      workstreamRun: run.workstream_run,
+      sessionId,
+      fencingGeneration: generation,
+      expectedVersion: run.version,
+      idempotencyKey: input.attachSessionIdempotencyKey,
+    }, {
+      session_lease_id: sessionLeaseId,
+      session_token: sessionToken,
+      pid: process.pid,
+      boot_id: currentBootId(),
+      lease_expires_at: leaseExpiry(),
+      handoff_token: null,
+    });
+    const attachedRun = parseCoordinationRun(payloadRecord(attachSession, 'run'));
+    const session = parseCoordinationSessionLease(payloadRecord(attachSession, 'session'));
+    const context: CoordinatorSessionContext = {
+      schema_version: AUTOPILOT_COORDINATOR_SESSION_CONTEXT_SCHEMA,
+      state_root: this.#client.paths.stateRoot,
+      repo_id: repoId,
+      repo_key: input.repo.repoKey,
+      autopilot_id: input.active.autopilot_id,
+      workstream: input.active.workstream,
+      workstream_run: input.active.workstream_run,
+      session_id: session.session_id,
+      session_generation: session.session_generation,
+      run_version: attachedRun.version,
+      session_lease_id: session.session_lease_id,
+      session_token: sessionToken,
+      session_version: session.version,
+      pid: session.pid,
+      boot_id: session.boot_id,
+    };
+    const contextPath = join(this.#client.paths.sessionsRoot, `${createHash('sha256').update(`${repoId}\0${run.workstream_run}\0${session.session_lease_id}`, 'utf8').digest('hex')}.json`);
+    await writeCoordinatorSessionContext(contextPath, context);
+    return { run: attachedRun, session, contextPath, context };
+  }
+
+  /**
+   * Recover the durable context for an already-attached D65 bootstrap session
+   * (crash after the single attach-session, before/after later charter stages).
+   * Only the exact one attached generation-1 dispatch session is adopted; a
+   * missing durable context file fails loud rather than creating a second one.
+   */
+  async #adoptExistingD65BootstrapSession(input: { readonly repo: AutopilotRepoIdentity; readonly active: ActiveAutopilotRow; readonly sessionLeaseId: string }, run: CoordinationRun): Promise<RunSupervisorAttachment | null> {
+    const repoId = input.repo.repoKey;
+    const status = await this.#client.query('status', repoId, run.workstream_run);
+    const sessions = payloadArray(status, 'session_leases').map((value) => parseCoordinationSessionLease(value));
+    const attached = sessions.filter((session) => session.status === 'attached' && session.attachment_kind === 'dispatch' && session.session_generation === run.active_session_generation);
+    if (attached.length !== 1) return null;
+    const session = attached[0];
+    if (session === undefined || session.session_lease_id !== input.sessionLeaseId) return null;
+    const contextPath = join(this.#client.paths.sessionsRoot, `${createHash('sha256').update(`${repoId}\0${run.workstream_run}\0${session.session_lease_id}`, 'utf8').digest('hex')}.json`);
+    if (!existsSync(contextPath)) return null;
+    const context = await readCoordinatorSessionContext(contextPath);
+    if (context.session_lease_id !== session.session_lease_id || context.session_generation !== session.session_generation) return null;
+    return { run, session, contextPath, context };
+  }
+
   async consumeReconciliationReceipt(response: CoordinatorResponseEnvelope, context: CoordinatorSessionContext): Promise<void> {
     const receipt = parseOptionalCoordinationReconciliationReceipt(response.payload['reconciliation_receipt']);
     if (receipt !== null) await this.#client.reconciliationDetails({ repoId: context.repo_id, workstreamRun: context.workstream_run, sessionId: context.session_id, fencingGeneration: context.session_generation, sessionLeaseId: context.session_lease_id, sessionToken: context.session_token, receipt });
@@ -620,6 +750,33 @@ export class AutopilotSessionBridge {
     await bridge.reconcileOwnedRun('session-attachment-before-mailbox-and-dispatch');
     if (bridge.#recoverOwnedOperations !== null) await bridge.#recoverOwnedOperations(bridge.#attachment.contextPath);
     await bridge.drainMailbox();
+    bridge.#startHeartbeat();
+    return bridge;
+  }
+
+  /**
+   * ADOPT an already-established durable attachment (D65 single-session launch;
+   * fresh plan §3 "exactly one initial bootstrap session"). The launcher already
+   * attached exactly one session, drove the full bootstrap charter, and accepted
+   * the first complete graph + successor heartbeat on THAT session. The session
+   * bridge must therefore adopt that exact attachment/context — reusing its
+   * lease, token, generation, and durable context file — rather than create a
+   * second no-handoff attachment. No new attach-run/attach-session/lease/token/
+   * context is created; the periodic session heartbeat starts only now, after
+   * graph sequence 2 is accepted, so the bootstrap event window stays exactly the
+   * frozen 9-event B→E prefix.
+   */
+  static async adopt(input: { readonly attachment: RunSupervisorAttachment; readonly sink: CoordinationMessageSink; readonly env?: ProcessEnvLike; readonly recoverOwnedOperations?: (contextPath: string) => Promise<void> }): Promise<AutopilotSessionBridge> {
+    const supervisor = new DurableRunSupervisorClient(input.env ?? process.env);
+    const bridge = new AutopilotSessionBridge(supervisor, input.attachment, input.sink, input.recoverOwnedOperations ?? null);
+    // The D65 launcher already established clean, freshly-bootstrapped state on
+    // this exact session: the main-worktree saga is committed, the mailbox is
+    // empty, and no owned operation needs recovery. Running a pre-dispatch
+    // `reconcile-run` here would emit a maintenance event that advances the
+    // coordinator sequence past the just-accepted complete graph and stale it,
+    // fencing the immediately-following mailbox drain. Adoption therefore starts
+    // the periodic heartbeat directly; ongoing reconciliation/recovery/drain run
+    // through that heartbeat's owned cadence exactly as for a started bridge.
     bridge.#startHeartbeat();
     return bridge;
   }

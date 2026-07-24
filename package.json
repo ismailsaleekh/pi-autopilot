@@ -41,6 +41,7 @@
   "bin": {
     "autopilot-agent-run": "bin/autopilot-agent-run.mjs",
     "autopilot-coordinator": "bin/autopilot-coordinator.mjs",
+    "autopilot-launch-signer": "bin/autopilot-launch-signer.mjs",
     "autopilot-s2-corpus-rehearsal": "bin/autopilot-s2-corpus-rehearsal.mjs"
   },
   "scripts": {

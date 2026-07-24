@@ -6,6 +6,12 @@ export interface ParsedAutopilotArgs {
   readonly workstream: string;
   readonly remainder: string;
   readonly rosterId: string | null;
+  /**
+   * The absolute path to a sealed D65 prelaunch manifest, when the caller
+   * supplies `--launch-manifest <absolute-path>`. Its presence selects the
+   * closed D65 launch mode; its absence preserves the exact legacy behavior.
+   */
+  readonly launchManifestPath: string | null;
 }
 
 export interface ParsedAutopilotCloseArgs {
@@ -117,6 +123,20 @@ export function parseAutopilotArgs(args: string, options: ParseAutopilotArgsOpti
   }
   let remainder = firstSpace < 0 ? '' : trimmed.slice(firstSpace).trim();
   let rosterId: string | null = null;
+  let launchManifestPath: string | null = null;
+  // `--launch-manifest <absolute-path>` selects the closed D65 launch mode. It
+  // may appear before or after `--roster`; the remaining text is the task intro.
+  // A relative or empty path is rejected (no inferred default).
+  {
+    const match = /^--launch-manifest(?:\s+|=)(\S+)(?:\s+([\s\S]*))?$/u.exec(remainder);
+    if (/^--launch-manifest(?:\s|=|$)/u.test(remainder)) {
+      const candidate = match?.[1];
+      if (candidate === undefined) return { ok: false, message: 'Usage: /autopilot <workstream> --launch-manifest <absolute-path> [--roster <id>] [task intro]' };
+      if (!candidate.startsWith('/') || candidate.includes('\u0000')) return { ok: false, message: '--launch-manifest requires an absolute path.' };
+      launchManifestPath = candidate;
+      remainder = (match?.[2] ?? '').trim();
+    }
+  }
   if (options.parseRoster !== false && /^--roster(?:\s|=|$)/u.test(remainder)) {
     const match = /^--roster\s+(\S+)(?:\s+([\s\S]*))?$/u.exec(remainder);
     const candidateRosterId = match?.[1];
@@ -129,7 +149,16 @@ export function parseAutopilotArgs(args: string, options: ParseAutopilotArgsOpti
     rosterId = candidateRosterId;
     remainder = (match?.[2] ?? '').trim();
   }
-  return { ok: true, value: { workstream, remainder, rosterId } };
+  // Allow `--launch-manifest` to follow `--roster` as well.
+  if (launchManifestPath === null && /^--launch-manifest(?:\s|=|$)/u.test(remainder)) {
+    const match = /^--launch-manifest(?:\s+|=)(\S+)(?:\s+([\s\S]*))?$/u.exec(remainder);
+    const candidate = match?.[1];
+    if (candidate === undefined) return { ok: false, message: 'Usage: /autopilot <workstream> --launch-manifest <absolute-path> [--roster <id>] [task intro]' };
+    if (!candidate.startsWith('/') || candidate.includes('\u0000')) return { ok: false, message: '--launch-manifest requires an absolute path.' };
+    launchManifestPath = candidate;
+    remainder = (match?.[2] ?? '').trim();
+  }
+  return { ok: true, value: { workstream, remainder, rosterId, launchManifestPath } };
 }
 
 export function parseAutopilotInjectArgs(args: string): ParseAutopilotInjectArgsResult {

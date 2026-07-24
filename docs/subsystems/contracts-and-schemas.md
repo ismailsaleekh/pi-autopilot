@@ -16,8 +16,8 @@ covers_surfaces:
 covers_sources:
   - src/core/contracts/index.ts
   - src/core/names.ts
-signature_hash: 'sha256:09d5b894b45a6ee909d86cc0f308ba3e12e25aad1bf7b6bb02c08611fa3eded0'
-body_hash: 'sha256:d0b47661598d9edfdfb1e69c53c73fbaf7899938f26da34f5355186802b830df'
+signature_hash: 'sha256:6ee03c7fb6ad764d8fac92d0ed9ed092d712b0054a8abcbdddb6b9c7b798c527'
+body_hash: 'sha256:32eac81d894fa08c0563d7633e91c35b829f0b43c2815b142663fda076937a0d'
 stability: stable
 ---
 

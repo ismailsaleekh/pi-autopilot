@@ -9,6 +9,23 @@ stability: stable
 
 # Operation: Start or Resume a Run
 
+## D65 sealed launch (recovery/first-wave runs)
+
+A D65 fresh run starts from a sealed prelaunch package produced out of band by the
+operator/control plane. Launch it with:
+
+`/autopilot <workstream> --launch-manifest <absolute-path> [task intro]`
+
+The runtime consumes the sealed `autopilot.launch_manifest.v1` exactly: it binds the
+fixed prelaunch identity, attaches the run with the sealed bootstrap graph through one
+session, creates the full-tree main worktree from the content-result commit, consumes
+the operator-signed launch policy + initial heartbeat (never self-signed; see
+[`../cli/autopilot-launch-signer.md`](../cli/autopilot-launch-signer.md)), runs a
+bootstrap-plan-only parent turn limited to the five charter roots, then mechanically
+publishes the first complete graph and accepts the successor heartbeat before any
+ordinary child dispatch. Any mismatch exits before a parent model call. Omitting
+`--launch-manifest` uses the ordinary roster-resolved path below unchanged.
+
 ## Recipe
 
 1. In a Pi session, run `/autopilot <workstream> [--roster <id>] [task intro]`.

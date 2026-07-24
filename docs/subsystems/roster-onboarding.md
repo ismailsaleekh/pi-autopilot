@@ -81,8 +81,8 @@ covers_sources:
   - src/internal/execution-observer-extension.ts
   - templates/skills/autopilot-roster-setup/SKILL.md
   - templates/skills/autopilot-roster-setup/payload.json
-signature_hash: 'sha256:803bb3fc2e2f4dfe6f4dda4b1588f9fc4c63b06a4c30ffb0d20cfe1f8ff38683'
-body_hash: 'sha256:37938b39c381ce872fafc5b45fca2ef94ab18dd36c6a8303820225b052034218'
+signature_hash: 'sha256:65e0ff2b8897b03cb04396f41d85620adfe929a558d45b0553399f5141dca92b'
+body_hash: 'sha256:8ef758a17cc1948bec67f88de2109f7775e2274e61bc8b19316d0c6cf91d1c99'
 stability: evolving
 ---
 

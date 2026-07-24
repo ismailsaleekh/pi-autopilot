@@ -17,7 +17,11 @@ import { replayPendingCoordinatorReconciliation } from "./core/coordination/reco
 import { reconcileRetainedFailedUnitAuthority } from "./core/unit-failure.js";
 import { AutopilotSessionBridge } from "./core/coordination/supervisor.js";
 import { ensureMainWorktreeSagaRegistered } from "./core/coordination/worktree-saga.js";
-import { handoffUsage, onboardUsage, renderAutopilotPrompt, renderHandoffPrompt, renderOnboardPrompt, } from "./core/prompts.js";
+import { handoffUsage, onboardUsage, renderAutopilotBootstrapPlanPrompt, renderAutopilotPrompt, renderHandoffPrompt, renderOnboardPrompt, } from "./core/prompts.js";
+import { parseD65LaunchManifest, launchManifestBytesSha256, D65_LAUNCH_MANIFEST_MAX_BYTES } from "./core/coordination/d65-launch-manifest.js";
+import { SpawnedD65LaunchSigner } from "./core/coordination/d65-launch-signer.js";
+import { beginD65LaunchBootstrap, detectD65CharterComplete, publishD65FirstGraphAndSuccessorHeartbeat, registerD65LaunchPolicyAndInitialHeartbeat, } from "./core/coordination/d65-launch-integration.js";
+import { readFileSync, lstatSync } from 'node:fs';
 import { coordinationCutoverCommitted } from "./core/coordination/migration-paths.js";
 import { autopilotRosterContractCanonicalJson, autopilotRosterContractHashField, autopilotRosterContractSha256OmittingOwnField, isAutopilotRosterContractSchemaVersion, parseAutopilotRosterContract, parseAutopilotRosterContractJson, } from "./core/roster/contracts.js";
 import { isLaunchableRosterCandidate } from "./core/roster/activation-fence.js";
@@ -982,6 +986,37 @@ function normalizeTrustedProjectRoot(path) {
 function notify(ctx, message, kind) {
     ctx.ui.notify(message, kind);
 }
+/**
+ * The default external launch signer resolver. It reads a mode-0600
+ * `signer-invocation.json` from the sealed program evidence root that names the
+ * absolute `command`, optional base `args`, and the signer config path. The
+ * runtime never learns the operator private key path; the signer CLI resolves it
+ * from its own config. This keeps signing entirely outside runtime authority.
+ */
+function defaultLaunchSignerResolver(manifest, env) {
+    const invocationPath = resolve(manifest.program_evidence_root, 'signer-invocation.json');
+    const before = lstatSync(invocationPath);
+    if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1 || (before.mode & 0o777) !== 0o600 || before.size > 65_536) {
+        throw new Error(`launch signer invocation ${invocationPath} must be a one-link no-follow regular mode-0600 file <=64 KiB`);
+    }
+    const parsed = JSON.parse(readFileSync(invocationPath, 'utf8'));
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed))
+        throw new Error('launch signer invocation must be an object');
+    const record = parsed;
+    if (record['schema_version'] !== 'autopilot.launch_signer_invocation.v1')
+        throw new Error('launch signer invocation schema is wrong');
+    const command = record['command'];
+    if (typeof command !== 'string' || !command.startsWith('/'))
+        throw new Error('launch signer invocation command must be an absolute path');
+    const rawArgs = record['args'];
+    const baseArgs = Array.isArray(rawArgs) ? rawArgs.map((entry) => { if (typeof entry !== 'string')
+        throw new Error('launch signer invocation args must be strings'); return entry; }) : [];
+    const configPath = record['config_path'];
+    if (configPath !== undefined && typeof configPath !== 'string')
+        throw new Error('launch signer invocation config_path must be a string');
+    const args = configPath === undefined ? baseArgs : [...baseArgs, '--config', configPath];
+    return new SpawnedD65LaunchSigner({ command, baseArgs: args, env });
+}
 export default function autopilotExtension(pi, dependencies = {}) {
     const rosterActivationStore = dependencies.rosterActivationStore ?? new ProductionRosterActivationStore(dependencies.rosterStateRoot);
     const prepareWorkstream = dependencies.prepareAutopilotWorkstream ?? prepareAutopilotWorkstream;
@@ -1000,6 +1035,12 @@ export default function autopilotExtension(pi, dependencies = {}) {
     let sessionBridge = null;
     let lifecycleSessionId = `pi-session-${randomUUID()}`;
     let handoffRequested = false;
+    const resolveLaunchSigner = dependencies.resolveLaunchSigner ?? defaultLaunchSignerResolver;
+    // The pending D65 bootstrap-plan-only launch. While set, the next
+    // `agent_settled` publishes the first complete graph + successor heartbeat and
+    // delivers the ordinary continuation turn. It is cleared on completion,
+    // failure, or session shutdown.
+    let pendingD65Launch = null;
     let rosterSetupBundle = null;
     let rosterSetupActivationToken = null;
     let rosterSetupSkillPath = null;
@@ -1493,11 +1534,183 @@ export default function autopilotExtension(pi, dependencies = {}) {
         registerWorktreeGuardIfSupported();
         return prepared;
     }
+    /**
+     * Load and strictly parse a sealed D65 launch manifest from an absolute path.
+     * The file must be a bounded, one-link, no-follow regular file; a relative
+     * path, oversized file, symlink, or unknown field rejects. No fallback.
+     */
+    function loadLaunchManifest(absolutePath) {
+        const before = lstatSync(absolutePath);
+        if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1 || before.size > D65_LAUNCH_MANIFEST_MAX_BYTES) {
+            throw new Error(`launch manifest ${absolutePath} must be a one-link no-follow regular file <= ${String(D65_LAUNCH_MANIFEST_MAX_BYTES)} bytes`);
+        }
+        const bytes = readFileSync(absolutePath);
+        const manifest = parseD65LaunchManifest(JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)));
+        // Bind the manifest's own launch_seal digest to the exact loaded bytes when
+        // the seal names itself is forbidden; here we only record the loaded digest
+        // for evidence. The seal digest is the launch-audit seal, not a self-hash.
+        void launchManifestBytesSha256(bytes);
+        return manifest;
+    }
+    /**
+     * Drive stages 1-6 of the D65 launch from a sealed manifest: attach-run with
+     * bootstrap_graph through ONE session, create the main worktree, register the
+     * operator-signed policy, accept the initial governing heartbeat, then deliver
+     * the bootstrap-plan-only parent prompt. The single session bridge is NOT
+     * adopted yet: the periodic session heartbeat must stay off until graph
+     * sequence 2 is accepted (the 9-event bootstrap window). Returns true when the
+     * bootstrap-plan turn was dispatched.
+     */
+    async function activateD65Launch(input) {
+        const { manifest, ctx } = input;
+        const env = process.env;
+        let signer;
+        try {
+            signer = resolveLaunchSigner(manifest, env);
+        }
+        catch (error) {
+            notify(ctx, `Autopilot could not resolve the external launch signer: ${error instanceof Error ? error.message : String(error)}. No run state was created.`, 'error');
+            return false;
+        }
+        // Enforce the pinned parent request profile before any mutation.
+        try {
+            activateContextBudget();
+        }
+        catch (error) {
+            notify(ctx, `Autopilot could not activate context_budget for the D65 launch: ${error instanceof Error ? error.message : String(error)}`, 'error');
+            return false;
+        }
+        let bootstrap;
+        try {
+            bootstrap = await beginD65LaunchBootstrap({ manifest, rawSessionId: rawSessionId(ctx), env });
+            await registerD65LaunchPolicyAndInitialHeartbeat({ manifest, attachment: bootstrap.attachment, signer, env });
+        }
+        catch (error) {
+            const message = error instanceof CoordinationRuntimeError ? formatCoordinationRuntimeError(error) : error instanceof Error ? error.message : String(error);
+            notify(ctx, `Autopilot D65 launch bootstrap failed closed: ${message}. No parent model call was made.`, 'error');
+            return false;
+        }
+        activeAutopilotWorkstream = manifest.workstream;
+        activeAutopilotRuntimeRoot = manifest.runtime_root;
+        activeAutopilotWorktreePath = manifest.main_worktree_path;
+        activeAutopilotWorkstreamRun = manifest.workstream_run;
+        registerWorktreeGuardIfSupported();
+        pendingD65Launch = { manifest, bootstrap, signer, taskIntro: input.taskIntro, inFlight: false };
+        const prompt = renderAutopilotBootstrapPlanPrompt({
+            workstream: manifest.workstream,
+            runtimeRoot: manifest.runtime_root,
+            workstreamRun: manifest.workstream_run,
+            worktreePath: manifest.main_worktree_path,
+            taskIntro: input.taskIntro,
+        });
+        try {
+            pi.sendUserMessage(prompt, { deliverAs: 'followUp' });
+        }
+        catch (error) {
+            pendingD65Launch = null;
+            notify(ctx, `Autopilot D65 launch prepared ${manifest.workstream_run} but could not deliver the bootstrap-plan prompt: ${error instanceof Error ? error.message : String(error)}`, 'error');
+            return false;
+        }
+        notify(ctx, `Autopilot D65 launch bootstrap active for ${manifest.workstream} (${manifest.workstream_run}); awaiting the bootstrap-plan turn.`, 'info');
+        return true;
+    }
+    /**
+     * Stage 7-9, fired on `agent_settled` after the bootstrap-plan turn: validate
+     * the five charter roots, publish the first complete graph (sequence 2), accept
+     * the successor governing heartbeat, adopt the single session bridge (starting
+     * its periodic heartbeat now), and deliver the ordinary continuation turn.
+     * Idempotent and fail-closed; child dispatch is impossible until this succeeds.
+     */
+    async function completeD65LaunchIfReady(ctx) {
+        const pending = pendingD65Launch;
+        if (pending === null || pending.inFlight)
+            return;
+        let charterComplete;
+        try {
+            charterComplete = detectD65CharterComplete(pending.manifest);
+        }
+        catch (error) {
+            pendingD65Launch = null;
+            notify(ctx, `Autopilot D65 bootstrap parent violated the charter scope: ${error instanceof Error ? error.message : String(error)}. The launch is fenced; no child work occurred.`, 'error');
+            return;
+        }
+        if (!charterComplete)
+            return; // parent has not yet written the five charter roots; wait for the next settle.
+        pending.inFlight = true;
+        try {
+            await publishD65FirstGraphAndSuccessorHeartbeat({ manifest: pending.manifest, attachment: pending.bootstrap.attachment, signer: pending.signer, env: process.env });
+        }
+        catch (error) {
+            pending.inFlight = false;
+            const message = error instanceof CoordinationRuntimeError ? formatCoordinationRuntimeError(error) : error instanceof Error ? error.message : String(error);
+            notify(ctx, `Autopilot D65 first-graph publication failed closed: ${message}. The run stays bootstrap-only; no child work is possible.`, 'error');
+            return;
+        }
+        // Adopt the exact single session; the periodic heartbeat starts only now.
+        const sendMessage = pi.sendMessage;
+        if (sendMessage === undefined) {
+            pending.inFlight = false;
+            notify(ctx, 'Autopilot cannot adopt its durable run supervisor because Pi sendMessage is unavailable.', 'error');
+            return;
+        }
+        try {
+            const adopted = await AutopilotSessionBridge.adopt({
+                attachment: pending.bootstrap.attachment,
+                recoverOwnedOperations: async (contextPath) => {
+                    const env = { ...process.env, [AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV]: contextPath };
+                    await recoverAutopilotWorktreeSagas({ active: pending.bootstrap.active, env });
+                    await ensureMainWorktreeSagaRegistered({ active: pending.bootstrap.active, env });
+                },
+                sink: {
+                    send: (message, delivery, triggerTurn) => sendMessage(message, { deliverAs: delivery, triggerTurn }),
+                    isIdle: () => ctx.isIdle?.() ?? true,
+                },
+            });
+            sessionBridge = adopted;
+            activateClaimResponseTool();
+            process.env[AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV] = adopted.attachment.contextPath;
+        }
+        catch (error) {
+            pending.inFlight = false;
+            const message = error instanceof CoordinationRuntimeError ? formatCoordinationRuntimeError(error) : error instanceof Error ? error.message : String(error);
+            notify(ctx, `Autopilot D65 launch session adoption failed closed: ${message}.`, 'error');
+            return;
+        }
+        const runtimeRoot = pending.manifest.runtime_root;
+        const continuation = renderAutopilotPrompt({
+            workstream: pending.manifest.workstream,
+            runtimeRoot,
+            runnerInvocation: runnerInvocationFromModuleUrl(import.meta.url),
+            taskIntro: pending.taskIntro,
+            workstreamRun: pending.manifest.workstream_run,
+            sourceRepo: pending.manifest.canonical_root,
+            worktreePath: pending.manifest.main_worktree_path,
+            branch: pending.manifest.run_branch,
+            repoKey: pending.manifest.repo_key,
+            targetBranch: pending.manifest.target_branch,
+            rosterTransition: null,
+        });
+        pendingD65Launch = null;
+        try {
+            pi.sendUserMessage(continuation, { deliverAs: 'followUp' });
+        }
+        catch (error) {
+            notify(ctx, `Autopilot D65 launch reached ordinary dispatch for ${pending.manifest.workstream_run} but could not deliver the continuation prompt: ${error instanceof Error ? error.message : String(error)}`, 'error');
+            return;
+        }
+        notify(ctx, `Autopilot D65 launch complete for ${pending.manifest.workstream} (${pending.manifest.workstream_run}); ordinary child dispatch is now permitted.`, 'info');
+    }
     if (pi.on !== undefined) {
         pi.on('session_start', (_event, ctx) => {
             resetRosterSetupForSession();
             const restored = ctx.sessionManager?.getSessionId();
             lifecycleSessionId = restored === undefined || restored.length === 0 ? `pi-session-${randomUUID()}` : restored;
+        });
+        pi.on('agent_settled', async (_event, ctx) => {
+            // After the D65 bootstrap-plan-only turn settles, publish the first
+            // complete graph and enable ordinary dispatch. No-op when no launch is
+            // pending. Errors are surfaced loudly and leave the run bootstrap-fenced.
+            await completeD65LaunchIfReady(ctx);
         });
         pi.on('resources_discover', () => {
             if (rosterSetupSkillPath === null)
@@ -1571,6 +1784,10 @@ export default function autopilotExtension(pi, dependencies = {}) {
         });
         pi.on('session_shutdown', async (event, ctx) => {
             deactivateRosterSetupTool();
+            // A D65 launch interrupted before graph sequence 2 leaves its durable
+            // bootstrap authority intact; a fresh `/autopilot ... --launch-manifest`
+            // in a new session recovers it idempotently. Clear only in-memory state.
+            pendingD65Launch = null;
             if (sessionBridge === null)
                 return;
             try {
@@ -1603,6 +1820,25 @@ export default function autopilotExtension(pi, dependencies = {}) {
             const originalCommand = originalAutopilotCommand(args);
             if (failIfRosterSetupRestartRequired(ctx))
                 return;
+            // Closed D65 launch mode: when `--launch-manifest <absolute-path>` is
+            // present, `/autopilot` consumes the sealed prelaunch package rather than
+            // regenerating a run. The legacy path below is unchanged when it is absent.
+            if (parsed.value.launchManifestPath !== null) {
+                let manifest;
+                try {
+                    manifest = loadLaunchManifest(parsed.value.launchManifestPath);
+                }
+                catch (error) {
+                    notify(ctx, `Autopilot launch manifest is invalid: ${error instanceof Error ? error.message : String(error)}. No run state was created.`, 'error');
+                    return;
+                }
+                if (manifest.workstream !== parsed.value.workstream) {
+                    notify(ctx, `Autopilot launch manifest workstream ${manifest.workstream} does not match the command workstream ${parsed.value.workstream}. No run state was created.`, 'error');
+                    return;
+                }
+                await activateD65Launch({ manifest, ctx, taskIntro: parsed.value.remainder });
+                return;
+            }
             const activationNow = clock();
             const plannedWorkstreamRun = buildAutopilotWorkstreamRun(parsed.value.workstream, activationNow);
             const rosterResolution = await rosterActivationStore.resolve({ parsed: parsed.value, ctx, originalCommand, env: process.env, plannedWorkstreamRun, now: activationNow });
@@ -1669,7 +1905,7 @@ export default function autopilotExtension(pi, dependencies = {}) {
                 notify(ctx, parsed.message, 'warning');
                 return;
             }
-            const autopilotEquivalent = { workstream: parsed.value.workstream, remainder: '', rosterId: null };
+            const autopilotEquivalent = { workstream: parsed.value.workstream, remainder: '', rosterId: null, launchManifestPath: null };
             const originalCommand = `/${AUTOPILOT_COMMAND} ${parsed.value.workstream}`;
             if (failIfRosterSetupRestartRequired(ctx))
                 return;
