@@ -249,10 +249,11 @@ test injects an absolute state root. Roster authority paths are:
 | Trusted-project roster revision | `<trusted-project>/.autopilot/rosters/<roster-id>/revision-<revision>.json` |
 
 Trusted-project reads and writes require project trust. The closed
-`<workstream-run>` storage grammar accepts the production timestamped identity bytes
-emitted by `buildAutopilotWorkstreamRun` (including uppercase UTC `T`/`Z`), while
-remaining bounded to 120 ASCII alphanumeric-or-hyphen bytes; separators such as `_`,
-`/`, and `..` reject before publication. Pre-run selection files are create-only:
+`<workstream-run>` storage and activation grammar accepts sealed production/D65
+identity bytes, including canonical uppercase UTC `T`/`Z`. The ordinary local
+`buildAutopilotWorkstreamRun` generator retains lowercase `t`/`z` for compatibility.
+Both forms remain bounded to 120 ASCII alphanumeric-or-hyphen bytes; separators such
+as `_`, `/`, and `..` reject before publication or activation. Pre-run selection files are create-only:
 byte-identical replay is idempotent, different existing bytes are a conflict. Before publishing the run-local selection mirror, the runtime creates or
 hardens `.pi/autopilot/<workstream>/` as a physical private authority directory; mirror
 publication and exact-byte readback therefore cannot fail merely because the newly

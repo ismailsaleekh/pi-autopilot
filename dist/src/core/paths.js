@@ -1,7 +1,11 @@
 import { randomBytes } from 'node:crypto';
 import { AUTOPILOT_RUNTIME_ROOT_PREFIX } from "./names.js";
 const WORKSTREAM_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
-const WORKSTREAM_RUN_PATTERN = /^[a-z][a-z0-9-]{0,119}$/u;
+// Locally generated run ids remain lowercase for compatibility, while sealed
+// production/D65 run authority may carry canonical UTC `T`/`Z` bytes. Keep the
+// activation grammar aligned with the closed roster schemas without admitting
+// separators, traversal, Unicode, or more than 120 ASCII bytes.
+const WORKSTREAM_RUN_PATTERN = /^[A-Za-z][A-Za-z0-9-]{0,119}$/u;
 const ROSTER_ID_PATTERN = /^[a-z][a-z0-9-]{0,95}$/u;
 const WORKSTREAM_RUN_MAX_LENGTH = 120;
 export function isValidWorkstreamSlug(value) {

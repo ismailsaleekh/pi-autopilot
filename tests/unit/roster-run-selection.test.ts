@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { describe, it } from 'node:test';
 
+import { isValidWorkstreamRun } from '../../src/core/paths.ts';
 import { canonicalRosterJson } from '../../src/core/roster/canonical.ts';
 import { SEED_CANDIDATES } from '../../src/core/roster/provider-recipes.ts';
 import {
@@ -109,6 +110,11 @@ void describe('D69 W3 immutable pre-run selection/runtime snapshot lane', () => 
   void it('accepts the exact production timestamped KBG workstream-run identity and keeps the path grammar closed', async () => {
     await withTempDir(async (dir) => {
       const exactRun = 'kbg-finalize-fresh-20260722T220032Z-181913';
+      assert.equal(isValidWorkstreamRun(exactRun), true);
+      assert.equal(isValidWorkstreamRun('kbg-finalize-fresh-20260722t220032z-181913'), true);
+      for (const invalidRun of ['bad_run', '../escape', 'bad/run', 'é-run', `a${'a'.repeat(120)}`]) {
+        assert.equal(isValidWorkstreamRun(invalidRun), false, invalidRun);
+      }
       const publication = buildCanonicalPreRunSelection({
         stateRoot: join(dir, 'state'),
         repo_id: 'sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',

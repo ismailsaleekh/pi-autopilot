@@ -81,25 +81,27 @@ void describe('legacy coordination canonical preflight', () => {
     });
   });
 
-  void it('resumes a real workstream while preserving its old-session claim identity', async () => {
+  void it('activates and resumes an exact uppercase-T/Z sealed run while preserving its old-session claim identity', async () => {
     await withTempDir(async (root) => {
       const source = join(root, 'source');
+      const exactRun = 'kbg-finalize-fresh-20260722T220032Z-181913';
       await initGitSource(source);
       const previousStateRoot = process.env[AUTOPILOT_STATE_ROOT_ENV];
       process.env[AUTOPILOT_STATE_ROOT_ENV] = join(root, 'state');
       try {
-        const prepared = await prepareAutopilotWorkstream({ workstream: 'production-preflight', sourceCwd: source, now: new Date('2026-07-11T15:12:30.000Z') });
+        const prepared = await prepareAutopilotWorkstream({ workstream: 'kbg-finalize-fresh', workstreamRun: exactRun, sourceCwd: source, now: new Date('2026-07-11T15:12:30.000Z') });
+        assert.equal(prepared.active.workstream_run, exactRun);
         const simulatedPriorProcess = { ...prepared.active, pid: prepared.active.pid + 10, boot_id: 'prior-process-boot' };
         const coordinationRoot = coordinationRootForRepo(prepared.active.repo_key);
         const durableClaim = legacyClaim(simulatedPriorProcess);
         await writeActiveAutopilots(coordinationRoot, [simulatedPriorProcess]);
         await writePathClaims(coordinationRoot, [durableClaim]);
-        const resumed = await prepareAutopilotWorkstream({ workstream: 'production-preflight', sourceCwd: source, now: new Date('2026-07-11T15:12:31.000Z') });
+        const resumed = await prepareAutopilotWorkstream({ workstream: 'kbg-finalize-fresh', workstreamRun: exactRun, sourceCwd: source, now: new Date('2026-07-11T15:12:31.000Z') });
         const rows = await readActiveAutopilots(coordinationRoot);
         const claims = await readFile(join(coordinationRoot, 'path-claims.json'), 'utf8');
         assert.equal(rows[0]?.pid, process.pid);
         assert.equal(rows[0]?.active_run_epoch, simulatedPriorProcess.active_run_epoch + 1);
-        assert.equal(resumed.active.workstream_run, simulatedPriorProcess.workstream_run);
+        assert.equal(resumed.active.workstream_run, exactRun);
         assert.match(claims, new RegExp(`"active_run_epoch": ${String(durableClaim.active_run_epoch)}`, 'u'));
       } finally {
         if (previousStateRoot === undefined) delete process.env[AUTOPILOT_STATE_ROOT_ENV];
