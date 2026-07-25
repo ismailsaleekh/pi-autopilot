@@ -5,6 +5,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import {
   parseAutopilotDecisionRow,
   parseAutopilotMasterPlan,
+  resolveAutopilotRuntimeReference,
 } from '../contracts/index.ts';
 import type { AutopilotDecisionRow, AutopilotMasterPlan } from '../contracts/types.ts';
 
@@ -31,16 +32,6 @@ export interface AutopilotPurposeSnapshot {
   readonly masterPlan: AutopilotMasterPlan | null;
   readonly decisionsTail: readonly AutopilotDecisionRow[];
 }
-
-const REQUIRED_MISSION_SECTIONS = [
-  'Goal',
-  'Non-goals / exclusions',
-  'Perfect-quality bar',
-  'Definition of done',
-  'Key constraints',
-  'Current strategy summary',
-  'Open questions',
-] as const;
 
 export async function readAutopilotPurposeSnapshot(input: {
   readonly root: string;
@@ -72,7 +63,7 @@ export async function readAutopilotPurposeSnapshot(input: {
   }
 
   if (mission !== null && masterPlan !== null) {
-    const missionRef = resolveRef(input.root, masterPlan.mission_ref, 'master_plan.mission_ref');
+    const missionRef = resolvePurposeRef(input.root, masterPlan.workstream, masterPlan.mission_ref, 'master_plan.mission_ref');
     if (missionRef !== mission.path) {
       throw new AutopilotPurposeStoreError(
         'purpose-ref-mismatch',
@@ -83,7 +74,7 @@ export async function readAutopilotPurposeSnapshot(input: {
 
   for (const decision of decisions) {
     if (decision.master_plan_ref !== undefined) {
-      resolveRef(input.root, decision.master_plan_ref, 'decision.master_plan_ref');
+      resolvePurposeRef(input.root, decision.workstream, decision.master_plan_ref, 'decision.master_plan_ref');
     }
     if (masterPlan !== null && decision.workstream !== masterPlan.workstream) {
       throw new AutopilotPurposeStoreError(
@@ -120,14 +111,12 @@ export async function readAutopilotMissionIfPresent(path: string): Promise<Autop
     throw new AutopilotPurposeStoreError('invalid-mission', `mission.md is not a file at ${path}`);
   }
   const text = await readFile(path, 'utf8');
+  if (text.trim().length === 0) throw new AutopilotPurposeStoreError('invalid-mission', `mission.md is empty at ${path}`);
+  // BUG-182: headings are useful metadata, not a second hidden mission schema.
+  // The bootstrap contract asks for a Markdown mission statement; rejecting a
+  // concise, non-empty statement because it did not reproduce seven template
+  // headings stranded an otherwise valid graph after model planning.
   const sections = extractMissionSections(text);
-  const missing = REQUIRED_MISSION_SECTIONS.filter((section) => !sections.includes(section));
-  if (missing.length > 0) {
-    throw new AutopilotPurposeStoreError(
-      'invalid-mission',
-      `mission.md missing required section(s): ${missing.join(', ')}`,
-    );
-  }
   const frozenSections = Object.freeze(sections);
   return Object.freeze({ path, text, sections: frozenSections });
 }
@@ -237,6 +226,12 @@ async function writeJsonAtomic(path: string, value: unknown): Promise<void> {
     await rm(tempPath, { force: true });
     throw error;
   }
+}
+
+function resolvePurposeRef(root: string, workstream: string, ref: string, label: string): string {
+  const runtimeRef = resolveAutopilotRuntimeReference(workstream, ref);
+  if (runtimeRef === null) throw new AutopilotPurposeStoreError('reference-escape', `${label} ${ref} is not a local reference for workstream ${workstream}`);
+  return resolveRef(root, runtimeRef.runtime_relative_ref, label);
 }
 
 function resolveRef(root: string, ref: string, label: string): string {

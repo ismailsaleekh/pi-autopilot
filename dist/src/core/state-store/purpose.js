@@ -1,7 +1,7 @@
 import { appendFile, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { parseAutopilotDecisionRow, parseAutopilotMasterPlan, } from "../contracts/index.js";
+import { parseAutopilotDecisionRow, parseAutopilotMasterPlan, resolveAutopilotRuntimeReference, } from "../contracts/index.js";
 const parseJsonValue = globalThis.JSON.parse;
 export class AutopilotPurposeStoreError extends Error {
     code;
@@ -11,15 +11,6 @@ export class AutopilotPurposeStoreError extends Error {
         this.code = code;
     }
 }
-const REQUIRED_MISSION_SECTIONS = [
-    'Goal',
-    'Non-goals / exclusions',
-    'Perfect-quality bar',
-    'Definition of done',
-    'Key constraints',
-    'Current strategy summary',
-    'Open questions',
-];
 export async function readAutopilotPurposeSnapshot(input) {
     assertAbsoluteRoot(input.root);
     const decisionTailLimit = input.decisionTailLimit ?? 50;
@@ -40,14 +31,14 @@ export async function readAutopilotPurposeSnapshot(input) {
         }
     }
     if (mission !== null && masterPlan !== null) {
-        const missionRef = resolveRef(input.root, masterPlan.mission_ref, 'master_plan.mission_ref');
+        const missionRef = resolvePurposeRef(input.root, masterPlan.workstream, masterPlan.mission_ref, 'master_plan.mission_ref');
         if (missionRef !== mission.path) {
             throw new AutopilotPurposeStoreError('purpose-ref-mismatch', `master-plan mission_ref ${masterPlan.mission_ref} does not resolve to mission.md`);
         }
     }
     for (const decision of decisions) {
         if (decision.master_plan_ref !== undefined) {
-            resolveRef(input.root, decision.master_plan_ref, 'decision.master_plan_ref');
+            resolvePurposeRef(input.root, decision.workstream, decision.master_plan_ref, 'decision.master_plan_ref');
         }
         if (masterPlan !== null && decision.workstream !== masterPlan.workstream) {
             throw new AutopilotPurposeStoreError('decision-workstream-mismatch', `decision ${String(decision.id)} workstream ${decision.workstream} does not match master-plan workstream ${masterPlan.workstream}`);
@@ -76,11 +67,13 @@ export async function readAutopilotMissionIfPresent(path) {
         throw new AutopilotPurposeStoreError('invalid-mission', `mission.md is not a file at ${path}`);
     }
     const text = await readFile(path, 'utf8');
+    if (text.trim().length === 0)
+        throw new AutopilotPurposeStoreError('invalid-mission', `mission.md is empty at ${path}`);
+    // BUG-182: headings are useful metadata, not a second hidden mission schema.
+    // The bootstrap contract asks for a Markdown mission statement; rejecting a
+    // concise, non-empty statement because it did not reproduce seven template
+    // headings stranded an otherwise valid graph after model planning.
     const sections = extractMissionSections(text);
-    const missing = REQUIRED_MISSION_SECTIONS.filter((section) => !sections.includes(section));
-    if (missing.length > 0) {
-        throw new AutopilotPurposeStoreError('invalid-mission', `mission.md missing required section(s): ${missing.join(', ')}`);
-    }
     const frozenSections = Object.freeze(sections);
     return Object.freeze({ path, text, sections: frozenSections });
 }
@@ -171,6 +164,12 @@ async function writeJsonAtomic(path, value) {
         await rm(tempPath, { force: true });
         throw error;
     }
+}
+function resolvePurposeRef(root, workstream, ref, label) {
+    const runtimeRef = resolveAutopilotRuntimeReference(workstream, ref);
+    if (runtimeRef === null)
+        throw new AutopilotPurposeStoreError('reference-escape', `${label} ${ref} is not a local reference for workstream ${workstream}`);
+    return resolveRef(root, runtimeRef.runtime_relative_ref, label);
 }
 function resolveRef(root, ref, label) {
     const resolved = resolve(root, ref);

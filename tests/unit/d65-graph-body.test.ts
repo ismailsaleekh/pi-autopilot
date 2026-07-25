@@ -54,6 +54,18 @@ describe('D65 complete graph core discovery', () => {
     assert.equal(discovered.descriptors.master_plan.document_schema_version, 'autopilot.master_plan.v1');
   });
 
+  it('BUG-182 accepts the canonical repository-relative spelling of the core mission ref', () => {
+    const prefix = '.pi/autopilot/demo';
+    const masterPlan = JSON.stringify({
+      schema_version: 'autopilot.master_plan.v1', workstream: 'demo', mission_ref: `${prefix}/mission.md`, goal_summary: 'demo', non_goals: [], definition_of_done: ['done'], risk_level: 'low',
+      lanes: [{ lane_id: 'main', summary: 'main', unit_ids: ['u1'] }], units: { u1: { unit_id: 'u1', role: 'validate', state: 'ready', dependencies: [], summary: 'validate' } },
+      ownership_matrix: { owned_paths: [], read_only_paths: [], untouchable_paths: [], held_paths: [] }, verification_matrix: verificationPlan(), closure_criteria: ['done'], current_focus: 'u1',
+      last_decision_id: 1, last_event_id: 1, updated_at: '2026-07-22T00:00:00.000Z',
+    });
+    const discovered = discoverD65GraphCore({ readGitAtG: coreReader({ [`${prefix}/master-plan.json`]: `${masterPlan}\n` }), runtimePrefix: prefix, workstream: 'demo' });
+    assert.equal(discovered.master_plan.mission_ref, `${prefix}/mission.md`);
+  });
+
   it('rejects a ledger gap and stale state/master-plan tail authority', () => {
     const gap = `${JSON.stringify({ schema_version: 'autopilot.event.v1', id: 2, ts: '2026-07-22T00:00:00.000Z', event: 'state_created', workstream: 'demo', summary: 'gap' })}\n`;
     assert.throws(

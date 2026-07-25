@@ -218,22 +218,15 @@ function masterPlan(worktree: string): AutopilotMasterPlan {
 }
 
 function missionText(): string {
+  // BUG-182 live-bootstrap shape: concise Markdown remains purpose truth without
+  // reproducing an unrelated seven-heading template.
   return [
     '# Quality Demo Mission',
-    '## Goal',
-    'Prove durable purpose truth.',
-    '## Non-goals / exclusions',
-    'No live provider call.',
-    '## Perfect-quality bar',
-    'No band-aids or fake-green closure.',
+    'Prove durable purpose truth on one exact tip.',
     '## Definition of done',
     'State, plan, and decisions validate.',
-    '## Key constraints',
-    'Offline only.',
-    '## Current strategy summary',
-    'Use package-owned purpose state.',
-    '## Open questions',
-    'None.',
+    '## Constraints',
+    'Use exact schemas and no live provider call.',
   ].join('\n');
 }
 
@@ -379,15 +372,17 @@ void describe('Autopilot purpose state', () => {
           workstream: 'quality-demo',
           summary: 'Master plan created.',
           decision: 'Use durable purpose truth before queue state.',
-          master_plan_ref: 'master-plan.json',
+          // BUG-182: model-authored purpose refs may use the canonical
+          // repository-relative spelling as well as runtime-root-relative text.
+          master_plan_ref: '.pi/autopilot/quality-demo/master-plan.json',
         },
       });
       await writeAutopilotMasterPlanAtomic({
         masterPlanPath: join(runtimeRoot, 'master-plan.json'),
-        masterPlan: masterPlan(worktree),
+        masterPlan: { ...masterPlan(worktree), mission_ref: '.pi/autopilot/quality-demo/mission.md' },
       });
       const purpose = await readAutopilotPurposeSnapshot({ root: runtimeRoot, requirePurpose: true });
-      assert.equal(purpose.mission?.sections.includes('Goal'), true);
+      assert.equal(purpose.mission?.sections.includes('Definition of done'), true);
       assert.equal(purpose.masterPlan?.last_decision_id, 1);
       assert.equal(purpose.decisionsTail.length, 1);
 
@@ -411,6 +406,12 @@ void describe('Autopilot purpose state', () => {
       const snapshot = await readAutopilotResumeSnapshot({ root: runtimeRoot });
       assert.equal(snapshot.purpose.masterPlan?.workstream, 'quality-demo');
       assert.equal(snapshot.state.workstream, 'quality-demo');
+
+      await writeFile(join(runtimeRoot, 'mission.md'), '   \n', 'utf8');
+      await assert.rejects(
+        async () => await readAutopilotPurposeSnapshot({ root: runtimeRoot, requirePurpose: true }),
+        /mission\.md is empty/u,
+      );
     });
   });
 });

@@ -3,6 +3,7 @@ import {
   parseAutopilotEventRow,
   parseAutopilotMasterPlan,
   parseAutopilotState,
+  resolveAutopilotRuntimeReference,
   parseAutopilotStatusEntry,
   type AutopilotDecisionRow,
   type AutopilotEventRow,
@@ -117,7 +118,8 @@ export function discoverD65GraphCore(input: {
   const decisions = jsonl(decisionsBlob.bytes, refs.decision_log, parseAutopilotDecisionRow, (entry) => entry.id);
   const events = jsonl(eventsBlob.bytes, refs.events, parseAutopilotEventRow, (entry) => entry.id);
   if (masterPlan.workstream !== input.workstream || state.workstream !== input.workstream) fail('core master-plan/state workstream differs from graph workstream');
-  if (masterPlan.mission_ref !== 'mission.md') fail('master-plan mission_ref is not the exact core mission ref', [masterPlan.mission_ref]);
+  const missionRef = resolveAutopilotRuntimeReference(input.workstream, masterPlan.mission_ref);
+  if (missionRef === null || missionRef.repository_ref !== refs.mission) fail('master-plan mission_ref does not resolve to the core mission ref', [masterPlan.mission_ref, refs.mission]);
   const latestDecision = decisions[decisions.length - 1]?.id ?? 0;
   const latestEvent = events[events.length - 1]?.id ?? 0;
   if (masterPlan.last_decision_id !== latestDecision) fail('master-plan last_decision_id differs from the exact decision ledger tail', [String(masterPlan.last_decision_id), String(latestDecision)]);

@@ -141,6 +141,11 @@ ${roots}
 - \`decision-log.jsonl\` — one-per-line \`autopilot.decision.v1\` records (start with the plan-created decision).
 - \`events.jsonl\` — one-per-line \`autopilot.event.v1\` records (start with the state-created event).
 
+References among these five runtime documents may use either their runtime-root-relative
+spelling (for example \`mission.md\`) or the exact repository-relative spelling printed
+above (for example \`.pi/autopilot/${input.workstream}/mission.md\`). Both resolve to the
+same runtime document; aliases and another workstream's prefix do not.
+
 ## Absolute prohibitions for this turn
 
 - Do NOT launch any child, create any unit worktree, acquire any claim, register any attempt, or dispatch any model. It is mechanically impossible and will fence the run.

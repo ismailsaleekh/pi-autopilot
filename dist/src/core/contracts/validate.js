@@ -1511,6 +1511,33 @@ function relativePathIssues(pathValue, label) {
     }
     return issues;
 }
+/**
+ * Resolve either supported spelling of one runtime-local reference:
+ *
+ * - runtime-root-relative: `mission.md`
+ * - canonical repository-relative: `.pi/autopilot/<workstream>/mission.md`
+ *
+ * BUG-182 exposed three consumers that each assumed only the first spelling even
+ * though the public relative-path contract admits both. Keep the original bytes
+ * untouched, reject aliases/cross-workstream prefixes, and return one semantic
+ * target so callers compare authority rather than string presentation.
+ */
+export function resolveAutopilotRuntimeReference(workstream, ref) {
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(workstream) || ref.length > 512 || ref !== ref.normalize('NFC') || ref.split('/').some((segment) => segment.length === 0) || relativePathIssues(ref, 'runtime reference').length > 0)
+        return null;
+    const runtimePrefix = `.pi/autopilot/${workstream}`;
+    const reservedPrefix = '.pi/autopilot/';
+    let runtimeRelativeRef = ref;
+    if (ref.startsWith(reservedPrefix)) {
+        const exactPrefix = `${runtimePrefix}/`;
+        if (!ref.startsWith(exactPrefix))
+            return null;
+        runtimeRelativeRef = ref.slice(exactPrefix.length);
+    }
+    if (runtimeRelativeRef.length === 0 || runtimeRelativeRef.split('/').some((segment) => segment.length === 0) || relativePathIssues(runtimeRelativeRef, 'runtime-relative reference').length > 0)
+        return null;
+    return Object.freeze({ runtime_relative_ref: runtimeRelativeRef, repository_ref: `${runtimePrefix}/${runtimeRelativeRef}` });
+}
 function absolutePathIssues(pathValue, label) {
     const issues = [];
     if (pathValue.includes('\0'))

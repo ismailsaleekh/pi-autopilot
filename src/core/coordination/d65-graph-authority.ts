@@ -8,6 +8,7 @@ import {
   parseAutopilotReceipt,
   parseAutopilotReceiptV2,
   parseAutopilotStatusEntry,
+  resolveAutopilotRuntimeReference,
   parseAutopilotUnitSpec,
   parseAutopilotUnitSpecV2,
   type AutopilotMasterPlan,
@@ -728,7 +729,11 @@ export function discoverD65GraphAuthority(input: {
       value = value.slice(mainRoot.length + 1);
     } else {
       if (value.startsWith('/')) return null; // non-authority absolute locator
-      if (extractorRow.base === 'runtime') value = `${prefix}${value}`;
+      if (extractorRow.base === 'runtime') {
+        const resolved = resolveAutopilotRuntimeReference(input.workstream, value);
+        if (resolved === null) fail('runtime-relative transitive authority ref is malformed or names another workstream', [sourceRef, extractorRow.field_path, raw]);
+        value = resolved.repository_ref;
+      }
     }
     if (value.split('/').some((segment) => segment === '..' || segment === '.' || segment.length === 0)) fail('transitive authority ref contains an alias or empty segment', [sourceRef, extractorRow.field_path, raw]);
     return value;

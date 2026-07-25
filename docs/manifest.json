@@ -867,7 +867,7 @@
         "src/core/coordination/d65-semantic-graph.ts"
       ],
       "signature_hash": "sha256:9a5e60a3ba8f59128b16556cc1fe4af77d4d23a810f53e081e0bd219d0e33e42",
-      "body_hash": "sha256:9015e1a8a1d88ca10e68671acebbe23c88fd4397837331b58f135f49aa2c568e",
+      "body_hash": "sha256:203bcdbaa6ea2f9618ec0b2471f849462ece973733bb20240951a621edeb9e79",
       "semantic_attestation": "sha256:9015e1a8a1d88ca10e68671acebbe23c88fd4397837331b58f135f49aa2c568e"
     },
     "concepts/terminal-evidence": {

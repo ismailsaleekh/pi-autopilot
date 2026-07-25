@@ -21,6 +21,7 @@ import {
   parseAutopilotState,
   parseAutopilotStatusEntry,
   parseAutopilotUnitSpec,
+  resolveAutopilotRuntimeReference,
   type AutopilotReceipt,
   type AutopilotStatusEntry,
   type AutopilotVerificationPlan,
@@ -247,6 +248,22 @@ void describe('Autopilot contracts', () => {
       });
       assert.equal(audit.classification, 'clean');
     });
+  });
+
+  void it('BUG-182 resolves both runtime reference spellings to one target and rejects aliases', () => {
+    assert.deepEqual(resolveAutopilotRuntimeReference('demo', 'mission.md'), {
+      runtime_relative_ref: 'mission.md',
+      repository_ref: '.pi/autopilot/demo/mission.md',
+    });
+    assert.deepEqual(resolveAutopilotRuntimeReference('demo', '.pi/autopilot/demo/mission.md'), {
+      runtime_relative_ref: 'mission.md',
+      repository_ref: '.pi/autopilot/demo/mission.md',
+    });
+    assert.equal(resolveAutopilotRuntimeReference('demo', '.pi/autopilot/other/mission.md'), null);
+    assert.equal(resolveAutopilotRuntimeReference('demo', '../mission.md'), null);
+    assert.equal(resolveAutopilotRuntimeReference('demo', '/mission.md'), null);
+    assert.equal(resolveAutopilotRuntimeReference('demo', 'nested\\mission.md'), null);
+    assert.equal(resolveAutopilotRuntimeReference('demo', 'nested//mission.md'), null);
   });
 
   void it('rejects malformed Quality vNext contracts loudly', async () => {

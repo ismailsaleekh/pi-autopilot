@@ -258,6 +258,12 @@ describe('D65 transitive-ref extractor closure', () => {
     findings: [], commands: [], evidence_refs: [] as unknown[], report_ref: null, next_action: 'advance work',
   };
 
+  it('BUG-182 resolves a canonical repository-relative runtime ref without prefix duplication', () => {
+    const seeds = coreSeeds({}) as unknown as { master_plan: { mission_ref: string } };
+    seeds.master_plan.mission_ref = `${prefix}/mission.md`;
+    assert.doesNotThrow(() => discoverWithSeeds(reader([]), seeds as never));
+  });
+
   it('includes referenced status evidence as opaque evidence and rejects a wrong digest binding', () => {
     const evidenceBytes = 'raw evidence\n';
     const evidenceSha = `sha256:${createHash('sha256').update(evidenceBytes, 'utf8').digest('hex')}`;

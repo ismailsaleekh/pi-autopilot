@@ -251,8 +251,11 @@ function readSealedReceipt(path: string): Readonly<Record<string, unknown>> {
 async function writeCharterRoots(manifest: D65LaunchManifest): Promise<void> {
   const runtimeRoot = manifest.runtime_root;
   const state = { schema_version: 'autopilot.state.v1', workstream: manifest.workstream, updated_at: '2026-07-22T22:00:36.000Z', status: 'running', context_gate: { gate: 'ok', percent: 10 }, last_event_id: 1, ready_queue: [], running: [], blocked: [], completed: [], units: emptyMap(), operator_questions: [], next_actions: ['plan'] };
-  const masterPlan = { schema_version: 'autopilot.master_plan.v1', workstream: manifest.workstream, mission_ref: 'mission.md', goal_summary: 'mission', non_goals: [], definition_of_done: ['done'], risk_level: 'low', lanes: [{ lane_id: 'main', summary: 'main', unit_ids: [] }], units: emptyMap(), ownership_matrix: { owned_paths: [], read_only_paths: [], untouchable_paths: [], held_paths: [] }, verification_matrix: { positive_witnesses: [], negative_witnesses: [], regression_witnesses: [], real_boundary_witnesses: [], blast_radius_checks: [], docs_schema_prompt_checks: [], dirty_tree_checks: [] }, closure_criteria: ['done'], current_focus: 'plan', last_decision_id: 1, last_event_id: 1, updated_at: '2026-07-22T22:00:36.000Z' };
-  const decision = { schema_version: 'autopilot.decision.v1', id: 1, ts: '2026-07-22T22:00:36.000Z', event: 'master_plan_created', workstream: manifest.workstream, summary: 's', decision: 'd' };
+  // BUG-182: exercise the exact canonical repository-relative spelling a live
+  // bootstrap parent naturally derives from the five absolute charter paths.
+  const runtimePrefix = `.pi/autopilot/${manifest.workstream}`;
+  const masterPlan = { schema_version: 'autopilot.master_plan.v1', workstream: manifest.workstream, mission_ref: `${runtimePrefix}/mission.md`, goal_summary: 'mission', non_goals: [], definition_of_done: ['done'], risk_level: 'low', lanes: [{ lane_id: 'main', summary: 'main', unit_ids: [] }], units: emptyMap(), ownership_matrix: { owned_paths: [], read_only_paths: [], untouchable_paths: [], held_paths: [] }, verification_matrix: { positive_witnesses: [], negative_witnesses: [], regression_witnesses: [], real_boundary_witnesses: [], blast_radius_checks: [], docs_schema_prompt_checks: [], dirty_tree_checks: [] }, closure_criteria: ['done'], current_focus: 'plan', last_decision_id: 1, last_event_id: 1, updated_at: '2026-07-22T22:00:36.000Z' };
+  const decision = { schema_version: 'autopilot.decision.v1', id: 1, ts: '2026-07-22T22:00:36.000Z', event: 'master_plan_created', workstream: manifest.workstream, summary: 's', decision: 'd', master_plan_ref: `${runtimePrefix}/master-plan.json` };
   const event = { schema_version: 'autopilot.event.v1', id: 1, ts: '2026-07-22T22:00:36.000Z', event: 'state_created', workstream: manifest.workstream, summary: 's' };
   await mkdir(runtimeRoot, { recursive: true });
   await writeFile(join(runtimeRoot, 'mission.md'), '# Mission\n');
@@ -279,6 +282,7 @@ void describe('D65 launch via /autopilot --launch-manifest (extension)', () => {
       if (bootstrapPrompt === undefined) throw new Error('bootstrap-plan prompt was not delivered');
       assert.match(bootstrapPrompt, /bootstrap-plan-only/u);
       assert.match(bootstrapPrompt, /five previously-absent charter roots/u);
+      assert.match(bootstrapPrompt, /either their runtime-root-relative[\s\S]*exact repository-relative spelling/u);
       assert.ok(existsSync(fixture.manifest.main_worktree_path), 'main worktree created');
       const bashDecisions = await Promise.all(harness.toolCallHandlers.map(async (handler) => await handler(
         { toolName: 'bash', input: { command: 'printf pwn > PRODUCT.md' } },

@@ -1,4 +1,4 @@
-import { parseAutopilotDecisionRow, parseAutopilotEventRow, parseAutopilotMasterPlan, parseAutopilotState, parseAutopilotStatusEntry, } from "../contracts/index.js";
+import { parseAutopilotDecisionRow, parseAutopilotEventRow, parseAutopilotMasterPlan, parseAutopilotState, resolveAutopilotRuntimeReference, parseAutopilotStatusEntry, } from "../contracts/index.js";
 import { canonicalJson } from "./canonical-json.js";
 import { buildD65CoordinatorProjectionMembers } from "./d65-coordinator-projection.js";
 import { D65_CORE_KEYS, D65_GRAPH_ROOT_MAX_BYTES, bytesSha256, } from "./d65-semantic-graph.js";
@@ -87,8 +87,9 @@ export function discoverD65GraphCore(input) {
     const events = jsonl(eventsBlob.bytes, refs.events, parseAutopilotEventRow, (entry) => entry.id);
     if (masterPlan.workstream !== input.workstream || state.workstream !== input.workstream)
         fail('core master-plan/state workstream differs from graph workstream');
-    if (masterPlan.mission_ref !== 'mission.md')
-        fail('master-plan mission_ref is not the exact core mission ref', [masterPlan.mission_ref]);
+    const missionRef = resolveAutopilotRuntimeReference(input.workstream, masterPlan.mission_ref);
+    if (missionRef === null || missionRef.repository_ref !== refs.mission)
+        fail('master-plan mission_ref does not resolve to the core mission ref', [masterPlan.mission_ref, refs.mission]);
     const latestDecision = decisions[decisions.length - 1]?.id ?? 0;
     const latestEvent = events[events.length - 1]?.id ?? 0;
     if (masterPlan.last_decision_id !== latestDecision)

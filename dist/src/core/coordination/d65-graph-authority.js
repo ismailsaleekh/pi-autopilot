@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { parseAutopilotAuthority } from "../authority.js";
-import { parseAutopilotExecutionAudit, parseAutopilotExecutionCommit, parseAutopilotHistoricalFixedRosterAdapterResult, parseAutopilotReceipt, parseAutopilotReceiptV2, parseAutopilotStatusEntry, parseAutopilotUnitSpec, parseAutopilotUnitSpecV2, } from "../contracts/index.js";
+import { parseAutopilotExecutionAudit, parseAutopilotExecutionCommit, parseAutopilotHistoricalFixedRosterAdapterResult, parseAutopilotReceipt, parseAutopilotReceiptV2, parseAutopilotStatusEntry, resolveAutopilotRuntimeReference, parseAutopilotUnitSpec, parseAutopilotUnitSpecV2, } from "../contracts/index.js";
 import { parseAutopilotUnitMerge } from "../unit-merge.js";
 import { parseValidationEvidence, parseReservationValidationStaleness } from "../validation-staleness.js";
 import { parseCoordinationIntegrationConflict } from "./contracts.js";
@@ -710,8 +710,12 @@ export function discoverD65GraphAuthority(input) {
         else {
             if (value.startsWith('/'))
                 return null; // non-authority absolute locator
-            if (extractorRow.base === 'runtime')
-                value = `${prefix}${value}`;
+            if (extractorRow.base === 'runtime') {
+                const resolved = resolveAutopilotRuntimeReference(input.workstream, value);
+                if (resolved === null)
+                    fail('runtime-relative transitive authority ref is malformed or names another workstream', [sourceRef, extractorRow.field_path, raw]);
+                value = resolved.repository_ref;
+            }
         }
         if (value.split('/').some((segment) => segment === '..' || segment === '.' || segment.length === 0))
             fail('transitive authority ref contains an alias or empty segment', [sourceRef, extractorRow.field_path, raw]);

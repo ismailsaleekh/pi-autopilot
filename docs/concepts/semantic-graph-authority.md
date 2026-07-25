@@ -12,7 +12,7 @@ covers_sources:
   - src/core/coordination/d65-graph-successor.ts
   - src/core/coordination/d65-graph-publication-residue.ts
 signature_hash: 'sha256:9a5e60a3ba8f59128b16556cc1fe4af77d4d23a810f53e081e0bd219d0e33e42'
-body_hash: 'sha256:9015e1a8a1d88ca10e68671acebbe23c88fd4397837331b58f135f49aa2c568e'
+body_hash: 'sha256:203bcdbaa6ea2f9618ec0b2471f849462ece973733bb20240951a621edeb9e79'
 semantic_attestation: 'sha256:9015e1a8a1d88ca10e68671acebbe23c88fd4397837331b58f135f49aa2c568e'
 stability: evolving
 ---
@@ -62,6 +62,12 @@ A consumer discovers current authority by loading the registered complete graph,
 by scanning the worktree. The graph loader reconstructs the authority and projection
 shards and asserts the coordinator projection equals the graph's registration
 baseline; a mismatch is a loud error, never a silent re-scan.
+
+Runtime-local document references have two semantically identical spellings:
+runtime-root-relative (`mission.md`) and canonical repository-relative
+(`.pi/autopilot/<workstream>/mission.md`). BUG-182 centralizes their resolution to one
+exact repository target without rewriting stored bytes. Cross-workstream prefixes,
+absolute paths, traversal segments, backslashes, and path aliases remain invalid.
 
 ## Exact G / H / R publication
 
