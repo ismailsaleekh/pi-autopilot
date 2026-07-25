@@ -1208,8 +1208,8 @@
         "src/core/parallel-runtime.ts",
         "src/core/sparse-worktree.ts"
       ],
-      "signature_hash": "sha256:9e7f50dd59b9434e8d5c5809cb34e3bd53e01e2291356b0483f111fa71aece2e",
-      "body_hash": "sha256:da4a2afdfcb3fd0de2162311dca2a45409aeee5b781837124eac5e8b37282f8c",
+      "signature_hash": "sha256:455e4ba7b28348eef1e8d0d09e097ad5160c10e6278edbb3c6badae59bba6673",
+      "body_hash": "sha256:26553af7caa451a173e018dafad5c4e96456963709a871712bb7ed1d5d0b2dd4",
       "semantic_attestation": "sha256:da4a2afdfcb3fd0de2162311dca2a45409aeee5b781837124eac5e8b37282f8c"
     },
     "tools/autopilot_emit_status": {

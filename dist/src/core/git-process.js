@@ -3,7 +3,6 @@ import { createHash } from 'node:crypto';
 import { existsSync, lstatSync, realpathSync } from 'node:fs';
 import { platform } from 'node:os';
 import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path';
-export const GIT_QUERY_MAX_OUTPUT_BYTES = 64 * 1024 * 1024;
 export const GIT_MUTATION_DIAGNOSTIC_BYTES = 256 * 1024;
 export const GIT_DEFAULT_QUERY_TIMEOUT_MS = 30_000;
 export const GIT_DEFAULT_MUTATION_TIMEOUT_MS = 120_000;
@@ -341,14 +340,13 @@ export function runGitQuery(input) {
         cwd: input.cwd,
         env: { ...process.env, ...input.env, GIT_TERMINAL_PROMPT: '0' },
         timeout: input.timeoutMs ?? GIT_DEFAULT_QUERY_TIMEOUT_MS,
-        // spawnSync applies this independently to stdout/stderr. The explicit
-        // combined check below is the authoritative retained-output ceiling.
-        maxBuffer: GIT_QUERY_MAX_OUTPUT_BYTES + 1,
+        // BUG-181: ordinary typed queries retain their complete output. A fixed
+        // capture ceiling rejected legitimate repository trees before D65 could
+        // publish graph sequence 2. Error diagnostics remain separately bounded.
+        maxBuffer: Number.POSITIVE_INFINITY,
     });
     const stdout = new Uint8Array(result.stdout);
     const stderr = new Uint8Array(result.stderr);
-    if (stdout.byteLength + stderr.byteLength > GIT_QUERY_MAX_OUTPUT_BYTES)
-        throw new GitQueryError('output-overflow', input.descriptor.kind, `Git query exceeded the ${String(GIT_QUERY_MAX_OUTPUT_BYTES)}-byte retained output ceiling`, boundedDiagnostic(stdout, stderr));
     if (result.error !== undefined) {
         const code = queryErrorCode(result.error);
         throw new GitQueryError(code, input.descriptor.kind, result.error.message, boundedDiagnostic(stdout, stderr));
@@ -432,12 +430,12 @@ export function runGitPlumbing(input) {
         },
         ...(command.input === null ? {} : { input: command.input }),
         timeout: input.timeoutMs ?? GIT_DEFAULT_QUERY_TIMEOUT_MS,
-        maxBuffer: GIT_QUERY_MAX_OUTPUT_BYTES + 1,
+        // Plumbing shares the same uncapped successful-output contract as queries;
+        // its closed descriptors still validate the exact expected output shape.
+        maxBuffer: Number.POSITIVE_INFINITY,
     });
     const stdout = new Uint8Array(result.stdout);
     const stderr = new Uint8Array(result.stderr);
-    if (stdout.byteLength + stderr.byteLength > GIT_QUERY_MAX_OUTPUT_BYTES)
-        throw new GitPlumbingError('output-overflow', input.descriptor.kind, `Git plumbing exceeded the ${String(GIT_QUERY_MAX_OUTPUT_BYTES)}-byte retained output ceiling`, boundedDiagnostic(stdout, stderr));
     if (result.error !== undefined) {
         const code = queryErrorCode(result.error);
         throw new GitPlumbingError(code === 'output-overflow' ? 'output-overflow' : code, input.descriptor.kind, result.error.message, boundedDiagnostic(stdout, stderr));

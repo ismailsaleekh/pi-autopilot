@@ -110,21 +110,18 @@ void describe('package-owned Git process boundary', () => {
     }
   });
 
-  void it('fails loudly when combined retained query output exceeds 64 MiB and still bounds diagnostics', async () => {
-    const value = await repository('pi-autopilot-git-query-overflow-');
+  void it('BUG-181 retains complete query output beyond the former 64 MiB ceiling', async () => {
+    const value = await repository('pi-autopilot-git-query-unbounded-');
     try {
       const bin = join(value.root, 'bin');
       await mkdir(bin);
       const wrapper = join(bin, 'git');
       await writeFile(wrapper, "#!/bin/sh\ndd if=/dev/zero bs=1048576 count=33 2>/dev/null\ndd if=/dev/zero bs=1048576 count=33 1>&2 2>/dev/null\n", 'utf8');
       await chmod(wrapper, 0o755);
-      assert.throws(
-        () => runGitQuery({ descriptor: { kind: 'head' }, cwd: value.repo, env: { PATH: `${bin}:${process.env['PATH'] ?? ''}` } }),
-        (error: unknown) => error instanceof GitQueryError
-          && error.code === 'output-overflow'
-          && error.diagnostic.includes('diagnostic truncated')
-          && Buffer.byteLength(error.diagnostic, 'utf8') <= GIT_MUTATION_DIAGNOSTIC_BYTES + 128,
-      );
+      const result = runGitQuery({ descriptor: { kind: 'head' }, cwd: value.repo, env: { PATH: `${bin}:${process.env['PATH'] ?? ''}` } });
+      assert.equal(result.stdout.byteLength, 33 * 1024 * 1024);
+      assert.equal(result.stderr.byteLength, 33 * 1024 * 1024);
+      assert.equal(result.exitCode, 0);
     } finally {
       await rm(value.root, { recursive: true, force: true });
     }

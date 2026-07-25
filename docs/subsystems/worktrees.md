@@ -11,8 +11,8 @@ covers_sources:
   - src/core/materialization.ts
   - src/core/git-guard.ts
   - src/core/git-process.ts
-signature_hash: 'sha256:9e7f50dd59b9434e8d5c5809cb34e3bd53e01e2291356b0483f111fa71aece2e'
-body_hash: 'sha256:da4a2afdfcb3fd0de2162311dca2a45409aeee5b781837124eac5e8b37282f8c'
+signature_hash: 'sha256:455e4ba7b28348eef1e8d0d09e097ad5160c10e6278edbb3c6badae59bba6673'
+body_hash: 'sha256:26553af7caa451a173e018dafad5c4e96456963709a871712bb7ed1d5d0b2dd4'
 semantic_attestation: 'sha256:da4a2afdfcb3fd0de2162311dca2a45409aeee5b781837124eac5e8b37282f8c'
 stability: stable
 ---
@@ -32,7 +32,7 @@ This subsystem prepares, sizes, materializes, and guards those worktrees.
 | Disk gate before runtime/index mutation | `src/core/disk-gate.ts` |
 | Authority materialization into worktrees | `src/core/materialization.ts` |
 | Worktree-scoped parent/child git guard | `src/core/git-guard.ts` |
-| Bounded, NUL-safe git process boundary | `src/core/git-process.ts` |
+| Complete-output, NUL-safe git process boundary | `src/core/git-process.ts` |
 | D65 graph publication + worktree cadence (related; reviewed in the D65 concept docs, not covered here) | `src/core/coordination/d65-graph-publisher.ts`, `src/core/coordination/worktree-saga.ts` |
 
 ## Worktree layout
@@ -90,12 +90,15 @@ Parent and child sessions may use local git inside registered Autopilot worktree
 (staging, commits, resets, restores, checkouts, cleanups, rebases), but the guard
 rejects git whose effective cwd/work-tree is outside the active worktree, plus explicit
 git remapping, remote/external subcommands, and shared branch/tag mutation. The
-`git-process.ts` boundary is a single closed process with bounded raw-byte queries,
-NUL-safe parsing, drained mutations, process-tree timeout termination, and redacted
-diagnostics — no raw production Git exceptions escape. Recursive tracked-tree sizing
-uses the streaming `ls-tree-recursive-stream` descriptor with separate entry-count,
-cumulative-path-byte, per-record, and total lifecycle bounds; it never raises the
-64 MiB retained-output ceiling or truncates authority into a false success.
+`git-process.ts` boundary is a single closed process with complete retained output for
+ordinary typed queries, NUL-safe parsing, drained mutations, process-tree timeout
+termination, and bounded redacted error diagnostics — no raw production Git
+exceptions escape. BUG-181 removed the fixed 64 MiB successful-output ceiling after a
+legitimate D65 recursive tree exceeded it before first-graph publication. Recursive
+tracked-tree sizing continues to use the incremental
+`ls-tree-recursive-stream` descriptor with separate entry-count,
+cumulative-path-byte, per-record, and total lifecycle bounds; neither path truncates
+authority into a false success.
 
 ### D65 bootstrap-only effect fence
 

@@ -49,9 +49,10 @@ never effect truth.
 ## Failure-state model
 
 1. A query has a closed descriptor, explicit accepted/negative exits, timeout,
-   raw bytes, NUL-safe typed parsing, and a 64 MiB combined retained-output
-   ceiling. Overflow, signal, timeout, spawn failure, and unexpected exit are
-   loud query failures and cannot imply an effect.
+   complete retained raw bytes, and NUL-safe typed parsing. BUG-181 removed the
+   fixed successful-output ceiling so legitimate large repository trees are not
+   rejected; signal, timeout, spawn failure, runtime buffer failure, and
+   unexpected exit remain loud query failures and cannot imply an effect.
 2. A mutation continuously drains output and retains one bounded redacted
    diagnostic. Timeout, signal, stream/stdin/spawn/report loss, or truncation is
    `effect-unknown`.
