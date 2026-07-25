@@ -23,7 +23,13 @@ import {
   repoIdentityFromLaunchManifest,
   activeRowFromLaunchManifest,
 } from '../../src/core/coordination/d65-launch-integration.ts';
+import { parseD65LaunchManifest } from '../../src/core/coordination/d65-launch-manifest.ts';
 import { authenticateD65LaunchRoster } from '../../src/core/coordination/d65-launch-roster.ts';
+import {
+  assertD65ContextBudgetOpaqueToolCallContract,
+  buildD65ContextBudgetReceiptFixture,
+  BUG_180_PROVIDER_TOOL_CALL_ID,
+} from '../helpers/d65-context-budget-receipt.ts';
 import { recoverRuntimeRosterSelection } from '../../src/core/roster/snapshot.ts';
 import { COORDINATOR_SESSION_LEASE_MS, COORDINATOR_BOOTSTRAP_SESSION_LEASE_MS } from '../../src/core/coordination/runtime-constants.ts';
 import type { StoreClock } from '../../src/core/coordination/store.ts';
@@ -497,6 +503,24 @@ void describe('D65 launch item-I: bootstrap charter effect fence (ignored + exte
 });
 
 void describe('D65 context_budget receipt (bootstrap effect fence)', () => {
+  // BUG-180: D65 owned a PRIVATE strict-identifier grammar for the receipt's
+  // tool_call_id while the package already owned one canonical opaque tool-call-ID
+  // contract (src/core/tool-call-id.ts). The private grammar admitted no `|`, so a
+  // real Codex Responses composite id (`call_…|fc_…`) was rejected at the first
+  // mandatory receipt and fenced a live launch. The writer AND reader now consume
+  // the canonical helper, so D65 cannot drift from the shared contract again.
+  void it('BUG-180 writes, preserves, and re-accepts a real provider-native composite tool-call id', async () => {
+    const fixture = await buildD65ContextBudgetReceiptFixture('crash', parseD65LaunchManifest);
+    try {
+      assertD65ContextBudgetOpaqueToolCallContract(
+        { writeD65ContextBudgetReceipt, requireD65ContextBudgetReceipt, d65ContextBudgetReceiptPath },
+        fixture,
+      );
+    } finally {
+      await fixture.close();
+    }
+  });
+
   void it('accepts only an exact OK tool-call receipt bound to the durable session', async () => {
     const fixture = await buildD65LaunchFixture('nobudget');
     try {
@@ -506,7 +530,7 @@ void describe('D65 context_budget receipt (bootstrap effect fence)', () => {
       assert.throws(() => writeD65ContextBudgetReceipt(manifest, { gate: 'halt', percent: 90, tool_call_id: 'call-halt', session_id: sessionId }), /gate is not ok/u);
       assert.throws(() => writeD65ContextBudgetReceipt(manifest, { gate: 'unknown', percent: null, tool_call_id: 'call-unknown', session_id: sessionId }), /gate is not ok/u);
       assert.equal(existsSync(d65ContextBudgetReceiptPath(manifest)), false);
-      writeD65ContextBudgetReceipt(manifest, { gate: 'ok', percent: 12, tool_call_id: 'call-ok', session_id: sessionId });
+      writeD65ContextBudgetReceipt(manifest, { gate: 'ok', percent: 12, tool_call_id: BUG_180_PROVIDER_TOOL_CALL_ID, session_id: sessionId });
       requireD65ContextBudgetReceipt(manifest, sessionId);
       assert.throws(() => requireD65ContextBudgetReceipt(manifest, 'session-other'), /another run\/session/u);
       assert.ok(existsSync(d65ContextBudgetReceiptPath(manifest)));
@@ -522,7 +546,7 @@ void describe('D65 context_budget receipt (bootstrap effect fence)', () => {
       const { mkdirSync } = await import('node:fs');
       const receiptPath = d65ContextBudgetReceiptPath(manifest);
       mkdirSync(join(receiptPath, '..'), { recursive: true });
-      writeFileSync(receiptPath, `${JSON.stringify({ schema_version: 'autopilot.d65_context_budget_receipt.v1', program_id: manifest.program_id, workstream_run: 'foreign-run', gate: 'ok', percent: 10, tool_call_id: 'call-ok', session_id: 'session-test', extra: true })}\n`);
+      writeFileSync(receiptPath, `${JSON.stringify({ schema_version: 'autopilot.d65_context_budget_receipt.v1', program_id: manifest.program_id, workstream_run: 'foreign-run', gate: 'ok', percent: 10, tool_call_id: BUG_180_PROVIDER_TOOL_CALL_ID, session_id: 'session-test', extra: true })}\n`);
       assert.throws(() => requireD65ContextBudgetReceipt(manifest, 'session-test'), /another run\/session/u);
     } finally {
       await fixture.close();

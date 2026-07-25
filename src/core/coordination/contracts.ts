@@ -214,6 +214,25 @@ function identifierValue(value: string, label: string): string {
   return value;
 }
 
+/**
+ * The ONE coordinator session-identity contract, expressed as a reusable issue
+ * probe over the exact same bounded grammar `session_id` already binds in
+ * `parseCoordinationSessionLease` and the coordinator request envelope.
+ *
+ * A coordinator session id is PACKAGE-OWNED identity (`durableIdentifier('session',
+ * …)`), never provider-native carrier text, so a closed grammar is correct here —
+ * unlike `tool_call_id`, which is opaque provider bytes governed by
+ * `src/core/tool-call-id.ts`. Durable consumers outside this module must bind this
+ * helper rather than restate the grammar, so a second session-identity dialect can
+ * never drift from the identity the coordinator actually issues.
+ */
+export function coordinatorSessionIdIssue(value: unknown): string | null {
+  if (typeof value !== 'string') return 'must be a coordinator session identity string';
+  if (value.length < 1 || value.length > 192) return 'must contain 1..192 characters';
+  if (!IDENTIFIER.test(value)) return 'must match the bounded coordinator session-identity grammar';
+  return null;
+}
+
 function nullablePathSegmentIdentifier(record: JsonObject, field: string, label: string): string | null {
   if (record[field] === null) return null;
   return pathSegmentIdentifier(record, field, label);

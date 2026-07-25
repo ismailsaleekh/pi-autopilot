@@ -4,6 +4,8 @@ import { it } from 'node:test';
 import { getAutopilotJsonSchema, parseAutopilotReceipt } from '../../src/core/contracts/index.ts';
 import { parseAutopilotChildTerminalAcceptance } from '../../src/core/coordination/terminal-acceptance.ts';
 import { CHILD_TERMINAL_ACCEPTANCE_SCHEMA } from '../../src/core/coordination/schemas.ts';
+import { AUTOPILOT_TOOL_CALL_ID_MAX_CODE_POINTS, opaqueToolCallIdIssue } from '../../src/core/tool-call-id.ts';
+import { BUG_180_PROVIDER_TOOL_CALL_ID } from '../helpers/d65-context-budget-receipt.ts';
 
 interface JsonRecord { readonly [key: string]: unknown }
 
@@ -77,4 +79,17 @@ void it('admits a provider-native tool_call_id through the closed JSON schema de
   const receiptSchema = getAutopilotJsonSchema('receipt');
   const receiptProperties = receiptSchema['properties'] as Readonly<Record<string, Readonly<Record<string, unknown>>>>;
   assert.deepEqual(receiptProperties['tool_call_id'], toolCallIdSchema, 'receipt and terminal acceptance must publish one exact opaque contract');
+});
+
+// BUG-180 connects the D65 bootstrap `context_budget` receipt to this ALREADY-
+// CERTIFIED contract. D65 had introduced a second, private strict-identifier
+// grammar that rejected the exact live provider-native id below; the canonical
+// helper (the single implementation, deliberately not duplicated here) accepts it.
+// The D65 writer/reader behavior itself is proven in tests/crash/d65-launch-recovery
+// and the compiled witness in tests/package/d65-context-budget-dist.
+void it('BUG-180 admits the exact live Codex composite tool-call id through the one canonical contract', () => {
+  assert.equal(Array.from(BUG_180_PROVIDER_TOOL_CALL_ID).length, 83);
+  assert.equal(opaqueToolCallIdIssue(BUG_180_PROVIDER_TOOL_CALL_ID), null, 'the live provider-native composite id is canonical-valid opaque text');
+  assert.equal(AUTOPILOT_TOOL_CALL_ID_MAX_CODE_POINTS, 200);
+  assert.equal(parseAutopilotChildTerminalAcceptance(jsonRoundTrip(acceptance(BUG_180_PROVIDER_TOOL_CALL_ID))).tool_call_id, BUG_180_PROVIDER_TOOL_CALL_ID);
 });

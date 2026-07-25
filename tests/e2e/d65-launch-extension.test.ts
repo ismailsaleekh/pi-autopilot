@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash, generateKeyPairSync, sign } from 'node:crypto';
-import { chmodSync, existsSync, realpathSync } from 'node:fs';
+import { chmodSync, existsSync, readFileSync, realpathSync } from 'node:fs';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -29,6 +29,7 @@ import { parseD65LaunchPolicy } from '../../src/core/coordination/d65-launch-pol
 import { parseD65LaunchManifest, type D65LaunchManifest } from '../../src/core/coordination/d65-launch-manifest.ts';
 import type { D65LaunchSigner, D65LaunchSignerHeartbeatRequest, D65LaunchSignerPolicyRequest, D65LaunchSignerResult } from '../../src/core/coordination/d65-launch-signer.ts';
 import { d65ContextBudgetReceiptPath } from '../../src/core/coordination/d65-launch-integration.ts';
+import { BUG_180_PROVIDER_TOOL_CALL_ID } from '../helpers/d65-context-budget-receipt.ts';
 import { createContextBudgetTool } from '../../src/core/context-budget.ts';
 import { AUTOPILOT_STATE_ROOT_ENV, type ProcessEnvLike } from '../../src/core/parallel-runtime.ts';
 import { packagedCertifiedLaunchRoster } from '../helpers/d65-certified-roster.ts';
@@ -240,6 +241,13 @@ async function buildFixture(suffix: string): Promise<Fixture> {
 
 function emptyMap(): Record<string, unknown> { return {}; }
 
+/** BUG-180: read the sealed D65 context_budget receipt as a closed JSON record. */
+function readSealedReceipt(path: string): Readonly<Record<string, unknown>> {
+  const parsed: unknown = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(readFileSync(path)));
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) throw new Error('BUG-180 sealed receipt must be a JSON object');
+  return parsed as Readonly<Record<string, unknown>>;
+}
+
 async function writeCharterRoots(manifest: D65LaunchManifest): Promise<void> {
   const runtimeRoot = manifest.runtime_root;
   const state = { schema_version: 'autopilot.state.v1', workstream: manifest.workstream, updated_at: '2026-07-22T22:00:36.000Z', status: 'running', context_gate: { gate: 'ok', percent: 10 }, last_event_id: 1, ready_queue: [], running: [], blocked: [], completed: [], units: emptyMap(), operator_questions: [], next_actions: ['plan'] };
@@ -297,8 +305,16 @@ void describe('D65 launch via /autopilot --launch-manifest (extension)', () => {
       const d65ContextTool = harness.tools.get('context_budget') as ReturnType<typeof createContextBudgetTool> | undefined;
       if (d65ContextTool === undefined) throw new Error('manifest-bound context_budget missing');
       assert.notEqual(d65ContextTool, preexistingContextTool, 'D65 must replace an already-registered base tool');
-      await d65ContextTool.execute('call-d65-context', {}, undefined, undefined, { getContextUsage: () => ({ tokens: 20_000, contextWindow: 200_000, percent: 10 }) });
-      assert.equal(existsSync(d65ContextBudgetReceiptPath(fixture.manifest)), true);
+      // BUG-180: the manifest-bound wrapper receives the PROVIDER-NATIVE tool-call
+      // id verbatim from Pi. A real Codex Responses composite id (`call_…|fc_…`)
+      // must seal the receipt and be retained byte-for-byte; D65's former private
+      // identifier grammar rejected it and fenced the live launch here.
+      await d65ContextTool.execute(BUG_180_PROVIDER_TOOL_CALL_ID, {}, undefined, undefined, { getContextUsage: () => ({ tokens: 20_000, contextWindow: 200_000, percent: 10 }) });
+      const receiptPath = d65ContextBudgetReceiptPath(fixture.manifest);
+      assert.equal(existsSync(receiptPath), true);
+      const sealedReceipt = readSealedReceipt(receiptPath);
+      assert.equal(sealedReceipt['tool_call_id'], BUG_180_PROVIDER_TOOL_CALL_ID, 'BUG-180 the exact raw provider tool-call id must be retained');
+      assert.equal(sealedReceipt['gate'], 'ok');
 
       // Exactly one session and an accepted policy + initial heartbeat exist.
       const client = new CoordinatorClient({ env: fixture.env });
@@ -387,7 +403,7 @@ void describe('D65 launch via /autopilot --launch-manifest (extension)', () => {
       const secondWrapper = harness.tools.get('context_budget') as ReturnType<typeof createContextBudgetTool> | undefined;
       if (secondWrapper === undefined) throw new Error('second manifest wrapper missing');
       assert.notEqual(secondWrapper, baseAfterFailure);
-      await secondWrapper.execute('call-second-manifest', {}, undefined, undefined, { getContextUsage: () => ({ tokens: 20_000, contextWindow: 200_000, percent: 10 }) });
+      await secondWrapper.execute(`${BUG_180_PROVIDER_TOOL_CALL_ID}|second`, {}, undefined, undefined, { getContextUsage: () => ({ tokens: 20_000, contextWindow: 200_000, percent: 10 }) });
       assert.equal(existsSync(d65ContextBudgetReceiptPath(first.manifest)), false);
       assert.equal(existsSync(d65ContextBudgetReceiptPath(second.manifest)), true);
       assert.ok(harness.toolRegistrations.filter((tool) => tool.name === 'context_budget').length >= 3, 'wrapper/base/wrapper registrations must all occur');

@@ -19,6 +19,7 @@ import { startCoordinatorServer } from '../../src/core/coordination/server.ts';
 import { encodeUnpaddedBase64Url } from '../../src/core/coordination/d65-trust.ts';
 import { parseD65LaunchPolicy } from '../../src/core/coordination/d65-launch-policy.ts';
 import { beginD65LaunchBootstrap, detectD65CharterComplete, publishD65FirstGraphAndSuccessorHeartbeat, registerD65LaunchPolicyAndInitialHeartbeat, writeD65ContextBudgetReceipt } from '../../src/core/coordination/d65-launch-integration.ts';
+import { BUG_180_PROVIDER_TOOL_CALL_ID } from '../helpers/d65-context-budget-receipt.ts';
 import { parseD65LaunchManifest, type D65LaunchManifest } from '../../src/core/coordination/d65-launch-manifest.ts';
 import type { D65LaunchSigner, D65LaunchSignerHeartbeatRequest, D65LaunchSignerPolicyRequest, D65LaunchSignerResult } from '../../src/core/coordination/d65-launch-signer.ts';
 import { AUTOPILOT_STATE_ROOT_ENV, type ProcessEnvLike } from '../../src/core/parallel-runtime.ts';
@@ -267,7 +268,7 @@ async function writeCharterRoots(manifest: D65LaunchManifest, sessionId: string)
     await writeFile(join(runtimeRoot, name), body, 'utf8');
   }
   // The bootstrap-plan turn calls context_budget first: seal its durable receipt.
-  writeD65ContextBudgetReceipt(manifest, { gate: 'ok', percent: 10, tool_call_id: 'test-context-budget', session_id: sessionId });
+  writeD65ContextBudgetReceipt(manifest, { gate: 'ok', percent: 10, tool_call_id: BUG_180_PROVIDER_TOOL_CALL_ID, session_id: sessionId });
 }
 
 void describe('D65 launch integration (production path)', () => {

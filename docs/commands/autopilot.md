@@ -73,7 +73,14 @@ In launch mode `/autopilot`:
    exact-path `write`/`edit`, and the manifest/session-bound `context_budget`; `bash`,
    command/process/background aliases, and every unknown tool are denied. Graph
    publication requires an exact tool-call/session receipt with `gate:"ok"` and bounded
-   percentage;
+   percentage. That receipt's `tool_call_id` is the provider's own carrier id, validated
+   by the package's single canonical opaque tool-call-ID contract — the same one used by
+   forced-output receipts and child terminal acceptance — so a real Codex Responses
+   composite id (`call_…|fc_…`) is accepted and persisted byte-for-byte. The receipt
+   writer and reader share that one contract; neither interprets provider structure, and
+   no normalization, truncation, or hashing occurs. Its `session_id` is instead the
+   package-owned coordinator session identity and binds the shared closed
+   session-identity contract;
 5. on `agent_settled`, mechanically publishes the first complete graph (sequence 2),
    accepts the successor governing heartbeat, adopts that exact single session (starting
    its periodic heartbeat only now), and delivers the ordinary continuation turn.

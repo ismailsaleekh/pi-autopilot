@@ -23,7 +23,8 @@ import {
 } from '../parallel-runtime.ts';
 import { CoordinatorClient } from './client.ts';
 import { coordinatorRuntimePaths } from './runtime-paths.ts';
-import { parseCoordinationAuthoritativeArtifact, parseCoordinationRun, parseCoordinationSessionLease } from './contracts.ts';
+import { coordinatorSessionIdIssue, parseCoordinationAuthoritativeArtifact, parseCoordinationRun, parseCoordinationSessionLease } from './contracts.ts';
+import { opaqueToolCallIdIssue } from '../tool-call-id.ts';
 import { CoordinationRuntimeError } from './failures.ts';
 import { readImmutableFileBytes } from './immutable-file.ts';
 import {
@@ -890,20 +891,39 @@ export interface D65ContextBudgetReceiptInput {
 const D65_CONTEXT_BUDGET_RECEIPT_FIELDS = Object.freeze([
   'schema_version', 'program_id', 'workstream_run', 'gate', 'percent', 'tool_call_id', 'session_id',
 ] as const);
-const D65_CONTEXT_BUDGET_CALL_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u;
-const D65_CONTEXT_BUDGET_SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u;
+
+// BUG-180: the receipt's `tool_call_id` is PROVIDER-NATIVE carrier text and is
+// governed by the package's ONE canonical opaque tool-call-ID contract
+// (`src/core/tool-call-id.ts`), exactly like the forced-output receipt and child
+// terminal acceptance. D65 previously carried a PRIVATE strict-identifier grammar
+// here; it admitted no `|`, so a legitimate Codex Responses composite id
+// (`call_…|fc_…`) was rejected at the first mandatory receipt and fenced a live
+// launch. Nothing in this module may interpret provider structure: no prefix
+// parsing, no separator splitting, no normalization, truncation, or hashing — the
+// receipt binds the carrier byte-for-byte for exact acceptance equality.
+//
+// `session_id` is deliberately NOT the same contract: it is PACKAGE-OWNED
+// coordinator identity (`durableIdentifier('session', …)`), so it binds the shared
+// closed coordinator session-identity contract (`coordinatorSessionIdIssue`) that
+// `parseCoordinationSessionLease` already enforces, rather than a private grammar.
+function requireD65ContextBudgetIdentities(toolCallId: unknown, sessionId: unknown): void {
+  const toolCallIssue = opaqueToolCallIdIssue(toolCallId);
+  if (toolCallIssue !== null) throw new CoordinationRuntimeError('invalid-state', `D65 bootstrap context_budget tool_call_id is not a bounded opaque tool-call ID: it ${toolCallIssue}`);
+  const sessionIssue = coordinatorSessionIdIssue(sessionId);
+  if (sessionIssue !== null) throw new CoordinationRuntimeError('invalid-state', `D65 bootstrap context_budget session_id is not a bounded coordinator session identity: it ${sessionIssue}`);
+}
 
 /**
  * Persist a durable receipt proving the bootstrap parent successfully CALLED
  * `context_budget` and received `gate:"ok"` in the exact durable D65 session.
  * Halt/unknown/unbounded reports reject before any create-only replay check, so
  * they can never be converted into positive launch authority by a stale file.
+ * The provider's tool-call id is stored exactly as received (BUG-180).
  */
 export function writeD65ContextBudgetReceipt(manifest: D65LaunchManifest, report: D65ContextBudgetReceiptInput): void {
   if (report.gate !== 'ok') throw new CoordinationRuntimeError('invalid-state', 'D65 bootstrap context_budget gate is not ok; first-graph publication remains fenced', [report.gate]);
   if (report.percent === null || !Number.isFinite(report.percent) || report.percent < 0 || report.percent > 100) throw new CoordinationRuntimeError('invalid-state', 'D65 bootstrap context_budget percent must be a finite number in [0,100]');
-  if (!D65_CONTEXT_BUDGET_CALL_ID.test(report.tool_call_id)) throw new CoordinationRuntimeError('invalid-state', 'D65 bootstrap context_budget tool_call_id is not a bounded closed identifier');
-  if (!D65_CONTEXT_BUDGET_SESSION_ID.test(report.session_id)) throw new CoordinationRuntimeError('invalid-state', 'D65 bootstrap context_budget session_id is not a bounded closed identifier');
+  requireD65ContextBudgetIdentities(report.tool_call_id, report.session_id);
   const receiptPath = d65ContextBudgetReceiptPath(manifest);
   if (existsSync(receiptPath)) return;
   const record = { schema_version: D65_CONTEXT_BUDGET_RECEIPT_SCHEMA, program_id: manifest.program_id, workstream_run: manifest.workstream_run, gate: 'ok', percent: report.percent, tool_call_id: report.tool_call_id, session_id: report.session_id };
@@ -930,7 +950,11 @@ export function requireD65ContextBudgetReceipt(manifest: D65LaunchManifest, expe
   const expectedKeys = [...D65_CONTEXT_BUDGET_RECEIPT_FIELDS].sort();
   const exactFields = keys.length === expectedKeys.length && keys.every((key, index) => key === expectedKeys[index]);
   const percent = record['percent'];
-  if (!exactFields || record['schema_version'] !== D65_CONTEXT_BUDGET_RECEIPT_SCHEMA || record['program_id'] !== manifest.program_id || record['workstream_run'] !== manifest.workstream_run || record['gate'] !== 'ok' || typeof percent !== 'number' || !Number.isFinite(percent) || percent < 0 || percent > 100 || typeof record['tool_call_id'] !== 'string' || !D65_CONTEXT_BUDGET_CALL_ID.test(record['tool_call_id']) || record['session_id'] !== expectedSessionId || !D65_CONTEXT_BUDGET_SESSION_ID.test(expectedSessionId)) throw new CoordinationRuntimeError('invalid-state', 'D65 context_budget receipt is malformed or belongs to another run/session', [receiptPath]);
+  // The persisted carrier is re-validated through the SAME canonical contracts the
+  // writer used (BUG-180): one opaque tool-call-ID contract, one coordinator
+  // session-identity contract. Equality against the attached session stays exact.
+  const identitiesValid = opaqueToolCallIdIssue(record['tool_call_id']) === null && coordinatorSessionIdIssue(expectedSessionId) === null;
+  if (!exactFields || record['schema_version'] !== D65_CONTEXT_BUDGET_RECEIPT_SCHEMA || record['program_id'] !== manifest.program_id || record['workstream_run'] !== manifest.workstream_run || record['gate'] !== 'ok' || typeof percent !== 'number' || !Number.isFinite(percent) || percent < 0 || percent > 100 || !identitiesValid || record['session_id'] !== expectedSessionId) throw new CoordinationRuntimeError('invalid-state', 'D65 context_budget receipt is malformed or belongs to another run/session', [receiptPath]);
 }
 
 /**

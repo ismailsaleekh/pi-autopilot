@@ -20,6 +20,7 @@ import { encodeUnpaddedBase64Url } from '../../src/core/coordination/d65-trust.t
 import { parseD65ProgramHeartbeat } from '../../src/core/coordination/d65-launch-policy.ts';
 import { SpawnedD65LaunchSigner } from '../../src/core/coordination/d65-launch-signer.ts';
 import { beginD65LaunchBootstrap, detectD65CharterComplete, publishD65FirstGraphAndSuccessorHeartbeat, registerD65LaunchPolicyAndInitialHeartbeat, writeD65ContextBudgetReceipt } from '../../src/core/coordination/d65-launch-integration.ts';
+import { BUG_180_PROVIDER_TOOL_CALL_ID } from '../helpers/d65-context-budget-receipt.ts';
 import { parseD65LaunchManifest, type D65LaunchManifest } from '../../src/core/coordination/d65-launch-manifest.ts';
 import { AUTOPILOT_STATE_ROOT_ENV, type ProcessEnvLike } from '../../src/core/parallel-runtime.ts';
 
@@ -177,7 +178,7 @@ async function writeCharterRoots(manifest: D65LaunchManifest, sessionId: string)
   const files: readonly [string, string][] = [['mission.md', '# Mission\n'], ['master-plan.json', `${JSON.stringify(masterPlan)}\n`], ['state.json', `${JSON.stringify(state)}\n`], ['decision-log.jsonl', `${JSON.stringify(decision)}\n`], ['events.jsonl', `${JSON.stringify(event)}\n`]];
   const { mkdir: mkdirp, writeFile: writeFilep } = await import('node:fs/promises');
   for (const [name, body] of files) { await mkdirp(runtimeRoot, { recursive: true }); await writeFilep(join(runtimeRoot, name), body, 'utf8'); }
-  writeD65ContextBudgetReceipt(manifest, { gate: 'ok', percent: 10, tool_call_id: 'test-context-budget', session_id: sessionId });
+  writeD65ContextBudgetReceipt(manifest, { gate: 'ok', percent: 10, tool_call_id: BUG_180_PROVIDER_TOOL_CALL_ID, session_id: sessionId });
 }
 
 /** Drive one CLI fixture fully to ordinary dispatch (graph 2 + heartbeat 2). */

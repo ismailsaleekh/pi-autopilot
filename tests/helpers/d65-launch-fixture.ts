@@ -18,6 +18,7 @@ import type { StoreClock } from '../../src/core/coordination/store.ts';
 import { encodeUnpaddedBase64Url } from '../../src/core/coordination/d65-trust.ts';
 import { parseD65LaunchPolicy } from '../../src/core/coordination/d65-launch-policy.ts';
 import { writeD65ContextBudgetReceipt } from '../../src/core/coordination/d65-launch-integration.ts';
+import { BUG_180_PROVIDER_TOOL_CALL_ID } from './d65-context-budget-receipt.ts';
 import { parseD65LaunchManifest, type D65LaunchManifest } from '../../src/core/coordination/d65-launch-manifest.ts';
 import type { D65LaunchSigner, D65LaunchSignerHeartbeatRequest, D65LaunchSignerPolicyRequest, D65LaunchSignerResult } from '../../src/core/coordination/d65-launch-signer.ts';
 import { AUTOPILOT_STATE_ROOT_ENV, type ProcessEnvLike } from '../../src/core/parallel-runtime.ts';
@@ -264,7 +265,10 @@ export async function writeD65CharterRoots(manifest: D65LaunchManifest, sessionI
     await mkdir(runtimeRoot, { recursive: true });
     await writeFile(join(runtimeRoot, name), body, 'utf8');
   }
-  writeD65ContextBudgetReceipt(manifest, { gate: 'ok', percent: 10, tool_call_id: 'test-context-budget', session_id: sessionId });
+  // BUG-180: the shared positive helper seals the receipt with a PROVIDER-REALISTIC
+  // Codex Responses composite tool-call id, so every multiprocess/crash D65 consumer
+  // exercises the real provider format by default rather than a friendly synthetic id.
+  writeD65ContextBudgetReceipt(manifest, { gate: 'ok', percent: 10, tool_call_id: BUG_180_PROVIDER_TOOL_CALL_ID, session_id: sessionId });
 }
 
 export { existsSync };
