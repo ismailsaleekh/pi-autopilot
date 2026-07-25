@@ -1,8 +1,8 @@
 {
   "schema_version": "autopilot.docs_semantic_attestation.v2",
   "doc_id": "subsystems/runner-and-forced-output",
-  "reviewed_body_hash": "sha256:a1b2d9c0690b025fbfaabaac53614c5148fb7fb07817456c6d58794d56fdd08b",
-  "reviewed_doc_sha256": "sha256:fb1048e9ebb0f19880f824466491f0d0ae045eaa98641e6b3c134caa85d858c3",
+  "reviewed_body_hash": "sha256:28a7af517eda3c3d5f0f7af8bde83f075455e97a52923debd5df8d387f3d9a7c",
+  "reviewed_doc_sha256": "sha256:e92c64bb5cc298174d6e01bf7e25cac17825df576a7b45b7540cf7974d99c20a",
   "covers_sources": [
     "src/core/agent-runner.ts",
     "src/core/authority.ts",
@@ -18,7 +18,7 @@
     "src/core/unit-failure.ts"
   ],
   "verdict": "PASS",
-  "reviewer": "OpenAI coding assistant, independent semantic reviewer task be5e05564",
-  "reviewed_at": "2026-07-23T19:33:34.665Z",
-  "notes": "Independent review against baseline 65f80eb and every covered current source found no findings. Closed provider-domain parsers validate unknown roster/manifest input before serialization or certification decisions; strict v2 launch, exact-byte historical v1 authority, observed identity, empty trust registries, and fail-closed readiness semantics remain intact, and the current prose matches those behaviors."
+  "reviewer": "Claude semantic reviewer, six-run D65 readiness control task (F005 re-review of the 8c6cc7e delta)",
+  "reviewed_at": "2026-07-25T01:45:00.000Z",
+  "notes": "Independent behavioral re-review of the exact 74334f7..8c6cc7e covered-source delta. Verified against current bytes: (1) validateSpawnExecutionProfile still rejects every system_prompt_profile except pi-default.v1 and the narrowly-gated anthropic-autopilot-sanitized.v1 (provider_id=anthropic AND api=anthropic-messages), so no new profile can reach model spend un-gated; (2) runPiPromptWithStatusCarrier loads the package-owned Anthropic prompt-transform extension only when that exact profile is pinned, and positionally BEFORE the execution observer, exactly as the prose states; (3) deriveRoutePolicyFromObservedProviderApi now maps anthropic/anthropic-messages to anthropic-opus5-sonnet5-subscription-v1, and classifySystemPromptProfile observes the sanitizer header from the real system prompt rather than inferring it from options; (4) the prose claim that the Codex GPT-5.5 Heavy pack has one reviewed live manifest and certified-roster pin while Anthropic and all other provider/custom paths remain blocked matches artifacts/qualification/live and the empty custom trust registry; (5) OpenRouter and other metered frontier routes remain forbidden. No findings. This attestation covers the same delta that D65-A6 re-audited for launch-roster certification authority."
 }

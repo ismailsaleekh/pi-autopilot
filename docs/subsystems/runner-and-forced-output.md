@@ -20,7 +20,7 @@ covers_sources:
   - src/core/model-roster.ts
 signature_hash: 'sha256:a5ee2fb831b97d6f0e5450759d68bfb1bf43017a4d5c8f10df68c05755315709'
 body_hash: 'sha256:28a7af517eda3c3d5f0f7af8bde83f075455e97a52923debd5df8d387f3d9a7c'
-semantic_attestation: 'sha256:a1b2d9c0690b025fbfaabaac53614c5148fb7fb07817456c6d58794d56fdd08b'
+semantic_attestation: 'sha256:28a7af517eda3c3d5f0f7af8bde83f075455e97a52923debd5df8d387f3d9a7c'
 stability: stable
 ---
 

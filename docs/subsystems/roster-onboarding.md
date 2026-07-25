@@ -84,7 +84,7 @@ covers_sources:
   - templates/skills/autopilot-roster-setup/SKILL.md
   - templates/skills/autopilot-roster-setup/payload.json
 signature_hash: 'sha256:446abbf30121b2ab57063f3ce3a9c42ce65ec63b073426f7ff4369c9ca095a43'
-body_hash: 'sha256:ee982fa4a899f8ef025ed681bf33e5985ffc4a22e47654a655228c425e439756'
+body_hash: 'sha256:6fe2da07cbbf5631c919ac054d4af8fe1ab8878985978c9285426cb86ff8c5ca'
 stability: evolving
 ---
 
@@ -196,6 +196,12 @@ Any present higher-precedence authority that is corrupt, hash-mismatched, missin
 roster bytes, or untrusted blocks the run. Lower-precedence defaults are not consulted.
 Existing runs do not use onboarding or defaults: they use only their immutable pre-run
 selection plus the runtime mirror and pinned roster bytes.
+
+This precedence applies only to the ordinary (non-launch) path. A D65 sealed launch
+(`--launch-manifest`) carries its own authenticated roster authority in the sealed
+manifest and never runs the precedence chain above, so combining `--roster <id>` with
+`--launch-manifest` is rejected before any roster resolution, signer, or parent model
+call rather than silently ignored.
 
 ## No-roster onboarding and inactive tool activation
 
@@ -344,6 +350,19 @@ authority for user-custom rosters. The custom registry and all provider entries 
 entry remain unpinned, so those paths stay blocked. Mixed billing routes are rejected by production
 seed roster construction, and custom/mixed structural compatibility is not certified
 readiness.
+
+### D65 sealed-launch roster authority
+
+A D65 sealed launch authenticates its roster through certification authority, not a
+hardcoded per-role model list. `authenticateD65LaunchRoster` requires the sealed roster
+to declare `generation_source: w4-certified-recipe`, carry a non-empty certification
+manifest id and a canonical `certification_manifest_sha256`, and assign
+`qualification_state: w4-certified-ready` to every role in the closed D65 role registry
+(`parent`, `strategy`, `implement`, `validate`, `fix`, `adjudicate`, `bughunt`,
+`extract`). Role *models* are therefore whatever the W4 certification authorized, while
+the subscription provider, the plan-backed OAuth billing/auth channel, the roster and
+selection digests, and the closed role set all still fail closed. A non-certifying seed
+roster is never sealed-launch authority even when its model names look ordinary.
 
 ## Transitions and history
 

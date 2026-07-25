@@ -1142,7 +1142,7 @@
         "templates/skills/autopilot-roster-setup/payload.json"
       ],
       "signature_hash": "sha256:446abbf30121b2ab57063f3ce3a9c42ce65ec63b073426f7ff4369c9ca095a43",
-      "body_hash": "sha256:ee982fa4a899f8ef025ed681bf33e5985ffc4a22e47654a655228c425e439756",
+      "body_hash": "sha256:6fe2da07cbbf5631c919ac054d4af8fe1ab8878985978c9285426cb86ff8c5ca",
       "semantic_attestation": null
     },
     "subsystems/runner-and-forced-output": {
@@ -1169,7 +1169,7 @@
       ],
       "signature_hash": "sha256:a5ee2fb831b97d6f0e5450759d68bfb1bf43017a4d5c8f10df68c05755315709",
       "body_hash": "sha256:28a7af517eda3c3d5f0f7af8bde83f075455e97a52923debd5df8d387f3d9a7c",
-      "semantic_attestation": "sha256:a1b2d9c0690b025fbfaabaac53614c5148fb7fb07817456c6d58794d56fdd08b"
+      "semantic_attestation": "sha256:28a7af517eda3c3d5f0f7af8bde83f075455e97a52923debd5df8d387f3d9a7c"
     },
     "subsystems/s2-retention": {
       "mode": "authored",

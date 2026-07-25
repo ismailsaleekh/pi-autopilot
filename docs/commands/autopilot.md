@@ -14,7 +14,10 @@ Start or resume an Autopilot parent orchestration session for a workstream.
 
 ## Synopsis
 
-`/autopilot <workstream> [--launch-manifest <absolute-path>] [--roster <id>] [--] [task intro/current focus]`
+`/autopilot <workstream> [--launch-manifest <absolute-path> | --roster <id>] [--] [task intro/current focus]`
+
+`--launch-manifest` and `--roster` are mutually exclusive: a sealed launch package
+carries its own authenticated roster authority.
 
 ## D65 sealed launch mode
 
@@ -28,7 +31,12 @@ audit/seal). Every sealed value is consumed exactly, never regenerated. The mani
 roster storage, and activation layers share the same bounded ASCII alphanumeric-or-
 hyphen run/repo identity grammar; a relative path, oversized/symlinked file, unknown
 field, unsafe identity, duplicate/misplaced launch flag, or internal mismatch fails closed with no
-run state. Launch options must precede task text; a standalone `--` explicitly starts
+run state. Because the sealed manifest is the sole roster authority in launch mode, a
+`--roster <id>` supplied alongside `--launch-manifest` is **rejected** before any roster
+resolution, signer resolution, or parent model call rather than silently ignored.
+The sealed roster must be W4-certified authority: every role in the closed D65 role
+registry must be `w4-certified-ready` under a `w4-certified-recipe` roster with a real
+certification manifest pin, so a non-certifying seed roster can never launch. Launch options must precede task text; a standalone `--` explicitly starts
 literal task text when the words `--launch-manifest` are part of the task itself.
 
 In launch mode `/autopilot`:
