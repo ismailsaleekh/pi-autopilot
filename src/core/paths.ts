@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto';
 
 import { AUTOPILOT_RUNTIME_ROOT_PREFIX } from './names.ts';
+import { resolveExtensionPackageExecutables } from './coordination/executable-resolution.ts';
 
 export interface ParsedAutopilotArgs {
   readonly workstream: string;
@@ -347,11 +348,6 @@ export function runtimeRootForWorkstream(workstream: string): string {
   return `${AUTOPILOT_RUNTIME_ROOT_PREFIX}/${workstream}`;
 }
 
-export function packageRootFromModuleUrl(moduleUrl: string): URL {
-  return new URL('../', moduleUrl);
-}
-
 export function runnerInvocationFromModuleUrl(moduleUrl: string): string {
-  const runner = new URL('bin/autopilot-agent-run.mjs', packageRootFromModuleUrl(moduleUrl));
-  return runner.pathname;
+  return resolveExtensionPackageExecutables(moduleUrl).agentRunnerPath;
 }

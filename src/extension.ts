@@ -1,7 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { realpathSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
 
 import { createContextBudgetTool, resolveContextHaltPercent } from './core/context-budget.ts';
 import {
@@ -61,6 +60,7 @@ import {
   type D65LaunchBootstrapResult,
 } from './core/coordination/d65-launch-integration.ts';
 import { readImmutableFileBytes } from './core/coordination/immutable-file.ts';
+import { resolveExtensionPackageExecutables } from './core/coordination/executable-resolution.ts';
 import { coordinationCutoverCommitted } from './core/coordination/migration-paths.ts';
 import {
   autopilotRosterContractCanonicalJson,
@@ -1267,7 +1267,7 @@ function notify(ctx: ExtensionCommandContextLike, message: string, kind: Notific
  * runtime never learns the operator private key path; the signer CLI resolves it
  * from its own config. This keeps signing entirely outside runtime authority.
  */
-function defaultLaunchSignerResolver(manifest: D65LaunchManifest, env: ProcessEnvLike): D65LaunchSigner {
+export function defaultLaunchSignerResolver(manifest: D65LaunchManifest, env: ProcessEnvLike): D65LaunchSigner {
   const invocationPath = resolve(manifest.program_evidence_root, 'signer-invocation.json');
   const invocationBytes = readImmutableFileBytes({ path: invocationPath, maximumBytes: 65_536, label: 'launch signer invocation', errorCode: 'invalid-request' });
   const parsed = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(invocationBytes)) as unknown;
@@ -1286,7 +1286,7 @@ function defaultLaunchSignerResolver(manifest: D65LaunchManifest, env: ProcessEn
   if (typeof node !== 'string' || node !== process.execPath) throw new Error('launch signer invocation node must equal the current Node executable');
   if (typeof signerBin !== 'string' || !signerBin.startsWith('/') || !/[\\/]bin[\\/]autopilot-launch-signer\.mjs$/u.test(signerBin)) throw new Error('launch signer invocation signer_bin must be the packaged autopilot-launch-signer.mjs bin');
   const signerBinReal = realpathSync(signerBin);
-  const expectedSignerBin = realpathSync(fileURLToPath(new URL('../bin/autopilot-launch-signer.mjs', import.meta.url)));
+  const expectedSignerBin = realpathSync(resolveExtensionPackageExecutables(import.meta.url).launchSignerPath);
   if (signerBinReal !== expectedSignerBin) throw new Error('launch signer invocation signer_bin is not this package\'s autopilot-launch-signer.mjs');
   if (typeof configPath !== 'string' || !configPath.startsWith('/')) throw new Error('launch signer invocation config_path must be an absolute path');
   return new SpawnedD65LaunchSigner({ command: node, baseArgs: [signerBin, '--config', configPath], env });

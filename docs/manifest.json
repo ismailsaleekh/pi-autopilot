@@ -355,6 +355,9 @@
       "concepts/deadlock",
       "subsystems/coordination"
     ],
+    "src/core/coordination/executable-resolution.ts": [
+      "subsystems/roster-onboarding"
+    ],
     "src/core/coordination/index.ts": [
       "subsystems/coordination"
     ],
@@ -427,6 +430,9 @@
     ],
     "src/core/parallel-runtime.ts": [
       "subsystems/worktrees"
+    ],
+    "src/core/paths.ts": [
+      "subsystems/roster-onboarding"
     ],
     "src/core/prompt-renderer/index.ts": [
       "subsystems/runner-and-forced-output"
@@ -1109,7 +1115,9 @@
         "autopilot.unit_spec.v2"
       ],
       "covers_sources": [
+        "src/core/coordination/executable-resolution.ts",
         "src/core/forced-output/identity.ts",
+        "src/core/paths.ts",
         "src/core/roster/activation-fence.ts",
         "src/core/roster/artifact-compatibility.ts",
         "src/core/roster/canonical.ts",
@@ -1141,8 +1149,8 @@
         "templates/skills/autopilot-roster-setup/SKILL.md",
         "templates/skills/autopilot-roster-setup/payload.json"
       ],
-      "signature_hash": "sha256:446abbf30121b2ab57063f3ce3a9c42ce65ec63b073426f7ff4369c9ca095a43",
-      "body_hash": "sha256:6fe2da07cbbf5631c919ac054d4af8fe1ab8878985978c9285426cb86ff8c5ca",
+      "signature_hash": "sha256:76b717c28f46fad18c8271f1e5662a601c326ae52c97142a252eab67ce61bd6c",
+      "body_hash": "sha256:ebb6d2c0bcaf0dd0f2c11c5fe4656c2d2337ab5114bb4b6bfbcf46eee764001b",
       "semantic_attestation": null
     },
     "subsystems/runner-and-forced-output": {

@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { AUTOPILOT_RUNTIME_ROOT_PREFIX } from "./names.js";
+import { resolveExtensionPackageExecutables } from "./coordination/executable-resolution.js";
 const WORKSTREAM_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 // Locally generated run ids remain lowercase for compatibility, while sealed
 // production/D65 run authority may carry canonical UTC `T`/`Z` bytes. Keep the
@@ -255,10 +256,6 @@ export function runtimeRootForWorkstream(workstream) {
     }
     return `${AUTOPILOT_RUNTIME_ROOT_PREFIX}/${workstream}`;
 }
-export function packageRootFromModuleUrl(moduleUrl) {
-    return new URL('../', moduleUrl);
-}
 export function runnerInvocationFromModuleUrl(moduleUrl) {
-    const runner = new URL('bin/autopilot-agent-run.mjs', packageRootFromModuleUrl(moduleUrl));
-    return runner.pathname;
+    return resolveExtensionPackageExecutables(moduleUrl).agentRunnerPath;
 }

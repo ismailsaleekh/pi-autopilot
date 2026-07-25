@@ -53,6 +53,8 @@ covers_surfaces:
   - autopilot.unit_spec.v2
 covers_sources:
   - src/extension.ts
+  - src/core/coordination/executable-resolution.ts
+  - src/core/paths.ts
   - src/core/roster/activation-fence.ts
   - src/core/roster/artifact-compatibility.ts
   - src/core/roster/canonical.ts
@@ -83,8 +85,8 @@ covers_sources:
   - src/internal/execution-observer-extension.ts
   - templates/skills/autopilot-roster-setup/SKILL.md
   - templates/skills/autopilot-roster-setup/payload.json
-signature_hash: 'sha256:446abbf30121b2ab57063f3ce3a9c42ce65ec63b073426f7ff4369c9ca095a43'
-body_hash: 'sha256:6fe2da07cbbf5631c919ac054d4af8fe1ab8878985978c9285426cb86ff8c5ca'
+signature_hash: 'sha256:76b717c28f46fad18c8271f1e5662a601c326ae52c97142a252eab67ce61bd6c'
+body_hash: 'sha256:ebb6d2c0bcaf0dd0f2c11c5fe4656c2d2337ab5114bb4b6bfbcf46eee764001b'
 stability: evolving
 ---
 
@@ -202,6 +204,19 @@ This precedence applies only to the ordinary (non-launch) path. A D65 sealed lau
 manifest and never runs the precedence chain above, so combining `--roster <id>` with
 `--launch-manifest` is rejected before any roster resolution, signer, or parent model
 call rather than silently ignored.
+
+The external launch signer is also package-identity-bound. Pi should load an exact
+local package by directory (`pi --no-extensions --extension /absolute/package/root`),
+which follows the declared `./extensions/autopilot.ts` entry. The runtime derives one
+physical package root from a closed pair of exact module layouts
+(`src/extension.ts` and `dist/src/extension.js`), verifies `package.json` name/version
+and both `bin.autopilot-launch-signer` / `bin.autopilot-agent-run` declarations, and
+requires the sealed `signer-invocation.json` to resolve to that package's one regular
+root-level signer while every child launch resolves to the same package's runner.
+It never searches ancestors, PATH, cwd, global installs, or alternate package copies;
+unknown layouts, symlinks, missing build artifacts, and cross-package signer paths fail
+before run state. The release/prepack `launch-entrypoint:check` exercises both layouts
+and requires identical signer and child-runner identities.
 
 ## No-roster onboarding and inactive tool activation
 

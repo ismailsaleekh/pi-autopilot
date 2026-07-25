@@ -196,12 +196,29 @@ void describe('package manifest and payload', () => {
     assert.equal(pkg.bin['autopilot-s2-corpus-rehearsal'], 'bin/autopilot-s2-corpus-rehearsal.mjs');
     assert.ok(pkg.files.includes('dist/'));
     assert.ok(pkg.peerDependencies['@earendil-works/pi-coding-agent']);
-    for (const script of ['build', 'typecheck', 'test:type-safety', 'test:unit', 'test:e2e', 'test:model', 'test:multiprocess', 'test:version-skew', 'test:upgrade', 'test:crash', 'test:chaos', 'test:scale', 'test:sdk', 'test:rpc', 'test:package', 'test:packed-migration', 'test:s2-corpus', 's2:corpus', 'security:scan', 'security:audit', 'sbom', 'payload:check', 'test', 'test:release', 'pack:dry-run']) {
+    for (const script of ['build', 'typecheck', 'test:type-safety', 'test:unit', 'test:e2e', 'test:model', 'test:multiprocess', 'test:version-skew', 'test:upgrade', 'test:crash', 'test:chaos', 'test:scale', 'test:sdk', 'test:rpc', 'test:package', 'test:packed-migration', 'test:s2-corpus', 's2:corpus', 'launch-entrypoint:check', 'test:certification', 'security:scan', 'security:audit', 'sbom', 'payload:check', 'test', 'test:release', 'pack:dry-run']) {
       assert.equal(typeof pkg.scripts[script], 'string', script);
     }
-    assert.match(pkg.scripts['prepack'] ?? '', /security:scan -- --quiet && npm run sbom/u, 'prepack must regenerate security evidence before SBOM');
+    assert.match(pkg.scripts['prepack'] ?? '', /npm run build && npm run launch-entrypoint:check && npm run security:scan -- --quiet && npm run sbom/u, 'prepack must verify the package-root launch boundary before regenerating security evidence');
+    assert.match(pkg.scripts['test:certification'] ?? '', /production-git:check && npm run launch-entrypoint:check/u, 'certification must consume the launch-entrypoint gate');
     assert.match(pkg.scripts['test:multiprocess'] ?? '', /--test-concurrency=1/u, 'resource-heavy real-process files must be serialized so fixed startup deadlines are not invalidated by cross-file load');
     for (const dir of ['bin/', 'dist/', 'extensions/', 'src/', 'tools/s2-corpus-rehearsal/', 'templates/', 'artifacts/security/']) assert.ok(pkg.files.includes(dir), dir);
+  });
+
+  void it('BUG-179 keeps source/dist launch-signer resolution in one closed package-layout seam', async () => {
+    const resolver = await sourceText('src/core/coordination/executable-resolution.ts');
+    const extension = await sourceText('src/extension.ts');
+    const paths = await sourceText('src/core/paths.ts');
+    const gate = await sourceText('scripts/check-launch-entrypoint.mjs');
+    assert.match(resolver, /resolveExtensionPackageExecutables/u);
+    assert.match(resolver, /SOURCE_EXTENSION_RELATIVE_PATH/u);
+    assert.match(resolver, /DIST_EXTENSION_RELATIVE_PATH/u);
+    assert.match(resolver, /outside the closed source\/dist package layouts/u);
+    assert.match(extension, /resolveExtensionPackageExecutables\(import\.meta\.url\)/u);
+    assert.match(paths, /resolveExtensionPackageExecutables\(moduleUrl\)\.agentRunnerPath/u);
+    assert.equal(/new URL\('\.\.\/bin\/autopilot-launch-signer\.mjs'/u.test(extension), false, 'extension must not re-derive a source-only signer path');
+    assert.equal(/new URL\('bin\/autopilot-agent-run\.mjs'/u.test(paths), false, 'paths must not re-derive a source-only runner path');
+    assert.match(gate, /source\/dist executable identities diverge/u);
   });
 
   void it('pins shrinkwrapped Pi integrity and Linux native libc selectors without exceptions', async () => {

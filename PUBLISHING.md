@@ -8,6 +8,7 @@ Run from the repository root:
 
 ```bash
 npm run build
+npm run launch-entrypoint:check
 npm run typecheck
 npm run test:package
 npm run test:upgrade
@@ -39,12 +40,29 @@ Windows for Node 22.19.0 and 24.x; its security/scale job runs `test:model`,
 `test:packed-consumer` remain explicit package-script release gates, not current workflow
 steps.
 
+## Exact local package loading
+
+When isolating one exact local package from settings-installed extensions, give Pi the
+**package directory**, not a compiled implementation file:
+
+```bash
+pi --no-extensions --extension /absolute/path/to/pi-autopilot
+```
+
+Pi then follows the declared `pi.extensions` entry (`./extensions/autopilot.ts`).
+`npm run launch-entrypoint:check` independently proves that the source-loaded and
+compiled extension module layouts resolve one identical physical package root and its
+exact `bin/autopilot-launch-signer.mjs` plus `bin/autopilot-agent-run.mjs`; it fails
+closed on manifest drift, missing build output, symlinks, or an unknown module layout. Directly loading
+`dist/src/extension.js` is not a valid package-loader or release proof, even though the
+closed runtime resolver supports that compiled layout defensively.
+
 ## Package payload checklist
 
 1. Confirm `npm run pack:dry-run` includes `bin/`, `dist/`, `extensions/`, `src/`, `templates/`, the generic S2-D rehearsal harness (`tools/s2-corpus-rehearsal/` plus `autopilot-s2-corpus-rehearsal`), the agent-first docs tree (`docs/` + `AUTOPILOT-INSTRUCTIONS.md`), the compiled coordinator bootstrap and migrations, deliberate `artifacts/security/` evidence, README, TESTING, TEST_PLAN, PUBLISHING, and LICENSE. `prepack` runs `docs:verify` so stale docs block publish.
 2. Confirm tests, transient artifacts, dependency directories, local runtime state, tarballs, private corpus requests/results, cloned corpus trees, rehearsal logs, and live-corpus evidence are excluded from the tarball.
 3. Verify `pi.extensions` points at `./extensions/autopilot.ts`; package bins expose `autopilot-agent-run` and `autopilot-coordinator` through compiled `dist/src/cli/*.js`; and installed auto-start resolves the contained `dist/src/cli/autopilot-coordinator-bootstrap.js` plus one `dist/src/cli/autopilot-coordinator.js`. Missing/aliased payloads must fail before spawn with no TypeScript, PATH, cwd, global-install, ancestor, or checkout fallback.
-4. Verify `/autopilot`, `/autopilot-inject`, `/autopilot-onboard`, `/autopilot-handoff`, `/autopilot-config`, `/autopilot-claim-gc`, `/autopilot-coordination`, `/autopilot-close`, and `/autopilot-abort` load from the installed package and not from repo-local prompt files. The proof must give the installed package directory to Pi’s real loader, follow the declared `pi.extensions` manifest entry, and invoke the command; importing `dist/src/extension.js` directly is not valid proof.
+4. Verify `/autopilot`, `/autopilot-inject`, `/autopilot-onboard`, `/autopilot-handoff`, `/autopilot-config`, `/autopilot-claim-gc`, `/autopilot-coordination`, `/autopilot-close`, and `/autopilot-abort` load from the installed package and not from repo-local prompt files. The proof must give the installed package directory to Pi’s real loader, follow the declared `pi.extensions` manifest entry, and invoke the command; importing `dist/src/extension.js` directly is not valid proof. Run `launch-entrypoint:check` in the same release train so both exact source/dist module layouts are mechanically bound to the same package-root signer and child-runner executables.
 5. Verify `/autopilot` activates `context_budget` and the authenticated parent-only `autopilot_respond_claim_request` tool in a parent session, `/autopilot-inject` refreshes active workstream binding without queueing the parent prompt, `/autopilot-onboard` remains read-only, `/autopilot-handoff` uses the active workstream without requiring a workstream argument, `/autopilot-config` persists scheduler `parallel_cap`, `/autopilot-claim-gc` writes dry-run/apply evidence, `/autopilot-coordination status|doctor` queries the broker without an LLM turn, and `/autopilot-close`/`/autopilot-abort` are runtime-owned/local-only.
 6. Verify the npm-created `.bin/autopilot-agent-run` and `.bin/autopilot-coordinator` links directly. Prove runner dry-run; coordinator handshake/status/doctor/export/replay/upgrade-schema11/migrate/verify/rollback/cutover; and recovery list/show/doctor/drain-stale-sessions/retain-authority/release-with-evidence from a packed generic install. Recovery QA must include 1,014 rows without exceeding the IPC frame bound.
 7. Verify the fake-Pi runner/e2e witness still joins status artifact, receipt artifact, receipt hash, provider identity, and structured tool carrier.

@@ -61,6 +61,7 @@ here are not yet governed by a doc; coverage ratchets up per PR (C8 floor).
 | `src/core/coordination/d65-semantic-graph.ts` | [`concepts/d65-terminal-tail`](concepts/d65-terminal-tail.md), [`concepts/semantic-graph-authority`](concepts/semantic-graph-authority.md) |
 | `src/core/coordination/d65-terminal-intent.ts` | [`concepts/d65-terminal-tail`](concepts/d65-terminal-tail.md) |
 | `src/core/coordination/deadlock.ts` | [`concepts/deadlock`](concepts/deadlock.md), [`subsystems/coordination`](subsystems/coordination.md) |
+| `src/core/coordination/executable-resolution.ts` | [`subsystems/roster-onboarding`](subsystems/roster-onboarding.md) |
 | `src/core/coordination/index.ts` | [`subsystems/coordination`](subsystems/coordination.md) |
 | `src/core/coordination/invariants.ts` | [`subsystems/coordination`](subsystems/coordination.md) |
 | `src/core/coordination/peer-classification.ts` | [`subsystems/coordination`](subsystems/coordination.md) |
@@ -85,6 +86,7 @@ here are not yet governed by a doc; coverage ratchets up per PR (C8 floor).
 | `src/core/model-roster.ts` | [`subsystems/runner-and-forced-output`](subsystems/runner-and-forced-output.md) |
 | `src/core/names.ts` | [`subsystems/contracts-and-schemas`](subsystems/contracts-and-schemas.md) |
 | `src/core/parallel-runtime.ts` | [`subsystems/worktrees`](subsystems/worktrees.md) |
+| `src/core/paths.ts` | [`subsystems/roster-onboarding`](subsystems/roster-onboarding.md) |
 | `src/core/prompt-renderer/index.ts` | [`subsystems/runner-and-forced-output`](subsystems/runner-and-forced-output.md) |
 | `src/core/quality/contract.ts` | [`subsystems/quality-and-closure`](subsystems/quality-and-closure.md) |
 | `src/core/quality/spec-gate.ts` | [`subsystems/quality-and-closure`](subsystems/quality-and-closure.md) |

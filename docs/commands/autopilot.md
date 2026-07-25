@@ -21,6 +21,20 @@ carries its own authenticated roster authority.
 
 ## D65 sealed launch mode
 
+For an exact local package launch, start Pi with the **package directory** so the real
+package loader follows `package.json` → `pi.extensions` →
+`./extensions/autopilot.ts`:
+
+```bash
+pi --no-extensions --extension /absolute/path/to/pi-autopilot
+```
+
+Do not point Pi at `dist/src/extension.js` as a package-loading shortcut. The package
+entrypoint and the external signer are one physical package identity; the closed
+source/dist resolver verifies both supported internal layouts against the same
+package-root `bin/autopilot-launch-signer.mjs` and `bin/autopilot-agent-run.mjs`, then
+rejects cwd, PATH, ancestor, global, symlink, or manifest fallbacks.
+
 When `--launch-manifest <absolute-path>` is present before task text, `/autopilot`
 enters the closed D65 launch mode and consumes a sealed `autopilot.launch_manifest.v1` prelaunch package
 rather than regenerating a run. The manifest binds the fixed prelaunch identity

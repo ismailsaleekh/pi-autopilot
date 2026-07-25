@@ -1,7 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { realpathSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { createContextBudgetTool, resolveContextHaltPercent } from "./core/context-budget.js";
 import { AUTOPILOT_ABORT_COMMAND, AUTOPILOT_CLAIM_GC_COMMAND, AUTOPILOT_CLOSE_COMMAND, AUTOPILOT_COMMAND, AUTOPILOT_CONFIG_COMMAND, AUTOPILOT_COORDINATION_COMMAND, AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV, AUTOPILOT_HANDOFF_COMMAND, AUTOPILOT_INJECT_COMMAND, AUTOPILOT_ONBOARD_COMMAND, CONTEXT_BUDGET_TOOL_NAME, AUTOPILOT_RESPOND_CLAIM_REQUEST_TOOL_NAME, } from "./core/names.js";
 import { buildAutopilotWorkstreamRun, parseAutopilotAbortArgs, parseAutopilotArgs, parseAutopilotLaunchArgs, parseAutopilotClaimGcArgs, parseAutopilotCloseArgs, parseAutopilotConfigArgs, parseAutopilotCoordinationArgs, parseAutopilotInjectArgs, runnerInvocationFromModuleUrl, runtimeRootForWorkstream } from "./core/paths.js";
@@ -23,6 +22,7 @@ import { parseD65LaunchManifest, launchManifestBytesSha256, D65_LAUNCH_MANIFEST_
 import { SpawnedD65LaunchSigner } from "./core/coordination/d65-launch-signer.js";
 import { beginD65LaunchBootstrap, detectD65CharterComplete, D65_CHARTER_ROOTS, launchEnv, publishD65FirstGraphAndSuccessorHeartbeat, registerD65LaunchPolicyAndInitialHeartbeat, resolveD65LaunchPhase, activateD65RuntimeRosterFromManifest, publishD65RuntimeRosterSnapshot, writeD65ContextBudgetReceipt, } from "./core/coordination/d65-launch-integration.js";
 import { readImmutableFileBytes } from "./core/coordination/immutable-file.js";
+import { resolveExtensionPackageExecutables } from "./core/coordination/executable-resolution.js";
 import { coordinationCutoverCommitted } from "./core/coordination/migration-paths.js";
 import { autopilotRosterContractCanonicalJson, autopilotRosterContractHashField, autopilotRosterContractSha256OmittingOwnField, isAutopilotRosterContractSchemaVersion, parseAutopilotRosterContract, parseAutopilotRosterContractJson, } from "./core/roster/contracts.js";
 import { isLaunchableRosterCandidate } from "./core/roster/activation-fence.js";
@@ -995,7 +995,7 @@ function notify(ctx, message, kind) {
  * runtime never learns the operator private key path; the signer CLI resolves it
  * from its own config. This keeps signing entirely outside runtime authority.
  */
-function defaultLaunchSignerResolver(manifest, env) {
+export function defaultLaunchSignerResolver(manifest, env) {
     const invocationPath = resolve(manifest.program_evidence_root, 'signer-invocation.json');
     const invocationBytes = readImmutableFileBytes({ path: invocationPath, maximumBytes: 65_536, label: 'launch signer invocation', errorCode: 'invalid-request' });
     const parsed = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(invocationBytes));
@@ -1019,7 +1019,7 @@ function defaultLaunchSignerResolver(manifest, env) {
     if (typeof signerBin !== 'string' || !signerBin.startsWith('/') || !/[\\/]bin[\\/]autopilot-launch-signer\.mjs$/u.test(signerBin))
         throw new Error('launch signer invocation signer_bin must be the packaged autopilot-launch-signer.mjs bin');
     const signerBinReal = realpathSync(signerBin);
-    const expectedSignerBin = realpathSync(fileURLToPath(new URL('../bin/autopilot-launch-signer.mjs', import.meta.url)));
+    const expectedSignerBin = realpathSync(resolveExtensionPackageExecutables(import.meta.url).launchSignerPath);
     if (signerBinReal !== expectedSignerBin)
         throw new Error('launch signer invocation signer_bin is not this package\'s autopilot-launch-signer.mjs');
     if (typeof configPath !== 'string' || !configPath.startsWith('/'))

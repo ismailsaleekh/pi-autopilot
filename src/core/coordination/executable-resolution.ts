@@ -9,13 +9,23 @@ export const COORDINATOR_COMPILED_ENTRYPOINT_ENV = 'AUTOPILOT_COORDINATOR_COMPIL
 const PACKAGE_NAME = 'pi-autopilot';
 const SOURCE_CLIENT_RELATIVE_PATH = join('src', 'core', 'coordination', 'client.ts');
 const DIST_CLIENT_RELATIVE_PATH = join('dist', 'src', 'core', 'coordination', 'client.js');
+const SOURCE_EXTENSION_RELATIVE_PATH = join('src', 'extension.ts');
+const DIST_EXTENSION_RELATIVE_PATH = join('dist', 'src', 'extension.js');
 const BOOTSTRAP_RELATIVE_PATH = join('dist', 'src', 'cli', 'autopilot-coordinator-bootstrap.js');
 const COORDINATOR_RELATIVE_PATH = join('dist', 'src', 'cli', 'autopilot-coordinator.js');
+const LAUNCH_SIGNER_RELATIVE_PATH = join('bin', 'autopilot-launch-signer.mjs');
+const AGENT_RUNNER_RELATIVE_PATH = join('bin', 'autopilot-agent-run.mjs');
 
 export interface CoordinatorExecutableResolution {
   readonly packageRoot: string;
   readonly bootstrapPath: string;
   readonly coordinatorPath: string;
+}
+
+export interface ExtensionPackageExecutableResolution {
+  readonly packageRoot: string;
+  readonly launchSignerPath: string;
+  readonly agentRunnerPath: string;
 }
 
 function isContained(root: string, target: string): boolean {
@@ -62,7 +72,7 @@ function assertClosedPackagePath(packageRoot: string, target: string, label: str
   }
 }
 
-function verifyPackageIdentity(packageRoot: string): void {
+function verifyPackageIdentity(packageRoot: string): Readonly<Record<string, unknown>> {
   const manifestPath = join(packageRoot, 'package.json');
   assertClosedPackagePath(packageRoot, manifestPath, 'coordinator package manifest');
   let manifest: unknown;
@@ -78,21 +88,45 @@ function verifyPackageIdentity(packageRoot: string): void {
       `observed_package=${String(record['name'])}@${String(record['version'])}`,
     ]);
   }
+  return record;
 }
 
-function packageRootForClientModule(modulePath: string): string {
-  const sourceRoot = resolve(dirname(modulePath), '..', '..', '..');
-  if (modulePath === join(sourceRoot, SOURCE_CLIENT_RELATIVE_PATH)) return sourceRoot;
-  const distRoot = resolve(dirname(modulePath), '..', '..', '..', '..');
-  if (modulePath === join(distRoot, DIST_CLIENT_RELATIVE_PATH)) return distRoot;
-  throw new CoordinationRuntimeError('coordinator-unavailable', 'coordinator client module location is outside the closed source/dist package layouts', [`client_module=${modulePath}`]);
+/**
+ * Resolve one module against a CLOSED pair of source/dist layouts. This is not
+ * ancestor discovery: each candidate root is derived by removing exactly the
+ * segments in one package-owned relative path, then the complete path is
+ * compared byte-for-byte. Adding another build layout requires an explicit
+ * code + test change rather than a filesystem-search fallback.
+ */
+function packageRootForKnownModule(input: {
+  readonly modulePath: string;
+  readonly sourceRelativePath: string;
+  readonly distRelativePath: string;
+  readonly label: string;
+}): string {
+  const modulePath = resolve(input.modulePath);
+  for (const relativePath of [input.sourceRelativePath, input.distRelativePath]) {
+    const segments = relativePath.split(/[\\/]/u);
+    let candidateRoot = modulePath;
+    for (const _segment of segments) candidateRoot = dirname(candidateRoot);
+    if (modulePath === join(candidateRoot, relativePath)) return candidateRoot;
+  }
+  throw new CoordinationRuntimeError('coordinator-unavailable', `${input.label} module location is outside the closed source/dist package layouts`, [`module=${modulePath}`]);
+}
+
+function localModulePath(moduleUrl: string, label: string): string {
+  try { return resolve(fileURLToPath(moduleUrl)); }
+  catch (error) { throw new CoordinationRuntimeError('coordinator-unavailable', `${label} module URL is not a local package file`, [`packaging_cause=${error instanceof Error ? error.message : String(error)}`]); }
 }
 
 export function resolveCoordinatorExecutable(clientModuleUrl: string): CoordinatorExecutableResolution {
-  let modulePath: string;
-  try { modulePath = fileURLToPath(clientModuleUrl); }
-  catch (error) { throw new CoordinationRuntimeError('coordinator-unavailable', 'coordinator client module URL is not a local package file', [`packaging_cause=${error instanceof Error ? error.message : String(error)}`]); }
-  const packageRoot = packageRootForClientModule(resolve(modulePath));
+  const modulePath = localModulePath(clientModuleUrl, 'coordinator client');
+  const packageRoot = packageRootForKnownModule({
+    modulePath,
+    sourceRelativePath: SOURCE_CLIENT_RELATIVE_PATH,
+    distRelativePath: DIST_CLIENT_RELATIVE_PATH,
+    label: 'coordinator client',
+  });
   verifyPackageIdentity(packageRoot);
   assertClosedPackagePath(packageRoot, modulePath, 'coordinator client module');
   const bootstrapPath = join(packageRoot, BOOTSTRAP_RELATIVE_PATH);
@@ -100,4 +134,35 @@ export function resolveCoordinatorExecutable(clientModuleUrl: string): Coordinat
   assertClosedPackagePath(packageRoot, bootstrapPath, 'compiled coordinator bootstrap');
   assertClosedPackagePath(packageRoot, coordinatorPath, 'compiled coordinator artifact');
   return Object.freeze({ packageRoot, bootstrapPath, coordinatorPath });
+}
+
+/**
+ * Resolve every extension-spawned executable from the physical package that
+ * loaded the extension. BUG-179 proved that composing `../bin` directly from
+ * import.meta works for src/extension.ts but points at nonexistent dist/bin
+ * from compiled dist/src/extension.js; the signer failed first and the child
+ * runner carried the same latent peer. Both exact layouts and both executables
+ * now share this one closed package-root derivation; no PATH, cwd, global
+ * install, or ancestor fallback is permitted.
+ */
+export function resolveExtensionPackageExecutables(extensionModuleUrl: string): ExtensionPackageExecutableResolution {
+  const modulePath = localModulePath(extensionModuleUrl, 'Autopilot extension');
+  const packageRoot = packageRootForKnownModule({
+    modulePath,
+    sourceRelativePath: SOURCE_EXTENSION_RELATIVE_PATH,
+    distRelativePath: DIST_EXTENSION_RELATIVE_PATH,
+    label: 'Autopilot extension',
+  });
+  const manifest = verifyPackageIdentity(packageRoot);
+  assertClosedPackagePath(packageRoot, modulePath, 'Autopilot extension module');
+  const bin = manifest['bin'];
+  const binRecord = typeof bin === 'object' && bin !== null && !Array.isArray(bin) ? bin as Readonly<Record<string, unknown>> : null;
+  if (binRecord?.['autopilot-launch-signer'] !== 'bin/autopilot-launch-signer.mjs' || binRecord['autopilot-agent-run'] !== 'bin/autopilot-agent-run.mjs') {
+    throw new CoordinationRuntimeError('coordinator-unavailable', 'extension executable manifest identity does not name the package-owned signer and runner bins', [`package_root=${packageRoot}`]);
+  }
+  const launchSignerPath = join(packageRoot, LAUNCH_SIGNER_RELATIVE_PATH);
+  const agentRunnerPath = join(packageRoot, AGENT_RUNNER_RELATIVE_PATH);
+  assertClosedPackagePath(packageRoot, launchSignerPath, 'launch signer executable');
+  assertClosedPackagePath(packageRoot, agentRunnerPath, 'agent runner executable');
+  return Object.freeze({ packageRoot, launchSignerPath, agentRunnerPath });
 }
