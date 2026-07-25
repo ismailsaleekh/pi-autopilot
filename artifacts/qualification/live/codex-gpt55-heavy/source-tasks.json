@@ -1,0 +1,14 @@
+{
+  "schema_version": "autopilot.live_certification_source_tasks.v1",
+  "session_dir": "session-83371-83371",
+  "roles": {
+    "parent": "be263a42b6869a113a0ee3fbedd47f775",
+    "strategy": "b4caf36bb6c2ea148aa459c24fd3fa9c3",
+    "implement": "bafb32418fb5d9b0789b1aee3cc7d4d6f",
+    "validate": "bfa0167c9a54e70488b064c3afac20763",
+    "fix": "bc736c4525822ae97d3735aa3168c58de",
+    "adjudicate": "be514b9987dbd4e1283f798504079549e",
+    "bughunt": "bec8c1036488036458776b165be0d939e",
+    "extract": "bd592c55e12ede799163e687d932bb9ad"
+  }
+}

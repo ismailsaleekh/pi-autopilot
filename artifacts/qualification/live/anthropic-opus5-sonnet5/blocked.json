@@ -1,0 +1,36 @@
+{
+  "schema_version": "autopilot.live_certification_block.v1",
+  "provider_pack_id": "anthropic-opus5-sonnet5-subscription-w4",
+  "recipe_id": "anthropic-opus5-sonnet5-subscription",
+  "pi_version": "0.82.0",
+  "status": "blocked-live-certification",
+  "reason_code": "ANTHROPIC_SUBSCRIPTION_USAGE_EXHAUSTED",
+  "reason": "Direct subscription requests returned provider usage exhaustion before producing an assistant response.",
+  "package_owned_system_prompt_transform": {
+    "profile_id": "anthropic-autopilot-sanitized.v1",
+    "extension_path": "src/internal/anthropic-system-prompt-extension.ts",
+    "extension_sha256": "sha256:855acb4e1c49c2dc72191010967bcd1bcda75f31d16b169044ded33318aae544"
+  },
+  "failed_live_probes": [
+    {
+      "role": "parent",
+      "provider_id": "anthropic",
+      "model_id": "claude-opus-5",
+      "api": "anthropic-messages",
+      "source_task_id": "b13f2abc47ecea5f8bf222da93c4d7676",
+      "result": "provider-usage-exhausted"
+    },
+    {
+      "role": "implement",
+      "provider_id": "anthropic",
+      "model_id": "claude-sonnet-5",
+      "api": "anthropic-messages",
+      "source_task_id": "bf4756322deef520e42763f1fc4912149",
+      "result": "provider-usage-exhausted"
+    }
+  ],
+  "paid_fallback_attempted": false,
+  "api_key_fallback_attempted": false,
+  "openrouter_fallback_attempted": false,
+  "secret_free": true
+}

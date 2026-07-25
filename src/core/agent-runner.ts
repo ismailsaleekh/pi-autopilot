@@ -189,6 +189,7 @@ const RPC_COMMAND_TIMEOUT_MS = 10_000;
 const DIAGNOSTIC_TEXT_LIMIT = 600;
 const FAILURE_REASON_LIMIT = 2_400;
 const AUTOPILOT_AGENT_STATUS_EXTENSION_PATH = resolveAutopilotInternalExtensionPath(import.meta.url, 'status-extension');
+const AUTOPILOT_AGENT_ANTHROPIC_SANITIZER_EXTENSION_PATH = resolveAutopilotInternalExtensionPath(import.meta.url, 'anthropic-system-prompt-extension');
 const AUTOPILOT_AGENT_EXECUTION_OBSERVER_EXTENSION_PATH = resolveAutopilotInternalExtensionPath(import.meta.url, 'execution-observer-extension');
 
 function resolveAutopilotInternalExtensionPath(moduleUrl: string, basename: string): string {
@@ -1999,7 +2000,12 @@ function validateSpawnExecutionProfile(spec: SpawnSpec): void {
     }
     if (request.service_tier !== null) mismatches.push(`current Pi ^0.81.1 adapter cannot set request_profile.service_tier=${JSON.stringify(request.service_tier)} exactly before model spend`);
     if (request.cache_policy !== 'provider-default') mismatches.push(`current Pi ^0.81.1 adapter cannot set request_profile.cache_policy=${JSON.stringify(request.cache_policy)} exactly before model spend`);
-    if (request.system_prompt_profile !== 'pi-default.v1') mismatches.push(`current Pi ^0.81.1 adapter cannot set request_profile.system_prompt_profile=${JSON.stringify(request.system_prompt_profile)} exactly before model spend`);
+    const supportsAnthropicSanitizer = request.provider_id === 'anthropic' &&
+      request.api === 'anthropic-messages' &&
+      request.system_prompt_profile === 'anthropic-autopilot-sanitized.v1';
+    if (request.system_prompt_profile !== 'pi-default.v1' && !supportsAnthropicSanitizer) {
+      mismatches.push(`current Pi adapter cannot set request_profile.system_prompt_profile=${JSON.stringify(request.system_prompt_profile)} exactly before model spend`);
+    }
     if (mismatches.length > 0) throw new Error(mismatches.join('; '));
   } catch (error) {
     throw new AutopilotAgentRunError('spec-invalid', {
@@ -2030,6 +2036,9 @@ async function runPiPromptWithStatusCarrier(spec: SpawnSpec, prompt: string): Pr
     buildPiToolArgument(spec.toolPolicy),
     '--extension',
     AUTOPILOT_AGENT_STATUS_EXTENSION_PATH,
+    ...(spec.requestProfile?.system_prompt_profile === 'anthropic-autopilot-sanitized.v1'
+      ? ['--extension', AUTOPILOT_AGENT_ANTHROPIC_SANITIZER_EXTENSION_PATH]
+      : []),
     '--extension',
     AUTOPILOT_AGENT_EXECUTION_OBSERVER_EXTENSION_PATH,
   ];

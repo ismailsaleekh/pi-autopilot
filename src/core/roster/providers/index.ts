@@ -114,6 +114,8 @@ export interface W4ProviderPackRegistryEntry {
   readonly recipe_revision: number;
   readonly route_policy_id: string;
   readonly route_policy_revision: number;
+  readonly certification_package_version: string;
+  readonly certification_pi_version: string;
   readonly ready_profiles: readonly string[];
   readonly required_evidence: readonly EvidenceRef[];
   readonly trusted_manifest_ids: readonly string[];
@@ -138,6 +140,8 @@ export interface W4ProviderRegistryVerificationOptions {
 const EMPTY_REFS: readonly EvidenceRef[] = Object.freeze([]);
 const EMPTY_DIGESTS: readonly Digest[] = Object.freeze([]);
 const EMPTY_IDS: readonly string[] = Object.freeze([]);
+const CURRENT_LIVE_CERTIFICATION_PACKAGE_VERSION = '1.3.0' as const;
+const CURRENT_LIVE_CERTIFICATION_PI_VERSION = '0.82.0' as const;
 const ANTHROPIC_OPUS5_SONNET5_PROVIDER_PACK_ID = 'anthropic-opus5-sonnet5-subscription-w4' as const;
 const ANTHROPIC_OPUS5_SONNET5_ROUTE_POLICY_ID = 'anthropic-opus5-sonnet5-subscription-v1' as const;
 const ANTHROPIC_OPUS5_SONNET5_REQUIRED_EVIDENCE_REFS: readonly EvidenceRef[] = Object.freeze([
@@ -153,6 +157,13 @@ const ANTHROPIC_OPUS5_SONNET5_REQUIRED_EVIDENCE_REFS: readonly EvidenceRef[] = O
   })),
 ]);
 const CODEX_GPT55_HEAVY_PROVIDER_PACK_ID = 'codex-gpt55-heavy-sol-terra-w4' as const;
+const CODEX_GPT55_HEAVY_TRUSTED_MANIFEST_IDS = Object.freeze(['codex-gpt55-heavy-sol-terra-w4-live-20260724']);
+const CODEX_GPT55_HEAVY_TRUSTED_MANIFEST_SHA256S: readonly Digest[] = Object.freeze([
+  'sha256:9c8a852f64f06951b00bea59c1e137ea0066b293fb2dc836aded72f3c2c93b03',
+]);
+const CODEX_GPT55_HEAVY_TRUSTED_ROSTER_SHA256S: readonly Digest[] = Object.freeze([
+  'sha256:7adf4b920818facf754ff67b63ccb8239b5b29ecb7352d78c09417a3824fc537',
+]);
 const CODEX_GPT55_HEAVY_REQUIRED_EVIDENCE_REFS: readonly EvidenceRef[] = Object.freeze([
   Object.freeze({ evidence_id: 'codex-gpt55-heavy-route-proof', kind: 'route-proof' as const, uri: 'qualification-required://codex-gpt55-heavy/route', sha256: null, byte_count: null, secret_free: true as const }),
   Object.freeze({ evidence_id: 'codex-gpt55-heavy-billing-proof', kind: 'billing-proof' as const, uri: 'qualification-required://codex-gpt55-heavy/billing', sha256: null, byte_count: null, secret_free: true as const }),
@@ -174,6 +185,8 @@ export const W4_PROVIDER_PACK_REGISTRY: readonly W4ProviderPackRegistryEntry[] =
     recipe_revision: ANTHROPIC_OPUS5_SONNET5_RECIPE_REVISION,
     route_policy_id: ANTHROPIC_OPUS5_SONNET5_ROUTE_POLICY_ID,
     route_policy_revision: 1,
+    certification_package_version: CURRENT_LIVE_CERTIFICATION_PACKAGE_VERSION,
+    certification_pi_version: CURRENT_LIVE_CERTIFICATION_PI_VERSION,
     ready_profiles: Object.freeze(['precision']),
     required_evidence: ANTHROPIC_OPUS5_SONNET5_REQUIRED_EVIDENCE_REFS,
     trusted_manifest_ids: EMPTY_IDS,
@@ -189,6 +202,8 @@ export const W4_PROVIDER_PACK_REGISTRY: readonly W4ProviderPackRegistryEntry[] =
     recipe_revision: 1,
     route_policy_id: ANTHROPIC_ROUTE_POLICY_ID,
     route_policy_revision: ANTHROPIC_ROUTE_POLICY_REVISION,
+    certification_package_version: PHASE37_PACKAGE_VERSION,
+    certification_pi_version: PHASE37_PI_VERSION,
     ready_profiles: Object.freeze([]),
     required_evidence: EMPTY_REFS,
     trusted_manifest_ids: EMPTY_IDS,
@@ -204,11 +219,13 @@ export const W4_PROVIDER_PACK_REGISTRY: readonly W4ProviderPackRegistryEntry[] =
     recipe_revision: CODEX_GPT55_HEAVY_RECIPE_REVISION,
     route_policy_id: CODEX_ROUTE_POLICY_ID,
     route_policy_revision: CODEX_ROUTE_POLICY_REVISION,
+    certification_package_version: CURRENT_LIVE_CERTIFICATION_PACKAGE_VERSION,
+    certification_pi_version: CURRENT_LIVE_CERTIFICATION_PI_VERSION,
     ready_profiles: Object.freeze(['cruise']),
     required_evidence: CODEX_GPT55_HEAVY_REQUIRED_EVIDENCE_REFS,
-    trusted_manifest_ids: EMPTY_IDS,
-    trusted_manifest_sha256s: EMPTY_DIGESTS,
-    trusted_certified_roster_sha256s: EMPTY_DIGESTS,
+    trusted_manifest_ids: CODEX_GPT55_HEAVY_TRUSTED_MANIFEST_IDS,
+    trusted_manifest_sha256s: CODEX_GPT55_HEAVY_TRUSTED_MANIFEST_SHA256S,
+    trusted_certified_roster_sha256s: CODEX_GPT55_HEAVY_TRUSTED_ROSTER_SHA256S,
     live_w3_uri_prefix: 'w3-evidence://codex-gpt55-heavy/',
     readiness: 'strict-w3-manifest' as const,
   }),
@@ -219,6 +236,8 @@ export const W4_PROVIDER_PACK_REGISTRY: readonly W4ProviderPackRegistryEntry[] =
     recipe_revision: CODEX_RECIPE_REVISION,
     route_policy_id: CODEX_ROUTE_POLICY_ID,
     route_policy_revision: CODEX_ROUTE_POLICY_REVISION,
+    certification_package_version: PHASE37_PACKAGE_VERSION,
+    certification_pi_version: PHASE37_PI_VERSION,
     ready_profiles: Object.freeze([]),
     required_evidence: EMPTY_REFS,
     trusted_manifest_ids: EMPTY_IDS,
@@ -234,6 +253,8 @@ export const W4_PROVIDER_PACK_REGISTRY: readonly W4ProviderPackRegistryEntry[] =
     recipe_revision: KIMI_CODING_RECIPE_REVISION,
     route_policy_id: KIMI_CODING_ROUTE_POLICY_ID,
     route_policy_revision: KIMI_CODING_ROUTE_POLICY_REVISION,
+    certification_package_version: PHASE37_PACKAGE_VERSION,
+    certification_pi_version: PHASE37_PI_VERSION,
     ready_profiles: Object.freeze(['precision']),
     required_evidence: KIMI_CODING_REQUIRED_EVIDENCE_REFS,
     trusted_manifest_ids: EMPTY_IDS,
@@ -249,6 +270,8 @@ export const W4_PROVIDER_PACK_REGISTRY: readonly W4ProviderPackRegistryEntry[] =
     recipe_revision: OPENCODE_GO_RECIPE_REVISION,
     route_policy_id: OPENCODE_GO_ROUTE_POLICY_ID,
     route_policy_revision: OPENCODE_GO_ROUTE_POLICY_REVISION,
+    certification_package_version: PHASE37_PACKAGE_VERSION,
+    certification_pi_version: PHASE37_PI_VERSION,
     ready_profiles: Object.freeze(['precision']),
     required_evidence: OPENCODE_GO_REQUIRED_EVIDENCE_REFS,
     trusted_manifest_ids: EMPTY_IDS,
@@ -264,6 +287,8 @@ export const W4_PROVIDER_PACK_REGISTRY: readonly W4ProviderPackRegistryEntry[] =
     recipe_revision: ZAI_RECIPE_REVISION,
     route_policy_id: ZAI_ROUTE_POLICY_ID,
     route_policy_revision: ZAI_ROUTE_POLICY_REVISION,
+    certification_package_version: PHASE37_PACKAGE_VERSION,
+    certification_pi_version: PHASE37_PI_VERSION,
     ready_profiles: Object.freeze(['precision']),
     required_evidence: ZAI_REQUIRED_EVIDENCE_REFS,
     trusted_manifest_ids: EMPTY_IDS,
@@ -458,8 +483,11 @@ export function verifyW4ProviderManifestForCandidate(input: {
   ) {
     issues.push(issue('W4_MANIFEST_BINDING_MISMATCH', 'manifest subject, recipe, route, or candidate binding does not match the central registry'));
   }
-  if (manifest.package_version !== PHASE37_PACKAGE_VERSION || manifest.pi_version !== PHASE37_PI_VERSION) {
-    issues.push(issue('W4_MANIFEST_BINDING_MISMATCH', 'manifest package or Pi version does not match the package registry'));
+  if (
+    manifest.package_version !== entry.certification_package_version ||
+    manifest.pi_version !== entry.certification_pi_version
+  ) {
+    issues.push(issue('W4_MANIFEST_BINDING_MISMATCH', 'manifest package or Pi version does not match the provider-pack certification baseline'));
   }
   if (!manifestTimeIsValid(manifest, input.options?.now ?? new Date())) {
     issues.push(issue('W4_MANIFEST_TIME_INVALID', 'manifest issued_at/expires_at window is invalid or stale'));

@@ -459,6 +459,9 @@
     "src/core/roster/historical-adapter.ts": [
       "subsystems/roster-onboarding"
     ],
+    "src/core/roster/live-certification-manifests.ts": [
+      "subsystems/roster-onboarding"
+    ],
     "src/core/roster/paths.ts": [
       "subsystems/roster-onboarding"
     ],
@@ -537,6 +540,9 @@
       "subsystems/close-lifecycle"
     ],
     "src/extension.ts": [
+      "subsystems/roster-onboarding"
+    ],
+    "src/internal/anthropic-system-prompt-extension.ts": [
       "subsystems/roster-onboarding"
     ],
     "src/internal/execution-observer-extension.ts": [
@@ -1111,6 +1117,7 @@
         "src/core/roster/custom-certification.ts",
         "src/core/roster/doctor.ts",
         "src/core/roster/historical-adapter.ts",
+        "src/core/roster/live-certification-manifests.ts",
         "src/core/roster/paths.ts",
         "src/core/roster/provider-recipes.ts",
         "src/core/roster/providers/index.ts",
@@ -1129,12 +1136,13 @@
         "src/core/roster/transaction.ts",
         "src/core/roster/transition.ts",
         "src/extension.ts",
+        "src/internal/anthropic-system-prompt-extension.ts",
         "src/internal/execution-observer-extension.ts",
         "templates/skills/autopilot-roster-setup/SKILL.md",
         "templates/skills/autopilot-roster-setup/payload.json"
       ],
-      "signature_hash": "sha256:cd6b0f17b8caa110e56406b720630028433f2895ef8603a0dcfe4ac482d0250c",
-      "body_hash": "sha256:855950593b24e80c4a562a037ee63b86aa1325096c2bb710dc95d1413da68d25",
+      "signature_hash": "sha256:446abbf30121b2ab57063f3ce3a9c42ce65ec63b073426f7ff4369c9ca095a43",
+      "body_hash": "sha256:ee982fa4a899f8ef025ed681bf33e5985ffc4a22e47654a655228c425e439756",
       "semantic_attestation": null
     },
     "subsystems/runner-and-forced-output": {
@@ -1160,7 +1168,7 @@
         "src/core/unit-failure.ts"
       ],
       "signature_hash": "sha256:a5ee2fb831b97d6f0e5450759d68bfb1bf43017a4d5c8f10df68c05755315709",
-      "body_hash": "sha256:a1b2d9c0690b025fbfaabaac53614c5148fb7fb07817456c6d58794d56fdd08b",
+      "body_hash": "sha256:28a7af517eda3c3d5f0f7af8bde83f075455e97a52923debd5df8d387f3d9a7c",
       "semantic_attestation": "sha256:a1b2d9c0690b025fbfaabaac53614c5148fb7fb07817456c6d58794d56fdd08b"
     },
     "subsystems/s2-retention": {

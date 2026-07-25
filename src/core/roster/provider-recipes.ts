@@ -616,7 +616,7 @@ const ANTHROPIC_OPUS5_SONNET5_RECIPE_PREIMAGE = {
       anthropicOpus5Sonnet5RoleTemplate('extract', 'claude-sonnet-5', 'high'),
     ],
   }],
-  minimum_pi_version: '0.81.1',
+  minimum_pi_version: '0.82.0',
   certification_manifest_id: null,
   certification_manifest_sha256: null,
   qualification_state: 'unqualified-non-certifying-seed' as const,
@@ -685,12 +685,12 @@ export const ANTHROPIC_OPUS5_SONNET5_ROSTER: Roster = deepFreezeRecipeAuthority(
   ...anthropicOpus5Sonnet5RosterPreimage,
   roster_id: ANTHROPIC_OPUS5_SONNET5_ROSTER_ID,
   display_name: 'Anthropic Precision — Opus 5 / Sonnet 5',
-  pi_version: '0.81.1',
+  pi_version: '0.82.0',
   roster_sha256: canonicalSha256({
     ...anthropicOpus5Sonnet5RosterPreimage,
     roster_id: ANTHROPIC_OPUS5_SONNET5_ROSTER_ID,
     display_name: 'Anthropic Precision — Opus 5 / Sonnet 5',
-    pi_version: '0.81.1',
+    pi_version: '0.82.0',
   }),
 });
 
@@ -744,7 +744,7 @@ function codexGpt55HeavyRoleTemplate(
     service_tier: null,
     cache_policy: 'provider-default',
     system_prompt_profile: 'pi-default.v1',
-    context_window: isGpt55 ? 256_000 : 512_000,
+    context_window: 256_000,
     max_output_tokens: isGpt55 ? 32_768 : 65_536,
     input_modalities: ['text'],
     output_modalities: ['text'],
@@ -776,7 +776,7 @@ const CODEX_GPT55_HEAVY_RECIPE_PREIMAGE = {
       codexGpt55HeavyRoleTemplate('extract', 'gpt-5.5', 'high'),
     ],
   }],
-  minimum_pi_version: '0.81.1',
+  minimum_pi_version: '0.82.0',
   certification_manifest_id: null,
   certification_manifest_sha256: null,
   qualification_state: 'unqualified-non-certifying-seed' as const,
@@ -859,12 +859,12 @@ export const CODEX_GPT55_HEAVY_ROSTER: Roster = deepFreezeRecipeAuthority({
   ...codexGpt55HeavyRosterPreimage,
   roster_id: CODEX_GPT55_HEAVY_ROSTER_ID,
   display_name: 'Codex GPT-5.5 Heavy — Sol / Terra',
-  pi_version: '0.81.1',
+  pi_version: '0.82.0',
   roster_sha256: canonicalSha256({
     ...codexGpt55HeavyRosterPreimage,
     roster_id: CODEX_GPT55_HEAVY_ROSTER_ID,
     display_name: 'Codex GPT-5.5 Heavy — Sol / Terra',
-    pi_version: '0.81.1',
+    pi_version: '0.82.0',
   }),
 });
 

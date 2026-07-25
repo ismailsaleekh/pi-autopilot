@@ -60,6 +60,7 @@ covers_sources:
   - src/core/roster/custom-certification.ts
   - src/core/roster/doctor.ts
   - src/core/roster/historical-adapter.ts
+  - src/core/roster/live-certification-manifests.ts
   - src/core/roster/paths.ts
   - src/core/roster/provider-recipes.ts
   - src/core/roster/providers/index.ts
@@ -78,11 +79,12 @@ covers_sources:
   - src/core/roster/transaction.ts
   - src/core/roster/transition.ts
   - src/core/forced-output/identity.ts
+  - src/internal/anthropic-system-prompt-extension.ts
   - src/internal/execution-observer-extension.ts
   - templates/skills/autopilot-roster-setup/SKILL.md
   - templates/skills/autopilot-roster-setup/payload.json
-signature_hash: 'sha256:cd6b0f17b8caa110e56406b720630028433f2895ef8603a0dcfe4ac482d0250c'
-body_hash: 'sha256:855950593b24e80c4a562a037ee63b86aa1325096c2bb710dc95d1413da68d25'
+signature_hash: 'sha256:446abbf30121b2ab57063f3ce3a9c42ce65ec63b073426f7ff4369c9ca095a43'
+body_hash: 'sha256:ee982fa4a899f8ef025ed681bf33e5985ffc4a22e47654a655228c425e439756'
 stability: evolving
 ---
 
@@ -99,13 +101,11 @@ default or a provider guess.
 
 ## Current readiness truth
 
-**Current package truth:** every offline W4 provider pack and every custom roster
-trust path in this package is blocked for launch authority because the provider and
-custom trust registries carry zero trusted manifest/roster pins. The generated table
-below lists the current provider packs and pin counts; setup can inspect and propose
-seed or custom v2 rosters, but it cannot save a launchable provider or custom roster
-until package-reviewed live W3 trust pins and trusted certified roster hashes exist in
-the relevant registry.
+**Current package truth:** the Codex GPT-5.5 Heavy provider pack carries one
+package-reviewed live W3 manifest pin and one matching certified-roster pin on the Pi
+`0.82.0` subscription baseline. Other provider packs and every custom roster trust
+path remain blocked because their registries carry no trusted current pins. The
+generated table below is authoritative for exact pack baselines and pin counts.
 
 The Anthropic subscription seed `anthropic-precision-opus5-sonnet5-v1` is an
 explicit Precision roster over Pi's direct Anthropic OAuth route. It assigns Opus 5
@@ -123,23 +123,22 @@ recommended Cruise default candidate. Sol at `xhigh` owns parent, strategy, and
 bughunt; GPT-5.5 at `high` owns the complete implement/validate/fix loop plus extract;
 and Terra at `high` owns adjudication. Every assignment uses the direct
 `openai-codex-responses` OAuth subscription route, a null service tier,
-provider-default caching, and `pi-default.v1`. Setup recommends this candidate as the
-user default when the exact inventory resolves, but the storage gate cannot persist it
-as launch authority until reviewed live W3 evidence and its certified roster hash are
-pinned.
+provider-default caching, and `pi-default.v1`. Its reviewed live W3 evidence,
+manifest, and certified roster are pinned on Pi `0.82.0`; setup recommends the
+resulting ready candidate as the user default when the exact inventory resolves.
 
 <!-- GENERATED:roster-readiness START (source: src/core/roster/provider-recipes.ts, src/core/roster/route-policies.ts, src/core/roster/providers/index.ts) -->
 ### W4 provider registry (current package pins)
 
-| Provider pack | Provider | Recipe | Route policy | Ready profiles | Registry readiness | Required evidence refs | Trusted manifest pins | Trusted certified roster pins |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `anthropic-opus5-sonnet5-subscription-w4` | `anthropic` | `anthropic-opus5-sonnet5-subscription@1` | `anthropic-opus5-sonnet5-subscription-v1@1` | `precision` | `strict-w3-manifest` | 10 | 0 | 0 |
-| `anthropic-sanitized` | `anthropic` | `anthropic-sanitized@1` | `anthropic-sanitized-v1@1` | none | `blocked-current-pack` | 0 | 0 | 0 |
-| `codex-gpt55-heavy-sol-terra-w4` | `openai-codex` | `codex-gpt55-heavy-subscription@1` | `codex-subscription-v1@1` | `cruise` | `strict-w3-manifest` | 10 | 0 | 0 |
-| `codex-subscription-w4-offline` | `openai-codex` | `codex-subscription@1` | `codex-subscription-v1@1` | none | `blocked-current-pack` | 0 | 0 | 0 |
-| `kimi-coding-plan-w4-provider-pack` | `kimi-coding` | `kimi-coding-plan@1` | `kimi-coding-plan-v1@1` | `precision` | `strict-w3-manifest` | 10 | 0 | 0 |
-| `opencode-go-plan-w4-provider-pack` | `opencode-go` | `opencode-go-plan@1` | `opencode-go-plan-v1@1` | `precision` | `strict-w3-manifest` | 10 | 0 | 0 |
-| `zai-coding-plan-w4-provider-pack` | `zai` | `zai-coding-plan@1` | `zai-coding-plan-v1@1` | `precision` | `strict-w3-manifest` | 40 | 0 | 0 |
+| Provider pack | Provider | Recipe | Route policy | Certification package | Certification Pi | Ready profiles | Registry readiness | Required evidence refs | Trusted manifest pins | Trusted certified roster pins |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `anthropic-opus5-sonnet5-subscription-w4` | `anthropic` | `anthropic-opus5-sonnet5-subscription@1` | `anthropic-opus5-sonnet5-subscription-v1@1` | `1.3.0` | `0.82.0` | `precision` | `strict-w3-manifest` | 10 | 0 | 0 |
+| `anthropic-sanitized` | `anthropic` | `anthropic-sanitized@1` | `anthropic-sanitized-v1@1` | `1.3.0` | `0.80.6` | none | `blocked-current-pack` | 0 | 0 | 0 |
+| `codex-gpt55-heavy-sol-terra-w4` | `openai-codex` | `codex-gpt55-heavy-subscription@1` | `codex-subscription-v1@1` | `1.3.0` | `0.82.0` | `cruise` | `strict-w3-manifest` | 10 | 1 | 1 |
+| `codex-subscription-w4-offline` | `openai-codex` | `codex-subscription@1` | `codex-subscription-v1@1` | `1.3.0` | `0.80.6` | none | `blocked-current-pack` | 0 | 0 | 0 |
+| `kimi-coding-plan-w4-provider-pack` | `kimi-coding` | `kimi-coding-plan@1` | `kimi-coding-plan-v1@1` | `1.3.0` | `0.80.6` | `precision` | `strict-w3-manifest` | 10 | 0 | 0 |
+| `opencode-go-plan-w4-provider-pack` | `opencode-go` | `opencode-go-plan@1` | `opencode-go-plan-v1@1` | `1.3.0` | `0.80.6` | `precision` | `strict-w3-manifest` | 10 | 0 | 0 |
+| `zai-coding-plan-w4-provider-pack` | `zai` | `zai-coding-plan@1` | `zai-coding-plan-v1@1` | `1.3.0` | `0.80.6` | `precision` | `strict-w3-manifest` | 40 | 0 | 0 |
 
 ### Route policies
 
@@ -157,9 +156,9 @@ pinned.
 | Candidate | Profile | Recipe | Route policy | Roster ID | Revision | Roster SHA-256 | Assignment-set SHA-256 | Candidate state | Launch readiness | Qualification state | Non-certifying seed | Synthetic fixture ready only | Diagnostics |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | `codex-afterburner-v1` | `afterburner` | `codex-subscription@1` | `codex-subscription-v1@1` | `afterburner-codex-subscription-7814ccd19c58` | 1 | `sha256:ba7d0cdd955589f24fb9afbb403057c8b5461fe9d62c8265b347ec7827578a85` | `sha256:7814ccd19c5807b001764c9a6a40f6d1e7e669c6fda29220c1f4e0e96c309e5d` | `qualification-required` | `not-ready-until-w4` | `unqualified-non-certifying-seed` | yes | no | `ROSTER_PRIORITY_PROOF_REQUIRED`, `ROSTER_QUALIFICATION_REQUIRED` |
-| `codex-gpt55-heavy-sol-terra-v1` | `cruise` | `codex-gpt55-heavy-subscription@1` | `codex-subscription-v1@1` | `codex-gpt55-heavy-sol-terra-v1` | 1 | `sha256:4a0d4f35223b9cf10ab705929b83e83996cf1d487a232967b98f8dcb53fbdec6` | `sha256:dd3f3161e993e4e5039307d01b31790874258b8ebbd7de7ee8a2f623f2bc2a72` | `qualification-required` | `not-ready-until-w4` | `unqualified-non-certifying-seed` | yes | no | `ROSTER_QUALIFICATION_REQUIRED` |
+| `codex-gpt55-heavy-sol-terra-v1` | `cruise` | `codex-gpt55-heavy-subscription@1` | `codex-subscription-v1@1` | `codex-gpt55-heavy-sol-terra-v1` | 1 | `sha256:6e14ad4b1ce19ecef6dc39248f3661fd9deb7f0fa621810dac76945197dbebba` | `sha256:f8dae47d19c7f91736f6b3a3e11d085d920ed847d97cb1a4e34b91d7be4b1f09` | `qualification-required` | `not-ready-until-w4` | `unqualified-non-certifying-seed` | yes | no | `ROSTER_QUALIFICATION_REQUIRED` |
 | `codex-cruise-v1` | `cruise` | `codex-subscription@1` | `codex-subscription-v1@1` | `cruise-codex-subscription-bdb4f15f0ff9` | 1 | `sha256:f3ac0895d9abedfbe3616a79af0c1c3691962d24d5f17d195a78e6ab24d2b4a0` | `sha256:bdb4f15f0ff90aff9d1e46a3a56bfdfddabafcf3c7f5c293a7b558ff2f22a3c4` | `qualification-required` | `not-ready-until-w4` | `unqualified-non-certifying-seed` | yes | no | `ROSTER_CONVERGED_ASSIGNMENT_SET`, `ROSTER_QUALIFICATION_REQUIRED` |
-| `anthropic-precision-opus5-sonnet5-v1` | `precision` | `anthropic-opus5-sonnet5-subscription@1` | `anthropic-opus5-sonnet5-subscription-v1@1` | `anthropic-precision-opus5-sonnet5-v1` | 1 | `sha256:4ec6d315bcf23067e0544237c665c1612b6fae37389f8eaf738fa68eca988c69` | `sha256:ad709aa7f4ea2f5049eea536926529989cddb475308962dbc3334849b309354c` | `qualification-required` | `not-ready-until-w4` | `unqualified-non-certifying-seed` | yes | no | `ROSTER_QUALIFICATION_REQUIRED` |
+| `anthropic-precision-opus5-sonnet5-v1` | `precision` | `anthropic-opus5-sonnet5-subscription@1` | `anthropic-opus5-sonnet5-subscription-v1@1` | `anthropic-precision-opus5-sonnet5-v1` | 1 | `sha256:6e640d692c5db971ec01586fbedf9f00830b107b02c224f65c3478c9323c17d3` | `sha256:ad709aa7f4ea2f5049eea536926529989cddb475308962dbc3334849b309354c` | `qualification-required` | `not-ready-until-w4` | `unqualified-non-certifying-seed` | yes | no | `ROSTER_QUALIFICATION_REQUIRED` |
 | `anthropic-precision-v1` | `precision` | `anthropic-sanitized@1` | `anthropic-sanitized-v1@1` | `precision-anthropic-sanitized-b7321cad3237` | 1 | `sha256:15592a2eb13b6a89b89bbdb56193baed9cd14617457dcd510f45064802038a1e` | `sha256:b7321cad32374c9299499d1edbb6f0f2038f4bc5fdee82b9af892cea47bdc724` | `blocked-live-certification` | `blocked` | `blocked-live-certification` | yes | no | `ROSTER_QUALIFICATION_REQUIRED`, `ROSTER_ROUTE_FORBIDDEN` |
 | `codex-precision-v1` | `precision` | `codex-subscription@1` | `codex-subscription-v1@1` | `precision-codex-subscription-bdb4f15f0ff9` | 1 | `sha256:3cb35e9f63613f85e8d586a3de6fe7e418d3bb935f088651ec3300d63f82b7f9` | `sha256:bdb4f15f0ff90aff9d1e46a3a56bfdfddabafcf3c7f5c293a7b558ff2f22a3c4` | `qualification-required` | `not-ready-until-w4` | `unqualified-non-certifying-seed` | yes | no | `ROSTER_QUALIFICATION_REQUIRED` |
 | `kimi-coding-precision-v1` | `precision` | `kimi-coding-plan@1` | `kimi-coding-plan-v1@1` | `precision-kimi-coding-plan-af83b830e2e6` | 1 | `sha256:669061f5e1a419552c9b43f03e4ca4ca28f238b60283113d54f52000ef164a77` | `sha256:af83b830e2e6f39fa4558c88f0e4260ee1253e64bd0f8602745fe86d394d96c4` | `qualification-required` | `not-ready-until-w4` | `unqualified-non-certifying-seed` | yes | no | `ROSTER_QUALIFICATION_REQUIRED` |
@@ -319,8 +318,10 @@ certification. Until requalified on the `^0.81.1` baseline, old offline qualific
 packs and provider/custom trust remain blocked. The currently supportable pre-spend
 request-profile facts are the provider/model/thinking/API route that Pi can set plus
 `service_tier=null`, `cache_policy=provider-default`, and
-`system_prompt_profile=pi-default.v1`. Non-null service tiers, non-default cache
-policies, and non-default prompt profiles are rejected by the current adapter.
+`system_prompt_profile=pi-default.v1`, plus the package-owned
+`anthropic-autopilot-sanitized.v1` transform for the direct Anthropic route. Non-null
+service tiers, non-default cache policies, and other prompt profiles are rejected by
+the current adapter.
 
 After the child finishes, `src/internal/execution-observer-extension.ts` records the
 observed provider/model/API, system-prompt hash/profile, service tier, cache policy, and
@@ -339,8 +340,8 @@ roster routes. The contract schemas and setup tool now ship `custom_roster`,
 `user-custom`, and `autopilot.roster_transition.v1` behavior, but production launch
 authority still requires exact package trust: central W4 provider-registry pins for
 provider recipes or custom trust-registry pins plus a published custom certification
-authority for user-custom rosters. Both registries are empty in this package, so all
-provider/custom trust remains blocked. Mixed billing routes are rejected by production
+authority for user-custom rosters. The custom registry and all provider entries except the current Codex GPT-5.5 Heavy
+entry remain unpinned, so those paths stay blocked. Mixed billing routes are rejected by production
 seed roster construction, and custom/mixed structural compatibility is not certified
 readiness.
 
@@ -350,8 +351,8 @@ Allowed transition semantics are explicit and source-backed:
 
 - `setup-required` activates the setup lane and writes no run state.
 - A certified save path publishes roster/config authority and requires a fresh session;
-  current provider and custom trust pins are empty, so this path cannot produce launch
-  authority from offline seeds or uncertified custom drafts.
+  only the exact pinned Codex GPT-5.5 Heavy manifest can currently produce provider
+  launch authority; offline seeds and uncertified custom drafts remain blocked.
 - A new run commits one immutable pre-run selection before worktree mutation or spend.
 - The main worktree mirrors that selection for runtime recovery.
 - Existing-run recovery consumes the immutable selection and any committed transition

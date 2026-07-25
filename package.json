@@ -29,6 +29,7 @@
     "tools/s2-corpus-rehearsal/",
     "templates/",
     "artifacts/security/",
+    "artifacts/qualification/live/",
     "docs/",
     "AUTOPILOT-INSTRUCTIONS.md",
     "logo.png",

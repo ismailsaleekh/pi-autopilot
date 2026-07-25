@@ -283,6 +283,8 @@ export async function loadCodeSurfaces() {
         recipe_revision: entry.recipe_revision,
         route_policy_id: entry.route_policy_id,
         route_policy_revision: entry.route_policy_revision,
+        certification_package_version: entry.certification_package_version,
+        certification_pi_version: entry.certification_pi_version,
         ready_profiles: Object.freeze([...(entry.ready_profiles ?? [])]),
         readiness: entry.readiness,
         required_evidence_count: entry.required_evidence?.length ?? 0,

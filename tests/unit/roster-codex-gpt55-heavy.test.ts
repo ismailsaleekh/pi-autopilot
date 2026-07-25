@@ -58,7 +58,7 @@ void describe('Codex GPT-5.5 Heavy roster registration', () => {
     assert.equal(CODEX_GPT55_HEAVY_RECIPE.recipe_id, 'codex-gpt55-heavy-subscription');
     assert.equal(CODEX_GPT55_HEAVY_RECIPE.profile_templates[0]?.selected_by_default, true);
     assert.equal(CODEX_GPT55_HEAVY_ROSTER.roster_id, 'codex-gpt55-heavy-sol-terra-v1');
-    assert.equal(CODEX_GPT55_HEAVY_ROSTER.pi_version, '0.81.1');
+    assert.equal(CODEX_GPT55_HEAVY_ROSTER.pi_version, '0.82.0');
     assert.deepEqual(CODEX_GPT55_HEAVY_ROSTER.assignments.map((assignment) => [assignment.role, assignment.model_id, assignment.thinking]), [
       ['parent', 'gpt-5.6-sol', 'xhigh'],
       ['strategy', 'gpt-5.6-sol', 'xhigh'],

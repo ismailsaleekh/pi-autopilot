@@ -1,0 +1,16 @@
+{
+  "schema_version": "autopilot.live_global_route_attestation.v1",
+  "proof_kind": "billing-proof",
+  "provider_id": "openai-codex",
+  "api": "openai-codex-responses",
+  "auth_class": "pi-codex-oauth",
+  "credential_kind": "oauth",
+  "route_class": "subscription-agent",
+  "channel": "subscription-codex",
+  "direct_api_key": false,
+  "billing_route_class": "subscription-oauth",
+  "fallback_used": false,
+  "source_task_id": "be263a42b6869a113a0ee3fbedd47f775",
+  "source_attestation_sha256": "sha256:0129444eaa69edbdbf2f6b36ac6f347399069d49b24d0698c929d9e835b7d9cc",
+  "secret_free": true
+}

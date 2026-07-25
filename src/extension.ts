@@ -78,6 +78,7 @@ import {
   verifyCustomRosterManifestForRoster,
 } from './core/roster/custom-certification.ts';
 import { isCentrallyTrustedW4CertifiedRoster } from './core/roster/providers/index.ts';
+import { loadPackagedLiveCertificationManifests } from './core/roster/live-certification-manifests.ts';
 import { createAutopilotRosterSetupTool } from './core/roster/setup-tool.ts';
 import { createRosterSetupReceiptFactory, type AutopilotRosterSetupReceipt } from './core/roster/setup-receipt.ts';
 import { resolveAutopilotRosterSetupSkillPackage, type VerifiedAutopilotRosterSetupSkillPackage } from './core/roster/skill-package.ts';
@@ -1434,6 +1435,7 @@ export default function autopilotExtension(pi: ExtensionHostLike, dependencies: 
   function ensureRosterSetupBundle(): AutopilotRosterSetupToolBundle {
     if (rosterSetupBundle !== null) return rosterSetupBundle;
     const bundle = createRosterSetupTool({
+      qualificationManifests: loadPackagedLiveCertificationManifests(),
       saveApproved: async (input) => {
         const request = input.request;
         const stateRoot = dependencies.rosterStateRoot;

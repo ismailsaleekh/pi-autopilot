@@ -157,8 +157,8 @@ void describe('Phase 37 W1 provider recipes and candidates', () => {
       SEED_CANDIDATES.map((candidate) => candidate.candidate_sort_key),
       SEED_CANDIDATES.map((candidate) => candidate.candidate_sort_key).sort((left, right) => left.localeCompare(right)),
     );
-    assert.equal(PROVIDER_RECIPE_REGISTRY_SHA256, 'sha256:80ae7c8ef05505fa3381aa383041ef374061d01cb4991163838db7cf9a55fcba');
-    assert.equal(SEED_CANDIDATE_REGISTRY_SHA256, 'sha256:fd3d9f3856991c51128428c58a46c2f00d08c8fd6e4885f7ea53296046b3ee71');
+    assert.equal(PROVIDER_RECIPE_REGISTRY_SHA256, 'sha256:b12e671fc64ece3daf747f391fc70baf151a24636259e64f12dd61434034ea7f');
+    assert.equal(SEED_CANDIDATE_REGISTRY_SHA256, 'sha256:43738a9859824888fb708df405df12b9459a72f6097299530fecf0f81261d89f');
     for (const candidate of SEED_CANDIDATES) {
       assertCandidateDirectReferences(candidate);
       assert.notEqual(candidate.launch_readiness, 'synthetic-fixture-only');
@@ -168,7 +168,7 @@ void describe('Phase 37 W1 provider recipes and candidates', () => {
   void it('registers the approved Anthropic Opus 5 / Sonnet 5 Precision chain as non-certifying authority', () => {
     assert.equal(ANTHROPIC_OPUS5_SONNET5_RECIPE.recipe_id, 'anthropic-opus5-sonnet5-subscription');
     assert.equal(ANTHROPIC_OPUS5_SONNET5_ROSTER.roster_id, 'anthropic-precision-opus5-sonnet5-v1');
-    assert.equal(ANTHROPIC_OPUS5_SONNET5_ROSTER.pi_version, '0.81.1');
+    assert.equal(ANTHROPIC_OPUS5_SONNET5_ROSTER.pi_version, '0.82.0');
     assert.equal(ANTHROPIC_OPUS5_SONNET5_CANDIDATE.candidate_id, 'anthropic-precision-opus5-sonnet5-v1');
     assert.equal(ANTHROPIC_OPUS5_SONNET5_CANDIDATE.launch_readiness, 'not-ready-until-w4');
     assert.deepEqual(ANTHROPIC_OPUS5_SONNET5_ROSTER.assignments.map((assignment) => [assignment.role, assignment.model_id, assignment.thinking]), [

@@ -154,6 +154,8 @@ export function renderRosterReadiness(surfaces) {
     `\`${entry.provider_id}\``,
     `\`${entry.recipe_id}@${String(entry.recipe_revision)}\``,
     `\`${entry.route_policy_id}@${String(entry.route_policy_revision)}\``,
+    `\`${entry.certification_package_version}\``,
+    `\`${entry.certification_pi_version}\``,
     entry.ready_profiles.length === 0 ? 'none' : entry.ready_profiles.map((profile) => `\`${profile}\``).join(', '),
     `\`${entry.readiness}\``,
     String(entry.required_evidence_count),
@@ -195,7 +197,7 @@ export function renderRosterReadiness(surfaces) {
   return [
     '### W4 provider registry (current package pins)',
     '',
-    table(['Provider pack', 'Provider', 'Recipe', 'Route policy', 'Ready profiles', 'Registry readiness', 'Required evidence refs', 'Trusted manifest pins', 'Trusted certified roster pins'], packRows),
+    table(['Provider pack', 'Provider', 'Recipe', 'Route policy', 'Certification package', 'Certification Pi', 'Ready profiles', 'Registry readiness', 'Required evidence refs', 'Trusted manifest pins', 'Trusted certified roster pins'], packRows),
     '',
     '### Route policies',
     '',

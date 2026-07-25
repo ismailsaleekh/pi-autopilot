@@ -28,6 +28,7 @@ import { autopilotRosterContractCanonicalJson, autopilotRosterContractHashField,
 import { isLaunchableRosterCandidate } from "./core/roster/activation-fence.js";
 import { publishCustomRosterCertificationAuthority, readCustomRosterCertificationAuthority, verifyCustomRosterManifestForRoster, } from "./core/roster/custom-certification.js";
 import { isCentrallyTrustedW4CertifiedRoster } from "./core/roster/providers/index.js";
+import { loadPackagedLiveCertificationManifests } from "./core/roster/live-certification-manifests.js";
 import { createAutopilotRosterSetupTool } from "./core/roster/setup-tool.js";
 import { createRosterSetupReceiptFactory } from "./core/roster/setup-receipt.js";
 import { resolveAutopilotRosterSetupSkillPackage } from "./core/roster/skill-package.js";
@@ -1160,6 +1161,7 @@ export default function autopilotExtension(pi, dependencies = {}) {
         if (rosterSetupBundle !== null)
             return rosterSetupBundle;
         const bundle = createRosterSetupTool({
+            qualificationManifests: loadPackagedLiveCertificationManifests(),
             saveApproved: async (input) => {
                 const request = input.request;
                 const stateRoot = dependencies.rosterStateRoot;

@@ -19,7 +19,7 @@ covers_sources:
   - src/core/roster/transition.ts
   - src/core/model-roster.ts
 signature_hash: 'sha256:a5ee2fb831b97d6f0e5450759d68bfb1bf43017a4d5c8f10df68c05755315709'
-body_hash: 'sha256:a1b2d9c0690b025fbfaabaac53614c5148fb7fb07817456c6d58794d56fdd08b'
+body_hash: 'sha256:28a7af517eda3c3d5f0f7af8bde83f075455e97a52923debd5df8d387f3d9a7c'
 semantic_attestation: 'sha256:a1b2d9c0690b025fbfaabaac53614c5148fb7fb07817456c6d58794d56fdd08b'
 stability: stable
 ---
@@ -125,10 +125,12 @@ surfaces. Phase 37 v2 execution is stricter than provider-name matching: the uni
 pins the roster, assignment, and request profile, the runner verifies Pi can set that
 profile before spend, and receipt acceptance compares requested vs observed provider,
 model, thinking, API route, service tier, cache policy, system-prompt profile/hash, and
-route policy. Current package provider packs and the custom trust registry have empty trusted pins,
-so these checks document the contract for future certified provider/custom rosters
-without implying current launch readiness. OpenRouter and other metered frontier routes
-remain forbidden.
+route policy. The runner applies `pi-default.v1` directly for Codex and loads the
+package-owned Anthropic prompt-transform extension before the execution observer when
+`anthropic-autopilot-sanitized.v1` is pinned. The Codex GPT-5.5 Heavy pack has one
+reviewed live manifest and certified-roster pin; Anthropic and all other provider/custom
+paths remain blocked until their own exact evidence is trusted. OpenRouter and other
+metered frontier routes remain forbidden.
 
 ## Related
 

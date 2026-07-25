@@ -172,13 +172,13 @@ void describe('W3 v2 runner observation and authentication', () => {
     }, { role: 'implement', unitId: 'w3validpreauth' });
   });
 
-  void it('rejects unsupported request profile fields pre-spend and rejects ordinary v1 without grandfather authority', async () => {
+  void it('rejects the obsolete blocked Anthropic route pre-spend and rejects ordinary v1 without grandfather authority', async () => {
     await withPreparedV2(async ({ root, specPath }) => {
       const fakePi = await writeFakePi(root);
       await expectAgentRejects(
         () => runAutopilotAgentFromSpecPath(specPath, { piExecutable: fakePi, env: { ...process.env, AUTOPILOT_FAKE_PI_SCENARIO: 'success-v2' }, timeoutMsOverride: FAKE_TIMEOUT_MS }),
         'spec-invalid',
-        /request_profile\.system_prompt_profile/u,
+        /route_policy_id expected anthropic-sanitized-v1/u,
       );
     }, { rosterIndex: 2 });
 

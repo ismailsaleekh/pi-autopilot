@@ -2,6 +2,8 @@ import { createHash } from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute } from 'node:path';
 
+import { ANTHROPIC_SANITIZER_HEADER_BYTES } from '../core/roster/providers/anthropic.ts';
+
 export const AUTOPILOT_EXECUTION_OBSERVATION_ENV = 'AUTOPILOT_EXECUTION_OBSERVATION_PATH' as const;
 export const AUTOPILOT_EXECUTION_OBSERVATION_SCHEMA_VERSION = 'autopilot.execution_observation.v1' as const;
 
@@ -121,7 +123,7 @@ export function parseAutopilotExecutionObservation(value: unknown): AutopilotExe
 
 export function deriveRoutePolicyFromObservedProviderApi(providerId: string, api: string): { readonly route_policy_id: string; readonly route_policy_revision: number } | null {
   if (providerId === 'openai-codex' && api === 'openai-codex-responses') return { route_policy_id: 'codex-subscription-v1', route_policy_revision: 1 };
-  if (providerId === 'anthropic' && api === 'anthropic-messages') return { route_policy_id: 'anthropic-sanitized-v1', route_policy_revision: 1 };
+  if (providerId === 'anthropic' && api === 'anthropic-messages') return { route_policy_id: 'anthropic-opus5-sonnet5-subscription-v1', route_policy_revision: 1 };
   if (providerId === 'kimi-coding' && api === 'openai-completions') return { route_policy_id: 'kimi-coding-plan-v1', route_policy_revision: 1 };
   if (providerId === 'opencode-go' && api === 'openai-completions') return { route_policy_id: 'opencode-go-plan-v1', route_policy_revision: 1 };
   if (providerId === 'zai' && api === 'openai-completions') return { route_policy_id: 'zai-coding-plan-v1', route_policy_revision: 1 };
@@ -214,7 +216,7 @@ export default function autopilotExecutionObserverExtension(pi: PiExecutionObser
     state.mode = ctx.mode;
     state.activeModel = projectModel(ctx.model);
     state.systemPromptSha256 = sha256String(event.systemPrompt);
-    state.systemPromptProfile = classifySystemPromptProfile(event.systemPromptOptions);
+    state.systemPromptProfile = classifySystemPromptProfile(event.systemPrompt, event.systemPromptOptions);
     writeObservation();
   });
 
@@ -275,7 +277,8 @@ function parseExecutionProfile(value: unknown): AutopilotExecutionObservationPro
   return Object.freeze({ service_tier, cache_policy, system_prompt_profile, system_prompt_sha256, route_policy_id, route_policy_revision });
 }
 
-function classifySystemPromptProfile(options: unknown): AutopilotObservedSystemPromptProfile | null {
+function classifySystemPromptProfile(systemPrompt: string, options: unknown): AutopilotObservedSystemPromptProfile | null {
+  if (systemPrompt.startsWith(ANTHROPIC_SANITIZER_HEADER_BYTES)) return 'anthropic-autopilot-sanitized.v1';
   if (!isRecord(options)) return processArgvProvesPiDefaultPromptProfile() ? 'pi-default.v1' : null;
   const customPrompt = options['customPrompt'];
   const appendSystemPrompt = options['appendSystemPrompt'];

@@ -8,6 +8,7 @@ import {
   verifyW4ProviderManifestForCandidate,
   W4_PROVIDER_PACK_REGISTRY,
 } from '../../src/core/roster/providers/index.ts';
+import { loadPackagedLiveCertificationManifests } from '../../src/core/roster/live-certification-manifests.ts';
 import {
   buildW4CertifiedRosterForCandidate,
   proposeRosterCandidates,
@@ -15,6 +16,7 @@ import {
 } from '../../src/core/roster/provider-recipes.ts';
 import { canonicalSha256 } from '../../src/core/roster/route-policies.ts';
 import {
+  codexRosterInventory,
   kimiRosterInventory,
   selfHashedKimiW4ManifestFixture,
 } from '../helpers/roster-setup-harness.ts';
@@ -41,14 +43,56 @@ void describe('Phase37 central W4 provider registry', () => {
     const opus5Sonnet5 = W4_PROVIDER_PACK_REGISTRY.find((entry) => entry.provider_pack_id === 'anthropic-opus5-sonnet5-subscription-w4');
     assert.notEqual(opus5Sonnet5, undefined);
     assert.deepEqual(opus5Sonnet5?.ready_profiles, ['precision']);
+    assert.equal(opus5Sonnet5?.certification_pi_version, '0.82.0');
     assert.equal(opus5Sonnet5?.required_evidence.length, 10);
     const gpt55Heavy = W4_PROVIDER_PACK_REGISTRY.find((entry) => entry.provider_pack_id === 'codex-gpt55-heavy-sol-terra-w4');
     assert.notEqual(gpt55Heavy, undefined);
     assert.deepEqual(gpt55Heavy?.ready_profiles, ['cruise']);
+    assert.equal(gpt55Heavy?.certification_pi_version, '0.82.0');
     assert.equal(gpt55Heavy?.required_evidence.length, 10);
-    assert.equal(W4_PROVIDER_PACK_REGISTRY.every((entry) => entry.trusted_manifest_ids.length === 0), true);
-    assert.equal(W4_PROVIDER_PACK_REGISTRY.every((entry) => entry.trusted_manifest_sha256s.length === 0), true);
-    assert.equal(W4_PROVIDER_PACK_REGISTRY.every((entry) => entry.trusted_certified_roster_sha256s.length === 0), true);
+    assert.deepEqual(gpt55Heavy?.trusted_manifest_ids, ['codex-gpt55-heavy-sol-terra-w4-live-20260724']);
+    assert.deepEqual(gpt55Heavy?.trusted_manifest_sha256s, ['sha256:9c8a852f64f06951b00bea59c1e137ea0066b293fb2dc836aded72f3c2c93b03']);
+    assert.deepEqual(gpt55Heavy?.trusted_certified_roster_sha256s, ['sha256:7adf4b920818facf754ff67b63ccb8239b5b29ecb7352d78c09417a3824fc537']);
+    const unpinned = W4_PROVIDER_PACK_REGISTRY.filter((entry) => entry.provider_pack_id !== 'codex-gpt55-heavy-sol-terra-w4');
+    assert.equal(unpinned.every((entry) => entry.trusted_manifest_ids.length === 0), true);
+    assert.equal(unpinned.every((entry) => entry.trusted_manifest_sha256s.length === 0), true);
+    assert.equal(unpinned.every((entry) => entry.trusted_certified_roster_sha256s.length === 0), true);
+  });
+
+  void it('promotes the exact reviewed Codex live manifest and no other candidate', () => {
+    const manifests = loadPackagedLiveCertificationManifests();
+    assert.equal(manifests.length, 1);
+    const manifest = manifests[0] as QualificationManifest;
+    const baseInventory = codexRosterInventory();
+    const inventory = {
+      ...baseInventory,
+      providers: baseInventory.providers.map((provider) => ({
+        ...provider,
+        models: provider.models.map((model) => ({ ...model, service_tiers: [null, ...model.service_tiers.filter((tier) => tier !== null)] })),
+      })),
+    };
+    const proposal = proposeRosterCandidates({ inventory, include_unready: true });
+    const candidate = proposal.candidate_set.candidates.find((entry) => entry.recipe_id === 'codex-gpt55-heavy-subscription');
+    if (candidate === undefined) throw new Error('missing Codex GPT-5.5 Heavy candidate');
+
+    const verified = verifyW4ProviderManifestForCandidate({
+      candidate,
+      manifest,
+      options: { now: new Date('2026-07-25T00:00:00.000Z') },
+    });
+    assert.equal(verified.ok, true);
+    assert.deepEqual(verified.issues, []);
+    assert.equal(verified.certified_roster_sha256, 'sha256:7adf4b920818facf754ff67b63ccb8239b5b29ecb7352d78c09417a3824fc537');
+
+    const certifiedSet = applyW4ProviderRegistryReadinessToCandidateSet({
+      candidateSet: proposal.candidate_set,
+      manifests: [manifest],
+      options: { now: new Date('2026-07-25T00:00:00.000Z') },
+    });
+    const ready = certifiedSet.candidates.filter((entry) => entry.launch_readiness === 'w4-certified-ready');
+    assert.equal(ready.length, 1);
+    assert.equal(ready[0]?.candidate_id, 'codex-gpt55-heavy-sol-terra-v1');
+    assert.equal(ready[0]?.provider_pack_id, 'codex-gpt55-heavy-sol-terra-w4');
   });
 
   void it('keeps all current offline qualification reports blocked', () => {

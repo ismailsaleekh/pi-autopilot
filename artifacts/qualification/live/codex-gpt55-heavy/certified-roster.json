@@ -1,0 +1,287 @@
+{
+  "schema_version": "autopilot.roster.v1",
+  "roster_id": "cruise-codex-gpt55-heavy-subscription-51b6779e1472",
+  "roster_revision": 1,
+  "display_name": "Codex GPT-5.5 Heavy — Sol / Terra",
+  "scope": "user",
+  "selected_scope": "user",
+  "profile_id": "cruise",
+  "recipe_id": "codex-gpt55-heavy-subscription",
+  "recipe_revision": 1,
+  "generation_source": "w4-certified-recipe",
+  "package_version": "1.3.0",
+  "pi_version": "0.82.0",
+  "route_policy_ids": [
+    "codex-subscription-v1"
+  ],
+  "assignment_set_sha256": "sha256:51b6779e14728a3c45bda445c728b7a81511434c5df2b418e079f458d2efdea4",
+  "assignments": [
+    {
+      "role": "parent",
+      "provider_id": "openai-codex",
+      "model_id": "gpt-5.6-sol",
+      "model": "openai-codex/gpt-5.6-sol",
+      "api": "openai-codex-responses",
+      "thinking": "xhigh",
+      "service_tier": null,
+      "cache_policy": "provider-default",
+      "system_prompt_profile": "pi-default.v1",
+      "context_window": 256000,
+      "max_output_tokens": 65536,
+      "input_modalities": [
+        "text"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning_capability": "reasoning-supported",
+      "tool_capability": "tool-use-supported",
+      "route_policy_id": "codex-subscription-v1",
+      "route_policy_revision": 1,
+      "billing_class": "plan-backed-subscription",
+      "billing_route_class": "subscription-oauth",
+      "auth_class": "oauth",
+      "auth_source": "stored",
+      "qualification_state": "w4-certified-ready",
+      "assignment_sha256": "sha256:b6ec222b69348648caeee89f1cc3930a9fc654a098422d2e89918a8b3e7bddf5"
+    },
+    {
+      "role": "strategy",
+      "provider_id": "openai-codex",
+      "model_id": "gpt-5.6-sol",
+      "model": "openai-codex/gpt-5.6-sol",
+      "api": "openai-codex-responses",
+      "thinking": "xhigh",
+      "service_tier": null,
+      "cache_policy": "provider-default",
+      "system_prompt_profile": "pi-default.v1",
+      "context_window": 256000,
+      "max_output_tokens": 65536,
+      "input_modalities": [
+        "text"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning_capability": "reasoning-supported",
+      "tool_capability": "tool-use-supported",
+      "route_policy_id": "codex-subscription-v1",
+      "route_policy_revision": 1,
+      "billing_class": "plan-backed-subscription",
+      "billing_route_class": "subscription-oauth",
+      "auth_class": "oauth",
+      "auth_source": "stored",
+      "qualification_state": "w4-certified-ready",
+      "assignment_sha256": "sha256:51941e7870a6b56cb73039c64cf32f7deb7b19229b8c74bf2ac2d869b050c794"
+    },
+    {
+      "role": "implement",
+      "provider_id": "openai-codex",
+      "model_id": "gpt-5.5",
+      "model": "openai-codex/gpt-5.5",
+      "api": "openai-codex-responses",
+      "thinking": "high",
+      "service_tier": null,
+      "cache_policy": "provider-default",
+      "system_prompt_profile": "pi-default.v1",
+      "context_window": 256000,
+      "max_output_tokens": 32768,
+      "input_modalities": [
+        "text"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning_capability": "reasoning-supported",
+      "tool_capability": "tool-use-supported",
+      "route_policy_id": "codex-subscription-v1",
+      "route_policy_revision": 1,
+      "billing_class": "plan-backed-subscription",
+      "billing_route_class": "subscription-oauth",
+      "auth_class": "oauth",
+      "auth_source": "stored",
+      "qualification_state": "w4-certified-ready",
+      "assignment_sha256": "sha256:48a50ffc82ef3f7785f440487bf9a0ad29a5c4f02e04786a2be649e9faffaaf4"
+    },
+    {
+      "role": "validate",
+      "provider_id": "openai-codex",
+      "model_id": "gpt-5.5",
+      "model": "openai-codex/gpt-5.5",
+      "api": "openai-codex-responses",
+      "thinking": "high",
+      "service_tier": null,
+      "cache_policy": "provider-default",
+      "system_prompt_profile": "pi-default.v1",
+      "context_window": 256000,
+      "max_output_tokens": 32768,
+      "input_modalities": [
+        "text"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning_capability": "reasoning-supported",
+      "tool_capability": "tool-use-supported",
+      "route_policy_id": "codex-subscription-v1",
+      "route_policy_revision": 1,
+      "billing_class": "plan-backed-subscription",
+      "billing_route_class": "subscription-oauth",
+      "auth_class": "oauth",
+      "auth_source": "stored",
+      "qualification_state": "w4-certified-ready",
+      "assignment_sha256": "sha256:5ac4c923a50fd924a185bdba792b67a15708cc8d58069aa44362bd7bb2fcb2a8"
+    },
+    {
+      "role": "fix",
+      "provider_id": "openai-codex",
+      "model_id": "gpt-5.5",
+      "model": "openai-codex/gpt-5.5",
+      "api": "openai-codex-responses",
+      "thinking": "high",
+      "service_tier": null,
+      "cache_policy": "provider-default",
+      "system_prompt_profile": "pi-default.v1",
+      "context_window": 256000,
+      "max_output_tokens": 32768,
+      "input_modalities": [
+        "text"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning_capability": "reasoning-supported",
+      "tool_capability": "tool-use-supported",
+      "route_policy_id": "codex-subscription-v1",
+      "route_policy_revision": 1,
+      "billing_class": "plan-backed-subscription",
+      "billing_route_class": "subscription-oauth",
+      "auth_class": "oauth",
+      "auth_source": "stored",
+      "qualification_state": "w4-certified-ready",
+      "assignment_sha256": "sha256:b83947f6c572db39ab289f82045424210de2bd2c9503b36aa391258ff26f28d4"
+    },
+    {
+      "role": "adjudicate",
+      "provider_id": "openai-codex",
+      "model_id": "gpt-5.6-terra",
+      "model": "openai-codex/gpt-5.6-terra",
+      "api": "openai-codex-responses",
+      "thinking": "high",
+      "service_tier": null,
+      "cache_policy": "provider-default",
+      "system_prompt_profile": "pi-default.v1",
+      "context_window": 256000,
+      "max_output_tokens": 65536,
+      "input_modalities": [
+        "text"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning_capability": "reasoning-supported",
+      "tool_capability": "tool-use-supported",
+      "route_policy_id": "codex-subscription-v1",
+      "route_policy_revision": 1,
+      "billing_class": "plan-backed-subscription",
+      "billing_route_class": "subscription-oauth",
+      "auth_class": "oauth",
+      "auth_source": "stored",
+      "qualification_state": "w4-certified-ready",
+      "assignment_sha256": "sha256:339891e6e986cc3df811179d85f94dcde6c395225e4f972f8e57dd2ecb413e6d"
+    },
+    {
+      "role": "bughunt",
+      "provider_id": "openai-codex",
+      "model_id": "gpt-5.6-sol",
+      "model": "openai-codex/gpt-5.6-sol",
+      "api": "openai-codex-responses",
+      "thinking": "xhigh",
+      "service_tier": null,
+      "cache_policy": "provider-default",
+      "system_prompt_profile": "pi-default.v1",
+      "context_window": 256000,
+      "max_output_tokens": 65536,
+      "input_modalities": [
+        "text"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning_capability": "reasoning-supported",
+      "tool_capability": "tool-use-supported",
+      "route_policy_id": "codex-subscription-v1",
+      "route_policy_revision": 1,
+      "billing_class": "plan-backed-subscription",
+      "billing_route_class": "subscription-oauth",
+      "auth_class": "oauth",
+      "auth_source": "stored",
+      "qualification_state": "w4-certified-ready",
+      "assignment_sha256": "sha256:0dafda9b64849d981cd5dd7ef3f039230b54a989d1a45ee10d846b59cf500b53"
+    },
+    {
+      "role": "extract",
+      "provider_id": "openai-codex",
+      "model_id": "gpt-5.5",
+      "model": "openai-codex/gpt-5.5",
+      "api": "openai-codex-responses",
+      "thinking": "high",
+      "service_tier": null,
+      "cache_policy": "provider-default",
+      "system_prompt_profile": "pi-default.v1",
+      "context_window": 256000,
+      "max_output_tokens": 32768,
+      "input_modalities": [
+        "text"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning_capability": "reasoning-supported",
+      "tool_capability": "tool-use-supported",
+      "route_policy_id": "codex-subscription-v1",
+      "route_policy_revision": 1,
+      "billing_class": "plan-backed-subscription",
+      "billing_route_class": "subscription-oauth",
+      "auth_class": "oauth",
+      "auth_source": "stored",
+      "qualification_state": "w4-certified-ready",
+      "assignment_sha256": "sha256:da050bad9348ba475b173bb8050cf27e38422705d262d4243698ec4d8df0587f"
+    }
+  ],
+  "capability_summary": {
+    "min_context_window": 256000,
+    "min_max_output_tokens": 32768,
+    "input_modalities": [
+      "text"
+    ],
+    "output_modalities": [
+      "text"
+    ],
+    "reasoning_capability": "reasoning-supported",
+    "tool_capability": "tool-use-supported"
+  },
+  "billing_summary": {
+    "billing_class": "plan-backed-subscription",
+    "billing_route_class": "subscription-oauth",
+    "route_policy_ids": [
+      "codex-subscription-v1"
+    ],
+    "service_tiers": [
+      null
+    ]
+  },
+  "auth_summary": {
+    "auth_classes": [
+      "oauth"
+    ],
+    "auth_sources": [
+      "stored"
+    ],
+    "secret_fields_present": false
+  },
+  "certification_manifest_id": "codex-gpt55-heavy-sol-terra-w4-live-20260724",
+  "certification_manifest_sha256": "sha256:9c8a852f64f06951b00bea59c1e137ea0066b293fb2dc836aded72f3c2c93b03",
+  "created_at": "2026-07-22T00:00:00.000Z",
+  "roster_sha256": "sha256:7adf4b920818facf754ff67b63ccb8239b5b29ecb7352d78c09417a3824fc537"
+}

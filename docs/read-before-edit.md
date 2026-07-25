@@ -95,6 +95,7 @@ here are not yet governed by a doc; coverage ratchets up per PR (C8 floor).
 | `src/core/roster/custom-certification.ts` | [`subsystems/roster-onboarding`](subsystems/roster-onboarding.md), [`subsystems/runner-and-forced-output`](subsystems/runner-and-forced-output.md) |
 | `src/core/roster/doctor.ts` | [`subsystems/roster-onboarding`](subsystems/roster-onboarding.md) |
 | `src/core/roster/historical-adapter.ts` | [`subsystems/roster-onboarding`](subsystems/roster-onboarding.md) |
+| `src/core/roster/live-certification-manifests.ts` | [`subsystems/roster-onboarding`](subsystems/roster-onboarding.md) |
 | `src/core/roster/paths.ts` | [`subsystems/roster-onboarding`](subsystems/roster-onboarding.md) |
 | `src/core/roster/provider-recipes.ts` | [`subsystems/roster-onboarding`](subsystems/roster-onboarding.md) |
 | `src/core/roster/providers/index.ts` | [`subsystems/roster-onboarding`](subsystems/roster-onboarding.md) |
@@ -121,6 +122,7 @@ here are not yet governed by a doc; coverage ratchets up per PR (C8 floor).
 | `src/core/validation-staleness.ts` | [`subsystems/close-lifecycle`](subsystems/close-lifecycle.md) |
 | `src/core/worktree-cleanup.ts` | [`subsystems/close-lifecycle`](subsystems/close-lifecycle.md) |
 | `src/extension.ts` | [`subsystems/roster-onboarding`](subsystems/roster-onboarding.md) |
+| `src/internal/anthropic-system-prompt-extension.ts` | [`subsystems/roster-onboarding`](subsystems/roster-onboarding.md) |
 | `src/internal/execution-observer-extension.ts` | [`subsystems/roster-onboarding`](subsystems/roster-onboarding.md) |
 | `src/internal/status-extension.ts` | [`tools/autopilot_emit_status`](tools/autopilot_emit_status.md) |
 | `templates/skills/autopilot-roster-setup/SKILL.md` | [`subsystems/roster-onboarding`](subsystems/roster-onboarding.md) |
