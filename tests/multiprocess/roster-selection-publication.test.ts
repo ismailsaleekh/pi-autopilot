@@ -128,9 +128,21 @@ process.stdout.write(JSON.stringify({
       for (const result of closed) {
         assert.ok(result.status === 'blocked' || result.status === 'failed', JSON.stringify(result));
         assert.equal(result.write_count, 0);
+        // The create-only race has exactly three legitimate fail-closed loser
+        // outcomes, all of which leave zero authority written:
+        //   - ROSTER_CREATE_ONLY_CONFLICT: the O_EXCL create lost;
+        //   - ROSTER_READBACK_MISMATCH: the winner's bytes differ from ours;
+        //   - ROSTER_STORAGE_AUTHORITY_UNSAFE: the selection file's dev/ino
+        //     changed between lstat and fstat because a competing writer
+        //     atomically renamed the winning file into place mid-read.
+        // The third is a real, observable outcome of this exact concurrency
+        // (it reproduces on unmodified package bytes), so omitting it made this
+        // gate non-deterministic rather than strict.
         assert.ok(
           result.diagnostics.length === 1 &&
-            (result.diagnostics[0] === 'ROSTER_CREATE_ONLY_CONFLICT' || result.diagnostics[0] === 'ROSTER_READBACK_MISMATCH'),
+            (result.diagnostics[0] === 'ROSTER_CREATE_ONLY_CONFLICT' ||
+              result.diagnostics[0] === 'ROSTER_READBACK_MISMATCH' ||
+              result.diagnostics[0] === 'ROSTER_STORAGE_AUTHORITY_UNSAFE'),
           JSON.stringify(result),
         );
       }
