@@ -7,7 +7,7 @@ import { dirname, join } from 'node:path';
 
 import { canonicalJson } from '../../src/core/coordination/canonical-json.ts';
 import { CoordinatorClient } from '../../src/core/coordination/client.ts';
-import { SEED_ROSTERS } from '../../src/core/roster/provider-recipes.ts';
+import { packagedCertifiedLaunchRoster } from './d65-certified-roster.ts';
 import { canonicalRosterJson } from '../../src/core/roster/canonical.ts';
 import { buildCanonicalPreRunSelection } from '../../src/core/roster/run-selection.ts';
 import type { RosterSha256 } from '../../src/core/roster/paths.ts';
@@ -182,8 +182,10 @@ export async function buildD65LaunchFixture(suffix: string, options: { readonly 
   await mkdir(rawEvidence, { recursive: true, mode: 0o700 }); chmodSync(rawEvidence, 0o700);
   const programEvidenceRoot = realpathSync(rawEvidence);
 
-  const seedRoster = SEED_ROSTERS.find((entry) => entry.roster_id === 'cruise-codex-subscription-bdb4f15f0ff9');
-  if (seedRoster === undefined) throw new Error('fixed subscription seed roster not found');
+  // D65 launch authority is the packaged W4-CERTIFIED roster (never a
+  // non-certifying seed): the production launch path rejects any roster whose
+  // generation source / qualification state is not W4-certified.
+  const seedRoster = packagedCertifiedLaunchRoster();
   const rosterBytes = Buffer.from(`${canonicalRosterJson(seedRoster)}\n`, 'utf8');
   const rosterAuthoritySha256 = seedRoster.roster_sha256 as `sha256:${string}`;
   const selectionPublication = buildCanonicalPreRunSelection({

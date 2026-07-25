@@ -2270,6 +2270,15 @@ export default function autopilotExtension(pi: ExtensionHostLike, dependencies: 
           notify(ctx, `Autopilot launch manifest workstream ${loaded.manifest.workstream} does not match the command workstream ${parsed.value.workstream}. No run state was created.`, 'error');
           return;
         }
+        // A sealed launch package carries its OWN authenticated roster authority.
+        // `--roster <id>` is ordinary (non-launch) roster resolution and is never
+        // consulted in launch mode, so accepting it silently would let the
+        // operator believe a roster override took effect when it did not. Reject
+        // the ambiguous combination instead of silently discarding it.
+        if (parsed.value.rosterId !== null) {
+          notify(ctx, `Autopilot launch mode consumes the sealed manifest roster authority; --roster ${parsed.value.rosterId} cannot be combined with --launch-manifest. Remove --roster and retry. No run state was created.`, 'error');
+          return;
+        }
         await activateD65Launch({ manifest: loaded.manifest, loadedManifestSha256: loaded.loadedManifestSha256, ctx, taskIntro: parsed.value.remainder });
         return;
       }

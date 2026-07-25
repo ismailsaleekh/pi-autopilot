@@ -31,7 +31,7 @@ import type { D65LaunchSigner, D65LaunchSignerHeartbeatRequest, D65LaunchSignerP
 import { d65ContextBudgetReceiptPath } from '../../src/core/coordination/d65-launch-integration.ts';
 import { createContextBudgetTool } from '../../src/core/context-budget.ts';
 import { AUTOPILOT_STATE_ROOT_ENV, type ProcessEnvLike } from '../../src/core/parallel-runtime.ts';
-import { SEED_ROSTERS } from '../../src/core/roster/provider-recipes.ts';
+import { packagedCertifiedLaunchRoster } from '../helpers/d65-certified-roster.ts';
 import { canonicalRosterJson } from '../../src/core/roster/canonical.ts';
 import { buildCanonicalPreRunSelection } from '../../src/core/roster/run-selection.ts';
 import type { RosterSha256 } from '../../src/core/roster/paths.ts';
@@ -170,8 +170,8 @@ async function buildFixture(suffix: string): Promise<Fixture> {
   const mainWorktreePath = join(worktreeRoot, 'active', workstreamRun, 'main');
   const runtimeRoot = join(mainWorktreePath, '.pi', 'autopilot', workstream);
   const packageCommit = 'a'.repeat(40); const packageTree = 'b'.repeat(40);
-  const seedRoster = SEED_ROSTERS.find((entry) => entry.roster_id === 'cruise-codex-subscription-bdb4f15f0ff9');
-  if (seedRoster === undefined) throw new Error('fixed subscription seed roster not found');
+  // The production D65 launch path accepts only W4-certified roster authority.
+  const seedRoster = packagedCertifiedLaunchRoster();
   const rosterSha256 = seedRoster.roster_sha256 as `sha256:${string}`; const rosterProvider = 'openai-codex';
   const prospectiveRun = { schema_version: 'autopilot.coordination_run.v1', repo_id: repoId, autopilot_id: autopilotId, workstream, workstream_run: workstreamRun, coordination_authority: 'coordinator-edit-leases-v1', status: 'active', active_session_generation: 0, created_event_seq: 1, version: 1 };
   const prospectiveResource = { schema_version: 'autopilot.coordination_run_resource.v1', repo_id: repoId, workstream_run: workstreamRun, source_repo: clone, git_common_dir: join(clone, '.git'), worktree_root: worktreeRoot, main_worktree_path: mainWorktreePath, runtime_root: runtimeRoot, branch: `autopilot/${workstreamRun}`, target_branch: 'main', target_base_sha: contentCommit, origin_url: null, started_at: '2026-07-22T22:00:32.000Z', version: 1 };
@@ -419,6 +419,37 @@ void describe('D65 launch via /autopilot --launch-manifest (extension)', () => {
     } finally {
       for (const handler of harness.shutdownHandlers) await handler({ reason: 'test-complete' }, harness.ctx);
       await fixture.close();
+    }
+  });
+
+  // D65-A6 regression: launch mode consumes the SEALED manifest roster. An
+  // operator `--roster <id>` in launch mode used to be parsed and then silently
+  // discarded (F.silent_fallback) — the operator could believe a roster override
+  // applied when it never did. It must now fail closed with no run state, no
+  // roster resolution, no signer call, and no parent model call.
+  void it('rejects --roster combined with --launch-manifest instead of silently ignoring it', async () => {
+    const fixture = await buildFixture('r');
+    const originalStateRoot = process.env[AUTOPILOT_STATE_ROOT_ENV];
+    process.env[AUTOPILOT_STATE_ROOT_ENV] = String(fixture.env[AUTOPILOT_STATE_ROOT_ENV]);
+    let rosterCalls = 0;
+    let signerCalls = 0;
+    const rosterActivationStore: AutopilotRosterActivationStore = {
+      resolve: async () => { rosterCalls += 1; return { status: 'blocked', source: 'user-default', diagnostics: [] }; },
+    };
+    const harness = createLaunchHarness(fixture.signer, { rosterActivationStore, resolveLaunchSigner: () => { signerCalls += 1; return fixture.signer; } });
+    try {
+      const command = harness.commands.get(AUTOPILOT_COMMAND);
+      if (command === undefined) throw new Error('missing command');
+      await command.handler(`${fixture.manifest.workstream} --launch-manifest ${fixture.manifestPath} --roster some-roster-id intro`, harness.ctx);
+      assert.equal(rosterCalls, 0, 'no ordinary roster resolution may run');
+      assert.equal(signerCalls, 0, 'no signer may be resolved');
+      assert.equal(harness.messages.length, 0, 'no parent prompt may be delivered');
+      assert.ok(harness.notifications.some((n) => /--roster some-roster-id cannot be combined with --launch-manifest/u.test(n.message)));
+    } finally {
+      for (const handler of harness.shutdownHandlers) await handler({ reason: 'test-complete' }, harness.ctx);
+      await fixture.close();
+      if (originalStateRoot === undefined) delete process.env[AUTOPILOT_STATE_ROOT_ENV];
+      else process.env[AUTOPILOT_STATE_ROOT_ENV] = originalStateRoot;
     }
   });
 

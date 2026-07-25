@@ -265,8 +265,14 @@ void describe('Phase 37 roster selection activation e2e', () => {
           schema_version: 'autopilot.roster_tool_request.v1', action: 'propose', activation_token: activationToken, approval_token: null, scope: 'user', trusted_project_root: null,
           candidate_set_sha256: null, approved_roster_sha256s: [], default_roster_id: null, default_roster_revision: null, default_roster_sha256: null, original_command: '/autopilot demo needs setup',
         };
-        const proposal = await setupTool.execute('propose', baseRequest, undefined, undefined, ctx) as { readonly details: { readonly candidate_set: unknown; readonly ok: boolean } };
-        assert.equal(proposal.details.ok, false);
+        const proposal = await setupTool.execute('propose', baseRequest, undefined, undefined, ctx) as { readonly details: { readonly candidate_set: unknown; readonly ok: boolean; readonly status: string } };
+        // `propose` is a zero-write inspection step. Once a live W4 certification
+        // ships in the package, a proposable (synthetic-fixture-only) candidate
+        // exists, so `propose` reports ok/proposed. That is NOT launch authority:
+        // the security property this test pins is that SAVE still fails closed
+        // with ROSTER_QUALIFICATION_REQUIRED and writes nothing (asserted below).
+        assert.equal(proposal.details.status, 'proposed');
+        assert.equal(proposal.details.ok, true);
         const fields = approvalFields(proposal.details.candidate_set);
         const presentation = renderRosterSetupApprovalPresentation({ scope: 'user', original_command: '/autopilot demo needs setup', ...fields });
 

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
 
@@ -27,6 +28,8 @@ import { recoverRuntimeRosterSelection } from '../../src/core/roster/snapshot.ts
 import { COORDINATOR_SESSION_LEASE_MS, COORDINATOR_BOOTSTRAP_SESSION_LEASE_MS } from '../../src/core/coordination/runtime-constants.ts';
 import type { StoreClock } from '../../src/core/coordination/store.ts';
 import { buildD65LaunchFixture, writeD65CharterRoots } from '../helpers/d65-launch-fixture.ts';
+import { canonicalRosterJson } from '../../src/core/roster/canonical.ts';
+import { computeAutopilotRosterContractObjectHash } from '../../src/core/roster/contracts.ts';
 
 /**
  * A controlled, injectable coordinator clock expressed as an OFFSET over real
@@ -305,6 +308,60 @@ void describe('D65 single-session crash-safe attach (staged context)', () => {
   });
 });
 
+/**
+ * Re-seal the fixture's sealed roster file with mutated bytes so ONLY the
+ * certification facts differ, then prove `authenticateD65LaunchRoster` fails
+ * closed. Every digest the manifest binds is recomputed from the mutated bytes,
+ * so the rejection cannot come from a stale digest mismatch — it must come from
+ * the certification-authority check itself.
+ */
+async function assertRosterBytesRejected(
+  fixture: Awaited<ReturnType<typeof buildD65LaunchFixture>>,
+  mutatedRoster: Record<string, unknown>,
+  expected: RegExp,
+): Promise<void> {
+  // Re-seal the roster's OWN self-referencing digest so the mutation stays
+  // internally coherent; otherwise the roster contract parser rejects it for a
+  // stale self-hash and never reaches the certification-authority check.
+  const canonical = computeAutopilotRosterContractObjectHash('autopilot.roster.v1', mutatedRoster);
+  if (canonical === null) throw new Error('mutated roster must still be a parseable roster contract object');
+  const sealed = { ...mutatedRoster, roster_sha256: canonical };
+  const bytes = Buffer.from(`${canonicalRosterJson(sealed)}\n`, 'utf8');
+  const rosterRef = fixture.manifest.roster_selection.roster_ref;
+  const selectionRef = fixture.manifest.roster_selection.selection_ref;
+  const previousRoster = readFileSync(rosterRef);
+  const previousSelection = readFileSync(selectionRef);
+
+  // The sealed SELECTION binds the roster digest too, so it must be re-sealed
+  // against the mutated roster. Otherwise the selection-binding check fires
+  // first and the certification-authority check is never reached.
+  const selection = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(previousSelection)) as Record<string, unknown>;
+  const reboundSelection: Record<string, unknown> = { ...selection, roster_sha256: canonical, selection_sha256: null };
+  const selectionCanonical = computeAutopilotRosterContractObjectHash('autopilot.pre_run_selection.v1', reboundSelection);
+  if (selectionCanonical === null) throw new Error('rebound selection must remain a parseable selection contract object');
+  const sealedSelection: Record<string, unknown> = { ...reboundSelection, selection_sha256: selectionCanonical };
+  const selectionBytes = Buffer.from(`${canonicalRosterJson(sealedSelection)}\n`, 'utf8');
+
+  writeFileSync(rosterRef, bytes, { mode: 0o600 });
+  writeFileSync(selectionRef, selectionBytes, { mode: 0o600 });
+  try {
+    const manifest = {
+      ...fixture.manifest,
+      roster_sha256: canonical,
+      roster_selection: {
+        ...fixture.manifest.roster_selection,
+        roster_bytes_sha256: `sha256:${createHash('sha256').update(bytes).digest('hex')}` as `sha256:${string}`,
+        selection_bytes_sha256: `sha256:${createHash('sha256').update(selectionBytes).digest('hex')}` as `sha256:${string}`,
+        selection_sha256: selectionCanonical,
+      },
+    };
+    assert.throws(() => authenticateD65LaunchRoster(manifest), expected);
+  } finally {
+    writeFileSync(rosterRef, previousRoster, { mode: 0o600 });
+    writeFileSync(selectionRef, previousSelection, { mode: 0o600 });
+  }
+}
+
 void describe('D65 authenticated roster authority + first child preflight', () => {
   void it('derives the exact parent model/thinking from the authenticated sealed roster bytes', async () => {
     const fixture = await buildD65LaunchFixture('roster');
@@ -326,6 +383,36 @@ void describe('D65 authenticated roster authority + first child preflight', () =
     try {
       const tampered = { ...fixture.manifest, parent_model: 'openai-codex/gpt-5.6-terra' };
       assert.throws(() => authenticateD65LaunchRoster(tampered), /authenticated roster parent model diverges/u);
+    } finally {
+      await fixture.close();
+    }
+  });
+
+  // D65-A6 regression: launch authority is W4 CERTIFICATION authority, never a
+  // hardcoded model list. A roster whose bytes are otherwise well-formed but
+  // which is a non-certifying seed (or carries an uncertified role) must fail
+  // closed with no model call, even though its model names look ordinary.
+  void it('rejects sealed roster bytes that are not W4-certified launch authority', async () => {
+    const fixture = await buildD65LaunchFixture('rosteruncert');
+    try {
+      const decoded = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(fixture.rosterBytes)) as Record<string, unknown>;
+
+      // (a) a genuine non-certifying seed roster (w0 source + null pins, exactly
+      //     the shape the roster contract requires of a seed) is rejected.
+      const seedGeneration = { ...decoded, generation_source: 'w0-non-certifying-seed', certification_manifest_id: null, certification_manifest_sha256: null };
+      await assertRosterBytesRejected(fixture, seedGeneration, /generation source is not W4-certified/u);
+
+      // (b) a null certification manifest pin is rejected.
+      const noPin = { ...decoded, certification_manifest_id: null };
+      await assertRosterBytesRejected(fixture, noPin, /no certification manifest id/u);
+
+      // (c) a single uncertified role assignment is rejected.
+      const assignments = (decoded['assignments'] as Record<string, unknown>[]).map((assignment) =>
+        assignment['role'] === 'extract'
+          ? { ...assignment, qualification_state: 'unqualified-non-certifying-seed' }
+          : assignment);
+      const uncertifiedRole = { ...decoded, assignments };
+      await assertRosterBytesRejected(fixture, uncertifiedRole, /role extract is not W4-certified/u);
     } finally {
       await fixture.close();
     }
