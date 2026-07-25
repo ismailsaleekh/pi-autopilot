@@ -13,25 +13,47 @@ import { parseRosterJsonWithDuplicateKeyRejection } from "../roster/canonical.js
 // assignment, and exposes the exact selection bytes for the runtime snapshot the
 // ordinary unit-spec-v2 child path authors specs from.
 //
-// The fixed Phase 37 subscription roster (fresh plan §2.4):
-//   parent / strategy / validate / adjudicate / bughunt: <provider>/gpt-5.6-sol @ xhigh
-//   implement / fix:                                      <provider>/gpt-5.6-terra @ high
-//   extract:                                              <provider>/gpt-5.6-luna @ high
-//   provider = openai-codex subscription only.
+// D65-A6 ROSTER AUTHORITY AMENDMENT (supersedes the hardcoded Phase 37 model
+// list). The launch contract previously pinned literal model ids per role:
+//   parent / strategy / validate / adjudicate / bughunt: gpt-5.6-sol @ xhigh
+//   implement / fix: gpt-5.6-terra @ high; extract: gpt-5.6-luna @ high
+// That list was written BEFORE any roster was live-certified, and it was both
+// too strict and too weak:
+//   - too strict: the operator's W4-certified roster
+//     `cruise-codex-gpt55-heavy-subscription-51b6779e1472` (certification
+//     manifest `codex-gpt55-heavy-sol-terra-w4-live-20260724`) assigns
+//     gpt-5.5 to implement/validate/fix/extract and gpt-5.6-terra to
+//     adjudicate, so five roles failed closed and NO certified roster could
+//     launch;
+//   - too weak: a `w0-non-certifying-seed` roster whose
+//     `qualification_state` is `unqualified-non-certifying-seed` and whose
+//     `certification_manifest_id` is null satisfied every literal model check
+//     and WOULD have launched. Model-name equality was a proxy for
+//     certification and is not one.
+//
+// The amendment replaces the model-name proxy with the real invariant: every
+// role must be covered by W4 live-certification authority. The closed role set,
+// the single subscription provider, the OAuth/plan-backed channel, the roster
+// digest, and the selection binding are all UNCHANGED and still fail closed.
+// This strictly increases what the launch path proves.
 //
 // Nothing here is inferred: a divergent digest, authority, provider, channel,
-// or assignment fails closed with no model call.
-/** The exact fixed subscription role assignments (fresh plan §2.4). */
-export const D65_FIXED_ROSTER_ASSIGNMENTS = Object.freeze({
-    parent: { model_id: 'gpt-5.6-sol', thinking: 'xhigh' },
-    strategy: { model_id: 'gpt-5.6-sol', thinking: 'xhigh' },
-    validate: { model_id: 'gpt-5.6-sol', thinking: 'xhigh' },
-    adjudicate: { model_id: 'gpt-5.6-sol', thinking: 'xhigh' },
-    bughunt: { model_id: 'gpt-5.6-sol', thinking: 'xhigh' },
-    implement: { model_id: 'gpt-5.6-terra', thinking: 'high' },
-    fix: { model_id: 'gpt-5.6-terra', thinking: 'high' },
-    extract: { model_id: 'gpt-5.6-luna', thinking: 'high' },
-});
+// certification pin, or role coverage fails closed with no model call.
+/**
+ * The closed D65 role registry. Every one of these roles must be present
+ * exactly once in a sealed launch roster, and no other role may appear. Role
+ * MODEL selection is certification authority (see
+ * {@link D65_REQUIRED_ROSTER_QUALIFICATION_STATE}), not a hardcoded list.
+ */
+export const D65_REQUIRED_ROSTER_ROLES = Object.freeze([
+    'parent', 'strategy', 'implement', 'validate', 'fix', 'adjudicate', 'bughunt', 'extract',
+]);
+/** The only qualification state a D65 launch roster assignment may carry. */
+export const D65_REQUIRED_ROSTER_QUALIFICATION_STATE = 'w4-certified-ready';
+/** The only roster generation source a D65 launch may consume. */
+export const D65_REQUIRED_ROSTER_GENERATION_SOURCE = 'w4-certified-recipe';
+/** The only thinking levels a certified D65 assignment may carry. */
+const D65_ALLOWED_THINKING = Object.freeze(['high', 'xhigh']);
 /** The only authorized subscription provider (no paid frontier API). */
 export const D65_SUBSCRIPTION_PROVIDER = 'openai-codex';
 function bytesSha256(bytes) {
@@ -85,17 +107,30 @@ export function authenticateD65LaunchRoster(manifest) {
             throw new CoordinationRuntimeError('invalid-state', 'sealed roster contains a duplicate role assignment', [assignment.role]);
         byRole.set(assignment.role, assignment);
     }
-    for (const [role, expected] of Object.entries(D65_FIXED_ROSTER_ASSIGNMENTS)) {
+    // The roster as a whole must be W4-certified authority with a real
+    // certification manifest pin. A `w0-non-certifying-seed` roster (or any
+    // roster with a null/blank certification pin) is never launch authority.
+    if (roster.generation_source !== D65_REQUIRED_ROSTER_GENERATION_SOURCE)
+        throw new CoordinationRuntimeError('invalid-state', 'sealed roster generation source is not W4-certified launch authority', [String(roster.generation_source), D65_REQUIRED_ROSTER_GENERATION_SOURCE]);
+    if (typeof roster.certification_manifest_id !== 'string' || roster.certification_manifest_id.length === 0)
+        throw new CoordinationRuntimeError('invalid-state', 'sealed roster carries no certification manifest id', [String(roster.certification_manifest_id)]);
+    if (typeof roster.certification_manifest_sha256 !== 'string' || !/^sha256:[a-f0-9]{64}$/u.test(roster.certification_manifest_sha256))
+        throw new CoordinationRuntimeError('invalid-state', 'sealed roster carries no canonical certification manifest digest', [String(roster.certification_manifest_sha256)]);
+    for (const role of D65_REQUIRED_ROSTER_ROLES) {
         const assignment = byRole.get(role);
         if (assignment === undefined)
-            throw new CoordinationRuntimeError('invalid-state', 'sealed roster is missing a fixed role assignment', [role]);
+            throw new CoordinationRuntimeError('invalid-state', 'sealed roster is missing a required role assignment', [role]);
         if (assignment.provider_id !== provider)
             throw new CoordinationRuntimeError('invalid-state', `sealed roster role ${role} is not on the subscription provider`, [assignment.provider_id]);
-        if (assignment.model_id !== expected.model_id)
-            throw new CoordinationRuntimeError('invalid-state', `sealed roster role ${role} model diverges from the fixed subscription roster`, [assignment.model_id, expected.model_id]);
-        if (assignment.thinking !== expected.thinking)
-            throw new CoordinationRuntimeError('invalid-state', `sealed roster role ${role} thinking diverges from the fixed subscription roster`, [assignment.thinking, expected.thinking]);
-        if (assignment.model !== `${provider}/${expected.model_id}`)
+        // The role's MODEL is whatever the W4 certification authorized, but it must
+        // actually be certified: an uncertified/seed/blocked assignment fails closed.
+        if (assignment.qualification_state !== D65_REQUIRED_ROSTER_QUALIFICATION_STATE)
+            throw new CoordinationRuntimeError('invalid-state', `sealed roster role ${role} is not W4-certified launch authority`, [String(assignment.qualification_state), D65_REQUIRED_ROSTER_QUALIFICATION_STATE]);
+        if (typeof assignment.model_id !== 'string' || assignment.model_id.length === 0)
+            throw new CoordinationRuntimeError('invalid-state', `sealed roster role ${role} has no model id`, [String(assignment.model_id)]);
+        if (!D65_ALLOWED_THINKING.includes(assignment.thinking))
+            throw new CoordinationRuntimeError('invalid-state', `sealed roster role ${role} thinking is out of range`, [String(assignment.thinking)]);
+        if (assignment.model !== `${provider}/${assignment.model_id}`)
             throw new CoordinationRuntimeError('invalid-state', `sealed roster role ${role} model identifier is malformed`, [assignment.model]);
         // Subscription channel: the billing route and auth class must be the OAuth
         // subscription channel (never a paid metered API key/gateway). This is the
@@ -107,9 +142,9 @@ export function authenticateD65LaunchRoster(manifest) {
         if (assignment.auth_class !== 'oauth')
             throw new CoordinationRuntimeError('invalid-state', `sealed roster role ${role} is not on an OAuth subscription auth class`, [String(assignment.auth_class)]);
     }
-    // Reject any extra role beyond the fixed set (the closed role registry).
+    // Reject any extra role beyond the closed role registry.
     for (const role of byRole.keys()) {
-        if (!(role in D65_FIXED_ROSTER_ASSIGNMENTS))
+        if (!D65_REQUIRED_ROSTER_ROLES.includes(role))
             throw new CoordinationRuntimeError('invalid-state', 'sealed roster contains an unexpected role', [role]);
     }
     // 6. Derive the authenticated parent assignment from the sealed bytes and
