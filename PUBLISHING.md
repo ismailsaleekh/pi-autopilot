@@ -55,7 +55,10 @@ compiled extension module layouts resolve one identical physical package root an
 exact `bin/autopilot-launch-signer.mjs` plus `bin/autopilot-agent-run.mjs`; it fails
 closed on manifest drift, missing build output, symlinks, or an unknown module layout. Directly loading
 `dist/src/extension.js` is not a valid package-loader or release proof, even though the
-closed runtime resolver supports that compiled layout defensively.
+closed runtime resolver supports that compiled layout defensively. Sealed signer paths
+must equal the resolver's canonical physical package path; same-realpath aliases are
+rejected and only the verified package path is ever spawned. Absolute-path validation
+uses the host platform contract, including Windows drive/UNC paths.
 
 ## Package payload checklist
 

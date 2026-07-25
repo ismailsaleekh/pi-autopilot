@@ -33,7 +33,9 @@ Do not point Pi at `dist/src/extension.js` as a package-loading shortcut. The pa
 entrypoint and the external signer are one physical package identity; the closed
 source/dist resolver verifies both supported internal layouts against the same
 package-root `bin/autopilot-launch-signer.mjs` and `bin/autopilot-agent-run.mjs`, then
-rejects cwd, PATH, ancestor, global, symlink, or manifest fallbacks.
+rejects cwd, PATH, ancestor, global, symlink, or manifest fallbacks. The sealed signer
+path must equal the canonical physical package signer exactly; the runtime spawns only
+that verified path, using platform-native absolute-path semantics on POSIX and Windows.
 
 When `--launch-manifest <absolute-path>` is present before task text, `/autopilot`
 enters the closed D65 launch mode and consumes a sealed `autopilot.launch_manifest.v1` prelaunch package

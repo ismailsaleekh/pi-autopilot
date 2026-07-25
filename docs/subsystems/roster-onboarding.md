@@ -86,7 +86,7 @@ covers_sources:
   - templates/skills/autopilot-roster-setup/SKILL.md
   - templates/skills/autopilot-roster-setup/payload.json
 signature_hash: 'sha256:76b717c28f46fad18c8271f1e5662a601c326ae52c97142a252eab67ce61bd6c'
-body_hash: 'sha256:ebb6d2c0bcaf0dd0f2c11c5fe4656c2d2337ab5114bb4b6bfbcf46eee764001b'
+body_hash: 'sha256:58efc8d1cc75fb46bef9776fbde76ef469eed532d7b0b5554a7f3ba678e982e3'
 stability: evolving
 ---
 
@@ -211,11 +211,14 @@ which follows the declared `./extensions/autopilot.ts` entry. The runtime derive
 physical package root from a closed pair of exact module layouts
 (`src/extension.ts` and `dist/src/extension.js`), verifies `package.json` name/version
 and both `bin.autopilot-launch-signer` / `bin.autopilot-agent-run` declarations, and
-requires the sealed `signer-invocation.json` to resolve to that package's one regular
-root-level signer while every child launch resolves to the same package's runner.
-It never searches ancestors, PATH, cwd, global installs, or alternate package copies;
-unknown layouts, symlinks, missing build artifacts, and cross-package signer paths fail
-before run state. The release/prepack `launch-entrypoint:check` exercises both layouts
+requires the sealed `signer-invocation.json` to name that package's exact canonical
+physical root-level signer byte-for-byte while every child launch resolves to the same
+package's runner. Absolute-path checks are platform-native, including Windows drive and
+UNC paths. The runtime spawns only the already-verified package path, never the
+invocation spelling, so a same-realpath symlink alias or later retarget cannot cross the
+signing boundary. It never searches ancestors, PATH, cwd, global installs, or alternate
+package copies; unknown layouts, symlinks, missing build artifacts, and cross-package
+signer paths fail before run state. The release/prepack `launch-entrypoint:check` exercises both layouts
 and requires identical signer and child-runner identities.
 
 ## No-roster onboarding and inactive tool activation

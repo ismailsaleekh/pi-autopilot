@@ -1150,7 +1150,7 @@
         "templates/skills/autopilot-roster-setup/payload.json"
       ],
       "signature_hash": "sha256:76b717c28f46fad18c8271f1e5662a601c326ae52c97142a252eab67ce61bd6c",
-      "body_hash": "sha256:ebb6d2c0bcaf0dd0f2c11c5fe4656c2d2337ab5114bb4b6bfbcf46eee764001b",
+      "body_hash": "sha256:58efc8d1cc75fb46bef9776fbde76ef469eed532d7b0b5554a7f3ba678e982e3",
       "semantic_attestation": null
     },
     "subsystems/runner-and-forced-output": {

@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { realpathSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { createContextBudgetTool, resolveContextHaltPercent } from "./core/context-budget.js";
 import { AUTOPILOT_ABORT_COMMAND, AUTOPILOT_CLAIM_GC_COMMAND, AUTOPILOT_CLOSE_COMMAND, AUTOPILOT_COMMAND, AUTOPILOT_CONFIG_COMMAND, AUTOPILOT_COORDINATION_COMMAND, AUTOPILOT_COORDINATOR_SESSION_CONTEXT_ENV, AUTOPILOT_HANDOFF_COMMAND, AUTOPILOT_INJECT_COMMAND, AUTOPILOT_ONBOARD_COMMAND, CONTEXT_BUDGET_TOOL_NAME, AUTOPILOT_RESPOND_CLAIM_REQUEST_TOOL_NAME, } from "./core/names.js";
 import { buildAutopilotWorkstreamRun, parseAutopilotAbortArgs, parseAutopilotArgs, parseAutopilotLaunchArgs, parseAutopilotClaimGcArgs, parseAutopilotCloseArgs, parseAutopilotConfigArgs, parseAutopilotCoordinationArgs, parseAutopilotInjectArgs, runnerInvocationFromModuleUrl, runtimeRootForWorkstream } from "./core/paths.js";
@@ -1016,15 +1016,16 @@ export function defaultLaunchSignerResolver(manifest, env) {
     // and the only permitted argument is `--config <absolute-path>`.
     if (typeof node !== 'string' || node !== process.execPath)
         throw new Error('launch signer invocation node must equal the current Node executable');
-    if (typeof signerBin !== 'string' || !signerBin.startsWith('/') || !/[\\/]bin[\\/]autopilot-launch-signer\.mjs$/u.test(signerBin))
+    if (typeof signerBin !== 'string' || !isAbsolute(signerBin) || !/[\\/]bin[\\/]autopilot-launch-signer\.mjs$/u.test(signerBin))
         throw new Error('launch signer invocation signer_bin must be the packaged autopilot-launch-signer.mjs bin');
-    const signerBinReal = realpathSync(signerBin);
-    const expectedSignerBin = realpathSync(resolveExtensionPackageExecutables(import.meta.url).launchSignerPath);
-    if (signerBinReal !== expectedSignerBin)
-        throw new Error('launch signer invocation signer_bin is not this package\'s autopilot-launch-signer.mjs');
-    if (typeof configPath !== 'string' || !configPath.startsWith('/'))
+    const expectedSignerBin = resolveExtensionPackageExecutables(import.meta.url).launchSignerPath;
+    if (signerBin !== expectedSignerBin)
+        throw new Error('launch signer invocation signer_bin is not this package\'s exact physical autopilot-launch-signer.mjs');
+    if (typeof configPath !== 'string' || !isAbsolute(configPath))
         throw new Error('launch signer invocation config_path must be an absolute path');
-    return new SpawnedD65LaunchSigner({ command: node, baseArgs: [signerBin, '--config', configPath], env });
+    // Spawn only the path returned by the closed package resolver. Never retain
+    // the invocation spelling: even a same-realpath symlink alias is mutable.
+    return new SpawnedD65LaunchSigner({ command: node, baseArgs: [expectedSignerBin, '--config', configPath], env });
 }
 export default function autopilotExtension(pi, dependencies = {}) {
     const rosterActivationStore = dependencies.rosterActivationStore ?? new ProductionRosterActivationStore(dependencies.rosterStateRoot);

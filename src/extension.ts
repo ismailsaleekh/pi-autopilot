@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { realpathSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 
 import { createContextBudgetTool, resolveContextHaltPercent } from './core/context-budget.ts';
 import {
@@ -1284,12 +1284,13 @@ export function defaultLaunchSignerResolver(manifest: D65LaunchManifest, env: Pr
   // signer bin (autopilot-launch-signer.mjs) — never an arbitrary executable —
   // and the only permitted argument is `--config <absolute-path>`.
   if (typeof node !== 'string' || node !== process.execPath) throw new Error('launch signer invocation node must equal the current Node executable');
-  if (typeof signerBin !== 'string' || !signerBin.startsWith('/') || !/[\\/]bin[\\/]autopilot-launch-signer\.mjs$/u.test(signerBin)) throw new Error('launch signer invocation signer_bin must be the packaged autopilot-launch-signer.mjs bin');
-  const signerBinReal = realpathSync(signerBin);
-  const expectedSignerBin = realpathSync(resolveExtensionPackageExecutables(import.meta.url).launchSignerPath);
-  if (signerBinReal !== expectedSignerBin) throw new Error('launch signer invocation signer_bin is not this package\'s autopilot-launch-signer.mjs');
-  if (typeof configPath !== 'string' || !configPath.startsWith('/')) throw new Error('launch signer invocation config_path must be an absolute path');
-  return new SpawnedD65LaunchSigner({ command: node, baseArgs: [signerBin, '--config', configPath], env });
+  if (typeof signerBin !== 'string' || !isAbsolute(signerBin) || !/[\\/]bin[\\/]autopilot-launch-signer\.mjs$/u.test(signerBin)) throw new Error('launch signer invocation signer_bin must be the packaged autopilot-launch-signer.mjs bin');
+  const expectedSignerBin = resolveExtensionPackageExecutables(import.meta.url).launchSignerPath;
+  if (signerBin !== expectedSignerBin) throw new Error('launch signer invocation signer_bin is not this package\'s exact physical autopilot-launch-signer.mjs');
+  if (typeof configPath !== 'string' || !isAbsolute(configPath)) throw new Error('launch signer invocation config_path must be an absolute path');
+  // Spawn only the path returned by the closed package resolver. Never retain
+  // the invocation spelling: even a same-realpath symlink alias is mutable.
+  return new SpawnedD65LaunchSigner({ command: node, baseArgs: [expectedSignerBin, '--config', configPath], env });
 }
 
 export default function autopilotExtension(pi: ExtensionHostLike, dependencies: AutopilotExtensionDependencies = {}): void {

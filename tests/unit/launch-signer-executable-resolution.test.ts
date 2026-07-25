@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { realpathSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { it } from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -102,6 +103,51 @@ void it('BUG-179 default signer resolution succeeds from both the source package
   }
 });
 
+void it('BUG-179 rejects a signer-invocation symlink alias both before and after retarget without spawning it', async () => {
+  const packageRoot = resolve(fileURLToPath(new URL('../../', import.meta.url)));
+  const root = await mkdtemp(join(tmpdir(), 'pi-autopilot-signer-alias-'));
+  const aliasPath = join(root, 'alias', 'bin', 'autopilot-launch-signer.mjs');
+  const attackerPath = join(root, 'attacker.mjs');
+  try {
+    await mkdir(dirname(aliasPath), { recursive: true });
+    await symlink(join(packageRoot, 'bin', 'autopilot-launch-signer.mjs'), aliasPath);
+    const resolveAlias = async (suffix: string): Promise<void> => {
+      const evidenceRoot = join(root, `evidence-${suffix}`);
+      await mkdir(evidenceRoot, { recursive: true, mode: 0o700 });
+      await writeFile(join(evidenceRoot, 'signer-invocation.json'), `${JSON.stringify({
+        schema_version: 'autopilot.launch_signer_invocation.v1',
+        node: process.execPath,
+        signer_bin: aliasPath,
+        config_path: join(root, 'operator-key', 'signer-config.json'),
+      })}\n`, { mode: 0o600 });
+      const sourceLoaded: unknown = await import('../../src/extension.ts');
+      assert.throws(
+        () => extensionModule(sourceLoaded).defaultLaunchSignerResolver({ program_evidence_root: evidenceRoot }, {}),
+        /not this package's exact physical/u,
+      );
+    };
+    await resolveAlias('same-realpath');
+    await rm(aliasPath);
+    await writeFile(attackerPath, '#!/usr/bin/env node\nthrow new Error("must never execute");\n', 'utf8');
+    await symlink(attackerPath, aliasPath);
+    await resolveAlias('retargeted');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+void it('BUG-179 uses the platform-native absolute-path contract required by Windows release lanes', async () => {
+  const signerPath = process.platform === 'win32' ? 'D:\\pi-autopilot\\bin\\autopilot-launch-signer.mjs' : '/opt/pi-autopilot/bin/autopilot-launch-signer.mjs';
+  const configPath = process.platform === 'win32' ? 'D:\\operator\\signer-config.json' : '/opt/operator/signer-config.json';
+  assert.equal(isAbsolute(signerPath), true);
+  assert.equal(isAbsolute(configPath), true);
+  const extension = await readFile(new URL('../../src/extension.ts', import.meta.url), 'utf8');
+  assert.match(extension, /isAbsolute\(signerBin\)/u);
+  assert.match(extension, /isAbsolute\(configPath\)/u);
+  assert.equal(extension.includes("signerBin.startsWith('/')"), false);
+  assert.equal(extension.includes("configPath.startsWith('/')"), false);
+});
+
 void it('BUG-179 keeps the prepack launch-entrypoint gate silent unless JSON output is explicitly requested', () => {
   const packageRoot = resolve(fileURLToPath(new URL('../../', import.meta.url)));
   const script = join(packageRoot, 'scripts', 'check-launch-entrypoint.mjs');
@@ -132,7 +178,7 @@ void it('BUG-179 rejects signer manifest drift, symlink payloads, and extension 
     ]) await copyFile(join(sourceRoot, relative), join(fixture, relative));
 
     const sourceUrl = pathToFileURL(join(fixture, 'src', 'extension.ts')).href;
-    assert.equal(resolver.resolveExtensionPackageExecutables(sourceUrl).packageRoot, fixture);
+    assert.equal(resolver.resolveExtensionPackageExecutables(sourceUrl).packageRoot, realpathSync(fixture));
 
     const manifest = JSON.parse(await readFile(join(fixture, 'package.json'), 'utf8')) as Record<string, unknown>;
     manifest['bin'] = { 'autopilot-launch-signer': 'dist/bin/autopilot-launch-signer.mjs' };

@@ -154,5 +154,11 @@ export function resolveExtensionPackageExecutables(extensionModuleUrl) {
     const agentRunnerPath = join(packageRoot, AGENT_RUNNER_RELATIVE_PATH);
     assertClosedPackagePath(packageRoot, launchSignerPath, 'launch signer executable');
     assertClosedPackagePath(packageRoot, agentRunnerPath, 'agent runner executable');
-    return Object.freeze({ packageRoot, launchSignerPath, agentRunnerPath });
+    // Return only canonical physical spellings. Consumers compare sealed paths
+    // byte-for-byte and spawn these verified paths, never caller-provided aliases.
+    return Object.freeze({
+        packageRoot: realpathSync(packageRoot),
+        launchSignerPath: realpathSync(launchSignerPath),
+        agentRunnerPath: realpathSync(agentRunnerPath),
+    });
 }

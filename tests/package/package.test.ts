@@ -215,6 +215,10 @@ void describe('package manifest and payload', () => {
     assert.match(resolver, /DIST_EXTENSION_RELATIVE_PATH/u);
     assert.match(resolver, /outside the closed source\/dist package layouts/u);
     assert.match(extension, /resolveExtensionPackageExecutables\(import\.meta\.url\)/u);
+    assert.match(extension, /signerBin !== expectedSignerBin/u);
+    assert.match(extension, /baseArgs: \[expectedSignerBin, '--config', configPath\]/u);
+    assert.match(extension, /isAbsolute\(signerBin\)/u);
+    assert.match(extension, /isAbsolute\(configPath\)/u);
     assert.match(paths, /resolveExtensionPackageExecutables\(moduleUrl\)\.agentRunnerPath/u);
     assert.equal(/new URL\('\.\.\/bin\/autopilot-launch-signer\.mjs'/u.test(extension), false, 'extension must not re-derive a source-only signer path');
     assert.equal(/new URL\('bin\/autopilot-agent-run\.mjs'/u.test(paths), false, 'paths must not re-derive a source-only runner path');
