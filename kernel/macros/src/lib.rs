@@ -3,8 +3,8 @@ use proc_macro2::Span;
 use quote::{format_ident, quote};
 use syn::punctuated::Punctuated;
 use syn::{
-    AngleBracketedGenericArguments, Expr, ExprLit, ExprPath, GenericArgument, ItemFn, Lit,
-    Meta, PathArguments, ReturnType, Token, Type, TypePath, parse_macro_input,
+    AngleBracketedGenericArguments, Expr, ExprLit, ExprPath, GenericArgument, ItemFn, Lit, Meta,
+    PathArguments, ReturnType, Token, Type, TypePath, parse_macro_input,
 };
 
 #[proc_macro_attribute]
@@ -25,7 +25,10 @@ struct Args {
     mode_variant: syn::Ident,
 }
 
-fn expand(args: Punctuated<Meta, Token![,]>, input: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
+fn expand(
+    args: Punctuated<Meta, Token![,]>,
+    input: ItemFn,
+) -> syn::Result<proc_macro2::TokenStream> {
     let parsed = parse_args(args)?;
     verify_return(&input)?;
 
@@ -124,8 +127,8 @@ fn parse_args(args: Punctuated<Meta, Token![,]>) -> syn::Result<Args> {
     }
 
     let id = id.ok_or_else(|| syn::Error::new(Span::call_site(), "missing id"))?;
-    let producer_variant = producer_variant
-        .ok_or_else(|| syn::Error::new(Span::call_site(), "missing producer"))?;
+    let producer_variant =
+        producer_variant.ok_or_else(|| syn::Error::new(Span::call_site(), "missing producer"))?;
     let admits = admits.ok_or_else(|| syn::Error::new(Span::call_site(), "missing admits"))?;
     let mode_variant = match mode_variant {
         Some(mode) => mode,
@@ -182,7 +185,10 @@ fn enum_variant(value: Expr, name: &str, allowed: &[&str]) -> syn::Result<syn::I
         ));
     };
     let variant = segment.ident.to_string();
-    if allowed.iter().any(|allowed_variant| *allowed_variant == variant) {
+    if allowed
+        .iter()
+        .any(|allowed_variant| *allowed_variant == variant)
+    {
         Ok(segment.ident.clone())
     } else {
         Err(syn::Error::new_spanned(

@@ -106,7 +106,10 @@ impl fmt::Display for BoundaryTransitionError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::EnforceToRecordRefused { id } => {
-                write!(formatter, "boundary {id} cannot move from enforce to record")
+                write!(
+                    formatter,
+                    "boundary {id} cannot move from enforce to record"
+                )
             }
         }
     }
@@ -136,9 +139,7 @@ pub struct BoundaryRuntime {
 }
 
 impl BoundaryRuntime {
-    pub fn new(
-        descriptor: &'static BoundaryDescriptor,
-    ) -> Result<Self, BoundaryRegistrationError> {
+    pub fn new(descriptor: &'static BoundaryDescriptor) -> Result<Self, BoundaryRegistrationError> {
         if is_registered(descriptor) {
             Ok(Self {
                 descriptor,
@@ -173,7 +174,9 @@ impl BoundaryRuntime {
     pub fn reject(&self, actual: impl Into<String>) -> Result<(), Rejection> {
         match self.mode {
             BoundaryMode::Record => Ok(()),
-            BoundaryMode::Enforce => Err(Rejection::from_registered(self.descriptor, actual.into())),
+            BoundaryMode::Enforce => {
+                Err(Rejection::from_registered(self.descriptor, actual.into()))
+            }
         }
     }
 }
@@ -183,5 +186,7 @@ pub fn boundary_by_id(id: &str) -> Option<&'static BoundaryDescriptor> {
 }
 
 fn is_registered(descriptor: &'static BoundaryDescriptor) -> bool {
-    BOUNDARIES.iter().any(|registered| core::ptr::eq(registered, descriptor))
+    BOUNDARIES
+        .iter()
+        .any(|registered| core::ptr::eq(registered, descriptor))
 }

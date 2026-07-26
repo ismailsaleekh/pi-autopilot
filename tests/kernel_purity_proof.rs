@@ -1,7 +1,6 @@
 use drivers::sim::SimPlatform;
-use kernel::effect::{
-    ActionId, CommandBytes, Effect, Label, LaunchBackground, LogId, OperatorMessage, TaskId,
-};
+use kernel::effect::{Effect, OperatorMessage};
+use kernel::generated::{ActionKind, BackgroundAction, Bytes, Duration, Id, SupersessionState};
 use kernel::platform::Platform;
 
 fn small_step(seed: u64) -> Vec<Effect> {
@@ -12,17 +11,23 @@ fn small_step(seed: u64) -> Vec<Effect> {
     let mark = platform.clock().read();
 
     let effects = vec![
-        Effect::LaunchBackground(LaunchBackground {
-            action: ActionId(first),
-            name: Label(b"unit".to_vec()),
-            command: CommandBytes(first.to_le_bytes().to_vec()),
-            agent: true,
-            timeout_secs: 1_800,
+        Effect::LaunchBackground(BackgroundAction {
+            action_id: Id(format!("action-{first:016x}")),
+            assignment_id: Id("assignment-unit".to_string()),
+            kind: ActionKind::LaunchBackground,
+            command_bytes: Bytes(format!("{first:016x}")),
+            display_name: "unit".to_string(),
+            is_agent: true,
+            timeout: Some(Duration("1800s".to_string())),
+            notify_on_completion: true,
             trigger_on_completion: true,
+            run_revision: 1,
+            expires_at: None,
+            supersession_state: SupersessionState("live".to_string()),
         }),
-        Effect::ReconcileBackground(TaskId(second)),
-        Effect::ReadFailureLog(LogId(mark.0)),
-        Effect::StopBackground(TaskId(first ^ second)),
+        Effect::ReconcileBackground(Id(format!("task-{second:016x}"))),
+        Effect::ReadFailureLog(Id(format!("log-{:016x}", mark.0))),
+        Effect::StopBackground(Id(format!("task-{:016x}", first ^ second))),
         Effect::RequestOperator(OperatorMessage(second.to_le_bytes().to_vec())),
         Effect::ReturnIdle,
     ];

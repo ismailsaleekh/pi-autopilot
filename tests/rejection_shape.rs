@@ -91,22 +91,16 @@ fn assert_rejection(
 fn malformed_values_return_shaped_rejections() {
     match accept_model("not a counted value") {
         Ok(value) => panic!("model boundary accepted {value}"),
-        Err(rejection) => assert_rejection(
-            rejection,
-            MODEL_ID,
-            MODEL_ADMITS,
-            "not a counted value",
-        ),
+        Err(rejection) => {
+            assert_rejection(rejection, MODEL_ID, MODEL_ADMITS, "not a counted value")
+        }
     }
 
     match accept_operator("please continue") {
         Ok(value) => panic!("operator boundary accepted {value}"),
-        Err(rejection) => assert_rejection(
-            rejection,
-            OPERATOR_ID,
-            OPERATOR_ADMITS,
-            "please continue",
-        ),
+        Err(rejection) => {
+            assert_rejection(rejection, OPERATOR_ID, OPERATOR_ADMITS, "please continue")
+        }
     }
 }
 
@@ -117,7 +111,11 @@ fn registry_lists_boundaries_with_unique_ids() {
     assert!(ids.contains(MODEL_ID));
     assert!(ids.contains(OPERATOR_ID));
     assert!(ids.contains(RECORD_ID));
-    assert_eq!(ids.len(), BOUNDARIES.len(), "duplicate boundary id in registry");
+    assert_eq!(
+        ids.len(),
+        BOUNDARIES.len(),
+        "duplicate boundary id in registry"
+    );
 }
 
 #[test]

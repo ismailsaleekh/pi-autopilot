@@ -6,4 +6,9 @@ pub mod boundary;
 pub mod generated;
 
 pub mod effect;
+pub mod failure;
+pub mod fold;
+pub mod log;
 pub mod platform;
+pub mod schedule;
+pub mod state;

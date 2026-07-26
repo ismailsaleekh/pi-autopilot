@@ -8,13 +8,48 @@ publish = false
 linkme.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 
 [dev-dependencies]
+kdl.workspace = true
 kernel-macros = { path = "macros" }
+proptest.workspace = true
 
 [[test]]
 name = "rejection_shape"
 path = "../tests/rejection_shape.rs"
+
+[[test]]
+name = "failure_table_parity"
+path = "../tests/failure_table_parity.rs"
+
+[[test]]
+name = "only_unsafe_halts"
+path = "../tests/only_unsafe_halts.rs"
+
+[[test]]
+name = "hard_boundaries"
+path = "../tests/hard_boundaries.rs"
+
+[[test]]
+name = "fold_invariant"
+path = "../tests/fold_invariant.rs"
+
+[[test]]
+name = "cache_is_disposable"
+path = "../tests/cache_is_disposable.rs"
+
+[[test]]
+name = "cache_mismatch_replay"
+path = "../tests/cache_mismatch_replay.rs"
+
+[[test]]
+name = "scheduler_order"
+path = "../tests/scheduler_order.rs"
+
+[[test]]
+name = "parallel_cap_scope"
+path = "../tests/parallel_cap_scope.rs"
 
 [lints]
 workspace = true

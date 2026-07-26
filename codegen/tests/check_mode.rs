@@ -70,7 +70,8 @@ fn unknown_kdl_node_is_rejected() {
         .current_dir(temp.path())
         .assert()
         .code(2)
-        .stderr(predicates::str::contains("unknown top-level node `bogus_node`").and(
-            predicates::str::contains("line"),
-        ));
+        .stderr(
+            predicates::str::contains("unknown top-level node `bogus_node`")
+                .and(predicates::str::contains("line")),
+        );
 }
