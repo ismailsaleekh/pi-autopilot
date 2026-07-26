@@ -1,0 +1,13 @@
+error: acceptance_boundary functions must return Result<_, Rejection>
+  --> tests/compile_fail/wrong_return.rs:10:29
+   |
+10 | fn wrong_return(_: &str) -> String {
+   |                             ^^^^^^
+
+warning: unused import: `kernel::boundary::Producer`
+ --> tests/compile_fail/wrong_return.rs:1:5
+  |
+1 | use kernel::boundary::Producer;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

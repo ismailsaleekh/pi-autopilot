@@ -5,6 +5,11 @@ version = "0.0.0"
 publish = false
 
 [dependencies]
+kernel = { path = "../kernel" }
+
+[[test]]
+name = "kernel_purity_proof"
+path = "../tests/kernel_purity_proof.rs"
 
 [lints]
 workspace = true

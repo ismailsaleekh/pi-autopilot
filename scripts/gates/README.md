@@ -38,8 +38,14 @@ asserts the exit codes.
 gate used a word-boundary regex, so `spawn_implementer()` and `lane_is_ready()`
 slipped through — domain vocabulary embedded *inside* an identifier, which is
 exactly how the boundary leaks in practice. The match is now substring-based.
-A later run caught `no-inference.sh` swallowing malformed regex terms; literals
-are now fixed-string matched, and pattern entries are validated before scanning.
+A later run caught `no-inference.sh` swallowing malformed regex terms; inference
+concepts are now fixed-substring matched, and pattern entries are validated before
+scanning.
+
+`no-inference.sh` matches banned concepts as fixed substrings against
+comment-stripped source. A concept such as `exists` therefore catches both
+`x.exists()` and the bare field/identifier form `x.exists`; adding a concept
+requires adding selftest fixtures for both forms.
 
 ## W0 obligation
 
@@ -48,7 +54,7 @@ known-bad fixture means **the kill-switch cannot be trusted to fire**, and W1
 must not start.
 
 ```bash
-./scripts/gates/selftest.sh     # must exit 0 — W0 gate (35/35 fixtures)
+./scripts/gates/selftest.sh     # must exit 0 — W0 gate (80/80 fixtures)
 ```
 
 ## The host boundary (D78)
@@ -74,9 +80,10 @@ the eight D76 §10 hard boundaries, so this is hardcoded and pinned by its own f
 2. **Never delete a banned term** from `kernel-purity.sh` or `no-inference.sh`
    to clear a violation.
 3. **Exemptions must be justified.** `no-inference.sh` carries an
-   `EXEMPT_SUFFIXES` list for disposable-cache and safe-cleanup paths. Each
-   entry names its file and its reason, and an exempted file must still never
-   set run/lane/candidate state.
+   `EXEMPT_SUFFIXES` list only for disposable-cache and safe-cleanup paths.
+   Each entry names its file and its reason, and an exempted file must still
+   never set run/lane/candidate state. Lexical collisions in other files must
+   be renamed or narrowed, not hidden by a whole-file exemption.
 4. **Changing a gate requires re-running `selftest.sh`**, plus a new fixture
    covering the behavior that changed.
 

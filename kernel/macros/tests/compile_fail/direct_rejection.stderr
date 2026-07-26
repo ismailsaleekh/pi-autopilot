@@ -1,0 +1,13 @@
+error[E0451]: fields `boundary_id`, `expected`, `actual` and `producer_visible` of struct `Rejection` are private
+ --> tests/compile_fail/direct_rejection.rs:5:9
+  |
+4 |     let _value = Rejection {
+  |                  --------- in this type
+5 |         boundary_id: "shape.direct.v1",
+  |         ^^^^^^^^^^^ private field
+6 |         expected: String::from("declared rule"),
+  |         ^^^^^^^^ private field
+7 |         actual: String::from("raw value"),
+  |         ^^^^^^ private field
+8 |         producer_visible: true,
+  |         ^^^^^^^^^^^^^^^^ private field

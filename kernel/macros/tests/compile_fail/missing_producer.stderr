@@ -1,0 +1,19 @@
+error: missing producer
+ --> tests/compile_fail/missing_producer.rs:4:1
+  |
+4 | / #[acceptance_boundary(
+5 | |     id = "shape.no-producer.v1",
+6 | |     visible = true,
+7 | |     admits = "a value the producer can see"
+8 | | )]
+  | |__^
+  |
+  = note: this error originates in the attribute macro `acceptance_boundary` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unused import: `kernel::boundary::Rejection`
+ --> tests/compile_fail/missing_producer.rs:1:5
+  |
+1 | use kernel::boundary::Rejection;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

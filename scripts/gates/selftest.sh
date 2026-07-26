@@ -303,6 +303,27 @@ pub fn drop_cache(p: &Path) {
 RS
 expect 0 "permits the justified cache exemption" "$NOINFER" --root "$nex"
 
+nmacro_good="$tmp/noinfer-kernel-macros-clean"
+mkdir -p "$nmacro_good/kernel/macros/src"
+cat > "$nmacro_good/kernel/macros/src/lib.rs" <<'RS'
+pub fn type_suffix_is(value: &Type, expected: &str) -> bool {
+    let Type::Path(TypePath { path, .. }) = value else {
+        return false;
+    };
+    path.segments.last().is_some_and(|segment| segment.ident == expected)
+}
+RS
+expect 0 "accepts the kernel macro AST type suffix helper" "$NOINFER" --root "$nmacro_good"
+
+nmacro_bad="$tmp/noinfer-kernel-macros-real-violation"
+mkdir -p "$nmacro_bad/kernel/macros/src"
+cat > "$nmacro_bad/kernel/macros/src/lib.rs" <<'RS'
+pub fn infer_from_listing(p: &Path) -> Step {
+    if std::fs::read_dir(p).is_ok() { Step::Recover } else { Step::Continue }
+}
+RS
+expect 1 "rejects real inference in the kernel macro file" "$NOINFER" --root "$nmacro_bad"
+
 expect 0 "tolerates absent sources (pre-W1)" "$NOINFER" --root "$tmp/loc-empty-root"
 
 # ---------------------------------------------------------------------------

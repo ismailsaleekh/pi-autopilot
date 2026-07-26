@@ -5,6 +5,13 @@ version = "0.0.0"
 publish = false
 
 [dependencies]
+kdl.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
+tempfile = "3"
 
 [lints]
 workspace = true

@@ -72,10 +72,10 @@ readonly -a BANNED_INFERENCE_PATTERNS=(
   'sort_by_key\(\|.*modified'
 )
 
-# Files exempted from the listing/existence rules because their entire purpose
-# is disposable-cache management or archival cleanup, which are explicitly NOT
-# state decisions. Each exemption must be justified here, and each exempted
-# file must still never use what it finds to set run/lane/candidate state.
+# Files exempted from the inference concepts because their entire purpose is
+# disposable-cache management or archival cleanup. Each exemption must be
+# justified here, and each exempted file must still never use what it finds to
+# set run/lane/candidate state.
 readonly -a EXEMPT_SUFFIXES=(
   'drivers/fs/cleanup.rs'      # safe-archive removal after close (D76 §10)
   'drivers/fs/cache.rs'        # state.json disposable cache (Closure B)

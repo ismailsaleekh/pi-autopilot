@@ -5,6 +5,16 @@ version = "0.0.0"
 publish = false
 
 [dependencies]
+linkme.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+kernel-macros = { path = "macros" }
+
+[[test]]
+name = "rejection_shape"
+path = "../tests/rejection_shape.rs"
 
 [lints]
 workspace = true
