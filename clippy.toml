@@ -1,0 +1,12 @@
+disallowed-methods = [
+    { path = "std::time::SystemTime::now", reason = "the kernel is pure; clock access belongs behind Platform in a driver" },
+    { path = "std::time::Instant::now", reason = "the kernel is pure; clock access belongs behind Platform in a driver" },
+    { path = "std::env::var", reason = "the kernel is pure; environment access belongs behind Platform in a driver" },
+    { path = "std::env::vars", reason = "the kernel is pure; environment access belongs behind Platform in a driver" },
+]
+
+disallowed-types = [
+    { path = "std::process::Command", reason = "the kernel is pure; process execution belongs behind Platform in a driver" },
+    { path = "std::fs::File", reason = "the kernel is pure; filesystem access belongs behind Platform in a driver" },
+    { path = "std::fs::OpenOptions", reason = "the kernel is pure; filesystem access belongs behind Platform in a driver" },
+]
