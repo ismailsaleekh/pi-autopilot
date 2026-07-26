@@ -1,6 +1,6 @@
 # Autopilot contract data
 
-`contracts.kdl` is the source document for generated Rust types, TypeScript types, JSON Schemas, and prompt-visible admissibility text.
+`contracts.kdl` is the source document for generated Rust types, TypeScript types, and prompt-visible admissibility text.
 
 ## KDL shape
 
@@ -34,11 +34,11 @@ Current model-produced artifacts are:
 
 `context_anchor` uses the discriminator field `anchor_form`, not a backend-specific field name. Two `pattern` rows necessarily contain the literal `git://...` anchor strings because D76 §4.1 defines those URI forms. That is allowed in data.
 
-W0-4 codegen must not emit those literal backend substrings into `kernel/**/*.rs`. The purity gate scans kernel source only; generated files are excluded. Generated kernel-facing code should use generic names such as `version-control-lines` / `version-control-whole-file` or numeric discriminants, while driver/generated-schema layers may preserve the literal data needed for prompts and JSON Schema.
+W0-4 codegen must not emit those literal backend substrings into `kernel/**/*.rs`. The purity gate scans kernel source only; generated files are excluded. Generated kernel-facing code should use generic names such as `version-control-lines` / `version-control-whole-file` or numeric discriminants, while driver layers may preserve the literal data needed for prompts.
 
 ## Completeness notes
 
 - D76 printed YAML blocks are represented field-for-field for `role_frontmatter`, `context_manifest`, and `control_frame`.
 - D76 §5.3 state/verdict vocabularies are represented as closed enums. `interrupted`, `checkpointed`, and `superseded` are encoded as `attempt_attribute`, not `lane_state`.
 - D78 §3.2 has exactly twelve `frame` nodes: six `host-to-core` and six `core-to-host`.
-- D74 §20 durable artifact categories are data rows so generated docs/schemas can stay synchronized with the runtime layout.
+- D74 §20 durable artifact categories are data rows so generated outputs can stay synchronized with the runtime layout.
