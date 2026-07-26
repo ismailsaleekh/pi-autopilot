@@ -191,36 +191,107 @@ pub fn state(events: &[Event]) -> State {
 RS
 expect 0 "accepts pure fold-based state" "$NOINFER" --root "$ngood"
 
-# BAD: existence-as-authority.
-nexist="$tmp/noinfer-exists"
-mkdir -p "$nexist/kernel"
-cat > "$nexist/kernel/lib.rs" <<'RS'
-pub fn resume(p: &Path) -> Step {
-    if p.join("implementation.json").exists() { Step::Validate } else { Step::Implement }
-}
-RS
-expect 1 "rejects existence-as-authority" "$NOINFER" --root "$nexist"
+# Every banned inference concept must reject both method-call syntax
+# (`entry.exists()`) and bare field/identifier syntax (`entry.exists`).
+readonly -a NOINFER_CONCEPT_FIXTURES=(
+  exists
+  try_exists
+  is_file
+  is_dir
+  modified
+  mtime
+  created
+  accessed
+  metadata
+  read_dir
+  glob
+  walkdir
+  DirEntry
+  file_stem
+  extension
+  file_name
+  ends_with
+  starts_with
+  kill
+  is_alive
+  pid_exists
+  latest
+  most_recent
+)
 
-# BAD: mtime-as-authority.
-nmtime="$tmp/noinfer-mtime"
-mkdir -p "$nmtime/drivers"
-cat > "$nmtime/drivers/lib.rs" <<'RS'
-pub fn newest(a: &Path) -> Step {
-    let m = a.metadata().unwrap().modified().unwrap();
-    Step::from(m)
+for concept in "${NOINFER_CONCEPT_FIXTURES[@]}"; do
+  ncall="$tmp/noinfer-${concept}-call"
+  mkdir -p "$ncall/kernel"
+  cat > "$ncall/kernel/lib.rs" <<RS
+pub fn infer(entry: &Entry) -> Step {
+    if entry.${concept}() { Step::Continue } else { Step::Recover }
 }
 RS
-expect 1 "rejects mtime-as-authority" "$NOINFER" --root "$nmtime"
+  expect 1 "rejects ${concept}() call-form inference" "$NOINFER" --root "$ncall"
 
-# BAD: listing-as-authority.
-nlist="$tmp/noinfer-readdir"
-mkdir -p "$nlist/kernel"
-cat > "$nlist/kernel/lib.rs" <<'RS'
-pub fn scan(d: &Path) -> usize {
-    read_dir(d).unwrap().count()
+  nbare="$tmp/noinfer-${concept}-bare"
+  mkdir -p "$nbare/kernel"
+  cat > "$nbare/kernel/lib.rs" <<RS
+pub fn infer(entry: &Entry) -> Step {
+    let observed = entry.${concept};
+    Step::from(observed)
 }
 RS
-expect 1 "rejects directory-listing-as-authority" "$NOINFER" --root "$nlist"
+  expect 1 "rejects ${concept} bare-field inference" "$NOINFER" --root "$nbare"
+done
+
+# FIX-1 regression fixtures: these constructs used to be invisible because
+# malformed ERE terms made grep exit 2 and the gate swallowed that failure.
+nglob="$tmp/noinfer-glob"
+mkdir -p "$nglob/drivers"
+cat > "$nglob/drivers/lib.rs" <<'RS'
+pub fn artifacts() -> Vec<PathBuf> {
+    glob("runs/*/artifacts/*.json").unwrap().collect()
+}
+RS
+expect 1 "rejects glob( artifact listing" "$NOINFER" --root "$nglob"
+
+nkill="$tmp/noinfer-kill0"
+mkdir -p "$nkill/drivers"
+cat > "$nkill/drivers/lib.rs" <<'RS'
+pub fn live() -> Step {
+    if kill(0, None).is_ok() { Step::Continue } else { Step::Recover }
+}
+RS
+expect 1 "rejects kill(0 liveness checks" "$NOINFER" --root "$nkill"
+
+nstarts="$tmp/noinfer-starts-with"
+mkdir -p "$nstarts/kernel"
+cat > "$nstarts/kernel/lib.rs" <<'RS'
+pub fn classify(file_name: &str) -> Step {
+    if file_name.starts_with("implementation") { Step::Validate } else { Step::Implement }
+}
+RS
+expect 1 "rejects starts_with(\"implementation filename prefixes" "$NOINFER" --root "$nstarts"
+
+nsort="$tmp/noinfer-sort-by-modified"
+mkdir -p "$nsort/drivers"
+cat > "$nsort/drivers/lib.rs" <<'RS'
+pub fn choose(mut artifacts: Vec<Artifact>) -> Option<Artifact> {
+    artifacts.sort_by_key(|e| e.modified);
+    artifacts.pop()
+}
+RS
+expect 1 "rejects sort_by_key(|e| e.modified) ordering" "$NOINFER" --root "$nsort"
+
+# Pattern-list errors must fail loudly before any source scan.
+nmalformed="$tmp/noinfer-malformed-pattern-root"
+mkdir -p "$nmalformed"
+malformed_gate="$tmp/noinfer-malformed-pattern.sh"
+awk '
+  index($0, "sort_by_key") {
+    print "  '\''glob('\''"
+    next
+  }
+  { print }
+' "$NOINFER" > "$malformed_gate"
+chmod +x "$malformed_gate"
+expect 2 "rejects a malformed no-inference pattern entry" "$malformed_gate" --root "$nmalformed"
 
 # Exempt paths are allowed to touch the filesystem.
 nex="$tmp/noinfer-exempt"

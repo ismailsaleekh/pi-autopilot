@@ -38,6 +38,8 @@ asserts the exit codes.
 gate used a word-boundary regex, so `spawn_implementer()` and `lane_is_ready()`
 slipped through — domain vocabulary embedded *inside* an identifier, which is
 exactly how the boundary leaks in practice. The match is now substring-based.
+A later run caught `no-inference.sh` swallowing malformed regex terms; literals
+are now fixed-string matched, and pattern entries are validated before scanning.
 
 ## W0 obligation
 
@@ -46,7 +48,7 @@ known-bad fixture means **the kill-switch cannot be trusted to fire**, and W1
 must not start.
 
 ```bash
-./scripts/gates/selftest.sh     # must exit 0 — W0 gate (30/30 fixtures)
+./scripts/gates/selftest.sh     # must exit 0 — W0 gate (35/35 fixtures)
 ```
 
 ## The host boundary (D78)

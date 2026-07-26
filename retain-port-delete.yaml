@@ -1,0 +1,1585 @@
+schema: autopilot.disposition.v1
+baseline:
+  commit: ddde5f9af8bf587c0bdc8c402c20bc75f9d8b3f4
+  tree: 7fc71995ae95e58d4aa4d40e7908d80464128b57
+  tracked_paths: 866
+  total_loc: 102944
+generated_at_wave: W0
+dispositions:
+  - path: "retain-port-delete.yaml"
+    kind: exact
+    disposition: retain
+    loc: 0
+    reason: "D76 §11 — baseline disposition manifest is retained as the W8 deletion gate."
+  - path: "scripts/check-disposition.mjs"
+    kind: exact
+    disposition: retain
+    loc: 0
+    reason: "D77 checklist W0 — disposition checker is retained as the W8 CI gate."
+  - path: ".gitattributes"
+    kind: exact
+    disposition: retain
+    loc: 1
+    reason: "D79 §1 — retained package substrate for the Rust Core/TypeScript Host layout."
+  - path: ".gitignore"
+    kind: exact
+    disposition: retain
+    loc: 11
+    reason: "D79 §1 — retained package substrate for the Rust Core/TypeScript Host layout."
+  - path: "LICENSE"
+    kind: exact
+    disposition: retain
+    loc: 7
+    reason: "D79 §1 — retained package substrate for the Rust Core/TypeScript Host layout."
+  - path: "logo.png"
+    kind: exact
+    disposition: retain
+    loc: 1879
+    reason: "D79 §1 — retained package substrate for the Rust Core/TypeScript Host layout."
+  - path: ".github/workflows/"
+    kind: prefix
+    disposition: rewrite
+    loc: 86
+    reason: "D76 §13 — CI workflow is rewritten for final package/deletion QA."
+    replacement_slice: slice-7
+  - path: "AUTOPILOT-INSTRUCTIONS.md"
+    kind: exact
+    disposition: rewrite
+    loc: 67
+    reason: "D76 §13 — top-level package/operator surface is rewritten for the simplified major package line."
+    replacement_slice: slice-7
+  - path: "PUBLISHING.md"
+    kind: exact
+    disposition: rewrite
+    loc: 99
+    reason: "D76 §13 — top-level package/operator surface is rewritten for the simplified major package line."
+    replacement_slice: slice-7
+  - path: "README.md"
+    kind: exact
+    disposition: rewrite
+    loc: 202
+    reason: "D76 §13 — top-level package/operator surface is rewritten for the simplified major package line."
+    replacement_slice: slice-7
+  - path: "TESTING.md"
+    kind: exact
+    disposition: rewrite
+    loc: 125
+    reason: "D76 §13 — top-level package/operator surface is rewritten for the simplified major package line."
+    replacement_slice: slice-7
+  - path: "TEST_PLAN.md"
+    kind: exact
+    disposition: rewrite
+    loc: 133
+    reason: "D76 §13 — top-level package/operator surface is rewritten for the simplified major package line."
+    replacement_slice: slice-7
+  - path: "package.json"
+    kind: exact
+    disposition: rewrite
+    loc: 118
+    reason: "D76 §13 — top-level package/operator surface is rewritten for the simplified major package line."
+    replacement_slice: slice-7
+  - path: "package-lock.json"
+    kind: exact
+    disposition: rewrite
+    loc: 2555
+    reason: "D76 §13 — top-level package/operator surface is rewritten for the simplified major package line."
+    replacement_slice: slice-7
+  - path: "tsconfig.json"
+    kind: exact
+    disposition: rewrite
+    loc: 30
+    reason: "D76 §13 — top-level package/operator surface is rewritten for the simplified major package line."
+    replacement_slice: slice-7
+  - path: "tsconfig.build.json"
+    kind: exact
+    disposition: rewrite
+    loc: 13
+    reason: "D76 §13 — top-level package/operator surface is rewritten for the simplified major package line."
+    replacement_slice: slice-7
+  - path: "PHASE37_ROSTER_CONTRACT_FREEZE.md"
+    kind: exact
+    disposition: delete
+    loc: 65
+    reason: "D76 §11 and refactor-task Remove list — old architecture slice is deleted with a live replacement consumer."
+    replacement_slice: slice-1
+    replacement_consumer: data/roster.kdl
+  - path: "S1_STORE_DESIGN.md"
+    kind: exact
+    disposition: delete
+    loc: 84
+    reason: "D76 §11 and refactor-task Remove list — old architecture slice is deleted with a live replacement consumer."
+    replacement_slice: slice-1
+    replacement_consumer: data/workflow.kdl
+  - path: "S1_GIT_SAGA_DESIGN.md"
+    kind: exact
+    disposition: delete
+    loc: 84
+    reason: "D76 §11 and refactor-task Remove list — old architecture slice is deleted with a live replacement consumer."
+    replacement_slice: slice-3
+    replacement_consumer: drivers/src/vcs
+  - path: "integrate-3-retention.md"
+    kind: exact
+    disposition: delete
+    loc: 21
+    reason: "D76 §11 and refactor-task Remove list — old architecture slice is deleted with a live replacement consumer."
+    replacement_slice: slice-7
+    replacement_consumer: docs
+  - path: "integrate-4-release-gates.md"
+    kind: exact
+    disposition: delete
+    loc: 28
+    reason: "D76 §11 and refactor-task Remove list — old architecture slice is deleted with a live replacement consumer."
+    replacement_slice: slice-7
+    replacement_consumer: scripts/gates
+  - path: "integrate-5-phase36.md"
+    kind: exact
+    disposition: delete
+    loc: 17
+    reason: "D76 §11 and refactor-task Remove list — old architecture slice is deleted with a live replacement consumer."
+    replacement_slice: slice-7
+    replacement_consumer: docs
+  - path: "integrate-6-docs.md"
+    kind: exact
+    disposition: delete
+    loc: 35
+    reason: "D76 §11 and refactor-task Remove list — old architecture slice is deleted with a live replacement consumer."
+    replacement_slice: slice-7
+    replacement_consumer: docs
+  - path: "extensions/"
+    kind: prefix
+    disposition: rewrite
+    loc: 1
+    reason: "D78/D79 §1 — extension entrypoint moves to the thin TypeScript Host."
+    replacement_slice: slice-2
+  - path: "design/phase37/"
+    kind: prefix
+    disposition: rewrite
+    loc: 14245
+    reason: "D76 §11 — phase37 roster design fixtures are rewritten as five-slot roster data."
+    replacement_slice: slice-1
+  - path: "dist/"
+    kind: prefix
+    disposition: delete
+    loc: 91336
+    reason: "D76 §11 — generated dist build output for the old TypeScript architecture is deleted and regenerated from the new package line."
+    replacement_slice: slice-7
+    replacement_consumer: package.json
+  - path: "artifacts/docs-semantic/"
+    kind: prefix
+    disposition: delete
+    loc: 265
+    reason: "D76 §11 — old semantic-doc attestation residue is deleted with replacement docs QA."
+    replacement_slice: slice-7
+    replacement_consumer: docs
+  - path: "artifacts/qualification/live/anthropic-opus5-sonnet5/"
+    kind: prefix
+    disposition: port
+    loc: 36
+    reason: "D76 §11 — concrete subscription-route evidence is ported into the route guard."
+    replacement_slice: slice-1
+    replacement_consumer: data/roster.kdl
+  - path: "artifacts/qualification/live/codex-gpt55-heavy/authenticated/no-fallback/"
+    kind: prefix
+    disposition: port
+    loc: 288
+    reason: "D76 §11 — concrete no-fallback subscription-route checks are ported into the route guard."
+    replacement_slice: slice-1
+    replacement_consumer: data/roster.kdl
+  - path: "artifacts/qualification/live/codex-gpt55-heavy/certified-roster.json"
+    kind: exact
+    disposition: delete
+    loc: 287
+    reason: "D76 §11 and refactor-task Remove list — old architecture slice is deleted with a live replacement consumer."
+    replacement_slice: slice-1
+    replacement_consumer: data/roster.kdl
+  - path: "artifacts/qualification/live/codex-gpt55-heavy/manifest.json"
+    kind: exact
+    disposition: delete
+    loc: 292
+    reason: "D76 §11 and refactor-task Remove list — old architecture slice is deleted with a live replacement consumer."
+    replacement_slice: slice-1
+    replacement_consumer: data/roster.kdl
+  - path: "artifacts/qualification/live/codex-gpt55-heavy/source-tasks.json"
+    kind: exact
+    disposition: delete
+    loc: 14
+    reason: "D76 §11 and refactor-task Remove list — old architecture slice is deleted with a live replacement consumer."
+    replacement_slice: slice-1
+    replacement_consumer: data/roster.kdl
+  - path: "artifacts/qualification/phase37/"
+    kind: prefix
+    disposition: delete
+    loc: 2705
+    reason: "D76 §11 — old provider-pack/trust-registry qualification artifacts are replaced by the route guard."
+    replacement_slice: slice-1
+    replacement_consumer: data/roster.kdl
+  - path: "artifacts/security/"
+    kind: prefix
+    disposition: retain
+    loc: 2276
+    reason: "D76 §13 — security audit/SBOM artifacts remain final gate evidence."
+  - path: "bin/autopilot-coordinator.mjs"
+    kind: exact
+    disposition: delete
+    loc: 22
+    reason: "D76 §11 and refactor-task Remove list — old architecture slice is deleted with a live replacement consumer."
+    replacement_slice: slice-7
+    replacement_consumer: drivers/src/bin/autopilot-core.rs
+  - path: "bin/autopilot-launch-signer.mjs"
+    kind: exact
+    disposition: delete
+    loc: 24
+    reason: "D76 §11 and refactor-task Remove list — old architecture slice is deleted with a live replacement consumer."
+    replacement_slice: slice-1
+    replacement_consumer: data/roster.kdl
+  - path: "bin/autopilot-agent-run.mjs"
+    kind: exact
+    disposition: delete
+    loc: 32
+    reason: "D76 §11 and refactor-task Remove list — old architecture slice is deleted with a live replacement consumer."
+    replacement_slice: slice-3
+    replacement_consumer: drivers/src/process
+  - path: "bin/autopilot-s2-corpus-rehearsal.mjs"
+    kind: exact
+    disposition: delete
+    loc: 7
+    reason: "D76 §11 and refactor-task Remove list — old architecture slice is deleted with a live replacement consumer."
+    replacement_slice: slice-7
+    replacement_consumer: tests
+  - path: "scripts/docs/"
+    kind: prefix
+    disposition: rewrite
+    loc: 1744
+    reason: "D76 §13 — documentation helper scripts are rewritten for the new docs contract."
+    replacement_slice: slice-7
+  - path: "scripts/gates/"
+    kind: prefix
+    disposition: retain
+    loc: 1177
+    reason: "D77 checklist W0 — gate scripts are new D77 infrastructure and are retained unchanged."
+  - path: "scripts/build-live-roster-certification.mjs"
+    kind: exact
+    disposition: delete
+    loc: 210
+    reason: "D76 §11 and refactor-task Remove list — old architecture slice is deleted with a live replacement consumer."
+    replacement_slice: slice-1
+    replacement_consumer: data/roster.kdl
+  - path: "scripts/run-certified-command.mjs"
+    kind: exact
+    disposition: delete
+    loc: 382
+    reason: "D76 §11 and refactor-task Remove list — old architecture slice is deleted with a live replacement consumer."
+    replacement_slice: slice-1
+    replacement_consumer: data/roster.kdl
+  - path: "scripts/test-identity-reporter.mjs"
+    kind: exact
+    disposition: delete
+    loc: 85
+    reason: "D76 §11 and refactor-task Remove list — old architecture slice is deleted with a live replacement consumer."
+    replacement_slice: slice-1
+    replacement_consumer: data/roster.kdl
+  - path: "scripts/test-parity-compare.mjs"
+    kind: exact
+    disposition: delete
+    loc: 145
+    reason: "D76 §11 and refactor-task Remove list — old architecture slice is deleted with a live replacement consumer."
+    replacement_slice: slice-7
+    replacement_consumer: tests
+  - path: "scripts/check-launch-entrypoint.mjs"
+    kind: exact
+    disposition: rewrite
+    loc: 50
+    reason: "D76 §13 — rewrite package/docs/test surface for the replacement slice."
+    replacement_slice: slice-7
+  - path: "scripts/docs-generate.mjs"
+    kind: exact
+    disposition: rewrite
+    loc: 129
+    reason: "D76 §13 — rewrite package/docs/test surface for the replacement slice."
+    replacement_slice: slice-7
+  - path: "scripts/docs-record-attestation.mjs"
+    kind: exact
+    disposition: rewrite
+    loc: 102
+    reason: "D76 §13 — rewrite package/docs/test surface for the replacement slice."
+    replacement_slice: slice-7
+  - path: "scripts/docs-verify.mjs"
+    kind: exact
+    disposition: rewrite
+    loc: 458
+    reason: "D76 §13 — rewrite package/docs/test surface for the replacement slice."
+    replacement_slice: slice-7
+  - path: "scripts/test-fast.mjs"
+    kind: exact
+    disposition: rewrite
+    loc: 434
+    reason: "D76 §13 — rewrite package/docs/test surface for the replacement slice."
+    replacement_slice: slice-7
+  - path: "scripts/check-production-git-spawns.mjs"
+    kind: exact
+    disposition: port
+    loc: 113
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-3
+    replacement_consumer: drivers/src/process
+  - path: "scripts/check-package-payload.mjs"
+    kind: exact
+    disposition: retain
+    loc: 107
+    reason: "D76 §13 — package/security QA script remains useful final gate infrastructure."
+  - path: "scripts/generate-sbom.mjs"
+    kind: exact
+    disposition: retain
+    loc: 35
+    reason: "D76 §13 — package/security QA script remains useful final gate infrastructure."
+  - path: "scripts/security-scan.mjs"
+    kind: exact
+    disposition: retain
+    loc: 54
+    reason: "D76 §13 — package/security QA script remains useful final gate infrastructure."
+  - path: "scripts/test-packed-consumer-release.mjs"
+    kind: exact
+    disposition: retain
+    loc: 45
+    reason: "D76 §13 — package/security QA script remains useful final gate infrastructure."
+  - path: "scripts/test-ram-root.mjs"
+    kind: exact
+    disposition: retain
+    loc: 163
+    reason: "D76 §13 — package/security QA script remains useful final gate infrastructure."
+  - path: "scripts/verify-packed-consumer.mjs"
+    kind: exact
+    disposition: retain
+    loc: 265
+    reason: "D76 §13 — package/security QA script remains useful final gate infrastructure."
+  - path: "docs/"
+    kind: prefix
+    disposition: rewrite
+    loc: 4099
+    reason: "D76 §13 — documentation set is rewritten for the simplified major package line."
+    replacement_slice: slice-7
+  - path: "docs/cli/autopilot-coordinator.md"
+    kind: exact
+    disposition: delete
+    loc: 72
+    reason: "D76 §11 — docs for deleted coordination/claim/migration/public-command surfaces are replaced by slice-7 docs QA."
+    replacement_slice: slice-7
+    replacement_consumer: docs
+  - path: "docs/cli/autopilot-launch-signer.md"
+    kind: exact
+    disposition: delete
+    loc: 94
+    reason: "D76 §11 — docs for deleted coordination/claim/migration/public-command surfaces are replaced by slice-7 docs QA."
+    replacement_slice: slice-7
+    replacement_consumer: docs
+  - path: "docs/commands/autopilot-claim-gc.md"
+    kind: exact
+    disposition: delete
+    loc: 41
+    reason: "D76 §11 — docs for deleted coordination/claim/migration/public-command surfaces are replaced by slice-7 docs QA."
+    replacement_slice: slice-7
+    replacement_consumer: docs
+  - path: "docs/commands/autopilot-coordination.md"
+    kind: exact
+    disposition: delete
+    loc: 43
+    reason: "D76 §11 — docs for deleted coordination/claim/migration/public-command surfaces are replaced by slice-7 docs QA."
+    replacement_slice: slice-7
+    replacement_consumer: docs
+  - path: "docs/tools/autopilot_respond_claim_request.md"
+    kind: exact
+    disposition: delete
+    loc: 41
+    reason: "D76 §11 — docs for deleted coordination/claim/migration/public-command surfaces are replaced by slice-7 docs QA."
+    replacement_slice: slice-7
+    replacement_consumer: docs
+  - path: "docs/concepts/deadlock.md"
+    kind: exact
+    disposition: delete
+    loc: 76
+    reason: "D76 §11 — docs for deleted coordination/claim/migration/public-command surfaces are replaced by slice-7 docs QA."
+    replacement_slice: slice-7
+    replacement_consumer: docs
+  - path: "docs/concepts/leases-and-observations.md"
+    kind: exact
+    disposition: delete
+    loc: 51
+    reason: "D76 §11 — docs for deleted coordination/claim/migration/public-command surfaces are replaced by slice-7 docs QA."
+    replacement_slice: slice-7
+    replacement_consumer: docs
+  - path: "docs/concepts/reservations.md"
+    kind: exact
+    disposition: delete
+    loc: 53
+    reason: "D76 §11 — docs for deleted coordination/claim/migration/public-command surfaces are replaced by slice-7 docs QA."
+    replacement_slice: slice-7
+    replacement_consumer: docs
+  - path: "docs/concepts/migration-cutover.md"
+    kind: exact
+    disposition: delete
+    loc: 71
+    reason: "D76 §11 — docs for deleted coordination/claim/migration/public-command surfaces are replaced by slice-7 docs QA."
+    replacement_slice: slice-7
+    replacement_consumer: docs
+  - path: "docs/concepts/semantic-graph-authority.md"
+    kind: exact
+    disposition: delete
+    loc: 135
+    reason: "D76 §11 — docs for deleted coordination/claim/migration/public-command surfaces are replaced by slice-7 docs QA."
+    replacement_slice: slice-7
+    replacement_consumer: docs
+  - path: "docs/subsystems/coordination.md"
+    kind: exact
+    disposition: delete
+    loc: 199
+    reason: "D76 §11 — docs for deleted coordination/claim/migration/public-command surfaces are replaced by slice-7 docs QA."
+    replacement_slice: slice-7
+    replacement_consumer: docs
+  - path: "docs/subsystems/s2-retention.md"
+    kind: exact
+    disposition: delete
+    loc: 102
+    reason: "D76 §11 — docs for deleted coordination/claim/migration/public-command surfaces are replaced by slice-7 docs QA."
+    replacement_slice: slice-7
+    replacement_consumer: docs
+  - path: "docs/tools/context_budget.md"
+    kind: exact
+    disposition: port
+    loc: 54
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-1
+    replacement_consumer: docs
+  - path: "docs/subsystems/runner-and-forced-output.md"
+    kind: exact
+    disposition: port
+    loc: 140
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-1
+    replacement_consumer: docs
+  - path: "docs/subsystems/worktrees.md"
+    kind: exact
+    disposition: port
+    loc: 131
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-3
+    replacement_consumer: docs
+  - path: "docs/subsystems/quality-and-closure.md"
+    kind: exact
+    disposition: port
+    loc: 99
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-5
+    replacement_consumer: docs
+  - path: "templates/"
+    kind: prefix
+    disposition: rewrite
+    loc: 283
+    reason: "D76 §13 — prompt templates are rewritten as generated visible prompt blocks."
+    replacement_slice: slice-1
+  - path: "templates/adjudicate.md"
+    kind: exact
+    disposition: delete
+    loc: 70
+    reason: "D76 §11 — obsolete freeform prompt/roster skill path is deleted for generated prompt blocks or route guard data."
+    replacement_slice: slice-5
+    replacement_consumer: codegen
+  - path: "templates/extract.md"
+    kind: exact
+    disposition: delete
+    loc: 70
+    reason: "D76 §11 — obsolete freeform prompt/roster skill path is deleted for generated prompt blocks or route guard data."
+    replacement_slice: slice-1
+    replacement_consumer: codegen
+  - path: "templates/strategy.md"
+    kind: exact
+    disposition: delete
+    loc: 70
+    reason: "D76 §11 — obsolete freeform prompt/roster skill path is deleted for generated prompt blocks or route guard data."
+    replacement_slice: slice-1
+    replacement_consumer: codegen
+  - path: "templates/skills/autopilot-roster-setup/"
+    kind: prefix
+    disposition: delete
+    loc: 203
+    reason: "D76 §11 — obsolete freeform prompt/roster skill path is deleted for generated prompt blocks or route guard data."
+    replacement_slice: slice-1
+    replacement_consumer: data/roster.kdl
+  - path: "tools/s1-corpus-rehearsal/"
+    kind: prefix
+    disposition: delete
+    loc: 4935
+    reason: "D76 §11 and refactor-task Remove list — old D65 graph/bootstrap/rehearsal tooling is deleted for replacement walkthrough tests."
+    replacement_slice: slice-7
+    replacement_consumer: tests
+  - path: "tools/s2-corpus-rehearsal/"
+    kind: prefix
+    disposition: delete
+    loc: 2227
+    reason: "D76 §11 — old S2 retention/release rehearsal tooling is deleted for final package QA."
+    replacement_slice: slice-7
+    replacement_consumer: tests
+  - path: "src/extension.ts"
+    kind: exact
+    disposition: rewrite
+    loc: 2598
+    reason: "D78/D79 §1 — legacy extension implementation is rewritten as the thin TypeScript Host."
+    replacement_slice: slice-2
+  - path: "src/cli/"
+    kind: prefix
+    disposition: delete
+    loc: 1354
+    reason: "D76 §11 — coordinator/bootstrap/signer/migration CLIs are deleted and replaced by Host/Core commands."
+    replacement_slice: slice-7
+    replacement_consumer: host/src
+  - path: "src/internal/anthropic-system-prompt-extension.ts"
+    kind: exact
+    disposition: delete
+    loc: 36
+    reason: "D76 §11 — freeform runtime prompt extension path is deleted for generated prompt blocks."
+    replacement_slice: slice-1
+    replacement_consumer: codegen
+  - path: "src/internal/execution-observer-extension.ts"
+    kind: exact
+    disposition: rewrite
+    loc: 413
+    reason: "D78 — Host observation plumbing is rewritten over Core state."
+    replacement_slice: slice-2
+  - path: "src/internal/status-extension.ts"
+    kind: exact
+    disposition: rewrite
+    loc: 240
+    reason: "D78 — status surface is rewritten as thin Host presentation over Core state."
+    replacement_slice: slice-2
+  - path: "src/testing/"
+    kind: prefix
+    disposition: rewrite
+    loc: 68
+    reason: "D78 — fake extension-host seam is rewritten for Host/Core boundary tests."
+    replacement_slice: slice-2
+  - path: "src/types/"
+    kind: prefix
+    disposition: retain
+    loc: 327
+    reason: "D78 — minimal Node type shims are retained for the thin Host TypeScript surface."
+  - path: "src/core/"
+    kind: prefix
+    disposition: delete
+    loc: 0
+    reason: "D76 §11 — legacy TypeScript core is deleted after replacement-backed vertical slices go live."
+    replacement_slice: slice-7
+    replacement_consumer: drivers/src
+  - path: "src/core/coordination/"
+    kind: prefix
+    disposition: delete
+    loc: 44385
+    reason: "D76 §11 — coordination ceremony provides no value in isolated worktree architecture; Core scheduler plus serialized integration queue replace it."
+    replacement_slice: slice-7
+    replacement_consumer: drivers/src/integration
+  - path: "src/core/adjudication/"
+    kind: prefix
+    disposition: port
+    loc: 172
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-5
+    replacement_consumer: drivers/src/integration
+  - path: "src/core/agent-runner.ts"
+    kind: exact
+    disposition: port
+    loc: 2711
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-3
+    replacement_consumer: drivers/src/process
+  - path: "src/core/checkout-profile.ts"
+    kind: exact
+    disposition: port
+    loc: 590
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-3
+    replacement_consumer: drivers/src/materialization
+  - path: "src/core/close-runtime.ts"
+    kind: exact
+    disposition: port
+    loc: 2400
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-6
+    replacement_consumer: drivers/src/lifecycle
+  - path: "src/core/context-budget.ts"
+    kind: exact
+    disposition: port
+    loc: 169
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-1
+    replacement_consumer: drivers/src/context
+  - path: "src/core/disk-gate.ts"
+    kind: exact
+    disposition: port
+    loc: 128
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-3
+    replacement_consumer: drivers/src/store
+  - path: "src/core/execution-audit/"
+    kind: prefix
+    disposition: port
+    loc: 491
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-3
+    replacement_consumer: drivers/src/audit
+  - path: "src/core/execution-commit.ts"
+    kind: exact
+    disposition: port
+    loc: 236
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-3
+    replacement_consumer: drivers/src/audit
+  - path: "src/core/forced-output/"
+    kind: prefix
+    disposition: port
+    loc: 1329
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-1
+    replacement_consumer: drivers/src/forced_output
+  - path: "src/core/git-guard.ts"
+    kind: exact
+    disposition: port
+    loc: 641
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-3
+    replacement_consumer: drivers/src/vcs
+  - path: "src/core/git-process.ts"
+    kind: exact
+    disposition: port
+    loc: 1291
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-3
+    replacement_consumer: drivers/src/vcs
+  - path: "src/core/lifecycle/"
+    kind: prefix
+    disposition: port
+    loc: 206
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-6
+    replacement_consumer: drivers/src/lifecycle
+  - path: "src/core/materialization.ts"
+    kind: exact
+    disposition: port
+    loc: 676
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-3
+    replacement_consumer: drivers/src/materialization
+  - path: "src/core/model-roster.ts"
+    kind: exact
+    disposition: port
+    loc: 69
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-1
+    replacement_consumer: data/roster.kdl
+  - path: "src/core/private-path.ts"
+    kind: exact
+    disposition: port
+    loc: 156
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-1
+    replacement_consumer: drivers/src/context
+  - path: "src/core/prompt-renderer/"
+    kind: prefix
+    disposition: port
+    loc: 633
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-1
+    replacement_consumer: codegen
+  - path: "src/core/quality/"
+    kind: prefix
+    disposition: port
+    loc: 181
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-4
+    replacement_consumer: drivers/src/validation
+  - path: "src/core/scheduler-config.ts"
+    kind: exact
+    disposition: port
+    loc: 140
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-3
+    replacement_consumer: kernel/src
+  - path: "src/core/scheduler.ts"
+    kind: exact
+    disposition: port
+    loc: 286
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-3
+    replacement_consumer: kernel/src
+  - path: "src/core/sparse-worktree.ts"
+    kind: exact
+    disposition: port
+    loc: 91
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-3
+    replacement_consumer: drivers/src/materialization
+  - path: "src/core/tool-call-id.ts"
+    kind: exact
+    disposition: port
+    loc: 24
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-2
+    replacement_consumer: host/src
+  - path: "src/core/unit-merge.ts"
+    kind: exact
+    disposition: port
+    loc: 446
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-5
+    replacement_consumer: drivers/src/integration
+  - path: "src/core/validation-staleness.ts"
+    kind: exact
+    disposition: port
+    loc: 271
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-5
+    replacement_consumer: drivers/src/validation
+  - path: "src/core/worktree-cleanup.ts"
+    kind: exact
+    disposition: port
+    loc: 1384
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-6
+    replacement_consumer: drivers/src/lifecycle
+  - path: "src/core/contracts/"
+    kind: prefix
+    disposition: rewrite
+    loc: 4485
+    reason: "D76 §13 — rewrite package/docs/test surface for the replacement slice."
+    replacement_slice: slice-1
+  - path: "src/core/names.ts"
+    kind: exact
+    disposition: rewrite
+    loc: 81
+    reason: "D76 §13 — rewrite package/docs/test surface for the replacement slice."
+    replacement_slice: slice-1
+  - path: "src/core/paths.ts"
+    kind: exact
+    disposition: rewrite
+    loc: 353
+    reason: "D76 §13 — rewrite package/docs/test surface for the replacement slice."
+    replacement_slice: slice-1
+  - path: "src/core/state-store/"
+    kind: prefix
+    disposition: rewrite
+    loc: 710
+    reason: "D76 §13 — rewrite package/docs/test surface for the replacement slice."
+    replacement_slice: slice-1
+  - path: "src/core/unit-failure.ts"
+    kind: exact
+    disposition: rewrite
+    loc: 656
+    reason: "D76 §13 — rewrite package/docs/test surface for the replacement slice."
+    replacement_slice: slice-5
+  - path: "src/core/authority.ts"
+    kind: exact
+    disposition: delete
+    loc: 534
+    reason: "D76 §11 and refactor-task Remove list — old architecture slice is deleted with a live replacement consumer."
+    replacement_slice: slice-3
+    replacement_consumer: kernel/src
+  - path: "src/core/claim-gc.ts"
+    kind: exact
+    disposition: delete
+    loc: 198
+    reason: "D76 §11 and refactor-task Remove list — old architecture slice is deleted with a live replacement consumer."
+    replacement_slice: slice-7
+    replacement_consumer: drivers/src/integration
+  - path: "src/core/parallel-runtime.ts"
+    kind: exact
+    disposition: delete
+    loc: 2223
+    reason: "D76 §11 and refactor-task Remove list — old architecture slice is deleted with a live replacement consumer."
+    replacement_slice: slice-2
+    replacement_consumer: pi-background-tasks
+  - path: "src/core/prompts.ts"
+    kind: exact
+    disposition: delete
+    loc: 309
+    reason: "D76 §11 and refactor-task Remove list — old architecture slice is deleted with a live replacement consumer."
+    replacement_slice: slice-1
+    replacement_consumer: codegen
+  - path: "src/core/roster/"
+    kind: prefix
+    disposition: delete
+    loc: 12434
+    reason: "D76 §11 — old roster certification/provider-pack/trust-registry machinery is deleted for five-slot roster loader/route guard."
+    replacement_slice: slice-1
+    replacement_consumer: data/roster.kdl
+  - path: "src/core/roster/canonical.ts"
+    kind: exact
+    disposition: port
+    loc: 417
+    reason: "D76 §11 — concrete subscription-route roster loading/checking is ported to the five-slot route guard."
+    replacement_slice: slice-1
+    replacement_consumer: data/roster.kdl
+  - path: "src/core/roster/contracts.ts"
+    kind: exact
+    disposition: port
+    loc: 7214
+    reason: "D76 §11 — concrete subscription-route roster loading/checking is ported to the five-slot route guard."
+    replacement_slice: slice-1
+    replacement_consumer: data/roster.kdl
+  - path: "src/core/roster/doctor.ts"
+    kind: exact
+    disposition: port
+    loc: 239
+    reason: "D76 §11 — concrete subscription-route roster loading/checking is ported to the five-slot route guard."
+    replacement_slice: slice-1
+    replacement_consumer: data/roster.kdl
+  - path: "src/core/roster/paths.ts"
+    kind: exact
+    disposition: port
+    loc: 175
+    reason: "D76 §11 — concrete subscription-route roster loading/checking is ported to the five-slot route guard."
+    replacement_slice: slice-1
+    replacement_consumer: data/roster.kdl
+  - path: "src/core/roster/providers/"
+    kind: prefix
+    disposition: port
+    loc: 6166
+    reason: "D76 §11 — concrete subscription-route roster loading/checking is ported to the five-slot route guard."
+    replacement_slice: slice-1
+    replacement_consumer: data/roster.kdl
+  - path: "src/core/roster/resolve.ts"
+    kind: exact
+    disposition: port
+    loc: 391
+    reason: "D76 §11 — concrete subscription-route roster loading/checking is ported to the five-slot route guard."
+    replacement_slice: slice-1
+    replacement_consumer: data/roster.kdl
+  - path: "src/core/roster/route-policies.ts"
+    kind: exact
+    disposition: port
+    loc: 759
+    reason: "D76 §11 — concrete subscription-route roster loading/checking is ported to the five-slot route guard."
+    replacement_slice: slice-1
+    replacement_consumer: data/roster.kdl
+  - path: "src/core/roster/run-selection.ts"
+    kind: exact
+    disposition: port
+    loc: 654
+    reason: "D76 §11 — concrete subscription-route roster loading/checking is ported to the five-slot route guard."
+    replacement_slice: slice-1
+    replacement_consumer: data/roster.kdl
+  - path: "src/core/roster/runtime-consumers.ts"
+    kind: exact
+    disposition: port
+    loc: 424
+    reason: "D76 §11 — concrete subscription-route roster loading/checking is ported to the five-slot route guard."
+    replacement_slice: slice-1
+    replacement_consumer: data/roster.kdl
+  - path: "src/core/roster/runtime-spec.ts"
+    kind: exact
+    disposition: port
+    loc: 380
+    reason: "D76 §11 — concrete subscription-route roster loading/checking is ported to the five-slot route guard."
+    replacement_slice: slice-1
+    replacement_consumer: data/roster.kdl
+  - path: "tests/"
+    kind: prefix
+    disposition: delete
+    loc: 42044
+    reason: "D76 §11 — tests tied to removed legacy vertical slices are deleted after replacement tests go live."
+    replacement_slice: slice-7
+    replacement_consumer: tests
+  - path: "tests/fixtures/contracts/"
+    kind: prefix
+    disposition: rewrite
+    loc: 352
+    reason: "D76 §11 — strict model-authored contract fixtures are rewritten as visible contract data tests."
+    replacement_slice: slice-1
+  - path: "tests/fixtures/roster/providers/"
+    kind: prefix
+    disposition: port
+    loc: 5364
+    reason: "D76 §11 — concrete provider route-check fixtures are ported to roster guard tests."
+    replacement_slice: slice-1
+    replacement_consumer: data/roster.kdl
+  - path: "tests/helpers/agent-runner-harness.ts"
+    kind: exact
+    disposition: port
+    loc: 460
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-3
+    replacement_consumer: drivers/src/process
+  - path: "tests/helpers/d65-context-budget-receipt.ts"
+    kind: exact
+    disposition: port
+    loc: 235
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-1
+    replacement_consumer: drivers/src/context
+  - path: "tests/helpers/packed-manifest-route.ts"
+    kind: exact
+    disposition: port
+    loc: 156
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-1
+    replacement_consumer: data/roster.kdl
+  - path: "tests/helpers/roster-setup-harness.ts"
+    kind: exact
+    disposition: port
+    loc: 1787
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-1
+    replacement_consumer: data/roster.kdl
+  - path: "tests/helpers/runtime-roster-authority.ts"
+    kind: exact
+    disposition: port
+    loc: 84
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-1
+    replacement_consumer: data/roster.kdl
+  - path: "tests/helpers/sdk-ready-extension.ts"
+    kind: exact
+    disposition: port
+    loc: 6
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-2
+    replacement_consumer: host/src
+  - path: "tests/helpers/sdk-ready-roster.ts"
+    kind: exact
+    disposition: port
+    loc: 89
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-1
+    replacement_consumer: data/roster.kdl
+  - path: "tests/helpers/terminal-cleanup-harness.ts"
+    kind: exact
+    disposition: port
+    loc: 133
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-6
+    replacement_consumer: drivers/src/lifecycle
+  - path: "tests/helpers/unit-merge-regression.ts"
+    kind: exact
+    disposition: port
+    loc: 383
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-5
+    replacement_consumer: drivers/src/integration
+  - path: "tests/helpers/worktree-saga-harness.ts"
+    kind: exact
+    disposition: port
+    loc: 123
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-3
+    replacement_consumer: drivers/src/materialization
+  - path: "tests/e2e/agent-runner-smoke.test.ts"
+    kind: exact
+    disposition: port
+    loc: 276
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-3
+    replacement_consumer: drivers/src/process
+  - path: "tests/e2e/roster-forced-output.test.ts"
+    kind: exact
+    disposition: port
+    loc: 226
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-1
+    replacement_consumer: drivers/src/forced_output
+  - path: "tests/e2e/post-cutover-lifecycle.test.ts"
+    kind: exact
+    disposition: port
+    loc: 713
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-6
+    replacement_consumer: drivers/src/lifecycle
+  - path: "tests/package/d65-context-budget-dist.test.ts"
+    kind: exact
+    disposition: port
+    loc: 69
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-1
+    replacement_consumer: drivers/src/context
+  - path: "tests/package/docs-contract.test.ts"
+    kind: exact
+    disposition: port
+    loc: 176
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-7
+    replacement_consumer: docs
+  - path: "tests/package/mixed-build-packed.test.ts"
+    kind: exact
+    disposition: port
+    loc: 57
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-7
+    replacement_consumer: package.json
+  - path: "tests/package/package.test.ts"
+    kind: exact
+    disposition: port
+    loc: 779
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-7
+    replacement_consumer: package.json
+  - path: "tests/package/roster-onboarding-package.test.ts"
+    kind: exact
+    disposition: port
+    loc: 103
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-1
+    replacement_consumer: data/roster.kdl
+  - path: "tests/package/type-safety.test.ts"
+    kind: exact
+    disposition: port
+    loc: 188
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-7
+    replacement_consumer: package.json
+  - path: "tests/package/unit-merge-dist.test.ts"
+    kind: exact
+    disposition: port
+    loc: 30
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-5
+    replacement_consumer: drivers/src/integration
+  - path: "tests/e2e/roster-onboarding-activation.test.ts"
+    kind: exact
+    disposition: port
+    loc: 337
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-1
+    replacement_consumer: data/roster.kdl
+  - path: "tests/e2e/roster-selection-activation.test.ts"
+    kind: exact
+    disposition: port
+    loc: 372
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-1
+    replacement_consumer: data/roster.kdl
+  - path: "tests/e2e/roster-transition-activation.test.ts"
+    kind: exact
+    disposition: port
+    loc: 310
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-1
+    replacement_consumer: data/roster.kdl
+  - path: "tests/e2e/roster-v1-v2-history.test.ts"
+    kind: exact
+    disposition: port
+    loc: 305
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-1
+    replacement_consumer: data/roster.kdl
+  - path: "tests/e2e/roster-v2-planning-flow.test.ts"
+    kind: exact
+    disposition: port
+    loc: 227
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-1
+    replacement_consumer: data/roster.kdl
+  - path: "tests/model/roster-provider-anthropic.test.ts"
+    kind: exact
+    disposition: port
+    loc: 536
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-1
+    replacement_consumer: data/roster.kdl
+  - path: "tests/model/roster-provider-codex.test.ts"
+    kind: exact
+    disposition: port
+    loc: 342
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-1
+    replacement_consumer: data/roster.kdl
+  - path: "tests/model/roster-provider-kimi-coding.test.ts"
+    kind: exact
+    disposition: port
+    loc: 476
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-1
+    replacement_consumer: data/roster.kdl
+  - path: "tests/model/roster-provider-opencode-go.test.ts"
+    kind: exact
+    disposition: port
+    loc: 301
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-1
+    replacement_consumer: data/roster.kdl
+  - path: "tests/model/roster-provider-registry.test.ts"
+    kind: exact
+    disposition: port
+    loc: 201
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-1
+    replacement_consumer: data/roster.kdl
+  - path: "tests/model/roster-provider-zai.test.ts"
+    kind: exact
+    disposition: port
+    loc: 411
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-1
+    replacement_consumer: data/roster.kdl
+  - path: "tests/model/roster-w5-provider-registry-negatives.test.ts"
+    kind: exact
+    disposition: port
+    loc: 109
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-1
+    replacement_consumer: data/roster.kdl
+  - path: "tests/multiprocess/git-streaming-process.test.ts"
+    kind: exact
+    disposition: port
+    loc: 84
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-3
+    replacement_consumer: drivers/src
+  - path: "tests/multiprocess/roster-selection-publication.test.ts"
+    kind: exact
+    disposition: port
+    loc: 158
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-1
+    replacement_consumer: data/roster.kdl
+  - path: "tests/multiprocess/worktree-saga-process.test.ts"
+    kind: exact
+    disposition: port
+    loc: 86
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-3
+    replacement_consumer: drivers/src
+  - path: "tests/package/roster-skill-package.test.ts"
+    kind: exact
+    disposition: port
+    loc: 242
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-1
+    replacement_consumer: data/roster.kdl
+  - path: "tests/rpc/roster-setup-rpc.test.ts"
+    kind: exact
+    disposition: port
+    loc: 172
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-1
+    replacement_consumer: data/roster.kdl
+  - path: "tests/sdk/roster-setup-sdk.test.ts"
+    kind: exact
+    disposition: port
+    loc: 154
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-1
+    replacement_consumer: data/roster.kdl
+  - path: "tests/unit/agent-runner-carrier.test.ts"
+    kind: exact
+    disposition: port
+    loc: 152
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-3
+    replacement_consumer: drivers/src
+  - path: "tests/unit/agent-runner-lifecycle.test.ts"
+    kind: exact
+    disposition: port
+    loc: 151
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-3
+    replacement_consumer: drivers/src
+  - path: "tests/unit/agent-runner-observation.test.ts"
+    kind: exact
+    disposition: port
+    loc: 447
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-3
+    replacement_consumer: drivers/src
+  - path: "tests/unit/agent-runner-roster.test.ts"
+    kind: exact
+    disposition: port
+    loc: 395
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-3
+    replacement_consumer: drivers/src
+  - path: "tests/unit/agent-runner-selection.test.ts"
+    kind: exact
+    disposition: port
+    loc: 169
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-3
+    replacement_consumer: drivers/src
+  - path: "tests/unit/agent-runner.test.ts"
+    kind: exact
+    disposition: port
+    loc: 169
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-3
+    replacement_consumer: drivers/src
+  - path: "tests/unit/close-runtime.test.ts"
+    kind: exact
+    disposition: port
+    loc: 1076
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-3
+    replacement_consumer: drivers/src
+  - path: "tests/unit/context-budget.test.ts"
+    kind: exact
+    disposition: port
+    loc: 87
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-3
+    replacement_consumer: drivers/src
+  - path: "tests/unit/contracts.test.ts"
+    kind: exact
+    disposition: rewrite
+    loc: 522
+    reason: "D76 §13 — rewrite package/docs/test surface for the replacement slice."
+    replacement_slice: slice-1
+  - path: "tests/unit/git-guard.test.ts"
+    kind: exact
+    disposition: port
+    loc: 102
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-3
+    replacement_consumer: drivers/src
+  - path: "tests/unit/git-process-production-guard.test.ts"
+    kind: exact
+    disposition: port
+    loc: 50
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-3
+    replacement_consumer: drivers/src
+  - path: "tests/unit/git-process.test.ts"
+    kind: exact
+    disposition: port
+    loc: 234
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-3
+    replacement_consumer: drivers/src
+  - path: "tests/unit/git-streaming-query.test.ts"
+    kind: exact
+    disposition: port
+    loc: 619
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-3
+    replacement_consumer: drivers/src
+  - path: "tests/unit/integration-conflicts.test.ts"
+    kind: exact
+    disposition: port
+    loc: 161
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-3
+    replacement_consumer: drivers/src
+  - path: "tests/unit/model-roster.test.ts"
+    kind: exact
+    disposition: port
+    loc: 67
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-3
+    replacement_consumer: drivers/src
+  - path: "tests/unit/prompt-renderer.test.ts"
+    kind: exact
+    disposition: port
+    loc: 248
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-3
+    replacement_consumer: drivers/src
+  - path: "tests/unit/quality-vnext.test.ts"
+    kind: exact
+    disposition: port
+    loc: 605
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-3
+    replacement_consumer: drivers/src
+  - path: "tests/unit/roster-activation.test.ts"
+    kind: exact
+    disposition: port
+    loc: 706
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-1
+    replacement_consumer: data/roster.kdl
+  - path: "tests/unit/roster-anthropic-opus5-sonnet5.test.ts"
+    kind: exact
+    disposition: port
+    loc: 113
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-1
+    replacement_consumer: data/roster.kdl
+  - path: "tests/unit/roster-artifact-compatibility.test.ts"
+    kind: exact
+    disposition: port
+    loc: 394
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-1
+    replacement_consumer: data/roster.kdl
+  - path: "tests/unit/roster-canonical.test.ts"
+    kind: exact
+    disposition: port
+    loc: 108
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-1
+    replacement_consumer: data/roster.kdl
+  - path: "tests/unit/roster-codex-gpt55-heavy.test.ts"
+    kind: exact
+    disposition: port
+    loc: 120
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-1
+    replacement_consumer: data/roster.kdl
+  - path: "tests/unit/roster-contracts.test.ts"
+    kind: exact
+    disposition: port
+    loc: 458
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-1
+    replacement_consumer: data/roster.kdl
+  - path: "tests/unit/roster-custom-certification.test.ts"
+    kind: exact
+    disposition: port
+    loc: 404
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-1
+    replacement_consumer: data/roster.kdl
+  - path: "tests/unit/roster-custom-setup-tool.test.ts"
+    kind: exact
+    disposition: port
+    loc: 454
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-1
+    replacement_consumer: data/roster.kdl
+  - path: "tests/unit/roster-doctor.test.ts"
+    kind: exact
+    disposition: port
+    loc: 192
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-1
+    replacement_consumer: data/roster.kdl
+  - path: "tests/unit/roster-execution-identity.test.ts"
+    kind: exact
+    disposition: port
+    loc: 201
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-1
+    replacement_consumer: data/roster.kdl
+  - path: "tests/unit/roster-fixture-corpus.test.ts"
+    kind: exact
+    disposition: port
+    loc: 193
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-1
+    replacement_consumer: data/roster.kdl
+  - path: "tests/unit/roster-historical-adapter.test.ts"
+    kind: exact
+    disposition: port
+    loc: 255
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-1
+    replacement_consumer: data/roster.kdl
+  - path: "tests/unit/roster-recipes.test.ts"
+    kind: exact
+    disposition: port
+    loc: 467
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-1
+    replacement_consumer: data/roster.kdl
+  - path: "tests/unit/roster-resolve.test.ts"
+    kind: exact
+    disposition: port
+    loc: 292
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-1
+    replacement_consumer: data/roster.kdl
+  - path: "tests/unit/roster-route-policies.test.ts"
+    kind: exact
+    disposition: port
+    loc: 185
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-1
+    replacement_consumer: data/roster.kdl
+  - path: "tests/unit/roster-run-selection.test.ts"
+    kind: exact
+    disposition: port
+    loc: 508
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-1
+    replacement_consumer: data/roster.kdl
+  - path: "tests/unit/roster-setup-approval.test.ts"
+    kind: exact
+    disposition: port
+    loc: 575
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-1
+    replacement_consumer: data/roster.kdl
+  - path: "tests/unit/roster-setup-tool.test.ts"
+    kind: exact
+    disposition: port
+    loc: 482
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-1
+    replacement_consumer: data/roster.kdl
+  - path: "tests/unit/roster-storage.test.ts"
+    kind: exact
+    disposition: port
+    loc: 865
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-1
+    replacement_consumer: data/roster.kdl
+  - path: "tests/unit/roster-transition.test.ts"
+    kind: exact
+    disposition: port
+    loc: 265
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-1
+    replacement_consumer: data/roster.kdl
+  - path: "tests/unit/roster-v2-runtime-consumers.test.ts"
+    kind: exact
+    disposition: port
+    loc: 278
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-1
+    replacement_consumer: data/roster.kdl
+  - path: "tests/unit/roster-w5-boundary-compositions.test.ts"
+    kind: exact
+    disposition: port
+    loc: 343
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-1
+    replacement_consumer: data/roster.kdl
+  - path: "tests/unit/s1-worktree-identity-contracts.test.ts"
+    kind: exact
+    disposition: port
+    loc: 125
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-3
+    replacement_consumer: drivers/src
+  - path: "tests/unit/state-store.test.ts"
+    kind: exact
+    disposition: rewrite
+    loc: 305
+    reason: "D76 §13 — rewrite package/docs/test surface for the replacement slice."
+    replacement_slice: slice-1
+  - path: "tests/unit/status-extension.test.ts"
+    kind: exact
+    disposition: port
+    loc: 465
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-3
+    replacement_consumer: drivers/src
+  - path: "tests/unit/terminal-acceptance-role-registry.test.ts"
+    kind: exact
+    disposition: rewrite
+    loc: 258
+    reason: "D76 §13 — rewrite package/docs/test surface for the replacement slice."
+    replacement_slice: slice-1
+  - path: "tests/unit/tool-call-id-opaque.test.ts"
+    kind: exact
+    disposition: port
+    loc: 95
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-3
+    replacement_consumer: drivers/src
+  - path: "tests/unit/unit-failure-reconciliation.test.ts"
+    kind: exact
+    disposition: rewrite
+    loc: 61
+    reason: "D76 §13 — rewrite package/docs/test surface for the replacement slice."
+    replacement_slice: slice-1
+  - path: "tests/unit/unit-merge-toctou.test.ts"
+    kind: exact
+    disposition: port
+    loc: 18
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-3
+    replacement_consumer: drivers/src
+  - path: "tests/unit/worktree-lifecycle-regressions.test.ts"
+    kind: exact
+    disposition: port
+    loc: 60
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-3
+    replacement_consumer: drivers/src
+  - path: "tests/unit/worktree-saga-recovery-effects.test.ts"
+    kind: exact
+    disposition: port
+    loc: 423
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-3
+    replacement_consumer: drivers/src
+  - path: "tests/unit/worktree-saga-recovery-lifecycle.test.ts"
+    kind: exact
+    disposition: port
+    loc: 237
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-3
+    replacement_consumer: drivers/src
+  - path: "tests/unit/worktree-saga-recovery-rollback.test.ts"
+    kind: exact
+    disposition: port
+    loc: 419
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-3
+    replacement_consumer: drivers/src
+  - path: "tests/unit/worktree-saga-recovery.test.ts"
+    kind: exact
+    disposition: port
+    loc: 315
+    reason: "D76 §11 — retain/port useful capability into the simplified architecture."
+    replacement_slice: slice-3
+    replacement_consumer: drivers/src
+  - path: "tests/unit/anthropic-system-prompt-extension.test.ts"
+    kind: exact
+    disposition: rewrite
+    loc: 50
+    reason: "D76 §13 — test is rewritten for the matching replacement slice and public surface."
+    replacement_slice: slice-1
+  - path: "tests/unit/autopilot-prompt.test.ts"
+    kind: exact
+    disposition: rewrite
+    loc: 101
+    reason: "D76 §13 — test is rewritten for the matching replacement slice and public surface."
+    replacement_slice: slice-1
+  - path: "tests/unit/autopilot-onboard-handoff-prompt.test.ts"
+    kind: exact
+    disposition: rewrite
+    loc: 72
+    reason: "D76 §13 — test is rewritten for the matching replacement slice and public surface."
+    replacement_slice: slice-1
+  - path: "tests/unit/command-prompts.test.ts"
+    kind: exact
+    disposition: rewrite
+    loc: 134
+    reason: "D76 §13 — test is rewritten for the matching replacement slice and public surface."
+    replacement_slice: slice-1
+  - path: "tests/unit/docs-semantic-attestations.test.ts"
+    kind: exact
+    disposition: rewrite
+    loc: 73
+    reason: "D76 §13 — test is rewritten for the matching replacement slice and public surface."
+    replacement_slice: slice-7
+  - path: "tests/package/docs-c11-attestation.test.ts"
+    kind: exact
+    disposition: rewrite
+    loc: 163
+    reason: "D76 §13 — test is rewritten for the matching replacement slice and public surface."
+    replacement_slice: slice-7
+  - path: "tests/package/installed-manifest-startup.test.ts"
+    kind: exact
+    disposition: rewrite
+    loc: 200
+    reason: "D76 §13 — test is rewritten for the matching replacement slice and public surface."
+    replacement_slice: slice-7
+  - path: "tests/phase37/phase37-w0-contract-freeze.test.ts"
+    kind: exact
+    disposition: rewrite
+    loc: 1835
+    reason: "D76 §13 — test is rewritten for the matching replacement slice and public surface."
+    replacement_slice: slice-1
+  - path: "tests/rpc/command-payloads.test.ts"
+    kind: exact
+    disposition: rewrite
+    loc: 437
+    reason: "D76 §13 — test is rewritten for the matching replacement slice and public surface."
+    replacement_slice: slice-2
+  - path: "tests/sdk/activation.test.ts"
+    kind: exact
+    disposition: rewrite
+    loc: 600
+    reason: "D76 §13 — test is rewritten for the matching replacement slice and public surface."
+    replacement_slice: slice-2
+  - path: "tests/sdk/autopilot-command.test.ts"
+    kind: exact
+    disposition: rewrite
+    loc: 367
+    reason: "D76 §13 — test is rewritten for the matching replacement slice and public surface."
+    replacement_slice: slice-2

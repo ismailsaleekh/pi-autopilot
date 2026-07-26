@@ -1,0 +1,480 @@
+schema "autopilot.contracts.v1"
+version 1
+
+doc "Declarative contract source for Autopilot artifacts, enums, seam frames, prompt-visible admissibility text, and durable categories. Parsed as KDL v2 by kdl crate 6.7."
+
+// Common node shapes used below:
+// artifact <name> schema=<schema-id> producer=<Producer> model_produced=<bool> { doc ... admits ... field/group/list/record... }
+// field <field-name> type=<type-id> required=<bool> doc=<human text>
+// list <field-name> item=<record-or-type-id> required=<bool> doc=<human text>
+// enum <name> { value <exact-value> }
+// frame direction=<host-to-core|core-to-host> kind=<exact-kind> { ... }
+
+type "uuidv7" doc="UUID version 7 string."
+type "digest" doc="Stable digest string from the producing package contract."
+type "sha" doc="Git object SHA string where D76 names <sha>."
+type "ref" doc="Durable artifact reference, bounded before inclusion in model context."
+type "timestamp" doc="Timestamp string; nullable only where the field says <timestamp|null>."
+type "id" doc="Package stable identifier string."
+type "bytes" doc="Exact command bytes encoded losslessly for transport."
+
+artifact "role_frontmatter" schema="autopilot.role.v1" producer="Package" model_produced=#false {
+    doc "Strict package-authored YAML frontmatter for role definitions (D76 §2.2)."
+    field "schema" type="schema-id" required=#true constant="autopilot.role.v1"
+    field "id" type="id" required=#true doc="Role id, for example implementer in D76 §2.2."
+    field "version" type="u32" required=#true
+    list "modes" item="mode-id" required=#true doc="YAML field modes, for example [lane-delivery]."
+    field "model_slot" type="roster_slot" required=#true
+    field "thinking" type="thinking-level" required=#true doc="Roster thinking value, for example high/max/xhigh."
+    list "tools" item="tool-name" required=#true doc="Exact active tool names supplied in the YAML list."
+    group "permissions" required=#true {
+        field "repository" type="permission" required=#true
+        field "git" type="permission" required=#true
+        field "network" type="permission" required=#true
+        field "package_state" type="permission" required=#true
+        field "operator_checkout" type="permission" required=#true
+    }
+    field "context_policy" type="contract-id" required=#true
+    field "result_contract" type="contract-id" required=#true
+    field "checkpoint_contract" type="contract-id" required=#true
+}
+
+artifact "context_manifest" schema="autopilot.context_manifest.v1" producer="Package" model_produced=#false {
+    doc "Canonical package-written context manifest (D76 §4.1)."
+    field "schema" type="schema-id" required=#true constant="autopilot.context_manifest.v1"
+    field "manifest_id" type="uuidv7" required=#true
+    field "revision" type="u32" required=#true
+    field "run_id" type="uuidv7" required=#true
+    field "assignment_id" type="id" required=#true
+    group "role" required=#true {
+        field "id" type="id" required=#true
+        field "version" type="u32" required=#true
+        field "mode" type="mode-id" required=#true
+        field "mode_version" type="u32" required=#true
+    }
+    group "freshness" required=#true {
+        field "task_revision" type="digest" required=#true
+        field "plan_revision" type="digest" required=#true
+        field "dossier_revision" type="digest" required=#true
+        field "runtime_revision" type="u64" required=#true
+        field "git_commit" type="sha" required=#true
+    }
+    group "budget" required=#true {
+        field "context_window" type="u32" required=#true
+        field "estimated_initial_tokens" type="u32" required=#true
+        field "estimated_percent" type="u8" required=#true doc="Conservative estimate; D76 §4.2 routing thresholds are <=40%, >40% and <=50%, and >50%."
+        field "estimator" type="string" required=#true constant="conservative-utf8-v1"
+    }
+    list "mandatory_inline" item="context_item" required=#true doc="Tier 1 delivery list; may be empty []."
+    list "required_reads" item="context_item" required=#true doc="Tier 2 delivery list; may be empty []."
+    list "on_demand" item="context_item" required=#true doc="Tier 3 delivery list; may be empty []."
+    list "excluded" item="context_item" required=#true doc="Excluded context records; may be empty []."
+    list "gaps" item="context_gap" required=#true doc="Known context gaps; may be empty []."
+    field "curator_proposal_ref" type="ref" required=#true nullable=#true doc="<ref|null> in D76 §4.1."
+    record "context_item" {
+        field "id" type="id" required=#true
+        field "authority_class" type="authority-class" required=#true
+        field "source_uri" type="uri" required=#true
+        field "anchor" type="context_anchor" required=#true
+        field "source_digest" type="digest" required=#true
+        field "content_digest" type="digest" required=#true
+        field "purpose" type="string" required=#true
+        field "linked_criterion" type="id" required=#false nullable=#true
+        field "linked_decision" type="id" required=#false nullable=#true
+        field "linked_unit" type="id" required=#false nullable=#true
+        field "token_estimate" type="u32" required=#true
+        field "redaction_state" type="redaction-state" required=#true
+    }
+    record "context_gap" {
+        field "id" type="id" required=#true
+        field "missing_fact_or_ref" type="string" required=#true
+        field "reason" type="string" required=#true
+        field "affected_criterion" type="id" required=#false nullable=#true
+        field "affected_decision" type="id" required=#false nullable=#true
+        field "known_source" type="uri" required=#false nullable=#true
+    }
+}
+
+artifact "context_anchor" schema="autopilot.context_anchor.v1" producer="Package" model_produced=#false {
+    doc "Validated context anchor pattern set from D76 §4.1. The discriminating field is anchor_form so generated kernel source can avoid embedding domain substrings; literal forms remain data."
+    field "anchor_form" type="context_anchor_form" required=#true doc="Do not name this field after any concrete backend; generated kernel code should use generic names."
+    field "uri" type="uri" required=#true
+    pattern "task-heading" anchor_form="task" value="task://<digest>/<path>#heading=<heading>"
+    pattern "plan-unit" anchor_form="plan" value="plan://<revision>/units/<unit-id>"
+    pattern "dossier-finding" anchor_form="dossier" value="dossier://<revision>/findings/<finding-id>"
+    pattern "run-finding" anchor_form="run" value="run://<run-id>/findings/<finding-id>"
+    pattern "vcs-lines" anchor_form="version-control-lines" value="git://<commit>/<path>#L<start>-L<end>" doc="D76 says git line anchors bind the exact blob; data may contain this literal."
+    pattern "vcs-whole-file" anchor_form="version-control-whole-file" value="git://<commit>/<path>#whole-file" doc="Whole-file source anchor."
+    pattern "json-pointer" anchor_form="json" value="json://<digest>/<path>#/<json-pointer>"
+}
+
+artifact "control_frame" schema="autopilot.control_frame.v1" producer="Package" model_produced=#false {
+    doc "Bounded package-generated Control Frame (D76 §6.1)."
+    field "schema" type="schema-id" required=#true constant="autopilot.control_frame.v1"
+    field "frame_id" type="uuidv7" required=#true
+    field "run_id" type="uuidv7" required=#true
+    field "run_revision" type="u64" required=#true
+    group "trigger" required=#true {
+        field "kind" type="trigger-kind" required=#true doc="Example from D76: background-completed."
+        list "refs" item="ref" required=#true doc="Example from D76: [<action-id>]."
+    }
+    group "counts" required=#true {
+        field "implementers" type="u32" required=#true
+        field "validators" type="u32" required=#true
+        field "fixers" type="u32" required=#true
+        field "deterministic_jobs" type="u32" required=#true
+        field "queued_candidates" type="u32" required=#true
+    }
+    list "observations" item="control_observation" required=#true doc="Bounded observations only; no source diff, broad logs, implementation reasoning, or full plan prose."
+    list "actions" item="background_action" required=#true doc="Exact currently valid actions."
+    field "next_watchdog_at" type="timestamp" required=#true nullable=#true
+    field "return_to_idle" type="bool" required=#true
+}
+
+artifact "background_action" schema="autopilot.background_action.v1" producer="Package" model_produced=#false {
+    doc "Exact background launch/reconcile/stop action descriptor (D76 §6.2 and D74 §4.5)."
+    field "action_id" type="id" required=#true
+    field "assignment_id" type="id" required=#true
+    field "kind" type="action_kind" required=#true
+    field "command_bytes" type="bytes" required=#true doc="Byte-fixed command; the tool_call guard accepts only an exact live descriptor."
+    field "display_name" type="string" required=#true
+    field "isAgent" type="bool" required=#true doc="Exact bg_run field spelling from Pi background tasks."
+    field "timeout" type="duration" required=#false nullable=#true doc="Agent tasks may omit arbitrary wall timeout; focused commands default 30m, integration 30m, final suite 4h, cooperative handoff 2m unless overridden."
+    field "notifyOnCompletion" type="bool" required=#true doc="Notification posture."
+    field "triggerOnCompletion" type="bool" required=#true doc="Completion-trigger posture."
+    field "run_revision" type="u64" required=#true doc="Expected run revision."
+    field "expires_at" type="timestamp" required=#false nullable=#true doc="Expiry for one-time issued action."
+    field "supersession_state" type="supersession-state" required=#true doc="Live, superseded, expired, or consumed posture."
+}
+
+artifact "run_identity" schema="autopilot.run_identity.v1" producer="Package" model_produced=#false {
+    doc "Clean v2 runtime identity namespace (D76 §5.1)."
+    field "repo_key" type="base32" required=#true doc="lowercase-base32(sha256(\"autopilot-repo-v1\\0\" + realpath(git-common-dir)))"
+    field "run_id" type="uuidv7" required=#true doc="UUIDv7 run-id."
+    field "workstream" type="id" required=#true
+    constant "runtime_root" value="~/.pi/agent/autopilot/v2/"
+    constant "repo_key_derivation" value="lowercase-base32(sha256(\"autopilot-repo-v1\\0\" + realpath(git-common-dir)))"
+    constant "run_id_derivation" value="UUIDv7"
+}
+
+artifact "event_row" schema="autopilot.event_row.v1" producer="Package" model_produced=#false {
+    doc "Append-only event row; events.jsonl is the sole state authority (D76 §5.4 + D77 Closure B)."
+    field "sequence" type="u64" required=#true doc="Monotonic sequence."
+    field "previous_revision" type="u64" required=#true
+    field "new_revision" type="u64" required=#true
+    field "kind" type="event-kind" required=#true
+    list "artifact_refs" item="ref" required=#true doc="Bounded artifact refs."
+}
+
+artifact "state_cache" schema="autopilot.state_cache.v1" producer="Package" model_produced=#false {
+    doc "Disposable cache only, never an authority. State is fold(events); this cache may be deleted at any instant with zero semantic loss and any mismatch forces full replay (D77 Closure B)."
+    field "sequence" type="u64" required=#true
+    field "state_hash" type="digest" required=#true
+}
+
+artifact "allocation_lane_proposal" schema="autopilot.allocation_lane_proposal.v1" producer="Model" model_produced=#true {
+    doc "Allocator model proposal; package validates totality, dependencies, cap, and no invented ownership (D76 §7)."
+    admits "Return a lane proposal that groups only approved plan units. Preserve every unit id, dependency, predecessor forward criterion, downstream release edge, and verification obligation exactly as supplied. Do not invent file ownership or modify plan authority. Include ordered unit ids, one delivery boundary, context family id and estimate, focused tests, and launch wave."
+    field "lane_id" type="id" required=#true
+    field "objective" type="string" required=#true
+    list "ordered_unit_ids" item="id" required=#true
+    field "rationale" type="string" required=#true
+    field "delivery_boundary" type="delivery-boundary" required=#true
+    list "predecessor_forward_criteria" item="id" required=#true
+    list "downstream_release_edges" item="id" required=#true
+    field "context_family_id" type="id" required=#true
+    field "context_estimate" type="u32" required=#true doc="Estimated starting context usage/tokens."
+    list "focused_tests" item="test-id" required=#true
+    field "launch_wave" type="u32" required=#true
+    field "continue_existing_logical_lane" type="bool" required=#false nullable=#true
+}
+
+artifact "delivery_result" schema="autopilot.delivery_result.v1" producer="Model" model_produced=#true {
+    doc "Implementer/Fixer terminal delivery carrier pending package acceptance (D76 §8.2)."
+    admits "Submit exactly one terminal delivery carrier for your assigned role, mode, assignment, attempt, and run revision. Report the exact base, worktree, resulting commit/tree or preservation checkpoint as applicable, actual changed paths, execution audit reference, and required focused evidence. Do not claim validation, merge, package state mutation, or success hidden behind missing evidence. If any hard boundary was violated or required evidence is missing, say so instead of reporting DONE."
+    field "assignment_id" type="id" required=#true
+    field "role_id" type="id" required=#true
+    field "mode" type="mode-id" required=#true
+    field "run_revision" type="u64" required=#true
+    field "lane_id" type="id" required=#true
+    field "attempt" type="u32" required=#true
+    field "base_commit" type="sha" required=#true
+    field "worktree" type="path" required=#true
+    field "package_commit" type="sha" required=#false nullable=#true
+    field "package_tree" type="sha" required=#false nullable=#true
+    list "actual_changed_paths" item="path" required=#true
+    field "execution_audit_ref" type="ref" required=#true
+    list "focused_evidence_refs" item="ref" required=#true
+    field "terminal_status" type="delivery-terminal-status" required=#true
+    list "hard_boundary_violations" item="string" required=#true
+}
+
+artifact "validation_verdict" schema="autopilot.validation_verdict.v1" producer="Model" model_produced=#true {
+    doc "Independent validation verdict bundle for forward, closure, conflict, delta, or final review (D76 §9.2)."
+    admits "Verdict every required criterion independently as PASS, FAIL, or BLOCKED, and attach evidence refs, finding refs, covered paths, semantic surfaces, and forward-edge ids. Do not issue an overall PASS while any required criterion is unverdicted, stale, failed, or blocked. Use FORWARD_READY, FORWARD_BLOCKED, or BLOCKED only for forward validation, and PASS, NEEDS_FIX, or BLOCKED only for closure/final validation."
+    field "assignment_id" type="id" required=#true
+    field "validation_scope" type="validation-scope" required=#true
+    field "exact_commit" type="sha" required=#true
+    field "exact_tree" type="sha" required=#true
+    field "forward_verdict" type="forward_verdict" required=#false nullable=#true
+    field "closure_verdict" type="closure_verdict" required=#false nullable=#true
+    list "criterion_results" item="criterion_result" required=#true
+    list "finding_refs" item="ref" required=#true
+    record "criterion_result" {
+        field "criterion_id" type="id" required=#true
+        field "verdict" type="criterion_verdict" required=#true
+        list "evidence_refs" item="ref" required=#true
+        list "finding_refs" item="ref" required=#true
+        list "covered_paths" item="path" required=#true
+        list "semantic_surface_ids" item="id" required=#true
+        list "forward_edge_ids" item="id" required=#true
+    }
+}
+
+artifact "finding" schema="autopilot.finding.v1" producer="Model" model_produced=#true {
+    doc "Validator/Bughunter/Fixer finding with semantic scheduling effect (D76 §5.3 and D74 §11.2)."
+    admits "For each material issue, record one effect: forward-blocking, closure-blocking-forward-safe, or advisory. Tie the finding to exact criteria or forward edges and evidence. Do not use severity alone to decide scheduling, do not hide a mandatory blocker as advisory, and do not report a source repair requirement without the evidence that makes it mandatory."
+    field "finding_id" type="id" required=#true
+    field "effect" type="finding_effect" required=#true
+    field "summary" type="string" required=#true
+    field "detail" type="string" required=#true
+    list "criterion_ids" item="id" required=#true
+    list "edge_ids" item="id" required=#true
+    list "evidence_refs" item="ref" required=#true
+    list "covered_paths" item="path" required=#true
+    list "semantic_surface_ids" item="id" required=#true
+}
+
+artifact "seam_envelope" schema="autopilot.seam_envelope.v1" producer="Host" model_produced=#false {
+    doc "D78 §3.1 newline-delimited JSON frame envelope over stdio."
+    field "v" type="u32" required=#true constant="1"
+    field "id" type="u64" required=#true
+    field "kind" type="string" required=#true
+    field "payload" type="object" required=#true
+}
+
+constant "guard_timeout_default" value="5s" doc="D78 §3.3 default guard-query timeout. On timeout or Core unavailability the Host denies fail-closed."
+
+artifact_category "run-files" path="runs/<repo-key>/<run-id>/" doc="run.json / state.json / events.jsonl."
+artifact_category "plan" path="runs/<repo-key>/<run-id>/plan.json" doc="plan.json and approved planning artifacts."
+artifact_category "control" path="runs/<repo-key>/<run-id>/control/" doc="Current/consumed Control Frames and issued actions."
+artifact_category "prompts" path="runs/<repo-key>/<run-id>/prompts/" doc="Role/mode/assignment identities and render/resume refs."
+artifact_category "context" path="runs/<repo-key>/<run-id>/context/" doc="Catalogs, Curator proposals, manifests and gaps."
+artifact_category "allocation" path="runs/<repo-key>/<run-id>/allocation/" doc="Dossiers, proposals, canonical lane map, revisions."
+artifact_category "lanes" path="runs/<repo-key>/<run-id>/lanes/" doc="Lane specs, attempts, checkpoints, delivery results."
+artifact_category "background" path="runs/<repo-key>/<run-id>/background/" doc="Action <-> bg task bindings and bounded status refs."
+artifact_category "candidates" path="runs/<repo-key>/<run-id>/candidates/" doc="Release/repair/conflict integration intents/results."
+artifact_category "validation" path="runs/<repo-key>/<run-id>/validation/" doc="Forward/deep/final verdicts and staleness."
+artifact_category "findings" path="runs/<repo-key>/<run-id>/findings/" doc="Stable finding ledger and closure state."
+artifact_category "tests" path="runs/<repo-key>/<run-id>/tests/" doc="Focused and final command evidence."
+artifact_category "handoffs" path="runs/<repo-key>/<run-id>/handoffs/"
+artifact_category "finalization" path="runs/<repo-key>/<run-id>/finalization/"
+artifact_category "archive" path="runs/<repo-key>/<run-id>/archive/"
+artifact_category "worktree-main" path="worktrees/<repo-key>/<run-id>/main/"
+artifact_category "worktree-lanes" path="worktrees/<repo-key>/<run-id>/lanes/<lane-id>/attempt-<n>/"
+artifact_category "worktree-repairs" path="worktrees/<repo-key>/<run-id>/repairs/<scope-id>/attempt-<n>/"
+artifact_category "worktree-integration" path="worktrees/<repo-key>/<run-id>/integration/<candidate-id>/"
+
+resource_gate "parallel_cap" default="8" counts="active Implementers only" doc="Validators, Fixers, Curators, Allocator, Bughunter, amendment agents, tests, merges, heartbeat, and finalization are outside this cap (D76 §7)."
+resource_gate "normal_lane_target" value="3-6 cohesive lanes"
+resource_gate "disk_pressure" threshold="free disk below max(5 GiB, projected sparse worktree footprint × 2)" effect="pause new Implementer launch; already-required validation/repair has priority"
+resource_gate "memory_pressure" threshold="available memory below max(2 GiB, 10% of physical RAM)" effect="pause new Implementer launch; already-required validation/repair has priority"
+scheduler_order 1 key="launch_wave" direction="ascending"
+scheduler_order 2 key="longest remaining dependency path" direction="descending"
+scheduler_order 3 key="earliest operator-plan unit order" direction="ascending"
+scheduler_order 4 key="lane id" direction="lexicographic"
+
+enum "run_phase" {
+    doc "D76 §5.3 — orthogonal run phase."
+    value "planning"
+    value "ready-to-execute"
+    value "allocating"
+    value "executing"
+    value "final-verification"
+    value "ready-to-close"
+    value "terminal"
+}
+
+enum "run_health" {
+    doc "D76 §5.3 — orthogonal run health."
+    value "healthy"
+    value "degraded"
+    value "paused"
+    value "unsafe-halt"
+}
+
+enum "run_outcome" {
+    doc "D76 §5.3 — orthogonal run outcome."
+    value "null"
+    value "closed"
+    value "aborted"
+}
+
+enum "lane_state" {
+    doc "D76 §5.3 lane semantic states. D76 separately says interrupted, checkpointed, and superseded are attempt attributes, not lane states."
+    value "allocated"
+    value "implementing"
+    value "forward-validating-1"
+    value "forward-fixing"
+    value "forward-validating-2"
+    value "forward-ready"
+    value "release-queued"
+    value "forward-integrated"
+    value "deep-validating"
+    value "closure-needs-fix"
+    value "repair-queued"
+    value "closed"
+}
+
+enum "attempt_attribute" {
+    doc "D76 §5.3 explicitly distinguishes these from lane states."
+    value "interrupted"
+    value "checkpointed"
+    value "superseded"
+}
+
+enum "candidate_state" {
+    doc "D76 §5.3 candidate states."
+    value "queued"
+    value "preparing"
+    value "conflicted"
+    value "resolving"
+    value "focused-checking"
+    value "ready-to-commit"
+    value "committed"
+    value "needs-fix"
+    value "failed"
+    value "superseded"
+}
+
+enum "forward_verdict" {
+    value "FORWARD_READY"
+    value "FORWARD_BLOCKED"
+    value "BLOCKED"
+}
+
+enum "closure_verdict" {
+    value "PASS"
+    value "NEEDS_FIX"
+    value "BLOCKED"
+}
+
+enum "criterion_verdict" {
+    value "PASS"
+    value "FAIL"
+    value "BLOCKED"
+}
+
+enum "finding_effect" {
+    value "forward-blocking"
+    value "closure-blocking-forward-safe"
+    value "advisory"
+}
+
+enum "action_kind" {
+    doc "D76 §6.2 action kinds."
+    value "launch-background"
+    value "reconcile-background"
+    value "read-failure-log"
+    value "stop-background"
+    value "request-operator"
+    value "return-idle"
+}
+
+enum "producer" {
+    doc "D77 §3.1 closed Producer enum plus Host from D78 §7."
+    value "Model"
+    value "Git"
+    value "Operator"
+    value "Filesystem"
+    value "Provider"
+    value "BackgroundTask"
+    value "Package"
+    value "Host"
+}
+
+enum "roster_slot" {
+    doc "D76 §3 final simple model roster slots."
+    value "control"
+    value "reasoning"
+    value "extraction"
+    value "coding"
+    value "review"
+}
+
+enum "context_anchor_form" {
+    value "task"
+    value "plan"
+    value "dossier"
+    value "run"
+    value "version-control-lines"
+    value "version-control-whole-file"
+    value "json"
+}
+
+frame direction="host-to-core" kind="command" {
+    doc "D78 §3.2 — an operator slash command with its raw argument string."
+    field "raw" type="string" required=#true
+}
+
+frame direction="host-to-core" kind="guard-query" {
+    doc "D78 §3.2 — a Pi tool_call needing an allow/deny decision."
+    field "tool_name" type="string" required=#true
+    field "arguments" type="object" required=#true
+}
+
+frame direction="host-to-core" kind="task-completed" {
+    doc "D78 §3.2 — a pi-background-tasks completion/failure notification."
+    field "task_id" type="id" required=#true
+    field "status" type="string" required=#true
+}
+
+frame direction="host-to-core" kind="agent-result" {
+    doc "D78 §3.2 — a child agent terminal/checkpoint carrier."
+    field "assignment_id" type="id" required=#true
+    field "carrier" type="object" required=#true
+}
+
+frame direction="host-to-core" kind="operator-answer" {
+    doc "D78 §3.2 — a response to a Question Gate or approval prompt."
+    field "question_id" type="id" required=#true
+    field "answer" type="object" required=#true
+}
+
+frame direction="host-to-core" kind="shutdown" {
+    doc "D78 §3.2 — Pi is exiting; checkpoint and settle."
+    field "reason" type="string" required=#false nullable=#true
+}
+
+frame direction="core-to-host" kind="guard-decision" {
+    doc "D78 §3.2 — allow / deny + reason, answers guard-query."
+    field "decision" type="guard-decision" required=#true
+    field "reason" type="string" required=#true
+}
+
+frame direction="core-to-host" kind="ui" {
+    doc "D78 §3.2 — render text/select/confirm/input through ctx.ui."
+    field "ui_kind" type="ui-kind" required=#true
+    field "content" type="object" required=#true
+}
+
+frame direction="core-to-host" kind="spawn" {
+    doc "D78 §3.2 — launch an exact bg_run descriptor, byte-fixed by D76 §6.2."
+    field "action" type="background_action" required=#true
+}
+
+frame direction="core-to-host" kind="session" {
+    doc "D78 §3.2 — create/prompt/compact/close a Pi SDK child session."
+    field "session_action" type="session-action" required=#true
+    field "payload" type="object" required=#true
+}
+
+frame direction="core-to-host" kind="log" {
+    doc "D78 §3.2 — diagnostic line for the TUI."
+    field "line" type="string" required=#true
+}
+
+frame direction="core-to-host" kind="done" {
+    doc "D78 §3.2 — command complete; Host returns to idle."
+    field "status" type="string" required=#true
+}
