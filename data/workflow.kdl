@@ -1,0 +1,160 @@
+schema "autopilot.workflow.v1"
+version 1
+
+doc "Model-checked workflow data for D76 §5.3 state/verdict vocabulary and D76/D74 execution transitions. Parsed as KDL v2 by kdl crate 6.7."
+
+// Common node shapes:
+// machine <name> { initial <state>; state <state> terminal=<bool> [forward_gate=<bool>] [integrated=<bool>]; transition from=<state> to=<state> evidence=<artifact> ... }
+// axis <name> contract=<contracts-enum> { value <exact-contract-value> ... }
+// attribute <exact-contract-value> contract="attempt_attribute"
+// verdict_set <kind> contract=<contracts-enum> { value <exact-contract-value> ... }
+// total_verdicts machine=<machine> kind=<verdict_set> from=<state>
+// capacity_class <name> gate=<resource_gate> { state <machine-state> ... }
+
+machine "run" {
+    doc "D76 §5.3 run phase machine. Health and outcome are orthogonal axes, not states."
+    initial "planning"
+
+    state "planning" terminal=#false
+    state "ready-to-execute" terminal=#false
+    state "allocating" terminal=#false
+    state "executing" terminal=#false
+    state "final-verification" terminal=#false
+    state "ready-to-close" terminal=#false
+    state "terminal" terminal=#true
+
+    transition from="planning" to="ready-to-execute" evidence="plan-approval" doc="D76 §12 walkthrough — approved planning completes the planning superphase."
+    transition from="ready-to-execute" to="allocating" evidence="execution-command" doc="D76 §12 walkthrough — /autopilot resumes the approved run for execution."
+    transition from="allocating" to="executing" evidence="allocation-accepted" doc="D76 §7 and §12 — accepted Allocation Dossier/lane map enables ready lane dispatch."
+    transition from="executing" to="final-verification" evidence="all-lanes-closed" doc="D76 §9.2/§10 — final verification waits until every implementation delivery is closed."
+    transition from="final-verification" to="ready-to-close" evidence="final-verification-pass" doc="D76 §9.2/§10 — exact-tip final commands, full suite, final Validator, and required Bughunter passed."
+    transition from="ready-to-close" to="terminal" evidence="result-ref-archived" doc="D76 §10 — result ref and safe archive complete the run."
+}
+
+machine "lane" {
+    doc "D76 §5.3 lane semantic state machine, with D74 §11.3 forward-ready/forward-integrated distinct from closed and D74 §12.2 two forward validation rounds."
+    initial "allocated"
+
+    state "allocated" terminal=#false
+    state "implementing" terminal=#false implementer_active=#true
+    state "forward-validating-1" terminal=#false validates="forward" round=1
+    state "forward-fixing" terminal=#false
+    state "forward-validating-2" terminal=#false validates="forward" round=2
+    state "forward-ready" terminal=#false forward_gate=#true
+    state "release-queued" terminal=#false
+    state "forward-integrated" terminal=#false forward_gate=#true integrated=#true
+    state "deep-validating" terminal=#false validates="closure"
+    state "closure-needs-fix" terminal=#false
+    state "repair-queued" terminal=#false
+    state "closed" terminal=#true
+
+    transition from="allocated" to="implementing" evidence="lane-launch-action" doc="D76 §12 — ready Implementer lanes launch from accepted allocation."
+    transition from="implementing" to="forward-validating-1" evidence="delivery-result" doc="D74 §12.2 — full lane implementation completion launches Round 1 forward validation."
+
+    transition from="forward-validating-1" to="forward-ready" verdict_kind="forward" verdict="FORWARD_READY" evidence="forward-round-1-verdict" doc="D76 §9.2/D74 §12.2 — Round 1 with no forward blockers releases."
+    transition from="forward-validating-1" to="forward-fixing" verdict_kind="forward" verdict="FORWARD_BLOCKED" evidence="forward-round-1-verdict" doc="D76 §9.2/D74 §12.2 — Round 1 forward blocker creates one consolidated Fixer."
+    transition from="forward-validating-1" to="forward-fixing" verdict_kind="forward" verdict="BLOCKED" evidence="forward-round-1-verdict" doc="D76 §9.2 — blocked forward validation is routed through the consolidated forward Fixer path before the bounded recheck."
+
+    transition from="forward-fixing" to="forward-validating-2" evidence="forward-fix-delivery" doc="D76 §9.2/D74 §12.2 — one consolidated Fixer pass is followed by Round 2."
+
+    transition from="forward-validating-2" to="forward-ready" verdict_kind="forward" verdict="FORWARD_READY" evidence="forward-round-2-verdict" doc="D76 §9.2/D74 §12.2 — Round 2 with no forward blockers releases."
+    transition from="forward-validating-2" to="allocated" verdict_kind="forward" verdict="FORWARD_BLOCKED" evidence="tier-2-3-amendment" route="tier-2-3" doc="D76 §9.2/D74 §12.2 — a remaining Round 2 forward blocker refuses merge and routes Tier 2/3; the amended lane returns to allocation rather than a third validation round."
+    transition from="forward-validating-2" to="allocated" verdict_kind="forward" verdict="BLOCKED" evidence="tier-2-3-amendment" route="tier-2-3" doc="D76 §9.2/D74 §12.2 — a still-blocked Round 2 validation refuses merge and routes Tier 2/3; the amended lane returns to allocation rather than a third validation round."
+
+    transition from="forward-ready" to="release-queued" evidence="release-candidate-created" doc="D76 §9.1/D74 §9.3 — a forward-ready delivery enters the serialized release queue."
+    transition from="release-queued" to="forward-integrated" evidence="release-merge-committed" doc="D76 §9.1/D74 §9.3 — CAS of the focused-checked release candidate advances run-main."
+    transition from="forward-integrated" to="deep-validating" evidence="deep-validation-launch" doc="D74 §11.3/§12.3 — forward-integrated work is successor-safe but not closed; post-release deep validation starts."
+
+    transition from="deep-validating" to="closed" verdict_kind="closure" verdict="PASS" evidence="closure-verdict" doc="D76 §9.2/D74 §11.3 — closure PASS means every mandatory criterion/finding for the delivery is satisfied with current evidence."
+    transition from="deep-validating" to="closure-needs-fix" verdict_kind="closure" verdict="NEEDS_FIX" evidence="closure-verdict" doc="D76 §9.2/D74 §12.3 — mandatory closure finding creates cohesive closure repair."
+    transition from="deep-validating" to="closure-needs-fix" verdict_kind="closure" verdict="BLOCKED" evidence="closure-verdict" doc="D76 §9.2 — blocked closure validation remains closure work and cannot close the lane."
+
+    transition from="closure-needs-fix" to="repair-queued" evidence="closure-repair-assignment" doc="D76 §5.3/D74 §12.3 — a Fixer assignment addresses the consolidated closure bundle where practical."
+    transition from="repair-queued" to="deep-validating" evidence="repair-merge-committed" doc="D76 §9.1/D74 §9.4/§12.3 — source-changing repair is integrated through the serialized queue, then changed/stale criteria revalidate."
+}
+
+machine "candidate" {
+    doc "D76 §5.3 candidate state machine for serialized release, repair, conflict, and finalization candidates."
+    initial "queued"
+
+    state "queued" terminal=#false
+    state "preparing" terminal=#false
+    state "conflicted" terminal=#false
+    state "resolving" terminal=#false
+    state "focused-checking" terminal=#false
+    state "ready-to-commit" terminal=#false
+    state "committed" terminal=#true
+    state "needs-fix" terminal=#false
+    state "failed" terminal=#true
+    state "superseded" terminal=#true
+
+    transition from="queued" to="preparing" evidence="candidate-intent" doc="D76 §9.1 — integration creates an isolated candidate at current run-main."
+    transition from="queued" to="failed" evidence="candidate-preparation-failure" doc="D76 §9.1 — candidate intent/postconditions make failed preparation visible and restart-safe."
+    transition from="queued" to="superseded" evidence="candidate-supersession" doc="D76 §9.1 — priority/CAS changes may supersede an unprepared candidate."
+
+    transition from="preparing" to="focused-checking" evidence="merge-clean" doc="D76 §9.1/D74 §9.3 — clean/disjoint merge proceeds to focused checks."
+    transition from="preparing" to="conflicted" evidence="merge-conflict" doc="D74 §9.3/§13.1 — conflict or semantic overlap routes to Fixer/Integrator."
+    transition from="preparing" to="failed" evidence="merge-failed" doc="D76 §9.1 — failed merge preparation is an explicit terminal candidate failure."
+    transition from="preparing" to="superseded" evidence="candidate-supersession" doc="D76 §9.1 — a newer priority/current-main candidate can supersede preparation."
+
+    transition from="conflicted" to="resolving" evidence="conflict-resolution-assignment" doc="D76 §9.2/D74 §13.1 — conflict bundle launches bounded Fixer/Integrator resolution."
+    transition from="conflicted" to="failed" evidence="conflict-unresolvable" doc="D76 §9.2 — package rejects unresolved markers/unmerged index/unexplained dropped-side behavior."
+    transition from="conflicted" to="superseded" evidence="candidate-supersession" doc="D76 §9.1 — queued integration work may be superseded before resolution completes."
+
+    transition from="resolving" to="focused-checking" evidence="conflict-resolution-delivery" doc="D76 §9.2/D74 §13.1 — accepted conflict resolution proceeds to overlap-focused checks."
+    transition from="resolving" to="needs-fix" evidence="conflict-review-needs-fix" doc="D76 §9.2/D74 §13.2 — independent conflict review/focused checks may require a bounded fix."
+    transition from="resolving" to="failed" evidence="conflict-resolution-failed" doc="D76 §9.2 — invalid or exhausted resolution fails the candidate loudly."
+    transition from="resolving" to="superseded" evidence="candidate-supersession" doc="D76 §9.1 — a current-main change may supersede an in-flight resolution."
+
+    transition from="focused-checking" to="ready-to-commit" evidence="focused-checks-pass" doc="D76 §9.1 — focused checks, ancestry/tree/diff verification pass before CAS."
+    transition from="focused-checking" to="needs-fix" evidence="focused-checks-fail" doc="D76 §9.1/§9.2 — failed focused checks route repair for failed/stale criteria and direct consequences."
+    transition from="focused-checking" to="failed" evidence="focused-checks-blocked" doc="D76 §9.2 — blocked/failing checks with no local progress fail loudly instead of merging."
+    transition from="focused-checking" to="superseded" evidence="candidate-supersession" doc="D76 §9.1 — a candidate can be superseded before commit."
+
+    transition from="needs-fix" to="preparing" evidence="candidate-fix-delivery" doc="D76 §9.1/§9.2 — accepted repair produces a new exact commit/range and re-enters preparation at current run-main."
+    transition from="needs-fix" to="failed" evidence="candidate-fix-failed" doc="D76 §9.2 — repeated blocker/no-progress routes loud failure rather than hidden success."
+    transition from="needs-fix" to="superseded" evidence="candidate-supersession" doc="D76 §9.1 — repair work may be superseded by newer integration authority."
+
+    transition from="ready-to-commit" to="committed" evidence="run-main-cas" doc="D76 §9.1/D74 §9.5 — git update-ref CAS advances run-main to the exact candidate."
+    transition from="ready-to-commit" to="failed" evidence="run-main-cas-failed" doc="D76 §9.1 — compare-and-swap failure is explicit; response-loss restart reconciles postconditions."
+    transition from="ready-to-commit" to="superseded" evidence="candidate-supersession" doc="D76 §9.1 — a ready candidate may be superseded by a current-main/priority change before CAS."
+}
+
+axis "health" contract="run_health" {
+    doc "D76 §5.3 run health axis; orthogonal to run phase and not a state machine."
+    value "healthy"
+    value "degraded"
+    value "paused"
+    value "unsafe-halt"
+}
+
+axis "outcome" contract="run_outcome" {
+    doc "D76 §5.3 run outcome axis; orthogonal to run phase and not a state machine."
+    value "null"
+    value "closed"
+    value "aborted"
+}
+
+attribute "interrupted" contract="attempt_attribute" doc="D76 §5.3 attempt attribute, not a lane state."
+attribute "checkpointed" contract="attempt_attribute" doc="D76 §5.3 attempt attribute, not a lane state."
+attribute "superseded" contract="attempt_attribute" doc="D76 §5.3 attempt attribute, not a lane state; candidate superseded remains a candidate state separately."
+
+verdict_set "forward" contract="forward_verdict" {
+    value "FORWARD_READY"
+    value "FORWARD_BLOCKED"
+    value "BLOCKED"
+}
+
+verdict_set "closure" contract="closure_verdict" {
+    value "PASS"
+    value "NEEDS_FIX"
+    value "BLOCKED"
+}
+
+total_verdicts machine="lane" kind="forward" from="forward-validating-1" doc="C5 — Round 1 forward Validator has an outgoing transition for every forward verdict."
+total_verdicts machine="lane" kind="forward" from="forward-validating-2" doc="C5 — Round 2 forward Validator has an outgoing transition for every forward verdict; blocker outcomes route Tier 2/3 instead of a third round."
+total_verdicts machine="lane" kind="closure" from="deep-validating" doc="C5 — closure Validator has an outgoing transition for every closure verdict."
+
+capacity_class "implementer-active" gate="parallel_cap" doc="C8 — D76 §7 counts active Implementers only; Validators, Fixers, tests, merges, Curator, Allocator, Bughunter, heartbeat, and finalization are outside the cap." {
+    state "implementing"
+}
