@@ -328,6 +328,9 @@ dependencies = [
 [[package]]
 name = "modelcheck"
 version = "0.0.0"
+dependencies = [
+ "kdl",
+]
 
 [[package]]
 name = "normalize-line-endings"

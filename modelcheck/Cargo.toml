@@ -5,6 +5,11 @@ version = "0.0.0"
 publish = false
 
 [dependencies]
+kdl.workspace = true
+
+[[test]]
+name = "workflow_matches_d76"
+path = "../tests/workflow_matches_d76.rs"
 
 [lints]
 workspace = true

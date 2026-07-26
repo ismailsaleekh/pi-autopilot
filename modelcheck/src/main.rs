@@ -2,18 +2,17 @@ use std::path::Path;
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
-    match Path::new("data/workflow.kdl").try_exists() {
-        Ok(true) => {
-            eprintln!("modelcheck not yet implemented (W2)");
-            ExitCode::from(2)
+    let mut args = std::env::args().skip(1);
+    let path = match (args.next(), args.next()) {
+        (None, None) => "data/workflow.kdl".to_owned(),
+        (Some(path), None) => path,
+        _ => {
+            eprintln!("usage: modelcheck [workflow.kdl]");
+            return ExitCode::from(2);
         }
-        Ok(false) => {
-            println!("no workflow.kdl present");
-            ExitCode::SUCCESS
-        }
-        Err(error) => {
-            eprintln!("failed to inspect data/workflow.kdl: {error}");
-            ExitCode::from(1)
-        }
-    }
+    };
+    let report = modelcheck::run_path(Path::new(&path));
+    print!("{}", report.stdout);
+    eprint!("{}", report.stderr);
+    ExitCode::from(report.exit_code)
 }
