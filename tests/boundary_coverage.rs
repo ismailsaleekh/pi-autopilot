@@ -3,11 +3,14 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use drivers::planning::MODEL_BOUNDARIES;
+use drivers::planning::{
+    MODEL_BOUNDARIES, accept_plan_review, accept_questions, accept_scout_dossier,
+    accept_task_atoms, accept_work_map, boundary_runtime,
+};
 use drivers::transcript::{
     BoundaryModeTable, TranscriptProvenance, TranscriptRecord, TranscriptStore,
 };
-use kernel::boundary::{BOUNDARIES, BoundaryDescriptor, BoundaryMode, Producer};
+use kernel::boundary::{BOUNDARIES, BoundaryDescriptor, BoundaryMode, BoundaryRuntime, Producer, Rejection};
 
 #[test]
 fn model_boundaries_are_enforced_or_loudly_reported_in_record_phase() {
@@ -34,7 +37,7 @@ fn model_boundaries_are_enforced_or_loudly_reported_in_record_phase() {
         match table.mode(descriptor.id()) {
             Ok(BoundaryMode::Record) => record_mode.push(descriptor.id()),
             Ok(BoundaryMode::Enforce) => match store.load_boundary(descriptor.id()) {
-                Ok(records) if !records.is_empty() => {}
+                Ok(records) if !records.is_empty() => replay_records(descriptor.id(), &records),
                 Ok(_) => missing.push(descriptor.id()),
                 Err(error) => panic!("bad transcript for {}: {error:?}", descriptor.id()),
             },
@@ -114,6 +117,30 @@ fn transcript_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/transcripts")
 }
 
+#[test]
+fn replay_gate_rejects_malformed_work_map() {
+    let raw = "### unit\n- **id:** U1\n- **objective:** Do it.\n- **acceptance criteria:**\n  - tested\n";
+    let mut runtime = boundary_runtime("planning.work-map.v1");
+    runtime.flip_to_enforce();
+    let rejection = match accept_work_map(raw, &runtime) {
+        Ok(value) => panic!("untraceable work map admitted: {value}"),
+        Err(value) => value,
+    };
+    assert_eq!(rejection.boundary_id(), "planning.work-map.v1");
+}
+
+#[test]
+fn replay_gate_rejects_malformed_plan_review() {
+    let raw = "verdict PASS — overall ok\n\n- missing verification command must be added before release\n";
+    let mut runtime = boundary_runtime("planning.plan-review.v1");
+    runtime.flip_to_enforce();
+    let rejection = match accept_plan_review(raw, &runtime) {
+        Ok(value) => panic!("unclassified substantive review admitted: {value}"),
+        Err(value) => value,
+    };
+    assert_eq!(rejection.boundary_id(), "planning.plan-review.v1");
+}
+
 fn validate_transcript_root(root: &Path) -> Result<(), String> {
     let metadata = fs::metadata(root).map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
@@ -153,6 +180,52 @@ fn validate_transcript_root(root: &Path) -> Result<(), String> {
     }
     Ok(())
 }
+
+fn replay_records(boundary_id: &'static str, records: &[TranscriptRecord]) {
+    let Some(plan) = replay_plan(boundary_id) else {
+        panic!("enforced Model boundary {boundary_id} has transcripts but no replay acceptor or declared typed-only report");
+    };
+    for (index, record) in records.iter().enumerate() {
+        let raw = match record.replay() {
+            Ok(value) => value,
+            Err(error) => panic!("bad replay transcript for {boundary_id}: {error:?}"),
+        };
+        if let ReplayPlan::Raw(acceptor) = plan
+            && let Err(rejection) = acceptor(raw)
+        {
+            panic!("boundary {boundary_id} rejected transcript #{index}: {rejection:?}");
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ReplayPlan {
+    Raw(fn(&str) -> Result<(), Rejection>),
+    TypedOnly,
+}
+
+fn replay_plan(boundary_id: &str) -> Option<ReplayPlan> {
+    match boundary_id {
+        "planning.task-atoms.v1" => Some(ReplayPlan::Raw(replay_task_atoms)),
+        "planning.scout-dossier.v1" => Some(ReplayPlan::Raw(replay_scout_dossier)),
+        "planning.questions.v1" => Some(ReplayPlan::Raw(replay_questions)),
+        "planning.work-map.v1" => Some(ReplayPlan::Raw(replay_work_map)),
+        "planning.plan-review.v1" => Some(ReplayPlan::Raw(replay_plan_review)),
+        "allocation.lane-proposal.v1" | "validation.verdict.v1" => Some(ReplayPlan::TypedOnly),
+        _ => None,
+    }
+}
+
+fn replay_with(raw: &str, id: &'static str, acceptor: fn(&str, &BoundaryRuntime) -> Result<String, Rejection>) -> Result<(), Rejection> {
+    let mut runtime = boundary_runtime(id);
+    runtime.flip_to_enforce();
+    acceptor(raw, &runtime).map(|_| ())
+}
+fn replay_task_atoms(raw: &str) -> Result<(), Rejection> { replay_with(raw, "planning.task-atoms.v1", accept_task_atoms) }
+fn replay_scout_dossier(raw: &str) -> Result<(), Rejection> { replay_with(raw, "planning.scout-dossier.v1", accept_scout_dossier) }
+fn replay_questions(raw: &str) -> Result<(), Rejection> { replay_with(raw, "planning.questions.v1", accept_questions) }
+fn replay_work_map(raw: &str) -> Result<(), Rejection> { replay_with(raw, "planning.work-map.v1", accept_work_map) }
+fn replay_plan_review(raw: &str) -> Result<(), Rejection> { replay_with(raw, "planning.plan-review.v1", accept_plan_review) }
 
 fn model_boundaries() -> Vec<&'static BoundaryDescriptor> {
     BOUNDARIES

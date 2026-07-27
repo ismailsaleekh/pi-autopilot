@@ -2,13 +2,7 @@ use crate::roles::kdl::{attr as kdl_attr, boundary_runtime as runtime_by_id, tab
 use kernel::boundary::{BoundaryRuntime, Rejection};
 use kernel_macros::acceptance_boundary;
 
-pub const MODEL_BOUNDARIES: [&str; 5] = [
-    "planning.task-atoms.v1",
-    "planning.scout-dossier.v1",
-    "planning.questions.v1",
-    "planning.work-map.v1",
-    "planning.plan-review.v1",
-];
+pub const MODEL_BOUNDARIES: [&str; 5] = ["planning.task-atoms.v1", "planning.scout-dossier.v1", "planning.questions.v1", "planning.work-map.v1", "planning.plan-review.v1"];
 const DRIVER_TABLES_KDL: &str = include_str!("../../../data/driver-tables.kdl");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -51,13 +45,7 @@ pub enum QuestionClass {
     DodHole,
     UnsafeIrreversible,
 }
-const D72_QUESTION_CLASS_VALUES: [QuestionClass; 5] = [
-    QuestionClass::InvalidatedDecision,
-    QuestionClass::MissingMaterialDecision,
-    QuestionClass::MaterialUnderdetermination,
-    QuestionClass::DodHole,
-    QuestionClass::UnsafeIrreversible,
-];
+const D72_QUESTION_CLASS_VALUES: [QuestionClass; 5] = [QuestionClass::InvalidatedDecision, QuestionClass::MissingMaterialDecision, QuestionClass::MaterialUnderdetermination, QuestionClass::DodHole, QuestionClass::UnsafeIrreversible];
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct QuestionNomination {
     pub class: QuestionClass,
@@ -84,23 +72,9 @@ impl AssignmentPlan {
             reserved_resolution: 3,
         }
     }
-    pub fn total(&self) -> u8 {
-        self.task_extractors
-            + self.scout_and_compiler_first_pass
-            + self.context_curator
-            + self.synthesizers
-            + self.reviewer
-            + self.reserved_resolution
-    }
+    pub fn total(&self) -> u8 { self.task_extractors + self.scout_and_compiler_first_pass + self.context_curator + self.synthesizers + self.reviewer + self.reserved_resolution }
     pub fn validate(&self, cap: u8) -> Result<(), PlanningError> {
-        if self.total() > cap {
-            Err(PlanningError::AssignmentCap {
-                total: self.total(),
-                cap,
-            })
-        } else {
-            Ok(())
-        }
+        if self.total() > cap { Err(PlanningError::AssignmentCap { total: self.total(), cap }) } else { Ok(()) }
     }
 }
 
@@ -269,13 +243,13 @@ pub fn accept_questions(raw: &str, runtime: &BoundaryRuntime) -> Result<String, 
         Ok(raw.to_owned())
     }
 }
-#[acceptance_boundary(id = "planning.work-map.v1", producer = Producer::Model, visible = true, admits = "Plan compiler and synthesizer output must backlink every material element to atoms or verified facts.", mode = BoundaryMode::Enforce)]
+#[acceptance_boundary(id = "planning.work-map.v1", producer = Producer::Model, visible = true, admits = "Plan compiler and synthesizer output must contain one or more unit sections. Each unit must have an objective, acceptance criteria, and a traceable link by exact task phrase, atom id, source anchor, backlink, or verified evidence/fact.", mode = BoundaryMode::Enforce)]
 pub fn accept_work_map(raw: &str, runtime: &BoundaryRuntime) -> Result<String, Rejection> {
-    accept_contains(raw, "backlink", runtime)
+    if accepts_work_map(raw) { Ok(raw.to_owned()) } else { runtime.reject(raw)?; Ok(raw.to_owned()) }
 }
-#[acceptance_boundary(id = "planning.plan-review.v1", producer = Producer::Model, visible = true, admits = "Plan review output must separate substantive perfect-plan blockers from advisory wording or style notes.", mode = BoundaryMode::Enforce)]
+#[acceptance_boundary(id = "planning.plan-review.v1", producer = Producer::Model, visible = true, admits = "Plan review output must assign a verdict to each finding, using pass, blocker, advisory, fail, blocked, or needs-fix. It must include at least one verdict and must not give an overall pass while a substantive finding is left unclassified.", mode = BoundaryMode::Enforce)]
 pub fn accept_plan_review(raw: &str, runtime: &BoundaryRuntime) -> Result<String, Rejection> {
-    accept_contains(raw, "blocker", runtime)
+    if accepts_plan_review(raw) { Ok(raw.to_owned()) } else { runtime.reject(raw)?; Ok(raw.to_owned()) }
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -290,17 +264,40 @@ pub enum PlanningError {
     BadDeclaration(String),
 }
 
-fn accept_contains(
-    raw: &str,
-    required: &str,
-    runtime: &BoundaryRuntime,
-) -> Result<String, Rejection> {
-    if raw.contains(required) {
-        Ok(raw.to_owned())
-    } else {
-        runtime.reject(raw)?;
-        Ok(raw.to_owned())
+fn accept_contains(raw: &str, required: &str, runtime: &BoundaryRuntime) -> Result<String, Rejection> {
+    if raw.contains(required) { Ok(raw.to_owned()) } else { runtime.reject(raw)?; Ok(raw.to_owned()) }
+}
+fn accepts_work_map(raw: &str) -> bool {
+    let (mut units, mut seen, mut objective, mut criteria, mut link) = (0_u8, false, false, false, false);
+    for line in raw.lines().chain(std::iter::once("### unit")) {
+        let trimmed = line.trim();
+        if trimmed.trim_start_matches('#').trim_start().to_ascii_lowercase().starts_with("unit") {
+            if seen { if !(objective && criteria && link) { return false; } units = units.saturating_add(1); }
+            seen = true; objective = false; criteria = false; link = false; continue;
+        }
+        if let Some((field, value)) = structured_field(trimmed) { objective |= field == "objective" && !value.is_empty(); criteria |= field == "acceptance-criteria"; link |= has_trace_field(&field) && !value.is_empty(); }
     }
+    units > 0
+}
+fn has_trace_field(field: &str) -> bool {
+    ["exact-task-phrase", "atom-id", "source-anchor", "source", "anchor", "backlink", "evidence", "verified-fact"].contains(&field) || field.contains("task-phrase") || field.contains("atom")
+}
+fn accepts_plan_review(raw: &str) -> bool {
+    let (mut verdicts, mut overall_pass, mut unclassified) = (0_u8, false, false);
+    for line in raw.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        if let Some(pass) = verdict_is_pass(line) { verdicts = verdicts.saturating_add(1); overall_pass |= pass; } else { unclassified |= substantive_finding(line); }
+    }
+    verdicts > 0 && !(overall_pass && unclassified)
+}
+fn verdict_is_pass(line: &str) -> Option<bool> {
+    let lower = line.trim_start_matches(['-', '*', '>']).trim_start().to_ascii_lowercase();
+    let rest = lower.strip_prefix("verdict ").or_else(|| lower.strip_prefix("verdict:"))?;
+    let class = rest.split(|ch: char| !ch.is_ascii_alphabetic() && ch != '-').find(|part| !part.is_empty())?;
+    matches!(class, "pass" | "blocker" | "advisory" | "fail" | "blocked" | "needs-fix").then_some(class == "pass")
+}
+fn substantive_finding(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    (lower.starts_with('-') || lower.starts_with('*') || lower.starts_with("finding") || lower.starts_with("issue")) && ["must", "missing", "omission", "blocker", "substantive", "fail", "unsafe", "incomplete", "not covered"].iter().any(|word| lower.contains(word))
 }
 fn accepts_question_output(raw: &str) -> bool {
     let trimmed = raw.trim();

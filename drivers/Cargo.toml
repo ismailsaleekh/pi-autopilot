@@ -160,5 +160,9 @@ path = "../tests/multiprocess_race.rs"
 name = "packed_install"
 path = "../tests/packed_install.rs"
 
+[[test]]
+name = "live_end_to_end"
+path = "../tests/live_end_to_end.rs"
+
 [lints]
 workspace = true
