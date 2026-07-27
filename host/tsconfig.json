@@ -2,7 +2,8 @@
   "compilerOptions": {
     "composite": false,
     "declaration": false,
-    "exactOptionalPropertyTypes": true,
+    "allowImportingTsExtensions": true,
+    "exactOptionalPropertyTypes": false,
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
     "noEmit": true,
@@ -12,7 +13,8 @@
     "noUncheckedIndexedAccess": true,
     "strict": true,
     "target": "ES2024",
-    "types": []
+    "types": ["node"]
   },
-  "include": ["src/generated/**/*.ts"]
+  "include": ["src/**/*.ts"]
 }
+
