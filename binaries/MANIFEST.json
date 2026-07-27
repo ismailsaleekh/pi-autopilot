@@ -1,0 +1,58 @@
+{
+  "binaries": {
+    "darwin-arm64": {
+      "buildMethod": "native cargo build --release --target aarch64-apple-darwin -p drivers --bin autopilot-core",
+      "path": "binaries/darwin-arm64/autopilot-core",
+      "sha256": "17a5692582d496f9440964cbe96f79877d4a53485508a7d098742e7ebe1859cd",
+      "sizeBytes": 1140144,
+      "sourceHash": "64a6da523381bd6365da8253062de5b6410897e45c4c93b1f7e7c7bad5be3d0f",
+      "target": "aarch64-apple-darwin"
+    },
+    "darwin-x64": {
+      "buildMethod": "native cargo build --release --target x86_64-apple-darwin -p drivers --bin autopilot-core",
+      "path": "binaries/darwin-x64/autopilot-core",
+      "sha256": "8c88e395b174ad076783178ea8b905fbbad598eea31de84fb6557edab65476aa",
+      "sizeBytes": 1204592,
+      "sourceHash": "64a6da523381bd6365da8253062de5b6410897e45c4c93b1f7e7c7bad5be3d0f",
+      "target": "x86_64-apple-darwin"
+    },
+    "linux-arm64": {
+      "buildMethod": "docker rust:1.97.1-alpine --platform linux/arm64 musl static build",
+      "path": "binaries/linux-arm64/autopilot-core",
+      "sha256": "d585391902355f001e92e9b4ff6aeec883f520e3540c5af1100abb8e7fb63618",
+      "sizeBytes": 1395272,
+      "sourceHash": "64a6da523381bd6365da8253062de5b6410897e45c4c93b1f7e7c7bad5be3d0f",
+      "target": "aarch64-unknown-linux-musl"
+    },
+    "linux-x64": {
+      "buildMethod": "docker rust:1.97.1-alpine --platform linux/amd64 musl static build",
+      "path": "binaries/linux-x64/autopilot-core",
+      "sha256": "b924f7940b13cda44f0b3e5da2f341a7faeed2fc242125b1608ac7cd26f9e449",
+      "sizeBytes": 1419592,
+      "sourceHash": "64a6da523381bd6365da8253062de5b6410897e45c4c93b1f7e7c7bad5be3d0f",
+      "target": "x86_64-unknown-linux-musl"
+    },
+    "win32-x64": {
+      "buildMethod": "native cargo build --release --target x86_64-pc-windows-gnu -p drivers --bin autopilot-core",
+      "path": "binaries/win32-x64/autopilot-core.exe",
+      "sha256": "fa80488d5a4611ec0d52b3452c318adc4f85a9c08fb27b4b302449848371df87",
+      "sizeBytes": 2752482,
+      "sourceHash": "64a6da523381bd6365da8253062de5b6410897e45c4c93b1f7e7c7bad5be3d0f",
+      "target": "x86_64-pc-windows-gnu"
+    }
+  },
+  "generatedAt": "2026-07-27T20:41:19Z",
+  "schema": 1,
+  "source": {
+    "directories": [
+      "kernel",
+      "drivers",
+      "codegen"
+    ],
+    "fileCount": 56,
+    "hash": "64a6da523381bd6365da8253062de5b6410897e45c4c93b1f7e7c7bad5be3d0f",
+    "hashAlgorithm": "sha256(path-nul-content-nul over git-tracked .rs files)",
+    "newestTrackedSource": "drivers/src/seam/mod.rs",
+    "newestTrackedSourceMtimeNs": 1785181109210720600
+  }
+}

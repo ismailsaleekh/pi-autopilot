@@ -36,9 +36,10 @@ readonly LOC="$script_dir/loc.sh"
 readonly PURITY="$script_dir/kernel-purity.sh"
 readonly NOINFER="$script_dir/no-inference.sh"
 readonly HOSTTHIN="$script_dir/host-thinness.sh"
+readonly BINARY="$script_dir/binary-parity.sh"
 readonly REALPROD="$script_dir/real-producers.mjs"
 
-for s in "$LOC" "$PURITY" "$NOINFER" "$HOSTTHIN" "$REALPROD"; do
+for s in "$LOC" "$PURITY" "$NOINFER" "$HOSTTHIN" "$BINARY" "$REALPROD"; do
   [ -x "$s" ] || { printf 'selftest.sh: not executable: %s\n' "$s" >&2; exit 2; }
 done
 
@@ -61,6 +62,88 @@ expect() {
     printf '  FAIL  %s — expected exit %d, got %d\n' "$label" "$want" "$got" >&2
     sed 's/^/          /' "$tmp/out.log" >&2
     failures=$((failures + 1))
+  fi
+}
+
+write_binary_parity_fixture() {
+  local root="$1" mode="$2"
+
+  mkdir -p \
+    "$root/bin" \
+    "$root/binaries/darwin-arm64" \
+    "$root/kernel/src" \
+    "$root/drivers/src" \
+    "$root/codegen/src"
+
+  cat > "$root/bin/autopilot-core.mjs" <<'JS'
+#!/usr/bin/env node
+const supported = {
+  'darwin-arm64': 'autopilot-core',
+};
+JS
+
+  cat > "$root/kernel/src/lib.rs" <<'RS'
+pub fn kernel_state() -> u8 { 1 }
+RS
+  cat > "$root/drivers/src/lib.rs" <<'RS'
+pub fn driver_state() -> u8 { 2 }
+RS
+  cat > "$root/codegen/src/main.rs" <<'RS'
+fn main() {}
+RS
+
+  printf '#!/bin/sh\necho autopilot-core fixture\n' > "$root/binaries/darwin-arm64/autopilot-core"
+  chmod +x "$root/binaries/darwin-arm64/autopilot-core"
+
+  touch -t 202607280101.00 "$root/kernel/src/lib.rs" "$root/drivers/src/lib.rs" "$root/codegen/src/main.rs"
+  touch -t 202607280102.00 "$root/binaries/darwin-arm64/autopilot-core"
+
+  python3 - "$root" <<'PY'
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+source_files = ["codegen/src/main.rs", "drivers/src/lib.rs", "kernel/src/lib.rs"]
+h = hashlib.sha256()
+newest = max(source_files, key=lambda rel: (root / rel).stat().st_mtime_ns)
+for rel in sorted(source_files):
+    h.update(rel.encode())
+    h.update(b"\0")
+    h.update((root / rel).read_bytes())
+    h.update(b"\0")
+source_hash = h.hexdigest()
+binary_rel = "binaries/darwin-arm64/autopilot-core"
+binary_hash = hashlib.sha256((root / binary_rel).read_bytes()).hexdigest()
+manifest = {
+    "schema": 1,
+    "source": {
+        "directories": ["kernel", "drivers", "codegen"],
+        "hash": source_hash,
+        "newestTrackedSource": newest,
+    },
+    "binaries": {
+        "darwin-arm64": {
+            "path": binary_rel,
+            "sha256": binary_hash,
+            "sourceHash": source_hash,
+            "target": "aarch64-apple-darwin",
+        }
+    },
+}
+(root / "binaries/MANIFEST.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+PY
+
+  git -C "$root" init -q
+  git -C "$root" config user.email selftest@example.invalid
+  git -C "$root" config user.name 'Gate Selftest'
+  git -C "$root" add bin kernel drivers codegen binaries
+
+  if [ "$mode" = "stale" ]; then
+    printf '\npub fn repaired_source() -> u8 { 3 }\n' >> "$root/drivers/src/lib.rs"
+    touch -t 202607280103.00 "$root/drivers/src/lib.rs"
+    git -C "$root" add drivers/src/lib.rs
   fi
 }
 
@@ -537,6 +620,19 @@ fn ready(name: &str) -> LaneReadiness { LaneReadiness { lane_id: id(name), prede
 fn resources() -> ResourceFacts { ResourceFacts { free_storage_bytes: 20, projected_storage_bytes: 1, available_memory_bytes: 8, physical_memory_bytes: 16 } }
 RS
 expect 1 "rejects fabricated route producers and success without recorded invocation" node "$REALPROD" --root "$rbad"
+
+# ---------------------------------------------------------------------------
+# binary-parity.sh  (D81 source/artifact parity)
+# ---------------------------------------------------------------------------
+printf '\nbinary-parity.sh\n'
+
+bgood="$tmp/binary-parity-good"
+write_binary_parity_fixture "$bgood" current
+expect 0 "accepts binaries rebuilt from the current tracked source hash" "$BINARY" --root "$bgood"
+
+bbad="$tmp/binary-parity-stale"
+write_binary_parity_fixture "$bbad" stale
+expect 1 "rejects stale binary older than repaired source and stale manifest hash" "$BINARY" --root "$bbad"
 
 # ---------------------------------------------------------------------------
 

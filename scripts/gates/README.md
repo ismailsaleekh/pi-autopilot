@@ -15,7 +15,8 @@ invariants that the whole convergence property depends on.
 | `kernel-purity.sh` | S4, F1 | Kernel names no domain concept; performs no IO |
 | `no-inference.sh` | B4 | State comes only from `fold(events)` |
 | `host-thinness.sh` | S7 | TS Host ≤ 1,200 LOC and **decides nothing** (D78) |
-| `selftest.sh` | S0 | Proves the five gates above actually work |
+| `binary-parity.sh` | D81 | Shipped `binaries/` artifacts match current tracked Rust source and manifest fingerprints |
+| `selftest.sh` | S0 | Proves the six gates above actually work |
 
 All gates exit `0` on pass, `1` on violation, `2` on usage error. Absent
 directories are not a failure, so the gates are safe to run from W0 onward.
@@ -72,7 +73,7 @@ known-bad fixture means **the kill-switch cannot be trusted to fire**, and W1
 must not start.
 
 ```bash
-./scripts/gates/selftest.sh     # must exit 0 — W0 gate (89/89 fixtures)
+./scripts/gates/selftest.sh     # must exit 0 — W0 gate (93/93 fixtures)
 ```
 
 ## The host boundary (D78)
