@@ -1,0 +1,15 @@
+{
+  "records": [
+    {
+      "schema": "autopilot.transcript.v1",
+      "boundary_id": "planning.plan-review.v1",
+      "raw_output": "verdict PASS — The plan is sufficient: U1 covers parsing `--json`, loud unknown-flag rejection, and no dependency; U2 covers exact JSON output, byte-for-byte default preservation, and unchanged derivation; U3 requires focused tests for all mission-critical behaviors.\n\nverdict ADVISORY — If “exactly” means no trailing newline or specific key order, the implementation/test should enforce that explicitly, but this is already mostly implied by U2/U3.\n",
+      "provenance": {
+        "provider": "openai-codex",
+        "model": "gpt-5.5",
+        "thinking": "xhigh",
+        "session_id": "w4-capture-planning-plan-review-v1-2254"
+      }
+    }
+  ]
+}

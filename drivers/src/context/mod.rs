@@ -1,7 +1,8 @@
 use kernel::boundary::{BoundaryDescriptor, BoundaryRuntime, Rejection, boundary_by_id};
 use kernel::generated::{
     ContextAnchor, ContextAnchorForm, ContextManifest, ContextManifestBudget,
-    ContextManifestFreshness, ContextManifestRole, Digest, Id, Nullable, SchemaId, Sha, Uri, Uuidv7,
+    ContextManifestFreshness, ContextManifestRole, Digest, Id, Nullable, SchemaId, Sha, Uri,
+    Uuidv7,
 };
 use kernel_macros::acceptance_boundary;
 

@@ -6,15 +6,65 @@ use drivers::bgtasks::{BgCapabilities, BgCapability, require_before_mutation};
 use kernel::failure::{Failure, OperatorDecision};
 
 #[test]
-fn missing_background_task_capability_pauses_before_any_mutation() -> Result<(), Box<dyn std::error::Error>> {
+fn missing_background_task_capability_pauses_before_any_mutation()
+-> Result<(), Box<dyn std::error::Error>> {
     for (label, caps, tool) in [
-        ("run", BgCapabilities { run: false, ..BgCapabilities::complete() }, BgCapability::Run),
-        ("is-agent", BgCapabilities { run_is_agent: false, ..BgCapabilities::complete() }, BgCapability::Run),
-        ("trigger", BgCapabilities { run_completion_trigger: false, ..BgCapabilities::complete() }, BgCapability::Run),
-        ("status", BgCapabilities { status: false, ..BgCapabilities::complete() }, BgCapability::Status),
-        ("logs", BgCapabilities { logs: false, ..BgCapabilities::complete() }, BgCapability::Logs),
-        ("bounded-logs", BgCapabilities { logs_bounded: false, ..BgCapabilities::complete() }, BgCapability::Logs),
-        ("stop", BgCapabilities { stop: false, ..BgCapabilities::complete() }, BgCapability::Stop),
+        (
+            "run",
+            BgCapabilities {
+                run: false,
+                ..BgCapabilities::complete()
+            },
+            BgCapability::Run,
+        ),
+        (
+            "is-agent",
+            BgCapabilities {
+                run_is_agent: false,
+                ..BgCapabilities::complete()
+            },
+            BgCapability::Run,
+        ),
+        (
+            "trigger",
+            BgCapabilities {
+                run_completion_trigger: false,
+                ..BgCapabilities::complete()
+            },
+            BgCapability::Run,
+        ),
+        (
+            "status",
+            BgCapabilities {
+                status: false,
+                ..BgCapabilities::complete()
+            },
+            BgCapability::Status,
+        ),
+        (
+            "logs",
+            BgCapabilities {
+                logs: false,
+                ..BgCapabilities::complete()
+            },
+            BgCapability::Logs,
+        ),
+        (
+            "bounded-logs",
+            BgCapabilities {
+                logs_bounded: false,
+                ..BgCapabilities::complete()
+            },
+            BgCapability::Logs,
+        ),
+        (
+            "stop",
+            BgCapabilities {
+                stop: false,
+                ..BgCapabilities::complete()
+            },
+            BgCapability::Stop,
+        ),
     ] {
         let root = temp_root(label)?;
         let target = root.join("mutation");
@@ -24,7 +74,12 @@ fn missing_background_task_capability_pauses_before_any_mutation() -> Result<(),
         });
         let error = result.unwrap_err();
         assert_eq!(error.capability, tool);
-        assert_eq!(error.failure, Failure::Paused { needs: OperatorDecision::SupplyCapability });
+        assert_eq!(
+            error.failure,
+            Failure::Paused {
+                needs: OperatorDecision::SupplyCapability
+            }
+        );
         assert!(error.instruction.contains("https://pi.dev/packages"));
         assert!(error.instruction.contains("reload/restart"));
         assert!(!target.exists(), "{label} created a directory");
@@ -50,7 +105,10 @@ fn complete_background_task_capability_allows_mutation() -> Result<(), Box<dyn s
 fn temp_root(label: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
-    let root = std::env::temp_dir().join(format!("pi-autopilot-bg-{label}-{}-{n}", std::process::id()));
+    let root = std::env::temp_dir().join(format!(
+        "pi-autopilot-bg-{label}-{}-{n}",
+        std::process::id()
+    ));
     fs::create_dir_all(&root)?;
     Ok(root)
 }

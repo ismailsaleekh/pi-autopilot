@@ -1,4 +1,4 @@
-use kernel::boundary::{boundary_by_id, BoundaryDescriptor, BoundaryRuntime, Rejection};
+use kernel::boundary::{BoundaryDescriptor, BoundaryRuntime, Rejection, boundary_by_id};
 use kernel_macros::acceptance_boundary;
 
 pub const MODEL_BOUNDARIES: [&str; 5] = [
@@ -48,11 +48,11 @@ pub struct MaterialPlanElement {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum QuestionClass {
-    InvalidatedDecisionPremise,
+    InvalidatedDecision,
+    MissingMaterialDecision,
     MaterialUnderdetermination,
-    UnresolvedTaskContradiction,
-    MissionDodScopeHole,
-    SafetyOrIrreversibility,
+    DodHole,
+    UnsafeIrreversible,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -93,14 +93,7 @@ impl AssignmentPlan {
     }
 
     pub fn validate(&self, cap: u8) -> Result<(), PlanningError> {
-        if self.total() > cap {
-            Err(PlanningError::AssignmentCap {
-                total: self.total(),
-                cap,
-            })
-        } else {
-            Ok(())
-        }
+        if self.total() > cap { Err(PlanningError::AssignmentCap { total: self.total(), cap }) } else { Ok(()) }
     }
 }
 
@@ -153,31 +146,16 @@ impl PlanningDeclarations {
                 let Some((id, attrs)) = after.split_once('"') else {
                     return Err(PlanningError::BadDeclaration(trimmed.to_owned()));
                 };
-                let question = parse_attr(attrs, "question=")?;
-                phases.push(PhaseDeclaration {
-                    id: id.to_owned(),
-                    question,
-                });
+                phases.push(PhaseDeclaration { id: id.to_owned(), question: parse_attr(attrs, "question=")? });
             }
         }
-        let Some(assignment_cap) = cap else {
-            return Err(PlanningError::BadDeclaration(
-                "missing assignment_cap".to_owned(),
-            ));
-        };
-        Ok(Self {
-            assignment_cap,
-            phases,
-        })
+        let Some(assignment_cap) = cap else { return Err(PlanningError::BadDeclaration("missing assignment_cap".to_owned())); };
+        Ok(Self { assignment_cap, phases })
     }
 
     pub fn validate_p1_to_p6(&self) -> Result<(), PlanningError> {
         let expected = ["P1", "P2", "P3", "P4", "P5", "P6"];
-        if self.phases.len() != expected.len() {
-            return Err(PlanningError::BadDeclaration(
-                "wrong phase count".to_owned(),
-            ));
-        }
+        if self.phases.len() != expected.len() { return Err(PlanningError::BadDeclaration("wrong phase count".to_owned())); }
         for (phase, expected_id) in self.phases.iter().zip(expected) {
             if phase.id != expected_id {
                 return Err(PlanningError::BadDeclaration(phase.id.clone()));
@@ -228,11 +206,11 @@ pub fn admit_question(nomination: QuestionNomination) -> Result<QuestionNominati
 
 pub fn question_class_from_d72(value: &str) -> Result<QuestionClass, PlanningError> {
     match value {
-        "invalidated-decision-premise" => Ok(QuestionClass::InvalidatedDecisionPremise),
+        "invalidated-decision" => Ok(QuestionClass::InvalidatedDecision),
+        "missing-material-decision" => Ok(QuestionClass::MissingMaterialDecision),
         "material-underdetermination" => Ok(QuestionClass::MaterialUnderdetermination),
-        "unresolved-task-contradiction" => Ok(QuestionClass::UnresolvedTaskContradiction),
-        "mission-dod-scope-hole" => Ok(QuestionClass::MissionDodScopeHole),
-        "safety-or-irreversibility" => Ok(QuestionClass::SafetyOrIrreversibility),
+        "dod-hole" => Ok(QuestionClass::DodHole),
+        "unsafe-irreversible" => Ok(QuestionClass::UnsafeIrreversible),
         other => Err(PlanningError::RejectedQuestionClass(other.to_owned())),
     }
 }
@@ -271,7 +249,7 @@ pub fn boundary_runtime(id: &'static str) -> BoundaryRuntime {
     producer = Producer::Model,
     visible = true,
     admits = "Task extractor output must name operator-task atoms with source anchors and no repository findings.",
-    mode = BoundaryMode::Record
+    mode = BoundaryMode::Enforce
 )]
 pub fn accept_task_atoms(raw: &str, runtime: &BoundaryRuntime) -> Result<String, Rejection> {
     accept_contains(raw, "atom", runtime)
@@ -282,7 +260,7 @@ pub fn accept_task_atoms(raw: &str, runtime: &BoundaryRuntime) -> Result<String,
     producer = Producer::Model,
     visible = true,
     admits = "Repository scout and dossier output must cite current evidence and avoid work planning.",
-    mode = BoundaryMode::Record
+    mode = BoundaryMode::Enforce
 )]
 pub fn accept_scout_dossier(raw: &str, runtime: &BoundaryRuntime) -> Result<String, Rejection> {
     accept_contains(raw, "evidence", runtime)
@@ -292,11 +270,16 @@ pub fn accept_scout_dossier(raw: &str, runtime: &BoundaryRuntime) -> Result<Stri
     id = "planning.questions.v1",
     producer = Producer::Model,
     visible = true,
-    admits = "Question nominations must use only the five D72 material classes with consequences and evidence.",
-    mode = BoundaryMode::Record
+    admits = "Question output must be either an explicit empty set (`questions: []`) or structured nominations. Each nomination must include class, evidence, and consequence fields. The class field is closed to: invalidated-decision, missing-material-decision, material-underdetermination, dod-hole, unsafe-irreversible.",
+    mode = BoundaryMode::Enforce
 )]
 pub fn accept_questions(raw: &str, runtime: &BoundaryRuntime) -> Result<String, Rejection> {
-    accept_contains(raw, "class", runtime)
+    if accepts_question_output(raw) {
+        Ok(raw.to_owned())
+    } else {
+        runtime.reject(raw)?;
+        Ok(raw.to_owned())
+    }
 }
 
 #[acceptance_boundary(
@@ -304,7 +287,7 @@ pub fn accept_questions(raw: &str, runtime: &BoundaryRuntime) -> Result<String, 
     producer = Producer::Model,
     visible = true,
     admits = "Plan compiler and synthesizer output must backlink every material element to atoms or verified facts.",
-    mode = BoundaryMode::Record
+    mode = BoundaryMode::Enforce
 )]
 pub fn accept_work_map(raw: &str, runtime: &BoundaryRuntime) -> Result<String, Rejection> {
     accept_contains(raw, "backlink", runtime)
@@ -315,7 +298,7 @@ pub fn accept_work_map(raw: &str, runtime: &BoundaryRuntime) -> Result<String, R
     producer = Producer::Model,
     visible = true,
     admits = "Plan review output must separate substantive perfect-plan blockers from advisory wording or style notes.",
-    mode = BoundaryMode::Record
+    mode = BoundaryMode::Enforce
 )]
 pub fn accept_plan_review(raw: &str, runtime: &BoundaryRuntime) -> Result<String, Rejection> {
     accept_contains(raw, "blocker", runtime)
@@ -344,6 +327,25 @@ fn accept_contains(
         runtime.reject(raw)?;
         Ok(raw.to_owned())
     }
+}
+
+fn accepts_question_output(raw: &str) -> bool {
+    let trimmed = raw.trim(); if trimmed.is_empty() { return false; }
+    let (mut classes, mut evidence, mut consequence) = (0_u8, false, false);
+    for (field, value) in trimmed.lines().filter_map(structured_field) { if field == "class" || field == "admissible-class" { classes = classes.saturating_add(1); if question_class_from_d72(&value).is_err() { return false; } } evidence |= field.contains("evidence") && !value.is_empty(); consequence |= field.contains("consequence") && !value.is_empty(); }
+    if classes > 0 { evidence && consequence } else { accepts_empty_question_text(trimmed) }
+}
+
+fn accepts_empty_question_text(raw: &str) -> bool {
+    let compact = raw.split_whitespace().collect::<String>().to_ascii_lowercase(); if ["questions:[]", "question_nominations:[]", "question-nominations:[]", "nominations:[]"].contains(&compact.as_str()) { return true; }
+    let tokens: Vec<String> = raw.split(|character: char| !character.is_ascii_alphanumeric()).map(str::to_ascii_lowercase).collect();
+    let has = |words: &[&str]| tokens.iter().any(|token| words.contains(&token.as_str()));
+    has(&["no", "none", "zero"]) && has(&["question", "questions", "nomination", "nominations"]) && has(&["qualifying", "qualifies", "qualify", "admissible", "material"])
+}
+
+fn structured_field(line: &str) -> Option<(String, String)> {
+    let trimmed = line.trim().trim_start_matches(['-', '*', '>']).trim_start(); let (field, value) = trimmed.split_once(':')?;
+    Some((field.trim().trim_matches('*').to_ascii_lowercase().replace(' ', "-"), value.trim().trim_matches('`').to_ascii_lowercase()))
 }
 
 fn parse_cap(attrs: &str) -> Result<u8, PlanningError> {

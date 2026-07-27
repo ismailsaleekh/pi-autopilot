@@ -1,0 +1,15 @@
+{
+  "records": [
+    {
+      "schema": "autopilot.transcript.v1",
+      "boundary_id": "planning.work-map.v1",
+      "raw_output": "### unit\n- **id:** U1\n- **objective:** Parse the opt-in `--json` flag in the utility entrypoint and reject unknown flags.\n- **acceptance criteria:**\n  - `--json` is recognized.\n  - Any unknown flag exits non-zero with a message naming that flag.\n  - No new runtime dependency is introduced.\n- **exact task phrase:** “Parse a `--json` flag in the utility entrypoint.” / “Unknown flags must fail loudly, never be ignored.” / “No new runtime dependency.”\n\n### unit\n- **id:** U2\n- **objective:** Emit the documented JSON object in JSON mode while preserving existing default output and derivation behavior.\n- **acceptance criteria:**\n  - `--json` emits exactly `{\"repo_key\": \"<base32>\", \"algorithm\": \"autopilot-repo-v1\"}`.\n  - With no flag, output remains unchanged byte for byte.\n  - The derivation algorithm is unchanged.\n- **exact task phrase:** “Emit the JSON object when set; keep the existing plain output otherwise.” / “Default (no flag) output is unchanged, byte for byte.” / “No change to the derivation algorithm itself.”\n\n### unit\n- **id:** U3\n- **objective:** Add a focused test covering JSON output, default output, and unknown-flag failure.\n- **acceptance criteria:**\n  - The test verifies the exact documented JSON object.\n  - The test verifies unchanged default output.\n  - The test verifies an unknown flag exits non-zero and its message names the flag.\n- **exact task phrase:** “Focused test covers all three cases.”\n",
+      "provenance": {
+        "provider": "openai-codex",
+        "model": "gpt-5.6-sol",
+        "thinking": "max",
+        "session_id": "w4-capture-planning-work-map-v1-2254"
+      }
+    }
+  ]
+}

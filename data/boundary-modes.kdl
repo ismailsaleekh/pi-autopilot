@@ -1,8 +1,8 @@
 schema "autopilot.boundary_modes.v1"
 version 1
 
-boundary "planning.task-atoms.v1" mode="record" reason="W4 live planning transcript pending"
-boundary "planning.scout-dossier.v1" mode="record" reason="W4 live planning transcript pending"
-boundary "planning.questions.v1" mode="record" reason="W4 live planning transcript pending"
-boundary "planning.work-map.v1" mode="record" reason="W4 live planning transcript pending"
-boundary "planning.plan-review.v1" mode="record" reason="W4 live planning transcript pending"
+boundary "planning.task-atoms.v1" mode="enforce" reason="W4 live subscription transcript recorded 2026-07-27; flip is one-way"
+boundary "planning.scout-dossier.v1" mode="enforce" reason="W4 live subscription transcript recorded 2026-07-27; flip is one-way"
+boundary "planning.questions.v1" mode="enforce" reason="W4 live subscription transcript recorded 2026-07-27; flip is one-way"
+boundary "planning.work-map.v1" mode="enforce" reason="W4 live subscription transcript recorded 2026-07-27; flip is one-way"
+boundary "planning.plan-review.v1" mode="enforce" reason="W4 live subscription transcript recorded 2026-07-27; flip is one-way"

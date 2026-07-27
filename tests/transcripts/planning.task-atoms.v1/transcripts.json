@@ -1,0 +1,15 @@
+{
+  "records": [
+    {
+      "schema": "autopilot.transcript.v1",
+      "boundary_id": "planning.task-atoms.v1",
+      "raw_output": "atom W1 \"Parse a `--json` flag in the utility entrypoint.\" section \"3. Work Breakdown\"\natom W2 \"Emit the JSON object when set; keep the existing plain output otherwise.\" section \"3. Work Breakdown\"\natom W3 \"Cover both modes with a focused test.\" section \"3. Work Breakdown\"\natom W4 \"Unknown flags must fail loudly, never be ignored.\" section \"4. Constraints and Banned Shapes\"\natom W5 \"Focused test covers all three cases.\" section \"5. Definition of Done\"\n",
+      "provenance": {
+        "provider": "openai-codex",
+        "model": "gpt-5.5",
+        "thinking": "high",
+        "session_id": "w4-capture-planning-task-atoms-v1-2254"
+      }
+    }
+  ]
+}

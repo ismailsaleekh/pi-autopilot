@@ -50,15 +50,28 @@ pub struct RunLease {
 
 impl StateRoot {
     pub fn from_home(home: impl AsRef<Path>) -> Self {
-        Self { root: home.as_ref().join(".pi").join("agent").join("autopilot").join("v2") }
+        Self {
+            root: home
+                .as_ref()
+                .join(".pi")
+                .join("agent")
+                .join("autopilot")
+                .join("v2"),
+        }
     }
 
     pub fn from_v2_root(root: impl AsRef<Path>) -> Self {
-        Self { root: root.as_ref().to_path_buf() }
+        Self {
+            root: root.as_ref().to_path_buf(),
+        }
     }
 
     pub fn reserve(&self, identity: &RunIdentity) -> Result<RunLease, StateRootError> {
-        let dir = self.root.join("active").join(&identity.repo_key.0).join(&identity.workstream.0);
+        let dir = self
+            .root
+            .join("active")
+            .join(&identity.repo_key.0)
+            .join(&identity.workstream.0);
         private_dir(&dir)?;
         let marker = dir.join("nonterminal.lock");
         match OpenOptions::new()
@@ -81,11 +94,22 @@ impl StateRoot {
     }
 
     pub fn materialize(&self, identity: &RunIdentity) -> Result<RunPaths, StateRootError> {
-        let run_dir = self.root.join("runs").join(&identity.repo_key.0).join(&identity.run_id.0);
-        let worktree_dir = self.root.join("worktrees").join(&identity.repo_key.0).join(&identity.run_id.0);
+        let run_dir = self
+            .root
+            .join("runs")
+            .join(&identity.repo_key.0)
+            .join(&identity.run_id.0);
+        let worktree_dir = self
+            .root
+            .join("worktrees")
+            .join(&identity.repo_key.0)
+            .join(&identity.run_id.0);
         private_dir(&run_dir)?;
         private_dir(&worktree_dir)?;
-        Ok(RunPaths { run_dir, worktree_dir })
+        Ok(RunPaths {
+            run_dir,
+            worktree_dir,
+        })
     }
 
     pub fn write_private(
@@ -96,7 +120,12 @@ impl StateRoot {
         let path = self.root.join(relative.as_ref());
         let parent = path.parent().ok_or(StateRootError::Io)?;
         private_dir(parent)?;
-        let mut file = OpenOptions::new().write(true).create(true).truncate(true).open(&path).map_err(map_io)?;
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&path)
+            .map_err(map_io)?;
         private_handle(&file)?;
         file.write_all(bytes).map_err(map_io)?;
         file.sync_all().map_err(map_io)?;
@@ -126,7 +155,8 @@ pub fn repo_key(common_dir: impl AsRef<Path>) -> Result<Base32, StateRootError> 
     #[cfg(unix)]
     let key = repo_key_from_canonical_bytes(real.as_os_str().as_bytes());
     #[cfg(not(unix))]
-    let key = repo_key_from_canonical_bytes(real.to_str().ok_or(StateRootError::NonUtf8Path)?.as_bytes());
+    let key =
+        repo_key_from_canonical_bytes(real.to_str().ok_or(StateRootError::NonUtf8Path)?.as_bytes());
     Ok(key)
 }
 
@@ -175,7 +205,11 @@ fn hex_uuid(bytes: [u8; 16]) -> String {
 }
 
 fn hex(nibble: u8) -> char {
-    char::from(if nibble < 10 { b'0' + nibble } else { b'a' + (nibble - 10) })
+    char::from(if nibble < 10 {
+        b'0' + nibble
+    } else {
+        b'a' + (nibble - 10)
+    })
 }
 
 fn private_dir(path: &Path) -> Result<(), StateRootError> {
@@ -216,4 +250,3 @@ fn base32_lower(bytes: &[u8]) -> String {
     }
     out
 }
-

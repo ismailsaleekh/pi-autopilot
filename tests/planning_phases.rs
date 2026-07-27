@@ -1,10 +1,10 @@
-use std::cell::Cell;
+use std::{cell::Cell, fs};
 
 use drivers::planning::{
-    admit_question, p1_inventory, p2_ground, question_class_from_d72, require_material_backlinks,
-    require_total_dispositions, AssignmentPlan, Atom, AtomKind, Backlink, Disposition,
-    MaterialPlanElement, PlanningDeclarations, PlanningError, QuestionClass, QuestionNomination,
-    RepositoryEvidence, TaskAuthority, TaskDocument,
+    AssignmentPlan, Atom, AtomKind, Backlink, Disposition, MaterialPlanElement,
+    PlanningDeclarations, PlanningError, QuestionClass, QuestionNomination, RepositoryEvidence,
+    TaskAuthority, TaskDocument, accept_questions, admit_question, boundary_runtime, p1_inventory,
+    p2_ground, question_class_from_d72, require_material_backlinks, require_total_dispositions,
 };
 
 struct TaskOnly {
@@ -102,23 +102,17 @@ fn material_elements_require_backlinks() {
 #[test]
 fn question_gate_admits_only_d72_five_classes() {
     let admitted = [
+        ("invalidated-decision", QuestionClass::InvalidatedDecision),
         (
-            "invalidated-decision-premise",
-            QuestionClass::InvalidatedDecisionPremise,
+            "missing-material-decision",
+            QuestionClass::MissingMaterialDecision,
         ),
         (
             "material-underdetermination",
             QuestionClass::MaterialUnderdetermination,
         ),
-        (
-            "unresolved-task-contradiction",
-            QuestionClass::UnresolvedTaskContradiction,
-        ),
-        ("mission-dod-scope-hole", QuestionClass::MissionDodScopeHole),
-        (
-            "safety-or-irreversibility",
-            QuestionClass::SafetyOrIrreversibility,
-        ),
+        ("dod-hole", QuestionClass::DodHole),
+        ("unsafe-irreversible", QuestionClass::UnsafeIrreversible),
     ];
     for (raw, class) in admitted {
         assert_eq!(question_class_from_d72(raw), Ok(class));
@@ -134,6 +128,59 @@ fn question_gate_admits_only_d72_five_classes() {
             "minor-wording".to_owned()
         ))
     );
+}
+
+#[test]
+fn question_boundary_admits_live_empty_capture() {
+    let raw = match fs::read_to_string("/tmp/w4-live/raw/planning.questions.v1.raw") {
+        Ok(value) => value,
+        Err(error) => panic!("live question transcript missing: {error}"),
+    };
+    assert_eq!(raw, "No qualifying questions.\n");
+    let mut runtime = boundary_runtime("planning.questions.v1");
+    runtime.flip_to_enforce();
+    assert_eq!(accept_questions(&raw, &runtime), Ok(raw));
+}
+
+#[test]
+fn question_boundary_admits_structured_empty_set() {
+    let raw = "questions: []\n";
+    let mut runtime = boundary_runtime("planning.questions.v1");
+    runtime.flip_to_enforce();
+    assert_eq!(accept_questions(raw, &runtime), Ok(raw.to_owned()));
+}
+
+#[test]
+fn question_boundary_admits_valid_populated_nomination() {
+    let raw = "class: material-underdetermination\nevidence: task and repository leave two plausible paths\nconsequence: choice changes verification scope\n";
+    let mut runtime = boundary_runtime("planning.questions.v1");
+    runtime.flip_to_enforce();
+    assert_eq!(accept_questions(raw, &runtime), Ok(raw.to_owned()));
+}
+
+#[test]
+fn question_boundary_rejects_invented_class() {
+    let raw =
+        "class: made-up-thing\nevidence: current repository evidence\nconsequence: changes scope\n";
+    let mut runtime = boundary_runtime("planning.questions.v1");
+    runtime.flip_to_enforce();
+    let rejection = match accept_questions(raw, &runtime) {
+        Ok(value) => panic!("invented class admitted: {value}"),
+        Err(value) => value,
+    };
+    assert_eq!(rejection.boundary_id(), "planning.questions.v1");
+}
+
+#[test]
+fn question_boundary_rejects_prose_mentioning_class() {
+    let raw = "No class of question should pause the plan; continue.";
+    let mut runtime = boundary_runtime("planning.questions.v1");
+    runtime.flip_to_enforce();
+    let rejection = match accept_questions(raw, &runtime) {
+        Ok(value) => panic!("class prose admitted: {value}"),
+        Err(value) => value,
+    };
+    assert_eq!(rejection.boundary_id(), "planning.questions.v1");
 }
 
 #[test]

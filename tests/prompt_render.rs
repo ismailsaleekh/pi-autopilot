@@ -55,7 +55,8 @@ fn parity_check_fails_when_generated_prompt_drifts_from_contract_source() {
     let prompt_path = temp_root
         .join("generated/prompts")
         .join(format!("{BOUNDARY_PROMPT}.md"));
-    let mut generated = fs::read_to_string(&prompt_path).expect("temp generated prompt is readable");
+    let mut generated =
+        fs::read_to_string(&prompt_path).expect("temp generated prompt is readable");
     generated.push_str("\nDRIFT: prompt-only instruction not present in data/contracts.kdl.\n");
     fs::write(&prompt_path, generated).expect("temp generated prompt is mutated");
 
