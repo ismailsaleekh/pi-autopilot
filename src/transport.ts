@@ -85,6 +85,10 @@ export class CoreTransport {
     return this.diagnostics.join("\n");
   }
 
+  hasLiveChild(): boolean {
+    return this.child !== undefined && this.child.exitCode === null && !this.child.killed;
+  }
+
   close(): void {
     if (this.child !== undefined) {
       this.child.kill();
@@ -93,7 +97,7 @@ export class CoreTransport {
   }
 
   private ensureChild(): ChildProcessWithoutNullStreams {
-    if (this.child !== undefined && this.child.exitCode === null && !this.child.killed) {
+    if (this.hasLiveChild() && this.child !== undefined) {
       return this.child;
     }
     const binary = this.options.binaryPath ?? resolveCoreBinary({ packageJsonPath: this.options.packageJsonPath });

@@ -42,7 +42,7 @@ jobs:
       - name: Gate no inference
         run: ./scripts/gates/no-inference.sh
       - name: Gate host thinness
-        run: ./scripts/gates/host-thinness.sh --root "$PWD/host"
+        run: ./scripts/gates/host-thinness.sh
       - name: Full Rust tests
         run: cargo test -q
       - name: Host tests
@@ -57,6 +57,64 @@ jobs:
         run: git diff --exit-code ea802a3 -- kernel/
       - name: Package dry run
         run: npm run build && npm run pack:dry-run
+
+  core-binary-matrix:
+    name: core binary ${{ matrix.platform }}-${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: darwin
+            arch: arm64
+            runner: macos-latest
+            target: aarch64-apple-darwin
+            binary: autopilot-core
+          - platform: darwin
+            arch: x64
+            runner: macos-13
+            target: x86_64-apple-darwin
+            binary: autopilot-core
+          - platform: linux
+            arch: x64
+            runner: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            binary: autopilot-core
+          - platform: linux
+            arch: arm64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            binary: autopilot-core
+          - platform: win32
+            arch: x64
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            binary: autopilot-core.exe
+    env:
+      PI_OFFLINE: "1"
+      PI_SKIP_VERSION_CHECK: "1"
+      PI_TELEMETRY: "0"
+      CI: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: ${{ matrix.target }}
+      - name: Build release core
+        run: cargo build --release -p drivers --bin autopilot-core --target ${{ matrix.target }}
+      - name: Stage platform binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "binaries/${{ matrix.platform }}-${{ matrix.arch }}"
+          cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" "binaries/${{ matrix.platform }}-${{ matrix.arch }}/${{ matrix.binary }}"
+          test -s "binaries/${{ matrix.platform }}-${{ matrix.arch }}/${{ matrix.binary }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: autopilot-core-${{ matrix.platform }}-${{ matrix.arch }}
+          path: binaries/${{ matrix.platform }}-${{ matrix.arch }}/${{ matrix.binary }}
+          if-no-files-found: error
 
   security:
     runs-on: ubuntu-latest

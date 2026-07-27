@@ -39,8 +39,13 @@ fn packed_install_resolves_installed_core_and_fails_before_spawn_when_missing() 
     let source_package_json = package_root.join("package.json");
     fs::copy(&source_package_json, stage.join("package.json"))?;
     let bin_entry = package_bin_entry(&source_package_json)?;
-    let staged_binary = stage.join(&bin_entry);
-    fs::create_dir_all(staged_binary.parent().ok_or("bin parent")?)?;
+    let staged_wrapper = stage.join(&bin_entry);
+    fs::create_dir_all(staged_wrapper.parent().ok_or("bin parent")?)?;
+    fs::copy(package_root.join(&bin_entry), &staged_wrapper)?;
+    make_executable(&staged_wrapper)?;
+    let binary_entry = package_platform_binary_entry();
+    let staged_binary = stage.join(&binary_entry);
+    fs::create_dir_all(staged_binary.parent().ok_or("binary parent")?)?;
     fs::copy(env!("CARGO_BIN_EXE_autopilot-core"), &staged_binary)?;
     make_executable(&staged_binary)?;
 
@@ -54,15 +59,18 @@ fn packed_install_resolves_installed_core_and_fails_before_spawn_when_missing() 
         .get("files")
         .and_then(Value::as_array)
         .ok_or("npm pack metadata omitted files")?;
-    let packed_bin = files
-        .iter()
-        .find(|file| file.get("path").and_then(Value::as_str) == Some(bin_entry.as_str()))
-        .ok_or_else(|| format!("packed payload omitted bin.autopilot-core at {bin_entry}"))?;
-    let mode = packed_bin
+    let packed_wrapper = packed_file(files, &bin_entry)?;
+    let wrapper_mode = packed_wrapper
         .get("mode")
         .and_then(Value::as_u64)
-        .ok_or("packed bin omitted mode")?;
-    assert_ne!(mode & 0o111, 0, "packed autopilot-core is not executable");
+        .ok_or("packed wrapper omitted mode")?;
+    assert_ne!(wrapper_mode & 0o111, 0, "packed autopilot-core resolver wrapper is not executable");
+    let packed_binary = packed_file(files, &binary_entry)?;
+    let binary_mode = packed_binary
+        .get("mode")
+        .and_then(Value::as_u64)
+        .ok_or("packed platform binary omitted mode")?;
+    assert_ne!(binary_mode & 0o111, 0, "packed platform autopilot-core is not executable");
 
     let filename = packed
         .get("filename")
@@ -74,8 +82,11 @@ fn packed_install_resolves_installed_core_and_fails_before_spawn_when_missing() 
 
     let installed = consumer.join("node_modules").join("pi-autopilot");
     let installed_package_json = installed.join("package.json");
-    let installed_binary = installed.join(&bin_entry);
-    assert!(installed_binary.is_file(), "installed bin path is absent");
+    let installed_wrapper = installed.join(&bin_entry);
+    assert!(installed_wrapper.is_file(), "installed bin wrapper path is absent");
+    assert_executable(&installed_wrapper)?;
+    let installed_binary = installed.join(&binary_entry);
+    assert!(installed_binary.is_file(), "installed platform binary path is absent");
     assert_executable(&installed_binary)?;
 
     let resolver = package_root.join("host").join("src").join("resolve-core.ts");
@@ -88,7 +99,7 @@ fn packed_install_resolves_installed_core_and_fails_before_spawn_when_missing() 
     assert!(!missing.success(), "missing binary unexpectedly resolved");
     let evidence = String::from_utf8_lossy(&missing.stderr);
     assert!(evidence.len() < 1200, "missing-binary evidence is unbounded");
-    assert!(evidence.contains("autopilot-core is not installed"), "{evidence}");
+    assert!(evidence.contains("autopilot-core binary missing"), "{evidence}");
     assert!(evidence.contains(installed_binary.to_string_lossy().as_ref()), "{evidence}");
     assert!(!evidence.contains("exited code="), "resolver spawned the core: {evidence}");
 
@@ -148,6 +159,28 @@ fn package_bin_entry(package_json: &Path) -> Result<String, Box<dyn std::error::
         .and_then(Value::as_str)
         .ok_or("package.json bin.autopilot-core is absent")?;
     Ok(entry.to_owned())
+}
+
+fn package_platform_binary_entry() -> String {
+    let os = match std::env::consts::OS {
+        "macos" => "darwin",
+        "windows" => "win32",
+        other => other,
+    };
+    let arch = match std::env::consts::ARCH {
+        "aarch64" => "arm64",
+        "x86_64" => "x64",
+        other => other,
+    };
+    let name = if os == "win32" { "autopilot-core.exe" } else { "autopilot-core" };
+    format!("binaries/{os}-{arch}/{name}")
+}
+
+fn packed_file<'a>(files: &'a [Value], path: &str) -> Result<&'a Value, Box<dyn std::error::Error>> {
+    files
+        .iter()
+        .find(|file| file.get("path").and_then(Value::as_str) == Some(path))
+        .ok_or_else(|| format!("packed payload omitted {path}").into())
 }
 
 fn run_resolver(

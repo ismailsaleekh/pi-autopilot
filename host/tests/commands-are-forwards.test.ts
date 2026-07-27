@@ -59,11 +59,11 @@ test("extension registers tool_call guard as a core frame forward", async () => 
   autopilotExtension(pi, { transport });
 
   const input = { command: "do-not-rewrite" };
-  const result = await pi.events.get("tool_call")({ toolName: "bg_run", input }, fakeCtx());
+  const result = await pi.events.get("tool_call")({ toolName: "autopilot_emit_status", input }, fakeCtx());
 
   assert.deepEqual(transport.calls.at(-1), {
     kind: "guard-query",
-    payload: { tool_name: "bg_run", arguments: input },
+    payload: { tool_name: "autopilot_emit_status", arguments: input },
     timeoutMs: 5000,
   });
   assert.deepEqual(result, { block: true, reason: "guarded" });

@@ -18,9 +18,10 @@
 #   1. SIZE      — Host <= 1200 LOC (separate from the Core budget).
 #   2. SEMANTICS — Host source contains no decision vocabulary.
 #
-# The single sanctioned exception is the fail-closed guard default (D78 §3.3):
-# when Core is unavailable or times out, the Host DENIES. That is a safety
-# default, not a decision, and it is pinned by its own negative test.
+# The single sanctioned exception is the scoped fail-closed guard default (D78
+# §3.3): inside Autopilot's authority, Core unavailability/timeouts DENY. The
+# Host may also route out-of-scope Pi tools around Core. That scope predicate is
+# routing, not semantic verdict logic, and is pinned by negative tests.
 #
 # Usage:
 #     scripts/gates/host-thinness.sh
@@ -166,8 +167,8 @@ host-thinness.sh: $violations DECISION VIOLATION(S).
   Core effects. Run state, lane readiness, merge admissibility, verdicts,
   scheduling, and role/prompt selection all belong to Core.
 
-  The only sanctioned Host decision is the fail-closed guard default: when
-  Core is unavailable or times out, DENY (D78 §3.3).
+  The only sanctioned Host decision is the scoped fail-closed guard default:
+  inside Autopilot's authority, Core unavailability/timeouts DENY (D78 §3.3).
 
   Do NOT delete banned terms to make this pass.
 EOF

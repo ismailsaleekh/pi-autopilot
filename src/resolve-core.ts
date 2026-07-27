@@ -1,20 +1,74 @@
 import { accessSync, constants, readFileSync } from "node:fs";
-import { dirname, isAbsolute, resolve } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export interface ResolveCoreOptions {
   packageJsonPath?: string;
+  platform?: NodeJS.Platform | string;
+  arch?: NodeJS.Architecture | string;
 }
 
+export type CoreInstallErrorCode = "metadata" | "unsupported-platform" | "missing-binary";
+
 export class CoreInstallError extends Error {
-  constructor(message: string) {
+  readonly code: CoreInstallErrorCode;
+  readonly platformKey?: string;
+
+  constructor(message: string, code: CoreInstallErrorCode = "metadata", platformKey?: string) {
     super(message);
     this.name = "CoreInstallError";
+    this.code = code;
+    this.platformKey = platformKey;
   }
 }
 
+const SUPPORTED_BINARIES = Object.freeze({
+  "darwin-arm64": "autopilot-core",
+  "darwin-x64": "autopilot-core",
+  "linux-x64": "autopilot-core",
+  "linux-arm64": "autopilot-core",
+  "win32-x64": "autopilot-core.exe",
+} as const);
+
+type SupportedPlatformKey = keyof typeof SUPPORTED_BINARIES;
+
 export function resolveCoreBinary(options: ResolveCoreOptions = {}): string {
   const packageJsonPath = options.packageJsonPath ?? defaultPackageJsonPath();
+  const platform = options.platform ?? process.platform;
+  const arch = options.arch ?? process.arch;
+  const platformKey = `${platform}-${arch}`;
+  const binaryName = SUPPORTED_BINARIES[platformKey as SupportedPlatformKey];
+  if (binaryName === undefined) {
+    throw new CoreInstallError(
+      `autopilot-core unsupported platform ${platformKey}. Supported platforms: ${Object.keys(SUPPORTED_BINARIES).join(", ")}`,
+      "unsupported-platform",
+      platformKey,
+    );
+  }
+
+  assertPackageDeclaresResolver(packageJsonPath);
+  const candidate = join(dirname(packageJsonPath), "binaries", platformKey, binaryName);
+  try {
+    accessSync(candidate, constants.X_OK);
+  } catch (error) {
+    throw new CoreInstallError(
+      `autopilot-core binary missing for ${platformKey}: ${candidate}: ${errorMessage(error)}`,
+      "missing-binary",
+      platformKey,
+    );
+  }
+  return candidate;
+}
+
+export function corePlatformKey(options: Pick<ResolveCoreOptions, "platform" | "arch"> = {}): string {
+  return `${options.platform ?? process.platform}-${options.arch ?? process.arch}`;
+}
+
+function defaultPackageJsonPath(): string {
+  return fileURLToPath(new URL("../package.json", import.meta.url));
+}
+
+function assertPackageDeclaresResolver(packageJsonPath: string): void {
   const metadata = readPackageMetadata(packageJsonPath);
   const bin = metadata.bin;
   if (!isRecord(bin)) {
@@ -24,20 +78,9 @@ export function resolveCoreBinary(options: ResolveCoreOptions = {}): string {
   if (typeof entry !== "string" || entry.length === 0) {
     throw installError(packageJsonPath, "package.json bin.autopilot-core is absent");
   }
-  const candidate = isAbsolute(entry) ? entry : resolve(dirname(packageJsonPath), entry);
-  try {
-    accessSync(candidate, constants.X_OK);
-  } catch (error) {
-    throw installError(
-      packageJsonPath,
-      `package.json bin.autopilot-core points to unavailable binary ${candidate}: ${errorMessage(error)}`,
-    );
+  if (entry !== "bin/autopilot-core.mjs") {
+    throw installError(packageJsonPath, `package.json bin.autopilot-core must point to bin/autopilot-core.mjs, got ${entry}`);
   }
-  return candidate;
-}
-
-function defaultPackageJsonPath(): string {
-  return fileURLToPath(new URL("../package.json", import.meta.url));
 }
 
 function readPackageMetadata(packageJsonPath: string): Record<string, unknown> {
@@ -57,7 +100,8 @@ function readPackageMetadata(packageJsonPath: string): Record<string, unknown> {
 
 function installError(packageJsonPath: string, detail: string): CoreInstallError {
   return new CoreInstallError(
-    `autopilot-core is not installed (${detail}). Reinstall pi-autopilot or run cargo build -p drivers --release so the package.json bin entry is present. package=${packageJsonPath}`,
+    `autopilot-core is not installed (${detail}). Reinstall pi-autopilot. package=${packageJsonPath}`,
+    "metadata",
   );
 }
 

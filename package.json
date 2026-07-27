@@ -22,7 +22,8 @@
   ],
   "files": [
     "src/",
-    "target/release/autopilot-core",
+    "bin/",
+    "binaries/",
     "docs/generated/",
     "AUTOPILOT-INSTRUCTIONS.md",
     "logo.png",
@@ -30,7 +31,7 @@
     "LICENSE"
   ],
   "bin": {
-    "autopilot-core": "target/release/autopilot-core"
+    "autopilot-core": "bin/autopilot-core.mjs"
   },
   "scripts": {
     "build": "cargo build --release --workspace",

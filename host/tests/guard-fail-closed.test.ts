@@ -15,7 +15,7 @@ test("guard denies when core times out", async () => {
   const transport = new CoreTransport({ binaryPath: script });
   try {
     const result = await guardToolCall(
-      { tool_name: "bg_run", arguments: { name: "unissued" } },
+      { tool_name: "autopilot_emit_status", arguments: { name: "unissued" } },
       { transport, timeoutMs: 25 },
     );
     assert.equal(result.decision, "deny");
@@ -25,10 +25,10 @@ test("guard denies when core times out", async () => {
   }
 });
 
-test("guard denies when core is absent", async () => {
+test("guard denies when core is absent inside Autopilot scope", async () => {
   const transport = new CoreTransport({ binaryPath: join(tmpdir(), "autopilot-core-absent") });
   const result = await guardToolCall(
-    { tool_name: "write", arguments: { path: "../outside" } },
+    { tool_name: "autopilot_materialize_context", arguments: { path: "../outside" } },
     { transport, timeoutMs: 25 },
   );
   assert.equal(result.decision, "deny");

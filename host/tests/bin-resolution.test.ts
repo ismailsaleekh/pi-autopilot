@@ -6,9 +6,9 @@ import assert from "node:assert/strict";
 
 import { resolveCoreBinary } from "../src/resolve-core.ts";
 
-test("core binary resolves through package.json bin metadata", () => {
+test("core binary resolves through packaged platform binary", () => {
   const dir = mkdtempSync(join(tmpdir(), "autopilot-bin-resolution-"));
-  const binDir = join(dir, "target", "release");
+  const binDir = join(dir, "binaries", "darwin-arm64");
   mkdirSync(binDir, { recursive: true });
   const binary = join(binDir, "autopilot-core");
   writeFileSync(binary, "#!/usr/bin/env sh\nexit 0\n");
@@ -16,10 +16,10 @@ test("core binary resolves through package.json bin metadata", () => {
   const packageJsonPath = join(dir, "package.json");
   writeFileSync(
     packageJsonPath,
-    JSON.stringify({ name: "fixture", bin: { "autopilot-core": "target/release/autopilot-core" } }),
+    JSON.stringify({ name: "fixture", bin: { "autopilot-core": "bin/autopilot-core.mjs" } }),
   );
 
-  assert.equal(resolveCoreBinary({ packageJsonPath }), binary);
+  assert.equal(resolveCoreBinary({ packageJsonPath, platform: "darwin", arch: "arm64" }), binary);
 });
 
 test("host source has no derived path fallback", () => {
@@ -28,7 +28,8 @@ test("host source has no derived path fallback", () => {
   const sourceRoot = new URL("../src/", import.meta.url);
   for (const file of sourceFiles(sourceRoot)) {
     const text = readFileSync(file, "utf8");
-    assert.equal(text.includes("dist/"), false, `${file} contains a forbidden derived path`);
+    assert.equal(text.includes("dist/"), false, `${file} contains a forbidden dist path`);
+    assert.equal(text.includes("target/"), false, `${file} contains a forbidden target path`);
   }
 });
 
