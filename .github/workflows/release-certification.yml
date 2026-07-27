@@ -10,56 +10,9 @@ permissions:
   contents: read
 
 jobs:
-  packed-install:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-        node: [22.19.0, 24.x]
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 25
-    env:
-      PI_OFFLINE: "1"
-      PI_SKIP_VERSION_CHECK: "1"
-      PI_TELEMETRY: "0"
-      CI: "1"
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          # The upgrade witness git-archives exact executable predecessor aa3e377.
-          fetch-depth: 0
-      - uses: actions/setup-node@v4
-        with:
-          node-version: ${{ matrix.node }}
-          cache: npm
-      - run: npm ci --ignore-scripts
-      - name: Complete deterministic offline gate
-        run: npm test
-      - name: Digest-pinned S2 release-skew certification
-        run: npm run test:version-skew
-      - name: Synthetic S2-D mutable-corpus rehearsal certification
-        run: npm run test:s2-corpus
-      - name: Deterministic docs-freshness gate (C0–C11)
-        run: node scripts/docs-verify.mjs
-      - name: Packed generic-repository migration rehearsals
-        run: npm run test:packed-migration
-      - run: npm run pack:dry-run
-      - name: Packed generic-repository install
-        shell: bash
-        run: |
-          set -euo pipefail
-          npm pack --json > pack.json
-          TARBALL=$(node -e "const p=require('./pack.json'); process.stdout.write(p[0].filename)")
-          mkdir packed-proof
-          cd packed-proof
-          npm init -y >/dev/null
-          npm install --offline --ignore-scripts --omit=dev --legacy-peer-deps --no-audit --no-fund "../${TARBALL}"
-          node node_modules/pi-autopilot/dist/src/cli/autopilot-coordinator.js --help
-          node node_modules/pi-autopilot/dist/src/cli/autopilot-agent-run.js --help
-
-  release-security-and-scale:
+  core-host-gates:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 30
     env:
       PI_OFFLINE: "1"
       PI_SKIP_VERSION_CHECK: "1"
@@ -72,10 +25,54 @@ jobs:
           node-version: 24.x
           cache: npm
       - run: npm ci --ignore-scripts
-      - run: npm run test:model
-      - run: npm run test:scale
-      - run: npm run test:version-skew
-      - run: npm run test:s2-corpus
+      - name: Rust workspace build
+        run: cargo build --workspace
+      - name: Rust clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Host typecheck
+        run: npx tsc --noEmit -p host/tsconfig.json
+      - name: Gates selftest
+        run: ./scripts/gates/selftest.sh
+      - name: Gate loc core
+        run: ./scripts/gates/loc.sh core
+      - name: Gate loc tooling
+        run: ./scripts/gates/loc.sh tooling
+      - name: Gate kernel purity
+        run: ./scripts/gates/kernel-purity.sh
+      - name: Gate no inference
+        run: ./scripts/gates/no-inference.sh
+      - name: Gate host thinness
+        run: ./scripts/gates/host-thinness.sh --root "$PWD/host"
+      - name: Full Rust tests
+        run: cargo test -q
+      - name: Host tests
+        run: node --experimental-strip-types --test host/tests/*.test.ts
+      - name: Codegen check
+        run: cargo run -p codegen -- --check
+      - name: Modelcheck
+        run: cargo run -p modelcheck
+      - name: Disposition check
+        run: node scripts/check-disposition.mjs
+      - name: Kernel freeze
+        run: git diff --exit-code ea802a3 -- kernel/
+      - name: Package dry run
+        run: npm run build && npm run pack:dry-run
+
+  security:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      PI_OFFLINE: "1"
+      PI_SKIP_VERSION_CHECK: "1"
+      PI_TELEMETRY: "0"
+      CI: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.x
+          cache: npm
+      - run: npm ci --ignore-scripts
       - run: npm run security:scan
       - run: npm run security:audit
       - run: npm run sbom
