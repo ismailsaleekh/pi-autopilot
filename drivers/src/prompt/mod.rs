@@ -1,10 +1,14 @@
-use crate::roles::{Role, RoleError, RoleRegistry};
+use crate::{
+    roles::kdl::table_values,
+    roles::{Role, RoleError, RoleRegistry},
+};
 use std::{
     fs,
     path::{Path, PathBuf},
 };
 
 pub const RENDERER_VERSION: &str = "autopilot.prompt-renderer.v1";
+const DRIVER_TABLES_KDL: &str = include_str!("../../../data/driver-tables.kdl");
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PromptInput {
@@ -71,8 +75,8 @@ impl Renderer {
                 .join("modes")
                 .join(format!("{}.md", input.mode_id)),
         )?;
-        check_sections(&base, &BASE_SECTIONS, &role.id)?;
-        check_sections(&mode, &MODE_SECTIONS, &input.mode_id)?;
+        check_sections(&base, "prompt.base-sections", &role.id)?;
+        check_sections(&mode, "prompt.mode-sections", &input.mode_id)?;
         let mut out = String::from("# Autopilot rendered prompt\n\n");
         out.push_str(&record(input, role));
         layer(&mut out, 1, &["glo", "bal doctrine"].concat(), &doctrine);
@@ -160,34 +164,23 @@ fn read(path: PathBuf) -> Result<String, PromptError> {
     fs::read_to_string(&path)
         .map_err(|error| PromptError::Io(format!("{}: {error}", path.display())))
 }
-fn check_sections(text: &str, expected: &[&str], label: &str) -> Result<(), PromptError> {
+fn check_sections(text: &str, table: &str, label: &str) -> Result<(), PromptError> {
+    let expected =
+        table_values(DRIVER_TABLES_KDL, table, "values").map_err(PromptError::BadSections)?;
     let actual: Vec<&str> = text
         .lines()
         .filter_map(|line| line.strip_prefix("## "))
         .collect();
-    if actual == expected {
+    if actual
+        .iter()
+        .copied()
+        .eq(expected.iter().map(String::as_str))
+    {
         Ok(())
     } else {
         Err(PromptError::BadSections(format!("{label}: {actual:?}")))
     }
 }
-
-const BASE_SECTIONS: [&str; 8] = [
-    "Role and objective",
-    "Authority and required read order",
-    "Responsibilities",
-    "Operating procedure",
-    "Quality and evidence requirements",
-    "Prohibited actions and non-goals",
-    "Context gaps and checkpoint behavior",
-    "Terminal result",
-];
-const MODE_SECTIONS: [&str; 4] = [
-    "Mode objective",
-    "Additional context",
-    "Mode procedure",
-    "Mode evidence",
-];
 fn digest(text: &str) -> String {
     let mut hash = 0xcbf29ce484222325u64;
     for byte in text.as_bytes() {

@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
 
-use kernel::boundary::{BoundaryDescriptor, BoundaryRuntime, Rejection, boundary_by_id};
+use kernel::boundary::Rejection;
 use kernel::generated::{
     CONTRACT_VERSION, CoreToHostDonePayload, CoreToHostGuardDecisionPayload, EventKind, EventRow,
     GuardDecision, HostToCoreAgentResultPayload, HostToCoreCommandPayload,
@@ -14,6 +14,8 @@ use kernel::generated::{
 use kernel::state::{State, apply};
 use kernel_macros::acceptance_boundary;
 use serde::de::DeserializeOwned;
+
+use crate::roles::kdl::boundary_runtime;
 
 pub mod sim_host;
 
@@ -100,7 +102,7 @@ pub fn handle_line(line: &str, state: &mut CoreState) -> Result<SeamEnvelope, An
 )]
 pub fn admit_host_frame(frame: SeamEnvelope) -> Result<SeamEnvelope, Rejection> {
     if frame.v != CONTRACT_VERSION as u32 {
-        rt().reject(format!("version-mismatch:{}", frame.v))?;
+        boundary_runtime(BOUNDARY_ID).reject(format!("version-mismatch:{}", frame.v))?;
     }
     match frame.kind.as_str() {
         "agent-result" => payload::<HostToCoreAgentResultPayload>(&frame)?,
@@ -109,7 +111,7 @@ pub fn admit_host_frame(frame: SeamEnvelope) -> Result<SeamEnvelope, Rejection> 
         "operator-answer" => payload::<HostToCoreOperatorAnswerPayload>(&frame)?,
         "shutdown" => payload::<HostToCoreShutdownPayload>(&frame)?,
         "task-completed" => payload::<HostToCoreTaskCompletedPayload>(&frame)?,
-        other => rt().reject(format!("unknown-kind:{other}"))?,
+        other => boundary_runtime(BOUNDARY_ID).reject(format!("unknown-kind:{other}"))?,
     }
     Ok(frame)
 }
@@ -169,7 +171,7 @@ fn event_parts(rest: &str) -> Result<(EventKind, Ref), String> {
 
 fn payload<T: DeserializeOwned>(frame: &SeamEnvelope) -> Result<(), Rejection> {
     if let Err(error) = serde_json::from_value::<T>(frame.payload.clone()) {
-        rt().reject(format!("payload-mismatch:{}:{error}", frame.kind))?;
+        boundary_runtime(BOUNDARY_ID).reject(format!("payload-mismatch:{}:{error}", frame.kind))?;
     }
     Ok(())
 }
@@ -228,15 +230,4 @@ fn append_event(path: &Path, event: &EventRow) -> Result<(), AnyError> {
 
 fn rejection(code: &str, detail: &str) -> String {
     format!("rejection:{code}:{detail}")
-}
-
-fn rt() -> BoundaryRuntime {
-    let descriptor: &'static BoundaryDescriptor = match boundary_by_id(BOUNDARY_ID) {
-        Some(descriptor) => descriptor,
-        None => panic!("missing boundary {BOUNDARY_ID}"),
-    };
-    match BoundaryRuntime::new(descriptor) {
-        Ok(runtime) => runtime,
-        Err(error) => panic!("runtime missing for {BOUNDARY_ID}: {error}"),
-    }
 }

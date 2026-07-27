@@ -2,6 +2,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use kernel::boundary::BoundaryMode;
+
+use crate::roles::kdl::attr as kdl_attr;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Eq, PartialEq)]
@@ -173,17 +175,12 @@ impl TranscriptStore {
 }
 
 fn parse_mode(id: &str, attrs: &str) -> Result<BoundaryMode, TranscriptError> {
-    for attr in attrs.split_whitespace() {
-        let Some(value) = attr.strip_prefix("mode=") else {
-            continue;
-        };
-        return match value.trim_matches('"') {
-            "record" => Ok(BoundaryMode::Record),
-            "enforce" => Ok(BoundaryMode::Enforce),
-            other => Err(TranscriptError::BadMode(format!("{id}:{other}"))),
-        };
+    match kdl_attr(attrs, "mode=").as_deref() {
+        Some("record") => Ok(BoundaryMode::Record),
+        Some("enforce") => Ok(BoundaryMode::Enforce),
+        Some(other) => Err(TranscriptError::BadMode(format!("{id}:{other}"))),
+        None => Err(TranscriptError::MissingMode(id.to_owned())),
     }
-    Err(TranscriptError::MissingMode(id.to_owned()))
 }
 
 fn check_id(id: &str) -> Result<(), TranscriptError> {

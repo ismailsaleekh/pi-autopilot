@@ -1,10 +1,12 @@
-use kernel::boundary::{BoundaryDescriptor, BoundaryRuntime, Rejection, boundary_by_id};
+use kernel::boundary::Rejection;
 use kernel::generated::{
     ContextAnchor, ContextAnchorForm, ContextManifest, ContextManifestBudget,
     ContextManifestFreshness, ContextManifestRole, Digest, Id, Nullable, SchemaId, Sha, Uri,
     Uuidv7,
 };
 use kernel_macros::acceptance_boundary;
+
+use crate::roles::kdl::boundary_runtime;
 
 const BOUNDARY_ID: &str = "context.anchor.v1";
 const ESTIMATOR: &str = "conservative-utf8-v1";
@@ -137,7 +139,7 @@ pub fn parse_anchor(raw: &str) -> Result<ContextAnchor, Rejection> {
         require(pointer.strip_prefix('/').is_some(), raw)?;
         ContextAnchorForm::Json
     } else {
-        rt().reject(raw)?;
+        boundary_runtime(BOUNDARY_ID).reject(raw)?;
         ContextAnchorForm::Json
     };
     Ok(ContextAnchor {
@@ -155,7 +157,7 @@ fn parse_git(rest: &str, raw: &str) -> Result<ContextAnchorForm, Rejection> {
     let range = match fragment.strip_prefix('L') {
         Some(value) => value,
         None => {
-            rt().reject(raw)?;
+            boundary_runtime(BOUNDARY_ID).reject(raw)?;
             ""
         }
     };
@@ -173,7 +175,7 @@ fn split_once<'a>(value: &'a str, needle: &str, raw: &str) -> Result<AnchorParts
     match value.split_once(needle) {
         Some(parts) => Ok(parts),
         None => {
-            rt().reject(raw)?;
+            boundary_runtime(BOUNDARY_ID).reject(raw)?;
             Ok(("", ""))
         }
     }
@@ -184,7 +186,11 @@ fn require_pair(parts: AnchorParts<'_>, raw: &str) -> Result<(), Rejection> {
 }
 
 fn require(ok: bool, raw: &str) -> Result<(), Rejection> {
-    if ok { Ok(()) } else { rt().reject(raw) }
+    if ok {
+        Ok(())
+    } else {
+        boundary_runtime(BOUNDARY_ID).reject(raw)
+    }
 }
 
 fn require_u32(value: &str, raw: &str) -> Result<(), Rejection> {
@@ -202,16 +208,5 @@ fn percent(tokens: u32, window: u32) -> u8 {
         u8::MAX
     } else {
         pct as u8
-    }
-}
-
-fn rt() -> BoundaryRuntime {
-    let descriptor: &'static BoundaryDescriptor = match boundary_by_id(BOUNDARY_ID) {
-        Some(descriptor) => descriptor,
-        None => panic!("missing boundary {BOUNDARY_ID}"),
-    };
-    match BoundaryRuntime::new(descriptor) {
-        Ok(runtime) => runtime,
-        Err(error) => panic!("runtime missing for {BOUNDARY_ID}: {error}"),
     }
 }

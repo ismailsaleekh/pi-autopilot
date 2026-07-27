@@ -1,12 +1,12 @@
 use std::collections::BTreeMap;
 
 use kernel::{
-    boundary::{BoundaryRuntime, Rejection, boundary_by_id},
+    boundary::Rejection,
     failure::{Failure, HardBoundary},
 };
 use kernel_macros::acceptance_boundary;
 
-use crate::roles::kdl::{blocks, one};
+use crate::roles::kdl::{blocks, boundary_runtime, one, values};
 
 pub const ROSTER_KDL: &str = include_str!("../../../data/roster.kdl");
 const BOUNDARY_ID: &str = "route.metered-frontier.v1";
@@ -55,10 +55,7 @@ impl Roster {
                 model: one(&block.fields, "model").map_err(RosterError::Malformed)?,
                 thinking: one(&block.fields, "thinking").map_err(RosterError::Malformed)?,
                 route: one(&block.fields, "route").map_err(RosterError::Malformed)?,
-                roles: match block.fields.get("roles") {
-                    Some(roles) => roles.clone(),
-                    None => Vec::new(),
-                },
+                roles: values(&block.fields, "roles"),
             };
             if slots.insert(block.id.clone(), slot).is_some() {
                 return Err(RosterError::Duplicate(block.id));
@@ -107,7 +104,7 @@ pub fn guard_route(route: &Route) -> Result<Route, Failure> {
 )]
 pub fn admit_route(route: Route) -> Result<Route, Rejection> {
     if !route.subscription || route.provider != "openai-codex" || !roster_contains(&route) {
-        runtime().reject(format!(
+        boundary_runtime(BOUNDARY_ID).reject(format!(
             "unsafe-route:{}/{}:{}",
             route.provider, route.model, route.thinking
         ))?;
@@ -124,13 +121,5 @@ fn roster_contains(route: &Route) -> bool {
                 && slot.route == "subscription"
         }),
         Err(_) => false,
-    }
-}
-
-fn runtime() -> BoundaryRuntime {
-    match boundary_by_id(BOUNDARY_ID).and_then(|descriptor| BoundaryRuntime::new(descriptor).ok()) {
-        Some(value) => value,
-        // Invariant: the acceptance_boundary attribute on admit_route registers this id in this module.
-        None => unreachable!("route boundary is registered by acceptance_boundary macro"),
     }
 }

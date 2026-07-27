@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 pub(crate) mod kdl;
 
-use kdl::{blocks, one};
+use kdl::{blocks, one, values};
 
 pub const ROLE_REGISTRY_KDL: &str = include_str!("../../../data/roles.kdl");
 
@@ -97,12 +97,5 @@ impl RoleRegistry {
 
     pub fn roles(&self) -> impl Iterator<Item = &Role> {
         self.roles.values()
-    }
-}
-
-fn values(fields: &BTreeMap<String, Vec<String>>, key: &str) -> Vec<String> {
-    match fields.get(key) {
-        Some(values) => values.clone(),
-        None => Vec::new(),
     }
 }

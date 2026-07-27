@@ -1,0 +1,13 @@
+// declarative driver tables moved out of Rust for D79 S2 headroom
+
+table "prompt.base-sections" {
+  values "Role and objective" "Authority and required read order" "Responsibilities" "Operating procedure" "Quality and evidence requirements" "Prohibited actions and non-goals" "Context gaps and checkpoint behavior" "Terminal result"
+}
+
+table "prompt.mode-sections" {
+  values "Mode objective" "Additional context" "Mode procedure" "Mode evidence"
+}
+
+table "planning.d72-question-classes" {
+  values "invalidated-decision" "missing-material-decision" "material-underdetermination" "dod-hole" "unsafe-irreversible"
+}
