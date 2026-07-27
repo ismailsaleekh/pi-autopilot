@@ -3,13 +3,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use kernel::boundary::Rejection;
 use kernel::generated::{AllocationLaneProposal, Id};
 use kernel_macros::acceptance_boundary;
+use serde::{Deserialize, Serialize};
 
 use crate::roles::kdl::boundary_runtime;
 
 pub const BOUNDARY_ID: &str = "allocation.lane-proposal.v1";
 const IMPLEMENTER_CAPACITY: &str = "implementer";
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ApprovedUnit {
     pub id: Id,
     pub operator_order: u32,
@@ -20,13 +21,13 @@ pub struct ApprovedUnit {
     pub downstream_release_edges: Vec<Id>,
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
 pub struct FutureUnit {
     pub unit_id: Id,
     pub reason: String,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Serialize)]
 pub struct AllocationSubmission {
     pub lanes: Vec<AllocationLaneProposal>,
     pub future_units: Vec<FutureUnit>,

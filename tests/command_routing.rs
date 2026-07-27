@@ -14,17 +14,32 @@ use kernel::generated::{CoreToHostDonePayload, CoreToHostSpawnPayload, CoreToHos
 #[test]
 fn all_public_commands_reach_driver_surfaces() {
     let root = temp_dir("public-routes");
-    let task = root.join("TASK.md");
+    let repo = root.join("repo");
+    let vcs = GitVcs::new(&root);
+    vcs.init_fixture(&repo).expect("fixture repo");
+    let task = repo.join("TASK.md");
     fs::write(&task, "Mission\nDefinition of Done\n").expect("task file");
+    vcs.stage_all(&repo).expect("stage task");
+    vcs.snapshot(&repo, "task file").expect("task commit");
+    let event_log = root.join("events.jsonl");
 
     let plan_raw = "autopilot-plan main ".to_owned() + task.to_str().expect("utf8 task");
-    let plan = send_once(&plan_raw, None);
-    let plan_status = done_status(&plan);
-    assert!(plan_status.contains("planning:P1-P6:atoms=1:facts=1"));
-    assert!(plan_status.contains("state:sequence=1;revision=1"));
+    let plan = send_with_log(&plan_raw, &event_log, Some(&repo));
+    assert_eq!(plan.kind, "spawn");
+    let plan_spawn: CoreToHostSpawnPayload = serde_json::from_value(plan.payload).expect("plan spawn payload");
+    assert!(plan_spawn.action.command_bytes.0.contains("autopilot-agent-run"));
+    assert!(plan_spawn.action.command_bytes.0.contains("--role extractor"));
 
-    let run = send_once("autopilot main", None);
-    assert_eq!(run.kind, "spawn");
+    let work_map = transcript("planning.work-map.v1");
+    let accepted = send_agent_result("planning-main-compiler-01", "main", "planning.work-map.v1", &work_map, &event_log, &repo);
+    assert_eq!(accepted.kind, "spawn");
+    let review = transcript("planning.plan-review.v1");
+    let ready = send_agent_result("planning-main-reviewer-01", "main", "planning.plan-review.v1", &review, &event_log, &repo);
+    assert!(done_status(&ready).contains("ready-to-execute:workstream=main"));
+    assert!(fs::read_to_string(repo.join(".pi/autopilot/main/approved-plan.json")).expect("approved plan").contains("U1"));
+
+    let run = send_with_log("autopilot main", &event_log, Some(&repo));
+    assert_eq!(run.kind, "spawn", "run response: {:?}", run);
     let spawn_payload: CoreToHostSpawnPayload = serde_json::from_value(run.payload).expect("spawn payload");
     assert!(spawn_payload.action.command_bytes.0.contains("autopilot-agent-run"));
     assert!(spawn_payload.action.assignment_id.0.contains("main"));
@@ -32,9 +47,6 @@ fn all_public_commands_reach_driver_surfaces() {
     let status = send_once("autopilot-status", None);
     assert!(done_status(&status).contains("state:sequence=0;revision=0"));
 
-    let repo = root.join("repo");
-    let vcs = GitVcs::new(&root);
-    vcs.init_fixture(&repo).expect("fixture repo");
     let close = send_once("autopilot-close main", Some(&repo));
     assert!(done_status(&close).contains("lifecycle:close:refs/autopilot/results/main/run-1"));
     assert!(Command::new("git").current_dir(&repo).args(["rev-parse", "--verify", "refs/autopilot/results/main/run-1"]).stdout(Stdio::null()).status().expect("git rev-parse").success());
@@ -122,8 +134,20 @@ fn send_once(raw: &str, cwd: Option<&Path>) -> SeamEnvelope {
 }
 
 fn send_with_log(raw: &str, event_log: &Path, cwd: Option<&Path>) -> SeamEnvelope {
+    send_frame(frame_json(1, raw), event_log, cwd)
+}
+
+fn send_agent_result(assignment_id: &str, workstream: &str, boundary_id: &str, raw_output: &str, event_log: &Path, cwd: &Path) -> SeamEnvelope {
+    send_frame(
+        serde_json::json!({"v":1,"id":2,"kind":"agent-result","payload":{"assignment_id":assignment_id,"carrier":{"workstream":workstream,"boundary_id":boundary_id,"raw_output":raw_output}}}),
+        event_log,
+        Some(cwd),
+    )
+}
+
+fn send_frame(frame: serde_json::Value, event_log: &Path, cwd: Option<&Path>) -> SeamEnvelope {
     let mut child = spawn_core(event_log, cwd);
-    writeln!(child.stdin.as_mut().expect("stdin"), "{}", frame_json(1, raw)).expect("write frame");
+    writeln!(child.stdin.as_mut().expect("stdin"), "{}", frame).expect("write frame");
     drop(child.stdin.take());
     let mut stdout = BufReader::new(child.stdout.take().expect("stdout"));
     let mut line = String::new();
@@ -141,6 +165,12 @@ fn spawn_core(event_log: &Path, cwd: Option<&Path>) -> Child {
 
 fn frame_json(id: u64, raw: &str) -> serde_json::Value {
     serde_json::json!({"v":1,"id":id,"kind":"command","payload":{"raw":raw}})
+}
+
+fn transcript(boundary_id: &str) -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/transcripts").join(boundary_id).join("transcripts.json");
+    let value: serde_json::Value = serde_json::from_str(&fs::read_to_string(path).expect("transcript file")).expect("transcript json");
+    value["records"][0]["raw_output"].as_str().expect("raw output").to_owned()
 }
 
 fn done_status(envelope: &SeamEnvelope) -> String {

@@ -29,17 +29,28 @@ test("registers the retained D76 public commands", () => {
   }
 });
 
-test("each command forwards one command frame with the raw argument bytes", async () => {
+test("each command forwards one command frame with command name and raw argument bytes", async () => {
   for (const command of AUTOPILOT_COMMANDS) {
     const pi = fakePi();
     const transport = fakeTransport();
     registerAutopilotCommands(pi, { transport });
 
-    const raw = "  keep  spacing --and-bytes=✓  ";
-    await pi.registrations.get(command).handler(raw, fakeCtx());
+    const rawArgs = "  keep  spacing --and-bytes=✓  ";
+    await pi.registrations.get(command).handler(rawArgs, fakeCtx());
 
-    assert.deepEqual(transport.calls, [{ kind: "command", payload: { raw } }], command);
+    assert.deepEqual(transport.calls, [{ kind: "command", payload: { raw: `${command}${rawArgs}` } }], command);
   }
+});
+
+test("command framing inserts only the missing delimiter before raw arguments", async () => {
+  const pi = fakePi();
+  const transport = fakeTransport();
+  registerAutopilotCommands(pi, { transport });
+
+  const rawArgs = "keep  spacing --and-bytes=✓";
+  await pi.registrations.get("autopilot-onboard").handler(rawArgs, fakeCtx());
+
+  assert.deepEqual(transport.calls, [{ kind: "command", payload: { raw: `autopilot-onboard ${rawArgs}` } }]);
 });
 
 test("registered command handlers contain no local control branch", () => {

@@ -36,8 +36,9 @@ readonly LOC="$script_dir/loc.sh"
 readonly PURITY="$script_dir/kernel-purity.sh"
 readonly NOINFER="$script_dir/no-inference.sh"
 readonly HOSTTHIN="$script_dir/host-thinness.sh"
+readonly REALPROD="$script_dir/real-producers.mjs"
 
-for s in "$LOC" "$PURITY" "$NOINFER" "$HOSTTHIN"; do
+for s in "$LOC" "$PURITY" "$NOINFER" "$HOSTTHIN" "$REALPROD"; do
   [ -x "$s" ] || { printf 'selftest.sh: not executable: %s\n' "$s" >&2; exit 2; }
 done
 
@@ -486,6 +487,56 @@ mkdir -p "$hgen/src"
 expect 0 "excludes @generated seam types from the budget" "$HOSTTHIN" --root "$hgen"
 
 expect 0 "tolerates an absent src/ (pre-W3)" "$HOSTTHIN" --root "$tmp/loc-empty-root"
+
+# ---------------------------------------------------------------------------
+# real-producers.mjs  (DEFECT-2 / F012)
+# ---------------------------------------------------------------------------
+printf '\nreal-producers.mjs\n'
+
+rgood="$tmp/real-producers-good"
+mkdir -p "$rgood/drivers/src/seam"
+cat > "$rgood/drivers/src/seam/mod.rs" <<'RS'
+fn route_plan(id: u64, args: &[String], state: &mut CoreState) -> Result<SeamEnvelope, AnyError> {
+    let dossier = p2_ground(&RepoGrounding { repo: current_dir()? }, &inventory)?;
+    let assignments = planning_assignments(&args[0], &plan);
+    append_agent_invocation(state, &args[0], assignments.first().unwrap())?;
+    spawn(id, planning_bg_action(assignments.first().unwrap(), state.state.revision))
+}
+fn route_run(id: u64, workstream: &str, state: &mut CoreState) -> Result<SeamEnvelope, AnyError> {
+    let approved = read_approved_plan(workstream)?;
+    let readiness = lane_readiness_from_events(&lanes, &approved, state);
+    let resources = host_resource_facts()?;
+    append_agent_invocation(state, workstream, &assignment)?;
+    spawn(id, action)
+}
+RS
+expect 0 "accepts routes backed by repo grounding, persisted plan, resources, and agent spawn" node "$REALPROD" --root "$rgood"
+
+rbad="$tmp/real-producers-bad"
+mkdir -p "$rbad/drivers/src/seam"
+cat > "$rbad/drivers/src/seam/mod.rs" <<'RS'
+fn route_plan(id: u64, args: &[String], state: &mut CoreState) -> Result<SeamEnvelope, AnyError> {
+    let dossier = p2_ground(&Facts, &inventory)?;
+    state.append(EventKind("planning:P1-P6".to_owned()), vec![])?;
+    done(id, "planning:P1-P6:atoms=1:facts=1".to_owned())
+}
+struct Facts;
+impl RepositoryEvidence for Facts {
+    fn facts_for_atoms(&self, atoms: &[Atom]) -> Result<Vec<String>, PlanningError> {
+        Ok(atoms.iter().map(|atom| format!("verified:{}", atom.id)).collect())
+    }
+}
+fn route_run(id: u64, workstream: &str, state: &mut CoreState) -> Result<SeamEnvelope, AnyError> {
+    let approved = units();
+    let readiness = vec![ready("l1")];
+    let host = resources();
+    spawn(id, action)
+}
+fn units() -> Vec<ApprovedUnit> { vec![] }
+fn ready(name: &str) -> LaneReadiness { LaneReadiness { lane_id: id(name), predecessor_gates_met: true, blockers_clear: true, unit_free: true, route_ready: true, preflight_passed: true, pressure_delay: false } }
+fn resources() -> ResourceFacts { ResourceFacts { free_storage_bytes: 20, projected_storage_bytes: 1, available_memory_bytes: 8, physical_memory_bytes: 16 } }
+RS
+expect 1 "rejects fabricated route producers and success without recorded invocation" node "$REALPROD" --root "$rbad"
 
 # ---------------------------------------------------------------------------
 

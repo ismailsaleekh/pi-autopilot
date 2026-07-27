@@ -35,12 +35,17 @@ export function registerAutopilotCommands(pi: CommandHostLike, options: Register
   for (const name of AUTOPILOT_COMMANDS) {
     pi.registerCommand(name, {
       description: `Forward /${name} to autopilot-core.`,
-      handler: async (args, ctx) => forwardCommand(args, ctx, options.transport),
+      handler: async (args, ctx) => forwardCommand(name, args, ctx, options.transport),
     });
   }
 }
 
-async function forwardCommand(raw: string, ctx: HostEffectContext, transport: CommandTransportLike | CoreTransport): Promise<void> {
-  const frame = await transport.request("command", { raw });
+async function forwardCommand(name: string, args: string, ctx: HostEffectContext, transport: CommandTransportLike | CoreTransport): Promise<void> {
+  const frame = await transport.request("command", { raw: frameRawCommand(name, args) });
   await applyCoreEffect(frame, ctx);
+}
+
+function frameRawCommand(name: string, args: string): string {
+  const separator = args.length > 0 && !/^\s/u.test(args) ? " " : "";
+  return `${name}${separator}${args}`;
 }

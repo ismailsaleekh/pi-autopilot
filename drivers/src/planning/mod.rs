@@ -262,6 +262,7 @@ pub enum PlanningError {
     MissingBacklink(String),
     AssignmentCap { total: u8, cap: u8 },
     BadDeclaration(String),
+    ContextGap(String),
 }
 
 fn accept_contains(raw: &str, required: &str, runtime: &BoundaryRuntime) -> Result<String, Rejection> {

@@ -1,6 +1,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::thread;
 use std::time::Duration;
 
@@ -16,13 +17,13 @@ use kernel::generated::{
 use kernel::schedule::ResourceFacts;
 use kernel::state::{State, apply};
 use kernel_macros::acceptance_boundary;
-use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::allocation::{self, AllocationPolicy, AllocationSubmission, ApprovedUnit, FutureUnit};
 use crate::dispatch::{self, DispatchInput, LaneReadiness};
 use crate::handoff::{self, AssignmentHandle, CooperativeCheckpoint};
 use crate::lifecycle::{self, AbortRequest, CleanupProof, CloseRequest, LocalLifecycle};
-use crate::planning::{self, Backlink, Disposition, MaterialPlanElement, QuestionNomination, TaskAuthority, TaskDocument};
+use crate::planning::{self, TaskAuthority, TaskDocument};
 use crate::roles::kdl::boundary_runtime;
 use crate::roster;
 use crate::runner::{self, RunnerAssignment};
@@ -103,8 +104,8 @@ pub fn admit_operator_command(raw: &str) -> Result<ParsedCommand, Rejection> {
 
 fn dispatch(frame: SeamEnvelope, state: &mut CoreState) -> Result<SeamEnvelope, AnyError> {
     match frame.kind.as_str() {
-        "command" => command(frame, state), "guard-query" => guard_decision(frame.id, "deny", "core guard policy is not configured"), "shutdown" => done(frame.id, "ok:shutdown".to_owned()),
-        "task-completed" | "agent-result" | "operator-answer" => done(frame.id, "ok:recorded".to_owned()), other => done(frame.id, rejection("unknown-kind", other)),
+        "command" => command(frame, state), "agent-result" => route_agent_result(frame, state), "guard-query" => guard_decision(frame.id, "deny", "core guard policy is not configured"), "shutdown" => done(frame.id, "ok:shutdown".to_owned()),
+        "task-completed" | "operator-answer" => done(frame.id, "ok:recorded".to_owned()), other => done(frame.id, rejection("unknown-kind", other)),
     }
 }
 
@@ -136,26 +137,53 @@ fn product_command(id: u64, parsed: ParsedCommand, state: &mut CoreState) -> Res
 }
 
 fn route_plan(id: u64, args: &[String], state: &mut CoreState) -> Result<SeamEnvelope, AnyError> {
+    let workstream = &args[0];
     let source = TaskFiles(args[1..].iter().map(PathBuf::from).collect());
-    let inventory = planning::p1_inventory(&source).map_err(|error| format!("planning:{error:?}"))?;
-    let dossier = planning::p2_ground(&Facts, &inventory).map_err(|error| format!("planning:{error:?}"))?;
-    let first = match inventory.atoms.first() { Some(atom) => atom.id.clone(), None => return done(id, rejection("planning", "empty-inventory")) };
-    let disposed = inventory.atoms.iter().map(|atom| planning::Atom { disposition: Some(Disposition { kind: "accepted".to_owned(), backlink: Backlink::VerifiedFact("fact-1".to_owned()) }), ..atom.clone() }).collect::<Vec<_>>();
-    planning::admit_question(QuestionNomination { class: planning::question_class_from_d72("dod-hole").map_err(|error| format!("planning:{error:?}"))?, material_consequence: first.clone() }).map_err(|error| format!("planning:{error:?}"))?;
-    planning::require_total_dispositions(&disposed).map_err(|error| format!("planning:{error:?}"))?;
-    planning::require_material_backlinks(&[MaterialPlanElement { id: "P4".to_owned(), backlinks: vec![Backlink::Atom(first)] }]).map_err(|error| format!("planning:{error:?}"))?;
-    planning::AssignmentPlan::d72_default().validate(25).map_err(|error| format!("planning:{error:?}"))?;
-    state.append(EventKind("planning:P1-P6".to_owned()), args.iter().map(|arg| Ref(arg.clone())).collect())?;
-    done(id, format!("planning:P1-P6:atoms={}:facts={};{}", inventory.atoms.len(), dossier.verified_facts.len(), state.summary()))
+    let inventory = planning::p1_inventory(&source).map_err(|error| context_status("planning", error))?;
+    let cwd = std::env::current_dir()?;
+    let dossier = planning::p2_ground(&RepoGrounding { repo: cwd }, &inventory).map_err(|error| context_status("planning", error))?;
+    let plan = planning::AssignmentPlan::d72_default();
+    plan.validate(25).map_err(|error| context_status("planning", error))?;
+    let assignments = planning_assignments(workstream, &plan);
+    let first = assignments.first().ok_or("planning assignment plan is empty")?;
+    write_planning_manifest(workstream, &inventory, &dossier, &assignments)?;
+    append_agent_invocation(state, workstream, first)?;
+    spawn(id, planning_bg_action(first, state.state.revision))
 }
 
 fn route_run(id: u64, workstream: &str, state: &mut CoreState) -> Result<SeamEnvelope, AnyError> {
-    let approved = units(); let submission = AllocationSubmission { lanes: vec![lane("l1", &["u1"], 0), lane("l2", &["u2"], 1), lane("l3", &["u3"], 2)], future_units: Vec::<FutureUnit>::new(), authority_echo: approved.clone(), ownership_claims: Vec::new(), overlap_blocks: Vec::new() };
-    let allocation = allocation::validate_allocation(&approved, &submission, AllocationPolicy { parallel_cap: 8, active_implementers: 0 }).map_err(|error| format!("allocation:{error:?}"))?;
-    let selected = dispatch::select_ready_lanes(&DispatchInput { lanes: allocation.lanes, readiness: vec![ready("l1"), ready("l2"), ready("l3")], active_implementers: 0, parallel_cap: 8, resources: resources() });
+    let approved = read_approved_plan(workstream).map_err(|error| format!("CONTEXT_GAP:approved-plan:{error}"))?;
+    let submission = allocation_submission_from_plan(workstream, &approved).map_err(|error| format!("CONTEXT_GAP:allocation:{error}"))?;
+    let allocation = allocation::validate_allocation(&approved, &submission, AllocationPolicy { parallel_cap: 8, active_implementers: active_implementers(state) }).map_err(|error| format!("allocation:{error:?}"))?;
+    let readiness = lane_readiness_from_events(&submission.lanes, &approved, state);
+    let resources = host_resource_facts().map_err(|error| format!("CONTEXT_GAP:resources:{error}"))?;
+    let selected = dispatch::select_ready_lanes(&DispatchInput { lanes: allocation.lanes, readiness, active_implementers: active_implementers(state), parallel_cap: 8, resources });
     let Some(lane_id) = selected.first() else { return done(id, rejection("dispatch", "no-ready-lane")) };
-    state.append(EventKind("dispatch:spawn".to_owned()), vec![Ref(workstream.to_owned()), Ref(lane_id.0.clone())])?;
-    spawn(id, runner::bg_action(&assignment(workstream, lane_id)))
+    let assignment = assignment(workstream, lane_id)?;
+    append_agent_invocation(state, workstream, &AgentAssignment { assignment_id: assignment.assignment_id.0.clone(), role: "implementer".to_owned(), mode: assignment.mode.0.clone(), boundary_id: None })?;
+    spawn(id, runner::bg_action(&assignment))
+}
+
+fn route_agent_result(frame: SeamEnvelope, state: &mut CoreState) -> Result<SeamEnvelope, AnyError> {
+    let HostToCoreAgentResultPayload { assignment_id, carrier } = serde_json::from_value(frame.payload)?;
+    let carrier: AgentCarrier = serde_json::from_value(carrier).map_err(|error| format!("agent-result-carrier:{error}"))?;
+    validate_agent_output(&carrier.boundary_id, &carrier.raw_output).map_err(|error| boundary_status(&error))?;
+    state.append(EventKind("agent:result".to_owned()), vec![Ref(assignment_id.0.clone()), Ref(carrier.boundary_id.clone()), Ref(carrier.workstream.clone())])?;
+    if carrier.boundary_id == "planning.work-map.v1" {
+        write_work_map(&carrier.workstream, &carrier.raw_output)?;
+    }
+    if carrier.boundary_id == "planning.plan-review.v1" {
+        let work_map = read_work_map(&carrier.workstream).map_err(|error| format!("CONTEXT_GAP:approved-plan:{error}"))?;
+        let units = parse_approved_units(&work_map).map_err(|error| format!("CONTEXT_GAP:approved-plan:{error}"))?;
+        write_approved_plan(&carrier.workstream, &units)?;
+        state.append(EventKind("planning:ready-to-execute".to_owned()), vec![Ref(carrier.workstream.clone()), Ref(plan_path(&carrier.workstream).display().to_string())])?;
+        return done(frame.id, format!("ready-to-execute:workstream={};{}", carrier.workstream, state.summary()));
+    }
+    if let Some(next) = next_planning_assignment(&carrier.workstream, state) {
+        append_agent_invocation(state, &carrier.workstream, &next)?;
+        return spawn(frame.id, planning_bg_action(&next, state.state.revision));
+    }
+    done(frame.id, format!("agent-result:accepted:{};{}", carrier.boundary_id, state.summary()))
 }
 
 fn route_config(id: u64, args: &[String]) -> Result<SeamEnvelope, AnyError> {
@@ -190,37 +218,9 @@ fn route_close(id: u64, workstream: &str, state: &mut CoreState) -> Result<SeamE
     done(id, format!("lifecycle:close:{result_ref}"))
 }
 
-struct TaskFiles(Vec<PathBuf>);
-impl TaskAuthority for TaskFiles { fn documents(&self) -> Result<Vec<TaskDocument>, planning::PlanningError> { let mut out = Vec::new(); for path in &self.0 { let body = fs::read_to_string(path).map_err(|_| planning::PlanningError::NoTaskAuthority)?; out.push(TaskDocument { id: path.display().to_string(), body }); } Ok(out) } }
-struct InlineTask(String);
-impl TaskAuthority for InlineTask { fn documents(&self) -> Result<Vec<TaskDocument>, planning::PlanningError> { Ok(vec![TaskDocument { id: "operator-request".to_owned(), body: self.0.clone() }]) } }
-struct Facts;
-impl planning::RepositoryEvidence for Facts { fn facts_for_atoms(&self, atoms: &[planning::Atom]) -> Result<Vec<String>, planning::PlanningError> { Ok(atoms.iter().map(|atom| format!("verified:{}", atom.id)).collect()) } }
+include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../data/seam_real_producers.rs"));
 
-fn units() -> Vec<ApprovedUnit> { vec![unit("u1", 1, &[]), unit("u2", 2, &["u1"]), unit("u3", 3, &["u2"])] }
-fn unit(name: &str, order: u32, deps: &[&str]) -> ApprovedUnit { ApprovedUnit { id: idv(name), operator_order: order, decisions: Vec::new(), criteria: vec![idv(&format!("criterion-{name}"))], dependencies: ids(deps), predecessor_forward_criteria: if name == "u1" { Vec::new() } else { vec![idv(&format!("gate-{name}"))] }, downstream_release_edges: Vec::new() } }
-fn lane(name: &str, unit_ids: &[&str], wave: u32) -> AllocationLaneProposal { let gates = match unit_ids.first() { Some(unit) if name != "l1" => vec![idv(&format!("gate-{unit}"))], _ => Vec::new() }; AllocationLaneProposal { lane_id: idv(name), objective: format!("deliver {name}"), ordered_unit_ids: ids(unit_ids), rationale: "operator order".to_owned(), delivery_boundary: DeliveryBoundary("unit".to_owned()), predecessor_forward_criteria: gates, downstream_release_edges: Vec::new(), context_family_id: idv("context"), context_estimate: 10, focused_tests: vec![TestId("cargo test -q".to_owned())], launch_wave: wave, continue_existing_logical_lane: None } }
-fn ready(name: &str) -> LaneReadiness { LaneReadiness { lane_id: idv(name), predecessor_gates_met: true, blockers_clear: true, unit_free: true, route_ready: true, preflight_passed: true, pressure_delay: false } }
-fn assignment(workstream: &str, lane_id: &Id) -> RunnerAssignment { RunnerAssignment { action_id: idv(&format!("action-{workstream}-{}", lane_id.0)), assignment_id: idv(&format!("assignment-{workstream}-{}", lane_id.0)), role_id: idv("implementer"), mode: ModeId("lane-delivery".to_owned()), run_revision: 1, lane_id: lane_id.clone(), attempt: 1, base_commit: Sha("0000000000000000000000000000000000000000".to_owned()), worktree: PathBuf::from(format!(".pi/autopilot/{workstream}/worktrees/{}", lane_id.0)), session_file: PathBuf::from(format!(".pi/autopilot/{workstream}/session.json")), roster_assignment: "openai-codex/gpt-subscription".to_owned() } }
-fn resources() -> ResourceFacts { ResourceFacts { free_storage_bytes: 20 * 1024 * 1024 * 1024, projected_storage_bytes: 1024, available_memory_bytes: 8 * 1024 * 1024 * 1024, physical_memory_bytes: 16 * 1024 * 1024 * 1024 } }
-fn ids(values: &[&str]) -> Vec<Id> { values.iter().map(|value| idv(value)).collect() }
-fn idv(value: &str) -> Id { Id(value.to_owned()) }
 
-fn routes() -> Result<Vec<Route>, String> {
-    let mut out = Vec::new();
-    for raw in COMMANDS_KDL.lines() {
-        let line = match raw.split_once("//") { Some((head, _)) => head.trim(), None => raw.trim() };
-        if line.is_empty() || begins(line, "schema ") || begins(line, "version ") { continue; }
-        if !begins(line, "command ") { return Err(format!("expected command: {line}")); }
-        let name = quoted(line).ok_or_else(|| format!("missing command name: {line}"))?;
-        out.push(Route { name, driver: need_attr(line, "driver=")?, args: need_attr(line, "args=")?, expects: need_attr(line, "expects=")? });
-    }
-    if out.is_empty() { Err("no commands".to_owned()) } else { Ok(out) }
-}
-fn need_attr(line: &str, key: &str) -> Result<String, String> { let at = line.find(key).ok_or_else(|| format!("missing {key}: {line}"))?; let rest = &line[at + key.len()..]; let quoted = rest.strip_prefix('"').ok_or_else(|| format!("unquoted {key}: {line}"))?; let end = quoted.find('"').ok_or_else(|| format!("unterminated {key}: {line}"))?; Ok(quoted[..end].to_owned()) }
-fn begins(value: &str, prefix: &str) -> bool { value.get(..prefix.len()) == Some(prefix) }
-fn quoted(line: &str) -> Option<String> { let mut parts = line.split('"'); let _before = parts.next()?; parts.next().map(str::to_owned) }
-fn valid(routes: &[Route]) -> String { routes.iter().map(|route| format!("/{}", route.name)).collect::<Vec<_>>().join(", ") }
 fn args_valid(spec: &str, args: &[String]) -> bool { match spec { "none" => args.is_empty(), "workstream" => args.len() == 1, "workstream task-paths..." => args.len() >= 2, "request..." => !args.is_empty(), "show|parallel-cap" => (args.len() == 1 && args[0] == "show") || (args.len() == 2 && args[0] == "parallel-cap" && args[1].parse::<u32>().is_ok()), _ => false } }
 fn command_reject(actual: String) -> Result<ParsedCommand, Rejection> { loop { boundary_runtime(COMMAND_BOUNDARY_ID).reject(actual.clone())?; } }
 fn boundary_status(error: &Rejection) -> String { rejection(error.boundary_id(), &format!("expected={};actual={}", error.expected(), error.actual())) }
