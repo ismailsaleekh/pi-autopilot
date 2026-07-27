@@ -6,10 +6,34 @@ publish = false
 
 [dependencies]
 kernel = { path = "../kernel" }
+kernel-macros = { path = "../kernel/macros" }
+linkme = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 [[test]]
 name = "kernel_purity_proof"
 path = "../tests/kernel_purity_proof.rs"
+
+[[test]]
+name = "atomic_write"
+path = "../tests/atomic_write.rs"
+
+[[test]]
+name = "cache_roundtrip"
+path = "../tests/cache_roundtrip.rs"
+
+[[test]]
+name = "core_crash_resume"
+path = "../tests/core_crash_resume.rs"
+
+[[test]]
+name = "sparse_failure_classes"
+path = "../tests/sparse_failure_classes.rs"
+
+[[test]]
+name = "local_only"
+path = "../tests/local_only.rs"
 
 [lints]
 workspace = true

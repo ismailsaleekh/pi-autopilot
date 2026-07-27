@@ -1,5 +1,8 @@
 use kernel::effect::Effect;
-use kernel::platform::{Clock, Entropy, Platform, Process, Store, Timestamp, Vcs};
+use kernel::failure::{Failure, OperatorDecision};
+use kernel::generated::{EventRow, Id};
+use kernel::log::CacheImage;
+use kernel::platform::{CacheRead, Clock, Entropy, Platform, Store, Timestamp};
 
 const STEP: u64 = 0x9e37_79b9_7f4a_7c15;
 
@@ -70,14 +73,6 @@ impl Platform for SimPlatform {
     fn store(&mut self) -> &mut dyn Store {
         &mut self.store
     }
-
-    fn vcs(&mut self) -> &mut dyn Vcs {
-        &mut self.vcs
-    }
-
-    fn process(&mut self) -> &mut dyn Process {
-        &mut self.process
-    }
 }
 
 #[derive(Debug)]
@@ -145,7 +140,29 @@ impl SimStore {
     }
 }
 
-impl Store for SimStore {}
+impl Store for SimStore {
+    fn append_event(&mut self, row: &EventRow) -> Result<(), Failure> {
+        self.record(Effect::ReadFailureLog(Id(row.sequence.to_string())));
+        Ok(())
+    }
+
+    fn write_cache(&mut self, image: &CacheImage) -> Result<(), Failure> {
+        self.record(Effect::ReadFailureLog(Id(image.cache.sequence.to_string())));
+        Ok(())
+    }
+
+    fn read_events(&self) -> Result<Vec<EventRow>, Failure> {
+        Err(Failure::Paused {
+            needs: OperatorDecision::SupplyCapability,
+        })
+    }
+
+    fn read_cache(&self) -> Result<CacheRead, Failure> {
+        Err(Failure::Paused {
+            needs: OperatorDecision::SupplyCapability,
+        })
+    }
+}
 
 #[derive(Debug)]
 pub struct SimVcs {
@@ -163,8 +180,6 @@ impl SimVcs {
         &self.requests
     }
 }
-
-impl Vcs for SimVcs {}
 
 #[derive(Debug)]
 pub struct SimProcess {
@@ -186,5 +201,3 @@ impl SimProcess {
         &self.requests
     }
 }
-
-impl Process for SimProcess {}

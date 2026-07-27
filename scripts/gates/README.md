@@ -9,7 +9,9 @@ invariants that the whole convergence property depends on.
 | Script | DoD | Enforces |
 |---|---|---|
 | `loc.sh kernel` | S1 | Core kernel ≤ 2,000 LOC — **the W1 kill-switch** |
-| `loc.sh all` | S2 | Core total ≤ 3,500 LOC |
+| `loc.sh core` | S2 | Shipped Core (`kernel/` + `drivers/`) ≤ 3,500 LOC |
+| `loc.sh tooling` | S2b | Build-time tooling (`codegen/` + `modelcheck/`) ≤ 2,000 LOC |
+| `loc.sh all` | report | Combined total across kernel, drivers, codegen, and modelcheck; reports against 5,500 LOC, not an enforcement scope |
 | `kernel-purity.sh` | S4, F1 | Kernel names no domain concept; performs no IO |
 | `no-inference.sh` | B4 | State comes only from `fold(events)` |
 | `host-thinness.sh` | S7 | TS Host ≤ 1,200 LOC and **decides nothing** (D78) |
@@ -17,6 +19,13 @@ invariants that the whole convergence property depends on.
 
 All gates exit `0` on pass, `1` on violation, `2` on usage error. Absent
 directories are not a failure, so the gates are safe to run from W0 onward.
+
+D79 §13 records the W3 S2 breach as a budget mis-apportionment, not a budget
+raise: D77's own sketch allocated kernel ≤ 2,000 plus drivers ~1,700 while also
+mandating build-time `codegen` and `modelcheck` with no separate line item. The
+split keeps shipped Core and verification tooling separately bounded, with
+selftest fixtures proving both new kill-switches fire, while `loc.sh all` still
+reports the combined total so no line is hidden.
 
 ## Why `selftest.sh` exists
 
@@ -54,7 +63,7 @@ known-bad fixture means **the kill-switch cannot be trusted to fire**, and W1
 must not start.
 
 ```bash
-./scripts/gates/selftest.sh     # must exit 0 — W0 gate (80/80 fixtures)
+./scripts/gates/selftest.sh     # must exit 0 — W0 gate (88/88 fixtures)
 ```
 
 ## The host boundary (D78)

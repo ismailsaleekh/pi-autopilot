@@ -142,6 +142,10 @@ name = "drivers"
 version = "0.0.0"
 dependencies = [
  "kernel",
+ "kernel-macros",
+ "linkme",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

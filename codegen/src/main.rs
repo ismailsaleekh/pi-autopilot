@@ -828,14 +828,15 @@ struct OutputFile {
 }
 
 fn emit_all(contracts: &Contracts) -> Vec<OutputFile> {
+    let (rust, typescript) = emit_rust_typescript(contracts);
     let mut outputs = vec![
         OutputFile {
             path: PathBuf::from("kernel/src/generated/mod.rs"),
-            content: emit_rust(contracts),
+            content: rust,
         },
         OutputFile {
             path: PathBuf::from("host/src/generated/index.ts"),
-            content: emit_typescript(contracts),
+            content: typescript,
         },
     ];
 
@@ -853,20 +854,26 @@ fn emit_all(contracts: &Contracts) -> Vec<OutputFile> {
     outputs
 }
 
-fn emit_rust(contracts: &Contracts) -> String {
-    let mut out = String::new();
-    out.push_str("// ");
-    out.push_str(GENERATED_MARKER);
-    out.push_str("\n\n");
-    out.push_str("use serde::{Deserialize, Serialize};\n\n");
-    out.push_str("#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]\n");
-    out.push_str("#[serde(transparent)]\n");
-    out.push_str("pub struct Nullable<T>(pub Option<T>);\n\n");
+fn emit_rust_typescript(contracts: &Contracts) -> (String, String) {
+    let mut rust = String::new();
+    rust.push_str("// ");
+    rust.push_str(GENERATED_MARKER);
+    rust.push_str("\n\n");
+    rust.push_str("use serde::{Deserialize, Serialize};\n\n");
+    rust.push_str("#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]\n");
+    rust.push_str("#[serde(transparent)]\n");
+    rust.push_str("pub struct Nullable<T>(pub Option<T>);\n\n");
+
+    let mut typescript = String::new();
+    typescript.push_str("// ");
+    typescript.push_str(GENERATED_MARKER);
+    typescript.push_str("\n\n");
+    typescript.push_str("export type JsonObject = Record<string, unknown>;\n\n");
 
     let mut scalar_types: Vec<String> = contracts
         .types
         .iter()
-        .filter(|name| rust_scalar_type(name).is_none())
+        .filter(|name| should_emit_newtype(name))
         .cloned()
         .collect();
     scalar_types.extend(
@@ -876,224 +883,55 @@ fn emit_rust(contracts: &Contracts) -> String {
     );
     scalar_types.sort();
     scalar_types.dedup();
-    for scalar in scalar_types {
-        let ty = rust_type_name(&scalar);
-        out.push_str("#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]\n");
-        out.push_str("#[serde(transparent)]\n");
-        out.push_str(&format!("pub struct {ty}(pub String);\n\n"));
+    for scalar in &scalar_types {
+        let ty = rust_type_name(scalar);
+        rust.push_str("#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]\n");
+        rust.push_str("#[serde(transparent)]\n");
+        rust.push_str(&format!("pub struct {ty}(pub String);\n\n"));
+        typescript.push_str(&format!("export type {ty} = string;\n"));
     }
+    typescript.push('\n');
 
     let mut enums = contracts.enums.clone();
     enums.sort_by(|left, right| left.name.cmp(&right.name));
     for enum_def in &enums {
+        let ty = rust_type_name(&enum_def.name);
         if let Some(doc) = &enum_def.doc {
-            out.push_str(&rust_doc(doc));
+            rust.push_str(&rust_doc(doc));
         }
-        out.push_str("#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]\n");
-        out.push_str(&format!("pub enum {} {{\n", rust_type_name(&enum_def.name)));
+        rust.push_str("#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]\n");
+        rust.push_str(&format!("pub enum {ty} {{\n"));
         let mut values = enum_def.values.clone();
         values.sort();
         for value in values {
-            out.push_str(&format!(
+            rust.push_str(&format!(
                 "    #[serde(rename = \"{}\")]\n    {},\n",
                 escape_rust_string(&value),
                 rust_variant_name(&value)
             ));
         }
-        out.push_str("}\n\n");
-    }
-
-    let mut artifacts = contracts.artifacts.clone();
-    artifacts.sort_by(|left, right| left.name.cmp(&right.name));
-    for artifact in &artifacts {
-        let type_name = rust_type_name(&artifact.name);
-        emit_rust_shape(
-            &mut out,
-            &type_name,
-            &artifact.doc,
-            &artifact.items,
-            Some(&type_name),
-        );
-        emit_nested_rust_shapes(&mut out, &type_name, &artifact.items);
-    }
-
-    let mut frames = contracts.frames.clone();
-    frames.sort_by(|left, right| {
-        (left.direction.as_str(), left.kind.as_str())
-            .cmp(&(right.direction.as_str(), right.kind.as_str()))
-    });
-    for frame in &frames {
-        let name = frame_type_name(frame);
-        emit_rust_shape(&mut out, &name, &frame.doc, &frame.items, Some(&name));
-        emit_nested_rust_shapes(&mut out, &name, &frame.items);
-    }
-
-    let mut admits = BTreeMap::new();
-    for artifact in &contracts.artifacts {
-        if let Some(text) = &artifact.admits {
-            admits.insert(artifact.name.clone(), text.clone());
-        }
-    }
-    out.push_str("pub const CONTRACT_SCHEMA: &str = ");
-    out.push_str(&format!("\"{}\";\n", escape_rust_string(&contracts.schema)));
-    out.push_str("pub const CONTRACT_VERSION: u64 = ");
-    out.push_str(&format!("{};\n\n", contracts.version));
-    for (name, text) in admits {
-        out.push_str(&format!(
-            "pub const {}_ADMITS: &str = \"{}\";\n",
-            screaming_name(&name),
-            escape_rust_string(&text)
-        ));
-    }
-    out
-}
-
-fn emit_rust_shape(
-    out: &mut String,
-    type_name: &str,
-    doc: &str,
-    items: &[Item],
-    prefix: Option<&str>,
-) {
-    out.push_str(&rust_doc(doc));
-    out.push_str("#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]\n");
-    out.push_str(&format!("pub struct {type_name} {{\n"));
-    for item in items {
-        match item {
-            Item::Field(field) => {
-                if let Some(doc) = &field.doc {
-                    out.push_str(&indent(&rust_doc(doc), "    "));
-                }
-                for attr in rust_field_attrs(&field.name, !field.required) {
-                    out.push_str("    ");
-                    out.push_str(&attr);
-                    out.push('\n');
-                }
-                out.push_str(&format!(
-                    "    pub {}: {},\n",
-                    rust_field_name(&field.name),
-                    rust_field_type(&field.type_id, field.required, field.nullable)
-                ));
-            }
-            Item::List(list) => {
-                if let Some(doc) = &list.doc {
-                    out.push_str(&indent(&rust_doc(doc), "    "));
-                }
-                for attr in rust_field_attrs(&list.name, !list.required) {
-                    out.push_str("    ");
-                    out.push_str(&attr);
-                    out.push('\n');
-                }
-                let inner = format!("Vec<{}>", rust_type_ref(&list.item_type));
-                out.push_str(&format!(
-                    "    pub {}: {},\n",
-                    rust_field_name(&list.name),
-                    wrap_required_nullable(&inner, list.required, list.nullable)
-                ));
-            }
-            Item::Group(group) => {
-                for attr in rust_field_attrs(&group.name, !group.required) {
-                    out.push_str("    ");
-                    out.push_str(&attr);
-                    out.push('\n');
-                }
-                let nested_name = match prefix {
-                    Some(parent) => format!("{}{}", parent, rust_type_name(&group.name)),
-                    None => rust_type_name(&group.name),
-                };
-                out.push_str(&format!(
-                    "    pub {}: {},\n",
-                    rust_field_name(&group.name),
-                    wrap_required_nullable(&nested_name, group.required, false)
-                ));
-            }
-            Item::Record(_) => {}
-        }
-    }
-    out.push_str("}\n\n");
-}
-
-fn emit_nested_rust_shapes(out: &mut String, prefix: &str, items: &[Item]) {
-    for item in items {
-        match item {
-            Item::Group(group) => {
-                let nested = format!("{}{}", prefix, rust_type_name(&group.name));
-                emit_rust_shape(
-                    out,
-                    &nested,
-                    "Nested generated object.",
-                    &group.items,
-                    Some(&nested),
-                );
-                emit_nested_rust_shapes(out, &nested, &group.items);
-            }
-            Item::Record(record) => {
-                let nested = rust_type_name(&record.name);
-                emit_rust_shape(
-                    out,
-                    &nested,
-                    "Generated record item.",
-                    &record.items,
-                    Some(&nested),
-                );
-                emit_nested_rust_shapes(out, &nested, &record.items);
-            }
-            Item::Field(_) | Item::List(_) => {}
-        }
-    }
-}
-
-fn emit_typescript(contracts: &Contracts) -> String {
-    let mut out = String::new();
-    out.push_str("// ");
-    out.push_str(GENERATED_MARKER);
-    out.push_str("\n\n");
-    out.push_str("export type JsonObject = Record<string, unknown>;\n\n");
-
-    let mut scalar_types: Vec<String> = contracts
-        .types
-        .iter()
-        .filter(|name| ts_scalar_type(name).is_none())
-        .cloned()
-        .collect();
-    scalar_types.extend(
-        builtin_scalar_types()
-            .into_iter()
-            .filter(|name| should_emit_newtype(name) && !contracts.types.contains(name)),
-    );
-    scalar_types.sort();
-    scalar_types.dedup();
-    for scalar in scalar_types {
-        out.push_str(&format!(
-            "export type {} = string;\n",
-            rust_type_name(&scalar)
-        ));
-    }
-    out.push('\n');
-
-    let mut enums = contracts.enums.clone();
-    enums.sort_by(|left, right| left.name.cmp(&right.name));
-    for enum_def in &enums {
+        rust.push_str("}\n\n");
         let values = enum_def
             .values
             .iter()
             .map(|value| format!("\"{}\"", escape_ts_string(value)))
             .collect::<Vec<_>>()
             .join(" | ");
-        out.push_str(&format!(
-            "export type {} = {};\n",
-            rust_type_name(&enum_def.name),
-            values
-        ));
+        typescript.push_str(&format!("export type {ty} = {values};\n"));
     }
-    out.push('\n');
+    typescript.push('\n');
 
     let mut artifacts = contracts.artifacts.clone();
     artifacts.sort_by(|left, right| left.name.cmp(&right.name));
     for artifact in &artifacts {
         let type_name = rust_type_name(&artifact.name);
-        emit_ts_interface(&mut out, &type_name, &artifact.items, Some(&type_name));
-        emit_nested_ts_interfaces(&mut out, &type_name, &artifact.items);
+        emit_shape_tree(
+            &mut rust,
+            &mut typescript,
+            &type_name,
+            &artifact.doc,
+            &artifact.items,
+        );
     }
 
     let mut frame_names = Vec::new();
@@ -1105,9 +943,27 @@ fn emit_typescript(contracts: &Contracts) -> String {
     for frame in &frames {
         let name = frame_type_name(frame);
         frame_names.push((frame.direction.clone(), frame.kind.clone(), name.clone()));
-        emit_ts_interface(&mut out, &name, &frame.items, Some(&name));
-        emit_nested_ts_interfaces(&mut out, &name, &frame.items);
+        emit_shape_tree(&mut rust, &mut typescript, &name, &frame.doc, &frame.items);
     }
+
+    rust.push_str("pub const CONTRACT_SCHEMA: &str = ");
+    rust.push_str(&format!("\"{}\";\n", escape_rust_string(&contracts.schema)));
+    rust.push_str("pub const CONTRACT_VERSION: u64 = ");
+    rust.push_str(&format!("{};\n\n", contracts.version));
+    let mut admits = BTreeMap::new();
+    for artifact in &contracts.artifacts {
+        if let Some(text) = &artifact.admits {
+            admits.insert(artifact.name.clone(), text.clone());
+        }
+    }
+    for (name, text) in admits {
+        rust.push_str(&format!(
+            "pub const {}_ADMITS: &str = \"{}\";\n",
+            screaming_name(&name),
+            escape_rust_string(&text)
+        ));
+    }
+
     let host_to_core = frame_names
         .iter()
         .filter(|(direction, _, _)| direction == "host-to-core")
@@ -1132,76 +988,136 @@ fn emit_typescript(contracts: &Contracts) -> String {
         })
         .collect::<Vec<_>>()
         .join(" | ");
-    out.push_str(&format!(
+    typescript.push_str(&format!(
         "export type HostToCoreFrame = {};\n",
         host_to_core
     ));
-    out.push_str(&format!(
+    typescript.push_str(&format!(
         "export type CoreToHostFrame = {};\n",
         core_to_host
     ));
 
-    out
+    (rust, typescript)
 }
 
-fn emit_ts_interface(out: &mut String, type_name: &str, items: &[Item], prefix: Option<&str>) {
-    out.push_str(&format!("export interface {type_name} {{\n"));
+fn emit_shape_tree(
+    rust: &mut String,
+    typescript: &mut String,
+    type_name: &str,
+    doc: &str,
+    items: &[Item],
+) {
+    emit_shape(rust, typescript, type_name, doc, items, type_name);
+    emit_nested_shapes(rust, typescript, type_name, items);
+}
+
+fn emit_shape(
+    rust: &mut String,
+    typescript: &mut String,
+    type_name: &str,
+    doc: &str,
+    items: &[Item],
+    prefix: &str,
+) {
+    rust.push_str(&rust_doc(doc));
+    rust.push_str("#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]\n");
+    rust.push_str(&format!("pub struct {type_name} {{\n"));
+    typescript.push_str(&format!("export interface {type_name} {{\n"));
     for item in items {
         match item {
             Item::Field(field) => {
-                out.push_str(&format!(
-                    "  {}{}: {};\n",
-                    quote_ts_key(&field.name),
-                    if field.required { "" } else { "?" },
-                    ts_field_type(&field.type_id, field.nullable)
-                ));
+                emit_rust_member(
+                    rust,
+                    &field.name,
+                    field.required,
+                    field.doc.as_ref(),
+                    rust_field_type(&field.type_id, field.required, field.nullable),
+                );
+                emit_ts_member(
+                    typescript,
+                    &field.name,
+                    field.required,
+                    ts_field_type(&field.type_id, field.nullable),
+                );
             }
             Item::List(list) => {
-                let inner = format!("{}[]", ts_type_ref(&list.item_type));
-                out.push_str(&format!(
-                    "  {}{}: {};\n",
-                    quote_ts_key(&list.name),
-                    if list.required { "" } else { "?" },
-                    if list.nullable {
-                        format!("{inner} | null")
-                    } else {
-                        inner
-                    }
-                ));
+                let rust_inner = format!("Vec<{}>", rust_type_ref(&list.item_type));
+                emit_rust_member(
+                    rust,
+                    &list.name,
+                    list.required,
+                    list.doc.as_ref(),
+                    wrap_required_nullable(&rust_inner, list.required, list.nullable),
+                );
+                let ts_inner = format!("{}[]", ts_type_ref(&list.item_type));
+                let ts_ty = if list.nullable {
+                    format!("{ts_inner} | null")
+                } else {
+                    ts_inner
+                };
+                emit_ts_member(typescript, &list.name, list.required, ts_ty);
             }
             Item::Group(group) => {
-                let nested_name = match prefix {
-                    Some(parent) => format!("{}{}", parent, rust_type_name(&group.name)),
-                    None => rust_type_name(&group.name),
-                };
-                out.push_str(&format!(
-                    "  {}{}: {};\n",
-                    quote_ts_key(&group.name),
-                    if group.required { "" } else { "?" },
-                    nested_name
-                ));
+                let nested_name = format!("{}{}", prefix, rust_type_name(&group.name));
+                emit_rust_member(
+                    rust,
+                    &group.name,
+                    group.required,
+                    None,
+                    wrap_required_nullable(&nested_name, group.required, false),
+                );
+                emit_ts_member(typescript, &group.name, group.required, nested_name);
             }
             Item::Record(_) => {}
         }
     }
-    out.push_str("}\n\n");
+    rust.push_str("}\n\n");
+    typescript.push_str("}\n\n");
 }
 
-fn emit_nested_ts_interfaces(out: &mut String, prefix: &str, items: &[Item]) {
+fn emit_rust_member(
+    out: &mut String,
+    wire_name: &str,
+    required: bool,
+    doc: Option<&String>,
+    ty: String,
+) {
+    if let Some(doc) = doc {
+        out.push_str(&indent(&rust_doc(doc), "    "));
+    }
+    for attr in rust_field_attrs(wire_name, !required) {
+        out.push_str("    ");
+        out.push_str(&attr);
+        out.push('\n');
+    }
+    out.push_str(&format!("    pub {}: {ty},\n", rust_field_name(wire_name)));
+}
+
+fn emit_ts_member(out: &mut String, wire_name: &str, required: bool, ty: String) {
+    out.push_str(&format!(
+        "  {}{}: {ty};\n",
+        quote_ts_key(wire_name),
+        if required { "" } else { "?" }
+    ));
+}
+
+fn emit_nested_shapes(rust: &mut String, typescript: &mut String, prefix: &str, items: &[Item]) {
     for item in items {
-        match item {
-            Item::Group(group) => {
-                let nested = format!("{}{}", prefix, rust_type_name(&group.name));
-                emit_ts_interface(out, &nested, &group.items, Some(&nested));
-                emit_nested_ts_interfaces(out, &nested, &group.items);
-            }
-            Item::Record(record) => {
-                let nested = rust_type_name(&record.name);
-                emit_ts_interface(out, &nested, &record.items, Some(&nested));
-                emit_nested_ts_interfaces(out, &nested, &record.items);
-            }
-            Item::Field(_) | Item::List(_) => {}
-        }
+        let (nested, doc, nested_items) = match item {
+            Item::Group(group) => (
+                format!("{}{}", prefix, rust_type_name(&group.name)),
+                "Nested generated object.",
+                group.items.as_slice(),
+            ),
+            Item::Record(record) => (
+                rust_type_name(&record.name),
+                "Generated record item.",
+                record.items.as_slice(),
+            ),
+            Item::Field(_) | Item::List(_) => continue,
+        };
+        emit_shape(rust, typescript, &nested, doc, nested_items, &nested);
+        emit_nested_shapes(rust, typescript, &nested, nested_items);
     }
 }
 

@@ -43,7 +43,8 @@
     "autopilot-agent-run": "bin/autopilot-agent-run.mjs",
     "autopilot-coordinator": "bin/autopilot-coordinator.mjs",
     "autopilot-launch-signer": "bin/autopilot-launch-signer.mjs",
-    "autopilot-s2-corpus-rehearsal": "bin/autopilot-s2-corpus-rehearsal.mjs"
+    "autopilot-s2-corpus-rehearsal": "bin/autopilot-s2-corpus-rehearsal.mjs",
+    "autopilot-core": "target/release/autopilot-core"
   },
   "scripts": {
     "build": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.build.json",
